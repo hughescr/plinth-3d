@@ -185,6 +185,13 @@ class SupportConfig:
     # Merge trunks closer than this in xy (parallel twin/triplet columns
     # a few mm apart serve no one -- resin cost, no stiffness gain).
     trunk_merge_radius_mm: float = 3.0
+    # v3.6 (queue item 3): twins at or under this spacing that STILL
+    # can't merge (even via the midpoint retry) get single alternating
+    # brace diagonals instead of crossed X pairs -- between near-parallel
+    # columns millimetres apart the second rod of each X adds no
+    # stiffness, only lattice clutter. Single rods are sized WITHOUT the
+    # X-pair load-sharing discount.
+    twin_single_brace_xy_mm: float = 3.0
     # Trunk-to-MODEL brace rungs (like Chitubox's own support-to-model
     # mini braces): when no neighbor trunk is in reach, a short rod to
     # already-printed model geometry restrains the span instead. Both

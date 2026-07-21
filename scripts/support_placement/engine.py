@@ -142,7 +142,7 @@ def run(mesh, cfg, max_fix_passes=3, log=None, do_emit=False):
         trunk_list, assignment = trunks_mod.plan(
             contacts, tip_r, carried, stub_ends, plate_z, surface_tree, cfg)
         trunk_list, assignment = trunks_mod.consolidate(
-            trunk_list, assignment, stub_ends, tip_r, surface_tree, cfg)
+            trunk_list, assignment, stub_ends, tip_r, plate_z, surface_tree, cfg)
 
         # Fallback: contacts whose column never cleared get a strut
         # anchored ON the model below instead of a through-model column

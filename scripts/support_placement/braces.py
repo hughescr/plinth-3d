@@ -29,7 +29,11 @@ def build_trunk_braces(trunks, plate_z, cfg):
     unsupported bridge islands; every brace member obeys the same
     <=45-degrees-from-vertical rule as everything else). Each rung of the
     ladder between two trunks is a crossed pair of rods whose vertical
-    rise equals their lateral span (45 degrees).
+    rise equals their lateral span (45 degrees) -- EXCEPT twin pairs at
+    or under cfg.twin_single_brace_xy_mm (queue item 3: these are trunks
+    consolidate() couldn't merge, even via its midpoint retry; a second
+    crossed rod between columns millimetres apart is cosmetic waste), which
+    get a single alternating diagonal per rung instead.
 
     Returns (braces, graph): braces are {i, j, p0, p1, r} dicts in TRUNK
     indices."""
@@ -76,24 +80,56 @@ def build_trunk_braces(trunks, plate_z, cfg):
         # the (1/2)^(1/4) on the pair-load term.
         from . import placement
         rod_len = rise * np.sqrt(2.0)
-        r_rod = max(cfg.brace_r_mm,
-                     placement._shaft_r_for_L(
-                         rod_len, cfg,
-                         angle_from_vertical_deg=cfg.max_segment_angle_deg)
-                     * 0.5 ** 0.25)
+        xi, xj = trunks[i].xy, trunks[j].xy
+        # v3.6 (queue item 3): twins this close together (per
+        # cfg.twin_single_brace_xy_mm) either merged in
+        # trunks.consolidate already, or genuinely couldn't (even via
+        # its midpoint retry) -- for the survivors, a crossed X pair
+        # between columns only millimetres apart is cosmetic waste: the
+        # second rod of each rung adds no stiffness a single diagonal
+        # doesn't already give at that spacing. Emit one rod per rung
+        # instead, alternating which trunk it starts from so the ladder
+        # still restrains both columns as it climbs. Single rods lose
+        # the X-pair load-sharing discount since there's no partner rod
+        # to share the final lateral load with.
+        twin = d <= cfg.twin_single_brace_xy_mm
+        if twin:
+            r_rod = max(cfg.brace_r_mm,
+                         placement._shaft_r_for_L(
+                             rod_len, cfg,
+                             angle_from_vertical_deg=cfg.max_segment_angle_deg))
+        else:
+            r_rod = max(cfg.brace_r_mm,
+                         placement._shaft_r_for_L(
+                             rod_len, cfg,
+                             angle_from_vertical_deg=cfg.max_segment_angle_deg)
+                         * 0.5 ** 0.25)
         placed = 0
         for k in range(n_rungs):
             if given[i] >= needs[i] and given[j] >= needs[j]:
                 break
             z = zlo + (k + 0.5) * (span - rise) / max(n_rungs, 1)
-            xi, xj = trunks[i].xy, trunks[j].xy
-            # crossed pair: up-right and up-left
-            braces.append(dict(i=i, j=j, r=r_rod,
-                                p0=np.array([xi[0], xi[1], z]),
-                                p1=np.array([xj[0], xj[1], z + rise])))
-            braces.append(dict(i=i, j=j, r=r_rod,
-                                p0=np.array([xj[0], xj[1], z]),
-                                p1=np.array([xi[0], xi[1], z + rise])))
+            if twin:
+                # alternate direction each rung: even rungs climb i -> j,
+                # odd rungs climb j -> i. The dict's i/j keys must match
+                # the geometry (resize_for_spans reads p0[2] as an
+                # attachment on trunk b["i"]), so odd rungs swap them.
+                if k % 2 == 0:
+                    braces.append(dict(i=i, j=j, r=r_rod,
+                                        p0=np.array([xi[0], xi[1], z]),
+                                        p1=np.array([xj[0], xj[1], z + rise])))
+                else:
+                    braces.append(dict(i=j, j=i, r=r_rod,
+                                        p0=np.array([xj[0], xj[1], z]),
+                                        p1=np.array([xi[0], xi[1], z + rise])))
+            else:
+                # crossed pair: up-right and up-left
+                braces.append(dict(i=i, j=j, r=r_rod,
+                                    p0=np.array([xi[0], xi[1], z]),
+                                    p1=np.array([xj[0], xj[1], z + rise])))
+                braces.append(dict(i=i, j=j, r=r_rod,
+                                    p0=np.array([xj[0], xj[1], z]),
+                                    p1=np.array([xi[0], xi[1], z + rise])))
             given[i] += 1
             given[j] += 1
             placed += 1

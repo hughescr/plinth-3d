@@ -25,12 +25,17 @@ def test_consolidate_merges_adjacent_twin_trunks(cfg, far_tree):
     stub_ends = [np.array([0.0, 0.0, 32.0]), np.array([1.5, 0.0, 27.0])]
     tip_r = np.array([0.3, 0.3])
     assignment = [(0, 30.0, True), (1, 25.0, True)]
+    # far_tree: nothing blocks clearance, so the DIRECT move must win --
+    # the survivor stays at its ORIGINAL xy, not the midpoint (v3.6's
+    # midpoint retry is a fallback, never preferred over a clear direct
+    # merge).
     trunks, assignment = tm.consolidate([a, b], assignment, stub_ends, tip_r,
-                                         far_tree, cfg)
+                                         -5.0, far_tree, cfg)
     assert len(trunks) == 1
     assert sorted(trunks[0].shoots) == [0, 1]
     assert assignment[0][0] == assignment[1][0] == 0
     assert trunks[0].carried_mm2 == pytest.approx(18.0)
+    assert np.allclose(trunks[0].xy, [0.0, 0.0])
 
 
 def test_consolidate_leaves_distant_trunks_alone(cfg, far_tree):
@@ -41,8 +46,43 @@ def test_consolidate_leaves_distant_trunks_alone(cfg, far_tree):
     stub_ends = [np.array([0.0, 0.0, 32.0]), np.array([20.0, 0.0, 27.0])]
     assignment = [(0, 30.0, True), (1, 25.0, True)]
     trunks, _ = tm.consolidate([a, b], assignment, stub_ends,
-                                np.array([0.3, 0.3]), far_tree, cfg)
+                                np.array([0.3, 0.3]), -5.0, far_tree, cfg)
     assert len(trunks) == 2
+
+
+def test_consolidate_midpoint_retry_when_direct_move_blocked(cfg):
+    """v3.6 (queue item 3): an obstacle sitting right next to trunk a's
+    xy blocks the direct move (gone's shoot re-aimed straight at
+    survivor.xy clips it), but the MIDPOINT between the two trunks is
+    clear for every shoot of both trunks AND the column -- consolidate
+    must retry there rather than leaving the twins standing."""
+    a = tm.Trunk([0.0, 0.0], z_top=30.0)
+    a.shoots = [0]
+    a.carried_mm2 = 5.0
+    b = tm.Trunk([2.5, 0.0], z_top=30.0)
+    b.shoots = [1]
+    b.carried_mm2 = 4.0
+    stub_ends = [np.array([0.0, 0.0, 32.0]), np.array([2.5, 0.0, 32.0])]
+    tip_r = np.array([0.3, 0.3])
+    assignment = [(0, 30.0, True), (1, 30.0, True)]
+    # obstacle right beside a's xy: blocks b's shoot re-aimed directly at
+    # a (junction lands within r+standoff of it) but is far from the
+    # midpoint (1.25, 0)'s shoots and column.
+    tree = cKDTree(np.array([[-0.5, 0.0, 29.5]]))
+    trunks, assignment = tm.consolidate([a, b], assignment, stub_ends, tip_r,
+                                         -5.0, tree, cfg)
+    assert len(trunks) == 1
+    merged = trunks[0]
+    assert np.allclose(merged.xy, [1.25, 0.0])
+    assert sorted(merged.shoots) == [0, 1]
+    # both shoots' junctions moved to their NEW (midpoint) values
+    new_jz = 32.0 - 1.25  # 45-degree drop over the new 1.25mm lateral reach
+    assert assignment[0][0] == assignment[1][0] == 0
+    assert assignment[0][1] == pytest.approx(new_jz)
+    assert assignment[1][1] == pytest.approx(new_jz)
+    assert assignment[0][2] is True and assignment[1][2] is True
+    assert merged.z_top == pytest.approx(new_jz)
+    assert merged.carried_mm2 == pytest.approx(9.0)
 
 
 def test_unbraced_tall_trunk_is_thickened_not_ignored(cfg):

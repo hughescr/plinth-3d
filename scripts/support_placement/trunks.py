@@ -203,12 +203,19 @@ def plan(contacts, tip_r, carried, stub_ends, plate_z, surface_tree, cfg):
     return trunks, assignment
 
 
-def consolidate(trunks, assignment, stub_ends, tip_r, surface_tree, cfg):
+def consolidate(trunks, assignment, stub_ends, tip_r, plate_z, surface_tree, cfg):
     """Merge trunks closer than cfg.trunk_merge_radius_mm in xy (second
     review: parallel twin/triplet columns mm apart -- resin cost, no
     stiffness). Shoots of the dropped trunk move to the survivor only if
-    every moved shoot's new diagonal clears; otherwise the pair stays.
-    Returns (trunks, assignment) with indices rewritten."""
+    every moved shoot's new diagonal clears; when that direct move fails,
+    v3.6 (queue item 3) retries once more at the MIDPOINT of the two
+    trunks, re-aiming EVERY shoot of BOTH trunks there -- a spot exactly
+    between two near-touching columns sometimes clears where forcing
+    everything onto either original trunk's xy does not. Only if that
+    also fails do the twins survive (braces.build_trunk_braces's
+    single-rod twin path then picks up the cosmetic-waste slack instead
+    of a full crossed X). Returns (trunks, assignment) with indices
+    rewritten."""
     keep = list(range(len(trunks)))
     merged_into = {}
     for a in range(len(trunks)):
@@ -225,8 +232,9 @@ def consolidate(trunks, assignment, stub_ends, tip_r, surface_tree, cfg):
             sv, gn = trunks[surv], trunks[gone]
             if len(sv.shoots) + len(gn.shoots) > cfg.trunk_max_shoots:
                 continue
+
             moves = []
-            ok = True
+            direct_ok = True
             for i in gn.shoots:
                 se = stub_ends[i]
                 jz, dxy = _junction_z(se, sv.xy, cfg)
@@ -234,28 +242,74 @@ def consolidate(trunks, assignment, stub_ends, tip_r, surface_tree, cfg):
                 jp = np.array([sv.xy[0], sv.xy[1], jz])
                 if not _segment_clear(surface_tree, se, jp, r_shoot, cfg,
                                        skip_from_p0=cfg.standoff_mm):
-                    ok = False
+                    direct_ok = False
                     break
                 moves.append((i, jz))
-            if not ok:
+            if direct_ok:
+                # The survivor's column may need to GROW upward to reach
+                # the moved junctions -- plan()'s join path column-checks
+                # exactly this extension, and this merge path must too
+                # (v3.6 bug, found by the toed-slab minima fixture: six
+                # under-cone contacts merged onto one column that then
+                # ran straight through the cone apex; relocation can't
+                # serve them all from one xy, so the whole cluster
+                # dissolved to unrouted).
+                top_needed = max(jz for _, jz in moves)
+                if top_needed > sv.z_top and not _column_clear(
+                        surface_tree, sv.xy, sv.z_top, top_needed,
+                        max(sv.r, cfg.min_trunk_r_mm), cfg):
+                    direct_ok = False
+
+            merged = False
+            if direct_ok:
+                for i, jz in moves:
+                    sv.shoots.append(i)
+                    sv.z_top = max(sv.z_top, jz)
+                    assignment[i] = (surv, jz, assignment[i][2])
+                sv.carried_mm2 += gn.carried_mm2
+                merged = True
+            else:
+                # v3.6 (queue item 3): the direct move (survivor keeps
+                # its own xy, only the dropped trunk's shoots re-aim)
+                # failed -- before giving up and leaving the pointless
+                # twin standing, try relocating the SURVIVOR itself to
+                # the midpoint. Every shoot of both trunks needs a fresh
+                # junction there, including the survivor's own (its xy
+                # is moving too), and the new column has to clear its
+                # full height from the plate up, not just an extension.
+                mid = (sv.xy + gn.xy) / 2.0
+                both_shoots = list(sv.shoots) + list(gn.shoots)
+                mid_moves = []
+                mid_ok = True
+                for i in both_shoots:
+                    se = stub_ends[i]
+                    jz, dxy = _junction_z(se, mid, cfg)
+                    if dxy > cfg.shoot_max_xy_mm or jz <= plate_z + 1.0:
+                        mid_ok = False
+                        break
+                    r_shoot = max(float(tip_r[i]), cfg.min_shoot_r_mm)
+                    jp = np.array([mid[0], mid[1], jz])
+                    if not _segment_clear(surface_tree, se, jp, r_shoot, cfg,
+                                           skip_from_p0=cfg.standoff_mm):
+                        mid_ok = False
+                        break
+                    mid_moves.append((i, jz))
+                if mid_ok:
+                    top_needed = max(jz for _, jz in mid_moves)
+                    if not _column_clear(surface_tree, mid, plate_z, top_needed,
+                                          max(sv.r, cfg.min_trunk_r_mm), cfg):
+                        mid_ok = False
+                if mid_ok:
+                    sv.xy = mid
+                    sv.shoots = list(both_shoots)
+                    sv.z_top = top_needed
+                    sv.carried_mm2 += gn.carried_mm2
+                    for i, jz in mid_moves:
+                        assignment[i] = (surv, jz, True)
+                    merged = True
+
+            if not merged:
                 continue
-            # The survivor's column may need to GROW upward to reach the
-            # moved junctions -- plan()'s join path column-checks exactly
-            # this extension, and this merge path must too (v3.6 bug,
-            # found by the toed-slab minima fixture: six under-cone
-            # contacts merged onto one column that then ran straight
-            # through the cone apex; relocation can't serve them all from
-            # one xy, so the whole cluster dissolved to unrouted).
-            top_needed = max(jz for _, jz in moves)
-            if top_needed > sv.z_top and not _column_clear(
-                    surface_tree, sv.xy, sv.z_top, top_needed,
-                    max(sv.r, cfg.min_trunk_r_mm), cfg):
-                continue
-            for i, jz in moves:
-                sv.shoots.append(i)
-                sv.z_top = max(sv.z_top, jz)
-                assignment[i] = (surv, jz, assignment[i][2])
-            sv.carried_mm2 += gn.carried_mm2
             gn.shoots = []          # dead trunk must not accumulate more
             merged_into[gone] = surv
             if gone == a:

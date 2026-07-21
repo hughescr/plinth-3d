@@ -358,6 +358,22 @@ reach costs tan60/tan45 = 1.73x less height under the junction/z_top
 ceilings); the explicit xy economy caps (trunk_branch_merge_xy_mm,
 shoot_max_xy_mm) were left unchanged deliberately.
 
+### v3.6: twin-column merge cleanup (queue item 3)
+
+Two prongs. (a) consolidate() now takes plate_z and, when the direct
+move (gone's shoots re-aimed at survivor.xy) fails clearance, retries
+the merge at the MIDPOINT xy -- every shoot of BOTH trunks re-aimed and
+checked (reach/plate-floor guards, segment clearance, full-height
+column clearance) before the survivor relocates there. (b) twins at or
+under twin_single_brace_xy_mm (3.0) that still can't merge get single
+ALTERNATING brace diagonals instead of crossed X pairs -- between
+near-parallel columns millimetres apart the second rod of each X adds
+no stiffness, only lattice clutter. Single rods are sized WITHOUT the
+X-pair 0.5^0.25 load-sharing discount, and the brace dict's i/j keys
+follow the geometry (p0 always on trunk i) so resize_for_spans'
+attachment bookkeeping stays truthful. Implemented by a Sonnet
+subagent to this spec; 86 tests green.
+
 ## Next-session queue (agreed with Craig, 2026-07-20 session end)
 
 1. ~~**Global joint-ball pass (Craig's design, replaces scattered per-call
@@ -376,8 +392,8 @@ shoot_max_xy_mm) were left unchanged deliberately.
    so steep members are honestly fattened. Widens the coalesce/bundle
    search spaces and the strut anchor cone (attacks the ~60 unrouted
    canopy contacts).
-3. Twin-column merge improvement (doubled X-lattice between unmerged
-   twins is cosmetic waste).
+3. ~~Twin-column merge improvement (doubled X-lattice between unmerged
+   twins is cosmetic waste).~~ **DONE (v3.6 above).**
 
 0. ~~**LOCAL Z-MINIMA MUST BE DIRECTLY SUPPORTED (Craig, session end --
    TOP PRIORITY, correctness not optimization).**~~ **DONE (v3.6 above;
