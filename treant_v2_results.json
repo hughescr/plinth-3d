@@ -1,0 +1,54 @@
+{
+  "v2_n_supports": 359,
+  "v2_n_plate": 359,
+  "v2_n_model_strut": 0,
+  "v2_n_braces": 584,
+  "v2_verify_ok": false,
+  "v2_uncovered": 0,
+  "v2_clearance_violations": 116,
+  "v2_load_violations": 0,
+  "v0_n_supports": 137,
+  "v0_clearance_violations": 27,
+  "corpus_n_supports": 469,
+  "corpus_median_spacing_mm": 3.09,
+  "log": {
+    "islands": 146,
+    "t_islands": 1.65,
+    "contacts_initial": 353,
+    "t_surface_tree": 3.74,
+    "anchor_kinds_pass0": {
+      "plate": 46,
+      "model": 307
+    },
+    "detour_repairs_pass0": 0,
+    "verify_pass0": {
+      "ok": false,
+      "n_uncovered": 6,
+      "n_clearance_violations": 439,
+      "n_load_violations": 0
+    },
+    "anchor_kinds_pass1": {
+      "plate": 354,
+      "model": 5
+    },
+    "detour_repairs_pass1": 98,
+    "verify_pass1": {
+      "ok": false,
+      "n_uncovered": 0,
+      "n_clearance_violations": 120,
+      "n_load_violations": 0
+    },
+    "anchor_kinds_pass2": {
+      "plate": 359,
+      "model": 0
+    },
+    "detour_repairs_pass2": 102,
+    "verify_pass2": {
+      "ok": false,
+      "n_uncovered": 0,
+      "n_clearance_violations": 116,
+      "n_load_violations": 0
+    },
+    "t_total": 26.11
+  }
+}

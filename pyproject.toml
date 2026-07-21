@@ -1,0 +1,30 @@
+[project]
+name = "resin-print-prep"
+version = "1.4.1"
+description = "Physics-engineered CHITUBOX support placement + resin print prep (support_placement engine; Blender-side skills have their own deps via Blender)"
+requires-python = ">=3.10"
+# Caret-style ranges (PEP 440 has no ^, so ^x.y.z is spelled
+# >=x.y.z,<x+1): accept semver-compatible evolution, reject majors.
+# Reproducibility lives in uv.lock (exact resolved versions the engine
+# was built, tested, and real-model-validated against, 2026-07-20) --
+# `uv run --frozen` uses the lock; `uv lock --upgrade` + test suite is
+# the deliberate way to move forward. Hard-pin here only with a
+# documented reason.
+dependencies = [
+    "numpy>=2.2.6,<3",
+    "scipy>=1.15.3,<2",
+    "trimesh>=4.12.2,<5",
+    "rtree>=1.4.1,<2",   # trimesh's ray-query backend; undeclared before -- the uv venv caught it
+    "networkx>=3.4.2,<4",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1,<10",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["scripts/tests"]
