@@ -413,11 +413,20 @@ def coalesce_columns(trunks, junctions_by_trunk, plate_z, surface_tree, cfg):
             d = float(np.linalg.norm(parent.xy - child.xy))
             if not (1.0 <= d <= cfg.trunk_branch_merge_xy_mm):
                 continue
-            z_split = min(parent.z_top, lowest_j - d) - 0.5
+            # v3.6: Y-diagonals climb at branch_angle_deg (60), not 45 --
+            # same lateral reach costs less height, so more merges fit
+            # under the lowest-junction ceiling. Sizing note: the
+            # diagonal is emitted at the child column's radius, which
+            # already meets the angle-aware requirement for these short
+            # runs (<= ~12mm at min_trunk_r) with margin.
+            tan_b = np.tan(np.radians(cfg.branch_angle_deg))
+            rise = d / max(tan_b, 1e-6)
+            z_split = min(parent.z_top, lowest_j - rise) - 0.5
             if z_split <= plate_z + cfg.flare_len_mm + 2.0:
                 continue
-            z_start = z_split + d
-            saved_len = (z_start - plate_z) - d * np.sqrt(2.0)
+            z_start = z_split + rise
+            diag_len = d / max(np.sin(np.radians(cfg.branch_angle_deg)), 1e-6)
+            saved_len = (z_start - plate_z) - diag_len
             if saved_len <= cfg.flare_len_mm:
                 continue  # not worth a scar-free but pointless merge
             p_split = np.array([parent.xy[0], parent.xy[1], z_split])
@@ -486,22 +495,27 @@ def bundle_shoots(routes, trunks, tip_r, plate_z, surface_tree, cfg):
             stubs = np.array([s.p0 for _, s, _ in cluster])
             hub_xy = stubs[:, :2].mean(axis=0)
             reach = max(np.linalg.norm(stubs[:, :2] - hub_xy, axis=1).max(), 0.5)
-            hub_z = stubs[:, 2].min() - reach  # every fan shoot <=45deg
+            # v3.6: hub fans and risers are branch-angle members (60deg)
+            tan_b = max(np.tan(np.radians(cfg.branch_angle_deg)), 1e-6)
+            hub_z = stubs[:, 2].min() - reach / tan_b  # fans <= branch angle
             hub = np.array([hub_xy[0], hub_xy[1], hub_z])
-            # riser hub -> trunk at <=45deg. A hub nearly ABOVE the trunk
-            # would make the riser coincide with the trunk column itself
-            # (seventh review: redundant parallel verticals) -- skip.
+            # riser hub -> trunk at <= branch angle. A hub nearly ABOVE
+            # the trunk would make the riser coincide with the trunk
+            # column itself (seventh review: redundant parallel
+            # verticals) -- skip.
             d_tr = float(np.linalg.norm(trunk.xy - hub_xy))
             if d_tr < 2.0:
                 continue
-            jz = hub_z - d_tr
+            jz = hub_z - d_tr / tan_b
             if jz <= trunk.base_z(plate_z) + 1.0 or jz > trunk.z_top + 1e-6:
                 continue
             jp = np.array([trunk.xy[0], trunk.xy[1], jz])
             L_riser = float(np.linalg.norm(jp - hub))
+            riser_lean = np.degrees(np.arctan2(d_tr, hub_z - jz))
             r_members = [s.r0 for _, s, _ in cluster]
             r_riser = max(max(r_members),
-                           placement._shaft_r_for_L(L_riser, cfg)
+                           placement._shaft_r_for_L(
+                               L_riser, cfg, angle_from_vertical_deg=riser_lean)
                            * len(cluster) ** 0.125)
             # clearance: riser, and each short fan shoot
             if not _segment_clear(surface_tree, hub, jp, r_riser, cfg):
@@ -606,13 +620,18 @@ def size_trunks(trunks, plate_z, cfg):
     return trunks
 
 
-def shoot_radius(tip_r_i, shoot_len, carried_i, cfg):
+def shoot_radius(tip_r_i, shoot_len, carried_i, cfg, angle_deg=None):
     """A shoot's worst moment is DURING the build: it grows outward from
     its trunk junction as a free cantilever of its full length until the
     final layers connect it to the model, so it gets the full deflection
     sizing for that length -- no root-stiffness discount. (A 0.7 fudge
     here previously put every length-sized shoot at exactly (1/0.7)^4 =
-    4.2x the deflection budget; the fourth review's audit caught it.)"""
+    4.2x the deflection budget; the fourth review's audit caught it.)
+
+    v3.6: sized with the angle-aware peel term at the member's actual
+    lean (plain trunk shoots are exactly cfg.max_segment_angle_deg by
+    construction -- the default; struts pass their real, steeper lean)."""
     from . import placement
-    r_defl = placement._shaft_r_for_L(shoot_len, cfg)
+    angle = cfg.max_segment_angle_deg if angle_deg is None else float(angle_deg)
+    r_defl = placement._shaft_r_for_L(shoot_len, cfg, angle_from_vertical_deg=angle)
     return float(max(tip_r_i, r_defl, cfg.min_shoot_r_mm))

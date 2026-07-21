@@ -117,26 +117,49 @@ def tip_radius_mm(carried_area_mm2, cfg):
     return np.clip(r_mm, cfg.tip_r_min_mm, cfg.tip_r_max_mm)
 
 
-def _shaft_r_for_L(L_mm, cfg):
+def _peel_tan(angle_from_vertical_deg):
+    return float(np.tan(np.radians(angle_from_vertical_deg))) \
+        if angle_from_vertical_deg > 1e-9 else 0.0
+
+
+def _shaft_r_for_L(L_mm, cfg, angle_from_vertical_deg=0.0):
     """Unclamped cantilever point-load deflection solve:
     delta = 4*F*L^3/(3*E*pi*r^4)  =>  r = (4*F*L^3/(3*E*pi*delta))^0.25
-    (design.md: "deflection ~ L^3/r^4"). All SI internally."""
+    (design.md: "deflection ~ L^3/r^4"). All SI internally.
+
+    v3.6 angle-aware load term (Craig, queue item 2): an inclined member
+    presents an elliptical layer cross-section of area pi*r^2/cos(theta)
+    to the peel; resolving that peel normal load onto the member's
+    lateral (bending) axis multiplies by sin(theta):
+        F_eff = F_drag + peel_pressure * (pi*r^2/cos t) * sin t
+              = F_drag + peel_pressure * pi * r^2 * tan(theta).
+    F_eff depends on r, so the solve is a fixed-point iteration -- it
+    contracts fast (r ~ F^(1/4), F ~ r^2 => net exponent 1/2 < 1).
+    Vertical members (theta=0) reduce exactly to the old closed form."""
     L_m = max(L_mm, 1e-6) / 1000.0
-    F = cfg.shaft_drag_force_n
     E = cfg.modulus_green_gpa * 1e9
     delta = cfg.max_deflection_mm / 1000.0
-    r_m = (4 * F * L_m ** 3 / (3 * E * np.pi * delta)) ** 0.25
+    tan_t = _peel_tan(angle_from_vertical_deg)
+    geom = 4 * L_m ** 3 / (3 * E * np.pi * delta)
+    r_m = (geom * cfg.shaft_drag_force_n) ** 0.25
+    for _ in range(6 if tan_t else 0):
+        F = cfg.shaft_drag_force_n + cfg.peel_pressure_pa * np.pi * r_m ** 2 * tan_t
+        r_m = (geom * F) ** 0.25
     return max(r_m * 1000.0, cfg.min_shaft_r_mm)
 
 
-def max_unbraced_len_mm(r_mm, cfg):
+def max_unbraced_len_mm(r_mm, cfg, angle_from_vertical_deg=0.0):
     """Inverse of _shaft_r_for_L: the longest free cantilever a member of
     radius r may run while meeting the deflection budget. Used to decide
-    where a long member needs bracing rungs (v3.4: brace-then-thin)."""
+    where a long member needs bracing rungs (v3.4: brace-then-thin).
+    With radius KNOWN the angle-aware load is closed-form (no iteration):
+    F_eff = F_drag + peel * pi * r^2 * tan(theta)."""
     r_m = max(r_mm, 1e-6) / 1000.0
     E = cfg.modulus_green_gpa * 1e9
     delta = cfg.max_deflection_mm / 1000.0
-    L_m = (r_m ** 4 * 3 * E * np.pi * delta / (4 * cfg.shaft_drag_force_n)) ** (1 / 3)
+    F = cfg.shaft_drag_force_n \
+        + cfg.peel_pressure_pa * np.pi * r_m ** 2 * _peel_tan(angle_from_vertical_deg)
+    L_m = (r_m ** 4 * 3 * E * np.pi * delta / (4 * F)) ** (1 / 3)
     return L_m * 1000.0
 
 

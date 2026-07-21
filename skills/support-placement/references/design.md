@@ -332,6 +332,32 @@ zipped routes with tip_r, but routes exclude unrouted contacts -- tip
 radii after the first unrouted index were off by one; now looked up by
 route.contact_idx.
 
+### v3.6: branch angle 60 + angle-aware peel load (queue item 2)
+
+branch_angle_deg = 60 now governs Y-diagonals, hub fans, risers, and
+the strut anchor cone (strut_fallback_max_angle_deg 55 -> 60); plain
+trunk shoots stay at 45 (length-optimal there). PAIRED, as required,
+with the angle-aware load term in placement._shaft_r_for_L:
+
+    F_eff = F_drag + peel_pressure * ellipse_area(theta) * sin(theta)
+          = F_drag + peel_pressure * pi * r^2 * tan(theta)
+
+(an inclined member's layer slice is an ellipse of area pi*r^2/cos t;
+the peel normal load on it resolves a lateral bending component
+proportional to sin t). F_eff depends on r, so the solve is a
+fixed-point iteration (contracts, net exponent 1/2); theta=0 reduces
+exactly to the old closed form (test-pinned). max_unbraced_len_mm takes
+the same angle closed-form. Members now sized at their ACTUAL lean:
+shoots at 45, X-brace rods at 45, risers and struts at their real
+geometry. Y-diagonals stay drawn at the child column radius -- at their
+bounded length (<= ~12mm) the angle-aware requirement never exceeds
+min_trunk_r, checked, documented in coalesce_columns.
+
+Search-space widening comes from the geometry itself (same lateral
+reach costs tan60/tan45 = 1.73x less height under the junction/z_top
+ceilings); the explicit xy economy caps (trunk_branch_merge_xy_mm,
+shoot_max_xy_mm) were left unchanged deliberately.
+
 ## Next-session queue (agreed with Craig, 2026-07-20 session end)
 
 1. ~~**Global joint-ball pass (Craig's design, replaces scattered per-call
@@ -343,7 +369,7 @@ route.contact_idx.
    touching it. Strip the per-member embedded balls from
    synth_v3_support/synth_v3_trunk/brace_record. Kills the
    gapped-undersized-ball bug class entirely and dedups doubled spheres.
-2. **branch_angle_deg ~= 60 for Y-diagonals, hub fans, risers, struts**
+2. ~~**branch_angle_deg ~= 60 for Y-diagonals, hub fans, risers, struts**~~ **DONE (v3.6 above).**
    (45 stays for plain trunk shoots -- it is length-optimal there),
    PAIRED with the angle-aware load term in the deflection solve
    (F_eff = F_drag + peel_pressure * ellipse_area(theta) * sin(theta))

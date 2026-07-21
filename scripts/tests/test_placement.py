@@ -3,6 +3,33 @@ import pytest
 from support_placement import perception, placement
 
 
+def test_angle_aware_peel_term_fattens_steep_members(cfg):
+    """v3.6 queue item 2: F_eff = F_drag + peel * pi*r^2 * tan(theta).
+    Vertical members reduce exactly to the old closed form; lean
+    monotonically fattens."""
+    L = 20.0
+    r0 = placement._shaft_r_for_L(L, cfg, angle_from_vertical_deg=0.0)
+    closed = ((4 * cfg.shaft_drag_force_n * (L / 1000) ** 3
+               / (3 * cfg.modulus_green_gpa * 1e9 * np.pi
+                  * (cfg.max_deflection_mm / 1000))) ** 0.25) * 1000
+    assert abs(r0 - max(closed, cfg.min_shaft_r_mm)) < 1e-9
+    r45 = placement._shaft_r_for_L(L, cfg, angle_from_vertical_deg=45.0)
+    r60 = placement._shaft_r_for_L(L, cfg, angle_from_vertical_deg=60.0)
+    assert r60 > r45 > r0
+
+
+def test_max_unbraced_len_is_consistent_inverse_with_angle(cfg):
+    for angle in (0.0, 45.0, 60.0):
+        r = placement._shaft_r_for_L(25.0, cfg, angle_from_vertical_deg=angle)
+        if r <= cfg.min_shaft_r_mm:
+            continue
+        L_back = placement.max_unbraced_len_mm(r, cfg, angle_from_vertical_deg=angle)
+        assert abs(L_back - 25.0) < 0.2, (angle, r, L_back)
+    # steeper members must be allowed SHORTER free spans at equal radius
+    assert placement.max_unbraced_len_mm(0.8, cfg, 60.0) \
+        < placement.max_unbraced_len_mm(0.8, cfg, 0.0)
+
+
 def test_spacing_floor_never_violated(table_mesh, cfg):
     islands = perception.overhang_islands(table_mesh, cfg)
     contacts = placement.sample_candidates(table_mesh, islands, cfg, seed=1)

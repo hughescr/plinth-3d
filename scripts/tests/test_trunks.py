@@ -96,6 +96,41 @@ def test_model_strut_returns_none_when_nothing_qualifies(cfg, far_tree):
     assert tm.model_strut(contact, stub_end, 0.4, ground, far_tree, cfg) is None
 
 
+def test_coalesce_y_diagonal_climbs_at_branch_angle(cfg, far_tree):
+    """v3.6: Y-diagonals are branch-angle members (60deg): same lateral
+    reach, less height -- rise must be d/tan(branch_angle_deg)."""
+    parent = tm.Trunk([0.0, 0.0], z_top=40.0)
+    parent.shoots = [0]
+    parent.r = 1.0
+    child = tm.Trunk([6.0, 0.0], z_top=38.0)
+    child.shoots = [1]
+    child.r = 1.0
+    juncs = {0: [(40.0, 42.0)], 1: [(38.0, 40.0)]}
+    merges = tm.coalesce_columns([parent, child], juncs, plate_z=-5.0,
+                                  surface_tree=far_tree, cfg=cfg)
+    assert len(merges) == 1
+    rise = child.z_start - child.z_split
+    expected = 6.0 / np.tan(np.radians(cfg.branch_angle_deg))
+    assert rise == pytest.approx(expected, abs=1e-6)
+    lean = np.degrees(np.arctan2(6.0, rise))
+    assert lean == pytest.approx(cfg.branch_angle_deg, abs=0.1)
+
+
+def test_strut_cone_widened_to_branch_angle(cfg, far_tree):
+    """Queue item 2: the strut anchor cone follows the branch-angle
+    family (60deg). An anchor at 58deg lean -- rejected at the old 55 --
+    must now qualify."""
+    assert cfg.strut_fallback_max_angle_deg == pytest.approx(60.0)
+    contact = dict(position=np.array([0.0, 0.0, 20.0]),
+                    normal=np.array([0.0, 0.0, -1.0]))
+    stub_end = np.array([0.0, 0.0, 17.5])
+    drop = 8.0
+    lateral = drop * np.tan(np.radians(58.0))
+    ground = np.array([[lateral, 0.0, 17.5 - drop]])
+    anchor = tm.model_strut(contact, stub_end, 0.4, ground, far_tree, cfg)
+    assert anchor is not None
+
+
 def test_junction_restraint_does_not_exist_until_shoot_completes(cfg):
     """Fourth review (Craig): at every layer, the layers above DO NOT
     EXIST YET. A shoot junction at z=30 whose shoot only reaches its

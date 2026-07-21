@@ -77,7 +77,10 @@ def build_trunk_braces(trunks, plate_z, cfg):
         from . import placement
         rod_len = rise * np.sqrt(2.0)
         r_rod = max(cfg.brace_r_mm,
-                     placement._shaft_r_for_L(rod_len, cfg) * 0.5 ** 0.25)
+                     placement._shaft_r_for_L(
+                         rod_len, cfg,
+                         angle_from_vertical_deg=cfg.max_segment_angle_deg)
+                     * 0.5 ** 0.25)
         placed = 0
         for k in range(n_rungs):
             if given[i] >= needs[i] and given[j] >= needs[j]:
@@ -187,8 +190,12 @@ def brace_and_thin_shoots(routes, trunks, plate_z, ground_points, surface_tree, 
         stub = rt.segments[0]
         root, tip_end = shoot.p1, shoot.p0  # build grows root -> tip_end
         L = float(np.linalg.norm(tip_end - root))
+        d_seg = tip_end - root
+        lean_deg = float(np.degrees(np.arctan2(
+            np.linalg.norm(d_seg[:2]), abs(d_seg[2])))) if L > 1e-9 else 0.0
         r_target = max(stub.r0, cfg.min_shoot_r_mm)
-        span_ok = placement.max_unbraced_len_mm(r_target, cfg)
+        span_ok = placement.max_unbraced_len_mm(
+            r_target, cfg, angle_from_vertical_deg=lean_deg)
         if L <= span_ok or L < 4.0:
             continue
         dirv = (tip_end - root) / L
@@ -240,7 +247,9 @@ def brace_and_thin_shoots(routes, trunks, plate_z, ground_points, surface_tree, 
         # counts in full)
         ss = sorted(restraints) + [L]
         worst = max(b - a for a, b in zip(ss[:-1], ss[1:]))
-        r_new = max(stub.r0, placement._shaft_r_for_L(worst, cfg),
+        r_new = max(stub.r0,
+                     placement._shaft_r_for_L(
+                         worst, cfg, angle_from_vertical_deg=lean_deg),
                      cfg.min_shoot_r_mm)
         # ECONOMIC gate (Craig): these members already met the deflection
         # budget at full-length sizing, so rungs here are pure resin

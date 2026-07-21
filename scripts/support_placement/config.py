@@ -197,7 +197,24 @@ class SupportConfig:
     # corpus's own 227 model-adsorbed supports) -- steeper lean allowed
     # than trunk members (still layer-continuous), since the strut is
     # rooted on already-printed model, not dangling from the raft.
-    strut_fallback_max_angle_deg: float = 55.0
+    # v3.6: raised 55 -> 60 with the rest of the branch-angle family;
+    # struts are sized with their ACTUAL lean via the angle-aware term.
+    strut_fallback_max_angle_deg: float = 60.0
+
+    # ---- Widened branch angle (v3.6, queue item 2, Craig) ----
+    # Y-diagonals, hub fans, risers, and strut members may lean up to
+    # this angle from vertical -- steeper than the 45-degree default that
+    # governs plain trunk shoots (45 is length-optimal there and stays).
+    # The extra reach widens what the coalesce/bundle passes and the
+    # strut anchor cone can serve (attacks the unrouted canopy
+    # contacts). REQUIRED PAIRING: any member allowed past 45 degrees
+    # must be sized with the angle-aware load term in
+    # placement._shaft_r_for_L (F_eff = F_drag + peel_pressure *
+    # ellipse_area(theta) * sin(theta)) so steep members are honestly
+    # fattened -- the peel load on an inclined member's elliptical layer
+    # slice resolves a lateral bending component that vertical members
+    # don't see.
+    branch_angle_deg: float = 60.0
 
     # ---- Y-branch column coalescing (v3.5, sixth review) ----
     # Near-parallel plate columns whose feet land this close in xy get

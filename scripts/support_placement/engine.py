@@ -14,6 +14,16 @@ import numpy as np
 from . import perception, placement, routing, braces as braces_mod, struts, verify, mesh_io, trunks as trunks_mod
 
 
+def _lean_deg(p0, p1):
+    """Lean from vertical of the member p0->p1, for the angle-aware
+    deflection sizing (v3.6)."""
+    d = np.asarray(p1, float) - np.asarray(p0, float)
+    L = float(np.linalg.norm(d))
+    if L < 1e-9:
+        return 0.0
+    return float(np.degrees(np.arctan2(np.linalg.norm(d[:2]), abs(d[2]))))
+
+
 def _trunk_route(contact, stub_end, tip_r_i, shoot_r, junction, cfg):
     """Route for a trunk-attached contact: embedded tip stub along the
     surface normal, then a single diagonal shoot (<= printability angle)
@@ -276,7 +286,8 @@ def run(mesh, cfg, max_fix_passes=3, log=None, do_emit=False):
                 anchor = strut_anchor[i]
                 shoot_len = float(np.linalg.norm(anchor - se))
                 r_shoot = trunks_mod.shoot_radius(float(tip_r[i]), shoot_len,
-                                                   float(carried[i]), cfg)
+                                                   float(carried[i]), cfg,
+                                                   angle_deg=_lean_deg(se, anchor))
                 route = _trunk_route(c, se, float(tip_r[i]), r_shoot, anchor, cfg)
                 route.segments[-1].embedded_p1 = True  # adsorbed model foot
                 route.anchor_kind = "model"
@@ -305,11 +316,13 @@ def run(mesh, cfg, max_fix_passes=3, log=None, do_emit=False):
                                              ground_points, surface_tree, cfg)
             if anchor is None:
                 return None
-            # size for the strut's actual length (it grows from the model
-            # anchor as a free cantilever until it reaches the stub)
+            # size for the strut's actual length and lean (it grows from
+            # the model anchor as a free cantilever until it reaches the
+            # stub; steeper lean = bigger peel slice, angle-aware term)
             L = float(np.linalg.norm(np.asarray(anchor) - stub_ends[i]))
             r_shoot = trunks_mod.shoot_radius(float(tip_r[i]), L,
-                                               float(carried[i]), cfg)
+                                               float(carried[i]), cfg,
+                                               angle_deg=_lean_deg(stub_ends[i], anchor))
             strut = _trunk_route(contacts[i], stub_ends[i], float(tip_r[i]),
                                   r_shoot, anchor, cfg)
             strut.segments[-1].embedded_p1 = True
