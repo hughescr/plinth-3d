@@ -12,7 +12,7 @@ module map.
 import time
 import numpy as np
 
-from . import perception, placement, routing, verify, joints, cco, tree
+from . import perception, placement, routing, verify, joints, cco, tree, rewire
 
 
 def run(mesh, cfg, log=None):
@@ -83,14 +83,26 @@ def run(mesh, cfg, log=None):
         # a forest with a void certificate. Stands in for "emission
         # asserts zero dirty members" until Phase 7 wires a real emitter.
         tree.assert_all_certified(forest)
+        # Phase 3 (design-v4.md #7): topology mutation runs AFTER
+        # insertion, BEFORE verify -- rewire.optimize mutates `forest` in
+        # place (subtree reattach / junction slide / twig prune), each
+        # move already transactional+certificate-checked internally, so
+        # re-asserting here is a cheap belt-and-suspenders check of the
+        # same invariant, not new work.
+        rewire.optimize(forest, mesh, surface_tree, cfg, log=log)
+        tree.assert_all_certified(forest)
         # An honestly-unrouted terminal's stub member is still sitting in
         # the forest (every terminal gets one up front, before insertion
         # is attempted) but was never attached to anything -- it must not
         # leak into the connectivity/volume/printability accounting as a
-        # floating member; `unrouted` already reports it honestly.
+        # floating member; `unrouted` already reports it honestly. Members
+        # rewire.py retired (tree.Forest.dead -- twig prune folds a
+        # degenerate pass-through into its surviving child rather than
+        # deleting the row, since the checkpoint protocol is append-only)
+        # are excluded the same way.
         unrouted_stub_idx = {forest.terminal_of[i] for i in unrouted}
         live_members = [m for mi, m in enumerate(forest.members)
-                        if mi not in unrouted_stub_idx]
+                        if mi not in unrouted_stub_idx and mi not in forest.dead]
         members = joints.collect_members(live_members)
         balls = joints.compute_joint_balls(live_members, plate_z, cfg)
         log[f"forest_pass{fix_pass}"] = dict(

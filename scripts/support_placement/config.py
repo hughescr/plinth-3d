@@ -305,6 +305,15 @@ class SupportConfig:
     # 1-2-layer connection rule; this only absorbs sampling gaps.
     minima_contact_radius_mm: float = 1.0
 
+    # ---- Rewiring / topology mutation (design-v4.md #7, Phase 3) ----
+    # Wall-clock budget for rewire.optimize's sweep loop. Craig's directive
+    # (design-v4.md #7): "diminishing returns, not iteration counts" -- the
+    # rolling-savings convergence check is the PRIMARY stop condition; this
+    # cap is the backstop so a pathological fixture can't blow the overall
+    # 30-60s runtime budget (design-v4.md #12). 30.0s matches the design
+    # doc's own stated default for the rewiring stage.
+    rewire_time_cap_s: float = 30.0
+
     # ---- Self-verify (design.md #9) ----
     # An island counts as "still unsupported" if any of its faces sits
     # farther than this multiple of target_spacing from the nearest

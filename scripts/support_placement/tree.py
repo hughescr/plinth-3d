@@ -28,6 +28,11 @@ import numpy as np
 _POS_FIELDS = ("p0", "p1")
 _R_FIELDS = ("r0", "r1")
 _TRACKED_FIELDS = _POS_FIELDS + _R_FIELDS
+# carried_mm2 is transactionally snapshotted (Phase 3 fix -- see __setattr__)
+# but is NOT a certificate field: it doesn't affect swept geometry, so a
+# carried_mm2-only change must not bump geom_version/void cert_radius the
+# way a real p0/p1/r0/r1 mutation does.
+_SNAPSHOT_ONLY_FIELDS = ("carried_mm2",)
 
 
 class Member:
@@ -77,6 +82,25 @@ class Member:
                                 object.__getattribute__(self, "geom_version") + 1)
             if name in _POS_FIELDS:
                 object.__setattr__(self, "cert_radius", -1.0)
+        elif name in _SNAPSHOT_ONLY_FIELDS:
+            # Phase 3 fix (verifier-caught corruption): cco._propagate_
+            # murray/rewire._slim_ancestors always set carried_mm2 BEFORE
+            # r0/r1 on the same member. Before this fix, carried_mm2 was
+            # invisible to the checkpoint/rollback protocol -- the r0/r1
+            # write's _touch_member call snapshotted the member AFTER
+            # carried_mm2 had already changed, so a rolled-back candidate
+            # permanently baked in that carried_mm2 delta even though its
+            # geometry correctly reverted (measured repro: a rejected
+            # rewire.py reattach candidate left a sibling member's
+            # carried_mm2 drifting across every subsequent trial in the
+            # same sweep, eventually undersizing it against its own
+            # load). Touching BEFORE the mutation (matching the tracked-
+            # field branch above) captures the true pre-transaction value.
+            forest = object.__getattribute__(self, "_forest")
+            idx = object.__getattribute__(self, "_idx")
+            if forest is not None and idx is not None:
+                forest._touch_member(idx)
+            object.__setattr__(self, name, float(value))
         else:
             object.__setattr__(self, name, value)
 
@@ -131,6 +155,17 @@ class Forest:
         self.children = []         # list[list[int]]
         self.roots = []            # list[int] -- member indices with parent None
         self.terminal_of = {}      # contact_idx -> member idx (that terminal's stub)
+        self.dead = set()          # member idx retired by rewire.py's twig prune (Phase
+                                    # 3, design-v4.md #7): the checkpoint/rollback
+                                    # protocol is append-only (rollback truncates the
+                                    # member list from the tail, see rollback() below),
+                                    # so an interior member can never be physically
+                                    # removed -- a pruned member is instead marked dead
+                                    # (its volume/carried load already folded into its
+                                    # surviving neighbor) and every downstream consumer
+                                    # (volume_report, verify, emission) is fed a member
+                                    # list that already excludes `dead` indices, the same
+                                    # pattern already used for honestly-unrouted stubs.
         self._cp_stack = []
 
     # ---- construction / topology ----------------------------------
@@ -167,6 +202,15 @@ class Forest:
         else:
             if child_idx not in self.roots:
                 self.roots.append(child_idx)
+
+    # ---- retirement (rewire.py twig prune, design-v4.md #7) -----------
+    def mark_dead(self, idx):
+        """Retire member `idx` (see `dead` field docstring): the caller
+        (rewire._try_twig_prune) must already have folded its geometry/
+        load into a surviving member and detached it (set_parent(idx,
+        None)) before calling this -- mark_dead only records that idx is
+        no longer live, it does not itself touch topology."""
+        self.dead.add(idx)
 
     # ---- certificates ------------------------------------------------
     def dirty_members(self):
@@ -270,7 +314,8 @@ class Forest:
     def checkpoint(self):
         self._cp_stack.append(dict(
             n_members=len(self.members), members={}, topo={},
-            roots=list(self.roots), terminal_of=dict(self.terminal_of)))
+            roots=list(self.roots), terminal_of=dict(self.terminal_of),
+            dead=set(self.dead)))
         return len(self._cp_stack) - 1
 
     def rollback(self, cp):
@@ -287,6 +332,7 @@ class Forest:
         del self.children[n0:]
         self.roots = top["roots"]
         self.terminal_of = top["terminal_of"]
+        self.dead = top["dead"]
 
     def commit(self, cp):
         assert cp == len(self._cp_stack) - 1, "commit must target the innermost checkpoint"

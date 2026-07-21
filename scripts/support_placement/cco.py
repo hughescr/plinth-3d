@@ -202,8 +202,16 @@ class _KDCache:
         self.tree = cKDTree(np.array(pts))
         self.owners = np.array(owners)
 
-    def nearest_members(self, point, k, forest):
+    def nearest_members(self, point, k, forest, exclude=None):
+        """`exclude` (Phase 3 addition, design-v4.md #7 "refactor
+        minimally to expose"): an optional set/frozenset of member
+        indices to skip -- rewire.py's subtree-reattach move needs this
+        to keep a detached subtree from being offered its own descendant
+        as a new host (a cycle); cco.build never passes it, so the
+        default (None -> no exclusion) reproduces the exact Phase 2
+        candidate set, zero behavior change to insertion."""
         point = np.asarray(point, float)
+        exclude = exclude or ()
         scored = {}
         if self.tree is not None:
             k_samples = min(len(self.owners), max(k * 6, 12))
@@ -212,10 +220,14 @@ class _KDCache:
                 if ii >= len(self.owners):
                     continue
                 mi = int(self.owners[ii])
+                if mi in exclude:
+                    continue
                 dd = float(dd)
                 if mi not in scored or dd < scored[mi]:
                     scored[mi] = dd
         for mi in range(self.indexed_count, len(forest.members)):
+            if mi in exclude:
+                continue
             m = forest.members[mi]
             if m.kind == "stub":
                 continue
@@ -380,8 +392,9 @@ def _model_anchor_builder(forest, i, stub_idx, se, r_i, carried_i,
 
 
 # ---------------------------------------------------------- (c) bifurcation --
-def _bifurcation_builders(forest, i, stub_idx, se, r_i, carried_i, plate_z, cfg, kdc):
-    hosts = kdc.nearest_members(se, 5, forest)
+def _bifurcation_builders(forest, i, stub_idx, se, r_i, carried_i, plate_z, cfg, kdc,
+                           exclude=None):
+    hosts = kdc.nearest_members(se, 5, forest, exclude=exclude)
     for host_idx in hosts:
         yield _make_bifurcation_builder(forest, i, stub_idx, se, r_i, carried_i,
                                           host_idx, plate_z, cfg)
