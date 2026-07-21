@@ -506,6 +506,20 @@ stability loop, join-first solo retry, OCN rewiring cleanup, Xia angle +
 Murray check. Tier 2 (if needed) — full descending-front CCO/Meshmixer
 rebuild behind the unchanged verify gates.
 
+### v4: CCO redesign (2026-07-21, Craig's direction — Tier 2 directly)
+
+Craig chose the ground-up CCO rebuild over Tier 1 surgery. Charter:
+`references/design-v4.md` (replaces trunks.py + engine.py construction
+in place; keeps the substrate and all verify gates, adds removal-
+leverage + volume + Murray + printability gates, allows curved members
+via the per-layer rim-overhang limit). Adversarially verified before
+implementation (math independently confirmed; three blockers found and
+resolved in the charter: joints/verify signature migration, spiral
+plate-search ported from Phase 2, floors-hard/ceilings-soft radius
+policy). This document remains the objectives/mechanics charter and the
+v0→v3.7 history; construction-mechanism sections above describe the
+retired v3 builder.
+
 ## Next-session queue (agreed with Craig, 2026-07-20 session end)
 
 1. ~~**Global joint-ball pass (Craig's design, replaces scattered per-call
