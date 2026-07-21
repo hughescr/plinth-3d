@@ -449,10 +449,20 @@ def coalesce_columns(trunks, junctions_by_trunk, plate_z, surface_tree, cfg):
     Single-level trees only (a parent cannot itself be a branch).
     Mutates trunks in place; returns list of merge dicts for the log."""
     merges = []
+    # v3.7 (Craig, Chitubox review): single-level invariant was violated
+    # by a trunk that became a PARENT earlier in this same pass later
+    # being adopted as someone ELSE's child -- the parent side is already
+    # excluded by the cand filter below (foot_kind == "plate"), but
+    # nothing stopped the CHILD side from being a prior merge's parent.
+    # Result: 2-level+ chains with the middle trunk's z_split floating up
+    # to 52mm outside its (new) parent's actual column span -- dangling
+    # diagonals. Track every trunk that has become a parent this pass and
+    # refuse to adopt it as a child.
+    parents = set()
     order = sorted(range(len(trunks)), key=lambda t: trunks[t].z_top)
     for ci in order:
         child = trunks[ci]
-        if child.foot_kind != "plate" or not child.shoots:
+        if child.foot_kind != "plate" or not child.shoots or ci in parents:
             continue
         lowest_j = min((jz for jz, _az in junctions_by_trunk.get(ci, [(child.z_top, 0)])),
                         default=child.z_top)
@@ -477,6 +487,13 @@ def coalesce_columns(trunks, junctions_by_trunk, plate_z, surface_tree, cfg):
             rise = d / max(tan_b, 1e-6)
             z_split = min(parent.z_top, lowest_j - rise) - 0.5
             if z_split <= plate_z + cfg.flare_len_mm + 2.0:
+                continue
+            # v3.7: the high end is satisfied by construction (z_split <=
+            # parent.z_top - 0.5 above), but a gate the diagnosis relies
+            # on to bound dangling diagonals should say so explicitly
+            # rather than trust that construction never changes -- a
+            # future edit to the min() above must not silently widen this.
+            if z_split > parent.z_top - 0.4:
                 continue
             z_start = z_split + rise
             diag_len = d / max(np.sin(np.radians(cfg.branch_angle_deg)), 1e-6)
@@ -504,6 +521,7 @@ def coalesce_columns(trunks, junctions_by_trunk, plate_z, surface_tree, cfg):
             child.z_start = float(z_start)
             parent.carried_mm2 += child.carried_mm2
             parent.extra_shoots += len(child.shoots) + child.extra_shoots
+            parents.add(pi)  # v3.7: pi may not now be adopted as a child
             merges.append(dict(child=ci, parent=pi, z_split=float(z_split),
                                 saved_mm3=float(np.pi * max(child.r, cfg.min_trunk_r_mm) ** 2
                                                  * saved_len)))
@@ -634,7 +652,18 @@ def bundle_shoots(routes, trunks, tip_r, plate_z, surface_tree, cfg):
             if getattr(rt, "trunk_idx", None) != t_idx:
                 continue
             for sg in rt.segments:
-                if sg.kind == "shoot" and np.linalg.norm(sg.p1[:2] - trunk.xy) < 0.5:
+                # v3.7 (found via the connectivity gate's real-model
+                # validation): a contact whose stub lands close enough to
+                # the trunk's own xy gets NO separate shoot segment
+                # (_trunk_route only appends one when the junction is >0
+                # away) -- its stub's own p1 IS the junction. The old
+                # "shoot"-only scan silently dropped these from `tops`,
+                # so a bundled trunk's z_top could shrink BELOW a
+                # straight-down contact's real, unmoved attachment
+                # (2.9-4.5mm short on the real Treant model -- the exact
+                # floating-stub-elbow defect the diagnosis flagged).
+                if sg.kind in ("shoot", "stub") \
+                        and np.linalg.norm(sg.p1[:2] - trunk.xy) < 0.5:
                     tops.append(float(sg.p1[2]))
         if tops:
             trunk.z_top = max(tops)

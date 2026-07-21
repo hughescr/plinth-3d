@@ -422,6 +422,58 @@ loop that exhausts its 3 iterations WITH drops in the final iteration
 can carry stale brace trunk-indices into emission (pre-existing);
 engine.run's do_emit parameter is dead.
 
+### v3.7: floating-member fixes + connectivity gate (Craig's Chitubox
+### review of the v3.6 emission, 2026-07-21)
+
+Craig found floating members in the v3.6 file: zigzag brace chains and
+X-ladders hanging in air, model-embedded posts with a floating joint
+ball, and a "globbed mish-mash" under the forward palm. Diagnosis
+(exhaustive, subagent): 134/391 brace endpoints sat >0.3mm from their
+trunk's final xy. Root causes, all fixed:
+
+1. **Stale braces**: the stability loop builds braces early each
+   iteration but relocate_trunk moves trunks LATER in the same
+   iteration; the loop always runs its full 3 iterations on the real
+   model, so the final iteration's relocations leaked stale rods.
+   Fixed: post-loop brace rebuild from FINAL trunk geometry.
+2. **Chained Y-branches**: coalesce_columns let a trunk that became a
+   parent later become someone's child ("single-level" invariant
+   violated; z_split up to 52mm outside the parent's real span).
+   Fixed: parents set + explicit z_split range gate + a post-bundle
+   revalidation of every branch against its parent's CURRENT span.
+3. **Gate escapes**: the post-route-gate trunk-consistency block only
+   ran `if changed`; now unconditional and iterated to a bounded fixed
+   point (dissolving one trunk lengthens siblings' spans -- cascades).
+4. **X-pair mislabeling** (found during fix): the crossed pair's second
+   rod had reversed geometry but unswapped i/j keys -- ~40% of brace
+   endpoints attributed to the wrong trunk in resize_for_spans'
+   restraint bookkeeping. Fixing it also thinned member volume
+   25.1 -> 23.1 cm^3 (correct restraints = correctly slender trunks).
+5. **Rung floor bug** (found during fix): thinning rungs used a flat
+   plate-level floor instead of per-trunk base_z, so a rung could
+   target a branch trunk below its z_start.
+
+**New hard gate: verify.connectivity_report** -- every member endpoint
+must attach to another member's axis (0.25mm), the plate, or be a
+designed model-embedded end; wired into self_verify ok. This class of
+defect is now impossible to emit silently. Gate review (Fable,
+PASS WITH NOTES) drove two more closures: thinning rungs are now built
+LAST (after all dissolution passes, so no filter can orphan them while
+their shoots stay thinned), and the verify clearance sweep extends to
+z_top + r so the emitted dome ball's zone is no longer blind (paired
+with an unconditional post-bundle all-trunks column recheck).
+
+Treant v3.7: 641 contacts, 465 routed supports on 114 trunks, 95 pads
++ 94 bridges, 1369 joint balls; clearance violations 0 (now including
+the dome zone), connectivity violations 0, stale endpoints 0, chained
+parents 0; 176 unrouted, 74/379 minima unsupported (path-planning
+residual, follow-up #4). Known remaining softness: the connectivity
+rule is adjacency-based, not plate-reachability (a closed floating
+loop would theoretically pass; current builders cannot construct one)
+-- recorded, and the stability loop still never converges in 3
+iterations on the real model (377 column-check failures across a run),
+worth a look when the routing residual is attacked.
+
 ## Next-session queue (agreed with Craig, 2026-07-20 session end)
 
 1. ~~**Global joint-ball pass (Craig's design, replaces scattered per-call

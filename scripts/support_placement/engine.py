@@ -60,12 +60,18 @@ def _remap_parents(trunk_list, remap):
 
 def _trunk_pseudo_routes(trunk_list, plate_z, cfg):
     """Trunk columns as Route objects so the standard batched clearance
-    checker can sweep them (kind='shaft' so nothing is skipped)."""
+    checker can sweep them (kind='shaft' so nothing is skipped).
+
+    v3.7 (gate review): the sweep runs to z_top + r, not z_top -- the
+    emitted dome/joint ball lives in that zone and trunk_column_ok has
+    always gated it; stopping at z_top left verify blind to the one
+    region the construction gate checks (the cylinder over z_top..z_top+r
+    conservatively contains the ball)."""
     out = []
     for t in trunk_list:
         base = t.base_z(plate_z)
         p0 = np.array([t.xy[0], t.xy[1], base])
-        p1 = np.array([t.xy[0], t.xy[1], t.z_top])
+        p1 = np.array([t.xy[0], t.xy[1], t.z_top + t.r])
         segs = [routing.Segment(p0, p1, t.r, t.r, "shaft")]
         if t.foot_kind == "branch" and t.parent_idx is not None:
             parent = trunk_list[t.parent_idx]
@@ -107,7 +113,8 @@ def run(mesh, cfg, max_fix_passes=3, log=None, do_emit=False):
                     plate_z=float(mesh.bounds[0][2]) - cfg.lift_mm, brace_graph=None,
                     minima=minima,
                     verify=dict(ok=True, uncovered_islands=[], clearance_violations=[],
-                                load_violations=[], unsupported_minima=[]),
+                                load_violations=[], unsupported_minima=[],
+                                connectivity_violations=[]),
                     log=log)
 
     zmin = float(mesh.bounds[0][2])
@@ -269,6 +276,39 @@ def run(mesh, cfg, max_fix_passes=3, log=None, do_emit=False):
                               for (tj, jz, c) in assignment]
                 _remap_parents(trunk_list, remap)
 
+        # ---- v3.7 (Craig, Chitubox review): the loop above builds braces
+        # EARLY each iteration, then can relocate/revert/drop trunks LATER
+        # in that same iteration's bad-trunk handling; the loop always
+        # runs its full range(3) on the real model (the early-break at
+        # "if not bad" never fires), so the LAST iteration's post-brace
+        # trunk changes were never re-braced -- stale rods rode straight
+        # into emission as floating X-ladders and twin zigzag chains (a
+        # 60mm 4-rod chain 1.04mm off its trunk; a 65.6mm 10-rod ladder
+        # 3.02mm off its trunks). Rebuild once more here from the loop's
+        # FINAL trunk geometry, in the identical sequence the loop itself
+        # uses. size_trunks is already current: relocate/revert only move
+        # a trunk's xy/z_top/base, never its carried_mm2, so the r_axial
+        # floor size_trunks last computed is still valid; resize_for_spans
+        # below is AUTHORITATIVE for the span-driven part and recomputes
+        # it fresh from the trunk's actual current span, so it doesn't
+        # matter that the old r_defl was sized against a stale span.
+        made_braces, brace_graph = braces_mod.build_trunk_braces(
+            trunk_list, plate_z, cfg)
+        made_braces = _filter_clear_braces(made_braces, mesh, cfg, surface_tree)
+        junctions_by_trunk = {
+            t: [(assignment[i][1], stub_ends[i][2]) for i in trunk.shoots]
+            for t, trunk in enumerate(trunk_list)}
+        made_braces += braces_mod.build_model_braces(
+            trunk_list, made_braces, junctions_by_trunk, ground_points,
+            surface_tree, plate_z, cfg)
+        trunks_mod.resize_for_spans(trunk_list, made_braces,
+                                     junctions_by_trunk, plate_z, cfg)
+        # Any trunk the reconcile above re-fattens (or a relocation left)
+        # past clearance is caught for real by the unconditional final
+        # gate further down (v3.7 fix #2) -- not re-gated here, since that
+        # gate has to run unconditionally anyway (defect: it used to run
+        # only `if changed`, so two trunks escaped it entirely).
+
         log[f"trunks_pass{fix_pass}"] = dict(
             n_trunks=len(trunk_list),
             n_struts=len(strut_anchor),
@@ -335,13 +375,12 @@ def run(mesh, cfg, max_fix_passes=3, log=None, do_emit=False):
 
         route_viol = routing.check_clearance_batch(mesh, routes, cfg,
                                                     surface_tree=surface_tree)
-        cleaned, changed = [], False
+        cleaned = []
         for route, viol in zip(routes, route_viol):
             if not viol:
                 cleaned.append(route)
                 continue
             i = route.contact_idx
-            changed = True
             if route.trunk_idx is not None:  # unwind the trunk's bookkeeping
                 trunk = trunk_list[route.trunk_idx]
                 trunk.shoots.remove(i)
@@ -353,10 +392,23 @@ def run(mesh, cfg, max_fix_passes=3, log=None, do_emit=False):
                 unrouted.add(i)
         routes = cleaned
 
-        if changed:
-            # drop emptied trunks (+ braces referencing them), refresh
-            # tops/spans, and re-gate the fattened columns one last time:
-            # any trunk STILL violating is dissolved into struts/unrouted.
+        # v3.7 (Craig, Chitubox review, defect #3): UNCONDITIONAL and
+        # ITERATED TO A FIXED POINT now -- this used to run only `if
+        # changed` (i.e. only when the route gate above actually demoted
+        # something) AND only once. Two problems, same root cause (a
+        # trunk failing the gate in the emitted state must be impossible
+        # BY CONSTRUCTION, not just likely): (1) the post-loop brace
+        # rebuild's resize_for_spans (fix #1, above) can fatten a trunk
+        # into violation on a pass where no ROUTE needed cleanup, so this
+        # must run even when nothing "changed"; (2) DISSOLVING a bad
+        # trunk drops it from made_braces, which can lengthen a SIBLING
+        # trunk's transient span (it was leaning on a brace to the now-
+        # gone trunk) enough to fatten it into its own violation -- a
+        # single pass can't see that, so repeat until stable (same bound
+        # as the stability loop above). When nothing changed and nothing
+        # is bad, every iteration after the first is a no-op cheap enough
+        # not to matter.
+        for _gate_pass in range(3):
             keep = [ti for ti, t in enumerate(trunk_list) if t.shoots]
             remap = {old: new for new, old in enumerate(keep)}
             trunk_list = [trunk_list[ti] for ti in keep]
@@ -380,33 +432,34 @@ def run(mesh, cfg, max_fix_passes=3, log=None, do_emit=False):
             still_bad = {ti for ti, t in enumerate(trunk_list)
                          if not trunks_mod.trunk_column_ok(t, plate_z,
                                                             surface_tree, cfg)}
-            if still_bad:
-                dissolved = {i for ti in still_bad for i in trunk_list[ti].shoots}
-                routes2 = []
-                for route in routes:
-                    i = route.contact_idx
-                    if i not in dissolved:
-                        routes2.append(route)
-                        continue
-                    strut = _make_strut(i)
-                    if strut is not None:
-                        routes2.append(strut)
-                    else:
-                        unrouted.add(i)
-                routes = routes2
-                keep = [ti for ti in range(len(trunk_list)) if ti not in still_bad]
-                remap = {old: new for new, old in enumerate(keep)}
-                trunk_list = [trunk_list[ti] for ti in keep]
-                assignment = [((remap.get(tj) if tj is not None else None), jz, c)
-                              for (tj, jz, c) in assignment]
-                _remap_parents(trunk_list, remap)
-                made_braces = [dict(b, i=remap[b["i"]],
-                                     j=(remap[b["j"]] if b["j"] in remap else b["j"]))
-                               for b in made_braces
-                               if b["i"] in remap and (b["j"] == -1 or b["j"] in remap)]
-                for route in routes:
-                    if route.trunk_idx is not None:
-                        route.trunk_idx = remap[route.trunk_idx]
+            if not still_bad:
+                break
+            dissolved = {i for ti in still_bad for i in trunk_list[ti].shoots}
+            routes2 = []
+            for route in routes:
+                i = route.contact_idx
+                if i not in dissolved:
+                    routes2.append(route)
+                    continue
+                strut = _make_strut(i)
+                if strut is not None:
+                    routes2.append(strut)
+                else:
+                    unrouted.add(i)
+            routes = routes2
+            keep = [ti for ti in range(len(trunk_list)) if ti not in still_bad]
+            remap = {old: new for new, old in enumerate(keep)}
+            trunk_list = [trunk_list[ti] for ti in keep]
+            assignment = [((remap.get(tj) if tj is not None else None), jz, c)
+                          for (tj, jz, c) in assignment]
+            _remap_parents(trunk_list, remap)
+            made_braces = [dict(b, i=remap[b["i"]],
+                                 j=(remap[b["j"]] if b["j"] in remap else b["j"]))
+                           for b in made_braces
+                           if b["i"] in remap and (b["j"] == -1 or b["j"] in remap)]
+            for route in routes:
+                if route.trunk_idx is not None:
+                    route.trunk_idx = remap[route.trunk_idx]
         log[f"unrouted_pass{fix_pass}"] = len(unrouted)
 
         # ---- Economic cross-bracing pass (Craig, fifth review): rungs
@@ -440,6 +493,93 @@ def run(mesh, cfg, max_fix_passes=3, log=None, do_emit=False):
                         return False
             return True
         made_braces = [b for b in made_braces if _attached_below_top(b)]
+
+        # ---- v3.7 (Craig, Chitubox review, connectivity-gate finding):
+        # trunks.coalesce_columns validates a Y-merge's z_split against its
+        # parent's z_top only AT MERGE TIME (start of this fix_pass, before
+        # the stability loop). The parent's z_top can shrink AFTER that --
+        # the final route-gate's z_top recompute above when one of the
+        # parent's own shoots gets demoted, or bundle_shoots just above
+        # re-aiming shoots to a hub+riser -- stranding the child's
+        # Y-diagonal above where the parent's column now actually ends
+        # (found on the real Treant model: one branch's z_split sat
+        # 0.9mm above its post-shrink parent top). Re-validate every
+        # branch trunk against its parent's FINAL span here and revert
+        # anything that no longer fits back to a plain plate column --
+        # the same bookkeeping the stability loop's own revert path uses
+        # -- then re-size and re-gate exactly the reverted trunks (now
+        # much longer, rooted at the plate instead of the Y-split).
+        reverted = []
+        for ti, t in enumerate(trunk_list):
+            if t.foot_kind != "branch" or t.parent_idx is None:
+                continue
+            parent = trunk_list[t.parent_idx]
+            lo = parent.base_z(plate_z) + cfg.flare_len_mm + 2.0
+            hi = parent.z_top - 0.4
+            if lo <= t.z_split <= hi:
+                continue
+            parent.carried_mm2 -= t.carried_mm2
+            parent.extra_shoots -= len(t.shoots) + t.extra_shoots
+            t.foot_kind, t.parent_idx = "plate", None
+            t.z_split = t.z_start = None
+            reverted.append(ti)
+        if reverted:
+            junctions_by_trunk = {
+                tt: [(assignment[i][1], stub_ends[i][2]) for i in trunk.shoots]
+                for tt, trunk in enumerate(trunk_list)}
+            trunks_mod.resize_for_spans(trunk_list, made_braces,
+                                         junctions_by_trunk, plate_z, cfg)
+        # Re-gate EVERY trunk at its FINAL, post-bundle geometry --
+        # unconditionally (v3.7 gate review). Bundling shifts z_top after
+        # the last in-loop column gate, which changes the dome-zone
+        # sample phase; without this recheck 1-2 marginal columns escaped
+        # trunk_column_ok in the emitted state, and the verify sweep
+        # below could not honestly cover the dome ball. Only an
+        # unconditional all-trunks recheck makes a clearance escape
+        # impossible by construction.
+        still_bad = {ti for ti, t in enumerate(trunk_list)
+                     if not trunks_mod.trunk_column_ok(
+                         t, plate_z, surface_tree, cfg)}
+        if still_bad:
+            dissolved = {i for ti in still_bad for i in trunk_list[ti].shoots}
+            routes2 = []
+            for route in routes:
+                i = route.contact_idx
+                if i not in dissolved:
+                    routes2.append(route)
+                    continue
+                strut = _make_strut(i)
+                if strut is not None:
+                    routes2.append(strut)
+                else:
+                    unrouted.add(i)
+            routes = routes2
+            keep = [ti for ti in range(len(trunk_list)) if ti not in still_bad]
+            remap = {old: new for new, old in enumerate(keep)}
+            trunk_list = [trunk_list[ti] for ti in keep]
+            assignment = [((remap.get(tj) if tj is not None else None), jz, c)
+                          for (tj, jz, c) in assignment]
+            _remap_parents(trunk_list, remap)
+            # no thinning rungs exist yet (they are built AFTER this
+            # block, precisely so this filter can never orphan them or
+            # strand their thinned shoots -- v3.7 gate should-fix #1),
+            # so trunk indices + j=-1 model rungs are the only cases.
+            made_braces = [dict(b, i=remap[b["i"]],
+                                 j=(remap[b["j"]] if b["j"] in remap else b["j"]))
+                           for b in made_braces
+                           if b["i"] in remap and (b["j"] == -1 or b["j"] in remap)]
+            # risers to a dissolved trunk must not outlive it either
+            risers = [dict(rs, trunk_idx=remap[rs["trunk_idx"]])
+                      for rs in risers if rs["trunk_idx"] in remap]
+            for route in routes:
+                if route.trunk_idx is not None:
+                    route.trunk_idx = remap[route.trunk_idx]
+
+        # ---- Economic rung-thinning runs LAST, on the final stable
+        # structure (v3.7 gate should-fix #1: rungs built before the
+        # repair/dissolution block could be mass-dropped by its brace
+        # filter while their shoots stayed thinned -- unbraced AND
+        # under-sized, with no gate catching it).
         rungs = braces_mod.brace_and_thin_shoots(
             routes, trunk_list, plate_z, ground_points, surface_tree, cfg)
         made_braces = made_braces + rungs
@@ -459,15 +599,23 @@ def run(mesh, cfg, max_fix_passes=3, log=None, do_emit=False):
                                  rs["r"], rs["r"], "shaft")],
                 anchor_kind="plate", free_length_mm=0.0))
         routed_contacts = [c for i, c in enumerate(contacts) if i not in unrouted]
+        # v3.7: connectivity needs the RAW parts (routes/trunks/risers/
+        # braces), not the routes+pseudo blend built above for clearance
+        # sweeping -- pass them separately so the gate sees exactly what
+        # emission sees (made_braces here already includes the thinning
+        # rungs added just above).
         report = verify.self_verify(mesh, islands, routed_contacts, routes + pseudo,
                                      carried, tip_r, cfg, surface_tree=surface_tree,
-                                     minima=minima)
+                                     minima=minima,
+                                     conn_parts=(routes, trunk_list, risers,
+                                                 made_braces, plate_z))
         log[f"verify_pass{fix_pass}"] = dict(
             ok=report["ok"],
             n_uncovered=len(report["uncovered_islands"]),
             n_clearance_violations=len(report["clearance_violations"]),
             n_load_violations=len(report["load_violations"]),
             n_unsupported_minima=len(report["unsupported_minima"]),
+            n_connectivity_violations=len(report["connectivity_violations"]),
         )
         if report["ok"] or not report["uncovered_islands"]:
             break

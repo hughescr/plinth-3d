@@ -171,6 +171,46 @@ def test_strut_cone_widened_to_branch_angle(cfg, far_tree):
     assert anchor is not None
 
 
+def test_coalesce_single_level_invariant_pins_chained_parent_bug(cfg, far_tree):
+    """v3.7 regression pin: the OLD code's child-side filter only checked
+    `child.foot_kind != 'plate'` -- a trunk that had ALREADY become a
+    PARENT earlier in this same pass (foot_kind stays 'plate', only its
+    would-be children change) could still be picked up as someone ELSE's
+    child later in the same pass, chaining trunk[A] under trunk[C] while
+    trunk[A] was itself already the parent of trunk[B]. Construct exactly
+    that ordering (B merges into A first -- lowest z_top is processed
+    first -- then A, still 'plate'/parent_idx=None, would be the closest
+    remaining candidate for C to adopt): the fix's `ci in parents` guard
+    must refuse to let A be adopted, so A stays a plain parent and C
+    merges into A directly (a second child under A, not a chain) instead."""
+    A = tm.Trunk([6.0, 0.0], z_top=60.0)
+    A.shoots = [0]
+    A.r = 1.0
+    B = tm.Trunk([0.0, 0.0], z_top=20.0)
+    B.shoots = [1]
+    B.r = 1.0
+    C = tm.Trunk([12.0, 0.0], z_top=120.0)
+    C.shoots = [2]
+    C.r = 1.0
+    trunks = [A, B, C]
+    juncs = {0: [(60.0, 62.0)], 1: [(20.0, 22.0)], 2: [(120.0, 122.0)]}
+    merges = tm.coalesce_columns(trunks, juncs, plate_z=-5.0,
+                                  surface_tree=far_tree, cfg=cfg)
+    assert len(merges) == 2  # B->A and C->A both go through; A->C must not
+    # the crux: A must never have been adopted as anyone's child, even
+    # though it was still 'plate'/parent_idx=None (the old candidate
+    # filter's only check) after taking B as a child.
+    assert trunks[0].foot_kind == "plate" and trunks[0].parent_idx is None
+    # no trunk has both children and a branch foot; every branch trunk's
+    # parent is itself a plain (non-branch, non-child) plate trunk, and
+    # its z_split lands within that parent's actual column span.
+    for t in trunks:
+        if t.foot_kind == "branch":
+            parent = trunks[t.parent_idx]
+            assert parent.foot_kind == "plate" and parent.parent_idx is None
+            assert parent.base_z(-5.0) <= t.z_split <= parent.z_top
+
+
 def test_junction_restraint_does_not_exist_until_shoot_completes(cfg):
     """Fourth review (Craig): at every layer, the layers above DO NOT
     EXIST YET. A shoot junction at z=30 whose shoot only reaches its

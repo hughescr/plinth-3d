@@ -1,5 +1,7 @@
 import numpy as np
+from scipy.spatial import cKDTree
 from support_placement import perception, placement, routing, verify, mesh_io
+from support_placement import trunks as tm
 
 
 def test_coverage_report_flags_island_with_no_contacts(table_mesh, cfg):
@@ -78,6 +80,74 @@ def test_minima_report_requires_contact_at_birth_region_not_nearby(cfg):
     no_contacts = verify.minima_report(minima, [], cfg)
     assert len(no_contacts) == 1 and no_contacts[0]["min_gap_mm"] == float("inf")
     assert verify.minima_report([], at_min, cfg) == []
+
+
+def test_connectivity_report_empty_inputs_returns_empty(cfg):
+    assert verify.connectivity_report([], [], [], [], plate_z=0.0, cfg=cfg) == []
+
+
+def test_connectivity_report_flags_floating_brace_endpoint(cfg):
+    """v3.7 hard gate: a brace endpoint sitting in mid-air (nothing else's
+    axis nearby, not at plate level, not embedded in any model) must be
+    flagged -- this is the exact failure mode the stale-brace-leak defect
+    produced (rods left pointing at trunks that had since moved/vanished)."""
+    plate_z = -5.0
+    a = tm.Trunk([0.0, 0.0], z_top=10.0)
+    a.r = 1.0
+    b = tm.Trunk([10.0, 0.0], z_top=10.0)
+    b.r = 1.0
+    good_brace = dict(i=0, j=1, r=0.5,
+                       p0=np.array([0.0, 0.0, 4.0]),
+                       p1=np.array([10.0, 0.0, 4.0]))
+    floating_brace = dict(i=0, j=1, r=0.5,
+                           p0=np.array([0.0, 0.0, 6.0]),   # still on trunk a's axis
+                           p1=np.array([50.0, 50.0, 50.0]))  # nowhere near anything
+    violations = verify.connectivity_report(
+        [], [a, b], [], [good_brace, floating_brace], plate_z, cfg)
+    flagged = [tuple(v["endpoint"]) for v in violations]
+    assert (50.0, 50.0, 50.0) in flagged
+    assert (0.0, 0.0, 6.0) not in flagged  # on-axis end of the SAME rod is fine
+
+
+def test_connectivity_report_brace_attached_to_trunk_axis_passes(cfg):
+    """A rod whose endpoints sit on trunk column axes is attached (rule
+    a) -- the ordinary trunk-to-trunk brace case."""
+    plate_z = -5.0
+    a = tm.Trunk([0.0, 0.0], z_top=10.0)
+    a.r = 1.0
+    b = tm.Trunk([10.0, 0.0], z_top=10.0)
+    b.r = 1.0
+    brace = dict(i=0, j=1, r=0.5,
+                 p0=np.array([0.0, 0.0, 4.0]),
+                 p1=np.array([10.0, 0.0, 4.0]))
+    violations = verify.connectivity_report([], [a, b], [], [brace], plate_z, cfg)
+    flagged = [tuple(v["endpoint"]) for v in violations]
+    assert (0.0, 0.0, 4.0) not in flagged
+    assert (10.0, 0.0, 4.0) not in flagged
+
+
+def test_connectivity_report_model_rung_passes_with_embedded_end_and_surface_tree(cfg):
+    """A trunk-to-model rung's model-facing end (j=-1, p1) is attached iff
+    it is actually embedded in the model surface -- rule (c), and ONLY for
+    the specific endpoint kinds designed to embed."""
+    plate_z = -5.0
+    a = tm.Trunk([0.0, 0.0], z_top=10.0)
+    a.r = 1.0
+    model_pt = np.array([5.0, 0.0, 4.0])
+    rung = dict(i=0, j=-1, r=cfg.brace_r_mm,
+                p0=np.array([0.0, 0.0, 4.0]),   # on trunk a's axis
+                p1=model_pt)                     # model end
+    surface_tree = cKDTree(np.array([model_pt]))
+    violations = verify.connectivity_report([], [a], [], [rung], plate_z, cfg,
+                                             surface_tree=surface_tree)
+    flagged = [tuple(v["endpoint"]) for v in violations]
+    assert tuple(model_pt.tolist()) not in flagged
+    assert (0.0, 0.0, 4.0) not in flagged
+    # without a surface tree the embed rule can't fire -- the model end is
+    # honestly reported as unattached rather than silently passed
+    violations_no_tree = verify.connectivity_report([], [a], [], [rung], plate_z, cfg)
+    flagged_no_tree = [tuple(v["endpoint"]) for v in violations_no_tree]
+    assert tuple(model_pt.tolist()) in flagged_no_tree
 
 
 def test_orientation_scar_cost_prefers_hiding_the_delicate_fin(fin_mesh, cfg):

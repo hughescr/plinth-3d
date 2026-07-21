@@ -123,11 +123,23 @@ def build_trunk_braces(trunks, plate_z, cfg):
                                         p0=np.array([xj[0], xj[1], z]),
                                         p1=np.array([xi[0], xi[1], z + rise])))
             else:
-                # crossed pair: up-right and up-left
+                # crossed pair: up-right and up-left. v3.7 (found via the
+                # connectivity gate's real-model validation): the SECOND
+                # rod's geometry starts at xj/ends at xi (reversed from
+                # the first), but its dict kept i=i, j=j unswapped -- same
+                # mismatch the twin path above already guards against
+                # (resize_for_spans and build_model_braces both read
+                # p0[2]/p1[2] as attachments on trunk b["i"]/b["j"]
+                # respectively). 122/300 brace endpoints on the real
+                # Treant model were mislabeled this way (harmless to the
+                # emitted geometry itself -- both ends still land on the
+                # real trunks -- but wrong for span-restraint bookkeeping
+                # and for the emitted-file connectivity audit). Swap the
+                # dict's i/j on the second rod to match its geometry.
                 braces.append(dict(i=i, j=j, r=r_rod,
                                     p0=np.array([xi[0], xi[1], z]),
                                     p1=np.array([xj[0], xj[1], z + rise])))
-                braces.append(dict(i=i, j=j, r=r_rod,
+                braces.append(dict(i=j, j=i, r=r_rod,
                                     p0=np.array([xj[0], xj[1], z]),
                                     p1=np.array([xi[0], xi[1], z + rise])))
             given[i] += 1
@@ -243,9 +255,17 @@ def brace_and_thin_shoots(routes, trunks, plate_z, ground_points, surface_tree, 
             p = root + dirv * s
             z = p[2]
             best = None
-            # (a) trunk columns existing at this z
+            # (a) trunk columns existing at this z. v3.7 (found via the
+            # connectivity gate's real-model validation): this used a flat
+            # plate_z + flare_len_mm floor for every trunk, but a BRANCH
+            # trunk's column only exists from its OWN base (z_start, via
+            # base_z()) upward -- below that there is no column, just
+            # empty air under the Y-split. Targeting a rung at a branch
+            # trunk's xy below its z_start produced a floating rod (two
+            # rungs landing 6-9mm below trunk[68]'s actual z_start on the
+            # real Treant model).
             for t in trunks:
-                if not (plate_z + cfg.flare_len_mm <= z <= t.z_top):
+                if not (t.base_z(plate_z) + cfg.flare_len_mm <= z <= t.z_top):
                     continue
                 q = np.array([t.xy[0], t.xy[1], z])
                 d = float(np.linalg.norm(q - p))

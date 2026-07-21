@@ -23,6 +23,9 @@ def test_engine_runs_end_to_end_on_table_fixture(table_mesh, cfg):
     assert result["verify"]["load_violations"] == []
     # the no-intersection guarantee: zero clearance violations, always
     assert result["verify"]["clearance_violations"] == [], result["verify"]
+    # v3.7: nothing floats -- every emitted member endpoint attaches to
+    # something (another member's axis, the plate, or the model).
+    assert result["verify"]["connectivity_violations"] == [], result["verify"]
     assert result["log"]["t_total"] < 10.0
 
 
@@ -110,6 +113,7 @@ def test_engine_supports_toe_minima_directly(toed_slab_mesh, cfg):
     import numpy as np
     result = engine.run(toed_slab_mesh, cfg)
     assert result["verify"]["clearance_violations"] == [], result["verify"]
+    assert result["verify"]["connectivity_violations"] == [], result["verify"]
     assert result["verify"]["unsupported_minima"] == []
     routed = {r.contact_idx for r in result["routes"]}
     for apex in (np.array([8.0, 0.0, 9.0]), np.array([-8.0, 0.0, 11.0])):
