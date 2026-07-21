@@ -31,6 +31,8 @@ Deliberate conventions preserved from the per-member era:
 """
 import numpy as np
 
+_MISSING = object()
+
 MODEL_FOOT_FACTOR = 1.4     # adsorbed strut foot ball vs its rod radius
 COINCIDE_TOL_MM = 0.15      # endpoint clustering: true coincidences only
 ON_AXIS_TOL_MM = 0.2        # node-to-member-axis distance for sizing
@@ -47,87 +49,76 @@ def _point_segment_dist(points, p0, p1):
     return np.linalg.norm(points - proj, axis=1)
 
 
-def collect_members(routes, trunks, risers, braces, plate_z):
-    """Every final member as dicts {p0, p1, r0, r1, owner, kind}.
-    owner is ("route", i) | ("trunk", i) | ("riser", i) | ("brace", i).
-    kind is the semantic role; joint NODES are derived from these by
-    compute_joint_balls (which knows which endpoints are joints)."""
-    members = []
-    for ti, t in enumerate(trunks):
-        base = t.base_z(plate_z)
-        members.append(dict(
-            p0=np.array([t.xy[0], t.xy[1], base]),
-            p1=np.array([t.xy[0], t.xy[1], t.z_top]),
-            r0=t.r, r1=t.r, owner=("trunk", ti), kind="column"))
-        if t.foot_kind == "branch" and t.parent_idx is not None:
-            parent = trunks[t.parent_idx]
-            members.append(dict(
-                p0=np.array([parent.xy[0], parent.xy[1], t.z_split]),
-                p1=np.array([t.xy[0], t.xy[1], t.z_start]),
-                r0=t.r, r1=t.r, owner=("trunk", ti), kind="y_diagonal"))
-    for ri, rt in enumerate(routes):
-        for seg in rt.segments:
-            if seg.kind == "stub":
-                members.append(dict(p0=np.asarray(seg.p0, float),
-                                    p1=np.asarray(seg.p1, float),
-                                    r0=seg.r0, r1=seg.r1,
-                                    owner=("route", ri), kind="stub"))
-            elif seg.kind == "shoot":
-                members.append(dict(p0=np.asarray(seg.p0, float),
-                                    p1=np.asarray(seg.p1, float),
-                                    r0=seg.r0, r1=seg.r1,
-                                    owner=("route", ri),
-                                    kind=("strut" if rt.anchor_kind == "model"
-                                          else "shoot")))
-    for ki, rs in enumerate(risers or []):
-        members.append(dict(p0=np.asarray(rs["p0"], float),
-                            p1=np.asarray(rs["p1"], float),
-                            r0=rs["r"], r1=rs["r"],
-                            owner=("riser", ki), kind="riser"))
-    for bi, b in enumerate(braces or []):
-        members.append(dict(p0=np.asarray(b["p0"], float),
-                            p1=np.asarray(b["p1"], float),
-                            r0=b["r"], r1=b["r"],
-                            owner=("brace", bi),
-                            kind=("model_rung" if b.get("j") == -1 else "brace")))
-    return members
+def collect_members(members):
+    """v4 (design-v4.md #2): the CCO builder (cco.build) produces the
+    member list NATIVELY (tree.Member objects, or plain dicts with the
+    same schema) instead of v3's four separate routes/trunks/risers/
+    braces collections. This function inverts from a from-parts
+    CONSTRUCTOR to a validation/identity layer: assert the schema, and
+    normalize every member (Member object or dict) to the dict schema
+    {p0, p1, r0, r1, owner, kind, embed_end} that compute_joint_balls,
+    verify.connectivity_report, and emission consume.
+
+    embed_end replaces v3's kind/sentinel logic (j == -1 model rung,
+    i == j == -3 thinning rung) for embed-eligibility; a plain dict
+    fixture that omits it is treated as None (no designed embed), same
+    as a freshly-built tree.Member's default.
+    """
+    out = []
+    for m in members:
+        p0 = np.asarray(_field(m, "p0"), float)
+        p1 = np.asarray(_field(m, "p1"), float)
+        r0 = float(_field(m, "r0"))
+        r1 = float(_field(m, "r1"))
+        kind = _field(m, "kind")
+        owner = _field(m, "owner")
+        assert p0.shape == (3,) and p1.shape == (3,), f"member p0/p1 must be 3-vectors: {m}"
+        assert isinstance(kind, str), f"member kind must be a str: {m}"
+        assert isinstance(owner, tuple) and len(owner) == 2, f"member owner must be a 2-tuple: {m}"
+        embed_end = _field(m, "embed_end", default=None)
+        assert embed_end in ("p0", "p1", None), f"member embed_end must be p0/p1/None: {m}"
+        out.append(dict(p0=p0, p1=p1, r0=r0, r1=r1, owner=owner, kind=kind,
+                         embed_end=embed_end))
+    return out
 
 
-def compute_joint_balls(routes, trunks, risers, braces, plate_z, cfg):
+def _field(m, name, default=_MISSING):
+    if isinstance(m, dict):
+        if name in m:
+            return m[name]
+        if default is not _MISSING:
+            return default
+        raise KeyError(f"member dict missing required field {name!r}: {m}")
+    if hasattr(m, name):
+        return getattr(m, name)
+    if default is not _MISSING:
+        return default
+    raise AttributeError(f"member object missing required field {name!r}: {m}")
+
+
+def compute_joint_balls(members, plate_z, cfg):
     """One ball per joint, sized to the fattest member touching it.
     Returns list of dicts {center (3,), r, owner} with owner as in
-    collect_members. See module docstring for the rules."""
-    members = collect_members(routes, trunks, risers, braces, plate_z)
+    collect_members. See module docstring for the rules.
+
+    v4: joint-ness is now determined structurally instead of by a
+    per-kind branch table -- every member contributes a node at p1, and
+    at p0 UNLESS its kind is "stub" (a stub's p0 is the tip CONTACT, the
+    removal-friendly point contact, never a joint -- same rule v3 had,
+    now expressed once instead of per-kind). An endpoint is the
+    model-adsorbed-foot case (MODEL_FOOT_FACTOR) iff it is that member's
+    embed_end AND it isn't the stub-tip case already excluded above --
+    replaces v3's kind-specific "strut"/"model_rung" embedded flags."""
+    members = collect_members(members)
     if not members:
         return []
 
     # --- joint NODES: member endpoints that are articulation points.
     nodes = []  # (point, radius_at_end, owner, embedded_model)
     for m in members:
-        kind = m["kind"]
-        if kind == "column":
-            # top is a joint (dome / meeting point of top junctions);
-            # a PLATE base is flare+pad territory, a BRANCH base
-            # coincides with its y_diagonal's end which supplies the node
-            nodes.append((m["p1"], m["r1"], m["owner"], False))
-        elif kind == "y_diagonal":
-            nodes.append((m["p0"], m["r0"], m["owner"], False))  # on parent
-            nodes.append((m["p1"], m["r1"], m["owner"], False))  # child base
-        elif kind == "stub":
-            # p0 is the tip contact (contact-ball domain, not a joint)
-            nodes.append((m["p1"], m["r1"], m["owner"], False))
-        elif kind == "shoot":
-            nodes.append((m["p0"], m["r0"], m["owner"], False))  # elbow
-            nodes.append((m["p1"], m["r1"], m["owner"], False))  # junction
-        elif kind == "strut":
-            nodes.append((m["p0"], m["r0"], m["owner"], False))
-            nodes.append((m["p1"], m["r1"], m["owner"], True))   # model foot
-        elif kind in ("riser", "brace"):
-            nodes.append((m["p0"], m["r0"], m["owner"], False))
-            nodes.append((m["p1"], m["r1"], m["owner"], False))
-        elif kind == "model_rung":
-            nodes.append((m["p0"], m["r0"], m["owner"], False))
-            nodes.append((m["p1"], m["r1"], m["owner"], True))   # model end
+        if m["kind"] != "stub":
+            nodes.append((m["p0"], m["r0"], m["owner"], m["embed_end"] == "p0"))
+        nodes.append((m["p1"], m["r1"], m["owner"], m["embed_end"] == "p1"))
 
     pts = np.array([n[0] for n in nodes])
 
@@ -152,9 +143,14 @@ def compute_joint_balls(routes, trunks, risers, braces, plate_z, cfg):
         clusters.setdefault(find(i), []).append(i)
 
     # --- axis members for mid-member landings (sized by what the ball
-    # actually sits on, not just who ends there)
-    axis_members = [m for m in members
-                    if m["kind"] in ("column", "y_diagonal", "riser", "shoot")]
+    # actually sits on, not just who ends there). v4: a bifurcation SPLITS
+    # its host member at the junction, so "mid-member" landings are now
+    # the exception rather than v3's routine case (a rung/riser floating
+    # onto an unsplit column's surface) -- kept as a safety net for any
+    # near-coincident-but-not-exactly-split geometry. Every non-stub
+    # member is eligible (stubs are excluded: their p0 is the tip contact
+    # domain, not structural axis a joint could land on).
+    axis_members = [m for m in members if m["kind"] != "stub"]
 
     balls = []
     for idxs in clusters.values():

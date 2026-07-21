@@ -12,7 +12,7 @@ doesn't choose orientation, it evaluates candidates handed to it.
 import numpy as np
 from scipy.spatial import cKDTree
 
-from . import perception, routing, joints
+from . import perception, routing, joints, tree as tree_mod
 
 
 def coverage_report(mesh, islands, contacts, cfg):
@@ -41,20 +41,105 @@ def coverage_report(mesh, islands, contacts, cfg):
     return report
 
 
-def clearance_report(mesh, routes, cfg, surface_tree=None):
-    """Flattened clearance violations across all routes (routing.py sweeps
-    the full capsule envelope, not the v0 centerline-only check). Pass a
-    routing.build_surface_tree(mesh) for real-model-scale runs -- see its
-    docstring; the exact per-call path does not scale to hundreds of
-    routes on a large mesh."""
+def clearance_report(mesh, members, cfg, surface_tree=None):
+    """v4: independent full-envelope clearance re-check over the FINAL
+    member list. Deliberately does not reuse tree.Forest.revalidate's
+    certificate bookkeeping (a builder bug that mis-certifies a member
+    must not also fool the verify gate) -- same sampling math (sample at
+    clearance_sample_step_mm, linear radius taper, skip the first
+    contact_depth_mm+0.2 of a designed-embed end), applied unconditionally
+    to every member regardless of cert status, as an honest independent
+    check. `surface_tree` (see routing.build_surface_tree), if given,
+    uses the fast approximate path real runs always use; None falls back
+    to exact trimesh.proximity (routing._surface_distances) the same way
+    routing.check_clearance's legacy path does -- fine for a handful of
+    members in a test, not for a real mesh (see build_surface_tree's own
+    docstring for why).
+
+    "stub" members are skipped entirely, same as routing.
+    sample_route_envelope's existing precedent and tree.Forest.
+    revalidate's identical rule (see that docstring for why the
+    contact_depth_mm+0.2 inset alone isn't enough for a member that
+    travels along the surface normal at a near-grazing angle).
+
+    Returns list of dicts {member_idx, kind, min_clearance_mm, at_point}.
+    """
+    members = joints.collect_members(members)
     out = []
-    all_violations = routing.check_clearance_batch(mesh, routes, cfg,
-                                                    surface_tree=surface_tree)
-    for i, violations in enumerate(all_violations):
-        for v in violations:
-            v["route_idx"] = i
-            out.append(v)
+    if not members:
+        return out
+    inset = cfg.contact_depth_mm + 0.2
+    all_pts, all_r, all_mi = [], [], []
+    for mi, m in enumerate(members):
+        if m["kind"] == "stub":
+            continue
+        p0, p1 = np.asarray(m["p0"], float), np.asarray(m["p1"], float)
+        r0, r1 = float(m["r0"]), float(m["r1"])
+        length = float(np.linalg.norm(p1 - p0))
+        if length < 1e-9:
+            pts = p0[None, :]
+            radii = np.array([max(r0, r1)])
+        else:
+            n = max(int(length / cfg.clearance_sample_step_mm), 1)
+            t = np.linspace(0.0, 1.0, n + 1)
+            if m.get("embed_end") == "p0":
+                t = t[t * length >= inset]
+            if m.get("embed_end") == "p1":
+                t = t[(1 - t) * length >= inset]
+            if len(t) == 0:
+                continue
+            pts = p0[None, :] + t[:, None] * (p1 - p0)[None, :]
+            radii = r0 + t * (r1 - r0)
+        all_pts.append(pts)
+        all_r.append(radii)
+        all_mi.append(np.full(len(radii), mi, dtype=int))
+    if not all_pts:
+        return out
+    pts_all = np.concatenate(all_pts)
+    r_all = np.concatenate(all_r)
+    mi_all = np.concatenate(all_mi)
+    ub = float(r_all.max()) + cfg.standoff_mm
+    dist = routing._surface_distances(mesh, pts_all, surface_tree, upper_bound=ub)
+    clearance = dist - r_all - cfg.standoff_mm
+    for mi, m in enumerate(members):
+        mask = mi_all == mi
+        if not mask.any():
+            continue
+        worst = float(clearance[mask].min())
+        if worst < 0:
+            widx = np.nonzero(mask)[0][int(np.argmin(clearance[mask]))]
+            out.append(dict(member_idx=mi, kind=m["kind"], min_clearance_mm=worst,
+                             at_point=pts_all[widx].tolist()))
     return out
+
+
+def murray_report(forest, cfg, tolerance=0.05):
+    """New (design-v4.md #5, #11): per-junction Murray-law conservation
+    sanity check, r_parent^4 >= sum(r_child^4) * (1 - tolerance). A
+    parent member's radius at its p0 (the junction end -- children attach
+    there, see tree.Forest's parent/child convention) may legitimately
+    sit ABOVE conservation (physics floors -- min radius, transient spans
+    -- may push it up), but never meaningfully below: that would mean an
+    upstream sizing bug. Only evaluated at true branch junctions (>= 2
+    children) -- a single pass-through attachment is topology, not a
+    merge, and has nothing to conserve against. Honestly-unrouted
+    terminals never enter the forest, so they are excluded by
+    construction (nothing to sum).
+
+    Returns list of dicts {member_idx, r_parent, r_child_equiv, deficit}.
+    """
+    violations = []
+    for pi, children in enumerate(forest.children):
+        if len(children) < 2:
+            continue
+        parent = forest.members[pi]
+        r_parent4 = float(parent.r0) ** 4
+        sum_child4 = sum(float(forest.members[ci].r1) ** 4 for ci in children)
+        if r_parent4 < sum_child4 * (1.0 - tolerance):
+            violations.append(dict(member_idx=pi, r_parent=float(parent.r0),
+                                    r_child_equiv=sum_child4 ** 0.25,
+                                    deficit=sum_child4 - r_parent4))
+    return violations
 
 
 def load_report(carried_area_mm2, tip_r_mm, cfg):
@@ -105,51 +190,47 @@ def minima_report(minima, routed_contacts, cfg):
     return out
 
 
-def connectivity_report(routes, trunks, risers, braces, plate_z, cfg, surface_tree=None):
-    """v3.7 hard gate (Craig's Chitubox review): the stale-brace-leak and
-    chained-Y-branch defects both manifested the same way in the emitted
-    file -- a member with an endpoint touching NOTHING (a floating rod).
-    This makes "nothing floats" a checked invariant instead of a hope.
+def connectivity_report(members, plate_z, cfg, surface_tree=None):
+    """v3.7 hard gate (Craig's Chitubox review), signature-migrated for v4
+    (design-v4.md #2): the stale-brace-leak and chained-Y-branch defects
+    both manifested the same way in the emitted file -- a member with an
+    endpoint touching NOTHING (a floating rod). This makes "nothing
+    floats" a checked invariant instead of a hope.
 
-    Every member (joints.collect_members: stubs, shoots/struts, trunk
-    columns, y-diagonals, risers, braces/rungs) has two endpoints; each
-    must be ATTACHED by at least one of:
+    Every member (joints.collect_members) has two endpoints; each must be
+    ATTACHED by at least one of:
       (a) within 0.25mm of ANOTHER member's axis segment (point-to-segment
           distance, self excluded) -- the general "something is really
-          there" rule, covering joints, mid-column brace/riser landings,
-          and sibling-shoot rung targets;
-      (b) plate level (abs(z - plate_z) <= 0.2mm) -- e.g. a plate trunk's
-          column base. Column bases are widened to
-          [plate_z, plate_z + cfg.flare_len_mm + 0.2] since the flare/pad
-          below the column's own base_z is an emission-only detail this
-          check doesn't model; this widening only ever applies to a
-          column's OWN base endpoint, so it can't paper over a genuinely
-          floating branch base (those sit well above plate_z by the
-          coalesce_columns gates and get caught by rule (a) against their
-          own y_diagonal instead);
+          there" rule, covering junctions and any mid-member landing;
+      (b) plate level (abs(z - plate_z) <= 0.2mm) -- a plate-rooted
+          member's base. (v4 simplification, recorded: v3 widened this
+          band by flare_len_mm to cover an emission-only flare/pad detail
+          below a column's modeled base; v4's plate-descent candidate has
+          no such offset -- its root member's p1 lands exactly at
+          plate_z -- so the widening is dropped rather than carried
+          forward as unexplained slack.)
       (c) embedded in the model surface (within cfg.contact_depth_mm+0.45)
-          -- ONLY for the specific endpoints that are DESIGNED to embed:
-          a stub's tip (p0), a model-anchored strut's foot (p1), a
-          trunk-to-model rung's model end (p1), and a shoot-thinning
-          rung's (i=j=-3) far end (p1, which may land on a trunk, a
-          sibling shoot, or the model -- rule (a) already covers the first
-          two, this only adds the model case). Any OTHER endpoint merely
+          -- ONLY for the endpoint that is that member's DESIGNED
+          embed_end (replaces v3's kind/sentinel table: a stub's tip
+          (p0), a model-anchor strut's foot (p1), or any other member
+          explicitly built with an embed_end). Any OTHER endpoint merely
           being near the model is explicitly NOT attachment -- that would
           silently wave through an unbraced floating rod that happens to
-          pass close to the mesh.
+          pass close to the mesh. Preserved verbatim: with no
+          surface_tree, an embed-eligible endpoint is honestly flagged
+          rather than silently passed (the fixture pinning this case
+          stays a guard on engine.py always supplying one for real runs).
 
     Returns a list of violation dicts {kind, endpoint (xyz list), gap_mm}
     -- gap_mm is the distance to the nearest legitimate attachment of the
     allowed kinds for that endpoint. Vectorized (member-axis distances
     computed in point-chunks against all member axes at once) to stay well
-    under a second at real-model scale (~1350 members / 2700 endpoints).
+    under a second at real-model scale.
     """
-    members = joints.collect_members(routes, trunks, risers, braces, plate_z)
+    members = joints.collect_members(members)
     if not members:
         return []
 
-    brace_list = list(braces or [])
-    n_members = len(members)
     m_p0 = np.array([m["p0"] for m in members], dtype=float)
     m_p1 = np.array([m["p1"] for m in members], dtype=float)
     d_axis = m_p1 - m_p0
@@ -158,32 +239,16 @@ def connectivity_report(routes, trunks, risers, braces, plate_z, cfg, surface_tr
     zero_len = L2 < 1e-18
 
     # endpoints: (member_idx, point, embed_eligible)
-    ep_mi, ep_pts, ep_embed, ep_kind = [], [], [], []
+    ep_mi, ep_pts, ep_embed = [], [], []
     for mi, m in enumerate(members):
-        kind = m["kind"]
-        owner_kind, owner_idx = m["owner"]
-        embed0 = kind == "stub"                     # tip contact, p0
-        embed1 = kind in ("strut", "model_rung")     # model foot / rung end, p1
-        if owner_kind == "brace":
-            b = brace_list[owner_idx]
-            if b.get("i") == -3 and b.get("j") == -3:
-                # shoot-thinning rung: far end (p1) may land on a trunk,
-                # sibling shoot (both caught by rule (a) already) or the
-                # model (needs rule (c)) -- widen eligibility, harmless
-                # for the trunk/shoot cases since (a) alone already passes.
-                embed1 = True
+        embed0 = m.get("embed_end") == "p0"
+        embed1 = m.get("embed_end") == "p1"
         ep_mi.append(mi); ep_pts.append(m["p0"]); ep_embed.append(embed0)
-        ep_kind.append(kind)
         ep_mi.append(mi); ep_pts.append(m["p1"]); ep_embed.append(embed1)
-        ep_kind.append(kind)
 
     ep_mi = np.array(ep_mi)
     pts = np.array(ep_pts, dtype=float)
     embed_ok = np.array(ep_embed, dtype=bool)
-    # every member contributes p0 then p1 in order, so even flat-index ->
-    # p0 (a column's base) and odd -> p1 (its top, not eligible here).
-    is_col_base = np.array([members[mi]["kind"] == "column" and (idx % 2 == 0)
-                             for idx, mi in enumerate(ep_mi)])
 
     n_ep = len(ep_mi)
     best_axis_dist = np.full(n_ep, np.inf)
@@ -207,8 +272,7 @@ def connectivity_report(routes, trunks, risers, braces, plate_z, cfg, surface_tr
     attached_a = best_axis_dist <= 0.25
 
     z = pts[:, 2]
-    attached_b = (np.abs(z - plate_z) <= 0.2) | \
-        (is_col_base & (z >= plate_z - 1e-6) & (z <= plate_z + cfg.flare_len_mm + 0.2))
+    attached_b = np.abs(z - plate_z) <= 0.2
 
     surf_dist = np.full(n_ep, np.inf)
     if surface_tree is not None and embed_ok.any():
@@ -233,39 +297,48 @@ def connectivity_report(routes, trunks, risers, braces, plate_z, cfg, surface_tr
     return violations
 
 
-def self_verify(mesh, islands, contacts, routes, carried_area_mm2, tip_r_mm, cfg,
-                 surface_tree=None, minima=None, conn_parts=None):
-    """Full design.md #9 gate. Returns a report dict; `ok` is True only if
-    all checks are clean (coverage, clearance, load, layer-island minima --
-    only when the caller supplies the minima list from
-    perception.local_z_minima; engine.run always does -- and, since v3.7,
-    connectivity).
+def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cfg,
+                 plate_z, surface_tree=None, minima=None, forest=None):
+    """Full design-v4.md #11 gate. Returns a report dict; `ok` is True
+    only if all checks are clean: coverage, clearance, load, layer-island
+    minima (only when the caller supplies `minima` from
+    perception.local_z_minima; engine.run always does), connectivity, and
+    -- new in v4 -- per-segment printability and per-junction Murray
+    conservation.
 
-    conn_parts, if given, is (routes, trunks, risers, braces, plate_z) --
-    the RAW parts exactly as emission sees them (not the routes+pseudo
-    blend `routes` above uses for clearance sweeping). None skips the
-    connectivity gate entirely (backward compatible, same optional
-    pattern as `minima`)."""
+    `members` replaces v3's conn_parts=(routes,trunks,risers,braces,
+    plate_z): one flat member list (tree.Member objects or dicts) drives
+    both clearance_report and connectivity_report. `forest`, if given
+    (a tree.Forest -- engine.run always supplies one in real runs, same
+    optional pattern as `minima`/`surface_tree`), additionally gates
+    printability and Murray conservation; omitting it skips those two
+    sub-reports (reported as empty) rather than gating on them, since
+    murray_report needs the forest's parent/child topology, not just the
+    flat member list."""
     coverage = coverage_report(mesh, islands, contacts, cfg)
-    clearance = clearance_report(mesh, routes, cfg, surface_tree=surface_tree)
+    clearance = clearance_report(mesh, members, cfg, surface_tree=surface_tree)
     load = load_report(carried_area_mm2, tip_r_mm, cfg)
     unsupported_minima = minima_report(minima, contacts, cfg) if minima is not None else []
-    if conn_parts is not None:
-        c_routes, c_trunks, c_risers, c_braces, c_plate_z = conn_parts
-        connectivity_violations = connectivity_report(
-            c_routes, c_trunks, c_risers, c_braces, c_plate_z, cfg,
-            surface_tree=surface_tree)
+    connectivity_violations = connectivity_report(members, plate_z, cfg,
+                                                   surface_tree=surface_tree)
+    if forest is not None:
+        printability_violations = tree_mod.printability_report(forest.members, cfg)
+        murray_violations = murray_report(forest, cfg)
     else:
-        connectivity_violations = []
+        printability_violations = []
+        murray_violations = []
     uncovered = [c for c in coverage if not c["covered"]]
     return dict(
         ok=(len(uncovered) == 0 and len(clearance) == 0 and len(load) == 0
-            and len(unsupported_minima) == 0 and len(connectivity_violations) == 0),
+            and len(unsupported_minima) == 0 and len(connectivity_violations) == 0
+            and len(printability_violations) == 0 and len(murray_violations) == 0),
         uncovered_islands=uncovered,
         clearance_violations=clearance,
         load_violations=load,
         unsupported_minima=unsupported_minima,
         connectivity_violations=connectivity_violations,
+        printability_violations=printability_violations,
+        murray_violations=murray_violations,
     )
 
 

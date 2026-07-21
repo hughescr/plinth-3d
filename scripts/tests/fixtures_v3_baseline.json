@@ -1,0 +1,35 @@
+{
+  "table": {
+    "member_ml": 0.7395,
+    "ball_ml": 0.156,
+    "total_ml": 0.8955,
+    "by_kind_ml": {
+      "brace": 0.1126,
+      "column": 0.4411,
+      "model_rung": 0.0019,
+      "shoot": 0.0675,
+      "strut": 0.0023,
+      "stub": 0.0272,
+      "y_diagonal": 0.0869
+    },
+    "n_routes": 39,
+    "n_trunks": 12,
+    "n_unrouted": 2,
+    "verify_ok": true
+  },
+  "toed_slab": {
+    "member_ml": 0.3621,
+    "ball_ml": 0.0821,
+    "total_ml": 0.4442,
+    "by_kind_ml": {
+      "brace": 0.002,
+      "column": 0.2515,
+      "shoot": 0.0801,
+      "stub": 0.0284
+    },
+    "n_routes": 38,
+    "n_trunks": 16,
+    "n_unrouted": 1,
+    "verify_ok": true
+  }
+}

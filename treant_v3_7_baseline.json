@@ -1,0 +1,28 @@
+{
+ "version": "v3.7",
+ "n_members": 1327,
+ "n_balls": 1369,
+ "n_routes": 465,
+ "n_trunks": 114,
+ "n_risers": 20,
+ "n_braces": 297,
+ "member_ml": 22.852,
+ "ball_ml": 3.739,
+ "total_ml": 26.591,
+ "by_kind_ml": {
+  "brace": 1.066,
+  "column": 19.404,
+  "model_rung": 0.023,
+  "riser": 0.372,
+  "shoot": 0.99,
+  "strut": 0.337,
+  "stub": 0.466,
+  "y_diagonal": 0.194
+ },
+ "verify": {
+  "clearance": 0,
+  "connectivity": 0,
+  "unsupported_minima": 74,
+  "unrouted": 176
+ }
+}
