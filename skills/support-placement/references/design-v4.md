@@ -441,11 +441,19 @@ unchanged. Curved members emit as their polyline — no new record types.
    `treant_v3_7_baseline.json` frozen BEFORE any deletion. Commit.
 3. `rewire.py` + junction numeric polish + Murray verify gate; fixture
    volume A/B vs frozen v3 numbers. Commit.
-4. Curvature: curved descent + curved merge candidates, per-segment
+4. `transient.py` full generalization + bracing-as-restraint (§9).
+   REORDERED ahead of curvature on Treant smoke-test evidence
+   (2026-07-21): unbraced ~100mm canopy columns deflection-size to
+   r≈2.9mm (~2.7ml each; 200-contact partial build measured 74ml vs
+   v3.7's 22.85 full) — bracing is a ~14x per-column volume lever,
+   curvature is mostly a routing lever (v4 unrouted rate already ≈ v3's
+   without it). Includes: braced-cost candidate evaluation in cco.build
+   (span capped at brace_free_span_mm + brace volume estimate) so
+   insertion doesn't misprice, then the real §8 transient loop, then a
+   rewire re-pass against braced costs. Commit.
+5. Curvature: curved descent + curved merge candidates, per-segment
    printability check, r_bend, curved-path transient arms. Attack the
    unrouted/minima residual. Commit.
-5. `transient.py` full generalization + bracing-as-restraint (§9).
-   Commit.
 6. `removal.py` + gates wired into verify ok. Commit.
 7. Treant: full run, volume vs baseline & 16–17ml target, all gates
    green, emit, Craig's Chitubox review. Iterate.

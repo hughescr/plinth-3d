@@ -15,11 +15,13 @@ import numpy as np
 from . import perception, placement, routing, verify, joints, cco, tree, rewire
 
 
-def run(mesh, cfg, log=None):
-    """Run the full v4 pipeline on an already-loaded trimesh.Trimesh.
-    Returns a result dict: islands, contacts, carried_area_mm2, tip_r_mm,
-    forest, members, balls, unrouted, minima, plate_z, verify, volume,
-    log."""
+def prepare(mesh, cfg, log=None):
+    """Stage 1 of the pipeline: everything that depends only on the mesh.
+    Returns a picklable dict (no KDTree -- rebuild surface_tree per
+    process with routing.build_surface_tree): islands, minima, contacts,
+    plate_z, sample_points, sample_delicacy, log. Extracted from run()
+    so Treant-scale runs can checkpoint between bounded foreground
+    calls; run() remains the canonical composition."""
     log = log if log is not None else {}
     t0 = time.time()
 
@@ -42,6 +44,73 @@ def run(mesh, cfg, log=None):
     log["minima_contacts_added"] = n_min_added
 
     plate_z = float(mesh.bounds[0][2]) - cfg.lift_mm
+    sample_points, _sn, sample_delicacy, _q = perception.delicacy_field(mesh, cfg)
+    log["t_delicacy"] = round(time.time() - t0, 2)
+    return dict(islands=islands, minima=minima, contacts=contacts,
+                plate_z=plate_z, sample_points=sample_points,
+                sample_delicacy=sample_delicacy, log=log)
+
+
+def construct(mesh, pre, surface_tree, cfg, log=None, limit_contacts=None):
+    """Stage 2: load partition + tip sizing + cco.build (NO rewiring --
+    the caller owns rewire.optimize so its wall budget is its own).
+    `limit_contacts` truncates the contact list for profiling only.
+    Returns (forest, unrouted, carried, tip_r, contacts)."""
+    log = log if log is not None else {}
+    contacts = pre["contacts"][:limit_contacts] if limit_contacts else pre["contacts"]
+    carried = placement.load_partition(mesh, pre["islands"], contacts, cfg)
+    tip_r = placement.tip_radius_mm(carried, cfg)
+    minima_flags = [bool(c.get("minimum")) for c in contacts]
+    forest, unrouted = cco.build(mesh, contacts, tip_r, carried, minima_flags,
+                                  pre["plate_z"], surface_tree, cfg,
+                                  sample_points=pre["sample_points"],
+                                  sample_delicacy=pre["sample_delicacy"])
+    tree.assert_all_certified(forest)
+    return forest, unrouted, carried, tip_r, contacts
+
+
+def live_member_lists(forest, unrouted, plate_z, cfg):
+    """Stage 3a: the verify/emission-facing member + ball lists. An
+    honestly-unrouted terminal's never-attached stub, and rewire-retired
+    (Forest.dead) members, are excluded -- `unrouted` reports the former
+    honestly and the latter were folded into survivors."""
+    unrouted_stub_idx = {forest.terminal_of[i] for i in unrouted}
+    live = [m for mi, m in enumerate(forest.members)
+            if mi not in unrouted_stub_idx and mi not in forest.dead]
+    members = joints.collect_members(live)
+    balls = joints.compute_joint_balls(live, plate_z, cfg)
+    return members, balls
+
+
+def finish(mesh, pre, forest, unrouted, contacts, carried, tip_r,
+           surface_tree, cfg, log=None):
+    """Stage 3b: verify gates + volume report on the final forest."""
+    log = log if log is not None else {}
+    plate_z = pre["plate_z"]
+    tree.assert_all_certified(forest)
+    members, balls = live_member_lists(forest, unrouted, plate_z, cfg)
+    routed_contacts = [c for i, c in enumerate(contacts) if i not in unrouted]
+    report = verify.self_verify(mesh, pre["islands"], routed_contacts, members,
+                                 carried, tip_r, cfg, plate_z,
+                                 surface_tree=surface_tree, minima=pre["minima"],
+                                 forest=forest)
+    volume = tree.volume_report(members, balls)
+    log["n_unrouted"] = len(unrouted)
+    return dict(members=members, balls=balls, verify=report, volume=volume,
+                plate_z=plate_z, log=log)
+
+
+def run(mesh, cfg, log=None):
+    """Run the full v4 pipeline on an already-loaded trimesh.Trimesh.
+    Returns a result dict: islands, contacts, carried_area_mm2, tip_r_mm,
+    forest, members, balls, unrouted, minima, plate_z, verify, volume,
+    log."""
+    log = log if log is not None else {}
+    t0 = time.time()
+
+    pre = prepare(mesh, cfg, log)
+    islands, minima, contacts = pre["islands"], pre["minima"], pre["contacts"]
+    plate_z = pre["plate_z"]
 
     if not contacts:
         log["t_total"] = round(time.time() - t0, 2)
@@ -65,54 +134,24 @@ def run(mesh, cfg, log=None):
     surface_tree = routing.build_surface_tree(mesh, pitch_mm=0.3, max_points=400000)
     log["t_surface_tree"] = round(time.time() - t0, 2)
 
-    sample_points, _sample_normals, sample_delicacy, _query = perception.delicacy_field(mesh, cfg)
-    log["t_delicacy"] = round(time.time() - t0, 2)
-
     forest = members = balls = report = carried = tip_r = unrouted = None
     max_fix_passes = 2
     for fix_pass in range(max_fix_passes):
-        carried = placement.load_partition(mesh, islands, contacts, cfg)
-        tip_r = placement.tip_radius_mm(carried, cfg)
-        minima_flags = [bool(c.get("minimum")) for c in contacts]
-
-        forest, unrouted = cco.build(mesh, contacts, tip_r, carried, minima_flags,
-                                      plate_z, surface_tree, cfg,
-                                      sample_points=sample_points,
-                                      sample_delicacy=sample_delicacy)
-        # Certificate rule (design-v4.md #4): nothing downstream may trust
-        # a forest with a void certificate. Stands in for "emission
-        # asserts zero dirty members" until Phase 7 wires a real emitter.
-        tree.assert_all_certified(forest)
+        pre["contacts"] = contacts  # fix-pass additions feed back in
+        forest, unrouted, carried, tip_r, contacts = construct(
+            mesh, pre, surface_tree, cfg, log=log)
         # Phase 3 (design-v4.md #7): topology mutation runs AFTER
         # insertion, BEFORE verify -- rewire.optimize mutates `forest` in
         # place (subtree reattach / junction slide / twig prune), each
-        # move already transactional+certificate-checked internally, so
-        # re-asserting here is a cheap belt-and-suspenders check of the
-        # same invariant, not new work.
+        # move already transactional+certificate-checked internally;
+        # re-asserting after is a cheap belt-and-suspenders check.
         rewire.optimize(forest, mesh, surface_tree, cfg, log=log)
         tree.assert_all_certified(forest)
-        # An honestly-unrouted terminal's stub member is still sitting in
-        # the forest (every terminal gets one up front, before insertion
-        # is attempted) but was never attached to anything -- it must not
-        # leak into the connectivity/volume/printability accounting as a
-        # floating member; `unrouted` already reports it honestly. Members
-        # rewire.py retired (tree.Forest.dead -- twig prune folds a
-        # degenerate pass-through into its surviving child rather than
-        # deleting the row, since the checkpoint protocol is append-only)
-        # are excluded the same way.
-        unrouted_stub_idx = {forest.terminal_of[i] for i in unrouted}
-        live_members = [m for mi, m in enumerate(forest.members)
-                        if mi not in unrouted_stub_idx and mi not in forest.dead]
-        members = joints.collect_members(live_members)
-        balls = joints.compute_joint_balls(live_members, plate_z, cfg)
+        members, balls = live_member_lists(forest, unrouted, plate_z, cfg)
         log[f"forest_pass{fix_pass}"] = dict(
             n_members=len(members), n_balls=len(balls), n_unrouted=len(unrouted))
-        # Verifier should-fix: n_unrouted was only ever visible nested
-        # inside forest_pass{N} (or by len()-ing the unrouted list
-        # yourself) -- surface it as its own top-level log key so a
-        # regression vs the frozen v3 baselines (fixtures_v3_baseline.json:
-        # table=2, toed_slab=1) shows up directly in test/log output
-        # without digging into a per-pass dict or a result list.
+        # Verifier should-fix: surface n_unrouted top-level so regressions
+        # vs the frozen baselines show up without digging.
         log["n_unrouted"] = len(unrouted)
 
         routed_contacts = [c for i, c in enumerate(contacts) if i not in unrouted]

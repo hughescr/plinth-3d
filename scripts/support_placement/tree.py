@@ -67,6 +67,17 @@ class Member:
         object.__setattr__(self, "r0", float(r0))
         object.__setattr__(self, "r1", float(r1))
 
+    def __getstate__(self):
+        """Pickle support (Treant-scale staged runs checkpoint the whole
+        Forest): dump slots raw; the Forest<->Member cycle is handled by
+        pickle's memo, and __setstate__ bypasses the guarded setattr
+        (which would otherwise fire before _forest exists)."""
+        return {s: object.__getattribute__(self, s) for s in self.__slots__}
+
+    def __setstate__(self, state):
+        for k, v in state.items():
+            object.__setattr__(self, k, v)
+
     def __setattr__(self, name, value):
         if name in _TRACKED_FIELDS:
             forest = object.__getattribute__(self, "_forest")
