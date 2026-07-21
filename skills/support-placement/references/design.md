@@ -266,7 +266,22 @@ uncovered).
    epistemics call for walking density/sizing against real print
    outcomes; that loop hasn't run yet because no v2-supported print has
    been made.
-4. **Pad geometry is cloned, not measured for the Treant's own feet.**
+4. **75/379 Treant minima unsupported (v3.6 measurement of #2's
+   residual).** The minima rule now measures the routing gap honestly:
+   75 birth islands have no routable support (canopy congestion; all
+   placement/bookkeeping verified correct). Attacks: real path planning
+   (multi-hop detours) per #2; per-minimum alternative contact
+   placements in the fix-pass loop (currently a minimum whose contact
+   proves unroutable is reported, never retried elsewhere in its birth
+   region); the 8 near-misses (routed contact 1.0-1.5mm from the birth
+   region) might yield to a slightly wider relocation search.
+5. **Stability-loop exhaustion corner (gate note, pre-existing):** if
+   the 3-iteration loop ends WITH drops in its final iteration,
+   made_braces built before the remap can carry stale trunk indices
+   into emission. Not observed in practice; fix by rebuilding braces
+   after any final-iteration drop.
+6. **engine.run(do_emit=) is dead** -- remove or implement.
+7. **Pad geometry is cloned, not measured for the Treant's own feet.**
    `place_pad` clones one template pad from the corpus and translates it
    -- foot diameter (4.4mm from the template) may be oversized or
    undersized for some of the Treant's smaller/larger tip classes;
@@ -373,6 +388,39 @@ X-pair 0.5^0.25 load-sharing discount, and the brace dict's i/j keys
 follow the geometry (p0 always on trunk i) so resize_for_spans'
 attachment bookkeeping stays truthful. Implemented by a Sonnet
 subagent to this spec; 86 tests green.
+
+### v3.6: Treant validation + gate review (session end)
+
+Workflow note (Craig): items implemented/validated via Sonnet subagents
+with a Fable verification gate at the end; gate verdict PASS WITH
+NOTES. Gate fixes applied: (a) bundled hub-fan shoots are re-sized with
+the angle-aware term for their NEW (up to 60deg) geometry, clearance
+re-checked at the final radius -- inheriting the 45deg-sized r0 was the
+one hole in the mandatory 60deg/angle-term pairing; (b) the Y-diagonal
+sizing exemption in coalesce_columns is now an explicit gate, not a
+comment (a raised trunk_branch_merge_xy_mm would have silently
+outgrown the margin past ~14mm).
+
+Treant v3.6: 641 contacts (354 island-sampled + 287 minima-added), 379
+minima detected, 470 routed supports on 119 trunks + 89 raft bridges,
+1398 joint balls across 644 owner records, ZERO clearance violations
+(the guarantee held through all of it), 171 honestly unrouted, 75/379
+minima unsupported. Diagnosis (subagent, exhaustive cross-reference):
+all 75 trace to contacts correctly placed AT the minimum that failed
+the final capsule-clearance gate after trunk relocation, solo retry,
+and strut fallback were exhausted -- 87% cluster in the canopy upper
+third; the few low ones have confirmed off-axis obstructions.
+Bookkeeping is perfect (0 routed-but-flagged cases). This is follow-up
+#2's path-planning residual measured honestly against the new minima
+rule, not a v3.6 defect. Minimum-birthed contacts fail routing at ~2x
+the ordinary rate (36% vs 19%) -- they sit exactly where geometry is
+hardest.
+
+Gate notes recorded as follow-ups (below): the fix-pass loop never
+retries unsupported minima with alternative placements; a stability
+loop that exhausts its 3 iterations WITH drops in the final iteration
+can carry stale brace trunk-indices into emission (pre-existing);
+engine.run's do_emit parameter is dead.
 
 ## Next-session queue (agreed with Craig, 2026-07-20 session end)
 

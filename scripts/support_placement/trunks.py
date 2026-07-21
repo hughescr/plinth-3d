@@ -483,6 +483,16 @@ def coalesce_columns(trunks, junctions_by_trunk, plate_z, surface_tree, cfg):
             saved_len = (z_start - plate_z) - diag_len
             if saved_len <= cfg.flare_len_mm:
                 continue  # not worth a scar-free but pointless merge
+            # Honest gate for the sizing exemption (gate review): the
+            # diagonal is emitted at the child column's radius; VERIFY
+            # that covers the angle-aware requirement rather than
+            # assuming it -- a raised trunk_branch_merge_xy_mm (~>14mm)
+            # would otherwise silently outgrow the margin.
+            from . import placement
+            if placement._shaft_r_for_L(
+                    diag_len, cfg, angle_from_vertical_deg=cfg.branch_angle_deg) \
+                    > max(child.r, cfg.min_trunk_r_mm) + 1e-9:
+                continue
             p_split = np.array([parent.xy[0], parent.xy[1], z_split])
             p_start = np.array([child.xy[0], child.xy[1], z_start])
             if not _segment_clear(surface_tree, p_split, p_start,
@@ -566,28 +576,47 @@ def bundle_shoots(routes, trunks, tip_r, plate_z, surface_tree, cfg):
             jp = np.array([trunk.xy[0], trunk.xy[1], jz])
             L_riser = float(np.linalg.norm(jp - hub))
             riser_lean = np.degrees(np.arctan2(d_tr, hub_z - jz))
-            r_members = [s.r0 for _, s, _ in cluster]
+            # v3.6 pairing rule (gate review): the fan shoots are re-aimed
+            # at up to branch_angle_deg, so each must carry the
+            # angle-aware peel sizing for its NEW geometry -- inheriting
+            # the 45deg-sized r0 undersizes the steep short runs. Never
+            # thinner than the original (monotone-safe for clearance is
+            # only true for shrinking; growth is re-checked below).
+            fans = []
+            for ri2, s, L in cluster:
+                v = hub - s.p0
+                L_fan = float(np.linalg.norm(v))
+                fan_lean = float(np.degrees(np.arctan2(
+                    np.linalg.norm(v[:2]), abs(v[2])))) if L_fan > 1e-9 else 0.0
+                r_fan = max(s.r0, placement._shaft_r_for_L(
+                    L_fan, cfg, angle_from_vertical_deg=fan_lean))
+                fans.append((ri2, s, L, L_fan, r_fan))
+            r_members = [f[4] for f in fans]
             r_riser = max(max(r_members),
                            placement._shaft_r_for_L(
                                L_riser, cfg, angle_from_vertical_deg=riser_lean)
                            * len(cluster) ** 0.125)
-            # clearance: riser, and each short fan shoot
+            # clearance: riser, and each short fan shoot AT ITS FINAL radius
             if not _segment_clear(surface_tree, hub, jp, r_riser, cfg):
                 continue
-            fans_ok = all(_segment_clear(surface_tree, s.p0, hub, s.r0, cfg,
+            fans_ok = all(_segment_clear(surface_tree, s.p0, hub, r_fan, cfg,
                                           skip_from_p0=cfg.standoff_mm)
-                          for _, s, _ in cluster)
+                          for _, s, _, _, r_fan in fans)
             if not fans_ok:
                 continue
             # resin gate: old parallel diagonals vs fan + shared riser
             vol_old = sum(np.pi * s.r0 ** 2 * L for _, s, L in cluster)
-            vol_new = (sum(np.pi * s.r0 ** 2 * float(np.linalg.norm(s.p0 - hub))
-                            for _, s, _ in cluster)
+            vol_new = (sum(np.pi * r_fan ** 2 * L_fan
+                            for _, _, _, L_fan, r_fan in fans)
                         + np.pi * r_riser ** 2 * L_riser)
             if vol_new >= vol_old:
                 continue
-            for ri2, s, _ in cluster:
+            for ri2, s, _, _, r_fan in fans:
                 s.p1 = hub.copy()  # short fan shoot to the collector
+                s.r0 = s.r1 = float(r_fan)
+                # keep the stub taper continuous into the (possibly
+                # fattened) fan shoot
+                routes[ri2].segments[0].r1 = float(r_fan)
             # hub ball sizing (fattest member meeting at the hub --
             # seventh review) is now the global joint pass's job
             # (joints.compute_joint_balls), at final radii
