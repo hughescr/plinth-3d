@@ -474,6 +474,38 @@ loop would theoretically pass; current builders cannot construct one)
 iterations on the real model (377 column-check failures across a run),
 worth a look when the routing residual is attacked.
 
+### Research spike: tree-construction literature (2026-07-21)
+
+Craig asked whether the iterative place-then-patch forest could be built
+more rigorously — a "descending front" from the model down to the plate,
+merging as it descends. Three-agent web-research spike (3D-print support
+literature; Steiner / branched-transport math; cross-domain network
+analogs). Full memo: `references/tree-construction-literature.md`.
+
+Headline: our task is formally a **constrained single-sink
+Gilbert–Steiner / branched-transport problem** (concave-in-load member
+cost + max-angle-from-vertical gradient cone + mesh obstacle). Optimal
+TOPOLOGY is NP-hard; the field universally does greedy/incremental build
++ local geometric relaxation + topology mutation. The parallel-column
+waste is the textbook greedy local-minimum artifact, and we do too
+little topology mutation, too late (`consolidate`/`coalesce` run once,
+before the stability loop; solo-retry founds columns nothing re-merges).
+Two closed-form laws to adopt: Xia's load-dependent junction angle
+(replaces the fixed 60°) and the Murray-law radius conservation
+`r_parent^4 = Σ r_child^4` (our own sizing rule restated). Closest prior
+art to read: Meshmixer branching (Schmidt & Umetani 2014, a literal
+descending-front queue), Clever Support (Vaněk 2014), Cura organic
+supports (per-radius avoidance field), CCO vascular-tree synthesis
+(cross-domain twin of our problem), OCN annealed rewiring (cleanup for
+exactly our parallel-column artifact). Our load-accumulating radii +
+build-time honesty + no-intersection/connectivity gates are ahead of
+every surveyed source — geometry is borrowable, the physics stays ours.
+
+Recommended: Tier 1 (surgical, keeps v3.x) — re-consolidate after the
+stability loop, join-first solo retry, OCN rewiring cleanup, Xia angle +
+Murray check. Tier 2 (if needed) — full descending-front CCO/Meshmixer
+rebuild behind the unchanged verify gates.
+
 ## Next-session queue (agreed with Craig, 2026-07-20 session end)
 
 1. ~~**Global joint-ball pass (Craig's design, replaces scattered per-call
