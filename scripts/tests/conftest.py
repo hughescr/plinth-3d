@@ -25,3 +25,8 @@ def table_mesh():
 @pytest.fixture
 def fin_mesh():
     return mesh_io.make_thin_fin()
+
+
+@pytest.fixture
+def toed_slab_mesh():
+    return mesh_io.make_toed_slab()

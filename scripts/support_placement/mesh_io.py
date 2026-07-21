@@ -59,6 +59,36 @@ def make_overhang_table(leg=(4, 4, 20), top=(30, 30, 4), z0=0.0):
     return trimesh.Trimesh(vertices=merged.vertices.copy(), faces=merged.faces.copy(), process=True)
 
 
+def make_toed_slab(top=(30, 30, 4), z_bottom=15.0):
+    """Synthetic fixture for the v3.6 layer-island minima rule: a high
+    slab with two downward cones hanging from its underside.
+
+      - shallow toe (r=3, h=4, apex z_bottom-4): flanks ~53deg from
+        horizontal, so its faces ARE down-facing overhang faces -- an
+        island the area model sees, but whose apex still births a layer
+        island no spacing-based contact necessarily pins;
+      - steep toe (r=1.5, h=6, apex z_bottom-6): flanks ~76deg, faces
+        only ~14deg below horizontal -- INVISIBLE to the overhang-angle
+        island model. Exactly the missed class the minima rule exists
+        for.
+    """
+    parts = []
+    slab = trimesh.creation.box(extents=top)
+    slab.apply_translation((0, 0, z_bottom + top[2] / 2))
+    parts.append(slab)
+    down = trimesh.transformations.rotation_matrix(np.pi, (1, 0, 0))
+    shallow = trimesh.creation.cone(radius=3.0, height=4.0)
+    shallow.apply_transform(down)
+    shallow.apply_translation((-8, 0, z_bottom))  # apex at z_bottom - 4
+    parts.append(shallow)
+    steep = trimesh.creation.cone(radius=1.5, height=6.0)
+    steep.apply_transform(down)
+    steep.apply_translation((8, 0, z_bottom))  # apex at z_bottom - 6
+    parts.append(steep)
+    merged = trimesh.util.concatenate(parts)
+    return trimesh.Trimesh(vertices=merged.vertices.copy(), faces=merged.faces.copy(), process=True)
+
+
 def make_thin_fin(base=(20, 20, 4), fin=(0.6, 10, 15), z0=0.0):
     """Synthetic fixture: a block with a thin fin sticking up -- for
     delicacy/thinness field tests."""

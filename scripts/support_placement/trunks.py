@@ -239,6 +239,18 @@ def consolidate(trunks, assignment, stub_ends, tip_r, surface_tree, cfg):
                 moves.append((i, jz))
             if not ok:
                 continue
+            # The survivor's column may need to GROW upward to reach the
+            # moved junctions -- plan()'s join path column-checks exactly
+            # this extension, and this merge path must too (v3.6 bug,
+            # found by the toed-slab minima fixture: six under-cone
+            # contacts merged onto one column that then ran straight
+            # through the cone apex; relocation can't serve them all from
+            # one xy, so the whole cluster dissolved to unrouted).
+            top_needed = max(jz for _, jz in moves)
+            if top_needed > sv.z_top and not _column_clear(
+                    surface_tree, sv.xy, sv.z_top, top_needed,
+                    max(sv.r, cfg.min_trunk_r_mm), cfg):
+                continue
             for i, jz in moves:
                 sv.shoots.append(i)
                 sv.z_top = max(sv.z_top, jz)

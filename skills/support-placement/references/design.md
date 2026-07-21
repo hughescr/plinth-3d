@@ -273,6 +273,43 @@ uncovered).
    continuous foot sizing (matching the continuous tip/shaft sizing this
    whole engine is built around) is unimplemented.
 
+### v3.6: layer-island minima directly supported (this session)
+
+Queue item 0 (Craig, TOP PRIORITY), upgraded mid-session by Craig from
+"contact within ~1mm" to a CONNECTION-TIME rule: proximity is the wrong
+metric; what matters is how many layers pass before a birth island
+connects to anything. Implemented as perception.local_z_minima:
+
+- every strict 1-ring local minimum (eps ties merge flat plateaus into
+  one representative) births a cross-section island;
+- a bounded flood inside the birth band [z_min - eps, z_min + tol]
+  (tol = minima_connect_layers * layer_height_mm, default 2 x 0.05mm)
+  exempts a minimum only if it reaches a strictly LOWER vertex --
+  earlier-printed material, inductively supported at its own birth by
+  the same rule. The lower vertex terminates the flood (traversing it
+  would flood the whole model below -- first implementation did, and
+  took minutes on the Treant instead of ~3s);
+- NO near-plate exemption (unlike grounded_mask's island rule): lifted
+  scenes make the model's own lowest point the FIRST island of the
+  print. Consequence, test-pinned: a flat-bottomed box honestly gets
+  one bottom-plateau contact ("box needs no supports" was a miss);
+- engine._ensure_minima_contacts adds a contact AT each unmet minimum
+  (synthetic islands for minima the overhang-angle model can't see --
+  steep-flank toes); verify.minima_report gates on ROUTED contacts
+  touching the birth region (min gap <= minima_contact_radius_mm) and
+  unsupported_minima is part of verify ok.
+
+Two engine bugs this fixture flushed out: (1) trunks.consolidate merged
+trunks and grew the survivor's column without the column-extension
+clearance check plan()'s join path has -- six under-cone contacts merged
+onto a column through the cone apex; (2) cluster dissolution was
+all-or-nothing -- when relocation can't serve every shoot from one xy,
+solvable singles died with the cluster. The stability loop now retries
+each shoot as a SOLO column (spiral search) before strut/unrouted.
+
+Treant: 379 minima detected in ~3s (median birth region 2 vertices,
+max 59); global-min rearmost toe at z=-63.98 caught.
+
 ## Next-session queue (agreed with Craig, 2026-07-20 session end)
 
 1. **Global joint-ball pass (Craig's design, replaces scattered per-call
@@ -294,8 +331,9 @@ uncovered).
 3. Twin-column merge improvement (doubled X-lattice between unmerged
    twins is cosmetic waste).
 
-0. **LOCAL Z-MINIMA MUST BE DIRECTLY SUPPORTED (Craig, session end --
-   TOP PRIORITY, correctness not optimization).** The rearmost toe case:
+0. ~~**LOCAL Z-MINIMA MUST BE DIRECTLY SUPPORTED (Craig, session end --
+   TOP PRIORITY, correctness not optimization).**~~ **DONE (v3.6 above;
+   spec upgraded by Craig to the layers-until-connection rule).** The rearmost toe case:
    a local minimum's first layers cure as a disconnected island stuck to
    the FEP (glob/tear risk) until something connects. The overhang-angle
    island model MISSES minima whose flanks are steeper than the 45deg

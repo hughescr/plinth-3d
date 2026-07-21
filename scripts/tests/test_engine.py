@@ -89,7 +89,31 @@ def test_engine_trunk_radius_meets_load_and_span_requirements(table_mesh, cfg):
             assert t.r >= min(r_need, cfg.max_trunk_r_mm) - 1e-6
 
 
-def test_engine_box_alone_needs_no_supports(box_mesh, cfg):
+def test_engine_box_gets_exactly_the_bottom_plateau_minimum(box_mesh, cfg):
+    """v3.6 revision of the old "box needs no supports" invariant: under
+    lift a flat bottom is the print's FIRST FEP island, so the honest
+    answer is one bottom-plateau minimum with one contact pinning it --
+    and nothing else."""
     result = engine.run(box_mesh, cfg)
-    assert result["contacts"] == []
-    assert result["verify"]["ok"]
+    assert result["log"]["minima"] == 1
+    assert len(result["contacts"]) == 1
+    assert result["contacts"][0].get("minimum") is True
+    assert result["verify"]["unsupported_minima"] == []
+    assert result["verify"]["ok"], result["verify"]
+
+
+def test_engine_supports_toe_minima_directly(toed_slab_mesh, cfg):
+    """The layer-island rule end to end: both toe apexes (including the
+    steep one the overhang-angle island model cannot see) end up with a
+    routed contact AT the birth region, with the no-intersection
+    guarantee intact."""
+    import numpy as np
+    result = engine.run(toed_slab_mesh, cfg)
+    assert result["verify"]["clearance_violations"] == [], result["verify"]
+    assert result["verify"]["unsupported_minima"] == []
+    routed = {r.contact_idx for r in result["routes"]}
+    for apex in (np.array([8.0, 0.0, 9.0]), np.array([-8.0, 0.0, 11.0])):
+        d = min(float(np.linalg.norm(
+            np.asarray(result["contacts"][i]["position"]) - apex))
+            for i in routed)
+        assert d <= cfg.minima_contact_radius_mm, (apex, d)

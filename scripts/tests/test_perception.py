@@ -66,6 +66,45 @@ def test_overhang_angle_threshold_matches_vertical_lean_convention(cfg):
         assert bool(down[0]) == expect_down, f"lean {lean_deg} expected down={expect_down}"
 
 
+def test_local_z_minima_finds_both_toe_apexes(toed_slab_mesh, cfg):
+    minima = perception.local_z_minima(toed_slab_mesh, cfg)
+    zs = np.array([m["z"] for m in minima])
+    # steep toe apex (z=9): flanks ~76deg from horizontal are INVISIBLE to
+    # the overhang-angle island model -- the minima rule must still see it
+    assert np.any(np.abs(zs - 9.0) < 1e-3), zs
+    # shallow toe apex (z=11)
+    assert np.any(np.abs(zs - 11.0) < 1e-3), zs
+    for m in minima:
+        # birth regions stay inside the connection band above their minimum
+        assert m["region_pts"][:, 2].max() <= m["z"] \
+            + cfg.minima_connect_layers * cfg.layer_height_mm + 1e-9
+
+
+def test_local_z_minima_no_near_plate_exemption(box_mesh, cfg):
+    # Under lift the model's own lowest point is the FIRST island of the
+    # whole print: a flat-bottomed box is one bottom-plateau minimum, one
+    # region (the tie-flood merges the whole plateau), honestly reported.
+    minima = perception.local_z_minima(box_mesh, cfg)
+    assert len(minima) == 1
+    assert abs(minima[0]["z"] - 0.0) < 1e-6
+
+
+def test_local_z_minima_flags_only_true_minima_on_tilted_box(cfg):
+    import trimesh
+    from support_placement import mesh_io
+    b = mesh_io.make_box(size=(20, 20, 4), translate=(0, 0, 10))
+    b.apply_transform(trimesh.transformations.rotation_matrix(
+        np.radians(5.0), (0, 1, 0), point=[0, 0, 12]))
+    b = trimesh.Trimesh(vertices=b.vertices.copy(), faces=b.faces.copy(), process=True)
+    minima = perception.local_z_minima(b, cfg)
+    # only the lowest edge of the tilted bottom face is a birth minimum
+    # (its two corners tie through the shared edge); the higher corners
+    # have lower neighbors and must NOT be flagged
+    assert len(minima) == 1
+    zs = b.vertices[:, 2]
+    assert abs(minima[0]["z"] - zs.min()) < 1e-6
+
+
 def test_delicacy_field_scores_thin_fin_higher_than_base(fin_mesh, cfg):
     points, normals, w, query = perception.delicacy_field(fin_mesh, cfg, n_samples=6000)
     fin_pts_mask = points[:, 2] > 6.0  # fin sits above the 4mm-tall base

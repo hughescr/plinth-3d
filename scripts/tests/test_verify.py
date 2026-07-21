@@ -64,6 +64,22 @@ def test_self_verify_ok_on_a_clean_small_case(table_mesh, cfg):
     assert report["load_violations"] == []
 
 
+def test_minima_report_requires_contact_at_birth_region_not_nearby(cfg):
+    """Craig's rule: lateral proximity is NOT support. A contact 1.5mm
+    away laterally (10+ layers above the island's birth on a shallow toe)
+    must NOT satisfy the minimum; a contact touching the birth region
+    must."""
+    minima = [dict(z=9.0, position=[8.0, 0.0, 9.0],
+                   region_pts=np.array([[8.0, 0.0, 9.0], [8.1, 0.0, 9.05]]))]
+    far = [dict(position=np.array([8.0, 1.5, 10.2]))]
+    at_min = [dict(position=np.array([8.05, 0.0, 9.02]))]
+    assert len(verify.minima_report(minima, far, cfg)) == 1
+    assert verify.minima_report(minima, at_min, cfg) == []
+    no_contacts = verify.minima_report(minima, [], cfg)
+    assert len(no_contacts) == 1 and no_contacts[0]["min_gap_mm"] == float("inf")
+    assert verify.minima_report([], at_min, cfg) == []
+
+
 def test_orientation_scar_cost_prefers_hiding_the_delicate_fin(fin_mesh, cfg):
     delicacy = perception.delicacy_field(fin_mesh, cfg, n_samples=6000)
     identity = np.eye(3)

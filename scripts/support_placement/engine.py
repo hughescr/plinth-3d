@@ -77,16 +77,27 @@ def run(mesh, cfg, max_fix_passes=3, log=None, do_emit=False):
     log["islands"] = len(islands)
     log["t_islands"] = round(time.time() - t0, 2)
 
+    # v3.6 (Craig, top priority): island-birth minima. Detected before
+    # sampling so every minimum the overhang-angle model missed (steep
+    # flanks) still ends up with a contact AT its birth region.
+    minima = perception.local_z_minima(mesh, cfg)
+    log["minima"] = len(minima)
+    log["t_minima"] = round(time.time() - t0, 2)
+
     contacts = placement.sample_candidates(mesh, islands, cfg)
     log["contacts_initial"] = len(contacts)
+    contacts, islands, n_min_added = _ensure_minima_contacts(
+        mesh, islands, contacts, minima, cfg)
+    log["minima_contacts_added"] = n_min_added
 
     if not contacts:
         log["t_total"] = round(time.time() - t0, 2)
         return dict(islands=islands, contacts=[], carried_area_mm2=np.array([]),
                     tip_r_mm=np.array([]), routes=[], braces=[], trunks=[],
                     plate_z=float(mesh.bounds[0][2]) - cfg.lift_mm, brace_graph=None,
+                    minima=minima,
                     verify=dict(ok=True, uncovered_islands=[], clearance_violations=[],
-                                load_violations=[]),
+                                load_violations=[], unsupported_minima=[]),
                     log=log)
 
     zmin = float(mesh.bounds[0][2])
@@ -211,6 +222,26 @@ def run(mesh, cfg, max_fix_passes=3, log=None, do_emit=False):
                     t.z_top = max(juncs.values())
                 else:
                     for i in list(t.shoots):
+                        # v3.6: dissolving a whole cluster because no ONE
+                        # xy serves every shoot loses solvable singles
+                        # (toed-slab fixture: the apex minimum's own
+                        # straight-down column was fine; it dissolved with
+                        # five doomed flank neighbors). Retry each shoot
+                        # as a solo column before strut/unrouted.
+                        solo = trunks_mod.Trunk(np.asarray(stub_ends[i][:2], float),
+                                                 stub_ends[i][2])
+                        solo.shoots = [i]
+                        solo.carried_mm2 = float(carried[i])
+                        solo.r = cfg.min_trunk_r_mm
+                        res2 = trunks_mod.relocate_trunk(
+                            solo, stub_ends, tip_r, plate_z, surface_tree, cfg)
+                        if res2 is not None:
+                            xy2, juncs2 = res2
+                            solo.xy = np.asarray(xy2, float)
+                            solo.z_top = max(juncs2.values())
+                            trunk_list.append(solo)
+                            assignment[i] = (len(trunk_list) - 1, juncs2[i], True)
+                            continue
                         r_shoot = max(float(tip_r[i]), cfg.min_shoot_r_mm)
                         anchor = trunks_mod.model_strut(
                             contacts[i], stub_ends[i], r_shoot,
@@ -416,12 +447,14 @@ def run(mesh, cfg, max_fix_passes=3, log=None, do_emit=False):
                 anchor_kind="plate", free_length_mm=0.0))
         routed_contacts = [c for i, c in enumerate(contacts) if i not in unrouted]
         report = verify.self_verify(mesh, islands, routed_contacts, routes + pseudo,
-                                     carried, tip_r, cfg, surface_tree=surface_tree)
+                                     carried, tip_r, cfg, surface_tree=surface_tree,
+                                     minima=minima)
         log[f"verify_pass{fix_pass}"] = dict(
             ok=report["ok"],
             n_uncovered=len(report["uncovered_islands"]),
             n_clearance_violations=len(report["clearance_violations"]),
             n_load_violations=len(report["load_violations"]),
+            n_unsupported_minima=len(report["unsupported_minima"]),
         )
         if report["ok"] or not report["uncovered_islands"]:
             break
@@ -440,9 +473,61 @@ def run(mesh, cfg, max_fix_passes=3, log=None, do_emit=False):
     return dict(
         islands=islands, contacts=contacts, carried_area_mm2=carried,
         tip_r_mm=tip_r, routes=routes, braces=made_braces, trunks=trunk_list,
-        risers=risers, unrouted=sorted(unrouted),
+        risers=risers, unrouted=sorted(unrouted), minima=minima,
         plate_z=plate_z, brace_graph=brace_graph, verify=report, log=log,
     )
+
+
+def _ensure_minima_contacts(mesh, islands, contacts, minima, cfg):
+    """v3.6: every island-birth minimum (perception.local_z_minima) gets a
+    contact touching its birth region unless one already does. A contact
+    merely NEAR the minimum does not count -- the satisfaction test is
+    distance to the birth-region vertices, which only spans the first
+    couple of layers of the island (Craig: what matters is how many layers
+    pass before the island connects, not lateral proximity).
+
+    Minima outside every overhang island (flanks steeper than the
+    down-facing test -- exactly the class the island model misses) get a
+    small synthetic island appended so load partition and coverage treat
+    them like any other region. Mutates neither input list in place;
+    returns (contacts, islands, n_added)."""
+    from scipy.spatial import cKDTree
+    if not minima:
+        return contacts, islands, 0
+    contacts = list(contacts)
+    islands = list(islands)
+    have = np.array([np.asarray(c["position"], float) for c in contacts]) \
+        if contacts else np.zeros((0, 3))
+    tree = cKDTree(have) if len(have) else None
+    face_island = -np.ones(len(mesh.faces), dtype=np.int64)
+    for iid, fids in enumerate(islands):
+        face_island[fids] = iid
+    centers_tree = cKDTree(mesh.triangles_center)
+    added = 0
+    for m in minima:
+        if tree is not None:
+            d, _ = tree.query(m["region_pts"],
+                              workers=routing.query_workers(len(m["region_pts"])))
+            if float(np.min(d)) <= cfg.minima_contact_radius_mm:
+                continue  # an existing contact already holds this birth island
+        near = centers_tree.query_ball_point(m["position"], r=1.5)
+        if not near:
+            _, nearest = centers_tree.query(m["position"])
+            near = [int(nearest)]
+        best = min(near, key=lambda f: float(
+            np.linalg.norm(mesh.triangles_center[f] - m["position"])))
+        if face_island[best] >= 0:
+            iid = int(face_island[best])
+        else:
+            fids = np.array(sorted(near), dtype=np.int64)
+            islands.append(fids)
+            iid = len(islands) - 1
+        area = float(mesh.area_faces[islands[iid]].sum())
+        contacts.append(dict(position=np.asarray(m["position"], float),
+                             normal=np.asarray(m["normal"], float),
+                             island_id=iid, area_mm2=area, minimum=True))
+        added += 1
+    return contacts, islands, added
 
 
 def _filter_clear_braces(braces, mesh, cfg, surface_tree):

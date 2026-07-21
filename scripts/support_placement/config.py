@@ -254,6 +254,33 @@ class SupportConfig:
     # Thickness at/below this counts as maximally thin (weight saturates).
     thin_feature_mm: float = 1.5
 
+    # ---- Local z-minima / layer-island birth support (v3.6, Craig:
+    # TOP PRIORITY correctness) ----
+    # Every local minimum of the surface height function births a new
+    # cross-section island: its first layers cure as a disconnected patch
+    # stuck to the FEP (glob/tear risk) until the growing island either
+    # merges with earlier-printed material or meets a support tip. The
+    # overhang-angle island model MISSES minima whose flanks are steeper
+    # than the down-facing test, and spacing-based coverage allows the
+    # nearest contact millimetres away laterally -- useless for a layer
+    # island (Craig: proximity is the wrong metric; what matters is how
+    # many LAYERS pass before the island connects to anything).
+    # Print layer height for this printer profile (Saturn 4 Ultra @ 50um).
+    layer_height_mm: float = 0.05
+    # A minimum is exempt only if its birth island connects to strictly
+    # lower (earlier-printed, inductively-supported) material within this
+    # many layers of its birth; otherwise it must have a routed contact
+    # touching the birth region itself.
+    minima_connect_layers: float = 2.0
+    # Tie tolerance for flat plateaus (vertices within this of each other
+    # count as one minimum plateau, one representative). Sub-layer scale.
+    minima_eps_mm: float = 0.02
+    # Discretization slack when testing whether a contact touches a birth
+    # region (contact points are face samples, regions are vertex sets).
+    # This is NOT a coverage radius -- the region itself encodes the
+    # 1-2-layer connection rule; this only absorbs sampling gaps.
+    minima_contact_radius_mm: float = 1.0
+
     # ---- Self-verify (design.md #9) ----
     # An island counts as "still unsupported" if any of its faces sits
     # farther than this multiple of target_spacing from the nearest

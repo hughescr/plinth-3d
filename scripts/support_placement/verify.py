@@ -77,19 +77,52 @@ def load_report(carried_area_mm2, tip_r_mm, cfg):
     return out
 
 
+def minima_report(minima, routed_contacts, cfg):
+    """Layer-island check (v3.6, Craig's rule): every island-birth
+    minimum (perception.local_z_minima -- already filtered to the ones
+    that do NOT connect to earlier-printed material within the layer
+    tolerance) must have a ROUTED contact touching its birth region.
+    Proximity elsewhere on the model does not count: a contact 1mm away
+    laterally on a shallow toe is 10+ layers above the island's birth.
+    Returns the unsupported minima as dicts {z, position, min_gap_mm}."""
+    if not minima:
+        return []
+    out = []
+    positions = np.array([np.asarray(c["position"], float)
+                          for c in routed_contacts]) if routed_contacts else None
+    tree = cKDTree(positions) if positions is not None and len(positions) else None
+    for m in minima:
+        if tree is None:
+            out.append(dict(z=m["z"], position=np.asarray(m["position"]).tolist(),
+                            min_gap_mm=float("inf")))
+            continue
+        dist, _ = tree.query(m["region_pts"],
+                             workers=routing.query_workers(len(m["region_pts"])))
+        gap = float(np.min(dist))
+        if gap > cfg.minima_contact_radius_mm:
+            out.append(dict(z=m["z"], position=np.asarray(m["position"]).tolist(),
+                            min_gap_mm=gap))
+    return out
+
+
 def self_verify(mesh, islands, contacts, routes, carried_area_mm2, tip_r_mm, cfg,
-                 surface_tree=None):
+                 surface_tree=None, minima=None):
     """Full design.md #9 gate. Returns a report dict; `ok` is True only if
-    all three checks are clean."""
+    all four checks are clean (coverage, clearance, load, layer-island
+    minima -- the last only when the caller supplies the minima list from
+    perception.local_z_minima; engine.run always does)."""
     coverage = coverage_report(mesh, islands, contacts, cfg)
     clearance = clearance_report(mesh, routes, cfg, surface_tree=surface_tree)
     load = load_report(carried_area_mm2, tip_r_mm, cfg)
+    unsupported_minima = minima_report(minima, contacts, cfg) if minima is not None else []
     uncovered = [c for c in coverage if not c["covered"]]
     return dict(
-        ok=(len(uncovered) == 0 and len(clearance) == 0 and len(load) == 0),
+        ok=(len(uncovered) == 0 and len(clearance) == 0 and len(load) == 0
+            and len(unsupported_minima) == 0),
         uncovered_islands=uncovered,
         clearance_violations=clearance,
         load_violations=load,
+        unsupported_minima=unsupported_minima,
     )
 
 

@@ -142,6 +142,113 @@ def overhang_islands(mesh, cfg):
     return islands
 
 
+def local_z_minima(mesh, cfg):
+    """Island-birth minima that need direct support (v3.6, Craig's rule).
+
+    A local minimum of the surface height function births a new
+    cross-section island at its own z: those first layers are a
+    disconnected patch curing onto the FEP until the island merges with
+    something. Lateral proximity of a contact is NOT support -- on a
+    shallow toe, a contact 1mm away laterally is 10+ layers above the
+    island's birth. The test that matters is CONNECTION TIME, in layers.
+
+    Method (per-minimum bounded flood, not full Morse persistence -- we
+    only ever need to resolve "connects within tol", so each flood stays
+    inside a tol-height band and regions are tiny except on plateaus,
+    where sharing one region is exactly right):
+      1. candidates: vertices no 1-ring neighbor undercuts by more than
+         minima_eps_mm (eps admits flat-plateau ties);
+      2. flood from each candidate (ascending z, visited-deduped) over
+         mesh vertex adjacency restricted to z <= z_min + tol, where
+         tol = minima_connect_layers * layer_height_mm;
+      3. if the flooded region reaches a vertex strictly LOWER than the
+         minimum (earlier-printed material -- inductively supported at
+         its own birth by this same rule), the island connects within
+         tol layers of birth: exempt.
+
+    There is deliberately NO near-plate exemption here (unlike
+    grounded_mask's island rule): the engine's scenes are lifted, so the
+    model's own lowest point is the FIRST island of the entire print --
+    exempting it would miss the flagship rearmost-toe case. A flat-
+    bottomed model therefore honestly gets one contact on its bottom
+    plateau.
+
+    The returned birth region doubles as the support test: a minimum is
+    satisfied only by a routed contact within minima_contact_radius_mm of
+    its birth-region vertices (for a sharp toe that means AT the tip; for
+    a flat plateau, anywhere on the plateau -- the whole plateau is one
+    birth island and one contact holds all of it at birth).
+
+    The mesh is vertex-welded on a local copy first (mesh_io deliberately
+    loads process=False to keep caller-facing indices stable; an unwelded
+    STL triangle soup has no cross-face vertex adjacency and would flood
+    nothing). Region data is therefore returned as POSITIONS, not indices
+    into the caller's mesh. Returns list of dicts, ascending z:
+    {position, normal, z, region_pts} (region_pts = (N,3) float array).
+    """
+    import trimesh
+    mw = trimesh.Trimesh(vertices=np.asarray(mesh.vertices).copy(),
+                         faces=np.asarray(mesh.faces).copy(), process=True)
+    z = mw.vertices[:, 2]
+    nv = len(z)
+    eps = cfg.minima_eps_mm
+    tol = cfg.minima_connect_layers * cfg.layer_height_mm
+    edges = mw.edges_unique
+    if len(edges) == 0:
+        return []
+
+    # neighbor-min z per vertex (vectorized over the edge list)
+    nmin = np.full(nv, np.inf)
+    np.minimum.at(nmin, edges[:, 0], z[edges[:, 1]])
+    np.minimum.at(nmin, edges[:, 1], z[edges[:, 0]])
+    cand = np.nonzero(z <= nmin + eps)[0]
+    if len(cand) == 0:
+        return []
+
+    # CSR adjacency for the floods
+    e2 = np.concatenate([edges, edges[:, ::-1]])
+    order = np.argsort(e2[:, 0], kind="stable")
+    src = e2[order, 0]
+    dst = e2[order, 1]
+    starts = np.searchsorted(src, np.arange(nv + 1))
+
+    visited = np.zeros(nv, dtype=bool)
+    out = []
+    for v in cand[np.argsort(z[cand], kind="stable")]:
+        if visited[v]:
+            continue
+        z_v = z[v]
+        lid = z_v + tol
+        # bounded BFS strictly inside the birth band [z_v - eps, z_v + tol]:
+        # a strictly-lower neighbor IS the connection event (earlier-born
+        # material) and terminates the flood -- it must not be traversed,
+        # or a connecting region would flood the whole model below it.
+        region = [v]
+        seen = {int(v)}
+        stack = [int(v)]
+        connects = False
+        while stack and not connects:
+            u = stack.pop()
+            for w in dst[starts[u]:starts[u + 1]]:
+                w = int(w)
+                if w in seen or z[w] > lid:
+                    continue
+                if z[w] < z_v - eps:
+                    connects = True
+                    break
+                seen.add(w)
+                region.append(w)
+                stack.append(w)
+        region = np.array(region, dtype=np.int64)
+        visited[region] = True
+        if connects:
+            continue  # merges with earlier-printed material within tol
+        out.append(dict(position=mw.vertices[v].copy(),
+                        normal=np.asarray(mw.vertex_normals[v], float).copy(),
+                        z=float(z_v), region_pts=mw.vertices[region].copy()))
+    return out
+
+
 def delicacy_field(mesh, cfg, n_samples=20000, seed=0):
     """Scar-cost / delicacy weight in [0, 1] per surface sample point,
     returned as (sample_points, sample_normals, weights, query) where
@@ -159,7 +266,10 @@ def delicacy_field(mesh, cfg, n_samples=20000, seed=0):
     """
     from scipy.spatial import cKDTree
 
-    rng = np.random.default_rng(seed)
+    # trimesh's sample() draws from the GLOBAL numpy random state (see
+    # placement.sample_candidates' identical note) -- seed it explicitly
+    # or this field silently varies with whatever ran before it.
+    np.random.seed(seed)
     n = min(n_samples, max(2000, len(mesh.faces)))
     points, face_idx = mesh.sample(n, return_index=True)
     normals = mesh.face_normals[face_idx]
