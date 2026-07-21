@@ -22,7 +22,7 @@ import time
 import pickle
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-from support_placement import mesh_io, config, engine, chitubox_emit as ce
+from support_placement import mesh_io, config, engine, chitubox_emit as ce, joints
 import chitubox_inject as ci
 import numpy as np
 
@@ -80,34 +80,39 @@ def stage_emit():
     next_off = proj.mesh_off + proj.mesh_size
     new_records = []
 
-    # per-contact chains: contact ball + tip cone, elbow ball, diagonal
-    # shoot, junction ball (trunk-attached; no per-contact pads)
-    for route, r in zip(routes, tip_r):
-        r_shoot = next((s.r0 for s in route.segments if s.kind == "shoot"),
-                        float(r))
-        hub_r = getattr(route, "hub_ball_r", None)
-        if hub_r is not None:
-            joint_r = hub_r  # bundled: ball matches the riser at the hub
-        elif route.trunk_idx is not None:
-            joint_r = trunks[route.trunk_idx].r
-        else:
-            # model-anchored strut: adsorbed foot ball, slightly larger
-            # than the rod for adhesion (no trunk to size against)
-            joint_r = float(r_shoot) * 1.4
-        chain = ce.synth_v3_support(route, r_tip=float(r), r_shoot=float(r_shoot),
-                                     trunk_r=joint_r, cfg=cfg, next_off=next_off)
+    # v3.6 global joint pass: ONE ball per joint, sized to the fattest
+    # member touching it, computed at final radii and attached to each
+    # owner record's blob (record count/grouping unchanged).
+    risers = state.get("risers", [])
+    ball_map = joints.balls_by_owner(joints.compute_joint_balls(
+        routes, trunks, risers, braces, plate_z, cfg))
+    print(f"joint pass: {sum(len(v) for v in ball_map.values())} balls "
+          f"across {len(ball_map)} owner records")
+
+    # per-contact chains: contact ball + tip cone + diagonal shoot rod
+    # (trunk-attached; no per-contact pads). tip_r is indexed by CONTACT,
+    # routes exclude unrouted contacts -- look up via contact_idx.
+    for ri, route in enumerate(routes):
+        r = float(tip_r[route.contact_idx])
+        r_shoot = next((s.r0 for s in route.segments if s.kind == "shoot"), r)
+        chain = ce.synth_v3_support(route, r_tip=r, r_shoot=float(r_shoot),
+                                     cfg=cfg, next_off=next_off,
+                                     extra_balls=ball_map.get(("route", ri), ()))
         for rec, blob in chain:
             new_records.append((rec, blob))
             next_off += len(blob)
 
-    # trunks: flare + column + dome (plate) or Y-diagonal + column
-    # (branch); pads only at PLATE trunk feet
+    # trunks: flare + column (plate) or Y-diagonal + column (branch);
+    # joint balls on this axis ride in the column blob; pads only at
+    # PLATE trunk feet
     pad_xy = []
-    for trunk in trunks:
+    for ti, trunk in enumerate(trunks):
         parent_xy = (trunks[trunk.parent_idx].xy
                      if trunk.foot_kind == "branch" and trunk.parent_idx is not None
                      else None)
-        chain = ce.synth_v3_trunk(trunk, plate_z, cfg, next_off, parent_xy=parent_xy)
+        chain = ce.synth_v3_trunk(trunk, plate_z, cfg, next_off,
+                                   parent_xy=parent_xy,
+                                   extra_balls=ball_map.get(("trunk", ti), ()))
         for rec, blob in chain:
             new_records.append((rec, blob))
             next_off += len(blob)
@@ -117,15 +122,17 @@ def stage_emit():
             next_off += len(pad_blob)
             pad_xy.append(np.asarray(trunk.xy, float))
 
-    # shared risers from shoot bundling: rod + end balls
-    for rs in state.get("risers", []):
-        rec, blob = ce.brace_record(rs, next_off, cfg)
+    # shared risers from shoot bundling
+    for ki, rs in enumerate(risers):
+        rec, blob = ce.brace_record(rs, next_off, cfg,
+                                     extra_balls=ball_map.get(("riser", ki), ()))
         new_records.append((rec, blob))
         next_off += len(blob)
 
-    for brace in braces:
+    for bi, brace in enumerate(braces):
         # brace dict indices are trunk ids; geometry is already absolute
-        rec, blob = ce.brace_record(brace, next_off, cfg)
+        rec, blob = ce.brace_record(brace, next_off, cfg,
+                                     extra_balls=ball_map.get(("brace", bi), ()))
         new_records.append((rec, blob))
         next_off += len(blob)
 

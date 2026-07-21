@@ -143,11 +143,19 @@ def sphere_mesh(center, r, n_lat=8, n_lon=16):
     return out
 
 
-def synth_v3_support(route, r_tip, r_shoot, trunk_r, cfg, next_off):
+def _ball_meshes(extra_balls):
+    return [sphere_mesh(c, r) for c, r in (extra_balls or [])]
+
+
+def synth_v3_support(route, r_tip, r_shoot, cfg, next_off, extra_balls=()):
     """v3 per-contact chain: spherical CONTACT BALL merged into the tip
-    cone blob (removal-friendly point contact), elbow ball where the stub
-    meets the shoot, diagonal shoot, junction ball where the shoot meets
-    its trunk. Returns (record, blob) pairs."""
+    cone blob (removal-friendly point contact) + diagonal shoot rod.
+
+    v3.6: joint balls (elbow, junction, hub, strut foot) are no longer
+    embedded here -- the global joint pass (joints.compute_joint_balls)
+    sizes ONE ball per joint at final radii and hands this route's share
+    in via `extra_balls` [(center, r), ...]; they are appended to the
+    last segment record's blob. Returns (record, blob) pairs."""
     out = []
     off = next_off
     segs = route.segments
@@ -155,28 +163,33 @@ def synth_v3_support(route, r_tip, r_shoot, trunk_r, cfg, next_off):
     ball_r = cfg.tip_ball_r_factor * r_tip
     tip_ball = sphere_mesh(stub.p0, ball_r)
     tip_cone = frustum_mesh(stub.p0, stub.p1, r_tip, r_shoot)
-    blob = np.concatenate([tip_ball, tip_cone])
-    out.append((build_record(ci.T_TIP, stub.p0, stub.p1, r_tip, r_shoot,
-                              off, blob.nbytes, cfg), blob.tobytes()))
-    off += blob.nbytes
+    parts = [np.concatenate([tip_ball, tip_cone])]
+    recs_meta = [(ci.T_TIP, stub.p0, stub.p1, r_tip, r_shoot)]
     for seg in segs[1:]:
         if seg.kind != "shoot":
             continue
-        elbow = sphere_mesh(seg.p0, cfg.joint_ball_factor * r_shoot)
-        rod = frustum_mesh(seg.p0, seg.p1, r_shoot, r_shoot)
-        junction = sphere_mesh(seg.p1, cfg.joint_ball_factor * max(r_shoot, trunk_r))
-        blob = np.concatenate([elbow, rod, junction])
-        out.append((build_record(ci.T_SHAFT, seg.p0, seg.p1, r_shoot, r_shoot,
+        parts.append(frustum_mesh(seg.p0, seg.p1, seg.r0, seg.r1))
+        recs_meta.append((ci.T_SHAFT, seg.p0, seg.p1, seg.r0, seg.r1))
+    balls = _ball_meshes(extra_balls)
+    if balls:
+        parts[-1] = np.concatenate([parts[-1]] + balls)
+    for (tid, p0, p1, r0, r1), blob in zip(recs_meta, parts):
+        out.append((build_record(tid, p0, p1, r0, r1,
                                   off, blob.nbytes, cfg), blob.tobytes()))
         off += blob.nbytes
     return out
 
 
-def synth_v3_trunk(trunk, plate_z, cfg, next_off, parent_xy=None):
-    """v3 trunk: conical foot flare at the pad, constant-radius column,
-    domed top. v3.5 branch trunks instead sprout from their parent via a
-    45-degree Y diagonal (ball at the split), no flare/pad. Returns
-    (record, blob) pairs; plate pads are cloned separately."""
+def synth_v3_trunk(trunk, plate_z, cfg, next_off, parent_xy=None, extra_balls=()):
+    """v3 trunk: conical foot flare at the pad + constant-radius column.
+    v3.5 branch trunks instead sprout from their parent via a 45-degree
+    Y diagonal, no flare/pad.
+
+    v3.6: the top dome and the Y-split ball are no longer embedded here
+    -- they are joints, owned by the global joint pass, which passes this
+    trunk's balls (top joint, mid-column junction balls, brace-end balls
+    on this axis...) via `extra_balls`; appended to the column blob.
+    Returns (record, blob) pairs; plate pads are cloned separately."""
     out = []
     off = next_off
     xy = trunk.xy
@@ -184,12 +197,10 @@ def synth_v3_trunk(trunk, plate_z, cfg, next_off, parent_xy=None):
     if trunk.foot_kind == "branch" and parent_xy is not None:
         p_split = np.array([parent_xy[0], parent_xy[1], trunk.z_split])
         p_start = np.array([xy[0], xy[1], trunk.z_start])
-        ball = sphere_mesh(p_split, cfg.joint_ball_factor * trunk.r)
         diag = frustum_mesh(p_split, p_start, trunk.r, trunk.r)
-        blob = np.concatenate([ball, diag])
         out.append((build_record(ci.T_JOINER, p_split, p_start, trunk.r, trunk.r,
-                                  off, blob.nbytes, cfg), blob.tobytes()))
-        off += blob.nbytes
+                                  off, diag.nbytes, cfg), diag.tobytes()))
+        off += diag.nbytes
         p_col0 = p_start
     else:
         p_plate = np.array([xy[0], xy[1], plate_z])
@@ -199,9 +210,9 @@ def synth_v3_trunk(trunk, plate_z, cfg, next_off, parent_xy=None):
                                   cfg.flare_r_factor * trunk.r, trunk.r,
                                   off, flare.nbytes, cfg), flare.tobytes()))
         off += flare.nbytes
-    shaft = frustum_mesh(p_col0, p_top, trunk.r, trunk.r)
-    dome = sphere_mesh(p_top, cfg.joint_ball_factor * trunk.r)
-    blob = np.concatenate([shaft, dome])
+    parts = [frustum_mesh(p_col0, p_top, trunk.r, trunk.r)]
+    parts += _ball_meshes(extra_balls)
+    blob = np.concatenate(parts)
     out.append((build_record(ci.T_SHAFT, p_col0, p_top, trunk.r, trunk.r,
                               off, blob.nbytes, cfg), blob.tobytes()))
     off += blob.nbytes
@@ -268,14 +279,17 @@ def synth_chain_records(route, r_tip, r_shaft, next_off, cfg):
     return out
 
 
-def brace_record(brace, next_off, cfg):
+def brace_record(brace, next_off, cfg, extra_balls=()):
     """A brace is a constant-radius joiner rod between two trunk columns
-    (v3: 45-degree diagonals in crossed X pairs, never horizontal), with
-    small balls at both ends so the angled joins are solid."""
-    rod = frustum_mesh(brace["p0"], brace["p1"], brace["r"], brace["r"])
-    b0 = sphere_mesh(brace["p0"], cfg.joint_ball_factor * brace["r"])
-    b1 = sphere_mesh(brace["p1"], cfg.joint_ball_factor * brace["r"])
-    blob = np.concatenate([rod, b0, b1])
+    (v3: 45-degree diagonals in crossed X pairs, never horizontal).
+
+    v3.6: end balls come from the global joint pass via `extra_balls`
+    (one deduped ball per joint, sized to the fattest member there --
+    the old per-rod pair doubled spheres at shared endpoints and
+    undersized them against fattened trunks)."""
+    parts = [frustum_mesh(brace["p0"], brace["p1"], brace["r"], brace["r"])]
+    parts += _ball_meshes(extra_balls)
+    blob = np.concatenate(parts)
     rec = build_record(ci.T_JOINER, brace["p0"], brace["p1"], brace["r"], brace["r"],
                         next_off, blob.nbytes, cfg)
     return rec, blob.tobytes()

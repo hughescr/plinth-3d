@@ -520,10 +520,9 @@ def bundle_shoots(routes, trunks, tip_r, plate_z, surface_tree, cfg):
                 continue
             for ri2, s, _ in cluster:
                 s.p1 = hub.copy()  # short fan shoot to the collector
-                # hub ball must match the FATTEST member meeting there
-                # (seventh review: sizing it by the distant trunk left a
-                # ball smaller than the riser rod -- a gapped joint)
-                routes[ri2].hub_ball_r = float(max(r_riser, s.r0))
+            # hub ball sizing (fattest member meeting at the hub --
+            # seventh review) is now the global joint pass's job
+            # (joints.compute_joint_balls), at final radii
             risers.append(dict(p0=hub, p1=jp, r=float(r_riser), trunk_idx=t_idx,
                                 saved_mm3=float(vol_old - vol_new)))
     # bundled trunks: junctions moved to the riser attach point, so the

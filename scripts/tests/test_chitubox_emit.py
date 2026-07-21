@@ -99,29 +99,44 @@ def test_sphere_mesh_is_watertight_with_sphere_volume(cfg):
     assert 0.90 * exact < m.volume <= exact
 
 
-def test_v3_support_chain_has_contact_ball_and_junction_ball(cfg):
+def _v3_route():
     from support_placement import routing as rt
     seg_stub = rt.Segment(np.array([0.0, 0.0, 10.0]), np.array([0.0, 0.0, 12.5]),
                            0.3, 0.4, "stub", embedded_p0=True)
     seg_shoot = rt.Segment(np.array([0.0, 0.0, 12.5]), np.array([4.0, 0.0, 8.5]),
                             0.4, 0.4, "shoot")
-    route = rt.Route(contact_idx=0, segments=[seg_stub, seg_shoot],
-                      anchor_kind="trunk", free_length_mm=8.0)
-    recs = ce.synth_v3_support(route, r_tip=0.3, r_shoot=0.4, trunk_r=1.2,
-                                cfg=cfg, next_off=0)
+    return rt.Route(contact_idx=0, segments=[seg_stub, seg_shoot],
+                     anchor_kind="trunk", free_length_mm=8.0)
+
+
+def test_v3_support_chain_has_contact_ball_and_bare_rod(cfg):
+    """v3.6: the contact ball stays (it is a contact, not a joint); the
+    per-member elbow/junction balls are gone -- joint balls arrive only
+    via extra_balls from the global joint pass."""
+    route = _v3_route()
+    recs = ce.synth_v3_support(route, r_tip=0.3, r_shoot=0.4, cfg=cfg, next_off=0)
     assert len(recs) == 2
-    # tip blob must contain triangles reaching a full ball radius BELOW
-    # the contact point (the contact sphere), not just the cone
     tip_blob = np.frombuffer(recs[0][1], "<f4").reshape(-1, 3)
     ball_r = cfg.tip_ball_r_factor * 0.3
     assert tip_blob[:, 2].min() <= 10.0 - 0.8 * ball_r
-    # shoot blob must contain the junction ball (triangles beyond the rod
-    # end by ~ball radius, sized by the TRUNK radius since trunk_r > r_shoot)
+    # bare rod: nothing in the shoot blob may extend beyond the rod ends
+    # by more than the rod radius (no embedded junction sphere)
     shoot_blob = np.frombuffer(recs[1][1], "<f4").reshape(-1, 3)
-    jball = cfg.joint_ball_factor * 1.2
-    d_from_junction = np.linalg.norm(shoot_blob - np.array([4.0, 0.0, 8.5]), axis=1)
-    assert (d_from_junction <= jball + 1e-4).any()
-    assert shoot_blob[:, 2].min() <= 8.5 - 0.8 * jball
+    assert shoot_blob[:, 2].min() >= 8.5 - 0.4 - 1e-4
+
+
+def test_v3_support_chain_carries_global_joint_balls(cfg):
+    route = _v3_route()
+    junction = np.array([4.0, 0.0, 8.5])
+    recs = ce.synth_v3_support(route, r_tip=0.3, r_shoot=0.4, cfg=cfg, next_off=0,
+                                extra_balls=[(junction, 1.2)])
+    shoot_blob = np.frombuffer(recs[1][1], "<f4").reshape(-1, 3)
+    d = np.linalg.norm(shoot_blob - junction, axis=1)
+    assert (d <= 1.2 + 1e-4).any()
+    assert shoot_blob[:, 2].min() <= 8.5 - 0.8 * 1.2
+    # record metadata still describes the rod, not the balls
+    rec = ci.Record(recs[1][0])
+    assert np.allclose(rec.end, junction)
 
 
 def test_v3_trunk_has_flare_wider_than_column(cfg):

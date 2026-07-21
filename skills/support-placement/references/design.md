@@ -310,10 +310,32 @@ each shoot as a SOLO column (spiral search) before strut/unrouted.
 Treant: 379 minima detected in ~3s (median birth region 2 vertices,
 max 59); global-min rearmost toe at z=-63.98 caught.
 
+### v3.6: global joint-ball pass (queue item 1, Craig's design)
+
+joints.py replaces every per-call embedded ball (elbow/junction balls in
+synth_v3_support, dome + Y-split ball in synth_v3_trunk, end balls in
+brace_record, bundle_shoots' hub_ball_r). After ALL geometry and radii
+are final: collect every member; cluster joint points (endpoint
+coincidence within 0.15mm, PLUS on-axis proximity 0.2mm for balls
+landing mid-member -- shoot junctions on trunk columns, rung ends on
+sibling shoots); emit exactly ONE ball per joint sized to the FATTEST
+member touching it. Kills the gapped-undersized-ball class (e.g. the
+Y-split ball was sized by the CHILD; the parent column through the
+joint can be fatter) and dedups the doubled X-brace endpoint spheres.
+
+Ball ownership: each ball is appended into the fattest touching
+member's record blob, so record count and Chitubox grouping are
+unchanged. Conventions kept: the tip contact ball is a contact, not a
+joint (stays in synth_v3_support); a lone model-embedded strut foot
+keeps the 1.4x adhesion fillet. Also fixed in passing: stage_emit
+zipped routes with tip_r, but routes exclude unrouted contacts -- tip
+radii after the first unrouted index were off by one; now looked up by
+route.contact_idx.
+
 ## Next-session queue (agreed with Craig, 2026-07-20 session end)
 
-1. **Global joint-ball pass (Craig's design, replaces scattered per-call
-   sizing).** After ALL geometry and radii are final: collect every
+1. ~~**Global joint-ball pass (Craig's design, replaces scattered per-call
+   sizing).**~~ **DONE (v3.6 above).** After ALL geometry and radii are final: collect every
    member (stubs, shoots, trunk columns, Y-diagonals, risers, braces,
    rungs); cluster joint points (endpoint coincidence within tolerance,
    PLUS on-axis proximity for balls landing mid-column on a trunk or
