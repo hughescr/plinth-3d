@@ -59,6 +59,29 @@ transient.transient_report already computes -- no span math happens
 here, only the height-spread arithmetic (identical n_rungs formula) and
 the height->host mapping.
 
+SPEC-151-SCOPING round 2 (the table unblocker, layer 2 -- shared-interval
+trigger drop): Pass 2's dedup (below) can find that a JUST-COMPUTED
+trigger's own (target, z) height collides with an ALREADY-CLAIMED height
+on the same target, genuinely inside its own winning interval (unlike the
+round-1/P2-polish case, b7222de, where the colliding claim sat OUTSIDE
+the second trigger's own interval and was rightly still attempted). The
+pre-round-2 code treated same-target/in-interval collision as proof of
+relief and silently DROPPED the second trigger's request -- but a shared
+rung height does not shrink two different members' arms by the same
+amount (each member's own contribution is `hi - max(z_min(M), R)`, and
+z_min(M) differs per member), so "the first trigger's claim relieves the
+second" is an assumption, not a fact. THE INVARIANT: a member that
+triggers in the current spans_report is by definition not relieved --
+dedup may merge PLACEMENTS, it must never skip VERIFICATION. Fix: such a
+collision now MERGES (never drops) -- the second trigger's own member_idx
+is appended to the existing request's carried-trigger list (sorted,
+deterministic), and its own independently-computed candidate positions
+(_path_fallback_candidates over ITS OWN path/interval) are folded into
+the SAME request's fallback pool, so propose_and_place's stacking loop
+(see its own docstring) tries every carried trigger's own path candidates
+and re-verifies EVERY carried trigger with the real transient math before
+it may stop stacking -- never just the first (dict-order) one.
+
 Backward-compatible degenerate case (recorded design decision): when
 `worst_span_path` is absent/empty or has length <= 1 (either a
 legacy/hand-built spans_report that never set the new fields -- every
@@ -157,15 +180,38 @@ def compute_needs(forest, spans_report, cfg):
     gap by (n_rungs+1), so two separate requests against the identical
     band would place overlapping/duplicate rungs at different offsets.
 
-    Returns an ordered list of (member_idx, z_lo, z_hi, n_rungs) requests
-    for n_rungs >= 1, sorted by (member_idx, z_lo) -- deterministic
-    regardless of spans_report's own iteration/dict order."""
+    Path-level dedup (SPEC-151-SCOPING round 2, see module docstring for
+    the full invariant): when a generalized path-mapped trigger's own
+    computed (target, z) collides (within cfg.brace_ladder_z_mm/2) with
+    an existing claim on the SAME target that already falls inside THIS
+    trigger's own winning interval, the two triggers are MERGED into ONE
+    physical request -- carrying BOTH member indices (sorted, in the
+    request's trailing element, a tuple when 2+, a bare int when exactly
+    1, `None` for a static/degenerate request -- unchanged shape for
+    every pre-round-2 caller) and the UNION of both triggers' own
+    candidate positions, never a silent drop. A collision against a
+    STATIC (Pass 1) claim, which carries no verifiable trigger of its
+    own, is unaffected (still dropped, as before b7222de already
+    established -- that claim becomes a real restraint once actually
+    placed, and the engine's own fixed-point re-iteration picks up any
+    residual need next pass).
+
+    Returns an ordered list of (member_idx, z_lo, z_hi, n_rungs,
+    fallbacks, trigger_idx_or_idxs) requests for n_rungs >= 1, sorted by
+    (member_idx, z_lo) -- deterministic regardless of spans_report's own
+    iteration/dict order."""
     # Pass 1: static per-gap requests (UNCHANGED formula/output shape from
     # pre-W6). Kept in a per-member dict (rather than appended straight to
     # `requests`) so the activation trigger below can MERGE into the same
     # (z_lo, z_hi) key in the degenerate case, exactly as before.
     static_reqs = {}          # member_idx -> {(z_lo, z_hi): n_rungs}
-    placed_heights = {}       # member_idx -> [z, ...] already claimed (any trigger)
+    # member_idx -> [(z, request_ref), ...] already claimed (any trigger).
+    # request_ref is None for a Pass-1 static claim (not independently
+    # re-verifiable, see module docstring); for a Pass-2 path-mapped claim
+    # it is that request's own index into `path_entries` below, so a LATER
+    # trigger colliding with it (SPEC-151-SCOPING round 2) can be MERGED
+    # into the same live entry instead of silently dropped.
+    placed_heights = {}
     for member_idx, info in spans_report.items():
         member = forest.members[member_idx]
         lean = cco._lean_deg(member.p0, member.p1)
@@ -188,12 +234,20 @@ def compute_needs(forest, spans_report, cfg):
         for (z_lo, z_hi), n_rungs in member_reqs.items():
             for k in range(n_rungs):
                 z = z_lo + (k + 1) * (z_hi - z_lo) / (n_rungs + 1)
-                placed_heights.setdefault(member_idx, []).append(z)
+                placed_heights.setdefault(member_idx, []).append((z, None))
 
     # Pass 2: activation trigger (SPEC-ARM-FIX fix A gate, SPEC-PATHRUNG
     # W6 placement). See module docstring for the degenerate-vs-
     # generalized split.
-    path_requests = []  # [(host_idx, z, z, 1), ...] -- generalized case only
+    # [{target, z, fallbacks, triggers: [member_idx, ...]}, ...] -- one
+    # live, MUTABLE entry per generalized-case physical rung request
+    # (generalized case only; the degenerate case still merges straight
+    # into static_reqs above, unchanged). SPEC-151-SCOPING round 2: a
+    # later trigger colliding with (and genuinely inside) an existing
+    # entry's own winning interval APPENDS to that entry's own
+    # `triggers`/`fallbacks` instead of being dropped -- see module
+    # docstring for the invariant.
+    path_entries = []
     for member_idx, info in spans_report.items():
         member = forest.members[member_idx]
         lean = cco._lean_deg(member.p0, member.p1)
@@ -246,21 +300,59 @@ def compute_needs(forest, spans_report, cfg):
             if target is None:
                 continue  # no path member covers this height -- skip it, honestly
             existing = placed_heights.get(target, [])
-            colliding = [ez for ez in existing
+            colliding = [(ez, ref) for (ez, ref) in existing
                          if abs(z - ez) <= cfg.brace_ladder_z_mm / 2.0]
-            if colliding and any(lo <= ez <= hi for ez in colliding):
+            in_range = [(ez, ref) for (ez, ref) in colliding if lo <= ez <= hi]
+            if in_range:
                 # Geometric relief check (verifier H2), not a bare
                 # proximity assumption: a surviving nearby claim on the
-                # SAME target only genuinely relieves THIS trigger's
-                # request if it falls within THIS trigger's own winning
-                # interval [lo, hi] -- consistent with transient.py's
-                # closed-interval overlap convention (a restraint
-                # anywhere inside the offending span caps it, regardless
-                # of which trigger's own height arithmetic produced it).
-                # A same-trigger repeat always satisfies this (its own
-                # prior heights are, by construction, inside its own
-                # [lo, hi]), so intra-trigger dedup is unaffected.
-                continue  # genuinely relieved -- drop
+                # SAME target only even CANDIDATES as relief for THIS
+                # trigger's request if it falls within THIS trigger's own
+                # winning interval [lo, hi] -- consistent with
+                # transient.py's closed-interval overlap convention (a
+                # restraint anywhere inside the offending span caps it,
+                # regardless of which trigger's own height arithmetic
+                # produced it). A same-trigger repeat always satisfies
+                # this (its own prior heights are, by construction,
+                # inside its own [lo, hi]), so intra-trigger dedup is
+                # unaffected.
+                mergeable = [(ez, ref) for (ez, ref) in in_range if ref is not None]
+                if mergeable:
+                    # SPEC-151-SCOPING round 2 (module docstring, THE
+                    # INVARIANT): candidacy for relief is NOT proof of
+                    # relief -- the SAME physical rung shrinks two
+                    # different members' arms by DIFFERENT amounts (each
+                    # member's own contribution is `hi - max(z_min(M),
+                    # R)`, and z_min(M) differs per member; table_mesh
+                    # members 117/152: identical winning interval,
+                    # different z_min anchors, one rung relieves 117 but
+                    # not 152). MERGE into the live entry instead of
+                    # dropping: carry this trigger for independent
+                    # relief-verification (propose_and_place's stacking
+                    # loop re-checks EVERY carried trigger, never just the
+                    # first), and fold this trigger's OWN independently-
+                    # computed candidate positions (its own path, its own
+                    # interval -- may differ from the entry's primary
+                    # trigger's own path) into the entry's fallback pool,
+                    # deterministic, dedup'd, sorted -- "its own
+                    # independent request attempt" is thereby already
+                    # part of the SAME stacking pass, not a separate one.
+                    mergeable.sort(key=lambda t: (t[0], t[1]))
+                    _, ridx = mergeable[0]
+                    entry = path_entries[ridx]
+                    if member_idx not in entry["triggers"]:
+                        entry["triggers"].append(member_idx)
+                    own_fallbacks = _path_fallback_candidates(forest, path, target, z, lo, hi)
+                    entry["fallbacks"] = _merge_fallback_lists(
+                        entry["fallbacks"], own_fallbacks, ((z, target),))
+                    continue
+                # Every in-range colliding claim is a Pass-1 STATIC claim
+                # (no verifiable trigger of its own to merge into) --
+                # unaffected by round 2, unchanged since b7222de: drop.
+                # That claim becomes a real restraint once actually
+                # placed; the engine's own brace_and_size fixed point
+                # picks up any residual need on its next iteration.
+                continue
             # Either no nearby claim exists at all, or the nearby
             # claim(s) sit OUTSIDE this trigger's own winning span (a
             # different trigger's own interval happened to land a claim
@@ -269,21 +361,51 @@ def compute_needs(forest, spans_report, cfg):
             # proximity alone was unsound (verifier H2: member117's claim
             # silently swallowing member151's own trigger without ever
             # attempting or relief-checking it) -- still attempt it.
-            placed_heights.setdefault(target, []).append(z)
+            ridx = len(path_entries)
+            placed_heights.setdefault(target, []).append((z, ridx))
             fallbacks = _path_fallback_candidates(forest, path, target, z, lo, hi)
-            # trigger_idx (member_idx, this loop's OWN triggering member --
-            # see propose_and_place's "stack more rungs" should-fix) rides
-            # along as a 6th element so propose_and_place can re-check
-            # WHOSE arm this request exists to relieve, not just place
-            # geometry blindly.
-            path_requests.append((target, z, z, 1, fallbacks, member_idx))
+            path_entries.append(dict(target=target, z=z, fallbacks=fallbacks,
+                                      triggers=[member_idx]))
 
-    requests = list(path_requests)
+    requests = []
+    for entry in path_entries:
+        triggers = sorted(entry["triggers"])
+        # trigger_idx_or_idxs (this request's carried trigger(s) -- see
+        # propose_and_place's "stack more rungs" should-fix, SPEC-151-
+        # SCOPING round 2) rides along as a 6th element so propose_and_
+        # place can re-check WHOSE arm(s) this request exists to relieve,
+        # not just place geometry blindly. A bare int when exactly one
+        # trigger shares this physical request (every pre-round-2 shape,
+        # bit-identical), a sorted tuple when 2+ are merged (new).
+        trigger_repr = triggers[0] if len(triggers) == 1 else tuple(triggers)
+        requests.append((entry["target"], entry["z"], entry["z"], 1,
+                          entry["fallbacks"], trigger_repr))
     for member_idx, member_reqs in static_reqs.items():
         for (z_lo, z_hi), n_rungs in member_reqs.items():
             requests.append((member_idx, z_lo, z_hi, n_rungs, (), None))
     requests.sort(key=lambda r: (r[0], r[1]))
     return requests
+
+
+def _merge_fallback_lists(*lists):
+    """SPEC-151-SCOPING round 2: union (order-preserving-then-resorted,
+    duplicate-safe) of any number of (z_alt, host_alt) fallback tuples --
+    used to fold a newly-merged trigger's OWN candidate positions into an
+    existing request's fallback pool. Re-sorted by the SAME (z_alt,
+    host_alt) key _path_fallback_candidates itself already sorts by (that
+    function's own docstring: z_ideal does not drive the order, only the
+    tuple's own values do), so the merged pool stays in that identical,
+    deterministic convention regardless of which trigger's own candidates
+    contributed which entry or the order they were merged in."""
+    seen = set()
+    out = []
+    for lst in lists:
+        for item in lst:
+            if item not in seen:
+                seen.add(item)
+                out.append(item)
+    out.sort(key=lambda t: (t[0], t[1]))
+    return tuple(out)
 
 
 def _path_fallback_candidates(forest, path, target, z_ideal, lo, hi):
@@ -700,6 +822,56 @@ def _place_one_rung(forest, surface_tree, cfg, mi, z, k, counters):
     return None
 
 
+def _trigger_relieved(forest, surface_tree, cfg, fresh_report, trigger_idx):
+    """SPEC-151-SCOPING round 2: is `trigger_idx` genuinely relieved right
+    now, per the SAME real transient math (r_transient_mm / _trial_
+    resize_r / a trial-revalidate probe) propose_and_place's stacking
+    loop has always used for its single-trigger relief check -- extracted
+    verbatim so a merged (shared-interval) request can re-verify EVERY
+    carried trigger, not just one, after each stacked placement.
+    `fresh_report` is ONE transient.transient_report(...) call the caller
+    shares across every trigger checked at this stacking step (not
+    recomputed per trigger -- the forest doesn't change between them).
+
+    `trigger_idx` absent from `fresh_report` (no longer a live/eligible
+    member) counts as relieved -- nothing left to relieve, matching the
+    pre-round-2 single-trigger code's own `if t_info is None: break`."""
+    t_info = fresh_report.get(trigger_idx)
+    if t_info is None:
+        return True
+    t_member = forest.members[trigger_idx]
+    t_lean = cco._lean_deg(t_member.p0, t_member.p1)
+    t_span = t_info["worst_span_mm"]
+    t_r = transient.r_transient_mm(t_span, t_lean, t_info["n_terminals"], cfg)
+    # SPEC-PATHRUNG W6 should-fix (table_mesh forensics, trial-clearance
+    # not just the deflection threshold): the (r_transient > max_
+    # unbraced_shaft_r_mm) gate is compute_needs's OWN "does this need
+    # bracing AT ALL" trigger -- by definition it is satisfied the instant
+    # a SINGLE (mathematically ideal, equal-split) rung would suffice,
+    # which says nothing about whether THIS REAL, geometry-constrained
+    # split (unbalanced by whatever candidate actually cleared) also
+    # clears LOCAL clearance at the RESIZE_FOREST-FINAL radius --
+    # r_transient alone understates it whenever r_deflect's own worst-
+    # sub-gap term (design-v4.md #6, transient.resize_forest's SAME
+    # max(...) formula) is the larger of the two for this specific member
+    # (unlike the common case where bracing shrinks r_deflect well below
+    # r_transient). Trial the FULL resize_forest formula, not just its
+    # r_transient term, so this lookahead can't declare victory on a
+    # radius resize_forest itself would never actually pick.
+    t_r_req = _trial_resize_r(forest, t_member, trigger_idx, t_info, t_lean, cfg)
+    relieved = t_span <= cfg.brace_free_span_mm and t_r <= cfg.max_unbraced_shaft_r_mm
+    if relieved:
+        trial_cp = forest.checkpoint()
+        if abs(t_member.r0 - t_r_req) > 1e-9:
+            t_member.r0 = t_r_req
+        if abs(t_member.r1 - t_r_req) > 1e-9:
+            t_member.r1 = t_r_req
+        trial_violations = forest.revalidate(surface_tree, cfg)
+        forest.rollback(trial_cp)
+        relieved = not any(v["member_idx"] == trigger_idx for v in trial_violations)
+    return relieved
+
+
 def propose_and_place(forest, surface_tree, plate_z, cfg, spans_report, log=None):
     """Places braces transactionally against ONE snapshot of spans_report
     (SPEC-BRACING Part 2). `plate_z` is accepted per the interface
@@ -783,7 +955,32 @@ def propose_and_place(forest, surface_tree, plate_z, cfg, spans_report, log=None
     instead of declaring victory on geometry-only success. Static/
     degenerate requests (trigger_idx is None) never enter this branch,
     matching every pre-W6 test's exact pinned single-placement-per-
-    request behavior."""
+    request behavior.
+
+    SPEC-151-SCOPING round 2 (compute_needs's own docstring has the full
+    invariant): trigger_idx is no longer always a lone int -- a request
+    compute_needs merged from a shared winning interval carries a sorted
+    TUPLE of every member_idx relying on it. The stacking loop above
+    generalizes accordingly: after each successful placement it re-
+    verifies (the SAME fresh transient_report, SAME per-member relief
+    formula, one call shared across every trigger checked at that step,
+    not one call per trigger) EVERY still-pending carried trigger, drops
+    each one that is now genuinely relieved from the pending set, and
+    only stops stacking once the pending set is EMPTY (every carried
+    trigger relieved) or a candidate/stack-depth bound is hit -- never on
+    the first (dict-order) trigger's relief alone. A trigger's own
+    independently-computed candidate positions were already folded into
+    this SAME request's fallback pool by compute_needs (its own path may
+    differ from the request's primary trigger's path), so "its own
+    independent request attempt" happens automatically within this one
+    pass -- not as a second, separately-tracked call. A single-trigger
+    request (the overwhelmingly common case, and every pre-round-2 test)
+    is bit-identical: pending starts as a 1-element list, first relief
+    empties it, same as the old bare `if relieved: break`. A static/
+    degenerate request (trigger_idx None) starts with an EMPTY pending
+    set, so the very first successful placement's pending-empty check
+    stops it immediately -- bit-identical to the old `if trigger_idx is
+    None: break`."""
     if log is None:
         log = {}
     requests = compute_needs(forest, spans_report, cfg)
@@ -800,6 +997,18 @@ def propose_and_place(forest, surface_tree, plate_z, cfg, spans_report, log=None
         is_path_mapped = (z_lo == z_hi)  # SPEC-PATHRUNG W6, see docstring
         restraint_zs = ([] if is_path_mapped else
                          (spans_report.get(member_idx, {}).get("restraint_zs") or []))
+        # SPEC-151-SCOPING round 2: normalize trigger_idx to the set of
+        # triggers THIS request must relieve before the stacking loop may
+        # stop -- empty for a static/degenerate request (trigger_idx is
+        # None), a 1-tuple for the overwhelmingly common single-trigger
+        # case (bit-identical old behavior), 2+ for a merged shared-
+        # interval request (compute_needs's own docstring).
+        if trigger_idx is None:
+            trigger_idxs = ()
+        elif isinstance(trigger_idx, tuple):
+            trigger_idxs = trigger_idx
+        else:
+            trigger_idxs = (trigger_idx,)
         for k in range(n_rungs):
             z = z_lo + (k + 1) * (z_hi - z_lo) / (n_rungs + 1)
             if any(abs(z - rz) <= cfg.brace_ladder_z_mm / 2.0 for rz in restraint_zs):
@@ -809,6 +1018,7 @@ def propose_and_place(forest, surface_tree, plate_z, cfg, spans_report, log=None
                 candidates += [(host, zc) for zc, host in fallbacks]
             placed_any = None
             n_stacked = 0
+            pending = list(trigger_idxs)  # triggers not yet confirmed relieved
             for host, zc in candidates:
                 already = tried_zs.get(host, [])
                 if any(abs(zc - ez) <= cfg.brace_ladder_z_mm / 2.0 for ez in already):
@@ -830,57 +1040,25 @@ def propose_and_place(forest, surface_tree, plate_z, cfg, spans_report, log=None
                 # ideal (imbalanced) split -- e.g. a cross-link's own
                 # 45-degree rise pushes its ACTUAL activation height well
                 # above the z it was requested at (v3.6's construction,
-                # never negotiable). Re-check the member whose gate
-                # actually fired (trigger_idx, NOT `host`) against the
-                # SAME two-part threshold compute_needs used to decide
-                # bracing was needed at all; if it's not yet under
-                # budget, keep stacking the NEXT fallback (another real
-                # restraint further along the same offending span) rather
-                # than declaring victory on geometry alone. Static/
-                # degenerate requests (trigger_idx is None) never enter
-                # this branch -- unaffected, bit-identical to pre-W6.
-                if trigger_idx is None:
+                # never negotiable). Re-check EVERY still-pending carried
+                # trigger (SPEC-151-SCOPING round 2 -- NOT just the first,
+                # dict-order one) against the SAME two-part threshold
+                # compute_needs used to decide bracing was needed at all;
+                # if any remain over budget, keep stacking the NEXT
+                # candidate (another real restraint further along the
+                # same offending span) rather than declaring victory on
+                # geometry alone. Static/degenerate requests (pending
+                # starts empty) never enter this branch -- unaffected,
+                # bit-identical to pre-round-2.
+                if not pending:
                     break
                 fresh = transient.transient_report(forest, plate_z, cfg)
-                t_info = fresh.get(trigger_idx)
-                if t_info is None:
-                    break  # trigger no longer a live/eligible member -- nothing left to relieve
-                t_member = forest.members[trigger_idx]
-                t_lean = cco._lean_deg(t_member.p0, t_member.p1)
-                t_span = t_info["worst_span_mm"]
-                t_r = transient.r_transient_mm(t_span, t_lean, t_info["n_terminals"], cfg)
-                # SPEC-PATHRUNG W6 should-fix (table_mesh forensics,
-                # trial-clearance not just the deflection threshold): the
-                # (r_transient > max_unbraced_shaft_r_mm) gate is compute_
-                # needs's OWN "does this need bracing AT ALL" trigger --
-                # by definition it is satisfied the instant a SINGLE
-                # (mathematically ideal, equal-split) rung would suffice,
-                # which says nothing about whether THIS REAL, geometry-
-                # constrained split (unbalanced by whatever candidate
-                # actually cleared) also clears LOCAL clearance at the
-                # RESIZE_FOREST-FINAL radius -- r_transient alone
-                # understates it whenever r_deflect's own worst-sub-gap
-                # term (design-v4.md #6, transient.resize_forest's SAME
-                # max(...) formula) is the larger of the two for this
-                # specific member (unlike the common case where bracing
-                # shrinks r_deflect well below r_transient). Trial the
-                # FULL resize_forest formula, not just its r_transient
-                # term, so this lookahead can't declare victory on a
-                # radius resize_forest itself would never actually pick.
-                t_r_req = _trial_resize_r(forest, t_member, trigger_idx, t_info, t_lean, cfg)
-                relieved = t_span <= cfg.brace_free_span_mm and t_r <= cfg.max_unbraced_shaft_r_mm
-                if relieved:
-                    trial_cp = forest.checkpoint()
-                    if abs(t_member.r0 - t_r_req) > 1e-9:
-                        t_member.r0 = t_r_req
-                    if abs(t_member.r1 - t_r_req) > 1e-9:
-                        t_member.r1 = t_r_req
-                    trial_violations = forest.revalidate(surface_tree, cfg)
-                    forest.rollback(trial_cp)
-                    relieved = not any(v["member_idx"] == trigger_idx for v in trial_violations)
-                if relieved:
-                    break  # relieved -- stop stacking more restraints for this request
-                # else: not relieved yet, fall through and try the NEXT candidate too
+                pending = [t_idx for t_idx in pending
+                           if not _trigger_relieved(forest, surface_tree, cfg, fresh, t_idx)]
+                if not pending:
+                    break  # every carried trigger relieved -- stop stacking
+                # else: at least one trigger not relieved yet, fall
+                # through and try the NEXT candidate too
             if placed_any is None:
                 rungs_unplaceable += 1
                 continue

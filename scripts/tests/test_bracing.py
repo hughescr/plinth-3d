@@ -960,3 +960,193 @@ def test_try_place_rods_still_rejects_candidates_own_violation_when_other_dirty(
     assert placed is None, (
         "candidate's own geometry violates clearance; it must still be "
         "rejected on its own defect, independent of the unrelated dirty member")
+
+
+# ------------------------------------------- SPEC-151-SCOPING round 2 -------
+# Shared worst_span_interval, second trigger silently dropped (the table
+# unblocker, layer 2): round 1 (6fb7d6e) fixed dirty-member self-poisoning
+# but left a SECOND, distinct defect traced verbatim by round 1 itself --
+# member 117/member 152's own real table_mesh shape, reproduced here as a
+# minimal synthetic fixture per orchestrator authorization.
+
+def test_compute_needs_shared_interval_merges_triggers_not_drops(cfg):
+    """THE INVARIANT (module docstring): a member that triggers in the
+    current spans_report is by definition not relieved -- dedup may merge
+    PLACEMENTS, it must never skip VERIFICATION. `a_idx` and `b_idx` share
+    the IDENTICAL worst_span_interval (0.0, 20.0) and both map (via
+    _map_height_to_path_member's lower-index tie-break) onto the SAME
+    target, `t_idx` -- a wide [0, 30] member covering the shared candidate
+    height for both.
+
+    On 6fb7d6e (pre-round-2), the pre-existing b7222de dedup rule ("a
+    colliding claim inside THIS trigger's own interval means genuinely
+    relieved") treats a_idx's own claim as proof b_idx needs nothing --
+    b_idx is silently dropped, never appearing anywhere in `requests`.
+    FAILS there (trigger_repr == a_idx alone, a bare int). Fixed code
+    MERGES instead of dropping: ONE physical request, carrying BOTH
+    triggers as a sorted tuple."""
+    f = tm.Forest()
+    t_idx = f.add_member(_member([500.0, 0.0, 30.0], [500.0, 0.0, 0.0], kind="trunk"))
+    a_idx = f.add_member(_member([0.0, 0.0, 20.0], [0.0, 0.0, 0.0], kind="trunk"))
+    b_idx = f.add_member(_member([100.0, 0.0, 20.0], [100.0, 0.0, 0.0], kind="trunk"))
+    path = [t_idx, a_idx, b_idx]
+
+    # free_gaps deliberately tiny (no static trigger of their own) so ONLY
+    # the activation trigger (Pass 2, path-mapped -- the merge-relevant
+    # code) fires for a_idx/b_idx; isolates this from the unrelated
+    # static-collision case, unchanged since b7222de (see compute_needs's
+    # own docstring, "Path-level dedup" paragraph).
+    spans_report = {
+        a_idx: dict(worst_span_mm=20.0, restraint_zs=[], free_gaps=[(0.0, 1.0)],
+                     n_terminals=1, worst_span_interval=(0.0, 20.0), worst_span_path=path),
+        b_idx: dict(worst_span_mm=20.0, restraint_zs=[], free_gaps=[(0.0, 1.0)],
+                     n_terminals=1, worst_span_interval=(0.0, 20.0), worst_span_path=path),
+    }
+    requests = bracing.compute_needs(f, spans_report, cfg)
+    path_mapped = [r for r in requests if r[1] == r[2]]  # z_lo == z_hi
+    assert len(path_mapped) == 1, "both triggers merge into ONE physical request"
+    target, z, z_hi, n_rungs, fallbacks, trigger_repr = path_mapped[0]
+    assert target == t_idx
+    assert z == z_hi == pytest.approx(10.0)
+    assert n_rungs == 1
+    assert isinstance(trigger_repr, tuple), (
+        "6fb7d6e leaves this a bare int (a_idx alone) -- b_idx dropped")
+    assert trigger_repr == (a_idx, b_idx)  # sorted, deterministic (see below)
+    assert any(host == b_idx for _z, host in fallbacks)
+
+
+def test_propose_and_place_stacks_until_every_carried_trigger_relieved(cfg):
+    """Integration-level proof of the SAME defect through the public
+    entry point (TDD (a)): a REAL, minimal forest where ONE candidate
+    (a model rung near `a_idx`'s own axis) genuinely relieves `a_idx`
+    (confirmed via a fresh, real transient.transient_report call after
+    placement) but does nothing at all for `b_idx` (an unrelated,
+    disconnected column -- the real-world "different z_min anchor, arm
+    shrinks less from the same rung" shape, here made unambiguous:
+    `b_idx` shares NOTHING with `a_idx` topologically, so a rung on
+    `a_idx` provably cannot touch `b_idx`'s own real worst_span_mm at
+    all). `t_idx` sits far away (x=500) and is never reachable -- its own
+    primary candidate always fails, forcing every real placement to come
+    from the merged fallback pool (a_idx's and b_idx's own path
+    candidates, folded together by compute_needs's round-2 fix).
+
+    On 6fb7d6e: only a_idx survives as a trigger, propose_and_place stops
+    stacking the instant a_idx is relieved -- exactly ONE model_rung
+    placed, b_idx's real worst_span_mm left untouched at its full 20mm
+    forever (verified directly against the pre-fix module below). Fixed
+    code keeps stacking (the carried-trigger pending set) until BOTH are
+    relieved -- TWO model_rungs, one per host, both members' real
+    worst_span_mm shrunk."""
+    local_cfg = config.SupportConfig(standoff_mm=0.05)
+    f = tm.Forest()
+    t_idx = f.add_member(_member([500.0, 0.0, 30.0], [500.0, 0.0, 0.0], kind="trunk"))
+    a_idx = f.add_member(_member([0.0, 0.0, 20.0], [0.0, 0.0, 0.0], kind="trunk"))
+    sa_idx = f.add_member(_member([0.0, 0.0, 20.001], [0.0, 0.0, 20.0], kind="stub"))
+    f.set_parent(sa_idx, a_idx)
+    b_idx = f.add_member(_member([100.0, 0.0, 20.0], [100.0, 0.0, 0.0], kind="trunk"))
+    sb_idx = f.add_member(_member([100.0, 0.0, 20.001], [100.0, 0.0, 20.0], kind="stub"))
+    f.set_parent(sb_idx, b_idx)
+
+    # One reachable surface anchor near EACH real column's own axis at
+    # z=10 (the formula-ideal midpoint of the shared (0, 20) interval) --
+    # nothing reachable anywhere near t_idx (x=500).
+    surface_tree = cKDTree(np.array([[3.0, 0.0, 10.0], [103.0, 0.0, 10.0]]))
+    path = [t_idx, a_idx, b_idx]
+    spans_report = {
+        a_idx: dict(worst_span_mm=20.0, restraint_zs=[], free_gaps=[(0.0, 1.0)],
+                     n_terminals=1, worst_span_interval=(0.0, 20.0), worst_span_path=path),
+        b_idx: dict(worst_span_mm=20.0, restraint_zs=[], free_gaps=[(0.0, 1.0)],
+                     n_terminals=1, worst_span_interval=(0.0, 20.0), worst_span_path=path),
+    }
+
+    result = bracing.propose_and_place(f, surface_tree, plate_z=0.0, cfg=local_cfg,
+                                        spans_report=spans_report)
+    assert result["rungs_requested"] == 1  # ONE logical request (merged)
+    assert result["rungs_placed"] == 1     # ... but it took stacking to satisfy it
+    assert result["rungs_unplaceable"] == 0
+    assert result["by_kind"] == {"model_rung": 2}
+    assert len(result["placed"]) == 2
+    hosts = sorted(round(float(f.members[idx].p0[0])) for idx in result["placed"])
+    assert hosts == [0, 100]  # one rung rooted on EACH real column
+    assert f.dirty_members() == []
+
+    fresh = transient.transient_report(f, 0.0, local_cfg)
+    assert fresh[a_idx]["worst_span_mm"] < 20.0
+    assert fresh[b_idx]["worst_span_mm"] < 20.0, (
+        "b_idx must be genuinely relieved too, not silently left at its "
+        "full unrestrained span the way 6fb7d6e leaves it")
+
+
+def test_propose_and_place_honest_unplaceable_when_no_candidate_clears_for_either(cfg):
+    """TDD (b), the honest path: when NEITHER carried trigger has any
+    viable candidate anywhere (no cross-link neighbor, no reachable
+    surface point for any of the merged request's candidates), the round-
+    2 stacking/pending machinery must still terminate cleanly -- honestly
+    unplaceable, no crash, no corruption, no false claim of relief for
+    either trigger. (The downstream "clearance-dirty member" crash this
+    workstream exists to make reachable again lives in engine.py's own
+    fixed-point assertion, out of this module's ownership -- this test
+    pins bracing.py's OWN honest half of that contract: it must not swallow
+    or paper over the failure itself.)"""
+    local_cfg = config.SupportConfig(standoff_mm=0.05)
+    f = tm.Forest()
+    t_idx = f.add_member(_member([500.0, 0.0, 30.0], [500.0, 0.0, 0.0], kind="trunk"))
+    a_idx = f.add_member(_member([0.0, 0.0, 20.0], [0.0, 0.0, 0.0], kind="trunk"))
+    sa_idx = f.add_member(_member([0.0, 0.0, 20.001], [0.0, 0.0, 20.0], kind="stub"))
+    f.set_parent(sa_idx, a_idx)
+    b_idx = f.add_member(_member([100.0, 0.0, 20.0], [100.0, 0.0, 0.0], kind="trunk"))
+    sb_idx = f.add_member(_member([100.0, 0.0, 20.001], [100.0, 0.0, 20.0], kind="stub"))
+    f.set_parent(sb_idx, b_idx)
+
+    surface_tree = _far_tree()
+    pre_violations = f.revalidate(surface_tree, local_cfg)
+    assert pre_violations == []
+    n_members_before = len(f.members)
+
+    path = [t_idx, a_idx, b_idx]
+    spans_report = {
+        a_idx: dict(worst_span_mm=20.0, restraint_zs=[], free_gaps=[(0.0, 1.0)],
+                     n_terminals=1, worst_span_interval=(0.0, 20.0), worst_span_path=path),
+        b_idx: dict(worst_span_mm=20.0, restraint_zs=[], free_gaps=[(0.0, 1.0)],
+                     n_terminals=1, worst_span_interval=(0.0, 20.0), worst_span_path=path),
+    }
+    result = bracing.propose_and_place(f, surface_tree, plate_z=0.0, cfg=local_cfg,
+                                        spans_report=spans_report)
+    assert result["placed"] == []
+    assert result["rungs_placed"] == 0
+    assert result["rungs_unplaceable"] == 1
+    assert len(f.members) == n_members_before
+    assert f.braces == []
+    assert f.dirty_members() == []
+
+
+def test_compute_needs_merged_trigger_order_deterministic(cfg):
+    """TDD (c): the carried-trigger tuple's ordering must not depend on
+    spans_report's own dict-iteration order (which of a_idx/b_idx happens
+    to be processed -- and therefore become the physical request's
+    PRIMARY -- first). Two builds, identical forest/geometry, spans_report
+    keys inserted in opposite order: the resulting merged request (target,
+    z, trigger tuple, fallbacks) must be bit-identical either way."""
+    def build():
+        f = tm.Forest()
+        t_idx = f.add_member(_member([500.0, 0.0, 30.0], [500.0, 0.0, 0.0], kind="trunk"))
+        a_idx = f.add_member(_member([0.0, 0.0, 20.0], [0.0, 0.0, 0.0], kind="trunk"))
+        b_idx = f.add_member(_member([100.0, 0.0, 20.0], [100.0, 0.0, 0.0], kind="trunk"))
+        return f, [t_idx, a_idx, b_idx]
+
+    def info(path):
+        return dict(worst_span_mm=20.0, restraint_zs=[], free_gaps=[(0.0, 1.0)],
+                    n_terminals=1, worst_span_interval=(0.0, 20.0), worst_span_path=path)
+
+    f1, (t1, a1, b1) = build()
+    sr_a_first = {a1: info([t1, a1, b1]), b1: info([t1, a1, b1])}
+    r1 = [r for r in bracing.compute_needs(f1, sr_a_first, cfg) if r[1] == r[2]]
+
+    f2, (t2, a2, b2) = build()
+    assert (t1, a1, b1) == (t2, a2, b2)  # identical forests -> identical indices
+    sr_b_first = {b2: info([t2, a2, b2]), a2: info([t2, a2, b2])}
+    r2 = [r for r in bracing.compute_needs(f2, sr_b_first, cfg) if r[1] == r[2]]
+
+    assert len(r1) == len(r2) == 1
+    assert r1[0] == r2[0]
+    assert r1[0][-1] == (a1, b1)
