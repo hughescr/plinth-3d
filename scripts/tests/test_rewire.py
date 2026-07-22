@@ -603,9 +603,12 @@ def test_degenerate_retire_skips_stub_regardless_of_length(cfg):
 
 
 def test_degenerate_retire_leaves_single_child_pass_through_to_twig_prune(cfg):
-    """A degenerate member with EXACTLY 1 child is _try_twig_prune's own
-    job (unchanged) -- _try_degenerate_retire must not duplicate or race
-    it, even though such a member also satisfies the length check."""
+    """A degenerate member with EXACTLY 1 NON-STUB child is _try_twig_
+    prune's own job (unchanged) -- _try_degenerate_retire must not
+    duplicate or race it, even though such a member also satisfies the
+    length check. (See test_degenerate_retire_handles_single_stub_child_
+    at_strut_junction below for the DIFFERENT, single-STUB-child shape,
+    which twig-prune can never act on and this function now must.)"""
     f = tm.Forest()
     p = f.add_member(_member([0.0, 0.0, 20.0], [0.0, 0.0, 10.0], kind="trunk"))
     m = f.add_member(_member([0.0, 0.0, 10.0], [0.0, 0.0, 10.0 - 1e-8], kind="shoot"))
@@ -613,6 +616,133 @@ def test_degenerate_retire_leaves_single_child_pass_through_to_twig_prune(cfg):
     c = f.add_member(_member([0.0, 0.0, 0.0], [0.0, 0.0, 10.0 - 1e-8], kind="shoot"))
     f.set_parent(c, m)
     assert rewire._try_degenerate_retire(f, m, _far_tree(), cfg, set()) == (False, 0.0)
+
+
+# ---------------------------------------------------- p6-reach verifier fix --
+def test_degenerate_retire_handles_single_stub_child_at_strut_junction(cfg):
+    """TDD failing-first (verifier's live introspection, full-scale
+    Treant): member owner ('contact', 205), kind shoot, length 4.6e-7mm,
+    sitting at a bifurcation where contact 205's own terminal stub merged
+    directly onto contact 206's strut route -- parent is the strut, SOLE
+    child is the stub. Mechanism: _try_twig_prune correctly refuses (its
+    own module docstring -- a stub child is never folded, it's the model
+    surface contact, not foldable topology), but the OLD _try_degenerate_
+    retire deferred to twig-prune on ANY len(children)==1 without
+    checking twig-prune could actually act -- so this exact shape fell
+    through BOTH, a printability violation (near/zero-length span) that
+    no rewire move ever cleared. Newly reachable only because struts now
+    exist (merge-base has zero struts).
+
+    Fix: retire the degenerate member and re-point the stub directly
+    onto the degenerate's own parent (the strut) -- geometrically a
+    no-op, since the degenerate's own p0~=p1 to well under DEGENERATE_
+    LEN_MM, so the stub's real position is completely untouched. Twig-
+    prune's own stub refusal (test_degenerate_retire_leaves_single_
+    child_pass_through_to_twig_prune, the NON-stub sibling case) is
+    unchanged -- this function's own new gate is scoped exactly to
+    child.kind == 'stub', never touching _try_twig_prune itself."""
+    f = tm.Forest()
+    strut = f.add_member(_member([0.0, 0.0, 20.0], [0.0, 0.0, 10.0], kind="strut"))
+    m = f.add_member(_member([0.0, 0.0, 10.0], [0.0, 0.0, 10.0 - 4.6e-7], kind="shoot"))
+    f.set_parent(m, strut)
+    stub = f.add_member(_member([0.0, 0.0, 10.0 - 4.6e-7 - 1.0],
+                                 [0.0, 0.0, 10.0 - 4.6e-7], kind="stub"))
+    f.set_parent(stub, m)
+    assert rewire._is_degenerate_span(f.members[m].p0, f.members[m].p1)
+    stub_p0_before = f.members[stub].p0.copy()
+
+    ok, saved = rewire._try_degenerate_retire(f, m, _far_tree(), cfg, set())
+
+    assert ok is True
+    assert saved >= 0.0
+    assert m in f.dead
+    assert f.parent[stub] == strut
+    assert stub in f.children[strut]
+    assert m not in f.children[strut]
+    assert np.allclose(f.members[stub].p0, stub_p0_before)  # geometrically a no-op
+    assert f.dirty_members() == []
+    live = [f.members[i] for i in range(len(f.members)) if i not in f.dead]
+    assert tm.printability_report(live, cfg) == []
+
+
+def test_degenerate_retire_still_skips_single_non_stub_child_via_sweep_order(cfg):
+    """The scheduling side of the same fix (_sweep_order must actually
+    OFFER this shape to _try_degenerate_retire as a 'retire' candidate,
+    or the fixed function above would never be reached by rewire.
+    optimize's real sweep loop) -- proven at the _sweep_order level
+    directly: a single-STUB-child degenerate is queued as BOTH 'prune'
+    (twig-prune's own existing queue entry, unchanged -- it will
+    correctly refuse) AND 'retire' (new); a single-NON-stub-child
+    degenerate is queued as 'prune' only, exactly as before this fix."""
+    f = tm.Forest()
+    p1 = f.add_member(_member([0.0, 0.0, 20.0], [0.0, 0.0, 10.0], kind="strut"))
+    m1 = f.add_member(_member([0.0, 0.0, 10.0], [0.0, 0.0, 10.0 - 4.6e-7], kind="shoot"))
+    f.set_parent(m1, p1)
+    stub1 = f.add_member(_member([0.0, 0.0, 10.0 - 4.6e-7 - 1.0],
+                                  [0.0, 0.0, 10.0 - 4.6e-7], kind="stub"))
+    f.set_parent(stub1, m1)
+
+    p2 = f.add_member(_member([100.0, 0.0, 20.0], [100.0, 0.0, 10.0], kind="trunk"))
+    m2 = f.add_member(_member([100.0, 0.0, 10.0], [100.0, 0.0, 10.0 - 4.6e-7], kind="shoot"))
+    f.set_parent(m2, p2)
+    c2 = f.add_member(_member([100.0, 0.0, 0.0], [100.0, 0.0, 10.0 - 4.6e-7], kind="shoot"))
+    f.set_parent(c2, m2)
+
+    order = rewire._sweep_order(f)
+    kinds_for_m1 = {kind for kind, idx in order if idx == m1}
+    kinds_for_m2 = {kind for kind, idx in order if idx == m2}
+    assert kinds_for_m1 == {"prune", "retire"}, (
+        "single-STUB-child degenerate must be offered to BOTH moves")
+    assert kinds_for_m2 == {"prune"}, (
+        "single-NON-stub-child degenerate is unchanged: prune only, "
+        "never offered to retire (twig-prune's own job)")
+
+
+def test_degenerate_retire_stub_child_sorts_before_high_volume_candidates(cfg):
+    """TDD failing-first (verifier's live full-scale introspection, round
+    2): _sweep_order correctly OFFERS the single-stub-child 'retire'
+    candidate (proven above), but its own volume is near-zero by
+    definition -- sorting it near the TAIL of the descending-volume
+    order -- which on the real Treant let optimize()'s own rolling-
+    savings convergence check (itself volume-driven) break the sweep
+    before this candidate's own turn ever came up, even though the
+    candidate WAS queued (confirmed by direct instrumentation: 213
+    higher-volume moves got tried and accepted before convergence
+    triggered, member 1065's own retire entry never reached). Proven
+    here at the _sweep_order level directly: a single-stub-child
+    degenerate's own volume is negligible, but a co-existing 'reattach'
+    candidate on a LARGE (unrelated) member has real, substantial
+    volume -- the degenerate's 'retire' entry must still sort FIRST."""
+    f = tm.Forest()
+    p1 = f.add_member(_member([0.0, 0.0, 20.0], [0.0, 0.0, 10.0], kind="strut"))
+    m1 = f.add_member(_member([0.0, 0.0, 10.0], [0.0, 0.0, 10.0 - 4.6e-7], kind="shoot"))
+    f.set_parent(m1, p1)
+    stub1 = f.add_member(_member([0.0, 0.0, 10.0 - 4.6e-7 - 1.0],
+                                  [0.0, 0.0, 10.0 - 4.6e-7], kind="stub"))
+    f.set_parent(stub1, m1)
+
+    # A large, unrelated member with a 2+-child junction parent -- offered
+    # as a real, substantial-volume "reattach" candidate (r=5.0, length
+    # 50mm -- orders of magnitude more volume than the near-zero
+    # degenerate above).
+    big_parent = f.add_member(_member([500.0, 0.0, 100.0], [500.0, 0.0, 50.0],
+                                       r0=5.0, r1=5.0, kind="trunk"))
+    big = f.add_member(_member([500.0, 0.0, 50.0], [500.0, 0.0, 0.0],
+                                r0=5.0, r1=5.0, kind="trunk"))
+    f.set_parent(big, big_parent)
+    big_sib = f.add_member(_member([500.0, 0.0, 50.0], [510.0, 0.0, 0.0],
+                                    r0=5.0, r1=5.0, kind="trunk"))
+    f.set_parent(big_sib, big_parent)
+
+    order = rewire._sweep_order(f)
+    retire_pos = next(i for i, (kind, idx) in enumerate(order) if kind == "retire" and idx == m1)
+    reattach_pos = next(i for i, (kind, idx) in enumerate(order)
+                         if kind == "reattach" and idx == big)
+    assert retire_pos < reattach_pos, (
+        "the near-zero-volume printability-fixing retire move must sort "
+        "BEFORE a real, substantial-volume candidate -- otherwise "
+        "optimize()'s own volume-driven convergence check can starve it "
+        "on a large real forest exactly as it did on the full Treant")
 
 
 def test_junction_geometry_at_rejects_a_collapsed_child_span(cfg):

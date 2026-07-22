@@ -118,7 +118,7 @@ def build_surface_tree(mesh, pitch_mm=0.4, max_points=150000, seed=0):
     return cKDTree(points)
 
 
-def surface_tree_pitch_bound_mm(surface_tree, percentile=95.0):
+def surface_tree_pitch_bound_mm(surface_tree, percentile=99.0):
     """p6-routing (Finding B): a DETERMINISTIC, per-tree, empirically-
     measured bound on how sparse `surface_tree`'s own point cloud gets,
     for use as the sampling-uncertainty term in an embed-end clearance
@@ -146,13 +146,24 @@ def surface_tree_pitch_bound_mm(surface_tree, percentile=95.0):
     (routing.build_surface_tree seeds trimesh's sample() explicitly), so
     this is a per-mesh constant, not a magic slop term -- Craig's
     fresh-layer-units doctrine: derive from a measured property, not a
-    guess. 95th percentile (not max) is a deliberate choice: a bound tight
-    enough to still catch a genuine mid-shaft clip (design-v4.md's gate-
-    safety bar -- "grows only as far as the anchor geometry itself
-    requires, never further"), while covering all but the sparsest ~5% of
-    the cloud's own local gaps, which is where a real embed-end anchor is
-    actually likely to land (delicacy_field's own sample density is
-    comparable to this tree's, not concentrated in the tail).
+    guess.
+
+    `percentile` defaults to 99.0 here purely so this function is never
+    silently wrong if called without one -- every real call site (tree.
+    Forest's own dirty-member certification, verify.clearance_report)
+    passes `percentile=cfg.surface_pitch_bound_percentile` explicitly, so
+    this default is never actually exercised; cfg.surface_pitch_bound_
+    percentile's OWN docstring is the authoritative rationale for WHY 99
+    (not 95, not 100/max) is the right choice -- a bound tight enough to
+    still catch a genuine mid-shaft clip (design-v4.md's gate-safety bar
+    -- "grows only as far as the anchor geometry itself requires, never
+    further") while being high enough to close every measured Treant
+    violation (p95 was measured to still MISS some of them; p99 covers
+    with margin), and more robust than max/p100 (a single degenerate
+    sliver triangle elsewhere on the mesh could set that arbitrarily
+    high). Do not re-litigate the percentile choice here -- update cfg.
+    surface_pitch_bound_percentile's own docstring instead, and keep this
+    one in sync with whatever it says.
     """
     n = int(surface_tree.n)
     if n < 2:

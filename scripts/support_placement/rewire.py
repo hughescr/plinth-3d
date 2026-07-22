@@ -667,6 +667,31 @@ def _try_degenerate_retire(forest, m_idx, surface_tree, cfg, braced_hosts):
     contact, not a topology artifact): dead weight, detach and
     mark_dead.
 
+    p6-reach (verifier-authorized extension, exactly this function + its
+    own tests -- struts now exist, newly reaching a shape neither prior
+    move handled): EXACTLY 1 child that is itself a STUB is also this
+    function's job, not _try_twig_prune's -- twig-prune's own module
+    docstring already refuses ANY stub child unconditionally (the stub
+    is the model-surface contact, never folded/merged into a host's own
+    geometry), so it can never act on this shape regardless of length.
+    The OLD gate here deferred to twig-prune on ANY len(children)==1
+    without checking twig-prune could actually act, so a degenerate
+    member whose SOLE child is a stub (verifier's live find: full-scale
+    Treant, owner ('contact', 205), kind shoot, length 4.6e-7mm, at a
+    strut-junction where contact 205's own terminal stub merged directly
+    onto contact 206's strut route) fell through BOTH moves -- an
+    unclearable printability violation forever. Handled by the SAME
+    splice-onto-parent path already used for the 2+ children case below
+    (which needs no change: `for c in children: set_parent(c, p_idx)`
+    already generalizes correctly to a single-stub-child list) --
+    geometrically a no-op, since the stub's own p0 already sits at m's
+    p1 to well under DEGENERATE_LEN_MM, unaffected by which member it is
+    parented under. A len(children)==1 NON-stub child is UNCHANGED --
+    still deferred to twig-prune, per test_degenerate_retire_leaves_
+    single_child_pass_through_to_twig_prune (unmodified, still pinned).
+    _try_twig_prune itself is untouched by this fix (its stub refusal is
+    correct and stays exactly as it is).
+
     Deliberately NOT gated on strict volume decrease like the other
     three move types -- a near-zero-length member's own volume is
     itself near zero, so "does this save real print material" is the
@@ -687,7 +712,12 @@ def _try_degenerate_retire(forest, m_idx, surface_tree, cfg, braced_hosts):
         return False, 0.0
     children = list(forest.children[m_idx])
     if len(children) == 1:
-        return False, 0.0  # _try_twig_prune's own job, unchanged, not duplicated
+        sole = children[0]
+        if sole in forest.dead or forest.members[sole].kind != "stub":
+            return False, 0.0  # _try_twig_prune's own job (it CAN act
+            # here), unchanged, not duplicated -- see this function's
+            # own docstring for the single-STUB-child case, which
+            # twig-prune can NEVER act on and falls through to here.
     if any(c in braced_hosts for c in children):
         return False, 0.0
 
@@ -729,7 +759,49 @@ def _sweep_order(forest):
     class "prune" (len(children) == 1 only) never reaches. Not mutually
     exclusive with "slide" (2+ children) -- both get queued; whichever
     the sweep tries first, the other's own guard (m_idx in forest.dead)
-    makes the second a harmless no-op once the first retires it."""
+    makes the second a harmless no-op once the first retires it.
+
+    p6-reach (verifier-authorized extension, same one-item grant as
+    _try_degenerate_retire itself -- this predicate is the dispatch gate
+    that must actually OFFER the new shape to it, or the fix above is
+    unreachable from rewire.optimize's real sweep loop): len(children)==1
+    is no longer an unconditional retire-exclusion -- when that SOLE
+    child is a stub (_try_degenerate_retire's own new case; twig-prune
+    can never act on it, see that function's docstring), "retire" is
+    queued ALONGSIDE "prune" for the SAME idx, same harmless-no-op-on-
+    the-second-mover guarantee as the slide/retire overlap above (each
+    move's own m_idx-in-forest.dead check makes order-independence exact
+    regardless of which one commits first). A len(children)==1 NON-stub
+    child is UNCHANGED -- "prune" only, never offered to "retire".
+
+    p6-reach should-fix (same one-item grant, verifier's live full-scale
+    introspection): a degenerate member's own volume is near-zero by
+    definition, which sorts its "retire" entry near the TAIL of this
+    descending-volume list -- for the single-stub-child case specifically
+    (the ONLY shape neither "prune" nor "slide" can ever reach), that
+    tail position risks optimize()'s own rolling-savings convergence
+    check (itself volume-driven: diminishing returns over the last
+    ROLL_WINDOW ACCEPTED moves) breaking the sweep loop before this
+    candidate's own turn ever comes up. Confirmed by direct
+    instrumentation on the real, full-scale Treant: this predicate
+    correctly offered ('retire', 1065) every sweep, yet optimize()'s
+    inner loop converged and broke before ever reaching it -- the SAME
+    printability violation survived a complete rewire + brace_and_size
+    pass. _try_degenerate_retire's own docstring already establishes the
+    governing principle for this exact move ("deliberately NOT gated on
+    strict volume decrease... a near-zero-length member's own volume is
+    itself near zero, so 'does this save real print material' is the
+    wrong question"); extending that from the ACCEPTANCE gate to this
+    move's own SCHEDULING PRIORITY is the same principle applied
+    consistently, not a new one -- a printability fix must not be
+    starved by a volume-savings convergence check that was never meant
+    to gate it. Sentinel priority (sorts before every real-volume
+    candidate, ties broken by the SAME deterministic (kind, idx)
+    tiebreak as everything else) applies ONLY to this exact
+    single-stub-child shape -- the pre-existing 0/2+-children retire
+    path (already established against the Treant's own member_idx 577
+    repro, per this function's own docstring) is UNCHANGED, still
+    sorted by its own real volume like every other move."""
     braces_set = set(getattr(forest, "braces", ()))
     items = []
     for idx, m in enumerate(forest.members):
@@ -740,14 +812,19 @@ def _sweep_order(forest):
         if parent_idx is None or len(forest.children[parent_idx]) >= 2:
             items.append((vol, "reattach", idx))
         children = forest.children[idx]
+        single_stub_child = False
         if len(children) >= 2:
             items.append((vol, "slide", idx))
         elif len(children) == 1:
             span = float(np.linalg.norm(m.p1 - m.p0))
             if span < TWIG_MERGE_LEN_MM:
                 items.append((vol, "prune", idx))
-        if len(children) != 1 and _is_degenerate_span(m.p0, m.p1):
-            items.append((vol, "retire", idx))
+            sole = children[0]
+            single_stub_child = (sole not in forest.dead
+                                  and forest.members[sole].kind == "stub")
+        if (len(children) != 1 or single_stub_child) and _is_degenerate_span(m.p0, m.p1):
+            retire_key = float("inf") if single_stub_child else vol
+            items.append((retire_key, "retire", idx))
     items.sort(key=lambda t: (-t[0], t[1], t[2]))
     return [(kind, idx) for _, kind, idx in items]
 
