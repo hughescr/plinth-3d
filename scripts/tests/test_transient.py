@@ -404,3 +404,110 @@ def test_span_intervals_max_matches_public_worst_span():
         intervals = tr._span_intervals(restraints, base_z, z_top)
         assert max(hi - lo for lo, hi in intervals) == pytest.approx(
             tr.transient_worst_span(restraints, base_z, z_top))
+
+
+# ============================================================ 13. verifier should-fixes: closed-interval + min-aggregation pins
+def test_worst_span_closed_interval_boundary_touch(cfg):
+    """Pins the CLOSED-interval overlap rule in transient_report's
+    per-member span-intersection check (`if hi >= zlo and lo <= zhi`,
+    transient.py ~line 328). Forest: trunk(0->90) forks at z=90 into a
+    zero-height horizontal decoy stub (both ends at z=90 -- its own
+    completion equals the junction height itself, an immediate
+    restraint derived purely from the junction rule, no brace needed)
+    and shoot M(90->95) topped by its own stub to 100.
+
+    M's path carries exactly one restraint event, (point_z=90.0,
+    active_z=90.0) -- decoy's completion == 90 == the junction height --
+    producing two candidate spans: (0, 90) [dominant, length 90] and
+    (90, 100) [length 10]. The dominant span's hi (90) lands EXACTLY on
+    M's own zlo (90.0) -- a knife-edge touch at one boundary, not a
+    genuine interior overlap (M's extent is [90, 95]; the span (0, 90)
+    only kisses that extent at the single point z=90).
+
+    Under the real closed-interval rule (hi >= zlo), that span counts
+    for M: worst_span_mm(M) == 90.0.
+
+    Mutation check (recorded): temporarily changed line ~328 to strict
+    `if hi > zlo and lo < zhi:`. Under that mutant the (0, 90) span is
+    excluded for M (90 > 90 is False), leaving only the genuinely
+    overlapping (90, 100) span (length 10) as the sole contributor.
+    Actual result when re-run against the mutant:
+    AssertionError: assert 10.0 == 90.0 +- ... (report[m_idx]
+    ["worst_span_mm"] came back 10.0, not 90.0). Mutation reverted
+    exactly afterward (git diff on transient.py clean); this test
+    passes again against the real closed-interval code."""
+    f = tm.Forest()
+    trunk = _member([0.0, 0.0, 90.0], [0.0, 0.0, 0.0], kind="trunk")
+    trunk_idx = f.add_member(trunk)
+
+    decoy = _member([5.0, 0.0, 90.0], [0.0, 0.0, 90.0], kind="stub", embed_end="p0")
+    decoy_idx = f.add_member(decoy)
+    f.set_parent(decoy_idx, trunk_idx)
+
+    m = _member([0.0, 0.0, 95.0], [0.0, 0.0, 90.0], kind="shoot")
+    m_idx = f.add_member(m)
+    f.set_parent(m_idx, trunk_idx)
+
+    stub = _member([0.0, 0.0, 100.0], [0.0, 0.0, 95.0], kind="stub", embed_end="p0")
+    f.set_parent(f.add_member(stub), m_idx)
+
+    # sanity: the path-level sweep matches the hand-derived spans.
+    assert tr.transient_worst_span([(90.0, 90.0)], 0.0, 100.0) == pytest.approx(90.0)
+
+    report = tr.transient_report(f, plate_z=0.0, cfg=cfg)
+    assert report[m_idx]["worst_span_mm"] == pytest.approx(90.0)
+    assert report[m_idx]["worst_span_mm"] != pytest.approx(10.0)  # the open-interval (wrong) answer
+
+
+def test_three_way_junction_uses_min_not_max_sibling_completion(cfg):
+    """Pins min-over-siblings aggregation in _path_events (transient.py
+    ~224-227, `active_z = min(completion(s) for s in siblings)`). Every
+    OTHER fixture in this file has <=2 children per junction (1
+    sibling, where min == max) -- this is the first genuinely 3-way
+    junction in the suite, the only fixture that can discriminate min
+    from max.
+
+    trunk forks at z=20 into three children: a (the path under test,
+    itself spanning 20->43, capped by its own stub to 45 -- "a's own
+    path z_top == 45"), b (sibling, subtree completes at 60 via its own
+    stub), and c (sibling, subtree completes at 40 via its own stub).
+    The correct rule takes the MIN over siblings b and c:
+    active_z = min(60, 40) == 40, point_z == 20 (the junction height).
+    That yields two candidate spans on a's path: (0, 40) [dominant,
+    length 40] and (20, 45) [length 25] -- worst_span_mm(a) == 40.0.
+
+    Mutation check (recorded): temporarily changed line ~225's `min(...)`
+    to `max(...)`. Under that mutant, active_z = max(60, 40) == 60,
+    clamped down to a's own z_top (45) since 60 > 45 -- giving dominant
+    candidate span (0, 45). Actual result when re-run against the
+    mutant: AssertionError: assert 45.0 == 40.0 +- ... (report[a_idx]
+    ["worst_span_mm"] came back 45.0, not 40.0). Mutation reverted
+    exactly afterward (git diff on transient.py clean); this test
+    passes again against the real min-based code."""
+    f = tm.Forest()
+    trunk = _member([0.0, 0.0, 20.0], [0.0, 0.0, 0.0], kind="trunk")
+    trunk_idx = f.add_member(trunk)
+
+    a = _member([0.0, 0.0, 43.0], [0.0, 0.0, 20.0], kind="shoot")
+    a_idx = f.add_member(a)
+    f.set_parent(a_idx, trunk_idx)
+    stub_a = _member([0.0, 0.0, 45.0], [0.0, 0.0, 43.0], kind="stub", embed_end="p0")
+    f.set_parent(f.add_member(stub_a), a_idx)
+
+    b = _member([0.0, 0.0, 58.0], [0.0, 0.0, 20.0], kind="shoot")
+    b_idx = f.add_member(b)
+    f.set_parent(b_idx, trunk_idx)
+    stub_b = _member([0.0, 0.0, 60.0], [0.0, 0.0, 58.0], kind="stub", embed_end="p0")
+    f.set_parent(f.add_member(stub_b), b_idx)
+
+    c = _member([0.0, 0.0, 38.0], [0.0, 0.0, 20.0], kind="shoot")
+    c_idx = f.add_member(c)
+    f.set_parent(c_idx, trunk_idx)
+    stub_c = _member([0.0, 0.0, 40.0], [0.0, 0.0, 38.0], kind="stub", embed_end="p0")
+    f.set_parent(f.add_member(stub_c), c_idx)
+
+    assert len(f.children[trunk_idx]) == 3  # genuinely 3-way, not a Y
+
+    report = tr.transient_report(f, plate_z=0.0, cfg=cfg)
+    assert report[a_idx]["worst_span_mm"] == pytest.approx(40.0)
+    assert report[a_idx]["worst_span_mm"] != pytest.approx(45.0)  # the max-based (wrong) answer
