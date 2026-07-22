@@ -32,6 +32,10 @@ import chitubox_inject as ci  # noqa: E402
 
 N_SIDES = 24
 CONTACT_DEPTH_TRAILING_TYPE = ci.T_TAPER
+PLATE_BAND_MM = 0.2  # F2/F1: same plate-band tolerance as joints.PLATE_BAND_MM
+                      # / verify.connectivity_report rule (b) -- kept as an
+                      # independent constant (this module stays self-
+                      # contained per its existing style, see _field below)
 
 
 def frustum_mesh(start, end, r0, r1, n_sides=N_SIDES):
@@ -363,7 +367,7 @@ def _assign_balls_to_members(members, balls, tol=0.25):
     return assigned
 
 
-def synth_member_chain(members, balls, cfg, next_off):
+def synth_member_chain(members, balls, cfg, next_off, plate_z=None):
     """v4 emission (design-v4.md #14 Phase-review/interim emitter): one
     record per Member (tree.Member or joints.collect_members's dict
     schema), each a frustum_mesh blob. Type id mirrors v3's evidenced
@@ -384,6 +388,19 @@ def synth_member_chain(members, balls, cfg, next_off):
     objects with center/r/owner) is appended into exactly ONE record's
     blob, chosen by _assign_balls_to_members; the assert there is the
     "every ball emitted exactly once" guarantee the caller can rely on.
+
+    F2 (Craig's Chitubox review -- conical feet): `plate_z` is optional
+    and defaults to None, in which case this function emits EXACTLY as
+    before (no caller depends on this parameter existing). When given, a
+    member whose p1 lands within PLATE_BAND_MM of plate_z -- the v4 Forest
+    root convention, tree.py: "p1 is always the root-ward end" -- is
+    plate-rooted and gets v3's foot flare ported from synth_v3_trunk
+    (chitubox_emit.py:184-212, cfg.flare_r_factor * r at plate_z tapering
+    up to r over cfg.flare_len_mm), emitted as a SEPARATE leading T_FLARE
+    record; the member's own column record is shortened to start where
+    the flare ends. Members shorter than 2*flare_len_mm flare only their
+    lower half (recorded decision, SPEC-EMIT-POLISH.md F2). Members/gates
+    are unchanged -- this is emission-only geometry, same doctrine as v3.
     Returns (record_bytes, blob_bytes) pairs, offsets contiguous from
     next_off."""
     members = list(members)
@@ -403,7 +420,23 @@ def synth_member_chain(members, balls, cfg, next_off):
         kind = _field(m, "kind")
         embed_end = _field(m, "embed_end", None)
 
-        parts = [frustum_mesh(p0, p1, r0, r1)]
+        is_plate_root = plate_z is not None and abs(p1[2] - float(plate_z)) <= PLATE_BAND_MM
+        if is_plate_root:
+            axis = p0 - p1
+            L = float(np.linalg.norm(axis))
+            axis_n = axis / L if L > 1e-9 else np.array([0.0, 0.0, 1.0])
+            flare_len_eff = min(cfg.flare_len_mm, L / 2.0) if L > 1e-9 else cfg.flare_len_mm
+            p_col0 = p1 + axis_n * flare_len_eff
+            flare_blob = frustum_mesh(p1, p_col0, cfg.flare_r_factor * r1, r1)
+            out.append((build_record(ci.T_FLARE, p1, p_col0,
+                                      cfg.flare_r_factor * r1, r1,
+                                      off, flare_blob.nbytes, cfg), flare_blob.tobytes()))
+            off += flare_blob.nbytes
+            col_p0, col_p1, col_r0, col_r1 = p_col0, p0, r1, r0
+        else:
+            col_p0, col_p1, col_r0, col_r1 = p0, p1, r0, r1
+
+        parts = [frustum_mesh(col_p0, col_p1, col_r0, col_r1)]
         if kind == "stub":
             ball_r = cfg.tip_ball_r_factor * r0
             parts.append(sphere_mesh(p0, ball_r))
@@ -415,7 +448,7 @@ def synth_member_chain(members, balls, cfg, next_off):
 
         tapered = abs(r0 - r1) > 1e-9
         type_id = ci.T_TAPER if (tapered and embed_end is not None) else ci.T_SHAFT
-        out.append((build_record(type_id, p0, p1, r0, r1, off, blob.nbytes, cfg),
+        out.append((build_record(type_id, col_p0, col_p1, col_r0, col_r1, off, blob.nbytes, cfg),
                     blob.tobytes()))
         off += blob.nbytes
 

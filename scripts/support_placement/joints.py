@@ -36,6 +36,15 @@ _MISSING = object()
 MODEL_FOOT_FACTOR = 1.4     # adsorbed strut foot ball vs its rod radius
 COINCIDE_TOL_MM = 0.15      # endpoint clustering: true coincidences only
 ON_AXIS_TOL_MM = 0.2        # node-to-member-axis distance for sizing
+PLATE_BAND_MM = 0.2         # same plate-band rule verify.connectivity_report
+                             # rule (b) uses -- a node this close to plate_z
+                             # is plate-rooted, owned by the foot flare/pad,
+                             # not a joint (F1: no balls sunk into the plate)
+COLINEAR_ANGLE_DEG = 10.0   # F3(a): two-member pass-through anti-parallel
+                             # tolerance (straight continuation, no ball)
+COLINEAR_RADIUS_FRAC = 0.20  # F3(a): end-radius match tolerance for the
+                              # same pass-through rule
+_COLINEAR_COS_MAX = float(np.cos(np.radians(180.0 - COLINEAR_ANGLE_DEG)))
 
 
 def _point_segment_dist(points, p0, p1):
@@ -47,6 +56,24 @@ def _point_segment_dist(points, p0, p1):
     t = np.clip((points - p0) @ d / L2, 0.0, 1.0)
     proj = p0[None, :] + t[:, None] * d[None, :]
     return np.linalg.norm(points - proj, axis=1)
+
+
+def _dist_and_local_radius(center, p0, p1, r0, r1):
+    """Distance from `center` to segment p0->p1, plus the segment's OWN
+    radius at the nearest point (linear taper r0->r1 evaluated at the
+    same clamped t used for the distance) -- F3(c): the radius a joint
+    ball should be sized against is the member's radius AT THE POINT the
+    joint actually lands on, not blindly max(r0, r1) (which lets an
+    irrelevant far taper end dominate a joint sitting at the near end)."""
+    d = p1 - p0
+    L2 = float(d @ d)
+    if L2 < 1e-18:
+        return float(np.linalg.norm(center - p0)), float(r0)
+    t = float(np.clip((center - p0) @ d / L2, 0.0, 1.0))
+    proj = p0 + t * d
+    dist = float(np.linalg.norm(center - proj))
+    local_r = float(r0) + (float(r1) - float(r0)) * t
+    return dist, local_r
 
 
 def collect_members(members):
@@ -108,18 +135,39 @@ def compute_joint_balls(members, plate_z, cfg):
     now expressed once instead of per-kind). An endpoint is the
     model-adsorbed-foot case (MODEL_FOOT_FACTOR) iff it is that member's
     embed_end AND it isn't the stub-tip case already excluded above --
-    replaces v3's kind-specific "strut"/"model_rung" embedded flags."""
+    replaces v3's kind-specific "strut"/"model_rung" embedded flags.
+
+    F1 (Craig's Chitubox review): a node within PLATE_BAND_MM of plate_z
+    is plate-rooted -- excluded here, same plate-band rule
+    verify.connectivity_report rule (b) uses. The foot flare + pad
+    (chitubox_emit's per-member plate_z handling) own that region
+    instead; a ball there would sink half into the build plate.
+
+    F3(a): a cluster of exactly two endpoints whose members are
+    anti-parallel through the point (within COLINEAR_ANGLE_DEG) AND
+    whose end radii match within COLINEAR_RADIUS_FRAC is a straight
+    continuation (a bifurcation split or rewire seam, not a real
+    junction) -- v3 merged these cosmetically; no ball."""
     members = collect_members(members)
     if not members:
         return []
 
     # --- joint NODES: member endpoints that are articulation points.
-    nodes = []  # (point, radius_at_end, owner, embedded_model)
+    # outward_dir points AWAY from the node, along the member, toward its
+    # other end -- used by F3(a)'s colinear-pass-through test.
+    nodes = []  # (point, radius_at_end, owner, embedded_model, outward_dir)
     for m in members:
+        d = m["p1"] - m["p0"]
+        L = float(np.linalg.norm(d))
+        d_unit = d / L if L > 1e-9 else np.zeros(3)
         if m["kind"] != "stub":
-            nodes.append((m["p0"], m["r0"], m["owner"], m["embed_end"] == "p0"))
-        nodes.append((m["p1"], m["r1"], m["owner"], m["embed_end"] == "p1"))
+            if abs(float(m["p0"][2]) - plate_z) > PLATE_BAND_MM:
+                nodes.append((m["p0"], m["r0"], m["owner"], m["embed_end"] == "p0", d_unit))
+        if abs(float(m["p1"][2]) - plate_z) > PLATE_BAND_MM:
+            nodes.append((m["p1"], m["r1"], m["owner"], m["embed_end"] == "p1", -d_unit))
 
+    if not nodes:
+        return []
     pts = np.array([n[0] for n in nodes])
 
     # --- cluster coincident endpoints (doubled X-brace ends, fan hubs)
@@ -155,16 +203,30 @@ def compute_joint_balls(members, plate_z, cfg):
     balls = []
     for idxs in clusters.values():
         cluster_nodes = [nodes[i] for i in idxs]
+        if len(cluster_nodes) == 2:
+            # F3(a): exactly two endpoints, anti-parallel through the point
+            # and near-equal radii -- a straight continuation (bifurcation
+            # split / rewire seam), not a real junction. No ball.
+            (_, ra, _, _, dir_a), (_, rb, _, _, dir_b) = cluster_nodes
+            cosang = float(np.dot(dir_a, dir_b))
+            r_hi = max(ra, rb)
+            radii_close = r_hi <= 1e-12 or (r_hi - min(ra, rb)) <= COLINEAR_RADIUS_FRAC * r_hi
+            if cosang <= _COLINEAR_COS_MAX and radii_close:
+                continue
         r_end = max(n[1] for n in cluster_nodes)
         center = cluster_nodes[int(np.argmax([n[1] for n in cluster_nodes]))][0]
         embedded = any(n[3] for n in cluster_nodes)
         owner = None
         r_max = r_end
-        # fattest member whose axis passes through this joint
+        # fattest member whose axis passes through this joint. F3(c): size
+        # by the radius AT THE CLUSTER POINT (linear taper evaluated at the
+        # nearest point on the member's own axis), not the member's overall
+        # max end radius -- a tapered member's FAR end (irrelevant to this
+        # joint) must not dominate a ball sized for its near end.
         for m in axis_members:
-            dist = _point_segment_dist(center[None, :], m["p0"], m["p1"])[0]
-            if dist <= ON_AXIS_TOL_MM and max(m["r0"], m["r1"]) >= r_max:
-                r_max = max(m["r0"], m["r1"])
+            dist, local_r = _dist_and_local_radius(center, m["p0"], m["p1"], m["r0"], m["r1"])
+            if dist <= ON_AXIS_TOL_MM and local_r >= r_max:
+                r_max = local_r
                 owner = m["owner"]
         if owner is None:
             # no fatter through-member: owned by the fattest endpoint
@@ -173,6 +235,25 @@ def compute_joint_balls(members, plate_z, cfg):
         if embedded and len(cluster_nodes) == 1:
             # adsorbed model foot: adhesion fillet, no second member
             r_ball = MODEL_FOOT_FACTOR * r_end
+        # F1 addendum (verifier should-fix): the node-band exclusion above
+        # only tests the NODE z against PLATE_BAND_MM, BEFORE the ball's
+        # radius is known -- a node comfortably outside the 0.2mm band can
+        # still size up into a sphere whose BOTTOM crosses the plate
+        # (real-data specimen: node 0.806mm above plate_z, r=0.8268,
+        # sphere bottom 0.0211mm below plate_z). Now that r_ball is final,
+        # judge the actual sphere geometry: center_z - r < plate_z means
+        # the sphere would poke through the build plate.
+        #
+        # Design decision: DROP the ball rather than clamp its radius or
+        # lift its center. These near-plate balls sit on structure whose
+        # reinforcement the foot flare/pad already provides -- the same
+        # F1 rationale as the node-band exclusion just above -- so a
+        # dropped ball loses no real support. Clamping would silently
+        # shrink or reposition a ball sized against a real member's
+        # radius and make the emitted geometry lie about what was
+        # actually decided; a missing entry is honest and cheap to audit.
+        if center[2] - r_ball < plate_z:
+            continue
         balls.append(dict(center=np.asarray(center, float), r=float(r_ball),
                           owner=owner))
     return balls
