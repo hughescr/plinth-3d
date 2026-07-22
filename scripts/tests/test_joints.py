@@ -310,3 +310,67 @@ def test_enclosure_filter_is_deterministic_across_repeated_calls(cfg):
         assert np.array_equal(x["center"], y["center"])
         assert x["r"] == y["r"]
         assert x["owner"] == y["owner"]
+
+
+# --- adversarial-review follow-up: two real soundness blockers found in
+# the first cut of the enclosure diet (commit d89d7bc), both fixed in
+# joints.py (see the BLOCKER 1 / BLOCKER 2 comments above
+# ENCLOSURE_SAMPLE_N). Both fixtures below are confirmed failing-first:
+# each one's ball comes back ABSENT against d89d7bc's compute_joint_balls
+# (an adversarially-verified real gap silently dropped), and PRESENT
+# here.
+
+def test_shallow_bend_elbow_past_colinear_threshold_is_kept(cfg):
+    """BLOCKER 1 (sampling gap): a fixed N=256 Fibonacci grid has a
+    measured covering radius of ~9.7 degrees -- a real but narrow
+    uncovered sliver can dodge every sample and get wrongly certified
+    "fully covered". This is a genuine 2-member elbow (~10.47 degrees
+    past COLINEAR_ANGLE_DEG, so F3(a) does not exclude it -- it reaches
+    the enclosure filter as a real joint) with mismatched tapered radii,
+    found by searching for a bend whose lune of true uncovered surface
+    falls where this exact 256-point grid is weakest. Confirmed
+    failing-first: this exact geometry's ball comes back ABSENT from
+    d89d7bc's compute_joint_balls (adversarially verified real gap,
+    silently dropped) -- must be KEPT here."""
+    a = _m([-5.558145426892051, 4.857161874782175, -0.021789380968864618],
+           [0.0, 0.0, 0.0], 0.405434317753589, 0.3404914468815763,
+           ("trunk", 0), "trunk")
+    b = _m([0.0, 0.0, 0.0],
+           [4.626683565127615, -5.734357056678134, 0.4431987998012146],
+           0.32635767800974197, 0.31251030900947435, ("trunk", 1), "trunk")
+    balls = joints.compute_joint_balls([a, b], plate_z=-1000.0, cfg=cfg)
+    at_joint = [ball for ball in balls if np.linalg.norm(ball["center"]) < 1e-6]
+    assert len(at_joint) == 1
+
+
+def test_multiway_hub_with_subcoincide_jitter_is_kept(cfg):
+    """BLOCKER 2 (union non-star-shapedness): "every surface sample
+    covered implies the solid sphere is covered" is only valid when the
+    ball's CENTER lies inside every frustum credited for that coverage
+    (star-shaped-from-center via convexity). With members meeting under
+    sub-COINCIDE_TOL_MM (0.15mm) jitter -- exactly what that tolerance
+    exists to permit -- a member whose own endpoint is offset from the
+    ball's chosen center can appear to cover surface points without its
+    frustum containing the center itself, silently breaking that
+    inference. 4 members here, all p0's mutually within 0.15mm of each
+    other (a realistic jittered hub) but not bit-identical. Confirmed
+    failing-first: this exact geometry's ball comes back ABSENT from
+    d89d7bc's compute_joint_balls (adversarially verified real ~0.036mm
+    gap, silently dropped) -- must be KEPT here."""
+    m0 = _m([-0.0012763566500100013, -0.02018765375559623, -0.0255239036087158],
+            [0.8935354235585666, -9.178482782952365, -0.33559696897299834],
+            0.37905493221448316, 0.37905493221448316, ("trunk", 0), "trunk")
+    m1 = _m([-0.03286932321566698, 0.016295075739409165, -0.046784730941915216],
+            [-3.7516483645842533, 5.112004744985008, -2.272011145171266],
+            0.3855562378313358, 0.3855562378313358, ("trunk", 1), "trunk")
+    m2 = _m([-0.07496186943470244, 0.00031463602499591867, 0.012583727280577122],
+            [1.8226767721828085, 3.1898157854197215, -3.832257784358506],
+            0.3126512418157271, 0.3126512418157271, ("trunk", 2), "trunk")
+    m3 = _m([-0.0006109511611611406, -0.02637707564935988, -0.04956143384038976],
+            [1.6189135678109392, -4.498665682157377, 9.512731015295648],
+            0.38313887477261743, 0.38313887477261743, ("trunk", 3), "trunk")
+    balls = joints.compute_joint_balls([m0, m1, m2, m3], plate_z=-1000.0, cfg=cfg)
+    at_hub = [ball for ball in balls if np.linalg.norm(ball["center"]) < 0.2]
+    assert len(at_hub) == 1
+    # sized by the fattest member (m1, r=0.3856) touching the hub
+    assert abs(at_hub[0]["r"] - cfg.joint_ball_factor * 0.3855562378313358) < 1e-9

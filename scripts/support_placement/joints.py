@@ -75,7 +75,77 @@ ENCLOSURE_TOL_MM = 0.02
 # only "escape" from the union is smaller than this changes nothing that
 # actually resolves on the plate. This is a fixed constant, not a config
 # knob -- it is a printer-physics fact, not a per-model tuning choice.
-ENCLOSURE_SAMPLE_N = 256  # fixed sample count, see _fibonacci_sphere_dirs
+ENCLOSURE_SAMPLE_N = 256  # coarse global sample count, see _fibonacci_sphere_dirs
+# Adversarial-review findings (independent verifier, two blockers found
+# on the first cut of this filter, both fixed here -- see
+# _ball_enclosed's docstring for the full pipeline these motivate):
+#
+# BLOCKER 1 (sampling gap): a fixed N=256 Fibonacci grid has a MEASURED
+# covering radius of ~9.7 degrees (worst point on the sphere is that far
+# from every sample direction) -- a real but narrow uncovered sliver
+# (e.g. two members meeting at a shallow bend just past
+# COLINEAR_ANGLE_DEG) can dodge every one of the 256 samples and get
+# wrongly certified "fully covered". A fixed-N global sampler alone
+# cannot promise catching every gap down to ENCLOSURE_TOL_MM. Fixed by
+# three targeted, ADAPTIVE follow-up passes that only run when the
+# coarse grid reports full coverage -- _seams_confirm_enclosed (dense
+# resampling in a band straddling every credited member's own coverage
+# boundary -- flat cap OR, for a member thinner than the ball, the cone
+# around its own axis; any real gap is proven to border one of these),
+# _corners_confirm_enclosed (dense resampling around the exact points
+# where two members' boundaries cross -- multi-member "corner" gaps a
+# single member's own azimuthal sweep can straddle without landing on),
+# and _meridian_confirm_enclosed (analytically solves, per meridian,
+# exactly where every OTHER member's boundary crosses it, for hand-offs
+# that don't happen to fall through a true 3-D corner). Also fixed:
+# _in_frustum_mask's distance-to-solid math had its own bug in the
+# "past an end AND radially outside that end's disk" corner (it measured
+# distance to the endpoint instead of to the disk's rim, silently over-
+# crediting coverage there) -- see that function's docstring.
+#
+# BLOCKER 2 (union non-star-shapedness): "every surface sample covered
+# implies the solid sphere is covered" is only valid when the ball's
+# CENTER lies inside every frustum being credited for that coverage --
+# a convex frustum containing both the center and a covered surface
+# point contains the whole segment between them (star-shaped-from-
+# center), which is what actually licenses the surface-sampling
+# shortcut. With 3+ members meeting under sub-COINCIDE_TOL_MM jitter --
+# exactly what that tolerance exists to permit -- a member whose own
+# endpoint is offset from the ball's chosen center can cover some
+# surface points without its frustum containing the center itself,
+# silently breaking that inference. Fixed in _ball_enclosed: only
+# CREDITED members (center verified inside their own frustum) may
+# contribute coverage.
+#
+# The enclosure PROOF (the whole pipeline above) runs against a tighter
+# internal tolerance than the stated ENCLOSURE_TOL_MM feature-scale
+# bound -- a 10% safety margin against the fact that any FINITE
+# sampling/densification scheme, however dense, cannot certify an exact
+# real-valued threshold with zero residual risk at the boundary itself
+# (adversarial review found real cases within ~0.0003mm of the raw
+# 0.02mm line that a still-finite densification pass could miss).
+# Proving containment at 0.018mm instead means any ball actually
+# dropped has a true worst-case gap safely under the stated 0.02mm
+# argument, with margin to spare -- this doesn't change what the
+# tolerance MEANS (0.02mm is still the printable-feature-scale fact
+# motivating the diet), only how confidently the proof has to clear it
+# before trusting a drop.
+ENCLOSURE_PROOF_TOL_MM = 0.9 * ENCLOSURE_TOL_MM
+_SEAM_N_THETA = 720  # 0.5 degree azimuthal resolution around each seam
+# Deliberately swept well past the coarse grid's own ~10 degree measured
+# covering radius: an uncovered region bordering a seam is not bounded
+# by that number (a real repro measured 13.6 degrees deep from the
+# nearest seam and was NOT caught by the 256-point coarse grid either --
+# "the coarse grid backstops anything beyond ~10 degrees" is false).
+# Swept out to 60 degrees so only a gap that consumes most of a
+# credited member's own hemisphere could still be missed here, and a
+# gap that large is caught by the coarse 256-point grid directly
+# (it is no longer a thin sliver).
+_SEAM_PHI_BANDS_DEG = (0.005, 0.01, 0.02, 0.05, 0.12, 0.3, 0.7, 1.5, 3.0, 6.0,
+                        11.0, 20.0, 35.0, 50.0, 65.0)
+_SEAM_THETAS = np.linspace(0.0, 2.0 * np.pi, _SEAM_N_THETA, endpoint=False)
+_SEAM_COS_T = np.cos(_SEAM_THETAS)
+_SEAM_SIN_T = np.sin(_SEAM_THETAS)
 
 
 def _fibonacci_sphere_dirs(n):
@@ -98,52 +168,364 @@ _ENCLOSURE_SAMPLE_DIRS = _fibonacci_sphere_dirs(ENCLOSURE_SAMPLE_N)
 
 def _in_frustum_mask(points, p0, p1, r0, r1, tol):
     """Boolean (N,) containment of `points` (N,3) in the frustum p0->p1
-    (radius r0 at p0, r1 at p1), tolerant by `tol` mm.
+    (radius r0 at p0, r1 at p1) -- true Euclidean distance to the
+    solid, flat-capped frustum (a cone with two flat end DISKS, not a
+    rounded-cap capsule), tolerant by `tol` mm.
 
-    Two gates, both required (this is a FRUSTUM test -- flat end caps --
-    not a rounded-cap capsule): (1) clamped-axial -- the point's raw
-    (unclamped) projection onto the p0->p1 axis must itself fall within
-    the member's own [0, length] extent (plus `tol` slack for the same
-    small drift COINCIDE_TOL_MM already tolerates between "the same"
-    endpoint recorded by two different members); a point whose axial
-    projection falls outside that range is beyond the member's own flat
-    end plane and is NOT part of its frustum, no matter how close
-    radially -- this is what keeps a real elbow/miter gap from being
-    waved through by an endpoint's own radius. (2) radial -- for a point
-    whose axial position DOES qualify, the perpendicular distance from
-    the point to the (clamped) axis must be within the taper-interpolated
-    radius at that point, plus `tol`."""
+    A point's position relative to the member decomposes into an axial
+    coordinate (mm from p0, unclamped) and a radial (perpendicular-to-
+    axis) distance. Three regions, each with its own correct nearest-
+    point-on-solid distance (this is NOT "clamp axial, then take radial
+    distance from the clamped point" -- an earlier version of this
+    function did exactly that, which collapses to measuring distance to
+    the ENDPOINT rather than to the flat cap's disk/rim whenever a
+    point is both past an end and radially outside that end's radius;
+    that silently OVER-credited coverage in that corner region, an
+    adversarial-review finding -- see BLOCKER comments above
+    ENCLOSURE_SAMPLE_N):
+
+    - axial position within [0, L]: distance is the radial overshoot
+      past the taper-interpolated radius there (0 if inside).
+    - axial position past an end, radially INSIDE that end's disk:
+      distance is just the axial overshoot (nearest point is straight
+      "below" on the flat cap).
+    - axial position past an end, radially OUTSIDE that end's disk:
+      distance is to the disk's RIM circle (axial and radial overshoot
+      combined via Pythagoras) -- the case the old formula got wrong."""
     d = p1 - p0
     L2 = float(d @ d)
     if L2 < 1e-18:
         dist = np.linalg.norm(points - p0[None, :], axis=1)
         return dist <= r0 + tol
     L = float(np.sqrt(L2))
-    s = (points - p0[None, :]) @ d / L2       # raw (unclamped) fraction
-    axial_mm = s * L                          # signed mm offset from p0
-    in_range = (axial_mm >= -tol) & (axial_mm <= L + tol)
-    t = np.clip(s, 0.0, 1.0)
-    proj = p0[None, :] + t[:, None] * d[None, :]
-    dist = np.linalg.norm(points - proj, axis=1)
+    d_hat = d / L
+    s = (points - p0[None, :]) @ d_hat        # axial coordinate, mm, from p0
+    rel = points - p0[None, :] - s[:, None] * d_hat[None, :]
+    radial = np.linalg.norm(rel, axis=1)
+    t = np.clip(s, 0.0, L) / L
     local_r = r0 + (r1 - r0) * t
-    return in_range & (dist <= local_r + tol)
+
+    dist = np.empty(len(points))
+    inside_span = (s >= 0.0) & (s <= L)
+    dist[inside_span] = np.maximum(0.0, radial[inside_span] - local_r[inside_span])
+    below = s < 0.0
+    if below.any():
+        axial_over = -s[below]
+        rad = radial[below]
+        on_disk = rad <= r0
+        dist[below] = np.where(on_disk, axial_over, np.hypot(axial_over, rad - r0))
+    above = s > L
+    if above.any():
+        axial_over = s[above] - L
+        rad = radial[above]
+        on_disk = rad <= r1
+        dist[above] = np.where(on_disk, axial_over, np.hypot(axial_over, rad - r1))
+    return dist <= tol
+
+
+def _perp_basis(axis):
+    """Two unit vectors e1, e2 completing `axis` (unit) to an orthonormal
+    basis -- deterministic (fixed reference vector choice, no RNG)."""
+    ref = np.array([1.0, 0.0, 0.0]) if abs(axis[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    e1 = ref - axis * (ref @ axis)
+    e1 = e1 / np.linalg.norm(e1)
+    e2 = np.cross(axis, e1)
+    return e1, e2
+
+
+def _seam_boundaries(center, r, members, tol):
+    """For every member, yield (axis, phi0) for each of its two sides
+    (toward p1, toward p0) whenever that side's coverage is NOT
+    unconditional -- axis/phi0 describe the boundary in an elevation
+    convention: this member covers a sample direction u near this seam
+    iff u.axis >= sin(phi0).
+
+    A member's coverage on one side is bounded by TWO independent
+    conditions, and the real boundary is whichever is more restrictive
+    (thresholds combine by max, since both are of the form u.axis>=k):
+
+    - axial: the ball's sphere reaches past that end's flat-cap plane
+      (a thin/short member -- the case the module docstring's elbow
+      story is about).
+    - radial: the member is simply THINNER than this ball (local
+      radius < r) -- even mid-span, comfortably clear of both its own
+      ends, such a member only covers a CONE around its own axis (half-
+      angle arcsin(local_r/r)), never a full hemisphere. Missing this
+      was a real bug found by adversarial review: a thin credited
+      member was silently treated as covering as much as a same-radius
+      one would, understating how little of the sphere it actually
+      backs up.
+
+    A side contributes no boundary only when BOTH conditions are slack
+    (member reaches well past this ball in that direction AND is at
+    least as fat as the ball there) -- the "mid-span fat through-trunk"
+    case, which needs no seam care at all."""
+    out = []
+    for m in members:
+        p0, p1 = m["p0"], m["p1"]
+        d = p1 - p0
+        L2 = float(d @ d)
+        if L2 < 1e-18:
+            continue
+        L = float(np.sqrt(L2))
+        d_hat = d / L
+        s0 = float((center - p0) @ d_hat)  # center's axial offset from p0
+        r_min = min(float(m["r0"]), float(m["r1"]))  # conservative: never overstate radial reach
+        radial_ratio = (r_min + tol) / r
+        k_radial = float(np.sqrt(max(0.0, 1.0 - radial_ratio * radial_ratio))) if radial_ratio < 1.0 else None
+
+        c1 = (L + tol - s0) / r   # near-p1 axial plane, in units of r from center
+        k_p1 = -c1
+        if k_radial is not None:
+            k_p1 = max(k_p1, k_radial)
+        if abs(k_p1) < 1.0:
+            out.append((-d_hat, float(np.arcsin(np.clip(k_p1, -1.0, 1.0)))))
+
+        c0 = (tol - s0) / r       # near-p0 axial plane, in units of r from center
+        k_p0 = c0
+        if k_radial is not None:
+            k_p0 = max(k_p0, k_radial)
+        if abs(k_p0) < 1.0:
+            out.append((d_hat, float(np.arcsin(np.clip(k_p0, -1.0, 1.0)))))
+    return out
+
+
+_CORNER_PATCH_N_THETA = 48
+_CORNER_PATCH_RADII_DEG = (0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 4.0,
+                            8.0, 15.0, 25.0, 40.0)
+_CORNER_THETAS = np.linspace(0.0, 2.0 * np.pi, _CORNER_PATCH_N_THETA, endpoint=False)
+_CORNER_COS_T = np.cos(_CORNER_THETAS)
+_CORNER_SIN_T = np.sin(_CORNER_THETAS)
+
+
+def _circle_circle_intersections(n1, k1, n2, k2):
+    """Unit-vector solutions of {u.n1=k1, u.n2=k2, |u|=1} -- the (up to
+    two) directions where two members' own seam circles cross. n1,n2
+    are the members' seam axes (unit), k1=sin(phi0_1), k2=sin(phi0_2)
+    the corresponding boundary thresholds from _seam_boundaries.
+    Standard basis expansion u=a.n1+b.n2+c'.w (w = unit n1 x n2);
+    returns [] if the axes are (near-)parallel or the circles don't
+    meet."""
+    m = float(n1 @ n2)
+    denom = 1.0 - m * m
+    if denom < 1e-10:
+        return []
+    a = (k1 - k2 * m) / denom
+    b = (k2 - k1 * m) / denom
+    rem = 1.0 - a * a - b * b - 2.0 * a * b * m
+    if rem < 0.0:
+        return []
+    cross = np.cross(n1, n2)
+    w = cross / np.sqrt(denom)
+    base = a * n1 + b * n2
+    cprime = float(np.sqrt(max(rem, 0.0)))
+    if cprime < 1e-9:
+        norm = np.linalg.norm(base)
+        return [base / norm] if norm > 1e-9 else []
+    return [base + cprime * w, base - cprime * w]
+
+
+def _corners_confirm_enclosed(center, r, credited, tol):
+    """Third-opinion check (multi-member "corner" case): where 3+ near-
+    seam members meet, the deepest residual gap can sit at a point where
+    TWO members' own seam circles cross -- close to both boundaries at
+    once -- which a single member's own 1-D azimuthal seam sweep
+    (_seams_confirm_enclosed) is not guaranteed to land exactly on
+    (its theta step is a fixed global grid, not centered on that
+    corner). For every PAIR of near-seam boundaries, compute their
+    (up to two) exact crossing directions and densely resample a small
+    disk of directions around each -- catches gaps localized at these
+    boundary intersections regardless of azimuthal alignment."""
+    boundaries = _seam_boundaries(center, r, credited, tol)
+    if len(boundaries) < 2:
+        return True
+    for i in range(len(boundaries)):
+        axis_i, phi0_i = boundaries[i]
+        k_i = float(np.sin(phi0_i))
+        for j in range(i + 1, len(boundaries)):
+            axis_j, phi0_j = boundaries[j]
+            k_j = float(np.sin(phi0_j))
+            for u0 in _circle_circle_intersections(axis_i, k_i, axis_j, k_j):
+                e1, e2 = _perp_basis(u0)
+                for rad_deg in _CORNER_PATCH_RADII_DEG:
+                    rad = np.radians(rad_deg)
+                    cos_r, sin_r = float(np.cos(rad)), float(np.sin(rad))
+                    dirs = (cos_r * u0[None, :]
+                            + sin_r * (_CORNER_COS_T[:, None] * e1[None, :]
+                                        + _CORNER_SIN_T[:, None] * e2[None, :]))
+                    pts = center[None, :] + r * dirs
+                    covered = np.zeros(len(pts), dtype=bool)
+                    for m in credited:
+                        covered |= _in_frustum_mask(pts, m["p0"], m["p1"], m["r0"], m["r1"], tol)
+                        if covered.all():
+                            break
+                    if not covered.all():
+                        return False
+    return True
+
+
+_MERIDIAN_EPS_DEG = np.radians(np.array([0.003, 0.01, 0.04, 0.15, 0.6]))
+
+
+def _meridian_confirm_enclosed(center, r, credited, tol):
+    """Fourth-opinion check: restricted to any ONE near-seam member's
+    azimuthal sweep (a meridian through its axis), every OTHER credited
+    member's own coverage is a single contiguous elevation interval
+    (its boundary crosses that meridian at 0, 1, or 2 exact,
+    analytically solvable points). The union's hand-off point on that
+    meridian therefore always sits at one of these crossings -- not
+    necessarily at any of _seams_confirm_enclosed's hand-picked global
+    bands, and not necessarily at one of _corners_confirm_enclosed's
+    exact circle-circle vertices either (two members can hand off
+    coverage to each other along a meridian that does not pass through
+    their true 3-D intersection point). Solves u(phi).axis_m = k_m
+    (A.sin(phi)+B.cos(phi)=C) in closed form per theta, then samples
+    immediately on both sides of every solution."""
+    boundaries = _seam_boundaries(center, r, credited, tol)
+    if not boundaries:
+        return True
+    cos_t, sin_t = _SEAM_COS_T, _SEAM_SIN_T
+    for axis0, _phi0 in boundaries:
+        e1, e2 = _perp_basis(axis0)
+        e0_arr = cos_t[:, None] * e1[None, :] + sin_t[:, None] * e2[None, :]
+        for axis_m, phi0_m in boundaries:
+            A = float(axis0 @ axis_m)
+            B_arr = e0_arr @ axis_m
+            C = float(np.sin(phi0_m))
+            R_arr = np.hypot(A, B_arr)
+            valid = R_arr >= abs(C)
+            if not valid.any():
+                continue
+            ratio = np.clip(np.where(valid, C / np.where(valid, R_arr, 1.0), 0.0), -1.0, 1.0)
+            delta_arr = np.arctan2(B_arr, A)
+            base_arr = np.arcsin(ratio)
+            for cand_arr in (base_arr - delta_arr, np.pi - base_arr - delta_arr):
+                wrapped = (cand_arr + np.pi) % (2.0 * np.pi) - np.pi
+                keep = valid & (wrapped >= -np.pi / 2.0) & (wrapped <= np.pi / 2.0)
+                if not keep.any():
+                    continue
+                idx = np.nonzero(keep)[0]
+                phis_c = wrapped[idx]
+                e0_k = e0_arr[idx]
+                for eps in _MERIDIAN_EPS_DEG:
+                    for sign in (-1.0, 1.0):
+                        phi = phis_c + sign * eps
+                        in_range = (phi >= -np.pi / 2.0) & (phi <= np.pi / 2.0)
+                        if not in_range.any():
+                            continue
+                        phi_k = phi[in_range]
+                        e0_kk = e0_k[in_range]
+                        pts = (center[None, :]
+                               + r * np.sin(phi_k)[:, None] * axis0[None, :]
+                               + r * np.cos(phi_k)[:, None] * e0_kk)
+                        covered = np.zeros(len(pts), dtype=bool)
+                        for mm in credited:
+                            covered |= _in_frustum_mask(pts, mm["p0"], mm["p1"], mm["r0"], mm["r1"], tol)
+                            if covered.all():
+                                break
+                        if not covered.all():
+                            return False
+    return True
+
+
+def _seams_confirm_enclosed(center, r, credited, tol):
+    """Second-opinion check, run only after the coarse global grid
+    already found every one of its 256 samples covered: densely
+    resample a thin band straddling every credited member's own seam
+    (its flat-cap plane, wherever it crosses this ball's sphere).
+
+    Why a real gap must border a seam: the union of the credited
+    members' frustums is a union of convex sets; the boundary of that
+    union (where covered turns to uncovered) is contained in the union
+    of the INDIVIDUAL members' own boundaries (a union can only gain
+    area, never lose it, by adding a set -- so its edge can't cut
+    through a region two sets both already agree on). So if any surface
+    point is genuinely uncovered, walking from it toward covered
+    territory crosses some member's own seam -- meaning a thin enough
+    band around every seam, swept through the full 360 degrees, will
+    graze any such gap regardless of how narrow it is, INCLUDING gaps
+    the coarse 256-point grid's ~10 degree covering radius (measured)
+    dodges entirely. Each band sample is deliberately placed strictly on
+    the uncovered side of its own seam (phi0 - band, never at phi0
+    itself, where the member trivially covers by construction and would
+    tell us nothing)."""
+    for axis, phi0 in _seam_boundaries(center, r, credited, tol):
+        e1, e2 = _perp_basis(axis)
+        for band_deg in _SEAM_PHI_BANDS_DEG:
+            phi = phi0 - np.radians(band_deg)
+            if phi <= -np.pi / 2.0:
+                continue
+            cos_phi, sin_phi = float(np.cos(phi)), float(np.sin(phi))
+            pts = (center[None, :]
+                   + r * sin_phi * axis[None, :]
+                   + r * cos_phi * (_SEAM_COS_T[:, None] * e1[None, :]
+                                     + _SEAM_SIN_T[:, None] * e2[None, :]))
+            covered = np.zeros(len(pts), dtype=bool)
+            for m in credited:
+                covered |= _in_frustum_mask(pts, m["p0"], m["p1"], m["r0"], m["r1"], tol)
+                if covered.all():
+                    break
+            if not covered.all():
+                return False
+    return True
 
 
 def _ball_enclosed(center, r, touching_members, tol):
-    """True iff every one of the fixed Fibonacci-sphere sample points on
-    this ball's surface is contained in at least one touching member's
-    frustum. Deterministic (fixed sample directions, no RNG) and
-    conservative (a single uncovered sample anywhere keeps the ball; an
-    empty touching set or non-positive radius never counts as enclosed)."""
+    """True iff the ball's solid sphere is provably contained in the
+    union of its touching members' own frustums. Conservative by
+    construction at every stage (a single uncovered sample, anywhere,
+    at any stage, keeps the ball; an empty credited set or non-positive
+    radius never counts as enclosed) and deterministic (fixed sample
+    directions throughout, no RNG).
+
+    Three stages, addressing the soundness gaps a from-scratch adversarial
+    review found in the first cut of this filter (see the BLOCKER
+    comments above ENCLOSURE_SAMPLE_N):
+
+    1. Star-shaped credit restriction (blocker 2): only members whose
+       frustum contains the ball's CENTER are credited -- this is what
+       makes "surface sample covered" a valid stand-in for "the solid
+       ray from center to that sample is covered" (convexity).
+    2. Coarse global check, then a seam-targeted second opinion
+       (blocker 1): the fixed 256-point grid is cheap and catches large
+       gaps immediately; only if it reports full coverage do we pay for
+       _seams_confirm_enclosed's dense, TARGETED resampling near every
+       credited member's own flat-cap plane, which is where any gap the
+       coarse grid could have missed is guaranteed to border.
+    3. Corner second-opinion (multi-member follow-up on blocker 1): with
+       3+ near-seam members, the deepest residual gap can sit exactly
+       where two members' own seam circles cross -- close to both
+       boundaries simultaneously, which a single member's own azimuthal
+       sweep isn't guaranteed to land on. _corners_confirm_enclosed
+       resamples densely around every such exact crossing.
+    4. Meridian hand-off check (multi-member follow-up on blocker 1,
+       general case): a hand-off between two members' coverage can also
+       occur along a meridian that does NOT pass through their true
+       circle-circle vertex -- _meridian_confirm_enclosed analytically
+       solves, per meridian, exactly where every other member's own
+       boundary crosses it, and samples both sides of every crossing."""
     if r <= 0.0 or not touching_members:
         return False
+    center_pt = center[None, :]
+    credited = [m for m in touching_members
+                if bool(_in_frustum_mask(center_pt, m["p0"], m["p1"], m["r0"], m["r1"], tol)[0])]
+    if not credited:
+        return False
+
     samples = center[None, :] + r * _ENCLOSURE_SAMPLE_DIRS
     covered = np.zeros(len(samples), dtype=bool)
-    for m in touching_members:
+    for m in credited:
         covered |= _in_frustum_mask(samples, m["p0"], m["p1"], m["r0"], m["r1"], tol)
         if covered.all():
-            return True
-    return bool(covered.all())
+            break
+    if not covered.all():
+        return False
+
+    if not _seams_confirm_enclosed(center, r, credited, tol):
+        return False
+    if not _corners_confirm_enclosed(center, r, credited, tol):
+        return False
+    return _meridian_confirm_enclosed(center, r, credited, tol)
 
 
 def _point_segment_dist(points, p0, p1):
@@ -373,7 +755,7 @@ def compute_joint_balls(members, plate_z, cfg):
         # just above: every other ball here keeps the exact center/radius
         # its sizing decided.
         if _ball_enclosed(np.asarray(center, float), float(r_ball),
-                           list(touching_members.values()), ENCLOSURE_TOL_MM):
+                           list(touching_members.values()), ENCLOSURE_PROOF_TOL_MM):
             continue
         balls.append(dict(center=np.asarray(center, float), r=float(r_ball),
                           owner=owner))
