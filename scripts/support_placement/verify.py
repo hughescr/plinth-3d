@@ -319,15 +319,19 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
     skips all three (reported as empty/None) rather than gating on them.
 
     `gate_on_removal` (Phase 5 wiring decision, see the p5-removal commit
-    message and the orchestrator's own review of it): the charter (#10)
-    says the removal gate's hard-failure case -- a residual set no
-    removal order clears -- is "a BLOCKER gate, wired into verify ok".
-    Whether that should actually flip `ok` on THIS engine's current
-    geometry is a product decision the implementer was told not to make
-    unilaterally; removal_report/removal_violations are ALWAYS computed
-    and surfaced (measurement), but they only affect `ok` when the caller
-    opts in with gate_on_removal=True. Defaults False so no existing
-    caller's acceptance behavior changes by importing this function."""
+    message; amended 2026-07-22): the charter (#10) originally called the
+    removal gate's hard-failure case -- a residual set no removal order
+    clears -- "a BLOCKER gate, wired into verify ok". Craig's 2026-07-22
+    ruling (design-v4.md #10 amendment) supersedes that language:
+    removal_report is diagnostic/report-only, removability is the least
+    important optimization axis, and nothing it finds -- caged sets
+    included -- may block an otherwise-superior layout. Per that ruling,
+    removal_report/removal_violations are ALWAYS computed and surfaced
+    (measurement only); gate_on_removal stays an inert toggle no shipped
+    caller sets (setting it True would still AND removal_violations into
+    `ok` mechanically, but doing so now runs against the charter, not
+    with it). Defaults False so no existing caller's acceptance behavior
+    changes by importing this function."""
     coverage = coverage_report(mesh, islands, contacts, cfg)
     clearance = clearance_report(mesh, members, cfg, surface_tree=surface_tree)
     load = load_report(carried_area_mm2, tip_r_mm, cfg)
