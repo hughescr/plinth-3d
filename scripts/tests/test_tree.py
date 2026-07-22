@@ -156,6 +156,93 @@ def test_commit_keeps_mutations_and_pops_checkpoint():
     assert f._cp_stack == []
 
 
+# ------------------------------------------------------------- brace reg --
+def test_forest_starts_with_empty_brace_registry():
+    f = tm.Forest()
+    assert f.braces == []
+
+
+def test_add_brace_registers_member_without_entering_tree_topology():
+    """design-v4.md #9 / SPEC-BRACING Part 1: a brace is a Forest member
+    (rides certificates/volume/printability generically) but NEVER enters
+    roots/children/terminal_of -- it's a graph edge, not topology."""
+    f = tm.Forest()
+    host = f.add_member(_member([0, 0, 0], [0, 0, -10]))
+    b = f.add_brace(_member([1, 1, 1], [2, 2, 2], kind="brace",
+                             owner=("brace", 0)))
+    assert b in range(len(f.members))
+    assert f.members[b].kind == "brace"
+    assert b in f.braces
+    assert b not in f.roots
+    assert f.parent[b] is None
+    assert f.children[b] == []
+    for ch in f.children:
+        assert b not in ch
+    assert b not in f.terminal_of.values()
+    # host member unaffected
+    assert host in f.roots
+
+
+def test_checkpoint_rollback_removes_newly_appended_brace_and_registry_entry():
+    f = tm.Forest()
+    f.add_member(_member([0, 0, 0], [0, 0, -10]))
+    cp = f.checkpoint()
+    b = f.add_brace(_member([1, 1, 1], [2, 2, 2], kind="brace",
+                             owner=("brace", 0)))
+    assert b in f.braces
+    assert len(f.members) == 2
+    f.rollback(cp)
+    assert len(f.members) == 1
+    assert f.braces == []
+
+
+def test_checkpoint_commit_keeps_brace_and_registry_entry():
+    f = tm.Forest()
+    f.add_member(_member([0, 0, 0], [0, 0, -10]))
+    cp = f.checkpoint()
+    b = f.add_brace(_member([1, 1, 1], [2, 2, 2], kind="brace",
+                             owner=("brace", 0)))
+    f.commit(cp)
+    assert b in f.braces
+    assert len(f.members) == 2
+    assert f._cp_stack == []
+
+
+def test_nested_checkpoint_rollback_inner_keeps_outer_brace():
+    """Nested transaction correctness: an outer-committed... no, an
+    outer-LEVEL brace survives an INNER checkpoint's rollback, while the
+    inner brace itself is undone."""
+    f = tm.Forest()
+    f.add_member(_member([0, 0, 0], [0, 0, -10]))
+    cp_outer = f.checkpoint()
+    b_outer = f.add_brace(_member([1, 1, 1], [2, 2, 2], kind="brace",
+                                   owner=("brace", 0)))
+    cp_inner = f.checkpoint()
+    b_inner = f.add_brace(_member([3, 3, 3], [4, 4, 4], kind="brace",
+                                   owner=("brace", 1)))
+    assert sorted(f.braces) == sorted([b_outer, b_inner])
+    f.rollback(cp_inner)
+    assert f.braces == [b_outer]
+    assert len(f.members) == 2
+    f.commit(cp_outer)
+    assert f.braces == [b_outer]
+    assert f._cp_stack == []
+
+
+def test_forest_pickle_round_trips_braces(cfg):
+    f = tm.Forest()
+    f.add_member(_member([0, 0, 0], [0, 0, -10]))
+    f.add_brace(_member([1, 1, 1], [2, 2, 2], kind="brace", owner=("brace", 0)))
+    f.add_brace(_member([1, 1, 1], [2, 2, 5], kind="model_rung",
+                         owner=("model_rung", 0), embed_end="p1"))
+    import pickle
+    f2 = pickle.loads(pickle.dumps(f))
+    assert f2.braces == f.braces
+    assert len(f2.members) == len(f.members)
+    assert [m.kind for m in f2.members] == [m.kind for m in f.members]
+    assert f2.roots == f.roots
+
+
 # ---------------------------------------------------------------- volume --
 def test_volume_report_matches_hand_computed_frustum_and_ball():
     m = _member([0, 0, 0], [0, 0, -10], r0=1.0, r1=2.0, kind="trunk")
@@ -246,3 +333,25 @@ def test_printability_report_flags_horizontal_non_rung(cfg):
     violations = tm.printability_report([m], cfg)
     assert len(violations) == 1
     assert violations[0]["reason"] == "near_horizontal"
+
+
+def test_printability_report_passes_45_degree_brace_rod(cfg):
+    """SPEC-BRACING #9: a 45-degree brace rod (v3.6's hardcoded rise==d
+    construction) must pass the cone rule at any radius -- tan(45) is the
+    minimum budget of either angle family."""
+    m = _member([0, 0, 0], [8, 0, 8], r0=0.5, r1=0.5, kind="brace")
+    assert tm.printability_report([m], cfg) == []
+
+
+def test_volume_report_includes_brace_kinds_in_by_kind_ml():
+    """SPEC-BRACING Part 1 item 4: brace kinds ride volume_report generically
+    -- no special-casing needed, just confirm the by_kind_ml bucketing
+    covers "brace" and "model_rung" like any other kind string."""
+    m1 = _member([0, 0, 0], [8, 0, 8], r0=0.5, r1=0.5, kind="brace")
+    m2 = _member([0, 0, 0], [3, 0, 0], r0=0.5, r1=0.5, kind="model_rung",
+                  embed_end="p1")
+    report = tm.volume_report([m1, m2], [])
+    assert "brace" in report["by_kind_ml"]
+    assert "model_rung" in report["by_kind_ml"]
+    assert report["member_ml"] == pytest.approx(
+        report["by_kind_ml"]["brace"] + report["by_kind_ml"]["model_rung"])
