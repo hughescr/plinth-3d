@@ -1,6 +1,7 @@
 import numpy as np
 from scipy.spatial import cKDTree
 from support_placement import perception, placement, routing, verify, mesh_io, joints
+from support_placement import tree as tm
 
 
 def _m(p0, p1, r0, r1, owner, kind, embed_end=None):
@@ -9,6 +10,10 @@ def _m(p0, p1, r0, r1, owner, kind, embed_end=None):
     unchanged."""
     return dict(p0=np.asarray(p0, float), p1=np.asarray(p1, float),
                 r0=r0, r1=r1, owner=owner, kind=kind, embed_end=embed_end)
+
+
+def _member(p0, p1, r0=0.5, r1=0.5, kind="trunk", owner=("contact", 0), embed_end=None):
+    return tm.Member(p0=p0, p1=p1, r0=r0, r1=r1, kind=kind, owner=owner, embed_end=embed_end)
 
 
 def test_coverage_report_flags_island_with_no_contacts(table_mesh, cfg):
@@ -172,6 +177,54 @@ def test_self_verify_ok_on_a_clean_small_case(table_mesh, cfg):
                                  cfg, plate_z)
     assert report["uncovered_islands"] == []
     assert report["load_violations"] == []
+
+
+# ------------------------------------------------ p6-reach consistency fix --
+# self_verify's printability check used to run over the RAW forest.members
+# (every member ever appended, including tree.Forest.dead retirees) instead
+# of the SAME caller-filtered, dead-excluding `members` list every sibling
+# check (clearance, connectivity) already uses -- verifier-authorized,
+# one-line fix (self_verify's own docstring has the full rationale).
+
+def test_self_verify_printability_ignores_dead_members(box_mesh, cfg):
+    """TDD failing-first: forest.members (raw) still contains a DEAD,
+    near-horizontal member (mark_dead never deletes -- tree.Forest's
+    append-only protocol, so checkpoint/rollback indices stay stable) --
+    exactly the shape rewire.py's degenerate-retire move leaves behind.
+    A dead member is never emitted or printed (emission consumes the
+    SAME filtered live set `members` is built from here), so gating on
+    its own stale geometry checks something that will never actually
+    print. `members` (the correctly-filtered list) excludes it entirely
+    -- printability_violations must be empty."""
+    f = tm.Forest()
+    live_idx = f.add_member(_member([0.0, 0.0, 0.0], [0.0, 0.0, 10.0], kind="trunk"))
+    dead_idx = f.add_member(_member([5.0, 0.0, 5.0], [5.0, 0.0, 5.0 + 1e-8], kind="shoot"))
+    f.mark_dead(dead_idx)
+    assert dead_idx in f.dead
+
+    members = [f.members[live_idx]]  # mirrors engine.live_member_lists' own
+    # dead-exclusion -- exactly what would actually be emitted/printed.
+
+    report = verify.self_verify(box_mesh, [], [], members, np.array([]), np.array([]),
+                                 cfg, 0.0, forest=f)
+    assert report["printability_violations"] == []
+
+
+def test_self_verify_printability_still_catches_a_live_violation(box_mesh, cfg):
+    """The inverse guard: a LIVE near-horizontal member must still be
+    caught -- this fix narrows the CHECKED SET to what's actually live,
+    it must never weaken the rule itself. Passes both before and after
+    the fix; pinned here so a future change can't silently break it
+    while "fixing" the dead-member case above."""
+    f = tm.Forest()
+    bad_idx = f.add_member(_member([0.0, 0.0, 5.0], [0.0, 0.0, 5.0 + 1e-8], kind="shoot"))
+    members = [f.members[bad_idx]]
+
+    report = verify.self_verify(box_mesh, [], [], members, np.array([]), np.array([]),
+                                 cfg, 0.0, forest=f)
+    assert len(report["printability_violations"]) == 1
+    assert report["printability_violations"][0]["kind"] == "shoot"
+    assert report["printability_violations"][0]["reason"] == "near_horizontal"
 
 
 def test_minima_report_requires_contact_at_birth_region_not_nearby(cfg):

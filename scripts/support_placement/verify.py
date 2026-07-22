@@ -335,13 +335,32 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
 
     `members` replaces v3's conn_parts=(routes,trunks,risers,braces,
     plate_z): one flat member list (tree.Member objects or dicts) drives
-    both clearance_report and connectivity_report. `forest`, if given
-    (a tree.Forest -- engine.run always supplies one in real runs, same
-    optional pattern as `minima`/`surface_tree`), additionally gates
-    printability and Murray conservation; omitting it skips those two
-    sub-reports (reported as empty) rather than gating on them, since
-    murray_report needs the forest's parent/child topology, not just the
-    flat member list."""
+    clearance_report, connectivity_report, AND printability_report (p6-
+    reach consistency fix -- see below). `forest`, if given (a tree.
+    Forest -- engine.run always supplies one in real runs, same optional
+    pattern as `minima`/`surface_tree`), additionally gates printability
+    and Murray conservation; omitting it skips those two sub-reports
+    (reported as empty) rather than gating on them, since murray_report
+    needs the forest's parent/child topology, not just the flat member
+    list.
+
+    p6-reach consistency fix (verifier-authorized, one line): printability
+    used to run over the RAW `forest.members` (every member this Forest
+    has ever appended, including tree.Forest.dead retirees -- rewire.py's
+    twig-prune/degenerate-retire moves mark a member dead rather than
+    delete it, by design, so checkpoint/rollback indices stay stable) --
+    the ONE check in this function not built on the caller-filtered,
+    dead-excluding `members` list every sibling check (clearance,
+    connectivity) already uses. That was a consistency bug, not extra
+    gate strictness: a dead member is never emitted or printed (emission
+    consumes engine.live_member_lists' own filtered output, the same
+    live set `members` is built from), so a printability rule checking
+    dead geometry was gating on something that will never actually print
+    -- the gate's own referent is what gets printed. Fixed by running
+    printability_report over `members` (the SAME filtered basis as its
+    sibling checks) instead of `forest.members` -- `forest` is still
+    required to gate this sub-report at all (per the docstring above),
+    just no longer the SOURCE of what gets checked."""
     coverage = coverage_report(mesh, islands, contacts, cfg)
     clearance = clearance_report(mesh, members, cfg, surface_tree=surface_tree)
     load = load_report(carried_area_mm2, tip_r_mm, cfg)
@@ -349,7 +368,7 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
     connectivity_violations = connectivity_report(members, plate_z, cfg,
                                                    surface_tree=surface_tree)
     if forest is not None:
-        printability_violations = tree_mod.printability_report(forest.members, cfg)
+        printability_violations = tree_mod.printability_report(members, cfg)
         murray_violations = murray_report(forest, cfg)
     else:
         printability_violations = []
