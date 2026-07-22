@@ -1,5 +1,11 @@
+import json
+import os
+
 import numpy as np
-from support_placement import engine
+import pytest
+from scipy.spatial import cKDTree
+
+from support_placement import config as config_mod, engine, mesh_io, tree as tm
 
 
 def test_engine_runs_end_to_end_on_table_fixture(table_mesh, cfg):
@@ -108,3 +114,170 @@ def test_engine_no_contacts_returns_honest_empty_result(cfg):
         "islands", "contacts", "carried_area_mm2", "tip_r_mm", "forest",
         "members", "balls", "unrouted", "minima", "plate_z", "verify",
         "volume", "log"}
+
+
+# =================================================================
+# Phase 4c: engine.brace_and_size (SPEC-INTEGRATION #3)
+# =================================================================
+def _far_tree():
+    return cKDTree(np.array([[1e6, 1e6, 1e6]]))
+
+
+def _m(p0, p1, r0=0.5, r1=0.5, kind="trunk", owner=("t", 0), embed_end=None, carried_mm2=0.0):
+    return tm.Member(p0=p0, p1=p1, r0=r0, r1=r1, kind=kind, owner=owner,
+                      embed_end=embed_end, carried_mm2=carried_mm2)
+
+
+def test_brace_and_size_shrinks_a_braceable_tall_twin_column(cfg, box_mesh):
+    """The 14x-lever smoke test (SPEC-INTEGRATION #4, kickoff doc: 'a
+    ~14x per-column lever'): two tall (80mm), close (4mm apart) parallel
+    plate columns -- far enough from any real mesh that clearance is
+    trivial (a far single-point surface_tree), so the only thing that can
+    move member_ml is the fixed point itself. brace_and_size must (a)
+    measurably shrink member_ml, (b) actually place braces, (c) leave the
+    forest gate-clean (murray/printability/certificates)."""
+    from support_placement import cco, placement
+
+    plate_z = -50.0
+
+    def make_column(x, carried):
+        L = 30.0 - plate_z
+        r = max(cco._r_tension_mm(carried, cfg),
+                placement._shaft_r_for_L(L, cfg, 0.0), cfg.min_trunk_r_mm)
+        return tm.Member(p0=[x, 100.0, 30.0], p1=[x, 100.0, plate_z], r0=r, r1=r,
+                          kind="trunk", owner=("test", int(x)), embed_end=None,
+                          carried_mm2=carried)
+
+    f = tm.Forest()
+    f.add_member(make_column(0.0, 300.0))
+    f.add_member(make_column(4.0, 300.0))
+
+    log = {}
+    out = engine.brace_and_size(box_mesh, f, [], _far_tree(), plate_z, cfg, log=log)
+
+    assert out["member_ml_after"] < out["member_ml_before"], out
+    assert out["member_ml_after"] < out["member_ml_before"] / 4.0, (
+        f"expected the bracing lever to be dramatic, not marginal: {out}")
+    assert out["rungs_placed"] > 0
+    assert len(f.braces) > 0
+    tm.assert_all_certified(f)
+    live = [f.members[i] for i in range(len(f.members)) if i not in f.dead]
+    from support_placement import verify as verify_mod
+    assert verify_mod.murray_report(f, cfg) == []
+    assert tm.printability_report(live, cfg) == []
+    assert log["brace_and_size"] == out
+
+
+def test_brace_and_size_activation_timing_integration(cfg, box_mesh):
+    """SPEC-INTEGRATION #4 activation-timing bullet: a forest whose only
+    restraint is a lagged Y-junction (transient.py test 6's own fixture,
+    reproduced here) gets a FATTER final trunk than an otherwise-identical
+    forest with an early-activating brace at the junction height -- ties
+    transient_report's activation-aware semantics through the FULL
+    brace_and_size loop (not just transient.resize_forest in isolation,
+    which test_transient.py already pins)."""
+    def y_junction_forest():
+        f = tm.Forest()
+        trunk = f.add_member(_m([0.0, 0.0, 20.0], [0.0, 0.0, 0.0], kind="trunk"))
+        a = f.add_member(_m([0.0, 0.0, 58.0], [0.0, 0.0, 20.0], kind="shoot"))
+        f.set_parent(a, trunk)
+        b = f.add_member(_m([0.0, 0.0, 45.0], [0.0, 0.0, 20.0], kind="shoot"))
+        f.set_parent(b, trunk)
+        sa = f.add_member(_m([0.0, 0.0, 60.0], [0.0, 0.0, 58.0], kind="stub", embed_end="p0"))
+        f.set_parent(sa, a)
+        sb = f.add_member(_m([0.0, 0.0, 47.0], [0.0, 0.0, 45.0], kind="stub", embed_end="p0"))
+        f.set_parent(sb, b)
+        return f, trunk
+
+    f_u, trunk_u = y_junction_forest()
+    engine.brace_and_size(box_mesh, f_u, [], _far_tree(), plate_z=0.0, cfg=cfg, log={})
+
+    f_b, trunk_b = y_junction_forest()
+    # Early-activating restraint at the SAME z as the junction (20.0):
+    # a model_rung (embed_end="p1") activates the instant both its own
+    # endpoints exist -- deliberately hand-placed (not searched for by
+    # bracing.propose_and_place, which has no real model surface to find
+    # here) to isolate exactly the activation-timing effect under test.
+    f_b.add_brace(_m([0.0, 0.0, 20.0], [3.0, 0.0, 20.0], r0=cfg.brace_r_mm,
+                      r1=cfg.brace_r_mm, kind="model_rung", embed_end="p1"))
+    engine.brace_and_size(box_mesh, f_b, [], _far_tree(), plate_z=0.0, cfg=cfg, log={})
+
+    r_unbraced = max(f_u.members[trunk_u].r0, f_u.members[trunk_u].r1)
+    r_braced = max(f_b.members[trunk_b].r0, f_b.members[trunk_b].r1)
+    assert r_braced < r_unbraced, (r_braced, r_unbraced)
+
+
+def test_run_writes_brace_and_size_log_and_stays_deterministic(cfg, toed_slab_mesh):
+    """brace_and_size is wired into run() (log key present) and run() stays
+    deterministic across repeated calls on the same fixture -- identical
+    volume_report and member count. Uses toed_slab_mesh, not table_mesh:
+    table_mesh currently CRASHES run() (see
+    test_table_and_toed_slab_full_run_not_worse_than_baseline's docstring
+    for the root-caused reason) -- toed_slab_mesh is the fixture this
+    determinism property is actually checkable on."""
+    r1 = engine.run(toed_slab_mesh, config_mod.SupportConfig())
+    r2 = engine.run(toed_slab_mesh, config_mod.SupportConfig())
+    assert "brace_and_size" in r1["log"]
+    assert r1["volume"] == r2["volume"]
+    assert len(r1["members"]) == len(r2["members"])
+
+
+_BASELINE_PATH = os.path.join(os.path.dirname(__file__), "fixtures_v4_p3_baseline.json")
+
+
+def test_table_and_toed_slab_full_run_not_worse_than_baseline(cfg):
+    """SPEC-INTEGRATION #4's acceptance gate + trap detector: table and
+    toed_slab through the FULL new run() (construct -> rewire ->
+    brace_and_size -> verify) must stay gate-clean and not exceed
+    fixtures_v4_p3_baseline.json's total_ml.
+
+    MEASURED, ROOT-CAUSED FINDING (reported honestly per the task charter,
+    not tuned around): as implemented, this currently FAILS on both
+    fixtures, for a reason outside this workstream's file ownership
+    (engine.py/cco.py/rewire.py) --
+
+    bracing.compute_needs (already-merged p4-bracing, frozen) decides
+    WHERE a restraint is needed purely from transient_report's STATIC
+    free_gaps (topology-only distances between junctions/braces/base,
+    activation-timing independent by that module's own documented design
+    decision). transient.resize_forest's r_transient floor, however, is
+    driven by worst_span_mm, which is ACTIVATION-timing aware and can be
+    far larger than any single member's own static free_gap when the
+    danger is a CHAIN of Y-junctions whose siblings complete late (a
+    physically short junction can legitimately inherit a large worst_span
+    -- pinned, correct, intended behavior; see test_transient.py test 6).
+    compute_needs never sees worst_span_mm, so it never requests a rung
+    for exactly this danger class -- the fixed point (implemented exactly
+    per SPEC-INTEGRATION #3's pseudocode) then grows those members via
+    r_transient every iteration with NOTHING bracing can do about it.
+
+    Reproduced with cco.py's braced-cost pricing REVERTED to HEAD (i.e.
+    unmodified, pre-Phase-4c cco.py) -- confirmed NOT a pricing-side
+    effect of this workstream. On table_mesh this drives 10 members past
+    clearance (crashes brace_and_size's own honest-failure assert, design-
+    v4.md #8's terminal safeguard -- kickoff item 3's exact anticipated
+    failure class, discovered here at table_mesh scale instead of Treant
+    scale). On toed_slab_mesh gates stay clean but member_ml grows from
+    0.2764 (baseline) to ~0.40 (r_transient's n_terminals**0.125 term has
+    no analog in the pre-Phase-4 per-member floor and applies even where
+    no bracing was ever structurally needed).
+
+    This test is written to the SPEC'S actual bar (not weakened to
+    xfail/skip) so a fix to bracing.compute_needs' trigger criterion (or
+    an explicit charter decision to relax this bar) shows up here as a
+    flip from red to green, not as newly-written code."""
+    baseline = json.load(open(_BASELINE_PATH))
+
+    for name, mesh_fn in (("table", mesh_io.make_overhang_table),
+                           ("toed_slab", mesh_io.make_toed_slab)):
+        mesh = mesh_fn()
+        result = engine.run(mesh, config_mod.SupportConfig())
+        v = result["verify"]
+        assert v["clearance_violations"] == [], (name, v["clearance_violations"])
+        assert v["connectivity_violations"] == [], (name, v["connectivity_violations"])
+        assert v["printability_violations"] == [], (name, v["printability_violations"])
+        assert v["murray_violations"] == [], (name, v["murray_violations"])
+        total_ml = result["volume"]["total_ml"]
+        assert total_ml <= baseline[name]["total_ml"] + 1e-6, (
+            f"{name}: total_ml {total_ml:.4f} exceeds frozen baseline "
+            f"{baseline[name]['total_ml']} (not-worse trap detector)")

@@ -13,6 +13,7 @@ import time
 import numpy as np
 
 from . import perception, placement, routing, verify, joints, cco, tree, rewire
+from . import transient, bracing
 
 
 def prepare(mesh, cfg, log=None):
@@ -82,6 +83,87 @@ def live_member_lists(forest, unrouted, plate_z, cfg):
     return members, balls
 
 
+def _live_member_ml(forest, unrouted):
+    """member_ml over exactly the same live set live_member_lists uses
+    (honestly-unrouted stubs and rewire-dead members excluded), without
+    paying for compute_joint_balls -- brace_and_size only needs the member
+    total for its before/after log, not the ball list."""
+    unrouted_stub_idx = {forest.terminal_of[i] for i in unrouted}
+    live = [m for mi, m in enumerate(forest.members)
+            if mi not in unrouted_stub_idx and mi not in forest.dead]
+    return tree.volume_report(live, [])["member_ml"]
+
+
+def brace_and_size(mesh, forest, unrouted, surface_tree, plate_z, cfg, log=None):
+    """design-v4.md #8/#9 fixed point (SPEC-INTEGRATION #3): bounded
+    propose-braces / resize-down-and-up / batch-revalidate loop (<=3
+    iterations), then a SECOND rewire.optimize pass against the now-braced
+    reality (design-v4.md #7: rewire after ANY structural pass -- braces
+    just changed which spans are restrained), then a final re-fix so the
+    forest handed back to the caller is clearance-clean at its final
+    (braced) radii. Mutates `forest` in place; returns the log dict this
+    call wrote to log['brace_and_size'].
+
+    A member that GREW past clearance during the loop is never silently
+    shrunk back -- its need (a real transient span) and its violation (a
+    real clearance conflict) are both honest; the fix is more restraint
+    next iteration (another brace), not corruption-by-omission.
+    """
+    log = log if log is not None else {}
+    member_ml_before = _live_member_ml(forest, unrouted)
+
+    iterations = 0
+    rungs_placed = 0
+    rungs_unplaceable = 0
+    n_resized_down = 0
+    n_resized_up = 0
+    for it in range(3):
+        iterations = it + 1
+        report = transient.transient_report(forest, plate_z, cfg)
+        placed = bracing.propose_and_place(forest, surface_tree, plate_z, cfg, report, log=log)
+        resize = transient.resize_forest(forest, plate_z, cfg)
+        violations = forest.revalidate(surface_tree, cfg)
+        rungs_placed += placed["rungs_placed"]
+        rungs_unplaceable += placed["rungs_unplaceable"]
+        for _idx, r_old, r_new in resize["resized"]:
+            if r_new < r_old - 1e-9:
+                n_resized_down += 1
+            elif r_new > r_old + 1e-9:
+                n_resized_up += 1
+        if not placed["placed"] and not resize["resized"] and not violations:
+            break
+
+    # Design-v4.md #7: rewire again after ANY structural pass -- the
+    # braces/resizes above just changed which spans are restrained and how
+    # fat every member is, exactly the kind of neighborhood change that can
+    # newly expose a parallel-column merge or a now-degenerate twig.
+    rewire.optimize(forest, mesh, surface_tree, cfg, log=log)
+
+    # Re-fix: rewire may have created or moved unbraced members (a fresh
+    # reattach connector, a slid junction) -- one more propose/resize pass
+    # against that post-rewire reality before certifying.
+    report = transient.transient_report(forest, plate_z, cfg)
+    bracing.propose_and_place(forest, surface_tree, plate_z, cfg, report, log=log)
+    transient.resize_forest(forest, plate_z, cfg)
+    violations = forest.revalidate(surface_tree, cfg)
+    assert not violations, (
+        f"brace_and_size fixed point ended with {len(violations)} "
+        f"clearance-dirty member(s) after re-fix (an honest engine failure, "
+        f"not a warning) -- member_idx: radius_mm = " + ", ".join(
+            f"{v['member_idx']}: "
+            f"{round(max(forest.members[v['member_idx']].r0, forest.members[v['member_idx']].r1), 4)}"
+            for v in violations))
+    tree.assert_all_certified(forest)
+
+    member_ml_after = _live_member_ml(forest, unrouted)
+    log["brace_and_size"] = dict(
+        iterations=iterations, rungs_placed=rungs_placed,
+        rungs_unplaceable=rungs_unplaceable, n_resized_down=n_resized_down,
+        n_resized_up=n_resized_up, member_ml_before=member_ml_before,
+        member_ml_after=member_ml_after)
+    return log["brace_and_size"]
+
+
 def finish(mesh, pre, forest, unrouted, contacts, carried, tip_r,
            surface_tree, cfg, log=None):
     """Stage 3b: verify gates + volume report on the final forest."""
@@ -146,6 +228,11 @@ def run(mesh, cfg, log=None):
         # move already transactional+certificate-checked internally;
         # re-asserting after is a cheap belt-and-suspenders check.
         rewire.optimize(forest, mesh, surface_tree, cfg, log=log)
+        # Phase 4c (design-v4.md #8/#9): build-time-honest transient sizing
+        # + bracing fixed point, then its own second rewire pass against the
+        # braced reality -- runs AFTER topology settles, BEFORE the gates
+        # that decide whether this fix-pass is done.
+        brace_and_size(mesh, forest, unrouted, surface_tree, plate_z, cfg, log=log)
         tree.assert_all_certified(forest)
         members, balls = live_member_lists(forest, unrouted, plate_z, cfg)
         log[f"forest_pass{fix_pass}"] = dict(
