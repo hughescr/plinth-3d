@@ -114,6 +114,21 @@ def make_raking_blade(top=(20, 20, 4), z_bottom=10.0, blade=(0.03, 2.0, 5.0),
     the blade that a single apex contact never reaches at birth (Craig's
     criterion is about the print-time state at each layer, not mesh
     topology) -- exactly the gap I2's contact-demand pass exists to fill.
+
+    CALIBRATED TO THE 0.05mm DEFAULT (cfg.layer_height_mm), not
+    layer-height-independent: the ladder only appears because per-layer
+    xy shift (layer_height * tan(rake_deg)) exceeds the blade's own
+    cross-sectional width at THAT layer height. Empirically verified at a
+    finer 0.02mm profile the per-layer shift drops under the blade's
+    width, consecutive slices go back to overlapping, and the fixture
+    genuinely stops birthing a ladder (perception.local_z_minima still
+    finds 2, but perception.island_births drops from 9 to 1) -- this is
+    the PHYSICALLY CORRECT behavior (a slower-migrating cross-section at
+    finer layers really does re-merge), not a bug, but it means this
+    fixture's ladder-proof tests are only valid at the 0.05mm default; a
+    future dynamic-layer-height pass that changes that default would need
+    to re-tune `blade`/`rake_deg` here (steeper rake and/or thinner blade)
+    to keep exercising the same class of failure.
     """
     parts = []
     slab = trimesh.creation.box(extents=top)

@@ -375,6 +375,22 @@ def _ensure_minima_contacts(mesh, islands, contacts, minima, cfg):
 # of the same raking/migrating thin feature into one physical footprint,
 # without merging genuinely separate overhangs (kept well under
 # cfg.target_spacing_mm).
+#
+# This is a 3D-EUCLIDEAN xy/z BOOKKEEPING radius -- "are these two raw
+# birth records the same physical feature, or two different ones" -- not
+# a coverage-correctness tolerance; it never decides whether a birth
+# counts as covered (island_birth_report's derived z_tol_mm and
+# perception.ISLAND_ATTACH_REACH_MM alone decide that). Deliberately NOT
+# derived from cfg.layer_height_mm under design-v4.md section 11's
+# amendment: this radius groups birth RECORDS regardless of how many real
+# layers separate them, a different question from "is layer N close
+# enough in time to layer N-1" (the z_tol question). It was tuned once
+# against the 0.05mm-layer Treant corpus, though, so a future
+# dynamic-layer-height pass should empirically re-check whether 0.6mm
+# still groups sensibly at much finer local layer heights (more, closer-
+# spaced raw births per unit height could plausibly want a smaller link
+# radius to avoid over-merging distinct nearby features) -- not required
+# for this branch, flagged for whoever lands that pass.
 _ISLAND_BIRTH_LINK_R_MM = 0.6
 
 

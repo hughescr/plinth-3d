@@ -155,6 +155,24 @@ def test_island_births_deterministic(raking_blade_mesh, cfg):
         assert np.array_equal(ba["loop"], bb["loop"])
 
 
+def test_island_attach_reach_mm_is_pinned():
+    """Regression pin (adversarial-review blocker): perception.
+    ISLAND_ATTACH_REACH_MM must stay at 0.2mm -- config.py's own
+    tip_r_min_mm, the smallest tip this engine ever builds, so the strict
+    at-birth coverage gate's xy tolerance never assumes a bigger tip than
+    is actually guaranteed to exist. This constant is read internally by
+    engine._ensure_minima_contacts, engine._ensure_island_birth_contacts,
+    and verify.island_birth_report -- every one of their existing tests
+    that touches "the tolerance" derives its own expectation FROM this
+    constant, so widening it (e.g. back toward the old, too-loose 1.0mm
+    minima_contact_radius_mm) would sail through those tests unnoticed.
+    This direct value assertion, plus
+    test_verify.test_island_birth_report_hardcoded_boundary_catches_reach_widening
+    (a HARDCODED literal distance, deliberately not derived from this
+    constant), together close that gap."""
+    assert perception.ISLAND_ATTACH_REACH_MM == 0.2
+
+
 def test_island_birth_xy_ok_inside_polygon_and_within_boundary_tolerance():
     poly = np.array([[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]])
     ok, d = perception.island_birth_xy_ok(1.0, 1.0, poly, tol_mm=0.2)

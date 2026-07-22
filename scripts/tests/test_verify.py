@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 from scipy.spatial import cKDTree
 from support_placement import perception, placement, routing, verify, mesh_io, joints
 
@@ -127,6 +128,64 @@ def test_island_birth_report_honors_attach_radius_at_footprint_boundary(cfg):
     too_far = [dict(position=np.array([0.05 + r * 3.0, 0.0, 3.0]))]
     assert verify.island_birth_report([birth], just_outside, cfg) == []
     assert len(verify.island_birth_report([birth], too_far, cfg)) == 1
+
+
+def test_island_birth_report_hardcoded_boundary_catches_reach_widening(cfg):
+    """Regression pin for perception.ISLAND_ATTACH_REACH_MM (adversarial-
+    review blocker): every OTHER boundary test in this file derives its
+    expected-covered/uncovered distance FROM perception.
+    ISLAND_ATTACH_REACH_MM itself, so a future widening of that constant
+    (e.g. someone "fixing a false uncovered report" by nudging it back
+    toward the old, too-loose 1.0mm minima_contact_radius_mm) would sail
+    through them unnoticed -- they'd just re-derive a new, looser
+    expectation and keep passing. This test uses a HARDCODED literal xy
+    distance instead, deliberately NOT read from the constant under test:
+    the birth footprint's boundary sits at x=0.05 (_square_loop's default
+    half-width), and a contact at x=0.40 is exactly 0.35mm outside it --
+    farther than the correct 0.2mm reach, so it must be UNCOVERED. If
+    ISLAND_ATTACH_REACH_MM were ever widened to 1.0mm, 0.35mm would fall
+    back WITHIN reach and this assertion would fail, catching the
+    regression by construction (verified directly: mutating the constant
+    to 1.0 and re-running this test fails; restored byte-identical
+    afterward -- see the p6-islands commit history for that proof run)."""
+    birth = dict(x=0.0, y=0.0, z=5.0, area_mm2=0.01, loop=_square_loop(0.0, 0.0))
+    contact = [dict(position=np.array([0.40, 0.0, 5.0]))]  # 0.35mm outside the x=0.05 boundary
+    uncovered = verify.island_birth_report([birth], contact, cfg)
+    assert len(uncovered) == 1, (
+        "a contact 0.35mm outside the birth footprint must be UNCOVERED at "
+        "the correct 0.2mm attach reach -- if this now passes as covered, "
+        "perception.ISLAND_ATTACH_REACH_MM has silently widened")
+
+
+def test_island_birth_report_z_tol_derives_from_layer_height_dynamically():
+    """Charter amendment (design-v4.md section 11, Craig 2026-07-22:
+    "islanding and other such features need to think about attachment in
+    terms of much smaller distances" as layer height shrinks) --
+    dynamic-layer-height compatibility pin: island_birth_report's z
+    tolerance must be RE-DERIVED from cfg.layer_height_mm at call time,
+    never baked in at the 0.05mm profile's current value.
+
+    A fixed 0.06mm z-gap, xy-on-footprint contact: at the 0.05mm default
+    (z_tol = minima_connect_layers(2.0) * layer_height_mm(0.05) = 0.10mm,
+    0.06 <= 0.10) it is COVERED; at a finer 0.02mm profile (z_tol = 2.0 *
+    0.02 = 0.04mm, 0.06 > 0.04) the SAME 0.06mm gap is now UNCOVERED --
+    proving the tolerance tracks layer_height_mm rather than a pinned
+    millimetre constant."""
+    from support_placement import config as config_mod
+    birth = dict(x=0.0, y=0.0, z=10.0, area_mm2=0.01, loop=_square_loop(0.0, 0.0))
+    late_by_006mm = [dict(position=np.array([0.0, 0.0, 10.06]))]
+
+    cfg_default = config_mod.SupportConfig(layer_height_mm=0.05)
+    assert cfg_default.minima_connect_layers * cfg_default.layer_height_mm == pytest.approx(0.10)
+    assert verify.island_birth_report([birth], late_by_006mm, cfg_default) == []
+
+    cfg_fine = config_mod.SupportConfig(layer_height_mm=0.02)
+    assert cfg_fine.minima_connect_layers * cfg_fine.layer_height_mm == pytest.approx(0.04)
+    uncovered = verify.island_birth_report([birth], late_by_006mm, cfg_fine)
+    assert len(uncovered) == 1, (
+        "the same 0.06mm z-gap contact must become UNCOVERED at a finer "
+        "layer_height_mm -- if this still reports covered, the z tolerance "
+        "is pinned to the old profile instead of re-derived from cfg")
 
 
 def test_self_verify_gates_on_uncovered_island_births(table_mesh, cfg):

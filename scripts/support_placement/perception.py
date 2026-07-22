@@ -395,6 +395,28 @@ def _polys_overlap_xy(loop_a, bbox_a, loop_b, bbox_b):
 # workstream (p6-config/cco/struts/tree) for this branch, and this value
 # is a conservative geometric floor tied to an existing config constant's
 # own documented meaning, not a new physics/tuning knob to expose.
+#
+# NOT subject to design-v4.md section 11's layer-derivation amendment
+# (Craig, 2026-07-22: "any tolerance whose rationale is print resolution,
+# layer-to-layer connection timing, or a build-plate/attachment z-window
+# must be expressed as a multiple of cfg.layer_height_mm") -- that
+# amendment governs Z-direction/print-timing tolerances. This is an XY
+# mechanical reach tied to the smallest physically-buildable tip radius,
+# independent of layer height at any resolution (a 0.2mm tip is exactly
+# as wide at 0.05mm layers as at 0.02mm layers). See
+# _ensure_island_birth_contacts's z_tol_mm (engine.py) and
+# island_birth_report's z_tol_mm (verify.py) for the Z half of the
+# criterion, which IS derived from cfg.layer_height_mm at the point of
+# use, per the amendment.
+#
+# PINNED at 0.2mm -- do not casually widen. This is the floor Craig's
+# strict criterion depends on to actually be strict: widening it back
+# toward the old, too-loose 1.0mm minima_contact_radius_mm would silently
+# reintroduce the self-certifying coverage gate this branch exists to
+# fix (see test_perception.test_island_attach_reach_mm_is_pinned and
+# test_verify.test_island_birth_report_hardcoded_boundary_catches_reach_widening
+# -- the latter uses a HARDCODED literal distance specifically so a
+# regression here cannot pass by construction).
 ISLAND_ATTACH_REACH_MM = 0.2
 
 
