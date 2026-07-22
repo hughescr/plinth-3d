@@ -621,8 +621,41 @@ def _try_place_rods(forest, surface_tree, cfg, rods, kind, embed_end, counters):
     whole forest; the gate itself is untouched) and reject exactly like a
     clearance failure would (rollback, return None, caller tries the
     next candidate nearest-first) -- deterministic, no RNG, no retry
-    loop needed since the reject is authoritative on the REAL geometry."""
+    loop needed since the reject is authoritative on the REAL geometry.
+
+    SPEC-151-SCOPING fix (the table unblocker, dirty-member self-
+    poisoning): forest.revalidate is ONE BATCHED re-check over EVERY
+    currently-dirty member, not scoped to the just-added candidate. A
+    member left dirty by an earlier stage (e.g. resize_forest growing it
+    past its certified radius) that ALSO genuinely violates clearance
+    stays in that dirty set on every subsequent revalidate() call in this
+    same brace_and_size pass -- its own persistent violation rides along
+    in the return value regardless of what candidate is being judged, so
+    `if violations: reject` would kill a candidate for a defect that
+    predates it and has nothing to do with its own geometry (measured:
+    table_mesh member 151's own pre-existing debt false-rejected 10 of 26
+    candidates that would otherwise have relieved it). Fix: snapshot the
+    dirty set BEFORE adding this candidate's rod member(s), then treat as
+    grounds for rejection ONLY violations whose member_idx is NOT in that
+    pre-add snapshot.
+
+    Safety argument (independently verified against add_brace/
+    Forest.add_brace and Member.__setattr__ in tree.py): add_brace only
+    ever APPENDS a new Member (fresh geom_version=0/cert_version=-1, its
+    OWN dirty entry) to forest.members/braces -- it never assigns to any
+    p0/p1/r0/r1 of an EXISTING member, and nothing else runs between
+    checkpoint() and this revalidate() call. So no pre-existing member's
+    geom_version can change here, meaning no pre-existing member can
+    newly enter the dirty set as a result of adding this candidate.
+    Therefore every member_idx in the pre-add snapshot that still appears
+    in revalidate()'s violations is reporting the SAME pre-existing
+    defect, not a new one this candidate caused -- filtering those out
+    can never mask a genuinely new problem. Every violation on an index
+    NOT in the snapshot is a real, unmasked rejection. revalidate()'s
+    certificate side effects (re-issuing certs to clean dirty members)
+    are untouched; only the accept/reject DECISION here is rescoped."""
     cp = forest.checkpoint()
+    pre_dirty = set(forest.dirty_members())
     idxs = []
     for p0, p1, r in rods:
         owner = (kind, counters[kind])
@@ -631,6 +664,7 @@ def _try_place_rods(forest, surface_tree, cfg, rods, kind, embed_end, counters):
                          embed_end=embed_end)
         idxs.append(forest.add_brace(m))
     violations = forest.revalidate(surface_tree, cfg)
+    violations = [v for v in violations if v["member_idx"] not in pre_dirty]
     if not violations:
         violations = tree.printability_report([forest.members[i] for i in idxs], cfg)
     if violations:

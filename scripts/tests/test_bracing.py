@@ -892,3 +892,71 @@ def test_rung_not_skipped_when_restraint_far(cfg):
                                         spans_report=spans_report)
     assert result["rungs_placed"] == 1
     assert result["placed"] != []
+
+
+# ------------------------------------------------ dirty-member self-poisoning --
+def test_try_place_rods_scopes_rejection_to_own_violations_not_preexisting_dirty(cfg):
+    """Regression pin (SPEC-151-SCOPING, the table unblocker): a
+    candidate's placement is judged only on its OWN geometry, independent
+    of any other member's pre-existing certificate state.
+
+    `dirty_idx` is already dirty (freshly added, never certified) AND
+    genuinely, permanently violates clearance -- an obstacle sits right on
+    its own axis, a defect nothing in this test ever fixes. The candidate
+    rod lives far away and is geometrically clean on its own (0 violations
+    in isolation).
+
+    On the base branch, forest.revalidate is ONE batched re-check over
+    EVERY currently-dirty member -- not scoped to the just-added
+    candidate. Once the candidate is added, dirty_idx is STILL dirty (its
+    own defect never got fixed), so its pre-existing violation rides along
+    in the same revalidate() call the candidate is judged by, and
+    `if violations: reject` (bracing._try_place_rods, pre-fix) kills the
+    candidate too -- this is the fails-first proof of the dirty-member
+    self-poisoning bug SPEC-151-SCOPING diagnoses (member 151's own debt
+    poisoning every other candidate's revalidate() call on table_mesh).
+    On the fixed code (rejection scoped to violations NOT in the pre-add
+    dirty snapshot) the candidate places."""
+    f = tm.Forest()
+    dirty_idx = f.add_member(_member([0.0, 0.0, 0.0], [0.0, 0.0, 10.0], kind="shoot"))
+    # Obstacle sits right on dirty_idx's own axis (clearance is deeply
+    # negative there) -- a real, permanent defect that revalidate() keeps
+    # re-reporting on every batched call since dirty_idx's own geometry
+    # never changes in this test.
+    surface_tree = cKDTree(np.array([[0.03, 0.0, 5.0]]))
+    pre_violations = f.revalidate(surface_tree, cfg)
+    assert pre_violations and pre_violations[0]["member_idx"] == dirty_idx
+    assert dirty_idx in f.dirty_members(), "own defect persists -- never certified"
+
+    # Candidate rod: a real 45-degree-ish diagonal (passes printability
+    # cleanly, unlike a bare horizontal segment) sitting far away in xy
+    # from the lone obstacle point above -- 0 violations of its own.
+    rods = [(np.array([100.0, 0.0, 0.0]), np.array([105.0, 0.0, 5.0]), 0.5)]
+    counters = {"brace": 0, "model_rung": 0}
+    placed = bracing._try_place_rods(f, surface_tree, cfg, rods, "brace", None, counters)
+    assert placed is not None, (
+        "candidate's own geometry is clean; it must place even though an "
+        "UNRELATED member (dirty_idx) is already dirty and violating")
+
+
+def test_try_place_rods_still_rejects_candidates_own_violation_when_other_dirty(cfg):
+    """The inverse guard (SPEC-151-SCOPING): scoping rejection to the
+    candidate's own violations must not become a blanket suppression -- a
+    candidate whose OWN geometry clips an obstacle is rejected exactly as
+    before, even while an unrelated member is ALSO dirty and violating (no
+    over-correction, the filter cannot hide a genuinely new problem)."""
+    f = tm.Forest()
+    dirty_idx = f.add_member(_member([0.0, 0.0, 0.0], [0.0, 0.0, 10.0], kind="shoot"))
+    surface_tree = cKDTree(np.array([
+        [0.03, 0.0, 5.0],     # sits on dirty_idx's own axis -- its own permanent defect
+        [102.5, 0.03, 2.5],   # sits on the CANDIDATE's own axis (its own midpoint) --
+    ]))                       # its own real, freshly-introduced defect
+    pre_violations = f.revalidate(surface_tree, cfg)
+    assert pre_violations and pre_violations[0]["member_idx"] == dirty_idx
+
+    rods = [(np.array([100.0, 0.0, 0.0]), np.array([105.0, 0.0, 5.0]), 0.5)]
+    counters = {"brace": 0, "model_rung": 0}
+    placed = bracing._try_place_rods(f, surface_tree, cfg, rods, "brace", None, counters)
+    assert placed is None, (
+        "candidate's own geometry violates clearance; it must still be "
+        "rejected on its own defect, independent of the unrelated dirty member")
