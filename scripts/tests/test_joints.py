@@ -109,3 +109,79 @@ def test_collect_members_accepts_member_objects():
     out = joints.collect_members([m])
     assert out[0]["kind"] == "trunk"
     assert out[0]["r1"] == 0.4
+
+
+# --- F1: no joint balls at the plate ---------------------------------
+
+def test_plate_rooted_column_base_gets_no_ball(cfg):
+    """Craig: spheres half-sunk into the build plate at column bases."""
+    trunk = _m([4.0, 0.0, -5.0], [4.0, 0.0, 20.0], 1.2, 1.2, ("trunk", 0), "trunk")
+    balls = joints.compute_joint_balls([trunk], plate_z=-5.0, cfg=cfg)
+    at_base = [b for b in balls if np.allclose(b["center"], [4.0, 0.0, -5.0], atol=1e-6)]
+    assert len(at_base) == 0
+    # the top dome ball is untouched
+    at_top = [b for b in balls if np.allclose(b["center"], [4.0, 0.0, 20.0], atol=1e-6)]
+    assert len(at_top) == 1
+
+
+def test_junction_5mm_above_plate_still_gets_a_ball(cfg):
+    trunk = _m([4.0, 0.0, -5.0], [4.0, 0.0, 20.0], 1.2, 1.2, ("trunk", 0), "trunk")
+    shoot = _m([0.0, 0.0, 3.0], [4.0, 0.0, 0.0], 0.4, 0.4, ("route", 0), "shoot")
+    balls = joints.compute_joint_balls([trunk, shoot], plate_z=-5.0, cfg=cfg)
+    at_junction = [b for b in balls if np.allclose(b["center"], [4.0, 0.0, 0.0], atol=1e-6)]
+    assert len(at_junction) == 1
+
+
+def test_plate_band_exclusion_applies_to_p1_end_too(cfg):
+    """v4's real root convention lands a root's p1 (not p0) at plate_z --
+    the exclusion must not be hardcoded to one end."""
+    root = _m([4.0, 0.0, 20.0], [4.0, 0.0, -5.0], 1.2, 1.2, ("trunk", 0), "trunk")
+    balls = joints.compute_joint_balls([root], plate_z=-5.0, cfg=cfg)
+    at_base = [b for b in balls if np.allclose(b["center"], [4.0, 0.0, -5.0], atol=1e-6)]
+    assert len(at_base) == 0
+
+
+# --- F3(a): colinear pass-throughs get no ball ------------------------
+
+def test_colinear_pass_through_no_ball(cfg):
+    """Two members meeting nearly head-on (anti-parallel through the
+    point) with matching end radii is a straight continuation
+    (bifurcation split / rewire seam) -- v3 merged these cosmetically."""
+    a = _m([0.0, 0.0, 0.0], [0.0, 0.0, 10.0], 0.5, 0.5, ("trunk", 0), "trunk")
+    b = _m([0.0, 0.0, 10.0], [0.0, 0.0, 20.0], 0.52, 0.52, ("trunk", 1), "trunk")
+    balls = joints.compute_joint_balls([a, b], plate_z=-100.0, cfg=cfg)
+    at_seam = [ball for ball in balls if np.allclose(ball["center"], [0, 0, 10.0], atol=1e-6)]
+    assert len(at_seam) == 0
+
+
+def test_elbow_at_90deg_still_gets_a_ball_not_colinear(cfg):
+    a = _m([0.0, 0.0, 0.0], [0.0, 0.0, 10.0], 0.5, 0.5, ("trunk", 0), "trunk")
+    b = _m([0.0, 0.0, 10.0], [10.0, 0.0, 10.0], 0.5, 0.5, ("trunk", 1), "trunk")
+    balls = joints.compute_joint_balls([a, b], plate_z=-100.0, cfg=cfg)
+    at_elbow = [ball for ball in balls if np.allclose(ball["center"], [0, 0, 10.0], atol=1e-6)]
+    assert len(at_elbow) == 1
+
+
+def test_colinear_but_mismatched_radii_still_gets_a_ball(cfg):
+    """Anti-parallel through the point but end radii differ > 20% -- a
+    genuine taper transition, not a cosmetic seam; keep the ball."""
+    a = _m([0.0, 0.0, 0.0], [0.0, 0.0, 10.0], 0.5, 0.5, ("trunk", 0), "trunk")
+    b = _m([0.0, 0.0, 10.0], [0.0, 0.0, 20.0], 1.2, 1.2, ("trunk", 1), "trunk")
+    balls = joints.compute_joint_balls([a, b], plate_z=-100.0, cfg=cfg)
+    at_seam = [ball for ball in balls if np.allclose(ball["center"], [0, 0, 10.0], atol=1e-6)]
+    assert len(at_seam) == 1
+
+
+# --- F3(c): axis-match sizing uses the LOCAL (taper-interpolated)
+# radius at the cluster point, not the member's overall max end radius --
+
+def test_axis_match_sizes_by_local_radius_not_far_taper_end(cfg):
+    """Reproduces the F3(b) forensics finding on the real snapshot: a
+    tapered member's own thin end (0.35) IS the joint, but its far end
+    (1.647, elsewhere on the same member) must not dominate the ball."""
+    diag = _m([0.0, 0.0, 20.0], [-12.5, 21.65, 5.6], 0.35, 1.647,
+               ("contact", 144), "trunk")
+    balls = joints.compute_joint_balls([diag], plate_z=-100.0, cfg=cfg)
+    at_thin_end = [b for b in balls if np.allclose(b["center"], [0.0, 0.0, 20.0], atol=1e-6)]
+    assert len(at_thin_end) == 1
+    assert abs(at_thin_end[0]["r"] - cfg.joint_ball_factor * 0.35) < 1e-9
