@@ -410,6 +410,43 @@ Also new: per-junction Murray conservation check (§5) and the
 per-segment tangent+taper printability check (§3) — both verify-side, so
 a builder bug cannot ship a violation silently.
 
+**Amendment — Craig's ruling (2026-07-22), governs every z-direction /
+print-timing tolerance in this charter (this section's gates included):**
+
+> "The code should probably not think in '1mm is small' terms - it
+> really needs to think in 'layers' which are typically going to be
+> 0.05mm - 20x smaller! And my goal is to have a later pass of this
+> software implement dynamic layer heights where layers might go down
+> even smaller to 0.02mm when detail needs it. So islanding and other
+> such features need to think about attachment in terms of much smaller
+> distances."
+
+Principle: any tolerance whose rationale is print resolution,
+layer-to-layer connection timing, or a build-plate/attachment z-window
+must be expressed as a multiple of `cfg.layer_height_mm`, never as an
+absolute millimetre pinned to the current 0.05mm profile — "small" is
+judged in layers, not millimetres. A value that reads as comfortably
+sub-feature-scale at today's 0.05mm default (a plateau-tie epsilon, a
+plate-band width, a birth/attachment window) silently stops being small
+once the profile — or a future per-region schedule — runs finer,
+without the code ever being told anything changed. `minima_connect_layers`
+(a layer COUNT, multiplied by `layer_height_mm` at the point of use in
+`local_z_minima`) is the pattern every such tolerance in this charter
+should follow: name the quantity in layers, derive the millimetre value
+once, at the point of use.
+
+Recorded future item: dynamic layer heights (down to ~0.02mm where local
+detail demands it) are a planned capability of a later pass, not yet
+implemented — this charter's single `cfg.layer_height_mm` scalar is
+expected eventually to become a per-z layer schedule (height as a
+function of build z, not one constant for the whole print). Every
+z-tolerance and attachment-window computation adopted under the
+principle above must stay compatible with that future: expressed as "N
+layers at whatever height is locally in force," not "N layers at the
+profile's one global height," so the eventual schedule swap-in is a
+lookup change at each point of use, not a re-derivation of the tolerance
+itself.
+
 ## 12. Performance, termination, language
 
 Stays Python. Evidence: v3's measured bottlenecks were scipy thread-pool
