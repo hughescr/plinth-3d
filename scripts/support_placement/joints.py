@@ -235,6 +235,25 @@ def compute_joint_balls(members, plate_z, cfg):
         if embedded and len(cluster_nodes) == 1:
             # adsorbed model foot: adhesion fillet, no second member
             r_ball = MODEL_FOOT_FACTOR * r_end
+        # F1 addendum (verifier should-fix): the node-band exclusion above
+        # only tests the NODE z against PLATE_BAND_MM, BEFORE the ball's
+        # radius is known -- a node comfortably outside the 0.2mm band can
+        # still size up into a sphere whose BOTTOM crosses the plate
+        # (real-data specimen: node 0.806mm above plate_z, r=0.8268,
+        # sphere bottom 0.0211mm below plate_z). Now that r_ball is final,
+        # judge the actual sphere geometry: center_z - r < plate_z means
+        # the sphere would poke through the build plate.
+        #
+        # Design decision: DROP the ball rather than clamp its radius or
+        # lift its center. These near-plate balls sit on structure whose
+        # reinforcement the foot flare/pad already provides -- the same
+        # F1 rationale as the node-band exclusion just above -- so a
+        # dropped ball loses no real support. Clamping would silently
+        # shrink or reposition a ball sized against a real member's
+        # radius and make the emitted geometry lie about what was
+        # actually decided; a missing entry is honest and cheap to audit.
+        if center[2] - r_ball < plate_z:
+            continue
         balls.append(dict(center=np.asarray(center, float), r=float(r_ball),
                           owner=owner))
     return balls

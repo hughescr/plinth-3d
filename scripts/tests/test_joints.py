@@ -141,6 +141,27 @@ def test_plate_band_exclusion_applies_to_p1_end_too(cfg):
     assert len(at_base) == 0
 
 
+def test_ball_sphere_may_not_cross_plate_plane_even_when_node_clears_band(cfg):
+    """Adversarial-verifier specimen: the node-band exclusion tests only
+    the NODE z against PLATE_BAND_MM, before the ball's radius is known.
+    Real-data joint at [13.40, -7.33, -66.17], plate_z=-66.97575, sits
+    0.806mm above the plate -- comfortably outside the 0.2mm node band --
+    but sizes to r=0.8268, so its sphere BOTTOM (center_z - r) lands at
+    -66.9968, which is 0.0211mm BELOW plate_z. No emitted ball's sphere
+    geometry may cross the plate plane, node-band pass or not."""
+    plate_z = -66.97575
+    node = [13.40, -7.33, -66.17]
+    r = 0.8268
+    assert abs(node[2] - plate_z) > joints.PLATE_BAND_MM  # node-band alone would pass this
+    assert node[2] - r < plate_z  # but the sized sphere's bottom crosses the plate
+    trunk = _m([13.40, -7.33, -40.0], node, r, r, ("trunk", 0), "trunk")
+    balls = joints.compute_joint_balls([trunk], plate_z=plate_z, cfg=cfg)
+    at_node = [b for b in balls if np.allclose(b["center"], node, atol=1e-6)]
+    assert len(at_node) == 0, "ball sphere crosses the plate plane -- must be dropped"
+    for b in balls:
+        assert b["center"][2] - b["r"] >= plate_z - 1e-9
+
+
 # --- F3(a): colinear pass-throughs get no ball ------------------------
 
 def test_colinear_pass_through_no_ball(cfg):
