@@ -266,21 +266,37 @@ def transient_report(forest, plate_z, cfg):
             M, as the physical support under that span, carries its
             reaction). The member's worst_span_mm is the max of that
             over every path through it.
+            Design decision (recorded): "intersects" is a CLOSED-interval
+            overlap (boundary touching counts) -- a span [z, a] that
+            starts exactly at M's own tip (M's p0/p1) still loads M,
+            since M is the physical restraint transmitting that
+            cantilever's reaction force at the point it grips. Pinned by
+            test_junction_restrains_taller_path_only_once_sibling_subtree_completes
+            (the trunk below a Y-junction inherits the same worst span as
+            the branch immediately above it).
         restraint_zs: STATIC restraint points on M's own extent (brace
             attachments on M, M's own p0 if it's a >=2-child junction,
             M's p1 if M's PARENT is a >=2-child junction, M's own base z
-            if M is a root) -- activation-timing independent, sorted.
+            if M is a root) -- activation-timing independent, sorted
+            (NOT deduplicated -- two independent restraints landing at
+            the same z is legitimate information, not noise).
         free_gaps: maximal sub-intervals of [z_min(M), z_max(M)] between
             consecutive restraint_zs (extent ends always included as
             bounds, even with nothing restraining there).
-        n_terminals: count of live stub descendants of M.
+        n_terminals: count of live stub descendants of M, UNCLAMPED (may
+            be 0 for a structurally-orphaned member with no live stub
+            descendant at all -- r_transient_mm applies its own
+            max(n_terminals, 1) floor per spec, so this field stays an
+            honest raw count rather than pre-clamping here too).
 
     `plate_z` is accepted for signature parity with the rest of the
     sizing pipeline (engine.brace_and_size threads the same (forest,
     plate_z, cfg) triple through every sizing call); root base_z is
     always derived from the root member's own p1.z (plate roots: that IS
     plate_z; strut roots (embed_end=="p1"): the model-anchor z, rigid
-    once printed) rather than the parameter, per spec.
+    once printed) rather than the parameter, per spec. Design decision
+    (recorded): this leaves `plate_z` otherwise unused by this function's
+    own math -- deliberate, not an oversight.
     """
     live_braces = {b for b in getattr(forest, "braces", []) if b not in forest.dead}
     brace_attach = derive_brace_attachments(forest)
