@@ -154,7 +154,7 @@ def stage_emit():
     bridge_template = bridge_templates[0]
 
     next_off = proj.mesh_off + proj.mesh_size
-    new_records = ce.synth_member_chain(members, balls, cfg, next_off)
+    new_records = ce.synth_member_chain(members, balls, cfg, next_off, plate_z=plate_z)
     for _, blob in new_records:
         next_off += len(blob)
     print(f"synth: {len(new_records)} member records, {len(balls)} joint balls "
