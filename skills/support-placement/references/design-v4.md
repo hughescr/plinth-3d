@@ -347,18 +347,44 @@ Per-tree accessibility, evaluated on final geometry:
   acceptable, more work, better than a failed print): iterate — remove
   every tree that currently passes HANDLE+PEEL given the remaining
   forest; repeat. Trees that only become removable after neighbors go
-  are counted into a `removal_effort` metric. **Hard failure = a
-  residual set no removal order can clear (mutually caging /
-  model-caged): that is a BLOCKER gate, wired into verify ok.** The
-  emitted run log includes the peel order. Removal effort is REPORTED,
-  not priced into the §4/§7 volume objective (verifier finding: the doc
-  claimed pricing no acceptance criterion implemented; simulating
-  ordered removal per candidate would blow the runtime budget).
-  Recorded follow-up: a cheap effort proxy in the objective if the
-  Treant's effort metric comes out high.
+  are counted into a `removal_effort` metric. A residual set no removal
+  order can clear (mutually caging / model-caged) is REPORTED in
+  `removal_report` as a hard-failure case — diagnostic only; it does NOT
+  gate verify's `ok` (see the 2026-07-22 amendment below, which
+  supersedes this section's original "BLOCKER gate, wired into verify
+  ok" language). The emitted run log includes the peel order. Removal
+  effort is REPORTED, not priced into the §4/§7 volume objective
+  (verifier finding: the doc claimed pricing no acceptance criterion
+  implemented; simulating ordered removal per candidate would blow the
+  runtime budget). Recorded follow-up: a cheap effort proxy in the
+  objective if the Treant's effort metric comes out high — subject to
+  the same "slight preference penalty, never a block" ceiling as the
+  amendment below.
 
 All four parameters are flagged rough-estimate-pending-calibration; the
 calibrator is Craig's hands on the first v4 print.
+
+**Amendment — Craig's ruling (2026-07-22), supersedes the "BLOCKER gate,
+wired into verify ok" language above:**
+
+> "unremovable support" is always not really true - they *are*
+> removable, just maybe a little harder to remove. I think a slight
+> preference penalty when making algorithmic choices against
+> hard-to-remove supports is enough it shouldn't BLOCK an
+> otherwise-superior (in terms of structural/physics support and
+> reduced resin use) support layout. Removability is the least
+> important axis for optimization.
+
+`removal_report` (HANDLE/PEEL/ordered-removal simulation, including the
+caged-set hard-failure case above) is diagnostic/report-only: nothing it
+finds, caged sets included, blocks verify's `ok`. Removability may at
+most inform algorithmic choices as a slight preference penalty — e.g. a
+rewire/pricing tie-break between otherwise-comparable candidates — and
+must never veto a layout that is superior on structural/physics support
+quality or resin use. That tie-break is not yet implemented; it is a
+recorded future item, same status as the removal-effort objective term
+above. Removability is the least important optimization axis, strictly
+below structural/physics quality and resin volume.
 
 ## 11. Verify gates
 
@@ -370,7 +396,8 @@ unchanged), `minima_report` (birth-region contact within
 `coverage_report`, `load_report` (every contact routed / strutted /
 honestly unrouted, exact accounting).
 
-New: `removal_report` (§10, hard gate on caged sets) and
+New: `removal_report` (§10; diagnostic/report-only per Craig's
+2026-07-22 ruling — never gates verify's `ok`, caged sets included) and
 `volume_report` — one accounting function (frustums + balls, ml,
 per-kind breakdown) used for EVERY baseline/target comparison. The v3.7
 Treant baseline is captured with this same function BEFORE trunks.py is
@@ -382,6 +409,43 @@ unexplained and gets resolved by measuring, not asserting; target stays
 Also new: per-junction Murray conservation check (§5) and the
 per-segment tangent+taper printability check (§3) — both verify-side, so
 a builder bug cannot ship a violation silently.
+
+**Amendment — Craig's ruling (2026-07-22), governs every z-direction /
+print-timing tolerance in this charter (this section's gates included):**
+
+> "The code should probably not think in '1mm is small' terms - it
+> really needs to think in 'layers' which are typically going to be
+> 0.05mm - 20x smaller! And my goal is to have a later pass of this
+> software implement dynamic layer heights where layers might go down
+> even smaller to 0.02mm when detail needs it. So islanding and other
+> such features need to think about attachment in terms of much smaller
+> distances."
+
+Principle: any tolerance whose rationale is print resolution,
+layer-to-layer connection timing, or a build-plate/attachment z-window
+must be expressed as a multiple of `cfg.layer_height_mm`, never as an
+absolute millimetre pinned to the current 0.05mm profile — "small" is
+judged in layers, not millimetres. A value that reads as comfortably
+sub-feature-scale at today's 0.05mm default (a plateau-tie epsilon, a
+plate-band width, a birth/attachment window) silently stops being small
+once the profile — or a future per-region schedule — runs finer,
+without the code ever being told anything changed. `minima_connect_layers`
+(a layer COUNT, multiplied by `layer_height_mm` at the point of use in
+`local_z_minima`) is the pattern every such tolerance in this charter
+should follow: name the quantity in layers, derive the millimetre value
+once, at the point of use.
+
+Recorded future item: dynamic layer heights (down to ~0.02mm where local
+detail demands it) are a planned capability of a later pass, not yet
+implemented — this charter's single `cfg.layer_height_mm` scalar is
+expected eventually to become a per-z layer schedule (height as a
+function of build z, not one constant for the whole print). Every
+z-tolerance and attachment-window computation adopted under the
+principle above must stay compatible with that future: expressed as "N
+layers at whatever height is locally in force," not "N layers at the
+profile's one global height," so the eventual schedule swap-in is a
+lookup change at each point of use, not a re-derivation of the tolerance
+itself.
 
 ## 12. Performance, termination, language
 
@@ -478,9 +542,13 @@ at every phase boundary (rsync → /tmp git → rsync .git back).
 - Baseline volume discrepancy (23.1 cm³ vs ~21.5 ml) unresolved until
   measured with the unified volume_report.
 - Removal PEEL check is translational; real removal has a rotational
-  hinge component. Conservative direction, but false BLOCKERs possible
-  in principle — if the gate over-fires on the Treant, the fix is a
-  hinge-sweep refinement, not gate removal.
+  hinge component. Conservative direction, but the report can undercall
+  a tree's true removability in principle — since `removal_report` is
+  diagnostic-only (2026-07-22 amendment, §10), this doesn't block
+  anything, but an over-conservative PEEL check still means a noisier
+  diagnostic and a noisier future preference-penalty signal. If PEEL
+  over-flags on the Treant, the fix is a hinge-sweep refinement to the
+  diagnostic's accuracy, not a gating change.
 - Root-split-vs-fat-root pricing (§6 ceilings) is a new topology
   degree of freedom; watch fixture A/B for the penalty constant
   reintroducing twin-column waste through the back door.
