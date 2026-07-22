@@ -664,7 +664,28 @@ def _find_cross_link_candidates(forest, mi, z, cfg, k):
 def _cross_link_rods(forest, mi, ni, z, d, k, cfg):
     """Rod geometry for one candidate (SPEC-BRACING rule 1): X-pair for
     d > cfg.twin_single_brace_xy_mm (both rods discounted), else a single
-    alternating rod (twin rule, undiscounted). rise = d always."""
+    alternating rod (twin rule, undiscounted). rise = d always.
+
+    ORCHESTRATOR RULING (Phase 4 floor-fix, design-v4.md #9's
+    load-sharing discount vs #6's per-member deflection floor): the
+    charter #9 X-pair discount (0.5**0.25) legitimately shares the
+    LATERAL-RESTRAINT duty between the two rods -- but each rod's own
+    r_deflect floor encodes ITS OWN survivability under print peel
+    forces, which pairing cannot share (each rod is peeled
+    individually). The discount may therefore never push a rod below
+    its own floor. That floor must be keyed off the rod's REAL final
+    endpoints (length AND lean), not the d*sqrt(2)/max_segment_angle_deg
+    45-degree-construction approximation r_raw uses -- on a LEANING
+    host, a rod's true endpoint-to-endpoint geometry drifts from that
+    approximation (verified: measured table_mesh brace members 152/153,
+    two mirrored rods of the SAME X-pair, own floors 0.6765mm and
+    0.6508mm -- different, because the two hosts' own leans differ),
+    exactly the same real-geometry-over-construction-estimate principle
+    _try_place_rods already applies for the printability cone check
+    (this function's own module docstring, SPEC-PATHRUNG W1). Twin
+    single rods carry no discount and (measured) already clear this same
+    per-rod floor under the fixed r_raw approximation in practice, so
+    they are left as-is."""
     M, N = forest.members[mi], forest.members[ni]
     rise = d
     p_M_z, p_N_z = _axis_point_at_z(M, z), _axis_point_at_z(N, z)
@@ -676,8 +697,14 @@ def _cross_link_rods(forest, mi, ni, z, d, k, cfg):
         if k % 2 == 0:
             return [(p_M_z, p_N_hi, r)]      # even: M -> N climbing
         return [(p_N_z, p_M_hi, r)]          # odd: N -> M climbing
-    r = max(cfg.brace_r_mm, r_raw * 0.5 ** 0.25)
-    return [(p_M_z, p_N_hi, r), (p_N_z, p_M_hi, r)]
+    duty_r = r_raw * 0.5 ** 0.25
+    rods = []
+    for p0, p1 in ((p_M_z, p_N_hi), (p_N_z, p_M_hi)):
+        own_len = float(np.linalg.norm(np.asarray(p1, float) - np.asarray(p0, float)))
+        own_lean = cco._lean_deg(p0, p1)
+        own_floor = placement._shaft_r_for_L(own_len, cfg, own_lean)
+        rods.append((p0, p1, max(cfg.brace_r_mm, own_floor, duty_r)))
+    return rods
 
 
 def _find_model_rung_anchors(forest, surface_tree, mi, z, cfg, limit=6):

@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from scipy.spatial import cKDTree
 
-from support_placement import bracing, config, joints, placement, tree as tm
+from support_placement import bracing, cco, config, joints, placement, tree as tm
 from support_placement import transient, verify
 
 
@@ -282,7 +282,8 @@ def test_compute_needs_activation_trigger_absent_when_neither_condition_holds(cf
 def test_xpair_geometry_pin_wider_columns(cfg):
     """Two vertical columns 8mm apart (v3's
     test_wider_trunk_pair_still_gets_crossed_pair, adapted): 2 rods,
-    rise == 8.0 exactly, endpoints on both axes, discounted radius.
+    rise == 8.0 exactly, endpoints on both axes, discounted-but-
+    floor-respecting radius.
 
     Should-fix #3 (cross-link connectivity assertion): columns are sized
     to exactly z+rise (18.0mm) rather than an arbitrarily-tall 40mm --
@@ -290,7 +291,19 @@ def test_xpair_geometry_pin_wider_columns(cfg):
     point (rod1 lands on N at 18, rod2 lands on M at 18), so the whole
     forest (both hosts, both braces) certifies connectivity-clean with
     no filtering: this is the gate that would have caught the r1
-    floating-brace blocker."""
+    floating-brace blocker.
+
+    ORCHESTRATOR RULING (Phase 4 floor-fix): with vertical M and N, both
+    rods' REAL endpoint-to-endpoint length/lean exactly match the
+    d*sqrt(2)/45-degree construction estimate, so each rod's own
+    (undiscounted) r_deflect floor equals r_raw itself here -- and since
+    r_raw > r_raw*0.5**0.25 always, the floor (not the discount) is what
+    sets the radius once it clears cfg.brace_r_mm. This is the exact
+    bug the fix closes: the PRE-fix formula (max(brace_r_mm, r_raw *
+    0.5**0.25)) let the discount alone decide and, for this very
+    fixture, silently placed both rods 0.072mm under their own floor
+    (measured: 0.5 vs 0.572) -- this test's old expectation had that
+    same bug baked into it unnoticed."""
     d = 8.0
     assert d > cfg.twin_single_brace_xy_mm
     plate_z = 0.0
@@ -308,9 +321,10 @@ def test_xpair_geometry_pin_wider_columns(cfg):
     assert len(result["placed"]) == 2
 
     rod_len = d * np.sqrt(2.0)
-    expected_r = max(cfg.brace_r_mm,
-                      placement._shaft_r_for_L(rod_len, cfg, cfg.max_segment_angle_deg)
-                      * 0.5 ** 0.25)
+    r_raw = placement._shaft_r_for_L(rod_len, cfg, cfg.max_segment_angle_deg)
+    # own r_deflect floor == r_raw here (vertical columns: real rod
+    # geometry exactly matches the 45-degree construction estimate).
+    expected_r = max(cfg.brace_r_mm, r_raw, r_raw * 0.5 ** 0.25)
     rods = [f.members[idx] for idx in result["placed"]]
     for rod in rods:
         assert rod.kind == "brace"
@@ -342,6 +356,57 @@ def test_xpair_rods_pass_printability_report(cfg):
                               free_gaps=[(0.0, 20.0)], n_terminals=1)}
     bracing.propose_and_place(f, _far_tree(), plate_z=0.0, cfg=cfg, spans_report=spans_report)
     assert tree_mod.printability_report(f.members, cfg) == []
+
+
+def test_xpair_discount_never_drops_a_rod_below_its_own_deflection_floor(cfg):
+    """ORCHESTRATOR RULING (Phase 4 floor-fix, design-v4.md #9 vs #6): the
+    charter #9 X-pair load-sharing discount (0.5**0.25) may legitimately
+    shrink the shared lateral-restraint duty term, but it must never push
+    a rod below ITS OWN r_deflect floor (design-v4.md #6) -- that floor
+    is each rod's individual survivability under print peel, which
+    pairing cannot share (each rod is peeled alone). Reproduces the
+    real-world table_mesh failure class (brace members 152/153: two
+    mirrored X-pair rods with DIFFERENT own floors, 0.6765mm / 0.6508mm,
+    because their hosts lean differently) at unit scale: N leans while M
+    stays vertical, so the two rods' real endpoint-to-endpoint length and
+    lean diverge from the d*sqrt(2)/45-degree construction estimate
+    r_raw uses, and diverge from EACH OTHER -- exactly the asymmetry
+    that must be caught per-rod, not once for the pair.
+
+    Failing pre-fix (measured): both rods placed at the same discounted
+    radius (~0.558mm) while their own floors (recomputed exactly as the
+    engine's own load/deflection gate -- test_cco.py's _own_floor_mm --
+    would) are 0.7196mm and 0.6639mm respectively: both below floor."""
+    d = 8.0
+    assert d > cfg.twin_single_brace_xy_mm
+    plate_z = 0.0
+    lean_shift = 6.0
+    f = tm.Forest()
+    mi = f.add_member(_member([0.0, 0.0, 0.0], [0.0, 0.0, 40.0]))
+    ni = f.add_member(_member([d, 0.0, 0.0], [d + lean_shift, 0.0, 40.0]))
+    spans_report = {mi: dict(worst_span_mm=20.0, restraint_zs=[],
+                              free_gaps=[(0.0, 20.0)], n_terminals=1)}
+    surface_tree = _far_tree()
+
+    result = bracing.propose_and_place(f, surface_tree, plate_z=plate_z, cfg=cfg,
+                                        spans_report=spans_report)
+    assert result["by_kind"] == {"brace": 2}
+    rods = [f.members[idx] for idx in result["placed"]]
+    assert len(rods) == 2
+
+    # sanity: the two rods' own floors genuinely differ (leaning-host
+    # asymmetry, the real bug's own shape) -- else this fixture isn't
+    # exercising the case at all.
+    floors = []
+    for rod in rods:
+        L = float(np.linalg.norm(np.asarray(rod.p1, float) - np.asarray(rod.p0, float)))
+        lean = cco._lean_deg(rod.p0, rod.p1)
+        floors.append(placement._shaft_r_for_L(L, cfg, lean))
+    assert floors[0] != pytest.approx(floors[1])
+
+    for rod, floor in zip(rods, floors):
+        r_have = max(rod.r0, rod.r1)
+        assert r_have >= floor - 1e-6, (r_have, floor)
 
 
 # ----------------------------------------------------------------- twin -----
