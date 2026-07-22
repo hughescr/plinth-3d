@@ -255,25 +255,55 @@ def transient_report(forest, plate_z, cfg):
     """Per-member build-time transient report (design-v4.md #8). For
     every live, non-brace, non-stub member M:
 
-        worst_span_mm: activation-aware worst free-cantilever span that
-            LOADS M -- brute-force over every root->terminal path
+        worst_span_mm: activation-aware worst PER-MEMBER MOMENT-ARM span
+            that LOADS M -- brute-force over every root->terminal path
             through M (O(terminals x path length), fine at Treant scale
             ~465 x ~20): for each such path, run the restraint-activation
             sweep over the PATH's full event set (base_z from the path's
-            root, z_top the path's own build top), then take the longest
-            candidate span that intersects M's own [z_min, z_max]
-            extent (a span loads M if it overlaps M's extent at all --
-            M, as the physical support under that span, carries its
-            reaction). The member's worst_span_mm is the max of that
-            over every path through it.
-            Design decision (recorded): "intersects" is a CLOSED-interval
-            overlap (boundary touching counts) -- a span [z, a] that
-            starts exactly at M's own tip (M's p0/p1) still loads M,
-            since M is the physical restraint transmitting that
-            cantilever's reaction force at the point it grips. Pinned by
-            test_junction_restrains_taller_path_only_once_sibling_subtree_completes
-            (the trunk below a Y-junction inherits the same worst span as
-            the branch immediately above it).
+            root, z_top the path's own build top), producing candidate
+            (R, a) intervals (R = the highest active restraint point at
+            that moment, a = that event's clamped activation/build-front
+            height). For each candidate interval that CLOSED-interval
+            overlaps M's own [z_min, z_max] extent (hi >= z_min(M) and
+            lo <= z_max(M) -- boundary touching counts, unchanged from
+            the prior design), the contribution to M is
+                a - max(z_min(M), R)
+            NOT the flat `a - R` (design-v4.md #8's charter fix, Phase
+            4d/SPEC-ARM-FIX: the stress at M's own cross-section depends
+            on the load ABOVE M and the arm FROM M, not on structure
+            below it). The member's worst_span_mm is the max of that
+            contribution over every overlapping interval on every path
+            through it.
+            Design decision (recorded): the overlap gate (`lo <=
+            z_max(M)`) is REQUIRED, not redundant with the `a - max(...)`
+            arm formula alone -- a member entirely below a LATER
+            restraint (z_max(M) < R for some interval further along the
+            same sweep) must contribute ZERO from that interval, because
+            by the time R is active this member is already anchored by
+            an EARLIER event; charging it `a - R` anyway (as the bare
+            formula would, since z_min(M) <= R too there) would silently
+            resurrect a worse version of the very bug this fix corrects
+            (a base-side member inheriting bending arms from spans that
+            open up far above it, long after it was itself restrained).
+            Concretely (see test_moment_arm_excludes_member_entirely_
+            below_a_later_restraint): base(0-10) -> shoot(10-... with an
+            early-activating brace at z=15 that only starts existing once
+            the print reaches z=55, tip at z=100 -- the bare (ungated)
+            formula would charge the base member `100 - 15 == 85`; the
+            gated formula correctly caps it at the arm it actually
+            carried BEFORE that later restraint existed (55, the base's
+            own moment when the brace activated).
+            Consequences (SPEC-ARM-FIX, verified by the tests below):
+            the base member of a span still gets the FULL arm (its own
+            z_min sits at/below every relevant R, so max(z_min, R) == R
+            reduces to the old flat formula for it specifically); members
+            HIGHER in the same span get a STRICTLY SMALLER arm (their own
+            z_min exceeds R, so the max clamps to their own tip instead)
+            -- a chain of members under one long span now sizes as a
+            TAPER, not a uniform fat run. A single-member column (the
+            whole path is one member) is unaffected: its own z_min is the
+            path's base, which is <= every R by construction, so this is
+            bit-identical to the pre-fix flat-span math and to v3.
         restraint_zs: STATIC restraint points on M's own extent (brace
             attachments on M, M's own p0 if it's a >=2-child junction,
             M's p1 if M's PARENT is a >=2-child junction, M's own base z
@@ -325,8 +355,17 @@ def transient_report(forest, plate_z, cfg):
             zlo, zhi = sorted((float(m.p0[2]), float(m.p1[2])))
             best_here = 0.0
             for lo, hi in intervals:
+                # lo == R (highest active restraint at that moment), hi ==
+                # a (that event's clamped activation/build-front height).
+                # Closed-interval overlap gate (unchanged), NEW moment-arm
+                # contribution (SPEC-ARM-FIX fix B): a - max(z_min(M), R),
+                # not the old flat a - R -- see transient_report's
+                # docstring for why the gate is still required alongside
+                # the arm refinement.
                 if hi >= zlo and lo <= zhi:
-                    best_here = max(best_here, hi - lo)
+                    contribution = hi - max(zlo, lo)
+                    if contribution > best_here:
+                        best_here = contribution
             if best_here > worst[idx]:
                 worst[idx] = best_here
 
@@ -391,16 +430,86 @@ def resize_forest(forest, plate_z, cfg):
 
     r_req = max(Murray fan-in over live children's r1 (unfiltered by
     kind -- stub children count too, matching verify.murray_report),
-    cco._r_tension_mm, r_transient_mm, the kind floor). Uniform members
-    (r0==r1) and any junction (>=2 children) get r0=r1=r_req; a tapered
-    pass-through (shoot/diag/strut carrying a tip taper) keeps its OWN
-    r0 untouched and only ever raises r1 to max(r_req, r0). NO ceiling
-    clamp (v4: floors hard, ceilings soft). Stubs and braces are never
-    resized (excluded by _postorder). All mutation via plain attribute
-    assignment (tree.py's guarded setters handle certificates); a value
-    that would not actually change is left unwritten so an unchanged
-    member's certificate survives via geom_version equality, not just
-    the radius-decrease fallback.
+    cco._r_tension_mm, r_deflect (design-v4.md #6's angle-aware solve,
+    "per-segment, not per-member" -- placement._shaft_r_for_L over the
+    member's own WORST FREE GAP, info["free_gaps"], not its raw p0->p1
+    length; see the SPEC-ARM-FIX note below), r_transient_mm, the kind
+    floor). Uniform members (r0==r1) and any junction (>=2 children) get
+    r0=r1=r_req; a tapered pass-through (shoot/diag/strut carrying a tip
+    taper) keeps its OWN r0 untouched and only ever raises r1 to
+    max(r_req, r0). NO ceiling clamp (v4: floors hard, ceilings soft).
+    Stubs and braces are never resized (excluded by _postorder). All
+    mutation via plain attribute assignment (tree.py's guarded setters
+    handle certificates); a value that would not actually change is left
+    unwritten so an unchanged member's certificate survives via
+    geom_version equality, not just the radius-decrease fallback.
+
+    SPEC-ARM-FIX fix B follow-on (Phase 4d, found while verifying the
+    acceptance ladder, NOT part of the two spec'd fixes themselves but
+    within this function's own file ownership and required to keep this
+    function charter-conformant): design-v4.md #6 defines the final
+    radius as max(r_load, r_deflect, r_transient, r_bend) -- r_deflect
+    and r_transient are BOTH always-active floors, not alternatives. This
+    function was computing r_transient but never r_deflect at all. That
+    omission was invisible before fix B: the OLD (pre-fix) flat-span
+    attribution mathematically GUARANTEED worst_span_mm(M) >= M's own
+    physical length for every M with no brace attaching to its own
+    interior (the interval bounding M's own extent always contributed at
+    least the flat `hi - lo` >= M's own span), so r_transient always
+    dominated a same-span r_deflect as a side effect. Fix B's per-member
+    moment-arm refinement does NOT break that specific guarantee (proven:
+    with no interior brace, R never exceeds M's own z_min at any sweep
+    step, so max(z_min, R) == z_min uniformly and the same argument
+    holds) -- but it exposed that r_deflect was simply never computed at
+    all, so ANY member relying on it (even pre-fix-B, coincidentally
+    masked by r_transient always winning on span grounds alone) was one
+    r_transient regression away from silently violating design-v4.md #6.
+
+    Design decision (recorded, own-length vs free-gap): the first version
+    of this fix used the member's raw p0->p1 length for r_deflect, which
+    is CORRECT for an unbraced member (free_gaps == the whole extent) but
+    WRONG once bracing splits that extent -- charter #6 explicitly says
+    "per-segment, not per-member". A raw-length r_deflect would floor
+    every member at its own full geometric length FOREVER, regardless of
+    how many rungs get placed along it, silently defeating design-v4.md
+    #9's entire premise (bracing existing specifically to let a spanning
+    member come back down to slender). Caught by test_engine.py's
+    existing (untouched, out-of-ownership)
+    test_brace_and_size_shrinks_a_braceable_tall_twin_column smoke test:
+    a raw-length r_deflect kept member_ml from ever shrinking despite 8
+    rungs being placed. Fixed by using info["free_gaps"]'s WORST (widest)
+    sub-span instead -- the same static, activation-timing-independent
+    field transient_report already computes for exactly this purpose
+    (each brace attachment on M's own axis is one of the bounds a
+    free_gap splits on).
+
+    Second design decision (recorded, z-span vs true 3D sub-length):
+    free_gaps bounds live in Z-COORDINATE space (transient_report's whole
+    sweep is 1D-in-z, matching worst_span_mm's own convention) -- for a
+    LEANING member that understates the true cantilever length of a
+    sub-segment (z-span < 3D length whenever lean != 0), while
+    placement._shaft_r_for_L wants the actual physical length (the L^3
+    deflection term), with `lean` used ONLY for the separate peel-load
+    magnitude, not as an implicit z-to-3D conversion (confirmed by
+    reading _shaft_r_for_L itself: no such conversion happens inside it).
+    Passing a raw z-span as L_mm for a leaning member silently
+    UNDER-sizes r_deflect. Fixed by scaling worst_gap_mm into an
+    equivalent 3D sub-length via the member's OWN (uniform, since a
+    Member is one straight segment) length/z-extent ratio:
+    worst_gap_3d_mm = worst_gap_mm * (own_length_mm / z_extent_mm). For
+    an unbraced member this reduces to exactly own_length_mm (worst_gap
+    == z_extent by construction), reproducing test_cco.py's own_floor_mm
+    exactly; for a vertical member (lean==0) z_extent == own_length_mm so
+    the ratio is 1 regardless of bracing. Caught (after the first,
+    z-span-only version of this fix still left it broken) by test_cco.
+    py's test_engine_every_member_meets_its_own_load_and_deflection_floor
+    on toed_slab_mesh: several LEANING shoot members (lean ~56-60deg)
+    were undersized by the z-span version specifically because
+    z-extent << true 3D length at that much lean, not because of any
+    bracing/free_gaps interaction (toed_slab_mesh places zero braces in
+    this run) -- a genuinely different failure mode than the twin-column
+    smoke test's, caught by re-running the FULL fixture ladder rather
+    than trusting the isolated unit-test reasoning alone.
 
     Radius decreases keep certificates valid (checked fat covers thin);
     increases void them -- the CALLER (engine.brace_and_size) revalidates.
@@ -421,9 +530,15 @@ def resize_forest(forest, plate_z, cfg):
             if children else 0.0
         r_tension = cco._r_tension_mm(m.carried_mm2, cfg)
         info = report[idx]
+        worst_gap_mm = max(hi - lo for lo, hi in info["free_gaps"])
+        own_length_mm = float(np.linalg.norm(np.asarray(m.p1, dtype=float)
+                                              - np.asarray(m.p0, dtype=float)))
+        z_extent_mm = max(abs(float(m.p0[2]) - float(m.p1[2])), 1e-9)
+        worst_gap_3d_mm = worst_gap_mm * (own_length_mm / z_extent_mm)
+        r_deflect = placement._shaft_r_for_L(worst_gap_3d_mm, cfg, lean)
         r_trans = r_transient_mm(info["worst_span_mm"], lean, info["n_terminals"], cfg)
         kind_floor = cfg.min_trunk_r_mm if m.kind == "trunk" else cfg.min_shoot_r_mm
-        r_req = max(r_murray, r_tension, r_trans, kind_floor)
+        r_req = max(r_murray, r_tension, r_deflect, r_trans, kind_floor)
 
         r_old_max = max(m.r0, m.r1)
         uniform_or_branch = abs(m.r0 - m.r1) < 1e-9 or len(children) >= 2

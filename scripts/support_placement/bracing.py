@@ -28,10 +28,25 @@ transient_report's output shape -- another workstream; tests here hand-
 build the dicts, that is the decoupling contract per SPEC-BRACING). No
 resizing of host members, no engine wiring, no restraint/span computation
 beyond consuming spans_report.
+
+SPEC-ARM-FIX fix A (Phase 4d, design-v4.md #9's literal rule): compute_
+needs ALSO triggers on spans_report's worst_span_mm (the activation-aware
+moment-arm value, transient.transient_report's own per-member field) via
+transient.r_transient_mm -- not just the static free_gaps trigger. A
+pass-through chain can have tiny per-member static gaps (no internal
+restraint points at all) while its worst_span_mm runs 20mm+ unrestrained
+during the actual build (a lagged sibling elsewhere on the path). The
+static trigger is blind to that danger class; this one isn't. Only
+`transient.r_transient_mm` is imported from that module (a pure function,
+no forest/report coupling) -- the decoupling contract above stays intact:
+this module still never COMPUTES a span itself, only consumes the two
+fields (worst_span_mm, free_gaps) spans_report already carries.
 """
+import math
+
 import numpy as np
 
-from . import cco, placement, tree
+from . import cco, placement, transient, tree
 
 # Half of the connectivity-restraint-dedup tolerance lives in cfg
 # (brace_ladder_z_mm/2); see propose_and_place's restraint_zs skip.
@@ -50,11 +65,48 @@ def _n_slender(gap_mm, cfg, lean_deg):
     return 50
 
 
+def _rungs_that_fit(gap_span, n_rungs):
+    """Cap n_rungs so that, laid out evenly across gap_span at n_rungs+1
+    equal sub-spacings (propose_and_place's own layout formula:
+    z = z_lo + (k+1) * gap_span / (n_rungs+1)), every sub-spacing is
+    >= 1mm. gap_span / (n+1) >= 1  <=>  n <= gap_span - 1."""
+    if n_rungs <= 0:
+        return 0
+    max_by_spacing = int(math.floor(gap_span - 1.0 + 1e-9))
+    return max(0, min(n_rungs, max_by_spacing))
+
+
 def compute_needs(forest, spans_report, cfg):
     """For each member and each free gap (z_lo, z_hi) in spans_report,
     decide how many rungs that gap needs (SPEC-BRACING Part 2): the max
     of the slenderness-triggered count (n_slender, deflection budget) and
-    the build-time trigger (n_span, v3's brace_free_span_mm cadence).
+    the build-time trigger (n_span, v3's brace_free_span_mm cadence) --
+    this is the STATIC trigger, blind to activation timing by design.
+
+    SPEC-ARM-FIX fix A (Phase 4d, design-v4.md #9): ALSO trigger on the
+    member's own worst_span_mm (S), the activation-aware moment-arm value
+    threaded straight from transient_report -- a pass-through member can
+    have a tiny static free_gap (no internal restraint points on its OWN
+    extent) while S, inherited from a lagged restraint elsewhere on its
+    root->terminal path, is large enough that either the resulting
+    r_transient shaft radius exceeds cfg.max_unbraced_shaft_r_mm or S
+    itself exceeds cfg.brace_free_span_mm. When that fires, request
+    rungs (n_rungs = max(n_slender(S, lean), int(S / brace_free_span_mm))
+    -- the SAME two-trigger formula as the static path, just fed S
+    instead of a gap's own span) in the member's LARGEST free gap (the
+    only concrete height band this trigger has to work with -- spans_
+    report doesn't say WHERE along the member the moment-arm empirically
+    bites), capped by what physically fits in that gap at >= 1mm rung
+    spacing (_rungs_that_fit).
+
+    Dedup (never double-request the same height band): when the
+    activation trigger's target gap is the SAME (z_lo, z_hi) the static
+    trigger already produced a request for on this member, the two are
+    MERGED (max of the two counts) into ONE entry, not appended as a
+    second request -- propose_and_place's rung-height formula divides a
+    gap by (n_rungs+1), so two separate requests against the identical
+    band would place overlapping/duplicate rungs at different offsets.
+
     Returns an ordered list of (member_idx, z_lo, z_hi, n_rungs) requests
     for n_rungs >= 1, sorted by (member_idx, z_lo) -- deterministic
     regardless of spans_report's own iteration/dict order."""
@@ -62,7 +114,10 @@ def compute_needs(forest, spans_report, cfg):
     for member_idx, info in spans_report.items():
         member = forest.members[member_idx]
         lean = cco._lean_deg(member.p0, member.p1)
-        for gap in info.get("free_gaps", []):
+        gaps = info.get("free_gaps", [])
+        member_reqs = {}  # (z_lo, z_hi) -> n_rungs, static-then-merged
+
+        for gap in gaps:
             z_lo, z_hi = float(gap[0]), float(gap[1])
             span = z_hi - z_lo
             if span <= 0:
@@ -74,7 +129,28 @@ def compute_needs(forest, spans_report, cfg):
             n_span = int(span / cfg.brace_free_span_mm)
             n_rungs = max(n_slender, n_span)
             if n_rungs >= 1:
-                requests.append((member_idx, z_lo, z_hi, n_rungs))
+                member_reqs[(z_lo, z_hi)] = n_rungs
+
+        worst_span_mm = float(info.get("worst_span_mm", 0.0))
+        if worst_span_mm > 0 and gaps:
+            n_terminals = info.get("n_terminals", 0)
+            r_trans = transient.r_transient_mm(worst_span_mm, lean, n_terminals, cfg)
+            if r_trans > cfg.max_unbraced_shaft_r_mm or worst_span_mm > cfg.brace_free_span_mm:
+                n_slender_s = _n_slender(worst_span_mm, cfg, lean)
+                n_span_s = int(worst_span_mm / cfg.brace_free_span_mm)
+                n_rungs_s = max(n_slender_s, n_span_s)
+                if n_rungs_s >= 1:
+                    z_lo, z_hi = max(
+                        ((float(g[0]), float(g[1])) for g in gaps),
+                        key=lambda t: t[1] - t[0])
+                    gap_span = z_hi - z_lo
+                    n_rungs_s = _rungs_that_fit(gap_span, n_rungs_s)
+                    if n_rungs_s >= 1:
+                        key = (z_lo, z_hi)
+                        member_reqs[key] = max(member_reqs.get(key, 0), n_rungs_s)
+
+        for (z_lo, z_hi), n_rungs in member_reqs.items():
+            requests.append((member_idx, z_lo, z_hi, n_rungs))
     requests.sort(key=lambda r: (r[0], r[1]))
     return requests
 

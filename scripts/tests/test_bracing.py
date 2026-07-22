@@ -3,7 +3,7 @@ import pytest
 from scipy.spatial import cKDTree
 
 from support_placement import bracing, config, joints, placement, tree as tm
-from support_placement import verify
+from support_placement import transient, verify
 
 
 def _member(p0, p1, r0=0.5, r1=0.5, kind="trunk", owner=("contact", 0), embed_end=None):
@@ -120,6 +120,107 @@ def test_compute_needs_sorted_by_member_then_z_lo(cfg):
     assert idx_pairs[0] == (m0, 0.0)
     assert idx_pairs[1] == (m0, 40.0)
     assert idx_pairs[2] == (m1, 0.0)
+
+
+# --------------------------------------------- activation-aware trigger -----
+def test_compute_needs_activation_trigger_fires_on_worst_span_despite_tiny_static_gap(cfg):
+    """SPEC-ARM-FIX fix A (Phase 4d, design-v4.md #9's literal rule): a
+    pass-through member's own STATIC free_gap can be tiny (no internal
+    restraint points on its own extent) while its worst_span_mm --
+    transient.transient_report's activation-aware moment-arm value,
+    inherited from a lagged restraint elsewhere on its root->terminal
+    path -- is large enough to demand bracing on its own. compute_needs
+    must catch this even though the static (gap-only) trigger alone
+    requests nothing for this member."""
+    f, (mi,) = _column_forest(((0.0, 0.0), 0.0, 5.0))
+    worst_span_mm = 80.0
+    n_terminals = 1
+    lean = 0.0
+
+    # sanity: the STATIC trigger alone (worst_span_mm == 0) requests
+    # nothing for this member -- span 5.0 is far under both thresholds.
+    static_only = {mi: dict(worst_span_mm=0.0, restraint_zs=[],
+                             free_gaps=[(0.0, 5.0)], n_terminals=n_terminals)}
+    assert bracing.compute_needs(f, static_only, cfg) == []
+
+    r_trans = transient.r_transient_mm(worst_span_mm, lean, n_terminals, cfg)
+    assert (r_trans > cfg.max_unbraced_shaft_r_mm) or (worst_span_mm > cfg.brace_free_span_mm)
+
+    def n_slender(gap):
+        for n in range(51):
+            r = placement._shaft_r_for_L(gap / (n + 1), cfg, lean)
+            if r <= cfg.max_unbraced_shaft_r_mm:
+                return n
+        return 50
+
+    n_activation = max(n_slender(worst_span_mm), int(worst_span_mm / cfg.brace_free_span_mm))
+    expected = bracing._rungs_that_fit(5.0, n_activation)
+    assert expected >= 1
+
+    spans_report = {mi: dict(worst_span_mm=worst_span_mm, restraint_zs=[],
+                              free_gaps=[(0.0, 5.0)], n_terminals=n_terminals)}
+    requests = bracing.compute_needs(f, spans_report, cfg)
+    assert requests == [(mi, 0.0, 5.0, expected)]
+
+
+def test_compute_needs_activation_trigger_merges_with_static_not_duplicates(cfg):
+    """Dedup rule (SPEC-ARM-FIX fix A): when the activation trigger's
+    target (the member's LARGEST free gap) is the SAME gap the static
+    trigger already produced a request for, the two merge into ONE
+    request (max of the two counts) -- never a second, duplicate tuple
+    for the same (member_idx, z_lo, z_hi) height band (propose_and_place
+    would otherwise place overlapping rungs at different offsets within
+    the identical band)."""
+    f, (mi,) = _column_forest(((0.0, 0.0), 0.0, 20.0))
+    worst_span_mm = 80.0
+    lean = 0.0
+
+    def n_slender(gap):
+        for n in range(51):
+            r = placement._shaft_r_for_L(gap / (n + 1), cfg, lean)
+            if r <= cfg.max_unbraced_shaft_r_mm:
+                return n
+        return 50
+
+    n_static = max(n_slender(20.0), int(20.0 / cfg.brace_free_span_mm))
+    n_activation_raw = max(n_slender(worst_span_mm), int(worst_span_mm / cfg.brace_free_span_mm))
+    n_activation = bracing._rungs_that_fit(20.0, n_activation_raw)
+    expected = max(n_static, n_activation)
+    assert n_static >= 1  # sanity: the static trigger already fires on this gap
+    assert expected > n_static  # sanity: the activation trigger genuinely adds MORE
+
+    spans_report = {mi: dict(worst_span_mm=worst_span_mm, restraint_zs=[],
+                              free_gaps=[(0.0, 20.0)], n_terminals=1)}
+    requests = bracing.compute_needs(f, spans_report, cfg)
+    # exactly ONE entry for this member/gap, merged to the larger count.
+    assert requests == [(mi, 0.0, 20.0, expected)]
+
+
+def test_compute_needs_activation_trigger_capped_by_gap_fit(cfg):
+    """The activation trigger's rung count is capped by what physically
+    fits in the target gap at >= 1mm spacing (_rungs_that_fit) -- an
+    enormous worst_span_mm must not demand more rungs than a short gap
+    can actually hold."""
+    f, (mi,) = _column_forest(((0.0, 0.0), 0.0, 3.0))
+    spans_report = {mi: dict(worst_span_mm=500.0, restraint_zs=[],
+                              free_gaps=[(0.0, 3.0)], n_terminals=1)}
+    requests = bracing.compute_needs(f, spans_report, cfg)
+    # gap_span=3.0 -> floor(3-1)=2 max rungs fit at >=1mm spacing.
+    assert requests == [(mi, 0.0, 3.0, 2)]
+
+
+def test_compute_needs_activation_trigger_absent_when_neither_condition_holds(cfg):
+    """Control: a worst_span_mm that clears BOTH the r_transient
+    threshold and the brace_free_span_mm cadence must not fire the
+    activation trigger at all."""
+    f, (mi,) = _column_forest(((0.0, 0.0), 0.0, 5.0))
+    worst_span_mm = 5.0  # tiny -- well under brace_free_span_mm (18.0)
+    r_trans = transient.r_transient_mm(worst_span_mm, 0.0, 1, cfg)
+    assert r_trans <= cfg.max_unbraced_shaft_r_mm
+    assert worst_span_mm <= cfg.brace_free_span_mm
+    spans_report = {mi: dict(worst_span_mm=worst_span_mm, restraint_zs=[],
+                              free_gaps=[(0.0, 5.0)], n_terminals=1)}
+    assert bracing.compute_needs(f, spans_report, cfg) == []
 
 
 # ---------------------------------------------------------------- X-pair ----
