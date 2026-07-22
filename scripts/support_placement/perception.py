@@ -249,6 +249,228 @@ def local_z_minima(mesh, cfg):
     return out
 
 
+# ---- Slice-based island-birth detection (v4 p6, Craig's strict criterion:
+# design doc / SETUP charter "island-coverage" item I1) ----
+#
+# local_z_minima (above) is a fast, topologically-exact first pass: it
+# finds every vertex-graph local minimum and floods a bounded band to see
+# if it connects to strictly-lower (already-printed) material within
+# cfg.minima_connect_layers layers. It is precise but VERTEX-graph based,
+# so it can only ever resolve connection events that a mesh EDGE can
+# express -- a raking/migrating thin feature whose birth polygon appears,
+# drifts, and reappears slice-to-slice (no single vertex 1-ring captures
+# that motion) is invisible to it, and it says nothing about MULTIPLE
+# distinct birth events at different z on what the vertex graph considers
+# one connected region.
+#
+# island_births is the ground-truth cross-check (measured on the real
+# Weeping Treant corpus: full_model_audit.py / island_audit_strict.py in
+# the design scratchpad -- 211 real-layer births at 0.05mm full-height
+# resolution, 77 uncovered by the pre-existing engine): actually slice the
+# mesh at the REAL print layer height (cfg.layer_height_mm) over the
+# model's full height and track, slice to slice, which polygon components
+# have NO xy-overlap with any component in the layer directly below. Such
+# a component is, by definition, a disconnected patch curing onto the FEP
+# at its own birth layer -- Craig's "lump floating in the resin tank"
+# criterion operates on exactly this event, not on vertex adjacency.
+#
+# Deterministic (trimesh.section_multiplane on a fixed height list, no
+# RNG) and O(model height / layer_height_mm) slices -- measured ~53s on
+# the full 128mm-tall, 576k-face Weeping Treant at 0.05mm (Craig-approved
+# budget for a `prepare()` stage that runs once per print job). Processed
+# in z-chunks purely to bound memory (section_multiplane keeps every
+# section of a batch live at once); a single birth-connectivity state
+# (`prev_comps`) is carried across chunk boundaries so chunking is not a
+# source of boundary artifacts -- the result is identical to slicing the
+# whole height in one call, just cheaper to hold in memory.
+
+def _signed_area_xy(loop):
+    """Shoelace signed area of an (N,2) xy polygon loop; trimesh's
+    Path2D.discrete winds outer boundaries positive and holes negative --
+    used below purely to drop holes (interior voids never a birth event
+    on their own) and degenerate slivers."""
+    x, y = loop[:, 0], loop[:, 1]
+    return 0.5 * float(np.sum(x * np.roll(y, -1) - np.roll(x, -1) * y))
+
+
+def _bbox_xy(loop):
+    return (float(loop[:, 0].min()), float(loop[:, 0].max()),
+            float(loop[:, 1].min()), float(loop[:, 1].max()))
+
+
+def _bbox_overlap(b1, b2):
+    return not (b1[1] < b2[0] or b2[1] < b1[0] or b1[3] < b2[2] or b2[3] < b1[2])
+
+
+def _segments_intersect(p1, p2, p3, p4):
+    def ccw(a, b, c):
+        return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0])
+    return (ccw(p1, p3, p4) != ccw(p2, p3, p4)) and (ccw(p1, p2, p3) != ccw(p1, p2, p4))
+
+
+def point_in_polygon_xy(px, py, poly):
+    """Standard ray-casting point-in-polygon test (poly: (N,2) xy)."""
+    x, y = poly[:, 0], poly[:, 1]
+    x2, y2 = np.roll(x, -1), np.roll(y, -1)
+    cond = ((y > py) != (y2 > py))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        xin = x + (py - y) / (y2 - y) * (x2 - x)
+    hit = cond & (px < xin)
+    return bool(np.sum(hit) % 2 == 1)
+
+
+def _point_to_segment_dist_xy(p, a, b):
+    p, a, b = np.asarray(p, float), np.asarray(a, float), np.asarray(b, float)
+    ab = b - a
+    denom = float(np.dot(ab, ab))
+    if denom < 1e-15:
+        return float(np.linalg.norm(p - a))
+    t = float(np.clip(np.dot(p - a, ab) / denom, 0.0, 1.0))
+    proj = a + t * ab
+    return float(np.linalg.norm(p - proj))
+
+
+def point_to_polygon_boundary_dist_xy(px, py, poly):
+    p = (px, py)
+    n = len(poly)
+    best = float("inf")
+    for i in range(n):
+        d = _point_to_segment_dist_xy(p, poly[i], poly[(i + 1) % n])
+        if d < best:
+            best = d
+    return best
+
+
+def island_birth_xy_ok(px, py, poly, tol_mm):
+    """The xy half of Craig's strict at-birth criterion: True if (px,py)
+    lands ON the birth footprint `poly`, or within `tol_mm` of its
+    boundary otherwise. Returns (ok, dist_mm) -- dist_mm is 0.0 when
+    inside (for an honest "no gap" report), else the boundary distance
+    regardless of whether it cleared tol_mm (so callers can report how
+    far off an out-of-tolerance case was)."""
+    if point_in_polygon_xy(px, py, poly):
+        return True, 0.0
+    d = point_to_polygon_boundary_dist_xy(px, py, poly)
+    return (d <= tol_mm), d
+
+
+def _polys_overlap_xy(loop_a, bbox_a, loop_b, bbox_b):
+    """True if two xy polygon loops share any area: bbox reject, then
+    vertex-in-other-polygon sampling, then edge-segment intersection --
+    catches full containment (a shrinking/growing footprint) and partial
+    overlap (a migrating/raking footprint) alike. Vertex/edge sampling is
+    capped (not every point) since birth loops can have hundreds of
+    points on a dense mesh and this runs O(slices) times per model --
+    matches the measured-cost reference implementation
+    (full_model_audit.py) this function is ported from."""
+    if not _bbox_overlap(bbox_a, bbox_b):
+        return False
+    for (px, py) in loop_a[::max(1, len(loop_a) // 40)]:
+        if point_in_polygon_xy(px, py, loop_b):
+            return True
+    for (px, py) in loop_b[::max(1, len(loop_b) // 40)]:
+        if point_in_polygon_xy(px, py, loop_a):
+            return True
+    na, nb = len(loop_a), len(loop_b)
+    stepa = max(1, na // 60)
+    stepb = max(1, nb // 60)
+    for i in range(0, na, stepa):
+        p1, p2 = loop_a[i], loop_a[(i + stepa) % na]
+        for j in range(0, nb, stepb):
+            p3, p4 = loop_b[j], loop_b[(j + stepb) % nb]
+            if _segments_intersect(p1, p2, p3, p4):
+                return True
+    return False
+
+
+# Conservative attach-reach for the strict island-birth criterion: how far
+# in xy a contact may sit from a birth footprint's boundary and still
+# count as landing "on" it (used both to dedupe an already-covered birth
+# in engine._ensure_island_birth_contacts and as the coverage gate's xy
+# tolerance in verify.island_birth_report). Set at tip_r_min_mm
+# (config.py's own removal-friendly tip floor) -- the smallest tip this
+# engine ever builds -- so the tolerance never assumes a bigger tip than
+# what's actually guaranteed to exist. Deliberately a plain module
+# constant, not a SupportConfig field: config.py is owned by a parallel
+# workstream (p6-config/cco/struts/tree) for this branch, and this value
+# is a conservative geometric floor tied to an existing config constant's
+# own documented meaning, not a new physics/tuning knob to expose.
+#
+# NOT subject to design-v4.md section 11's layer-derivation amendment
+# (Craig, 2026-07-22: "any tolerance whose rationale is print resolution,
+# layer-to-layer connection timing, or a build-plate/attachment z-window
+# must be expressed as a multiple of cfg.layer_height_mm") -- that
+# amendment governs Z-direction/print-timing tolerances. This is an XY
+# mechanical reach tied to the smallest physically-buildable tip radius,
+# independent of layer height at any resolution (a 0.2mm tip is exactly
+# as wide at 0.05mm layers as at 0.02mm layers). See
+# _ensure_island_birth_contacts's z_tol_mm (engine.py) and
+# island_birth_report's z_tol_mm (verify.py) for the Z half of the
+# criterion, which IS derived from cfg.layer_height_mm at the point of
+# use, per the amendment.
+#
+# PINNED at 0.2mm -- do not casually widen. This is the floor Craig's
+# strict criterion depends on to actually be strict: widening it back
+# toward the old, too-loose 1.0mm minima_contact_radius_mm would silently
+# reintroduce the self-certifying coverage gate this branch exists to
+# fix (see test_perception.test_island_attach_reach_mm_is_pinned and
+# test_verify.test_island_birth_report_hardcoded_boundary_catches_reach_widening
+# -- the latter uses a HARDCODED literal distance specifically so a
+# regression here cannot pass by construction).
+ISLAND_ATTACH_REACH_MM = 0.2
+
+
+def island_births(mesh, cfg, chunk_mm=16.0, min_area_mm2=1e-3):
+    """I1: slice `mesh` at the real print layer height (cfg.layer_height_mm)
+    over its full z range and return every polygon component with no xy
+    overlap with the layer directly below it -- an "island birth" (see
+    module-level comment above for the full rationale).
+
+    Returns a list of dicts, ascending z: {x, y, z, area_mm2, loop} where
+    (x, y) is the birth polygon's centroid (its own footprint's boundary
+    passes through the actual mesh surface by construction, so the
+    centroid of a birth-scale polygon -- these are new/small by
+    definition -- sits at or extremely close to the real surface) and
+    `loop` is the (N,2) xy polygon itself, consumed by
+    island_birth_xy_ok for the strict on-footprint coverage test.
+    """
+    step = float(cfg.layer_height_mm)
+    zmin = float(mesh.bounds[0][2])
+    zmax = float(mesh.bounds[1][2])
+    total_h = zmax - zmin
+    if total_h <= 0:
+        return []
+
+    prev_comps = []  # [(loop, bbox)] from the previous real-print-layer slice
+    births = []
+    n_chunks = max(1, int(np.ceil(total_h / chunk_mm)))
+    for ci in range(n_chunks):
+        c0 = zmin + ci * chunk_mm
+        c1 = min(zmin + (ci + 1) * chunk_mm, zmax)
+        heights = list(np.arange(c0 + step / 2, c1, step))
+        if not heights:
+            continue
+        sections = mesh.section_multiplane(
+            plane_origin=[0, 0, 0], plane_normal=[0, 0, 1], heights=heights)
+        for z, path2d in zip(heights, sections):
+            cur_comps = []
+            if path2d is not None:
+                for loop in path2d.discrete:
+                    a = _signed_area_xy(loop)
+                    if a < 0 or a < min_area_mm2:
+                        continue  # hole, or a sliver below the noise floor
+                    cx, cy = float(loop[:, 0].mean()), float(loop[:, 1].mean())
+                    cur_comps.append((loop, _bbox_xy(loop), float(a), (cx, cy)))
+            for (loop, bb, area, (cx, cy)) in cur_comps:
+                overlapped = any(_polys_overlap_xy(loop, bb, ploop, pbb)
+                                  for (ploop, pbb, _, _) in prev_comps)
+                if not overlapped:
+                    births.append(dict(x=cx, y=cy, z=float(z), area_mm2=area,
+                                        loop=loop))
+            prev_comps = cur_comps
+    return births
+
+
 def delicacy_field(mesh, cfg, n_samples=20000, seed=0):
     """Scar-cost / delicacy weight in [0, 1] per surface sample point,
     returned as (sample_points, sample_normals, weights, query) where

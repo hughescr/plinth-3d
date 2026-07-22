@@ -35,6 +35,11 @@ def test_engine_runs_end_to_end_on_table_fixture(table_mesh, cfg):
     # nothing floats -- every emitted member endpoint attaches to
     # something (another member's axis, the plate, or the model).
     assert result["verify"]["connectivity_violations"] == [], result["verify"]
+    # v4 p6 (I3): the honest slice-based island-birth gate -- HARD
+    # acceptance for this fixture, not report-only (that's the Treant-
+    # scale run, which additionally depends on the parallel p6-routing
+    # workstream).
+    assert result["verify"]["uncovered_island_births"] == [], result["verify"]
     assert result["log"]["t_total"] < 10.0
 
 
@@ -81,17 +86,28 @@ def test_engine_supports_toe_minima_directly(toed_slab_mesh, cfg):
     """The layer-island rule end to end: both toe apexes (including the
     steep one the overhang-angle island model cannot see) end up with a
     routed contact AT the birth region, with the no-intersection
-    guarantee intact."""
+    guarantee intact.
+
+    v4 p6 (I4, Craig's strict criterion): tightened from
+    cfg.minima_contact_radius_mm (1.0mm -- that field's own docstring
+    says it was never meant as a coverage radius, "only absorbs sampling
+    gaps") to perception.ISLAND_ATTACH_REACH_MM (0.2mm, the same
+    conservative attach-reach the new island-birth demand/gate machinery
+    uses) -- strictly TIGHTER, never looser. The routed contact is placed
+    directly at the apex by _ensure_minima_contacts, so this stays a
+    near-zero-mm distance either way; only the STATED tolerance changed."""
+    from support_placement import perception
     result = engine.run(toed_slab_mesh, cfg)
     assert result["verify"]["clearance_violations"] == [], result["verify"]
     assert result["verify"]["connectivity_violations"] == [], result["verify"]
     assert result["verify"]["unsupported_minima"] == []
+    assert result["verify"]["uncovered_island_births"] == []
     routed = {m["owner"][1] for m in result["members"] if m["kind"] == "stub"}
     for apex in (np.array([8.0, 0.0, 9.0]), np.array([-8.0, 0.0, 11.0])):
         d = min(float(np.linalg.norm(
             np.asarray(result["contacts"][i]["position"]) - apex))
             for i in routed)
-        assert d <= cfg.minima_contact_radius_mm, (apex, d)
+        assert d <= perception.ISLAND_ATTACH_REACH_MM, (apex, d)
 
 
 def test_engine_wall_time_pin_on_table(table_mesh, cfg):
@@ -132,6 +148,68 @@ def test_engine_construct_is_deterministic_despite_global_rng_state(table_mesh, 
         assert np.array_equal(ma.p1, mb.p1)
         assert ma.r0 == mb.r0
         assert ma.r1 == mb.r1
+
+
+# =================================================================
+# v4 p6 (I1/I2/I3): slice-based island-birth detection, on-footprint
+# contact demand, and the honest at-birth coverage gate
+# =================================================================
+def test_engine_prepare_demands_ladder_contacts_old_detector_misses(raking_blade_mesh, cfg):
+    """TDD failing-first case (fails on master -- there is no
+    _ensure_island_birth_contacts / perception.island_births on master, so
+    engine.prepare only ever produces the OLD detector's single apex
+    contact for this fixture, which verify.island_birth_report -- also new
+    -- would then correctly flag as leaving the rest of the ladder
+    uncovered): engine.prepare's new I2 step must demand and add contacts
+    for the raking-blade births local_z_minima's single apex misses, and
+    the resulting FULL contact set must satisfy the strict I3 gate even
+    though the old-detector-only subset does not."""
+    from support_placement import verify as verify_mod
+
+    log = {}
+    pre = engine.prepare(raking_blade_mesh, cfg, log)
+    assert log["island_births"] >= 5
+    assert log["island_birth_contacts_added"] > 0, (
+        "I2 must demand extra contacts for the raking ladder beyond what "
+        "local_z_minima's single apex minimum already covers")
+
+    old_detector_only = [c for c in pre["contacts"] if not c.get("island_birth")]
+    uncovered_old = verify_mod.island_birth_report(pre["island_births"], old_detector_only, cfg)
+    assert len(uncovered_old) > 0, (
+        "the OLD detector's contacts alone should leave real gaps in the "
+        "strict ladder gate -- this is the failing-first half of the proof")
+
+    uncovered_new = verify_mod.island_birth_report(pre["island_births"], pre["contacts"], cfg)
+    assert uncovered_new == [], (
+        "the FULL demanded contact set (old detector + I2 ladder) must "
+        f"clear the strict gate: {uncovered_new}")
+
+
+def test_engine_prepare_island_births_deterministic_despite_global_rng_state(
+        raking_blade_mesh, cfg):
+    """Charter requirement: two preps bit-identical. engine.prepare's new
+    I1/I2 steps must not introduce any hidden RNG dependency -- perturb the
+    global numpy RNG differently before each call (same technique as
+    test_engine_construct_is_deterministic_despite_global_rng_state) and
+    require identical island_births and contacts."""
+    np.random.seed(111)
+    log_a = {}
+    pre_a = engine.prepare(raking_blade_mesh, cfg, log_a)
+
+    np.random.seed(999)
+    log_b = {}
+    pre_b = engine.prepare(raking_blade_mesh, cfg, log_b)
+
+    assert len(pre_a["island_births"]) == len(pre_b["island_births"])
+    for ba, bb in zip(pre_a["island_births"], pre_b["island_births"]):
+        assert ba["x"] == bb["x"] and ba["y"] == bb["y"] and ba["z"] == bb["z"]
+        assert ba["area_mm2"] == bb["area_mm2"]
+
+    assert len(pre_a["contacts"]) == len(pre_b["contacts"])
+    for ca, cb in zip(pre_a["contacts"], pre_b["contacts"]):
+        assert np.array_equal(np.asarray(ca["position"]), np.asarray(cb["position"]))
+        assert bool(ca.get("island_birth")) == bool(cb.get("island_birth"))
+    assert log_a["island_birth_contacts_added"] == log_b["island_birth_contacts_added"]
 
 
 def test_engine_no_contacts_returns_honest_empty_result(cfg):
@@ -335,6 +413,10 @@ def test_table_and_toed_slab_full_run_not_worse_than_baseline(cfg):
         assert v["connectivity_violations"] == [], (name, v["connectivity_violations"])
         assert v["printability_violations"] == [], (name, v["printability_violations"])
         assert v["murray_violations"] == [], (name, v["murray_violations"])
+        # v4 p6 (I3): HARD acceptance on these small fixtures -- the honest
+        # island-birth gate, with the I2-demanded contacts actually
+        # generated, routed, and covering.
+        assert v["uncovered_island_births"] == [], (name, v["uncovered_island_births"])
         total_ml = result["volume"]["total_ml"]
         assert total_ml <= baseline[name]["total_ml"] + 1e-6, (
             f"{name}: total_ml {total_ml:.4f} exceeds frozen baseline "

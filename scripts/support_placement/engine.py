@@ -19,10 +19,10 @@ from . import transient, bracing
 def prepare(mesh, cfg, log=None):
     """Stage 1 of the pipeline: everything that depends only on the mesh.
     Returns a picklable dict (no KDTree -- rebuild surface_tree per
-    process with routing.build_surface_tree): islands, minima, contacts,
-    plate_z, sample_points, sample_delicacy, log. Extracted from run()
-    so Treant-scale runs can checkpoint between bounded foreground
-    calls; run() remains the canonical composition."""
+    process with routing.build_surface_tree): islands, minima,
+    island_births, contacts, plate_z, sample_points, sample_delicacy, log.
+    Extracted from run() so Treant-scale runs can checkpoint between
+    bounded foreground calls; run() remains the canonical composition."""
     log = log if log is not None else {}
     t0 = time.time()
 
@@ -38,17 +38,37 @@ def prepare(mesh, cfg, log=None):
     log["minima"] = len(minima)
     log["t_minima"] = round(time.time() - t0, 2)
 
+    # v4 p6 (I1, Craig's strict criterion): ground-truth slice-based
+    # island-birth detection at the real print layer height, computed ONCE
+    # here and carried in `pre` for both contact demand (below) and the
+    # honest verify gate (verify.island_birth_report) -- see
+    # perception.island_births' module-level comment for why this is a
+    # necessary cross-check on local_z_minima above, not a duplicate of it.
+    island_births = perception.island_births(mesh, cfg)
+    log["island_births"] = len(island_births)
+    log["t_island_births"] = round(time.time() - t0, 2)
+
     contacts = placement.sample_candidates(mesh, islands, cfg)
     log["contacts_initial"] = len(contacts)
     contacts, islands, n_min_added = _ensure_minima_contacts(
         mesh, islands, contacts, minima, cfg)
     log["minima_contacts_added"] = n_min_added
 
+    # I2: demand one contact (or a short "ladder" for a raking/migrating
+    # cluster) per island-birth footprint not already satisfied by an
+    # existing contact under the strict at-birth criterion. Runs AFTER
+    # the minima pass so births local_z_minima already covers produce no
+    # duplicate demand (dedup is by the strict criterion here, not the
+    # old 1mm minima_contact_radius_mm -- see _ensure_island_birth_contacts).
+    contacts, islands, n_birth_added = _ensure_island_birth_contacts(
+        mesh, islands, contacts, island_births, cfg)
+    log["island_birth_contacts_added"] = n_birth_added
+
     plate_z = float(mesh.bounds[0][2]) - cfg.lift_mm
     sample_points, _sn, sample_delicacy, _q = perception.delicacy_field(mesh, cfg)
     log["t_delicacy"] = round(time.time() - t0, 2)
-    return dict(islands=islands, minima=minima, contacts=contacts,
-                plate_z=plate_z, sample_points=sample_points,
+    return dict(islands=islands, minima=minima, island_births=island_births,
+                contacts=contacts, plate_z=plate_z, sample_points=sample_points,
                 sample_delicacy=sample_delicacy, log=log)
 
 
@@ -175,7 +195,8 @@ def finish(mesh, pre, forest, unrouted, contacts, carried, tip_r,
     report = verify.self_verify(mesh, pre["islands"], routed_contacts, members,
                                  carried, tip_r, cfg, plate_z,
                                  surface_tree=surface_tree, minima=pre["minima"],
-                                 forest=forest)
+                                 forest=forest, unrouted=unrouted,
+                                 island_births=pre["island_births"])
     volume = tree.volume_report(members, balls)
     log["n_unrouted"] = len(unrouted)
     return dict(members=members, balls=balls, verify=report, volume=volume,
@@ -192,6 +213,7 @@ def run(mesh, cfg, log=None):
 
     pre = prepare(mesh, cfg, log)
     islands, minima, contacts = pre["islands"], pre["minima"], pre["contacts"]
+    island_births = pre["island_births"]
     plate_z = pre["plate_z"]
 
     if not contacts:
@@ -204,7 +226,11 @@ def run(mesh, cfg, log=None):
             verify=dict(ok=True, uncovered_islands=[], clearance_violations=[],
                         load_violations=[], unsupported_minima=[],
                         connectivity_violations=[], printability_violations=[],
-                        murray_violations=[]),
+                        murray_violations=[], uncovered_island_births=[],
+                        removal_report=dict(ok=True, n_trees=0, trees=[],
+                                             removal_order=[], removal_effort={},
+                                             blocked_trees=[]),
+                        removal_violations=[]),
             volume=dict(member_ml=0.0, ball_ml=0.0, total_ml=0.0, by_kind_ml={}),
             log=log)
 
@@ -244,7 +270,8 @@ def run(mesh, cfg, log=None):
         routed_contacts = [c for i, c in enumerate(contacts) if i not in unrouted]
         report = verify.self_verify(mesh, islands, routed_contacts, members, carried, tip_r,
                                      cfg, plate_z, surface_tree=surface_tree, minima=minima,
-                                     forest=forest)
+                                     forest=forest, unrouted=unrouted,
+                                     island_births=island_births)
         log[f"verify_pass{fix_pass}"] = dict(
             ok=report["ok"],
             n_uncovered=len(report["uncovered_islands"]),
@@ -254,6 +281,19 @@ def run(mesh, cfg, log=None):
             n_connectivity_violations=len(report["connectivity_violations"]),
             n_printability_violations=len(report["printability_violations"]),
             n_murray_violations=len(report["murray_violations"]),
+            n_uncovered_island_births=len(report["uncovered_island_births"]),
+            # Phase 5 (design-v4.md #10, amended 2026-07-22): MEASUREMENT
+            # ONLY -- self_verify's default gate_on_removal=False means
+            # this never affects `ok`. Per Craig's 2026-07-22 ruling
+            # (design-v4.md #10 amendment, superseding the earlier
+            # "BLOCKER gate" charter language), removal_report is
+            # diagnostic/report-only and removability is the least
+            # important optimization axis -- it must never block a
+            # layout that's otherwise superior on structural/physics
+            # quality or resin use, so gate_on_removal stays an inert
+            # (unused-by-any-caller) toggle rather than something wired
+            # to engine.run acceptance.
+            n_removal_blocked_trees=len(report["removal_violations"]),
         )
         if report["ok"] or not report["uncovered_islands"]:
             break
@@ -307,7 +347,20 @@ def _ensure_minima_contacts(mesh, islands, contacts, minima, cfg):
         if tree_have is not None:
             d, _ = tree_have.query(m["region_pts"],
                                     workers=routing.query_workers(len(m["region_pts"])))
-            if float(np.min(d)) <= cfg.minima_contact_radius_mm:
+            # I4 (Craig's strict criterion, v4 p6): this used to skip on
+            # cfg.minima_contact_radius_mm (1.0mm) -- but that field's own
+            # docstring says it is "NOT a coverage radius... only absorbs
+            # sampling gaps" between face-sampled contact points and
+            # vertex-sampled birth regions. 1.0mm let a contact 20 real
+            # layers away from a birth (Craig: "that's 20 layers... a lump
+            # floating in the resin tank") silently count as already
+            # covering it, so this pass would under-add. Use the same
+            # conservative attach-reach as the new island-birth demand
+            # pass (perception.ISLAND_ATTACH_REACH_MM, ~tip_r_min_mm) --
+            # a plain module constant, not a config.py knob (see that
+            # constant's own docstring for why: config.py belongs to a
+            # parallel workstream on this branch).
+            if float(np.min(d)) <= perception.ISLAND_ATTACH_REACH_MM:
                 continue  # an existing contact already holds this birth island
         near = centers_tree.query_ball_point(m["position"], r=1.5)
         if not near:
@@ -326,6 +379,195 @@ def _ensure_minima_contacts(mesh, islands, contacts, minima, cfg):
                              normal=np.asarray(m["normal"], float),
                              island_id=iid, area_mm2=area, minimum=True))
         added += 1
+    return contacts, islands, added
+
+
+# I2 (v4 p6, Craig's strict criterion): "distinct physical footprint"
+# clustering radius for raw real-layer island births -- see
+# _ensure_island_birth_contacts. Not a config.py knob (see
+# perception.ISLAND_ATTACH_REACH_MM's docstring for why: implementation
+# geometry constant, config.py belongs to a parallel workstream on this
+# branch). Measured against the real Weeping Treant corpus (design
+# scratchpad's island_contact_demand_result.json): bridges the
+# surface-texture-scale gap between consecutive 0.05mm-layer birth events
+# of the same raking/migrating thin feature into one physical footprint,
+# without merging genuinely separate overhangs (kept well under
+# cfg.target_spacing_mm).
+#
+# This is a 3D-EUCLIDEAN xy/z BOOKKEEPING radius -- "are these two raw
+# birth records the same physical feature, or two different ones" -- not
+# a coverage-correctness tolerance; it never decides whether a birth
+# counts as covered (island_birth_report's derived z_tol_mm and
+# perception.ISLAND_ATTACH_REACH_MM alone decide that). Deliberately NOT
+# derived from cfg.layer_height_mm under design-v4.md section 11's
+# amendment: this radius groups birth RECORDS regardless of how many real
+# layers separate them, a different question from "is layer N close
+# enough in time to layer N-1" (the z_tol question). It was tuned once
+# against the 0.05mm-layer Treant corpus, though, so a future
+# dynamic-layer-height pass should empirically re-check whether 0.6mm
+# still groups sensibly at much finer local layer heights (more, closer-
+# spaced raw births per unit height could plausibly want a smaller link
+# radius to avoid over-merging distinct nearby features) -- not required
+# for this branch, flagged for whoever lands that pass.
+_ISLAND_BIRTH_LINK_R_MM = 0.6
+
+
+def _cluster_island_births_3d(uncovered, link_r_mm):
+    """Union-find over 3D euclidean distance <= link_r_mm -> distinct
+    physical footprints. `uncovered` is a list of birth dicts (x, y, z, ...).
+    Returns a list of index-lists into `uncovered`, ported from the
+    design scratchpad's contact_demand.py measurement script (same
+    algorithm, now production code)."""
+    n = len(uncovered)
+    pts = np.array([[b["x"], b["y"], b["z"]] for b in uncovered])
+    parent = list(range(n))
+
+    def find(i):
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i, j):
+        ri, rj = find(i), find(j)
+        if ri != rj:
+            parent[ri] = rj
+
+    for i in range(n):
+        if i + 1 >= n:
+            continue
+        d = np.linalg.norm(pts[i + 1:] - pts[i], axis=1)
+        for k, dd in enumerate(d):
+            if dd <= link_r_mm:
+                union(i, i + 1 + k)
+
+    groups = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+    return list(groups.values())
+
+
+def _greedy_ladder_positions(cluster_idx, uncovered, attach_r_mm, z_tol_mm):
+    """Greedy minimum-contact cover for one footprint cluster (I2's
+    "ladder" for a raking/migrating cluster, 1 contact for an isolated
+    birth): sort the cluster's raw births by z, then repeatedly take the
+    lowest still-uncovered birth as a placement and drop every later birth
+    within attach_r_mm (xy) AND z_tol_mm (z) of THAT placement's own
+    position -- each placement is a real contact that will itself be
+    checked against exactly this xy/z criterion by
+    verify.island_birth_report, so the cover this loop computes is exactly
+    the ladder needed to satisfy that gate. Not necessarily the global
+    minimum cover (greedy), but a simple, defensible, honest-by-
+    construction one -- ported from the design scratchpad's
+    contact_demand.py measurement script. Returns the list of chosen birth
+    dicts (subset of `uncovered`)."""
+    items = sorted((uncovered[i] for i in cluster_idx), key=lambda b: b["z"])
+    remaining = list(items)
+    placements = []
+    while remaining:
+        anchor = remaining.pop(0)
+        placements.append(anchor)
+        keep = []
+        for b in remaining:
+            xy_d = float(np.hypot(b["x"] - anchor["x"], b["y"] - anchor["y"]))
+            z_d = float(abs(b["z"] - anchor["z"]))
+            if xy_d <= attach_r_mm and z_d <= z_tol_mm:
+                continue  # covered by this placement
+            keep.append(b)
+        remaining = keep
+    return placements
+
+
+def _ensure_island_birth_contacts(mesh, islands, contacts, island_births, cfg):
+    """I2: contact demand from perception.island_births (I1) -- the
+    ground-truth slice-based birth detection, independent of
+    local_z_minima's vertex-graph model. For every birth not already held
+    by an existing contact under Craig's strict at-birth criterion (within
+    cfg.minima_connect_layers real print layers of z, landing on/within
+    perception.ISLAND_ATTACH_REACH_MM of the birth footprint's own
+    boundary -- NOT the old 1mm minima_contact_radius_mm, see I4/
+    _ensure_minima_contacts), clusters the raw uncovered births into
+    distinct physical footprints (_ISLAND_BIRTH_LINK_R_MM) and demands the
+    minimum "ladder" of contacts (_greedy_ladder_positions) needed to
+    satisfy the gate, placed ON the footprint (xy-exact at the birth
+    centroid, z at the birth layer).
+
+    Runs AFTER _ensure_minima_contacts so births that detector already
+    covers (the common case: a sharp toe apex is both a vertex-graph
+    local minimum AND a slice-birth) produce no duplicate demand -- this
+    pass only fills the GAP: raking/migrating features and any other
+    birth event the vertex-graph model's per-vertex 1-ring can't express
+    (see perception.island_births' module docstring).
+
+    Mirrors _ensure_minima_contacts' island bookkeeping: a birth whose
+    footprint isn't already inside a known overhang island gets a small
+    synthetic island appended (load partition / coverage_report then
+    treat it like any other region). Unlike _ensure_minima_contacts, a
+    newly-created synthetic island's owning face IS marked in the local
+    face_island lookup immediately (a strict local improvement, not a
+    behavior change to the sibling function this is ported alongside) --
+    ladder placements from the same cluster are likely to share a nearest
+    face, and this avoids spawning one redundant synthetic island per
+    ladder rung for what is physically one small footprint.
+
+    Mutates neither input list; returns (contacts, islands, n_added)."""
+    if not island_births:
+        return contacts, islands, 0
+    from scipy.spatial import cKDTree
+    contacts = list(contacts)
+    islands = list(islands)
+
+    z_tol_mm = cfg.minima_connect_layers * cfg.layer_height_mm
+    attach_r = perception.ISLAND_ATTACH_REACH_MM
+
+    have = np.array([np.asarray(c["position"], float) for c in contacts]) \
+        if contacts else np.zeros((0, 3))
+
+    def already_covered(b):
+        if len(have) == 0:
+            return False
+        z_ok = np.abs(have[:, 2] - b["z"]) <= z_tol_mm
+        if not z_ok.any():
+            return False
+        for cx, cy, _cz in have[z_ok]:
+            ok, _d = perception.island_birth_xy_ok(float(cx), float(cy), b["loop"], attach_r)
+            if ok:
+                return True
+        return False
+
+    uncovered = [b for b in island_births if not already_covered(b)]
+    if not uncovered:
+        return contacts, islands, 0
+
+    clusters = _cluster_island_births_3d(uncovered, _ISLAND_BIRTH_LINK_R_MM)
+
+    face_island = -np.ones(len(mesh.faces), dtype=np.int64)
+    for iid, fids in enumerate(islands):
+        face_island[fids] = iid
+    centers_tree = cKDTree(mesh.triangles_center)
+
+    added = 0
+    for cluster_idx in clusters:
+        for b in _greedy_ladder_positions(cluster_idx, uncovered, attach_r, z_tol_mm):
+            pos = np.array([b["x"], b["y"], b["z"]], float)
+            near = centers_tree.query_ball_point(pos, r=1.5)
+            if not near:
+                _, nearest = centers_tree.query(pos)
+                near = [int(nearest)]
+            best = min(near, key=lambda f: float(
+                np.linalg.norm(mesh.triangles_center[f] - pos)))
+            normal = np.asarray(mesh.face_normals[best], float)
+            if face_island[best] >= 0:
+                iid = int(face_island[best])
+            else:
+                fids = np.array(sorted(near), dtype=np.int64)
+                islands.append(fids)
+                iid = len(islands) - 1
+                face_island[fids] = iid
+            area = float(mesh.area_faces[islands[iid]].sum())
+            contacts.append(dict(position=pos, normal=normal, island_id=iid,
+                                 area_mm2=area, minimum=True, island_birth=True))
+            added += 1
     return contacts, islands, added
 
 

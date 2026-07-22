@@ -89,6 +89,64 @@ def make_toed_slab(top=(30, 30, 4), z_bottom=15.0):
     return trimesh.Trimesh(vertices=merged.vertices.copy(), faces=merged.faces.copy(), process=True)
 
 
+def make_raking_blade(top=(20, 20, 4), z_bottom=10.0, blade=(0.03, 2.0, 5.0),
+                       rake_deg=85.0):
+    """Synthetic fixture for v4 p6's I1 slice-based island-birth detection
+    (TDD regression for the class local_z_minima's vertex-graph model
+    cannot cover on its own): a slab with a THIN blade hanging from its
+    underside, rotated `rake_deg` from vertical about the y-axis so it
+    rakes steeply sideways as it descends -- the real Weeping Treant
+    corpus's "raking/migrating cluster" case (design scratchpad
+    island_contact_demand_result.json: 10 such clusters, 1-4-contact
+    ladders).
+
+    Physically: the blade is topologically ONE connected minimum (a
+    single lowest vertex at its free tip) -- local_z_minima correctly
+    finds exactly that one apex and stops there, a single contact. But
+    because the blade is thin (bx) and rakes far from vertical, its
+    cross-section at each REAL PRINT LAYER (cfg.layer_height_mm) shifts
+    sideways by roughly layer_height * tan(rake_deg) -- at the default
+    85 degrees that is ~0.57mm per 0.05mm layer, comfortably exceeding
+    both the blade's own cross-sectional width and
+    perception.ISLAND_ATTACH_REACH_MM (0.2mm). Every consecutive pair of
+    real-layer slices therefore fails to overlap: perception.
+    island_births sees a whole LADDER of distinct birth events climbing
+    the blade that a single apex contact never reaches at birth (Craig's
+    criterion is about the print-time state at each layer, not mesh
+    topology) -- exactly the gap I2's contact-demand pass exists to fill.
+
+    CALIBRATED TO THE 0.05mm DEFAULT (cfg.layer_height_mm), not
+    layer-height-independent: the ladder only appears because per-layer
+    xy shift (layer_height * tan(rake_deg)) exceeds the blade's own
+    cross-sectional width at THAT layer height. Empirically verified at a
+    finer 0.02mm profile the per-layer shift drops under the blade's
+    width, consecutive slices go back to overlapping, and the fixture
+    genuinely stops birthing a ladder (perception.local_z_minima still
+    finds 2, but perception.island_births drops from 9 to 1) -- this is
+    the PHYSICALLY CORRECT behavior (a slower-migrating cross-section at
+    finer layers really does re-merge), not a bug, but it means this
+    fixture's ladder-proof tests are only valid at the 0.05mm default; a
+    future dynamic-layer-height pass that changes that default would need
+    to re-tune `blade`/`rake_deg` here (steeper rake and/or thinner blade)
+    to keep exercising the same class of failure.
+    """
+    parts = []
+    slab = trimesh.creation.box(extents=top)
+    slab.apply_translation((0, 0, z_bottom + top[2] / 2))
+    parts.append(slab)
+    bx, by, bz = blade
+    b = trimesh.creation.box(extents=(bx, by, bz))
+    b.apply_translation((0, 0, -bz / 2))  # top face at local z=0 (attach); tip at z=-bz
+    R = trimesh.transformations.rotation_matrix(np.radians(rake_deg), (0, 1, 0),
+                                                 point=[0, 0, 0])
+    b.apply_transform(R)
+    b.apply_translation((0, 0, z_bottom))
+    parts.append(b)
+    merged = trimesh.util.concatenate(parts)
+    return trimesh.Trimesh(vertices=merged.vertices.copy(), faces=merged.faces.copy(),
+                            process=True)
+
+
 def make_thin_fin(base=(20, 20, 4), fin=(0.6, 10, 15), z0=0.0):
     """Synthetic fixture: a block with a thin fin sticking up -- for
     delicacy/thinness field tests."""

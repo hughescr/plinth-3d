@@ -12,7 +12,7 @@ doesn't choose orientation, it evaluates candidates handed to it.
 import numpy as np
 from scipy.spatial import cKDTree
 
-from . import perception, routing, joints, tree as tree_mod
+from . import perception, routing, joints, tree as tree_mod, removal as removal_mod
 
 
 def coverage_report(mesh, islands, contacts, cfg):
@@ -217,6 +217,70 @@ def minima_report(minima, routed_contacts, cfg):
     return out
 
 
+def island_birth_report(island_births, routed_contacts, cfg):
+    """I3: the HONEST island-birth coverage gate (v4 p6, Craig's strict
+    criterion, verbatim: "every island birth ... must have a support
+    contact within ~2 real print layers (0.1mm z) landing ON the birth
+    component's footprint (or within that contact's own attach radius of
+    its boundary)"). Consumes perception.island_births (I1's ground-truth
+    slice-based birth detection at the real print layer height), NOT
+    local_z_minima's birth regions -- minima_report (above) already gates
+    those independently; this is a second, geometrically-independent
+    check, not a stricter version of the same one.
+
+    A birth is covered iff some ROUTED contact (proximity elsewhere,
+    or an unrouted stub, does not count -- an unrouted contact provides
+    zero physical support) satisfies BOTH:
+      - z: |contact.z - birth.z| <= cfg.minima_connect_layers *
+        cfg.layer_height_mm (the ~2-real-print-layer / 0.1mm budget);
+      - xy: on the birth polygon, or within
+        perception.ISLAND_ATTACH_REACH_MM of its boundary.
+    This REPLACES minima_report's cfg.minima_contact_radius_mm as the
+    coverage radius for THIS data -- that field's own docstring says it
+    was "NOT a coverage radius... only absorbs sampling gaps", which is
+    exactly how the pre-p6 engine could self-certify while a full-model
+    ground-truth audit found real uncovered births (design scratchpad:
+    island_audit_fullmodel_0.05mm_result.json, 77/211 uncovered against a
+    gate that reported 51).
+
+    Returns list of uncovered-birth dicts {x, y, z, area_mm2, gap_mm,
+    gap_layers}, gap_mm being the true nearest-in-3D-space routed contact
+    (an honest number even when nothing anywhere qualifies on xy) -- an
+    empty list means every slice-detected birth is genuinely supported at
+    birth, not merely "close to something.\""""
+    if not island_births:
+        return []
+    z_tol_mm = cfg.minima_connect_layers * cfg.layer_height_mm
+    attach_r = perception.ISLAND_ATTACH_REACH_MM
+    positions = np.array([np.asarray(c["position"], float)
+                          for c in routed_contacts]) if routed_contacts else np.zeros((0, 3))
+    out = []
+    for b in island_births:
+        bz = b["z"]
+        covered = False
+        if len(positions):
+            z_ok = np.nonzero(np.abs(positions[:, 2] - bz) <= z_tol_mm)[0]
+            for k in z_ok:
+                cx, cy, _cz = positions[k]
+                ok, _d = perception.island_birth_xy_ok(float(cx), float(cy), b["loop"], attach_r)
+                if ok:
+                    covered = True
+                    break
+        if covered:
+            continue
+        if len(positions):
+            d3 = np.linalg.norm(
+                positions - np.array([b["x"], b["y"], bz]), axis=1)
+            gap = float(d3.min())
+        else:
+            gap = float("inf")
+        out.append(dict(x=b["x"], y=b["y"], z=bz, area_mm2=b["area_mm2"],
+                        gap_mm=gap,
+                        gap_layers=(gap / cfg.layer_height_mm
+                                    if np.isfinite(gap) else float("inf"))))
+    return out
+
+
 def connectivity_report(members, plate_z, cfg, surface_tree=None):
     """v3.7 hard gate (Craig's Chitubox review), signature-migrated for v4
     (design-v4.md #2): the stale-brace-leak and chained-Y-branch defects
@@ -325,24 +389,29 @@ def connectivity_report(members, plate_z, cfg, surface_tree=None):
 
 
 def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cfg,
-                 plate_z, surface_tree=None, minima=None, forest=None):
+                 plate_z, surface_tree=None, minima=None, forest=None, unrouted=(),
+                 gate_on_removal=False, island_births=None):
     """Full design-v4.md #11 gate. Returns a report dict; `ok` is True
     only if all checks are clean: coverage, clearance, load, layer-island
     minima (only when the caller supplies `minima` from
-    perception.local_z_minima; engine.run always does), connectivity, and
-    -- new in v4 -- per-segment printability and per-junction Murray
-    conservation.
+    perception.local_z_minima; engine.run always does), the v4 p6
+    slice-based island-birth gate (only when the caller supplies
+    `island_births` from perception.island_births; engine.run always
+    does), connectivity, and -- new in v4 -- per-segment printability and
+    per-junction Murray conservation.
 
     `members` replaces v3's conn_parts=(routes,trunks,risers,braces,
     plate_z): one flat member list (tree.Member objects or dicts) drives
     clearance_report, connectivity_report, AND printability_report (p6-
     reach consistency fix -- see below). `forest`, if given (a tree.
     Forest -- engine.run always supplies one in real runs, same optional
-    pattern as `minima`/`surface_tree`), additionally gates printability
-    and Murray conservation; omitting it skips those two sub-reports
-    (reported as empty) rather than gating on them, since murray_report
-    needs the forest's parent/child topology, not just the flat member
-    list.
+    pattern as `minima`/`island_births`/`surface_tree`), additionally
+    gates printability and Murray conservation, and computes the
+    design-v4.md #10 removal_report (`unrouted`, the caller's honestly-
+    unrouted contact-index list, feeds forest_trees so a never-built stub
+    isn't reported as its own unremovable singleton tree); omitting
+    `forest` skips all three (reported as empty/None) rather than gating
+    on them.
 
     p6-reach consistency fix (verifier-authorized, one line): printability
     used to run over the RAW `forest.members` (every member this Forest
@@ -360,31 +429,61 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
     printability_report over `members` (the SAME filtered basis as its
     sibling checks) instead of `forest.members` -- `forest` is still
     required to gate this sub-report at all (per the docstring above),
-    just no longer the SOURCE of what gets checked."""
+    just no longer the SOURCE of what gets checked.
+
+    `gate_on_removal` (Phase 5 wiring decision, see the p5-removal commit
+    message; amended 2026-07-22): the charter (#10) originally called the
+    removal gate's hard-failure case -- a residual set no removal order
+    clears -- "a BLOCKER gate, wired into verify ok". Craig's 2026-07-22
+    ruling (design-v4.md #10 amendment) supersedes that language:
+    removal_report is diagnostic/report-only, removability is the least
+    important optimization axis, and nothing it finds -- caged sets
+    included -- may block an otherwise-superior layout. Per that ruling,
+    removal_report/removal_violations are ALWAYS computed and surfaced
+    (measurement only); gate_on_removal stays an inert toggle no shipped
+    caller sets (setting it True would still AND removal_violations into
+    `ok` mechanically, but doing so now runs against the charter, not
+    with it). Defaults False so no existing caller's acceptance behavior
+    changes by importing this function. `island_births`'s gate is NOT
+    inert: per Craig's strict I3 ruling (see island_birth_report), an
+    uncovered slice-detected island birth DOES fail `ok` -- removal is a
+    soft preference axis, island-birth coverage is not."""
     coverage = coverage_report(mesh, islands, contacts, cfg)
     clearance = clearance_report(mesh, members, cfg, surface_tree=surface_tree)
     load = load_report(carried_area_mm2, tip_r_mm, cfg)
     unsupported_minima = minima_report(minima, contacts, cfg) if minima is not None else []
+    uncovered_island_births = island_birth_report(island_births, contacts, cfg) \
+        if island_births is not None else []
     connectivity_violations = connectivity_report(members, plate_z, cfg,
                                                    surface_tree=surface_tree)
     if forest is not None:
         printability_violations = tree_mod.printability_report(members, cfg)
         murray_violations = murray_report(forest, cfg)
+        removal = removal_mod.removal_report(forest, mesh, surface_tree, cfg, unrouted=unrouted)
     else:
         printability_violations = []
         murray_violations = []
+        removal = None
+    removal_violations = list(removal["blocked_trees"]) if removal is not None else []
     uncovered = [c for c in coverage if not c["covered"]]
+    ok = (len(uncovered) == 0 and len(clearance) == 0 and len(load) == 0
+          and len(unsupported_minima) == 0 and len(uncovered_island_births) == 0
+          and len(connectivity_violations) == 0
+          and len(printability_violations) == 0 and len(murray_violations) == 0)
+    if gate_on_removal:
+        ok = ok and len(removal_violations) == 0
     return dict(
-        ok=(len(uncovered) == 0 and len(clearance) == 0 and len(load) == 0
-            and len(unsupported_minima) == 0 and len(connectivity_violations) == 0
-            and len(printability_violations) == 0 and len(murray_violations) == 0),
+        ok=ok,
         uncovered_islands=uncovered,
         clearance_violations=clearance,
         load_violations=load,
         unsupported_minima=unsupported_minima,
+        uncovered_island_births=uncovered_island_births,
         connectivity_violations=connectivity_violations,
         printability_violations=printability_violations,
         murray_violations=murray_violations,
+        removal_report=removal,
+        removal_violations=removal_violations,
     )
 
 
