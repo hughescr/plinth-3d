@@ -317,10 +317,8 @@ def _candidate_builders(forest, i, stub_idx, se, r_i, carried_i, contacts, tip_r
                          carried, plate_z, surface_tree, mesh, cfg, kdc,
                          sample_points, sample_delicacy, query_fn):
     yield from _plate_descent_builders(forest, i, stub_idx, se, r_i, carried_i, plate_z, cfg)
-    mb = _model_anchor_builder(forest, i, stub_idx, se, r_i, carried_i,
-                                sample_points, sample_delicacy, query_fn, cfg)
-    if mb is not None:
-        yield mb
+    yield from _model_anchor_builders(forest, i, stub_idx, se, r_i, carried_i,
+                                       sample_points, sample_delicacy, query_fn, cfg)
     yield from _bifurcation_builders(forest, i, stub_idx, se, r_i, carried_i,
                                       plate_z, cfg, kdc)
 
@@ -406,17 +404,30 @@ def _plate_descent_builders(forest, i, stub_idx, se, r_i, carried_i, plate_z, cf
 
 
 # ---------------------------------------------------------- (b) model anchor --
-def _model_anchor_builder(forest, i, stub_idx, se, r_i, carried_i,
-                           sample_points, sample_delicacy, query_fn, cfg):
+def _model_anchor_builders(forest, i, stub_idx, se, r_i, carried_i,
+                            sample_points, sample_delicacy, query_fn, cfg):
+    """BUG 1 fix: yield one build_fn per cone-pre-filtered candidate anchor
+    (struts.find_model_anchor_candidates, sorted nearest-first, capped
+    ~40) instead of committing to a single globally-nearest point. Each
+    candidate goes through cco's NORMAL insertion trial machinery in
+    _insert_terminal (checkpoint, build, forest.revalidate, rollback,
+    cheapest-clearance-surviving-candidate-wins) exactly like every other
+    route family -- so a candidate that fails the builder's own cone
+    check OR fails real clearance (e.g. its straight-line path clips
+    other model geometry) is simply passed over in favor of the next one,
+    rather than silently killing the whole model-anchor option for this
+    contact."""
     if sample_points is None or sample_delicacy is None:
-        return None
+        return
     contact = dict(position=se)
-    found = struts.find_model_anchor(contact, sample_points, sample_delicacy, cfg)
-    if found is None:
-        return None
-    anchor_pt, _anchor_delicacy, _len = found
-    anchor_pt = np.asarray(anchor_pt, float)
+    candidates = struts.find_model_anchor_candidates(contact, sample_points,
+                                                       sample_delicacy, cfg)
+    for anchor_pt, _anchor_delicacy, _len in candidates:
+        yield _make_model_anchor_builder(forest, i, stub_idx, se, r_i, carried_i,
+                                          np.asarray(anchor_pt, float), cfg)
 
+
+def _make_model_anchor_builder(forest, i, stub_idx, se, r_i, carried_i, anchor_pt, cfg):
     def build():
         L = float(np.linalg.norm(anchor_pt - se))
         if L <= 1e-6:

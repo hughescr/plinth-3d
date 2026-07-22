@@ -104,18 +104,28 @@ def test_rewire_preserves_exact_terminal_accounting(fixture_name, cfg, request):
 
 @pytest.mark.parametrize("fixture_name", ["table_mesh", "toed_slab_mesh"])
 def test_rewire_floors_hold_post_rewire(fixture_name, cfg, request):
-    """design-v4.md #6 floors (r_load, r_deflect, kind floor), reusing
-    Phase 2's own exact regression helper (test_cco._own_floor_mm) rather
-    than re-deriving the formula -- run the FULL engine (insertion +
-    rewire) and check every live member."""
+    """design-v4.md #6 floors (r_murray, r_tension, r_deflect, r_transient,
+    kind floor), reusing Phase 2's own exact regression helper
+    (test_cco._own_floor_mm) rather than re-deriving the formula -- run
+    the FULL engine (insertion + rewire) and check every live member.
+
+    p6-routing: _own_floor_mm now needs (forest, report, cfg) -- it reads
+    transient.transient_report's free_gaps to floor a member against its
+    own worst UNBRACED sub-span rather than its raw full length (matches
+    transient.resize_forest's "per-segment, not per-member" rule; see
+    test_cco.py's own docstring for the interior-model_rung-brace repro
+    this reconciles). Braces (forest.braces) are excluded -- sized by
+    bracing.py's own fixed cfg.brace_r_mm rule, not this floor at all."""
     result = request.getfixturevalue(fixture_name.replace("_mesh", "_result"))
     forest = result["forest"]
+    report = transient.transient_report(forest, result["plate_z"], cfg)
     unrouted_stub_idx = {forest.terminal_of[i] for i in result["unrouted"]}
     violations = []
     for mi, m in enumerate(forest.members):
-        if mi in unrouted_stub_idx or mi in forest.dead or m.kind == "stub":
+        if (mi in unrouted_stub_idx or mi in forest.dead or m.kind == "stub"
+                or mi in forest.braces):
             continue
-        floor = _own_floor_mm(m, cfg)
+        floor = _own_floor_mm(m, mi, forest, report, cfg)
         r_have = max(m.r0, m.r1)
         if r_have < floor - 1e-6:
             violations.append(dict(member_idx=mi, kind=m.kind,

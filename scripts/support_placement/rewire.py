@@ -21,7 +21,7 @@ rollback:
 
 REUSE, not reimplementation (design-v4.md #7 "same candidate machinery
 as #4"): (a) calls cco.py's own `_plate_descent_builders`,
-`_model_anchor_builder`, and `_bifurcation_builders` directly -- the
+`_model_anchor_builders`, and `_bifurcation_builders` directly -- the
 exact functions cco.build uses per terminal, with zero change to their
 logic. The one real gap (cco.py never needed to exclude a host, since a
 fresh terminal can never be its own ancestor) is closed by the minimal
@@ -205,10 +205,17 @@ def _reattach_candidate_builders(forest, root_idx, se, r_i, carried_root, plate_
     for build_fn in plate_candidates:
         yield build_fn
         break
-    mb = cco._model_anchor_builder(forest, root_idx, root_idx, se, r_i, carried_root,
-                                    sample_points, sample_delicacy, None, cfg)
-    if mb is not None:
-        yield mb
+    # p6-routing (BUG 1 fix, cco.py): cco._model_anchor_builder (single
+    # globally-nearest, no cone filter) was renamed/replaced by
+    # cco._model_anchor_builders (plural: cone-pre-filtered, multi-
+    # candidate, nearest-first, capped ~40) -- call-site update only, zero
+    # change to this function's own move logic. This incidentally gives
+    # the reattach search the same fix cco.build's insertion gets: a
+    # cone- or clearance-infeasible nearest model anchor no longer kills
+    # the model-anchor option for a reattach the way the single-candidate
+    # version did.
+    yield from cco._model_anchor_builders(forest, root_idx, root_idx, se, r_i, carried_root,
+                                           sample_points, sample_delicacy, None, cfg)
     yield from cco._bifurcation_builders(forest, root_idx, root_idx, se, r_i, carried_root,
                                           plate_z, cfg, kdc, exclude=exclude)
 

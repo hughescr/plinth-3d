@@ -260,30 +260,68 @@ class Forest:
     def revalidate(self, surface_tree, cfg):
         """ONE batched clearance re-check over every currently-dirty
         member: sample at cfg.clearance_sample_step_mm, linear radius
-        taper, skip the first contact_depth_mm+0.2 of a designed-embed
-        end. clearance = kdtree_distance - radius - standoff_mm. Members
-        with no violation get their certificate (re)issued; members with
-        a violation stay dirty. Returns the violation list.
+        taper, skip the embed-end inset described below. clearance =
+        kdtree_distance - radius - standoff_mm. Members with no violation
+        get their certificate (re)issued; members with a violation stay
+        dirty. Returns the violation list.
 
         "stub" members are skipped entirely (design decision, recorded --
         mirrors routing.sample_route_envelope's existing, unchanged
         precedent: "the stub is rooted against the surface it springs
-        from"). The charter's contact_depth_mm+0.2 inset is enough to
-        exclude the EMBEDDED point itself, but a stub travels along the
-        surface normal at a near-grazing angle to the local surface for
-        its first couple of mm by construction -- an inset that size
-        still leaves samples well under standoff_mm from the surface,
-        which would flag every ordinary stub as a false violation. Since
-        v3 already established (and design-v4.md #2 keeps routing.py,
-        including this exemption, unchanged as substrate) that the stub
-        is the model's own emergence point and not swept, the same rule
-        carries over here rather than reintroducing the false-positive
-        class routing.py already solved."""
+        from"). A stub travels along the surface normal at a near-grazing
+        angle to the local surface for its first couple of mm by
+        construction -- ANY fixed inset still leaves samples well under
+        standoff_mm from the surface, which would flag every ordinary
+        stub as a false violation. Since v3 already established (and
+        design-v4.md #2 keeps routing.py, including this exemption,
+        unchanged as substrate) that the stub is the model's own
+        emergence point and not swept, the same rule carries over here
+        rather than reintroducing the false-positive class routing.py
+        already solved.
+
+        Embed-end exemption (BUG 2 fix, radius-principled -- p6-routing):
+        for a NON-stub member whose embed_end is p0 or p1, that endpoint
+        (call it A) is DESIGNED to sit on/at the model surface (a strut's
+        anchor foot, a model_rung's foot -- both land at a raw sample
+        point off the surface, offset by nothing, the same way a stub's
+        contact tip is defined as sitting cfg.contact_depth_mm INSIDE the
+        surface -- format.md's "0.3mm INSIDE surface" convention is
+        reused here as the general embedding-slop budget for ANY
+        designed-embed point, not just the stub tip). A sample P on the
+        member's own centerline at arc-length s from A can therefore have
+        its true nearest-surface distance bounded below:
+        dist(P) >= s - contact_depth_mm (triangle inequality through the
+        true surface point that is within contact_depth_mm of A). The
+        member's own radius at P, r(s), is <= r_end (r0 if embed_end is
+        p0, r1 if embed_end is p1: the radius AT the embedded end) for
+        every s on this endpoint's side, because both a strut's foot (its
+        FATTER end, by construction: r_strut = max(r_i, r_load, r_defl,
+        min_shoot_r_mm) >= r_i) and a model_rung's uniform-radius rod
+        taper monotonically toward, or stay flat at, r_end moving away
+        from A. So requiring the WORST case -- dist(P) - r(s) - standoff
+        >= (s - contact_depth_mm) - r_end - standoff -- to be non-
+        negative reduces to s >= contact_depth_mm + r_end + standoff_mm:
+        exactly `inset` below. Any sample beyond that inset cannot have
+        its clearance explained by proximity to A alone -- a violation
+        there is real (caused by OTHER geometry the member's straight
+        line happens to clip), not a false positive from the intentional
+        anchor. This replaces the OLD fixed inset (contact_depth_mm +
+        0.2, radius- and standoff-independent), which was proven too
+        small for every real radius (r >= min_shoot_r_mm = 0.35mm): its
+        own worst-case bound, inset + sample_step - r - standoff, is
+        NEGATIVE for r >= 0.2mm at the default cfg -- measured 179/179
+        model-anchor cone-survivors and 215/215 model_rung members
+        failing clearance by exactly that formula. The new inset grows
+        only as far as THIS member's own end radius and the standoff
+        margin require, never further (test_tree.py's masking tests
+        cover both directions: an anchored member with nothing else
+        nearby now passes; one that clips other geometry beyond its own
+        anchor region, or whose embedded end is NOT on the model surface,
+        still gets caught)."""
         from . import routing
         dirty = self.dirty_members()
         if not dirty:
             return []
-        inset = cfg.contact_depth_mm + 0.2
         all_pts, all_r, all_mi = [], [], []
         for mi in dirty:
             m = self.members[mi]
@@ -298,8 +336,10 @@ class Forest:
                 n = max(int(length / cfg.clearance_sample_step_mm), 1)
                 t = np.linspace(0.0, 1.0, n + 1)
                 if m.embed_end == "p0":
+                    inset = cfg.contact_depth_mm + m.r0 + cfg.standoff_mm
                     t = t[t * length >= inset]
                 if m.embed_end == "p1":
+                    inset = cfg.contact_depth_mm + m.r1 + cfg.standoff_mm
                     t = t[(1 - t) * length >= inset]
                 if len(t) == 0:
                     continue

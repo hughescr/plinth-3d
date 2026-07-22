@@ -105,6 +105,159 @@ def test_revalidate_reports_violation_and_leaves_member_dirty(cfg):
     assert f.dirty_members() != []
 
 
+def _dense_line(p_a, p_b, t_lo, t_hi, n=40, lateral_offset=None):
+    """Dense cluster of points along the segment p_a->p_b between
+    fractions t_lo/t_hi (inclusive), optionally shifted by a fixed
+    lateral offset -- robust to Forest.revalidate's own
+    clearance_sample_step_mm grid quantization (a single point can
+    otherwise miss the nearest actual sample by up to half a step)."""
+    p_a = np.asarray(p_a, float)
+    p_b = np.asarray(p_b, float)
+    ts = np.linspace(t_lo, t_hi, n)
+    pts = p_a[None, :] + ts[:, None] * (p_b - p_a)[None, :]
+    if lateral_offset is not None:
+        pts = pts + np.asarray(lateral_offset, float)[None, :]
+    return pts
+
+
+# --------------------------------------- BUG 2: embed-end exemption (p6) --
+@pytest.mark.parametrize("r_end", [0.35, 0.5, 0.8])
+def test_revalidate_passes_on_surface_anchored_strut_with_nothing_else_nearby(cfg, r_end):
+    """MASKING TEST (a): an on-surface-anchored strut (r 0.35-0.8) with
+    nothing else nearby must PASS revalidate. FAILS ON MASTER (the old
+    fixed contact_depth_mm+0.2=0.5mm inset is radius-independent -- its
+    own worst-case bound, inset+sample_step-r-standoff, is negative for
+    every r >= 0.35mm at these cfg defaults)."""
+    anchor = np.array([0.0, 0.0, 0.0])   # p1 -- the designed on-surface foot
+    se = np.array([8.0, 0.0, 6.0])       # p0 -- ~10mm strut, otherwise clear
+    m = _member(se, anchor, r0=0.3, r1=r_end, kind="strut",
+                owner=("contact", 0), embed_end="p1")
+    f = tm.Forest()
+    f.add_member(m)
+    surface_tree = cKDTree(np.array([anchor]))  # only the anchor itself is "model"
+    violations = f.revalidate(surface_tree, cfg)
+    assert violations == []
+    assert f.dirty_members() == []
+
+
+@pytest.mark.parametrize("r_end", [0.35, 0.5, 0.8])
+def test_revalidate_passes_on_surface_anchored_model_rung_with_nothing_else_nearby(cfg, r_end):
+    """MASKING TEST (a), model_rung variant: same guarantee for the OTHER
+    embed_end='p1' kind the charter names (bracing.py's model-rung
+    foot)."""
+    anchor = np.array([0.0, 0.0, 0.0])
+    p0 = np.array([3.0, 0.0, 0.0])       # short rod, like a real model_rung
+    m = _member(p0, anchor, r0=r_end, r1=r_end, kind="model_rung",
+                owner=("model_rung", 0), embed_end="p1")
+    f = tm.Forest()
+    f.add_member(m)
+    surface_tree = cKDTree(np.array([anchor]))
+    violations = f.revalidate(surface_tree, cfg)
+    assert violations == []
+
+
+def test_revalidate_catches_midshaft_clip_just_outside_exemption_zone(cfg):
+    """MASKING TEST (b): a member whose MID-SHAFT passes illegally close
+    to the model, just past the new exemption boundary and far from the
+    embedded end otherwise, must still be caught -- the exemption may
+    grow only as far as the anchor geometry requires, never further."""
+    anchor = np.array([0.0, 0.0, 0.0])
+    se = np.array([8.0, 0.0, 6.0])
+    r_end = 0.5
+    m = _member(se, anchor, r0=0.3, r1=r_end, kind="strut",
+                owner=("contact", 0), embed_end="p1")
+    inset = cfg.contact_depth_mm + r_end + cfg.standoff_mm
+    length = float(np.linalg.norm(se - anchor))
+    # dead-on the centerline, starting just past the exemption boundary
+    t_clip_lo = 1.0 - (inset + 1.5) / length
+    t_clip_hi = 1.0 - (inset + 0.05) / length
+    clip_cloud = _dense_line(se, anchor, t_clip_lo, t_clip_hi)
+    f = tm.Forest()
+    f.add_member(m)
+    surface_tree = cKDTree(np.vstack([[anchor], clip_cloud]))
+    violations = f.revalidate(surface_tree, cfg)
+    assert len(violations) == 1
+    assert violations[0]["member_idx"] == 0
+
+
+@pytest.mark.parametrize("offset_dir", [
+    np.array([1.0, 0.0, 0.0]),
+    np.array([0.0, 1.0, 0.0]),
+    np.array([1.0, 1.0, 0.0]) / np.sqrt(2.0),
+])
+def test_revalidate_catches_grazing_clip_at_various_angles_beyond_exemption(cfg, offset_dir):
+    """MASKING TEST (b), grazing variant: not dead-on, just close enough
+    (within r+standoff) at a point well beyond the exemption zone,
+    approached from different lateral directions -- must still be
+    caught."""
+    anchor = np.array([0.0, 0.0, 0.0])
+    se = np.array([8.0, 0.0, 6.0])
+    r0, r_end = 0.3, 0.5
+    m = _member(se, anchor, r0=r0, r1=r_end, kind="strut",
+                owner=("contact", 0), embed_end="p1")
+    inset = cfg.contact_depth_mm + r_end + cfg.standoff_mm
+    length = float(np.linalg.norm(se - anchor))
+    s = inset + 2.0  # comfortably beyond the exemption boundary
+    t = 1.0 - s / length
+    r_here = r0 + t * (r_end - r0)
+    margin = r_here + cfg.standoff_mm - 0.05  # just inside the required clearance
+    t_lo, t_hi = t - 0.01, t + 0.01
+    clip_cloud = _dense_line(se, anchor, t_lo, t_hi, n=15, lateral_offset=offset_dir * margin)
+    f = tm.Forest()
+    f.add_member(m)
+    surface_tree = cKDTree(np.vstack([[anchor], clip_cloud]))
+    violations = f.revalidate(surface_tree, cfg)
+    assert len(violations) == 1
+
+
+def test_revalidate_no_exemption_when_embed_end_is_not_on_model_surface(cfg):
+    """MASKING TEST (c): a member whose embedded end is NOT a designed
+    on-model anchor (embed_end=None -- a plate root or a bifurcation
+    junction) must get NO new exemption at all: a clip well inside where
+    an actual anchor's exemption zone WOULD have covered it must still
+    be caught."""
+    p0 = np.array([8.0, 0.0, 6.0])
+    p1 = np.array([0.0, 0.0, 0.0])
+    r_end = 0.5
+    m = _member(p0, p1, r0=0.3, r1=r_end, kind="trunk",
+                owner=("contact", 0), embed_end=None)
+    length = float(np.linalg.norm(p1 - p0))
+    inset = cfg.contact_depth_mm + r_end + cfg.standoff_mm  # what WOULD apply if embed_end="p1"
+    clip_near_p1 = p1 + (p0 - p1) / length * (inset * 0.5)  # well inside that hypothetical zone
+    f = tm.Forest()
+    f.add_member(m)
+    surface_tree = cKDTree(np.array([clip_near_p1]))
+    violations = f.revalidate(surface_tree, cfg)
+    assert len(violations) == 1
+
+
+def test_revalidate_rejects_anchored_strut_that_also_clips_other_geometry(cfg):
+    """MASKING TEST (d): an otherwise-legitimate on-surface-anchored
+    strut (its own anchor region passes cleanly on its own, confirmed
+    below) that ADDITIONALLY clips a different, unrelated part of the
+    model along its shaft must still be rejected -- the exemption must
+    not spill over to excuse an unrelated clip just because the member
+    also has a legitimate anchor somewhere."""
+    anchor = np.array([0.0, 0.0, 0.0])
+    se = np.array([8.0, 0.0, 6.0])
+    r_end = 0.5
+    length = float(np.linalg.norm(se - anchor))
+    inset = cfg.contact_depth_mm + r_end + cfg.standoff_mm
+    other_clip = anchor + (se - anchor) / length * (inset + 3.0)  # unrelated, well past the zone
+
+    f_clean = tm.Forest()
+    f_clean.add_member(_member(se, anchor, r0=0.3, r1=r_end, kind="strut",
+                                owner=("contact", 0), embed_end="p1"))
+    assert f_clean.revalidate(cKDTree(np.array([anchor])), cfg) == []
+
+    f = tm.Forest()
+    f.add_member(_member(se, anchor, r0=0.3, r1=r_end, kind="strut",
+                          owner=("contact", 0), embed_end="p1"))
+    surface_tree = cKDTree(np.array([anchor, other_clip]))
+    violations = f.revalidate(surface_tree, cfg)
+    assert len(violations) == 1
+
+
 def test_checkpoint_rollback_restores_mutated_member_state(cfg):
     f = tm.Forest()
     idx = f.add_member(_member([0, 0, 0], [0, 0, -10], r0=0.3, r1=0.3))

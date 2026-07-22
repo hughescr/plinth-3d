@@ -279,17 +279,54 @@ def test_build_is_deterministic_across_repeated_runs(cfg, table_mesh):
 
 
 # ------------------------------------------------ per-member sizing floor --
-def _own_floor_mm(m, cfg):
-    """design-v4.md #6: r = max(r_load, r_deflect, kind floor), recomputed
-    fresh from a member's OWN current length/lean/carried load -- the
-    verifier's audit approach, reused here as the regression test for the
-    deleted test_engine_trunk_radius_meets_load_and_span_requirements."""
+def _own_floor_mm(m, mi, forest, report, cfg):
+    """design-v4.md #6: r = max(r_murray, r_tension, r_deflect, r_transient,
+    kind floor), recomputed fresh from a member's OWN current geometry/
+    lean/carried load/children -- the verifier's audit approach, reused
+    here as the regression test for the deleted
+    test_engine_trunk_radius_meets_load_and_span_requirements.
+
+    p6-routing update: the ORIGINAL version of this helper used the
+    member's raw p0->p1 length for r_deflect and ignored r_murray/
+    r_transient entirely -- an incomplete but previously-invisible proxy,
+    because no live "shoot"/"trunk" member in either charter fixture ever
+    had an INTERIOR brace splitting its own axis until struts.py's BUG 1
+    fix made model_rung placement (bracing.py) actually viable (was
+    always 0 before). transient.resize_forest is "per-segment, not
+    per-member" (its own docstring, SPEC-ARM-FIX): once a model_rung
+    brace attaches partway along a member's axis, that member's REAL
+    r_deflect/r_transient floor is governed by its worst FREE GAP between
+    restraints (transient.transient_report's own field), which can be
+    shorter than the member's raw full length -- using the raw length
+    here would fail a member that is honestly, structurally fine (proven
+    on the Weeping Treant table fixture: member owner=('contact', 11)
+    kind='shoot', braced mid-shaft by a model_rung at z=8.2, raw-length
+    r_deflect=0.797 vs the correct free-gap r_deflect=0.477, actual
+    r=0.566 -- comfortably satisfies the real floor, would have
+    false-failed the naive one). This mirrors resize_forest's own
+    documented worst_gap_3d_mm derivation (z-space free_gaps scaled by
+    the member's own length/z-extent ratio) exactly, read from
+    transient.transient_report (a published primitive, not
+    resize_forest's mutation code itself -- this stays an independent
+    recomputation, not a call into the function under test)."""
+    from support_placement import transient
     L = float(np.linalg.norm(np.asarray(m.p1, float) - np.asarray(m.p0, float)))
     lean = cco._lean_deg(m.p0, m.p1)
-    r_defl = placement._shaft_r_for_L(L, cfg, lean)
+    children = [c for c in forest.children[mi] if c not in forest.dead]
+    r_murray = (sum(forest.members[c].r1 ** 4 for c in children)) ** 0.25 if children else 0.0
     r_tension = cco._r_tension_mm(m.carried_mm2, cfg)
     kind_floor = cfg.min_trunk_r_mm if m.kind == "trunk" else cfg.min_shoot_r_mm
-    return max(r_defl, r_tension, kind_floor)
+    info = report.get(mi)
+    if info is None:
+        r_deflect = placement._shaft_r_for_L(L, cfg, lean)
+        r_trans = 0.0
+    else:
+        worst_gap_mm = max(hi - lo for lo, hi in info["free_gaps"])
+        z_extent_mm = max(abs(float(m.p0[2]) - float(m.p1[2])), 1e-9)
+        worst_gap_3d_mm = worst_gap_mm * (L / z_extent_mm)
+        r_deflect = placement._shaft_r_for_L(worst_gap_3d_mm, cfg, lean)
+        r_trans = transient.r_transient_mm(info["worst_span_mm"], lean, info["n_terminals"], cfg)
+    return max(r_murray, r_tension, r_deflect, r_trans, kind_floor)
 
 
 @pytest.mark.parametrize("fixture_name", ["table_mesh", "toed_slab_mesh"])
@@ -311,16 +348,24 @@ def test_engine_every_member_meets_its_own_load_and_deflection_floor(fixture_nam
     tip_radius_mm's own SF/clamp band (design-v4.md #6, "Tips unchanged"),
     not this structural floor -- verify.load_report already covers tip
     undersizing on its own (different) terms, and tree.printability_report
-    exempts stubs from its per-segment rule for the same reason."""
+    exempts stubs from its per-segment rule for the same reason. Braces
+    (forest.braces -- "brace"/"model_rung" kinds) are ALSO exempt (p6-
+    routing): they are sized by bracing.py's own fixed cfg.brace_r_mm +
+    printability rule, never by this load/deflection floor at all (the
+    SAME exemption transient.resize_forest's own _postorder applies) --
+    was invisible before BUG 1/2 since model_rung members never existed
+    (always 0) to expose the check applying the wrong formula to them."""
     mesh = request.getfixturevalue(fixture_name)
     result = eng.run(mesh, cfg)
     forest = result["forest"]
+    from support_placement import transient
+    report = transient.transient_report(forest, result["plate_z"], cfg)
     unrouted_stub_idx = {forest.terminal_of[i] for i in result["unrouted"]}
     violations = []
     for mi, m in enumerate(forest.members):
-        if mi in unrouted_stub_idx or m.kind == "stub":
+        if mi in unrouted_stub_idx or m.kind == "stub" or mi in forest.braces:
             continue
-        floor = _own_floor_mm(m, cfg)
+        floor = _own_floor_mm(m, mi, forest, report, cfg)
         r_have = max(m.r0, m.r1)
         if r_have < floor - 1e-6:
             violations.append(dict(
@@ -419,3 +464,79 @@ def test_plate_descent_price_equals_honest_volume_for_short_column(cfg):
     honest_vol = tm.volume_report([col], [])["member_ml"]
     assert (se[2] - plate_z) < cfg.brace_free_span_mm
     assert price == pytest.approx(honest_vol)
+
+
+# ------------------------------------------------- BUG 1 integration (p6) --
+def test_model_anchor_builders_yields_one_per_candidate_in_length_order(cfg):
+    """cco._model_anchor_builders must yield ONE build_fn per qualifying
+    struts.find_model_anchor_candidates candidate (BUG 1 fix), in the
+    same nearest-first order -- not collapse to a single pre-chosen
+    anchor the way the old singular _model_anchor_builder did."""
+    f = tm.Forest()
+    se = np.array([0.0, 0.0, 20.0])
+    stub = tm.Member(p0=se - np.array([0.0, 0.0, 0.5]), p1=se, r0=0.35, r1=0.35,
+                      kind="stub", owner=("contact", 0), embed_end="p0")
+    stub_idx = f.add_member(stub)
+    a_near = np.array([4.0, 0.0, 15.0])   # d ~6.40mm
+    a_far = np.array([-4.0, 0.0, 6.0])    # d ~14.56mm
+    sample_points = np.array([a_near, a_far])
+    sample_delicacy = np.array([0.0, 0.0])
+
+    builders = list(cco._model_anchor_builders(f, 0, stub_idx, se, 0.35, 0.0,
+                                                 sample_points, sample_delicacy, None, cfg))
+    assert len(builders) == 2
+
+    cp = f.checkpoint()
+    builders[0]()
+    strut0 = next(m for m in f.members if m.kind == "strut")
+    assert np.allclose(strut0.p1, a_near)
+    f.rollback(cp)
+
+    cp = f.checkpoint()
+    builders[1]()
+    strut1 = next(m for m in f.members if m.kind == "strut")
+    assert np.allclose(strut1.p1, a_far)
+    f.rollback(cp)
+
+
+def test_model_anchor_multi_candidate_skips_clearance_infeasible_and_uses_next(cfg, box_mesh):
+    """BUG 1 integration: cco.build must retry the model-anchor route
+    through its NORMAL insertion trial machinery (checkpoint / build /
+    forest.revalidate / rollback, cheapest-clearance-surviving-candidate
+    wins) when the nearest anchor's straight-line path clips OTHER model
+    geometry mid-shaft -- a real clearance failure, not just a cone
+    failure. Proves the wiring is genuinely multi-candidate (cco retries
+    via the SAME machinery every other route family uses), not merely a
+    smarter single-shot pick made inside struts.py."""
+    se = np.array([0.0, 0.0, 20.0])
+    normal = np.array([0.0, 0.0, 1.0])
+    pos = se - normal * cfg.stub_length_mm  # so p_stub_end lands exactly on se
+    contacts = [dict(position=pos, normal=normal)]
+    tip_r = np.array([0.2])
+    carried = np.array([0.0])
+    minima_flags = [False]
+    plate_z = -200.0  # plate route hugely more expensive than either strut
+
+    a_near = np.array([4.0, 0.0, 15.0])
+    a_far = np.array([-4.0, 0.0, 6.0])
+    sample_points = np.array([a_near, a_far])
+    sample_delicacy = np.array([0.0, 0.0])
+
+    # Obstruction cloud along the NEAR strut's own centerline, well past
+    # its embed-end exemption zone and well clear of the FAR strut's
+    # centerline (rays diverge ~55deg from se) -- blocks ONLY the near
+    # candidate's straight-line path.
+    length_near = float(np.linalg.norm(a_near - se))
+    u_near = (a_near - se) / length_near
+    s_vals = np.arange(2.5, 4.05, 0.05)
+    obstruction = se[None, :] + s_vals[:, None] * u_near[None, :]
+    surface_tree = cKDTree(obstruction)
+
+    forest, unrouted = cco.build(box_mesh, contacts, tip_r, carried, minima_flags,
+                                  plate_z, surface_tree, cfg,
+                                  sample_points=sample_points, sample_delicacy=sample_delicacy)
+
+    assert unrouted == []
+    strut_members = [m for m in forest.members if m.kind == "strut"]
+    assert len(strut_members) == 1
+    assert np.allclose(strut_members[0].p1, a_far, atol=1e-6)

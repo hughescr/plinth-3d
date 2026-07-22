@@ -19,29 +19,78 @@ def cost(free_length_mm, contact_delicacy, anchor_delicacy, cfg):
             + cfg.scar_cost_weight * (contact_delicacy + anchor_delicacy))
 
 
+def find_model_anchor_candidates(contact, sample_points, sample_delicacy, cfg,
+                                  min_len_mm=5.0, max_delicacy=0.5, max_candidates=40):
+    """Every usable model-surface anchor point to strut to, sorted nearest
+    first and capped to `max_candidates` (v3.7's trunks.model_strut
+    pattern -- BUG 1 fix: v4's original find_model_anchor picked ONLY the
+    single globally-nearest qualifying point with no lean/cone filter at
+    all, which measured 76.7deg median lean (near-horizontal) and got
+    71% cone-rejected at the builder with no fallback. A candidate list
+    lets cco's normal insertion trial machinery (checkpoint/build/
+    revalidate/rollback, cheapest-survivor-wins) retry the next-nearest
+    anchor when the nearest one fails -- on the cone OR on clearance --
+    instead of the whole model-anchor route silently vanishing.
+
+    A candidate qualifies if it is: below or level with the contact
+    (keeps the member roughly load-bearing rather than fighting gravity
+    sideways), far enough away to be a real strut (not a degenerate
+    near-zero-length hack), not itself a delicate/detailed area (don't
+    trade one scar for a worse one), within cfg.strut_max_length_mm (keep
+    it local, design.md #6), and within cfg.strut_fallback_max_angle_deg
+    of vertical (the REVIVED v3.7 knob -- config.py:209 was dead code in
+    v4; this is the pre-filter that fixes the near-horizontal problem:
+    cco's own builder-side cone check (_within_cone) is the final
+    authority on any one candidate's feasibility at its actual sized
+    radius, but pre-filtering here means we don't waste 39 of 40 slots on
+    candidates that were never going to clear it).
+
+    Returns a list of (anchor_point, anchor_delicacy, length_mm) tuples
+    ordered by ascending length (ties broken by sample index, for
+    determinism -- no RNG anywhere, design-v4.md #4), empty if nothing
+    qualifies within the pool given.
+    """
+    pos = np.asarray(contact["position"], float)
+    if len(sample_points) == 0:
+        return []
+    delta = sample_points - pos
+    d = np.linalg.norm(delta, axis=1)
+    dxy = np.linalg.norm(delta[:, :2], axis=1)
+    drop = -delta[:, 2]  # positive when the candidate is below the contact
+    with np.errstate(divide="ignore", invalid="ignore"):
+        lean = np.degrees(np.arctan2(dxy, drop))
+    max_len = getattr(cfg, "strut_max_length_mm", None)
+    max_lean = getattr(cfg, "strut_fallback_max_angle_deg", 60.0)
+    mask = (d >= min_len_mm) & (sample_points[:, 2] <= pos[2] + 1e-6) \
+           & (sample_delicacy <= max_delicacy) & (lean <= max_lean + 1e-9)
+    if max_len is not None:
+        mask &= (d <= max_len)
+    if not mask.any():
+        return []
+    idx = np.nonzero(mask)[0]
+    order = idx[np.argsort(d[idx], kind="stable")][:max_candidates]
+    return [(sample_points[j], float(sample_delicacy[j]), float(d[j])) for j in order]
+
+
 def find_model_anchor(contact, sample_points, sample_delicacy, cfg,
                        min_len_mm=5.0, max_delicacy=0.5):
-    """Nearest usable model-surface point to strut to: below or level with
-    the contact (keeps the member roughly load-bearing rather than
-    fighting gravity sideways), far enough away to be a real strut (not a
-    degenerate near-zero-length hack), and not itself a delicate/detailed
-    area (don't trade one scar for a worse one).
+    """Nearest cone-feasible usable model-surface point to strut to (see
+    find_model_anchor_candidates for the qualification rules). Thin
+    single-result wrapper kept for choose_anchor's one-shot cost
+    comparison; cco.py's insertion builder uses
+    find_model_anchor_candidates directly so a cone- or clearance-
+    infeasible nearest candidate doesn't kill the whole model-anchor
+    route (BUG 1).
 
     Returns (anchor_point, anchor_delicacy, length_mm) or None if nothing
     qualifies within the pool given.
     """
-    pos = np.asarray(contact["position"], float)
-    d = np.linalg.norm(sample_points - pos, axis=1)
-    max_len = getattr(cfg, "strut_max_length_mm", None)
-    mask = (d >= min_len_mm) & (sample_points[:, 2] <= pos[2] + 1e-6) \
-           & (sample_delicacy <= max_delicacy)
-    if max_len is not None:
-        mask &= (d <= max_len)
-    if not mask.any():
+    candidates = find_model_anchor_candidates(
+        contact, sample_points, sample_delicacy, cfg,
+        min_len_mm=min_len_mm, max_delicacy=max_delicacy)
+    if not candidates:
         return None
-    idx = np.nonzero(mask)[0]
-    best = idx[np.argmin(d[idx])]
-    return sample_points[best], float(sample_delicacy[best]), float(d[best])
+    return candidates[0]
 
 
 def choose_anchor(contact, plate_free_length_mm, contact_delicacy,
