@@ -105,6 +105,66 @@ def test_local_z_minima_flags_only_true_minima_on_tilted_box(cfg):
     assert abs(minima[0]["z"] - zs.min()) < 1e-6
 
 
+# =================================================================
+# v4 p6 (I1): slice-based island-birth detection, Craig's strict
+# criterion
+# =================================================================
+def test_island_births_matches_single_bottom_plateau_on_box(box_mesh, cfg):
+    """Sanity/cross-check against local_z_minima's own box test: a flat
+    box under lift has exactly one island-birth event (its own bottom
+    cross-section, the very first slice with nothing below it), matching
+    local_z_minima's single bottom-plateau minimum."""
+    births = perception.island_births(box_mesh, cfg)
+    assert len(births) == 1
+    assert abs(births[0]["z"] - (box_mesh.bounds[0][2] + cfg.layer_height_mm / 2)) < 1e-6
+
+
+def test_island_births_reveals_raking_ladder_local_z_minima_misses(raking_blade_mesh, cfg):
+    """TDD failing-first case (fails on master's local_z_minima-only
+    detector): a thin blade raking far from vertical is topologically ONE
+    connected minimum (a single lowest vertex) -- local_z_minima correctly
+    finds just that one apex and stops, since its vertex-graph flood
+    connects the whole blade as one continuous surface. But the blade's
+    real-print-layer cross-section migrates sideways faster than its own
+    width, so consecutive real layers genuinely do NOT overlap: this is
+    Craig's "lump floating in the resin tank" case, and island_births
+    (I1's ground-truth slice scan) must see a whole ladder of distinct
+    birth events climbing the blade that the vertex-graph model cannot
+    express as multiple minima."""
+    minima = perception.local_z_minima(raking_blade_mesh, cfg)
+    births = perception.island_births(raking_blade_mesh, cfg)
+    assert len(minima) <= 2, (
+        "local_z_minima should see the blade as (at most) its own apex "
+        f"plus one unrelated slab-geometry minimum, not a ladder: {minima}")
+    assert len(births) >= 5, (
+        f"island_births should reveal a real ladder of >=5 birth events "
+        f"climbing the raking blade, found {len(births)}")
+    assert len(births) > len(minima) + 3
+
+
+def test_island_births_deterministic(raking_blade_mesh, cfg):
+    """Charter requirement: no RNG anywhere in the slice-based detector --
+    two independent calls on the same mesh must be bit-identical (count,
+    xyz, area, and the raw loop geometry)."""
+    a = perception.island_births(raking_blade_mesh, cfg)
+    b = perception.island_births(raking_blade_mesh, cfg)
+    assert len(a) == len(b)
+    for ba, bb in zip(a, b):
+        assert ba["x"] == bb["x"] and ba["y"] == bb["y"] and ba["z"] == bb["z"]
+        assert ba["area_mm2"] == bb["area_mm2"]
+        assert np.array_equal(ba["loop"], bb["loop"])
+
+
+def test_island_birth_xy_ok_inside_polygon_and_within_boundary_tolerance():
+    poly = np.array([[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]])
+    ok, d = perception.island_birth_xy_ok(1.0, 1.0, poly, tol_mm=0.2)
+    assert ok and d == 0.0
+    ok, d = perception.island_birth_xy_ok(2.1, 1.0, poly, tol_mm=0.2)
+    assert ok and abs(d - 0.1) < 1e-9
+    ok, d = perception.island_birth_xy_ok(3.0, 1.0, poly, tol_mm=0.2)
+    assert not ok and abs(d - 1.0) < 1e-9
+
+
 def test_delicacy_field_scores_thin_fin_higher_than_base(fin_mesh, cfg):
     points, normals, w, query = perception.delicacy_field(fin_mesh, cfg, n_samples=6000)
     fin_pts_mask = points[:, 2] > 6.0  # fin sits above the 4mm-tall base

@@ -30,3 +30,8 @@ def fin_mesh():
 @pytest.fixture
 def toed_slab_mesh():
     return mesh_io.make_toed_slab()
+
+
+@pytest.fixture
+def raking_blade_mesh():
+    return mesh_io.make_raking_blade()
