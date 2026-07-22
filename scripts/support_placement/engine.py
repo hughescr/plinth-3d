@@ -258,11 +258,17 @@ def run(mesh, cfg, log=None):
             n_connectivity_violations=len(report["connectivity_violations"]),
             n_printability_violations=len(report["printability_violations"]),
             n_murray_violations=len(report["murray_violations"]),
-            # Phase 5 (design-v4.md #10): MEASUREMENT ONLY -- self_verify's
-            # default gate_on_removal=False means this never affects `ok`
-            # (see verify.self_verify's docstring: whether removal
-            # violations should block engine.run acceptance is a product
-            # decision not made here, deliberately).
+            # Phase 5 (design-v4.md #10, amended 2026-07-22): MEASUREMENT
+            # ONLY -- self_verify's default gate_on_removal=False means
+            # this never affects `ok`. Per Craig's 2026-07-22 ruling
+            # (design-v4.md #10 amendment, superseding the earlier
+            # "BLOCKER gate" charter language), removal_report is
+            # diagnostic/report-only and removability is the least
+            # important optimization axis -- it must never block a
+            # layout that's otherwise superior on structural/physics
+            # quality or resin use, so gate_on_removal stays an inert
+            # (unused-by-any-caller) toggle rather than something wired
+            # to engine.run acceptance.
             n_removal_blocked_trees=len(report["removal_violations"]),
         )
         if report["ok"] or not report["uncovered_islands"]:
