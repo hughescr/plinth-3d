@@ -166,6 +166,16 @@ class Forest:
         self.children = []         # list[list[int]]
         self.roots = []            # list[int] -- member indices with parent None
         self.terminal_of = {}      # contact_idx -> member idx (that terminal's stub)
+        self.braces = []           # list[int] -- member idx of NON-TREE Forest members
+                                    # (design-v4.md #9): graph edges (X-pair cross-links,
+                                    # model rungs), not parent/child topology. Append-only
+                                    # alongside `members`, mirroring add_member's own
+                                    # invariant -- see add_brace. Braces ride certificates/
+                                    # volume/printability/checkpoint generically BY BEING
+                                    # MEMBERS; they never enter roots/children/terminal_of
+                                    # because they carry no tree-topology role (Murray
+                                    # conservation and rewire's own move candidates exclude
+                                    # `forest.braces` from what they treat as real topology).
         self.dead = set()          # member idx retired by rewire.py's twig prune (Phase
                                     # 3, design-v4.md #7): the checkpoint/rollback
                                     # protocol is append-only (rollback truncates the
@@ -188,6 +198,26 @@ class Forest:
         self.parent.append(None)
         self.children.append([])
         self.roots.append(idx)
+        if self._cp_stack:
+            self._cp_stack[-1]["new_since"] = min(
+                self._cp_stack[-1].get("new_since", idx), idx)
+        return idx
+
+    def add_brace(self, member):
+        """Register a NON-TREE Forest member (design-v4.md #9, SPEC-BRACING
+        Part 1): mirrors add_member EXACTLY (forest/idx wiring, members/
+        parent/children append, checkpoint frame's new_since bump) except
+        it does NOT enter `roots` -- instead its index is appended to
+        `self.braces`. A brace is a graph edge (X-pair cross-link, model
+        rung), never tree topology: it never gets a parent, never gets
+        children attached under it, and is never a terminal's stub."""
+        idx = len(self.members)
+        object.__setattr__(member, "_forest", self)
+        object.__setattr__(member, "_idx", idx)
+        self.members.append(member)
+        self.parent.append(None)
+        self.children.append([])
+        self.braces.append(idx)
         if self._cp_stack:
             self._cp_stack[-1]["new_since"] = min(
                 self._cp_stack[-1].get("new_since", idx), idx)
@@ -326,7 +356,7 @@ class Forest:
         self._cp_stack.append(dict(
             n_members=len(self.members), members={}, topo={},
             roots=list(self.roots), terminal_of=dict(self.terminal_of),
-            dead=set(self.dead)))
+            dead=set(self.dead), braces=list(self.braces)))
         return len(self._cp_stack) - 1
 
     def rollback(self, cp):
@@ -344,6 +374,7 @@ class Forest:
         self.roots = top["roots"]
         self.terminal_of = top["terminal_of"]
         self.dead = top["dead"]
+        self.braces = top["braces"]
 
     def commit(self, cp):
         assert cp == len(self._cp_stack) - 1, "commit must target the innermost checkpoint"
