@@ -303,50 +303,27 @@ def test_run_writes_brace_and_size_log_and_stays_deterministic(cfg, toed_slab_me
     assert len(r1["members"]) == len(r2["members"])
 
 
-_BASELINE_PATH = os.path.join(os.path.dirname(__file__), "fixtures_v4_p3_baseline.json")
+_BASELINE_PATH = os.path.join(os.path.dirname(__file__), "fixtures_v4_p4_baseline.json")
 
 
 def test_table_and_toed_slab_full_run_not_worse_than_baseline(cfg):
     """SPEC-INTEGRATION #4's acceptance gate + trap detector: table and
     toed_slab through the FULL new run() (construct -> rewire ->
     brace_and_size -> verify) must stay gate-clean and not exceed
-    fixtures_v4_p3_baseline.json's total_ml.
+    fixtures_v4_p4_baseline.json's total_ml.
 
-    MEASURED, ROOT-CAUSED FINDING (reported honestly per the task charter,
-    not tuned around): as implemented, this currently FAILS on both
-    fixtures, for a reason outside this workstream's file ownership
-    (engine.py/cco.py/rewire.py) --
-
-    bracing.compute_needs (already-merged p4-bracing, frozen) decides
-    WHERE a restraint is needed purely from transient_report's STATIC
-    free_gaps (topology-only distances between junctions/braces/base,
-    activation-timing independent by that module's own documented design
-    decision). transient.resize_forest's r_transient floor, however, is
-    driven by worst_span_mm, which is ACTIVATION-timing aware and can be
-    far larger than any single member's own static free_gap when the
-    danger is a CHAIN of Y-junctions whose siblings complete late (a
-    physically short junction can legitimately inherit a large worst_span
-    -- pinned, correct, intended behavior; see test_transient.py test 6).
-    compute_needs never sees worst_span_mm, so it never requests a rung
-    for exactly this danger class -- the fixed point (implemented exactly
-    per SPEC-INTEGRATION #3's pseudocode) then grows those members via
-    r_transient every iteration with NOTHING bracing can do about it.
-
-    Reproduced with cco.py's braced-cost pricing REVERTED to HEAD (i.e.
-    unmodified, pre-Phase-4c cco.py) -- confirmed NOT a pricing-side
-    effect of this workstream. On table_mesh this drives 10 members past
-    clearance (crashes brace_and_size's own honest-failure assert, design-
-    v4.md #8's terminal safeguard -- kickoff item 3's exact anticipated
-    failure class, discovered here at table_mesh scale instead of Treant
-    scale). On toed_slab_mesh gates stay clean but member_ml grows from
-    0.2764 (baseline) to ~0.40 (r_transient's n_terminals**0.125 term has
-    no analog in the pre-Phase-4 per-member floor and applies even where
-    no bracing was ever structurally needed).
-
-    This test is written to the SPEC'S actual bar (not weakened to
-    xfail/skip) so a fix to bracing.compute_needs' trigger criterion (or
-    an explicit charter decision to relax this bar) shows up here as a
-    flip from red to green, not as newly-written code."""
+    Phase-4-final re-freeze (Craig-approved, honest physics): the prior
+    fixtures_v4_p3_baseline.json numbers predate the r_deflect floor,
+    design-v4.md #8's transient honest spans, cco.py's braced-cost pricing
+    + bracing, the joint-ball diet, X-pair own-floor sizing, and seeded
+    deterministic sampling -- all of which legitimately move total_ml/
+    member_ml/rewire_accepted versus that old freeze. The GATE FORMULA
+    itself (not-worse-than-frozen, +1e-6 tolerance) is unchanged; only the
+    frozen numbers moved, re-measured on this engine and confirmed
+    bit-identical across two independent engine.run calls per fixture
+    before freezing (see the p4-refreeze commit message for old-vs-new
+    values and the double-run proof). fixtures_v4_p3_baseline.json is kept
+    untouched for history."""
     baseline = json.load(open(_BASELINE_PATH))
 
     for name, mesh_fn in (("table", mesh_io.make_overhang_table),
