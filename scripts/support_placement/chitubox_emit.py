@@ -310,6 +310,120 @@ def place_pad(proj, template_pad_record, at_xy, next_off):
     return patched, blob
 
 
+def _field(m, name, default=None):
+    """Read `name` off a v4 tree.Member OR a plain dict with the same
+    schema (joints.collect_members's output, or a hand-built test
+    fixture) -- same duality joints.py's _field/tree.py's _get already
+    rely on, duplicated here rather than importing (this module stays
+    self-contained per its existing style)."""
+    if isinstance(m, dict):
+        return m.get(name, default)
+    return getattr(m, name, default)
+
+
+def _point_seg_dist(p, a, b):
+    """Distance from point p (3,) to segment a->b (3,)."""
+    d = b - a
+    L2 = float(d @ d)
+    if L2 < 1e-18:
+        return float(np.linalg.norm(p - a))
+    t = float(np.clip((p - a) @ d / L2, 0.0, 1.0))
+    return float(np.linalg.norm(p - (a + t * d)))
+
+
+def _assign_balls_to_members(members, balls, tol=0.25):
+    """One member index per ball: "the fattest member touching it"
+    (design-v4.md joint-ball doctrine, joints.compute_joint_balls) --
+    re-derived here against member INDEX rather than the `owner` tuple
+    joints.py hands back, because in v4 several Members legitimately
+    share the same owner (e.g. a contact's stub, trunk diagonal, and
+    trunk column are all owner=("contact", i)) so owner alone can't
+    identify which single record should carry the ball. A joint ball's
+    center is always literally an endpoint of at least one touching
+    member (COINCIDE_TOL_MM=0.15) or within ON_AXIS_TOL_MM=0.2 of a
+    through-member's axis (joints.py's own tolerances) -- tol=0.25
+    covers both with margin. Asserts every ball resolves to exactly one
+    member; a ball that lands on nothing is a bug upstream, not a
+    silent drop."""
+    assigned = []
+    for b in balls:
+        center = np.asarray(_field(b, "center"), float)
+        best_idx, best_r = None, -1.0
+        for mi, m in enumerate(members):
+            p0 = np.asarray(_field(m, "p0"), float)
+            p1 = np.asarray(_field(m, "p1"), float)
+            if _point_seg_dist(center, p0, p1) <= tol:
+                mr = max(float(_field(m, "r0")), float(_field(m, "r1")))
+                if mr > best_r:
+                    best_r, best_idx = mr, mi
+        assert best_idx is not None, (
+            f"joint ball at {center.tolist()} r={_field(b, 'r')} did not land "
+            f"on any member's axis -- upstream bug, not a silent drop")
+        assigned.append(best_idx)
+    return assigned
+
+
+def synth_member_chain(members, balls, cfg, next_off):
+    """v4 emission (design-v4.md #14 Phase-review/interim emitter): one
+    record per Member (tree.Member or joints.collect_members's dict
+    schema), each a frustum_mesh blob. Type id mirrors v3's evidenced
+    T_TAPER-carries-contact_depth convention: T_TAPER when the member is
+    both tapered (r0 != r1) AND has a designed embed_end (a stub's
+    contact tip, or a strut's model-anchor foot -- the cases v3's
+    tip->taper transition and struts.py's anchor foot correspond to);
+    T_SHAFT otherwise (constant-radius trunk columns, shoots, diagonals).
+
+    A stub's contact ball (cfg.tip_ball_r_factor * r0 sphere at its
+    embedded p0) is merged into ITS OWN record's blob -- same
+    "removal-friendly point contact, not a joint" rule v3.6 established
+    (joints.py module docstring); a model-anchor strut's embedded foot
+    is instead handled by the global joint pass's MODEL_FOOT_FACTOR ball
+    (it has no separate contact-ball convention of its own).
+
+    Every entry in `balls` (joints.compute_joint_balls output: dicts or
+    objects with center/r/owner) is appended into exactly ONE record's
+    blob, chosen by _assign_balls_to_members; the assert there is the
+    "every ball emitted exactly once" guarantee the caller can rely on.
+    Returns (record_bytes, blob_bytes) pairs, offsets contiguous from
+    next_off."""
+    members = list(members)
+    ball_owner_idx = _assign_balls_to_members(members, balls)
+    balls_by_member = {}
+    for bi, mi in enumerate(ball_owner_idx):
+        balls_by_member.setdefault(mi, []).append(bi)
+
+    out = []
+    off = next_off
+    n_balls_emitted = 0
+    for mi, m in enumerate(members):
+        p0 = np.asarray(_field(m, "p0"), float)
+        p1 = np.asarray(_field(m, "p1"), float)
+        r0 = float(_field(m, "r0"))
+        r1 = float(_field(m, "r1"))
+        kind = _field(m, "kind")
+        embed_end = _field(m, "embed_end", None)
+
+        parts = [frustum_mesh(p0, p1, r0, r1)]
+        if kind == "stub":
+            ball_r = cfg.tip_ball_r_factor * r0
+            parts.append(sphere_mesh(p0, ball_r))
+        for bi in balls_by_member.get(mi, []):
+            b = balls[bi]
+            parts.append(sphere_mesh(_field(b, "center"), float(_field(b, "r"))))
+            n_balls_emitted += 1
+        blob = np.concatenate(parts)
+
+        tapered = abs(r0 - r1) > 1e-9
+        type_id = ci.T_TAPER if (tapered and embed_end is not None) else ci.T_SHAFT
+        out.append((build_record(type_id, p0, p1, r0, r1, off, blob.nbytes, cfg),
+                    blob.tobytes()))
+        off += blob.nbytes
+
+    assert n_balls_emitted == len(balls), (
+        f"ball emission count mismatch: emitted {n_balls_emitted}, expected {len(balls)}")
+    return out
+
+
 def find_template_records(proj):
     """First real record of each type this module needs a trailing-bytes
     or pad/bridge template for, from an already-loaded base Project."""

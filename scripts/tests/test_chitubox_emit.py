@@ -139,6 +139,80 @@ def test_v3_support_chain_carries_global_joint_balls(cfg):
     assert np.allclose(rec.end, junction)
 
 
+def _mk_member(p0, p1, r0, r1, kind, owner, embed_end=None):
+    return dict(p0=np.array(p0, float), p1=np.array(p1, float), r0=r0, r1=r1,
+                kind=kind, owner=owner, embed_end=embed_end)
+
+
+def test_synth_member_chain_round_trips_with_contiguous_offsets(cfg):
+    members = [
+        _mk_member([0, 0, 0], [0, 0, 2], 0.3, 0.4, "stub", ("contact", 0), embed_end="p0"),
+        _mk_member([0, 0, 2], [0, 0, 10], 0.4, 0.4, "trunk", ("contact", 0)),
+        _mk_member([5, 0, 2], [0, 0, 2], 0.3, 0.4, "shoot", ("contact", 1)),
+    ]
+    next_off = 1000
+    recs = ce.synth_member_chain(members, [], cfg, next_off)
+    assert len(recs) == len(members)
+    off = next_off
+    for rec_bytes, blob in recs:
+        rec = ci.Record(rec_bytes)
+        assert rec.mesh_off == off
+        assert rec.mesh_len == len(blob) == rec.mesh_len
+        off += len(blob)
+    # stub (tapered + embed_end) -> T_TAPER with contact-depth trailing;
+    # trunk column (constant radius, no embed) -> T_SHAFT
+    stub_rec = ci.Record(recs[0][0])
+    assert stub_rec.type == ci.T_TAPER
+    depth = struct.unpack_from("<f", recs[0][0], 48)[0]
+    assert abs(depth - cfg.contact_depth_mm) < 1e-6
+    trunk_rec = ci.Record(recs[1][0])
+    assert trunk_rec.type == ci.T_SHAFT
+
+
+def test_synth_member_chain_stub_gets_contact_ball(cfg):
+    members = [_mk_member([0, 0, 0], [0, 0, 2], 0.3, 0.4, "stub", ("contact", 0), embed_end="p0")]
+    recs = ce.synth_member_chain(members, [], cfg, 0)
+    blob = np.frombuffer(recs[0][1], "<f4").reshape(-1, 3)
+    ball_r = cfg.tip_ball_r_factor * 0.3
+    assert blob[:, 2].min() <= 0.0 - 0.8 * ball_r
+
+
+def test_synth_member_chain_emits_each_joint_ball_exactly_once(cfg):
+    members = [
+        _mk_member([0, 0, 0], [0, 0, 2], 0.3, 0.4, "stub", ("contact", 0), embed_end="p0"),
+        _mk_member([0, 0, 2], [0, 0, 10], 0.4, 0.4, "trunk", ("contact", 0)),
+        _mk_member([5, 0, 2], [0, 0, 2], 0.3, 0.4, "shoot", ("contact", 1)),
+    ]
+    joint_center = np.array([0.0, 0.0, 2.0])  # shared endpoint of all 3 members
+    ball_r = 0.6  # bigger than any member's own radius (max 0.4) at this joint
+    balls = [dict(center=joint_center, r=ball_r, owner=("contact", 0))]
+    recs = ce.synth_member_chain(members, balls, cfg, 0)
+    # only the record actually carrying the merged sphere_mesh can have a
+    # point out near the ball's own radius from the joint center -- every
+    # member's own frustum geometry stays within its own (<=0.4) radius
+    # NEAR the joint (a member's far end can be arbitrarily far away, so
+    # restrict to points actually within the ball's zone before comparing).
+    hits = 0
+    for _, blob in recs:
+        pts = np.frombuffer(blob, "<f4").reshape(-1, 3)
+        d = np.linalg.norm(pts - joint_center, axis=1)
+        near = d[d <= ball_r + 0.05]
+        if len(near) and float(near.max()) >= 0.5:
+            hits += 1
+    assert hits == 1  # ball landed in exactly one record's blob
+    total_verts = sum(len(np.frombuffer(b, "<f4")) // 3 for _, b in recs)
+    assert total_verts > 0
+
+
+def test_synth_member_chain_asserts_unassignable_ball():
+    from support_placement import config as cfg_mod
+    cfg = cfg_mod.SupportConfig()
+    members = [_mk_member([0, 0, 0], [0, 0, 2], 0.3, 0.3, "trunk", ("contact", 0))]
+    stray = [dict(center=np.array([50.0, 50.0, 50.0]), r=0.5, owner=("contact", 0))]
+    with pytest.raises(AssertionError):
+        ce.synth_member_chain(members, stray, cfg, 0)
+
+
 def test_v3_trunk_has_flare_wider_than_column(cfg):
     from support_placement import trunks as tm
     t = tm.Trunk([2.0, 3.0], z_top=40.0)
