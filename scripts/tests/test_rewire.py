@@ -522,3 +522,145 @@ def test_optimize_never_strands_a_brace_on_a_real_run(cfg, box_mesh):
     matches = [host_idx for host_idx, entries in attach_after.items()
                for _z, bi in entries if bi == br_idx]
     assert len(matches) >= 2, f"brace {br_idx} left stranded: {attach_after}"
+
+
+# =================================================================
+# Phase 4e (SPEC-PATHRUNG W2): degenerate-member prevention + retirement
+# =================================================================
+def test_degenerate_retire_folds_two_or_more_children_onto_parent(cfg):
+    """The Treant verify member_idx 577 class (kind=shoot, length ~1e-6,
+    near_horizontal printability violation): a junction collapsed to a
+    near-zero-length span with 2+ children -- _try_twig_prune's own
+    len(children) == 1 gate never reaches this shape. Direct
+    construction (per spec): parent P -> degenerate M (length 1e-8mm,
+    well under DEGENERATE_LEN_MM) -> two children A, B. Retiring M
+    splices A and B directly onto P (their own p0 already coincides
+    with M's p1 to float precision, no geometry change needed) and
+    marks M dead."""
+    f = tm.Forest()
+    p = f.add_member(_member([0.0, 0.0, 20.0], [0.0, 0.0, 10.0], kind="trunk"))
+    m = f.add_member(_member([0.0, 0.0, 10.0], [0.0, 0.0, 10.0 - 1e-8],
+                              kind="shoot"))
+    f.set_parent(m, p)
+    a = f.add_member(_member([2.0, 0.0, 0.0], [0.0, 0.0, 10.0 - 1e-8], kind="shoot"))
+    f.set_parent(a, m)
+    b = f.add_member(_member([-2.0, 0.0, 0.0], [0.0, 0.0, 10.0 - 1e-8], kind="shoot"))
+    f.set_parent(b, m)
+    assert rewire._is_degenerate_span(f.members[m].p0, f.members[m].p1)
+
+    ok, saved = rewire._try_degenerate_retire(f, m, _far_tree(), cfg, set())
+
+    assert ok is True
+    assert saved >= 0.0
+    assert m in f.dead
+    assert set(f.children[p]) == {a, b}
+    assert f.parent[a] == p and f.parent[b] == p
+    assert f.dirty_members() == []
+    live = [f.members[i] for i in range(len(f.members)) if i not in f.dead]
+    assert tm.printability_report(live, cfg) == []
+
+
+def test_degenerate_retire_detaches_zero_child_dead_weight(cfg):
+    """A degenerate member with ZERO children and no stub role is dead
+    weight per spec -- detach from its parent and mark_dead, no
+    splicing needed since it has nothing to splice."""
+    f = tm.Forest()
+    p = f.add_member(_member([0.0, 0.0, 20.0], [0.0, 0.0, 10.0], kind="trunk"))
+    m = f.add_member(_member([0.0, 0.0, 10.0], [0.0, 0.0, 10.0 - 1e-8], kind="shoot"))
+    f.set_parent(m, p)
+
+    ok, saved = rewire._try_degenerate_retire(f, m, _far_tree(), cfg, set())
+
+    assert ok is True
+    assert saved >= 0.0
+    assert m in f.dead
+    assert m not in f.children[p]
+    assert f.dirty_members() == []
+    live = [f.members[i] for i in range(len(f.members)) if i not in f.dead]
+    assert tm.printability_report(live, cfg) == []
+
+
+def test_degenerate_retire_skips_stub_regardless_of_length(cfg):
+    """A real contact stub is never degenerate-retired regardless of
+    length -- it is the model surface contact, not a topology artifact
+    (mirrors printability_report's own stub exemption, design decision
+    recorded there)."""
+    f = tm.Forest()
+    p = f.add_member(_member([0.0, 0.0, 20.0], [0.0, 0.0, 10.0], kind="trunk"))
+    m = f.add_member(_member([0.0, 0.0, 10.0], [0.0, 0.0, 10.0 - 1e-8], kind="stub"))
+    f.set_parent(m, p)
+    assert rewire._try_degenerate_retire(f, m, _far_tree(), cfg, set()) == (False, 0.0)
+
+
+def test_degenerate_retire_leaves_single_child_pass_through_to_twig_prune(cfg):
+    """A degenerate member with EXACTLY 1 child is _try_twig_prune's own
+    job (unchanged) -- _try_degenerate_retire must not duplicate or race
+    it, even though such a member also satisfies the length check."""
+    f = tm.Forest()
+    p = f.add_member(_member([0.0, 0.0, 20.0], [0.0, 0.0, 10.0], kind="trunk"))
+    m = f.add_member(_member([0.0, 0.0, 10.0], [0.0, 0.0, 10.0 - 1e-8], kind="shoot"))
+    f.set_parent(m, p)
+    c = f.add_member(_member([0.0, 0.0, 0.0], [0.0, 0.0, 10.0 - 1e-8], kind="shoot"))
+    f.set_parent(c, m)
+    assert rewire._try_degenerate_retire(f, m, _far_tree(), cfg, set()) == (False, 0.0)
+
+
+def test_junction_geometry_at_rejects_a_collapsed_child_span(cfg):
+    """SPEC-PATHRUNG W2 root-cause guard #2 ("junction slide collapsing a
+    child"): a candidate slide position J landing within
+    DEGENERATE_LEN_MM of a child's OWN p0 would create exactly the
+    member_idx 577 shape (a near-zero-length span) -- _junction_geometry_
+    at, the single choke point both the hill-climb search and the final
+    application route through, must reject such a J outright (return
+    None) rather than ever let it become a real candidate."""
+    child = _member([1.0, 0.0, 5.0], [0.0, 0.0, 0.0])  # child's own p0
+    m = _member([0.0, 0.0, 0.0], [0.0, 0.0, 20.0])       # m.p1 unrelated
+    J_collapsed = np.array([1.0, 0.0, 5.0 + 1e-9])       # within DEGENERATE_LEN_MM of child.p0
+    assert rewire._junction_geometry_at(J_collapsed, m, [child], cfg) is None
+
+    J_ok = np.array([1.0, 0.0, 6.0])  # a real, non-degenerate position
+    assert rewire._junction_geometry_at(J_ok, m, [child], cfg) is not None
+
+
+def test_reattach_rejects_degenerate_connector_candidate(cfg, monkeypatch):
+    """SPEC-PATHRUNG W2 root-cause guard #1 ("reattach connector built
+    from se to a Fermat/projected point that coincides with se"): a
+    candidate builder that would draw a connector from se to a
+    coincident (or near-coincident) point must be rejected before ever
+    being scored/committed -- proven directly against the exact choke
+    point (the n0..len(forest.members) degenerate-span check added to
+    _try_subtree_reattach's own candidate loop) by monkeypatching
+    _reattach_candidate_builders to yield EXACTLY that one degenerate
+    shape (isolating the guard from cco.py's real candidate machinery,
+    which is not this module's ownership) -- with no other candidate
+    available, the whole move must be rejected outright (False, 0.0),
+    never silently commit a zero-length connector."""
+    f = tm.Forest()
+    parent = f.add_member(_member([0.0, 0.0, 30.0], [0.0, 0.0, 20.0], kind="trunk"))
+    root = f.add_member(_member([2.0, 0.0, 20.0], [0.0, 0.0, 10.0], kind="shoot"))
+    f.set_parent(root, parent)
+    sibling = f.add_member(_member([-2.0, 0.0, 20.0], [0.0, 0.0, 10.0], kind="shoot"))
+    f.set_parent(sibling, parent)
+    se = f.members[root].p1.copy()
+
+    def degenerate_builder():
+        # se to a point coinciding with se -- exactly the "projected
+        # point that coincides with se" shape the spec names.
+        f.add_member(tm.Member(p0=se, p1=se.copy(), r0=0.5, r1=0.5,
+                                kind="shoot", owner=("contact", root)))
+
+    def fake_candidates(*_args, **_kwargs):
+        yield degenerate_builder
+
+    monkeypatch.setattr(rewire, "_reattach_candidate_builders", fake_candidates)
+    n_members_before = len(f.members)
+
+    ok, saved = rewire._try_subtree_reattach(f, root, _far_tree(), cfg, None,
+                                              0.0, np.zeros((0, 3)), np.zeros(0), set())
+
+    assert (ok, saved) == (False, 0.0)
+    assert len(f.members) == n_members_before  # nothing committed, degenerate or not
+    for i, m in enumerate(f.members):
+        if i in f.dead:
+            continue
+        assert not rewire._is_degenerate_span(m.p0, m.p1)

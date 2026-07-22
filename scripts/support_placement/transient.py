@@ -31,7 +31,15 @@ Public API (engine wiring by another agent depends on these signatures):
     transient_report(forest, plate_z, cfg) -> dict[int, dict]
     r_transient_mm(worst_span_mm, lean_deg, n_terminals, cfg) -> float
     resize_forest(forest, plate_z, cfg) -> dict(resized=..., report=...)
-"""
+
+Phase 4e (SPEC-PATHRUNG W6): transient_report gains two per-member fields,
+additive (nothing existing above changes) -- `worst_span_path` generalizes
+v3's whole-trunk-ladder rung placement to v4's forest: the WINNING event
+(the one that actually produced worst_span_mm) is no longer collapsed
+into a bare number, it is remembered as (a) the interval it occupies and
+(b) which path members physically occupy that z-window, so bracing.py can
+place a restraint anywhere along the offending span's path -- not just on
+M's own (possibly congested, un-clearable) extent."""
 import numpy as np
 
 from . import cco, placement
@@ -318,6 +326,33 @@ def transient_report(forest, plate_z, cfg):
             descendant at all -- r_transient_mm applies its own
             max(n_terminals, 1) floor per spec, so this field stays an
             honest raw count rather than pre-clamping here too).
+        worst_span_interval: (lo, hi) of the WINNING event's unsupported
+            region -- lo = max(z_min(M), R), hi = the clamped `a` -- the
+            single interval whose length equals worst_span_mm (Phase 4e,
+            SPEC-PATHRUNG W6). Default (0.0-contribution members, never
+            engaged by any path) is (z_min(M), z_min(M)), a degenerate
+            zero-length interval -- honest, since no interval ever won.
+        worst_span_path: ordered (root-side first) list of live,
+            non-stub member indices on the WINNING root->terminal path
+            (the one that produced worst_span_mm) whose own z-extents
+            intersect worst_span_interval (same closed-interval overlap
+            rule as the contribution gate above) -- these are the members
+            physically present in the z-window that is actually
+            unsupported at M's worst moment, i.e. every place a restraint
+            could legally cut M's own arm (Phase 4e W6: generalizes v3's
+            whole-trunk-ladder rung placement -- a restraint no longer has
+            to land in M's OWN free_gaps, which can be a congested band
+            with nothing clearable, when an upstream member further along
+            the SAME path sits in open air within the same span). Always
+            contains M itself when worst_span_mm > 0 (M's own extent
+            trivially intersects its own winning interval, by
+            construction of the overlap gate that selected it). Default
+            (never engaged) is [] -- honestly empty, no path to offer.
+            Deterministic tie-break (pinned): if multiple terminal-paths
+            through M tie EXACTLY on worst_span_mm, the path whose own
+            member-index tuple (root-first) is lexicographically smallest
+            wins -- an arbitrary but STABLE choice (iteration order over
+            `terminals` must never leak into the answer).
 
     `plate_z` is accepted for signature parity with the rest of the
     sizing pipeline (engine.brace_and_size threads the same (forest,
@@ -335,7 +370,8 @@ def transient_report(forest, plate_z, cfg):
 
     eligible = [i for i, m in enumerate(forest.members)
                 if i not in forest.dead and i not in live_braces and m.kind != "stub"]
-    worst = {i: 0.0 for i in eligible}
+    # best[idx] = [worst_span_mm, winning_interval_or_None, winning_path_tuple_or_None]
+    best = {i: [0.0, None, None] for i in eligible}
 
     terminals = [i for i, m in enumerate(forest.members)
                  if m.kind == "stub" and i not in forest.dead
@@ -343,17 +379,19 @@ def transient_report(forest, plate_z, cfg):
 
     for t in terminals:
         path = _root_to_terminal_path(forest, t)
+        path_tuple = tuple(path)
         base_z = float(forest.members[path[0]].p1[2])
         z_top = max(max(float(forest.members[idx].p0[2]), float(forest.members[idx].p1[2]))
                     for idx in path)
         events = _path_events(forest, path, brace_attach, completion_cache)
         intervals = _span_intervals(events, base_z, z_top)
         for idx in path:
-            if idx not in worst:
+            if idx not in best:
                 continue
             m = forest.members[idx]
             zlo, zhi = sorted((float(m.p0[2]), float(m.p1[2])))
             best_here = 0.0
+            best_iv = None
             for lo, hi in intervals:
                 # lo == R (highest active restraint at that moment), hi ==
                 # a (that event's clamped activation/build-front height).
@@ -366,8 +404,18 @@ def transient_report(forest, plate_z, cfg):
                     contribution = hi - max(zlo, lo)
                     if contribution > best_here:
                         best_here = contribution
-            if best_here > worst[idx]:
-                worst[idx] = best_here
+                        best_iv = (max(zlo, lo), hi)
+            if best_here <= 0.0:
+                continue
+            cur_val, _cur_iv, cur_path = best[idx]
+            # Phase 4e (SPEC-PATHRUNG W6): strictly-better path always wins;
+            # an EXACT tie is broken deterministically by the smaller
+            # (root-first) member-index tuple, pinned by spec -- iteration
+            # order over `terminals` must never leak into the answer.
+            if best_here > cur_val + 1e-9:
+                best[idx] = [best_here, best_iv, path_tuple]
+            elif abs(best_here - cur_val) <= 1e-9 and (cur_path is None or path_tuple < cur_path):
+                best[idx] = [best_here, best_iv, path_tuple]
 
     report = {}
     for idx in eligible:
@@ -376,9 +424,30 @@ def transient_report(forest, plate_z, cfg):
         restraint_zs = _static_restraint_zs(forest, brace_attach, idx)
         gaps = _free_gaps(zlo, zhi, restraint_zs)
         n_term = _subtree_terminal_count(forest, idx, terminal_count_cache)
-        report[idx] = dict(worst_span_mm=worst[idx], restraint_zs=restraint_zs,
-                            free_gaps=gaps, n_terminals=n_term)
+        worst_val, winning_iv, winning_path = best[idx]
+        if winning_iv is None:
+            worst_span_interval = (zlo, zlo)
+            worst_span_path = []
+        else:
+            worst_span_interval = winning_iv
+            iv_lo, iv_hi = winning_iv
+            worst_span_path = [p for p in winning_path
+                                if forest.members[p].kind != "stub"
+                                and _extent_intersects(forest.members[p], iv_lo, iv_hi)]
+        report[idx] = dict(worst_span_mm=worst_val, restraint_zs=restraint_zs,
+                            free_gaps=gaps, n_terminals=n_term,
+                            worst_span_interval=worst_span_interval,
+                            worst_span_path=worst_span_path)
     return report
+
+
+def _extent_intersects(m, lo, hi):
+    """Closed-interval overlap between member m's own z-extent and [lo,
+    hi] -- same rule as transient_report's contribution gate (boundary
+    touches count, matching the module's general closed-interval
+    convention)."""
+    zlo, zhi = sorted((float(m.p0[2]), float(m.p1[2])))
+    return zhi >= lo and zlo <= hi
 
 
 # =============================================================== sizing

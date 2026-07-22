@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 from scipy.spatial import cKDTree
 
-from support_placement import config as config_mod, engine, mesh_io, tree as tm
+from support_placement import config as config_mod, engine, mesh_io, rewire, tree as tm
 
 
 def test_engine_runs_end_to_end_on_table_fixture(table_mesh, cfg):
@@ -171,11 +171,49 @@ def test_brace_and_size_shrinks_a_braceable_tall_twin_column(cfg, box_mesh):
 def test_brace_and_size_activation_timing_integration(cfg, box_mesh):
     """SPEC-INTEGRATION #4 activation-timing bullet: a forest whose only
     restraint is a lagged Y-junction (transient.py test 6's own fixture,
-    reproduced here) gets a FATTER final trunk than an otherwise-identical
-    forest with an early-activating brace at the junction height -- ties
-    transient_report's activation-aware semantics through the FULL
-    brace_and_size loop (not just transient.resize_forest in isolation,
-    which test_transient.py already pins)."""
+    reproduced here) uses MORE total live print material than an
+    otherwise-identical forest with an early-activating brace at the
+    junction height -- ties transient_report's activation-aware
+    semantics through the FULL brace_and_size loop (not just transient.
+    resize_forest in isolation, which test_transient.py already pins).
+
+    SPEC-PATHRUNG W3 reconciliation (independently re-traced, not just
+    trusting the Phase-4d implementer's own note): the ORIGINAL
+    assertion compared max(r0, r1) on the SAME member index (`trunk`)
+    across both runs. That comparison is no longer sound now that
+    resize_forest correctly floors on r_deflect (charter #6) IN
+    ADDITION to r_transient (#8) -- NOT because r_deflect happens to
+    dominate here (traced and ruled out: r_deflect(20mm, lean=0) ==
+    0.8203mm, well under the observed ~1.03mm), but because of a real,
+    separate structural consequence: brace_and_size's own rewire.
+    optimize pass finds a genuinely cheaper topology for the UNBRACED
+    forest (splitting the Y-junction's two branches onto independent
+    descending connectors through a shared bifurcation point instead of
+    one shared trunk) and takes it -- `trunk`'s own member_idx retires
+    (tree.Forest.dead), its r0/r1 left FROZEN at whatever they were the
+    instant before retirement. The BRACED forest's `trunk` is instead
+    PROTECTED from that exact restructuring by rewire's own brace-
+    awareness guard (module docstring: "retiring root_idx would strand
+    that brace... refused outright when root_idx is [a braced host]"),
+    a real, load-bearing safety rule (SPEC-INTEGRATION #2) rather than a
+    defect -- this workstream does not touch it. The two `trunk`
+    readings are therefore comparing a topology-divergent, one-shot-
+    frozen dead member against a live, differently-supported one:
+    incomparable by construction, independent of any r_deflect/
+    r_transient interaction at all.
+
+    Old (unsound) expectation: r_braced < r_unbraced, read off a single
+    member index assumed stable across both runs.
+    New expectation, computed from the charter formula in THIS test
+    body (design-v4.md #6/#11's own accounting, tree.volume_report/
+    rewire._total_volume_ml -- both already used elsewhere in this
+    suite for exactly this "how much real material got printed"
+    question): total LIVE print volume is topology-agnostic (survives
+    the reattach divergence) and directly measures whether the
+    early-activating restraint actually let the structure use less
+    material overall -- the SAME physical claim the original assertion
+    was reaching for, on a metric that stays well-defined regardless of
+    which specific member ends up carrying which span."""
     def y_junction_forest():
         f = tm.Forest()
         trunk = f.add_member(_m([0.0, 0.0, 20.0], [0.0, 0.0, 0.0], kind="trunk"))
@@ -202,9 +240,17 @@ def test_brace_and_size_activation_timing_integration(cfg, box_mesh):
                       r1=cfg.brace_r_mm, kind="model_rung", embed_end="p1"))
     engine.brace_and_size(box_mesh, f_b, [], _far_tree(), plate_z=0.0, cfg=cfg, log={})
 
-    r_unbraced = max(f_u.members[trunk_u].r0, f_u.members[trunk_u].r1)
-    r_braced = max(f_b.members[trunk_b].r0, f_b.members[trunk_b].r1)
-    assert r_braced < r_unbraced, (r_braced, r_unbraced)
+    # Sanity, independent of the volume claim below: the braced trunk's
+    # own member_idx really does survive live (the guard this test's
+    # reconciliation depends on actually fired), while the unbraced
+    # one's really did retire -- confirms the traced mechanism, not an
+    # assumption.
+    assert trunk_b not in f_b.dead
+    assert trunk_u in f_u.dead
+
+    vol_unbraced = rewire._total_volume_ml(f_u)
+    vol_braced = rewire._total_volume_ml(f_b)
+    assert vol_braced < vol_unbraced, (vol_braced, vol_unbraced)
 
 
 def test_run_writes_brace_and_size_log_and_stays_deterministic(cfg, toed_slab_mesh):

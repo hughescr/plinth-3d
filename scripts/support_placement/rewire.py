@@ -87,6 +87,21 @@ MAX_SLIDE_EVALS = 50      # design-v4.md #7 "<=50 evals per junction"
 ROLL_WINDOW = 20          # design-v4.md #7 default W=20
 ROLL_EPS = 0.0025         # design-v4.md #7 default eps=0.25%
 
+# SPEC-PATHRUNG W2: a TRUE zero-length member (Treant verify's member_idx
+# 577 repro: kind=shoot, length ~1e-6) is a different class from
+# TWIG_MERGE_LEN_MM's "short but real, worth folding for volume" spans --
+# this is a coordinate collapse (a connector built from se to a point
+# that coincides with se to float precision, or a slide that walked a
+# child's far endpoint onto its own near endpoint), never geometrically
+# meaningful. Deliberately far tighter than TWIG_MERGE_LEN_MM so the two
+# classes never overlap/interact: nothing between DEGENERATE_LEN_MM and
+# TWIG_MERGE_LEN_MM changes behavior here.
+DEGENERATE_LEN_MM = 1e-4
+
+
+def _is_degenerate_span(p0, p1, tol=DEGENERATE_LEN_MM):
+    return float(np.linalg.norm(np.asarray(p1, float) - np.asarray(p0, float))) < tol
+
 
 # ------------------------------------------------------------- accounting --
 def _live_member_indices(forest):
@@ -249,9 +264,19 @@ def _try_subtree_reattach(forest, root_idx, surface_tree, cfg, kdc, plate_z,
                                                   plate_z, sample_points, sample_delicacy,
                                                   cfg, kdc, exclude):
         cp2 = forest.checkpoint()
+        n0 = len(forest.members)
         try:
             build_fn()
         except cco._InfeasibleCandidate:
+            forest.rollback(cp2)
+            continue
+        # SPEC-PATHRUNG W2 (prevent the creation, preferred over a later
+        # cure): a connector built from se to a merge/projection point
+        # that coincides with se to float precision is a degenerate
+        # (near-zero-length) member -- reject the candidate outright,
+        # same as a clearance violation, rather than ever committing it.
+        if any(_is_degenerate_span(forest.members[i].p0, forest.members[i].p1)
+               for i in range(n0, len(forest.members))):
             forest.rollback(cp2)
             continue
         violations = forest.revalidate(surface_tree, cfg)
@@ -315,9 +340,16 @@ def _try_root_reanchor(forest, root_idx, surface_tree, cfg, kdc, plate_z,
                                                   plate_z, sample_points, sample_delicacy,
                                                   cfg, kdc, exclude):
         cp2 = forest.checkpoint()
+        n0 = len(forest.members)
         try:
             build_fn()
         except cco._InfeasibleCandidate:
+            forest.rollback(cp2)
+            continue
+        # SPEC-PATHRUNG W2: same degenerate-connector reject as
+        # _try_subtree_reattach above -- see that call site's comment.
+        if any(_is_degenerate_span(forest.members[i].p0, forest.members[i].p1)
+               for i in range(n0, len(forest.members))):
             forest.rollback(cp2)
             continue
         violations = forest.revalidate(surface_tree, cfg)
@@ -388,9 +420,22 @@ def _junction_geometry_at(J, m, child_members, cfg):
     was caught by test_engine_every_member_meets_its_own_load_and_
     deflection_floor: a slide moved a child's endpoint ~8mm with its
     radius untouched). Returns (child_r1_list, m_r) or None if the cone
-    is violated for any member at ITS OWN new floor-respecting radius."""
+    is violated for any member at ITS OWN new floor-respecting radius.
+
+    SPEC-PATHRUNG W2 (prevent the creation): a candidate J that walks a
+    child's far endpoint onto (or within DEGENERATE_LEN_MM of) its own
+    near endpoint -- or onto m's own far endpoint -- collapses that
+    span to zero length, one root-cause suspect for the Treant verify
+    member_idx 577 class (kind=shoot, length ~1e-6). Rejected here,
+    upstream of every caller (the hill-climb search AND the final
+    application both route through this one function), so a slide can
+    never even CONSIDER a degenerate candidate, let alone accept one."""
+    if _is_degenerate_span(J, m.p1):
+        return None
     child_r1 = []
     for cm in child_members:
+        if _is_degenerate_span(cm.p0, J):
+            return None
         r_floor = _own_floor(cm.p0, J, cm.carried_mm2, cm.kind, cfg)
         r_new = max(cm.r0, r_floor)
         if not cco._within_cone(cm.p0, J, r_new, cfg):
@@ -591,6 +636,72 @@ def _try_twig_prune(forest, m_idx, surface_tree, cfg, braced_hosts):
     return True, vol_before - vol_after
 
 
+# --------------------------------------------- (d) degenerate-member retire --
+def _try_degenerate_retire(forest, m_idx, surface_tree, cfg, braced_hosts):
+    """Move (d), SPEC-PATHRUNG W2: fold/retire an ALREADY-EXISTING
+    degenerate (< DEGENERATE_LEN_MM) member that _try_twig_prune's own
+    len(children) == 1 gate never reaches -- the Treant verify member_
+    idx 577 class (kind=shoot, length ~1e-6, near_horizontal
+    printability violation) has 0 or 2+ children, not 1. This is a
+    RETROFIT cure for whatever slips through despite the "prevent the
+    creation" guards added to _try_subtree_reattach / _try_root_reanchor
+    / _junction_geometry_at above (a construction path this module
+    doesn't own -- e.g. cco.py insertion -- could in principle also
+    produce one; W2's own repro test pins the specific creation path
+    found).
+
+    2+ children: their own p0 already coincides with m's p1 (m is
+    near-zero length) to well within DEGENERATE_LEN_MM, so splicing them
+    onto m_idx's OWN parent needs no geometry change -- exactly
+    _try_root_reanchor's own "own_children just moved here" reasoning,
+    one level generalized (m_idx need not be a parentless root here).
+    0 children and m.kind != "stub" (a real contact stub is NEVER
+    degenerate-retired regardless of length -- it is the model surface
+    contact, not a topology artifact): dead weight, detach and
+    mark_dead.
+
+    Deliberately NOT gated on strict volume decrease like the other
+    three move types -- a near-zero-length member's own volume is
+    itself near zero, so "does this save real print material" is the
+    wrong question; the reason to retire it is that it is a printability
+    violation waiting to happen (near_horizontal, per tree.
+    printability_report), which volume accounting cannot see at all.
+    Still gated on `forest.revalidate` staying clean, same as every
+    other move -- this can only ever REMOVE a violating member, never
+    introduce a new clearance/connectivity one."""
+    if m_idx in forest.dead:
+        return False, 0.0
+    if m_idx in braced_hosts:
+        return False, 0.0
+    m = forest.members[m_idx]
+    if m.kind == "stub":
+        return False, 0.0
+    if not _is_degenerate_span(m.p0, m.p1):
+        return False, 0.0
+    children = list(forest.children[m_idx])
+    if len(children) == 1:
+        return False, 0.0  # _try_twig_prune's own job, unchanged, not duplicated
+    if any(c in braced_hosts for c in children):
+        return False, 0.0
+
+    p_idx = forest.parent[m_idx]
+    vol_before = _total_volume_ml(forest)
+    cp = forest.checkpoint()
+    for c in children:
+        forest.set_parent(c, p_idx)
+    forest.set_parent(m_idx, None)
+    forest.mark_dead(m_idx)
+    if p_idx is not None:
+        _reconcile_ancestors(forest, p_idx, cfg)
+    violations = forest.revalidate(surface_tree, cfg)
+    if violations:
+        forest.rollback(cp)
+        return False, 0.0
+    forest.commit(cp)
+    vol_after = _total_volume_ml(forest)
+    return True, max(0.0, vol_before - vol_after)
+
+
 # ---------------------------------------------------------- scheduling ------
 def _sweep_order(forest):
     """Deterministic sweep order (design-v4.md #7): descending estimated
@@ -604,7 +715,14 @@ def _sweep_order(forest):
     three move types, skipped entirely here (the braced-HOST protections
     in _try_junction_slide/_try_root_reanchor/_try_twig_prune/
     _try_subtree_reattach's candidate-set exclusion are the separate,
-    complementary rule that a brace's ATTACHMENT HOST also can't move)."""
+    complementary rule that a brace's ATTACHMENT HOST also can't move).
+
+    SPEC-PATHRUNG W2: a 4th move kind, "retire" (_try_degenerate_retire),
+    for a < DEGENERATE_LEN_MM member with 0 or 2+ children -- the ONE
+    class "prune" (len(children) == 1 only) never reaches. Not mutually
+    exclusive with "slide" (2+ children) -- both get queued; whichever
+    the sweep tries first, the other's own guard (m_idx in forest.dead)
+    makes the second a harmless no-op once the first retires it."""
     braces_set = set(getattr(forest, "braces", ()))
     items = []
     for idx, m in enumerate(forest.members):
@@ -621,6 +739,8 @@ def _sweep_order(forest):
             span = float(np.linalg.norm(m.p1 - m.p0))
             if span < TWIG_MERGE_LEN_MM:
                 items.append((vol, "prune", idx))
+        if len(children) != 1 and _is_degenerate_span(m.p0, m.p1):
+            items.append((vol, "retire", idx))
     items.sort(key=lambda t: (-t[0], t[1], t[2]))
     return [(kind, idx) for _, kind, idx in items]
 
@@ -673,6 +793,8 @@ def optimize(forest, mesh, surface_tree, cfg, log=None):
                                                    braced_hosts)
             elif kind == "slide":
                 ok, saved = _try_junction_slide(forest, idx, surface_tree, cfg, braced_hosts)
+            elif kind == "retire":
+                ok, saved = _try_degenerate_retire(forest, idx, surface_tree, cfg, braced_hosts)
             else:
                 ok, saved = _try_twig_prune(forest, idx, surface_tree, cfg, braced_hosts)
             if ok:

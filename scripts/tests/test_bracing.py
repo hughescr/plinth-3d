@@ -42,7 +42,7 @@ def test_compute_needs_pins_exact_rung_count_for_65mm_gap(cfg):
 
     expected = max(n_slender(65.0), int(65.0 / cfg.brace_free_span_mm))
     requests = bracing.compute_needs(f, spans_report, cfg)
-    assert requests == [(mi, 0.0, 65.0, expected)]
+    assert requests == [(mi, 0.0, 65.0, expected, (), None)]
 
 
 def test_compute_needs_no_request_under_both_thresholds(cfg):
@@ -160,7 +160,7 @@ def test_compute_needs_activation_trigger_fires_on_worst_span_despite_tiny_stati
     spans_report = {mi: dict(worst_span_mm=worst_span_mm, restraint_zs=[],
                               free_gaps=[(0.0, 5.0)], n_terminals=n_terminals)}
     requests = bracing.compute_needs(f, spans_report, cfg)
-    assert requests == [(mi, 0.0, 5.0, expected)]
+    assert requests == [(mi, 0.0, 5.0, expected, (), None)]
 
 
 def test_compute_needs_activation_trigger_merges_with_static_not_duplicates(cfg):
@@ -193,7 +193,7 @@ def test_compute_needs_activation_trigger_merges_with_static_not_duplicates(cfg)
                               free_gaps=[(0.0, 20.0)], n_terminals=1)}
     requests = bracing.compute_needs(f, spans_report, cfg)
     # exactly ONE entry for this member/gap, merged to the larger count.
-    assert requests == [(mi, 0.0, 20.0, expected)]
+    assert requests == [(mi, 0.0, 20.0, expected, (), None)]
 
 
 def test_compute_needs_activation_trigger_capped_by_gap_fit(cfg):
@@ -206,7 +206,7 @@ def test_compute_needs_activation_trigger_capped_by_gap_fit(cfg):
                               free_gaps=[(0.0, 3.0)], n_terminals=1)}
     requests = bracing.compute_needs(f, spans_report, cfg)
     # gap_span=3.0 -> floor(3-1)=2 max rungs fit at >=1mm spacing.
-    assert requests == [(mi, 0.0, 3.0, 2)]
+    assert requests == [(mi, 0.0, 3.0, 2, (), None)]
 
 
 def test_compute_needs_activation_trigger_absent_when_neither_condition_holds(cfg):
@@ -449,6 +449,7 @@ def test_twin_even_rung_placed_when_M_covers_z_but_not_climb(cfg):
 
     members = joints.collect_members(list(f.members))
     assert verify.connectivity_report(members, plate_z, cfg, surface_tree=surface_tree) == []
+    assert tm.printability_report(list(f.members), cfg) == []
 
 
 # ------------------------------------------------------------- model rung ---
@@ -574,6 +575,83 @@ def test_model_rung_retries_next_nearest_anchor_when_nearest_too_short(cfg):
     assert np.allclose(rung.p1, [2.0, 0.0, 9.3])
     length = float(np.linalg.norm(rung.p1 - rung.p0))
     assert length == pytest.approx(2.0)
+    assert tm.printability_report(list(f.members), local_cfg) == []
+
+
+# ------------------------------------------------- Phase 4e (SPEC-PATHRUNG W1) --
+def test_cross_link_rejected_on_leaning_host_cone_violation(cfg):
+    """Treant build:200 forensics: a brace rod at 69.8deg (limit 60) --
+    rise=d is evaluated at height z (v3.6's hardcoded 45-degree
+    construction), but on a LEANING host the actual endpoint-to-endpoint
+    drift can exceed d(z). M is a plumb column; N leans hard enough
+    (xy grows 1.0mm per 1mm of z) that the ONLY cross-link candidate's
+    rod, read on N's REAL axis at z+rise, drifts at 2.0 (63.4deg) --
+    over tan(branch_angle_deg=60deg)=1.732 -- even though the
+    CONSTRUCTION itself is the textbook v3.6 45-degree climb.
+
+    First, prove the fixture is a genuine cone violation independent of
+    bracing's own placement code (the SAME tree.printability_report the
+    final gate uses, called directly on the naive/unrejected rod
+    geometry). Then confirm the fix: no other cross-link neighbor and no
+    reachable model-surface anchor exist here, so the honest outcome is
+    unplaceable (Design freedom, recorded: single-pass reject, not an
+    iterative rise recompute) -- never a floating brace that only the
+    FINAL gate would have caught."""
+    f = tm.Forest()
+    mi = f.add_member(_member([0.0, 0.0, 0.0], [0.0, 0.0, 20.0]))
+    slope = 1.0  # mm of xy drift per mm of z -- an aggressively leaning host
+    ni = f.add_member(_member([1.0, 0.0, -5.0], [1.0 + slope * 25.0, 0.0, 20.0]))
+    z = 5.0
+
+    cands = bracing._find_cross_link_candidates(f, mi, z, cfg, k=0)
+    assert len(cands) == 1
+    d, n_found = cands[0]
+    assert n_found == ni
+    rods = bracing._cross_link_rods(f, mi, n_found, z, d, k=0, cfg=cfg)
+    assert len(rods) == 2  # d > twin_single_brace_xy_mm -> X-pair
+    naive_members = [tm.Member(p0=p0, p1=p1, r0=r, r1=r, kind="brace",
+                                owner=("brace", i)) for i, (p0, p1, r) in enumerate(rods)]
+    naive_violations = tm.printability_report(naive_members, cfg)
+    assert len(naive_violations) >= 1  # the fixture genuinely violates the cone
+
+    counters = {"brace": 0, "model_rung": 0}
+    n_members_before = len(f.members)
+    result = bracing._place_one_rung(f, _far_tree(), cfg, mi, z, 0, counters)
+
+    assert result is None  # honest unplaceable -- rejected, not silently certified
+    assert len(f.members) == n_members_before
+    assert f.braces == []
+    assert f.dirty_members() == []
+    assert tm.printability_report(list(f.members), cfg) == []
+
+
+def test_leaning_host_cone_violation_end_to_end_via_propose_and_place(cfg):
+    """Integration-level repro of the same defect class through the
+    public propose_and_place entry point (SPEC-PATHRUNG W1's own
+    acceptance line: "printability_report == [] asserted over every
+    placement test's final forest"). free_gaps=[(0,30)] forces the
+    static trigger to fire (n_slender(30mm) == 1, pinned independently
+    in this file's other compute_needs tests) at z=15. N leans at
+    slope=1.0 (xy grows 1mm per mm of z) -- N's OWN printability is
+    clean (its own drift_rate == slope == 1.0, well under
+    tan(branch_angle_deg=60deg)=1.732, a legitimate pre-existing host,
+    not a pre-broken fixture) but the cross-link ROD read off N's real
+    axis at z+rise drifts at (1 + slope) == 2.0 (the "+1" is the rod's
+    own unavoidable 45-degree construction term, rise == d always) --
+    over the SAME 1.732 limit."""
+    f = tm.Forest()
+    mi = f.add_member(_member([0.0, 0.0, 0.0], [0.0, 0.0, 30.0]))
+    slope = 1.0
+    f.add_member(_member([2.0, 0.0, 10.0], [2.0 + slope * 20.0, 0.0, 30.0]))
+    surface_tree = _far_tree()
+    spans_report = {mi: dict(worst_span_mm=0.0, restraint_zs=[],
+                              free_gaps=[(0.0, 30.0)], n_terminals=1)}
+    result = bracing.propose_and_place(f, surface_tree, plate_z=0.0, cfg=cfg,
+                                        spans_report=spans_report)
+    assert result["placed"] == []
+    assert result["rungs_unplaceable"] == 1  # the ONE candidate is a cone violation
+    assert f.dirty_members() == []
+    assert tm.printability_report(list(f.members), cfg) == []
 
 
 # ---------------------------------------------------------- unplaceable -----
@@ -617,6 +695,7 @@ def test_all_placed_braces_certificates_valid(cfg):
                                         spans_report=spans_report)
     assert result["rungs_placed"] == 1
     assert f.dirty_members() == []
+    assert tm.printability_report(list(f.members), cfg) == []
 
 
 # ------------------------------------------------------------ determinism --
@@ -644,6 +723,83 @@ def test_determinism_identical_inputs_identical_placement(cfg):
         assert m1.r0 == m2.r0
         assert m1.r1 == m2.r1
         assert m1.kind == m2.kind
+    assert tm.printability_report(list(f1.members), cfg) == []
+    assert tm.printability_report(list(f2.members), cfg) == []
+
+
+# ------------------------------------------------- Phase 4e (SPEC-PATHRUNG W6) --
+def test_path_level_rung_places_upstream_when_own_gap_is_dead_congested(cfg):
+    """Regression fixture reproducing the member-150 shape from the
+    orchestrator's own forensics (SPEC-PATHRUNG): a member (A, "150") is
+    the BASE of an honest, activation-lagged cantilever -- its own
+    worst_span_mm (22.28mm) is dominated by an interval that starts AT
+    its own z_min (own-gap-shaped span, `max(z_min, R) == z_min`), but A's
+    own free gap [-2.0, 8.4] is a congested band with NO clearable
+    restraint anywhere in it (here: no cross-link neighbor exists on A's
+    own axis, and the only reachable model-surface anchor sits far
+    outside A's own [-2.0, 8.4] z-window's +-0.75mm anchor tolerance).
+    The offending span reaches into B ("upstream", open air, z 8.4->25):
+    a rung mapped onto B via worst_span_path cuts A's arm and clears.
+
+    Two spans_report shapes against the IDENTICAL forest/surface_tree:
+      - `spans_new` carries worst_span_interval/worst_span_path (Phase 4e
+        W6, what transient.transient_report now actually produces) ->
+        compute_needs routes the rung onto B, propose_and_place places it
+        (model_rung fallback, B sits in open air near the one reachable
+        surface point) -- rungs_placed == 1, rungs_unplaceable == 0.
+      - `spans_old` is the pre-W6 shape (no path fields -- literally what
+        p4-armfix's transient_report emits, and what every OTHER test in
+        this file already hand-builds) -> compute_needs falls back to
+        targeting A's own gap exclusively -> no candidate anywhere near
+        that height -> rungs_unplaceable == 1, honestly. This is the
+        FAILS-on-p4-armfix branch, reproduced in-repo (not just asserted
+        by reference to the old commit) so this one test pins both the
+        regression and the fix."""
+    def build():
+        f = tm.Forest()
+        a_idx = f.add_member(_member([0.0, 0.0, 8.4], [0.0, 0.0, -2.0], kind="trunk"))
+        b_idx = f.add_member(_member([0.0, 0.0, 25.0], [0.0, 0.0, 8.4], kind="shoot"))
+        f.set_parent(b_idx, a_idx)
+        return f, a_idx, b_idx
+
+    lo, hi = -2.0, 20.28  # honest 22.28mm activation-lagged span (SPEC-PATHRUNG)
+    worst_span_mm = hi - lo
+    assert worst_span_mm == pytest.approx(22.28)
+
+    # The only reachable model-surface anchor in this fixture: within
+    # model_brace_max_len_mm of B's axis at z=9.14 (an interior point of
+    # the winning interval, open air) and >0.75mm in z from anywhere
+    # inside A's own [-2.0, 8.4] gap -- A genuinely has nothing to clear
+    # against, congested by construction, not by accident.
+    surface_tree = cKDTree(np.array([[3.0, 0.0, 9.14]]))
+    local_cfg = config.SupportConfig(standoff_mm=0.05)  # isolates placement logic,
+    # same pre-existing embed_end="p1" clearance-inset tension documented
+    # by test_model_rung_lone_column_near_surface_wall above.
+
+    f_new, a_new, b_new = build()
+    spans_new = {a_new: dict(worst_span_mm=worst_span_mm, restraint_zs=[],
+                              free_gaps=[(-2.0, 8.4)], n_terminals=1,
+                              worst_span_interval=(lo, hi),
+                              worst_span_path=[a_new, b_new])}
+    result_new = bracing.propose_and_place(f_new, surface_tree, plate_z=-2.0,
+                                            cfg=local_cfg, spans_report=spans_new)
+    assert result_new["rungs_placed"] == 1
+    assert result_new["rungs_unplaceable"] == 0
+    assert result_new["by_kind"] == {"model_rung": 1}
+    placed = f_new.members[result_new["placed"][0]]
+    # placed ON the upstream member (B), not A -- the whole point.
+    assert placed.p0[2] == pytest.approx(9.14)
+    assert 8.4 - 1e-6 <= float(placed.p0[2]) <= 25.0 + 1e-6  # within B's own extent
+    assert tm.printability_report(f_new.members, local_cfg) == []
+
+    f_old, a_old, _b_old = build()
+    spans_old = {a_old: dict(worst_span_mm=worst_span_mm, restraint_zs=[],
+                              free_gaps=[(-2.0, 8.4)], n_terminals=1)}
+    result_old = bracing.propose_and_place(f_old, surface_tree, plate_z=-2.0,
+                                            cfg=local_cfg, spans_report=spans_old)
+    assert result_old["rungs_placed"] == 0
+    assert result_old["rungs_unplaceable"] == 1
+    assert result_old["placed"] == []
 
 
 # ---------------------------------------------------------- restraint dedup --

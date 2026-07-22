@@ -732,6 +732,68 @@ def test_moment_arm_tapers_along_chain_under_one_span(cfg):
     assert report[a_idx]["worst_span_mm"] > report[b_idx]["worst_span_mm"] > report[c_idx]["worst_span_mm"]
 
 
+# ============================================================ 14. Phase 4e (SPEC-PATHRUNG W6): worst_span_interval / worst_span_path
+def test_worst_span_interval_and_path_on_y_junction(cfg):
+    """Reuses the Y-junction fixture (test 6 above), which already pins
+    worst_span_mm for trunk_idx (45.0, tied across BOTH terminal paths)
+    and a_idx (38.0, only reachable via the a-path). This test pins the
+    two NEW additive fields (Phase 4e, SPEC-PATHRUNG W6).
+
+    trunk_idx: worst_span_mm==45.0 is achieved by BOTH the a-terminal's
+    path (trunk=0, a=1, stub_a=3) and the b-terminal's path (trunk=0,
+    b=2, stub_b=4) -- an EXACT tie. The pinned tie-break (smaller
+    root-first member-index tuple) picks (0,1,3) over (0,2,4), since
+    1 < 2 at the first differing position -- so the winning interval and
+    path must come from the a-path's sweep, not b's, even though both
+    give the identical worst_span_mm number. Winning interval (0.0, 45.0)
+    (trunk's own dominant span, R=0 base_z, a=45 the sibling's
+    completion). worst_span_path filters the winning path tuple to
+    members whose OWN extent intersects (0.0, 45.0), excluding stubs:
+    trunk [0,20] intersects; a_idx [20,55] intersects; stub_a excluded by
+    kind regardless. -> [trunk_idx, a_idx].
+
+    a_idx: worst_span_mm==38.0 is only reachable via the a-path (b's path
+    never visits a_idx at all). Winning interval (20.0, 58.0) (a_idx's
+    later span, where it IS the base member: max(z_min=20, R=20)==20).
+    worst_span_path filters (trunk=0, a=1, stub_a=3) against (20, 58):
+    trunk's own extent [0,20] touches the interval's lo (20) at a single
+    boundary point -- CLOSED-interval overlap counts it (module
+    convention, unchanged) -- so trunk_idx is included too, alongside
+    a_idx itself; stub_a excluded by kind. -> [trunk_idx, a_idx]."""
+    f, trunk_idx, a_idx, b_idx = _y_junction_forest()
+    report = tr.transient_report(f, plate_z=0.0, cfg=cfg)
+
+    assert report[trunk_idx]["worst_span_mm"] == pytest.approx(45.0)
+    assert report[trunk_idx]["worst_span_interval"] == (pytest.approx(0.0), pytest.approx(45.0))
+    assert report[trunk_idx]["worst_span_path"] == [trunk_idx, a_idx]
+
+    assert report[a_idx]["worst_span_mm"] == pytest.approx(38.0)
+    assert report[a_idx]["worst_span_interval"] == (pytest.approx(20.0), pytest.approx(58.0))
+    assert report[a_idx]["worst_span_path"] == [trunk_idx, a_idx]
+
+
+def test_worst_span_interval_default_when_never_engaged(cfg):
+    """A member with worst_span_mm == 0.0 (never the winner of any path's
+    sweep -- can't happen for a live structural member in practice since
+    the trailing interval alone always contributes SOMETHING > 0 unless
+    the member has zero length, but the field must still have an honest,
+    well-typed default) gets the degenerate (z_min, z_min) interval and
+    an empty path -- not None, not a stale value from another member."""
+    f = tm.Forest()
+    # A zero-length member: p0 == p1, so every candidate interval's
+    # contribution (hi - max(zlo, lo)) with zlo == zhi can still be
+    # positive -- to genuinely get worst_span_mm == 0 we isolate the
+    # member from every terminal's path entirely (no live stub
+    # descendant reaches it -- it's a live root with no children and no
+    # terminal registry entry, i.e. structurally orphaned).
+    m = _member([0.0, 0.0, 10.0], [0.0, 0.0, 0.0], kind="trunk")
+    idx = f.add_member(m)
+    report = tr.transient_report(f, plate_z=0.0, cfg=cfg)
+    assert report[idx]["worst_span_mm"] == pytest.approx(0.0)
+    assert report[idx]["worst_span_interval"] == (pytest.approx(0.0), pytest.approx(0.0))
+    assert report[idx]["worst_span_path"] == []
+
+
 def test_three_way_junction_uses_min_not_max_sibling_completion(cfg):
     """Pins min-over-siblings aggregation in _path_events (transient.py
     ~224-227, `active_z = min(completion(s) for s in siblings)`). Every

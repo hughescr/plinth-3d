@@ -41,7 +41,37 @@ static trigger is blind to that danger class; this one isn't. Only
 no forest/report coupling) -- the decoupling contract above stays intact:
 this module still never COMPUTES a span itself, only consumes the two
 fields (worst_span_mm, free_gaps) spans_report already carries.
-"""
+
+SPEC-PATHRUNG W6 (Phase 4e, "the table unblocker"): the activation
+trigger's rung heights are no longer anchored to M's OWN largest free
+gap alone -- they are spread across the FULL spans_report[...]
+["worst_span_interval"] (transient.transient_report's own field, Phase
+4e) and each height is mapped to whichever member on spans_report[...]
+["worst_span_path"] physically covers it (transient.py's own docstring:
+"root->terminal path... whose z-extents intersect" the winning
+interval). This is v3's whole-trunk-ladder rung placement, generalized
+to a v4 path: a member whose OWN gap is congested (nothing clears
+locally) can still get relief from a rung placed on an UPSTREAM path
+member sitting in open air within the SAME offending span -- the exact
+member-150 shape this workstream exists to fix (own-gap placement
+impossible, upstream placement viable). Still only CONSUMES fields
+transient.transient_report already computes -- no span math happens
+here, only the height-spread arithmetic (identical n_rungs formula) and
+the height->host mapping.
+
+Backward-compatible degenerate case (recorded design decision): when
+`worst_span_path` is absent/empty or has length <= 1 (either a
+legacy/hand-built spans_report that never set the new fields -- every
+existing test in this file predates W6 and does exactly this -- or a
+genuinely single-member path, i.e. no upstream relief exists), this
+reduces to a SINGLE merged (member_idx, z_lo, z_hi, n_rungs) request
+against M's own largest free gap, bit-identical to the pre-W6 formula
+and output shape (so every pre-W6 test keeps its exact pinned
+expectations). The generalized (multi-member path) case instead emits
+one (host_idx, z, z, 1) request PER individual mapped height -- "an
+equivalent" propose_and_place's existing z_lo+(k+1)(z_hi-z_lo)/(n+1)
+formula already consumes correctly for n_rungs==1, z_lo==z_hi==z (no
+change needed to propose_and_place itself, per spec)."""
 import math
 
 import numpy as np
@@ -50,6 +80,26 @@ from . import cco, placement, transient, tree
 
 # Half of the connectivity-restraint-dedup tolerance lives in cfg
 # (brace_ladder_z_mm/2); see propose_and_place's restraint_zs skip.
+
+# Should-fix (SPEC-PATHRUNG, _find_cross_link_candidates): a cross-link
+# rod's length is ALWAYS d*sqrt(2) (rise == d, v3.6's hardcoded
+# 45-degree construction) -- floor it at the SAME 1.0mm minimum
+# model_rung already enforces on its own rod length (_place_one_rung),
+# so two near-coincident member axes can never produce a practically
+# zero-length "brace" that gets credited as a real restraint by
+# transient.py's activation sweep. d*sqrt(2) >= 1.0  <=>  d >= 1/sqrt(2).
+_MIN_CROSS_LINK_XY_MM = 1.0 / math.sqrt(2.0)
+
+# Should-fix (SPEC-PATHRUNG, propose_and_place's "stack more fallback
+# rungs"): bound the blast radius of the trial-clearance retry -- at
+# most this many REAL braces get stacked for ONE logical rung request
+# before accepting whatever relief was achieved and moving on, so an
+# unusually stubborn span can't quietly balloon into a dense cluster of
+# extra material (and new incidental clearance pressure on UNRELATED
+# nearby members) while chasing full relief. Small values cover "the
+# ideal split wasn't placeable, a real fallback mostly-but-not-fully
+# compensates" without unbounded escalation.
+_MAX_STACKED_FALLBACKS = 6
 
 
 def _n_slender(gap_mm, cfg, lean_deg):
@@ -110,13 +160,17 @@ def compute_needs(forest, spans_report, cfg):
     Returns an ordered list of (member_idx, z_lo, z_hi, n_rungs) requests
     for n_rungs >= 1, sorted by (member_idx, z_lo) -- deterministic
     regardless of spans_report's own iteration/dict order."""
-    requests = []
+    # Pass 1: static per-gap requests (UNCHANGED formula/output shape from
+    # pre-W6). Kept in a per-member dict (rather than appended straight to
+    # `requests`) so the activation trigger below can MERGE into the same
+    # (z_lo, z_hi) key in the degenerate case, exactly as before.
+    static_reqs = {}          # member_idx -> {(z_lo, z_hi): n_rungs}
+    placed_heights = {}       # member_idx -> [z, ...] already claimed (any trigger)
     for member_idx, info in spans_report.items():
         member = forest.members[member_idx]
         lean = cco._lean_deg(member.p0, member.p1)
         gaps = info.get("free_gaps", [])
-        member_reqs = {}  # (z_lo, z_hi) -> n_rungs, static-then-merged
-
+        member_reqs = {}
         for gap in gaps:
             z_lo, z_hi = float(gap[0]), float(gap[1])
             span = z_hi - z_lo
@@ -130,29 +184,213 @@ def compute_needs(forest, spans_report, cfg):
             n_rungs = max(n_slender, n_span)
             if n_rungs >= 1:
                 member_reqs[(z_lo, z_hi)] = n_rungs
-
-        worst_span_mm = float(info.get("worst_span_mm", 0.0))
-        if worst_span_mm > 0 and gaps:
-            n_terminals = info.get("n_terminals", 0)
-            r_trans = transient.r_transient_mm(worst_span_mm, lean, n_terminals, cfg)
-            if r_trans > cfg.max_unbraced_shaft_r_mm or worst_span_mm > cfg.brace_free_span_mm:
-                n_slender_s = _n_slender(worst_span_mm, cfg, lean)
-                n_span_s = int(worst_span_mm / cfg.brace_free_span_mm)
-                n_rungs_s = max(n_slender_s, n_span_s)
-                if n_rungs_s >= 1:
-                    z_lo, z_hi = max(
-                        ((float(g[0]), float(g[1])) for g in gaps),
-                        key=lambda t: t[1] - t[0])
-                    gap_span = z_hi - z_lo
-                    n_rungs_s = _rungs_that_fit(gap_span, n_rungs_s)
-                    if n_rungs_s >= 1:
-                        key = (z_lo, z_hi)
-                        member_reqs[key] = max(member_reqs.get(key, 0), n_rungs_s)
-
+        static_reqs[member_idx] = member_reqs
         for (z_lo, z_hi), n_rungs in member_reqs.items():
-            requests.append((member_idx, z_lo, z_hi, n_rungs))
+            for k in range(n_rungs):
+                z = z_lo + (k + 1) * (z_hi - z_lo) / (n_rungs + 1)
+                placed_heights.setdefault(member_idx, []).append(z)
+
+    # Pass 2: activation trigger (SPEC-ARM-FIX fix A gate, SPEC-PATHRUNG
+    # W6 placement). See module docstring for the degenerate-vs-
+    # generalized split.
+    path_requests = []  # [(host_idx, z, z, 1), ...] -- generalized case only
+    for member_idx, info in spans_report.items():
+        member = forest.members[member_idx]
+        lean = cco._lean_deg(member.p0, member.p1)
+        gaps = info.get("free_gaps", [])
+        worst_span_mm = float(info.get("worst_span_mm", 0.0))
+        if worst_span_mm <= 0 or not gaps:
+            continue
+        n_terminals = info.get("n_terminals", 0)
+        r_trans = transient.r_transient_mm(worst_span_mm, lean, n_terminals, cfg)
+        if not (r_trans > cfg.max_unbraced_shaft_r_mm or worst_span_mm > cfg.brace_free_span_mm):
+            continue
+        n_slender_s = _n_slender(worst_span_mm, cfg, lean)
+        n_span_s = int(worst_span_mm / cfg.brace_free_span_mm)
+        n_rungs_s = max(n_slender_s, n_span_s)
+        if n_rungs_s < 1:
+            continue
+
+        path = info.get("worst_span_path") or [member_idx]
+        interval = info.get("worst_span_interval")
+        if len(path) <= 1 or interval is None:
+            # Degenerate / legacy shape: reproduce the pre-W6 own-gap
+            # targeting EXACTLY (bit-identical formula and output shape --
+            # every test predating W6 pins this).
+            z_lo, z_hi = max(
+                ((float(g[0]), float(g[1])) for g in gaps),
+                key=lambda t: t[1] - t[0])
+            gap_span = z_hi - z_lo
+            n_fit = _rungs_that_fit(gap_span, n_rungs_s)
+            if n_fit < 1:
+                continue
+            key = (z_lo, z_hi)
+            member_reqs = static_reqs.setdefault(member_idx, {})
+            member_reqs[key] = max(member_reqs.get(key, 0), n_fit)
+            continue
+
+        # Generalized path-level distribution (SPEC-PATHRUNG W6): spread
+        # n_fit heights evenly across the FULL winning interval (same
+        # layout formula as propose_and_place uses per-band), map each to
+        # whichever path member covers it, dedupe against every height
+        # already claimed (by static OR a previously-mapped activation
+        # height) on that TARGET member.
+        lo, hi = float(interval[0]), float(interval[1])
+        gap_span = hi - lo
+        n_fit = _rungs_that_fit(gap_span, n_rungs_s)
+        if n_fit < 1:
+            continue
+        for k in range(n_fit):
+            z = lo + (k + 1) * (hi - lo) / (n_fit + 1)
+            target = _map_height_to_path_member(forest, path, z)
+            if target is None:
+                continue  # no path member covers this height -- skip it, honestly
+            existing = placed_heights.get(target, [])
+            if any(abs(z - ez) <= cfg.brace_ladder_z_mm / 2.0 for ez in existing):
+                continue  # never two requests within brace_ladder_z_mm/2 of the same height
+            placed_heights.setdefault(target, []).append(z)
+            fallbacks = _path_fallback_candidates(forest, path, target, z, lo, hi)
+            # trigger_idx (member_idx, this loop's OWN triggering member --
+            # see propose_and_place's "stack more rungs" should-fix) rides
+            # along as a 6th element so propose_and_place can re-check
+            # WHOSE arm this request exists to relieve, not just place
+            # geometry blindly.
+            path_requests.append((target, z, z, 1, fallbacks, member_idx))
+
+    requests = list(path_requests)
+    for member_idx, member_reqs in static_reqs.items():
+        for (z_lo, z_hi), n_rungs in member_reqs.items():
+            requests.append((member_idx, z_lo, z_hi, n_rungs, (), None))
     requests.sort(key=lambda r: (r[0], r[1]))
     return requests
+
+
+def _path_fallback_candidates(forest, path, target, z_ideal, lo, hi):
+    """SPEC-PATHRUNG W6 should-fix (table_mesh forensics): the formula-
+    pinned height z_ideal (dead center of the winning interval, for the
+    common n_fit==1 case) is the mathematically OPTIMAL single-rung split
+    point (equalizes the two resulting segments, matching _n_slender's
+    own equal-split assumption) -- but on the real Treant table it can
+    land exactly on a densely-congested junction cluster while every
+    OTHER member physically present in the same offending span sits in
+    genuinely open air a few mm away (the exact "own-gap congested,
+    upstream viable" shape this workstream exists to fix, one level
+    removed: the WHOLE PATH can be congested only in a narrow sub-band).
+    _place_one_rung already searches nearest-first WITHIN one height;
+    this is the same idea one level up -- if the ideal height's own
+    target member offers nothing, don't give up on the whole path, try
+    every OTHER path member's own open middle before calling it honestly
+    unplaceable.
+
+    Returns an ordered (tightest-cut-for-the-TRIGGERING-member first,
+    then member_idx, then fraction) tuple of (z_alt, host_alt) -- up to
+    _FALLBACK_FRACTIONS candidates per OTHER live path member (target
+    excluded, already the primary) whose own z-extent intersects the
+    winning interval [lo, hi]: each z_alt is a fixed fraction of that
+    member's own (extent ∩ [lo, hi]) sub-window. Bounded (at most
+    len(path) - 1 times len(_FALLBACK_FRACTIONS) entries) and entirely
+    deterministic (a pure function of the path, the winning interval,
+    and the primary target/height -- no placement-time state).
+
+    Should-fix (table_mesh forensics, more than one sample per member):
+    a single member's own real clearance envelope is NOT uniform across
+    its length (a nearby cross-link neighbor's own z-extent only
+    partially overlaps it) -- the exact MIDPOINT can be blocked while a
+    position nearer one end of the SAME member is wide open (confirmed:
+    the table's real 64/61 pair clears only near 64's own TOP and 61's
+    own BOTTOM, not either member's center). One candidate per member
+    is not enough to reliably find that; multiple fixed-fraction samples
+    are.
+
+    Ordering (recorded design decision, table_mesh forensics): NOT
+    nearest-to-z_ideal. The triggering member M's own worst_span
+    contribution is `hi_final - max(z_min(M), R)` with z_min(M) FIXED --
+    so whichever live candidate actually gets built, the smaller its
+    OWN z, the smaller M's resulting arm, full stop (z_ideal's exact
+    midpoint is merely the OPTIMAL split IF it were placeable at all --
+    once it isn't, the split is no longer perfectly balanced regardless
+    of which fallback is chosen, so the tiebreak that actually serves
+    M -- the member whose gate fired -- is "cut as close to M's own top
+    as the real geometry allows", not "closest to the abstract ideal
+    point"). z_ideal is still threaded through purely to keep the
+    signature/call-site stable; it no longer drives the sort.
+
+    Should-fix (table_mesh forensics, member 104's own shape): TARGET
+    itself is now ALSO sampled at every other fraction (only its exact
+    z_ideal formula height is guaranteed tried already, as the primary,
+    before this list is ever consulted -- excluding it entirely from its
+    OWN fallback set threw away every OTHER position along what can be
+    the single BEST (longest, most open) member on the whole path, just
+    because the one formula-picked height on it happened to land on a
+    locally-congested spot (e.g. dead on a neighboring member's own
+    boundary). A real repro: member 104's own path is [149, 104, 105];
+    z_ideal (the FULL interval's midpoint) maps onto 105 (an 8mm+-long,
+    otherwise wide-open member) at a height sitting RIGHT on a
+    neighbor's boundary and failing there, while positions ~1mm further
+    into 105's own body clear cleanly -- 149 (a sub-mm sliver) offers
+    nothing, so without re-sampling 105 itself this request had no real
+    fallback at all."""
+    out = []
+    for p in path:
+        pz0, pz1 = _z_extent(forest.members[p])
+        ilo, ihi = max(pz0, lo), min(pz1, hi)
+        if ihi <= ilo:
+            continue  # this path member doesn't reach into the winning interval at all
+        span = ihi - ilo
+        for frac in _FALLBACK_FRACTIONS:
+            z_alt = ilo + frac * span
+            if p == target and abs(z_alt - z_ideal) <= 1e-9:
+                continue  # that exact point IS the primary, already tried first
+            out.append((z_alt, p))
+    out.sort(key=lambda t: (t[0], t[1]))
+    return tuple(out)
+
+
+def _trial_resize_r(forest, member, member_idx, info, lean, cfg):
+    """SPEC-PATHRUNG W6 should-fix (propose_and_place's trial-clearance
+    lookahead): the SAME r_req = max(r_murray, r_tension, r_deflect,
+    r_transient, kind_floor) formula transient.resize_forest itself uses
+    (design-v4.md #6) -- re-derived here (read-only, no mutation) so the
+    lookahead can't under-estimate the member's REAL final radius by
+    checking only r_transient. r_deflect's own worst-sub-gap term can be
+    the larger of the two whenever this specific member ISN'T the one
+    whose bracing shrank its own free_gaps (the common case bracing
+    exists to shrink is r_deflect < r_transient; this covers the
+    opposite)."""
+    children = [c for c in forest.children[member_idx] if c not in forest.dead]
+    r_murray = (sum(forest.members[c].r1 ** 4 for c in children)) ** 0.25 if children else 0.0
+    r_tension = cco._r_tension_mm(member.carried_mm2, cfg)
+    worst_gap_mm = max(hi - lo for lo, hi in info["free_gaps"])
+    own_length_mm = float(np.linalg.norm(
+        np.asarray(member.p1, dtype=float) - np.asarray(member.p0, dtype=float)))
+    z_extent_mm = max(abs(float(member.p0[2]) - float(member.p1[2])), 1e-9)
+    worst_gap_3d_mm = worst_gap_mm * (own_length_mm / z_extent_mm)
+    r_deflect = placement._shaft_r_for_L(worst_gap_3d_mm, cfg, lean)
+    r_trans = transient.r_transient_mm(info["worst_span_mm"], lean, info["n_terminals"], cfg)
+    kind_floor = cfg.min_trunk_r_mm if member.kind == "trunk" else cfg.min_shoot_r_mm
+    return max(r_murray, r_tension, r_deflect, r_trans, kind_floor)
+
+
+# Should-fix (SPEC-PATHRUNG, _path_fallback_candidates): fixed, ordered
+# sample fractions within each candidate path member's own (extent ∩
+# winning-interval) sub-window -- the midpoint alone can sit exactly on
+# a locally-congested spot while a position nearer one end of the SAME
+# member is wide open (a real cross-link neighbor's own z-extent often
+# only partially overlaps the candidate member). Deterministic, bounded.
+_FALLBACK_FRACTIONS = (0.5, 0.25, 0.75, 0.1, 0.9)
+
+
+def _map_height_to_path_member(forest, path, z):
+    """SPEC-PATHRUNG W6: which path member (root-side ordered list of
+    live member indices) physically covers height z -- closed-interval
+    containment on each member's own z-extent. Several covering the same
+    z (a junction boundary, shared by parent and child) -> the LOWEST
+    member index wins (deterministic, arbitrary tiebreak matching the
+    spec's literal wording); none -> None (skip that height, honestly)."""
+    candidates = [idx for idx in path
+                  if _z_extent(forest.members[idx])[0] - 1e-9 <= z
+                  <= _z_extent(forest.members[idx])[1] + 1e-9]
+    return min(candidates) if candidates else None
 
 
 # ---------------------------------------------------------------- geometry --
@@ -214,7 +452,33 @@ def _find_cross_link_candidates(forest, mi, z, cfg, k):
     z+rise in that case over-rejects a perfectly valid candidate.
     X-pairs are unaffected (both rods always required, so M needs the
     full range regardless of k) -- N's own [z, z+rise] requirement below
-    stays unconditional in every case, unchanged."""
+    stays unconditional in every case, unchanged.
+
+    Should-fix (SPEC-PATHRUNG, table_mesh forensics -- pre-existing
+    latent bug, never before exercised since zero braces ever placed on
+    table_mesh pre-W6): the lower bound on `d` was `1e-6` -- "nonzero",
+    not "physically meaningful". Two near-COINCIDENT members (real
+    table_mesh case: two shoot members ~3 MICRONS apart in xy, an
+    upstream bifurcation-split near-duplicate) satisfy that trivially,
+    producing a rod of length d*sqrt(2) ~= 4e-6mm -- a zero-length brace
+    in every practical sense (model_rung already floors its OWN rod
+    length at 1.0mm, exactly to rule out this class -- cross-link never
+    had the equivalent floor). Such a rod passes clearance/revalidate
+    for free (no real geometry to intersect) but STILL gets recorded by
+    derive_brace_attachments and, via _static_restraint_zs, is credited
+    as a genuine restraint at that height for every future transient_
+    report/resize_forest call -- inflating BOTH neighbors' apparent
+    bracing (shrinking their r_deflect/r_transient floors) for restraint
+    that does not mechanically exist. Caught by
+    test_engine_every_member_meets_its_own_load_and_deflection_floor
+    [table_mesh] (test_cco.py, not this module's ownership, but the
+    defect is squarely bracing's to fix): two real shoot members came
+    back undersized relative to their own honest per-segment floor,
+    traced to exactly this degenerate pair. Fixed by requiring the
+    resulting ROD length (d*sqrt(2), the same v3.6 45-degree geometry
+    _cross_link_rods always uses) to clear the SAME 1.0mm floor
+    model_rung already enforces -- d >= 1.0/sqrt(2) -- rather than merely
+    excluding the single ill-defined d==0 point."""
     M = forest.members[mi]
     z0_M, z1_M = _z_extent(M)
     if not (z0_M - 1e-9 <= z <= z1_M + 1e-9):
@@ -232,7 +496,10 @@ def _find_cross_link_candidates(forest, mi, z, cfg, k):
             continue
         p_N = _axis_point_at_z(N, z)
         d = float(np.linalg.norm(p_N[:2] - p_M[:2]))
-        if not (1e-6 < d <= cfg.brace_neighbor_max_xy_mm):
+        # Should-fix (SPEC-PATHRUNG): d's lower bound is a REAL rod-length
+        # floor (rise == d always, rod_len == d*sqrt(2)), not merely
+        # "nonzero" -- see this function's own docstring.
+        if not (_MIN_CROSS_LINK_XY_MM < d <= cfg.brace_neighbor_max_xy_mm):
             continue
         rise = d
         if not (z0 - 1e-9 <= z + rise <= z1 + 1e-9):
@@ -313,7 +580,27 @@ def _try_place_rods(forest, surface_tree, cfg, rods, kind, embed_end, counters):
     rods of this ONE candidate (both X-pair rods together, atomically),
     revalidate, rollback on any violation (returning the kind's owner
     counter to where it was so placed members keep a contiguous sequence
-    number), else commit. Returns the new member indices or None."""
+    number), else commit. Returns the new member indices or None.
+
+    SPEC-PATHRUNG W1 (Treant build:200, brace rod at 69.8deg vs limit
+    60): Forest.revalidate checks clearance/connectivity/murray only --
+    nothing checked a brace's OWN printability until the FINAL gate,
+    which is too late to reject-and-try-next. On a LEANING host, rise=d
+    is evaluated at height z (v3.6's hardcoded 45-degree construction),
+    but the rod's actual endpoint-to-endpoint drift is measured on the
+    REAL geometry -- a leaning host's axis at z+rise sits somewhere other
+    than "straight up d from the z point", so the rod's true cone angle
+    can exceed theta_max(r) even though its CONSTRUCTION was textbook
+    45-degrees. Design freedom (recorded): single-pass reject, not an
+    iterative rise recompute -- after the ACTUAL endpoints are known
+    (rods already carries them), run tree.printability_report -- the
+    SAME per-segment rule (drift+taper <= tan(theta_max(r)), model_rung's
+    horizontal exemption intact since it is literally the same function
+    the final gate uses) -- over just the newly-added members (not the
+    whole forest; the gate itself is untouched) and reject exactly like a
+    clearance failure would (rollback, return None, caller tries the
+    next candidate nearest-first) -- deterministic, no RNG, no retry
+    loop needed since the reject is authoritative on the REAL geometry."""
     cp = forest.checkpoint()
     idxs = []
     for p0, p1, r in rods:
@@ -323,6 +610,8 @@ def _try_place_rods(forest, surface_tree, cfg, rods, kind, embed_end, counters):
                          embed_end=embed_end)
         idxs.append(forest.add_brace(m))
     violations = forest.revalidate(surface_tree, cfg)
+    if not violations:
+        violations = tree.printability_report([forest.members[i] for i in idxs], cfg)
     if violations:
         forest.rollback(cp)
         counters[kind] -= len(rods)
@@ -359,9 +648,12 @@ def _place_one_rung(forest, surface_tree, cfg, mi, z, k, counters):
 def propose_and_place(forest, surface_tree, plate_z, cfg, spans_report, log=None):
     """Places braces transactionally against ONE snapshot of spans_report
     (SPEC-BRACING Part 2). `plate_z` is accepted per the interface
-    contract (engine wiring depends on this exact signature) but unused
-    here -- bracing never roots a member at the plate, only cross-links
-    or model rungs; plate-relative placement decisions belong to cco.py.
+    contract (engine wiring depends on this exact signature); bracing
+    never roots a member at the plate, only cross-links or model rungs
+    (plate-relative placement decisions belong to cco.py) -- BUT
+    SPEC-PATHRUNG W6's "stack more fallback rungs" should-fix (below)
+    threads it straight into a mid-call transient.transient_report
+    re-check, so it is no longer decoratively unused.
 
     Returns dict(placed=[brace idx...], rungs_requested, rungs_placed,
     rungs_unplaceable, by_kind={"brace": n, "model_rung": m}).
@@ -372,8 +664,71 @@ def propose_and_place(forest, surface_tree, plate_z, cfg, spans_report, log=None
     "unplaceable" -- it wasn't attempted because it wasn't needed, which
     is a different outcome than "tried and couldn't clear". It still
     counts toward rungs_requested (the raw ask from compute_needs, before
-    any placement-time skip/failure)."""
-    _ = plate_z  # accepted for interface parity; unused, see docstring
+    any placement-time skip/failure).
+
+    SPEC-PATHRUNG W6 scoping (recorded design decision, table_mesh
+    forensics): the restraint_zs skip above stays EXACTLY as it was for
+    every static/degenerate request (z_lo != z_hi, host == the member
+    that owns the gap) -- unchanged, per spec's "keep the existing
+    near-existing-restraint skip". It does NOT apply to a generalized
+    path-mapped single-height rung (compute_needs's path_requests,
+    identifiable by z_lo == z_hi -- no static/degenerate request is ever
+    a zero-length band, span > 0 is enforced at construction). Reason:
+    spans_report[host]["restraint_zs"] is HOST's own STRUCTURAL branch-
+    point presence (transient._static_restraint_zs: p0 when host itself
+    forks, p1 when host's parent forks) -- topologically real but
+    ACTIVATION-LAGGED, which is exactly the defect class this workstream
+    exists to fix (member 150's own two nominal restraints at 8.4/11.1
+    did not prevent its 22.28mm worst_span_mm in the first place). On a
+    densely-branched forest a path member's entire short extent can sit
+    within brace_ladder_z_mm/2 of BOTH its own structural boundaries,
+    which would blanket-reject every path-mapped candidate and leave the
+    triggering member's own arm honestly uncuttable even though open-air
+    placement is geometrically viable -- the exact member-150 shape.
+    compute_needs's OWN placed_heights dedup (never two requests within
+    brace_ladder_z_mm/2 of the same height on the SAME host, across every
+    trigger) still fully applies and is the correct redundancy guard for
+    this request class; an ALREADY-PLACED brace from a prior
+    brace_and_size iteration is instead caught structurally -- once
+    placed it becomes part of derive_brace_attachments and the next
+    transient_report call reflects the now-earlier-activating restraint,
+    shrinking worst_span_mm (and usually clearing the trigger) rather
+    than needing a second, separately-tracked dedup source here.
+
+    SPEC-PATHRUNG W6 should-fix (table_mesh forensics, _path_fallback_
+    candidates): when a generalized path-mapped request's PRIMARY (ideal,
+    formula-computed) height fails placement outright, its request tuple
+    carries a bounded, deterministic fallback list (compute_needs's own
+    output, not recomputed here) of (z_alt, host_alt) candidates on every
+    OTHER path member physically present in the same winning interval --
+    tried nearest-to-ideal first, same "honest unplaceable" outcome only
+    once every one of them has ALSO failed. A local `tried_zs` tracker
+    (host -> heights attempted THIS call, primary and fallback alike)
+    keeps a fallback from ever landing within brace_ladder_z_mm/2 of
+    anything already attempted on that host in this same pass -- static/
+    degenerate requests carry no fallbacks (empty tuple) and are
+    completely unaffected, bit-identical to pre-W6 behavior.
+
+    SPEC-PATHRUNG W6 should-fix (table_mesh forensics, "stack more
+    fallback rungs"): a geometrically-successful placement is not always
+    a SUFFICIENT one -- a real cross-link's mandatory 45-degree rise
+    (rise == the xy distance crossed, ALWAYS, v3.6's construction) can
+    put its actual activation height well above the z it was requested
+    at, leaving the triggering member's arm still over budget even
+    though a rung genuinely got built. For a path-mapped request, after
+    each successful placement (primary or fallback) this re-checks
+    spans_report's OWN triggering member (trigger_idx, compute_needs's
+    6th tuple element -- NOT `host`, which may be a different path
+    member entirely) against the identical two-part gate compute_needs
+    used to decide bracing was needed (r_transient_mm > cfg.
+    max_unbraced_shaft_r_mm or worst_span_mm > cfg.brace_free_span_mm),
+    via a fresh transient.transient_report call. Relieved -> stop.
+    Still over budget -> keep stacking the NEXT fallback (a genuinely
+    different, real restraint further along the SAME offending span)
+    instead of declaring victory on geometry-only success. Static/
+    degenerate requests (trigger_idx is None) never enter this branch,
+    matching every pre-W6 test's exact pinned single-placement-per-
+    request behavior."""
     if log is None:
         log = {}
     requests = compute_needs(forest, spans_report, cfg)
@@ -383,20 +738,99 @@ def propose_and_place(forest, surface_tree, plate_z, cfg, spans_report, log=None
     rungs_unplaceable = 0
     by_kind = {}
     counters = {"brace": 0, "model_rung": 0}
+    tried_zs = {}  # host -> [z, ...] attempted this call (primary + fallback)
 
-    for member_idx, z_lo, z_hi, n_rungs in requests:
+    for member_idx, z_lo, z_hi, n_rungs, fallbacks, trigger_idx in requests:
         rungs_requested += n_rungs
-        restraint_zs = (spans_report.get(member_idx, {}).get("restraint_zs") or [])
+        is_path_mapped = (z_lo == z_hi)  # SPEC-PATHRUNG W6, see docstring
+        restraint_zs = ([] if is_path_mapped else
+                         (spans_report.get(member_idx, {}).get("restraint_zs") or []))
         for k in range(n_rungs):
             z = z_lo + (k + 1) * (z_hi - z_lo) / (n_rungs + 1)
             if any(abs(z - rz) <= cfg.brace_ladder_z_mm / 2.0 for rz in restraint_zs):
                 continue
-            result = _place_one_rung(forest, surface_tree, cfg, member_idx, z, k, counters)
-            if result is None:
+            candidates = [(member_idx, z)]
+            if is_path_mapped:
+                candidates += [(host, zc) for zc, host in fallbacks]
+            placed_any = None
+            n_stacked = 0
+            for host, zc in candidates:
+                already = tried_zs.get(host, [])
+                if any(abs(zc - ez) <= cfg.brace_ladder_z_mm / 2.0 for ez in already):
+                    continue
+                tried_zs.setdefault(host, []).append(zc)
+                result = _place_one_rung(forest, surface_tree, cfg, host, zc, k, counters)
+                if result is None:
+                    continue
+                placed_any = (placed_any or []) + result
+                n_stacked += 1
+                if n_stacked >= _MAX_STACKED_FALLBACKS:
+                    break  # SPEC-PATHRUNG W6 should-fix: bounded blast radius,
+                    # see _MAX_STACKED_FALLBACKS -- accept whatever this got
+                    # us rather than keep placing material indefinitely.
+                # SPEC-PATHRUNG W6 should-fix (table_mesh forensics): the
+                # single formula-ideal split is only PROVABLY sufficient
+                # when it's actually placeable there; a REAL fallback
+                # candidate elsewhere on the path can leave a less-than-
+                # ideal (imbalanced) split -- e.g. a cross-link's own
+                # 45-degree rise pushes its ACTUAL activation height well
+                # above the z it was requested at (v3.6's construction,
+                # never negotiable). Re-check the member whose gate
+                # actually fired (trigger_idx, NOT `host`) against the
+                # SAME two-part threshold compute_needs used to decide
+                # bracing was needed at all; if it's not yet under
+                # budget, keep stacking the NEXT fallback (another real
+                # restraint further along the same offending span) rather
+                # than declaring victory on geometry alone. Static/
+                # degenerate requests (trigger_idx is None) never enter
+                # this branch -- unaffected, bit-identical to pre-W6.
+                if trigger_idx is None:
+                    break
+                fresh = transient.transient_report(forest, plate_z, cfg)
+                t_info = fresh.get(trigger_idx)
+                if t_info is None:
+                    break  # trigger no longer a live/eligible member -- nothing left to relieve
+                t_member = forest.members[trigger_idx]
+                t_lean = cco._lean_deg(t_member.p0, t_member.p1)
+                t_span = t_info["worst_span_mm"]
+                t_r = transient.r_transient_mm(t_span, t_lean, t_info["n_terminals"], cfg)
+                # SPEC-PATHRUNG W6 should-fix (table_mesh forensics,
+                # trial-clearance not just the deflection threshold): the
+                # (r_transient > max_unbraced_shaft_r_mm) gate is compute_
+                # needs's OWN "does this need bracing AT ALL" trigger --
+                # by definition it is satisfied the instant a SINGLE
+                # (mathematically ideal, equal-split) rung would suffice,
+                # which says nothing about whether THIS REAL, geometry-
+                # constrained split (unbalanced by whatever candidate
+                # actually cleared) also clears LOCAL clearance at the
+                # RESIZE_FOREST-FINAL radius -- r_transient alone
+                # understates it whenever r_deflect's own worst-sub-gap
+                # term (design-v4.md #6, transient.resize_forest's SAME
+                # max(...) formula) is the larger of the two for this
+                # specific member (unlike the common case where bracing
+                # shrinks r_deflect well below r_transient). Trial the
+                # FULL resize_forest formula, not just its r_transient
+                # term, so this lookahead can't declare victory on a
+                # radius resize_forest itself would never actually pick.
+                t_r_req = _trial_resize_r(forest, t_member, trigger_idx, t_info, t_lean, cfg)
+                relieved = t_span <= cfg.brace_free_span_mm and t_r <= cfg.max_unbraced_shaft_r_mm
+                if relieved:
+                    trial_cp = forest.checkpoint()
+                    if abs(t_member.r0 - t_r_req) > 1e-9:
+                        t_member.r0 = t_r_req
+                    if abs(t_member.r1 - t_r_req) > 1e-9:
+                        t_member.r1 = t_r_req
+                    trial_violations = forest.revalidate(surface_tree, cfg)
+                    forest.rollback(trial_cp)
+                    relieved = not any(v["member_idx"] == trigger_idx for v in trial_violations)
+                if relieved:
+                    break  # relieved -- stop stacking more restraints for this request
+                # else: not relieved yet, fall through and try the NEXT candidate too
+            if placed_any is None:
                 rungs_unplaceable += 1
                 continue
             rungs_placed += 1
-            for idx, kind in result:
+            for idx, kind in placed_any:
                 placed.append(idx)
                 by_kind[kind] = by_kind.get(kind, 0) + 1
 
