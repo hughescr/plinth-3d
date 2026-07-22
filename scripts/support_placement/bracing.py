@@ -109,8 +109,26 @@ def _find_cross_link_candidates(forest, mi, z, cfg):
     """Neighbor candidates for member `mi` at rung height z (SPEC-BRACING
     rule 1): live non-brace non-stub members N != M whose z-extent covers
     [z, z+rise] (rise = d, the xy distance between the axes at z -- v3.6's
-    hardcoded 45-degree construction), sorted by (d, idx)."""
+    hardcoded 45-degree construction), sorted by (d, idx).
+
+    Fix (verifier blocker #1, floating brace endpoint): rule 1's
+    endpoints are "ON THE AXES (centerline to centerline)" for BOTH
+    members -- the X-pair's mirrored rod and the twin rule's odd-parity
+    rung both read M's own axis AT z+rise (_cross_link_rods), and
+    _axis_xy_at_z is an unclamped linear parametrization that silently
+    extrapolates past a member's real endpoint rather than failing. A
+    candidate whose rise would put z+rise beyond M's own physical
+    z-extent is therefore not "on M's axis" at all -- it must be
+    rejected here, exactly like N's own z-extent is already rejected
+    below, or the rod gets certified while floating disconnected from
+    M's real geometry (the 'stale-brace-leak' class connectivity_report
+    exists to catch)."""
     M = forest.members[mi]
+    z0_M, z1_M = _z_extent(M)
+    if not (z0_M - 1e-9 <= z <= z1_M + 1e-9):
+        # M's own axis doesn't even reach the requested rung height --
+        # no candidate at this z can ever be valid.
+        return []
     p_M = _axis_point_at_z(M, z)
     cands = []
     for ni in _live_neighbor_indices(forest):
@@ -124,7 +142,10 @@ def _find_cross_link_candidates(forest, mi, z, cfg):
         d = float(np.linalg.norm(p_N[:2] - p_M[:2]))
         if not (1e-6 < d <= cfg.brace_neighbor_max_xy_mm):
             continue
-        if not (z0 - 1e-9 <= z + d <= z1 + 1e-9):
+        rise = d
+        if not (z0 - 1e-9 <= z + rise <= z1 + 1e-9):
+            continue
+        if not (z0_M - 1e-9 <= z + rise <= z1_M + 1e-9):
             continue
         cands.append((d, ni))
     cands.sort(key=lambda t: (t[0], t[1]))

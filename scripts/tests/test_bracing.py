@@ -156,6 +156,56 @@ def test_twin_geometry_pin_close_columns(cfg):
     assert rods[1].p0[0] == pytest.approx(d)
 
 
+# ------------------------------------------------------- floating endpoint --
+def test_cross_link_candidate_rejected_when_M_real_height_short_of_rise(cfg):
+    """Verifier blocker #1: _find_cross_link_candidates validated N's
+    z-extent covers [z, z+rise] but never M's OWN z-extent -- letting a
+    neighbor clear even when M's real geometry doesn't reach z+rise, so
+    the X-pair/twin-odd rod that reads M's axis AT z+rise
+    (_axis_point_at_z is an unclamped linear parametrization) floats
+    above M's real tip instead of touching it. M's real height here
+    (14) is shorter than z+rise (9+8=17) even though the rung height
+    z=9 itself is well within M -- exactly the stale-spans_report
+    scenario connectivity_report's own docstring names
+    ("stale-brace-leak"): the candidate must not clear."""
+    d = 8.0
+    f, (mi, ni) = _column_forest(((0.0, 0.0), 0.0, 14.0), ((d, 0.0), 0.0, 40.0))
+    z = 9.0
+    assert bracing._find_cross_link_candidates(f, mi, z, cfg) == []
+
+
+def test_propose_and_place_rejects_rung_when_M_shorter_than_climb(cfg):
+    """Integration-level repro of blocker #1: unfixed code places an
+    X-pair whose mirrored rod's far endpoint sits above M's real
+    physical tip -- a valid certificate (dirty_members()==[]) for a
+    member disconnected from its host, corruption not a crash. Fixed
+    code must reject the only candidate (M doesn't reach z+rise) and,
+    with no other neighbor and no reachable model-surface anchor, count
+    the rung unplaceable -- never place a floating brace."""
+    d = 8.0
+    f, (mi, ni) = _column_forest(((0.0, 0.0), 0.0, 14.0), ((d, 0.0), 0.0, 40.0))
+    surface_tree = _far_tree()
+    # Certify the two columns clean first (mirrors
+    # test_unclearable_rung_never_placed's pattern) so the pristine
+    # assertion below isolates propose_and_place's OWN effect rather
+    # than the base fixture's never-revalidated starting certificates.
+    assert f.revalidate(surface_tree, cfg) == []
+    assert f.dirty_members() == []
+    n_members_before = len(f.members)
+    spans_report = {mi: dict(worst_span_mm=18.0, restraint_zs=[],
+                              free_gaps=[(0.0, 18.0)], n_terminals=1)}
+
+    result = bracing.propose_and_place(f, surface_tree, plate_z=0.0, cfg=cfg,
+                                        spans_report=spans_report)
+
+    assert result["placed"] == []
+    assert result["rungs_placed"] == 0
+    assert result["rungs_unplaceable"] == 1
+    assert len(f.members) == n_members_before
+    assert f.braces == []
+    assert f.dirty_members() == []
+
+
 # ------------------------------------------------------------- model rung ---
 def test_model_rung_lone_column_near_surface_wall(cfg):
     """Lone column (no other tree member in reach) near a wall of
