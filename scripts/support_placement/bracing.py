@@ -105,11 +105,15 @@ def _live_neighbor_indices(forest):
             if i not in forest.dead and i not in braces_set and m.kind != "stub"]
 
 
-def _find_cross_link_candidates(forest, mi, z, cfg):
+def _find_cross_link_candidates(forest, mi, z, cfg, k):
     """Neighbor candidates for member `mi` at rung height z (SPEC-BRACING
     rule 1): live non-brace non-stub members N != M whose z-extent covers
     [z, z+rise] (rise = d, the xy distance between the axes at z -- v3.6's
-    hardcoded 45-degree construction), sorted by (d, idx).
+    hardcoded 45-degree construction), sorted by (d, idx). `k` is the
+    rung's own index within its request (SAME meaning as
+    _cross_link_rods' k, which parity picks the rod direction) --
+    required, not defaulted, because which of M's endpoints a rod
+    actually reads depends on it (see the should-fix note below).
 
     Fix (verifier blocker #1, floating brace endpoint): rule 1's
     endpoints are "ON THE AXES (centerline to centerline)" for BOTH
@@ -122,7 +126,19 @@ def _find_cross_link_candidates(forest, mi, z, cfg):
     rejected here, exactly like N's own z-extent is already rejected
     below, or the rod gets certified while floating disconnected from
     M's real geometry (the 'stale-brace-leak' class connectivity_report
-    exists to catch)."""
+    exists to catch).
+
+    Should-fix (verifier round 2, twin k-even over-rejection): the fix
+    above made M's [z, z+rise] coverage unconditional, but a rod only
+    ever LANDS on M at z+rise for an X-pair (rod2 mirrors onto M) or a
+    twin ODD-parity rung (`k` odd, N -> M climbing) -- see
+    _cross_link_rods. An X-pair's OTHER rod (rod1) and a twin
+    EVEN-parity rung both read M at z (its own real point, never
+    extrapolated) and only read N at z+rise; requiring M to also cover
+    z+rise in that case over-rejects a perfectly valid candidate.
+    X-pairs are unaffected (both rods always required, so M needs the
+    full range regardless of k) -- N's own [z, z+rise] requirement below
+    stays unconditional in every case, unchanged."""
     M = forest.members[mi]
     z0_M, z1_M = _z_extent(M)
     if not (z0_M - 1e-9 <= z <= z1_M + 1e-9):
@@ -145,7 +161,14 @@ def _find_cross_link_candidates(forest, mi, z, cfg):
         rise = d
         if not (z0 - 1e-9 <= z + rise <= z1 + 1e-9):
             continue
-        if not (z0_M - 1e-9 <= z + rise <= z1_M + 1e-9):
+        # M's own [z, z+rise] coverage is only required when a rod
+        # actually lands ON M at z+rise: always true for an X-pair
+        # (d > twin_single_brace_xy_mm, both rods placed -- rod2 mirrors
+        # onto M), and true for a twin (d <= threshold) ONLY on an odd
+        # (N -> M climbing) rung. A twin even rung never reads M above z.
+        is_twin = d <= cfg.twin_single_brace_xy_mm
+        m_needs_full_extent = (not is_twin) or (k % 2 != 0)
+        if m_needs_full_extent and not (z0_M - 1e-9 <= z + rise <= z1_M + 1e-9):
             continue
         cands.append((d, ni))
     cands.sort(key=lambda t: (t[0], t[1]))
@@ -171,31 +194,41 @@ def _cross_link_rods(forest, mi, ni, z, d, k, cfg):
     return [(p_M_z, p_N_hi, r), (p_N_z, p_M_hi, r)]
 
 
-def _find_model_rung_anchor(forest, surface_tree, mi, z, cfg):
-    """Rule 2 fallback: nearest surface point within cfg.model_brace_max_
-    len_mm of M's axis at z, with |anchor_z - z| <= 0.75, sorted by
-    (distance, index). Returns (p0, p1) with p0 = M's axis at the
-    ANCHOR's z (so the rod is exactly horizontal by construction) and
-    p1 = the anchor, or None if no candidate qualifies."""
+def _find_model_rung_anchors(forest, surface_tree, mi, z, cfg, limit=6):
+    """Rule 2 fallback candidates: surface points within cfg.model_brace_
+    max_len_mm of M's axis at z, with |anchor_z - z| <= 0.75, sorted by
+    (distance, index) -- nearest first, up to `limit` (v3's cadence,
+    braces.py's ground_points[mask][argsort][:6]). Returns a list of
+    (p0, p1) with p0 = M's axis at the ANCHOR's z (so the rod is exactly
+    horizontal by construction) and p1 = the anchor; empty if nothing
+    qualifies.
+
+    Should-fix (verifier round 2, model-rung retry): the original
+    single-candidate version gave up entirely if the ONE nearest anchor
+    failed the caller's length floor or clearance, even when a perfectly
+    good next-nearest anchor was right there. Returning the whole
+    ordered shortlist lets the caller retry deterministically instead."""
     if surface_tree is None:
-        return None
+        return []
     M = forest.members[mi]
     p_M_z = _axis_point_at_z(M, z)
     pts = np.asarray(surface_tree.data, dtype=float)
     if pts.size == 0:
-        return None
+        return []
     dist = np.linalg.norm(pts - p_M_z[None, :], axis=1)
     anchor_z = pts[:, 2]
     mask = (dist <= cfg.model_brace_max_len_mm + 1e-9) & (np.abs(anchor_z - z) <= 0.75 + 1e-9)
     idxs = np.nonzero(mask)[0]
     if len(idxs) == 0:
-        return None
+        return []
     order = idxs[np.argsort(dist[idxs], kind="stable")]
-    best = int(order[0])
-    anchor = pts[best]
-    p0 = _axis_point_at_z(M, float(anchor[2]))
-    p1 = np.array(anchor, dtype=float)
-    return p0, p1
+    out = []
+    for i in order[:limit]:
+        anchor = pts[int(i)]
+        p0 = _axis_point_at_z(M, float(anchor[2]))
+        p1 = np.array(anchor, dtype=float)
+        out.append((p0, p1))
+    return out
 
 
 # --------------------------------------------------------------- placement --
@@ -224,25 +257,26 @@ def _try_place_rods(forest, surface_tree, cfg, rods, kind, embed_end, counters):
 
 def _place_one_rung(forest, surface_tree, cfg, mi, z, k, counters):
     """One rung request at height z on member mi: try cross-link
-    candidates nearest-first, then the model-rung fallback. Returns a
-    list of (member_idx, kind) placed, or None if unplaceable."""
-    for d, ni in _find_cross_link_candidates(forest, mi, z, cfg):
+    candidates nearest-first, then the model-rung fallback -- itself
+    retried nearest-first (should-fix, verifier round 2: up to
+    cfg-implied v3 cadence of 6 candidates, deterministic (distance,
+    index) order) rather than giving up after the single nearest anchor.
+    Returns a list of (member_idx, kind) placed, or None if
+    unplaceable."""
+    for d, ni in _find_cross_link_candidates(forest, mi, z, cfg, k):
         rods = _cross_link_rods(forest, mi, ni, z, d, k, cfg)
         placed = _try_place_rods(forest, surface_tree, cfg, rods, "brace", None, counters)
         if placed is not None:
             return [(idx, "brace") for idx in placed]
 
-    anchor = _find_model_rung_anchor(forest, surface_tree, mi, z, cfg)
-    if anchor is None:
-        return None
-    p0, p1 = anchor
-    length = float(np.linalg.norm(p1 - p0))
-    if not (1.0 - 1e-9 <= length <= cfg.model_brace_max_len_mm + 1e-9):
-        return None
-    placed = _try_place_rods(forest, surface_tree, cfg,
-                              [(p0, p1, cfg.brace_r_mm)], "model_rung", "p1", counters)
-    if placed is not None:
-        return [(idx, "model_rung") for idx in placed]
+    for p0, p1 in _find_model_rung_anchors(forest, surface_tree, mi, z, cfg):
+        length = float(np.linalg.norm(p1 - p0))
+        if not (1.0 - 1e-9 <= length <= cfg.model_brace_max_len_mm + 1e-9):
+            continue
+        placed = _try_place_rods(forest, surface_tree, cfg,
+                                  [(p0, p1, cfg.brace_r_mm)], "model_rung", "p1", counters)
+        if placed is not None:
+            return [(idx, "model_rung") for idx in placed]
     return None
 
 

@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 from scipy.spatial import cKDTree
 
-from support_placement import bracing, config, placement, tree as tm
+from support_placement import bracing, config, joints, placement, tree as tm
 from support_placement import verify
 
 
@@ -54,6 +54,59 @@ def test_compute_needs_no_request_under_both_thresholds(cfg):
     assert bracing.compute_needs(f, spans_report, cfg) == []
 
 
+def test_compute_needs_lean_deg_threading_demands_more_rungs(cfg):
+    """SPEC-BRACING should-fix #4 (non-vertical lean coverage):
+    compute_needs threads cco._lean_deg(member) into _shaft_r_for_L for
+    n_slender, but no existing test exercises a leaning member -- a
+    45-degree member's angle-aware peel term (placement._shaft_r_for_L's
+    tan(theta) load) inflates the required shaft radius at any given
+    segment length relative to a vertical member of the same z-span, so
+    it needs MORE rungs to bring that radius back under
+    cfg.max_unbraced_shaft_r_mm. Both counts are pinned directly against
+    placement._shaft_r_for_L, per the same pattern as
+    test_compute_needs_pins_exact_rung_count_for_65mm_gap.
+
+    Design decision (recorded, measured not assumed): under DEFAULT cfg
+    the build-time span trigger (n_span = gap // brace_free_span_mm)
+    saturates n_rungs at BOTH 0 and 45 degrees for every gap swept up to
+    400mm -- it would silently mask a broken/dropped lean value (e.g. a
+    regression that hardcoded lean=0.0) behind an unrelated trigger. This
+    test uses a locally-relaxed (effectively infinite) brace_free_span_mm
+    to isolate the slenderness trigger the lean value actually feeds,
+    exactly the kind of one-field cfg override test_model_rung_lone_
+    column_near_surface_wall already established as house style."""
+    local_cfg = config.SupportConfig(brace_free_span_mm=1.0e6)
+    gap = 40.0
+
+    def n_slender(g, lean_deg):
+        for n in range(51):
+            r = placement._shaft_r_for_L(g / (n + 1), local_cfg, lean_deg)
+            if r <= local_cfg.max_unbraced_shaft_r_mm:
+                return n
+        return 50
+
+    expected_vertical = n_slender(gap, 0.0)
+    expected_45 = n_slender(gap, 45.0)
+    assert expected_45 > expected_vertical  # sanity: the angle genuinely bites
+
+    f = tm.Forest()
+    # Equal xy-run and z-rise over the member's length -> exactly 45
+    # degrees off vertical (cco._lean_deg == atan2(dxy, dz)).
+    leaning = f.add_member(_member([0.0, 0.0, 0.0], [gap, 0.0, gap]))
+    vertical = f.add_member(_member([100.0, 0.0, 0.0], [100.0, 0.0, gap]))
+    spans_report = {
+        leaning: dict(worst_span_mm=gap, restraint_zs=[],
+                      free_gaps=[(0.0, gap)], n_terminals=1),
+        vertical: dict(worst_span_mm=gap, restraint_zs=[],
+                       free_gaps=[(0.0, gap)], n_terminals=1),
+    }
+    requests = bracing.compute_needs(f, spans_report, local_cfg)
+    by_member = {r[0]: r[3] for r in requests}
+    assert by_member[leaning] == expected_45
+    assert by_member[vertical] == expected_vertical
+    assert by_member[leaning] > by_member[vertical]
+
+
 def test_compute_needs_sorted_by_member_then_z_lo(cfg):
     f, (m0, m1) = _column_forest(((0.0, 0.0), 0.0, 80.0), ((20.0, 0.0), 0.0, 80.0))
     spans_report = {
@@ -73,16 +126,25 @@ def test_compute_needs_sorted_by_member_then_z_lo(cfg):
 def test_xpair_geometry_pin_wider_columns(cfg):
     """Two vertical columns 8mm apart (v3's
     test_wider_trunk_pair_still_gets_crossed_pair, adapted): 2 rods,
-    rise == 8.0 exactly, endpoints on both axes, discounted radius."""
+    rise == 8.0 exactly, endpoints on both axes, discounted radius.
+
+    Should-fix #3 (cross-link connectivity assertion): columns are sized
+    to exactly z+rise (18.0mm) rather than an arbitrarily-tall 40mm --
+    each column's own tip then coincides with the OTHER rod's landing
+    point (rod1 lands on N at 18, rod2 lands on M at 18), so the whole
+    forest (both hosts, both braces) certifies connectivity-clean with
+    no filtering: this is the gate that would have caught the r1
+    floating-brace blocker."""
     d = 8.0
     assert d > cfg.twin_single_brace_xy_mm
-    f, (mi, ni) = _column_forest(((0.0, 0.0), 0.0, 40.0), ((d, 0.0), 0.0, 40.0))
+    plate_z = 0.0
+    f, (mi, ni) = _column_forest(((0.0, 0.0), 0.0, 18.0), ((d, 0.0), 0.0, 18.0))
     # gap sized to yield exactly n_rungs == 1 (z_lo=0, z_hi=20 -> z=10)
     spans_report = {mi: dict(worst_span_mm=20.0, restraint_zs=[],
                               free_gaps=[(0.0, 20.0)], n_terminals=1)}
     surface_tree = _far_tree()
 
-    result = bracing.propose_and_place(f, surface_tree, plate_z=0.0, cfg=cfg,
+    result = bracing.propose_and_place(f, surface_tree, plate_z=plate_z, cfg=cfg,
                                         spans_report=spans_report)
     assert result["rungs_placed"] == 1
     assert result["rungs_unplaceable"] == 0
@@ -112,6 +174,9 @@ def test_xpair_geometry_pin_wider_columns(cfg):
             assert rod.p0[2] == pytest.approx(10.0)
             assert rod.p1[2] == pytest.approx(18.0)
 
+    members = joints.collect_members(list(f.members))
+    assert verify.connectivity_report(members, plate_z, cfg, surface_tree=surface_tree) == []
+
 
 def test_xpair_rods_pass_printability_report(cfg):
     from support_placement import tree as tree_mod
@@ -127,15 +192,44 @@ def test_xpair_rods_pass_printability_report(cfg):
 def test_twin_geometry_pin_close_columns(cfg):
     """Columns 2.5mm apart (v3's
     test_twin_trunk_pair_gets_single_alternating_rods, adapted): ONE rod
-    per rung, alternating p0 side by rung parity, UNdiscounted radius."""
+    per rung, alternating p0 side by rung parity, UNdiscounted radius.
+
+    Should-fix #3 (cross-link connectivity assertion): with 2 alternating
+    rungs, N (the neighbor) needs its z-extent to cover BOTH rungs'
+    [z, z+rise] unconditionally (rung 0's [12, 14.5] and rung 1's
+    [24, 26.5]) regardless of parity -- so N's column can't simply be
+    trimmed to its rung-0 landing height the way the X-pair test trims
+    to a single shared landing height. M's tip DOES land naturally
+    (rung 1, odd-parity, climbs N->M and lands on M at 26.5, so M is
+    sized to exactly that). N's tip has no natural landing at all in
+    this 2-rung fixture -- it is given a designed embed_end="p1" contact
+    with a real nearby surface point instead (a realistic stand-in for
+    "this trunk terminates against the model", the same role
+    test_model_rung_lone_column_near_surface_wall's rung plays for its
+    own p1). That test's own comment already measured (not assumed) that
+    revalidate's clearance inset is tighter than standoff_mm+brace_r_mm
+    for ANY embed_end="p1" endpoint under default cfg; the SAME
+    locally-relaxed standoff isolates that separate, pre-existing
+    tension here too, so the whole forest (both hosts, both braces)
+    certifies connectivity-clean with no filtering -- the gate that
+    would have caught the r1 floating-brace blocker."""
     d = 2.5
     assert d <= cfg.twin_single_brace_xy_mm
-    f, (mi, ni) = _column_forest(((0.0, 0.0), 0.0, 40.0), ((d, 0.0), 0.0, 40.0))
+    local_cfg = config.SupportConfig(standoff_mm=0.05)
+    plate_z = 0.0
+    # M: natural top landing (rung 1 lands on M at z+rise=26.5) -> sized
+    # to exactly that height, no synthetic embed needed.
+    # N: must reach 26.5 too (unconditional neighbor-extent requirement,
+    # both rungs) but nothing lands exactly at its tip -> designed embed.
+    f = tm.Forest()
+    mi = f.add_member(_member([0.0, 0.0, 0.0], [0.0, 0.0, 26.5]))
+    ni = f.add_member(_member([d, 0.0, 0.0], [d, 0.0, 26.5], embed_end="p1"))
+    surface_tree = cKDTree(np.array([[d + 0.5, 0.0, 26.5]]))
     # gap sized to yield exactly n_rungs == 2 (z_lo=0, z_hi=36 -> z=12, 24)
     spans_report = {mi: dict(worst_span_mm=36.0, restraint_zs=[],
                               free_gaps=[(0.0, 36.0)], n_terminals=1)}
 
-    result = bracing.propose_and_place(f, _far_tree(), plate_z=0.0, cfg=cfg,
+    result = bracing.propose_and_place(f, surface_tree, plate_z=plate_z, cfg=local_cfg,
                                         spans_report=spans_report)
     assert result["rungs_placed"] == 2
     assert result["rungs_unplaceable"] == 0
@@ -143,8 +237,8 @@ def test_twin_geometry_pin_close_columns(cfg):
     assert len(result["placed"]) == 2
 
     rod_len = d * np.sqrt(2.0)
-    expected_r = max(cfg.brace_r_mm,
-                      placement._shaft_r_for_L(rod_len, cfg, cfg.max_segment_angle_deg))
+    expected_r = max(local_cfg.brace_r_mm,
+                      placement._shaft_r_for_L(rod_len, local_cfg, local_cfg.max_segment_angle_deg))
     rods = [f.members[idx] for idx in result["placed"]]
     assert [round(float(r.p0[2]), 6) for r in rods] == [12.0, 24.0]
     for rod in rods:
@@ -154,6 +248,10 @@ def test_twin_geometry_pin_close_columns(cfg):
     # (odd) starts at N's xy (2.5)
     assert rods[0].p0[0] == pytest.approx(0.0)
     assert rods[1].p0[0] == pytest.approx(d)
+
+    members = joints.collect_members(list(f.members))
+    assert verify.connectivity_report(members, plate_z, local_cfg,
+                                       surface_tree=surface_tree) == []
 
 
 # ------------------------------------------------------- floating endpoint --
@@ -171,7 +269,9 @@ def test_cross_link_candidate_rejected_when_M_real_height_short_of_rise(cfg):
     d = 8.0
     f, (mi, ni) = _column_forest(((0.0, 0.0), 0.0, 14.0), ((d, 0.0), 0.0, 40.0))
     z = 9.0
-    assert bracing._find_cross_link_candidates(f, mi, z, cfg) == []
+    # k is irrelevant here: d=8.0 is an X-pair (> twin_single_brace_xy_mm),
+    # which always needs M's full [z, z+rise] regardless of rung parity.
+    assert bracing._find_cross_link_candidates(f, mi, z, cfg, k=0) == []
 
 
 def test_propose_and_place_rejects_rung_when_M_shorter_than_climb(cfg):
@@ -204,6 +304,50 @@ def test_propose_and_place_rejects_rung_when_M_shorter_than_climb(cfg):
     assert len(f.members) == n_members_before
     assert f.braces == []
     assert f.dirty_members() == []
+
+
+def test_twin_even_rung_placed_when_M_covers_z_but_not_climb(cfg):
+    """Should-fix #1 (twin k-even over-rejection): the blocker #1 fix
+    above made M's [z, z+rise] coverage unconditional, but a rod only
+    ever LANDS on M at z+rise for an X-pair's mirrored rod or a twin
+    ODD-parity rung -- an EVEN-parity twin rung climbs M (read at z, M's
+    own real point) -> N (read at z+rise), never touching M above z.
+    Requiring M to also cover z+rise over-rejects a perfectly valid
+    even-parity candidate. M here covers z=10 (its real top, chosen so
+    the rod's own p0 lands exactly there) but NOT z+rise=12.5 -- must
+    now clear (was rejected), and connectivity_report on the placed rod
+    is clean (the invariant from the blocker fix stays absolute: no
+    endpoint here extrapolates past a host's real end -- M's own tip and
+    N's own tip are chosen to exactly match the rod's landing points, so
+    the WHOLE forest, not just the rod, certifies clean)."""
+    d = 2.5
+    assert d <= cfg.twin_single_brace_xy_mm
+    plate_z = 0.0
+    # M's real top is exactly z (10.0); N's real top is exactly z+rise
+    # (12.5) -- both hosts' own tips coincide with the rod's own
+    # endpoints, so nothing floats anywhere in the forest.
+    f, (mi, ni) = _column_forest(((0.0, 0.0), 0.0, 10.0), ((d, 0.0), 0.0, 12.5))
+    z = 10.0
+    rise = d
+    assert bracing._find_cross_link_candidates(f, mi, z, cfg, k=0) == [(d, ni)]
+
+    spans_report = {mi: dict(worst_span_mm=20.0, restraint_zs=[],
+                              free_gaps=[(0.0, 20.0)], n_terminals=1)}
+    surface_tree = _far_tree()
+    result = bracing.propose_and_place(f, surface_tree, plate_z=plate_z, cfg=cfg,
+                                        spans_report=spans_report)
+
+    assert result["rungs_placed"] == 1
+    assert result["rungs_unplaceable"] == 0
+    assert result["by_kind"] == {"brace": 1}
+    assert len(result["placed"]) == 1
+    rod = f.members[result["placed"][0]]
+    assert rod.kind == "brace"
+    assert np.allclose(rod.p0, [0.0, 0.0, z])          # M's own real axis point at z
+    assert np.allclose(rod.p1, [d, 0.0, z + rise])     # N's own real axis point at z+rise
+
+    members = joints.collect_members(list(f.members))
+    assert verify.connectivity_report(members, plate_z, cfg, surface_tree=surface_tree) == []
 
 
 # ------------------------------------------------------------- model rung ---
@@ -276,6 +420,59 @@ def test_model_rung_lone_column_near_surface_wall(cfg):
                                                surface_tree=surface_tree)
     rung_violations = [v for v in connectivity if v["kind"] == "model_rung"]
     assert rung_violations == []
+
+
+def test_model_rung_retries_next_nearest_anchor_when_nearest_too_short(cfg):
+    """Should-fix #2 (model-rung retry): the original fallback tried only
+    the single nearest anchor and gave up entirely if it failed the
+    >=1.0mm minimum rod length (or clearance) -- even when a perfectly
+    good next-nearest anchor was right there. Fixed code must retry
+    qualifying candidates in deterministic (distance, index) order, up
+    to 6 (v3's cadence), and place on the first one that actually
+    clears.
+
+    Design decision (recorded, same measured tension as
+    test_model_rung_lone_column_near_surface_wall above): a
+    locally-relaxed standoff is needed for ANY model_rung placement to
+    clear its own embedded-end clearance under default cfg
+    (contact_depth_mm+0.2 inset < standoff_mm+brace_r_mm). M's own
+    radius is shrunk to 0.1mm so its bare (non-embedded) shaft clears
+    the intentionally-close (0.5mm offset) degenerate anchor point --
+    both isolate the RETRY logic itself from that separate,
+    pre-existing tension rather than depending on it."""
+    local_cfg = config.SupportConfig(standoff_mm=0.05)
+    plate_z = 0.0
+    M = _member([0.0, 0.0, plate_z], [0.0, 0.0, 20.0], r0=0.1, r1=0.1, kind="trunk")
+    f = tm.Forest()
+    mi = f.add_member(M)
+
+    # Rung target z == 10.0 (see spans_report below). Both anchors sit
+    # within 0.75mm of z in their OWN z (so both qualify) but on
+    # opposite sides of it, so the nearest-by-3D-distance-to-M-at-z
+    # ordering below matches the nearest-by-own-rod-length ordering too.
+    pts = np.array([
+        [0.5, 0.0, 10.7],   # nearest (0.86mm to M-at-z=10): own rod
+                             # length is the pure xy offset (0.5mm) --
+                             # degenerate-short, below the 1.0mm floor.
+        [2.0, 0.0, 9.3],    # second-nearest (2.12mm): own rod length
+                             # 2.0mm, valid.
+    ])
+    surface_tree = cKDTree(pts)
+    spans_report = {mi: dict(worst_span_mm=20.0, restraint_zs=[],
+                              free_gaps=[(0.0, 20.0)], n_terminals=1)}
+
+    result = bracing.propose_and_place(f, surface_tree, plate_z=plate_z, cfg=local_cfg,
+                                        spans_report=spans_report)
+
+    assert result["rungs_placed"] == 1
+    assert result["rungs_unplaceable"] == 0
+    assert result["by_kind"] == {"model_rung": 1}
+    assert len(result["placed"]) == 1
+    rung = f.members[result["placed"][0]]
+    assert rung.kind == "model_rung"
+    assert np.allclose(rung.p1, [2.0, 0.0, 9.3])
+    length = float(np.linalg.norm(rung.p1 - rung.p0))
+    assert length == pytest.approx(2.0)
 
 
 # ---------------------------------------------------------- unplaceable -----
