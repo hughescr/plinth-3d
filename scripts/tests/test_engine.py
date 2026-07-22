@@ -99,6 +99,41 @@ def test_engine_wall_time_pin_on_table(table_mesh, cfg):
     assert result["log"]["t_total"] < 10.0
 
 
+def test_engine_construct_is_deterministic_despite_global_rng_state(table_mesh, cfg):
+    """Charter: no RNG. engine.construct (via placement.load_partition)
+    and its surface_tree (via routing.build_surface_tree) both draw from
+    the GLOBAL numpy random state through trimesh's mesh.sample(). If
+    either isn't seeded internally, a fix-pass loop or a re-run on the
+    same mesh can silently produce a different forest depending on
+    whatever ran before it. Perturb the global RNG differently before
+    each call; the resulting forest must be bit-identical (member count,
+    positions, radii)."""
+    from support_placement import routing
+
+    log = {}
+    pre = engine.prepare(table_mesh, cfg, log)
+
+    np.random.seed(12345)
+    surface_tree_a = routing.build_surface_tree(table_mesh, pitch_mm=0.3, max_points=400000)
+    forest_a, unrouted_a, carried_a, tip_r_a, contacts_a = engine.construct(
+        table_mesh, pre, surface_tree_a, cfg)
+
+    np.random.seed(54321)
+    surface_tree_b = routing.build_surface_tree(table_mesh, pitch_mm=0.3, max_points=400000)
+    forest_b, unrouted_b, carried_b, tip_r_b, contacts_b = engine.construct(
+        table_mesh, pre, surface_tree_b, cfg)
+
+    assert len(forest_a.members) == len(forest_b.members)
+    assert unrouted_a == unrouted_b
+    assert np.array_equal(carried_a, carried_b)
+    assert np.array_equal(tip_r_a, tip_r_b)
+    for ma, mb in zip(forest_a.members, forest_b.members):
+        assert np.array_equal(ma.p0, mb.p0)
+        assert np.array_equal(ma.p1, mb.p1)
+        assert ma.r0 == mb.r0
+        assert ma.r1 == mb.r1
+
+
 def test_engine_no_contacts_returns_honest_empty_result(cfg):
     """Degenerate case: a mesh with essentially no down-facing overhang
     beyond near_plate_mm still returns a complete, well-formed result

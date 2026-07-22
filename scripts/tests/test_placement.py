@@ -74,6 +74,21 @@ def test_load_partition_conserves_area(table_mesh, cfg):
         assert abs(total - true_area) / true_area < 0.15
 
 
+def test_load_partition_is_deterministic_despite_global_rng_state(table_mesh, cfg):
+    """Charter: no RNG. load_partition's sub.sample() draws from the
+    GLOBAL numpy random state -- if it isn't seeded internally, the
+    carried-area partition silently varies with whatever ran before it.
+    Perturb the global RNG differently before each call; the carried-area
+    outputs must still match exactly."""
+    islands = perception.overhang_islands(table_mesh, cfg)
+    contacts = placement.sample_candidates(table_mesh, islands, cfg, seed=3)
+    np.random.seed(12345)
+    carried_a = placement.load_partition(table_mesh, islands, contacts, cfg)
+    np.random.seed(54321)
+    carried_b = placement.load_partition(table_mesh, islands, contacts, cfg)
+    assert np.array_equal(carried_a, carried_b)
+
+
 def test_tip_radius_matches_hand_calculation(cfg):
     # Hand calc: area=20mm2, peel=3000Pa, SF=8, tensile=10MPa
     area = 20.0

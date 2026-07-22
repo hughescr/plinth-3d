@@ -94,7 +94,7 @@ def plate_anchor(contact, mesh_zmin, cfg):
     return np.array([pos[0], pos[1], z])
 
 
-def build_surface_tree(mesh, pitch_mm=0.4, max_points=150000):
+def build_surface_tree(mesh, pitch_mm=0.4, max_points=150000, seed=0):
     """Dense point-sample KDTree over the mesh surface, for fast
     approximate clearance queries at real-model scale. Exact
     trimesh.proximity.closest_point measured ~0.4-2s PER CALL on the
@@ -106,6 +106,13 @@ def build_surface_tree(mesh, pitch_mm=0.4, max_points=150000):
     Build once per mesh, reuse across every check_clearance call in a run.
     """
     from scipy.spatial import cKDTree
+    # trimesh's Trimesh.sample() draws from the GLOBAL numpy random state,
+    # not a passed-in Generator -- seed it explicitly here so this tree is
+    # actually reproducible (otherwise every call, including once per
+    # staged-driver stage and once per engine.run, silently drew a
+    # different surface sample depending on whatever ran before it; see
+    # placement.sample_candidates' identical note).
+    np.random.seed(seed)
     n = int(np.clip(mesh.area / (pitch_mm ** 2), 5000, max_points))
     points = mesh.sample(n)
     return cKDTree(points)
