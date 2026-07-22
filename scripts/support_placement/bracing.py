@@ -246,8 +246,29 @@ def compute_needs(forest, spans_report, cfg):
             if target is None:
                 continue  # no path member covers this height -- skip it, honestly
             existing = placed_heights.get(target, [])
-            if any(abs(z - ez) <= cfg.brace_ladder_z_mm / 2.0 for ez in existing):
-                continue  # never two requests within brace_ladder_z_mm/2 of the same height
+            colliding = [ez for ez in existing
+                         if abs(z - ez) <= cfg.brace_ladder_z_mm / 2.0]
+            if colliding and any(lo <= ez <= hi for ez in colliding):
+                # Geometric relief check (verifier H2), not a bare
+                # proximity assumption: a surviving nearby claim on the
+                # SAME target only genuinely relieves THIS trigger's
+                # request if it falls within THIS trigger's own winning
+                # interval [lo, hi] -- consistent with transient.py's
+                # closed-interval overlap convention (a restraint
+                # anywhere inside the offending span caps it, regardless
+                # of which trigger's own height arithmetic produced it).
+                # A same-trigger repeat always satisfies this (its own
+                # prior heights are, by construction, inside its own
+                # [lo, hi]), so intra-trigger dedup is unaffected.
+                continue  # genuinely relieved -- drop
+            # Either no nearby claim exists at all, or the nearby
+            # claim(s) sit OUTSIDE this trigger's own winning span (a
+            # different trigger's own interval happened to land a claim
+            # on the same TARGET member close in raw z, but not actually
+            # within the span THIS trigger needs relieved). Dropping on
+            # proximity alone was unsound (verifier H2: member117's claim
+            # silently swallowing member151's own trigger without ever
+            # attempting or relief-checking it) -- still attempt it.
             placed_heights.setdefault(target, []).append(z)
             fallbacks = _path_fallback_candidates(forest, path, target, z, lo, hi)
             # trigger_idx (member_idx, this loop's OWN triggering member --

@@ -772,6 +772,75 @@ def test_worst_span_interval_and_path_on_y_junction(cfg):
     assert report[a_idx]["worst_span_path"] == [trunk_idx, a_idx]
 
 
+def _partial_start_winner_forest():
+    """root(0..30) forks at z=30 into mid (the member under test, 30..50,
+    terminal-ward stub 50..52) and sib (a tall, childless sibling shoot
+    30..100 with no stub of its own -- never a terminal path, only
+    present to seed a restraint event on mid's path).
+
+    Built specifically so mid's OWN z_min (30) sits STRICTLY ABOVE the
+    raw restraint height (R=0, the dominant span's lo) at the interval
+    that ends up winning -- unlike every existing worst_span_interval
+    fixture (y-junction's trunk_idx and a_idx both happen to win at a
+    point where zlo==R, a no-op clamp) -- so this is the first fixture
+    that can discriminate transient.py:407's `max(zlo, lo)` clamp from
+    a mutant that drops it (`best_iv = (lo, hi)`).
+
+    mid's path (root, mid, stub) has z_top = 52 (its own extent tops
+    out at the stub's embed at 52 -- sib's height never enters THIS
+    path's z_top, only the timing of the one event it contributes).
+    sib's subtree completion is 100, deliberately >= z_top: _span_intervals
+    clamps active_z into z_top, so the dominant candidate span (0, 100)
+    collapses to (0, 52) -- EXACTLY tying the trailing span (30, 52) on
+    raw (hi - lo). The sweep still resolves this correctly for
+    worst_span_mm itself, because both candidates already route through
+    the SAME max(zlo, lo)-clamped contribution (52 - 30 == 22 either
+    way) -- ties break to whichever interval is considered FIRST, and
+    the dominant (0, 52) span is always appended before the trailing
+    one, so it wins the tie. mid's own zlo (30) is strictly above that
+    winning interval's raw lo (0): correct code clamps the recorded
+    interval to (30, 52); the lo-dropping mutant would instead record
+    the unclamped (0, 52) -- same worst_span_mm, different (wrong)
+    interval, exactly the gap the independent verifier flagged."""
+    f = tm.Forest()
+    root = _member([0.0, 0.0, 30.0], [0.0, 0.0, 0.0], kind="trunk")
+    root_idx = f.add_member(root)
+    mid = _member([0.0, 0.0, 50.0], [0.0, 0.0, 30.0], kind="shoot")
+    mid_idx = f.add_member(mid)
+    f.set_parent(mid_idx, root_idx)
+    sib = _member([0.0, 0.0, 100.0], [0.0, 0.0, 30.0], kind="shoot")
+    sib_idx = f.add_member(sib)
+    f.set_parent(sib_idx, root_idx)
+    stub = _member([0.0, 0.0, 52.0], [0.0, 0.0, 50.0], kind="stub", embed_end="p0")
+    stub_idx = f.add_member(stub)
+    f.set_parent(stub_idx, mid_idx)
+    return f, root_idx, mid_idx, sib_idx
+
+
+def test_worst_span_interval_clamps_lo_to_member_zlo_not_raw_restraint(cfg):
+    """Pins transient.py:407 (`best_iv = (max(zlo, lo), hi)`) against the
+    mutant that drops the clamp (`best_iv = (lo, hi)`). See
+    _partial_start_winner_forest's docstring for the geometry: mid's
+    winning interval is the dominant span (raw lo=0, the base_z of the
+    whole path), clamped up to mid's OWN z_min (30) because mid's own
+    extent [30, 50] never reaches down to 0 -- a restraint pinned at
+    z=0 cannot be reported as bounding a member that only starts at 30.
+
+    worst_span_mm is UNCHANGED by the mutant (22.0 either way -- the
+    contribution arithmetic that picks the winning span already applies
+    the clamp inline); only the recorded interval differs, which is
+    exactly why the existing y-junction fixture's zlo==lo coincidence
+    let this mutant survive."""
+    f, root_idx, mid_idx, sib_idx = _partial_start_winner_forest()
+    report = tr.transient_report(f, plate_z=0.0, cfg=cfg)
+
+    assert report[mid_idx]["worst_span_mm"] == pytest.approx(22.0)
+    # the clamped answer: lo reflects mid's own zlo (30), not the raw
+    # restraint height (0) that the mutant would report.
+    assert report[mid_idx]["worst_span_interval"] == (pytest.approx(30.0), pytest.approx(52.0))
+    assert report[mid_idx]["worst_span_interval"][0] != pytest.approx(0.0)
+
+
 def test_worst_span_interval_default_when_never_engaged(cfg):
     """A member with worst_span_mm == 0.0 (never the winner of any path's
     sweep -- can't happen for a live structural member in practice since

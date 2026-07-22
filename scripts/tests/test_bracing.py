@@ -209,6 +209,61 @@ def test_compute_needs_activation_trigger_capped_by_gap_fit(cfg):
     assert requests == [(mi, 0.0, 3.0, 2, (), None)]
 
 
+def test_compute_needs_dedup_still_attempts_trigger_not_actually_relieved(cfg):
+    """Verifier H2 regression: the generalized path-level dedup (SPEC-
+    PATHRUNG W6) must not swallow a SECOND trigger's request just
+    because it lands on the SAME target member close in raw z to an
+    earlier trigger's claim -- only when that earlier claim's height
+    ACTUALLY falls inside the second trigger's own winning interval
+    (genuine geometric relief) may it be dropped.
+
+    T (member 0, a long shared trunk z 0..100) sits on BOTH triggers'
+    own worst_span_path. Trigger A (member_idx 1, processed FIRST --
+    dict insertion order) has winning interval (0.0, 20.0); its single
+    rung (n_fit==1) lands at the midpoint z=10.0, which maps onto T
+    (member 0 wins the tie over member 1 by the lower-index rule) --
+    claiming T's z=10.0 slot.
+
+    Trigger B (member_idx 2, processed SECOND) has winning interval
+    (10.5, 13.9) -- deliberately excludes z=10.0 -- whose own midpoint
+    z=12.2 ALSO maps onto T (member 2's own tiny extent [10, 15] loses
+    the same lower-index tie). |12.2 - 10.0| == 2.2 <= brace_ladder_z_mm
+    / 2.0 (4.0mm default), so the two collide on the SAME target/height
+    slot -- but A's claimed height (10.0) sits OUTSIDE B's own winning
+    interval (10.5, 13.9): a rung placed at 10.0 does not restrain B's
+    own offending span at all. The unsound proximity-only dedup drops
+    B's request anyway (member117/member151 shape, verified against
+    p4-landing to fail this assertion); the geometric relief check
+    must still attempt it -- observable as a path-level request whose
+    OWN trigger tag (the request's 6th element) is member_idx 2."""
+    f = tm.Forest()
+    t_idx = f.add_member(_member([0.0, 0.0, 100.0], [0.0, 0.0, 0.0], kind="trunk"))
+    a_idx = f.add_member(_member([0.0, 0.0, 15.0], [0.0, 0.0, 5.0], kind="shoot"))
+    b_idx = f.add_member(_member([0.0, 0.0, 15.0], [0.0, 0.0, 10.0], kind="shoot"))
+    assert abs(12.2 - 10.0) <= cfg.brace_ladder_z_mm / 2.0  # collision, by construction
+    assert not (10.5 <= 10.0 <= 13.9)  # A's claimed height genuinely outside B's own span
+
+    # dict insertion order pins dict-iteration order (Python 3.7+): A
+    # (member_idx 1) is processed before B (member_idx 2), reproducing
+    # the "earlier trigger claims the slot first" mechanism verbatim.
+    spans_report = {
+        a_idx: dict(worst_span_mm=20.0, restraint_zs=[], free_gaps=[(0.0, 20.0)],
+                     n_terminals=1, worst_span_interval=(0.0, 20.0),
+                     worst_span_path=[t_idx, a_idx]),
+        b_idx: dict(worst_span_mm=20.0, restraint_zs=[], free_gaps=[(10.5, 13.9)],
+                     n_terminals=1, worst_span_interval=(10.5, 13.9),
+                     worst_span_path=[t_idx, b_idx]),
+    }
+    requests = bracing.compute_needs(f, spans_report, cfg)
+
+    trigger_tags = [r[-1] for r in requests]
+    assert a_idx in trigger_tags  # the winner's own request, unaffected
+    # the loser's request must still be attempted -- not silently
+    # dropped just because it landed near the winner's slot on the
+    # same target while genuinely outside the winner's relief zone.
+    assert b_idx in trigger_tags
+
+
 def test_compute_needs_activation_trigger_absent_when_neither_condition_holds(cfg):
     """Control: a worst_span_mm that clears BOTH the r_transient
     threshold and the brace_free_span_mm cadence must not fire the
