@@ -285,9 +285,10 @@ def test_borderline_protrusion_over_tolerance_is_kept(cfg):
 
 def test_enclosure_filter_is_deterministic_across_repeated_calls(cfg):
     """Two independent calls on the same mixed (some dropped, some kept)
-    input produce bit-identical ball lists -- the Fibonacci-sphere
-    sampling (_fibonacci_sphere_dirs) is seedless/deterministic, so
-    nothing here should ever vary call to call."""
+    input produce bit-identical ball lists -- the enclosure certificate
+    (icosahedron subdivision + exact geometry, no RNG anywhere in the
+    pipeline) is fully deterministic, so nothing here should ever vary
+    call to call."""
     trunk = _m([4.0, 0.0, -5.0], [4.0, 0.0, 30.0], 2.0, 2.0, ("trunk", 0), "trunk")
     brace = _m([10.0, 0.0, 10.0], [4.0, 0.0, 10.0], 0.3, 0.3, ("brace", 0), "brace")
     elbow_a = _m([20.0, 0.0, 0.0], [20.0, 0.0, 10.0], 0.6, 0.6, ("trunk", 1), "trunk")
@@ -312,13 +313,13 @@ def test_enclosure_filter_is_deterministic_across_repeated_calls(cfg):
         assert x["owner"] == y["owner"]
 
 
-# --- adversarial-review follow-up: two real soundness blockers found in
-# the first cut of the enclosure diet (commit d89d7bc), both fixed in
-# joints.py (see the BLOCKER 1 / BLOCKER 2 comments above
-# ENCLOSURE_SAMPLE_N). Both fixtures below are confirmed failing-first:
-# each one's ball comes back ABSENT against d89d7bc's compute_joint_balls
-# (an adversarially-verified real gap silently dropped), and PRESENT
-# here.
+# --- adversarial-review follow-up (round 2): two real soundness
+# blockers found in the first cut of the enclosure diet (commit
+# d89d7bc), both fixed in joints.py (see the "Round 1"/"Round 2"
+# comments in joints.py above ENCLOSURE_TOL_MM). Both fixtures below are
+# confirmed failing-first: each one's ball comes back ABSENT against
+# d89d7bc's compute_joint_balls (an adversarially-verified real gap
+# silently dropped), and PRESENT here.
 
 def test_shallow_bend_elbow_past_colinear_threshold_is_kept(cfg):
     """BLOCKER 1 (sampling gap): a fixed N=256 Fibonacci grid has a
@@ -374,3 +375,76 @@ def test_multiway_hub_with_subcoincide_jitter_is_kept(cfg):
     assert len(at_hub) == 1
     # sized by the fattest member (m1, r=0.3856) touching the hub
     assert abs(at_hub[0]["r"] - cfg.joint_ball_factor * 0.3855562378313358) < 1e-9
+
+
+# --- Round-3 adversarial review: an earlier sampling/densification
+# pipeline (seam/corner/meridian heuristics, commit 7cbe74f) analytically
+# PREDICTED where each member's coverage boundary crosses the sphere and
+# only resampled near those predicted locations. For compound (tapered,
+# non-coplanar) geometry that prediction itself can be wrong -- found by
+# an independent adversarial verifier for a bend just past
+# COLINEAR_ANGLE_DEG, off by 24-45 degrees from where the real gap
+# actually was, so every resampling pass looked nowhere near it and
+# wrongly confirmed enclosure. Replaced with a genuine mathematical
+# CERTIFICATE (recursive spherical-patch subdivision + a Lipschitz bound
+# on the EXACT signed distance to the union, _ball_enclosed /
+# _certify_sphere_enclosed) that needs no boundary-shape prediction at
+# all -- sound for any member geometry by construction. Both fixtures
+# below are confirmed failing-first against 7cbe74f.
+
+def test_tapered_noncoplanar_shallow_bend_kept_trial_7220(cfg):
+    """Verbatim trial-7220 repro geometry from the adversarial verifier:
+    two TAPERED, non-coplanar members at a ~4 degree bend (deviation
+    from straight) -- three independent ground-truth methods agreed the
+    true gap at the ball's exposed outer surface is 0.0347mm (73% over
+    ENCLOSURE_TOL_MM). This exact bend is shallow enough that the pre-
+    existing, unrelated F3(a) colinear-pass-through rule (COLINEAR_
+    ANGLE_DEG=10, out of this task's scope, confirmed still correct and
+    untouched) would exclude it entirely if only these 2 members shared
+    the joint -- so a third, thin, off-axis witness member is added
+    here purely to reach a 3-node cluster and exercise the enclosure
+    filter itself, exactly like a real third branch at the same joint
+    would. _ball_enclosed on the verbatim 2-member geometry alone (no
+    witness) is checked directly too, pinning the exact function the
+    verifier diagnosed the bug in."""
+    a = _m([-2.06728315, 2.35429766, 0.60941606], [0.0, 0.0, 0.0],
+           0.8487748905596435, 0.9618749218092074, ("trunk", 0), "trunk")
+    b = _m([0.0, 0.0, 0.0], [2.61782379, -3.38413437, -1.00501819],
+           0.9515651205265617, 0.6902509545577595, ("trunk", 1), "trunk")
+
+    # direct check on the verbatim pair (pins the exact diagnosed function)
+    members = joints.collect_members([a, b])
+    r_ball = 0.9618749218092074  # a's local radius at the joint (its p1 end), the fattest
+    assert joints._ball_enclosed(np.zeros(3), r_ball, members,
+                                  joints.ENCLOSURE_PROOF_TOL_MM) is False
+
+    # full compute_joint_balls pipeline, with a 3rd witness member so the
+    # cluster isn't the F3(a) 2-node special case (an unrelated, correct
+    # exclusion for genuinely-straight continuations -- not what's under
+    # test here)
+    c = _m([0.0, 0.0, 0.0], [0.0, 0.0, -3.0], 0.05, 0.05, ("trunk", 2), "trunk")
+    balls = joints.compute_joint_balls([a, b, c], plate_z=-1000.0, cfg=cfg)
+    at_joint = [ball for ball in balls if np.linalg.norm(ball["center"]) < 1e-6]
+    assert len(at_joint) == 1
+    assert abs(at_joint[0]["r"] - cfg.joint_ball_factor * r_ball) < 1e-9
+
+
+def test_tapered_noncoplanar_bend_kept_trial_4055_class(cfg):
+    """Secondary marginal case from the same adversarial round (the
+    "trial-4055 class": true gap ~0.0202-0.0215mm, barely over
+    ENCLOSURE_TOL_MM) -- an independently-found repro of the same root
+    cause (two tapered, non-coplanar members, this one at a ~16 degree
+    bend, well past COLINEAR_ANGLE_DEG so it reaches compute_joint_balls
+    directly with no witness member needed). Confirmed failing-first:
+    absent from 7cbe74f's compute_joint_balls (real ~0.023mm gap,
+    silently dropped)."""
+    a = _m([0.9364904936757851, 0.2714744007119751, 0.752930226115027],
+           [0.0, 0.0, 0.0], 0.04431473021227952, 0.16790109202464978,
+           ("trunk", 0), "trunk")
+    b = _m([0.0, 0.0, 0.0],
+           [-1.0818439371612572, -0.3694209493362457, -0.45908450006900064],
+           0.1676098823931195, 0.6619919334695765, ("trunk", 1), "trunk")
+    balls = joints.compute_joint_balls([a, b], plate_z=-1000.0, cfg=cfg)
+    at_joint = [ball for ball in balls if np.linalg.norm(ball["center"]) < 1e-6]
+    assert len(at_joint) == 1
+    assert abs(at_joint[0]["r"] - cfg.joint_ball_factor * 0.16790109202464978) < 1e-9
