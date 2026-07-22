@@ -213,6 +213,80 @@ def test_synth_member_chain_asserts_unassignable_ball():
         ce.synth_member_chain(members, stray, cfg, 0)
 
 
+# --- F2: conical feet on plate-rooted members --------------------------
+
+def test_synth_member_chain_plate_root_gets_foot_flare(cfg):
+    """v4 real root convention (tree.py): p1 is the root-ward end -- a
+    member whose p1 sits at plate_z gets v3's conical foot flare."""
+    members = [_mk_member([4.0, 0.0, 20.0], [4.0, 0.0, -5.0], 1.0, 1.0, "trunk", ("contact", 0))]
+    recs = ce.synth_member_chain(members, [], cfg, 0, plate_z=-5.0)
+    assert len(recs) == 2  # flare record + shortened column record
+    flare_rec = ci.Record(recs[0][0])
+    assert flare_rec.type == ci.T_FLARE
+    flare_blob = np.frombuffer(recs[0][1], "<f4").reshape(-1, 3)
+    at_plate = flare_blob[np.abs(flare_blob[:, 2] - (-5.0)) < 1e-4]
+    rad = np.linalg.norm(at_plate[:, :2] - np.array([4.0, 0.0]), axis=1)
+    assert rad.max() > 1.0 * 1.3  # wider than the column radius at the plate
+    assert abs(rad.max() - cfg.flare_r_factor * 1.0) < 0.05
+    col_rec = ci.Record(recs[1][0])
+    assert col_rec.type == ci.T_SHAFT
+    assert abs(float(col_rec.start[2]) - (-5.0 + cfg.flare_len_mm)) < 1e-6
+
+
+def test_synth_member_chain_no_flare_when_plate_z_omitted(cfg):
+    """plate_z defaults to None: emits exactly as before -- the driver
+    call site (manual_treant_v4.stage_emit) is unaffected."""
+    members = [_mk_member([4.0, 0.0, 20.0], [4.0, 0.0, -5.0], 1.0, 1.0, "trunk", ("contact", 0))]
+    recs = ce.synth_member_chain(members, [], cfg, 0)
+    assert len(recs) == 1
+    rec = ci.Record(recs[0][0])
+    assert rec.type == ci.T_SHAFT
+    assert np.allclose(rec.end, [4.0, 0.0, -5.0])
+
+
+def test_synth_member_chain_non_root_member_unaffected_by_plate_z(cfg):
+    """A member whose p1 does NOT land at plate_z (a shoot, a mid-tree
+    member) gets no flare even when plate_z is supplied."""
+    members = [_mk_member([5, 0, 2], [0, 0, 2], 0.3, 0.4, "shoot", ("contact", 1))]
+    recs = ce.synth_member_chain(members, [], cfg, 0, plate_z=-5.0)
+    assert len(recs) == 1
+    rec = ci.Record(recs[0][0])
+    assert np.allclose(rec.start, [5, 0, 2]) and np.allclose(rec.end, [0, 0, 2])
+
+
+def test_synth_member_chain_short_plate_root_flares_lower_half_only(cfg):
+    """Member shorter than 2*flare_len_mm: flare the lower half only
+    (recorded decision, SPEC-EMIT-POLISH.md F2)."""
+    short_len = cfg.flare_len_mm * 1.2  # < 2*flare_len_mm
+    members = [_mk_member([4.0, 0.0, -5.0 + short_len], [4.0, 0.0, -5.0],
+                           1.0, 1.0, "trunk", ("contact", 0))]
+    recs = ce.synth_member_chain(members, [], cfg, 0, plate_z=-5.0)
+    assert len(recs) == 2
+    flare_rec = ci.Record(recs[0][0])
+    expected_col0_z = -5.0 + short_len / 2.0
+    assert abs(float(flare_rec.end[2]) - expected_col0_z) < 1e-6
+    col_rec = ci.Record(recs[1][0])
+    assert abs(float(col_rec.start[2]) - expected_col0_z) < 1e-6
+
+
+def test_synth_member_chain_plate_root_still_carries_its_joint_balls(cfg):
+    """A plate-rooted member's non-plate joint balls (e.g. a mid-column
+    junction, since F1 already excludes the true plate-band node from
+    ever being produced) still land in exactly one record's blob."""
+    members = [_mk_member([4.0, 0.0, 20.0], [4.0, 0.0, -5.0], 1.0, 1.0, "trunk", ("contact", 0))]
+    mid = np.array([4.0, 0.0, 10.0])
+    balls = [dict(center=mid, r=1.3, owner=("contact", 0))]
+    recs = ce.synth_member_chain(members, balls, cfg, 0, plate_z=-5.0)
+    hits = 0
+    for _, blob in recs:
+        pts = np.frombuffer(blob, "<f4").reshape(-1, 3)
+        d = np.linalg.norm(pts - mid, axis=1)
+        near = d[d <= 1.3 + 0.05]
+        if len(near) and float(near.max()) >= 0.9:
+            hits += 1
+    assert hits == 1
+
+
 def test_v3_trunk_has_flare_wider_than_column(cfg):
     from support_placement import trunks as tm
     t = tm.Trunk([2.0, 3.0], z_top=40.0)

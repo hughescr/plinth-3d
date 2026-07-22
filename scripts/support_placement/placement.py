@@ -77,11 +77,16 @@ def _farthest_point_fallback(pts, k, floor_mm):
     return chosen
 
 
-def load_partition(mesh, islands, contacts, cfg, n_dense_samples=4000):
+def load_partition(mesh, islands, contacts, cfg, n_dense_samples=4000, seed=0):
     """Approximate Voronoi partition of each island's down-facing area
     among its contacts via Monte-Carlo nearest-assignment (robust, no
     exact-Voronoi-on-a-mesh-surface machinery needed). Returns an array of
     carried_area_mm2 aligned with `contacts`."""
+    # trimesh's Trimesh.sample() draws from the GLOBAL numpy random state
+    # (see sample_candidates' identical note above) -- seed it explicitly
+    # so the carried-area partition is reproducible regardless of what ran
+    # before it.
+    np.random.seed(seed)
     carried = np.zeros(len(contacts))
     by_island = {}
     for i, c in enumerate(contacts):

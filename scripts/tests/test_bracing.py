@@ -2,8 +2,8 @@ import numpy as np
 import pytest
 from scipy.spatial import cKDTree
 
-from support_placement import bracing, config, joints, placement, tree as tm
-from support_placement import verify
+from support_placement import bracing, cco, config, joints, placement, tree as tm
+from support_placement import transient, verify
 
 
 def _member(p0, p1, r0=0.5, r1=0.5, kind="trunk", owner=("contact", 0), embed_end=None):
@@ -42,7 +42,7 @@ def test_compute_needs_pins_exact_rung_count_for_65mm_gap(cfg):
 
     expected = max(n_slender(65.0), int(65.0 / cfg.brace_free_span_mm))
     requests = bracing.compute_needs(f, spans_report, cfg)
-    assert requests == [(mi, 0.0, 65.0, expected)]
+    assert requests == [(mi, 0.0, 65.0, expected, (), None)]
 
 
 def test_compute_needs_no_request_under_both_thresholds(cfg):
@@ -122,11 +122,168 @@ def test_compute_needs_sorted_by_member_then_z_lo(cfg):
     assert idx_pairs[2] == (m1, 0.0)
 
 
+# --------------------------------------------- activation-aware trigger -----
+def test_compute_needs_activation_trigger_fires_on_worst_span_despite_tiny_static_gap(cfg):
+    """SPEC-ARM-FIX fix A (Phase 4d, design-v4.md #9's literal rule): a
+    pass-through member's own STATIC free_gap can be tiny (no internal
+    restraint points on its own extent) while its worst_span_mm --
+    transient.transient_report's activation-aware moment-arm value,
+    inherited from a lagged restraint elsewhere on its root->terminal
+    path -- is large enough to demand bracing on its own. compute_needs
+    must catch this even though the static (gap-only) trigger alone
+    requests nothing for this member."""
+    f, (mi,) = _column_forest(((0.0, 0.0), 0.0, 5.0))
+    worst_span_mm = 80.0
+    n_terminals = 1
+    lean = 0.0
+
+    # sanity: the STATIC trigger alone (worst_span_mm == 0) requests
+    # nothing for this member -- span 5.0 is far under both thresholds.
+    static_only = {mi: dict(worst_span_mm=0.0, restraint_zs=[],
+                             free_gaps=[(0.0, 5.0)], n_terminals=n_terminals)}
+    assert bracing.compute_needs(f, static_only, cfg) == []
+
+    r_trans = transient.r_transient_mm(worst_span_mm, lean, n_terminals, cfg)
+    assert (r_trans > cfg.max_unbraced_shaft_r_mm) or (worst_span_mm > cfg.brace_free_span_mm)
+
+    def n_slender(gap):
+        for n in range(51):
+            r = placement._shaft_r_for_L(gap / (n + 1), cfg, lean)
+            if r <= cfg.max_unbraced_shaft_r_mm:
+                return n
+        return 50
+
+    n_activation = max(n_slender(worst_span_mm), int(worst_span_mm / cfg.brace_free_span_mm))
+    expected = bracing._rungs_that_fit(5.0, n_activation)
+    assert expected >= 1
+
+    spans_report = {mi: dict(worst_span_mm=worst_span_mm, restraint_zs=[],
+                              free_gaps=[(0.0, 5.0)], n_terminals=n_terminals)}
+    requests = bracing.compute_needs(f, spans_report, cfg)
+    assert requests == [(mi, 0.0, 5.0, expected, (), None)]
+
+
+def test_compute_needs_activation_trigger_merges_with_static_not_duplicates(cfg):
+    """Dedup rule (SPEC-ARM-FIX fix A): when the activation trigger's
+    target (the member's LARGEST free gap) is the SAME gap the static
+    trigger already produced a request for, the two merge into ONE
+    request (max of the two counts) -- never a second, duplicate tuple
+    for the same (member_idx, z_lo, z_hi) height band (propose_and_place
+    would otherwise place overlapping rungs at different offsets within
+    the identical band)."""
+    f, (mi,) = _column_forest(((0.0, 0.0), 0.0, 20.0))
+    worst_span_mm = 80.0
+    lean = 0.0
+
+    def n_slender(gap):
+        for n in range(51):
+            r = placement._shaft_r_for_L(gap / (n + 1), cfg, lean)
+            if r <= cfg.max_unbraced_shaft_r_mm:
+                return n
+        return 50
+
+    n_static = max(n_slender(20.0), int(20.0 / cfg.brace_free_span_mm))
+    n_activation_raw = max(n_slender(worst_span_mm), int(worst_span_mm / cfg.brace_free_span_mm))
+    n_activation = bracing._rungs_that_fit(20.0, n_activation_raw)
+    expected = max(n_static, n_activation)
+    assert n_static >= 1  # sanity: the static trigger already fires on this gap
+    assert expected > n_static  # sanity: the activation trigger genuinely adds MORE
+
+    spans_report = {mi: dict(worst_span_mm=worst_span_mm, restraint_zs=[],
+                              free_gaps=[(0.0, 20.0)], n_terminals=1)}
+    requests = bracing.compute_needs(f, spans_report, cfg)
+    # exactly ONE entry for this member/gap, merged to the larger count.
+    assert requests == [(mi, 0.0, 20.0, expected, (), None)]
+
+
+def test_compute_needs_activation_trigger_capped_by_gap_fit(cfg):
+    """The activation trigger's rung count is capped by what physically
+    fits in the target gap at >= 1mm spacing (_rungs_that_fit) -- an
+    enormous worst_span_mm must not demand more rungs than a short gap
+    can actually hold."""
+    f, (mi,) = _column_forest(((0.0, 0.0), 0.0, 3.0))
+    spans_report = {mi: dict(worst_span_mm=500.0, restraint_zs=[],
+                              free_gaps=[(0.0, 3.0)], n_terminals=1)}
+    requests = bracing.compute_needs(f, spans_report, cfg)
+    # gap_span=3.0 -> floor(3-1)=2 max rungs fit at >=1mm spacing.
+    assert requests == [(mi, 0.0, 3.0, 2, (), None)]
+
+
+def test_compute_needs_dedup_still_attempts_trigger_not_actually_relieved(cfg):
+    """Verifier H2 regression: the generalized path-level dedup (SPEC-
+    PATHRUNG W6) must not swallow a SECOND trigger's request just
+    because it lands on the SAME target member close in raw z to an
+    earlier trigger's claim -- only when that earlier claim's height
+    ACTUALLY falls inside the second trigger's own winning interval
+    (genuine geometric relief) may it be dropped.
+
+    T (member 0, a long shared trunk z 0..100) sits on BOTH triggers'
+    own worst_span_path. Trigger A (member_idx 1, processed FIRST --
+    dict insertion order) has winning interval (0.0, 20.0); its single
+    rung (n_fit==1) lands at the midpoint z=10.0, which maps onto T
+    (member 0 wins the tie over member 1 by the lower-index rule) --
+    claiming T's z=10.0 slot.
+
+    Trigger B (member_idx 2, processed SECOND) has winning interval
+    (10.5, 13.9) -- deliberately excludes z=10.0 -- whose own midpoint
+    z=12.2 ALSO maps onto T (member 2's own tiny extent [10, 15] loses
+    the same lower-index tie). |12.2 - 10.0| == 2.2 <= brace_ladder_z_mm
+    / 2.0 (4.0mm default), so the two collide on the SAME target/height
+    slot -- but A's claimed height (10.0) sits OUTSIDE B's own winning
+    interval (10.5, 13.9): a rung placed at 10.0 does not restrain B's
+    own offending span at all. The unsound proximity-only dedup drops
+    B's request anyway (member117/member151 shape, verified against
+    p4-landing to fail this assertion); the geometric relief check
+    must still attempt it -- observable as a path-level request whose
+    OWN trigger tag (the request's 6th element) is member_idx 2."""
+    f = tm.Forest()
+    t_idx = f.add_member(_member([0.0, 0.0, 100.0], [0.0, 0.0, 0.0], kind="trunk"))
+    a_idx = f.add_member(_member([0.0, 0.0, 15.0], [0.0, 0.0, 5.0], kind="shoot"))
+    b_idx = f.add_member(_member([0.0, 0.0, 15.0], [0.0, 0.0, 10.0], kind="shoot"))
+    assert abs(12.2 - 10.0) <= cfg.brace_ladder_z_mm / 2.0  # collision, by construction
+    assert not (10.5 <= 10.0 <= 13.9)  # A's claimed height genuinely outside B's own span
+
+    # dict insertion order pins dict-iteration order (Python 3.7+): A
+    # (member_idx 1) is processed before B (member_idx 2), reproducing
+    # the "earlier trigger claims the slot first" mechanism verbatim.
+    spans_report = {
+        a_idx: dict(worst_span_mm=20.0, restraint_zs=[], free_gaps=[(0.0, 20.0)],
+                     n_terminals=1, worst_span_interval=(0.0, 20.0),
+                     worst_span_path=[t_idx, a_idx]),
+        b_idx: dict(worst_span_mm=20.0, restraint_zs=[], free_gaps=[(10.5, 13.9)],
+                     n_terminals=1, worst_span_interval=(10.5, 13.9),
+                     worst_span_path=[t_idx, b_idx]),
+    }
+    requests = bracing.compute_needs(f, spans_report, cfg)
+
+    trigger_tags = [r[-1] for r in requests]
+    assert a_idx in trigger_tags  # the winner's own request, unaffected
+    # the loser's request must still be attempted -- not silently
+    # dropped just because it landed near the winner's slot on the
+    # same target while genuinely outside the winner's relief zone.
+    assert b_idx in trigger_tags
+
+
+def test_compute_needs_activation_trigger_absent_when_neither_condition_holds(cfg):
+    """Control: a worst_span_mm that clears BOTH the r_transient
+    threshold and the brace_free_span_mm cadence must not fire the
+    activation trigger at all."""
+    f, (mi,) = _column_forest(((0.0, 0.0), 0.0, 5.0))
+    worst_span_mm = 5.0  # tiny -- well under brace_free_span_mm (18.0)
+    r_trans = transient.r_transient_mm(worst_span_mm, 0.0, 1, cfg)
+    assert r_trans <= cfg.max_unbraced_shaft_r_mm
+    assert worst_span_mm <= cfg.brace_free_span_mm
+    spans_report = {mi: dict(worst_span_mm=worst_span_mm, restraint_zs=[],
+                              free_gaps=[(0.0, 5.0)], n_terminals=1)}
+    assert bracing.compute_needs(f, spans_report, cfg) == []
+
+
 # ---------------------------------------------------------------- X-pair ----
 def test_xpair_geometry_pin_wider_columns(cfg):
     """Two vertical columns 8mm apart (v3's
     test_wider_trunk_pair_still_gets_crossed_pair, adapted): 2 rods,
-    rise == 8.0 exactly, endpoints on both axes, discounted radius.
+    rise == 8.0 exactly, endpoints on both axes, discounted-but-
+    floor-respecting radius.
 
     Should-fix #3 (cross-link connectivity assertion): columns are sized
     to exactly z+rise (18.0mm) rather than an arbitrarily-tall 40mm --
@@ -134,7 +291,19 @@ def test_xpair_geometry_pin_wider_columns(cfg):
     point (rod1 lands on N at 18, rod2 lands on M at 18), so the whole
     forest (both hosts, both braces) certifies connectivity-clean with
     no filtering: this is the gate that would have caught the r1
-    floating-brace blocker."""
+    floating-brace blocker.
+
+    ORCHESTRATOR RULING (Phase 4 floor-fix): with vertical M and N, both
+    rods' REAL endpoint-to-endpoint length/lean exactly match the
+    d*sqrt(2)/45-degree construction estimate, so each rod's own
+    (undiscounted) r_deflect floor equals r_raw itself here -- and since
+    r_raw > r_raw*0.5**0.25 always, the floor (not the discount) is what
+    sets the radius once it clears cfg.brace_r_mm. This is the exact
+    bug the fix closes: the PRE-fix formula (max(brace_r_mm, r_raw *
+    0.5**0.25)) let the discount alone decide and, for this very
+    fixture, silently placed both rods 0.072mm under their own floor
+    (measured: 0.5 vs 0.572) -- this test's old expectation had that
+    same bug baked into it unnoticed."""
     d = 8.0
     assert d > cfg.twin_single_brace_xy_mm
     plate_z = 0.0
@@ -152,9 +321,10 @@ def test_xpair_geometry_pin_wider_columns(cfg):
     assert len(result["placed"]) == 2
 
     rod_len = d * np.sqrt(2.0)
-    expected_r = max(cfg.brace_r_mm,
-                      placement._shaft_r_for_L(rod_len, cfg, cfg.max_segment_angle_deg)
-                      * 0.5 ** 0.25)
+    r_raw = placement._shaft_r_for_L(rod_len, cfg, cfg.max_segment_angle_deg)
+    # own r_deflect floor == r_raw here (vertical columns: real rod
+    # geometry exactly matches the 45-degree construction estimate).
+    expected_r = max(cfg.brace_r_mm, r_raw, r_raw * 0.5 ** 0.25)
     rods = [f.members[idx] for idx in result["placed"]]
     for rod in rods:
         assert rod.kind == "brace"
@@ -186,6 +356,57 @@ def test_xpair_rods_pass_printability_report(cfg):
                               free_gaps=[(0.0, 20.0)], n_terminals=1)}
     bracing.propose_and_place(f, _far_tree(), plate_z=0.0, cfg=cfg, spans_report=spans_report)
     assert tree_mod.printability_report(f.members, cfg) == []
+
+
+def test_xpair_discount_never_drops_a_rod_below_its_own_deflection_floor(cfg):
+    """ORCHESTRATOR RULING (Phase 4 floor-fix, design-v4.md #9 vs #6): the
+    charter #9 X-pair load-sharing discount (0.5**0.25) may legitimately
+    shrink the shared lateral-restraint duty term, but it must never push
+    a rod below ITS OWN r_deflect floor (design-v4.md #6) -- that floor
+    is each rod's individual survivability under print peel, which
+    pairing cannot share (each rod is peeled alone). Reproduces the
+    real-world table_mesh failure class (brace members 152/153: two
+    mirrored X-pair rods with DIFFERENT own floors, 0.6765mm / 0.6508mm,
+    because their hosts lean differently) at unit scale: N leans while M
+    stays vertical, so the two rods' real endpoint-to-endpoint length and
+    lean diverge from the d*sqrt(2)/45-degree construction estimate
+    r_raw uses, and diverge from EACH OTHER -- exactly the asymmetry
+    that must be caught per-rod, not once for the pair.
+
+    Failing pre-fix (measured): both rods placed at the same discounted
+    radius (~0.558mm) while their own floors (recomputed exactly as the
+    engine's own load/deflection gate -- test_cco.py's _own_floor_mm --
+    would) are 0.7196mm and 0.6639mm respectively: both below floor."""
+    d = 8.0
+    assert d > cfg.twin_single_brace_xy_mm
+    plate_z = 0.0
+    lean_shift = 6.0
+    f = tm.Forest()
+    mi = f.add_member(_member([0.0, 0.0, 0.0], [0.0, 0.0, 40.0]))
+    ni = f.add_member(_member([d, 0.0, 0.0], [d + lean_shift, 0.0, 40.0]))
+    spans_report = {mi: dict(worst_span_mm=20.0, restraint_zs=[],
+                              free_gaps=[(0.0, 20.0)], n_terminals=1)}
+    surface_tree = _far_tree()
+
+    result = bracing.propose_and_place(f, surface_tree, plate_z=plate_z, cfg=cfg,
+                                        spans_report=spans_report)
+    assert result["by_kind"] == {"brace": 2}
+    rods = [f.members[idx] for idx in result["placed"]]
+    assert len(rods) == 2
+
+    # sanity: the two rods' own floors genuinely differ (leaning-host
+    # asymmetry, the real bug's own shape) -- else this fixture isn't
+    # exercising the case at all.
+    floors = []
+    for rod in rods:
+        L = float(np.linalg.norm(np.asarray(rod.p1, float) - np.asarray(rod.p0, float)))
+        lean = cco._lean_deg(rod.p0, rod.p1)
+        floors.append(placement._shaft_r_for_L(L, cfg, lean))
+    assert floors[0] != pytest.approx(floors[1])
+
+    for rod, floor in zip(rods, floors):
+        r_have = max(rod.r0, rod.r1)
+        assert r_have >= floor - 1e-6, (r_have, floor)
 
 
 # ----------------------------------------------------------------- twin -----
@@ -348,6 +569,7 @@ def test_twin_even_rung_placed_when_M_covers_z_but_not_climb(cfg):
 
     members = joints.collect_members(list(f.members))
     assert verify.connectivity_report(members, plate_z, cfg, surface_tree=surface_tree) == []
+    assert tm.printability_report(list(f.members), cfg) == []
 
 
 # ------------------------------------------------------------- model rung ---
@@ -473,6 +695,83 @@ def test_model_rung_retries_next_nearest_anchor_when_nearest_too_short(cfg):
     assert np.allclose(rung.p1, [2.0, 0.0, 9.3])
     length = float(np.linalg.norm(rung.p1 - rung.p0))
     assert length == pytest.approx(2.0)
+    assert tm.printability_report(list(f.members), local_cfg) == []
+
+
+# ------------------------------------------------- Phase 4e (SPEC-PATHRUNG W1) --
+def test_cross_link_rejected_on_leaning_host_cone_violation(cfg):
+    """Treant build:200 forensics: a brace rod at 69.8deg (limit 60) --
+    rise=d is evaluated at height z (v3.6's hardcoded 45-degree
+    construction), but on a LEANING host the actual endpoint-to-endpoint
+    drift can exceed d(z). M is a plumb column; N leans hard enough
+    (xy grows 1.0mm per 1mm of z) that the ONLY cross-link candidate's
+    rod, read on N's REAL axis at z+rise, drifts at 2.0 (63.4deg) --
+    over tan(branch_angle_deg=60deg)=1.732 -- even though the
+    CONSTRUCTION itself is the textbook v3.6 45-degree climb.
+
+    First, prove the fixture is a genuine cone violation independent of
+    bracing's own placement code (the SAME tree.printability_report the
+    final gate uses, called directly on the naive/unrejected rod
+    geometry). Then confirm the fix: no other cross-link neighbor and no
+    reachable model-surface anchor exist here, so the honest outcome is
+    unplaceable (Design freedom, recorded: single-pass reject, not an
+    iterative rise recompute) -- never a floating brace that only the
+    FINAL gate would have caught."""
+    f = tm.Forest()
+    mi = f.add_member(_member([0.0, 0.0, 0.0], [0.0, 0.0, 20.0]))
+    slope = 1.0  # mm of xy drift per mm of z -- an aggressively leaning host
+    ni = f.add_member(_member([1.0, 0.0, -5.0], [1.0 + slope * 25.0, 0.0, 20.0]))
+    z = 5.0
+
+    cands = bracing._find_cross_link_candidates(f, mi, z, cfg, k=0)
+    assert len(cands) == 1
+    d, n_found = cands[0]
+    assert n_found == ni
+    rods = bracing._cross_link_rods(f, mi, n_found, z, d, k=0, cfg=cfg)
+    assert len(rods) == 2  # d > twin_single_brace_xy_mm -> X-pair
+    naive_members = [tm.Member(p0=p0, p1=p1, r0=r, r1=r, kind="brace",
+                                owner=("brace", i)) for i, (p0, p1, r) in enumerate(rods)]
+    naive_violations = tm.printability_report(naive_members, cfg)
+    assert len(naive_violations) >= 1  # the fixture genuinely violates the cone
+
+    counters = {"brace": 0, "model_rung": 0}
+    n_members_before = len(f.members)
+    result = bracing._place_one_rung(f, _far_tree(), cfg, mi, z, 0, counters)
+
+    assert result is None  # honest unplaceable -- rejected, not silently certified
+    assert len(f.members) == n_members_before
+    assert f.braces == []
+    assert f.dirty_members() == []
+    assert tm.printability_report(list(f.members), cfg) == []
+
+
+def test_leaning_host_cone_violation_end_to_end_via_propose_and_place(cfg):
+    """Integration-level repro of the same defect class through the
+    public propose_and_place entry point (SPEC-PATHRUNG W1's own
+    acceptance line: "printability_report == [] asserted over every
+    placement test's final forest"). free_gaps=[(0,30)] forces the
+    static trigger to fire (n_slender(30mm) == 1, pinned independently
+    in this file's other compute_needs tests) at z=15. N leans at
+    slope=1.0 (xy grows 1mm per mm of z) -- N's OWN printability is
+    clean (its own drift_rate == slope == 1.0, well under
+    tan(branch_angle_deg=60deg)=1.732, a legitimate pre-existing host,
+    not a pre-broken fixture) but the cross-link ROD read off N's real
+    axis at z+rise drifts at (1 + slope) == 2.0 (the "+1" is the rod's
+    own unavoidable 45-degree construction term, rise == d always) --
+    over the SAME 1.732 limit."""
+    f = tm.Forest()
+    mi = f.add_member(_member([0.0, 0.0, 0.0], [0.0, 0.0, 30.0]))
+    slope = 1.0
+    f.add_member(_member([2.0, 0.0, 10.0], [2.0 + slope * 20.0, 0.0, 30.0]))
+    surface_tree = _far_tree()
+    spans_report = {mi: dict(worst_span_mm=0.0, restraint_zs=[],
+                              free_gaps=[(0.0, 30.0)], n_terminals=1)}
+    result = bracing.propose_and_place(f, surface_tree, plate_z=0.0, cfg=cfg,
+                                        spans_report=spans_report)
+    assert result["placed"] == []
+    assert result["rungs_unplaceable"] == 1  # the ONE candidate is a cone violation
+    assert f.dirty_members() == []
+    assert tm.printability_report(list(f.members), cfg) == []
 
 
 # ---------------------------------------------------------- unplaceable -----
@@ -516,6 +815,7 @@ def test_all_placed_braces_certificates_valid(cfg):
                                         spans_report=spans_report)
     assert result["rungs_placed"] == 1
     assert f.dirty_members() == []
+    assert tm.printability_report(list(f.members), cfg) == []
 
 
 # ------------------------------------------------------------ determinism --
@@ -543,6 +843,83 @@ def test_determinism_identical_inputs_identical_placement(cfg):
         assert m1.r0 == m2.r0
         assert m1.r1 == m2.r1
         assert m1.kind == m2.kind
+    assert tm.printability_report(list(f1.members), cfg) == []
+    assert tm.printability_report(list(f2.members), cfg) == []
+
+
+# ------------------------------------------------- Phase 4e (SPEC-PATHRUNG W6) --
+def test_path_level_rung_places_upstream_when_own_gap_is_dead_congested(cfg):
+    """Regression fixture reproducing the member-150 shape from the
+    orchestrator's own forensics (SPEC-PATHRUNG): a member (A, "150") is
+    the BASE of an honest, activation-lagged cantilever -- its own
+    worst_span_mm (22.28mm) is dominated by an interval that starts AT
+    its own z_min (own-gap-shaped span, `max(z_min, R) == z_min`), but A's
+    own free gap [-2.0, 8.4] is a congested band with NO clearable
+    restraint anywhere in it (here: no cross-link neighbor exists on A's
+    own axis, and the only reachable model-surface anchor sits far
+    outside A's own [-2.0, 8.4] z-window's +-0.75mm anchor tolerance).
+    The offending span reaches into B ("upstream", open air, z 8.4->25):
+    a rung mapped onto B via worst_span_path cuts A's arm and clears.
+
+    Two spans_report shapes against the IDENTICAL forest/surface_tree:
+      - `spans_new` carries worst_span_interval/worst_span_path (Phase 4e
+        W6, what transient.transient_report now actually produces) ->
+        compute_needs routes the rung onto B, propose_and_place places it
+        (model_rung fallback, B sits in open air near the one reachable
+        surface point) -- rungs_placed == 1, rungs_unplaceable == 0.
+      - `spans_old` is the pre-W6 shape (no path fields -- literally what
+        p4-armfix's transient_report emits, and what every OTHER test in
+        this file already hand-builds) -> compute_needs falls back to
+        targeting A's own gap exclusively -> no candidate anywhere near
+        that height -> rungs_unplaceable == 1, honestly. This is the
+        FAILS-on-p4-armfix branch, reproduced in-repo (not just asserted
+        by reference to the old commit) so this one test pins both the
+        regression and the fix."""
+    def build():
+        f = tm.Forest()
+        a_idx = f.add_member(_member([0.0, 0.0, 8.4], [0.0, 0.0, -2.0], kind="trunk"))
+        b_idx = f.add_member(_member([0.0, 0.0, 25.0], [0.0, 0.0, 8.4], kind="shoot"))
+        f.set_parent(b_idx, a_idx)
+        return f, a_idx, b_idx
+
+    lo, hi = -2.0, 20.28  # honest 22.28mm activation-lagged span (SPEC-PATHRUNG)
+    worst_span_mm = hi - lo
+    assert worst_span_mm == pytest.approx(22.28)
+
+    # The only reachable model-surface anchor in this fixture: within
+    # model_brace_max_len_mm of B's axis at z=9.14 (an interior point of
+    # the winning interval, open air) and >0.75mm in z from anywhere
+    # inside A's own [-2.0, 8.4] gap -- A genuinely has nothing to clear
+    # against, congested by construction, not by accident.
+    surface_tree = cKDTree(np.array([[3.0, 0.0, 9.14]]))
+    local_cfg = config.SupportConfig(standoff_mm=0.05)  # isolates placement logic,
+    # same pre-existing embed_end="p1" clearance-inset tension documented
+    # by test_model_rung_lone_column_near_surface_wall above.
+
+    f_new, a_new, b_new = build()
+    spans_new = {a_new: dict(worst_span_mm=worst_span_mm, restraint_zs=[],
+                              free_gaps=[(-2.0, 8.4)], n_terminals=1,
+                              worst_span_interval=(lo, hi),
+                              worst_span_path=[a_new, b_new])}
+    result_new = bracing.propose_and_place(f_new, surface_tree, plate_z=-2.0,
+                                            cfg=local_cfg, spans_report=spans_new)
+    assert result_new["rungs_placed"] == 1
+    assert result_new["rungs_unplaceable"] == 0
+    assert result_new["by_kind"] == {"model_rung": 1}
+    placed = f_new.members[result_new["placed"][0]]
+    # placed ON the upstream member (B), not A -- the whole point.
+    assert placed.p0[2] == pytest.approx(9.14)
+    assert 8.4 - 1e-6 <= float(placed.p0[2]) <= 25.0 + 1e-6  # within B's own extent
+    assert tm.printability_report(f_new.members, local_cfg) == []
+
+    f_old, a_old, _b_old = build()
+    spans_old = {a_old: dict(worst_span_mm=worst_span_mm, restraint_zs=[],
+                              free_gaps=[(-2.0, 8.4)], n_terminals=1)}
+    result_old = bracing.propose_and_place(f_old, surface_tree, plate_z=-2.0,
+                                            cfg=local_cfg, spans_report=spans_old)
+    assert result_old["rungs_placed"] == 0
+    assert result_old["rungs_unplaceable"] == 1
+    assert result_old["placed"] == []
 
 
 # ---------------------------------------------------------- restraint dedup --
@@ -580,3 +957,261 @@ def test_rung_not_skipped_when_restraint_far(cfg):
                                         spans_report=spans_report)
     assert result["rungs_placed"] == 1
     assert result["placed"] != []
+
+
+# ------------------------------------------------ dirty-member self-poisoning --
+def test_try_place_rods_scopes_rejection_to_own_violations_not_preexisting_dirty(cfg):
+    """Regression pin (SPEC-151-SCOPING, the table unblocker): a
+    candidate's placement is judged only on its OWN geometry, independent
+    of any other member's pre-existing certificate state.
+
+    `dirty_idx` is already dirty (freshly added, never certified) AND
+    genuinely, permanently violates clearance -- an obstacle sits right on
+    its own axis, a defect nothing in this test ever fixes. The candidate
+    rod lives far away and is geometrically clean on its own (0 violations
+    in isolation).
+
+    On the base branch, forest.revalidate is ONE batched re-check over
+    EVERY currently-dirty member -- not scoped to the just-added
+    candidate. Once the candidate is added, dirty_idx is STILL dirty (its
+    own defect never got fixed), so its pre-existing violation rides along
+    in the same revalidate() call the candidate is judged by, and
+    `if violations: reject` (bracing._try_place_rods, pre-fix) kills the
+    candidate too -- this is the fails-first proof of the dirty-member
+    self-poisoning bug SPEC-151-SCOPING diagnoses (member 151's own debt
+    poisoning every other candidate's revalidate() call on table_mesh).
+    On the fixed code (rejection scoped to violations NOT in the pre-add
+    dirty snapshot) the candidate places."""
+    f = tm.Forest()
+    dirty_idx = f.add_member(_member([0.0, 0.0, 0.0], [0.0, 0.0, 10.0], kind="shoot"))
+    # Obstacle sits right on dirty_idx's own axis (clearance is deeply
+    # negative there) -- a real, permanent defect that revalidate() keeps
+    # re-reporting on every batched call since dirty_idx's own geometry
+    # never changes in this test.
+    surface_tree = cKDTree(np.array([[0.03, 0.0, 5.0]]))
+    pre_violations = f.revalidate(surface_tree, cfg)
+    assert pre_violations and pre_violations[0]["member_idx"] == dirty_idx
+    assert dirty_idx in f.dirty_members(), "own defect persists -- never certified"
+
+    # Candidate rod: a real 45-degree-ish diagonal (passes printability
+    # cleanly, unlike a bare horizontal segment) sitting far away in xy
+    # from the lone obstacle point above -- 0 violations of its own.
+    rods = [(np.array([100.0, 0.0, 0.0]), np.array([105.0, 0.0, 5.0]), 0.5)]
+    counters = {"brace": 0, "model_rung": 0}
+    placed = bracing._try_place_rods(f, surface_tree, cfg, rods, "brace", None, counters)
+    assert placed is not None, (
+        "candidate's own geometry is clean; it must place even though an "
+        "UNRELATED member (dirty_idx) is already dirty and violating")
+
+
+def test_try_place_rods_still_rejects_candidates_own_violation_when_other_dirty(cfg):
+    """The inverse guard (SPEC-151-SCOPING): scoping rejection to the
+    candidate's own violations must not become a blanket suppression -- a
+    candidate whose OWN geometry clips an obstacle is rejected exactly as
+    before, even while an unrelated member is ALSO dirty and violating (no
+    over-correction, the filter cannot hide a genuinely new problem)."""
+    f = tm.Forest()
+    dirty_idx = f.add_member(_member([0.0, 0.0, 0.0], [0.0, 0.0, 10.0], kind="shoot"))
+    surface_tree = cKDTree(np.array([
+        [0.03, 0.0, 5.0],     # sits on dirty_idx's own axis -- its own permanent defect
+        [102.5, 0.03, 2.5],   # sits on the CANDIDATE's own axis (its own midpoint) --
+    ]))                       # its own real, freshly-introduced defect
+    pre_violations = f.revalidate(surface_tree, cfg)
+    assert pre_violations and pre_violations[0]["member_idx"] == dirty_idx
+
+    rods = [(np.array([100.0, 0.0, 0.0]), np.array([105.0, 0.0, 5.0]), 0.5)]
+    counters = {"brace": 0, "model_rung": 0}
+    placed = bracing._try_place_rods(f, surface_tree, cfg, rods, "brace", None, counters)
+    assert placed is None, (
+        "candidate's own geometry violates clearance; it must still be "
+        "rejected on its own defect, independent of the unrelated dirty member")
+
+
+# ------------------------------------------- SPEC-151-SCOPING round 2 -------
+# Shared worst_span_interval, second trigger silently dropped (the table
+# unblocker, layer 2): round 1 (6fb7d6e) fixed dirty-member self-poisoning
+# but left a SECOND, distinct defect traced verbatim by round 1 itself --
+# member 117/member 152's own real table_mesh shape, reproduced here as a
+# minimal synthetic fixture per orchestrator authorization.
+
+def test_compute_needs_shared_interval_merges_triggers_not_drops(cfg):
+    """THE INVARIANT (module docstring): a member that triggers in the
+    current spans_report is by definition not relieved -- dedup may merge
+    PLACEMENTS, it must never skip VERIFICATION. `a_idx` and `b_idx` share
+    the IDENTICAL worst_span_interval (0.0, 20.0) and both map (via
+    _map_height_to_path_member's lower-index tie-break) onto the SAME
+    target, `t_idx` -- a wide [0, 30] member covering the shared candidate
+    height for both.
+
+    On 6fb7d6e (pre-round-2), the pre-existing b7222de dedup rule ("a
+    colliding claim inside THIS trigger's own interval means genuinely
+    relieved") treats a_idx's own claim as proof b_idx needs nothing --
+    b_idx is silently dropped, never appearing anywhere in `requests`.
+    FAILS there (trigger_repr == a_idx alone, a bare int). Fixed code
+    MERGES instead of dropping: ONE physical request, carrying BOTH
+    triggers as a sorted tuple."""
+    f = tm.Forest()
+    t_idx = f.add_member(_member([500.0, 0.0, 30.0], [500.0, 0.0, 0.0], kind="trunk"))
+    a_idx = f.add_member(_member([0.0, 0.0, 20.0], [0.0, 0.0, 0.0], kind="trunk"))
+    b_idx = f.add_member(_member([100.0, 0.0, 20.0], [100.0, 0.0, 0.0], kind="trunk"))
+    path = [t_idx, a_idx, b_idx]
+
+    # free_gaps deliberately tiny (no static trigger of their own) so ONLY
+    # the activation trigger (Pass 2, path-mapped -- the merge-relevant
+    # code) fires for a_idx/b_idx; isolates this from the unrelated
+    # static-collision case, unchanged since b7222de (see compute_needs's
+    # own docstring, "Path-level dedup" paragraph).
+    spans_report = {
+        a_idx: dict(worst_span_mm=20.0, restraint_zs=[], free_gaps=[(0.0, 1.0)],
+                     n_terminals=1, worst_span_interval=(0.0, 20.0), worst_span_path=path),
+        b_idx: dict(worst_span_mm=20.0, restraint_zs=[], free_gaps=[(0.0, 1.0)],
+                     n_terminals=1, worst_span_interval=(0.0, 20.0), worst_span_path=path),
+    }
+    requests = bracing.compute_needs(f, spans_report, cfg)
+    path_mapped = [r for r in requests if r[1] == r[2]]  # z_lo == z_hi
+    assert len(path_mapped) == 1, "both triggers merge into ONE physical request"
+    target, z, z_hi, n_rungs, fallbacks, trigger_repr = path_mapped[0]
+    assert target == t_idx
+    assert z == z_hi == pytest.approx(10.0)
+    assert n_rungs == 1
+    assert isinstance(trigger_repr, tuple), (
+        "6fb7d6e leaves this a bare int (a_idx alone) -- b_idx dropped")
+    assert trigger_repr == (a_idx, b_idx)  # sorted, deterministic (see below)
+    assert any(host == b_idx for _z, host in fallbacks)
+
+
+def test_propose_and_place_stacks_until_every_carried_trigger_relieved(cfg):
+    """Integration-level proof of the SAME defect through the public
+    entry point (TDD (a)): a REAL, minimal forest where ONE candidate
+    (a model rung near `a_idx`'s own axis) genuinely relieves `a_idx`
+    (confirmed via a fresh, real transient.transient_report call after
+    placement) but does nothing at all for `b_idx` (an unrelated,
+    disconnected column -- the real-world "different z_min anchor, arm
+    shrinks less from the same rung" shape, here made unambiguous:
+    `b_idx` shares NOTHING with `a_idx` topologically, so a rung on
+    `a_idx` provably cannot touch `b_idx`'s own real worst_span_mm at
+    all). `t_idx` sits far away (x=500) and is never reachable -- its own
+    primary candidate always fails, forcing every real placement to come
+    from the merged fallback pool (a_idx's and b_idx's own path
+    candidates, folded together by compute_needs's round-2 fix).
+
+    On 6fb7d6e: only a_idx survives as a trigger, propose_and_place stops
+    stacking the instant a_idx is relieved -- exactly ONE model_rung
+    placed, b_idx's real worst_span_mm left untouched at its full 20mm
+    forever (verified directly against the pre-fix module below). Fixed
+    code keeps stacking (the carried-trigger pending set) until BOTH are
+    relieved -- TWO model_rungs, one per host, both members' real
+    worst_span_mm shrunk."""
+    local_cfg = config.SupportConfig(standoff_mm=0.05)
+    f = tm.Forest()
+    t_idx = f.add_member(_member([500.0, 0.0, 30.0], [500.0, 0.0, 0.0], kind="trunk"))
+    a_idx = f.add_member(_member([0.0, 0.0, 20.0], [0.0, 0.0, 0.0], kind="trunk"))
+    sa_idx = f.add_member(_member([0.0, 0.0, 20.001], [0.0, 0.0, 20.0], kind="stub"))
+    f.set_parent(sa_idx, a_idx)
+    b_idx = f.add_member(_member([100.0, 0.0, 20.0], [100.0, 0.0, 0.0], kind="trunk"))
+    sb_idx = f.add_member(_member([100.0, 0.0, 20.001], [100.0, 0.0, 20.0], kind="stub"))
+    f.set_parent(sb_idx, b_idx)
+
+    # One reachable surface anchor near EACH real column's own axis at
+    # z=10 (the formula-ideal midpoint of the shared (0, 20) interval) --
+    # nothing reachable anywhere near t_idx (x=500).
+    surface_tree = cKDTree(np.array([[3.0, 0.0, 10.0], [103.0, 0.0, 10.0]]))
+    path = [t_idx, a_idx, b_idx]
+    spans_report = {
+        a_idx: dict(worst_span_mm=20.0, restraint_zs=[], free_gaps=[(0.0, 1.0)],
+                     n_terminals=1, worst_span_interval=(0.0, 20.0), worst_span_path=path),
+        b_idx: dict(worst_span_mm=20.0, restraint_zs=[], free_gaps=[(0.0, 1.0)],
+                     n_terminals=1, worst_span_interval=(0.0, 20.0), worst_span_path=path),
+    }
+
+    result = bracing.propose_and_place(f, surface_tree, plate_z=0.0, cfg=local_cfg,
+                                        spans_report=spans_report)
+    assert result["rungs_requested"] == 1  # ONE logical request (merged)
+    assert result["rungs_placed"] == 1     # ... but it took stacking to satisfy it
+    assert result["rungs_unplaceable"] == 0
+    assert result["by_kind"] == {"model_rung": 2}
+    assert len(result["placed"]) == 2
+    hosts = sorted(round(float(f.members[idx].p0[0])) for idx in result["placed"])
+    assert hosts == [0, 100]  # one rung rooted on EACH real column
+    assert f.dirty_members() == []
+
+    fresh = transient.transient_report(f, 0.0, local_cfg)
+    assert fresh[a_idx]["worst_span_mm"] < 20.0
+    assert fresh[b_idx]["worst_span_mm"] < 20.0, (
+        "b_idx must be genuinely relieved too, not silently left at its "
+        "full unrestrained span the way 6fb7d6e leaves it")
+
+
+def test_propose_and_place_honest_unplaceable_when_no_candidate_clears_for_either(cfg):
+    """TDD (b), the honest path: when NEITHER carried trigger has any
+    viable candidate anywhere (no cross-link neighbor, no reachable
+    surface point for any of the merged request's candidates), the round-
+    2 stacking/pending machinery must still terminate cleanly -- honestly
+    unplaceable, no crash, no corruption, no false claim of relief for
+    either trigger. (The downstream "clearance-dirty member" crash this
+    workstream exists to make reachable again lives in engine.py's own
+    fixed-point assertion, out of this module's ownership -- this test
+    pins bracing.py's OWN honest half of that contract: it must not swallow
+    or paper over the failure itself.)"""
+    local_cfg = config.SupportConfig(standoff_mm=0.05)
+    f = tm.Forest()
+    t_idx = f.add_member(_member([500.0, 0.0, 30.0], [500.0, 0.0, 0.0], kind="trunk"))
+    a_idx = f.add_member(_member([0.0, 0.0, 20.0], [0.0, 0.0, 0.0], kind="trunk"))
+    sa_idx = f.add_member(_member([0.0, 0.0, 20.001], [0.0, 0.0, 20.0], kind="stub"))
+    f.set_parent(sa_idx, a_idx)
+    b_idx = f.add_member(_member([100.0, 0.0, 20.0], [100.0, 0.0, 0.0], kind="trunk"))
+    sb_idx = f.add_member(_member([100.0, 0.0, 20.001], [100.0, 0.0, 20.0], kind="stub"))
+    f.set_parent(sb_idx, b_idx)
+
+    surface_tree = _far_tree()
+    pre_violations = f.revalidate(surface_tree, local_cfg)
+    assert pre_violations == []
+    n_members_before = len(f.members)
+
+    path = [t_idx, a_idx, b_idx]
+    spans_report = {
+        a_idx: dict(worst_span_mm=20.0, restraint_zs=[], free_gaps=[(0.0, 1.0)],
+                     n_terminals=1, worst_span_interval=(0.0, 20.0), worst_span_path=path),
+        b_idx: dict(worst_span_mm=20.0, restraint_zs=[], free_gaps=[(0.0, 1.0)],
+                     n_terminals=1, worst_span_interval=(0.0, 20.0), worst_span_path=path),
+    }
+    result = bracing.propose_and_place(f, surface_tree, plate_z=0.0, cfg=local_cfg,
+                                        spans_report=spans_report)
+    assert result["placed"] == []
+    assert result["rungs_placed"] == 0
+    assert result["rungs_unplaceable"] == 1
+    assert len(f.members) == n_members_before
+    assert f.braces == []
+    assert f.dirty_members() == []
+
+
+def test_compute_needs_merged_trigger_order_deterministic(cfg):
+    """TDD (c): the carried-trigger tuple's ordering must not depend on
+    spans_report's own dict-iteration order (which of a_idx/b_idx happens
+    to be processed -- and therefore become the physical request's
+    PRIMARY -- first). Two builds, identical forest/geometry, spans_report
+    keys inserted in opposite order: the resulting merged request (target,
+    z, trigger tuple, fallbacks) must be bit-identical either way."""
+    def build():
+        f = tm.Forest()
+        t_idx = f.add_member(_member([500.0, 0.0, 30.0], [500.0, 0.0, 0.0], kind="trunk"))
+        a_idx = f.add_member(_member([0.0, 0.0, 20.0], [0.0, 0.0, 0.0], kind="trunk"))
+        b_idx = f.add_member(_member([100.0, 0.0, 20.0], [100.0, 0.0, 0.0], kind="trunk"))
+        return f, [t_idx, a_idx, b_idx]
+
+    def info(path):
+        return dict(worst_span_mm=20.0, restraint_zs=[], free_gaps=[(0.0, 1.0)],
+                    n_terminals=1, worst_span_interval=(0.0, 20.0), worst_span_path=path)
+
+    f1, (t1, a1, b1) = build()
+    sr_a_first = {a1: info([t1, a1, b1]), b1: info([t1, a1, b1])}
+    r1 = [r for r in bracing.compute_needs(f1, sr_a_first, cfg) if r[1] == r[2]]
+
+    f2, (t2, a2, b2) = build()
+    assert (t1, a1, b1) == (t2, a2, b2)  # identical forests -> identical indices
+    sr_b_first = {b2: info([t2, a2, b2]), a2: info([t2, a2, b2])}
+    r2 = [r for r in bracing.compute_needs(f2, sr_b_first, cfg) if r[1] == r[2]]
+
+    assert len(r1) == len(r2) == 1
+    assert r1[0] == r2[0]
+    assert r1[0][-1] == (a1, b1)

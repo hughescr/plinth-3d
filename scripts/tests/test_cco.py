@@ -328,3 +328,94 @@ def test_engine_every_member_meets_its_own_load_and_deflection_floor(fixture_nam
                 L=round(float(np.linalg.norm(m.p1 - m.p0)), 3),
                 lean_deg=round(cco._lean_deg(m.p0, m.p1), 2)))
     assert violations == [], violations
+
+
+# ---------------------------------------------- Phase 4c braced-cost pricing --
+def test_brace_estimate_ml_pinned_formula(cfg):
+    """SPEC-INTEGRATION #1: brace_estimate_ml pinned against its own
+    documented formula (independently re-derived here, not just calling
+    the function back at itself)."""
+    L2 = 55.0
+    d = cfg.brace_neighbor_max_xy_mm / 2.0
+    rod_len = d * (2.0 ** 0.5)
+    r_raw = placement._shaft_r_for_L(rod_len, cfg, cfg.max_segment_angle_deg)
+    rod_r = max(cfg.brace_r_mm, r_raw * 0.5 ** 0.25)
+    n = int(L2 / cfg.brace_free_span_mm)
+    expected = n * (2 * np.pi * rod_r ** 2 * rod_len / 1000.0)
+    assert n >= 1  # sanity: this L2 actually exercises a non-trivial rung count
+    assert cco.brace_estimate_ml(L2, cfg) == pytest.approx(expected)
+
+
+def test_brace_estimate_ml_zero_under_one_free_span(cfg):
+    """A column shorter than one brace_free_span_mm needs no rungs by this
+    estimate (n = floor(L2/brace_free_span_mm) == 0)."""
+    assert cco.brace_estimate_ml(cfg.brace_free_span_mm - 1.0, cfg) == 0.0
+
+
+def test_plate_descent_price_below_honest_volume_and_matches_formula(cfg):
+    """SPEC-INTEGRATION #1's core pin: a tall plate-descent candidate's
+    RETURNED price (a) equals diag_vol + column_vol_priced +
+    brace_estimate_ml exactly, (b) is strictly less than the honest BUILT
+    volume (the whole point of pricing the column as if it will be
+    braced), and (c) the honest BUILT member's own r0/r1 are completely
+    unaffected by pricing -- a regression pin on cco.py's #1 charter rule
+    ("construction still builds true members")."""
+    f = tm.Forest()
+    se = np.array([0.0, 0.0, 40.0])
+    plate_z = 0.0
+    r_i = cfg.min_shoot_r_mm
+    carried_i = 0.0
+    stub = tm.Member(p0=se - np.array([0.0, 0.0, 0.5]), p1=se, r0=r_i, r1=r_i,
+                      kind="stub", owner=("contact", 0), embed_end="p0")
+    stub_idx = f.add_member(stub)
+
+    builders = list(cco._plate_descent_builders(f, 0, stub_idx, se, r_i, carried_i,
+                                                  plate_z, cfg))
+    build_fn = builders[0]  # straight-down candidate: zero-length diagonal, one column
+    price = build_fn()
+
+    new_members = [m for i, m in enumerate(f.members) if i != stub_idx]
+    assert len(new_members) == 1  # straight-down: no diagonal, column only
+    col = new_members[0]
+    honest_vol = tm.volume_report([col], [])["member_ml"]
+
+    L2 = se[2] - plate_z
+    assert L2 > cfg.brace_free_span_mm  # tall enough that the discount actually engages
+
+    r_load = max(cco._r_tension_mm(carried_i, cfg), cfg.min_trunk_r_mm)
+    r_col_honest = max(r_load, placement._shaft_r_for_L(L2, cfg, 0.0), cfg.min_trunk_r_mm)
+    assert col.r0 == pytest.approx(r_col_honest)  # honest sizing: full-length solve, untouched
+    assert col.r1 == pytest.approx(r_col_honest)
+
+    r_col_priced = max(r_load,
+                        placement._shaft_r_for_L(min(L2, cfg.brace_free_span_mm), cfg, 0.0),
+                        cfg.min_trunk_r_mm)
+    expected_price = (cco._member_vol_ml(col.p0, col.p1, r_col_priced, r_col_priced)
+                       + cco.brace_estimate_ml(L2, cfg))
+    assert price == pytest.approx(expected_price)
+    assert price < honest_vol, (
+        f"priced candidate ({price:.4f}ml) must rank cheaper than its own honest "
+        f"built volume ({honest_vol:.4f}ml) -- otherwise pricing has no effect")
+
+
+def test_plate_descent_price_equals_honest_volume_for_short_column(cfg):
+    """A column shorter than brace_free_span_mm never needs bracing --
+    min(L2, brace_free_span_mm) == L2 and brace_estimate_ml == 0, so the
+    priced return value collapses to exactly the honest built volume
+    (no phantom discount for spans that were never going to be braced)."""
+    f = tm.Forest()
+    se = np.array([0.0, 0.0, 5.0])
+    plate_z = 0.0
+    r_i = cfg.min_shoot_r_mm
+    carried_i = 0.0
+    stub = tm.Member(p0=se - np.array([0.0, 0.0, 0.5]), p1=se, r0=r_i, r1=r_i,
+                      kind="stub", owner=("contact", 0), embed_end="p0")
+    stub_idx = f.add_member(stub)
+
+    builders = list(cco._plate_descent_builders(f, 0, stub_idx, se, r_i, carried_i,
+                                                  plate_z, cfg))
+    price = builders[0]()
+    col = next(m for i, m in enumerate(f.members) if i != stub_idx)
+    honest_vol = tm.volume_report([col], [])["member_ml"]
+    assert (se[2] - plate_z) < cfg.brace_free_span_mm
+    assert price == pytest.approx(honest_vol)

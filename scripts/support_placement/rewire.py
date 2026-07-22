@@ -41,17 +41,66 @@ consumer" pattern already established for honestly-unrouted stubs.
 
 No RNG: sweep order is a stable sort (volume, kind, index tiebreak);
 re-running optimize on an identical forest is bit-identical.
+
+Brace-awareness (Phase 4c, SPEC-INTEGRATION #2, "the stale-brace-
+impossibility invariant"): once bracing.propose_and_place has run
+(engine.brace_and_size calls rewire.optimize a SECOND time against
+braced reality), some live members carry a brace attached to their own
+axis (transient.derive_brace_attachments -- geometric, host indices
+with >=1 live brace endpoint within 0.25mm of that host's axis segment,
+computed here once per sweep, see optimize()). None of the three move
+types may move, retire, or split a braced host's geometry:
+  - reattach (junction-child case): the detached subtree's OWN geometry
+    never moves (only its topology/parent pointer does -- see
+    _try_subtree_reattach's docstring), so a braced host anywhere INSIDE
+    the subtree is fine; the risk is the bifurcation CANDIDATE the
+    subtree might land on -- splitting a host moves its axis (see
+    cco._make_bifurcation_builder), so braced hosts (and braces
+    themselves) are excluded from that candidate set.
+  - reattach (root-reanchor case): root_idx itself retires (mark_dead)
+    on acceptance -- if root_idx is a braced host, retiring it strands
+    that brace, so this move is refused outright when root_idx is one.
+  - junction slide: mutates the junction's own p0 AND every child's p1 --
+    refused if the junction or any child is a braced host.
+  - twig prune: folds m_idx into its surviving child, moving the
+    child's p1 -- refused if either m_idx or the child is a braced host.
+Braces are themselves never move candidates (_sweep_order skips
+forest.braces entirely) and are excluded from every bifurcation
+candidate set the same way as braced hosts (cco._make_bifurcation_
+builder splits whatever host it's given; a brace is a graph edge, not a
+thing with its own children/Murray role to preserve, so it must never
+be chosen as one). `_live_member_indices` needs no change: braces ARE
+live printed volume (tree.Forest.braces' own docstring), already
+included by that filter (brace kind != "stub"). optimize() ends with an
+independent geometric ASSERT (crash, not a warning) that no live brace
+was left stale by any accepted move -- the invariant the rules above
+exist to make geometrically impossible, checked rather than trusted.
 """
 import time
 
 import numpy as np
 
-from . import cco, perception, placement, tree
+from . import cco, perception, placement, tree, transient
 
 TWIG_MERGE_LEN_MM = 0.5   # design-v4.md #7 "merge degenerate spans (<0.5mm)"
 MAX_SLIDE_EVALS = 50      # design-v4.md #7 "<=50 evals per junction"
 ROLL_WINDOW = 20          # design-v4.md #7 default W=20
 ROLL_EPS = 0.0025         # design-v4.md #7 default eps=0.25%
+
+# SPEC-PATHRUNG W2: a TRUE zero-length member (Treant verify's member_idx
+# 577 repro: kind=shoot, length ~1e-6) is a different class from
+# TWIG_MERGE_LEN_MM's "short but real, worth folding for volume" spans --
+# this is a coordinate collapse (a connector built from se to a point
+# that coincides with se to float precision, or a slide that walked a
+# child's far endpoint onto its own near endpoint), never geometrically
+# meaningful. Deliberately far tighter than TWIG_MERGE_LEN_MM so the two
+# classes never overlap/interact: nothing between DEGENERATE_LEN_MM and
+# TWIG_MERGE_LEN_MM changes behavior here.
+DEGENERATE_LEN_MM = 1e-4
+
+
+def _is_degenerate_span(p0, p1, tol=DEGENERATE_LEN_MM):
+    return float(np.linalg.norm(np.asarray(p1, float) - np.asarray(p0, float))) < tol
 
 
 # ------------------------------------------------------------- accounting --
@@ -165,8 +214,11 @@ def _reattach_candidate_builders(forest, root_idx, se, r_i, carried_root, plate_
 
 
 def _try_subtree_reattach(forest, root_idx, surface_tree, cfg, kdc, plate_z,
-                           sample_points, sample_delicacy):
-    """Move (a). Returns (accepted, volume_saved_ml)."""
+                           sample_points, sample_delicacy, braced_hosts):
+    """Move (a). Returns (accepted, volume_saved_ml). `braced_hosts` (see
+    module docstring's brace-awareness section) is a set of member indices
+    with a live brace on their own axis, derived once per sweep by the
+    caller (transient.derive_brace_attachments)."""
     if root_idx in forest.dead:
         return False, 0.0
     root = forest.members[root_idx]
@@ -184,7 +236,7 @@ def _try_subtree_reattach(forest, root_idx, surface_tree, cfg, kdc, plate_z,
         # columns serving nearby terminals, the textbook parallel-column
         # waste this phase exists to fix.
         return _try_root_reanchor(forest, root_idx, surface_tree, cfg, kdc, plate_z,
-                                   sample_points, sample_delicacy)
+                                   sample_points, sample_delicacy, braced_hosts)
     if len(forest.children[old_parent]) < 2:
         return False, 0.0  # would leave old_parent dangling with zero children
 
@@ -198,15 +250,33 @@ def _try_subtree_reattach(forest, root_idx, surface_tree, cfg, kdc, plate_z,
     forest.set_parent(root_idx, None)
     _slim_ancestors(forest, old_parent, carried_root, cfg)
 
-    exclude = subtree | forest.dead | {old_parent}
+    # Brace-awareness (SPEC-INTEGRATION #2): the detached subtree's OWN
+    # geometry never moves here (only its topology does -- see this
+    # function's docstring / module docstring), so a braced host INSIDE
+    # `subtree` is not itself at risk; what IS at risk is the bifurcation
+    # candidate this subtree might get merged onto -- splitting a host
+    # moves its axis (cco._make_bifurcation_builder), which would strand
+    # any brace already attached to it. Braced hosts and braces themselves
+    # are therefore excluded from the candidate set, not just `subtree`.
+    exclude = subtree | forest.dead | {old_parent} | braced_hosts | set(forest.braces)
     best_fn, best_vol = None, None
     for build_fn in _reattach_candidate_builders(forest, root_idx, se, r_i, carried_root,
                                                   plate_z, sample_points, sample_delicacy,
                                                   cfg, kdc, exclude):
         cp2 = forest.checkpoint()
+        n0 = len(forest.members)
         try:
             build_fn()
         except cco._InfeasibleCandidate:
+            forest.rollback(cp2)
+            continue
+        # SPEC-PATHRUNG W2 (prevent the creation, preferred over a later
+        # cure): a connector built from se to a merge/projection point
+        # that coincides with se to float precision is a degenerate
+        # (near-zero-length) member -- reject the candidate outright,
+        # same as a clearance violation, rather than ever committing it.
+        if any(_is_degenerate_span(forest.members[i].p0, forest.members[i].p1)
+               for i in range(n0, len(forest.members))):
             forest.rollback(cp2)
             continue
         violations = forest.revalidate(surface_tree, cfg)
@@ -235,7 +305,7 @@ def _try_subtree_reattach(forest, root_idx, surface_tree, cfg, kdc, plate_z,
 
 
 def _try_root_reanchor(forest, root_idx, surface_tree, cfg, kdc, plate_z,
-                        sample_points, sample_delicacy):
+                        sample_points, sample_delicacy, braced_hosts):
     """Reattach variant for a parentless root (see _try_subtree_reattach's
     dispatch comment): root.p0 is the fixed anchor (wherever root's own
     children, if any, already attach); root.p1 offers nothing to search
@@ -245,14 +315,24 @@ def _try_root_reanchor(forest, root_idx, surface_tree, cfg, kdc, plate_z,
     exactly the role a fresh terminal's stub_end plays for cco.build) --
     if a candidate wins, root's own former children are spliced onto the
     NEW connector and root_idx itself retires (tree.Forest.dead): its
-    whole old p0->plate run is superseded, not just one endpoint moved."""
+    whole old p0->plate run is superseded, not just one endpoint moved.
+
+    Brace-awareness (SPEC-INTEGRATION #2): retiring root_idx would strand
+    any brace attached to root_idx's OWN axis, so this move is refused
+    outright when root_idx is a braced host -- unlike the junction-child
+    case, root_idx's geometry (not just its topology) goes away here.
+    Braced hosts (and braces) are also excluded from the bifurcation
+    candidate set below, same reasoning as _try_subtree_reattach: bi-
+    furcating a candidate host moves ITS axis too."""
+    if root_idx in braced_hosts:
+        return False, 0.0
     root = forest.members[root_idx]
     own_children = list(forest.children[root_idx])
     subtree = _subtree_indices(forest, root_idx)
     se = root.p0.copy()
     r_i = max(root.r0, cfg.min_shoot_r_mm)
     carried_root = root.carried_mm2
-    exclude = subtree | forest.dead | {root_idx}
+    exclude = subtree | forest.dead | {root_idx} | braced_hosts | set(forest.braces)
 
     vol_before = _total_volume_ml(forest)
     best_fn, best_vol = None, None
@@ -260,9 +340,16 @@ def _try_root_reanchor(forest, root_idx, surface_tree, cfg, kdc, plate_z,
                                                   plate_z, sample_points, sample_delicacy,
                                                   cfg, kdc, exclude):
         cp2 = forest.checkpoint()
+        n0 = len(forest.members)
         try:
             build_fn()
         except cco._InfeasibleCandidate:
+            forest.rollback(cp2)
+            continue
+        # SPEC-PATHRUNG W2: same degenerate-connector reject as
+        # _try_subtree_reattach above -- see that call site's comment.
+        if any(_is_degenerate_span(forest.members[i].p0, forest.members[i].p1)
+               for i in range(n0, len(forest.members))):
             forest.rollback(cp2)
             continue
         violations = forest.revalidate(surface_tree, cfg)
@@ -333,9 +420,22 @@ def _junction_geometry_at(J, m, child_members, cfg):
     was caught by test_engine_every_member_meets_its_own_load_and_
     deflection_floor: a slide moved a child's endpoint ~8mm with its
     radius untouched). Returns (child_r1_list, m_r) or None if the cone
-    is violated for any member at ITS OWN new floor-respecting radius."""
+    is violated for any member at ITS OWN new floor-respecting radius.
+
+    SPEC-PATHRUNG W2 (prevent the creation): a candidate J that walks a
+    child's far endpoint onto (or within DEGENERATE_LEN_MM of) its own
+    near endpoint -- or onto m's own far endpoint -- collapses that
+    span to zero length, one root-cause suspect for the Treant verify
+    member_idx 577 class (kind=shoot, length ~1e-6). Rejected here,
+    upstream of every caller (the hill-climb search AND the final
+    application both route through this one function), so a slide can
+    never even CONSIDER a degenerate candidate, let alone accept one."""
+    if _is_degenerate_span(J, m.p1):
+        return None
     child_r1 = []
     for cm in child_members:
+        if _is_degenerate_span(cm.p0, J):
+            return None
         r_floor = _own_floor(cm.p0, J, cm.carried_mm2, cm.kind, cfg)
         r_new = max(cm.r0, r_floor)
         if not cco._within_cone(cm.p0, J, r_new, cfg):
@@ -360,18 +460,26 @@ def _junction_feasible_vol(J, m, child_members, cfg):
     return v
 
 
-def _try_junction_slide(forest, j_idx, surface_tree, cfg):
+def _try_junction_slide(forest, j_idx, surface_tree, cfg, braced_hosts):
     """Move (b): bounded pattern-search re-polish of junction j_idx's
     position (design-v4.md #5/#7), minimizing the REAL volume of the
     junction member itself plus every child that lands on it, subject to
     each incident member's printability cone -- never accepting a point
     worse than the current one (a plain hill-climb: every accepted step
-    strictly improves, so "current" is always a valid fallback)."""
+    strictly improves, so "current" is always a valid fallback).
+
+    Brace-awareness (SPEC-INTEGRATION #2): a slide mutates j_idx's OWN p0
+    AND every child's p1 -- refused outright if j_idx or ANY child is a
+    braced host (either would move geometry a live brace is attached to)."""
     if j_idx in forest.dead:
+        return False, 0.0
+    if j_idx in braced_hosts:
         return False, 0.0
     m = forest.members[j_idx]
     children = forest.children[j_idx]
     if len(children) < 2:
+        return False, 0.0
+    if any(c in braced_hosts for c in children):
         return False, 0.0
     child_members = [forest.members[c] for c in children]
     J0 = m.p0.copy()
@@ -456,7 +564,7 @@ def _reconcile_ancestors(forest, start_idx, cfg):
         idx = forest.parent[idx]
 
 
-def _try_twig_prune(forest, m_idx, surface_tree, cfg):
+def _try_twig_prune(forest, m_idx, surface_tree, cfg, braced_hosts):
     """Move (c): fold a degenerate (<TWIG_MERGE_LEN_MM) pass-through span
     -- a junction reduced to a single child by an earlier accepted
     reattach (design-v4.md #7 "pass-through junctions left by
@@ -465,8 +573,14 @@ def _try_twig_prune(forest, m_idx, surface_tree, cfg):
     longer length/lean/load, never below what it already had). `m_idx`
     is marked dead rather than removed (see module docstring / tree.py's
     `dead` field -- interior deletion isn't safe under the append-only
-    checkpoint protocol)."""
+    checkpoint protocol).
+
+    Brace-awareness (SPEC-INTEGRATION #2): m_idx retires (its geometry
+    disappears) and the surviving child's p1 moves to m_idx's old p1 --
+    refused if EITHER is a braced host."""
     if m_idx in forest.dead:
+        return False, 0.0
+    if m_idx in braced_hosts:
         return False, 0.0
     m = forest.members[m_idx]
     if m.kind == "stub":
@@ -475,6 +589,8 @@ def _try_twig_prune(forest, m_idx, surface_tree, cfg):
     if len(children) != 1:
         return False, 0.0
     c_idx = children[0]
+    if c_idx in braced_hosts:
+        return False, 0.0
     c = forest.members[c_idx]
     if c.kind == "stub":
         return False, 0.0
@@ -520,16 +636,97 @@ def _try_twig_prune(forest, m_idx, surface_tree, cfg):
     return True, vol_before - vol_after
 
 
+# --------------------------------------------- (d) degenerate-member retire --
+def _try_degenerate_retire(forest, m_idx, surface_tree, cfg, braced_hosts):
+    """Move (d), SPEC-PATHRUNG W2: fold/retire an ALREADY-EXISTING
+    degenerate (< DEGENERATE_LEN_MM) member that _try_twig_prune's own
+    len(children) == 1 gate never reaches -- the Treant verify member_
+    idx 577 class (kind=shoot, length ~1e-6, near_horizontal
+    printability violation) has 0 or 2+ children, not 1. This is a
+    RETROFIT cure for whatever slips through despite the "prevent the
+    creation" guards added to _try_subtree_reattach / _try_root_reanchor
+    / _junction_geometry_at above (a construction path this module
+    doesn't own -- e.g. cco.py insertion -- could in principle also
+    produce one; W2's own repro test pins the specific creation path
+    found).
+
+    2+ children: their own p0 already coincides with m's p1 (m is
+    near-zero length) to well within DEGENERATE_LEN_MM, so splicing them
+    onto m_idx's OWN parent needs no geometry change -- exactly
+    _try_root_reanchor's own "own_children just moved here" reasoning,
+    one level generalized (m_idx need not be a parentless root here).
+    0 children and m.kind != "stub" (a real contact stub is NEVER
+    degenerate-retired regardless of length -- it is the model surface
+    contact, not a topology artifact): dead weight, detach and
+    mark_dead.
+
+    Deliberately NOT gated on strict volume decrease like the other
+    three move types -- a near-zero-length member's own volume is
+    itself near zero, so "does this save real print material" is the
+    wrong question; the reason to retire it is that it is a printability
+    violation waiting to happen (near_horizontal, per tree.
+    printability_report), which volume accounting cannot see at all.
+    Still gated on `forest.revalidate` staying clean, same as every
+    other move -- this can only ever REMOVE a violating member, never
+    introduce a new clearance/connectivity one."""
+    if m_idx in forest.dead:
+        return False, 0.0
+    if m_idx in braced_hosts:
+        return False, 0.0
+    m = forest.members[m_idx]
+    if m.kind == "stub":
+        return False, 0.0
+    if not _is_degenerate_span(m.p0, m.p1):
+        return False, 0.0
+    children = list(forest.children[m_idx])
+    if len(children) == 1:
+        return False, 0.0  # _try_twig_prune's own job, unchanged, not duplicated
+    if any(c in braced_hosts for c in children):
+        return False, 0.0
+
+    p_idx = forest.parent[m_idx]
+    vol_before = _total_volume_ml(forest)
+    cp = forest.checkpoint()
+    for c in children:
+        forest.set_parent(c, p_idx)
+    forest.set_parent(m_idx, None)
+    forest.mark_dead(m_idx)
+    if p_idx is not None:
+        _reconcile_ancestors(forest, p_idx, cfg)
+    violations = forest.revalidate(surface_tree, cfg)
+    if violations:
+        forest.rollback(cp)
+        return False, 0.0
+    forest.commit(cp)
+    vol_after = _total_volume_ml(forest)
+    return True, max(0.0, vol_before - vol_after)
+
+
 # ---------------------------------------------------------- scheduling ------
 def _sweep_order(forest):
     """Deterministic sweep order (design-v4.md #7): descending estimated
     saving, stable tiebreak by (kind, idx) so a re-run visits moves in
     exactly the same order. Estimated saving is each candidate's own
     member volume (the reattach/slide/prune move each act ON) -- cheap,
-    real-volume-derived, and comparable across all three move types."""
+    real-volume-derived, and comparable across all three move types.
+
+    Brace-awareness (SPEC-INTEGRATION #2): members in forest.braces are
+    graph edges, not tree topology -- never move candidates for any of the
+    three move types, skipped entirely here (the braced-HOST protections
+    in _try_junction_slide/_try_root_reanchor/_try_twig_prune/
+    _try_subtree_reattach's candidate-set exclusion are the separate,
+    complementary rule that a brace's ATTACHMENT HOST also can't move).
+
+    SPEC-PATHRUNG W2: a 4th move kind, "retire" (_try_degenerate_retire),
+    for a < DEGENERATE_LEN_MM member with 0 or 2+ children -- the ONE
+    class "prune" (len(children) == 1 only) never reaches. Not mutually
+    exclusive with "slide" (2+ children) -- both get queued; whichever
+    the sweep tries first, the other's own guard (m_idx in forest.dead)
+    makes the second a harmless no-op once the first retires it."""
+    braces_set = set(getattr(forest, "braces", ()))
     items = []
     for idx, m in enumerate(forest.members):
-        if idx in forest.dead or m.kind == "stub":
+        if idx in forest.dead or m.kind == "stub" or idx in braces_set:
             continue
         vol = cco._member_vol_ml(m.p0, m.p1, m.r0, m.r1)
         parent_idx = forest.parent[idx]
@@ -542,6 +739,8 @@ def _sweep_order(forest):
             span = float(np.linalg.norm(m.p1 - m.p0))
             if span < TWIG_MERGE_LEN_MM:
                 items.append((vol, "prune", idx))
+        if len(children) != 1 and _is_degenerate_span(m.p0, m.p1):
+            items.append((vol, "retire", idx))
     items.sort(key=lambda t: (-t[0], t[1], t[2]))
     return [(kind, idx) for _, kind, idx in items]
 
@@ -578,6 +777,10 @@ def optimize(forest, mesh, surface_tree, cfg, log=None):
         sweeps += 1
         kdc = cco._KDCache()
         kdc.rebuild(forest)
+        # Brace-awareness (SPEC-INTEGRATION #2): derived once per sweep
+        # (geometric, not cached across sweeps -- a prior sweep's accepted
+        # moves can change which members a brace's endpoints land on).
+        braced_hosts = set(transient.derive_brace_attachments(forest).keys())
         order = _sweep_order(forest)
         any_accepted = False
         for kind, idx in order:
@@ -586,11 +789,14 @@ def optimize(forest, mesh, surface_tree, cfg, log=None):
                 break
             if kind == "reattach":
                 ok, saved = _try_subtree_reattach(forest, idx, surface_tree, cfg, kdc,
-                                                   plate_z, sample_points, sample_delicacy)
+                                                   plate_z, sample_points, sample_delicacy,
+                                                   braced_hosts)
             elif kind == "slide":
-                ok, saved = _try_junction_slide(forest, idx, surface_tree, cfg)
+                ok, saved = _try_junction_slide(forest, idx, surface_tree, cfg, braced_hosts)
+            elif kind == "retire":
+                ok, saved = _try_degenerate_retire(forest, idx, surface_tree, cfg, braced_hosts)
             else:
-                ok, saved = _try_twig_prune(forest, idx, surface_tree, cfg)
+                ok, saved = _try_twig_prune(forest, idx, surface_tree, cfg, braced_hosts)
             if ok:
                 accepted += 1
                 any_accepted = True
@@ -612,4 +818,57 @@ def optimize(forest, mesh, surface_tree, cfg, log=None):
 
     log["rewire"] = dict(curve=curve, accepted=accepted, rejected=rejected,
                           sweeps=sweeps, cap_hit=cap_hit)
+    _assert_no_stale_braces(forest)
     return forest
+
+
+def _assert_no_stale_braces(forest, tol=0.25):
+    """End-of-optimize invariant (SPEC-INTEGRATION #2, "stale-brace
+    impossibility"): every live brace's non-embedded endpoint(s) must
+    still lie within `tol` mm of some live non-brace member's axis --
+    exactly the geometric rule the brace-awareness move guards above exist
+    to make impossible; this independently CHECKS it rather than trusting
+    the guards, crashing (not warning) if one ever has a hole. A
+    self-contained re-derivation of transient.derive_brace_attachments's
+    per-host geometry (rather than reusing that host->[(z, brace_idx)]
+    mapping directly): that mapping loses per-endpoint identity when both
+    of a brace's endpoints could coincidentally share a z (this function
+    needs a hard per-endpoint pass/fail, not a per-host aggregate)."""
+    braces_set = set(getattr(forest, "braces", ()))
+    live_braces = [b for b in braces_set if b not in forest.dead]
+    if not live_braces:
+        return
+    host_idxs = [i for i in range(len(forest.members))
+                 if i not in forest.dead and i not in braces_set]
+    if not host_idxs:
+        raise AssertionError(
+            f"rewire.optimize left {len(live_braces)} live brace(s) with no "
+            f"live host at all (forest idx: {live_braces})")
+
+    h_p0 = np.array([forest.members[i].p0 for i in host_idxs], dtype=float)
+    h_p1 = np.array([forest.members[i].p1 for i in host_idxs], dtype=float)
+    d_axis = h_p1 - h_p0
+    L2 = np.einsum("ij,ij->i", d_axis, d_axis)
+    L2safe = np.where(L2 < 1e-18, 1.0, L2)
+    zero_len = L2 < 1e-18
+
+    stale = []
+    for b_idx in live_braces:
+        b = forest.members[b_idx]
+        for end_name, pt in (("p0", b.p0), ("p1", b.p1)):
+            if b.embed_end == end_name:
+                continue  # designed to embed into the model, not a member
+            pt = np.asarray(pt, dtype=float)
+            rel = pt[None, :] - h_p0
+            t = np.clip(np.einsum("nk,nk->n", rel, d_axis) / L2safe, 0.0, 1.0)
+            proj = h_p0 + t[:, None] * d_axis
+            dist = np.linalg.norm(pt[None, :] - proj, axis=1)
+            if zero_len.any():
+                dist[zero_len] = np.linalg.norm(pt[None, :] - h_p0[zero_len], axis=1)
+            nearest = float(dist.min())
+            if nearest > tol:
+                stale.append((b_idx, end_name, pt.tolist(), round(nearest, 4)))
+    assert not stale, (
+        f"rewire.optimize left {len(stale)} stale brace endpoint(s) -- a live "
+        f"brace endpoint no longer lies within {tol}mm of any live host axis "
+        f"(brace_idx, end, point, nearest_host_dist_mm): {stale}")

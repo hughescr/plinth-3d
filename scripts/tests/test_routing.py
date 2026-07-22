@@ -96,6 +96,20 @@ def test_upper_bound_pruning_does_not_change_violations(box_mesh, cfg):
         assert v_pruned == v_full
 
 
+def test_build_surface_tree_is_deterministic_despite_global_rng_state(box_mesh):
+    """Charter: no RNG. build_surface_tree's mesh.sample() draws from the
+    GLOBAL numpy random state -- if it isn't seeded internally, the tree
+    (and every clearance query riding on it) silently varies with whatever
+    ran before it. Perturb the global RNG differently before each call;
+    the resulting point clouds must still match exactly."""
+    np.random.seed(12345)
+    tree_a = routing.build_surface_tree(box_mesh)
+    np.random.seed(54321)
+    tree_b = routing.build_surface_tree(box_mesh)
+    assert tree_a.data.shape == tree_b.data.shape
+    assert np.array_equal(tree_a.data, tree_b.data)
+
+
 def test_embedded_tip_contact_itself_is_not_a_false_violation(box_mesh, cfg):
     # a route whose tip touches the box surface (as every real support
     # does) must not itself register as a clearance violation.

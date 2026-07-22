@@ -128,6 +128,31 @@ def _r_tension_mm(carried_mm2, cfg):
     return float(r_m * 1000.0)
 
 
+def brace_estimate_ml(L2, cfg):
+    """Phase 4c (SPEC-INTEGRATION #1): deterministic estimate of the brace
+    volume a plate-descent column of height L2 will need once the bracing
+    pass (bracing.propose_and_place) actually restrains it -- used ONLY to
+    PRICE a plate-descent candidate in _plate_descent_builders (the
+    measured trap: pricing a slender braced column without also pricing
+    the braces that make it legal makes the ranking prefer a column that
+    then needs MORE total volume once bracing lands, table 1.57ml vs
+    0.845ml). Expected rung count n = floor(L2 / brace_free_span_mm)
+    (v3's brace cadence); each rung priced as an X-pair at the assumed
+    worst-case neighbor distance d = brace_neighbor_max_xy_mm / 2 (the
+    same rod geometry bracing._cross_link_rods builds: rise = d, rod_len =
+    d*sqrt(2), X-pair discount 0.5**0.25), floored by cfg.brace_r_mm same
+    as the real placer."""
+    n = max(0, int(L2 / cfg.brace_free_span_mm))
+    if n == 0:
+        return 0.0
+    d = cfg.brace_neighbor_max_xy_mm / 2.0
+    rod_len = d * np.sqrt(2.0)
+    r_raw = placement._shaft_r_for_L(rod_len, cfg, cfg.max_segment_angle_deg)
+    rod_r = max(cfg.brace_r_mm, r_raw * 0.5 ** 0.25)
+    rung_ml = 2 * np.pi * rod_r ** 2 * rod_len / 1000.0
+    return n * rung_ml
+
+
 # ---------------------------------------------------------------- builder --
 def build(mesh, contacts, tip_r, carried, minima_flags, plate_z, surface_tree, cfg,
           sample_points=None, sample_delicacy=None, query_fn=None):
@@ -320,7 +345,7 @@ def _plate_descent_builders(forest, i, stub_idx, se, r_i, carried_i, plate_z, cf
                 raise _InfeasibleCandidate()
             r_load = max(_r_tension_mm(carried_i, cfg), cfg.min_trunk_r_mm)
             r_col = max(r_load, placement._shaft_r_for_L(L2, cfg, 0.0), cfg.min_trunk_r_mm)
-            vol = 0.0
+            diag_vol = 0.0
             parent_for_col = stub_idx
             col_p0 = se.copy()
             if L1 > 1e-6:
@@ -334,16 +359,37 @@ def _plate_descent_builders(forest, i, stub_idx, se, r_i, carried_i, plate_z, cf
                                     carried_mm2=carried_i)
                 d_idx = forest.add_member(diag)
                 forest.set_parent(stub_idx, d_idx)
-                vol += _member_vol_ml(diag.p0, diag.p1, diag.r0, diag.r1)
+                diag_vol += _member_vol_ml(diag.p0, diag.p1, diag.r0, diag.r1)
                 parent_for_col = d_idx
                 col_p0 = p_top
                 r_col = max(r_col, r_diag_r1)
+            # Honest built geometry: the column is still constructed at its
+            # full-length deflection-solved radius (r_col) -- construction
+            # never changes here; the bracing pass (engine.brace_and_size)
+            # resizes it down for real once braces actually land (design-v4.md
+            # #9). Nothing below this point changes what gets BUILT.
             col = tree.Member(p0=col_p0, p1=p_bot, r0=r_col, r1=r_col, kind="trunk",
                                owner=("contact", i), embed_end=None, carried_mm2=carried_i)
             c_idx = forest.add_member(col)
             forest.set_parent(parent_for_col, c_idx)
-            vol += _member_vol_ml(col.p0, col.p1, col.r0, col.r1)
-            return vol
+
+            # Phase 4c braced-cost PRICING ONLY (SPEC-INTEGRATION #1): the
+            # RETURNED value (used purely to RANK this candidate against
+            # others in _insert_terminal's scored list) prices the column as
+            # if it will be braced down to brace_free_span_mm, plus the
+            # estimated brace volume that bracing will actually need to add
+            # to make that legal -- landed together with bracing/resize in
+            # the SAME merge (measured trap: pricing alone without effective
+            # bracing made the table fixture WORSE, 1.57ml vs 0.845ml,
+            # because it steers insertion toward tall slender columns that
+            # then still get built honestly fat and never come back down).
+            r_col_priced = max(r_load,
+                                placement._shaft_r_for_L(min(L2, cfg.brace_free_span_mm),
+                                                          cfg, 0.0),
+                                cfg.min_trunk_r_mm)
+            column_vol_priced = _member_vol_ml(col.p0, col.p1, r_col_priced, r_col_priced)
+            price = diag_vol + column_vol_priced + brace_estimate_ml(L2, cfg)
+            return price
         return build
 
     yield _make(se[:2], se[2])  # straight down: zero-length diagonal, one column
