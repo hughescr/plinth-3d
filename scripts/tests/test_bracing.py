@@ -1215,3 +1215,411 @@ def test_compute_needs_merged_trigger_order_deterministic(cfg):
     assert len(r1) == len(r2) == 1
     assert r1[0] == r2[0]
     assert r1[0][-1] == (a1, b1)
+
+
+# ============================================================= p6-reach =====
+# The pillar fix (Craig's screenshot find, member 2337/contact 240 -- see
+# config.py's brace_reach_max_factor_x docstring for the full forensics):
+# a genuinely-triggering member whose ONE useful cross-link neighbor sits
+# just past cfg.brace_neighbor_max_xy_mm must still be reachable via a
+# bounded, deterministic tiered widening -- but ONLY when the standard
+# search already came back empty, and ONLY for an activation-triggered
+# (path-mapped) request.
+
+def _pillar_forest(d_mm, span_mm=112.4):
+    """Forest mirroring the real pillar's proportions: M is a plate-
+    rooted trunk column (span_mm tall) with a live stub terminal (so a
+    REAL transient.transient_report call after placement can verify
+    genuine relief, matching test_propose_and_place_stacks_until_every_
+    carried_trigger_relieved's own precedent); N is a full-height
+    neighbor column at xy distance `d_mm`; D is an irrelevant decoy path
+    member (far away, never a candidate at any z) used only to make
+    compute_needs's generalized (path-mapped, length > 1) branch fire --
+    a bare [M] path is the DEGENERATE case (SPEC-PATHRUNG W6, module
+    docstring) and never receives the widened reach by design (see
+    propose_and_place's own docstring, "Deliberately NOT reach-tiered"
+    paragraph -- that scoping is for the OTHER, unrelated Case-2 pass;
+    this fixture is the Case-1/pillar path and must stay genuinely
+    path-mapped to exercise it)."""
+    f = tm.Forest()
+    m_idx = f.add_member(_member([0.0, 0.0, span_mm], [0.0, 0.0, 0.0], kind="trunk"))
+    stub_idx = f.add_member(_member([0.0, 0.0, span_mm + 0.001], [0.0, 0.0, span_mm],
+                                     kind="stub"))
+    f.set_parent(stub_idx, m_idx)
+    n_idx = f.add_member(_member([d_mm, 0.0, span_mm + 10.0], [d_mm, 0.0, -10.0],
+                                  kind="trunk"))
+    d_idx = f.add_member(_member([1000.0, 0.0, -2.0], [1000.0, 0.0, -1.0], kind="trunk"))
+    return f, m_idx, n_idx, d_idx
+
+
+def _pillar_spans_report(m_idx, d_idx, span_mm=112.4):
+    # free_gaps deliberately tiny (SAME established pattern as
+    # test_propose_and_place_stacks_until_every_carried_trigger_relieved
+    # etc.): M's own STATIC gap must not equal the winning interval, or
+    # Pass 1's static trigger fires on the identical span/heights and
+    # "steals" compute_needs's own placed_heights claim before Pass 2
+    # runs (b7222de's pre-round-2 static-collision rule: a Pass-1 claim
+    # silently drops the colliding Pass-2 request) -- collapsing this
+    # fixture back to a plain static (non-path-mapped) request that
+    # never receives the widened reach at all. Isolating the activation
+    # trigger this way is exactly this fixture's whole point: the real
+    # Case 1 member's own worst_span_mm/interval span the FULL
+    # multi-member path, strictly larger than M's own local extent.
+    return {m_idx: dict(worst_span_mm=span_mm, restraint_zs=[],
+                         free_gaps=[(0.0, 1.0)], n_terminals=1,
+                         worst_span_interval=(0.0, span_mm),
+                         worst_span_path=[d_idx, m_idx])}
+
+
+def test_reach_tiers_mm_ascending_deduped(cfg):
+    tiers = bracing._reach_tiers_mm(cfg)
+    base = cfg.brace_neighbor_max_xy_mm
+    assert tiers == (pytest.approx(base * 1.25), pytest.approx(base * cfg.brace_reach_max_factor_x))
+    assert tiers[0] < tiers[1]
+
+    # a hard ceiling BELOW the 1.25x tier must never be exceeded -- the
+    # intermediate 1.25x attempt is dropped entirely, collapsing to just
+    # the (tighter) ceiling itself as the one and only tier.
+    local_cfg = config.SupportConfig(brace_reach_max_factor_x=1.1)
+    tiers2 = bracing._reach_tiers_mm(local_cfg)
+    assert tiers2 == (pytest.approx(base * 1.1),)
+
+
+def test_find_cross_link_candidates_max_xy_mm_override(cfg):
+    """Unit-level proof the override is a pure additive parameter: None
+    (the default) reproduces cfg.brace_neighbor_max_xy_mm's own cap
+    exactly; an explicit value replaces it, nothing else about the
+    rise-gate/floor logic changes."""
+    d = cfg.brace_neighbor_max_xy_mm + 2.0  # just past the base cap
+    f, (mi, ni) = _column_forest(((0.0, 0.0), 0.0, 40.0), ((d, 0.0), -10.0, 60.0))
+    z = 20.0
+    assert bracing._find_cross_link_candidates(f, mi, z, cfg, k=0) == []
+    assert bracing._find_cross_link_candidates(f, mi, z, cfg, k=0, max_xy_mm=None) == []
+    wide = bracing._find_cross_link_candidates(f, mi, z, cfg, k=0, max_xy_mm=d + 1.0)
+    assert wide == [(d, ni)]
+    # a cap still short of d finds nothing, override or not.
+    assert bracing._find_cross_link_candidates(f, mi, z, cfg, k=0, max_xy_mm=d - 1.0) == []
+
+
+def test_pillar_fixture_fails_at_standard_reach_both_mechanisms(cfg):
+    """TDD failing-first, part 1: prove the fixture is genuinely
+    reach-limited (Case 1's mechanism) BEFORE exercising the fix -- the
+    STANDARD-cap cross-link search (max_xy_mm unspecified, i.e. cfg.
+    brace_neighbor_max_xy_mm exactly, the pre-p6-reach behavior at every
+    call site that does not opt into reach_tiers) finds nothing at the
+    one candidate height, and the model_rung fallback (an empty/far
+    surface_tree) finds nothing either -- p6-routing's own dead end,
+    reproduced at the primitive level (NOT via propose_and_place, whose
+    default gated behavior IS the fix under test in the next function --
+    asserting "unplaceable" through it here would just be re-testing the
+    same fix from the other direction, not isolating the pre-fix state)."""
+    d = 17.2  # the measured real distance -- Case 1 forensics
+    assert d > cfg.brace_neighbor_max_xy_mm  # sanity: genuinely past the base cap
+    assert d <= cfg.brace_neighbor_max_xy_mm * 1.25  # sanity: WOULD clear the first tier
+    f, m_idx, n_idx, d_idx = _pillar_forest(d)
+
+    n_rungs_s = max(bracing._n_slender(112.4, cfg, 0.0), int(112.4 / cfg.brace_free_span_mm))
+    n_fit = bracing._rungs_that_fit(112.4, n_rungs_s)
+    assert n_fit >= 1
+
+    surface_tree = _far_tree()
+    for k in range(n_fit):
+        z = (k + 1) * 112.4 / (n_fit + 1)
+        assert bracing._find_cross_link_candidates(f, m_idx, z, cfg, k) == []
+        assert bracing._find_model_rung_anchors(f, surface_tree, m_idx, z, cfg) == []
+        # the SAME height's _place_one_rung call, with reach widening
+        # NOT offered (reach_tiers=None, the default -- every caller
+        # gets this unless it explicitly opts in, as static/degenerate
+        # requests still do post-fix), is therefore honestly unplaceable.
+        assert bracing._place_one_rung(f, surface_tree, cfg, m_idx, z, k, {
+            "brace": 0, "model_rung": 0}) is None
+
+
+def test_pillar_fixture_places_via_tiered_reach_when_standard_search_empty(cfg):
+    """TDD failing-first, part 2 (the fix): the SAME fixture as above,
+    same standard-cap dead end, now placed via the widened reach -- every
+    successfully-placed rod is an X-pair to N (d=17.2mm, within the
+    1.25x=18.75mm first tier; part 1 proved N is UNREACHABLE at the
+    standard cap), and a REAL post-placement transient.transient_report
+    call confirms M's own worst_span_mm genuinely dropped (not just
+    "geometry got placed"). Not asserting an exact placed-count: with a
+    REAL forest (M has a live stub terminal), propose_and_place's own
+    relief-verification stacking (SPEC-151-SCOPING round 2 -- pre-dates
+    p6-reach, unmodified here) keeps adding restraints from M's own
+    fallback pool until compute_needs's activation gate is genuinely
+    satisfied, which can legitimately place MORE than one rod per logical
+    request and can legitimately leave one candidate honestly unplaceable
+    if a later stacked rod's own geometry clips an earlier one -- the
+    interesting, fix-specific claim is narrower and unaffected by that:
+    EVERY successfully placed rod must be a genuine X-pair to N (proving
+    the widened reach is what made each one possible at all, since N is
+    the ONLY neighbor in this fixture), and M's real worst_span_mm must
+    end up genuinely relieved."""
+    d = 17.2
+    f, m_idx, n_idx, d_idx = _pillar_forest(d)
+    spans_report = _pillar_spans_report(m_idx, d_idx)
+    surface_tree = _far_tree()
+
+    result = bracing.propose_and_place(f, surface_tree, plate_z=0.0, cfg=cfg,
+                                        spans_report=spans_report)
+    assert result["rungs_placed"] >= 1
+    assert len(result["placed"]) >= 2  # at least one X-pair (two rods)
+    assert set(result["by_kind"]) == {"brace"}  # every placement is a cross-link to N,
+    # never a model_rung fallback -- surface_tree is _far_tree(), so a
+    # model_rung success here would itself be a bug this test would catch.
+
+    rods = [f.members[idx] for idx in result["placed"]]
+    for rod in rods:
+        assert rod.kind == "brace"
+        xy0, xy1 = rod.p0[:2], rod.p1[:2]
+        assert float(np.linalg.norm(np.asarray(xy0) - np.asarray(xy1))) == pytest.approx(d), (
+            "every placed rod's own xy delta must be exactly N's distance -- "
+            "proof each one is genuinely the widened-reach candidate, not "
+            "some other (nonexistent, in this fixture) neighbor")
+
+    assert f.dirty_members() == []  # every placed rod passed Forest.
+    # revalidate's own clearance check cleanly at add-time (_try_place_
+    # rods's own transactional commit/rollback discipline, unmodified
+    # here). verify.connectivity_report is deliberately NOT asserted
+    # here -- N's own top end (17.2, 0, 122.4) is left dangling by this
+    # minimal fixture regardless of how many rungs get placed (N has no
+    # stub terminal, only M does), a fixture artifact unrelated to this
+    # fix's own rods, not something bracing.py's placement discipline
+    # governs.
+    assert tm.printability_report(list(f.members), cfg) == []
+
+    fresh = transient.transient_report(f, 0.0, cfg)
+    assert fresh[m_idx]["worst_span_mm"] < 112.4, (
+        "geometry alone isn't enough -- the newly-placed cross-links must "
+        "register as REAL restraints on M's own axis and genuinely shrink "
+        "its worst-case moment arm")
+    r_trans_before = transient.r_transient_mm(112.4, 0.0, 1, cfg)
+    r_trans_after = transient.r_transient_mm(fresh[m_idx]["worst_span_mm"], 0.0, 1, cfg)
+    assert r_trans_after < r_trans_before * 0.5, (
+        "the pillar itself: mirrors the measured 2.9947 -> 2.1663 drop -- "
+        "a SUBSTANTIAL (not merely nonzero) improvement. Full convergence "
+        "under the activation ceiling in a single propose_and_place call "
+        "isn't asserted here: the real engine's own brace_and_size loops "
+        "this SAME call up to 3 times (plus a rewire + final re-fix pass) "
+        "specifically because one call is not always enough -- this test "
+        "isolates the widened-reach mechanism itself (every rod IS a real "
+        "X-pair to the once-unreachable N, and it DOES genuinely shrink "
+        "the arm every time it fires), not the outer convergence loop, "
+        "which lives in engine.py, out of this module's ownership")
+
+
+def test_reach_widening_never_engages_when_standard_search_already_finds_candidates(cfg):
+    """The no-change guarantee (explicitly required): a fixture where a
+    standard-reach candidate already exists must place BIT-IDENTICAL
+    geometry whether or not the widened-reach code path is reachable.
+    Proven empirically, not just by construction -- N2 sits well within
+    the base cap (d=10mm); a THIRD, decoy column N3 sits far enough away
+    (50mm) that it is unreachable even by the DEFAULT widened tiers
+    (15*1.5=22.5mm) but WOULD be pulled in by an absurdly large
+    brace_reach_max_factor_x if the widened search ever mistakenly ran
+    when it shouldn't. Two otherwise-identical runs (default cfg vs a
+    cfg with brace_reach_max_factor_x=100.0) must produce the exact same
+    placement -- proof the widened branch truly never engages once the
+    standard search already succeeded, not merely "wasn't observed to"."""
+    span_mm = 40.0
+
+    def build(local_cfg):
+        f = tm.Forest()
+        m_idx = f.add_member(_member([0.0, 0.0, span_mm], [0.0, 0.0, 0.0], kind="trunk"))
+        stub_idx = f.add_member(_member([0.0, 0.0, span_mm + 0.001], [0.0, 0.0, span_mm],
+                                         kind="stub"))
+        f.set_parent(stub_idx, m_idx)
+        n2_idx = f.add_member(_member([10.0, 0.0, span_mm + 10.0], [10.0, 0.0, -10.0],
+                                       kind="trunk"))
+        n3_idx = f.add_member(_member([50.0, 0.0, span_mm + 10.0], [50.0, 0.0, -10.0],
+                                       kind="trunk"))
+        d_idx = f.add_member(_member([1000.0, 0.0, -2.0], [1000.0, 0.0, -1.0], kind="trunk"))
+        # free_gaps deliberately tiny -- see _pillar_spans_report's own
+        # comment: keeps this a genuinely path-mapped (activation-
+        # triggered) request rather than degrading to a static one that
+        # would never even offer reach_tiers a chance to run.
+        spans_report = {m_idx: dict(worst_span_mm=span_mm, restraint_zs=[],
+                                     free_gaps=[(0.0, 1.0)], n_terminals=1,
+                                     worst_span_interval=(0.0, span_mm),
+                                     worst_span_path=[d_idx, m_idx])}
+        surface_tree = _far_tree()
+        result = bracing.propose_and_place(f, surface_tree, plate_z=0.0, cfg=local_cfg,
+                                            spans_report=spans_report)
+        return f, result
+
+    default_cfg = cfg
+    huge_reach_cfg = config.SupportConfig(brace_reach_max_factor_x=100.0)
+    assert huge_reach_cfg.brace_neighbor_max_xy_mm * 100.0 > 50.0  # sanity: N3 WOULD
+    # be reachable under this cfg's widened tiers if that code path ever ran
+
+    f_a, result_a = build(default_cfg)
+    f_b, result_b = build(huge_reach_cfg)
+
+    assert result_a["rungs_placed"] == result_b["rungs_placed"]
+    assert result_a["rungs_unplaceable"] == result_b["rungs_unplaceable"]
+    assert result_a["by_kind"] == result_b["by_kind"]
+    assert len(result_a["placed"]) == len(result_b["placed"])
+    for ia, ib in zip(result_a["placed"], result_b["placed"]):
+        ma, mb = f_a.members[ia], f_b.members[ib]
+        assert np.allclose(ma.p0, mb.p0) and np.allclose(ma.p1, mb.p1)
+        assert ma.r0 == pytest.approx(mb.r0)
+        assert ma.kind == mb.kind
+    # and specifically: every placed rod connects to N2 (d=10), never N3
+    # (d=50) -- the widened cfg's own extra reach must have gone unused.
+    for idx in result_b["placed"]:
+        m = f_b.members[idx]
+        xy_d = abs(float(m.p0[0]) - float(m.p1[0]))
+        assert round(xy_d) == 10, f"unexpected xy delta {xy_d} -- N3 (d=50) got used"
+
+
+def test_pillar_reach_placement_deterministic_across_repeated_runs(cfg):
+    """Determinism (explicitly required): two fully independent builds of
+    the identical pillar fixture, through the widened-reach path, must
+    produce bit-identical results -- no RNG anywhere in the new tiers/
+    dedup-by-neighbor-index logic."""
+    d = 17.2
+
+    def run_once():
+        f, m_idx, n_idx, d_idx = _pillar_forest(d)
+        spans_report = _pillar_spans_report(m_idx, d_idx)
+        surface_tree = _far_tree()
+        result = bracing.propose_and_place(f, surface_tree, plate_z=0.0, cfg=cfg,
+                                            spans_report=spans_report)
+        return f, result
+
+    f1, r1 = run_once()
+    f2, r2 = run_once()
+
+    assert r1["rungs_placed"] == r2["rungs_placed"]
+    assert r1["rungs_unplaceable"] == r2["rungs_unplaceable"]
+    assert r1["by_kind"] == r2["by_kind"]
+    assert len(r1["placed"]) == len(r2["placed"])
+    for i1, i2 in zip(r1["placed"], r2["placed"]):
+        m1, m2 = f1.members[i1], f2.members[i2]
+        assert np.allclose(m1.p0, m2.p0) and np.allclose(m1.p1, m2.p1)
+        assert m1.r0 == pytest.approx(m2.r0)
+        assert m1.r1 == pytest.approx(m2.r1)
+        assert m1.kind == m2.kind
+
+
+# ================================================ p6-reach Case 2 fix ========
+# "More restraint next iteration" (engine.brace_and_size's own docstring):
+# a member whose SPAN never crosses compute_needs's own activation trigger
+# can still be grown by transient.resize_forest's OTHER floor terms into a
+# genuine clearance violation, invisible to compute_needs's slenderness-
+# only notion of "needs bracing". Forensics: table_mesh member 88/contact
+# 34, Treant members 713/719/1104/1183 -- ALL five share this ONE
+# mechanism and NONE are reach-limited (Case 1's mechanism): the
+# activation trigger never fires for any of them (r_transient/
+# worst_span_mm sit comfortably under both ceilings), so no cross-link
+# search -- widened or not -- is ever even attempted before this fix.
+
+def test_clearance_violated_members_finds_live_non_brace_non_stub_only(cfg):
+    """Unit-level proof of the helper's own filtering: a live trunk with
+    a real violation is reported; a brace member and a stub member with
+    (synthetically forced) violations are not, and a dead member is not."""
+    f = tm.Forest()
+    clean_idx = f.add_member(_member([0.0, 0.0, 0.0], [0.0, 0.0, 10.0], kind="trunk"))
+    dirty_idx = f.add_member(_member([50.0, 0.0, 0.0], [50.0, 0.0, 10.0], kind="trunk"))
+    stub_idx = f.add_member(_member([100.0, 0.0, 0.0], [100.0, 0.0, 1.0], kind="stub"))
+    surface_tree = cKDTree(np.array([
+        [50.03, 0.0, 5.0],    # sits on dirty_idx's own axis -- a real violation
+        [100.03, 0.0, 0.5],   # sits on stub_idx's own axis -- a real violation, excluded anyway
+    ]))
+    assert bracing._clearance_violated_members(f, surface_tree, cfg) == [dirty_idx]
+
+
+def test_propose_and_place_relieves_clearance_violation_invisible_to_activation_trigger(cfg):
+    """TDD failing-first (the Case 2 fix): M is a short, modest column
+    whose worst_span_mm/r_transient sit WELL under both of compute_
+    needs's own activation-trigger ceilings (mirroring every one of the 5
+    forensic members exactly) -- so compute_needs alone requests NOTHING
+    for it. But M's forced starting radius already clips a real, nearby
+    obstacle (the resize_forest-grew-it-past-clearance shape, injected
+    directly here since this module never resizes members itself, per
+    its own decoupling contract). Pre-fix, propose_and_place's ONLY
+    request source is compute_needs -- zero requests, zero relief
+    attempted, the violation persists untouched. Post-fix, the SEPARATE
+    clearance-triggered pass must find it and place a relief rung."""
+    lean = 0.0
+    r_m = 0.5
+    span_mm = 10.0
+    n_terminals = 1
+    r_trans = transient.r_transient_mm(span_mm, lean, n_terminals, cfg)
+    assert r_trans <= cfg.max_unbraced_shaft_r_mm  # sanity: activation trigger genuinely silent
+    assert span_mm <= cfg.brace_free_span_mm
+
+    f = tm.Forest()
+    m_idx = f.add_member(_member([0.0, 0.0, span_mm], [0.0, 0.0, 0.0], r0=r_m, r1=r_m,
+                                  kind="trunk"))
+    n_idx = f.add_member(_member([3.0, 0.0, span_mm + 5.0], [3.0, 0.0, -5.0], r0=0.35, r1=0.35,
+                                  kind="trunk"))
+    # 0.6mm off M's own axis -- inside M's own r_m=0.5 + cfg.standoff_mm
+    # envelope -> a real violation. Placed at z=1.0, deliberately AWAY
+    # from M's own largest-free-gap MIDPOINT (z=5.0, where this pass
+    # requests its relief rung) -- the relief rod's own near endpoint
+    # sits exactly ON M's axis at that height, so if the obstacle sat
+    # there too the fresh rod would clip the SAME obstacle it exists to
+    # help relieve (a genuinely different, honest rejection, not what
+    # this test is proving).
+    surface_tree = cKDTree(np.array([[0.6, 0.0, 1.0]]))
+
+    pre_violations = f.revalidate(surface_tree, cfg)
+    assert any(v["member_idx"] == m_idx for v in pre_violations), (
+        "fixture sanity: M must start genuinely clearance-violated")
+
+    spans_report = {m_idx: dict(worst_span_mm=span_mm, restraint_zs=[],
+                                 free_gaps=[(0.0, span_mm)], n_terminals=n_terminals)}
+    # compute_needs alone (the pre-fix request source) asks for nothing.
+    assert bracing.compute_needs(f, spans_report, cfg) == []
+
+    result = bracing.propose_and_place(f, surface_tree, plate_z=0.0, cfg=cfg,
+                                        spans_report=spans_report)
+    assert result["rungs_placed"] >= 1
+    assert result["rungs_unplaceable"] == 0
+    assert len(result["placed"]) >= 1
+    assert all(f.members[idx].kind == "brace" for idx in result["placed"])
+
+    # M's own radius is untouched by this pass (that's resize_forest's
+    # job, on the CALLER's NEXT iteration -- see this function's own
+    # docstring: "a single relief rung cannot itself shrink the violating
+    # member's OWN radius within this same call") -- so M's OWN
+    # pre-existing violation legitimately persists exactly as it was,
+    # unchanged, not worse. What must be proven here is narrower: the
+    # newly-placed relief member(s) are themselves genuinely clean (no
+    # NEW violation introduced), and M's own violation count/magnitude
+    # didn't grow.
+    post_violations = f.revalidate(surface_tree, cfg)
+    placed_set = set(result["placed"])
+    assert not any(v["member_idx"] in placed_set for v in post_violations), (
+        "the newly-placed relief member(s) must themselves be clean")
+    m_pre = [v for v in pre_violations if v["member_idx"] == m_idx]
+    m_post = [v for v in post_violations if v["member_idx"] == m_idx]
+    assert len(m_post) <= len(m_pre)
+    if m_pre and m_post:
+        assert m_post[0]["min_clearance_mm"] == pytest.approx(m_pre[0]["min_clearance_mm"])
+
+
+def test_propose_and_place_clearance_pass_is_honest_when_unplaceable(cfg):
+    """The honest half of the same contract: when NO candidate anywhere
+    can relieve a genuine clearance violation (no cross-link neighbor, no
+    reachable model surface), the new pass must count it unplaceable --
+    never silently drop or fabricate relief."""
+    r_m = 0.5
+    span_mm = 10.0
+    f = tm.Forest()
+    m_idx = f.add_member(_member([0.0, 0.0, span_mm], [0.0, 0.0, 0.0], r0=r_m, r1=r_m,
+                                  kind="trunk"))
+    surface_tree = cKDTree(np.array([[0.6, 0.0, 5.0]]))
+    pre_violations = f.revalidate(surface_tree, cfg)
+    assert any(v["member_idx"] == m_idx for v in pre_violations)
+
+    spans_report = {m_idx: dict(worst_span_mm=span_mm, restraint_zs=[],
+                                 free_gaps=[(0.0, span_mm)], n_terminals=1)}
+    n_members_before = len(f.members)
+    result = bracing.propose_and_place(f, surface_tree, plate_z=0.0, cfg=cfg,
+                                        spans_report=spans_report)
+    assert result["rungs_placed"] == 0
+    assert result["rungs_unplaceable"] == 1
+    assert result["placed"] == []
+    assert len(f.members) == n_members_before

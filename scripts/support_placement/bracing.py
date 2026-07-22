@@ -124,6 +124,37 @@ _MIN_CROSS_LINK_XY_MM = 1.0 / math.sqrt(2.0)
 # compensates" without unbounded escalation.
 _MAX_STACKED_FALLBACKS = 6
 
+# p6-reach (the pillar fix, config.py's own brace_reach_max_factor_x
+# docstring has the full forensics): widened-reach tier MULTIPLIERS tried,
+# in ascending order, for an activation-triggered request whose STANDARD
+# (cfg.brace_neighbor_max_xy_mm) cross-link search comes back with ZERO
+# candidates at a given height. 1.25x first (comfortably covers the one
+# measured case -- the pillar's useful neighbor sat at ~1.15x the base
+# cap), cfg.brace_reach_max_factor_x (default 1.5x) as the hard ceiling
+# tried only if 1.25x ALSO finds nothing. Deliberately just two tiers,
+# not a smooth/iterative widen: deterministic, bounded, and matches the
+# spec's own "widen ... in tiers" wording.
+_REACH_TIER_BASE_FACTOR = 1.25
+
+
+def _reach_tiers_mm(cfg):
+    """Ascending, deduped widened-reach xy caps (absolute mm, already
+    scaled by cfg.brace_neighbor_max_xy_mm) to try after the standard cap
+    finds nothing -- see _REACH_TIER_BASE_FACTOR and config.py's
+    brace_reach_max_factor_x docstring. cfg.brace_reach_max_factor_x is a
+    HARD ceiling: the intermediate 1.25x tier is only included when it
+    sits AT or under that ceiling (a caller configuring a tighter ceiling
+    than 1.25x, e.g. 1.1x, must never see a 1.25x attempt in between --
+    that would silently exceed the ceiling they set). Factors <= 1.0 (a
+    misconfigured ceiling at or under the base cap) are dropped
+    entirely -- they would never find anything the standard search
+    didn't already try."""
+    base = cfg.brace_neighbor_max_xy_mm
+    hard = float(cfg.brace_reach_max_factor_x)
+    factors = sorted({f for f in (_REACH_TIER_BASE_FACTOR, hard)
+                       if 1.0 + 1e-9 < f <= hard + 1e-9})
+    return tuple(base * f for f in factors)
+
 
 def _n_slender(gap_mm, cfg, lean_deg):
     """Smallest n >= 0 (capped at 50, v3's runaway guard) such that
@@ -562,7 +593,7 @@ def _live_neighbor_indices(forest):
             if i not in forest.dead and i not in braces_set and m.kind != "stub"]
 
 
-def _find_cross_link_candidates(forest, mi, z, cfg, k):
+def _find_cross_link_candidates(forest, mi, z, cfg, k, max_xy_mm=None):
     """Neighbor candidates for member `mi` at rung height z (SPEC-BRACING
     rule 1): live non-brace non-stub members N != M whose z-extent covers
     [z, z+rise] (rise = d, the xy distance between the axes at z -- v3.6's
@@ -571,6 +602,12 @@ def _find_cross_link_candidates(forest, mi, z, cfg, k):
     _cross_link_rods' k, which parity picks the rod direction) --
     required, not defaulted, because which of M's endpoints a rod
     actually reads depends on it (see the should-fix note below).
+
+    p6-reach: `max_xy_mm` overrides cfg.brace_neighbor_max_xy_mm as the
+    upper distance cap when given (None, the default, preserves the
+    EXACT prior behavior/signature for every existing caller) -- lets
+    _place_one_rung retry a WIDENED search (see _reach_tiers_mm) without
+    duplicating this function's own candidate-scan/rise-gate logic.
 
     Fix (verifier blocker #1, floating brace endpoint): rule 1's
     endpoints are "ON THE AXES (centerline to centerline)" for BOTH
@@ -628,6 +665,7 @@ def _find_cross_link_candidates(forest, mi, z, cfg, k):
         # M's own axis doesn't even reach the requested rung height --
         # no candidate at this z can ever be valid.
         return []
+    cap = cfg.brace_neighbor_max_xy_mm if max_xy_mm is None else float(max_xy_mm)
     p_M = _axis_point_at_z(M, z)
     cands = []
     for ni in _live_neighbor_indices(forest):
@@ -642,7 +680,7 @@ def _find_cross_link_candidates(forest, mi, z, cfg, k):
         # Should-fix (SPEC-PATHRUNG): d's lower bound is a REAL rod-length
         # floor (rise == d always, rod_len == d*sqrt(2)), not merely
         # "nonzero" -- see this function's own docstring.
-        if not (_MIN_CROSS_LINK_XY_MM < d <= cfg.brace_neighbor_max_xy_mm):
+        if not (_MIN_CROSS_LINK_XY_MM < d <= cap):
             continue
         rise = d
         if not (z0 - 1e-9 <= z + rise <= z1 + 1e-9):
@@ -824,19 +862,47 @@ def _try_place_rods(forest, surface_tree, cfg, rods, kind, embed_end, counters):
     return idxs
 
 
-def _place_one_rung(forest, surface_tree, cfg, mi, z, k, counters):
+def _place_one_rung(forest, surface_tree, cfg, mi, z, k, counters, reach_tiers=None):
     """One rung request at height z on member mi: try cross-link
     candidates nearest-first, then the model-rung fallback -- itself
     retried nearest-first (should-fix, verifier round 2: up to
     cfg-implied v3 cadence of 6 candidates, deterministic (distance,
     index) order) rather than giving up after the single nearest anchor.
     Returns a list of (member_idx, kind) placed, or None if
-    unplaceable."""
-    for d, ni in _find_cross_link_candidates(forest, mi, z, cfg, k):
+    unplaceable.
+
+    p6-reach (the pillar fix): `reach_tiers` (an ascending tuple of
+    widened xy caps, see _reach_tiers_mm) is None by default -- every
+    existing caller/test is bit-identical. When given AND the standard-
+    cap search above found ZERO candidates at this exact height, retry
+    with each tier's wider cap in turn (nearest-first within a tier,
+    smallest tier first), skipping any neighbor index already tried by a
+    smaller tier (a larger tier's candidate list is always a superset of
+    a smaller one's, so nothing is retried twice). Only ever reached when
+    the standard search was EMPTY -- a height where standard-cap
+    candidates already exist never even evaluates `reach_tiers`, so this
+    can only ADD placements the base mechanism could never have found,
+    never change one that already worked."""
+    std_candidates = _find_cross_link_candidates(forest, mi, z, cfg, k)
+    for d, ni in std_candidates:
         rods = _cross_link_rods(forest, mi, ni, z, d, k, cfg)
         placed = _try_place_rods(forest, surface_tree, cfg, rods, "brace", None, counters)
         if placed is not None:
             return [(idx, "brace") for idx in placed]
+
+    if not std_candidates and reach_tiers:
+        tried_ni = set()
+        for tier_cap in reach_tiers:
+            wide_candidates = _find_cross_link_candidates(forest, mi, z, cfg, k,
+                                                            max_xy_mm=tier_cap)
+            for d, ni in wide_candidates:
+                if ni in tried_ni:
+                    continue
+                tried_ni.add(ni)
+                rods = _cross_link_rods(forest, mi, ni, z, d, k, cfg)
+                placed = _try_place_rods(forest, surface_tree, cfg, rods, "brace", None, counters)
+                if placed is not None:
+                    return [(idx, "brace") for idx in placed]
 
     for p0, p1 in _find_model_rung_anchors(forest, surface_tree, mi, z, cfg):
         length = float(np.linalg.norm(p1 - p0))
@@ -897,6 +963,32 @@ def _trigger_relieved(forest, surface_tree, cfg, fresh_report, trigger_idx):
         forest.rollback(trial_cp)
         relieved = not any(v["member_idx"] == trigger_idx for v in trial_violations)
     return relieved
+
+
+def _clearance_violated_members(forest, surface_tree, cfg):
+    """p6-reach Case 2 fix ("more restraint next iteration", engine.
+    brace_and_size's own docstring): live, non-brace, non-stub member
+    indices with a REAL clearance violation RIGHT NOW -- the exact SAME
+    check (forest.revalidate against surface_tree/cfg) engine.
+    brace_and_size's own loop already performs after transient.
+    resize_forest, just read one call earlier (propose_and_place runs
+    BEFORE resize_forest each brace_and_size iteration, so this sees
+    whatever the PRIOR iteration's resize already grew into a violation
+    -- the mechanism that actually needs another iteration to close).
+    Deduped (a member can appear in more than one violation entry) and
+    sorted ascending by member_idx for determinism -- forest.revalidate's
+    own return order is not a documented contract."""
+    violations = forest.revalidate(surface_tree, cfg)
+    brace_set = set(getattr(forest, "braces", []))
+    out = set()
+    for v in violations:
+        idx = v["member_idx"]
+        if idx in forest.dead or idx in brace_set:
+            continue
+        if forest.members[idx].kind == "stub":
+            continue
+        out.add(idx)
+    return sorted(out)
 
 
 def propose_and_place(forest, surface_tree, plate_z, cfg, spans_report, log=None):
@@ -1007,7 +1099,69 @@ def propose_and_place(forest, surface_tree, plate_z, cfg, spans_report, log=None
     degenerate request (trigger_idx None) starts with an EMPTY pending
     set, so the very first successful placement's pending-empty check
     stops it immediately -- bit-identical to the old `if trigger_idx is
-    None: break`."""
+    None: break`.
+
+    p6-reach Case 2 fix (forensics: table_mesh member 88/contact 34, Treant
+    members 713/719/1104/1183): a SEPARATE, additional pass runs after the
+    compute_needs-driven loop above, entirely independent of it (does not
+    touch requests/trigger_idx/fallbacks at all). Every one of the 5
+    forensic members shares ONE mechanism, and it is NOT reach-limited
+    (Case 1's mechanism) -- in all 5, compute_needs's own activation
+    trigger (r_transient > cfg.max_unbraced_shaft_r_mm or worst_span_mm >
+    cfg.brace_free_span_mm) never fires at all (each member's r_transient/
+    worst_span_mm sit comfortably UNDER both ceilings), so NO cross-link
+    search is ever attempted, by design -- yet transient.resize_forest's
+    r_req = max(r_murray, r_tension, r_deflect, r_transient, kind_floor)
+    formula (design-v4.md #6) still grows the member's radius (r_transient
+    is the binding term in every forensic case measured), and that growth
+    alone -- still well inside the "acceptable to leave unbraced" zone by
+    compute_needs's own criteria -- is enough to intrude on real nearby
+    geometry that had zero margin to spare. engine.brace_and_size's own
+    docstring names the intended remedy verbatim: "the fix is more
+    restraint next iteration (another brace)" -- but nothing before this
+    fix ever THREADED a real clearance violation into a relief attempt;
+    compute_needs's only notion of "needs bracing" was slenderness/span,
+    never clearance, so a member in exactly this shape got NO relief
+    attempt across all 3 of brace_and_size's iterations (confirmed:
+    identical violation, byte for byte, on every iteration -- a dead fixed
+    point, not a converging one). This pass closes that gap, self-
+    contained within bracing.py (forest.revalidate is a read-only call
+    this module already makes elsewhere, e.g. _try_place_rods) -- no
+    engine.py wiring change needed: for every member CURRENTLY showing a
+    real violation (_clearance_violated_members, the SAME check engine.
+    brace_and_size's own loop performs one step later) that owns at least
+    one free_gap in spans_report, attempt ONE relief rung in its own
+    largest gap via the SAME _place_one_rung primitive (cross-link
+    nearest-first -- NOT reach-tiered, see below -- then model_rung
+    fallback). Deliberately NOT reach-tiered: the p6-reach widening is
+    scoped to genuine activation-trigger requests (is_path_mapped above)
+    per spec ("the activation trigger fired") -- these members' activation
+    trigger did NOT fire, so extending reach here would misapply Case 1's
+    mechanism to a class Case-1 forensics never established it helps
+    with (measured: 3 of the 4 Treant members are blocked by the
+    rise/extent gate at EVERY candidate distance, not by cfg.
+    brace_neighbor_max_xy_mm -- widening reach would not have placed
+    anything different for them; only member 713 happens to have a
+    same-cap candidate, which the UNWIDENED search already finds).
+    Deliberately only ONE attempt per member per call, not a stacking
+    loop: a single relief rung cannot itself shrink the violating
+    member's OWN radius within this same call (that only happens on the
+    CALLER's next transient.resize_forest pass, after propose_and_place
+    returns) -- re-checking "is it fixed yet" here would only ever see
+    the SAME still-fat radius, so there is nothing a same-call stack
+    would learn that the caller's own 3-iteration outer loop does not
+    already provide. Height dedup reuses the SAME `tried_zs` map as the
+    main loop (never re-attempts a height already tried this call, by
+    either mechanism). A placement here can only ever HELP or be a
+    harmless no-op: if the member's radius growth genuinely came from
+    r_transient/r_deflect (span-driven terms a brace can shrink), the
+    next resize_forest call brings the radius back down and the violation
+    clears; if the growth came from a span-independent term (r_murray,
+    r_tension, a kind floor -- unaffected by bracing), this pass attempts
+    relief, it does nothing to fix the actual radius, and the outer loop
+    still terminates honestly (the existing "clearance-dirty member"
+    assert fires exactly as before -- no silent corruption, matching this
+    module's whole design philosophy)."""
     if log is None:
         log = {}
     requests = compute_needs(forest, spans_report, cfg)
@@ -1036,6 +1190,17 @@ def propose_and_place(forest, surface_tree, plate_z, cfg, spans_report, log=None
             trigger_idxs = trigger_idx
         else:
             trigger_idxs = (trigger_idx,)
+        # p6-reach (the pillar fix): widened reach is offered ONLY to a
+        # request the activation trigger itself produced (is_path_mapped
+        # == compute_needs's own generalized-case tag, carrying a real
+        # trigger_idx for later relief-verification) -- a static/
+        # degenerate request (trigger_idx None) never receives it, so a
+        # gap that merely LOOKS big enough per the static cadence trigger
+        # (v3's brace_free_span_mm cadence, blind to activation timing)
+        # cannot reach past the standard neighbor cap. See
+        # _reach_tiers_mm / _place_one_rung's own docstring for the
+        # "only reached when the standard search was EMPTY" guarantee.
+        reach_tiers = _reach_tiers_mm(cfg) if is_path_mapped else None
         for k in range(n_rungs):
             z = z_lo + (k + 1) * (z_hi - z_lo) / (n_rungs + 1)
             if any(abs(z - rz) <= cfg.brace_ladder_z_mm / 2.0 for rz in restraint_zs):
@@ -1051,7 +1216,8 @@ def propose_and_place(forest, surface_tree, plate_z, cfg, spans_report, log=None
                 if any(abs(zc - ez) <= cfg.brace_ladder_z_mm / 2.0 for ez in already):
                     continue
                 tried_zs.setdefault(host, []).append(zc)
-                result = _place_one_rung(forest, surface_tree, cfg, host, zc, k, counters)
+                result = _place_one_rung(forest, surface_tree, cfg, host, zc, k, counters,
+                                          reach_tiers=reach_tiers)
                 if result is None:
                     continue
                 placed_any = (placed_any or []) + result
@@ -1093,6 +1259,33 @@ def propose_and_place(forest, surface_tree, plate_z, cfg, spans_report, log=None
             for idx, kind in placed_any:
                 placed.append(idx)
                 by_kind[kind] = by_kind.get(kind, 0) + 1
+
+    # p6-reach Case 2 fix ("more restraint next iteration" -- see this
+    # function's own docstring for the full mechanism/forensics). Runs
+    # AFTER the compute_needs loop above so it sees this call's own
+    # placements too (a member the loop above just relieved is no longer
+    # violated, and one it just placed a brace NEAR is unaffected either
+    # way -- _clearance_violated_members reads live forest state).
+    for member_idx in _clearance_violated_members(forest, surface_tree, cfg):
+        info = spans_report.get(member_idx)
+        if not info or not info.get("free_gaps"):
+            continue
+        z_lo, z_hi = max(((float(g[0]), float(g[1])) for g in info["free_gaps"]),
+                          key=lambda t: t[1] - t[0])
+        z = (z_lo + z_hi) / 2.0
+        already = tried_zs.get(member_idx, [])
+        if any(abs(z - ez) <= cfg.brace_ladder_z_mm / 2.0 for ez in already):
+            continue
+        tried_zs.setdefault(member_idx, []).append(z)
+        rungs_requested += 1
+        result = _place_one_rung(forest, surface_tree, cfg, member_idx, z, 0, counters)
+        if result is None:
+            rungs_unplaceable += 1
+            continue
+        rungs_placed += 1
+        for idx, kind in result:
+            placed.append(idx)
+            by_kind[kind] = by_kind.get(kind, 0) + 1
 
     log["bracing"] = dict(rungs_requested=rungs_requested, rungs_placed=rungs_placed,
                            rungs_unplaceable=rungs_unplaceable, by_kind=dict(by_kind))

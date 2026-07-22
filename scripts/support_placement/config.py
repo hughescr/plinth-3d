@@ -167,6 +167,33 @@ class SupportConfig:
     # ---- Bracing (design.md #5; v3: diagonal X pairs, not horizontal) ----
     # Neighbour trunks within this cross-distance are brace candidates.
     brace_neighbor_max_xy_mm: float = 15.0
+    # ---- Adaptive cross-link reach (p6-reach, "the pillar fix") ----
+    # Hard ceiling on how far bracing.py's cross-link search may widen
+    # PAST brace_neighbor_max_xy_mm, expressed as a multiple of that base
+    # cap. Forensics (Craig's screenshot find, member 2337 serving contact
+    # 240): a 112.4mm fully-unbraced plate column sized to r=2.9947 by
+    # r_transient (the only member over the pillar's own reasonableness
+    # ceiling) -- compute_needs's activation trigger fired correctly (6
+    # requests), but every candidate at every requested height failed
+    # honestly: model rungs clip the overhang, and cross-link candidates
+    # came back EMPTY because the one useful neighbor (member 1015, a
+    # 93mm column) sits 17.2mm away -- just outside the 15mm base cap --
+    # while everything genuinely closer fails the rise gate (a short
+    # shoot whose real z-extent doesn't reach the climb). MEASURED FIX:
+    # widening the cross-link search to 18mm let ONE cross-link to 1015
+    # place cleanly (clearance + printability both pass, X-pair
+    # r~1.155mm) and r_transient dropped 2.9947 -> 2.1663, back under the
+    # ceiling. 1.5x (the default 15mm base -> 22.5mm) is deliberately
+    # generous ABOVE the single measured data point (18mm, ~1.2x) --
+    # bracing.py tries an intermediate 1.25x (18.75mm) tier FIRST, only
+    # reaching this hard ceiling on a still-emptier search; see
+    # bracing._reach_tiers_mm.
+    # This widening is STRICTLY GATED (bracing.py's own docstring/tests):
+    # it only ever activates for a request whose activation trigger
+    # genuinely fired AND whose standard-cap search came back with ZERO
+    # candidates at that height -- never a density change anywhere the
+    # unwidened search already produces candidates.
+    brace_reach_max_factor_x: float = 1.5
     # Vertical spacing between rungs of a brace ladder along a trunk pair.
     brace_ladder_z_mm: float = 8.0
     brace_r_mm: float = 0.5
