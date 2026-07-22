@@ -28,6 +28,20 @@ Deliberate conventions preserved from the per-member era:
   - a model-embedded end (strut anchor foot) keeps its 1.4x adhesion
     factor -- there is no second member to size against, the ball is
     the adhesion fillet against the model surface.
+
+Enclosure diet (Craig's volume-forensics review): measured on the
+full-scale Treant, 72.5% of joint balls (6.54ml of 7.60ml total ball
+volume) are geometrically ENCLOSED -- every point of the ball's sphere
+already lies inside the union of the touching members' own frustums,
+overwhelmingly the case where a brace/rung endpoint lands mid-span on a
+fatter through-member and the ball is sized to (and centered on the axis
+of) that fatter member, well clear of its own ends. Emitting a sphere
+there prints nothing a viewer or the slicer doesn't already have from
+the frustum alone; it's pure wasted volume/resin. This pass drops those
+balls from the LIST before emission (see compute_joint_balls's tail) --
+every other exclusion (plate-band, radius-aware plate crossing, colinear
+pass-through) and the sizing/ownership logic above it are unchanged;
+emission still just consumes whatever ball list it's handed.
 """
 import numpy as np
 
@@ -45,6 +59,91 @@ COLINEAR_ANGLE_DEG = 10.0   # F3(a): two-member pass-through anti-parallel
 COLINEAR_RADIUS_FRAC = 0.20  # F3(a): end-radius match tolerance for the
                               # same pass-through rule
 _COLINEAR_COS_MAX = float(np.cos(np.radians(180.0 - COLINEAR_ANGLE_DEG)))
+
+# --- enclosure diet: drop a ball whose sphere is provably already
+# inside the union of its touching members' own frustums (see module
+# docstring). Conservative by construction: a ball is dropped only when
+# EVERY sampled point on its sphere resolves as contained; any single
+# uncovered sample keeps it.
+ENCLOSURE_TOL_MM = 0.02
+# Physical argument for the tolerance: mSLA resin printers resolve
+# roughly ~0.05mm per feature (typical layer height and XY pixel pitch
+# both sit around there). A protrusion under 0.02mm -- well under half
+# that feature scale -- cannot be resolved as a distinct bump by the
+# layer stack or the pixel grid; it does not print as anything the
+# frustum union wasn't already going to produce. Dropping a ball whose
+# only "escape" from the union is smaller than this changes nothing that
+# actually resolves on the plate. This is a fixed constant, not a config
+# knob -- it is a printer-physics fact, not a per-model tuning choice.
+ENCLOSURE_SAMPLE_N = 256  # fixed sample count, see _fibonacci_sphere_dirs
+
+
+def _fibonacci_sphere_dirs(n):
+    """n unit vectors (n, 3) evenly covering the sphere via the
+    Fibonacci-sphere construction. Fully deterministic and seedless --
+    no RNG anywhere, just a fixed closed-form point-index -> angle map --
+    so the same n always produces bit-identical directions across calls,
+    processes, and runs (the determinism the enclosure test, and its
+    test_joints pin, need)."""
+    i = np.arange(n, dtype=float)
+    z = 1.0 - 2.0 * (i + 0.5) / n
+    r_xy = np.sqrt(np.clip(1.0 - z * z, 0.0, None))
+    golden_angle = np.pi * (3.0 - np.sqrt(5.0))
+    theta = golden_angle * i
+    return np.stack([r_xy * np.cos(theta), r_xy * np.sin(theta), z], axis=1)
+
+
+_ENCLOSURE_SAMPLE_DIRS = _fibonacci_sphere_dirs(ENCLOSURE_SAMPLE_N)
+
+
+def _in_frustum_mask(points, p0, p1, r0, r1, tol):
+    """Boolean (N,) containment of `points` (N,3) in the frustum p0->p1
+    (radius r0 at p0, r1 at p1), tolerant by `tol` mm.
+
+    Two gates, both required (this is a FRUSTUM test -- flat end caps --
+    not a rounded-cap capsule): (1) clamped-axial -- the point's raw
+    (unclamped) projection onto the p0->p1 axis must itself fall within
+    the member's own [0, length] extent (plus `tol` slack for the same
+    small drift COINCIDE_TOL_MM already tolerates between "the same"
+    endpoint recorded by two different members); a point whose axial
+    projection falls outside that range is beyond the member's own flat
+    end plane and is NOT part of its frustum, no matter how close
+    radially -- this is what keeps a real elbow/miter gap from being
+    waved through by an endpoint's own radius. (2) radial -- for a point
+    whose axial position DOES qualify, the perpendicular distance from
+    the point to the (clamped) axis must be within the taper-interpolated
+    radius at that point, plus `tol`."""
+    d = p1 - p0
+    L2 = float(d @ d)
+    if L2 < 1e-18:
+        dist = np.linalg.norm(points - p0[None, :], axis=1)
+        return dist <= r0 + tol
+    L = float(np.sqrt(L2))
+    s = (points - p0[None, :]) @ d / L2       # raw (unclamped) fraction
+    axial_mm = s * L                          # signed mm offset from p0
+    in_range = (axial_mm >= -tol) & (axial_mm <= L + tol)
+    t = np.clip(s, 0.0, 1.0)
+    proj = p0[None, :] + t[:, None] * d[None, :]
+    dist = np.linalg.norm(points - proj, axis=1)
+    local_r = r0 + (r1 - r0) * t
+    return in_range & (dist <= local_r + tol)
+
+
+def _ball_enclosed(center, r, touching_members, tol):
+    """True iff every one of the fixed Fibonacci-sphere sample points on
+    this ball's surface is contained in at least one touching member's
+    frustum. Deterministic (fixed sample directions, no RNG) and
+    conservative (a single uncovered sample anywhere keeps the ball; an
+    empty touching set or non-positive radius never counts as enclosed)."""
+    if r <= 0.0 or not touching_members:
+        return False
+    samples = center[None, :] + r * _ENCLOSURE_SAMPLE_DIRS
+    covered = np.zeros(len(samples), dtype=bool)
+    for m in touching_members:
+        covered |= _in_frustum_mask(samples, m["p0"], m["p1"], m["r0"], m["r1"], tol)
+        if covered.all():
+            return True
+    return bool(covered.all())
 
 
 def _point_segment_dist(points, p0, p1):
@@ -154,17 +253,21 @@ def compute_joint_balls(members, plate_z, cfg):
 
     # --- joint NODES: member endpoints that are articulation points.
     # outward_dir points AWAY from the node, along the member, toward its
-    # other end -- used by F3(a)'s colinear-pass-through test.
-    nodes = []  # (point, radius_at_end, owner, embedded_model, outward_dir)
+    # other end -- used by F3(a)'s colinear-pass-through test. The
+    # trailing `m` (the owning member's own dict) is carried so the
+    # enclosure diet below can test the ball against the actual member(s)
+    # that meet at this node, without re-deriving them from owner tuples
+    # (several members can legitimately share one owner, design-v4.md #2).
+    nodes = []  # (point, radius_at_end, owner, embedded_model, outward_dir, member)
     for m in members:
         d = m["p1"] - m["p0"]
         L = float(np.linalg.norm(d))
         d_unit = d / L if L > 1e-9 else np.zeros(3)
         if m["kind"] != "stub":
             if abs(float(m["p0"][2]) - plate_z) > PLATE_BAND_MM:
-                nodes.append((m["p0"], m["r0"], m["owner"], m["embed_end"] == "p0", d_unit))
+                nodes.append((m["p0"], m["r0"], m["owner"], m["embed_end"] == "p0", d_unit, m))
         if abs(float(m["p1"][2]) - plate_z) > PLATE_BAND_MM:
-            nodes.append((m["p1"], m["r1"], m["owner"], m["embed_end"] == "p1", -d_unit))
+            nodes.append((m["p1"], m["r1"], m["owner"], m["embed_end"] == "p1", -d_unit, m))
 
     if not nodes:
         return []
@@ -207,7 +310,7 @@ def compute_joint_balls(members, plate_z, cfg):
             # F3(a): exactly two endpoints, anti-parallel through the point
             # and near-equal radii -- a straight continuation (bifurcation
             # split / rewire seam), not a real junction. No ball.
-            (_, ra, _, _, dir_a), (_, rb, _, _, dir_b) = cluster_nodes
+            (_, ra, _, _, dir_a, _), (_, rb, _, _, dir_b, _) = cluster_nodes
             cosang = float(np.dot(dir_a, dir_b))
             r_hi = max(ra, rb)
             radii_close = r_hi <= 1e-12 or (r_hi - min(ra, rb)) <= COLINEAR_RADIUS_FRAC * r_hi
@@ -223,11 +326,19 @@ def compute_joint_balls(members, plate_z, cfg):
         # nearest point on the member's own axis), not the member's overall
         # max end radius -- a tapered member's FAR end (irrelevant to this
         # joint) must not dominate a ball sized for its near end.
+        #
+        # Enclosure diet: every axis member within ON_AXIS_TOL_MM (not just
+        # the fattest) is also a TOUCHING member for the containment test
+        # below -- a through-member's own solid genuinely occupies this
+        # point even when it isn't the one sizing the ball.
+        touching_members = {id(n[5]): n[5] for n in cluster_nodes}
         for m in axis_members:
             dist, local_r = _dist_and_local_radius(center, m["p0"], m["p1"], m["r0"], m["r1"])
-            if dist <= ON_AXIS_TOL_MM and local_r >= r_max:
-                r_max = local_r
-                owner = m["owner"]
+            if dist <= ON_AXIS_TOL_MM:
+                touching_members[id(m)] = m
+                if local_r >= r_max:
+                    r_max = local_r
+                    owner = m["owner"]
         if owner is None:
             # no fatter through-member: owned by the fattest endpoint
             owner = cluster_nodes[int(np.argmax([n[1] for n in cluster_nodes]))][2]
@@ -253,6 +364,16 @@ def compute_joint_balls(members, plate_z, cfg):
         # radius and make the emitted geometry lie about what was
         # actually decided; a missing entry is honest and cheap to audit.
         if center[2] - r_ball < plate_z:
+            continue
+        # Enclosure diet (module docstring): the ball's sphere already
+        # lies entirely inside material the touching members' own
+        # frustums provide -- emitting it adds print volume without
+        # adding print geometry. Dropped from the LIST, not clamped or
+        # repositioned, same honesty argument as the plate-crossing drop
+        # just above: every other ball here keeps the exact center/radius
+        # its sizing decided.
+        if _ball_enclosed(np.asarray(center, float), float(r_ball),
+                           list(touching_members.values()), ENCLOSURE_TOL_MM):
             continue
         balls.append(dict(center=np.asarray(center, float), r=float(r_ball),
                           owner=owner))

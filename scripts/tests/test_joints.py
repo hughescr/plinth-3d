@@ -14,8 +14,17 @@ def test_junction_ball_sized_by_fattest_member_and_owned_by_trunk(cfg):
     """A shoot landing mid-column: the ball must be sized by the TRUNK
     (fattest member through the joint), even though only the shoot ENDS
     there -- the exact gapped-undersized-ball class the global pass
-    kills."""
-    trunk = _m([4.0, 0.0, -5.0], [4.0, 0.0, 20.0], 1.2, 1.2, ("trunk", 0), "trunk")
+    kills.
+
+    The trunk's top sits only 0.8mm above the junction (< the ball's own
+    1.2mm radius) so the sized ball genuinely pokes past the trunk's own
+    end -- keeps this a KEPT ball under the enclosure diet (F5) while
+    leaving the sizing/ownership computation (which only cares that the
+    junction is on-axis and mid-span, not close to an end) unchanged.
+    A trunk long enough to clear the ball on both sides is exactly the
+    "fully enclosed, correctly dropped" case -- see
+    test_mid_column_ball_fully_enclosed_by_fat_trunk_is_dropped."""
+    trunk = _m([4.0, 0.0, -5.0], [4.0, 0.0, 9.3], 1.2, 1.2, ("trunk", 0), "trunk")
     stub = _m([0, 0, 10], [0, 0, 12.5], 0.3, 0.4, ("route", 0), "stub", embed_end="p0")
     shoot = _m([0, 0, 12.5], [4.0, 0.0, 8.5], 0.4, 0.4, ("route", 0), "shoot")
     balls = joints.compute_joint_balls([trunk, stub, shoot], plate_z=-5.0, cfg=cfg)
@@ -28,8 +37,14 @@ def test_junction_ball_sized_by_fattest_member_and_owned_by_trunk(cfg):
 
 def test_one_ball_per_joint_dedupes_shared_brace_endpoints(cfg):
     """Crossed X-pair rods share endpoints on the trunk axes; the old
-    per-rod emission put 2+ spheres at each shared point."""
-    ta = _m([0.0, 0.0, -5.0], [0.0, 0.0, 30.0], 1.0, 1.0, ("trunk", 0), "trunk")
+    per-rod emission put 2+ spheres at each shared point.
+
+    `ta`'s top sits only 0.7mm above the shared point (< the 1.0mm sized
+    radius) so the ball genuinely protrudes past ta's own end and stays
+    a KEPT ball under the enclosure diet (F5) -- a ta long enough to
+    clear the ball on both sides is the "fully enclosed" case (see
+    test_mid_column_ball_fully_enclosed_by_fat_trunk_is_dropped)."""
+    ta = _m([0.0, 0.0, -5.0], [0.0, 0.0, 10.7], 1.0, 1.0, ("trunk", 0), "trunk")
     tb = _m([6.0, 0.0, -5.0], [6.0, 0.0, 30.0], 1.0, 1.0, ("trunk", 1), "trunk")
     shared = np.array([0.0, 0.0, 10.0])
     b1 = _m(shared.copy(), [6.0, 0.0, 16.0], 0.5, 0.5, ("brace", 0), "brace")
@@ -84,7 +99,12 @@ def test_hub_ball_matches_fattest_of_fans_and_riser(cfg):
 
 
 def test_y_split_ball_sized_by_parent_column(cfg):
-    parent = _m([0.0, 0.0, -5.0], [0.0, 0.0, 30.0], 1.8, 1.8, ("trunk", 0), "trunk")
+    """`parent`'s top sits only 1.5mm above the split (< the 1.8mm sized
+    radius) so the ball genuinely protrudes past parent's own end and
+    stays a KEPT ball under the enclosure diet (F5) -- a parent long
+    enough to clear the ball on both sides is the "fully enclosed" case
+    (see test_mid_column_ball_fully_enclosed_by_fat_trunk_is_dropped)."""
+    parent = _m([0.0, 0.0, -5.0], [0.0, 0.0, 11.5], 1.8, 1.8, ("trunk", 0), "trunk")
     y_diag = _m([0.0, 0.0, 10.0], [5.0, 0.0, 15.0], 1.0, 1.0, ("trunk", 1), "y_diagonal")
     child = _m([5.0, 0.0, 15.0], [5.0, 0.0, 25.0], 1.0, 1.0, ("trunk", 1), "trunk")
     balls = joints.compute_joint_balls([parent, y_diag, child], plate_z=-5.0, cfg=cfg)
@@ -125,7 +145,15 @@ def test_plate_rooted_column_base_gets_no_ball(cfg):
 
 
 def test_junction_5mm_above_plate_still_gets_a_ball(cfg):
-    trunk = _m([4.0, 0.0, -5.0], [4.0, 0.0, 20.0], 1.2, 1.2, ("trunk", 0), "trunk")
+    """trunk's top sits only 0.9mm above the junction (< the 1.2mm sized
+    radius) so the ball genuinely protrudes past trunk's own top end and
+    stays a KEPT ball under the enclosure diet (F5); the bottom end stays
+    at plate_z (unaffected) so the plate-band story this test is actually
+    about -- a junction 5mm above the plate, well outside PLATE_BAND_MM
+    -- is untouched. A trunk long enough to clear the ball on both sides
+    is the "fully enclosed" case (see
+    test_mid_column_ball_fully_enclosed_by_fat_trunk_is_dropped)."""
+    trunk = _m([4.0, 0.0, -5.0], [4.0, 0.0, 0.9], 1.2, 1.2, ("trunk", 0), "trunk")
     shoot = _m([0.0, 0.0, 3.0], [4.0, 0.0, 0.0], 0.4, 0.4, ("route", 0), "shoot")
     balls = joints.compute_joint_balls([trunk, shoot], plate_z=-5.0, cfg=cfg)
     at_junction = [b for b in balls if np.allclose(b["center"], [4.0, 0.0, 0.0], atol=1e-6)]
@@ -206,3 +234,79 @@ def test_axis_match_sizes_by_local_radius_not_far_taper_end(cfg):
     at_thin_end = [b for b in balls if np.allclose(b["center"], [0.0, 0.0, 20.0], atol=1e-6)]
     assert len(at_thin_end) == 1
     assert abs(at_thin_end[0]["r"] - cfg.joint_ball_factor * 0.35) < 1e-9
+
+
+# --- enclosure diet (F5): drop a joint ball whose whole sphere is
+# provably already inside the union of its touching members' own
+# frustums -- see joints.py module docstring for the volume-forensics
+# basis (measured 72.5% of the Treant's joint-ball volume is this shape).
+
+def test_mid_column_ball_fully_enclosed_by_fat_trunk_is_dropped(cfg):
+    """The measured majority case: a thin brace's endpoint lands mid-span
+    on a much fatter trunk, comfortably clear of the trunk's own ends
+    (15mm/20mm clearance vs the trunk's own 2.0mm radius). The ball sizes
+    to (and centers on the axis of) the trunk; with that much clearance
+    on both sides, every sampled point on the sphere resolves inside the
+    trunk's own frustum -- no protrusion to fill, so it's dropped."""
+    trunk = _m([4.0, 0.0, -5.0], [4.0, 0.0, 30.0], 2.0, 2.0, ("trunk", 0), "trunk")
+    brace = _m([10.0, 0.0, 10.0], [4.0, 0.0, 10.0], 0.3, 0.3, ("brace", 0), "brace")
+    balls = joints.compute_joint_balls([trunk, brace], plate_z=-100.0, cfg=cfg)
+    at_joint = [b for b in balls if np.allclose(b["center"], [4.0, 0.0, 10.0], atol=1e-6)]
+    assert at_joint == []
+
+
+def test_elbow_junction_ball_protrudes_and_is_kept(cfg):
+    """The classic miter-gap case: two same-radius members meeting at a
+    right angle. The joint ball fills the real void on the outside of
+    the bend -- neither member's frustum reaches into that gap (each
+    member's own flat end cap is exactly at the joint), so the enclosure
+    diet must NOT drop it."""
+    a = _m([0.0, 0.0, 0.0], [0.0, 0.0, 10.0], 0.6, 0.6, ("trunk", 0), "trunk")
+    b = _m([0.0, 0.0, 10.0], [10.0, 0.0, 10.0], 0.6, 0.6, ("trunk", 1), "trunk")
+    balls = joints.compute_joint_balls([a, b], plate_z=-100.0, cfg=cfg)
+    at_elbow = [ball for ball in balls if np.allclose(ball["center"], [0, 0, 10.0], atol=1e-6)]
+    assert len(at_elbow) == 1
+    assert abs(at_elbow[0]["r"] - cfg.joint_ball_factor * 0.6) < 1e-9
+
+
+def test_borderline_protrusion_over_tolerance_is_kept(cfg):
+    """Conservatism pin: the trunk's top sits 0.9mm above the joint, just
+    short of the ball's own 1.0mm radius -- a ~0.1mm protrusion, 5x
+    ENCLOSURE_TOL_MM (0.02mm) and unambiguously real, but still small.
+    The diet must only drop a ball when its ENTIRE surface resolves
+    inside the frustum union; "close" is not "enclosed"."""
+    trunk = _m([4.0, 0.0, -5.0], [4.0, 0.0, 0.9], 1.0, 1.0, ("trunk", 0), "trunk")
+    brace = _m([10.0, 0.0, 0.0], [4.0, 0.0, 0.0], 0.2, 0.2, ("brace", 0), "brace")
+    balls = joints.compute_joint_balls([trunk, brace], plate_z=-100.0, cfg=cfg)
+    at_joint = [b for b in balls if np.allclose(b["center"], [4.0, 0.0, 0.0], atol=1e-6)]
+    assert len(at_joint) == 1
+    assert abs(at_joint[0]["r"] - cfg.joint_ball_factor * 1.0) < 1e-9
+
+
+def test_enclosure_filter_is_deterministic_across_repeated_calls(cfg):
+    """Two independent calls on the same mixed (some dropped, some kept)
+    input produce bit-identical ball lists -- the Fibonacci-sphere
+    sampling (_fibonacci_sphere_dirs) is seedless/deterministic, so
+    nothing here should ever vary call to call."""
+    trunk = _m([4.0, 0.0, -5.0], [4.0, 0.0, 30.0], 2.0, 2.0, ("trunk", 0), "trunk")
+    brace = _m([10.0, 0.0, 10.0], [4.0, 0.0, 10.0], 0.3, 0.3, ("brace", 0), "brace")
+    elbow_a = _m([20.0, 0.0, 0.0], [20.0, 0.0, 10.0], 0.6, 0.6, ("trunk", 1), "trunk")
+    elbow_b = _m([20.0, 0.0, 10.0], [30.0, 0.0, 10.0], 0.6, 0.6, ("trunk", 2), "trunk")
+    members = [trunk, brace, elbow_a, elbow_b]
+    balls_1 = joints.compute_joint_balls(members, plate_z=-100.0, cfg=cfg)
+    balls_2 = joints.compute_joint_balls(members, plate_z=-100.0, cfg=cfg)
+    assert len(balls_1) == len(balls_2)
+    # sanity: this fixture really does mix a dropped case (the mid-column
+    # brace/trunk joint) with a kept one (the elbow) -- a determinism
+    # check over an all-dropped or all-kept list would prove less.
+    assert not any(np.allclose(b["center"], [4.0, 0.0, 10.0], atol=1e-6) for b in balls_1)
+    assert any(np.allclose(b["center"], [20.0, 0.0, 10.0], atol=1e-6) for b in balls_1)
+
+    def _key(b):
+        return (round(float(b["center"][0]), 9), round(float(b["center"][1]), 9),
+                round(float(b["center"][2]), 9))
+
+    for x, y in zip(sorted(balls_1, key=_key), sorted(balls_2, key=_key)):
+        assert np.array_equal(x["center"], y["center"])
+        assert x["r"] == y["r"]
+        assert x["owner"] == y["owner"]
