@@ -46,21 +46,44 @@ def clearance_report(mesh, members, cfg, surface_tree=None):
     member list. Deliberately does not reuse tree.Forest.revalidate's
     certificate bookkeeping (a builder bug that mis-certifies a member
     must not also fool the verify gate) -- same sampling math (sample at
-    clearance_sample_step_mm, linear radius taper, skip the first
-    contact_depth_mm+0.2 of a designed-embed end), applied unconditionally
-    to every member regardless of cert status, as an honest independent
-    check. `surface_tree` (see routing.build_surface_tree), if given,
-    uses the fast approximate path real runs always use; None falls back
-    to exact trimesh.proximity (routing._surface_distances) the same way
+    clearance_sample_step_mm, linear radius taper, skip the embed-end
+    inset described below), applied unconditionally to every member
+    regardless of cert status, as an honest independent check.
+    `surface_tree` (see routing.build_surface_tree), if given, uses the
+    fast approximate path real runs always use; None falls back to exact
+    trimesh.proximity (routing._surface_distances) the same way
     routing.check_clearance's legacy path does -- fine for a handful of
     members in a test, not for a real mesh (see build_surface_tree's own
-    docstring for why).
+    docstring for why). No surface_tree also means no pitch_bound_mm
+    (routing.surface_tree_pitch_bound_mm needs a tree to measure) -- the
+    exact-trimesh path is inherently pitch-uncertainty-free (it queries
+    the true continuous surface, not an approximating point cloud), so
+    pitch_bound_mm is 0.0 in that branch, correctly (nothing to budget
+    for).
 
     "stub" members are skipped entirely, same as routing.
     sample_route_envelope's existing precedent and tree.Forest.
-    revalidate's identical rule (see that docstring for why the
-    contact_depth_mm+0.2 inset alone isn't enough for a member that
-    travels along the surface normal at a near-grazing angle).
+    revalidate's identical rule (see that docstring for why a fixed inset
+    alone isn't enough for a member that travels along the surface normal
+    at a near-grazing angle).
+
+    Embed-end exemption (p6-routing, Findings A/B): a SECOND, INDEPENDENT
+    implementation of the SAME radius- and pitch-principled inset
+    tree.Forest.revalidate derives (see that function's docstring for the
+    full derivation) -- inset = contact_depth_mm + pitch_bound_mm + r_end
+    + standoff_mm. Deliberately reimplemented here rather than calling
+    into tree.py (preserving this function's own stated independence:
+    "a builder bug... must not also fool the verify gate" applies just as
+    much to a clearance-gate bug as a certificate bug) -- only the
+    GENERIC point-cloud-density primitive (routing.surface_tree_
+    pitch_bound_mm, exactly the same kind of shared low-level utility
+    this function already calls via routing._surface_distances /
+    routing.build_surface_tree) is shared, never the masking/exemption
+    logic itself. This was ALSO the OLD fixed contact_depth_mm+0.2 inset
+    (byte-identical to the pre-fix tree.py formula, independently proven
+    stale on the real Weeping Treant model: 26 false-positive clearance_
+    violations on table_mesh alone, all traced to this exact formula and
+    confirmed to vanish when this same fix is applied).
 
     Returns list of dicts {member_idx, kind, min_clearance_mm, at_point}.
     """
@@ -68,7 +91,9 @@ def clearance_report(mesh, members, cfg, surface_tree=None):
     out = []
     if not members:
         return out
-    inset = cfg.contact_depth_mm + 0.2
+    pitch_bound_mm = (routing.surface_tree_pitch_bound_mm(
+        surface_tree, percentile=cfg.surface_pitch_bound_percentile)
+        if surface_tree is not None else 0.0)
     all_pts, all_r, all_mi = [], [], []
     for mi, m in enumerate(members):
         if m["kind"] == "stub":
@@ -83,8 +108,10 @@ def clearance_report(mesh, members, cfg, surface_tree=None):
             n = max(int(length / cfg.clearance_sample_step_mm), 1)
             t = np.linspace(0.0, 1.0, n + 1)
             if m.get("embed_end") == "p0":
+                inset = cfg.contact_depth_mm + pitch_bound_mm + r0 + cfg.standoff_mm
                 t = t[t * length >= inset]
             if m.get("embed_end") == "p1":
+                inset = cfg.contact_depth_mm + pitch_bound_mm + r1 + cfg.standoff_mm
                 t = t[(1 - t) * length >= inset]
             if len(t) == 0:
                 continue

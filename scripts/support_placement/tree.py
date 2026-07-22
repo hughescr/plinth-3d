@@ -188,6 +188,27 @@ class Forest:
                                     # list that already excludes `dead` indices, the same
                                     # pattern already used for honestly-unrouted stubs.
         self._cp_stack = []
+        self._pitch_bound_cache = None   # (surface_tree, pitch_bound_mm) -- see
+                                          # _surface_pitch_bound_mm below.
+
+    def __getstate__(self):
+        """Pickle support (Treant-scale staged runs checkpoint the whole
+        Forest, see Member.__getstate__): drop _pitch_bound_cache, not
+        keep it. It holds a strong reference to a full cKDTree (measured:
+        17.5MB pickled for a 400k-point tree) that every OTHER part of
+        this checkpoint protocol deliberately does NOT persist (surface_
+        tree is always rebuilt fresh from the mesh per stage/process, see
+        manual_treant_v4.py's own _tree() helper) -- keeping this one
+        derived, purely-a-perf-cache field would silently reintroduce
+        exactly the bloat that convention avoids, for a value that's
+        cheap (~0.16s/400k pts, measured) to recompute on first use after
+        unpickling anyway."""
+        state = self.__dict__.copy()
+        state["_pitch_bound_cache"] = None
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
 
     # ---- construction / topology ----------------------------------
     def add_member(self, member):
@@ -287,20 +308,34 @@ class Forest:
         contact tip is defined as sitting cfg.contact_depth_mm INSIDE the
         surface -- format.md's "0.3mm INSIDE surface" convention is
         reused here as the general embedding-slop budget for ANY
-        designed-embed point, not just the stub tip). A sample P on the
-        member's own centerline at arc-length s from A can therefore have
-        its true nearest-surface distance bounded below:
-        dist(P) >= s - contact_depth_mm (triangle inequality through the
-        true surface point that is within contact_depth_mm of A). The
-        member's own radius at P, r(s), is <= r_end (r0 if embed_end is
-        p0, r1 if embed_end is p1: the radius AT the embedded end) for
-        every s on this endpoint's side, because both a strut's foot (its
-        FATTER end, by construction: r_strut = max(r_i, r_load, r_defl,
-        min_shoot_r_mm) >= r_i) and a model_rung's uniform-radius rod
-        taper monotonically toward, or stay flat at, r_end moving away
-        from A. So requiring the WORST case -- dist(P) - r(s) - standoff
-        >= (s - contact_depth_mm) - r_end - standoff -- to be non-
-        negative reduces to s >= contact_depth_mm + r_end + standoff_mm:
+        designed-embed point, not just the stub tip). A's own sample was
+        drawn from a DIFFERENT point set than `surface_tree` (struts.py's
+        candidates come from perception.delicacy_field's own mesh.sample()
+        call; model_rung's foot IS a surface_tree point, but a strut's
+        anchor is not), so a second, independent uncertainty term applies:
+        pitch_bound_mm, `routing.surface_tree_pitch_bound_mm`'s
+        cfg.surface_pitch_bound_percentile-th percentile of THIS tree's
+        own nearest-neighbor gaps (see that function's docstring for the
+        full derivation and the real-Treant numbers that motivated it) --
+        a deterministic, per-mesh, measured bound on how far A could
+        legitimately sit from surface_tree's nearest actual point, not a
+        guessed constant.
+
+        A sample P on the member's own centerline at arc-length s from A
+        can therefore have its true nearest-surface distance bounded
+        below: dist(P) >= s - contact_depth_mm - pitch_bound_mm (triangle
+        inequality through the true surface point within contact_depth_mm
+        of A, then through surface_tree's nearest actual point to THAT,
+        within pitch_bound_mm of it). The member's own radius at P, r(s),
+        is <= r_end (r0 if embed_end is p0, r1 if embed_end is p1: the
+        radius AT the embedded end) for every s on this endpoint's side,
+        because both a strut's foot (its FATTER end, by construction:
+        r_strut = max(r_i, r_load, r_defl, min_shoot_r_mm) >= r_i) and a
+        model_rung's uniform-radius rod taper monotonically toward, or
+        stay flat at, r_end moving away from A. So requiring the WORST
+        case -- dist(P) - r(s) - standoff >= (s - contact_depth_mm -
+        pitch_bound_mm) - r_end - standoff -- to be non-negative reduces
+        to s >= contact_depth_mm + pitch_bound_mm + r_end + standoff_mm:
         exactly `inset` below. Any sample beyond that inset cannot have
         its clearance explained by proximity to A alone -- a violation
         there is real (caused by OTHER geometry the member's straight
@@ -311,17 +346,22 @@ class Forest:
         own worst-case bound, inset + sample_step - r - standoff, is
         NEGATIVE for r >= 0.2mm at the default cfg -- measured 179/179
         model-anchor cone-survivors and 215/215 model_rung members
-        failing clearance by exactly that formula. The new inset grows
-        only as far as THIS member's own end radius and the standoff
-        margin require, never further (test_tree.py's masking tests
-        cover both directions: an anchored member with nothing else
-        nearby now passes; one that clips other geometry beyond its own
-        anchor region, or whose embedded end is NOT on the model surface,
-        still gets caught)."""
+        failing clearance by exactly that formula. The 3-term-only
+        version (no pitch_bound_mm) closed that but left a SECOND,
+        smaller gap at real mesh scale (measured on the Weeping Treant:
+        6 members, -0.003..-0.05mm, after the sampling-set mismatch above)
+        -- pitch_bound_mm closes it with a measured, not guessed, term.
+        The inset grows only as far as THIS member's own end radius, the
+        standoff margin, and the measured cloud density require, never
+        further (test_tree.py's masking tests cover both directions: an
+        anchored member with nothing else nearby now passes; one that
+        clips other geometry beyond its own anchor region, or whose
+        embedded end is NOT on the model surface, still gets caught)."""
         from . import routing
         dirty = self.dirty_members()
         if not dirty:
             return []
+        pitch_bound_mm = self._surface_pitch_bound_mm(surface_tree, cfg)
         all_pts, all_r, all_mi = [], [], []
         for mi in dirty:
             m = self.members[mi]
@@ -336,10 +376,10 @@ class Forest:
                 n = max(int(length / cfg.clearance_sample_step_mm), 1)
                 t = np.linspace(0.0, 1.0, n + 1)
                 if m.embed_end == "p0":
-                    inset = cfg.contact_depth_mm + m.r0 + cfg.standoff_mm
+                    inset = cfg.contact_depth_mm + pitch_bound_mm + m.r0 + cfg.standoff_mm
                     t = t[t * length >= inset]
                 if m.embed_end == "p1":
-                    inset = cfg.contact_depth_mm + m.r1 + cfg.standoff_mm
+                    inset = cfg.contact_depth_mm + pitch_bound_mm + m.r1 + cfg.standoff_mm
                     t = t[(1 - t) * length >= inset]
                 if len(t) == 0:
                     continue
@@ -376,6 +416,45 @@ class Forest:
             m.cert_version = m.geom_version
             m.cert_radius = max(m.r0, m.r1)
         return violations
+
+    def _surface_pitch_bound_mm(self, surface_tree, cfg):
+        """Cache routing.surface_tree_pitch_bound_mm's result, keyed by
+        `surface_tree` OBJECT IDENTITY (`is`, not `==`) -- cKDTree
+        supports neither attribute assignment nor weakrefs (both measured
+        directly: TypeError on both), so the value can't be stashed ON
+        the tree itself the way its own docstring's "carry it alongside
+        the tree" phrasing might first suggest; caching it here instead,
+        on the Forest that's the actual `self` at every real call site in
+        this codebase, gets the same effect with zero signature changes
+        to any of revalidate's ~10 production call sites (cco.py,
+        rewire.py, bracing.py, engine.py all keep calling
+        `forest.revalidate(surface_tree, cfg)` verbatim).
+
+        Held as a STRONG reference (self._pitch_bound_cache stores the
+        tree object itself, not its id()) specifically to rule out an
+        id-reuse hazard: holding the reference keeps the object alive, so
+        a later id() collision with a DIFFERENT, unrelated tree object
+        cannot occur while this cache entry exists. Correctness over
+        performance for the (rare, mostly test-only) case where the same
+        Forest is later revalidated against a genuinely different
+        surface_tree: the `is` check below recomputes rather than
+        silently reusing a stale value from the wrong cloud. In every
+        real pipeline run (engine.py builds surface_tree ONCE and reuses
+        the SAME object across construct/rewire/brace_and_size), this is
+        the fast path -- measured 0.16s for a 400k-point query, paid
+        once, not once per candidate trial (revalidate is called from
+        cco.py's insertion loop up to tens of thousands of times per
+        Treant-scale run; recomputing per-call would have been a real
+        regression on top of the wall-clock budget this fix already has
+        to mind)."""
+        cached = self._pitch_bound_cache
+        if cached is not None and cached[0] is surface_tree:
+            return cached[1]
+        from . import routing
+        value = routing.surface_tree_pitch_bound_mm(
+            surface_tree, percentile=cfg.surface_pitch_bound_percentile)
+        self._pitch_bound_cache = (surface_tree, value)
+        return value
 
     # ---- transactions --------------------------------------------------
     def _touch_member(self, idx):

@@ -122,6 +122,32 @@ class SupportConfig:
     contact_depth_mm: float = 0.3
     # Sampling step along a segment when sweeping the clearance envelope.
     clearance_sample_step_mm: float = 0.3
+    # Percentile of routing.surface_tree_pitch_bound_mm's own nearest-
+    # neighbor-gap distribution used as the sampling-uncertainty term in
+    # an embed-end clearance exemption (tree.Forest.revalidate,
+    # verify.clearance_report -- p6-routing Finding B). A designed-embed
+    # anchor point (struts.py's candidates, bracing.py's model_rung feet)
+    # is drawn from a DIFFERENT sample than the surface_tree clearance is
+    # checked against, so the exemption must budget for how far that
+    # anchor could legitimately sit from surface_tree's nearest actual
+    # point. build_surface_tree's own docstring calls its approximation
+    # error "roughly the sample pitch" -- an AVERAGE-case claim for a
+    # random (non-gridded) point sample; measured on the real Weeping
+    # Treant model (nominal pitch_mm=0.3): p95=0.28mm, p99=0.35mm,
+    # max=0.61mm across 400k points, while the specific anchor that
+    # crashed engine.brace_and_size's hard assert (member owner=
+    # ('contact', 421)) measured a 0.537mm real gap -- inside the tail
+    # p95 misses but p99 covers with margin. 99.0 (not 100/max) is the
+    # deliberate choice: max over ~400k points is a single-outlier-
+    # sensitive statistic (one degenerate sliver triangle could set it
+    # arbitrarily high on some other mesh); p99 is high enough to close
+    # every measured Treant violation (all < 0.06mm, comfortably inside
+    # the p99-p95 margin) while staying a robust, mesh-representative
+    # measure of "how sparse does this cloud legitimately get" rather
+    # than chasing a single worst point (design-v4.md's gate-safety bar:
+    # "grows only as far as the anchor geometry itself requires, never
+    # further").
+    surface_pitch_bound_percentile: float = 99.0
 
     # ---- Printability angle limit (v3, from in-Chitubox review) ----
     # No support member may lean more than this many degrees from

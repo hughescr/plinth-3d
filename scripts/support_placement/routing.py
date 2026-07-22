@@ -118,6 +118,51 @@ def build_surface_tree(mesh, pitch_mm=0.4, max_points=150000, seed=0):
     return cKDTree(points)
 
 
+def surface_tree_pitch_bound_mm(surface_tree, percentile=95.0):
+    """p6-routing (Finding B): a DETERMINISTIC, per-tree, empirically-
+    measured bound on how sparse `surface_tree`'s own point cloud gets,
+    for use as the sampling-uncertainty term in an embed-end clearance
+    exemption (tree.Forest.revalidate, verify.clearance_report).
+
+    build_surface_tree's own docstring already documents its approximation
+    error as "roughly the sample pitch" -- true on AVERAGE for a uniform-
+    area random point sample (trimesh's Trimesh.sample() draws by area,
+    not on a jittered grid), but a random process has a long right tail:
+    individual points can sit meaningfully farther from their nearest
+    neighbor than the nominal pitch, and a designed-embed anchor point
+    (drawn from a DIFFERENT sample -- perception.delicacy_field's own
+    mesh.sample() call, not this tree) can land in exactly such a locally
+    sparse patch. Measured on the real Weeping Treant model: nominal
+    pitch_mm=0.3, but the worst embed-end clearance gap traced back to an
+    anchor ~0.537mm from surface_tree's nearest actual point -- the
+    average-case "roughly the pitch" claim understated this specific
+    cloud's local sparsity there.
+
+    Rather than inflating a generic constant, this measures the ACTUAL
+    cloud: for every point in `surface_tree`, its own nearest-OTHER-point
+    distance (a k=2 self-query -- the first hit is the point itself, at
+    distance 0), then returns the `percentile`th percentile of that
+    distribution. Same seed + same mesh => same cloud => same bound
+    (routing.build_surface_tree seeds trimesh's sample() explicitly), so
+    this is a per-mesh constant, not a magic slop term -- Craig's
+    fresh-layer-units doctrine: derive from a measured property, not a
+    guess. 95th percentile (not max) is a deliberate choice: a bound tight
+    enough to still catch a genuine mid-shaft clip (design-v4.md's gate-
+    safety bar -- "grows only as far as the anchor geometry itself
+    requires, never further"), while covering all but the sparsest ~5% of
+    the cloud's own local gaps, which is where a real embed-end anchor is
+    actually likely to land (delicacy_field's own sample density is
+    comparable to this tree's, not concentrated in the tail).
+    """
+    n = int(surface_tree.n)
+    if n < 2:
+        return 0.0
+    pts = np.asarray(surface_tree.data)
+    dist, _ = surface_tree.query(pts, k=2, workers=query_workers(n))
+    nn = dist[:, 1]  # column 0 is the point itself (distance 0); column 1 is its nearest OTHER point
+    return float(np.percentile(nn, percentile))
+
+
 def query_workers(n_points):
     """Thread count for a cKDTree.query of n_points. scipy spawns a FRESH
     thread pool per query call (no reuse); profiled on the 576k-face

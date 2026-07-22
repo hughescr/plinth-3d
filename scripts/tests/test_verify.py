@@ -34,6 +34,109 @@ def test_clearance_report_aggregates_route_violations(box_mesh, cfg):
     assert len(report) > 0
 
 
+# ------------------------------- p6-routing Finding A: embed-end masking --
+# verify.clearance_report is a DELIBERATE independent duplicate of tree.
+# Forest.revalidate's embed-end exemption (see that module's docstring for
+# the full inset = contact_depth_mm + pitch_bound_mm + r_end + standoff_mm
+# derivation) -- these mirror test_tree.py's mandatory masking tests
+# (a)/(b)/(c)/(d) against THIS function directly, independently, per the
+# orchestrator's ruling: apply the same formula as a second implementation,
+# never a shared helper across that boundary.
+def _dense_line(p_a, p_b, t_lo, t_hi, n=40, lateral_offset=None):
+    p_a = np.asarray(p_a, float)
+    p_b = np.asarray(p_b, float)
+    ts = np.linspace(t_lo, t_hi, n)
+    pts = p_a[None, :] + ts[:, None] * (p_b - p_a)[None, :]
+    if lateral_offset is not None:
+        pts = pts + np.asarray(lateral_offset, float)[None, :]
+    return pts
+
+
+def _dense_background_cloud(n_side=150, spacing_mm=0.3, offset=(1.0e5, 1.0e5, 1.0e5)):
+    """See test_tree.py's identical helper for the full rationale: a
+    deterministic dense grid standing in for "the rest of a real mesh's
+    surface_tree" so routing.surface_tree_pitch_bound_mm measures a
+    representative ~0.3mm density instead of a bare test point's own
+    incidental (often much larger) spacing."""
+    idx = np.arange(n_side, dtype=float)
+    gx, gy = np.meshgrid(idx, idx)
+    pts = np.stack([gx.ravel(), gy.ravel(), np.zeros(gx.size)], axis=1) * spacing_mm
+    return pts + np.asarray(offset, float)
+
+
+def _pitch_bound_mm(cfg):
+    return routing.surface_tree_pitch_bound_mm(
+        cKDTree(_dense_background_cloud()), percentile=cfg.surface_pitch_bound_percentile)
+
+
+def test_clearance_report_passes_on_surface_anchored_strut_nothing_else_nearby(box_mesh, cfg):
+    """MASKING TEST (a): mirrors test_tree.py's identical case against
+    verify.clearance_report directly -- fails on master's byte-identical
+    stale duplicate (fixed contact_depth_mm+0.2 inset)."""
+    anchor = np.array([0.0, 0.0, 0.0])
+    se = np.array([8.0, 0.0, 6.0])
+    r_end = 0.5
+    m = _m(se, anchor, 0.3, r_end, ("contact", 0), "strut", embed_end="p1")
+    surface_tree = cKDTree(np.vstack([[anchor], _dense_background_cloud()]))
+    report = verify.clearance_report(box_mesh, [m], cfg, surface_tree=surface_tree)
+    assert report == []
+
+
+def test_clearance_report_catches_midshaft_clip_just_outside_exemption_zone(box_mesh, cfg):
+    """MASKING TEST (b): dead-on mid-shaft clip just past the exemption
+    boundary must still be caught."""
+    anchor = np.array([0.0, 0.0, 0.0])
+    se = np.array([8.0, 0.0, 6.0])
+    r_end = 0.5
+    m = _m(se, anchor, 0.3, r_end, ("contact", 0), "strut", embed_end="p1")
+    pitch_bound = _pitch_bound_mm(cfg)
+    inset = cfg.contact_depth_mm + pitch_bound + r_end + cfg.standoff_mm
+    length = float(np.linalg.norm(se - anchor))
+    t_clip_lo = 1.0 - (inset + 1.5) / length
+    t_clip_hi = 1.0 - (inset + 0.05) / length
+    clip_cloud = _dense_line(se, anchor, t_clip_lo, t_clip_hi)
+    surface_tree = cKDTree(np.vstack([[anchor], clip_cloud, _dense_background_cloud()]))
+    report = verify.clearance_report(box_mesh, [m], cfg, surface_tree=surface_tree)
+    assert len(report) == 1
+    assert report[0]["member_idx"] == 0
+
+
+def test_clearance_report_no_exemption_when_embed_end_is_not_on_model_surface(box_mesh, cfg):
+    """MASKING TEST (c): embed_end=None gets no new exemption at all."""
+    p0 = np.array([8.0, 0.0, 6.0])
+    p1 = np.array([0.0, 0.0, 0.0])
+    r_end = 0.5
+    m = _m(p0, p1, 0.3, r_end, ("contact", 0), "trunk", embed_end=None)
+    length = float(np.linalg.norm(p1 - p0))
+    pitch_bound = _pitch_bound_mm(cfg)
+    inset = cfg.contact_depth_mm + pitch_bound + r_end + cfg.standoff_mm
+    clip_near_p1 = p1 + (p0 - p1) / length * (inset * 0.5)
+    surface_tree = cKDTree(np.array([clip_near_p1]))
+    report = verify.clearance_report(box_mesh, [m], cfg, surface_tree=surface_tree)
+    assert len(report) == 1
+
+
+def test_clearance_report_rejects_anchored_strut_that_also_clips_other_geometry(box_mesh, cfg):
+    """MASKING TEST (d): a legitimate anchor plus a separate, unrelated
+    mid-shaft clip must still be rejected."""
+    anchor = np.array([0.0, 0.0, 0.0])
+    se = np.array([8.0, 0.0, 6.0])
+    r_end = 0.5
+    length = float(np.linalg.norm(se - anchor))
+    pitch_bound = _pitch_bound_mm(cfg)
+    inset = cfg.contact_depth_mm + pitch_bound + r_end + cfg.standoff_mm
+    other_clip = anchor + (se - anchor) / length * (inset + 3.0)
+    background = _dense_background_cloud()
+    m = _m(se, anchor, 0.3, r_end, ("contact", 0), "strut", embed_end="p1")
+
+    clean_tree = cKDTree(np.vstack([[anchor], background]))
+    assert verify.clearance_report(box_mesh, [m], cfg, surface_tree=clean_tree) == []
+
+    surface_tree = cKDTree(np.vstack([[anchor, other_clip], background]))
+    report = verify.clearance_report(box_mesh, [m], cfg, surface_tree=surface_tree)
+    assert len(report) == 1
+
+
 def test_load_report_flags_clamped_overloaded_tip(cfg):
     # an absurdly large carried area forces the tip to clamp at r_max,
     # which can't actually carry that load at the target safety factor.

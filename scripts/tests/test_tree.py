@@ -120,6 +120,48 @@ def _dense_line(p_a, p_b, t_lo, t_hi, n=40, lateral_offset=None):
     return pts
 
 
+def _dense_background_cloud(n_side=150, spacing_mm=0.3, offset=(1.0e5, 1.0e5, 1.0e5)):
+    """A large, uniformly-spaced (deterministic, no RNG -- a plain grid,
+    not a random sample), FAR-AWAY point cloud standing in for "the rest
+    of a real mesh's surface_tree" in a masking test. A single bare test
+    point (or two) makes routing.surface_tree_pitch_bound_mm measure that
+    test's OWN incidental point spacing (often many mm, since test points
+    are placed for geometric convenience, not surface density) instead of
+    anything representative -- this cloud dilutes a test's own handful of
+    specific points to a negligible (<1%) fraction of the tree, the same
+    way a real ~hundred-thousand-point mesh cloud dwarfs any one strut's
+    local geometry in production. Every point in a regular grid has
+    nearest-neighbor distance EXACTLY `spacing_mm` (its immediate row/
+    column neighbor, grid corners included), so this cloud's own
+    contribution to ANY percentile is the single deterministic value
+    spacing_mm -- 0.3mm here, matching production's own measured p99
+    (table_mesh 0.359mm, toed_slab_mesh 0.360mm, real Weeping Treant
+    0.351mm at the default cfg.surface_pitch_bound_percentile=99) closely
+    enough to be representative while staying a clean, hand-verifiable
+    number. Offset far from any test geometry (1e5mm) so cKDTree's
+    distance_upper_bound pruning skips it entirely in every clearance
+    query -- it can only affect the density MEASUREMENT, never a
+    clearance DISTANCE."""
+    idx = np.arange(n_side, dtype=float)
+    gx, gy = np.meshgrid(idx, idx)
+    pts = np.stack([gx.ravel(), gy.ravel(), np.zeros(gx.size)], axis=1) * spacing_mm
+    return pts + np.asarray(offset, float)
+
+
+def _pitch_bound_mm(cfg):
+    """The pitch_bound_mm Forest.revalidate will itself measure for any
+    tree built as `_dense_background_cloud()` unioned with a test's own
+    (much smaller) point set -- computed via the REAL production function
+    (routing.surface_tree_pitch_bound_mm) against the background alone,
+    not hand-asserted, so a masking test's boundary placement is derived
+    from the same formula it's testing (per the original charter
+    instruction: "make the formula the same one your failing test
+    computes independently"), now extended to this second term."""
+    from support_placement import routing
+    return routing.surface_tree_pitch_bound_mm(
+        cKDTree(_dense_background_cloud()), percentile=cfg.surface_pitch_bound_percentile)
+
+
 # --------------------------------------- BUG 2: embed-end exemption (p6) --
 @pytest.mark.parametrize("r_end", [0.35, 0.5, 0.8])
 def test_revalidate_passes_on_surface_anchored_strut_with_nothing_else_nearby(cfg, r_end):
@@ -127,14 +169,20 @@ def test_revalidate_passes_on_surface_anchored_strut_with_nothing_else_nearby(cf
     nothing else nearby must PASS revalidate. FAILS ON MASTER (the old
     fixed contact_depth_mm+0.2=0.5mm inset is radius-independent -- its
     own worst-case bound, inset+sample_step-r-standoff, is negative for
-    every r >= 0.35mm at these cfg defaults)."""
+    every r >= 0.35mm at these cfg defaults). Includes a realistic
+    background cloud (production-representative pitch_bound_mm ~0.3mm,
+    Finding B) rather than a bare single point -- this is provably still
+    the HARDER case, not an easier one: a nonzero pitch_bound_mm only
+    ever WIDENS the exemption zone relative to the degenerate
+    single-point (pitch_bound_mm=0.0) tree, so passing here implies
+    passing with an even larger, more forgiving bound too."""
     anchor = np.array([0.0, 0.0, 0.0])   # p1 -- the designed on-surface foot
     se = np.array([8.0, 0.0, 6.0])       # p0 -- ~10mm strut, otherwise clear
     m = _member(se, anchor, r0=0.3, r1=r_end, kind="strut",
                 owner=("contact", 0), embed_end="p1")
     f = tm.Forest()
     f.add_member(m)
-    surface_tree = cKDTree(np.array([anchor]))  # only the anchor itself is "model"
+    surface_tree = cKDTree(np.vstack([[anchor], _dense_background_cloud()]))
     violations = f.revalidate(surface_tree, cfg)
     assert violations == []
     assert f.dirty_members() == []
@@ -151,22 +199,25 @@ def test_revalidate_passes_on_surface_anchored_model_rung_with_nothing_else_near
                 owner=("model_rung", 0), embed_end="p1")
     f = tm.Forest()
     f.add_member(m)
-    surface_tree = cKDTree(np.array([anchor]))
+    surface_tree = cKDTree(np.vstack([[anchor], _dense_background_cloud()]))
     violations = f.revalidate(surface_tree, cfg)
     assert violations == []
 
 
 def test_revalidate_catches_midshaft_clip_just_outside_exemption_zone(cfg):
     """MASKING TEST (b): a member whose MID-SHAFT passes illegally close
-    to the model, just past the new exemption boundary and far from the
-    embedded end otherwise, must still be caught -- the exemption may
-    grow only as far as the anchor geometry requires, never further."""
+    to the model, just past the new exemption boundary (contact_depth_mm
+    + pitch_bound_mm + r_end + standoff_mm, Finding B's completed
+    derivation) and far from the embedded end otherwise, must still be
+    caught -- the exemption may grow only as far as the anchor geometry
+    AND the measured cloud density require, never further."""
     anchor = np.array([0.0, 0.0, 0.0])
     se = np.array([8.0, 0.0, 6.0])
     r_end = 0.5
     m = _member(se, anchor, r0=0.3, r1=r_end, kind="strut",
                 owner=("contact", 0), embed_end="p1")
-    inset = cfg.contact_depth_mm + r_end + cfg.standoff_mm
+    pitch_bound = _pitch_bound_mm(cfg)
+    inset = cfg.contact_depth_mm + pitch_bound + r_end + cfg.standoff_mm
     length = float(np.linalg.norm(se - anchor))
     # dead-on the centerline, starting just past the exemption boundary
     t_clip_lo = 1.0 - (inset + 1.5) / length
@@ -174,7 +225,7 @@ def test_revalidate_catches_midshaft_clip_just_outside_exemption_zone(cfg):
     clip_cloud = _dense_line(se, anchor, t_clip_lo, t_clip_hi)
     f = tm.Forest()
     f.add_member(m)
-    surface_tree = cKDTree(np.vstack([[anchor], clip_cloud]))
+    surface_tree = cKDTree(np.vstack([[anchor], clip_cloud, _dense_background_cloud()]))
     violations = f.revalidate(surface_tree, cfg)
     assert len(violations) == 1
     assert violations[0]["member_idx"] == 0
@@ -195,7 +246,8 @@ def test_revalidate_catches_grazing_clip_at_various_angles_beyond_exemption(cfg,
     r0, r_end = 0.3, 0.5
     m = _member(se, anchor, r0=r0, r1=r_end, kind="strut",
                 owner=("contact", 0), embed_end="p1")
-    inset = cfg.contact_depth_mm + r_end + cfg.standoff_mm
+    pitch_bound = _pitch_bound_mm(cfg)
+    inset = cfg.contact_depth_mm + pitch_bound + r_end + cfg.standoff_mm
     length = float(np.linalg.norm(se - anchor))
     s = inset + 2.0  # comfortably beyond the exemption boundary
     t = 1.0 - s / length
@@ -205,7 +257,7 @@ def test_revalidate_catches_grazing_clip_at_various_angles_beyond_exemption(cfg,
     clip_cloud = _dense_line(se, anchor, t_lo, t_hi, n=15, lateral_offset=offset_dir * margin)
     f = tm.Forest()
     f.add_member(m)
-    surface_tree = cKDTree(np.vstack([[anchor], clip_cloud]))
+    surface_tree = cKDTree(np.vstack([[anchor], clip_cloud, _dense_background_cloud()]))
     violations = f.revalidate(surface_tree, cfg)
     assert len(violations) == 1
 
@@ -215,14 +267,17 @@ def test_revalidate_no_exemption_when_embed_end_is_not_on_model_surface(cfg):
     on-model anchor (embed_end=None -- a plate root or a bifurcation
     junction) must get NO new exemption at all: a clip well inside where
     an actual anchor's exemption zone WOULD have covered it must still
-    be caught."""
+    be caught. pitch_bound_mm never enters this member's formula at all
+    (embed_end is None, so neither exemption branch in revalidate ever
+    runs for it) -- no background cloud needed here."""
     p0 = np.array([8.0, 0.0, 6.0])
     p1 = np.array([0.0, 0.0, 0.0])
     r_end = 0.5
     m = _member(p0, p1, r0=0.3, r1=r_end, kind="trunk",
                 owner=("contact", 0), embed_end=None)
     length = float(np.linalg.norm(p1 - p0))
-    inset = cfg.contact_depth_mm + r_end + cfg.standoff_mm  # what WOULD apply if embed_end="p1"
+    pitch_bound = _pitch_bound_mm(cfg)
+    inset = cfg.contact_depth_mm + pitch_bound + r_end + cfg.standoff_mm  # what WOULD apply if embed_end="p1"
     clip_near_p1 = p1 + (p0 - p1) / length * (inset * 0.5)  # well inside that hypothetical zone
     f = tm.Forest()
     f.add_member(m)
@@ -242,18 +297,20 @@ def test_revalidate_rejects_anchored_strut_that_also_clips_other_geometry(cfg):
     se = np.array([8.0, 0.0, 6.0])
     r_end = 0.5
     length = float(np.linalg.norm(se - anchor))
-    inset = cfg.contact_depth_mm + r_end + cfg.standoff_mm
+    pitch_bound = _pitch_bound_mm(cfg)
+    inset = cfg.contact_depth_mm + pitch_bound + r_end + cfg.standoff_mm
     other_clip = anchor + (se - anchor) / length * (inset + 3.0)  # unrelated, well past the zone
+    background = _dense_background_cloud()
 
     f_clean = tm.Forest()
     f_clean.add_member(_member(se, anchor, r0=0.3, r1=r_end, kind="strut",
                                 owner=("contact", 0), embed_end="p1"))
-    assert f_clean.revalidate(cKDTree(np.array([anchor])), cfg) == []
+    assert f_clean.revalidate(cKDTree(np.vstack([[anchor], background])), cfg) == []
 
     f = tm.Forest()
     f.add_member(_member(se, anchor, r0=0.3, r1=r_end, kind="strut",
                           owner=("contact", 0), embed_end="p1"))
-    surface_tree = cKDTree(np.array([anchor, other_clip]))
+    surface_tree = cKDTree(np.vstack([[anchor, other_clip], background]))
     violations = f.revalidate(surface_tree, cfg)
     assert len(violations) == 1
 
