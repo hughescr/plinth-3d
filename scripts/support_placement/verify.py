@@ -12,7 +12,7 @@ doesn't choose orientation, it evaluates candidates handed to it.
 import numpy as np
 from scipy.spatial import cKDTree
 
-from . import perception, routing, joints, tree as tree_mod
+from . import perception, routing, joints, tree as tree_mod, removal as removal_mod
 
 
 def coverage_report(mesh, islands, contacts, cfg):
@@ -298,7 +298,8 @@ def connectivity_report(members, plate_z, cfg, surface_tree=None):
 
 
 def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cfg,
-                 plate_z, surface_tree=None, minima=None, forest=None):
+                 plate_z, surface_tree=None, minima=None, forest=None, unrouted=(),
+                 gate_on_removal=False):
     """Full design-v4.md #11 gate. Returns a report dict; `ok` is True
     only if all checks are clean: coverage, clearance, load, layer-island
     minima (only when the caller supplies `minima` from
@@ -311,10 +312,26 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
     both clearance_report and connectivity_report. `forest`, if given
     (a tree.Forest -- engine.run always supplies one in real runs, same
     optional pattern as `minima`/`surface_tree`), additionally gates
-    printability and Murray conservation; omitting it skips those two
-    sub-reports (reported as empty) rather than gating on them, since
-    murray_report needs the forest's parent/child topology, not just the
-    flat member list."""
+    printability and Murray conservation, and computes the design-v4.md
+    #10 removal_report (`unrouted`, the caller's honestly-unrouted
+    contact-index list, feeds forest_trees so a never-built stub isn't
+    reported as its own unremovable singleton tree); omitting `forest`
+    skips all three (reported as empty/None) rather than gating on them.
+
+    `gate_on_removal` (Phase 5 wiring decision, see the p5-removal commit
+    message; amended 2026-07-22): the charter (#10) originally called the
+    removal gate's hard-failure case -- a residual set no removal order
+    clears -- "a BLOCKER gate, wired into verify ok". Craig's 2026-07-22
+    ruling (design-v4.md #10 amendment) supersedes that language:
+    removal_report is diagnostic/report-only, removability is the least
+    important optimization axis, and nothing it finds -- caged sets
+    included -- may block an otherwise-superior layout. Per that ruling,
+    removal_report/removal_violations are ALWAYS computed and surfaced
+    (measurement only); gate_on_removal stays an inert toggle no shipped
+    caller sets (setting it True would still AND removal_violations into
+    `ok` mechanically, but doing so now runs against the charter, not
+    with it). Defaults False so no existing caller's acceptance behavior
+    changes by importing this function."""
     coverage = coverage_report(mesh, islands, contacts, cfg)
     clearance = clearance_report(mesh, members, cfg, surface_tree=surface_tree)
     load = load_report(carried_area_mm2, tip_r_mm, cfg)
@@ -324,14 +341,20 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
     if forest is not None:
         printability_violations = tree_mod.printability_report(forest.members, cfg)
         murray_violations = murray_report(forest, cfg)
+        removal = removal_mod.removal_report(forest, mesh, surface_tree, cfg, unrouted=unrouted)
     else:
         printability_violations = []
         murray_violations = []
+        removal = None
+    removal_violations = list(removal["blocked_trees"]) if removal is not None else []
     uncovered = [c for c in coverage if not c["covered"]]
+    ok = (len(uncovered) == 0 and len(clearance) == 0 and len(load) == 0
+          and len(unsupported_minima) == 0 and len(connectivity_violations) == 0
+          and len(printability_violations) == 0 and len(murray_violations) == 0)
+    if gate_on_removal:
+        ok = ok and len(removal_violations) == 0
     return dict(
-        ok=(len(uncovered) == 0 and len(clearance) == 0 and len(load) == 0
-            and len(unsupported_minima) == 0 and len(connectivity_violations) == 0
-            and len(printability_violations) == 0 and len(murray_violations) == 0),
+        ok=ok,
         uncovered_islands=uncovered,
         clearance_violations=clearance,
         load_violations=load,
@@ -339,6 +362,8 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
         connectivity_violations=connectivity_violations,
         printability_violations=printability_violations,
         murray_violations=murray_violations,
+        removal_report=removal,
+        removal_violations=removal_violations,
     )
 
 

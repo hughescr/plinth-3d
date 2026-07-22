@@ -175,7 +175,7 @@ def finish(mesh, pre, forest, unrouted, contacts, carried, tip_r,
     report = verify.self_verify(mesh, pre["islands"], routed_contacts, members,
                                  carried, tip_r, cfg, plate_z,
                                  surface_tree=surface_tree, minima=pre["minima"],
-                                 forest=forest)
+                                 forest=forest, unrouted=unrouted)
     volume = tree.volume_report(members, balls)
     log["n_unrouted"] = len(unrouted)
     return dict(members=members, balls=balls, verify=report, volume=volume,
@@ -204,7 +204,11 @@ def run(mesh, cfg, log=None):
             verify=dict(ok=True, uncovered_islands=[], clearance_violations=[],
                         load_violations=[], unsupported_minima=[],
                         connectivity_violations=[], printability_violations=[],
-                        murray_violations=[]),
+                        murray_violations=[],
+                        removal_report=dict(ok=True, n_trees=0, trees=[],
+                                             removal_order=[], removal_effort={},
+                                             blocked_trees=[]),
+                        removal_violations=[]),
             volume=dict(member_ml=0.0, ball_ml=0.0, total_ml=0.0, by_kind_ml={}),
             log=log)
 
@@ -244,7 +248,7 @@ def run(mesh, cfg, log=None):
         routed_contacts = [c for i, c in enumerate(contacts) if i not in unrouted]
         report = verify.self_verify(mesh, islands, routed_contacts, members, carried, tip_r,
                                      cfg, plate_z, surface_tree=surface_tree, minima=minima,
-                                     forest=forest)
+                                     forest=forest, unrouted=unrouted)
         log[f"verify_pass{fix_pass}"] = dict(
             ok=report["ok"],
             n_uncovered=len(report["uncovered_islands"]),
@@ -254,6 +258,18 @@ def run(mesh, cfg, log=None):
             n_connectivity_violations=len(report["connectivity_violations"]),
             n_printability_violations=len(report["printability_violations"]),
             n_murray_violations=len(report["murray_violations"]),
+            # Phase 5 (design-v4.md #10, amended 2026-07-22): MEASUREMENT
+            # ONLY -- self_verify's default gate_on_removal=False means
+            # this never affects `ok`. Per Craig's 2026-07-22 ruling
+            # (design-v4.md #10 amendment, superseding the earlier
+            # "BLOCKER gate" charter language), removal_report is
+            # diagnostic/report-only and removability is the least
+            # important optimization axis -- it must never block a
+            # layout that's otherwise superior on structural/physics
+            # quality or resin use, so gate_on_removal stays an inert
+            # (unused-by-any-caller) toggle rather than something wired
+            # to engine.run acceptance.
+            n_removal_blocked_trees=len(report["removal_violations"]),
         )
         if report["ok"] or not report["uncovered_islands"]:
             break

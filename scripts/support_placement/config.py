@@ -314,6 +314,27 @@ class SupportConfig:
     # doc's own stated default for the rewiring stage.
     rewire_time_cap_s: float = 30.0
 
+    # ---- Removal-leverage gate (design-v4.md #10, Craig's removal model) ----
+    # HANDLE: a contiguous member run at/above this radius is thick enough
+    # to grip by hand.
+    grip_handle_r_mm: float = 1.0
+    # HANDLE: the qualifying thick run must span at least this much
+    # contiguous length to count as a graspable handle.
+    grip_handle_len_mm: float = 10.0
+    # HANDLE: radial free space required around the handle run's axis,
+    # against BOTH the model and every other tree, before it counts as
+    # actually gripable (a thick-enough run wedged against the model or a
+    # neighbor is not a real handle).
+    grip_clear_mm: float = 5.0
+    # PEEL: distance a tree must translate clear along some outward-biased
+    # pull direction, without entering the model's standoff envelope,
+    # before it counts as removable. Translation is the conservative proxy
+    # for the real rotational peel motion (design-v4.md #10, #15).
+    pull_dist_mm: float = 15.0
+    # All four above are flagged rough-estimate-pending-calibration
+    # (design-v4.md #10): "the calibrator is Craig's hands on the first
+    # v4 print."
+
     # ---- Self-verify (design.md #9) ----
     # An island counts as "still unsupported" if any of its faces sits
     # farther than this multiple of target_spacing from the nearest
@@ -334,6 +355,8 @@ class SupportConfig:
             ],
             "rough_estimate_pending_calibration": [
                 "peel_pressure_pa", "shaft_drag_force_n", "max_deflection_mm",
+                "grip_handle_r_mm", "grip_handle_len_mm", "grip_clear_mm",
+                "pull_dist_mm",
             ],
         }
 

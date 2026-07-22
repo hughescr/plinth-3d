@@ -347,18 +347,44 @@ Per-tree accessibility, evaluated on final geometry:
   acceptable, more work, better than a failed print): iterate — remove
   every tree that currently passes HANDLE+PEEL given the remaining
   forest; repeat. Trees that only become removable after neighbors go
-  are counted into a `removal_effort` metric. **Hard failure = a
-  residual set no removal order can clear (mutually caging /
-  model-caged): that is a BLOCKER gate, wired into verify ok.** The
-  emitted run log includes the peel order. Removal effort is REPORTED,
-  not priced into the §4/§7 volume objective (verifier finding: the doc
-  claimed pricing no acceptance criterion implemented; simulating
-  ordered removal per candidate would blow the runtime budget).
-  Recorded follow-up: a cheap effort proxy in the objective if the
-  Treant's effort metric comes out high.
+  are counted into a `removal_effort` metric. A residual set no removal
+  order can clear (mutually caging / model-caged) is REPORTED in
+  `removal_report` as a hard-failure case — diagnostic only; it does NOT
+  gate verify's `ok` (see the 2026-07-22 amendment below, which
+  supersedes this section's original "BLOCKER gate, wired into verify
+  ok" language). The emitted run log includes the peel order. Removal
+  effort is REPORTED, not priced into the §4/§7 volume objective
+  (verifier finding: the doc claimed pricing no acceptance criterion
+  implemented; simulating ordered removal per candidate would blow the
+  runtime budget). Recorded follow-up: a cheap effort proxy in the
+  objective if the Treant's effort metric comes out high — subject to
+  the same "slight preference penalty, never a block" ceiling as the
+  amendment below.
 
 All four parameters are flagged rough-estimate-pending-calibration; the
 calibrator is Craig's hands on the first v4 print.
+
+**Amendment — Craig's ruling (2026-07-22), supersedes the "BLOCKER gate,
+wired into verify ok" language above:**
+
+> "unremovable support" is always not really true - they *are*
+> removable, just maybe a little harder to remove. I think a slight
+> preference penalty when making algorithmic choices against
+> hard-to-remove supports is enough it shouldn't BLOCK an
+> otherwise-superior (in terms of structural/physics support and
+> reduced resin use) support layout. Removability is the least
+> important axis for optimization.
+
+`removal_report` (HANDLE/PEEL/ordered-removal simulation, including the
+caged-set hard-failure case above) is diagnostic/report-only: nothing it
+finds, caged sets included, blocks verify's `ok`. Removability may at
+most inform algorithmic choices as a slight preference penalty — e.g. a
+rewire/pricing tie-break between otherwise-comparable candidates — and
+must never veto a layout that is superior on structural/physics support
+quality or resin use. That tie-break is not yet implemented; it is a
+recorded future item, same status as the removal-effort objective term
+above. Removability is the least important optimization axis, strictly
+below structural/physics quality and resin volume.
 
 ## 11. Verify gates
 
@@ -370,7 +396,8 @@ unchanged), `minima_report` (birth-region contact within
 `coverage_report`, `load_report` (every contact routed / strutted /
 honestly unrouted, exact accounting).
 
-New: `removal_report` (§10, hard gate on caged sets) and
+New: `removal_report` (§10; diagnostic/report-only per Craig's
+2026-07-22 ruling — never gates verify's `ok`, caged sets included) and
 `volume_report` — one accounting function (frustums + balls, ml,
 per-kind breakdown) used for EVERY baseline/target comparison. The v3.7
 Treant baseline is captured with this same function BEFORE trunks.py is
@@ -478,9 +505,13 @@ at every phase boundary (rsync → /tmp git → rsync .git back).
 - Baseline volume discrepancy (23.1 cm³ vs ~21.5 ml) unresolved until
   measured with the unified volume_report.
 - Removal PEEL check is translational; real removal has a rotational
-  hinge component. Conservative direction, but false BLOCKERs possible
-  in principle — if the gate over-fires on the Treant, the fix is a
-  hinge-sweep refinement, not gate removal.
+  hinge component. Conservative direction, but the report can undercall
+  a tree's true removability in principle — since `removal_report` is
+  diagnostic-only (2026-07-22 amendment, §10), this doesn't block
+  anything, but an over-conservative PEEL check still means a noisier
+  diagnostic and a noisier future preference-penalty signal. If PEEL
+  over-flags on the Treant, the fix is a hinge-sweep refinement to the
+  diagnostic's accuracy, not a gating change.
 - Root-split-vs-fat-root pricing (§6 ceilings) is a new topology
   degree of freedom; watch fixture A/B for the penalty constant
   reintroducing twin-column waste through the back door.
