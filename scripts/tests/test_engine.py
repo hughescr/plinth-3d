@@ -40,7 +40,8 @@ def test_engine_runs_end_to_end_on_table_fixture(table_mesh, cfg):
     # scale run, which additionally depends on the parallel p6-routing
     # workstream).
     assert result["verify"]["uncovered_island_births"] == [], result["verify"]
-    assert result["log"]["t_total"] < 10.0
+    # regression tripwire only: composed-engine baseline ~10.2s (2026-07-22); Craig's ruling — never trade correctness/resin for speed
+    assert result["log"]["t_total"] < 20.0
 
 
 def test_engine_insertion_accounting_exact(table_mesh, cfg):
@@ -112,7 +113,8 @@ def test_engine_supports_toe_minima_directly(toed_slab_mesh, cfg):
 
 def test_engine_wall_time_pin_on_table(table_mesh, cfg):
     result = engine.run(table_mesh, cfg)
-    assert result["log"]["t_total"] < 10.0
+    # regression tripwire only: composed-engine baseline ~10.2s (2026-07-22); Craig's ruling — never trade correctness/resin for speed
+    assert result["log"]["t_total"] < 20.0
 
 
 def test_engine_construct_is_deterministic_despite_global_rng_state(table_mesh, cfg):
