@@ -181,6 +181,17 @@ impl SupportRecord {
 }
 
 /// Attach-supports mode.
+///
+/// Group-header (the opaque per-section block between the index quad and the
+/// records) discard semantics — pinned so callers can rely on them:
+/// - `Replace` with a NON-EMPTY record list keeps the existing section's group
+///   header verbatim (or 400 zeros when the model had no prior section).
+/// - `Replace` with an EMPTY record list REMOVES the whole support section,
+///   discarding the group header along with it (there is no header without a
+///   section).
+/// - `Append` keeps the existing group header verbatim and never introduces a
+///   new one; an `Append` of an empty list onto a model with no supports is a
+///   no-op (nothing is created, nothing is discarded).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SupportMode {
     #[default]

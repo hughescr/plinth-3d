@@ -3,6 +3,7 @@
 
 use std::path::Path;
 
+use crate::codec::u32_of;
 use crate::consts::*;
 use crate::document::{bytes_to_f32, f32_to_bytes, Document, ModelEntry, Pristine};
 use crate::error::{ChituboxError, Result};
@@ -105,8 +106,12 @@ impl Project {
             raw[M_TRANSLATE_X..M_TRANSLATE_X + 4].copy_from_slice(&m.placement.x.to_le_bytes());
             raw[M_TRANSLATE_Y..M_TRANSLATE_Y + 4].copy_from_slice(&m.placement.y.to_le_bytes());
             raw[M_TRANSLATE_Z..M_TRANSLATE_Z + 4].copy_from_slice(&m.placement.z_lift.to_le_bytes());
+            // Fail early on an impossibly-large mesh rather than truncating the
+            // in-memory size field: `serialize` re-derives M_MESH_SIZE through
+            // the same `u32_of` guard (write.rs), so a silent `as u32` here
+            // would desync the cached record from the bytes that get written.
             raw[M_MESH_SIZE..M_MESH_SIZE + 4]
-                .copy_from_slice(&(mesh.len() as u32).to_le_bytes());
+                .copy_from_slice(&u32_of(mesh.len())?.to_le_bytes());
             built.push(ModelEntry {
                 raw_record: raw,
                 mesh,
@@ -539,8 +544,19 @@ impl Project {
     pub fn save(&self, path: &Path) -> Result<()> {
         let bytes = self.to_bytes()?;
         let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        // Temp name must be unique even across concurrent saves from the SAME
+        // process (pid alone collides): compose pid + a high-res timestamp + a
+        // process-lifetime-unique atomic sequence so two in-flight `save`s can
+        // never target the same tmp path and clobber each other's bytes.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+        let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
         let tmp = dir.join(format!(
-            ".chitubox_io.tmp.{}",
+            ".chitubox_io.tmp.{}.{nanos}.{seq}",
             std::process::id()
         ));
         {

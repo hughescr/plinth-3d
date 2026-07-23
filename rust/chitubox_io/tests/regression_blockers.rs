@@ -397,6 +397,77 @@ fn major2_stale_opaque_id_errors_not_retargets() {
     );
 }
 
+/// ROTATION CONSISTENCY (Blocker-1 positive guard + per-primitive coverage) —
+/// after ONE Z-rotation the three rotation primitives (model mesh, support-blob
+/// bytes, record endpoints) must all reflect the SAME single rotation. If a
+/// blob were rotated more than once (the aliasing bug), it would sit at a
+/// different angle than its endpoints; pinning all three to one angle closes
+/// that gap. Runs synthetically (no corpus), unlike the corpus-gated positive
+/// assembly test.
+#[test]
+fn rotation_consistency_all_primitives_agree() {
+    let mut p = one_model_project(); // model mesh first vertex = (1,0,0)
+    // Endpoints and blob first vertex are OFF the rotation axis so a 90 deg turn
+    // is observable on every primitive.
+    let rec = SupportRecord::new(
+        SegmentType::SHAFT,
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        0.5,
+        0.5,
+        TriangleSoup::new(vec![2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0]),
+    );
+    p.attach_supports(&[SupportBatch {
+        model_index: 0,
+        records: vec![rec],
+        mode: SupportMode::Replace,
+        lift_mm: None,
+    }])
+    .unwrap();
+
+    // angle-0 (pristine) values
+    let m0 = p.model_triangles(0).unwrap();
+    let s0 = p.supports(0).unwrap();
+    let mesh0 = [m0[0], m0[1]];
+    let blob0 = [s0[0].mesh.xyz[0], s0[0].mesh.xyz[1]];
+    let start0 = s0[0].start;
+    let end0 = s0[0].end;
+
+    p.rotate_model_z(0, 90.0).unwrap();
+
+    // 90 deg about +Z: (x, y) -> (-y, x). Every primitive must match this.
+    let rot90 = |x: f32, y: f32| (-y, x);
+    let m1 = p.model_triangles(0).unwrap();
+    let s1 = p.supports(0).unwrap();
+
+    let (emx, emy) = rot90(mesh0[0], mesh0[1]);
+    assert!(
+        (m1[0] - emx).abs() < 1e-4 && (m1[1] - emy).abs() < 1e-4,
+        "model mesh did not rotate 90 deg: got ({},{})",
+        m1[0],
+        m1[1]
+    );
+    let (ebx, eby) = rot90(blob0[0], blob0[1]);
+    assert!(
+        (s1[0].mesh.xyz[0] - ebx).abs() < 1e-4 && (s1[0].mesh.xyz[1] - eby).abs() < 1e-4,
+        "support blob angle disagrees with model mesh (double-rotation?): got ({},{})",
+        s1[0].mesh.xyz[0],
+        s1[0].mesh.xyz[1]
+    );
+    let (esx, esy) = rot90(start0[0], start0[1]);
+    assert!(
+        (s1[0].start[0] - esx).abs() < 1e-4 && (s1[0].start[1] - esy).abs() < 1e-4,
+        "record start endpoint angle disagrees: got {:?}",
+        s1[0].start
+    );
+    let (eex, eey) = rot90(end0[0], end0[1]);
+    assert!(
+        (s1[0].end[0] - eex).abs() < 1e-4 && (s1[0].end[1] - eey).abs() < 1e-4,
+        "record end endpoint angle disagrees: got {:?}",
+        s1[0].end
+    );
+}
+
 #[test]
 fn probe5_zero_triangle_stl_rejected() {
     let mut stl = vec![0u8; 80];
