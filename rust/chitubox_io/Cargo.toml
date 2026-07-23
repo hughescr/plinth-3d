@@ -1,0 +1,12 @@
+[package]
+name = "chitubox_io"
+version = "0.1.0"
+edition = "2021"
+description = "Read/write ChituBox Basic .chitubox project files: add STL models, attach support records, set placement. Pure Rust, wrapper-friendly, batch-first."
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+thiserror = "1"
+
+[profile.test]
+opt-level = 2

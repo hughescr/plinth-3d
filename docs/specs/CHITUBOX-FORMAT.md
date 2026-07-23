@@ -47,12 +47,19 @@ Confidence: **high** (all offsets derived and cross-checked on 7 files incl. mor
 | 0  | u32 | magic `0xAB231243` (2871202371) | identical in all 7 files |
 | 4  | u32 | **model count** | empty=0, sphere-cylinder=2, morel=1 |
 | 8  | u32 | **model-table offset** (`off8`, T above) | empty=420=EOF; = start of 680-byte records |
-| 12 | u32 | settings-blob size = `420` (0x1A4), constant | all files |
-| 16 | u32 | `412` (0x19C), constant (settings-related) | all files |
+| 12 | u32 | settings-blob size = `420` (0x1A4) when populated, **`0` in an empty project** | corrected during Rust impl 2026-07-23: NOT a constant — `empty.chitubox` holds 0 here, every populated file holds 420 |
+| 16 | u32 | `412` (0x19C), constant (settings-related) | all files incl. empty |
 | 20 | u32 | **support-section anchor** = `off8 + 680*model_count` | empty=0; else exactly end of model table |
 
 Derived invariant: `off20 == off8 + 680*model_count` (empty writes 0). Confirmed on
 every populated file (2-model diff = 1360 = 2*680; morel diff = 680 = 1*680).
+
+**Correction (Rust impl, 2026-07-23):** field 12 is not the pinned constant the
+first recon claimed. `empty.chitubox` carries `0`; all populated specimens carry
+`420`. `chitubox_io` therefore stores/re-emits field 12 verbatim (preserving
+byte-identity) and, on a from-scratch build, flips it from 0 to 420 when the
+first model is added — matching every native populated file. Only field 16 (412)
+is treated as a pinned drift-detector constant.
 
 ---
 
