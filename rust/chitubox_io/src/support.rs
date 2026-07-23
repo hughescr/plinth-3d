@@ -21,7 +21,10 @@ pub(crate) fn build_section(
     let mut raw_records: Vec<[u8; SEG_RECORD_LEN]> = Vec::with_capacity(records.len());
     let mut off: usize = 0;
     for (i, r) in records.iter().enumerate() {
-        if r.mesh.xyz.len() % FLOATS_PER_TRI != 0 {
+        // Reject a zero-triangle record mesh: it writes a mesh_len=0 record
+        // whose ChituBox semantics are unprobed (probe5 rationale) and is
+        // inconsistent with the model path, which rejects an empty soup.
+        if r.mesh.xyz.is_empty() || r.mesh.xyz.len() % FLOATS_PER_TRI != 0 {
             return Err(ChituboxError::BadTriangleBuffer { len: r.mesh.xyz.len() });
         }
         if !all_finite(&r.mesh.xyz) {

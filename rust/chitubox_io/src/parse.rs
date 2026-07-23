@@ -253,6 +253,9 @@ fn parse_support(bytes: &[u8], m: usize, sptr: usize, mesh_end: usize) -> Result
         });
     }
     let mut records = Vec::with_capacity(n_rec);
+    // (start, end) of every record's referenced blob, for the disjointness
+    // audit below.
+    let mut blob_ivals: Vec<(usize, usize)> = Vec::with_capacity(n_rec);
     for k in 0..n_rec {
         let o = rec_off + k * SEG_RECORD_LEN;
         let magic = read_u32(bytes, o, "record magic")?;
@@ -272,9 +275,33 @@ fn parse_support(bytes: &[u8], m: usize, sptr: usize, mesh_end: usize) -> Result
                 ),
             });
         }
+        // A non-empty blob participates in the disjointness audit. Zero-length
+        // blobs reference no bytes and cannot alias, so they are exempt.
+        if bl > 0 {
+            blob_ivals.push((bo, be));
+        }
         let mut r = [0u8; SEG_RECORD_LEN];
         r.copy_from_slice(&bytes[o..o + SEG_RECORD_LEN]);
         records.push(r);
+    }
+
+    // Reject aliased / overlapping record blob ranges. `rotate_one` rotates
+    // each record's referenced range independently, so two records sharing (or
+    // partially overlapping) a byte range would rotate that range MORE THAN
+    // ONCE — silently detaching the shared support mesh from its record
+    // endpoints (rigid-assembly ruling violated), while still passing every
+    // advertised invariant. No corpus specimen aliases; a well-formed section
+    // has strictly disjoint (touching-allowed) blobs.
+    blob_ivals.sort_unstable();
+    for w in blob_ivals.windows(2) {
+        if w[1].0 < w[0].1 {
+            return Err(ChituboxError::SupportSectionMalformed {
+                detail: format!(
+                    "model {m}: record blob ranges alias/overlap ([{}..{}] and [{}..{}])",
+                    w[0].0, w[0].1, w[1].0, w[1].1
+                ),
+            });
+        }
     }
 
     Ok(RawSupport {

@@ -57,7 +57,7 @@ pub(crate) fn parse_binary_stl(bytes: &[u8]) -> Result<Vec<f32>> {
     if !all_finite(&xyz) {
         return Err(ChituboxError::NonFiniteValue { context: "stl" });
     }
-    Ok(center(xyz))
+    center(xyz)
 }
 
 fn looks_like_binary(bytes: &[u8]) -> bool {
@@ -77,7 +77,14 @@ fn looks_like_binary(bytes: &[u8]) -> bool {
 }
 
 /// Center an already-decoded 9-f32/tri stream on its bbox center, in place.
-pub(crate) fn center(mut xyz: Vec<f32>) -> Vec<f32> {
+///
+/// The bbox-center `(min+max)*0.5` overflows `f32` when both extremes of an
+/// axis are near `f32::MAX` with the same sign: the sum saturates to ±inf, the
+/// center becomes ±inf, and every centered vertex becomes ∓inf — non-finite
+/// output from all-finite input. That would slip past the caller's intake
+/// `all_finite` gate and bake inf/nan into the file, so re-assert finiteness
+/// AFTER centering and reject overflow here.
+pub(crate) fn center(mut xyz: Vec<f32>) -> Result<Vec<f32>> {
     let (min, max) = bbox(&xyz);
     let c = [
         (min[0] + max[0]) * 0.5,
@@ -89,7 +96,12 @@ pub(crate) fn center(mut xyz: Vec<f32>) -> Vec<f32> {
         chunk[1] -= c[1];
         chunk[2] -= c[2];
     }
-    xyz
+    if !all_finite(&xyz) {
+        return Err(ChituboxError::NonFiniteValue {
+            context: "centered geometry (coordinate magnitude overflows f32)",
+        });
+    }
+    Ok(xyz)
 }
 
 /// Bounding box of a flat 3-f32/vertex stream. Returns zeros for an empty

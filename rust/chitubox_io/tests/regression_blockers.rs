@@ -27,6 +27,24 @@ fn one_model_project() -> Project {
     p
 }
 
+fn two_model_project() -> Project {
+    let mut p = Project::new_empty();
+    p.add_models(&[
+        ModelSource {
+            name: "a".into(),
+            geometry: ModelGeometry::Triangles(TriangleSoup::new(tri_centered())),
+            placement: Placement::default(),
+        },
+        ModelSource {
+            name: "b".into(),
+            geometry: ModelGeometry::Triangles(TriangleSoup::new(tri_centered())),
+            placement: Placement::default(),
+        },
+    ])
+    .unwrap();
+    p
+}
+
 fn support_rec() -> SupportRecord {
     SupportRecord::new(
         SegmentType::SHAFT,
@@ -208,6 +226,175 @@ fn probe6_empty_group_header_parses_and_saves_byte_identical() {
         .to_bytes()
         .expect("PROBE6: clean save of empty-header file failed => invariant (a) broken");
     assert_eq!(out, nb, "PROBE6: parse-then-save not byte-identical");
+}
+
+// ---- second adversarial wave: two confirmed blockers + two majors ----------
+
+/// BLOCKER 1 — two support records aliasing the SAME blob byte-range must be
+/// rejected at parse. Otherwise `rotate_models_z` rotates the shared range once
+/// per referencing record (twice here), leaving the blob at 2x the angle of its
+/// record endpoints — a silently corrupted, invariant-passing file.
+#[test]
+fn blocker1_aliased_support_blob_ranges_rejected_at_parse() {
+    // record layout: S_MESH_OFF = 40, S_MESH_LEN = 44 within each 72-byte record
+    const S_MESH_OFF: usize = 40;
+    const SEG_RECORD_LEN: usize = 72;
+    let mut p = one_model_project();
+    p.attach_supports(&[SupportBatch {
+        model_index: 0,
+        records: vec![support_rec(), support_rec()],
+        mode: SupportMode::Replace,
+        lift_mm: None,
+    }])
+    .unwrap();
+    let mut bytes = p.to_bytes().unwrap();
+    let off8 = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let sptr = u32::from_le_bytes(bytes[off8 + 268..off8 + 272].try_into().unwrap()) as usize;
+    assert!(sptr != 0);
+    let rec_off = u32::from_le_bytes(bytes[sptr + 4..sptr + 8].try_into().unwrap()) as usize;
+    // point record 1's (off,len) at record 0's blob -> exact alias
+    let r0 = rec_off + S_MESH_OFF;
+    let r1 = rec_off + SEG_RECORD_LEN + S_MESH_OFF;
+    let alias: [u8; 8] = bytes[r0..r0 + 8].try_into().unwrap();
+    bytes[r1..r1 + 8].copy_from_slice(&alias);
+    // the parser must reject the aliased section rather than accept a file that
+    // rotate would silently corrupt.
+    assert!(
+        Project::from_bytes(bytes).is_err(),
+        "BLOCKER1: aliased support-blob ranges accepted at parse"
+    );
+}
+
+/// BLOCKER 2a — finite-in / non-finite-out: a TriangleSoup with coordinates
+/// near f32::MAX (same sign) overflows the bbox-center `(min+max)*0.5` to inf,
+/// baking -inf into every vertex. The post-center finiteness barrier must
+/// reject it (the intake all_finite gate passes such input).
+#[test]
+fn blocker2a_center_overflow_rejected() {
+    let big = 3.0e38f32;
+    let mut p = Project::new_empty();
+    let r = p.add_models(&[ModelSource {
+        name: "overflow".into(),
+        geometry: ModelGeometry::Triangles(TriangleSoup::new(vec![big; 9])),
+        placement: Placement::default(),
+    }]);
+    assert!(
+        r.is_err(),
+        "BLOCKER2a: center overflow produced finite-in/non-finite-out geometry"
+    );
+    // and nothing was committed
+    assert_eq!(p.model_count(), 0, "BLOCKER2a: partial mutation on failure");
+}
+
+/// BLOCKER 2b — rotation rebake overflow: a finite, symmetric, large-extent
+/// mesh centers fine (bbox center = 0), but `x*c - y*s` at 45 deg overflows
+/// f32::MAX. The rebake must re-assert finiteness and reject, with NO partial
+/// mutation (the model's geometry is unchanged after the failed rotate).
+#[test]
+fn blocker2b_rotation_overflow_rejected_no_partial_mutation() {
+    let big = 3.0e38f32;
+    // verts span ±big on x and y so bbox center is 0 (centering is a no-op)
+    let soup = vec![big, -big, 0.0, -big, big, 0.0, 0.0, 0.0, 0.0];
+    let mut p = Project::new_empty();
+    p.add_models(&[ModelSource {
+        name: "rot".into(),
+        geometry: ModelGeometry::Triangles(TriangleSoup::new(soup)),
+        placement: Placement::default(),
+    }])
+    .expect("centered symmetric large mesh is finite");
+    let before = p.model_triangles(0).unwrap();
+    let r = p.rotate_model_z(0, 45.0);
+    assert!(r.is_err(), "BLOCKER2b: rotation overflow baked non-finite geometry");
+    let after = p.model_triangles(0).unwrap();
+    assert_eq!(before, after, "BLOCKER2b: failed rotate left partial mutation");
+}
+
+/// MAJOR 1 — a zero-triangle support-record mesh must be rejected on attach
+/// (mirrors the model path and probe5): its mesh_len=0 record has unprobed
+/// ChituBox semantics.
+#[test]
+fn major1_empty_support_record_mesh_rejected() {
+    let mut p = one_model_project();
+    let empty = SupportRecord::new(
+        SegmentType::SHAFT,
+        [0.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0],
+        0.5,
+        0.5,
+        TriangleSoup::new(vec![]),
+    );
+    let r = p.attach_supports(&[SupportBatch {
+        model_index: 0,
+        records: vec![empty],
+        mode: SupportMode::Replace,
+        lift_mm: None,
+    }]);
+    assert!(r.is_err(), "MAJOR1: zero-triangle support record accepted");
+}
+
+/// MAJOR 2 — opaque ids are keyed on (kind, model_index), not enumeration
+/// position: after removing model 0's supports, model 0's stale group_header id
+/// must ERROR, never silently retarget model 1's group_header.
+#[test]
+fn major2_stale_opaque_id_errors_not_retargets() {
+    let mut p = two_model_project();
+    // attach supports to BOTH models so two group_header regions exist
+    p.attach_supports(&[
+        SupportBatch {
+            model_index: 0,
+            records: vec![support_rec()],
+            mode: SupportMode::Replace,
+            lift_mm: None,
+        },
+        SupportBatch {
+            model_index: 1,
+            records: vec![support_rec()],
+            mode: SupportMode::Replace,
+            lift_mm: None,
+        },
+    ])
+    .unwrap();
+    // grab model 0's group_header id
+    let regions = p.opaque_regions();
+    let gh0 = regions
+        .iter()
+        .find(|r| r.kind == "group_header" && r.model_index == Some(0))
+        .expect("model 0 group_header region");
+    let stale_id = gh0.id;
+    // capture model 1's group_header bytes (must stay untouched)
+    let gh1_before = {
+        let gh1 = regions
+            .iter()
+            .find(|r| r.kind == "group_header" && r.model_index == Some(1))
+            .expect("model 1 group_header region");
+        p.opaque_region_bytes(gh1.id).unwrap()
+    };
+    // remove model 0's supports -> the enumeration shifts; a positional id
+    // scheme would now map stale_id onto model 1's group_header.
+    p.attach_supports(&[SupportBatch {
+        model_index: 0,
+        records: vec![],
+        mode: SupportMode::Replace,
+        lift_mm: None,
+    }])
+    .unwrap();
+    let sentinel = vec![0xAAu8; gh1_before.len()];
+    let r = p.overwrite_opaque_region_unchecked(stale_id, &sentinel);
+    assert!(
+        r.is_err(),
+        "MAJOR2: stale opaque id silently retargeted after supports removed"
+    );
+    // model 1's group_header must be intact (not clobbered by the sentinel)
+    let gh1 = p
+        .opaque_regions()
+        .into_iter()
+        .find(|r| r.kind == "group_header" && r.model_index == Some(1))
+        .expect("model 1 group_header still present");
+    assert_eq!(
+        p.opaque_region_bytes(gh1.id).unwrap(),
+        gh1_before,
+        "MAJOR2: model 1 group_header was clobbered via stale id"
+    );
 }
 
 #[test]

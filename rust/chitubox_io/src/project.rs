@@ -94,7 +94,7 @@ impl Project {
                     if !all_finite(&soup.xyz) {
                         return Err(ChituboxError::NonFiniteValue { context: "triangles" });
                     }
-                    center(soup.xyz.clone())
+                    center(soup.xyz.clone())?
                 }
             };
             let mesh = f32_to_bytes(&centered);
@@ -249,17 +249,35 @@ impl Project {
                 return Err(ChituboxError::NonFiniteValue { context: "rotation" });
             }
         }
+        // Two-phase to preserve the no-partial-mutation invariant: STAGE every
+        // rotation purely (reading `self`, mutating nothing), which also runs
+        // the post-rotation finiteness checks; only if ALL stages succeed do we
+        // COMMIT. A finite coordinate near `f32::MAX` can overflow to inf/nan
+        // under `x*c - y*s`, so the rebake output is re-checked against the
+        // crate's finiteness barrier before it can be written.
+        let mut staged = Vec::with_capacity(rotations.len());
         for r in rotations {
-            self.rotate_one(r.model_index, r.delta_deg);
+            staged.push(self.stage_rotation(r.model_index, r.delta_deg)?);
+        }
+        for st in staged {
+            self.commit_rotation(st);
         }
         self.mark_dirty();
         Ok(())
     }
 
-    fn rotate_one(&mut self, index: usize, delta_deg: f32) {
-        let me = &mut self.doc.models[index];
-        // snapshot pristine geometry before the first rotation
-        if me.pristine.is_none() {
+    /// Compute the rotated geometry for one model without mutating anything,
+    /// validating that every produced coordinate is finite. Batch indices are
+    /// deduplicated upstream, so per-model staging is independent.
+    fn stage_rotation(&self, index: usize, delta_deg: f32) -> Result<StagedRotation> {
+        let me = &self.doc.models[index];
+        // Rebake source: the existing pristine snapshot, or a fresh one to
+        // install on commit (taken before the FIRST rotation of this model).
+        let fresh_pristine;
+        let pristine: &Pristine = if let Some(p) = &me.pristine {
+            fresh_pristine = None;
+            p
+        } else {
             let record_geo = me
                 .support
                 .as_ref()
@@ -278,24 +296,29 @@ impl Project {
                         .collect()
                 })
                 .unwrap_or_default();
-            me.pristine = Some(Pristine {
+            fresh_pristine = Some(Pristine {
                 mesh: me.mesh.clone(),
                 smesh: me.support.as_ref().map(|s| s.smesh.clone()).unwrap_or_default(),
                 record_geo,
             });
-        }
-        me.session_z_rot_deg += delta_deg;
-        let angle = me.session_z_rot_deg;
-        let (s, c) = angle.to_radians().sin_cos();
-        let pristine = me.pristine.as_ref().unwrap();
+            fresh_pristine.as_ref().unwrap()
+        };
+
+        let new_angle = me.session_z_rot_deg + delta_deg;
+        let (s, c) = new_angle.to_radians().sin_cos();
 
         // rebake model mesh from pristine
         let mut mesh_f = bytes_to_f32(&pristine.mesh);
         rotate_z_with(&mut mesh_f, s, c);
-        me.mesh = f32_to_bytes(&mesh_f);
+        if !all_finite(&mesh_f) {
+            return Err(ChituboxError::NonFiniteValue {
+                context: "rotated model mesh (coordinate magnitude overflows f32)",
+            });
+        }
+        let mesh = f32_to_bytes(&mesh_f);
 
         // rebake support geometry (mesh blobs + record endpoints) from pristine
-        if let Some(section) = me.support.as_mut() {
+        let (smesh, endpoints) = if let Some(section) = &me.support {
             // Rotate ONLY the byte ranges each record references as its mesh
             // blob. Every other smesh byte — inter-blob padding, unreferenced
             // trailing bytes, or a non-4-aligned remainder — is unknown data
@@ -309,22 +332,67 @@ impl Project {
                 let abs = u32::from_le_bytes(rec[S_MESH_OFF..S_MESH_OFF + 4].try_into().unwrap());
                 let len =
                     u32::from_le_bytes(rec[S_MESH_LEN..S_MESH_LEN + 4].try_into().unwrap()) as usize;
-                // Relative start within smesh (parse guaranteed containment; guard anyway).
-                let Some(start) = abs.checked_sub(orig).map(|v| v as usize) else {
-                    continue;
-                };
-                let Some(end) = start.checked_add(len) else {
-                    continue;
-                };
+                // Parse guarantees containment; on the impossible violation
+                // return an error rather than rotating endpoints while leaving
+                // the blob unrotated (silent desync).
+                let start = abs.checked_sub(orig).map(|v| v as usize).ok_or(
+                    ChituboxError::SupportSectionMalformed {
+                        detail: "record mesh_off precedes smesh start".into(),
+                    },
+                )?;
+                let end = start.checked_add(len).ok_or(ChituboxError::ArithmeticOverflow {
+                    context: "rotate blob range",
+                })?;
                 if end > smesh_len {
-                    continue;
+                    return Err(ChituboxError::SupportSectionMalformed {
+                        detail: "record blob exceeds smesh during rotate".into(),
+                    });
                 }
-                rotate_z_bytes_in_place(&mut new_smesh[start..end], s, c);
+                if !rotate_z_bytes_in_place(&mut new_smesh[start..end], s, c) {
+                    return Err(ChituboxError::NonFiniteValue {
+                        context: "rotated support blob (coordinate magnitude overflows f32)",
+                    });
+                }
             }
-            section.smesh = new_smesh;
-            for (rec, (p_start, p_end)) in section.records.iter_mut().zip(&pristine.record_geo) {
+            let mut eps = Vec::with_capacity(section.records.len());
+            for (p_start, p_end) in &pristine.record_geo {
                 let ns = rotate_z_point(*p_start, s, c);
                 let ne = rotate_z_point(*p_end, s, c);
+                if !ns.iter().chain(ne.iter()).all(|v| v.is_finite()) {
+                    return Err(ChituboxError::NonFiniteValue {
+                        context: "rotated support endpoint (coordinate magnitude overflows f32)",
+                    });
+                }
+                eps.push((ns, ne));
+            }
+            (Some(new_smesh), eps)
+        } else {
+            (None, Vec::new())
+        };
+
+        Ok(StagedRotation {
+            index,
+            install_pristine: fresh_pristine,
+            session_z_rot_deg: new_angle,
+            mesh,
+            smesh,
+            endpoints,
+        })
+    }
+
+    /// Apply a previously-staged, finiteness-validated rotation.
+    fn commit_rotation(&mut self, st: StagedRotation) {
+        let me = &mut self.doc.models[st.index];
+        if let Some(p) = st.install_pristine {
+            me.pristine = Some(p);
+        }
+        me.session_z_rot_deg = st.session_z_rot_deg;
+        me.mesh = st.mesh;
+        if let Some(section) = me.support.as_mut() {
+            if let Some(sm) = st.smesh {
+                section.smesh = sm;
+            }
+            for (rec, (ns, ne)) in section.records.iter_mut().zip(&st.endpoints) {
                 for k in 0..3 {
                     rec[S_START + k * 4..S_START + k * 4 + 4].copy_from_slice(&ns[k].to_le_bytes());
                     rec[S_END + k * 4..S_END + k * 4 + 4].copy_from_slice(&ne[k].to_le_bytes());
@@ -548,62 +616,98 @@ impl Project {
         Ok(())
     }
 
-    /// Resolve an opaque id to its location using the SAME enumeration order
-    /// as `opaque_locs`.
+    /// Resolve an opaque id to its location. Ids are keyed on (kind,
+    /// model_index) — NOT enumeration position — so a mutation that changes how
+    /// many regions precede a target (e.g. removing an earlier model's
+    /// supports) can never silently retarget a stale id onto a different
+    /// region: the id still names its original (kind, model_index), and if that
+    /// region no longer exists the resolution fails instead of aliasing.
     fn resolve_opaque(&self, id: OpaqueRegionId) -> Option<OpaqueLoc> {
-        let mut cur = 0u32;
-        let mut take = |loc: OpaqueLoc| -> Option<OpaqueLoc> {
-            let hit = OpaqueRegionId(cur) == id;
-            cur += 1;
-            hit.then_some(loc)
-        };
-        if let Some(l) = take(OpaqueLoc::Settings) {
-            return Some(l);
+        let kind = id.0 >> OPAQUE_KIND_SHIFT;
+        let index = (id.0 & OPAQUE_INDEX_MASK) as usize;
+        match kind {
+            OPAQUE_SETTINGS if index == 0 => Some(OpaqueLoc::Settings),
+            OPAQUE_PREVIEW if index == 0 => Some(OpaqueLoc::Preview),
+            OPAQUE_FRONT_FILLER if index == 0 => Some(OpaqueLoc::FrontFiller),
+            OPAQUE_GROUP_HEADER => self
+                .doc
+                .models
+                .get(index)
+                .filter(|m| m.support.is_some())
+                .map(|_| OpaqueLoc::GroupHeader(index)),
+            OPAQUE_POST_FILLER => self
+                .doc
+                .models
+                .get(index)
+                .filter(|m| !m.post_filler.is_empty())
+                .map(|_| OpaqueLoc::PostFiller(index)),
+            _ => None,
         }
-        if let Some(l) = take(OpaqueLoc::Preview) {
-            return Some(l);
-        }
-        if let Some(l) = take(OpaqueLoc::FrontFiller) {
-            return Some(l);
-        }
-        for (i, me) in self.doc.models.iter().enumerate() {
-            if me.support.is_some() {
-                if let Some(l) = take(OpaqueLoc::GroupHeader(i)) {
-                    return Some(l);
-                }
-            }
-            if !me.post_filler.is_empty() {
-                if let Some(l) = take(OpaqueLoc::PostFiller(i)) {
-                    return Some(l);
-                }
-            }
-        }
-        None
     }
 
     /// Deterministic enumeration of contiguous opaque regions:
     /// settings, preview, front_filler, then per model (group_header, post_filler).
+    /// Each id is the (kind, model_index) key, stable under unrelated mutations.
     fn opaque_locs(&self) -> Vec<(OpaqueRegionId, &'static str, Option<usize>, Vec<u8>)> {
         let mut out = Vec::new();
-        let mut id = 0u32;
-        let mut push =
-            |kind: &'static str, mi: Option<usize>, bytes: Vec<u8>, id: &mut u32| {
-                out.push((OpaqueRegionId(*id), kind, mi, bytes));
-                *id += 1;
-            };
-        push("settings", None, self.doc.settings.clone(), &mut id);
-        push("preview", None, self.doc.preview.clone(), &mut id);
-        push("front_filler", None, self.doc.front_filler.clone(), &mut id);
+        out.push((
+            encode_opaque(OPAQUE_SETTINGS, 0),
+            "settings",
+            None,
+            self.doc.settings.clone(),
+        ));
+        out.push((
+            encode_opaque(OPAQUE_PREVIEW, 0),
+            "preview",
+            None,
+            self.doc.preview.clone(),
+        ));
+        out.push((
+            encode_opaque(OPAQUE_FRONT_FILLER, 0),
+            "front_filler",
+            None,
+            self.doc.front_filler.clone(),
+        ));
         for (i, me) in self.doc.models.iter().enumerate() {
             if let Some(s) = &me.support {
-                push("group_header", Some(i), s.group_header.clone(), &mut id);
+                out.push((
+                    encode_opaque(OPAQUE_GROUP_HEADER, i),
+                    "group_header",
+                    Some(i),
+                    s.group_header.clone(),
+                ));
             }
             if !me.post_filler.is_empty() {
-                push("gap", Some(i), me.post_filler.clone(), &mut id);
+                out.push((
+                    encode_opaque(OPAQUE_POST_FILLER, i),
+                    "gap",
+                    Some(i),
+                    me.post_filler.clone(),
+                ));
             }
         }
         out
     }
+}
+
+// -- opaque-id encoding -----------------------------------------------------
+// An OpaqueRegionId encodes (kind, model_index): the high byte is the kind
+// discriminant, the low 24 bits the model index (0 for the singleton regions).
+// This makes an id a stable *identity* rather than an enumeration ordinal, so a
+// stale id can never silently retarget a different region after an intervening
+// mutation (MAJOR 2). 24 bits caps the model index at ~16M — unreachable.
+const OPAQUE_KIND_SHIFT: u32 = 24;
+const OPAQUE_INDEX_MASK: u32 = (1 << OPAQUE_KIND_SHIFT) - 1;
+const OPAQUE_SETTINGS: u32 = 0;
+const OPAQUE_PREVIEW: u32 = 1;
+const OPAQUE_FRONT_FILLER: u32 = 2;
+const OPAQUE_GROUP_HEADER: u32 = 3;
+const OPAQUE_POST_FILLER: u32 = 4;
+
+fn encode_opaque(kind: u32, index: usize) -> OpaqueRegionId {
+    // index is bounded by model_count, itself bounded by the u32 model table;
+    // mask defensively so the kind bits are never clobbered.
+    OpaqueRegionId((kind << OPAQUE_KIND_SHIFT) | (index as u32 & OPAQUE_INDEX_MASK))
 }
 
 // -- free helpers -----------------------------------------------------------
@@ -634,7 +738,9 @@ fn append_into(
         .checked_add(sec.smesh.len() as u32)
         .ok_or(ChituboxError::ArithmeticOverflow { context: "append offset" })?;
     for r in records {
-        if r.mesh.xyz.len() % FLOATS_PER_TRI != 0 {
+        // Zero-triangle record mesh rejected on the write path (mirrors
+        // build_section and the model path; ChituBox semantics unprobed).
+        if r.mesh.xyz.is_empty() || r.mesh.xyz.len() % FLOATS_PER_TRI != 0 {
             return Err(ChituboxError::BadTriangleBuffer { len: r.mesh.xyz.len() });
         }
         if !all_finite(&r.mesh.xyz)
@@ -665,6 +771,21 @@ fn append_into(
             .ok_or(ChituboxError::ArithmeticOverflow { context: "append offset" })?;
     }
     Ok(())
+}
+
+/// A fully-computed, finiteness-validated rotation for one model, produced by
+/// `stage_rotation` and applied by `commit_rotation`. Holding owned bytes lets
+/// the whole batch be validated before any model is mutated.
+struct StagedRotation {
+    index: usize,
+    /// pristine snapshot to install (Some only on a model's first rotation)
+    install_pristine: Option<Pristine>,
+    session_z_rot_deg: f32,
+    mesh: Vec<u8>,
+    /// rebaked support mesh (None when the model has no supports)
+    smesh: Option<Vec<u8>>,
+    /// rotated (start, end) per support record
+    endpoints: Vec<([f32; 3], [f32; 3])>,
 }
 
 /// Which contiguous opaque region an id names.
