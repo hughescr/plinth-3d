@@ -332,28 +332,63 @@ def _insert_terminal(forest, i, contacts, tip_r, carried, stub_ends, cfg,
                 if (v["member_idx"], forest.members[v["member_idx"]].geom_version)
                 not in pre_violators]
 
-    scored = []
-    for build_fn in builders:
+    # SPEC-V5-PERF A2 -- price-ordered trials with exact early exit. The
+    # baseline revalidated EVERY builder (~90-130 clearance re-checks per
+    # insertion: the W2 multiplier that multiplies every other cost). But
+    # selection needs only the cheapest CLEARANCE-SURVIVING candidate, and a
+    # builder's price is a pure function of forest geometry/loads (it reads no
+    # certificate state), independent of trial interleaving. So:
+    #   1. PRICING PASS (no revalidate): build -> record (delta, yield_index)
+    #      -> roll back, for every builder.
+    #   2. sort by (delta, yield_index) -- materializing the stable tie-break
+    #      the baseline's `scored.sort(key=t[0])` applied by insertion order.
+    #   3. TRIAL in that order, stop at the first clearance survivor: it is the
+    #      min-(delta, yield_index) survivor == the baseline's min-delta,
+    #      stable-tie winner. Cheaper non-survivors are simply skipped over.
+    #   4. accept (re-build + revalidate + commit) or return False.
+    # Identity: revalidate's only cross-trial side effect is certificate
+    # issuance on pre-existing dirty members; in the healthy regime (A0b) there
+    # are none at entry, and the accept-step revalidate runs unconditionally in
+    # both schemes. Deferring all revalidation to the trial phase is therefore
+    # result-inert. See SPEC-V5-PERF sec 2.3 + Appendix A R4.
+    priced = []
+    for yi, build_fn in enumerate(builders):
         cp = forest.checkpoint()
         try:
             delta = build_fn()
         except _InfeasibleCandidate:
             forest.rollback(cp)
             continue
+        forest.rollback(cp)
+        # A NaN/inf/negative price would make the sort order -- hence the winner
+        # -- undefined (the baseline's key=t[0] had the same latent exposure);
+        # assert it away so the price-ordering is total and deterministic.
+        assert delta == delta and delta != float("inf") and delta >= 0.0, (
+            f"candidate price must be finite and non-negative, got {delta!r} "
+            "-- non-deterministic selection, crash over corruption")
+        priced.append((delta, yi, build_fn))
+
+    if not priced:
+        return False
+
+    priced.sort(key=lambda t: (t[0], t[1]))
+
+    winner = None
+    for _delta, _yi, build_fn in priced:
+        cp = forest.checkpoint()
+        build_fn()
         violations = forest.revalidate(surface_tree, cfg)
         new_viol = _new_violations(violations)
         forest.rollback(cp)
-        if new_viol:
-            continue
-        scored.append((delta, build_fn))
+        if not new_viol:
+            winner = build_fn
+            break
 
-    if not scored:
+    if winner is None:
         return False
 
-    scored.sort(key=lambda t: t[0])
-    _, best_fn = scored[0]
     cp = forest.checkpoint()
-    best_fn()
+    winner()
     violations = forest.revalidate(surface_tree, cfg)
     assert not _new_violations(violations), (
         "candidate re-application produced a different clearance result "
