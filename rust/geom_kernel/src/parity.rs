@@ -1,0 +1,278 @@
+//! Axis-aligned ray-parity inside/outside, ported VERBATIM from
+//! geometry_exact.py VerticalParity/ParityVote (lines 171-284). Per axis a CSR
+//! grid replaces the oracle's dict — keyed by the IDENTICAL flat cell id
+//! `ix*NY + iy`, so candidate sets match the oracle exactly (including its
+//! benign out-of-range aliasing; an unknown key => empty, spec sec 3.4). The
+//! parity dedup is the consecutive-difference CLUSTER COUNT `1 + Σ(diff >
+//! zdedup)`, NOT dedup_loc keep-first (Amendment A2).
+
+use crate::consts::{PARITY_DEN_EPS, PARITY_SLACK, ZDEDUP};
+use crate::mesh::Mesh;
+
+/// One axis' projected triangle data + CSR grid.
+pub struct AxisGrid {
+    pub ax: usize,
+    pub p0: usize,
+    pub p1: usize,
+    pub origin0: f64,
+    pub origin1: f64,
+    pub h: f64,
+    pub ny: i64,
+    // per-triangle projected quantities (indexed by original face id)
+    a2x: Vec<f64>,
+    a2y: Vec<f64>,
+    v0x: Vec<f64>,
+    v0y: Vec<f64>,
+    v1x: Vec<f64>,
+    v1y: Vec<f64>,
+    den: Vec<f64>,
+    good: Vec<bool>,
+    az: Vec<f64>,
+    bz: Vec<f64>,
+    cz: Vec<f64>,
+    // CSR: sorted unique flat cell ids -> contiguous tri-id ranges
+    keys: Vec<i64>,
+    offs: Vec<u32>,
+    tri_ids: Vec<u32>,
+    // telemetry
+    pub n_cells: usize,
+    pub n_refs: usize,
+    pub max_occ: usize,
+}
+
+impl AxisGrid {
+    pub fn build(mesh: &Mesh, ax: usize, h: f64) -> Result<AxisGrid, String> {
+        let n = mesh.nfaces;
+        let pp: Vec<usize> = (0..3).filter(|&i| i != ax).collect();
+        let (p0, p1) = (pp[0], pp[1]);
+
+        // origin = bounds[0, p] - 1.0 ; NY = floor((bounds[1,p1]+1 - origin1)/h)+3
+        let origin0 = mesh.bounds[0][p0] - 1.0;
+        let origin1 = mesh.bounds[0][p1] - 1.0;
+        let ny = ((mesh.bounds[1][p1] + 1.0 - origin1) / h).floor() as i64 + 3;
+
+        let mut a2x = vec![0.0; n];
+        let mut a2y = vec![0.0; n];
+        let mut v0x = vec![0.0; n];
+        let mut v0y = vec![0.0; n];
+        let mut v1x = vec![0.0; n];
+        let mut v1y = vec![0.0; n];
+        let mut den = vec![0.0; n];
+        let mut good = vec![false; n];
+        let mut az = vec![0.0; n];
+        let mut bz = vec![0.0; n];
+        let mut cz = vec![0.0; n];
+
+        // (flat_id, tri) pairs for the CSR
+        let mut pairs: Vec<(i64, u32)> = Vec::with_capacity(n * 2);
+
+        for f in 0..n {
+            let a = mesh.v0[f];
+            let b = mesh.vertex_b(f);
+            let cc = mesh.vertex_c(f);
+            // 2D projected verts
+            let ax0 = a[p0];
+            let ay0 = a[p1];
+            let bx = b[p0];
+            let by = b[p1];
+            let cx = cc[p0];
+            let cy = cc[p1];
+            a2x[f] = ax0;
+            a2y[f] = ay0;
+            // v0 = C2 - A2 ; v1 = B2 - A2 (geometry_exact.py:232)
+            let v0xf = cx - ax0;
+            let v0yf = cy - ay0;
+            let v1xf = bx - ax0;
+            let v1yf = by - ay0;
+            v0x[f] = v0xf;
+            v0y[f] = v0yf;
+            v1x[f] = v1xf;
+            v1y[f] = v1yf;
+            // den = v0x*v1y - v1x*v0y (line 233)
+            let d = v0xf * v1yf - v1xf * v0yf;
+            den[f] = d;
+            good[f] = d.abs() > PARITY_DEN_EPS;
+            az[f] = a[ax];
+            bz[f] = b[ax];
+            cz[f] = cc[ax];
+
+            // cell range of the 2D AABB
+            let xmin = ax0.min(bx).min(cx);
+            let xmax = ax0.max(bx).max(cx);
+            let ymin = ay0.min(by).min(cy);
+            let ymax = ay0.max(by).max(cy);
+            let ix0 = ((xmin - origin0) / h).floor() as i64;
+            let ix1 = ((xmax - origin0) / h).floor() as i64;
+            let iy0 = ((ymin - origin1) / h).floor() as i64;
+            let iy1 = ((ymax - origin1) / h).floor() as i64;
+            for ix in ix0..=ix1 {
+                for iy in iy0..=iy1 {
+                    let flat = ix
+                        .checked_mul(ny)
+                        .and_then(|v| v.checked_add(iy))
+                        .ok_or_else(|| "parity flat-id overflow".to_string())?;
+                    pairs.push((flat, f as u32));
+                }
+            }
+        }
+
+        if pairs.len() > u32::MAX as usize {
+            return Err("parity grid exceeds 2^32 triangle references".into());
+        }
+
+        // sort by flat id (stable-not-required; intra-cell order is irrelevant
+        // to parity because crossings are re-sorted per query)
+        pairs.sort_unstable_by_key(|&(k, _)| k);
+
+        let mut keys: Vec<i64> = Vec::new();
+        let mut offs: Vec<u32> = vec![0];
+        let mut tri_ids: Vec<u32> = Vec::with_capacity(pairs.len());
+        let mut max_occ = 0usize;
+        let mut i = 0usize;
+        while i < pairs.len() {
+            let k = pairs[i].0;
+            let mut j = i;
+            while j < pairs.len() && pairs[j].0 == k {
+                tri_ids.push(pairs[j].1);
+                j += 1;
+            }
+            keys.push(k);
+            offs.push(tri_ids.len() as u32);
+            let occ = j - i;
+            if occ > max_occ {
+                max_occ = occ;
+            }
+            i = j;
+        }
+
+        Ok(AxisGrid {
+            ax,
+            p0,
+            p1,
+            origin0,
+            origin1,
+            h,
+            ny,
+            a2x,
+            a2y,
+            v0x,
+            v0y,
+            v1x,
+            v1y,
+            den,
+            good,
+            az,
+            bz,
+            cz,
+            n_cells: keys.len(),
+            n_refs: tri_ids.len(),
+            max_occ,
+            keys,
+            offs,
+            tri_ids,
+        })
+    }
+
+    /// Approx bytes for telemetry.
+    pub fn bytes(&self) -> usize {
+        let per_tri = 11 * 8 + 1; // 11 f64 + 1 bool per face
+        per_tri * self.a2x.len()
+            + self.keys.len() * 8
+            + self.offs.len() * 4
+            + self.tri_ids.len() * 4
+    }
+
+    #[inline]
+    fn cell_lookup(&self, flat: i64) -> Option<(usize, usize)> {
+        match self.keys.binary_search(&flat) {
+            Ok(pos) => {
+                let s = self.offs[pos] as usize;
+                let e = self.offs[pos + 1] as usize;
+                Some((s, e))
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// Parity for one point along this axis: true iff an odd number of
+    /// deduped crossings lie strictly above along +axis.
+    #[inline]
+    pub fn inside_point(&self, pt: [f64; 3], scratch: &mut Vec<f64>) -> bool {
+        let c0 = pt[self.p0];
+        let c1 = pt[self.p1];
+        let pch = pt[self.ax];
+        let ix = ((c0 - self.origin0) / self.h).floor() as i64;
+        let iy = ((c1 - self.origin1) / self.h).floor() as i64;
+        let flat = match ix.checked_mul(self.ny).and_then(|v| v.checked_add(iy)) {
+            Some(v) => v,
+            None => return false, // wildly out of range => empty
+        };
+        let (s, e) = match self.cell_lookup(flat) {
+            Some(r) => r,
+            None => return false,
+        };
+
+        scratch.clear();
+        for &tid in &self.tri_ids[s..e] {
+            let t = tid as usize;
+            if !self.good[t] {
+                continue;
+            }
+            let den = self.den[t];
+            let d0 = c0 - self.a2x[t];
+            let d1 = c1 - self.a2y[t];
+            // a = (d0*v1y - v1x*d1)/den ; b = (v0x*d1 - d0*v0y)/den (lines 245-246)
+            let a = (d0 * self.v1y[t] - self.v1x[t] * d1) / den;
+            let b = (self.v0x[t] * d1 - d0 * self.v0y[t]) / den;
+            let insxy =
+                (a >= -PARITY_SLACK) && (b >= -PARITY_SLACK) && (a + b <= 1.0 + PARITY_SLACK);
+            if !insxy {
+                continue;
+            }
+            // z = (1-a-b)*Az + a*Cz + b*Bz  (line 252, assoc ((.)+a*Cz)+b*Bz)
+            let z = (1.0 - a - b) * self.az[t] + a * self.cz[t] + b * self.bz[t];
+            if z > pch + PARITY_SLACK {
+                scratch.push(z);
+            }
+        }
+        if scratch.is_empty() {
+            return false;
+        }
+        // cluster count = 1 + Σ(diff > zdedup) over ascending z (Amendment A2)
+        scratch.sort_unstable_by(|x, y| x.partial_cmp(y).unwrap());
+        let mut uniqn = 1usize;
+        for w in scratch.windows(2) {
+            if w[1] - w[0] > ZDEDUP {
+                uniqn += 1;
+            }
+        }
+        uniqn % 2 == 1
+    }
+}
+
+/// 3-axis majority vote (ParityVote): inside iff >= 2 of 3 axes report inside.
+pub struct ParityVote {
+    pub grids: [AxisGrid; 3],
+}
+
+impl ParityVote {
+    pub fn build(mesh: &Mesh, h: f64) -> Result<ParityVote, String> {
+        let g0 = AxisGrid::build(mesh, 0, h)?;
+        let g1 = AxisGrid::build(mesh, 1, h)?;
+        let g2 = AxisGrid::build(mesh, 2, h)?;
+        Ok(ParityVote {
+            grids: [g0, g1, g2],
+        })
+    }
+
+    #[inline]
+    pub fn inside(&self, pt: [f64; 3], scratch: &mut Vec<f64>) -> bool {
+        let mut s = 0u8;
+        for g in &self.grids {
+            if g.inside_point(pt, scratch) {
+                s += 1;
+            }
+        }
+        s >= 2
+    }
+}
