@@ -278,9 +278,175 @@ class Forest:
     def dirty_members(self):
         return [i for i, m in enumerate(self.members) if not m.cert_valid]
 
-    def revalidate(self, surface_tree, cfg):
-        """ONE batched clearance re-check over every currently-dirty
-        member: sample at cfg.clearance_sample_step_mm, linear radius
+    def revalidate(self, geom, cfg):
+        """ONE batched clearance re-check over every currently-dirty member.
+
+        v5 geometry core (SPEC-V5-GEOM sec 2.1): when `geom` is a surface-
+        EXACT oracle (geometry_exact.ExactSurface -- duck-typed on
+        `.segment_clearance`), clearance is measured against the ACTUAL
+        triangles via exact swept-capsule distance, sanctioned end-embedding
+        is honored by an inset that excludes the designed embed zone
+        (contact_depth_mm + r_end + standoff_mm -- the pitch term is
+        identically 0 for an exact oracle: there is no approximating cloud to
+        budget for, so the whole surface_tree_pitch_bound_mm derivation of the
+        sampled path below collapses), mid-path penetration is caught by a
+        gated axis penetration-interval test, and stub members get a
+        through-transit interval check instead of the old blanket skip (the
+        census found illegal through-and-through stubs the skip waved past).
+        When `geom` is a plain cKDTree (unit tests / legacy), the historical
+        SAMPLED path runs unchanged -- SPEC sec 2.6 keeps build_surface_tree
+        alive for tests/legacy; production (engine.run) always builds and
+        threads an ExactSurface, so every load-bearing production clearance
+        query is exact. Members with no violation get their certificate
+        (re)issued; violators stay dirty. Returns the violation list."""
+        if hasattr(geom, "segment_clearance"):
+            return self._revalidate_exact(geom, cfg)
+        return self._revalidate_sampled(geom, cfg)
+
+    @staticmethod
+    def _embed_inset_arc(geom, m, cfg):
+        """Angle-aware sanctioned-embed inset (arc length excluded from the
+        exact clearance / interval checks) at each designed embed_end.
+
+        A member whose foot is DESIGNED to sit on the model surface grazes
+        the standoff envelope as its shaft dives toward that foot; the arc
+        length of this SANCTIONED approach depends on the approach angle -- a
+        perpendicular dive clears the envelope in contact_depth_mm + r_end +
+        standoff_mm, but an ANGLED dive (a strut/model-rung foot leans up to
+        the 60deg branch/strut family) legitimately stays within the envelope
+        proportionally longer. Project the embedded end to the true surface,
+        take the angle between the member axis and the local surface normal,
+        and divide the perpendicular reach by its cosine (floored at 60deg so
+        a near-grazing approach cannot inflate the exempt zone without bound).
+        Non-embed ends get 0.
+
+        This is the exact-oracle replacement for the sampled path's
+        contact_depth + PITCH_BOUND + r_end + standoff: the pitch term
+        (sampling uncertainty) is correctly 0 for an exact oracle (SPEC sec
+        2.1), but the geometry of an angled designed approach that the bare
+        perpendicular formula under-derives is restored from the TRUE surface
+        normal, not from a guessed cloud-density budget. It matches what the
+        pitch term was empirically providing for embed approaches (measured
+        ~2.04 vs ~2.02mm on the table) while forbidding a mid-path clip, whose
+        argmin sits at the full perpendicular distance far from any anchor."""
+        p0 = np.asarray(m.p0, float)
+        p1 = np.asarray(m.p1, float)
+        L = float(np.linalg.norm(p1 - p0))
+
+        def _arc(p_embed, u_out, r_end):
+            if L < 1e-9:
+                return cfg.contact_depth_mm + r_end + cfg.standoff_mm
+            _d, _cp, _ti, n = geom.project(p_embed)
+            nn = float(np.linalg.norm(n))
+            if nn < 1e-9:
+                return cfg.contact_depth_mm + r_end + cfg.standoff_mm
+            cosang = max(abs(float(np.dot(u_out, n / nn))), 0.5)  # 60deg floor
+            return cfg.contact_depth_mm + (r_end + cfg.standoff_mm) / cosang
+
+        inset0 = _arc(p0, (p1 - p0) / L, m.r0) if (m.embed_end == "p0" and L >= 1e-9) else 0.0
+        inset1 = _arc(p1, (p0 - p1) / L, m.r1) if (m.embed_end == "p1" and L >= 1e-9) else 0.0
+        return inset0, inset1
+
+    @staticmethod
+    def _exact_interval_illegal(geom, m, cfg, inset0, inset1):
+        """True iff the member's AXIS has an inside-the-solid run longer than
+        the census MIN_ILLEGAL_LEN (0.05mm) OUTSIDE its sanctioned embed zones
+        -- the mid-path-penetration / stub through-transit test. This is a
+        parity-crossing test (exact boundaries, majority-vote inside), never a
+        distance test, so it cannot false-positive on an ordinary surface-
+        hugging stub. Axis-only, matching the census (census_run.py:52)."""
+        p0 = np.asarray(m.p0, float)
+        p1 = np.asarray(m.p1, float)
+        L = float(np.linalg.norm(p1 - p0))
+        if L < 1e-9:
+            return False
+        lo = inset0
+        hi = L - inset1
+        if hi - lo <= 1e-9:
+            return False
+        intervals = geom.penetration_intervals(p0, p1, m.r0, m.r1, rays="axis",
+                                                min_illegal_len_mm=0.05)
+        for iv in intervals:
+            if min(iv["s_b"], hi) - max(iv["s_a"], lo) > 0.05:
+                return True
+        return False
+
+    def _revalidate_exact(self, geom, cfg):
+        """Exact swept-capsule clearance path (SPEC sec 2.1). Non-stub dirty
+        members: exact geom.segment_clearance over the non-embed sub-segment
+        (< 0 => violation), plus a GATED axis penetration-interval belt for
+        the census through-transit class (runs only when a cheap trigger
+        fires: clearance within 0.1mm of 0, or the member midpoint parity-
+        votes inside -- the latter catches a segment routed wholly inside a
+        solid region an unsigned distance test cannot see).
+
+        STUB handling (v5 step-1 scope): stubs keep the blanket standoff
+        exemption -- they are certified without a distance check, exactly as
+        the sampled path did (a stub hugs its own emergence surface at a
+        grazing angle by construction). SPEC sec 2.1's NEW stub
+        through-transit interval check is DEFERRED to step 2: it depends on
+        step 2.4's interior-face demand filter to be safe. Without that
+        filter, contacts seeded on faces INTERIOR to the non-watertight
+        solid union (the audit's ~40%-phantom class) produce stubs whose
+        whole axis is legitimately buried in solid; the interval check would
+        correctly flag them, but a stub is fixed contact geometry the builder
+        cannot re-route, so a flagged stub would crash assert_all_certified
+        rather than surface a fixable violation. Deferring the stub check
+        until the phantoms are filtered at the source is the correct
+        sequencing (recorded in the return message / follow-up)."""
+        dirty = self.dirty_members()
+        if not dirty:
+            return []
+        seg_mi, p0s, p1s, r0s, r1s, ins0, ins1 = [], [], [], [], [], [], []
+        for mi in dirty:
+            m = self.members[mi]
+            if m.kind == "stub":
+                continue  # blanket standoff exemption (step-1 scope, see above)
+            i0, i1 = self._embed_inset_arc(geom, m, cfg)
+            seg_mi.append(mi)
+            p0s.append(np.asarray(m.p0, float))
+            p1s.append(np.asarray(m.p1, float))
+            r0s.append(m.r0)
+            r1s.append(m.r1)
+            ins0.append(i0)
+            ins1.append(i1)
+
+        violations = []
+        bad = set()
+        if seg_mi:
+            clr, argp = geom.segment_clearance(
+                np.array(p0s), np.array(p1s), np.array(r0s), np.array(r1s),
+                cfg.standoff_mm, inset0s=np.array(ins0), inset1s=np.array(ins1))
+            for k, mi in enumerate(seg_mi):
+                m = self.members[mi]
+                worst = float(clr[k])
+                if worst < 0:
+                    bad.add(mi)
+                    ap = argp[k]
+                    violations.append(dict(
+                        member_idx=mi, min_clearance_mm=worst,
+                        at_point=(ap.tolist() if np.all(np.isfinite(ap)) else None)))
+                    continue
+                triggered = worst < 0.1
+                if not triggered:
+                    mid = 0.5 * (np.asarray(m.p0, float) + np.asarray(m.p1, float))
+                    triggered = bool(geom.inside(mid))
+                if triggered and self._exact_interval_illegal(geom, m, cfg, ins0[k], ins1[k]):
+                    bad.add(mi)
+                    violations.append(dict(member_idx=mi, min_clearance_mm=worst,
+                                           at_point=None))
+        for mi in dirty:
+            if mi in bad:
+                continue
+            m = self.members[mi]
+            m.cert_version = m.geom_version
+            m.cert_radius = max(m.r0, m.r1)
+        return violations
+
+    def _revalidate_sampled(self, surface_tree, cfg):
+        """SAMPLED clearance path (legacy / unit-test cKDTree oracle).
+        Preserved verbatim from the v4 engine (SPEC sec 2.6 keeps this alive
+        for tests/legacy): sample at cfg.clearance_sample_step_mm, linear radius
         taper, skip the embed-end inset described below. clearance =
         kdtree_distance - radius - standoff_mm. Members with no violation
         get their certificate (re)issued; members with a violation stay

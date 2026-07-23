@@ -14,6 +14,7 @@ import numpy as np
 
 from . import perception, placement, routing, verify, joints, cco, tree, rewire
 from . import transient, bracing
+from .geometry_exact import ExactSurface
 
 
 def prepare(mesh, cfg, log=None):
@@ -72,18 +73,22 @@ def prepare(mesh, cfg, log=None):
                 sample_delicacy=sample_delicacy, log=log)
 
 
-def construct(mesh, pre, surface_tree, cfg, log=None, limit_contacts=None):
+def construct(mesh, pre, surface_tree, cfg, log=None, limit_contacts=None, geom=None):
     """Stage 2: load partition + tip sizing + cco.build (NO rewiring --
     the caller owns rewire.optimize so its wall budget is its own).
     `limit_contacts` truncates the contact list for profiling only.
-    Returns (forest, unrouted, carried, tip_r, contacts)."""
+    `geom` (v5 exact oracle, SPEC sec 2.1) drives cco's per-candidate
+    clearance revalidation when supplied; without it, the legacy cKDTree
+    `surface_tree` does (tests/staged-legacy). Returns (forest, unrouted,
+    carried, tip_r, contacts)."""
     log = log if log is not None else {}
+    oracle = geom if geom is not None else surface_tree
     contacts = pre["contacts"][:limit_contacts] if limit_contacts else pre["contacts"]
     carried = placement.load_partition(mesh, pre["islands"], contacts, cfg)
     tip_r = placement.tip_radius_mm(carried, cfg)
     minima_flags = [bool(c.get("minimum")) for c in contacts]
     forest, unrouted = cco.build(mesh, contacts, tip_r, carried, minima_flags,
-                                  pre["plate_z"], surface_tree, cfg,
+                                  pre["plate_z"], oracle, cfg,
                                   sample_points=pre["sample_points"],
                                   sample_delicacy=pre["sample_delicacy"])
     tree.assert_all_certified(forest)
@@ -114,7 +119,7 @@ def _live_member_ml(forest, unrouted):
     return tree.volume_report(live, [])["member_ml"]
 
 
-def brace_and_size(mesh, forest, unrouted, surface_tree, plate_z, cfg, log=None):
+def brace_and_size(mesh, forest, unrouted, surface_tree, plate_z, cfg, log=None, geom=None):
     """design-v4.md #8/#9 fixed point (SPEC-INTEGRATION #3): bounded
     propose-braces / resize-down-and-up / batch-revalidate loop (<=3
     iterations), then a SECOND rewire.optimize pass against the now-braced
@@ -130,6 +135,7 @@ def brace_and_size(mesh, forest, unrouted, surface_tree, plate_z, cfg, log=None)
     next iteration (another brace), not corruption-by-omission.
     """
     log = log if log is not None else {}
+    oracle = geom if geom is not None else surface_tree
     member_ml_before = _live_member_ml(forest, unrouted)
 
     iterations = 0
@@ -140,9 +146,10 @@ def brace_and_size(mesh, forest, unrouted, surface_tree, plate_z, cfg, log=None)
     for it in range(3):
         iterations = it + 1
         report = transient.transient_report(forest, plate_z, cfg)
-        placed = bracing.propose_and_place(forest, surface_tree, plate_z, cfg, report, log=log)
+        placed = bracing.propose_and_place(forest, surface_tree, plate_z, cfg, report,
+                                            log=log, geom=geom)
         resize = transient.resize_forest(forest, plate_z, cfg)
-        violations = forest.revalidate(surface_tree, cfg)
+        violations = forest.revalidate(oracle, cfg)
         rungs_placed += placed["rungs_placed"]
         rungs_unplaceable += placed["rungs_unplaceable"]
         for _idx, r_old, r_new in resize["resized"]:
@@ -157,15 +164,15 @@ def brace_and_size(mesh, forest, unrouted, surface_tree, plate_z, cfg, log=None)
     # braces/resizes above just changed which spans are restrained and how
     # fat every member is, exactly the kind of neighborhood change that can
     # newly expose a parallel-column merge or a now-degenerate twig.
-    rewire.optimize(forest, mesh, surface_tree, cfg, log=log)
+    rewire.optimize(forest, mesh, oracle, cfg, log=log)
 
     # Re-fix: rewire may have created or moved unbraced members (a fresh
     # reattach connector, a slid junction) -- one more propose/resize pass
     # against that post-rewire reality before certifying.
     report = transient.transient_report(forest, plate_z, cfg)
-    bracing.propose_and_place(forest, surface_tree, plate_z, cfg, report, log=log)
+    bracing.propose_and_place(forest, surface_tree, plate_z, cfg, report, log=log, geom=geom)
     transient.resize_forest(forest, plate_z, cfg)
-    violations = forest.revalidate(surface_tree, cfg)
+    violations = forest.revalidate(oracle, cfg)
     assert not violations, (
         f"brace_and_size fixed point ended with {len(violations)} "
         f"clearance-dirty member(s) after re-fix (an honest engine failure, "
@@ -185,7 +192,7 @@ def brace_and_size(mesh, forest, unrouted, surface_tree, plate_z, cfg, log=None)
 
 
 def finish(mesh, pre, forest, unrouted, contacts, carried, tip_r,
-           surface_tree, cfg, log=None):
+           surface_tree, cfg, log=None, geom=None):
     """Stage 3b: verify gates + volume report on the final forest."""
     log = log if log is not None else {}
     plate_z = pre["plate_z"]
@@ -196,7 +203,8 @@ def finish(mesh, pre, forest, unrouted, contacts, carried, tip_r,
                                  carried, tip_r, cfg, plate_z,
                                  surface_tree=surface_tree, minima=pre["minima"],
                                  forest=forest, unrouted=unrouted,
-                                 island_births=pre["island_births"])
+                                 island_births=pre["island_births"],
+                                 geom=geom, balls=balls)
     volume = tree.volume_report(members, balls)
     log["n_unrouted"] = len(unrouted)
     return dict(members=members, balls=balls, verify=report, volume=volume,
@@ -224,6 +232,7 @@ def run(mesh, cfg, log=None):
             tip_r_mm=np.array([]), forest=empty_forest, members=[], balls=[],
             unrouted=[], minima=minima, plate_z=plate_z,
             verify=dict(ok=True, uncovered_islands=[], clearance_violations=[],
+                        ball_breach_violations=[],
                         load_violations=[], unsupported_minima=[],
                         connectivity_violations=[], printability_violations=[],
                         murray_violations=[], uncovered_island_births=[],
@@ -241,24 +250,32 @@ def run(mesh, cfg, log=None):
     # standoff_mm.
     surface_tree = routing.build_surface_tree(mesh, pitch_mm=0.3, max_points=400000)
     log["t_surface_tree"] = round(time.time() - t0, 2)
+    # v5 geometry core (SPEC-V5-GEOM): the surface-EXACT oracle. Every
+    # load-bearing clearance decision (Forest.revalidate + verify's
+    # independent gate + ball breach) now consults the true triangles via
+    # this, not the sampled cloud. surface_tree stays for the not-yet-
+    # migrated consumers (bracing model-rung anchors, connectivity/removal
+    # diagnostics -- SPEC steps 2/3).
+    geom = ExactSurface(mesh)
+    log["t_geom_build"] = round(time.time() - t0, 2)
 
     forest = members = balls = report = carried = tip_r = unrouted = None
     max_fix_passes = 2
     for fix_pass in range(max_fix_passes):
         pre["contacts"] = contacts  # fix-pass additions feed back in
         forest, unrouted, carried, tip_r, contacts = construct(
-            mesh, pre, surface_tree, cfg, log=log)
+            mesh, pre, surface_tree, cfg, log=log, geom=geom)
         # Phase 3 (design-v4.md #7): topology mutation runs AFTER
         # insertion, BEFORE verify -- rewire.optimize mutates `forest` in
         # place (subtree reattach / junction slide / twig prune), each
         # move already transactional+certificate-checked internally;
         # re-asserting after is a cheap belt-and-suspenders check.
-        rewire.optimize(forest, mesh, surface_tree, cfg, log=log)
+        rewire.optimize(forest, mesh, geom, cfg, log=log)
         # Phase 4c (design-v4.md #8/#9): build-time-honest transient sizing
         # + bracing fixed point, then its own second rewire pass against the
         # braced reality -- runs AFTER topology settles, BEFORE the gates
         # that decide whether this fix-pass is done.
-        brace_and_size(mesh, forest, unrouted, surface_tree, plate_z, cfg, log=log)
+        brace_and_size(mesh, forest, unrouted, surface_tree, plate_z, cfg, log=log, geom=geom)
         tree.assert_all_certified(forest)
         members, balls = live_member_lists(forest, unrouted, plate_z, cfg)
         log[f"forest_pass{fix_pass}"] = dict(
@@ -271,7 +288,7 @@ def run(mesh, cfg, log=None):
         report = verify.self_verify(mesh, islands, routed_contacts, members, carried, tip_r,
                                      cfg, plate_z, surface_tree=surface_tree, minima=minima,
                                      forest=forest, unrouted=unrouted,
-                                     island_births=island_births)
+                                     island_births=island_births, geom=geom, balls=balls)
         log[f"verify_pass{fix_pass}"] = dict(
             ok=report["ok"],
             n_uncovered=len(report["uncovered_islands"]),

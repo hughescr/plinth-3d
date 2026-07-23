@@ -41,8 +41,152 @@ def coverage_report(mesh, islands, contacts, cfg):
     return report
 
 
-def clearance_report(mesh, members, cfg, surface_tree=None):
-    """v4: independent full-envelope clearance re-check over the FINAL
+def _embed_inset_arc_exact(geom, m, cfg):
+    """Angle-aware sanctioned-embed inset (arc length) at each designed
+    embed_end -- verify's INDEPENDENT copy of the same geometry
+    tree.Forest._embed_inset_arc derives (shares only geom's generic
+    project()). A designed foot on the surface grazes the standoff envelope
+    as the shaft dives toward it; the sanctioned arc length scales with the
+    approach angle (perpendicular reach / cos(axis-vs-surface-normal),
+    floored at the 60deg strut/branch family). The pitch term is 0 for an
+    exact oracle; the angled-approach geometry is read from the true
+    surface, not a cloud-density budget. Non-embed ends get 0."""
+    p0 = np.asarray(m["p0"], float)
+    p1 = np.asarray(m["p1"], float)
+    L = float(np.linalg.norm(p1 - p0))
+
+    def _arc(p_embed, u_out, r_end):
+        if L < 1e-9:
+            return cfg.contact_depth_mm + r_end + cfg.standoff_mm
+        _d, _cp, _ti, n = geom.project(p_embed)
+        nn = float(np.linalg.norm(n))
+        if nn < 1e-9:
+            return cfg.contact_depth_mm + r_end + cfg.standoff_mm
+        cosang = max(abs(float(np.dot(u_out, n / nn))), 0.5)
+        return cfg.contact_depth_mm + (r_end + cfg.standoff_mm) / cosang
+
+    embed = m.get("embed_end")
+    inset0 = _arc(p0, (p1 - p0) / L, float(m["r0"])) if (embed == "p0" and L >= 1e-9) else 0.0
+    inset1 = _arc(p1, (p0 - p1) / L, float(m["r1"])) if (embed == "p1" and L >= 1e-9) else 0.0
+    return inset0, inset1
+
+
+def _interval_illegal_exact(geom, m, cfg, inset0, inset1):
+    """True iff the member's AXIS has an inside-the-solid run > 0.05mm
+    (census MIN_ILLEGAL_LEN) outside its sanctioned embed zones -- the
+    mid-path-penetration / stub through-transit test (parity crossings,
+    exact boundaries; never a distance test). Independent verify-side copy
+    (the independence covenant: shares only geom's generic primitives)."""
+    p0 = np.asarray(m["p0"], float)
+    p1 = np.asarray(m["p1"], float)
+    L = float(np.linalg.norm(p1 - p0))
+    if L < 1e-9:
+        return False
+    lo, hi = inset0, L - inset1
+    if hi - lo <= 1e-9:
+        return False
+    for iv in geom.penetration_intervals(p0, p1, float(m["r0"]), float(m["r1"]),
+                                          rays="axis", min_illegal_len_mm=0.05):
+        if min(iv["s_b"], hi) - max(iv["s_a"], lo) > 0.05:
+            return True
+    return False
+
+
+def _clearance_report_exact(members, cfg, geom):
+    """Independent EXACT swept-capsule clearance re-check (SPEC-V5-GEOM
+    sec 2.2). Deliberately NOT sharing tree.Forest's exact helper -- the
+    independence covenant (a builder bug that mis-certifies a member must
+    not also fool the verify gate) carries over verbatim: it calls only
+    geom's GENERIC primitives (segment_clearance, penetration_intervals),
+    deriving its own inset/interval logic here. Insets exclude the
+    sanctioned embed zone (contact_depth_mm + r_end + standoff_mm, pitch
+    term 0 for an exact oracle). Unlike tree.Forest.revalidate's HOT-loop
+    gated belt, verify runs the axis penetration-interval test UNGATED on
+    every non-stub member (SPEC sec 2.1: the ungated dense pass lives here).
+
+    STUB handling matches tree.Forest._revalidate_exact (v5 step-1 scope):
+    stubs keep the blanket standoff exemption; the SPEC sec 2.1 stub
+    through-transit check is deferred to step 2 with the interior-face
+    demand filter it depends on (see that method's docstring)."""
+    seg_mi, p0s, p1s, r0s, r1s, ins0, ins1 = [], [], [], [], [], [], []
+    for mi, m in enumerate(members):
+        if m["kind"] == "stub":
+            continue  # blanket standoff exemption (step-1 scope)
+        r0, r1 = float(m["r0"]), float(m["r1"])
+        i0, i1 = _embed_inset_arc_exact(geom, m, cfg)
+        seg_mi.append(mi)
+        p0s.append(np.asarray(m["p0"], float))
+        p1s.append(np.asarray(m["p1"], float))
+        r0s.append(r0)
+        r1s.append(r1)
+        ins0.append(i0)
+        ins1.append(i1)
+    out = []
+    if seg_mi:
+        clr, argp = geom.segment_clearance(
+            np.array(p0s), np.array(p1s), np.array(r0s), np.array(r1s),
+            cfg.standoff_mm, inset0s=np.array(ins0), inset1s=np.array(ins1))
+        for k, mi in enumerate(seg_mi):
+            m = members[mi]
+            worst = float(clr[k])
+            if worst < 0:
+                ap = argp[k]
+                out.append(dict(member_idx=mi, kind=m["kind"], min_clearance_mm=worst,
+                                at_point=(ap.tolist() if np.all(np.isfinite(ap)) else None)))
+            elif _interval_illegal_exact(geom, m, cfg, ins0[k], ins1[k]):
+                out.append(dict(member_idx=mi, kind=m["kind"], min_clearance_mm=worst,
+                                at_point=None))
+    return out
+
+
+def ball_breach_report(geom, members, balls, cfg, eps_mm=0.05):
+    """SPEC-V5-GEOM sec 2.2: the census's headline defect class (44 ball
+    breaches) was checked by NOTHING before v5. For every joint ball AND
+    every embedded member end (a synthesized end-cap sphere -- an embedded
+    tip transiting a sub-mm fin AT its end is exempt from BOTH clearance
+    paths by design, so it escaped every census-era test), run
+    geom.sphere_breach: a sphere spanning a feature thinner than its radius
+    (poke-out > eps_mm) is a violation. Sanctioned shallow anchors into
+    thick surface pass by construction (the test measures far-wall
+    thickness, not surface contact). No-op unless `geom` is an exact oracle
+    (has `.sphere_breach`) -- legacy/test callers with a cKDTree get []."""
+    if geom is None or not hasattr(geom, "sphere_breach"):
+        return []
+    members = joints.collect_members(members)
+    centers, radii, tags = [], [], []
+    for b in (balls or []):
+        c = b["center"] if isinstance(b, dict) else b.center
+        r = b["r"] if isinstance(b, dict) else b.r
+        owner = b.get("owner") if isinstance(b, dict) else getattr(b, "owner", None)
+        centers.append(np.asarray(c, float))
+        radii.append(float(r))
+        tags.append(dict(source="ball", owner=owner))
+    for mi, m in enumerate(members):
+        embed = m.get("embed_end")
+        if embed == "p0":
+            centers.append(np.asarray(m["p0"], float))
+            radii.append(float(m["r0"]))
+            tags.append(dict(source="endcap", member_idx=mi, end="p0", kind=m["kind"]))
+        elif embed == "p1":
+            centers.append(np.asarray(m["p1"], float))
+            radii.append(float(m["r1"]))
+            tags.append(dict(source="endcap", member_idx=mi, end="p1", kind=m["kind"]))
+    if not centers:
+        return []
+    breached, thick, poke = geom.sphere_breach(np.array(centers), np.array(radii),
+                                               eps_mm=eps_mm)
+    out = []
+    for i in range(len(centers)):
+        if breached[i]:
+            t = dict(tags[i])
+            t.update(center=centers[i].tolist(), r=float(radii[i]),
+                     feature_thickness_mm=float(thick[i]), poke_out_mm=float(poke[i]))
+            out.append(t)
+    return out
+
+
+def clearance_report(mesh, members, cfg, surface_tree=None, geom=None):
+    """v4/v5: independent full-envelope clearance re-check over the FINAL
     member list. Deliberately does not reuse tree.Forest.revalidate's
     certificate bookkeeping (a builder bug that mis-certifies a member
     must not also fool the verify gate) -- same sampling math (sample at
@@ -91,6 +235,11 @@ def clearance_report(mesh, members, cfg, surface_tree=None):
     out = []
     if not members:
         return out
+    # v5 exact swap (SPEC sec 2.2): a surface-EXACT oracle routes to the
+    # independent exact re-check; a plain cKDTree (tests/legacy) keeps the
+    # sampled path below.
+    if geom is not None and hasattr(geom, "segment_clearance"):
+        return _clearance_report_exact(members, cfg, geom)
     pitch_bound_mm = (routing.surface_tree_pitch_bound_mm(
         surface_tree, percentile=cfg.surface_pitch_bound_percentile)
         if surface_tree is not None else 0.0)
@@ -390,7 +539,8 @@ def connectivity_report(members, plate_z, cfg, surface_tree=None):
 
 def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cfg,
                  plate_z, surface_tree=None, minima=None, forest=None, unrouted=(),
-                 gate_on_removal=False, island_births=None):
+                 gate_on_removal=False, island_births=None, geom=None, balls=None,
+                 gate_on_ball_breach=False):
     """Full design-v4.md #11 gate. Returns a report dict; `ok` is True
     only if all checks are clean: coverage, clearance, load, layer-island
     minima (only when the caller supplies `minima` from
@@ -449,7 +599,8 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
     uncovered slice-detected island birth DOES fail `ok` -- removal is a
     soft preference axis, island-birth coverage is not."""
     coverage = coverage_report(mesh, islands, contacts, cfg)
-    clearance = clearance_report(mesh, members, cfg, surface_tree=surface_tree)
+    clearance = clearance_report(mesh, members, cfg, surface_tree=surface_tree, geom=geom)
+    ball_breach_violations = ball_breach_report(geom, members, balls, cfg)
     load = load_report(carried_area_mm2, tip_r_mm, cfg)
     unsupported_minima = minima_report(minima, contacts, cfg) if minima is not None else []
     uncovered_island_births = island_birth_report(island_births, contacts, cfg) \
@@ -472,10 +623,25 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
           and len(printability_violations) == 0 and len(murray_violations) == 0)
     if gate_on_removal:
         ok = ok and len(removal_violations) == 0
+    # v5 step-1 (SPEC sec 2.2): ball_breach_violations are COMPUTED and
+    # surfaced (the census's headline defect class, previously checked by
+    # nothing -- the sampled engine reported zero of the 12 the exact core
+    # finds on the table), but gating `ok` on them is DEFERRED behind
+    # gate_on_ball_breach (default off, mirroring gate_on_removal). The hard
+    # gate becomes satisfiable only once the builder stops CREATING breaching
+    # anchors -- SPEC sec 2.2/2.3's builder-side geom.sphere_breach rejection
+    # during cco/bracing candidate scoring plus the exact ray-cast anchor
+    # pool (exterior-face centroids), which land in swap steps 2/3. Wiring a
+    # hard gate before that fix path exists would only crash every model with
+    # a thin-feature model anchor, with no way for the engine to route
+    # around it. Detection is in place now; the gate flips on with its fix.
+    if gate_on_ball_breach:
+        ok = ok and len(ball_breach_violations) == 0
     return dict(
         ok=ok,
         uncovered_islands=uncovered,
         clearance_violations=clearance,
+        ball_breach_violations=ball_breach_violations,
         load_violations=load,
         unsupported_minima=unsupported_minima,
         uncovered_island_births=uncovered_island_births,

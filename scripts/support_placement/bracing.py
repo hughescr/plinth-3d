@@ -783,7 +783,7 @@ def _find_model_rung_anchors(forest, surface_tree, mi, z, cfg, limit=6):
 
 
 # --------------------------------------------------------------- placement --
-def _try_place_rods(forest, surface_tree, cfg, rods, kind, embed_end, counters):
+def _try_place_rods(forest, surface_tree, cfg, rods, kind, embed_end, counters, geom=None):
     """Transactional placement (SPEC-BRACING rule 3): checkpoint, add all
     rods of this ONE candidate (both X-pair rods together, atomically),
     revalidate, rollback on any violation (returning the kind's owner
@@ -850,7 +850,7 @@ def _try_place_rods(forest, surface_tree, cfg, rods, kind, embed_end, counters):
         m = tree.Member(p0=p0, p1=p1, r0=r, r1=r, kind=kind, owner=owner,
                          embed_end=embed_end)
         idxs.append(forest.add_brace(m))
-    violations = forest.revalidate(surface_tree, cfg)
+    violations = forest.revalidate(geom if geom is not None else surface_tree, cfg)
     violations = [v for v in violations if v["member_idx"] not in pre_dirty]
     if not violations:
         violations = tree.printability_report([forest.members[i] for i in idxs], cfg)
@@ -862,7 +862,7 @@ def _try_place_rods(forest, surface_tree, cfg, rods, kind, embed_end, counters):
     return idxs
 
 
-def _place_one_rung(forest, surface_tree, cfg, mi, z, k, counters, reach_tiers=None):
+def _place_one_rung(forest, surface_tree, cfg, mi, z, k, counters, reach_tiers=None, geom=None):
     """One rung request at height z on member mi: try cross-link
     candidates nearest-first, then the model-rung fallback -- itself
     retried nearest-first (should-fix, verifier round 2: up to
@@ -886,7 +886,7 @@ def _place_one_rung(forest, surface_tree, cfg, mi, z, k, counters, reach_tiers=N
     std_candidates = _find_cross_link_candidates(forest, mi, z, cfg, k)
     for d, ni in std_candidates:
         rods = _cross_link_rods(forest, mi, ni, z, d, k, cfg)
-        placed = _try_place_rods(forest, surface_tree, cfg, rods, "brace", None, counters)
+        placed = _try_place_rods(forest, surface_tree, cfg, rods, "brace", None, counters, geom=geom)
         if placed is not None:
             return [(idx, "brace") for idx in placed]
 
@@ -900,7 +900,7 @@ def _place_one_rung(forest, surface_tree, cfg, mi, z, k, counters, reach_tiers=N
                     continue
                 tried_ni.add(ni)
                 rods = _cross_link_rods(forest, mi, ni, z, d, k, cfg)
-                placed = _try_place_rods(forest, surface_tree, cfg, rods, "brace", None, counters)
+                placed = _try_place_rods(forest, surface_tree, cfg, rods, "brace", None, counters, geom=geom)
                 if placed is not None:
                     return [(idx, "brace") for idx in placed]
 
@@ -909,13 +909,13 @@ def _place_one_rung(forest, surface_tree, cfg, mi, z, k, counters, reach_tiers=N
         if not (1.0 - 1e-9 <= length <= cfg.model_brace_max_len_mm + 1e-9):
             continue
         placed = _try_place_rods(forest, surface_tree, cfg,
-                                  [(p0, p1, cfg.brace_r_mm)], "model_rung", "p1", counters)
+                                  [(p0, p1, cfg.brace_r_mm)], "model_rung", "p1", counters, geom=geom)
         if placed is not None:
             return [(idx, "model_rung") for idx in placed]
     return None
 
 
-def _trigger_relieved(forest, surface_tree, cfg, fresh_report, trigger_idx):
+def _trigger_relieved(forest, surface_tree, cfg, fresh_report, trigger_idx, geom=None):
     """SPEC-151-SCOPING round 2: is `trigger_idx` genuinely relieved right
     now, per the SAME real transient math (r_transient_mm / _trial_
     resize_r / a trial-revalidate probe) propose_and_place's stacking
@@ -959,13 +959,13 @@ def _trigger_relieved(forest, surface_tree, cfg, fresh_report, trigger_idx):
             t_member.r0 = t_r_req
         if abs(t_member.r1 - t_r_req) > 1e-9:
             t_member.r1 = t_r_req
-        trial_violations = forest.revalidate(surface_tree, cfg)
+        trial_violations = forest.revalidate(geom if geom is not None else surface_tree, cfg)
         forest.rollback(trial_cp)
         relieved = not any(v["member_idx"] == trigger_idx for v in trial_violations)
     return relieved
 
 
-def _clearance_violated_members(forest, surface_tree, cfg):
+def _clearance_violated_members(forest, surface_tree, cfg, geom=None):
     """p6-reach Case 2 fix ("more restraint next iteration", engine.
     brace_and_size's own docstring): live, non-brace, non-stub member
     indices with a REAL clearance violation RIGHT NOW -- the exact SAME
@@ -978,7 +978,7 @@ def _clearance_violated_members(forest, surface_tree, cfg):
     Deduped (a member can appear in more than one violation entry) and
     sorted ascending by member_idx for determinism -- forest.revalidate's
     own return order is not a documented contract."""
-    violations = forest.revalidate(surface_tree, cfg)
+    violations = forest.revalidate(geom if geom is not None else surface_tree, cfg)
     brace_set = set(getattr(forest, "braces", []))
     out = set()
     for v in violations:
@@ -991,7 +991,7 @@ def _clearance_violated_members(forest, surface_tree, cfg):
     return sorted(out)
 
 
-def propose_and_place(forest, surface_tree, plate_z, cfg, spans_report, log=None):
+def propose_and_place(forest, surface_tree, plate_z, cfg, spans_report, log=None, geom=None):
     """Places braces transactionally against ONE snapshot of spans_report
     (SPEC-BRACING Part 2). `plate_z` is accepted per the interface
     contract (engine wiring depends on this exact signature); bracing
@@ -1217,7 +1217,7 @@ def propose_and_place(forest, surface_tree, plate_z, cfg, spans_report, log=None
                     continue
                 tried_zs.setdefault(host, []).append(zc)
                 result = _place_one_rung(forest, surface_tree, cfg, host, zc, k, counters,
-                                          reach_tiers=reach_tiers)
+                                          reach_tiers=reach_tiers, geom=geom)
                 if result is None:
                     continue
                 placed_any = (placed_any or []) + result
@@ -1247,7 +1247,7 @@ def propose_and_place(forest, surface_tree, plate_z, cfg, spans_report, log=None
                     break
                 fresh = transient.transient_report(forest, plate_z, cfg)
                 pending = [t_idx for t_idx in pending
-                           if not _trigger_relieved(forest, surface_tree, cfg, fresh, t_idx)]
+                           if not _trigger_relieved(forest, surface_tree, cfg, fresh, t_idx, geom=geom)]
                 if not pending:
                     break  # every carried trigger relieved -- stop stacking
                 # else: at least one trigger not relieved yet, fall
@@ -1266,7 +1266,7 @@ def propose_and_place(forest, surface_tree, plate_z, cfg, spans_report, log=None
     # placements too (a member the loop above just relieved is no longer
     # violated, and one it just placed a brace NEAR is unaffected either
     # way -- _clearance_violated_members reads live forest state).
-    for member_idx in _clearance_violated_members(forest, surface_tree, cfg):
+    for member_idx in _clearance_violated_members(forest, surface_tree, cfg, geom=geom):
         info = spans_report.get(member_idx)
         if not info or not info.get("free_gaps"):
             continue
@@ -1278,7 +1278,7 @@ def propose_and_place(forest, surface_tree, plate_z, cfg, spans_report, log=None
             continue
         tried_zs.setdefault(member_idx, []).append(z)
         rungs_requested += 1
-        result = _place_one_rung(forest, surface_tree, cfg, member_idx, z, 0, counters)
+        result = _place_one_rung(forest, surface_tree, cfg, member_idx, z, 0, counters, geom=geom)
         if result is None:
             rungs_unplaceable += 1
             continue
