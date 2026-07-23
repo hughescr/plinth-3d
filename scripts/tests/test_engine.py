@@ -399,27 +399,31 @@ def test_run_writes_brace_and_size_log_and_stays_deterministic(cfg, toed_slab_me
     assert len(r1["members"]) == len(r2["members"])
 
 
-_BASELINE_PATH = os.path.join(os.path.dirname(__file__), "fixtures_v4_p4_baseline.json")
+_BASELINE_PATH = os.path.join(os.path.dirname(__file__), "fixtures_v5_baseline.json")
 
 
 def test_table_and_toed_slab_full_run_not_worse_than_baseline(cfg):
     """SPEC-INTEGRATION #4's acceptance gate + trap detector: table and
     toed_slab through the FULL new run() (construct -> rewire ->
     brace_and_size -> verify) must stay gate-clean and not exceed
-    fixtures_v4_p4_baseline.json's total_ml.
+    fixtures_v5_baseline.json's total_ml.
 
-    Phase-4-final re-freeze (Craig-approved, honest physics): the prior
-    fixtures_v4_p3_baseline.json numbers predate the r_deflect floor,
-    design-v4.md #8's transient honest spans, cco.py's braced-cost pricing
-    + bracing, the joint-ball diet, X-pair own-floor sizing, and seeded
-    deterministic sampling -- all of which legitimately move total_ml/
-    member_ml/rewire_accepted versus that old freeze. The GATE FORMULA
-    itself (not-worse-than-frozen, +1e-6 tolerance) is unchanged; only the
-    frozen numbers moved, re-measured on this engine and confirmed
-    bit-identical across two independent engine.run calls per fixture
-    before freezing (see the p4-refreeze commit message for old-vs-new
-    values and the double-run proof). fixtures_v4_p3_baseline.json is kept
-    untouched for history."""
+    v5 geometry-core re-freeze (SPEC-V5-GEOM sec 4, PRE-APPROVED): evicting
+    the sampled surface point cloud from the load-bearing queries legitimately
+    moves the frozen volumes. The exact swap that lands in SWAP STEP 3 changes
+    total_ml two ways: (1) placement.load_partition became an EXACT,
+    deterministic per-face area partition (sec 2.5) -- no more Monte-Carlo
+    sub.sample -- which reassigns carried areas (hence tip radii, hence member
+    volumes) off the honest face geometry rather than a seed-dependent point
+    draw; (2) the perception interior-face filter (sec 2.4) drops phantom
+    demand seeded on faces interior to the overlapping-assembly solid union.
+    The GATE FORMULA itself (not-worse-than-frozen, +1e-6 tolerance) is
+    UNCHANGED; only the frozen numbers moved, re-measured on the exact engine
+    and confirmed bit-identical across two independent engine.run calls per
+    fixture before freezing (scripts/tests/_refreeze_v5.py: the double-run
+    determinism proof; old->new values are in the SWAP-STEP-3 commit message).
+    fixtures_v4_p4_baseline.json (and _v4_p3, _v3) are kept untouched for
+    history/provenance."""
     baseline = json.load(open(_BASELINE_PATH))
 
     for name, mesh_fn in (("table", mesh_io.make_overhang_table),
@@ -439,3 +443,13 @@ def test_table_and_toed_slab_full_run_not_worse_than_baseline(cfg):
         assert total_ml <= baseline[name]["total_ml"] + 1e-6, (
             f"{name}: total_ml {total_ml:.4f} exceeds frozen baseline "
             f"{baseline[name]['total_ml']} (not-worse trap detector)")
+        # Coverage pin (SPEC-V5-GEOM sec 4.5 / adversarial review point 7):
+        # the volume not-worse gate ALONE would silently accept lost routes
+        # (fewer routed contacts = less resin = a "better" volume that is
+        # actually worse support). Pin the unrouted-contact count so a
+        # coverage regression from the exact-anchor pool change is caught,
+        # not rewarded.
+        n_unrouted = len(result["unrouted"])
+        assert n_unrouted <= baseline[name]["n_unrouted"], (
+            f"{name}: n_unrouted {n_unrouted} exceeds frozen coverage baseline "
+            f"{baseline[name]['n_unrouted']} (silent route-loss detector)")

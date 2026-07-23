@@ -103,17 +103,32 @@ def grounded_mask(mesh, cfg, down_mask=None, column_pitch_mm=1.0):
     return grounded
 
 
-def overhang_islands(mesh, cfg):
+def overhang_islands(mesh, cfg, geom=None):
     """Connected components of down-facing, non-grounded faces, merging
     across BOTH true mesh-edge adjacency AND cfg.island_merge_radius_mm of
     spatial proximity (see that field's docstring: pure topological
     adjacency badly over-fragments organic/textured surfaces). Returns
-    list of np.ndarray face-index arrays, largest first."""
+    list of np.ndarray face-index arrays, largest first.
+
+    v5 interior-face filter (SPEC-V5-GEOM sec 2.4): the STL is a
+    non-watertight overlapping assembly, so ~40% of the "unrouted" contacts
+    the sampled engine chased were phantoms seeded on faces INTERIOR to the
+    solid union (a down-facing triangle buried inside another sub-body is
+    not a real overhang -- nothing prints under it). When a surface-EXACT
+    oracle `geom` is supplied, the need mask additionally requires
+    `geom.exterior_face_mask()`: interior faces can neither found an island
+    nor join one, killing that phantom demand at the source. `geom` is
+    duck-typed on `.exterior_face_mask`; callers without an exact oracle
+    (unit tests / legacy) pass None and get the v4 behavior verbatim (the
+    mask is FAIL-OPEN anyway -- ambiguous faces classify exterior -- so a
+    genuine overhang is never dropped)."""
     from scipy.spatial import cKDTree
 
     down = down_facing_mask(mesh, cfg)
     grounded = grounded_mask(mesh, cfg, down)
     need = down & ~grounded
+    if geom is not None and hasattr(geom, "exterior_face_mask"):
+        need &= geom.exterior_face_mask()
     face_ids = np.nonzero(need)[0]
     if len(face_ids) == 0:
         return []
@@ -471,11 +486,22 @@ def island_births(mesh, cfg, chunk_mm=16.0, min_area_mm2=1e-3):
     return births
 
 
-def delicacy_field(mesh, cfg, n_samples=20000, seed=0):
+def delicacy_field(mesh, cfg, n_samples=20000, seed=0, geom=None):
     """Scar-cost / delicacy weight in [0, 1] per surface sample point,
     returned as (sample_points, sample_normals, weights, query) where
     `query(points)` maps arbitrary points back to the nearest sample's
     weight via a KDTree -- this is what placement/orientation scoring call.
+
+    v5 (SPEC-V5-GEOM sec 2.4/2.6): this field is SCORING-ONLY now -- its
+    former load-bearing role as the model-anchor POSITION pool is retired
+    (exterior_anchor_pool draws anchors from exterior-face centroids). It
+    keeps its seed (weights, not a geometric measurement, so the sanctioned
+    sample stays -- sec 3). When a surface-EXACT `geom` is supplied its
+    sampling is restricted to EXTERIOR faces so interior-shell triangles of
+    the overlapping assembly never contribute a scoring sample; `geom` is
+    duck-typed on `.exterior_face_mask` and the restriction fails open (a
+    mesh that is all-exterior, or an oracle-less legacy call, samples the
+    full mesh exactly as before).
 
     Proxy for "what the decimation error map would protect" (design.md
     #7): high local curvature (surface detail) and small local thickness
@@ -493,8 +519,18 @@ def delicacy_field(mesh, cfg, n_samples=20000, seed=0):
     # or this field silently varies with whatever ran before it.
     np.random.seed(seed)
     n = min(n_samples, max(2000, len(mesh.faces)))
-    points, face_idx = mesh.sample(n, return_index=True)
-    normals = mesh.face_normals[face_idx]
+    # Restrict the scoring sample to exterior faces when an exact oracle is
+    # available (sec 2.4). Geometry (points/normals) is identical on the
+    # submesh; curvature/thickness below still query the FULL mesh, so only
+    # the DISTRIBUTION of scoring samples changes -- interior-shell faces no
+    # longer seed weights. Fail-open: all-exterior or empty -> full mesh.
+    sample_mesh = mesh
+    if geom is not None and hasattr(geom, "exterior_face_mask"):
+        ext = geom.exterior_face_mask()
+        if ext.any() and not ext.all():
+            sample_mesh = mesh.submesh([np.nonzero(ext)[0]], append=True)
+    points, face_idx = sample_mesh.sample(n, return_index=True)
+    normals = sample_mesh.face_normals[face_idx]
 
     try:
         from trimesh.curvature import discrete_gaussian_curvature_measure
@@ -582,7 +618,7 @@ def exterior_anchor_pool(mesh, geom, cfg):
     back to delicacy_field's own points/weights VERBATIM (zero behavior
     change -- the pre-v5 pool). Returns (points[N,3], delicacy[N]), the
     same shape contract delicacy_field's 1st/3rd return values have."""
-    points, _normals, weights, query = delicacy_field(mesh, cfg)
+    points, _normals, weights, query = delicacy_field(mesh, cfg, geom=geom)
     if geom is None or not hasattr(geom, "exterior_face_mask"):
         return points, weights
     ext = geom.exterior_face_mask()

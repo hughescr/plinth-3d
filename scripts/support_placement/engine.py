@@ -36,7 +36,7 @@ def prepare(mesh, cfg, log=None, geom=None):
     log = log if log is not None else {}
     t0 = time.time()
 
-    islands = perception.overhang_islands(mesh, cfg)
+    islands = perception.overhang_islands(mesh, cfg, geom=geom)
     log["islands"] = len(islands)
     log["t_islands"] = round(time.time() - t0, 2)
 
@@ -61,7 +61,7 @@ def prepare(mesh, cfg, log=None, geom=None):
     contacts = placement.sample_candidates(mesh, islands, cfg)
     log["contacts_initial"] = len(contacts)
     contacts, islands, n_min_added = _ensure_minima_contacts(
-        mesh, islands, contacts, minima, cfg)
+        mesh, islands, contacts, minima, cfg, geom=geom)
     log["minima_contacts_added"] = n_min_added
 
     # I2: demand one contact (or a short "ladder" for a raking/migrating
@@ -71,7 +71,7 @@ def prepare(mesh, cfg, log=None, geom=None):
     # duplicate demand (dedup is by the strict criterion here, not the
     # old 1mm minima_contact_radius_mm -- see _ensure_island_birth_contacts).
     contacts, islands, n_birth_added = _ensure_island_birth_contacts(
-        mesh, islands, contacts, island_births, cfg)
+        mesh, islands, contacts, island_births, cfg, geom=geom)
     log["island_birth_contacts_added"] = n_birth_added
 
     plate_z = float(mesh.bounds[0][2]) - cfg.lift_mm
@@ -348,7 +348,21 @@ def run(mesh, cfg, log=None):
     )
 
 
-def _ensure_minima_contacts(mesh, islands, contacts, minima, cfg):
+def _exterior_face_ids(mesh, geom):
+    """Original face indices to draw a contact's owning face from (SPEC-V5-GEOM
+    sec 2.4): exterior faces only when a surface-EXACT `geom` is supplied, so a
+    minimum/birth contact never snaps its owning face (and thus its normal and
+    island) to a triangle INTERIOR to the overlapping-assembly solid union.
+    Fail-open: no oracle, or a degenerate all-interior classification, falls
+    back to every face (the v4 behavior)."""
+    if geom is not None and hasattr(geom, "exterior_face_mask"):
+        ids = np.nonzero(geom.exterior_face_mask())[0]
+        if len(ids):
+            return ids
+    return np.arange(len(mesh.faces))
+
+
+def _ensure_minima_contacts(mesh, islands, contacts, minima, cfg, geom=None):
     """Ported verbatim from v3 engine.py (design-v4.md #4 orchestration
     step list): every island-birth minimum (perception.local_z_minima)
     gets a contact touching its birth region unless one already does. A
@@ -373,7 +387,8 @@ def _ensure_minima_contacts(mesh, islands, contacts, minima, cfg):
     face_island = -np.ones(len(mesh.faces), dtype=np.int64)
     for iid, fids in enumerate(islands):
         face_island[fids] = iid
-    centers_tree = cKDTree(mesh.triangles_center)
+    ext_ids = _exterior_face_ids(mesh, geom)
+    centers_tree = cKDTree(mesh.triangles_center[ext_ids])
     added = 0
     for m in minima:
         if tree_have is not None:
@@ -394,10 +409,11 @@ def _ensure_minima_contacts(mesh, islands, contacts, minima, cfg):
             # parallel workstream on this branch).
             if float(np.min(d)) <= perception.ISLAND_ATTACH_REACH_MM:
                 continue  # an existing contact already holds this birth island
-        near = centers_tree.query_ball_point(m["position"], r=1.5)
-        if not near:
-            _, nearest = centers_tree.query(m["position"])
-            near = [int(nearest)]
+        local = centers_tree.query_ball_point(m["position"], r=1.5)
+        if not local:
+            _, ln = centers_tree.query(m["position"])
+            local = [int(ln)]
+        near = [int(ext_ids[k]) for k in local]  # map exterior-local -> mesh face id
         best = min(near, key=lambda f: float(
             np.linalg.norm(mesh.triangles_center[f] - m["position"])))
         if face_island[best] >= 0:
@@ -510,7 +526,7 @@ def _greedy_ladder_positions(cluster_idx, uncovered, attach_r_mm, z_tol_mm):
     return placements
 
 
-def _ensure_island_birth_contacts(mesh, islands, contacts, island_births, cfg):
+def _ensure_island_birth_contacts(mesh, islands, contacts, island_births, cfg, geom=None):
     """I2: contact demand from perception.island_births (I1) -- the
     ground-truth slice-based birth detection, independent of
     local_z_minima's vertex-graph model. For every birth not already held
@@ -576,16 +592,18 @@ def _ensure_island_birth_contacts(mesh, islands, contacts, island_births, cfg):
     face_island = -np.ones(len(mesh.faces), dtype=np.int64)
     for iid, fids in enumerate(islands):
         face_island[fids] = iid
-    centers_tree = cKDTree(mesh.triangles_center)
+    ext_ids = _exterior_face_ids(mesh, geom)
+    centers_tree = cKDTree(mesh.triangles_center[ext_ids])
 
     added = 0
     for cluster_idx in clusters:
         for b in _greedy_ladder_positions(cluster_idx, uncovered, attach_r, z_tol_mm):
             pos = np.array([b["x"], b["y"], b["z"]], float)
-            near = centers_tree.query_ball_point(pos, r=1.5)
-            if not near:
-                _, nearest = centers_tree.query(pos)
-                near = [int(nearest)]
+            local = centers_tree.query_ball_point(pos, r=1.5)
+            if not local:
+                _, ln = centers_tree.query(pos)
+                local = [int(ln)]
+            near = [int(ext_ids[k]) for k in local]  # exterior-local -> mesh face id
             best = min(near, key=lambda f: float(
                 np.linalg.norm(mesh.triangles_center[f] - pos)))
             normal = np.asarray(mesh.face_normals[best], float)

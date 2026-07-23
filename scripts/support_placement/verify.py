@@ -430,7 +430,7 @@ def island_birth_report(island_births, routed_contacts, cfg):
     return out
 
 
-def connectivity_report(members, plate_z, cfg, surface_tree=None):
+def connectivity_report(members, plate_z, cfg, surface_tree=None, geom=None):
     """v3.7 hard gate (Craig's Chitubox review), signature-migrated for v4
     (design-v4.md #2): the stale-brace-leak and chained-Y-branch defects
     both manifested the same way in the emitted file -- a member with an
@@ -514,10 +514,20 @@ def connectivity_report(members, plate_z, cfg, surface_tree=None):
     z = pts[:, 2]
     attached_b = np.abs(z - plate_z) <= 0.2
 
+    # v5 (SPEC-V5-GEOM sec 2.6, review point 9): prefer the surface-EXACT
+    # oracle for the embed distance when supplied (geom.query is signature-
+    # compatible with cKDTree.query). DIRECTIONAL effect, intended and
+    # documented: an exact point-to-surface distance is <= the nearest
+    # sampled-cloud distance, so surf_dist can only SHRINK -> strictly MORE
+    # embed-eligible endpoints clear attached_c (the cloud over-estimated
+    # detachment). This loosens the gate only in that one direction; a real
+    # floating rod (far from the surface) still fails. Falls back to the
+    # sampled `surface_tree` when no exact oracle is passed (tests/legacy).
+    oracle = geom if geom is not None else surface_tree
     surf_dist = np.full(n_ep, np.inf)
-    if surface_tree is not None and embed_ok.any():
+    if oracle is not None and embed_ok.any():
         idx = np.nonzero(embed_ok)[0]
-        dd, _ = surface_tree.query(pts[idx])
+        dd, _ = oracle.query(pts[idx])
         surf_dist[idx] = dd
     attached_c = embed_ok & (surf_dist <= cfg.contact_depth_mm + 0.45)
 
@@ -606,7 +616,7 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
     uncovered_island_births = island_birth_report(island_births, contacts, cfg) \
         if island_births is not None else []
     connectivity_violations = connectivity_report(members, plate_z, cfg,
-                                                   surface_tree=surface_tree)
+                                                   surface_tree=surface_tree, geom=geom)
     if forest is not None:
         printability_violations = tree_mod.printability_report(members, cfg)
         murray_violations = murray_report(forest, cfg)

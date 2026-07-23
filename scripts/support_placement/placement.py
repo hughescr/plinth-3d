@@ -77,36 +77,42 @@ def _farthest_point_fallback(pts, k, floor_mm):
     return chosen
 
 
-def load_partition(mesh, islands, contacts, cfg, n_dense_samples=4000, seed=0):
-    """Approximate Voronoi partition of each island's down-facing area
-    among its contacts via Monte-Carlo nearest-assignment (robust, no
-    exact-Voronoi-on-a-mesh-surface machinery needed). Returns an array of
+def load_partition(mesh, islands, contacts, cfg):
+    """Exact, deterministic per-face load partition (SPEC-V5-GEOM sec 2.5).
+
+    Replaces the seed-dependent Monte-Carlo `sub.sample` Voronoi partition
+    (which made carried areas -- hence tip radii, hence member volumes --
+    depend on the RNG seed and on whatever perturbed the global numpy state
+    before it). Each island face's CENTROID is assigned to its nearest
+    contact (a cKDTree over that island's contacts), and the face's FULL
+    `mesh.area_faces` value accrues to that contact. No RNG, no sampling:
+    exact at face granularity (mesh faces are small vs cfg.target_spacing_mm
+    on this corpus, so per-face assignment is a faithful Voronoi partition
+    of the island's own area). Per-island carried areas sum EXACTLY to the
+    island's face-area total by construction. Returns an array of
     carried_area_mm2 aligned with `contacts`."""
-    # trimesh's Trimesh.sample() draws from the GLOBAL numpy random state
-    # (see sample_candidates' identical note above) -- seed it explicitly
-    # so the carried-area partition is reproducible regardless of what ran
-    # before it.
-    np.random.seed(seed)
     carried = np.zeros(len(contacts))
     by_island = {}
     for i, c in enumerate(contacts):
         by_island.setdefault(c["island_id"], []).append(i)
 
+    centers = mesh.triangles_center
+    face_area = mesh.area_faces
     for island_id, idxs in by_island.items():
         face_ids = islands[island_id]
-        sub = mesh.submesh([face_ids], append=True)
-        area = float(sub.area)
-        if len(idxs) == 1:
-            carried[idxs[0]] = area
+        if len(face_ids) == 0:
             continue
-        pts = sub.sample(max(n_dense_samples, 20 * len(idxs)))
+        if len(idxs) == 1:
+            carried[idxs[0]] = float(face_area[face_ids].sum())
+            continue
         positions = np.array([contacts[i]["position"] for i in idxs])
         tree = cKDTree(positions)
-        _, nearest = tree.query(pts, workers=-1)
-        counts = np.bincount(nearest, minlength=len(idxs))
-        share = counts / counts.sum()
+        # nearest contact per island face centroid -- exact & deterministic
+        # (NN assignment is independent of `workers`; ties break by index).
+        _, nearest = tree.query(centers[face_ids], workers=-1)
+        areas = np.asarray(face_area[face_ids], float)
         for j, i in enumerate(idxs):
-            carried[i] = share[j] * area
+            carried[i] = float(areas[nearest == j].sum())
     return carried
 
 
