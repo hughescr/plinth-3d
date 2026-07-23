@@ -89,3 +89,25 @@ fn deterministic_build_bit_identical() {
     let s2 = build_surface(&mesh);
     assert_eq!(surf_bvh_signature(&s1), surf_bvh_signature(&s2));
 }
+
+#[test]
+fn r6_no_hashmap_in_src() {
+    // Determinism tripwire (spec R6 / sec 4.2): HashMap/HashSet iteration order
+    // leaks RandomState into results. src/ must contain neither.
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/src");
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let p = entry.unwrap().path();
+        if p.extension().map(|e| e == "rs").unwrap_or(false) {
+            let txt = std::fs::read_to_string(&p).unwrap();
+            // match real USAGE tokens, not the words in doc comments
+            for bad in ["HashMap<", "HashMap::", "HashSet<", "HashSet::"] {
+                assert!(
+                    !txt.contains(bad),
+                    "forbidden {} in {:?} (spec R6)",
+                    bad,
+                    p
+                );
+            }
+        }
+    }
+}
