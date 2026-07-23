@@ -18,7 +18,7 @@ re-run on the same inputs reproduces the same forest exactly.
 import numpy as np
 from scipy.spatial import cKDTree
 
-from . import placement, struts, tree
+from . import joints, placement, struts, tree
 
 KDTREE_REBUILD_EVERY = 25   # design-v4.md #4: bifurcation candidate search
 
@@ -459,14 +459,15 @@ def _model_anchor_builders(forest, i, stub_idx, se, r_i, carried_i,
             t_hit = float(ts[j])
             exact_pt = se + t_hit * (np.asarray(anchor_pt, float) - se)
             yield _make_model_anchor_builder(forest, i, stub_idx, se, r_i, carried_i,
-                                              exact_pt, cfg)
+                                              exact_pt, cfg, geom=geom)
         return
     for anchor_pt, _anchor_delicacy, _len in candidates:
         yield _make_model_anchor_builder(forest, i, stub_idx, se, r_i, carried_i,
-                                          np.asarray(anchor_pt, float), cfg)
+                                          np.asarray(anchor_pt, float), cfg, geom=geom)
 
 
-def _make_model_anchor_builder(forest, i, stub_idx, se, r_i, carried_i, anchor_pt, cfg):
+def _make_model_anchor_builder(forest, i, stub_idx, se, r_i, carried_i, anchor_pt, cfg,
+                               geom=None):
     def build():
         L = float(np.linalg.norm(anchor_pt - se))
         if L <= 1e-6:
@@ -478,6 +479,24 @@ def _make_model_anchor_builder(forest, i, stub_idx, se, r_i, carried_i, anchor_p
         # foot angle budget = theta_max of its own (60-class) radius
         if not _within_cone(se, anchor_pt, r_strut, cfg):
             raise _InfeasibleCandidate()
+        # Builder-side ball-breach rejection (SPEC-V5-GEOM sec 2.2/2.3,
+        # amendment 5): the strut foot embeds at anchor_pt (embed_end="p1"),
+        # and joints.compute_joint_balls will adsorb a foot ball there sized
+        # MODEL_FOOT_FACTOR (1.4x) the rod's end radius -- that LARGER ball,
+        # not the bare rod radius, is what verify's ball_breach_report gates
+        # on (the census's headline defect: a 1.4x foot ball engulfing a
+        # sub-mm twig). Reject the anchor HERE, during candidate scoring,
+        # against the ACTUAL emitted foot-ball radius, so the trial machinery
+        # moves to the next candidate rather than committing a member whose
+        # foot ball the gate would then fail. Cheap: one sphere_breach per
+        # candidate. No-op for a non-exact geom (None / cKDTree lacks
+        # sphere_breach) -- tests/legacy keep their behavior.
+        if geom is not None and hasattr(geom, "sphere_breach"):
+            r_foot_ball = joints.MODEL_FOOT_FACTOR * r_strut
+            breached, _thick, _poke = geom.sphere_breach(
+                np.asarray(anchor_pt, float)[None, :], np.array([r_foot_ball]))
+            if bool(breached[0]):
+                raise _InfeasibleCandidate()
         member = tree.Member(p0=se.copy(), p1=anchor_pt.copy(), r0=r_i, r1=r_strut,
                               kind="strut", owner=("contact", i), embed_end="p1",
                               carried_mm2=carried_i)

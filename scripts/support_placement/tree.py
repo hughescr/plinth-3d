@@ -380,28 +380,36 @@ class Forest:
         votes inside -- the latter catches a segment routed wholly inside a
         solid region an unsigned distance test cannot see).
 
-        STUB handling (v5 step-1 scope): stubs keep the blanket standoff
-        exemption -- they are certified without a distance check, exactly as
-        the sampled path did (a stub hugs its own emergence surface at a
-        grazing angle by construction). SPEC sec 2.1's NEW stub
-        through-transit interval check is DEFERRED to step 2: it depends on
-        step 2.4's interior-face demand filter to be safe. Without that
-        filter, contacts seeded on faces INTERIOR to the non-watertight
-        solid union (the audit's ~40%-phantom class) produce stubs whose
-        whole axis is legitimately buried in solid; the interval check would
-        correctly flag them, but a stub is fixed contact geometry the builder
-        cannot re-route, so a flagged stub would crash assert_all_certified
-        rather than surface a fixable violation. Deferring the stub check
-        until the phantoms are filtered at the source is the correct
-        sequencing (recorded in the return message / follow-up)."""
+        STUB handling (SPEC sec 2.1): stubs keep the blanket standoff
+        exemption -- they are NOT distance-checked (a stub hugs its own
+        emergence surface at a grazing angle by construction, so any swept-
+        distance check false-positives) -- but they are NO LONGER blanket-
+        skipped. Each dirty stub gets the axis through-transit interval
+        check: it fails certification iff penetration_intervals on its axis
+        finds an inside run > 0.05mm (census MIN_ILLEGAL_LEN) OUTSIDE its
+        sanctioned p0 embed zone (the census's illegal through-and-through
+        stubs, members 403/357/227). A parity-crossing test, never a distance
+        test, so an ordinary surface-hugging stub cannot false-positive. A
+        stub's geometry is fixed at creation, so it is dirty (hence checked)
+        only until its first revalidate, then certified once and for all --
+        the check is O(n_contacts) across a whole run, not per-trial.
+
+        The step-1 deferral -- which depended on step 2.4's interior-face
+        demand filter -- has EXPIRED: commit 6aba0f6 landed that filter, so
+        contacts seed only on exterior faces. A flagged stub is therefore a
+        real through-transit defect, not an interior phantom; letting it stay
+        dirty (so assert_all_certified crashes rather than silently emitting
+        a support that welds through a fin) is the mandated hard gate."""
         dirty = self.dirty_members()
         if not dirty:
             return []
         seg_mi, p0s, p1s, r0s, r1s, ins0, ins1 = [], [], [], [], [], [], []
+        stub_mi = []
         for mi in dirty:
             m = self.members[mi]
             if m.kind == "stub":
-                continue  # blanket standoff exemption (step-1 scope, see above)
+                stub_mi.append(mi)  # standoff-exempt, but gets the interval check below
+                continue
             i0, i1 = self._embed_inset_arc(geom, m, cfg)
             seg_mi.append(mi)
             p0s.append(np.asarray(m.p0, float))
@@ -413,6 +421,32 @@ class Forest:
 
         violations = []
         bad = set()
+        # Stub through-transit rule (SPEC sec 2.1): axis-only interval check,
+        # standoff exemption preserved (no segment_clearance for stubs).
+        #
+        # A printable stub TERMINATES IN OPEN AIR: its stub_end (p1) is where
+        # the support column begins. Only such a stub can weld THROUGH a thin
+        # feature (census member-357 class: tip embedded, exits, transits a
+        # fin, continues in open air). If p1 is INSIDE the solid, the contact
+        # is unroutable-by-construction -- its outward normal points into the
+        # model body or an overlapping shell (the sec-2.4 interior class),
+        # so every candidate support would run through solid and the contact
+        # ends up honestly unrouted (excluded from live_member_lists). Such a
+        # wholly-buried stub is NOT a printed transit; flagging it would only
+        # crash assert_all_certified on geometry that never prints. Gate the
+        # interval test on p1 being exterior (one cheap parity vote), so the
+        # rule catches real through-transits and leaves interior phantoms to
+        # the unrouted path -- exactly the sequencing the step-1 deferral
+        # named, now that sec 2.4 keeps genuine exterior overhangs.
+        for mi in stub_mi:
+            m = self.members[mi]
+            if bool(geom.inside(np.asarray(m.p1, float)[None, :])[0]):
+                continue
+            si0, si1 = self._embed_inset_arc(geom, m, cfg)
+            if self._exact_interval_illegal(geom, m, cfg, si0, si1):
+                bad.add(mi)
+                violations.append(dict(member_idx=mi, min_clearance_mm=0.0,
+                                       at_point=None))
         if seg_mi:
             clr, argp = geom.segment_clearance(
                 np.array(p0s), np.array(p1s), np.array(r0s), np.array(r1s),

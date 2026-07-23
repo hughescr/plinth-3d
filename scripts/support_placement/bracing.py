@@ -99,7 +99,7 @@ import math
 
 import numpy as np
 
-from . import cco, placement, transient, tree
+from . import cco, joints, placement, transient, tree
 
 # Half of the connectivity-restraint-dedup tolerance lives in cfg
 # (brace_ladder_z_mm/2); see propose_and_place's restraint_zs skip.
@@ -793,8 +793,23 @@ def _find_model_rung_anchors(forest, surface_tree, mi, z, cfg, limit=6):
             _d, cp, _ti, _fn = geom.project(cand)
             if abs(float(cp[2]) - z) > 0.75 + 1e-9:
                 continue
-            p0 = _axis_point_at_z(M, float(cp[2]))
             p1 = np.array(cp, dtype=float)
+            # Builder-side ball-breach rejection (SPEC-V5-GEOM sec 2.2/2.3,
+            # amendment 5): a model_rung embeds its p1 foot (embed_end="p1"),
+            # and joints.compute_joint_balls adsorbs a foot ball there sized
+            # MODEL_FOOT_FACTOR (1.4x) the rod radius -- that LARGER ball, not
+            # the bare rod radius, is what verify's ball_breach_report gates
+            # on. Reject the anchor here (against the actual emitted foot-ball
+            # radius) so the caller (_place_one_rung) retries the next-nearest
+            # candidate, rather than placing a rung whose foot ball the gate
+            # would fail. Cheap: one sphere_breach per surviving candidate.
+            if hasattr(geom, "sphere_breach"):
+                r_foot_ball = joints.MODEL_FOOT_FACTOR * cfg.brace_r_mm
+                breached, _thick, _poke = geom.sphere_breach(
+                    p1[None, :], np.array([r_foot_ball]))
+                if bool(breached[0]):
+                    continue
+            p0 = _axis_point_at_z(M, float(cp[2]))
             out.append((p0, p1))
             if len(out) >= limit:
                 break

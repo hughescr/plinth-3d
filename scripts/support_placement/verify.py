@@ -102,16 +102,43 @@ def _clearance_report_exact(members, cfg, geom):
     sanctioned embed zone (contact_depth_mm + r_end + standoff_mm, pitch
     term 0 for an exact oracle). Unlike tree.Forest.revalidate's HOT-loop
     gated belt, verify runs the axis penetration-interval test UNGATED on
-    every non-stub member (SPEC sec 2.1: the ungated dense pass lives here).
+    every member -- non-stub AND stub (SPEC sec 2.1: the ungated dense pass
+    lives here).
 
-    STUB handling matches tree.Forest._revalidate_exact (v5 step-1 scope):
-    stubs keep the blanket standoff exemption; the SPEC sec 2.1 stub
-    through-transit check is deferred to step 2 with the interior-face
-    demand filter it depends on (see that method's docstring)."""
+    STUB handling (SPEC sec 2.1/2.2, independently coded from
+    tree.Forest._revalidate_exact per the independence covenant): a stub
+    keeps the blanket standoff exemption -- it hugs its own emergence
+    surface at a grazing angle by construction, so any swept-distance check
+    false-positives -- but is NO LONGER blanket-skipped. It gets the
+    through-transit rule: an axis inside-interval > 0.05mm OUTSIDE its
+    sanctioned p0 embed zone fails it (the census's illegal
+    through-and-through stubs, members 403/357/227). This is a
+    parity-crossing test (exact boundaries, majority-vote inside), never a
+    distance test, so an ordinary surface-hugging stub cannot false-
+    positive. The step-1 deferral -- which depended on the interior-face
+    demand filter -- has EXPIRED: commit 6aba0f6 landed that filter, so
+    contacts now seed only on exterior faces and a flagged stub is a real
+    defect, not an interior phantom the builder cannot re-route."""
     seg_mi, p0s, p1s, r0s, r1s, ins0, ins1 = [], [], [], [], [], [], []
+    out = []
     for mi, m in enumerate(members):
         if m["kind"] == "stub":
-            continue  # blanket standoff exemption (step-1 scope)
+            # Stub keeps the standoff exemption (no segment_clearance) but
+            # gets the axis through-transit interval check (SPEC sec 2.1).
+            # A printable stub terminates in open air: only a stub whose
+            # stub_end (p1) is OUTSIDE the solid can weld THROUGH a thin
+            # feature. A p1 inside the solid is the interior-unroutable class
+            # (outward normal into the model body / an overlapping shell,
+            # sec 2.4) -- discarded via the unrouted path, never printed --
+            # so it is not a transit defect. Gate on p1 exterior (one parity
+            # vote). Independently coded from tree._revalidate_exact.
+            if bool(geom.inside(np.asarray(m["p1"], float)[None, :])[0]):
+                continue
+            si0, si1 = _embed_inset_arc_exact(geom, m, cfg)
+            if _interval_illegal_exact(geom, m, cfg, si0, si1):
+                out.append(dict(member_idx=mi, kind="stub", min_clearance_mm=0.0,
+                                at_point=None))
+            continue
         r0, r1 = float(m["r0"]), float(m["r1"])
         i0, i1 = _embed_inset_arc_exact(geom, m, cfg)
         seg_mi.append(mi)
@@ -121,7 +148,6 @@ def _clearance_report_exact(members, cfg, geom):
         r1s.append(r1)
         ins0.append(i0)
         ins1.append(i1)
-    out = []
     if seg_mi:
         clr, argp = geom.segment_clearance(
             np.array(p0s), np.array(p1s), np.array(r0s), np.array(r1s),
@@ -550,7 +576,7 @@ def connectivity_report(members, plate_z, cfg, surface_tree=None, geom=None):
 def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cfg,
                  plate_z, surface_tree=None, minima=None, forest=None, unrouted=(),
                  gate_on_removal=False, island_births=None, geom=None, balls=None,
-                 gate_on_ball_breach=False):
+                 gate_on_ball_breach=True):
     """Full design-v4.md #11 gate. Returns a report dict; `ok` is True
     only if all checks are clean: coverage, clearance, load, layer-island
     minima (only when the caller supplies `minima` from
@@ -633,18 +659,19 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
           and len(printability_violations) == 0 and len(murray_violations) == 0)
     if gate_on_removal:
         ok = ok and len(removal_violations) == 0
-    # v5 step-1 (SPEC sec 2.2): ball_breach_violations are COMPUTED and
-    # surfaced (the census's headline defect class, previously checked by
-    # nothing -- the sampled engine reported zero of the 12 the exact core
-    # finds on the table), but gating `ok` on them is DEFERRED behind
-    # gate_on_ball_breach (default off, mirroring gate_on_removal). The hard
-    # gate becomes satisfiable only once the builder stops CREATING breaching
-    # anchors -- SPEC sec 2.2/2.3's builder-side geom.sphere_breach rejection
-    # during cco/bracing candidate scoring plus the exact ray-cast anchor
-    # pool (exterior-face centroids), which land in swap steps 2/3. Wiring a
-    # hard gate before that fix path exists would only crash every model with
-    # a thin-feature model anchor, with no way for the engine to route
-    # around it. Detection is in place now; the gate flips on with its fix.
+    # v5 (SPEC sec 2.2, line 280): ball_breach_violations are a HARD GATE,
+    # same class as clearance -- ANDed into `ok`. This is the census's
+    # headline defect class (44/48 crossings), previously checked by nothing
+    # (the sampled engine reported zero of the 12 the exact core finds on the
+    # table). The gate is now satisfiable because the builder side stops
+    # CREATING breaching anchors: cco model-anchor and bracing model-rung
+    # candidate scoring reject a thin-twig anchor via geom.sphere_breach on
+    # the anchor-end ball (SPEC sec 2.2/2.3), and the exact ray-cast anchor
+    # pool (exterior-face centroids) lands feet on true surface. verify's
+    # gate is the independent re-check behind that. `gate_on_ball_breach`
+    # defaults True; it is a no-op for non-exact callers (a plain cKDTree /
+    # None geom makes ball_breach_report return [] by construction), so
+    # tests/legacy paths are unaffected.
     if gate_on_ball_breach:
         ok = ok and len(ball_breach_violations) == 0
     return dict(
