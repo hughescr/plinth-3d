@@ -765,3 +765,86 @@ def test_a18_revalidate_batches_interval_calls():
     assert cg.n_per_member == 0, "per-member penetration_intervals must NOT be called"
     assert cg.batch_sizes == [3], f"expected ONE batch of 3, got {cg.batch_sizes}"
     assert viol == [], "clear struts must not be flagged"
+
+
+# ==========================================================================
+# 15. Amendment A22 (spec sec 2.4) — wrapper-side input validation MUST reject
+#     non-finite (NaN/inf) coordinates AND non-coordinate numeric args
+#     (radii/insets/standoff) with a ValueError naming the offending argument,
+#     BEFORE crossing the FFI. The `< 0` nonneg checks alone let NaN through
+#     (NaN < 0 is False), which on the interval paths silently returns an EMPTY
+#     interval list and certifies garbage geometry (the confirmed B-2 hole).
+# ==========================================================================
+def _kbox():
+    return GK.KernelSurface(_box((10, 10, 10)))
+
+
+def test_a22_penetration_intervals_rejects_nan_inf():
+    k = _kbox()
+    good0 = np.array([-3.0, 0, 0]); good1 = np.array([3.0, 0, 0])
+    # NaN / inf endpoint
+    for bad in (np.nan, np.inf):
+        with pytest.raises(ValueError):
+            k.penetration_intervals(np.array([bad, 0, 0]), good1, 0.3, 0.3)
+        with pytest.raises(ValueError):
+            k.penetration_intervals(good0, np.array([0, bad, 0]), 0.3, 0.3)
+        # NaN / inf radius — the exact hole: NaN passes `r < 0`
+        with pytest.raises(ValueError):
+            k.penetration_intervals(good0, good1, bad, 0.3)
+        with pytest.raises(ValueError):
+            k.penetration_intervals(good0, good1, 0.3, bad)
+    with pytest.raises(ValueError):
+        k.penetration_intervals(good0, good1, -0.1, 0.3)   # negative still caught
+
+
+def test_a22_penetration_intervals_batch_rejects_nan_inf():
+    k = _kbox()
+    p0 = np.array([[-3.0, 0, 0], [-3, 1, 0]])
+    p1 = np.array([[3.0, 0, 0], [3, 1, 0]])
+    with pytest.raises(ValueError):
+        k.penetration_intervals_batch(np.array([[np.nan, 0, 0], [-3, 1, 0]]), p1, 0.3, 0.3)
+    with pytest.raises(ValueError):
+        k.penetration_intervals_batch(p0, p1, np.array([0.3, np.nan]), 0.3)
+    with pytest.raises(ValueError):
+        k.penetration_intervals_batch(p0, p1, 0.3, np.array([np.inf, 0.3]))
+    with pytest.raises(ValueError):
+        k.penetration_intervals_batch(p0, p1, np.array([-0.1, 0.3]), 0.3)
+
+
+def test_a22_sphere_breach_rejects_nan_inf_radius():
+    k = _kbox()
+    c = np.array([[0, 0, 0.0]])
+    with pytest.raises(ValueError):
+        k.sphere_breach(c, np.array([np.nan]))   # the hole: NaN passes `radii < 0`
+    with pytest.raises(ValueError):
+        k.sphere_breach(c, np.array([np.inf]))
+    with pytest.raises(ValueError):
+        k.sphere_breach(np.array([[np.nan, 0, 0]]), np.array([1.0]))
+    with pytest.raises(ValueError):
+        k.sphere_breach(c, np.array([-0.5]))     # negative still caught
+
+
+def test_a22_segment_clearance_rejects_nan_inf():
+    k = _kbox()
+    p0 = np.array([[-5.0, 0, 8.0]]); p1 = np.array([[5.0, 0, 8.0]])
+    with pytest.raises(ValueError):
+        k.segment_clearance(p0, p1, np.array([np.nan]), 0.5, 0.5)  # NaN radius
+    with pytest.raises(ValueError):
+        k.segment_clearance(p0, p1, 0.5, np.array([np.inf]), 0.5)
+    with pytest.raises(ValueError):
+        k.segment_clearance(p0, p1, 0.5, 0.5, 0.5, inset0s=np.array([np.nan]))  # NaN inset
+    with pytest.raises(ValueError):
+        k.segment_clearance(p0, p1, 0.5, 0.5, np.nan)             # NaN standoff
+    with pytest.raises(ValueError):
+        k.segment_clearance(p0, p1, -0.5, 0.5, 0.5)               # negative still caught
+
+
+def test_a22_penetration_intervals_nan_does_not_silently_empty():
+    # The precise failure scenario: a NaN endpoint must RAISE, never return an
+    # empty (=no-penetration) interval list that would certify garbage geometry.
+    k = _kbox()
+    try:
+        out = k.penetration_intervals(np.array([np.nan, 0, 0]), np.array([3.0, 0, 0]), 0.3, 0.3)
+    except ValueError:
+        return  # correct: rejected
+    pytest.fail(f"NaN endpoint silently returned {out!r} instead of raising")

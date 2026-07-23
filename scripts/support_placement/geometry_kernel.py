@@ -190,6 +190,13 @@ class KernelSurface:
         i1 = (np.zeros(N) if inset1s is None
               else np.ascontiguousarray(np.broadcast_to(np.asarray(inset1s, dtype=np.float64), (N,))))
         _finite_or_raise(p0, "p0s"); _finite_or_raise(p1, "p1s")
+        # Amendment A22: validate non-coordinate numeric args too. The `< 0`
+        # checks below let NaN through (NaN < 0 is False), so NaN/inf radii,
+        # insets, or standoff must be rejected explicitly BEFORE they cross FFI.
+        _finite_or_raise(r0, "r0s"); _finite_or_raise(r1, "r1s")
+        _finite_or_raise(i0, "inset0s"); _finite_or_raise(i1, "inset1s")
+        if not np.isfinite(standoff):
+            raise ValueError("standoff contains non-finite values (NaN/inf)")
         if np.any(r0 < 0) or np.any(r1 < 0):
             raise ValueError("radii must be nonnegative")
         if np.any(i0 < 0) or np.any(i1 < 0):
@@ -207,6 +214,14 @@ class KernelSurface:
         p0 = np.ascontiguousarray(np.asarray(p0, dtype=np.float64).reshape(1, 3))
         p1 = np.ascontiguousarray(np.asarray(p1, dtype=np.float64).reshape(1, 3))
         r0a = np.array([float(r0)]); r1a = np.array([float(r1)])
+        # Amendment A22: reject non-finite endpoints/radii before crossing FFI.
+        # On NaN, the Moller/parity comparisons all evaluate false and the
+        # kernel would return an EMPTY interval list, silently certifying a
+        # member whose geometry is garbage instead of raising.
+        _finite_or_raise(p0, "p0"); _finite_or_raise(p1, "p1")
+        _finite_or_raise(r0a, "r0"); _finite_or_raise(r1a, "r1")
+        if np.any(r0a < 0) or np.any(r1a < 0):
+            raise ValueError("radii must be nonnegative")
         d = self._native.penetration_intervals_batch(
             p0, p1, r0a, r1a, int(n_offset_rays), float(majority_step_mm),
             int(cap), float(min_illegal_len_mm), rays == "all")
@@ -222,6 +237,11 @@ class KernelSurface:
         N = len(p0)
         r0 = np.ascontiguousarray(np.broadcast_to(np.asarray(r0s, dtype=np.float64), (N,)))
         r1 = np.ascontiguousarray(np.broadcast_to(np.asarray(r1s, dtype=np.float64), (N,)))
+        # Amendment A22: validate before FFI (see penetration_intervals note).
+        _finite_or_raise(p0, "p0s"); _finite_or_raise(p1, "p1s")
+        _finite_or_raise(r0, "r0s"); _finite_or_raise(r1, "r1s")
+        if np.any(r0 < 0) or np.any(r1 < 0):
+            raise ValueError("radii must be nonnegative")
         if N == 0:
             return []
         d = self._native.penetration_intervals_batch(
@@ -251,6 +271,8 @@ class KernelSurface:
         N = len(centers)
         radii = np.ascontiguousarray(np.broadcast_to(np.asarray(radii, dtype=np.float64), (N,)))
         _finite_or_raise(centers, "centers")
+        # Amendment A22: `radii < 0` alone lets NaN through (NaN < 0 is False).
+        _finite_or_raise(radii, "radii")
         if np.any(radii < 0):
             raise ValueError("radii must be nonnegative")
         if N == 0:
