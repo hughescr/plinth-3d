@@ -9,18 +9,44 @@ machinery -- those retire with trunks.py/braces.py's policy role
 See references/design-v4.md for the charter and __init__.py for the
 module map.
 """
+import contextlib
+import sys
 import time
 import numpy as np
 
 from . import perception, placement, routing, verify, joints, cco, tree, rewire
 from . import transient, bracing
-from .geometry_exact import ExactSurface
+from .geometry_kernel import KernelSurface
+
+
+@contextlib.contextmanager
+def _stage(log, name, run_t0):
+    """Per-stage progress + timing (SPEC-RUST-KERNEL sec 7). Owner-mandated so
+    a full-scale run is never a heartbeat-only black box: on enter prints
+    ``[v5] >> {name}``; on exit prints
+    ``[v5] << {name} dt={dt}s t=+{total}s`` -- BOTH to stderr (stdout stays
+    clean for result piping), flush=True. ``dt`` is this stage's own duration;
+    ``total`` is cumulative since the run's ``run_t0``. Records
+    ``log[f"t_{name}"]`` = cumulative time (round 2), which preserves today's
+    key semantics verbatim for the stages that already had them (t_geom_build,
+    t_surface_tree were both ``time.time() - run_t0`` cumulative) and adds the
+    rest (t_prepare, t_construct[p{i}], t_rewire[p{i}], t_brace_and_size[p{i}],
+    t_verify[p{i}], t_finish)."""
+    t_stage = time.time()
+    print(f"[v5] >> {name}", file=sys.stderr, flush=True)
+    try:
+        yield
+    finally:
+        now = time.time()
+        print(f"[v5] << {name} dt={now - t_stage:.1f}s t=+{now - run_t0:.1f}s",
+              file=sys.stderr, flush=True)
+        log[f"t_{name}"] = round(now - run_t0, 2)
 
 
 def prepare(mesh, cfg, log=None, geom=None):
     """Stage 1 of the pipeline: everything that depends only on the mesh.
-    Returns a picklable dict (no KDTree/ExactSurface -- rebuild per
-    process with routing.build_surface_tree / ExactSurface(mesh)):
+    Returns a picklable dict (no KDTree/KernelSurface -- rebuild per
+    process with routing.build_surface_tree / KernelSurface(mesh)):
     islands, minima, island_births, contacts, plate_z, sample_points,
     sample_delicacy, log. Extracted from run() so Treant-scale runs can
     checkpoint between bounded foreground calls; run() remains the
@@ -228,19 +254,26 @@ def run(mesh, cfg, log=None):
     log = log if log is not None else {}
     t0 = time.time()
 
-    # v5 geometry core (SPEC-V5-GEOM): the surface-EXACT oracle, built
-    # FIRST (ahead of prepare()) so prepare()'s own model-anchor pool
-    # (SPEC sec 2.3) can already be exterior-face centroids rather than
-    # a seeded cloud -- prepare() no longer has a cheaper legacy path to
-    # fall back to once geom exists, so this pays the ExactSurface build
-    # cost even on a mesh that turns out to have zero contacts; that
-    # build is seconds-scale (sec 1) and never the dominant cost here.
-    # Every load-bearing clearance/anchor decision downstream consults
-    # the true triangles via this, not the sampled cloud.
-    geom = ExactSurface(mesh)
-    log["t_geom_build"] = round(time.time() - t0, 2)
+    # v5 geometry core: the surface-EXACT oracle, now the Rust geom_kernel
+    # (SPEC-RUST-KERNEL, de-Python stage 1) -- a drop-in for the frozen
+    # Python ExactSurface oracle, same public API/semantics/dtypes, parallel
+    # across all cores (GEOM_KERNEL_THREADS), bit-deterministic run-to-run and
+    # thread-count invariant. Built FIRST (ahead of prepare()) so prepare()'s
+    # own model-anchor pool (SPEC-V5-GEOM sec 2.3) can already be exterior-face
+    # centroids rather than a seeded cloud -- prepare() no longer has a cheaper
+    # legacy path to fall back to once geom exists, so this pays the kernel
+    # build cost even on a mesh that turns out to have zero contacts; that
+    # build is sub-second (BVH + parity CSR over the soup) and never the
+    # dominant cost. Every load-bearing clearance/anchor decision downstream
+    # (both clearance implementations, model anchors, perception seeding +
+    # interior-face filter) consults the true triangles via this kernel, not
+    # the sampled cloud. The Python ExactSurface survives ONLY as the frozen
+    # differential-test oracle (scripts/tests/test_kernel_parity.py).
+    with _stage(log, "geom_build", t0):
+        geom = KernelSurface(mesh)
 
-    pre = prepare(mesh, cfg, log, geom=geom)
+    with _stage(log, "prepare", t0):
+        pre = prepare(mesh, cfg, log, geom=geom)
     islands, minima, contacts = pre["islands"], pre["minima"], pre["contacts"]
     island_births = pre["island_births"]
     plate_z = pre["plate_z"]
@@ -271,26 +304,30 @@ def run(mesh, cfg, log=None):
     # standoff_mm. Kept alive for the not-yet-migrated consumers
     # (connectivity/removal diagnostics -- SPEC step 3); model anchors
     # (this step) and clearance (step 1) no longer read it.
-    surface_tree = routing.build_surface_tree(mesh, pitch_mm=0.3, max_points=400000)
-    log["t_surface_tree"] = round(time.time() - t0, 2)
+    with _stage(log, "surface_tree", t0):
+        surface_tree = routing.build_surface_tree(mesh, pitch_mm=0.3, max_points=400000)
 
     forest = members = balls = report = carried = tip_r = unrouted = None
     max_fix_passes = 2
     for fix_pass in range(max_fix_passes):
         pre["contacts"] = contacts  # fix-pass additions feed back in
-        forest, unrouted, carried, tip_r, contacts = construct(
-            mesh, pre, surface_tree, cfg, log=log, geom=geom)
+        with _stage(log, f"construct[p{fix_pass}]", t0):
+            forest, unrouted, carried, tip_r, contacts = construct(
+                mesh, pre, surface_tree, cfg, log=log, geom=geom)
         # Phase 3 (design-v4.md #7): topology mutation runs AFTER
         # insertion, BEFORE verify -- rewire.optimize mutates `forest` in
         # place (subtree reattach / junction slide / twig prune), each
         # move already transactional+certificate-checked internally;
         # re-asserting after is a cheap belt-and-suspenders check.
-        rewire.optimize(forest, mesh, geom, cfg, log=log)
+        with _stage(log, f"rewire[p{fix_pass}]", t0):
+            rewire.optimize(forest, mesh, geom, cfg, log=log)
         # Phase 4c (design-v4.md #8/#9): build-time-honest transient sizing
         # + bracing fixed point, then its own second rewire pass against the
         # braced reality -- runs AFTER topology settles, BEFORE the gates
         # that decide whether this fix-pass is done.
-        brace_and_size(mesh, forest, unrouted, surface_tree, plate_z, cfg, log=log, geom=geom)
+        with _stage(log, f"brace_and_size[p{fix_pass}]", t0):
+            brace_and_size(mesh, forest, unrouted, surface_tree, plate_z, cfg,
+                           log=log, geom=geom)
         tree.assert_all_certified(forest)
         members, balls = live_member_lists(forest, unrouted, plate_z, cfg)
         log[f"forest_pass{fix_pass}"] = dict(
@@ -300,10 +337,11 @@ def run(mesh, cfg, log=None):
         log["n_unrouted"] = len(unrouted)
 
         routed_contacts = [c for i, c in enumerate(contacts) if i not in unrouted]
-        report = verify.self_verify(mesh, islands, routed_contacts, members, carried, tip_r,
-                                     cfg, plate_z, surface_tree=surface_tree, minima=minima,
-                                     forest=forest, unrouted=unrouted,
-                                     island_births=island_births, geom=geom, balls=balls)
+        with _stage(log, f"verify[p{fix_pass}]", t0):
+            report = verify.self_verify(mesh, islands, routed_contacts, members, carried, tip_r,
+                                        cfg, plate_z, surface_tree=surface_tree, minima=minima,
+                                        forest=forest, unrouted=unrouted,
+                                        island_births=island_births, geom=geom, balls=balls)
         log[f"verify_pass{fix_pass}"] = dict(
             ok=report["ok"],
             n_uncovered=len(report["uncovered_islands"]),
@@ -339,7 +377,8 @@ def run(mesh, cfg, log=None):
             break
         contacts = _add_fix_contacts(mesh, islands, contacts, fixable)
 
-    volume = tree.volume_report(members, balls)
+    with _stage(log, "finish", t0):
+        volume = tree.volume_report(members, balls)
     log["t_total"] = round(time.time() - t0, 2)
     return dict(
         islands=islands, contacts=contacts, carried_area_mm2=carried, tip_r_mm=tip_r,

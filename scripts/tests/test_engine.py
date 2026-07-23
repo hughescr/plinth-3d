@@ -42,14 +42,16 @@ def test_engine_runs_end_to_end_on_table_fixture(table_mesh, cfg):
     assert result["verify"]["uncovered_island_births"] == [], result["verify"]
     # regression tripwire only, per Craig's correctness-over-speed ruling
     # (never trade correctness/resin for speed): pre-v5 cloud-based
-    # composed-engine baseline was ~10.2s (2026-07-22). v5-geom-core swap
-    # steps 1+2 (exact clearance + exact model anchors, SPEC-V5-GEOM secs
-    # 2.1/2.2/2.3) measure ~19.5-20.1s on this machine -- real geometry
-    # work costs real time; re-baselined here (not tightened) with wide
-    # headroom since the table fixture sat flaky right at the old 20.0s
-    # pin (a coin flip, not a regression). Step 3 (perception/load-
-    # partition swap) may move this again; re-measure, don't guess.
-    assert result["log"]["t_total"] < 30.0
+    # composed-engine baseline was ~10.2s (2026-07-22). The v5-geom-core
+    # Python-exact swap (SPEC-V5-GEOM) measured ~19.5-20.1s and sat at a
+    # < 30.0s pin. SPEC-RUST-KERNEL WIRE (2026-07-23) replaced the geometry
+    # hot core with the Rust geom_kernel (parallel across all cores): the
+    # SAME fixture now runs ~7.5s on this machine (M3 Max). Re-baselined to
+    # < 15.0s as an honest tripwire -- ~2x measured headroom (absorbs
+    # machine/thermal variance) while still tripping on any regression back
+    # toward the Python-exact ~20s or worse. NOT a speed target (correctness
+    # and resin never trade against wall-time); re-measure, don't guess.
+    assert result["log"]["t_total"] < 15.0
 
 
 def test_engine_insertion_accounting_exact(table_mesh, cfg):
@@ -123,14 +125,16 @@ def test_engine_wall_time_pin_on_table(table_mesh, cfg):
     result = engine.run(table_mesh, cfg)
     # regression tripwire only, per Craig's correctness-over-speed ruling
     # (never trade correctness/resin for speed): pre-v5 cloud-based
-    # composed-engine baseline was ~10.2s (2026-07-22). v5-geom-core swap
-    # steps 1+2 (exact clearance + exact model anchors, SPEC-V5-GEOM secs
-    # 2.1/2.2/2.3) measure ~19.5-20.1s on this machine -- real geometry
-    # work costs real time; re-baselined here (not tightened) with wide
-    # headroom since the table fixture sat flaky right at the old 20.0s
-    # pin (a coin flip, not a regression). Step 3 (perception/load-
-    # partition swap) may move this again; re-measure, don't guess.
-    assert result["log"]["t_total"] < 30.0
+    # composed-engine baseline was ~10.2s (2026-07-22). The v5-geom-core
+    # Python-exact swap (SPEC-V5-GEOM) measured ~19.5-20.1s and sat at a
+    # < 30.0s pin. SPEC-RUST-KERNEL WIRE (2026-07-23) replaced the geometry
+    # hot core with the Rust geom_kernel (parallel across all cores): the
+    # SAME fixture now runs ~7.5s on this machine (M3 Max). Re-baselined to
+    # < 15.0s as an honest tripwire -- ~2x measured headroom (absorbs
+    # machine/thermal variance) while still tripping on any regression back
+    # toward the Python-exact ~20s or worse. NOT a speed target (correctness
+    # and resin never trade against wall-time); re-measure, don't guess.
+    assert result["log"]["t_total"] < 15.0
 
 
 def test_engine_construct_is_deterministic_despite_global_rng_state(table_mesh, cfg):
@@ -397,6 +401,97 @@ def test_run_writes_brace_and_size_log_and_stays_deterministic(cfg, toed_slab_me
     assert "brace_and_size" in r1["log"]
     assert r1["volume"] == r2["volume"]
     assert len(r1["members"]) == len(r2["members"])
+
+
+# =================================================================
+# SPEC-RUST-KERNEL WIRE (c): production-path determinism guard.
+# engine.run now builds the Rust geom_kernel (KernelSurface) as its
+# surface-EXACT oracle. Determinism is a HARD requirement (house rules):
+# results must be BIT-IDENTICAL across repeated runs AND across thread
+# counts. This guard runs the table fixture three ways -- twice at the
+# default (all-cores) thread count and once pinned to a single kernel
+# thread -- and asserts every load-bearing output is byte-for-byte equal.
+# =================================================================
+def _tobytes(a):
+    a = np.ascontiguousarray(np.asarray(a, dtype=np.float64))
+    return str(a.shape).encode() + a.tobytes()
+
+
+def _run_canon(result):
+    """Canonical byte image of a run() result's load-bearing, determinism-
+    relevant outputs: the full volume accounting, every live member's
+    endpoints/radii/kind, the joint balls, the routed/unrouted split,
+    carried areas + tip radii, and every verify violation list. dtype +
+    shape + tobytes() (NOT np.array_equal, which treats +0.0 == -0.0 --
+    Amendment A19)."""
+    parts = []
+    vol = result["volume"]
+    for k in sorted(vol):
+        v = vol[k]
+        if isinstance(v, dict):
+            parts.append((k + ":" + repr(sorted(v.items()))).encode())
+        else:
+            parts.append((k + "=" + repr(float(v))).encode())
+    for m in result["members"]:
+        parts.append(_tobytes(m["p0"]))
+        parts.append(_tobytes(m["p1"]))
+        parts.append(repr((float(m["r0"]), float(m["r1"]), m["kind"],
+                           tuple(m["owner"]), m.get("embed_end"),
+                           float(m.get("carried_mm2", 0.0)))).encode())
+    for b in result["balls"]:
+        parts.append(_tobytes(b["center"]))
+        parts.append(repr(float(b["r"])).encode())
+    parts.append(repr(sorted(int(i) for i in result["unrouted"])).encode())
+    parts.append(_tobytes(result["carried_area_mm2"]))
+    parts.append(_tobytes(result["tip_r_mm"]))
+    v = result["verify"]
+    for key in sorted(v):
+        if key.endswith("violations") or key.startswith("uncovered") or \
+                key == "unsupported_minima":
+            parts.append((key + "=" + repr(v[key])).encode())
+    return b"|".join(parts)
+
+
+@pytest.mark.kernel
+def test_run_bit_identical_across_thread_counts_on_table(table_mesh):
+    """WIRE guard (c): engine.run on the table fixture is bit-identical when
+    repeated AND when the kernel's effective thread count is changed. The
+    real knob for THIS kernel is GEOM_KERNEL_THREADS (spec A4: the kernel
+    never touches rayon's GLOBAL pool -- it keys per-call ThreadPoolBuilder
+    pools on GEOM_KERNEL_THREADS, so RAYON_NUM_THREADS is inert by design and
+    a RAYON_NUM_THREADS sweep would pass VACUOUSLY without ever varying the
+    count). We therefore sweep the real knob and, per A4's anti-vacuous rule,
+    ASSERT the effective count actually changed before trusting the equality.
+    """
+    from support_placement import geometry_kernel as GK
+
+    prev = os.environ.get("GEOM_KERNEL_THREADS")
+    seen = []
+    canons = []
+    try:
+        # default (all cores), default again (repeat), then single-thread.
+        for env in (None, None, "1"):
+            if env is None:
+                os.environ.pop("GEOM_KERNEL_THREADS", None)
+            else:
+                os.environ["GEOM_KERNEL_THREADS"] = env
+            seen.append(GK.KernelSurface(table_mesh).current_threads())
+            result = engine.run(table_mesh, config_mod.SupportConfig())
+            canons.append(_run_canon(result))
+    finally:
+        if prev is None:
+            os.environ.pop("GEOM_KERNEL_THREADS", None)
+        else:
+            os.environ["GEOM_KERNEL_THREADS"] = prev
+
+    # A4 anti-vacuous: the sweep MUST have actually varied the thread count,
+    # otherwise thread-invariance is untested. Default is all cores (>1 on
+    # this machine); the pinned case is exactly 1.
+    assert seen[2] == 1, seen
+    assert seen[0] > 1, ("default kernel thread count is not >1; cannot "
+                         f"demonstrate thread-count variance: {seen}")
+    # The load-bearing property: byte-identical results across all three runs.
+    assert len(set(canons)) == 1, "engine.run results differ across runs/threads"
 
 
 _BASELINE_PATH = os.path.join(os.path.dirname(__file__), "fixtures_v5_baseline.json")
