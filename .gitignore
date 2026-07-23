@@ -4,3 +4,4 @@ __pycache__/
 .DS_Store
 .venv/
 uv.lock.bak
+scripts/tests/treant_pre_probe.pkl
