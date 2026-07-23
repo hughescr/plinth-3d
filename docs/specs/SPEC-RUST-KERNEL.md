@@ -83,9 +83,12 @@ reassembly) so the Rust side only ever sees clean C-contiguous f64/i64 arrays.
   (debug builds are 10–50x slower on this workload; `--release` is the
   default; a `--profile dev-opt` (opt-level 2 + debug assertions) profile is
   provided for kernel debugging).
-- Cargo.toml pins: `pyo3` with `abi3-py311` (venv is Python 3.11.12; abi3
-  keeps the wheel valid across minor bumps), `numpy` crate matching the
-  installed numpy 2.x, `rayon`. `[profile.release]` keeps default
+- Cargo.toml pins: the `numpy` crate (rust-numpy ≥ 0.21, required for numpy
+  2.x) is selected FIRST and its required `pyo3` version drives the top-level
+  `pyo3` pin (with `abi3-py311`; venv is Python 3.11.12) — rust-numpy
+  re-exports and hard-couples to one pyo3 version, and a mismatched
+  independent pin is the single most common maturin build wall ("expected
+  PyArray (pyo3 vA), found (pyo3 vB)"). Plus `rayon`. `[profile.release]` keeps default
   `codegen-units` but sets `lto = "thin"`; **no** `-ffast-math`-equivalents,
   no `target-cpu=native` (sec 5.1 — reproducibility across machines beats a
   few percent).
@@ -151,10 +154,10 @@ the GIL (`py.allow_threads`) for every batch computation.
 | `project(pts)` | f64 (N,3) or (3,) | (f64 (N,), f64 (N,3), i64 (N,), f64 (N,3)) | (unsigned dist, closest point, tri idx, face normal). Normal is the trimesh-supplied row for the argmin face. |
 | `inside(pts, batch=40000)` | f64 (N,3) or (3,) | bool (N,) or bool | 3-axis ray-parity MAJORITY vote, the ONLY inside/outside classifier. `batch` accepted and ignored (kernel streams; no O(N·cand) intermediates exist to bound). |
 | `cast_rays(origins, dirs, t_max=1.0)` | f64 (n,3), f64 (n,3), float | list of n pairs `(t_sorted f64 (k_i,), faces i64 (k_i,))` | Native returns flat `(offsets i64 (n+1,), t_all, faces_all)`; the wrapper slices into the list — one FFI crossing for the whole batch, identical list-of-pairs shape to today. Crossings deduped by arc location, tol 3e-3mm (dedup_loc semantics, sec 3.5). |
-| `segment_clearance(p0s, p1s, r0s, r1s, standoff, inset0s=None, inset1s=None, chunk_mm=5.0)` | f64 (N,3)x2; r/inset scalar-or-(N,) broadcast | (f64 (N,), f64 (N,3)) | (min clearance over sub-segment [inset0, L−inset1], argmin surface point; NaN point when certified clear with no near candidate / degenerate). Conservative r_max taper fallback preserved verbatim (over-flags only, never under-flags). `chunk_mm` accepted; the BVH kernel does not need chunked crops but honors the parameter for signature parity (ignored). |
-| `penetration_intervals(p0, p1, r0, r1, n_offset_rays=8, majority_step_mm=0.12, cap=80, min_illegal_len_mm=0.05, rays="axis")` | f64 (3,)x2, floats | list[dict(s_a, s_b, entered, exited, max_depth_mm, ray)] | Census PASS A–C, ported semantics-for-semantics: Moller crossings partition each ray; each sub-segment classified by dense-majority parity vote (`mean >= 0.5`) of `min(cap, max(3, floor(Lsub/step)))` interior linspace samples; maximal inside runs longer than min_illegal_len become intervals; depth = max unsigned distance of inside samples. `rays="axis"|"all"` (all = axis + n capsule-offset rays, member_rays construction verbatim). Native returns struct-of-arrays + ray-id; wrapper builds the dicts and "axis"/"offK" labels. |
+| `segment_clearance(p0s, p1s, r0s, r1s, standoff, inset0s=None, inset1s=None, chunk_mm=5.0)` | f64 (N,3)x2; r/inset scalar-or-(N,) broadcast | (f64 (N,), f64 (N,3)) | (min clearance over sub-segment [inset0, L−inset1], argmin surface point; NaN point only in the degenerate cases: L < 1e-9 or sub-segment entirely inside embed zones). Conservative r_max taper fallback preserved verbatim (over-flags only, never under-flags). `chunk_mm` accepted; the BVH kernel does not need chunked crops but honors the parameter for signature parity (ignored). **Sanctioned Tier-1 deviation (Amendment A1):** the oracle's crop-empty "open space" branch returns `min(endpoint-to-nearest-CENTROID) − thresh` and a NaN argmin point (`geometry_exact.py` 693–697) — a certificate value, not the physical distance. The kernel does NOT reproduce it (no centroid tree exists); it always returns the exact segment-to-surface clearance and a real argmin point. This is safe by construction: the oracle's Tier-1 fires only when the sound crop certificate proves true distance > thresh, so BOTH values are strictly positive (verdict parity exact), and exact ≤ centroid-endpoint distance so `clr_kernel ≤ clr_oracle` always. Value 1e-9-parity applies ONLY in the oracle's Tier-2 regime (sec 5.3, 6.3). |
+| `penetration_intervals(p0, p1, r0, r1, n_offset_rays=8, majority_step_mm=0.12, cap=80, min_illegal_len_mm=0.05, rays="axis")` | f64 (3,)x2, floats | list[dict(s_a, s_b, entered, exited, max_depth_mm, ray)] | Census PASS A–C, ported semantics-for-semantics: Moller crossings partition each ray; each sub-segment classified by dense-majority parity vote (`mean >= 0.5`) of `min(cap, max(3, floor(Lsub/step)))` interior linspace samples; maximal inside runs longer than min_illegal_len become intervals; depth = max unsigned distance of inside samples. `rays="axis"|"all"` (all = axis + n capsule-offset rays, member_rays construction verbatim). Native returns struct-of-arrays + ray-id; wrapper builds the dicts and "axis"/"offK" labels. **Amendment A7:** each single-member call is ONE native call — the internal parity votes and inside-sample nearest-distances run inside the kernel, never by re-entering the Python wrapper's `inside()`/`query()`. Because this is the one genuinely per-element method in the surface (an acknowledged exception to R1's batch-only rule), the native layer ALSO exposes `penetration_intervals_batch(members as SoA + offsets) -> SoA + offsets`; the wrapper keeps the single-member signature for drop-in parity and routes any caller holding N members (census-parameter revalidate) through the batch entry point. Sample positions use the pinned linspace formula (sec 5.1). |
 | `sphere_breach(centers, radii, eps_mm=0.05, half_deg=25.0, n_cone=8)` | f64 (N,3), scalar-or-(N,) | (bool (N,), f64 (N,), f64 (N,)) | (breached, feature_thickness_mm, poke_out_mm). Cone construction (`_cone_dirs`), near-wall skip (`> nd + 0.05`), and the reach precondition (`r − dist > eps`) verbatim. thickness = inf when no far wall. |
-| `exterior_face_mask(gap_warn_mm=0.15)` | — | bool (nfaces,), cached | 3 fixed barycentric points × eps ∈ {0.05, 0.15} along +normal = 6 parity samples; INTERIOR iff ≥ 4/6 inside; fail-open to EXTERIOR. Gap diagnostic (seeded sample of 1500 centroids, outward first-crossing percentiles) computed kernel-side, exposed as `._gap_diag` dict on the wrapper for log parity. |
+| `exterior_face_mask(gap_warn_mm=0.15)` | — | bool (nfaces,), cached | 3 fixed barycentric points × eps ∈ {0.05, 0.15} along +normal = 6 parity samples; INTERIOR iff ≥ 4/6 inside; fail-open to EXTERIOR. **Gap diagnostic split (Amendment A10, reconciling the old 2.2/4.2 contradiction):** the WRAPPER owns everything numpy-flavored — it draws the seeded face sample (`RandomState(0).choice(n, 1500, replace=False)`, identical to the oracle) and computes the percentiles/median (numpy's default linear interpolation — NOT reimplemented in Rust) from raw first-crossing gap distances; the KERNEL only performs the ray casts (a plain `cast_rays` batch). `._gap_diag` dict assembled wrapper-side for log parity. |
 | `build_log` (attr) | — | dict | nfaces, grid_pitch_mm carried over; adds bvh_depth, bvh_nodes, n_degenerate_tris, t_build_ms. `large_thr`/`n_large`/`tri_extent_*` are retired (the BVH has no never-miss set); keys are kept with `None` values for one transition release so log-diffing tools don't crash, then dropped. |
 
 Module-level helpers consumed by tests (`closest_on_tri`, `dedup_loc`,
@@ -169,10 +172,29 @@ re-export them.
   dedup_loc 3e-3, near-wall 0.05, 1e-300 Ericson denom regularizer) are
   copied verbatim as named constants in one Rust module (`consts.rs` section
   of mesh.rs) with a comment linking each to its geometry_exact.py line.
-- Tie-breaking: argmin over candidate triangles resolves ties to the LOWEST
-  face index (both implementations must iterate/reduce so this holds; the
-  parity suite compares distances, not indices, except in constructed
-  tie-free cases — sec 6.3).
+- Tie-breaking (Amendment A3 — the previous "both resolve to lowest face
+  index" claim was FALSE for the oracle and is withdrawn): the KERNEL resolves
+  argmin ties to the lowest face index (strictly-less updates, leaves visited
+  in ascending face index) — deterministic. The ORACLE does not and cannot:
+  point-nearest argmin runs over candidates in kNN-CENTROID-distance order
+  (`_closest_over_candidates`, geometry_exact.py 450, first-minimum wins),
+  and segment-clearance candidates come from a Python `set` in iteration
+  order (683–698). Both orders are cKDTree-/hash-internal and not
+  specifiable. Consequences and mitigations:
+  - Index parity is asserted only in constructed tie-free cases (sec 6.3);
+    elsewhere argmin points/indices are checked by consequence (sec 5.3).
+  - On EXACT distance ties between coincident soup triangles with OPPOSITE
+    winding (the two-box fixture; unmerged internal walls), `project()` may
+    return opposite normals between oracle and kernel, and that normal feeds
+    sphere_breach's inward cone and the exterior-mask offset direction. The
+    fuzz therefore compares project normals UP TO SIGN
+    (`|dot(n_k, n_o)| ≥ 1 − 1e-9`); a sign disagreement is recorded as
+    measured-tie telemetry (tri indices differ AND distances equal to
+    1e-12), not a failure — but any DOWNSTREAM boolean divergence
+    (breached, exterior-mask bit) traced to a normal flip is a BLOCKER to be
+    resolved by fixture construction (move the probe off the tie), never by
+    loosening the boolean contract. Normal non-parity on measured coincident
+    ties is documented, bounded, and telemetered — not silent.
 - Embed-zone semantics (`s_lo=inset0`, `s_hi=L−inset1`, "entirely inside the
   embed zones ⇒ clearance +inf"), degenerate-segment (L < 1e-9 ⇒ inf/[]),
   and empty-input shapes are contract, verbatim.
@@ -246,9 +268,17 @@ to sort, unique, or union. The remaining sorts are per-ray crossing lists
   exact seg-tri decomposition verbatim from `_seg_tri_dist`: (a) both
   endpoints vs triangle (Ericson), (b) segment vs each of the 3 edges
   (clamped seg-seg), (c) pierce ⇒ 0 at the Moller crossing point. Early
-  termination when best hits 0 (pierce) is allowed ONLY for the clearance
-  scalar; the argmin point must then be the first (lowest-index) piercing
-  triangle's crossing point — deterministic.
+  termination when best hits 0 (pierce) is allowed; the argmin point is then
+  the crossing point of the FIRST pierce encountered in the kernel's fixed
+  traversal order (nearer-AABB-first, leaves in ascending face index) —
+  deterministic and thread-invariant, but NOT guaranteed lowest-index
+  (Amendment A8: a lowest-index guarantee would require visiting all
+  piercers, defeating the early-out, and the oracle's own pierce argmin runs
+  in Python-set iteration order, so no lowest-index reference exists on
+  either side; the prior spec text claiming the first (lowest-index) piercing
+  triangle wins is WITHDRAWN). Argmin-point parity for pierces is
+  consequence-based only: the point lies on the mesh surface and yields
+  clearance = −thresh (sec 5.3).
 - **Parity (inside):** sec 3.4. **Intervals/breach:** compositions of the
   above three primitives with census constants, per sec 2.2.
 
@@ -266,8 +296,35 @@ above with 1e-9 slack, zdedup 5e-3 arc dedup, odd ⇒ inside, 3-axis majority
   QUERIES per batch, not the grid itself.)
 - Per query point: locate its cell in O(1), scan the cell's triangle list,
   accumulate crossing z's into a small stack vector, sort that (typically
-  < 16 entries), dedup, take parity. No cross-query state ⇒ embarrassingly
-  parallel, no grouping needed.
+  < 16 entries), cluster-count, take parity. No cross-query state ⇒
+  embarrassingly parallel, no grouping needed.
+- **Parity dedup is the consecutive-difference CLUSTER COUNT, NOT dedup_loc
+  (Amendment A2 — these are two different algorithms and conflating them
+  flips verdicts):** the oracle's `VerticalParity.inside`
+  (geometry_exact.py 259–267) computes, over the ascending finite crossing
+  z's, `uniqn = 1 + count(z[i+1] − z[i] > zdedup)` (0 if no finite
+  crossings), masking non-finite pairs — i.e. adjacent-gap chaining.
+  `dedup_loc` (134–144) instead keeps a crossing when it exceeds the LAST
+  KEPT value by tol. They disagree on chained sub-tolerance crossings:
+  z = [0, 0.004, 0.008] at tol 5e-3 gives cluster-count 1 (odd ⇒ INSIDE)
+  but keep-first 2 (even ⇒ OUTSIDE) — and chained sub-5µm crossings are
+  exactly what the non-watertight overlapping assembly produces near shell
+  overlaps and at the exterior-mask eps 0.05/0.15 offsets, where a mis-vote
+  silently deletes real support demand. The Rust kernel MUST implement the
+  parity path with the verbatim `1 + Σ(diff > zdedup)` cluster count and
+  MUST NOT reuse the keep-first dedup helper for it; `dedup_loc` keep-first
+  semantics apply ONLY to cast_rays/penetration-interval arc dedup. A
+  dedicated parity fixture pins a chained-crossing case (three coincident
+  walls < zdedup apart) on both implementations.
+- **CSR out-of-range rule:** the oracle's dict-backed grid simply lacks keys
+  for cells no triangle touches, including negative/aliased flat ids from
+  out-of-bounds queries (`grid.get` ⇒ None ⇒ zero crossings). The dense CSR
+  must reproduce this: any query whose computed (ix, iy) falls outside the
+  built grid range — negative included — maps to the EMPTY candidate list.
+  Never clamp a query into the nearest edge cell: clamping would hand it a
+  candidate set the oracle never consults. (Aliased in-range collisions are
+  benign — the 2D barycentric containment re-filters — but the unknown ⇒
+  empty mapping must be explicit in code.)
 - Candidate-set equivalence argument (why verdicts match Python exactly):
   both implementations consider every triangle whose 2D AABB overlaps the
   query's cell, and a triangle whose projection contains the query point
@@ -326,14 +383,26 @@ Thread-count invariance argument, concretely:
 - No wall-clock reads in the kernel. No time-based work stealing decisions
   affecting results (rayon steals work, but per sec 4.1 stealing cannot
   change any output bit).
-- Thread pool: default global pool sized by rayon (all cores — this is the
-  multi-core mandate); `GEOM_KERNEL_THREADS` env override for testing. The
-  parity suite runs its determinism case at threads ∈ {1, 2, all} and
-  asserts byte-identical outputs (sec 6.5).
+- Thread pool (Amendment A4 — the global pool would make the thread-sweep
+  test INERT: rayon's global pool initializes once per process, so a pytest
+  process sweeping {1, 2, all} via env changes would silently run all three
+  cases at the first-initialized count and the R6 tripwire would never
+  fire): the kernel NEVER uses rayon's global pool. It maintains a cache of
+  explicit `rayon::ThreadPoolBuilder::num_threads(k).build()` pools keyed by
+  k; each batch call re-reads `GEOM_KERNEL_THREADS` (0/unset = all cores —
+  the multi-core mandate), fetches or builds the pool for that count, and
+  runs the parallel work under `pool.install(...)`. The native module
+  exposes `current_threads() -> usize` (the pool size the next call will
+  use) and the thread-sweep test ASSERTS the effective count actually
+  changed between cases before comparing outputs — a sweep that cannot
+  demonstrate it varied the thread count fails loudly instead of passing
+  vacuously (sec 6.5).
 - exterior_face_mask and the gap diagnostic parallelize per-face / per-ray
   under the same pattern. The gap diagnostic keeps its seeded sample: the
-  wrapper passes the same `RandomState(0)` choice of face ids into the
-  kernel, so the sampled set is identical to the oracle's.
+  wrapper draws the `RandomState(0)` choice of face ids and passes them into
+  the kernel's ray-cast batch, so the sampled set is identical to the
+  oracle's; percentile/median statistics stay wrapper-side in numpy (sec 2.2
+  Amendment A10).
 
 ### 4.3 Effect on pipeline-level determinism
 
@@ -360,6 +429,32 @@ cap-hit status so any layout delta is attributed, not mysterious.)
   comparison: closest_on_tri, seg-seg, Moller are ported term-for-term
   (the Python is already scalar-formula math broadcast over arrays; the Rust
   writes the same formulas per element).
+- **Pinned operand-construction sequences (Amendment A6 — "term-for-term"
+  alone is not enough; the oracle's bits come from specific
+  reconstruct-then-resubtract patterns an idiomatic Rust port would
+  "optimise" away):**
+  - `closest_on_tri` is ALWAYS fed reconstructed vertices `A = V0`,
+    `B = V0 + E1`, `Cc = V0 + E2` (geometry_exact.py 447, 605) and then
+    internally recomputes `ab = B − A`, `ac = Cc − A` (line 84). In f64,
+    `(V0 + E1) − V0 ≠ E1`; the kernel must perform the same
+    add-then-subtract, NOT feed E1/E2 directly, and must produce the output
+    point as `A + ab·v + ac·w` from the recomputed edges.
+  - Moller-Trumbore, by contrast, consumes the RAW stored `E1`, `E2`
+    (lines 110–131, 560–568). The two primitives use DIFFERENT vertex
+    handling; port both exactly as-is.
+  - Parity z-interpolation uses `v0 = C − A`, `v1 = B − A` (line 232) and
+    the non-standard A/C/B weighting
+    `z = (1 − a − b)·Az + a·Cz + b·Bz` (line 252) — a maps to C, b maps to
+    B. Do not "fix" this to A/B/C.
+  - `penetration_intervals` sample positions follow numpy's linspace
+    algorithm verbatim: `step = (tb − ta)/(ns + 1)`, sample
+    `t_i = ta + i·step` for i = 1..ns (the [1:-1] slice of
+    `linspace(ta, tb, ns+2)`; numpy's endpoint override is sliced away and
+    does not apply). NOT the naive closed form
+    `ta + (tb − ta)·i/(ns + 1)`, which differs by ULPs and can flip an
+    on-surface sample's parity bit. `ns = min(cap, max(3,
+    trunc(Lsub/majority_step_mm)))` with Python `int()` truncation toward
+    zero, verbatim (line 761).
 
 ### 5.2 Where parity is EXACT (bit-for-bit), and why
 
@@ -388,6 +483,15 @@ cap-hit status so any layout delta is attributed, not mysterious.)
   (query_ball_point block vs k-NN block) with different broadcast shapes —
   numpy reductions over different shapes may associate differently.
   Contract: `|d_kernel − d_oracle| ≤ 1e-9 · max(1, |d_oracle|)`.
+  **Scope restriction (Amendment A1):** for segment_clearance this contract
+  applies ONLY when the oracle answers via Tier-2 (non-empty crop). In the
+  oracle's Tier-1 open-space regime the two implementations return different
+  quantities by design (sec 2.2); there the contract is: both clearances
+  strictly positive (sign/verdict exact), `clr_kernel ≤ clr_oracle`, and the
+  oracle's NaN argmin point is not compared (kernel's real point checked by
+  consequence only). The fuzz classifies every draw by oracle tier
+  (Tier-1 signature: NaN argmin point with finite positive clearance)
+  before choosing which contract to assert (sec 6.3).
 - **penetration_intervals s_a/s_b/max_depth, sphere_breach thickness/poke:**
   compositions of the above ⇒ same 1e-9-relative bound.
 - **Argmin POINTS and tri indices:** compared via their consequences, not
@@ -408,6 +512,18 @@ standoff ~0.5mm, contact_depth 0.3mm — 10^6× the 1e-9 numeric skin. Policy:
    a knife-edge draw cannot manufacture a spurious mismatch. Fixture cases
    are constructed with mm-scale margins. Any surviving boolean mismatch is
    a BLOCKER bug, never a tolerance note.
+3. **Scope note (Amendment A5):** the 1e-6 band applies only to CONTINUOUS
+   decision quantities (clearance vs 0, thickness vs r − eps, interval
+   length vs min_illegal_len, s_a/s_b). The penetration-interval majority
+   vote (`mean(inside) ≥ 0.5` over ns samples) is a DISCRETE count with no
+   continuous margin to band — its exactness rests instead on construction:
+   with sample positions pinned bit-identical (sec 5.1 linspace pin) and
+   per-sample parity bits exact (item 1), the boolean sample vector is
+   bit-identical on both sides, so the integer count, the mean comparison,
+   and the resulting interval structure (existence, entered/exited) are
+   exact with no tolerance involved. Any interval-structure mismatch
+   therefore indicates a pin violation (sample positions or parity bits),
+   not a knife-edge draw, and is a BLOCKER.
 
 ---
 
@@ -428,16 +544,28 @@ imported ONLY here and in its own unit tests once consumers swap.
      0.5mm-fin interval > 0.05mm on both; strut mid-path 0.2mm fin clip
      fails both; two-box parity table incl. the points-inside-B-outside-A
      killer; exterior mask per-face boolean vector EXACTLY equal).
+   - PLUS a chained-crossing parity fixture (Amendment A2): three parallel
+     coincident walls spaced < zdedup (5e-3mm) apart, probed above/below/
+     between — pins the cluster-count dedup (1 crossing cluster ⇒ inside
+     parity) against the keep-first algorithm that would report 2 and flip
+     the verdict; asserted identical on oracle and kernel.
 2. **Primitive bit-parity pins**: closed-form single-triangle /
    single-segment / single-ray cases asserted bitwise (sec 5.2).
 3. **Seeded fuzz** (per fixture mesh; `np.random.default_rng(0xB51)` streams,
    batches ≤ 2048, bounded per test to keep RSS < 2GB):
    - 10k random points in a 1.5×-bounds box → query/project/inside:
-     distances 1e-9-rel, inside EXACT per-point.
+     distances 1e-9-rel, inside EXACT per-point; project normals compared
+     UP TO SIGN with sign-flips recorded as measured-tie telemetry
+     (sec 2.3 Amendment A3).
    - 2k random segments (mix of lengths 0.1–40mm, some grazing the surface
      by construction: point-on-surface + jittered offsets) with random
-     radii/insets → segment_clearance value 1e-9-rel; sign EXACT after
-     threshold-rejection redraw (sec 5.4).
+     radii/insets → each draw first CLASSIFIED by oracle tier (Amendment
+     A1: Tier-1 signature = NaN argmin point with finite positive
+     clearance). Tier-2 draws: value 1e-9-rel; sign EXACT after
+     threshold-rejection redraw (sec 5.4). Tier-1 draws: both signs
+     strictly positive AND `clr_kernel ≤ clr_oracle`; no value or point
+     comparison. The generator ensures ≥ 500 draws land in EACH tier so
+     neither regime goes untested.
    - 1k random rays → cast_rays crossing COUNTS exact, t-values 1e-9-rel
      elementwise after alignment.
    - 500 random balls seeded ON the surface (project a random point, place
@@ -451,6 +579,11 @@ imported ONLY here and in its own unit tests once consumers swap.
 5. **Determinism/thread-invariance**: every fuzz output above recomputed
    with `GEOM_KERNEL_THREADS ∈ {1, 2, 0(all)}` and twice at fixed threads —
    byte-identical (np.array_equal on raw bytes) across all five runs.
+   The test asserts `_native.current_threads()` reports the expected count
+   for each case BEFORE comparing outputs (Amendment A4: per-call
+   `ThreadPoolBuilder` pools make the env override effective mid-process;
+   a sweep that cannot prove it varied the count fails, so the tripwire
+   can never pass vacuously).
 6. **Anti-drift**: the suite records the oracle-side answers' SHA-256 per
    test into `scripts/tests/fixtures_kernel_parity.json` on first freeze;
    both oracle and kernel must keep matching it, so an accidental oracle
@@ -524,7 +657,14 @@ independent penetration census (census_core_v5/census_run_v5 in
 `/Users/craig/.claude/jobs/0ddf6d41/tmp/`, kept Python, kept independent —
 NEVER ported, never calling the kernel) is run against its emitted forest as
 the full-scale correctness check standing in for the missing golden
-reference. If measured kernel time exceeds projection by >10×, that is a
+reference. Honest scope of that check (Amendment A9): the census is an
+independent CODE PATH but shares algorithmic lineage with the oracle
+(geometry_exact.py is ported from census_core), so it certifies that the
+kernel matches the trusted Python geometry family at full scale — its
+intended job — not that the physics is correct in some absolute sense; a
+blind spot common to the shared ancestor would be invisible to it. Given no
+golden reference exists, this is the strongest available backstop and any
+census/kernel disagreement remains a BLOCKER. If measured kernel time exceeds projection by >10×, that is a
 bug-hunt trigger, not a shrug.
 
 ---
@@ -533,7 +673,7 @@ bug-hunt trigger, not a shrug.
 
 | # | Risk | Exposure | Mitigation |
 |---|---|---|---|
-| R1 | **PyO3/numpy boundary cost**: per-call overhead (~µs) + copies of query arrays could recreate death-by-a-thousand-calls if hot loops make scalar calls | revalidate calls segment_clearance per dirty SET (already batched); but `_one_segment_clearance`-style per-member Python loops in consumers would serialize | API is batch-only (arrays in/arrays out, ragged via offsets); wrapper never loops per element; GIL released per call so scipy/numpy work can overlap; parity microbenchmark (sec 6 budget + test_microbenchmark convention) reports per-call overhead so regressions are visible |
+| R1 | **PyO3/numpy boundary cost**: per-call overhead (~µs) + copies of query arrays could recreate death-by-a-thousand-calls if hot loops make scalar calls | revalidate calls segment_clearance per dirty SET (already batched); but `_one_segment_clearance`-style per-member Python loops in consumers would serialize | API is batch-only (arrays in/arrays out, ragged via offsets) with ONE acknowledged exception: penetration_intervals is per-member by oracle signature — mitigated by Amendment A7 (single call = one native call, internal parity/nearest never re-enter Python; `penetration_intervals_batch` SoA entry point for N-member callers such as census-parameter revalidate); wrapper never loops per element; GIL released per call so scipy/numpy work can overlap; parity microbenchmark (sec 6 budget + test_microbenchmark convention) reports per-call overhead so regressions are visible |
 | R2 | **BVH degeneracy on triangle soup**: duplicate/coincident triangles, zero-area slivers, huge coordinate spread → deep/unbalanced trees or infinite split recursion | 576k-face soup, unmerged vertices, known degenerates | Leaf-size floor + index-median fallback split guarantees termination and O(log n) depth; degenerate count logged; Rust unit tests build the BVH over pathological soups (all-identical tris, 1e-9-area slivers, mixed-scale) and assert depth bounds + query correctness vs brute force |
 | R3 | **Float divergence flips a verdict at scale** (fixtures can't cover 576k-face adversity) | breach/clearance thresholds near-zero margins DO occur in the wild | Threshold-band telemetry: kernel-side counters for decisions landing within 1e-6 of their threshold, reported in the full-run log; independent Python census over the emitted forest is the acceptance backstop; any census/kernel disagreement is a BLOCKER |
 | R4 | **macOS codesign/loading quirks**: locally-built cdylib in a venv under `~/Documents` (TCC-protected), ad-hoc signature invalidated by post-build mutation, or quarantine on copied artifacts | maturin develop installs into `.venv/lib/python3.11/site-packages` | maturin's local build needs no notarization (ad-hoc signing is automatic on arm64); never `strip`/edit the .so post-build (invalidates ad-hoc sig ⇒ SIGKILL on load); if dlopen fails with code-signature error, re-run `codesign -s - --force` on the .so; TCC: build happens inside the repo dir the shell already reads — the earlier port_plan TCC incident was about the STL, not build products; keep cargo target/ inside rust/geom_kernel (repo-local, no /tmp cross-volume moves) |
@@ -574,3 +714,72 @@ pipeline unchanged above it; Python oracle demoted to test fixture.
 Each stage lands behind its own parity suite against the Python
 implementation it replaces, with the same determinism rules (sec 4) and the
 same ruling: correctness and resin economy never trade against wall-time.
+
+---
+
+## Appendix A — Adjudication record (2026-07-23 adversarial review)
+
+Two critiques were commissioned. The Codex critique was NOT received
+(relay failed: "Not inside a trusted directory and --skip-git-repo-check
+was not specified" — a tooling error, not a clean review; there is no
+cross-family sign-off on this spec revision and a Codex pass should be
+re-run when the relay is fixed). The Opus critique delivered 10 findings;
+all 10 were verified line-by-line against the frozen oracle and ACCEPTED,
+producing Amendments A1–A10:
+
+| # | Finding | Amendment | Sections touched |
+|---|---|---|---|
+| A1 | Tier-1 open-space fallback returns centroid-endpoint distance + NaN point; value parity unsatisfiable there | Kernel deviation sanctioned; contract split by oracle tier; fuzz classifies draws, ≥500 per tier | 2.2, 5.3, 6.3 |
+| A2 | Parity dedup is cluster-count, NOT dedup_loc keep-first; conflation flips verdicts on chained crossings | Formula pinned verbatim, distinct from dedup_loc; chained-crossing fixture added | 3.4, 6.1 |
+| A3 | Oracle does NOT resolve argmin ties to lowest index; coincident opposite-winding ties can flip project normals unmeasured | False claim withdrawn; kernel-only lowest-index; up-to-sign normal fuzz + measured-tie telemetry; downstream boolean divergence stays BLOCKER | 2.3, 6.3 |
+| A4 | Thread sweep inert under rayon global pool (one-shot init) | Per-count ThreadPoolBuilder pool cache + pool.install; current_threads() exposed; sweep asserts effective count | 4.2, 6.5 |
+| A5 | linspace ULP divergence can flip parity samples; 1e-6 band cannot protect a discrete majority count | numpy step formula + int() truncation pinned; discrete-vote exactness rests on pinned positions + exact parity bits; band scoped to continuous quantities | 5.1, 5.4 |
+| A6 | closest_on_tri bits come from reconstruct-then-resubtract (A, A+E1, A+E2); Moller uses raw E1/E2; A/C/B z-weighting | All three operand-construction sequences pinned explicitly | 5.1 |
+| A7 | penetration_intervals is per-member, contradicting R1 batch-only | Exception acknowledged; one-native-call rule; penetration_intervals_batch added | 2.2, R1 |
+| A8 | Pierce early-out and lowest-index argmin point cannot both hold; oracle's own tie order is set-iteration | Lowest-index claim withdrawn; first-pierce-in-fixed-traversal-order, consequence-based parity | 3.3 |
+| A9 | Census shares algorithmic lineage with the oracle; "independent acceptance" overstated | Reworded: certifies kernel matches the trusted Python geometry family, not absolute physics | 8 |
+| A10 | pyo3 ↔ rust-numpy version coupling is the dominant build wall; gap-diag kernel-side/wrapper-side contradiction | rust-numpy (≥0.21) drives the pyo3 pin; gap diag split: kernel casts rays, wrapper owns seeded sample + numpy percentiles | 1.2, 2.2, 4.2 |
+
+Also adopted from the review's cross-cutting notes: CSR unknown/negative/
+out-of-range cell ⇒ EMPTY candidate list, never clamped (sec 3.4); ragged
+prefix-sums assembled by SERIAL scan in index order.
+
+## Appendix B — Rejected challenges
+
+- **CODEX critique: none received.** Nothing to adjudicate; recorded as a
+  gap, not a rejection (see Appendix A preamble).
+- **Finding 1, remedy option (a) — reproduce the oracle's Tier-1 branch by
+  re-introducing a centroid structure in the kernel.** REJECTED. The Tier-1
+  value is an artifact of the retired crop machinery (a certificate bound,
+  not a physical distance); reproducing it would resurrect the centroid
+  KDTree and crop bookkeeping the whole design exists to eliminate, to
+  chase parity on a quantity no consumer uses beyond its sign. The
+  tier-split contract (A1) preserves everything consumers observe: exact
+  verdicts everywhere, exact values in the regime where the oracle is
+  exact, and a provably conservative ordering (`clr_kernel ≤ clr_oracle`,
+  both positive) in the regime where it is not.
+- **Finding 3, remedy option "define a deterministic oracle-matching tie
+  policy."** REJECTED as impossible, as the finding itself concedes: the
+  oracle's tie order is cKDTree-internal (point queries) and Python
+  set/hash-internal (segment candidates) — neither is specifiable or
+  stable. The accepted mitigations (up-to-sign normal comparison,
+  measured-tie telemetry, consequence-based point checks, BLOCKER status
+  for any downstream boolean divergence) bound the exposure without
+  pretending an unspecifiable order can be matched.
+- **Finding 5, remedy option "perturb-stability check" for interval
+  booleans.** REJECTED AS UNNECESSARY (the finding's diagnosis is accepted;
+  this proposed mechanism is superseded). With sample positions pinned
+  bit-identical (A6/A5 linspace pin) and per-sample parity bits exact by
+  construction, the majority vote compares identical integers on both
+  sides — there is no residual float freedom for a perturbation test to
+  probe. A perturb-stability harness would add runtime and a new
+  false-positive surface while guarding a gap the pins already close; any
+  interval-structure mismatch is by construction a pin violation and
+  already a BLOCKER (sec 5.4 item 3).
+- **Finding 7, implied remedy "make the single-member signature itself
+  batch."** PARTIALLY REJECTED: the single-member `penetration_intervals`
+  signature is retained verbatim because drop-in oracle compatibility is
+  the stage-1 contract (changing the Python-visible signature would fork
+  the API the parity suite exists to mirror). The substance of the finding
+  is accepted via A7 (one-native-call rule + `penetration_intervals_batch`
+  for hot-loop callers).
