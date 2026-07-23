@@ -91,8 +91,13 @@ fn audit(b: &[u8]) -> std::result::Result<(), String> {
             if smesh_end != sptr {
                 return Err(format!("model {m} smesh_end {smesh_end} != index {sptr}"));
             }
-            if rec_off <= sptr + SUPPORT_INDEX_LEN {
-                return Err(format!("model {m} rec_off {rec_off} not after group header"));
+            // `rec_off` may sit AT the end of the index quad (empty group
+            // header) or after it; only a `rec_off` pointing INTO the index
+            // quad is malformed. Parse (parse.rs) accepts `rec_off == idx_end`,
+            // so the audit must too, or gold invariant (a) — parse-then-save of
+            // an unmodified file is byte-identical — breaks for empty headers.
+            if rec_off < sptr + SUPPORT_INDEX_LEN {
+                return Err(format!("model {m} rec_off {rec_off} into index quad"));
             }
             let recs_end = rec_off
                 .checked_add(SEG_RECORD_LEN.checked_mul(n_rec).ok_or("recs overflow")?)

@@ -6,6 +6,9 @@
 //!   3 — dead/unaligned smesh bytes silently dropped by a rotate rebake.
 //!   4 — non-finite STL geometry bypassed the finiteness check.
 //!   5 — zero-triangle STL accepted.
+//!   6 — parse/verify asymmetry: an empty support group header parsed OK but a
+//!       clean, unmodified `to_bytes()` failed the write audit, breaking gold
+//!       invariant (a) (parse-then-save of an unmodified file is byte-identical).
 use chitubox_io::*;
 
 fn tri_centered() -> Vec<f32> {
@@ -163,6 +166,48 @@ fn probe4_nan_stl_bypasses_finite_check() {
             );
         }
     }
+}
+
+#[test]
+fn probe6_empty_group_header_parses_and_saves_byte_identical() {
+    // Build a normal supported file (synthetic writes emit a NON-empty group
+    // header, so the empty case is otherwise unexercised).
+    let mut p = one_model_project();
+    p.attach_supports(&[SupportBatch {
+        model_index: 0,
+        records: vec![support_rec()],
+        mode: SupportMode::Replace,
+        lift_mm: None,
+    }])
+    .unwrap();
+    let bytes = p.to_bytes().unwrap();
+
+    // locate the support index quad
+    let off8 = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+    let sptr = u32::from_le_bytes(bytes[off8 + 268..off8 + 272].try_into().unwrap()) as usize;
+    assert!(sptr != 0);
+    let idx_end = sptr + 16; // SUPPORT_INDEX_LEN
+    let rec_off = u32::from_le_bytes(bytes[sptr + 4..sptr + 8].try_into().unwrap()) as usize;
+    let header_len = rec_off - idx_end;
+    assert!(header_len > 0, "expected a non-empty group header to excise");
+
+    // Excise the group header and repoint rec_off at idx_end -> empty header.
+    // Records are the tail region; nothing after them is referenced by offset,
+    // and record blob offsets point into smesh (before the index), so removing
+    // these bytes needs only the rec_off field patched.
+    let mut nb = Vec::with_capacity(bytes.len() - header_len);
+    nb.extend_from_slice(&bytes[..idx_end]);
+    nb.extend_from_slice(&bytes[rec_off..]);
+    nb[sptr + 4..sptr + 8].copy_from_slice(&(idx_end as u32).to_le_bytes());
+
+    // Parser accepts the empty-header file...
+    let p2 = Project::from_bytes(nb.clone())
+        .expect("PROBE6: empty group header must parse (rec_off == idx_end)");
+    // ...and a clean, UNMODIFIED save must succeed AND be byte-identical.
+    let out = p2
+        .to_bytes()
+        .expect("PROBE6: clean save of empty-header file failed => invariant (a) broken");
+    assert_eq!(out, nb, "PROBE6: parse-then-save not byte-identical");
 }
 
 #[test]
