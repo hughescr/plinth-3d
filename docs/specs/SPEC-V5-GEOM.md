@@ -60,13 +60,31 @@ class ExactSurface:
 
     Internals (numpy/scipy, ported from census_core.py) are replaceable by a
     native kernel behind this exact API. All batch methods enforce internal
-    batching (<= 2048 queries per block) and a 2GB RSS assert.
+    batching bounded on the QUERY x CANDIDATE-TRIANGLE PRODUCT (see below)
+    and a 2GB RSS assert.
+
+    Memory batching contract (amended per adversarial review, point 2): a
+    2048-query cap alone does NOT bound memory -- the exact kernels
+    (closest_on_tri and friends) materialize O(queries x candidates)
+    intermediate arrays. Every batch method sizes its blocks adaptively:
+    block_queries = min(2048, ROW_BUDGET // max(1, est_candidates_per_query))
+    with ROW_BUDGET ~ 4M rows (~1.5GB peak across the ~15 float64 (M,3)
+    intermediates), est from the actual crop sizes of the block being built
+    (ragged crops concatenated, never padded to the max). The 2GB RSS assert
+    remains the hard backstop in every loop.
     """
 
     def __init__(self, mesh, grid_pitch_mm=2.0):
         # - V0/E1/E2 triangle arrays (census MeshIndex), float64, copied once
-        # - centroid cKDTree + per-triangle extent; `large` never-miss list
-        #   (extent > 1.5mm) appended to every candidate crop
+        # - centroid cKDTree + per-triangle extent. `large` never-miss list
+        #   appended to every candidate crop. large_thr is DERIVED PER MESH at
+        #   build time (amended per review, points 1+10), not inherited from
+        #   the census constant: measure the extent distribution and pick the
+        #   smallest threshold keeping len(large) <= ~2000 (so the never-miss
+        #   set stays cheap) -- report both large_thr and len(large) in the
+        #   build log. Two extents are kept:
+        #     tri_extent_global   = ext.max()            (crop radii only)
+        #     tri_extent_nonlarge = ext[ext <= large_thr].max()  (Tier-1 bound)
         # - three VerticalParity grids (ax=0,1,2) for the parity vote
         # - exterior-face mask computed lazily on first use (sec 2.4)
 
@@ -77,7 +95,16 @@ class ExactSurface:
         (removal.py diagnostics, connectivity_report) swap by duck-typing.
         Points farther than distance_upper_bound MAY return inf (pruning),
         same contract as cKDTree. Implementation: k-nearest centroids
-        (k=64) + census `large` list -> closest_on_tri, batched."""
+        (k=64) + `large` list -> closest_on_tri, batched, PLUS an exactness
+        certificate (amended per review, point 8 -- plain k-NN is only
+        near-exact for triangles in the sub-large_thr band whose centroid
+        ranks beyond k): let d_k = distance to the k-th nearest centroid;
+        the answer is certified exact iff best_dist + tri_extent_nonlarge
+        <= d_k (no un-examined non-large triangle can beat best_dist, and
+        large triangles are always in the candidate set). Queries failing
+        the certificate escalate (k doubled, or centroid ball query at
+        best_dist + tri_extent_nonlarge) until certified. `query` is
+        therefore exact by construction, at adaptive cost."""
 
     # ---- load-bearing primitives ----
     def project(self, pts):
@@ -126,12 +153,34 @@ class ExactSurface:
         (breached, feature_thickness_mm, poke_out_mm)."""
 
     def exterior_face_mask(self):
-        """bool[n_faces], cached: face f is EXTERIOR iff
-        inside(centroid_f + eps * normal_f) is False (eps = 0.05mm).
-        A face interior to the solid union (the STL is a non-watertight
-        overlapping assembly) has solid material on BOTH sides of it, so
-        the parity vote reports its outward offset point inside. Batched
-        through inside() in <= 2048-point blocks."""
+        """bool[n_faces], cached. A face interior to the solid union (the
+        STL is a non-watertight overlapping assembly) has solid material on
+        BOTH sides of it, so an outward offset point tests inside.
+
+        Robust classification (amended per review, point 3 -- a single
+        centroid offset at a fixed eps is the riskiest new behavior in this
+        spec, because a mis-vote can silently DELETE real support demand):
+        - MULTIPLE offset samples per face, not one: 3 interior barycentric
+          points (centroid + two off-center points, fixed barycentric
+          coords) x 2 offsets eps in {0.05, 0.15} mm along +normal = 6
+          parity-vote samples per face; face is INTERIOR iff a strict
+          majority (>= 4/6) of samples test inside. This mirrors the
+          census's dense-majority discipline (census_run.py PASS B/C):
+          never a keep/drop decision from a single parity point.
+        - eps is VALIDATED, not assumed: at build time, measure the
+          inter-shell gap distribution diagnostically (distance from a
+          sample of face centroids to the nearest OTHER-side triangle) and
+          log it; if a material fraction of gaps falls below 0.15mm the
+          eps ladder is re-derived from the measurement before trusting
+          the mask.
+        - FAIL-OPEN bias: ties and ambiguous faces classify EXTERIOR.
+          Phantom demand on a rare mis-kept interior face costs resin (the
+          v4 status quo everywhere); a mis-dropped exterior overhang costs
+          the print. Anchor-side safety does not rest on the mask alone --
+          anchors additionally pass exact ray casting and sphere_breach
+          (sec 2.2/2.3).
+        Batched through inside() under the product-bounded batching
+        contract."""
 ```
 
 Construction and caching: `engine.run` builds ONE `ExactSurface` (replacing
@@ -176,12 +225,36 @@ today), but each derives its own inset/exemption logic separately.
   length > 0.05mm (census MIN_ILLEGAL_LEN) outside its sanctioned p0 embed
   zone (arc length < contact_depth_mm + r0 + standoff slack as derived for
   the embed inset). This is a crossing/parity test, not a distance test, so
-  it cannot false-positive on ordinary surface-hugging stubs.
+  it cannot false-positive on ordinary surface-hugging stubs. LIMITATION
+  (recorded per review, point 6): the stub rule tests the AXIS only, matching
+  the census (census_run.py:52) — a stub whose centerline misses a fin but
+  whose radius clips it sideways is not caught by this rule. Extending stubs
+  to capsule-offset rays was considered and REJECTED: a stub hugs bumpy bark
+  by construction, and an offset ray at radius r0 legitimately enters and
+  exits surface convexities — through-transit false positives would block
+  valid stubs wholesale. The radial-graze residual is recorded in sec 7; the
+  worst thin-feature case at the stub TIP is separately closed by the
+  embedded-end-cap breach check (sec 2.2).
 - Non-stub members additionally get the mid-path penetration test: an inside
   interval outside the embed insets fails the member even when the standoff
   distance check passes (grazing-tangent transits). In practice
   `segment_clearance < 0` already catches nearly all of these; the interval
   test is the belt for exactly the census's through-transit class.
+- **Hot-loop gate on `penetration_intervals`** (amended per review, point 4:
+  revalidate runs tens of thousands of times per Treant; the dense census
+  parameters STEP=0.12/CAP=80 are unbounded cost if run unconditionally, and
+  a rewire subtree-reattach can dirty a large subtree). In revalidate, the
+  interval test runs on a dirty member ONLY when at least one cheap trigger
+  fires: (a) the Tier-2 exact pass found >= 1 Moller crossing on the member's
+  axis, (b) `segment_clearance` came in below a 0.1mm margin above 0, or
+  (c) the segment midpoint's parity vote says inside (one 3-axis vote — this
+  is the trigger that catches a member routed WHOLLY inside a solid region,
+  which an unsigned distance test cannot see and which crossing counts miss
+  when entry happened through an open shell boundary). Soundness: an illegal
+  inside interval implies axis crossings (a), or a fully-interior segment
+  whose midpoint votes inside (c), or capsule-edge contact driving clearance
+  <= 0 (b). The UNGATED dense-parameter interval test runs once per run in
+  verify's independent gate (sec 2.2) regardless.
 - Call sites unchanged: cco.py:288,301; rewire.py:289,302,362,395,537,633,733;
   bracing.py:853,962,981; engine.py:145,168 keep calling
   `forest.revalidate(geom, cfg)` verbatim.
@@ -206,6 +279,18 @@ today), but each derives its own inset/exemption logic separately.
   `self_verify` (verify.py:391-487) as a new report key
   `ball_breach_violations`, ANDed into `ok` (this is a hard gate, same class
   as clearance).
+- **Embedded END-CAP breach check** (amended per review, point 5): the breach
+  test must not be limited to joints that carry a ball. A member's embedded
+  end is exempt from BOTH clearance paths by design (`segment_clearance`
+  measures only `[inset0, L-inset1]`; `penetration_intervals` clamps the
+  embed zone, census_run.py:128), so an embedded tip transiting a sub-mm fin
+  AT its end escaped every census-era test — a carried-over blind spot, now
+  closed: `ball_breach_report` additionally synthesizes an end-cap sphere
+  (center = embedded end point, r = end radius) for EVERY embedded member end
+  (stub tips at p0, strut/rung model-anchor ends at p1) whether or not a
+  joint ball exists there, and runs `geom.sphere_breach` on the combined set.
+  Same gate semantics: thick-feature shallow embeds pass by construction;
+  poke-out > 0.05mm fails.
 - The builder side must also stop CREATING breaching balls: cco model-anchor
   and bracing model-rung candidate trials add a `geom.sphere_breach` check on
   the anchor-end ball radius during candidate scoring (cheap: one ball per
@@ -221,7 +306,11 @@ today), but each derives its own inset/exemption logic separately.
   cco.py:157/278/321; also rewire.py:845/876 and bracing.py:218/246/271/347).
   Replacement: the candidate POOL becomes **exterior-face centroids**
   (deterministic, seed-free, on-surface by construction): faces from
-  `geom.exterior_face_mask()`, delicacy weight looked up per face (sec 2.5).
+  `geom.exterior_face_mask()`, delicacy weight obtained by querying each
+  centroid against `perception.delicacy_field`'s query function (the seeded
+  field survives as SCORING only, sec 3 — corrected per review inventory
+  note: the earlier cross-reference to sec 2.5 was wrong; 2.5 is
+  load_partition and has nothing to do with delicacy).
   The qualification mask (below-contact, length band, lean cone, delicacy
   cap — struts.py:64-67) is unchanged, evaluated vectorized over centroids
   cropped to `strut_max_length_mm` via a KDTree ball query on centroids.
@@ -239,6 +328,17 @@ today), but each derives its own inset/exemption logic separately.
   (same mask, bracing.py:772), each snapped to the exact surface via
   `geom.project` (and kept only if its projection stays in the z-band);
   ordering (distance, index) preserved for determinism.
+- **Anchor-coverage measurement** (amended per review, point 7): the new pool
+  (exterior centroids) plus builder-side breach rejection of thin-twig
+  anchors can strand contacts the v4 engine routed — by DESIGN when the only
+  available anchor was defect-class (a sub-mm twig a ball would breach), but
+  the spec must measure, not assume. Required instrumentation: fixture tests
+  pin the unrouted-contact count (sec 6); the full-scale run log reports
+  routed fraction and unrouted delta vs the v4 reference so a coverage
+  regression is visible and judged, never silent. A contact that loses ALL
+  model-anchor candidates falls back to the existing plate-routing path
+  (behavior unchanged); keeping breach-rejected thin-twig anchors as a
+  fallback is explicitly rejected (appendix).
 
 ### 2.4 Perception demand seeding — interior-face filter + true-surface guarantee
 
@@ -283,7 +383,7 @@ Same signature, `n_dense_samples`/`seed` parameters retired.
 |---|---|---|
 | tree.Forest.revalidate query (tree.py:399) | **YES** | -> geom.segment_clearance (2.1) |
 | verify.clearance_report (verify.py:129) | **YES** | -> exact, independent (2.2) |
-| verify.connectivity_report embed check (verify.py:369-373) | **YES** (attachment gate) | -> geom.query (exact point distance), threshold formula unchanged |
+| verify.connectivity_report embed check (verify.py:369-373) | **YES** (attachment gate) | -> geom.query (exact point distance). Threshold FORMULA unchanged, but note the DIRECTIONAL effect (review point 9): exact distance <= nearest-cloud-sample distance, so `surf_dist` shrinks and strictly MORE endpoints pass `attached_c` — an intended loosening (the cloud over-estimated detachment), pinned by a test (sec 6.12) |
 | cco model anchors via struts + sample_points (cco.py:278,321; struts.py:22-72) | **YES** | -> exterior-centroid pool + exact ray anchor (2.3) |
 | bracing._find_model_rung_anchors surface_tree.data (bracing.py:766) | **YES** | -> exterior-centroid pool + geom.project (2.3) |
 | perception islands / demand seeding (perception.py:116; placement.py:37) | **YES** | -> exterior-face filter; positions already on-surface (2.4) |
@@ -338,6 +438,11 @@ load partition changes carried areas. Per Craig's pre-approval:
    re-baselined by measurement with the standing comment ("regression tripwire
    only, per Craig's correctness-over-speed ruling") if the exact core
    legitimately exceeds them. Never tune quality to fit a clock.
+5. Alongside the volume freeze, freeze COVERAGE numbers (review point 7): the
+   fixture unrouted-contact counts are pinned, and the full-scale report
+   records routed fraction vs the v4 reference. The volume not-worse gate
+   alone would silently accept lost routes (fewer routes = less resin); the
+   coverage pin closes that hole.
 
 ---
 
@@ -349,21 +454,32 @@ sets, mostly in open space. Strategy:
 
 - **Tier-1 conservative reject** (the workhorse): for a segment batch, query
   the triangle-CENTROID cKDTree at path points (step = clearance_sample_step_mm)
-  with `distance_upper_bound = r + standoff + tri_extent_global`, where
-  tri_extent_global is the max per-triangle centroid-to-vertex extent (census
-  MeshIndex). If no centroid falls within the bound, NO triangle can be within
-  r + standoff (any such triangle's centroid would be within r + standoff +
-  its own extent) — the segment is certified clear with zero exact work. This
-  is a sound bound, not an approximation: it can only send MORE work to tier
-  2, never hide a violation. Oversized triangles are on the census `large`
-  never-miss list, checked exactly every time.
+  with `distance_upper_bound = r + standoff + tri_extent_nonlarge` — the max
+  centroid-to-vertex extent among NON-large triangles only (amended per
+  review, point 1: the census's `tri_extent` field is the GLOBAL max
+  including the `large` set, so using it here would inflate the bound by
+  >= large_thr and demote essentially every path point to Tier-2, collapsing
+  the performance strategy; the global max is reserved for crop radii, where
+  conservatism is cheap). If no centroid falls within the bound, no NON-large
+  triangle can be within r + standoff (any such triangle's centroid would be
+  within r + standoff + its own extent <= the bound) — and `large` triangles
+  are never Tier-1-certified: they are checked exactly on every query via the
+  never-miss list. Together the segment is certified clear with near-zero
+  exact work. This is a sound bound, not an approximation: it can only send
+  MORE work to tier 2, never hide a violation. large_thr is derived per mesh
+  at build time (sec 1) so tri_extent_nonlarge stays tight on THIS mesh
+  (review point 10: 1.5mm was a census constant, not a law).
 - **Tier-2 exact** only for segments tier 1 cannot certify: crop candidates
   by ball query around sub-segment midpoints (split long members ~5mm so crop
   radii stay local), then vectorized exact segment-vs-triangle distance +
   Moller crossings + parity on the (few) interval midpoints.
-- Batching: one revalidate call = one tier-1 batch + one tier-2 batch across
-  all dirty members (same shape as today's single concatenated query). Query
-  blocks <= 2048; RSS assert < 2GB in every loop.
+- Batching: one revalidate call = one tier-1 pass + tier-2 exact work across
+  all dirty members, with tier-2 blocks sized by the QUERY x CANDIDATE
+  product budget of sec 1 (amended per review, point 2 — a flat 2048-segment
+  block near dense surface patches would materialize multi-GB intermediates;
+  the census stayed safe precisely because it processed one member's ragged
+  crop at a time). Ragged concatenation, never rectangular padding to the
+  max candidate count. RSS assert < 2GB in every loop.
 - Ball breach checks batch all balls in one pass (1102 balls = ~10k Moller
   rays on cropped candidates — the census did this in seconds).
 - One-time costs per run: ExactSurface build (~seconds), exterior_face_mask
@@ -374,11 +490,18 @@ sets, mostly in open space. Strategy:
   distance on the whole delivered forest) completed in single-digit minutes
   single-core. Engine-integrated projection: tier-1 absorbs the open-space
   majority at KDTree cost (comparable to today), tier-2 exact work is bounded
-  by near-surface trials. Honest estimate: **~400–900s (7–15 min) single-core
-  full Treant**, worst case low tens of minutes — comfortably inside the
-  overnight-usable bound, far from it in expectation. Report the measured
-  number in the run log (`t_total`, plus new `t_geom_build`,
-  `t_exterior_mask`); re-baseline pins per sec 4.
+  by near-surface trials, and the dense interval test is gated (sec 2.1)
+  rather than unconditional. The ~400-900s estimate below is CONDITIONAL on
+  the tri_extent_nonlarge Tier-1 bound and the interval gate both landing as
+  specified (review points 1 and 4 — without them the strategy degenerates
+  to all-Tier-2 and the estimate is void); the first full-scale run must
+  report the measured Tier-1 certify rate alongside the timings so the
+  projection is validated, not assumed. Honest estimate: **~400–900s
+  (7–15 min) single-core full Treant**, worst case low tens of minutes —
+  comfortably inside the overnight-usable bound, far from it in expectation.
+  Report the measured number in the run log (`t_total`, plus new
+  `t_geom_build`, `t_exterior_mask`, `tier1_certify_rate`); re-baseline pins
+  per sec 4.
 
 ---
 
@@ -432,6 +555,27 @@ existing suites. All fixtures deterministic, no unseeded sampling.
     gating on wall time.
 11. **Full-suite regression**: 329 passed / 4 skipped on master must stay
     green modulo the re-frozen baselines (sec 4) and pin re-baselines.
+12. **Connectivity gate direction** (review point 9): a fixture endpoint
+    whose exact surface distance sits just under `contact_depth + 0.45` but
+    whose nearest CLOUD sample would read over it MUST pass `attached_c` on
+    v5 — pinning that the swap loosens the gate in the intended direction
+    (exact <= sampled) and only that direction.
+13. **Exterior-mask gap robustness** (review point 3): the two-box fixture
+    re-run with the inter-shell gap swept across the eps ladder (gap in
+    {0.02, 0.1, 0.3} mm): outer-shell faces MUST stay exterior at every gap;
+    genuinely buried faces MUST stay interior; any ambiguous face resolves
+    EXTERIOR (fail-open pin).
+14. **Embedded end-cap breach** (review point 5): a ball-less strut whose p1
+    embed terminates inside a 0.3mm fin with poke-out > 0.05mm MUST be
+    flagged by `ball_breach_report` via the synthesized end-cap sphere; the
+    same strut embedding into a 5mm slab MUST pass.
+15. **query exactness certificate** (review point 8): a fixture with a
+    ~1.2mm triangle (sub-large_thr) placed so its centroid ranks beyond
+    k=64 from the query point but its face is nearest: `geom.query` MUST
+    return the true distance (escalation path exercised).
+16. **Coverage pins** (review point 7): fixture unrouted-contact counts
+    pinned; a synthetic thin-twig-only-anchor fixture MUST route to plate
+    (not to the breach-rejected twig) with the contact still supported.
 
 ---
 
@@ -450,3 +594,73 @@ existing suites. All fixtures deterministic, no unseeded sampling.
   geom.cast_rays: optional cleanup, not required for correctness.
 - Dynamic re-check of `_ISLAND_BIRTH_LINK_R_MM` at other layer heights
   (pre-existing flag, engine.py:405-411) — unchanged by this spec.
+- **Stub radial graze** (recorded per review, point 6): a stub whose radius
+  clips a thin fin the centerline misses is not detected — stubs keep the
+  axis-only interval rule because capsule-offset rays on surface-hugging
+  stubs would through-transit bark convexities and false-positive
+  wholesale. Mitigations in scope: the stub-tip end-cap breach check
+  (sec 2.2) closes the worst thin-feature case at the tip; the census found
+  zero stub radial-graze defects (all 3 illegal stubs were axis transits).
+  Revisit if a future census finds this class in the wild.
+
+---
+
+## 8. Adjudication appendix (2026-07-23 adversarial review)
+
+Two critiques were commissioned. **Codex: UNAVAILABLE** (the relay produced
+no output — no session id; recorded here so the single-critique provenance
+is explicit). The Opus critique was adjudicated point by point; every claim
+was verified against census_core.py / census_run.py before ruling.
+
+**Accepted (spec amended):**
+1. Tier-1 bound used the census's GLOBAL tri_extent (census_core.py:44
+   includes the `large` set) — would have inflated the reject bound by
+   >= large_thr and collapsed Tier-1. Fixed: `tri_extent_nonlarge` (sec 1,
+   sec 5), large_thr derived per mesh (also resolves point 10).
+2. 2048-query batching does not bound memory (cost is queries x candidates;
+   closest_on_tri materializes ~15 (M,3) intermediates). Fixed:
+   product-bounded adaptive blocks, ragged crops, no padding (sec 1, sec 5).
+3. Single-point/single-eps exterior_face_mask was brittle and unvalidated —
+   the highest-risk new behavior (can silently delete real demand). Fixed:
+   6-sample robust majority (3 barycentric points x 2 eps), measured
+   inter-shell gap diagnostic, fail-open-to-exterior bias (sec 1), gap-sweep
+   test (sec 6.13).
+4. Unbounded dense penetration_intervals in the revalidate hot loop. Fixed:
+   triple-trigger gate (axis crossings / clearance margin / midpoint parity
+   — the parity trigger covers the wholly-interior segment an unsigned
+   distance test cannot see); ungated dense pass stays in verify (sec 2.1).
+5. Ball-less embedded member ends escaped every breach/clearance test (both
+   paths exempt the embed zone; census_run.py:128 clamps it). Fixed:
+   synthesized end-cap spheres for every embedded end in ball_breach_report
+   and builder scoring (sec 2.2), test 6.14.
+7. (partial) Anchor-pool change can strand contacts silently under the
+   volume-only gate. Fixed: coverage pins + routed-fraction reporting
+   (secs 2.3, 4.5, 6.16).
+8. `query` was labeled EXACT but k-NN can miss a sub-large_thr triangle
+   beyond rank k. Fixed: exactness certificate with adaptive escalation
+   (sec 1) + test 6.15 — kept the EXACT label by making it true rather than
+   weakening the label.
+9. Connectivity attachment gate loosens directionally under exact distances.
+   Accepted as intended behavior, now documented (sec 2.6) and pinned
+   (test 6.12).
+10. large_thr=1.5 was an uninherited-context census constant. Fixed: derived
+    per mesh at build, logged (sec 1).
+Inventory note: the sec 2.3 delicacy cross-reference to sec 2.5 was wrong;
+corrected to the delicacy_field query function (scoring only).
+
+**Rejected challenges:**
+- Point 6 (extend stub certification beyond the axis ray): REJECTED as a
+  certification rule. Capsule-offset rays on a surface-hugging stub
+  through-transit bark convexities by construction — the false-positive rate
+  would block legitimate stubs wholesale, and the census found zero
+  radial-graze stub defects. The residual is recorded honestly in sec 7 and
+  partially mitigated by the stub-tip end-cap breach check. Re-open on
+  evidence.
+- Point 7 (implied remedy of retaining thin-twig anchors to preserve v4
+  coverage): REJECTED. Breach-rejected anchors ARE the census defect class
+  (44 ball breaches); keeping them as fallback re-introduces the defect.
+  Plate fallback + measured coverage is the correct trade — resin economy
+  never buys back correctness.
+- Point 8's suggested relabeling to "near-exact": REJECTED in favor of the
+  stronger fix — the certificate makes `query` actually exact, so the label
+  stands.
