@@ -90,6 +90,84 @@ fn deterministic_build_bit_identical() {
     assert_eq!(surf_bvh_signature(&s1), surf_bvh_signature(&s2));
 }
 
+// ---- Amendment A11: conservative ray pad guard ---------------------------
+// These rays graze just OUTSIDE an AABB-boundary triangle edge, at a
+// barycentric offset inside Moller's tolerant [-EPS,0) band. The tolerant
+// Moller ACCEPTS them, so the padded broad phase MUST surface them. With the
+// per-triangle pad forced to 0 the exact AABB slab rejects the ray before
+// Moller ever runs, silently dropping the crossing — a parity/breach under-flag
+// (spec sec 3.3/6 item 8; the MUTATION-CONFIRMED gap these tests close).
+#[test]
+fn a11_pad_captures_edge_ray_v0v1() {
+    // single triangle in z=0: v0=(0,0,0), v1=(1,0,0), v2=(0,1,0)
+    let surf = build_from_tris(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+    // vertical ray at y = -0.5e-6 (just outside edge v0-v1, |v| < EPS)
+    let o = [0.5, -0.5e-6, 1.0];
+    let d = [0.0, 0.0, -2.0];
+    let hits = surf_collect_hits(&surf, o, d, 1.0);
+    assert!(
+        hits.contains(&0),
+        "A11 pad: tolerant-Moller hit just outside edge v0-v1 (below the exact \
+         AABB) must be collected; pad=0 misses it"
+    );
+}
+
+#[test]
+fn a11_pad_captures_edge_ray_v0v2() {
+    let surf = build_from_tris(vec![0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+    // vertical ray at x = -0.5e-6 (just outside edge v0-v2, |u| < EPS)
+    let o = [-0.5e-6, 0.5, 1.0];
+    let d = [0.0, 0.0, -2.0];
+    let hits = surf_collect_hits(&surf, o, d, 1.0);
+    assert!(
+        hits.contains(&0),
+        "A11 pad: tolerant-Moller hit just outside edge v0-v2 must be collected; \
+         pad=0 misses it"
+    );
+}
+
+// ---- Amendment A17: segment pruning lower bound vs brute force ------------
+#[test]
+fn a17_segment_pruning_matches_brute_force() {
+    let mesh = make_grid_mesh(6);
+    let surf = build_surface(&mesh);
+    let pts = sample_points(&mesh, 120);
+    // pair consecutive sample points into segments
+    for w in pts.chunks_exact(2) {
+        let (a, b) = (w[0], w[1]);
+        let (dk, _) = surf_seg_min(&surf, a, b);
+        let (db, _) = brute_seg_min(&surf, a, b);
+        // same per-triangle primitive => the BVH's axis-gap lower bound must
+        // never prune the true nearest triangle: identical minimum distance.
+        assert!(
+            (dk - db).abs() <= 1e-12 * db.max(1.0),
+            "A17 segment lower bound unsound: pruned {} vs brute {}",
+            dk,
+            db
+        );
+    }
+}
+
+// ---- Amendment A17: parity grid fails cleanly past a memory budget --------
+#[test]
+fn a17_parity_grid_budget_fails_cleanly() {
+    let mesh = grid_mesh(6);
+    // generous budget builds fine
+    assert!(
+        build_surface_budget(&mesh, usize::MAX).is_ok(),
+        "unbounded budget must build"
+    );
+    // a tiny budget must fail with a clean Err, never panic or OOM
+    let res = build_surface_budget(&mesh, 1000);
+    assert!(res.is_err(), "tiny grid budget must fail construction");
+    let err = res.err().unwrap();
+    assert!(
+        err.contains("memory budget"),
+        "budget failure must be reported cleanly, got: {}",
+        err
+    );
+}
+
 #[test]
 fn r6_no_hashmap_in_src() {
     // Determinism tripwire (spec R6 / sec 4.2): HashMap/HashSet iteration order

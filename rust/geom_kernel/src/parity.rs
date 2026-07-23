@@ -41,8 +41,21 @@ pub struct AxisGrid {
 }
 
 impl AxisGrid {
-    pub fn build(mesh: &Mesh, ax: usize, h: f64) -> Result<AxisGrid, String> {
+    pub fn build(
+        mesh: &Mesh,
+        ax: usize,
+        h: f64,
+        max_grid_bytes: usize,
+    ) -> Result<AxisGrid, String> {
         let n = mesh.nfaces;
+        // Peak-memory accounting (Amendment A17 / spec sec 3.5): a large
+        // projected triangle bins into every overlapped cell, so the CSR ref
+        // count — not nfaces — dominates. Fail CLEANLY past the configured
+        // budget instead of thrashing toward OOM. per-tri projected arrays are
+        // fixed (11 f64 + 1 bool); the transient (flat_id, tri) pair vector is
+        // the growing term we bound as it accumulates.
+        let per_tri_bytes = n.saturating_mul(11 * 8 + 1);
+        let pair_bytes = std::mem::size_of::<(i64, u32)>();
         let pp: Vec<usize> = (0..3).filter(|&i| i != ax).collect();
         let (p0, p1) = (pp[0], pp[1]);
 
@@ -113,6 +126,17 @@ impl AxisGrid {
                         .ok_or_else(|| "parity flat-id overflow".to_string())?;
                     pairs.push((flat, f as u32));
                 }
+            }
+            // Budget check per triangle: bounds overshoot to one triangle's
+            // cell fan-out, so we fail before the pair vector grows unbounded.
+            let projected = per_tri_bytes
+                .saturating_add(pairs.len().saturating_mul(pair_bytes));
+            if projected > max_grid_bytes {
+                return Err(format!(
+                    "parity grid axis {} exceeds memory budget: {} bytes projected > {} budget \
+                     (spec sec 3.5 / Amendment A17)",
+                    ax, projected, max_grid_bytes
+                ));
             }
         }
 
@@ -256,10 +280,10 @@ pub struct ParityVote {
 }
 
 impl ParityVote {
-    pub fn build(mesh: &Mesh, h: f64) -> Result<ParityVote, String> {
-        let g0 = AxisGrid::build(mesh, 0, h)?;
-        let g1 = AxisGrid::build(mesh, 1, h)?;
-        let g2 = AxisGrid::build(mesh, 2, h)?;
+    pub fn build(mesh: &Mesh, h: f64, max_grid_bytes: usize) -> Result<ParityVote, String> {
+        let g0 = AxisGrid::build(mesh, 0, h, max_grid_bytes)?;
+        let g1 = AxisGrid::build(mesh, 1, h, max_grid_bytes)?;
+        let g2 = AxisGrid::build(mesh, 2, h, max_grid_bytes)?;
         Ok(ParityVote {
             grids: [g0, g1, g2],
         })

@@ -194,19 +194,48 @@ def test_query_upper_bound_over_returns_inf():
 
 
 def test_equal_distance_subtree_tie_lowest_index():
-    # a point equidistant to two identical triangles placed far apart in the
-    # tree; kernel must return the LOWEST face index deterministically.
-    verts = np.array([
-        [-1, -1, 0], [-1, 1, 0], [-3, 0, 0.0],   # tri 0 (left)
-        [1, -1, 0], [1, 1, 0], [3, 0, 0.0],       # tri 1 (right)
-    ])
-    faces = np.array([[0, 1, 2], [3, 4, 5]])
-    mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+    # Amendment A12: a point equidistant to mirror-image triangle clusters
+    # placed in DIFFERENT BVH subtrees. The LOWEST face index must win the tie
+    # across the whole tree -- not merely deterministically, and not merely
+    # within a leaf. This pins BOTH the leaf comparison (`t < best_i`, guards a
+    # highest-index tie regression) AND the strict `>` pruning (guards a `>=`
+    # regression that would prune the lower-index subtree once best_d is set).
+    #
+    # Faces 0-7 are 8 coincident copies of a RIGHT triangle (x in [1,3]);
+    # faces 8-15 are 8 coincident copies of its LEFT mirror (x in [-3,-1]).
+    # >8 faces forces a top-level split into left/right subtrees; the left
+    # subtree (higher indices 8-15) is traversed first, so the winner index 0
+    # is only reached in the second-visited subtree -- exactly where a `>=`
+    # prune would drop it.
+    right = np.array([[1, -1, 0], [1, 1, 0], [3, 0, 0.0]])
+    left = np.array([[-1, -1, 0], [-1, 1, 0], [-3, 0, 0.0]])
+    verts = []
+    faces = []
+    for _ in range(8):                       # faces 0-7: right
+        base = len(verts)
+        verts.extend(right.tolist())
+        faces.append([base, base + 1, base + 2])
+    for _ in range(8):                       # faces 8-15: left mirror
+        base = len(verts)
+        verts.extend(left.tolist())
+        faces.append([base, base + 1, base + 2])
+    mesh = trimesh.Trimesh(vertices=np.array(verts, float),
+                           faces=np.array(faces), process=False)
     k = GK.KernelSurface(mesh)
-    # point at x=0 equidistant to both triangles' nearest edges
-    d, ti = k.query(np.array([[0.0, 0, 5.0]]))
-    d2, ti2 = k.query(np.array([[0.0, 0, 5.0]]))
+    assert k.build_log["bvh_nodes"] >= 3, "fixture must split into subtrees"
+    P = np.array([[0.0, 0, 5.0]])
+    d, ti = k.query(P)
+    d2, ti2 = k.query(P)
     assert ti[0] == ti2[0]  # deterministic
+    # genuine tie: a right copy (face 0) and a left copy (face 8) sit at
+    # bit-identical distance (mirror geometry => dx^2 identical).
+    A = k.V0; B = k.V0 + k.E1; C = k.V0 + k.E2
+    Pb = np.broadcast_to(P[0], A.shape)
+    dists = np.linalg.norm(Pb - GE.closest_on_tri(Pb, A, B, C), axis=1)
+    assert dists[0] == dists[8], "fixture must be a genuine equal-distance tie"
+    assert dists.min() == dists[0]
+    # A12 contract: the LOWEST face index wins the tie across the tree.
+    assert ti[0] == 0, f"A12: tie must resolve to the lowest face index, got {ti[0]}"
 
 
 # ==========================================================================
@@ -472,3 +501,267 @@ def test_bvh_nearest_vs_brute_python():
         cpt = GE.closest_on_tri(P, A, B, C)
         dref = float(np.linalg.norm(P - cpt, axis=1).min())
         assert abs(dk[i] - dref) <= 1e-9 * max(1.0, dref)
+
+
+# ==========================================================================
+# 9. THRESHOLD-BAND TELEMETRY (spec R3 / sec 4.2) — the band_counter must
+#    actually count near-threshold continuous decisions, else the full-scale
+#    acceptance log's R3 tripwire reads 0 exactly when it matters.
+# ==========================================================================
+def test_threshold_band_counter_counts_near_threshold_decisions():
+    # clearance-vs-0 band: a segment whose exact clearance is 0 to f64
+    # (best_d 1.0 == r_max+standoff 1.0) must register; a comfortably-clear one
+    # must not. Fresh surface => counter starts at 0.
+    k = GK.KernelSurface(_box((20, 20, 5)))
+    assert k.telemetry()["threshold_band"] == 0
+    k.segment_clearance(np.array([[-5, 0, 10.0]]), np.array([[5, 0, 10.0]]), 0.5, 0.5, 0.5)
+    assert k.telemetry()["threshold_band"] == 0, "far decision must NOT band"
+    k.segment_clearance(np.array([[-5, 0, 3.5]]), np.array([[5, 0, 3.5]]), 0.5, 0.5, 0.5)
+    assert k.telemetry()["threshold_band"] >= 1, "clearance==0 must land in the band"
+
+    # breach reach-precondition band: r - nd = 0.05 exactly at eps_mm=0.05.
+    k2 = GK.KernelSurface(_box((20, 20, 5)))
+    k2.sphere_breach(np.array([[0, 0, 0.0]]), np.array([1.0]))  # r-nd = -1.5, far
+    assert k2.telemetry()["threshold_band"] == 0
+    k2.sphere_breach(np.array([[0, 0, 1.5]]), np.array([1.05]))  # nd=1.0, r-nd=0.05
+    assert k2.telemetry()["threshold_band"] >= 1, "r-nd==eps must land in the band"
+
+
+def test_threshold_band_counter_thread_invariant():
+    # the COUNT is a deterministic function of the inputs (each decision
+    # inspects only its own quantity), so it must not vary with thread count.
+    import os
+    mesh = _box((20, 20, 5))
+    centers = np.array([[0, 0, 1.5], [0, 0, 0.0], [0, 0, 1.05], [3, 3, 1.5]])
+    radii = np.array([1.05, 1.0, 1.05, 1.05])
+    prev = os.environ.get("GEOM_KERNEL_THREADS")
+    counts = []
+    try:
+        for env in ("1", "0", "2"):
+            os.environ["GEOM_KERNEL_THREADS"] = env
+            kk = GK.KernelSurface(mesh)
+            kk.sphere_breach(centers, radii)
+            counts.append(kk.telemetry()["threshold_band"])
+    finally:
+        if prev is None:
+            os.environ.pop("GEOM_KERNEL_THREADS", None)
+        else:
+            os.environ["GEOM_KERNEL_THREADS"] = prev
+    assert len(set(counts)) == 1, f"band count varied with threads: {counts}"
+
+
+# ==========================================================================
+# 10. ADVERSARIAL THRESHOLD CORPUS (Amendment A21, sec 6 item 7) — a second
+#     generator seeking the decision boundaries the seeded fuzz's redraw band
+#     deliberately avoids. On pin-covered paths oracle and kernel compute
+#     identical bits, so EXACT agreement is asserted even at the knife edge.
+# ==========================================================================
+def test_adversarial_moller_t_at_segment_endpoints():
+    # a ray whose crossings sit EXACTLY at t=0 and t=t_max (origin ON one face,
+    # terminus ON the opposite face) — both Moller parameter endpoints at once.
+    o, k = _both(_box((10, 10, 10)))
+    O = np.array([[5.0, 0, 0]])          # on the +x face (t=0 crossing)
+    D = np.array([[-10.0, 0, 0]])        # ends on the -x face (t=1=t_max)
+    ro = o.cast_rays(O, D, 1.0)[0]
+    rk = k.cast_rays(O, D, 1.0)[0]
+    assert len(ro[0]) == len(rk[0]), f"endpoint crossings {len(ro[0])} vs {len(rk[0])}"
+    to = np.sort(ro[0]); tk = np.sort(rk[0])
+    assert np.all(np.abs(to - tk) <= 1e-9 * np.maximum(1.0, np.abs(to)))
+    _, cf = _brute_canonical_groups(_box((10, 10, 10)), o, O[0], D[0], 1.0)
+    korder = np.argsort(rk[0], kind="stable")
+    assert np.array_equal(np.sort(rk[1][korder]), np.sort(cf))
+
+
+def test_adversarial_parity_coincident_shells_at_dedup_boundary():
+    # three coincident walls at EXACTLY zdedup (5e-3) spacing: the cluster-count
+    # dedup boundary. Probed above/below/between; inside verdicts EXACT vs oracle.
+    walls = [_box((4, 4, 1e-6), center=(0, 0, z)) for z in (0.0, 5e-3, 1e-2)]
+    mesh = _soup(*walls)
+    o, k = _both(mesh)
+    pts = np.array([[0, 0, -0.5], [0, 0, 0.5], [0, 0, 2.5e-3], [0, 0, 7.5e-3]])
+    assert np.array_equal(o.inside(pts), k.inside(pts))
+
+
+def test_adversarial_clearance_and_breach_at_thresholds():
+    # clearance exactly at 0 (Tier-2, value 1e-9 parity + sign parity), and a
+    # breach whose thickness is near r-eps: oracle and kernel agree.
+    o, k = _both(_box((20, 20, 5)))
+    co, _ = o.segment_clearance(np.array([[-5, 0, 3.5]]), np.array([[5, 0, 3.5]]), 0.5, 0.5, 0.5)
+    ck, _ = k.segment_clearance(np.array([[-5, 0, 3.5]]), np.array([[5, 0, 3.5]]), 0.5, 0.5, 0.5)
+    assert abs(co[0] - ck[0]) <= 1e-9 * max(1.0, abs(co[0]))
+    assert (co[0] >= 0) == (ck[0] >= 0)
+    # coincident shells: two identical boxes; every inside verdict EXACT.
+    o2, k2 = _both(_soup(_box((10, 10, 10)), _box((10, 10, 10))))
+    rng = np.random.default_rng(0xC0)
+    pts = rng.uniform(-8, 8, size=(500, 3))
+    assert np.array_equal(o2.inside(pts), k2.inside(pts))
+
+
+# ==========================================================================
+# 11. BATCHED-ENTRY BIT PINS + CANCELLATION-HEAVY FUZZ (Amendment A21,
+#     sec 5.2/6 item 2) — scalar closed-form pins guard the wrong path; the
+#     production per-element BATCH loop is what LTO exposes to SLP/loop
+#     auto-vectorization, so the bit pins run through the batched entry points.
+# ==========================================================================
+def test_batched_primitive_bit_parity_single_triangle():
+    tri = trimesh.Trimesh(vertices=np.array([[0, 0, 0], [4, 0, 0], [0, 4, 0.0]]),
+                          faces=np.array([[0, 1, 2]]), process=False)
+    o, k = _both(tri)
+    rng = np.random.default_rng(0xB17)
+    # 2048-point batch (the ≤2048 discipline) all resolving to the one face:
+    pts = rng.uniform(-3, 6, size=(2048, 3))
+    do, cpo, tio, _ = o.project(pts)
+    dk, cpk, tik, _ = k.project(pts)
+    same = tio == tik
+    assert same.sum() > 100, "batch must exercise the shared-face path"
+    # same face => same formula => BIT-identical distance and closest point,
+    # through the vectorized batch entry (not just a 5-point scalar pin).
+    assert np.array_equal(do[same], dk[same]), "batched distance bit mismatch"
+    assert np.array_equal(cpo[same], cpk[same]), "batched closest-point bit mismatch"
+
+
+def test_cancellation_heavy_primitive_bit_fuzz():
+    # wide exponent range + near-cancellation operand constructions: a triangle
+    # with mixed-magnitude coordinates, points drawn across many exponents.
+    tri = trimesh.Trimesh(
+        vertices=np.array([[1e-3, 2e2, -5e1], [3e2, -1e-2, 4e1], [-2e1, 5e1, 7e-3]]),
+        faces=np.array([[0, 1, 2]]), process=False)
+    o, k = _both(tri)
+    rng = np.random.default_rng(0xCA9)
+    exps = rng.integers(-4, 4, size=(4000,))
+    signs = rng.choice([-1.0, 1.0], size=(4000, 3))
+    mant = rng.uniform(1.0, 9.9, size=(4000, 3))
+    pts = signs * mant * (10.0 ** exps)[:, None]
+    do, cpo, tio, _ = o.project(pts)
+    dk, cpk, tik, _ = k.project(pts)
+    same = tio == tik
+    assert same.any()
+    assert np.array_equal(do[same], dk[same]), "cancellation-heavy distance bit drift"
+    assert np.array_equal(cpo[same], cpk[same]), "cancellation-heavy cp bit drift"
+
+
+# ==========================================================================
+# 12. Amendment A13 — CONTESTED representative + anchor-consumption fixture.
+#     Two coincident walls (< dedup tol) make the dedup-group representative
+#     genuinely contested; the lowest-index rep and the exterior-mask value it
+#     indexes (cco.py:451-460 anchor input) must agree oracle vs kernel.
+# ==========================================================================
+def test_coincident_wall_representative_and_anchor():
+    v = np.array([
+        [0, -1, -1], [0, 1, -1], [0, 1, 1], [0, -1, 1],                    # wall A @ x=0
+        [1e-4, -1, -1], [1e-4, 1, -1], [1e-4, 1, 1], [1e-4, -1, 1],        # wall B @ x=1e-4
+    ], float)
+    faces = np.array([[0, 1, 2], [0, 2, 3], [4, 6, 5], [4, 7, 6]])          # B reversed winding
+    mesh = trimesh.Trimesh(vertices=v, faces=faces, process=False)
+    o, k = _both(mesh)
+    O = np.array([[-2.0, 0, 0]]); D = np.array([[4.0, 0, 0]])
+    ro = o.cast_rays(O, D, 1.0)[0]; rk = k.cast_rays(O, D, 1.0)[0]
+    assert len(rk[0]) == len(ro[0]) == 1, "coincident walls must dedup to ONE crossing"
+    # kernel returns the lowest-index representative; brute canonical agrees
+    _, cf = _brute_canonical_groups(mesh, o, O[0], D[0], 1.0)
+    assert list(rk[1]) == list(cf), f"representative {list(rk[1])} vs canonical {list(cf)}"
+    # anchor-selection input: exterior mask indexed by the representative equal
+    mo = o.exterior_face_mask(); mk = k.exterior_face_mask()
+    assert np.array_equal(mo, mk)
+    assert bool(mk[int(rk[1][0])]) == bool(mo[int(cf[0])])
+
+
+# ==========================================================================
+# 13. Amendment A14 — Tier-1 observability + revalidate-verdict replay.
+#     The Tier-1 deviation is verdict-preserving; the load-bearing property is
+#     (a) the one-directional ordering clr_kernel <= clr_oracle on every Tier-1
+#     draw, and (b) EQUAL revalidate verdicts oracle vs kernel (sec 6 item 4).
+# ==========================================================================
+def test_a14_tier1_ordering_over_many_draws():
+    # sweep segments across the open-space regime; every oracle Tier-1 draw
+    # (NaN argmin, finite positive cert) must satisfy clr_kernel <= clr_oracle
+    # and both strictly positive (verdict-preserving).
+    o, k = _both(_box((2, 2, 2)))
+    rng = np.random.default_rng(0x14A)
+    n_tier1 = 0
+    for _ in range(400):
+        base = rng.uniform(-1, 1, size=3)
+        base = base / (np.linalg.norm(base) or 1.0) * rng.uniform(3.0, 12.0)
+        d = rng.uniform(-1, 1, size=3)
+        d = d / (np.linalg.norm(d) or 1.0) * rng.uniform(0.1, 3.0)
+        p0 = base[None, :]; p1 = (base + d)[None, :]
+        co, ao = o.segment_clearance(p0, p1, 0.5, 0.5, 0.5)
+        ck, ak = k.segment_clearance(p0, p1, 0.5, 0.5, 0.5)
+        if not np.isfinite(co[0]):
+            continue
+        tier1 = bool(np.isnan(ao[0]).any()) and np.isfinite(co[0]) and co[0] > 0
+        if not tier1:
+            continue
+        n_tier1 += 1
+        assert co[0] > 0 and ck[0] > 0, "Tier-1 must be strictly positive both sides"
+        assert ck[0] <= co[0] + 1e-9, f"Tier-1 ordering violated: {ck[0]} > {co[0]}"
+    assert n_tier1 >= 50, f"too few Tier-1 draws exercised: {n_tier1}"
+
+
+def test_a14_revalidate_verdict_replay_oracle_vs_kernel():
+    # sec 6 item 4: run the SAME dirty members through tree.Forest.revalidate
+    # with the oracle geom and the kernel geom; the violation member sets must
+    # be EXACTLY equal (the A14 outcome-equivalence proof as a test).
+    from support_placement import tree as TR, config
+    mesh = _box((20, 20, 5))                     # top face at z=2.5
+    o, k = _both(mesh)
+    cfg = config.SupportConfig()
+    # a clearly-clear strut, a clearly-violating (embedded) strut, and a
+    # near-but-clear one — mm-scale margins so both geoms agree exactly.
+    specs = [
+        (( -5, 0, 10.0), (5, 0, 10.0)),          # far above: clear
+        (( -5, 0, 2.7), (5, 0, 2.7)),            # skims the top face: violation
+        (( -5, 0, 6.0), (5, 0, 6.0)),            # a few mm clear
+    ]
+
+    def _run(geom):
+        f = TR.Forest()
+        for p0, p1 in specs:
+            f.add_member(TR.Member(p0=np.array(p0, float), p1=np.array(p1, float),
+                                   r0=0.5, r1=0.5, kind="strut", owner=0))
+        viol = f.revalidate(geom, cfg)
+        return sorted(v["member_idx"] for v in viol)
+
+    assert _run(o) == _run(k), "revalidate verdicts diverge oracle vs kernel"
+
+
+# ==========================================================================
+# 14. Amendment A18 — the stage-1 batch refactor: no per-element FFI hot loop
+#     survives revalidate. The call-size histogram proof (fixture-scale).
+# ==========================================================================
+class _CountingGeom:
+    """Transparent proxy counting per-member vs batched interval calls."""
+    def __init__(self, inner):
+        self._inner = inner
+        self.n_per_member = 0
+        self.batch_sizes = []
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def penetration_intervals(self, *a, **kw):
+        self.n_per_member += 1
+        return self._inner.penetration_intervals(*a, **kw)
+
+    def penetration_intervals_batch(self, p0s, *a, **kw):
+        self.batch_sizes.append(len(p0s))
+        return self._inner.penetration_intervals_batch(p0s, *a, **kw)
+
+
+def test_a18_revalidate_batches_interval_calls():
+    from support_placement import tree as TR, config
+    mesh = _box((10, 10, 10))                    # +x face at x=5
+    cfg = config.SupportConfig()                 # standoff 0.6
+    # three struts whose clearance lands in [0, 0.1) => the interval belt fires
+    # for all three; the refactor must service them with ONE batched native
+    # call, never three per-member ones (R1 / Amendment A18).
+    xs = [6.15, 6.16, 6.17]                       # dist-to-face 1.15.. => clr ~0.05..
+    f = TR.Forest()
+    for x in xs:
+        f.add_member(TR.Member(p0=np.array([x, -3, 0.0]), p1=np.array([x, 3, 0.0]),
+                               r0=0.5, r1=0.5, kind="strut", owner=0))
+    cg = _CountingGeom(GK.KernelSurface(mesh))
+    viol = f.revalidate(cg, cfg)
+    assert cg.n_per_member == 0, "per-member penetration_intervals must NOT be called"
+    assert cg.batch_sizes == [3], f"expected ONE batch of 3, got {cg.batch_sizes}"
+    assert viol == [], "clear struts must not be flagged"

@@ -348,28 +348,52 @@ class Forest:
         return inset0, inset1
 
     @staticmethod
-    def _exact_interval_illegal(geom, m, cfg, inset0, inset1):
+    def _axis_interval_illegal(intervals, L, inset0, inset1):
         """True iff the member's AXIS has an inside-the-solid run longer than
         the census MIN_ILLEGAL_LEN (0.05mm) OUTSIDE its sanctioned embed zones
         -- the mid-path-penetration / stub through-transit test. This is a
         parity-crossing test (exact boundaries, majority-vote inside), never a
         distance test, so it cannot false-positive on an ordinary surface-
-        hugging stub. Axis-only, matching the census (census_run.py:52)."""
-        p0 = np.asarray(m.p0, float)
-        p1 = np.asarray(m.p1, float)
-        L = float(np.linalg.norm(p1 - p0))
+        hugging stub. Axis-only, matching the census (census_run.py:52).
+
+        Takes PRE-COMPUTED axis intervals (from _batch_axis_intervals' single
+        native call) rather than re-entering the geometry oracle per member --
+        the Amendment A18 stage-1 refactor: a wrapper cannot batch a Python
+        for-loop above it, so the caller gathers members and this helper only
+        applies the inset/overlap arithmetic (R1: no per-element FFI hot loop)."""
         if L < 1e-9:
             return False
         lo = inset0
         hi = L - inset1
         if hi - lo <= 1e-9:
             return False
-        intervals = geom.penetration_intervals(p0, p1, m.r0, m.r1, rays="axis",
-                                                min_illegal_len_mm=0.05)
         for iv in intervals:
             if min(iv["s_b"], hi) - max(iv["s_a"], lo) > 0.05:
                 return True
         return False
+
+    @staticmethod
+    def _batch_axis_intervals(geom, members, mis):
+        """ONE native penetration_intervals call for ALL members in `mis`
+        (Amendment A7/A18). Returns {member_idx: interval-list}. Uses the SoA
+        batch entry point when the oracle exposes it (the Rust kernel does);
+        falls back to per-member calls only for a legacy cKDTree/oracle geom
+        that has none (tests). Production always takes the batched path, so no
+        per-element FFI hot loop survives revalidate at treant scale (R1)."""
+        if not mis:
+            return {}
+        p0s = np.array([np.asarray(members[mi].p0, float) for mi in mis])
+        p1s = np.array([np.asarray(members[mi].p1, float) for mi in mis])
+        r0s = np.array([float(members[mi].r0) for mi in mis])
+        r1s = np.array([float(members[mi].r1) for mi in mis])
+        batch = getattr(geom, "penetration_intervals_batch", None)
+        if batch is not None:
+            per = batch(p0s, p1s, r0s, r1s, rays="axis", min_illegal_len_mm=0.05)
+        else:
+            per = [geom.penetration_intervals(p0s[j], p1s[j], r0s[j], r1s[j],
+                                              rays="axis", min_illegal_len_mm=0.05)
+                   for j in range(len(mis))]
+        return {mi: per[j] for j, mi in enumerate(mis)}
 
     def _revalidate_exact(self, geom, cfg):
         """Exact swept-capsule clearance path (SPEC sec 2.1). Non-stub dirty
@@ -438,21 +462,76 @@ class Forest:
         # rule catches real through-transits and leaves interior phantoms to
         # the unrouted path -- exactly the sequencing the step-1 deferral
         # named, now that sec 2.4 keeps genuine exterior overhangs.
-        for mi in stub_mi:
-            m = self.members[mi]
-            if bool(geom.inside(np.asarray(m.p1, float)[None, :])[0]):
-                continue
-            si0, si1 = self._embed_inset_arc(geom, m, cfg)
-            if self._exact_interval_illegal(geom, m, cfg, si0, si1):
-                bad.add(mi)
-                violations.append(dict(member_idx=mi, min_clearance_mm=0.0,
-                                       at_point=None))
+        #
+        # Amendment A18 (stage-1 named refactor): the per-member
+        # penetration_intervals loop is GONE. Every member needing the axis
+        # interval test -- exterior stubs plus gate-triggered segments -- is
+        # gathered first, its intervals computed in ONE _batch_axis_intervals
+        # native call, and only the inset/overlap arithmetic runs in Python
+        # here. A wrapper cannot batch a Python for-loop above it, so this hot
+        # revalidate loop is the site R1's "no per-element FFI hot loop" proof
+        # obligation names.
+
+        # (1) exterior stubs: one batched parity vote over all stub p1s.
+        stub_p1_ext = []
+        stub_insets = {}
+        if stub_mi:
+            stub_p1 = np.array([np.asarray(self.members[mi].p1, float) for mi in stub_mi])
+            inside_p1 = geom.inside(stub_p1)
+            for k, mi in enumerate(stub_mi):
+                if bool(inside_p1[k]):
+                    continue
+                m = self.members[mi]
+                si0, si1 = self._embed_inset_arc(geom, m, cfg)
+                L = float(np.linalg.norm(np.asarray(m.p1, float) - np.asarray(m.p0, float)))
+                stub_p1_ext.append(mi)
+                stub_insets[mi] = (si0, si1, L)
+
+        # (2) segment clearances (already ONE batched native call) + belt trigger.
+        clr = argp = None
+        seg_trigger = []
+        seg_insets = {}
         if seg_mi:
             clr, argp = geom.segment_clearance(
                 np.array(p0s), np.array(p1s), np.array(r0s), np.array(r1s),
                 cfg.standoff_mm, inset0s=np.array(ins0), inset1s=np.array(ins1))
+            # midpoint parity vote only where the 0.1 gate did NOT already fire;
+            # batch those into ONE inside() call. (A14: kernel-exact clearance
+            # can sit below 0.1 where the oracle's Tier-1 certificate does not,
+            # which only fires the belt MORE often -- verdict-preserving.)
+            need_mid = [k for k in range(len(seg_mi))
+                        if float(clr[k]) >= 0.0 and float(clr[k]) >= 0.1]
+            mid_inside = {}
+            if need_mid:
+                mids = np.array([0.5 * (np.asarray(self.members[seg_mi[k]].p0, float)
+                                        + np.asarray(self.members[seg_mi[k]].p1, float))
+                                 for k in need_mid])
+                flags = geom.inside(mids)
+                mid_inside = {k: bool(flags[j]) for j, k in enumerate(need_mid)}
             for k, mi in enumerate(seg_mi):
-                m = self.members[mi]
+                worst = float(clr[k])
+                if worst < 0:
+                    continue  # hard clearance violation; no interval belt
+                if worst < 0.1 or mid_inside.get(k, False):
+                    m = self.members[mi]
+                    L = float(np.linalg.norm(np.asarray(m.p1, float) - np.asarray(m.p0, float)))
+                    seg_trigger.append(mi)
+                    seg_insets[mi] = (ins0[k], ins1[k], L)
+
+        # (3) ONE native penetration_intervals_batch over every interval job.
+        intervals_by_mi = self._batch_axis_intervals(
+            geom, self.members, stub_p1_ext + seg_trigger)
+
+        # (4) verdict assembly -- stub violations first, then segment violations,
+        #     preserving the pre-refactor append order exactly.
+        for mi in stub_p1_ext:
+            si0, si1, L = stub_insets[mi]
+            if self._axis_interval_illegal(intervals_by_mi[mi], L, si0, si1):
+                bad.add(mi)
+                violations.append(dict(member_idx=mi, min_clearance_mm=0.0,
+                                       at_point=None))
+        if seg_mi:
+            for k, mi in enumerate(seg_mi):
                 worst = float(clr[k])
                 if worst < 0:
                     bad.add(mi)
@@ -461,14 +540,12 @@ class Forest:
                         member_idx=mi, min_clearance_mm=worst,
                         at_point=(ap.tolist() if np.all(np.isfinite(ap)) else None)))
                     continue
-                triggered = worst < 0.1
-                if not triggered:
-                    mid = 0.5 * (np.asarray(m.p0, float) + np.asarray(m.p1, float))
-                    triggered = bool(geom.inside(mid))
-                if triggered and self._exact_interval_illegal(geom, m, cfg, ins0[k], ins1[k]):
-                    bad.add(mi)
-                    violations.append(dict(member_idx=mi, min_clearance_mm=worst,
-                                           at_point=None))
+                if mi in seg_insets:
+                    si0, si1, L = seg_insets[mi]
+                    if self._axis_interval_illegal(intervals_by_mi[mi], L, si0, si1):
+                        bad.add(mi)
+                        violations.append(dict(member_idx=mi, min_clearance_mm=worst,
+                                               at_point=None))
         for mi in dirty:
             if mi in bad:
                 continue

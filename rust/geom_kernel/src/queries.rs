@@ -10,7 +10,7 @@ use rayon::prelude::*;
 
 use crate::bvh::Bvh;
 use crate::closest::{closest_on_tri, segseg};
-use crate::consts::{DEDUP_LOC_MM, EPS, NEAR_WALL_SKIP};
+use crate::consts::{DEDUP_LOC_MM, EPS, NEAR_WALL_SKIP, THRESHOLD_BAND_MM};
 use crate::mesh::Mesh;
 use crate::moller::{dedup_loc, moller};
 use crate::par;
@@ -118,9 +118,13 @@ fn ray_box(o: V3, d: V3, bmin: V3, bmax: V3, pad: f64, t0: f64, t1: f64) -> bool
 }
 
 impl NativeSurface {
-    pub fn new(mesh: Mesh, grid_pitch_mm: f64) -> Result<NativeSurface, String> {
+    pub fn new(
+        mesh: Mesh,
+        grid_pitch_mm: f64,
+        max_grid_bytes: usize,
+    ) -> Result<NativeSurface, String> {
         let bvh = Bvh::build(&mesh)?;
-        let pv = ParityVote::build(&mesh, grid_pitch_mm)?;
+        let pv = ParityVote::build(&mesh, grid_pitch_mm, max_grid_bytes)?;
         Ok(NativeSurface {
             mesh,
             bvh,
@@ -130,6 +134,20 @@ impl NativeSurface {
             band_counter: AtomicU64::new(0),
             tie_counter: AtomicU64::new(0),
         })
+    }
+
+    /// Result-inert threshold-band telemetry (spec R3 / sec 4.2): count a
+    /// CONTINUOUS decision quantity whose distance to its threshold is under
+    /// `THRESHOLD_BAND_MM`. Relaxed atomic — the COUNT is a deterministic
+    /// function of the inputs (each decision inspects only its own quantity),
+    /// so it is thread-count invariant like `tie_counter`, and it NEVER feeds a
+    /// result. Non-finite quantities (e.g. an infinite far-wall thickness or an
+    /// empty-crop clearance) compare false and are not counted.
+    #[inline]
+    fn band_check(&self, quantity: f64, threshold: f64) {
+        if (quantity - threshold).abs() < THRESHOLD_BAND_MM {
+            self.band_counter.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     // ---- nearest triangle (query/project) -------------------------------
@@ -350,7 +368,7 @@ impl NativeSurface {
     /// Exact segment [a,b] vs one triangle: min over endpoints, 3 edges, pierce.
     /// Mirrors _seg_tri_dist (geometry_exact.py:596-630).
     #[inline]
-    fn seg_tri_dist(&self, a: V3, b: V3, t: usize) -> (f64, V3) {
+    pub(crate) fn seg_tri_dist(&self, a: V3, b: V3, t: usize) -> (f64, V3) {
         let v0 = self.mesh.v0[t];
         let p = v0;
         let q = add(v0, self.mesh.e1[t]);
@@ -392,7 +410,7 @@ impl NativeSurface {
     }
 
     /// Exact minimum distance from segment [a,b] to the surface (branch & bound).
-    fn seg_surface_min(&self, a: V3, b: V3) -> (f64, V3) {
+    pub(crate) fn seg_surface_min(&self, a: V3, b: V3) -> (f64, V3) {
         let smin = box_min(a, b);
         let smax = box_max(a, b);
         let mut best_d = f64::INFINITY;
@@ -466,7 +484,10 @@ impl NativeSurface {
         let r_max = r_lo.max(r_hi);
         let thresh = r_max + standoff;
         let (best_d, best_pt) = self.seg_surface_min(a, b);
-        (best_d - thresh, best_pt)
+        let clr = best_d - thresh;
+        // clearance-vs-0 threshold band (spec sec 5.4 item 3)
+        self.band_check(clr, 0.0);
+        (clr, best_pt)
     }
 
     pub fn segment_clearance(
@@ -627,6 +648,8 @@ impl NativeSurface {
                     }
                     let s_a = ta * seg;
                     let s_b = tb * seg;
+                    // interval-length vs min_illegal_len threshold band (sec 5.4 item 3)
+                    self.band_check(s_b - s_a, min_illegal_len_mm);
                     if (s_b - s_a) > min_illegal_len_mm {
                         out.push(Interval {
                             s_a,
@@ -765,6 +788,8 @@ impl NativeSurface {
             (d, cp, i, n)
         };
         let _ = tri;
+        // reach precondition r−nd vs eps_mm threshold band (sec 5.4 item 3)
+        self.band_check(r - nd, eps_mm);
         if r - nd <= eps_mm {
             return (false, f64::INFINITY, 0.0);
         }
@@ -802,6 +827,11 @@ impl NativeSurface {
             }
         }
 
+        // thickness-vs-(r−eps) threshold band, per breaching orientation (sec 5.4 item 3)
+        self.band_check(t1, r - eps_mm);
+        if tie {
+            self.band_check(t2, r - eps_mm);
+        }
         let breach1 = t1.is_finite() && t1 < r - eps_mm;
         let breach2 = tie && t2.is_finite() && t2 < r - eps_mm;
         if tie {

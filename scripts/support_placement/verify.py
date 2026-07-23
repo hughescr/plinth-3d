@@ -71,25 +71,48 @@ def _embed_inset_arc_exact(geom, m, cfg):
     return inset0, inset1
 
 
-def _interval_illegal_exact(geom, m, cfg, inset0, inset1):
+def _axis_interval_illegal(intervals, L, inset0, inset1):
     """True iff the member's AXIS has an inside-the-solid run > 0.05mm
     (census MIN_ILLEGAL_LEN) outside its sanctioned embed zones -- the
     mid-path-penetration / stub through-transit test (parity crossings,
     exact boundaries; never a distance test). Independent verify-side copy
-    (the independence covenant: shares only geom's generic primitives)."""
-    p0 = np.asarray(m["p0"], float)
-    p1 = np.asarray(m["p1"], float)
-    L = float(np.linalg.norm(p1 - p0))
+    (the independence covenant: shares only geom's generic primitives).
+
+    Takes PRE-COMPUTED axis intervals from _batch_axis_intervals' single
+    native call rather than re-entering the oracle per member -- the
+    Amendment A18 stage-1 refactor (verify.py:88 was the named site): a
+    wrapper cannot batch a Python for-loop above it, so the caller gathers
+    members and this helper only applies the inset/overlap arithmetic."""
     if L < 1e-9:
         return False
     lo, hi = inset0, L - inset1
     if hi - lo <= 1e-9:
         return False
-    for iv in geom.penetration_intervals(p0, p1, float(m["r0"]), float(m["r1"]),
-                                          rays="axis", min_illegal_len_mm=0.05):
+    for iv in intervals:
         if min(iv["s_b"], hi) - max(iv["s_a"], lo) > 0.05:
             return True
     return False
+
+
+def _batch_axis_intervals(geom, members, mis):
+    """ONE native penetration_intervals call for ALL members in `mis`
+    (Amendment A7/A18); returns {member_idx: interval-list}. Batch SoA entry
+    point when the geom exposes it (the Rust kernel does); per-member fallback
+    only for a legacy cKDTree/oracle with none. Independent verify-side copy."""
+    if not mis:
+        return {}
+    p0s = np.array([np.asarray(members[mi]["p0"], float) for mi in mis])
+    p1s = np.array([np.asarray(members[mi]["p1"], float) for mi in mis])
+    r0s = np.array([float(members[mi]["r0"]) for mi in mis])
+    r1s = np.array([float(members[mi]["r1"]) for mi in mis])
+    batch = getattr(geom, "penetration_intervals_batch", None)
+    if batch is not None:
+        per = batch(p0s, p1s, r0s, r1s, rays="axis", min_illegal_len_mm=0.05)
+    else:
+        per = [geom.penetration_intervals(p0s[j], p1s[j], r0s[j], r1s[j],
+                                          rays="axis", min_illegal_len_mm=0.05)
+               for j in range(len(mis))]
+    return {mi: per[j] for j, mi in enumerate(mis)}
 
 
 def _clearance_report_exact(members, cfg, geom):
@@ -118,40 +141,72 @@ def _clearance_report_exact(members, cfg, geom):
     positive. The step-1 deferral -- which depended on the interior-face
     demand filter -- has EXPIRED: commit 6aba0f6 landed that filter, so
     contacts now seed only on exterior faces and a flagged stub is a real
-    defect, not an interior phantom the builder cannot re-route."""
-    seg_mi, p0s, p1s, r0s, r1s, ins0, ins1 = [], [], [], [], [], [], []
+    defect, not an interior phantom the builder cannot re-route.
+
+    Amendment A18 (stage-1 named refactor, verify.py:88): the per-member
+    penetration_intervals loop is GONE. Exterior stubs and every non-stub with
+    non-negative clearance are gathered and their axis intervals computed in
+    ONE _batch_axis_intervals native call; only the inset/overlap arithmetic
+    runs in Python. Verdict and append order are preserved exactly (stub
+    violations in member order, then segment violations in seg order)."""
     out = []
+    # (1) exterior stubs: ONE batched parity vote over all stub p1s.
+    stub_mi = [mi for mi, m in enumerate(members) if m["kind"] == "stub"]
+    stub_p1_ext = []
+    stub_insets = {}
+    if stub_mi:
+        stub_p1 = np.array([np.asarray(members[mi]["p1"], float) for mi in stub_mi])
+        inside_p1 = geom.inside(stub_p1)
+        for k, mi in enumerate(stub_mi):
+            if bool(inside_p1[k]):
+                continue
+            m = members[mi]
+            si0, si1 = _embed_inset_arc_exact(geom, m, cfg)
+            L = float(np.linalg.norm(np.asarray(m["p1"], float) - np.asarray(m["p0"], float)))
+            stub_p1_ext.append(mi)
+            stub_insets[mi] = (si0, si1, L)
+
+    # (2) non-stubs: gather + ONE batched segment_clearance call.
+    seg_mi, p0s, p1s, r0s, r1s, ins0, ins1 = [], [], [], [], [], [], []
     for mi, m in enumerate(members):
         if m["kind"] == "stub":
-            # Stub keeps the standoff exemption (no segment_clearance) but
-            # gets the axis through-transit interval check (SPEC sec 2.1).
-            # A printable stub terminates in open air: only a stub whose
-            # stub_end (p1) is OUTSIDE the solid can weld THROUGH a thin
-            # feature. A p1 inside the solid is the interior-unroutable class
-            # (outward normal into the model body / an overlapping shell,
-            # sec 2.4) -- discarded via the unrouted path, never printed --
-            # so it is not a transit defect. Gate on p1 exterior (one parity
-            # vote). Independently coded from tree._revalidate_exact.
-            if bool(geom.inside(np.asarray(m["p1"], float)[None, :])[0]):
-                continue
-            si0, si1 = _embed_inset_arc_exact(geom, m, cfg)
-            if _interval_illegal_exact(geom, m, cfg, si0, si1):
-                out.append(dict(member_idx=mi, kind="stub", min_clearance_mm=0.0,
-                                at_point=None))
             continue
-        r0, r1 = float(m["r0"]), float(m["r1"])
         i0, i1 = _embed_inset_arc_exact(geom, m, cfg)
         seg_mi.append(mi)
         p0s.append(np.asarray(m["p0"], float))
         p1s.append(np.asarray(m["p1"], float))
-        r0s.append(r0)
-        r1s.append(r1)
+        r0s.append(float(m["r0"]))
+        r1s.append(float(m["r1"]))
         ins0.append(i0)
         ins1.append(i1)
+    clr = argp = None
+    seg_check = []
+    seg_insets = {}
     if seg_mi:
         clr, argp = geom.segment_clearance(
             np.array(p0s), np.array(p1s), np.array(r0s), np.array(r1s),
             cfg.standoff_mm, inset0s=np.array(ins0), inset1s=np.array(ins1))
+        # verify runs the interval test UNGATED on every non-negative-clearance
+        # non-stub (no 0.1 hot-loop gate here -- SPEC sec 2.1: the ungated dense
+        # pass lives in verify). Gather them for the single batched call.
+        for k, mi in enumerate(seg_mi):
+            if float(clr[k]) < 0:
+                continue
+            L = float(np.linalg.norm(np.asarray(members[mi]["p1"], float)
+                                     - np.asarray(members[mi]["p0"], float)))
+            seg_check.append(mi)
+            seg_insets[mi] = (ins0[k], ins1[k], L)
+
+    # (3) ONE native penetration_intervals_batch over every interval job.
+    intervals_by_mi = _batch_axis_intervals(geom, members, stub_p1_ext + seg_check)
+
+    # (4) verdict assembly -- stub violations first (member order), then segs.
+    for mi in stub_p1_ext:
+        si0, si1, L = stub_insets[mi]
+        if _axis_interval_illegal(intervals_by_mi[mi], L, si0, si1):
+            out.append(dict(member_idx=mi, kind="stub", min_clearance_mm=0.0,
+                            at_point=None))
+    if seg_mi:
         for k, mi in enumerate(seg_mi):
             m = members[mi]
             worst = float(clr[k])
@@ -159,9 +214,11 @@ def _clearance_report_exact(members, cfg, geom):
                 ap = argp[k]
                 out.append(dict(member_idx=mi, kind=m["kind"], min_clearance_mm=worst,
                                 at_point=(ap.tolist() if np.all(np.isfinite(ap)) else None)))
-            elif _interval_illegal_exact(geom, m, cfg, ins0[k], ins1[k]):
-                out.append(dict(member_idx=mi, kind=m["kind"], min_clearance_mm=worst,
-                                at_point=None))
+            elif mi in seg_insets:
+                si0, si1, L = seg_insets[mi]
+                if _axis_interval_illegal(intervals_by_mi[mi], L, si0, si1):
+                    out.append(dict(member_idx=mi, kind=m["kind"], min_clearance_mm=worst,
+                                    at_point=None))
     return out
 
 

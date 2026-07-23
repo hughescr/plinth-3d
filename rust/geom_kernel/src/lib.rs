@@ -96,7 +96,17 @@ impl NativeSurfacePy {
 
         let mesh = Mesh::new(&flat_tris, &flat_norm, &flat_area, &flat_bounds)
             .map_err(PyValueError::new_err)?;
-        let inner = NativeSurface::new(mesh, grid_pitch_mm).map_err(PyValueError::new_err)?;
+        // Configured parity-grid memory budget (spec sec 3.5 / Amendment A17):
+        // GEOM_KERNEL_MAX_GRID_BYTES caps each per-axis CSR grid so a
+        // pathological mesh fails construction cleanly instead of thrashing.
+        // Unset => usize::MAX (no cap; production treant-scale grids are tens
+        // of MB, telemetered in build_log).
+        let max_grid_bytes = std::env::var("GEOM_KERNEL_MAX_GRID_BYTES")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .unwrap_or(usize::MAX);
+        let inner = NativeSurface::new(mesh, grid_pitch_mm, max_grid_bytes)
+            .map_err(PyValueError::new_err)?;
         Ok(NativeSurfacePy { inner })
     }
 

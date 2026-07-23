@@ -111,7 +111,44 @@ pub fn make_slivers(n: usize) -> TestMesh {
 
 pub fn build_surface(m: &TestMesh) -> NativeSurface {
     let mesh = Mesh::new(&m.tris, &m.normals, &m.areas, &m.bounds).unwrap();
-    NativeSurface::new(mesh, 2.0).unwrap()
+    NativeSurface::new(mesh, 2.0, usize::MAX).unwrap()
+}
+
+/// Build a surface directly from a flat n*9 triangle list (test fixtures).
+pub fn build_from_tris(tris: Vec<f64>) -> NativeSurface {
+    build_surface(&finalize(tris))
+}
+
+/// Build with an explicit parity-grid memory budget (A17 budget-failure test).
+pub fn build_surface_budget(m: &TestMesh, max_grid_bytes: usize) -> Result<NativeSurface, String> {
+    let mesh = Mesh::new(&m.tris, &m.normals, &m.areas, &m.bounds)?;
+    NativeSurface::new(mesh, 2.0, max_grid_bytes)
+}
+
+/// Public accessor for the make_* meshes so the budget test can reuse them.
+pub fn grid_mesh(k: usize) -> TestMesh {
+    make_grid_mesh(k)
+}
+
+/// Exact segment-to-surface minimum via the BVH-pruned branch & bound.
+pub fn surf_seg_min(s: &NativeSurface, a: V3, b: V3) -> (f64, V3) {
+    s.seg_surface_min(a, b)
+}
+
+/// Brute-force segment-to-surface minimum over ALL triangles, using the SAME
+/// per-triangle primitive as the pruned path — so a discrepancy isolates the
+/// A17 pruning lower bound, not the triangle math.
+pub fn brute_seg_min(s: &NativeSurface, a: V3, b: V3) -> (f64, V3) {
+    let mut best_d = f64::INFINITY;
+    let mut best_pt: V3 = [f64::NAN; 3];
+    for t in 0..s.mesh.nfaces {
+        let (d, pt) = s.seg_tri_dist(a, b, t);
+        if d < best_d {
+            best_d = d;
+            best_pt = pt;
+        }
+    }
+    (best_d, best_pt)
 }
 
 pub fn sample_points(m: &TestMesh, n: usize) -> Vec<V3> {
