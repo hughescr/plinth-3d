@@ -231,7 +231,11 @@ fn parse_support(bytes: &[u8], m: usize, sptr: usize, mesh_end: usize) -> Result
             ),
         });
     }
-    if rec_off <= sptr {
+    // `rec_off` must lie AT OR AFTER the end of the 16-byte index quad (so the
+    // group-header slice `[idx_end..rec_off]` is well-formed) and within the
+    // file. A `rec_off` inside the index quad (`sptr < rec_off < idx_end`) or
+    // past EOF would otherwise panic the slice below on malformed input.
+    if rec_off < idx_end || rec_off > n {
         return Err(ChituboxError::SupportPointerInvalid {
             model: m,
             ptr: sptr as u32,

@@ -9,7 +9,7 @@ use crate::error::{ChituboxError, Result};
 use crate::parse::parse;
 use crate::stl::{all_finite, center, parse_binary_stl};
 use crate::support::{build_section, decode_section};
-use crate::transform::{rotate_z_point, rotate_z_with};
+use crate::transform::{rotate_z_bytes_in_place, rotate_z_point, rotate_z_with};
 use crate::types::*;
 use crate::verify::verify;
 use crate::write::serialize;
@@ -296,9 +296,32 @@ impl Project {
 
         // rebake support geometry (mesh blobs + record endpoints) from pristine
         if let Some(section) = me.support.as_mut() {
-            let mut smesh_f = bytes_to_f32(&pristine.smesh);
-            rotate_z_with(&mut smesh_f, s, c);
-            section.smesh = f32_to_bytes(&smesh_f);
+            // Rotate ONLY the byte ranges each record references as its mesh
+            // blob. Every other smesh byte — inter-blob padding, unreferenced
+            // trailing bytes, or a non-4-aligned remainder — is unknown data
+            // that MUST survive verbatim (gold invariant c). Rebaking the whole
+            // smesh through `bytes_to_f32` (chunks_exact(4)) would silently drop
+            // a non-4-aligned tail and reinterpret dead bytes as geometry.
+            let orig = section.orig_smesh_off;
+            let mut new_smesh = pristine.smesh.clone();
+            let smesh_len = new_smesh.len();
+            for rec in &section.records {
+                let abs = u32::from_le_bytes(rec[S_MESH_OFF..S_MESH_OFF + 4].try_into().unwrap());
+                let len =
+                    u32::from_le_bytes(rec[S_MESH_LEN..S_MESH_LEN + 4].try_into().unwrap()) as usize;
+                // Relative start within smesh (parse guaranteed containment; guard anyway).
+                let Some(start) = abs.checked_sub(orig).map(|v| v as usize) else {
+                    continue;
+                };
+                let Some(end) = start.checked_add(len) else {
+                    continue;
+                };
+                if end > smesh_len {
+                    continue;
+                }
+                rotate_z_bytes_in_place(&mut new_smesh[start..end], s, c);
+            }
+            section.smesh = new_smesh;
             for (rec, (p_start, p_end)) in section.records.iter_mut().zip(&pristine.record_geo) {
                 let ns = rotate_z_point(*p_start, s, c);
                 let ne = rotate_z_point(*p_end, s, c);
@@ -397,8 +420,15 @@ impl Project {
                 t[2] = z;
                 me.set_translate(t);
             }
-            // geometry changed: invalidate rotation snapshot
+            // Geometry changed: invalidate the rotation snapshot AND reset the
+            // cumulative session angle. The freshly attached/replaced records
+            // are supplied in the model's CURRENT (already-baked) frame, so the
+            // post-attach mesh + records become the new pristine baseline at
+            // angle 0. Failing to reset here would make the next rotate re-snap
+            // the already-rotated mesh as pristine and then re-apply the old
+            // cumulative angle on top of it (silently wrong geometry).
             me.pristine = None;
+            me.session_z_rot_deg = 0.0;
         }
         self.mark_dirty();
         Ok(())

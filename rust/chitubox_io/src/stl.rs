@@ -23,6 +23,14 @@ pub(crate) fn parse_binary_stl(bytes: &[u8]) -> Result<Vec<f32>> {
         });
     }
     let count = read_u32(bytes, STL_HEADER_LEN, "stl count")? as usize;
+    // Reject a zero-triangle model: it yields an empty mesh whose ChituBox
+    // behavior is unprobed, and mirrors the Triangles branch which rejects
+    // empty soups.
+    if count == 0 {
+        return Err(ChituboxError::StlParse {
+            detail: "STL declares zero triangles".into(),
+        });
+    }
     let need = STL_HEADER_LEN + 4 + mul(count, STL_BYTES_PER_TRI, "stl body")?;
     if bytes.len() != need {
         return Err(ChituboxError::StlParse {
@@ -41,6 +49,13 @@ pub(crate) fn parse_binary_stl(bytes: &[u8]) -> Result<Vec<f32>> {
             xyz.push(read_f32(bytes, v0 + k * 4, "stl vertex")?);
         }
         base += STL_BYTES_PER_TRI;
+    }
+    // Reject non-finite geometry BEFORE centering: a NaN/Inf vertex would poison
+    // the bbox center (NaN comparisons make centering a silent no-op) and bake
+    // non-finite floats into the file. Mirrors the Triangles branch's finiteness
+    // guard in `Project::add_models`.
+    if !all_finite(&xyz) {
+        return Err(ChituboxError::NonFiniteValue { context: "stl" });
     }
     Ok(center(xyz))
 }

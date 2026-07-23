@@ -15,6 +15,10 @@
 //! self-consistent (magics, offsets, coverage) — NOT that ChituBox will load
 //! it. ChituBox itself is the only semantic oracle.
 
+// The crate contains zero `unsafe` (audited); pin that so a future edit can't
+// reintroduce it unnoticed under the wrapper-safety mandate.
+#![forbid(unsafe_code)]
+
 mod codec;
 mod consts;
 mod document;
