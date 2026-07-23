@@ -505,6 +505,7 @@ def _model_anchor_builders(forest, i, stub_idx, se, r_i, carried_i,
         origins = np.broadcast_to(se, (len(candidates), 3))
         dirs = np.array([np.asarray(c[0], float) - se for c in candidates], dtype=float)
         hits = geom.cast_rays(origins, dirs, t_max=1.0)
+        exact_pts = []
         for (anchor_pt, _anchor_delicacy, _len), (ts, faces) in zip(candidates, hits):
             if len(ts) == 0:
                 continue
@@ -513,17 +514,53 @@ def _model_anchor_builders(forest, i, stub_idx, se, r_i, carried_i,
                 continue
             j = int(np.nonzero(ext_sel)[0][0])  # ts sorted ascending -> first exterior hit
             t_hit = float(ts[j])
-            exact_pt = se + t_hit * (np.asarray(anchor_pt, float) - se)
+            exact_pts.append(se + t_hit * (np.asarray(anchor_pt, float) - se))
+        # SPEC-V5-PERF A3: ONE sphere_breach batch over every surviving anchor's
+        # foot ball (measured ~1,000 scalar sphere_breach/window on the treant
+        # probe), replacing the per-candidate scalar call inside build_fn. The
+        # foot-ball radius is a pure function of the anchor point (r_strut from
+        # L/lean/load), computable up front; the precomputed verdict is read by
+        # build_fn at exactly the point it used to call sphere_breach, so the
+        # accept/reject decision is byte-identical (sphere_breach is a pure
+        # function of (center, radius) against the immutable mesh).
+        breached = _anchor_foot_breach_batch(se, r_i, carried_i, exact_pts, cfg, geom)
+        for k, exact_pt in enumerate(exact_pts):
             yield _make_model_anchor_builder(forest, i, stub_idx, se, r_i, carried_i,
-                                              exact_pt, cfg, geom=geom)
+                                              exact_pt, cfg, geom=geom,
+                                              breach_precomputed=breached[k])
         return
     for anchor_pt, _anchor_delicacy, _len in candidates:
         yield _make_model_anchor_builder(forest, i, stub_idx, se, r_i, carried_i,
                                           np.asarray(anchor_pt, float), cfg, geom=geom)
 
 
+def _anchor_foot_breach_batch(se, r_i, carried_i, exact_pts, cfg, geom):
+    """SPEC-V5-PERF A3: batched model-anchor foot-ball breach verdicts. For
+    each exact anchor point, the emitted foot ball has radius
+    MODEL_FOOT_FACTOR * r_strut, r_strut = max(r_i, r_load, r_defl,
+    min_shoot_r_mm) -- the SAME formula _make_model_anchor_builder's build_fn
+    computes -- so one sphere_breach call over all anchors reproduces every
+    per-candidate verdict exactly. Returns list[bool] aligned with exact_pts
+    (all False when the oracle has no sphere_breach: legacy/tests)."""
+    n = len(exact_pts)
+    if n == 0 or not hasattr(geom, "sphere_breach"):
+        return [False] * n
+    pts = np.empty((n, 3), float)
+    radii = np.empty(n, float)
+    for k, pt in enumerate(exact_pts):
+        L = float(np.linalg.norm(np.asarray(pt, float) - se))
+        r_load = max(_r_tension_mm(carried_i, cfg), cfg.min_shoot_r_mm)
+        lean = _lean_deg(se, pt)
+        r_defl = placement._shaft_r_for_L(L, cfg, lean)
+        r_strut = max(r_i, r_load, r_defl, cfg.min_shoot_r_mm)
+        pts[k] = np.asarray(pt, float)
+        radii[k] = joints.MODEL_FOOT_FACTOR * r_strut
+    breached, _thick, _poke = geom.sphere_breach(pts, radii)
+    return [bool(b) for b in breached]
+
+
 def _make_model_anchor_builder(forest, i, stub_idx, se, r_i, carried_i, anchor_pt, cfg,
-                               geom=None):
+                               geom=None, breach_precomputed=None):
     def build():
         L = float(np.linalg.norm(anchor_pt - se))
         if L <= 1e-6:
@@ -548,11 +585,18 @@ def _make_model_anchor_builder(forest, i, stub_idx, se, r_i, carried_i, anchor_p
         # candidate. No-op for a non-exact geom (None / cKDTree lacks
         # sphere_breach) -- tests/legacy keep their behavior.
         if geom is not None and hasattr(geom, "sphere_breach"):
-            r_foot_ball = joints.MODEL_FOOT_FACTOR * r_strut
-            breached, _thick, _poke = geom.sphere_breach(
-                np.asarray(anchor_pt, float)[None, :], np.array([r_foot_ball]))
-            if bool(breached[0]):
-                raise _InfeasibleCandidate()
+            if breach_precomputed is not None:
+                # SPEC-V5-PERF A3: verdict from the batched sphere_breach
+                # (_anchor_foot_breach_batch) -- same (anchor_pt, r_foot_ball),
+                # same pure kernel result as the scalar call it replaces.
+                if breach_precomputed:
+                    raise _InfeasibleCandidate()
+            else:
+                r_foot_ball = joints.MODEL_FOOT_FACTOR * r_strut
+                breached, _thick, _poke = geom.sphere_breach(
+                    np.asarray(anchor_pt, float)[None, :], np.array([r_foot_ball]))
+                if bool(breached[0]):
+                    raise _InfeasibleCandidate()
         member = tree.Member(p0=se.copy(), p1=anchor_pt.copy(), r0=r_i, r1=r_strut,
                               kind="strut", owner=("contact", i), embed_end="p1",
                               carried_mm2=carried_i)
