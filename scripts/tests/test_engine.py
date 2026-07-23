@@ -40,8 +40,16 @@ def test_engine_runs_end_to_end_on_table_fixture(table_mesh, cfg):
     # scale run, which additionally depends on the parallel p6-routing
     # workstream).
     assert result["verify"]["uncovered_island_births"] == [], result["verify"]
-    # regression tripwire only: composed-engine baseline ~10.2s (2026-07-22); Craig's ruling — never trade correctness/resin for speed
-    assert result["log"]["t_total"] < 20.0
+    # regression tripwire only, per Craig's correctness-over-speed ruling
+    # (never trade correctness/resin for speed): pre-v5 cloud-based
+    # composed-engine baseline was ~10.2s (2026-07-22). v5-geom-core swap
+    # steps 1+2 (exact clearance + exact model anchors, SPEC-V5-GEOM secs
+    # 2.1/2.2/2.3) measure ~19.5-20.1s on this machine -- real geometry
+    # work costs real time; re-baselined here (not tightened) with wide
+    # headroom since the table fixture sat flaky right at the old 20.0s
+    # pin (a coin flip, not a regression). Step 3 (perception/load-
+    # partition swap) may move this again; re-measure, don't guess.
+    assert result["log"]["t_total"] < 30.0
 
 
 def test_engine_insertion_accounting_exact(table_mesh, cfg):
@@ -113,8 +121,16 @@ def test_engine_supports_toe_minima_directly(toed_slab_mesh, cfg):
 
 def test_engine_wall_time_pin_on_table(table_mesh, cfg):
     result = engine.run(table_mesh, cfg)
-    # regression tripwire only: composed-engine baseline ~10.2s (2026-07-22); Craig's ruling — never trade correctness/resin for speed
-    assert result["log"]["t_total"] < 20.0
+    # regression tripwire only, per Craig's correctness-over-speed ruling
+    # (never trade correctness/resin for speed): pre-v5 cloud-based
+    # composed-engine baseline was ~10.2s (2026-07-22). v5-geom-core swap
+    # steps 1+2 (exact clearance + exact model anchors, SPEC-V5-GEOM secs
+    # 2.1/2.2/2.3) measure ~19.5-20.1s on this machine -- real geometry
+    # work costs real time; re-baselined here (not tightened) with wide
+    # headroom since the table fixture sat flaky right at the old 20.0s
+    # pin (a coin flip, not a regression). Step 3 (perception/load-
+    # partition swap) may move this again; re-measure, don't guess.
+    assert result["log"]["t_total"] < 30.0
 
 
 def test_engine_construct_is_deterministic_despite_global_rng_state(table_mesh, cfg):

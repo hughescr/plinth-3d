@@ -318,7 +318,8 @@ def _candidate_builders(forest, i, stub_idx, se, r_i, carried_i, contacts, tip_r
                          sample_points, sample_delicacy, query_fn):
     yield from _plate_descent_builders(forest, i, stub_idx, se, r_i, carried_i, plate_z, cfg)
     yield from _model_anchor_builders(forest, i, stub_idx, se, r_i, carried_i,
-                                       sample_points, sample_delicacy, query_fn, cfg)
+                                       sample_points, sample_delicacy, query_fn, cfg,
+                                       geom=surface_tree)
     yield from _bifurcation_builders(forest, i, stub_idx, se, r_i, carried_i,
                                       plate_z, cfg, kdc)
 
@@ -405,7 +406,7 @@ def _plate_descent_builders(forest, i, stub_idx, se, r_i, carried_i, plate_z, cf
 
 # ---------------------------------------------------------- (b) model anchor --
 def _model_anchor_builders(forest, i, stub_idx, se, r_i, carried_i,
-                            sample_points, sample_delicacy, query_fn, cfg):
+                            sample_points, sample_delicacy, query_fn, cfg, geom=None):
     """BUG 1 fix: yield one build_fn per cone-pre-filtered candidate anchor
     (struts.find_model_anchor_candidates, sorted nearest-first, capped
     ~40) instead of committing to a single globally-nearest point. Each
@@ -416,12 +417,50 @@ def _model_anchor_builders(forest, i, stub_idx, se, r_i, carried_i,
     check OR fails real clearance (e.g. its straight-line path clips
     other model geometry) is simply passed over in favor of the next one,
     rather than silently killing the whole model-anchor option for this
-    contact."""
+    contact.
+
+    v5 exact-anchor swap (SPEC-V5-GEOM sec 2.3): `sample_points` is now
+    the caller's exterior-face-centroid pool (perception.exterior_anchor_
+    pool), not a seeded cloud -- struts.find_model_anchor_candidates
+    itself is UNCHANGED, it just scores a different, exact-on-surface
+    pool. When `geom` is a surface-EXACT oracle (duck-typed on
+    `.cast_rays`), each surviving candidate is additionally made EXACT: a
+    ray is cast from se toward the candidate; the anchor snaps to the
+    FIRST crossing whose hit face is exterior (t in (0, 1+eps]) -- the
+    strut foot lands on the TRUE surface intersection along that
+    direction (which can sit nearer than the candidate centroid itself,
+    if something else is in the way), not merely at a pool point. A
+    candidate with no exterior hit along its own direction is discarded
+    (SPEC: "no hit => candidate discarded" -- the builder-side half of
+    the census's ball-breach fix; a thin-twig anchor a ball would
+    breach is exactly the class this can also reject when its direction
+    only grazes the model). `geom=None` (legacy / unit tests with a bare
+    point pool) keeps the candidate point verbatim -- zero behavior
+    change."""
     if sample_points is None or sample_delicacy is None:
         return
     contact = dict(position=se)
     candidates = struts.find_model_anchor_candidates(contact, sample_points,
                                                        sample_delicacy, cfg)
+    if not candidates:
+        return
+    if geom is not None and hasattr(geom, "cast_rays"):
+        ext = geom.exterior_face_mask()
+        origins = np.broadcast_to(se, (len(candidates), 3))
+        dirs = np.array([np.asarray(c[0], float) - se for c in candidates], dtype=float)
+        hits = geom.cast_rays(origins, dirs, t_max=1.0)
+        for (anchor_pt, _anchor_delicacy, _len), (ts, faces) in zip(candidates, hits):
+            if len(ts) == 0:
+                continue
+            ext_sel = ext[faces]
+            if not ext_sel.any():
+                continue
+            j = int(np.nonzero(ext_sel)[0][0])  # ts sorted ascending -> first exterior hit
+            t_hit = float(ts[j])
+            exact_pt = se + t_hit * (np.asarray(anchor_pt, float) - se)
+            yield _make_model_anchor_builder(forest, i, stub_idx, se, r_i, carried_i,
+                                              exact_pt, cfg)
+        return
     for anchor_pt, _anchor_delicacy, _len in candidates:
         yield _make_model_anchor_builder(forest, i, stub_idx, se, r_i, carried_i,
                                           np.asarray(anchor_pt, float), cfg)

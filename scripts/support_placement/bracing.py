@@ -758,11 +758,47 @@ def _find_model_rung_anchors(forest, surface_tree, mi, z, cfg, limit=6):
     single-candidate version gave up entirely if the ONE nearest anchor
     failed the caller's length floor or clearance, even when a perfectly
     good next-nearest anchor was right there. Returning the whole
-    ordered shortlist lets the caller retry deterministically instead."""
+    ordered shortlist lets the caller retry deterministically instead.
+
+    v5 exact-anchor swap (SPEC-V5-GEOM sec 2.3): when `surface_tree` is a
+    surface-EXACT oracle (duck-typed on `.exterior_face_mask` -- callers
+    thread `geom` through this same parameter, see _place_one_rung), the
+    candidate pool becomes exterior-face centroids (same distance/z mask
+    as the legacy pool below), each SNAPPED to the exact surface via
+    geom.project and kept only if its projection stays in the z-band.
+    Ordering (distance, index) preserved for determinism -- `index` is
+    the exterior face index. Falls back to the legacy `surface_tree.data`
+    sampled-cloud pool verbatim for a plain cKDTree (tests/legacy)."""
     if surface_tree is None:
         return []
     M = forest.members[mi]
     p_M_z = _axis_point_at_z(M, z)
+    if hasattr(surface_tree, "exterior_face_mask"):
+        geom = surface_tree
+        ext = geom.exterior_face_mask()
+        face_idx = np.nonzero(ext)[0]
+        if face_idx.size == 0:
+            return []
+        pts = geom.centroids[face_idx]
+        dist = np.linalg.norm(pts - p_M_z[None, :], axis=1)
+        anchor_z = pts[:, 2]
+        mask = (dist <= cfg.model_brace_max_len_mm + 1e-9) & (np.abs(anchor_z - z) <= 0.75 + 1e-9)
+        idxs = np.nonzero(mask)[0]
+        if idxs.size == 0:
+            return []
+        order = idxs[np.lexsort((face_idx[idxs], dist[idxs]))]
+        out = []
+        for i in order:
+            cand = pts[int(i)]
+            _d, cp, _ti, _fn = geom.project(cand)
+            if abs(float(cp[2]) - z) > 0.75 + 1e-9:
+                continue
+            p0 = _axis_point_at_z(M, float(cp[2]))
+            p1 = np.array(cp, dtype=float)
+            out.append((p0, p1))
+            if len(out) >= limit:
+                break
+        return out
     pts = np.asarray(surface_tree.data, dtype=float)
     if pts.size == 0:
         return []
@@ -904,7 +940,8 @@ def _place_one_rung(forest, surface_tree, cfg, mi, z, k, counters, reach_tiers=N
                 if placed is not None:
                     return [(idx, "brace") for idx in placed]
 
-    for p0, p1 in _find_model_rung_anchors(forest, surface_tree, mi, z, cfg):
+    for p0, p1 in _find_model_rung_anchors(
+            forest, (geom if geom is not None else surface_tree), mi, z, cfg):
         length = float(np.linalg.norm(p1 - p0))
         if not (1.0 - 1e-9 <= length <= cfg.model_brace_max_len_mm + 1e-9):
             continue

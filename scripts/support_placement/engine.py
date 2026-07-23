@@ -17,13 +17,22 @@ from . import transient, bracing
 from .geometry_exact import ExactSurface
 
 
-def prepare(mesh, cfg, log=None):
+def prepare(mesh, cfg, log=None, geom=None):
     """Stage 1 of the pipeline: everything that depends only on the mesh.
-    Returns a picklable dict (no KDTree -- rebuild surface_tree per
-    process with routing.build_surface_tree): islands, minima,
-    island_births, contacts, plate_z, sample_points, sample_delicacy, log.
-    Extracted from run() so Treant-scale runs can checkpoint between
-    bounded foreground calls; run() remains the canonical composition."""
+    Returns a picklable dict (no KDTree/ExactSurface -- rebuild per
+    process with routing.build_surface_tree / ExactSurface(mesh)):
+    islands, minima, island_births, contacts, plate_z, sample_points,
+    sample_delicacy, log. Extracted from run() so Treant-scale runs can
+    checkpoint between bounded foreground calls; run() remains the
+    canonical composition.
+
+    `geom` (v5, SPEC-V5-GEOM sec 2.3, optional): when supplied (a
+    surface-EXACT oracle, NOT stored in the returned dict -- it is only
+    used here to build sample_points/sample_delicacy), the model-anchor
+    candidate pool becomes deterministic exterior-face centroids instead
+    of delicacy_field's seeded sample cloud (perception.exterior_anchor_
+    pool). Callers that omit it (unit tests / legacy) get the v4 pool
+    verbatim, unchanged."""
     log = log if log is not None else {}
     t0 = time.time()
 
@@ -66,7 +75,7 @@ def prepare(mesh, cfg, log=None):
     log["island_birth_contacts_added"] = n_birth_added
 
     plate_z = float(mesh.bounds[0][2]) - cfg.lift_mm
-    sample_points, _sn, sample_delicacy, _q = perception.delicacy_field(mesh, cfg)
+    sample_points, sample_delicacy = perception.exterior_anchor_pool(mesh, geom, cfg)
     log["t_delicacy"] = round(time.time() - t0, 2)
     return dict(islands=islands, minima=minima, island_births=island_births,
                 contacts=contacts, plate_z=plate_z, sample_points=sample_points,
@@ -219,7 +228,19 @@ def run(mesh, cfg, log=None):
     log = log if log is not None else {}
     t0 = time.time()
 
-    pre = prepare(mesh, cfg, log)
+    # v5 geometry core (SPEC-V5-GEOM): the surface-EXACT oracle, built
+    # FIRST (ahead of prepare()) so prepare()'s own model-anchor pool
+    # (SPEC sec 2.3) can already be exterior-face centroids rather than
+    # a seeded cloud -- prepare() no longer has a cheaper legacy path to
+    # fall back to once geom exists, so this pays the ExactSurface build
+    # cost even on a mesh that turns out to have zero contacts; that
+    # build is seconds-scale (sec 1) and never the dominant cost here.
+    # Every load-bearing clearance/anchor decision downstream consults
+    # the true triangles via this, not the sampled cloud.
+    geom = ExactSurface(mesh)
+    log["t_geom_build"] = round(time.time() - t0, 2)
+
+    pre = prepare(mesh, cfg, log, geom=geom)
     islands, minima, contacts = pre["islands"], pre["minima"], pre["contacts"]
     island_births = pre["island_births"]
     plate_z = pre["plate_z"]
@@ -247,17 +268,11 @@ def run(mesh, cfg, log=None):
     # routing.build_surface_tree's docstring). Tighter sample than the
     # default: every no-intersection guarantee in this engine rides on
     # this tree, so keep its approximation error small against
-    # standoff_mm.
+    # standoff_mm. Kept alive for the not-yet-migrated consumers
+    # (connectivity/removal diagnostics -- SPEC step 3); model anchors
+    # (this step) and clearance (step 1) no longer read it.
     surface_tree = routing.build_surface_tree(mesh, pitch_mm=0.3, max_points=400000)
     log["t_surface_tree"] = round(time.time() - t0, 2)
-    # v5 geometry core (SPEC-V5-GEOM): the surface-EXACT oracle. Every
-    # load-bearing clearance decision (Forest.revalidate + verify's
-    # independent gate + ball breach) now consults the true triangles via
-    # this, not the sampled cloud. surface_tree stays for the not-yet-
-    # migrated consumers (bracing model-rung anchors, connectivity/removal
-    # diagnostics -- SPEC steps 2/3).
-    geom = ExactSurface(mesh)
-    log["t_geom_build"] = round(time.time() - t0, 2)
 
     forest = members = balls = report = carried = tip_r = unrouted = None
     max_fix_passes = 2

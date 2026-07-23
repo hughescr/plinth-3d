@@ -169,7 +169,8 @@ def _slim_ancestors(forest, start_idx, removed_carried_mm2, cfg):
 
 
 def _reattach_candidate_builders(forest, root_idx, se, r_i, carried_root, plate_z,
-                                  sample_points, sample_delicacy, cfg, kdc, exclude):
+                                  sample_points, sample_delicacy, cfg, kdc, exclude,
+                                  surface_tree=None):
     """Same three candidate families cco._candidate_builders offers a
     fresh terminal (design-v4.md #7: "same candidate machinery as #4"),
     called with `root_idx` standing in for a terminal's stub member --
@@ -215,7 +216,8 @@ def _reattach_candidate_builders(forest, root_idx, se, r_i, carried_root, plate_
     # the model-anchor option for a reattach the way the single-candidate
     # version did.
     yield from cco._model_anchor_builders(forest, root_idx, root_idx, se, r_i, carried_root,
-                                           sample_points, sample_delicacy, None, cfg)
+                                           sample_points, sample_delicacy, None, cfg,
+                                           geom=surface_tree)
     yield from cco._bifurcation_builders(forest, root_idx, root_idx, se, r_i, carried_root,
                                           plate_z, cfg, kdc, exclude=exclude)
 
@@ -269,7 +271,7 @@ def _try_subtree_reattach(forest, root_idx, surface_tree, cfg, kdc, plate_z,
     best_fn, best_vol = None, None
     for build_fn in _reattach_candidate_builders(forest, root_idx, se, r_i, carried_root,
                                                   plate_z, sample_points, sample_delicacy,
-                                                  cfg, kdc, exclude):
+                                                  cfg, kdc, exclude, surface_tree=surface_tree):
         cp2 = forest.checkpoint()
         n0 = len(forest.members)
         try:
@@ -345,7 +347,7 @@ def _try_root_reanchor(forest, root_idx, surface_tree, cfg, kdc, plate_z,
     best_fn, best_vol = None, None
     for build_fn in _reattach_candidate_builders(forest, root_idx, se, r_i, carried_root,
                                                   plate_z, sample_points, sample_delicacy,
-                                                  cfg, kdc, exclude):
+                                                  cfg, kdc, exclude, surface_tree=surface_tree):
         cp2 = forest.checkpoint()
         n0 = len(forest.members)
         try:
@@ -837,12 +839,24 @@ def optimize(forest, mesh, surface_tree, cfg, log=None):
     current total, OR a full sweep accepts nothing, OR the wall-clock cap
     `cfg.rewire_time_cap_s` is hit (logged as `cap_hit`, distinct from
     convergence, so a cutoff reads as budget vs. an actual local optimum).
+
+    `surface_tree` (v5, SPEC-V5-GEOM): kept its pre-v5 name (no big-bang
+    rename, per the spec's naming note) but IS the surface-EXACT oracle
+    in production (engine.py threads `geom` through this parameter for
+    both revalidate's clearance queries and this function's own
+    model-anchor candidate pool, sec 2.1/2.3); a plain cKDTree still
+    works for legacy/unit-test callers via duck-typing at every consumer.
     """
     log = log if log is not None else {}
     t0 = time.time()
     cap_s = cfg.rewire_time_cap_s
     plate_z = float(mesh.bounds[0][2]) - cfg.lift_mm
-    sample_points, _sample_normals, sample_delicacy, _query = perception.delicacy_field(mesh, cfg)
+    # v5 (SPEC-V5-GEOM sec 2.3): model-anchor candidate pool is exterior-
+    # face centroids when `surface_tree` is a surface-EXACT oracle (it is,
+    # in production -- see this function's own docstring on the
+    # surface_tree/geom naming convention); falls back to delicacy_field's
+    # seeded cloud verbatim for a plain cKDTree (tests/legacy).
+    sample_points, sample_delicacy = perception.exterior_anchor_pool(mesh, surface_tree, cfg)
 
     total_vol = _total_volume_ml(forest)
     curve = [(0, total_vol)]

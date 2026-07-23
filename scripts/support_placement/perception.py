@@ -561,3 +561,32 @@ def delicacy_field(mesh, cfg, n_samples=20000, seed=0):
         return w[i]
 
     return points, normals, w, query
+
+
+def exterior_anchor_pool(mesh, geom, cfg):
+    """v5 model-anchor candidate pool (SPEC-V5-GEOM sec 2.3): the point
+    pool struts.find_model_anchor_candidates draws from, and the pool
+    bracing._find_model_rung_anchors' legacy branch reads from -- swapped
+    from delicacy_field's seeded random surface cloud to DETERMINISTIC,
+    seed-free exterior-face centroids (geom.exterior_face_mask()) once a
+    surface-EXACT oracle exists. The former load-bearing role of
+    delicacy_field's own sample cloud as the anchor POSITION pool is
+    retired by this swap (SPEC sec 2.6's inventory note); delicacy_field
+    itself is UNCHANGED and keeps its seed -- its `query` function is
+    reused here purely as a SCORING lookup (weights rank candidate
+    regions, they are not a geometric measurement), consistent with
+    delicacy_field's surviving role everywhere else.
+
+    `geom` is duck-typed on `.exterior_face_mask` (a plain cKDTree, or
+    None, is legacy/test input): callers without an exact oracle fall
+    back to delicacy_field's own points/weights VERBATIM (zero behavior
+    change -- the pre-v5 pool). Returns (points[N,3], delicacy[N]), the
+    same shape contract delicacy_field's 1st/3rd return values have."""
+    points, _normals, weights, query = delicacy_field(mesh, cfg)
+    if geom is None or not hasattr(geom, "exterior_face_mask"):
+        return points, weights
+    ext = geom.exterior_face_mask()
+    cents = geom.centroids[ext]
+    if len(cents) == 0:
+        return cents, np.zeros(0)
+    return cents, query(cents)
