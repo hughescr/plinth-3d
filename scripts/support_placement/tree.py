@@ -169,6 +169,19 @@ class Member:
                 f"r0={self.r0:.3f}, r1={self.r1:.3f}, embed_end={self.embed_end!r})")
 
 
+_VERDICT_CACHE_CAP = 1 << 20   # SPEC-V5-PERF A1 -- per-dict hard cap
+
+
+def _cap_evict(d, cache):
+    """Per-dict hard cap with clear-half (oldest-by-insertion) eviction.
+    Correctness-neutral (SPEC-V5-PERF P4): an evicted entry is simply
+    recomputed by the kernel on its next use -- never a different result."""
+    if len(d) > _VERDICT_CACHE_CAP:
+        for k in list(d.keys())[: len(d) // 2]:
+            del d[k]
+        cache["evictions"] += 1
+
+
 def _get(m, name):
     """Field access that works for either a Member object or a plain dict
     with the same schema (joints.collect_members's downstream consumers
@@ -236,6 +249,10 @@ class Forest:
         self._cp_stack = []
         self._pitch_bound_cache = None   # (surface_tree, pitch_bound_mm) -- see
                                           # _surface_pitch_bound_mm below.
+        self._verdict_cache = None       # SPEC-V5-PERF A1 -- geometry-keyed
+                                          # verdict cache, see _verdict_cache_for.
+                                          # Dropped on pickle (holds a geom ref),
+                                          # exactly like _pitch_bound_cache.
 
     def __getstate__(self):
         """Pickle support (Treant-scale staged runs checkpoint the whole
@@ -251,6 +268,7 @@ class Forest:
         unpickling anyway."""
         state = self.__dict__.copy()
         state["_pitch_bound_cache"] = None
+        state["_verdict_cache"] = None
         return state
 
     def __setstate__(self, state):
@@ -259,6 +277,8 @@ class Forest:
         # quarantined set (staged treant checkpoints): default it empty.
         if not hasattr(self, "quarantined"):
             self.quarantined = set()
+        if not hasattr(self, "_verdict_cache"):
+            self._verdict_cache = None
 
     # ---- construction / topology ----------------------------------
     def add_member(self, member):
@@ -459,6 +479,180 @@ class Forest:
                    for j in range(len(mis))]
         return {mi: per[j] for j, mi in enumerate(mis)}
 
+    # ---- A1 verdict cache (SPEC-V5-PERF sec 2.2) ----------------------
+    def _verdict_cache_for(self, geom, cfg):
+        """The geometry-keyed verdict cache for (this Forest, geom). Rebuilt
+        when geom identity changes (mesh changed -> every content key void).
+        A SupportConfig change on the SAME geom is a HARD failure, not a
+        stale replay: the cache captures a config fingerprint at creation and
+        asserts it every call (SupportConfig is mutable). All keys are CONTENT
+        keys (tobytes snapshots + exact floats), so a rolled-back-and-rebuilt
+        member with identical bytes hits and any mutation is a different key
+        -- there is no invalidation protocol to get wrong (P1/P9)."""
+        fp = (float(cfg.standoff_mm), float(cfg.contact_depth_mm))
+        c = self._verdict_cache
+        if c is not None and c["geom"] is geom:
+            assert c["cfg_fp"] == fp, (
+                "SupportConfig changed mid-run under the A1 verdict cache "
+                f"({c['cfg_fp']} -> {fp}) -- refusing to replay stale verdicts")
+            return c
+        c = dict(geom=geom, cfg_fp=fp, proj={}, parity={}, axis={}, clr={},
+                 hits=0, misses=0, evictions=0)
+        self._verdict_cache = c
+        return c
+
+    def _embed_insets_cached(self, cache, geom, cfg, mis):
+        """SPEC-V5-PERF A3 (embed-inset batch) + A1 (project cache): the
+        sanctioned-embed insets for every member in `mis`, with ALL project
+        queries in ONE batched geom.project call over the cache MISSES (the
+        per-member scalar geom.project in _embed_inset_arc is gone). Returns
+        {mi: (inset0, inset1)}. Values are bit-identical to _embed_inset_arc:
+        the projected normal is a pure function of the point (kernel batch ==
+        scalar), and the cosang/inset arithmetic is unchanged."""
+        insets = {mi: (0.0, 0.0) for mi in mis}
+        jobs = []  # (mi, end_idx, p_embed, u_out, r_end, key)
+        for mi in mis:
+            m = self.members[mi]
+            p0 = np.asarray(m.p0, float)
+            p1 = np.asarray(m.p1, float)
+            L = float(np.linalg.norm(p1 - p0))
+            if L < 1e-9:
+                continue
+            if m.embed_end == "p0":
+                jobs.append((mi, 0, p0, (p1 - p0) / L, m.r0, p0.tobytes()))
+            elif m.embed_end == "p1":
+                jobs.append((mi, 1, p1, (p0 - p1) / L, m.r1, p1.tobytes()))
+        if not jobs:
+            return insets
+        pc = cache["proj"] if cache is not None else None
+        normals = {}
+        miss_pts, miss_keys = [], []
+        for (_mi, _ei, pe, _u, _r, key) in jobs:
+            if pc is not None and key in pc:
+                normals[key] = pc[key]
+                cache["hits"] += 1
+            elif key not in normals:
+                miss_keys.append(key)
+                miss_pts.append(pe)
+        if miss_pts:
+            _d, _cp, _ti, ns = geom.project(np.array(miss_pts))
+            for j, key in enumerate(miss_keys):
+                n = np.asarray(ns[j], float)
+                normals[key] = n
+                if pc is not None:
+                    pc[key] = n
+                    cache["misses"] += 1
+            if pc is not None:
+                _cap_evict(pc, cache)
+        for (mi, ei, _pe, u_out, r_end, key) in jobs:
+            n = normals[key]
+            nn = float(np.linalg.norm(n))
+            if nn < 1e-9:
+                inset = cfg.contact_depth_mm + r_end + cfg.standoff_mm
+            else:
+                cosang = max(abs(float(np.dot(u_out, n / nn))), 0.5)  # 60deg floor
+                inset = cfg.contact_depth_mm + (r_end + cfg.standoff_mm) / cosang
+            pair = list(insets[mi])
+            pair[ei] = inset
+            insets[mi] = (pair[0], pair[1])
+        return insets
+
+    def _inside_cached(self, cache, geom, pts):
+        """geom.inside over `pts` (an (n,3) array), per-point content-cached;
+        only cache-miss points enter the batched geom.inside call. Bit-identical
+        (inside is a pure per-point parity test against the immutable mesh)."""
+        n = len(pts)
+        out = np.empty(n, dtype=bool)
+        pc = cache["parity"] if cache is not None else None
+        miss_i, miss_pts, miss_keys = [], [], []
+        for i in range(n):
+            key = pts[i].tobytes()
+            if pc is not None and key in pc:
+                out[i] = pc[key]
+                cache["hits"] += 1
+            else:
+                miss_i.append(i)
+                miss_pts.append(pts[i])
+                miss_keys.append(key)
+        if miss_pts:
+            flags = geom.inside(np.array(miss_pts))
+            for j, i in enumerate(miss_i):
+                b = bool(flags[j])
+                out[i] = b
+                if pc is not None:
+                    pc[miss_keys[j]] = b
+                    cache["misses"] += 1
+            if pc is not None:
+                _cap_evict(pc, cache)
+        return out
+
+    def _seg_clearance_cached(self, cache, geom, cfg, mis, insets):
+        """Batched segment_clearance over `mis`, per-member content-cached on
+        (p0, p1, r0, r1, inset0, inset1). Only misses enter the kernel batch;
+        cached (clr, argp) replay byte-identically (pure function of the key +
+        immutable mesh). Returns {mi: clr}, {mi: argp}."""
+        clr_by, argp_by = {}, {}
+        cc = cache["clr"] if cache is not None else None
+        miss = []
+        for mi in mis:
+            m = self.members[mi]
+            i0, i1 = insets[mi]
+            key = (m.p0.tobytes(), m.p1.tobytes(), float(m.r0), float(m.r1),
+                   float(i0), float(i1))
+            if cc is not None and key in cc:
+                clr_by[mi], argp_by[mi] = cc[key]
+                cache["hits"] += 1
+            else:
+                miss.append((mi, key))
+        if miss:
+            p0s = np.array([self.members[mi].p0 for mi, _ in miss])
+            p1s = np.array([self.members[mi].p1 for mi, _ in miss])
+            r0s = np.array([self.members[mi].r0 for mi, _ in miss])
+            r1s = np.array([self.members[mi].r1 for mi, _ in miss])
+            i0s = np.array([insets[mi][0] for mi, _ in miss])
+            i1s = np.array([insets[mi][1] for mi, _ in miss])
+            clr, argp = geom.segment_clearance(
+                p0s, p1s, r0s, r1s, cfg.standoff_mm, inset0s=i0s, inset1s=i1s)
+            for k, (mi, key) in enumerate(miss):
+                v_clr = float(clr[k])
+                v_argp = np.asarray(argp[k], float).copy()
+                clr_by[mi] = v_clr
+                argp_by[mi] = v_argp
+                if cc is not None:
+                    cc[key] = (v_clr, v_argp)
+                    cache["misses"] += 1
+            if cc is not None:
+                _cap_evict(cc, cache)
+        return clr_by, argp_by
+
+    def _axis_intervals_cached(self, cache, geom, mis):
+        """Batched penetration_intervals (axis mode) over `mis`, per-member
+        content-cached on (p0, p1) -- radii are unused in axis mode
+        (queries.rs casts only the axis ray for rays="axis"), so the key is
+        the axis alone. Only misses enter the kernel batch. Returns
+        {mi: interval-list}."""
+        result = {}
+        ac = cache["axis"] if cache is not None else None
+        miss = []
+        for mi in mis:
+            m = self.members[mi]
+            key = (m.p0.tobytes(), m.p1.tobytes())
+            if ac is not None and key in ac:
+                result[mi] = ac[key]
+                cache["hits"] += 1
+            else:
+                miss.append((mi, key))
+        if miss:
+            got = self._batch_axis_intervals(geom, self.members, [mi for mi, _ in miss])
+            for mi, key in miss:
+                result[mi] = got[mi]
+                if ac is not None:
+                    ac[key] = got[mi]
+                    cache["misses"] += 1
+            if ac is not None:
+                _cap_evict(ac, cache)
+        return result
+
     def _revalidate_exact(self, geom, cfg):
         """Exact swept-capsule clearance path (SPEC sec 2.1). Non-stub dirty
         members: exact geom.segment_clearance over the non-embed sub-segment
@@ -491,21 +685,29 @@ class Forest:
         dirty = self.dirty_members()
         if not dirty:
             return []
-        seg_mi, p0s, p1s, r0s, r1s, ins0, ins1 = [], [], [], [], [], [], []
+        # SPEC-V5-PERF A1: the geometry-keyed verdict cache. Every kernel query
+        # below (embed-inset projection, stub/midpoint parity, segment
+        # clearance, axis intervals) is a PURE function of member content + the
+        # immutable mesh + the config fingerprint, so a per-content-key cache
+        # replays byte-identically and only cache MISSES enter the (still
+        # batched) kernel calls. `perf_exact_opts_disable` (default False)
+        # bypasses the cache for the exactness-control gate (sec 2.5 gate 4):
+        # cache-on and cache-off must be BIT-IDENTICAL, differing only in
+        # whether the kernel recomputes an already-known verdict.
+        cache = (None if getattr(cfg, "perf_exact_opts_disable", False)
+                 else self._verdict_cache_for(geom, cfg))
+
+        seg_mi = []
         stub_mi = []
         for mi in dirty:
             m = self.members[mi]
             if m.kind == "stub":
                 stub_mi.append(mi)  # standoff-exempt, but gets the interval check below
                 continue
-            i0, i1 = self._embed_inset_arc(geom, m, cfg)
             seg_mi.append(mi)
-            p0s.append(np.asarray(m.p0, float))
-            p1s.append(np.asarray(m.p1, float))
-            r0s.append(m.r0)
-            r1s.append(m.r1)
-            ins0.append(i0)
-            ins1.append(i1)
+        # A3 embed-inset batch + A1 project cache: one batched project over the
+        # seg members' embed endpoints (misses only).
+        seg_inset_pairs = self._embed_insets_cached(cache, geom, cfg, seg_mi)
 
         violations = []
         bad = set()
@@ -536,55 +738,55 @@ class Forest:
         # revalidate loop is the site R1's "no per-element FFI hot loop" proof
         # obligation names.
 
-        # (1) exterior stubs: one batched parity vote over all stub p1s.
+        # (1) exterior stubs: one batched (cached) parity vote over all stub p1s.
         stub_p1_ext = []
         stub_insets = {}
         if stub_mi:
             stub_p1 = np.array([np.asarray(self.members[mi].p1, float) for mi in stub_mi])
-            inside_p1 = geom.inside(stub_p1)
-            for k, mi in enumerate(stub_mi):
-                if bool(inside_p1[k]):
-                    continue
+            inside_p1 = self._inside_cached(cache, geom, stub_p1)
+            ext_stub_mi = [mi for k, mi in enumerate(stub_mi) if not bool(inside_p1[k])]
+            ext_insets = self._embed_insets_cached(cache, geom, cfg, ext_stub_mi)
+            for mi in ext_stub_mi:
                 m = self.members[mi]
-                si0, si1 = self._embed_inset_arc(geom, m, cfg)
+                si0, si1 = ext_insets[mi]
                 L = float(np.linalg.norm(np.asarray(m.p1, float) - np.asarray(m.p0, float)))
                 stub_p1_ext.append(mi)
                 stub_insets[mi] = (si0, si1, L)
 
-        # (2) segment clearances (already ONE batched native call) + belt trigger.
-        clr = argp = None
+        # (2) segment clearances (batched, cached) + belt trigger.
+        clr_by = argp_by = None
         seg_trigger = []
         seg_insets = {}
         if seg_mi:
-            clr, argp = geom.segment_clearance(
-                np.array(p0s), np.array(p1s), np.array(r0s), np.array(r1s),
-                cfg.standoff_mm, inset0s=np.array(ins0), inset1s=np.array(ins1))
+            clr_by, argp_by = self._seg_clearance_cached(
+                cache, geom, cfg, seg_mi, seg_inset_pairs)
             # midpoint parity vote only where the 0.1 gate did NOT already fire;
-            # batch those into ONE inside() call. (A14: kernel-exact clearance
-            # can sit below 0.1 where the oracle's Tier-1 certificate does not,
-            # which only fires the belt MORE often -- verdict-preserving.)
-            need_mid = [k for k in range(len(seg_mi))
-                        if float(clr[k]) >= 0.0 and float(clr[k]) >= 0.1]
+            # batch those into ONE (cached) inside() call. (A14: kernel-exact
+            # clearance can sit below 0.1 where the oracle's Tier-1 certificate
+            # does not, which only fires the belt MORE often -- verdict-preserving.)
+            need_mid = [mi for mi in seg_mi
+                        if float(clr_by[mi]) >= 0.0 and float(clr_by[mi]) >= 0.1]
             mid_inside = {}
             if need_mid:
-                mids = np.array([0.5 * (np.asarray(self.members[seg_mi[k]].p0, float)
-                                        + np.asarray(self.members[seg_mi[k]].p1, float))
-                                 for k in need_mid])
-                flags = geom.inside(mids)
-                mid_inside = {k: bool(flags[j]) for j, k in enumerate(need_mid)}
-            for k, mi in enumerate(seg_mi):
-                worst = float(clr[k])
+                mids = np.array([0.5 * (np.asarray(self.members[mi].p0, float)
+                                        + np.asarray(self.members[mi].p1, float))
+                                 for mi in need_mid])
+                flags = self._inside_cached(cache, geom, mids)
+                mid_inside = {mi: bool(flags[j]) for j, mi in enumerate(need_mid)}
+            for mi in seg_mi:
+                worst = float(clr_by[mi])
                 if worst < 0:
                     continue  # hard clearance violation; no interval belt
-                if worst < 0.1 or mid_inside.get(k, False):
+                if worst < 0.1 or mid_inside.get(mi, False):
                     m = self.members[mi]
                     L = float(np.linalg.norm(np.asarray(m.p1, float) - np.asarray(m.p0, float)))
+                    i0, i1 = seg_inset_pairs[mi]
                     seg_trigger.append(mi)
-                    seg_insets[mi] = (ins0[k], ins1[k], L)
+                    seg_insets[mi] = (i0, i1, L)
 
-        # (3) ONE native penetration_intervals_batch over every interval job.
-        intervals_by_mi = self._batch_axis_intervals(
-            geom, self.members, stub_p1_ext + seg_trigger)
+        # (3) ONE (cached) penetration_intervals_batch over every interval job.
+        intervals_by_mi = self._axis_intervals_cached(
+            cache, geom, stub_p1_ext + seg_trigger)
 
         # (4) verdict assembly -- stub violations first, then segment violations,
         #     preserving the pre-refactor append order exactly.
@@ -595,11 +797,11 @@ class Forest:
                 violations.append(dict(member_idx=mi, min_clearance_mm=0.0,
                                        at_point=None))
         if seg_mi:
-            for k, mi in enumerate(seg_mi):
-                worst = float(clr[k])
+            for mi in seg_mi:
+                worst = float(clr_by[mi])
                 if worst < 0:
                     bad.add(mi)
-                    ap = argp[k]
+                    ap = argp_by[mi]
                     violations.append(dict(
                         member_idx=mi, min_clearance_mm=worst,
                         at_point=(ap.tolist() if np.all(np.isfinite(ap)) else None)))

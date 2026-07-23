@@ -396,6 +396,39 @@ class SupportConfig:
     # coverage holes (the case v0's "fix pass" existed to patch).
     coverage_radius_factor: float = 1.5
 
+    # ---- SPEC-V5-PERF: construct-stage performance ----
+    # CLASS A (exact-preserving, always on). Debug kill-switch for the
+    # exactness-control gate (sec 2.5 gate 4) and the cache fuzz suite ONLY:
+    # when True, Forest._revalidate_exact bypasses the geometry-keyed verdict
+    # cache (A1) and recomputes every kernel query, so a run with it True vs
+    # False must be BIT-IDENTICAL. Default False (cache ON). Not a tuning knob.
+    perf_exact_opts_disable: bool = False
+
+    # CLASS B approximation levers (SPEC-V5-PERF sec 3). Each defaults OFF
+    # (None) -- a lever trades solution QUALITY (resin ml / support count),
+    # never correctness, and is enabled only after its sec-5.3 measurement row.
+    # B1: candidate beam pruning -- after A2's pricing pass, trial only the k
+    #     cheapest candidates for clearance; if all k fail, honestly unroute.
+    perf_beam_k: int = None
+    # B2: model-anchor candidate cap -- truncate the ~40-candidate anchor list
+    #     to the nearest `cap` before ray-exactification/builder creation.
+    perf_anchor_cap: int = None
+    # B3: coarser demand seeding -- multiply placement sampling target spacing
+    #     by f > 1 in prepare (SEEDING ONLY; the coverage gate's
+    #     target_spacing_mm is untouched, so coverage itself never loosens).
+    perf_seed_spacing_factor: float = None
+    # B4: convergence caps -- (engine_fix_passes, brace_internal_iters). Can
+    #     leave residual uncovered islands, so it is gated by a mechanical
+    #     emission gate on verify.ok (perf_gate_emit_on_verify).
+    perf_fix_iter_caps: tuple = None
+    # B4 companion: refuse to treat a run as emittable when verify.ok is False
+    #     (required for B4 acceptance; harmless/off by default).
+    perf_gate_emit_on_verify: bool = False
+    # B5: deterministic rewire budget -- replace rewire's wall-clock cap with a
+    #     move-evaluation (checkpoint/build/revalidate/rollback) budget; the
+    #     precondition for any scale-level bit-compare that includes rewire.
+    perf_rewire_work_budget: int = None
+
     def notes(self):
         """Flags for the caller: which constants are physics-derived vs
         rough estimates pending calibration. Surface this in run logs so a
