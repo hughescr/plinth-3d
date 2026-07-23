@@ -11,6 +11,7 @@ module map.
 """
 import contextlib
 import sys
+import threading
 import time
 import numpy as np
 
@@ -41,6 +42,43 @@ def _stage(log, name, run_t0):
         print(f"[v5] << {name} dt={now - t_stage:.1f}s t=+{now - run_t0:.1f}s",
               file=sys.stderr, flush=True)
         log[f"t_{name}"] = round(now - run_t0, 2)
+
+
+class _ProgressCell:
+    """SPEC-V5-PERF sec 4: a single monotonic int cell, written by the compute
+    thread (cco.build) after each insertion, read by the ticker thread. CPython
+    int assignment/read cannot tear, so no lock is needed for a single writer +
+    reader-only observer."""
+    __slots__ = ("n",)
+
+    def __init__(self):
+        self.n = 0
+
+
+@contextlib.contextmanager
+def _ticker(label, get_n, total, interval=5.0):
+    """SPEC-V5-PERF sec 4 (owner-mandated, task #17): a daemon thread that
+    prints ``[v5] .. {label} {n}/{total} contacts`` to stderr every `interval`
+    seconds while the wrapped stage runs, so a full-scale construct is never a
+    heartbeat-only black box. ALL timing lives in the thread's
+    ``Event.wait(interval)``; the compute path only advances the counter
+    get_n() reads (no kernel calls, no allocation), so output is byte-identical
+    with the ticker on or off. Event-signaled shutdown + join in finally
+    (never leaves a dangling thread, even on exception -- risk P7)."""
+    stop = threading.Event()
+
+    def _run():
+        while not stop.wait(interval):
+            print(f"[v5] .. {label} {get_n()}/{total} contacts",
+                  file=sys.stderr, flush=True)
+
+    t = threading.Thread(target=_run, name=f"ticker-{label}", daemon=True)
+    t.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        t.join()
 
 
 def prepare(mesh, cfg, log=None, geom=None):
@@ -108,7 +146,8 @@ def prepare(mesh, cfg, log=None, geom=None):
                 sample_delicacy=sample_delicacy, log=log)
 
 
-def construct(mesh, pre, surface_tree, cfg, log=None, limit_contacts=None, geom=None):
+def construct(mesh, pre, surface_tree, cfg, log=None, limit_contacts=None, geom=None,
+              progress=None):
     """Stage 2: load partition + tip sizing + cco.build (NO rewiring --
     the caller owns rewire.optimize so its wall budget is its own).
     `limit_contacts` truncates the contact list for profiling only.
@@ -125,7 +164,8 @@ def construct(mesh, pre, surface_tree, cfg, log=None, limit_contacts=None, geom=
     forest, unrouted = cco.build(mesh, contacts, tip_r, carried, minima_flags,
                                   pre["plate_z"], oracle, cfg,
                                   sample_points=pre["sample_points"],
-                                  sample_delicacy=pre["sample_delicacy"])
+                                  sample_delicacy=pre["sample_delicacy"],
+                                  progress=progress)
     tree.assert_all_certified(forest)
     # SPEC-V5-PERF A0b: surface the quarantined (condemned-stub) contacts and
     # their carried surface area in the run log so the census cross-check
@@ -327,8 +367,10 @@ def run(mesh, cfg, log=None):
     for fix_pass in range(max_fix_passes):
         pre["contacts"] = contacts  # fix-pass additions feed back in
         with _stage(log, f"construct[p{fix_pass}]", t0):
-            forest, unrouted, carried, tip_r, contacts = construct(
-                mesh, pre, surface_tree, cfg, log=log, geom=geom)
+            _prog = _ProgressCell()
+            with _ticker(f"construct[p{fix_pass}]", lambda: _prog.n, len(pre["contacts"])):
+                forest, unrouted, carried, tip_r, contacts = construct(
+                    mesh, pre, surface_tree, cfg, log=log, geom=geom, progress=_prog)
         # Phase 3 (design-v4.md #7): topology mutation runs AFTER
         # insertion, BEFORE verify -- rewire.optimize mutates `forest` in
         # place (subtree reattach / junction slide / twig prune), each

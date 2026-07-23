@@ -155,10 +155,18 @@ def brace_estimate_ml(L2, cfg):
 
 # ---------------------------------------------------------------- builder --
 def build(mesh, contacts, tip_r, carried, minima_flags, plate_z, surface_tree, cfg,
-          sample_points=None, sample_delicacy=None, query_fn=None):
+          sample_points=None, sample_delicacy=None, query_fn=None, progress=None):
     """Insert every contact's terminal into a Forest via CCO. Returns
     (forest, unrouted) where unrouted is a sorted list of contact indices
-    that found no legal candidate (honest failure, design-v4.md #4)."""
+    that found no legal candidate (honest failure, design-v4.md #4).
+
+    `progress` (SPEC-V5-PERF sec 4, optional): a single-attribute cell whose
+    `.n` this loop advances to the running inserted-contact count after each
+    insertion, for the off-hot-path progress ticker to READ from a separate
+    thread. The ONLY compute-path effect is a monotonic int assignment that
+    already-existing `n_inserted` mirrors -- no kernel calls, no allocation --
+    so a build with `progress` set produces byte-identical forest output to one
+    with `progress=None` (test: test_perf_ticker.py)."""
     forest = tree.Forest()
     n = len(contacts)
     stub_ends = [None] * n
@@ -221,6 +229,8 @@ def build(mesh, contacts, tip_r, carried, minima_flags, plate_z, surface_tree, c
             if not ok:
                 unrouted.append(i)
         n_inserted += 1
+        if progress is not None:
+            progress.n = n_inserted   # single-writer int; ticker thread reads
         if n_inserted % KDTREE_REBUILD_EVERY == 0:
             kdc.rebuild(forest)
     return forest, sorted(unrouted)
