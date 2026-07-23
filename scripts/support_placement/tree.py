@@ -28,6 +28,14 @@ import numpy as np
 _POS_FIELDS = ("p0", "p1")
 _R_FIELDS = ("r0", "r1")
 _TRACKED_FIELDS = _POS_FIELDS + _R_FIELDS
+# SPEC-V5-PERF A1a: embed_end and kind SELECT the validation predicate (which
+# end, if any, gets a radius-dependent sanctioned-embed inset; stub vs
+# non-stub semantics). Mutating either changes what a re-check would compute,
+# so both are invalidating writes -- they bump geom_version and void the
+# radius-decrease certificate escape hatch, exactly like a position write.
+# (Today embed_end's only mutation, cco bifurcation, rides a coincident p1
+# write; this makes soundness an invariant, not a call-site accident.)
+_INVALIDATING_FIELDS = ("embed_end", "kind")
 # carried_mm2 is transactionally snapshotted (Phase 3 fix -- see __setattr__)
 # but is NOT a certificate field: it doesn't affect swept geometry, so a
 # carried_mm2-only change must not bump geom_version/void cert_radius the
@@ -93,6 +101,30 @@ class Member:
                                 object.__getattribute__(self, "geom_version") + 1)
             if name in _POS_FIELDS:
                 object.__setattr__(self, "cert_radius", -1.0)
+            elif object.__getattribute__(self, "embed_end") is not None:
+                # SPEC-V5-PERF A1a: on an embed_end member the sanctioned inset
+                # is radius-dependent (contact_depth + (r_end+standoff)/cosang),
+                # so a radius DECREASE shrinks the inset and GROWS the checked
+                # sub-segment/interval window -- geometry that was never checked
+                # becomes load-bearing. The scalar "checked fat covers thin"
+                # escape hatch (max(r0,r1) <= cert_radius) is therefore UNSOUND
+                # for embed members; void the certificate on ANY radius write,
+                # not only increases. Non-embed members (embed_end is None) keep
+                # the exact, sound fast path untouched (insets identically 0 ->
+                # domain fixed, envelope = max(r0,r1); Appendix A R1).
+                object.__setattr__(self, "cert_radius", -1.0)
+        elif name in _INVALIDATING_FIELDS:
+            # SPEC-V5-PERF A1a: embed_end / kind select the predicate; a write
+            # voids the certificate and bumps geom_version (also snapshotting
+            # for rollback), even without a coincident position/radius write.
+            forest = object.__getattribute__(self, "_forest")
+            idx = object.__getattribute__(self, "_idx")
+            if forest is not None and idx is not None:
+                forest._touch_member(idx)
+            object.__setattr__(self, name, value)
+            object.__setattr__(self, "geom_version",
+                                object.__getattribute__(self, "geom_version") + 1)
+            object.__setattr__(self, "cert_radius", -1.0)
         elif name in _SNAPSHOT_ONLY_FIELDS:
             # Phase 3 fix (verifier-caught corruption): cco._propagate_
             # murray/rewire._slim_ancestors always set carried_mm2 BEFORE
