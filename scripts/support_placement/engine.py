@@ -127,6 +127,21 @@ def construct(mesh, pre, surface_tree, cfg, log=None, limit_contacts=None, geom=
                                   sample_points=pre["sample_points"],
                                   sample_delicacy=pre["sample_delicacy"])
     tree.assert_all_certified(forest)
+    # SPEC-V5-PERF A0b: surface the quarantined (condemned-stub) contacts and
+    # their carried surface area in the run log so the census cross-check
+    # (SPEC sec 0/2.5.5) can rule on each -- the load these contacts would
+    # have carried is declared, accepted QUALITY loss, not silently dropped.
+    if forest.quarantined:
+        stub_of = {idx: i for i, idx in forest.terminal_of.items()}
+        q = sorted((stub_of[si], si, float(carried[stub_of[si]]))
+                   for si in forest.quarantined if si in stub_of)
+        log["quarantined_contacts"] = [
+            dict(contact=ci, stub_member=si, carried_mm2=round(area, 4))
+            for ci, si, area in q]
+        log["n_quarantined"] = len(q)
+        print(f"[v5] .. construct quarantined {len(q)} condemned-stub contact(s), "
+              f"carried_mm2 total={sum(a for _, _, a in q):.2f}",
+              file=sys.stderr, flush=True)
     return forest, unrouted, carried, tip_r, contacts
 
 

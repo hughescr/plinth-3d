@@ -182,15 +182,44 @@ def build(mesh, contacts, tip_r, carried, minima_flags, plate_z, surface_tree, c
     order2 = sorted((i for i in range(n) if not minima_flags[i]),
                      key=lambda i: (-float(stub_ends[i][2]), -float(carried[i]), i))
 
+    # SPEC-V5-PERF A0b -- quarantine pre-pass. Every stub's geometry is fixed
+    # at creation (cco.build built them all above), so ONE revalidate over the
+    # all-stubs forest finds the persistent through-transit violators once and
+    # for all: a contact whose OWN stub welds through a thin feature is
+    # unroutable-by-construction under the stub rule (any support built on it
+    # would run through the feature). Mark those contacts unrouted immediately
+    # and skip their insertion, rather than letting each condemned stub sit
+    # dirty and poison every candidate of every OTHER contact on every one of
+    # ~120 revalidates/insertion (the sec-0 poisoned loop). This same first
+    # revalidate also certifies every clean stub -- exactly what the first
+    # _insert_terminal trial's revalidate did in the baseline (certificate
+    # issuance on untouched members persists through rollback, tree.py R4), so
+    # a run with ZERO persistent violators (both fixtures, any clean mesh) is
+    # bit-identical: quarantined stays empty and no contact is skipped. Only
+    # the exact oracle runs the stub through-transit test (the sampled/legacy
+    # path skips stubs entirely, so this is a harmless no-op there).
+    quarantined_contacts = set()
+    stub_of = {idx: i for i, idx in forest.terminal_of.items()}
+    pre_violations = forest.revalidate(surface_tree, cfg)
+    for v in pre_violations:
+        si = v["member_idx"]
+        ci = stub_of.get(si)
+        if ci is not None:
+            forest.mark_quarantined(si)
+            quarantined_contacts.add(ci)
+
     kdc = _KDCache()
     unrouted = []
     n_inserted = 0
     for i in order1 + order2:
-        ok = _insert_terminal(forest, i, contacts, tip_r, carried, stub_ends, cfg,
-                               plate_z, surface_tree, mesh, kdc,
-                               sample_points, sample_delicacy, query_fn)
-        if not ok:
+        if i in quarantined_contacts:
             unrouted.append(i)
+        else:
+            ok = _insert_terminal(forest, i, contacts, tip_r, carried, stub_ends, cfg,
+                                   plate_z, surface_tree, mesh, kdc,
+                                   sample_points, sample_delicacy, query_fn)
+            if not ok:
+                unrouted.append(i)
         n_inserted += 1
         if n_inserted % KDTREE_REBUILD_EVERY == 0:
             kdc.rebuild(forest)
@@ -277,6 +306,32 @@ def _insert_terminal(forest, i, contacts, tip_r, carried, stub_ends, cfg,
         forest, i, stub_idx, se, r_i, carried_i, contacts, tip_r, carried,
         plate_z, surface_tree, mesh, cfg, kdc, sample_points, sample_delicacy, query_fn))
 
+    # SPEC-V5-PERF A0a -- pre-existing-violation snapshot (the bracing.py:865
+    # SPEC-151-SCOPING pattern, ported and hardened to a geometry-sensitive
+    # key). forest.revalidate is ONE batched re-check over EVERY dirty member,
+    # so a member left persistently violating by an earlier step rides along in
+    # every candidate's violation list and would false-reject candidates that
+    # have nothing to do with it. Snapshot the pre-existing violators BEFORE
+    # any trial and treat a trial as clearance-clean iff it introduces NO
+    # violation outside that snapshot. Key = (member_idx, geom_version), not
+    # bare idx: a trial (e.g. a bifurcation) that MUTATES a pre-existing
+    # violator bumps its geom_version, so a still-violating mutated member is a
+    # NEW violation (not waived) -- filtering by bare idx could conceal a
+    # candidate-caused or -worsened violation. In the healthy regime (A0b has
+    # quarantined the condemned stubs, which dirty_members now excludes) this
+    # snapshot is EMPTY at entry, so the accept/reject decision is identical to
+    # the baseline `if violations` -- bit-identical on any run with no
+    # non-quarantined persistent violator (both fixtures).
+    pre_violators = {(idx, forest.members[idx].geom_version)
+                     for idx in forest.dirty_members()}
+
+    def _new_violations(viols):
+        # geom_versions read while the (possibly trial-created) members still
+        # exist -- MUST be evaluated before rollback truncates the tail.
+        return [v for v in viols
+                if (v["member_idx"], forest.members[v["member_idx"]].geom_version)
+                not in pre_violators]
+
     scored = []
     for build_fn in builders:
         cp = forest.checkpoint()
@@ -286,8 +341,9 @@ def _insert_terminal(forest, i, contacts, tip_r, carried, stub_ends, cfg,
             forest.rollback(cp)
             continue
         violations = forest.revalidate(surface_tree, cfg)
+        new_viol = _new_violations(violations)
         forest.rollback(cp)
-        if violations:
+        if new_viol:
             continue
         scored.append((delta, build_fn))
 
@@ -299,7 +355,7 @@ def _insert_terminal(forest, i, contacts, tip_r, carried, stub_ends, cfg,
     cp = forest.checkpoint()
     best_fn()
     violations = forest.revalidate(surface_tree, cfg)
-    assert not violations, (
+    assert not _new_violations(violations), (
         "candidate re-application produced a different clearance result "
         "(non-determinism in the builder) -- crash over corruption")
     forest.commit(cp)

@@ -176,6 +176,20 @@ class Forest:
                                     # because they carry no tree-topology role (Murray
                                     # conservation and rewire's own move candidates exclude
                                     # `forest.braces` from what they treat as real topology).
+        self.quarantined = set()   # member idx of a contact's OWN stub that is a
+                                    # PERSISTENT through-transit violator (SPEC-V5-PERF
+                                    # A0b): unroutable-by-construction under the stub
+                                    # rule (any support on that stub welds through the
+                                    # feature). Distinct from `dead` (whose contract,
+                                    # mark_dead, requires the caller to have folded the
+                                    # member's geometry/load into a survivor first --
+                                    # quarantine does NOT: the contact is honestly
+                                    # unrouted, its load never redistributed). Excluded
+                                    # from dirty_members (hence revalidate re-checks and
+                                    # assert_all_certified) and from live_member_lists/
+                                    # verify/emission via the same unrouted-stub path.
+                                    # No fixture has one, so it is empty on every
+                                    # fixture run (A0 bit-identity, SPEC-V5-PERF 2.0).
         self.dead = set()          # member idx retired by rewire.py's twig prune (Phase
                                     # 3, design-v4.md #7): the checkpoint/rollback
                                     # protocol is append-only (rollback truncates the
@@ -209,6 +223,10 @@ class Forest:
 
     def __setstate__(self, state):
         self.__dict__.update(state)
+        # Back-compat for Forests pickled before SPEC-V5-PERF A0b added the
+        # quarantined set (staged treant checkpoints): default it empty.
+        if not hasattr(self, "quarantined"):
+            self.quarantined = set()
 
     # ---- construction / topology ----------------------------------
     def add_member(self, member):
@@ -274,8 +292,22 @@ class Forest:
         no longer live, it does not itself touch topology."""
         self.dead.add(idx)
 
+    # ---- quarantine (SPEC-V5-PERF A0b) --------------------------------
+    def mark_quarantined(self, idx):
+        """Record that member `idx` (a contact's own persistent through-
+        transit stub violator) is unroutable-by-construction: excluded from
+        dirty_members (so revalidate never re-checks it and
+        assert_all_certified never crashes on it) and from the live/emitted
+        forest via the caller marking its contact unrouted. See the
+        `quarantined` field docstring. Unlike mark_dead, it makes no
+        load/geometry-folding claim -- the contact is honestly unrouted."""
+        self.quarantined.add(idx)
+
     # ---- certificates ------------------------------------------------
     def dirty_members(self):
+        if self.quarantined:
+            return [i for i, m in enumerate(self.members)
+                    if not m.cert_valid and i not in self.quarantined]
         return [i for i, m in enumerate(self.members) if not m.cert_valid]
 
     def revalidate(self, geom, cfg):
@@ -752,7 +784,8 @@ class Forest:
         self._cp_stack.append(dict(
             n_members=len(self.members), members={}, topo={},
             roots=list(self.roots), terminal_of=dict(self.terminal_of),
-            dead=set(self.dead), braces=list(self.braces)))
+            dead=set(self.dead), braces=list(self.braces),
+            quarantined=set(self.quarantined)))
         return len(self._cp_stack) - 1
 
     def rollback(self, cp):
@@ -771,6 +804,7 @@ class Forest:
         self.terminal_of = top["terminal_of"]
         self.dead = top["dead"]
         self.braces = top["braces"]
+        self.quarantined = top["quarantined"]
 
     def commit(self, cp):
         assert cp == len(self._cp_stack) - 1, "commit must target the innermost checkpoint"
@@ -782,7 +816,11 @@ def assert_all_certified(forest):
     accepted or emitted with a void certificate. Crash, not a warning --
     a caller (engine.run stands in for "emission" until Phase 7 wires a
     real emitter) must call this before trusting a forest's geometry.
-    Raises AssertionError naming the uncertified members if any exist."""
+    Raises AssertionError naming the uncertified members if any exist.
+
+    Quarantined members (SPEC-V5-PERF A0b) are excluded by dirty_members and
+    so never trip this assert -- they are unroutable-by-construction stubs,
+    honestly unrouted and never emitted, not corruption."""
     dirty = forest.dirty_members()
     assert not dirty, (
         f"forest has {len(dirty)} uncertified member(s) -- crash over "
