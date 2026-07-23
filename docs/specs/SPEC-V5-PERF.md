@@ -140,9 +140,37 @@ insertions x ~120 revalidates x ~50-violator tax ≈ 4x10^8+ queries: the
 observed 30–90+ min.
 
 Probe N=300 with the A0 quarantine simulated (pre-existing violations
-excluded from trial rejection — healthy regime):
+excluded from trial rejection — healthy regime; construct 318.1s, forest
+644 members, 33 unrouted incl. the 4 quarantined):
 
-<<HEALTHY_TABLE>>
+| window (insertions) | dt s | reval calls | dirty/reval | pen-interval members | est. parity votes | scalar project |
+|---|---|---|---|---|---|---|
+| 1–25 | 76.3 | 2,655 | 5.9 | 11,220 | 262,240 | 11,712 |
+| 76–100 | 26.2 | 3,140 | 5.7 | 12,703 | 297,060 | 13,575 |
+| 176–200 | 25.8 | 3,058 | 5.7 | 12,382 | 293,092 | 13,164 |
+| 276–300 | 9.1 | 1,079 | 6.0 | 4,316 | 100,347 | 4,316 |
+
+**The decisive comparison**: the healthy run costs the same as the poisoned
+run (318s vs 329s, per-window counts within ~2%) — because in BOTH regimes
+the per-revalidate cost is dominated by the persistent-violator tax:
+pen-interval members/reval ≈ 4.0 and scalar projects/reval ≈ 4.3 — i.e. the
+4 condemned stubs, re-checked on every one of ~120 revalidates per
+insertion. Fresh trial geometry contributes only ~1.7 dirty members/reval
+at this scale. Scale that tax to the full partition (49 violators, ~12x)
+x ~9x10^4 revalidates ≈ 4x10^8 elementary queries: the observed full-scale
+wall, with or without the poisoning. Consequences for the design:
+
+- **W0 (the tax) is the first-order term** — removed exactly by A1's
+  negative-verdict replay (violator geometry never changes), independent of
+  whether A0 lands.
+- **W2 (the ~120x trial multiplicity) is what multiplies everything** —
+  A2 cuts it to ~1–5 revalidates/insertion.
+- **W1 (Murray-path re-checks) is second-order at N=300 depth** but is the
+  only term that GROWS with forest depth (bifurcation-heavy late stages,
+  rewire/bracing on the ~1625-member forest); A1's Lipschitz skip bounds it
+  to cache lookups.
+- The A18 residual scalar `project` (~13k/window) tracks the dirty set 1:1
+  and disappears into the same caches/batches (A1/A3).
 
 ---
 
