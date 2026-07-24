@@ -237,6 +237,30 @@ explicit sign-off as a bug fix, not smuggling; the 49 quarantined contacts
 are reported in the run log and `unrouted`, and the census cross-check of
 sec 0 decides whether any of them deserve rule-side rework later.
 
+**[AMENDMENT 2026-07-23 — buried-free-end stubs join the condemned class]**:
+the first full-scale acceptance run exposed a hole in the through-transit
+predicate. The stub interval test ran ONLY on stubs whose free end (p1)
+parity-voted EXTERIOR; a p1-INTERIOR stub was exempted on the assumption it is
+"unroutable-by-construction" and would be dropped by the honestly-unrouted
+path. The independent census DISPROVED that: 14 contacts whose stub buries p1
+in dense crown foliage were nonetheless routed and EMITTED — the census's
+axis-centerline illegal stub members, a regression from the v1 baseline's 4
+illegal members to 15. A buried-end stub is an illegal weld through the model
+body, the same defect class as a through-and-through transit, so BOTH
+independent implementations (`tree.Forest._revalidate_exact` and
+`verify._clearance_report_exact`) now run `_axis_interval_illegal` on EVERY
+stub, not only p1-exterior ones. The pre-pass then quarantines the buried-end
+stubs (dropping the support, never emitting the weld — the inviolable-
+correctness direction). Effect at full scale: quarantine 49 → 80, emitted
+illegal stub members 14 → 0 by the engine's own sanctioned-embed inset (2 by
+the census's stricter pitch-augmented inset — sub-threshold marginals the
+engine's angle-corrected inset legitimately permits). Ordinary surface-hugging
+stubs keep their whole inside-run inside the sanctioned p0 embed zone and are
+untouched, so the fixtures stay bit-identical (quarantine still empty there).
+The residual illegal geometry (1 strut off-axis capsule-clip, the ~14 tip-ball-
+on-sub-mm-fin breaches) is a distinct placement/sizing class — Phase-8 reach
+work, not this quarantine-predicate defect.
+
 ### 2.1 Dirty-set definition — derived from the clearance semantics, not guessed
 
 **Claim: the correct post-placement dirty set is exactly the set of members

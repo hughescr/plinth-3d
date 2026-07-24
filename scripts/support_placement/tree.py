@@ -666,15 +666,18 @@ class Forest:
         exemption -- they are NOT distance-checked (a stub hugs its own
         emergence surface at a grazing angle by construction, so any swept-
         distance check false-positives) -- but they are NO LONGER blanket-
-        skipped. Each dirty stub gets the axis through-transit interval
-        check: it fails certification iff penetration_intervals on its axis
-        finds an inside run > 0.05mm (census MIN_ILLEGAL_LEN) OUTSIDE its
-        sanctioned p0 embed zone (the census's illegal through-and-through
-        stubs, members 403/357/227). A parity-crossing test, never a distance
-        test, so an ordinary surface-hugging stub cannot false-positive. A
-        stub's geometry is fixed at creation, so it is dirty (hence checked)
-        only until its first revalidate, then certified once and for all --
-        the check is O(n_contacts) across a whole run, not per-trial.
+        skipped. EVERY dirty stub gets the axis through-transit interval
+        check (see the step-(1) comment below for why p1-interior stubs are
+        no longer exempted): it fails certification iff penetration_intervals
+        on its axis finds an inside run > 0.05mm (census MIN_ILLEGAL_LEN)
+        OUTSIDE its sanctioned p0 embed zone -- both the census's illegal
+        through-and-through stubs (members 403/357/227) and the buried-free-end
+        stubs the full-scale treant emitted (the 4->15 illegal-member
+        regression). A parity-crossing test, never a distance test, so an
+        ordinary surface-hugging stub cannot false-positive. A stub's geometry
+        is fixed at creation, so it is dirty (hence checked) only until its
+        first revalidate, then certified once and for all -- the check is
+        O(n_contacts) across a whole run, not per-trial.
 
         The step-1 deferral -- which depended on step 2.4's interior-face
         demand filter -- has EXPIRED: commit 6aba0f6 landed that filter, so
@@ -714,43 +717,59 @@ class Forest:
         # Stub through-transit rule (SPEC sec 2.1): axis-only interval check,
         # standoff exemption preserved (no segment_clearance for stubs).
         #
-        # A printable stub TERMINATES IN OPEN AIR: its stub_end (p1) is where
-        # the support column begins. Only such a stub can weld THROUGH a thin
-        # feature (census member-357 class: tip embedded, exits, transits a
-        # fin, continues in open air). If p1 is INSIDE the solid, the contact
-        # is unroutable-by-construction -- its outward normal points into the
-        # model body or an overlapping shell (the sec-2.4 interior class),
-        # so every candidate support would run through solid and the contact
-        # ends up honestly unrouted (excluded from live_member_lists). Such a
-        # wholly-buried stub is NOT a printed transit; flagging it would only
-        # crash assert_all_certified on geometry that never prints. Gate the
-        # interval test on p1 being exterior (one cheap parity vote), so the
-        # rule catches real through-transits and leaves interior phantoms to
-        # the unrouted path -- exactly the sequencing the step-1 deferral
-        # named, now that sec 2.4 keeps genuine exterior overhangs.
+        # A stub weld is illegal whenever its AXIS has an inside-the-solid run
+        # OUTSIDE its sanctioned p0 embed zone -- whether the shaft transits a
+        # thin fin and continues in open air (the census member-357
+        # through-and-through class) OR buries its free end (p1) inside
+        # adjacent model geometry. Both are the same defect: printed structure
+        # welded through the model body.
+        #
+        # EVERY dirty stub therefore gets the interval test. The earlier code
+        # gated it on p1 parity-voting EXTERIOR, exempting p1-interior stubs on
+        # the assumption they are unroutable-by-construction (outward normal
+        # into the model body => every candidate support runs through solid =>
+        # the contact ends up honestly unrouted, excluded from
+        # live_member_lists) so that flagging them would only crash
+        # assert_all_certified on geometry that never prints. The full-scale
+        # Weeping Treant DISPROVED that assumption: 13 contacts whose stub
+        # buries p1 in dense crown foliage were nonetheless ROUTED and EMITTED,
+        # surfacing as the independent census's axis-centerline illegal stub
+        # members -- the 4->15 illegal-member regression vs the v1 baseline. A
+        # buried-end stub is not a safe phantom; it is an illegal weld and must
+        # be CONDEMNED (the cco pre-pass quarantines every flagged stub,
+        # dropping the support rather than emitting the weld -- the spec's
+        # inviolable-correctness direction), not trusted to the unrouted path.
+        #
+        # _axis_interval_illegal is the correct symmetric predicate for both
+        # cases: an inside-run > MIN_ILLEGAL_LEN OUTSIDE the sanctioned zone
+        # [inset0, L-inset1]. An ordinary surface-hugging stub keeps its whole
+        # inside-run within the p0 embed zone [0, inset0] and is untouched (a
+        # parity-crossing test, never a distance test), so clean meshes -- the
+        # table/toed_slab fixtures included -- keep an empty quarantine set and
+        # stay bit-identical. Reusing the same _embed_insets_cached inset the
+        # exterior stubs already used keeps the rule the engine's own
+        # sanctioned-embed budget, consistently applied to every stub.
         #
         # Amendment A18 (stage-1 named refactor): the per-member
         # penetration_intervals loop is GONE. Every member needing the axis
-        # interval test -- exterior stubs plus gate-triggered segments -- is
+        # interval test -- all stubs plus gate-triggered segments -- is
         # gathered first, its intervals computed in ONE _batch_axis_intervals
         # native call, and only the inset/overlap arithmetic runs in Python
         # here. A wrapper cannot batch a Python for-loop above it, so this hot
         # revalidate loop is the site R1's "no per-element FFI hot loop" proof
         # obligation names.
 
-        # (1) exterior stubs: one batched (cached) parity vote over all stub p1s.
-        stub_p1_ext = []
+        # (1) all stubs: one batched (cached) sanctioned-embed inset over every
+        # stub, then the axis through-transit interval test in step (4).
+        stub_iv_mi = []
         stub_insets = {}
         if stub_mi:
-            stub_p1 = np.array([np.asarray(self.members[mi].p1, float) for mi in stub_mi])
-            inside_p1 = self._inside_cached(cache, geom, stub_p1)
-            ext_stub_mi = [mi for k, mi in enumerate(stub_mi) if not bool(inside_p1[k])]
-            ext_insets = self._embed_insets_cached(cache, geom, cfg, ext_stub_mi)
-            for mi in ext_stub_mi:
+            all_stub_insets = self._embed_insets_cached(cache, geom, cfg, stub_mi)
+            for mi in stub_mi:
                 m = self.members[mi]
-                si0, si1 = ext_insets[mi]
+                si0, si1 = all_stub_insets[mi]
                 L = float(np.linalg.norm(np.asarray(m.p1, float) - np.asarray(m.p0, float)))
-                stub_p1_ext.append(mi)
+                stub_iv_mi.append(mi)
                 stub_insets[mi] = (si0, si1, L)
 
         # (2) segment clearances (batched, cached) + belt trigger.
@@ -786,11 +805,11 @@ class Forest:
 
         # (3) ONE (cached) penetration_intervals_batch over every interval job.
         intervals_by_mi = self._axis_intervals_cached(
-            cache, geom, stub_p1_ext + seg_trigger)
+            cache, geom, stub_iv_mi + seg_trigger)
 
         # (4) verdict assembly -- stub violations first, then segment violations,
         #     preserving the pre-refactor append order exactly.
-        for mi in stub_p1_ext:
+        for mi in stub_iv_mi:
             si0, si1, L = stub_insets[mi]
             if self._axis_interval_illegal(intervals_by_mi[mi], L, si0, si1):
                 bad.add(mi)

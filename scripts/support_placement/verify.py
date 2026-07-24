@@ -132,38 +132,47 @@ def _clearance_report_exact(members, cfg, geom):
     tree.Forest._revalidate_exact per the independence covenant): a stub
     keeps the blanket standoff exemption -- it hugs its own emergence
     surface at a grazing angle by construction, so any swept-distance check
-    false-positives -- but is NO LONGER blanket-skipped. It gets the
+    false-positives -- but is NO LONGER blanket-skipped. EVERY stub gets the
     through-transit rule: an axis inside-interval > 0.05mm OUTSIDE its
-    sanctioned p0 embed zone fails it (the census's illegal
-    through-and-through stubs, members 403/357/227). This is a
-    parity-crossing test (exact boundaries, majority-vote inside), never a
-    distance test, so an ordinary surface-hugging stub cannot false-
-    positive. The step-1 deferral -- which depended on the interior-face
-    demand filter -- has EXPIRED: commit 6aba0f6 landed that filter, so
-    contacts now seed only on exterior faces and a flagged stub is a real
-    defect, not an interior phantom the builder cannot re-route.
+    sanctioned p0 embed zone fails it -- both the census's illegal
+    through-and-through stubs (members 403/357/227) and the buried-free-end
+    stubs the full-scale treant emitted (the 4->15 illegal-member regression).
+    Formerly gated on p1 parity-voting exterior; that exemption is gone (see
+    the step-(1) comment). This is a parity-crossing test (exact boundaries,
+    majority-vote inside), never a distance test, so an ordinary
+    surface-hugging stub cannot false-positive. The step-1 deferral -- which
+    depended on the interior-face demand filter -- has EXPIRED: commit 6aba0f6
+    landed that filter, so contacts now seed only on exterior faces and a
+    flagged stub is a real defect, not an interior phantom the builder cannot
+    re-route.
 
     Amendment A18 (stage-1 named refactor, verify.py:88): the per-member
-    penetration_intervals loop is GONE. Exterior stubs and every non-stub with
+    penetration_intervals loop is GONE. All stubs and every non-stub with
     non-negative clearance are gathered and their axis intervals computed in
     ONE _batch_axis_intervals native call; only the inset/overlap arithmetic
     runs in Python. Verdict and append order are preserved exactly (stub
     violations in member order, then segment violations in seg order)."""
     out = []
-    # (1) exterior stubs: ONE batched parity vote over all stub p1s.
+    # (1) ALL stubs get the axis through-transit interval test -- not only
+    # those whose free end (p1) parity-votes exterior. The former p1-exterior
+    # gate exempted p1-INTERIOR stubs as unroutable-by-construction, but the
+    # full-scale Weeping Treant emitted 13 such buried-free-end stubs -- the
+    # 4->15 illegal-member regression this independent census-family gate is
+    # meant to catch. The builder-side twin (tree._revalidate_exact step 1)
+    # now condemns them at the quarantine pre-pass; this independent gate must
+    # agree so a buried-end stub that ever reaches the emitted forest is still
+    # flagged. An ordinary surface-hugging stub keeps its whole inside-run
+    # within the p0 embed zone and is untouched (a parity-crossing test, never
+    # a distance test).
     stub_mi = [mi for mi, m in enumerate(members) if m["kind"] == "stub"]
-    stub_p1_ext = []
+    stub_iv_mi = []
     stub_insets = {}
     if stub_mi:
-        stub_p1 = np.array([np.asarray(members[mi]["p1"], float) for mi in stub_mi])
-        inside_p1 = geom.inside(stub_p1)
-        for k, mi in enumerate(stub_mi):
-            if bool(inside_p1[k]):
-                continue
+        for mi in stub_mi:
             m = members[mi]
             si0, si1 = _embed_inset_arc_exact(geom, m, cfg)
             L = float(np.linalg.norm(np.asarray(m["p1"], float) - np.asarray(m["p0"], float)))
-            stub_p1_ext.append(mi)
+            stub_iv_mi.append(mi)
             stub_insets[mi] = (si0, si1, L)
 
     # (2) non-stubs: gather + ONE batched segment_clearance call.
@@ -198,10 +207,10 @@ def _clearance_report_exact(members, cfg, geom):
             seg_insets[mi] = (ins0[k], ins1[k], L)
 
     # (3) ONE native penetration_intervals_batch over every interval job.
-    intervals_by_mi = _batch_axis_intervals(geom, members, stub_p1_ext + seg_check)
+    intervals_by_mi = _batch_axis_intervals(geom, members, stub_iv_mi + seg_check)
 
     # (4) verdict assembly -- stub violations first (member order), then segs.
-    for mi in stub_p1_ext:
+    for mi in stub_iv_mi:
         si0, si1, L = stub_insets[mi]
         if _axis_interval_illegal(intervals_by_mi[mi], L, si0, si1):
             out.append(dict(member_idx=mi, kind="stub", min_clearance_mm=0.0,

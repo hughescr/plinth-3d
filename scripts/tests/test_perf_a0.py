@@ -55,6 +55,16 @@ def _through_fin_mesh():
     return _soup(_overhang_plate(), fin)
 
 
+def _buried_end_mesh():
+    """Overhang plate + a SOLID block at z in [-5,-2] under the origin. A
+    downward stub tip-embedded in the plate whose FREE end (p1) lands at
+    z=-3.5 buries that end deep INSIDE the block -- an illegal weld into the
+    model body whose stub end is INTERIOR, not the through-and-through class.
+    A contact 15mm away has clear air below it (no block)."""
+    block = _box((6, 6, 3), center=(0, 0, -3.5))
+    return _soup(_overhang_plate(), block)
+
+
 # ==========================================================================
 # A0a -- snapshot semantics on hand-built forests
 # ==========================================================================
@@ -181,3 +191,82 @@ def test_a0b_bit_identical_when_no_persistent_violator(cfg):
     assert forest.quarantined == set()
     assert unrouted == []
     tm.assert_all_certified(forest)
+
+
+# ==========================================================================
+# A0b regression -- buried-free-end stubs (full-scale treant, 2026-07-23)
+#
+# The stub through-transit rule formerly ran ONLY on stubs whose free end (p1)
+# parity-voted EXTERIOR, exempting p1-interior stubs on the assumption they are
+# unroutable-by-construction. The full-scale Weeping Treant disproved that:
+# contacts whose stub buries p1 in adjacent crown foliage were routed and
+# EMITTED, surfacing as the independent census's axis-centerline illegal stub
+# members (the 4->15 illegal-member regression vs v1). Every stub now gets the
+# axis interval test; a buried-end stub is condemned like a through-transit one.
+# ==========================================================================
+def test_a0b_buried_free_end_stub_is_flagged(cfg):
+    """A stub tip-embedded in the plate (sanctioned p0) whose FREE end p1 is
+    buried INSIDE the solid block fails certification -- the p1-interior
+    exemption is gone. Its axis has an inside-run (through the block) well
+    outside the sanctioned p0 embed zone."""
+    mesh = _buried_end_mesh()
+    geom = ExactSurface(mesh)
+
+    # Precondition: p1 really is interior (the case the old code exempted).
+    p1 = np.array([0.0, 0.0, -3.5])
+    assert bool(geom.inside(p1[None])[0])
+
+    forest = tm.Forest()
+    buried = tm.Member(p0=np.array([0.0, 0.0, 0.05]), p1=p1,
+                       r0=0.2, r1=0.35, kind="stub", owner=("contact", 0),
+                       embed_end="p0")
+    forest.add_member(buried)
+    viol = forest.revalidate(geom, cfg)
+    assert [v["member_idx"] for v in viol] == [0]   # flagged, stays dirty
+
+
+def test_a0b_ordinary_stub_with_air_below_is_not_flagged(cfg):
+    """Negative control on the SAME mesh: a stub 15mm away tip-embedded in the
+    plate with clear AIR below (no block) keeps its whole inside-run within the
+    p0 embed zone and is NOT flagged -- the interval test does not false-
+    positive on an ordinary surface-hugging stub now that it runs on all stubs."""
+    mesh = _buried_end_mesh()
+    geom = ExactSurface(mesh)
+
+    p1 = np.array([15.0, 0.0, -2.75])
+    assert not bool(geom.inside(p1[None])[0])   # free end in open air
+
+    forest = tm.Forest()
+    ok_stub = tm.Member(p0=np.array([15.0, 0.0, 0.05]), p1=p1,
+                        r0=0.2, r1=0.35, kind="stub", owner=("contact", 0),
+                        embed_end="p0")
+    forest.add_member(ok_stub)
+    assert forest.revalidate(geom, cfg) == []
+    tm.assert_all_certified(forest)
+
+
+def test_a0b_buried_free_end_stub_is_quarantined_end_to_end(cfg):
+    """End-to-end through cco.build: the buried-end contact is quarantined and
+    unrouted (never emitted), while a clean contact 15mm away routes. Mirrors
+    test_a0b_condemned_stub_is_quarantined_and_contact_unrouted for the
+    p1-interior class the census flagged at full scale."""
+    mesh = _buried_end_mesh()
+    geom = ExactSurface(mesh)
+    contacts = [dict(position=np.array([0.0, 0.0, -0.25]), normal=np.array([0.0, 0.0, -1.0])),
+                dict(position=np.array([15.0, 0.0, -0.25]), normal=np.array([0.0, 0.0, -1.0]))]
+    tip_r = np.array([0.2, 0.2])
+    carried = np.array([1.0, 1.0])
+    forest, unrouted = cco.build(mesh, contacts, tip_r, carried, [False, False],
+                                 -10.0, geom, cfg, sample_points=None,
+                                 sample_delicacy=None)
+    stub0 = forest.terminal_of[0]
+    assert stub0 in forest.quarantined
+    assert 0 in unrouted
+    assert 1 not in unrouted
+    assert forest.terminal_of[1] not in forest.quarantined
+    tm.assert_all_certified(forest)
+
+    members, _balls = engine.live_member_lists(forest, unrouted, -10.0, cfg)
+    owners = {tuple(m["owner"]) for m in members if m["kind"] == "stub"}
+    assert ("contact", 0) not in owners   # buried-end stub never emitted
+    assert ("contact", 1) in owners

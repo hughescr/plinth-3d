@@ -7,8 +7,12 @@ pass DETECTED but never WIRED (see SPEC-V5-GEOM sec 2.2/2.1, test plan 6.1/6.2):
      stop CREATING such anchors so the gate is satisfiable.
   2. Stub through-transit: BOTH independent clearance implementations
      (tree.Forest.revalidate AND verify.clearance_report) must flag a stub whose
-     shaft welds through a thin fin, while still certifying a sanctioned embed
-     and NOT flagging an interior/unroutable buried stub.
+     shaft welds through a thin fin OR buries its free end inside the model
+     body, while still certifying a sanctioned tip embed. (The former
+     p1-interior exemption was removed 2026-07-23: the full-scale treant
+     EMITTED buried-free-end stubs -- the 4->15 illegal-member regression the
+     independent census caught -- so a buried end is condemned, not trusted to
+     the unrouted path.)
 
 These are negative controls on the CONSUMERS (the oracle-level detectors are
 covered by test_geometry_exact.py). Without them, a future edit could silently
@@ -199,20 +203,27 @@ def test_clearance_report_flags_through_transit_stub(cfg):
                                    geom=clean_geom) == []
 
 
-def test_buried_unroutable_stub_not_flagged(cfg):
-    """Discriminator guard: a stub whose stub_end (p1) is INSIDE the solid is
-    the interior/unroutable class (outward normal into the model body) --
-    discarded via the unrouted path, never printed -- and MUST NOT be flagged
-    by either implementation (that would crash assert_all_certified on
-    geometry that never prints). Locks in the p1-exterior gate."""
+def test_buried_free_end_stub_is_flagged(cfg):
+    """A stub whose FREE end (p1) is buried INSIDE the solid welds into the
+    model body -- an illegal print, not a harmless phantom. The full-scale
+    Weeping Treant EMITTED this class (the independent census's axis-centerline
+    illegal stub members, the 4->15 regression vs v1), disproving the old
+    "interior => unroutable => never printed" premise. BOTH implementations
+    must now flag it (the cco pre-pass then quarantines it, so
+    assert_all_certified is satisfied by exclusion, not by exemption). An
+    ordinary surface-hugging stub with p1 in open air is still NOT flagged --
+    covered by the sanctioned-embed clean cases in the through-transit tests
+    above and by test_perf_a0's negative control."""
     slab = _box((20, 20, 10), center=(0, 0, 0))    # solid z in [-5, 5]
     geom = ExactSurface(slab)
     buried = dict(p0=np.array([0.0, 0.0, 4.7]),    # tip 0.3 inside top face z=5
                   p1=np.array([0.0, 0.0, 2.0]),    # stub_end still deep inside
                   r0=0.2, r1=0.35, kind="stub", owner=("contact", 0),
                   embed_end="p0")
+    assert bool(geom.inside(np.array([buried["p1"]]))[0])   # free end interior
     f = tm.Forest()
     f.add_member(tm.Member(**buried))
-    assert f.revalidate(geom, cfg) == []
-    assert f.dirty_members() == []
-    assert verify.clearance_report(None, [buried], cfg, geom=geom) == []
+    assert [v["member_idx"] for v in f.revalidate(geom, cfg)] == [0]
+    assert f.dirty_members() == [0]                # stays uncertified (hard)
+    rep = verify.clearance_report(None, [buried], cfg, geom=geom)
+    assert [v["member_idx"] for v in rep] == [0]   # independent gate agrees
