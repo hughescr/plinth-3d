@@ -72,11 +72,24 @@ def _embed_inset_arc_exact(geom, m, cfg):
 
 
 def _axis_interval_illegal(intervals, L, inset0, inset1):
-    """True iff the member's AXIS has an inside-the-solid run > 0.05mm
-    (census MIN_ILLEGAL_LEN) outside its sanctioned embed zones -- the
-    mid-path-penetration / stub through-transit test (parity crossings,
-    exact boundaries; never a distance test). Independent verify-side copy
-    (the independence covenant: shares only geom's generic primitives).
+    """True iff ANY supplied penetration interval is an inside-the-solid run
+    > 0.05mm (census MIN_ILLEGAL_LEN) outside the sanctioned embed zones
+    [inset0, L-inset1] -- the mid-path-penetration / through-transit test
+    (parity crossings, exact boundaries; never a distance test). Independent
+    verify-side copy (the independence covenant: shares only geom's generic
+    primitives).
+
+    Ray-agnostic: the CALLER selects which rays' intervals to pass. Stubs
+    pass AXIS-only intervals (census_run.py:52 -- a stub hugs its own
+    emergence surface, so capsule-offset rays would graze it and false-
+    positive). Non-stub members (R2) pass AXIS *plus* the capsule-offset
+    rays, so a strut whose axis is clean but whose capsule surface grazes a
+    thin wall (census member 1138: axis empty, an offset ray grazes to
+    0.264mm) is caught. The sanctioned window [inset0, L-inset1] is applied
+    to every interval in `intervals` using the member's AXIS length L; an
+    offset ray's own arc length differs from L only by O(|r1-r0|) on a
+    tapered member, negligible against the 0.05mm MIN_ILLEGAL_LEN test and
+    consistent with the engine's axis-length window convention.
 
     Takes PRE-COMPUTED axis intervals from _batch_axis_intervals' single
     native call rather than re-entering the oracle per member -- the
@@ -94,11 +107,15 @@ def _axis_interval_illegal(intervals, L, inset0, inset1):
     return False
 
 
-def _batch_axis_intervals(geom, members, mis):
+def _batch_axis_intervals(geom, members, mis, rays="axis"):
     """ONE native penetration_intervals call for ALL members in `mis`
     (Amendment A7/A18); returns {member_idx: interval-list}. Batch SoA entry
     point when the geom exposes it (the Rust kernel does); per-member fallback
-    only for a legacy cKDTree/oracle with none. Independent verify-side copy."""
+    only for a legacy cKDTree/oracle with none. Independent verify-side copy.
+
+    `rays` selects the ray set the kernel returns intervals for: "axis" (the
+    single centerline, the load-bearing stub rule) or "all" (axis + the n
+    capsule-offset rays, R2's non-stub capsule-graze evidence)."""
     if not mis:
         return {}
     p0s = np.array([np.asarray(members[mi]["p0"], float) for mi in mis])
@@ -107,10 +124,10 @@ def _batch_axis_intervals(geom, members, mis):
     r1s = np.array([float(members[mi]["r1"]) for mi in mis])
     batch = getattr(geom, "penetration_intervals_batch", None)
     if batch is not None:
-        per = batch(p0s, p1s, r0s, r1s, rays="axis", min_illegal_len_mm=0.05)
+        per = batch(p0s, p1s, r0s, r1s, rays=rays, min_illegal_len_mm=0.05)
     else:
         per = [geom.penetration_intervals(p0s[j], p1s[j], r0s[j], r1s[j],
-                                          rays="axis", min_illegal_len_mm=0.05)
+                                          rays=rays, min_illegal_len_mm=0.05)
                for j in range(len(mis))]
     return {mi: per[j] for j, mi in enumerate(mis)}
 
@@ -127,6 +144,17 @@ def _clearance_report_exact(members, cfg, geom):
     gated belt, verify runs the axis penetration-interval test UNGATED on
     every member -- non-stub AND stub (SPEC sec 2.1: the ungated dense pass
     lives here).
+
+    NON-STUB CAPSULE-AWARENESS (R2, census member 1138): the segment_clearance
+    gate is an axis-to-surface DISTANCE test -- blind to a capsule surface that
+    grazes a thin wall while the axis stays clear. That strut (axis intervals
+    empty, one capsule-offset ray grazing to 0.264mm) passed every distance/
+    axis check and was emitted. So every non-stub segment now gets the
+    through-transit interval test over the CAPSULE ray set (rays="all": axis +
+    the n capsule-offset rays), matching the census's non-stub PASS A. Stubs
+    stay AXIS-only (they hug their own emergence surface, so an offset ray
+    grazes it -- the census restricts offset rays to non-stubs, and leaving
+    stubs axis-only keeps the P11 over-quarantine class R4 owns untouched).
 
     STUB handling (SPEC sec 2.1/2.2, independently coded from
     tree.Forest._revalidate_exact per the independence covenant): a stub
@@ -206,13 +234,25 @@ def _clearance_report_exact(members, cfg, geom):
             seg_check.append(mi)
             seg_insets[mi] = (ins0[k], ins1[k], L)
 
-    # (3) ONE native penetration_intervals_batch over every interval job.
-    intervals_by_mi = _batch_axis_intervals(geom, members, stub_iv_mi + seg_check)
+    # (3) penetration intervals. STUBS get AXIS-only intervals (census_run.py:52
+    # -- a stub hugs its own emergence surface at a grazing angle, so capsule-
+    # offset rays graze that surface and false-positive; the census restricts
+    # offset rays to non-stubs, and keeping stubs axis-only leaves the P11
+    # over-quarantine class untouched, which is R4's embed-inset job, not this
+    # one). NON-STUB segments get the CAPSULE-AWARE ray set (R2): axis PLUS the
+    # n capsule-offset rays. A segment_clearance (axis-to-surface distance) gate
+    # is blind to a capsule surface that grazes a thin wall while the axis stays
+    # clear -- census member 1138 (a strut, axis intervals empty, one offset ray
+    # grazing to 0.264mm) slipped every distance/axis check and was emitted. The
+    # kernel already computes the offset-ray transits (rays="all"); wire that
+    # same evidence into the gate so the graze is caught at final geometry.
+    stub_intervals = _batch_axis_intervals(geom, members, stub_iv_mi, rays="axis")
+    seg_intervals = _batch_axis_intervals(geom, members, seg_check, rays="all")
 
     # (4) verdict assembly -- stub violations first (member order), then segs.
     for mi in stub_iv_mi:
         si0, si1, L = stub_insets[mi]
-        if _axis_interval_illegal(intervals_by_mi[mi], L, si0, si1):
+        if _axis_interval_illegal(stub_intervals[mi], L, si0, si1):
             out.append(dict(member_idx=mi, kind="stub", min_clearance_mm=0.0,
                             at_point=None))
     if seg_mi:
@@ -225,7 +265,7 @@ def _clearance_report_exact(members, cfg, geom):
                                 at_point=(ap.tolist() if np.all(np.isfinite(ap)) else None)))
             elif mi in seg_insets:
                 si0, si1, L = seg_insets[mi]
-                if _axis_interval_illegal(intervals_by_mi[mi], L, si0, si1):
+                if _axis_interval_illegal(seg_intervals[mi], L, si0, si1):
                     out.append(dict(member_idx=mi, kind=m["kind"], min_clearance_mm=worst,
                                     at_point=None))
     return out
