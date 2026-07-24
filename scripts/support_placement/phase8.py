@@ -41,6 +41,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Callable, Optional
 
 import numpy as np
@@ -384,10 +385,30 @@ def evaluate_r1(sites: list, geom, cfg,
         site_by_id[site.site_id] = site
         for cand in stub_candidates(site, cfg):
             all_cands.append(cand)
+    return _run_rung(all_cands, site_by_id, [s.site_id for s in sites], geom, cfg,
+                     rays="axis", guard_fn=_resin_guards_ok, moot_fn=_count_moot_axis,
+                     revalidate_fn=revalidate_fn, reroute_fn=reroute_fn,
+                     pocket_penalty_fn=pocket_penalty_fn)
 
-    results = {s.site_id: R1Result(site_id=s.site_id, winner=None, score=None,
-                                   n_candidates=0, n_legal=0, needs_r2=True)
-               for s in sites}
+
+def _run_rung(all_cands: list, site_by_id: dict, sids: list, geom, cfg, *,
+              rays: str, guard_fn: Callable, moot_fn: Callable,
+              revalidate_fn: Optional[Callable] = None,
+              reroute_fn: Optional[Callable] = None,
+              pocket_penalty_fn: Optional[Callable] = None) -> dict:
+    """The shared BATCH-FIRST ladder-rung evaluator (SM-STUB R1 / SM-STRUT S1).
+    One flat candidate matrix -> a handful of batched kernel interval + SCAR
+    calls -> scatter -> per-site UNIQUE global lexicographic minimum. A rung is
+    NOT first-legal-wins (amendment B): the FULL legal set is enumerated and the
+    lex-min of the score tuple is selected. `rays` selects the kernel ray set
+    (stubs axis-only; interior struts axis + capsule-offset, so a shaft whose
+    axis is clean but whose capsule grazes a thin wall -- census mi=1138 -- is
+    caught, §3.1s); `guard_fn` is the member-kind's amendment-H legality guard;
+    `moot_fn` counts moot crossings for the score tuple's n_moot slot. A
+    per-candidate scalar kernel loop here would be a defect (batch-first rule)."""
+    results = {sid: R1Result(site_id=sid, winner=None, score=None,
+                             n_candidates=0, n_legal=0, needs_r2=True)
+               for sid in sids}
     if not all_cands:
         return results
 
@@ -395,38 +416,38 @@ def evaluate_r1(sites: list, geom, cfg,
     mis = list(range(len(members)))
 
     # --- one batched kernel call for intervals; one for SCAR verdicts ---
-    ivmap = verify._batch_axis_intervals(geom, members, mis, rays="axis")
+    ivmap = verify._batch_axis_intervals(geom, members, mis, rays=rays)
     verdicts = verify._embed_scar_verdicts(geom, members, mis, ivmap, cfg)
 
     # --- scatter: classify each candidate, assemble per-site legal sets ---
-    per_site_legal = {s.site_id: [] for s in sites}
-    per_site_count = {s.site_id: 0 for s in sites}
+    per_site_legal = {sid: [] for sid in sids}
+    per_site_count = {sid: 0 for sid in sids}
     for j, cand in enumerate(all_cands):
         per_site_count[cand.site_id] += 1
         m = cand.member
         verdict_legal = verdicts.get(j)
-        # (a) tip SCAR verdict LEGAL
+        # (a) tip/foot SCAR verdict LEGAL
         if not verdict_legal:
             continue
-        # (b) zero NON-EXEMPT rule-4 crossings under PRINT-FLOOR
-        nonexempt, n_moot_flag = verify._transit_classify(ivmap.get(j, []), m, verdict_legal)
+        # (b) zero NON-EXEMPT rule-4 crossings under PRINT-FLOOR (all rays)
+        nonexempt, _ = verify._transit_classify(ivmap.get(j, []), m, verdict_legal)
         if nonexempt:
             continue
-        # n_moot_crossings for the score tuple: count moot crossings on the axis
-        # ray (a member is moot iff it has >=1 rule-4 crossing all < floor).
-        n_moot = _count_moot_axis(ivmap.get(j, []), m, verdict_legal)
-        # (d) downstream re-route from the moved free end
+        # n_moot_crossings for the score tuple (never trade a clean candidate
+        # for a moot-riding one).
+        n_moot = moot_fn(ivmap.get(j, []), m, verdict_legal)
+        # (d) downstream / segment re-route from the moved free end
         if reroute_fn is not None:
             ok, route_vol_ml, route_len_mm = reroute_fn(cand)
             if not ok:
                 continue
         else:
             route_vol_ml, route_len_mm = 0.0, 0.0
-        # (e) resin / quality guards
-        if not _resin_guards_ok(cand, site_by_id[cand.site_id],
-                                route_vol_ml, route_len_mm, cfg):
+        # (e) resin / quality guards (amendment H) AS LEGALITY
+        if not guard_fn(cand, site_by_id[cand.site_id], route_vol_ml, route_len_mm, cfg):
             continue
-        # (c) collision revalidate under the §5 law
+        # (c) collision revalidate under the §5 law (both adjoining segments for
+        # an interior strut -- the engine's injected revalidate)
         if revalidate_fn is not None and not revalidate_fn(cand):
             continue
         density = 0
@@ -481,10 +502,345 @@ def _count_moot_axis(intervals, m, verdict_legal) -> int:
     return n
 
 
+def _count_moot(intervals, m, verdict_legal) -> int:
+    """Moot (sub-floor) rule-4 crossing count across ALL rays present in
+    `intervals` -- the interior-strut generalisation of `_count_moot_axis` (a
+    strut is classified over axis + capsule-offset rays, so a moot capsule graze
+    must be counted for the score tuple). Per-ray tip-anchored interval is exempt
+    when the member verdict is LEGAL, each ray measured against its OWN arc
+    length (mirrors verify._transit_classify). Identical to `_count_moot_axis`
+    when only axis intervals are present, so a stub scores the same either way."""
+    if not intervals:
+        return 0
+    embed = m.get("embed_end")
+    p0 = np.asarray(m["p0"], float); p1 = np.asarray(m["p1"], float)
+    axis_seg = float(np.linalg.norm(p1 - p0))
+    ray_segs = {"axis": axis_seg}
+    if m["kind"] != "stub" and axis_seg >= 1e-9:
+        for lab, _O, _D, sg in verify.member_rays(p0, p1, float(m["r0"]), float(m["r1"])):
+            ray_segs[lab] = sg
+    by_ray = {}
+    for iv in intervals:
+        by_ray.setdefault(iv["ray"], []).append(iv)
+    n = 0
+    for ray, ivs in by_ray.items():
+        ivs.sort(key=lambda iv: iv["s_a"])
+        ray_seg = ray_segs.get(ray, axis_seg)
+        tip_idx = (verify._tip_iv_index(ivs, ray_seg, embed)
+                   if embed in ("p0", "p1") else None)
+        for i, iv in enumerate(ivs):
+            if i == tip_idx and verdict_legal:
+                continue
+            chord = iv["s_b"] - iv["s_a"]
+            if chord <= verify.MIN_ILLEGAL_LEN_MM:
+                continue
+            if chord < verify.PRINT_FLOOR_CHORD_MM:
+                n += 1
+    return n
+
+
+# ===========================================================================
+# SM-STRUT (§3.1s) -- the 17 class-T interior struts. A DISTINCT state machine
+# from SM-STUB (amendment D): a strut's embed end is a FOOT ball
+# (BALL_FACTOR_FOOT = 1.4, not the 1.5 stub tip); its legality is judged over
+# AXIS + capsule-offset rays (a strut whose axis is clean but whose capsule
+# grazes a thin wall -- census mi=1138 -- is caught); and -- critically -- the
+# stub `mark_quarantined` contract DOES NOT cover it. A retired strut is
+# `mark_dead` and reported as an unresolved STRUT (structural), never
+# quarantined (which would send a *contact* to honest failure a strut has not
+# got). Same three-rung ladder S1->S2->S3, same global-lex-min selection.
+# ===========================================================================
+@dataclass
+class StrutSite:
+    """One class-T interior strut to remediate. `c` is the fixed FOOT anchor
+    surface point (invariant across S1 candidates); `n0` its outward foot normal
+    (polar-0 direction). `r_foot`/`r_root` are the foot-end / far-end radii (the
+    foot ball uses BALL_FACTOR_FOOT). `strut_length_mm` drives the S1 length
+    ladder; `orig_strut_length_mm` is the amendment-H no-unbounded-growth
+    baseline (defaults to `strut_length_mm`, so the <=1.0 length factors never
+    trip the guard). `criticality` weights the §6.7 honest-failure bound -- a
+    load-bearing strut outranks a leaf; `orphan` records whether S3 retirement
+    would orphan a subtree from the raft (amendment G raft-connectivity guard)."""
+    site_id: int
+    c: np.ndarray
+    n0: np.ndarray
+    r_foot: float
+    r_root: float
+    strut_length_mm: float
+    foot_depth_mm: float
+    carried_mm2: float = 0.0
+    owner: tuple = None
+    orig_member: dict = None
+    orig_strut_length_mm: float = None
+    downstream_route_len_mm: float = 0.0
+    downstream_route_vol_ml: float = 0.0
+    criticality: float = 2.0            # structural strut > leaf contact stub
+    orphan_if_dropped: bool = False     # amendment G: dropping orphans a subtree
+
+
+def reaim_foot(c, n_hat, delta, L, r_foot, r_root, owner, carried_mm2):
+    """Pinned S1 re-aim formulas applied AT THE FOOT (§3.1s), identical form to
+    the stub re-aim but kind='strut' so the SCAR verdict uses BALL_FACTOR_FOOT
+    (1.4) and the transit classifier sweeps the capsule-offset rays:
+
+        p0        = c - n_hat*delta      # embedded foot / designed foot ball
+        p1        = c + n_hat*L          # free strut end
+        ball_ctr  = p0
+        u         = normalize(p0 - p1) = -n_hat
+
+    The demanded FOOT surface point `c` is invariant; `p0` moves on a sphere of
+    radius `delta` about `c` as `n_hat` changes."""
+    c = np.asarray(c, float)
+    n_hat = _unit(np.asarray(n_hat, float))
+    p0 = c - n_hat * float(delta)
+    p1 = c + n_hat * float(L)
+    return dict(p0=p0, p1=p1, r0=float(r_foot), r1=float(r_root),
+                kind="strut", owner=owner, embed_end="p0",
+                carried_mm2=float(carried_mm2),
+                ball_ctr=p0.copy(), axis_u=(-n_hat).copy())
+
+
+def strut_candidates(site: StrutSite, cfg) -> list:
+    """Enumerate a strut's S1 candidate set (direction x length), <=75 members.
+    Foot re-aim lean cone uses the branch/segment angle family exactly as the
+    stub cone; candidates past the printability lean limit are SKIPPED, never
+    clamped (§3.1s, Open-risk #1). `cand_index` is length-major then the
+    reaim_directions order -- a total order, the score tuple's final tiebreak."""
+    dirs = reaim_directions(site.n0, cfg)
+    ndir = len(dirs)
+    out = []
+    for li, f in enumerate(cfg.p8_reaim_length_factors):
+        L = float(site.strut_length_mm) * float(f)
+        for di, (polar, az, n_hat) in enumerate(dirs):
+            m = reaim_foot(site.c, n_hat, site.foot_depth_mm, L,
+                           site.r_foot, site.r_root, site.owner, site.carried_mm2)
+            if _lean_deg(m["p0"], m["p1"]) > _theta_max_deg(m["r1"], cfg) + 1e-9:
+                continue
+            out.append(Candidate(site_id=site.site_id, cand_index=li * ndir + di,
+                                  length_step=li, f=float(f), polar_deg=polar,
+                                  azimuth_deg=az, n_hat=n_hat, member=m))
+    return out
+
+
+def _strut_guards_ok(cand: Candidate, site: StrutSite, route_vol_ml: float,
+                     route_len_mm: float, cfg) -> bool:
+    """Amendment-H S1 no-unbounded-strut-growth guard (part of LEGALITY, §3.1s):
+    reject a candidate whose strut shaft length exceeds
+    `p8_strut_growth_max_factor x` the ORIGINAL strut length. The S1 length
+    ladder is <= 1.0 so re-aim itself cannot grow the strut against its OWN
+    design length; the guard binds when a candidate's length is measured against
+    a SHORTER original (an already-shortened strut), so no relocation balloons
+    structural material. When an S2 re-route is trialled (`route_len_mm`>0) its
+    added length is bound by the same factor against the original downstream
+    route -- no unbounded downstream growth either."""
+    orig_len = (site.orig_strut_length_mm if site.orig_strut_length_mm is not None
+                else site.strut_length_mm)
+    cand_len = float(np.linalg.norm(np.asarray(cand.member["p1"], float)
+                                    - np.asarray(cand.member["p0"], float)))
+    # cand_len includes the foot embed depth; compare the FREE strut length.
+    free_len = cand_len - float(site.foot_depth_mm)
+    if free_len > cfg.p8_strut_growth_max_factor * float(orig_len) + 1e-9:
+        return False
+    if site.downstream_route_len_mm > 1e-9 and route_len_mm > 1e-9:
+        if route_len_mm > cfg.p8_strut_growth_max_factor * site.downstream_route_len_mm + 1e-9:
+            return False
+    return True
+
+
+def evaluate_s1(sites: list, geom, cfg,
+                revalidate_fn: Optional[Callable] = None,
+                reroute_fn: Optional[Callable] = None,
+                pocket_penalty_fn: Optional[Callable] = None) -> dict:
+    """SM-STRUT S1 foot re-aim for a batch of interior struts (§3.1s), BATCH-FIRST.
+    Same gather->batch->scatter->global-lex-min discipline as SM-STUB R1, but on
+    the strut ray set (axis + capsule-offset) with the foot ball factor and the
+    S1 growth guard. `revalidate_fn` is where the engine enforces "both adjoining
+    segments legal" (moving an interior foot re-splits two segments); None => the
+    pure-geometry unit path (the strut's own transit legality). Returns
+    {site_id: R1Result} (winner => S1 resolved; needs_r2 => escalate to S2)."""
+    all_cands: list = []
+    site_by_id = {}
+    for site in sites:
+        site_by_id[site.site_id] = site
+        for cand in strut_candidates(site, cfg):
+            all_cands.append(cand)
+    return _run_rung(all_cands, site_by_id, [s.site_id for s in sites], geom, cfg,
+                     rays="all", guard_fn=_strut_guards_ok, moot_fn=_count_moot,
+                     revalidate_fn=revalidate_fn, reroute_fn=reroute_fn,
+                     pocket_penalty_fn=pocket_penalty_fn)
+
+
+# ===========================================================================
+# SM-BALL (§3.2) -- the 15 true joint-ball breaches, run LAST (Phase 3). A THIRD
+# distinct state machine (amendment D). Remedy is RELOCATION of the joint, NEVER
+# shrinking the ball (a smaller ball is a different, un-offered sanction). Ladder
+# B1 (axial slide) -> B2 (local re-route) -> B3 (honest failure, unresolved
+# BALL). B3 never shrinks the ball and never suppresses the breach, and the
+# raft-connectivity guard (amendment G) applies exactly as SM-STRUT S3.
+# ===========================================================================
+@dataclass
+class BallSite:
+    """One true joint-ball breach to relocate (`source="ball"`; endcap spheres
+    are report-only, out of SM-BALL scope). `center`/`r` are the breaching ball;
+    `root_dir` is the UNIT member-axis direction toward the ROOT (the raft) -- B1
+    slides the joint +root_dir (root-ward, rank 0) then -root_dir (tip-ward, rank
+    1). The ball radius is INVARIANT across the slide (never shrunk)."""
+    ball_id: int
+    center: np.ndarray
+    r: float
+    root_dir: np.ndarray
+    owner: tuple = None
+    criticality: float = 1.5
+    orphan_if_dropped: bool = False
+
+
+@dataclass
+class BallSlide:
+    ball_id: int
+    slide_index: int            # (magnitude-major, direction-minor) total order
+    slide_distance_mm: float
+    direction_rank: int         # 0 root-ward, 1 tip-ward
+    center: np.ndarray          # slid ball center (radius unchanged)
+
+
+@dataclass
+class B1Result:
+    ball_id: int
+    winner: Optional[BallSlide]     # None => no clean slide => B2
+    n_candidates: int
+    n_clean: int
+    needs_b2: bool = True
+
+
+def ball_slide_candidates(site: BallSite, cfg) -> list:
+    """The 1-D deterministic minimal-slide grid (§3.2 B1): magnitudes
+    `p8_ball_slide_step_mm .. p8_ball_slide_max_mm` in step increments, each in
+    two directions (root-ward rank 0, then tip-ward rank 1). Slide 0 is excluded
+    (a breaching ball is breaching at 0 by definition). `slide_index` is
+    magnitude-major then direction-minor -- the total order in which
+    `first-clean` == lexicographic min of `(slide_distance, direction_rank)`."""
+    step = float(cfg.p8_ball_slide_step_mm)
+    smax = float(cfg.p8_ball_slide_max_mm)
+    root = _unit(np.asarray(site.root_dir, float))
+    n_mag = int(round(smax / step))
+    out = []
+    idx = 0
+    for k in range(1, n_mag + 1):
+        dist = step * k
+        for rank, sign in ((0, 1.0), (1, -1.0)):        # root-ward first
+            center = np.asarray(site.center, float) + sign * dist * root
+            out.append(BallSlide(ball_id=site.ball_id, slide_index=idx,
+                                 slide_distance_mm=dist, direction_rank=rank,
+                                 center=center))
+            idx += 1
+    return out
+
+
+def evaluate_b1(sites: list, geom, cfg,
+                slide_revalidate_fn: Optional[Callable] = None,
+                eps_mm: float = 0.05) -> dict:
+    """SM-BALL B1 axial slide for a batch of breaching joint balls (§3.2),
+    BATCH-FIRST. Gather EVERY slide candidate of EVERY ball, test them in ONE
+    batched `geom.sphere_breach` call (radius invariant), scatter, and per ball
+    take the MINIMAL-slide position that is (i) sphere-clean AND (ii) leaves both
+    adjoining segments legal under the §5 law (`slide_revalidate_fn`, injected by
+    the engine; None => the pure-geometry unit path). A per-ball scalar
+    sphere_breach loop would be a defect. Returns {ball_id: B1Result}."""
+    all_slides: list = []
+    for site in sites:
+        for sl in ball_slide_candidates(site, cfg):
+            all_slides.append((site, sl))
+    site_by_id = {s.ball_id: s for s in sites}
+    results = {s.ball_id: B1Result(ball_id=s.ball_id, winner=None,
+                                   n_candidates=0, n_clean=0, needs_b2=True)
+               for s in sites}
+    if not all_slides:
+        return results
+    centers = np.array([sl.center for _s, sl in all_slides])
+    radii = np.array([float(_s.r) for _s, sl in all_slides])
+    breached, _thick, _poke = geom.sphere_breach(centers, radii, eps_mm=eps_mm)
+    per_ball_clean = {s.ball_id: [] for s in sites}
+    per_ball_count = {s.ball_id: 0 for s in sites}
+    for j, (site, sl) in enumerate(all_slides):
+        per_ball_count[site.ball_id] += 1
+        if bool(breached[j]):
+            continue
+        if slide_revalidate_fn is not None and not slide_revalidate_fn(site, sl):
+            continue
+        per_ball_clean[site.ball_id].append(sl)
+    for bid, clean in per_ball_clean.items():
+        res = results[bid]
+        res.n_candidates = per_ball_count[bid]
+        res.n_clean = len(clean)
+        if not clean:
+            res.needs_b2 = True
+            continue
+        # minimal-slide == lex-min of (slide_distance, direction_rank); slide_index
+        # already encodes that total order, so the smallest index is the winner.
+        clean.sort(key=lambda sl: sl.slide_index)
+        res.winner = clean[0]
+        res.needs_b2 = False
+    return results
+
+
+# ===========================================================================
+# Ladder dispositions + the SM-STRUT / SM-BALL drivers (§3.0 Phase 2 / Phase 3).
+# The disposal CONTRACT is explicit and pinned (amendment D): a retired strut is
+# `mark_dead`, a failed ball is an unresolved BALL -- NEITHER is ever
+# `mark_quarantined` (that contract is stub-only).
+# ===========================================================================
+class Disposition(str, Enum):
+    STRUT_S1_REAIM = "strut_s1_reaim"       # S1 foot re-aim resolved it
+    STRUT_S2_REROUTE = "strut_s2_reroute"   # S2 re-route from an alternative foot
+    STRUT_S3_DEAD = "strut_s3_dead"         # S3 mark_dead, unresolved STRUT
+    STRUT_S3_ESCALATE = "strut_s3_escalate"  # raft-guard: owner escalation (never dropped)
+    BALL_B1_SLIDE = "ball_b1_slide"         # B1 axial slide resolved it
+    BALL_B2_REROUTE = "ball_b2_reroute"     # B2 local re-route
+    BALL_B3_UNRESOLVED = "ball_b3_unresolved"  # B3 honest failure, unresolved BALL
+
+
+# The disposal contract each terminal disposition asserts. Struts use mark_dead
+# (structural retirement); a ball is never disposed by mark_* at all (its joint
+# is relocated or reported unresolved). NO strut/ball disposition is
+# `mark_quarantined` -- that is the stub-only contract (amendment D).
+_STRUT_CONTRACT = {
+    Disposition.STRUT_S1_REAIM: "reaim",
+    Disposition.STRUT_S2_REROUTE: "mark_dead",   # old foot dies, strut re-routed
+    Disposition.STRUT_S3_DEAD: "mark_dead",
+    Disposition.STRUT_S3_ESCALATE: "escalate",
+}
+
+
+@dataclass
+class StrutResult:
+    site_id: int
+    disposition: Disposition
+    contract: str                       # "reaim" | "mark_dead" | "escalate"
+    rung: str                           # "S1" | "S2" | "S3"
+    winner: Optional[Candidate] = None  # set for S1
+    score: Optional[tuple] = None
+    unresolved: bool = False            # True for S3 (dead or escalated)
+    criticality: float = 0.0
+    trace: tuple = ()                   # rungs entered, in order
+
+
+@dataclass
+class BallResult:
+    ball_id: int
+    disposition: Disposition
+    rung: str                           # "B1" | "B2" | "B3"
+    slide: Optional[BallSlide] = None   # set for B1
+    ball_shrunk: bool = False           # MUST always stay False (never shrink)
+    unresolved: bool = False
+    criticality: float = 0.0
+    trace: tuple = ()
+
+
 # ---------------------------------------------------------------------------
-# Phase-order driver + deferred state machines (§3.0). Phase-1 stub re-aim is
-# implemented; the later phases are typed skeleton entry points that RAISE, so
-# no caller mistakes a not-yet-built state machine for a no-op.
+# Phase-order driver + the state machines (§3.0). Phase-1 stub re-aim (R1),
+# Phase-2 interior struts (SM-STRUT), and Phase-3 ball breaches (SM-BALL) are
+# implemented; the atomic-commit pocket solver (§4) remains a typed skeleton
+# that RAISES, so no caller mistakes it for a no-op.
 # ---------------------------------------------------------------------------
 def run_phase1_stubs(sites: list, geom, cfg, **kw) -> dict:
     """Phase 1 (§3.0): the class-T contact stubs and Q-REAL condemned stubs are
@@ -497,24 +853,110 @@ def run_phase1_stubs(sites: list, geom, cfg, **kw) -> dict:
     return evaluate_r1(sites, geom, cfg, **kw)
 
 
-def run_phase2_struts(*a, **k):
-    """Phase 2 (§3.1s): the 17 interior struts run SM-STRUT (S1 foot re-aim ->
-    S2 re-route -> S3 retirement) -- a DISTINCT state machine from stub re-aim
-    (amendment D: interior struts are NEVER routed through the stub
-    `mark_quarantined` contract). Not part of this foundation delivery."""
-    raise NotImplementedError(
-        "SM-STRUT (Phase 2, SPEC-P8-RELOCATE §3.1s) is a follow-up state "
-        "machine; this commit delivers the foundation + SM-STUB R1 only.")
+def run_phase2_struts(sites: list, geom, cfg,
+                      revalidate_fn: Optional[Callable] = None,
+                      reroute_fn: Optional[Callable] = None,
+                      orphan_fn: Optional[Callable] = None,
+                      pocket_penalty_fn: Optional[Callable] = None) -> dict:
+    """Phase 2 (§3.1s): the interior struts run SM-STRUT, a three-rung ladder
+    S1->S2->S3 -- entered top-down, a rung reached only when the rung above
+    yields ZERO legal candidates for the site (the ladder never re-orders).
+    DISTINCT from SM-STUB (amendment D): the disposal contract is `mark_dead` /
+    escalate, NEVER `mark_quarantined`.
+
+      * S1 -- foot re-aim (batched, `evaluate_s1`): the strut foot re-aims in its
+        lean cone; a winner disposes STRUT_S1_REAIM.
+      * S2 -- strut re-route (`reroute_fn(site) -> (ok, vol, len)`, injected: the
+        engine re-trials `_candidate_builders` from an alternative foot in the
+        strut/rung foot domain). Old foot `mark_dead` (never mark_quarantined).
+      * S3 -- retirement (honest STRUCTURAL failure): `mark_dead` + reported as
+        an unresolved STRUT (§6.7, class="STRUT"), NEVER `mark_quarantined`.
+        Raft-connectivity guard (amendment G, §6.9): if `orphan_fn(site)` is
+        True (dropping the strut orphans a subtree from the raft), S3 is
+        DISALLOWED and the strut ESCALATES to the owner as a
+        criticality-weighted unresolved -- structural connectivity is never
+        silently severed.
+
+    Sites are processed in the frozen commit order the caller assembles (worst-
+    firm-chord desc, mi asc); S1 itself is order-free (a pure function of
+    geometry). Returns {site_id: StrutResult}."""
+    site_by_id = {s.site_id: s for s in sites}
+    s1 = evaluate_s1(sites, geom, cfg, revalidate_fn=revalidate_fn,
+                     reroute_fn=None, pocket_penalty_fn=pocket_penalty_fn)
+    out = {}
+    for sid, res in s1.items():
+        site = site_by_id[sid]
+        if not res.needs_r2:                       # S1 resolved
+            out[sid] = StrutResult(
+                site_id=sid, disposition=Disposition.STRUT_S1_REAIM,
+                contract=_STRUT_CONTRACT[Disposition.STRUT_S1_REAIM], rung="S1",
+                winner=res.winner, score=res.score, criticality=site.criticality,
+                trace=("S1",))
+            continue
+        # S2 -- re-route from an alternative foot in the strut/rung foot domain.
+        if reroute_fn is not None:
+            ok, _vol, _len = reroute_fn(site)
+            if ok:
+                out[sid] = StrutResult(
+                    site_id=sid, disposition=Disposition.STRUT_S2_REROUTE,
+                    contract=_STRUT_CONTRACT[Disposition.STRUT_S2_REROUTE],
+                    rung="S2", criticality=site.criticality, trace=("S1", "S2"))
+                continue
+        # S3 -- honest structural failure. Raft-connectivity guard first.
+        orphans = bool(orphan_fn(site)) if orphan_fn is not None else bool(site.orphan_if_dropped)
+        disp = (Disposition.STRUT_S3_ESCALATE if orphans
+                else Disposition.STRUT_S3_DEAD)
+        out[sid] = StrutResult(
+            site_id=sid, disposition=disp, contract=_STRUT_CONTRACT[disp],
+            rung="S3", unresolved=True, criticality=site.criticality,
+            trace=("S1", "S2", "S3"))
+    return out
 
 
-def run_phase3_balls(*a, **k):
-    """Phase 3 (§3.2): the 15 true ball breaches run SM-BALL (B1 axial slide ->
-    B2 local re-route -> B3 honest failure), LAST -- a ball's legal position
-    depends on the FINAL shaft geometry Phases 1-2 produce. Not part of this
-    foundation delivery."""
-    raise NotImplementedError(
-        "SM-BALL (Phase 3, SPEC-P8-RELOCATE §3.2) is a follow-up state "
-        "machine; this commit delivers the foundation + SM-STUB R1 only.")
+def run_phase3_balls(sites: list, geom, cfg,
+                     slide_revalidate_fn: Optional[Callable] = None,
+                     reroute_fn: Optional[Callable] = None,
+                     orphan_fn: Optional[Callable] = None,
+                     eps_mm: float = 0.05) -> dict:
+    """Phase 3 (§3.2): the 15 true ball breaches run SM-BALL, LAST -- a joint
+    ball's legal position depends on the FINAL shaft geometry Phases 1-2 produce.
+    Three-rung ladder B1->B2->B3; the ball radius is INVARIANT everywhere (never
+    shrunk -- `ball_shrunk` stays False by construction).
+
+      * B1 -- axial slide (batched, `evaluate_b1`): minimal-slide clean joint
+        position; a winner disposes BALL_B1_SLIDE.
+      * B2 -- local re-route (`reroute_fn(site) -> (ok, ...)`, injected): the
+        owning terminal re-routes with the breaching joint's region penalized.
+      * B3 -- honest failure: unresolved BALL (§6.7, class="BALL"); the breach is
+        never suppressed and the ball is never shrunk. Raft-connectivity guard
+        (amendment G) applies exactly as SM-STRUT S3.
+
+    Returns {ball_id: BallResult}."""
+    site_by_id = {s.ball_id: s for s in sites}
+    b1 = evaluate_b1(sites, geom, cfg, slide_revalidate_fn=slide_revalidate_fn,
+                     eps_mm=eps_mm)
+    out = {}
+    for bid, res in b1.items():
+        site = site_by_id[bid]
+        if not res.needs_b2:                       # B1 resolved
+            out[bid] = BallResult(
+                ball_id=bid, disposition=Disposition.BALL_B1_SLIDE, rung="B1",
+                slide=res.winner, criticality=site.criticality, trace=("B1",))
+            continue
+        if reroute_fn is not None:
+            ok = reroute_fn(site)
+            ok = ok[0] if isinstance(ok, tuple) else bool(ok)
+            if ok:
+                out[bid] = BallResult(
+                    ball_id=bid, disposition=Disposition.BALL_B2_REROUTE,
+                    rung="B2", criticality=site.criticality, trace=("B1", "B2"))
+                continue
+        # B3 -- honest failure. The raft guard records orphaning for the owner
+        # escalation but the ball is NEVER shrunk and the breach NEVER suppressed.
+        out[bid] = BallResult(
+            ball_id=bid, disposition=Disposition.BALL_B3_UNRESOLVED, rung="B3",
+            unresolved=True, criticality=site.criticality, trace=("B1", "B2", "B3"))
+    return out
 
 
 def run_pocket_solver(*a, **k):

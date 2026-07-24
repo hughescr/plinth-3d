@@ -467,14 +467,10 @@ def test_phase_order_normative():
     assert phase8.PHASE_ORDER == ("phase1_stubs", "phase2_struts", "phase3_balls")
 
 
-def test_deferred_state_machines_raise(cfg):
-    """The later state machines are NOT no-ops: they raise until built, so a
-    caller can never mistake a missing SM-STRUT/SM-BALL/pocket-solver for a
-    clean pass (amendment C/D)."""
-    with pytest.raises(NotImplementedError):
-        phase8.run_phase2_struts()
-    with pytest.raises(NotImplementedError):
-        phase8.run_phase3_balls()
+def test_pocket_solver_still_deferred(cfg):
+    """SM-STRUT (Phase 2) and SM-BALL (Phase 3) are now implemented; only the
+    atomic-commit pocket solver (§4) remains a typed skeleton that RAISES, so a
+    caller can never mistake it for a no-op (amendment C/F)."""
     with pytest.raises(NotImplementedError):
         phase8.run_pocket_solver()
 
@@ -490,3 +486,303 @@ def test_run_phase1_stubs_is_r1(cfg):
     geom_low = ExactSurface(_fin_mesh(0.25, 0.5))       # fin at [0.5,0.75]; f=0.5 ends 1.25 still crosses
     out2 = phase8.run_phase1_stubs([_vertical_site(mi=42, cfg=cfg)], geom_low, cfg)
     assert out2[42].winner is None and out2[42].needs_r2 is True
+
+
+# ==========================================================================
+# SM-STRUT (§3.1s) -- the 17 class-T interior struts, S1->S2->S3.
+# ==========================================================================
+def _strut_graze_mesh(wall_z0=0.5, wall_h=0.5, wall_x=0.45, wall_t=0.12):
+    """mi=1138-lineage strut-graze fixture: a foot-anchor slab (top z=0) plus a
+    thin vertical wall offset in +x by ~r_foot. A vertical strut embedded 0.3mm
+    in the slab has a CLEAN axis but its +x capsule-offset ray grazes the wall --
+    a firm capsule-graze transit only the offset rays (rays='all') catch, exactly
+    the census mi=1138 strut subclass. The wall is low enough that no length
+    shortening clears it; only a FOOT RE-AIM lean moves the shaft off the wall."""
+    base = _box((20, 20, 4), center=(0, 0, -2))
+    wall = _box((wall_t, 4, wall_h), center=(wall_x, 0, wall_z0 + wall_h / 2))
+    return _soup(base, wall)
+
+
+def _strut_site(mi=1138, cfg=None, r_foot=0.5, r_root=0.35, strut_len=2.5,
+                orig_len=None, criticality=2.0, orphan=False):
+    cfg = cfg or SupportConfig()
+    return phase8.StrutSite(
+        site_id=mi, c=np.array([0.0, 0.0, 0.0]), n0=np.array([0.0, 0.0, 1.0]),
+        r_foot=r_foot, r_root=r_root, strut_length_mm=strut_len,
+        foot_depth_mm=cfg.contact_depth_mm, carried_mm2=1.0, owner=("strut", mi),
+        orig_strut_length_mm=orig_len, criticality=criticality,
+        orphan_if_dropped=orphan)
+
+
+def test_strut_reaim_foot_formulas_and_kind(cfg):
+    """S1 foot re-aim uses the SAME pinned formulas as the stub (§3.1s) but
+    kind='strut' -- so the SCAR verdict picks BALL_FACTOR_FOOT (1.4, not the 1.5
+    stub tip) and the transit classifier sweeps the capsule-offset rays. Contact
+    (foot) surface point c is invariant; p0 = c - n*delta; embed_end p0."""
+    c = np.array([1.0, 2.0, 3.0]); n_hat = np.array([0.0, 0.0, 1.0])
+    m = phase8.reaim_foot(c, n_hat, cfg.contact_depth_mm, 2.0, 0.5, 0.35,
+                          ("strut", 1138), 1.0)
+    assert m["kind"] == "strut" and m["embed_end"] == "p0"
+    assert np.allclose(m["p0"], c - n_hat * cfg.contact_depth_mm)
+    assert np.allclose(m["p1"], c + n_hat * 2.0)
+    assert np.allclose(m["ball_ctr"], m["p0"]) and np.allclose(m["axis_u"], -n_hat)
+    assert m["r0"] == 0.5 and m["r1"] == 0.35
+
+
+def test_strut_s1_capsule_graze_needs_lean(cfg):
+    """SITE-DERIVED (mi=1138 lineage): a strut whose AXIS is clean but whose
+    capsule-offset ray grazes a thin wall is a FIRM transit only rays='all'
+    catches. Every polar-0 (vertical) length still grazes, so S1 resolves it ONLY
+    by a foot-re-aim LEAN (polar > 0); the winner is legal on the independent
+    axis+capsule gate."""
+    geom = ExactSurface(_strut_graze_mesh())
+    site = _strut_site(mi=1138, cfg=cfg)
+    # the vertical full strut is firm ONLY on the capsule rays (axis is clean)
+    m0 = phase8.reaim_foot(site.c, site.n0, cfg.contact_depth_mm,
+                           site.strut_length_mm, site.r_foot, site.r_root,
+                           site.owner, 1.0)
+    iv_all = geom.penetration_intervals(m0["p0"], m0["p1"], m0["r0"], m0["r1"], rays="all")
+    iv_ax = geom.penetration_intervals(m0["p0"], m0["p1"], m0["r0"], m0["r1"], rays="axis")
+    vd = verify._embed_scar_verdicts(geom, [m0], [0], {0: iv_all}, cfg)
+    assert verify._transit_classify(iv_all, m0, vd.get(0))[0] is True   # capsule firm
+    assert verify._transit_classify(iv_ax, m0, vd.get(0)) == (False, False)  # axis clean
+    res = phase8.run_phase2_struts([site], geom, cfg)[1138]
+    assert res.disposition == phase8.Disposition.STRUT_S1_REAIM
+    assert res.rung == "S1" and res.contract == "reaim" and res.winner is not None
+    assert res.winner.polar_deg > 0.0                    # a LEAN, not a shorten
+    wm = res.winner.member
+    ivw = geom.penetration_intervals(wm["p0"], wm["p1"], wm["r0"], wm["r1"], rays="all")
+    vdw = verify._embed_scar_verdicts(geom, [wm], [0], {0: ivw}, cfg)
+    assert verify._transit_classify(ivw, wm, vdw.get(0)) == (False, False)
+
+
+def test_strut_s1_axis_only_would_miss_graze(cfg):
+    """The strut ray set is normative: evaluating the graze on the STUB (axis-
+    only) ray set would call the firm strut legal (a false pass). Pins that
+    SM-STRUT uses rays='all' -- the census mi=1138 capsule-graze rule."""
+    geom = ExactSurface(_strut_graze_mesh())
+    site = _strut_site(mi=1138, cfg=cfg)
+    m0 = phase8.reaim_foot(site.c, site.n0, cfg.contact_depth_mm,
+                           site.strut_length_mm, site.r_foot, site.r_root,
+                           site.owner, 1.0)
+    ax = geom.penetration_intervals(m0["p0"], m0["p1"], m0["r0"], m0["r1"], rays="axis")
+    al = geom.penetration_intervals(m0["p0"], m0["p1"], m0["r0"], m0["r1"], rays="all")
+    vd = verify._embed_scar_verdicts(geom, [m0], [0], {0: al}, cfg)
+    assert verify._transit_classify(ax, m0, vd.get(0))[0] is False     # axis-only misses
+    assert verify._transit_classify(al, m0, vd.get(0))[0] is True      # capsule catches
+
+
+def test_strut_s1_growth_guard_rejects(cfg):
+    """Amendment-H S1 no-unbounded-strut-growth guard (part of LEGALITY): a
+    candidate whose free strut length exceeds p8_strut_growth_max_factor x the
+    ORIGINAL strut length is illegal. orig_len 1.0, factor 1.25 -> cap 1.25mm; a
+    site whose design length is 2.5mm has its f=1.0 (2.5) and f=0.75 (1.875)
+    candidates rejected, only f=0.5 (1.25 == cap) survives the guard."""
+    geom = ExactSurface(_box((20, 20, 4), center=(0, 0, -2)))   # clean slab, no wall
+    tight = _strut_site(mi=1, cfg=cfg, orig_len=1.0)
+    res = phase8.evaluate_s1([tight], geom, cfg)[1]
+    assert res.winner is not None
+    assert res.winner.f == 0.5                            # only the shortest survives
+    # generous baseline: every length legal-lean survives the guard
+    loose = _strut_site(mi=2, cfg=cfg, orig_len=2.5)
+    assert phase8.evaluate_s1([loose], geom, cfg)[2].winner.f == 1.0
+
+
+def test_strut_s2_reroute_marks_dead_never_quarantine(cfg):
+    """S1 empty (revalidate rejects every foot re-aim) -> S2 re-route. The old
+    foot's disposal contract is mark_dead, NEVER mark_quarantined (amendment D:
+    that stub-only contract does not cover interior struts)."""
+    geom = ExactSurface(_strut_graze_mesh())
+    site = _strut_site(mi=816, cfg=cfg)
+    res = phase8.run_phase2_struts([site], geom, cfg,
+                                   revalidate_fn=lambda c: False,
+                                   reroute_fn=lambda s: (True, 0.0, 5.0))[816]
+    assert res.disposition == phase8.Disposition.STRUT_S2_REROUTE
+    assert res.rung == "S2" and res.contract == "mark_dead"
+    assert res.contract != "mark_quarantined"
+
+
+def test_strut_s3_retirement_is_mark_dead_not_quarantine(cfg):
+    """S1 and S2 both empty -> S3 honest STRUCTURAL failure: mark_dead + an
+    unresolved STRUT (§6.7), NEVER mark_quarantined. Pins the amendment-D
+    contract fix: no strut disposition maps to the stub quarantine path."""
+    geom = ExactSurface(_strut_graze_mesh())
+    site = _strut_site(mi=824, cfg=cfg, criticality=2.0)
+    res = phase8.run_phase2_struts([site], geom, cfg,
+                                   revalidate_fn=lambda c: False)[824]   # no reroute_fn
+    assert res.disposition == phase8.Disposition.STRUT_S3_DEAD
+    assert res.rung == "S3" and res.contract == "mark_dead" and res.unresolved is True
+    assert res.criticality == 2.0 and res.trace == ("S1", "S2", "S3")
+    # the contract table itself never contains the stub quarantine path
+    assert "mark_quarantined" not in set(phase8._STRUT_CONTRACT.values())
+
+
+def test_strut_s3_raft_connectivity_guard_escalates(cfg):
+    """Raft-connectivity guard (amendment G, §6.9): if dropping the strut would
+    orphan a subtree from the raft, S3 mark_dead is DISALLOWED -- the strut
+    ESCALATES to the owner as a criticality-weighted unresolved, never silently
+    severed. orphan_fn True flips STRUT_S3_DEAD -> STRUT_S3_ESCALATE."""
+    geom = ExactSurface(_strut_graze_mesh())
+    site = _strut_site(mi=845, cfg=cfg, criticality=2.5)
+    res = phase8.run_phase2_struts([site], geom, cfg,
+                                   revalidate_fn=lambda c: False,
+                                   orphan_fn=lambda s: True)[845]
+    assert res.disposition == phase8.Disposition.STRUT_S3_ESCALATE
+    assert res.contract == "escalate" and res.unresolved is True
+    assert res.criticality == 2.5
+
+
+def test_strut_s1_determinism_and_batched(cfg):
+    """No RNG / no wall-clock: S1 winners are bit-identical run-to-run, and
+    evaluating struts TOGETHER (batched gather->scatter, rays='all') gives the
+    SAME per-site winner as alone."""
+    geom = ExactSurface(_strut_graze_mesh())
+    sites = [_strut_site(mi=867, cfg=cfg), _strut_site(mi=874, cfg=cfg)]
+    a = phase8.evaluate_s1(sites, geom, cfg)
+    b = phase8.evaluate_s1(sites, geom, cfg)
+    for sid in (867, 874):
+        assert a[sid].score == b[sid].score
+        assert a[sid].winner.cand_index == b[sid].winner.cand_index
+        alone = phase8.evaluate_s1([_strut_site(mi=sid, cfg=cfg)], geom, cfg)[sid]
+        assert alone.winner.cand_index == a[sid].winner.cand_index
+        assert alone.n_legal == a[sid].n_legal
+
+
+# ==========================================================================
+# SM-BALL (§3.2) -- the 15 true joint-ball breaches, B1->B2->B3, run LAST.
+# ==========================================================================
+def _ball53_mesh(near=0.2191, thick=0.0623):
+    """Reconstruction of archived breaching ball 53 (census breaching_balls):
+    r=0.35, center outside the surface (surface_dist 0.2191), the ball spanning a
+    thin 0.06mm foliage knife-edge whose FAR wall sits 0.2814mm from the center
+    -> feature_thickness_mm 0.2814, poke_out 0.0686. A thin slab whose near face
+    is `near` below the ball center and whose far face is `near+thick` below it
+    reproduces those exact numbers; sliding the joint root-ward clears it."""
+    return _box((4, 4, thick), center=(0.0, 0.0, -(near + thick / 2.0)))
+
+
+def _ball_site(bid=53, cfg=None, root_dir=(0, 0, 1), r=0.35, criticality=1.5,
+               orphan=False):
+    return phase8.BallSite(ball_id=bid, center=np.array([0.0, 0.0, 0.0]), r=r,
+                           root_dir=np.asarray(root_dir, float),
+                           owner=("contact", 55), criticality=criticality,
+                           orphan_if_dropped=orphan)
+
+
+def test_ball53_reconstruction_matches_archived(cfg):
+    """The fixture reproduces archived ball 53's measured numbers exactly (r
+    0.35, feature_thickness 0.2814, poke_out 0.0686) -- the ball-breach
+    reconstruction anchor from the archived forest census."""
+    geom = ExactSurface(_ball53_mesh())
+    br, th, pk = geom.sphere_breach(np.array([[0.0, 0.0, 0.0]]), np.array([0.35]),
+                                    eps_mm=0.05)
+    assert bool(br[0]) is True
+    assert abs(float(th[0]) - 0.2814) < 1e-3
+    assert abs(float(pk[0]) - 0.0686) < 1e-3
+
+
+def test_ball_b1_axial_slide_resolves_breach(cfg):
+    """SITE-DERIVED (archived ball 53): the joint breaches a thin feature; B1
+    slides it minimally along the member axis to a clean position. The winner is
+    the MINIMAL slide (0.25mm, root-ward rank 0), the ball radius is INVARIANT
+    (never shrunk), and disposition is BALL_B1_SLIDE."""
+    geom = ExactSurface(_ball53_mesh())
+    site = _ball_site(bid=53, cfg=cfg)
+    res = phase8.run_phase3_balls([site], geom, cfg)[53]
+    assert res.disposition == phase8.Disposition.BALL_B1_SLIDE
+    assert res.rung == "B1" and res.ball_shrunk is False
+    assert res.slide.slide_distance_mm == cfg.p8_ball_slide_step_mm   # minimal 0.25
+    assert res.slide.direction_rank == 0                              # root-ward
+    # the slid center is sphere-clean at the UNCHANGED radius (never shrunk)
+    br, _t, _p = geom.sphere_breach(res.slide.center[None, :], np.array([site.r]),
+                                    eps_mm=0.05)
+    assert bool(br[0]) is False
+
+
+def test_ball_slide_grid_order_and_no_zero(cfg):
+    """The B1 slide grid is magnitude-major then direction-minor (root-ward rank
+    0 before tip-ward rank 1), excludes the zero slide, and spans step..max. For
+    step 0.25 / max 2.0 that is 8 magnitudes x 2 directions = 16 candidates; the
+    slide_index total order makes first-clean == lex-min (slide_distance,
+    direction_rank)."""
+    site = _ball_site(cfg=cfg)
+    cands = phase8.ball_slide_candidates(site, cfg)
+    assert len(cands) == 16
+    assert all(c.slide_distance_mm > 0 for c in cands)               # no zero slide
+    assert [c.slide_index for c in cands] == list(range(16))
+    # first two share the smallest magnitude, root-ward (0) before tip-ward (1)
+    assert cands[0].slide_distance_mm == cands[1].slide_distance_mm == 0.25
+    assert cands[0].direction_rank == 0 and cands[1].direction_rank == 1
+    assert cands[-1].slide_distance_mm == 2.0
+
+
+def test_ball_b1_minimal_slide_when_multiple_clean(cfg):
+    """When several slide positions are clean, B1 takes the MINIMAL-slide one
+    (lex-min of (slide_distance, direction_rank)) -- not merely any clean
+    position. Root-ward 0.25 is clean AND root-ward 0.5 is clean; 0.25 wins."""
+    geom = ExactSurface(_ball53_mesh())
+    b1 = phase8.evaluate_b1([_ball_site(cfg=cfg)], geom, cfg)[53]
+    assert b1.n_clean >= 2                                            # multiple clean
+    assert b1.winner.slide_distance_mm == 0.25 and b1.winner.direction_rank == 0
+
+
+def test_ball_b2_local_reroute(cfg):
+    """B1 empty (slide-revalidate rejects every clean slide -- e.g. both adjoining
+    segments would go illegal) -> B2 local re-route; disposition BALL_B2_REROUTE,
+    ball never shrunk."""
+    geom = ExactSurface(_ball53_mesh())
+    site = _ball_site(bid=751, cfg=cfg)
+    res = phase8.run_phase3_balls([site], geom, cfg,
+                                  slide_revalidate_fn=lambda s, sl: False,
+                                  reroute_fn=lambda s: True)[751]
+    assert res.disposition == phase8.Disposition.BALL_B2_REROUTE
+    assert res.rung == "B2" and res.ball_shrunk is False
+
+
+def test_ball_b3_honest_failure_never_shrinks(cfg):
+    """B1 and B2 both fail -> B3 honest failure: an unresolved BALL (§6.7), the
+    breach never suppressed and the ball NEVER shrunk (the only remedy on offer
+    is relocation). ball_shrunk stays False; unresolved True."""
+    geom = ExactSurface(_ball53_mesh())
+    site = _ball_site(bid=773, cfg=cfg, criticality=1.5)
+    res = phase8.run_phase3_balls([site], geom, cfg,
+                                  slide_revalidate_fn=lambda s, sl: False)[773]  # no reroute
+    assert res.disposition == phase8.Disposition.BALL_B3_UNRESOLVED
+    assert res.rung == "B3" and res.unresolved is True and res.ball_shrunk is False
+    assert res.trace == ("B1", "B2", "B3") and res.criticality == 1.5
+
+
+def test_ball_b1_batched_order_invariant(cfg):
+    """BATCH-FIRST: evaluating several balls TOGETHER (one flat slide matrix, ONE
+    sphere_breach call) yields the SAME per-ball winner as evaluating each alone
+    -- the scatter bookkeeping a per-ball scalar loop would sidestep."""
+    geom = ExactSurface(_ball53_mesh())
+    sites = [_ball_site(bid=53, cfg=cfg), _ball_site(bid=289, cfg=cfg),
+             _ball_site(bid=388, cfg=cfg)]
+    together = phase8.evaluate_b1(sites, geom, cfg)
+    for s in sites:
+        alone = phase8.evaluate_b1([s], geom, cfg)[s.ball_id]
+        assert together[s.ball_id].winner.slide_index == alone.winner.slide_index
+        assert together[s.ball_id].n_clean == alone.n_clean
+
+
+def test_ball_radius_invariant_across_slides(cfg):
+    """The ball radius is never touched by SM-BALL (relocation, not shrinking):
+    every slide candidate carries the ORIGINAL center offset only, and the B1
+    winner is tested at the unchanged radius. No slide candidate encodes a
+    radius, so shrinking is structurally impossible."""
+    site = _ball_site(cfg=cfg, r=0.35)
+    cands = phase8.ball_slide_candidates(site, cfg)
+    for c in cands:
+        assert not hasattr(c, "r")                       # no radius on a slide
+        assert np.isclose(np.linalg.norm(c.center - site.center),
+                          c.slide_distance_mm)            # pure translation
+
+
+def test_phase2_phase3_implemented_not_raising(cfg):
+    """Phase 2 (SM-STRUT) and Phase 3 (SM-BALL) are implemented state machines --
+    they return results, they do not raise (only the pocket solver still does)."""
+    geom_s = ExactSurface(_strut_graze_mesh())
+    geom_b = ExactSurface(_ball53_mesh())
+    assert phase8.run_phase2_struts([_strut_site(cfg=cfg)], geom_s, cfg)   # no raise
+    assert phase8.run_phase3_balls([_ball_site(cfg=cfg)], geom_b, cfg)     # no raise
