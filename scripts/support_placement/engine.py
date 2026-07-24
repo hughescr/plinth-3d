@@ -16,7 +16,7 @@ import time
 import numpy as np
 
 from . import perception, placement, routing, verify, joints, cco, tree, rewire
-from . import transient, bracing
+from . import transient, bracing, phase8_driver
 from .geometry_kernel import KernelSurface
 
 
@@ -296,6 +296,48 @@ def brace_and_size(mesh, forest, unrouted, surface_tree, plate_z, cfg, log=None,
     return log["brace_and_size"]
 
 
+def relocate(mesh, forest, unrouted, contacts, carried, tip_r, plate_z, cfg,
+             geom=None, log=None, census_authority=frozenset()):
+    """Phase-8 RELOCATION STAGE (SPEC-P8-RELOCATE §3.0), wired post-brace /
+    pre-final-verify. Constructs the frozen defect snapshot + the SM-STUB /
+    SM-STRUT / SM-BALL sites from the engine's OWN gate output, runs the state
+    machines in the normative order, and splices accepted relocations back into
+    `forest` deterministically (`phase8_driver.run_phase8`). Mutates `forest` in
+    place; returns the `Phase8Report` dict this call wrote to `log['relocate']`.
+
+    IDEMPOTENT BY CONSTRUCTION: a forest with zero non-exempt transits / zero
+    breaches builds an empty snapshot, enters no ladder, and mutates nothing, so
+    re-invoking the stage over already-fixed geometry is a byte-exact no-op
+    (§6.10). Requires an exact `geom` oracle; a legacy cKDTree caller is a no-op
+    (the transit/ball predicates need the exact kernel)."""
+    log = log if log is not None else {}
+    if geom is None or not hasattr(geom, "penetration_intervals"):
+        log["relocate"] = dict(skipped="no exact geom oracle")
+        return log["relocate"]
+    members, balls = live_member_lists(forest, unrouted, plate_z, cfg)
+    report = phase8_driver.run_phase8(
+        forest, members, balls, contacts, carried, tip_r, plate_z, geom, cfg, mesh,
+        unrouted=unrouted, census_authority=census_authority, log=log)
+    rep = dict(
+        entered_ladder=report.entered_ladder, dt_s=report.dt_s,
+        n_stub_sites=report.n_stub_sites, n_strut_sites=report.n_strut_sites,
+        n_ball_sites=report.n_ball_sites,
+        stub_resolved=report.stub_resolved, stub_unresolved=report.stub_unresolved,
+        qreal_resolved=report.qreal_resolved, qreal_unresolved=report.qreal_unresolved,
+        strut_resolved=report.strut_resolved, strut_unresolved=report.strut_unresolved,
+        ball_resolved=report.ball_resolved, ball_unresolved=report.ball_unresolved,
+        n_reverted=len(report.reverted_splices), n_pockets=len(report.pocket_labels),
+        snapshot=report.snapshot_summary)
+    log["relocate"] = rep
+    if report.entered_ladder:
+        print(f"[v5] .. relocate sites stub={report.n_stub_sites} "
+              f"strut={report.n_strut_sites} ball={report.n_ball_sites} -> "
+              f"resolved stub={report.stub_resolved} strut={report.strut_resolved} "
+              f"ball={report.ball_resolved} (reverted {len(report.reverted_splices)})",
+              file=sys.stderr, flush=True)
+    return rep
+
+
 def finish(mesh, pre, forest, unrouted, contacts, carried, tip_r,
            surface_tree, cfg, log=None, geom=None):
     """Stage 3b: verify gates + volume report on the final forest."""
@@ -408,6 +450,18 @@ def run(mesh, cfg, log=None):
         with _stage(log, f"brace_and_size[p{fix_pass}]", t0):
             brace_and_size(mesh, forest, unrouted, surface_tree, plate_z, cfg,
                            log=log, geom=geom)
+        # Phase-8 RELOCATION (SPEC-P8-RELOCATE §3.0): its own stage, post-brace
+        # and pre-final-verify, so the ball phase reads the FINAL braced shaft
+        # geometry and the verify gate below judges the RELOCATED forest. Gated
+        # by cfg.p8_relocate_enable (default OFF; idempotent no-op on clean
+        # geometry, so bit-identity baselines are preserved when OFF or when the
+        # forest has no defects). Its own [v5] stage log + ledger entry.
+        if getattr(cfg, "p8_relocate_enable", False):
+            with _stage(log, f"relocate[p{fix_pass}]", t0):
+                _prog_r = _ProgressCell()
+                with _ticker(f"relocate[p{fix_pass}]", lambda: _prog_r.n, 1):
+                    relocate(mesh, forest, unrouted, contacts, carried, tip_r,
+                             plate_z, cfg, geom=geom, log=log)
         tree.assert_all_certified(forest)
         members, balls = live_member_lists(forest, unrouted, plate_z, cfg)
         log[f"forest_pass{fix_pass}"] = dict(

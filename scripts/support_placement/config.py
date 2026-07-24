@@ -473,6 +473,16 @@ class SupportConfig:
     p8_max_unresolved_weight: float = 3.0           # §6.7 criticality-weighted bound
     p8_chord_canon_micron: int = 1                  # §6.3 integer-micron chord canon
 
+    # Phase-8 RELOCATION STAGE (phase8_driver.run_phase8, wired into engine.run
+    # post-brace / pre-final-verify). Default OFF -- like every other perf/quality
+    # lever on this branch (perf_gate_emit_on_verify etc.), it is opt-in so the
+    # frozen bit-identity/determinism baselines are untouched: with it OFF the
+    # engine emits byte-identical geometry to HEAD. The full-scale acceptance run
+    # turns it ON. When ON but a forest has zero defects the stage is a no-op
+    # (idempotent by construction), so enabling it on already-clean geometry also
+    # leaves the digest unchanged.
+    p8_relocate_enable: bool = False
+
     def notes(self):
         """Flags for the caller: which constants are physics-derived vs
         rough estimates pending calibration. Surface this in run logs so a
