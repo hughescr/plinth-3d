@@ -22,20 +22,49 @@ STEP = 0.12          # dense sample step (mm)
 CAP = 80             # max samples per sub-segment
 BALL_EPS = 0.05      # mm poke-out to count a ball breach
 
+# ---- SPEC-EMBED-POLICY (SCAR-AREA-CAP, panel ruling 2026-07-23, commit cd989fe)
+# docs/specs/SPEC-EMBED-POLICY.md -- normative constants, literal from that text.
+# Independent census implementation: NO kernel calls, no shared code with the
+# Rust/Python engine. pitch_bound (PB) and EMBED_SLACK are RETIRED entirely by
+# the spec -- exact oracles on both sides need no sampled-cloud noise term or
+# placement-slack budget; this predicate measures the ACTUAL crossing.
+A_ABS_MM2 = 2.0        # absolute scar-area allowance (1.60mm equiv. scar dia)
+KAPPA = 1.25           # headroom multiplier on the designed crossing disc
+L_SCAR_MAX_MM = 2.5    # max scar patch dimension
+EPS_COS = 1e-9         # divide-by-zero guard only; NOT a physics floor
+TOL_MM = 0.05          # interval anchoring / detection tolerance
+BALL_FACTOR_STUB = 1.5  # contact-stub tips (config.py tip_ball_r_factor)
+BALL_FACTOR_FOOT = 1.4  # strut/rung feet (joints.py MODEL_FOOT_FACTOR)
+
 def own(o):
     return list(o) if isinstance(o, (list, tuple)) else o
+
+def tip_iv_index(ivs, seg, embed, tol):
+    """Index into `ivs` (sorted, disjoint intervals in ray-parameter order) of
+    the TIP-ANCHORED interval for a designed embed end, per SPEC-EMBED-POLICY:
+    'the solid interval whose start lies within TOL_MM of p0' (p1 case:
+    symmetric, measured back from p1). DISTANCE-based, deliberately NOT the
+    census's own Moller-crossing subsegment-index flags (ss/es) -- a stub tip
+    sitting a hair outside the surface (a common, legal placement) still
+    anchors here as long as the gap is within tolerance; ss/es only tell you
+    whether that boundary happens to equal the ray's own t=0/t=1 exactly."""
+    if not ivs:
+        return None
+    if embed == "p0":
+        return 0 if ivs[0][0] * seg <= tol else None
+    if embed == "p1":
+        return (len(ivs) - 1) if (seg - ivs[-1][1] * seg) <= tol else None
+    return None
 
 t0 = time.time()
 S, mesh = C.load_all()
 members = S["members"]; balls = S["balls"]; cfg = S["cfg"]
-CD = cfg.contact_depth_mm; STAND = cfg.standoff_mm
+CD = cfg.contact_depth_mm; STAND = cfg.standoff_mm   # provenance only; NOT inputs
+TIP_R_MIN = cfg.tip_r_min_mm                          # to the SCAR-AREA-CAP formula
 MI = C.MeshIndex(mesh)
-import routing
-stree = routing.build_surface_tree(mesh)
-PB = float(routing.surface_tree_pitch_bound_mm(stree, percentile=cfg.surface_pitch_bound_percentile)); del stree
 dist_tool = C.SignedTester(mesh, MI, k=64, flip=False)
 PV = C.ParityVote(mesh, h=0.5)   # finer grid: bounds per-cell (pts x tris) working set <2GB
-print("pitch_bound=%.3f ready RSS=%.2fGB" % (PB, C.rss_gb()), flush=True)
+print("census index ready RSS=%.2fGB" % C.rss_gb(), flush=True)
 
 # ---------------- PASS A: crossings + dense per-subsegment samples ----------------
 rec = []; pts_list = []
@@ -90,8 +119,7 @@ for s in range(0, len(all_pts), 1024):
 print("PASS B: dense inside frac=%.4f t=%.1fs RSS=%.2fGB" %
       (inside_all.mean(), time.time() - t0, C.rss_gb()), flush=True)
 
-# ---------------- PASS C: subseg majority -> intervals -> classify ----------------
-crossings = []; per_member = {}
+# ---------------- PASS C1: subseg majority -> intervals ----------------
 for r in rec:
     subs = r["subs"]
     ins = []; dep = []
@@ -115,20 +143,103 @@ for r in rec:
             ivs.append((ta, tb, ss, es, depth)); i = j + 1
         else:
             i += 1
+    r["ivs"] = ivs
+print("PASS C1: intervals resolved t=%.1fs" % (time.time() - t0), flush=True)
+
+# ---------------- PASS C2: SCAR-AREA-CAP embed-end legality ----------------
+# Per designed embed end (SPEC-EMBED-POLICY.md), AXIS geometry only, batched.
+# T = tip-anchored interior interval length (from the axis ray's own PASS-C1
+# intervals); x_c = its real crossing boundary; d = signed distance p0->surface;
+# cosang from the crossing triangle's outward normal (nearest-triangle exact
+# projection, same primitive the rest of this census uses for d/normals).
+embed_axis = [r for r in rec if r["label"] == "axis" and r["embed"] in ("p0", "p1")]
+p0_pts = []; xc_pts = []; xc_owner = []; meta = []
+for r in embed_axis:
+    embed = r["embed"]; seg = r["seg"]; O = r["O"]; D = r["D"]; kind = r["kind"]
+    if embed == "p0":
+        p0pt = O; other_r = r["r1"]; r_end_raw = r["r0"]; u = -D / seg
+    else:  # embed == "p1"
+        p0pt = O + D; other_r = r["r0"]; r_end_raw = r["r1"]; u = D / seg
+    xc = None
+    ti = tip_iv_index(r["ivs"], seg, embed, TOL_MM)
+    if ti is not None:
+        ta, tb, ss, es, depth = r["ivs"][ti]
+        T = (tb - ta) * seg
+        if T > TOL_MM:
+            xc = O + (tb if embed == "p0" else ta) * D
+    else:
+        T = 0.0
+    r_end = max(r_end_raw, TIP_R_MIN)
+    ball_factor = BALL_FACTOR_STUB if kind == "stub" else BALL_FACTOR_FOOT
+    R_b = ball_factor * r_end
+    k = len(meta)
+    meta.append(dict(mi=r["mi"], T=T, seg=seg, r_end=r_end, r_root=other_r, R_b=R_b, u=u))
+    p0_pts.append(p0pt)
+    if xc is not None:
+        xc_pts.append(xc); xc_owner.append(k)
+
+p0_arr = np.array(p0_pts) if p0_pts else np.zeros((0, 3))
+d_all = np.abs(dist_tool.signed(p0_arr, batch=256)) if len(p0_arr) else np.empty(0)
+xc_arr = np.array(xc_pts) if xc_pts else np.zeros((0, 3))
+if len(xc_arr):
+    _, _, _, xc_norm = dist_tool.nearest(xc_arr, batch=256)
+else:
+    xc_norm = np.zeros((0, 3))
+xc_norm_by_k = {kk: xc_norm[i] for i, kk in enumerate(xc_owner)}
+
+embed_verdict = {}
+for k, mt in enumerate(meta):
+    T = mt["T"]; d = float(d_all[k]); R_b = mt["R_b"]; r_end = mt["r_end"]
+    if T > TOL_MM:
+        n = xc_norm_by_k[k]
+        cosang = abs(float(np.dot(mt["u"], n)))
+        frac = min(max(T / mt["seg"], 0.0), 1.0) if mt["seg"] > 1e-9 else 0.0
+        r_x = r_end + (mt["r_root"] - r_end) * frac
+        A_shaft = min(np.pi * r_x ** 2 / max(cosang, EPS_COS), 2.0 * r_x * T)
+        L_scar = min(2.0 * r_x / max(cosang, EPS_COS), T + 2.0 * r_x)
+        A_anchor_shaft = np.pi * r_x ** 2
+    else:
+        cosang = None; r_x = r_end
+        A_shaft = 0.0; L_scar = 0.0; A_anchor_shaft = 0.0
+    A_ball = np.pi * max(R_b ** 2 - d ** 2, 0.0)
+    A_patch = A_shaft + A_ball
+    A_design = np.pi * R_b ** 2
+    A_max = max(A_ABS_MM2, KAPPA * A_design)
+    A_anchor = A_ball + A_anchor_shaft
+    legal = (A_patch <= A_max) and (L_scar <= L_SCAR_MAX_MM) and (A_anchor >= np.pi * r_end ** 2)
+    embed_verdict[mt["mi"]] = dict(
+        legal=bool(legal), T=round(float(T), 4), d=round(d, 4),
+        cosang=(round(cosang, 4) if cosang is not None else None),
+        r_x=round(float(r_x), 4), R_b=round(float(R_b), 4),
+        A_patch=round(float(A_patch), 4), A_max=round(float(A_max), 4),
+        L_scar=round(float(L_scar), 4), A_anchor=round(float(A_anchor), 4),
+        r_end=round(float(r_end), 4))
+n_embed_ends = len(meta); n_embed_illegal = sum(1 for v in embed_verdict.values() if not v["legal"])
+print("PASS C2: %d designed embed ends, %d SCAR-AREA-CAP illegal t=%.1fs" %
+      (n_embed_ends, n_embed_illegal, time.time() - t0), flush=True)
+
+# ---------------- PASS C3: aggregate illegal crossings/members ----------------
+# Crossing topology (spec rule 4, unchanged): only the tip-anchored interval is
+# exempt-eligible. A LEGAL embed-end verdict exempts it ENTIRELY (no depth cap
+# -- idempotent union, per the owner's ruling); an ILLEGAL verdict flags its
+# full raw length. Any other interval (mid-span graze, re-entry, capsule-edge
+# crossing) is always a transit and always illegal, regardless of size.
+crossings = []; per_member = {}
+for r in rec:
+    ivs = r["ivs"]
     if not ivs:
         continue
     seg = r["seg"]; embed = r["embed"]; kind = r["kind"]
-    inset0 = CD + PB + r["r0"] + STAND; inset1 = CD + PB + r["r1"] + STAND
+    verdict = embed_verdict.get(r["mi"]) if embed in ("p0", "p1") else None
+    tip_idx = tip_iv_index(ivs, seg, embed, TOL_MM) if embed in ("p0", "p1") else None
     O = r["O"]; D = r["D"]
-    for (ta, tb, ss, es, depth) in ivs:
+    for iv_idx, (ta, tb, ss, es, depth) in enumerate(ivs):
         aa = ta * seg; bb = tb * seg
-        if embed == "p0":
-            lo, hi, zone = max(aa, inset0), bb, "p0"
-        elif embed == "p1":
-            lo, hi, zone = aa, min(bb, seg - inset1), "p1"
-        else:
-            lo, hi, zone = aa, bb, None
-        ill_len = hi - lo
+        tip_anchored = (iv_idx == tip_idx)
+        if tip_anchored and verdict is not None and verdict["legal"]:
+            continue  # SCAR-AREA-CAP LEGAL: sanctioned embed, fully exempt
+        zone = embed if tip_anchored else None
+        ill_len = bb - aa
         entry = O + ta * D; exit_ = O + tb * D
         feat = float(np.linalg.norm(exit_ - entry)); through = bool(ss and es)
         loc = (entry + exit_) / 2.0
@@ -153,11 +264,12 @@ for r in rec:
                   location=[round(float(x), 3) for x in loc],
                   transit_len_mm=round(float(transit), 4), illegal_len_mm=round(float(ill_len), 4),
                   feature_thickness_mm=round(float(feat), 4), penetration_depth_mm=round(float(depth), 4),
-                  z=round(float(loc[2]), 3), embed_zone=zone, scar_on_removal=through)
+                  z=round(float(loc[2]), 3), embed_zone=zone, scar_on_removal=through,
+                  embed_verdict=(verdict if tip_anchored else None))
         crossings.append(cd)
         if agg["worst"] is None or transit > agg["worst"][0]:
             agg["worst"] = (transit, cd)
-print("PASS C: %d illegal crossings, %d illegal members t=%.1fs" %
+print("PASS C3: %d illegal crossings, %d illegal members t=%.1fs" %
       (len(crossings), sum(1 for a in per_member.values() if a["illegal"]), time.time() - t0), flush=True)
 
 # ---------------- BALLS: through-thin-feature breach ----------------
@@ -271,11 +383,18 @@ summary = dict(
     ball_pokeout_edges=[0, 0.1, 0.2, 0.3, 0.5, 1, 1e9],
     ball_pokeout_hist=hist([b["poke_out_mm"] for b in ball_records], [0, 0.1, 0.2, 0.3, 0.5, 1, 1e9]),
     ball_by_owner=dict(Counter(b["owner"][0] if isinstance(b["owner"], list) else b["owner"] for b in ball_records)),
-    pitch_bound_mm=round(PB, 4), contact_depth_mm=CD, standoff_mm=STAND,
+    contact_depth_mm=CD, standoff_mm=STAND,   # provenance only; not embed-sanction inputs
+    embed_policy="SCAR-AREA-CAP (SPEC-EMBED-POLICY.md, panel ruling cd989fe)",
+    n_designed_embed_ends=n_embed_ends, n_embed_ends_illegal=n_embed_illegal,
+    embed_policy_constants=dict(A_ABS_MM2=A_ABS_MM2, KAPPA=KAPPA, L_SCAR_MAX_MM=L_SCAR_MAX_MM,
+                                 TOL_MM=TOL_MM, BALL_FACTOR_STUB=BALL_FACTOR_STUB,
+                                 BALL_FACTOR_FOOT=BALL_FACTOR_FOOT),
     min_illegal_len_mm=MIN_ILLEGAL_LEN, ball_eps_mm=BALL_EPS,
     crosscheck_heavy9ray_agreement=agree,
     delivered_verify_clearance_violations=len(S["verify"]["clearance_violations"]),
-    method="Moller crossings + dense-majority ParityVote inside per sub-segment; balls via antipodal-ray span")
+    method="Moller crossings + dense-majority ParityVote inside per sub-segment; "
+           "SCAR-AREA-CAP embed-end legality (area bound, no depth cap); "
+           "balls via antipodal-ray span")
 worst10m = [dict(member_idx=a["mi"], kind=a["kind"], embed_end=a["embed"], owner=a["owner"],
                  max_transit_mm=round(a["max_transit"], 3), max_penetration_depth_mm=round(a["max_depth"], 3),
                  min_feature_thickness_mm=(round(a["min_feat"], 3) if a["min_feat"] else None),
