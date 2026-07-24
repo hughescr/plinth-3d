@@ -1,0 +1,250 @@
+{
+  "tag": "run2",
+  "wall_s": 242.7,
+  "utime_s": 508.93,
+  "stime_s": 12.82,
+  "cpu_over_wall": 2.097,
+  "peak_rss_gb": 2.376,
+  "kernel": {
+    "api": 1,
+    "digest": "69fce2adf95577b38693f3ea6da0e93a8bbb764706892f29c728d83c29b86ad5",
+    "threads": 16,
+    "env_threads": null
+  },
+  "n_members": 1507,
+  "n_balls": 1073,
+  "n_unrouted": 154,
+  "n_contacts": 753,
+  "n_forest_members_total": 1737,
+  "n_forest_dead": 76,
+  "n_quarantined": 49,
+  "max_structural_radius_mm": 0.9818,
+  "max_ball_radius_mm": 1.2477,
+  "member_kind_counts": {
+    "stub": 599,
+    "trunk": 114,
+    "shoot": 364,
+    "strut": 414,
+    "model_rung": 4,
+    "brace": 12
+  },
+  "gates": {
+    "clearance_violations": 0,
+    "connectivity_violations": 0,
+    "printability_violations": 0,
+    "murray_violations": 0,
+    "unsupported_minima": 28,
+    "load_violations": 0,
+    "uncovered_island_births": 16,
+    "uncovered_islands": 120,
+    "removal_violations": 314,
+    "ball_breach_violations": 201,
+    "ok": false
+  },
+  "volume": {
+    "member_ml": 2.757,
+    "ball_ml": 0.70986,
+    "total_ml": 3.46687,
+    "by_kind_ml": {
+      "stub": 0.4677,
+      "trunk": 0.88467,
+      "shoot": 0.48845,
+      "strut": 0.76963,
+      "model_rung": 0.00479,
+      "brace": 0.14177
+    }
+  },
+  "digest": {
+    "n_members": 1507,
+    "n_balls": 1073,
+    "member_sha": "58df8fa07749d1e79a5764b452349e14c393caab920b859c288d710a3e686383",
+    "ball_sha": "7a749604edef3506f846bfd2f64c5ba64192e206e440db07c6d9023f2ff9a367",
+    "combined_sha": "79a0bb2d5345547dffb1d7b9221c807e28c575c4fd084ce3fec050ffcf36e925"
+  },
+  "telemetry": {
+    "threshold_band": 0,
+    "measured_tie": 38
+  },
+  "build_log": {
+    "nfaces": 576026,
+    "grid_pitch_mm": 2.0,
+    "bvh_depth": 29,
+    "bvh_nodes": 208717,
+    "n_degenerate_tris": 0,
+    "parity_axes": [
+      {
+        "axis": 0,
+        "cells": 1271,
+        "refs": 757185,
+        "max_occ": 36769,
+        "bytes": 54310310
+      },
+      {
+        "axis": 1,
+        "cells": 1778,
+        "refs": 781345,
+        "max_occ": 28280,
+        "bytes": 54413034
+      },
+      {
+        "axis": 2,
+        "cells": 990,
+        "refs": 736393,
+        "max_occ": 53729,
+        "bytes": 54223770
+      }
+    ]
+  },
+  "stage_timings": {
+    "t_geom_build": 0.33,
+    "t_islands": 18.5,
+    "t_minima": 21.43,
+    "t_island_births": 77.18,
+    "t_delicacy": 89.59,
+    "t_prepare": 89.91,
+    "t_surface_tree": 90.12,
+    "t_construct[p0]": 117.24,
+    "t_rewire[p0]": 140.05,
+    "t_brace_and_size[p0]": 156.65,
+    "t_verify[p0]": 166.11,
+    "t_construct[p1]": 193.46,
+    "t_rewire[p1]": 216.48,
+    "t_brace_and_size[p1]": 233.21,
+    "t_verify[p1]": 242.7,
+    "t_finish": 242.7,
+    "t_total": 242.7
+  },
+  "verify_passes": {
+    "verify_pass0": {
+      "ok": false,
+      "n_uncovered": 123,
+      "n_clearance_violations": 0,
+      "n_load_violations": 0,
+      "n_unsupported_minima": 28,
+      "n_connectivity_violations": 0,
+      "n_printability_violations": 0,
+      "n_murray_violations": 0,
+      "n_uncovered_island_births": 16,
+      "n_removal_blocked_trees": 311
+    },
+    "verify_pass1": {
+      "ok": false,
+      "n_uncovered": 120,
+      "n_clearance_violations": 0,
+      "n_load_violations": 0,
+      "n_unsupported_minima": 28,
+      "n_connectivity_violations": 0,
+      "n_printability_violations": 0,
+      "n_murray_violations": 0,
+      "n_uncovered_island_births": 16,
+      "n_removal_blocked_trees": 314
+    }
+  },
+  "forest_passes": {
+    "forest_pass0": {
+      "n_members": 1501,
+      "n_balls": 1068,
+      "n_unrouted": 153
+    },
+    "forest_pass1": {
+      "n_members": 1507,
+      "n_balls": 1073,
+      "n_unrouted": 154
+    }
+  },
+  "log_scalars": {
+    "contacts_initial": 335,
+    "minima_contacts_added": 344,
+    "island_birth_contacts_added": 70,
+    "n_quarantined": 49,
+    "n_unrouted": 154,
+    "gates_failed": true
+  },
+  "instrumentation": {
+    "capture": false,
+    "call_total": {
+      "cast_rays": 1490,
+      "inside": 12776,
+      "project": 11940,
+      "penetration_intervals_batch": 933,
+      "segment_clearance": 33450,
+      "sphere_breach": 1551,
+      "query": 2
+    },
+    "row_total": {
+      "cast_rays": 60830,
+      "inside": 17869,
+      "project": 13372,
+      "penetration_intervals_batch": 5374,
+      "segment_clearance": 57093,
+      "sphere_breach": 63259,
+      "query": 1746
+    },
+    "seen_total": {},
+    "corpus_sizes": {},
+    "call_size_histogram": {
+      "cast_rays": {
+        "1": 2,
+        "4": 1,
+        "10": 2,
+        "18": 2,
+        "37": 4,
+        "40": 1478,
+        "1500": 1
+      },
+      "inside": {
+        "1": 11385,
+        "2": 374,
+        "3": 1013,
+        "596": 1,
+        "599": 1,
+        "749": 1,
+        "753": 1
+      },
+      "project": {
+        "1": 11938,
+        "715": 1,
+        "719": 1
+      },
+      "penetration_intervals_batch": {
+        "1": 898,
+        "2": 31,
+        "715": 1,
+        "719": 1,
+        "1487": 1,
+        "1493": 1
+      },
+      "segment_clearance": {
+        "1": 14314,
+        "2": 17466,
+        "3": 1089,
+        "4": 356,
+        "5": 169,
+        "6": 42,
+        "7": 8,
+        "25": 2,
+        "69": 1,
+        "71": 1,
+        "905": 1,
+        "908": 1
+      },
+      "sphere_breach": {
+        "1": 62,
+        "4": 1,
+        "10": 2,
+        "18": 2,
+        "37": 4,
+        "38": 2,
+        "39": 14,
+        "40": 1462,
+        "1938": 1,
+        "1949": 1
+      },
+      "query": {
+        "870": 1,
+        "876": 1
+      }
+    },
+    "n_instances": 1
+  }
+}
