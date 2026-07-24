@@ -1834,3 +1834,337 @@ def test_ruling5_site_derived_ledger_registers_the_archived_unresolved_set():
     assert all(r[6] == 2 for r in rows), "attempts accumulate across passes"
     assert all(r[4] == 0 and r[5] == 1 for r in rows), "first/last sweep tracked"
     assert rows == tuple(sorted(rows, key=lambda r: (r[0], r[1]))), "deterministic"
+
+
+# ==========================================================================
+# RULING (4) -- THE CENSUS-PARITY DUAL CERTIFICATE.
+# ==========================================================================
+_CENSUS_RUN2_PKL = os.path.join(_SCR, "p8_run2.pkl")
+_CENSUS_RUN2_CMP = os.path.join(_SCR, "p8census_run2", "compare_run2_report.json")
+
+# The archived engine-vs-census symmetric difference, from the acceptance
+# census's own `compare_run2_report.json` (bucket "non_exempt": only_in_engine
+# EMPTY, only_in_census these six). This is the boundary class ruling (4) is
+# about, and the fixture every test below is derived from.
+_ARCHIVED_BOUNDARY = (168, 376, 443, 445, 485, 519)
+
+
+def test_dual_certificate_mechanism_a_dropped_tip_sliver_promotes_a_transit():
+    """THE MECHANISM, mesh-free, on the archived mi=376 numbers.
+
+    The engine oracle drops sub-`MIN_ILLEGAL_LEN` intervals INSIDE
+    `penetration_intervals` -- i.e. BEFORE tip anchoring is decided -- while the
+    census keeps every PASS-C1 interval and length-filters afterwards in PASS C3.
+    Feed `certify_member` (the ONE shared law, unchanged) the two lists and the
+    verdict flips: with the 31um tip sliver present the tip anchors to the
+    SLIVER and the 1.155mm run is the unanchored firm transit the census counts;
+    with the sliver dropped the 1.155mm run itself slides into the tip slot,
+    where a LEGAL SCAR verdict exempts it entirely."""
+    m = dict(p0=[0.0, 0.0, 0.0], p1=[0.0, 0.0, 2.8], r0=0.2, r1=0.35,
+             kind="stub", embed_end="p0", owner=("contact", 0))
+    sliver = dict(s_a=0.0, s_b=0.0311, entered=False, exited=True,
+                  max_depth_mm=0.01, ray="axis")
+    transit = dict(s_a=0.0446, s_b=1.1999, entered=True, exited=True,
+                   max_depth_mm=0.09, ray="axis")
+    # what the engine's oracle hands the certificate today (sliver dropped)
+    assert verify.certify_member([transit], m, True)["legal"] is True
+    assert verify.certify_member([transit], m, True)["nonexempt"] is False
+    # what the census sees (full resolution) -- the SAME function, same verdict input
+    full = verify.certify_member([sliver, transit], m, True)
+    assert full["legal"] is False and full["nonexempt"] is True
+    # and the tip exemption is NOT capped: the sliver itself stays exempt.
+    assert verify.certify_member([sliver], m, True)["legal"] is True
+
+
+def test_full_resolution_intervals_keep_the_sub_detection_tip_sliver(cfg):
+    """END-TO-END on a synthetic mesh: a 0.03mm skin at the tip plus a thick
+    wall beyond it. `_batch_axis_intervals` at the gate's own 0.05mm cutoff
+    returns ONE interval and certifies the member legal; at full resolution it
+    returns TWO and the dual certificate reads it non-exempt. This is the
+    treant's six boundary members in miniature, built from scratch."""
+    skin = _box((10, 10, 0.03), center=(0, 0, 0.015))     # 30um tip skin, z 0..0.03
+    wall = _box((10, 10, 0.15), center=(0, 0, 0.12))      # z 0.045..0.195
+    mesh = _soup(skin, wall)
+    geom = ExactSurface(mesh)
+    m = dict(p0=[0.0, 0.0, 0.0], p1=[0.0, 0.0, 2.0], r0=0.2, r1=0.35,
+             kind="stub", embed_end="p0", owner=("contact", 0))
+
+    gate_iv = verify._batch_axis_intervals(geom, [m], [0], rays="axis")[0]
+    full_iv = verify._batch_axis_intervals(geom, [m], [0], rays="axis",
+                                           min_illegal_len_mm=0.0)[0]
+    assert len(full_iv) == len(gate_iv) + 1, (gate_iv, full_iv)
+    assert full_iv[0]["s_b"] - full_iv[0]["s_a"] < verify.MIN_ILLEGAL_LEN_MM
+    assert np.isclose(full_iv[0]["s_a"], 0.0, atol=1e-6), "the sliver IS the tip"
+
+    gate_vd = verify._embed_scar_verdicts(geom, [m], [0], {0: gate_iv}, cfg)
+    assert verify.certify_member(gate_iv, m, gate_vd.get(0))["legal"] is True
+    dual = verify.certify_members_full_resolution(geom, [m], [0], cfg, rays="axis")
+    assert dual[0]["nonexempt"] is True and dual[0]["legal"] is False
+
+
+def test_dual_cert_fn_is_batched_scoped_and_inert_off_the_boundary(cfg):
+    """The `_batch_legal_sets` hook contract: ONE call per rung over the WHOLE
+    candidate list (never per candidate), answers ONLY boundary-site candidates,
+    and is None -- so bit-for-bit the old evaluator -- when no site is
+    boundary-class."""
+    assert pd._dual_cert_fn(frozenset(), object(), cfg) is None
+
+    calls = []
+
+    class _Cand:
+        def __init__(self, sid):
+            self.site_id = sid
+            self.member = dict(p0=[0, 0, 0], p1=[0, 0, 1], r0=0.2, r1=0.2,
+                               kind="stub", embed_end="p0", owner=("contact", sid))
+
+    cands = [_Cand(7), _Cand(9), _Cand(7)]
+
+    def _fake_full_res(geom, members, mis, cfg_, rays="axis"):
+        calls.append(tuple(mis))
+        return {j: dict(legal=(j == 0), scar_ok=True, nonexempt=(j != 0), moot=False)
+                for j in mis}
+
+    orig = verify.certify_members_full_resolution
+    verify.certify_members_full_resolution = _fake_full_res
+    try:
+        fn = pd._dual_cert_fn(frozenset({7}), object(), cfg)
+        out = fn(cands)
+    finally:
+        verify.certify_members_full_resolution = orig
+    assert calls == [(0, 2)], "ONE batched call over exactly the boundary candidates"
+    assert out == {0: True, 2: False}
+    assert 1 not in out, "a non-boundary candidate is unrestricted, not keyed"
+
+
+@pytest.mark.kernel
+def test_census_boundary_members_reproduces_the_archived_census_only_set(cfg):
+    """SITE-DERIVED (ruling (4)). On the archived p8_run2 geometry the derived
+    boundary class is EXACTLY the acceptance census's own `only_in_census` list
+    -- all six, and nothing else out of 1476 live members. The set is computed,
+    never hardcoded: `census_boundary_members` asks the dual certificate, and the
+    dual certificate IS the census's rule-4 accounting."""
+    import pickle
+    from support_placement.geometry_kernel import KernelSurface
+    if not (os.path.exists(_CENSUS_RUN2_PKL) and os.path.exists(_STL)):
+        pytest.skip("archived p8_run2.pkl / source STL not present")
+    S = pickle.load(open(_CENSUS_RUN2_PKL, "rb"))
+    members = joints.collect_members(S["members"])
+    cfg_r = S["cfg"]
+    mesh = trimesh.load(_STL, file_type="stl", process=False)
+    mesh.apply_translation(-(mesh.bounds[0] + mesh.bounds[1]) / 2.0)
+    geom = KernelSurface(mesh)
+
+    if os.path.exists(_CENSUS_RUN2_CMP):        # prefer the census's OWN answer
+        rep = json.load(open(_CENSUS_RUN2_CMP))
+        expect = tuple(sorted(int(x) for x in rep["non_exempt"]["only_in_census"]))
+        assert not rep["non_exempt"]["only_in_engine"], "engine-only must be empty"
+    else:
+        expect = _ARCHIVED_BOUNDARY
+    assert expect == _ARCHIVED_BOUNDARY, expect
+
+    gate = pd.classify_gate(mesh, members, S["balls"], geom, cfg_r)
+    got = pd.census_boundary_members(members, range(len(members)), gate, geom, cfg_r)
+    assert tuple(sorted(got)) == _ARCHIVED_BOUNDARY, sorted(got)
+    # and every one of them is LEGAL under the engine's own gate -- that is what
+    # makes them boundary rather than ordinary targets.
+    assert not (got & gate.firm_transit)
+
+
+# ==========================================================================
+# RULING (6) -- SM-BALL: THE JOINT SLIDE MOVES THE JOINT, NOT ITS NEIGHBOURS.
+# ==========================================================================
+def test_translate_joint_obeys_the_joints_membership_law(cfg):
+    """`_translate_joint` derives its co-move set from `joints.compute_joint_balls`'
+    OWN law, not from a radius invented at the call site (ruling (6)):
+
+      * the coincidence radius is `joints.COINCIDE_TOL_MM` -- an endpoint further
+        out is NOT in the cluster that formed the ball and must not ride;
+      * a STUB's p0 is the tip CONTACT and is NEVER a joint node, so it never
+        rides even when it sits exactly on the node.
+
+    The second rule is the one that mattered: a stub tip is an EMBEDDED model
+    contact, so dragging it collapses its SCAR anchor and the D6 guard refuses
+    the whole slide -- an over-broad co-move set does not make a wrong commit, it
+    makes NO commit and reports "no legal slide" when one existed."""
+    node = np.array([0.0, 0.0, 1.0])
+    f = tree.Forest()
+    fi_branch = f.add_member(tree.Member(p0=node.tolist(), p1=[1, 0, 3],
+                                         r0=0.3, r1=0.3, kind="branch",
+                                         owner=("contact", 0)))
+    fi_stub_p1 = f.add_member(tree.Member(p0=[0, 0, -0.3], p1=node.tolist(),
+                                          r0=0.2, r1=0.3, kind="stub",
+                                          owner=("contact", 1), embed_end="p0"))
+    # a NEIGHBOURING contact stub whose embedded TIP happens to sit on the node
+    fi_tip = f.add_member(tree.Member(p0=node.tolist(), p1=[0, 0, 3],
+                                      r0=0.2, r1=0.35, kind="stub",
+                                      owner=("contact", 2), embed_end="p0"))
+    # a branch end just OUTSIDE the joints-law radius (inside the old 0.5*r_ball)
+    fi_far = f.add_member(tree.Member(p0=(node + [0.30, 0, 0]).tolist(), p1=[3, 0, 3],
+                                      r0=0.3, r1=0.3, kind="branch",
+                                      owner=("contact", 3)))
+    before = {fi: (np.array(m.p0, float).copy(), np.array(m.p1, float).copy())
+              for fi, m in enumerate(f.members)}
+
+    delta = np.array([0.0, 0.0, 0.4])
+    saved = pd._translate_joint(f, node, delta)
+    moved = sorted(fi for fi, _s in saved)
+    assert moved == [fi_branch, fi_stub_p1], moved
+    # the neighbouring stub's embedded TIP did not move ...
+    assert np.array_equal(np.asarray(f.members[fi_tip].p0), before[fi_tip][0])
+    # ... nor did the endpoint outside the joints-law radius.
+    assert np.array_equal(np.asarray(f.members[fi_far].p0), before[fi_far][0])
+    # the joint members that DID ride moved by exactly delta (the weld holds).
+    assert np.allclose(np.asarray(f.members[fi_branch].p0), before[fi_branch][0] + delta)
+    assert np.allclose(np.asarray(f.members[fi_stub_p1].p1), before[fi_stub_p1][1] + delta)
+    assert np.array_equal(np.asarray(f.members[fi_branch].p1), before[fi_branch][1])
+    # explicit tol still overrides the RADIUS, but never the structural stub rule.
+    f2 = tree.Forest()
+    f2.add_member(tree.Member(p0=node.tolist(), p1=[0, 0, 3], r0=0.2, r1=0.35,
+                              kind="stub", owner=("contact", 2), embed_end="p0"))
+    assert pd._translate_joint(f2, node, delta, tol=1.0) == []
+
+
+@pytest.mark.kernel
+def test_smball_archived_746_slide_is_scoped_to_the_joint(cfg):
+    """SITE-DERIVED (ruling (6)) from the archived (contact,746) 0.796mm breach.
+
+    Diagnosis, reproduced as the test. The site was always constructed and B1
+    always found sphere-clean slides; the failure was neither "never sited" nor
+    "no legal slide". The co-move radius `max(0.05, 0.5*r_ball)` = 0.624mm --
+    four times `joints.COINCIDE_TOL_MM`, and derived from the BALL rather than
+    from joint membership -- swept in ELEVEN neighbouring contact-stub TIPS.
+    Those are embedded model contacts, so every trial collapsed eleven SCAR
+    anchors and the D6 zero-new-violation guard refused the lot, reporting "no
+    legal slide" for a reason that had nothing to do with the ball.
+
+    Under `joints`' own membership law the slide touches exactly the ONE member
+    that meets the node. The breach is still not resolvable by an axial slide,
+    but now for its own honest reason, which this test pins: the only
+    sphere-clean positions pull the strut's foot clear out of the model and
+    collapse ITS OWN anchor. The ball is 2.50mm across on a 0.45mm feature -- no
+    position on that leaf can hold it, and the remaining lever is a foot re-seat
+    (rung B2), not a slide."""
+    import pickle
+    from support_placement.geometry_kernel import KernelSurface
+    if not (os.path.exists(_RUN2_PKL) and os.path.exists(_STL)):
+        pytest.skip("archived p8r_run2.pkl / source STL not present")
+    S = pickle.load(open(_RUN2_PKL, "rb"))
+    forest, cfg_r, plate_z = S["forest"], S["cfg"], S["plate_z"]
+    members, unrouted = S["members"], S["unrouted"]
+    mesh = trimesh.load(_STL, file_type="stl", process=False)
+    mesh.apply_translation(-(mesh.bounds[0] + mesh.bounds[1]) / 2.0)
+    geom = KernelSurface(mesh)
+
+    breaches = [v for v in verify.ball_breach_report(geom, members, S["balls"], cfg_r)
+                if v.get("source") == "ball"]
+    sites = pd.ball_sites_from_breaches(breaches, members, cfg_r)
+    site = next((s for s in sites if tuple(s.owner or ()) == ("contact", 746)), None)
+    assert site is not None, "the (contact,746) breach must be SITED, not skipped"
+    assert 0.79 < float(next(b["poke_out_mm"] for b in breaches
+                             if tuple(b["owner"]) == ("contact", 746))) < 0.80
+
+    # (1) the OLD radius swept in the neighbouring stub tips; the joints law does not.
+    idx_arr, end_arr, pt_arr = forest.endpoint_index()
+    d = np.linalg.norm(pt_arr - np.asarray(site.center, float)[None, :], axis=1)
+    wide = np.nonzero(d <= max(0.05, 0.5 * float(site.r)))[0]
+    n_tips = sum(1 for k in wide
+                 if int(end_arr[k]) == 0
+                 and getattr(forest.members[int(idx_arr[k])], "kind", None) == "stub")
+    assert len(wide) == 12 and n_tips == 11, (len(wide), n_tips)
+    assert int((d <= joints.COINCIDE_TOL_MM).sum()) == 1
+
+    # (2) B1's grid still contains sphere-clean slides -- it always did.
+    slides = phase8.ball_slide_candidates(site, cfg_r)
+    breached, _t, _p = geom.sphere_breach(
+        np.array([sl.center for sl in slides]),
+        np.full(len(slides), float(site.r)), eps_mm=0.05)
+    clean = sorted((sl for j, sl in enumerate(slides) if not bool(breached[j])),
+                   key=lambda s: s.slide_index)
+    assert clean, "B1 always had sphere-clean slides; the guard is what refused them"
+
+    # (3) THE CONTRAST that is the whole fix. Under the OLD co-move set every
+    # sphere-clean slide was refused because it dragged eleven innocent
+    # neighbours' embedded tips; under `joints`' membership law the slide touches
+    # exactly the one member that meets the node, so whatever the guard says next
+    # is about THAT member and not about collateral damage.
+    pre_members, _lf, pos_of = pd._live_universe(forest, unrouted)
+    dig0 = p8_accept.geometry_digest(*engine.live_member_lists(
+        forest, unrouted, plate_z, cfg_r))
+
+    def _legacy_translate(delta, tol):
+        """The PRE-FIX co-move set, verbatim: every live endpoint within
+        `max(0.05, 0.5*r_ball)`, embedded stub tip contacts included."""
+        idx_a, end_a, pt_a = forest.endpoint_index()
+        hit = np.nonzero(np.linalg.norm(
+            pt_a - np.asarray(site.center, float)[None, :], axis=1) <= tol)[0]
+        ends = {}
+        for k in hit:
+            ends.setdefault(int(idx_a[k]), []).append(int(end_a[k]))
+        out = []
+        for fi in sorted(ends):
+            fm = forest.members[fi]
+            out.append((fi, fm._snapshot()))
+            for end in sorted(ends[fi]):
+                if end == 0:
+                    fm.p0 = np.asarray(fm.p0, float) + delta
+                else:
+                    fm.p1 = np.asarray(fm.p1, float) + delta
+        return out
+
+    def _trial(sl, legacy):
+        delta = np.asarray(sl.center, float) - np.asarray(site.center, float)
+        index = forest.endpoint_index()
+        if legacy:
+            saved = _legacy_translate(delta, max(0.05, 0.5 * float(site.r)))
+            assert len(saved) == 12, "the old radius dragged twelve endpoints"
+        else:
+            saved = pd._translate_joint(forest, site.center, delta, index=index)
+            assert len(saved) == 1, "the joint is ONE endpoint, not twelve"
+        viol = forest.revalidate(geom, cfg_r)
+        touched = {fi for fi, _s in saved}
+        affected = set(touched)
+        for fi, snap in saved:
+            for pt, r in pd._member_endpoints(snap):
+                for (nfi, _ne) in pd._coincident(*index, pt, max(0.05, 0.5 * r),
+                                                 exclude_fi=fi):
+                    affected.add(nfi)
+        subset = sorted(pos_of[fi] for fi in affected if fi in pos_of)
+        pre_def = pd._influence_defects(pre_members, subset, geom, cfg_r, plate_z)
+        post_members = pd._post_members(forest, pre_members, pos_of, touched)
+        post_def = pd._influence_defects(post_members, subset, geom, cfg_r, plate_z)
+        new = {k: sorted(post_def.get(k, frozenset()) - pre_def.get(k, frozenset()))
+               for k in subset
+               if post_def.get(k, frozenset()) - pre_def.get(k, frozenset())}
+        ok = (not any(v["member_idx"] in touched for v in viol)
+              and pd._ball_slide_guard_ok(forest, geom, cfg_r, plate_z, saved,
+                                          pre_members, pos_of, *index))
+        for fi, snapm in saved:                  # trial only -- always undo
+            forest.members[fi]._restore(snapm)
+        forest.revalidate(geom, cfg_r)
+        return ok, new, {pos_of[fi] for fi in touched if fi in pos_of}
+
+    legacy_new = {}
+    for sl in clean:
+        ok, new, _own = _trial(sl, legacy=True)
+        assert not ok, "no slide could pass under the old co-move set"
+        legacy_new[sl.slide_index] = set(new)
+    # the old refusals were collateral: NEW violations on members the slide did
+    # not own, several of them at once.
+    assert all(len(v) > 1 for v in legacy_new.values()), legacy_new
+
+    fixed_new = {}
+    for sl in clean:
+        ok, new, owned = _trial(sl, legacy=False)
+        fixed_new[sl.slide_index] = (ok, new, owned)
+    # every remaining refusal is now about the slid member ITSELF -- the foot
+    # would leave the model and collapse its own SCAR anchor -- which is the D6
+    # invariant working, not a search blindness. (Ball 2.50mm dia on a 0.45mm
+    # feature: no position ON that leaf can hold it; the remaining lever is a
+    # foot RE-SEAT, rung B2, which this driver does not wire.)
+    for sidx, (ok, new, owned) in fixed_new.items():
+        if not ok:
+            assert set(new) <= owned, (sidx, new, owned)
+            assert all(v == ["embed"] for v in new.values()), (sidx, new)
+
+    assert p8_accept.geometry_digest(*engine.live_member_lists(
+        forest, unrouted, plate_z, cfg_r)) == dig0, "trials must leave no trace"

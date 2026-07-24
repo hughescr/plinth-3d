@@ -457,6 +457,43 @@ sizing — a smaller ball is a different sanction and is not on offer):
   as SM-STUB R3 — the ball is never shrunk and the breach is never suppressed.
   Raft-connectivity guard (§6.9) applies exactly as SM-STRUT S3.
 
+#### 3.2a Joint membership for a slide — implementation-consequence amendment (orchestrator ruling (6), 2026-07-24)
+
+"Move the joint point" is normative and means exactly what
+`joints.compute_joint_balls` means by a joint, because that is the function
+that FORMED the ball being slid. The co-move set of a B1 slide (and of the D5
+junction re-seat, which commits through the same splice) is therefore:
+
+- every live member endpoint within **`joints.COINCIDE_TOL_MM`** of the node —
+  the tolerance `compute_joint_balls` clusters endpoints with. **Not** a radius
+  derived from the ball, and specifically not `max(0.05, 0.5 × r_ball)`, which
+  is what the driver passed until this amendment;
+- **excluding any stub's `p0`**, which `compute_joint_balls` never admits as a
+  node ("a stub's p0 is the tip CONTACT, the removal-friendly point contact,
+  never a joint"), so no ball is ever formed from one and none may ride a
+  slide of one.
+
+Both rules exist for one reason: a stub tip is an **embedded model contact**.
+Dragging one sideways collapses its SCAR-AREA-CAP anchor, which the D6
+zero-new-violation invariant then correctly refuses — so an over-broad co-move
+set does not produce a wrong commit, it produces **no** commit, and the breach
+is reported "no legal slide" when a legal slide existed. Measured on the
+archived treant's `(contact,746)` foot ball: the ball-derived radius is
+0.624 mm, four times the law, and swept in **eleven** neighbouring contact-stub
+tips; every one of B1's sphere-clean slides was refused for damage to members
+the slide had no business touching.
+
+Pinned by `test_translate_joint_obeys_the_joints_membership_law` and the
+site-derived `test_smball_archived_746_slide_is_scoped_to_the_joint`.
+
+**Open (not fixed here):** with the co-move set correct, `(contact,746)`
+remains unresolved for its own honest reason — every sphere-clean axial
+position pulls the strut's foot clear out of the model and collapses its own
+anchor. The ball is 2.50 mm across on a 0.45 mm feature; no position on that
+leaf can hold it. The lever is **B2** (foot re-seat / local re-route), which
+the driver does not currently wire (`run_phase3_balls` is called with
+`reroute_fn=None`), so B1 escalates straight to D5 and then to B3.
+
 ### 3.3 Class Q — quarantine pool re-grade (77 REAL)
 
 The A0b quarantine pre-pass condemns any stub the *old* revalidate flags —
@@ -698,6 +735,84 @@ contradictory work:
   {445, 474, 575} is RETIRED (not as a carve-out but because it never survives
   micron canonicalization + remediation); mi=445 becomes a named regression
   fixture for the robust boundary (§6.8).
+
+### 5.3a Dual certificate for census-boundary targets — implementation-consequence amendment (orchestrator-approved 2026-07-24)
+
+Implementing §5.3 Layer 2 required measuring *why* the two implementations
+disagree, and the measurement **corrects the mechanism recorded in §5.3's
+opening paragraph**. That paragraph says the census "over-segments near-tip
+slivers into separate intervals, manufacturing a phantom unanchored transit
+where the kernel resolves one clean tip-anchored interval." That is not what
+either implementation does. Measured on the archived run-2 geometry, over the
+six boundary members {168, 376, 443, 445, 485, 519}:
+
+- the Rust kernel, the Python `ExactSurface`, and the census's own
+  `ParityVote` sampler return **byte-equal interval lists** — at grid pitch
+  0.5 mm and 2.0 mm alike. There is no sampler divergence and no
+  over-segmentation.
+- the SCAR-AREA-CAP verdicts agree too: **zero** disagreements over all 853
+  designed embed ends.
+- the divergence is an **ordering** one, in a single filter. The engine drops
+  intervals shorter than `MIN_ILLEGAL_LEN` *inside* `penetration_intervals` —
+  i.e. **before** tip anchoring is decided. The census keeps every PASS-C1
+  interval and applies the same filter afterwards, in PASS C3. Each of the six
+  members has a genuine tip-anchored **sliver** of 5–31 µm. Dropping it
+  **promotes** the next interval — an unanchored transit of 94 µm–1.16 mm —
+  into the tip slot, where a LEGAL SCAR verdict exempts it entirely. The
+  census, holding the sliver, anchors the tip correctly and counts the long
+  run as the firm transit it is.
+
+So the census is right about these six, and the phantom is the engine's. §5.3
+Layer 1 stands unchanged in force — the kernel oracle is authoritative for
+geometry and is **not** de-robustified, edited, or re-tuned — but its stated
+rationale ("the sliver IS the tip interval, not a transit") is now literally
+true only of the census's reading; the engine's filtered reading names the
+transit as the tip.
+
+**Normative consequence.** Candidate acceptance for a **census-boundary
+target** — a member the census counts non-exempt while the engine's own
+certificate reads it legal — must ALSO pass a **dual certificate**: the SAME
+law (`verify.certify_member`, one law, one authority) evaluated on
+**full-resolution** intervals (`min_illegal_len_mm = 0`) rather than the
+oracle's filtered ones. A candidate for such a site is legal only if BOTH
+certificates clear it, so relocation drives it to a placement both
+implementations read clean, which is exactly the §5.3 Layer 2 rationale (3).
+
+Binding details:
+
+- **Derived, never hardcoded.** The boundary class is
+  `{mi : engine certificate legal AND dual certificate non-exempt}`, scanned
+  over the snapshot's own target set (plus a monotone carry, below). On the
+  archived treant it returns exactly the six the acceptance census reported as
+  `only_in_census`, out of 1476 live members — the symmetric difference
+  itself, not a reconstruction of it.
+- **The tip exemption is NOT capped.** SPEC-EMBED-POLICY.md:132 forbids that
+  and it is not done here: the tip stays exempt with no depth cap. It is
+  merely *identified* from the interval list the census uses.
+- **The same restriction applies to the improvement measure.** The D6
+  zero-new-violation invariant requires a strict decrease in the influence
+  set's defect count; a boundary member scores zero defects under the engine
+  certificate alone, so no candidate could ever decrease it and every commit
+  would be refused. `_influence_defects` therefore scores boundary members
+  through the dual certificate as well. This is why the ladder previously
+  no-opped the six.
+- **Monotone carry.** Target selection falls back to the live engine gate as
+  soon as geometry stops matching the frozen fixture, and that gate is by
+  definition blind to this class. A member seen to be boundary-class therefore
+  stays under the dual certificate for the rest of the stage. The carry adds
+  members to the SCORING population only; relocation targets still come from
+  the snapshot, so it can never widen target selection.
+- **Batched.** One extra interval + SCAR call per rung and per influence
+  evaluation, over a handful of members. A per-candidate call would be a
+  defect.
+
+**Known residual (not addressed here, flagged for the owner).** The same
+filter-before-anchoring inversion can in principle mis-certify a member at a
+*non*-boundary site, including in the acceptance verifier. Correcting it
+globally would move the 853-key embed baseline and change target selection for
+the whole population, which is a policy call, not an implementation
+consequence. Scope here is exactly the boundary class §5.3 Layer 2 already
+authorises as targets.
 
 ---
 

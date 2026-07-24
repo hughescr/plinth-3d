@@ -257,7 +257,7 @@ def certify_member(intervals, member, verdict_legal, chords_out=None):
                 nonexempt=bool(nonexempt), moot=bool(moot))
 
 
-def _batch_axis_intervals(geom, members, mis, rays="axis"):
+def _batch_axis_intervals(geom, members, mis, rays="axis", min_illegal_len_mm=0.05):
     """ONE native penetration_intervals call for ALL members in `mis`
     (Amendment A7/A18); returns {member_idx: interval-list}. Batch SoA entry
     point when the geom exposes it (the Rust kernel does); per-member fallback
@@ -265,21 +265,67 @@ def _batch_axis_intervals(geom, members, mis, rays="axis"):
 
     `rays` selects the ray set the kernel returns intervals for: "axis" (the
     single centerline, the load-bearing stub rule) or "all" (axis + the n
-    capsule-offset rays, R2's non-stub capsule-graze evidence)."""
+    capsule-offset rays, R2's non-stub capsule-graze evidence).
+
+    `min_illegal_len_mm` is the oracle's own sub-detection cutoff -- intervals
+    shorter than it are DROPPED before this function ever sees them. The default
+    0.05 (census MIN_ILLEGAL_LEN) is the gate's law and is unchanged. Passing
+    0.0 asks for the FULL-RESOLUTION list (census PASS-C1 before its C3 length
+    filter), which is what the census-parity dual certificate needs and is the
+    ONLY caller that changes it -- see `certify_members_full_resolution`."""
     if not mis:
         return {}
     p0s = np.array([np.asarray(members[mi]["p0"], float) for mi in mis])
     p1s = np.array([np.asarray(members[mi]["p1"], float) for mi in mis])
     r0s = np.array([float(members[mi]["r0"]) for mi in mis])
     r1s = np.array([float(members[mi]["r1"]) for mi in mis])
+    mil = float(min_illegal_len_mm)
     batch = getattr(geom, "penetration_intervals_batch", None)
     if batch is not None:
-        per = batch(p0s, p1s, r0s, r1s, rays=rays, min_illegal_len_mm=0.05)
+        per = batch(p0s, p1s, r0s, r1s, rays=rays, min_illegal_len_mm=mil)
     else:
         per = [geom.penetration_intervals(p0s[j], p1s[j], r0s[j], r1s[j],
-                                          rays=rays, min_illegal_len_mm=0.05)
+                                          rays=rays, min_illegal_len_mm=mil)
                for j in range(len(mis))]
     return {mi: per[j] for j, mi in enumerate(mis)}
+
+
+def certify_members_full_resolution(geom, members, mis, cfg, rays="axis"):
+    """The CENSUS-PARITY dual certificate: `certify_member` -- the SAME law, the
+    SAME function -- evaluated on FULL-RESOLUTION penetration intervals instead
+    of the oracle's length-filtered ones. Returns `{mi: cert_dict}`. BATCHED:
+    one interval call and one SCAR-verdict call over the whole `mis` list.
+
+    WHY IT DIFFERS FROM THE ORDINARY CERTIFICATE (orchestrator ruling (4),
+    2026-07-24 -- an implementation consequence of the ratified census-authority
+    rule, not new policy). The engine's oracle drops intervals shorter than
+    `MIN_ILLEGAL_LEN_MM` INSIDE `penetration_intervals`, i.e. BEFORE tip
+    anchoring is decided; the independent census keeps every PASS-C1 interval and
+    applies the same length filter only afterwards, in PASS C3. That ordering is
+    not cosmetic. On a near-tangent foliage graze the real tip-anchored run is a
+    sub-detection SLIVER (5-31um on the treant's six census-boundary members),
+    and dropping it PROMOTES the next interval -- an unanchored 0.09-1.16mm
+    transit -- into the tip slot, where a LEGAL SCAR-AREA-CAP verdict exempts it
+    entirely. The census, holding the sliver, anchors the tip correctly and
+    counts the long run as the firm transit it is. Measured on the six
+    (168/376/443/445/485/519), the two lists differ by exactly one leading
+    sliver and the verdicts flip from legal to non-exempt across all six --
+    which is the whole census-vs-engine symmetric difference.
+
+    This does NOT touch the kernel's robust oracle and does NOT cap the tip
+    exemption (SPEC-EMBED-POLICY.md:132 forbids that): the tip stays exempt with
+    no depth cap, it is merely identified from the interval list the census
+    uses. Membership is per the SCAR verdict re-derived on the SAME
+    full-resolution intervals, so the tip length T the area formula reads is the
+    sliver -- exactly the census's PASS-C2 input."""
+    mis = list(mis)
+    if not mis:
+        return {}
+    ivmap = _batch_axis_intervals(geom, members, mis, rays=rays,
+                                  min_illegal_len_mm=0.0)
+    verdicts = _embed_scar_verdicts(geom, members, mis, ivmap, cfg)
+    return {mi: certify_member(ivmap.get(mi, []), members[mi], verdicts.get(mi))
+            for mi in mis}
 
 
 def _scar_area_cap_legal(T, d, cosang, r_x, r_end, R_b):

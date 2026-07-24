@@ -390,7 +390,8 @@ def _resin_guards_ok(cand: Candidate, site: StubSite, route_vol_ml: float,
 def evaluate_r1(sites: list, geom, cfg,
                 revalidate_fn: Optional[Callable] = None,
                 reroute_fn: Optional[Callable] = None,
-                pocket_penalty_fn: Optional[Callable] = None) -> dict:
+                pocket_penalty_fn: Optional[Callable] = None,
+                dual_cert_fn: Optional[Callable] = None) -> dict:
     """R1 tip re-aim for a batch of class-T contact stubs (§3.1), BATCH-FIRST.
 
     Gather every candidate axis ray across every site, evaluate legality for ALL
@@ -424,7 +425,7 @@ def evaluate_r1(sites: list, geom, cfg,
     return _run_rung(all_cands, site_by_id, [s.site_id for s in sites], geom, cfg,
                      rays="axis", guard_fn=_resin_guards_ok, moot_fn=_count_moot_axis,
                      revalidate_fn=revalidate_fn, reroute_fn=reroute_fn,
-                     pocket_penalty_fn=pocket_penalty_fn)
+                     pocket_penalty_fn=pocket_penalty_fn, dual_cert_fn=dual_cert_fn)
 
 
 # ---------------------------------------------------------------------------
@@ -467,7 +468,8 @@ def reseat_candidates(site: StubSite, seeds, cfg) -> list:
 
 def evaluate_r2(sites: list, seeds_by_site: dict, geom, cfg,
                 revalidate_fn: Optional[Callable] = None,
-                reroute_fn: Optional[Callable] = None) -> dict:
+                reroute_fn: Optional[Callable] = None,
+                dual_cert_fn: Optional[Callable] = None) -> dict:
     """SM-STUB R2 -- contact re-seat, BATCH-FIRST and GLOBAL-lex-min (§3.1 R2).
 
     Entered ONLY for sites whose R1 legal set is empty (the ladder never
@@ -494,7 +496,7 @@ def evaluate_r2(sites: list, seeds_by_site: dict, geom, cfg,
     return _run_rung(all_cands, site_by_id, [s.site_id for s in sites], geom, cfg,
                      rays="axis", guard_fn=_resin_guards_ok, moot_fn=_count_moot_axis,
                      revalidate_fn=revalidate_fn, reroute_fn=reroute_fn,
-                     score_fn=_reseat_score_tuple)
+                     score_fn=_reseat_score_tuple, dual_cert_fn=dual_cert_fn)
 
 
 def _batch_legal_sets(all_cands: list, site_by_id: dict, sids: list, geom, cfg, *,
@@ -503,7 +505,8 @@ def _batch_legal_sets(all_cands: list, site_by_id: dict, sids: list, geom, cfg, 
                       reroute_fn: Optional[Callable] = None,
                       pocket_penalty_fn: Optional[Callable] = None,
                       cert_cache: Optional[dict] = None,
-                      score_fn: Optional[Callable] = None):
+                      score_fn: Optional[Callable] = None,
+                      dual_cert_fn: Optional[Callable] = None):
     """The shared BATCH-FIRST legality evaluator: one flat candidate matrix ->
     a handful of batched kernel interval + SCAR calls -> scatter -> per-site
     legal set, each SORTED by the §3.1 score tuple (lexicographic). Returns
@@ -540,6 +543,22 @@ def _batch_legal_sets(all_cands: list, site_by_id: dict, sids: list, geom, cfg, 
     objective. R2 installs `_reseat_score_tuple` here so the re-seat rung is
     ordered by its own pinned §3.1-R2 tuple while still routing LEGALITY through
     this ONE evaluator -- one law, one authority; only the ORDER differs.
+
+    `dual_cert_fn(all_cands) -> {j: bool}` (orchestrator ruling (4), 2026-07-24):
+    the CENSUS-PARITY DUAL CERTIFICATE, an ADDITIONAL acceptance restriction that
+    applies to the CENSUS-BOUNDARY sites only -- those the census counts
+    non-exempt while the engine's own certificate reads them legal. It is the
+    SAME law (`verify.certify_member`) read off FULL-RESOLUTION intervals rather
+    than the oracle's length-filtered ones (see
+    `verify.certify_members_full_resolution` for the exact mechanism and why the
+    two lists disagree). A candidate for such a site is legal here only if BOTH
+    certificates clear it, so relocation drives those sites to placements both
+    implementations read clean. It can only ever REMOVE candidates -- a site
+    outside the boundary class is never keyed by the driver's function and the
+    hook is None on every unit/foundation path, so the pinned selection of every
+    other site is bit-identical to before this parameter existed. BATCHED by
+    contract: the function is handed the WHOLE candidate list and returns a map,
+    exactly once per rung -- a per-candidate call here would be a defect.
     """
     if score_fn is None:
         score_fn = _score_tuple
@@ -550,6 +569,7 @@ def _batch_legal_sets(all_cands: list, site_by_id: dict, sids: list, geom, cfg, 
 
     members = [c.member for c in all_cands]
     mis = list(range(len(members)))
+    dual_ok = dual_cert_fn(all_cands) if dual_cert_fn is not None else None
 
     # --- one batched kernel call for intervals; one for SCAR verdicts ---
     if cert_cache is None:
@@ -578,6 +598,10 @@ def _batch_legal_sets(all_cands: list, site_by_id: dict, sids: list, geom, cfg, 
         # (verify.certify_member, defect-1 b): a candidate can never be certified
         # legal here and flagged by the gate, nor vice-versa.
         if not verify.certify_member(ivmap.get(j, []), m, verdict_legal)["legal"]:
+            continue
+        # (a') CENSUS-PARITY DUAL CERTIFICATE (ruling (4)) -- boundary sites only.
+        # Absent from the map => not a boundary candidate => unrestricted.
+        if dual_ok is not None and not dual_ok.get(j, True):
             continue
         # n_moot_crossings for the score tuple (never trade a clean candidate
         # for a moot-riding one).
@@ -614,7 +638,8 @@ def _run_rung(all_cands: list, site_by_id: dict, sids: list, geom, cfg, *,
               revalidate_fn: Optional[Callable] = None,
               reroute_fn: Optional[Callable] = None,
               pocket_penalty_fn: Optional[Callable] = None,
-              score_fn: Optional[Callable] = None) -> dict:
+              score_fn: Optional[Callable] = None,
+              dual_cert_fn: Optional[Callable] = None) -> dict:
     """The shared BATCH-FIRST ladder-rung evaluator (SM-STUB R1/R2 / SM-STRUT S1):
     `_batch_legal_sets` -> per-site UNIQUE global lexicographic minimum. A rung
     is NOT first-legal-wins (amendment B): the FULL legal set is enumerated and
@@ -625,7 +650,8 @@ def _run_rung(all_cands: list, site_by_id: dict, sids: list, geom, cfg, *,
     per_site_legal, per_site_count = _batch_legal_sets(
         all_cands, site_by_id, sids, geom, cfg, rays=rays, guard_fn=guard_fn,
         moot_fn=moot_fn, revalidate_fn=revalidate_fn, reroute_fn=reroute_fn,
-        pocket_penalty_fn=pocket_penalty_fn, score_fn=score_fn)
+        pocket_penalty_fn=pocket_penalty_fn, score_fn=score_fn,
+        dual_cert_fn=dual_cert_fn)
     for sid, legal in per_site_legal.items():
         res = results[sid]
         res.n_candidates = per_site_count[sid]
@@ -820,7 +846,8 @@ def _strut_guards_ok(cand: Candidate, site: StrutSite, route_vol_ml: float,
 def evaluate_s1(sites: list, geom, cfg,
                 revalidate_fn: Optional[Callable] = None,
                 reroute_fn: Optional[Callable] = None,
-                pocket_penalty_fn: Optional[Callable] = None) -> dict:
+                pocket_penalty_fn: Optional[Callable] = None,
+                dual_cert_fn: Optional[Callable] = None) -> dict:
     """SM-STRUT S1 foot re-aim for a batch of interior struts (§3.1s), BATCH-FIRST.
     Same gather->batch->scatter->global-lex-min discipline as SM-STUB R1, but on
     the strut ray set (axis + capsule-offset) with the foot ball factor and the
@@ -837,7 +864,7 @@ def evaluate_s1(sites: list, geom, cfg,
     return _run_rung(all_cands, site_by_id, [s.site_id for s in sites], geom, cfg,
                      rays="all", guard_fn=_strut_guards_ok, moot_fn=_count_moot,
                      revalidate_fn=revalidate_fn, reroute_fn=reroute_fn,
-                     pocket_penalty_fn=pocket_penalty_fn)
+                     pocket_penalty_fn=pocket_penalty_fn, dual_cert_fn=dual_cert_fn)
 
 
 # ===========================================================================
@@ -1027,7 +1054,8 @@ def run_phase2_struts(sites: list, geom, cfg,
                       revalidate_fn: Optional[Callable] = None,
                       reroute_fn: Optional[Callable] = None,
                       orphan_fn: Optional[Callable] = None,
-                      pocket_penalty_fn: Optional[Callable] = None) -> dict:
+                      pocket_penalty_fn: Optional[Callable] = None,
+                      dual_cert_fn: Optional[Callable] = None) -> dict:
     """Phase 2 (§3.1s): the interior struts run SM-STRUT, a three-rung ladder
     S1->S2->S3 -- entered top-down, a rung reached only when the rung above
     yields ZERO legal candidates for the site (the ladder never re-orders).
@@ -1052,7 +1080,8 @@ def run_phase2_struts(sites: list, geom, cfg,
     geometry). Returns {site_id: StrutResult}."""
     site_by_id = {s.site_id: s for s in sites}
     s1 = evaluate_s1(sites, geom, cfg, revalidate_fn=revalidate_fn,
-                     reroute_fn=None, pocket_penalty_fn=pocket_penalty_fn)
+                     reroute_fn=None, pocket_penalty_fn=pocket_penalty_fn,
+                     dual_cert_fn=dual_cert_fn)
     out = {}
     for sid, res in s1.items():
         site = site_by_id[sid]
@@ -1514,6 +1543,7 @@ def solve_pocket(members: list, geom, cfg, *,
                  revalidate_fn: Optional[Callable] = None,
                  reroute_fn: Optional[Callable] = None,
                  mutual_legal_fn: Optional[Callable] = None,
+                 dual_cert_fn: Optional[Callable] = None,
                  label: int = 0) -> PocketSolveResult:
     """The atomic-commit loop (§4.3, normative) for ONE pocket's members.
 
@@ -1587,7 +1617,8 @@ def solve_pocket(members: list, geom, cfg, *,
             per_legal, _cnt = _batch_legal_sets(
                 all_cands, sub, grp, geom, cfg, rays=rays, guard_fn=guard,
                 moot_fn=moot, revalidate_fn=revalidate_fn, reroute_fn=reroute_fn,
-                pocket_penalty_fn=density_fn, cert_cache=cert_cache)
+                pocket_penalty_fn=density_fn, cert_cache=cert_cache,
+                dual_cert_fn=dual_cert_fn)
             out.update(per_legal)
         return out
 
@@ -1666,7 +1697,8 @@ def solve_pocket(members: list, geom, cfg, *,
 def run_pocket_solver(sites: list, geom, cfg,
                       revalidate_fn: Optional[Callable] = None,
                       reroute_fn: Optional[Callable] = None,
-                      mutual_legal_fn: Optional[Callable] = None) -> PocketSolverReport:
+                      mutual_legal_fn: Optional[Callable] = None,
+                      dual_cert_fn: Optional[Callable] = None) -> PocketSolverReport:
     """The atomic-commit pocket solver with full dependency-set invalidation
     (§4) -- conflict-graph-driven, monotone resolved-count objective, terminates
     in <= |pocket| commits, bit-deterministic (§4.5).
@@ -1685,7 +1717,7 @@ def run_pocket_solver(sites: list, geom, cfg,
         pmembers = [site_by_id[i] for i in pk.member_ids]
         solved.append(solve_pocket(pmembers, geom, cfg, revalidate_fn=revalidate_fn,
                                    reroute_fn=reroute_fn, mutual_legal_fn=mutual_legal_fn,
-                                   label=pk.label))
+                                   dual_cert_fn=dual_cert_fn, label=pk.label))
         pocketed.update(pk.member_ids)
 
     # §4.6 isolated members: plain per-site ladder, density 0 (pocket_penalty None).
@@ -1695,10 +1727,10 @@ def run_pocket_solver(sites: list, geom, cfg,
     isolated = {}
     if iso_stubs:
         isolated.update(evaluate_r1(iso_stubs, geom, cfg, revalidate_fn=revalidate_fn,
-                                    reroute_fn=reroute_fn))
+                                    reroute_fn=reroute_fn, dual_cert_fn=dual_cert_fn))
     if iso_struts:
         isolated.update(evaluate_s1(iso_struts, geom, cfg, revalidate_fn=revalidate_fn,
-                                    reroute_fn=reroute_fn))
+                                    reroute_fn=reroute_fn, dual_cert_fn=dual_cert_fn))
 
     dispositions = {}
     for res in solved:

@@ -350,6 +350,33 @@ def classify_gate(mesh, members, balls, geom, cfg) -> GateClassification:
                               ball_breaches=breaches)
 
 
+def census_boundary_members(members, candidate_mis, gate: GateClassification,
+                            geom, cfg) -> frozenset:
+    """The CENSUS-BOUNDARY class (orchestrator ruling (4), 2026-07-24): members
+    the CENSUS counts non-exempt while the ENGINE'S OWN certificate reads them
+    legal. DERIVED, never a hardcoded index list -- a member is boundary-class
+    iff it is outside `gate.firm_transit` (the engine sees nothing) AND the
+    census-parity DUAL certificate (`verify.certify_members_full_resolution`)
+    reads it NON-EXEMPT. That predicate IS the census's rule-4 accounting, so the
+    set it returns is the engine-vs-census symmetric difference itself rather
+    than a reconstruction of one: on the archived treant run it returns exactly
+    {168, 376, 443, 445, 485, 519} out of 1476 live members -- the six the
+    acceptance census reported as `only_in_census`, no more and no fewer.
+
+    `candidate_mis` bounds the scan to the population the caller is allowed to
+    retarget (the frozen fixture's target set), so this costs ONE batched
+    interval call over a handful of members, not over the whole forest -- and it
+    can never widen the target set beyond what the fixture already authorises.
+    BATCH-FIRST: one call, not one per member."""
+    cand = [int(mi) for mi in sorted(set(candidate_mis))
+            if 0 <= int(mi) < len(members) and int(mi) not in gate.firm_transit]
+    if not cand:
+        return frozenset()
+    dual = verify.certify_members_full_resolution(geom, members, cand, cfg,
+                                                  rays="axis")
+    return frozenset(mi for mi in cand if dual[mi]["nonexempt"])
+
+
 def regrade_quarantine(quarantine_sites, geom, cfg):
     """Re-grade the A0b quarantine pool under the ratified law (§3.3): a
     condemned stub is Q-REAL iff, placed at its demanded position, it is genuinely
@@ -397,6 +424,9 @@ class DriverInput:
     # re-seat can write the moved demand back into the contact record (the demand
     # migrated -- coverage/birth accounting must see where it actually is).
     contact_of_site: dict = field(default_factory=dict)   # site_id -> contact idx
+    # ruling (4): the census-boundary member idxs (== stub/strut site ids) whose
+    # candidate acceptance additionally needs the census-parity dual certificate.
+    boundary_mis: frozenset = frozenset()
 
 
 def build_snapshot(gate: GateClassification, real_ids, artifact_ids,
@@ -453,7 +483,8 @@ def frozen_target_snapshot(frozen: phase8.DefectSnapshot, gate: GateClassificati
 def construct_sites(forest, members, balls, contacts, carried, cfg, geom, mesh,
                     unrouted=(), quarantine_sites=None,
                     census_authority=frozenset(),
-                    frozen_snapshot=None) -> DriverInput:
+                    frozen_snapshot=None,
+                    boundary_carry=frozenset()) -> DriverInput:
     """Build the full Phase-8 driver input from the engine's OWN gate output
     (task step 1). BATCH-FIRST: one `classify_gate` pass (batched clearance +
     ball-breach reports) drives every class; per-site geometry is pure algebra on
@@ -523,11 +554,18 @@ def construct_sites(forest, members, balls, contacts, carried, cfg, geom, mesh,
 
     ball_sites = ball_sites_from_breaches(list(gate.ball_breaches), members, cfg)
 
+    # Ruling (4): which of THIS snapshot's targets are census-boundary -- counted
+    # by the census, read legal by the engine's own certificate. Scanned over the
+    # target set only, so the dual certificate can never widen the population
+    # beyond what target selection already authorised.
+    boundary_mis = census_boundary_members(
+        members, set(snapshot.non_exempt) | set(boundary_carry), gate, geom, cfg)
+
     return DriverInput(snapshot=snapshot, stub_sites=stub_sites,
                        strut_sites=strut_sites, ball_sites=ball_sites,
                        live_fi=live_fi, site_forest_idx=site_forest_idx, gate=gate,
                        target_source=("frozen-fixture" if use_frozen else "live-gate"),
-                       contact_of_site=contact_of_site)
+                       contact_of_site=contact_of_site, boundary_mis=boundary_mis)
 
 
 # ===========================================================================
@@ -806,7 +844,7 @@ def _member_endpoints(snap):
 # report, one printability report, one sphere-breach call -- never per member.
 
 
-def _influence_defects(member_dicts, subset, geom, cfg, plate_z):
+def _influence_defects(member_dicts, subset, geom, cfg, plate_z, dual_mis=()):
     """Score EVERY defect class over `subset` (positions into `member_dicts`, the
     live-universe list) in ONE batched pass. Returns `{pos: frozenset(classes)}`,
     entries only for positions carrying >= 1 defect.
@@ -857,6 +895,24 @@ def _influence_defects(member_dicts, subset, geom, cfg, plate_z):
             _add(subset[j], "transit")
         if not cert["scar_ok"]:
             _add(subset[j], "embed")
+
+    # ---- ruling (4): census-parity DUAL certificate on the boundary class ----
+    # A boundary member is one the engine's own certificate above reads legal
+    # while the census counts it. Without this the D6 guard would score such a
+    # site at ZERO defects both before and after a re-aim, so no candidate could
+    # ever strictly decrease the count and every commit would be refused -- which
+    # is exactly why the ladder no-opped the six boundary members. Scored through
+    # the SAME `certify_member` law, on full-resolution intervals; ONE extra
+    # batched call over the (handful of) boundary positions in this subset.
+    dual_j = [j for j, k in enumerate(subset) if k in dual_mis] if dual_mis else []
+    if dual_j:
+        dcerts = verify.certify_members_full_resolution(
+            geom, sub_members, dual_j, cfg, rays="axis")
+        for j in dual_j:
+            if dcerts[j]["nonexempt"]:
+                _add(subset[j], "transit")
+            if not dcerts[j]["scar_ok"]:
+                _add(subset[j], "embed")
 
     if plate_z is None:                 # legacy/unit oracle: the rest needs a plate
         return out
@@ -915,7 +971,8 @@ def _post_members(forest, pre_members, pos_of, changed_fis):
 
 
 def _ball_slide_guard_ok(forest, geom, cfg, plate_z, saved, pre_members,
-                         pos_of, idx_arr, end_arr, pt_arr, pre_cache=None) -> bool:
+                         pos_of, idx_arr, end_arr, pt_arr, pre_cache=None,
+                         dual_mis=()) -> bool:
     """D6 commit invariant for a ball-joint slide (Phase-3), the SAME law the
     shaft splice enforces (`splice_reaims`): over the affected set -- the
     translated joint members UNION their endpoint-neighbours -- the slide must
@@ -948,19 +1005,21 @@ def _ball_slide_guard_ok(forest, geom, cfg, plate_z, saved, pre_members,
     if pre_cache is not None and ckey in pre_cache:
         pre_def = pre_cache[ckey]
     else:
-        pre_def = _influence_defects(pre_members, subset, geom, cfg, plate_z)
+        pre_def = _influence_defects(pre_members, subset, geom, cfg, plate_z,
+                                     dual_mis=dual_mis)
         if pre_cache is not None:
             pre_cache[ckey] = pre_def
     post_members = _post_members(forest, pre_members, pos_of,
                                  {fi for fi, _s in saved})
-    post_def = _influence_defects(post_members, subset, geom, cfg, plate_z)
+    post_def = _influence_defects(post_members, subset, geom, cfg, plate_z,
+                                 dual_mis=dual_mis)
     if any(post_def.get(k, frozenset()) - pre_def.get(k, frozenset()) for k in subset):
         return False                       # a NEW violation somewhere in reach
     return _defect_count(post_def, subset) < _defect_count(pre_def, subset)
 
 
 def splice_reaims(forest, geom, cfg, accepted: list, *, plate_z=None, unrouted=(),
-                  reasons_out: Optional[dict] = None):
+                  reasons_out: Optional[dict] = None, dual_mis=()):
     """Splice a batch of accepted re-aims into the forest under its
     checkpoint/revalidate protocol (deterministic, transactional). `accepted` is
     a list of `(forest_idx, cand_member, orig_embed_end)`.
@@ -1099,7 +1158,8 @@ def splice_reaims(forest, geom, cfg, accepted: list, *, plate_z=None, unrouted=(
     # runs at most `len(groups)` rounds and always terminates.
     affected = set().union(*(g["resp"] for g in groups.values())) if groups else set()
     inf_subset = sorted(pos_of[fi] for fi in affected if fi in pos_of)
-    pre_def = _influence_defects(pre_members, inf_subset, geom, cfg, plate_z)
+    pre_def = _influence_defects(pre_members, inf_subset, geom, cfg, plate_z,
+                                 dual_mis=dual_mis)
 
     live_groups = dict(groups)
     reverted = []
@@ -1110,7 +1170,8 @@ def splice_reaims(forest, geom, cfg, accepted: list, *, plate_z=None, unrouted=(
         # `pre_members` -- a reverted one collects back to its pre geometry, so
         # this is bit-identical to a full re-collect at O(|saved|).
         post_members = _post_members(forest, pre_members, pos_of, set(saved))
-        post_def = _influence_defects(post_members, inf_subset, geom, cfg, plate_z)
+        post_def = _influence_defects(post_members, inf_subset, geom, cfg, plate_z,
+                                      dual_mis=dual_mis)
         new_bad = {live_fi[k] for k in inf_subset
                    if post_def.get(k, frozenset()) - pre_def.get(k, frozenset())}
         bad_members = bad_clearance | new_bad
@@ -1143,32 +1204,68 @@ def splice_reaims(forest, geom, cfg, accepted: list, *, plate_z=None, unrouted=(
 # ---------------------------------------------------------------------------
 # ball-slide splice (Phase 3): translate the joint node.
 # ---------------------------------------------------------------------------
-def _translate_joint(forest, center, delta, tol, index=None):
-    """Translate every live member endpoint coincident with `center` by `delta`
-    (a joint slide keeps the members meeting at the node coincident, so
-    connectivity is preserved). Returns the list of `(forest_idx, snapshot)` it
-    touched so the caller can revert.
+def _translate_joint(forest, center, delta, tol=None, index=None):
+    """Translate every live member endpoint that is a member OF THE JOINT at
+    `center` by `delta` (a joint slide keeps the members meeting at the node
+    coincident, so connectivity is preserved). Returns the list of
+    `(forest_idx, snapshot)` it touched so the caller can revert.
 
-    BATCH-FIRST: the coincidence test is ONE vectorised distance query against
-    `Forest.endpoint_index` (the same live, dead-excluded endpoint set the old
-    per-member Python scan walked), not a scan over every forest member. `index`
-    lets a caller that trials MANY deltas against the SAME geometry (D5's
-    junction lattice: every failed trial is undone bit-exact, so the endpoint
-    index is invariant across them) build it once instead of once per trial --
-    that per-trial O(n_members) rebuild is what turned the ladder into a spin.
-    Passing a STALE index would silently mis-target the move, so it is only ever
-    supplied by a caller that owns the geometry between rebuilds."""
+    JOINT MEMBERSHIP IS `joints.compute_joint_balls`' OWN LAW -- one law, one
+    authority -- and NOT a radius invented at the call site (ruling (6),
+    2026-07-24). That distinction is the whole SM-BALL defect:
+
+      * radius = `joints.COINCIDE_TOL_MM`, the exact tolerance
+        `compute_joint_balls` clusters endpoints with to FORM the ball being
+        slid (and the one `_influence_defects` already uses to attribute a
+        joint-ball breach to a member). The old call sites passed
+        `max(0.05, 0.5 * r_ball)` instead -- a number derived from the BALL's
+        radius, which has nothing to do with which endpoints meet at the node.
+        On the treant's `(contact,746)` foot that is 0.624mm, four times the
+        law, and it swept in 11 unrelated endpoints.
+      * a STUB's `p0` is NEVER a joint node. `compute_joint_balls` says so
+        explicitly ("a stub's p0 is the tip CONTACT, the removal-friendly point
+        contact, never a joint") and never adds one to its node list, so no ball
+        is ever formed from one and none may ever ride a slide of one.
+
+    Both rules exist for the same reason: a stub tip is an EMBEDDED model
+    contact. Dragging one sideways collapses its SCAR-AREA-CAP anchor, which the
+    D6 zero-new-violation guard then (correctly) refuses -- so an over-broad
+    co-move set does not produce a wrong commit, it produces NO commit, and the
+    breach is reported unresolved with "no legal slide" when a legal slide
+    existed all along. That is exactly how the 0.796mm `(contact,746)` breach
+    survived every rung: 6 of its 16 B1 slides are sphere-clean, and all 6 were
+    refused for embed regressions on 11 neighbouring stub tips the slide had no
+    business touching.
+
+    `tol` overrides the radius (unit/legacy callers only); the stub-p0 rule is
+    structural and is NEVER parameterised. BATCH-FIRST: the coincidence test is
+    ONE vectorised distance query against `Forest.endpoint_index` (the same live,
+    dead-excluded endpoint set the old per-member Python scan walked), not a scan
+    over every forest member. `index` lets a caller that trials MANY deltas
+    against the SAME geometry (D5's junction lattice: every failed trial is
+    undone bit-exact, so the endpoint index is invariant across them) build it
+    once instead of once per trial -- that per-trial O(n_members) rebuild is what
+    turned the ladder into a spin. Passing a STALE index would silently
+    mis-target the move, so it is only ever supplied by a caller that owns the
+    geometry between rebuilds."""
     idx_arr, end_arr, pt_arr = index if index is not None else forest.endpoint_index()
     if len(idx_arr) == 0:
         return []
     center = np.asarray(center, float)
     delta = np.asarray(delta, float)
+    if tol is None:
+        tol = joints.COINCIDE_TOL_MM
     hit = np.nonzero(np.linalg.norm(pt_arr - center[None, :], axis=1) <= tol)[0]
     if not len(hit):
         return []
     ends_by_fi: dict = {}
     for k in hit:
-        ends_by_fi.setdefault(int(idx_arr[k]), []).append(int(end_arr[k]))
+        fi = int(idx_arr[k]); end = int(end_arr[k])
+        if end == 0 and getattr(forest.members[fi], "kind", None) == "stub":
+            continue                  # a stub p0 is the tip CONTACT, never a joint
+        ends_by_fi.setdefault(fi, []).append(end)
+    if not ends_by_fi:
+        return []
     saved = []
     for fi in sorted(ends_by_fi):                     # deterministic order
         fm = forest.members[fi]
@@ -1239,7 +1336,7 @@ def junction_lattice(node, axis, cfg) -> list:
 
 
 def try_junction_reseat(forest, geom, cfg, plate_z, unrouted, fi, node_pt, axis,
-                        tol, max_trials=None):
+                        tol=None, max_trials=None, dual_mis=()):
     """Trial the junction lattice for ONE site and COMMIT the first legal delta.
 
     Every trial is transactional: translate -> revalidate -> D6 guard -> undo,
@@ -1272,7 +1369,7 @@ def try_junction_reseat(forest, geom, cfg, plate_z, unrouted, fi, node_pt, axis,
         ok = (not any(v["member_idx"] in touched for v in viol)
               and _ball_slide_guard_ok(forest, geom, cfg, plate_z, saved,
                                        pre_members, pos_of, *index,
-                                       pre_cache=pre_cache))
+                                       pre_cache=pre_cache, dual_mis=dual_mis))
         if ok:
             return np.asarray(delta, float), n_trials, len(saved)
         for sfi, snapm in saved:                       # trial failed -> undo
@@ -1602,6 +1699,32 @@ class _SweepResult:
     ledger_obs: list = field(default_factory=list)
 
 
+def _dual_cert_fn(dual_mis, geom, cfg):
+    """Build the `phase8._batch_legal_sets` DUAL-CERTIFICATE hook for the
+    census-boundary site set `dual_mis` (ruling (4)), or None when that set is
+    empty -- so a model with no boundary class pays nothing and its candidate
+    selection is bit-identical to before the rung existed.
+
+    BATCH-FIRST by contract: the hook is handed the WHOLE candidate list once per
+    rung, selects the boundary-site candidates from it, and answers all of them
+    in ONE `certify_members_full_resolution` call (one batched interval query +
+    one batched SCAR query). Candidates for non-boundary sites are absent from
+    the returned map, which `_batch_legal_sets` reads as unrestricted."""
+    dual_mis = frozenset(int(x) for x in dual_mis)
+    if not dual_mis:
+        return None
+
+    def _fn(all_cands):
+        pick = [j for j, c in enumerate(all_cands) if c.site_id in dual_mis]
+        if not pick:
+            return {}
+        cmembers = [c.member for c in all_cands]
+        certs = verify.certify_members_full_resolution(geom, cmembers, pick, cfg,
+                                                       rays="axis")
+        return {j: bool(certs[j]["legal"]) for j in pick}
+    return _fn
+
+
 def _relocation_sweep(di: DriverInput, forest, geom, cfg,
                       banned: Optional[dict] = None,
                       plate_z=None, unrouted=(), seed_index=None,
@@ -1655,6 +1778,12 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
     # selection so a re-pick of already-applied geometry is never "committed".
     noop_fn = _noop_skip_fn(forest, di.site_forest_idx)
     stub_sel_fn = _compose_fns(ban_fn, noop_fn)
+    # Ruling (4): the census-parity DUAL certificate, applied to candidate
+    # acceptance for the CENSUS-BOUNDARY sites only. `di.boundary_mis` is derived
+    # per sweep from the live geometry (`census_boundary_members`), so a site that
+    # stops being boundary-class after a commit stops paying for the check.
+    dual_mis = frozenset(di.boundary_mis)
+    dual_cert_fn = _dual_cert_fn(dual_mis, geom, cfg)
 
     # ---- shared escalation bookkeeping --------------------------------------
     def _drop_unresolved(cls, sid):
@@ -1693,16 +1822,18 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
             r_node = float(fm.r1)
         return node, r_node, phase8._unit(node - other)
 
-    def _try_d5_at(cls, sid, fi, node, axis, tol):
+    def _try_d5_at(cls, sid, fi, node, axis):
         """D5 at one junction NODE. Returns True iff the re-seat committed (and
         therefore strictly reduced the influence set's defect count -- the guard
         refuses anything else). `fi` is only the ledger's member attribution;
-        the move is a NODE translation and rides every member meeting there."""
+        the move is a NODE translation and rides every member OF THE JOINT there
+        -- `joints`' own membership law, per ruling (6); see `_translate_joint`."""
         nonlocal n_committed
         if not getattr(cfg, "p8_junction_reseat_enable", True):
             return False
         delta, n_trials, n_touched = try_junction_reseat(
-            forest, geom, cfg, plate_z, unrouted, fi, node, axis, tol=tol)
+            forest, geom, cfg, plate_z, unrouted, fi, node, axis,
+            dual_mis=dual_mis)
         final_rung[(cls, sid)] = "D5"
         if delta is None:
             ledger_rows.append((cls, sid, fi, "D5-EXHAUSTED", "D5"))
@@ -1717,8 +1848,8 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
         the tree-side node -- holding the embedded end fixed."""
         if fi is None or not (0 <= fi < len(forest.members)):
             return False
-        node, r_node, axis = _site_node_and_axis(fi)
-        return _try_d5_at(cls, sid, fi, node, axis, max(0.05, 0.5 * r_node))
+        node, _r_node, axis = _site_node_and_axis(fi)
+        return _try_d5_at(cls, sid, fi, node, axis)
 
     # ---- Phase 1: stubs (class-T stubs UNION Q-REAL), pocket solver + isolated.
     stub_resolved = stub_unresolved = 0
@@ -1750,6 +1881,7 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
 
     if di.stub_sites:
         report = phase8.run_pocket_solver(di.stub_sites, geom, cfg,
+                                          dual_cert_fn=dual_cert_fn,
                                           revalidate_fn=stub_sel_fn)
         pocket_labels = [pk.label for pk in report.pockets]
         accepted = []
@@ -1772,7 +1904,7 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
             ledger_rows.append(("STUB", mid, fi, "ISOLATED", "R1" if ok else "R2"))
         acc_by_fi = {fi: cm for fi, cm, _emb in accepted}
         reasons: dict = {}
-        n_ok, rv = splice_reaims(forest, geom, cfg, accepted,
+        n_ok, rv = splice_reaims(forest, geom, cfg, accepted, dual_mis=dual_mis,
                                  plate_z=plate_z, unrouted=unrouted,
                                  reasons_out=reasons)
         n_committed += n_ok
@@ -1807,7 +1939,8 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
         seeds = seed_index.seeds_for(r2_sites, di.contact_of_site, contacts,
                                      unrouted, cfg)
         r2res = phase8.evaluate_r2(r2_sites, seeds, geom, cfg,
-                                   revalidate_fn=stub_sel_fn)
+                                   revalidate_fn=stub_sel_fn,
+                                   dual_cert_fn=dual_cert_fn)
         accepted = []
         acc_site = {}                       # fi -> (site_id, winner Candidate)
         for sid in sorted(r2res):
@@ -1822,7 +1955,7 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
             acc_site[fi] = (sid, res.winner)
         acc_by_fi = {fi: cm for fi, cm, _emb in accepted}
         reasons = {}
-        n_ok, rv = splice_reaims(forest, geom, cfg, accepted,
+        n_ok, rv = splice_reaims(forest, geom, cfg, accepted, dual_mis=dual_mis,
                                  plate_z=plate_z, unrouted=unrouted,
                                  reasons_out=reasons)
         n_committed += n_ok
@@ -1880,7 +2013,8 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
     if di.strut_sites:
         sres = phase8.run_phase2_struts(
             di.strut_sites, geom, cfg,
-            revalidate_fn=_compose_strut_revalidate_fn(ban_fn, noop_fn, cfg))
+            revalidate_fn=_compose_strut_revalidate_fn(ban_fn, noop_fn, cfg),
+            dual_cert_fn=dual_cert_fn)
         accepted = []
         acc_site = {}                     # fi -> (site_id, rung) for committed tracking
         for sid, sr in sres.items():
@@ -1900,7 +2034,7 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
                 ledger_rows.append(("STRUT", sid, None, "UNRESOLVED", sr.rung))
         acc_by_fi = {fi: cm for fi, cm, _emb in accepted}
         reasons = {}
-        n_ok, rv = splice_reaims(forest, geom, cfg, accepted,
+        n_ok, rv = splice_reaims(forest, geom, cfg, accepted, dual_mis=dual_mis,
                                  plate_z=plate_z, unrouted=unrouted,
                                  reasons_out=reasons)
         n_committed += n_ok
@@ -1940,11 +2074,12 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
         def _slide_revalidate(site, sl):
             center = np.asarray(site.center, float)
             delta = np.asarray(sl.center, float) - center
-            tol = max(0.05, 0.5 * site.r)
+            # The co-move set is `joints`' own joint-membership law, NOT a radius
+            # derived from the ball (ruling (6)) -- see `_translate_joint`.
             # pre-slide index + universe (D2 guard baseline), captured BEFORE move.
             idx_arr, end_arr, pt_arr = forest.endpoint_index()
             pre_members, _live_fi, pos_of = _live_universe(forest, unrouted)
-            saved = _translate_joint(forest, center, delta, tol=tol)
+            saved = _translate_joint(forest, center, delta)
             if not saved:
                 return False
             viol = forest.revalidate(geom, cfg)
@@ -1952,7 +2087,8 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
             ok = (not any(v["member_idx"] in touched for v in viol)
                   and _ball_slide_guard_ok(forest, geom, cfg, plate_z, saved,
                                            pre_members, pos_of,
-                                           idx_arr, end_arr, pt_arr))
+                                           idx_arr, end_arr, pt_arr,
+                                           dual_mis=dual_mis))
             for fi, snapm in saved:              # trial only -- always undo here
                 forest.members[fi]._restore(snapm)
             forest.revalidate(geom, cfg)
@@ -1964,16 +2100,16 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
             if br.rung == "B1" and br.slide is not None and site is not None:
                 center = np.asarray(site.center, float)
                 delta = np.asarray(br.slide.center, float) - center
-                tol = max(0.05, 0.5 * site.r)
                 idx_arr, end_arr, pt_arr = forest.endpoint_index()
                 pre_members, _live_fi, pos_of = _live_universe(forest, unrouted)
-                saved = _translate_joint(forest, center, delta, tol=tol)
+                saved = _translate_joint(forest, center, delta)
                 viol = forest.revalidate(geom, cfg)
                 touched = {fi for fi, _s in saved}
                 clean = (not any(v["member_idx"] in touched for v in viol)
                          and _ball_slide_guard_ok(forest, geom, cfg, plate_z, saved,
                                                   pre_members, pos_of,
-                                                  idx_arr, end_arr, pt_arr))
+                                                  idx_arr, end_arr, pt_arr,
+                                                  dual_mis=dual_mis))
                 if not clean:
                     # D3(a) part 3 ball-ban parity: bar re-attempting the SAME slide
                     # on the touched joint members next sweep -- append each touched
@@ -2015,8 +2151,7 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
             if site is None:
                 continue
             if _try_d5_at("BALL", bid, None, np.asarray(site.center, float),
-                          np.asarray(site.root_dir, float),
-                          max(0.05, 0.5 * float(site.r))):
+                          np.asarray(site.root_dir, float)):
                 ball_resolved += 1
                 ball_unresolved -= 1
                 _drop_unresolved("BALL", bid)
@@ -2164,6 +2299,7 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
     commit_measure: dict = {}                    # key -> (cls, rung, measure, count)
     canon_mm = float(getattr(cfg, "p8_chord_canon_micron", 1)) * 1e-3
     defects_by_sweep: list = []                  # D6 monotonicity trace (evidence)
+    boundary_carry: frozenset = frozenset()      # ruling (4), see the loop body
 
     for _sweep in range(max_sweeps):
         if _sweep > 0:
@@ -2171,7 +2307,18 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
         di = construct_sites(forest, members, balls, contacts, carried, cfg, geom,
                              mesh, unrouted=unrouted, quarantine_sites=quarantine_sites,
                              census_authority=census_authority,
-                             frozen_snapshot=frozen_snapshot)
+                             frozen_snapshot=frozen_snapshot,
+                             boundary_carry=boundary_carry)
+        # Ruling (4): once a member has been seen to be census-boundary it stays
+        # under the dual certificate for the rest of the stage. Target selection
+        # falls back to the LIVE ENGINE GATE the moment the geometry stops
+        # matching the frozen fixture, and the engine gate is by definition BLIND
+        # to this class -- so without the carry a boundary member resolved in
+        # sweep 1 would be unscored from sweep 2 on, and a later commit could
+        # silently re-break its census legality with the D6 guard seeing nothing.
+        # The carry only ever adds members to the SCORING population; it cannot
+        # add a relocation target (sites still come from `snapshot`).
+        boundary_carry |= frozenset(di.boundary_mis)
         ne_set = frozenset(di.snapshot.non_exempt)
         # ---- D3(a) part 1: progress-based retirement. Any previously-committed site
         # that REAPPEARS in THIS sweep's snapshot without acceptable progress (measure
