@@ -1,0 +1,27 @@
+{
+ "n_members": [
+  1476,
+  1476
+ ],
+ "members_float_exact": true,
+ "members_max_abs_delta": 0.0,
+ "n_balls": [
+  1049,
+  1049
+ ],
+ "balls_float_exact": true,
+ "n_quarantine": [
+  80,
+  80
+ ],
+ "quarantine_list_exact": true,
+ "quarantine_sites_exact": true,
+ "n_unrouted": [
+  167,
+  167
+ ],
+ "digest_run1": "09ce1fd6a9a1b8b3d3d253a7f76e74199e08a0c1549d173fe5069e187c1b5e76",
+ "digest_run2": "09ce1fd6a9a1b8b3d3d253a7f76e74199e08a0c1549d173fe5069e187c1b5e76",
+ "digest_match": true,
+ "DETERMINISTIC": true
+}

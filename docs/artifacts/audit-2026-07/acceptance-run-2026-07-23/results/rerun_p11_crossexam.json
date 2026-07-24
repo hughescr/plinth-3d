@@ -1,0 +1,3681 @@
+{
+ "summary": {
+  "n_quarantine_sites": 80,
+  "quarantine_real": 55,
+  "quarantine_artifact": 25,
+  "n_through_and_through": 12,
+  "method": "census-grade axis Moller crossings + dense-majority ParityVote inside, sanctioned tip-embed inset (CD+PB+r+standoff); REAL iff illegal interior interval > 0.05mm survives inset",
+  "pitch_bound_mm": 0.5706,
+  "contact_depth_mm": 0.3,
+  "standoff_mm": 0.6,
+  "min_illegal_len_mm": 0.05
+ },
+ "exemplars": [
+  {
+   "stub_member": 8,
+   "contact_idx": 8,
+   "p0": [
+    18.03982477636172,
+    -17.469322692725182,
+    -22.592001048380823
+   ],
+   "p1": [
+    19.333588668353528,
+    -18.024755064445937,
+    -25.012263404453584
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": -22.592,
+   "z_root": -25.012,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 3,
+   "n_inside_intervals": 2,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 1.1608,
+    "through": false,
+    "feature_thickness_mm": 1.1608,
+    "penetration_depth_mm": 0.2596,
+    "entry": [
+     18.797,
+     -17.794,
+     -24.009
+    ],
+    "exit": [
+     19.334,
+     -18.025,
+     -25.012
+    ],
+    "z": -24.511
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 253,
+   "contact_idx": 253,
+   "p0": [
+    17.179634306404896,
+    -15.443667328353234,
+    -34.06888698100181
+   ],
+   "p1": [
+    17.71260748283039,
+    -16.661147571918143,
+    -36.5333709938816
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": -34.069,
+   "z_root": -36.533,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.8,
+    "through": false,
+    "feature_thickness_mm": 2.8,
+    "penetration_depth_mm": 0.771,
+    "entry": [
+     17.18,
+     -15.444,
+     -34.069
+    ],
+    "exit": [
+     17.713,
+     -16.661,
+     -36.533
+    ],
+    "z": -35.301
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 297,
+   "contact_idx": 297,
+   "p0": [
+    30.356861693041804,
+    -7.818127129128872,
+    21.07425003051758
+   ],
+   "p1": [
+    30.356861693041804,
+    -7.818127129128872,
+    18.274250030517578
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 21.074,
+   "z_root": 18.274,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.8,
+    "through": false,
+    "feature_thickness_mm": 2.8,
+    "penetration_depth_mm": 1.069,
+    "entry": [
+     30.357,
+     -7.818,
+     21.074
+    ],
+    "exit": [
+     30.357,
+     -7.818,
+     18.274
+    ],
+    "z": 19.674
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 316,
+   "contact_idx": 316,
+   "p0": [
+    35.161767185710595,
+    -7.009074473545447,
+    22.488122061866306
+   ],
+   "p1": [
+    35.160495388241195,
+    -8.758087944730777,
+    20.301583642321972
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 22.488,
+   "z_root": 20.302,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 3,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.5,
+    "through": false,
+    "feature_thickness_mm": 2.5,
+    "penetration_depth_mm": 0.5902,
+    "entry": [
+     35.162,
+     -7.196,
+     22.254
+    ],
+    "exit": [
+     35.16,
+     -8.758,
+     20.302
+    ],
+    "z": 21.278
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 323,
+   "contact_idx": 323,
+   "p0": [
+    28.37826855437248,
+    3.662870435119514,
+    41.72483339580024
+   ],
+   "p1": [
+    28.193535315666068,
+    5.05737756025283,
+    39.30383700826277
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 41.725,
+   "z_root": 39.304,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 3,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.5025,
+    "through": false,
+    "feature_thickness_mm": 2.5025,
+    "penetration_depth_mm": 0.2488,
+    "entry": [
+     28.359,
+     3.811,
+     41.468
+    ],
+    "exit": [
+     28.194,
+     5.057,
+     39.304
+    ],
+    "z": 40.386
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 325,
+   "contact_idx": 325,
+   "p0": [
+    42.21287375070161,
+    16.06158953849995,
+    45.30803342121445
+   ],
+   "p1": [
+    42.89999630903012,
+    17.626215413922107,
+    43.089969296849354
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 45.308,
+   "z_root": 43.09,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 10,
+   "n_inside_intervals": 2,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 1.4145,
+    "through": false,
+    "feature_thickness_mm": 1.4145,
+    "penetration_depth_mm": 0.0265,
+    "entry": [
+     42.553,
+     16.836,
+     44.21
+    ],
+    "exit": [
+     42.9,
+     17.626,
+     43.09
+    ],
+    "z": 43.65
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 333,
+   "contact_idx": 333,
+   "p0": [
+    28.498264212911273,
+    1.315418491833121,
+    -56.425749969482425
+   ],
+   "p1": [
+    28.498264212911273,
+    1.315418491833121,
+    -59.22574996948242
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": -56.426,
+   "z_root": -59.226,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.8,
+    "through": false,
+    "feature_thickness_mm": 2.8,
+    "penetration_depth_mm": 1.1765,
+    "entry": [
+     28.498,
+     1.315,
+     -56.426
+    ],
+    "exit": [
+     28.498,
+     1.315,
+     -59.226
+    ],
+    "z": -57.826
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 3,
+   "contact_idx": 3,
+   "p0": [
+    5.28518208115162,
+    -8.240749657978688,
+    50.90792744572391
+   ],
+   "p1": [
+    5.9321139076696205,
+    -6.823230473993908,
+    48.581531397138626
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 50.908,
+   "z_root": 48.582,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 23,
+   "n_inside_intervals": 3,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 223,
+   "contact_idx": 223,
+   "p0": [
+    -41.52088776860506,
+    -7.524647090581013,
+    -43.925749969482425
+   ],
+   "p1": [
+    -41.52088776860506,
+    -7.524647090581013,
+    -46.72574996948242
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": -43.926,
+   "z_root": -46.726,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 232,
+   "contact_idx": 232,
+   "p0": [
+    26.985728981194836,
+    -7.86795063769219,
+    31.57425003051758
+   ],
+   "p1": [
+    26.985728981194836,
+    -7.86795063769219,
+    28.774250030517578
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 31.574,
+   "z_root": 28.774,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  }
+ ],
+ "all_sites": [
+  {
+   "stub_member": 3,
+   "contact_idx": 3,
+   "p0": [
+    5.28518208115162,
+    -8.240749657978688,
+    50.90792744572391
+   ],
+   "p1": [
+    5.9321139076696205,
+    -6.823230473993908,
+    48.581531397138626
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 50.908,
+   "z_root": 48.582,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 23,
+   "n_inside_intervals": 3,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 8,
+   "contact_idx": 8,
+   "p0": [
+    18.03982477636172,
+    -17.469322692725182,
+    -22.592001048380823
+   ],
+   "p1": [
+    19.333588668353528,
+    -18.024755064445937,
+    -25.012263404453584
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": -22.592,
+   "z_root": -25.012,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 3,
+   "n_inside_intervals": 2,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 1.1608,
+    "through": false,
+    "feature_thickness_mm": 1.1608,
+    "penetration_depth_mm": 0.2596,
+    "entry": [
+     18.797,
+     -17.794,
+     -24.009
+    ],
+    "exit": [
+     19.334,
+     -18.025,
+     -25.012
+    ],
+    "z": -24.511
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 174,
+   "contact_idx": 174,
+   "p0": [
+    29.326841892309634,
+    7.798705393876947,
+    49.8809836574639
+   ],
+   "p1": [
+    30.919117259701007,
+    7.469715838502313,
+    47.60141680675452
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 49.881,
+   "z_root": 47.601,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 16,
+   "n_inside_intervals": 3,
+   "illegal_len_total_mm": 1.1085,
+   "through": true,
+   "worst_interval": {
+    "illegal_len_mm": 0.7617,
+    "transit_len_mm": 2.0297,
+    "through": true,
+    "feature_thickness_mm": 2.0297,
+    "penetration_depth_mm": 0.0138,
+    "entry": [
+     29.556,
+     7.751,
+     49.553
+    ],
+    "exit": [
+     30.71,
+     7.513,
+     47.901
+    ],
+    "z": 48.727
+   },
+   "classification": "REAL",
+   "reason": "axis transits through model (through-and-through)"
+  },
+  {
+   "stub_member": 223,
+   "contact_idx": 223,
+   "p0": [
+    -41.52088776860506,
+    -7.524647090581013,
+    -43.925749969482425
+   ],
+   "p1": [
+    -41.52088776860506,
+    -7.524647090581013,
+    -46.72574996948242
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": -43.926,
+   "z_root": -46.726,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 232,
+   "contact_idx": 232,
+   "p0": [
+    26.985728981194836,
+    -7.86795063769219,
+    31.57425003051758
+   ],
+   "p1": [
+    26.985728981194836,
+    -7.86795063769219,
+    28.774250030517578
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 31.574,
+   "z_root": 28.774,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 233,
+   "contact_idx": 233,
+   "p0": [
+    26.74821997366802,
+    -8.985983116445519,
+    21.07425003051758
+   ],
+   "p1": [
+    26.74821997366802,
+    -8.985983116445519,
+    18.274250030517578
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 21.074,
+   "z_root": 18.274,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 240,
+   "contact_idx": 240,
+   "p0": [
+    32.25973443046819,
+    -9.374143217797522,
+    36.074250030517575
+   ],
+   "p1": [
+    32.25973443046819,
+    -9.374143217797522,
+    33.27425003051758
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 36.074,
+   "z_root": 33.274,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 243,
+   "contact_idx": 243,
+   "p0": [
+    -35.7948182815421,
+    -12.140427030314802,
+    -45.425749969482425
+   ],
+   "p1": [
+    -35.7948182815421,
+    -12.140427030314802,
+    -48.22574996948242
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": -45.426,
+   "z_root": -48.226,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 245,
+   "contact_idx": 245,
+   "p0": [
+    -29.1619661214847,
+    -10.34157869524652,
+    -45.925749969482425
+   ],
+   "p1": [
+    -29.1619661214847,
+    -10.34157869524652,
+    -48.72574996948242
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": -45.926,
+   "z_root": -48.726,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 253,
+   "contact_idx": 253,
+   "p0": [
+    17.179634306404896,
+    -15.443667328353234,
+    -34.06888698100181
+   ],
+   "p1": [
+    17.71260748283039,
+    -16.661147571918143,
+    -36.5333709938816
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": -34.069,
+   "z_root": -36.533,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.8,
+    "through": false,
+    "feature_thickness_mm": 2.8,
+    "penetration_depth_mm": 0.771,
+    "entry": [
+     17.18,
+     -15.444,
+     -34.069
+    ],
+    "exit": [
+     17.713,
+     -16.661,
+     -36.533
+    ],
+    "z": -35.301
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 255,
+   "contact_idx": 255,
+   "p0": [
+    0.7428544033140316,
+    2.84262037379977,
+    19.07425003051758
+   ],
+   "p1": [
+    0.7428544033140316,
+    2.84262037379977,
+    16.274250030517578
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 19.074,
+   "z_root": 16.274,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 261,
+   "contact_idx": 261,
+   "p0": [
+    21.251614440300592,
+    -0.9997545180999783,
+    -54.925749969482425
+   ],
+   "p1": [
+    21.251614440300592,
+    -0.9997545180999783,
+    -57.72574996948242
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": -54.926,
+   "z_root": -57.726,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 262,
+   "contact_idx": 262,
+   "p0": [
+    29.030594442107002,
+    -18.0534432409242,
+    7.074250030517578
+   ],
+   "p1": [
+    29.030594442107002,
+    -18.0534432409242,
+    4.274250030517578
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 7.074,
+   "z_root": 4.274,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 282,
+   "contact_idx": 282,
+   "p0": [
+    -32.379949247168284,
+    8.460779803534077,
+    -45.925749969482425
+   ],
+   "p1": [
+    -32.379949247168284,
+    8.460779803534077,
+    -48.72574996948242
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": -45.926,
+   "z_root": -48.726,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 291,
+   "contact_idx": 291,
+   "p0": [
+    16.34160333535174,
+    9.248685886697926,
+    54.889080442096116
+   ],
+   "p1": [
+    17.242590950479467,
+    9.813993566588897,
+    52.298974547650346
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 54.889,
+   "z_root": 52.299,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 6,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.5212,
+   "through": true,
+   "worst_interval": {
+    "illegal_len_mm": 0.5212,
+    "transit_len_mm": 2.001,
+    "through": true,
+    "feature_thickness_mm": 2.001,
+    "penetration_depth_mm": 0.0682,
+    "entry": [
+     16.403,
+     9.287,
+     54.713
+    ],
+    "exit": [
+     17.047,
+     9.691,
+     52.862
+    ],
+    "z": 53.787
+   },
+   "classification": "REAL",
+   "reason": "axis transits through model (through-and-through)"
+  },
+  {
+   "stub_member": 293,
+   "contact_idx": 293,
+   "p0": [
+    40.80830186318107,
+    15.321150741171378,
+    42.799953199067076
+   ],
+   "p1": [
+    41.114605400972984,
+    16.981187384647978,
+    40.56602023564783
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 42.8,
+   "z_root": 40.566,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 7,
+   "n_inside_intervals": 0,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 295,
+   "contact_idx": 295,
+   "p0": [
+    -24.84760155467058,
+    9.416864705830642,
+    -45.425749969482425
+   ],
+   "p1": [
+    -24.84760155467058,
+    9.416864705830642,
+    -48.22574996948242
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": -45.426,
+   "z_root": -48.226,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 297,
+   "contact_idx": 297,
+   "p0": [
+    30.356861693041804,
+    -7.818127129128872,
+    21.07425003051758
+   ],
+   "p1": [
+    30.356861693041804,
+    -7.818127129128872,
+    18.274250030517578
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 21.074,
+   "z_root": 18.274,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.8,
+    "through": false,
+    "feature_thickness_mm": 2.8,
+    "penetration_depth_mm": 1.069,
+    "entry": [
+     30.357,
+     -7.818,
+     21.074
+    ],
+    "exit": [
+     30.357,
+     -7.818,
+     18.274
+    ],
+    "z": 19.674
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 315,
+   "contact_idx": 315,
+   "p0": [
+    33.45767485457376,
+    -22.745441973856497,
+    2.7177948701904167
+   ],
+   "p1": [
+    31.646055967550083,
+    -23.4538827781822,
+    0.7038066291757261
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 2.718,
+   "z_root": 0.704,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 4,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.4654,
+   "through": true,
+   "worst_interval": {
+    "illegal_len_mm": 0.4654,
+    "transit_len_mm": 1.836,
+    "through": true,
+    "feature_thickness_mm": 1.836,
+    "penetration_depth_mm": 0.4561,
+    "entry": [
+     33.264,
+     -22.821,
+     2.502
+    ],
+    "exit": [
+     32.076,
+     -23.286,
+     1.181
+    ],
+    "z": 1.842
+   },
+   "classification": "REAL",
+   "reason": "axis transits through model (through-and-through)"
+  },
+  {
+   "stub_member": 316,
+   "contact_idx": 316,
+   "p0": [
+    35.161767185710595,
+    -7.009074473545447,
+    22.488122061866306
+   ],
+   "p1": [
+    35.160495388241195,
+    -8.758087944730777,
+    20.301583642321972
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 22.488,
+   "z_root": 20.302,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 3,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.5,
+    "through": false,
+    "feature_thickness_mm": 2.5,
+    "penetration_depth_mm": 0.5902,
+    "entry": [
+     35.162,
+     -7.196,
+     22.254
+    ],
+    "exit": [
+     35.16,
+     -8.758,
+     20.302
+    ],
+    "z": 21.278
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 323,
+   "contact_idx": 323,
+   "p0": [
+    28.37826855437248,
+    3.662870435119514,
+    41.72483339580024
+   ],
+   "p1": [
+    28.193535315666068,
+    5.05737756025283,
+    39.30383700826277
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 41.725,
+   "z_root": 39.304,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 3,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.5025,
+    "through": false,
+    "feature_thickness_mm": 2.5025,
+    "penetration_depth_mm": 0.2488,
+    "entry": [
+     28.359,
+     3.811,
+     41.468
+    ],
+    "exit": [
+     28.194,
+     5.057,
+     39.304
+    ],
+    "z": 40.386
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 325,
+   "contact_idx": 325,
+   "p0": [
+    42.21287375070161,
+    16.06158953849995,
+    45.30803342121445
+   ],
+   "p1": [
+    42.89999630903012,
+    17.626215413922107,
+    43.089969296849354
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 45.308,
+   "z_root": 43.09,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 10,
+   "n_inside_intervals": 2,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 1.4145,
+    "through": false,
+    "feature_thickness_mm": 1.4145,
+    "penetration_depth_mm": 0.0265,
+    "entry": [
+     42.553,
+     16.836,
+     44.21
+    ],
+    "exit": [
+     42.9,
+     17.626,
+     43.09
+    ],
+    "z": 43.65
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 326,
+   "contact_idx": 326,
+   "p0": [
+    -0.418135801867479,
+    -5.492732516242596,
+    30.302289736849758
+   ],
+   "p1": [
+    0.4260959629502592,
+    -4.648500751424858,
+    27.769594442396546
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 30.302,
+   "z_root": 27.77,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 3,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 328,
+   "contact_idx": 328,
+   "p0": [
+    17.514284174170395,
+    -14.53498937553441,
+    -54.925749969482425
+   ],
+   "p1": [
+    17.514284174170395,
+    -14.53498937553441,
+    -57.72574996948242
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": -54.926,
+   "z_root": -57.726,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 329,
+   "contact_idx": 329,
+   "p0": [
+    13.622578881237636,
+    -8.601385996915495,
+    -53.925749969482425
+   ],
+   "p1": [
+    13.622578881237636,
+    -8.601385996915495,
+    -56.72574996948242
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": -53.926,
+   "z_root": -56.726,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 333,
+   "contact_idx": 333,
+   "p0": [
+    28.498264212911273,
+    1.315418491833121,
+    -56.425749969482425
+   ],
+   "p1": [
+    28.498264212911273,
+    1.315418491833121,
+    -59.22574996948242
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": -56.426,
+   "z_root": -59.226,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.8,
+    "through": false,
+    "feature_thickness_mm": 2.8,
+    "penetration_depth_mm": 1.1765,
+    "entry": [
+     28.498,
+     1.315,
+     -56.426
+    ],
+    "exit": [
+     28.498,
+     1.315,
+     -59.226
+    ],
+    "z": -57.826
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 334,
+   "contact_idx": 334,
+   "p0": [
+    30.9654282724235,
+    0.4575014396854997,
+    39.08022241358945
+   ],
+   "p1": [
+    31.809660037241237,
+    1.301733204503238,
+    36.54752711913624
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 39.08,
+   "z_root": 36.548,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.8,
+    "through": false,
+    "feature_thickness_mm": 2.8,
+    "penetration_depth_mm": 0.9937,
+    "entry": [
+     30.965,
+     0.458,
+     39.08
+    ],
+    "exit": [
+     31.81,
+     1.302,
+     36.548
+    ],
+    "z": 37.814
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 362,
+   "contact_idx": 362,
+   "p0": [
+    -28.580748735251724,
+    17.602421083940392,
+    -48.864813008145006
+   ],
+   "p1": [
+    -27.33031347739449,
+    17.431270833699855,
+    -51.36423679329032
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": -48.865,
+   "z_root": -51.364,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 3,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.5242,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 0.5242,
+    "transit_len_mm": 2.1948,
+    "through": false,
+    "feature_thickness_mm": 2.1948,
+    "penetration_depth_mm": 0.309,
+    "entry": [
+     -28.581,
+     17.602,
+     -48.865
+    ],
+    "exit": [
+     -27.601,
+     17.468,
+     -50.824
+    ],
+    "z": -49.844
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 367,
+   "contact_idx": 367,
+   "p0": [
+    -39.86371589535267,
+    -15.645245486424383,
+    -45.325961927729566
+   ],
+   "p1": [
+    -41.728896469391806,
+    -16.399878413097593,
+    -47.273172900430694
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": -45.326,
+   "z_root": -47.273,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.8,
+    "through": false,
+    "feature_thickness_mm": 2.8,
+    "penetration_depth_mm": 1.0462,
+    "entry": [
+     -39.864,
+     -15.645,
+     -45.326
+    ],
+    "exit": [
+     -41.729,
+     -16.4,
+     -47.273
+    ],
+    "z": -46.3
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 377,
+   "contact_idx": 377,
+   "p0": [
+    -33.03568613042262,
+    14.878855454212129,
+    -20.900168012429297
+   ],
+   "p1": [
+    -32.21267112180372,
+    14.833409494114415,
+    -23.576094199807947
+   ],
+   "r0": 0.2494,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": -20.9,
+   "z_root": -23.576,
+   "inset0_mm": 1.72,
+   "inset1_mm": 0.0,
+   "n_crossings": 24,
+   "n_inside_intervals": 3,
+   "illegal_len_total_mm": 0.0708,
+   "through": true,
+   "worst_interval": {
+    "illegal_len_mm": 0.0708,
+    "transit_len_mm": 0.0708,
+    "through": true,
+    "feature_thickness_mm": 0.0708,
+    "penetration_depth_mm": 0.1903,
+    "entry": [
+     -32.512,
+     14.85,
+     -22.604
+    ],
+    "exit": [
+     -32.491,
+     14.849,
+     -22.671
+    ],
+    "z": -22.637
+   },
+   "classification": "REAL",
+   "reason": "axis transits through model (through-and-through)"
+  },
+  {
+   "stub_member": 384,
+   "contact_idx": 384,
+   "p0": [
+    -33.40528027673476,
+    14.614664126374755,
+    -20.82549733723778
+   ],
+   "p1": [
+    -33.07345985208015,
+    15.917016577899167,
+    -23.281871351469
+   ],
+   "r0": 0.2565,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": -20.825,
+   "z_root": -23.282,
+   "inset0_mm": 1.7271,
+   "inset1_mm": 0.0,
+   "n_crossings": 15,
+   "n_inside_intervals": 2,
+   "illegal_len_total_mm": 1.0729,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.0729,
+    "transit_len_mm": 2.5,
+    "through": false,
+    "feature_thickness_mm": 2.5,
+    "penetration_depth_mm": 0.0108,
+    "entry": [
+     -33.37,
+     14.754,
+     -21.089
+    ],
+    "exit": [
+     -33.073,
+     15.917,
+     -23.282
+    ],
+    "z": -22.185
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 385,
+   "contact_idx": 385,
+   "p0": [
+    -33.57057150845304,
+    14.473869165957217,
+    -20.817238611998825
+   ],
+   "p1": [
+    -33.63779520950591,
+    15.819660229978922,
+    -23.27168913829103
+   ],
+   "r0": 0.2476,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": -20.817,
+   "z_root": -23.272,
+   "inset0_mm": 1.7183,
+   "inset1_mm": 0.0,
+   "n_crossings": 29,
+   "n_inside_intervals": 5,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 410,
+   "contact_idx": 410,
+   "p0": [
+    -16.117848779869977,
+    -0.9982971707504351,
+    -17.921152259015695
+   ],
+   "p1": [
+    -14.778375290227405,
+    -0.7158506384149532,
+    -20.363699029686916
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": -17.921,
+   "z_root": -20.364,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 4,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.7092,
+    "through": false,
+    "feature_thickness_mm": 2.7092,
+    "penetration_depth_mm": 0.9194,
+    "entry": [
+     -16.074,
+     -0.989,
+     -18.0
+    ],
+    "exit": [
+     -14.778,
+     -0.716,
+     -20.364
+    ],
+    "z": -19.182
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 427,
+   "contact_idx": 427,
+   "p0": [
+    35.25207986177431,
+    -5.870513681951757,
+    22.3426859360754
+   ],
+   "p1": [
+    35.26314470656821,
+    -5.723467552135423,
+    19.546571667145084
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 22.343,
+   "z_root": 19.547,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.8,
+    "through": false,
+    "feature_thickness_mm": 2.8,
+    "penetration_depth_mm": 1.714,
+    "entry": [
+     35.252,
+     -5.871,
+     22.343
+    ],
+    "exit": [
+     35.263,
+     -5.723,
+     19.547
+    ],
+    "z": 20.945
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 437,
+   "contact_idx": 437,
+   "p0": [
+    37.19185482224347,
+    4.169027979159059,
+    27.19470466207651
+   ],
+   "p1": [
+    37.27464833189035,
+    6.946864745818056,
+    26.852991137969187
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 27.195,
+   "z_root": 26.853,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.8,
+    "through": false,
+    "feature_thickness_mm": 2.8,
+    "penetration_depth_mm": 0.6464,
+    "entry": [
+     37.192,
+     4.169,
+     27.195
+    ],
+    "exit": [
+     37.275,
+     6.947,
+     26.853
+    ],
+    "z": 27.024
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 440,
+   "contact_idx": 440,
+   "p0": [
+    11.741339793332202,
+    -17.065114345196204,
+    28.500396354973557
+   ],
+   "p1": [
+    12.911378899152231,
+    -18.565982344719146,
+    26.4465210571865
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 28.5,
+   "z_root": 26.447,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.8,
+    "through": false,
+    "feature_thickness_mm": 2.8,
+    "penetration_depth_mm": 0.3616,
+    "entry": [
+     11.741,
+     -17.065,
+     28.5
+    ],
+    "exit": [
+     12.911,
+     -18.566,
+     26.447
+    ],
+    "z": 27.473
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 444,
+   "contact_idx": 444,
+   "p0": [
+    2.4012499982663456,
+    11.789293342499919,
+    34.73575020041195
+   ],
+   "p1": [
+    -0.34926571990753574,
+    12.06965529199287,
+    35.178537351710325
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 34.736,
+   "z_root": 35.179,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 1,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.8,
+    "through": false,
+    "feature_thickness_mm": 2.8,
+    "penetration_depth_mm": 0.8836,
+    "entry": [
+     2.401,
+     11.789,
+     34.736
+    ],
+    "exit": [
+     -0.349,
+     12.07,
+     35.179
+    ],
+    "z": 34.957
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 448,
+   "contact_idx": 448,
+   "p0": [
+    -10.78914370790337,
+    3.944171886030392,
+    40.543386641258806
+   ],
+   "p1": [
+    -10.713217157852771,
+    5.5442175899648305,
+    38.24684817993961
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 40.543,
+   "z_root": 38.247,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.5,
+    "through": false,
+    "feature_thickness_mm": 2.5,
+    "penetration_depth_mm": 0.7881,
+    "entry": [
+     -10.781,
+     4.116,
+     40.297
+    ],
+    "exit": [
+     -10.713,
+     5.544,
+     38.247
+    ],
+    "z": 39.272
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 453,
+   "contact_idx": 453,
+   "p0": [
+    -19.56959497313456,
+    4.126588122084476,
+    41.40200135742265
+   ],
+   "p1": [
+    -20.23407285571461,
+    3.6061688526244855,
+    38.732238647454466
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 41.402,
+   "z_root": 38.732,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 12,
+   "n_inside_intervals": 3,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 1.5465,
+    "through": false,
+    "feature_thickness_mm": 1.5465,
+    "penetration_depth_mm": 0.0151,
+    "entry": [
+     -19.867,
+     3.894,
+     40.207
+    ],
+    "exit": [
+     -20.234,
+     3.606,
+     38.732
+    ],
+    "z": 39.47
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 454,
+   "contact_idx": 454,
+   "p0": [
+    -19.608000464510717,
+    3.8636497022688028,
+    41.392844407388964
+   ],
+   "p1": [
+    -18.55727151970237,
+    4.18276158804725,
+    38.81716269395913
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 41.393,
+   "z_root": 38.817,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 10,
+   "n_inside_intervals": 2,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 456,
+   "contact_idx": 456,
+   "p0": [
+    -19.47919745184692,
+    3.973296082705122,
+    41.40554497249591
+   ],
+   "p1": [
+    -19.10547330166627,
+    2.5223335169267207,
+    39.04016172822417
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 41.406,
+   "z_root": 39.04,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 13,
+   "n_inside_intervals": 2,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 1.3657,
+    "through": false,
+    "feature_thickness_mm": 1.3657,
+    "penetration_depth_mm": 0.2276,
+    "entry": [
+     -19.288,
+     3.23,
+     40.194
+    ],
+    "exit": [
+     -19.105,
+     2.522,
+     39.04
+    ],
+    "z": 39.617
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 459,
+   "contact_idx": 459,
+   "p0": [
+    -19.832944741771573,
+    3.9046560431123534,
+    41.58715200186469
+   ],
+   "p1": [
+    -19.525649185594954,
+    3.046066164473063,
+    38.93981506421352
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 41.587,
+   "z_root": 38.94,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 19,
+   "n_inside_intervals": 3,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 1.3821,
+    "through": false,
+    "feature_thickness_mm": 1.3821,
+    "penetration_depth_mm": 0.1712,
+    "entry": [
+     -19.677,
+     3.47,
+     40.247
+    ],
+    "exit": [
+     -19.526,
+     3.046,
+     38.94
+    ],
+    "z": 39.593
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 461,
+   "contact_idx": 461,
+   "p0": [
+    8.655243540796034,
+    -8.154602809255964,
+    41.80538019480071
+   ],
+   "p1": [
+    8.05474336120492,
+    -8.059221940689232,
+    39.072194869173764
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 41.805,
+   "z_root": 39.072,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.8,
+    "through": false,
+    "feature_thickness_mm": 2.8,
+    "penetration_depth_mm": 0.865,
+    "entry": [
+     8.655,
+     -8.155,
+     41.805
+    ],
+    "exit": [
+     8.055,
+     -8.059,
+     39.072
+    ],
+    "z": 40.439
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 462,
+   "contact_idx": 462,
+   "p0": [
+    25.625776244582188,
+    5.044303586331403,
+    42.711987359529665
+   ],
+   "p1": [
+    25.31846212197137,
+    4.051586808037464,
+    40.11197362338563
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 42.712,
+   "z_root": 40.112,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 7,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.674,
+    "through": false,
+    "feature_thickness_mm": 2.674,
+    "penetration_depth_mm": 0.6362,
+    "entry": [
+     25.612,
+     5.0,
+     42.595
+    ],
+    "exit": [
+     25.318,
+     4.052,
+     40.112
+    ],
+    "z": 41.353
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 478,
+   "contact_idx": 478,
+   "p0": [
+    -2.8617732708510553,
+    7.5339171607921225,
+    44.45128252659119
+   ],
+   "p1": [
+    -3.113065010262203,
+    9.164361947419161,
+    42.18887180802915
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 44.451,
+   "z_root": 42.189,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 4,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.6456,
+    "through": false,
+    "feature_thickness_mm": 2.6456,
+    "penetration_depth_mm": 0.078,
+    "entry": [
+     -2.876,
+     7.624,
+     44.326
+    ],
+    "exit": [
+     -3.113,
+     9.164,
+     42.189
+    ],
+    "z": 43.258
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 479,
+   "contact_idx": 479,
+   "p0": [
+    -2.446649395641291,
+    8.008728811802612,
+    44.50430366336985
+   ],
+   "p1": [
+    -3.7239119475367657,
+    8.537340620639045,
+    42.069314971592384
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 44.504,
+   "z_root": 42.069,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 9,
+   "n_inside_intervals": 2,
+   "illegal_len_total_mm": 0.5354,
+   "through": true,
+   "worst_interval": {
+    "illegal_len_mm": 0.5354,
+    "transit_len_mm": 1.8151,
+    "through": true,
+    "feature_thickness_mm": 1.8151,
+    "penetration_depth_mm": 0.0616,
+    "entry": [
+     -2.625,
+     8.083,
+     44.164
+    ],
+    "exit": [
+     -3.453,
+     8.425,
+     42.586
+    ],
+    "z": 43.375
+   },
+   "classification": "REAL",
+   "reason": "axis transits through model (through-and-through)"
+  },
+  {
+   "stub_member": 483,
+   "contact_idx": 483,
+   "p0": [
+    -2.135408023400607,
+    9.755714523498895,
+    45.381040997877854
+   ],
+   "p1": [
+    -1.746982546287259,
+    11.911624016822353,
+    43.637143092228825
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 45.381,
+   "z_root": 43.637,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.5,
+    "through": false,
+    "feature_thickness_mm": 2.5,
+    "penetration_depth_mm": 0.9181,
+    "entry": [
+     -2.094,
+     9.987,
+     45.194
+    ],
+    "exit": [
+     -1.747,
+     11.912,
+     43.637
+    ],
+    "z": 44.416
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 485,
+   "contact_idx": 485,
+   "p0": [
+    44.524527593854756,
+    -10.660621958551163,
+    45.70340127797186
+   ],
+   "p1": [
+    43.041600495546305,
+    -9.524277919056061,
+    43.61781995733091
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 45.703,
+   "z_root": 43.618,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 4,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.4619,
+   "through": true,
+   "worst_interval": {
+    "illegal_len_mm": 0.4619,
+    "transit_len_mm": 2.03,
+    "through": true,
+    "feature_thickness_mm": 2.03,
+    "penetration_depth_mm": 0.5072,
+    "entry": [
+     44.47,
+     -10.619,
+     45.627
+    ],
+    "exit": [
+     43.395,
+     -9.795,
+     44.115
+    ],
+    "z": 44.871
+   },
+   "classification": "REAL",
+   "reason": "axis transits through model (through-and-through)"
+  },
+  {
+   "stub_member": 492,
+   "contact_idx": 492,
+   "p0": [
+    0.5387586653764715,
+    -7.34584579110628,
+    46.44007038596337
+   ],
+   "p1": [
+    1.0036143755451912,
+    -5.969164560198322,
+    44.0466088848756
+   ],
+   "r0": 0.2182,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 46.44,
+   "z_root": 44.047,
+   "inset0_mm": 1.6889,
+   "inset1_mm": 0.0,
+   "n_crossings": 16,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 495,
+   "contact_idx": 495,
+   "p0": [
+    0.38628215456335746,
+    -7.4661277762331215,
+    46.58064458100643
+   ],
+   "p1": [
+    0.28977174358823204,
+    -8.794036236672227,
+    44.11744648477713
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 46.581,
+   "z_root": 44.117,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 10,
+   "n_inside_intervals": 2,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.5742,
+    "through": false,
+    "feature_thickness_mm": 2.5742,
+    "penetration_depth_mm": 0.0454,
+    "entry": [
+     0.379,
+     -7.573,
+     46.382
+    ],
+    "exit": [
+     0.29,
+     -8.794,
+     44.117
+    ],
+    "z": 45.25
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 497,
+   "contact_idx": 497,
+   "p0": [
+    0.38109192398293934,
+    -7.590000739180447,
+    46.605482573976936
+   ],
+   "p1": [
+    0.5059228715711067,
+    -8.764601587558769,
+    44.06683528033546
+   ],
+   "r0": 0.242,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 46.605,
+   "z_root": 44.067,
+   "inset0_mm": 1.7126,
+   "inset1_mm": 0.0,
+   "n_crossings": 7,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 499,
+   "contact_idx": 499,
+   "p0": [
+    0.45417237991308,
+    -7.820808379212774,
+    46.5371383418764
+   ],
+   "p1": [
+    1.214590808234709,
+    -5.70824585722754,
+    44.86416392349091
+   ],
+   "r0": 0.2193,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 46.537,
+   "z_root": 44.864,
+   "inset0_mm": 1.6899,
+   "inset1_mm": 0.0,
+   "n_crossings": 14,
+   "n_inside_intervals": 2,
+   "illegal_len_total_mm": 1.1101,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1101,
+    "transit_len_mm": 2.2432,
+    "through": false,
+    "feature_thickness_mm": 2.2432,
+    "penetration_depth_mm": 0.0764,
+    "entry": [
+     0.605,
+     -7.401,
+     46.204
+    ],
+    "exit": [
+     1.215,
+     -5.708,
+     44.864
+    ],
+    "z": 45.534
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 508,
+   "contact_idx": 508,
+   "p0": [
+    -18.218559286119337,
+    1.9399879601928518,
+    48.49491498428988
+   ],
+   "p1": [
+    -17.675529305125323,
+    3.2135835063681624,
+    50.92865137603489
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 48.495,
+   "z_root": 50.929,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 2,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 509,
+   "contact_idx": 509,
+   "p0": [
+    6.5999202354234745,
+    -8.232875341158906,
+    49.683343642399045
+   ],
+   "p1": [
+    5.790218029185893,
+    -9.139932205430341,
+    47.16111641588037
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 49.683,
+   "z_root": 47.161,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 4,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.7114,
+    "through": false,
+    "feature_thickness_mm": 2.7114,
+    "penetration_depth_mm": 0.4005,
+    "entry": [
+     6.574,
+     -8.262,
+     49.604
+    ],
+    "exit": [
+     5.79,
+     -9.14,
+     47.161
+    ],
+    "z": 48.382
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 513,
+   "contact_idx": 513,
+   "p0": [
+    28.243164884926024,
+    6.605178991159889,
+    50.11160482114286
+   ],
+   "p1": [
+    28.502513389776635,
+    7.113698277199493,
+    47.37041046671312
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 50.112,
+   "z_root": 47.37,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 14,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 517,
+   "contact_idx": 517,
+   "p0": [
+    2.9626894793955603,
+    -7.731570586059536,
+    50.38327769701994
+   ],
+   "p1": [
+    3.3281465884313652,
+    -8.767256428019495,
+    47.80766205445623
+   ],
+   "r0": 0.2284,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 50.383,
+   "z_root": 47.808,
+   "inset0_mm": 1.699,
+   "inset1_mm": 0.0,
+   "n_crossings": 19,
+   "n_inside_intervals": 3,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 526,
+   "contact_idx": 526,
+   "p0": [
+    17.54329270580153,
+    10.975703777612118,
+    51.03148679190514
+   ],
+   "p1": [
+    18.116303664219032,
+    11.179788873089128,
+    48.29835530671501
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 51.031,
+   "z_root": 48.298,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 6,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 614,
+   "contact_idx": 614,
+   "p0": [
+    24.019473367695014,
+    13.750284552891216,
+    52.43639234163782
+   ],
+   "p1": [
+    24.60439724918869,
+    11.490211682856408,
+    50.89045098602597
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 52.436,
+   "z_root": 50.89,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 21,
+   "n_inside_intervals": 3,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 1.566,
+    "through": false,
+    "feature_thickness_mm": 1.566,
+    "penetration_depth_mm": 0.0855,
+    "entry": [
+     24.277,
+     12.754,
+     51.755
+    ],
+    "exit": [
+     24.604,
+     11.49,
+     50.89
+    ],
+    "z": 51.323
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 617,
+   "contact_idx": 617,
+   "p0": [
+    -7.709117899395457,
+    10.277144502104838,
+    52.55082224964371
+   ],
+   "p1": [
+    -6.684034264274513,
+    11.172233315793022,
+    50.103779226601915
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 52.551,
+   "z_root": 50.104,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 8,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.7506,
+   "through": true,
+   "worst_interval": {
+    "illegal_len_mm": 0.7506,
+    "transit_len_mm": 2.1212,
+    "through": true,
+    "feature_thickness_mm": 2.1212,
+    "penetration_depth_mm": 0.1832,
+    "entry": [
+     -7.599,
+     10.373,
+     52.289
+    ],
+    "exit": [
+     -6.823,
+     11.051,
+     50.435
+    ],
+    "z": 51.362
+   },
+   "classification": "REAL",
+   "reason": "axis transits through model (through-and-through)"
+  },
+  {
+   "stub_member": 618,
+   "contact_idx": 618,
+   "p0": [
+    6.5788895842667285,
+    -7.7898488460073185,
+    52.551335146575596
+   ],
+   "p1": [
+    5.382545115851805,
+    -8.631954959623261,
+    50.16394803797681
+   ],
+   "r0": 0.3218,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 52.551,
+   "z_root": 50.164,
+   "inset0_mm": 1.7925,
+   "inset1_mm": 0.0,
+   "n_crossings": 32,
+   "n_inside_intervals": 5,
+   "illegal_len_total_mm": 1.0075,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.0075,
+    "transit_len_mm": 1.1958,
+    "through": false,
+    "feature_thickness_mm": 1.1958,
+    "penetration_depth_mm": 0.0042,
+    "entry": [
+     5.893,
+     -8.272,
+     51.184
+    ],
+    "exit": [
+     5.383,
+     -8.632,
+     50.164
+    ],
+    "z": 50.674
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 619,
+   "contact_idx": 619,
+   "p0": [
+    6.591346355244228,
+    -7.9405522804233275,
+    52.586777878891674
+   ],
+   "p1": [
+    6.207638456053955,
+    -8.50938997270925,
+    49.872152319457406
+   ],
+   "r0": 0.3266,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 52.587,
+   "z_root": 49.872,
+   "inset0_mm": 1.7972,
+   "inset1_mm": 0.0,
+   "n_crossings": 36,
+   "n_inside_intervals": 5,
+   "illegal_len_total_mm": 1.0028,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.0028,
+    "transit_len_mm": 1.3094,
+    "through": false,
+    "feature_thickness_mm": 1.3094,
+    "penetration_depth_mm": 0.0042,
+    "entry": [
+     6.387,
+     -8.243,
+     51.142
+    ],
+    "exit": [
+     6.208,
+     -8.509,
+     49.872
+    ],
+    "z": 50.507
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 621,
+   "contact_idx": 621,
+   "p0": [
+    6.568896251543781,
+    -7.941201053746486,
+    52.588960006030916
+   ],
+   "p1": [
+    5.6945820183851605,
+    -8.100191464954412,
+    49.93372053079705
+   ],
+   "r0": 0.323,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 52.589,
+   "z_root": 49.934,
+   "inset0_mm": 1.7936,
+   "inset1_mm": 0.0,
+   "n_crossings": 59,
+   "n_inside_intervals": 6,
+   "illegal_len_total_mm": 1.0064,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.0064,
+    "transit_len_mm": 1.0334,
+    "through": false,
+    "feature_thickness_mm": 1.0334,
+    "penetration_depth_mm": 0.0045,
+    "entry": [
+     6.017,
+     -8.042,
+     50.914
+    ],
+    "exit": [
+     5.695,
+     -8.1,
+     49.934
+    ],
+    "z": 50.424
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 623,
+   "contact_idx": 623,
+   "p0": [
+    6.71586080282686,
+    -7.695154192180815,
+    52.558046755388524
+   ],
+   "p1": [
+    6.295308612307087,
+    -9.282560330866259,
+    50.290167215837805
+   ],
+   "r0": 0.3343,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 52.558,
+   "z_root": 50.29,
+   "inset0_mm": 1.8049,
+   "inset1_mm": 0.0,
+   "n_crossings": 34,
+   "n_inside_intervals": 4,
+   "illegal_len_total_mm": 0.9951,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 0.9951,
+    "transit_len_mm": 2.5,
+    "through": false,
+    "feature_thickness_mm": 2.5,
+    "penetration_depth_mm": 0.0066,
+    "entry": [
+     6.671,
+     -7.865,
+     52.315
+    ],
+    "exit": [
+     6.295,
+     -9.283,
+     50.29
+    ],
+    "z": 51.303
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 625,
+   "contact_idx": 625,
+   "p0": [
+    6.5319851595188725,
+    -7.983561106844094,
+    52.59731913474938
+   ],
+   "p1": [
+    5.527032290874632,
+    -8.4620360440401,
+    50.0280524171276
+   ],
+   "r0": 0.3182,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 52.597,
+   "z_root": 50.028,
+   "inset0_mm": 1.7888,
+   "inset1_mm": 0.0,
+   "n_crossings": 26,
+   "n_inside_intervals": 4,
+   "illegal_len_total_mm": 0.0,
+   "through": false,
+   "worst_interval": null,
+   "classification": "ARTIFACT",
+   "reason": "no exact interior transit on axis beyond embed inset (kernel through-transit flag unsupported by census geometry)"
+  },
+  {
+   "stub_member": 628,
+   "contact_idx": 628,
+   "p0": [
+    -7.812589618952318,
+    10.261881338755876,
+    52.65029507098875
+   ],
+   "p1": [
+    -7.056520046531789,
+    10.809045738639181,
+    50.01041440679951
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 52.65,
+   "z_root": 50.01,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 10,
+   "n_inside_intervals": 2,
+   "illegal_len_total_mm": 0.5944,
+   "through": true,
+   "worst_interval": {
+    "illegal_len_mm": 0.5944,
+    "transit_len_mm": 1.9479,
+    "through": true,
+    "feature_thickness_mm": 1.9479,
+    "penetration_depth_mm": 0.0272,
+    "entry": [
+     -7.727,
+     10.324,
+     52.351
+    ],
+    "exit": [
+     -7.201,
+     10.704,
+     50.515
+    ],
+    "z": 51.433
+   },
+   "classification": "REAL",
+   "reason": "axis transits through model (through-and-through)"
+  },
+  {
+   "stub_member": 630,
+   "contact_idx": 630,
+   "p0": [
+    -7.93245474158,
+    10.313237805931424,
+    52.63248595785015
+   ],
+   "p1": [
+    -6.551518256608728,
+    11.002949670216646,
+    50.29639692514198
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 52.632,
+   "z_root": 50.296,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 20,
+   "n_inside_intervals": 3,
+   "illegal_len_total_mm": 0.8266,
+   "through": true,
+   "worst_interval": {
+    "illegal_len_mm": 0.5623,
+    "transit_len_mm": 0.5623,
+    "through": true,
+    "feature_thickness_mm": 0.5623,
+    "penetration_depth_mm": 0.1342,
+    "entry": [
+     -6.977,
+     10.791,
+     51.016
+    ],
+    "exit": [
+     -6.699,
+     10.929,
+     50.547
+    ],
+    "z": 50.781
+   },
+   "classification": "REAL",
+   "reason": "axis transits through model (through-and-through)"
+  },
+  {
+   "stub_member": 636,
+   "contact_idx": 636,
+   "p0": [
+    36.18930826709381,
+    3.7623664152729854,
+    52.97251493600408
+   ],
+   "p1": [
+    37.452317989062,
+    3.6263741949297117,
+    50.47725692164566
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 52.973,
+   "z_root": 50.477,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 4,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.6775,
+    "through": false,
+    "feature_thickness_mm": 2.6775,
+    "penetration_depth_mm": 0.3116,
+    "entry": [
+     36.245,
+     3.756,
+     52.863
+    ],
+    "exit": [
+     37.452,
+     3.626,
+     50.477
+    ],
+    "z": 51.67
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 637,
+   "contact_idx": 637,
+   "p0": [
+    36.184194752548585,
+    3.826700227948069,
+    53.02327283895261
+   ],
+   "p1": [
+    36.73571430167846,
+    4.024635170134906,
+    50.28527211842877
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 53.023,
+   "z_root": 50.285,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 7,
+   "n_inside_intervals": 2,
+   "illegal_len_total_mm": 1.0681,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.0681,
+    "transit_len_mm": 1.0681,
+    "through": false,
+    "feature_thickness_mm": 1.0681,
+    "penetration_depth_mm": 0.037,
+    "entry": [
+     36.525,
+     3.949,
+     51.33
+    ],
+    "exit": [
+     36.736,
+     4.025,
+     50.285
+    ],
+    "z": 50.807
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 639,
+   "contact_idx": 639,
+   "p0": [
+    24.941565719931347,
+    7.2519647601478985,
+    53.148253624959956
+   ],
+   "p1": [
+    24.80262870516195,
+    7.0392611794722635,
+    50.359803572924825
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 53.148,
+   "z_root": 50.36,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 6,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 0.5894,
+   "through": true,
+   "worst_interval": {
+    "illegal_len_mm": 0.5894,
+    "transit_len_mm": 2.1539,
+    "through": true,
+    "feature_thickness_mm": 2.1539,
+    "penetration_depth_mm": 0.21,
+    "entry": [
+     24.936,
+     7.244,
+     53.043
+    ],
+    "exit": [
+     24.829,
+     7.08,
+     50.898
+    ],
+    "z": 51.97
+   },
+   "classification": "REAL",
+   "reason": "axis transits through model (through-and-through)"
+  },
+  {
+   "stub_member": 641,
+   "contact_idx": 641,
+   "p0": [
+    15.258115570396816,
+    9.20624069076956,
+    54.004897397987264
+   ],
+   "p1": [
+    15.125964861357918,
+    8.749888113622815,
+    51.24549918181185
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 54.005,
+   "z_root": 51.245,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 8,
+   "n_inside_intervals": 2,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.3195,
+    "through": false,
+    "feature_thickness_mm": 2.3195,
+    "penetration_depth_mm": 0.0954,
+    "entry": [
+     15.235,
+     9.128,
+     53.531
+    ],
+    "exit": [
+     15.126,
+     8.75,
+     51.245
+    ],
+    "z": 52.388
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 648,
+   "contact_idx": 648,
+   "p0": [
+    32.197326471051475,
+    16.564556232530272,
+    56.26096558185182
+   ],
+   "p1": [
+    30.15988062453847,
+    16.657249799715196,
+    54.342575025909305
+   ],
+   "r0": 0.2909,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 56.261,
+   "z_root": 54.343,
+   "inset0_mm": 1.7615,
+   "inset1_mm": 0.0,
+   "n_crossings": 23,
+   "n_inside_intervals": 5,
+   "illegal_len_total_mm": 0.8846,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 0.8846,
+    "transit_len_mm": 0.8846,
+    "through": false,
+    "feature_thickness_mm": 0.8846,
+    "penetration_depth_mm": 0.0303,
+    "entry": [
+     30.804,
+     16.628,
+     54.949
+    ],
+    "exit": [
+     30.16,
+     16.657,
+     54.343
+    ],
+    "z": 54.646
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 654,
+   "contact_idx": 654,
+   "p0": [
+    4.17376366794577,
+    -7.7882522095143365,
+    58.909708789080454
+   ],
+   "p1": [
+    4.774014060656996,
+    -8.15901860520279,
+    56.200053507337365
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 58.91,
+   "z_root": 56.2,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 53,
+   "n_inside_intervals": 6,
+   "illegal_len_total_mm": 1.0611,
+   "through": true,
+   "worst_interval": {
+    "illegal_len_mm": 1.0611,
+    "transit_len_mm": 1.4617,
+    "through": true,
+    "feature_thickness_mm": 1.4617,
+    "penetration_depth_mm": 0.0041,
+    "entry": [
+     4.446,
+     -7.956,
+     57.681
+    ],
+    "exit": [
+     4.759,
+     -8.15,
+     56.266
+    ],
+    "z": 56.973
+   },
+   "classification": "REAL",
+   "reason": "axis transits through model (through-and-through)"
+  },
+  {
+   "stub_member": 719,
+   "contact_idx": 719,
+   "p0": [
+    29.045926025674007,
+    -0.10824796605983081,
+    36.49742784272456
+   ],
+   "p1": [
+    31.37764672548292,
+    1.3645515039972402,
+    36.98110159545696
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 36.497,
+   "z_root": 36.981,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 3,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.497,
+    "through": false,
+    "feature_thickness_mm": 2.497,
+    "penetration_depth_mm": 0.5441,
+    "entry": [
+     29.298,
+     0.051,
+     36.55
+    ],
+    "exit": [
+     31.378,
+     1.365,
+     36.981
+    ],
+    "z": 36.765
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 723,
+   "contact_idx": 723,
+   "p0": [
+    3.404566524367961,
+    -7.392258044666522,
+    42.14039028483171
+   ],
+   "p1": [
+    4.772645519222069,
+    -7.030061303695102,
+    44.556414577894316
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 42.14,
+   "z_root": 44.556,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 39,
+   "n_inside_intervals": 5,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 1.4574,
+    "through": false,
+    "feature_thickness_mm": 1.4574,
+    "penetration_depth_mm": 0.005,
+    "entry": [
+     4.061,
+     -7.219,
+     43.299
+    ],
+    "exit": [
+     4.773,
+     -7.03,
+     44.556
+    ],
+    "z": 43.928
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 726,
+   "contact_idx": 726,
+   "p0": [
+    -2.925020264632504,
+    8.633175529138608,
+    42.521248636506506
+   ],
+   "p1": [
+    -5.082910353016841,
+    10.262134528809982,
+    43.24926164727092
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 42.521,
+   "z_root": 43.249,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 3,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.4979,
+    "through": false,
+    "feature_thickness_mm": 2.4979,
+    "penetration_depth_mm": 0.2849,
+    "entry": [
+     -3.158,
+     8.809,
+     42.6
+    ],
+    "exit": [
+     -5.083,
+     10.262,
+     43.249
+    ],
+    "z": 42.925
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 727,
+   "contact_idx": 727,
+   "p0": [
+    -2.4742907924669275,
+    9.249319132071665,
+    42.89184765891067
+   ],
+   "p1": [
+    -4.968743725039088,
+    10.402866116525123,
+    43.42760312723599
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 42.892,
+   "z_root": 43.428,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 4,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.3278,
+    "through": false,
+    "feature_thickness_mm": 2.3278,
+    "penetration_depth_mm": 0.2995,
+    "entry": [
+     -2.895,
+     9.444,
+     42.982
+    ],
+    "exit": [
+     -4.969,
+     10.403,
+     43.428
+    ],
+    "z": 43.205
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 731,
+   "contact_idx": 731,
+   "p0": [
+    49.27600409617658,
+    -12.111974067540439,
+    47.55332747197353
+   ],
+   "p1": [
+    50.50082278962633,
+    -9.99420919942466,
+    48.91527135170962
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 47.553,
+   "z_root": 48.915,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 8,
+   "n_inside_intervals": 2,
+   "illegal_len_total_mm": 0.668,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 0.668,
+    "transit_len_mm": 0.668,
+    "through": false,
+    "feature_thickness_mm": 0.668,
+    "penetration_depth_mm": 0.0003,
+    "entry": [
+     50.209,
+     -10.499,
+     48.59
+    ],
+    "exit": [
+     50.501,
+     -9.994,
+     48.915
+    ],
+    "z": 48.753
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 734,
+   "contact_idx": 734,
+   "p0": [
+    2.8268451307892106,
+    -8.173417450395176,
+    49.51205256344653
+   ],
+   "p1": [
+    2.342787729521185,
+    -6.912725330945003,
+    47.05922892277567
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 49.512,
+   "z_root": 47.059,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 12,
+   "n_inside_intervals": 3,
+   "illegal_len_total_mm": 0.4042,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 0.4042,
+    "transit_len_mm": 0.4042,
+    "through": false,
+    "feature_thickness_mm": 0.4042,
+    "penetration_depth_mm": 0.0093,
+    "entry": [
+     2.413,
+     -7.095,
+     47.413
+    ],
+    "exit": [
+     2.343,
+     -6.913,
+     47.059
+    ],
+    "z": 47.236
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  },
+  {
+   "stub_member": 735,
+   "contact_idx": 735,
+   "p0": [
+    6.907754539179155,
+    -8.051612436947172,
+    51.61916403953889
+   ],
+   "p1": [
+    7.93136996508199,
+    -8.719336804739548,
+    49.09996662200488
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 51.619,
+   "z_root": 49.1,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 43,
+   "n_inside_intervals": 6,
+   "illegal_len_total_mm": 0.7696,
+   "through": true,
+   "worst_interval": {
+    "illegal_len_mm": 0.6254,
+    "transit_len_mm": 1.9573,
+    "through": true,
+    "feature_thickness_mm": 1.9573,
+    "penetration_depth_mm": 0.0054,
+    "entry": [
+     7.032,
+     -8.132,
+     51.314
+    ],
+    "exit": [
+     7.747,
+     -8.599,
+     49.553
+    ],
+    "z": 50.434
+   },
+   "classification": "REAL",
+   "reason": "axis transits through model (through-and-through)"
+  },
+  {
+   "stub_member": 741,
+   "contact_idx": 741,
+   "p0": [
+    9.274179277265688,
+    -8.25032946483342,
+    51.90542013104886
+   ],
+   "p1": [
+    9.231995088057861,
+    -7.686951483619949,
+    54.64783252608807
+   ],
+   "r0": 0.2,
+   "r1": 0.35,
+   "L": 2.8,
+   "embed_end": "p0",
+   "z_tip": 51.905,
+   "z_root": 54.648,
+   "inset0_mm": 1.6706,
+   "inset1_mm": 0.0,
+   "n_crossings": 19,
+   "n_inside_intervals": 1,
+   "illegal_len_total_mm": 1.1294,
+   "through": false,
+   "worst_interval": {
+    "illegal_len_mm": 1.1294,
+    "transit_len_mm": 2.1658,
+    "through": false,
+    "feature_thickness_mm": 2.1658,
+    "penetration_depth_mm": 0.0212,
+    "entry": [
+     9.265,
+     -8.123,
+     52.527
+    ],
+    "exit": [
+     9.232,
+     -7.687,
+     54.648
+    ],
+    "z": 53.587
+   },
+   "classification": "REAL",
+   "reason": "axis penetrates model interior beyond sanctioned tip embed"
+  }
+ ]
+}
