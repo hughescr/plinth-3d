@@ -99,38 +99,70 @@ def test_config_constants_pinned(cfg):
 # Frozen defect snapshot (§3.0) -- stable site IDs; census target authority.
 # ==========================================================================
 def test_frozen_snapshot_population():
-    """Amendment-A corrected population: 143 non-exempt / 50 moot / band 25,
-    with mi=420 all-moot (never a target) and mi=445 non-exempt (a target)."""
+    """The LIVE snapshot at HEAD: the 2026-07-24 contact-fix re-derivation.
+    109 illegal = 72 non-exempt (firm 53 + band 19) / 37 moot, on the
+    post-minima-fix pre-relocation state v5p_treant_cfix1.pkl. Supersedes the
+    pre-fix 143/50/band-25 population, which every member id in it was keyed
+    to (see test_archived_2026_07_23_snapshot_population)."""
     snap = phase8.load_frozen_snapshot()
+    s = snap.summary()
+    assert s["n_non_exempt"] == 72
+    assert s["n_moot"] == 37
+    assert s["partition"]["firm_ge_0_10"] == 53
+    assert s["partition"]["band_0_08_to_0_10"] == 19
+    assert s["partition"]["moot_all_lt_0_08"] == 37
+    assert 72 + 37 == 109
+    assert s["n_quarantine_real"] == 39
+    assert s["n_quarantine_artifact"] == 0
+    assert snap.provenance["state_md5"] == "762b6679fa53b52061967237d97653cb"
+    assert snap.provenance["supersedes"].endswith(
+        "acceptance-run-2026-07-23/phase8_relocation_input.json")
+
+
+def test_archived_2026_07_23_snapshot_population():
+    """The SUPERSEDED pre-contact-fix snapshot still loads through the same
+    function when its path is passed explicitly, with its amendment-A corrected
+    population intact: 143 non-exempt / 50 moot / band 25, mi=420 all-moot. It
+    remains the regression pair for the archived forest v5e_run1.pkl (see
+    test_phase8_driver.test_snapshot_cross_check_archived_forest), so its
+    numbers must not drift with the live snapshot."""
+    snap = phase8.load_frozen_snapshot(phase8._ARCHIVED_SNAPSHOT_2026_07_23)
     s = snap.summary()
     assert s["n_non_exempt"] == 143
     assert s["n_moot"] == 50
-    assert s["partition"]["band_0_08_to_0_10"] == 25
-    assert s["partition"]["firm_ge_0_10"] == 118
-    assert s["partition"]["moot_all_lt_0_08"] == 50
+    assert s["partition"] == {"firm_ge_0_10": 118, "band_0_08_to_0_10": 25,
+                              "moot_all_lt_0_08": 50}
     assert 143 + 50 == 193
     assert snap.provenance["state_md5"] == "aab04cf3d0be6fdb6454ce01c3274dfc"
+    # the historical `printfloor_193` key still resolves through the loader.
+    assert snap.is_relocation_target(420) is False          # all-moot -> never
+    assert snap.is_relocation_target(445) is True           # census-nonexempt
 
 
 def test_snapshot_target_selection_census_authority():
-    """§5.3 Layer 2 (conservative): the census non-exempt count is the
-    acceptance TARGET authority. mi=445 (kernel exempts, census counts) IS a
-    target; the all-moot mi=420 is NEVER a target; the 77 Q-REAL condemned
-    stubs are targets (same defect, caught pre-insertion)."""
+    """§5.3 Layer 2 (conservative): the census non-exempt set is the acceptance
+    TARGET authority, and a member the census reads MOOT is never remediated --
+    even when the raw pre-insertion predicate condemned its stub into Q-REAL.
+    On the live (contact-fix) snapshot that Q-REAL-and-moot class is
+    {402, 476}; on the archived snapshot it was {448, 492, 497}."""
     snap = phase8.load_frozen_snapshot()
-    assert snap.is_relocation_target(445) is True          # census-nonexempt -> target
-    assert snap.is_relocation_target(420) is False         # all-moot -> never
-    # the 143/50 census partition is disjoint by construction
+    # the 72/37 census partition is disjoint by construction
     assert not (set(snap.non_exempt) & set(snap.moot))
-    # NO moot member is a target -- moot is never remediated (§2, §3.0), even a
-    # Q-REAL condemned stub the census reads moot (448/492/497 on this snapshot).
+    # every non-exempt member IS a target; no moot member is.
+    assert set(snap.non_exempt) <= snap._target_set
     assert not (set(snap.moot) & snap._target_set)
-    assert {448, 492, 497} <= set(snap.quarantine_real)     # raw-predicate Q-REAL
-    assert {448, 492, 497} & set(snap.moot) == {448, 492, 497}
-    assert not ({448, 492, 497} & snap._target_set)         # ... but dropped as moot
-    # every non-moot Q-REAL condemned stub IS a target
-    assert (set(snap.quarantine_real) - set(snap.moot)) <= snap._target_set
-    assert len(snap.quarantine_real) == 77
+    # Q-REAL condemned stubs are targets (same defect, caught pre-insertion) ...
+    assert set(snap.quarantine_real) - set(snap.moot) <= snap._target_set
+    # ... except the ones the census reads moot, which are dropped.
+    q_moot = set(snap.quarantine_real) & set(snap.moot)
+    assert q_moot == {402, 476}
+    assert not (q_moot & snap._target_set)
+    assert len(snap.quarantine_real) == 39
+    # |72 non-exempt U 39 Q-REAL| = 107 (4 members are both), less the 2 Q-REAL
+    # the census reads moot -> 105 targets.
+    assert len(set(snap.non_exempt) & set(snap.quarantine_real)) == 4
+    assert len(set(snap.non_exempt) | set(snap.quarantine_real)) == 107
+    assert len(snap._target_set) == 105
 
 
 # ==========================================================================
@@ -302,8 +334,11 @@ def test_r1_mi445_class_boundary_target(cfg):
     """mi=445 robust tip-anchor boundary (§5.3 Layer 2): a member whose census
     reading is a FIRM ~0.2531mm chord transit is a relocation target; R1 re-aim
     makes it legal on BOTH readings. Fixture chord 0.2531 mirrors the archived
-    mi=445 measurement; the site is confirmed a snapshot target."""
-    snap = phase8.load_frozen_snapshot()
+    mi=445 measurement; the site is confirmed a snapshot target. mi=445 is an
+    ARCHIVED-population id (the contact fix re-indexed the forest), so the
+    membership half of this test reads the archived snapshot explicitly; the
+    geometry half below is synthetic and population-independent."""
+    snap = phase8.load_frozen_snapshot(phase8._ARCHIVED_SNAPSHOT_2026_07_23)
     assert snap.is_relocation_target(445) is True
     geom = ExactSurface(_fin_mesh(0.2531, 1.4))
     site = _vertical_site(mi=445, cfg=cfg)
@@ -342,8 +377,10 @@ def test_all_moot_member_is_exempt_not_target(cfg):
     """An all-moot member (every rule-4 crossing a sub-0.08 knife-edge) is
     EXEMPT -- recorded, never remediated (§3.0). Pinned end-to-end: a wide
     0.06mm fin produces a moot-only transit, so the original stub is NOT a firm
-    violation, and the archived all-moot mi=420 is excluded from the target
-    set."""
+    violation; the exclusion is then pinned on BOTH snapshots with members that
+    are really IN them (vacuous on an absent id): live mi=402, which is
+    simultaneously a Q-REAL condemned stub and census-moot -- the hardest case,
+    since Q-REAL alone would make it a target -- and archived mi=420."""
     geom = ExactSurface(_fin_mesh(0.06, 1.4))
     site = _vertical_site(mi=420, cfg=cfg)
     orig = phase8.reaim_stub(site.c, site.n0, cfg.contact_depth_mm,
@@ -352,7 +389,12 @@ def test_all_moot_member_is_exempt_not_target(cfg):
     vdo = verify._embed_scar_verdicts(geom, [orig], [0], {0: ivo}, cfg)
     nonexempt, moot = verify._transit_classify(ivo, orig, vdo.get(0))
     assert nonexempt is False and moot is True          # moot, not firm
-    assert phase8.load_frozen_snapshot().is_relocation_target(420) is False
+    live = phase8.load_frozen_snapshot()
+    assert 402 in live.moot and 402 in live.quarantine_real
+    assert live.is_relocation_target(402) is False
+    archived = phase8.load_frozen_snapshot(phase8._ARCHIVED_SNAPSHOT_2026_07_23)
+    assert 420 in archived.moot
+    assert archived.is_relocation_target(420) is False
 
 
 # ==========================================================================

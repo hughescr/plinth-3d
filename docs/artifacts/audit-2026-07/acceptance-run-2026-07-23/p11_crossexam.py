@@ -140,10 +140,16 @@ moots = sorted(r["mi"] for r in records if r["moot"])
 print(f"\n80-site RATIFIED regrade: REAL={len(reals)} ARTIFACT={len(arts)} "
       f"(moot bucket={len(moots)}) ARTIFACT mis={arts}", flush=True)
 
-# three-oracle agreement on buried-root re-entry exemplars
+# three-oracle agreement on buried-root re-entry exemplars.
+# The exemplar member indices below are keyed to the PRE-contact-fix numbering
+# (state v5e_run1.pkl). Removing phantom/adequately-carried minima reindexes the
+# forest, so on a later state these ids need not exist -- skip what is absent
+# rather than crashing; the 80-site regrade above is the deliverable.
 oracle = {}
 for mi in (223, 232, 8, 3):
-    rec = by_mi[mi]
+    rec = by_mi.get(mi)
+    if rec is None:
+        continue
     O = np.asarray(rec["p0"], float); D = np.asarray(rec["p1"], float) - O
     seg = rec["L"]
     pts = []
@@ -160,14 +166,17 @@ for mi in (223, 232, 8, 3):
                         ray16_inside=r16, agree=bool(k_in == pv_in == r16)))
     oracle[mi] = pts
 
-r3 = by_mi[3]
-unanch = [cr for cr in r3["crossings"] if not cr["tip_anchored"] and cr["counts_illegal"]]
-mi3 = dict(mi=3, classification_raw=r3["classification"], nonexempt=r3["nonexempt"],
-           moot=r3["moot"], unanchored_illegal_crossings=unanch,
-           all_chords_below_floor=bool(unanch and all(c["below_floor"] for c in unanch)),
-           min_chord_mm=(min(c["chord_mm"] for c in unanch) if unanch else None),
-           max_chord_mm=(max(c["chord_mm"] for c in unanch) if unanch else None),
-           floor_mm=FLOOR)
+r3 = by_mi.get(3)
+if r3 is not None:
+    unanch = [cr for cr in r3["crossings"] if not cr["tip_anchored"] and cr["counts_illegal"]]
+    mi3 = dict(mi=3, classification_raw=r3["classification"], nonexempt=r3["nonexempt"],
+               moot=r3["moot"], unanchored_illegal_crossings=unanch,
+               all_chords_below_floor=bool(unanch and all(c["below_floor"] for c in unanch)),
+               min_chord_mm=(min(c["chord_mm"] for c in unanch) if unanch else None),
+               max_chord_mm=(max(c["chord_mm"] for c in unanch) if unanch else None),
+               floor_mm=FLOOR)
+else:
+    mi3 = dict(mi=3, absent=True, floor_mm=FLOOR)
 
 out = dict(
     predicate="SCAR-AREA-CAP + rule-4 (through-transit) + PRINT-FLOOR moot floor",
@@ -176,20 +185,28 @@ out = dict(
     regrade_80=dict(n_sites=len(sites), n_real=len(reals), n_artifact=len(arts),
                     n_moot=len(moots), artifact_mis=arts, moot_mis=moots, real_mis=reals),
     ruling_1a_labels=LABELS,
-    exemplars={str(mi): by_mi[mi] for mi in sorted(LABELS)},
+    exemplars={str(mi): by_mi[mi] for mi in sorted(LABELS) if mi in by_mi},
     three_oracle={str(k): v for k, v in oracle.items()}, mi3_print_floor=mi3)
-OUT = os.path.join(os.path.dirname(__file__), "results", "p11_regrade_ratified.json")
+OUT = os.environ.get("P11_OUT") or os.path.join(
+    os.path.dirname(__file__), "results", "p11_regrade_ratified.json")
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
 json.dump(out, open(OUT, "w"), indent=1)
 print(f"wrote {OUT}", flush=True)
 for mi in sorted(LABELS):
-    r = by_mi[mi]
+    r = by_mi.get(mi)
+    if r is None:
+        print(f"  mi={mi}: GT={LABELS[mi]:8s} ABSENT from this state's quarantine set",
+              flush=True)
+        continue
     print(f"  mi={mi}: GT={LABELS[mi]:8s} raw={r['classification']:8s} "
           f"moot={r['moot']} verdict_legal={r['verdict_legal']}", flush=True)
 for mi in (223, 232, 8):
+    if mi not in oracle:
+        continue
     ag = all(p["agree"] for p in oracle[mi]) if oracle[mi] else None
     print(f"  three-oracle mi={mi}: {len(oracle[mi])} pts all-agree={ag}", flush=True)
-print(f"mi=3 print-floor all_chords_below_floor={mi3['all_chords_below_floor']} "
-      f"(min={mi3['min_chord_mm']} max_arc={mi3['max_chord_mm']} floor={FLOOR}) "
-      f"-> moot={mi3['moot']}", flush=True)
+if not mi3.get("absent"):
+    print(f"mi=3 print-floor all_chords_below_floor={mi3['all_chords_below_floor']} "
+          f"(min={mi3['min_chord_mm']} max_arc={mi3['max_chord_mm']} floor={FLOOR}) "
+          f"-> moot={mi3['moot']}", flush=True)
 print(f"done t={time.time()-t0:.1f}s RSS={C.rss_gb():.2f}GB", flush=True)

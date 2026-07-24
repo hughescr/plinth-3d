@@ -6,7 +6,15 @@ rule 4, aligned with census). Governing law: SPEC-EMBED-POLICY (owner-ratified,
 cd989fe) **plus** the owner-ratified PRINT-FLOOR amendment (2026-07-24, §2).
 Validates/extends SPEC-P8-REACH — §1 states exactly what of REACH survives.
 
-Evidence base (archived, digest-identical across 5 runs, 09ce1fd6a9a1…):
+CURRENT evidence base (post-contact-fix, v5-perf @ e023b0e — the live §3.0
+snapshot): `docs/artifacts/audit-2026-07/acceptance-run-2026-07-24-contactfix/`
+— forest `scratchpad/v5p_treant_cfix1.pkl` (1226 members, 877 balls, 558
+contacts, 39 quarantine sites); census `results/penetration_census.json`
+(109 illegal members / 144 crossings, 7 true ball breaches); quarantine regrade
+`results/p11_regrade_ratified.json` (39 REAL / 0 ARTIFACT).
+
+SUPERSEDED evidence base (pre-contact-fix, digest-identical across 5 runs,
+09ce1fd6a9a1…) — retained as the archived regression pair, see §3.0:
 
 - forest: `scratchpad/v5e_run1.pkl` (paths below abbreviate the session
   scratchpad `/private/tmp/claude-501/…/0ddf6d41…/scratchpad/`)
@@ -93,6 +101,13 @@ reduced precision; it sits in the moot 50, moving the band 26→25 and moot
 49→50 vs the pre-correction snapshot; see phase8_relocation_input.json
 CORRECTION 2026-07-24.)
 
+**Effect on the CURRENT geometry (post-contact-fix, §3.0 supersession):** of the
+109 census members, 37 are moot-exempt. Partition: **53 firm + 19 band + 37
+all-moot**, **rebuild target = 72 non-exempt members**. The moot/non-exempt split
+is read off the census's own full-precision `moot` flag rather than the rounded
+JSON, so the mi=420-class rounding artifact cannot recur; no member's worst firm
+chord sits within 1e-4 mm of the 0.10 mm band edge either.
+
 ---
 
 ## 3. Defect classes and per-class remediation
@@ -100,16 +115,35 @@ CORRECTION 2026-07-24.)
 ### 3.0 Frozen defect snapshot, stable site IDs, and phase order (normative)
 
 **Frozen snapshot.** The remediation input is the frozen defect snapshot
-`phase8_relocation_input.json`, pinned to `state_pkl = v5e_run1.pkl`,
-`state_md5 = aab04cf3d0be6fdb6454ce01c3274dfc` (digest-identical across the
-5 archived runs, 09ce1fd6a9a1…). The snapshot is computed ONCE, before any
-relocation, and is immutable for the duration of the pass — no class reads
+`phase8_relocation_input.json`, pinned to `state_pkl = v5p_treant_cfix1.pkl`,
+`state_md5 = 762b6679fa53b52061967237d97653cb`, pre-relocation geometry digest
+`fc3fb20add04cbb…` (`docs/artifacts/audit-2026-07/
+acceptance-run-2026-07-24-contactfix/`). The snapshot is computed ONCE, before
+any relocation, and is immutable for the duration of the pass — no class reads
 live geometry to decide membership; every member is addressed by its
 **stable site ID = the member index `mi` in that pickle** (immutable for the
 run; the same integer used by census and gate). The frozen partition is
-**143 non-exempt transit members** (class T), **15 true ball breaches**
-(class B), **77 REAL quarantine sites** (class Q); the moot 50 are recorded
-but never remediated.
+**72 non-exempt transit members** (class T), **7 true ball breaches**
+(class B), **39 REAL quarantine sites** (class Q, 0 ARTIFACT); the moot 37 are
+recorded but never remediated. Target set = (72 ∪ 39) − moot = **105 sites**.
+
+**Snapshot supersession (2026-07-24, contact fix).** The previous snapshot
+(`acceptance-run-2026-07-23/`, `state_pkl = v5e_run1.pkl`,
+`state_md5 = aab04cf3d0be6fdb6454ce01c3274dfc`, geometry digest `354f1ec85b97…`,
+partition **143 non-exempt / 50 moot / 77 Q-REAL / 3 Q-ARTIFACT / 15 balls**) is
+keyed to the PRE-contact-fix contact set. The minima fix (filter A
+`minima_drop_interior_faces` + refined filter B `minima_require_island_birth`
+AND `minima_support_area_tips`, v5-perf @ e023b0e) removes 195 of 753 contacts
+and re-indexes every downstream member, so **every member id in the old snapshot
+is invalid on current geometry**. It is retained, unchanged, as the
+archived-forest regression pair and remains loadable by explicit path
+(`phase8._ARCHIVED_SNAPSHOT_2026_07_23`); the `TREANT_PRERELOCATE_DIGEST`
+geometry gate moves with the snapshot, so neither snapshot can ever be applied
+to the other's geometry. **Verdict stability across the fix is exact:** of the
+old 143 non-exempt, 81 member geometries are gone and all 62 survivors are still
+non-exempt; of the old 50 moot, 17 are gone and all 33 survivors are still moot
+— zero flips in either direction. The 10 new non-exempt / 4 new moot members are
+re-routed geometry with no surviving old counterpart, not newly-broken members.
 
 **Explicit phase processing order (deterministic, normative):**
 

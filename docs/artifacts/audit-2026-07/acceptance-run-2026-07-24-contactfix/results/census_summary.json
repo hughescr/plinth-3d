@@ -1,0 +1,462 @@
+{
+ "summary": {
+  "n_members_total": 1226,
+  "n_balls_total": 877,
+  "n_illegal_members": 109,
+  "n_through_and_through": 109,
+  "n_non_exempt_members": 72,
+  "n_moot_transit_members": 37,
+  "n_moot_transit_crossings": 59,
+  "n_axis_centerline_transit": 98,
+  "n_capsule_clip_only": 11,
+  "n_illegal_crossings": 144,
+  "illegal_by_kind": {
+   "stub": 98,
+   "strut": 11
+  },
+  "through_by_kind": {
+   "stub": 98,
+   "strut": 11
+  },
+  "n_breaching_balls": 7,
+  "n_balls_center_inside": 0,
+  "n_ball_spheres_reach_surface": 223,
+  "crown_illegal_members": 78,
+  "crown_breaching_balls": 3,
+  "transit_hist_edges": [
+   0,
+   0.5,
+   1,
+   2,
+   4,
+   8,
+   1000000000.0
+  ],
+  "transit_hist": [
+   103,
+   6,
+   0,
+   0,
+   0,
+   0
+  ],
+  "depth_hist_edges": [
+   0,
+   0.5,
+   1,
+   2,
+   4,
+   8,
+   1000000000.0
+  ],
+  "depth_hist": [
+   109,
+   0,
+   0,
+   0,
+   0,
+   0
+  ],
+  "feature_thickness_hist_edges": [
+   0,
+   0.3,
+   0.5,
+   1,
+   2,
+   4,
+   1000000000.0
+  ],
+  "member_through_feat_hist": [
+   104,
+   3,
+   2,
+   0,
+   0,
+   0
+  ],
+  "ball_feature_thickness_hist": [
+   2,
+   2,
+   3,
+   0,
+   0,
+   0
+  ],
+  "ball_pokeout_edges": [
+   0,
+   0.1,
+   0.2,
+   0.3,
+   0.5,
+   1,
+   1000000000.0
+  ],
+  "ball_pokeout_hist": [
+   3,
+   2,
+   2,
+   0,
+   0,
+   0
+  ],
+  "ball_by_owner": {
+   "contact": 7
+  },
+  "contact_depth_mm": 0.3,
+  "standoff_mm": 0.6,
+  "embed_policy": "SCAR-AREA-CAP (SPEC-EMBED-POLICY.md, panel ruling cd989fe)",
+  "n_designed_embed_ends": 720,
+  "n_embed_ends_illegal": 12,
+  "embed_policy_constants": {
+   "A_ABS_MM2": 2.0,
+   "KAPPA": 1.25,
+   "L_SCAR_MAX_MM": 2.5,
+   "TOL_MM": 0.05,
+   "PRINT_FLOOR_CHORD_MM": 0.08,
+   "BALL_FACTOR_STUB": 1.5,
+   "BALL_FACTOR_FOOT": 1.4
+  },
+  "min_illegal_len_mm": 0.05,
+  "ball_eps_mm": 0.05,
+  "crosscheck_heavy9ray_agreement": 0.9,
+  "delivered_verify_clearance_violations": 72,
+  "method": "Moller crossings + dense-majority ParityVote inside per sub-segment; SCAR-AREA-CAP embed-end legality (area bound, no depth cap); balls via antipodal-ray span"
+ },
+ "worst10_members": [
+  {
+   "member_idx": 281,
+   "kind": "stub",
+   "embed_end": "p0",
+   "owner": [
+    "contact",
+    309
+   ],
+   "max_transit_mm": 0.726,
+   "max_penetration_depth_mm": 0.166,
+   "min_feature_thickness_mm": 0.726,
+   "through_and_through": true,
+   "n_illegal_intervals": 1,
+   "worst_location": [
+    12.274,
+    -8.388,
+    -3.34
+   ],
+   "z": -3.34
+  },
+  {
+   "member_idx": 275,
+   "kind": "stub",
+   "embed_end": "p0",
+   "owner": [
+    "contact",
+    303
+   ],
+   "max_transit_mm": 0.714,
+   "max_penetration_depth_mm": 0.022,
+   "min_feature_thickness_mm": 0.084,
+   "through_and_through": true,
+   "n_illegal_intervals": 2,
+   "worst_location": [
+    -25.252,
+    15.599,
+    -9.529
+   ],
+   "z": -9.529
+  },
+  {
+   "member_idx": 290,
+   "kind": "stub",
+   "embed_end": "p0",
+   "owner": [
+    "contact",
+    321
+   ],
+   "max_transit_mm": 0.644,
+   "max_penetration_depth_mm": 0.034,
+   "min_feature_thickness_mm": 0.644,
+   "through_and_through": true,
+   "n_illegal_intervals": 1,
+   "worst_location": [
+    15.229,
+    10.712,
+    50.391
+   ],
+   "z": 50.391
+  },
+  {
+   "member_idx": 680,
+   "kind": "strut",
+   "embed_end": "p1",
+   "owner": [
+    "contact",
+    459
+   ],
+   "max_transit_mm": 0.608,
+   "max_penetration_depth_mm": 0.062,
+   "min_feature_thickness_mm": 0.071,
+   "through_and_through": true,
+   "n_illegal_intervals": 2,
+   "worst_location": [
+    6.751,
+    -8.201,
+    48.465
+   ],
+   "z": 48.465
+  },
+  {
+   "member_idx": 292,
+   "kind": "stub",
+   "embed_end": "p0",
+   "owner": [
+    "contact",
+    324
+   ],
+   "max_transit_mm": 0.571,
+   "max_penetration_depth_mm": 0.036,
+   "min_feature_thickness_mm": 0.158,
+   "through_and_through": true,
+   "n_illegal_intervals": 2,
+   "worst_location": [
+    31.378,
+    3.439,
+    40.853
+   ],
+   "z": 40.853
+  },
+  {
+   "member_idx": 238,
+   "kind": "stub",
+   "embed_end": "p0",
+   "owner": [
+    "contact",
+    254
+   ],
+   "max_transit_mm": 0.522,
+   "max_penetration_depth_mm": 0.109,
+   "min_feature_thickness_mm": 0.077,
+   "through_and_through": true,
+   "n_illegal_intervals": 2,
+   "worst_location": [
+    24.977,
+    7.192,
+    51.555
+   ],
+   "z": 51.555
+  },
+  {
+   "member_idx": 289,
+   "kind": "stub",
+   "embed_end": "p0",
+   "owner": [
+    "contact",
+    320
+   ],
+   "max_transit_mm": 0.449,
+   "max_penetration_depth_mm": 0.092,
+   "min_feature_thickness_mm": 0.449,
+   "through_and_through": true,
+   "n_illegal_intervals": 1,
+   "worst_location": [
+    15.155,
+    8.889,
+    52.716
+   ],
+   "z": 52.716
+  },
+  {
+   "member_idx": 250,
+   "kind": "stub",
+   "embed_end": "p0",
+   "owner": [
+    "contact",
+    270
+   ],
+   "max_transit_mm": 0.369,
+   "max_penetration_depth_mm": 0.062,
+   "min_feature_thickness_mm": 0.369,
+   "through_and_through": true,
+   "n_illegal_intervals": 1,
+   "worst_location": [
+    -7.218,
+    10.605,
+    50.165
+   ],
+   "z": 50.165
+  },
+  {
+   "member_idx": 718,
+   "kind": "strut",
+   "embed_end": "p1",
+   "owner": [
+    "contact",
+    434
+   ],
+   "max_transit_mm": 0.354,
+   "max_penetration_depth_mm": 0.088,
+   "min_feature_thickness_mm": 0.354,
+   "through_and_through": true,
+   "n_illegal_intervals": 1,
+   "worst_location": [
+    5.962,
+    -7.469,
+    49.261
+   ],
+   "z": 49.261
+  },
+  {
+   "member_idx": 809,
+   "kind": "strut",
+   "embed_end": "p1",
+   "owner": [
+    "contact",
+    524
+   ],
+   "max_transit_mm": 0.27,
+   "max_penetration_depth_mm": 0.051,
+   "min_feature_thickness_mm": 0.27,
+   "through_and_through": true,
+   "n_illegal_intervals": 1,
+   "worst_location": [
+    44.812,
+    -5.704,
+    29.845
+   ],
+   "z": 29.845
+  }
+ ],
+ "worst10_balls": [
+  {
+   "ball_idx": 870,
+   "owner": [
+    "contact",
+    1054
+   ],
+   "center": [
+    -33.194,
+    15.762,
+    -46.336
+   ],
+   "r": 0.873,
+   "feature_thickness_mm": 0.5802,
+   "poke_out_mm": 0.2927,
+   "surface_dist_mm": 0.5258,
+   "center_inside": false,
+   "buried_fraction": 0.167,
+   "z": -46.336
+  },
+  {
+   "ball_idx": 288,
+   "owner": [
+    "contact",
+    321
+   ],
+   "center": [
+    14.919,
+    9.611,
+    48.683
+   ],
+   "r": 0.35,
+   "feature_thickness_mm": 0.1273,
+   "poke_out_mm": 0.2227,
+   "surface_dist_mm": 0.0669,
+   "center_inside": false,
+   "buried_fraction": 0.3,
+   "z": 48.683
+  },
+  {
+   "ball_idx": 533,
+   "owner": [
+    "contact",
+    375
+   ],
+   "center": [
+    9.694,
+    -12.921,
+    -4.393
+   ],
+   "r": 0.616,
+   "feature_thickness_mm": 0.4507,
+   "poke_out_mm": 0.1649,
+   "surface_dist_mm": 0.0,
+   "center_inside": false,
+   "buried_fraction": 0.408,
+   "z": -4.393
+  },
+  {
+   "ball_idx": 617,
+   "owner": [
+    "contact",
+    420
+   ],
+   "center": [
+    31.16,
+    16.192,
+    42.726
+   ],
+   "r": 0.85,
+   "feature_thickness_mm": 0.7497,
+   "poke_out_mm": 0.1007,
+   "surface_dist_mm": 0.0,
+   "center_inside": false,
+   "buried_fraction": 0.117,
+   "z": 42.726
+  },
+  {
+   "ball_idx": 847,
+   "owner": [
+    "contact",
+    108
+   ],
+   "center": [
+    -13.362,
+    -0.386,
+    -35.503
+   ],
+   "r": 0.645,
+   "feature_thickness_mm": 0.5598,
+   "poke_out_mm": 0.0851,
+   "surface_dist_mm": 0.0,
+   "center_inside": false,
+   "buried_fraction": 0.167,
+   "z": -35.503
+  },
+  {
+   "ball_idx": 53,
+   "owner": [
+    "contact",
+    55
+   ],
+   "center": [
+    0.25,
+    -4.978,
+    3.215
+   ],
+   "r": 0.35,
+   "feature_thickness_mm": 0.2814,
+   "poke_out_mm": 0.0686,
+   "surface_dist_mm": 0.2191,
+   "center_inside": false,
+   "buried_fraction": 0.1,
+   "z": 3.215
+  },
+  {
+   "ball_idx": 587,
+   "owner": [
+    "contact",
+    419
+   ],
+   "center": [
+    6.159,
+    -7.357,
+    48.108
+   ],
+   "r": 0.528,
+   "feature_thickness_mm": 0.4722,
+   "poke_out_mm": 0.0557,
+   "surface_dist_mm": 0.0,
+   "center_inside": false,
+   "buried_fraction": 0.292,
+   "z": 48.108
+  }
+ ]
+}

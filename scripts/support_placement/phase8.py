@@ -53,10 +53,17 @@ from . import verify
 _Z = np.array([0.0, 0.0, 1.0])
 _X = np.array([1.0, 0.0, 0.0])
 
-# Frozen snapshot provenance (§3.0): pinned to the digest-identical archived run.
-_DEFAULT_SNAPSHOT = os.path.join(
+# Frozen snapshot provenance (§3.0): pinned to the pre-relocation run at HEAD.
+# Re-derived 2026-07-24 against the POST-contact-fix contact set (v5-perf
+# @ e023b0e); the 2026-07-23 file it supersedes is keyed to the pre-fix member
+# numbering and is retained only as the archived-forest regression pair.
+_ARCHIVED_SNAPSHOT_2026_07_23 = os.path.join(
     os.path.dirname(__file__), "..", "..",
     "docs", "artifacts", "audit-2026-07", "acceptance-run-2026-07-23",
+    "phase8_relocation_input.json")
+_DEFAULT_SNAPSHOT = os.path.join(
+    os.path.dirname(__file__), "..", "..",
+    "docs", "artifacts", "audit-2026-07", "acceptance-run-2026-07-24-contactfix",
     "phase8_relocation_input.json")
 
 # Explicit, normative phase processing order (§3.0). Shaft geometry (stubs then
@@ -122,16 +129,21 @@ class DefectSnapshot:
 def load_frozen_snapshot(path: Optional[str] = None,
                          ball_breaches=()) -> DefectSnapshot:
     """Load the frozen Phase-8 defect snapshot (§3.0) from the pinned
-    `phase8_relocation_input.json`. The JSON is the AMENDED partition
-    (population correction A already applied: 143 non-exempt / 50 moot / band
-    25, mi=420 all-moot). `ball_breaches` is supplied by the caller from the
-    census `breaching_balls` (the JSON does not carry the 15 ball breaches);
+    `phase8_relocation_input.json`. At HEAD that is the 2026-07-24 contact-fix
+    re-derivation (72 non-exempt / 37 moot / band 19, 39 Q-REAL / 0 Q-ARTIFACT);
+    the superseded 2026-07-23 snapshot (143/50/band 25, mi=420 all-moot) still
+    loads through this same function when its path is passed explicitly.
+    `ball_breaches` is supplied by the caller from the census `breaching_balls`
+    (the JSON's own `ball_breaches` block, where present, is informational only);
     it defaults empty for the foundation/unit path."""
     if path is None:
         path = _DEFAULT_SNAPSHOT
     with open(path) as fh:
         d = json.load(fh)
-    pf = d["printfloor_193"]
+    # `printfloor_193` is the historical key on the 2026-07-23 snapshot, named
+    # for that population's size; the re-derived file uses the size-neutral
+    # `printfloor_partition`. Identical schema either way.
+    pf = d.get("printfloor_partition") or d["printfloor_193"]
     rt = d["relocation_targets"]
     non_exempt = tuple(int(x) for x in pf["non_exempt_member_idxs"])
     moot = tuple(int(x) for x in pf["moot_member_idxs"])

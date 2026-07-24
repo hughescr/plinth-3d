@@ -57,24 +57,34 @@ from . import phase8, verify, joints, p8_accept, tree, perception
 # Frozen-fixture target law (SPEC-P8-RELOCATE §3.0 / §5.3) -- the TREANT law.
 # ---------------------------------------------------------------------------
 # The frozen `phase8_relocation_input.json` is the acceptance TARGET-SELECTION
-# authority for the treant (§5.3 Layer 2, census-authoritative): 143 non-exempt
-# (incl. the 6 census-only boundary members {168,376,443,445,485,519} the kernel
-# robust tip-anchor merge exempts but the census counts), 50 moot (incl. mi=420,
-# all-moot at full IEEE-754 precision), 77 REAL quarantine, 15 ball breaches. The
-# live-forest gate under-counts these boundary members (kernel-exempt), so the
-# frozen fixture -- not the live gate -- is the treant target law.
+# authority for the treant (§5.3 Layer 2, census-authoritative). At HEAD that is
+# the 2026-07-24 contact-fix re-derivation: 72 non-exempt, 37 moot, 39 REAL
+# quarantine, 0 ARTIFACT, 7 ball breaches, on state v5p_treant_cfix1.pkl. Where
+# the live-forest gate under-counts a census-nonexempt boundary member (kernel
+# robust tip-anchor merge exempts it), the frozen fixture -- not the live gate --
+# is the treant target law.
 #
 # It is applied ONLY when the current geometry IS the fixture's source geometry
-# (the pre-relocation treant, v5e_run1). The gate is a canonical members digest:
-# on the ORIGINAL geometry it matches and the fixture's 143/50 target set is used;
-# once relocation MUTATES the geometry (subsequent convergence sweeps, the §6.10
+# (the PRE-relocation treant). The gate is a canonical members digest: on the
+# ORIGINAL geometry it matches and the fixture's target set is used; once
+# relocation MUTATES the geometry (subsequent convergence sweeps, the §6.10
 # idempotence pass, or ANY other model) the digest no longer matches and target
 # selection falls back to the live gate -- which reads the relocated members legal
 # and yields an EMPTY snapshot, so the idempotence pass is a provable no-op by
-# construction (and the fixture's v5e_run1 member INDICES, invalid on a mutated /
-# re-indexed forest, are never mis-applied). Pinned from
-# `p8_accept.geometry_digest(collect_members(v5e_run1.members), [])`.
+# construction (and the fixture's member INDICES, invalid on a mutated /
+# re-indexed forest, are never mis-applied).
+#
+# THIS IS WHY THE DIGEST MOVES WITH THE FIXTURE. The minima contact fix (filter A
+# + refined filter B, e023b0e) removes 195 of 753 contacts and re-indexes the
+# forest, so the 2026-07-23 pin below no longer matches any geometry the engine
+# produces; leaving it would silently demote the treant to live-gate selection.
+# Pinned from `p8_accept.geometry_digest(collect_members(<pkl>.members), [])`.
 TREANT_PRERELOCATE_DIGEST = (
+    "fc3fb20add04cbb12136a2adc4ff9191a73c984a69a66b54013020dc2efbe79c")
+# Superseded pin, kept for provenance: the pre-contact-fix forest v5e_run1.pkl
+# (143/50/77/3/15), whose snapshot lives at
+# docs/artifacts/audit-2026-07/acceptance-run-2026-07-23/.
+TREANT_PRERELOCATE_DIGEST_2026_07_23 = (
     "354f1ec85b972c14b674167200130d397aac5f71bb58359d9b954129fd35341f")
 
 

@@ -247,6 +247,16 @@ phase8_relocation_input.json CORRECTION 2026-07-24.
 
 ## Evidence
 
+Re-derivation at HEAD (2026-07-24, post minima contact fix e023b0e — the
+predicate and all constants are UNCHANGED; only the population it is applied to
+moved): docs/artifacts/audit-2026-07/acceptance-run-2026-07-24-contactfix/
+(phase8_relocation_input.json, results/{penetration_census.json,
+census_summary.json,p11_regrade_ratified.json,run_results.json}, README.md).
+Of 109 illegal members, 37 are moot and 72 non-exempt (53 firm ≥ 0.10 + 19 band
+0.08-0.10 + 37 all-moot); quarantine regrades 39 REAL / 0 ARTIFACT; 7 true ball
+breaches. No surviving member changed verdict — see that README for the
+old→new correspondence.
+
 docs/artifacts/audit-2026-07/acceptance-run-2026-07-23/ (census_core.py,
 census_run.py, p11_crossexam.py [refreshed to the ratified predicate 2026-07-24;
 the retired h=2.0 CD+PB arc-inset version and validate_r4_embed_inset.py are

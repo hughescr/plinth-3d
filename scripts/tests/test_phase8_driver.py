@@ -46,6 +46,14 @@ _STL = "/Users/craig/code/hughescr/dnd-campaigns/Weeping Treant v1.2.stl"
 _INPUT_JSON = os.path.join(
     os.path.dirname(__file__), "..", "..", "docs", "artifacts",
     "audit-2026-07", "acceptance-run-2026-07-23", "phase8_relocation_input.json")
+# The LIVE pair at HEAD: the post-contact-fix pre-relocation state and the
+# snapshot re-derived from it. `_PKL` / `_INPUT_JSON` above stay pinned to the
+# SUPERSEDED 2026-07-23 pair, which the archived cross-checks still validate.
+_PKL_CFIX = os.path.join(_SCR, "v5p_treant_cfix1.pkl")
+_INPUT_JSON_CFIX = os.path.join(
+    os.path.dirname(__file__), "..", "..", "docs", "artifacts",
+    "audit-2026-07", "acceptance-run-2026-07-24-contactfix",
+    "phase8_relocation_input.json")
 
 
 # --------------------------------------------------------------------------
@@ -655,19 +663,25 @@ def test_per_pass_relocate_ledger_distinct_keys(cfg):
 # ==========================================================================
 @pytest.mark.kernel
 def test_frozen_fixture_is_treant_target_law_geometry_gated():
-    """On the pre-relocation treant (v5e_run1) the driver's target set is the
-    FROZEN fixture (the census-authoritative treant law, §5.3 Layer 2): 143
-    non-exempt / 50 moot / 77 REAL-quarantine / 15 balls, INCLUDING the 6
-    census-only boundary members {168,376,443,445,485,519} the live kernel gate
-    exempts (defect-6), with mi=420 all-moot (never a target). The gate is the
-    canonical geometry digest: a mutated forest falls back to the live gate, so the
-    fixture's v5e_run1 indices are never mis-applied to relocated geometry and the
-    §6.10 idempotence pass is a no-op by construction (defect-5)."""
+    """On the pre-relocation treant AT HEAD (v5p_treant_cfix1, the post-contact-
+    fix state the live snapshot was re-derived from) the driver's target set is
+    the FROZEN fixture (the census-authoritative treant law, §5.3 Layer 2): 72
+    non-exempt / 37 moot / 39 REAL-quarantine, with the ball breaches coming
+    from the LIVE gate. The gate is the canonical geometry digest: a mutated
+    forest falls back to the live gate, so the fixture's member indices are never
+    mis-applied to relocated geometry and the §6.10 idempotence pass is a no-op
+    by construction (defect-5).
+
+    The digest MOVES WITH THE FIXTURE. The superseded 2026-07-23 pair is checked
+    below (test_superseded_archived_forest_falls_back_to_live_gate): the archived
+    forest no longer matches the pin, which is exactly the safety property --
+    a snapshot must never be applied to geometry it was not derived from."""
     import pickle
-    if not (os.path.exists(_PKL) and os.path.exists(_STL) and os.path.exists(_INPUT_JSON)):
-        pytest.skip("archived artifacts not present")
+    if not (os.path.exists(_PKL_CFIX) and os.path.exists(_STL)
+            and os.path.exists(_INPUT_JSON_CFIX)):
+        pytest.skip("post-contact-fix state pickle / source STL / input JSON not present")
     from support_placement.geometry_kernel import KernelSurface
-    S = pickle.load(open(_PKL, "rb"))
+    S = pickle.load(open(_PKL_CFIX, "rb"))
     mesh = trimesh.load(_STL, file_type="stl", process=False)
     mesh.apply_translation(-(mesh.bounds[0] + mesh.bounds[1]) / 2.0)
     geom = KernelSurface(mesh)
@@ -680,12 +694,18 @@ def test_frozen_fixture_is_treant_target_law_geometry_gated():
                             frozen_snapshot=frozen)
     assert di.target_source == "frozen-fixture"
     snap = di.snapshot
-    assert len(snap.non_exempt) == 143 and len(snap.moot) == 50
-    assert len(snap.quarantine_real) == 77 and len(snap.ball_breaches) == 15
-    # defect-6: every census-only boundary member is a target (485 also quarantine-routed).
-    assert {168, 376, 443, 445, 485, 519}.issubset(set(snap.non_exempt))
-    # mi=420 is all-moot at full precision -> recorded moot, NEVER remediated.
-    assert 420 in snap.moot and 420 not in snap.non_exempt
+    d = json.load(open(_INPUT_JSON_CFIX))
+    pf = d["printfloor_partition"]
+    assert len(snap.non_exempt) == 72 and len(snap.moot) == 37
+    assert len(snap.quarantine_real) == 39
+    assert len(snap.quarantine_artifact) == 0
+    # the fixture population is used VERBATIM -- no live-gate substitution.
+    assert set(snap.non_exempt) == set(pf["non_exempt_member_idxs"])
+    assert set(snap.moot) == set(pf["moot_member_idxs"])
+    # ball breaches come from the live gate and match the census (R3 parity).
+    assert len(snap.ball_breaches) == d["ball_breaches"]["n_breaching_balls"] == 7
+    # a Q-REAL stub the census reads moot is recorded, never remediated.
+    assert {402, 476} == set(snap.quarantine_real) & set(snap.moot)
 
     # geometry gate: perturb ONE member -> digest no longer matches -> live gate.
     m2 = [dict(x) for x in S["members"]]
@@ -696,6 +716,34 @@ def test_frozen_fixture_is_treant_target_law_geometry_gated():
                              quarantine_sites=S["quarantine_sites"],
                              frozen_snapshot=frozen)
     assert di2.target_source == "live-gate"
+
+
+@pytest.mark.kernel
+def test_superseded_archived_forest_falls_back_to_live_gate():
+    """The SUPERSEDED 2026-07-23 forest (v5e_run1) must NOT pick up the live
+    snapshot: its geometry digest is the old pin, the live pin is the new one,
+    so target selection falls back to the live gate. This is the guard that
+    stopped the stale 143/50 member ids being applied to the re-indexed forest
+    (and, symmetrically, stops the new 72/37 ids being applied to the old one).
+    Both pins are pinned here so a future re-derivation cannot quietly reuse
+    one snapshot for two geometries."""
+    import pickle
+    if not (os.path.exists(_PKL) and os.path.exists(_STL)):
+        pytest.skip("archived v5e_run1.pkl / source STL not present")
+    from support_placement.geometry_kernel import KernelSurface
+    from support_placement import p8_accept
+    S = pickle.load(open(_PKL, "rb"))
+    assert (p8_accept.geometry_digest(S["members"], [])
+            == pd.TREANT_PRERELOCATE_DIGEST_2026_07_23
+            != pd.TREANT_PRERELOCATE_DIGEST)
+    mesh = trimesh.load(_STL, file_type="stl", process=False)
+    mesh.apply_translation(-(mesh.bounds[0] + mesh.bounds[1]) / 2.0)
+    geom = KernelSurface(mesh)
+    di = pd.construct_sites(S["forest"], S["members"], S["balls"], S["contacts"],
+                            None, S["cfg"], geom, mesh, unrouted=S["unrouted"],
+                            quarantine_sites=S["quarantine_sites"],
+                            frozen_snapshot=pd.load_treant_frozen_snapshot())
+    assert di.target_source == "live-gate"
 
 
 def test_frozen_fixture_absent_falls_back_to_live_gate(cfg):
