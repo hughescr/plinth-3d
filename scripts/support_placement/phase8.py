@@ -253,6 +253,7 @@ class StubSite:
     orig_member: dict = None     # for the resin volume-delta baseline
     downstream_route_len_mm: float = 0.0
     downstream_route_vol_ml: float = 0.0
+    frozen_worst_chord_mm: float = 0.0   # §4.3 pocket commit-priority key (frozen)
 
 
 @dataclass
@@ -391,26 +392,30 @@ def evaluate_r1(sites: list, geom, cfg,
                      pocket_penalty_fn=pocket_penalty_fn)
 
 
-def _run_rung(all_cands: list, site_by_id: dict, sids: list, geom, cfg, *,
-              rays: str, guard_fn: Callable, moot_fn: Callable,
-              revalidate_fn: Optional[Callable] = None,
-              reroute_fn: Optional[Callable] = None,
-              pocket_penalty_fn: Optional[Callable] = None) -> dict:
-    """The shared BATCH-FIRST ladder-rung evaluator (SM-STUB R1 / SM-STRUT S1).
-    One flat candidate matrix -> a handful of batched kernel interval + SCAR
-    calls -> scatter -> per-site UNIQUE global lexicographic minimum. A rung is
-    NOT first-legal-wins (amendment B): the FULL legal set is enumerated and the
-    lex-min of the score tuple is selected. `rays` selects the kernel ray set
-    (stubs axis-only; interior struts axis + capsule-offset, so a shaft whose
-    axis is clean but whose capsule grazes a thin wall -- census mi=1138 -- is
-    caught, §3.1s); `guard_fn` is the member-kind's amendment-H legality guard;
-    `moot_fn` counts moot crossings for the score tuple's n_moot slot. A
-    per-candidate scalar kernel loop here would be a defect (batch-first rule)."""
-    results = {sid: R1Result(site_id=sid, winner=None, score=None,
-                             n_candidates=0, n_legal=0, needs_r2=True)
-               for sid in sids}
+def _batch_legal_sets(all_cands: list, site_by_id: dict, sids: list, geom, cfg, *,
+                      rays: str, guard_fn: Callable, moot_fn: Callable,
+                      revalidate_fn: Optional[Callable] = None,
+                      reroute_fn: Optional[Callable] = None,
+                      pocket_penalty_fn: Optional[Callable] = None):
+    """The shared BATCH-FIRST legality evaluator: one flat candidate matrix ->
+    a handful of batched kernel interval + SCAR calls -> scatter -> per-site
+    legal set, each SORTED by the §3.1 score tuple (lexicographic). Returns
+    `(per_site_legal, per_site_count)` where `per_site_legal[sid]` is the FULL
+    sorted `[(score, cand), ...]` list (never first-legal-truncated -- amendment
+    B). `rays` selects the kernel ray set (stubs axis-only; interior struts axis
+    + capsule-offset, so a shaft whose axis is clean but whose capsule grazes a
+    thin wall -- census mi=1138 -- is caught, §3.1s); `guard_fn` is the member-
+    kind's amendment-H legality guard; `moot_fn` counts moot crossings for the
+    score tuple's n_moot slot. A per-candidate scalar kernel loop here would be a
+    defect (batch-first rule).
+
+    Both consumers read this ONE evaluator: the ladder rungs (`_run_rung` -> the
+    unique global lex-min) and the pocket solver (§4, which needs the whole
+    sorted list per member for its atomic-commit walk)."""
+    per_site_legal = {sid: [] for sid in sids}
+    per_site_count = {sid: 0 for sid in sids}
     if not all_cands:
-        return results
+        return per_site_legal, per_site_count
 
     members = [c.member for c in all_cands]
     mis = list(range(len(members)))
@@ -420,8 +425,6 @@ def _run_rung(all_cands: list, site_by_id: dict, sids: list, geom, cfg, *,
     verdicts = verify._embed_scar_verdicts(geom, members, mis, ivmap, cfg)
 
     # --- scatter: classify each candidate, assemble per-site legal sets ---
-    per_site_legal = {sid: [] for sid in sids}
-    per_site_count = {sid: 0 for sid in sids}
     for j, cand in enumerate(all_cands):
         per_site_count[cand.site_id] += 1
         m = cand.member
@@ -457,6 +460,29 @@ def _run_rung(all_cands: list, site_by_id: dict, sids: list, geom, cfg, *,
         per_site_legal[cand.site_id].append((score, cand))
 
     for sid, legal in per_site_legal.items():
+        # GLOBAL lexicographic order over the full legal set -- a total order
+        # because the score tuple ends in the total-order candidate index.
+        legal.sort(key=lambda sc: sc[0])
+    return per_site_legal, per_site_count
+
+
+def _run_rung(all_cands: list, site_by_id: dict, sids: list, geom, cfg, *,
+              rays: str, guard_fn: Callable, moot_fn: Callable,
+              revalidate_fn: Optional[Callable] = None,
+              reroute_fn: Optional[Callable] = None,
+              pocket_penalty_fn: Optional[Callable] = None) -> dict:
+    """The shared BATCH-FIRST ladder-rung evaluator (SM-STUB R1 / SM-STRUT S1):
+    `_batch_legal_sets` -> per-site UNIQUE global lexicographic minimum. A rung
+    is NOT first-legal-wins (amendment B): the FULL legal set is enumerated and
+    the lex-min of the score tuple is selected."""
+    results = {sid: R1Result(site_id=sid, winner=None, score=None,
+                             n_candidates=0, n_legal=0, needs_r2=True)
+               for sid in sids}
+    per_site_legal, per_site_count = _batch_legal_sets(
+        all_cands, site_by_id, sids, geom, cfg, rays=rays, guard_fn=guard_fn,
+        moot_fn=moot_fn, revalidate_fn=revalidate_fn, reroute_fn=reroute_fn,
+        pocket_penalty_fn=pocket_penalty_fn)
+    for sid, legal in per_site_legal.items():
         res = results[sid]
         res.n_candidates = per_site_count[sid]
         res.n_legal = len(legal)
@@ -465,7 +491,6 @@ def _run_rung(all_cands: list, site_by_id: dict, sids: list, geom, cfg, *,
             continue
         # GLOBAL lexicographic minimum over the full legal set -- unique because
         # the tuple ends in the total-order candidate index.
-        legal.sort(key=lambda sc: sc[0])
         best_score, best_cand = legal[0]
         res.winner = best_cand
         res.score = best_score
@@ -576,6 +601,7 @@ class StrutSite:
     downstream_route_vol_ml: float = 0.0
     criticality: float = 2.0            # structural strut > leaf contact stub
     orphan_if_dropped: bool = False     # amendment G: dropping orphans a subtree
+    frozen_worst_chord_mm: float = 0.0  # §4.3 pocket commit-priority key (frozen)
 
 
 def reaim_foot(c, n_hat, delta, L, r_foot, r_root, owner, carried_mm2):
@@ -959,12 +985,575 @@ def run_phase3_balls(sites: list, geom, cfg,
     return out
 
 
-def run_pocket_solver(*a, **k):
+# ===========================================================================
+# §4 POCKET SOLVER -- atomic-commit loop with full dependency-set invalidation.
+# ===========================================================================
+# The convergence-critical piece for the three dense defect clusters (canopy P1
+# x6-12/y-12..-6/z48-54 ~37, canopy P2 x18-36/y6-18/z48-60 ~22, lower-trunk P3
+# x-36..-30/y12-18/z-24..-18 17). Above CROWN_Z=35 in dense foliage a per-site
+# greedy re-aim THRASHES: a re-aimed shaft can create a NEW crossing through a
+# neighbour's corridor, and a naive sequential pass can oscillate. The draft's
+# unary scorer against a stale snapshot, its "two sweeps" cutoff, and its
+# candidate-ray-only invalidation are REJECTED (amendment F). This is an atomic
+# per-member commit loop with a MONOTONE resolved-count objective and FULL
+# dependency-set invalidation, driven by a precomputed conflict graph. It
+# terminates in <= |pocket| commits, never oscillates, and is bit-deterministic
+# (§4.5): world-origin-pinned voxels + lexicographic component labels + a total
+# commit-priority order + total-order score tuples => every choice is unique.
+#
+# One law, one authority: legality against the MODEL SURFACE reuses the SAME
+# batched verify primitives (`_batch_legal_sets`) the ladder rungs and the
+# independent census use -- the pocket solver never invents a second predicate.
+# Support/support interaction (the "no NEW firm transit into a committed
+# neighbour" mutual-legality guard, §4.3-3-ii / §6.9) is a pure geometric
+# capsule predicate applied at COMMIT time over the bounded committed subset of
+# a member's conflict neighbourhood; the engine may inject its own §5-law check.
+
+
+# --- pure-geometry segment primitives (deterministic; no RNG, no sampling) ---
+def _pt_seg_dist(pt, q0, q1) -> float:
+    """Distance from point `pt` to segment (q0,q1)."""
+    pt = np.asarray(pt, float); q0 = np.asarray(q0, float); q1 = np.asarray(q1, float)
+    d = q1 - q0
+    L2 = float(np.dot(d, d))
+    if L2 < 1e-18:
+        return float(np.linalg.norm(pt - q0))
+    t = float(np.dot(pt - q0, d) / L2)
+    t = min(1.0, max(0.0, t))
+    return float(np.linalg.norm(pt - (q0 + t * d)))
+
+
+def _seg_seg_dist_batch(p0, p1, Q0, Q1):
+    """Minimum distance between segment P=(p0,p1) and EACH segment
+    (Q0[k],Q1[k]) -- one vectorised clamped closest-approach (Ericson RTCD) over
+    the K neighbour corridors, not a per-neighbour scalar loop. Returns (K,)."""
+    p0 = np.asarray(p0, float); p1 = np.asarray(p1, float)
+    Q0 = np.atleast_2d(np.asarray(Q0, float)); Q1 = np.atleast_2d(np.asarray(Q1, float))
+    d1 = p1 - p0                             # (3,)  the SAME segment for all K
+    d2 = Q1 - Q0                             # (K,3)
+    r = p0[None, :] - Q0                     # (K,3)
+    a = float(np.dot(d1, d1))                # scalar  = |P|^2
+    e = np.sum(d2 * d2, axis=1)              # (K,)    = |Q_k|^2
+    f = np.sum(d2 * r, axis=1)               # (K,) dot(d2_k, r_k)
+    c = r @ d1                               # (K,) dot(d1, r_k)
+    b = d2 @ d1                              # (K,) dot(d1, d2_k)
+    K = e.shape[0]
+    e_safe = np.where(e < 1e-18, 1.0, e)
+    if a < 1e-18:                            # P degenerate -> a point at p0
+        s = np.zeros(K)
+        t = np.where(e < 1e-18, 0.0, np.clip(f / e_safe, 0.0, 1.0))
+    else:
+        denom = a * e - b * b                # (K,)
+        denom_safe = np.where(denom > 1e-18, denom, 1.0)
+        s = np.where(denom > 1e-18,
+                     np.clip((b * f - c * e) / denom_safe, 0.0, 1.0), 0.0)
+        t = np.where(e < 1e-18, 0.0, (b * s + f) / e_safe)
+        recl = (t < 0.0) | (t > 1.0)
+        t = np.clip(t, 0.0, 1.0)
+        # Ericson: where t clamped, recompute s = clip((b*t - c)/a, 0, 1)
+        s = np.where(recl, np.clip((b * t - c) / a, 0.0, 1.0), s)
+    cp_P = p0[None, :] + s[:, None] * d1[None, :]
+    cp_Q = Q0 + t[:, None] * d2
+    return np.linalg.norm(cp_P - cp_Q, axis=1)
+
+
+def _seg_capsule_chord(p0, p1, q0, q1, rad) -> float:
+    """Length of the sub-interval of segment P=(p0,p1) whose centreline lies
+    within `rad` of segment Q -- i.e. the chord along which P pierces the capsule
+    (Q, rad). distance-to-segment is CONVEX along P (P->P(t) affine composed with
+    distance to a convex set), so {t : d(t) < rad} is a single interval; found by
+    a golden-section min + two deterministic bisections (no RNG, no sampling)."""
+    p0 = np.asarray(p0, float); p1 = np.asarray(p1, float)
+    d1 = p1 - p0
+    L = float(np.linalg.norm(d1))
+    if L < 1e-9:
+        return 0.0
+
+    def dist(t):
+        return _pt_seg_dist(p0 + t * d1, q0, q1)
+
+    gr = (np.sqrt(5.0) - 1.0) / 2.0
+    a, b = 0.0, 1.0
+    x1 = b - gr * (b - a); x2 = a + gr * (b - a)
+    f1 = dist(x1); f2 = dist(x2)
+    for _ in range(64):
+        if f1 < f2:
+            b, x2, f2 = x2, x1, f1
+            x1 = b - gr * (b - a); f1 = dist(x1)
+        else:
+            a, x1, f1 = x1, x2, f2
+            x2 = a + gr * (b - a); f2 = dist(x2)
+    tstar = 0.5 * (a + b)
+    if dist(tstar) >= rad:
+        return 0.0
+    # left crossing on [0, tstar]
+    if dist(0.0) <= rad:
+        tlo = 0.0
+    else:
+        lo, hi = 0.0, tstar
+        for _ in range(64):
+            mid = 0.5 * (lo + hi)
+            if dist(mid) > rad:
+                lo = mid
+            else:
+                hi = mid
+        tlo = hi
+    # right crossing on [tstar, 1]
+    if dist(1.0) <= rad:
+        thi = 1.0
+    else:
+        lo, hi = tstar, 1.0
+        for _ in range(64):
+            mid = 0.5 * (lo + hi)
+            if dist(mid) > rad:
+                hi = mid
+            else:
+                lo = mid
+        thi = lo
+    return float(max(0.0, (thi - tlo) * L))
+
+
+# --- member helpers: tip, original placement, candidates, envelope ----------
+def _site_length(site) -> float:
+    return float(site.strut_length_mm if isinstance(site, StrutSite)
+                 else site.stub_length_mm)
+
+
+def _site_tip(site) -> np.ndarray:
+    """The frozen free-end (tip) position of a member at its ORIGINAL placement
+    (§4.1): the point the pocket-detection voxel grid buckets."""
+    n = _unit(np.asarray(site.n0, float))
+    return np.asarray(site.c, float) + n * _site_length(site)
+
+
+def _original_member(site) -> dict:
+    """The member dict at the site's original (polar-0, full-length) placement --
+    the corridor a member occupies before it commits (§4.2 density baseline)."""
+    if isinstance(site, StrutSite):
+        return reaim_foot(site.c, site.n0, site.foot_depth_mm, site.strut_length_mm,
+                          site.r_foot, site.r_root, site.owner, site.carried_mm2)
+    r_shoot_floor = max(float(site.r_tip), 0.0)
+    return reaim_stub(site.c, site.n0, site.contact_depth_mm, site.stub_length_mm,
+                      site.r_tip, r_shoot_floor, site.owner, site.carried_mm2)
+
+
+def _member_kindinfo(site):
+    """(kind, rays, guard_fn, moot_fn) for a pocket member -- a strut is judged
+    over axis+capsule rays with the foot growth guard, a stub axis-only."""
+    if isinstance(site, StrutSite):
+        return "strut", "all", _strut_guards_ok, _count_moot
+    return "stub", "axis", _resin_guards_ok, _count_moot_axis
+
+
+def _member_candidates(site, cfg) -> list:
+    if isinstance(site, StrutSite):
+        return strut_candidates(site, cfg)
+    return stub_candidates(site, cfg)
+
+
+def _corridor_of(member: dict):
+    """(q0, q1, rad) of a member's shaft corridor -- endpoints + max capsule
+    radius (the corridor half-width used by both the mutual guard and density)."""
+    return (np.asarray(member["p0"], float), np.asarray(member["p1"], float),
+            float(max(member["r0"], member["r1"])))
+
+
+# --- pocket detection (§4.1): pinned world-origin voxels + detection halo ----
+def voxel_key(pos, vox: float) -> tuple:
+    """World-origin-pinned voxel key `(floor(x/vox), floor(y/vox), floor(z/vox))`
+    (§4.1). NOT bbox-relative -- amendment F: a bbox grid shifts under any move
+    and would make pocket identity unstable."""
+    p = np.asarray(pos, float)
+    return (int(np.floor(p[0] / vox)), int(np.floor(p[1] / vox)),
+            int(np.floor(p[2] / vox)))
+
+
+def _vox_neighbors6(v):
+    """The 6 face neighbours -- the connectivity used to build a pocket's
+    voxel component (§4.1: a pocket is a 6-connected component)."""
+    x, y, z = v
+    return ((x - 1, y, z), (x + 1, y, z), (x, y - 1, z),
+            (x, y + 1, z), (x, y, z - 1), (x, y, z + 1))
+
+
+def _vox_halo26(v):
+    """The 26 neighbours (full 3x3x3 minus centre) -- the 1-voxel dilation
+    structuring element of the detection halo (§4.1). Face-adjacent occupied
+    voxels are already 6-connected into the component; the halo's job is to
+    absorb a straggler whose tip voxel only touches the pocket at an edge or
+    corner, so a sub-voxel re-aim can never flip its membership."""
+    x, y, z = v
+    return tuple((x + dx, y + dy, z + dz)
+                 for dx in (-1, 0, 1) for dy in (-1, 0, 1) for dz in (-1, 0, 1)
+                 if not (dx == 0 and dy == 0 and dz == 0))
+
+
+@dataclass(frozen=True)
+class Pocket:
+    label: int                    # deterministic (lexicographic component order)
+    voxels: frozenset             # the qualifying 6-connected component's voxels
+    member_ids: tuple             # sorted mi of members (incl. detection halo)
+
+
+def detect_pockets(sites: list, cfg) -> list:
+    """Pocket detection (§4.1). Bucket frozen tip positions into world-origin
+    `p8_pocket_voxel_mm` voxels; a pocket is a 6-connected occupied-voxel
+    component with >= `p8_pocket_min_members` tips. Components are discovered in
+    lexicographically-sorted voxel order, so labels are DETERMINISTIC. Membership
+    is then tested with a 1-voxel detection halo (dilation): a member whose tip
+    voxel lies in a qualifying component OR within its halo joins it (ties broken
+    to the lowest label), so a tip on a voxel face does not flip membership under
+    a sub-voxel re-aim. Returns the qualifying pockets only; members in none are
+    isolated (§4.6)."""
+    vox = float(cfg.p8_pocket_voxel_mm)
+    tip_vox = {s.site_id: voxel_key(_site_tip(s), vox) for s in sites}
+    occ = {}
+    for v in tip_vox.values():
+        occ[v] = occ.get(v, 0) + 1
+
+    seen = set(); comps = []
+    for v in sorted(occ.keys()):                     # lexicographic discovery
+        if v in seen:
+            continue
+        stack = [v]; seen.add(v); comp = []
+        while stack:
+            u = stack.pop(); comp.append(u)
+            for nb in _vox_neighbors6(u):
+                if nb in occ and nb not in seen:
+                    seen.add(nb); stack.append(nb)
+        comps.append(comp)
+
+    qualifying = []                                   # (label, voxelset, dilated)
+    for comp in comps:
+        tips = sum(occ[v] for v in comp)
+        if tips >= int(cfg.p8_pocket_min_members):
+            vset = frozenset(comp)
+            dilated = set(vset)
+            for u in vset:
+                dilated.update(_vox_halo26(u))       # 1-voxel dilation halo
+            qualifying.append((len(qualifying), vset, dilated))
+
+    # assign members (halo, lowest-label tie-break), in mi order for determinism
+    members = {lab: [] for lab, _v, _d in qualifying}
+    for sid in sorted(tip_vox):
+        tv = tip_vox[sid]
+        for lab, _vset, dilated in qualifying:
+            if tv in dilated:
+                members[lab].append(sid)
+                break
+    return [Pocket(label=lab, voxels=vset, member_ids=tuple(sorted(members[lab])))
+            for lab, vset, _d in qualifying if members[lab]]
+
+
+# --- conflict graph (§4.2): reachable-envelope AABB broad-phase --------------
+def _member_envelope(site, cfg):
+    """Reachable envelope E_m (§4.2): the AABB enclosing the capsule of EVERY
+    candidate shaft in C_m, padded by the detection halo
+    `p8_pocket_corridor_pad_mm`. (lo[3], hi[3])."""
+    pad = float(cfg.p8_pocket_corridor_pad_mm)
+    lo = np.full(3, np.inf); hi = np.full(3, -np.inf)
+    for cand in _member_candidates(site, cfg):
+        m = cand.member
+        r = float(max(m["r0"], m["r1"]))
+        p0 = np.asarray(m["p0"], float); p1 = np.asarray(m["p1"], float)
+        lo = np.minimum(lo, np.minimum(p0, p1) - r)
+        hi = np.maximum(hi, np.maximum(p0, p1) + r)
+    return lo - pad, hi + pad
+
+
+def build_conflict_graph(sites: list, cfg):
+    """Conflict graph G (§4.2): one node per pocket member; an undirected edge
+    (a,b) iff the reachable envelopes E_a, E_b overlap (SOME candidate of a could
+    geometrically interact with SOME candidate of b). One vectorised AABB
+    broad-phase over the envelopes (not a scalar O(n^2) probe loop); the envelope
+    IS an AABB so the broad-phase test is exact. N(m) is the COMPLETE dependency
+    set the §4.4 invalidation rule uses. Returns (env, adjacency, edges) with
+    edges as sorted (min mid, max mid) pairs and adjacency mid -> set(neighbours)."""
+    ids = sorted(s.site_id for s in sites)
+    site_by_id = {s.site_id: s for s in sites}
+    env = {i: _member_envelope(site_by_id[i], cfg) for i in ids}
+    adj = {i: set() for i in ids}
+    edges = []
+    if len(ids) >= 2:
+        LO = np.array([env[i][0] for i in ids])       # (n,3)
+        HI = np.array([env[i][1] for i in ids])
+        # overlap[a,b] iff LO_a <= HI_b (all axes) and LO_b <= HI_a (all axes)
+        ov = (np.all(LO[:, None, :] <= HI[None, :, :], axis=2)
+              & np.all(LO[None, :, :] <= HI[:, None, :], axis=2))
+        n = len(ids)
+        for ai in range(n):
+            for bi in range(ai + 1, n):
+                if ov[ai, bi]:
+                    a, b = ids[ai], ids[bi]
+                    adj[a].add(b); adj[b].add(a)
+                    edges.append((a, b))
+    return env, adj, tuple(edges)
+
+
+# --- density penalty (§4.2) feeding the §3.1 score tuple --------------------
+def _density_count(sid, cand, corridors, cfg) -> int:
+    """density_penalty(cand, m) (§4.2): the integer count of OTHER pocket members
+    whose current corridor the candidate shaft of m passes within
+    `p8_pocket_corridor_pad_mm` of (surface-to-surface). `corridors` is
+    {mid: (q0,q1,rad)} at the CURRENT state (committed geometry if COMMITTED,
+    else original placement). Vectorised over the neighbour corridors."""
+    others = [c for k, c in corridors.items() if k != sid]
+    if not others:
+        return 0
+    m = cand.member
+    p0 = np.asarray(m["p0"], float); p1 = np.asarray(m["p1"], float)
+    rp = float(max(m["r0"], m["r1"]))
+    Q0 = np.array([o[0] for o in others]); Q1 = np.array([o[1] for o in others])
+    RQ = np.array([o[2] for o in others])
+    d = _seg_seg_dist_batch(p0, p1, Q0, Q1)
+    surf = d - rp - RQ                       # surface-to-surface gap
+    return int(np.count_nonzero(surf < float(cfg.p8_pocket_corridor_pad_mm)))
+
+
+def _default_mutual_legal(cand_member: dict, committed_members: list, cfg) -> bool:
+    """The mutual-legality guard (§4.3-3-ii / §6.9), default pure-geometry
+    implementation: the candidate introduces NO new firm transit into any
+    already-COMMITTED neighbour. A firm transit = a shaft pierces the other's
+    capsule with an interior chord >= PRINT_FLOOR_CHORD_MM (0.08mm); checked
+    BOTH directions (m through k and k through m). Vacuously True when no
+    committed neighbour. The engine may inject its own §5-law equivalent."""
+    p0, p1, rp = _corridor_of(cand_member)
+    for km in committed_members:
+        q0, q1, rq = _corridor_of(km)
+        if _seg_capsule_chord(p0, p1, q0, q1, rq) >= verify.PRINT_FLOOR_CHORD_MM:
+            return False
+        if _seg_capsule_chord(q0, q1, p0, p1, rp) >= verify.PRINT_FLOOR_CHORD_MM:
+            return False
+    return True
+
+
+# --- pocket-solver result records -------------------------------------------
+class PocketStatus(str, Enum):
+    UNRESOLVED = "unresolved"
+    COMMITTED = "committed"
+    FALLEN = "fallen"          # empty/exhausted -> leaves to R2/R3 (S2/S3)
+
+
+@dataclass
+class PocketMemberResult:
+    mid: int
+    status: PocketStatus
+    kind: str                              # "stub" | "strut"
+    committed_cand: Optional[Candidate] = None
+    score: Optional[tuple] = None
+    escalate_rung: Optional[str] = None    # "R2" (stub) | "S2" (strut) when FALLEN
+    n_legal_seed: int = 0
+
+
+@dataclass
+class PocketSolveResult:
+    label: int
+    member_ids: tuple
+    members: dict                          # mid -> PocketMemberResult
+    commit_order: tuple                    # mids in loop-processing order
+    objective_trace: tuple                 # UNRESOLVED count after each iteration
+    invalidations: tuple                   # (committed_mid, (dirty_mid, ...)) per commit
+    n_iterations: int
+    n_committed: int
+    n_fallen: int
+    edges: tuple
+
+
+@dataclass
+class PocketSolverReport:
+    pockets: list                          # PocketSolveResult, in label order
+    isolated: dict                         # mid -> R1Result (§4.6 plain ladder)
+    dispositions: dict                     # mid -> str
+
+
+def solve_pocket(members: list, geom, cfg, *,
+                 revalidate_fn: Optional[Callable] = None,
+                 reroute_fn: Optional[Callable] = None,
+                 mutual_legal_fn: Optional[Callable] = None,
+                 label: int = 0) -> PocketSolveResult:
+    """The atomic-commit loop (§4.3, normative) for ONE pocket's members.
+
+    Batch-first throughout: the seed evaluates the FULL candidate matrix in ONE
+    batched kernel query per ray-kind (gather -> batched call -> scatter); every
+    dirty re-evaluation is likewise ONE batched query over the dirty members'
+    candidates. Per iteration EXACTLY one UNRESOLVED member becomes COMMITTED or
+    FALLEN, so the UNRESOLVED count strictly decreases -- the loop runs <=
+    |pocket| iterations and halts, with no sweep cap and no oscillation (§4.5).
+
+    Soundness (§4.4): a member commits its lex-min legal candidate that also (i)
+    is legal against all committed geometry (surface law + injected revalidate)
+    AND (ii) introduces no new firm transit into any COMMITTED neighbour
+    (`mutual_legal_fn`). Committed geometry only grows and every addition
+    preserves mutual legality, so the committed set is fully mutually legal at
+    every step -- the §6.9 zero-NEW-firm-transit gate enforced locally."""
+    if mutual_legal_fn is None:
+        mutual_legal_fn = _default_mutual_legal
+    site_by_id = {s.site_id: s for s in members}
+    ids = sorted(site_by_id)
+    _env, adj, edges = build_conflict_graph(members, cfg)
+
+    # candidate sets are FIXED grids, computed once (§4.5 determinism).
+    cand_map = {i: _member_candidates(site_by_id[i], cfg) for i in ids}
+    kind_of = {i: _member_kindinfo(site_by_id[i])[0] for i in ids}
+    orig_member = {i: _original_member(site_by_id[i]) for i in ids}
+    wfc = {i: float(getattr(site_by_id[i], "frozen_worst_chord_mm", 0.0)) for i in ids}
+
+    status = {i: PocketStatus.UNRESOLVED for i in ids}
+    committed_member = {i: None for i in ids}
+    committed_cand = {i: None for i in ids}
+    score_of = {i: None for i in ids}
+    legal_sorted = {i: [] for i in ids}
+    n_legal_seed = {i: 0 for i in ids}
+
+    def _corridors():
+        """Current corridor of every member: committed geometry if COMMITTED,
+        else the original placement (§4.2)."""
+        out = {}
+        for i in ids:
+            m = committed_member[i] if status[i] == PocketStatus.COMMITTED else orig_member[i]
+            out[i] = _corridor_of(m)
+        return out
+
+    def _batched_eval(eval_ids):
+        """ONE batched legality evaluation (grouped by ray-kind) over eval_ids;
+        returns {mid: sorted legal [(score, cand), ...]}. density_penalty is
+        recomputed against the CURRENT committed corridors (§4.3-5)."""
+        corridors = _corridors()
+
+        def density_fn(sid, cand):
+            return _density_count(sid, cand, corridors, cfg)
+
+        out = {}
+        for kind in ("stub", "strut"):
+            grp = [i for i in eval_ids if kind_of[i] == kind]
+            if not grp:
+                continue
+            rays, guard, moot = (("axis", _resin_guards_ok, _count_moot_axis)
+                                 if kind == "stub"
+                                 else ("all", _strut_guards_ok, _count_moot))
+            all_cands = [c for i in grp for c in cand_map[i]]
+            sub = {i: site_by_id[i] for i in grp}
+            per_legal, _cnt = _batch_legal_sets(
+                all_cands, sub, grp, geom, cfg, rays=rays, guard_fn=guard,
+                moot_fn=moot, revalidate_fn=revalidate_fn, reroute_fn=reroute_fn,
+                pocket_penalty_fn=density_fn)
+            out.update(per_legal)
+        return out
+
+    # 1. seed -- one batched call over ALL members (§4.3-1).
+    seed = _batched_eval(ids)
+    for i in ids:
+        legal_sorted[i] = seed.get(i, [])
+        n_legal_seed[i] = len(legal_sorted[i])
+
+    commit_order = []
+    objective_trace = []
+    invalidations = []
+
+    # 2-6. the atomic-commit loop.
+    while True:
+        ready = [i for i in ids
+                 if status[i] == PocketStatus.UNRESOLVED and legal_sorted[i]]
+        if not ready:
+            break
+        # commit priority (§4.3-2): worst-firm-chord desc, mid asc -- a total order.
+        m = min(ready, key=lambda i: (-wfc[i], i))
+        committed_neighbors = [committed_member[k] for k in sorted(adj[m])
+                               if status[k] == PocketStatus.COMMITTED]
+        # 3. walk lex-min-first to the first candidate passing the mutual guard.
+        chosen = None
+        for score, cand in legal_sorted[m]:
+            if mutual_legal_fn(cand.member, committed_neighbors, cfg):
+                chosen = (score, cand)
+                break
+        if chosen is None:                            # exhausted -> FALLEN
+            status[m] = PocketStatus.FALLEN
+        else:
+            committed_cand[m] = chosen[1]
+            committed_member[m] = chosen[1].member
+            score_of[m] = chosen[0]
+            status[m] = PocketStatus.COMMITTED        # terminal, never re-evaluated
+            # 4. FULL dependency-set invalidation: every UNRESOLVED graph
+            #    neighbour (amendment F: NOT merely candidate-ray-overlapping).
+            dirty = [k for k in sorted(adj[m])
+                     if status[k] == PocketStatus.UNRESOLVED]
+            invalidations.append((m, tuple(dirty)))
+            # 5. re-evaluate ALL dirty members in ONE batched call.
+            if dirty:
+                re = _batched_eval(dirty)
+                for k in dirty:
+                    legal_sorted[k] = re.get(k, [])
+        commit_order.append(m)
+        # monotone objective (§4.5): UNRESOLVED count strictly decreases by one.
+        objective_trace.append(sum(1 for i in ids
+                                   if status[i] == PocketStatus.UNRESOLVED))
+
+    # any member still UNRESOLVED here has an empty legal set -> honest FALLEN
+    # (leaves to SM-STUB R2/R3 resp. SM-STRUT S2/S3).
+    for i in ids:
+        if status[i] == PocketStatus.UNRESOLVED:
+            status[i] = PocketStatus.FALLEN
+
+    out_members = {}
+    for i in ids:
+        rung = None
+        if status[i] == PocketStatus.FALLEN:
+            rung = "R2" if kind_of[i] == "stub" else "S2"
+        out_members[i] = PocketMemberResult(
+            mid=i, status=status[i], kind=kind_of[i],
+            committed_cand=committed_cand[i], score=score_of[i],
+            escalate_rung=rung, n_legal_seed=n_legal_seed[i])
+    n_committed = sum(1 for i in ids if status[i] == PocketStatus.COMMITTED)
+    return PocketSolveResult(
+        label=label, member_ids=tuple(ids), members=out_members,
+        commit_order=tuple(commit_order), objective_trace=tuple(objective_trace),
+        invalidations=tuple(invalidations),
+        n_iterations=len(commit_order), n_committed=n_committed,
+        n_fallen=len(ids) - n_committed, edges=edges)
+
+
+def run_pocket_solver(sites: list, geom, cfg,
+                      revalidate_fn: Optional[Callable] = None,
+                      reroute_fn: Optional[Callable] = None,
+                      mutual_legal_fn: Optional[Callable] = None) -> PocketSolverReport:
     """The atomic-commit pocket solver with full dependency-set invalidation
-    (§4) -- conflict-graph-driven, monotone resolved-count objective,
-    terminates in <= |pocket| commits. Not part of this foundation delivery;
-    isolated (non-pocket) sites use the plain per-site R1 ladder here (§4.6),
-    for which `pocket_penalty_fn` is 0 by construction."""
-    raise NotImplementedError(
-        "The Phase-8 pocket solver (SPEC-P8-RELOCATE §4) is a follow-up; the "
-        "foundation evaluates isolated sites with density_penalty 0 (§4.6).")
+    (§4) -- conflict-graph-driven, monotone resolved-count objective, terminates
+    in <= |pocket| commits, bit-deterministic (§4.5).
+
+    Detects pockets among `sites` (§4.1, world-origin voxels + detection halo),
+    solves each pocket's members with `solve_pocket` (the atomic-commit loop),
+    and routes members in NO pocket component through the plain per-site ladder
+    (§4.6: `density_penalty` is 0 for them, so their §3.1 score tuple reduces
+    exactly to the sparse ordering -- the interaction machinery is pocket-only,
+    sparse sites pay nothing). Returns a `PocketSolverReport`."""
+    site_by_id = {s.site_id: s for s in sites}
+    pockets = detect_pockets(sites, cfg)
+    pocketed = set()
+    solved = []
+    for pk in pockets:
+        pmembers = [site_by_id[i] for i in pk.member_ids]
+        solved.append(solve_pocket(pmembers, geom, cfg, revalidate_fn=revalidate_fn,
+                                   reroute_fn=reroute_fn, mutual_legal_fn=mutual_legal_fn,
+                                   label=pk.label))
+        pocketed.update(pk.member_ids)
+
+    # §4.6 isolated members: plain per-site ladder, density 0 (pocket_penalty None).
+    iso_ids = [s.site_id for s in sites if s.site_id not in pocketed]
+    iso_stubs = [site_by_id[i] for i in iso_ids if not isinstance(site_by_id[i], StrutSite)]
+    iso_struts = [site_by_id[i] for i in iso_ids if isinstance(site_by_id[i], StrutSite)]
+    isolated = {}
+    if iso_stubs:
+        isolated.update(evaluate_r1(iso_stubs, geom, cfg, revalidate_fn=revalidate_fn,
+                                    reroute_fn=reroute_fn))
+    if iso_struts:
+        isolated.update(evaluate_s1(iso_struts, geom, cfg, revalidate_fn=revalidate_fn,
+                                    reroute_fn=reroute_fn))
+
+    dispositions = {}
+    for res in solved:
+        for mid, mr in res.members.items():
+            dispositions[mid] = ("POCKET_COMMITTED" if mr.status == PocketStatus.COMMITTED
+                                 else "POCKET_FALLEN_" + (mr.escalate_rung or "R2"))
+    for mid, r in isolated.items():
+        dispositions[mid] = "ISOLATED_RESOLVED" if r.winner is not None else "ISOLATED_NEEDS_R2"
+    return PocketSolverReport(pockets=solved, isolated=isolated, dispositions=dispositions)

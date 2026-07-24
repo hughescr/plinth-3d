@@ -467,12 +467,14 @@ def test_phase_order_normative():
     assert phase8.PHASE_ORDER == ("phase1_stubs", "phase2_struts", "phase3_balls")
 
 
-def test_pocket_solver_still_deferred(cfg):
-    """SM-STRUT (Phase 2) and SM-BALL (Phase 3) are now implemented; only the
-    atomic-commit pocket solver (§4) remains a typed skeleton that RAISES, so a
-    caller can never mistake it for a no-op (amendment C/F)."""
-    with pytest.raises(NotImplementedError):
-        phase8.run_pocket_solver()
+def test_pocket_solver_implemented_not_raising(cfg):
+    """The atomic-commit pocket solver (§4) is now implemented -- every Phase-8
+    state machine (SM-STUB, SM-STRUT, SM-BALL, pocket) runs; none is a skeleton
+    that raises. run_pocket_solver over an empty site list is a clean no-op
+    report (the §6.10 idempotence base case: nothing to fix -> nothing done)."""
+    geom = ExactSurface(_fin_mesh(0.25, 1.4))
+    rep = phase8.run_pocket_solver([], geom, cfg)
+    assert rep.pockets == [] and rep.isolated == {} and rep.dispositions == {}
 
 
 def test_run_phase1_stubs_is_r1(cfg):
@@ -781,8 +783,368 @@ def test_ball_radius_invariant_across_slides(cfg):
 
 def test_phase2_phase3_implemented_not_raising(cfg):
     """Phase 2 (SM-STRUT) and Phase 3 (SM-BALL) are implemented state machines --
-    they return results, they do not raise (only the pocket solver still does)."""
+    they return results, they do not raise."""
     geom_s = ExactSurface(_strut_graze_mesh())
     geom_b = ExactSurface(_ball53_mesh())
     assert phase8.run_phase2_struts([_strut_site(cfg=cfg)], geom_s, cfg)   # no raise
     assert phase8.run_phase3_balls([_ball_site(cfg=cfg)], geom_b, cfg)     # no raise
+
+
+# ==========================================================================
+# §4 POCKET SOLVER -- detection, conflict graph, atomic-commit loop.
+# ==========================================================================
+def _pocket_mesh(fin_z=0.25, fin_z0=1.4, extent=60.0):
+    """A wide slab (top z=0) + a wide fin: a vertical stub embedded 0.3mm welds
+    THROUGH the fin (firm rule-4 transit); shortening to f=0.5 (tip z=1.25)
+    clears it. Wide enough that a whole cluster of clustered contacts shares the
+    same clearing geometry -- the canopy-pocket class."""
+    slab = _box((extent, extent, 5), center=(0, 0, -2.5))
+    fin = _box((extent, extent, fin_z), center=(0, 0, fin_z0 + fin_z / 2))
+    return _soup(slab, fin)
+
+
+def _cluster_stub(mi, x, y, cfg, wfc=0.25, n0=(0.0, 0.0, 1.0)):
+    return phase8.StubSite(
+        site_id=mi, c=np.array([float(x), float(y), 0.0]),
+        n0=np.asarray(n0, float), r_tip=0.2, stub_length_mm=cfg.stub_length_mm,
+        contact_depth_mm=cfg.contact_depth_mm, carried_mm2=1.0,
+        owner=("contact", mi), frozen_worst_chord_mm=float(wfc))
+
+
+def _dense_cluster(cfg, base_mi=100, origin=(1.0, 1.0), n=3, pitch=1.2):
+    """An n x n grid of contact stubs packed on a `pitch` mm lattice near
+    `origin` -- all tips fall inside one 6mm voxel neighbourhood, a single dense
+    canopy pocket. Distinct descending worst-firm-chords pin the commit order."""
+    sites = []
+    k = 0
+    for ix in range(n):
+        for iy in range(n):
+            sites.append(_cluster_stub(
+                base_mi + k, origin[0] + ix * pitch, origin[1] + iy * pitch,
+                cfg, wfc=0.30 - 0.001 * k))
+            k += 1
+    return sites
+
+
+# ---- detection (§4.1) ------------------------------------------------------
+def test_pocket_voxel_key_pinned_to_world_origin(cfg):
+    """voxel_key is a pure function of WORLD coordinates pinned to (0,0,0), NOT a
+    bbox-relative grid (amendment F: a bbox grid shifts under any geometry move
+    and destabilises pocket identity). floor(x/6) with a strict cell boundary."""
+    assert phase8.voxel_key((0.0, 0.0, 0.0), 6.0) == (0, 0, 0)
+    assert phase8.voxel_key((5.999, 5.999, 5.999), 6.0) == (0, 0, 0)
+    assert phase8.voxel_key((6.0, 0.0, 0.0), 6.0) == (1, 0, 0)     # boundary -> next
+    assert phase8.voxel_key((-0.001, 0.0, 0.0), 6.0) == (-1, 0, 0)  # floor, not trunc
+    # pure function: the SAME world point always maps to the SAME key
+    assert phase8.voxel_key((13.2, -7.1, 49.5), 6.0) == phase8.voxel_key((13.2, -7.1, 49.5), 6.0)
+
+
+def test_pocket_detection_min_members_threshold(cfg):
+    """A pocket needs >= p8_pocket_min_members (8) defect tips. 7 clustered tips
+    are NOT a pocket (they are isolated §4.6 members); 8 ARE."""
+    seven = [_cluster_stub(200 + i, 1.0 + 0.3 * i, 1.0, cfg) for i in range(7)]
+    assert phase8.detect_pockets(seven, cfg) == []
+    eight = seven + [_cluster_stub(299, 1.0, 1.3, cfg)]
+    pk = phase8.detect_pockets(eight, cfg)
+    assert len(pk) == 1 and len(pk[0].member_ids) == 8
+
+
+def test_pocket_detection_halo_absorbs_edge_straggler(cfg):
+    """Detection halo (§4.1): a straggler whose tip voxel only touches the pocket
+    diagonally (a separate 6-connected component) is still absorbed by the
+    1-voxel dilation -- membership can't flip on a sub-voxel re-aim. A 9-tip block
+    fills voxel (0,0,0); a straggler at voxel (1,1,0) (edge-diagonal, not
+    6-connected) joins via the halo."""
+    block = [_cluster_stub(300 + i, 0.5 + 0.4 * (i % 3), 0.5 + 0.4 * (i // 3), cfg)
+             for i in range(9)]                        # all in voxel (0,0,0)
+    for s in block:
+        assert phase8.voxel_key(phase8._site_tip(s), cfg.p8_pocket_voxel_mm)[:2] == (0, 0)
+    straggler = _cluster_stub(399, 7.0, 7.0, cfg)      # tip voxel (1,1,z): diagonal
+    tv = phase8.voxel_key(phase8._site_tip(straggler), cfg.p8_pocket_voxel_mm)
+    assert tv[:2] == (1, 1)                             # not 6-connected to (0,0)
+    pk = phase8.detect_pockets(block + [straggler], cfg)
+    assert len(pk) == 1 and 399 in pk[0].member_ids     # halo pulled it in
+
+
+def test_pocket_detection_three_clusters_labeled_lexicographically(cfg):
+    """Three separated dense clusters -> three pockets (the P1/P2/P3 shape),
+    labeled in lexicographic voxel order (deterministic §4.1). Each member lands
+    in exactly one pocket; the far-apart clusters share no member."""
+    c1 = _dense_cluster(cfg, base_mi=400, origin=(1.0, 1.0))
+    c2 = _dense_cluster(cfg, base_mi=500, origin=(31.0, 1.0))
+    c3 = _dense_cluster(cfg, base_mi=600, origin=(1.0, 31.0))
+    pk = phase8.detect_pockets(c1 + c2 + c3, cfg)
+    assert len(pk) == 3
+    assert [p.label for p in pk] == [0, 1, 2]           # dense-order labels
+    sizes = {len(p.member_ids) for p in pk}
+    assert sizes == {9}
+    allmem = [m for p in pk for m in p.member_ids]
+    assert len(allmem) == len(set(allmem)) == 27        # partition, no overlap
+
+
+# ---- conflict graph (§4.2) -------------------------------------------------
+def test_conflict_graph_envelope_overlap_edges(cfg):
+    """Conflict graph G (§4.2): an edge iff reachable envelopes overlap. Two
+    adjacent cluster members share an edge; a far member shares none. Edges are
+    stored as sorted (min mid, max mid) pairs (determinism)."""
+    near = [_cluster_stub(700, 1.0, 1.0, cfg), _cluster_stub(701, 1.4, 1.0, cfg)]
+    far = _cluster_stub(702, 40.0, 40.0, cfg)
+    env, adj, edges = phase8.build_conflict_graph(near + [far], cfg)
+    assert (700, 701) in edges                          # adjacent -> edge
+    assert 702 not in adj[700] and 702 not in adj[701]  # far -> no edge
+    assert adj[702] == set()
+    assert all(a < b for a, b in edges)                 # sorted pairs
+    assert list(edges) == sorted(edges)                 # deterministic order
+
+
+def test_conflict_graph_neighbourhood_is_full_dependency_set(cfg):
+    """N(m) is the COMPLETE set of members whose legality could change when m is
+    fixed (§4.2). In a tightly packed cluster every pair's envelopes overlap, so
+    G is complete -- the full dependency set the §4.4 invalidation rule uses."""
+    sites = _dense_cluster(cfg, base_mi=100)
+    _env, adj, edges = phase8.build_conflict_graph(sites, cfg)
+    n = len(sites)
+    assert len(edges) == n * (n - 1) // 2               # complete graph
+    assert all(len(adj[s.site_id]) == n - 1 for s in sites)
+
+
+# ---- density penalty (§4.2) ------------------------------------------------
+def test_density_penalty_counts_corridor_neighbours(cfg):
+    """density_penalty (§4.2) counts OTHER members whose corridor a candidate
+    shaft passes within p8_pocket_corridor_pad_mm of. A near neighbour is
+    counted; a far member is 0 (so an isolated site's tuple slot degrades to the
+    sparse ordering, §4.6)."""
+    A = _cluster_stub(1, 1.0, 1.0, cfg)
+    B = _cluster_stub(2, 1.3, 1.0, cfg)                 # within pad
+    far = _cluster_stub(3, 50.0, 50.0, cfg)
+    cand0 = phase8._member_candidates(A, cfg)[0]
+    near_cor = {1: phase8._corridor_of(phase8._original_member(A)),
+                2: phase8._corridor_of(phase8._original_member(B))}
+    assert phase8._density_count(1, cand0, near_cor, cfg) == 1
+    far_cor = {1: near_cor[1],
+               3: phase8._corridor_of(phase8._original_member(far))}
+    assert phase8._density_count(1, cand0, far_cor, cfg) == 0
+
+
+# ---- atomic-commit loop (§4.3-4.5) -----------------------------------------
+def test_pocket_convergence_dense_cluster_terminates(cfg):
+    """CONVERGENCE / TERMINATION (§4.5) on a synthetic DENSE cluster: the loop
+    runs <= |pocket| iterations, every member reaches a terminal state
+    (COMMITTED or FALLEN, none left UNRESOLVED), and it halts. The dense 9-stub
+    canopy pocket resolves fully via shortening (all clear the fin)."""
+    geom = ExactSurface(_pocket_mesh())
+    sites = _dense_cluster(cfg)
+    rep = phase8.run_pocket_solver(sites, geom, cfg)
+    assert len(rep.pockets) == 1
+    r = rep.pockets[0]
+    assert r.n_iterations <= len(r.member_ids)          # <= |pocket| commits
+    assert r.n_committed + r.n_fallen == len(r.member_ids)  # all terminal
+    assert r.n_committed == 9 and r.n_fallen == 0        # dense cluster resolves
+    # every committed member is independently legal on the verify gate
+    for mr in r.members.values():
+        wm = mr.committed_cand.member
+        ivw = geom.penetration_intervals(wm["p0"], wm["p1"], wm["r0"], wm["r1"])
+        vdw = verify._embed_scar_verdicts(geom, [wm], [0], {0: ivw}, cfg)
+        assert verify._transit_classify(ivw, wm, vdw.get(0)) == (False, False)
+
+
+def test_pocket_monotone_objective_no_thrash(cfg):
+    """NO-THRASH / MONOTONE OBJECTIVE (§4.5): the UNRESOLVED count strictly
+    DECREASES by exactly one per iteration -- the resolved-count objective is
+    strictly monotone, not merely bounded, so there is no sweep cap and no
+    oscillation. objective_trace is strictly decreasing and has one entry per
+    commit iteration."""
+    geom = ExactSurface(_pocket_mesh())
+    r = phase8.run_pocket_solver(_dense_cluster(cfg), geom, cfg).pockets[0]
+    tr = r.objective_trace
+    assert len(tr) == r.n_iterations
+    assert all(tr[i] > tr[i + 1] for i in range(len(tr) - 1))   # strictly decreasing
+    assert all(tr[i] - tr[i + 1] == 1 for i in range(len(tr) - 1))  # by exactly one
+    assert tr[-1] == 0                                   # fully drained
+
+
+def test_pocket_commit_priority_worst_chord_then_mid(cfg):
+    """Commit priority (§4.3-2): worst-firm-chord DESC, then mid ASC -- a total
+    order. With strictly descending frozen chords by construction, the commit
+    order is exactly the descending-chord order."""
+    geom = ExactSurface(_pocket_mesh())
+    sites = _dense_cluster(cfg, base_mi=100)             # wfc 0.30, 0.299, ... desc by mi
+    r = phase8.run_pocket_solver(sites, geom, cfg).pockets[0]
+    wfc = {s.site_id: s.frozen_worst_chord_mm for s in sites}
+    expected = tuple(sorted(wfc, key=lambda i: (-wfc[i], i)))
+    assert r.commit_order == expected
+
+
+def test_pocket_determinism_bit_identical(cfg):
+    """DETERMINISM (§4.5): no RNG, no wall-clock. Two runs produce bit-identical
+    commit order, dispositions, and committed member geometry -- the bedrock of
+    the 5-run acceptance digest."""
+    geom = ExactSurface(_pocket_mesh())
+    sites = _dense_cluster(cfg)
+    a = phase8.run_pocket_solver(sites, geom, cfg).pockets[0]
+    b = phase8.run_pocket_solver(sites, geom, cfg).pockets[0]
+    assert a.commit_order == b.commit_order
+    assert a.objective_trace == b.objective_trace
+    assert a.invalidations == b.invalidations
+    for mid in a.member_ids:
+        pa = a.members[mid].committed_cand.member["p1"]
+        pb = b.members[mid].committed_cand.member["p1"]
+        assert pa.tobytes() == pb.tobytes()             # bit-identical, not merely close
+
+
+def test_pocket_idempotence_second_run_noop(cfg):
+    """IDEMPOTENCE (§6.10): the solver is a pure function of geometry, so a
+    second run over the same input reproduces the same report exactly -- the
+    no-op-on-already-fixed-geometry gate at the solver level (dispositions and
+    per-member scores identical)."""
+    geom = ExactSurface(_pocket_mesh())
+    sites = _dense_cluster(cfg)
+    r1 = phase8.run_pocket_solver(sites, geom, cfg)
+    r2 = phase8.run_pocket_solver(sites, geom, cfg)
+    assert r1.dispositions == r2.dispositions
+    for mid in r1.dispositions:
+        s1 = r1.pockets[0].members[mid].score
+        s2 = r2.pockets[0].members[mid].score
+        assert s1 == s2
+
+
+# ---- mutual-legality guard + full-dependency invalidation (§4.3-4.4) -------
+def _guard_reject_vertical_when_committed(cand_member, committed, cfg):
+    """A §5-law stand-in: once ANY neighbour is committed, forbid the candidate's
+    vertical (polar-0) shaft -- as if the vertical corridor were now occupied.
+    Forces the neighbour off its lex-min onto a lean."""
+    if committed:
+        n_hat = -np.asarray(cand_member["axis_u"], float)
+        if float(n_hat[2]) > 0.99:
+            return False
+    return True
+
+
+def test_pocket_mutual_guard_pushes_off_lexmin(cfg):
+    """MUTUAL-LEGALITY guard (§4.3-3-ii): a committed neighbour forbids a
+    member's lex-min candidate, so the atomic commit walks legal_sorted to the
+    first candidate that passes the guard -- committing a NON-lex-min candidate
+    rather than illegalising the committed set. solve_pocket is exercised
+    directly (the loop mechanics, below the >=8 detection threshold)."""
+    geom = ExactSurface(_pocket_mesh())
+    A = _cluster_stub(1, 1.0, 1.0, cfg, wfc=0.30)       # commits first (higher chord)
+    B = _cluster_stub(2, 1.5, 1.0, cfg, wfc=0.20)       # neighbour, pushed off vertical
+    r = phase8.solve_pocket([A, B], geom, cfg,
+                            mutual_legal_fn=_guard_reject_vertical_when_committed)
+    assert (1, 2) in r.edges                             # they conflict
+    assert r.members[1].committed_cand.polar_deg == 0.0  # A keeps the lex-min vertical
+    assert r.members[2].status == phase8.PocketStatus.COMMITTED
+    assert r.members[2].committed_cand.polar_deg > 0.0   # B pushed to a lean
+    # soundness (§4.4): the final committed set satisfies the guard
+    assert _guard_reject_vertical_when_committed(
+        r.members[2].committed_cand.member, [r.members[1].committed_cand.member], cfg)
+
+
+def test_pocket_mutual_guard_exhaustion_falls_to_r2(cfg):
+    """When every candidate of a member conflicts with the committed set, it is
+    FALLEN -- it leaves the pocket loop to SM-STUB R2 (§4.3-3), never
+    force-committed illegally. The higher-priority member still commits; the
+    committed set stays mutually legal (soundness §4.4)."""
+    geom = ExactSurface(_pocket_mesh())
+    A = _cluster_stub(1, 1.0, 1.0, cfg, wfc=0.30)
+    B = _cluster_stub(2, 1.5, 1.0, cfg, wfc=0.20)
+
+    def reject_all_once_committed(cand_member, committed, cfg):
+        return not committed                            # any committed neighbour -> reject
+
+    r = phase8.solve_pocket([A, B], geom, cfg, mutual_legal_fn=reject_all_once_committed)
+    assert r.members[1].status == phase8.PocketStatus.COMMITTED
+    assert r.members[2].status == phase8.PocketStatus.FALLEN
+    assert r.members[2].escalate_rung == "R2"           # stub -> R2 (not quarantine)
+    assert r.n_committed == 1 and r.n_fallen == 1
+
+
+def test_pocket_full_dependency_set_invalidation(cfg):
+    """FULL dependency-set invalidation (§4.4, amendment F): when a member
+    commits, EVERY still-UNRESOLVED graph neighbour is marked dirty and
+    re-evaluated -- NOT merely the members whose current best ray overlaps the
+    committed shaft (the rejected candidate-ray-only rule). On the complete
+    conflict graph of a dense cluster, the first commit invalidates ALL other
+    unresolved members."""
+    geom = ExactSurface(_pocket_mesh())
+    sites = _dense_cluster(cfg)                          # complete conflict graph
+    r = phase8.run_pocket_solver(sites, geom, cfg).pockets[0]
+    first_commit, first_dirty = r.invalidations[0]
+    ids = set(r.member_ids)
+    # the first commit's dirty set == ALL other members (they were all UNRESOLVED)
+    assert set(first_dirty) == ids - {first_commit}
+    # each successive commit invalidates exactly the still-UNRESOLVED remainder
+    committed_so_far = {first_commit}
+    for m, dirty in r.invalidations:
+        still_unresolved = ids - committed_so_far - {m}
+        assert set(dirty) == still_unresolved
+        committed_so_far.add(m)
+
+
+def test_pocket_committed_set_mutually_legal_default_guard(cfg):
+    """SOUNDNESS (§4.4) with the DEFAULT geometric guard: at termination no two
+    committed members firm-transit each other (the invariant the mutual guard
+    maintains inductively -- the §6.9 zero-NEW-firm-transit gate enforced locally
+    at each commit). Verified independently against the serialized committed
+    geometry (Codex acceptance addition G)."""
+    geom = ExactSurface(_pocket_mesh())
+    r = phase8.run_pocket_solver(_dense_cluster(cfg), geom, cfg).pockets[0]
+    committed = [mr.committed_cand.member for mr in r.members.values()
+                 if mr.status == phase8.PocketStatus.COMMITTED]
+    for i in range(len(committed)):
+        for j in range(i + 1, len(committed)):
+            assert phase8._default_mutual_legal(committed[i], [committed[j]], cfg)
+
+
+# ---- isolated members (§4.6) -----------------------------------------------
+def test_pocket_isolated_members_use_plain_ladder(cfg):
+    """§4.6: a member in NO pocket component runs the plain per-site R1 ladder
+    with density_penalty 0 (the interaction machinery is pocket-only; sparse
+    sites pay nothing). A lone stub is reported under `isolated`, not `pockets`,
+    and its winning score carries density slot 0."""
+    geom = ExactSurface(_pocket_mesh())
+    lone = _cluster_stub(9001, 0.0, 0.0, cfg)
+    rep = phase8.run_pocket_solver([lone], geom, cfg)
+    assert rep.pockets == []                             # no pocket formed
+    assert 9001 in rep.isolated
+    r = rep.isolated[9001]
+    assert r.winner is not None and r.score[1] == 0      # density slot 0 (sparse)
+    assert rep.dispositions[9001] == "ISOLATED_RESOLVED"
+
+
+def test_pocket_mixed_isolated_and_pocket(cfg):
+    """A dense cluster (a pocket) plus a far-away lone stub (isolated): the
+    solver routes each correctly -- the cluster through the atomic-commit loop,
+    the straggler through the plain ladder -- and the two partitions are
+    disjoint and complete."""
+    geom = ExactSurface(_pocket_mesh())
+    cluster = _dense_cluster(cfg, base_mi=100)
+    lone = _cluster_stub(9001, 45.0, 45.0, cfg)
+    rep = phase8.run_pocket_solver(cluster + [lone], geom, cfg)
+    assert len(rep.pockets) == 1
+    assert set(rep.pockets[0].member_ids) == {s.site_id for s in cluster}
+    assert set(rep.isolated) == {9001}
+    assert len(rep.dispositions) == len(cluster) + 1     # complete partition
+
+
+def test_pocket_solver_batched_not_per_candidate(cfg, monkeypatch):
+    """BATCH-FIRST (§7): the seed and every dirty re-evaluation cross the batched
+    kernel boundary (`verify._batch_axis_intervals`) ONCE per (ray-kind x
+    eval-round) -- never a per-candidate scalar probe. Pinned by spying on that
+    boundary: the number of batched interval calls is bounded by (1 seed +
+    <=|pocket| dirty re-eval rounds) x ray-kinds, FAR below the ~675
+    (9 members x <=75 candidates) a per-candidate loop would issue."""
+    geom = ExactSurface(_pocket_mesh())
+    sites = _dense_cluster(cfg)                          # all stubs -> one ray-kind
+    calls = {"n": 0}
+    orig = verify._batch_axis_intervals
+
+    def counting(*a, **k):
+        calls["n"] += 1
+        return orig(*a, **k)
+
+    monkeypatch.setattr(verify, "_batch_axis_intervals", counting)
+    phase8.run_pocket_solver(sites, geom, cfg)
+    # 1 seed + at most |pocket| dirty re-eval rounds (one ray-kind: all stubs),
+    # each a single batched interval call -- nowhere near one-per-candidate.
+    assert calls["n"] <= 1 + len(sites)
