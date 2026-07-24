@@ -245,7 +245,11 @@ all-crossings-`< 0.08`).
 ## Evidence
 
 docs/artifacts/audit-2026-07/acceptance-run-2026-07-23/ (census_core.py,
-census_run.py, p11_crossexam.py, validate_r4_embed_inset.py, results/),
+census_run.py, p11_crossexam.py [refreshed to the ratified predicate 2026-07-24;
+the retired h=2.0 CD+PB arc-inset version and validate_r4_embed_inset.py are
+tombstoned in RETIRED-TOOLS.md], phase8_relocation_input.json,
+results/p11_regrade_ratified.json, RETIRED-TOOLS.md; the P11 ruling-1A fixture is
+scripts/tests/fixtures_p11.json, guarded by scripts/tests/test_p11_fixture.py),
 panel area analysis (853-member run1 forest, scratchpad
 panel_area_analysis.py), docs/artifacts/audit-2026-07/
 {physics_contacts_tips.md, resin_sunlu.md, TREANT-V4-PRINT-AUDIT.md},
