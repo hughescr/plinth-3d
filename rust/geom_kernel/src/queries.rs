@@ -320,8 +320,7 @@ impl NativeSurface {
         let mut fs: Vec<i64> = Vec::new();
         let mut group_kept = hits[0].0;
         let mut group_min_face = hits[0].1;
-        for k in 1..hits.len() {
-            let (t, f) = hits[k];
+        for &(t, f) in hits.iter().skip(1) {
             if t - group_kept > dt {
                 // close current group
                 ts.push(group_kept);
@@ -455,6 +454,16 @@ impl NativeSurface {
 
     /// One segment clearance. Tier-1 open-space branch is NOT reproduced
     /// (Amendment A1): always exact segment-to-surface clearance.
+    // The 7-argument geometry-query signature (endpoints, radii, standoff,
+    // insets) is the inherent shape of this API, mirrored 1:1 by
+    // `segment_clearance`'s own batched signature just below and by the
+    // independent verify.py/census callers this kernel serves (SPEC-EMBED-
+    // POLICY, SCAR-AREA-CAP) -- bundling them into a struct would just move
+    // the same fields one level of indirection away with no clarity gain,
+    // and every field is read at every call site. Not a candidate for the
+    // batch-first hot-path rule either: this is the per-item primitive the
+    // BATCHED caller already amortizes over (see `segment_clearance` below).
+    #[allow(clippy::too_many_arguments)]
     fn seg_clear_one(
         &self,
         p0: V3,
@@ -490,6 +499,12 @@ impl NativeSurface {
         (clr, best_pt)
     }
 
+    // Same rationale as `seg_clear_one` immediately above: this is that
+    // primitive's batched (SoA) entry point, one argument per per-member
+    // input array plus the shared `standoff` -- the PyO3 boundary's own
+    // shape (verify.py's `_batch_axis_intervals` calls this signature
+    // directly), not a candidate for bundling.
+    #[allow(clippy::too_many_arguments)]
     pub fn segment_clearance(
         &self,
         p0s: &[V3],
@@ -521,6 +536,12 @@ impl NativeSurface {
     }
 
     // ---- penetration intervals -------------------------------------------
+    // Same rationale as `seg_clear_one` above: the per-member primitive
+    // behind the batched `penetration_intervals`/`penetration_intervals_
+    // batch` PyO3 entry points verify.py's `_batch_axis_intervals` calls
+    // (SPEC-EMBED-POLICY rule-4 transit detection) -- every argument is the
+    // geometry + sampling config a single interval extraction needs.
+    #[allow(clippy::too_many_arguments)]
     fn pen_intervals_one(
         &self,
         p0: V3,

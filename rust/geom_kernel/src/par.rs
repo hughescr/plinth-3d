@@ -12,9 +12,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 // A Vec (not a HashMap — sec 4.2 / R6) of (k, pool); linear scan over the few
 // distinct thread counts a process ever uses.
-static POOLS: OnceLock<Mutex<Vec<(usize, Arc<ThreadPool>)>>> = OnceLock::new();
+type PoolList = Mutex<Vec<(usize, Arc<ThreadPool>)>>;
+static POOLS: OnceLock<PoolList> = OnceLock::new();
 
-fn pools() -> &'static Mutex<Vec<(usize, Arc<ThreadPool>)>> {
+fn pools() -> &'static PoolList {
     POOLS.get_or_init(|| Mutex::new(Vec::new()))
 }
 

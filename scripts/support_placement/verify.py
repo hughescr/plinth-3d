@@ -126,7 +126,7 @@ def _tip_iv_index(ivs, ray_seg, embed, tol=TOL_MM):
     return None
 
 
-def _transit_classify(intervals, m, verdict_legal):
+def _transit_classify(intervals, m, verdict_legal, chords_out=None):
     """SPEC-EMBED-POLICY rule 4 (through-transit) with the PRINT-FLOOR amendment
     (OWNER RATIFIED 2026-07-24). Classifies a member's inside-the-solid runs and
     returns `(nonexempt, moot)`:
@@ -163,7 +163,16 @@ def _transit_classify(intervals, m, verdict_legal):
     0.05mm tolerance for a foot graze reaching the designed embed end), matching
     the census's per-ray tip_iv_index. `verdict_legal` is the member's SINGLE
     axis-derived SCAR-AREA-CAP verdict, applied to exempt the tip interval on any
-    ray (None => no exemption)."""
+    ray (None => no exemption).
+
+    `chords_out` (amendment G / SPEC-P8-RELOCATE.md sec 5.3 Layer 3, sec 6 item
+    3): if a list is passed, every COUNTED rule-4 crossing chord (mm, raw float
+    -- both the firm ones that set `nonexempt` and the moot ones below the
+    PRINT-FLOOR) is appended to it, in per-ray then per-interval order. Purely
+    additive reporting for the cross-implementation micron-canonical equality
+    check (`chord_canon.chord_parity_report`); it never influences the
+    nonexempt/moot verdict itself -- the classification above is computed
+    first, on raw floats, exactly as before this parameter existed."""
     if not intervals:
         return False, False
     embed = m.get("embed_end")
@@ -189,6 +198,8 @@ def _transit_classify(intervals, m, verdict_legal):
             if chord <= MIN_ILLEGAL_LEN_MM:
                 continue  # sub-detection sliver, not an illegal crossing
             has_illegal = True
+            if chords_out is not None:
+                chords_out.append(float(chord))
             # PRINT-FLOOR: a rule-4 unanchored transit with chord < floor is
             # moot; a SCAR-illegal tip interval (i == tip_idx, verdict not legal)
             # is a rules-1-3 failure, never moot-eligible, always firm.
@@ -337,7 +348,7 @@ def _embed_scar_verdicts(geom, members, mis, ivmap, cfg):
     return verdicts
 
 
-def _clearance_report_exact(members, cfg, geom, moot_out=None):
+def _clearance_report_exact(members, cfg, geom, moot_out=None, chords_out=None):
     """Independent EXACT clearance + embed/transit re-check (SPEC-V5-GEOM
     sec 2.2, SPEC-EMBED-POLICY rule 4). Deliberately NOT sharing tree.Forest's
     exact helpers -- the independence covenant (a builder bug that mis-certifies
@@ -373,7 +384,24 @@ def _clearance_report_exact(members, cfg, geom, moot_out=None):
        check false-positives); their legality is entirely the rule-4 test.
 
     Append order is deterministic: stub transit violations in member order, then
-    non-stub violations in member order."""
+    non-stub violations in member order.
+
+    `source` (amendment G, SPEC-P8-RELOCATE.md sec 6 item 9 zero-NEW-firm-
+    transit gate): every entry in the returned hard-gate list AND in
+    `moot_out` carries `source` = "transit" (a rule-4/SCAR-AREA-CAP violation)
+    or "distance" (a plain swept-capsule collision) -- the P8 acceptance
+    harness needs to distinguish the two failure modes to check specifically
+    that re-aiming introduced no NEW firm TRANSIT (a distance collision is a
+    different, already-covered failure class). Mirrors the existing
+    `ball_breach_report` source="ball"/"endcap" convention.
+
+    `chords_out` (amendment G, sec 5.3 Layer 3 / sec 6 item 3): if a dict is
+    passed, every member with at least one counted rule-4 crossing (firm or
+    moot) gets an entry `{member_idx: [chord_mm, ...]}` -- raw, uncanonicalized
+    floats, one per crossing, in the same per-ray/per-interval order
+    `_transit_classify` counts them. Feeds `chord_canon.chord_parity_report`
+    for the engine/census micron-canonical equality check; never read by the
+    classification itself."""
     out = []
 
     def _len(mi):
@@ -424,26 +452,35 @@ def _clearance_report_exact(members, cfg, geom, moot_out=None):
     # PRINT_FLOOR_CHORD_MM -> `moot_out`, report-only, never gates). A distance
     # collision (worst < 0) is a hard violation regardless of the transit class.
     for mi in stub_iv_mi:
-        nonexempt, moot = _transit_classify(ivmap[mi], members[mi], verdicts.get(mi))
+        chords = [] if chords_out is not None else None
+        nonexempt, moot = _transit_classify(ivmap[mi], members[mi], verdicts.get(mi),
+                                            chords_out=chords)
+        if chords:
+            chords_out[mi] = chords
         if nonexempt:
             out.append(dict(member_idx=mi, kind="stub", min_clearance_mm=0.0,
-                            at_point=None))
+                            at_point=None, source="transit"))
         elif moot and moot_out is not None:
-            moot_out.append(dict(member_idx=mi, kind="stub"))
+            moot_out.append(dict(member_idx=mi, kind="stub", source="transit"))
     for mi in seg_mi:
         m = members[mi]
         worst, ap = clr_by_mi.get(mi, (0.0, None))
         if worst < 0:
             out.append(dict(member_idx=mi, kind=m["kind"], min_clearance_mm=worst,
                             at_point=(ap.tolist() if ap is not None
-                                      and np.all(np.isfinite(ap)) else None)))
+                                      and np.all(np.isfinite(ap)) else None),
+                            source="distance"))
         elif mi in ivmap:
-            nonexempt, moot = _transit_classify(ivmap[mi], m, verdicts.get(mi))
+            chords = [] if chords_out is not None else None
+            nonexempt, moot = _transit_classify(ivmap[mi], m, verdicts.get(mi),
+                                                chords_out=chords)
+            if chords:
+                chords_out[mi] = chords
             if nonexempt:
                 out.append(dict(member_idx=mi, kind=m["kind"], min_clearance_mm=worst,
-                                at_point=None))
+                                at_point=None, source="transit"))
             elif moot and moot_out is not None:
-                moot_out.append(dict(member_idx=mi, kind=m["kind"]))
+                moot_out.append(dict(member_idx=mi, kind=m["kind"], source="transit"))
     return out
 
 
@@ -499,7 +536,7 @@ def ball_breach_report(geom, members, balls, cfg, eps_mm=0.05):
 
 
 def clearance_report(mesh, members, cfg, surface_tree=None, geom=None,
-                     moot_transit_out=None):
+                     moot_transit_out=None, transit_chords_out=None):
     """v4/v5: independent full-envelope clearance re-check over the FINAL
     member list. Deliberately does not reuse tree.Forest.revalidate's
     certificate bookkeeping (a builder bug that mis-certifies a member
@@ -550,6 +587,12 @@ def clearance_report(mesh, members, cfg, surface_tree=None, geom=None,
     (members whose every unanchored crossing has a chord < PRINT_FLOOR_CHORD_MM)
     to it -- never part of the returned hard-gate list. The sampled/legacy path
     has no rule-4 transit concept and leaves it untouched (empty).
+
+    `transit_chords_out` (amendment G, sec 5.3 Layer 3 / sec 6 item 3): if a
+    dict is passed, the exact path fills it `{member_idx: [chord_mm, ...]}` for
+    every member with >=1 counted rule-4 crossing (see
+    `_clearance_report_exact`'s docstring). The sampled/legacy path leaves it
+    untouched (empty), same fallback contract as `moot_transit_out`.
     """
     members = joints.collect_members(members)
     out = []
@@ -559,7 +602,8 @@ def clearance_report(mesh, members, cfg, surface_tree=None, geom=None,
     # independent exact re-check; a plain cKDTree (tests/legacy) keeps the
     # sampled path below.
     if geom is not None and hasattr(geom, "segment_clearance"):
-        return _clearance_report_exact(members, cfg, geom, moot_out=moot_transit_out)
+        return _clearance_report_exact(members, cfg, geom, moot_out=moot_transit_out,
+                                       chords_out=transit_chords_out)
     pitch_bound_mm = (routing.surface_tree_pitch_bound_mm(
         surface_tree, percentile=cfg.surface_pitch_bound_percentile)
         if surface_tree is not None else 0.0)
@@ -946,15 +990,26 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
     unanchored crossing's chord < PRINT_FLOOR_CHORD_MM = 0.08mm -- foliage
     knife-edges that cannot print as coherent material). Always surfaced,
     never gates `ok`; the hard clearance gate counts only the non-exempt
-    population."""
+    population.
+
+    `transit_chords_mm` (amendment G, SPEC-P8-RELOCATE.md sec 5.3 Layer 3 /
+    sec 6 item 3): report-only `{member_idx: [chord_mm, ...]}` for every
+    member with >=1 counted rule-4 crossing (firm or moot), raw uncanonicalized
+    floats. Never gates `ok`; it exists so a caller can feed
+    `chord_canon.chord_parity_report` for the engine/census micron-canonical
+    cross-implementation equality check without re-deriving intervals."""
     coverage = coverage_report(mesh, islands, contacts, cfg)
     # PRINT-FLOOR amendment (OWNER RATIFIED 2026-07-24): clearance_report fills
     # `moot_transit_members` with the report-only moot rule-4 transits (all
     # crossings' chords < PRINT_FLOOR_CHORD_MM); the returned `clearance` list is
-    # the non-exempt hard-gate population only.
+    # the non-exempt hard-gate population only. `transit_chords_mm` (amendment
+    # G) rides the same call, cost-free beyond a couple of list appends already
+    # in the classify loop.
     moot_transit_members = []
+    transit_chords_mm = {}
     clearance = clearance_report(mesh, members, cfg, surface_tree=surface_tree,
-                                 geom=geom, moot_transit_out=moot_transit_members)
+                                 geom=geom, moot_transit_out=moot_transit_members,
+                                 transit_chords_out=transit_chords_mm)
     # R3 (ball-gate semantics, 2026-07-23): ball_breach_report synthesizes
     # and tests TWO categories against geom.sphere_breach -- actual joint
     # balls (source="ball") AND synthesized embedded-end-cap spheres
@@ -1040,6 +1095,7 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
         uncovered_islands=uncovered,
         clearance_violations=clearance,
         moot_transit_members=moot_transit_members,
+        transit_chords_mm=transit_chords_mm,
         ball_breach_violations=ball_breach_violations,
         endcap_breach_diagnostic=endcap_breach_diagnostic,
         load_violations=load,

@@ -8,6 +8,7 @@
 //!  * No wall-clock reads in the kernel (t_build_ms is wrapper-measured).
 //!  * Mutable state is confined: the exterior-mask OnceLock cache and the
 //!    result-inert telemetry atomics — nothing else.
+//!
 //! Violating any of these breaks bit-invariance across thread counts.
 //!
 //! Ownership (Amendment A16): every input batch is COPIED into Rust-owned

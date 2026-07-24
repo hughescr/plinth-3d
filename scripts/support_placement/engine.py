@@ -356,7 +356,7 @@ def run(mesh, cfg, log=None):
             tip_r_mm=np.array([]), forest=empty_forest, members=[], balls=[],
             unrouted=[], minima=minima, plate_z=plate_z,
             verify=dict(ok=True, uncovered_islands=[], clearance_violations=[],
-                        moot_transit_members=[],
+                        moot_transit_members=[], transit_chords_mm={},
                         ball_breach_violations=[], endcap_breach_diagnostic=[],
                         load_violations=[], unsupported_minima=[],
                         connectivity_violations=[], printability_violations=[],

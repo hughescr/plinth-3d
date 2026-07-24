@@ -31,7 +31,7 @@ impl Mesh {
         areas: &[f64],
         bounds: &[f64],
     ) -> Result<Mesh, String> {
-        if tris.len() % 9 != 0 {
+        if !tris.len().is_multiple_of(9) {
             return Err(format!("tris length {} not a multiple of 9", tris.len()));
         }
         let nfaces = tris.len() / 9;
