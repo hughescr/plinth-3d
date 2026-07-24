@@ -1,3 +1,5 @@
+import dataclasses
+
 import numpy as np
 from support_placement import perception
 
@@ -196,3 +198,153 @@ def test_delicacy_query_matches_precomputed_weights(box_mesh, cfg):
     points, normals, w, query = perception.delicacy_field(box_mesh, cfg, n_samples=2000)
     got = query(points[:5])
     assert np.allclose(got, w[:5])
+
+
+# =================================================================
+# Filter (B) -- island-birth + ADEQUACY (Craig's refinement ruling,
+# 2026-07-24). Nothing exercised minima_require_island_birth or
+# _filter_minima_to_island_births before these, which is exactly why
+# two special-case branches drifted from the stated predicate.
+# =================================================================
+def _raw_minima(mesh, cfg):
+    """The candidate set filter (B) is handed: local_z_minima with BOTH
+    optional filters off."""
+    c = dataclasses.replace(cfg, minima_require_island_birth=False,
+                            minima_drop_interior_faces=False)
+    return perception.local_z_minima(mesh, c)
+
+
+def _unrefined_filter_B(mesh, minima, births, cfg):
+    """The UNREFINED filter (B) exactly as it behaved before the adequacy
+    refinement: a minimum survives iff it coincides with a real island
+    birth, and NOTHING survives when there are no births at all.
+
+    Expressed here as the refined filter with a constant-True adequacy
+    predicate -- which is precisely what threshold 0.0 must reduce to. Any
+    branch that decides adequacy without consulting the threshold (the two
+    that were found and removed: the empty-births early return, and
+    treating an unmeasurable section as inadequate) makes the refined
+    filter at 0.0 disagree with this oracle."""
+    from unittest import mock
+    with mock.patch.object(
+            perception, "_minima_support_adequate",
+            lambda mesh, ms, cfg: np.ones(len(ms), dtype=bool)):
+        return perception._filter_minima_to_island_births(
+            mesh, minima, births, cfg)
+
+
+def _probe(mesh, xyz):
+    """A single synthetic filter-(B) candidate at xyz, shaped like the
+    dicts local_z_minima emits."""
+    p = np.asarray(xyz, dtype=float)
+    return [dict(position=p.copy(), z=float(p[2]),
+                 normal=np.array([0.0, 0.0, -1.0]),
+                 region_pts=p.reshape(1, 3).copy())]
+
+
+def test_filter_B_defaults_are_on_and_pinned(cfg):
+    """Both halves of filter (B) ship ON, at one tip footprint."""
+    assert cfg.minima_require_island_birth is True
+    assert cfg.minima_support_area_tips == 1.0
+    assert abs(np.pi * cfg.tip_r_min_mm ** 2 - 0.12566370614359174) < 1e-12
+
+
+def test_filter_B_threshold_zero_reproduces_unrefined_filter(table_mesh, cfg):
+    """0.0 == the old filter, on a REAL mesh where it actually drops
+    something (5 candidates, 4 births, 1 dropped)."""
+    raw = _raw_minima(table_mesh, cfg)
+    births = perception.island_births(table_mesh, cfg)
+    assert len(raw) == 5 and len(births) == 4
+    c0 = dataclasses.replace(cfg, minima_support_area_tips=0.0)
+    kept = perception._filter_minima_to_island_births(
+        table_mesh, raw, births, c0)
+    old = _unrefined_filter_B(table_mesh, raw, births, c0)
+    assert len(kept) == 4, len(kept)
+    assert [m["z"] for m in kept] == [m["z"] for m in old]
+    assert len(raw) - len(kept) == 1, "must actually drop one, else vacuous"
+
+
+def test_filter_B_threshold_zero_reproduces_unrefined_filter_with_no_births(
+        table_mesh, cfg):
+    """The degenerate empty-births case the removed early return got wrong:
+    at 0.0 every candidate is a non-birth AND adequate, so all of them go --
+    the old filter's `return []`."""
+    raw = _raw_minima(table_mesh, cfg)
+    assert len(raw) == 5, "fixture must supply candidates, else vacuous"
+    c0 = dataclasses.replace(cfg, minima_support_area_tips=0.0)
+    kept = perception._filter_minima_to_island_births(table_mesh, raw, [], c0)
+    old = _unrefined_filter_B(table_mesh, raw, [], c0)
+    assert kept == [] and old == []
+
+
+def test_filter_B_no_births_is_not_a_free_pass_at_the_default(box_mesh, cfg):
+    """Empty births must not become a blanket rescue either: a candidate
+    standing on 100 mm2 of solid is adequately carried and is dropped at the
+    default just as it is at 0.0."""
+    mid = _probe(box_mesh, [0.0, 0.0, 5.0])
+    assert perception._minima_support_adequate(box_mesh, mid, cfg).tolist() \
+        == [True]
+    assert perception._filter_minima_to_island_births(
+        box_mesh, mid, [], cfg) == []
+    c0 = dataclasses.replace(cfg, minima_support_area_tips=0.0)
+    assert perception._filter_minima_to_island_births(
+        box_mesh, mid, [], c0) == []
+
+
+def test_filter_B_default_keeps_candidate_on_sub_tip_footprint_sliver(cfg):
+    """The defect the refinement exists to fix: a candidate resting on a
+    0.0625 mm2 post -- half a support tip's own 0.1257 mm2 footprint -- is
+    NOT carried, so the default keeps it while the old filter dropped it."""
+    from support_placement import mesh_io
+    post = mesh_io.make_box(size=(0.25, 0.25, 6.0))
+    cand = _probe(post, [0.0, 0.0, 3.0])
+    # brackets the measured carried area between 0.4x and 0.6x a tip
+    # footprint (0.0503-0.0754 mm2), i.e. genuinely sub-footprint.
+    for tips, expect in [(0.4, True), (0.6, False), (1.0, False), (0.0, True)]:
+        c = dataclasses.replace(cfg, minima_support_area_tips=tips)
+        assert perception._minima_support_adequate(
+            post, cand, c).tolist() == [expect], tips
+    assert len(perception._filter_minima_to_island_births(
+        post, cand, [], cfg)) == 1, "sliver-borne candidate must be KEPT"
+    c0 = dataclasses.replace(cfg, minima_support_area_tips=0.0)
+    assert perception._filter_minima_to_island_births(
+        post, cand, [], c0) == [], "old behaviour at 0.0: dropped"
+
+
+def test_filter_B_unmeasurable_section_kept_at_default_dropped_at_zero(
+        box_mesh, cfg):
+    """A probe one layer below the model's own floor has no section at all.
+    That yields carried area 0.0 and the ONE comparison governs: kept at the
+    default (inconclusive -> keep demanding support), dropped at 0.0 (the
+    old filter's unconditional drop)."""
+    zmin = float(box_mesh.bounds[0][2])
+    cand = _probe(box_mesh, [0.0, 0.0, zmin])
+    assert box_mesh.section(plane_origin=[0, 0, zmin - cfg.layer_height_mm],
+                            plane_normal=[0, 0, 1]) is None, \
+        "fixture must genuinely have no section there, else vacuous"
+    assert perception._minima_support_adequate(
+        box_mesh, cand, cfg).tolist() == [False]
+    assert len(perception._filter_minima_to_island_births(
+        box_mesh, cand, [], cfg)) == 1
+    c0 = dataclasses.replace(cfg, minima_support_area_tips=0.0)
+    assert perception._minima_support_adequate(
+        box_mesh, cand, c0).tolist() == [True]
+    assert perception._filter_minima_to_island_births(
+        box_mesh, cand, [], c0) == []
+
+
+def test_filter_B_default_rescues_sites_the_unrefined_filter_dropped(
+        table_mesh, toed_slab_mesh, cfg):
+    """End-to-end through local_z_minima on two real fixtures: the refined
+    default keeps strictly more than the unrefined filter, and the rescued
+    sites are exactly the non-births that are not adequately carried."""
+    for mesh, n_raw, n_old in [(table_mesh, 5, 4), (toed_slab_mesh, 3, 2)]:
+        raw = _raw_minima(mesh, cfg)
+        births = perception.island_births(mesh, cfg)
+        assert len(raw) == n_raw
+        c0 = dataclasses.replace(cfg, minima_support_area_tips=0.0)
+        old = perception._filter_minima_to_island_births(mesh, raw, births, c0)
+        new = perception._filter_minima_to_island_births(mesh, raw, births, cfg)
+        assert len(old) == n_old
+        assert len(new) == n_raw
+        assert {id(m) for m in old} < {id(m) for m in new}

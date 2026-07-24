@@ -256,6 +256,17 @@ def local_z_minima(mesh, cfg, births=None, geom=None):
     birth plane sits at the first slice ABOVE the tip vertex, so the offset
     is inherently sub-layer; measured max on morel/treant is ~1.1 layers,
     and the default 2.0 keeps a full layer of headroom).
+
+    ADEQUACY REFINEMENT (Craig's ruling, same day, after the first version
+    of (B) was held back). "Not an island birth" establishes only that solid
+    EXISTS beneath the candidate, which is not the owner's predicate -- the
+    material must be SUPPORTIVE. A candidate standing on a 0.0076 mm2
+    whisker is standing on less cross-section than the tip that would land
+    on it. So (B) now drops a minimum only when it is BOTH not-a-birth AND
+    adequately carried, where adequacy is measured one FULL layer below the
+    candidate (a half-layer probe reads the candidate's own slice and gives
+    the wrong areas). See _minima_support_adequate for the threshold and
+    the sensitivity sweep behind it.
     """
     import trimesh
     mw = trimesh.Trimesh(vertices=np.asarray(mesh.vertices).copy(),
@@ -328,7 +339,7 @@ def local_z_minima(mesh, cfg, births=None, geom=None):
     if getattr(cfg, "minima_require_island_birth", False):
         if births is None:
             births = island_births(mesh, cfg)
-        out = _filter_minima_to_island_births(out, births, cfg)
+        out = _filter_minima_to_island_births(mesh, out, births, cfg)
     return out
 
 
@@ -361,7 +372,89 @@ def _filter_minima_to_exterior_faces(mesh, minima, geom):
     return [m for m, k in zip(minima, keep) if k]
 
 
-def _filter_minima_to_island_births(minima, births, cfg):
+def _minima_support_adequate(mesh, minima, cfg):
+    """ADEQUACY half of filter (B) (Craig's ruling, 2026-07-24): the owner's
+    rule is that a candidate is fine if it connects through solid to material
+    below -- "it just needs to be SUPPORTIVE". Testing that solid merely
+    EXISTS beneath is not the same test. A candidate standing on a 0.0076 mm2
+    whisker is standing on far less than a support tip's own footprint; that
+    material will deflect or snap, and calling it support is wrong.
+
+    So: adequate iff the candidate stands strictly INSIDE a solid component
+    at the layer DIRECTLY BELOW its own, and that component's area is at
+    least cfg.minima_support_area_tips * the tip footprint (pi *
+    cfg.tip_r_min_mm**2 -- the smallest tip this engine ever builds, so the
+    threshold never assumes a bigger tip than is guaranteed to exist).
+
+    Returns a bool array, one entry per minimum.
+
+    Threshold chosen from the measured distribution, not by taste (see the
+    sweep in the branch notes): on the treant the supporting areas are
+    sharply bimodal -- median 5.24 mm2 against sliver cases of 0.008-0.097
+    mm2 -- and the tip footprint (0.1257 mm2 at tip_r_min_mm=0.2) falls in
+    the empty gap between them. The count of sites rescued moves by only 5
+    across the whole 1x-8x range (50 -> 55), so the constant is in a flat
+    region rather than balanced on an edge; it climbs steeply only past 16x.
+    Inside-depth was evaluated as an alternative and REJECTED as a threshold:
+    it has no flat region at all (45 / 59 / 75 / 98 rescued at 0.0 / 0.01 /
+    0.02 / 0.05 mm), so any constant there would be arbitrary.
+
+    NO SPECIAL CASES (Craig's ruling on the first draft of this function):
+    a missing or unmeasurable section, and a section in which the candidate
+    stands inside no component at all, both yield a carried area of 0.0, and
+    the one comparison `area >= threshold` governs every case. That single
+    law gives the right answer at both ends without a branch:
+      * at minima_support_area_tips = 0.0 the threshold is 0.0, `0.0 >= 0.0`
+        is True, so every non-birth is adequate and dropped -- EXACTLY the
+        unrefined filter (B), including where a section is unmeasurable and
+        where there are no births at all;
+      * at the 1.0 default an unmeasurable or empty section is
+        `0.0 >= 0.1257` == False, so the candidate is KEPT. Those are the
+        sites whose inside/outside call is at slice-discretisation scale
+        (the minimum's vertex lies exactly on the surface), so the honest
+        label is inconclusive and the safe action is to keep demanding
+        support rather than to delete it. The 18 treant sites that stand
+        outside every component are kept by construction for that reason.
+    A branch deciding adequacy instead of the threshold is how a predicate
+    drifts from its stated semantics, so there is none.
+
+    BATCHED: sites are sorted by probe height and sliced with
+    section_multiplane in bounded chunks -- the same machinery and the same
+    memory discipline as island_births. No per-candidate section() call."""
+    n = len(minima)
+    if n == 0:
+        return np.zeros(0, dtype=bool)
+    h = float(cfg.layer_height_mm)
+    tip_area = np.pi * float(cfg.tip_r_min_mm) ** 2
+    limit = float(getattr(cfg, "minima_support_area_tips", 1.0)) * tip_area
+
+    pos = np.array([np.asarray(m["position"], float) for m in minima])
+    heights = pos[:, 2] - h
+    order = np.argsort(heights, kind="stable")
+    ok = np.zeros(n, dtype=bool)
+    CHUNK = 64
+    for s in range(0, n, CHUNK):
+        idx = order[s:s + CHUNK]
+        secs = mesh.section_multiplane(
+            plane_origin=[0, 0, 0], plane_normal=[0, 0, 1],
+            heights=[float(heights[i]) for i in idx])
+        for i, p2 in zip(idx, secs):
+            px, py = float(pos[i][0]), float(pos[i][1])
+            # Carried area = the largest solid component containing the
+            # candidate, or 0.0 when there is none / the section could not
+            # be measured. No branch decides adequacy; the comparison does.
+            best = 0.0
+            for loop in (p2.discrete if p2 is not None else ()):
+                a = _signed_area_xy(loop)
+                if a <= best:      # hole (negative winding), or no better
+                    continue
+                if point_in_polygon_xy(px, py, loop):
+                    best = a
+            ok[i] = best >= limit
+    return ok
+
+
+def _filter_minima_to_island_births(mesh, minima, births, cfg):
     """Keep only the minima that coincide with a real slice-based island
     birth (see local_z_minima's docstring for the ruling this implements).
     A minimum that does NOT coincide with one is standing on a layer-k
@@ -376,53 +469,67 @@ def _filter_minima_to_island_births(minima, births, cfg):
     point. No per-candidate slicing, no per-candidate kernel call."""
     if not minima:
         return []
-    if not births:
-        return []
-    z_tol = float(getattr(cfg, "minima_birth_match_layers", 2.0)) \
-        * float(cfg.layer_height_mm)
-    reach = ISLAND_ATTACH_REACH_MM
+    # No births at all is NOT a special case: it simply means no minimum is
+    # a birth. Everything then falls through to the adequacy comparison,
+    # which reproduces the unrefined filter's `return []` exactly at
+    # threshold 0.0 and keeps uncarried candidates at the default.
+    is_birth = np.zeros(len(minima), dtype=bool)
+    if births:
+        z_tol = float(getattr(cfg, "minima_birth_match_layers", 2.0)) \
+            * float(cfg.layer_height_mm)
+        reach = ISLAND_ATTACH_REACH_MM
 
-    bz = np.array([b["z"] for b in births], dtype=float)
-    order = np.argsort(bz, kind="stable")
-    bz_s = bz[order]
-    loops = [births[i]["loop"] for i in order]
-    bbox = np.array([[l[:, 0].min(), l[:, 0].max(),
-                      l[:, 1].min(), l[:, 1].max()] for l in loops], dtype=float)
+        bz = np.array([b["z"] for b in births], dtype=float)
+        order = np.argsort(bz, kind="stable")
+        bz_s = bz[order]
+        loops = [births[i]["loop"] for i in order]
+        bbox = np.array([[l[:, 0].min(), l[:, 0].max(),
+                          l[:, 1].min(), l[:, 1].max()]
+                         for l in loops], dtype=float)
 
-    kept = []
-    for m in minima:
-        pz = float(m["z"])
-        lo = int(np.searchsorted(bz_s, pz - z_tol, side="left"))
-        hi = int(np.searchsorted(bz_s, pz + z_tol, side="right"))
-        if hi <= lo:
-            continue
-        # The minimum's own vertex plus its birth region: the region is the
-        # plateau/patch that is born together, so a birth footprint touching
-        # ANY of it is the same birth event. Capped so a large plateau can
-        # not turn this into an unbounded polygon-test loop.
-        pts = np.asarray(m["region_pts"], float)[:, :2]
-        if len(pts) > 64:
-            pts = pts[np.linspace(0, len(pts) - 1, 64).astype(np.int64)]
-        pts = np.vstack([np.asarray(m["position"], float)[:2][None, :], pts])
+        for mi, m in enumerate(minima):
+            pz = float(m["z"])
+            lo = int(np.searchsorted(bz_s, pz - z_tol, side="left"))
+            hi = int(np.searchsorted(bz_s, pz + z_tol, side="right"))
+            if hi <= lo:
+                continue
+            # The minimum's own vertex plus its birth region: the region is
+            # the plateau/patch that is born together, so a birth footprint
+            # touching ANY of it is the same birth event. Capped so a large
+            # plateau can not turn this into an unbounded polygon-test loop.
+            pts = np.asarray(m["region_pts"], float)[:, :2]
+            if len(pts) > 64:
+                pts = pts[np.linspace(0, len(pts) - 1, 64).astype(np.int64)]
+            pts = np.vstack([np.asarray(m["position"], float)[:2][None, :], pts])
 
-        bb = bbox[lo:hi]
-        # vectorized bbox reject: (n_pts, n_births_in_window)
-        inx = (pts[:, 0][:, None] >= bb[:, 0][None, :] - reach) & \
-              (pts[:, 0][:, None] <= bb[:, 1][None, :] + reach)
-        iny = (pts[:, 1][:, None] >= bb[:, 2][None, :] - reach) & \
-              (pts[:, 1][:, None] <= bb[:, 3][None, :] + reach)
-        cand = np.nonzero((inx & iny).any(axis=0))[0]
-        hit = False
-        for k in cand:
-            loop = loops[lo + int(k)]
-            for (px, py) in pts:
-                ok, _ = island_birth_xy_ok(float(px), float(py), loop, reach)
-                if ok:
-                    hit = True
+            bb = bbox[lo:hi]
+            # vectorized bbox reject: (n_pts, n_births_in_window)
+            inx = (pts[:, 0][:, None] >= bb[:, 0][None, :] - reach) & \
+                  (pts[:, 0][:, None] <= bb[:, 1][None, :] + reach)
+            iny = (pts[:, 1][:, None] >= bb[:, 2][None, :] - reach) & \
+                  (pts[:, 1][:, None] <= bb[:, 3][None, :] + reach)
+            cand = np.nonzero((inx & iny).any(axis=0))[0]
+            hit = False
+            for k in cand:
+                loop = loops[lo + int(k)]
+                for (px, py) in pts:
+                    ok, _ = island_birth_xy_ok(float(px), float(py), loop, reach)
+                    if ok:
+                        hit = True
+                        break
+                if hit:
                     break
-            if hit:
-                break
-        if hit:
+            is_birth[mi] = hit
+
+    # A minimum survives if it is a real island birth OR if the material it
+    # would otherwise be resting on is not actually supportive. Only a
+    # candidate that is BOTH not-a-birth AND adequately carried gets dropped.
+    kept = []
+    suspects = [m for m, b in zip(minima, is_birth) if not b]
+    adequate = _minima_support_adequate(mesh, suspects, cfg)
+    ok_iter = iter(adequate)
+    for m, b in zip(minima, is_birth):
+        if b or not next(ok_iter):
             kept.append(m)
     return kept
 

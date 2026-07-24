@@ -373,16 +373,20 @@ class SupportConfig:
     # surface-only behaviour is a measured defect: 38.1% of treant and
     # 21.7% of morel minima-stage contacts were false).
     #
-    # DEFAULT OFF pending refinement (Craig's ruling, 2026-07-24). Held back
-    # because this filter tests the EXISTENCE of solid beneath a candidate,
-    # not its ADEQUACY, and the owner's rule is that the material must be
-    # *supportive*. Per-site inspection of the 80 exterior down-facing
-    # treant minima it removes found 31 standing on less than 1 mm2 or less
-    # than 0.05mm inside the boundary -- the worst on 0.0076 mm2, far less
-    # than a support tip's own footprint. That is a whisker, not support.
-    # A2 exposure for comparison: filter A removes 2 exterior down-facing
-    # contacts on the treant and 0 on the morel; this one removes 77.
-    minima_require_island_birth: bool = False
+    # DEFAULT ON as of the ADEQUACY refinement (Craig's ruling, 2026-07-24).
+    # It was held back for one round because the original filter tested the
+    # EXISTENCE of solid beneath a candidate, not its ADEQUACY, and the
+    # owner's rule is that the material must be *supportive*: per-site
+    # inspection of the 80 exterior down-facing treant minima it removed
+    # found 31 standing on less than 1 mm2 or less than 0.05mm inside the
+    # boundary -- the worst on 0.0076 mm2, far less than a support tip's own
+    # footprint. That is a whisker, not support. The refined filter drops a
+    # minimum only if it is BOTH not-an-island-birth AND adequately carried
+    # (see minima_support_area_tips below), so those sites are now kept and
+    # the filter is safe to enable. A2 exposure for comparison: filter A
+    # removes 2 exterior down-facing contacts on the treant and 0 on the
+    # morel; the unrefined version of this one removed 77.
+    minima_require_island_birth: bool = True
     # FILTER (A), independent of the above (Craig's adjudication,
     # 2026-07-24: the two are DIFFERENT defects and must not be collapsed
     # into one mechanism, so a win in one cannot launder a loss in the
@@ -400,6 +404,22 @@ class SupportConfig:
     # slice ABOVE the minimum's tip vertex, so the offset is inherently
     # sub-layer; measured max on the morel/treant corpus is ~1.1 layers.
     minima_birth_match_layers: float = 2.0
+    # ADEQUACY threshold for filter (B), in multiples of a support tip's own
+    # footprint (pi * tip_r_min_mm**2 = 0.1257 mm2 at the 0.2mm tip floor).
+    # The ruling is that material below a candidate must be SUPPORTIVE, not
+    # merely present: a candidate resting on less cross-section than the tip
+    # that would land on it is resting on a whisker. Chosen from the measured
+    # distribution, not by taste -- treant supporting areas are bimodal
+    # (median 5.24 mm2 vs sliver cases of 0.008-0.097 mm2) and the tip
+    # footprint sits in the empty gap; the rescued-site count moves by only 5
+    # across the whole 1x-8x range, so this sits in a flat region rather than
+    # on an edge. See perception._minima_support_adequate.
+    # Setting this to 0.0 reproduces the UNREFINED filter (B) exactly (every
+    # non-birth is dropped): adequacy is decided by the single comparison
+    # `carried_area >= threshold` with no special cases, and 0.0 >= 0.0 is
+    # true for every candidate including ones whose supporting section is
+    # missing or unmeasurable. That equivalence is pinned by tests.
+    minima_support_area_tips: float = 1.0
 
     # ---- Rewiring / topology mutation (design-v4.md #7, Phase 3) ----
     # Wall-clock budget for rewire.optimize's sweep loop. Craig's directive
