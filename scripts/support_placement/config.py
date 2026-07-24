@@ -475,6 +475,32 @@ class SupportConfig:
     p8_reaim_route_growth_max_factor: float = 1.50  # R1 downstream-route growth cap
     p8_strut_growth_max_factor: float = 1.25        # S1 no-unbounded-strut-growth cap
 
+    # SM-STUB R2 -- SURFACE-SEED CONTACT RE-SEAT (§3.1 R2; orchestrator ruling (5),
+    # 2026-07-24). Only entered when the R1 legal set is EMPTY: the demanded
+    # contact is moved to an alternative MODEL-SURFACE seed inside its inviolable
+    # class domain (REACH §1: same island), candidates ordered nearest-to-demanded
+    # under the REACH §2b economy cap, each re-aimed at the seed's own outward
+    # normal x the shortening ladder and judged by the SAME shared certificate +
+    # zero-new-violation commit invariant as R1. `p8_reseat_radius_mm` bounds the
+    # demand displacement (the contact is a DEMAND -- it may migrate, never
+    # teleport); the coverage/birth guard (REACH §2b "neighbor-birth guard before
+    # commit") is unconditional and not a config lever.
+    p8_reseat_enable: bool = True
+    p8_reseat_radius_mm: float = 2.0                # max demand displacement (REACH §1 domain)
+    p8_reseat_max_seeds: int = 24                   # REACH §2b `reloc_max_candidates`
+
+    # D5 -- PARENT-JUNCTION RE-SEAT (orchestrator ruling (5), 2026-07-24). The last
+    # rung before honest failure: when neither re-aim (R1/S1) nor contact re-seat
+    # (R2) can make a site legal, the site's PARENT JUNCTION node is re-seated
+    # through the guarded co-moving splice (`_translate_joint` + the D6 invariant,
+    # the same transaction SM-BALL B1 commits through). Candidates are the same
+    # surface seeds when the junction sits ON the model surface (a strut/rung
+    # foot), else a deterministic free-space lattice about the node; ordered
+    # nearest-first, so the first legal one IS the lexicographic minimum.
+    p8_junction_reseat_enable: bool = True
+    p8_junction_reseat_step_mm: float = 0.25
+    p8_junction_reseat_max_mm: float = 1.0
+
     # Acceptance levers (§6).
     p8_resin_delta_max: float = 0.03                # §6.6 aggregate resin backstop
     p8_max_unresolved: int = 10                     # §6.7 honest-failure count bound

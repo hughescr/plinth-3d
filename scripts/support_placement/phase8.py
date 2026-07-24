@@ -266,6 +266,17 @@ class Candidate:
     azimuth_deg: float
     n_hat: np.ndarray
     member: dict
+    # ---- SM-STUB R2 surface-seed re-seat (§3.1 R2) ---------------------------
+    # An R1 candidate PRESERVES the demanded contact, so these stay at their
+    # defaults and every R1 code path is bit-identical to before they existed.
+    # An R2 candidate MOVES the demand to a model-surface seed: `seat_c` is the
+    # new contact surface point, `seat_n` its outward normal, and
+    # `reseat_dist_mm` the displacement from the demanded position -- the middle
+    # slot of the §3.1 R2 score tuple and the number the driver writes back into
+    # the contact record when the re-seat survives commit.
+    seat_c: Optional[np.ndarray] = None
+    seat_n: Optional[np.ndarray] = None
+    reseat_dist_mm: float = 0.0
 
 
 def stub_candidates(site: StubSite, cfg) -> list:
@@ -308,16 +319,40 @@ class R1Result:
 
 
 def _score_tuple(cand: Candidate, n_moot: int, density_penalty: int,
-                 route_vol_ml: float) -> tuple:
+                 route_vol_ml: float, route_len_mm: float = 0.0) -> tuple:
     """The R1 score tuple, minimised GLOBALLY over the full legal set (§3.1):
 
         (n_moot_crossings, density_penalty, polar_angle_deg,
          length_reduction_step, route_volume_ml, candidate_index)
 
     density_penalty occupies its pinned slot; it is 0 for isolated (non-pocket)
-    members, so the tuple degrades exactly to the sparse-site ordering."""
+    members, so the tuple degrades exactly to the sparse-site ordering.
+    `route_len_mm` is accepted (the shared evaluator passes both route metrics to
+    whichever score function a rung installs) and deliberately UNUSED here -- the
+    R1 tuple is pinned by §3.1 and must not change."""
     return (int(n_moot), int(density_penalty), float(cand.polar_deg),
             int(cand.length_step), float(route_vol_ml), int(cand.cand_index))
+
+
+def _reseat_score_tuple(cand: Candidate, n_moot: int, density_penalty: int,
+                        route_vol_ml: float, route_len_mm: float = 0.0) -> tuple:
+    """The R2 re-seat score tuple, pinned by §3.1 R2 and minimised GLOBALLY over
+    the full legal re-seat set:
+
+        (route_length_mm, reseat_distance_from_demanded_mm, candidate_index)
+
+    REACH's route objective first, least demand displacement next, enumeration
+    index (nearest-seed-major, then the shortening ladder) last -- a total order,
+    so the minimum is unique and deterministic. `route_length_mm` is the
+    re-trialled downstream route length when a `reroute_fn` is injected PLUS the
+    candidate stub's own shaft length, so with no injected router it degrades to
+    "shortest shaft wins" rather than to a constant (which would drop the slot
+    and promote displacement to first, silently changing the pinned objective)."""
+    m = cand.member
+    shaft = float(np.linalg.norm(np.asarray(m["p1"], float)
+                                 - np.asarray(m["p0"], float)))
+    return (float(route_len_mm) + shaft, float(cand.reseat_dist_mm),
+            int(cand.cand_index))
 
 
 def _resin_guards_ok(cand: Candidate, site: StubSite, route_vol_ml: float,
@@ -392,12 +427,83 @@ def evaluate_r1(sites: list, geom, cfg,
                      pocket_penalty_fn=pocket_penalty_fn)
 
 
+# ---------------------------------------------------------------------------
+# R2 -- SURFACE-SEED CONTACT RE-SEAT (§3.1 R2; orchestrator ruling (5)).
+# ---------------------------------------------------------------------------
+def reseat_candidates(site: StubSite, seeds, cfg) -> list:
+    """Enumerate a site's R2 re-seat candidate set from `seeds` -- an ORDERED
+    (nearest-to-demanded first) list of `(position, outward_normal, distance)`
+    model-surface seats inside the site's inviolable class domain (REACH §1;
+    the driver's `surface_seeds_for_sites` builds and orders them, and applies
+    the domain + coverage/birth guard, so this function is pure algebra).
+
+    Each seat is re-aimed at ITS OWN outward normal (polar 0 -- R2 moves the
+    demand, it does not additionally re-aim: the cone belongs to R1, which by
+    definition already failed at the demanded seat) across the SAME shortening
+    ladder R1 uses, so the rung cannot grow a stub. `cand_index` is
+    SEED-MAJOR then length-minor -- the pinned "ordered nearest-to-demanded"
+    enumeration, and the R2 score tuple's final tiebreak. Candidates outside
+    the printability lean limit are SKIPPED, never clamped (§3.1)."""
+    r_shoot_floor = max(float(site.r_tip), cfg.min_shoot_r_mm)
+    factors = list(cfg.p8_reaim_length_factors)
+    nlen = len(factors)
+    out = []
+    for si, (pos, nrm, dist) in enumerate(seeds):
+        pos = np.asarray(pos, float)
+        n_hat = _unit(np.asarray(nrm, float))
+        for li, f in enumerate(factors):
+            L = float(site.stub_length_mm) * float(f)
+            m = reaim_stub(pos, n_hat, site.contact_depth_mm, L, site.r_tip,
+                           r_shoot_floor, site.owner, site.carried_mm2)
+            if _lean_deg(m["p0"], m["p1"]) > _theta_max_deg(m["r1"], cfg) + 1e-9:
+                continue
+            out.append(Candidate(site_id=site.site_id, cand_index=si * nlen + li,
+                                 length_step=li, f=float(f), polar_deg=0.0,
+                                 azimuth_deg=0.0, n_hat=n_hat, member=m,
+                                 seat_c=pos.copy(), seat_n=n_hat.copy(),
+                                 reseat_dist_mm=float(dist)))
+    return out
+
+
+def evaluate_r2(sites: list, seeds_by_site: dict, geom, cfg,
+                revalidate_fn: Optional[Callable] = None,
+                reroute_fn: Optional[Callable] = None) -> dict:
+    """SM-STUB R2 -- contact re-seat, BATCH-FIRST and GLOBAL-lex-min (§3.1 R2).
+
+    Entered ONLY for sites whose R1 legal set is empty (the ladder never
+    re-orders). Gathers every seat x length candidate of EVERY escalated site
+    into ONE flat matrix and evaluates legality for all of them in the handful
+    of batched kernel calls `_batch_legal_sets` makes -- the same shared
+    certificate (`verify.certify_member`) the R1 rung, the pocket solver, the
+    acceptance verifier and the census all read, so a re-seat can never be
+    certified here and flagged by the gate. A per-candidate scalar kernel loop
+    here would be a defect.
+
+    Selection is the UNIQUE global lexicographic minimum of the pinned R2 tuple
+    `(route_length_mm, reseat_distance_from_demanded_mm, candidate_index)`.
+    Returns {site_id: R1Result}; `winner is None` (needs_r2 True) means the
+    re-seat set is empty too and the site escalates to D5 / R3."""
+    all_cands: list = []
+    site_by_id = {}
+    for site in sites:
+        site_by_id[site.site_id] = site
+        seeds = seeds_by_site.get(site.site_id) or ()
+        if not seeds:
+            continue
+        all_cands.extend(reseat_candidates(site, seeds, cfg))
+    return _run_rung(all_cands, site_by_id, [s.site_id for s in sites], geom, cfg,
+                     rays="axis", guard_fn=_resin_guards_ok, moot_fn=_count_moot_axis,
+                     revalidate_fn=revalidate_fn, reroute_fn=reroute_fn,
+                     score_fn=_reseat_score_tuple)
+
+
 def _batch_legal_sets(all_cands: list, site_by_id: dict, sids: list, geom, cfg, *,
                       rays: str, guard_fn: Callable, moot_fn: Callable,
                       revalidate_fn: Optional[Callable] = None,
                       reroute_fn: Optional[Callable] = None,
                       pocket_penalty_fn: Optional[Callable] = None,
-                      cert_cache: Optional[dict] = None):
+                      cert_cache: Optional[dict] = None,
+                      score_fn: Optional[Callable] = None):
     """The shared BATCH-FIRST legality evaluator: one flat candidate matrix ->
     a handful of batched kernel interval + SCAR calls -> scatter -> per-site
     legal set, each SORTED by the §3.1 score tuple (lexicographic). Returns
@@ -429,7 +535,14 @@ def _batch_legal_sets(all_cands: list, site_by_id: dict, sids: list, geom, cfg, 
     `_embed_scar_verdicts` are per-row independent, so a subset call returns the
     same rows a full call would), so the result is bit-identical with or without
     it -- pinned by `test_phase8.py::test_cert_cache_is_bit_identical_and_reused`.
+
+    `score_fn` (default `_score_tuple`, the pinned §3.1 R1 tuple): the rung's
+    objective. R2 installs `_reseat_score_tuple` here so the re-seat rung is
+    ordered by its own pinned §3.1-R2 tuple while still routing LEGALITY through
+    this ONE evaluator -- one law, one authority; only the ORDER differs.
     """
+    if score_fn is None:
+        score_fn = _score_tuple
     per_site_legal = {sid: [] for sid in sids}
     per_site_count = {sid: 0 for sid in sids}
     if not all_cands:
@@ -486,7 +599,7 @@ def _batch_legal_sets(all_cands: list, site_by_id: dict, sids: list, geom, cfg, 
         density = 0
         if pocket_penalty_fn is not None:
             density = int(pocket_penalty_fn(cand.site_id, cand))
-        score = _score_tuple(cand, n_moot, density, route_vol_ml)
+        score = score_fn(cand, n_moot, density, route_vol_ml, route_len_mm)
         per_site_legal[cand.site_id].append((score, cand))
 
     for sid, legal in per_site_legal.items():
@@ -500,8 +613,9 @@ def _run_rung(all_cands: list, site_by_id: dict, sids: list, geom, cfg, *,
               rays: str, guard_fn: Callable, moot_fn: Callable,
               revalidate_fn: Optional[Callable] = None,
               reroute_fn: Optional[Callable] = None,
-              pocket_penalty_fn: Optional[Callable] = None) -> dict:
-    """The shared BATCH-FIRST ladder-rung evaluator (SM-STUB R1 / SM-STRUT S1):
+              pocket_penalty_fn: Optional[Callable] = None,
+              score_fn: Optional[Callable] = None) -> dict:
+    """The shared BATCH-FIRST ladder-rung evaluator (SM-STUB R1/R2 / SM-STRUT S1):
     `_batch_legal_sets` -> per-site UNIQUE global lexicographic minimum. A rung
     is NOT first-legal-wins (amendment B): the FULL legal set is enumerated and
     the lex-min of the score tuple is selected."""
@@ -511,7 +625,7 @@ def _run_rung(all_cands: list, site_by_id: dict, sids: list, geom, cfg, *,
     per_site_legal, per_site_count = _batch_legal_sets(
         all_cands, site_by_id, sids, geom, cfg, rays=rays, guard_fn=guard_fn,
         moot_fn=moot_fn, revalidate_fn=revalidate_fn, reroute_fn=reroute_fn,
-        pocket_penalty_fn=pocket_penalty_fn)
+        pocket_penalty_fn=pocket_penalty_fn, score_fn=score_fn)
     for sid, legal in per_site_legal.items():
         res = results[sid]
         res.n_candidates = per_site_count[sid]

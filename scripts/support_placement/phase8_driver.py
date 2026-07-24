@@ -49,8 +49,9 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import numpy as np
+from scipy.spatial import cKDTree
 
-from . import phase8, verify, joints, p8_accept, tree
+from . import phase8, verify, joints, p8_accept, tree, perception
 
 # ---------------------------------------------------------------------------
 # Frozen-fixture target law (SPEC-P8-RELOCATE §3.0 / §5.3) -- the TREANT law.
@@ -138,6 +139,20 @@ def _contact_of(member: dict, contacts) -> Optional[dict]:
         ci = int(owner[1])
         if 0 <= ci < len(contacts):
             return contacts[ci]
+    return None
+
+
+def _contact_index_of(member: dict, contacts) -> Optional[int]:
+    """The INDEX of the contact a member owns, or None. The R2 re-seat needs the
+    index (not just the dict) so a committed re-seat can write the moved demand
+    back into `contacts[ci]` -- coverage and island-birth accounting read contact
+    POSITIONS, so a migrated demand that is not written back would leave the
+    gates judging a position no stub is standing on."""
+    owner = member.get("owner")
+    if isinstance(owner, (tuple, list)) and len(owner) == 2 and owner[0] == "contact":
+        ci = int(owner[1])
+        if 0 <= ci < len(contacts):
+            return ci
     return None
 
 
@@ -378,6 +393,10 @@ class DriverInput:
     site_forest_idx: dict            # site_id (live mi) -> forest member index
     gate: GateClassification
     target_source: str = "live-gate"  # "frozen-fixture" iff geometry-gated fixture
+    # R2 re-seat bookkeeping: a stub site's owning CONTACT index, so a committed
+    # re-seat can write the moved demand back into the contact record (the demand
+    # migrated -- coverage/birth accounting must see where it actually is).
+    contact_of_site: dict = field(default_factory=dict)   # site_id -> contact idx
 
 
 def build_snapshot(gate: GateClassification, real_ids, artifact_ids,
@@ -468,6 +487,7 @@ def construct_sites(forest, members, balls, contacts, carried, cfg, geom, mesh,
 
     stub_sites, strut_sites = [], []
     site_forest_idx = {}
+    contact_of_site = {}
     for mi in snapshot.non_exempt:
         m = members[mi]
         contact = _contact_of(m, contacts)
@@ -475,6 +495,9 @@ def construct_sites(forest, members, balls, contacts, carried, cfg, geom, mesh,
         wc = gate.worst_chord.get(mi, 0.0)
         if m["kind"] == "stub":
             stub_sites.append(stub_site_from_member(mi, m, contact, cfg, carried_mm2, wc))
+            ci = _contact_index_of(m, contacts)
+            if ci is not None:
+                contact_of_site[mi] = ci
         else:
             strut_sites.append(strut_site_from_member(mi, m, cfg, carried_mm2, wc))
         if mi < len(live_fi):
@@ -493,13 +516,206 @@ def construct_sites(forest, members, balls, contacts, carried, cfg, geom, mesh,
         site.site_id = Q_SITE_OFFSET + int(qid)   # disjoint namespace (see top)
         stub_sites.append(site)
         site_forest_idx[Q_SITE_OFFSET + int(qid)] = int(qid)  # -> forest member idx
+        qowner = qs.get("owner")
+        if (isinstance(qowner, (tuple, list)) and len(qowner) == 2
+                and qowner[0] == "contact"):
+            contact_of_site[Q_SITE_OFFSET + int(qid)] = int(qowner[1])
 
     ball_sites = ball_sites_from_breaches(list(gate.ball_breaches), members, cfg)
 
     return DriverInput(snapshot=snapshot, stub_sites=stub_sites,
                        strut_sites=strut_sites, ball_sites=ball_sites,
                        live_fi=live_fi, site_forest_idx=site_forest_idx, gate=gate,
-                       target_source=("frozen-fixture" if use_frozen else "live-gate"))
+                       target_source=("frozen-fixture" if use_frozen else "live-gate"),
+                       contact_of_site=contact_of_site)
+
+
+# ===========================================================================
+# R2 -- SURFACE-SEED SEARCH + THE INVIOLABLE-DOMAIN / COVERAGE GUARD.
+# ===========================================================================
+# SM-STUB R2 (§3.1) moves a DEMAND, not merely a shaft: the contact surface
+# point migrates to an alternative model-surface seat. Two things therefore
+# bound it, and neither is a config lever:
+#
+#   * THE INVIOLABLE CLASS DOMAIN (REACH §1). A contact belongs to its island;
+#     a seat on a different island is a different demand, not a relocation of
+#     this one. Seeds are restricted to faces of the contact's OWN island.
+#   * THE NEIGHBOR-BIRTH / COVERAGE GUARD (REACH §2b, "before committing, guard
+#     neighbor birth coverage"). `uncovered_islands` and `uncovered_island_births`
+#     are HARD gates that read contact POSITIONS -- a re-seat that clears a
+#     transit by uncovering an island has not fixed anything, it has moved the
+#     failure to a gate the D6 influence-set invariant cannot see (that invariant
+#     scores MEMBER geometry classes only). So the guard is applied at SEED
+#     SELECTION, before any candidate is built: a seat that would regress
+#     coverage or orphan a birth this contact uniquely covers is never enumerated.
+#
+# BATCH-FIRST: the face KD-tree is built ONCE per run and reused by every sweep;
+# every site's seed neighbourhood comes from ONE `query_ball_point` over the
+# whole stacked query-point array; the coverage guard evaluates all of a site's
+# seats against all of its critical island faces in ONE (n_seeds x n_faces)
+# array. There is no per-seed scalar mesh query anywhere below.
+
+
+class SurfaceSeedIndex:
+    """Model-surface seat source for R2 (and for D5 when a junction sits on the
+    surface). Holds the face-centroid KD-tree, the face normals, and the
+    face->island map, all built ONCE and reused across sweeps.
+
+    `islands` (the engine's island face-id lists) is optional: without it the
+    per-island domain restriction cannot be applied, so `seeds_for` refuses to
+    emit ANY seed rather than silently relocating a demand out of its class
+    domain -- R2 simply does not fire for a caller that did not supply the
+    domain (unit/legacy paths), which is the conservative failure direction."""
+
+    def __init__(self, mesh, islands=None, island_births=None):
+        self.centers = np.asarray(mesh.triangles_center, float)
+        self.normals = np.asarray(mesh.face_normals, float)
+        self.tree = cKDTree(self.centers) if len(self.centers) else None
+        self.islands = islands
+        self.island_births = list(island_births or ())
+        n_faces = len(self.centers)
+        self.island_of_face = np.full(n_faces, -1, dtype=np.int64)
+        if islands is not None:
+            for iid, face_ids in enumerate(islands):
+                fi = np.asarray(face_ids, dtype=np.int64)
+                if len(fi):
+                    self.island_of_face[fi] = int(iid)
+
+    # -- coverage / birth guard ------------------------------------------------
+    def _coverage_context(self, ci: int, contacts, unrouted, cfg):
+        """Everything the coverage half of the guard needs for contact `ci`, in
+        ONE KD query: the island's face centres, the per-face distance to the
+        nearest OTHER routed contact on that island, the gate threshold, and the
+        island's CURRENT worst gap. Returns None when the island is unknown (no
+        domain -> no seeds)."""
+        if self.islands is None or not (0 <= ci < len(contacts)):
+            return None
+        iid = int(contacts[ci].get("island_id", -1))
+        if not (0 <= iid < len(self.islands)):
+            return None
+        face_ids = np.asarray(self.islands[iid], dtype=np.int64)
+        if not len(face_ids):
+            return None
+        centers = self.centers[face_ids]
+        unrouted = set(int(u) for u in unrouted)
+        others = [np.asarray(c["position"], float) for k, c in enumerate(contacts)
+                  if k != ci and k not in unrouted
+                  and int(c.get("island_id", -1)) == iid]
+        if others:
+            d_other, _ = cKDTree(np.array(others)).query(centers)
+            d_other = np.asarray(d_other, float)
+        else:
+            d_other = np.full(len(centers), np.inf)
+        cur = np.linalg.norm(centers - np.asarray(contacts[ci]["position"], float),
+                             axis=1)
+        threshold = float(cfg.target_spacing_mm) * float(cfg.coverage_radius_factor)
+        cur_worst = float(np.minimum(d_other, cur).max())
+        return centers, d_other, threshold, cur_worst
+
+    def _sole_births(self, ci: int, contacts, unrouted, cfg):
+        """The island births that ONLY contact `ci` covers today -- the births a
+        re-seat could orphan (REACH §2b's neighbor-birth guard). Births covered
+        by some OTHER routed contact are not this move's responsibility."""
+        if not self.island_births:
+            return []
+        z_tol = float(cfg.minima_connect_layers) * float(cfg.layer_height_mm)
+        attach_r = perception.ISLAND_ATTACH_REACH_MM
+        unrouted = set(int(u) for u in unrouted)
+
+        def _covers(pos, b):
+            if abs(float(pos[2]) - float(b["z"])) > z_tol:
+                return False
+            ok, _d = perception.island_birth_xy_ok(float(pos[0]), float(pos[1]),
+                                                  b["loop"], attach_r)
+            return bool(ok)
+
+        here = np.asarray(contacts[ci]["position"], float)
+        out = []
+        for b in self.island_births:
+            if not _covers(here, b):
+                continue
+            if any(_covers(np.asarray(c["position"], float), b)
+                   for k, c in enumerate(contacts)
+                   if k != ci and k not in unrouted):
+                continue
+            out.append(b)
+        return out
+
+    # -- the seed search -------------------------------------------------------
+    def seeds_for(self, sites, contact_of_site, contacts, unrouted, cfg) -> dict:
+        """`{site_id: [(position, outward_normal, distance_from_demanded), ...]}`,
+        ordered nearest-to-demanded and capped at `cfg.p8_reseat_max_seeds`
+        (REACH §2b), restricted to the contact's own island (the inviolable class
+        domain) and filtered by the coverage / sole-birth guard.
+
+        ONE stacked `query_ball_point` over every site's demanded position; the
+        per-site work is then pure numpy over that site's own candidate faces."""
+        out = {s.site_id: [] for s in sites}
+        if (self.tree is None or self.islands is None or not sites
+                or not getattr(cfg, "p8_reseat_enable", True)):
+            return out
+        radius = float(getattr(cfg, "p8_reseat_radius_mm", 2.0))
+        cap = int(getattr(cfg, "p8_reseat_max_seeds", 24))
+        if radius <= 0.0 or cap <= 0:
+            return out
+        pts = np.array([np.asarray(s.c, float) for s in sites])
+        # ONE batched neighbourhood query for every site (batch-first).
+        neigh = self.tree.query_ball_point(pts, r=radius)
+        for k, site in enumerate(sites):
+            ci = contact_of_site.get(site.site_id)
+            if ci is None:
+                continue
+            faces = np.asarray(sorted(neigh[k]), dtype=np.int64)
+            if not len(faces):
+                continue
+            iid = int(contacts[ci].get("island_id", -1))
+            faces = faces[self.island_of_face[faces] == iid]      # class domain
+            if not len(faces):
+                continue
+            c0 = np.asarray(site.c, float)
+            cand = self.centers[faces]
+            dist = np.linalg.norm(cand - c0[None, :], axis=1)
+            keep = dist > 1e-9                    # the demanded seat already failed
+            faces, cand, dist = faces[keep], cand[keep], dist[keep]
+            if not len(faces):
+                continue
+            # nearest-to-demanded, face index as the total-order tiebreak.
+            order = np.lexsort((faces, dist))
+            faces, cand, dist = faces[order], cand[order], dist[order]
+            faces, cand, dist = faces[:cap], cand[:cap], dist[:cap]
+            ctx = self._coverage_context(ci, contacts, unrouted, cfg)
+            if ctx is None:
+                continue
+            centers, d_other, threshold, cur_worst = ctx
+            # ONE (n_seeds x n_faces) evaluation of the island's coverage with
+            # THIS contact moved to each seat: the new worst gap must clear the
+            # gate threshold, or at least not exceed the CURRENT worst gap (an
+            # already-uncovered island must not be made worse).
+            dseat = np.linalg.norm(centers[None, :, :] - cand[:, None, :], axis=2)
+            new_worst = np.minimum(d_other[None, :], dseat).max(axis=1)
+            ok = (new_worst <= threshold + 1e-9) | (new_worst <= cur_worst + 1e-9)
+            births = self._sole_births(ci, contacts, unrouted, cfg)
+            if births:
+                z_tol = float(cfg.minima_connect_layers) * float(cfg.layer_height_mm)
+                attach_r = perception.ISLAND_ATTACH_REACH_MM
+                for j in range(len(cand)):
+                    if not ok[j]:
+                        continue
+                    p = cand[j]
+                    for b in births:
+                        if abs(float(p[2]) - float(b["z"])) > z_tol:
+                            ok[j] = False
+                            break
+                        good, _d = perception.island_birth_xy_ok(
+                            float(p[0]), float(p[1]), b["loop"], attach_r)
+                        if not good:
+                            ok[j] = False
+                            break
+            sel = np.nonzero(ok)[0]
+            out[site.site_id] = [
+                (cand[j].copy(), phase8._unit(self.normals[faces[j]]), float(dist[j]))
+                for j in sel]
+        return out
 
 
 # ---------------------------------------------------------------------------
@@ -679,8 +895,27 @@ def _defect_count(defmap, positions) -> int:
     return sum(len(defmap.get(k, ())) for k in positions)
 
 
-def _ball_slide_guard_ok(forest, geom, cfg, plate_z, saved, pre_members, live_fi,
-                         pos_of, idx_arr, end_arr, pt_arr) -> bool:
+def _post_members(forest, pre_members, pos_of, changed_fis):
+    """The live member-dict universe AFTER a transaction, built INCREMENTALLY
+    from the pre-transaction one: only `changed_fis` moved, and
+    `joints.collect_members` is a per-member pure normalisation (no cross-member
+    state), so replacing exactly those entries yields the bit-identical list a
+    full re-collect would -- at O(|changed|) instead of O(n_members).
+
+    That difference is not cosmetic: the D5 junction lattice and the SM-BALL
+    slide search evaluate this guard once per TRIAL, and a full 1476-member
+    re-collect per trial is the shape of pure-Python-per-item cost that turned
+    the ladder into a 99%-CPU spin once already."""
+    out = list(pre_members)
+    for fi in sorted(changed_fis):
+        k = pos_of.get(fi)
+        if k is not None:
+            out[k] = joints.collect_members([forest.members[fi]])[0]
+    return out
+
+
+def _ball_slide_guard_ok(forest, geom, cfg, plate_z, saved, pre_members,
+                         pos_of, idx_arr, end_arr, pt_arr, pre_cache=None) -> bool:
     """D6 commit invariant for a ball-joint slide (Phase-3), the SAME law the
     shaft splice enforces (`splice_reaims`): over the affected set -- the
     translated joint members UNION their endpoint-neighbours -- the slide must
@@ -690,7 +925,14 @@ def _ball_slide_guard_ok(forest, geom, cfg, plate_z, saved, pre_members, live_fi
     transit on a neighbour, is illegal at commit -- that is what makes the sweep
     loop monotone. `saved` is `_translate_joint`'s `(fi, pre-snapshot)` list; the
     forest currently holds the POST-slide geometry (this is called before the
-    trial undo). `plate_z is None` disables the guard (legacy/unit callers)."""
+    trial undo). `plate_z is None` disables the guard (legacy/unit callers).
+
+    `pre_cache` (optional, caller-owned dict): memoises the PRE-side influence
+    scoring by subset. A D5 lattice trials many deltas against ONE unchanged
+    pre-geometry at ONE node, so every trial derives the SAME subset and the
+    SAME `pre_def` -- re-asking the kernel for it per trial is the same
+    "re-ask the same question" waste the pocket solver's cert_cache retired.
+    Semantically inert: a miss computes exactly what the uncached path would."""
     if plate_z is None:
         return True
     affected = {fi for fi, _s in saved}
@@ -702,8 +944,15 @@ def _ball_slide_guard_ok(forest, geom, cfg, plate_z, saved, pre_members, live_fi
     subset = sorted(pos_of[fi] for fi in affected if fi in pos_of)
     if not subset:
         return False
-    pre_def = _influence_defects(pre_members, subset, geom, cfg, plate_z)
-    post_members = joints.collect_members([forest.members[fi] for fi in live_fi])
+    ckey = tuple(subset)
+    if pre_cache is not None and ckey in pre_cache:
+        pre_def = pre_cache[ckey]
+    else:
+        pre_def = _influence_defects(pre_members, subset, geom, cfg, plate_z)
+        if pre_cache is not None:
+            pre_cache[ckey] = pre_def
+    post_members = _post_members(forest, pre_members, pos_of,
+                                 {fi for fi, _s in saved})
     post_def = _influence_defects(post_members, subset, geom, cfg, plate_z)
     if any(post_def.get(k, frozenset()) - pre_def.get(k, frozenset()) for k in subset):
         return False                       # a NEW violation somewhere in reach
@@ -857,7 +1106,10 @@ def splice_reaims(forest, geom, cfg, accepted: list, *, plate_z=None, unrouted=(
     for _round in range(len(groups) + 1):
         violations = forest.revalidate(geom, cfg)
         bad_clearance = {v["member_idx"] for v in violations if v["member_idx"] in saved}
-        post_members = joints.collect_members([forest.members[fi] for fi in live_fi])
+        # incremental (batch-first): only the snapshotted members can differ from
+        # `pre_members` -- a reverted one collects back to its pre geometry, so
+        # this is bit-identical to a full re-collect at O(|saved|).
+        post_members = _post_members(forest, pre_members, pos_of, set(saved))
         post_def = _influence_defects(post_members, inf_subset, geom, cfg, plate_z)
         new_bad = {live_fi[k] for k in inf_subset
                    if post_def.get(k, frozenset()) - pre_def.get(k, frozenset())}
@@ -891,24 +1143,142 @@ def splice_reaims(forest, geom, cfg, accepted: list, *, plate_z=None, unrouted=(
 # ---------------------------------------------------------------------------
 # ball-slide splice (Phase 3): translate the joint node.
 # ---------------------------------------------------------------------------
-def _translate_joint(forest, center, delta, tol):
+def _translate_joint(forest, center, delta, tol, index=None):
     """Translate every live member endpoint coincident with `center` by `delta`
     (a joint slide keeps the members meeting at the node coincident, so
     connectivity is preserved). Returns the list of `(forest_idx, snapshot)` it
-    touched so the caller can revert."""
+    touched so the caller can revert.
+
+    BATCH-FIRST: the coincidence test is ONE vectorised distance query against
+    `Forest.endpoint_index` (the same live, dead-excluded endpoint set the old
+    per-member Python scan walked), not a scan over every forest member. `index`
+    lets a caller that trials MANY deltas against the SAME geometry (D5's
+    junction lattice: every failed trial is undone bit-exact, so the endpoint
+    index is invariant across them) build it once instead of once per trial --
+    that per-trial O(n_members) rebuild is what turned the ladder into a spin.
+    Passing a STALE index would silently mis-target the move, so it is only ever
+    supplied by a caller that owns the geometry between rebuilds."""
+    idx_arr, end_arr, pt_arr = index if index is not None else forest.endpoint_index()
+    if len(idx_arr) == 0:
+        return []
+    center = np.asarray(center, float)
+    delta = np.asarray(delta, float)
+    hit = np.nonzero(np.linalg.norm(pt_arr - center[None, :], axis=1) <= tol)[0]
+    if not len(hit):
+        return []
+    ends_by_fi: dict = {}
+    for k in hit:
+        ends_by_fi.setdefault(int(idx_arr[k]), []).append(int(end_arr[k]))
     saved = []
-    for fi, fm in enumerate(forest.members):
-        if fi in getattr(forest, "dead", set()):
-            continue
-        moved = False
-        snap = fm._snapshot()
-        if np.linalg.norm(np.asarray(fm.p0, float) - center) <= tol:
-            fm.p0 = np.asarray(fm.p0, float) + delta; moved = True
-        if np.linalg.norm(np.asarray(fm.p1, float) - center) <= tol:
-            fm.p1 = np.asarray(fm.p1, float) + delta; moved = True
-        if moved:
-            saved.append((fi, snap))
+    for fi in sorted(ends_by_fi):                     # deterministic order
+        fm = forest.members[fi]
+        saved.append((fi, fm._snapshot()))
+        for end in sorted(ends_by_fi[fi]):
+            if end == 0:
+                fm.p0 = np.asarray(fm.p0, float) + delta
+            else:
+                fm.p1 = np.asarray(fm.p1, float) + delta
     return saved
+
+
+# ===========================================================================
+# D5 -- PARENT-JUNCTION RE-SEAT (orchestrator ruling (5), 2026-07-24).
+# ===========================================================================
+# The rung BELOW R2 and above honest failure. R1 pivots the shaft about the
+# demanded contact; R2 moves the demand itself. Both leave one degree of freedom
+# untouched: the site's PARENT JUNCTION -- the tree-side node where the member
+# meets its route. Moving THAT swings the shaft while holding the embedded tip
+# (and therefore the demand, the carried area and the coverage accounting)
+# exactly where it is, which is precisely the lever for a site whose contact is
+# fine and whose corridor is not.
+#
+# The move is committed through the SAME guarded co-moving splice SM-BALL B1
+# uses -- `_translate_joint` (every member meeting at the node rides the delta,
+# so the junction stays welded by construction) under `_ball_slide_guard_ok`
+# (the D6 zero-new-violation invariant + strict defect-count decrease over the
+# influence set). D5 therefore cannot break the monotonicity the fixed point
+# rests on: a junction re-seat that does not strictly reduce the defect count is
+# refused exactly like a sterile re-aim.
+#
+# The candidate lattice is a total order (distance, then direction rank), so
+# "first legal in order" IS the lexicographic minimum -- the same argument B1's
+# minimal-slide search rests on, not a first-success-wins shortcut.
+
+
+def junction_lattice(node, axis, cfg) -> list:
+    """Ordered candidate positions for a parent-junction re-seat, nearest-first.
+
+    Free-space lattice: +/- the member axis and the two stable local-frame
+    perpendiculars (`phase8.local_frame`, the SAME frame the R1 azimuth grid is
+    anchored to, so the two rungs never disagree about what "sideways" means),
+    at `p8_junction_reseat_step_mm` multiples out to `p8_junction_reseat_max_mm`.
+    Ordered by `(distance, direction_rank)` -- a total order, so the first legal
+    candidate is the unique lexicographic minimum.
+
+    The lattice is FREE-SPACE only, and deliberately so: a site's parent junction
+    is where its member meets the ROUTE, which is in free space by construction
+    -- the surface-anchored end is the embed end, and that end is R1/S1's cone
+    and R2's seed search, not this rung's. A surface-seed branch here would be a
+    code path no site can reach."""
+    node = np.asarray(node, float)
+    step = float(getattr(cfg, "p8_junction_reseat_step_mm", 0.25))
+    reach = float(getattr(cfg, "p8_junction_reseat_max_mm", 1.0))
+    if step <= 0.0 or reach <= 0.0:
+        return []
+    u = phase8._unit(np.asarray(axis, float))
+    e, e2 = phase8.local_frame(u)
+    dirs = [u, -u, e, -e, e2, -e2]                    # direction_rank = list index
+    n_steps = int(round(reach / step))
+    out = []
+    for si in range(1, n_steps + 1):
+        d = step * si
+        for rank, dv in enumerate(dirs):
+            out.append((float(d), rank, dv * d))
+    out.sort(key=lambda t: (t[0], t[1]))
+    return [(t[2], t[0], t[1]) for t in out]          # (delta, distance, rank)
+
+
+def try_junction_reseat(forest, geom, cfg, plate_z, unrouted, fi, node_pt, axis,
+                        tol, max_trials=None):
+    """Trial the junction lattice for ONE site and COMMIT the first legal delta.
+
+    Every trial is transactional: translate -> revalidate -> D6 guard -> undo,
+    and the winner is left in place. Returns
+    `(committed_delta or None, n_trials, n_members_moved)`.
+
+    The pre-trial endpoint index and live universe are built ONCE for the whole
+    lattice (a failed trial restores bit-exact geometry, so both are invariant
+    across trials) -- the per-trial rebuild is the O(n_members) cost that made
+    the naive version a spin."""
+    # `fi` is ledger attribution only and is None for a BALL site (a joint node
+    # is not any single member's endpoint) -- the move itself is addressed by
+    # `node_pt`, never by a member index.
+    if fi is not None and not (0 <= fi < len(forest.members)):
+        return None, 0, 0
+    index = forest.endpoint_index()
+    pre_members, _live_fi, pos_of = _live_universe(forest, unrouted)
+    lattice = junction_lattice(node_pt, axis, cfg)
+    if max_trials is not None:
+        lattice = lattice[:int(max_trials)]
+    n_trials = 0
+    pre_cache: dict = {}          # PRE-side influence scoring, invariant per node
+    for delta, _dist, _rank in lattice:
+        n_trials += 1
+        saved = _translate_joint(forest, node_pt, delta, tol, index=index)
+        if not saved:
+            continue
+        viol = forest.revalidate(geom, cfg)
+        touched = {sfi for sfi, _s in saved}
+        ok = (not any(v["member_idx"] in touched for v in viol)
+              and _ball_slide_guard_ok(forest, geom, cfg, plate_z, saved,
+                                       pre_members, pos_of, *index,
+                                       pre_cache=pre_cache))
+        if ok:
+            return np.asarray(delta, float), n_trials, len(saved)
+        for sfi, snapm in saved:                       # trial failed -> undo
+            forest.members[sfi]._restore(snapm)
+        forest.revalidate(geom, cfg)
+    return None, n_trials, 0
 
 
 # ---------------------------------------------------------------------------
@@ -951,6 +1321,68 @@ class Phase8Report:
     # it, so this trace is the machine-checkable monotonicity evidence: it is
     # non-increasing, and strictly decreasing across any sweep that committed.
     defects_by_sweep: tuple = ()
+    # ---- ruling (5): R2 surface-seed re-seat / D5 junction re-seat -----------
+    reseats: tuple = ()               # (site_id, contact_idx, x, y, z, dist_mm) committed
+    junction_reseats: tuple = ()      # (report_class, site_id, dx, dy, dz, n_trials)
+    # ---- ruling (5): the PERSISTENT formally-unresolvable ledger -------------
+    # One row per site the ladder could not resolve, CARRIED ACROSS SWEEPS (and,
+    # via the caller's `carry_ledger`, across passes) rather than rebuilt from the
+    # last sweep's leftovers -- so a site that fell at R1 in sweep 1, was retried
+    # at R2 in sweep 2 and finally refused at D5 in sweep 3 is ONE row with its
+    # whole history, not three disconnected observations. Rows are
+    # `(class, site_id, last_rung, reason, first_sweep, last_sweep, n_attempts,
+    # measure_mm)`, sorted -- the honest-failure report §6.7 gates on and the
+    # thing an owner actually reads to decide what to do about a site.
+    unresolvable_ledger: tuple = ()
+
+
+# ---------------------------------------------------------------------------
+# the PERSISTENT formally-unresolvable ledger (ruling (5)).
+# ---------------------------------------------------------------------------
+_LEDGER_FIELDS = ("cls", "site_id", "rung", "reason", "first_sweep", "last_sweep",
+                  "n_attempts", "measure_mm")
+
+
+def ledger_touch(ledger: dict, cls: str, site_id: int, rung: str, reason: str,
+                 sweep: int, measure: Optional[float] = None) -> None:
+    """Record (or update) one formally-unresolvable site in `ledger`, keyed by
+    `(class, site_id)`. A repeat observation UPDATES the row -- last rung, last
+    reason, last sweep, attempt count, latest defect measure -- it never appends
+    a duplicate, which is what makes the ledger a persistent register rather than
+    a log. `ledger` is caller-owned so it survives sweeps AND passes.
+
+    `measure` is the site's live defect measure (transit chord for a stub/strut,
+    poke depth for a ball) at the moment of the observation; None leaves the
+    previously recorded value in place (an observation with no measure must not
+    erase a good one) and is reported as None, never 0.0 -- "no measure recorded"
+    and "this site has no defect" are different statements, and the row is
+    JSON-serialisable either way (NaN is not valid JSON).
+
+    `cls` NAMESPACES the row: "STUB"/"STRUT"/"BALL" for live sites addressed by
+    their live member index, "QSTUB" for a Q-REAL condemned stub addressed by its
+    forest member index -- two DISJOINT id spaces that can collide on the same
+    integer, which is exactly why the class is part of the key."""
+    key = (str(cls), int(site_id))
+    prev = ledger.get(key)
+    if prev is None:
+        ledger[key] = dict(cls=str(cls), site_id=int(site_id), rung=str(rung),
+                           reason=str(reason), first_sweep=int(sweep),
+                           last_sweep=int(sweep), n_attempts=1,
+                           measure_mm=(None if measure is None else float(measure)))
+        return
+    prev["rung"] = str(rung)
+    prev["reason"] = str(reason)
+    prev["last_sweep"] = int(sweep)
+    prev["n_attempts"] = int(prev["n_attempts"]) + 1
+    if measure is not None:
+        prev["measure_mm"] = float(measure)
+
+
+def unresolvable_rows(ledger: dict) -> tuple:
+    """The ledger as a deterministic tuple of `_LEDGER_FIELDS` tuples, sorted by
+    (class, site_id) -- the form the report and the engine log carry."""
+    return tuple(tuple(ledger[k][f] for f in _LEDGER_FIELDS)
+                 for k in sorted(ledger))
 
 
 def _cand_geom_key(member: dict) -> tuple:
@@ -1154,17 +1586,51 @@ class _SweepResult:
     # that kept the sweep tail alive, so the caller RETIRES these outright --
     # namespaced key -> (report_class, rung), same shape as `committed_sites`.
     sterile_sites: dict = field(default_factory=dict)
+    # ---- ruling (5) escalation rungs ---------------------------------------
+    reseats: list = field(default_factory=list)            # (sid, ci, seat_c, dist)
+    junction_reseats: list = field(default_factory=list)   # (cls, sid, delta, n_trials)
+    # last rung actually ATTEMPTED per still-unresolved site, keyed
+    # (report_class, site_id) -- what the persistent ledger records as the
+    # honest end of the ladder for that site this sweep.
+    final_rung: dict = field(default_factory=dict)
+    # LEDGER-READY honest failures: (ledger_class, site_id, measure_key). Distinct
+    # from `unresolved_items` because the ledger NAMESPACES a Q-REAL stub as
+    # "QSTUB" -- its site id is a forest member index, a different id space from a
+    # class-T stub's live member index, and the two can collide on one integer.
+    # `measure_key` is the `_site_defect_measure` key, or None when the site has
+    # no live measure (a Q-REAL stub is not in the live member list at all).
+    ledger_obs: list = field(default_factory=list)
 
 
 def _relocation_sweep(di: DriverInput, forest, geom, cfg,
                       banned: Optional[dict] = None,
-                      plate_z=None, unrouted=()) -> _SweepResult:
+                      plate_z=None, unrouted=(), seed_index=None,
+                      contacts=None) -> _SweepResult:
     """Run ONE Phase 1 (stubs+Q-REAL) -> Phase 2 (struts) -> Phase 3 (balls) pass
     over the FROZEN sites in `di`, splicing accepted re-aims/slides into `forest`
     under the transactional revalidate protocol. Pure single-sweep mechanics --
     the caller (`run_phase8`) re-derives `di` from the mutated forest for the next
     sweep, which is the F1 convergence: the ladder runs on its OWN output until a
     sweep changes nothing (`n_committed == 0`, the true-no-op fixed point).
+
+    LADDER ORDER (§3.1, never re-ordered; ruling (5) adds the last two rungs):
+    a rung is entered ONLY when the rung above it yields ZERO legal candidates
+    for that site.
+
+        stubs   R1 tip re-aim -> R2 surface-seed contact re-seat -> D5 parent-
+                junction re-seat -> R3 honest failure
+        struts  S1 foot re-aim -> D5 parent-junction re-seat -> S3 honest failure
+        balls   B1 axial slide -> D5 junction re-seat -> B3 honest failure
+
+    Every rung commits through the SAME guarded transaction (`splice_reaims` for
+    shaft geometry, `_translate_joint` + `_ball_slide_guard_ok` for a junction),
+    so the D6 zero-new-violation invariant and its strict defect-count decrease
+    bind the new rungs exactly as they bind R1 -- the escalation buys resolution
+    COMPLETENESS without touching the monotonicity the fixed point rests on.
+
+    `seed_index` (a `SurfaceSeedIndex`) and `contacts` enable R2; without them
+    (unit/legacy callers, or a caller that supplied no island domain) the ladder
+    is exactly the R1/S1/B1 ladder it was.
 
     Records a per-site provenance row (F6): (cls, site_id, forest_idx, disposition,
     rung) so the 34-member-class collateral is attributable from artifacts."""
@@ -1176,6 +1642,10 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
     newly_banned: list = []
     committed_sites: dict = {}            # D3(a): key -> (report_class, rung), committed
     sterile_sites: dict = {}              # D6: key -> (report_class, rung), no-progress
+    reseats: list = []                    # ruling (5) R2 commits
+    junction_reseats: list = []           # ruling (5) D5 commits
+    final_rung: dict = {}                 # (ledger_cls, sid) -> last rung ATTEMPTED
+    ledger_obs: list = []                 # (ledger_cls, sid, measure_key)
     # anti-churn ban filter (defect-3): any candidate in `banned` is skipped at
     # selection, so the ladder picks a DIFFERENT one or falls honestly. `run_phase8`
     # owns that set's lifetime -- see its comment for why D6 makes it sweep-local.
@@ -1186,9 +1656,74 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
     noop_fn = _noop_skip_fn(forest, di.site_forest_idx)
     stub_sel_fn = _compose_fns(ban_fn, noop_fn)
 
+    # ---- shared escalation bookkeeping --------------------------------------
+    def _drop_unresolved(cls, sid):
+        """Retract an honest-failure row a LOWER rung has since resolved. The R1
+        disposal records the failure the moment R1 fails (that is what makes the
+        provenance ledger complete); when R2 or D5 then resolves the site the row
+        must go, or the report would count one site as both resolved and
+        unresolved."""
+        hit = False
+        for i, it in enumerate(unresolved_items):
+            if it[0] == cls and it[1] == sid:
+                del unresolved_items[i]
+                hit = True
+                break
+        for i, ob in enumerate(ledger_obs):
+            # only ever called for LIVE sites, so the class match is exact and a
+            # Q-REAL row ("QSTUB") sharing the integer is never touched.
+            if ob[0] == cls and ob[1] == sid:
+                del ledger_obs[i]
+                break
+        return hit
+
+    def _site_node_and_axis(fi):
+        """The parent-JUNCTION node of a live member and the shaft axis pointing
+        at it: the TREE-SIDE endpoint (the non-embedded end -- a stub's p1, a
+        strut foot's p0), its radius, and the unit axis from the embedded end
+        toward it. This is the node D5 re-seats; the embedded end (and therefore
+        the demand, the carried area and every coverage number) does not move."""
+        fm = forest.members[fi]
+        embed = fm.embed_end
+        if embed == "p1":
+            node = np.asarray(fm.p0, float); other = np.asarray(fm.p1, float)
+            r_node = float(fm.r0)
+        else:
+            node = np.asarray(fm.p1, float); other = np.asarray(fm.p0, float)
+            r_node = float(fm.r1)
+        return node, r_node, phase8._unit(node - other)
+
+    def _try_d5_at(cls, sid, fi, node, axis, tol):
+        """D5 at one junction NODE. Returns True iff the re-seat committed (and
+        therefore strictly reduced the influence set's defect count -- the guard
+        refuses anything else). `fi` is only the ledger's member attribution;
+        the move is a NODE translation and rides every member meeting there."""
+        nonlocal n_committed
+        if not getattr(cfg, "p8_junction_reseat_enable", True):
+            return False
+        delta, n_trials, n_touched = try_junction_reseat(
+            forest, geom, cfg, plate_z, unrouted, fi, node, axis, tol=tol)
+        final_rung[(cls, sid)] = "D5"
+        if delta is None:
+            ledger_rows.append((cls, sid, fi, "D5-EXHAUSTED", "D5"))
+            return False
+        n_committed += n_touched
+        junction_reseats.append((cls, sid, np.asarray(delta, float), int(n_trials)))
+        ledger_rows.append((cls, sid, fi, "D5", "D5"))
+        return True
+
+    def _try_d5(cls, sid, fi):
+        """D5 for one MEMBER site (stub / strut): re-seat its parent junction --
+        the tree-side node -- holding the embedded end fixed."""
+        if fi is None or not (0 <= fi < len(forest.members)):
+            return False
+        node, r_node, axis = _site_node_and_axis(fi)
+        return _try_d5_at(cls, sid, fi, node, axis, max(0.05, 0.5 * r_node))
+
     # ---- Phase 1: stubs (class-T stubs UNION Q-REAL), pocket solver + isolated.
     stub_resolved = stub_unresolved = 0
     qreal_resolved = qreal_unresolved = 0
+    r1_failed: list = []                  # live stub site_ids with an EMPTY R1 set
 
     def _dispose_stub(mid, resolved, rung):
         nonlocal stub_resolved, stub_unresolved, qreal_resolved, qreal_unresolved
@@ -1198,12 +1733,19 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
             else:
                 qreal_unresolved += 1
                 unresolved_items.append(("STUB", mid - Q_SITE_OFFSET, rung))
+                # a Q-REAL stub is NOT in the live member list, so it has no live
+                # defect measure -- ledgered as "QSTUB" with measure None.
+                final_rung[("QSTUB", mid - Q_SITE_OFFSET)] = rung
+                ledger_obs.append(("QSTUB", mid - Q_SITE_OFFSET, None))
             return None                       # Q-REAL: never spliced (see run_phase8)
         if resolved:
             stub_resolved += 1
             return di.site_forest_idx.get(mid)
         stub_unresolved += 1
         unresolved_items.append(("STUB", mid, rung))
+        final_rung[("STUB", mid)] = rung
+        ledger_obs.append(("STUB", mid, ("M", mid)))
+        r1_failed.append(mid)                 # escalate: R2, then D5
         return None
 
     if di.stub_sites:
@@ -1251,8 +1793,90 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
             if why == "violation" and fi in acc_by_fi:
                 newly_banned.append((fi, _cand_geom_key(acc_by_fi[fi])))
 
+    # ---- Phase 1 rung R2: SURFACE-SEED CONTACT RE-SEAT (ruling (5)) ---------
+    # Entered ONLY for live stub sites whose R1 legal set was EMPTY (Q-REAL sites
+    # are never spliced by this driver, so they never escalate here). ONE batched
+    # seed search over every escalated site, ONE batched candidate evaluation
+    # through the shared certificate, then ONE guarded splice batch -- so a
+    # re-seat is judged by exactly the law and the invariant a re-aim is.
+    r2_pending = list(r1_failed)
+    if (r2_pending and seed_index is not None and contacts is not None
+            and getattr(cfg, "p8_reseat_enable", True)):
+        want = set(r2_pending)
+        r2_sites = [s for s in di.stub_sites if s.site_id in want]
+        seeds = seed_index.seeds_for(r2_sites, di.contact_of_site, contacts,
+                                     unrouted, cfg)
+        r2res = phase8.evaluate_r2(r2_sites, seeds, geom, cfg,
+                                   revalidate_fn=stub_sel_fn)
+        accepted = []
+        acc_site = {}                       # fi -> (site_id, winner Candidate)
+        for sid in sorted(r2res):
+            final_rung[("STUB", sid)] = "R2"
+            res = r2res[sid]
+            if res.winner is None:
+                continue
+            fi = di.site_forest_idx.get(sid)
+            if fi is None:
+                continue
+            accepted.append((fi, res.winner.member, _orig_embed(forest, fi)))
+            acc_site[fi] = (sid, res.winner)
+        acc_by_fi = {fi: cm for fi, cm, _emb in accepted}
+        reasons = {}
+        n_ok, rv = splice_reaims(forest, geom, cfg, accepted,
+                                 plate_z=plate_z, unrouted=unrouted,
+                                 reasons_out=reasons)
+        n_committed += n_ok
+        rv_set = set(rv)
+        for fi, (sid, cand) in sorted(acc_site.items()):
+            if fi in rv_set:
+                reverted.append(("STUB", fi))
+                why = reasons.get(fi, "violation")
+                ledger_rows.append(("STUB", sid, fi, "REVERTED", "R2:" + why))
+                if why == "violation" and fi in acc_by_fi:
+                    newly_banned.append((fi, _cand_geom_key(acc_by_fi[fi])))
+                elif why == "no-progress":
+                    sterile_sites[("M", sid)] = ("STUB", "D6-sterile")
+                continue
+            # COMMITTED. The demand MIGRATED: write the new seat back into the
+            # contact record, or the coverage / island-birth gates (which read
+            # contact POSITIONS, not member geometry) would keep judging a point
+            # no stub is standing on. The seat was already cleared by the
+            # domain + coverage/birth guard at seed selection, so this write can
+            # never be the thing that fails a coverage gate.
+            ci = di.contact_of_site.get(sid)
+            if ci is not None and 0 <= ci < len(contacts):
+                rec = contacts[ci]
+                as_list = isinstance(rec.get("position"), list)
+                pos = np.asarray(cand.seat_c, float)
+                nrm = np.asarray(cand.seat_n, float)
+                rec["position"] = pos.tolist() if as_list else pos
+                rec["normal"] = nrm.tolist() if as_list else nrm
+            reseats.append((sid, ci, np.asarray(cand.seat_c, float),
+                            float(cand.reseat_dist_mm)))
+            stub_resolved += 1
+            stub_unresolved -= 1
+            _drop_unresolved("STUB", sid)
+            r2_pending.remove(sid)
+            committed_sites[("M", sid)] = ("STUB", "R2")
+            ledger_rows.append(("STUB", sid, fi, "R2", "R2"))
+
+    # ---- Phase 1 rung D5: PARENT-JUNCTION RE-SEAT (ruling (5)) --------------
+    # The last rung before R3 honest failure, for stubs neither re-aim nor
+    # re-seat could place. Sites are taken in the pocket solver's own total
+    # commit-priority order (worst frozen chord desc, site id asc) so the
+    # sequence is deterministic and worst-first.
+    if r2_pending and getattr(cfg, "p8_junction_reseat_enable", True):
+        wfc = di.gate.worst_chord
+        for sid in sorted(r2_pending, key=lambda i: (-float(wfc.get(i, 0.0)), i)):
+            if _try_d5("STUB", sid, di.site_forest_idx.get(sid)):
+                stub_resolved += 1
+                stub_unresolved -= 1
+                _drop_unresolved("STUB", sid)
+                committed_sites[("M", sid)] = ("STUB", "D5")
+
     # ---- Phase 2: interior struts (SM-STRUT S1), spliced AFTER stubs.
     strut_resolved = strut_unresolved = 0
+    s1_failed: list = []                  # strut site_ids with an EMPTY S1 set
     if di.strut_sites:
         sres = phase8.run_phase2_struts(
             di.strut_sites, geom, cfg,
@@ -1270,6 +1894,9 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
             else:
                 strut_unresolved += 1
                 unresolved_items.append(("STRUT", sid, sr.rung))
+                final_rung[("STRUT", sid)] = sr.rung
+                ledger_obs.append(("STRUT", sid, ("M", sid)))
+                s1_failed.append(sid)         # escalate: D5 (see below)
                 ledger_rows.append(("STRUT", sid, None, "UNRESOLVED", sr.rung))
         acc_by_fi = {fi: cm for fi, cm, _emb in accepted}
         reasons = {}
@@ -1291,8 +1918,24 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
             if why == "violation" and fi in acc_by_fi:
                 newly_banned.append((fi, _cand_geom_key(acc_by_fi[fi])))
 
+    # ---- Phase 2 rung D5: PARENT-JUNCTION RE-SEAT for struts (ruling (5)).
+    # A strut foot is a FIXED model-surface anchor (amendment E), so S1 can only
+    # pivot the shaft about it; when that cone is empty the remaining freedom is
+    # the other end -- the junction where the strut meets the tree. Same guarded
+    # co-moving transaction, so both adjoining segments are re-judged by the §5
+    # law and the D6 invariant, and connectivity is preserved by construction.
+    if s1_failed and getattr(cfg, "p8_junction_reseat_enable", True):
+        wfc = di.gate.worst_chord
+        for sid in sorted(s1_failed, key=lambda i: (-float(wfc.get(i, 0.0)), i)):
+            if _try_d5("STRUT", sid, di.site_forest_idx.get(sid)):
+                strut_resolved += 1
+                strut_unresolved -= 1
+                _drop_unresolved("STRUT", sid)
+                committed_sites[("M", sid)] = ("STRUT", "D5")
+
     # ---- Phase 3: ball breaches (SM-BALL B1), LAST -- reads FINAL shaft geometry.
     ball_resolved = ball_unresolved = 0
+    b1_failed: list = []                  # ball ids B1 could not place
     if di.ball_sites:
         def _slide_revalidate(site, sl):
             center = np.asarray(site.center, float)
@@ -1300,7 +1943,7 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
             tol = max(0.05, 0.5 * site.r)
             # pre-slide index + universe (D2 guard baseline), captured BEFORE move.
             idx_arr, end_arr, pt_arr = forest.endpoint_index()
-            pre_members, live_fi, pos_of = _live_universe(forest, unrouted)
+            pre_members, _live_fi, pos_of = _live_universe(forest, unrouted)
             saved = _translate_joint(forest, center, delta, tol=tol)
             if not saved:
                 return False
@@ -1308,7 +1951,7 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
             touched = {fi for fi, _s in saved}
             ok = (not any(v["member_idx"] in touched for v in viol)
                   and _ball_slide_guard_ok(forest, geom, cfg, plate_z, saved,
-                                           pre_members, live_fi, pos_of,
+                                           pre_members, pos_of,
                                            idx_arr, end_arr, pt_arr))
             for fi, snapm in saved:              # trial only -- always undo here
                 forest.members[fi]._restore(snapm)
@@ -1323,13 +1966,13 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
                 delta = np.asarray(br.slide.center, float) - center
                 tol = max(0.05, 0.5 * site.r)
                 idx_arr, end_arr, pt_arr = forest.endpoint_index()
-                pre_members, live_fi, pos_of = _live_universe(forest, unrouted)
+                pre_members, _live_fi, pos_of = _live_universe(forest, unrouted)
                 saved = _translate_joint(forest, center, delta, tol=tol)
                 viol = forest.revalidate(geom, cfg)
                 touched = {fi for fi, _s in saved}
                 clean = (not any(v["member_idx"] in touched for v in viol)
                          and _ball_slide_guard_ok(forest, geom, cfg, plate_z, saved,
-                                                  pre_members, live_fi, pos_of,
+                                                  pre_members, pos_of,
                                                   idx_arr, end_arr, pt_arr))
                 if not clean:
                     # D3(a) part 3 ball-ban parity: bar re-attempting the SAME slide
@@ -1342,6 +1985,9 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
                     forest.revalidate(geom, cfg)
                     ball_unresolved += 1
                     unresolved_items.append(("BALL", bid, "B1-reverted"))
+                    final_rung[("BALL", bid)] = "B1-reverted"
+                    ledger_obs.append(("BALL", bid, ("B", bid)))
+                    b1_failed.append(bid)
                     ledger_rows.append(("BALL", bid, None, "REVERTED", "B1"))
                 else:
                     ball_resolved += 1
@@ -1351,7 +1997,30 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
             else:
                 ball_unresolved += 1
                 unresolved_items.append(("BALL", bid, br.rung))
+                final_rung[("BALL", bid)] = br.rung
+                ledger_obs.append(("BALL", bid, ("B", bid)))
+                b1_failed.append(bid)
                 ledger_rows.append(("BALL", bid, None, "UNRESOLVED", br.rung))
+
+    # ---- Phase 3 rung D5: JUNCTION RE-SEAT for unresolved ball breaches.
+    # B1's candidate space is the member AXIS only -- a strict 1-D subset of the
+    # D5 lattice, which adds the two local-frame perpendiculars. So D5 on a ball
+    # is not a retry of B1's question, it is the rest of the question, and that
+    # is why a B1-REVERTED ball escalates here as well as an empty-B1 one: the
+    # revert says "no clean position ALONG THE AXIS", not "no clean position".
+    if b1_failed and getattr(cfg, "p8_junction_reseat_enable", True):
+        site_by_bid = {s.ball_id: s for s in di.ball_sites}
+        for bid in sorted(b1_failed):
+            site = site_by_bid.get(bid)
+            if site is None:
+                continue
+            if _try_d5_at("BALL", bid, None, np.asarray(site.center, float),
+                          np.asarray(site.root_dir, float),
+                          max(0.05, 0.5 * float(site.r))):
+                ball_resolved += 1
+                ball_unresolved -= 1
+                _drop_unresolved("BALL", bid)
+                committed_sites[("B", bid)] = ("BALL", "D5")
 
     return _SweepResult(
         stub_resolved=stub_resolved, stub_unresolved=stub_unresolved,
@@ -1361,14 +2030,17 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
         reverted=reverted, pocket_labels=pocket_labels,
         unresolved_items=unresolved_items, ledger_rows=ledger_rows,
         n_committed=n_committed, newly_banned=newly_banned,
-        committed_sites=committed_sites, sterile_sites=sterile_sites)
+        committed_sites=committed_sites, sterile_sites=sterile_sites,
+        reseats=reseats, junction_reseats=junction_reseats, final_rung=final_rung,
+        ledger_obs=ledger_obs)
 
 
 def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
                cfg, mesh, unrouted=(), quarantine_sites=None,
                census_authority=frozenset(), log=None,
                member_list_fn=None, frozen_snapshot=None,
-               progress=None) -> Phase8Report:
+               progress=None, islands=None, island_births=None,
+               carry_ledger=None) -> Phase8Report:
     """The Phase-8 orchestration driver (task step 1-2-3): construct sites from
     the engine gate, run the state machines in the §3.0 normative order, and
     splice accepted relocations back into `forest`. Idempotent by construction --
@@ -1421,6 +2093,25 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
     log = log if log is not None else {}
     if quarantine_sites is None:
         quarantine_sites = quarantine_sites_from_forest(forest, contacts)
+
+    # ruling (5): the R2/D5 surface-seed source, built ONCE for the whole run
+    # (the mesh does not move) and reused by every sweep -- rebuilding the face
+    # KD-tree per sweep would be exactly the per-item cost the batch-first rule
+    # forbids. Without `islands` there is no inviolable class domain to keep a
+    # re-seated demand inside, so R2 is simply not offered (see SurfaceSeedIndex).
+    seed_index = None
+    if (mesh is not None and islands is not None
+            and getattr(cfg, "p8_reseat_enable", True)):
+        seed_index = SurfaceSeedIndex(mesh, islands=islands,
+                                      island_births=island_births)
+    # ruling (5): the PERSISTENT formally-unresolvable ledger. Caller-owned when
+    # supplied (`carry_ledger`), so its rows survive not just sweeps but PASSES --
+    # a site the ladder gave up on in an earlier relocation call keeps its
+    # first-seen sweep and accumulates attempts instead of being re-reported as a
+    # fresh discovery.
+    unresolvable = carry_ledger if carry_ledger is not None else {}
+    reseats_all: list = []
+    junction_reseats_all: list = []
 
     max_sweeps = int(getattr(cfg, "p8_max_relocate_sweeps", 8))
     if member_list_fn is None:
@@ -1520,7 +2211,23 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
         entered_any = True
 
         sw = _relocation_sweep(di, forest, geom, cfg, banned=banned,
-                               plate_z=plate_z, unrouted=unrouted)
+                               plate_z=plate_z, unrouted=unrouted,
+                               seed_index=seed_index, contacts=contacts)
+        reseats_all.extend((int(sid), (None if ci is None else int(ci)),
+                            float(pos[0]), float(pos[1]), float(pos[2]), float(d))
+                           for sid, ci, pos, d in sw.reseats)
+        junction_reseats_all.extend(
+            (str(cls), int(sid), float(dv[0]), float(dv[1]), float(dv[2]), int(nt))
+            for cls, sid, dv, nt in sw.junction_reseats)
+        # ruling (5): fold THIS sweep's honest failures into the persistent
+        # ledger -- one row per site, updated (never duplicated), carrying the
+        # last rung the ladder actually reached and the live defect measure.
+        for cls, sid, mkey in sw.ledger_obs:
+            ledger_touch(unresolvable, cls, sid,
+                         sw.final_rung.get((cls, sid), "?"),
+                         "ladder-exhausted", _sweep,
+                         None if mkey is None
+                         else _site_defect_measure(di, mkey, ne_set))
         # accumulate this sweep's collision-reverts into the monotone ban set so
         # the NEXT sweep cannot re-pick the reverting winner (defect-3 anti-churn).
         for fi, gk in sw.newly_banned:
@@ -1595,7 +2302,11 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
             dt_s=round(time.time() - t0, 3), entered_ladder=False,
             sweeps=0, converged=True, committed_by_sweep=(),
             provenance_ledger=(), moot_member_ids=tuple(first_moot),
-            target_source=first_target_source, sweep_tail_monotone=True, n_banned=0)
+            target_source=first_target_source, sweep_tail_monotone=True, n_banned=0,
+            # a no-op pass resolves nothing and un-resolves nothing: the carried
+            # ledger is reported VERBATIM, never cleared. That is what makes it a
+            # persistent register across passes rather than a per-call snapshot.
+            unresolvable_ledger=unresolvable_rows(unresolvable))
 
     # D3(a) part 1: retired sites are honest-unresolved at their last rung. Move
     # each out of the cumulative resolved tally into the unresolved tally + trace
@@ -1624,6 +2335,12 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
             ball_unresolved += 1
         unresolved_items.append((rcls, sid, rung))
         retired_sites.append((rcls, sid, rung))
+        # a retirement IS a formally-unresolvable outcome (the site was given up
+        # on, honestly) -- it belongs in the persistent ledger with its reason,
+        # not only in the retirement trace.
+        ledger_touch(unresolvable, rcls, sid, rung,
+                     "sterile" if rung == "D6-sterile" else "retired-no-progress",
+                     sweeps_run)
 
     # converged iff a further sweep is provably a no-op: either the snapshot
     # emptied / every remaining target retired, or the last executed sweep
@@ -1659,7 +2376,10 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
         target_source=first_target_source,
         sweep_tail_monotone=sweep_tail_monotone, n_banned=n_banned,
         retired_sites=tuple(retired_sites),
-        defects_by_sweep=tuple(defects_by_sweep))
+        defects_by_sweep=tuple(defects_by_sweep),
+        reseats=tuple(reseats_all),
+        junction_reseats=tuple(junction_reseats_all),
+        unresolvable_ledger=unresolvable_rows(unresolvable))
 
 
 def _orig_embed(forest, fi):

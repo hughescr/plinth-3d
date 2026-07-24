@@ -298,7 +298,7 @@ def brace_and_size(mesh, forest, unrouted, surface_tree, plate_z, cfg, log=None,
 
 def relocate(mesh, forest, unrouted, contacts, carried, tip_r, plate_z, cfg,
              geom=None, log=None, census_authority=frozenset(), pass_idx=0,
-             progress=None):
+             progress=None, islands=None, island_births=None, carry_ledger=None):
     """Phase-8 RELOCATION STAGE (SPEC-P8-RELOCATE §3.0), wired post-brace /
     pre-final-verify. Constructs the frozen defect snapshot + the SM-STUB /
     SM-STRUT / SM-BALL sites from the engine's OWN gate output, runs the state
@@ -330,7 +330,13 @@ def relocate(mesh, forest, unrouted, contacts, carried, tip_r, plate_z, cfg,
         forest, members, balls, contacts, carried, tip_r, plate_z, geom, cfg, mesh,
         unrouted=unrouted, census_authority=census_authority, log=log,
         member_list_fn=member_list_fn, frozen_snapshot=frozen_snapshot,
-        progress=progress)
+        progress=progress,
+        # ruling (5): `islands` is the R2 re-seat's INVIOLABLE CLASS DOMAIN (a
+        # demand may migrate within its island, never onto another) and, with
+        # `island_births`, the coverage / neighbor-birth guard's input. Without
+        # them the driver does not offer R2 at all -- it never guesses a domain.
+        islands=islands, island_births=island_births,
+        carry_ledger=carry_ledger)
     rep = dict(
         entered_ladder=report.entered_ladder, dt_s=report.dt_s,
         n_stub_sites=report.n_stub_sites, n_strut_sites=report.n_strut_sites,
@@ -350,17 +356,35 @@ def relocate(mesh, forest, unrouted, contacts, carried, tip_r, plate_z, cfg,
         defects_by_sweep=list(report.defects_by_sweep),
         n_retired=len(report.retired_sites),
         retired_sites=[list(r) for r in report.retired_sites],
+        # ruling (5): escalation-rung evidence + the persistent honest-failure
+        # register. `unresolvable_ledger` rows are
+        # (class, site_id, last_rung, reason, first_sweep, last_sweep,
+        #  n_attempts, measure_mm) -- see phase8_driver._LEDGER_FIELDS.
+        n_reseats=len(report.reseats),
+        reseats=[list(r) for r in report.reseats],
+        n_junction_reseats=len(report.junction_reseats),
+        junction_reseats=[list(r) for r in report.junction_reseats],
+        n_unresolvable=len(report.unresolvable_ledger),
+        unresolvable_ledger=[list(r) for r in report.unresolvable_ledger],
         snapshot=report.snapshot_summary)
     # defect-5: DISTINCT per-fix-pass ledger keys (relocate_p0, relocate_p1, ...)
     # so a later fix-pass's report never overwrites an earlier one; `relocate`
     # keeps the latest for back-compat.
     log["relocate"] = rep
     log[f"relocate_p{pass_idx}"] = rep
+    # ruling (5): the persistent formally-unresolvable register is surfaced at the
+    # TOP of the log, not only inside the per-pass relocate block -- it is the
+    # honest-failure statement for the whole run and must be readable without
+    # knowing which pass last touched it.
+    log["p8_unresolvable"] = rep["unresolvable_ledger"]
+    log["p8_n_unresolvable"] = rep["n_unresolvable"]
     if report.entered_ladder:
         print(f"[v5] .. relocate sites stub={report.n_stub_sites} "
               f"strut={report.n_strut_sites} ball={report.n_ball_sites} -> "
               f"resolved stub={report.stub_resolved} strut={report.strut_resolved} "
               f"ball={report.ball_resolved} (reverted {len(report.reverted_splices)}) "
+              f"reseat={len(report.reseats)} d5={len(report.junction_reseats)} "
+              f"unresolvable={len(report.unresolvable_ledger)} "
               f"sweeps={report.sweeps} converged={report.converged}",
               file=sys.stderr, flush=True)
     return rep
@@ -436,7 +460,7 @@ def run(mesh, cfg, log=None):
                                              blocked_trees=[]),
                         removal_violations=[]),
             volume=dict(member_ml=0.0, ball_ml=0.0, total_ml=0.0, by_kind_ml={}),
-            log=log)
+            island_births=pre["island_births"], log=log)
 
     # Built once, reused for every clearance query this run makes (see
     # routing.build_surface_tree's docstring). Tighter sample than the
@@ -547,6 +571,11 @@ def run(mesh, cfg, log=None):
     # So the ladder now runs ONCE, after every fix pass' construct/rewire/brace has
     # settled, immediately before the FINAL verify -- which is re-run over the
     # relocated forest so the returned report judges what is actually emitted.
+    # ruling (5): the persistent formally-unresolvable ledger is owned HERE, above
+    # the relocation call, so its rows are carried across passes -- a run that
+    # relocates more than once (or a future caller that re-enters the stage) keeps
+    # one register per site instead of a fresh per-call snapshot.
+    p8_ledger: dict = {}
     if getattr(cfg, "p8_relocate_enable", False) and forest is not None:
         with _stage(log, "relocate", t0):
             _prog_r = _ProgressCell()
@@ -554,7 +583,9 @@ def run(mesh, cfg, log=None):
             with _ticker("relocate", lambda: _prog_r.n, max_sweeps,
                          unit="sweeps"):
                 relocate(mesh, forest, unrouted, contacts, carried, tip_r,
-                         plate_z, cfg, geom=geom, log=log, progress=_prog_r)
+                         plate_z, cfg, geom=geom, log=log, progress=_prog_r,
+                         islands=islands, island_births=island_births,
+                         carry_ledger=p8_ledger)
         tree.assert_all_certified(forest)
         members, balls = live_member_lists(forest, unrouted, plate_z, cfg)
         log["forest_relocated"] = dict(
@@ -580,6 +611,10 @@ def run(mesh, cfg, log=None):
             n_murray_violations=len(report["murray_violations"]),
             n_uncovered_island_births=len(report["uncovered_island_births"]),
             n_removal_blocked_trees=len(report["removal_violations"]),
+            # ruling (5): the honest-failure count belongs next to the gate
+            # numbers -- a reader of verify[final] must see what relocation gave
+            # up on, not just what the gates still flag.
+            n_unresolvable=int(log.get("p8_n_unresolvable", 0)),
         )
 
     with _stage(log, "finish", t0):
@@ -599,6 +634,12 @@ def run(mesh, cfg, log=None):
         islands=islands, contacts=contacts, carried_area_mm2=carried, tip_r_mm=tip_r,
         forest=forest, members=members, balls=balls, unrouted=unrouted, minima=minima,
         plate_z=plate_z, verify=report, volume=volume, log=log,
+        # ruling (5): the R2 re-seat's domain + birth-guard inputs. Returned so a
+        # caller re-entering `relocate` over this result (the §6.10 idempotence
+        # pass, an acceptance harness) can hand the stage the SAME domain the run
+        # itself used -- a second pass offered a DIFFERENT ladder would not be
+        # testing idempotence of anything.
+        island_births=island_births,
     )
 
 

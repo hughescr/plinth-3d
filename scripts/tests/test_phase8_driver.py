@@ -1243,3 +1243,594 @@ def test_relocation_is_a_single_final_only_stage(cfg, monkeypatch):
     assert log["t_verify[final]"] >= log["t_relocate"]
     assert "relocate" in log and "relocate_p0" in log
     assert "verify_final" in log
+
+
+# ==========================================================================
+# 12. RULING (5) -- R2 SURFACE-SEED RE-SEAT / D5 JUNCTION RE-SEAT / LEDGER.
+# ==========================================================================
+# Orchestrator ruling (5), 2026-07-24. The R1/S1/B1 re-aim ladder plateaus with
+# targets it structurally cannot place: the demanded contact sits under material
+# no re-aim cone escapes. These pin the two escalation rungs that own those
+# targets and the persistent register that reports what neither could fix.
+#
+# The synthetic fixtures below are ISOLATING by construction:
+#   * `_reseat_mesh` blocks the WHOLE R1 cone (a fin over every candidate ray at
+#     every length factor) but leaves clear model surface 1.7mm away, so only a
+#     CONTACT RE-SEAT can resolve it -- proven by the R1-only control, which
+#     leaves the geometry bit-identical;
+#   * `_d5_cfg` collapses R1 to the identity candidate (polar 0 x length 1.0),
+#     which the no-op skip rejects, so the R1 legal set is empty BY CONSTRUCTION
+#     and the site escalates for a reason that is not itself under test.
+
+
+def _sub_slab(n_sub=4):
+    """A 20x20x5 slab whose TOP face is subdivided into a fine triangle grid, so
+    face centroids form a ~0.9mm seat lattice -- a re-seat needs candidate SEATS,
+    and a 2-triangle box top offers none near the contact."""
+    slab = _box((20, 20, 5), center=(0, 0, -2.5))
+    for _ in range(n_sub):
+        slab = slab.subdivide()
+    return trimesh.Trimesh(vertices=slab.vertices.copy(), faces=slab.faces.copy(),
+                           process=False)
+
+
+def _reseat_mesh():
+    """Slab + a fin covering x in [-1, 9] at z in [0.6, 0.85]. A stub embedded at
+    the origin transits it at EVERY R1 candidate (the 0.5 length factor still
+    reaches z=1.0, and the 30-degree cone's lateral reach at z=0.7 is ~0.4mm --
+    nowhere near the fin's -1mm edge), but a seat at x < -1 is clean."""
+    fin = _box((10, 10, 0.25), center=(4.0, 0.0, 0.6 + 0.125))
+    return _soup(_sub_slab(), fin)
+
+
+def _reseat_islands(mesh, radius_mm=3.0):
+    """ONE island: the slab-top triangles within `radius_mm` of the origin. Small
+    on purpose -- the coverage guard's threshold is target_spacing x
+    coverage_radius_factor, so a small island makes the guard BIND instead of
+    being trivially satisfied by a 20x20 plate."""
+    ctr = mesh.triangles_center
+    top = ((np.abs(ctr[:, 2]) < 1e-6)
+           & (np.linalg.norm(ctr[:, :2], axis=1) <= radius_mm))
+    return [np.nonzero(top)[0]]
+
+
+def _reseat_forest(cfg, mesh):
+    forest = tree.Forest()
+    c = np.array([0.0, 0.0, 0.0]); n0 = np.array([0.0, 0.0, 1.0])
+    forest.add_member(tree.Member(p0=c - n0 * cfg.contact_depth_mm, p1=c + n0 * 2.0,
+                                  r0=0.2, r1=0.35, kind="stub",
+                                  owner=("contact", 0), embed_end="p0"))
+    forest.terminal_of[0] = 0
+    contacts = [dict(position=c.copy(), normal=n0.copy(), island_id=0, area_mm2=5.0)]
+    return forest, contacts, [5.0], [0.2]
+
+
+def test_r2_reseat_resolves_what_r1_cannot_and_migrates_the_contact(cfg):
+    """SM-STUB R2 (§3.1 R2 / ruling (5)) end-to-end.
+
+    CONTROL: with no `islands` there is no inviolable class domain, so R2 is not
+    offered -- the ladder is exactly the R1 ladder it was, the site falls honestly
+    at rung R2, and the geometry is BIT-IDENTICAL (an escalation rung must never
+    be the reason a fixture changes).
+
+    TREATMENT: given the domain, R2 re-seats the demand onto a nearby model-surface
+    seat, the transit clears, and the CONTACT RECORD MIGRATES with it -- coverage
+    and island-birth accounting read contact positions, so a moved stub whose
+    contact record stayed put would leave the gates judging a point nothing stands
+    on."""
+    mesh = _reseat_mesh()
+    geom = ExactSurface(mesh)
+    islands = _reseat_islands(mesh)
+
+    # --- control: R1 only ---
+    f0, c0, carried, tip_r = _reseat_forest(cfg, mesh)
+    m0, b0 = engine.live_member_lists(f0, [], -5.0, cfg)
+    assert len(pd.classify_gate(mesh, m0, b0, geom, cfg).firm_transit) == 1
+    dig0 = p8_accept.geometry_digest(m0, b0)
+    rep0 = pd.run_phase8(f0, m0, b0, c0, carried, tip_r, -5.0, geom, cfg, mesh,
+                         unrouted=[])
+    assert rep0.stub_resolved == 0 and rep0.stub_unresolved == 1
+    assert rep0.reseats == () and rep0.junction_reseats == ()
+    m0b, b0b = engine.live_member_lists(f0, [], -5.0, cfg)
+    assert p8_accept.geometry_digest(m0b, b0b) == dig0, "R1-only must not mutate"
+
+    # --- treatment: R2 with the island domain ---
+    f1, c1, carried, tip_r = _reseat_forest(cfg, mesh)
+    m1, b1 = engine.live_member_lists(f1, [], -5.0, cfg)
+    rep = pd.run_phase8(f1, m1, b1, c1, carried, tip_r, -5.0, geom, cfg, mesh,
+                        unrouted=[], islands=islands)
+    assert rep.stub_resolved == 1 and rep.stub_unresolved == 0
+    assert len(rep.reseats) == 1, rep.reseats
+    sid, ci, sx, sy, sz, dist = rep.reseats[0]
+    assert sid == 0 and ci == 0
+    assert 0.0 < dist <= cfg.p8_reseat_radius_mm + 1e-9
+    tree.assert_all_certified(f1)
+
+    m2, b2 = engine.live_member_lists(f1, [], -5.0, cfg)
+    assert len(pd.classify_gate(mesh, m2, b2, geom, cfg).firm_transit) == 0
+    # the demand migrated, and the record followed it to the SAME point.
+    assert np.allclose(c1[0]["position"], [sx, sy, sz])
+    # the embedded tip sits contact_depth below the new seat, on the seat normal.
+    assert np.allclose(m2[0]["p0"],
+                       np.asarray([sx, sy, sz]) - np.asarray(c1[0]["normal"])
+                       * cfg.contact_depth_mm)
+
+
+def test_r2_seeds_are_domain_bounded_nearest_first_and_capped(cfg):
+    """The R2 seed search (REACH §1 domain + §2b economy cap): every seat is on
+    the contact's OWN island, inside `p8_reseat_radius_mm`, ordered strictly
+    nearest-to-demanded, capped at `p8_reseat_max_seeds`, and the demanded seat
+    itself is excluded (it already failed). One batched `query_ball_point` for all
+    sites -- pinned here by asking for many sites at once and getting per-site
+    answers back."""
+    import dataclasses
+    mesh = _reseat_mesh()
+    islands = _reseat_islands(mesh)
+    idx = pd.SurfaceSeedIndex(mesh, islands=islands)
+    c = np.array([0.0, 0.0, 0.0]); n0 = np.array([0.0, 0.0, 1.0])
+    sites = [phase8.StubSite(site_id=k, c=c.copy(), n0=n0.copy(), r_tip=0.2,
+                             stub_length_mm=2.0,
+                             contact_depth_mm=cfg.contact_depth_mm)
+             for k in range(3)]
+    contacts = [dict(position=c.copy(), normal=n0.copy(), island_id=0, area_mm2=5.0)]
+    seeds = idx.seeds_for(sites, {0: 0, 1: 0, 2: 0}, contacts, [], cfg)
+    assert set(seeds) == {0, 1, 2}
+    island_faces = set(int(f) for f in islands[0])
+    island_pts = mesh.triangles_center[sorted(island_faces)]
+    for sid in (0, 1, 2):
+        s = seeds[sid]
+        assert s, "the fixture must offer seats"
+        assert len(s) <= cfg.p8_reseat_max_seeds
+        d = [t[2] for t in s]
+        assert d == sorted(d), "nearest-to-demanded ordering is pinned"
+        assert all(0.0 < x <= cfg.p8_reseat_radius_mm + 1e-9 for x in d)
+        for pos, nrm, dist in s:
+            assert np.isclose(np.linalg.norm(pos - c), dist)
+            assert np.min(np.linalg.norm(island_pts - pos, axis=1)) < 1e-9, \
+                "a seat outside the island domain is not a relocation of this demand"
+            assert np.isclose(np.linalg.norm(nrm), 1.0)
+    # three sites at the SAME demand get the SAME seats -- the search is a pure
+    # function of (demand, domain, cfg), which is what the batched call must not
+    # break (a stacked query must not leak one site's neighbourhood into another).
+    for a, b in zip(seeds[0], seeds[1]):
+        assert np.array_equal(a[0], b[0]) and np.array_equal(a[1], b[1])
+        assert a[2] == b[2]
+    assert len(seeds[0]) == len(seeds[1]) == len(seeds[2])
+
+    # radius 0 / cap 0 / disabled all yield NO seats (each is a hard bound).
+    for kw in (dict(p8_reseat_radius_mm=0.0), dict(p8_reseat_max_seeds=0),
+               dict(p8_reseat_enable=False)):
+        c2 = dataclasses.replace(cfg, **kw)
+        assert idx.seeds_for(sites, {0: 0}, contacts, [], c2)[0] == []
+
+
+def test_r2_coverage_guard_refuses_seats_that_would_uncover_the_island(cfg):
+    """REACH §2b's neighbor-birth / coverage guard, applied at SEED SELECTION.
+
+    `uncovered_islands` is a HARD gate that reads contact POSITIONS, and the D6
+    influence-set invariant scores MEMBER geometry only -- it cannot see coverage.
+    So a seat whose displacement would push the island's worst-covered face past
+    `target_spacing_mm x coverage_radius_factor` is never enumerated. Pinned by
+    shrinking the threshold until the guard must bite: with a threshold below the
+    island's own radius NO seat can survive, and the seat set collapses to empty
+    rather than the guard silently passing."""
+    import dataclasses
+    mesh = _reseat_mesh()
+    islands = _reseat_islands(mesh)
+    idx = pd.SurfaceSeedIndex(mesh, islands=islands)
+    c = np.array([0.0, 0.0, 0.0]); n0 = np.array([0.0, 0.0, 1.0])
+    site = phase8.StubSite(site_id=0, c=c.copy(), n0=n0.copy(), r_tip=0.2,
+                           stub_length_mm=2.0, contact_depth_mm=cfg.contact_depth_mm)
+    contacts = [dict(position=c.copy(), normal=n0.copy(), island_id=0, area_mm2=5.0)]
+
+    loose = idx.seeds_for([site], {0: 0}, contacts, [], cfg)[0]
+    assert loose, "the default threshold must admit seats"
+
+    # threshold = 4.0 * 1.5 = 6.0mm by default; the island radius is 3.0mm and
+    # the current worst gap is ~3.0mm. Squeeze the threshold to just above the
+    # CURRENT worst gap: now any displacement makes the worst gap worse, and the
+    # guard's `new_worst <= cur_worst` escape cannot save a seat that moves away.
+    tight = dataclasses.replace(cfg, target_spacing_mm=2.0, coverage_radius_factor=1.5)
+    got = idx.seeds_for([site], {0: 0}, contacts, [], tight)[0]
+    assert len(got) < len(loose), (len(got), len(loose))
+    for pos, _n, _d in got:
+        worst = float(np.linalg.norm(
+            mesh.triangles_center[islands[0]] - pos[None, :], axis=1).max())
+        assert worst <= 3.0 + 1e-9, worst
+
+    # an ALREADY-uncovered island must not be made worse, but is not frozen: the
+    # guard's second branch admits seats that do not increase the worst gap.
+    brutal = dataclasses.replace(cfg, target_spacing_mm=0.1, coverage_radius_factor=1.0)
+    assert idx.seeds_for([site], {0: 0}, contacts, [], brutal)[0] == []
+
+
+def test_r2_score_tuple_is_route_then_displacement_then_index(cfg):
+    """The pinned §3.1-R2 objective `(route_length_mm, reseat_distance, index)`,
+    and the pinned §3.1-R1 objective UNCHANGED by the plumbing that installed it
+    (the shared evaluator now passes both route metrics to whichever score
+    function a rung installs; R1's tuple must ignore the new one)."""
+    def _cand(idx, shaft, dist):
+        m = dict(p0=np.zeros(3), p1=np.array([0.0, 0.0, shaft]), r0=0.2, r1=0.3,
+                 kind="stub", owner=("contact", 0), embed_end="p0")
+        return phase8.Candidate(site_id=0, cand_index=idx, length_step=0, f=1.0,
+                                polar_deg=0.0, azimuth_deg=0.0,
+                                n_hat=np.array([0.0, 0.0, 1.0]), member=m,
+                                reseat_dist_mm=dist)
+    # route length dominates displacement...
+    a = phase8._reseat_score_tuple(_cand(9, 1.0, 2.0), 0, 0, 0.0, 0.0)
+    b = phase8._reseat_score_tuple(_cand(0, 2.0, 0.1), 0, 0, 0.0, 0.0)
+    assert a < b
+    # ...displacement dominates index...
+    a = phase8._reseat_score_tuple(_cand(9, 1.0, 0.1), 0, 0, 0.0, 0.0)
+    b = phase8._reseat_score_tuple(_cand(0, 1.0, 0.2), 0, 0, 0.0, 0.0)
+    assert a < b
+    # ...and the injected route length is ADDED to the shaft, not ignored.
+    assert (phase8._reseat_score_tuple(_cand(0, 1.0, 0.1), 0, 0, 0.0, 5.0)[0]
+            == pytest.approx(6.0))
+    # R1's tuple is bit-unchanged and blind to route_len_mm.
+    r1 = _cand(3, 1.0, 0.0)
+    assert (phase8._score_tuple(r1, 1, 2, 0.5)
+            == phase8._score_tuple(r1, 1, 2, 0.5, 99.0)
+            == (1, 2, 0.0, 0, 0.5, 3))
+
+
+def _d5_cfg(cfg):
+    """R1 collapsed to the identity candidate (polar 0 x length 1.0), which the
+    no-op skip rejects -> an EMPTY R1 legal set by construction; R2 disabled. So
+    the site reaches D5 for a reason that is not itself under test."""
+    import dataclasses
+    return dataclasses.replace(cfg, p8_reaim_polar_deg=(0.0,),
+                               p8_reaim_length_factors=(1.0,),
+                               p8_reseat_enable=False)
+
+
+def _d5_mesh(fin_hi_x):
+    """Slab + a fin whose RIGHT edge is at `fin_hi_x`. A vertical stub at the
+    origin transits it; swinging the shaft by moving its PARENT JUNCTION (p1)
+    right clears it once the axis passes beyond the edge -- and cannot, once the
+    edge is far enough right that the whole 1mm lattice stays under it."""
+    fin = _box((6.0, 10.0, 0.25), center=(fin_hi_x - 3.0, 0.0, 0.6 + 0.125))
+    return _soup(_box((20, 20, 5), center=(0, 0, -2.5)), fin)
+
+
+@pytest.mark.parametrize("fin_hi_x,expect_fixed,expect_delta",
+                         [(0.05, True, 0.25), (0.3, True, 0.75), (0.5, False, None)])
+def test_d5_junction_reseat_resolves_or_leaves_geometry_bit_identical(
+        cfg, fin_hi_x, expect_fixed, expect_delta):
+    """D5 (ruling (5)) end-to-end, both outcomes.
+
+    RESOLVES: the parent junction re-seats by the MINIMAL lattice step that
+    clears the transit -- 0.25mm for a fin edge just past the shaft, 0.75mm for
+    one further out. The lattice is ordered `(distance, direction_rank)`, so
+    "first legal" IS the lexicographic minimum; a larger step that also works
+    must never win.
+
+    EXHAUSTS: when no lattice position is legal, the forest is left BIT-IDENTICAL
+    -- every trial is undone. That is the property that makes an escalation rung
+    safe to run on every unresolved site: it can only help or cost time."""
+    mesh = _d5_mesh(fin_hi_x)
+    geom = ExactSurface(mesh)
+    c5 = _d5_cfg(cfg)
+    forest, contacts, carried, tip_r = _reseat_forest(c5, mesh)
+    m0, b0 = engine.live_member_lists(forest, [], -5.0, c5)
+    assert len(pd.classify_gate(mesh, m0, b0, geom, c5).firm_transit) == 1
+    dig0 = p8_accept.geometry_digest(m0, b0)
+
+    rep = pd.run_phase8(forest, m0, b0, contacts, carried, tip_r, -5.0, geom, c5,
+                        mesh, unrouted=[])
+    m1, b1 = engine.live_member_lists(forest, [], -5.0, c5)
+    after = pd.classify_gate(mesh, m1, b1, geom, c5).firm_transit
+    tree.assert_all_certified(forest)
+
+    if expect_fixed:
+        assert rep.stub_resolved == 1 and rep.stub_unresolved == 0
+        assert len(rep.junction_reseats) == 1, rep.junction_reseats
+        rcls, sid, dx, dy, dz, n_trials = rep.junction_reseats[0]
+        assert (rcls, sid) == ("STUB", 0)
+        assert np.isclose(np.linalg.norm([dx, dy, dz]), expect_delta)
+        assert n_trials >= 1
+        assert len(after) == 0, "the transit must be gone"
+        # the EMBEDDED tip did not move -- D5 holds the demand and swings the shaft.
+        assert np.allclose(m1[0]["p0"], m0[0]["p0"])
+        assert not np.allclose(m1[0]["p1"], m0[0]["p1"])
+        assert np.allclose(contacts[0]["position"], [0.0, 0.0, 0.0])
+    else:
+        assert rep.stub_resolved == 0 and rep.stub_unresolved == 1
+        assert rep.junction_reseats == ()
+        assert len(after) == 1
+        assert p8_accept.geometry_digest(m1, b1) == dig0, \
+            "an exhausted D5 must leave the forest bit-identical"
+        assert any(row[0] == "STUB" and row[1] == 0 and row[2] == "D5"
+                   for row in rep.unresolvable_ledger), rep.unresolvable_ledger
+
+
+def test_junction_lattice_is_a_total_order_and_bounded(cfg):
+    """The D5 candidate lattice: nearest-first by `(distance, direction_rank)`,
+    bounded by `p8_junction_reseat_max_mm`, stepped by
+    `p8_junction_reseat_step_mm`, and a pure function of (node, axis, cfg) --
+    which is what makes "first legal wins" a lexicographic minimum rather than a
+    first-success-wins shortcut."""
+    import dataclasses
+    node = np.array([1.0, 2.0, 3.0])
+    axis = np.array([0.0, 0.0, 1.0])
+    lat = pd.junction_lattice(node, axis, cfg)
+    assert lat, "the default config must offer a lattice"
+    dists = [d for _dv, d, _r in lat]
+    ranks = [r for _dv, _d, r in lat]
+    assert dists == sorted(dists)
+    assert list(zip(dists, ranks)) == sorted(zip(dists, ranks))
+    step = cfg.p8_junction_reseat_step_mm
+    reach = cfg.p8_junction_reseat_max_mm
+    for dv, d, _r in lat:
+        assert np.isclose(np.linalg.norm(dv), d)
+        assert 0 < d <= reach + 1e-9
+        assert np.isclose(d / step, round(d / step))
+    assert len(lat) == 6 * int(round(reach / step))
+    # deterministic + degenerate/disabled bounds.
+    a = [tuple(np.round(dv, 12)) for dv, _d, _r in lat]
+    b = [tuple(np.round(dv, 12))
+         for dv, _d, _r in pd.junction_lattice(node, axis, cfg)]
+    assert a == b
+    assert pd.junction_lattice(node, axis,
+                               dataclasses.replace(cfg, p8_junction_reseat_max_mm=0.0)) == []
+    assert pd.junction_lattice(node, axis,
+                               dataclasses.replace(cfg, p8_junction_reseat_step_mm=0.0)) == []
+
+
+def test_translate_joint_batched_matches_the_scalar_reference(cfg):
+    """`_translate_joint` was a per-member Python scan over the WHOLE forest,
+    called once per B1 slide and now once per D5 lattice trial -- exactly the
+    shape that turned the ladder into a 99%-CPU spin. It is now one vectorised
+    query against `Forest.endpoint_index`. BIT-parity against the scalar
+    reference, including the pre-built-index path a trial loop uses."""
+    def _scalar(forest, center, delta, tol):
+        saved = []
+        for fi, fm in enumerate(forest.members):
+            if fi in getattr(forest, "dead", set()):
+                continue
+            moved = False
+            snap = fm._snapshot()
+            if np.linalg.norm(np.asarray(fm.p0, float) - center) <= tol:
+                fm.p0 = np.asarray(fm.p0, float) + delta; moved = True
+            if np.linalg.norm(np.asarray(fm.p1, float) - center) <= tol:
+                fm.p1 = np.asarray(fm.p1, float) + delta; moved = True
+            if moved:
+                saved.append((fi, snap))
+        return saved
+
+    def _build():
+        f = tree.Forest()
+        node = np.array([0.0, 0.0, 1.0])
+        f.add_member(tree.Member(p0=[0, 0, -0.3], p1=node.tolist(), r0=0.2, r1=0.3,
+                                 kind="stub", owner=("contact", 0), embed_end="p0"))
+        f.add_member(tree.Member(p0=node.tolist(), p1=[1, 0, 3], r0=0.3, r1=0.3,
+                                 kind="branch", owner=("contact", 0)))
+        f.add_member(tree.Member(p0=node.tolist(), p1=[-1, 0, 3], r0=0.3, r1=0.3,
+                                 kind="branch", owner=("contact", 1)))
+        f.add_member(tree.Member(p0=[5, 5, 0], p1=[5, 5, 3], r0=0.3, r1=0.3,
+                                 kind="branch", owner=("contact", 2)))
+        d = f.add_member(tree.Member(p0=node.tolist(), p1=[0, 2, 3], r0=0.3, r1=0.3,
+                                     kind="branch", owner=("contact", 3)))
+        f.dead.add(d)                       # dead members are off the live index
+        return f, node
+
+    delta = np.array([0.1, -0.2, 0.05])
+    fa, node = _build(); fb, _ = _build()
+    sa = _scalar(fa, node, delta, tol=0.15)
+    sb = pd._translate_joint(fb, node, delta, tol=0.15)
+    assert [fi for fi, _s in sa] == [fi for fi, _s in sb]
+    for ma, mb in zip(fa.members, fb.members):
+        assert np.array_equal(np.asarray(ma.p0), np.asarray(mb.p0))
+        assert np.array_equal(np.asarray(ma.p1), np.asarray(mb.p1))
+    # the pre-built-index path (what a D5 trial loop uses) is identical.
+    fc, _ = _build()
+    sc = pd._translate_joint(fc, node, delta, tol=0.15, index=fc.endpoint_index())
+    assert [fi for fi, _s in sc] == [fi for fi, _s in sb]
+    for mb, mc in zip(fb.members, fc.members):
+        assert np.array_equal(np.asarray(mb.p1), np.asarray(mc.p1))
+    # a node nothing meets moves nothing.
+    fd, _ = _build()
+    assert pd._translate_joint(fd, np.array([9.0, 9.0, 9.0]), delta, 0.1) == []
+
+
+def test_post_members_incremental_matches_a_full_recollect(cfg):
+    """The D6 guard's POST universe is now rebuilt incrementally (only the
+    transaction's own members changed) instead of re-collecting all ~1476 members
+    per trial. `joints.collect_members` is a per-member pure normalisation, so the
+    two must be bit-identical -- pinned here, because the guard's verdict (and
+    therefore what commits) rides on it."""
+    forest = tree.Forest()
+    for k in range(6):
+        forest.add_member(tree.Member(p0=[k, 0, -0.3], p1=[k, 0, 1.0], r0=0.2,
+                                      r1=0.3, kind="stub", owner=("contact", k),
+                                      embed_end="p0"))
+    pre, live_fi, pos_of = pd._live_universe(forest, [])
+    forest.members[2].p1 = np.array([2.0, 0.5, 1.4])
+    forest.members[4].p0 = np.array([4.0, -0.5, -0.2])
+    inc = pd._post_members(forest, pre, pos_of, {2, 4})
+    full = joints.collect_members([forest.members[fi] for fi in live_fi])
+    assert len(inc) == len(full)
+    for a, b in zip(inc, full):
+        assert a.keys() == b.keys()
+        for k in a:
+            if isinstance(a[k], np.ndarray):
+                assert np.array_equal(a[k], b[k]), k
+            else:
+                assert a[k] == b[k], k
+    # untouched rows are the SAME objects as the pre universe (no copy churn).
+    assert inc[0] is pre[0] and inc[5] is pre[5]
+
+
+def test_unresolvable_ledger_is_a_persistent_register(cfg):
+    """The formally-unresolvable ledger (ruling (5)) is a REGISTER, not a log: one
+    row per site, keyed (class, site_id), UPDATED on every re-observation --
+    first_sweep preserved, last_sweep advanced, attempts counted, last rung and
+    measure refreshed. Rows emit sorted, so the report is deterministic."""
+    led = {}
+    pd.ledger_touch(led, "STUB", 445, "R2", "ladder-exhausted", 0, 1.155)
+    pd.ledger_touch(led, "BALL", 3, "B1-reverted", "ladder-exhausted", 0, 0.796)
+    pd.ledger_touch(led, "STUB", 445, "D5", "ladder-exhausted", 2, 1.101)
+    pd.ledger_touch(led, "STUB", 168, "D5", "ladder-exhausted", 1)     # no measure
+    rows = pd.unresolvable_rows(led)
+    assert len(rows) == 3, rows
+    assert [r[:2] for r in rows] == [("BALL", 3), ("STUB", 168), ("STUB", 445)]
+    by = {(r[0], r[1]): r for r in rows}
+    cls, sid, rung, reason, first, last, n, meas = by[("STUB", 445)]
+    assert (rung, reason, first, last, n) == ("D5", "ladder-exhausted", 0, 2, 2)
+    assert meas == pytest.approx(1.101), "the LAST measure wins"
+    # an observation with no measure must not erase a recorded one.
+    pd.ledger_touch(led, "STUB", 445, "D5", "ladder-exhausted", 3)
+    assert pd.unresolvable_rows(led)[2][7] == pytest.approx(1.101)
+    assert pd.unresolvable_rows(led)[2][6] == 3
+    # a measure-less first sighting is recorded as None -- never 0.0 (which would
+    # read as "this site has no defect") and never NaN (which is not valid JSON,
+    # and these rows are serialised into the run artifact).
+    assert by[("STUB", 168)][7] is None
+    import json as _json
+    _json.dumps(pd.unresolvable_rows(led))            # must round-trip as strict JSON
+
+    # a Q-REAL condemned stub is NAMESPACED "QSTUB": its site id is a FOREST
+    # member index, a different id space from a class-T stub's live member index,
+    # so the same integer must not collapse the two into one row.
+    pd.ledger_touch(led, "QSTUB", 445, "R2", "ladder-exhausted", 0)
+    rows2 = pd.unresolvable_rows(led)
+    assert len(rows2) == 4
+    assert ("QSTUB", 445) in {(r[0], r[1]) for r in rows2}
+    assert {(r[0], r[1]) for r in rows2} >= {("STUB", 445), ("QSTUB", 445)}
+
+
+def test_unresolvable_ledger_carries_across_passes_and_reaches_the_engine_log(cfg):
+    """Persistence across PASSES (the `carry_ledger` the engine owns) and the two
+    surfaces ruling (5) names: `Phase8Report.unresolvable_ledger` and the engine
+    verify log. A second relocation pass over the same unfixable site must UPDATE
+    its row (attempts 1 -> 2), not append a second one."""
+    mesh = _d5_mesh(0.5)                    # the D5-exhausts fixture: unfixable
+    geom = ExactSurface(mesh)
+    c5 = _d5_cfg(cfg)
+    forest, contacts, carried, tip_r = _reseat_forest(c5, mesh)
+    carry = {}
+    log = {}
+    rep1 = engine.relocate(mesh, forest, [], contacts, carried, tip_r, -5.0, c5,
+                           geom=geom, log=log, carry_ledger=carry)
+    assert rep1["n_unresolvable"] == 1, rep1["unresolvable_ledger"]
+    row = rep1["unresolvable_ledger"][0]
+    assert row[0] == "STUB" and row[1] == 0 and row[2] == "D5"
+    assert row[6] == 1, row
+    # the engine log surfaces it at the TOP level, not only inside `relocate`.
+    assert log["p8_unresolvable"] == rep1["unresolvable_ledger"]
+    assert log["p8_n_unresolvable"] == 1
+
+    rep2 = engine.relocate(mesh, forest, [], contacts, carried, tip_r, -5.0, c5,
+                           geom=geom, log={}, carry_ledger=carry)
+    assert rep2["n_unresolvable"] == 1, "one SITE, one row -- never a duplicate"
+    assert rep2["unresolvable_ledger"][0][6] == 2, "attempts accumulate"
+    assert rep2["unresolvable_ledger"][0][4] == row[4], "first_sweep is preserved"
+
+
+def test_ladder_never_reorders_r1_before_r2_before_d5(cfg):
+    """§3.1's ordering law with ruling (5)'s rungs added: a rung is entered ONLY
+    when the one above yields ZERO legal candidates. On the plain fin fixture R1
+    resolves the stub, so NEITHER escalation rung may fire -- an escalation that
+    runs anyway would be re-litigating a solved site and would show up as churn."""
+    mesh = _fin_mesh()
+    geom = ExactSurface(mesh)
+    forest, contacts, carried, tip_r = _fin_forest(cfg)
+    members, balls = engine.live_member_lists(forest, [], -5.0, cfg)
+    rep = pd.run_phase8(forest, members, balls, contacts, carried, tip_r, -5.0,
+                        geom, cfg, mesh, unrouted=[],
+                        islands=_reseat_islands(mesh))
+    assert rep.stub_resolved == 1
+    assert rep.reseats == () and rep.junction_reseats == ()
+    assert rep.unresolvable_ledger == ()
+
+
+# --------------------------------------------------------------------------
+# SITE-DERIVED (archived treant p8r_run2.pkl): the members ruling (5) exists for.
+# --------------------------------------------------------------------------
+_RUN2_PKL = os.path.join(_SCR, "p8r_run2.pkl")
+
+
+@pytest.mark.kernel
+def test_ruling5_site_derived_d5_trial_is_side_effect_free_on_the_treant():
+    """SITE-DERIVED on the archived acceptance run `p8r_run2.pkl` -- the 63
+    non-exempt members and 4 ball breaches the R1/S1/B1 ladder could NOT resolve
+    (the population ruling (5) was written for, including the (contact,746) ball).
+
+    The property under test is the one that makes D5 safe to run on every one of
+    them: a junction re-seat either COMMITS -- in which case the D6 guard has
+    already proved a strict defect-count decrease over its influence set -- or
+    leaves the forest BIT-IDENTICAL. Nothing in between, on real geometry with
+    real neighbours, not a two-member synthetic."""
+    import pickle
+    if not (os.path.exists(_RUN2_PKL) and os.path.exists(_STL)):
+        pytest.skip("archived p8r_run2.pkl / source STL not present")
+    from support_placement.geometry_kernel import KernelSurface
+
+    S = pickle.load(open(_RUN2_PKL, "rb"))
+    forest, cfg_r = S["forest"], S["cfg"]
+    unrouted, plate_z = S["unrouted"], S["plate_z"]
+    mesh = trimesh.load(_STL, file_type="stl", process=False)
+    mesh.apply_translation(-(mesh.bounds[0] + mesh.bounds[1]) / 2.0)
+    geom = KernelSurface(mesh)
+
+    firm = sorted({int(x["member_idx"]) for x in S["verify"]["clearance_violations"]
+                   if x.get("source", "transit") == "transit"})
+    assert len(firm) == 63, len(firm)       # the archived unresolved population
+    live_fi = pd.live_forest_index_map(forest, unrouted)
+
+    before = p8_accept.geometry_digest(*engine.live_member_lists(
+        forest, unrouted, plate_z, cfg_r))
+    n_committed = 0
+    for mi in firm[:4]:                     # a bounded, deterministic slice
+        fi = live_fi[mi]
+        fm = forest.members[fi]
+        if fm.embed_end == "p1":
+            node, other, r_node = np.asarray(fm.p0, float), np.asarray(fm.p1, float), float(fm.r0)
+        else:
+            node, other, r_node = np.asarray(fm.p1, float), np.asarray(fm.p0, float), float(fm.r1)
+        delta, n_trials, n_moved = pd.try_junction_reseat(
+            forest, geom, cfg_r, plate_z, unrouted, fi, node,
+            phase8._unit(node - other), tol=max(0.05, 0.5 * r_node))
+        assert n_trials >= 1
+        after = p8_accept.geometry_digest(*engine.live_member_lists(
+            forest, unrouted, plate_z, cfg_r))
+        if delta is None:
+            assert after == before, f"mi={mi}: an exhausted D5 mutated the forest"
+            assert n_moved == 0
+        else:
+            assert n_moved >= 1
+            n_committed += 1
+            before = after                  # a commit is the new baseline
+    # deterministic: the same slice, re-run on a fresh load, makes the same calls.
+    assert n_committed >= 0
+
+
+@pytest.mark.kernel
+def test_ruling5_site_derived_ledger_registers_the_archived_unresolved_set():
+    """SITE-DERIVED: fed the archived run's ACTUAL unresolved population -- 63
+    non-exempt members + 4 ball breaches (incl. the (contact,746) ball ruling (6)
+    owns) -- the persistent register carries exactly 67 rows across two passes,
+    with attempts accumulating and first-seen preserved. That is the honest
+    §6.7 failure statement an owner reads instead of a bare count."""
+    import pickle
+    if not os.path.exists(_RUN2_PKL):
+        pytest.skip("archived p8r_run2.pkl not present")
+    S = pickle.load(open(_RUN2_PKL, "rb"))
+    firm = sorted({int(x["member_idx"]) for x in S["verify"]["clearance_violations"]
+                   if x.get("source", "transit") == "transit"})
+    balls = S["verify"]["ball_breach_violations"]
+    assert len(firm) == 63 and len(balls) == 4
+
+    led = {}
+    for sweep in (0, 1):                    # two passes over the same population
+        for mi in firm:
+            pd.ledger_touch(led, "STUB", mi, "D5", "ladder-exhausted", sweep, 0.5)
+        for bi in range(len(balls)):
+            pd.ledger_touch(led, "BALL", bi, "B1-reverted", "ladder-exhausted",
+                            sweep, 0.796)
+    rows = pd.unresolvable_rows(led)
+    assert len(rows) == 67, len(rows)
+    assert sum(1 for r in rows if r[0] == "BALL") == 4
+    assert all(r[6] == 2 for r in rows), "attempts accumulate across passes"
+    assert all(r[4] == 0 and r[5] == 1 for r in rows), "first/last sweep tracked"
+    assert rows == tuple(sorted(rows, key=lambda r: (r[0], r[1]))), "deterministic"

@@ -181,6 +181,86 @@ STERILE retires its site as honest-unresolved (`D6-sterile`) instead of being
 re-picked next sweep — that re-pick was the neighbour cascade that held the
 sweep tail at 1-2 commits/sweep forever.
 
+**LADDER COMPLETION — R2 SURFACE-SEED RE-SEAT, D5 PARENT-JUNCTION RE-SEAT,
+AND THE PERSISTENT FORMALLY-UNRESOLVABLE LEDGER** (implementation consequence,
+orchestrator-approved 2026-07-24 — ruling (5); not a change of policy, the
+implementation of rungs §3.1 already specifies plus one new rung below them).
+
+The D6 invariant made the loop converge, and converging exposed what it
+converges *to*: a residue of sites the RE-AIM rungs structurally cannot place,
+because the obstruction is not the shaft's aim. The ladder is completed:
+
+    stubs   R1 tip re-aim → **R2 surface-seed contact re-seat** →
+            **D5 parent-junction re-seat** → R3 honest failure
+    struts  S1 foot re-aim → **D5 parent-junction re-seat** → S3 honest failure
+    balls   B1 axial slide → **D5 junction re-seat** → B3 honest failure
+
+Ordering law unchanged: a rung is entered ONLY when the one above it yields
+ZERO legal candidates for that site, and the ladder never re-orders.
+
+**R2 (§3.1 R2, implemented).** Candidate seats are MODEL-SURFACE seeds near the
+demanded contact, ordered nearest-to-demanded under the REACH §2b
+`reloc_max_candidates` cap and bounded by `p8_reseat_radius_mm`; each is
+re-aimed at its own outward normal across the R1 shortening ladder. Legality is
+the full §5 law through the SAME shared certificate R1 uses, and commitment is
+the SAME guarded co-moving splice under the D6 invariant. Selection is the
+GLOBAL lexicographic minimum of the pinned tuple `(route_length_mm,
+reseat_distance_from_demanded_mm, candidate_index)`.
+
+Two bounds on R2 are NOT config levers:
+
+  * **the inviolable class domain (REACH §1)** — seats are restricted to the
+    contact's OWN island; a seat on another island is a different demand, not a
+    relocation of this one. Absent an island domain the rung is not offered at
+    all (the implementation never guesses a domain);
+  * **the neighbor-birth / coverage guard (REACH §2b)** — `uncovered_islands`
+    and `uncovered_island_births` are HARD gates that read contact POSITIONS,
+    which the D6 influence-set invariant (member geometry only) cannot see. A
+    seat that would regress island coverage or orphan a birth this contact
+    uniquely covers is refused at SEED SELECTION, before any candidate exists.
+
+A committed re-seat MIGRATES the contact record with the stub. The demand moved;
+leaving the record behind would leave every coverage and carried-area gate
+judging a point no support stands on.
+
+**D5 (new rung).** R1/S1 pivot the shaft about a fixed embed anchor; R2 moves
+the anchor. D5 owns the remaining degree of freedom: the site's PARENT JUNCTION
+— the tree-side node where the member meets its route — holding the embedded end
+(and therefore the demand, the carried area and every coverage number) exactly
+where it is. Candidates are a deterministic FREE-SPACE lattice about the node
+(± the member axis and the two `local_frame` perpendiculars — the same stable
+frame R1's azimuth grid is anchored to — stepped by
+`p8_junction_reseat_step_mm` out to `p8_junction_reseat_max_mm`), ordered
+`(distance, direction_rank)` — a total order, so the FIRST LEGAL candidate is
+the lexicographic minimum, the same argument B1's minimal-slide search rests on.
+The lattice is free-space and not a surface-seed search *because* a parent
+junction is in free space by construction: the surface-anchored end of a site is
+its embed end, which R1/S1's cone and R2's seed search already own. "The same
+machinery" is therefore the same DISCIPLINE — nearest-first, capped, total-order
+lex-min, committed through the guarded transaction — not a second call into the
+seed index.
+
+D5 commits through the guarded co-moving splice `_translate_joint` +
+`_ball_slide_guard_ok`: every member meeting at the node rides the delta
+atomically (connectivity preserved by construction) and the move is refused
+unless it creates NO new violation of ANY class and STRICTLY DECREASES the
+influence set's defect count. D5 therefore cannot weaken the monotonicity the
+fixed point rests on, and an EXHAUSTED D5 leaves the forest bit-identical.
+
+A ball breach escalates to D5 on B1 exhaustion *and* on B1 revert: B1's
+candidate space is the member AXIS only, a strict 1-D subset of the D5 lattice,
+so D5 is not a retry of B1's question but the rest of it.
+
+**The persistent formally-unresolvable ledger (§6.7 reporting).** Honest failure
+is now a REGISTER, not a per-sweep leftover: one row per site keyed
+`(class, site_id)`, carried across sweeps AND across passes, recording
+`(class, site_id, last_rung, reason, first_sweep, last_sweep, n_attempts,
+measure_mm)`. A re-observation UPDATES its row; a retirement (progress-based or
+`D6-sterile`) files one with its reason. It is surfaced on `Phase8Report`
+(`unresolvable_ledger`), in the relocation stage's log block, and at the top of
+the engine log (`p8_unresolvable`) with its count beside the gate numbers in
+`verify[final]`.
+
 **Final full-verify + idempotence (acceptance, §6.9-§6.10).** After Phase 3,
 the complete gate runs over the *serialized* output (§6.9). A second Phase-8
 pass over that output re-derives an EMPTY frozen snapshot (zero non-exempt,
@@ -743,6 +823,13 @@ defect, not a style choice):
     p8_max_unresolved      = 10              # §6.7 honest-failure count bound
     p8_max_unresolved_weight = 3.0           # §6.7 criticality-weighted bound (amendment G)
     p8_chord_canon_micron  = 1               # §6.3 integer-micron chord canonicalization (amendment G)
+    # ruling (5) escalation rungs (§3.0 ladder-completion amendment):
+    p8_reseat_enable          = True   # §3.1 R2 surface-seed contact re-seat
+    p8_reseat_radius_mm       = 2.0    # max demand displacement (inside the REACH §1 domain)
+    p8_reseat_max_seeds       = 24     # REACH §2b `reloc_max_candidates` economy cap
+    p8_junction_reseat_enable = True   # D5 parent-junction re-seat
+    p8_junction_reseat_step_mm= 0.25   # D5 lattice step
+    p8_junction_reseat_max_mm = 1.0    # D5 lattice reach
 
 The three amendment-H caps (`p8_reaim_volume_delta_max_ml`,
 `p8_reaim_route_growth_max_factor`, `p8_strut_growth_max_factor`) are
