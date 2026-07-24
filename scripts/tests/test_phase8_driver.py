@@ -106,10 +106,15 @@ def test_snapshot_cross_check_archived_forest():
     """On the archived forest v5e_run1.pkl the driver's SITE CONSTRUCTION must
     reproduce the acceptance targets pinned in phase8_relocation_input.json --
     143 non-exempt (incl. mi=445 per §5.3 Layer 2), 77 REAL quarantine, 15 true
-    ball breaches -- EXACTLY (task step 3). Also pins the §5.3 reconciliation the
-    ruling rests on: the engine gate alone finds 142 firm-transit members and the
-    SOLE census-only addition is mi=445 (the kernel's robust tip-anchor merge
-    exempts it; the census counts it; the acceptance treats it as a target)."""
+    ball breaches -- EXACTLY (task step 3).
+
+    Also pins the §5.3 reconciliation, AS AMENDED BY THE CENSUS-PARITY INTERVAL
+    FIX (residual round 2). It used to read: the engine gate alone finds 142
+    firm-transit members and the SOLE census-only addition is mi=445. That gap
+    was the oracle's pre-anchoring length filter (`_batch_axis_intervals`), not a
+    difference of law: with the full-resolution interval list the gate finds all
+    143 ITSELF and the census-only class is EMPTY -- `census_authority` becomes a
+    no-op on this fixture rather than the thing that carries mi=445 in."""
     import pickle
     if not (os.path.exists(_PKL) and os.path.exists(_STL) and os.path.exists(_INPUT_JSON)):
         pytest.skip("archived v5e_run1.pkl / source STL / input JSON not present")
@@ -141,10 +146,15 @@ def test_snapshot_cross_check_archived_forest():
     assert sorted(snap.quarantine_artifact) == [437, 440, 444]
     assert len(snap.ball_breaches) == 15
 
-    # --- §5.3 reconciliation: engine gate 142 firm, sole census-only is 445 ---
-    assert len(di.gate.firm_transit) == 142
-    assert sorted(census_ne - di.gate.firm_transit) == [445]
-    assert di.gate.firm_transit.issubset(census_ne)   # no engine-only firm member
+    # --- §5.3 reconciliation, post-parity-fix: the engine gate reproduces the
+    # census non-exempt set EXACTLY -- 143 firm, no census-only member left for
+    # `census_authority` to carry, no engine-only firm member either.
+    assert len(di.gate.firm_transit) == 143
+    assert sorted(census_ne - di.gate.firm_transit) == []
+    assert di.gate.firm_transit == census_ne
+    assert 445 in di.gate.firm_transit, "the promoted-transit class is now SEEN"
+    # ... so the boundary/dual-certificate class it used to need is empty.
+    assert di.boundary_mis == frozenset()
 
     # --- site objects built for every target, correctly typed ---
     #   129 class-T contact stubs + 77 Q-REAL = 206 stub sites; 14 struts; 15 balls
@@ -888,9 +898,17 @@ def _const_gate_for_first_transit(cfg, forest, geom, plate_z=-5.0, chord=1.0):
 def test_d3a_synthetic_site_committed_once_then_retired(cfg, monkeypatch):
     """D3(a) part 1 (regression test 1): a synthetic site whose commit never clears
     its transit (a constant gate that re-flags it every sweep) is committed AT MOST
-    ONCE -- retired on the next sweep because its defect measure did not strictly
-    shrink -- so `committed_by_sweep` is monotone, `converged` is True, and the site
-    is reported as honest-unresolved (in `retired_sites` AND `unresolved_items`)."""
+    ONCE per round -- retired on the next sweep because its defect measure did not
+    strictly shrink -- so the trace is monotone within the round, `converged` is
+    True, and the site is reported as honest-unresolved.
+
+    AMENDED by the outer round loop (residual round 2): the retirement is a
+    per-round judgement, so round 2 re-arms and re-offers the site instead of
+    trusting it. The site is then refused ON ITS MERITS -- round 2 commits
+    nothing -- and the run's honest-unresolved statement comes from that
+    fresh-state round, which is exactly the invocation an idempotence probe
+    would run. `committed_by_round` ends in 0; the site stays in
+    `unresolved_items`."""
     geom = ExactSurface(_fin_mesh())
     forest, contacts, carried, tip_r = _fin_forest(cfg)
     plate_z = -5.0
@@ -904,15 +922,18 @@ def test_d3a_synthetic_site_committed_once_then_retired(cfg, monkeypatch):
     rep = pd.run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z,
                         geom, cfg, _fin_mesh(), unrouted=[], member_list_fn=_mlf)
     # committed AT MOST ONCE, and the trace is non-increasing + a true fixed point.
-    assert rep.committed_by_sweep == (1,), rep.committed_by_sweep
+    assert rep.committed_by_sweep == (1, 0), rep.committed_by_sweep
+    assert rep.committed_by_round == (1, 0), rep.committed_by_round
+    assert rep.rounds == 2
     assert all(a >= b for a, b in zip(rep.committed_by_sweep,
                                       rep.committed_by_sweep[1:]))
     assert rep.sweep_tail_monotone is True
-    assert rep.converged is True, "retirement must reach an honest fixed point"
-    # retired thereafter, and counted honest-unresolved at its last rung.
-    assert any(r[0] == "STUB" and r[1] == mi for r in rep.retired_sites), rep.retired_sites
+    assert rep.converged is True, "the fixed point must be reached FRESH-STATE"
+    # honest-unresolved at its last rung, per the fresh-state round's own verdict.
     assert any(it[0] == "STUB" and it[1] == mi for it in rep.unresolved_items), \
         rep.unresolved_items
+    assert any(r[0] == "STUB" and r[1] == mi for r in rep.unresolvable_ledger), \
+        rep.unresolvable_ledger
     # a retired site is NOT double-counted as resolved (moved out of the tally).
     assert rep.stub_unresolved >= 1
 
@@ -989,9 +1010,15 @@ def test_d3a_p8f_run1_churn_pair_is_single_commit_then_retire(cfg, monkeypatch):
     members, balls = _mlf()
     rep = pd.run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z,
                         geom, cfg, _fin_mesh(), unrouted=[], member_list_fn=_mlf)
-    assert rep.committed_by_sweep == (1,), rep.committed_by_sweep
+    assert rep.committed_by_sweep == (1, 0), rep.committed_by_sweep
+    assert rep.committed_by_round == (1, 0), rep.committed_by_round
     assert rep.sweep_tail_monotone is True and rep.converged is True
-    assert any(r[1] == mi for r in rep.retired_sites), rep.retired_sites
+    # the honest-unresolved verdict now comes from the FRESH-STATE round (round 2
+    # re-offered the site with the retirement set re-armed and it committed
+    # nothing), not from round 1's retirement -- see the round-loop note in
+    # `run_phase8`. Either way it is one commit total, never churn.
+    assert sum(rep.committed_by_sweep) == 1
+    assert any(it[1] == mi for it in rep.unresolved_items), rep.unresolved_items
 
 
 @pytest.mark.kernel
@@ -1878,10 +1905,15 @@ def test_dual_certificate_mechanism_a_dropped_tip_sliver_promotes_a_transit():
 
 def test_full_resolution_intervals_keep_the_sub_detection_tip_sliver(cfg):
     """END-TO-END on a synthetic mesh: a 0.03mm skin at the tip plus a thick
-    wall beyond it. `_batch_axis_intervals` at the gate's own 0.05mm cutoff
-    returns ONE interval and certifies the member legal; at full resolution it
-    returns TWO and the dual certificate reads it non-exempt. This is the
-    treant's six boundary members in miniature, built from scratch."""
+    wall beyond it -- the treant's boundary members in miniature, built from
+    scratch.
+
+    THE DEFECT (pinned here so it cannot return): asking the oracle for the
+    0.05mm-filtered list drops the tip skin, the wall behind it slides into the
+    tip slot, and a legal SCAR verdict exempts the whole thing -- the member
+    certifies LEGAL. THE FIX: `_batch_axis_intervals` now returns the
+    full-resolution list by default, the sliver anchors the tip, and the SAME
+    certificate reads the wall as the firm transit it is."""
     skin = _box((10, 10, 0.03), center=(0, 0, 0.015))     # 30um tip skin, z 0..0.03
     wall = _box((10, 10, 0.15), center=(0, 0, 0.12))      # z 0.045..0.195
     mesh = _soup(skin, wall)
@@ -1889,17 +1921,28 @@ def test_full_resolution_intervals_keep_the_sub_detection_tip_sliver(cfg):
     m = dict(p0=[0.0, 0.0, 0.0], p1=[0.0, 0.0, 2.0], r0=0.2, r1=0.35,
              kind="stub", embed_end="p0", owner=("contact", 0))
 
-    gate_iv = verify._batch_axis_intervals(geom, [m], [0], rays="axis")[0]
-    full_iv = verify._batch_axis_intervals(geom, [m], [0], rays="axis",
-                                           min_illegal_len_mm=0.0)[0]
-    assert len(full_iv) == len(gate_iv) + 1, (gate_iv, full_iv)
+    # the PRE-FIX reading, reproduced by asking for the old cutoff explicitly
+    old_iv = verify._batch_axis_intervals(geom, [m], [0], rays="axis",
+                                          min_illegal_len_mm=0.05)[0]
+    # the law: the DEFAULT is full resolution
+    full_iv = verify._batch_axis_intervals(geom, [m], [0], rays="axis")[0]
+    assert len(full_iv) == len(old_iv) + 1, (old_iv, full_iv)
     assert full_iv[0]["s_b"] - full_iv[0]["s_a"] < verify.MIN_ILLEGAL_LEN_MM
     assert np.isclose(full_iv[0]["s_a"], 0.0, atol=1e-6), "the sliver IS the tip"
 
-    gate_vd = verify._embed_scar_verdicts(geom, [m], [0], {0: gate_iv}, cfg)
-    assert verify.certify_member(gate_iv, m, gate_vd.get(0))["legal"] is True
+    # pre-fix: the promoted wall took the tip slot and the member certified LEGAL
+    old_vd = verify._embed_scar_verdicts(geom, [m], [0], {0: old_iv}, cfg)
+    assert verify.certify_member(old_iv, m, old_vd.get(0))["legal"] is True
+    # post-fix: the ORDINARY gate certificate and the explicit census-parity one
+    # agree, and both read the wall as the firm transit it is.
+    gate_vd = verify._embed_scar_verdicts(geom, [m], [0], {0: full_iv}, cfg)
+    gate_cert = verify.certify_member(full_iv, m, gate_vd.get(0))
     dual = verify.certify_members_full_resolution(geom, [m], [0], cfg, rays="axis")
-    assert dual[0]["nonexempt"] is True and dual[0]["legal"] is False
+    assert gate_cert["nonexempt"] is True and gate_cert["legal"] is False
+    assert dual[0] == gate_cert, "the dual certificate is no longer a SECOND opinion"
+    # end-to-end through the hard gate itself
+    rep = verify.clearance_report(None, [m], cfg, geom=geom)
+    assert [v["member_idx"] for v in rep] == [0], rep
 
 
 def test_dual_cert_fn_is_batched_scoped_and_inert_off_the_boundary(cfg):
@@ -1938,11 +1981,13 @@ def test_dual_cert_fn_is_batched_scoped_and_inert_off_the_boundary(cfg):
 
 @pytest.mark.kernel
 def test_census_boundary_members_reproduces_the_archived_census_only_set(cfg):
-    """SITE-DERIVED (ruling (4)). On the archived p8_run2 geometry the derived
-    boundary class is EXACTLY the acceptance census's own `only_in_census` list
-    -- all six, and nothing else out of 1476 live members. The set is computed,
-    never hardcoded: `census_boundary_members` asks the dual certificate, and the
-    dual certificate IS the census's rule-4 accounting."""
+    """SITE-DERIVED. On the archived p8_run2 geometry the acceptance census
+    reported six members (`only_in_census`) that the engine gate could not see.
+    THE POINT OF THIS TEST IS NOW THE OPPOSITE OF WHAT IT WAS: after the
+    census-parity interval fix (residual round 2) the ENGINE'S OWN GATE finds all
+    six, so the derived "census-boundary" class -- members the census counts and
+    the engine reads legal -- is EMPTY. The disagreement is gone at the source
+    instead of being patched over by a second opinion at candidate acceptance."""
     import pickle
     from support_placement.geometry_kernel import KernelSurface
     if not (os.path.exists(_CENSUS_RUN2_PKL) and os.path.exists(_STL)):
@@ -1963,8 +2008,12 @@ def test_census_boundary_members_reproduces_the_archived_census_only_set(cfg):
     assert expect == _ARCHIVED_BOUNDARY, expect
 
     gate = pd.classify_gate(mesh, members, S["balls"], geom, cfg_r)
+    # the six the census saw and the engine did not are now IN the engine gate
+    for mi in _ARCHIVED_BOUNDARY:
+        assert mi in gate.firm_transit, mi
+    # ... so no member is census-non-exempt-but-engine-legal any more.
     got = pd.census_boundary_members(members, range(len(members)), gate, geom, cfg_r)
-    assert tuple(sorted(got)) == _ARCHIVED_BOUNDARY, sorted(got)
+    assert tuple(sorted(got)) == (), sorted(got)
     # and every one of them is LEGAL under the engine's own gate -- that is what
     # makes them boundary rather than ordinary targets.
     assert not (got & gate.firm_transit)
@@ -2168,3 +2217,277 @@ def test_smball_archived_746_slide_is_scoped_to_the_joint(cfg):
 
     assert p8_accept.geometry_digest(*engine.live_member_lists(
         forest, unrouted, plate_z, cfg_r)) == dig0, "trials must leave no trace"
+
+
+# ==========================================================================
+# 12. RESIDUAL ROUND 2 -- CENSUS-PARITY INTERVALS + THE OUTER FIXED-POINT
+#     ROUND LOOP.
+#
+# Round 1's acceptance verdict was `nonexempt=66 balls=6 newtransits=1
+# idempotent=no`. Two of those three were ONE defect: the engine oracle applied
+# SPEC-EMBED-POLICY's PASS-C3 length filter inside `penetration_intervals`,
+# i.e. BEFORE PASS-C2 anchored the tip, so a sub-detection tip sliver was
+# dropped and the transit behind it was PROMOTED into the exempt tip slot. The
+# third was the relocation stage reaching only a per-CALL fixed point. Both are
+# pinned below from the archived acceptance artifacts.
+# ==========================================================================
+_P8X_PKL = os.path.join(_SCR, "p8x_run1.pkl")
+_P8X_CENSUS = os.path.join(_SCR, "p8x_census", "penetration_census.json")
+
+# From the round-1 acceptance census (`compare_p8x_report.json`): the members
+# the INDEPENDENT census counted and the engine's own gate could not see, and
+# the moot-bucket disagreements that came with them. Every one is the same
+# promoted-transit mechanism.
+_R1_CENSUS_ONLY_NONEXEMPT = (168, 376, 449, 461, 519)
+_R1_CENSUS_ONLY_MOOT = (474, 575)
+_R1_ENGINE_ONLY_MOOT = (449,)       # engine called it moot; census: 59um + 120um
+
+
+def _engine_buckets(geom, members, cfg):
+    """The engine's OWN gate, split into (non_exempt, moot) member-index sets --
+    the same call `classify_gate` makes, stubs axis-only / non-stubs all-rays."""
+    moot_out = []
+    clr = verify.clearance_report(None, members, cfg, geom=geom,
+                                  moot_transit_out=moot_out)
+    ne = {v["member_idx"] for v in clr if v.get("source", "transit") == "transit"}
+    return ne, {v["member_idx"] for v in moot_out}
+
+
+@pytest.mark.kernel
+def test_census_parity_the_engine_gate_reproduces_the_census_exactly():
+    """SITE-DERIVED, WHOLE-FOREST. On the archived p8x_run1 geometry the engine
+    gate's non-exempt and moot buckets are now IDENTICAL to the independent
+    census's own -- symmetric difference empty in both, over all 1476 live
+    members. Round 1 measured `only_in_census=[168, 376, 449, 461, 519]` and
+    `moot symdiff {449, 474, 575}`; this asserts those are gone, and that they
+    are gone because the gate SEES them, not because anything was exempted."""
+    import pickle
+    from support_placement.geometry_kernel import KernelSurface
+    if not (os.path.exists(_P8X_PKL) and os.path.exists(_P8X_CENSUS)
+            and os.path.exists(_STL)):
+        pytest.skip("archived p8x_run1 acceptance artifacts not present")
+    S = pickle.load(open(_P8X_PKL, "rb"))
+    members = joints.collect_members(S["members"])
+    cfg_r = S["cfg"]
+    mesh = trimesh.load(_STL, file_type="stl", process=False)
+    mesh.apply_translation(-(mesh.bounds[0] + mesh.bounds[1]) / 2.0)
+    geom = KernelSurface(mesh)
+    census = json.load(open(_P8X_CENSUS))
+    c_ne = set(census["non_exempt_members"])
+    c_mo = set(census["moot_transit_members"])
+
+    ne, mo = _engine_buckets(geom, members, cfg_r)
+    assert ne == c_ne, sorted(ne ^ c_ne)
+    assert mo == c_mo, sorted(mo ^ c_mo)
+    # and specifically the round-1 residuals, named:
+    for mi in _R1_CENSUS_ONLY_NONEXEMPT:
+        assert mi in ne, mi
+    for mi in _R1_CENSUS_ONLY_MOOT:
+        assert mi in mo, mi
+    for mi in _R1_ENGINE_ONLY_MOOT:
+        assert mi not in mo, mi          # promoted out of moot into non-exempt
+
+
+@pytest.mark.kernel
+def test_census_parity_per_site_promoted_transit_mechanism():
+    """SITE-DERIVED, PER MEMBER. For each round-1 residual, the pre-fix reading
+    (oracle cutoff 0.05, passed explicitly) and the post-fix reading (the
+    default) differ by exactly one LEADING SUB-DETECTION SLIVER, and that one
+    interval is what flips the verdict. mi=376 and mi=519 carry >1.1mm firm
+    transits the old reading exempted outright -- not near-tangent ambiguity,
+    substantial real material."""
+    import pickle
+    from support_placement.geometry_kernel import KernelSurface
+    if not (os.path.exists(_P8X_PKL) and os.path.exists(_STL)):
+        pytest.skip("archived p8x_run1.pkl / source STL not present")
+    S = pickle.load(open(_P8X_PKL, "rb"))
+    members = joints.collect_members(S["members"])
+    cfg_r = S["cfg"]
+    mesh = trimesh.load(_STL, file_type="stl", process=False)
+    mesh.apply_translation(-(mesh.bounds[0] + mesh.bounds[1]) / 2.0)
+    geom = KernelSurface(mesh)
+
+    mis = list(_R1_CENSUS_ONLY_NONEXEMPT)
+    old = verify._batch_axis_intervals(geom, members, mis, rays="axis",
+                                       min_illegal_len_mm=0.05)
+    new = verify._batch_axis_intervals(geom, members, mis, rays="axis")
+    old_vd = verify._embed_scar_verdicts(geom, members, mis, old, cfg_r)
+    new_vd = verify._embed_scar_verdicts(geom, members, mis, new, cfg_r)
+    worst = {}
+    for mi in mis:
+        o = sorted(old[mi], key=lambda iv: iv["s_a"])
+        n = sorted(new[mi], key=lambda iv: iv["s_a"])
+        assert len(n) > len(o), (mi, o, n)
+        # the extra leading interval is BELOW the detection floor -- that is why
+        # the oracle dropped it, and why dropping it re-anchored the tip.
+        assert n[0]["s_b"] - n[0]["s_a"] < verify.MIN_ILLEGAL_LEN_MM, (mi, n[0])
+        assert n[0]["s_a"] < o[0]["s_a"], (mi, n[0], o[0])
+        old_cert = verify.certify_member(o, members[mi], old_vd.get(mi))
+        chords = []
+        new_cert = verify.certify_member(n, members[mi], new_vd.get(mi),
+                                         chords_out=chords)
+        assert old_cert["nonexempt"] is False, mi
+        assert new_cert["nonexempt"] is True, mi
+        worst[mi] = max(chords)
+    # the two big ones: >1.1mm of real material, exempted by the old reading
+    assert worst[376] > 1.1 and worst[519] > 1.1, worst
+
+
+def test_relocate_round_loop_re_offers_a_retired_site_and_stops_fresh(cfg, monkeypatch):
+    """THE OUTER FIXED-POINT ROUND LOOP, pinned on the loop's own contract.
+
+    Round 1's §6.10 probe -- a genuinely fresh `run_phase8` over a forest the
+    stage had just declared converged -- committed 14 more legal splices. The
+    cause: the terminating sweep ran carrying its round's RETIREMENT SET, a
+    judgement made against geometry later commits had moved, so the stage
+    reached a per-CALL fixed point and called it global.
+
+    This drives the loop with a fake sweep that commits exactly once and then
+    retires its site, and asserts (a) a SECOND round happens, (b) the retired
+    site is RE-OFFERED to it (the sweep sees it in its site list again, which is
+    the whole point -- a stale retirement must not hide it), and (c) the run
+    stops on a fresh-state round that committed nothing, so `committed_by_round`
+    ends in 0 and `converged` is True."""
+    geom = ExactSurface(_fin_mesh())
+    forest, contacts, carried, tip_r = _fin_forest(cfg)
+    plate_z = -5.0
+    mi, const_gate = _const_gate_for_first_transit(cfg, forest, geom, plate_z)
+    monkeypatch.setattr(pd, "classify_gate", lambda *a, **k: const_gate)
+
+    seen = []          # per fake-sweep call: the stub site_ids it was offered
+    calls = {"n": 0}
+
+    def _fake_sweep(di, forest_, geom_, cfg_, **kw):
+        seen.append([s.site_id for s in di.stub_sites])
+        calls["n"] += 1
+        first = calls["n"] == 1
+        return pd._SweepResult(
+            stub_resolved=(1 if first else 0), stub_unresolved=(0 if first else 1),
+            qreal_resolved=0, qreal_unresolved=0, strut_resolved=0,
+            strut_unresolved=0, ball_resolved=0, ball_unresolved=0,
+            reverted=[], pocket_labels=[],
+            unresolved_items=([] if first else [("STUB", mi, "R3")]),
+            ledger_rows=[], n_committed=(1 if first else 0),
+            # the first sweep's commit is judged STERILE, which retires the site
+            # for the REST OF THAT ROUND -- and, pre-fix, for the rest of the run.
+            sterile_sites=({("M", mi): ("STUB", "D6-sterile")} if first else {}),
+            ledger_obs=([] if first else [("STUB", mi, ("M", mi))]),
+            final_rung=({} if first else {("STUB", mi): "R3"}))
+
+    monkeypatch.setattr(pd, "_relocation_sweep", _fake_sweep)
+
+    def _mlf():
+        return engine.live_member_lists(forest, [], plate_z, cfg)
+
+    members, balls = _mlf()
+    rep = pd.run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z,
+                        geom, cfg, _fin_mesh(), unrouted=[], member_list_fn=_mlf)
+
+    assert rep.rounds == 2, rep.committed_by_round
+    assert rep.committed_by_round == (1, 0), rep.committed_by_round
+    assert rep.converged is True
+    assert rep.sweep_tail_monotone is True
+    # (b) the retired site was RE-OFFERED by the fresh round -- the fix itself.
+    assert len(seen) == 2, seen
+    assert seen[0] == [mi] and seen[1] == [mi], seen
+    # round 1's second sweep never ran the ladder: the retirement emptied it.
+    assert rep.committed_by_sweep == (1, 0), rep.committed_by_sweep
+
+
+def test_relocate_round_cap_is_reported_honestly(cfg, monkeypatch):
+    """Termination rests on the D6 invariant, not on the round cap -- but if a
+    pathological ladder did keep committing, the cap must bound the work and the
+    report must NOT claim convergence (or idempotence) it did not reach."""
+    geom = ExactSurface(_fin_mesh())
+    forest, contacts, carried, tip_r = _fin_forest(cfg)
+    plate_z = -5.0
+    mi, const_gate = _const_gate_for_first_transit(cfg, forest, geom, plate_z)
+    monkeypatch.setattr(pd, "classify_gate", lambda *a, **k: const_gate)
+
+    def _always_commits(di, forest_, geom_, cfg_, **kw):
+        return pd._SweepResult(
+            stub_resolved=1, stub_unresolved=0, qreal_resolved=0,
+            qreal_unresolved=0, strut_resolved=0, strut_unresolved=0,
+            ball_resolved=0, ball_unresolved=0, reverted=[], pocket_labels=[],
+            unresolved_items=[], ledger_rows=[], n_committed=1,
+            sterile_sites={("M", mi): ("STUB", "D6-sterile")})
+
+    monkeypatch.setattr(pd, "_relocation_sweep", _always_commits)
+    cfg_r = SupportConfig(**{**cfg.__dict__, "p8_max_relocate_rounds": 3})
+
+    def _mlf():
+        return engine.live_member_lists(forest, [], plate_z, cfg_r)
+
+    members, balls = _mlf()
+    rep = pd.run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z,
+                        geom, cfg_r, _fin_mesh(), unrouted=[], member_list_fn=_mlf)
+    assert rep.rounds == 3, rep.committed_by_round
+    assert rep.committed_by_round == (1, 1, 1), rep.committed_by_round
+    assert rep.converged is False, "a cap exhaustion must never claim a fixed point"
+
+
+def test_relocate_round_cap_default_is_configured():
+    """The cap is a real config knob with a documented default, not a literal."""
+    assert SupportConfig().p8_max_relocate_rounds >= 2
+
+
+# ---- round-2 FULL-RUN acceptance evidence (skips without the artifacts) ----
+_P8X_IDEM = os.path.join(_SCR, "p8x_run1b_idempotence_compare.json")
+_P8Y_RESULTS = os.path.join(_SCR, "p8y_run1_results.json")
+_P8Y_IDEM = os.path.join(_SCR, "p8y_run1b_idempotence_compare.json")
+
+
+@pytest.mark.kernel
+def test_round2_full_run_reaches_a_fresh_state_fixed_point():
+    """FULL-RUN evidence that the round loop found exactly what round 1 left.
+
+    Round 1 declared `converged=True` after `committed_by_sweep=[157, 2, 0]`,
+    and its fresh §6.10 probe then committed **14** more splices. Round 2's own
+    trace is `committed_by_round=[167, 14, 0]`: the second round is the probe,
+    executed INSIDE the stage, and the third round -- fully fresh state -- finds
+    nothing. That 14 is the load-bearing number linking defect to fix."""
+    if not (os.path.exists(_P8Y_RESULTS) and os.path.exists(_P8X_IDEM)):
+        pytest.skip("round-2 acceptance artifacts absent")
+    rep = json.load(open(_P8Y_RESULTS))["relocate_reports"]["relocate_p0"]
+    archived_probe = json.load(open(_P8X_IDEM))["committed_by_sweep"]
+
+    cbr = rep["committed_by_round"]
+    assert cbr[-1] == 0, cbr                  # a FRESH-STATE round committed nothing
+    assert rep["converged"] is True, cbr
+    assert rep["rounds"] < SupportConfig().p8_max_relocate_rounds + 1, rep["rounds"]
+    assert len(cbr) >= 2, "round 1's per-call fixed point was NOT the global one"
+    assert cbr[1] == archived_probe[0], (cbr, archived_probe)
+    # the D6 potential is still monotone across the whole run, rounds included
+    dbs = rep["defects_by_sweep"]
+    assert all(a >= b for a, b in zip(dbs, dbs[1:])), dbs
+    # ... and the honest-unresolvable ledger is no longer padded by retirements:
+    # every row is a rung the ladder actually exhausted.
+    assert rep["n_retired"] == 0, rep["retired_sites"]
+    assert all(r[3] == "ladder-exhausted" for r in rep["unresolvable_ledger"]), \
+        [r for r in rep["unresolvable_ledger"] if r[3] != "ladder-exhausted"]
+
+
+@pytest.mark.kernel
+def test_round2_idempotence_probe_leaves_geometry_byte_identical():
+    """§6.10 STRICT NO-OP, on the authority that actually settles it: the
+    geometry digest. A fresh `relocate()` over the finished forest commits ZERO
+    splices and leaves member/ball SHAs byte-identical.
+
+    NOTE on the artifact's own `strict_no_op` flag, which reads False: the probe
+    script derives its commit count from `stub_resolved + qreal_resolved + ...`,
+    and `qreal_resolved` counts CONDEMNED (quarantined) stubs for which the
+    ladder found a legal placement -- sites this driver never splices at all
+    (`_dispose_stub`: "Q-REAL: never spliced"). Those are findings, not
+    mutations; `n_reverted` likewise counts trial splices that were rolled back
+    inside the transaction. Neither can move geometry, and the SHAs prove none
+    did. The sweep/round commit counters are the ones that mean 'geometry
+    changed', and they are 0."""
+    if not os.path.exists(_P8Y_IDEM):
+        pytest.skip("round-2 idempotence artifact absent")
+    d = json.load(open(_P8Y_IDEM))
+    assert d["member_sha_pre"] == d["member_sha_post"], d
+    assert d["ball_sha_pre"] == d["ball_sha_post"], d
+    assert d["geometry_unchanged"] is True, d
+    assert d["committed_by_sweep"] == [0], d
+    assert d["full_report"]["committed_by_round"] == [0], d["full_report"]
+    assert d["full_report"]["converged"] is True

@@ -267,6 +267,32 @@ pass over that output re-derives an EMPTY frozen snapshot (zero non-exempt,
 zero breaches), enters every ladder zero times, and emits byte-identical
 geometry — the idempotence gate (§6.10).
 
+**OUTER FIXED-POINT ROUND LOOP** (implementation consequence, residual round 2,
+2026-07-24). The sweep loop above reaches only a **per-call** fixed point. Its
+terminating sweep runs carrying that call's accumulated memory — the D3(a)
+retirement set, the progress ledger, the §5.3a boundary carry — and every one
+of those is a judgement made against geometry that later commits have since
+MOVED, exactly like the collision-revert ban the D6 note already clears on
+every committing sweep. Measured consequence on the round-1 acceptance run: the
+stage declared `converged=True`, and a genuinely fresh §6.10 probe over the
+finished forest then committed **14 more legal splices**
+(`committed_by_sweep=[14, 0]`). That is a failed strict-no-op gate, and it also
+PADS the §6.7 honest-unresolvable ledger with rows that are artifacts of
+per-call scoping rather than facts about the geometry.
+
+Normative: the sweep loop is wrapped in a ROUND loop that **re-arms every
+per-call memory** (ban set, retirement set, progress ledger, boundary carry)
+and re-enters, until a complete FRESH-STATE round commits ZERO. Only then is
+`converged` true. The terminating round is bit-for-bit the invocation a fresh
+caller runs on that geometry, so §6.10's strict no-op holds BY CONSTRUCTION
+rather than by measurement. Termination is unaffected — it rests on the D6
+invariant's strict global-defect decrease, never on the retirement set — and
+the round cap (`p8_max_relocate_rounds`) is a backstop whose exhaustion is
+reported honestly as `converged=False`. The anti-churn monotonicity invariant
+becomes a WITHIN-round property: a rebound across a round boundary is
+legitimate (the fresh round re-offers what a stale retirement was hiding), so
+`sweep_tail_monotone` is checked per round and AND-ed.
+
 ### 3.1 Class T stubs — 126 non-exempt contact stubs (SM-STUB, the rebuild core)
 
 Contact stubs whose shaft, after (or instead of) its legal tip-anchored
@@ -814,6 +840,61 @@ the whole population, which is a policy call, not an implementation
 consequence. Scope here is exactly the boundary class §5.3 Layer 2 already
 authorises as targets.
 
+**→ That residual FIRED. §5.3b supersedes this scoping.**
+
+### 5.3b Filter ordering corrected at the source — supersedes §5.3a's scope (residual round 2, 2026-07-24; ORCHESTRATOR/OWNER RATIFICATION REQUESTED)
+
+§5.3a's "known residual" was not hypothetical. The round-1 acceptance run
+(`p8x_run1`, HEAD a20ecd0) shipped with **five** members the independent census
+counted non-exempt and the engine's own gate could not see — 168, 376, 449,
+461, 519 — plus three misfiled between the moot and clean buckets (449, 474,
+575). Two of the five carry firm transits of **1.155 mm and 1.162 mm**: over a
+millimetre of real material driven through a foliage wall, exempted outright by
+the promoted-tip reading. Every one is the same filter-ordering inversion §5.3a
+diagnosed, occurring at sites the boundary-scoped dual certificate did not
+cover — either outside the frozen target set (449, 461) or reachable only
+through the monotone carry.
+
+The boundary-scoped patch cannot close this class, because the class is defined
+by *the engine being blind*: a site the engine reads clean is not a target, and
+a non-target is not scanned. Scoping the correction to targets is circular.
+
+**Normative.** SPEC-EMBED-POLICY's `MIN_ILLEGAL_LEN` filter is **PASS C3** — it
+applies when a solid run is CLASSIFIED as an illegal crossing, which is AFTER
+PASS C2 has anchored the tip. The engine now implements that order:
+`verify._batch_axis_intervals` returns the **full-resolution** interval list by
+default, and `_transit_classify` applies the length filter per crossing, in
+PASS-C3 position. Nothing else changes: the kernel oracle is untouched, the tip
+exemption is uncapped (SPEC-EMBED-POLICY.md:132), and the law evaluated is the
+same single `certify_member`.
+
+Consequences, all measured on the archived `p8x_run1` forest (1476 live
+members):
+
+- engine non-exempt 61 → **66**, moot 62 → **63**: the engine gate and the
+  independent census agree **exactly**, symmetric difference EMPTY in both
+  buckets. §6 acceptance item 3 ("engine gate == census exactly") is now true
+  by construction rather than by patch.
+- the census-boundary class of §5.3a is **empty by construction** — there is no
+  longer a member the census counts and the engine reads legal. The dual
+  certificate, its monotone carry and its influence-set special case remain in
+  the code (`verify.certify_members_full_resolution`, `census_boundary_members`)
+  as the explicit parity entry point and as a live self-check; they are inert,
+  not deleted.
+- the correction is one-directional in practice: strictly MORE members are
+  flagged, never fewer. The engine can no longer certify legal anything the
+  census counts.
+- cost: 0.4 s vs 0.3 s for a whole-forest gate pass. The sampling work is
+  identical; only the output filter moved.
+
+**Why this is an implementation consequence and not a new policy.** It makes
+the engine conform to the ratified census law it was already required to match
+(§5.3 Layer 3, §6 item 3) and to SPEC-EMBED-POLICY's own pass ordering. It
+changes no constant, no threshold and no exemption. **But** §5.3a explicitly
+deferred this to the owner as a policy call, and it does widen target selection
+for the whole population — so it is flagged here for ratification rather than
+recorded as settled.
+
 ---
 
 ## 6. Acceptance
@@ -945,6 +1026,9 @@ defect, not a style choice):
     p8_junction_reseat_enable = True   # D5 parent-junction re-seat
     p8_junction_reseat_step_mm= 0.25   # D5 lattice step
     p8_junction_reseat_max_mm = 1.0    # D5 lattice reach
+    # residual round 2 (§3.0 outer fixed-point round loop):
+    p8_max_relocate_sweeps    = 8      # per-round sweep cap
+    p8_max_relocate_rounds    = 4      # fresh-state round cap (idempotence backstop)
 
 The three amendment-H caps (`p8_reaim_volume_delta_max_ml`,
 `p8_reaim_route_growth_max_factor`, `p8_strut_growth_max_factor`) are

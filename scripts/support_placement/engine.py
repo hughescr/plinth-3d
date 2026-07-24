@@ -347,6 +347,10 @@ def relocate(mesh, forest, unrouted, contacts, carried, tip_r, plate_z, cfg,
         ball_resolved=report.ball_resolved, ball_unresolved=report.ball_unresolved,
         n_reverted=len(report.reverted_splices), n_pockets=len(report.pocket_labels),
         sweeps=report.sweeps, converged=report.converged,
+        # residual round 2: the OUTER fixed-point round trace. `converged` is now
+        # "a FRESH-STATE round committed nothing", so committed_by_round ending
+        # in 0 is the §6.10 strict-no-op evidence.
+        rounds=report.rounds, committed_by_round=list(report.committed_by_round),
         committed_by_sweep=list(report.committed_by_sweep),
         target_source=report.target_source,
         sweep_tail_monotone=report.sweep_tail_monotone, n_banned=report.n_banned,
@@ -385,7 +389,9 @@ def relocate(mesh, forest, unrouted, contacts, carried, tip_r, plate_z, cfg,
               f"ball={report.ball_resolved} (reverted {len(report.reverted_splices)}) "
               f"reseat={len(report.reseats)} d5={len(report.junction_reseats)} "
               f"unresolvable={len(report.unresolvable_ledger)} "
-              f"sweeps={report.sweeps} converged={report.converged}",
+              f"sweeps={report.sweeps} rounds={report.rounds} "
+              f"commits/round={list(report.committed_by_round)} "
+              f"converged={report.converged}",
               file=sys.stderr, flush=True)
     return rep
 
@@ -579,7 +585,10 @@ def run(mesh, cfg, log=None):
     if getattr(cfg, "p8_relocate_enable", False) and forest is not None:
         with _stage(log, "relocate", t0):
             _prog_r = _ProgressCell()
-            max_sweeps = int(getattr(cfg, "p8_max_relocate_sweeps", 8))
+            # ticker total spans the OUTER round loop too -- `progress.n` counts
+            # sweeps globally, so the denominator is sweeps x rounds.
+            max_sweeps = (int(getattr(cfg, "p8_max_relocate_sweeps", 8))
+                          * int(getattr(cfg, "p8_max_relocate_rounds", 4)))
             with _ticker("relocate", lambda: _prog_r.n, max_sweeps,
                          unit="sweeps"):
                 relocate(mesh, forest, unrouted, contacts, carried, tip_r,

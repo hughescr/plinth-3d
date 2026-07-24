@@ -468,6 +468,18 @@ class SupportConfig:
     # idempotence gate real (a subsequent run over the fixed point is a no-op).
     p8_max_relocate_sweeps: int = 8
 
+    # OUTER FIXED-POINT ROUND CAP (residual round 2, 2026-07-24). A sweep loop
+    # reaches only a LOCAL fixed point: its terminating sweep carries that
+    # round's retirement set / progress ledger / boundary carry, all judgements
+    # made against geometry later commits have since moved. `run_phase8`
+    # therefore re-arms every per-call memory and re-enters, until a complete
+    # FRESH-STATE round commits zero -- which is exactly what a fresh invocation
+    # over the same forest would do, so the §6.10 strict no-op becomes idempotent
+    # by construction. Termination rests on the D6 invariant (every commit
+    # strictly decreases the global defect count), never on this cap; the cap is
+    # a backstop and hitting it is reported honestly as converged=False.
+    p8_max_relocate_rounds: int = 4
+
     # Amendment-H per-candidate resin / quality guards -- part of R1/S1 LEGALITY,
     # not merely acceptance levers: a candidate that violates one is illegal at
     # selection, never merely penalized (§3.1, §8).

@@ -257,7 +257,7 @@ def certify_member(intervals, member, verdict_legal, chords_out=None):
                 nonexempt=bool(nonexempt), moot=bool(moot))
 
 
-def _batch_axis_intervals(geom, members, mis, rays="axis", min_illegal_len_mm=0.05):
+def _batch_axis_intervals(geom, members, mis, rays="axis", min_illegal_len_mm=0.0):
     """ONE native penetration_intervals call for ALL members in `mis`
     (Amendment A7/A18); returns {member_idx: interval-list}. Batch SoA entry
     point when the geom exposes it (the Rust kernel does); per-member fallback
@@ -268,11 +268,32 @@ def _batch_axis_intervals(geom, members, mis, rays="axis", min_illegal_len_mm=0.
     capsule-offset rays, R2's non-stub capsule-graze evidence).
 
     `min_illegal_len_mm` is the oracle's own sub-detection cutoff -- intervals
-    shorter than it are DROPPED before this function ever sees them. The default
-    0.05 (census MIN_ILLEGAL_LEN) is the gate's law and is unchanged. Passing
-    0.0 asks for the FULL-RESOLUTION list (census PASS-C1 before its C3 length
-    filter), which is what the census-parity dual certificate needs and is the
-    ONLY caller that changes it -- see `certify_members_full_resolution`."""
+    shorter than it are DROPPED inside the kernel, before this function ever
+    sees them.
+
+    THE DEFAULT IS 0.0 -- THE FULL-RESOLUTION LIST -- AND THAT IS THE LAW
+    (residual round 2, 2026-07-24). SPEC-EMBED-POLICY's length filter is census
+    PASS **C3**: it is applied when a solid run is CLASSIFIED as an illegal
+    crossing, which is AFTER PASS C2 has anchored the tip. Asking the kernel to
+    drop short runs first inverts that order, and the inversion is not cosmetic:
+    on a near-tangent graze the true tip-anchored run is a 5-31um sliver, and
+    dropping it PROMOTES the next interval -- an unanchored 0.09-1.16mm transit
+    -- into the tip slot, where a legal SCAR-AREA-CAP verdict exempts it
+    outright. That single ordering bug WAS the entire engine-vs-census
+    disagreement: on the p8x_run1 forest it hid 5 non-exempt members
+    (168/376/449/461/519, two of them >1.1mm firm transits) and misfiled 3 more
+    between the moot and clean buckets. With the full-resolution list the
+    engine's own gate reproduces the independent census EXACTLY -- non_exempt
+    and moot symmetric difference both empty over all 1476 live members -- at a
+    measured 0.4s vs 0.3s for the whole forest (the sampling work is identical;
+    only the output filter moves).
+
+    The length filter itself is unchanged and still binding: `_transit_classify`
+    applies MIN_ILLEGAL_LEN_MM per crossing, in PASS-C3 position, after
+    `_tip_iv_index` has anchored the tip -- exactly as the census does.
+
+    Callers may still pass an explicit cutoff (0.05 reproduces the pre-fix
+    oracle reading; the regression tests do so to pin the defect)."""
     if not mis:
         return {}
     p0s = np.array([np.asarray(members[mi]["p0"], float) for mi in mis])
@@ -291,26 +312,25 @@ def _batch_axis_intervals(geom, members, mis, rays="axis", min_illegal_len_mm=0.
 
 
 def certify_members_full_resolution(geom, members, mis, cfg, rays="axis"):
-    """The CENSUS-PARITY dual certificate: `certify_member` -- the SAME law, the
-    SAME function -- evaluated on FULL-RESOLUTION penetration intervals instead
-    of the oracle's length-filtered ones. Returns `{mi: cert_dict}`. BATCHED:
-    one interval call and one SCAR-verdict call over the whole `mis` list.
+    """The CENSUS-PARITY certificate: `certify_member` -- the SAME law, the SAME
+    function -- evaluated on FULL-RESOLUTION penetration intervals. Returns
+    `{mi: cert_dict}`. BATCHED: one interval call and one SCAR-verdict call over
+    the whole `mis` list.
 
-    WHY IT DIFFERS FROM THE ORDINARY CERTIFICATE (orchestrator ruling (4),
-    2026-07-24 -- an implementation consequence of the ratified census-authority
-    rule, not new policy). The engine's oracle drops intervals shorter than
-    `MIN_ILLEGAL_LEN_MM` INSIDE `penetration_intervals`, i.e. BEFORE tip
-    anchoring is decided; the independent census keeps every PASS-C1 interval and
-    applies the same length filter only afterwards, in PASS C3. That ordering is
-    not cosmetic. On a near-tangent foliage graze the real tip-anchored run is a
-    sub-detection SLIVER (5-31um on the treant's six census-boundary members),
-    and dropping it PROMOTES the next interval -- an unanchored 0.09-1.16mm
-    transit -- into the tip slot, where a LEGAL SCAR-AREA-CAP verdict exempts it
-    entirely. The census, holding the sliver, anchors the tip correctly and
-    counts the long run as the firm transit it is. Measured on the six
-    (168/376/443/445/485/519), the two lists differ by exactly one leading
-    sliver and the verdicts flip from legal to non-exempt across all six --
-    which is the whole census-vs-engine symmetric difference.
+    HISTORY, AND WHY IT IS NO LONGER A *DUAL* CERTIFICATE (residual round 2,
+    2026-07-24). This entered under orchestrator ruling (4) as a SECOND opinion
+    for a handful of "census-boundary" sites, because the ordinary gate read its
+    intervals through the oracle's pre-anchoring length filter and was therefore
+    blind to a promoted transit (see `_batch_axis_intervals`). That filter
+    ordering has since been corrected at the source -- `_batch_axis_intervals`
+    now returns the full-resolution list by DEFAULT -- so the ordinary
+    certificate and this one are the same computation, and the engine gate
+    reproduces the independent census exactly. The census-boundary class is
+    consequently EMPTY by construction, not merely small.
+
+    It is kept as the EXPLICIT census-parity entry point (call sites that want
+    to state "judge this the way the census would" read better for it, and it
+    pins the parity in one place should the oracle default ever be re-litigated).
 
     This does NOT touch the kernel's robust oracle and does NOT cap the tip
     exemption (SPEC-EMBED-POLICY.md:132 forbids that): the tip stays exempt with
