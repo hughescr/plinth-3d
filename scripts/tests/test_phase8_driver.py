@@ -526,3 +526,172 @@ def test_reaim_keeps_archived_strut_feet_on_surface():
                                          site.r_root, site.owner, 0.0)
                 worst = max(worst, _foot_d(geom, cand["p0"]))
         assert worst < 1e-6, (mi, worst)
+
+
+# ==========================================================================
+# 7. DEFECT-3 (true fixed point): collision-revert ban -> monotone sweep tail
+#    + provable second-pass no-op. SPEC-P8-RELOCATE §4.4-§4.5 / §6.10.
+# ==========================================================================
+def test_revert_ban_key_and_filter():
+    """The anti-churn ban's two primitives. `_cand_geom_key` is a stable, hashable
+    identity of a candidate's spliced geometry (round-9 p0/p1/r0/r1), equal for
+    bit-identical geometry (a revert restores exactly, so the re-derived winner
+    re-keys the same). `_ban_revalidate_fn` returns a selection guard that REJECTS
+    a banned (forest_idx, geometry) and passes everything else; empty / None ban =>
+    None (behaviour-preserving, no filter installed)."""
+    m = dict(p0=np.array([0., 0., 0.]), p1=np.array([0., 0., 1.]), r0=0.2, r1=0.3)
+    k = pd._cand_geom_key(m)
+    assert k == pd._cand_geom_key(dict(p0=[0, 0, 0], p1=[0, 0, 1.0], r0=0.2, r1=0.3))
+    assert isinstance(hash(k), int)                          # hashable
+    cand = phase8.Candidate(site_id=7, cand_index=0, length_step=0, f=1.0,
+                            polar_deg=0.0, azimuth_deg=0.0,
+                            n_hat=np.array([0, 0, 1.0]), member=m)
+    fn = pd._ban_revalidate_fn({42: {k}}, {7: 42})
+    assert fn(cand) is False                                 # this (fi, geom) banned
+    m2 = dict(p0=[0, 0, 0], p1=[0, 0, 0.75], r0=0.2, r1=0.3)  # DIFFERENT geometry
+    cand2 = phase8.Candidate(site_id=7, cand_index=1, length_step=1, f=0.75,
+                             polar_deg=0.0, azimuth_deg=0.0,
+                             n_hat=np.array([0, 0, 1.0]), member=m2)
+    assert fn(cand2) is True                                 # not banned -> passes
+    # a site with no forest_idx mapping is never banned; empty/None ban installs no filter.
+    assert pd._ban_revalidate_fn({42: {k}}, {})(cand) is True
+    assert pd._ban_revalidate_fn({}, {7: 42}) is None
+    assert pd._ban_revalidate_fn(None, {7: 42}) is None
+
+
+def test_ladder_ban_forces_alternate_or_falls(cfg):
+    """The ban changes ladder selection: banning R1's lex-min winner for a site
+    forces the NEXT lex-min candidate (or an honest R2 fall) -- it can NEVER re-pick
+    the banned candidate. This is the mechanism that turns the round-1 revert/
+    re-commit churn ([...,1,1] tail, 32 reverts) into monotone progress: a reverted
+    candidate is banned, so the site advances or falls instead of oscillating."""
+    geom = ExactSurface(_fin_mesh())
+    forest, contacts, carried, tip_r = _fin_forest(cfg)
+    members, balls = engine.live_member_lists(forest, [], -5.0, cfg)
+    di = pd.construct_sites(forest, members, balls, contacts, carried, cfg, geom,
+                            _fin_mesh(), unrouted=[])
+    assert di.stub_sites
+    site = di.stub_sites[0]
+    base = phase8.evaluate_r1([site], geom, cfg)[site.site_id]
+    assert base.winner is not None
+    w0 = pd._cand_geom_key(base.winner.member)
+    banned = {di.site_forest_idx[site.site_id]: {w0}}
+    fn = pd._ban_revalidate_fn(banned, di.site_forest_idx)
+    res = phase8.evaluate_r1([site], geom, cfg, revalidate_fn=fn)[site.site_id]
+    # the banned winner is never re-selected: either a different winner or an R2 fall.
+    if res.winner is not None:
+        assert pd._cand_geom_key(res.winner.member) != w0
+    else:
+        assert res.needs_r2 is True
+
+
+def test_convergence_sweep_tail_monotone_and_second_pass_noop(cfg):
+    """Defect-3 end-to-end: the convergence loop's per-sweep commit trace is
+    NON-INCREASING (`sweep_tail_monotone` -- the [116,57,9,2,3,2,1,1] revert
+    rebound can no longer occur) and it terminates at a true fixed point, so a
+    SECOND `run_phase8` over the ACCEPTED geometry re-derives an empty snapshot and
+    emits byte-identical geometry -- a provable no-op (§6.10)."""
+    geom = ExactSurface(_fin_mesh())
+    forest, contacts, carried, tip_r = _fin_forest(cfg)
+    plate_z = -5.0
+
+    def _mlf():
+        return engine.live_member_lists(forest, [], plate_z, cfg)
+
+    members, balls = _mlf()
+    rep = pd.run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z,
+                        geom, cfg, _fin_mesh(), unrouted=[], member_list_fn=_mlf)
+    cbs = rep.committed_by_sweep
+    assert all(a >= b for a, b in zip(cbs, cbs[1:])), cbs      # monotone non-increasing
+    assert rep.sweep_tail_monotone is True
+    assert rep.converged is True
+
+    m1, b1 = _mlf()
+    dig1 = p8_accept.geometry_digest(m1, b1)
+    rep2 = pd.run_phase8(forest, m1, b1, contacts, carried, tip_r, plate_z, geom,
+                         cfg, _fin_mesh(), unrouted=[], member_list_fn=_mlf)
+    assert rep2.entered_ladder is False and rep2.sweeps == 0 and rep2.converged is True
+    assert rep2.sweep_tail_monotone is True
+    m2, b2 = _mlf()
+    assert p8_accept.geometry_digest(m2, b2) == dig1
+
+
+def test_per_pass_relocate_ledger_distinct_keys(cfg):
+    """Defect-5 (ledger): each engine fix-pass writes a DISTINCT `relocate_p{N}`
+    key, so a later pass never overwrites an earlier pass's report (the round-1
+    single `relocate` key hid pass-0 under pass-1). `relocate` keeps the latest for
+    back-compat."""
+    geom = ExactSurface(_fin_mesh())
+    forest, contacts, carried, tip_r = _fin_forest(cfg)
+    log = {}
+    engine.relocate(_fin_mesh(), forest, [], contacts, carried, tip_r, -5.0, cfg,
+                    geom=geom, log=log, pass_idx=0)
+    engine.relocate(_fin_mesh(), forest, [], contacts, carried, tip_r, -5.0, cfg,
+                    geom=geom, log=log, pass_idx=1)
+    assert "relocate_p0" in log and "relocate_p1" in log
+    assert log["relocate_p0"]["entered_ladder"] is True       # pass 0 resolves the stub
+    assert log["relocate_p1"]["entered_ladder"] is False      # pass 1 over fixed geometry
+    assert log["relocate_p0"] is not log["relocate_p1"]       # NOT overwritten
+    assert log["relocate"] is log["relocate_p1"]              # 'relocate' == latest
+
+
+# ==========================================================================
+# 8. DEFECT-5/6 (frozen-fixture treant target law, geometry-gated). §3.0 / §5.3.
+# ==========================================================================
+@pytest.mark.kernel
+def test_frozen_fixture_is_treant_target_law_geometry_gated():
+    """On the pre-relocation treant (v5e_run1) the driver's target set is the
+    FROZEN fixture (the census-authoritative treant law, §5.3 Layer 2): 143
+    non-exempt / 50 moot / 77 REAL-quarantine / 15 balls, INCLUDING the 6
+    census-only boundary members {168,376,443,445,485,519} the live kernel gate
+    exempts (defect-6), with mi=420 all-moot (never a target). The gate is the
+    canonical geometry digest: a mutated forest falls back to the live gate, so the
+    fixture's v5e_run1 indices are never mis-applied to relocated geometry and the
+    §6.10 idempotence pass is a no-op by construction (defect-5)."""
+    import pickle
+    if not (os.path.exists(_PKL) and os.path.exists(_STL) and os.path.exists(_INPUT_JSON)):
+        pytest.skip("archived artifacts not present")
+    from support_placement.geometry_kernel import KernelSurface
+    S = pickle.load(open(_PKL, "rb"))
+    mesh = trimesh.load(_STL, file_type="stl", process=False)
+    mesh.apply_translation(-(mesh.bounds[0] + mesh.bounds[1]) / 2.0)
+    geom = KernelSurface(mesh)
+    frozen = pd.load_treant_frozen_snapshot()
+    assert frozen is not None
+
+    di = pd.construct_sites(S["forest"], S["members"], S["balls"], S["contacts"],
+                            None, S["cfg"], geom, mesh, unrouted=S["unrouted"],
+                            quarantine_sites=S["quarantine_sites"],
+                            frozen_snapshot=frozen)
+    assert di.target_source == "frozen-fixture"
+    snap = di.snapshot
+    assert len(snap.non_exempt) == 143 and len(snap.moot) == 50
+    assert len(snap.quarantine_real) == 77 and len(snap.ball_breaches) == 15
+    # defect-6: every census-only boundary member is a target (485 also quarantine-routed).
+    assert {168, 376, 443, 445, 485, 519}.issubset(set(snap.non_exempt))
+    # mi=420 is all-moot at full precision -> recorded moot, NEVER remediated.
+    assert 420 in snap.moot and 420 not in snap.non_exempt
+
+    # geometry gate: perturb ONE member -> digest no longer matches -> live gate.
+    m2 = [dict(x) for x in S["members"]]
+    m2[0] = dict(m2[0])
+    m2[0]["p1"] = np.asarray(m2[0]["p1"], float) + np.array([0.002, 0.0, 0.0])
+    di2 = pd.construct_sites(S["forest"], m2, S["balls"], S["contacts"], None,
+                             S["cfg"], geom, mesh, unrouted=S["unrouted"],
+                             quarantine_sites=S["quarantine_sites"],
+                             frozen_snapshot=frozen)
+    assert di2.target_source == "live-gate"
+
+
+def test_frozen_fixture_absent_falls_back_to_live_gate(cfg):
+    """A synthetic (non-treant) forest never matches the fixture geometry digest,
+    so target selection stays the live gate whether or not a frozen snapshot is
+    passed -- the frozen fixture is treant-only, and passing it is always safe."""
+    geom = ExactSurface(_fin_mesh())
+    forest, contacts, carried, tip_r = _fin_forest(cfg)
+    members, balls = engine.live_member_lists(forest, [], -5.0, cfg)
+    frozen = pd.load_treant_frozen_snapshot()                 # real fixture, wrong geometry
+    di = pd.construct_sites(forest, members, balls, contacts, carried, cfg, geom,
+                            _fin_mesh(), unrouted=[], frozen_snapshot=frozen)
+    assert di.target_source == "live-gate"
+    assert len(di.stub_sites) == 1                            # the fin transit only

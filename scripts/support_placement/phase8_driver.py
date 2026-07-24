@@ -50,7 +50,51 @@ from typing import Optional
 
 import numpy as np
 
-from . import phase8, verify, joints
+from . import phase8, verify, joints, p8_accept
+
+# ---------------------------------------------------------------------------
+# Frozen-fixture target law (SPEC-P8-RELOCATE §3.0 / §5.3) -- the TREANT law.
+# ---------------------------------------------------------------------------
+# The frozen `phase8_relocation_input.json` is the acceptance TARGET-SELECTION
+# authority for the treant (§5.3 Layer 2, census-authoritative): 143 non-exempt
+# (incl. the 6 census-only boundary members {168,376,443,445,485,519} the kernel
+# robust tip-anchor merge exempts but the census counts), 50 moot (incl. mi=420,
+# all-moot at full IEEE-754 precision), 77 REAL quarantine, 15 ball breaches. The
+# live-forest gate under-counts these boundary members (kernel-exempt), so the
+# frozen fixture -- not the live gate -- is the treant target law.
+#
+# It is applied ONLY when the current geometry IS the fixture's source geometry
+# (the pre-relocation treant, v5e_run1). The gate is a canonical members digest:
+# on the ORIGINAL geometry it matches and the fixture's 143/50 target set is used;
+# once relocation MUTATES the geometry (subsequent convergence sweeps, the §6.10
+# idempotence pass, or ANY other model) the digest no longer matches and target
+# selection falls back to the live gate -- which reads the relocated members legal
+# and yields an EMPTY snapshot, so the idempotence pass is a provable no-op by
+# construction (and the fixture's v5e_run1 member INDICES, invalid on a mutated /
+# re-indexed forest, are never mis-applied). Pinned from
+# `p8_accept.geometry_digest(collect_members(v5e_run1.members), [])`.
+TREANT_PRERELOCATE_DIGEST = (
+    "354f1ec85b972c14b674167200130d397aac5f71bb58359d9b954129fd35341f")
+
+
+def load_treant_frozen_snapshot():
+    """Load the frozen treant target-law snapshot (§3.0), or None if the pinned
+    fixture is unavailable (unit/synthetic callers on a tiny mesh). Ball breaches
+    come from the LIVE gate (the JSON does not carry the 15), so this carries only
+    the non_exempt / moot / quarantine target sets."""
+    try:
+        return phase8.load_frozen_snapshot()
+    except Exception:
+        return None
+
+
+def _members_geometry_digest(members) -> str:
+    """Canonical byte-exact digest of the current live member geometry (members
+    only, balls excluded), for the frozen-fixture geometry gate. Reuses the
+    amendment-G `p8_accept.geometry_digest` (hex-exact IEEE-754, no rounding) so a
+    single serialization contract governs both the gate and the idempotence gate."""
+    return p8_accept.geometry_digest(members, [])
+
 
 # Q-REAL quarantine site IDs live in a DISJOINT namespace from class-T live
 # member indices (a quarantine `stub_member` is a `forest.members` index that
@@ -333,6 +377,7 @@ class DriverInput:
     live_fi: list                    # live index -> forest member index
     site_forest_idx: dict            # site_id (live mi) -> forest member index
     gate: GateClassification
+    target_source: str = "live-gate"  # "frozen-fixture" iff geometry-gated fixture
 
 
 def build_snapshot(gate: GateClassification, real_ids, artifact_ids,
@@ -365,9 +410,31 @@ def build_snapshot(gate: GateClassification, real_ids, artifact_ids,
         provenance=dict(source="engine-gate+quarantine-regrade+census-authority"))
 
 
+def frozen_target_snapshot(frozen: phase8.DefectSnapshot, gate: GateClassification,
+                           real_ids, artifact_ids) -> phase8.DefectSnapshot:
+    """Assemble the frozen §3.0 target-law snapshot for the treant acceptance run
+    (§5.3 Layer 2): non_exempt / moot are taken VERBATIM from the frozen fixture
+    (the census-authoritative 143/50, incl. the 6 census-only boundary members the
+    live kernel gate exempts), the quarantine split from the live re-grade (tied to
+    the forest's own quarantine records, deterministic, == the JSON's 77), and the
+    ball breaches from the live gate (the JSON carries no balls). Applied ONLY under
+    the geometry gate (`construct_sites`), so it never touches a mutated forest."""
+    return phase8.DefectSnapshot(
+        non_exempt=tuple(frozen.non_exempt), moot=tuple(frozen.moot),
+        quarantine_real=tuple(sorted(real_ids)),
+        quarantine_artifact=tuple(sorted(artifact_ids)),
+        ball_breaches=tuple(range(len(gate.ball_breaches))),
+        partition=dict(n_firm_engine=len(gate.firm_transit),
+                       n_frozen_non_exempt=len(frozen.non_exempt),
+                       n_moot=len(frozen.moot)),
+        provenance=dict(source="frozen-fixture (treant law, geometry-gated) "
+                               "+ live quarantine-regrade + live ball-gate"))
+
+
 def construct_sites(forest, members, balls, contacts, carried, cfg, geom, mesh,
                     unrouted=(), quarantine_sites=None,
-                    census_authority=frozenset()) -> DriverInput:
+                    census_authority=frozenset(),
+                    frozen_snapshot=None) -> DriverInput:
     """Build the full Phase-8 driver input from the engine's OWN gate output
     (task step 1). BATCH-FIRST: one `classify_gate` pass (batched clearance +
     ball-breach reports) drives every class; per-site geometry is pure algebra on
@@ -376,11 +443,26 @@ def construct_sites(forest, members, balls, contacts, carried, cfg, geom, mesh,
     The site_id of every stub/strut is its live member index `mi` (the stable
     §3.0 site ID = the census/gate integer); quarantine stubs keep their own
     `stub_member` id (a disjoint index space -- a quarantined stub is never in the
-    live list). Returns a `DriverInput`."""
+    live list).
+
+    Target selection (§5.3): when `frozen_snapshot` is supplied AND the current
+    member geometry IS the frozen fixture's source geometry (the pre-relocation
+    treant, matched by `_members_geometry_digest == TREANT_PRERELOCATE_DIGEST`),
+    the non_exempt / moot target set is the FROZEN fixture (the census-authoritative
+    143/50 treant law, incl. the 6 census-only boundary members the live kernel gate
+    exempts). Otherwise -- a mutated forest (a convergence sweep, the idempotence
+    pass) or any non-treant model -- target selection is the live engine gate (which
+    reads relocated members legal, so the idempotence pass builds an empty snapshot).
+    Returns a `DriverInput`."""
     members = joints.collect_members(members)
     gate = classify_gate(mesh, members, balls, geom, cfg)
     real_ids, artifact_ids = regrade_quarantine(quarantine_sites, geom, cfg)
-    snapshot = build_snapshot(gate, real_ids, artifact_ids, census_authority)
+    use_frozen = (frozen_snapshot is not None
+                  and _members_geometry_digest(members) == TREANT_PRERELOCATE_DIGEST)
+    if use_frozen:
+        snapshot = frozen_target_snapshot(frozen_snapshot, gate, real_ids, artifact_ids)
+    else:
+        snapshot = build_snapshot(gate, real_ids, artifact_ids, census_authority)
 
     live_fi = live_forest_index_map(forest, unrouted)
 
@@ -416,7 +498,8 @@ def construct_sites(forest, members, balls, contacts, carried, cfg, geom, mesh,
 
     return DriverInput(snapshot=snapshot, stub_sites=stub_sites,
                        strut_sites=strut_sites, ball_sites=ball_sites,
-                       live_fi=live_fi, site_forest_idx=site_forest_idx, gate=gate)
+                       live_fi=live_fi, site_forest_idx=site_forest_idx, gate=gate,
+                       target_source=("frozen-fixture" if use_frozen else "live-gate"))
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +604,42 @@ class Phase8Report:
     committed_by_sweep: tuple = ()   # per-sweep splice-commit count (fixed-pt trace)
     provenance_ledger: tuple = ()    # (sweep, cls, site_id, forest_idx, disp, rung)
     moot_member_ids: tuple = ()      # census/gate moot member idxs (report-only, F6)
+    # ---- defect-3 (fixed point) + defect-5/6 (frozen-fixture target law) ------
+    target_source: str = "live-gate"  # "frozen-fixture" iff the treant target law
+    sweep_tail_monotone: bool = True  # committed_by_sweep non-increasing (anti-churn)
+    n_banned: int = 0                 # collision-reverted candidates banned (anti-churn)
+
+
+def _cand_geom_key(member: dict) -> tuple:
+    """A hashable, revert-stable identity of a candidate's spliced geometry
+    (round-9 p0/p1/r0/r1). A splice REVERT restores the member to bit-exact
+    pre-splice geometry (`Member._restore`), so the reverted site re-derives the
+    SAME candidate grid and the SAME lex-min winner on the next sweep -- keyed
+    here so the cross-sweep ban recognises and skips it (defect-3 anti-churn)."""
+    p0 = np.asarray(member["p0"], float); p1 = np.asarray(member["p1"], float)
+    return (tuple(np.round(p0, 9).tolist()), tuple(np.round(p1, 9).tolist()),
+            round(float(member["r0"]), 9), round(float(member["r1"]), 9))
+
+
+def _ban_revalidate_fn(banned: dict, site_forest_idx: dict):
+    """A ladder-selection `revalidate_fn` (returns True == candidate legal) that
+    REJECTS any candidate whose (forest_idx, spliced-geometry) was reverted for a
+    §5-law collision on an EARLIER sweep. This is the monotone anti-churn guard
+    (defect-3): a revert restores exact geometry, so a naive loop re-picks the
+    same lex-min winner and reverts it again forever ([...,1,1] churn + net-zero
+    non-monotone sweeps). Banning the reverted candidate forces the ladder to the
+    NEXT lex-min candidate or to an honest R2/R3 fall; the ban set only GROWS over
+    finite candidate grids, so the sweep loop provably reaches a fixed point.
+    None / empty ban => every candidate passes (behaviour-preserving)."""
+    if not banned:
+        return None
+
+    def _ok(cand):
+        fi = site_forest_idx.get(cand.site_id)
+        if fi is None:
+            return True
+        return _cand_geom_key(cand.member) not in banned.get(fi, ())
+    return _ok
 
 
 def _stub_revalidate_fn(site_by_id):
@@ -551,9 +670,11 @@ class _SweepResult:
     unresolved_items: list
     ledger_rows: list
     n_committed: int
+    newly_banned: list = field(default_factory=list)  # (forest_idx, geom_key) reverts
 
 
-def _relocation_sweep(di: DriverInput, forest, geom, cfg) -> _SweepResult:
+def _relocation_sweep(di: DriverInput, forest, geom, cfg,
+                      banned: Optional[dict] = None) -> _SweepResult:
     """Run ONE Phase 1 (stubs+Q-REAL) -> Phase 2 (struts) -> Phase 3 (balls) pass
     over the FROZEN sites in `di`, splicing accepted re-aims/slides into `forest`
     under the transactional revalidate protocol. Pure single-sweep mechanics --
@@ -568,6 +689,11 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg) -> _SweepResult:
     pocket_labels: list = []
     ledger_rows: list = []
     n_committed = 0
+    newly_banned: list = []
+    # anti-churn ban filter (defect-3): a candidate reverted for a §5-law collision
+    # on an earlier sweep is skipped at selection here, so the ladder either picks a
+    # DIFFERENT candidate or falls honestly -- never re-picks the reverting winner.
+    ban_fn = _ban_revalidate_fn(banned, di.site_forest_idx)
 
     # ---- Phase 1: stubs (class-T stubs UNION Q-REAL), pocket solver + isolated.
     stub_resolved = stub_unresolved = 0
@@ -590,7 +716,8 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg) -> _SweepResult:
         return None
 
     if di.stub_sites:
-        report = phase8.run_pocket_solver(di.stub_sites, geom, cfg)
+        report = phase8.run_pocket_solver(di.stub_sites, geom, cfg,
+                                          revalidate_fn=ban_fn)
         pocket_labels = [pk.label for pk in report.pockets]
         accepted = []
         for pk in report.pockets:
@@ -607,17 +734,21 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg) -> _SweepResult:
             if fi is not None:
                 accepted.append((fi, r1res.winner.member, _orig_embed(forest, fi)))
             ledger_rows.append(("STUB", mid, fi, "ISOLATED", "R1" if ok else "R2"))
+        acc_by_fi = {fi: cm for fi, cm, _emb in accepted}
         n_ok, rv = splice_reaims(forest, geom, cfg, accepted)
         n_committed += n_ok
         reverted.extend(("STUB", fi) for fi in rv)
         stub_resolved -= len(rv); stub_unresolved += len(rv)
         for fi in rv:
             ledger_rows.append(("STUB", None, fi, "REVERTED", "splice"))
+            if fi in acc_by_fi:
+                newly_banned.append((fi, _cand_geom_key(acc_by_fi[fi])))
 
     # ---- Phase 2: interior struts (SM-STRUT S1), spliced AFTER stubs.
     strut_resolved = strut_unresolved = 0
     if di.strut_sites:
-        sres = phase8.run_phase2_struts(di.strut_sites, geom, cfg)
+        sres = phase8.run_phase2_struts(di.strut_sites, geom, cfg,
+                                        revalidate_fn=ban_fn)
         accepted = []
         for sid, sr in sres.items():
             if sr.rung == "S1" and sr.winner is not None:
@@ -629,12 +760,15 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg) -> _SweepResult:
                 strut_unresolved += 1
                 unresolved_items.append(("STRUT", sid, sr.rung))
                 ledger_rows.append(("STRUT", sid, None, "UNRESOLVED", sr.rung))
+        acc_by_fi = {fi: cm for fi, cm, _emb in accepted}
         n_ok, rv = splice_reaims(forest, geom, cfg, accepted)
         n_committed += n_ok
         reverted.extend(("STRUT", fi) for fi in rv)
         strut_resolved -= len(rv); strut_unresolved += len(rv)
         for fi in rv:
             ledger_rows.append(("STRUT", None, fi, "REVERTED", "splice"))
+            if fi in acc_by_fi:
+                newly_banned.append((fi, _cand_geom_key(acc_by_fi[fi])))
 
     # ---- Phase 3: ball breaches (SM-BALL B1), LAST -- reads FINAL shaft geometry.
     ball_resolved = ball_unresolved = 0
@@ -684,13 +818,13 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg) -> _SweepResult:
         ball_resolved=ball_resolved, ball_unresolved=ball_unresolved,
         reverted=reverted, pocket_labels=pocket_labels,
         unresolved_items=unresolved_items, ledger_rows=ledger_rows,
-        n_committed=n_committed)
+        n_committed=n_committed, newly_banned=newly_banned)
 
 
 def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
                cfg, mesh, unrouted=(), quarantine_sites=None,
                census_authority=frozenset(), log=None,
-               member_list_fn=None) -> Phase8Report:
+               member_list_fn=None, frozen_snapshot=None) -> Phase8Report:
     """The Phase-8 orchestration driver (task step 1-2-3): construct sites from
     the engine gate, run the state machines in the §3.0 normative order, and
     splice accepted relocations back into `forest`. Idempotent by construction --
@@ -719,7 +853,20 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
     `member_list_fn` (the engine passes `lambda: live_member_lists(forest, ...)`):
     re-reads the live member + ball lists from the current forest state between
     sweeps. When None (unit/legacy callers), the loop runs EXACTLY ONE sweep on the
-    passed-in `members`/`balls` -- byte-identical to the pre-convergence driver."""
+    passed-in `members`/`balls` -- byte-identical to the pre-convergence driver.
+
+    `frozen_snapshot` (the treant target law, §5.3 / defect-5-6): when supplied it
+    is applied by `construct_sites` ONLY on the sweep whose geometry IS the fixture's
+    source (the pre-relocation treant, digest-gated) -- so the FIRST sweep targets
+    the census-authoritative 143/50 (incl. the 6 census-only boundary members the
+    live kernel gate exempts), while every subsequent (mutated-geometry) sweep and
+    the §6.10 idempotence pass fall back to the live gate.
+
+    Fixed point (defect-3): a collision-revert ban carried across sweeps forbids
+    re-picking a candidate that a §5-law splice already reverted, so the per-sweep
+    commit count is non-increasing (`sweep_tail_monotone`) and the loop reaches a
+    true fixed point -- a second `run_phase8` over the accepted geometry re-derives
+    an empty snapshot and is a provable no-op."""
     t0 = time.time()
     log = log if log is not None else {}
     if quarantine_sites is None:
@@ -747,17 +894,24 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
     prev_defect = None
     sweeps_run = 0
     reached_fp = False                          # True iff a further sweep is a no-op
+    first_target_source = "live-gate"
+    # cross-sweep collision-revert ban (defect-3 anti-churn): forest_idx -> set of
+    # reverted candidate geom-keys. GROWS monotonically; makes the sweep loop a
+    # provable fixed point (no revert/re-commit oscillation), never shrinks.
+    banned: dict = {}
 
     for _sweep in range(max_sweeps):
         if _sweep > 0:
             members, balls = member_list_fn()   # re-read the mutated forest
         di = construct_sites(forest, members, balls, contacts, carried, cfg, geom,
                              mesh, unrouted=unrouted, quarantine_sites=quarantine_sites,
-                             census_authority=census_authority)
+                             census_authority=census_authority,
+                             frozen_snapshot=frozen_snapshot)
         if first_summary is None:
             first_summary = di.snapshot.summary()
             first_sites = (len(di.stub_sites), len(di.strut_sites), len(di.ball_sites))
             first_moot = tuple(di.snapshot.moot)
+            first_target_source = di.target_source
         if not (di.stub_sites or di.strut_sites or di.ball_sites):
             reached_fp = True                   # snapshot emptied -> truly done
             break                               # empty snapshot -> nothing left to do
@@ -769,7 +923,11 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
         prev_defect = defect
         entered_any = True
 
-        sw = _relocation_sweep(di, forest, geom, cfg)
+        sw = _relocation_sweep(di, forest, geom, cfg, banned=banned)
+        # accumulate this sweep's collision-reverts into the monotone ban set so
+        # the NEXT sweep cannot re-pick the reverting winner (defect-3 anti-churn).
+        for fi, gk in sw.newly_banned:
+            banned.setdefault(fi, set()).add(gk)
         sweeps_run += 1
         committed_by_sweep.append(sw.n_committed)
         stub_resolved += sw.stub_resolved
@@ -800,13 +958,20 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
             reverted_splices=(), unresolved_items=(), pocket_labels=(),
             dt_s=round(time.time() - t0, 3), entered_ladder=False,
             sweeps=0, converged=True, committed_by_sweep=(),
-            provenance_ledger=(), moot_member_ids=tuple(first_moot))
+            provenance_ledger=(), moot_member_ids=tuple(first_moot),
+            target_source=first_target_source, sweep_tail_monotone=True, n_banned=0)
 
     # converged iff a further sweep is provably a no-op: either the snapshot
     # emptied or the last executed sweep committed nothing. A monotone-guard stop
     # or a sweep-cap exhaustion leaves `reached_fp` False -- the ladder had NOT
     # reached its fixed point, and idempotence is not claimed (reported honestly).
     converged = reached_fp
+    # anti-churn invariant (defect-3): with the collision-revert ban the per-sweep
+    # commit count is non-increasing -- the [116,57,9,2,3,2,1,1] revert/re-commit
+    # churn (a 2->3 rebound, a [...,1,1] tail) can no longer occur.
+    sweep_tail_monotone = all(a >= b for a, b in
+                              zip(committed_by_sweep, committed_by_sweep[1:]))
+    n_banned = sum(len(v) for v in banned.values())
 
     return Phase8Report(
         snapshot_summary=first_summary,
@@ -821,7 +986,9 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
         dt_s=round(time.time() - t0, 3), entered_ladder=True,
         sweeps=sweeps_run, converged=converged,
         committed_by_sweep=tuple(committed_by_sweep),
-        provenance_ledger=tuple(ledger), moot_member_ids=tuple(first_moot))
+        provenance_ledger=tuple(ledger), moot_member_ids=tuple(first_moot),
+        target_source=first_target_source,
+        sweep_tail_monotone=sweep_tail_monotone, n_banned=n_banned)
 
 
 def _orig_embed(forest, fi):

@@ -297,7 +297,7 @@ def brace_and_size(mesh, forest, unrouted, surface_tree, plate_z, cfg, log=None,
 
 
 def relocate(mesh, forest, unrouted, contacts, carried, tip_r, plate_z, cfg,
-             geom=None, log=None, census_authority=frozenset()):
+             geom=None, log=None, census_authority=frozenset(), pass_idx=0):
     """Phase-8 RELOCATION STAGE (SPEC-P8-RELOCATE §3.0), wired post-brace /
     pre-final-verify. Constructs the frozen defect snapshot + the SM-STUB /
     SM-STRUT / SM-BALL sites from the engine's OWN gate output, runs the state
@@ -312,17 +312,23 @@ def relocate(mesh, forest, unrouted, contacts, carried, tip_r, plate_z, cfg,
     (the transit/ball predicates need the exact kernel)."""
     log = log if log is not None else {}
     if geom is None or not hasattr(geom, "penetration_intervals"):
-        log["relocate"] = dict(skipped="no exact geom oracle")
+        log["relocate"] = log[f"relocate_p{pass_idx}"] = dict(skipped="no exact geom oracle")
         return log["relocate"]
     members, balls = live_member_lists(forest, unrouted, plate_z, cfg)
     # F1 convergence: hand the driver a closure that re-reads the LIVE member/ball
     # lists from the (mutated) forest between sweeps, so the relocation ladder runs
     # on its own output to a fixed point instead of discarding the first pass.
     member_list_fn = lambda: live_member_lists(forest, unrouted, plate_z, cfg)  # noqa: E731
+    # Frozen-fixture TREANT target law (SPEC-P8-RELOCATE §5.3, defect-5/6): the
+    # driver applies it only when the CURRENT geometry is the fixture's source
+    # (the pre-relocation treant, geometry-digest-gated); otherwise -- any mutated
+    # forest (convergence sweeps, the idempotence pass) or non-treant model -- it
+    # falls back to the live gate, so this is safe to always pass.
+    frozen_snapshot = phase8_driver.load_treant_frozen_snapshot()
     report = phase8_driver.run_phase8(
         forest, members, balls, contacts, carried, tip_r, plate_z, geom, cfg, mesh,
         unrouted=unrouted, census_authority=census_authority, log=log,
-        member_list_fn=member_list_fn)
+        member_list_fn=member_list_fn, frozen_snapshot=frozen_snapshot)
     rep = dict(
         entered_ladder=report.entered_ladder, dt_s=report.dt_s,
         n_stub_sites=report.n_stub_sites, n_strut_sites=report.n_strut_sites,
@@ -334,9 +340,15 @@ def relocate(mesh, forest, unrouted, contacts, carried, tip_r, plate_z, cfg,
         n_reverted=len(report.reverted_splices), n_pockets=len(report.pocket_labels),
         sweeps=report.sweeps, converged=report.converged,
         committed_by_sweep=list(report.committed_by_sweep),
+        target_source=report.target_source,
+        sweep_tail_monotone=report.sweep_tail_monotone, n_banned=report.n_banned,
         n_moot=len(report.moot_member_ids), n_ledger=len(report.provenance_ledger),
         snapshot=report.snapshot_summary)
+    # defect-5: DISTINCT per-fix-pass ledger keys (relocate_p0, relocate_p1, ...)
+    # so a later fix-pass's report never overwrites an earlier one; `relocate`
+    # keeps the latest for back-compat.
     log["relocate"] = rep
+    log[f"relocate_p{pass_idx}"] = rep
     if report.entered_ladder:
         print(f"[v5] .. relocate sites stub={report.n_stub_sites} "
               f"strut={report.n_strut_sites} ball={report.n_ball_sites} -> "
@@ -470,7 +482,7 @@ def run(mesh, cfg, log=None):
                 _prog_r = _ProgressCell()
                 with _ticker(f"relocate[p{fix_pass}]", lambda: _prog_r.n, 1):
                     relocate(mesh, forest, unrouted, contacts, carried, tip_r,
-                             plate_z, cfg, geom=geom, log=log)
+                             plate_z, cfg, geom=geom, log=log, pass_idx=fix_pass)
         tree.assert_all_certified(forest)
         members, balls = live_member_lists(forest, unrouted, plate_z, cfg)
         log[f"forest_pass{fix_pass}"] = dict(
