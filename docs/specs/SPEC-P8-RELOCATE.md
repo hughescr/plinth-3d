@@ -134,6 +134,53 @@ The order is normative: shaft geometry (stubs, then struts) is finalized
 before joint geometry (balls). Within every phase the commit order is a
 stable sort on the explicit key above with `mi` as the final tiebreak.
 
+**AMENDMENT — SINGLE FINAL-ONLY RELOCATION STAGE** (implementation
+consequence, orchestrator-approved 2026-07-24; not a change of policy, a
+correction of where the ratified phase order is applied).
+
+Relocation is ONE stage, run ONCE per engine run, AFTER every fix pass'
+`construct` / `rewire` / `brace_and_size` has settled and IMMEDIATELY BEFORE
+the final verify. **Nothing may mutate geometry after relocation except the
+verify that judges it.**
+
+Rationale — the same argument §3.0 already makes for Phase 3 ("a joint ball's
+legal position depends on the FINAL segment geometry produced by phases 1-2;
+running balls earlier would re-open on any subsequent shaft move"), applied
+one level up. The engine previously ran the ladder *inside* the fix-pass loop,
+once per pass; pass 1's `rewire` + `brace_and_size` then ran AFTER pass 0's
+relocation and mutated geometry relocation had already certified. Measured
+consequence on the 2026-07-24 acceptance run: 3 embed-grade regressions (the
+mi 920/991/1010 class) that were pure `brace_and_size` drift on endpoints
+pass-0 relocation had settled — remediation being undone by a later
+construction stage. Secondary consequence: two full ladders per run, the
+second re-deriving from an already-relocated forest, for roughly double the
+wall cost and no additional resolution.
+
+Ledger contract is unchanged: the stage still writes `relocate` and
+`relocate_p{N}` (a single final-only stage writes `relocate_p0`), and the
+verify it precedes is logged as `verify[final]` / `verify_final`.
+
+**ZERO-NEW-VIOLATION COMMIT INVARIANT (D6)** (implementation consequence,
+orchestrator-approved 2026-07-24). A candidate whose application would create
+ANY new violation — firm transit, embed grade (SCAR-AREA-CAP), connectivity,
+printability, or ball breach — ANYWHERE in its influence set (spliced ∪
+co-moved ∪ endpoint-neighbours) is ILLEGAL AT COMMIT; and a commit that does
+not STRICTLY DECREASE the defect count over that influence set is likewise
+illegal (it is churn, not remediation). Every class is read from the ONE
+authority §5 already names — `verify.certify_member` for transit + embed
+grade, `connectivity_report` / `printability_report` / `ball_breach_report`
+for the rest — evaluated BATCH-FIRST, one call per class per side over the
+whole influence set.
+
+Consequence, and why this is what makes §6.10 real: every surviving commit
+strictly decreases the GLOBAL defect count (geometry outside the influence set
+is untouched, and each class is a function of that geometry alone), so the
+sweep loop is monotone in a non-negative integer and reaches its fixed point
+by construction rather than by the sweep cap. A splice that is legal but
+STERILE retires its site as honest-unresolved (`D6-sterile`) instead of being
+re-picked next sweep — that re-pick was the neighbour cascade that held the
+sweep tail at 1-2 commits/sweep forever.
+
 **Final full-verify + idempotence (acceptance, §6.9-§6.10).** After Phase 3,
 the complete gate runs over the *serialized* output (§6.9). A second Phase-8
 pass over that output re-derives an EMPTY frozen snapshot (zero non-exempt,

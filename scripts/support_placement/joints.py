@@ -397,6 +397,67 @@ def _dist_and_local_radius(center, p0, p1, r0, r1):
     return dist, local_r
 
 
+# Rows per chunk of the batched joint<->axis-member scan below. Bounds the
+# transient (chunk x n_axis_members x 3) working set; purely a memory knob, it
+# cannot change the result (each row is independent).
+_AXIS_SCAN_CHUNK = 256
+
+
+def _batch_dist_and_local_radius(centers, p0s, p1s, r0s, r1s):
+    """BATCH-FIRST (binding house rule) vectorised `_dist_and_local_radius` over
+    the full (n_centers x n_segments) cross product. Returns `(dist, local_r)`,
+    both `(n_centers, n_segments)` float arrays.
+
+    BIT-IDENTICAL to calling the scalar helper in a double loop -- every
+    arithmetic expression below is written in the SAME operand order the scalar
+    form uses (explicit component-wise `x*x + y*y + z*z` rather than `@`/`einsum`,
+    whose small-vector reduction order is NOT guaranteed to match `np.dot`; the
+    einsum form was measured to differ from the scalar reference in 3275/240000
+    distances, the explicit form in 0/240000). This branch's determinism contract
+    is FLOAT-EXACT, so "close enough" is not a legal substitute -- see
+    `test_joints.py::test_batch_dist_and_local_radius_bit_identical_to_scalar`.
+
+    Zero-length segments follow the scalar branch exactly: distance to `p0`, and
+    the segment's `r0` (the scalar helper returns `t`-free values there)."""
+    centers = np.asarray(centers, float)
+    p0s = np.asarray(p0s, float); p1s = np.asarray(p1s, float)
+    r0s = np.asarray(r0s, float); r1s = np.asarray(r1s, float)
+    n_c = len(centers); n_m = len(p0s)
+    dist = np.empty((n_c, n_m), float)
+    local_r = np.empty((n_c, n_m), float)
+    if n_c == 0 or n_m == 0:
+        return dist, local_r
+    d = p1s - p0s
+    L2 = d[:, 0] * d[:, 0] + d[:, 1] * d[:, 1] + d[:, 2] * d[:, 2]
+    degenerate = L2 < 1e-18
+    L2safe = np.where(degenerate, 1.0, L2)
+    for start in range(0, n_c, _AXIS_SCAN_CHUNK):
+        end = min(start + _AXIS_SCAN_CHUNK, n_c)
+        c = centers[start:end]                                   # (k,3)
+        relx = c[:, None, 0] - p0s[None, :, 0]
+        rely = c[:, None, 1] - p0s[None, :, 1]
+        relz = c[:, None, 2] - p0s[None, :, 2]
+        num = (relx * d[None, :, 0] + rely * d[None, :, 1] + relz * d[None, :, 2])
+        t = np.clip(num / L2safe[None, :], 0.0, 1.0)
+        # `proj = p0 + t*d` THEN `center - proj` -- the scalar helper's exact
+        # association; `(center - p0) - t*d` is a different rounding and does
+        # NOT reproduce it bit-for-bit.
+        ex = c[:, None, 0] - (p0s[None, :, 0] + t * d[None, :, 0])
+        ey = c[:, None, 1] - (p0s[None, :, 1] + t * d[None, :, 1])
+        ez = c[:, None, 2] - (p0s[None, :, 2] + t * d[None, :, 2])
+        dchunk = np.sqrt(ex * ex + ey * ey + ez * ez)
+        rchunk = r0s[None, :] + (r1s[None, :] - r0s[None, :]) * t
+        if degenerate.any():
+            # scalar branch: |center - p0| and r0, with no t involved at all.
+            d0 = np.sqrt(relx * relx + rely * rely + relz * relz)
+            dchunk = np.where(degenerate[None, :], d0, dchunk)
+            rchunk = np.where(degenerate[None, :],
+                              np.broadcast_to(r0s[None, :], rchunk.shape), rchunk)
+        dist[start:end] = dchunk
+        local_r[start:end] = rchunk
+    return dist, local_r
+
+
 def collect_members(members):
     """v4 (design-v4.md #2): the CCO builder (cco.build) produces the
     member list NATIVELY (tree.Member objects, or plain dicts with the
@@ -525,8 +586,39 @@ def compute_joint_balls(members, plate_z, cfg):
     # domain, not structural axis a joint could land on).
     axis_members = [m for m in members if m["kind"] != "stub"]
 
+    # BATCH-FIRST (SPEC-V5-PERF, binding house rule): the joint <-> axis-member
+    # proximity scan is ONE vectorised (n_clusters x n_axis_members) evaluation,
+    # NOT a per-cluster scalar loop. The scalar form was the dominant pure-Python
+    # cost of the whole Phase-8 relocation stage -- 6.6M `_dist_and_local_radius`
+    # calls / 6.6s per `compute_joint_balls`, and the relocation loop re-derives
+    # the live member+ball lists once per sweep, so it paid that 8x (46s of a
+    # 204s profiled stage). `_batch_dist_and_local_radius` is bit-identical to the
+    # scalar helper (see its docstring), so this is a pure cost fix: the emitted
+    # ball list is byte-for-byte what the scalar loop produced.
+    #
+    # Every cluster's center is derived FIRST (the same `argmax` on end radius the
+    # per-cluster body used), so one batched call covers them all; the body below
+    # then reads its own row. Cluster iteration order, the F3(a)/plate/enclosure
+    # skips, and the `>=` (last-wins) tie rule over `axis_members` order are all
+    # preserved verbatim.
+    cluster_idxs = list(clusters.values())
+    cluster_centers = np.array(
+        [nodes[idxs[int(np.argmax([nodes[i][1] for i in idxs]))]][0]
+         for idxs in cluster_idxs], dtype=float) if cluster_idxs else np.zeros((0, 3))
+    if axis_members:
+        ax_dist, ax_local_r = _batch_dist_and_local_radius(
+            cluster_centers,
+            np.array([m["p0"] for m in axis_members], dtype=float),
+            np.array([m["p1"] for m in axis_members], dtype=float),
+            np.array([m["r0"] for m in axis_members], dtype=float),
+            np.array([m["r1"] for m in axis_members], dtype=float))
+        ax_on_axis = ax_dist <= ON_AXIS_TOL_MM
+    else:
+        ax_local_r = np.zeros((len(cluster_idxs), 0))
+        ax_on_axis = np.zeros((len(cluster_idxs), 0), bool)
+
     balls = []
-    for idxs in clusters.values():
+    for ci, idxs in enumerate(cluster_idxs):
         cluster_nodes = [nodes[i] for i in idxs]
         if len(cluster_nodes) == 2:
             # F3(a): exactly two endpoints, anti-parallel through the point
@@ -554,13 +646,15 @@ def compute_joint_balls(members, plate_z, cfg):
         # below -- a through-member's own solid genuinely occupies this
         # point even when it isn't the one sizing the ball.
         touching_members = {id(n[5]): n[5] for n in cluster_nodes}
-        for m in axis_members:
-            dist, local_r = _dist_and_local_radius(center, m["p0"], m["p1"], m["r0"], m["r1"])
-            if dist <= ON_AXIS_TOL_MM:
-                touching_members[id(m)] = m
-                if local_r >= r_max:
-                    r_max = local_r
-                    owner = m["owner"]
+        # ascending indices == the original `for m in axis_members` order, so the
+        # `>=` last-wins tie rule for `owner`/`r_max` is preserved exactly.
+        for j in np.nonzero(ax_on_axis[ci])[0]:
+            m = axis_members[int(j)]
+            touching_members[id(m)] = m
+            local_r = float(ax_local_r[ci, j])
+            if local_r >= r_max:
+                r_max = local_r
+                owner = m["owner"]
         if owner is None:
             # no fatter through-member: owned by the fattest endpoint
             owner = cluster_nodes[int(np.argmax([n[1] for n in cluster_nodes]))][2]

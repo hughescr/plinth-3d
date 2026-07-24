@@ -565,44 +565,132 @@ def _member_endpoints(snap):
             (np.asarray(snap["p1"], float), float(snap["r1"])))
 
 
-def _affected_new_violations(forest, geom, cfg, plate_z, pre_members, live_fi,
-                             pos_of, affected_fis):
-    """Connectivity + printability NEW-violation diff over the affected set (D2
-    part B). `pre_members` is the live-universe dict list captured BEFORE the
-    splice (same order as `live_fi`); the CURRENT forest geometry is the post
-    state. Returns `(new_conn_fis, new_print_fis)` -- forest member indices whose
-    endpoint newly floats / whose shaft newly over-leans POST but did NOT PRE, so
-    a pre-existing baseline issue elsewhere never blocks a legal re-aim. BATCH-
-    FIRST: exactly ONE connectivity + ONE printability report per side over the
-    whole affected subset, never per member. `plate_z is None` (legacy/unit
-    callers) disables the guard -- returns empty sets."""
-    if plate_z is None:
-        return set(), set()
-    subset = sorted(pos_of[fi] for fi in affected_fis if fi in pos_of)
+# ---------------------------------------------------------------------------
+# D6 -- ZERO-NEW-VIOLATION COMMIT INVARIANT (orchestrator ruling, 2026-07-24).
+# ---------------------------------------------------------------------------
+# The relocation ladder did not converge: committing a fix for member A perturbed
+# a NEIGHBOUR B (through the D2 co-move that keeps the junction welded) into a NEW
+# legal violation, which the next sweep re-targeted, which perturbed C... The
+# sweep tail plateaued at 1-2 commits/sweep forever ([57,14,11,9,3,3,1,2], cap 8)
+# and no per-SITE retirement rule can fix a per-NEIGHBOUR cascade.
+#
+# The invariant that does: a candidate whose application would create ANY new
+# violation -- transit, embed grade, connectivity, printability, ball breach --
+# ANYWHERE in its influence set is ILLEGAL AT COMMIT, and a commit that does not
+# STRICTLY DECREASE the defect count over that influence set is likewise illegal
+# (it is churn: the asymptotic "worst_chord shrinks a little every sweep but never
+# clears rule 4" re-commit is exactly this case). Both together make every
+# surviving commit strictly decrease the GLOBAL defect count -- geometry outside
+# the influence set is untouched and its defect classes are functions of that
+# geometry alone -- so the sweep loop is monotone in a non-negative integer and
+# reaches a fixed point (hence idempotence) BY CONSTRUCTION, not by a cap.
+#
+# BATCH-FIRST: the whole influence set is scored in ONE evaluation per side
+# (pre/post) -- two kernel interval calls, one SCAR verdict call, one connectivity
+# report, one printability report, one sphere-breach call -- never per member.
+
+
+def _influence_defects(member_dicts, subset, geom, cfg, plate_z):
+    """Score EVERY defect class over `subset` (positions into `member_dicts`, the
+    live-universe list) in ONE batched pass. Returns `{pos: frozenset(classes)}`,
+    entries only for positions carrying >= 1 defect.
+
+    The classes, and the ONE authority each is read from -- never a second
+    predicate invented here (SPEC-P8-RELOCATE §5 "one law, one authority"):
+
+      * "transit" / "embed" -- `verify.certify_member`, the SHARED certificate the
+        candidate gate (`phase8._batch_legal_sets`) and the acceptance verifier
+        (`verify._clearance_report_exact`) both route through: `nonexempt` is a
+        firm rule-4/PRINT-FLOOR crossing, `scar_ok=False` is an embed-GRADE
+        regression (a collapsed SCAR-AREA-CAP anchor). Stubs classify AXIS-only,
+        non-stubs AXIS + capsule-offset -- the same ray split the gate uses.
+      * "connectivity" -- `verify.connectivity_report` (subset-restricted, full
+        attachment universe).
+      * "printability" -- `tree.printability_report` (subset-restricted).
+      * "ball" -- `verify.ball_breach_report` over the joint balls the SUBSET's own
+        members form (`joints.compute_joint_balls`) plus their embed end-caps. An
+        end-cap breach carries its own `member_idx`; a joint-ball breach is
+        attributed to every subset member with an endpoint at the breaching
+        centre (one vectorised distance query, not a scan).
+
+    Deterministic: pure geometry + sorted iteration, no wall-clock, no RNG."""
+    out: dict = {}
     if not subset:
-        return set(), set()
-    post_members = joints.collect_members([forest.members[fi] for fi in live_fi])
-    pre_conn = verify.connectivity_report(pre_members, plate_z, cfg, geom=geom, subset=subset)
-    post_conn = verify.connectivity_report(post_members, plate_z, cfg, geom=geom, subset=subset)
-    pre_ck = {(live_fi[v["member_idx"]], v["end"]) for v in pre_conn}
-    post_ck = {(live_fi[v["member_idx"]], v["end"]) for v in post_conn}
-    pre_pr = tree.printability_report(pre_members, cfg, subset=subset)
-    post_pr = tree.printability_report(post_members, cfg, subset=subset)
-    pre_pk = {live_fi[v["member_idx"]] for v in pre_pr}
-    post_pk = {live_fi[v["member_idx"]] for v in post_pr}
-    new_conn = {fi for (fi, _e) in (post_ck - pre_ck)}
-    new_print = post_pk - pre_pk
-    return new_conn, new_print
+        return out
+    subset = sorted(subset)
+    sub_members = [member_dicts[k] for k in subset]
+
+    def _add(pos, cls):
+        out[pos] = out.get(pos, frozenset()) | {cls}
+
+    # ---- transit + embed grade, through the ONE shared certificate ----------
+    def _seg_len(m):
+        return float(np.linalg.norm(np.asarray(m["p1"], float)
+                                    - np.asarray(m["p0"], float)))
+    stub_mis = [j for j, m in enumerate(sub_members)
+                if m["kind"] == "stub" and _seg_len(m) >= 1e-9]
+    seg_mis = [j for j, m in enumerate(sub_members)
+               if m["kind"] != "stub" and _seg_len(m) >= 1e-9]
+    ivmap = {**verify._batch_axis_intervals(geom, sub_members, stub_mis, rays="axis"),
+             **verify._batch_axis_intervals(geom, sub_members, seg_mis, rays="all")}
+    all_mis = sorted(stub_mis + seg_mis)
+    verdicts = verify._embed_scar_verdicts(geom, sub_members, all_mis, ivmap, cfg)
+    for j in all_mis:
+        cert = verify.certify_member(ivmap.get(j, []), sub_members[j], verdicts.get(j))
+        if cert["nonexempt"]:
+            _add(subset[j], "transit")
+        if not cert["scar_ok"]:
+            _add(subset[j], "embed")
+
+    if plate_z is None:                 # legacy/unit oracle: the rest needs a plate
+        return out
+
+    # ---- connectivity + printability (subset-restricted, full universe) -----
+    for v in verify.connectivity_report(member_dicts, plate_z, cfg, geom=geom,
+                                        subset=subset):
+        _add(int(v["member_idx"]), "connectivity")
+    for v in tree.printability_report(member_dicts, cfg, subset=subset):
+        _add(int(v["member_idx"]), "printability")
+
+    # ---- ball breaches over the subset's own joints + embed end-caps --------
+    if hasattr(geom, "sphere_breach"):
+        sub_balls = joints.compute_joint_balls(sub_members, plate_z, cfg)
+        breaches = verify.ball_breach_report(geom, sub_members, sub_balls, cfg)
+        joint_centers = [np.asarray(v["center"], float) for v in breaches
+                         if v.get("source") == "ball"]
+        for v in breaches:
+            if v.get("source") == "endcap":
+                _add(subset[int(v["member_idx"])], "ball")
+        if joint_centers:
+            # ONE vectorised endpoint query: (n_breach x 2*n_sub) distances.
+            ep_pts = np.array([np.asarray(m[e], float)
+                               for m in sub_members for e in ("p0", "p1")])
+            ep_pos = [subset[j] for j in range(len(sub_members)) for _e in (0, 1)]
+            d = np.linalg.norm(np.array(joint_centers)[:, None, :]
+                               - ep_pts[None, :, :], axis=2)
+            for k in np.unique(np.nonzero(d <= joints.COINCIDE_TOL_MM)[1]):
+                _add(ep_pos[int(k)], "ball")
+    return out
+
+
+def _defect_count(defmap, positions) -> int:
+    """Total defect count (member x class) over `positions` -- the integer the
+    commit invariant requires every commit to strictly decrease."""
+    return sum(len(defmap.get(k, ())) for k in positions)
 
 
 def _ball_slide_guard_ok(forest, geom, cfg, plate_z, saved, pre_members, live_fi,
                          pos_of, idx_arr, end_arr, pt_arr) -> bool:
-    """D2 widened guard for a ball-joint slide (Phase-3): the affected set (the
-    translated joint members UNION their endpoint-neighbours) carries NO new
-    connectivity / printability violation vs the pre-slide baseline. `saved` is
-    `_translate_joint`'s `(fi, pre-snapshot)` list; the forest currently holds the
-    POST-slide geometry (this is called before the trial undo). `plate_z is None`
-    disables the guard (legacy/unit callers)."""
+    """D6 commit invariant for a ball-joint slide (Phase-3), the SAME law the
+    shaft splice enforces (`splice_reaims`): over the affected set -- the
+    translated joint members UNION their endpoint-neighbours -- the slide must
+    create NO new violation of ANY class (transit, embed grade, connectivity,
+    printability, ball breach) AND must STRICTLY DECREASE the defect count there.
+    A slide that merely shuffles a breach around, or trades a breach for a new
+    transit on a neighbour, is illegal at commit -- that is what makes the sweep
+    loop monotone. `saved` is `_translate_joint`'s `(fi, pre-snapshot)` list; the
+    forest currently holds the POST-slide geometry (this is called before the
+    trial undo). `plate_z is None` disables the guard (legacy/unit callers)."""
     if plate_z is None:
         return True
     affected = {fi for fi, _s in saved}
@@ -611,12 +699,19 @@ def _ball_slide_guard_ok(forest, geom, cfg, plate_z, saved, pre_members, live_fi
             for (nfi, _ne) in _coincident(idx_arr, end_arr, pt_arr, pt,
                                           max(0.05, 0.5 * r), exclude_fi=fi):
                 affected.add(nfi)
-    new_conn, new_print = _affected_new_violations(
-        forest, geom, cfg, plate_z, pre_members, live_fi, pos_of, affected)
-    return not (new_conn or new_print)
+    subset = sorted(pos_of[fi] for fi in affected if fi in pos_of)
+    if not subset:
+        return False
+    pre_def = _influence_defects(pre_members, subset, geom, cfg, plate_z)
+    post_members = joints.collect_members([forest.members[fi] for fi in live_fi])
+    post_def = _influence_defects(post_members, subset, geom, cfg, plate_z)
+    if any(post_def.get(k, frozenset()) - pre_def.get(k, frozenset()) for k in subset):
+        return False                       # a NEW violation somewhere in reach
+    return _defect_count(post_def, subset) < _defect_count(pre_def, subset)
 
 
-def splice_reaims(forest, geom, cfg, accepted: list, *, plate_z=None, unrouted=()):
+def splice_reaims(forest, geom, cfg, accepted: list, *, plate_z=None, unrouted=(),
+                  reasons_out: Optional[dict] = None):
     """Splice a batch of accepted re-aims into the forest under its
     checkpoint/revalidate protocol (deterministic, transactional). `accepted` is
     a list of `(forest_idx, cand_member, orig_embed_end)`.
@@ -631,17 +726,24 @@ def splice_reaims(forest, geom, cfg, accepted: list, *, plate_z=None, unrouted=(
           transaction, so the junction stays welded by construction -- exactly
           what the ball-slide path already does for joints.
 
-      (B) WIDENED GUARD: after applying the batch, in addition to the §5-law
-          `forest.revalidate` clearance re-check, the affected set (spliced UNION
-          co-moved UNION endpoint-neighbours) is scored for NEW connectivity /
-          printability violations vs the pre-splice baseline; any transaction whose
-          responsibility set intersects a new violation (clearance, connectivity,
-          or printability) is REVERTED AS A UNIT -- every co-moved member restored
-          bit-exact -- so a re-aim never strands or over-leans a member. Batch-
-          first: one report per side over the whole affected list.
+      (B) D6 COMMIT INVARIANT (orchestrator ruling 2026-07-24, extending D2's
+          guard transit- and embed-aware): after applying the batch, the affected
+          set (spliced UNION co-moved UNION endpoint-neighbours -- the INFLUENCE
+          set) is scored for EVERY defect class (`_influence_defects`), and a
+          transaction is REVERTED AS A UNIT -- every co-moved member restored
+          bit-exact -- when it either carries a NEW violation of any class or does
+          not STRICTLY DECREASE the influence set's defect count. Batch-first: one
+          evaluation per side over the whole affected list, never per member.
 
     Returns `(n_committed, reverted_forest_idxs)` (committed / reverted PRIMARY
-    site count -- the caller keys the anti-churn ban on the reverted primaries)."""
+    site count -- the caller keys the anti-churn ban on the reverted primaries).
+
+    `reasons_out` (optional dict): filled `primary_forest_idx -> reason` for every
+    revert, `"violation"` (a NEW violation somewhere in the influence set -- the
+    ladder should try a DIFFERENT candidate, so the caller BANS this one) or
+    `"no-progress"` (legal but sterile -- the caller RETIRES the site, since
+    re-picking around a candidate that cannot reduce the defect count is exactly
+    the churn that kept the sweep tail alive)."""
     if not accepted:
         return 0, []
     # pre-splice endpoint-node index + live universe (built ONCE, batch-first):
@@ -736,26 +838,54 @@ def splice_reaims(forest, geom, cfg, accepted: list, *, plate_z=None, unrouted=(
         g["members"] |= txns[ti][1]
         g["resp"] |= txns[ti][2]
 
-    # ---- widened commit guard (D2 part B): clearance + connectivity + printability.
-    violations = forest.revalidate(geom, cfg)
-    bad_clearance = {v["member_idx"] for v in violations if v["member_idx"] in saved}
+    # ---- D6 ZERO-NEW-VIOLATION COMMIT INVARIANT (see `_influence_defects`).
+    # The influence set is the union of every group's responsibility set (spliced
+    # UNION co-moved UNION endpoint-neighbours) -- the ONLY members whose defect
+    # classes this batch can change. It is scored ONCE pre-splice; then, each
+    # round, once post-splice, and every group that either (a) carries a NEW
+    # violation of ANY class anywhere in its responsibility set, or (b) fails to
+    # STRICTLY DECREASE the defect count over that set, is reverted as a unit.
+    # Reverting can change a shared responsibility member's post state, so the
+    # test is iterated to a fixed point -- each round reverts >= 1 group, so it
+    # runs at most `len(groups)` rounds and always terminates.
     affected = set().union(*(g["resp"] for g in groups.values())) if groups else set()
-    new_conn, new_print = _affected_new_violations(
-        forest, geom, cfg, plate_z, pre_members, live_fi, pos_of, affected)
-    bad_members = bad_clearance | new_conn | new_print
+    inf_subset = sorted(pos_of[fi] for fi in affected if fi in pos_of)
+    pre_def = _influence_defects(pre_members, inf_subset, geom, cfg, plate_z)
 
+    live_groups = dict(groups)
     reverted = []
-    if bad_members:
-        for _root, g in sorted(groups.items(), key=lambda kv: min(kv[1]["primaries"])):
+    for _round in range(len(groups) + 1):
+        violations = forest.revalidate(geom, cfg)
+        bad_clearance = {v["member_idx"] for v in violations if v["member_idx"] in saved}
+        post_members = joints.collect_members([forest.members[fi] for fi in live_fi])
+        post_def = _influence_defects(post_members, inf_subset, geom, cfg, plate_z)
+        new_bad = {live_fi[k] for k in inf_subset
+                   if post_def.get(k, frozenset()) - pre_def.get(k, frozenset())}
+        bad_members = bad_clearance | new_bad
+        illegal = []
+        for root, g in sorted(live_groups.items(), key=lambda kv: min(kv[1]["primaries"])):
             if g["resp"] & bad_members:
-                for mfi in sorted(g["members"]):
-                    if mfi in saved:
-                        forest.members[mfi]._restore(saved[mfi])
-                reverted.extend(sorted(g["primaries"]))
-        if reverted:
-            forest.revalidate(geom, cfg)   # re-certify the restored members
+                illegal.append((root, "violation"))
+                continue
+            if plate_z is None:
+                continue                  # legacy/unit oracle: no progress ledger
+            gsub = [pos_of[fi] for fi in g["resp"] if fi in pos_of]
+            if _defect_count(post_def, gsub) >= _defect_count(pre_def, gsub):
+                illegal.append((root, "no-progress"))   # churn: no strict decrease
+        if not illegal:
+            break
+        for root, why in illegal:
+            g = live_groups.pop(root)
+            for mfi in sorted(g["members"]):
+                if mfi in saved:
+                    forest.members[mfi]._restore(saved[mfi])
+            for pfi in sorted(g["primaries"]):
+                reverted.append(pfi)
+                if reasons_out is not None:
+                    reasons_out[pfi] = why
+        forest.revalidate(geom, cfg)      # re-certify the restored members
     n_committed = len(txns) - len(reverted)
-    return n_committed, reverted
+    return n_committed, sorted(reverted)
 
 
 # ---------------------------------------------------------------------------
@@ -815,6 +945,12 @@ class Phase8Report:
     n_banned: int = 0                 # collision-reverted candidates banned (anti-churn)
     # ---- D3(a) progress-based retirement (fixed point) -----------------------
     retired_sites: tuple = ()         # (report_class, site_id, last_rung) honest-unresolved
+    # ---- D6 zero-new-violation commit invariant ------------------------------
+    # Global defect population (non-exempt + ball breaches) at the TOP of each
+    # executed sweep. The invariant makes every surviving commit strictly reduce
+    # it, so this trace is the machine-checkable monotonicity evidence: it is
+    # non-increasing, and strictly decreasing across any sweep that committed.
+    defects_by_sweep: tuple = ()
 
 
 def _cand_geom_key(member: dict) -> tuple:
@@ -1013,6 +1149,11 @@ class _SweepResult:
     # namespaced key -> (report_class, rung) -- the caller records their pre-commit
     # defect measure and retires any that reappear next sweep without improving.
     committed_sites: dict = field(default_factory=dict)
+    # D6: sites whose splice was legal but STERILE (no strict defect-count decrease
+    # over its influence set). Re-picking around a sterile candidate is the churn
+    # that kept the sweep tail alive, so the caller RETIRES these outright --
+    # namespaced key -> (report_class, rung), same shape as `committed_sites`.
+    sterile_sites: dict = field(default_factory=dict)
 
 
 def _relocation_sweep(di: DriverInput, forest, geom, cfg,
@@ -1034,9 +1175,10 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
     n_committed = 0
     newly_banned: list = []
     committed_sites: dict = {}            # D3(a): key -> (report_class, rung), committed
-    # anti-churn ban filter (defect-3): a candidate reverted for a §5-law collision
-    # on an earlier sweep is skipped at selection here, so the ladder either picks a
-    # DIFFERENT candidate or falls honestly -- never re-picks the reverting winner.
+    sterile_sites: dict = {}              # D6: key -> (report_class, rung), no-progress
+    # anti-churn ban filter (defect-3): any candidate in `banned` is skipped at
+    # selection, so the ladder picks a DIFFERENT one or falls honestly. `run_phase8`
+    # owns that set's lifetime -- see its comment for why D6 makes it sweep-local.
     ban_fn = _ban_revalidate_fn(banned, di.site_forest_idx)
     # D3(a) part 2 no-op-candidate skip: a candidate whose spliced geometry equals
     # the member's CURRENT forest geometry is a no-op churn commit -- reject it at
@@ -1087,8 +1229,10 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
                 acc_site[fi] = (mid, "R1")
             ledger_rows.append(("STUB", mid, fi, "ISOLATED", "R1" if ok else "R2"))
         acc_by_fi = {fi: cm for fi, cm, _emb in accepted}
+        reasons: dict = {}
         n_ok, rv = splice_reaims(forest, geom, cfg, accepted,
-                                 plate_z=plate_z, unrouted=unrouted)
+                                 plate_z=plate_z, unrouted=unrouted,
+                                 reasons_out=reasons)
         n_committed += n_ok
         reverted.extend(("STUB", fi) for fi in rv)
         stub_resolved -= len(rv); stub_unresolved += len(rv)
@@ -1096,9 +1240,15 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
         for fi, (mid, rung) in acc_site.items():
             if fi not in rv_set:          # spliced AND survived revalidate -> committed
                 committed_sites[("M", mid)] = ("STUB", rung)
+            elif reasons.get(fi) == "no-progress":       # D6: sterile -> retire
+                sterile_sites[("M", mid)] = ("STUB", "D6-sterile")
         for fi in rv:
-            ledger_rows.append(("STUB", None, fi, "REVERTED", "splice"))
-            if fi in acc_by_fi:
+            why = reasons.get(fi, "violation")
+            ledger_rows.append(("STUB", None, fi, "REVERTED", why))
+            # only a NEW-VIOLATION revert bans the candidate (try a different one);
+            # a sterile one retires the SITE instead -- banning there would just
+            # walk the ladder down its candidate list, sweep after sweep.
+            if why == "violation" and fi in acc_by_fi:
                 newly_banned.append((fi, _cand_geom_key(acc_by_fi[fi])))
 
     # ---- Phase 2: interior struts (SM-STRUT S1), spliced AFTER stubs.
@@ -1122,8 +1272,10 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
                 unresolved_items.append(("STRUT", sid, sr.rung))
                 ledger_rows.append(("STRUT", sid, None, "UNRESOLVED", sr.rung))
         acc_by_fi = {fi: cm for fi, cm, _emb in accepted}
+        reasons = {}
         n_ok, rv = splice_reaims(forest, geom, cfg, accepted,
-                                 plate_z=plate_z, unrouted=unrouted)
+                                 plate_z=plate_z, unrouted=unrouted,
+                                 reasons_out=reasons)
         n_committed += n_ok
         reverted.extend(("STRUT", fi) for fi in rv)
         strut_resolved -= len(rv); strut_unresolved += len(rv)
@@ -1131,9 +1283,12 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
         for fi, (sid, rung) in acc_site.items():
             if fi not in rv_set:          # spliced AND survived revalidate -> committed
                 committed_sites[("M", sid)] = ("STRUT", rung)
+            elif reasons.get(fi) == "no-progress":       # D6: sterile -> retire
+                sterile_sites[("M", sid)] = ("STRUT", "D6-sterile")
         for fi in rv:
-            ledger_rows.append(("STRUT", None, fi, "REVERTED", "splice"))
-            if fi in acc_by_fi:
+            why = reasons.get(fi, "violation")
+            ledger_rows.append(("STRUT", None, fi, "REVERTED", why))
+            if why == "violation" and fi in acc_by_fi:
                 newly_banned.append((fi, _cand_geom_key(acc_by_fi[fi])))
 
     # ---- Phase 3: ball breaches (SM-BALL B1), LAST -- reads FINAL shaft geometry.
@@ -1206,13 +1361,14 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
         reverted=reverted, pocket_labels=pocket_labels,
         unresolved_items=unresolved_items, ledger_rows=ledger_rows,
         n_committed=n_committed, newly_banned=newly_banned,
-        committed_sites=committed_sites)
+        committed_sites=committed_sites, sterile_sites=sterile_sites)
 
 
 def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
                cfg, mesh, unrouted=(), quarantine_sites=None,
                census_authority=frozenset(), log=None,
-               member_list_fn=None, frozen_snapshot=None) -> Phase8Report:
+               member_list_fn=None, frozen_snapshot=None,
+               progress=None) -> Phase8Report:
     """The Phase-8 orchestration driver (task step 1-2-3): construct sites from
     the engine gate, run the state machines in the §3.0 normative order, and
     splice accepted relocations back into `forest`. Idempotent by construction --
@@ -1288,10 +1444,18 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
     sweeps_run = 0
     reached_fp = False                          # True iff a further sweep is a no-op
     first_target_source = "live-gate"
-    # cross-sweep collision-revert ban (defect-3 anti-churn): forest_idx -> set of
-    # reverted candidate geom-keys. GROWS monotonically; makes the sweep loop a
-    # provable fixed point (no revert/re-commit oscillation), never shrinks.
+    # Collision-revert ban (defect-3 anti-churn): forest_idx -> set of refused
+    # candidate geom-keys, consulted at ladder SELECTION. Under D6 it is no longer
+    # a cross-sweep set: it is cleared on every committing sweep (see there) and the
+    # loop stops at the first non-committing one, so it never survives into a later
+    # sweep -- which is exactly what makes every sweep, and in particular the
+    # terminating one, a pure function of the geometry (idempotence). It stays as
+    # the refused-candidate provenance counter and as the selection hook the
+    # within-sweep ladder-depth retry (the identified next lever for resolution
+    # COMPLETENESS) will use. `n_banned_total` is the cumulative count for the
+    # report, since `banned` itself no longer accumulates.
     banned: dict = {}
+    n_banned_total = 0
     # D3(a) progress-based retirement (fixed point). `retired` GROWS monotonically:
     # a committed site that reappears WITHOUT acceptable progress -- its defect
     # measure not shrinking by the canonical granularity since its last commit, or
@@ -1308,6 +1472,7 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
     retired_info: dict = {}                      # key -> (report_class, last_rung)
     commit_measure: dict = {}                    # key -> (cls, rung, measure, count)
     canon_mm = float(getattr(cfg, "p8_chord_canon_micron", 1)) * 1e-3
+    defects_by_sweep: list = []                  # D6 monotonicity trace (evidence)
 
     for _sweep in range(max_sweeps):
         if _sweep > 0:
@@ -1346,6 +1511,12 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
         if not (di.stub_sites or di.strut_sites or di.ball_sites):
             reached_fp = True                   # snapshot emptied / all retired -> done
             break                               # nothing left to work -> fixed point
+        # D6 monotonicity evidence: the GLOBAL defect population this sweep starts
+        # from. The commit invariant makes every surviving commit strictly decrease
+        # it, so this trace is non-increasing and strictly decreasing on any sweep
+        # that committed -- the fixed point is reached, not merely capped.
+        defects_by_sweep.append(len(di.snapshot.non_exempt)
+                                + len(di.snapshot.ball_breaches))
         entered_any = True
 
         sw = _relocation_sweep(di, forest, geom, cfg, banned=banned,
@@ -1354,6 +1525,33 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
         # the NEXT sweep cannot re-pick the reverting winner (defect-3 anti-churn).
         for fi, gk in sw.newly_banned:
             banned.setdefault(fi, set()).add(gk)
+        n_banned_total += len(sw.newly_banned)
+        if sw.n_committed:
+            # D6 IDEMPOTENCE: a ban records "this candidate was illegal against THAT
+            # geometry". A commit MOVES the geometry, so every such record is stale;
+            # carrying it forward lets a stale ban HIDE a candidate that is now legal
+            # and progressing -- which is precisely how the loop stopped one commit
+            # early and failed the §6.10 strict-no-op gate (the acceptance run's
+            # second pass found the hidden commit: committed_by_sweep=[1,0]).
+            # Clearing here also means every sweep -- in particular the TERMINATING
+            # zero-commit one -- runs with an EMPTY ban set, so it is bit-for-bit the
+            # sweep a FRESH `run_phase8` executes on that geometry. Combined with the
+            # commit invariant (a sweep that commits nothing cannot commit anything
+            # on a re-run either, the sweep being a pure function of the geometry),
+            # that makes the fixed point IDEMPOTENT BY CONSTRUCTION, not by
+            # measurement. Termination is unaffected: it rests on the invariant's
+            # strict global-defect decrease, never on the ban.
+            banned.clear()
+        # D6: a site whose splice was LEGAL but STERILE (no strict defect-count
+        # decrease over its influence set) is retired immediately -- honest-
+        # unresolved. This is the fix for the neighbour cascade: re-picking around
+        # a sterile candidate every sweep IS the churn, and the site cannot be
+        # relocated to a better place by re-aim alone (that is directives 3/4's
+        # R2 surface-seed / D5 junction re-seat territory, not this ladder's).
+        for key in sorted(sw.sterile_sites):
+            if key not in retired:
+                retired.add(key)
+                retired_info[key] = sw.sterile_sites[key]
         # update the persistent commit ledger for every site committed THIS sweep:
         # record its pre-commit defect measure (from THIS sweep's pre-mutation gate,
         # `di.gate`) as the new progress baseline and bump its commit count, so the
@@ -1365,6 +1563,8 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
             count = (prev[3] + 1) if prev is not None else 1
             commit_measure[key] = (rcls, rung, m if m is not None else float("inf"), count)
         sweeps_run += 1
+        if progress is not None:      # timer-read ticker cell (SPEC-V5-PERF §4):
+            progress.n = sweeps_run   # a monotone int write, no timing on this path
         committed_by_sweep.append(sw.n_committed)
         stub_resolved += sw.stub_resolved
         qreal_resolved += sw.qreal_resolved
@@ -1405,12 +1605,23 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
     for key in sorted(retired):
         rcls, rung = retired_info[key]
         _, sid = key
+        # A D6-STERILE site was REVERTED, so its sweep already netted it out of the
+        # cumulative `*_resolved` tally (+1 at disposal, -1 at revert) -- it is
+        # honest-unresolved, but decrementing `*_resolved` again would double-count.
+        # A D3(a) PROGRESS retirement did commit, so it does need the move.
+        if rung != "D6-sterile":
+            if rcls == "STUB":
+                stub_resolved -= 1
+            elif rcls == "STRUT":
+                strut_resolved -= 1
+            elif rcls == "BALL":
+                ball_resolved -= 1
         if rcls == "STUB":
-            stub_resolved -= 1; stub_unresolved += 1
+            stub_unresolved += 1
         elif rcls == "STRUT":
-            strut_resolved -= 1; strut_unresolved += 1
+            strut_unresolved += 1
         elif rcls == "BALL":
-            ball_resolved -= 1; ball_unresolved += 1
+            ball_unresolved += 1
         unresolved_items.append((rcls, sid, rung))
         retired_sites.append((rcls, sid, rung))
 
@@ -1420,13 +1631,16 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
     # ladder had NOT reached its fixed point, and idempotence is not claimed
     # (reported honestly).
     converged = reached_fp
-    # anti-churn invariant (defect-3 + D3(a)): with the collision-revert ban, the
-    # no-op-candidate skip, and progress-based retirement, the per-sweep commit
-    # count is non-increasing -- the [116,57,9,2,3,2,1,1] revert/re-commit churn
-    # (a 2->3 rebound, a [...,1,1] tail) can no longer occur.
+    # anti-churn invariant (defect-3 + D3(a) + D6): with the no-op-candidate skip,
+    # progress-based retirement, and above all the commit invariant's strict
+    # global-defect decrease, the per-sweep commit count is non-increasing -- the
+    # [116,57,9,2,3,2,1,1] revert/re-commit churn (a 2->3 rebound, a [...,1,1] tail)
+    # can no longer occur.
     sweep_tail_monotone = all(a >= b for a, b in
                               zip(committed_by_sweep, committed_by_sweep[1:]))
-    n_banned = sum(len(v) for v in banned.values())
+    # cumulative over the run: `banned` itself is cleared after every
+    # committing sweep (see there), so its live size is not the total.
+    n_banned = n_banned_total
 
     return Phase8Report(
         snapshot_summary=first_summary,
@@ -1444,7 +1658,8 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
         provenance_ledger=tuple(ledger), moot_member_ids=tuple(first_moot),
         target_source=first_target_source,
         sweep_tail_monotone=sweep_tail_monotone, n_banned=n_banned,
-        retired_sites=tuple(retired_sites))
+        retired_sites=tuple(retired_sites),
+        defects_by_sweep=tuple(defects_by_sweep))
 
 
 def _orig_embed(forest, fi):

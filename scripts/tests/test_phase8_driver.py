@@ -617,10 +617,15 @@ def test_convergence_sweep_tail_monotone_and_second_pass_noop(cfg):
 
 
 def test_per_pass_relocate_ledger_distinct_keys(cfg):
-    """Defect-5 (ledger): each engine fix-pass writes a DISTINCT `relocate_p{N}`
-    key, so a later pass never overwrites an earlier pass's report (the round-1
+    """Defect-5 (ledger): each `relocate` INVOCATION writes a DISTINCT
+    `relocate_p{N}` key, so one never overwrites another's report (the round-1
     single `relocate` key hid pass-0 under pass-1). `relocate` keeps the latest for
-    back-compat."""
+    back-compat.
+
+    Since the §3.0 final-only amendment `engine.run` invokes the stage exactly once
+    (writing `relocate_p0`), but the per-invocation key contract still governs any
+    direct caller -- the acceptance harness and the §6.10 idempotence pass both
+    invoke it a second time over the finished forest -- so it stays pinned here."""
     geom = ExactSurface(_fin_mesh())
     forest, contacts, carried, tip_r = _fin_forest(cfg)
     log = {}
@@ -731,12 +736,18 @@ def test_d2_reaim_comoves_child_junction_and_preserves_connectivity(cfg):
     """D2 part A (site-derived, the 130 class-T connectivity offenders): a re-aim
     that moves a stub's tree-side p1 CO-MOVES every live member endpoint coincident
     with the OLD node, so the child junction rides p1 and the junction stays welded
-    -- connectivity is preserved BY CONSTRUCTION and the splice commits."""
+    -- connectivity is preserved BY CONSTRUCTION and the splice commits.
+
+    Under the D6 commit invariant a splice must ALSO strictly reduce the influence
+    set's defect count, so the fixture carries a real defect for the re-aim to
+    clear: the child R starts near-HORIZONTAL (a printability violation), and the
+    node move the stub's re-aim drags it through stands it upright."""
     geom = _faraway_box_geom()
     plate_z = -0.5
-    forest = _stub_with_child(tree_node=(0.0, 0.0, 0.0), child_p1=(0.0, 0.0, -0.5))
-    # a small re-aim: keep the embedded tip fixed, nudge the tree-side p1.
-    new_p1 = np.array([0.1, 0.0, 0.0])
+    forest = _stub_with_child(tree_node=(0.0, 0.0, -0.499), child_p1=(0.5, 0.0, -0.5))
+    assert tree.printability_report([forest.members[1]], cfg)   # R illegal PRE
+    # a re-aim whose node move stands the child upright (defect count 1 -> 0).
+    new_p1 = np.array([0.5, 0.0, 0.5])
     cand = dict(p0=np.array([0.0, 0.0, 0.5]), p1=new_p1, r0=0.2, r1=0.3,
                 kind="stub", owner=("contact", 0), embed_end="p0")
     n_ok, reverted = pd.splice_reaims(forest, geom, cfg, [(0, cand, "p0")],
@@ -745,10 +756,61 @@ def test_d2_reaim_comoves_child_junction_and_preserves_connectivity(cfg):
     # the child junction R.p0 rode the SAME delta -> still coincident with S.p1.
     assert np.allclose(forest.members[1].p0, new_p1)           # co-moved
     assert np.allclose(forest.members[0].p1, forest.members[1].p0)   # still welded
+    assert not tree.printability_report([forest.members[1]], cfg)    # R legal POST
     # affected-set connectivity has no NEW float (the junction survived the re-aim).
     members = joints.collect_members([forest.members[0], forest.members[1]])
     conn = verify.connectivity_report(members, plate_z, cfg, geom=geom, subset=[0, 1])
     assert not any(v["member_idx"] == 1 for v in conn)         # R never floats
+
+
+def test_d6_no_progress_reaim_is_illegal_at_commit(cfg):
+    """D6 ZERO-NEW-VIOLATION COMMIT INVARIANT, half 2 (STRICT PROGRESS). The exact
+    non-convergence mechanism the archived treant trace shows -- a re-aim that
+    neither breaks anything nor CLEARS anything, re-committed every sweep while its
+    worst_chord shrinks asymptotically ([57,14,11,9,3,3,1,2], never reaching the
+    fixed point) -- is now ILLEGAL AT COMMIT: with no defect anywhere in the
+    influence set to remove, the splice cannot strictly decrease the defect count,
+    so the whole transaction is reverted bit-exact and the sweep is a no-op."""
+    geom = _faraway_box_geom()
+    plate_z = -0.5
+    forest = _stub_with_child(tree_node=(0.0, 0.0, 0.0), child_p1=(0.0, 0.0, -0.5))
+    snaps = [forest.members[fi]._snapshot() for fi in (0, 1)]
+    cand = dict(p0=np.array([0.0, 0.0, 0.5]), p1=np.array([0.1, 0.0, 0.0]),
+                r0=0.2, r1=0.3, kind="stub", owner=("contact", 0), embed_end="p0")
+    n_ok, reverted = pd.splice_reaims(forest, geom, cfg, [(0, cand, "p0")],
+                                      plate_z=plate_z, unrouted=[])
+    assert n_ok == 0 and reverted == [0]           # churn commit refused
+    for snap, fi in zip(snaps, (0, 1)):            # restored BIT-EXACT
+        cur = forest.members[fi]._snapshot()
+        assert np.array_equal(cur["p0"], snap["p0"]) and np.array_equal(cur["p1"], snap["p1"])
+        assert cur["r0"] == snap["r0"] and cur["r1"] == snap["r1"]
+
+
+def test_d6_influence_defects_scores_every_class_batched(cfg):
+    """D6: `_influence_defects` reads EVERY defect class the invariant governs, and
+    reads each from the ONE authority (`verify.certify_member` for transit + embed
+    grade, `connectivity_report`, `printability_report`, `ball_breach_report`) --
+    never a second predicate. Site-derived shapes: a near-horizontal shaft
+    (printability), a detached rod (connectivity), a stub welded through a thin fin
+    (transit)."""
+    geom = ExactSurface(_fin_mesh())
+    plate_z = -5.0
+    forest, _c, _ca, _tr = _fin_forest(cfg)
+    members = joints.collect_members(list(forest.members))
+    allpos = list(range(len(members)))
+    defmap = pd._influence_defects(members, allpos, geom, cfg, plate_z)
+    assert any("transit" in v for v in defmap.values()), defmap
+    # the count the invariant compares is (member x class), monotone in the map.
+    assert pd._defect_count(defmap, allpos) >= len(defmap)
+    # an empty subset is a free no-op (the guard must never do work it needn't).
+    assert pd._influence_defects(members, [], geom, cfg, plate_z) == {}
+    # a flat shaft is scored "printability"; a far-from-everything rod
+    # "connectivity" -- both from the shared reports, not a local re-derivation.
+    flat = dict(p0=np.array([0.0, 0.0, 20.0]), p1=np.array([5.0, 0.0, 20.001]),
+                r0=0.3, r1=0.3, kind="trunk", owner=("contact", 9), embed_end=None)
+    probe = pd._influence_defects([flat], [0], geom, cfg, plate_z)
+    assert "printability" in probe.get(0, frozenset()), probe
+    assert "connectivity" in probe.get(0, frozenset()), probe
 
 
 def test_d2_new_printability_violation_reverts_transaction_as_a_unit(cfg):
@@ -933,17 +995,251 @@ def test_d3a_p8f_run1_churn_pair_is_single_commit_then_retire(cfg, monkeypatch):
 
 
 @pytest.mark.kernel
-def test_d3a_full_run_converged_true_in_results_json():
-    """D3(a) (regression test 4): the FULL directive-2 acceptance run reaches a true
-    fixed point -- `converged=true` (and `sweep_tail_monotone=true`) in the results
-    JSON for every relocation pass. Reads the fresh full-run artifact this directive
-    produces; skips when it is absent (CI without the treant run)."""
-    p = os.path.join(_SCR, "p8fdir2_run1_results.json")
+def test_full_run_converges_before_cap_and_is_strictly_idempotent():
+    """FULL-RUN acceptance evidence for the D6 commit invariant + the final-only
+    relocation stage, read from the fresh treant artifact (skips without it).
+
+      * `converged is True` with the terminating sweep committing ZERO, reached
+        BEFORE the sweep cap -- not at it;
+      * `committed_by_sweep` non-increasing and ending in 0;
+      * `defects_by_sweep` strictly decreasing across every committing sweep --
+        the monotonicity the invariant guarantees;
+      * a SECOND relocation over the final forest is a STRICT no-op (§6.10);
+      * exactly ONE relocation stage in the ledger (`relocate_p0`, no `relocate_p1`).
+    """
+    p = os.path.join(_SCR, "core2_results.json")
     if not os.path.exists(p):
-        pytest.skip("directive-2 full-run artifact absent")
+        pytest.skip("CORE full-run artifact absent")
     with open(p) as f:
-        reports = json.load(f)["relocate_reports"]
-    assert reports, "results JSON must carry relocate reports"
-    for k, rep in reports.items():
-        assert rep.get("converged") is True, (k, rep.get("committed_by_sweep"))
-        assert rep.get("sweep_tail_monotone") is True, (k, rep.get("committed_by_sweep"))
+        art = json.load(f)
+    reports = art["relocate_reports"]
+    assert set(reports) == {"relocate", "relocate_p0"}, sorted(reports)
+    rep = reports["relocate_p0"]
+    cbs = rep["committed_by_sweep"]
+    dbs = rep["defects_by_sweep"]
+    assert rep["converged"] is True, cbs
+    assert cbs[-1] == 0, cbs                       # a true no-op sweep, not a cap stop
+    assert all(a >= b for a, b in zip(cbs, cbs[1:])), cbs
+    assert rep["sweeps"] < 8, (rep["sweeps"], cbs)
+    for k, n_c in enumerate(cbs):
+        if n_c > 0 and k + 1 < len(dbs):
+            assert dbs[k + 1] < dbs[k], (k, dbs, cbs)
+    idem = art["idempotence"]
+    assert idem["strict_no_op"] is True, idem
+    assert idem["exact_geometry_equal"] is True, idem
+    assert sum(idem["second_pass_report"]["committed_by_sweep"] or [0]) == 0, idem
+
+
+@pytest.mark.kernel
+def test_relocate_perf_bound_on_archived_treant_input():
+    """PERF REGRESSION on the archived p8r_run2.pkl-class input (skips without it).
+
+    The relocation stage's dominant pure-Python cost was `compute_joint_balls`'
+    O(clusters x axis_members) SCALAR double loop -- 6.6M `_dist_and_local_radius`
+    calls, 6.6s PER CALL on this forest, and the sweep loop re-derives the live
+    member+ball lists once per sweep, so a single relocation pass paid it 8x (46s
+    of a 204s profiled stage; the stack samples caught it mid-loop, which is what
+    read as a `relocate[p0] 0/1 contacts` hang).
+
+    Two guards, one machine-independent and one wall-clock:
+      * the scalar per-pair helper is NEVER called from `compute_joint_balls` --
+        the batch-first property itself, which no amount of faster hardware can
+        satisfy for a scalar loop;
+      * and the call stays under a generous wall bound (measured 0.28s batched vs
+        4.71s scalar on this exact forest).
+    """
+    import pickle
+    import time as _time
+    pkl = os.path.join(_SCR, "p8r_run2.pkl")
+    if not os.path.exists(pkl):
+        pytest.skip("archived p8r_run2.pkl not present")
+    with open(pkl, "rb") as f:
+        st = pickle.load(f)
+    forest, c, plate_z = st["forest"], st["cfg"], st["plate_z"]
+    unrouted_stub_idx = {forest.terminal_of[i] for i in st["unrouted"]
+                         if i in forest.terminal_of}
+    live = [m for mi, m in enumerate(forest.members)
+            if mi not in unrouted_stub_idx and mi not in forest.dead]
+    assert len(live) > 1000, len(live)             # a real treant-scale forest
+
+    calls = {"n": 0}
+    orig = joints._dist_and_local_radius
+
+    def counting(*a, **k):
+        calls["n"] += 1
+        return orig(*a, **k)
+
+    joints._dist_and_local_radius = counting
+    try:
+        t0 = _time.perf_counter()
+        balls = joints.compute_joint_balls(live, plate_z, c)
+        dt = _time.perf_counter() - t0
+    finally:
+        joints._dist_and_local_radius = orig
+    assert balls, "the archived forest must produce joint balls"
+    assert calls["n"] == 0, \
+        f"{calls['n']} scalar per-pair calls -- the batch-first scan regressed"
+    assert dt < 2.0, f"compute_joint_balls took {dt:.2f}s on the archived forest"
+
+
+# ==========================================================================
+# 10. D6 -- ZERO-NEW-VIOLATION COMMIT INVARIANT (orchestrator ruling 2026-07-24).
+# ==========================================================================
+def _cascade_forest(cfg, stub_len=2.0, tip_z=4.0):
+    """The NEIGHBOUR-CASCADE shape, site-derived from the treant's own failure
+    mode: a contact stub P that welds through the fin (its own real transit
+    defect), with a trunk N welded to P's tree-side node and rising clear above
+    the fin. Every R1 candidate that clears P's transit SHORTENS it, which drags
+    N's foot DOWN through the fin -- so fixing P creates a brand-new transit on
+    its neighbour N. That is exactly the cascade the archived trace shows
+    (committed_by_sweep=[57,14,11,9,3,3,1,2], never converging): the next sweep
+    re-targets N, whose fix perturbs the next member, forever."""
+    forest, contacts, carried, tip_r = _fin_forest(cfg, stub_len=stub_len)
+    node = np.array([0.0, 0.0, stub_len])
+    forest.add_member(tree.Member(p0=node.copy(), p1=np.array([0.0, 0.0, tip_z]),
+                                  r0=0.35, r1=0.35, kind="trunk",
+                                  owner=("contact", 0), embed_end=None))
+    return forest, contacts, carried, tip_r
+
+
+def test_d6_neighbour_cascade_commit_is_illegal_and_loop_converges(cfg):
+    """D6 half 1 (ZERO NEW VIOLATION) end-to-end through the driver: on the
+    cascade fixture, every candidate that clears the stub's own transit pushes its
+    welded neighbour through the fin. That is a NEW violation inside the commit's
+    INFLUENCE SET, so the transaction is illegal at commit and reverted as a unit.
+
+    The loop therefore commits ZERO and stops at a TRUE fixed point on sweep 1 --
+    instead of committing, re-flagging the neighbour, re-targeting it next sweep,
+    and grinding to the cap. The stub is reported HONEST-unresolved (it needs the
+    R2 surface-seed / D5 junction re-seat levers, not another re-aim)."""
+    geom = ExactSurface(_fin_mesh())
+    plate_z = -5.0
+    forest, contacts, carried, tip_r = _cascade_forest(cfg)
+
+    def _mlf():
+        return engine.live_member_lists(forest, [], plate_z, cfg)
+
+    members, balls = _mlf()
+    pre = p8_accept.geometry_digest(members, balls)
+    rep = pd.run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z,
+                        geom, cfg, _fin_mesh(), unrouted=[], member_list_fn=_mlf)
+    assert rep.entered_ladder is True
+    assert rep.committed_by_sweep == (0,), rep.committed_by_sweep   # nothing legal
+    assert rep.converged is True and rep.sweep_tail_monotone is True
+    assert rep.sweeps == 1, "a zero-commit sweep IS the fixed point -- never the cap"
+    # geometry is untouched: an illegal batch is reverted BIT-exact.
+    m1, b1 = _mlf()
+    assert p8_accept.geometry_digest(m1, b1) == pre
+    # and the neighbour was never left perturbed.
+    assert np.array_equal(forest.members[1].p0, np.array([0.0, 0.0, 2.0]))
+    # the guard's own evidence: applying the winning re-aim by hand CLEARS the
+    # stub's transit and hands a brand-new TRANSIT to the co-moved neighbour --
+    # a class the pre-D6 guard (clearance + connectivity + printability only) was
+    # blind to. This is the transit-aware extension the ruling calls for.
+    pre_def = pd._influence_defects(joints.collect_members(list(forest.members)),
+                                    [0, 1], geom, cfg, plate_z)
+    assert "transit" in pre_def[0] and "transit" not in pre_def.get(1, frozenset())
+    forest.members[0].p1 = np.array([0.0, 0.0, 1.0])
+    forest.members[1].p0 = np.array([0.0, 0.0, 1.0])
+    post_def = pd._influence_defects(joints.collect_members(list(forest.members)),
+                                     [0, 1], geom, cfg, plate_z)
+    assert "transit" not in post_def.get(0, frozenset())      # primary fixed ...
+    assert "transit" in post_def[1]                            # ... neighbour broken
+
+
+def test_d6_second_pass_is_a_strict_no_op_on_the_cascade_fixture(cfg):
+    """§6.10 IDEMPOTENCE on the synthetic that PREVIOUSLY cascaded: because the
+    first pass ends at a real fixed point (D6 refused every illegal commit rather
+    than committing one and re-opening a neighbour), a SECOND `run_phase8` over the
+    same forest re-derives the same snapshot, commits zero, and emits BYTE-identical
+    geometry. Before D6 the first pass committed, the neighbour re-flagged, and the
+    second pass had fresh work to do -- the gate could not be met."""
+    geom = ExactSurface(_fin_mesh())
+    plate_z = -5.0
+    forest, contacts, carried, tip_r = _cascade_forest(cfg)
+
+    def _mlf():
+        return engine.live_member_lists(forest, [], plate_z, cfg)
+
+    m0, b0 = _mlf()
+    pd.run_phase8(forest, m0, b0, contacts, carried, tip_r, plate_z, geom, cfg,
+                  _fin_mesh(), unrouted=[], member_list_fn=_mlf)
+    m1, b1 = _mlf()
+    dig1 = p8_accept.geometry_digest(m1, b1)
+    rep2 = pd.run_phase8(forest, m1, b1, contacts, carried, tip_r, plate_z, geom,
+                         cfg, _fin_mesh(), unrouted=[], member_list_fn=_mlf)
+    assert rep2.converged is True and sum(rep2.committed_by_sweep) == 0
+    m2, b2 = _mlf()
+    assert p8_accept.geometry_digest(m2, b2) == dig1     # STRICT no-op
+
+
+def test_d6_defects_by_sweep_is_monotone_and_strict_when_committing(cfg, monkeypatch):
+    """D6 monotonicity, machine-checked: `defects_by_sweep` records the GLOBAL
+    defect population at the top of every executed sweep. The invariant makes each
+    surviving commit strictly decrease it, so the trace is non-increasing -- and
+    strictly decreasing across any sweep that committed. That, plus the trace being
+    a non-negative integer, is the termination proof: the loop reaches its fixed
+    point BY CONSTRUCTION, never by exhausting the sweep cap."""
+    geom = ExactSurface(_fin_mesh())
+    plate_z = -5.0
+    forest, contacts, carried, tip_r = _fin_forest(cfg)     # resolvable, no neighbour
+
+    def _mlf():
+        return engine.live_member_lists(forest, [], plate_z, cfg)
+
+    members, balls = _mlf()
+    rep = pd.run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z,
+                        geom, cfg, _fin_mesh(), unrouted=[], member_list_fn=_mlf)
+    d = rep.defects_by_sweep
+    assert d and d[0] >= 1, d
+    assert all(a >= b for a, b in zip(d, d[1:])), d              # non-increasing
+    for k, n_c in enumerate(rep.committed_by_sweep):
+        if n_c > 0 and k + 1 < len(d):
+            assert d[k + 1] < d[k], (k, d, rep.committed_by_sweep)   # STRICT
+    assert rep.converged is True
+    assert rep.sweeps < int(getattr(cfg, "p8_max_relocate_sweeps", 8)), \
+        "convergence must be reached BEFORE the cap, not at it"
+
+
+def test_d6_report_and_engine_ledger_carry_the_invariant_evidence(cfg):
+    """The invariant's evidence is auditable from the artifacts, not only from a
+    test: `Phase8Report.defects_by_sweep` reaches `log['relocate']` alongside the
+    retirement rows, so an acceptance run's JSON shows the monotone trace and every
+    honest-unresolved site (`D6-sterile` rows included) without re-running."""
+    geom = ExactSurface(_fin_mesh())
+    forest, contacts, carried, tip_r = _fin_forest(cfg)
+    log = {}
+    rep = engine.relocate(_fin_mesh(), forest, [], contacts, carried, tip_r, -5.0,
+                          cfg, geom=geom, log=log)
+    assert "defects_by_sweep" in rep and isinstance(rep["defects_by_sweep"], list)
+    assert "n_retired" in rep and "retired_sites" in rep
+    assert log["relocate"] is rep and log["relocate_p0"] is rep
+
+
+# ==========================================================================
+# 11. FINAL-ONLY RELOCATION STAGE (SPEC-P8-RELOCATE §3.0 amendment 2026-07-24).
+# ==========================================================================
+def test_relocation_is_a_single_final_only_stage(cfg, monkeypatch):
+    """SPEC-P8-RELOCATE §3.0 amendment: relocation runs ONCE per engine run, AFTER
+    every fix pass' construct/rewire/brace_and_size, immediately before the FINAL
+    verify -- nothing mutates geometry after it except the verify that judges it.
+
+    Pinned by the stage ledger: exactly one `relocate` stage, a `verify[final]`
+    after it, no per-pass `relocate[pN]` stage at all, and the relocate timestamp
+    strictly after the LAST brace_and_size. (Before the amendment, pass-1's
+    rewire/brace ran after pass-0's relocation and drifted 3 embed ends back out of
+    grade -- the mi 920/991/1010 class.)"""
+    from support_placement import mesh_io, config as config_mod
+    mesh = mesh_io.make_overhang_table()
+    c = config_mod.SupportConfig(p8_relocate_enable=True)
+    log = {}
+    engine.run(mesh, c, log=log)
+    stages = [k for k in log if k.startswith("t_")]
+    assert "t_relocate" in stages, stages
+    assert not [k for k in stages if k.startswith("t_relocate[p")], stages
+    assert "t_verify[final]" in stages, stages
+    braces = [log[k] for k in stages if k.startswith("t_brace_and_size[")]
+    assert braces and log["t_relocate"] >= max(braces), (log["t_relocate"], braces)
+    assert log["t_verify[final]"] >= log["t_relocate"]
+    assert "relocate" in log and "relocate_p0" in log
+    assert "verify_final" in log

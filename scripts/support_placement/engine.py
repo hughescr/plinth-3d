@@ -56,9 +56,9 @@ class _ProgressCell:
 
 
 @contextlib.contextmanager
-def _ticker(label, get_n, total, interval=5.0):
+def _ticker(label, get_n, total, interval=5.0, unit="contacts"):
     """SPEC-V5-PERF sec 4 (owner-mandated, task #17): a daemon thread that
-    prints ``[v5] .. {label} {n}/{total} contacts`` to stderr every `interval`
+    prints ``[v5] .. {label} {n}/{total} {unit}`` to stderr every `interval`
     seconds while the wrapped stage runs, so a full-scale construct is never a
     heartbeat-only black box. ALL timing lives in the thread's
     ``Event.wait(interval)``; the compute path only advances the counter
@@ -69,7 +69,7 @@ def _ticker(label, get_n, total, interval=5.0):
 
     def _run():
         while not stop.wait(interval):
-            print(f"[v5] .. {label} {get_n()}/{total} contacts",
+            print(f"[v5] .. {label} {get_n()}/{total} {unit}",
                   file=sys.stderr, flush=True)
 
     t = threading.Thread(target=_run, name=f"ticker-{label}", daemon=True)
@@ -297,7 +297,8 @@ def brace_and_size(mesh, forest, unrouted, surface_tree, plate_z, cfg, log=None,
 
 
 def relocate(mesh, forest, unrouted, contacts, carried, tip_r, plate_z, cfg,
-             geom=None, log=None, census_authority=frozenset(), pass_idx=0):
+             geom=None, log=None, census_authority=frozenset(), pass_idx=0,
+             progress=None):
     """Phase-8 RELOCATION STAGE (SPEC-P8-RELOCATE §3.0), wired post-brace /
     pre-final-verify. Constructs the frozen defect snapshot + the SM-STUB /
     SM-STRUT / SM-BALL sites from the engine's OWN gate output, runs the state
@@ -328,7 +329,8 @@ def relocate(mesh, forest, unrouted, contacts, carried, tip_r, plate_z, cfg,
     report = phase8_driver.run_phase8(
         forest, members, balls, contacts, carried, tip_r, plate_z, geom, cfg, mesh,
         unrouted=unrouted, census_authority=census_authority, log=log,
-        member_list_fn=member_list_fn, frozen_snapshot=frozen_snapshot)
+        member_list_fn=member_list_fn, frozen_snapshot=frozen_snapshot,
+        progress=progress)
     rep = dict(
         entered_ladder=report.entered_ladder, dt_s=report.dt_s,
         n_stub_sites=report.n_stub_sites, n_strut_sites=report.n_strut_sites,
@@ -343,6 +345,11 @@ def relocate(mesh, forest, unrouted, contacts, carried, tip_r, plate_z, cfg,
         target_source=report.target_source,
         sweep_tail_monotone=report.sweep_tail_monotone, n_banned=report.n_banned,
         n_moot=len(report.moot_member_ids), n_ledger=len(report.provenance_ledger),
+        # D6 commit-invariant evidence: the global defect population at the top of
+        # each sweep (monotone by construction) + the honest-unresolved retirements.
+        defects_by_sweep=list(report.defects_by_sweep),
+        n_retired=len(report.retired_sites),
+        retired_sites=[list(r) for r in report.retired_sites],
         snapshot=report.snapshot_summary)
     # defect-5: DISTINCT per-fix-pass ledger keys (relocate_p0, relocate_p1, ...)
     # so a later fix-pass's report never overwrites an earlier one; `relocate`
@@ -471,18 +478,6 @@ def run(mesh, cfg, log=None):
         with _stage(log, f"brace_and_size[p{fix_pass}]", t0):
             brace_and_size(mesh, forest, unrouted, surface_tree, plate_z, cfg,
                            log=log, geom=geom)
-        # Phase-8 RELOCATION (SPEC-P8-RELOCATE §3.0): its own stage, post-brace
-        # and pre-final-verify, so the ball phase reads the FINAL braced shaft
-        # geometry and the verify gate below judges the RELOCATED forest. Gated
-        # by cfg.p8_relocate_enable (default OFF; idempotent no-op on clean
-        # geometry, so bit-identity baselines are preserved when OFF or when the
-        # forest has no defects). Its own [v5] stage log + ledger entry.
-        if getattr(cfg, "p8_relocate_enable", False):
-            with _stage(log, f"relocate[p{fix_pass}]", t0):
-                _prog_r = _ProgressCell()
-                with _ticker(f"relocate[p{fix_pass}]", lambda: _prog_r.n, 1):
-                    relocate(mesh, forest, unrouted, contacts, carried, tip_r,
-                             plate_z, cfg, geom=geom, log=log, pass_idx=fix_pass)
         tree.assert_all_certified(forest)
         members, balls = live_member_lists(forest, unrouted, plate_z, cfg)
         log[f"forest_pass{fix_pass}"] = dict(
@@ -532,6 +527,60 @@ def run(mesh, cfg, log=None):
         if not fixable:
             break
         contacts = _add_fix_contacts(mesh, islands, contacts, fixable)
+
+    # ---- Phase-8 RELOCATION: SINGLE FINAL-ONLY STAGE ------------------------
+    # SPEC-P8-RELOCATE §3.0, implementation-consequence amendment (orchestrator-
+    # approved 2026-07-24). Relocation used to run INSIDE the fix-pass loop, once
+    # per pass. That was wrong twice over:
+    #
+    #   * CORRECTNESS. Pass-1's construct/rewire/brace_and_size run AFTER pass-0's
+    #     relocation and MUTATE the geometry relocation had just certified -- the
+    #     acceptance run's 3 embed regressions (the mi 920/991/1010 class) were
+    #     brace_and_size drift on endpoints pass-0 relocation had already settled.
+    #     §3.0's own phase order ("shaft geometry is finalized before joint
+    #     geometry") generalises: NOTHING may mutate geometry after relocation
+    #     except the verify that judges it.
+    #   * COST. Two full relocation ladders per run, the second re-deriving from a
+    #     forest the first had already relocated -- roughly double the wall cost
+    #     for no additional resolution.
+    #
+    # So the ladder now runs ONCE, after every fix pass' construct/rewire/brace has
+    # settled, immediately before the FINAL verify -- which is re-run over the
+    # relocated forest so the returned report judges what is actually emitted.
+    if getattr(cfg, "p8_relocate_enable", False) and forest is not None:
+        with _stage(log, "relocate", t0):
+            _prog_r = _ProgressCell()
+            max_sweeps = int(getattr(cfg, "p8_max_relocate_sweeps", 8))
+            with _ticker("relocate", lambda: _prog_r.n, max_sweeps,
+                         unit="sweeps"):
+                relocate(mesh, forest, unrouted, contacts, carried, tip_r,
+                         plate_z, cfg, geom=geom, log=log, progress=_prog_r)
+        tree.assert_all_certified(forest)
+        members, balls = live_member_lists(forest, unrouted, plate_z, cfg)
+        log["forest_relocated"] = dict(
+            n_members=len(members), n_balls=len(balls), n_unrouted=len(unrouted))
+        log["n_unrouted"] = len(unrouted)
+        routed_contacts = [c for i, c in enumerate(contacts) if i not in unrouted]
+        with _stage(log, "verify[final]", t0):
+            report = verify.self_verify(mesh, islands, routed_contacts, members,
+                                        carried, tip_r, cfg, plate_z,
+                                        surface_tree=surface_tree, minima=minima,
+                                        forest=forest, unrouted=unrouted,
+                                        island_births=island_births, geom=geom,
+                                        balls=balls)
+        log["verify_final"] = dict(
+            ok=report["ok"],
+            n_uncovered=len(report["uncovered_islands"]),
+            n_clearance_violations=len(report["clearance_violations"]),
+            n_moot_transit_members=len(report["moot_transit_members"]),
+            n_load_violations=len(report["load_violations"]),
+            n_unsupported_minima=len(report["unsupported_minima"]),
+            n_connectivity_violations=len(report["connectivity_violations"]),
+            n_printability_violations=len(report["printability_violations"]),
+            n_murray_violations=len(report["murray_violations"]),
+            n_uncovered_island_births=len(report["uncovered_island_births"]),
+            n_removal_blocked_trees=len(report["removal_violations"]),
+        )
 
     with _stage(log, "finish", t0):
         volume = tree.volume_report(members, balls)

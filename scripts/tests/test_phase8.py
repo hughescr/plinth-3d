@@ -1148,3 +1148,63 @@ def test_pocket_solver_batched_not_per_candidate(cfg, monkeypatch):
     # 1 seed + at most |pocket| dirty re-eval rounds (one ray-kind: all stubs),
     # each a single batched interval call -- nowhere near one-per-candidate.
     assert calls["n"] <= 1 + len(sites)
+
+
+def test_cert_cache_is_bit_identical_and_reused(cfg, monkeypatch):
+    """PERF (SPEC-V5-PERF), semantically inert: `solve_pocket`'s atomic-commit loop
+    re-evaluates the SAME fixed candidate matrix on every dirty round -- measured on
+    the treant, 240 `_batched_eval` calls over 33 pockets, 138s of a 204s relocation
+    stage, all of it re-asking the kernel a question whose answer cannot have
+    changed (`cand_map` is FIXED for the solve, §4.5). The per-solve `cert_cache`
+    memoises exactly the geometry-only half of the certificate (kernel intervals +
+    SCAR verdict); the score inputs (density against the CURRENT committed
+    corridors) and the injected revalidate are still recomputed every round.
+
+    Pinned here: (a) the cached solve's result is BIT-identical to the uncached
+    one -- same commit order, same committed geometry, same statuses; and (b) it
+    actually saves work, issuing strictly fewer batched kernel calls."""
+    geom = ExactSurface(_pocket_mesh())
+    sites = _dense_cluster(cfg)
+
+    def _count_kernel_calls(fn):
+        calls = {"n": 0}
+        orig = verify._batch_axis_intervals
+
+        def counting(*a, **k):
+            calls["n"] += 1
+            return orig(*a, **k)
+        monkeypatch.setattr(verify, "_batch_axis_intervals", counting)
+        try:
+            out = fn()
+        finally:
+            monkeypatch.setattr(verify, "_batch_axis_intervals", orig)
+        return out, calls["n"]
+
+    cached, n_cached = _count_kernel_calls(
+        lambda: phase8.solve_pocket(sites, geom, cfg, label=1))
+
+    # the SAME solve with the memo disabled (patch the cache away at the boundary).
+    orig_bls = phase8._batch_legal_sets
+
+    def no_cache(*a, **k):
+        k.pop("cert_cache", None)
+        return orig_bls(*a, **k)
+
+    monkeypatch.setattr(phase8, "_batch_legal_sets", no_cache)
+    plain, n_plain = _count_kernel_calls(
+        lambda: phase8.solve_pocket(sites, geom, cfg, label=1))
+    monkeypatch.setattr(phase8, "_batch_legal_sets", orig_bls)
+
+    assert cached.commit_order == plain.commit_order
+    assert {i: r.status for i, r in cached.members.items()} == \
+           {i: r.status for i, r in plain.members.items()}
+    for mid, res in cached.members.items():
+        other = plain.members[mid].committed_cand
+        if res.committed_cand is None or other is None:
+            assert res.committed_cand is other
+            continue
+        for key in ("p0", "p1"):
+            assert np.array_equal(res.committed_cand.member[key],
+                                  other.member[key]), (mid, key)
+        assert res.committed_cand.cand_index == other.cand_index
+    assert n_cached < n_plain, (n_cached, n_plain)   # the memo really saves work

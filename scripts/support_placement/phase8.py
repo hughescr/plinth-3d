@@ -396,7 +396,8 @@ def _batch_legal_sets(all_cands: list, site_by_id: dict, sids: list, geom, cfg, 
                       rays: str, guard_fn: Callable, moot_fn: Callable,
                       revalidate_fn: Optional[Callable] = None,
                       reroute_fn: Optional[Callable] = None,
-                      pocket_penalty_fn: Optional[Callable] = None):
+                      pocket_penalty_fn: Optional[Callable] = None,
+                      cert_cache: Optional[dict] = None):
     """The shared BATCH-FIRST legality evaluator: one flat candidate matrix ->
     a handful of batched kernel interval + SCAR calls -> scatter -> per-site
     legal set, each SORTED by the §3.1 score tuple (lexicographic). Returns
@@ -411,7 +412,24 @@ def _batch_legal_sets(all_cands: list, site_by_id: dict, sids: list, geom, cfg, 
 
     Both consumers read this ONE evaluator: the ladder rungs (`_run_rung` -> the
     unique global lex-min) and the pocket solver (§4, which needs the whole
-    sorted list per member for its atomic-commit walk)."""
+    sorted list per member for its atomic-commit walk).
+
+    `cert_cache` (perf, SPEC-V5-PERF; semantically inert): an optional caller-owned
+    dict memoising the SURFACE certificate inputs -- the kernel penetration
+    intervals and the SCAR-AREA-CAP verdict -- keyed by `(rays, site_id,
+    cand_index)`. Those depend ONLY on the candidate's own geometry, which the
+    pocket solver's `cand_map` FIXES once per solve (§4.5), while its atomic-commit
+    loop re-evaluates the same candidates once per dirty re-evaluation (measured:
+    240 `_batched_eval` calls over 33 pockets, 138s of a 204s relocation stage,
+    every one of them re-asking the kernel the SAME question). Only the SCORE
+    inputs (`pocket_penalty_fn`'s density against the current committed corridors)
+    and the injected `revalidate_fn` actually change between those calls, and both
+    are recomputed below regardless. A cache MISS batches exactly as before (one
+    kernel call over the missing subset -- `penetration_intervals_batch` and
+    `_embed_scar_verdicts` are per-row independent, so a subset call returns the
+    same rows a full call would), so the result is bit-identical with or without
+    it -- pinned by `test_phase8.py::test_cert_cache_is_bit_identical_and_reused`.
+    """
     per_site_legal = {sid: [] for sid in sids}
     per_site_count = {sid: 0 for sid in sids}
     if not all_cands:
@@ -421,8 +439,20 @@ def _batch_legal_sets(all_cands: list, site_by_id: dict, sids: list, geom, cfg, 
     mis = list(range(len(members)))
 
     # --- one batched kernel call for intervals; one for SCAR verdicts ---
-    ivmap = verify._batch_axis_intervals(geom, members, mis, rays=rays)
-    verdicts = verify._embed_scar_verdicts(geom, members, mis, ivmap, cfg)
+    if cert_cache is None:
+        ivmap = verify._batch_axis_intervals(geom, members, mis, rays=rays)
+        verdicts = verify._embed_scar_verdicts(geom, members, mis, ivmap, cfg)
+    else:
+        keys = [(rays, c.site_id, c.cand_index) for c in all_cands]
+        miss = [j for j in mis if keys[j] not in cert_cache]
+        if miss:
+            iv_new = verify._batch_axis_intervals(geom, members, miss, rays=rays)
+            vd_new = verify._embed_scar_verdicts(geom, members, miss, iv_new, cfg)
+            for j in miss:
+                cert_cache[keys[j]] = (iv_new.get(j, []), vd_new.get(j))
+        ivmap = {j: cert_cache[keys[j]][0] for j in mis}
+        verdicts = {j: cert_cache[keys[j]][1] for j in mis
+                    if cert_cache[keys[j]][1] is not None}
 
     # --- scatter: classify each candidate, assemble per-site legal sets ---
     for j, cand in enumerate(all_cands):
@@ -1414,6 +1444,13 @@ def solve_pocket(members: list, geom, cfg, *,
             out[i] = _corridor_of(m)
         return out
 
+    # Per-solve surface-certificate memo (perf; semantically inert -- see
+    # `_batch_legal_sets`' `cert_cache` docstring). `cand_map` is FIXED for the
+    # whole solve (§4.5), so a candidate's kernel intervals + SCAR verdict are
+    # invariant across every dirty re-evaluation; only the density score and the
+    # injected revalidate change, and both are recomputed every call anyway.
+    cert_cache: dict = {}
+
     def _batched_eval(eval_ids):
         """ONE batched legality evaluation (grouped by ray-kind) over eval_ids;
         returns {mid: sorted legal [(score, cand), ...]}. density_penalty is
@@ -1436,7 +1473,7 @@ def solve_pocket(members: list, geom, cfg, *,
             per_legal, _cnt = _batch_legal_sets(
                 all_cands, sub, grp, geom, cfg, rays=rays, guard_fn=guard,
                 moot_fn=moot, revalidate_fn=revalidate_fn, reroute_fn=reroute_fn,
-                pocket_penalty_fn=density_fn)
+                pocket_penalty_fn=density_fn, cert_cache=cert_cache)
             out.update(per_legal)
         return out
 

@@ -448,3 +448,46 @@ def test_tapered_noncoplanar_bend_kept_trial_4055_class(cfg):
     at_joint = [ball for ball in balls if np.linalg.norm(ball["center"]) < 1e-6]
     assert len(at_joint) == 1
     assert abs(at_joint[0]["r"] - cfg.joint_ball_factor * 0.16790109202464978) < 1e-9
+
+
+def test_batch_dist_and_local_radius_bit_identical_to_scalar():
+    """BATCH-FIRST perf fix (the Phase-8 relocation spin): the joint <-> axis-member
+    proximity scan inside `compute_joint_balls` was an O(clusters x members) SCALAR
+    double loop -- 6.6M `_dist_and_local_radius` calls / 6.6s per call on the real
+    treant forest, paid once per relocation sweep (46s of a 204s profiled stage).
+    `_batch_dist_and_local_radius` replaces it with one vectorised evaluation.
+
+    This branch's determinism contract is FLOAT-EXACT, so the batched form must be
+    BIT-identical to the scalar reference, not merely close -- an `einsum`/`@`
+    formulation is NOT (measured 3275/240000 differing distances); the committed
+    explicit component-wise form is (0/240000). This pins that, including the
+    degenerate zero-length-segment branch and the `p0 + t*d` THEN `center - proj`
+    association the scalar helper uses."""
+    rng = np.random.default_rng(20260724)
+    centers = rng.normal(0, 20, (137, 3))
+    p0 = rng.normal(0, 20, (53, 3))
+    p1 = p0 + rng.normal(0, 8, (53, 3))
+    p1[7] = p0[7]                                     # a degenerate zero-length seg
+    r0 = rng.uniform(0.05, 3.0, 53)
+    r1 = rng.uniform(0.05, 3.0, 53)
+    bd, br = joints._batch_dist_and_local_radius(centers, p0, p1, r0, r1)
+    for i in range(len(centers)):
+        for j in range(len(p0)):
+            d, lr = joints._dist_and_local_radius(centers[i], p0[j], p1[j],
+                                                  r0[j], r1[j])
+            assert bd[i, j] == d, (i, j, bd[i, j], d)      # BIT-identical
+            assert br[i, j] == lr, (i, j, br[i, j], lr)
+    # chunking is a memory knob only -- it can never change a row.
+    old = joints._AXIS_SCAN_CHUNK
+    try:
+        joints._AXIS_SCAN_CHUNK = 7
+        cd, cr = joints._batch_dist_and_local_radius(centers, p0, p1, r0, r1)
+    finally:
+        joints._AXIS_SCAN_CHUNK = old
+    assert np.array_equal(cd, bd) and np.array_equal(cr, br)
+    # empty inputs are a free no-op on both axes.
+    assert joints._batch_dist_and_local_radius(
+        np.zeros((0, 3)), p0, p1, r0, r1)[0].shape == (0, 53)
+    assert joints._batch_dist_and_local_radius(
+        centers, np.zeros((0, 3)), np.zeros((0, 3)),
+        np.zeros(0), np.zeros(0))[0].shape == (137, 0)
