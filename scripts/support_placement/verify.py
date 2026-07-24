@@ -13,6 +13,30 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from . import perception, routing, joints, tree as tree_mod, removal as removal_mod
+from .geometry_exact import member_rays
+
+
+# --- SCAR-AREA-CAP embed policy (SPEC-EMBED-POLICY.md, owner-ratified cd989fe) -
+# The ratified sanction for DESIGNED embed ends: an area bound on a conservative
+# closed-form upper bound of the surface-crossing patch, a scar max-dimension
+# bound, a projected (angle-free) anchor-area floor, and strict crossing
+# topology (rule 4). SUPERSEDES the retired depth/arc-inset sanctions
+# (`_embed_inset_arc_exact` below survives only as a distance-gate mask, not a
+# sanction). These constants are literal from the spec text and MUST be
+# bit-identical to the independent census implementation
+# (docs/artifacts/audit-2026-07/acceptance-run-2026-07-23/census_run.py) -- the
+# engine gate and the census then count the SAME population from the SAME
+# formulas, neither sharing code with the other. TIP_R_MIN is read from cfg
+# (cfg.tip_r_min_mm); the BALL factors are the designed ball radii
+# (config.tip_ball_r_factor=1.5 stub tips, joints.MODEL_FOOT_FACTOR=1.4 feet).
+A_ABS_MM2 = 2.0            # absolute scar-area allowance (1.60mm equiv. scar dia)
+KAPPA = 1.25              # headroom multiplier on the designed crossing disc
+L_SCAR_MAX_MM = 2.5      # max scar patch dimension
+EPS_COS = 1e-9           # divide-by-zero guard only; NOT a physics floor
+TOL_MM = 0.05            # interval anchoring / detection tolerance
+MIN_ILLEGAL_LEN_MM = 0.05  # census MIN_ILLEGAL_LEN: a longer solid run is a transit
+BALL_FACTOR_STUB = 1.5   # contact-stub tips  (config.tip_ball_r_factor)
+BALL_FACTOR_FOOT = 1.4   # strut / model-rung feet  (joints.MODEL_FOOT_FACTOR)
 
 
 def coverage_report(mesh, islands, contacts, cfg):
@@ -42,15 +66,21 @@ def coverage_report(mesh, islands, contacts, cfg):
 
 
 def _embed_inset_arc_exact(geom, m, cfg):
-    """Angle-aware sanctioned-embed inset (arc length) at each designed
-    embed_end -- verify's INDEPENDENT copy of the same geometry
-    tree.Forest._embed_inset_arc derives (shares only geom's generic
-    project()). A designed foot on the surface grazes the standoff envelope
-    as the shaft dives toward it; the sanctioned arc length scales with the
-    approach angle (perpendicular reach / cos(axis-vs-surface-normal),
-    floored at the 60deg strut/branch family). The pitch term is 0 for an
-    exact oracle; the angled-approach geometry is read from the true
-    surface, not a cloud-density budget. Non-embed ends get 0."""
+    """DISTANCE-GATE MASK ONLY -- no longer an embed sanction (SPEC-EMBED-POLICY,
+    ratified cd989fe: the arc/depth inset is RETIRED as a sanction, replaced by
+    SCAR-AREA-CAP + rule 4, see `_embed_scar_verdicts` / `_transit_illegal`).
+    This survives solely so the swept-capsule DISTANCE check (segment_clearance)
+    does not self-trip on a member's OWN designed embed: a foot is embedded in
+    the surface by construction, so the min-distance test masks that zone with a
+    geometric inset. Retained verbatim (angle-aware arc, pitch term 0 for an
+    exact oracle) to keep the distance gate's calibration unchanged this round;
+    it is slated for replacement in the placement-rebuild round alongside
+    tree.Forest._embed_inset_arc. Non-embed ends get 0.
+
+    Angle-aware inset: a designed foot on the surface grazes the standoff
+    envelope as the shaft dives toward it; the arc length scales with the
+    approach angle (perpendicular reach / cos(axis-vs-surface-normal), floored
+    at the 60deg strut/branch family)."""
     p0 = np.asarray(m["p0"], float)
     p1 = np.asarray(m["p1"], float)
     L = float(np.linalg.norm(p1 - p0))
@@ -71,39 +101,68 @@ def _embed_inset_arc_exact(geom, m, cfg):
     return inset0, inset1
 
 
-def _axis_interval_illegal(intervals, L, inset0, inset1):
-    """True iff ANY supplied penetration interval is an inside-the-solid run
-    > 0.05mm (census MIN_ILLEGAL_LEN) outside the sanctioned embed zones
-    [inset0, L-inset1] -- the mid-path-penetration / through-transit test
-    (parity crossings, exact boundaries; never a distance test). Independent
-    verify-side copy (the independence covenant: shares only geom's generic
-    primitives).
+def _tip_iv_index(ivs, ray_seg, embed, tol=TOL_MM):
+    """Index into `ivs` (sorted ascending by s_a, arc-length mm along the ray)
+    of the TIP-ANCHORED interval for a designed embed end, per SPEC-EMBED-POLICY:
+    'the solid interval whose start lies within TOL_MM of the embed point' (p1
+    case: symmetric, measured back from the ray end). DISTANCE-based (a tip
+    sitting a hair outside the surface still anchors as long as the gap is within
+    tolerance), independent verify-side copy of census tip_iv_index. Returns None
+    if no interval anchors (a mid-span-only transit) or `ivs` is empty."""
+    if not ivs:
+        return None
+    if embed == "p0":
+        return 0 if ivs[0]["s_a"] <= tol else None
+    if embed == "p1":
+        return (len(ivs) - 1) if (ray_seg - ivs[-1]["s_b"]) <= tol else None
+    return None
 
-    Ray-agnostic: the CALLER selects which rays' intervals to pass. Stubs
-    pass AXIS-only intervals (census_run.py:52 -- a stub hugs its own
-    emergence surface, so capsule-offset rays would graze it and false-
-    positive). Non-stub members (R2) pass AXIS *plus* the capsule-offset
-    rays, so a strut whose axis is clean but whose capsule surface grazes a
-    thin wall (census member 1138: axis empty, an offset ray grazes to
-    0.264mm) is caught. The sanctioned window [inset0, L-inset1] is applied
-    to every interval in `intervals` using the member's AXIS length L; an
-    offset ray's own arc length differs from L only by O(|r1-r0|) on a
-    tapered member, negligible against the 0.05mm MIN_ILLEGAL_LEN test and
-    consistent with the engine's axis-length window convention.
 
-    Takes PRE-COMPUTED axis intervals from _batch_axis_intervals' single
-    native call rather than re-entering the oracle per member -- the
-    Amendment A18 stage-1 refactor (verify.py:88 was the named site): a
-    wrapper cannot batch a Python for-loop above it, so the caller gathers
-    members and this helper only applies the inset/overlap arithmetic."""
-    if L < 1e-9:
+def _transit_illegal(intervals, m, verdict_legal):
+    """SPEC-EMBED-POLICY rule 4 (through-transit) -- True iff the member has an
+    inside-the-solid run longer than MIN_ILLEGAL_LEN_MM that is NOT the
+    sanctioned tip-anchored exemption. ONLY the tip-anchored interval of a
+    designed embed end is exempt-eligible, and ONLY when its SCAR-AREA-CAP
+    verdict is LEGAL; an illegal verdict flags its full raw length, and EVERY
+    unanchored interval (mid-span graze, re-entry after the tip interval exits,
+    capsule-edge crossing) is a transit and illegal regardless of its size. A
+    parity-crossing test on exact boundaries -- never a distance test -- so an
+    ordinary surface-hugging stub cannot false-positive. Independent verify-side
+    copy of census PASS C3 (shares only geom's generic primitives).
+
+    Ray set is chosen by the CALLER via which intervals it passes: stubs get
+    AXIS-only (a stub hugs its own emergence surface, so a capsule-offset ray
+    grazes it and false-positives -- census restricts offset rays to non-stubs);
+    non-stubs get AXIS + the capsule-offset rays, so a strut whose axis is clean
+    but whose capsule surface grazes a thin wall (census member 1138) is caught.
+    Tip anchoring is evaluated per RAY, each against its OWN arc length (an
+    offset ray's length differs from the axis by O(|r1-r0|) -- material at the
+    0.05mm tolerance for a foot graze reaching the designed embed end), matching
+    the census's per-ray tip_iv_index. `verdict_legal` is the member's SINGLE
+    axis-derived SCAR-AREA-CAP verdict, applied to exempt the tip interval on any
+    ray (None => no exemption)."""
+    if not intervals:
         return False
-    lo, hi = inset0, L - inset1
-    if hi - lo <= 1e-9:
-        return False
+    embed = m.get("embed_end")
+    p0 = np.asarray(m["p0"], float); p1 = np.asarray(m["p1"], float)
+    axis_seg = float(np.linalg.norm(p1 - p0))
+    ray_segs = {"axis": axis_seg}
+    if m["kind"] != "stub" and axis_seg >= 1e-9:
+        for lab, _O, _D, sg in member_rays(p0, p1, float(m["r0"]), float(m["r1"])):
+            ray_segs[lab] = sg
+    by_ray = {}
     for iv in intervals:
-        if min(iv["s_b"], hi) - max(iv["s_a"], lo) > 0.05:
-            return True
+        by_ray.setdefault(iv["ray"], []).append(iv)
+    for ray, ivs in by_ray.items():
+        ivs.sort(key=lambda iv: iv["s_a"])
+        ray_seg = ray_segs.get(ray, axis_seg)
+        tip_idx = (_tip_iv_index(ivs, ray_seg, embed)
+                   if embed in ("p0", "p1") else None)
+        for i, iv in enumerate(ivs):
+            if i == tip_idx and verdict_legal:
+                continue
+            if (iv["s_b"] - iv["s_a"]) > MIN_ILLEGAL_LEN_MM:
+                return True
     return False
 
 
@@ -132,142 +191,204 @@ def _batch_axis_intervals(geom, members, mis, rays="axis"):
     return {mi: per[j] for j, mi in enumerate(mis)}
 
 
+def _scar_area_cap_legal(T, d, cosang, r_x, r_end, R_b):
+    """Pure SCAR-AREA-CAP legality predicate -- the SPEC-EMBED-POLICY normative
+    closed forms, given one designed embed end's geometry. Split out so the math
+    is unit-pinnable against the spec's documented numbers with no mesh. Returns
+    (legal_bool, metrics_dict). `cosang` is ignored when T <= TOL_MM (no shaft
+    term). LITERAL-IDENTICAL to census_run.py PASS C2.
+
+        A_shaft  = 0                                          if T <= TOL_MM
+                 = min(pi*r_x^2 / max(cosang, EPS_COS), 2*r_x*T)   otherwise
+        A_ball   = pi * max(R_b^2 - d^2, 0)
+        A_patch  = A_shaft + A_ball
+        A_max    = max(A_ABS_MM2, KAPPA * pi * R_b^2)
+        L_scar   = 0                                          if T <= TOL_MM
+                 = min(2*r_x / max(cosang, EPS_COS), T + 2*r_x)    otherwise
+        A_anchor = A_ball + (pi*r_x^2 if T > TOL_MM else 0)
+        LEGAL iff A_patch <= A_max AND L_scar <= L_SCAR_MAX_MM
+                  AND A_anchor >= pi*r_end^2      (scar cap; scar dim; anchor floor)
+    """
+    if T > TOL_MM:
+        A_shaft = min(np.pi * r_x ** 2 / max(cosang, EPS_COS), 2.0 * r_x * T)
+        L_scar = min(2.0 * r_x / max(cosang, EPS_COS), T + 2.0 * r_x)
+        A_anchor_shaft = np.pi * r_x ** 2
+    else:
+        A_shaft = 0.0; L_scar = 0.0; A_anchor_shaft = 0.0
+    A_ball = np.pi * max(R_b ** 2 - d ** 2, 0.0)
+    A_patch = A_shaft + A_ball
+    A_max = max(A_ABS_MM2, KAPPA * np.pi * R_b ** 2)
+    A_anchor = A_ball + A_anchor_shaft
+    legal = ((A_patch <= A_max) and (L_scar <= L_SCAR_MAX_MM)
+             and (A_anchor >= np.pi * r_end ** 2))
+    return bool(legal), dict(A_patch=float(A_patch), A_max=float(A_max),
+                             L_scar=float(L_scar), A_anchor=float(A_anchor),
+                             A_ball=float(A_ball), A_shaft=float(A_shaft))
+
+
+def _embed_scar_verdicts(geom, members, mis, ivmap, cfg):
+    """SCAR-AREA-CAP legality per designed embed end (SPEC-EMBED-POLICY.md),
+    AXIS geometry only. Returns {mi: legal_bool} for every mi in `mis` whose
+    member carries a designed embed_end (p0/p1). The verdict gates the rule-4 tip
+    exemption in `_transit_illegal` (a LEGAL tip is fully exempt; an ILLEGAL one
+    is flagged at full raw length). Formulas and constants are LITERAL-IDENTICAL
+    to the independent census (census_run.py PASS C2) -- the engine never shares
+    code with it, only the same spec text, so both count the same population.
+
+    Inputs read exactly as the census does: `T` = length of the tip-anchored
+    axis interval; `x_c` = its exit crossing (surface normal via geom.project ->
+    cosang); `d` = |signed distance| p_end->surface (geom.query); `r_x` = frustum
+    radius at x_c; `R_b` = BALL_FACTOR * r_end. Batched: one geom.query for all
+    embed points, one geom.project for all tip-interval exits."""
+    embed_mis = [mi for mi in mis if members[mi].get("embed_end") in ("p0", "p1")]
+    if not embed_mis:
+        return {}
+    p_ends = []; metas = []; xc_pts = []; xc_owner = []
+    for mi in embed_mis:
+        m = members[mi]; embed = m["embed_end"]
+        p0 = np.asarray(m["p0"], float); p1 = np.asarray(m["p1"], float)
+        D = p1 - p0; seg = float(np.linalg.norm(D))
+        axis_ivs = sorted((iv for iv in ivmap.get(mi, []) if iv["ray"] == "axis"),
+                          key=lambda iv: iv["s_a"])
+        if embed == "p0":
+            p_end = p0; r_end_raw = float(m["r0"]); r_root = float(m["r1"])
+            u = (-D / seg) if seg > 1e-9 else D
+        else:
+            p_end = p1; r_end_raw = float(m["r1"]); r_root = float(m["r0"])
+            u = (D / seg) if seg > 1e-9 else D
+        ti = _tip_iv_index(axis_ivs, seg, embed) if seg > 1e-9 else None
+        T = 0.0; xc = None
+        if ti is not None:
+            iv = axis_ivs[ti]; T = iv["s_b"] - iv["s_a"]
+            if T > TOL_MM:
+                s_x = iv["s_b"] if embed == "p0" else iv["s_a"]
+                xc = p0 + (s_x / seg) * D
+        r_end = max(r_end_raw, cfg.tip_r_min_mm)
+        ball_factor = BALL_FACTOR_STUB if m["kind"] == "stub" else BALL_FACTOR_FOOT
+        R_b = ball_factor * r_end
+        k = len(metas)
+        metas.append(dict(mi=mi, T=T, seg=seg, r_end=r_end, r_root=r_root,
+                          R_b=R_b, u=u, has_xc=xc is not None))
+        p_ends.append(p_end)
+        if xc is not None:
+            xc_pts.append(xc); xc_owner.append(k)
+    d_all, _ = geom.query(np.array(p_ends))
+    d_all = np.abs(np.atleast_1d(np.asarray(d_all, float)))
+    if xc_pts:
+        _, _, _, xc_fn = geom.project(np.array(xc_pts))
+        xc_fn = np.atleast_2d(np.asarray(xc_fn, float))
+    else:
+        xc_fn = np.zeros((0, 3))
+    norm_by_k = {kk: xc_fn[i] for i, kk in enumerate(xc_owner)}
+    verdicts = {}
+    for k, mt in enumerate(metas):
+        T = mt["T"]; d = float(d_all[k]); R_b = mt["R_b"]; r_end = mt["r_end"]
+        if T > TOL_MM and mt["has_xc"]:
+            n = norm_by_k[k]; nn = float(np.linalg.norm(n))
+            n = n / nn if nn > 1e-12 else n
+            cosang = abs(float(np.dot(mt["u"], n)))
+            frac = min(max(T / mt["seg"], 0.0), 1.0) if mt["seg"] > 1e-9 else 0.0
+            r_x = r_end + (mt["r_root"] - r_end) * frac
+        else:
+            cosang = 1.0; r_x = r_end
+        legal, _ = _scar_area_cap_legal(T, d, cosang, r_x, r_end, R_b)
+        verdicts[mt["mi"]] = legal
+    return verdicts
+
+
 def _clearance_report_exact(members, cfg, geom):
-    """Independent EXACT swept-capsule clearance re-check (SPEC-V5-GEOM
-    sec 2.2). Deliberately NOT sharing tree.Forest's exact helper -- the
-    independence covenant (a builder bug that mis-certifies a member must
-    not also fool the verify gate) carries over verbatim: it calls only
-    geom's GENERIC primitives (segment_clearance, penetration_intervals),
-    deriving its own inset/interval logic here. Insets exclude the
-    sanctioned embed zone (contact_depth_mm + r_end + standoff_mm, pitch
-    term 0 for an exact oracle). Unlike tree.Forest.revalidate's HOT-loop
-    gated belt, verify runs the axis penetration-interval test UNGATED on
-    every member -- non-stub AND stub (SPEC sec 2.1: the ungated dense pass
-    lives here).
+    """Independent EXACT clearance + embed/transit re-check (SPEC-V5-GEOM
+    sec 2.2, SPEC-EMBED-POLICY rule 4). Deliberately NOT sharing tree.Forest's
+    exact helpers -- the independence covenant (a builder bug that mis-certifies
+    a member must not also fool the verify gate): it calls only geom's GENERIC
+    primitives (segment_clearance, penetration_intervals, query, project),
+    deriving its own verdict/interval logic here.
 
-    NON-STUB CAPSULE-AWARENESS (R2, census member 1138): the segment_clearance
-    gate is an axis-to-surface DISTANCE test -- blind to a capsule surface that
-    grazes a thin wall while the axis stays clear. That strut (axis intervals
-    empty, one capsule-offset ray grazing to 0.264mm) passed every distance/
-    axis check and was emitted. So every non-stub segment now gets the
-    through-transit interval test over the CAPSULE ray set (rays="all": axis +
-    the n capsule-offset rays), matching the census's non-stub PASS A. Stubs
-    stay AXIS-only (they hug their own emergence surface, so an offset ray
-    grazes it -- the census restricts offset rays to non-stubs, and leaving
-    stubs axis-only keeps the P11 over-quarantine class R4 owns untouched).
+    Two independent checks, each flagging a member at most once (distance
+    collision reported with its min clearance; a rule-4 transit with no negative
+    distance reported at min_clearance_mm 0.0 / the clearance value):
 
-    STUB handling (SPEC sec 2.1/2.2, independently coded from
-    tree.Forest._revalidate_exact per the independence covenant): a stub
-    keeps the blanket standoff exemption -- it hugs its own emergence
-    surface at a grazing angle by construction, so any swept-distance check
-    false-positives -- but is NO LONGER blanket-skipped. EVERY stub gets the
-    through-transit rule: an axis inside-interval > 0.05mm OUTSIDE its
-    sanctioned p0 embed zone fails it -- both the census's illegal
-    through-and-through stubs (members 403/357/227) and the buried-free-end
-    stubs the full-scale treant emitted (the 4->15 illegal-member regression).
-    Formerly gated on p1 parity-voting exterior; that exemption is gone (see
-    the step-(1) comment). This is a parity-crossing test (exact boundaries,
-    majority-vote inside), never a distance test, so an ordinary
-    surface-hugging stub cannot false-positive. The step-1 deferral -- which
-    depended on the interior-face demand filter -- has EXPIRED: commit 6aba0f6
-    landed that filter, so contacts now seed only on exterior faces and a
-    flagged stub is a real defect, not an interior phantom the builder cannot
-    re-route.
+    1. THROUGH-TRANSIT / EMBED (SPEC-EMBED-POLICY, ratified cd989fe): the ported
+       SCAR-AREA-CAP + rule-4 predicate REPLACES the retired arc-inset window
+       sanction (`_axis_interval_illegal` is gone). Per-member SCAR-AREA-CAP
+       verdicts (`_embed_scar_verdicts`) gate the tip exemption; `_transit_illegal`
+       flags any member with a non-exempt inside-solid run > MIN_ILLEGAL_LEN_MM.
+       Swept over the SAME population the census does: EVERY member (ungated by
+       clearance sign), stubs AXIS-only (they hug their emergence surface, so an
+       offset ray false-positives), non-stubs AXIS + capsule-offset (a strut
+       whose axis is clean but whose capsule grazes a thin wall -- census 1138 --
+       is caught). This makes the engine gate count exactly the census's illegal
+       population from identical formulas.
 
-    Amendment A18 (stage-1 named refactor, verify.py:88): the per-member
-    penetration_intervals loop is GONE. All stubs and every non-stub with
-    non-negative clearance are gathered and their axis intervals computed in
-    ONE _batch_axis_intervals native call; only the inset/overlap arithmetic
-    runs in Python. Verdict and append order are preserved exactly (stub
-    violations in member order, then segment violations in seg order)."""
+    2. SWEPT-CAPSULE DISTANCE (SPEC-V5-GEOM sec 2.2): non-stubs get the
+       segment_clearance min-distance test. A designed foot is embedded by
+       construction, so the DISTANCE test masks that zone with the
+       `_embed_inset_arc_exact` geometric inset -- a distance-gate mask ONLY, no
+       longer an embed sanction (rule 4 above owns embed legality). Stubs are
+       skipped here (they hug their own emergence surface, so any swept-distance
+       check false-positives); their legality is entirely the rule-4 test.
+
+    Append order is deterministic: stub transit violations in member order, then
+    non-stub violations in member order."""
     out = []
-    # (1) ALL stubs get the axis through-transit interval test -- not only
-    # those whose free end (p1) parity-votes exterior. The former p1-exterior
-    # gate exempted p1-INTERIOR stubs as unroutable-by-construction, but the
-    # full-scale Weeping Treant emitted 13 such buried-free-end stubs -- the
-    # 4->15 illegal-member regression this independent census-family gate is
-    # meant to catch. The builder-side twin (tree._revalidate_exact step 1)
-    # now condemns them at the quarantine pre-pass; this independent gate must
-    # agree so a buried-end stub that ever reaches the emitted forest is still
-    # flagged. An ordinary surface-hugging stub keeps its whole inside-run
-    # within the p0 embed zone and is untouched (a parity-crossing test, never
-    # a distance test).
-    stub_mi = [mi for mi, m in enumerate(members) if m["kind"] == "stub"]
-    stub_iv_mi = []
-    stub_insets = {}
-    if stub_mi:
-        for mi in stub_mi:
-            m = members[mi]
-            si0, si1 = _embed_inset_arc_exact(geom, m, cfg)
-            L = float(np.linalg.norm(np.asarray(m["p1"], float) - np.asarray(m["p0"], float)))
-            stub_iv_mi.append(mi)
-            stub_insets[mi] = (si0, si1, L)
 
-    # (2) non-stubs: gather + ONE batched segment_clearance call.
-    seg_mi, p0s, p1s, r0s, r1s, ins0, ins1 = [], [], [], [], [], [], []
-    for mi, m in enumerate(members):
-        if m["kind"] == "stub":
-            continue
-        i0, i1 = _embed_inset_arc_exact(geom, m, cfg)
-        seg_mi.append(mi)
-        p0s.append(np.asarray(m["p0"], float))
-        p1s.append(np.asarray(m["p1"], float))
-        r0s.append(float(m["r0"]))
-        r1s.append(float(m["r1"]))
-        ins0.append(i0)
-        ins1.append(i1)
-    clr = argp = None
-    seg_check = []
-    seg_insets = {}
+    def _len(mi):
+        return float(np.linalg.norm(np.asarray(members[mi]["p1"], float)
+                                    - np.asarray(members[mi]["p0"], float)))
+
+    # (1) gather kernel penetration intervals ONCE, over the SAME population the
+    # census sweeps: EVERY member with real length, stubs AXIS-only, non-stubs
+    # AXIS + capsule-offset (rays="all"). Ungated by clearance sign -- the census
+    # has no distance test, so a rule-4 transit on a member whose capsule also
+    # collides is still counted here (that member is then flagged once, below).
+    stub_iv_mi = [mi for mi, m in enumerate(members)
+                  if m["kind"] == "stub" and _len(mi) >= 1e-9]
+    seg_iv_mi = [mi for mi, m in enumerate(members)
+                 if m["kind"] != "stub" and _len(mi) >= 1e-9]
+    stub_intervals = _batch_axis_intervals(geom, members, stub_iv_mi, rays="axis")
+    seg_intervals = _batch_axis_intervals(geom, members, seg_iv_mi, rays="all")
+    ivmap = {**stub_intervals, **seg_intervals}
+
+    # (2) SCAR-AREA-CAP embed verdicts (designed embed ends, axis ray) -- gate the
+    # rule-4 tip exemption. Only members with intervals need a verdict (a member
+    # with no tip-anchored interval is flagged, or not, independent of it).
+    verdicts = _embed_scar_verdicts(geom, members, list(ivmap.keys()), ivmap, cfg)
+
+    # (3) non-stub swept-capsule DISTANCE re-check (segment_clearance), masking
+    # each member's OWN designed embed zone with the _embed_inset_arc_exact
+    # geometric inset (distance-gate mask only; SCAR-AREA-CAP rule 4 owns embed
+    # legality). Flags a member whose SHAFT grazes OTHER geometry (worst < 0).
+    seg_mi = [mi for mi, m in enumerate(members) if m["kind"] != "stub"]
+    clr_by_mi = {}
     if seg_mi:
+        p0s, p1s, r0s, r1s, ins0, ins1 = [], [], [], [], [], []
+        for mi in seg_mi:
+            m = members[mi]
+            i0, i1 = _embed_inset_arc_exact(geom, m, cfg)
+            p0s.append(np.asarray(m["p0"], float)); p1s.append(np.asarray(m["p1"], float))
+            r0s.append(float(m["r0"])); r1s.append(float(m["r1"]))
+            ins0.append(i0); ins1.append(i1)
         clr, argp = geom.segment_clearance(
             np.array(p0s), np.array(p1s), np.array(r0s), np.array(r1s),
             cfg.standoff_mm, inset0s=np.array(ins0), inset1s=np.array(ins1))
-        # verify runs the interval test UNGATED on every non-negative-clearance
-        # non-stub (no 0.1 hot-loop gate here -- SPEC sec 2.1: the ungated dense
-        # pass lives in verify). Gather them for the single batched call.
-        for k, mi in enumerate(seg_mi):
-            if float(clr[k]) < 0:
-                continue
-            L = float(np.linalg.norm(np.asarray(members[mi]["p1"], float)
-                                     - np.asarray(members[mi]["p0"], float)))
-            seg_check.append(mi)
-            seg_insets[mi] = (ins0[k], ins1[k], L)
+        clr_by_mi = {mi: (float(clr[k]), argp[k]) for k, mi in enumerate(seg_mi)}
 
-    # (3) penetration intervals. STUBS get AXIS-only intervals (census_run.py:52
-    # -- a stub hugs its own emergence surface at a grazing angle, so capsule-
-    # offset rays graze that surface and false-positive; the census restricts
-    # offset rays to non-stubs, and keeping stubs axis-only leaves the P11
-    # over-quarantine class untouched, which is R4's embed-inset job, not this
-    # one). NON-STUB segments get the CAPSULE-AWARE ray set (R2): axis PLUS the
-    # n capsule-offset rays. A segment_clearance (axis-to-surface distance) gate
-    # is blind to a capsule surface that grazes a thin wall while the axis stays
-    # clear -- census member 1138 (a strut, axis intervals empty, one offset ray
-    # grazing to 0.264mm) slipped every distance/axis check and was emitted. The
-    # kernel already computes the offset-ray transits (rays="all"); wire that
-    # same evidence into the gate so the graze is caught at final geometry.
-    stub_intervals = _batch_axis_intervals(geom, members, stub_iv_mi, rays="axis")
-    seg_intervals = _batch_axis_intervals(geom, members, seg_check, rays="all")
-
-    # (4) verdict assembly -- stub violations first (member order), then segs.
+    # (4) verdict assembly -- stub transit violations first (member order), then
+    # non-stub violations (member order). Each member appears at most once.
     for mi in stub_iv_mi:
-        si0, si1, L = stub_insets[mi]
-        if _axis_interval_illegal(stub_intervals[mi], L, si0, si1):
+        if _transit_illegal(ivmap[mi], members[mi], verdicts.get(mi)):
             out.append(dict(member_idx=mi, kind="stub", min_clearance_mm=0.0,
                             at_point=None))
-    if seg_mi:
-        for k, mi in enumerate(seg_mi):
-            m = members[mi]
-            worst = float(clr[k])
-            if worst < 0:
-                ap = argp[k]
-                out.append(dict(member_idx=mi, kind=m["kind"], min_clearance_mm=worst,
-                                at_point=(ap.tolist() if np.all(np.isfinite(ap)) else None)))
-            elif mi in seg_insets:
-                si0, si1, L = seg_insets[mi]
-                if _axis_interval_illegal(seg_intervals[mi], L, si0, si1):
-                    out.append(dict(member_idx=mi, kind=m["kind"], min_clearance_mm=worst,
-                                    at_point=None))
+    for mi in seg_mi:
+        m = members[mi]
+        worst, ap = clr_by_mi.get(mi, (0.0, None))
+        if worst < 0:
+            out.append(dict(member_idx=mi, kind=m["kind"], min_clearance_mm=worst,
+                            at_point=(ap.tolist() if ap is not None
+                                      and np.all(np.isfinite(ap)) else None)))
+        elif mi in ivmap and _transit_illegal(ivmap[mi], m, verdicts.get(mi)):
+            out.append(dict(member_idx=mi, kind=m["kind"], min_clearance_mm=worst,
+                            at_point=None))
     return out
 
 

@@ -275,17 +275,23 @@ def test_clearance_report_flags_through_transit_stub(cfg):
                                    geom=clean_geom) == []
 
 
-def test_buried_free_end_stub_is_flagged(cfg):
-    """A stub whose FREE end (p1) is buried INSIDE the solid welds into the
-    model body -- an illegal print, not a harmless phantom. The full-scale
-    Weeping Treant EMITTED this class (the independent census's axis-centerline
-    illegal stub members, the 4->15 regression vs v1), disproving the old
-    "interior => unroutable => never printed" premise. BOTH implementations
-    must now flag it (the cco pre-pass then quarantines it, so
-    assert_all_certified is satisfied by exclusion, not by exemption). An
-    ordinary surface-hugging stub with p1 in open air is still NOT flagged --
-    covered by the sanctioned-embed clean cases in the through-transit tests
-    above and by test_perf_a0's negative control."""
+def test_buried_deep_plug_stub_adjudicated_legal_by_scar_gate(cfg):
+    """ADJUDICATION (SPEC-EMBED-POLICY, owner-ratified cd989fe): a stub tip-
+    embedded in THICK solid whose free end (p1) is buried deeper -- a pure deep
+    plug that never exits -- is a SINGLE tip-anchored interval with a SMALL
+    surface-crossing patch. Under SCAR-AREA-CAP there is NO depth cap on the
+    tip-anchored interval ('a deep perpendicular plug into thick solid has a
+    small crossing patch and no further physical consequence' -- the owner's
+    idempotence ruling), so the verify gate now deems it LEGAL. This is the
+    ratified reversal of the old arc-inset flag; the independent census agrees
+    (its 193 illegal members are ALL through-and-through transits, none a pure
+    buried plug).
+
+    Intended builder/verify DIVERGENCE this round: tree.Forest.revalidate is the
+    PLACEMENT side, still on the retired arc-inset window (untouched this round,
+    slated for the placement-rebuild round), so it STILL flags the plug; the
+    verify gate, on the ratified SCAR-AREA-CAP policy, does not. Reconciling the
+    two is the placement-rebuild round's job."""
     slab = _box((20, 20, 10), center=(0, 0, 0))    # solid z in [-5, 5]
     geom = ExactSurface(slab)
     buried = dict(p0=np.array([0.0, 0.0, 4.7]),    # tip 0.3 inside top face z=5
@@ -293,12 +299,15 @@ def test_buried_free_end_stub_is_flagged(cfg):
                   r0=0.2, r1=0.35, kind="stub", owner=("contact", 0),
                   embed_end="p0")
     assert bool(geom.inside(np.array([buried["p1"]]))[0])   # free end interior
+    # PLACEMENT side (unchanged arc-inset) still flags -- the divergence.
     f = tm.Forest()
     f.add_member(tm.Member(**buried))
     assert [v["member_idx"] for v in f.revalidate(geom, cfg)] == [0]
     assert f.dirty_members() == [0]                # stays uncertified (hard)
+    # VERIFY gate on the ratified SCAR-AREA-CAP policy: legal deep plug, NOT
+    # flagged (a single tip-anchored interval, small scar patch, thick solid).
     rep = verify.clearance_report(None, [buried], cfg, geom=geom)
-    assert [v["member_idx"] for v in rep] == [0]   # independent gate agrees
+    assert rep == []
 
 
 # ==========================================================================
@@ -314,15 +323,24 @@ def test_buried_free_end_stub_is_flagged(cfg):
 class _CapsuleGrazeGeom:
     """Duck-typed exact oracle returning CONTROLLED census-1138 evidence to
     ISOLATE the R2 wiring: the axis is clean (axis intervals EMPTY), one
-    capsule-offset ray transits the full length (a graze, entered/exited False,
-    depth 0.264mm), and segment_clearance is >= 0 (the distance path is blind to
-    the graze -- exactly the blind spot 1138 exploited). Records the `rays` mode
-    per penetration_intervals_batch call so a test can prove stubs stay
-    axis-only while non-stubs go capsule-aware. project() mirrors the scalar
-    contract of ExactSurface.project (a 1-D point -> a (3,) outward normal)."""
+    capsule-offset ray transits an UNANCHORED mid-strut span (a graze away from
+    the p1 embed foot -- the census's 'unanchored capsule graze', flagged by
+    SCAR-AREA-CAP rule 4 regardless of the tip verdict), and segment_clearance
+    is >= 0 (the distance path is blind to the graze -- exactly the blind spot
+    1138 exploited). Records the `rays` mode per penetration_intervals_batch call
+    so a test can prove stubs stay axis-only while non-stubs go capsule-aware.
+    query()/project() mirror the scalar+batch contracts of ExactSurface (a 1-D
+    point -> scalar / (3,) outward normal)."""
 
     def __init__(self):
         self.rays_seen = []
+
+    def query(self, pts, distance_upper_bound=np.inf, workers=None, k=1):
+        pts = np.asarray(pts, float)
+        if pts.ndim == 1:
+            return 0.0, 0
+        n = len(pts)
+        return np.zeros(n), np.zeros(n, int)
 
     def project(self, pts):
         pts = np.asarray(pts, float)
@@ -345,60 +363,80 @@ class _CapsuleGrazeGeom:
         out = []
         for j in range(len(p0s)):
             L = float(np.linalg.norm(p1s[j] - p0s[j]))
-            if rays == "all":            # census 1138: an offset ray grazes
-                out.append([dict(s_a=0.0, s_b=L, entered=False, exited=False,
-                                 max_depth_mm=0.264, ray="off6")])
+            if rays == "all":            # census 1138: an offset ray grazes,
+                # UNANCHORED -- a mid-strut span [0.3L, 0.8L], well clear of the
+                # p1 foot (s=L), so rule 4 flags it whatever the tip verdict.
+                out.append([dict(s_a=0.30 * L, s_b=0.80 * L, entered=True,
+                                 exited=True, max_depth_mm=0.264, ray="off6")])
             else:                        # axis-only: the census-1138 axis is empty
                 out.append([])
         return out
 
 
-def test_r2_predicate_axis_clean_capsule_graze():
-    """The exact behaviour change, at the predicate: the axis intervals are
-    EMPTY (census-1138 axis) so the old axis-only test PASSES the member; the
-    SAME predicate over the capsule-offset interval FAILS it -- WHEN the embed
-    inset leaves the offset run exposed. L from the diagnosed site
-    (mi=1138, L=1.913); a representative embed inset well inside L."""
+def test_r2_predicate_unanchored_capsule_graze_is_illegal():
+    """SPEC-EMBED-POLICY rule 4 at the predicate (census-1138 class, mi=1138:
+    strut, embed=p1, L=1.913). The axis interval is EMPTY so an axis-only test
+    passes the member; the SAME predicate over an UNANCHORED capsule-offset
+    interval (a mid-strut graze not reaching the p1 foot) flags it -- regardless
+    of the tip verdict. An ANCHORED offset graze (reaching the foot, within TOL
+    of s=L) is instead the sanctioned foot embed and is exempt when the verdict
+    is legal."""
     L = 1.913
-    assert verify._axis_interval_illegal([], L, 0.0, 0.9) is False
-    off = [dict(s_a=0.0, s_b=L, entered=False, exited=False,
-                max_depth_mm=0.264, ray="off6")]
-    assert verify._axis_interval_illegal(off, L, 0.0, 0.9) is True
+    strut = _m([0, 0, L], [0, 0, 0.0], 0.35, 0.35, "strut", ("contact", 0),
+               embed_end="p1")
+    # axis empty -> not illegal.
+    assert verify._transit_illegal([], strut, True) is False
+    # unanchored mid-strut offset graze -> illegal even with a LEGAL tip verdict.
+    off_mid = [dict(s_a=0.5, s_b=1.2, entered=True, exited=True,
+                    max_depth_mm=0.264, ray="off6")]
+    assert verify._transit_illegal(off_mid, strut, True) is True
+    # anchored offset graze reaching the p1 foot (s_b within TOL of L) -> the
+    # sanctioned foot embed, exempt under a LEGAL verdict.
+    off_foot = [dict(s_a=1.2, s_b=L - 0.01, entered=True, exited=False,
+                     max_depth_mm=0.264, ray="off6")]
+    assert verify._transit_illegal(off_foot, strut, True) is False
+    # ... but an ILLEGAL tip verdict flags even the anchored foot interval.
+    assert verify._transit_illegal(off_foot, strut, False) is True
 
 
-def test_r2_capsule_necessary_but_inset_gates_1138_end_to_end():
-    """FAITHFUL fixture from the diagnosed site, pinning the R2/R4 SPLIT with the
-    REAL kernel intervals + insets recorded on the acceptance run-1 geometry
-    (mi=1138: strut, embed=p1, L=1.913, r=0.35).
+def test_r4_near_tip_unanchored_transit_stub_is_illegal():
+    """Census worst-class stubs (this run's mi=510/416): a stub with a SINGLE
+    axis interval that starts JUST beyond the tip-anchor tolerance (s_a > TOL_MM)
+    -- the solid begins a hair too far from the tip to anchor -- is an unanchored
+    transit and ILLEGAL, no matter the SCAR verdict. The mirror sub-TOL case
+    (s_a <= TOL_MM) anchors and, under a legal verdict, is exempt."""
+    stub = _m([0, 0, 0.0], [0, 0, 2.8], 0.2, 0.35, "stub", ("contact", 0),
+              embed_end="p0")
+    unanchored = [dict(s_a=0.06, s_b=0.30, entered=True, exited=True,
+                       max_depth_mm=0.01, ray="axis")]      # s_a 0.06 > TOL 0.05
+    assert verify._transit_illegal(unanchored, stub, True) is True
+    anchored = [dict(s_a=0.04, s_b=0.30, entered=True, exited=True,
+                     max_depth_mm=0.01, ray="axis")]        # s_a 0.04 <= TOL
+    assert verify._transit_illegal(anchored, stub, True) is False
 
-    R2 supplies the NECESSARY capsule evidence: the axis interval is EMPTY and a
-    capsule-offset ray (off6) grazes the full length to 0.264mm -- an axis-only
-    predicate is structurally blind to it. But catching it END-TO-END also needs
-    the embed inset aligned with the census (R4's job): the engine's ANGLE-AWARE
-    inset here is 2.2mm (the 60deg floor: contact_depth + (r+standoff)/0.5),
-    which EXCEEDS L=1.913 -> an EMPTY sanctioned window [0, -0.287] that exempts
-    the whole member, so even R2's capsule ray cannot flag it. The census's FLAT
-    inset (contact_depth + pitch_bound + r + standoff = 1.82mm) leaves a 0.09mm
-    sliver exposed and flags it. This test locks in that R2 (capsule sensitivity)
-    is necessary but not sufficient alone; R4 (census-aligned embed-inset
-    accounting) closes the window."""
-    L = 1.913
-    off6 = dict(s_a=0.0, s_b=L, entered=False, exited=False,
-                max_depth_mm=0.264, ray="off6")
-    # (pre-R2) axis-only predicate is blind -- the axis interval is empty.
-    assert verify._axis_interval_illegal([], L, 0.0, 1.82) is False
-    # (R2, engine's CURRENT inset 2.2 > L) capsule ray present but window empty.
-    assert verify._axis_interval_illegal([off6], L, 0.0, 2.2) is False
-    # (R2 + R4's census-aligned inset 1.82) the graze is caught.
-    assert verify._axis_interval_illegal([off6], L, 0.0, 1.82) is True
+
+def test_r4_mid_span_transit_after_legal_tip_is_illegal():
+    """A designed embed with a LEGAL tip AND a separate mid-span transit: the
+    tip interval is exempt, but the re-entry / mid-span interval is an
+    unanchored transit -> the member is ILLEGAL (the through-transit stub class,
+    e.g. a stub welding through a floating fin above its sanctioned embed)."""
+    stub = _m([0, 0, -0.3], [0, 0, 2.5], 0.2, 0.35, "stub", ("contact", 0),
+              embed_end="p0")
+    ivs = [dict(s_a=0.0, s_b=0.30, entered=False, exited=True,
+                max_depth_mm=0.3, ray="axis"),               # tip-anchored (exempt)
+           dict(s_a=1.3, s_b=1.8, entered=True, exited=True,
+                max_depth_mm=0.25, ray="axis")]              # mid-span transit
+    assert verify._transit_illegal(ivs, stub, True) is True
+    # with only the tip interval, the legal verdict exempts the member entirely.
+    assert verify._transit_illegal(ivs[:1], stub, True) is False
 
 
 def test_r2_clearance_report_flags_capsule_graze_strut(cfg):
     """verify._clearance_report_exact catches the census-1138 class end-to-end:
     a non-stub whose segment_clearance is clear (min_clearance_mm >= 0, NOT a
     distance violation) and whose axis is empty, but a capsule-offset ray grazes
-    a thin wall. Pre-R2 (axis-only intervals) delivered ZERO violations; R2
-    flags it by consulting rays='all'."""
+    a thin wall UNANCHORED. Axis-only intervals deliver ZERO violations; the gate
+    flags it by consulting rays='all' and applying rule 4."""
     geom = _CapsuleGrazeGeom()
     strut = _m([0, 0, 3.0], [0, 0, 0.0], 0.35, 0.35, "strut",
                ("contact", 72), embed_end="p1")
@@ -413,9 +451,9 @@ def test_r2_capsule_awareness_does_not_leak_into_stubs(cfg):
     """R2 adds capsule-offset sensitivity to NON-STUB members ONLY. A stub hugs
     its own emergence surface, so a capsule-offset ray grazes THAT surface --
     flagging stubs on offset rays would re-fire the P11 over-quarantine class
-    R4 owns. Guard: with a geom whose offset rays ALL transit but whose axis is
-    clean, the STRUT is flagged and the STUB is NOT, and the stub's intervals
-    were requested axis-only."""
+    SCAR-AREA-CAP owns. Guard: with a geom whose offset rays ALL transit but
+    whose axis is clean, the STRUT is flagged and the STUB is NOT, and the stub's
+    intervals were requested axis-only."""
     geom = _CapsuleGrazeGeom()
     strut = _m([0, 0, 3.0], [0, 0, 0.0], 0.35, 0.35, "strut",
                ("contact", 1), embed_end="p1")
@@ -444,3 +482,78 @@ def test_r2_capsule_offset_ray_surfaces_transit_axis_misses():
     off = [iv for iv in all_iv if iv["ray"] != "axis"]
     assert off, "a capsule-offset ray must surface the graze the axis misses"
     assert any((iv["s_b"] - iv["s_a"]) > 0.05 for iv in off)
+
+
+# ==========================================================================
+# SCAR-AREA-CAP embed-legality (SPEC-EMBED-POLICY.md, ratified cd989fe) --
+# the ported per-embed-end sanction that REPLACES the retired arc/depth inset.
+# Pure closed-form pins on verify._scar_area_cap_legal, mesh-free and literal
+# to the spec's normative constants (A_ABS_MM2=2.0, KAPPA=1.25,
+# L_SCAR_MAX_MM=2.5). Each case isolates one legality rule so a future edit to a
+# single term is caught. These are the spec's own documented numbers (mi=415
+# grazing rib; the 85deg / 4.59mm long-gash; the KAPPA-lifted designed foot).
+# ==========================================================================
+def test_scar_area_cap_legal_grazing_rib_mi415_class():
+    """A LEGAL grazing rib stub (this run's mi=415 verdict inputs): moderate
+    angle, small scar patch -> LEGAL, mid-pack under the area lens. No depth cap
+    on the tip-anchored interval."""
+    legal, met = verify._scar_area_cap_legal(
+        T=1.7644, d=0.053, cosang=0.913, r_x=0.2945, r_end=0.2, R_b=0.3)
+    assert legal is True
+    assert met["A_patch"] == pytest.approx(0.5723, abs=2e-3)
+    assert met["A_patch"] <= met["A_max"]                       # rule 1
+    assert met["L_scar"] == pytest.approx(0.6451, abs=2e-3)     # rule 2
+    assert met["A_anchor"] >= np.pi * 0.2 ** 2                  # rule 3
+
+
+def test_scar_area_cap_long_gash_fails_scar_dimension():
+    """Rule 2 (scar max dimension): the spec's / Codex's 85deg long-gash example
+    -- L_scar via 2*r_x/cos = 4.59mm exceeds L_SCAR_MAX_MM (2.5) -> ILLEGAL,
+    even though its AREA (rule 1) is under A_ABS. A cos floor would have hidden
+    exactly this grazing growth."""
+    cos85 = float(np.cos(np.radians(85.0)))
+    legal, met = verify._scar_area_cap_legal(
+        T=5.0, d=0.05, cosang=cos85, r_x=0.2, r_end=0.2, R_b=0.3)
+    assert met["L_scar"] == pytest.approx(4.59, abs=0.02)       # spec's 4.59mm
+    assert met["A_patch"] <= met["A_max"]                        # rule 1 passes
+    assert met["L_scar"] > 2.5                                   # rule 2 fails
+    assert legal is False
+
+
+def test_scar_area_cap_grazing_scar_over_area_fails_scar_cap():
+    """Rule 1 (scar cap): a grazing stub whose shaft patch exceeds A_ABS
+    (>2.0mm2) while its scar dimension stays within 2.5mm -> ILLEGAL via the
+    area bound alone. A_ball can never breach A_max on its own (always within the
+    KAPPA headroom), so a scar-cap violation is necessarily a shaft-area gouge."""
+    legal, met = verify._scar_area_cap_legal(
+        T=2.0, d=0.05, cosang=0.48, r_x=0.6, r_end=0.4, R_b=0.6)
+    assert met["A_max"] == pytest.approx(2.0, abs=1e-9)          # small stub ball
+    assert met["A_patch"] > 2.0                                  # rule 1 fails
+    assert met["L_scar"] <= 2.5                                  # rule 2 passes
+    assert legal is False
+
+
+def test_scar_area_cap_detached_tip_fails_anchor_floor():
+    """Rule 3 (anchor floor): a DETACHED tip -- no tip-anchored interval (T=0)
+    and the surface farther than the ball radius (d > R_b) -- gives A_anchor = 0,
+    below the pi*r_end^2 fuse-neck floor -> ILLEGAL. Depth checks were
+    structurally blind in this direction."""
+    legal, met = verify._scar_area_cap_legal(
+        T=0.0, d=0.5, cosang=1.0, r_x=0.2, r_end=0.2, R_b=0.3)
+    assert met["A_anchor"] == pytest.approx(0.0, abs=1e-12)
+    assert met["A_anchor"] < np.pi * 0.2 ** 2                    # rule 3 fails
+    assert met["A_patch"] <= met["A_max"] and met["L_scar"] <= 2.5
+    assert legal is False
+
+
+def test_scar_area_cap_large_designed_foot_legal_via_kappa():
+    """The KAPPA lever (rule 1): a large designed strut foot (r_end=1.0 ->
+    R_b=1.4) embeds a disc of ~6.1mm2 -- far above the flat 2.0mm2 allowance, but
+    LEGAL by construction because A_max = KAPPA*pi*R_b^2 = 7.7mm2 scales with the
+    designed ball. A flat cap below that would outlaw the sanctioned design."""
+    legal, met = verify._scar_area_cap_legal(
+        T=0.0, d=0.1, cosang=1.0, r_x=1.0, r_end=1.0, R_b=1.4)
+    assert met["A_max"] == pytest.approx(1.25 * np.pi * 1.4 ** 2, rel=1e-9)
+    assert met["A_patch"] > 2.0                                  # over the flat cap
+    assert met["A_patch"] <= met["A_max"]                        # but under KAPPA cap
+    assert legal is True
