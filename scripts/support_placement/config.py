@@ -357,6 +357,49 @@ class SupportConfig:
     # This is NOT a coverage radius -- the region itself encodes the
     # 1-2-layer connection rule; this only absorbs sampling gaps.
     minima_contact_radius_mm: float = 1.0
+    # Supportive-connectivity filter on local_z_minima (Craig's ruling,
+    # 2026-07-24). local_z_minima's candidate test and flood are both PURE
+    # SURFACE tests -- they never ask whether solid model material already
+    # carries the point, so a dip on an upward/side-facing surface (chest
+    # crease, armpit fold, dorsal saddle) was treated as an unsupported
+    # island birth and got a strut into solid bulk. Craig: "'Directly
+    # below' should include voxels below and to the side if the voxel above
+    # (and side-by-side with the candidate) is connected. The voxel doesn't
+    # need to be *directly* below the candidate, it just needs to be
+    # supportive." Per-layer connected components ARE that predicate, and
+    # "component with no overlap of the layer below" is exactly
+    # perception.island_births -- so with this ON a minimum survives only
+    # if it coincides with a real slice-based island birth. Default ON (the
+    # surface-only behaviour is a measured defect: 38.1% of treant and
+    # 21.7% of morel minima-stage contacts were false).
+    #
+    # DEFAULT OFF pending refinement (Craig's ruling, 2026-07-24). Held back
+    # because this filter tests the EXISTENCE of solid beneath a candidate,
+    # not its ADEQUACY, and the owner's rule is that the material must be
+    # *supportive*. Per-site inspection of the 80 exterior down-facing
+    # treant minima it removes found 31 standing on less than 1 mm2 or less
+    # than 0.05mm inside the boundary -- the worst on 0.0076 mm2, far less
+    # than a support tip's own footprint. That is a whisker, not support.
+    # A2 exposure for comparison: filter A removes 2 exterior down-facing
+    # contacts on the treant and 0 on the morel; this one removes 77.
+    minima_require_island_birth: bool = False
+    # FILTER (A), independent of the above (Craig's adjudication,
+    # 2026-07-24: the two are DIFFERENT defects and must not be collapsed
+    # into one mechanism, so a win in one cannot launder a loss in the
+    # other). The model is a SINGLE HOLLOW SHELL -- not an assembly of
+    # overlapping sub-bodies -- so its interior faces are the INNER WALL
+    # surface. A minimum whose nearest face is interior is a phantom:
+    # nothing is ever printed on the inside of the wall, so supporting it
+    # is meaningless, whatever is or is not below it. Requires a
+    # surface-EXACT oracle (engine.run always supplies one); fails open
+    # without it.
+    minima_drop_interior_faces: bool = True
+    # Z half of that coincidence test, in real print layers (design-v4.md
+    # section 11: a print-timing tolerance is expressed as a multiple of
+    # layer_height_mm, never a raw mm). The birth plane sits at the first
+    # slice ABOVE the minimum's tip vertex, so the offset is inherently
+    # sub-layer; measured max on the morel/treant corpus is ~1.1 layers.
+    minima_birth_match_layers: float = 2.0
 
     # ---- Rewiring / topology mutation (design-v4.md #7, Phase 3) ----
     # Wall-clock budget for rewire.optimize's sweep loop. Craig's directive

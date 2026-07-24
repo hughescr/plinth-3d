@@ -157,7 +157,7 @@ def overhang_islands(mesh, cfg, geom=None):
     return islands
 
 
-def local_z_minima(mesh, cfg):
+def local_z_minima(mesh, cfg, births=None, geom=None):
     """Island-birth minima that need direct support (v3.6, Craig's rule).
 
     A local minimum of the surface height function births a new
@@ -200,6 +200,62 @@ def local_z_minima(mesh, cfg):
     nothing). Region data is therefore returned as POSITIONS, not indices
     into the caller's mesh. Returns list of dicts, ascending z:
     {position, normal, z, region_pts} (region_pts = (N,3) float array).
+
+    TWO INDEPENDENT FILTERS run after the surface pass above (Craig's
+    ruling + adjudication, 2026-07-24). They address DIFFERENT defects and
+    are deliberately kept on separate flags:
+
+      (A) cfg.minima_drop_interior_faces -- a minimum whose nearest face is
+          an INTERIOR face is on the INNER WALL of the model's hollow
+          shell. Nothing is ever printed there, so supporting it is
+          meaningless. Dropped for interiority alone. See
+          _filter_minima_to_exterior_faces.
+      (B) cfg.minima_require_island_birth -- a minimum on genuine EXTERIOR
+          surface that nevertheless rests on solid material connected
+          below needs no support. See _filter_minima_to_island_births and
+          the paragraphs below.
+
+    SUPPORTIVE-CONNECTIVITY FILTER (B). Everything above this
+    paragraph is a pure SURFACE test: candidates are local minima of the
+    vertex-height function and the flood traverses only the mesh SURFACE
+    graph. Neither ever asks whether SOLID MODEL MATERIAL already carries
+    the point. A dip on an upward- or side-facing surface -- a chest
+    crease, an armpit fold, a dorsal saddle -- is a local minimum of the
+    surface graph while sitting on continuous solid bulk; the flood cannot
+    see that bulk (it is not on the surface graph), so the point was
+    treated as an unsupported island birth and got a support strut into
+    solid material. Measured on the real corpus: 131/344 minima-stage
+    treant contacts and 10/46 morel ones were false by the engine's own
+    overhang test, ~6.9% / ~15.8% of each model's support resin.
+
+    Craig's ruling on the correct predicate: "'Directly below' should
+    include voxels below and to the side if the voxel above (and
+    side-by-side with the candidate) is connected. The voxel doesn't need
+    to be *directly* below the candidate, it just needs to be supportive."
+    So the question is SUPPORTIVE CONNECTIVITY THROUGH SOLID -- not
+    verticality (a column ray-cast wrongly condemns geometry that
+    overhangs but stays solidly connected to supported material off to one
+    side) and not the surface normal (an nz filter wrongly condemns a
+    genuinely thin/disconnected feature that happens to face upward).
+
+    Per-layer connected components ARE that predicate: a region at layer k
+    is supported iff its component overlaps, or is laterally connected
+    within layer k to a region that overlaps, solid at layer k-1 -- and a
+    layer-k component is by construction exactly one laterally-connected
+    region. So "this component does NOT overlap layer k-1" is precisely
+    `island_births`' definition. A minimum is therefore a real unsupported
+    island birth iff it coincides with an island_births event; anything
+    else is standing on solid that is already anchored. This reuses
+    island_births' real slicing machinery rather than inventing a parallel
+    mechanism, and the caller may pass `births` in (engine.prepare does) so
+    the model is sliced ONCE per run, not twice.
+
+    Coincidence test = the same strict at-birth criterion the rest of the
+    branch uses: ISLAND_ATTACH_REACH_MM in xy against the birth footprint
+    itself, and cfg.minima_birth_match_layers real print layers in z (the
+    birth plane sits at the first slice ABOVE the tip vertex, so the offset
+    is inherently sub-layer; measured max on morel/treant is ~1.1 layers,
+    and the default 2.0 keeps a full layer of headroom).
     """
     import trimesh
     mw = trimesh.Trimesh(vertices=np.asarray(mesh.vertices).copy(),
@@ -261,7 +317,114 @@ def local_z_minima(mesh, cfg):
         out.append(dict(position=mw.vertices[v].copy(),
                         normal=np.asarray(mw.vertex_normals[v], float).copy(),
                         z=float(z_v), region_pts=mw.vertices[region].copy()))
+
+    # Two INDEPENDENT filters, deliberately not collapsed into one mechanism
+    # (Craig's adjudication, 2026-07-24): (A) interiority drops phantoms,
+    # (B) connectivity drops genuinely-supported real surface. They remove
+    # overlapping but distinct populations and each must be measurable on
+    # its own, so a win in one can never launder a loss in the other.
+    if getattr(cfg, "minima_drop_interior_faces", False):
+        out = _filter_minima_to_exterior_faces(mesh, out, geom)
+    if getattr(cfg, "minima_require_island_birth", False):
+        if births is None:
+            births = island_births(mesh, cfg)
+        out = _filter_minima_to_island_births(out, births, cfg)
     return out
+
+
+def _filter_minima_to_exterior_faces(mesh, minima, geom):
+    """FILTER (A): drop minima whose nearest face is an INTERIOR face.
+
+    The Weeping Treant is a SINGLE HOLLOW SHELL -- not an assembly of
+    overlapping sub-bodies. Its interior faces are therefore the INNER WALL
+    SURFACE of that shell. A local minimum sitting on the inner wall is a
+    phantom: real geometry in the mesh, but the inside of the wall, where
+    nothing is ever printed and nothing can ever be supported. Supporting
+    it is meaningless, so it is dropped for INTERIORITY alone -- regardless
+    of what is or is not below it. That is a different defect from filter
+    (B) below, which is about genuine EXTERIOR surface that happens to rest
+    on solid, and the two must not be conflated.
+
+    Batched: one cKDTree over face centroids, ONE vectorized query for every
+    minimum at once, then a mask lookup -- no per-candidate query.
+    Fail-open (no oracle / degenerate all-interior mask -> unfiltered), the
+    same convention as engine._exterior_face_ids and delicacy_field."""
+    if not minima or geom is None or not hasattr(geom, "exterior_face_mask"):
+        return minima
+    ext = geom.exterior_face_mask()
+    if not ext.any() or ext.all():
+        return minima
+    from scipy.spatial import cKDTree
+    pos = np.array([np.asarray(m["position"], float) for m in minima])
+    _, nearest = cKDTree(mesh.triangles_center).query(pos)
+    keep = ext[np.asarray(nearest, dtype=np.int64)]
+    return [m for m, k in zip(minima, keep) if k]
+
+
+def _filter_minima_to_island_births(minima, births, cfg):
+    """Keep only the minima that coincide with a real slice-based island
+    birth (see local_z_minima's docstring for the ruling this implements).
+    A minimum that does NOT coincide with one is standing on a layer-k
+    component that overlaps solid at layer k-1 -- i.e. it is supportively
+    connected through solid material, laterally-offset support included --
+    and needs no printed support.
+
+    Batched: births are sorted by z once, the z window is a searchsorted
+    slice, and the (vectorized) bbox reject runs over that whole slice at
+    once so the O(N_poly) point-in-polygon / boundary-distance test only
+    ever sees the handful of footprints that could actually contain the
+    point. No per-candidate slicing, no per-candidate kernel call."""
+    if not minima:
+        return []
+    if not births:
+        return []
+    z_tol = float(getattr(cfg, "minima_birth_match_layers", 2.0)) \
+        * float(cfg.layer_height_mm)
+    reach = ISLAND_ATTACH_REACH_MM
+
+    bz = np.array([b["z"] for b in births], dtype=float)
+    order = np.argsort(bz, kind="stable")
+    bz_s = bz[order]
+    loops = [births[i]["loop"] for i in order]
+    bbox = np.array([[l[:, 0].min(), l[:, 0].max(),
+                      l[:, 1].min(), l[:, 1].max()] for l in loops], dtype=float)
+
+    kept = []
+    for m in minima:
+        pz = float(m["z"])
+        lo = int(np.searchsorted(bz_s, pz - z_tol, side="left"))
+        hi = int(np.searchsorted(bz_s, pz + z_tol, side="right"))
+        if hi <= lo:
+            continue
+        # The minimum's own vertex plus its birth region: the region is the
+        # plateau/patch that is born together, so a birth footprint touching
+        # ANY of it is the same birth event. Capped so a large plateau can
+        # not turn this into an unbounded polygon-test loop.
+        pts = np.asarray(m["region_pts"], float)[:, :2]
+        if len(pts) > 64:
+            pts = pts[np.linspace(0, len(pts) - 1, 64).astype(np.int64)]
+        pts = np.vstack([np.asarray(m["position"], float)[:2][None, :], pts])
+
+        bb = bbox[lo:hi]
+        # vectorized bbox reject: (n_pts, n_births_in_window)
+        inx = (pts[:, 0][:, None] >= bb[:, 0][None, :] - reach) & \
+              (pts[:, 0][:, None] <= bb[:, 1][None, :] + reach)
+        iny = (pts[:, 1][:, None] >= bb[:, 2][None, :] - reach) & \
+              (pts[:, 1][:, None] <= bb[:, 3][None, :] + reach)
+        cand = np.nonzero((inx & iny).any(axis=0))[0]
+        hit = False
+        for k in cand:
+            loop = loops[lo + int(k)]
+            for (px, py) in pts:
+                ok, _ = island_birth_xy_ok(float(px), float(py), loop, reach)
+                if ok:
+                    hit = True
+                    break
+            if hit:
+                break
+        if hit:
+            kept.append(m)
+    return kept
 
 
 # ---- Slice-based island-birth detection (v4 p6, Craig's strict criterion:

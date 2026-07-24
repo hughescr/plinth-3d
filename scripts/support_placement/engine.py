@@ -104,23 +104,32 @@ def prepare(mesh, cfg, log=None, geom=None):
     log["islands"] = len(islands)
     log["t_islands"] = round(time.time() - t0, 2)
 
-    # v3.6 (Craig, top priority, carried forward unchanged): island-birth
-    # minima. Detected before sampling so every minimum the overhang-angle
-    # model missed (steep flanks) still ends up with a contact AT its
-    # birth region.
-    minima = perception.local_z_minima(mesh, cfg)
-    log["minima"] = len(minima)
-    log["t_minima"] = round(time.time() - t0, 2)
-
     # v4 p6 (I1, Craig's strict criterion): ground-truth slice-based
     # island-birth detection at the real print layer height, computed ONCE
     # here and carried in `pre` for both contact demand (below) and the
     # honest verify gate (verify.island_birth_report) -- see
     # perception.island_births' module-level comment for why this is a
-    # necessary cross-check on local_z_minima above, not a duplicate of it.
+    # necessary cross-check on local_z_minima below, not a duplicate of it.
+    #
+    # Ordered BEFORE local_z_minima (Craig's 2026-07-24 supportive-
+    # connectivity ruling) so the single slicing pass also feeds that
+    # detector's cfg.minima_require_island_birth filter -- the model is
+    # sliced once per run, not twice.
     island_births = perception.island_births(mesh, cfg)
     log["island_births"] = len(island_births)
     log["t_island_births"] = round(time.time() - t0, 2)
+
+    # v3.6 (Craig, top priority): island-birth minima. Detected before
+    # sampling so every minimum the overhang-angle model missed (steep
+    # flanks) still ends up with a contact AT its birth region -- but
+    # filtered by the two independent passes in local_z_minima's docstring:
+    # (A) cfg.minima_drop_interior_faces drops inner-wall phantoms (needs
+    # `geom`), (B) cfg.minima_require_island_birth drops exterior surface
+    # that already rests on solid connected below.
+    minima = perception.local_z_minima(mesh, cfg, births=island_births,
+                                       geom=geom)
+    log["minima"] = len(minima)
+    log["t_minima"] = round(time.time() - t0, 2)
 
     # SPEC-V5-PERF B3 (perf_seed_spacing_factor, default OFF): multiply the
     # SEEDING target spacing by f > 1 -- fewer seeds into a smaller forest.
