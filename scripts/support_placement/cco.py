@@ -15,6 +15,8 @@ search for candidate (a).
 No RNG anywhere; every sort key is a stable tuple (index tiebreaks) so a
 re-run on the same inputs reproduces the same forest exactly.
 """
+import math
+
 import numpy as np
 from scipy.spatial import cKDTree
 
@@ -370,11 +372,14 @@ def _insert_terminal(forest, i, contacts, tip_r, carried, stub_ends, cfg,
             forest.rollback(cp)
             continue
         forest.rollback(cp)
-        # A NaN/inf/negative price would make the sort order -- hence the winner
-        # -- undefined (the baseline's key=t[0] had the same latent exposure);
-        # assert it away so the price-ordering is total and deterministic.
-        assert delta == delta and delta != float("inf") and delta >= 0.0, (
-            f"candidate price must be finite and non-negative, got {delta!r} "
+        # A NaN/inf price would make the sort order -- hence the winner --
+        # undefined (the baseline's key=t[0] had the same latent exposure);
+        # assert FINITENESS so the price-ordering is total and deterministic.
+        # (A negative delta is legitimate and meaningful: a volume-SAVING
+        # bifurcation merge prices below zero and the baseline correctly sorted
+        # it cheapest-first -- so non-negativity is NOT asserted.)
+        assert math.isfinite(delta), (
+            f"candidate price must be finite, got {delta!r} "
             "-- non-deterministic selection, crash over corruption")
         priced.append((delta, yi, build_fn))
 
@@ -383,8 +388,18 @@ def _insert_terminal(forest, i, contacts, tip_r, carried, stub_ends, cfg,
 
     priced.sort(key=lambda t: (t[0], t[1]))
 
+    # SPEC-V5-PERF B1 (perf_beam_k, default OFF): trial only the k cheapest
+    # candidates for clearance; if all k fail, the contact is honestly
+    # unrouted. Bounds worst-case trials/insertion at k (A2 alone is unbounded
+    # when many cheap candidates fail in dense canopy). Deterministic (priced
+    # is a total order). QUALITY lever: a beam-unrouted contact suppresses its
+    # island's fix-pass refinement (engine.py), so the 5.3 row must hold
+    # coverage/routed-load, not just report a lower volume.
+    beam_k = getattr(cfg, "perf_beam_k", None)
+    trial_set = priced if beam_k is None else priced[:beam_k]
+
     winner = None
-    for _delta, _yi, build_fn in priced:
+    for _delta, _yi, build_fn in trial_set:
         cp = forest.checkpoint()
         build_fn()
         violations = forest.revalidate(surface_tree, cfg)
@@ -545,6 +560,15 @@ def _model_anchor_builders(forest, i, stub_idx, se, r_i, carried_i,
                                                        sample_delicacy, cfg)
     if not candidates:
         return
+    # SPEC-V5-PERF B2 (perf_anchor_cap, default OFF): truncate the ~40-candidate
+    # anchor list (nearest-first) to `cap` before ray-exactification/builder
+    # creation -- fewer builds/prices/cast_rays/sphere_breach elements. QUALITY
+    # lever: ordering is by ORIGINAL centroid distance, so a nominally farther
+    # centroid that ray-hits a nearer surface can be the cheapest/only legal
+    # exact anchor; losing it can shift routing family (5.3 reports it).
+    anchor_cap = getattr(cfg, "perf_anchor_cap", None)
+    if anchor_cap is not None:
+        candidates = candidates[:anchor_cap]
     if geom is not None and hasattr(geom, "cast_rays"):
         ext = geom.exterior_face_mask()
         origins = np.broadcast_to(se, (len(candidates), 3))

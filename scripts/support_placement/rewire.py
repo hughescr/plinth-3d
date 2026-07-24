@@ -850,6 +850,19 @@ def optimize(forest, mesh, surface_tree, cfg, log=None):
     log = log if log is not None else {}
     t0 = time.time()
     cap_s = cfg.rewire_time_cap_s
+    # SPEC-V5-PERF B5 (perf_rewire_work_budget, default OFF): replace the
+    # nondeterministic wall-clock cap with a deterministic ACCEPT-LEVEL
+    # MOVE-EVALUATION budget (one _try_* checkpoint/build/revalidate/rollback
+    # cycle = one unit). Precondition for any scale-level bit-compare that
+    # includes rewire (sec 2.2 identity scoping): a deterministic budget makes
+    # rewire run-to-run reproducible where the wall-clock cap never was.
+    work_budget = getattr(cfg, "perf_rewire_work_budget", None)
+    move_evals = 0
+
+    def _stop_now():
+        if work_budget is not None:
+            return move_evals >= work_budget
+        return time.time() - t0 > cap_s
     plate_z = float(mesh.bounds[0][2]) - cfg.lift_mm
     # v5 (SPEC-V5-GEOM sec 2.3): model-anchor candidate pool is exterior-
     # face centroids when `surface_tree` is a surface-EXACT oracle (it is,
@@ -869,7 +882,7 @@ def optimize(forest, mesh, surface_tree, cfg, log=None):
     converged = False
 
     while True:
-        if time.time() - t0 > cap_s:
+        if _stop_now():
             cap_hit = True
             break
         sweeps += 1
@@ -882,9 +895,10 @@ def optimize(forest, mesh, surface_tree, cfg, log=None):
         order = _sweep_order(forest)
         any_accepted = False
         for kind, idx in order:
-            if time.time() - t0 > cap_s:
+            if _stop_now():
                 cap_hit = True
                 break
+            move_evals += 1   # SPEC-V5-PERF B5: one accept-level move eval
             if kind == "reattach":
                 ok, saved = _try_subtree_reattach(forest, idx, surface_tree, cfg, kdc,
                                                    plate_z, sample_points, sample_delicacy,
@@ -915,7 +929,8 @@ def optimize(forest, mesh, surface_tree, cfg, log=None):
             break  # full sweep accepted nothing
 
     log["rewire"] = dict(curve=curve, accepted=accepted, rejected=rejected,
-                          sweeps=sweeps, cap_hit=cap_hit)
+                          sweeps=sweeps, cap_hit=cap_hit, move_evals=move_evals,
+                          work_budget=work_budget)
     _assert_no_stale_braces(forest)
     return forest
 

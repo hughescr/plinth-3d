@@ -122,7 +122,19 @@ def prepare(mesh, cfg, log=None, geom=None):
     log["island_births"] = len(island_births)
     log["t_island_births"] = round(time.time() - t0, 2)
 
-    contacts = placement.sample_candidates(mesh, islands, cfg)
+    # SPEC-V5-PERF B3 (perf_seed_spacing_factor, default OFF): multiply the
+    # SEEDING target spacing by f > 1 -- fewer seeds into a smaller forest.
+    # SEEDING ONLY: the coverage gate consumes cfg.target_spacing_mm unchanged
+    # (a scaled cfg is passed only to sample_candidates via dataclasses.replace,
+    # so coverage itself never loosens). QUALITY lever: higher per-support
+    # carried load, coverage margin thins toward thresholds (5.3 measures it).
+    seed_f = getattr(cfg, "perf_seed_spacing_factor", None)
+    seed_cfg = cfg
+    if seed_f is not None:
+        import dataclasses
+        seed_cfg = dataclasses.replace(
+            cfg, target_spacing_mm=cfg.target_spacing_mm * float(seed_f))
+    contacts = placement.sample_candidates(mesh, islands, seed_cfg)
     log["contacts_initial"] = len(contacts)
     contacts, islands, n_min_added = _ensure_minima_contacts(
         mesh, islands, contacts, minima, cfg, geom=geom)
@@ -233,7 +245,10 @@ def brace_and_size(mesh, forest, unrouted, surface_tree, plate_z, cfg, log=None,
     rungs_unplaceable = 0
     n_resized_down = 0
     n_resized_up = 0
-    for it in range(3):
+    brace_iters = 3
+    if cfg.perf_fix_iter_caps is not None:      # SPEC-V5-PERF B4
+        brace_iters = int(cfg.perf_fix_iter_caps[1])
+    for it in range(brace_iters):
         iterations = it + 1
         report = transient.transient_report(forest, plate_z, cfg)
         placed = bracing.propose_and_place(forest, surface_tree, plate_z, cfg, report,
@@ -363,7 +378,14 @@ def run(mesh, cfg, log=None):
         surface_tree = routing.build_surface_tree(mesh, pitch_mm=0.3, max_points=400000)
 
     forest = members = balls = report = carried = tip_r = unrouted = None
+    # SPEC-V5-PERF B4 (perf_fix_iter_caps=(engine_passes, brace_iters), default
+    # OFF): lower the fix-pass and brace loop bounds. Can leave residual
+    # UNCOVERED ISLANDS -- a hard-gate failure, not a resin trade -- so it is
+    # gated by the mechanical emission gate on verify.ok below
+    # (perf_gate_emit_on_verify). QUALITY/coverage lever (5.3).
     max_fix_passes = 2
+    if cfg.perf_fix_iter_caps is not None:
+        max_fix_passes = int(cfg.perf_fix_iter_caps[0])
     for fix_pass in range(max_fix_passes):
         pre["contacts"] = contacts  # fix-pass additions feed back in
         with _stage(log, f"construct[p{fix_pass}]", t0):
@@ -437,6 +459,16 @@ def run(mesh, cfg, log=None):
     with _stage(log, "finish", t0):
         volume = tree.volume_report(members, balls)
     log["t_total"] = round(time.time() - t0, 2)
+    # SPEC-V5-PERF B4/P14 mechanical emission gate: a lever that can leave
+    # verify.ok False (B4's capped fix loop) must not let the pipeline emit a
+    # gate-failing layout. When perf_gate_emit_on_verify is set, refuse the run
+    # (fatal) if verify failed; default OFF keeps today's behavior (report
+    # returned, caller decides). Recorded in the log either way.
+    log["gates_failed"] = bool(report is not None and not report["ok"])
+    if getattr(cfg, "perf_gate_emit_on_verify", False) and log["gates_failed"]:
+        raise RuntimeError(
+            "GATES-FAILED: verify.ok is False and perf_gate_emit_on_verify is "
+            "set -- refusing to emit a gate-failing layout (SPEC-V5-PERF B4/P14)")
     return dict(
         islands=islands, contacts=contacts, carried_area_mm2=carried, tip_r_mm=tip_r,
         forest=forest, members=members, balls=balls, unrouted=unrouted, minima=minima,
