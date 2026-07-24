@@ -315,9 +315,14 @@ def relocate(mesh, forest, unrouted, contacts, carried, tip_r, plate_z, cfg,
         log["relocate"] = dict(skipped="no exact geom oracle")
         return log["relocate"]
     members, balls = live_member_lists(forest, unrouted, plate_z, cfg)
+    # F1 convergence: hand the driver a closure that re-reads the LIVE member/ball
+    # lists from the (mutated) forest between sweeps, so the relocation ladder runs
+    # on its own output to a fixed point instead of discarding the first pass.
+    member_list_fn = lambda: live_member_lists(forest, unrouted, plate_z, cfg)  # noqa: E731
     report = phase8_driver.run_phase8(
         forest, members, balls, contacts, carried, tip_r, plate_z, geom, cfg, mesh,
-        unrouted=unrouted, census_authority=census_authority, log=log)
+        unrouted=unrouted, census_authority=census_authority, log=log,
+        member_list_fn=member_list_fn)
     rep = dict(
         entered_ladder=report.entered_ladder, dt_s=report.dt_s,
         n_stub_sites=report.n_stub_sites, n_strut_sites=report.n_strut_sites,
@@ -327,13 +332,17 @@ def relocate(mesh, forest, unrouted, contacts, carried, tip_r, plate_z, cfg,
         strut_resolved=report.strut_resolved, strut_unresolved=report.strut_unresolved,
         ball_resolved=report.ball_resolved, ball_unresolved=report.ball_unresolved,
         n_reverted=len(report.reverted_splices), n_pockets=len(report.pocket_labels),
+        sweeps=report.sweeps, converged=report.converged,
+        committed_by_sweep=list(report.committed_by_sweep),
+        n_moot=len(report.moot_member_ids), n_ledger=len(report.provenance_ledger),
         snapshot=report.snapshot_summary)
     log["relocate"] = rep
     if report.entered_ladder:
         print(f"[v5] .. relocate sites stub={report.n_stub_sites} "
               f"strut={report.n_strut_sites} ball={report.n_ball_sites} -> "
               f"resolved stub={report.stub_resolved} strut={report.strut_resolved} "
-              f"ball={report.ball_resolved} (reverted {len(report.reverted_splices)})",
+              f"ball={report.ball_resolved} (reverted {len(report.reverted_splices)}) "
+              f"sweeps={report.sweeps} converged={report.converged}",
               file=sys.stderr, flush=True)
     return rep
 

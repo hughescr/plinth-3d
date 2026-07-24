@@ -502,6 +502,12 @@ class Phase8Report:
     pocket_labels: tuple
     dt_s: float
     entered_ladder: bool             # False => idempotent no-op (empty snapshot)
+    # ---- fix-round F1 convergence + F6 instrumentation -----------------------
+    sweeps: int = 0                  # convergence sweeps run (F1); 0 => no-op
+    converged: bool = True           # True => final sweep committed 0 splices
+    committed_by_sweep: tuple = ()   # per-sweep splice-commit count (fixed-pt trace)
+    provenance_ledger: tuple = ()    # (sweep, cls, site_id, forest_idx, disp, rung)
+    moot_member_ids: tuple = ()      # census/gate moot member idxs (report-only, F6)
 
 
 def _stub_revalidate_fn(site_by_id):
@@ -514,56 +520,43 @@ def _stub_revalidate_fn(site_by_id):
     return None
 
 
-def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
-               cfg, mesh, unrouted=(), quarantine_sites=None,
-               census_authority=frozenset(), log=None) -> Phase8Report:
-    """The Phase-8 orchestration driver (task step 1-2-3): construct sites from
-    the engine gate, run the state machines in the §3.0 normative order, and
-    splice accepted relocations back into `forest`. Idempotent by construction --
-    an empty frozen snapshot enters no ladder and mutates nothing.
+@dataclass
+class _SweepResult:
+    """One Phase 1->2->3 relocation sweep's outcome (fix-round F1). `n_committed`
+    is the number of splices that survived revalidate this sweep -- the geometry-
+    change count that drives the fixed-point / idempotence termination test."""
+    stub_resolved: int
+    stub_unresolved: int
+    qreal_resolved: int
+    qreal_unresolved: int
+    strut_resolved: int
+    strut_unresolved: int
+    ball_resolved: int
+    ball_unresolved: int
+    reverted: list
+    pocket_labels: list
+    unresolved_items: list
+    ledger_rows: list
+    n_committed: int
 
-    Phase order (§3.0, normative): the quarantine re-grade is folded into site
-    construction (Phase-0 predicate move); Phase-1 runs the stub population
-    (class-T stubs UNION Q-REAL) through the pocket solver (dense clusters) +
-    isolated ladder; Phase-2 runs the interior struts (SM-STRUT S1); Phase-3 runs
-    the ball breaches (SM-BALL B1) LAST, against the now-final shaft geometry.
-    Shaft geometry (stubs, then struts) is spliced and revalidated before the ball
-    phase reads it."""
-    t0 = time.time()
-    log = log if log is not None else {}
-    if quarantine_sites is None:
-        quarantine_sites = quarantine_sites_from_forest(forest, contacts)
 
-    di = construct_sites(forest, members, balls, contacts, carried, cfg, geom, mesh,
-                         unrouted=unrouted, quarantine_sites=quarantine_sites,
-                         census_authority=census_authority)
-    snap = di.snapshot
+def _relocation_sweep(di: DriverInput, forest, geom, cfg) -> _SweepResult:
+    """Run ONE Phase 1 (stubs+Q-REAL) -> Phase 2 (struts) -> Phase 3 (balls) pass
+    over the FROZEN sites in `di`, splicing accepted re-aims/slides into `forest`
+    under the transactional revalidate protocol. Pure single-sweep mechanics --
+    the caller (`run_phase8`) re-derives `di` from the mutated forest for the next
+    sweep, which is the F1 convergence: the ladder runs on its OWN output until a
+    sweep changes nothing (`n_committed == 0`, the true-no-op fixed point).
 
-    entered = bool(di.stub_sites or di.strut_sites or di.ball_sites)
-    if not entered:
-        # §6.10 idempotence: empty snapshot -> no ladder, no splice, no-op.
-        return Phase8Report(
-            snapshot_summary=snap.summary(), n_stub_sites=0, n_strut_sites=0,
-            n_ball_sites=0, stub_resolved=0, stub_unresolved=0, qreal_resolved=0,
-            qreal_unresolved=0, strut_resolved=0, strut_unresolved=0,
-            ball_resolved=0, ball_unresolved=0,
-            reverted_splices=(), unresolved_items=(), pocket_labels=(),
-            dt_s=round(time.time() - t0, 3), entered_ladder=False)
-
-    unresolved_items = []
-    reverted = []
-    pocket_labels = []
+    Records a per-site provenance row (F6): (cls, site_id, forest_idx, disposition,
+    rung) so the 34-member-class collateral is attributable from artifacts."""
+    unresolved_items: list = []
+    reverted: list = []
+    pocket_labels: list = []
+    ledger_rows: list = []
+    n_committed = 0
 
     # ---- Phase 1: stubs (class-T stubs UNION Q-REAL), pocket solver + isolated.
-    # Class-T stubs are LIVE emitted members -- their re-aim is spliced into the
-    # forest (the emitted-gate population §6.1 acts on). Q-REAL stubs
-    # (site_id >= Q_SITE_OFFSET) are condemned contacts EXCLUDED from emission
-    # (unrouted/quarantined), so they carry no emitted-gate violation; their
-    # ladder disposition is recorded (it feeds the §6.7 honest-failure bound and
-    # is the coverage-recovery re-insertion the acceptance run's router
-    # completes), but their geometry is NOT spliced into the live forest here --
-    # splicing an unrouted member changes nothing emitted and un-quarantining +
-    # re-routing a recovered contact is the router's job, not the driver's.
     stub_resolved = stub_unresolved = 0
     qreal_resolved = qreal_unresolved = 0
 
@@ -575,7 +568,7 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
             else:
                 qreal_unresolved += 1
                 unresolved_items.append(("STUB", mid - Q_SITE_OFFSET, rung))
-            return None                       # Q-REAL: never spliced (see above)
+            return None                       # Q-REAL: never spliced (see run_phase8)
         if resolved:
             stub_resolved += 1
             return di.site_forest_idx.get(mid)
@@ -593,14 +586,20 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
                 fi = _dispose_stub(mid, ok, mr.escalate_rung or "R2")
                 if fi is not None:
                     accepted.append((fi, mr.committed_cand.member, _orig_embed(forest, fi)))
+                ledger_rows.append(("STUB", mid, fi, "POCKET",
+                                    mr.escalate_rung or ("R1" if ok else "R2")))
         for mid, r1res in report.isolated.items():
             ok = r1res.winner is not None
             fi = _dispose_stub(mid, ok, "R2")
             if fi is not None:
                 accepted.append((fi, r1res.winner.member, _orig_embed(forest, fi)))
-        _n_ok, rv = splice_reaims(forest, geom, cfg, accepted)
+            ledger_rows.append(("STUB", mid, fi, "ISOLATED", "R1" if ok else "R2"))
+        n_ok, rv = splice_reaims(forest, geom, cfg, accepted)
+        n_committed += n_ok
         reverted.extend(("STUB", fi) for fi in rv)
         stub_resolved -= len(rv); stub_unresolved += len(rv)
+        for fi in rv:
+            ledger_rows.append(("STUB", None, fi, "REVERTED", "splice"))
 
     # ---- Phase 2: interior struts (SM-STRUT S1), spliced AFTER stubs.
     strut_resolved = strut_unresolved = 0
@@ -612,19 +611,22 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
                 fi = di.site_forest_idx.get(sid)
                 accepted.append((fi, sr.winner.member, _orig_embed(forest, fi)))
                 strut_resolved += 1
+                ledger_rows.append(("STRUT", sid, fi, "S1", "S1"))
             else:
                 strut_unresolved += 1
                 unresolved_items.append(("STRUT", sid, sr.rung))
-        _n_ok, rv = splice_reaims(forest, geom, cfg, accepted)
+                ledger_rows.append(("STRUT", sid, None, "UNRESOLVED", sr.rung))
+        n_ok, rv = splice_reaims(forest, geom, cfg, accepted)
+        n_committed += n_ok
         reverted.extend(("STRUT", fi) for fi in rv)
         strut_resolved -= len(rv); strut_unresolved += len(rv)
+        for fi in rv:
+            ledger_rows.append(("STRUT", None, fi, "REVERTED", "splice"))
 
     # ---- Phase 3: ball breaches (SM-BALL B1), LAST -- reads FINAL shaft geometry.
     ball_resolved = ball_unresolved = 0
     if di.ball_sites:
         def _slide_revalidate(site, sl):
-            # accept a slide iff translating the joint leaves the affected
-            # members legal under the §5 law (revalidate); revert-on-fail.
             delta = np.asarray(sl.center, float) - np.asarray(site.center, float)
             saved = _translate_joint(forest, np.asarray(site.center, float), delta,
                                      tol=max(0.05, 0.5 * site.r))
@@ -647,30 +649,166 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
                 viol = forest.revalidate(geom, cfg)
                 touched = {fi for fi, _s in saved}
                 if any(v["member_idx"] in touched for v in viol):
-                    # a sequential slide conflicted with an earlier commit: undo
-                    # this one (never leave a member dirty -> assert_all_certified).
                     for fi, snapm in saved:
                         forest.members[fi]._restore(snapm)
                     forest.revalidate(geom, cfg)
                     ball_unresolved += 1
                     unresolved_items.append(("BALL", bid, "B1-reverted"))
+                    ledger_rows.append(("BALL", bid, None, "REVERTED", "B1"))
                 else:
                     ball_resolved += 1
+                    n_committed += len(touched)
+                    ledger_rows.append(("BALL", bid, None, "B1", "B1"))
             else:
                 ball_unresolved += 1
                 unresolved_items.append(("BALL", bid, br.rung))
+                ledger_rows.append(("BALL", bid, None, "UNRESOLVED", br.rung))
+
+    return _SweepResult(
+        stub_resolved=stub_resolved, stub_unresolved=stub_unresolved,
+        qreal_resolved=qreal_resolved, qreal_unresolved=qreal_unresolved,
+        strut_resolved=strut_resolved, strut_unresolved=strut_unresolved,
+        ball_resolved=ball_resolved, ball_unresolved=ball_unresolved,
+        reverted=reverted, pocket_labels=pocket_labels,
+        unresolved_items=unresolved_items, ledger_rows=ledger_rows,
+        n_committed=n_committed)
+
+
+def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
+               cfg, mesh, unrouted=(), quarantine_sites=None,
+               census_authority=frozenset(), log=None,
+               member_list_fn=None) -> Phase8Report:
+    """The Phase-8 orchestration driver (task step 1-2-3): construct sites from
+    the engine gate, run the state machines in the §3.0 normative order, and
+    splice accepted relocations back into `forest`. Idempotent by construction --
+    an empty frozen snapshot enters no ladder and mutates nothing.
+
+    Phase order (§3.0, normative): the quarantine re-grade is folded into site
+    construction (Phase-0 predicate move); Phase-1 runs the stub population
+    (class-T stubs UNION Q-REAL) through the pocket solver (dense clusters) +
+    isolated ladder; Phase-2 runs the interior struts (SM-STRUT S1); Phase-3 runs
+    the ball breaches (SM-BALL B1) LAST, against the now-final shaft geometry.
+    Shaft geometry (stubs, then struts) is spliced and revalidated before the ball
+    phase reads it.
+
+    CONVERGENCE (fix-round F1): the three phases run as ONE sweep, then the sweep
+    repeats -- re-deriving the frozen defect snapshot from the MUTATED forest
+    (`member_list_fn` re-reads the live member/ball lists) -- until a sweep commits
+    ZERO splices (the true-no-op fixed point) or the defect population stops
+    strictly decreasing (monotone guard against re-aim/slide oscillation), bounded
+    by `cfg.p8_max_relocate_sweeps` (default 8). This converts the previously-
+    discarded first relocation pass into cumulative progress and makes the §6.10
+    idempotence gate real: a subsequent `run_phase8` over the fixed-point forest
+    builds the same snapshot, commits zero splices in its first sweep, and returns
+    a byte-identical no-op. Deterministic: no RNG, no wall-clock in the loop body;
+    termination is driven by integer commit / defect counts only.
+
+    `member_list_fn` (the engine passes `lambda: live_member_lists(forest, ...)`):
+    re-reads the live member + ball lists from the current forest state between
+    sweeps. When None (unit/legacy callers), the loop runs EXACTLY ONE sweep on the
+    passed-in `members`/`balls` -- byte-identical to the pre-convergence driver."""
+    t0 = time.time()
+    log = log if log is not None else {}
+    if quarantine_sites is None:
+        quarantine_sites = quarantine_sites_from_forest(forest, contacts)
+
+    max_sweeps = int(getattr(cfg, "p8_max_relocate_sweeps", 8))
+    if member_list_fn is None:
+        max_sweeps = 1                      # legacy/unit: single sweep, no re-read
+
+    # accumulators: resolved counts are CUMULATIVE across sweeps (a site resolved
+    # in sweep k is gone from sweep k+1's snapshot); unresolved counts are the
+    # FINAL sweep's remaining population. n_*_sites / snapshot_summary are frozen
+    # to the FIRST sweep (the audit record of the round's input, §3.0).
+    stub_resolved = qreal_resolved = strut_resolved = ball_resolved = 0
+    stub_unresolved = qreal_unresolved = strut_unresolved = ball_unresolved = 0
+    reverted: list = []
+    unresolved_items: list = []
+    pocket_labels: list = []
+    ledger: list = []
+    committed_by_sweep: list = []
+    first_summary = None
+    first_sites = (0, 0, 0)
+    first_moot = ()
+    entered_any = False
+    prev_defect = None
+    sweeps_run = 0
+    reached_fp = False                          # True iff a further sweep is a no-op
+
+    for _sweep in range(max_sweeps):
+        if _sweep > 0:
+            members, balls = member_list_fn()   # re-read the mutated forest
+        di = construct_sites(forest, members, balls, contacts, carried, cfg, geom,
+                             mesh, unrouted=unrouted, quarantine_sites=quarantine_sites,
+                             census_authority=census_authority)
+        if first_summary is None:
+            first_summary = di.snapshot.summary()
+            first_sites = (len(di.stub_sites), len(di.strut_sites), len(di.ball_sites))
+            first_moot = tuple(di.snapshot.moot)
+        if not (di.stub_sites or di.strut_sites or di.ball_sites):
+            reached_fp = True                   # snapshot emptied -> truly done
+            break                               # empty snapshot -> nothing left to do
+        # monotone guard: this sweep's starting defect population must be strictly
+        # below the previous sweep's, else stop (an oscillation / net-zero sweep).
+        defect = len(di.snapshot.non_exempt) + len(di.snapshot.ball_breaches)
+        if prev_defect is not None and defect >= prev_defect:
+            break
+        prev_defect = defect
+        entered_any = True
+
+        sw = _relocation_sweep(di, forest, geom, cfg)
+        sweeps_run += 1
+        committed_by_sweep.append(sw.n_committed)
+        stub_resolved += sw.stub_resolved
+        qreal_resolved += sw.qreal_resolved
+        strut_resolved += sw.strut_resolved
+        ball_resolved += sw.ball_resolved
+        stub_unresolved = sw.stub_unresolved
+        qreal_unresolved = sw.qreal_unresolved
+        strut_unresolved = sw.strut_unresolved
+        ball_unresolved = sw.ball_unresolved
+        reverted.extend(sw.reverted)
+        unresolved_items = list(sw.unresolved_items)
+        pocket_labels = sw.pocket_labels
+        for row in sw.ledger_rows:
+            ledger.append((_sweep,) + tuple(row))
+
+        if sw.n_committed == 0:
+            reached_fp = True                   # committed nothing -> fixed point
+            break                               # true no-op: fixed point reached
+
+    if not entered_any:
+        # §6.10 idempotence: empty snapshot -> no ladder, no splice, no-op.
+        return Phase8Report(
+            snapshot_summary=first_summary or {}, n_stub_sites=0, n_strut_sites=0,
+            n_ball_sites=0, stub_resolved=0, stub_unresolved=0, qreal_resolved=0,
+            qreal_unresolved=0, strut_resolved=0, strut_unresolved=0,
+            ball_resolved=0, ball_unresolved=0,
+            reverted_splices=(), unresolved_items=(), pocket_labels=(),
+            dt_s=round(time.time() - t0, 3), entered_ladder=False,
+            sweeps=0, converged=True, committed_by_sweep=(),
+            provenance_ledger=(), moot_member_ids=tuple(first_moot))
+
+    # converged iff a further sweep is provably a no-op: either the snapshot
+    # emptied or the last executed sweep committed nothing. A monotone-guard stop
+    # or a sweep-cap exhaustion leaves `reached_fp` False -- the ladder had NOT
+    # reached its fixed point, and idempotence is not claimed (reported honestly).
+    converged = reached_fp
 
     return Phase8Report(
-        snapshot_summary=snap.summary(),
-        n_stub_sites=len(di.stub_sites), n_strut_sites=len(di.strut_sites),
-        n_ball_sites=len(di.ball_sites),
+        snapshot_summary=first_summary,
+        n_stub_sites=first_sites[0], n_strut_sites=first_sites[1],
+        n_ball_sites=first_sites[2],
         stub_resolved=stub_resolved, stub_unresolved=stub_unresolved,
         qreal_resolved=qreal_resolved, qreal_unresolved=qreal_unresolved,
         strut_resolved=strut_resolved, strut_unresolved=strut_unresolved,
         ball_resolved=ball_resolved, ball_unresolved=ball_unresolved,
         reverted_splices=tuple(reverted), unresolved_items=tuple(unresolved_items),
         pocket_labels=tuple(pocket_labels),
-        dt_s=round(time.time() - t0, 3), entered_ladder=True)
+        dt_s=round(time.time() - t0, 3), entered_ladder=True,
+        sweeps=sweeps_run, converged=converged,
+        committed_by_sweep=tuple(committed_by_sweep),
+        provenance_ledger=tuple(ledger), moot_member_ids=tuple(first_moot))
 
 
 def _orig_embed(forest, fi):

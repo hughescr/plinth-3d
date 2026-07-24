@@ -239,6 +239,104 @@ def test_end_to_end_resolve_and_idempotent(cfg):
 
 
 # ==========================================================================
+# 3b. FIX-ROUND F1 (convergence loop) + F6 (provenance ledger).
+# ==========================================================================
+def test_convergence_loop_reaches_fixed_point_and_ledger(cfg):
+    """Fix-round F1: with a `member_list_fn` the driver runs the ladder as a
+    CONVERGENCE loop -- it re-reads the mutated forest between sweeps until a sweep
+    is a true no-op. On the single-transit fin fixture it resolves the stub in
+    sweep 0, then confirms an EMPTY snapshot in sweep 1 and stops, so `converged`
+    is True and the last sweep committed the one splice. F6: the report carries a
+    per-sweep provenance ledger (site-ID -> forest-idx -> disposition) so a
+    collateral regression is attributable from artifacts."""
+    geom = ExactSurface(_fin_mesh())
+    forest, contacts, carried, tip_r = _fin_forest(cfg)
+    plate_z = -5.0
+    members, balls = engine.live_member_lists(forest, [], plate_z, cfg)
+
+    def _mlf():
+        return engine.live_member_lists(forest, [], plate_z, cfg)
+
+    rep = pd.run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z,
+                        geom, cfg, _fin_mesh(), unrouted=[], member_list_fn=_mlf)
+    assert rep.entered_ladder
+    assert rep.stub_resolved == 1 and rep.stub_unresolved == 0
+    assert rep.converged is True, "loop must terminate at a provable no-op"
+    assert rep.sweeps >= 1
+    assert rep.committed_by_sweep and rep.committed_by_sweep[0] == 1
+    # F6 ledger: a resolved isolated stub row is present, sweep-tagged.
+    assert rep.provenance_ledger, "F6: ledger must be populated"
+    assert any(row[1] == "STUB" and row[4] == "ISOLATED" and row[5] == "R1"
+               for row in rep.provenance_ledger), rep.provenance_ledger
+    assert all(isinstance(row[0], int) for row in rep.provenance_ledger)
+    tree.assert_all_certified(forest)
+    # the transit is gone.
+    m1, b1 = engine.live_member_lists(forest, [], plate_z, cfg)
+    assert len(pd.classify_gate(_fin_mesh(), m1, b1, geom, cfg).firm_transit) == 0
+
+
+def test_convergence_second_call_is_byte_identical_noop(cfg):
+    """Fix-round F1 idempotence made real: after the convergence loop reaches its
+    fixed point, a SECOND `run_phase8` (with the re-read closure) builds an empty
+    snapshot, enters no ladder, and emits byte-identical geometry -- the §6.10
+    idempotence gate the round-1 verdict could not claim (a third relocate() call
+    used to keep making progress)."""
+    geom = ExactSurface(_fin_mesh())
+    forest, contacts, carried, tip_r = _fin_forest(cfg)
+    plate_z = -5.0
+
+    def _mlf():
+        return engine.live_member_lists(forest, [], plate_z, cfg)
+
+    members, balls = _mlf()
+    pd.run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z,
+                  geom, cfg, _fin_mesh(), unrouted=[], member_list_fn=_mlf)
+    m1, b1 = _mlf()
+    dig1 = p8_accept.geometry_digest(m1, b1)
+    rep2 = pd.run_phase8(forest, m1, b1, contacts, carried, tip_r, plate_z,
+                         geom, cfg, _fin_mesh(), unrouted=[], member_list_fn=_mlf)
+    assert rep2.entered_ladder is False
+    assert rep2.sweeps == 0 and rep2.converged is True
+    m2, b2 = _mlf()
+    assert p8_accept.geometry_digest(m2, b2) == dig1
+
+
+def test_convergence_loop_is_deterministic(cfg):
+    """The convergence loop keeps the binding determinism doctrine: two full
+    invocations (each with its own forest + re-read closure) emit bit-identical
+    geometry AND the same per-sweep commit trace (no RNG, no wall-clock in the
+    loop body; termination on integer counts only)."""
+    def _run():
+        geom = ExactSurface(_fin_mesh())
+        forest, contacts, carried, tip_r = _fin_forest(cfg)
+
+        def _mlf():
+            return engine.live_member_lists(forest, [], -5.0, cfg)
+
+        members, balls = _mlf()
+        rep = pd.run_phase8(forest, members, balls, contacts, carried, tip_r, -5.0,
+                            geom, cfg, _fin_mesh(), unrouted=[], member_list_fn=_mlf)
+        m, b = _mlf()
+        return p8_accept.geometry_digest(m, b), tuple(rep.committed_by_sweep)
+
+    a = _run(); b = _run()
+    assert a == b
+
+
+def test_convergence_no_member_list_fn_is_single_sweep(cfg):
+    """Back-compat: with `member_list_fn=None` (unit / legacy callers) the loop
+    runs EXACTLY ONE sweep -- no forest re-read -- so the pre-convergence driver
+    contract is preserved byte-for-byte."""
+    geom = ExactSurface(_fin_mesh())
+    forest, contacts, carried, tip_r = _fin_forest(cfg)
+    members, balls = engine.live_member_lists(forest, [], -5.0, cfg)
+    rep = pd.run_phase8(forest, members, balls, contacts, carried, tip_r, -5.0,
+                        geom, cfg, _fin_mesh(), unrouted=[])
+    assert rep.sweeps == 1
+    assert rep.stub_resolved == 1
+
+
+# ==========================================================================
 # 4. DETERMINISM: two invocations bit-identical.
 # ==========================================================================
 def test_determinism_two_invocations_bit_identical(cfg):

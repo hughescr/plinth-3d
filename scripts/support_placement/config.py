@@ -460,6 +460,14 @@ class SupportConfig:
     p8_ball_slide_step_mm: float = 0.25
     p8_ball_slide_max_mm: float = 2.0
 
+    # Fix-round F1 convergence: the relocation ladder repeats its Phase 1->2->3
+    # sweep -- re-deriving the frozen defect snapshot from the mutated forest --
+    # until a sweep commits zero splices (the true no-op fixed point) or the defect
+    # population stops strictly decreasing, bounded by this cap. Converts the
+    # previously-discarded first pass into cumulative progress and makes the §6.10
+    # idempotence gate real (a subsequent run over the fixed point is a no-op).
+    p8_max_relocate_sweeps: int = 8
+
     # Amendment-H per-candidate resin / quality guards -- part of R1/S1 LEGALITY,
     # not merely acceptance levers: a candidate that violates one is illegal at
     # selection, never merely penalized (§3.1, §8).
