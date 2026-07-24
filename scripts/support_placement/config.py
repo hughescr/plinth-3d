@@ -429,6 +429,50 @@ class SupportConfig:
     #     precondition for any scale-level bit-compare that includes rewire.
     perf_rewire_work_budget: int = None
 
+    # ---- Phase-8 relocation (SPEC-P8-RELOCATE.md §8, DRAFT+AMENDED) ----
+    # All deterministic; no RNG anywhere. Every ordering in Phase-8 is a stable
+    # sort on an explicit key with the candidate index as the final tiebreak.
+    # The moot floor PRINT_FLOOR_CHORD_MM = 0.08 lives with the SCAR-AREA-CAP
+    # normative constants in verify.py (literal-identical to the census); it is
+    # not re-declared here to keep one owner for that ratified number.
+    #
+    # SM-STUB / SM-STRUT R1 re-aim candidate grid (§3.1): a fixed cone of
+    # directions around the contact inward normal x a shortening-length ladder.
+    # polar 0 recovers the original contact normal and is emitted once; the four
+    # polar rings x eight azimuths give 25 directions, x three length factors =
+    # <=75 candidates/site. Directions outside the printability lean limit are
+    # SKIPPED, never clamped (§3.1, Open-risk #1).
+    p8_reaim_polar_deg: tuple = (0.0, 10.0, 20.0, 30.0)
+    p8_reaim_azimuth_deg: tuple = (0.0, 45.0, 90.0, 135.0, 180.0, 225.0, 270.0, 315.0)
+    p8_reaim_length_factors: tuple = (1.0, 0.75, 0.5)
+
+    # Pocket detection / conflict-graph solver (§4). World-origin-pinned voxel
+    # grid (NOT bbox-relative -- amendment F: pocket identity must be stable
+    # under sub-voxel re-aim). A pocket is a 6-connected voxel component with
+    # >= p8_pocket_min_members defect tips; corridor pad doubles as the
+    # detection halo and the density-penalty radius.
+    p8_pocket_voxel_mm: float = 6.0
+    p8_pocket_min_members: int = 8
+    p8_pocket_corridor_pad_mm: float = 0.5
+
+    # SM-BALL relocation (§3.2): 1-D deterministic minimal-slide search along the
+    # member axis, root-ward then tip-ward, taking the first clean position.
+    p8_ball_slide_step_mm: float = 0.25
+    p8_ball_slide_max_mm: float = 2.0
+
+    # Amendment-H per-candidate resin / quality guards -- part of R1/S1 LEGALITY,
+    # not merely acceptance levers: a candidate that violates one is illegal at
+    # selection, never merely penalized (§3.1, §8).
+    p8_reaim_volume_delta_max_ml: float = 0.02      # R1 per-relocation volume-delta cap
+    p8_reaim_route_growth_max_factor: float = 1.50  # R1 downstream-route growth cap
+    p8_strut_growth_max_factor: float = 1.25        # S1 no-unbounded-strut-growth cap
+
+    # Acceptance levers (§6).
+    p8_resin_delta_max: float = 0.03                # §6.6 aggregate resin backstop
+    p8_max_unresolved: int = 10                     # §6.7 honest-failure count bound
+    p8_max_unresolved_weight: float = 3.0           # §6.7 criticality-weighted bound
+    p8_chord_canon_micron: int = 1                  # §6.3 integer-micron chord canon
+
     def notes(self):
         """Flags for the caller: which constants are physics-derived vs
         rough estimates pending calibration. Surface this in run logs so a
