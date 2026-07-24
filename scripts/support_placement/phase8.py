@@ -429,12 +429,12 @@ def _batch_legal_sets(all_cands: list, site_by_id: dict, sids: list, geom, cfg, 
         per_site_count[cand.site_id] += 1
         m = cand.member
         verdict_legal = verdicts.get(j)
-        # (a) tip/foot SCAR verdict LEGAL
-        if not verdict_legal:
-            continue
-        # (b) zero NON-EXEMPT rule-4 crossings under PRINT-FLOOR (all rays)
-        nonexempt, _ = verify._transit_classify(ivmap.get(j, []), m, verdict_legal)
-        if nonexempt:
+        # (a)+(b) SCAR-AREA-CAP verdict LEGAL *and* zero NON-EXEMPT rule-4
+        # crossings under PRINT-FLOOR (all rays) -- evaluated through the ONE
+        # shared certificate the acceptance verifier also calls
+        # (verify.certify_member, defect-1 b): a candidate can never be certified
+        # legal here and flagged by the gate, nor vice-versa.
+        if not verify.certify_member(ivmap.get(j, []), m, verdict_legal)["legal"]:
             continue
         # n_moot_crossings for the score tuple (never trade a clean candidate
         # for a moot-riding one).

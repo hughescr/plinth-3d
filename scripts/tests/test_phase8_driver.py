@@ -393,3 +393,136 @@ def test_engine_relocate_stage_gated_and_idempotent(cfg):
     engine.relocate(_fin_mesh(), forest, [], contacts, carried, tip_r, -5.0, cfg,
                     geom=geom, log=log2)
     assert log2["relocate"]["entered_ladder"] is False
+
+
+# ==========================================================================
+# 6. DEFECT-1 (amendment E): re-aim keeps the FIXED model-surface anchor, and
+#    ONE shared certificate gates candidate legality AND acceptance (no
+#    divergence). SPEC-P8-RELOCATE.md sec 3.1s + defect-1 (a)/(b).
+# ==========================================================================
+def _foot_d(geom, pt):
+    """Unsigned surface distance of a point (embed-tip anchor check)."""
+    d, _ = geom.query(np.asarray([pt], float))
+    return abs(float(np.atleast_1d(d)[0]))
+
+
+def test_strut_reaim_preserves_surface_anchor_synthetic(cfg):
+    """Amendment E (defect-1a): a strut foot re-aim PIVOTS the shaft about the
+    FIXED foot anchor -- every candidate's embed tip stays coincident with the
+    on-surface foot, so its surface distance d is preserved (=0). The pre-fix
+    `c = foot + n0*contact_depth_mm` floated the anchor off the surface, so any
+    off-axis candidate dragged the foot off the model (d 0 -> >0): the exact
+    regression that turned 38 legal interior struts illegal."""
+    mesh = _box((20, 20, 5), center=(0, 0, -2.5))         # top face at z=0
+    geom = ExactSurface(mesh)
+    member = dict(p0=np.array([1.0, 0.5, 2.0]), p1=np.array([0.0, 0.0, 0.0]),
+                  r0=0.35, r1=0.35, kind="strut", owner=("contact", 0),
+                  embed_end="p1")                          # p1 == foot, ON surface
+    assert _foot_d(geom, member["p1"]) < 1e-9
+
+    site = pd.strut_site_from_member(0, member, cfg, 0.0, 0.0)
+    assert site.foot_depth_mm == 0.0                       # foot IS the anchor
+    assert _foot_d(geom, site.c) < 1e-9                    # c is ON the surface
+    assert np.allclose(site.c, member["p1"])
+
+    assert phase8.strut_candidates(site, cfg)              # cone yields candidates
+    # EVERY candidate over the full cone x length grid keeps the foot on-surface.
+    for pol, az, nh in phase8.reaim_directions(site.n0, cfg):
+        for f in cfg.p8_reaim_length_factors:
+            m = phase8.reaim_foot(site.c, nh, site.foot_depth_mm,
+                                  site.strut_length_mm * f, site.r_foot,
+                                  site.r_root, site.owner, 0.0)
+            assert np.allclose(m["p0"], member["p1"]), (pol, az, f)   # foot fixed
+            assert _foot_d(geom, m["p0"]) < 1e-9, (pol, az, f)        # d preserved
+
+
+def test_offsurface_foot_certificate_matches_acceptance(cfg):
+    """Defect-1b: an embed anchor driven OFF the surface (collapsed SCAR anchor,
+    NO through-transit interval -- the amendment-E regression class) must be
+    rejected by the SINGLE shared certificate (`verify.certify_member`) AND
+    surfaced by the INDEPENDENT acceptance verifier
+    (`clearance_report(scar_illegal_out=...)`). One source of truth, no
+    divergence: the candidate gate can never accept what acceptance flags."""
+    mesh = _box((20, 20, 5), center=(0, 0, -2.5))         # top face at z=0
+    geom = ExactSurface(mesh)
+    # foot 0.5mm ABOVE the surface -> d=0.5 > sqrt(R_b^2 - r_end^2)=0.343, anchor
+    # collapses; shaft points further up so there is NO transit interval.
+    bad = dict(p0=np.array([0.6, 0.0, 2.0]), p1=np.array([0.0, 0.0, 0.5]),
+               r0=0.35, r1=0.35, kind="strut", owner=("contact", 0),
+               embed_end="p1")
+    assert _foot_d(geom, bad["p1"]) > 0.343
+    iv = verify._batch_axis_intervals(geom, [bad], [0], rays="all")
+    vd = verify._embed_scar_verdicts(geom, [bad], [0], iv, cfg)
+    assert vd.get(0) is False                              # SCAR anchor collapsed
+    cert = verify.certify_member(iv.get(0, []), bad, vd.get(0))
+    assert cert["legal"] is False and cert["scar_ok"] is False
+    assert cert["nonexempt"] is False                      # illegal but NO transit
+    scar_out = []
+    verify.clearance_report(mesh, [bad], cfg, geom=geom, scar_illegal_out=scar_out)
+    assert [e["member_idx"] for e in scar_out] == [0]      # acceptance agrees
+    assert scar_out[0]["source"] == "scar"
+
+    # a GOOD on-surface foot: legal by BOTH, absent from the SCAR census.
+    good = dict(p0=np.array([0.6, 0.0, 2.0]), p1=np.array([0.0, 0.0, 0.0]),
+                r0=0.35, r1=0.35, kind="strut", owner=("contact", 0),
+                embed_end="p1")
+    ivg = verify._batch_axis_intervals(geom, [good], [0], rays="all")
+    vdg = verify._embed_scar_verdicts(geom, [good], [0], ivg, cfg)
+    assert vdg.get(0) is True
+    assert verify.certify_member(ivg.get(0, []), good, vdg.get(0))["legal"] is True
+    scar_out2 = []
+    verify.clearance_report(mesh, [good], cfg, geom=geom, scar_illegal_out=scar_out2)
+    assert scar_out2 == []
+
+
+def test_certify_member_is_single_source_predicate():
+    """`verify.certify_member` is the ONE legality predicate (defect-1b): SCAR
+    verdict LEGAL *and* zero non-exempt transit. A collapsed embed anchor with no
+    transit interval (verdict False, empty intervals) is illegal -- the exact
+    class the transit sweep alone (`_transit_classify` -> (False,False)) would
+    miss but the candidate gate rejects."""
+    m_embed = dict(kind="strut", embed_end="p1", p0=[0, 0, 1], p1=[0, 0, 0],
+                   r0=0.35, r1=0.35)
+    # collapsed anchor, no transit -> illegal via scar, not via transit.
+    c = verify.certify_member([], m_embed, False)
+    assert c == dict(legal=False, scar_ok=False, nonexempt=False, moot=False)
+    # legal verdict, no transit -> legal.
+    c = verify.certify_member([], m_embed, True)
+    assert c["legal"] is True and c["scar_ok"] is True
+    # no designed embed end -> scar constraint N/A, legal when no transit.
+    m_plain = dict(kind="shoot", p0=[0, 0, 1], p1=[0, 0, 0], r0=0.35, r1=0.35)
+    assert verify.certify_member([], m_plain, None)["legal"] is True
+
+
+@pytest.mark.kernel
+def test_reaim_keeps_archived_strut_feet_on_surface():
+    """Defect-1a regression on the ACTUAL members amendment E broke: interior
+    struts mi 814, 945, 1471 -- three of the 38 legal struts the round-1 run
+    drove off the model (d 0 -> 0.4-2.05mm, A_anchor collapse). Reconstructed
+    from v5e_run1.pkl (foot ON surface, d=0), a re-aim over the FULL cone x
+    length grid must keep EVERY candidate's embed tip on the surface (d
+    preserved = 0) -- the fixed anchor never moves."""
+    import pickle
+    if not (os.path.exists(_PKL) and os.path.exists(_STL)):
+        pytest.skip("archived v5e_run1.pkl / source STL not present")
+    from support_placement.geometry_kernel import KernelSurface
+    S = pickle.load(open(_PKL, "rb"))
+    kcfg = S["cfg"]
+    members = joints.collect_members(S["members"])
+    mesh = trimesh.load(_STL, file_type="stl", process=False)
+    mesh.apply_translation(-(mesh.bounds[0] + mesh.bounds[1]) / 2.0)
+    geom = KernelSurface(mesh)
+    for mi in (814, 945, 1471):
+        m = members[mi]
+        assert m["kind"] == "strut" and m.get("embed_end") == "p1"
+        assert _foot_d(geom, m["p1"]) < 1e-6              # baseline foot ON surface
+        site = pd.strut_site_from_member(mi, m, kcfg, 0.0, 0.0)
+        assert site.foot_depth_mm == 0.0
+        worst = 0.0
+        for pol, az, nh in phase8.reaim_directions(site.n0, kcfg):
+            for f in kcfg.p8_reaim_length_factors:
+                cand = phase8.reaim_foot(site.c, nh, site.foot_depth_mm,
+                                         site.strut_length_mm * f, site.r_foot,
+                                         site.r_root, site.owner, 0.0)
+                worst = max(worst, _foot_d(geom, cand["p0"]))
+        assert worst < 1e-6, (mi, worst)

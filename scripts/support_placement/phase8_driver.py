@@ -151,8 +151,21 @@ def strut_site_from_member(mi: int, member: dict, cfg, carried_mm2: float,
     else:                                   # embed p0 (defensive; not seen in T-struts)
         foot = p0; free = p1; r_foot = float(member["r0"]); r_root = float(member["r1"])
     n0 = phase8._unit(free - foot)
-    delta = float(cfg.contact_depth_mm)
-    c = foot + n0 * delta
+    # Amendment E (defect-1a): the strut foot ball CENTRE is itself the FIXED
+    # model-surface anchor -- feet are designed ON the surface (census: all 263
+    # interior struts have embed-tip surface distance d=0). The invariant contact
+    # point `c` is therefore the foot point, and the foot embed depth is 0, so a
+    # re-aim PIVOTS the shaft about the FIXED foot (every candidate's embed end is
+    # `c - n_hat*0 == foot`, unchanged) and the embed tip's signed surface
+    # distance d is preserved EXACTLY under re-aim -- verified against the mesh by
+    # the shared certificate (`verify.certify_member`) on every candidate.
+    #
+    # The OLD `c = foot + n0*contact_depth_mm` floated the anchor contact_depth_mm
+    # OFF the surface along the shaft axis, so any off-axis candidate dragged the
+    # foot off the model (d 0 -> 0.4-2.05mm, A_anchor collapse): the exact
+    # regression that turned 38 legal struts illegal in the round-1 run.
+    delta = 0.0
+    c = foot.copy()
     strut_len = float(np.linalg.norm(free - c))
     return phase8.StrutSite(
         site_id=int(mi), c=c, n0=n0, r_foot=r_foot, r_root=r_root,

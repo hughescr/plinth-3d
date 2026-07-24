@@ -218,6 +218,45 @@ def _transit_illegal(intervals, m, verdict_legal):
     return _transit_classify(intervals, m, verdict_legal)[0]
 
 
+def certify_member(intervals, member, verdict_legal, chords_out=None):
+    """SINGLE-SOURCE legality certificate for one PROPOSED member geometry
+    (SPEC-P8-RELOCATE.md defect-1 (b): "candidate legality and the acceptance
+    verifier must call the SAME certificate function -- one source of truth for
+    SCAR-AREA-CAP + PRINT-FLOOR + transit legality of a proposed member
+    geometry"). BOTH the Phase-8 per-candidate legality gate
+    (`phase8._batch_legal_sets`) and the independent acceptance verifier
+    (`_clearance_report_exact`) route their per-member legality decision through
+    THIS ONE function, so a member can never be certified legal by one path and
+    flagged illegal by the other.
+
+    Given a member's kernel penetration `intervals` (from `_batch_axis_intervals`)
+    and its axis SCAR-AREA-CAP `verdict_legal` (from `_embed_scar_verdicts`; None
+    for a member with no designed embed end), returns
+    `dict(legal, scar_ok, nonexempt, moot)`:
+
+      - `scar_ok`  : the member has NO designed embed end, OR its embed end's
+                     SCAR-AREA-CAP verdict is LEGAL. A designed embed end whose
+                     verdict is illegal (a collapsed foot/tip anchor -- the exact
+                     amendment-E regression class: d driven off the surface with
+                     no through-transit interval to otherwise catch it) is
+                     `scar_ok=False`.
+      - `nonexempt`: it has >= 1 FIRM rule-4/PRINT-FLOOR transit (see
+                     `_transit_classify`) -- an illegal SCAR verdict also demotes
+                     the tip-anchored interval to non-exempt there.
+      - `moot`     : all its rule-4 crossings are sub-floor (report-only).
+      - `legal`    : `scar_ok AND NOT nonexempt` -- the acceptance predicate a
+                     proposed member must satisfy.
+
+    `chords_out` (optional list) is passed straight through to
+    `_transit_classify` (amendment G chord-parity reporting)."""
+    has_embed = member.get("embed_end") in ("p0", "p1")
+    scar_ok = (not has_embed) or bool(verdict_legal)
+    nonexempt, moot = _transit_classify(intervals, member, verdict_legal,
+                                        chords_out=chords_out)
+    return dict(legal=bool(scar_ok and not nonexempt), scar_ok=bool(scar_ok),
+                nonexempt=bool(nonexempt), moot=bool(moot))
+
+
 def _batch_axis_intervals(geom, members, mis, rays="axis"):
     """ONE native penetration_intervals call for ALL members in `mis`
     (Amendment A7/A18); returns {member_idx: interval-list}. Batch SoA entry
@@ -348,7 +387,8 @@ def _embed_scar_verdicts(geom, members, mis, ivmap, cfg):
     return verdicts
 
 
-def _clearance_report_exact(members, cfg, geom, moot_out=None, chords_out=None):
+def _clearance_report_exact(members, cfg, geom, moot_out=None, chords_out=None,
+                            scar_illegal_out=None):
     """Independent EXACT clearance + embed/transit re-check (SPEC-V5-GEOM
     sec 2.2, SPEC-EMBED-POLICY rule 4). Deliberately NOT sharing tree.Forest's
     exact helpers -- the independence covenant (a builder bug that mis-certifies
@@ -421,10 +461,15 @@ def _clearance_report_exact(members, cfg, geom, moot_out=None, chords_out=None):
     seg_intervals = _batch_axis_intervals(geom, members, seg_iv_mi, rays="all")
     ivmap = {**stub_intervals, **seg_intervals}
 
-    # (2) SCAR-AREA-CAP embed verdicts (designed embed ends, axis ray) -- gate the
-    # rule-4 tip exemption. Only members with intervals need a verdict (a member
-    # with no tip-anchored interval is flagged, or not, independent of it).
-    verdicts = _embed_scar_verdicts(geom, members, list(ivmap.keys()), ivmap, cfg)
+    # (2) SCAR-AREA-CAP embed verdicts -- gate the rule-4 tip exemption. Computed
+    # over EVERY designed embed end with real length (not only those with a
+    # penetration interval), so a collapsed embed anchor with NO through-transit
+    # interval (the amendment-E regression: a foot driven off the surface, d>0,
+    # T=0) is still certified -- surfaced via `scar_illegal_out` below. Members
+    # without an interval contribute an empty interval list (ivmap.get default).
+    embed_verdict_mi = [mi for mi, m in enumerate(members)
+                        if m.get("embed_end") in ("p0", "p1") and _len(mi) >= 1e-9]
+    verdicts = _embed_scar_verdicts(geom, members, embed_verdict_mi, ivmap, cfg)
 
     # (3) non-stub swept-capsule DISTANCE re-check (segment_clearance), masking
     # each member's OWN designed embed zone with the _embed_inset_arc_exact
@@ -451,16 +496,23 @@ def _clearance_report_exact(members, cfg, geom, moot_out=None, chords_out=None):
     # into NON-EXEMPT (hard gate -> `out`) and MOOT (all crossings' chords <
     # PRINT_FLOOR_CHORD_MM -> `moot_out`, report-only, never gates). A distance
     # collision (worst < 0) is a hard violation regardless of the transit class.
+    # The per-member legality decision goes through the SINGLE shared certificate
+    # (`certify_member`) the Phase-8 candidate gate also calls -- one source of
+    # truth for SCAR + PRINT-FLOOR + transit (defect-1 b). The hard gate keys on
+    # `nonexempt` exactly as before; `scar_illegal_out` (opt-in, report-only)
+    # additionally surfaces a member whose designed embed anchor is SCAR-illegal
+    # yet leaves no through-transit interval -- the divergence class the candidate
+    # gate rejects (via certify_member.legal) but the transit sweep alone missed.
     for mi in stub_iv_mi:
         chords = [] if chords_out is not None else None
-        nonexempt, moot = _transit_classify(ivmap[mi], members[mi], verdicts.get(mi),
-                                            chords_out=chords)
+        cert = certify_member(ivmap[mi], members[mi], verdicts.get(mi),
+                              chords_out=chords)
         if chords:
             chords_out[mi] = chords
-        if nonexempt:
+        if cert["nonexempt"]:
             out.append(dict(member_idx=mi, kind="stub", min_clearance_mm=0.0,
                             at_point=None, source="transit"))
-        elif moot and moot_out is not None:
+        elif cert["moot"] and moot_out is not None:
             moot_out.append(dict(member_idx=mi, kind="stub", source="transit"))
     for mi in seg_mi:
         m = members[mi]
@@ -472,15 +524,25 @@ def _clearance_report_exact(members, cfg, geom, moot_out=None, chords_out=None):
                             source="distance"))
         elif mi in ivmap:
             chords = [] if chords_out is not None else None
-            nonexempt, moot = _transit_classify(ivmap[mi], m, verdicts.get(mi),
-                                                chords_out=chords)
+            cert = certify_member(ivmap[mi], m, verdicts.get(mi), chords_out=chords)
             if chords:
                 chords_out[mi] = chords
-            if nonexempt:
+            if cert["nonexempt"]:
                 out.append(dict(member_idx=mi, kind=m["kind"], min_clearance_mm=worst,
                                 at_point=None, source="transit"))
-            elif moot and moot_out is not None:
+            elif cert["moot"] and moot_out is not None:
                 moot_out.append(dict(member_idx=mi, kind=m["kind"], source="transit"))
+    # (5) report-only SCAR-standalone census (defect-1 b): every designed embed
+    # end whose SCAR-AREA-CAP verdict is illegal, INCLUDING the anchors with no
+    # through-transit interval the loops above cannot reach. Never gates here (the
+    # baseline carries a grandfathered set); the Phase-8 acceptance harness diffs
+    # it against the baseline to enforce "no legal-embed regression".
+    if scar_illegal_out is not None:
+        for mi in embed_verdict_mi:
+            if verdicts.get(mi) is False:
+                scar_illegal_out.append(dict(member_idx=mi, kind=members[mi]["kind"],
+                                             embed_end=members[mi].get("embed_end"),
+                                             source="scar"))
     return out
 
 
@@ -536,7 +598,8 @@ def ball_breach_report(geom, members, balls, cfg, eps_mm=0.05):
 
 
 def clearance_report(mesh, members, cfg, surface_tree=None, geom=None,
-                     moot_transit_out=None, transit_chords_out=None):
+                     moot_transit_out=None, transit_chords_out=None,
+                     scar_illegal_out=None):
     """v4/v5: independent full-envelope clearance re-check over the FINAL
     member list. Deliberately does not reuse tree.Forest.revalidate's
     certificate bookkeeping (a builder bug that mis-certifies a member
@@ -593,6 +656,14 @@ def clearance_report(mesh, members, cfg, surface_tree=None, geom=None,
     every member with >=1 counted rule-4 crossing (see
     `_clearance_report_exact`'s docstring). The sampled/legacy path leaves it
     untouched (empty), same fallback contract as `moot_transit_out`.
+
+    `scar_illegal_out` (defect-1 b): if a list is passed, the exact path appends
+    a `{member_idx, kind, embed_end, source="scar"}` entry for every designed
+    embed end whose SCAR-AREA-CAP verdict is illegal -- INCLUDING collapsed
+    anchors with no through-transit interval the hard gate cannot reach. Report-
+    only (never part of the returned hard-gate list); the Phase-8 acceptance
+    harness diffs it against the baseline for "no legal-embed regression". Same
+    exact-path-only fallback contract as `moot_transit_out`.
     """
     members = joints.collect_members(members)
     out = []
@@ -603,7 +674,8 @@ def clearance_report(mesh, members, cfg, surface_tree=None, geom=None,
     # sampled path below.
     if geom is not None and hasattr(geom, "segment_clearance"):
         return _clearance_report_exact(members, cfg, geom, moot_out=moot_transit_out,
-                                       chords_out=transit_chords_out)
+                                       chords_out=transit_chords_out,
+                                       scar_illegal_out=scar_illegal_out)
     pitch_bound_mm = (routing.surface_tree_pitch_bound_mm(
         surface_tree, percentile=cfg.surface_pitch_bound_percentile)
         if surface_tree is not None else 0.0)
