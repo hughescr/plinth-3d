@@ -57,13 +57,13 @@ print(f"  source=ball                          = {len(ball_only)}")
 print(f"  source=endcap                        = {len(endcap_only)}")
 print(f"  source=other (unexpected)             = {len(other)}")
 print(f"self_verify ball_breach_violations      = {len(rep['ball_breach_violations'])}")
-print(f"self_verify embed_end_breach_violations = {len(rep['embed_end_breach_violations'])}")
+print(f"self_verify endcap_breach_diagnostic = {len(rep['endcap_breach_diagnostic'])}")
 print(f"census n_breaching_balls (same forest, {os.path.basename(census_json)}) = {census_n}")
 
 ok = True
 if len(ball_only) != len(rep["ball_breach_violations"]):
     print("MISMATCH: module-level ball-only filter != self_verify's gated list"); ok = False
-if len(endcap_only) != len(rep["embed_end_breach_violations"]):
+if len(endcap_only) != len(rep["endcap_breach_diagnostic"]):
     print("MISMATCH: module-level endcap-only filter != self_verify's report-only list"); ok = False
 if other:
     print(f"UNEXPECTED: {len(other)} entries with neither source=ball nor source=endcap"); ok = False

@@ -33,6 +33,13 @@ KAPPA = 1.25           # headroom multiplier on the designed crossing disc
 L_SCAR_MAX_MM = 2.5    # max scar patch dimension
 EPS_COS = 1e-9         # divide-by-zero guard only; NOT a physics floor
 TOL_MM = 0.05          # interval anchoring / detection tolerance
+PRINT_FLOOR_CHORD_MM = 0.08  # PRINT-FLOOR moot threshold (OWNER RATIFIED
+                       # 2026-07-24): a rule-4 unanchored transit whose antipodal
+                       # crossing chord (feature_thickness_mm, entry-to-exit along
+                       # the offending ray) is < this floor is MOOT -- a foliage
+                       # knife-edge that cannot print as coherent material. A
+                       # member is exempt iff ALL its rule-4 crossings are moot;
+                       # the hard gate fails only on the non-exempt population.
 BALL_FACTOR_STUB = 1.5  # contact-stub tips (config.py tip_ball_r_factor)
 BALL_FACTOR_FOOT = 1.4  # strut/rung feet (joints.py MODEL_FOOT_FACTOR)
 
@@ -219,11 +226,18 @@ print("PASS C2: %d designed embed ends, %d SCAR-AREA-CAP illegal t=%.1fs" %
       (n_embed_ends, n_embed_illegal, time.time() - t0), flush=True)
 
 # ---------------- PASS C3: aggregate illegal crossings/members ----------------
-# Crossing topology (spec rule 4, unchanged): only the tip-anchored interval is
+# Crossing topology (spec rule 4): only the tip-anchored interval is
 # exempt-eligible. A LEGAL embed-end verdict exempts it ENTIRELY (no depth cap
 # -- idempotent union, per the owner's ruling); an ILLEGAL verdict flags its
 # full raw length. Any other interval (mid-span graze, re-entry, capsule-edge
-# crossing) is always a transit and always illegal, regardless of size.
+# crossing) is always a transit, subject to the PRINT-FLOOR moot downgrade.
+# PRINT-FLOOR amendment (OWNER RATIFIED 2026-07-24): a rule-4 UNANCHORED transit
+# whose antipodal crossing chord (feature_thickness_mm = feat) is <
+# PRINT_FLOOR_CHORD_MM is MOOT (still counted + reported, never gates). A member
+# is exempt (moot) iff ALL its rule-4 crossings are moot; non-exempt iff it has
+# >=1 FIRM crossing (an unanchored transit with feat >= floor, or a SCAR-illegal
+# tip interval -- a rules-1-3 failure, never moot-eligible). The hard gate fails
+# only on the non-exempt population.
 crossings = []; per_member = {}
 for r in rec:
     ivs = r["ivs"]
@@ -246,10 +260,17 @@ for r in rec:
         agg = per_member.setdefault(r["mi"], dict(
             mi=r["mi"], kind=kind, embed=embed, owner=own(r["owner"]),
             illegal=False, through=False, axis_transit=False,
-            max_transit=0.0, max_depth=0.0, min_feat=None, n_iv=0, worst=None, zmax=-1e9))
+            max_transit=0.0, max_depth=0.0, min_feat=None, n_iv=0, worst=None, zmax=-1e9,
+            all_moot=True, n_moot_iv=0))
         if ill_len <= MIN_ILLEGAL_LEN:
             continue
+        # PRINT-FLOOR: a rule-4 UNANCHORED transit with chord (feat) < floor is
+        # moot; a SCAR-illegal tip interval (tip_anchored, verdict illegal) is a
+        # rules-1-3 failure -- firm, never moot-eligible.
+        moot = (not tip_anchored) and (feat < PRINT_FLOOR_CHORD_MM)
         agg["illegal"] = True; agg["n_iv"] += 1
+        agg["all_moot"] = agg["all_moot"] and moot
+        if moot: agg["n_moot_iv"] += 1
         if through: agg["through"] = True
         if r["label"] == "axis": agg["axis_transit"] = True
         transit = bb - aa
@@ -265,12 +286,15 @@ for r in rec:
                   transit_len_mm=round(float(transit), 4), illegal_len_mm=round(float(ill_len), 4),
                   feature_thickness_mm=round(float(feat), 4), penetration_depth_mm=round(float(depth), 4),
                   z=round(float(loc[2]), 3), embed_zone=zone, scar_on_removal=through,
-                  embed_verdict=(verdict if tip_anchored else None))
+                  moot=bool(moot), embed_verdict=(verdict if tip_anchored else None))
         crossings.append(cd)
         if agg["worst"] is None or transit > agg["worst"][0]:
             agg["worst"] = (transit, cd)
-print("PASS C3: %d illegal crossings, %d illegal members t=%.1fs" %
-      (len(crossings), sum(1 for a in per_member.values() if a["illegal"]), time.time() - t0), flush=True)
+_ill = [a for a in per_member.values() if a["illegal"]]
+print("PASS C3: %d illegal crossings, %d illegal members "
+      "(%d non-exempt, %d moot) t=%.1fs" %
+      (len(crossings), len(_ill), sum(1 for a in _ill if not a["all_moot"]),
+       sum(1 for a in _ill if a["all_moot"]), time.time() - t0), flush=True)
 
 # ---------------- BALLS: through-thin-feature breach ----------------
 # Almost every ball whose sphere reaches the surface is a DESIGNED model-anchor
@@ -361,6 +385,13 @@ def hist(vals, edges):
 illegal = ill_members
 n_illegal = len(illegal); n_through = sum(1 for a in illegal if a["through"])
 n_axis = sum(1 for a in illegal if a["axis_transit"])
+# PRINT-FLOOR partition (OWNER RATIFIED 2026-07-24): a member is MOOT (exempt)
+# iff ALL its rule-4 crossings are moot (chord < PRINT_FLOOR_CHORD_MM); non-exempt
+# otherwise. The hard gate fails only on the non-exempt population; the moot
+# bucket is counted + reported for auditability, never gates.
+moot_members = [a for a in illegal if a["all_moot"]]
+non_exempt_members = [a for a in illegal if not a["all_moot"]]
+n_moot = len(moot_members); n_non_exempt = len(non_exempt_members)
 by_kind = Counter(a["kind"] for a in illegal); by_kind_through = Counter(a["kind"] for a in illegal if a["through"])
 crown = [a for a in illegal if a["zmax"] > CROWN_Z]; crown_balls = [b for b in ball_records if b["z"] > CROWN_Z]
 depth_edges = [0, 0.5, 1, 2, 4, 8, 1e9]; thick_edges = [0, 0.3, 0.5, 1, 2, 4, 1e9]
@@ -368,6 +399,8 @@ worst10 = illegal[:10]
 summary = dict(
     n_members_total=len(members), n_balls_total=len(balls),
     n_illegal_members=n_illegal, n_through_and_through=n_through,
+    n_non_exempt_members=n_non_exempt, n_moot_transit_members=n_moot,
+    n_moot_transit_crossings=sum(1 for c in crossings if c["moot"]),
     n_axis_centerline_transit=n_axis, n_capsule_clip_only=n_illegal - n_axis,
     n_illegal_crossings=len(crossings),
     illegal_by_kind=dict(by_kind), through_by_kind=dict(by_kind_through),
@@ -387,7 +420,8 @@ summary = dict(
     embed_policy="SCAR-AREA-CAP (SPEC-EMBED-POLICY.md, panel ruling cd989fe)",
     n_designed_embed_ends=n_embed_ends, n_embed_ends_illegal=n_embed_illegal,
     embed_policy_constants=dict(A_ABS_MM2=A_ABS_MM2, KAPPA=KAPPA, L_SCAR_MAX_MM=L_SCAR_MAX_MM,
-                                 TOL_MM=TOL_MM, BALL_FACTOR_STUB=BALL_FACTOR_STUB,
+                                 TOL_MM=TOL_MM, PRINT_FLOOR_CHORD_MM=PRINT_FLOOR_CHORD_MM,
+                                 BALL_FACTOR_STUB=BALL_FACTOR_STUB,
                                  BALL_FACTOR_FOOT=BALL_FACTOR_FOOT),
     min_illegal_len_mm=MIN_ILLEGAL_LEN, ball_eps_mm=BALL_EPS,
     crosscheck_heavy9ray_agreement=agree,
@@ -402,6 +436,8 @@ worst10m = [dict(member_idx=a["mi"], kind=a["kind"], embed_end=a["embed"], owner
                  worst_location=a["worst"][1]["location"], z=a["worst"][1]["z"]) for a in worst10]
 out = dict(summary=summary, worst10_members=worst10m,
            worst10_balls=sorted(ball_records, key=lambda b: -b["poke_out_mm"])[:10],
+           moot_transit_members=sorted(a["mi"] for a in moot_members),
+           non_exempt_members=sorted(a["mi"] for a in non_exempt_members),
            illegal_crossings=crossings, breaching_balls=ball_records)
 json.dump(out, open(os.path.join(AUDIT, "penetration_census.json"), "w"), indent=1)
 json.dump(dict(summary=summary, worst10_members=worst10m, worst10_balls=out["worst10_balls"]),

@@ -7,7 +7,7 @@ pass DETECTED but never WIRED (see SPEC-V5-GEOM sec 2.2/2.1, test plan 6.1/6.2):
      gate is satisfiable. (R3, 2026-07-23: the gate's SCOPE is pinned to the
      census's own antipodal-span reference -- actual joint balls only. A
      synthesized embedded end-cap sphere breach is still detected and
-     reported (embed_end_breach_violations) but is report-only, not gating
+     reported (endcap_breach_diagnostic) but is report-only, not gating
      -- see the R3 test block below for why.)
   2. Stub through-transit: BOTH independent clearance implementations
      (tree.Forest.revalidate AND verify.clearance_report) must flag a stub whose
@@ -122,7 +122,7 @@ def test_ball_breach_report_synthesizes_endcap_for_ball_less_embed(cfg):
 # and its `ball_breach_violations` key are restricted to actual joint balls
 # (the census's own reference antipodal-span scope); the embedded end-cap
 # check (amendment 5, tests above) is NOT deleted -- still computed, still
-# surfaced -- but moves to a report-only `embed_end_breach_violations` key
+# surfaced -- but moves to a report-only `endcap_breach_diagnostic` key
 # that never gates `ok`. Regression sites: the real Weeping Treant forest
 # (docs/artifacts/audit-2026-07/acceptance-run-2026-07-23) had
 # ball_breach_report return 199 (15 ball + 184 endcap); the independent
@@ -137,7 +137,7 @@ def test_self_verify_does_not_gate_on_endcap_breach(cfg):
     passes by construction, isolating the ball-gate behaviour under test)
     must NOT fail `ok` -- it is a report-only diagnostic under R3, not the
     ball gate's namesake. It must also not be silently dropped: it still
-    shows up, under embed_end_breach_violations."""
+    shows up, under endcap_breach_diagnostic."""
     fin = _box((6, 6, 0.3))                         # z in [-0.15, 0.15]
     geom = ExactSurface(fin)
     stree = routing.build_surface_tree(fin)
@@ -146,8 +146,8 @@ def test_self_verify_does_not_gate_on_endcap_breach(cfg):
     rep = verify.self_verify(fin, [], [], [strut], np.array([]), np.array([]),
                              cfg, 3.0, geom=geom, balls=[], surface_tree=stree)
     assert rep["ball_breach_violations"] == []
-    assert len(rep["embed_end_breach_violations"]) == 1
-    assert rep["embed_end_breach_violations"][0]["source"] == "endcap"
+    assert len(rep["endcap_breach_diagnostic"]) == 1
+    assert rep["endcap_breach_diagnostic"][0]["source"] == "endcap"
     assert rep["connectivity_violations"] == [] and rep["clearance_violations"] == []
     assert rep["ok"] is True                        # endcap alone does not gate
 
@@ -170,8 +170,8 @@ def test_self_verify_ball_gate_mixed_attributes_failure_to_true_breach_only(cfg)
                              cfg, 3.0, geom=geom, balls=balls, surface_tree=stree)
     assert len(rep["ball_breach_violations"]) == 1
     assert rep["ball_breach_violations"][0]["source"] == "ball"
-    assert len(rep["embed_end_breach_violations"]) == 1
-    assert rep["embed_end_breach_violations"][0]["source"] == "endcap"
+    assert len(rep["endcap_breach_diagnostic"]) == 1
+    assert rep["endcap_breach_diagnostic"][0]["source"] == "endcap"
     assert rep["ok"] is False
 
     # Turning gate_on_ball_breach off drops the TRUE breach's contribution
@@ -181,7 +181,7 @@ def test_self_verify_ball_gate_mixed_attributes_failure_to_true_breach_only(cfg)
                                  cfg, 3.0, geom=geom, balls=balls, surface_tree=stree,
                                  gate_on_ball_breach=False)
     assert len(rep_off["ball_breach_violations"]) == 1
-    assert len(rep_off["embed_end_breach_violations"]) == 1
+    assert len(rep_off["endcap_breach_diagnostic"]) == 1
     assert rep_off["ok"] is True
 
 
@@ -557,3 +557,147 @@ def test_scar_area_cap_large_designed_foot_legal_via_kappa():
     assert met["A_patch"] > 2.0                                  # over the flat cap
     assert met["A_patch"] <= met["A_max"]                        # but under KAPPA cap
     assert legal is True
+
+
+# ==========================================================================
+# PRINT-FLOOR amendment (SPEC-EMBED-POLICY.md, OWNER RATIFIED 2026-07-24):
+# a rule-4 UNANCHORED transit whose antipodal crossing chord
+# (feature_thickness_mm = the straight-ray interval length s_b - s_a) is <
+# PRINT_FLOOR_CHORD_MM (0.08mm) is downgraded from illegal to MOOT -- a
+# foliage knife-edge that cannot print as coherent material. A member is
+# EXEMPT (moot) iff ALL its rule-4 crossings are moot; NON-EXEMPT iff it has
+# >=1 firm crossing (chord >= floor, or a SCAR-illegal tip). The hard gate
+# fails ONLY on the non-exempt population; the moot bucket is reported
+# separately and never gates `ok`. Predicate pins on verify._transit_classify
+# / _transit_illegal plus end-to-end pins through clearance_report / self_verify.
+# ==========================================================================
+def test_printfloor_constant_pinned():
+    """The moot threshold is pinned literal-identical to the census (a 20um
+    guard band above the 0.0502mm archived-geometry population minimum)."""
+    assert verify.PRINT_FLOOR_CHORD_MM == 0.08
+
+
+def test_printfloor_firm_plus_small_crossing_is_nonexempt():
+    """SITE-DERIVED (task fixture): a member with one 0.25mm-chord crossing AND
+    one 0.05mm crossing is NON-EXEMPT -- the 0.25mm firm transit (>= 0.08 floor)
+    makes the member fail the hard gate no matter how thin the other crossing is.
+    The 0.05mm sliver is at/below MIN_ILLEGAL_LEN and moot either way; it never
+    rescues a member that also has a firm crossing."""
+    stub = _m([0, 0, -0.3], [0, 0, 2.5], 0.2, 0.35, "stub", ("contact", 0),
+              embed_end="p0")
+    ivs = [dict(s_a=0.0, s_b=0.30, entered=False, exited=True,
+                max_depth_mm=0.3, ray="axis"),               # tip-anchored (exempt)
+           dict(s_a=1.00, s_b=1.25, entered=True, exited=True,
+                max_depth_mm=0.10, ray="axis"),              # 0.25mm FIRM transit
+           dict(s_a=2.00, s_b=2.05, entered=True, exited=True,
+                max_depth_mm=0.02, ray="axis")]              # 0.05mm sliver
+    nonexempt, moot = verify._transit_classify(ivs, stub, True)
+    assert nonexempt is True and moot is False
+    assert verify._transit_illegal(ivs, stub, True) is True   # hard-gate predicate
+
+
+def test_printfloor_all_crossings_below_floor_is_moot():
+    """SITE-DERIVED (task fixture): a member whose EVERY rule-4 crossing is a
+    sub-0.08mm knife-edge (0.06mm + 0.07mm) is MOOT -- exempt from the hard gate,
+    but STILL reported (has_illegal, so `moot` is True, not (False, False))."""
+    stub = _m([0, 0, -0.3], [0, 0, 2.5], 0.2, 0.35, "stub", ("contact", 0),
+              embed_end="p0")
+    ivs = [dict(s_a=0.0, s_b=0.30, entered=False, exited=True,
+                max_depth_mm=0.3, ray="axis"),               # tip-anchored (exempt)
+           dict(s_a=1.00, s_b=1.06, entered=True, exited=True,
+                max_depth_mm=0.03, ray="axis"),              # 0.06mm moot
+           dict(s_a=1.60, s_b=1.67, entered=True, exited=True,
+                max_depth_mm=0.03, ray="axis")]              # 0.07mm moot
+    nonexempt, moot = verify._transit_classify(ivs, stub, True)
+    assert nonexempt is False and moot is True
+    assert verify._transit_illegal(ivs, stub, True) is False  # not a hard violation
+
+
+def test_printfloor_chord_at_floor_is_firm_not_moot():
+    """Boundary pin: a crossing chord EXACTLY at the floor (0.08mm) is FIRM
+    (moot requires chord STRICTLY < floor) -> non-exempt. Guards the comparison
+    direction so a future `<=` typo is caught."""
+    stub = _m([0, 0, -0.3], [0, 0, 2.5], 0.2, 0.35, "stub", ("contact", 0),
+              embed_end="p0")
+    ivs = [dict(s_a=1.00, s_b=1.08, entered=True, exited=True,
+                max_depth_mm=0.04, ray="axis")]              # chord 0.08 == floor
+    nonexempt, moot = verify._transit_classify(ivs, stub, True)
+    assert nonexempt is True and moot is False
+
+
+def test_printfloor_scar_illegal_tip_never_moot():
+    """A SCAR-illegal tip interval is a rules-1-3 failure, NOT a rule-4 transit --
+    it is never moot-eligible even when its chord is sub-floor. Same thin tip
+    interval, verdict legal -> exempt (no illegal crossing); verdict ILLEGAL ->
+    firm non-exempt (the tip is flagged), regardless of the 0.06mm chord."""
+    stub = _m([0, 0, -0.3], [0, 0, 2.5], 0.2, 0.35, "stub", ("contact", 0),
+              embed_end="p0")
+    tip_thin = [dict(s_a=0.0, s_b=0.06, entered=False, exited=True,
+                     max_depth_mm=0.06, ray="axis")]         # tip-anchored, chord 0.06
+    assert verify._transit_classify(tip_thin, stub, True) == (False, False)   # legal -> exempt
+    nonexempt, moot = verify._transit_classify(tip_thin, stub, False)         # verdict ILLEGAL
+    assert nonexempt is True and moot is False
+
+
+def _fin_stub():
+    """A stub tip-embedded 0.3mm in the slab (sanctioned embed) whose shaft
+    welds THROUGH a thin floating fin above it -- the fin crossing is the only
+    unanchored rule-4 transit, so its chord alone decides moot vs firm."""
+    return dict(p0=np.array([0.0, 0.0, -0.3]), p1=np.array([0.0, 0.0, 2.5]),
+                r0=0.2, r1=0.35, kind="stub", owner=("contact", 0), embed_end="p0")
+
+
+def _fin_mesh(fin_z):
+    slab = _box((20, 20, 5), center=(0, 0, -2.5))              # top face z=0
+    fin = _box((10, 10, fin_z), center=(0, 0, 1.0 + fin_z / 2))  # z in [1.0, 1.0+fin_z]
+    return _soup(slab, fin)
+
+
+def test_printfloor_moot_transit_surfaced_not_gated_end_to_end(cfg):
+    """SITE-DERIVED end-to-end (the census through-transit stub class at a
+    knife-edge fin): a stub welding through a 0.06mm fin above its sanctioned
+    embed produces a rule-4 transit of chord 0.06 < floor. clearance_report's
+    hard-gate list is EMPTY and the member surfaces in the moot bucket; the
+    0.12mm-fin counterpart (chord 0.12 >= floor) is a FIRM hard violation with
+    an empty moot bucket. Same geometry, only the fin thickness differs."""
+    geom = ExactSurface(_fin_mesh(0.06))
+    moot_out = []
+    rep = verify.clearance_report(None, [_fin_stub()], cfg, geom=geom,
+                                  moot_transit_out=moot_out)
+    assert rep == []                                          # not a hard violation
+    assert [v["member_idx"] for v in moot_out] == [0]         # reported as moot
+    assert moot_out[0]["kind"] == "stub"
+
+    geom2 = ExactSurface(_fin_mesh(0.12))
+    moot2 = []
+    rep2 = verify.clearance_report(None, [_fin_stub()], cfg, geom=geom2,
+                                   moot_transit_out=moot2)
+    assert [v["member_idx"] for v in rep2] == [0]             # firm hard violation
+    assert moot2 == []                                        # nothing moot
+
+
+def test_printfloor_self_verify_gate_ok_semantics(cfg):
+    """self_verify gate-ok semantics: a moot-only transit (0.06mm fin) does NOT
+    flip `ok` and lands in `moot_transit_members`; the firm counterpart (0.12mm
+    fin) drives `ok` False via clearance_violations with an empty moot bucket.
+    plate_z placed at the stub's free end (p1) and a surface_tree supplied so
+    connectivity passes by construction, isolating the clearance gate under
+    test (the only gate that changes with fin thickness)."""
+    m1 = _fin_mesh(0.06)
+    geom = ExactSurface(m1); st1 = routing.build_surface_tree(m1)
+    rep = verify.self_verify(m1, [], [], [_fin_stub()],
+                             np.array([]), np.array([]), cfg, 2.5,
+                             geom=geom, surface_tree=st1)
+    assert rep["clearance_violations"] == []
+    assert [v["member_idx"] for v in rep["moot_transit_members"]] == [0]
+    assert rep["connectivity_violations"] == []
+    assert rep["ok"] is True                                  # moot never gates
+
+    m2 = _fin_mesh(0.12)
+    geom2 = ExactSurface(m2); st2 = routing.build_surface_tree(m2)
+    rep2 = verify.self_verify(m2, [], [], [_fin_stub()],
+                              np.array([]), np.array([]), cfg, 2.5,
+                              geom=geom2, surface_tree=st2)
+    assert [v["member_idx"] for v in rep2["clearance_violations"]] == [0]
+    assert rep2["moot_transit_members"] == []
+    assert rep2["ok"] is False                                # firm transit gates

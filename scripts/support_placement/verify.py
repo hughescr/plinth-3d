@@ -35,6 +35,14 @@ L_SCAR_MAX_MM = 2.5      # max scar patch dimension
 EPS_COS = 1e-9           # divide-by-zero guard only; NOT a physics floor
 TOL_MM = 0.05            # interval anchoring / detection tolerance
 MIN_ILLEGAL_LEN_MM = 0.05  # census MIN_ILLEGAL_LEN: a longer solid run is a transit
+PRINT_FLOOR_CHORD_MM = 0.08  # PRINT-FLOOR moot threshold (SPEC-EMBED-POLICY,
+                         # OWNER RATIFIED 2026-07-24): a rule-4 unanchored transit
+                         # whose antipodal crossing chord (feature_thickness_mm,
+                         # entry-to-exit along the offending ray) is < this floor
+                         # is MOOT -- a foliage knife-edge that cannot print as
+                         # coherent material. A member is exempt iff ALL its rule-4
+                         # crossings are moot; the hard gate fails only on the
+                         # non-exempt population. Literal-identical to census.
 BALL_FACTOR_STUB = 1.5   # contact-stub tips  (config.tip_ball_r_factor)
 BALL_FACTOR_FOOT = 1.4   # strut / model-rung feet  (joints.MODEL_FOOT_FACTOR)
 
@@ -118,17 +126,32 @@ def _tip_iv_index(ivs, ray_seg, embed, tol=TOL_MM):
     return None
 
 
-def _transit_illegal(intervals, m, verdict_legal):
-    """SPEC-EMBED-POLICY rule 4 (through-transit) -- True iff the member has an
-    inside-the-solid run longer than MIN_ILLEGAL_LEN_MM that is NOT the
-    sanctioned tip-anchored exemption. ONLY the tip-anchored interval of a
-    designed embed end is exempt-eligible, and ONLY when its SCAR-AREA-CAP
-    verdict is LEGAL; an illegal verdict flags its full raw length, and EVERY
-    unanchored interval (mid-span graze, re-entry after the tip interval exits,
-    capsule-edge crossing) is a transit and illegal regardless of its size. A
-    parity-crossing test on exact boundaries -- never a distance test -- so an
-    ordinary surface-hugging stub cannot false-positive. Independent verify-side
-    copy of census PASS C3 (shares only geom's generic primitives).
+def _transit_classify(intervals, m, verdict_legal):
+    """SPEC-EMBED-POLICY rule 4 (through-transit) with the PRINT-FLOOR amendment
+    (OWNER RATIFIED 2026-07-24). Classifies a member's inside-the-solid runs and
+    returns `(nonexempt, moot)`:
+
+      - `nonexempt` is True iff the member has at least one FIRM illegal crossing
+        -- a rule-4 unanchored transit whose antipodal crossing chord
+        (`feature_thickness_mm`, entry-to-exit along the ray = the straight-ray
+        arc length s_b - s_a) is >= PRINT_FLOOR_CHORD_MM, OR a SCAR-illegal tip
+        interval (an anchored tip whose SCAR-AREA-CAP verdict is ILLEGAL; a
+        rules-1-3 failure, never moot-eligible). This is the population the HARD
+        GATE fails on.
+      - `moot` is True iff the member has at least one rule-4 crossing and ALL of
+        its rule-4 crossings are moot (chord < PRINT_FLOOR_CHORD_MM) -- a foliage
+        knife-edge that cannot print as coherent material. Still counted and
+        reported (the moot bucket), never gates.
+
+    A member with no illegal crossing at all returns (False, False).
+
+    ONLY the tip-anchored interval of a designed embed end is exempt-eligible,
+    and ONLY when its SCAR-AREA-CAP verdict is LEGAL; an illegal verdict flags
+    its full raw length. A parity-crossing test on exact boundaries -- never a
+    distance test -- so an ordinary surface-hugging stub cannot false-positive.
+    Independent verify-side copy of census PASS C3 (shares only geom's generic
+    primitives); the moot floor reads the SAME chord the census does, so parity
+    stays bit-testable.
 
     Ray set is chosen by the CALLER via which intervals it passes: stubs get
     AXIS-only (a stub hugs its own emergence surface, so a capsule-offset ray
@@ -142,7 +165,7 @@ def _transit_illegal(intervals, m, verdict_legal):
     axis-derived SCAR-AREA-CAP verdict, applied to exempt the tip interval on any
     ray (None => no exemption)."""
     if not intervals:
-        return False
+        return False, False
     embed = m.get("embed_end")
     p0 = np.asarray(m["p0"], float); p1 = np.asarray(m["p1"], float)
     axis_seg = float(np.linalg.norm(p1 - p0))
@@ -153,6 +176,7 @@ def _transit_illegal(intervals, m, verdict_legal):
     by_ray = {}
     for iv in intervals:
         by_ray.setdefault(iv["ray"], []).append(iv)
+    has_illegal = False; nonexempt = False
     for ray, ivs in by_ray.items():
         ivs.sort(key=lambda iv: iv["s_a"])
         ray_seg = ray_segs.get(ray, axis_seg)
@@ -160,10 +184,27 @@ def _transit_illegal(intervals, m, verdict_legal):
                    if embed in ("p0", "p1") else None)
         for i, iv in enumerate(ivs):
             if i == tip_idx and verdict_legal:
-                continue
-            if (iv["s_b"] - iv["s_a"]) > MIN_ILLEGAL_LEN_MM:
-                return True
-    return False
+                continue  # sanctioned tip embed -- fully exempt
+            chord = iv["s_b"] - iv["s_a"]
+            if chord <= MIN_ILLEGAL_LEN_MM:
+                continue  # sub-detection sliver, not an illegal crossing
+            has_illegal = True
+            # PRINT-FLOOR: a rule-4 unanchored transit with chord < floor is
+            # moot; a SCAR-illegal tip interval (i == tip_idx, verdict not legal)
+            # is a rules-1-3 failure, never moot-eligible, always firm.
+            firm = (i == tip_idx) or (chord >= PRINT_FLOOR_CHORD_MM)
+            if firm:
+                nonexempt = True
+    moot = has_illegal and not nonexempt
+    return nonexempt, moot
+
+
+def _transit_illegal(intervals, m, verdict_legal):
+    """PRINT-FLOOR non-exempt predicate: True iff the member is a NON-EXEMPT hard
+    rule-4/SCAR violation (see `_transit_classify` for the full contract). A
+    member whose every rule-4 crossing is moot (all chords < PRINT_FLOOR_CHORD_MM)
+    returns False here -- it is reported in the moot bucket, not the hard gate."""
+    return _transit_classify(intervals, m, verdict_legal)[0]
 
 
 def _batch_axis_intervals(geom, members, mis, rays="axis"):
@@ -296,7 +337,7 @@ def _embed_scar_verdicts(geom, members, mis, ivmap, cfg):
     return verdicts
 
 
-def _clearance_report_exact(members, cfg, geom):
+def _clearance_report_exact(members, cfg, geom, moot_out=None):
     """Independent EXACT clearance + embed/transit re-check (SPEC-V5-GEOM
     sec 2.2, SPEC-EMBED-POLICY rule 4). Deliberately NOT sharing tree.Forest's
     exact helpers -- the independence covenant (a builder bug that mis-certifies
@@ -308,17 +349,20 @@ def _clearance_report_exact(members, cfg, geom):
     collision reported with its min clearance; a rule-4 transit with no negative
     distance reported at min_clearance_mm 0.0 / the clearance value):
 
-    1. THROUGH-TRANSIT / EMBED (SPEC-EMBED-POLICY, ratified cd989fe): the ported
-       SCAR-AREA-CAP + rule-4 predicate REPLACES the retired arc-inset window
-       sanction (`_axis_interval_illegal` is gone). Per-member SCAR-AREA-CAP
-       verdicts (`_embed_scar_verdicts`) gate the tip exemption; `_transit_illegal`
-       flags any member with a non-exempt inside-solid run > MIN_ILLEGAL_LEN_MM.
-       Swept over the SAME population the census does: EVERY member (ungated by
-       clearance sign), stubs AXIS-only (they hug their emergence surface, so an
-       offset ray false-positives), non-stubs AXIS + capsule-offset (a strut
-       whose axis is clean but whose capsule grazes a thin wall -- census 1138 --
-       is caught). This makes the engine gate count exactly the census's illegal
-       population from identical formulas.
+    1. THROUGH-TRANSIT / EMBED (SPEC-EMBED-POLICY, ratified cd989fe; PRINT-FLOOR
+       amended 2026-07-24): the ported SCAR-AREA-CAP + rule-4 predicate REPLACES
+       the retired arc-inset window sanction (`_axis_interval_illegal` is gone).
+       Per-member SCAR-AREA-CAP verdicts (`_embed_scar_verdicts`) gate the tip
+       exemption; `_transit_classify` then splits each member's non-exempt
+       inside-solid runs into NON-EXEMPT (>= PRINT_FLOOR_CHORD_MM chord, or a
+       SCAR-illegal tip) -> the hard-gate list, and MOOT (all rule-4 chords <
+       floor) -> `moot_out`, a report-only bucket that never gates. Swept over
+       the SAME population the census does: EVERY member (ungated by clearance
+       sign), stubs AXIS-only (they hug their emergence surface, so an offset ray
+       false-positives), non-stubs AXIS + capsule-offset (a strut whose axis is
+       clean but whose capsule grazes a thin wall -- census 1138 -- is caught).
+       This makes the engine gate count exactly the census's non-exempt population
+       from identical formulas, and its moot bucket the census's moot bucket.
 
     2. SWEPT-CAPSULE DISTANCE (SPEC-V5-GEOM sec 2.2): non-stubs get the
        segment_clearance min-distance test. A designed foot is embedded by
@@ -374,11 +418,18 @@ def _clearance_report_exact(members, cfg, geom):
         clr_by_mi = {mi: (float(clr[k]), argp[k]) for k, mi in enumerate(seg_mi)}
 
     # (4) verdict assembly -- stub transit violations first (member order), then
-    # non-stub violations (member order). Each member appears at most once.
+    # non-stub violations (member order). Each member appears at most once. The
+    # PRINT-FLOOR amendment (OWNER RATIFIED 2026-07-24) splits rule-4 transits
+    # into NON-EXEMPT (hard gate -> `out`) and MOOT (all crossings' chords <
+    # PRINT_FLOOR_CHORD_MM -> `moot_out`, report-only, never gates). A distance
+    # collision (worst < 0) is a hard violation regardless of the transit class.
     for mi in stub_iv_mi:
-        if _transit_illegal(ivmap[mi], members[mi], verdicts.get(mi)):
+        nonexempt, moot = _transit_classify(ivmap[mi], members[mi], verdicts.get(mi))
+        if nonexempt:
             out.append(dict(member_idx=mi, kind="stub", min_clearance_mm=0.0,
                             at_point=None))
+        elif moot and moot_out is not None:
+            moot_out.append(dict(member_idx=mi, kind="stub"))
     for mi in seg_mi:
         m = members[mi]
         worst, ap = clr_by_mi.get(mi, (0.0, None))
@@ -386,9 +437,13 @@ def _clearance_report_exact(members, cfg, geom):
             out.append(dict(member_idx=mi, kind=m["kind"], min_clearance_mm=worst,
                             at_point=(ap.tolist() if ap is not None
                                       and np.all(np.isfinite(ap)) else None)))
-        elif mi in ivmap and _transit_illegal(ivmap[mi], m, verdicts.get(mi)):
-            out.append(dict(member_idx=mi, kind=m["kind"], min_clearance_mm=worst,
-                            at_point=None))
+        elif mi in ivmap:
+            nonexempt, moot = _transit_classify(ivmap[mi], m, verdicts.get(mi))
+            if nonexempt:
+                out.append(dict(member_idx=mi, kind=m["kind"], min_clearance_mm=worst,
+                                at_point=None))
+            elif moot and moot_out is not None:
+                moot_out.append(dict(member_idx=mi, kind=m["kind"]))
     return out
 
 
@@ -443,7 +498,8 @@ def ball_breach_report(geom, members, balls, cfg, eps_mm=0.05):
     return out
 
 
-def clearance_report(mesh, members, cfg, surface_tree=None, geom=None):
+def clearance_report(mesh, members, cfg, surface_tree=None, geom=None,
+                     moot_transit_out=None):
     """v4/v5: independent full-envelope clearance re-check over the FINAL
     member list. Deliberately does not reuse tree.Forest.revalidate's
     certificate bookkeeping (a builder bug that mis-certifies a member
@@ -488,6 +544,12 @@ def clearance_report(mesh, members, cfg, surface_tree=None, geom=None):
     confirmed to vanish when this same fix is applied).
 
     Returns list of dicts {member_idx, kind, min_clearance_mm, at_point}.
+
+    `moot_transit_out` (PRINT-FLOOR amendment, OWNER RATIFIED 2026-07-24): if a
+    list is passed, the exact path appends the report-only MOOT rule-4 transits
+    (members whose every unanchored crossing has a chord < PRINT_FLOOR_CHORD_MM)
+    to it -- never part of the returned hard-gate list. The sampled/legacy path
+    has no rule-4 transit concept and leaves it untouched (empty).
     """
     members = joints.collect_members(members)
     out = []
@@ -497,7 +559,7 @@ def clearance_report(mesh, members, cfg, surface_tree=None, geom=None):
     # independent exact re-check; a plain cKDTree (tests/legacy) keeps the
     # sampled path below.
     if geom is not None and hasattr(geom, "segment_clearance"):
-        return _clearance_report_exact(members, cfg, geom)
+        return _clearance_report_exact(members, cfg, geom, moot_out=moot_transit_out)
     pitch_bound_mm = (routing.surface_tree_pitch_bound_mm(
         surface_tree, percentile=cfg.surface_pitch_bound_percentile)
         if surface_tree is not None else 0.0)
@@ -872,12 +934,27 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
     census's reference implementation both algorithmically and in scope).
     Gated (ANDed into `ok` when `gate_on_ball_breach`). A member's own
     embedded end-cap sphere (SPEC-V5-GEOM sec 2.2 amendment 5) is a
-    DIFFERENT, report-only category returned as
-    `embed_end_breach_violations` -- always computed and surfaced, never
-    ANDed into `ok`. See the inline note above `ball_breach_all` in this
-    function body for the full finding and rationale."""
+    DIFFERENT, PROVENANCE-ONLY diagnostic returned as
+    `endcap_breach_diagnostic` (renamed 2026-07-24 from the old
+    `embed_end_breach_violations` to make its non-gating status explicit) --
+    always computed and surfaced, never ANDed into `ok`. See the inline note
+    above `ball_breach_all` in this function body for the full finding and
+    rationale.
+
+    `moot_transit_members` (PRINT-FLOOR amendment, OWNER RATIFIED 2026-07-24):
+    the report-only bucket of rule-4 transits downgraded to MOOT (every
+    unanchored crossing's chord < PRINT_FLOOR_CHORD_MM = 0.08mm -- foliage
+    knife-edges that cannot print as coherent material). Always surfaced,
+    never gates `ok`; the hard clearance gate counts only the non-exempt
+    population."""
     coverage = coverage_report(mesh, islands, contacts, cfg)
-    clearance = clearance_report(mesh, members, cfg, surface_tree=surface_tree, geom=geom)
+    # PRINT-FLOOR amendment (OWNER RATIFIED 2026-07-24): clearance_report fills
+    # `moot_transit_members` with the report-only moot rule-4 transits (all
+    # crossings' chords < PRINT_FLOOR_CHORD_MM); the returned `clearance` list is
+    # the non-exempt hard-gate population only.
+    moot_transit_members = []
+    clearance = clearance_report(mesh, members, cfg, surface_tree=surface_tree,
+                                 geom=geom, moot_transit_out=moot_transit_members)
     # R3 (ball-gate semantics, 2026-07-23): ball_breach_report synthesizes
     # and tests TWO categories against geom.sphere_breach -- actual joint
     # balls (source="ball") AND synthesized embedded-end-cap spheres
@@ -908,14 +985,15 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
     # algorithm, now also verbatim SCOPE). The embedded end-cap check
     # itself is NOT deleted (amendment 5's blind spot closure is still
     # real, still computed, still reported for Phase-8 relocation triage)
-    # -- it is surfaced separately, as `embed_end_breach_violations`, a
-    # REPORT-ONLY diagnostic that does not gate `ok`. This is deliberately
+    # -- it is surfaced separately, as `endcap_breach_diagnostic` (renamed
+    # 2026-07-24 from `embed_end_breach_violations`), a PROVENANCE-ONLY
+    # diagnostic that does not gate `ok`. This is deliberately
     # scoped as R3-only: aligning the embed-end check's own thickness/inset
     # accounting with the census (so its flags stop clustering at the
     # measurement floor) is R4's job, not this one.
     ball_breach_all = ball_breach_report(geom, members, balls, cfg)
     ball_breach_violations = [v for v in ball_breach_all if v.get("source") == "ball"]
-    embed_end_breach_violations = [v for v in ball_breach_all if v.get("source") == "endcap"]
+    endcap_breach_diagnostic = [v for v in ball_breach_all if v.get("source") == "endcap"]
     load = load_report(carried_area_mm2, tip_r_mm, cfg)
     unsupported_minima = minima_report(minima, contacts, cfg) if minima is not None else []
     uncovered_island_births = island_birth_report(island_births, contacts, cfg) \
@@ -951,8 +1029,8 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
     # the independent re-check behind that. `gate_on_ball_breach` defaults
     # True; it is a no-op for non-exact callers (a plain cKDTree / None geom
     # makes ball_breach_report return [] by construction, so both
-    # ball_breach_violations and embed_end_breach_violations are empty), so
-    # tests/legacy paths are unaffected. embed_end_breach_violations is
+    # ball_breach_violations and endcap_breach_diagnostic are empty), so
+    # tests/legacy paths are unaffected. endcap_breach_diagnostic is
     # NEVER gated (see the R3 note above `ball_breach_all` for why) --
     # always surfaced, not ANDed into `ok` under any flag.
     if gate_on_ball_breach:
@@ -961,8 +1039,9 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
         ok=ok,
         uncovered_islands=uncovered,
         clearance_violations=clearance,
+        moot_transit_members=moot_transit_members,
         ball_breach_violations=ball_breach_violations,
-        embed_end_breach_violations=embed_end_breach_violations,
+        endcap_breach_diagnostic=endcap_breach_diagnostic,
         load_violations=load,
         unsupported_minima=unsupported_minima,
         uncovered_island_births=uncovered_island_births,

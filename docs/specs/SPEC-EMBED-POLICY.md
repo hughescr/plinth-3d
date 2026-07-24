@@ -1,6 +1,7 @@
 # SPEC-EMBED-POLICY — Sanctioned embed at designed embed ends: scar-area bound
 
-Status: PANEL DECISION 2026-07-23 (judge ruling; pending owner ratification).
+Status: OWNER RATIFIED (SCAR-AREA-CAP, cd989fe). PRINT-FLOOR amendment
+OWNER RATIFIED 2026-07-24 (see the PRINT-FLOOR amendment section below).
 Supersedes: the same-day ARC-SLACK depth-inset ruling (committed 3920a0e),
 overtaken before ratification by the owner's binding reframing: union is
 idempotent, interior overlap is physically meaningless, and the embed's
@@ -43,6 +44,8 @@ length bound), and only declared embed endpoints get an exception
     L_SCAR_MAX_MM = 2.5     # max scar patch dimension
     EPS_COS       = 1e-9    # divide-by-zero guard only; NOT a physics floor
     TOL_MM        = 0.05    # interval anchoring / detection tolerance
+    PRINT_FLOOR_CHORD_MM = 0.08  # print-floor moot threshold (OWNER RATIFIED
+                            # 2026-07-24); see the PRINT-FLOOR amendment below
     BALL_FACTOR   = 1.5 for contact-stub tips; 1.4 for strut/rung feet
                             # (config.py / joints.py MODEL_FOOT_FACTOR — designed ball radii)
 
@@ -118,19 +121,62 @@ LEGAL iff ALL of:
    (the fuse/neck floor: the break must happen at the tip neck; also
    catches detached tips — `T = 0` and `d >= R_b` gives `A_anchor = 0`,
    ILLEGAL. Depth checks were structurally blind in this direction.)
-4. **Crossing topology (retained interval checks, unchanged):** only the
-   tip-anchored interval is exempt-eligible. ANY interior interval not
-   anchored to a designed embed end (mid-span graze, re-entry after the
-   tip interval exits, capsule-edge crossing) is a transit and ILLEGAL
-   regardless of its size. Both-ends-embedded members apply this per end
-   independently. The thin-feature-span check remains a separate,
-   unchanged check.
+4. **Crossing topology (retained interval checks, PRINT-FLOOR amended):**
+   only the tip-anchored interval is exempt-eligible. ANY interior interval
+   not anchored to a designed embed end (mid-span graze, re-entry after the
+   tip interval exits, capsule-edge crossing) is a transit and ILLEGAL —
+   subject to the PRINT-FLOOR moot downgrade below. Both-ends-embedded
+   members apply this per end independently. The thin-feature-span check
+   remains a separate, unchanged check.
 
 There is NO depth cap on the tip-anchored interval itself: a deep
 perpendicular plug into thick solid has a small crossing patch and, per
 the owner's idempotence ruling, no further physical consequence; thin
 walls are protected by rule 4 and the thin-feature-span check, and long
 grazing chords are bounded by rules 1-2 (A_shaft grows as 2*r_x*T).
+
+## PRINT-FLOOR amendment (OWNER RATIFIED 2026-07-24)
+
+Amends rule 4 only (crossing topology); rules 1-3 (SCAR-AREA-CAP on the
+tip-anchored interval) are untouched.
+
+A rule-4 unanchored transit is DOWNGRADED from illegal to **MOOT** iff its
+measured antipodal crossing chord is `< PRINT_FLOOR_CHORD_MM` (0.08 mm).
+The chord is the existing deterministic `feature_thickness_mm`: the
+entry-to-exit distance along the offending ray (for a straight ray this is
+exactly the interval's arc length `s_b - s_a`). No new geometry is
+computed — the moot test reads a quantity both implementations already
+produce, so engine/census parity stays bit-testable.
+
+Member-level rule (both implementations, identical):
+
+- A member is **exempt (moot)** iff it has at least one rule-4 crossing and
+  ALL of its rule-4 crossings are moot (`chord < PRINT_FLOOR_CHORD_MM`).
+- A member is **non-exempt** iff it has at least one FIRM illegal crossing:
+  a rule-4 unanchored transit whose `chord >= PRINT_FLOOR_CHORD_MM`, OR a
+  SCAR-illegal tip interval (an anchored tip whose SCAR-AREA-CAP verdict is
+  ILLEGAL is a rules-1-3 failure, NOT a rule-4 transit — it is never
+  moot-eligible and always makes its member non-exempt).
+
+Reporting and gating:
+
+- Moot transits are STILL COUNTED and reported in a separate auditable
+  bucket (`moot_transit_members` in the engine self-verify report;
+  `n_moot_transit_members` / `moot_transit_members` in the census summary),
+  alongside the intact raw per-crossing records (each carries its
+  `feature_thickness_mm` and a `moot` flag). Nothing is silently dropped.
+- The HARD GATE fails ONLY on the non-exempt population. The engine's
+  `clearance_violations` (ANDed into `ok`) contains only non-exempt members;
+  moot-only members are surfaced in the moot bucket and never gate `ok`.
+
+Rationale (owner-ratified): chords `< 0.08 mm` are 2.6-4.1 px foliage
+knife-edges that cannot print as coherent material; the crossing chord is
+`>=` the true wall thickness, so exempting on the chord is conservative;
+0.08 mm sits a 20 um guard band above the 0.0502 mm population minimum.
+Expected effect on the archived geometry: of the census's 193 illegal
+members, 49 become moot (all crossings `< 0.08`) and ~144 remain non-exempt
+(the adjudication partition: 118 firm `>= 0.10` + 26 band `0.08-0.10` + 49
+all-crossings-`< 0.08`).
 
 ## Rationale (measured on the 853-member run1 designed-embed population)
 

@@ -310,9 +310,10 @@ today), but each derives its own inset/exemption logic separately.
   dense crown foliage on this non-watertight, double-walled mesh. The
   amendment-5 check itself is UNCHANGED (still synthesizes + tests every
   embedded end, still runs on the combined set) — its findings are now
-  surfaced as `embed_end_breach_violations`, a report-only diagnostic (never
-  ANDed into `ok`), preserved for Phase-8 relocation triage rather than
-  dropped. Aligning the embed-end check's own thickness/inset accounting
+  surfaced as `endcap_breach_diagnostic` (renamed 2026-07-24 from
+  `embed_end_breach_violations` to make its provenance-only status explicit),
+  a report-only diagnostic (never ANDed into `ok`), preserved for Phase-8
+  relocation triage rather than dropped. Aligning the embed-end check's own thickness/inset accounting
   with the census (so it stops clustering at the floor) is R4's job, out of
   R3's scope. See `verify.self_verify`'s inline note and
   `validate_r3_ball_gate.py` (acceptance-run-2026-07-23/) for the
