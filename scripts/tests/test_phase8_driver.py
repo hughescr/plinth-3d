@@ -797,9 +797,153 @@ def test_d2_strut_shaft_angle_candidate_pruned_at_selection(cfg):
     assert pd._strut_shaft_printability_ok(upright, cfg) is True      # kept
     # composition with the ban: an upright but BANNED candidate is also rejected.
     ban = {7: {pd._cand_geom_key(upright.member)}}
-    fn = pd._compose_strut_revalidate_fn(pd._ban_revalidate_fn(ban, {1: 7}), cfg)
+    fn = pd._compose_strut_revalidate_fn(pd._ban_revalidate_fn(ban, {1: 7}), None, cfg)
     assert fn(flat) is False                                          # printability
     assert fn(upright) is False                                       # banned
-    # no ban installed -> only the printability filter binds.
-    fn2 = pd._compose_strut_revalidate_fn(None, cfg)
+    # no ban / no-op filter installed -> only the printability filter binds.
+    fn2 = pd._compose_strut_revalidate_fn(None, None, cfg)
     assert fn2(flat) is False and fn2(upright) is True
+
+
+# ==========================================================================
+# 9. DIRECTIVE 2 -- D3(a) progress-based retirement (true fixed point).
+# ==========================================================================
+def _const_gate_for_first_transit(cfg, forest, geom, plate_z=-5.0, chord=1.0):
+    """Helper: the mi of the fin fixture's single firm transit + a constant
+    `GateClassification` that ALWAYS reports it non-exempt with a fixed worst
+    chord. Monkeypatching `pd.classify_gate` to this makes the site regenerate
+    every sweep and its commit never clear it -- the exact non-improving
+    reappearance D3(a) retires."""
+    members0, balls0 = engine.live_member_lists(forest, [], plate_z, cfg)
+    real = pd.classify_gate(_fin_mesh(), members0, balls0, geom, cfg)
+    assert len(real.firm_transit) == 1, "fixture must start with 1 firm transit"
+    mi = next(iter(real.firm_transit))
+    const = pd.GateClassification(firm_transit=frozenset({mi}), moot=frozenset(),
+                                  worst_chord={mi: float(chord)}, ball_breaches=())
+    return mi, const
+
+
+def test_d3a_synthetic_site_committed_once_then_retired(cfg, monkeypatch):
+    """D3(a) part 1 (regression test 1): a synthetic site whose commit never clears
+    its transit (a constant gate that re-flags it every sweep) is committed AT MOST
+    ONCE -- retired on the next sweep because its defect measure did not strictly
+    shrink -- so `committed_by_sweep` is monotone, `converged` is True, and the site
+    is reported as honest-unresolved (in `retired_sites` AND `unresolved_items`)."""
+    geom = ExactSurface(_fin_mesh())
+    forest, contacts, carried, tip_r = _fin_forest(cfg)
+    plate_z = -5.0
+    mi, const_gate = _const_gate_for_first_transit(cfg, forest, geom, plate_z)
+    monkeypatch.setattr(pd, "classify_gate", lambda *a, **k: const_gate)
+
+    def _mlf():
+        return engine.live_member_lists(forest, [], plate_z, cfg)
+
+    members, balls = _mlf()
+    rep = pd.run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z,
+                        geom, cfg, _fin_mesh(), unrouted=[], member_list_fn=_mlf)
+    # committed AT MOST ONCE, and the trace is non-increasing + a true fixed point.
+    assert rep.committed_by_sweep == (1,), rep.committed_by_sweep
+    assert all(a >= b for a, b in zip(rep.committed_by_sweep,
+                                      rep.committed_by_sweep[1:]))
+    assert rep.sweep_tail_monotone is True
+    assert rep.converged is True, "retirement must reach an honest fixed point"
+    # retired thereafter, and counted honest-unresolved at its last rung.
+    assert any(r[0] == "STUB" and r[1] == mi for r in rep.retired_sites), rep.retired_sites
+    assert any(it[0] == "STUB" and it[1] == mi for it in rep.unresolved_items), \
+        rep.unresolved_items
+    # a retired site is NOT double-counted as resolved (moved out of the tally).
+    assert rep.stub_unresolved >= 1
+
+
+def test_d3a_noop_candidate_is_skipped():
+    """D3(a) part 2 (regression test 2): `_noop_skip_fn` REJECTS a candidate whose
+    spliced geometry equals the member's CURRENT forest geometry (a no-op churn
+    re-pick) and PASSES a genuinely different candidate -- for both an embed-p0 stub
+    and an embed-p1 strut foot (the candidate is canonical embed-at-p0; the no-op is
+    the end-swapped current geometry)."""
+    forest = tree.Forest()
+    m = tree.Member(p0=np.array([0., 0, 0]), p1=np.array([0., 0, 1.]), r0=0.2, r1=0.3,
+                    kind="stub", owner=("contact", 0), embed_end="p0")
+    fi = forest.add_member(m)
+    fn = pd._noop_skip_fn(forest, {7: fi})
+    same = phase8.Candidate(site_id=7, cand_index=0, length_step=0, f=1.0,
+                            polar_deg=0.0, azimuth_deg=0.0, n_hat=np.array([0., 0, 1.]),
+                            member=dict(p0=[0., 0, 0], p1=[0., 0, 1.], r0=0.2, r1=0.3))
+    assert fn(same) is False, "a candidate == current geometry is a no-op churn commit"
+    diff = phase8.Candidate(site_id=7, cand_index=1, length_step=1, f=0.5,
+                            polar_deg=0.0, azimuth_deg=0.0, n_hat=np.array([0., 0, 1.]),
+                            member=dict(p0=[0., 0, 0], p1=[0., 0, 0.5], r0=0.2, r1=0.3))
+    assert fn(diff) is True, "a genuinely different candidate is progress"
+    # embed-p1 strut foot: forest stores free end at p0, foot at p1; the candidate
+    # is canonical (foot at p0), so the no-op is the end-swapped current geometry.
+    m2 = tree.Member(p0=np.array([0., 0, 1.]), p1=np.array([0., 0, 0]), r0=0.3, r1=0.2,
+                     kind="strut", owner=("contact", 0), embed_end="p1")
+    fi2 = forest.add_member(m2)
+    fn2 = pd._noop_skip_fn(forest, {9: fi2})
+    noop2 = phase8.Candidate(site_id=9, cand_index=0, length_step=0, f=1.0,
+                             polar_deg=0.0, azimuth_deg=0.0, n_hat=np.array([0., 0, 1.]),
+                             member=dict(p0=[0., 0, 0], p1=[0., 0, 1.], r0=0.2, r1=0.3))
+    assert fn2(noop2) is False, "canonical re-pick of the applied foot geometry is a no-op"
+    # a filter with no forest mapping never rejects (behaviour-preserving).
+    assert pd._noop_skip_fn(forest, {})(same) is True
+
+
+def test_d3a_p8f_run1_churn_pair_is_single_commit_then_retire(cfg, monkeypatch):
+    """D3(a) (regression test 3, SITE-DERIVED): the archived p8f_run1 relocation
+    trace `committed_by_sweep=[117,56,9,2,3,2,1,1]` is NON-monotone (a 2->3 rebound,
+    a [...,1,1] tail) and commits 191 splices over ~128 targets -- proof that some
+    target was committed in >=2 sweeps (revert/re-commit churn). The D3(a)
+    retirement predicate turns that exact non-improving-reappearance pattern into
+    single-commit-then-retire, so the new trace is monotone and converged. Skips if
+    the archived artifact is absent."""
+    p = os.path.join(_SCR, "p8f_run1_results.json")
+    if not os.path.exists(p):
+        pytest.skip("p8f_run1 artifact absent")
+    with open(p) as f:
+        cbs_old = json.load(f)["relocate_reports"]["relocate"]["committed_by_sweep"]
+    assert cbs_old == [117, 56, 9, 2, 3, 2, 1, 1], cbs_old
+    assert not all(a >= b for a, b in zip(cbs_old, cbs_old[1:])), \
+        "the archived trace must be the non-monotone churn this fixes"
+    assert sum(cbs_old) > cbs_old[0], "re-commits across sweeps => a site committed >=2 sweeps"
+    # the retirement predicate that breaks it: an equal-measure reappearance retires;
+    # genuine (canonical-granularity) progress keeps trying; a resolved site (now is
+    # None) is not retired; and a budget-exhausted site retires even while improving.
+    assert pd._should_retire(0.8, 0.8, 0) is True                 # no progress -> retire
+    assert pd._should_retire(0.79, 0.8, 0) is False               # progress -> keep
+    assert pd._should_retire(None, 0.8, 0) is False               # resolved -> keep
+    assert pd._should_retire(0.5, 0.9, pd._SITE_COMMIT_BUDGET) is True   # budget spent
+    assert pd._should_retire(0.5, 0.9, 0) is False                # improving, budget left
+    # end-to-end on a churn analogue (a commit that never clears its gate): single
+    # commit, then retire, MONOTONE + converged -- the fix the trace above needed.
+    geom = ExactSurface(_fin_mesh())
+    forest, contacts, carried, tip_r = _fin_forest(cfg)
+    plate_z = -5.0
+    mi, const_gate = _const_gate_for_first_transit(cfg, forest, geom, plate_z)
+    monkeypatch.setattr(pd, "classify_gate", lambda *a, **k: const_gate)
+
+    def _mlf():
+        return engine.live_member_lists(forest, [], plate_z, cfg)
+
+    members, balls = _mlf()
+    rep = pd.run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z,
+                        geom, cfg, _fin_mesh(), unrouted=[], member_list_fn=_mlf)
+    assert rep.committed_by_sweep == (1,), rep.committed_by_sweep
+    assert rep.sweep_tail_monotone is True and rep.converged is True
+    assert any(r[1] == mi for r in rep.retired_sites), rep.retired_sites
+
+
+@pytest.mark.kernel
+def test_d3a_full_run_converged_true_in_results_json():
+    """D3(a) (regression test 4): the FULL directive-2 acceptance run reaches a true
+    fixed point -- `converged=true` (and `sweep_tail_monotone=true`) in the results
+    JSON for every relocation pass. Reads the fresh full-run artifact this directive
+    produces; skips when it is absent (CI without the treant run)."""
+    p = os.path.join(_SCR, "p8fdir2_run1_results.json")
+    if not os.path.exists(p):
+        pytest.skip("directive-2 full-run artifact absent")
+    with open(p) as f:
+        reports = json.load(f)["relocate_reports"]
+    assert reports, "results JSON must carry relocate reports"
+    for k, rep in reports.items():
+        assert rep.get("converged") is True, (k, rep.get("committed_by_sweep"))
+        assert rep.get("sweep_tail_monotone") is True, (k, rep.get("committed_by_sweep"))

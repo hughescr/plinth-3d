@@ -813,6 +813,8 @@ class Phase8Report:
     target_source: str = "live-gate"  # "frozen-fixture" iff the treant target law
     sweep_tail_monotone: bool = True  # committed_by_sweep non-increasing (anti-churn)
     n_banned: int = 0                 # collision-reverted candidates banned (anti-churn)
+    # ---- D3(a) progress-based retirement (fixed point) -----------------------
+    retired_sites: tuple = ()         # (report_class, site_id, last_rung) honest-unresolved
 
 
 def _cand_geom_key(member: dict) -> tuple:
@@ -847,6 +849,110 @@ def _ban_revalidate_fn(banned: dict, site_forest_idx: dict):
     return _ok
 
 
+def _forest_member_geom_key(fm) -> tuple:
+    """The `_cand_geom_key` of a live `tree.Member`'s CURRENT stored geometry
+    (p0/p1/r0/r1 as held on the forest, un-canonicalised)."""
+    return _cand_geom_key(dict(p0=fm.p0, p1=fm.p1, r0=fm.r0, r1=fm.r1))
+
+
+def _noop_skip_fn(forest, site_forest_idx: dict):
+    """A ladder-selection `revalidate_fn` (D3(a) part 2) that REJECTS any candidate
+    whose SPLICED geometry equals the member's CURRENT forest geometry -- a re-pick
+    of already-applied geometry is a no-op churn commit, not progress. The splice
+    (`_apply_member_geometry`) writes a candidate (canonical embed-at-p0) onto the
+    forest member, swapping ends back when the member embeds at p1 (SM-STRUT feet);
+    this predicate reconstructs that would-be forest geometry from the candidate and
+    compares it to the member's current stored geometry, so the no-op test is
+    invariant to the canonicalisation. Deterministic: reads only the live member
+    geometry + rounded (round-9) geom keys -- no wall-clock, no iteration order."""
+    def _ok(cand):
+        fi = site_forest_idx.get(cand.site_id)
+        if fi is None or not (0 <= fi < len(forest.members)):
+            return True
+        fm = forest.members[fi]
+        m = cand.member
+        p0 = np.asarray(m["p0"], float); p1 = np.asarray(m["p1"], float)
+        if fm.embed_end == "p1":                 # candidate embeds p0; forest embeds p1
+            would = _cand_geom_key(dict(p0=p1, p1=p0, r0=m["r1"], r1=m["r0"]))
+        else:
+            would = _cand_geom_key(dict(p0=p0, p1=p1, r0=m["r0"], r1=m["r1"]))
+        return would != _forest_member_geom_key(fm)
+    return _ok
+
+
+def _compose_fns(*fns):
+    """Compose ladder-selection `revalidate_fn`s: a candidate must pass EVERY
+    non-None fn. Returns None when none are active (behaviour-preserving -- no
+    filter installed, identical to the pre-compose contract)."""
+    active = [f for f in fns if f is not None]
+    if not active:
+        return None
+
+    def _ok(cand):
+        return all(f(cand) for f in active)
+    return _ok
+
+
+# D3(a) per-site commit budget (fixed-point backstop). Progress-based retirement
+# on the defect measure alone does NOT terminate on the treant: a re-aim can make
+# tiny asymptotic progress -- `worst_chord` strictly shrinks every sweep without the
+# member ever clearing rule-4 -- so the measure test (which permits any strict
+# improvement) re-commits such a site every sweep, and neighbour co-moves re-flag a
+# resolved site a sweep later (a gapped oscillation). A site that has been committed
+# `_SITE_COMMIT_BUDGET` times without resolving has demonstrably stalled: its
+# relocation is not converging, so it is retired (honest-unresolved). This BOUNDS
+# per-site commits, which -- with the persistent measure baseline below -- makes the
+# committable population strictly shrink and drives `committed_by_sweep` to zero
+# (converged=true) inside the sweep cap. Calibrated on the archived treant (the
+# smallest budget that yields a monotone trace converging before cap 8).
+_SITE_COMMIT_BUDGET = 2
+
+
+def _should_retire(now, pre, count, canon_mm=0.0) -> bool:
+    """D3(a) progress-based retirement predicate. A site that was committed on an
+    earlier sweep is RETIRED (honest-unresolved) when it REAPPEARS in the current
+    snapshot (`now is not None`) and it is NOT making acceptable progress -- either:
+
+      * it has already been committed `_SITE_COMMIT_BUDGET` times without resolving
+        (a stalled site whose re-aims never clear it), OR
+      * its defect measure did not shrink by at least the canonical chord/poke
+        granularity `canon_mm` since its last commit (`not (now < pre - canon_mm)`)
+        -- no meaningful progress, so re-committing it is churn.
+
+    A site that RESOLVED (`now is None` -- it left the snapshot) is never retired.
+    Pure float/int compare against snapshot-derived measures (deterministic; no
+    wall-clock, no iteration-order dependence)."""
+    if now is None:
+        return False
+    if count >= _SITE_COMMIT_BUDGET:
+        return True
+    return not (now < pre - canon_mm)
+
+
+def _site_defect_measure(di: "DriverInput", key: tuple, non_exempt_set) -> Optional[float]:
+    """The defect measure that TARGETS a site in `di`'s snapshot, or None if the
+    site is no longer a live target there (resolved / absent). `key` is the
+    namespaced retirement key:
+
+      * ('M', mi) -- a class-T stub/strut member: the worst counted TRANSIT chord
+        (mm, `di.gate.worst_chord`) iff `mi` is still non-exempt this sweep; None
+        otherwise (the member left the non-exempt set -> genuinely resolved).
+      * ('B', bid) -- a joint-ball breach: the ball's POKE-OUT depth (mm,
+        `poke_out_mm`) iff `bid` still indexes a live breach; None otherwise.
+
+    Derived only from snapshot integers + gate floats (no wall-clock, no
+    iteration-order dependence) so the retirement decision is deterministic."""
+    cls, sid = key
+    if cls == "M":
+        if sid in non_exempt_set:
+            return float(di.gate.worst_chord.get(sid, 0.0))
+        return None
+    breaches = di.gate.ball_breaches
+    if 0 <= sid < len(breaches):
+        return float(breaches[sid].get("poke_out_mm", 0.0))
+    return None
+
+
 def _strut_shaft_printability_ok(cand, cfg) -> bool:
     """S1 strut candidate legality (D2, SPEC-P8-RELOCATE): reject a re-aim whose
     SHAFT tilts past the cfg overhang cone -- the SAME drift+taper printability
@@ -860,12 +966,15 @@ def _strut_shaft_printability_ok(cand, cfg) -> bool:
     return not tree.printability_report([cand.member], cfg)
 
 
-def _compose_strut_revalidate_fn(ban_fn, cfg):
-    """Compose the cross-sweep collision-revert ban (defect-3 anti-churn) with the
-    D2 strut shaft-angle legality filter for the Phase-2 struts selection. Either
-    or both may be active; a candidate must pass BOTH."""
+def _compose_strut_revalidate_fn(ban_fn, noop_fn, cfg):
+    """Compose the cross-sweep collision-revert ban (defect-3 anti-churn), the
+    D3(a) no-op-candidate skip, and the D2 strut shaft-angle legality filter for
+    the Phase-2 struts selection. Any subset may be active; a candidate must pass
+    ALL active predicates."""
     def _ok(cand):
         if ban_fn is not None and not ban_fn(cand):
+            return False
+        if noop_fn is not None and not noop_fn(cand):
             return False
         return _strut_shaft_printability_ok(cand, cfg)
     return _ok
@@ -900,6 +1009,10 @@ class _SweepResult:
     ledger_rows: list
     n_committed: int
     newly_banned: list = field(default_factory=list)  # (forest_idx, geom_key) reverts
+    # D3(a) part 1: sites SUCCESSFULLY committed this sweep (survived revalidate),
+    # namespaced key -> (report_class, rung) -- the caller records their pre-commit
+    # defect measure and retires any that reappear next sweep without improving.
+    committed_sites: dict = field(default_factory=dict)
 
 
 def _relocation_sweep(di: DriverInput, forest, geom, cfg,
@@ -920,10 +1033,16 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
     ledger_rows: list = []
     n_committed = 0
     newly_banned: list = []
+    committed_sites: dict = {}            # D3(a): key -> (report_class, rung), committed
     # anti-churn ban filter (defect-3): a candidate reverted for a §5-law collision
     # on an earlier sweep is skipped at selection here, so the ladder either picks a
     # DIFFERENT candidate or falls honestly -- never re-picks the reverting winner.
     ban_fn = _ban_revalidate_fn(banned, di.site_forest_idx)
+    # D3(a) part 2 no-op-candidate skip: a candidate whose spliced geometry equals
+    # the member's CURRENT forest geometry is a no-op churn commit -- reject it at
+    # selection so a re-pick of already-applied geometry is never "committed".
+    noop_fn = _noop_skip_fn(forest, di.site_forest_idx)
+    stub_sel_fn = _compose_fns(ban_fn, noop_fn)
 
     # ---- Phase 1: stubs (class-T stubs UNION Q-REAL), pocket solver + isolated.
     stub_resolved = stub_unresolved = 0
@@ -947,15 +1066,17 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
 
     if di.stub_sites:
         report = phase8.run_pocket_solver(di.stub_sites, geom, cfg,
-                                          revalidate_fn=ban_fn)
+                                          revalidate_fn=stub_sel_fn)
         pocket_labels = [pk.label for pk in report.pockets]
         accepted = []
+        acc_site = {}                     # fi -> (site_id, rung) for committed tracking
         for pk in report.pockets:
             for mid, mr in pk.members.items():
                 ok = mr.status == phase8.PocketStatus.COMMITTED and bool(mr.committed_cand)
                 fi = _dispose_stub(mid, ok, mr.escalate_rung or "R2")
                 if fi is not None:
                     accepted.append((fi, mr.committed_cand.member, _orig_embed(forest, fi)))
+                    acc_site[fi] = (mid, mr.escalate_rung or "R1")
                 ledger_rows.append(("STUB", mid, fi, "POCKET",
                                     mr.escalate_rung or ("R1" if ok else "R2")))
         for mid, r1res in report.isolated.items():
@@ -963,6 +1084,7 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
             fi = _dispose_stub(mid, ok, "R2")
             if fi is not None:
                 accepted.append((fi, r1res.winner.member, _orig_embed(forest, fi)))
+                acc_site[fi] = (mid, "R1")
             ledger_rows.append(("STUB", mid, fi, "ISOLATED", "R1" if ok else "R2"))
         acc_by_fi = {fi: cm for fi, cm, _emb in accepted}
         n_ok, rv = splice_reaims(forest, geom, cfg, accepted,
@@ -970,6 +1092,10 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
         n_committed += n_ok
         reverted.extend(("STUB", fi) for fi in rv)
         stub_resolved -= len(rv); stub_unresolved += len(rv)
+        rv_set = set(rv)
+        for fi, (mid, rung) in acc_site.items():
+            if fi not in rv_set:          # spliced AND survived revalidate -> committed
+                committed_sites[("M", mid)] = ("STUB", rung)
         for fi in rv:
             ledger_rows.append(("STUB", None, fi, "REVERTED", "splice"))
             if fi in acc_by_fi:
@@ -978,13 +1104,17 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
     # ---- Phase 2: interior struts (SM-STRUT S1), spliced AFTER stubs.
     strut_resolved = strut_unresolved = 0
     if di.strut_sites:
-        sres = phase8.run_phase2_struts(di.strut_sites, geom, cfg,
-                                        revalidate_fn=_compose_strut_revalidate_fn(ban_fn, cfg))
+        sres = phase8.run_phase2_struts(
+            di.strut_sites, geom, cfg,
+            revalidate_fn=_compose_strut_revalidate_fn(ban_fn, noop_fn, cfg))
         accepted = []
+        acc_site = {}                     # fi -> (site_id, rung) for committed tracking
         for sid, sr in sres.items():
             if sr.rung == "S1" and sr.winner is not None:
                 fi = di.site_forest_idx.get(sid)
                 accepted.append((fi, sr.winner.member, _orig_embed(forest, fi)))
+                if fi is not None:
+                    acc_site[fi] = (sid, "S1")
                 strut_resolved += 1
                 ledger_rows.append(("STRUT", sid, fi, "S1", "S1"))
             else:
@@ -997,6 +1127,10 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
         n_committed += n_ok
         reverted.extend(("STRUT", fi) for fi in rv)
         strut_resolved -= len(rv); strut_unresolved += len(rv)
+        rv_set = set(rv)
+        for fi, (sid, rung) in acc_site.items():
+            if fi not in rv_set:          # spliced AND survived revalidate -> committed
+                committed_sites[("M", sid)] = ("STRUT", rung)
         for fi in rv:
             ledger_rows.append(("STRUT", None, fi, "REVERTED", "splice"))
             if fi in acc_by_fi:
@@ -1043,7 +1177,12 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
                                                   pre_members, live_fi, pos_of,
                                                   idx_arr, end_arr, pt_arr))
                 if not clean:
+                    # D3(a) part 3 ball-ban parity: bar re-attempting the SAME slide
+                    # on the touched joint members next sweep -- append each touched
+                    # member's POST-slide geometry key (captured BEFORE the restore)
+                    # to newly_banned, exactly as the STUB/STRUT revert paths do.
                     for fi, snapm in saved:
+                        newly_banned.append((fi, _cand_geom_key(forest.members[fi]._snapshot())))
                         forest.members[fi]._restore(snapm)
                     forest.revalidate(geom, cfg)
                     ball_unresolved += 1
@@ -1052,6 +1191,7 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
                 else:
                     ball_resolved += 1
                     n_committed += len(touched)
+                    committed_sites[("B", bid)] = ("BALL", "B1")
                     ledger_rows.append(("BALL", bid, None, "B1", "B1"))
             else:
                 ball_unresolved += 1
@@ -1065,7 +1205,8 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
         ball_resolved=ball_resolved, ball_unresolved=ball_unresolved,
         reverted=reverted, pocket_labels=pocket_labels,
         unresolved_items=unresolved_items, ledger_rows=ledger_rows,
-        n_committed=n_committed, newly_banned=newly_banned)
+        n_committed=n_committed, newly_banned=newly_banned,
+        committed_sites=committed_sites)
 
 
 def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
@@ -1085,17 +1226,23 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
     Shaft geometry (stubs, then struts) is spliced and revalidated before the ball
     phase reads it.
 
-    CONVERGENCE (fix-round F1): the three phases run as ONE sweep, then the sweep
-    repeats -- re-deriving the frozen defect snapshot from the MUTATED forest
+    CONVERGENCE (fix-round F1 + D3(a)): the three phases run as ONE sweep, then the
+    sweep repeats -- re-deriving the frozen defect snapshot from the MUTATED forest
     (`member_list_fn` re-reads the live member/ball lists) -- until a sweep commits
-    ZERO splices (the true-no-op fixed point) or the defect population stops
-    strictly decreasing (monotone guard against re-aim/slide oscillation), bounded
-    by `cfg.p8_max_relocate_sweeps` (default 8). This converts the previously-
-    discarded first relocation pass into cumulative progress and makes the §6.10
-    idempotence gate real: a subsequent `run_phase8` over the fixed-point forest
-    builds the same snapshot, commits zero splices in its first sweep, and returns
-    a byte-identical no-op. Deterministic: no RNG, no wall-clock in the loop body;
-    termination is driven by integer commit / defect counts only.
+    ZERO splices (the true-no-op fixed point) or every remaining target is retired,
+    bounded by `cfg.p8_max_relocate_sweeps` (default 8). PROGRESS-BASED RETIREMENT
+    (D3(a)) is what guarantees termination at a HONEST fixed point: a site committed
+    one sweep that reappears the next without its defect measure (transit chord for
+    stubs/struts, poke depth for balls) strictly shrinking made no progress and is
+    RETIRED for the rest of the run (filtered out of every later sweep), so the
+    committable population strictly shrinks and `converged` is reached before the
+    cap instead of churning to it. This converts the previously-discarded first
+    relocation pass into cumulative progress and makes the §6.10 idempotence gate
+    real: a subsequent `run_phase8` over the fixed-point forest builds the same
+    snapshot, commits zero splices in its first sweep, and returns a byte-identical
+    no-op. Deterministic: no RNG, no wall-clock in the loop body; termination is
+    driven by integer commit counts + snapshot-derived defect measures only, and
+    the retired set is built from sorted keys (no iteration-order dependence).
 
     `member_list_fn` (the engine passes `lambda: live_member_lists(forest, ...)`):
     re-reads the live member + ball lists from the current forest state between
@@ -1138,7 +1285,6 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
     first_sites = (0, 0, 0)
     first_moot = ()
     entered_any = False
-    prev_defect = None
     sweeps_run = 0
     reached_fp = False                          # True iff a further sweep is a no-op
     first_target_source = "live-gate"
@@ -1146,6 +1292,22 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
     # reverted candidate geom-keys. GROWS monotonically; makes the sweep loop a
     # provable fixed point (no revert/re-commit oscillation), never shrinks.
     banned: dict = {}
+    # D3(a) progress-based retirement (fixed point). `retired` GROWS monotonically:
+    # a committed site that reappears WITHOUT acceptable progress -- its defect
+    # measure not shrinking by the canonical granularity since its last commit, or
+    # it has exhausted its per-site commit budget -- is retired for the rest of the
+    # run (filtered out of every later sweep's site lists), so the committable
+    # population strictly shrinks and the loop reaches an honest no-op fixed point.
+    # `commit_measure` is a PERSISTENT per-site ledger (key -> (report_class, rung,
+    # measure_at_last_commit, commit_count)), checked at the TOP of every sweep so a
+    # site that reappears after a GAP (a neighbour co-move re-flagged a momentarily-
+    # resolved site) is caught too, not only on the immediately-next sweep. All keys
+    # are namespaced -- ('M', mi) for a stub/strut member, ('B', bid) for a ball --
+    # so a stub mi and a ball bid that share an integer never conflate.
+    retired: set = set()
+    retired_info: dict = {}                      # key -> (report_class, last_rung)
+    commit_measure: dict = {}                    # key -> (cls, rung, measure, count)
+    canon_mm = float(getattr(cfg, "p8_chord_canon_micron", 1)) * 1e-3
 
     for _sweep in range(max_sweeps):
         if _sweep > 0:
@@ -1154,20 +1316,36 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
                              mesh, unrouted=unrouted, quarantine_sites=quarantine_sites,
                              census_authority=census_authority,
                              frozen_snapshot=frozen_snapshot)
+        ne_set = frozenset(di.snapshot.non_exempt)
+        # ---- D3(a) part 1: progress-based retirement. Any previously-committed site
+        # that REAPPEARS in THIS sweep's snapshot without acceptable progress (measure
+        # not shrunk by the canonical granularity since its last commit, OR its commit
+        # budget is exhausted) is retired (honest-unresolved). Iterate the ledger keys
+        # in sorted order so the retired set is iteration-order-free.
+        for key in sorted(commit_measure):
+            if key in retired:
+                continue
+            rcls, rung, pre, count = commit_measure[key]
+            if _should_retire(_site_defect_measure(di, key, ne_set), pre, count, canon_mm):
+                retired.add(key)
+                retired_info[key] = (rcls, rung)
+        # filter construct_sites' output against the retired set (do NOT touch
+        # construct_sites itself) so a retired site never re-enters a sweep.
+        if retired:
+            di.stub_sites = [s for s in di.stub_sites
+                             if ("M", s.site_id) not in retired]
+            di.strut_sites = [s for s in di.strut_sites
+                              if ("M", s.site_id) not in retired]
+            di.ball_sites = [s for s in di.ball_sites
+                             if ("B", s.ball_id) not in retired]
         if first_summary is None:
             first_summary = di.snapshot.summary()
             first_sites = (len(di.stub_sites), len(di.strut_sites), len(di.ball_sites))
             first_moot = tuple(di.snapshot.moot)
             first_target_source = di.target_source
         if not (di.stub_sites or di.strut_sites or di.ball_sites):
-            reached_fp = True                   # snapshot emptied -> truly done
-            break                               # empty snapshot -> nothing left to do
-        # monotone guard: this sweep's starting defect population must be strictly
-        # below the previous sweep's, else stop (an oscillation / net-zero sweep).
-        defect = len(di.snapshot.non_exempt) + len(di.snapshot.ball_breaches)
-        if prev_defect is not None and defect >= prev_defect:
-            break
-        prev_defect = defect
+            reached_fp = True                   # snapshot emptied / all retired -> done
+            break                               # nothing left to work -> fixed point
         entered_any = True
 
         sw = _relocation_sweep(di, forest, geom, cfg, banned=banned,
@@ -1176,6 +1354,16 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
         # the NEXT sweep cannot re-pick the reverting winner (defect-3 anti-churn).
         for fi, gk in sw.newly_banned:
             banned.setdefault(fi, set()).add(gk)
+        # update the persistent commit ledger for every site committed THIS sweep:
+        # record its pre-commit defect measure (from THIS sweep's pre-mutation gate,
+        # `di.gate`) as the new progress baseline and bump its commit count, so the
+        # next sweep's retirement pass measures progress since this commit + enforces
+        # the per-site budget.
+        for key, (rcls, rung) in sw.committed_sites.items():
+            m = _site_defect_measure(di, key, ne_set)
+            prev = commit_measure.get(key)
+            count = (prev[3] + 1) if prev is not None else 1
+            commit_measure[key] = (rcls, rung, m if m is not None else float("inf"), count)
         sweeps_run += 1
         committed_by_sweep.append(sw.n_committed)
         stub_resolved += sw.stub_resolved
@@ -1209,14 +1397,33 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
             provenance_ledger=(), moot_member_ids=tuple(first_moot),
             target_source=first_target_source, sweep_tail_monotone=True, n_banned=0)
 
+    # D3(a) part 1: retired sites are honest-unresolved at their last rung. Move
+    # each out of the cumulative resolved tally into the unresolved tally + trace
+    # (a retired site was committed once then reappeared without progress, so it is
+    # not a genuine resolution). Sorted keys -> deterministic ordering.
+    retired_sites: list = []
+    for key in sorted(retired):
+        rcls, rung = retired_info[key]
+        _, sid = key
+        if rcls == "STUB":
+            stub_resolved -= 1; stub_unresolved += 1
+        elif rcls == "STRUT":
+            strut_resolved -= 1; strut_unresolved += 1
+        elif rcls == "BALL":
+            ball_resolved -= 1; ball_unresolved += 1
+        unresolved_items.append((rcls, sid, rung))
+        retired_sites.append((rcls, sid, rung))
+
     # converged iff a further sweep is provably a no-op: either the snapshot
-    # emptied or the last executed sweep committed nothing. A monotone-guard stop
-    # or a sweep-cap exhaustion leaves `reached_fp` False -- the ladder had NOT
-    # reached its fixed point, and idempotence is not claimed (reported honestly).
+    # emptied / every remaining target retired, or the last executed sweep
+    # committed nothing. A sweep-cap exhaustion leaves `reached_fp` False -- the
+    # ladder had NOT reached its fixed point, and idempotence is not claimed
+    # (reported honestly).
     converged = reached_fp
-    # anti-churn invariant (defect-3): with the collision-revert ban the per-sweep
-    # commit count is non-increasing -- the [116,57,9,2,3,2,1,1] revert/re-commit
-    # churn (a 2->3 rebound, a [...,1,1] tail) can no longer occur.
+    # anti-churn invariant (defect-3 + D3(a)): with the collision-revert ban, the
+    # no-op-candidate skip, and progress-based retirement, the per-sweep commit
+    # count is non-increasing -- the [116,57,9,2,3,2,1,1] revert/re-commit churn
+    # (a 2->3 rebound, a [...,1,1] tail) can no longer occur.
     sweep_tail_monotone = all(a >= b for a, b in
                               zip(committed_by_sweep, committed_by_sweep[1:]))
     n_banned = sum(len(v) for v in banned.values())
@@ -1236,7 +1443,8 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
         committed_by_sweep=tuple(committed_by_sweep),
         provenance_ledger=tuple(ledger), moot_member_ids=tuple(first_moot),
         target_source=first_target_source,
-        sweep_tail_monotone=sweep_tail_monotone, n_banned=n_banned)
+        sweep_tail_monotone=sweep_tail_monotone, n_banned=n_banned,
+        retired_sites=tuple(retired_sites))
 
 
 def _orig_embed(forest, fi):
