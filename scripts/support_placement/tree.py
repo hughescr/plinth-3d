@@ -355,6 +355,30 @@ class Forest:
         load/geometry-folding claim -- the contact is honestly unrouted."""
         self.quarantined.add(idx)
 
+    # ---- endpoint-node index (Phase-8 D2 co-move / neighbour lookup) ----
+    def endpoint_index(self):
+        """Batch endpoint-node index over every LIVE (non-dead) member: parallel
+        arrays `(fis, ends, pts)` for BOTH endpoints of each member -- `fis[k]`
+        the forest member index, `ends[k]` 0 for p0 / 1 for p1, `pts[k]` the (3,)
+        endpoint. Built ONCE per Phase-8 splice batch so the co-move dependent
+        scan and the affected-set neighbour lookup (SPEC-P8-RELOCATE D2) are a
+        single vectorised distance query against it, never a per-member forest
+        scan (batch-first). Dead members are excluded -- they are off the live
+        gate the splice guard mirrors. Captures the CURRENT (caller-timed)
+        geometry, so the caller builds it BEFORE mutating for a pre-splice
+        coincidence test."""
+        dead = self.dead
+        fis, ends, pts = [], [], []
+        for fi, m in enumerate(self.members):
+            if fi in dead:
+                continue
+            fis.append(fi); ends.append(0); pts.append(np.asarray(m.p0, float))
+            fis.append(fi); ends.append(1); pts.append(np.asarray(m.p1, float))
+        if not fis:
+            return (np.zeros(0, int), np.zeros(0, int), np.zeros((0, 3), float))
+        return (np.array(fis, dtype=int), np.array(ends, dtype=int),
+                np.array(pts, dtype=float))
+
     # ---- certificates ------------------------------------------------
     def dirty_members(self):
         if self.quarantined:
@@ -1105,7 +1129,7 @@ def volume_report(members, balls):
                 by_kind_ml=by_kind)
 
 
-def printability_report(members, cfg):
+def printability_report(members, cfg, subset=None):
     """Per-segment rim-overhang printability rule (design-v4.md #3): with
     z the build (up) axis, drift = |dc_xy|/dz, taper = (r_top-r_bot)/dz
     (signed -- an upward taper is a credit); violation if
@@ -1121,9 +1145,18 @@ def printability_report(members, cfg):
     physical necessity (not a choice the builder makes), so subjecting it
     to the same cone rule as a free-standing shaft would flag nearly
     every contact on any non-vertical surface. Balls are exempt by
-    construction (this function only ever sees frustum members)."""
+    construction (this function only ever sees frustum members).
+
+    `subset` (SPEC-P8-RELOCATE D2 affected-set guard): when given, only the
+    member indices it lists are evaluated -- the returned `member_idx` stays in
+    the FULL `members` index space (so a Phase-8 splice can key a NEW-violation
+    diff on member identity), and `subset=None` reproduces the whole-list gate
+    verbatim (index order 0..n). Printability is per-member independent, so a
+    subset is a pure restriction of the evaluated set, never a behaviour change."""
     violations = []
-    for mi, m in enumerate(members):
+    indices = range(len(members)) if subset is None else subset
+    for mi in indices:
+        m = members[mi]
         kind = _get(m, "kind")
         if kind == "stub":
             continue

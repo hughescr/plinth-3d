@@ -50,7 +50,7 @@ from typing import Optional
 
 import numpy as np
 
-from . import phase8, verify, joints, p8_accept
+from . import phase8, verify, joints, p8_accept, tree
 
 # ---------------------------------------------------------------------------
 # Frozen-fixture target law (SPEC-P8-RELOCATE §3.0 / §5.3) -- the TREANT law.
@@ -523,34 +523,239 @@ def _apply_member_geometry(fmember, cand_member: dict, orig_embed_end):
         fmember.r0 = r0; fmember.r1 = r1
 
 
-def splice_reaims(forest, geom, cfg, accepted: list):
+# ---------------------------------------------------------------------------
+# D2 (SPEC-P8-RELOCATE): connectivity- and printability-preserving commits.
+# ---------------------------------------------------------------------------
+def _live_universe(forest, unrouted):
+    """The live member-dict universe the engine gate sees (`live_member_lists`'
+    filter: drop honestly-unrouted stubs + rewire-dead), plus the stable
+    forest<->live index maps. Built ONCE per splice batch (batch-first): the
+    affected-set connectivity guard scores every subset endpoint against THIS
+    full universe (so a member never reads floating merely for lack of a partner
+    outside the subset). Returns `(members_dicts, live_fi, pos_of)` where
+    `members_dicts[k]` is `forest.members[live_fi[k]]` and `pos_of[fi] == k`. The
+    live-index SET is stable across the splice (no member is added/killed, only
+    moved), so `live_fi`/`pos_of` are valid for both the pre and post reports."""
+    unrouted_stub_idx = {forest.terminal_of[i] for i in unrouted
+                         if i in forest.terminal_of}
+    dead = getattr(forest, "dead", set())
+    live_fi = [fi for fi in range(len(forest.members))
+               if fi not in unrouted_stub_idx and fi not in dead]
+    members = joints.collect_members([forest.members[fi] for fi in live_fi])
+    pos_of = {fi: k for k, fi in enumerate(live_fi)}
+    return members, live_fi, pos_of
+
+
+def _coincident(idx_arr, end_arr, pt_arr, point, tol, exclude_fi=None):
+    """Vectorised endpoint-node coincidence query against a pre-built
+    `Forest.endpoint_index` (batch-first, not a per-member forest scan). Returns
+    `[(fi, end), ...]` for every indexed endpoint within `tol` of `point`,
+    excluding `exclude_fi`. Same coincidence semantics as `_translate_joint`."""
+    if len(idx_arr) == 0:
+        return []
+    d = np.linalg.norm(pt_arr - np.asarray(point, float)[None, :], axis=1)
+    hit = np.nonzero(d <= tol)[0]
+    return [(int(idx_arr[k]), int(end_arr[k])) for k in hit
+            if exclude_fi is None or int(idx_arr[k]) != exclude_fi]
+
+
+def _member_endpoints(snap):
+    """The two `(point, radius)` endpoints of a member snapshot (p0/r0, p1/r1)."""
+    return ((np.asarray(snap["p0"], float), float(snap["r0"])),
+            (np.asarray(snap["p1"], float), float(snap["r1"])))
+
+
+def _affected_new_violations(forest, geom, cfg, plate_z, pre_members, live_fi,
+                             pos_of, affected_fis):
+    """Connectivity + printability NEW-violation diff over the affected set (D2
+    part B). `pre_members` is the live-universe dict list captured BEFORE the
+    splice (same order as `live_fi`); the CURRENT forest geometry is the post
+    state. Returns `(new_conn_fis, new_print_fis)` -- forest member indices whose
+    endpoint newly floats / whose shaft newly over-leans POST but did NOT PRE, so
+    a pre-existing baseline issue elsewhere never blocks a legal re-aim. BATCH-
+    FIRST: exactly ONE connectivity + ONE printability report per side over the
+    whole affected subset, never per member. `plate_z is None` (legacy/unit
+    callers) disables the guard -- returns empty sets."""
+    if plate_z is None:
+        return set(), set()
+    subset = sorted(pos_of[fi] for fi in affected_fis if fi in pos_of)
+    if not subset:
+        return set(), set()
+    post_members = joints.collect_members([forest.members[fi] for fi in live_fi])
+    pre_conn = verify.connectivity_report(pre_members, plate_z, cfg, geom=geom, subset=subset)
+    post_conn = verify.connectivity_report(post_members, plate_z, cfg, geom=geom, subset=subset)
+    pre_ck = {(live_fi[v["member_idx"]], v["end"]) for v in pre_conn}
+    post_ck = {(live_fi[v["member_idx"]], v["end"]) for v in post_conn}
+    pre_pr = tree.printability_report(pre_members, cfg, subset=subset)
+    post_pr = tree.printability_report(post_members, cfg, subset=subset)
+    pre_pk = {live_fi[v["member_idx"]] for v in pre_pr}
+    post_pk = {live_fi[v["member_idx"]] for v in post_pr}
+    new_conn = {fi for (fi, _e) in (post_ck - pre_ck)}
+    new_print = post_pk - pre_pk
+    return new_conn, new_print
+
+
+def _ball_slide_guard_ok(forest, geom, cfg, plate_z, saved, pre_members, live_fi,
+                         pos_of, idx_arr, end_arr, pt_arr) -> bool:
+    """D2 widened guard for a ball-joint slide (Phase-3): the affected set (the
+    translated joint members UNION their endpoint-neighbours) carries NO new
+    connectivity / printability violation vs the pre-slide baseline. `saved` is
+    `_translate_joint`'s `(fi, pre-snapshot)` list; the forest currently holds the
+    POST-slide geometry (this is called before the trial undo). `plate_z is None`
+    disables the guard (legacy/unit callers)."""
+    if plate_z is None:
+        return True
+    affected = {fi for fi, _s in saved}
+    for fi, snap in saved:
+        for pt, r in _member_endpoints(snap):
+            for (nfi, _ne) in _coincident(idx_arr, end_arr, pt_arr, pt,
+                                          max(0.05, 0.5 * r), exclude_fi=fi):
+                affected.add(nfi)
+    new_conn, new_print = _affected_new_violations(
+        forest, geom, cfg, plate_z, pre_members, live_fi, pos_of, affected)
+    return not (new_conn or new_print)
+
+
+def splice_reaims(forest, geom, cfg, accepted: list, *, plate_z=None, unrouted=()):
     """Splice a batch of accepted re-aims into the forest under its
     checkpoint/revalidate protocol (deterministic, transactional). `accepted` is
-    a list of `(forest_idx, cand_member, orig_embed_end)`. Applies every winner,
-    runs ONE batched `forest.revalidate` (the §5-law re-check), and REVERTS any
-    member that comes back a violation to its pre-splice geometry (never strands
-    the contact -- a candidate that fails the collision law is dropped, its site
-    reported unresolved). Returns `(n_committed, reverted_forest_idxs)`."""
+    a list of `(forest_idx, cand_member, orig_embed_end)`.
+
+    D2 (SPEC-P8-RELOCATE) makes the splice connectivity- and printability-
+    PRESERVING:
+
+      (A) CO-MOVE: a re-aim moves a member's tree-side end (a stub's p1, a strut's
+          free p0); every OTHER live member whose endpoint is coincident with the
+          OLD tree-side node (same test as `_translate_joint`, tol max(0.05,
+          0.5*r)) rides the same delta ATOMICALLY, snapshotted into the same
+          transaction, so the junction stays welded by construction -- exactly
+          what the ball-slide path already does for joints.
+
+      (B) WIDENED GUARD: after applying the batch, in addition to the §5-law
+          `forest.revalidate` clearance re-check, the affected set (spliced UNION
+          co-moved UNION endpoint-neighbours) is scored for NEW connectivity /
+          printability violations vs the pre-splice baseline; any transaction whose
+          responsibility set intersects a new violation (clearance, connectivity,
+          or printability) is REVERTED AS A UNIT -- every co-moved member restored
+          bit-exact -- so a re-aim never strands or over-leans a member. Batch-
+          first: one report per side over the whole affected list.
+
+    Returns `(n_committed, reverted_forest_idxs)` (committed / reverted PRIMARY
+    site count -- the caller keys the anti-churn ban on the reverted primaries)."""
     if not accepted:
         return 0, []
+    # pre-splice endpoint-node index + live universe (built ONCE, batch-first):
+    # the co-move scan and the neighbour lookup query this index; the guard diffs
+    # `pre_members` (this geometry) against the mutated post state.
+    idx_arr, end_arr, pt_arr = forest.endpoint_index()
+    pre_members, live_fi, pos_of = _live_universe(forest, unrouted)
+
     saved = {}
+
+    def _snap(fi):
+        if fi not in saved:
+            saved[fi] = forest.members[fi]._snapshot()
+
+    primary_fis = {fi for fi, _cm, _e in accepted
+                   if fi is not None and 0 <= fi < len(forest.members)}
+    moved_endpoints = set()          # (fi, end) already displaced -> co-move at most once
+    txns = []                        # (primary_fi, members:set, responsibility:set)
+
     for fi, cand_member, orig_embed in accepted:
         if fi is None or not (0 <= fi < len(forest.members)):
             continue
         fm = forest.members[fi]
-        saved[fi] = fm._snapshot()
+        embed = orig_embed if orig_embed in ("p0", "p1") else fm.embed_end
+        tree_end = 0 if embed == "p1" else 1     # the NON-embedded (tree-side) end
+        snap0 = fm._snapshot()
+        old_tree_pt = np.asarray(snap0["p0"] if tree_end == 0 else snap0["p1"], float)
+        r_tree = float(snap0["r0"] if tree_end == 0 else snap0["r1"])
+        _snap(fi)
         _apply_member_geometry(fm, cand_member, orig_embed)
+        new_tree_pt = np.asarray(fm.p0 if tree_end == 0 else fm.p1, float)
+        delta = new_tree_pt - old_tree_pt
+
+        members_of = {fi}
+        # (A) co-move dependents coincident with the OLD tree-side node.
+        tol = max(0.05, 0.5 * r_tree)
+        for (cfi, cend) in _coincident(idx_arr, end_arr, pt_arr, old_tree_pt, tol,
+                                       exclude_fi=fi):
+            if cfi in primary_fis or (cfi, cend) in moved_endpoints:
+                continue                         # its own re-aim / already displaced
+            _snap(cfi)
+            cm = forest.members[cfi]
+            if cend == 0:
+                cm.p0 = np.asarray(cm.p0, float) + delta
+            else:
+                cm.p1 = np.asarray(cm.p1, float) + delta
+            moved_endpoints.add((cfi, cend))
+            members_of.add(cfi)
+
+        # responsibility = txn members UNION endpoint-neighbours (members a re-aim
+        # could ORPHAN); a new float on any of them reverts THIS transaction.
+        resp = set(members_of)
+        for mfi in members_of:
+            for pt, r in _member_endpoints(saved[mfi]):
+                for (nfi, _ne) in _coincident(idx_arr, end_arr, pt_arr, pt,
+                                              max(0.05, 0.5 * r), exclude_fi=mfi):
+                    resp.add(nfi)
+        txns.append((fi, members_of, resp))
+
     if not saved:
         return 0, []
+
+    # merge txns that share a member (a co-moved member can land in two txns' sets)
+    # into groups -- the revert UNIT, so a restore from the pre-splice snapshot is
+    # bit-exact and no member is split across a partial revert. Deterministic:
+    # groups keyed/sorted by min primary fi.
+    n = len(txns)
+    parent = list(range(n))
+
+    def _find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def _union(a, b):
+        ra, rb = _find(a), _find(b)
+        if ra != rb:
+            parent[max(ra, rb)] = min(ra, rb)
+
+    owner = {}
+    for ti, (_p, members_of, _r) in enumerate(txns):
+        for mfi in members_of:
+            if mfi in owner:
+                _union(ti, owner[mfi])
+            else:
+                owner[mfi] = ti
+    groups = {}
+    for ti in range(n):
+        g = groups.setdefault(_find(ti), dict(primaries=[], members=set(), resp=set()))
+        g["primaries"].append(txns[ti][0])
+        g["members"] |= txns[ti][1]
+        g["resp"] |= txns[ti][2]
+
+    # ---- widened commit guard (D2 part B): clearance + connectivity + printability.
     violations = forest.revalidate(geom, cfg)
+    bad_clearance = {v["member_idx"] for v in violations if v["member_idx"] in saved}
+    affected = set().union(*(g["resp"] for g in groups.values())) if groups else set()
+    new_conn, new_print = _affected_new_violations(
+        forest, geom, cfg, plate_z, pre_members, live_fi, pos_of, affected)
+    bad_members = bad_clearance | new_conn | new_print
+
     reverted = []
-    bad = {v["member_idx"] for v in violations if v["member_idx"] in saved}
-    for fi in sorted(bad):
-        forest.members[fi]._restore(saved[fi])
-        reverted.append(fi)
-    if reverted:
-        forest.revalidate(geom, cfg)   # re-certify the restored (already-legal) members
-    return len(saved) - len(reverted), reverted
+    if bad_members:
+        for _root, g in sorted(groups.items(), key=lambda kv: min(kv[1]["primaries"])):
+            if g["resp"] & bad_members:
+                for mfi in sorted(g["members"]):
+                    if mfi in saved:
+                        forest.members[mfi]._restore(saved[mfi])
+                reverted.extend(sorted(g["primaries"]))
+        if reverted:
+            forest.revalidate(geom, cfg)   # re-certify the restored members
+    n_committed = len(txns) - len(reverted)
+    return n_committed, reverted
 
 
 # ---------------------------------------------------------------------------
@@ -642,6 +847,30 @@ def _ban_revalidate_fn(banned: dict, site_forest_idx: dict):
     return _ok
 
 
+def _strut_shaft_printability_ok(cand, cfg) -> bool:
+    """S1 strut candidate legality (D2, SPEC-P8-RELOCATE): reject a re-aim whose
+    SHAFT tilts past the cfg overhang cone -- the SAME drift+taper printability
+    predicate the commit gate enforces (`tree.printability_report`), reused
+    verbatim on the single candidate member so an illegal candidate is pruned at
+    SELECTION, not discovered at commit (cheaper, and keeps the honest-fall
+    accounting right). Stubs are printability-exempt, so this is composed into the
+    strut selection filter only. Candidate sets are <=75/site, so this per-
+    candidate check is not a hot-path batch violation (it is the existing
+    revalidate_fn contract's own per-candidate hook)."""
+    return not tree.printability_report([cand.member], cfg)
+
+
+def _compose_strut_revalidate_fn(ban_fn, cfg):
+    """Compose the cross-sweep collision-revert ban (defect-3 anti-churn) with the
+    D2 strut shaft-angle legality filter for the Phase-2 struts selection. Either
+    or both may be active; a candidate must pass BOTH."""
+    def _ok(cand):
+        if ban_fn is not None and not ban_fn(cand):
+            return False
+        return _strut_shaft_printability_ok(cand, cfg)
+    return _ok
+
+
 def _stub_revalidate_fn(site_by_id):
     """No injected support-support revalidate at ladder-selection time: the
     §5-law model-surface legality (SCAR-AREA-CAP + rule-4 + PRINT-FLOOR) is
@@ -674,7 +903,8 @@ class _SweepResult:
 
 
 def _relocation_sweep(di: DriverInput, forest, geom, cfg,
-                      banned: Optional[dict] = None) -> _SweepResult:
+                      banned: Optional[dict] = None,
+                      plate_z=None, unrouted=()) -> _SweepResult:
     """Run ONE Phase 1 (stubs+Q-REAL) -> Phase 2 (struts) -> Phase 3 (balls) pass
     over the FROZEN sites in `di`, splicing accepted re-aims/slides into `forest`
     under the transactional revalidate protocol. Pure single-sweep mechanics --
@@ -735,7 +965,8 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
                 accepted.append((fi, r1res.winner.member, _orig_embed(forest, fi)))
             ledger_rows.append(("STUB", mid, fi, "ISOLATED", "R1" if ok else "R2"))
         acc_by_fi = {fi: cm for fi, cm, _emb in accepted}
-        n_ok, rv = splice_reaims(forest, geom, cfg, accepted)
+        n_ok, rv = splice_reaims(forest, geom, cfg, accepted,
+                                 plate_z=plate_z, unrouted=unrouted)
         n_committed += n_ok
         reverted.extend(("STUB", fi) for fi in rv)
         stub_resolved -= len(rv); stub_unresolved += len(rv)
@@ -748,7 +979,7 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
     strut_resolved = strut_unresolved = 0
     if di.strut_sites:
         sres = phase8.run_phase2_struts(di.strut_sites, geom, cfg,
-                                        revalidate_fn=ban_fn)
+                                        revalidate_fn=_compose_strut_revalidate_fn(ban_fn, cfg))
         accepted = []
         for sid, sr in sres.items():
             if sr.rung == "S1" and sr.winner is not None:
@@ -761,7 +992,8 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
                 unresolved_items.append(("STRUT", sid, sr.rung))
                 ledger_rows.append(("STRUT", sid, None, "UNRESOLVED", sr.rung))
         acc_by_fi = {fi: cm for fi, cm, _emb in accepted}
-        n_ok, rv = splice_reaims(forest, geom, cfg, accepted)
+        n_ok, rv = splice_reaims(forest, geom, cfg, accepted,
+                                 plate_z=plate_z, unrouted=unrouted)
         n_committed += n_ok
         reverted.extend(("STRUT", fi) for fi in rv)
         strut_resolved -= len(rv); strut_unresolved += len(rv)
@@ -774,13 +1006,21 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
     ball_resolved = ball_unresolved = 0
     if di.ball_sites:
         def _slide_revalidate(site, sl):
-            delta = np.asarray(sl.center, float) - np.asarray(site.center, float)
-            saved = _translate_joint(forest, np.asarray(site.center, float), delta,
-                                     tol=max(0.05, 0.5 * site.r))
+            center = np.asarray(site.center, float)
+            delta = np.asarray(sl.center, float) - center
+            tol = max(0.05, 0.5 * site.r)
+            # pre-slide index + universe (D2 guard baseline), captured BEFORE move.
+            idx_arr, end_arr, pt_arr = forest.endpoint_index()
+            pre_members, live_fi, pos_of = _live_universe(forest, unrouted)
+            saved = _translate_joint(forest, center, delta, tol=tol)
             if not saved:
                 return False
             viol = forest.revalidate(geom, cfg)
-            ok = not any(v["member_idx"] in {fi for fi, _s in saved} for v in viol)
+            touched = {fi for fi, _s in saved}
+            ok = (not any(v["member_idx"] in touched for v in viol)
+                  and _ball_slide_guard_ok(forest, geom, cfg, plate_z, saved,
+                                           pre_members, live_fi, pos_of,
+                                           idx_arr, end_arr, pt_arr))
             for fi, snapm in saved:              # trial only -- always undo here
                 forest.members[fi]._restore(snapm)
             forest.revalidate(geom, cfg)
@@ -790,12 +1030,19 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
         for bid, br in bres.items():
             site = next((s for s in di.ball_sites if s.ball_id == bid), None)
             if br.rung == "B1" and br.slide is not None and site is not None:
-                delta = np.asarray(br.slide.center, float) - np.asarray(site.center, float)
-                saved = _translate_joint(forest, np.asarray(site.center, float), delta,
-                                         tol=max(0.05, 0.5 * site.r))
+                center = np.asarray(site.center, float)
+                delta = np.asarray(br.slide.center, float) - center
+                tol = max(0.05, 0.5 * site.r)
+                idx_arr, end_arr, pt_arr = forest.endpoint_index()
+                pre_members, live_fi, pos_of = _live_universe(forest, unrouted)
+                saved = _translate_joint(forest, center, delta, tol=tol)
                 viol = forest.revalidate(geom, cfg)
                 touched = {fi for fi, _s in saved}
-                if any(v["member_idx"] in touched for v in viol):
+                clean = (not any(v["member_idx"] in touched for v in viol)
+                         and _ball_slide_guard_ok(forest, geom, cfg, plate_z, saved,
+                                                  pre_members, live_fi, pos_of,
+                                                  idx_arr, end_arr, pt_arr))
+                if not clean:
                     for fi, snapm in saved:
                         forest.members[fi]._restore(snapm)
                     forest.revalidate(geom, cfg)
@@ -923,7 +1170,8 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
         prev_defect = defect
         entered_any = True
 
-        sw = _relocation_sweep(di, forest, geom, cfg, banned=banned)
+        sw = _relocation_sweep(di, forest, geom, cfg, banned=banned,
+                               plate_z=plate_z, unrouted=unrouted)
         # accumulate this sweep's collision-reverts into the monotone ban set so
         # the NEXT sweep cannot re-pick the reverting winner (defect-3 anti-churn).
         for fi, gk in sw.newly_banned:

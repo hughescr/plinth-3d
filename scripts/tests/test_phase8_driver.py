@@ -695,3 +695,111 @@ def test_frozen_fixture_absent_falls_back_to_live_gate(cfg):
                             _fin_mesh(), unrouted=[], frozen_snapshot=frozen)
     assert di.target_source == "live-gate"
     assert len(di.stub_sites) == 1                            # the fin transit only
+
+
+# ==========================================================================
+# 9. DIRECTIVE 1 / D2 -- connectivity- & printability-preserving splice commits.
+#    (SPEC-P8-RELOCATE; site-derived from the p8f_run1 130-connectivity /
+#     9-printability offenders, encoded as deterministic synthetic fixtures so the
+#     regression runs everywhere -- the offender CLASSES, not the pinned indices.)
+# ==========================================================================
+def _faraway_box_geom():
+    """An ExactSurface whose mesh is far from the origin -- clearance is trivially
+    clean and nothing embeds, so a splice's ONLY guard trigger is connectivity /
+    printability (the axis we mean to test), never a mesh collision."""
+    return ExactSurface(_box((5, 5, 5), center=(0, 0, -50)))
+
+
+def _stub_with_child(tree_node=(0.0, 0.0, 0.0), child_p1=(0.0, 0.0, -0.5),
+                     r_child=(0.3, 0.3), child_kind="trunk"):
+    """A class-T stub S (fi0) whose tree-side end p1 IS `tree_node`, plus a child
+    member R (fi1) whose p0 is COINCIDENT with that node (R.p1 lands on the plate
+    at z = child_p1[2]). This is the 130-connectivity offender shape: a re-aim that
+    moves S.p1 must drag R.p0 with it or R is orphaned."""
+    forest = tree.Forest()
+    s = tree.Member(p0=np.array([0.0, 0.0, 0.5]), p1=np.asarray(tree_node, float),
+                    r0=0.2, r1=0.3, kind="stub", owner=("contact", 0), embed_end="p0")
+    forest.add_member(s)
+    r = tree.Member(p0=np.asarray(tree_node, float), p1=np.asarray(child_p1, float),
+                    r0=float(r_child[0]), r1=float(r_child[1]), kind=child_kind,
+                    owner=("contact", 1), embed_end=None)
+    forest.add_member(r)
+    return forest
+
+
+def test_d2_reaim_comoves_child_junction_and_preserves_connectivity(cfg):
+    """D2 part A (site-derived, the 130 class-T connectivity offenders): a re-aim
+    that moves a stub's tree-side p1 CO-MOVES every live member endpoint coincident
+    with the OLD node, so the child junction rides p1 and the junction stays welded
+    -- connectivity is preserved BY CONSTRUCTION and the splice commits."""
+    geom = _faraway_box_geom()
+    plate_z = -0.5
+    forest = _stub_with_child(tree_node=(0.0, 0.0, 0.0), child_p1=(0.0, 0.0, -0.5))
+    # a small re-aim: keep the embedded tip fixed, nudge the tree-side p1.
+    new_p1 = np.array([0.1, 0.0, 0.0])
+    cand = dict(p0=np.array([0.0, 0.0, 0.5]), p1=new_p1, r0=0.2, r1=0.3,
+                kind="stub", owner=("contact", 0), embed_end="p0")
+    n_ok, reverted = pd.splice_reaims(forest, geom, cfg, [(0, cand, "p0")],
+                                      plate_z=plate_z, unrouted=[])
+    assert reverted == [] and n_ok == 1                        # committed, not reverted
+    # the child junction R.p0 rode the SAME delta -> still coincident with S.p1.
+    assert np.allclose(forest.members[1].p0, new_p1)           # co-moved
+    assert np.allclose(forest.members[0].p1, forest.members[1].p0)   # still welded
+    # affected-set connectivity has no NEW float (the junction survived the re-aim).
+    members = joints.collect_members([forest.members[0], forest.members[1]])
+    conn = verify.connectivity_report(members, plate_z, cfg, geom=geom, subset=[0, 1])
+    assert not any(v["member_idx"] == 1 for v in conn)         # R never floats
+
+
+def test_d2_new_printability_violation_reverts_transaction_as_a_unit(cfg):
+    """D2 part B (site-derived, the 9 printability offenders): a re-aim whose
+    CO-MOVE tilts a dependent shaft past the overhang cone introduces a NEW
+    printability violation on the co-moved member; the whole transaction (primary
+    UNION co-moved) is reverted AS A UNIT -- every member restored bit-exact
+    (verified by _snapshot equality), the contact never stranded."""
+    geom = _faraway_box_geom()
+    plate_z = -0.5
+    # R is a near-vertical trunk (legal); a big HORIZONTAL node move tilts it flat.
+    forest = _stub_with_child(tree_node=(0.0, 0.0, 0.0), child_p1=(0.0, 0.0, -0.5),
+                              r_child=(0.4, 0.4), child_kind="trunk")
+    snap_s0 = forest.members[0]._snapshot()
+    snap_r0 = forest.members[1]._snapshot()
+    assert not tree.printability_report([forest.members[1]], cfg)   # R legal PRE
+    new_p1 = np.array([10.0, 0.0, 0.0])                        # drags R.p0 to (10,0,0)
+    cand = dict(p0=np.array([0.0, 0.0, 0.5]), p1=new_p1, r0=0.2, r1=0.3,
+                kind="stub", owner=("contact", 0), embed_end="p0")
+    n_ok, reverted = pd.splice_reaims(forest, geom, cfg, [(0, cand, "p0")],
+                                      plate_z=plate_z, unrouted=[])
+    assert reverted == [0] and n_ok == 0                       # whole txn reverted
+    # both the primary AND the co-moved child restored BIT-EXACT (_snapshot equality).
+    for snap, fi in ((snap_s0, 0), (snap_r0, 1)):
+        cur = forest.members[fi]._snapshot()
+        assert np.array_equal(cur["p0"], snap["p0"]) and np.array_equal(cur["p1"], snap["p1"])
+        assert cur["r0"] == snap["r0"] and cur["r1"] == snap["r1"]
+
+
+def test_d2_strut_shaft_angle_candidate_pruned_at_selection(cfg):
+    """D2 (site-derived, the strut-825 printability class): a strut re-aim whose
+    shaft tilts past the cfg overhang cone is pruned at S1 SELECTION by the
+    printability filter (the SAME drift+taper predicate the commit gate enforces),
+    not discovered at commit -- and the filter composes with the anti-churn ban."""
+    flat = phase8.Candidate(site_id=1, cand_index=0, length_step=0, f=1.0,
+                            polar_deg=80.0, azimuth_deg=0.0, n_hat=np.array([1., 0, 0.1]),
+                            member=dict(p0=np.array([0., 0, 0]), p1=np.array([5., 0, 0.1]),
+                                        r0=0.3, r1=0.3, kind="strut", embed_end="p0",
+                                        owner=("contact", 0)))
+    upright = phase8.Candidate(site_id=1, cand_index=1, length_step=0, f=1.0,
+                               polar_deg=0.0, azimuth_deg=0.0, n_hat=np.array([0., 0, 1.]),
+                               member=dict(p0=np.array([0., 0, 0]), p1=np.array([0., 0, 5.]),
+                                           r0=0.3, r1=0.3, kind="strut", embed_end="p0",
+                                           owner=("contact", 0)))
+    assert pd._strut_shaft_printability_ok(flat, cfg) is False       # pruned
+    assert pd._strut_shaft_printability_ok(upright, cfg) is True      # kept
+    # composition with the ban: an upright but BANNED candidate is also rejected.
+    ban = {7: {pd._cand_geom_key(upright.member)}}
+    fn = pd._compose_strut_revalidate_fn(pd._ban_revalidate_fn(ban, {1: 7}), cfg)
+    assert fn(flat) is False                                          # printability
+    assert fn(upright) is False                                       # banned
+    # no ban installed -> only the printability filter binds.
+    fn2 = pd._compose_strut_revalidate_fn(None, cfg)
+    assert fn2(flat) is False and fn2(upright) is True

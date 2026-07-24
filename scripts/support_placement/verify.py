@@ -866,7 +866,8 @@ def island_birth_report(island_births, routed_contacts, cfg):
     return out
 
 
-def connectivity_report(members, plate_z, cfg, surface_tree=None, geom=None):
+def connectivity_report(members, plate_z, cfg, surface_tree=None, geom=None,
+                        subset=None):
     """v3.7 hard gate (Craig's Chitubox review), signature-migrated for v4
     (design-v4.md #2): the stale-brace-leak and chained-Y-branch defects
     both manifested the same way in the emitted file -- a member with an
@@ -897,15 +898,27 @@ def connectivity_report(members, plate_z, cfg, surface_tree=None, geom=None):
           rather than silently passed (the fixture pinning this case
           stays a guard on engine.py always supplying one for real runs).
 
-    Returns a list of violation dicts {kind, endpoint (xyz list), gap_mm}
-    -- gap_mm is the distance to the nearest legitimate attachment of the
-    allowed kinds for that endpoint. Vectorized (member-axis distances
-    computed in point-chunks against all member axes at once) to stay well
-    under a second at real-model scale.
+    Returns a list of violation dicts {kind, endpoint (xyz list), gap_mm,
+    member_idx, end} -- gap_mm is the distance to the nearest legitimate
+    attachment of the allowed kinds for that endpoint; member_idx is the
+    endpoint's index in `members` and `end` is 0 (p0) or 1 (p1) (added for the
+    SPEC-P8-RELOCATE D2 affected-set NEW-violation diff -- purely additive, the
+    gate reads only the list length). Vectorized (member-axis distances computed
+    in point-chunks against all member axes at once) to stay well under a second
+    at real-model scale.
+
+    `subset` (SPEC-P8-RELOCATE D2): when given (an iterable of `members`
+    indices), ONLY those members' endpoints are EVALUATED and returned, while the
+    attachment universe stays the FULL member list -- so a Phase-8 splice can
+    ask "did moving these members newly float any of their own endpoints" without
+    re-scanning the whole forest and without a member falsely reading floating for
+    lack of a partner outside the subset. `subset=None` evaluates every endpoint
+    (the whole-forest gate), unchanged.
     """
     members = joints.collect_members(members)
     if not members:
         return []
+    subset_set = None if subset is None else {int(i) for i in subset}
 
     m_p0 = np.array([m["p0"] for m in members], dtype=float)
     m_p1 = np.array([m["p1"] for m in members], dtype=float)
@@ -914,15 +927,23 @@ def connectivity_report(members, plate_z, cfg, surface_tree=None, geom=None):
     L2safe = np.where(L2 < 1e-18, 1.0, L2)
     zero_len = L2 < 1e-18
 
-    # endpoints: (member_idx, point, embed_eligible)
-    ep_mi, ep_pts, ep_embed = [], [], []
+    # endpoints: (member_idx, end, point, embed_eligible). When `subset` is
+    # given only the subset members' endpoints are EVALUATED (the m_p0/m_p1 axis
+    # UNIVERSE above stays the full member list, so attachment to an out-of-subset
+    # partner still counts and self-exclusion by full member_idx still holds).
+    ep_mi, ep_end, ep_pts, ep_embed = [], [], [], []
     for mi, m in enumerate(members):
+        if subset_set is not None and mi not in subset_set:
+            continue
         embed0 = m.get("embed_end") == "p0"
         embed1 = m.get("embed_end") == "p1"
-        ep_mi.append(mi); ep_pts.append(m["p0"]); ep_embed.append(embed0)
-        ep_mi.append(mi); ep_pts.append(m["p1"]); ep_embed.append(embed1)
+        ep_mi.append(mi); ep_end.append(0); ep_pts.append(m["p0"]); ep_embed.append(embed0)
+        ep_mi.append(mi); ep_end.append(1); ep_pts.append(m["p1"]); ep_embed.append(embed1)
 
+    if not ep_mi:                       # empty subset -> nothing to evaluate
+        return []
     ep_mi = np.array(ep_mi)
+    ep_end = np.array(ep_end)
     pts = np.array(ep_pts, dtype=float)
     embed_ok = np.array(ep_embed, dtype=bool)
 
@@ -979,7 +1000,8 @@ def connectivity_report(members, plate_z, cfg, surface_tree=None, geom=None):
         gap = float(gap_mm_arr[k])
         violations.append(dict(kind=members[mi]["kind"],
                                 endpoint=np.asarray(pts[k], float).tolist(),
-                                gap_mm=(gap if np.isfinite(gap) else None)))
+                                gap_mm=(gap if np.isfinite(gap) else None),
+                                member_idx=mi, end=int(ep_end[k])))
     return violations
 
 
