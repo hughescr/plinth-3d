@@ -1,0 +1,11 @@
+PICKLE /private/tmp/claude-501/-Users-craig-code-hughescr-dnd-campaigns/0ddf6d41-f89e-4672-9577-2690d62b260c/scratchpad/v5p_treant_run1.pkl
+digest combined_sha = 09ce1fd6a9a1b8b3d3d253a7f76e74199e08a0c1549d173fe5069e187c1b5e76
+n_members=1476 n_balls=1049
+ball_breach_report RAW (combined)     = 199
+  source=ball                          = 15
+  source=endcap                        = 184
+  source=other (unexpected)             = 0
+self_verify ball_breach_violations      = 15
+self_verify embed_end_breach_violations = 184
+census n_breaching_balls (same forest, rerun_penetration_census.json) = 15
+RESULT: PASS

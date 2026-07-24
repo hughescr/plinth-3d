@@ -297,6 +297,26 @@ today), but each derives its own inset/exemption logic separately.
   candidate), so a thin-twig anchor is rejected and the trial machinery moves
   to the next candidate — verify's gate is then a true independent re-check,
   not the first line of defense.
+- **AMENDED (R3, 2026-07-23 full-scale acceptance finding):** the HARD gate
+  (`ok`) and `self_verify`'s reported `ball_breach_violations` are scoped to
+  the independent census's own antipodal-span reference: actual joint balls
+  ONLY, matching it both algorithmically (same math) and in SCOPE (census
+  never evaluates a member's embedded tip as a sphere at all). On the real
+  Weeping Treant forest `ball_breach_report`'s combined list was 199 (15
+  ball + 184 endcap) while the census's independent count for the identical
+  1049-ball set was 15 — i.e. exact agreement on the ball category, and the
+  entire gap is the amendment-5 endcap category, whose flags cluster at the
+  measurement floor (~0.05-0.11mm feature thickness at r=0.2mm stub tips) in
+  dense crown foliage on this non-watertight, double-walled mesh. The
+  amendment-5 check itself is UNCHANGED (still synthesizes + tests every
+  embedded end, still runs on the combined set) — its findings are now
+  surfaced as `embed_end_breach_violations`, a report-only diagnostic (never
+  ANDed into `ok`), preserved for Phase-8 relocation triage rather than
+  dropped. Aligning the embed-end check's own thickness/inset accounting
+  with the census (so it stops clustering at the floor) is R4's job, out of
+  R3's scope. See `verify.self_verify`'s inline note and
+  `validate_r3_ball_gate.py` (acceptance-run-2026-07-23/) for the
+  reconstruction evidence.
 
 ### 2.3 Model anchors — real ray/mesh intersection
 

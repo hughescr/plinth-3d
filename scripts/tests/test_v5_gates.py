@@ -1,10 +1,14 @@
 """Consumer-level negative controls for the two v5 hard gates that a prior
 pass DETECTED but never WIRED (see SPEC-V5-GEOM sec 2.2/2.1, test plan 6.1/6.2):
 
-  1. Ball-breach is a HARD gate: verify.self_verify's `ok` must go False when a
-     joint ball OR a synthesized embedded end-cap sphere breaches a sub-mm
-     feature -- and the builders (cco model-anchor, bracing model-rung) must
-     stop CREATING such anchors so the gate is satisfiable.
+  1. Ball-breach is a HARD gate: verify.self_verify's `ok` must go False when
+     a joint ball breaches a sub-mm feature -- and the builders (cco
+     model-anchor, bracing model-rung) must stop CREATING such anchors so the
+     gate is satisfiable. (R3, 2026-07-23: the gate's SCOPE is pinned to the
+     census's own antipodal-span reference -- actual joint balls only. A
+     synthesized embedded end-cap sphere breach is still detected and
+     reported (embed_end_breach_violations) but is report-only, not gating
+     -- see the R3 test block below for why.)
   2. Stub through-transit: BOTH independent clearance implementations
      (tree.Forest.revalidate AND verify.clearance_report) must flag a stub whose
      shaft welds through a thin fin OR buries its free end inside the model
@@ -23,7 +27,7 @@ import numpy as np
 import trimesh
 import pytest
 
-from support_placement import verify, cco
+from support_placement import verify, cco, routing
 from support_placement import tree as tm
 from support_placement.geometry_exact import ExactSurface
 from support_placement.config import SupportConfig
@@ -111,6 +115,74 @@ def test_ball_breach_report_synthesizes_endcap_for_ball_less_embed(cfg):
     strut_ok = _m([0, 0, 3.0], [0, 0, -0.3], 0.6, 0.6, "strut", ("contact", 0),
                   embed_end="p1")
     assert verify.ball_breach_report(g2, [strut_ok], [], cfg) == []
+
+
+# ==========================================================================
+# R3 (2026-07-23) -- ball-gate census-parity scope: self_verify's HARD gate
+# and its `ball_breach_violations` key are restricted to actual joint balls
+# (the census's own reference antipodal-span scope); the embedded end-cap
+# check (amendment 5, tests above) is NOT deleted -- still computed, still
+# surfaced -- but moves to a report-only `embed_end_breach_violations` key
+# that never gates `ok`. Regression sites: the real Weeping Treant forest
+# (docs/artifacts/audit-2026-07/acceptance-run-2026-07-23) had
+# ball_breach_report return 199 (15 ball + 184 endcap); the independent
+# census's antipodal-span test agrees with the engine EXACTLY on the ball
+# category (15 == 15) and never evaluates the endcap category at all -- see
+# validate_r3_ball_gate.py for the full-scale reconstruction.
+# ==========================================================================
+def test_self_verify_does_not_gate_on_endcap_breach(cfg):
+    """The amendment-5 endcap breach (test_ball_breach_report_synthesizes_
+    endcap_for_ball_less_embed's exact fixture, run through self_verify this
+    time -- p0 lifted to plate_z and a surface_tree supplied so connectivity
+    passes by construction, isolating the ball-gate behaviour under test)
+    must NOT fail `ok` -- it is a report-only diagnostic under R3, not the
+    ball gate's namesake. It must also not be silently dropped: it still
+    shows up, under embed_end_breach_violations."""
+    fin = _box((6, 6, 0.3))                         # z in [-0.15, 0.15]
+    geom = ExactSurface(fin)
+    stree = routing.build_surface_tree(fin)
+    strut = _m([0, 0, 3.0], [0, 0, 0.15], 0.6, 0.6, "strut", ("contact", 0),
+               embed_end="p1")
+    rep = verify.self_verify(fin, [], [], [strut], np.array([]), np.array([]),
+                             cfg, 3.0, geom=geom, balls=[], surface_tree=stree)
+    assert rep["ball_breach_violations"] == []
+    assert len(rep["embed_end_breach_violations"]) == 1
+    assert rep["embed_end_breach_violations"][0]["source"] == "endcap"
+    assert rep["connectivity_violations"] == [] and rep["clearance_violations"] == []
+    assert rep["ok"] is True                        # endcap alone does not gate
+
+
+def test_self_verify_ball_gate_mixed_attributes_failure_to_true_breach_only(cfg):
+    """Both categories present simultaneously (a true joint-ball breach +
+    the amendment-5 endcap fixture's member, layered on the SAME thin fin
+    geometry): `ok` goes False because of the TRUE (ball) breach -- proving
+    the endcap category is not what's driving the failure -- and each
+    violation lands in its own bucket, neither silently merged nor
+    dropped."""
+    fin = _box((6, 6, 0.3))                         # z in [-0.15, 0.15]
+    geom = ExactSurface(fin)
+    stree = routing.build_surface_tree(fin)
+    balls = [dict(center=np.array([2.0, 2.0, 0.15]), r=1.0, owner=("joint", 0))]
+    strut = _m([0, 0, 3.0], [0, 0, 0.15], 0.6, 0.6, "strut", ("contact", 0),
+               embed_end="p1")
+
+    rep = verify.self_verify(fin, [], [], [strut], np.array([]), np.array([]),
+                             cfg, 3.0, geom=geom, balls=balls, surface_tree=stree)
+    assert len(rep["ball_breach_violations"]) == 1
+    assert rep["ball_breach_violations"][0]["source"] == "ball"
+    assert len(rep["embed_end_breach_violations"]) == 1
+    assert rep["embed_end_breach_violations"][0]["source"] == "endcap"
+    assert rep["ok"] is False
+
+    # Turning gate_on_ball_breach off drops the TRUE breach's contribution
+    # to `ok` too (same inert-toggle contract as the existing gate test);
+    # the endcap category was already never gated, so nothing else changes.
+    rep_off = verify.self_verify(fin, [], [], [strut], np.array([]), np.array([]),
+                                 cfg, 3.0, geom=geom, balls=balls, surface_tree=stree,
+                                 gate_on_ball_breach=False)
+    assert len(rep_off["ball_breach_violations"]) == 1
+    assert len(rep_off["embed_end_breach_violations"]) == 1
+    assert rep_off["ok"] is True
 
 
 def test_cco_model_anchor_builder_rejects_thin_twig_anchor(cfg):

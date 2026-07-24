@@ -281,7 +281,12 @@ def ball_breach_report(geom, members, balls, cfg, eps_mm=0.05):
     (poke-out > eps_mm) is a violation. Sanctioned shallow anchors into
     thick surface pass by construction (the test measures far-wall
     thickness, not surface contact). No-op unless `geom` is an exact oracle
-    (has `.sphere_breach`) -- legacy/test callers with a cKDTree get []."""
+    (has `.sphere_breach`) -- legacy/test callers with a cKDTree get [].
+
+    Returns the COMBINED list (source="ball" and source="endcap" entries
+    intermixed) -- this function's own contract is unchanged by R3. The
+    caller (self_verify) is where the two categories get split for gating
+    purposes; see self_verify's docstring / inline note for why."""
     if geom is None or not hasattr(geom, "sphere_breach"):
         return []
     members = joints.collect_members(members)
@@ -739,10 +744,57 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
     changes by importing this function. `island_births`'s gate is NOT
     inert: per Craig's strict I3 ruling (see island_birth_report), an
     uncovered slice-detected island birth DOES fail `ok` -- removal is a
-    soft preference axis, island-birth coverage is not."""
+    soft preference axis, island-birth coverage is not.
+
+    `ball_breach_violations` (R3, 2026-07-23): census-parity scope -- ONLY
+    actual joint balls (antipodal-span semantics, matching the independent
+    census's reference implementation both algorithmically and in scope).
+    Gated (ANDed into `ok` when `gate_on_ball_breach`). A member's own
+    embedded end-cap sphere (SPEC-V5-GEOM sec 2.2 amendment 5) is a
+    DIFFERENT, report-only category returned as
+    `embed_end_breach_violations` -- always computed and surfaced, never
+    ANDed into `ok`. See the inline note above `ball_breach_all` in this
+    function body for the full finding and rationale."""
     coverage = coverage_report(mesh, islands, contacts, cfg)
     clearance = clearance_report(mesh, members, cfg, surface_tree=surface_tree, geom=geom)
-    ball_breach_violations = ball_breach_report(geom, members, balls, cfg)
+    # R3 (ball-gate semantics, 2026-07-23): ball_breach_report synthesizes
+    # and tests TWO categories against geom.sphere_breach -- actual joint
+    # balls (source="ball") AND synthesized embedded-end-cap spheres
+    # (source="endcap", SPEC-V5-GEOM sec 2.2 amendment 5). The full-scale
+    # acceptance run exposed a semantics gap between this gate and the
+    # independent census's reference "antipodal-span" ball test: census's
+    # test -- and its 15-true-breach headline count -- runs ONLY over
+    # actual joint balls (S["balls"]); it never evaluates a member's own
+    # embedded tip as a sphere at all (that geometry is instead the axis/
+    # capsule through-transit predicate's job, R1/R2's territory). On the
+    # real Weeping Treant forest the combined ball_breach_report list was
+    # 199 (15 ball + 184 endcap) while the census's independently computed
+    # antipodal-span count for the SAME 1049-ball set was exactly 15 --
+    # i.e. the two implementations agree EXACTLY on the ball category (same
+    # algorithm, same points: geometry_exact.py's sphere_breach is
+    # literally docstringed "Census ball breach test", and the kernel's
+    # breach_one is the same math) and the entire 184-count gap is the
+    # endcap category the census never touches. Those 184 endcap flags
+    # cluster at the measurement floor (feature_thickness ~0.05-0.11mm,
+    # r=0.2mm stub tips) concentrated in dense crown foliage -- consistent
+    # with the endcap check's local "wall thickness" reasoning being
+    # unreliable on this non-watertight, double-walled mesh at typical
+    # embed depths, not with 184 genuine visible-defect breaches.
+    #
+    # FIX: the HARD GATE and the reported `ball_breach_violations` --
+    # this gate's namesake -- are restricted to the census's own reference
+    # scope: actual joint balls only (antipodal-span semantics, verbatim
+    # algorithm, now also verbatim SCOPE). The embedded end-cap check
+    # itself is NOT deleted (amendment 5's blind spot closure is still
+    # real, still computed, still reported for Phase-8 relocation triage)
+    # -- it is surfaced separately, as `embed_end_breach_violations`, a
+    # REPORT-ONLY diagnostic that does not gate `ok`. This is deliberately
+    # scoped as R3-only: aligning the embed-end check's own thickness/inset
+    # accounting with the census (so its flags stop clustering at the
+    # measurement floor) is R4's job, not this one.
+    ball_breach_all = ball_breach_report(geom, members, balls, cfg)
+    ball_breach_violations = [v for v in ball_breach_all if v.get("source") == "ball"]
+    embed_end_breach_violations = [v for v in ball_breach_all if v.get("source") == "endcap"]
     load = load_report(carried_area_mm2, tip_r_mm, cfg)
     unsupported_minima = minima_report(minima, contacts, cfg) if minima is not None else []
     uncovered_island_births = island_birth_report(island_births, contacts, cfg) \
@@ -765,19 +817,23 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
           and len(printability_violations) == 0 and len(murray_violations) == 0)
     if gate_on_removal:
         ok = ok and len(removal_violations) == 0
-    # v5 (SPEC sec 2.2, line 280): ball_breach_violations are a HARD GATE,
-    # same class as clearance -- ANDed into `ok`. This is the census's
-    # headline defect class (44/48 crossings), previously checked by nothing
-    # (the sampled engine reported zero of the 12 the exact core finds on the
-    # table). The gate is now satisfiable because the builder side stops
-    # CREATING breaching anchors: cco model-anchor and bracing model-rung
-    # candidate scoring reject a thin-twig anchor via geom.sphere_breach on
-    # the anchor-end ball (SPEC sec 2.2/2.3), and the exact ray-cast anchor
-    # pool (exterior-face centroids) lands feet on true surface. verify's
-    # gate is the independent re-check behind that. `gate_on_ball_breach`
-    # defaults True; it is a no-op for non-exact callers (a plain cKDTree /
-    # None geom makes ball_breach_report return [] by construction), so
-    # tests/legacy paths are unaffected.
+    # v5 (SPEC sec 2.2, line 280; scope pinned to census parity by R3,
+    # 2026-07-23): ball_breach_violations are a HARD GATE, same class as
+    # clearance -- ANDed into `ok`. This is the census's headline defect
+    # class (44/48 crossings), previously checked by nothing (the sampled
+    # engine reported zero of the 12 the exact core finds on the table).
+    # The gate is now satisfiable because the builder side stops CREATING
+    # breaching anchors: cco model-anchor and bracing model-rung candidate
+    # scoring reject a thin-twig anchor via geom.sphere_breach on the
+    # anchor-end ball (SPEC sec 2.2/2.3), and the exact ray-cast anchor pool
+    # (exterior-face centroids) lands feet on true surface. verify's gate is
+    # the independent re-check behind that. `gate_on_ball_breach` defaults
+    # True; it is a no-op for non-exact callers (a plain cKDTree / None geom
+    # makes ball_breach_report return [] by construction, so both
+    # ball_breach_violations and embed_end_breach_violations are empty), so
+    # tests/legacy paths are unaffected. embed_end_breach_violations is
+    # NEVER gated (see the R3 note above `ball_breach_all` for why) --
+    # always surfaced, not ANDed into `ok` under any flag.
     if gate_on_ball_breach:
         ok = ok and len(ball_breach_violations) == 0
     return dict(
@@ -785,6 +841,7 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
         uncovered_islands=uncovered,
         clearance_violations=clearance,
         ball_breach_violations=ball_breach_violations,
+        embed_end_breach_violations=embed_end_breach_violations,
         load_violations=load,
         unsupported_minima=unsupported_minima,
         uncovered_island_births=uncovered_island_births,
