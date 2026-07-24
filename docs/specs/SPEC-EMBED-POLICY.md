@@ -173,10 +173,13 @@ Rationale (owner-ratified): chords `< 0.08 mm` are 2.6-4.1 px foliage
 knife-edges that cannot print as coherent material; the crossing chord is
 `>=` the true wall thickness, so exempting on the chord is conservative;
 0.08 mm sits a 20 um guard band above the 0.0502 mm population minimum.
-Expected effect on the archived geometry: of the census's 193 illegal
-members, 49 become moot (all crossings `< 0.08`) and ~144 remain non-exempt
-(the adjudication partition: 118 firm `>= 0.10` + 26 band `0.08-0.10` + 49
-all-crossings-`< 0.08`).
+Effect on the archived geometry (adjudicated, owner-reviewed): of the
+census's 193 illegal members, 50 become moot (all crossings `< 0.08`) and
+143 remain non-exempt (the adjudication partition: 118 firm `>= 0.10` + 25
+band `0.08-0.10` + 50 all-crossings-`< 0.08`). NB: mi=420 is all-moot at
+full IEEE-754 precision (its worst crossing rounds up to 0.08 mm only under
+reduced precision); it sits in the moot 50, not the band — see
+phase8_relocation_input.json CORRECTION 2026-07-24.
 
 ## Rationale (measured on the 853-member run1 designed-embed population)
 

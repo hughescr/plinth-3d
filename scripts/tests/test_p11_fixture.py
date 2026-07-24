@@ -247,11 +247,15 @@ def test_phase8_relocation_targets_raw_regrade(phase8, fx):
 def test_phase8_printfloor_193_partition(phase8):
     p = phase8["printfloor_193"]
     assert p["n_illegal_members"] == 193
-    assert p["n_non_exempt"] == 144 and p["n_moot"] == 49
-    assert p["partition"] == {"firm_ge_0_10": 118, "band_0_08_to_0_10": 26,
-                              "moot_all_lt_0_08": 49}
-    assert len(p["non_exempt_member_idxs"]) == 144
-    assert len(p["moot_member_idxs"]) == 49
+    # Corrected partition 2026-07-24 (amendment A): mi=420 is ALL-MOOT at full
+    # IEEE-754 precision; the earlier 144/49/band-26 was a rounding artifact.
+    assert p["n_non_exempt"] == 143 and p["n_moot"] == 50
+    assert p["partition"] == {"firm_ge_0_10": 118, "band_0_08_to_0_10": 25,
+                              "moot_all_lt_0_08": 50}
+    assert len(p["non_exempt_member_idxs"]) == 143
+    assert len(p["moot_member_idxs"]) == 50
+    # mi=420 lives in moot, not non-exempt.
+    assert 420 in p["moot_member_idxs"] and 420 not in p["non_exempt_member_idxs"]
     # disjoint partition of exactly the 193.
     ne = set(p["non_exempt_member_idxs"]); mo = set(p["moot_member_idxs"])
     assert not (ne & mo) and len(ne | mo) == 193

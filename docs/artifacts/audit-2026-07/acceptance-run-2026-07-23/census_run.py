@@ -115,12 +115,12 @@ print("PASS A: %d ray-records, %d samples t=%.1fs RSS=%.2fGB" %
 # ---------------- PASS B: parity inside + distance ----------------
 inside_all = np.empty(len(all_pts), bool)
 dist_all = np.empty(len(all_pts))
-for s in range(0, len(all_pts), 1024):
-    e = min(s + 1024, len(all_pts))
+for s in range(0, len(all_pts), 384):
+    e = min(s + 384, len(all_pts))
     inside_all[s:e] = PV.inside(all_pts[s:e])
     assert C.rss_gb() < 2.0
-for s in range(0, len(all_pts), 1024):
-    e = min(s + 1024, len(all_pts))
+for s in range(0, len(all_pts), 384):
+    e = min(s + 384, len(all_pts))
     dist_all[s:e] = np.abs(dist_tool.signed(all_pts[s:e], batch=256))
     assert C.rss_gb() < 2.0
 print("PASS B: dense inside frac=%.4f t=%.1fs RSS=%.2fGB" %
