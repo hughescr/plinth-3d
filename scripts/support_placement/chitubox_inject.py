@@ -119,7 +119,22 @@ class Project:
         the validated append path already patches; the only additional
         change vs write() is the record count and which records are in the
         list. Useful when iterating: re-emitting into the same base scene
-        without stacking generations of supports on top of each other."""
+        without stacking generations of supports on top of each other.
+
+        DO NOT USE THIS TO EMIT A NEW PROJECT. ``out += self.data[:mesh_end]``
+        below copies everything through the end of the mesh region -- which
+        includes the TEMPLATE's own model mesh. Emitting against a
+        model-bearing template therefore staples correct supports onto the
+        WRONG MODEL, silently, with a file that parses and verifies. This
+        class cannot author a model section, so there is no safe template to
+        use either.
+
+        The emit path is ``support_placement.emit.emit_project`` ->
+        ``chitubox_io`` (Rust), which starts from an EMPTY project and writes
+        the model explicitly: the failure mode is removed structurally, not by
+        a runtime check. This method survives only for in-place re-injection
+        into an already-correct scene, and ``Project``'s READ side is still
+        the reader used by ``corpus.py``."""
         new_blob = b"".join(b for _, b in new_records)
         new_recs = b"".join(r for r, _ in new_records)
         mesh_end = self.mesh_off + self.mesh_size

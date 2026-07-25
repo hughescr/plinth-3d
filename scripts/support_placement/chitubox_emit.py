@@ -23,6 +23,8 @@ translate a template record from the base project, same as
 chitubox_inject.clone_support -- see place_pad().
 """
 import struct
+from dataclasses import dataclass
+
 import numpy as np
 
 from . import chitubox_inject as ci
@@ -364,6 +366,88 @@ def _assign_balls_to_members(members, balls, tol=0.25):
     return assigned
 
 
+@dataclass(frozen=True)
+class SegmentSpec:
+    """One emitted support segment, described in the currency the CONTAINER
+    wants: geometry + the raw 24 trailing bytes + its own triangle soup. No
+    file offsets -- those are a container concern, assigned by whoever writes
+    the file (``chitubox_io`` assigns them itself; the legacy
+    ``chitubox_inject`` byte path assigns them in ``synth_member_chain``).
+
+    ``mesh`` is float32 (n_tri, 3, 3), C-contiguous.
+    """
+    type_id: int
+    start: np.ndarray
+    end: np.ndarray
+    r0: float
+    r1: float
+    trailing: bytes
+    mesh: np.ndarray
+
+
+def member_chain_specs(members, balls, cfg, plate_z=None):
+    """The v4 emission PRIMITIVE: geometry decisions only, no file offsets.
+
+    Returns ``list[SegmentSpec]`` in emission order. Every geometry rule
+    (flare split, contact ball, joint-ball assignment, T_TAPER-vs-T_SHAFT
+    typing, the trailing-bytes convention) lives here and nowhere else;
+    :func:`synth_member_chain` is a thin offset-assigning loop over this, so
+    the two can never drift apart. See :func:`synth_member_chain` for the
+    doctrine behind each rule.
+    """
+    members = list(members)
+    ball_owner_idx = _assign_balls_to_members(members, balls)
+    balls_by_member = {}
+    for bi, mi in enumerate(ball_owner_idx):
+        balls_by_member.setdefault(mi, []).append(bi)
+
+    specs = []
+    n_balls_emitted = 0
+    for mi, m in enumerate(members):
+        p0 = np.asarray(_field(m, "p0"), float)
+        p1 = np.asarray(_field(m, "p1"), float)
+        r0 = float(_field(m, "r0"))
+        r1 = float(_field(m, "r1"))
+        kind = _field(m, "kind")
+        embed_end = _field(m, "embed_end", None)
+
+        is_plate_root = plate_z is not None and abs(p1[2] - float(plate_z)) <= PLATE_BAND_MM
+        if is_plate_root:
+            axis = p0 - p1
+            L = float(np.linalg.norm(axis))
+            axis_n = axis / L if L > 1e-9 else np.array([0.0, 0.0, 1.0])
+            flare_len_eff = min(cfg.flare_len_mm, L / 2.0) if L > 1e-9 else cfg.flare_len_mm
+            p_col0 = p1 + axis_n * flare_len_eff
+            flare_blob = frustum_mesh(p1, p_col0, cfg.flare_r_factor * r1, r1)
+            specs.append(SegmentSpec(
+                type_id=ci.T_FLARE, start=p1, end=p_col0,
+                r0=cfg.flare_r_factor * r1, r1=r1,
+                trailing=_trailing_bytes(ci.T_FLARE, cfg), mesh=flare_blob))
+            col_p0, col_p1, col_r0, col_r1 = p_col0, p0, r1, r0
+        else:
+            col_p0, col_p1, col_r0, col_r1 = p0, p1, r0, r1
+
+        parts = [frustum_mesh(col_p0, col_p1, col_r0, col_r1)]
+        if kind == "stub":
+            ball_r = cfg.tip_ball_r_factor * r0
+            parts.append(sphere_mesh(p0, ball_r))
+        for bi in balls_by_member.get(mi, []):
+            b = balls[bi]
+            parts.append(sphere_mesh(_field(b, "center"), float(_field(b, "r"))))
+            n_balls_emitted += 1
+        blob = np.concatenate(parts)
+
+        tapered = abs(r0 - r1) > 1e-9
+        type_id = ci.T_TAPER if (tapered and embed_end is not None) else ci.T_SHAFT
+        specs.append(SegmentSpec(
+            type_id=type_id, start=col_p0, end=col_p1, r0=col_r0, r1=col_r1,
+            trailing=_trailing_bytes(type_id, cfg), mesh=blob))
+
+    assert n_balls_emitted == len(balls), (
+        f"ball emission count mismatch: emitted {n_balls_emitted}, expected {len(balls)}")
+    return specs
+
+
 def synth_member_chain(members, balls, cfg, next_off, plate_z=None):
     """v4 emission (design-v4.md #14 Phase-review/interim emitter): one
     record per Member (tree.Member or joints.collect_members's dict
@@ -399,58 +483,21 @@ def synth_member_chain(members, balls, cfg, next_off, plate_z=None):
     lower half (recorded decision, SPEC-EMIT-POLISH.md F2). Members/gates
     are unchanged -- this is emission-only geometry, same doctrine as v3.
     Returns (record_bytes, blob_bytes) pairs, offsets contiguous from
-    next_off."""
-    members = list(members)
-    ball_owner_idx = _assign_balls_to_members(members, balls)
-    balls_by_member = {}
-    for bi, mi in enumerate(ball_owner_idx):
-        balls_by_member.setdefault(mi, []).append(bi)
+    next_off.
 
+    IMPLEMENTATION: every geometry decision described above lives in
+    :func:`member_chain_specs`; this function is only the offset-assigning
+    loop the legacy ``chitubox_inject`` byte path needs. The modern emit path
+    (``support_placement.emit`` -> ``chitubox_io``) consumes the specs
+    directly, because that container assigns its own offsets. Keeping one
+    geometry implementation is what stops the two paths from drifting."""
     out = []
     off = next_off
-    n_balls_emitted = 0
-    for mi, m in enumerate(members):
-        p0 = np.asarray(_field(m, "p0"), float)
-        p1 = np.asarray(_field(m, "p1"), float)
-        r0 = float(_field(m, "r0"))
-        r1 = float(_field(m, "r1"))
-        kind = _field(m, "kind")
-        embed_end = _field(m, "embed_end", None)
-
-        is_plate_root = plate_z is not None and abs(p1[2] - float(plate_z)) <= PLATE_BAND_MM
-        if is_plate_root:
-            axis = p0 - p1
-            L = float(np.linalg.norm(axis))
-            axis_n = axis / L if L > 1e-9 else np.array([0.0, 0.0, 1.0])
-            flare_len_eff = min(cfg.flare_len_mm, L / 2.0) if L > 1e-9 else cfg.flare_len_mm
-            p_col0 = p1 + axis_n * flare_len_eff
-            flare_blob = frustum_mesh(p1, p_col0, cfg.flare_r_factor * r1, r1)
-            out.append((build_record(ci.T_FLARE, p1, p_col0,
-                                      cfg.flare_r_factor * r1, r1,
-                                      off, flare_blob.nbytes, cfg), flare_blob.tobytes()))
-            off += flare_blob.nbytes
-            col_p0, col_p1, col_r0, col_r1 = p_col0, p0, r1, r0
-        else:
-            col_p0, col_p1, col_r0, col_r1 = p0, p1, r0, r1
-
-        parts = [frustum_mesh(col_p0, col_p1, col_r0, col_r1)]
-        if kind == "stub":
-            ball_r = cfg.tip_ball_r_factor * r0
-            parts.append(sphere_mesh(p0, ball_r))
-        for bi in balls_by_member.get(mi, []):
-            b = balls[bi]
-            parts.append(sphere_mesh(_field(b, "center"), float(_field(b, "r"))))
-            n_balls_emitted += 1
-        blob = np.concatenate(parts)
-
-        tapered = abs(r0 - r1) > 1e-9
-        type_id = ci.T_TAPER if (tapered and embed_end is not None) else ci.T_SHAFT
-        out.append((build_record(type_id, col_p0, col_p1, col_r0, col_r1, off, blob.nbytes, cfg),
-                    blob.tobytes()))
-        off += blob.nbytes
-
-    assert n_balls_emitted == len(balls), (
-        f"ball emission count mismatch: emitted {n_balls_emitted}, expected {len(balls)}")
+    for spec in member_chain_specs(members, balls, cfg, plate_z=plate_z):
+        blob = spec.mesh.tobytes()
+        out.append((build_record(spec.type_id, spec.start, spec.end,
+                                 spec.r0, spec.r1, off, len(blob), cfg), blob))
+        off += len(blob)
     return out
 
 

@@ -1,0 +1,23 @@
+[build-system]
+requires = ["maturin>=1.7,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "chitubox_io"
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+dynamic = ["version"]
+
+[tool.maturin]
+# Mixed Rust/Python layout, same as rust/geom_kernel: the Python package root
+# lives under python/chitubox_io, the compiled extension is injected as
+# chitubox_io._native.
+python-source = "python"
+module-name = "chitubox_io._native"
+# `python` turns the binding on (it is off by default so `cargo test` /
+# `cargo clippy` compile a libpython-free crate); `pyo3/extension-module` is
+# passed here rather than in Cargo.toml for the same reason.
+features = ["pyo3/extension-module", "python"]

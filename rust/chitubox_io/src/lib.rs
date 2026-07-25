@@ -25,12 +25,20 @@ mod document;
 mod error;
 mod parse;
 mod project;
+#[cfg(feature = "python")]
+mod py;
 mod stl;
 mod support;
 mod transform;
 mod types;
 mod verify;
 mod write;
+
+/// Version of the `chitubox_io._native` Python surface. Bumped whenever that
+/// surface changes shape; `scripts/tests/conftest.py` fails the `chitubox`-
+/// marked tests when the built extension disagrees with the Python side's
+/// expectation, so a stale extension can never certify itself green.
+pub const CHITUBOX_API_VERSION: u32 = 1;
 
 pub use error::ChituboxError;
 pub use project::Project;

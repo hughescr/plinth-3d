@@ -2,10 +2,11 @@
 name = "resin-print-prep"
 version = "1.4.1"
 description = "Physics-engineered CHITUBOX support placement + resin print prep (support_placement engine + pure-Python prep tools; the two Blender-driven tools get bpy/mathutils from Blender's own runtime, not from this venv -- see [project.optional-dependencies].blender)"
-# 3.11, not 3.10: the engine's hot core is the geom_kernel PyO3 extension,
-# which is built abi3-py311 (rust/geom_kernel/Cargo.toml features=abi3-py311,
-# rust/geom_kernel/pyproject.toml requires-python=">=3.11", wheel tag
-# cp311-abi3). The old ">=3.10" claimed support this project cannot deliver.
+# 3.11, not 3.10: the engine's hot core is the geom_kernel PyO3 extension and
+# the emit boundary is the chitubox_io PyO3 extension. Both are built
+# abi3-py311 (rust/*/Cargo.toml features=abi3-py311, rust/*/pyproject.toml
+# requires-python=">=3.11", wheel tag cp311-abi3). The old ">=3.10" claimed
+# support this project cannot deliver.
 requires-python = ">=3.11"
 # Caret-style ranges (PEP 440 has no ^, so ^x.y.z is spelled
 # >=x.y.z,<x+1): accept semver-compatible evolution, reject majors.
@@ -45,9 +46,11 @@ blender = []
 [dependency-groups]
 dev = [
     "pytest>=9.1.1,<10",
-    # scripts/build_kernel.sh drives this to build the rust/geom_kernel PyO3
-    # extension into the venv; pinned there, so pin it here too. Without it
-    # declared, `uv sync` prunes it out of the venv and the build breaks.
+    # scripts/build_kernel.sh drives this to build BOTH PyO3 extensions
+    # (rust/geom_kernel, rust/chitubox_io) into the venv; pinned there, so pin
+    # it here too. Without it declared, `uv sync` prunes it out of the venv and
+    # the build breaks. Neither extension is a declared dependency: they are
+    # built from this repo's own sources, not resolved from an index.
     "maturin==1.8.3",
 ]
 

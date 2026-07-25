@@ -13,3 +13,7 @@ scripts/tests/treant_pre_probe.pkl
 docs/artifacts/
 /artifacts/
 scripts/treant_v2_results.json
+
+# maturin drops the compiled PyO3 extension into the crate source tree
+# (rust/*/python/*/_native.abi3.so). Never committable.
+*.so

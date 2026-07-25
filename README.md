@@ -33,6 +33,21 @@ suite in `scripts/tests/`). Validated end-to-end on a real 576k-face
 model (`skills/support-placement/references/design.md` has the full
 before/after and honestly-reported known limitations).
 
+New in 1.5: the **emit path** is a library, not a hand-driven script.
+`scripts/support_placement/emit.py` turns an `engine.run` result plus the STL
+it was computed for into a `.chitubox`, built from an **empty** template by the
+`chitubox_io` Rust crate (`rust/chitubox_io`, PyO3 binding, batch-first
+columnar boundary). The old clone-a-base-project writer could staple correct
+supports onto the wrong model — silently, in a file that parsed and verified;
+the new path has no template parameter at all, so that cannot happen.
+Operator entry point:
+`python scripts/tools/emit_supports.py <model.stl> <out.chitubox>` — one JSON
+report line on stdout, progress on stderr, distinct exit codes per failure
+class.
+
+Both Rust extensions are built with `bash scripts/build_kernel.sh` (no
+argument builds `geom_kernel` and `chitubox_io`; pass a crate name for one).
+
 Shared machinery in `scripts/tools/`: `decimate_pipeline.py` (also runs from the
 CLI: `blender --background host.blend --python decimate_pipeline.py -- --stl model.stl`)
 and `geometry_sweep.py` (repair loop + scale/center bake).

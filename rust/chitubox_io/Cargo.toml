@@ -2,11 +2,37 @@
 name = "chitubox_io"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.97"
+build = "build.rs"
 description = "Read/write ChituBox Basic .chitubox project files: add STL models, attach support records, set placement. Pure Rust, wrapper-friendly, batch-first."
 license = "MIT OR Apache-2.0"
 
+[lib]
+name = "chitubox_io"
+# cdylib: the PyO3 extension module (feature `python`). rlib: so `cargo test`,
+# the examples, and any Rust consumer can link the crate normally.
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
 thiserror = "1"
+
+# The Python binding is OPTIONAL and off by default. `cargo test` / `cargo
+# clippy` therefore compile a libpython-free crate, and the existing Rust test
+# suite keeps passing with no interpreter in the picture. maturin turns the
+# feature on (see pyproject.toml [tool.maturin] features).
+numpy = { version = "0.23", optional = true }
+
+[dependencies.pyo3]
+version = "0.23"
+features = ["abi3-py311"]
+optional = true
+
+[features]
+default = []
+# extension-module is NOT listed here: it disables libpython linking, which
+# would break a plain `cargo build --features python`. maturin passes
+# pyo3/extension-module itself.
+python = ["dep:pyo3", "dep:numpy"]
 
 [profile.test]
 opt-level = 2
