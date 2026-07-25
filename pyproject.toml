@@ -1,8 +1,12 @@
 [project]
 name = "resin-print-prep"
 version = "1.4.1"
-description = "Physics-engineered CHITUBOX support placement + resin print prep (support_placement engine; Blender-side skills have their own deps via Blender)"
-requires-python = ">=3.10"
+description = "Physics-engineered CHITUBOX support placement + resin print prep (support_placement engine + pure-Python prep tools; the two Blender-driven tools get bpy/mathutils from Blender's own runtime, not from this venv -- see [project.optional-dependencies].blender)"
+# 3.11, not 3.10: the engine's hot core is the geom_kernel PyO3 extension,
+# which is built abi3-py311 (rust/geom_kernel/Cargo.toml features=abi3-py311,
+# rust/geom_kernel/pyproject.toml requires-python=">=3.11", wheel tag
+# cp311-abi3). The old ">=3.10" claimed support this project cannot deliver.
+requires-python = ">=3.11"
 # Caret-style ranges (PEP 440 has no ^, so ^x.y.z is spelled
 # >=x.y.z,<x+1): accept semver-compatible evolution, reject majors.
 # Reproducibility lives in uv.lock (exact resolved versions the engine
@@ -16,11 +20,35 @@ dependencies = [
     "trimesh>=4.12.2,<5",
     "rtree>=1.4.1,<2",   # trimesh's ray-query backend; undeclared before -- the uv venv caught it
     "networkx>=3.4.2,<4",
+    "scikit-image>=0.26.0,<1",  # scripts/tools/hollow_drill.py: skimage.measure marching cubes for the cavity surface
+    "manifold3d>=3.5.2,<4",     # trimesh's boolean engine; hollow_drill.py names it explicitly (engine="manifold")
+    "shapely>=2.1.2,<3",        # trimesh's 2D polygon backend; hollow_drill.py's orientation scorer reads Section.polygons_closed
 ]
+
+[project.optional-dependencies]
+# Optional speed-up, not a requirement: hollow_drill.orient_search decimates a
+# proxy mesh for its orientation sweep inside a try/except and silently falls
+# back to the full mesh, so the tool is correct without this -- just slower.
+fast = [
+    "fast-simplification>=0.1.13,<1",  # scripts/tools/hollow_drill.py proxy decimation
+]
+# Blender-runtime tools -- scripts/tools/decimate_pipeline.py and
+# scripts/tools/geometry_sweep.py import `bpy` and `mathutils`. Those are NOT
+# installable here: they are supplied by the Blender application's own embedded
+# interpreter, and both scripts are invoked as
+#   blender --background --python <script>
+# never under this venv. Deliberately EMPTY rather than listing bpy/mathutils,
+# because listing them would make `uv sync --all-extras` fail. Nothing to
+# install -- this entry exists to document where those deps come from.
+blender = []
 
 [dependency-groups]
 dev = [
     "pytest>=9.1.1,<10",
+    # scripts/build_kernel.sh drives this to build the rust/geom_kernel PyO3
+    # extension into the venv; pinned there, so pin it here too. Without it
+    # declared, `uv sync` prunes it out of the venv and the build breaks.
+    "maturin==1.8.3",
 ]
 
 [tool.uv]

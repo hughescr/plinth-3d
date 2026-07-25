@@ -1,5 +1,11 @@
 """Error-bounded selective decimation for resin 3D printing.
 
+RUNTIME: Blender, not the project venv. This module imports `bpy`/`mathutils`,
+which are provided by Blender's own embedded interpreter, so it is invoked as
+    blender --background --python scripts/tools/decimate_pipeline.py -- <args>
+Those two packages are deliberately NOT project dependencies (they are not
+installable via uv); see the `blender` extra in pyproject.toml.
+
 Reduces mesh density to what the printer can physically express, protecting
 thin features (tendrils, spikes) that quadric-collapse sacrifices early.
 

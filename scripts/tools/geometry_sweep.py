@@ -1,5 +1,11 @@
 """Converging geometry-repair loop for dense sculpt meshes.
 
+RUNTIME: Blender, not the project venv. This module imports `bpy`/`mathutils`,
+which are provided by Blender's own embedded interpreter, so it is invoked as
+    blender --background --python scripts/tools/geometry_sweep.py -- <args>
+Those two packages are deliberately NOT project dependencies (they are not
+installable via uv); see the `blender` extra in pyproject.toml.
+
 Fixes true degenerates (zero-area faces, zero-length edges, non-manifold
 edges) by EDGE COLLAPSE -- never dissolve. Dissolve-based cleanup
 (dissolve_degenerate, the 3D-Print Toolbox "Make Manifold" button) chews
