@@ -23,11 +23,13 @@ artifacts** and have been removed to prevent them being mistaken for ground trut
   (`geometry_exact.penetration_intervals` + `verify._embed_scar_verdicts`
   (SCAR-AREA-CAP) + `verify._transit_classify` (rule-4 + PRINT-FLOOR moot floor))
   and cross-checks three independent inside-oracles. Deterministic; RSS < 1.6 GB.
-- **Result:** `results/p11_regrade_ratified.json` — **77 REAL / 3 ARTIFACT**
+- **Result:** `results/p11_regrade_ratified.json` (a run output, archived outside
+  git under `<project>/artifacts/audit-2026-07/`) — **77 REAL / 3 ARTIFACT**
   (ARTIFACTs `437/440/444` = single tip-anchored LEGAL deep plugs).
-- **Phase-8 input:** `phase8_relocation_input.json` — the 77 relocation targets +
+- **Phase-8 input:** `scripts/tests/fixtures/phase8_relocation_input_2026_07_23.json`
+  (moved out of this folder; it is a runtime fixture) — the 77 relocation targets +
   the census 193 print-floor partition (**144 non-exempt / 49 moot**).
-- **Fixture (ruling 1A):** `scripts/tests/fixtures_p11.json` — depth-aware ground
+- **Fixture (ruling 1A):** `scripts/tests/fixtures/p11.json` — depth-aware ground
   truth, labels `{ARTIFACT: 3; REAL: 8,223,232,253,297,316,323,325,333}`.
 - **Regression tests:** `scripts/tests/test_p11_fixture.py`.
 

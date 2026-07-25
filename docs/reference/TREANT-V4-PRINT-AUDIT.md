@@ -181,6 +181,13 @@ The plan, in brief (full detail in `port_plan.md`):
 
 ---
 
-## Appendix: source documents (all in this directory)
+## Appendix: source documents
+
+(Written at a time when all of these sat in one `docs/artifacts/audit-2026-07/`
+directory. They are now split by kind: the physics audits and `port_plan.md` are
+siblings here in `docs/reference/`; the resin research and `lit_green_peel.md`
+moved to `docs/datasheets/`; the run outputs — `verify_*.md`, `volume_audit.md`,
+`unrouted_*`, `voxel_result_pitch*.json`, `pads_bridges_result.json` — are
+archived outside git under `<project>/artifacts/audit-2026-07/`.)
 
 resin_sunlu.md, resin_elegoo.md, resin_nova3d.md — resin research · lit_green_peel.md — literature review · physics_load_sizing.md, physics_contacts_tips.md, physics_printability.md, physics_transient_peel.md — physics audits · verify_physics.md — adversarial physics verification · volume_audit.md + verify_volume.md + voxel_result_pitch*.json + pads_bridges_result.json — volume measurement · unrouted_forensics.md/.json + verify_forensics.md — contact forensics · port_plan.md — Task-2 plan.

@@ -64,10 +64,10 @@ Run an orchestrator + parallel-worker pattern, not a linear task list:
 ## Baselines and targets (measured, frozen)
 
 - v3.7 Treant: 22.85 ml members + 3.74 balls = 26.59 total
-  (`treant_v3_7_baseline.json`); 465 routed / 176 unrouted / 74
+  (`scripts/tests/fixtures/treant_v3_7_baseline.json`); 465 routed / 176 unrouted / 74
   unsupported minima; 0 clearance, 0 connectivity violations.
-- v4 fixtures (`scripts/tests/fixtures_v3_baseline.json`,
-  `fixtures_v4_p3_baseline.json`): table v4 0.8446 ml beats v3 0.8955;
+- v4 fixtures (`scripts/tests/fixtures/v3_baseline.json`,
+  `scripts/tests/fixtures/v4_p3_baseline.json`): table v4 0.8446 ml beats v3 0.8955;
   toed_slab 0.3727 vs 0.4442. All gates clean.
 - v4 Treant WITHOUT bracing (200-contact partial): 74 ml — unbraced
   ~100mm columns at r≈2.9mm are the dominant waste. Bracing is a ~14x
@@ -98,7 +98,7 @@ Run an orchestrator + parallel-worker pattern, not a linear task list:
    AND up → batch revalidate → drop failures, ≤3 iters), then a SECOND
    rewire.optimize pass, then re-fix. Wire into run() and keep the
    driver's brace stage working.
-   Acceptance: fixtures not worse than fixtures_v4_p3_baseline.json;
+   Acceptance: fixtures not worse than fixtures/v4_p3_baseline.json;
    Treant build:200 member_ml < 30 (from 74); all gates clean;
    activation-timing + stale-brace-impossibility tests; independent
    adversarial verify before commit.

@@ -148,8 +148,9 @@ this is a densely-branched organic model where a fixed-topology 2-kink
 router genuinely cannot route around every obstruction; the corpus's own
 469 hand/magic-support-generated supports on the same model is the
 existing evidence that a real slicer's fuller path search handles cases
-this engine's bounded local search doesn't. `treant_v2_results.json` (in
-the plugin root) has the full run log; `treant_v2_supports.chitubox` (in
+this engine's bounded local search doesn't. `treant_v2_results.json` (a
+run output; archived out of git alongside the project folder, in
+`artifacts/`) has the full run log; `treant_v2_supports.chitubox` (in
 the project folder, sibling to the calibration corpus) is the emitted,
 re-parse-verified artifact -- a CLEAN v2-only plate (the corpus's 469
 supports are dropped via `Project.write_replace`; append-only stacking

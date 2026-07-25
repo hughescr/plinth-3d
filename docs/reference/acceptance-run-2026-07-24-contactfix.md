@@ -3,7 +3,15 @@
 **Branch:** `v5-perf` @ `e023b0e` (minima contact fix: filter A
 `minima_drop_interior_faces` + refined filter B `minima_require_island_birth`
 AND `minima_support_area_tips`).
-**Supersedes:** `../acceptance-run-2026-07-23/phase8_relocation_input.json`.
+**Supersedes:** `scripts/tests/fixtures/phase8_relocation_input_2026_07_23.json`
+(formerly `../acceptance-run-2026-07-23/phase8_relocation_input.json`).
+
+**Where the snapshot lives:** the assembled `phase8_relocation_input.json` is a
+RUNTIME fixture (`phase8._DEFAULT_SNAPSHOT`), so it lives at
+`scripts/tests/fixtures/phase8_relocation_input.json`. The `results/` evidence it
+was assembled from is a run output, so it is archived outside git at
+`<project>/artifacts/audit-2026-07/acceptance-run-2026-07-24-contactfix/results/`;
+what remains in the repo is this write-up.
 
 The predicate is **unchanged** — SPEC-EMBED-POLICY SCAR-AREA-CAP
 (`A_ABS_MM2 = 2.0`, `KAPPA = 1.25`, `L_SCAR_MAX_MM = 2.5`), rule-4
@@ -17,10 +25,10 @@ member, so every member id in the 2026-07-23 snapshot is invalid here.
 
 | Step | Tool | Output |
 |---|---|---|
-| 1 | `../acceptance-run-2026-07-23/run_v5.py cfix1` — default cfg `SupportConfig(lift_mm=3.0)`, `p8_relocate_enable=False`, i.e. the **pre-relocation Phase-8 INPUT** geometry | `scratchpad/v5p_treant_cfix1.pkl`, `results/run_results.json` |
-| 2 | `../acceptance-run-2026-07-23/census_run.py` (independent Python census, never calls the kernel), `CENSUS_STATE` = that pickle | `results/penetration_census.json`, `results/census_summary.json` |
-| 3 | `../acceptance-run-2026-07-23/p11_crossexam.py` (engine's ratified verify path + three independent inside-oracles) | `results/p11_regrade_ratified.json` |
-| 4 | assemble | `phase8_relocation_input.json` |
+| 1 | `scripts/tools/run_v5.py cfix1` — default cfg `SupportConfig(lift_mm=3.0)`, `p8_relocate_enable=False`, i.e. the **pre-relocation Phase-8 INPUT** geometry | `scratchpad/v5p_treant_cfix1.pkl`, `results/run_results.json` |
+| 2 | `scripts/tools/census_run.py` (independent Python census, never calls the kernel), `CENSUS_STATE` = that pickle | `results/penetration_census.json`, `results/census_summary.json` |
+| 3 | `scripts/tools/p11_crossexam.py` (engine's ratified verify path + three independent inside-oracles) | `results/p11_regrade_ratified.json` |
+| 4 | assemble | `scripts/tests/fixtures/phase8_relocation_input.json` |
 
 The moot/non-exempt split is read off the **census's own full-precision `moot`
 flag**, not the 4-decimal JSON, so the mi=420-class rounding artifact that forced

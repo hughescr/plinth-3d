@@ -5,3 +5,11 @@ __pycache__/
 .venv/
 uv.lock.bak
 scripts/tests/treant_pre_probe.pkl
+
+# Run outputs never belong in git. They record the result of running one
+# particular version of the code -- they are not a revision to the code or
+# the docs. Archive them outside the repo instead; see docs/datasheets/README.md
+# for the specs / datasheets / artifacts distinction.
+docs/artifacts/
+/artifacts/
+scripts/treant_v2_results.json
