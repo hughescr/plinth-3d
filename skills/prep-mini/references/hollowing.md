@@ -48,6 +48,17 @@ have trapped 14ml, per-lobe drains cut it to 0.27ml.
 
 - Run hollow_drill.py foreground in one shell call (~20s typical); in
   sandboxed VMs background processes are reaped between calls.
+- **Already-hollowed input is refused (exit 1, `error_type:
+  PreHollowedError`), not re-hollowed.** Step 2 voxelizes and FILLS, so an
+  existing cavity is read as solid bulk (measured: 40.4mm of "bulk" on a
+  sphere whose wall is 2.5mm), the HOLLOW decision fires and a brand new
+  cavity replaces the real one. Such a file wants the drill-only path.
+- **Degenerate shards are stripped on load**, and every drop is reported
+  (`components`, `dropped_shards`, `dropped_shard_faces`). Only components
+  that share no EDGE with the body qualify, which is what makes removal
+  provably hole-free; a genuine detached body or an internal cavity is never
+  touched. Do not substitute "keep the largest component" for this -- that
+  rule deletes real internal cavities.
 - **Trust the exit code, not the JSON.** 0 = out.stl written (hollowed or
   a legitimate solid decision); 1 = bad input; 2 = self-verification failed
   and nothing was written, with the failed checks (`single_body`,

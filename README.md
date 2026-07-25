@@ -20,7 +20,9 @@ no Blender required. The algorithm lives in
 `scripts/support_placement/hollow.py`; `scripts/tools/hollow_drill.py` is its
 CLI (`in.stl out.stl`, exit 0 = written — hollowed or legitimately solid,
 1 = bad input, 2 = self-verification failed and nothing was written, with the
-failed checks named on stderr).
+failed checks named on stderr). Load-time triage strips degenerate modelling
+shards (edge-disjoint, so provably without opening a hole) and refuses an
+input that arrived already hollowed rather than carving over its cavity.
 
 New in 1.3: `chitubox-support-injection` skill — write native, editable
 supports (and raft bridges) directly into CHITUBOX project files via a

@@ -95,9 +95,14 @@ operation details, batch mode, and timeout handling.
 from measured bulk thickness and resin savings, hollows only the main
 cavity (small pockets stay solid -- they'd be sealed resin traps), drills
 one drain per low lobe plus a vent, audits trapped resin, and refuses to
-export unless verification passes. **Check the exit code**: 0 = out.stl was
-written (hollowed, or a legitimate solid decision), 1 = bad input, 2 =
-verification failed and NOTHING was written (stderr names each failed check).
+export unless verification passes. On load it also triages the input's
+connected components: degenerate shards are stripped (reported under
+`dropped_shards`) and an ALREADY-HOLLOWED model is refused rather than
+re-hollowed. **Check the exit code**: 0 = out.stl was written (hollowed, or
+a legitimate solid decision), 1 = bad input — no such file, not a watertight
+volume, or already hollowed (`error_type: PreHollowedError`; that one needs
+the drill-only path, not this tool), 2 = verification failed and NOTHING was
+written (stderr names each failed check).
 It also picks the print orientation
 (so do NOT auto-rotate in the slicer afterward). Read
 `references/hollowing.md` first -- it explains the thresholds, the

@@ -16,7 +16,11 @@ EXIT CODES (this is the whole point of the split)
   0  wrote out.stl -- either hollowed and every step-8 check passed, or a
      legitimate SOLID decision, which is a success and exports the oriented
      mesh
-  1  bad input: no such file, unreadable, or not a watertight volume
+  1  bad input: no such file, unreadable, not a watertight volume, or
+     ALREADY HOLLOWED (this tool refuses to re-hollow -- it would discard the
+     existing cavity; such a file needs the drill-only path). The JSON
+     report's ``error_type`` distinguishes them: ``PreHollowedError`` is the
+     already-hollowed case.
   2  hollowing produced a mesh that FAILED self-verification. NOTHING was
      written. stderr names each failed check and what it measured.
 

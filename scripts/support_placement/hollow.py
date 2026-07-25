@@ -19,6 +19,10 @@ Needs no Blender; the dependencies are declared in the project's
 optionally fast-simplification).
 
 Pipeline (all steps verified on real prints, July 2026):
+ 0. Load-time triage of the input's connected components (see
+    :func:`triage_components`): degenerate modelling shards are stripped as
+    standard prep, and an input that already contains an internal cavity is
+    REFUSED rather than re-hollowed.
  1. Optional orientation search on a 10x-decimated proxy: +-30 deg sweeps
     about X/Y scored by 0.5*support_area_cm2 + 3*peak_crosssection_cm2 +
     0.3*height_mm. Orientation MUST be final before drilling -- hole
@@ -56,6 +60,14 @@ path from :func:`run` now sets ``log["status"]`` to one of :data:`STATUS_OK` /
 ``log["check_detail"]`` (what each one measured). A legitimate SOLID decision
 is a success: it exports the oriented mesh and reports ``STATUS_OK``.
 
+Bad INPUTS are not statuses -- they raise :class:`HollowError`, which the CLI
+maps to exit 1 and the pipeline to a failed hollow stage. There are two:
+a mesh that is not a watertight volume, and a mesh that arrived ALREADY
+HOLLOWED (:class:`PreHollowedError`, raised by step 0). Neither is an outcome
+of the algorithm; both mean this stage is the wrong tool for that file. The
+error type is recorded in the CLI's JSON report under ``error_type``, so a
+caller can tell "unreadable" from "route this to drill-only".
+
 Do NOT post-process the output to silence slicer "error detection":
 sub-pixel seam/interior slivers are intrinsic and harmless (true
 degenerates: zero), collapse-based cleanup fragmented a watertight body
@@ -79,6 +91,37 @@ LOBE_BAND_MM = 15.0
 DRAIN_R = 1.5
 VENT_R = 1.25
 
+# Step-0 triage thresholds. Measured across the 37-model corpus (July 2026):
+# 14 degenerate shards in 9 of 37 models, 2-46 faces each, 0.005-1.04mm
+# across, each a closed shell of zero-to-noise volume sitting inside the main
+# bbox and sharing no edge with it. The whole predicate flags those 14 and
+# nothing else -- in particular it does not touch Awakened Tree.stl's real
+# 4.13ml, 9096-face cavity.
+#: Face-count ceiling for a shard. The largest observed is 46.
+SHARD_MAX_FACES = 64
+#: Size ceiling for a shard, on its longest bbox axis. ~8x the largest junk
+#: in the 8 models the original audit covered (0.256mm), and orders of
+#: magnitude below any printable feature -- this is a sanity bound, not a
+#: fitted threshold. Originally validated at 1.0mm; raised to 2.0 because
+#: Awakened Tree.stl's own shard measures 1.044mm and was spared by 44um.
+#: Re-validated at 2.0 against all 37 models: still exactly those 14, still
+#: no false positives.
+SHARD_MAX_DIM_MM = 2.0
+#: A shard may not enclose a SOLID bigger than this -- i.e. zero within STL
+#: float noise; the 4 shards that are outward-wound solids measure at most
+#: 0.00012mm^3. The clause is one-sided on purpose. Its job is to protect
+#: genuine detached geometry, and genuine geometry is solid: a closed,
+#: consistently-wound shell of POSITIVE volume, which is exactly what
+#: trimesh's ``is_volume`` reports. A component that is not a solid at all --
+#: an open patch, an inward-wound shell (a void, not a body), a double-sided
+#: triangle -- encloses nothing worth keeping, so it is junk whatever a
+#: signed divergence sum over its faces happens to total. That branch is
+#: load-bearing: the other 10 shards go through it, and Awakened Tree.stl's
+#: totals -0.0146mm^3, over this cap in absolute terms. The caps above bound
+#: the worst it can cost at 8mm^3 of sealed void -- and an undrainable pocket
+#: that small is a resin trap this stage would refuse to hollow anyway.
+SHARD_MAX_VOL_MM3 = 0.01
+
 #: Wrote ``out_path``. Either the model was hollowed and passed every check in
 #: step 8, or it was legitimately decided SOLID and exported as-is (oriented).
 STATUS_OK = "OK"
@@ -100,6 +143,141 @@ CHECK_DESCRIPTIONS = {
 
 class HollowError(RuntimeError):
     """The hollow/drill stage could not produce a trustworthy mesh."""
+
+
+class PreHollowedError(HollowError):
+    """The input arrived already hollowed, so this stage cannot run on it.
+
+    Measured, not theoretical: ``m.voxelized(PITCH).fill()`` (step 2) fills an
+    existing cavity back in and reads the wall as bulk -- 40.4mm of "bulk" on
+    a test sphere whose wall is 2.5mm. The HOLLOW decision then fires, derives
+    a brand new cavity from scratch, and the real one is discarded. On the
+    symmetric test shape ``volume_balance`` happened to catch it; on an
+    asymmetric model it could pass by coincidence, exporting a mini whose
+    cavity is not the one it was designed with. So this is a refusal, not a
+    repair: such a file needs the drill-only path.
+    """
+
+
+def triage_components(m, log, source=""):
+    """Step 0: classify ``m``'s connected components, strip the junk, refuse
+    the already-hollowed. Mutates and returns ``m``.
+
+    Every component that is not the main body (the one with the most faces) is
+    classified as one of three things:
+
+    * a degenerate modelling shard -- DROPPED, and reported under
+      ``log["dropped_shards"]``;
+    * an internal cavity, i.e. an inward-wound closed shell -- meaning the
+      file arrived hollowed, so :class:`PreHollowedError` is raised and
+      nothing is written;
+    * any other detached body -- left exactly as it was (this stage has
+      always passed multi-body files through), noted in
+      ``log["extra_bodies"]`` so it is at least visible.
+
+    This is deliberately a per-component DROP test and NOT "keep only the
+    largest component". The two agree on every model that has junk and
+    disagree catastrophically on the one that matters: keep-largest would
+    silently delete Awakened Tree.stl's real 4.13ml internal cavity, which is
+    exactly the geometry the refusal above exists to protect.
+
+    Runs before the ``is_volume`` gate, because a shard can be what makes a
+    mesh fail it, and before everything downstream: the SOLID path exports
+    ``m`` with no cleanup at all, so an unstripped shard rides through into
+    the printed STL.
+    """
+    if len(m.faces) == 0:
+        return m
+    labels = trimesh.graph.connected_component_labels(
+        m.face_adjacency, node_count=len(m.faces))
+    n_comp = int(labels.max()) + 1
+    log["components"] = n_comp
+    if n_comp == 1:
+        return m
+    face_count = np.bincount(labels, minlength=n_comp)
+    main = int(np.argmax(face_count))
+
+    # Hole-safety rests on EDGES, and it is MEASURED here rather than assumed
+    # from the component split. These shards are non-manifold bowtie pinches:
+    # they share bit-identical VERTEX positions with the main body (measured
+    # gap 0.0 at every epsilon down to 1e-12), so any test based on vertex or
+    # bounding-box separation concludes -- wrongly -- that they are attached.
+    # Watertightness is an edge-valence property, so a component that
+    # contributes no edge to the main body cannot change any main-body edge's
+    # valence, and dropping it provably cannot open a hole. The test is not
+    # redundant with the split either: trimesh builds face adjacency only
+    # across 2-valent edges, so a patch joined to the body along a
+    # non-manifold (>2 faces) edge lands in its own component while genuinely
+    # sharing an edge with it. That is the case this clause catches.
+    e = m.edges_sorted
+    keys = e[:, 0].astype(np.int64) * len(m.vertices) + e[:, 1]
+    edge_label = np.repeat(labels, 3)  # edges_sorted is 3 per face, in face order
+    main_keys = np.unique(keys[edge_label == main])
+    shared = (edge_label != main) & np.isin(keys, main_keys)
+    shares_main_edge = np.zeros(n_comp, bool)
+    shares_main_edge[edge_label[shared]] = True
+
+    # per-component bounding box, from face corners so that a vertex shared by
+    # two components (the pinch again) is counted in both
+    fv = m.vertices[m.faces]
+    lo = np.full((n_comp, 3), np.inf)
+    hi = np.full((n_comp, 3), -np.inf)
+    np.minimum.at(lo, labels, fv.min(axis=1))
+    np.maximum.at(hi, labels, fv.max(axis=1))
+    dims = hi - lo
+
+    # face indices grouped by component, in one sort rather than one scan of
+    # the label array per component
+    groups = np.split(np.argsort(labels, kind="stable"),
+                      np.cumsum(face_count)[:-1])
+    extra = [c for c in range(n_comp) if c != main]
+    junk, cavities, bodies = [], [], []
+    for c, sub in zip(extra, m.submesh([groups[c] for c in extra], repair=False)):
+        if (not shares_main_edge[c]
+                and face_count[c] <= SHARD_MAX_FACES
+                and dims[c].max() <= SHARD_MAX_DIM_MM
+                # ``is_volume`` is the "is this a solid?" test: closed,
+                # consistently wound, POSITIVE volume. Anything failing it
+                # encloses nothing -- see SHARD_MAX_VOL_MM3.
+                and (not sub.is_volume or sub.volume <= SHARD_MAX_VOL_MM3)):
+            junk.append(c)
+        elif sub.is_watertight and sub.is_winding_consistent and sub.volume < 0:
+            # A closed shell wound INWARD is a void in the material, not a
+            # body: negative volume is the STL convention for "normals point
+            # away from solid" read in reverse. That is what an
+            # already-hollowed model looks like, and it is what separates a
+            # cavity from a merely-detached second body (a base, a dropped
+            # weapon) -- those are outward-wound and positive, and this stage
+            # has always passed them through untouched.
+            cavities.append(c)
+        else:
+            bodies.append(c)
+
+    def _describe(ids):
+        return [{"faces": int(face_count[c]),
+                 "dims_mm": [round(float(x), 4) for x in dims[c]]} for c in ids]
+
+    if bodies:  # not ours to touch, but the operator should know they are there
+        log["extra_bodies"] = _describe(bodies)
+    if junk:
+        # silent mesh mutation is not acceptable: say what left and how big
+        log["dropped_shards"] = _describe(junk)
+        log["dropped_shard_faces"] = int(face_count[junk].sum())
+        m.update_faces(~np.isin(labels, junk))
+        m.remove_unreferenced_vertices()
+
+    if cavities:
+        log["cavity_components"] = _describe(cavities)
+        big = max(_describe(cavities), key=lambda d: d["faces"])
+        raise PreHollowedError(
+            f"input is already hollowed{': ' + source if source else ''}"
+            f" -- {len(cavities)} internal cavity shell(s) besides the main "
+            f"body (largest: {big['faces']} faces, "
+            f"{'x'.join(f'{d:g}' for d in big['dims_mm'])}mm). Hollowing it "
+            f"again would fill that cavity in, read the wall as bulk and "
+            f"carve a new cavity from scratch, discarding the real one. "
+            f"Re-run it through the drill-only path instead.")
+    return m
 
 
 def orient_search(m, log):
@@ -157,12 +335,14 @@ def run(in_path, out_path, wall=2.5, orient=True, log=None):
     carrying ``status``. ``status == STATUS_OK`` is the only outcome under
     which ``out_path`` was written; ``STATUS_VERIFY_FAILED`` additionally
     carries ``failed_checks`` and ``check_detail``. Raises for input problems
-    (unreadable/non-volume mesh) rather than reporting them -- those are not
-    outcomes of the algorithm, they are bad inputs.
+    (unreadable mesh, non-volume mesh, already-hollowed mesh) rather than
+    reporting them -- those are not outcomes of the algorithm, they are bad
+    inputs.
     """
     log = {} if log is None else log
     t0 = time.time()
     m = trimesh.load(in_path); m.merge_vertices()
+    m = triage_components(m, log, source=in_path)
     if not m.is_volume:
         trimesh.repair.fix_normals(m)
     if not m.is_volume:
