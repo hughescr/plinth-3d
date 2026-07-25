@@ -16,16 +16,16 @@ import sys, os, time, json, pickle, resource, faulthandler, threading, cProfile,
 
 faulthandler.enable()
 
-WT = "/Users/craig/code/hughescr/dnd-campaigns/.worktrees/wt-perf"
-SCR = "/private/tmp/claude-501/-Users-craig-code-hughescr-dnd-campaigns/0ddf6d41-f89e-4672-9577-2690d62b260c/scratchpad"
-STL = "/Users/craig/code/hughescr/dnd-campaigns/Weeping Treant v1.2.stl"
-sys.path.insert(0, os.path.join(WT, "scripts"))
-sys.path.insert(0, SCR)
+import _toolpaths
+WT = _toolpaths.REPO_ROOT
+SCR = _toolpaths.scratch_dir()
+STL = _toolpaths.resolve_stl()
+sys.path.insert(0, _toolpaths.SCRIPTS_DIR)
 
 import numpy as np
 from support_placement import mesh_io, config, engine
-import instrument
-import common
+import instrument   # sibling module in scripts/tools/
+import common       # sibling module in scripts/tools/
 
 
 def rss_gb():

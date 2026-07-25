@@ -22,13 +22,10 @@ placement is validated. This module's pad/bridge helpers therefore
 translate a template record from the base project, same as
 chitubox_inject.clone_support -- see place_pad().
 """
-import sys
-import os
 import struct
 import numpy as np
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import chitubox_inject as ci  # noqa: E402
+from . import chitubox_inject as ci
 
 N_SIDES = 24
 CONTACT_DEPTH_TRAILING_TYPE = ci.T_TAPER

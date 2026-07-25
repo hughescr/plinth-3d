@@ -6,7 +6,7 @@ Never gates on wall time (Craig's correctness-over-speed ruling) — it prints
 numbers so regressions in per-call FFI overhead and parallel scaling are
 visible. Run:
 
-    .venv/bin/python scripts/bench_kernel.py [subdivisions]
+    .venv/bin/python scripts/tools/bench_kernel.py [subdivisions]
 
 subdivisions controls the icosphere size (default 5 ~ 20480 faces).
 """
@@ -17,7 +17,9 @@ import time
 import numpy as np
 import trimesh
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
+import _toolpaths  # noqa: E402  (sibling module, resolved via sys.path[0])
+
+sys.path.insert(0, _toolpaths.SCRIPTS_DIR)
 from support_placement import geometry_exact as GE  # noqa: E402
 from support_placement import geometry_kernel as GK  # noqa: E402
 

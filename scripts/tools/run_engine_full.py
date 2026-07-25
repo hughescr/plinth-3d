@@ -2,12 +2,11 @@
 the canonical Weeping Treant v1.2 STL with the canonical cfg
 (SupportConfig(lift_mm=3.0)), dumping a JSON results file + a pickle of
 everything the chitubox_emit machinery needs to emit + reparse-verify
-afterward. Lives OUTSIDE the tracked worktree per the runner's mandate
-(throwaway, not a source edit).
+afterward.
 
-Usage: uv run --frozen python /Users/craig/.claude/jobs/0ddf6d41/tmp/run_engine_full.py
-Run from inside the worktree (cwd matters for `scripts` import + relative
-STL/corpus paths are made absolute below regardless).
+Usage: .venv/bin/python scripts/tools/run_engine_full.py
+Outputs land in the scratch dir (see _toolpaths: $CENSUS_SCRATCH, else the
+system temp dir) -- never inside the repo.
 """
 import sys
 import os
@@ -15,15 +14,16 @@ import time
 import json
 import pickle
 
-WORKTREE = "/private/tmp/claude-501/-Users-craig-Documents-Claude-Projects-D-D-Campaigns/f0760b14-ba8b-49b8-8c2c-e73e83d65858/scratchpad/wt-emit-final"
-sys.path.insert(0, os.path.join(WORKTREE, "scripts"))
+import _toolpaths  # noqa: E402  (sibling module, resolved via sys.path[0])
+
+sys.path.insert(0, _toolpaths.SCRIPTS_DIR)
 
 import numpy as np
 from support_placement import mesh_io, config, engine, tree
 
-STL = os.path.join(os.path.dirname(WORKTREE), "Weeping Treant v1.2.stl")  # scratchpad-root symlink
-RESULTS_JSON = "/Users/craig/.claude/jobs/0ddf6d41/tmp/engine_run_results.json"
-STATE_PKL = "/Users/craig/.claude/jobs/0ddf6d41/tmp/engine_run_state.pkl"
+STL = _toolpaths.resolve_stl()
+RESULTS_JSON = os.path.join(_toolpaths.scratch_dir(), "engine_run_results.json")
+STATE_PKL = os.path.join(_toolpaths.scratch_dir(), "engine_run_state.pkl")
 
 
 def jsonable(x):

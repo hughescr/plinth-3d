@@ -22,7 +22,7 @@ import pickle
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from support_placement import mesh_io, config, engine, routing, tree, rewire, chitubox_emit as ce
-import chitubox_inject as ci
+from support_placement import chitubox_inject as ci
 import numpy as np
 
 STATE_DIR = os.environ.get("V4_STATE_DIR", "/tmp/v4")

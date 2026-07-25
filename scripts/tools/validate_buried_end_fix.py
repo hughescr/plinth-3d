@@ -5,11 +5,12 @@ prints the emitted verify gates + digest for determinism comparison.
 argv: <pickle_path>
 """
 import sys, pickle, numpy as np
-sys.path.insert(0, "/Users/craig/code/hughescr/dnd-campaigns/.worktrees/wt-perf/scripts")
+import _toolpaths
+sys.path.insert(0, _toolpaths.SCRIPTS_DIR)
 from support_placement import mesh_io, joints, routing
 from support_placement.geometry_kernel import KernelSurface
 
-STL = "/Users/craig/code/hughescr/dnd-campaigns/Weeping Treant v1.2.stl"
+STL = _toolpaths.resolve_stl()
 pkl = sys.argv[1]
 st = pickle.load(open(pkl, "rb"))
 members = joints.collect_members(st["members"]); cfg = st["cfg"]

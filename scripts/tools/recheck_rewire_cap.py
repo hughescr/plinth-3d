@@ -7,13 +7,14 @@ import os
 import time
 import pickle
 
-WORKTREE = "/private/tmp/claude-501/-Users-craig-Documents-Claude-Projects-D-D-Campaigns/f0760b14-ba8b-49b8-8c2c-e73e83d65858/scratchpad/wt-emit-final"
-sys.path.insert(0, os.path.join(WORKTREE, "scripts"))
+import _toolpaths  # noqa: E402  (sibling module, resolved via sys.path[0])
+
+sys.path.insert(0, _toolpaths.SCRIPTS_DIR)
 
 from support_placement import mesh_io, config, engine
 
-STL = "/private/tmp/claude-501/-Users-craig-Documents-Claude-Projects-D-D-Campaigns/f0760b14-ba8b-49b8-8c2c-e73e83d65858/scratchpad/audit/treant_real_copy.stl"
-PKL = "/Users/craig/.claude/jobs/0ddf6d41/tmp/engine_run_state.pkl"
+STL = _toolpaths.resolve_stl()
+PKL = os.path.join(_toolpaths.scratch_dir(), "engine_run_state.pkl")
 
 
 def _field(m, name):

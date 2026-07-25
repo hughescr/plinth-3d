@@ -13,15 +13,15 @@ the [Blender MCP](https://extensions.blender.org/add-ons/mcp/):
   the deepest passing reduction, and verifies against the full original
   surface before exporting. Batch-friendly (headless Blender per model).
 
-New in 1.1: `scripts/hollow_drill.py` — supervised hollowing (EDT-based
+New in 1.1: `scripts/tools/hollow_drill.py` — supervised hollowing (EDT-based
 hollow/solid decision, main-cavity-only, per-lobe drains, pooling audit,
 vent, verified export) plus print-orientation search. Pure Python
 (trimesh/scipy/scikit-image/manifold3d), no Blender required.
 
 New in 1.3: `chitubox-support-injection` skill — write native, editable
 supports (and raft bridges) directly into CHITUBOX project files via a
-reverse-engineered, injection-validated format map (`chitubox_inject.py`
-+ full format reference).
+reverse-engineered, injection-validated format map
+(`scripts/support_placement/chitubox_inject.py` + full format reference).
 
 New in 1.4: `support-placement` v2 — the placement companion is no
 longer planned, it's implemented: engineered tip/shaft sizing from
@@ -33,7 +33,7 @@ suite in `scripts/tests/`). Validated end-to-end on a real 576k-face
 model (`skills/support-placement/references/design.md` has the full
 before/after and honestly-reported known limitations).
 
-Shared machinery in `scripts/`: `decimate_pipeline.py` (also runs from the
+Shared machinery in `scripts/tools/`: `decimate_pipeline.py` (also runs from the
 CLI: `blender --background host.blend --python decimate_pipeline.py -- --stl model.stl`)
 and `geometry_sweep.py` (repair loop + scale/center bake).
 

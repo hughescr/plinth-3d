@@ -12,13 +12,10 @@ This module ONLY reads (never writes) the corpus project, via
 chitubox_inject.Project. It adds no new file-format knowledge -- see
 references/chitubox-format.md for the format itself.
 """
-import sys
-import os
 import numpy as np
 from scipy.spatial import cKDTree
 
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
-import chitubox_inject as ci  # noqa: E402
+from . import chitubox_inject as ci
 
 
 def _tip_position(chain):

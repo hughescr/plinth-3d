@@ -23,7 +23,7 @@ import pickle
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from support_placement import mesh_io, config, engine, chitubox_emit as ce, joints
-import chitubox_inject as ci
+from support_placement import chitubox_inject as ci
 import numpy as np
 
 STL_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", "Weeping Treant v1.2.stl"))

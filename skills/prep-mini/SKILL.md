@@ -14,7 +14,7 @@ sweep decision rules and hard-won warnings live there). The reference
 files sit beside this file in `skills/prep-mini/references/`:
 `repair-playbook.md`, `sizing.md`, and `hollowing.md` (there is no
 top-level references/ directory).
-Shared scripts live in `${CLAUDE_PLUGIN_ROOT}/scripts/`.
+Shared scripts live in `${CLAUDE_PLUGIN_ROOT}/scripts/tools/`.
 
 ## Ask the user up front (skip anything already provided)
 
@@ -62,7 +62,7 @@ the playbook. Re-check shells after: remesh seals air pockets as tiny
 internal bubble shells; delete all but the largest component.
 
 ### 4. Geometry sweep (converging repair loop)
-`exec(open("${CLAUDE_PLUGIN_ROOT}/scripts/geometry_sweep.py").read())`
+`exec(open("${CLAUDE_PLUGIN_ROOT}/scripts/tools/geometry_sweep.py").read())`
 then `sweep("ObjectName")` until all counts are 0 (2-6 passes typical;
 transient count bumps are normal). Sweep thresholds operate in LOCAL mesh
 units -- check `obj.scale` first: an object scaled to 0.01 makes the
@@ -80,7 +80,7 @@ units as mm.
 
 ### 6. Error-bounded decimation
 Now that units = printed mm, run the decimation pipeline
-(`${CLAUDE_PLUGIN_ROOT}/scripts/decimate_pipeline.py`). **In an
+(`${CLAUDE_PLUGIN_ROOT}/scripts/tools/decimate_pipeline.py`). **In an
 interactive session pass `obj=` to `run()`** -- called with only a path it
 re-reads an empty homefile and wipes the open scene (path-only mode is for
 headless batch). This replaces any
@@ -90,7 +90,7 @@ real thin features. See the sibling skill `decimate-for-print` for
 operation details, batch mode, and timeout handling.
 
 ### 6b. Hollow + drill (only when thresholds say so)
-`python ${CLAUDE_PLUGIN_ROOT}/scripts/hollow_drill.py in.stl out.stl`
+`python ${CLAUDE_PLUGIN_ROOT}/scripts/tools/hollow_drill.py in.stl out.stl`
 (pure Python, no Blender; deps in its docstring). Decides hollow-vs-solid
 from measured bulk thickness and resin savings, hollows only the main
 cavity (small pockets stay solid -- they'd be sealed resin traps), drills

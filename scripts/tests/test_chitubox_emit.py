@@ -6,7 +6,7 @@ import trimesh
 
 from support_placement import chitubox_emit as ce
 from support_placement import routing
-import chitubox_inject as ci
+from support_placement import chitubox_inject as ci
 
 CORPUS_PATH = None
 _candidate = os.path.join(os.path.dirname(__file__), "..", "..", "..", "supported-treant.chitubox")

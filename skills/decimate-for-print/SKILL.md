@@ -9,7 +9,7 @@ Guessed decimate ratios either waste faces or destroy detail. This skill
 derives an error budget from printer physics and finds the deepest
 reduction that stays inside it, with measurement - not hope - as the gate.
 
-Script: `${CLAUDE_PLUGIN_ROOT}/scripts/decimate_pipeline.py` (read its
+Script: `${CLAUDE_PLUGIN_ROOT}/scripts/tools/decimate_pipeline.py` (read its
 docstring; it documents usage modes). Requires Blender with the Blender
 MCP (interactive `execute_blender_code` or headless
 `execute_blender_code_for_cli` with any small host .blend).

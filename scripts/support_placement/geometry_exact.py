@@ -11,7 +11,7 @@ micro-benchmark, do NOT swap consumers). Consumer swap is a follow-up.
 
 Math is ported from the exact penetration census that measured 48 real
 support-vs-model crossings the sampled check reported as zero:
-    docs/artifacts/audit-2026-07/tools/census_core.py   (100% heavy-9-ray agreement)
+    scripts/tools/census_core.py   (100% heavy-9-ray agreement)
 Ported verbatim where possible: closest_on_tri (Ericson), ray_crossings
 (Moller-Trumbore), VerticalParity / ParityVote (3-axis majority inside test).
 

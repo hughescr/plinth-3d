@@ -12,10 +12,10 @@ sides = the screenshot's breaching joint balls. Pure Moller, no point-inside.
 import numpy as np, sys, os, json, time
 from collections import Counter
 np.seterr(all="ignore")
-sys.path.insert(0, "/Users/craig/.claude/jobs/0ddf6d41/tmp")
-import census_core as C
+import census_core as C   # sibling module in scripts/tools/
 
 AUDIT = os.path.join(C.SCR, "audit")
+os.makedirs(AUDIT, exist_ok=True)
 MIN_ILLEGAL_LEN = 0.05
 CROWN_Z = 35.0
 STEP = 0.12          # dense sample step (mm)
@@ -70,7 +70,7 @@ CD = cfg.contact_depth_mm; STAND = cfg.standoff_mm   # provenance only; NOT inpu
 TIP_R_MIN = cfg.tip_r_min_mm                          # to the SCAR-AREA-CAP formula
 MI = C.MeshIndex(mesh)
 dist_tool = C.SignedTester(mesh, MI, k=64, flip=False)
-PV = C.ParityVote(mesh, h=2.0)
+PV = C.ParityVote(mesh, h=0.5)   # finer grid: bounds per-cell (pts x tris) working set <2GB
 print("census index ready RSS=%.2fGB" % C.rss_gb(), flush=True)
 
 # ---------------- PASS A: crossings + dense per-subsegment samples ----------------
@@ -115,14 +115,14 @@ print("PASS A: %d ray-records, %d samples t=%.1fs RSS=%.2fGB" %
 # ---------------- PASS B: parity inside + distance ----------------
 inside_all = np.empty(len(all_pts), bool)
 dist_all = np.empty(len(all_pts))
-for s in range(0, len(all_pts), 40000):
-    e = min(s + 40000, len(all_pts))
+for s in range(0, len(all_pts), 384):
+    e = min(s + 384, len(all_pts))
     inside_all[s:e] = PV.inside(all_pts[s:e])
-    assert C.rss_gb() < 32.0
-for s in range(0, len(all_pts), 4000):
-    e = min(s + 4000, len(all_pts))
-    dist_all[s:e] = np.abs(dist_tool.signed(all_pts[s:e]))
-    assert C.rss_gb() < 32.0
+    assert C.rss_gb() < 2.0
+for s in range(0, len(all_pts), 384):
+    e = min(s + 384, len(all_pts))
+    dist_all[s:e] = np.abs(dist_tool.signed(all_pts[s:e], batch=256))
+    assert C.rss_gb() < 2.0
 print("PASS B: dense inside frac=%.4f t=%.1fs RSS=%.2fGB" %
       (inside_all.mean(), time.time() - t0, C.rss_gb()), flush=True)
 
@@ -186,10 +186,10 @@ for r in embed_axis:
         xc_pts.append(xc); xc_owner.append(k)
 
 p0_arr = np.array(p0_pts) if p0_pts else np.zeros((0, 3))
-d_all = np.abs(dist_tool.signed(p0_arr)) if len(p0_arr) else np.empty(0)
+d_all = np.abs(dist_tool.signed(p0_arr, batch=256)) if len(p0_arr) else np.empty(0)
 xc_arr = np.array(xc_pts) if xc_pts else np.zeros((0, 3))
 if len(xc_arr):
-    _, _, _, xc_norm = dist_tool.nearest(xc_arr)
+    _, _, _, xc_norm = dist_tool.nearest(xc_arr, batch=256)
 else:
     xc_norm = np.zeros((0, 3))
 xc_norm_by_k = {kk: xc_norm[i] for i, kk in enumerate(xc_owner)}
@@ -311,7 +311,7 @@ def fib_sphere(n=120):
     return np.array(out)
 SPH = fib_sphere(120)
 bc = np.array([b["center"] for b in balls]); br = np.array([b["r"] for b in balls])
-nd, bti, bcp, bnorm = dist_tool.nearest(bc)
+nd, bti, bcp, bnorm = dist_tool.nearest(bc, batch=256)
 nd = np.abs(nd)
 b_center_in = PV.inside(bc)
 
@@ -441,6 +441,6 @@ out = dict(summary=summary, worst10_members=worst10m,
            illegal_crossings=crossings, breaching_balls=ball_records)
 json.dump(out, open(os.path.join(AUDIT, "penetration_census.json"), "w"), indent=1)
 json.dump(dict(summary=summary, worst10_members=worst10m, worst10_balls=out["worst10_balls"]),
-          open("/Users/craig/.claude/jobs/0ddf6d41/tmp/census_summary.json", "w"), indent=1)
+          open(os.path.join(C.SCR, "census_summary.json"), "w"), indent=1)
 print("wrote penetration_census.json DONE t=%.1fs RSS=%.2fGB" % (time.time() - t0, C.rss_gb()), flush=True)
 print(json.dumps(summary, indent=1))

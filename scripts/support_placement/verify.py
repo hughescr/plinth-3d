@@ -24,7 +24,7 @@ from .geometry_exact import member_rays
 # (`_embed_inset_arc_exact` below survives only as a distance-gate mask, not a
 # sanction). These constants are literal from the spec text and MUST be
 # bit-identical to the independent census implementation
-# (docs/artifacts/audit-2026-07/acceptance-run-2026-07-23/census_run.py) -- the
+# (scripts/tools/census_run.py) -- the
 # engine gate and the census then count the SAME population from the SAME
 # formulas, neither sharing code with the other. TIP_R_MIN is read from cfg
 # (cfg.tip_r_min_mm); the BALL factors are the designed ball radii

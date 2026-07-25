@@ -11,13 +11,14 @@ elsewhere. Bounded sample per method. Prints a per-method parity table.
 import sys, os, json, time, pickle
 import numpy as np
 np.seterr(all="ignore")
-WT = "/Users/craig/code/hughescr/dnd-campaigns/.worktrees/wt-perf"
-SCR = "/private/tmp/claude-501/-Users-craig-code-hughescr-dnd-campaigns/0ddf6d41-f89e-4672-9577-2690d62b260c/scratchpad"
-sys.path.insert(0, os.path.join(WT, "scripts"))
+import _toolpaths
+WT = _toolpaths.REPO_ROOT
+SCR = _toolpaths.scratch_dir()
+sys.path.insert(0, _toolpaths.SCRIPTS_DIR)
 from support_placement import mesh_io, geometry_exact
 from support_placement.geometry_kernel import KernelSurface
 
-STL = "/Users/craig/code/hughescr/dnd-campaigns/Weeping Treant v1.2.stl"
+STL = _toolpaths.resolve_stl()
 PER_METHOD = 2500          # bounded replay sample per method
 RTOL, ATOL = 1e-9, 1e-9
 

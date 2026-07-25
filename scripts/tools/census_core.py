@@ -16,12 +16,14 @@ import numpy as np, os, sys, pickle, resource, trimesh
 from scipy.spatial import cKDTree
 
 # ADAPTED (v5-perf acceptance): independent census, kept Python, NEVER calls the
-# kernel. Paths retargeted to the wt-perf worktree + this session's run pickle.
-WT = "/Users/craig/code/hughescr/dnd-campaigns/.worktrees/wt-perf/scripts"
+# kernel. Paths derive from this module's own location (see _toolpaths) so the
+# tool travels with the repo instead of being re-copied per session.
+import _toolpaths
+WT = _toolpaths.SCRIPTS_DIR
 sys.path.insert(0, WT); sys.path.insert(0, os.path.join(WT, "support_placement"))
-SCR = "/private/tmp/claude-501/-Users-craig-code-hughescr-dnd-campaigns/0ddf6d41-f89e-4672-9577-2690d62b260c/scratchpad"
+SCR = _toolpaths.scratch_dir()
 STATE = os.environ.get("CENSUS_STATE", os.path.join(SCR, "v5p_treant_run1.pkl"))
-STL = "/Users/craig/code/hughescr/dnd-campaigns/Weeping Treant v1.2.stl"
+STL = _toolpaths.resolve_stl()
 
 def rss_gb():
     r = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss

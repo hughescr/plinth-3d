@@ -72,7 +72,7 @@ Ray-parity through the body via BVHTree: 2 crossings = solid single skin,
 4 = hollow. Positive `bm.calc_volume(signed=True)` confirms consistent
 outward normals.
 
-## The sweep loop (see scripts/geometry_sweep.py)
+## The sweep loop (see scripts/tools/geometry_sweep.py)
 
 Passes until zero-faces / zero-edges / bad-edges all read 0 (2-5 passes).
 Counts bump transiently mid-loop (bowties: 106->49->23->30->7->0) - normal,

@@ -21,6 +21,6 @@ the base diameter rim-to-rim; canopy/limbs overhanging the base is normal
 and fine. State the interpretation in your report so the user can adjust.
 
 Bake scale into the mesh (see `scale_center_bake` in
-`scripts/geometry_sweep.py`): slicers read STL units as mm, and object
+`scripts/tools/geometry_sweep.py`): slicers read STL units as mm, and object
 transforms do not survive export. Center XY on origin, base at z=0 -
 models parked hundreds of mm off-origin read as "my import is invisible".

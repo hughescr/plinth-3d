@@ -10,16 +10,17 @@ pickle -- census_core.py's CENSUS_STATE default IS this file).
 argv: <pickle_path> [census_summary_json]
 """
 import sys, os, json, pickle, numpy as np
-sys.path.insert(0, "/Users/craig/code/hughescr/dnd-campaigns/.worktrees/wt-perf/scripts")
+import _toolpaths
+sys.path.insert(0, _toolpaths.SCRIPTS_DIR)
 from support_placement import mesh_io, joints, verify, routing
 from support_placement.geometry_kernel import KernelSurface
 
-STL = "/Users/craig/code/hughescr/dnd-campaigns/Weeping Treant v1.2.stl"
-HERE = os.path.dirname(os.path.abspath(__file__))
-pkl_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "..", "..", "..",
-    "..", "..", "..", "..", "v5p_treant_run1.pkl")  # not expected to be used; pass explicitly
+STL = _toolpaths.resolve_stl()
+SCRATCH = _toolpaths.scratch_dir()
+pkl_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+    SCRATCH, "v5p_treant_run1.pkl")  # not expected to be used; pass explicitly
 census_json = sys.argv[2] if len(sys.argv) > 2 else os.path.join(
-    HERE, "results", "rerun_penetration_census.json")
+    SCRATCH, "audit", "penetration_census.json")  # where census_run.py writes
 
 st = pickle.load(open(pkl_path, "rb"))
 members = st["members"]; balls = st["balls"]; cfg = st["cfg"]

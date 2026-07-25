@@ -55,7 +55,7 @@ def _is_calibration_specimen(path):
     """Cheap pre-check: does this file have enough support groups for
     corpus.analyze() to calibrate from? Mirrors corpus.analyze()'s own
     n < 2 guard without duplicating its fuller analysis."""
-    import chitubox_inject as ci
+    from support_placement import chitubox_inject as ci
     proj = ci.Project(path)
     groups, _bridges = proj.supports()
     return len(groups) >= 2

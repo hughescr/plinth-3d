@@ -1,6 +1,6 @@
 # Hollowing, orientation, and drain drilling
 
-Run by `scripts/hollow_drill.py` (STL in, STL out; pure Python, no
+Run by `scripts/tools/hollow_drill.py` (STL in, STL out; pure Python, no
 Blender: `pip install trimesh scipy scikit-image manifold3d
 fast-simplification`). Read its docstring for the pipeline. This file
 holds the reasoning and the slicer-facing lessons.

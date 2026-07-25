@@ -13,7 +13,8 @@ validated injector.
 
 **Read `references/chitubox-format.md` before touching bytes** -- it is
 the complete field map, the list of known unknowns, and the validation
-history. The injector is `${CLAUDE_PLUGIN_ROOT}/scripts/chitubox_inject.py`
+history. The injector is
+`${CLAUDE_PLUGIN_ROOT}/scripts/support_placement/chitubox_inject.py`
 (pure Python + numpy; read its docstring for the API and for which
 operations are Chitubox-validated vs merely geometry-verified).
 

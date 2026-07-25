@@ -7,7 +7,7 @@ That predicate was superseded by the owner-ratified SCAR-AREA-CAP embed policy
 (SPEC-EMBED-POLICY.md, panel ruling cd989fe) plus the rule-4 through-transit test
 and the PRINT-FLOOR moot amendment (OWNER RATIFIED 2026-07-24). The arc-inset
 outputs (former results/p11_crossexam.json, results/rerun_p11_crossexam.json) were
-stale-tool artifacts and have been removed -- see RETIRED-TOOLS.md.
+stale-tool artifacts and have been removed -- see docs/reference/RETIRED-TOOLS.md.
 
 This refreshed tool re-grades every quarantine site through the ENGINE's ratified
 verify path -- geometry_exact.penetration_intervals (kernel axis Moller crossings)
@@ -17,45 +17,34 @@ inside-oracles (kernel ExactSurface parity, census dense-majority ParityVote,
 independent 16-ray exact trimesh) on the buried-root re-entry interior points.
 
 Result under the ratified predicate: 77 REAL / 3 ARTIFACT (ARTIFACTs 437/440/444 =
-single tip-anchored LEGAL deep plugs). Emits results/p11_regrade_ratified.json.
+single tip-anchored LEGAL deep plugs). Emits p11_regrade_ratified.json (see
+P11_OUT below; the default is the scratch dir, never the source tree).
 The settled ruling-1A ground-truth fixture derived from this run is committed at
-scripts/tests/fixtures_p11.json and guarded by scripts/tests/test_p11_fixture.py
+scripts/tests/fixtures/p11.json and guarded by scripts/tests/test_p11_fixture.py
 (hermetic -- no real STL required).
 
 env:
-  CENSUS_STATE  archived forest pickle (default: v5e_run1.pkl in this scratchpad)
-  TREANT_STL    source STL (default: repo-root Weeping Treant v1.2.stl)
+  CENSUS_STATE    archived forest pickle (default: v5e_run1.pkl in the scratch dir)
+  CENSUS_SCRATCH  scratch dir for that pickle + the default output (default: temp dir)
+  TREANT_STL      source STL (default: probed from the repo root)
+  P11_OUT         output json path (default: <scratch>/p11_regrade_ratified.json)
 """
 import numpy as np, sys, os, json, time, hashlib
 np.seterr(all="ignore")
 
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-sys.path.insert(0, os.path.join(ROOT, "scripts"))
-STATE = os.environ.get("CENSUS_STATE",
-    "/private/tmp/claude-501/-Users-craig-code-hughescr-dnd-campaigns/"
-    "0ddf6d41-f89e-4672-9577-2690d62b260c/scratchpad/v5e_run1.pkl")
-def _resolve_stl():
-    if os.environ.get("TREANT_STL"):
-        return os.environ["TREANT_STL"]
-    name = "Weeping Treant v1.2.stl"
-    # worktrees share the model with the main working tree; probe a few roots.
-    for cand in (os.path.join(ROOT, name),
-                 os.path.join(ROOT, "..", "..", name),   # dnd-campaigns/ (main repo)
-                 os.path.join(ROOT, "..", name)):
-        if os.path.exists(cand):
-            return os.path.abspath(cand)
-    return os.path.join(ROOT, name)
-
-
-STL = _resolve_stl()
+import _toolpaths
+ROOT = _toolpaths.REPO_ROOT
+sys.path.insert(0, _toolpaths.SCRIPTS_DIR)
+SCRATCH = _toolpaths.scratch_dir()
+STATE = os.environ.get("CENSUS_STATE", os.path.join(SCRATCH, "v5e_run1.pkl"))
+STL = _toolpaths.resolve_stl()
 os.environ["CENSUS_STATE"] = STATE
 
 from support_placement.geometry_exact import ExactSurface
 from support_placement import verify
 from support_placement.config import SupportConfig  # noqa: F401 (asserts cfg parity)
 
-sys.path.insert(0, os.path.join(ROOT, "docs/artifacts/audit-2026-07/tools"))
-import census_core as C
+import census_core as C   # sibling module in scripts/tools/
 C.STATE = STATE
 import trimesh, pickle
 
@@ -188,7 +177,7 @@ out = dict(
     exemplars={str(mi): by_mi[mi] for mi in sorted(LABELS) if mi in by_mi},
     three_oracle={str(k): v for k, v in oracle.items()}, mi3_print_floor=mi3)
 OUT = os.environ.get("P11_OUT") or os.path.join(
-    os.path.dirname(__file__), "results", "p11_regrade_ratified.json")
+    SCRATCH, "p11_regrade_ratified.json")
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
 json.dump(out, open(OUT, "w"), indent=1)
 print(f"wrote {OUT}", flush=True)
