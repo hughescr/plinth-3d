@@ -248,3 +248,209 @@ def test_emitted_model_matches_the_source_stl(tmp_path):
     assert m["bbox_min"] == pytest.approx(list(src.bounds[0] - center), abs=1e-3)
     assert m["bbox_max"] == pytest.approx(list(src.bounds[1] - center), abs=1e-3)
     assert m["placement"] == pytest.approx((0.0, 0.0, cfg.lift_mm))
+
+
+# ---------------------------------------------------------------------------
+# the forest survives the crossing, record for record
+# ---------------------------------------------------------------------------
+
+def _cylinder_frame(cfg):
+    """(source mesh, centered zmin, plate_z) for the Cylinder fixture."""
+    src = mesh_io.load_stl(CYLINDER_STL)
+    center = (src.bounds[0] + src.bounds[1]) / 2.0
+    zmin_centered = float(src.bounds[0][2] - center[2])
+    return src, zmin_centered, zmin_centered - cfg.lift_mm
+
+
+def _mixed_forest(cfg, plate_z, zmin_centered):
+    """A forest that exercises every branch of the spec builder: a plate-rooted
+    trunk (flare + column = TWO records), a tapered stub with an embed_end
+    (T_TAPER + tip ball), a plain shoot (T_SHAFT), and a free joint ball."""
+    members = [
+        _mk_member([0, 0, zmin_centered], [0, 0, plate_z], 0.6, 0.6,
+                   "trunk", ("contact", 0)),
+        _mk_member([3, 0, -4], [3, 0, -8], 0.25, 0.5, "stub", ("contact", 1),
+                   embed_end="p0"),
+        _mk_member([5, 0, -6], [0, 0, -6], 0.3, 0.3, "shoot", ("contact", 2)),
+    ]
+    balls = [dict(center=np.array([0.0, 0.0, -6.0]), r=0.4)]
+    return members, balls
+
+
+@pytest.mark.chitubox
+def test_every_record_round_trips_through_the_container(tmp_path):
+    """Read the finished file back and compare it to the SPECS, record for
+    record: type, endpoints, both radii, and each record's own triangle count.
+
+    A count-only check (which is all the other emit tests do) passes happily
+    if the columnar batch is mis-packed -- start/end swapped, radii
+    transposed, records reordered, or ``mesh_len`` off by one so every
+    record's geometry is stolen from its neighbour. This is what fails then.
+    """
+    import chitubox_io
+    cfg = config.SupportConfig(lift_mm=3.0)
+    _, zmin_centered, plate_z = _cylinder_frame(cfg)
+    members, balls = _mixed_forest(cfg, plate_z, zmin_centered)
+    result = dict(members=members, balls=balls, plate_z=plate_z,
+                  verify=dict(ok=True))
+
+    out = tmp_path / "forest.chitubox"
+    rep = emit.emit_project(CYLINDER_STL, result, str(out), cfg)
+
+    specs = ce.member_chain_specs(members, balls, cfg, plate_z=plate_z)
+    assert len(specs) == 4, "fixture must cover flare-split + stub + shoot"
+    assert {s.type_id for s in specs} == {ci.T_FLARE, ci.T_TAPER, ci.T_SHAFT}
+    assert rep.n_records == len(specs) and rep.n_flares == 1
+
+    recs = chitubox_io.read_project(str(out))["models"][0]["supports"]
+    assert len(recs) == len(specs)
+    for i, (spec, r) in enumerate(zip(specs, recs)):
+        assert r["seg_type"] == spec.type_id, f"record {i} type"
+        assert r["start"] == pytest.approx(list(spec.start), abs=1e-5), f"record {i} start"
+        assert r["end"] == pytest.approx(list(spec.end), abs=1e-5), f"record {i} end"
+        assert r["radii"] == pytest.approx((spec.r0, spec.r1), abs=1e-6), f"record {i} radii"
+        assert r["triangle_count"] == spec.mesh.shape[0], f"record {i} mesh slice"
+
+
+@pytest.mark.chitubox
+def test_the_whole_forest_crosses_the_boundary_once(tmp_path, monkeypatch):
+    """ONE ``write_project`` call carrying ALL records. Catches a regression to
+    a per-record crossing (16 MB of triangle soup at treant scale would go over
+    the boundary 2700 times instead of once)."""
+    import chitubox_io
+    cfg = config.SupportConfig(lift_mm=3.0)
+    _, zmin_centered, plate_z = _cylinder_frame(cfg)
+    members, balls = _mixed_forest(cfg, plate_z, zmin_centered)
+    real = chitubox_io.write_project
+    calls = []
+
+    def counting(out_path, models):
+        calls.append(models)
+        return real(out_path, models)
+
+    monkeypatch.setattr(chitubox_io, "write_project", counting)
+    rep = emit.emit_project(CYLINDER_STL,
+                            dict(members=members, balls=balls, plate_z=plate_z,
+                                 verify=dict(ok=True)),
+                            str(tmp_path / "once.chitubox"), cfg)
+
+    assert len(calls) == 1, f"emit crossed the boundary {len(calls)} times"
+    models = calls[0]
+    assert len(models) == 1
+    sup = models[0]["supports"]
+    assert sup["seg_type"].size == rep.n_records
+    # one concatenated mesh buffer, not one per record
+    assert sup["mesh_flat"].ndim == 1
+    assert int(sup["mesh_len"].sum()) == sup["mesh_flat"].size
+
+
+# ---------------------------------------------------------------------------
+# the wrong-model failure mode is gone STRUCTURALLY, not guarded at runtime
+# ---------------------------------------------------------------------------
+
+@pytest.mark.chitubox
+def test_two_emits_in_one_process_carry_their_own_models(tmp_path):
+    """Emit the cylinder, then the sphere, from one process. Each file must
+    carry its OWN mesh.
+
+    This is the exact shape of the failure the old clone-and-patch emitter had:
+    ``chitubox_inject.write_replace`` copies the template's model through into
+    its output, so a second emit against a model-bearing template produced
+    correct supports stapled onto the first model. Triangle counts and bboxes
+    here differ enough that any such carry-over is visible.
+    """
+    import chitubox_io
+    sphere_stl = os.path.join(FIXTURES, "Sphere.stl")
+    cfg = config.SupportConfig(lift_mm=3.0)
+
+    written = {}
+    for path in (CYLINDER_STL, sphere_stl):
+        src = mesh_io.load_stl(path)
+        center = (src.bounds[0] + src.bounds[1]) / 2.0
+        zmin_centered = float(src.bounds[0][2] - center[2])
+        plate_z = zmin_centered - cfg.lift_mm
+        result = dict(
+            members=[_mk_member([0, 0, zmin_centered], [0, 0, plate_z],
+                                0.5, 0.5, "trunk", ("contact", 0))],
+            balls=[], plate_z=plate_z, verify=dict(ok=True))
+        out = tmp_path / (os.path.basename(path) + ".chitubox")
+        rep = emit.emit_project(path, result, str(out), cfg)
+        written[path] = (rep, chitubox_io.read_project(str(out))["models"][0], src, center)
+
+    (cyl_rep, cyl_m, cyl_src, cyl_c) = written[CYLINDER_STL]
+    (sph_rep, sph_m, sph_src, sph_c) = written[sphere_stl]
+
+    assert cyl_rep.model_triangles == _stl_face_count(CYLINDER_STL)
+    assert sph_rep.model_triangles == _stl_face_count(sphere_stl)
+    assert cyl_rep.model_triangles != sph_rep.model_triangles, \
+        "fixtures must differ, or this test cannot see carry-over"
+    assert cyl_m["name"] == "Cylinder" and sph_m["name"] == "Sphere"
+    # each file's bbox is its own source's, in the centered frame
+    for m, src, c in ((cyl_m, cyl_src, cyl_c), (sph_m, sph_src, sph_c)):
+        assert m["bbox_min"] == pytest.approx(list(src.bounds[0] - c), abs=1e-3)
+        assert m["bbox_max"] == pytest.approx(list(src.bounds[1] - c), abs=1e-3)
+    assert cyl_m["bbox_max"] != pytest.approx(sph_m["bbox_max"], abs=1e-3)
+
+
+def test_emit_offers_no_way_to_build_on_an_existing_file():
+    """No template/base/donor parameter, and no call into the clone-and-patch
+    writer. If someone reintroduces ``write_replace`` at this boundary -- the
+    one path that can staple supports onto a foreign model -- this fails."""
+    import ast
+    import inspect
+    params = set(inspect.signature(emit.emit_project).parameters)
+    assert not (params & {"template", "base", "donor", "clone_from", "base_path"})
+    with pytest.raises(TypeError):
+        emit.emit_project("a.stl", {}, "b.chitubox", None, template=b"")
+
+    # Real calls only -- the module docstring names write_replace on purpose,
+    # to explain the failure mode it removes.
+    tree = ast.parse(inspect.getsource(emit))
+    called = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            called.add(fn.attr if isinstance(fn, ast.Attribute) else
+                       getattr(fn, "id", ""))
+    assert not (called & {"write_replace", "write_supports", "clone"})
+
+
+# ---------------------------------------------------------------------------
+# placement + naming
+# ---------------------------------------------------------------------------
+
+@pytest.mark.chitubox
+def test_placement_xy_reaches_the_file(tmp_path):
+    """Plate translation is not silently dropped: (x, y, lift) round-trips.
+    Only (0, 0) was ever exercised before, which cannot distinguish "passed
+    through" from "hardcoded to the plate centre"."""
+    import chitubox_io
+    cfg = config.SupportConfig(lift_mm=3.0)
+    _, zmin_centered, plate_z = _cylinder_frame(cfg)
+    result = dict(members=[_mk_member([0, 0, zmin_centered], [0, 0, plate_z],
+                                      0.5, 0.5, "trunk", ("contact", 0))],
+                  balls=[], plate_z=plate_z, verify=dict(ok=True))
+    out = tmp_path / "placed.chitubox"
+    rep = emit.emit_project(CYLINDER_STL, result, str(out), cfg,
+                            placement_xy=(12.5, -7.25))
+    assert rep.placement_xy == (12.5, -7.25)
+    m = chitubox_io.read_project(str(out))["models"][0]
+    assert m["placement"] == pytest.approx((12.5, -7.25, cfg.lift_mm))
+
+
+@pytest.mark.chitubox
+def test_default_model_name_is_the_stl_stem_capped_at_63(tmp_path):
+    """The container's name field is 63 bytes. A long mini filename must be
+    truncated on the way in, not overrun the field or be rejected -- and the
+    name read back out of the finished file is what is checked."""
+    long_stem = "Morel_Mudskipper_" + "x" * 80
+    src = tmp_path / (long_stem + ".stl")
+    src.write_bytes(open(CYLINDER_STL, "rb").read())
+    cfg = config.SupportConfig(lift_mm=3.0)
+    _, zmin_centered, plate_z = _cylinder_frame(cfg)
+    result = dict(members=[_mk_member([0, 0, zmin_centered], [0, 0, plate_z],
+                                      0.5, 0.5, "trunk", ("contact", 0))],
+                  balls=[], plate_z=plate_z, verify=dict(ok=True))
+    rep = emit.emit_project(str(src), result, str(tmp_path / "n.chitubox"), cfg)
+    assert rep.model_name == long_stem[:63]
+    assert len(rep.model_name) == 63

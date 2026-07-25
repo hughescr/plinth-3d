@@ -16,6 +16,7 @@ import os
 import subprocess
 import sys
 
+import numpy as np
 import pytest
 
 from support_placement import config, emit, hollow, mesh_io, pipeline
@@ -99,6 +100,57 @@ def test_no_hollow_uses_the_source_mesh_untouched(source_stl, tmp_path):
     assert rep.stage("hollow").status == pipeline.STATUS_SKIPPED
     assert rep.prepped_stl == source_stl
     assert rep.stage("emit").report["model_stl"] == source_stl
+
+
+@pytest.mark.kernel
+@pytest.mark.chitubox
+def test_the_emitted_model_is_the_PREPPED_mesh_not_the_source(
+        source_stl, tmp_path, monkeypatch):
+    """Stage composition, at the only point where it can go wrong silently.
+
+    The supports are computed on the hollow/drill stage's OUTPUT, so that is
+    the mesh the project must embed. If emit were handed ``stl_path`` instead
+    of ``prepped``, the file would carry supports computed for a different
+    mesh -- the same wrong-model class of defect the emit path was rebuilt to
+    make impossible.
+
+    The fake hollow stage writes a mesh that is deliberately DIFFERENT from
+    the source (half scale), because a hollow stage that happens to reproduce
+    its input cannot tell the two apart. Everything downstream is real: real
+    engine run, real emit, and the bbox is read back out of the finished file.
+    """
+    import chitubox_io
+    half = mesh_io.load_stl(source_stl)
+    half.apply_scale(0.5)
+
+    def fake_hollow(in_path, out_path, wall=2.5, orient=True, log=None):
+        half.export(out_path)
+        log.update(status=hollow.STATUS_OK, decision="SOLID (test double)")
+        return log
+
+    monkeypatch.setattr(pipeline.hollow_mod, "run", fake_hollow)
+    out = tmp_path / "prepped.chitubox"
+    rep = pipeline.prep_one(source_stl, str(out), orient=False)
+    assert rep.status == pipeline.STATUS_OK, rep.error
+
+    assert rep.prepped_stl != source_stl and os.path.isfile(rep.prepped_stl)
+    assert rep.stage("emit").report["model_stl"] == rep.prepped_stl
+
+    prepped = mesh_io.load_stl(rep.prepped_stl)
+    center = (prepped.bounds[0] + prepped.bounds[1]) / 2.0
+    m = chitubox_io.read_project(str(out))["models"][0]
+    assert m["bbox_min"] == pytest.approx(list(prepped.bounds[0] - center), abs=1e-3)
+    assert m["bbox_max"] == pytest.approx(list(prepped.bounds[1] - center), abs=1e-3)
+    # and it is NOT the source: half scale means half the extents
+    src = mesh_io.load_stl(source_stl)
+    src_ext = src.bounds[1] - src.bounds[0]
+    got_ext = np.asarray(m["bbox_max"]) - np.asarray(m["bbox_min"])
+    assert got_ext == pytest.approx(src_ext * 0.5, abs=1e-3)
+    # the supports were computed in that same frame: plate_z is lift below it
+    assert rep.stage("supports").report["plate_z"] == pytest.approx(
+        float(prepped.bounds[0][2] - center[2]) - rep.settings["lift_mm"], abs=1e-6)
+    # the model is still named after the SOURCE mini, not the intermediate
+    assert rep.stage("emit").report["model_name"] == "small_table"
 
 
 def test_orientation_search_is_on_by_default(source_stl, tmp_path, monkeypatch):
