@@ -13,7 +13,7 @@ drift:
   * Three-oracle agreement: on every buried-root re-entry interior point the
     three INDEPENDENT inside-oracles agree -- the kernel (ExactSurface parity),
     the census dense-majority ParityVote, and an independent 16-ray exact
-    trimesh majority. The real-mesh verdicts are frozen in fixtures_p11.json;
+    trimesh majority. The real-mesh verdicts are frozen in fixtures/p11.json;
     this file additionally proves the three METHODS agree on controlled
     synthetic geometry (method-independence, hermetic -- no real STL needed).
 
@@ -45,9 +45,9 @@ from support_placement.config import SupportConfig
 from support_placement.geometry_exact import ExactSurface
 
 HERE = os.path.dirname(__file__)
-FIXTURE = os.path.join(HERE, "fixtures_p11.json")
-PHASE8 = os.path.join(HERE, "..", "..", "docs", "artifacts", "audit-2026-07",
-                      "acceptance-run-2026-07-23", "phase8_relocation_input.json")
+FIXTURE = os.path.join(HERE, "fixtures", "p11.json")
+PHASE8 = os.path.join(HERE, "fixtures",
+                      "phase8_relocation_input_2026_07_23.json")
 
 
 @pytest.fixture(scope="module")

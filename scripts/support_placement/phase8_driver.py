@@ -83,7 +83,7 @@ TREANT_PRERELOCATE_DIGEST = (
     "fc3fb20add04cbb12136a2adc4ff9191a73c984a69a66b54013020dc2efbe79c")
 # Superseded pin, kept for provenance: the pre-contact-fix forest v5e_run1.pkl
 # (143/50/77/3/15), whose snapshot lives at
-# docs/artifacts/audit-2026-07/acceptance-run-2026-07-23/.
+# scripts/tests/fixtures/phase8_relocation_input_2026_07_23.json.
 TREANT_PRERELOCATE_DIGEST_2026_07_23 = (
     "354f1ec85b972c14b674167200130d397aac5f71bb58359d9b954129fd35341f")
 

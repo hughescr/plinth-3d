@@ -58,12 +58,10 @@ _X = np.array([1.0, 0.0, 0.0])
 # @ e023b0e); the 2026-07-23 file it supersedes is keyed to the pre-fix member
 # numbering and is retained only as the archived-forest regression pair.
 _ARCHIVED_SNAPSHOT_2026_07_23 = os.path.join(
-    os.path.dirname(__file__), "..", "..",
-    "docs", "artifacts", "audit-2026-07", "acceptance-run-2026-07-23",
-    "phase8_relocation_input.json")
+    os.path.dirname(__file__), "..", "tests", "fixtures",
+    "phase8_relocation_input_2026_07_23.json")
 _DEFAULT_SNAPSHOT = os.path.join(
-    os.path.dirname(__file__), "..", "..",
-    "docs", "artifacts", "audit-2026-07", "acceptance-run-2026-07-24-contactfix",
+    os.path.dirname(__file__), "..", "tests", "fixtures",
     "phase8_relocation_input.json")
 
 # Explicit, normative phase processing order (§3.0). Shaft geometry (stubs then

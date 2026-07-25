@@ -124,11 +124,11 @@ def test_ball_breach_report_synthesizes_endcap_for_ball_less_embed(cfg):
 # check (amendment 5, tests above) is NOT deleted -- still computed, still
 # surfaced -- but moves to a report-only `endcap_breach_diagnostic` key
 # that never gates `ok`. Regression sites: the real Weeping Treant forest
-# (docs/artifacts/audit-2026-07/acceptance-run-2026-07-23) had
+# (acceptance run 2026-07-23) had
 # ball_breach_report return 199 (15 ball + 184 endcap); the independent
 # census's antipodal-span test agrees with the engine EXACTLY on the ball
 # category (15 == 15) and never evaluates the endcap category at all -- see
-# validate_r3_ball_gate.py for the full-scale reconstruction.
+# scripts/tools/validate_r3_ball_gate.py for the full-scale reconstruction.
 # ==========================================================================
 def test_self_verify_does_not_gate_on_endcap_breach(cfg):
     """The amendment-5 endcap breach (test_ball_breach_report_synthesizes_

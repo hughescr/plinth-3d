@@ -13,7 +13,7 @@ This module closes that hole. It recomputes ORACLE-side answers over a fixed,
 deterministic corpus spanning every oracle method across every parity fixture,
 canonically serialises them (dtype+shape+tobytes for arrays; sorted keys for
 dicts; bit-exact struct-packed floats), SHA-256 hashes each case, and compares
-against scripts/tests/fixtures_kernel_parity.json — which also carries an
+against scripts/tests/fixtures/kernel_parity.json — which also carries an
 ENVIRONMENT STAMP (python/numpy/scipy versions; the raw-float hashes are
 environment-sensitive).
 
@@ -41,7 +41,8 @@ from support_placement import mesh_io
 
 pytestmark = pytest.mark.kernel
 
-BASELINE_PATH = os.path.join(os.path.dirname(__file__), "fixtures_kernel_parity.json")
+BASELINE_PATH = os.path.join(os.path.dirname(__file__), "fixtures",
+                             "kernel_parity.json")
 
 
 # --------------------------------------------------------------------------

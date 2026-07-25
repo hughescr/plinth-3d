@@ -492,7 +492,8 @@ unchanged. Curved members emit as their polyline — no new record types.
   every new invariant gets a test that FAILS before its implementation.
 - Step zero of implementation, before any deletion: run current v3.7 on
   the Treant, freeze `treant_v3_7_baseline.json` (volume_report + counts)
-  into the repo.
+  into the repo (it now lives at
+  `scripts/tests/fixtures/treant_v3_7_baseline.json`).
 
 ## 14. Phase plan
 
@@ -502,7 +503,8 @@ unchanged. Curved members emit as their polyline — no new record types.
    can't demonstrate CCO's core value and would regress vs v3 at its
    own milestone) and the ported spiral plate-anchor search; straight
    segments only; joints/verify signature migration; all gates wired;
-   `treant_v3_7_baseline.json` frozen BEFORE any deletion. Commit.
+   `scripts/tests/fixtures/treant_v3_7_baseline.json` frozen BEFORE any
+   deletion. Commit.
 3. `rewire.py` + junction numeric polish + Murray verify gate; fixture
    volume A/B vs frozen v3 numbers. Commit.
 4. `transient.py` full generalization + bracing-as-restraint (§9).

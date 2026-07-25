@@ -44,16 +44,14 @@ _SCR = ("/private/tmp/claude-501/-Users-craig-code-hughescr-dnd-campaigns/"
 _PKL = os.path.join(_SCR, "v5e_run1.pkl")
 _STL = "/Users/craig/code/hughescr/dnd-campaigns/Weeping Treant v1.2.stl"
 _INPUT_JSON = os.path.join(
-    os.path.dirname(__file__), "..", "..", "docs", "artifacts",
-    "audit-2026-07", "acceptance-run-2026-07-23", "phase8_relocation_input.json")
+    os.path.dirname(__file__), "fixtures",
+    "phase8_relocation_input_2026_07_23.json")
 # The LIVE pair at HEAD: the post-contact-fix pre-relocation state and the
 # snapshot re-derived from it. `_PKL` / `_INPUT_JSON` above stay pinned to the
 # SUPERSEDED 2026-07-23 pair, which the archived cross-checks still validate.
 _PKL_CFIX = os.path.join(_SCR, "v5p_treant_cfix1.pkl")
 _INPUT_JSON_CFIX = os.path.join(
-    os.path.dirname(__file__), "..", "..", "docs", "artifacts",
-    "audit-2026-07", "acceptance-run-2026-07-24-contactfix",
-    "phase8_relocation_input.json")
+    os.path.dirname(__file__), "fixtures", "phase8_relocation_input.json")
 
 
 # --------------------------------------------------------------------------

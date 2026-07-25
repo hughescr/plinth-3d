@@ -83,12 +83,12 @@ def _gate():
 
 def pytest_addoption(parser):  # noqa: F811 - pytest hook
     # Anti-drift frozen parity baseline (spec sec 6 item 6, Amendment A20).
-    # The frozen oracle hashes in fixtures_kernel_parity.json are NEVER
+    # The frozen oracle hashes in fixtures/kernel_parity.json are NEVER
     # auto-created: "first freeze" (or an intentional re-freeze in its own
     # commit with a written rationale) happens only via this explicit flag.
     parser.addoption(
         "--freeze-kernel-baseline", action="store_true", default=False,
-        help="Recompute and WRITE scripts/tests/fixtures_kernel_parity.json "
+        help="Recompute and WRITE scripts/tests/fixtures/kernel_parity.json "
              "(frozen oracle-side answer hashes + env stamp). Use only for an "
              "intentional first-freeze/re-freeze, in its own commit.")
 

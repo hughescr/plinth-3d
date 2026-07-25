@@ -20,7 +20,7 @@ def test_engine_runs_end_to_end_on_table_fixture(table_mesh, cfg):
     # honestly reported unrouted -- never a through-model member.
     n_terminal_members = sum(1 for m in result["members"] if m["kind"] == "stub")
     assert n_terminal_members + len(result["unrouted"]) == len(result["contacts"])
-    # v3 baseline on this fixture (fixtures_v3_baseline.json) was 2
+    # v3 baseline on this fixture (fixtures/v3_baseline.json) was 2
     # unrouted; v4 Phase 2 (straight segments only, no curved descent/
     # rewiring yet) is allowed up to 4 pending Phase 3 rewiring and Phase
     # 4 curvature attacking the residual -- also visible directly as
@@ -494,14 +494,15 @@ def test_run_bit_identical_across_thread_counts_on_table(table_mesh):
     assert len(set(canons)) == 1, "engine.run results differ across runs/threads"
 
 
-_BASELINE_PATH = os.path.join(os.path.dirname(__file__), "fixtures_v5_baseline.json")
+_BASELINE_PATH = os.path.join(os.path.dirname(__file__), "fixtures",
+                              "v5_baseline.json")
 
 
 def test_table_and_toed_slab_full_run_not_worse_than_baseline(cfg):
     """SPEC-INTEGRATION #4's acceptance gate + trap detector: table and
     toed_slab through the FULL new run() (construct -> rewire ->
     brace_and_size -> verify) must stay gate-clean and not exceed
-    fixtures_v5_baseline.json's total_ml.
+    fixtures/v5_baseline.json's total_ml.
 
     v5 geometry-core re-freeze (SPEC-V5-GEOM sec 4, PRE-APPROVED): evicting
     the sampled surface point cloud from the load-bearing queries legitimately
@@ -517,7 +518,7 @@ def test_table_and_toed_slab_full_run_not_worse_than_baseline(cfg):
     and confirmed bit-identical across two independent engine.run calls per
     fixture before freezing (scripts/tests/_refreeze_v5.py: the double-run
     determinism proof; old->new values are in the SWAP-STEP-3 commit message).
-    fixtures_v4_p4_baseline.json (and _v4_p3, _v3) are kept untouched for
+    fixtures/v4_p4_baseline.json (and v4_p3, v3) are kept untouched for
     history/provenance."""
     baseline = json.load(open(_BASELINE_PATH))
 
