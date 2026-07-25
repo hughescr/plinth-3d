@@ -1,9 +1,7 @@
 # Printability dimension audit — v4 CCO resin support engine
 
-Repo: `resin-print-prep`, master f02b7af (audited via prepared worktree
-`.../scratchpad/wt-emit-final`, which is not itself a git checkout so
-line numbers below are cited against the worktree copy — content should
-match master per task setup).
+Repo: `resin-print-prep`, master f02b7af — line numbers below are cited
+against that commit.
 
 Scope per assignment: `tree.py` `printability_report` + per-segment
 rules, `joints.py` (tip-fuse SF 8, ball certification), `config.py`,

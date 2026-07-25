@@ -1,14 +1,14 @@
 # Physics audit: contacts & tips (dimension `contacts_tips`)
 
-Repo: `resin-print-prep`, master f02b7af (worktree `wt-emit-final`).
+Repo: `resin-print-prep`, master f02b7af.
 Files audited: `perception.py`, `struts.py`, `config.py`, `engine.py` contact-demand
 functions. `placement.py` (tip formula), `routing.py`, `verify.py`, `cco.py` were read
 opportunistically for grounding (the tip-radius formula lives in `placement.py` but is
 config-owned and engine-invoked, so it is included; anything from those files is marked
 "context, not primary scope").
 
-All line numbers verified 2026-07-22 against the worktree at
-`/private/tmp/claude-501/.../wt-emit-final/scripts/support_placement/`.
+All line numbers verified 2026-07-22 against
+`scripts/support_placement/` at master f02b7af.
 
 ---
 

@@ -1,7 +1,6 @@
 # Physics audit — dimension: transient_peel
 
-Repo: resin-print-prep, master f02b7af (audited via prepared worktree
-`wt-emit-final`, same content). Files in scope: `transient.py`,
+Repo: resin-print-prep, master f02b7af. Files in scope: `transient.py`,
 `bracing.py`, `engine.py::brace_and_size`, `config.py`. (`placement.py`
 and `cco.py` read as required dependencies of the sizing formulas these
 files call — `_shaft_r_for_L`, `_r_tension_mm`, `_lean_deg`.)

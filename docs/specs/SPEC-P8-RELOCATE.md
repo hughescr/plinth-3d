@@ -34,7 +34,7 @@ audit's 195-unrouted problem) but built machinery this spec deliberately
 reuses. **HOLDS, reused as substrate:**
 
 - the relocation seam: intervene inside `cco.build` between "candidate loop
-  exhausted" and "park unrouted" (REACH §0; cco.py:159-240 in this worktree);
+  exhausted" and "park unrouted" (REACH §0; cco.py:159-240 in this checkout);
 - the transactional trial mechanics: checkpoint → build → `forest.revalidate`
   → rollback (cco.py `_insert_terminal`, cco.py:309);
 - the contact-class legal-domain table (REACH §1: island-birth footprint /

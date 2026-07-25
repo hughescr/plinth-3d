@@ -10,7 +10,7 @@ before writing.
 Run an orchestrator + parallel-worker pattern, not a linear task list:
 - YOU (the lead session) own architecture decisions, gate every merge,
   and commit at milestones. Delegate implementation to parallel
-  subagents in ISOLATED WORKTREES with strict, disjoint file ownership
+  subagents in ISOLATED CHECKOUTS with strict, disjoint file ownership
   (the one time two agents shared a tree here, a cancelled agent left
   half-applied edits that silently corrupted volume numbers — never
   again).

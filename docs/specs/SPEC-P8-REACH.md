@@ -4,8 +4,8 @@ Author: Phase-8 designer. Charter: `skills/support-placement/references/design-v
 Target commit: f02b7af (repo read-only). **Grounding note on citations:** the
 `~/Documents` working copy is TCC-blocked for this environment (file `open()` returns
 EPERM even outside the sandbox); every `file:line` below is verified against the
-readable, most-advanced git worktree
-`…/scratchpad/wt-emit-final/scripts/support_placement/*` (engine.py 598, verify.py 517,
+most-advanced readable checkout of
+`scripts/support_placement/*` (engine.py 598, verify.py 517,
 tree.py 590, cco.py 667, bracing.py 1294, config.py 418, perception.py 564,
 routing.py 321, struts.py 117). Line numbers are exact against that checkout; if
 f02b7af differs, re-anchor by the quoted symbol, not the integer.
@@ -571,8 +571,8 @@ harness's config, `unrouted_mesh_classes.json` meta):
    is extended to carry `conceded_standoff_mm` (§3b). This is now a listed required edit,
    not an assumption — but it is the single highest-leverage line: get it wrong and the
    independent verify gate rejects every concession the builder just made.
-2. **Reference-checkout drift.** Citations are against `wt-emit-final`, the most-advanced
-   readable worktree, used as the f02b7af proxy. If f02b7af is behind/ahead, re-anchor by
+2. **Reference-checkout drift.** Citations are against the most-advanced readable
+   checkout, used as the f02b7af proxy. If f02b7af is behind/ahead, re-anchor by
    symbol. `routing.py` at 320 lines has no demand/relocation logic (it is the
    Segment/Route + clearance substrate, charter §2 "KEEP UNCHANGED") — Feature A's true
    seam is `cco.build`, not `routing.py`; the task named routing.py but the failure

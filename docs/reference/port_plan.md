@@ -25,12 +25,12 @@ Two profiling targets were requested. Status:
   Raw: `/Users/craig/.claude/jobs/0ddf6d41/tmp/prof_table.pstats` +
   `prof_table.py`.
 - **Full Weeping Treant v1.2 (576,026 faces):** ⚠️ **fine-grained cProfile
-  BLOCKED** in this worktree. The STL lives at
+  BLOCKED** in this checkout. The STL lives at
   `/Users/craig/Documents/Claude/Projects/D&D Campaigns/Weeping Treant v1.2.stl`
   (both scratchpad copies are symlinks to it). This process is denied read by
   **macOS TCC** on `~/Documents`: `os.stat` succeeds, `open()` →
   `PermissionError(1, 'Operation not permitted')`, even with the sandbox
-  disabled and even via the worktree venv python. A sibling agent in job
+  disabled and even via the venv python. A sibling agent in job
   `0ddf6d41` *did* read it earlier (it produced `engine_run_results.json` +
   `engine_run_state.pkl` at 16:29), so the grant is real but not held by this
   shell.

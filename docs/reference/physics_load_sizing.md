@@ -1,6 +1,6 @@
 # Physics audit: load_sizing (v4 CCO resin support engine)
 
-Repo: resin-print-prep, master f02b7af (worktree copy at wt-emit-final).
+Repo: resin-print-prep, master f02b7af.
 Scope files: `verify.py`, `tree.py`, `cco.py`, `config.py`, plus
 `placement.py` and `transient.py` (the actual homes of `_shaft_r_for_L`
 and `r_transient_mm`, which `tree.py`/`cco.py` only call — noted since
@@ -8,8 +8,7 @@ the task description places "r_deflect" under tree.py but it does not
 live there in the current source layout).
 
 All line numbers below refer to files under
-`scripts/support_placement/` in the worktree
-`.../scratchpad/wt-emit-final`, which mirrors the read-only master repo.
+`scripts/support_placement/` at master f02b7af.
 
 ---
 

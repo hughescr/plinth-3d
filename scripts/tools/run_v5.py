@@ -1,7 +1,6 @@
 """Full-scale Weeping Treant acceptance run on the kernel-backed engine.run
-(worktree wt-perf @ v5-perf, canonical cfg SupportConfig(lift_mm=3.0), DEFAULT
-config = class A only). Instrumented for the SPEC-RUST-KERNEL sec 8 / A23
-acceptance obligations.
+(canonical cfg SupportConfig(lift_mm=3.0), DEFAULT config = class A only).
+Instrumented for the SPEC-RUST-KERNEL sec 8 / A23 acceptance obligations.
 
 argv: <tag> [profile]
   tag=run1  -> histogram+telemetry, state pkl, clean timing (primary)

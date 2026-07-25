@@ -1,10 +1,10 @@
 """Path plumbing shared by the operator/analysis tools in this directory.
 
 These tools used to hardcode absolute paths into whichever session scratchpad
-and whichever worktree they happened to be written in, which is why they got
-COPIED next to each run instead of edited in place. Everything here is derived
-from the module's own location or overridable by environment variable, so a
-tool keeps working from any checkout.
+they happened to be written in, which is why they got COPIED next to each run
+instead of edited in place. Everything here is derived from the module's own
+location or overridable by environment variable, so a tool keeps working from
+any checkout.
 
 env:
   CENSUS_SCRATCH  scratch/output directory (default: the system temp dir)
@@ -29,15 +29,15 @@ def scratch_dir():
 def resolve_stl(name=STL_NAME):
     """Absolute path to the source STL.
 
-    $TREANT_STL wins; otherwise probe the repo root and the two enclosing
-    directories -- worktrees under <main>/.worktrees/<wt> share the model with
-    the main working tree rather than carrying a copy.
+    $TREANT_STL wins; otherwise probe the repo root and then its parent. The
+    source models are not tracked in git: the repo is
+    ``dnd-campaigns/resin-print-prep`` and the ``*.stl`` files sit beside it in
+    the project directory ``dnd-campaigns/``, i.e. the repo's parent.
     """
     if os.environ.get("TREANT_STL"):
         return os.environ["TREANT_STL"]
     for cand in (os.path.join(REPO_ROOT, name),
-                 os.path.join(REPO_ROOT, "..", "..", name),   # main working tree
-                 os.path.join(REPO_ROOT, "..", name)):
+                 os.path.join(REPO_ROOT, "..", name)):   # project dir, beside the repo
         if os.path.exists(cand):
             return os.path.abspath(cand)
     return os.path.join(REPO_ROOT, name)

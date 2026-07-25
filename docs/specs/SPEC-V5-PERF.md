@@ -805,7 +805,7 @@ committed config.
 
 ## Appendix A — Adjudication 2026-07-23: rejected challenges (with code evidence)
 
-Both critiques were verified claim-by-claim against the worktree before
+Both critiques were verified claim-by-claim against the source before
 ruling. Upheld findings are integrated above with **[ADJ]** markers.
 The following challenges were REJECTED or materially narrowed:
 
