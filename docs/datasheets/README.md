@@ -18,9 +18,14 @@ decides where a new file goes:
 - `resins/` — per-resin material data (green-state modulus and strength,
   cure behaviour, vendor-stated properties, water-washable quirks).
 - `printers/` — per-printer physical parameters. See its README.
-- `lit_green_peel.md` — the confidence-classed literature review behind the
-  peel-force and green-state numbers. It spans resin *and* process, so it
-  sits at this level rather than under either subdirectory.
+- `physics/` — the literature behind the peel-force and green-state numbers.
+  This spans resin *and* process, so it sits beside them rather than under
+  either. Contains the source PDFs plus:
+  - `LITERATURE-NOTES.md` — extracted numbers and relations from the
+    primary sources, with test conditions attached to every figure, and a
+    "what this changes in our config" summary per parameter.
+  - `lit-green-peel.md` — the earlier confidence-classed review. Still
+    valid; `LITERATURE-NOTES.md` adds primary-source measurements to it.
 
 ## Why this directory matters
 
