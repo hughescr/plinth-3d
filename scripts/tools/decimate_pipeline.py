@@ -33,7 +33,7 @@ Use from Blender MCP:
     overrides it).
 
 Or headless CLI:
-    blender --background host.blend --python decimate_pipeline.py -- \
+    blender --background scripts/tools/host.blend --python scripts/tools/decimate_pipeline.py -- \
         --stl "/path/model.stl" [--pixel-um 19] [--out "/path/out.stl"]
 
 MCP timeout note: client calls may time out around 60s but the Blender
