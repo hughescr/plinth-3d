@@ -13,10 +13,14 @@ the [Blender MCP](https://extensions.blender.org/add-ons/mcp/):
   the deepest passing reduction, and verifies against the full original
   surface before exporting. Batch-friendly (headless Blender per model).
 
-New in 1.1: `scripts/tools/hollow_drill.py` — supervised hollowing (EDT-based
-hollow/solid decision, main-cavity-only, per-lobe drains, pooling audit,
-vent, verified export) plus print-orientation search. Pure Python
-(trimesh/scipy/scikit-image/manifold3d), no Blender required.
+New in 1.1: supervised hollowing (EDT-based hollow/solid decision,
+main-cavity-only, per-lobe drains, pooling audit, vent, verified export) plus
+print-orientation search. Pure Python (trimesh/scipy/scikit-image/manifold3d),
+no Blender required. The algorithm lives in
+`scripts/support_placement/hollow.py`; `scripts/tools/hollow_drill.py` is its
+CLI (`in.stl out.stl`, exit 0 = written — hollowed or legitimately solid,
+1 = bad input, 2 = self-verification failed and nothing was written, with the
+failed checks named on stderr).
 
 New in 1.3: `chitubox-support-injection` skill — write native, editable
 supports (and raft bridges) directly into CHITUBOX project files via a
@@ -44,6 +48,24 @@ Operator entry point:
 `python scripts/tools/emit_supports.py <model.stl> <out.chitubox>` — one JSON
 report line on stdout, progress on stderr, distinct exit codes per failure
 class.
+
+New in 1.6: the **whole pipeline** is one call.
+`scripts/support_placement/pipeline.py` composes hollow/drill → support engine
+→ emit, with the orientation search on by default (orientation must be final
+before drilling — drain placement is gravity-dependent). Every stage's own
+report is captured, and every run writes a machine-readable record —
+`<out stem>.pipeline.json`, on failure too — alongside the
+`<out stem>.prepped.stl` the supports were actually computed against. A stage
+that declines to produce output yields a non-zero exit code *and* that record;
+"succeeded, wrote nothing" is not a reachable state. Operator entry point:
+
+    python scripts/tools/prep_one.py <model.stl> <out.chitubox>
+    python scripts/tools/prep_one.py --out-dir DIR <model.stl|dir>... --skip-existing
+
+One JSON line per input on stdout whatever the outcome; `--skip-existing`
+makes re-running a folder cheap and idempotent. Exit codes: 0 written/skipped,
+1 bad input, 2 hollow/drill failed, 3 support gates failed, 4 emit failed,
+5 support engine raised.
 
 Both Rust extensions are built with `bash scripts/build_kernel.sh` (no
 argument builds `geom_kernel` and `chitubox_io`; pass a crate name for one).

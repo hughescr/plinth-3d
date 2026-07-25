@@ -21,17 +21,17 @@ dependencies = [
     "trimesh>=4.12.2,<5",
     "rtree>=1.4.1,<2",   # trimesh's ray-query backend; undeclared before -- the uv venv caught it
     "networkx>=3.4.2,<4",
-    "scikit-image>=0.26.0,<1",  # scripts/tools/hollow_drill.py: skimage.measure marching cubes for the cavity surface
-    "manifold3d>=3.5.2,<4",     # trimesh's boolean engine; hollow_drill.py names it explicitly (engine="manifold")
-    "shapely>=2.1.2,<3",        # trimesh's 2D polygon backend; hollow_drill.py's orientation scorer reads Section.polygons_closed
+    "scikit-image>=0.26.0,<1",  # support_placement/hollow.py: skimage.measure marching cubes for the cavity surface
+    "manifold3d>=3.5.2,<4",     # trimesh's boolean engine; support_placement/hollow.py names it explicitly (engine="manifold")
+    "shapely>=2.1.2,<3",        # trimesh's 2D polygon backend; support_placement/hollow.py's orientation scorer reads Section.polygons_closed
 ]
 
 [project.optional-dependencies]
-# Optional speed-up, not a requirement: hollow_drill.orient_search decimates a
+# Optional speed-up, not a requirement: hollow.orient_search decimates a
 # proxy mesh for its orientation sweep inside a try/except and silently falls
 # back to the full mesh, so the tool is correct without this -- just slower.
 fast = [
-    "fast-simplification>=0.1.13,<1",  # scripts/tools/hollow_drill.py proxy decimation
+    "fast-simplification>=0.1.13,<1",  # support_placement/hollow.py proxy decimation
 ]
 # Blender-runtime tools -- scripts/tools/decimate_pipeline.py and
 # scripts/tools/geometry_sweep.py import `bpy` and `mathutils`. Those are NOT

@@ -48,6 +48,12 @@ have trapped 14ml, per-lobe drains cut it to 0.27ml.
 
 - Run hollow_drill.py foreground in one shell call (~20s typical); in
   sandboxed VMs background processes are reaped between calls.
+- **Trust the exit code, not the JSON.** 0 = out.stl written (hollowed or
+  a legitimate solid decision); 1 = bad input; 2 = self-verification failed
+  and nothing was written, with the failed checks (`single_body`,
+  `watertight`, `winding_consistent`, `volume_balance`, `cavity_breathes`)
+  named on stderr and listed under `failed_checks` in the report. The tool
+  used to exit 0 in that case, which read as a success with no output file.
 - The orientation search changes bounding dims versus the sized input
   (a 119mm-tall upright model may report 113mm tall x 107mm deep after
   a lean). Footprint scaling is unaffected -- not a sizing error.
