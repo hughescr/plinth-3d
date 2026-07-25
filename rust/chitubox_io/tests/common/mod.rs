@@ -1,12 +1,23 @@
-//! Shared test helpers. Corpus files are large and live outside the repo;
-//! tests locate them via `CHITUBOX_CORPUS_DIR` (default: the dnd-campaigns
-//! working dir). A missing corpus file makes the test SKIP with a printed
-//! notice, never silently pass.
+//! Shared test helpers. Most corpus specimens are committed under
+//! `scripts/tests/fixtures/chitubox/` and resolve with no setup. The handful
+//! that are too large to commit (the multi-tens-of-MB emitter deliverables)
+//! still live outside the repo and are looked up under `CHITUBOX_CORPUS_DIR`
+//! (default: the dnd-campaigns working dir). A missing corpus file makes the
+//! test SKIP with a printed notice, never silently pass.
+//!
+//! See `scripts/tests/fixtures/chitubox/README.md` for what each file is.
 
 #![allow(dead_code)]
 
 use std::path::PathBuf;
 
+/// Committed fixtures, resolved relative to this crate rather than the CWD.
+pub fn fixture_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../scripts/tests/fixtures/chitubox")
+}
+
+/// Fallback for specimens too large to commit.
 pub fn corpus_dir() -> PathBuf {
     std::env::var("CHITUBOX_CORPUS_DIR")
         .map(PathBuf::from)
@@ -14,13 +25,20 @@ pub fn corpus_dir() -> PathBuf {
 }
 
 pub fn corpus_path(name: &str) -> Option<PathBuf> {
-    let p = corpus_dir().join(name);
-    if p.exists() {
-        Some(p)
-    } else {
-        eprintln!("SKIP: corpus file not found: {}", p.display());
-        None
+    let fixture = fixture_dir().join(name);
+    if fixture.exists() {
+        return Some(fixture);
     }
+    let external = corpus_dir().join(name);
+    if external.exists() {
+        return Some(external);
+    }
+    eprintln!(
+        "SKIP: corpus file not found: {} (nor {})",
+        fixture.display(),
+        external.display()
+    );
+    None
 }
 
 pub fn read_corpus(name: &str) -> Option<Vec<u8>> {
@@ -38,7 +56,10 @@ pub const ROUNDTRIP_FILES: &[&str] = &[
     "cylinder-rotated.chitubox",
     "morel.chitubox",
     "morel_mudskipper_supports.chitubox",
-    "treant_v4_supports.chitubox",
+    // Large emitter deliverable: lives outside the repo, so this entry SKIPs
+    // unless CHITUBOX_CORPUS_DIR has it. Replaced treant_v4_supports.chitubox,
+    // which was lost with the v4 engine that produced it.
+    "treant_v5_candidate.chitubox",
 ];
 
 /// Reshape a flat 9-f32/tri stream into points sorted by total_cmp — for

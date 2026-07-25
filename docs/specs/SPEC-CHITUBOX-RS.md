@@ -677,6 +677,16 @@ above (§§2–11) and into `CHITUBOX-FORMAT.md`. This appendix records the
 
 ### A.1 New evidence produced during reconciliation
 
+> **Provenance caveat (2026-07-24).** The ChituBox-authored specimens behind
+> several claims below — `sphere-cylinder`, `sphere-cylinder-supported`, and the
+> three transform probes — were lost and have been replaced by golden-master
+> snapshots of our own writer (`scripts/tests/fixtures/chitubox/`). The findings
+> stand as recorded (they were derived when the originals existed), but the files
+> on disk can no longer *re-evidence* them: re-deriving these claims from the
+> current corpus would be circular. `empty.chitubox` and `morel.chitubox` are the
+> only surviving ChituBox-native saves. Re-establishing external ground truth
+> requires a fresh export from ChituBox.
+
 - **off268 support-index pointer.** The u32 at model-record offset 268
   equals that model's support-index file offset in ALL six supported
   specimens (sphere-cylinder-supported m0=378412 m1=476840,

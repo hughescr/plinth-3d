@@ -1,6 +1,6 @@
-//! Support parity (§7.4): parse the two real emitter outputs (1783 and 243
-//! records), census + type histogram + field decode; then replace/append
-//! round-trips and the asymmetric multi-model case.
+//! Support parity (§7.4): parse the two real emitter outputs, census + type
+//! histogram + field decode; then replace/append round-trips and the
+//! asymmetric multi-model case.
 
 mod common;
 use chitubox_io::{
@@ -30,7 +30,11 @@ fn tiny_record(t: SegmentType, x: f32) -> SupportRecord {
 fn parse_real_emitter_outputs() {
     for (name, expect) in [
         ("morel_mudskipper_supports.chitubox", 243usize),
-        ("treant_v4_supports.chitubox", 1783usize),
+        // Was treant_v4_supports.chitubox @ 1783 records. That file and the v4
+        // engine that emitted it are both gone, so the census is re-pinned on
+        // the current emitter's deliverable. Too large to commit: SKIPs unless
+        // CHITUBOX_CORPUS_DIR has it.
+        ("treant_v5_candidate.chitubox", 1360usize),
     ] {
         let Some(proj) = open(name) else { continue };
         let counts = proj.support_counts();

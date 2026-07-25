@@ -8,8 +8,14 @@ from support_placement import chitubox_emit as ce
 from support_placement import routing
 from support_placement import chitubox_inject as ci
 
+# Committed donor: a minimal single-model project carrying one real PAD and
+# one real BRIDGE record. Pads/bridges are the only record types this module
+# cannot author from scratch (see chitubox_emit's docstring), so the injection
+# test needs genuine ones to clone. Replaces a 65MB out-of-repo file that was
+# consulted for exactly these two records.
 CORPUS_PATH = None
-_candidate = os.path.join(os.path.dirname(__file__), "..", "..", "..", "supported-treant.chitubox")
+_candidate = os.path.join(os.path.dirname(__file__), "fixtures", "chitubox",
+                          "pad_bridge_donor.chitubox")
 if os.path.isfile(_candidate):
     CORPUS_PATH = os.path.abspath(_candidate)
 
