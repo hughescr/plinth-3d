@@ -322,6 +322,21 @@ def prep_one(stl_path, out_path, *, cfg=None, wall_mm=2.5, orient=True,
         say(f"hollow: {hlog.get('decision')} solid={hlog.get('solid_ml')}ml "
             f"final={hlog.get('final_ml', hlog.get('solid_ml'))}ml "
             f"{time.time() - t0:.1f}s")
+        # Triage DELETES geometry. That has to be visible to whoever is
+        # watching the batch scroll past, not just to whoever reads the JSON
+        # report afterwards -- an operator who never sees the line has no
+        # reason to go looking for it.
+        dropped = hlog.get("dropped_shards") or []
+        if dropped:
+            say(f"hollow: dropped {len(dropped)} degenerate shard(s), "
+                f"{hlog.get('dropped_shard_faces')} faces, largest "
+                f"{max(max(d['dims_mm']) for d in dropped):.3f}mm "
+                f"(of {hlog.get('components')} input components)")
+        extra = hlog.get("extra_bodies") or []
+        if extra:
+            say(f"hollow: {len(extra)} detached body/bodies left untouched "
+                f"({', '.join(str(b['faces']) + 'f' for b in extra[:4])}"
+                f"{', ...' if len(extra) > 4 else ''})")
     else:
         prepped = stl_path
         stages.append(StageResult("hollow", STATUS_SKIPPED, 0.0,

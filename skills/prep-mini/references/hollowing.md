@@ -53,12 +53,25 @@ have trapped 14ml, per-lobe drains cut it to 0.27ml.
   existing cavity is read as solid bulk (measured: 40.4mm of "bulk" on a
   sphere whose wall is 2.5mm), the HOLLOW decision fires and a brand new
   cavity replaces the real one. Such a file wants the drill-only path.
+  A component counts as a cavity when it is a closed shell CONTAINED in
+  another component's material -- not when its winding is inward. Winding
+  sign got this wrong both ways: one flipped triangle hid a real 0.5ml void
+  (destroyed, `volume_balance` passed, file written), and an inside-out
+  export of a mini plus its base was refused as "hollowed" when
+  `fix_normals` would have repaired it.
 - **Degenerate shards are stripped on load**, and every drop is reported
-  (`components`, `dropped_shards`, `dropped_shard_faces`). Only components
-  that share no EDGE with the body qualify, which is what makes removal
-  provably hole-free; a genuine detached body or an internal cavity is never
-  touched. Do not substitute "keep the largest component" for this -- that
-  rule deletes real internal cavities.
+  (`components`, `dropped_shards`, `dropped_shard_faces`) on the console as
+  well as in the JSON. A component qualifies only as the conjunction of what
+  the corpus's 13 real shards all measure: it shares no EDGE with any other
+  component (which is what makes removal provably hole-free), it is
+  bowtie-pinched to the main body by a shared VERTEX, it sits inside that
+  body's bbox, it has <=64 faces, it is <=1mm across, and it is a CLOSED
+  shell enclosing <=0.01mm^3 either way round. Openness or inverted normals
+  never condemn a component -- that is how a 1.53mm gem and a spray of
+  sub-millimetre spell-effect shells were being deleted. A genuine detached
+  body or an internal cavity is never touched, and do not substitute "keep
+  the largest component" for any of this -- that rule deletes real internal
+  cavities.
 - **Trust the exit code, not the JSON.** 0 = out.stl written (hollowed or
   a legitimate solid decision); 1 = bad input; 2 = self-verification failed
   and nothing was written, with the failed checks (`single_body`,

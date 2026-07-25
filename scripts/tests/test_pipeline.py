@@ -18,6 +18,7 @@ import sys
 
 import numpy as np
 import pytest
+import trimesh
 
 from support_placement import config, emit, hollow, mesh_io, pipeline
 
@@ -254,6 +255,44 @@ def test_emit_failure_is_exit_4(source_stl, tmp_path, monkeypatch):
     rep = pipeline.prep_one(source_stl, str(out), hollow=False)
     _assert_failed(rep, "emit", pipeline.EXIT_EMIT, str(out))
     assert "NonFiniteValue" in rep.error
+
+
+def test_deleted_geometry_is_announced_to_whoever_is_watching(tmp_path, monkeypatch):
+    """Triage DELETES geometry, and it was reported only into the JSON blob:
+    ``say`` printed decision/solid/final and nothing else, so an operator
+    watching a batch scroll past had no way to know a component had been
+    stripped, and no reason to go looking in the report. Detached bodies that
+    were left alone go on the console for the same reason.
+
+    (The support engine is stubbed out so the run stops right after the
+    hollow stage -- the milestones already said are what is under test.)"""
+    m = mesh_io.make_overhang_table()
+    m.apply_scale(0.7)
+    apex = m.vertices[np.lexsort(m.vertices.T)[-1]]
+    e = -0.2
+    tetra = trimesh.Trimesh(
+        vertices=np.array([apex, apex + [e, 0, 0], apex + [0, e, 0], apex + [0, 0, e]]),
+        faces=np.array([[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]]))
+    trimesh.repair.fix_normals(tetra)
+    tetra.invert()
+    src = tmp_path / "shardy.stl"
+    trimesh.util.concatenate([m, tetra]).export(str(src))
+
+    monkeypatch.setattr(pipeline.engine_mod, "run",
+                        lambda *a, **k: (_ for _ in ()).throw(ValueError("stop here")))
+    said = []
+    rep = pipeline.prep_one(str(src), str(tmp_path / "s.chitubox"),
+                            orient=False, progress=said.append)
+    assert rep.failed_stage == "supports", "the hollow stage must have run"
+    assert rep.stage("hollow").report["dropped_shard_faces"] == 4
+
+    dropped = [line for line in said if "dropped" in line]
+    assert len(dropped) == 1, said
+    assert "1 degenerate shard" in dropped[0] and "4 faces" in dropped[0]
+    assert "0.200mm" in dropped[0]
+    # the table is five overlapping boxes, so the four legs are extra bodies
+    detached = [line for line in said if "detached body" in line]
+    assert len(detached) == 1 and "4 detached" in detached[0]
 
 
 def test_exit_codes_are_distinct():
