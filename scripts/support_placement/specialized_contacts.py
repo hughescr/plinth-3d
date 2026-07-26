@@ -85,6 +85,15 @@ def coverage_routes(contact):
             int(contact["face_id"]),
             None,
         )
+    stored = contact.get("specialized_demands")
+    if stored is None:
+        component_id = contact.get("coverage_component_id")
+        yield (
+            int(contact["island_id"]),
+            int(contact["coverage_face_id"]),
+            None if component_id is None else int(component_id),
+        )
+        return
     for demand in logical_demands(contact):
         yield (
             int(demand["island_id"]),

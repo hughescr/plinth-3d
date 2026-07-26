@@ -3,7 +3,7 @@ import pytest
 from scipy.spatial import cKDTree
 from support_placement import (
     coverage, perception, placement, routing, topology, verify, mesh_io,
-    joints,
+    joints, specialized_contacts,
 )
 from support_placement import tree as tm
 
@@ -60,7 +60,7 @@ def test_coverage_report_passes_with_virtual_low_vertex_pool(table_mesh, cfg):
 
 
 def test_coverage_report_shared_faces_route_by_each_named_island(cfg):
-    """A face may belong to multiple named islands without last-wins loss."""
+    """Legacy scalar specialized routes still credit their named island."""
     import trimesh
     from support_placement import coverage, topology
 
@@ -78,11 +78,14 @@ def test_coverage_report_shared_faces_route_by_each_named_island(cfg):
     ]
     samples = coverage.build_coverage_samples(mesh, islands, cfg)
     sidecar = topology.build_face_topology(mesh, cfg=cfg)
+    legacy_specialized = dict(
+        position=samples.positions[samples.island_slice(0).start].copy(),
+        normal=mesh.face_normals[0].copy(),
+        island_id=0, minimum=True, coverage_face_id=0)
+    assert list(specialized_contacts.coverage_routes(
+        legacy_specialized)) == [(0, 0, None)]
     contacts = [
-        dict(
-            position=samples.positions[samples.island_slice(0).start].copy(),
-            normal=mesh.face_normals[0].copy(),
-            island_id=0, minimum=True, coverage_face_id=0),
+        legacy_specialized,
         dict(
             position=samples.positions[samples.island_slice(1).start].copy(),
             normal=mesh.face_normals[0].copy(),
