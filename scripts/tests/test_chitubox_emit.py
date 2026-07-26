@@ -8,11 +8,9 @@ from support_placement import chitubox_emit as ce
 from support_placement import routing
 from support_placement import chitubox_inject as ci
 
-# Committed donor: a minimal single-model project carrying one real PAD and
-# one real BRIDGE record. Pads/bridges are the only record types this module
-# cannot author from scratch (see chitubox_emit's docstring), so the injection
-# test needs genuine ones to clone. Replaces a 65MB out-of-repo file that was
-# consulted for exactly these two records.
+# Committed donor retained for the legacy clone-path integration test below.
+# The modern from-empty path authors type-6 geometry directly and does not
+# consult this file.
 CORPUS_PATH = None
 _candidate = os.path.join(os.path.dirname(__file__), "fixtures", "chitubox",
                           "pad_bridge_donor.chitubox")
@@ -239,6 +237,36 @@ def test_synth_member_chain_plate_root_gets_foot_flare(cfg):
     assert abs(float(col_rec.start[2]) - (-5.0 + cfg.flare_len_mm)) < 1e-6
 
 
+def test_plate_root_pedestal_is_vertical_before_angled_member(cfg):
+    plate_z = -5.0
+    members = [_mk_member(
+        [8.0, 3.0, -3.0], [4.0, 1.0, plate_z + 0.1],
+        0.7, 0.9, "trunk", ("contact", 0))]
+    specs = ce.member_chain_specs(members, [], cfg, plate_z=plate_z)
+    pedestal, angled = specs
+    assert pedestal.type_id == ci.T_FLARE
+    assert pedestal.start == pytest.approx([4.0, 1.0, plate_z])
+    assert pedestal.end[:2] == pytest.approx(pedestal.start[:2])
+    assert pedestal.end[2] - pedestal.start[2] >= (
+        ce.MIN_ROOT_VERTICAL_LAYERS * cfg.layer_height_mm - ce.PLATE_MESH_TOL_MM)
+    assert angled.start == pytest.approx(pedestal.end)
+    assert not np.allclose(angled.start[:2], angled.end[:2])
+    at_plate = pedestal.mesh[
+        np.abs(pedestal.mesh[..., 2] - plate_z) <= ce.PLATE_MESH_TOL_MM]
+    assert len(at_plate) > 0
+    assert np.ptp(at_plate[:, 0]) > 0 and np.ptp(at_plate[:, 1]) > 0
+
+
+def test_plate_root_rejects_less_than_ten_layers_before_bend(cfg):
+    plate_z = -5.0
+    too_short = ce.MIN_ROOT_VERTICAL_LAYERS * cfg.layer_height_mm - 0.01
+    members = [_mk_member(
+        [3.0, 0.0, plate_z + too_short], [0.0, 0.0, plate_z],
+        0.5, 0.5, "trunk", ("contact", 0))]
+    with pytest.raises(ce.PlateGeometryError, match="needs"):
+        ce.member_chain_specs(members, [], cfg, plate_z=plate_z)
+
+
 def test_synth_member_chain_no_flare_when_plate_z_omitted(cfg):
     """plate_z defaults to None: emits exactly as before -- the driver
     call site (manual_treant_v4.stage_emit) is unaffected."""
@@ -291,6 +319,73 @@ def test_synth_member_chain_plate_root_still_carries_its_joint_balls(cfg):
         if len(near) and float(near.max()) >= 0.9:
             hits += 1
     assert hits == 1
+
+
+def test_bottom_connected_exact_native_geometry_and_bytes():
+    plate_z = -7.25
+    members = [
+        _mk_member([0, 0, 2], [0, 0, plate_z], 0.25, 0.4,
+                   "trunk", ("contact", 0)),
+        _mk_member([4, 0, 2], [4, 0, plate_z], 1.2, 1.4,
+                   "trunk", ("contact", 1)),
+        # Duplicate XY with a different column radius: still one fixed pad.
+        _mk_member([4, 0, 3], [4, 0, plate_z], 0.5, 0.8,
+                   "trunk", ("contact", 2)),
+    ]
+    specs = ce.bottom_connected_specs(members, plate_z)
+    assert len(specs) == 3  # 2 pads + 1 bridge
+    bridge = specs[0]
+    pads = specs[1:]
+    assert bridge.type_id == ci.T_PAD
+    assert bridge.mesh.shape == (12, 3, 3) and bridge.mesh.nbytes == 432
+    assert bridge.r0 == pytest.approx(2.2) and bridge.r1 == pytest.approx(0.2)
+    assert bridge.start[2] == 0 and bridge.end[2] == 0
+    assert bridge.trailing == struct.pack("<2f", 1.0, 4.0) + bytes(16)
+    direction = bridge.end[:2] - bridge.start[:2]
+    along = direction / np.linalg.norm(direction)
+    across = np.array([-along[1], along[0]])
+    xy = bridge.mesh[..., :2].reshape(-1, 2)
+    assert np.ptp(xy @ along) == pytest.approx(np.linalg.norm(direction))
+    assert np.ptp(xy @ across) == pytest.approx(2.2)
+    assert bridge.mesh[..., 2].min() == pytest.approx(plate_z)
+    assert bridge.mesh[..., 2].max() == pytest.approx(plate_z + 0.2)
+    for pad in pads:
+        assert pad.mesh.shape == (80, 3, 3) and pad.mesh.nbytes == 2880
+        assert pad.r0 == pytest.approx(2.2) and pad.r1 == pytest.approx(0.2)
+        assert pad.start == pytest.approx(pad.end)
+        assert pad.start[2] == 0
+        assert pad.trailing == struct.pack("<2f", 0.0, 4.0) + bytes(16)
+        pts = pad.mesh.reshape(-1, 3)
+        assert np.ptp(pts[:, 0]) == pytest.approx(2.2)
+        assert np.ptp(pts[:, 1]) == pytest.approx(2.2)
+        assert np.ptp(pts[:, 2]) == pytest.approx(0.2)
+
+
+def test_bottom_connected_mst_is_deterministic_and_plate_frame_does_not_leak():
+    roots = [
+        _mk_member([0, 0, 2], [0, 0, -5], 0.5, 0.5, "trunk", ("c", 0)),
+        _mk_member([2, 0, 2], [2, 0, -5], 0.5, 0.5, "trunk", ("c", 1)),
+        _mk_member([0, 2, 2], [0, 2, -5], 0.5, 0.5, "trunk", ("c", 2)),
+        _mk_member([2, 2, 2], [2, 2, -5], 0.5, 0.5, "trunk", ("c", 3)),
+    ]
+    a = ce.bottom_connected_specs(roots, -5.0)
+    b = ce.bottom_connected_specs(list(reversed(roots)), -5.0)
+    edges_a = [(tuple(s.start), tuple(s.end)) for s in a
+               if not np.allclose(s.start[:2], s.end[:2])]
+    edges_b = [(tuple(s.start), tuple(s.end)) for s in b
+               if not np.allclose(s.start[:2], s.end[:2])]
+    assert edges_a == edges_b and len(edges_a) == 3
+
+    # Same current-frame roots at another local plate plane must rebuild every
+    # mesh at that plane; no cached/native absolute Z may leak between calls.
+    roots_2 = [
+        dict(m, p1=np.array([m["p1"][0], m["p1"][1], -12.0]))
+        for m in roots
+    ]
+    c = ce.bottom_connected_specs(roots_2, -12.0)
+    assert min(s.mesh[..., 2].min() for s in a) == pytest.approx(-5.0)
+    assert min(s.mesh[..., 2].min() for s in c) == pytest.approx(-12.0)
+    assert all(s.start[2] == 0 and s.end[2] == 0 for s in c)
 
 
 def test_v3_trunk_has_flare_wider_than_column(cfg):

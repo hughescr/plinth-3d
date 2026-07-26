@@ -33,15 +33,15 @@ cross unchanged. The plate lift travels as ``placement.z_lift`` and satisfies
 ``zmin_centered - plate_z == cfg.lift_mm`` -- asserted here, not re-derived
 from a corpus specimen the way the old manual emitter did.
 
-WHAT THIS MODULE DOES NOT EMIT
-------------------------------
-No PADs and no raft BRIDGEs. Plate-rooted members get the ``T_FLARE`` conical
-foot that :func:`chitubox_emit.member_chain_specs` synthesizes; the v3 emitter
-additionally cloned pad records and tied them into an MST bridge raft, and
-that is a validated-by-cloning-only construction this from-scratch path
-deliberately does not carry. Whether bare flares slice acceptably is a
-print-validation question, open and owner-facing -- not something the emit
-path can settle.
+BOTTOM-CONNECTED PLATE GEOMETRY
+-------------------------------
+Each unique live plate-root gets a fixed native-style 2.2 x 0.2 mm pad, and
+the pads are joined by a deterministic Euclidean MST of 2.2 x 0.2 mm bridge
+boxes. These type-6 records are synthesized in the run's current local frame
+from the owner's two native specimens; they never clone a donor/container or
+carry specimen absolute Z. Before the Rust writer is called, every vertex of
+every emitted support blob is checked against the authoritative local plate
+plane.
 """
 import os
 from dataclasses import dataclass, asdict
@@ -92,6 +92,8 @@ class EmitReport:
     n_members: int
     n_balls: int
     n_flares: int
+    n_pads: int
+    n_bridges: int
     support_mesh_bytes: int
     plate_z: float
     lift_mm: float
@@ -107,7 +109,8 @@ class EmitReport:
         for k in ("center_delta_mm", "plate_z", "lift_mm"):
             d[k] = float(d[k])
         for k in ("model_triangles", "source_triangles", "n_records", "n_members",
-                  "n_balls", "n_flares", "support_mesh_bytes", "bytes_written"):
+                  "n_balls", "n_flares", "n_pads", "n_bridges",
+                  "support_mesh_bytes", "bytes_written"):
             d[k] = int(d[k])
         for k in ("reparse_ok", "verify_ok"):
             d[k] = bool(d[k])
@@ -132,7 +135,7 @@ def _native():
     return chitubox_io
 
 
-def support_arrays(specs):
+def support_arrays(specs, *, plate_z=None):
     """Pack ``SegmentSpec``s into the columnar batch ``chitubox_io`` takes.
 
     ONE crossing for the whole forest: parallel arrays plus a single
@@ -143,6 +146,11 @@ def support_arrays(specs):
     n = len(specs)
     if n == 0:
         raise EmitError("no support records to emit (empty forest)")
+    if plate_z is not None:
+        try:
+            chitubox_emit.validate_support_mesh_plate_bound(specs, plate_z)
+        except chitubox_emit.PlateGeometryError as e:
+            raise EmitError(f"plate-invalid support geometry: {e}") from e
     meshes = [np.ascontiguousarray(s.mesh, dtype=np.float32).reshape(-1) for s in specs]
     return {
         "seg_type": np.fromiter((s.type_id for s in specs), dtype=np.uint32, count=n),
@@ -230,9 +238,19 @@ def emit_project(model_stl, result, out_path, cfg, *, name=None,
             f"(or cfg.lift_mm changed since).")
 
     # ONE geometry pass over the whole forest, then ONE packed crossing.
-    specs = chitubox_emit.member_chain_specs(members, balls, cfg, plate_z=plate_z)
-    arrays = support_arrays(specs)
+    try:
+        member_specs = chitubox_emit.member_chain_specs(
+            members, balls, cfg, plate_z=plate_z)
+        raft_specs = chitubox_emit.bottom_connected_specs(members, plate_z)
+    except chitubox_emit.PlateGeometryError as e:
+        raise EmitError(f"plate-invalid support geometry: {e}") from e
+    specs = member_specs + raft_specs
+    arrays = support_arrays(specs, plate_z=plate_z)
     n_flares = int(sum(1 for s in specs if s.type_id == ci.T_FLARE))
+    n_pads = int(sum(
+        1 for s in raft_specs if np.allclose(s.start[:2], s.end[:2],
+                                             atol=chitubox_emit.PLATE_MESH_TOL_MM)))
+    n_bridges = len(raft_specs) - n_pads
 
     model = {
         "name": name if name is not None
@@ -272,6 +290,8 @@ def emit_project(model_stl, result, out_path, cfg, *, name=None,
         n_members=int(len(members)),
         n_balls=int(len(balls)),
         n_flares=n_flares,
+        n_pads=n_pads,
+        n_bridges=n_bridges,
         support_mesh_bytes=int(arrays["mesh_flat"].nbytes),
         plate_z=plate_z,
         lift_mm=lift,

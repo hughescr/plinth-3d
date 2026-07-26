@@ -15,12 +15,14 @@ float in slot 0 (varies with profile, matches design's own
 cfg.contact_depth_mm concept) -- both choices below are evidenced, not
 invented.
 
-PAD and BRIDGE (type 6) are NOT synthesized from scratch here -- per the
-sibling chitubox-support-injection skill's doctrine ("clone + patch,
-never author from scratch") and its own code, only clone-based pad/bridge
-placement is validated. This module's pad/bridge helpers therefore
-translate a template record from the base project, same as
-chitubox_inject.clone_support -- see place_pad().
+PAD and BRIDGE (type 6) are synthesized from the owner's native
+``basic-cube-supports-raft`` and ``cylinder-supported-bottom-connected``
+specimens. Both agree on the complete contract: fixed 2.2 mm width/diameter,
+0.2 mm height, 80-triangle/2,880-byte pads, 12-triangle/432-byte bridges,
+record endpoint Z sentinel 0, and trailing f32 pairs ``[0, 4]`` (pad) /
+``[1, 4]`` (bridge) followed by zeros. Geometry is built directly at the
+current run's local ``plate_z``; no donor coordinates or absolute specimen Z
+cross this boundary.
 """
 import struct
 from dataclasses import dataclass
@@ -35,6 +37,15 @@ PLATE_BAND_MM = 0.2  # F2/F1: same plate-band tolerance as joints.PLATE_BAND_MM
                       # / verify.connectivity_report rule (b) -- kept as an
                       # independent constant (this module stays self-
                       # contained per its existing style, see _field below)
+PLATE_MESH_TOL_MM = 1e-5
+MIN_ROOT_VERTICAL_LAYERS = 10
+PAD_DIAMETER_MM = 2.2
+RAFT_HEIGHT_MM = 0.2
+PAD_N_SIDES = 20
+
+
+class PlateGeometryError(ValueError):
+    """A support forest cannot be emitted safely in its declared plate frame."""
 
 
 def frustum_mesh(start, end, r0, r1, n_sides=N_SIDES):
@@ -385,6 +396,141 @@ class SegmentSpec:
     mesh: np.ndarray
 
 
+def _type6_trailing(is_bridge):
+    """Native type-6 trailing bytes: f32[0,4] pad / f32[1,4] bridge."""
+    trailing = bytearray(24)
+    struct.pack_into("<2f", trailing, 0, 1.0 if is_bridge else 0.0, 4.0)
+    return bytes(trailing)
+
+
+def _pad_mesh(xy, plate_z):
+    center0 = np.array([float(xy[0]), float(xy[1]), float(plate_z)])
+    center1 = center0 + np.array([0.0, 0.0, RAFT_HEIGHT_MM])
+    mesh = frustum_mesh(
+        center0, center1, PAD_DIAMETER_MM / 2.0, PAD_DIAMETER_MM / 2.0,
+        n_sides=PAD_N_SIDES)
+    assert mesh.shape == (80, 3, 3) and mesh.nbytes == 2880
+    return mesh
+
+
+def _bridge_mesh(xy0, xy1, plate_z):
+    """Twelve-triangle rectangular prism with ends centered on the roots."""
+    a = np.asarray(xy0, dtype=float)
+    b = np.asarray(xy1, dtype=float)
+    axis = b - a
+    length = float(np.linalg.norm(axis))
+    if length <= 1e-9:
+        raise PlateGeometryError("raft bridge endpoints collapse to one root")
+    along = axis / length
+    across = np.array([-along[1], along[0]]) * (PAD_DIAMETER_MM / 2.0)
+    corners = np.array([
+        a - across, a + across, b + across, b - across,
+    ])
+    z0 = float(plate_z)
+    z1 = z0 + RAFT_HEIGHT_MM
+    lo = np.column_stack((corners, np.full(4, z0)))
+    hi = np.column_stack((corners, np.full(4, z1)))
+    vertices = np.concatenate((lo, hi))
+    faces = np.array([
+        [0, 2, 1], [0, 3, 2],  # plate face
+        [4, 5, 6], [4, 6, 7],  # top face
+        [0, 1, 5], [0, 5, 4],
+        [1, 2, 6], [1, 6, 5],
+        [2, 3, 7], [2, 7, 6],
+        [3, 0, 4], [3, 4, 7],
+    ], dtype=np.int64)
+    mesh = np.ascontiguousarray(vertices[faces], dtype="<f4")
+    assert mesh.shape == (12, 3, 3) and mesh.nbytes == 432
+    return mesh
+
+
+def _unique_plate_root_xy(members, plate_z):
+    """Sorted, tolerance-deduped XYs of the live members rooted at the plate."""
+    candidates = []
+    for m in members:
+        p1 = np.asarray(_field(m, "p1"), dtype=float)
+        if abs(float(p1[2]) - float(plate_z)) <= PLATE_BAND_MM:
+            candidates.append((float(p1[0]), float(p1[1])))
+    candidates.sort()
+    unique = []
+    for xy in candidates:
+        point = np.asarray(xy, dtype=float)
+        if not any(np.linalg.norm(point - prior) <= PLATE_MESH_TOL_MM
+                   for prior in unique):
+            unique.append(point)
+    return unique
+
+
+def _euclidean_mst_edges(points):
+    """Deterministic Prim MST over already-sorted 2-D points."""
+    n = len(points)
+    if n < 2:
+        return []
+    visited = {0}
+    edges = []
+    while len(visited) < n:
+        best = None
+        for i in sorted(visited):
+            for j in range(n):
+                if j in visited:
+                    continue
+                d = points[j] - points[i]
+                lo, hi = sorted((i, j))
+                candidate = (float(np.dot(d, d)), lo, hi, i, j)
+                if best is None or candidate < best:
+                    best = candidate
+        assert best is not None
+        _, lo, hi, _, new_vertex = best
+        edges.append((lo, hi))
+        visited.add(new_vertex)
+    return edges
+
+
+def bottom_connected_specs(members, plate_z):
+    """Build the fixed native-style pad plus deterministic MST raft records."""
+    roots = _unique_plate_root_xy(members, plate_z)
+    edges = _euclidean_mst_edges(roots)
+    specs = []
+    # Native specimens order bridges before pads. Keep that order even though
+    # the geometry is independent, so byte output stays deterministic.
+    for i, j in edges:
+        a, b = roots[i], roots[j]
+        specs.append(SegmentSpec(
+            type_id=ci.T_PAD,
+            start=np.array([a[0], a[1], 0.0]),
+            end=np.array([b[0], b[1], 0.0]),
+            r0=PAD_DIAMETER_MM,
+            r1=RAFT_HEIGHT_MM,
+            trailing=_type6_trailing(is_bridge=True),
+            mesh=_bridge_mesh(a, b, plate_z)))
+    for xy in roots:
+        endpoint = np.array([xy[0], xy[1], 0.0])
+        specs.append(SegmentSpec(
+            type_id=ci.T_PAD,
+            start=endpoint,
+            end=endpoint.copy(),
+            r0=PAD_DIAMETER_MM,
+            r1=RAFT_HEIGHT_MM,
+            trailing=_type6_trailing(is_bridge=False),
+            mesh=_pad_mesh(xy, plate_z)))
+    return specs
+
+
+def validate_support_mesh_plate_bound(specs, plate_z, tol=PLATE_MESH_TOL_MM):
+    """Reject if any emitted support vertex lies below the local plate."""
+    floor = float(plate_z) - float(tol)
+    for i, spec in enumerate(specs):
+        mesh = np.asarray(spec.mesh)
+        if mesh.size == 0 or not np.isfinite(mesh).all():
+            raise PlateGeometryError(
+                f"support record {i} has empty or non-finite mesh geometry")
+        z_min = float(mesh[..., 2].min())
+        if z_min < floor:
+            raise PlateGeometryError(
+                f"support record {i} mesh reaches z={z_min:.9f} below "
+                f"plate_z={float(plate_z):.9f} (tolerance {float(tol):.1e})")
+
+
 def member_chain_specs(members, balls, cfg, plate_z=None):
     """The v4 emission PRIMITIVE: geometry decisions only, no file offsets.
 
@@ -413,20 +559,58 @@ def member_chain_specs(members, balls, cfg, plate_z=None):
 
         is_plate_root = plate_z is not None and abs(p1[2] - float(plate_z)) <= PLATE_BAND_MM
         if is_plate_root:
-            axis = p0 - p1
-            L = float(np.linalg.norm(axis))
-            axis_n = axis / L if L > 1e-9 else np.array([0.0, 0.0, 1.0])
-            flare_len_eff = min(cfg.flare_len_mm, L / 2.0) if L > 1e-9 else cfg.flare_len_mm
-            p_col0 = p1 + axis_n * flare_len_eff
-            flare_blob = frustum_mesh(p1, p_col0, cfg.flare_r_factor * r1, r1)
+            plate = float(plate_z)
+            min_vertical = MIN_ROOT_VERTICAL_LAYERS * float(cfg.layer_height_mm)
+            available_vertical = float(p0[2]) - plate
+            if available_vertical < min_vertical - PLATE_MESH_TOL_MM:
+                raise PlateGeometryError(
+                    f"plate root {mi} has only {available_vertical:.6f} mm "
+                    f"above plate before its next joint; needs {min_vertical:.6f} mm "
+                    f"({MIN_ROOT_VERTICAL_LAYERS} layers)")
+            # The root p1 may be merely within the plate band. The plate plane
+            # is authoritative: anchor the base at exact plate_z and use a
+            # strictly +Z axis so the cone's contact ring is horizontal and no
+            # part of it can hang below the plate.
+            p_plate = np.array([p1[0], p1[1], plate])
+            flare_len_eff = max(
+                min_vertical,
+                min(float(cfg.flare_len_mm), available_vertical / 2.0))
+            p_col0 = p_plate + np.array([0.0, 0.0, flare_len_eff])
+            flare_blob = frustum_mesh(
+                p_plate, p_col0, cfg.flare_r_factor * r1, r1)
             specs.append(SegmentSpec(
-                type_id=ci.T_FLARE, start=p1, end=p_col0,
+                type_id=ci.T_FLARE, start=p_plate, end=p_col0,
                 r0=cfg.flare_r_factor * r1, r1=r1,
                 trailing=_trailing_bytes(ci.T_FLARE, cfg), mesh=flare_blob))
             col_p0, col_p1, col_r0, col_r1 = p_col0, p0, r1, r0
         else:
             col_p0, col_p1, col_r0, col_r1 = p0, p1, r0, r1
 
+        column_len = float(np.linalg.norm(col_p1 - col_p0))
+        if column_len <= 1e-9:
+            # A root exactly one safe run tall needs no second record. Preserve
+            # any geometry assigned to the original member by merging it into
+            # the pedestal's blob instead of authoring a zero-length frustum.
+            if not is_plate_root:
+                raise PlateGeometryError(f"support member {mi} has zero length")
+            pedestal = specs[-1]
+            parts = [pedestal.mesh]
+            if kind == "stub":
+                parts.append(sphere_mesh(p0, cfg.tip_ball_r_factor * r0))
+            for bi in balls_by_member.get(mi, []):
+                b = balls[bi]
+                parts.append(sphere_mesh(
+                    _field(b, "center"), float(_field(b, "r"))))
+                n_balls_emitted += 1
+            specs[-1] = SegmentSpec(
+                type_id=pedestal.type_id,
+                start=pedestal.start,
+                end=pedestal.end,
+                r0=pedestal.r0,
+                r1=pedestal.r1,
+                trailing=pedestal.trailing,
+                mesh=np.concatenate(parts))
+            continue
         parts = [frustum_mesh(col_p0, col_p1, col_r0, col_r1)]
         if kind == "stub":
             ball_r = cfg.tip_ball_r_factor * r0
@@ -475,13 +659,14 @@ def synth_member_chain(members, balls, cfg, next_off, plate_z=None):
     before (no caller depends on this parameter existing). When given, a
     member whose p1 lands within PLATE_BAND_MM of plate_z -- the v4 Forest
     root convention, tree.py: "p1 is always the root-ward end" -- is
-    plate-rooted and gets v3's foot flare ported from synth_v3_trunk
-    (chitubox_emit.py:184-212, cfg.flare_r_factor * r at plate_z tapering
-    up to r over cfg.flare_len_mm), emitted as a SEPARATE leading T_FLARE
-    record; the member's own column record is shortened to start where
-    the flare ends. Members shorter than 2*flare_len_mm flare only their
-    lower half (recorded decision, SPEC-EMIT-POLISH.md F2). Members/gates
-    are unchanged -- this is emission-only geometry, same doctrine as v3.
+    plate-rooted. Its base is re-anchored to exact local plate_z and emitted
+    as a SEPARATE, strictly +Z T_FLARE pedestal: a horizontal, nonzero-area
+    contact ring tapering to the column radius. The pedestal runs for at
+    least ``10 * cfg.layer_height_mm`` before the member may bend laterally;
+    a root without that vertical clearance is rejected. The original member
+    resumes from the pedestal top without translating the model or forest.
+    Members shorter than 2*flare_len_mm still prefer a lower-half pedestal,
+    bounded below by the ten-layer safety run.
     Returns (record_bytes, blob_bytes) pairs, offsets contiguous from
     next_off.
 

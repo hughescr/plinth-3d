@@ -151,7 +151,9 @@ def test_emit_project_writes_the_forest(table_run, table_stl, tmp_path):
 
     specs = ce.member_chain_specs(result["members"], result["balls"], cfg,
                                   plate_z=result["plate_z"])
+    specs += ce.bottom_connected_specs(result["members"], result["plate_z"])
     assert rep.n_records == len(specs)
+    assert rep.n_pads >= 1 and rep.n_bridges == rep.n_pads - 1
     assert rep.n_members == len(result["members"])
     assert rep.reparse_ok is True
     assert out.is_file() and rep.bytes_written == out.stat().st_size
@@ -164,15 +166,40 @@ def test_emit_project_writes_the_forest(table_run, table_stl, tmp_path):
 
 @pytest.mark.kernel
 @pytest.mark.chitubox
-def test_emitted_records_bottom_out_at_the_plate(table_run, table_stl, tmp_path):
-    import chitubox_io
+def test_every_emitted_mesh_vertex_is_on_or_above_plate(table_run, table_stl, tmp_path):
     cfg, _, result = table_run
+    plate_z = result["plate_z"]
+    specs = ce.member_chain_specs(
+        result["members"], result["balls"], cfg, plate_z=plate_z)
+    specs += ce.bottom_connected_specs(result["members"], plate_z)
+    ce.validate_support_mesh_plate_bound(specs, plate_z)
+    all_z = np.concatenate([s.mesh[..., 2].reshape(-1) for s in specs])
+    assert all_z.min() == pytest.approx(plate_z, abs=ce.PLATE_MESH_TOL_MM)
+    assert all_z.min() >= plate_z - ce.PLATE_MESH_TOL_MM
+
     out = tmp_path / "plate.chitubox"
     emit.emit_project(table_stl, result, str(out), cfg, allow_failed_gates=True)
-    recs = chitubox_io.read_project(str(out))["models"][0]["supports"]
-    zs = [min(r["start"][2], r["end"][2]) for r in recs]
-    assert min(zs) == pytest.approx(result["plate_z"], abs=ce.PLATE_BAND_MM)
-    assert min(zs) >= result["plate_z"] - ce.PLATE_BAND_MM
+    assert out.is_file()
+
+
+def test_plate_bound_rejects_bad_mesh_even_when_endpoints_are_valid(cfg):
+    good = ce.member_chain_specs(
+        [_mk_member([0, 0, 5], [0, 0, -5], 0.5, 0.5,
+                    "trunk", ("contact", 0))],
+        [], cfg, plate_z=-5.0)
+    bad_mesh = good[0].mesh.copy()
+    bad_mesh[0, 0, 2] = -5.1
+    bad = ce.SegmentSpec(
+        type_id=good[0].type_id,
+        start=good[0].start.copy(),
+        end=good[0].end.copy(),
+        r0=good[0].r0,
+        r1=good[0].r1,
+        trailing=good[0].trailing,
+        mesh=bad_mesh)
+    assert min(bad.start[2], bad.end[2]) >= -5.0
+    with pytest.raises(emit.EmitError, match="mesh reaches"):
+        emit.support_arrays([bad], plate_z=-5.0)
 
 
 @pytest.mark.kernel
@@ -264,11 +291,14 @@ def _cylinder_frame(cfg):
 
 def _mixed_forest(cfg, plate_z, zmin_centered):
     """A forest that exercises every branch of the spec builder: a plate-rooted
-    trunk (flare + column = TWO records), a tapered stub with an embed_end
-    (T_TAPER + tip ball), a plain shoot (T_SHAFT), and a free joint ball."""
+    trunk (flare + column = TWO records), a second differently-sized root,
+    a tapered stub with an embed_end (T_TAPER + tip ball), a plain shoot
+    (T_SHAFT), and a free joint ball."""
     members = [
         _mk_member([0, 0, zmin_centered], [0, 0, plate_z], 0.6, 0.6,
                    "trunk", ("contact", 0)),
+        _mk_member([10, 0, zmin_centered], [10, 0, plate_z], 1.1, 1.1,
+                   "trunk", ("contact", 3)),
         _mk_member([3, 0, -4], [3, 0, -8], 0.25, 0.5, "stub", ("contact", 1),
                    embed_end="p0"),
         _mk_member([5, 0, -6], [0, 0, -6], 0.3, 0.3, "shoot", ("contact", 2)),
@@ -298,9 +328,14 @@ def test_every_record_round_trips_through_the_container(tmp_path):
     rep = emit.emit_project(CYLINDER_STL, result, str(out), cfg)
 
     specs = ce.member_chain_specs(members, balls, cfg, plate_z=plate_z)
-    assert len(specs) == 4, "fixture must cover flare-split + stub + shoot"
-    assert {s.type_id for s in specs} == {ci.T_FLARE, ci.T_TAPER, ci.T_SHAFT}
-    assert rep.n_records == len(specs) and rep.n_flares == 1
+    specs += ce.bottom_connected_specs(members, plate_z)
+    assert len(specs) == 9, \
+        "fixture must cover two flare-splits + stub + shoot + pads + bridge"
+    assert {s.type_id for s in specs} == {
+        ci.T_FLARE, ci.T_TAPER, ci.T_SHAFT, ci.T_PAD}
+    assert rep.n_records == len(specs) and rep.n_flares == 2
+    assert rep.n_pads == 2 and rep.n_bridges == 1
+    assert rep.model_triangles == _stl_face_count(CYLINDER_STL)
 
     recs = chitubox_io.read_project(str(out))["models"][0]["supports"]
     assert len(recs) == len(specs)
@@ -310,6 +345,24 @@ def test_every_record_round_trips_through_the_container(tmp_path):
         assert r["end"] == pytest.approx(list(spec.end), abs=1e-5), f"record {i} end"
         assert r["radii"] == pytest.approx((spec.r0, spec.r1), abs=1e-6), f"record {i} radii"
         assert r["triangle_count"] == spec.mesh.shape[0], f"record {i} mesh slice"
+
+    # Inspect the serialized record bytes and cached blobs after reopen. This
+    # pins that the Rust from-empty writer preserves the exact native type-6
+    # fields, not merely the Python-side specs before crossing the boundary.
+    raw = ci.Project(str(out))
+    type6 = [r for r in raw.records if r.type == ci.T_PAD]
+    bridges = [r for r in type6 if not np.allclose(r.start[:2], r.end[:2])]
+    pads = [r for r in type6 if np.allclose(r.start[:2], r.end[:2])]
+    assert len(pads) == 2 and len(bridges) == 1
+    for r in pads:
+        assert bytes(r.raw[48:72]) == struct.pack("<2f", 0.0, 4.0) + bytes(16)
+        assert r.r1 == pytest.approx(2.2) and r.r2 == pytest.approx(0.2)
+        assert raw.blob(r).shape == (240, 3)  # 80 triangles
+    bridge = bridges[0]
+    assert bytes(bridge.raw[48:72]) == struct.pack("<2f", 1.0, 4.0) + bytes(16)
+    assert bridge.r1 == pytest.approx(2.2) and bridge.r2 == pytest.approx(0.2)
+    assert bridge.start[2] == 0 and bridge.end[2] == 0
+    assert raw.blob(bridge).shape == (36, 3)  # 12 triangles
 
 
 @pytest.mark.chitubox

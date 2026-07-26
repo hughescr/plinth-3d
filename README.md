@@ -47,6 +47,13 @@ it was computed for into a `.chitubox`, built from an **empty** template by the
 columnar boundary). The old clone-a-base-project writer could staple correct
 supports onto the wrong model — silently, in a file that parsed and verified;
 the new path has no template parameter at all, so that cannot happen.
+Plate-root emission is likewise local-frame explicit: every live root starts
+on the run's authoritative `plate_z` with a horizontal tapered pedestal and
+at least ten +Z layers before any lateral segment. The Bottom Connected raft
+uses fixed 2.2 mm x 0.2 mm native-style pads at unique root XYs plus a
+deterministic Euclidean-MST bridge set. The whole cached support mesh is
+rejected if any vertex falls below `plate_z` (within a 1e-5 mm float
+tolerance); model placement is not translated as a repair.
 Operator entry point:
 `python scripts/tools/emit_supports.py <model.stl> <out.chitubox>` — one JSON
 report line on stdout, progress on stderr, distinct exit codes per failure
