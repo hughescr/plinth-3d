@@ -79,6 +79,9 @@ into 41 pieces in testing, and slicer auto-repair may delete the cavity
 shell ("excess shell") or seal the drains ("holes"). Validate in the
 slice preview instead: two contours in hollow regions, open drains.
 """
+import hashlib
+import json
+import os
 import time
 
 import numpy as np
@@ -445,8 +448,18 @@ def describe_failure(log):
             for k in failed_checks(log)]
 
 
+def _array_fingerprint(parts):
+    h = hashlib.sha256()
+    for name, value, dtype in parts:
+        arr = np.ascontiguousarray(np.asarray(value, dtype=dtype))
+        h.update(name.encode("ascii"))
+        h.update(np.asarray(arr.shape, dtype="<i8").tobytes())
+        h.update(arr.tobytes())
+    return h.hexdigest()
+
+
 def run(in_path, out_path, wall=2.5, orient=True, log=None,
-        allow_hollow_output=False):
+        allow_hollow_output=False, cavity_out=None, solid_backup_path=None):
     """Hollow (or decide not to) and drill ``in_path``, writing ``out_path``.
 
     Returns the log dict (the same object if one was passed in), always
@@ -457,13 +470,17 @@ def run(in_path, out_path, wall=2.5, orient=True, log=None,
     reporting them -- those are not outcomes of the algorithm, they are bad
     inputs.
 
-    ``allow_hollow_output`` is the explicit future-verifier hook. It must
+    ``allow_hollow_output`` is the explicit internal-verifier hook. It must
     remain false unless the caller has a dedicated internal-support verifier
-    wired after support placement. The current pipeline leaves it false by
-    default, so a hollow-eligible model deterministically exports the
-    oriented solid before supports are computed.
+    wired after support placement. ``cavity_out`` is a runtime-only dict which
+    receives the exact post-refill cavity mask and its original voxel
+    transforms; reader-facing identity/provenance is copied into ``log``.
+    ``solid_backup_path`` preserves the already-oriented solid for fail-safe
+    fallback without repeating orientation.
     """
     log = {} if log is None else log
+    if cavity_out is not None:
+        cavity_out.clear()
     t0 = time.time()
     m = trimesh.load(in_path)
     m = triage_components(m, log, source=in_path)  # welds the mesh itself
@@ -533,6 +550,12 @@ def run(in_path, out_path, wall=2.5, orient=True, log=None,
             reason=INTERNAL_SUPPORT_VERIFIER_UNAVAILABLE,
             hollow_volume_estimate_ml=hollow_volume_estimate_ml,
         )
+    if solid_backup_path is not None:
+        backup_dir = os.path.dirname(os.path.abspath(os.fspath(solid_backup_path)))
+        if backup_dir:
+            os.makedirs(backup_dir, exist_ok=True)
+        m.export(solid_backup_path)
+        log["oriented_solid_backup"] = os.fspath(solid_backup_path)
     log.update(
         decision="HOLLOW",
         hollow_eligible=True,
@@ -566,7 +589,7 @@ def run(in_path, out_path, wall=2.5, orient=True, log=None,
     lb, nb = ndimage.label(below)
     szs = ndimage.sum(below, lb, range(1, nb + 1)) * PITCH ** 3 / 1000.0
     down = [[0, 0, -1], [.5, 0, -1], [-.5, 0, -1], [0, .5, -1], [0, -.5, -1]]
-    cyls, drains = [], []
+    cyls, drains, drill_keepouts = [], [], []
     for k in np.argsort(-szs):
         if szs[k] < LOBE_MIN_ML:
             break
@@ -581,6 +604,13 @@ def run(in_path, out_path, wall=2.5, orient=True, log=None,
         cyls.append(c)
         drains.append({"xyz": [round(v, 1) for v in p], "lobe_ml": round(float(szs[k]), 2),
                        "wall_mm": round(L, 1)})
+        drill_keepouts.append({
+            "role": "drain",
+            "p0": (p - 4.0 * d).tolist(),
+            "p1": (p + (L + 4.0) * d).tolist(),
+            "axis": d.tolist(),
+            "radius_mm": float(DRAIN_R),
+        })
     # vent: thinnest horizontal wall near cavity top
     high = world[world[:, 2] > zw.max() - 2.0]
     horiz = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0]]
@@ -599,6 +629,13 @@ def run(in_path, out_path, wall=2.5, orient=True, log=None,
     c.apply_transform(trimesh.geometry.align_vectors([0, 0, 1], vd))
     c.apply_translation(vp + vd * (ventL / 2 + 0.5))
     cyls.append(c)
+    drill_keepouts.append({
+        "role": "vent",
+        "p0": (vp - 4.0 * vd).tolist(),
+        "p1": (vp + (ventL + 5.0) * vd).tolist(),
+        "axis": vd.tolist(),
+        "radius_mm": float(VENT_R),
+    })
     log.update(drains=drains, vent={"xyz": [round(v, 1) for v in vp], "wall_mm": round(ventL, 1)})
 
     # Drainability doctrine: every cavity voxel must either drain or not
@@ -696,6 +733,13 @@ def run(in_path, out_path, wall=2.5, orient=True, log=None,
                 cyls.append(c)
                 drains.append({"xyz": [round(v, 1) for v in pk], "lobe_ml": round(float(vol_k), 2),
                                "wall_mm": round(L, 1), "added_by_audit": True})
+                drill_keepouts.append({
+                    "role": "audit_drain",
+                    "p0": (pk - 4.0 * d).tolist(),
+                    "p1": (pk + (L + 4.0) * d).tolist(),
+                    "axis": d.tolist(),
+                    "radius_mm": float(DRAIN_R),
+                })
                 extra += 1
                 drilled = True
         if not drilled:
@@ -720,6 +764,63 @@ def run(in_path, out_path, wall=2.5, orient=True, log=None,
     inner = trimesh.Trimesh(
         vertices=trimesh.transformations.transform_points(verts - 1.0, T), faces=faces)
     inner.merge_vertices(); trimesh.repair.fix_normals(inner)
+    cavity_fingerprint = _array_fingerprint((
+        ("cavity_mask", np.packbits(main, bitorder="little"), np.uint8),
+        ("transform", T, "<f8"),
+        ("inverse_transform", Tinv, "<f8"),
+    ))
+    inner_fingerprint = _array_fingerprint((
+        ("vertices", inner.vertices, "<f8"),
+        ("faces", inner.faces, "<i8"),
+    ))
+    keepout_json = [{
+        "role": d["role"],
+        "p0": [round(float(v), 6) for v in d["p0"]],
+        "p1": [round(float(v), 6) for v in d["p1"]],
+        "axis": [round(float(v), 9) for v in d["axis"]],
+        "radius_mm": round(float(d["radius_mm"]), 6),
+    } for d in drill_keepouts]
+    descriptor_payload = {
+        "schema": "support-placement/a5-cavity",
+        "schema_version": 1,
+        "pitch_mm": float(PITCH),
+        "shape": [int(v) for v in main.shape],
+        "cavity_voxels": int(main.sum()),
+        "solid_voxels": int((mat & ~main).sum()),
+        "outside_voxels": int((~mat).sum()),
+        "cavity_fingerprint": cavity_fingerprint,
+        "inner_mesh_fingerprint": inner_fingerprint,
+        "transform": T.tolist(),
+        "inverse_transform": Tinv.tolist(),
+        "drain_keepouts": keepout_json,
+    }
+    descriptor_fingerprint = hashlib.sha256(json.dumps(
+        descriptor_payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    descriptor_payload["descriptor_fingerprint"] = descriptor_fingerprint
+    log["cavity_descriptor"] = descriptor_payload
+    if cavity_out is not None:
+        cavity_mask = np.frombuffer(
+            np.ascontiguousarray(main, dtype=np.bool_).tobytes(),
+            dtype=np.bool_,
+        ).reshape(main.shape)
+        solid_mask = np.frombuffer(
+            np.ascontiguousarray(mat & ~main, dtype=np.bool_).tobytes(),
+            dtype=np.bool_,
+        ).reshape(main.shape)
+        cavity_out.update(
+            schema=descriptor_payload["schema"],
+            schema_version=descriptor_payload["schema_version"],
+            pitch_mm=float(PITCH),
+            cavity_mask=cavity_mask,
+            solid_mask=solid_mask,
+            transform=np.array(T, dtype=np.float64, copy=True),
+            inverse_transform=np.array(Tinv, dtype=np.float64, copy=True),
+            inner_mesh=inner,
+            drill_keepouts=tuple(drill_keepouts),
+            cavity_fingerprint=cavity_fingerprint,
+            inner_mesh_fingerprint=inner_fingerprint,
+            descriptor_fingerprint=descriptor_fingerprint,
+        )
     inputs = [m, inner] + cyls
     for c in cyls:
         c.merge_vertices()
