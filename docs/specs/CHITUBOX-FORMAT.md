@@ -188,6 +188,36 @@ type sequence per group: `[7,1,9,4,3,6, 7,1,9,4,3,6, 6]` = two minimal supports
 records" in the cited earlier note (offsets 0 magic, 4 type, 8/20 start/end xyz, 32/36
 radii, 40/44 mesh off/len, 48+ trailing).
 
+The later UI-authored `two-supports.chitubox` donor has record types
+`[7,1,9,6,7,3,4,3,4,9,1,6,6]`. This proves that physical `[7,1]` adjacency and
+the order of a type-7 record's two metadata poles are **not universal native-file
+invariants**. It does pin these segment semantics:
+
+- type 7: sphere-only contact mesh, equal radii, zero trailing;
+- type 1: taper-only contact mesh, with contact depth in trailing float slot 0
+  (`0.1` and `0.5` in the donor);
+- type 9: standalone joint sphere, equal radii and vertical metadata poles;
+- type 3: ordinary rod/column;
+- type 4: downward root boss from column end to raft top, radii column -> boss;
+- type 6: unchanged pad/bridge raft geometry.
+
+The emitter uses a deterministic adjacent contact-pair ordering without changing
+planner coordinates. For a stub from deepest contact point `p0` toward `p1`, let
+`u = unit(p1-p0)` and `R = tip_ball_r_factor*r0`. Its emitter-specific contract is:
+
+1. type 7: start `p0`, end `p0+2R*u`, radii `(R,R)`, zero trailing bytes, and a
+   sphere mesh of radius `R` centered at `p0+R*u`;
+2. immediately adjacent type 1: start `p0+R*u`, end `p1`, radii `(r0,r1)`,
+   contact-depth in trailing float slot 0, and a cached taper mesh with no
+   duplicate contact sphere.
+
+Joint balls are emitted separately as type 9 with start/end
+`center+[0,0,R]` / `center-[0,0,R]`. A plate root's type-3 column ends at a
+type-4 boss top; the boss ends at `plate_z+0.2`, the top of the unchanged type-6
+raft, rather than extending to `plate_z`. These are serialization contracts only;
+the 400-byte group header and registry fields remain preserved from the evidenced
+corpus rather than inferred from these records.
+
 Adding supports also **auto-lifts every model by 3.0 mm** (off264 Z: 0 -> 3.0 on both
 models in the supported file; morel likewise 3.0), presumably to seat feet/pads below
 the model. The library must set/track this lift when it emits supports.

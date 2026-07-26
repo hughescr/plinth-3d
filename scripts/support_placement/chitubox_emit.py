@@ -39,6 +39,7 @@ PLATE_BAND_MM = 0.2  # F2/F1: same plate-band tolerance as joints.PLATE_BAND_MM
                       # contained per its existing style, see _field below)
 PLATE_MESH_TOL_MM = 1e-5
 MIN_ROOT_VERTICAL_LAYERS = 10
+MIN_ROOT_NO_BEND_MM = 0.5
 PAD_DIAMETER_MM = 2.2
 RAFT_HEIGHT_MM = 0.2
 PAD_N_SIDES = 20
@@ -346,48 +347,6 @@ def _field(m, name, default=None):
     return getattr(m, name, default)
 
 
-def _point_seg_dist(p, a, b):
-    """Distance from point p (3,) to segment a->b (3,)."""
-    d = b - a
-    L2 = float(d @ d)
-    if L2 < 1e-18:
-        return float(np.linalg.norm(p - a))
-    t = float(np.clip((p - a) @ d / L2, 0.0, 1.0))
-    return float(np.linalg.norm(p - (a + t * d)))
-
-
-def _assign_balls_to_members(members, balls, tol=0.25):
-    """One member index per ball: "the fattest member touching it"
-    (design-v4.md joint-ball doctrine, joints.compute_joint_balls) --
-    re-derived here against member INDEX rather than the `owner` tuple
-    joints.py hands back, because in v4 several Members legitimately
-    share the same owner (e.g. a contact's stub, trunk diagonal, and
-    trunk column are all owner=("contact", i)) so owner alone can't
-    identify which single record should carry the ball. A joint ball's
-    center is always literally an endpoint of at least one touching
-    member (COINCIDE_TOL_MM=0.15) or within ON_AXIS_TOL_MM=0.2 of a
-    through-member's axis (joints.py's own tolerances) -- tol=0.25
-    covers both with margin. Asserts every ball resolves to exactly one
-    member; a ball that lands on nothing is a bug upstream, not a
-    silent drop."""
-    assigned = []
-    for b in balls:
-        center = np.asarray(_field(b, "center"), float)
-        best_idx, best_r = None, -1.0
-        for mi, m in enumerate(members):
-            p0 = np.asarray(_field(m, "p0"), float)
-            p1 = np.asarray(_field(m, "p1"), float)
-            if _point_seg_dist(center, p0, p1) <= tol:
-                mr = max(float(_field(m, "r0")), float(_field(m, "r1")))
-                if mr > best_r:
-                    best_r, best_idx = mr, mi
-        assert best_idx is not None, (
-            f"joint ball at {center.tolist()} r={_field(b, 'r')} did not land "
-            f"on any member's axis -- upstream bug, not a silent drop")
-        assigned.append(best_idx)
-    return assigned
-
-
 @dataclass(frozen=True)
 class SegmentSpec:
     """One emitted support segment, described in the currency the CONTAINER
@@ -553,20 +512,14 @@ def member_chain_specs(members, balls, cfg, plate_z=None):
     """The v4 emission PRIMITIVE: geometry decisions only, no file offsets.
 
     Returns ``list[SegmentSpec]`` in emission order. Every geometry rule
-    (flare split, contact ball, joint-ball assignment, T_TAPER-vs-T_SHAFT
-    typing, the trailing-bytes convention) lives here and nowhere else;
+    (native root boss, contact records, standalone joint balls, record typing,
+    and the trailing-bytes convention) lives here and nowhere else;
     :func:`synth_member_chain` is a thin offset-assigning loop over this, so
     the two can never drift apart. See :func:`synth_member_chain` for the
     doctrine behind each rule.
     """
     members = list(members)
-    ball_owner_idx = _assign_balls_to_members(members, balls)
-    balls_by_member = {}
-    for bi, mi in enumerate(ball_owner_idx):
-        balls_by_member.setdefault(mi, []).append(bi)
-
     specs = []
-    n_balls_emitted = 0
     for mi, m in enumerate(members):
         p0 = np.asarray(_field(m, "p0"), float)
         p1 = np.asarray(_field(m, "p1"), float)
@@ -575,123 +528,160 @@ def member_chain_specs(members, balls, cfg, plate_z=None):
         kind = _field(m, "kind")
         embed_end = _field(m, "embed_end", None)
 
+        if kind == "stub":
+            axis = p1 - p0
+            axis_len = float(np.linalg.norm(axis))
+            if axis_len <= 1e-9:
+                raise PlateGeometryError(
+                    f"support stub {mi} has zero length")
+            axis_n = axis / axis_len
+            ball_r = float(cfg.tip_ball_r_factor) * r0
+            ball_center = p0 + ball_r * axis_n
+
+            # The emitter deterministically starts every contact with an
+            # adjacent [type-7, type-1] pair. p0 remains the planner's deepest
+            # contact point; the type-7 record describes the full sphere
+            # diameter along the outward stub axis and owns the sphere mesh
+            # centered one radius out from p0.
+            specs.append(SegmentSpec(
+                type_id=ci.T_TIP,
+                start=p0,
+                end=p0 + 2.0 * ball_r * axis_n,
+                r0=ball_r,
+                r1=ball_r,
+                trailing=_trailing_bytes(ci.T_TIP, cfg),
+                mesh=sphere_mesh(ball_center, ball_r)))
+
+            # The following type-1 record starts at the sphere center. Its
+            # cached mesh is the taper alone; joint spheres are standalone
+            # type-9 records below.
+            specs.append(SegmentSpec(
+                type_id=ci.T_TAPER,
+                start=ball_center,
+                end=p1,
+                r0=r0,
+                r1=r1,
+                trailing=_trailing_bytes(ci.T_TAPER, cfg),
+                mesh=frustum_mesh(ball_center, p1, r0, r1)))
+            continue
+
         is_plate_root = plate_z is not None and abs(p1[2] - float(plate_z)) <= PLATE_BAND_MM
+        boss_spec = None
         if is_plate_root:
             plate = float(plate_z)
-            min_vertical = MIN_ROOT_VERTICAL_LAYERS * float(cfg.layer_height_mm)
-            available_vertical = float(p0[2]) - plate
-            if available_vertical < min_vertical - PLATE_MESH_TOL_MM:
+            min_layer_run = (
+                MIN_ROOT_VERTICAL_LAYERS * float(cfg.layer_height_mm))
+            min_no_bend = max(MIN_ROOT_NO_BEND_MM, min_layer_run)
+            available_from_plate = float(p0[2]) - plate
+            if available_from_plate < min_no_bend - PLATE_MESH_TOL_MM:
                 raise PlateGeometryError(
-                    f"plate root {mi} has only {available_vertical:.6f} mm "
-                    f"above plate before its next joint; needs {min_vertical:.6f} mm "
-                    f"({MIN_ROOT_VERTICAL_LAYERS} layers)")
-            # The root p1 may be merely within the plate band. The plate plane
-            # is authoritative: anchor the base at exact plate_z and use a
-            # strictly +Z axis so the cone's contact ring is horizontal and no
-            # part of it can hang below the plate.
-            p_plate = np.array([p1[0], p1[1], plate])
+                    f"plate root {mi} has only {available_from_plate:.6f} mm "
+                    f"above plate before its next joint; needs "
+                    f"{min_no_bend:.6f} mm")
+
+            # Native type-4 geometry sits on the raft, not the plate. Its
+            # record direction is boss-top -> raft-top and its radii are
+            # column -> boss. Keep the boss top at least the explicit no-bend
+            # distance above the plate after accounting for raft thickness.
+            raft_top_z = plate + RAFT_HEIGHT_MM
+            available_above_raft = float(p0[2]) - raft_top_z
+            min_boss_height = max(0.0, min_no_bend - RAFT_HEIGHT_MM)
             flare_len_eff = max(
-                min_vertical,
-                min(float(cfg.flare_len_mm), available_vertical / 2.0))
-            p_col0 = p_plate + np.array([0.0, 0.0, flare_len_eff])
-            flare_blob = frustum_mesh(
-                p_plate, p_col0, cfg.flare_r_factor * r1, r1)
-            specs.append(SegmentSpec(
-                type_id=ci.T_FLARE, start=p_plate, end=p_col0,
-                r0=cfg.flare_r_factor * r1, r1=r1,
-                trailing=_trailing_bytes(ci.T_FLARE, cfg), mesh=flare_blob))
-            col_p0, col_p1, col_r0, col_r1 = p_col0, p0, r1, r0
+                min_boss_height,
+                min(float(cfg.flare_len_mm), available_above_raft / 2.0))
+            boss_bottom = np.array([p1[0], p1[1], raft_top_z])
+            boss_top = boss_bottom + np.array([0.0, 0.0, flare_len_eff])
+            boss_spec = SegmentSpec(
+                type_id=ci.T_FLARE,
+                start=boss_top,
+                end=boss_bottom,
+                r0=r1,
+                r1=cfg.flare_r_factor * r1,
+                trailing=_trailing_bytes(ci.T_FLARE, cfg),
+                mesh=frustum_mesh(
+                    boss_top, boss_bottom, r1,
+                    cfg.flare_r_factor * r1))
+            col_p0, col_p1, col_r0, col_r1 = p0, boss_top, r0, r1
         else:
             col_p0, col_p1, col_r0, col_r1 = p0, p1, r0, r1
 
         column_len = float(np.linalg.norm(col_p1 - col_p0))
         if column_len <= 1e-9:
-            # A root exactly one safe run tall needs no second record. Preserve
-            # any geometry assigned to the original member by merging it into
-            # the pedestal's blob instead of authoring a zero-length frustum.
+            # A root exactly one safe run tall needs no zero-length column;
+            # its native boss remains a complete standalone type-4 record.
             if not is_plate_root:
                 raise PlateGeometryError(f"support member {mi} has zero length")
-            pedestal = specs[-1]
-            parts = [pedestal.mesh]
-            if kind == "stub":
-                parts.append(sphere_mesh(p0, cfg.tip_ball_r_factor * r0))
-            for bi in balls_by_member.get(mi, []):
-                b = balls[bi]
-                parts.append(sphere_mesh(
-                    _field(b, "center"), float(_field(b, "r"))))
-                n_balls_emitted += 1
-            specs[-1] = SegmentSpec(
-                type_id=pedestal.type_id,
-                start=pedestal.start,
-                end=pedestal.end,
-                r0=pedestal.r0,
-                r1=pedestal.r1,
-                trailing=pedestal.trailing,
-                mesh=np.concatenate(parts))
+            specs.append(boss_spec)
             continue
-        parts = [frustum_mesh(
+        blob = frustum_mesh(
             col_p0, col_p1, col_r0, col_r1,
-            # The root column starts immediately after a build-plane-normal
-            # pedestal.  Keep both of its end rings parallel to the plate:
+            # The root column ends immediately above a build-plane-normal
+            # boss. Keep both of its end rings parallel to the plate:
             # a short, wide angled root would otherwise project the
-            # perpendicular start ring below the build plane.
+            # perpendicular end ring below the boss/raft envelope.
             ring_normal=np.array([0.0, 0.0, 1.0])
-            if is_plate_root else None)]
-        if kind == "stub":
-            ball_r = cfg.tip_ball_r_factor * r0
-            parts.append(sphere_mesh(p0, ball_r))
-        for bi in balls_by_member.get(mi, []):
-            b = balls[bi]
-            parts.append(sphere_mesh(_field(b, "center"), float(_field(b, "r"))))
-            n_balls_emitted += 1
-        blob = np.concatenate(parts)
+            if is_plate_root else None)
 
         tapered = abs(r0 - r1) > 1e-9
-        type_id = ci.T_TAPER if (tapered and embed_end is not None) else ci.T_SHAFT
+        type_id = (
+            ci.T_TAPER
+            if (tapered and embed_end is not None)
+            else ci.T_JOINER)
         specs.append(SegmentSpec(
             type_id=type_id, start=col_p0, end=col_p1, r0=col_r0, r1=col_r1,
             trailing=_trailing_bytes(type_id, cfg), mesh=blob))
+        if boss_spec is not None:
+            specs.append(boss_spec)
 
-    assert n_balls_emitted == len(balls), (
-        f"ball emission count mismatch: emitted {n_balls_emitted}, expected {len(balls)}")
+    # Native joint balls are standalone type-9 records. Their metadata poles
+    # are vertical regardless of the incident member axes, and the cached mesh
+    # contains only the sphere.
+    for b in (balls or []):
+        center = np.asarray(_field(b, "center"), float)
+        radius = float(_field(b, "r"))
+        pole = np.array([0.0, 0.0, radius])
+        specs.append(SegmentSpec(
+            type_id=ci.T_SHAFT,
+            start=center + pole,
+            end=center - pole,
+            r0=radius,
+            r1=radius,
+            trailing=_trailing_bytes(ci.T_SHAFT, cfg),
+            mesh=sphere_mesh(center, radius)))
     return specs
 
 
 def synth_member_chain(members, balls, cfg, next_off, plate_z=None):
-    """v4 emission (design-v4.md #14 Phase-review/interim emitter): one
-    record per Member (tree.Member or joints.collect_members's dict
-    schema), each a frustum_mesh blob. Type id mirrors v3's evidenced
-    T_TAPER-carries-contact_depth convention: T_TAPER when the member is
-    both tapered (r0 != r1) AND has a designed embed_end (a stub's
-    contact tip, or a strut's model-anchor foot -- the cases v3's
-    tip->taper transition and struts.py's anchor foot correspond to);
-    T_SHAFT otherwise (constant-radius trunk columns, shoots, diagonals).
+    """Native segment emission for tree.Member / collect_members schemas.
 
-    A stub's contact ball (cfg.tip_ball_r_factor * r0 sphere at its
-    embedded p0) is merged into ITS OWN record's blob -- same
-    "removal-friendly point contact, not a joint" rule v3.6 established
-    (joints.py module docstring); a model-anchor strut's embedded foot
-    is instead handled by the global joint pass's MODEL_FOOT_FACTOR ball
-    (it has no separate contact-ball convention of its own).
+    Ordinary columns, shoots, diagonals, and other non-contact rods are
+    type 3. A tapered non-stub with a designed embed_end remains type 1 and
+    carries contact depth in trailing float slot 0. Each stub emits the
+    deterministic adjacent [type 7, type 1] contact pair described below.
+
+    A stub authors the native adjacent [T_TIP, T_TAPER] contact pair. The
+    T_TIP record owns a sphere of radius cfg.tip_ball_r_factor*r0 centered
+    one such radius outward from embedded p0; the following taper begins at
+    that center and does not duplicate the sphere in its cached mesh. This
+    preserves the "removal-friendly point contact, not a joint" rule v3.6
+    established (joints.py module docstring). A model-anchor strut's embedded
+    foot is instead handled by the global joint pass's MODEL_FOOT_FACTOR
+    ball (it has no separate contact-ball convention of its own).
 
     Every entry in `balls` (joints.compute_joint_balls output: dicts or
-    objects with center/r/owner) is appended into exactly ONE record's
-    blob, chosen by _assign_balls_to_members; the assert there is the
-    "every ball emitted exactly once" guarantee the caller can rely on.
+    objects with center/r/owner) becomes its own type-9 sphere record:
+    vertical metadata poles at center +/- [0,0,R], radii R/R, zero trailing,
+    and a sphere-only cached mesh. No member blob duplicates a joint sphere.
 
-    F2 (Craig's Chitubox review -- conical feet): `plate_z` is optional
-    and defaults to None, in which case this function emits EXACTLY as
-    before (no caller depends on this parameter existing). When given, a
+    For native root bosses, `plate_z` is optional. When given, a
     member whose p1 lands within PLATE_BAND_MM of plate_z -- the v4 Forest
     root convention, tree.py: "p1 is always the root-ward end" -- is
-    plate-rooted. Its base is re-anchored to exact local plate_z and emitted
-    as a SEPARATE, strictly +Z T_FLARE pedestal: a horizontal, nonzero-area
-    contact ring tapering to the column radius. The pedestal runs for at
-    least ``10 * cfg.layer_height_mm`` before the member may bend laterally;
-    a root without that vertical clearance is rejected. The original member
-    resumes from the pedestal top without translating the model or forest.
-    Members shorter than 2*flare_len_mm still prefer a lower-half pedestal,
-    bounded below by the ten-layer safety run.
+    plate-rooted. Its type-4 boss runs downward from boss top to raft top
+    (plate_z + RAFT_HEIGHT_MM), with radii column -> boss. The type-3 column
+    runs from the original node p0 to that boss top. Boss height plus raft
+    thickness preserves both the explicit 0.5 mm no-bend invariant and the
+    ten-layer safety run; a root without that clearance is rejected. Short
+    roots still prefer a lower-half boss, bounded below by that safety run.
     Returns (record_bytes, blob_bytes) pairs, offsets contiguous from
     next_off.
 

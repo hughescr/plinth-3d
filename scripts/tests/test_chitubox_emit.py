@@ -16,6 +16,9 @@ _candidate = os.path.join(os.path.dirname(__file__), "fixtures", "chitubox",
                           "pad_bridge_donor.chitubox")
 if os.path.isfile(_candidate):
     CORPUS_PATH = os.path.abspath(_candidate)
+TWO_SUPPORTS_PATH = os.path.abspath(os.path.join(
+    os.path.dirname(__file__), "fixtures", "chitubox",
+    "two-supports.chitubox"))
 
 
 def _assert_closed_outward(tri):
@@ -57,13 +60,11 @@ def test_frustum_triangle_count_matches_validated_topology():
 
 
 @pytest.mark.parametrize("type_id,r0,r1", [
-    (ci.T_TIP, 0.2, 0.3),
     (ci.T_TAPER, 0.3, 0.75),
-    (ci.T_SHAFT, 0.75, 0.75),
     (ci.T_JOINER, 0.4, 0.4),
     (ci.T_FLARE, 1.1, 0.75),
 ])
-def test_generated_closed_segment_types_are_outward_wound(
+def test_generated_frustum_segment_types_are_outward_wound(
         type_id, r0, r1, cfg):
     tri = ce.frustum_mesh(
         [0.0, 0.0, 0.0], [1.0, -0.5, 3.0], r0, r1)
@@ -83,6 +84,72 @@ def test_generated_pad_and_bridge_are_outward_wound_and_plate_safe():
     _assert_closed_outward(bridge)
     assert pad[..., 2].min() == pytest.approx(plate_z)
     assert bridge[..., 2].min() == pytest.approx(plate_z)
+
+
+def test_two_supports_donor_pins_native_segment_semantics():
+    """UI-authored donor: contacts, joint spheres, rods, bosses, and raft."""
+    project = ci.Project(TWO_SUPPORTS_PATH)
+    assert [r.type for r in project.records] == [
+        7, 1, 9, 6, 7, 3, 4, 3, 4, 9, 1, 6, 6]
+
+    # A native contact's type 1 starts at the type-7 sphere midpoint and
+    # contains a taper only. Native ordering is not universally adjacent:
+    # the larger contact is records 4/10.
+    for tip_i, taper_i, depth in ((0, 1, 0.1), (4, 10, 0.5)):
+        tip = project.records[tip_i]
+        taper = project.records[taper_i]
+        center = (tip.start + tip.end) / 2.0
+        radius = tip.r1
+        assert tip.r2 == pytest.approx(radius)
+        assert np.linalg.norm(tip.end - tip.start) == pytest.approx(
+            2.0 * radius, abs=1e-6)
+        assert taper.start == pytest.approx(center, abs=1e-6)
+        assert bytes(tip.raw[48:72]) == bytes(24)
+        assert struct.unpack_from("<f", taper.raw, 48)[0] == pytest.approx(
+            depth)
+
+        tip_pts = project.blob(tip)
+        assert np.linalg.norm(tip_pts - center, axis=1) == pytest.approx(
+            radius, abs=2e-6)
+        taper_pts = project.blob(taper)
+        axis = taper.end - taper.start
+        length = np.linalg.norm(axis)
+        axis_n = axis / length
+        axial = (taper_pts - taper.start) @ axis_n
+        assert np.all(
+            np.isclose(axial, 0.0, atol=2e-6)
+            | np.isclose(axial, length, atol=2e-6))
+
+    # Native type 9 is a sphere-only joint record with vertical metadata
+    # poles; ordinary column records are type 3.
+    for joint_i in (2, 9):
+        joint = project.records[joint_i]
+        center = (joint.start + joint.end) / 2.0
+        assert joint.start[:2] == pytest.approx(center[:2])
+        assert joint.end[:2] == pytest.approx(center[:2])
+        assert joint.start[2] > center[2] > joint.end[2]
+        assert joint.r1 == pytest.approx(joint.r2)
+        assert bytes(joint.raw[48:72]) == bytes(24)
+        assert np.linalg.norm(
+            project.blob(joint) - center, axis=1) == pytest.approx(
+                joint.r1, abs=2e-6)
+
+    # Each type-3 root column ends at a downward type-4 boss whose bottom is
+    # the corresponding type-6 raft top, never the plate bottom.
+    for column_i, boss_i, pad_i in ((5, 6, 3), (7, 8, 12)):
+        column = project.records[column_i]
+        boss = project.records[boss_i]
+        pad = project.records[pad_i]
+        assert column.type == ci.T_JOINER
+        assert boss.type == ci.T_FLARE
+        assert column.end == pytest.approx(boss.start, abs=0.0021)
+        assert boss.start[2] > boss.end[2]
+        assert boss.r1 == pytest.approx(column.r2, abs=1e-6)
+        pad_mesh = project.blob(pad)
+        assert boss.end[2] == pytest.approx(
+            float(pad_mesh[:, 2].max()), abs=0.0021)
+        assert float(pad_mesh[:, 2].max() - pad_mesh[:, 2].min()) == (
+            pytest.approx(ce.RAFT_HEIGHT_MM, abs=2e-6))
 
 
 def test_build_record_round_trips_through_chitubox_inject_Record():
@@ -200,29 +267,58 @@ def test_synth_member_chain_round_trips_with_contiguous_offsets(cfg):
     ]
     next_off = 1000
     recs = ce.synth_member_chain(members, [], cfg, next_off)
-    assert len(recs) == len(members)
+    assert len(recs) == len(members) + 1  # every stub is adjacent T_TIP + T_TAPER
     off = next_off
     for rec_bytes, blob in recs:
         rec = ci.Record(rec_bytes)
         assert rec.mesh_off == off
         assert rec.mesh_len == len(blob) == rec.mesh_len
         off += len(blob)
-    # stub (tapered + embed_end) -> T_TAPER with contact-depth trailing;
-    # trunk column (constant radius, no embed) -> T_SHAFT
-    stub_rec = ci.Record(recs[0][0])
-    assert stub_rec.type == ci.T_TAPER
-    depth = struct.unpack_from("<f", recs[0][0], 48)[0]
+    # stub -> adjacent T_TIP + T_TAPER with contact-depth trailing;
+    # trunk column (constant radius, no embed) -> native type-3 rod
+    assert [ci.Record(r[0]).type for r in recs[:2]] == [ci.T_TIP, ci.T_TAPER]
+    assert recs[0][0][48:72] == bytes(24)
+    depth = struct.unpack_from("<f", recs[1][0], 48)[0]
     assert abs(depth - cfg.contact_depth_mm) < 1e-6
-    trunk_rec = ci.Record(recs[1][0])
-    assert trunk_rec.type == ci.T_SHAFT
+    trunk_rec = ci.Record(recs[2][0])
+    assert trunk_rec.type == ci.T_JOINER
 
 
-def test_synth_member_chain_stub_gets_contact_ball(cfg):
-    members = [_mk_member([0, 0, 0], [0, 0, 2], 0.3, 0.4, "stub", ("contact", 0), embed_end="p0")]
+def test_synth_member_chain_stub_uses_native_contact_pair_geometry(cfg):
+    p0 = np.array([1.0, -2.0, 3.0])
+    p1 = np.array([4.0, 2.0, 15.0])
+    r0, r1 = 0.3, 0.4
+    members = [_mk_member(
+        p0, p1, r0, r1, "stub", ("contact", 0), embed_end="p0")]
     recs = ce.synth_member_chain(members, [], cfg, 0)
-    blob = np.frombuffer(recs[0][1], "<f4").reshape(-1, 3)
-    ball_r = cfg.tip_ball_r_factor * 0.3
-    assert blob[:, 2].min() <= 0.0 - 0.8 * ball_r
+    assert len(recs) == 2
+    tip = ci.Record(recs[0][0])
+    taper = ci.Record(recs[1][0])
+    assert [tip.type, taper.type] == [ci.T_TIP, ci.T_TAPER]
+
+    u = (p1 - p0) / np.linalg.norm(p1 - p0)
+    ball_r = cfg.tip_ball_r_factor * r0
+    ball_center = p0 + ball_r * u
+    assert np.allclose(tip.start, p0)
+    assert np.allclose(tip.end, p0 + 2.0 * ball_r * u)
+    assert tip.r1 == pytest.approx(ball_r)
+    assert tip.r2 == pytest.approx(ball_r)
+    assert np.allclose(taper.start, ball_center)
+    assert np.allclose(taper.end, p1)
+    assert taper.r1 == pytest.approx(r0)
+    assert taper.r2 == pytest.approx(r1)
+    assert recs[0][0][48:72] == bytes(24)
+    assert struct.unpack_from("<f", recs[1][0], 48)[0] == pytest.approx(
+        cfg.contact_depth_mm)
+
+    tip_mesh = np.frombuffer(recs[0][1], "<f4").reshape(-1, 3, 3)
+    taper_mesh = np.frombuffer(recs[1][1], "<f4").reshape(-1, 3, 3)
+    expected_tip = ce.sphere_mesh(ball_center, ball_r)
+    expected_taper = ce.frustum_mesh(ball_center, p1, r0, r1)
+    assert np.array_equal(tip_mesh, expected_tip)
+    assert np.array_equal(taper_mesh, expected_taper)  # no sphere payload
+    _assert_closed_outward(tip_mesh)
+    _assert_closed_outward(taper_mesh)
 
 
 def test_synth_member_chain_emits_each_joint_ball_exactly_once(cfg):
@@ -252,13 +348,27 @@ def test_synth_member_chain_emits_each_joint_ball_exactly_once(cfg):
     assert total_verts > 0
 
 
-def test_synth_member_chain_asserts_unassignable_ball():
+def test_synth_member_chain_emits_standalone_type9_joint_sphere():
     from support_placement import config as cfg_mod
     cfg = cfg_mod.SupportConfig()
     members = [_mk_member([0, 0, 0], [0, 0, 2], 0.3, 0.3, "trunk", ("contact", 0))]
-    stray = [dict(center=np.array([50.0, 50.0, 50.0]), r=0.5, owner=("contact", 0))]
-    with pytest.raises(AssertionError):
-        ce.synth_member_chain(members, stray, cfg, 0)
+    center = np.array([50.0, 50.0, 50.0])
+    radius = 0.5
+    balls = [dict(center=center, r=radius, owner=("contact", 0))]
+    recs = ce.synth_member_chain(members, balls, cfg, 0)
+    assert [ci.Record(raw).type for raw, _ in recs] == [
+        ci.T_JOINER, ci.T_SHAFT]
+    joint = ci.Record(recs[1][0])
+    assert joint.start == pytest.approx(center + [0.0, 0.0, radius])
+    assert joint.end == pytest.approx(center - [0.0, 0.0, radius])
+    assert joint.r1 == pytest.approx(radius)
+    assert joint.r2 == pytest.approx(radius)
+    assert recs[1][0][48:72] == bytes(24)
+    assert np.array_equal(
+        np.frombuffer(recs[1][1], "<f4").reshape(-1, 3, 3),
+        ce.sphere_mesh(center, radius))
+    _assert_closed_outward(
+        np.frombuffer(recs[1][1], "<f4").reshape(-1, 3, 3))
 
 
 # --- F2: conical feet on plate-rooted members --------------------------
@@ -268,17 +378,26 @@ def test_synth_member_chain_plate_root_gets_foot_flare(cfg):
     member whose p1 sits at plate_z gets v3's conical foot flare."""
     members = [_mk_member([4.0, 0.0, 20.0], [4.0, 0.0, -5.0], 1.0, 1.0, "trunk", ("contact", 0))]
     recs = ce.synth_member_chain(members, [], cfg, 0, plate_z=-5.0)
-    assert len(recs) == 2  # flare record + shortened column record
-    flare_rec = ci.Record(recs[0][0])
-    assert flare_rec.type == ci.T_FLARE
-    flare_blob = np.frombuffer(recs[0][1], "<f4").reshape(-1, 3)
-    at_plate = flare_blob[np.abs(flare_blob[:, 2] - (-5.0)) < 1e-4]
-    rad = np.linalg.norm(at_plate[:, :2] - np.array([4.0, 0.0]), axis=1)
-    assert rad.max() > 1.0 * 1.3  # wider than the column radius at the plate
+    assert len(recs) == 2  # shortened type-3 column + native type-4 boss
+    col_rec = ci.Record(recs[0][0])
+    boss_rec = ci.Record(recs[1][0])
+    assert col_rec.type == ci.T_JOINER
+    assert boss_rec.type == ci.T_FLARE
+    raft_top = -5.0 + ce.RAFT_HEIGHT_MM
+    assert boss_rec.start[2] == pytest.approx(raft_top + cfg.flare_len_mm)
+    assert boss_rec.end[2] == pytest.approx(raft_top)
+    assert boss_rec.r1 == pytest.approx(1.0)
+    assert boss_rec.r2 == pytest.approx(cfg.flare_r_factor * 1.0)
+    assert col_rec.start == pytest.approx([4.0, 0.0, 20.0])
+    assert col_rec.end == pytest.approx(boss_rec.start)
+    flare_blob = np.frombuffer(recs[1][1], "<f4").reshape(-1, 3)
+    at_raft_top = flare_blob[np.abs(flare_blob[:, 2] - raft_top) < 1e-4]
+    rad = np.linalg.norm(
+        at_raft_top[:, :2] - np.array([4.0, 0.0]), axis=1)
+    assert rad.max() > 1.0 * 1.3  # wider than the column radius at raft top
     assert abs(rad.max() - cfg.flare_r_factor * 1.0) < 0.05
-    col_rec = ci.Record(recs[1][0])
-    assert col_rec.type == ci.T_SHAFT
-    assert abs(float(col_rec.start[2]) - (-5.0 + cfg.flare_len_mm)) < 1e-6
+    _assert_closed_outward(
+        np.frombuffer(recs[1][1], "<f4").reshape(-1, 3, 3))
 
 
 def test_plate_root_pedestal_is_vertical_before_angled_member(cfg):
@@ -287,18 +406,21 @@ def test_plate_root_pedestal_is_vertical_before_angled_member(cfg):
         [8.0, 3.0, -3.0], [4.0, 1.0, plate_z + 0.1],
         0.7, 0.9, "trunk", ("contact", 0))]
     specs = ce.member_chain_specs(members, [], cfg, plate_z=plate_z)
-    pedestal, angled = specs
-    assert pedestal.type_id == ci.T_FLARE
-    assert pedestal.start == pytest.approx([4.0, 1.0, plate_z])
-    assert pedestal.end[:2] == pytest.approx(pedestal.start[:2])
-    assert pedestal.end[2] - pedestal.start[2] >= (
-        ce.MIN_ROOT_VERTICAL_LAYERS * cfg.layer_height_mm - ce.PLATE_MESH_TOL_MM)
-    assert angled.start == pytest.approx(pedestal.end)
+    angled, boss = specs
+    assert angled.type_id == ci.T_JOINER
+    assert boss.type_id == ci.T_FLARE
+    assert boss.start[:2] == pytest.approx([4.0, 1.0])
+    assert boss.end == pytest.approx(
+        [4.0, 1.0, plate_z + ce.RAFT_HEIGHT_MM])
+    assert boss.start[2] - plate_z >= (
+        ce.MIN_ROOT_NO_BEND_MM - ce.PLATE_MESH_TOL_MM)
+    assert angled.end == pytest.approx(boss.start)
     assert not np.allclose(angled.start[:2], angled.end[:2])
-    at_plate = pedestal.mesh[
-        np.abs(pedestal.mesh[..., 2] - plate_z) <= ce.PLATE_MESH_TOL_MM]
-    assert len(at_plate) > 0
-    assert np.ptp(at_plate[:, 0]) > 0 and np.ptp(at_plate[:, 1]) > 0
+    at_raft_top = boss.mesh[
+        np.abs(boss.mesh[..., 2] - boss.end[2]) <= ce.PLATE_MESH_TOL_MM]
+    assert len(at_raft_top) > 0
+    assert np.ptp(at_raft_top[:, 0]) > 0
+    assert np.ptp(at_raft_top[:, 1]) > 0
 
 
 def test_short_wide_angled_root_starts_above_safe_run(cfg):
@@ -309,20 +431,22 @@ def test_short_wide_angled_root_starts_above_safe_run(cfg):
         [-3.40738346, 9.71617020, plate_z],
         0.8, 0.8, "trunk", ("contact", 4))]
 
-    pedestal, angled = ce.member_chain_specs(
+    angled, boss = ce.member_chain_specs(
         members, [], cfg, plate_z=plate_z)
     raw_angled = ce.frustum_mesh(
         angled.start, angled.end, angled.r0, angled.r1)
 
-    assert raw_angled[..., 2].min() < plate_z
-    assert angled.start == pytest.approx(pedestal.end)
+    assert raw_angled[..., 2].min() < boss.end[2]
+    assert angled.end == pytest.approx(boss.start)
     assert not np.allclose(angled.start[:2], angled.end[:2])
-    min_vertical = ce.MIN_ROOT_VERTICAL_LAYERS * cfg.layer_height_mm
+    min_vertical = max(
+        ce.MIN_ROOT_NO_BEND_MM,
+        ce.MIN_ROOT_VERTICAL_LAYERS * cfg.layer_height_mm)
     assert min(angled.start[2], angled.end[2]) >= (
         plate_z + min_vertical - ce.PLATE_MESH_TOL_MM)
     assert angled.mesh[..., 2].min() >= plate_z
     ce.validate_support_mesh_plate_bound(
-        [pedestal, angled], plate_z)
+        [angled, boss], plate_z)
 
 
 def test_plate_root_rejects_less_than_ten_layers_before_bend(cfg):
@@ -342,7 +466,7 @@ def test_synth_member_chain_no_flare_when_plate_z_omitted(cfg):
     recs = ce.synth_member_chain(members, [], cfg, 0)
     assert len(recs) == 1
     rec = ci.Record(recs[0][0])
-    assert rec.type == ci.T_SHAFT
+    assert rec.type == ci.T_JOINER
     assert np.allclose(rec.end, [4.0, 0.0, -5.0])
 
 
@@ -364,29 +488,28 @@ def test_synth_member_chain_short_plate_root_flares_lower_half_only(cfg):
                            1.0, 1.0, "trunk", ("contact", 0))]
     recs = ce.synth_member_chain(members, [], cfg, 0, plate_z=-5.0)
     assert len(recs) == 2
-    flare_rec = ci.Record(recs[0][0])
-    expected_col0_z = -5.0 + short_len / 2.0
-    assert abs(float(flare_rec.end[2]) - expected_col0_z) < 1e-6
-    col_rec = ci.Record(recs[1][0])
-    assert abs(float(col_rec.start[2]) - expected_col0_z) < 1e-6
+    col_rec = ci.Record(recs[0][0])
+    boss_rec = ci.Record(recs[1][0])
+    available_above_raft = short_len - ce.RAFT_HEIGHT_MM
+    expected_boss_top_z = (
+        -5.0 + ce.RAFT_HEIGHT_MM + available_above_raft / 2.0)
+    assert col_rec.end[2] == pytest.approx(expected_boss_top_z)
+    assert boss_rec.start[2] == pytest.approx(expected_boss_top_z)
+    assert boss_rec.end[2] == pytest.approx(
+        -5.0 + ce.RAFT_HEIGHT_MM)
 
 
-def test_synth_member_chain_plate_root_still_carries_its_joint_balls(cfg):
-    """A plate-rooted member's non-plate joint balls (e.g. a mid-column
-    junction, since F1 already excludes the true plate-band node from
-    ever being produced) still land in exactly one record's blob."""
+def test_synth_member_chain_plate_root_still_emits_its_joint_balls(cfg):
+    """A plate-rooted member's non-plate joint ball is a standalone type 9."""
     members = [_mk_member([4.0, 0.0, 20.0], [4.0, 0.0, -5.0], 1.0, 1.0, "trunk", ("contact", 0))]
     mid = np.array([4.0, 0.0, 10.0])
     balls = [dict(center=mid, r=1.3, owner=("contact", 0))]
     recs = ce.synth_member_chain(members, balls, cfg, 0, plate_z=-5.0)
-    hits = 0
-    for _, blob in recs:
-        pts = np.frombuffer(blob, "<f4").reshape(-1, 3)
-        d = np.linalg.norm(pts - mid, axis=1)
-        near = d[d <= 1.3 + 0.05]
-        if len(near) and float(near.max()) >= 0.9:
-            hits += 1
-    assert hits == 1
+    assert [ci.Record(raw).type for raw, _ in recs] == [
+        ci.T_JOINER, ci.T_FLARE, ci.T_SHAFT]
+    joint = ci.Record(recs[-1][0])
+    assert joint.start == pytest.approx(mid + [0.0, 0.0, 1.3])
+    assert joint.end == pytest.approx(mid - [0.0, 0.0, 1.3])
 
 
 def test_bottom_connected_exact_native_geometry_and_bytes():

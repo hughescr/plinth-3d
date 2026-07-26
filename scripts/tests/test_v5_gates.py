@@ -117,6 +117,28 @@ def test_ball_breach_report_synthesizes_endcap_for_ball_less_embed(cfg):
     assert verify.ball_breach_report(g2, [strut_ok], [], cfg) == []
 
 
+def test_ball_breach_report_uses_true_emitted_stub_ball(cfg):
+    class CaptureGeom:
+        def sphere_breach(self, centers, radii, eps_mm):
+            self.centers = centers.copy()
+            self.radii = radii.copy()
+            return (np.zeros(len(centers), dtype=bool),
+                    np.zeros(len(centers)), np.zeros(len(centers)))
+
+    p0 = np.array([1.0, -2.0, 3.0])
+    p1 = np.array([4.0, 2.0, 15.0])
+    r0 = 0.3
+    stub = _m(p0, p1, r0, 0.5, "stub", ("contact", 0), embed_end="p0")
+    geom = CaptureGeom()
+    assert verify.ball_breach_report(geom, [stub], [], cfg) == []
+
+    u = (p1 - p0) / np.linalg.norm(p1 - p0)
+    radius = cfg.tip_ball_r_factor * r0
+    assert geom.centers.shape == (1, 3)
+    assert np.allclose(geom.centers[0], p0 + radius * u)
+    assert geom.radii[0] == pytest.approx(radius)
+
+
 # ==========================================================================
 # R3 (2026-07-23) -- ball-gate census-parity scope: self_verify's HARD gate
 # and its `ball_breach_violations` key are restricted to actual joint balls

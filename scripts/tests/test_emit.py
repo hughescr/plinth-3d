@@ -37,8 +37,8 @@ def _mk_member(p0, p1, r0, r1, kind, owner, embed_end=None):
 
 def _spec_cases(cfg):
     """Members exercising every branch member_chain_specs has: plate-rooted
-    (flare split), short plate-rooted (half flare), a stub (contact ball), a
-    tapered member with an embed_end (T_TAPER), a plain shoot (T_SHAFT)."""
+    (flare split), short plate-rooted (half flare), a stub (native contact pair), a
+    tapered member with an embed_end (T_TAPER), a plain type-3 shoot."""
     return [
         _mk_member([4, 0, 3], [4, 0, -5], 1.0, 1.0, "trunk", ("contact", 0)),
         _mk_member([0, 0, -5 + cfg.flare_len_mm * 1.2], [0, 0, -5],
@@ -86,6 +86,31 @@ def test_specs_carry_the_trailing_convention(cfg):
                 cfg.contact_depth_mm)
         else:
             assert s.trailing == bytes(24)
+
+
+def test_specs_stub_contact_records_are_adjacent_and_exact(cfg):
+    stub = _spec_cases(cfg)[2]
+    specs = ce.member_chain_specs([stub], [], cfg, plate_z=-5.0)
+    assert [s.type_id for s in specs] == [ci.T_TIP, ci.T_TAPER]
+
+    p0, p1 = stub["p0"], stub["p1"]
+    u = (p1 - p0) / np.linalg.norm(p1 - p0)
+    radius = cfg.tip_ball_r_factor * stub["r0"]
+    center = p0 + radius * u
+    tip, taper = specs
+    assert np.allclose(tip.start, p0)
+    assert np.allclose(tip.end, p0 + 2.0 * radius * u)
+    assert tip.r0 == pytest.approx(radius) and tip.r1 == pytest.approx(radius)
+    assert tip.trailing == bytes(24)
+    assert np.array_equal(tip.mesh, ce.sphere_mesh(center, radius))
+    assert np.allclose(taper.start, center) and np.allclose(taper.end, p1)
+    assert taper.r0 == pytest.approx(stub["r0"])
+    assert taper.r1 == pytest.approx(stub["r1"])
+    assert struct.unpack("<f", taper.trailing[:4])[0] == pytest.approx(
+        cfg.contact_depth_mm)
+    assert np.array_equal(
+        taper.mesh,
+        ce.frustum_mesh(center, p1, stub["r0"], stub["r1"]))
 
 
 def test_specs_meshes_are_c_contiguous_float32(cfg):
@@ -292,8 +317,8 @@ def _cylinder_frame(cfg):
 def _mixed_forest(cfg, plate_z, zmin_centered):
     """A forest that exercises every branch of the spec builder: a plate-rooted
     trunk (flare + column = TWO records), a second differently-sized root,
-    a tapered stub with an embed_end (T_TAPER + tip ball), a plain shoot
-    (T_SHAFT), and a free joint ball."""
+    a tapered stub with an embed_end (adjacent T_TIP + T_TAPER), a plain shoot
+    (type 3), and a standalone type-9 joint ball."""
     members = [
         _mk_member([0, 0, zmin_centered], [0, 0, plate_z], 0.6, 0.6,
                    "trunk", ("contact", 0)),
@@ -329,10 +354,11 @@ def test_every_record_round_trips_through_the_container(tmp_path):
 
     specs = ce.member_chain_specs(members, balls, cfg, plate_z=plate_z)
     specs += ce.bottom_connected_specs(members, plate_z)
-    assert len(specs) == 9, \
+    assert len(specs) == 11, \
         "fixture must cover two flare-splits + stub + shoot + pads + bridge"
     assert {s.type_id for s in specs} == {
-        ci.T_FLARE, ci.T_TAPER, ci.T_SHAFT, ci.T_PAD}
+        ci.T_TIP, ci.T_TAPER, ci.T_JOINER, ci.T_FLARE,
+        ci.T_SHAFT, ci.T_PAD}
     assert rep.n_records == len(specs) and rep.n_flares == 2
     assert rep.n_pads == 2 and rep.n_bridges == 1
     assert rep.model_triangles == _stl_face_count(CYLINDER_STL)

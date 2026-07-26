@@ -850,7 +850,8 @@ def _clearance_report_exact(members, cfg, geom, moot_out=None, chords_out=None,
 def ball_breach_report(geom, members, balls, cfg, eps_mm=0.05):
     """SPEC-V5-GEOM sec 2.2: the census's headline defect class (44 ball
     breaches) was checked by NOTHING before v5. For every joint ball AND
-    every embedded member end (a synthesized end-cap sphere -- an embedded
+    every embedded member end (the true emitted contact sphere for a stub,
+    otherwise a synthesized end-cap sphere -- an embedded
     tip transiting a sub-mm fin AT its end is exempt from BOTH clearance
     paths by design, so it escaped every census-era test), run
     geom.sphere_breach: a sphere spanning a feature thinner than its radius
@@ -877,8 +878,20 @@ def ball_breach_report(geom, members, balls, cfg, eps_mm=0.05):
     for mi, m in enumerate(members):
         embed = m.get("embed_end")
         if embed == "p0":
-            centers.append(np.asarray(m["p0"], float))
-            radii.append(float(m["r0"]))
+            p0 = np.asarray(m["p0"], float)
+            if m["kind"] == "stub":
+                axis = np.asarray(m["p1"], float) - p0
+                axis_len = float(np.linalg.norm(axis))
+                if axis_len <= 1e-9:
+                    raise ValueError(
+                        f"cannot verify emitted ball for zero-length stub {mi}")
+                radius = float(cfg.tip_ball_r_factor) * float(m["r0"])
+                center = p0 + radius * axis / axis_len
+            else:
+                radius = float(m["r0"])
+                center = p0
+            centers.append(center)
+            radii.append(radius)
             tags.append(dict(source="endcap", member_idx=mi, end="p0", kind=m["kind"]))
         elif embed == "p1":
             centers.append(np.asarray(m["p1"], float))
