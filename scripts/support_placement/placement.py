@@ -713,7 +713,7 @@ def sample_candidates(mesh, islands, cfg, seed=None, candidate_pool_prepared=Non
                 position=pool.positions[row].copy(),
                 normal=pool.normals[row].copy(),
                 island_id=island_id, face_id=int(pool.face_ids[row]),
-                area_mm2=area))
+                candidate_pool_row=int(row), area_mm2=area))
     return contacts
 
 

@@ -92,6 +92,39 @@ class SupportConfig:
     contact_pool_max_candidates: int = 2_250_000
     contact_pool_max_compact_payload_bytes: int = 144 * 1024 * 1024
 
+    # Exact-bit face-topology resource closure. The compact limit covers the
+    # exact retained CSR/flags/counters/digest payload. The peak limit
+    # independently gates both the conservative vectorized build plan and the
+    # later deep-validation plan; construction scratch is out of scope before
+    # validation begins. Both are refusal guards, not topology-quality levers.
+    topology_max_faces: int = 750_000
+    topology_max_compact_payload_bytes: int = 64 * 1024 * 1024
+    topology_max_peak_bytes: int = 512 * 1024 * 1024
+
+    # A3 prepared coverage-surface resource guards. Each source triangle is
+    # uniformly dyadically subdivided until every terminal edge is no longer
+    # than voxel_pitch_mm; one exact-area-weighted centroid represents each
+    # terminal cell. These are refusal/memory-safety limits, not physics knobs.
+    coverage_samples_max_virtual_cells: int = 2_000_000
+    # Compact covers every retained sample/offset/source row plus scalar and
+    # digest metadata. Peak separately gates the conservative maximum of build
+    # phases and deep-validation phases after build scratch has been released.
+    coverage_samples_max_compact_payload_bytes: int = 160 * 1024 * 1024
+    coverage_samples_max_working_cells: int = 65_536
+    coverage_samples_max_peak_bytes: int = 512 * 1024 * 1024
+    # Bounded nearest-contact query block used by A3 and exposed in its
+    # diagnostics so a regression cannot silently become one giant allocation.
+    coverage_query_block_size: int = 65_536
+    # Hard bound on every A4 candidate-by-sample score tile. Both axes are
+    # tiled; this is a matrix-entry budget, not a row-count suggestion.
+    coverage_score_matrix_max_entries: int = 65_536
+    # Retained A3 selector masks have a distinct aggregate bound, measured in
+    # dense uint64-equivalent words. Their Python-int/list representation is
+    # conservatively accounted separately before allocation.
+    synthetic_coverage_mask_max_words: int = 131_072
+    # A4 tries at most this many full construct/rewire/size/verify candidates.
+    coverage_repair_max_attempts: int = 8
+
     # ---- Overhang / island detection ----
     # A face counts as needing support if its normal points more than this
     # many degrees below horizontal (down-facing) AND is not already
@@ -559,6 +592,9 @@ class SupportConfig:
     # strictly decreases the global defect count), never on this cap; the cap is
     # a backstop and hitting it is reported honestly as converged=False.
     p8_max_relocate_rounds: int = 4
+    # Stage-wide outer transaction: repeat Phase 8 followed by structural
+    # resize until one combined round changes neither geometry nor clearance.
+    p8_resize_fixed_point_max_rounds: int = 4
 
     # Amendment-H per-candidate resin / quality guards -- part of R1/S1 LEGALITY,
     # not merely acceptance levers: a candidate that violates one is illegal at
@@ -580,6 +616,7 @@ class SupportConfig:
     p8_reseat_enable: bool = True
     p8_reseat_radius_mm: float = 2.0                # max demand displacement (REACH §1 domain)
     p8_reseat_max_seeds: int = 24                   # REACH §2b `reloc_max_candidates`
+    p8_coverage_matrix_max_entries: int = 65_536
 
     # D5 -- PARENT-JUNCTION RE-SEAT (orchestrator ruling (5), 2026-07-24). The last
     # rung before honest failure: when neither re-aim (R1/S1) nor contact re-seat
@@ -600,14 +637,12 @@ class SupportConfig:
     p8_chord_canon_micron: int = 1                  # §6.3 integer-micron chord canon
 
     # Phase-8 RELOCATION STAGE (phase8_driver.run_phase8, wired into engine.run
-    # post-brace / pre-final-verify). Default OFF -- like every other perf/quality
-    # lever on this branch (perf_gate_emit_on_verify etc.), it is opt-in so the
-    # frozen bit-identity/determinism baselines are untouched: with it OFF the
-    # engine emits byte-identical geometry to HEAD. The full-scale acceptance run
-    # turns it ON. When ON but a forest has zero defects the stage is a no-op
-    # (idempotent by construction), so enabling it on already-clean geometry also
-    # leaves the digest unchanged.
-    p8_relocate_enable: bool = False
+    # post-brace / pre-final-verify). On by default: A3/A4's mandatory removal
+    # of honestly-unrouted regular demands can expose real final-geometry defects
+    # that the pre-normalized forest concealed. Phase 8 is the transactional
+    # final repair stage and must judge/repair the normalized forest before
+    # emission. A defect-free forest is an idempotent no-op.
+    p8_relocate_enable: bool = True
 
     def notes(self):
         """Flags for the caller: which constants are physics-derived vs

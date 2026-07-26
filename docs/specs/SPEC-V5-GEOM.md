@@ -638,18 +638,35 @@ existing suites. All fixtures deterministic, no unseeded sampling.
     provenance (including an unrouted original contact) and specialized
     contacts carrying a regular `face_id` hard-fail `verify.ok`.
 
-### 6.1 A2 representative acceptance evidence (2026-07-25)
+### 6.1 A2/A3/A4 representative acceptance evidence (2026-07-26)
 
-The re-freeze helper ran table and toed-slab twice each and asserted exact
-volume-report equality. Table: total 0.39602846189165186 ml, member
-0.29864423997554795 ml, 4 unrouted, 34 accepted rewires; prepared pool depth
-5, 2,176 virtual cells, 1,189 candidates, and 76,096 compact ndarray bytes.
-Toed slab: total
-0.5362920772872579 ml, member 0.43307741172616016 ml, 2 unrouted, 41 accepted
-rewires; pool depth 5, 2,080 virtual cells, 1,109 candidates, and 70,976 compact
-ndarray bytes. Both finish with
-`verify.ok = True`, zero uncovered islands, zero ball breaches, and zero A2
-    regular-contact invariant violations.
+The re-freeze helper now runs the complete routed, rewired, Phase-8, verified
+pipeline twice per fixture. It requires `verify.ok = True`, every hard-gate list
+empty, and a byte-identical canonical signature covering full volume,
+members/balls, routed/unrouted split, contact provenance, selected pool rows,
+prepared synthetic selection, verification, and deterministic routing and
+transaction logs. Timing and RSS telemetry are excluded.
+
+The previous table baseline was 0.39602846189165186 ml total,
+0.29864423997554795 ml member, 4 unrouted, and 34 accepted rewires. The
+corrected A3/A4 pipeline is 0.44498745175652143 ml total,
+0.3305928503164897 ml member, 0 unrouted, and 33 accepted rewires. The route
+change is therefore 4→0, not a resin-only re-freeze. The old baseline omitted
+the corrected synthetic named-island ownership and the regular A3 contacts
+needed to support those prepared samples. Both new table runs produced the same
+171,460-byte signature,
+`ecd197cf548a919e7eba9d648783b0e21b35613b36662bad9bcf61deaf56fe2a`,
+with all hard gates empty.
+
+The previous toed-slab baseline was 0.5362920772872579 ml total,
+0.43307741172616016 ml member, 2 unrouted, and 41 accepted rewires. The
+corrected pipeline is 0.671681136175464 ml total, 0.5452890322575278 ml member,
+0 unrouted, and 38 accepted rewires. Both new runs produced the same
+148,483-byte signature,
+`3a5bdc3dc4fdd1b8f53ec2c52bee18bf8642a9f999ccc30f10f00de407d2b10d`,
+with all hard gates empty. Its higher-cardinality synthetic selection is a
+deterministic, proven-cover fallback after the 1,048,577-node bound
+(`exact=False`); it is not claimed to be the global minimum.
 18. **A2 resource/lifecycle gate:** aggregate many-face plans refuse before
     virtual allocation; one depth-8 face is admitted; the 2-GiB peak-RSS
     high-water-growth

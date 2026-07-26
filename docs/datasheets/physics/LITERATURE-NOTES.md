@@ -531,6 +531,11 @@ land in that factor.
 | Stress-field width σ_x = σ_y | **0.45 × γ_i · d_self-support** | swept 0.25–0.65 (Fig. 16, p. 15) |
 | Circle-covering max packing utilisation | **0.9069** | standard hexagonal packing constant |
 
+The 0.4 mm square and 2.4 mm reach are setup-specific results for Cao's
+printer, DM12 resin, PDMS vat, and process. They are not universal physical
+constants or project floors, and they are not trusted as Saturn 4 Ultra/current
+resin constants.
+
 ### 4d. What they constrain, and how
 
 Objective, Eq. (8), p. 10: **minimise support count n**, subject to two
@@ -909,22 +914,26 @@ Two weak sanity anchors, offered as context only:
 
 **Closing this gap needs our own measurement**, not another paper.
 
-### Support contact geometry — **two independent measured floors**
+### Support contact geometry — **setup-specific demonstrations, not floors**
 
 | Source | Contact | Note |
 |---|---|---|
-| Cao §3.1 | **0.4 mm** square minimum printable; **0.5 mm** chosen; **0.53 mm** with 10 % margin | swept 0.1–1.0 mm |
-| Artemeva §2.1 | **0.23 mm** tip diameter | Lychee default, worked throughout |
+| Cao §3.1 | **0.4 mm** square was the minimum printable in that setup; **0.5 mm** chosen; **0.53 mm** with 10 % margin | Cao printer + DM12 resin + PDMS vat; swept 0.1–1.0 mm |
+| Artemeva §2.1 | **0.23 mm** tip diameter worked in that setup | DTU printer + FTD Industrial Blend; Lychee default |
 
-Our `tip_radius_mm` clamp of **[0.2, 1.0] mm** (radius → 0.4–2.0 mm
-diameter) brackets both. The lower clamp of 0.2 mm radius = 0.4 mm diameter
-matches Cao's measured minimum printable feature almost exactly — a useful
-independent confirmation that the floor is in the right place.
+These do not independently confirm a 0.4 mm universal or project floor.
+Project policy permits a **0.15 mm diameter** contact when it is sufficiently
+vertical and mechanically justified. It also permits contacts **wider than
+0.4 mm** when the larger contact is mechanically justified and safely reduces
+support count. Neither paper determines those project decisions.
 
-### Overhang thresholds — **our 45°/60° are not contradicted, but the framing is**
+### Overhang thresholds — **setup-specific evidence, not a universal reach**
 
 - Cao measured a **6°** overhang-angle threshold for their machine (prior
-  work: 10°), and a **2.4 mm** maximum self-supporting overhang distance.
+  work: 10°), and a **2.4 mm** maximum self-supporting overhang distance in
+  that printer/resin/process. The project does not adopt 2.4 mm as a universal
+  overhang or coverage-reach constant, and does not trust it as a Saturn 4
+  Ultra/current-resin calibration.
 - Artemeva's whole study is a **0°** flat down-face, the worst case, and it
   succeeds with 1.51 % supported area.
 - **But Cao's central argument is that a pure angle threshold is the wrong

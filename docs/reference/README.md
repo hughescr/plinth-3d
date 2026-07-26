@@ -12,9 +12,11 @@ those specs were built on.
   and its independent adversarial review. `SPEC-RUST-KERNEL.md` cites both as
   its own basis.
 - `physics_contacts_tips.md`, `physics_load_sizing.md`,
-  `physics_printability.md`, `physics_transient_peel.md` — the four physics
-  audits of the sizing model. `SPEC-EMBED-POLICY.md` cites the first as
-  evidence.
+  `physics_printability.md`, `physics_transient_peel.md` — physics audits of
+  the sizing model. `SPEC-EMBED-POLICY.md` cites the first as evidence.
+- [`physics_coverage.md`](physics_coverage.md) — rationale, calibration, and
+  measured resource evidence for the normative
+  [`SPEC-A3-A4-COVERAGE`](../specs/SPEC-A3-A4-COVERAGE.md).
 - `TREANT-V4-PRINT-AUDIT.md` — the synthesis report over the resin research,
   literature review, and physics audits, plus its completion,
   `AUDIT-ADDENDUM-mesh-classification.md` (what the 195 unreachable contacts

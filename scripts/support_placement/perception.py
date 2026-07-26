@@ -106,7 +106,7 @@ def grounded_mask(mesh, cfg, plate_z, down_mask=None, column_pitch_mm=1.0):
     return grounded
 
 
-def overhang_islands(mesh, cfg, plate_z, geom=None):
+def overhang_islands(mesh, cfg, plate_z, geom=None, face_topology=None):
     """Connected components of down-facing, non-grounded faces, merging
     across BOTH true mesh-edge adjacency AND cfg.island_merge_radius_mm of
     spatial proximity (see that field's docstring: pure topological
@@ -141,7 +141,18 @@ def overhang_islands(mesh, cfg, plate_z, geom=None):
     remap[face_ids] = np.arange(len(face_ids))
     m = len(face_ids)
 
-    adj = mesh.face_adjacency
+    if face_topology is None:
+        from . import topology as topology_mod
+        face_topology = topology_mod.build_face_topology(mesh, cfg=cfg)
+    else:
+        from . import topology as topology_mod
+        topology_mod.validate_face_topology(face_topology, mesh=mesh)
+    rows = np.repeat(
+        np.arange(len(mesh.faces), dtype=np.int64),
+        np.diff(face_topology.indptr))
+    adj = np.column_stack((rows, face_topology.indices))
+    # CSR is symmetric; keep one orientation so the sparse graph is compact.
+    adj = adj[adj[:, 0] < adj[:, 1]]
     a, b = remap[adj[:, 0]], remap[adj[:, 1]]
     keep = (a >= 0) & (b >= 0)
     a_list, b_list = [a[keep]], [b[keep]]

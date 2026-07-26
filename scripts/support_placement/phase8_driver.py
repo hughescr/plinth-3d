@@ -51,7 +51,10 @@ from typing import Optional
 import numpy as np
 from scipy.spatial import cKDTree
 
-from . import phase8, verify, joints, p8_accept, tree, perception, placement
+from . import (
+    phase8, verify, joints, p8_accept, tree, perception, placement,
+    prepared_validation,
+)
 
 # ---------------------------------------------------------------------------
 # Frozen-fixture target law (SPEC-P8-RELOCATE §3.0 / §5.3) -- the TREANT law.
@@ -604,6 +607,30 @@ def construct_sites(forest, members, balls, contacts, carried, cfg, geom, mesh,
 # array. There is no per-seed scalar mesh query anywhere below.
 
 
+@dataclass(frozen=True)
+class SurfaceSeed:
+    """Legacy four-field iterable plus A3/A4 provenance metadata."""
+    position: np.ndarray
+    normal: np.ndarray
+    distance_mm: float
+    face_id: Optional[int]
+    candidate_pool_row: Optional[int]
+    coverage_face_id: int
+
+    def __iter__(self):
+        yield self.position
+        yield self.normal
+        yield self.distance_mm
+        yield self.face_id
+
+    def __len__(self):
+        return 4
+
+    def __getitem__(self, index):
+        return (
+            self.position, self.normal, self.distance_mm, self.face_id)[index]
+
+
 class SurfaceSeedIndex:
     """Model-surface seat source for R2 (and for D5 when a junction sits on the
     surface). Holds both the prepared regular-contact virtual lowest-vertex
@@ -618,19 +645,18 @@ class SurfaceSeedIndex:
 
     def __init__(self, mesh, islands=None, island_births=None,
                  candidate_pool_prepared=None, cfg=None,
-                 allow_legacy_candidate_pool_recompute=False):
+                 allow_legacy_candidate_pool_recompute=False,
+                 coverage_samples=None, face_topology=None,
+                 failed_candidate_pool_rows=(),
+                 _prepared_validation_token=None):
         self.centers = np.asarray(mesh.triangles_center, float)
         self.normals = np.asarray(mesh.face_normals, float)
         self.tree = cKDTree(self.centers) if len(self.centers) else None
         self.islands = islands
         self.island_births = list(island_births or ())
-        n_faces = len(self.centers)
-        self.island_of_face = np.full(n_faces, -1, dtype=np.int64)
-        if islands is not None:
-            for iid, face_ids in enumerate(islands):
-                fi = np.asarray(face_ids, dtype=np.int64)
-                if len(fi):
-                    self.island_of_face[fi] = int(iid)
+        self.island_faces = tuple(
+            np.unique(np.asarray(face_ids, dtype=np.int64))
+            for face_ids in (islands or ()))
         if candidate_pool_prepared is None:
             if not allow_legacy_candidate_pool_recompute:
                 raise ValueError(
@@ -642,12 +668,215 @@ class SurfaceSeedIndex:
             pool = placement.candidate_pool(mesh, islands or (), cfg)
         else:
             pool = candidate_pool_prepared
-        placement.validate_candidate_pool(pool, mesh=mesh, islands=islands)
+        authorized = prepared_validation._authorizes_domains(
+            _prepared_validation_token, mesh, cfg, islands,
+            candidate_pool=pool, face_topology=face_topology,
+            coverage_samples=coverage_samples)
+        if not authorized:
+            placement.validate_candidate_pool(
+                pool, mesh=mesh, islands=islands)
         self.pool_positions = pool.positions
         self.pool_normals = pool.normals
         self.pool_face_ids = pool.face_ids
         self.pool_islands = pool.island_ids
         self.pool_tree = cKDTree(self.pool_positions) if len(pool) else None
+        self.failed_candidate_pool_rows = frozenset(
+            int(row) for row in failed_candidate_pool_rows)
+        self.coverage_samples = coverage_samples
+        self.face_topology = face_topology
+        self.coverage_stats = dict(
+            authorities_validated=0, route_contexts_built=0,
+            max_matrix_entries=0,
+            specialized_component_rejections=0,
+            authority_validation=("token" if authorized else "deep"))
+        self.coverage_sample_components = None
+        self.coverage_route_rows = {}
+        if (coverage_samples is None) != (face_topology is None):
+            raise ValueError(
+                "R2 coverage samples and face topology must be supplied together")
+        if coverage_samples is not None:
+            from . import coverage as coverage_mod, topology as topology_mod
+            if not authorized:
+                topology_mod.validate_face_topology(face_topology, mesh=mesh)
+                coverage_mod.validate_coverage_samples(
+                    coverage_samples, mesh=mesh, islands=islands)
+            self.coverage_stats["authorities_validated"] = (
+                0 if authorized else 1)
+            self.coverage_sample_components = (
+                face_topology.component_ids[coverage_samples.face_ids])
+            for iid in range(len(islands or ())):
+                sl = coverage_samples.island_slice(iid)
+                rows = np.arange(sl.start, sl.stop, dtype=np.int64)
+                for component_id in np.unique(
+                        self.coverage_sample_components[rows]):
+                    self.coverage_route_rows[(iid, int(component_id))] = rows[
+                        self.coverage_sample_components[rows] == component_id]
+
+    def _faces_in_island(self, face_ids, island_id):
+        """Vectorized membership in one named island's sorted face set."""
+        face_ids = np.asarray(face_ids, dtype=np.int64)
+        out = np.zeros(face_ids.shape, dtype=bool)
+        island_id = int(island_id)
+        if not (0 <= island_id < len(self.island_faces)):
+            return out
+        legal = self.island_faces[island_id]
+        if not len(legal) or not len(face_ids):
+            return out
+        rows = np.searchsorted(legal, face_ids)
+        bounded = rows < len(legal)
+        out[bounded] = legal[rows[bounded]] == face_ids[bounded]
+        return out
+
+    def _face_in_island(self, face_id, island_id):
+        return bool(self._faces_in_island(
+            np.asarray([face_id], dtype=np.int64), island_id)[0])
+
+    def _contact_component(self, contact):
+        if self.face_topology is None:
+            return None
+        island_id = int(contact.get("island_id", -1))
+        specialized = bool(
+            contact.get("minimum") or contact.get("island_birth"))
+        face_id = (
+            contact.get("coverage_face_id")
+            if specialized else contact.get("face_id"))
+        if face_id is None:
+            return None
+        face_id = int(face_id)
+        if not (0 <= face_id < len(self.face_topology.component_ids)):
+            return None
+        if not self._face_in_island(face_id, island_id):
+            return None
+        resolved_component_id = int(
+            self.face_topology.component_ids[face_id])
+        if specialized:
+            stored_component_id = contact.get("coverage_component_id")
+            if (stored_component_id is None
+                    or int(stored_component_id) != resolved_component_id):
+                return None
+        return resolved_component_id
+
+    def _coverage_contexts(self, contact_indices, contacts, unrouted, cfg):
+        """Build every production A3 context once per sweep, grouped by route."""
+        contact_indices = sorted(set(int(ci) for ci in contact_indices))
+        if self.coverage_samples is None or self.face_topology is None:
+            return {
+                ci: self._coverage_context(ci, contacts, unrouted, cfg)
+                for ci in contact_indices}
+        budget = int(getattr(
+            cfg, "p8_coverage_matrix_max_entries", 65_536))
+        if budget <= 0:
+            raise ValueError("P8 coverage matrix budget must be positive")
+        threshold = float(cfg.target_spacing_mm) * float(
+            cfg.coverage_radius_factor)
+        threshold_sq = threshold * threshold
+        unrouted_set = {int(i) for i in unrouted}
+        by_route = {}
+        for ci, contact in enumerate(contacts):
+            if ci in unrouted_set:
+                continue
+            iid = int(contact.get("island_id", -1))
+            component_id = self._contact_component(contact)
+            if 0 <= iid < len(self.islands or ()) and component_id is not None:
+                by_route.setdefault((iid, component_id), []).append(ci)
+        targets_by_route = {}
+        for ci in contact_indices:
+            if not (0 <= ci < len(contacts)) or ci in unrouted_set:
+                continue
+            iid = int(contacts[ci].get("island_id", -1))
+            component_id = self._contact_component(contacts[ci])
+            if 0 <= iid < len(self.islands or ()) and component_id is not None:
+                targets_by_route.setdefault((iid, component_id), []).append(ci)
+        contexts = {}
+        for key, target_cis in sorted(targets_by_route.items()):
+            sample_rows = self.coverage_route_rows.get(key)
+            if sample_rows is None or not len(sample_rows):
+                continue
+            centers = self.coverage_samples.positions[sample_rows]
+            route_cis = np.asarray(by_route.get(key, ()), dtype=np.int64)
+            if not len(route_cis):
+                continue
+            contact_positions = np.asarray(
+                [contacts[int(ci)]["position"] for ci in route_cis],
+                dtype=np.float64)
+            sample_tile = min(
+                len(centers), max(1, int(np.sqrt(budget))))
+            contact_tile = max(1, budget // sample_tile)
+            cover_count = np.zeros(len(centers), dtype=np.int32)
+            for sample_start in range(0, len(centers), sample_tile):
+                sample_stop = min(sample_start + sample_tile, len(centers))
+                sample_block = centers[sample_start:sample_stop]
+                block_count = np.zeros(
+                    sample_stop - sample_start, dtype=np.int32)
+                for contact_start in range(
+                        0, len(contact_positions), contact_tile):
+                    contact_block = contact_positions[
+                        contact_start:contact_start + contact_tile]
+                    delta = (
+                        contact_block[:, None, :]
+                        - sample_block[None, :, :])
+                    distance_sq = np.einsum(
+                        "ijk,ijk->ij", delta, delta, optimize=False)
+                    self.coverage_stats["max_matrix_entries"] = max(
+                        self.coverage_stats["max_matrix_entries"],
+                        int(distance_sq.size))
+                    block_count += np.count_nonzero(
+                        distance_sq <= threshold_sq, axis=0)
+                cover_count[sample_start:sample_stop] = block_count
+            for ci in target_cis:
+                critical_chunks = []
+                position = np.asarray(contacts[ci]["position"], dtype=np.float64)
+                for sample_start in range(0, len(centers), sample_tile):
+                    sample_stop = min(
+                        sample_start + sample_tile, len(centers))
+                    sample_block = centers[sample_start:sample_stop]
+                    distance_sq = np.sum(
+                        (sample_block - position) ** 2, axis=1)
+                    critical = (
+                        (distance_sq <= threshold_sq)
+                        & (cover_count[sample_start:sample_stop] == 1))
+                    if np.any(critical):
+                        critical_chunks.append(sample_block[critical])
+                critical_centers = (
+                    np.concatenate(critical_chunks)
+                    if critical_chunks else np.empty((0, 3), dtype=np.float64))
+                contexts[ci] = (
+                    critical_centers, np.empty(0), threshold, 0.0)
+                self.coverage_stats["route_contexts_built"] += 1
+        return contexts
+
+    def _candidates_cover_critical(self, candidates, critical, threshold, cfg):
+        """True two-axis tiling for the production sole-authority guard."""
+        if not len(critical):
+            return np.ones(len(candidates), dtype=bool)
+        budget = int(getattr(
+            cfg, "p8_coverage_matrix_max_entries", 65_536))
+        sample_tile = min(
+            len(critical), max(1, int(np.sqrt(budget))))
+        candidate_tile = max(1, budget // sample_tile)
+        threshold_sq = float(threshold) ** 2
+        ok = np.ones(len(candidates), dtype=bool)
+        for candidate_start in range(
+                0, len(candidates), candidate_tile):
+            candidate_stop = min(
+                candidate_start + candidate_tile, len(candidates))
+            block_ok = np.ones(
+                candidate_stop - candidate_start, dtype=bool)
+            for sample_start in range(0, len(critical), sample_tile):
+                sample_block = critical[
+                    sample_start:sample_start + sample_tile]
+                delta = (
+                    candidates[candidate_start:candidate_stop, None, :]
+                    - sample_block[None, :, :])
+                distance_sq = np.einsum(
+                    "ijk,ijk->ij", delta, delta, optimize=False)
+                self.coverage_stats["max_matrix_entries"] = max(
+                    self.coverage_stats["max_matrix_entries"],
+                    int(distance_sq.size))
+                block_ok &= np.all(
+                    distance_sq <= threshold_sq, axis=1)
+            ok[candidate_start:candidate_stop] = block_ok
+        return ok
 
     # -- coverage / birth guard ------------------------------------------------
     def _coverage_context(self, ci: int, contacts, unrouted, cfg):
@@ -661,6 +890,9 @@ class SurfaceSeedIndex:
         iid = int(contacts[ci].get("island_id", -1))
         if not (0 <= iid < len(self.islands)):
             return None
+        if self.coverage_samples is not None and self.face_topology is not None:
+            return self._coverage_contexts(
+                [ci], contacts, unrouted, cfg).get(ci)
         face_ids = np.asarray(self.islands[iid], dtype=np.int64)
         if not len(face_ids):
             return None
@@ -740,6 +972,10 @@ class SurfaceSeedIndex:
                 continue
             rec = contacts[ci]
             if rec.get("island_birth") or rec.get("minimum"):
+                if self._contact_component(rec) is None:
+                    self.coverage_stats[
+                        "specialized_component_rejections"] += 1
+                    continue
                 specialized.append(k)
             else:
                 regular.append(k)
@@ -750,6 +986,10 @@ class SurfaceSeedIndex:
         if specialized and self.tree is not None:
             rows = self.tree.query_ball_point(pts[specialized], r=radius)
             neigh.update((k, row) for k, row in zip(specialized, rows))
+        coverage_contexts = self._coverage_contexts(
+            [contact_of_site[s.site_id] for s in sites
+             if s.site_id in contact_of_site],
+            contacts, unrouted, cfg)
         for k, site in enumerate(sites):
             ci = contact_of_site.get(site.site_id)
             if ci is None or k not in neigh:
@@ -759,12 +999,19 @@ class SurfaceSeedIndex:
             is_birth = bool(rec.get("island_birth"))
             is_minimum = bool(rec.get("minimum")) and not is_birth
             is_specialized = is_birth or is_minimum
+            component_id = self._contact_component(rec)
+            if is_specialized and component_id is None:
+                continue
             rows = np.asarray(sorted(neigh[k]), dtype=np.int64)
             if is_specialized:
-                rows = rows[self.island_of_face[rows] == iid]
+                rows = rows[self._faces_in_island(rows, iid)]
+                rows = rows[
+                    self.face_topology.component_ids[rows] == component_id]
                 cand = self.centers[rows]
                 cand_normals = self.normals[rows]
                 face_ids = np.full(len(rows), -1, dtype=np.int64)
+                coverage_face_ids = rows.copy()
+                candidate_pool_rows = np.full(len(rows), -1, dtype=np.int64)
                 if is_birth:
                     loop = rec.get("birth_loop")
                     birth_z = rec.get("birth_z")
@@ -787,32 +1034,48 @@ class SurfaceSeedIndex:
                     # domain iff its nearest persisted region point is <= r.
                     domain_ok = np.asarray(domain_dist, float) <= float(
                         cfg.minima_contact_radius_mm)
-                rows, cand, cand_normals, face_ids = (
+                rows, cand, cand_normals, face_ids, coverage_face_ids, candidate_pool_rows = (
                     rows[domain_ok], cand[domain_ok],
-                    cand_normals[domain_ok], face_ids[domain_ok])
+                    cand_normals[domain_ok], face_ids[domain_ok],
+                    coverage_face_ids[domain_ok], candidate_pool_rows[domain_ok])
             else:
                 rows = rows[self.pool_islands[rows] == iid]
+                if component_id is not None and self.face_topology is not None:
+                    rows = rows[
+                        self.face_topology.component_ids[
+                            self.pool_face_ids[rows]] == component_id]
+                if self.failed_candidate_pool_rows:
+                    rows = rows[~np.isin(
+                        rows,
+                        np.fromiter(
+                            self.failed_candidate_pool_rows,
+                            dtype=np.int64))]
                 cand = self.pool_positions[rows]
                 cand_normals = self.pool_normals[rows]
                 face_ids = self.pool_face_ids[rows]
+                coverage_face_ids = face_ids.copy()
+                candidate_pool_rows = rows.copy()
             if not len(rows):
                 continue
             c0 = np.asarray(site.c, float)
             dist = np.linalg.norm(cand - c0[None, :], axis=1)
             keep = dist > 1e-9                    # the demanded seat already failed
-            rows, cand, cand_normals, face_ids, dist = (
-                rows[keep], cand[keep], cand_normals[keep], face_ids[keep], dist[keep])
+            rows, cand, cand_normals, face_ids, coverage_face_ids, candidate_pool_rows, dist = (
+                rows[keep], cand[keep], cand_normals[keep], face_ids[keep],
+                coverage_face_ids[keep], candidate_pool_rows[keep], dist[keep])
             if not len(rows):
                 continue
             # nearest-to-demanded, face index as the total-order tiebreak.
             order = np.lexsort((face_ids, dist))
-            rows, cand, cand_normals, face_ids, dist = (
+            rows, cand, cand_normals, face_ids, coverage_face_ids, candidate_pool_rows, dist = (
                 rows[order], cand[order], cand_normals[order],
-                face_ids[order], dist[order])
-            rows, cand, cand_normals, face_ids, dist = (
+                face_ids[order], coverage_face_ids[order],
+                candidate_pool_rows[order], dist[order])
+            rows, cand, cand_normals, face_ids, coverage_face_ids, candidate_pool_rows, dist = (
                 rows[:cap], cand[:cap], cand_normals[:cap],
-                face_ids[:cap], dist[:cap])
-            ctx = self._coverage_context(ci, contacts, unrouted, cfg)
+                face_ids[:cap], coverage_face_ids[:cap],
+                candidate_pool_rows[:cap], dist[:cap])
+            ctx = coverage_contexts.get(ci)
             if ctx is None:
                 continue
             centers, d_other, threshold, cur_worst = ctx
@@ -820,9 +1083,15 @@ class SurfaceSeedIndex:
             # THIS contact moved to each seat: the new worst gap must clear the
             # gate threshold, or at least not exceed the CURRENT worst gap (an
             # already-uncovered island must not be made worse).
-            dseat = np.linalg.norm(centers[None, :, :] - cand[:, None, :], axis=2)
-            new_worst = np.minimum(d_other[None, :], dseat).max(axis=1)
-            ok = (new_worst <= threshold + 1e-9) | (new_worst <= cur_worst + 1e-9)
+            if self.coverage_samples is not None and self.face_topology is not None:
+                ok = self._candidates_cover_critical(
+                    cand, centers, threshold, cfg)
+            else:
+                dseat = np.linalg.norm(
+                    centers[None, :, :] - cand[:, None, :], axis=2)
+                new_worst = np.minimum(d_other[None, :], dseat).max(axis=1)
+                ok = ((new_worst <= threshold + 1e-9)
+                      | (new_worst <= cur_worst + 1e-9))
             births = self._sole_births(ci, contacts, unrouted, cfg)
             if births:
                 z_tol = float(cfg.minima_connect_layers) * float(cfg.layer_height_mm)
@@ -842,8 +1111,11 @@ class SurfaceSeedIndex:
                             break
             sel = np.nonzero(ok)[0]
             out[site.site_id] = [
-                (cand[j].copy(), cand_normals[j].copy(), float(dist[j]),
-                 None if is_specialized else int(face_ids[j]))
+                SurfaceSeed(
+                    cand[j].copy(), cand_normals[j].copy(), float(dist[j]),
+                    None if is_specialized else int(face_ids[j]),
+                    None if is_specialized else int(candidate_pool_rows[j]),
+                    int(coverage_face_ids[j]))
                 for j in sel]
         return out
 
@@ -888,7 +1160,19 @@ def _migrate_contact_record(rec: dict, cand) -> None:
     if is_regular:
         if cand.seat_face_id is None:
             raise RuntimeError("regular-contact R2 winner has no owning face_id")
+        candidate_pool_row = getattr(
+            cand, "seat_candidate_pool_row", None)
+        if candidate_pool_row is None and "candidate_pool_row" in rec:
+            raise RuntimeError(
+                "regular-contact R2 winner has no candidate_pool_row")
         updates["face_id"] = int(cand.seat_face_id)
+        if candidate_pool_row is not None:
+            updates["candidate_pool_row"] = int(candidate_pool_row)
+    if not is_regular:
+        coverage_face_id = getattr(cand, "seat_coverage_face_id", None)
+        if coverage_face_id is None:
+            raise RuntimeError("specialized R2 winner has no coverage_face_id")
+        updates["coverage_face_id"] = int(coverage_face_id)
     rec.update(updates)
 
 
@@ -2321,7 +2605,10 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
                progress=None, islands=None, island_births=None,
                carry_ledger=None,
                candidate_pool_prepared=None,
-               allow_legacy_candidate_pool_recompute=False) -> Phase8Report:
+               coverage_samples=None, face_topology=None,
+               failed_candidate_pool_rows=(),
+               allow_legacy_candidate_pool_recompute=False,
+               _prepared_validation_token=None) -> Phase8Report:
     """The Phase-8 orchestration driver (task step 1-2-3): construct sites from
     the engine gate, run the state machines in the §3.0 normative order, and
     splice accepted relocations back into `forest`. Idempotent by construction --
@@ -2402,9 +2689,15 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
                                       island_births=island_births,
                                       candidate_pool_prepared=(
                                           candidate_pool_prepared),
+                                      coverage_samples=coverage_samples,
+                                      face_topology=face_topology,
+                                      failed_candidate_pool_rows=(
+                                          failed_candidate_pool_rows),
                                       cfg=cfg,
                                       allow_legacy_candidate_pool_recompute=(
-                                          allow_legacy_candidate_pool_recompute))
+                                          allow_legacy_candidate_pool_recompute),
+                                      _prepared_validation_token=(
+                                          _prepared_validation_token))
     # ruling (5): the PERSISTENT formally-unresolvable ledger. Caller-owned when
     # supplied (`carry_ledger`), so its rows survive not just sweeps but PASSES --
     # a site the ladder gave up on in an earlier relocation call keeps its
@@ -2658,6 +2951,8 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
         if round_committed == 0:
             break                    # a FRESH-STATE invocation committed nothing
 
+    if seed_index is not None:
+        log["p8_coverage"] = dict(seed_index.coverage_stats)
     if not entered_any:
         # §6.10 idempotence: empty snapshot -> no ladder, no splice, no-op.
         return Phase8Report(

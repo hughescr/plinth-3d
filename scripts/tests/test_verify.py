@@ -1,7 +1,10 @@
 import numpy as np
 import pytest
 from scipy.spatial import cKDTree
-from support_placement import perception, placement, routing, verify, mesh_io, joints
+from support_placement import (
+    coverage, perception, placement, routing, topology, verify, mesh_io,
+    joints,
+)
 from support_placement import tree as tm
 
 
@@ -25,6 +28,26 @@ def test_coverage_report_flags_island_with_no_contacts(table_mesh, cfg):
     assert all(not r["covered"] for r in report)
 
 
+def test_coverage_report_empty_islands_needs_no_mesh_or_sidecars(cfg):
+    assessments = []
+    report = verify.coverage_report(
+        None, [], [], cfg, assessment_out=assessments)
+
+    assert report == []
+    assert len(assessments) == 1
+    assessment = assessments[0]
+    assert assessment.__dataclass_params__.frozen
+    for field, dtype in (
+            ("covered_mask", np.bool_),
+            ("nearest_mm", np.float64),
+            ("sample_components", np.int64),
+            ("failing_sample_mask", np.bool_)):
+        value = getattr(assessment, field)
+        assert value.shape == (0,)
+        assert value.dtype == np.dtype(dtype)
+    assert assessment.failing_route_keys == ()
+
+
 def test_coverage_report_passes_with_virtual_low_vertex_pool(table_mesh, cfg):
     """Coarse source triangles remain coverable without centroid/RNG seats."""
     plate_z = float(table_mesh.bounds[0][2]) - cfg.lift_mm
@@ -34,6 +57,44 @@ def test_coverage_report_passes_with_virtual_low_vertex_pool(table_mesh, cfg):
         table_mesh, islands, cfg, candidate_pool_prepared=pool)
     report = verify.coverage_report(table_mesh, islands, contacts, cfg)
     assert all(r["covered"] for r in report), report
+
+
+def test_coverage_report_shared_faces_route_by_each_named_island(cfg):
+    """A face may belong to multiple named islands without last-wins loss."""
+    import trimesh
+    from support_placement import coverage, topology
+
+    mesh = trimesh.Trimesh(
+        vertices=np.array([
+            [0.0, 0.0, 0.0],
+            [0.2, 0.0, 0.0],
+            [0.0, 0.2, 0.0],
+        ]),
+        faces=np.array([[0, 1, 2]], dtype=np.int64),
+        process=False)
+    islands = [
+        np.array([0], dtype=np.int64),
+        np.array([0], dtype=np.int64),
+    ]
+    samples = coverage.build_coverage_samples(mesh, islands, cfg)
+    sidecar = topology.build_face_topology(mesh, cfg=cfg)
+    contacts = [
+        dict(
+            position=samples.positions[samples.island_slice(0).start].copy(),
+            normal=mesh.face_normals[0].copy(),
+            island_id=0, minimum=True, coverage_face_id=0),
+        dict(
+            position=samples.positions[samples.island_slice(1).start].copy(),
+            normal=mesh.face_normals[0].copy(),
+            island_id=1, face_id=0),
+    ]
+
+    report = verify.coverage_report(
+        mesh, islands, contacts, cfg,
+        coverage_samples=samples, face_topology=sidecar)
+
+    assert [row["covered"] for row in report] == [True, True]
+    assert all(row["covered_fraction"] == 1.0 for row in report)
 
 
 def test_regular_contact_invariant_gate_rejects_stale_provenance(
@@ -60,9 +121,16 @@ def test_regular_contact_invariant_gate_rejects_stale_provenance(
         table_mesh, bad, pool, islands=islands)
     assert violations[0]["reason"] == "face-normal-mismatch"
 
+    bad = [dict(c) for c in contacts]
+    bad[0]["candidate_pool_row"] = len(pool)
+    violations = verify.regular_contact_invariant_report(
+        table_mesh, bad, pool, islands=islands)
+    assert violations[0]["reason"] == "invalid-candidate-pool-row"
+
     specialized = dict(
         position=np.zeros(3), normal=np.array([0.0, 0.0, -1.0]),
-        island_id=0, minimum=True, region_pts=np.zeros((1, 3)), face_id=0)
+        island_id=0, minimum=True, region_pts=np.zeros((1, 3)), face_id=0,
+        coverage_face_id=0)
     violations = verify.regular_contact_invariant_report(
         table_mesh, [specialized], pool, islands=islands)
     assert violations[0]["reason"] == "specialized-has-regular-face-id"
@@ -122,32 +190,110 @@ def test_regular_contact_invariant_rejects_pool_face_in_wrong_island(cfg):
         dict(contact_idx=0, reason="missing-prepared-pool")]
 
 
-def test_specialized_only_verify_is_clean_without_prepared_pool(
-        table_mesh, cfg):
+def test_specialized_provenance_rejects_wrong_island_and_route_component(cfg):
+    import trimesh
+
+    mesh = trimesh.Trimesh(
+        vertices=np.array([
+            [0.0, 0.0, 0.0], [0.2, 0.0, 0.0], [0.0, 0.2, 0.0],
+            [1.0, 0.0, 0.0], [1.2, 0.0, 0.0], [1.0, 0.2, 0.0],
+        ]),
+        faces=np.array([[0, 1, 2], [3, 4, 5]], dtype=np.int64),
+        process=False)
+    sidecar = topology.build_face_topology(mesh, cfg=cfg)
+    assert sidecar.component_ids.tolist() == [0, 1]
+    islands = [
+        np.array([0], dtype=np.int64),
+        np.array([1], dtype=np.int64),
+    ]
+    base = dict(
+        position=mesh.triangles_center[0].copy(),
+        normal=mesh.face_normals[0].copy(),
+        island_id=0, minimum=True,
+        region_pts=mesh.triangles_center.copy(),
+        coverage_face_id=0, coverage_component_id=0)
+
+    wrong_island = dict(base, coverage_face_id=1)
+    violations = verify.regular_contact_invariant_report(
+        mesh, [wrong_island], None, islands=islands,
+        face_topology=sidecar)
+    assert violations == [dict(
+        contact_idx=0,
+        reason="specialized-coverage-face-outside-island",
+        island_id=0, coverage_face_id=1)]
+
+    spanning_island = [np.array([0, 1], dtype=np.int64)]
+    wrong_component = dict(
+        base, island_id=0, coverage_face_id=1, coverage_component_id=0)
+    violations = verify.regular_contact_invariant_report(
+        mesh, [wrong_component], None, islands=spanning_island,
+        face_topology=sidecar)
+    assert violations == [dict(
+        contact_idx=0,
+        reason="specialized-coverage-component-mismatch",
+        coverage_face_id=1, coverage_component_id=0,
+        resolved_component_id=1)]
+
+
+def test_self_verify_hard_gates_unrouted_specialized_and_keeps_clean_empty(cfg):
+    import trimesh
+
+    mesh = trimesh.Trimesh(
+        vertices=np.array([
+            [0.0, 0.0, 0.0],
+            [0.2, 0.0, 0.0],
+            [0.0, 0.2, 0.0],
+        ]),
+        faces=np.array([[0, 1, 2]], dtype=np.int64),
+        process=False)
+    islands = [np.array([0], dtype=np.int64)]
+    sidecar = topology.build_face_topology(mesh, cfg=cfg)
+    samples = coverage.build_coverage_samples(mesh, islands, cfg)
     specialized = dict(
-        position=np.zeros(3), normal=np.array([0.0, 0.0, -1.0]),
-        island_id=0, minimum=True, region_pts=np.zeros((1, 3)))
+        position=mesh.triangles_center[0].copy(),
+        normal=mesh.face_normals[0].copy(),
+        island_id=0, minimum=True,
+        region_pts=mesh.triangles_center.copy(),
+        coverage_face_id=0, coverage_component_id=0)
     assert verify.regular_contact_invariant_report(
-        table_mesh, [specialized], None) == []
-    report = verify.self_verify(
-        table_mesh, [], [specialized], [], np.array([]), np.array([]),
-        cfg, plate_z=0.0)
-    assert report["ok"] is True
-    assert report["regular_contact_invariant_violations"] == []
+        mesh, [specialized], None, islands=islands,
+        face_topology=sidecar) == []
+
+    clean = verify.self_verify(
+        mesh, islands, [specialized], [], np.array([]), np.array([]),
+        cfg, plate_z=-1.0, contact_candidate_pool=None,
+        provenance_contacts=[specialized], coverage_samples=samples,
+        face_topology=sidecar)
+    assert clean["unrouted_specialized_contacts"] == []
+    assert clean["regular_contact_invariant_violations"] == []
+
+    failed = verify.self_verify(
+        mesh, islands, [], [], np.array([]), np.array([]),
+        cfg, plate_z=-1.0, unrouted=[0], contact_candidate_pool=None,
+        provenance_contacts=[specialized], coverage_samples=samples,
+        face_topology=sidecar)
+    assert failed["unrouted_specialized_contacts"] == [
+        dict(contact_idx=0, island_id=0)]
+    assert failed["ok"] is False
 
 
 def test_specialized_face_id_fails_class_scope_even_without_pool(
         table_mesh, cfg):
+    islands = [np.arange(len(table_mesh.faces), dtype=np.int64)]
+    sidecar = topology.build_face_topology(table_mesh, cfg=cfg)
     specialized = dict(
         position=np.zeros(3), normal=np.array([0.0, 0.0, -1.0]),
-        island_id=0, minimum=True, region_pts=np.zeros((1, 3)), face_id=0)
+        island_id=0, minimum=True, region_pts=np.zeros((1, 3)), face_id=0,
+        coverage_face_id=0,
+        coverage_component_id=int(sidecar.component_ids[0]))
     violations = verify.regular_contact_invariant_report(
-        table_mesh, [specialized], None)
+        table_mesh, [specialized], None, islands=islands,
+        face_topology=sidecar)
     assert violations == [dict(
         contact_idx=0, reason="specialized-has-regular-face-id", face_id=0)]
     report = verify.self_verify(
-        table_mesh, [], [specialized], [], np.array([]), np.array([]),
-        cfg, plate_z=0.0)
+        table_mesh, islands, [specialized], [], np.array([]), np.array([]),
+        cfg, plate_z=0.0, face_topology=sidecar)
     assert report["ok"] is False
     assert report["regular_contact_invariant_violations"] == violations
 
@@ -536,8 +682,20 @@ def test_self_verify_gates_on_uncovered_island_births(table_mesh, cfg):
     assert len(report_gated["uncovered_island_births"]) == 1
 
 
-def test_self_verify_island_birth_clean_control_supplies_pool(
-        table_mesh, cfg):
+def test_self_verify_island_birth_clean_control_supplies_pool(cfg):
+    import trimesh
+
+    mesh = trimesh.Trimesh(
+        vertices=np.array([
+            [-0.1, -0.1, 0.0],
+            [0.1, -0.1, 0.0],
+            [0.0, 0.1, 0.0],
+        ]),
+        faces=np.array([[0, 1, 2]], dtype=np.int64),
+        process=False)
+    islands = [np.array([0], dtype=np.int64)]
+    sidecar = topology.build_face_topology(mesh, cfg=cfg)
+    samples = coverage.build_coverage_samples(mesh, islands, cfg)
     birth = dict(
         x=0.0, y=0.0, z=0.0, area_mm2=0.01,
         loop=_square_loop(0.0, 0.0))
@@ -545,12 +703,14 @@ def test_self_verify_island_birth_clean_control_supplies_pool(
         position=np.array([0.0, 0.0, 0.0]),
         normal=np.array([0.0, 0.0, -1.0]),
         island_id=0, minimum=True, island_birth=True,
-        birth_loop=birth["loop"].copy(), birth_z=0.0)
-    pool = placement.candidate_pool(table_mesh, [], cfg)
+        birth_loop=birth["loop"].copy(), birth_z=0.0,
+        coverage_face_id=0, coverage_component_id=0)
+    pool = placement.candidate_pool(mesh, islands, cfg)
     report = verify.self_verify(
-        table_mesh, [], [contact], [], np.array([]), np.array([]),
+        mesh, islands, [contact], [], np.array([]), np.array([]),
         cfg, plate_z=0.0, island_births=[birth],
-        contact_candidate_pool=pool, provenance_contacts=[contact])
+        contact_candidate_pool=pool, provenance_contacts=[contact],
+        coverage_samples=samples, face_topology=sidecar)
     assert report["uncovered_island_births"] == []
     assert report["regular_contact_invariant_violations"] == []
     assert report["ok"] is True

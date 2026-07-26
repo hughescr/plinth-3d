@@ -9,12 +9,16 @@ delicate regions away from support-facing surfaces). This is exposed for
 prep-mini's orient stage to call; the support-placement engine itself
 doesn't choose orientation, it evaluates candidates handed to it.
 """
+import math
+from dataclasses import dataclass
 import numpy as np
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components
 from scipy.spatial import cKDTree
 
 from . import (
     perception, placement, routing, joints, tree as tree_mod,
-    removal as removal_mod,
+    removal as removal_mod, prepared_validation, topology as topology_mod,
 )
 from .geometry_exact import member_rays
 
@@ -50,29 +54,254 @@ BALL_FACTOR_STUB = 1.5   # contact-stub tips  (config.tip_ball_r_factor)
 BALL_FACTOR_FOOT = 1.4   # strut / model-rung feet  (joints.MODEL_FOOT_FACTOR)
 
 
-def coverage_report(mesh, islands, contacts, cfg):
-    """Independent re-check (not just trusting sample_candidates by
-    construction): for each island, the worst-covered face's distance to
-    its nearest assigned contact. Flags islands whose worst point exceeds
-    cfg.target_spacing_mm * cfg.coverage_radius_factor."""
-    threshold = cfg.target_spacing_mm * cfg.coverage_radius_factor
-    by_island = {}
-    for c in contacts:
-        by_island.setdefault(c["island_id"], []).append(c["position"])
+def _coverage_contact_face(contact):
+    if contact.get("minimum") or contact.get("island_birth"):
+        return contact.get("coverage_face_id")
+    return contact.get("face_id")
 
+
+def _sorted_island_face_sets(islands):
+    """Canonical many-to-many face membership, one sorted set per island."""
+    return tuple(
+        np.unique(np.asarray(face_ids, dtype=np.int64))
+        for face_ids in islands)
+
+
+def _face_in_sorted_set(face_id, sorted_face_ids):
+    """O(log n) membership without a scalar scan of an island's faces."""
+    row = int(np.searchsorted(sorted_face_ids, int(face_id)))
+    return bool(
+        row < len(sorted_face_ids)
+        and int(sorted_face_ids[row]) == int(face_id))
+
+
+@dataclass(frozen=True)
+class CoverageAssessment:
+    """Run-local A3 detail consumed by A4, never part of the public report."""
+    covered_mask: np.ndarray
+    nearest_mm: np.ndarray
+    sample_components: np.ndarray
+    failing_sample_mask: np.ndarray
+    failing_route_keys: tuple
+
+
+def _coverage_face_patch_labels(active_faces, topology_graph):
+    """Vectorized labels for the graph induced by sorted active source faces."""
+    active_faces = np.asarray(active_faces, dtype=np.int64)
+    if not len(active_faces):
+        return np.empty(0, dtype=np.int64)
+    induced = topology_graph[active_faces][:, active_faces]
+    _count, labels = connected_components(induced, directed=False)
+    return np.asarray(labels, dtype=np.int64)
+
+
+def coverage_report(mesh, islands, contacts, cfg, coverage_samples=None,
+                    face_topology=None, assessment_out=None,
+                    _prepared_validation_token=None):
+    """A3 area-weighted, exact-topology coverage judgment.
+
+    Samples are covered by routed contacts from the same island and exact
+    topology component when their Euclidean distance is inclusively no greater
+    than ``target_spacing_mm * coverage_radius_factor``. Uncovered sample area
+    is accumulated by source face; connected active source faces form patches.
+    A patch hard-fails above ``voxel_pitch_mm**2`` or whenever it touches a
+    topology ambiguity cut. The covered fraction is diagnostic only.
+    """
+    authorized = prepared_validation._authorizes_domains(
+        _prepared_validation_token, mesh, cfg, islands,
+        face_topology=face_topology, coverage_samples=coverage_samples)
+    if not authorized:
+        if face_topology is not None:
+            from . import topology as topology_mod
+            topology_mod.validate_face_topology(face_topology, mesh=mesh)
+        if coverage_samples is not None:
+            from . import coverage as coverage_mod
+            coverage_mod.validate_coverage_samples(
+                coverage_samples, mesh=mesh, islands=islands)
+
+    if not islands:
+        assessment = CoverageAssessment(
+            covered_mask=np.empty(0, dtype=bool),
+            nearest_mm=np.empty(0, dtype=np.float64),
+            sample_components=np.empty(0, dtype=np.int64),
+            failing_sample_mask=np.empty(0, dtype=bool),
+            failing_route_keys=())
+        if assessment_out is not None:
+            assessment_out.append(assessment)
+        return []
+
+    from . import coverage as coverage_mod
+    from . import topology as topology_mod
+
+    if face_topology is None:
+        face_topology = topology_mod.build_face_topology(mesh)
+    if coverage_samples is None:
+        coverage_samples = coverage_mod.build_coverage_samples(
+            mesh, islands, cfg)
+
+    threshold = float(cfg.target_spacing_mm) * float(
+        cfg.coverage_radius_factor)
+    area_floor = float(cfg.voxel_pitch_mm) ** 2
+    block_size = int(getattr(cfg, "coverage_query_block_size", 65_536))
+    if threshold < 0.0 or block_size <= 0:
+        raise ValueError("coverage radius and query block size must be positive")
+    component_ids = face_topology.component_ids
+    island_face_sets = _sorted_island_face_sets(islands)
+    by_route = {}
+    for contact_idx, contact in enumerate(contacts):
+        face_id = _coverage_contact_face(contact)
+        if face_id is None:
+            continue
+        iid = int(contact.get("island_id", -1))
+        face_id = int(face_id)
+        if not (0 <= iid < len(islands)
+                and 0 <= face_id < len(component_ids)
+                and _face_in_sorted_set(
+                    face_id, island_face_sets[iid])):
+            continue
+        key = (iid, int(component_ids[face_id]))
+        by_route.setdefault(key, []).append(
+            (int(contact_idx), np.asarray(contact["position"], dtype=np.float64)))
+    route_trees = {}
+    for key, rows in sorted(by_route.items()):
+        rows.sort(key=lambda item: item[0])
+        route_trees[key] = cKDTree(np.asarray([p for _i, p in rows]))
+
+    covered_mask = np.zeros(len(coverage_samples), dtype=bool)
+    nearest_mm = np.full(len(coverage_samples), np.inf, dtype=np.float64)
+    max_query_block_seen = 0
+    sample_components = component_ids[coverage_samples.face_ids]
+    for iid in range(len(islands)):
+        island_slice = coverage_samples.island_slice(iid)
+        island_rows = np.arange(
+            island_slice.start, island_slice.stop, dtype=np.int64)
+        if not len(island_rows):
+            continue
+        for component_id in np.unique(sample_components[island_rows]):
+            rows = island_rows[sample_components[island_rows] == component_id]
+            tree = route_trees.get((int(iid), int(component_id)))
+            if tree is None:
+                continue
+            for start in range(0, len(rows), block_size):
+                block_rows = rows[start:start + block_size]
+                max_query_block_seen = max(
+                    max_query_block_seen, int(len(block_rows)))
+                distances, _nearest = tree.query(
+                    coverage_samples.positions[block_rows],
+                    workers=routing.query_workers(len(block_rows)))
+                distances = np.asarray(distances, dtype=np.float64)
+                nearest_mm[block_rows] = distances
+                covered_mask[block_rows] = distances <= threshold
+
+    topology_graph = csr_matrix(
+        (np.ones(len(face_topology.indices), dtype=np.uint8),
+         face_topology.indices, face_topology.indptr),
+        shape=(len(component_ids), len(component_ids)))
+    source_counts = np.diff(coverage_samples.source_face_offsets)
+    if len(source_counts):
+        uncovered_by_source = np.add.reduceat(
+            coverage_samples.area_weights_mm2 * ~covered_mask,
+            coverage_samples.source_face_offsets[:-1])
+    else:
+        uncovered_by_source = np.empty(0, dtype=np.float64)
+    source_island_counts = np.bincount(
+        coverage_samples.source_face_island_ids,
+        minlength=len(islands))
+    source_island_offsets = np.r_[
+        0, np.cumsum(source_island_counts, dtype=np.int64)]
+    failing_source_mask = np.zeros(
+        coverage_samples.n_source_faces, dtype=bool)
+    failing_route_keys = set()
     report = []
     for island_id, face_ids in enumerate(islands):
-        positions = by_island.get(island_id)
-        centers = mesh.triangles_center[face_ids]
-        if not positions:
-            report.append(dict(island_id=island_id, covered=False,
-                                worst_gap_mm=float("inf"), n_faces=len(face_ids)))
+        sample_slice = coverage_samples.island_slice(island_id)
+        sample_rows = np.arange(
+            sample_slice.start, sample_slice.stop, dtype=np.int64)
+        if not len(sample_rows):
+            report.append(dict(
+                island_id=int(island_id), covered=True, worst_gap_mm=0.0,
+                n_faces=len(face_ids), uncovered_area_mm2=0.0,
+                failing_uncovered_area_mm2=0.0, max_patch_area_mm2=0.0,
+                n_patches=0, n_failing_patches=0, covered_fraction=1.0,
+                patch_area_floor_mm2=float(area_floor), patches=[],
+                max_query_block_rows=int(max_query_block_seen)))
             continue
-        tree = cKDTree(np.array(positions))
-        dist, _ = tree.query(centers, workers=routing.query_workers(len(centers)))
-        worst = float(dist.max())
-        report.append(dict(island_id=island_id, covered=worst <= threshold,
-                            worst_gap_mm=worst, n_faces=len(face_ids)))
+        uncovered_rows = sample_rows[~covered_mask[sample_rows]]
+        source_start = int(source_island_offsets[island_id])
+        source_stop = int(source_island_offsets[island_id + 1])
+        island_source_rows = np.arange(
+            source_start, source_stop, dtype=np.int64)
+        active_source_rows = island_source_rows[
+            uncovered_by_source[island_source_rows] > 0.0]
+        active_faces = coverage_samples.source_face_ids[active_source_rows]
+        patch_labels = _coverage_face_patch_labels(
+            active_faces, topology_graph)
+        n_patch = int(patch_labels.max(initial=-1) + 1)
+        patch_areas = np.bincount(
+            patch_labels,
+            weights=uncovered_by_source[active_source_rows],
+            minlength=n_patch)
+        patch_n_faces = np.bincount(
+            patch_labels, minlength=n_patch)
+        patch_ambiguous = np.zeros(n_patch, dtype=bool)
+        if n_patch:
+            np.logical_or.at(
+                patch_ambiguous, patch_labels,
+                face_topology.cut_flags[active_faces] != 0)
+        patch_components = np.full(n_patch, -1, dtype=np.int64)
+        if n_patch:
+            first = np.unique(patch_labels, return_index=True)[1]
+            patch_components[patch_labels[first]] = component_ids[
+                active_faces[first]]
+        patch_fails = (patch_areas > area_floor) | patch_ambiguous
+        if np.any(patch_fails):
+            failing_source_mask[active_source_rows[
+                patch_fails[patch_labels]]] = True
+            failing_route_keys.update(
+                (int(island_id), int(component))
+                for component in patch_components[patch_fails])
+        patches = []
+        for patch_id in range(n_patch):
+            patches.append(dict(
+                component_id=int(patch_components[patch_id]),
+                n_faces=int(patch_n_faces[patch_id]),
+                uncovered_area_mm2=float(patch_areas[patch_id]),
+                ambiguous_topology_cut=bool(
+                    patch_ambiguous[patch_id]),
+                fails=bool(patch_fails[patch_id])))
+        total_area = float(np.sum(
+            coverage_samples.area_weights_mm2[sample_rows],
+            dtype=np.float64))
+        uncovered_area = float(np.sum(
+            coverage_samples.area_weights_mm2[uncovered_rows],
+            dtype=np.float64))
+        failing = [p for p in patches if p["fails"]]
+        worst = float(np.max(nearest_mm[sample_rows], initial=0.0))
+        report.append(dict(
+            island_id=int(island_id), covered=not failing,
+            worst_gap_mm=worst, n_faces=len(face_ids),
+            uncovered_area_mm2=float(uncovered_area),
+            failing_uncovered_area_mm2=float(math.fsum(
+                p["uncovered_area_mm2"] for p in failing)),
+            max_patch_area_mm2=float(max(
+                (p["uncovered_area_mm2"] for p in failing), default=0.0)),
+            n_patches=int(len(patches)),
+            n_failing_patches=int(len(failing)),
+            covered_fraction=(
+                1.0 if total_area == 0.0
+                else float((total_area - uncovered_area) / total_area)),
+            patch_area_floor_mm2=float(area_floor),
+            patches=patches,
+            max_query_block_rows=int(max_query_block_seen)))
+    failing_sample_mask = (
+        np.repeat(failing_source_mask, source_counts) & ~covered_mask)
+    assessment = CoverageAssessment(
+        covered_mask=covered_mask, nearest_mm=nearest_mm,
+        sample_components=sample_components,
+        failing_sample_mask=failing_sample_mask,
+        failing_route_keys=tuple(sorted(failing_route_keys)))
+    if assessment_out is not None:
+        assessment_out.append(assessment)
     return report
 
 
@@ -1075,16 +1304,27 @@ def connectivity_report(members, plate_z, cfg, surface_tree=None, geom=None,
 
 
 def regular_contact_invariant_report(
-        mesh, contacts, candidate_pool, islands=None):
-    """Hard-gate the final A2 regular-contact provenance contract.
+        mesh, contacts, candidate_pool, islands=None, face_topology=None,
+        _candidate_pool_validated=False, _face_topology_validated=False):
+    """Hard-gate final regular and specialized contact provenance.
 
     Regular contacts must match one prepared-pool row exactly in island,
     position, and owning source ``face_id``; their stored normal must be the
     source mesh's face-normal bytes. Specialized minimum/island-birth contacts
-    are outside this invariant and must not carry a misleading ``face_id``.
+    must not carry a misleading regular ``face_id``; their
+    ``coverage_face_id`` must resolve through the authoritative topology and
+    belong to their named island.
     """
     out = []
     regular_indices = []
+    island_face_sets = (
+        _sorted_island_face_sets(islands) if islands is not None else ())
+    topology_valid = face_topology is not None
+    if topology_valid and not _face_topology_validated:
+        try:
+            topology_mod.validate_face_topology(face_topology, mesh=mesh)
+        except ValueError:
+            topology_valid = False
     for i, contact in enumerate(contacts):
         specialized = bool(
             contact.get("island_birth") or contact.get("minimum"))
@@ -1094,6 +1334,61 @@ def regular_contact_invariant_report(
                     contact_idx=int(i),
                     reason="specialized-has-regular-face-id",
                     face_id=int(contact["face_id"])))
+            if "candidate_pool_row" in contact:
+                out.append(dict(
+                    contact_idx=int(i),
+                    reason="specialized-has-candidate-pool-row",
+                    candidate_pool_row=int(contact["candidate_pool_row"])))
+            coverage_face_id = contact.get("coverage_face_id")
+            if coverage_face_id is None or not (
+                    0 <= int(coverage_face_id) < len(mesh.faces)):
+                out.append(dict(
+                    contact_idx=int(i),
+                    reason="specialized-missing-coverage-face-id"))
+                continue
+            island_id = int(contact.get("island_id", -1))
+            coverage_face_id = int(coverage_face_id)
+            if not (0 <= island_id < len(island_face_sets)):
+                out.append(dict(
+                    contact_idx=int(i),
+                    reason="specialized-invalid-island-id",
+                    island_id=island_id))
+                continue
+            if not _face_in_sorted_set(
+                    coverage_face_id, island_face_sets[island_id]):
+                out.append(dict(
+                    contact_idx=int(i),
+                    reason="specialized-coverage-face-outside-island",
+                    island_id=island_id,
+                    coverage_face_id=coverage_face_id))
+                continue
+            if not topology_valid:
+                out.append(dict(
+                    contact_idx=int(i),
+                    reason="specialized-missing-face-topology",
+                    coverage_face_id=coverage_face_id))
+                continue
+            component_id = int(
+                face_topology.component_ids[coverage_face_id])
+            if component_id < 0:
+                out.append(dict(
+                    contact_idx=int(i),
+                    reason="specialized-unresolved-face-component",
+                    coverage_face_id=coverage_face_id))
+                continue
+            stored_component_id = contact.get("coverage_component_id")
+            if stored_component_id is None:
+                out.append(dict(
+                    contact_idx=int(i),
+                    reason="specialized-missing-coverage-component-id",
+                    coverage_face_id=coverage_face_id))
+            elif int(stored_component_id) != component_id:
+                out.append(dict(
+                    contact_idx=int(i),
+                    reason="specialized-coverage-component-mismatch",
+                    coverage_face_id=coverage_face_id,
+                    coverage_component_id=int(stored_component_id),
+                    resolved_component_id=component_id))
         else:
             regular_indices.append(i)
     if candidate_pool is None:
@@ -1101,40 +1396,16 @@ def regular_contact_invariant_report(
             dict(contact_idx=int(i), reason="missing-prepared-pool")
             for i in regular_indices)
         return out
-    try:
-        placement.validate_candidate_pool(
-            candidate_pool, mesh=mesh, islands=islands)
-    except ValueError:
-        out.extend(
-            dict(contact_idx=int(i), reason="missing-prepared-pool")
-            for i in regular_indices)
-        return out
+    if not _candidate_pool_validated:
+        try:
+            placement.validate_candidate_pool(
+                candidate_pool, mesh=mesh, islands=islands)
+        except ValueError:
+            out.extend(
+                dict(contact_idx=int(i), reason="missing-prepared-pool")
+                for i in regular_indices)
+            return out
     normals = np.asarray(mesh.face_normals, float)
-
-    def _pool_has(iid, position, face_id):
-        """Exact lookup in pool's island,z,x,y,face total order; no row set."""
-        sl = candidate_pool.island_slice(iid)
-        pos = candidate_pool.positions[sl]
-        fids = candidate_pool.face_ids[sl]
-        if not len(pos):
-            return False
-        lo = int(np.searchsorted(pos[:, 2], position[2], side="left"))
-        hi = int(np.searchsorted(pos[:, 2], position[2], side="right"))
-        if lo == hi:
-            return False
-        x = pos[lo:hi, 0]
-        xlo = lo + int(np.searchsorted(x, position[0], side="left"))
-        xhi = lo + int(np.searchsorted(x, position[0], side="right"))
-        if xlo == xhi:
-            return False
-        y = pos[xlo:xhi, 1]
-        ylo = xlo + int(np.searchsorted(y, position[1], side="left"))
-        yhi = xlo + int(np.searchsorted(y, position[1], side="right"))
-        if ylo == yhi:
-            return False
-        faces_here = fids[ylo:yhi]
-        j = int(np.searchsorted(faces_here, face_id, side="left"))
-        return j < len(faces_here) and int(faces_here[j]) == face_id
 
     for ci, contact in enumerate(contacts):
         specialized = bool(
@@ -1144,6 +1415,16 @@ def regular_contact_invariant_report(
         if "face_id" not in contact:
             out.append(dict(contact_idx=int(ci), reason="missing-face-id"))
             continue
+        if "candidate_pool_row" not in contact:
+            out.append(dict(
+                contact_idx=int(ci), reason="missing-candidate-pool-row"))
+            continue
+        row = int(contact["candidate_pool_row"])
+        if not (0 <= row < len(candidate_pool)):
+            out.append(dict(
+                contact_idx=int(ci), reason="invalid-candidate-pool-row",
+                candidate_pool_row=row))
+            continue
         face_id = int(contact["face_id"])
         if not (0 <= face_id < len(normals)):
             out.append(dict(contact_idx=int(ci), reason="invalid-face-id",
@@ -1151,14 +1432,18 @@ def regular_contact_invariant_report(
             continue
         position = np.asarray(contact.get("position"), float)
         island_id = int(contact.get("island_id", -1))
-        if not _pool_has(island_id, position, face_id):
+        if (int(candidate_pool.island_ids[row]) != island_id
+                or int(candidate_pool.face_ids[row]) != face_id
+                or not np.array_equal(candidate_pool.positions[row], position)):
             out.append(dict(
                 contact_idx=int(ci), reason="not-in-prepared-pool",
                 island_id=island_id,
-                face_id=face_id, position=position.tolist()))
+                face_id=face_id, position=position.tolist(),
+                candidate_pool_row=row))
             continue
         stored = np.asarray(contact.get("normal"), float)
-        if not np.array_equal(stored, normals[face_id]):
+        if (not np.array_equal(stored, normals[face_id])
+                or not np.array_equal(stored, candidate_pool.normals[row])):
             out.append(dict(
                 contact_idx=int(ci), reason="face-normal-mismatch",
                 face_id=face_id, normal=stored.tolist(),
@@ -1170,7 +1455,9 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
                  plate_z, surface_tree=None, minima=None, forest=None, unrouted=(),
                  gate_on_removal=False, island_births=None, geom=None, balls=None,
                  gate_on_ball_breach=True, contact_candidate_pool=None,
-                 provenance_contacts=None):
+                 provenance_contacts=None, coverage_samples=None,
+                 face_topology=None, coverage_assessment_out=None,
+                 _prepared_validation_token=None):
     """Full design-v4.md #11 gate. Returns a report dict; `ok` is True
     only if all checks are clean: coverage, clearance, load, layer-island
     minima (only when the caller supplies `minima` from
@@ -1260,7 +1547,15 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
     # original-index contact list here; low-level callers default to `contacts`.
     if provenance_contacts is None:
         provenance_contacts = contacts
-    coverage = coverage_report(mesh, islands, contacts, cfg)
+    prepared_authorized = prepared_validation._authorizes_domains(
+        _prepared_validation_token, mesh, cfg, islands,
+        candidate_pool=contact_candidate_pool,
+        face_topology=face_topology, coverage_samples=coverage_samples)
+    coverage = coverage_report(
+        mesh, islands, contacts, cfg, coverage_samples=coverage_samples,
+        face_topology=face_topology,
+        assessment_out=coverage_assessment_out,
+        _prepared_validation_token=_prepared_validation_token)
     # PRINT-FLOOR amendment (OWNER RATIFIED 2026-07-24): clearance_report fills
     # `moot_transit_members` with the report-only moot rule-4 transits (all
     # crossings' chords < PRINT_FLOOR_CHORD_MM); the returned `clearance` list is
@@ -1316,7 +1611,19 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
     uncovered_island_births = island_birth_report(island_births, contacts, cfg) \
         if island_births is not None else []
     regular_contact_invariant_violations = regular_contact_invariant_report(
-        mesh, provenance_contacts, contact_candidate_pool, islands=islands)
+        mesh, provenance_contacts, contact_candidate_pool, islands=islands,
+        face_topology=face_topology,
+        _candidate_pool_validated=prepared_authorized,
+        _face_topology_validated=(
+            prepared_authorized or face_topology is not None))
+    unrouted_set = {int(i) for i in unrouted}
+    unrouted_specialized_contacts = [
+        dict(contact_idx=int(i), island_id=int(
+            contact.get("island_id", -1)))
+        for i, contact in enumerate(provenance_contacts)
+        if i in unrouted_set
+        and (contact.get("minimum") or contact.get("island_birth"))
+    ]
     connectivity_violations = connectivity_report(members, plate_z, cfg,
                                                    surface_tree=surface_tree, geom=geom)
     if forest is not None:
@@ -1332,6 +1639,7 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
     ok = (len(uncovered) == 0 and len(clearance) == 0 and len(load) == 0
           and len(unsupported_minima) == 0 and len(uncovered_island_births) == 0
           and len(regular_contact_invariant_violations) == 0
+          and len(unrouted_specialized_contacts) == 0
           and len(connectivity_violations) == 0
           and len(printability_violations) == 0 and len(murray_violations) == 0)
     if gate_on_removal:
@@ -1368,6 +1676,7 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
         uncovered_island_births=uncovered_island_births,
         regular_contact_invariant_violations=(
             regular_contact_invariant_violations),
+        unrouted_specialized_contacts=unrouted_specialized_contacts,
         connectivity_violations=connectivity_violations,
         printability_violations=printability_violations,
         murray_violations=murray_violations,

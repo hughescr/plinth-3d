@@ -8,7 +8,8 @@ import pytest
 from scipy.spatial import cKDTree
 
 from support_placement import (
-    config as config_mod, engine, mesh_io, phase8_driver, placement, rewire,
+    config as config_mod, coverage, engine, mesh_io, phase8_driver, placement, rewire,
+    topology,
     tree as tm, verify,
 )
 
@@ -24,6 +25,11 @@ def test_prepared_state_pickle_roundtrip_reuses_pool_without_recompute(
     engine.validate_prepared_state(reloaded, table_mesh, cfg)
     pool = reloaded["contact_candidate_pool"]
     assert pool.nbytes == len(pool) * placement.CONTACT_POOL_BYTES_PER_CANDIDATE
+    topology.validate_face_topology(
+        reloaded["face_topology"], mesh=table_mesh)
+    coverage.validate_coverage_samples(
+        reloaded["coverage_samples"], mesh=table_mesh,
+        islands=reloaded["islands"])
 
     def _refuse_recompute(*_args, **_kwargs):
         raise AssertionError("prepared pool was recomputed")
@@ -50,6 +56,140 @@ def test_prepared_state_pickle_roundtrip_reuses_pool_without_recompute(
     assert report["regular_contact_invariant_violations"] == []
 
 
+def _count_prepared_deep_validators(monkeypatch):
+    counts = dict(candidate=0, topology=0, coverage=0)
+    originals = (
+        placement.validate_candidate_pool,
+        topology.validate_face_topology,
+        coverage.validate_coverage_samples,
+    )
+
+    def candidate(*args, **kwargs):
+        counts["candidate"] += 1
+        return originals[0](*args, **kwargs)
+
+    def face_topology(*args, **kwargs):
+        counts["topology"] += 1
+        return originals[1](*args, **kwargs)
+
+    def coverage_samples(*args, **kwargs):
+        counts["coverage"] += 1
+        return originals[2](*args, **kwargs)
+
+    monkeypatch.setattr(placement, "validate_candidate_pool", candidate)
+    monkeypatch.setattr(topology, "validate_face_topology", face_topology)
+    monkeypatch.setattr(coverage, "validate_coverage_samples", coverage_samples)
+    return counts
+
+
+def test_external_staged_entries_deep_validate_prepared_authority_once(
+        table_mesh, cfg, monkeypatch):
+    pre = engine.prepare(table_mesh, cfg)
+    counts = _count_prepared_deep_validators(monkeypatch)
+    monkeypatch.setattr(
+        engine.cco, "build", lambda *_args, **_kwargs: (tm.Forest(), []))
+
+    engine.construct(table_mesh, pre, None, cfg)
+    assert counts == dict(candidate=1, topology=1, coverage=1)
+
+    counts.update(candidate=0, topology=0, coverage=0)
+    monkeypatch.setattr(engine.verify, "self_verify",
+                        lambda *_args, **_kwargs: {})
+    engine.finish(
+        table_mesh, pre, tm.Forest(), [], [], np.array([]), np.array([]),
+        None, cfg)
+    assert counts == dict(candidate=1, topology=1, coverage=1)
+
+    counts.update(candidate=0, topology=0, coverage=0)
+    result = engine.relocate(
+        table_mesh, None, [], [], np.array([]), np.array([]), 0.0, cfg,
+        prepared_state=pre)
+    assert result["skipped"] == "no exact geom oracle"
+    assert counts == dict(candidate=1, topology=1, coverage=1)
+
+
+def test_finish_hard_gates_unrouted_specialized_from_final_graph(
+        table_mesh, cfg, monkeypatch):
+    pre = engine.prepare(table_mesh, cfg)
+    contact = next(
+        dict(row) for row in pre["contacts"]
+        if row.get("minimum") or row.get("island_birth"))
+    forest = tm.Forest()
+    member_idx = forest.add_member(tm.Member(
+        p0=np.asarray(contact["position"], dtype=np.float64),
+        p1=np.asarray(contact["position"], dtype=np.float64)
+        + np.array([0.0, 0.0, 1.0]),
+        r0=0.2, r1=0.3, kind="stub", owner=("contact", 0),
+        embed_end="p0"))
+    forest.terminal_of[0] = member_idx
+    monkeypatch.setattr(
+        engine.tree, "assert_all_certified", lambda *_args: None)
+    monkeypatch.setattr(
+        engine.verify, "self_verify",
+        lambda *_args, **_kwargs: {"ok": True})
+
+    failed = engine.finish(
+        table_mesh, pre, forest, [0], [contact],
+        np.array([0.0]), np.array([0.0]), None, cfg)
+    assert failed["verify"]["unrouted_specialized_contacts"] == [
+        dict(contact_idx=0, island_id=int(contact["island_id"]))]
+    assert failed["verify"]["ok"] is False
+
+    clean = engine.finish(
+        table_mesh, pre, forest, [], [contact],
+        np.array([1.0]), np.array([0.2]), None, cfg)
+    assert clean["verify"]["unrouted_specialized_contacts"] == []
+    assert clean["verify"]["ok"] is True
+
+
+def test_prepared_validation_token_is_run_local_and_rejects_replaced_authority(
+        table_mesh, cfg, monkeypatch):
+    import copy
+
+    pre = engine.prepare(table_mesh, cfg)
+    engine.validate_prepared_state(pre, table_mesh, cfg)
+    token = engine.prepared_validation._issue_prepared_validation_token(
+        pre, table_mesh, cfg)
+    with pytest.raises(TypeError, match="run-local"):
+        pickle.dumps(token, protocol=pickle.HIGHEST_PROTOCOL)
+
+    counts = _count_prepared_deep_validators(monkeypatch)
+    monkeypatch.setattr(
+        engine.cco, "build", lambda *_args, **_kwargs: (tm.Forest(), []))
+
+    # A copied prepared dict is valid, but the old dict-identity capability
+    # cannot authorize it; the staged boundary therefore proves it afresh.
+    copied = copy.copy(pre)
+    engine.construct(
+        table_mesh, copied, None, cfg,
+        _prepared_validation_token=token)
+    assert counts == dict(candidate=1, topology=1, coverage=1)
+
+    # Replacing a sidecar on the original dict also invalidates the old token.
+    replacement_topology = copy.deepcopy(pre["face_topology"])
+    counts.update(candidate=0, topology=0, coverage=0)
+    pre["face_topology"] = replacement_topology
+    engine.construct(
+        table_mesh, pre, None, cfg,
+        _prepared_validation_token=token)
+    assert counts == dict(candidate=1, topology=1, coverage=1)
+
+
+def test_unpickled_corrupt_prepared_state_without_token_is_rejected(
+        table_mesh, cfg, monkeypatch):
+    pre = pickle.loads(pickle.dumps(
+        engine.prepare(table_mesh, cfg),
+        protocol=pickle.HIGHEST_PROTOCOL))
+    object.__setattr__(
+        pre["coverage_samples"], "content_digest", "0" * 64)
+    counts = _count_prepared_deep_validators(monkeypatch)
+
+    with pytest.raises(ValueError, match="content digest mismatch"):
+        engine.construct(table_mesh, pre, None, cfg)
+
+    assert counts == dict(candidate=1, topology=1, coverage=1)
+
+
 def test_staged_consumers_reject_old_prepared_state(table_mesh, cfg):
     with pytest.raises(ValueError, match="rerun prepare"):
         engine.construct(table_mesh, {}, None, cfg)
@@ -57,6 +197,624 @@ def test_staged_consumers_reject_old_prepared_state(table_mesh, cfg):
         engine.finish(
             table_mesh, {}, None, [], [], np.array([]), np.array([]),
             None, cfg)
+
+
+def test_a4_ranking_uses_marginal_area_lower_row_tie_and_exact_ledger(cfg):
+    import trimesh
+    mesh = trimesh.Trimesh(
+        vertices=np.array([
+            [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
+        ]),
+        faces=np.array([[0, 1, 2]]), process=False)
+    islands = [np.array([0], dtype=np.int64)]
+    pool = placement.candidate_pool(mesh, islands, cfg)
+    sidecar = topology.build_face_topology(mesh, cfg=cfg)
+    samples = coverage.build_coverage_samples(mesh, islands, cfg)
+    assessments = []
+    coverage_rows = verify.coverage_report(
+        mesh, islands, [], cfg, coverage_samples=samples,
+        face_topology=sidecar, assessment_out=assessments)
+    report = dict(
+        uncovered_islands=[row for row in coverage_rows if not row["covered"]])
+    pre = dict(
+        contact_candidate_pool=pool, coverage_samples=samples,
+        face_topology=sidecar)
+
+    stats = {}
+    first = engine._rank_coverage_repair_rows(
+        pre, assessments[0], occupied_rows=set(), failed_rows=set(), cfg=cfg,
+        stats_out=stats)
+    assert first == 0
+    assert stats["n_eligible_rows"] == len(pool)
+
+    # Occupancy and failure are exact row identities, never an island-wide or
+    # spatial-radius veto. The next legal row remains available.
+    stats = {}
+    second = engine._rank_coverage_repair_rows(
+        pre, assessments[0], occupied_rows={0}, failed_rows=set(), cfg=cfg,
+        stats_out=stats)
+    assert second == 1
+    assert stats["n_eligible_rows"] == len(pool) - 1
+    assert engine._rank_coverage_repair_rows(
+        pre, assessments[0], occupied_rows=set(), failed_rows={0}, cfg=cfg) == 1
+
+
+def test_run_multi_attempt_a4_deep_validates_once_and_threads_phase8_token(
+        table_mesh, cfg, monkeypatch):
+    from types import SimpleNamespace
+
+    local_cfg = dataclasses.replace(
+        cfg, coverage_repair_max_attempts=2, p8_relocate_enable=True)
+    pre = engine.prepare(table_mesh, local_cfg)
+    # Keep one valid demand so the real A3/A4 loop must add multiple prepared
+    # rows to address the other named islands.
+    pre["contacts"] = [dict(pre["contacts"][0])]
+    counts = _count_prepared_deep_validators(monkeypatch)
+    original_self_verify = verify.self_verify
+    verify_calls = 0
+    phase8_contexts = 0
+
+    monkeypatch.setattr(engine, "prepare", lambda *_args, **_kwargs: pre)
+    monkeypatch.setattr(
+        engine, "KernelSurface",
+        lambda _mesh: SimpleNamespace(penetration_intervals=lambda *_a: ()))
+    monkeypatch.setattr(
+        engine.routing, "build_surface_tree",
+        lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        engine.cco, "build", lambda *_args, **_kwargs: (tm.Forest(), []))
+    monkeypatch.setattr(
+        engine.rewire, "optimize", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        engine, "brace_and_size", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        engine, "live_member_lists",
+        lambda *_args, **_kwargs: ([dict(
+            p0=np.zeros(3), p1=np.array([0.0, 0.0, 1.0]),
+            r0=0.2, r1=0.2, kind="stub")], []))
+    monkeypatch.setattr(
+        engine.tree, "volume_report",
+        lambda *_args, **_kwargs: dict(member_ml=0.0, ball_ml=0.0))
+    monkeypatch.setattr(
+        engine.transient, "resize_forest",
+        lambda *_args, **_kwargs: {"resized": []})
+
+    def token_aware_verify(
+            mesh, islands, contacts, _members, carried, tip_r, run_cfg,
+            plate_z, **kwargs):
+        nonlocal verify_calls
+        verify_calls += 1
+        # Exercise the real coverage and A2 provenance validators while
+        # discarding the synthetic member used only to enter Phase 8.
+        kwargs["forest"] = tm.Forest()
+        return original_self_verify(
+            mesh, islands, contacts, [], carried, tip_r, run_cfg, plate_z,
+            **kwargs)
+
+    monkeypatch.setattr(engine.verify, "self_verify", token_aware_verify)
+
+    def token_aware_phase8(*args, **kwargs):
+        nonlocal phase8_contexts
+        phase8_contexts += 1
+        phase8_driver.SurfaceSeedIndex(
+            args[9], islands=kwargs["islands"],
+            island_births=kwargs["island_births"],
+            candidate_pool_prepared=kwargs["candidate_pool_prepared"],
+            coverage_samples=kwargs["coverage_samples"],
+            face_topology=kwargs["face_topology"], cfg=args[8],
+            _prepared_validation_token=kwargs[
+                "_prepared_validation_token"])
+        return phase8_driver.Phase8Report(
+            snapshot_summary={}, n_stub_sites=0, n_strut_sites=0,
+            n_ball_sites=0, stub_resolved=0, stub_unresolved=0,
+            qreal_resolved=0, qreal_unresolved=0,
+            strut_resolved=0, strut_unresolved=0,
+            ball_resolved=0, ball_unresolved=0,
+            reverted_splices=(), unresolved_items=(), pocket_labels=(),
+            dt_s=0.0, entered_ladder=False, sweeps=0, converged=True,
+            rounds=1, committed_by_round=(0,), committed_by_sweep=(0,))
+
+    monkeypatch.setattr(
+        engine.phase8_driver, "run_phase8", token_aware_phase8)
+    result = engine.run(table_mesh, local_cfg)
+
+    assert result["log"]["coverage_repair"]["attempts"] == 2
+    assert verify_calls == 4
+    assert phase8_contexts == 1
+    assert counts == dict(candidate=1, topology=1, coverage=1)
+
+
+def test_a4_scoring_tiles_both_axes_and_matches_full_matrix(cfg):
+    import trimesh
+    mesh = trimesh.Trimesh(
+        vertices=np.array([
+            [0.0, 0.0, 0.0], [12.0, 0.0, 0.0], [0.0, 12.0, 0.0],
+        ]),
+        faces=np.array([[0, 1, 2]]), process=False)
+    islands = [np.array([0], dtype=np.int64)]
+    local_cfg = dataclasses.replace(
+        cfg, coverage_score_matrix_max_entries=9)
+    pool = placement.candidate_pool(mesh, islands, local_cfg)
+    samples = coverage.build_coverage_samples(mesh, islands, local_cfg)
+    sidecar = topology.build_face_topology(mesh, cfg=local_cfg)
+    assessments = []
+    verify.coverage_report(
+        mesh, islands, [], local_cfg, coverage_samples=samples,
+        face_topology=sidecar, assessment_out=assessments)
+    pre = dict(
+        contact_candidate_pool=pool, coverage_samples=samples,
+        face_topology=sidecar)
+    stats = {}
+    selected = engine._rank_coverage_repair_rows(
+        pre, assessments[0], occupied_rows=set(), failed_rows=set(),
+        cfg=local_cfg, stats_out=stats)
+
+    distance_sq = np.sum(
+        (pool.positions[:, None, :] - samples.positions[None, :, :]) ** 2,
+        axis=2)
+    radius = local_cfg.target_spacing_mm * local_cfg.coverage_radius_factor
+    score = (distance_sq <= radius * radius) @ samples.area_weights_mm2
+    expected = int(np.flatnonzero(score == np.max(score))[0])
+    assert selected == expected
+    assert len(pool) > stats["max_candidate_tile_rows"]
+    assert len(samples) > stats["max_sample_tile_rows"]
+    assert stats["max_score_matrix_entries"] <= 9
+
+
+def test_a4_objective_and_noncoverage_guard_are_pinned():
+    old = [dict(
+        failing_uncovered_area_mm2=0.4, max_patch_area_mm2=0.3,
+        n_failing_patches=2, worst_gap_mm=8.0)]
+    better = [dict(
+        failing_uncovered_area_mm2=0.3, max_patch_area_mm2=0.29,
+        n_failing_patches=3, worst_gap_mm=9.0)]
+    assert engine._coverage_objective(better) < engine._coverage_objective(old)
+    report = {key: [] for key in engine._NONCOVERAGE_GATE_KEYS}
+    assert engine._noncoverage_hard_counts(report) == (
+        0,) * len(engine._NONCOVERAGE_GATE_KEYS)
+    report["clearance_violations"] = [{}, {}]
+    assert engine._noncoverage_hard_counts(report)[0] == 2
+
+    better_report = {key: [] for key in engine._NONCOVERAGE_GATE_KEYS}
+    better_report["uncovered_islands"] = better
+    old_report = {key: [] for key in engine._NONCOVERAGE_GATE_KEYS}
+    old_report["uncovered_islands"] = old
+    assert engine._coverage_repair_trial_verdict(
+        old_report, better_report)[:2] == (True, "accepted")
+
+    same_report = dict(old_report)
+    assert engine._coverage_repair_trial_verdict(
+        old_report, same_report)[:2] == (
+            False, "coverage-not-improved")
+
+    regressed = dict(better_report)
+    regressed["clearance_violations"] = [{}]
+    assert engine._coverage_repair_trial_verdict(
+        old_report, regressed)[:2] == (
+            False, "noncoverage-hard-gate-regression")
+
+
+def test_a4_full_trial_rolls_back_reranks_and_accepts_one_winner(
+        cfg, monkeypatch):
+    import trimesh
+    mesh = trimesh.Trimesh(
+        vertices=np.array([
+            [0.0, 0.0, 0.0], [12.0, 0.0, 0.0], [0.0, 12.0, 0.0],
+        ]),
+        faces=np.array([[0, 1, 2]]), process=False)
+    islands = [np.array([0], dtype=np.int64)]
+    pool = placement.candidate_pool(mesh, islands, cfg)
+    sidecar = topology.build_face_topology(mesh, cfg=cfg)
+    samples = coverage.build_coverage_samples(mesh, islands, cfg)
+    initial = engine._regular_contact_from_pool_row(pool, 0, islands, mesh)
+    pre = dict(
+        schema=engine.PREPARED_STATE_SCHEMA,
+        version=engine.PREPARED_STATE_SCHEMA_VERSION,
+        mesh_fingerprint=engine.mesh_fingerprint(mesh),
+        config_fingerprint=engine.config_fingerprint(cfg),
+        islands=islands, minima=[], island_births=[], contacts=[initial],
+        plate_z=-3.0, sample_points=np.empty((0, 3)),
+        sample_delicacy=np.empty(0), contact_candidate_pool=pool,
+        coverage_samples=samples, face_topology=sidecar, log={})
+    base_assessments = []
+    base_coverage = verify.coverage_report(
+        mesh, islands, [initial], cfg, coverage_samples=samples,
+        face_topology=sidecar, assessment_out=base_assessments)
+    base_uncovered = [r for r in base_coverage if not r["covered"]]
+    assert base_uncovered
+
+    monkeypatch.setattr(engine, "KernelSurface", lambda _mesh: object())
+    monkeypatch.setattr(engine, "prepare", lambda *_args, **_kwargs: pre)
+    monkeypatch.setattr(
+        engine.routing, "build_surface_tree", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(engine.rewire, "optimize", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(engine, "brace_and_size", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(engine.tree, "assert_all_certified", lambda *_args: None)
+    monkeypatch.setattr(engine, "live_member_lists", lambda *_args: ([], []))
+    monkeypatch.setattr(
+        engine.tree, "volume_report",
+        lambda *_args: dict(
+            member_ml=0.0, ball_ml=0.0, total_ml=0.0, by_kind_ml={}))
+
+    constructed_rows = []
+
+    def fake_construct(_mesh, prepared, *_args, **_kwargs):
+        active_contacts = _kwargs.get(
+            "contacts_override", prepared["contacts"])
+        rows = tuple(
+            int(c["candidate_pool_row"]) for c in active_contacts)
+        constructed_rows.append(rows)
+        n = len(active_contacts)
+        return object(), [], np.ones(n), np.ones(n), list(active_contacts)
+
+    monkeypatch.setattr(engine, "construct", fake_construct)
+    verify_calls = 0
+
+    def blank_report(uncovered, clearance=()):
+        report = {key: [] for key in engine._NONCOVERAGE_GATE_KEYS}
+        report.update(
+            ok=not uncovered and not clearance,
+            uncovered_islands=uncovered,
+            clearance_violations=list(clearance),
+            moot_transit_members=[], removal_violations=[],
+            removal_report=None, endcap_breach_diagnostic=[],
+            transit_chords_mm={})
+        return report
+
+    def fake_verify(*_args, **_kwargs):
+        nonlocal verify_calls
+        verify_calls += 1
+        _kwargs["coverage_assessment_out"].append(base_assessments[0])
+        if verify_calls == 1:
+            return blank_report(base_uncovered)
+        if verify_calls == 2:
+            trial = [dict(base_uncovered[0])]
+            trial[0]["failing_uncovered_area_mm2"] *= 0.5
+            return blank_report(trial, clearance=[dict(member_idx=0)])
+        return blank_report([])
+
+    monkeypatch.setattr(engine.verify, "self_verify", fake_verify)
+    local_cfg = dataclasses.replace(
+        cfg, p8_relocate_enable=False, coverage_repair_max_attempts=2)
+    # prepare is a test authority; align its semantic fingerprint to local cfg.
+    pre["config_fingerprint"] = engine.config_fingerprint(local_cfg)
+    result = engine.run(mesh, local_cfg)
+    repair = result["log"]["coverage_repair"]
+    assert len(constructed_rows) == 3
+    assert constructed_rows[0] == (0,)
+    first_trial_row = constructed_rows[1][-1]
+    second_trial_row = constructed_rows[2][-1]
+    assert first_trial_row != second_trial_row
+    assert tuple(
+        int(c["candidate_pool_row"]) for c in result["contacts"]) == (
+            0, second_trial_row)
+    assert repair["attempts"] == 2
+    assert repair["termination"] == "covered"
+    assert repair["ledger"][-2]["reason"] == (
+        "noncoverage-hard-gate-regression")
+    assert repair["ledger"][-1]["reason"] == "accepted"
+    assert first_trial_row in repair["failed_candidate_pool_rows"]
+
+    # The same first rejection with a one-attempt budget restores the baseline
+    # and terminates honestly at the workload cap.
+    constructed_rows.clear()
+    verify_calls = 0
+    pre["contacts"] = [initial]
+    capped_cfg = dataclasses.replace(
+        cfg, p8_relocate_enable=False, coverage_repair_max_attempts=1)
+    pre["config_fingerprint"] = engine.config_fingerprint(capped_cfg)
+    capped = engine.run(mesh, capped_cfg)
+    capped_repair = capped["log"]["coverage_repair"]
+    assert len(constructed_rows) == 2
+    assert tuple(
+        int(c["candidate_pool_row"]) for c in capped["contacts"]) == (0,)
+    assert capped_repair["attempts"] == 1
+    assert capped_repair["termination"] == "attempt-cap"
+    assert capped_repair["ledger"][-1]["reason"] == (
+        "noncoverage-hard-gate-regression")
+    assert capped["verify"]["uncovered_islands"]
+
+
+@pytest.mark.parametrize("p8_enabled", [False, True])
+@pytest.mark.parametrize("mixed_specialized", [False, True])
+def test_all_unrouted_normalizes_to_canonical_empty_geometry_without_mutating_prepared(
+        cfg, monkeypatch, p8_enabled, mixed_specialized):
+    import trimesh
+    mesh = trimesh.Trimesh(
+        vertices=np.array([
+            [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0],
+        ]),
+        faces=np.array([[0, 1, 2]]), process=False)
+    islands = [np.array([0], dtype=np.int64)]
+    pool = placement.candidate_pool(mesh, islands, cfg)
+    sidecar = topology.build_face_topology(mesh, cfg=cfg)
+    samples = coverage.build_coverage_samples(mesh, islands, cfg)
+    regular = engine._regular_contact_from_pool_row(
+        pool, 0, islands, mesh)
+    contacts = [regular]
+    if mixed_specialized:
+        contacts.append(dict(
+            position=np.asarray(mesh.triangles_center[0]).copy(),
+            normal=np.asarray(mesh.face_normals[0]).copy(),
+            island_id=0, minimum=True, coverage_face_id=0,
+            region_pts=np.asarray(mesh.triangles_center).copy(),
+            area_mm2=float(mesh.area)))
+    local_cfg = dataclasses.replace(
+        cfg, p8_relocate_enable=p8_enabled)
+    pre = dict(
+        schema=engine.PREPARED_STATE_SCHEMA,
+        version=engine.PREPARED_STATE_SCHEMA_VERSION,
+        mesh_fingerprint=engine.mesh_fingerprint(mesh),
+        config_fingerprint=engine.config_fingerprint(local_cfg),
+        islands=islands, minima=[], island_births=[],
+        contacts=contacts, plate_z=-3.0,
+        sample_points=np.empty((0, 3)),
+        sample_delicacy=np.empty(0),
+        contact_candidate_pool=pool, coverage_samples=samples,
+        face_topology=sidecar, log={})
+    prepared_contacts = pre["contacts"]
+    prepared_contact_ids = tuple(map(id, prepared_contacts))
+    active_history = []
+
+    def fake_construct(_mesh, _pre, *_args, **kwargs):
+        active = list(kwargs["contacts_override"])
+        active_history.append(tuple(
+            "specialized" if c.get("minimum") else "regular"
+            for c in active))
+        n = len(active)
+        return (
+            tm.Forest(), list(range(n)), np.ones(n), np.full(n, 0.2),
+            active)
+
+    monkeypatch.setattr(engine, "KernelSurface", lambda _mesh: object())
+    monkeypatch.setattr(engine, "prepare", lambda *_args, **_kwargs: pre)
+    monkeypatch.setattr(
+        engine.routing, "build_surface_tree",
+        lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(engine, "construct", fake_construct)
+    monkeypatch.setattr(
+        engine, "relocate",
+        lambda *_args, **_kwargs: pytest.fail(
+            "P8 must not run for canonical empty geometry"))
+
+    result = engine.run(mesh, local_cfg)
+    assert result["members"] == [] and result["balls"] == []
+    assert result["forest"].members == []
+    assert result["volume"]["total_ml"] == 0.0
+    assert result["verify"]["ok"] is False
+    assert result["verify"]["uncovered_islands"]
+    assert pre["contacts"] is prepared_contacts
+    assert tuple(map(id, pre["contacts"])) == prepared_contact_ids
+    assert "coverage_failed_candidate_pool_rows" not in pre
+    if mixed_specialized:
+        assert active_history == [
+            ("regular", "specialized"), ("specialized",)]
+        assert len(result["contacts"]) == 1
+        assert result["contacts"][0]["minimum"] is True
+        assert result["unrouted"] == [0]
+        assert result["carried_area_mm2"].tolist() == [0.0]
+        assert result["tip_r_mm"].tolist() == [0.0]
+        assert result["verify"]["unrouted_specialized_contacts"] == [
+            dict(contact_idx=0, island_id=0)]
+    else:
+        assert active_history == [("regular",)]
+        assert result["contacts"] == []
+        assert result["unrouted"] == []
+        assert result["carried_area_mm2"].size == 0
+        assert result["tip_r_mm"].size == 0
+
+
+def test_specialized_contact_face_provenance_uses_exact_triangle_not_centroid(
+        cfg):
+    import trimesh
+    triangles = np.array([
+        [[0.0, 0.0, 0.0], [100.0, 0.0, 0.0], [0.0, 100.0, 0.0]],
+        [[0.9, 0.9, 0.1], [1.1, 0.9, 0.1], [0.9, 1.1, 0.1]],
+    ])
+    mesh = trimesh.Trimesh(
+        vertices=triangles.reshape((-1, 3)),
+        faces=np.arange(6, dtype=np.int64).reshape((-1, 3)),
+        process=False)
+    islands = [np.array([0, 1], dtype=np.int64)]
+    point = np.array([1.0, 1.0, 0.0])
+    assert np.linalg.norm(
+        mesh.triangles_center[1] - point) < np.linalg.norm(
+            mesh.triangles_center[0] - point)
+    assert engine._exact_specialized_face_id(
+        mesh, point, np.array([0, 1])) == 0
+
+    minima = [dict(
+        position=point.copy(), normal=np.array([0.0, 0.0, 1.0]),
+        region_pts=point[None, :])]
+    minima_contacts, _islands, n_added = engine._ensure_minima_contacts(
+        mesh, islands, [], minima, cfg)
+    assert n_added == 1
+    assert minima_contacts[0]["coverage_face_id"] == 0
+
+    birth = dict(
+        x=1.0, y=1.0, z=0.0, area_mm2=1.0,
+        loop=np.array([
+            [0.9, 0.9], [1.1, 0.9], [1.1, 1.1], [0.9, 1.1],
+        ]))
+    birth_contacts, _islands, n_added = (
+        engine._ensure_island_birth_contacts(
+            mesh, islands, [], [birth], cfg))
+    assert n_added == 1
+    assert birth_contacts[0]["coverage_face_id"] == 0
+
+
+def _nearby_disconnected_face_mesh():
+    """Two edge-connected faces beside a disconnected face within 1.5mm."""
+    import trimesh
+    return trimesh.Trimesh(
+        vertices=np.array([
+            [0.0, 0.0, 0.0],
+            [0.6, 0.0, 0.0],
+            [0.0, 0.6, 0.0],
+            [0.6, 0.6, 0.0],
+            [0.0, 0.0, 0.2],
+            [0.6, 0.0, 0.2],
+            [0.0, 0.6, 0.2],
+        ], dtype=np.float64),
+        faces=np.array([
+            [0, 1, 2],
+            [1, 3, 2],
+            [4, 5, 6],
+        ], dtype=np.int64),
+        process=False)
+
+
+def test_minima_synthetic_islands_clip_local_faces_to_owning_component(cfg):
+    mesh = _nearby_disconnected_face_mesh()
+    sidecar = topology.build_face_topology(mesh, cfg=cfg)
+    assert tuple(sidecar.component_ids) == (0, 0, 1)
+    centers = np.asarray(mesh.triangles_center, dtype=np.float64)
+    minima = [
+        dict(
+            position=centers[face_id].copy(),
+            normal=mesh.face_normals[face_id].copy(),
+            region_pts=centers[face_id][None, :])
+        for face_id in (0, 1, 2)
+    ]
+
+    contacts, islands, added = engine._ensure_minima_contacts(
+        mesh, [], [], minima, cfg, face_topology=sidecar)
+    repeated = engine._ensure_minima_contacts(
+        mesh, [], [], minima, cfg, face_topology=sidecar)
+
+    assert added == 3
+    assert [island.tolist() for island in islands] == [[0, 1], [2]]
+    assert [contact["island_id"] for contact in contacts] == [0, 0, 1]
+    assert [contact["coverage_face_id"] for contact in contacts] == [0, 1, 2]
+    assert [island.tolist() for island in repeated[1]] == [
+        island.tolist() for island in islands]
+    assert [
+        (contact["island_id"], contact["coverage_face_id"])
+        for contact in repeated[0]
+    ] == [
+        (contact["island_id"], contact["coverage_face_id"])
+        for contact in contacts
+    ]
+    for island_id, island in enumerate(islands):
+        components = np.unique(sidecar.component_ids[island])
+        assert components.tolist() == [island_id]
+        assert all(
+            int(sidecar.component_ids[contact["coverage_face_id"]])
+            == int(components[0])
+            for contact in contacts
+            if contact["island_id"] == island_id)
+
+
+def test_birth_synthetic_island_clips_local_faces_to_owning_component(cfg):
+    mesh = _nearby_disconnected_face_mesh()
+    sidecar = topology.build_face_topology(mesh, cfg=cfg)
+    point = np.asarray(mesh.triangles_center[0], dtype=np.float64)
+    birth = dict(
+        x=float(point[0]), y=float(point[1]), z=float(point[2]),
+        area_mm2=0.1,
+        loop=np.array([
+            [0.1, 0.1], [0.3, 0.1], [0.3, 0.3], [0.1, 0.3],
+        ], dtype=np.float64))
+
+    contacts, islands, added = engine._ensure_island_birth_contacts(
+        mesh, [], [], [birth], cfg, face_topology=sidecar)
+
+    assert added == 1
+    assert [island.tolist() for island in islands] == [[0, 1]]
+    assert contacts[0]["island_id"] == 0
+    assert contacts[0]["coverage_face_id"] == 0
+    assert np.unique(sidecar.component_ids[islands[0]]).tolist() == [0]
+
+
+def test_prepare_reuses_one_topology_build_for_specialized_contact_passes(
+        box_mesh, cfg, monkeypatch):
+    original = topology.build_face_topology
+    calls = []
+
+    def counted(*args, **kwargs):
+        calls.append(True)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(topology, "build_face_topology", counted)
+    prepared = engine.prepare(box_mesh, cfg)
+
+    assert calls == [True]
+    assert prepared["face_topology"].n_faces == len(box_mesh.faces)
+
+
+def test_minima_contacts_preserve_each_named_owner_of_a_shared_face(cfg):
+    import trimesh
+    mesh = trimesh.Trimesh(
+        vertices=np.array([
+            [0.0, 0.0, 0.0],
+            [0.2, 0.0, 0.0],
+            [0.0, 0.2, 0.0],
+        ]),
+        faces=np.array([[0, 1, 2]], dtype=np.int64),
+        process=False)
+    islands = [
+        np.array([0], dtype=np.int64),
+        np.array([0], dtype=np.int64),
+    ]
+    point = np.asarray(mesh.triangles_center[0], dtype=np.float64)
+    minimum = dict(
+        position=point.copy(), normal=mesh.face_normals[0].copy(),
+        region_pts=point[None, :])
+
+    contacts, returned_islands, added = engine._ensure_minima_contacts(
+        mesh, islands, [], [minimum], cfg)
+
+    assert added == 2
+    assert returned_islands == islands
+    assert [contact["island_id"] for contact in contacts] == [0, 1]
+    assert [contact["coverage_face_id"] for contact in contacts] == [0, 0]
+
+    existing = [dict(contacts[0])]
+    contacts, returned_islands, added = engine._ensure_minima_contacts(
+        mesh, islands, existing, [minimum], cfg)
+    assert added == 1
+    assert returned_islands == islands
+    assert [contact["island_id"] for contact in contacts] == [0, 1]
+
+
+def test_birth_contacts_preserve_each_named_owner_of_a_shared_face(cfg):
+    import trimesh
+    mesh = trimesh.Trimesh(
+        vertices=np.array([
+            [0.0, 0.0, 0.0],
+            [0.2, 0.0, 0.0],
+            [0.0, 0.2, 0.0],
+        ]),
+        faces=np.array([[0, 1, 2]], dtype=np.int64),
+        process=False)
+    islands = [
+        np.array([0], dtype=np.int64),
+        np.array([0], dtype=np.int64),
+    ]
+    point = np.asarray(mesh.triangles_center[0], dtype=np.float64)
+    birth = dict(
+        x=float(point[0]), y=float(point[1]), z=float(point[2]),
+        area_mm2=float(mesh.area),
+        loop=np.array([
+            [0.0, 0.0], [0.2, 0.0], [0.2, 0.2], [0.0, 0.2],
+        ]))
+
+    contacts, returned_islands, added = (
+        engine._ensure_island_birth_contacts(
+            mesh, islands, [], [birth], cfg))
+
+    assert added == 2
+    assert returned_islands == islands
+    assert [contact["island_id"] for contact in contacts] == [0, 1]
+    assert [contact["coverage_face_id"] for contact in contacts] == [0, 0]
+
+    existing = [dict(contacts[0])]
+    contacts, returned_islands, added = (
+        engine._ensure_island_birth_contacts(
+            mesh, islands, existing, [birth], cfg))
+    assert added == 1
+    assert returned_islands == islands
+    assert [contact["island_id"] for contact in contacts] == [0, 1]
 
 
 def test_prepared_state_rejects_mismatched_mesh_and_semantic_config(
@@ -79,6 +837,491 @@ def test_prepared_state_rejects_mismatched_mesh_and_semantic_config(
         cfg, target_spacing_mm=np.nextafter(cfg.target_spacing_mm, np.inf))
     with pytest.raises(ValueError, match="config fingerprint mismatch"):
         engine.construct(table_mesh, pre, None, changed_cfg)
+    changed_mask_cap = dataclasses.replace(
+        cfg, synthetic_coverage_mask_max_words=(
+            cfg.synthetic_coverage_mask_max_words - 1))
+    assert engine.config_fingerprint(changed_mask_cap) != pre[
+        "config_fingerprint"]
+    with pytest.raises(ValueError, match="config fingerprint mismatch"):
+        engine.validate_prepared_state(pre, table_mesh, changed_mask_cap)
+
+
+def test_synthetic_mask_cap_exact_boundary_matches_dense_oracle():
+    candidates = np.asarray([
+        [0.0, 0.0, 0.0],
+        [10.0, 0.0, 0.0],
+    ])
+    samples = np.column_stack((
+        np.linspace(0.0, 10.0, 65),
+        np.zeros(65),
+        np.zeros(65),
+    ))
+    stats = {}
+    masks = engine._synthetic_candidate_masks(
+        candidates, samples, 2.0, 8, 4, stats)
+
+    dense = np.linalg.norm(
+        candidates[:, None, :] - samples[None, :, :], axis=2) <= 2.0
+    expected = [
+        sum(int(covered) << sample_index
+            for sample_index, covered in enumerate(row))
+        for row in dense
+    ]
+    assert masks == expected
+    assert stats["requested_mask_words"] == 4
+    assert stats["configured_mask_word_limit"] == 4
+    assert stats["mask_preflight_passed"] is True
+    assert stats["max_matrix_entries"] <= 8
+
+
+def test_synthetic_mask_cap_refuses_before_pack_or_mask_allocation(monkeypatch):
+    candidates = np.zeros((217, 3), dtype=np.float64)
+    samples = np.zeros((21_778, 3), dtype=np.float64)
+    allocation_calls = []
+
+    def refuse_mask_allocation(_candidate_count):
+        allocation_calls.append(True)
+        raise AssertionError("mask allocation crossed failed preflight")
+
+    def refuse_packbits(*_args, **_kwargs):
+        raise AssertionError("packbits crossed failed preflight")
+
+    monkeypatch.setattr(
+        engine, "_synthetic_allocate_masks", refuse_mask_allocation)
+    monkeypatch.setattr(engine.np, "packbits", refuse_packbits)
+    stats = {}
+    masks = engine._synthetic_candidate_masks(
+        candidates, samples, 1.0, 65_536, 73_996, stats)
+
+    assert masks is None
+    assert allocation_calls == []
+    assert stats["candidate_count"] == 217
+    assert stats["needed_sample_count"] == 21_778
+    assert stats["requested_mask_words"] == 73_997
+    assert stats["configured_mask_word_limit"] == 73_996
+    assert stats["mask_preflight_passed"] is False
+    assert stats["mask_refusal_reason"] == "requested-mask-words"
+
+
+def test_toed_mask_cap_73996_refuses_without_partial_contacts(
+        toed_slab_mesh, cfg, monkeypatch):
+    capped_cfg = dataclasses.replace(
+        cfg, synthetic_coverage_mask_max_words=73_996)
+    original_allocate = engine._synthetic_allocate_masks
+    allocation_counts = []
+
+    def observe_mask_allocation(candidate_count):
+        allocation_counts.append(int(candidate_count))
+        if int(candidate_count) == 217:
+            raise AssertionError("large mask allocation crossed preflight")
+        return original_allocate(candidate_count)
+
+    def refuse_partial_contact(*_args, **_kwargs):
+        raise AssertionError("selector emitted a partial regular contact")
+
+    monkeypatch.setattr(
+        engine, "_synthetic_allocate_masks", observe_mask_allocation)
+    monkeypatch.setattr(
+        engine, "_regular_contact_from_pool_row", refuse_partial_contact)
+    log = {}
+    with pytest.raises(
+            RuntimeError, match="packed-mask resource bound"):
+        engine.prepare(toed_slab_mesh, capped_cfg, log=log)
+
+    selection = log["synthetic_regular_coverage_selection"]
+    refused = max(
+        selection["components"],
+        key=lambda component: component.get("requested_mask_words", 0))
+    assert allocation_counts == [4]
+    assert selection["selected_count"] == 0
+    assert selection["selected_rows"] == ()
+    assert refused["requested_mask_words"] == 73_997
+    assert refused["configured_mask_word_limit"] == 73_996
+    assert refused["candidate_count"] == 217
+    assert refused["needed_sample_count"] == 21_778
+    assert refused["mask_preflight_passed"] is False
+    assert refused["mask_refusal_reason"] == "requested-mask-words"
+
+
+def test_synthetic_mask_cap_adversarial_refusal_is_deterministic(monkeypatch):
+    candidates = np.zeros((513, 3), dtype=np.float64)
+    samples = np.zeros((16_384, 3), dtype=np.float64)
+
+    def refuse_mask_allocation(_candidate_count):
+        raise AssertionError("mask allocation crossed failed preflight")
+
+    monkeypatch.setattr(
+        engine, "_synthetic_allocate_masks", refuse_mask_allocation)
+    outcomes = []
+    for _ in range(2):
+        stats = {}
+        masks = engine._synthetic_candidate_masks(
+            candidates, samples, 1.0, 65_536, 131_072, stats)
+        outcomes.append((masks, stats))
+
+    assert outcomes[0] == outcomes[1]
+    assert outcomes[0][0] is None
+    assert outcomes[0][1]["requested_mask_words"] == 131_328
+    assert outcomes[0][1]["mask_refusal_reason"] == "requested-mask-words"
+
+
+def test_synthetic_higher_k_batches_bound_rows_times_cardinality():
+    cardinality = 3
+    matrix_budget = 10
+    masks = [1] * 6 + [2] * 6 + [4] * 6
+    positions = np.column_stack((
+        np.arange(len(masks), dtype=np.float64) * 10.0,
+        np.zeros(len(masks)),
+        np.zeros(len(masks)),
+    ))
+    rows = np.arange(len(masks), dtype=np.int64)
+    batch_shapes = []
+
+    def observe_batch(index_sets):
+        batch_shapes.append((len(index_sets), len(index_sets[0])))
+        return None, None
+
+    selected, key, _nodes, complete = engine._synthetic_exact_k_cover(
+        masks, positions, rows, 0b111, np.empty((0, 3)),
+        1.0, cardinality, 100_000, observe_batch, matrix_budget)
+
+    assert selected is None
+    assert key is None
+    assert complete is True
+    assert len(batch_shapes) > 1
+    assert max(batch_count * k for batch_count, k in batch_shapes) <= (
+        matrix_budget)
+
+
+def test_synthetic_exact_pair_survives_greedy_spacing_trap(cfg, monkeypatch):
+    """A highest-gain greedy first seat must not preclude the exact pair rung."""
+    from types import SimpleNamespace
+
+    pool = SimpleNamespace(positions=np.array([
+        [0.0, 0.0, 0.0],
+        [-0.75, 0.0, 0.0],
+        [0.75, 0.0, 0.0],
+        [-0.75, 0.0, 0.0],
+    ], dtype=np.float64))
+    samples = SimpleNamespace(positions=np.array([
+        [-0.75, 0.0, 0.0],
+        [-0.75, 0.0, 0.0],
+        [0.75, 0.0, 0.0],
+        [0.75, 0.0, 0.0],
+    ], dtype=np.float64))
+    # Row 0 has the unique highest gain (three bits) but is within the
+    # 1 mm spacing floor of row 2, the only remaining-gain seat. Rows 1+2
+    # and 3+2 are compatible exact pairs with identical geometry; the
+    # existing lower-row tuple tie break must choose 1+2.
+    monkeypatch.setattr(
+        engine, "_synthetic_candidate_masks",
+        lambda *_args, **_kwargs: [0b0111, 0b0011, 0b1100, 0b0011])
+    stats = {}
+
+    selected, _metrics, cardinality, exact = (
+        engine._select_synthetic_component_rows(
+            np.array([0, 1, 2, 3], dtype=np.int64),
+            np.arange(4, dtype=np.int64),
+            np.empty((0, 3), dtype=np.float64),
+            np.empty((0, 3), dtype=np.float64),
+            pool, samples,
+            dataclasses.replace(cfg, target_spacing_mm=1.0),
+            stats))
+
+    assert selected == (1, 2)
+    assert cardinality == 2
+    assert exact is True
+    assert stats["searched_cardinality"] == 2
+    assert stats["pairs_examined"] == 6
+
+
+def test_toed_prepare_mask_cap_metrics_and_determinism(toed_slab_mesh, cfg):
+    first = engine.prepare(toed_slab_mesh, cfg)
+    second = engine.prepare(toed_slab_mesh, cfg)
+    first_selection = first["log"]["synthetic_regular_coverage_selection"]
+    second_selection = second["log"]["synthetic_regular_coverage_selection"]
+
+    assert first_selection == second_selection
+    assert first_selection["requested_mask_words"] == 73_997
+    assert first_selection["configured_mask_word_limit"] == 131_072
+    assert first_selection["candidate_count"] == 217
+    assert first_selection["needed_sample_count"] == 21_778
+    assert first_selection["mask_preflight_passed"] is True
+    assert first_selection["max_matrix_entries"] <= 65_536
+    assert first_selection["selector_max_peak_bytes"] == 512 * 1024 * 1024
+    assert first_selection["planned_selector_peak_bytes"] <= (
+        first_selection["selector_max_peak_bytes"])
+    assert first_selection["estimated_retained_mask_bytes"] > (
+        first_selection["requested_mask_words"] * 8)
+    assert all(
+        component["max_matrix_entries"] <= 65_536
+        for component in first_selection["components"])
+
+
+def test_prepare_seeds_synthetic_minima_islands_with_exact_minimum_cover(
+        table_mesh, cfg):
+    pre = engine.prepare(table_mesh, cfg)
+    repeat = engine.prepare(table_mesh, cfg)
+    n_original_islands = pre["log"]["islands"]
+    synthetic_ids = set(range(n_original_islands, len(pre["islands"])))
+    assert synthetic_ids
+
+    # Existing/original named islands retain ordinary placement's exact rows.
+    expected_regular = placement.sample_candidates(
+        table_mesh, pre["islands"], cfg,
+        candidate_pool_prepared=pre["contact_candidate_pool"])
+    expected_original_rows = [
+        contact["candidate_pool_row"] for contact in expected_regular
+        if contact["island_id"] < n_original_islands
+    ]
+    prepared_original_rows = [
+        contact["candidate_pool_row"] for contact in pre["contacts"]
+        if contact["island_id"] < n_original_islands
+        and not contact.get("minimum") and not contact.get("island_birth")
+    ]
+    assert prepared_original_rows == expected_original_rows
+
+    # Specialized minima/birth contacts are not moved, replaced, or decorated
+    # by the regular selector, and the whole selection is deterministic.
+    def specialized_snapshot(prepared):
+        return [
+            (
+                tuple(sorted(contact.keys())),
+                tuple(np.asarray(contact["position"], dtype=np.float64)),
+                tuple(np.asarray(contact["normal"], dtype=np.float64)),
+                int(contact["island_id"]),
+                int(contact["coverage_face_id"]),
+                bool(contact.get("minimum")),
+                bool(contact.get("island_birth")),
+            )
+            for contact in prepared["contacts"]
+            if contact.get("minimum") or contact.get("island_birth")
+        ]
+
+    assert specialized_snapshot(pre) == specialized_snapshot(repeat)
+    synthetic_regular = [
+        contact for contact in pre["contacts"]
+        if contact["island_id"] in synthetic_ids
+        and not contact.get("minimum") and not contact.get("island_birth")
+    ]
+    assert synthetic_regular
+    assert {contact["island_id"] for contact in synthetic_regular} == synthetic_ids
+    assert pre["log"]["synthetic_regular_contacts_added"] == len(
+        synthetic_regular)
+    pool = pre["contact_candidate_pool"]
+    for contact in synthetic_regular:
+        row = int(contact["candidate_pool_row"])
+        assert int(pool.island_ids[row]) == contact["island_id"]
+        assert int(pool.face_ids[row]) == contact["face_id"]
+        assert np.array_equal(pool.positions[row], contact["position"])
+        assert np.array_equal(pool.normals[row], contact["normal"])
+
+    selection = pre["log"]["synthetic_regular_coverage_selection"]
+    repeat_selection = repeat["log"]["synthetic_regular_coverage_selection"]
+    assert selection == repeat_selection
+    assert selection["exact"] is True
+    assert selection["selected_rows"] == tuple(
+        sorted(int(c["candidate_pool_row"]) for c in synthetic_regular))
+    assert selection["selected_count"] == len(synthetic_regular)
+    assert selection["max_matrix_entries"] <= (
+        cfg.coverage_score_matrix_max_entries)
+    assert selection["packed_mask_words"] <= (
+        len(selection["components"])
+        * cfg.coverage_score_matrix_max_entries)
+    assert all(route["exact"] for route in selection["components"])
+
+    by_island = {
+        island_id: [
+            c for c in synthetic_regular if c["island_id"] == island_id]
+        for island_id in sorted(synthetic_ids)
+    }
+    # Four leg-bottom two-face islands are the common exact pair case.
+    assert {
+        island_id: len(by_island[island_id])
+        for island_id in range(n_original_islands, n_original_islands + 4)
+    } == {
+        island_id: 2
+        for island_id in range(n_original_islands, n_original_islands + 4)
+    }
+    assert all(
+        route["searched_cardinality"] >= route["selected_cardinality"]
+        for route in selection["components"])
+
+    # Every regular seat stays at least the real 4 mm target from specialized
+    # and other selected contacts in the same named island.
+    target_sq = float(cfg.target_spacing_mm) ** 2
+    for island_id in synthetic_ids:
+        island_contacts = [
+            contact for contact in pre["contacts"]
+            if int(contact["island_id"]) == island_id]
+        for contact in by_island[island_id]:
+            others = [
+                other for other in island_contacts if other is not contact]
+            delta = (
+                np.asarray([other["position"] for other in others], float)
+                - np.asarray(contact["position"], float))
+            assert np.all(np.einsum(
+                "ij,ij->i", delta, delta, optimize=False) >= target_sq)
+
+    # Pin exact A3 semantics: every prepared sample, not merely every
+    # area-censored report patch, is within the component-local radius.
+    assessments = []
+    coverage_rows = verify.coverage_report(
+        table_mesh, pre["islands"], pre["contacts"], cfg,
+        coverage_samples=pre["coverage_samples"],
+        face_topology=pre["face_topology"],
+        assessment_out=assessments)
+    assert [row for row in coverage_rows if not row["covered"]] == []
+    assert np.all(assessments[0].covered_mask)
+
+    # Minimum-cardinality sets cannot contain a blanket of redundant
+    # zero-exclusive regulars. Also recompute and pin both deterministic tie
+    # metrics advertised for every route key.
+    radius = (
+        float(cfg.target_spacing_mm)
+        * float(cfg.coverage_radius_factor))
+    component_ids = pre["face_topology"].component_ids
+    samples = pre["coverage_samples"]
+    running_island_positions = {
+        island_id: [
+            np.asarray(contact["position"], dtype=np.float64)
+            for contact in pre["contacts"]
+            if (int(contact.get("island_id", -1)) == island_id
+                and (contact.get("minimum")
+                     or contact.get("island_birth")))
+        ]
+        for island_id in synthetic_ids
+    }
+    for route in selection["components"]:
+        island_id = int(route["island_id"])
+        component_id = int(route["component_id"])
+        sample_slice = samples.island_slice(island_id)
+        sample_rows = np.arange(
+            sample_slice.start, sample_slice.stop, dtype=np.int64)
+        sample_rows = sample_rows[
+            component_ids[samples.face_ids[sample_rows]] == component_id]
+        route_contacts = []
+        for contact in pre["contacts"]:
+            if int(contact.get("island_id", -1)) != island_id:
+                continue
+            face_id = contact.get(
+                "coverage_face_id", contact.get("face_id"))
+            if (face_id is not None
+                    and int(component_ids[int(face_id)]) == component_id):
+                route_contacts.append(contact)
+        distances = np.linalg.norm(
+            np.asarray(
+                [contact["position"] for contact in route_contacts],
+                dtype=np.float64)[:, None, :]
+            - samples.positions[sample_rows][None, :, :],
+            axis=2)
+        assert float(distances.min(axis=0).max()) == pytest.approx(
+            route["worst_sample_gap_mm"])
+        selected_route_indices = [
+            idx for idx, contact in enumerate(route_contacts)
+            if "candidate_pool_row" in contact]
+        zero_exclusive = 0
+        for idx in selected_route_indices:
+            other = np.delete(distances, idx, axis=0)
+            exclusive = (
+                (distances[idx] <= radius)
+                & np.all(other > radius, axis=0))
+            zero_exclusive += int(not np.any(exclusive))
+        assert zero_exclusive <= 1
+
+        running_island_positions[island_id].extend(
+            np.asarray(pool.positions[int(row)], dtype=np.float64)
+            for row in route["selected_rows"])
+        all_island_positions = np.asarray(
+            running_island_positions[island_id], dtype=np.float64)
+        pair_min = np.inf
+        for left in range(len(all_island_positions) - 1):
+            pair_min = min(
+                pair_min,
+                float(np.linalg.norm(
+                    all_island_positions[left + 1:]
+                    - all_island_positions[left], axis=1).min()))
+        assert pair_min == pytest.approx(
+            route["min_selection_pair_spacing_mm"])
+
+
+def test_prepared_synthetic_regular_rows_are_individually_required_by_actual_a3(
+        table_mesh, cfg):
+    pre = engine.prepare(table_mesh, cfg)
+    engine.validate_prepared_state(pre, table_mesh, cfg)
+    token = engine.prepared_validation._issue_prepared_validation_token(
+        pre, table_mesh, cfg)
+    n_original_islands = int(pre["log"]["islands"])
+    selected_rows = tuple(
+        int(row)
+        for row in pre["log"]["synthetic_regular_coverage_selection"][
+            "selected_rows"])
+    selected = [
+        (contact_index, contact)
+        for contact_index, contact in enumerate(pre["contacts"])
+        if ("candidate_pool_row" in contact
+            and int(contact["candidate_pool_row"]) in selected_rows)
+    ]
+
+    # Selection provenance, rather than a frozen fixture row list, identifies
+    # exactly the synthetic regular contacts whose A3 necessity is under test.
+    assert tuple(sorted(
+        int(contact["candidate_pool_row"])
+        for _contact_index, contact in selected)) == selected_rows
+    assert selected
+    assert all(
+        int(contact["island_id"]) >= n_original_islands
+        and not contact.get("minimum")
+        and not contact.get("island_birth")
+        for _contact_index, contact in selected)
+
+    diagnostics = []
+    for contact_index, contact in selected:
+        remaining_contacts = (
+            pre["contacts"][:contact_index]
+            + pre["contacts"][contact_index + 1:])
+        coverage_rows = verify.coverage_report(
+            table_mesh, pre["islands"], remaining_contacts, cfg,
+            coverage_samples=pre["coverage_samples"],
+            face_topology=pre["face_topology"],
+            _prepared_validation_token=token)
+        island_id = int(contact["island_id"])
+        island_row = coverage_rows[island_id]
+        failing_patches = [
+            patch for patch in island_row["patches"] if patch["fails"]]
+        diagnostic = dict(
+            candidate_pool_row=int(contact["candidate_pool_row"]),
+            island_id=island_id,
+            face_id=int(contact["face_id"]),
+            covered=bool(island_row["covered"]),
+            patch_area_floor_mm2=float(
+                island_row["patch_area_floor_mm2"]),
+            failing_uncovered_area_mm2=float(
+                island_row["failing_uncovered_area_mm2"]),
+            max_patch_area_mm2=float(
+                island_row["max_patch_area_mm2"]),
+            n_failing_patches=int(
+                island_row["n_failing_patches"]),
+            failing_patches=failing_patches)
+        diagnostics.append(diagnostic)
+
+        assert island_row["covered"] is False, diagnostic
+        assert failing_patches, diagnostic
+        assert any(
+            patch["ambiguous_topology_cut"]
+            or patch["uncovered_area_mm2"]
+            > island_row["patch_area_floor_mm2"]
+            for patch in failing_patches), diagnostic
+
+    assert len(selected_rows) == len(diagnostics) == 11
+    maximum_patch_areas = [
+        diagnostic["max_patch_area_mm2"] for diagnostic in diagnostics]
+    assert min(maximum_patch_areas) == pytest.approx(3.453369140625)
+    assert max(maximum_patch_areas) == pytest.approx(18.798828125)
+    assert {
+        diagnostic["patch_area_floor_mm2"]
+        for diagnostic in diagnostics
+    } == {0.16000000000000003}
 
 
 def test_engine_runs_end_to_end_on_table_fixture(table_mesh, cfg):
@@ -125,6 +1368,29 @@ def test_engine_runs_end_to_end_on_table_fixture(table_mesh, cfg):
     # toward the Python-exact ~20s or worse. NOT a speed target (correctness
     # and resin never trade against wall-time); re-measure, don't guess.
     assert result["log"]["t_total"] < 15.0
+
+
+def test_normalized_table_is_clean_and_default_phase8_is_a_noop():
+    default = config_mod.SupportConfig()
+    baseline = json.load(open(_BASELINE_PATH))
+    assert default.p8_relocate_enable is True
+    clean = engine.run(mesh_io.make_overhang_table(), default)
+    assert clean["verify"]["ok"] is True
+    assert clean["verify"]["ball_breach_violations"] == []
+    assert clean["log"]["p8_n_unresolvable"] == 0
+    assert clean["log"]["relocate"]["entered_ladder"] is False
+    assert clean["log"]["relocate_transaction"]["committed"] is True
+    assert clean["log"]["coverage_repair"]["attempts"] == 0
+    assert clean["volume"]["total_ml"] <= baseline["table"]["total_ml"]
+
+    explicit_off = engine.run(
+        mesh_io.make_overhang_table(),
+        dataclasses.replace(default, p8_relocate_enable=False))
+    assert explicit_off["verify"]["ok"] is True
+    assert explicit_off["verify"]["ball_breach_violations"] == []
+    assert explicit_off["verify"]["uncovered_islands"] == []
+    assert "t_relocate" not in explicit_off["log"]
+    assert "relocate" not in explicit_off["log"]
 
 
 def test_engine_insertion_accounting_exact(table_mesh, cfg):
@@ -620,6 +1886,101 @@ def test_run_bit_identical_across_thread_counts_on_table(table_mesh):
 
 _BASELINE_PATH = os.path.join(os.path.dirname(__file__), "fixtures",
                               "v5_baseline.json")
+
+
+def _refreeze_fake_result():
+    import _refreeze_v5 as refreeze
+
+    verify_result = {
+        "ok": True,
+        **{field: [] for field in refreeze.HARD_GATE_FIELDS},
+        "removal_report": {"blocked_trees": []},
+        "removal_violations": [],
+        "moot_transit_members": [],
+        "transit_chords_mm": {},
+        "endcap_breach_diagnostic": [],
+    }
+    return {
+        "volume": {
+            "total_ml": 1.0, "member_ml": 0.75, "ball_ml": 0.25,
+            "by_kind_ml": {"stub": 0.75},
+        },
+        "verify": verify_result,
+        "unrouted": [],
+        "contacts": [{
+            "position": np.array([1.0, 2.0, 3.0]),
+            "normal": np.array([0.0, 0.0, -1.0]),
+            "candidate_pool_row": 7,
+        }],
+        "members": [{
+            "p0": np.array([1.0, 2.0, 3.0]),
+            "p1": np.array([1.0, 2.0, 0.0]),
+            "r0": 0.2, "r1": 0.4, "kind": "stub",
+            "owner": ("contact", 0),
+        }],
+        "balls": [],
+        "carried_area_mm2": np.array([1.0]),
+        "tip_r_mm": np.array([0.2]),
+        "islands": [np.array([0], dtype=np.int64)],
+        "minima": [],
+        "island_births": [],
+        "coverage_failed_candidate_pool_rows": (),
+        "log": {
+            "gates_failed": False,
+            "rewire": {"accepted": 1, "rejected": 0},
+            "synthetic_regular_coverage_selection": {
+                "selected_rows": (7,), "exact": True},
+            "relocate_transaction": {"committed": True, "dt_s": 0.01},
+            "t_total": 1.2,
+            "measured_total_rss_high_water_delta_bytes": 123,
+        },
+    }
+
+
+def test_refreeze_signature_ignores_telemetry_but_covers_provenance():
+    import _refreeze_v5 as refreeze
+
+    first = _refreeze_fake_result()
+    second = pickle.loads(pickle.dumps(first))
+    second["log"]["t_total"] = 99.0
+    second["log"]["relocate_transaction"]["dt_s"] = 2.5
+    second["log"]["measured_total_rss_high_water_delta_bytes"] = 999
+    assert refreeze.canonical_signature(first) == (
+        refreeze.canonical_signature(second))
+
+    second["contacts"][0]["candidate_pool_row"] = 8
+    assert refreeze.canonical_signature(first) != (
+        refreeze.canonical_signature(second))
+
+
+def test_refreeze_pair_requires_two_gate_clean_full_signatures(monkeypatch):
+    import _refreeze_v5 as refreeze
+
+    first = _refreeze_fake_result()
+    second = pickle.loads(pickle.dumps(first))
+    calls = []
+    queue = [first, second]
+
+    def fake_run_once(_mesh_fn):
+        calls.append(True)
+        return queue.pop(0)
+
+    monkeypatch.setattr(refreeze, "run_once", fake_run_once)
+    result, signature = refreeze.run_pair("fixture", lambda: None)
+    assert result is first
+    assert signature == refreeze.canonical_signature(first)
+    assert calls == [True, True]
+
+    bad_gate = pickle.loads(pickle.dumps(first))
+    bad_gate["verify"]["clearance_violations"] = [{"member_idx": 1}]
+    with pytest.raises(RuntimeError, match="clearance_violations"):
+        refreeze.require_gate_clean("fixture", bad_gate)
+
+    divergent = pickle.loads(pickle.dumps(first))
+    divergent["log"]["relocate_transaction"]["committed"] = False
+    queue[:] = [first, divergent]
+    with pytest.raises(RuntimeError, match="NON-DETERMINISTIC"):
+        refreeze.run_pair("fixture", lambda: None)
 
 
 def test_table_and_toed_slab_full_run_not_worse_than_baseline(cfg):

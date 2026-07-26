@@ -366,6 +366,29 @@ def test_resize_forest_tapered_member_keeps_r0(cfg):
     assert f.members[shoot_idx].r1 >= f.members[shoot_idx].r0 - 1e-9
 
 
+def test_resize_forest_reports_only_actual_endpoint_changes(cfg):
+    """A tapered endpoint change counts even when the max radius does not,
+    while a forest settled by one resize reports no changes on the next."""
+    f = tm.Forest()
+    shoot = _member([0.0, 0.0, 20.0], [0.0, 0.0, 0.0],
+                    r0=10.0, r1=0.4, kind="shoot")
+    shoot_idx = f.add_member(shoot)
+    stub = _member([0.0, 0.0, 22.0], [0.0, 0.0, 20.0],
+                   kind="stub", embed_end="p0")
+    f.set_parent(f.add_member(stub), shoot_idx)
+
+    first = tr.resize_forest(f, plate_z=0.0, cfg=cfg)
+    assert (shoot_idx, 10.0, 10.0) in first["resized"]
+    assert f.members[shoot_idx].r0 == pytest.approx(10.0)
+    assert f.members[shoot_idx].r1 == pytest.approx(10.0)
+
+    settled, _, _ = _tall_unbraced_forest(r0=0.1)
+    first = tr.resize_forest(settled, plate_z=0.0, cfg=cfg)
+    assert first["resized"]
+    second = tr.resize_forest(settled, plate_z=0.0, cfg=cfg)
+    assert second["resized"] == []
+
+
 def test_resize_forest_r_deflect_uses_worst_free_gap_not_raw_own_length(cfg):
     """SPEC-ARM-FIX fix B follow-on (Phase 4d, recorded in resize_forest's
     own docstring): design-v4.md #6 requires r = max(r_load, r_deflect,

@@ -25,6 +25,7 @@ the frozen Python ExactSurface oracle, so they run everywhere.
 """
 import os
 import json
+import dataclasses
 
 import numpy as np
 import trimesh
@@ -33,6 +34,7 @@ import pytest
 from support_placement import phase8_driver as pd
 from support_placement import (
     phase8, verify, engine, tree, joints, p8_accept, placement, perception,
+    coverage, topology,
 )
 from support_placement.geometry_exact import ExactSurface
 from support_placement.config import SupportConfig
@@ -411,6 +413,143 @@ def test_engine_relocate_stage_gated_and_idempotent(cfg):
     engine.relocate(_fin_mesh(), forest, [], contacts, carried, tip_r, -5.0, cfg,
                     geom=geom, log=log2)
     assert log2["relocate"]["entered_ladder"] is False
+
+
+def _empty_phase8_report(*, entered=False):
+    return pd.Phase8Report(
+        snapshot_summary={}, n_stub_sites=int(entered),
+        n_strut_sites=0, n_ball_sites=0,
+        stub_resolved=int(entered), stub_unresolved=0,
+        qreal_resolved=0, qreal_unresolved=0,
+        strut_resolved=0, strut_unresolved=0,
+        ball_resolved=0, ball_unresolved=0,
+        reverted_splices=(), unresolved_items=(), pocket_labels=(),
+        dt_s=0.0, entered_ladder=entered, sweeps=int(entered),
+        converged=True, rounds=1, committed_by_round=(0,),
+        committed_by_sweep=(0,))
+
+
+def test_engine_relocate_transaction_rolls_back_forest_contacts_and_ledger(
+        cfg, monkeypatch):
+    import copy
+    import pickle
+    geom = ExactSurface(_fin_mesh())
+    forest, contacts, carried, tip_r = _fin_forest(cfg, stub_len=1.0)
+    forest_before = pickle.dumps(
+        forest, protocol=pickle.HIGHEST_PROTOCOL)
+    contacts_before = copy.deepcopy(contacts)
+    ledger = {("STUB", 9): dict(
+        cls="STUB", site_id=9, rung="R1", reason="existing",
+        first_sweep=0, last_sweep=0, n_attempts=1, measure_mm=1.0)}
+    ledger_before = copy.deepcopy(ledger)
+
+    def fake_phase8(working, _members, _balls, working_contacts, *_args,
+                    **_kwargs):
+        working.members[0].p1 = (
+            np.asarray(working.members[0].p1) + [0.25, 0.0, 0.0])
+        working_contacts[0]["position"] = (
+            np.asarray(working_contacts[0]["position"]) + [0.25, 0.0, 0.0])
+        _kwargs["carry_ledger"][("STUB", 10)] = dict(
+            cls="STUB", site_id=10, rung="R2", reason="attempt",
+            first_sweep=1, last_sweep=1, n_attempts=1, measure_mm=2.0)
+        return _empty_phase8_report(entered=True)
+
+    monkeypatch.setattr(pd, "run_phase8", fake_phase8)
+    monkeypatch.setattr(
+        engine.transient, "resize_forest",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("injected resize failure")))
+    log = {}
+    local_cfg = dataclasses.replace(cfg, p8_reseat_enable=False)
+    with pytest.raises(RuntimeError, match="injected resize failure"):
+        engine.relocate(
+            _fin_mesh(), forest, [], contacts, carried, tip_r, -5.0,
+            local_cfg, geom=geom, log=log, carry_ledger=ledger)
+    assert pickle.dumps(
+        forest, protocol=pickle.HIGHEST_PROTOCOL) == forest_before
+    assert len(contacts) == len(contacts_before)
+    for actual, expected in zip(contacts, contacts_before):
+        assert actual.keys() == expected.keys()
+        for key in actual:
+            if isinstance(actual[key], np.ndarray):
+                assert np.array_equal(actual[key], expected[key])
+            else:
+                assert actual[key] == expected[key]
+    assert ledger == ledger_before
+    assert log["relocate_transaction"]["committed"] is False
+
+
+def test_engine_relocate_reenters_phase8_after_resize_changes_geometry(
+        cfg, monkeypatch):
+    geom = ExactSurface(_fin_mesh())
+    forest, contacts, carried, tip_r = _fin_forest(cfg, stub_len=1.0)
+    original_identity = id(forest)
+    initial_radius = float(forest.members[0].r0)
+    p8_seen_radii = []
+
+    def fake_phase8(working, *_args, **_kwargs):
+        p8_seen_radii.append(float(working.members[0].r0))
+        return _empty_phase8_report(entered=len(p8_seen_radii) == 2)
+
+    resize_calls = 0
+
+    def fake_resize(working, *_args, **_kwargs):
+        nonlocal resize_calls
+        resize_calls += 1
+        if resize_calls == 1:
+            old = float(working.members[0].r0)
+            working.members[0].r0 = old + 0.01
+            return {"resized": [(0, old, old + 0.01)]}
+        return {"resized": []}
+
+    monkeypatch.setattr(pd, "run_phase8", fake_phase8)
+    monkeypatch.setattr(engine.transient, "resize_forest", fake_resize)
+    local_cfg = dataclasses.replace(cfg, p8_reseat_enable=False)
+    rep = engine.relocate(
+        _fin_mesh(), forest, [], contacts, carried, tip_r, -5.0,
+        local_cfg, geom=geom, log={})
+    assert id(forest) == original_identity
+    assert p8_seen_radii == [
+        initial_radius, pytest.approx(initial_radius + 0.01)]
+    assert rep["combined_rounds"] == 2
+    assert rep["combined_trace"][0]["n_resized"] == 1
+    assert rep["combined_trace"][0]["stable"] is False
+    assert rep["combined_trace"][1]["n_resized"] == 0
+    assert rep["combined_trace"][1]["stable"] is True
+    assert forest.members[0].r0 == pytest.approx(initial_radius + 0.01)
+
+
+def test_engine_relocate_combined_cap_exhaustion_discards_partial_clone(
+        cfg, monkeypatch):
+    import pickle
+    geom = ExactSurface(_fin_mesh())
+    forest, contacts, carried, tip_r = _fin_forest(cfg, stub_len=1.0)
+    forest_before = pickle.dumps(
+        forest, protocol=pickle.HIGHEST_PROTOCOL)
+    contact_before = np.asarray(contacts[0]["position"]).copy()
+    monkeypatch.setattr(
+        pd, "run_phase8",
+        lambda *_args, **_kwargs: _empty_phase8_report())
+
+    def always_resize(working, *_args, **_kwargs):
+        old = float(working.members[0].r0)
+        working.members[0].r0 = old + 0.001
+        return {"resized": [(0, old, old + 0.001)]}
+
+    monkeypatch.setattr(engine.transient, "resize_forest", always_resize)
+    local_cfg = dataclasses.replace(
+        cfg, p8_reseat_enable=False,
+        p8_resize_fixed_point_max_rounds=2)
+    log = {}
+    with pytest.raises(RuntimeError, match="combined fixed point exhausted"):
+        engine.relocate(
+            _fin_mesh(), forest, [], contacts, carried, tip_r, -5.0,
+            local_cfg, geom=geom, log=log)
+    assert pickle.dumps(
+        forest, protocol=pickle.HIGHEST_PROTOCOL) == forest_before
+    assert np.array_equal(contacts[0]["position"], contact_before)
+    assert log["relocate_transaction"]["committed"] is False
+    assert log["relocate_transaction"]["combined_rounds"] == 2
 
 
 # ==========================================================================
@@ -1320,6 +1459,35 @@ def test_relocation_is_a_single_final_only_stage(cfg, monkeypatch):
     assert "verify_final" in log
 
 
+def test_final_phase8_verify_hard_gates_newly_unrouted_specialized(
+        cfg, monkeypatch):
+    """The final post-relocation verify must not lose the specialized gate."""
+    from support_placement import mesh_io
+
+    selected = {}
+
+    def make_specialized_unrouted(
+            _mesh, _forest, unrouted, contacts, *_args, **_kwargs):
+        target = next(
+            i for i, contact in enumerate(contacts)
+            if (contact.get("minimum") or contact.get("island_birth"))
+            and i not in unrouted)
+        unrouted.append(target)
+        selected["contact_idx"] = target
+        selected["island_id"] = int(contacts[target]["island_id"])
+        return {}
+
+    monkeypatch.setattr(engine, "relocate", make_specialized_unrouted)
+    result = engine.run(mesh_io.make_overhang_table(), cfg)
+
+    assert result["verify"]["unrouted_specialized_contacts"] == [dict(
+        contact_idx=selected["contact_idx"],
+        island_id=selected["island_id"])]
+    assert result["verify"]["ok"] is False
+    assert result["log"]["verify_final"]["ok"] is False
+    assert result["log"]["verify_final"]["n_unrouted_specialized"] == 1
+
+
 # ==========================================================================
 # 12. RULING (5) -- R2 SURFACE-SEED RE-SEAT / D5 JUNCTION RE-SEAT / LEDGER.
 # ==========================================================================
@@ -1449,13 +1617,32 @@ def test_r2_regular_migration_preserves_raw_non_axis_face_normal():
     raw = np.array([0.30000000000000004, -0.4, -0.8660254037844385])
     cand = SimpleNamespace(
         seat_c=np.array([1.0, 2.0, 3.0]), seat_n=raw.copy(),
-        seat_face_id=17)
+        seat_face_id=17, seat_candidate_pool_row=29)
     rec = dict(position=np.zeros(3), normal=np.array([0.0, 0.0, -1.0]),
-               island_id=0, face_id=2)
+               island_id=0, face_id=2, candidate_pool_row=4)
     pd._migrate_contact_record(rec, cand)
     assert rec["face_id"] == 17
+    assert rec["candidate_pool_row"] == 29
     assert np.array_equal(rec["position"], cand.seat_c)
     assert np.array_equal(rec["normal"], raw)
+
+
+def test_r2_specialized_migration_updates_coverage_face_without_pool_row():
+    from types import SimpleNamespace
+    cand = SimpleNamespace(
+        seat_c=np.array([1.0, 2.0, 3.0]),
+        seat_n=np.array([0.0, 0.0, -1.0]),
+        seat_face_id=None, seat_candidate_pool_row=None,
+        seat_coverage_face_id=23)
+    rec = dict(
+        position=np.zeros(3), normal=np.array([0.0, 0.0, -1.0]),
+        island_id=0, minimum=True, region_pts=np.zeros((1, 3)),
+        coverage_face_id=4, coverage_component_id=7)
+    pd._migrate_contact_record(rec, cand)
+    assert rec["coverage_face_id"] == 23
+    assert rec["coverage_component_id"] == 7
+    assert "face_id" not in rec
+    assert "candidate_pool_row" not in rec
 
 
 def test_r2_seeds_are_domain_bounded_nearest_first_and_capped(cfg):
@@ -1513,6 +1700,191 @@ def test_r2_seeds_are_domain_bounded_nearest_first_and_capped(cfg):
         assert idx.seeds_for(sites, {0: 0}, contacts, [], c2)[0] == []
 
 
+def test_r2_regular_seed_index_never_retries_exact_a4_failed_row(cfg):
+    mesh = _reseat_mesh()
+    islands = _reseat_islands(mesh)
+    pool = placement.candidate_pool(mesh, islands, cfg)
+    c = np.array([0.0, 0.0, 0.0])
+    site = phase8.StubSite(
+        site_id=0, c=c, n0=np.array([0.0, 0.0, 1.0]), r_tip=0.2,
+        stub_length_mm=2.0, contact_depth_mm=cfg.contact_depth_mm)
+    contact = dict(
+        position=c.copy(), normal=np.array([0.0, 0.0, 1.0]),
+        island_id=0, area_mm2=5.0)
+    first = pd.SurfaceSeedIndex(
+        mesh, islands=islands, cfg=cfg,
+        candidate_pool_prepared=pool).seeds_for(
+            [site], {0: 0}, [contact], [], cfg)[0]
+    assert len(first) >= 2
+    failed = int(first[0].candidate_pool_row)
+    second = pd.SurfaceSeedIndex(
+        mesh, islands=islands, cfg=cfg,
+        candidate_pool_prepared=pool,
+        failed_candidate_pool_rows={failed}).seeds_for(
+            [site], {0: 0}, [contact], [], cfg)[0]
+    assert second
+    assert all(seed.candidate_pool_row != failed for seed in second)
+
+
+def test_r2_production_authorities_validate_once_tile_and_never_cross_component(
+        cfg):
+    import dataclasses
+    triangles = np.array([
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        [[0.0, 0.0, 0.01], [1.0, 0.0, 0.01], [0.0, 1.0, 0.01]],
+    ])
+    mesh = trimesh.Trimesh(
+        vertices=triangles.reshape((-1, 3)),
+        faces=np.arange(6, dtype=np.int64).reshape((-1, 3)),
+        process=False)
+    islands = [np.array([0, 1], dtype=np.int64)]
+    local_cfg = dataclasses.replace(
+        cfg, p8_coverage_matrix_max_entries=4,
+        p8_reseat_radius_mm=2.0)
+    pool = placement.candidate_pool(mesh, islands, local_cfg)
+    samples = coverage.build_coverage_samples(mesh, islands, local_cfg)
+    sidecar = topology.build_face_topology(mesh, cfg=local_cfg)
+    assert sidecar.component_ids.tolist() == [0, 1]
+    idx = pd.SurfaceSeedIndex(
+        mesh, islands=islands, cfg=local_cfg,
+        candidate_pool_prepared=pool, coverage_samples=samples,
+        face_topology=sidecar)
+    assert idx.coverage_stats["authorities_validated"] == 1
+    site = phase8.StubSite(
+        site_id=0, c=np.zeros(3), n0=np.array([0.0, 0.0, 1.0]),
+        r_tip=0.2, stub_length_mm=2.0,
+        contact_depth_mm=local_cfg.contact_depth_mm)
+
+    regular = dict(
+        position=np.zeros(3), normal=np.array([0.0, 0.0, 1.0]),
+        island_id=0, face_id=0, area_mm2=1.0)
+    regular_seeds = idx.seeds_for(
+        [site], {0: 0}, [regular], [], local_cfg)[0]
+    assert regular_seeds
+    assert all(
+        sidecar.component_ids[seed.coverage_face_id] == 0
+        for seed in regular_seeds)
+
+    specialized = dict(
+        position=np.zeros(3), normal=np.array([0.0, 0.0, 1.0]),
+        island_id=0, minimum=True, coverage_face_id=0,
+        coverage_component_id=0,
+        region_pts=np.asarray(mesh.triangles_center), area_mm2=1.0)
+    specialized_seeds = idx.seeds_for(
+        [site], {0: 0}, [specialized], [], local_cfg)[0]
+    assert specialized_seeds
+    assert all(seed.face_id is None for seed in specialized_seeds)
+    assert all(
+        sidecar.component_ids[seed.coverage_face_id] == 0
+        for seed in specialized_seeds)
+    assert idx.coverage_stats["authorities_validated"] == 1
+    assert idx.coverage_stats["route_contexts_built"] == 2
+    assert idx.coverage_stats["max_matrix_entries"] <= 4
+
+    corrupted = dict(
+        specialized, coverage_face_id=1, coverage_component_id=0)
+    assert idx.seeds_for(
+        [site], {0: 0}, [corrupted], [], local_cfg)[0] == []
+    assert idx.coverage_stats["specialized_component_rejections"] == 1
+
+
+def test_surface_seed_index_uses_only_authorized_run_token_to_skip_deep_validation(
+        table_mesh, cfg, monkeypatch):
+    pre = engine.prepare(table_mesh, cfg)
+    engine.validate_prepared_state(pre, table_mesh, cfg)
+    token = engine.prepared_validation._issue_prepared_validation_token(
+        pre, table_mesh, cfg)
+    counts = dict(candidate=0, topology=0, coverage=0)
+    candidate_validator = placement.validate_candidate_pool
+    topology_validator = topology.validate_face_topology
+    coverage_validator = coverage.validate_coverage_samples
+
+    def count_candidate(*args, **kwargs):
+        counts["candidate"] += 1
+        return candidate_validator(*args, **kwargs)
+
+    def count_topology(*args, **kwargs):
+        counts["topology"] += 1
+        return topology_validator(*args, **kwargs)
+
+    def count_coverage(*args, **kwargs):
+        counts["coverage"] += 1
+        return coverage_validator(*args, **kwargs)
+
+    monkeypatch.setattr(placement, "validate_candidate_pool", count_candidate)
+    monkeypatch.setattr(topology, "validate_face_topology", count_topology)
+    monkeypatch.setattr(coverage, "validate_coverage_samples", count_coverage)
+
+    authorized = pd.SurfaceSeedIndex(
+        table_mesh, islands=pre["islands"], cfg=cfg,
+        candidate_pool_prepared=pre["contact_candidate_pool"],
+        coverage_samples=pre["coverage_samples"],
+        face_topology=pre["face_topology"],
+        _prepared_validation_token=token)
+    assert counts == dict(candidate=0, topology=0, coverage=0)
+    assert authorized.coverage_stats["authorities_validated"] == 0
+    assert authorized.coverage_stats["authority_validation"] == "token"
+
+    external = pd.SurfaceSeedIndex(
+        table_mesh, islands=pre["islands"], cfg=cfg,
+        candidate_pool_prepared=pre["contact_candidate_pool"],
+        coverage_samples=pre["coverage_samples"],
+        face_topology=pre["face_topology"])
+    assert counts == dict(candidate=1, topology=1, coverage=1)
+    assert external.coverage_stats["authorities_validated"] == 1
+    assert external.coverage_stats["authority_validation"] == "deep"
+
+
+def test_r2_overlapping_islands_keep_both_named_specialized_routes(cfg):
+    """Shared faces remain eligible for each contact's own named island."""
+    triangles = np.array([
+        [[0.0, 0.0, 0.0], [0.2, 0.0, 0.0], [0.0, 0.2, 0.0]],
+        [[0.2, 0.0, 0.0], [0.2, 0.2, 0.0], [0.0, 0.2, 0.0]],
+    ])
+    mesh = trimesh.Trimesh(
+        vertices=triangles.reshape((-1, 3)),
+        faces=np.arange(6, dtype=np.int64).reshape((-1, 3)),
+        process=False)
+    islands = [
+        np.array([0, 1], dtype=np.int64),
+        np.array([0, 1], dtype=np.int64),
+    ]
+    pool = placement.candidate_pool(mesh, islands, cfg)
+    samples = coverage.build_coverage_samples(mesh, islands, cfg)
+    sidecar = topology.build_face_topology(mesh, cfg=cfg)
+    idx = pd.SurfaceSeedIndex(
+        mesh, islands=islands, cfg=cfg,
+        candidate_pool_prepared=pool,
+        coverage_samples=samples, face_topology=sidecar)
+    centers = np.asarray(mesh.triangles_center, dtype=np.float64)
+    sites = [
+        phase8.StubSite(
+            site_id=i, c=centers[0].copy(),
+            n0=np.array([0.0, 0.0, 1.0]), r_tip=0.2,
+            stub_length_mm=2.0,
+            contact_depth_mm=cfg.contact_depth_mm)
+        for i in range(2)
+    ]
+    contacts = [
+        dict(
+            position=centers[0].copy(), normal=mesh.face_normals[0].copy(),
+            island_id=i, minimum=True, coverage_face_id=0,
+            coverage_component_id=int(sidecar.component_ids[0]),
+            region_pts=centers.copy(), area_mm2=1.0)
+        for i in range(2)
+    ]
+
+    seeds = idx.seeds_for(
+        sites, {0: 0, 1: 1}, contacts, [], cfg)
+
+    assert seeds[0] and seeds[1]
+    assert idx.coverage_stats["route_contexts_built"] == 2
+    for island_id in (0, 1):
+        assert all(
+            seed.coverage_face_id in islands[island_id]
+            for seed in seeds[island_id])
+
+
 @pytest.mark.parametrize("specialized_kind", ["minimum", "dual-flag-birth"])
 def test_r2_specialized_contacts_keep_existing_domain_without_pool_face_id(
         cfg, specialized_kind):
@@ -1523,15 +1895,20 @@ def test_r2_specialized_contacts_keep_existing_domain_without_pool_face_id(
     """
     mesh = _reseat_mesh()
     islands = _reseat_islands(mesh)
+    sidecar = topology.build_face_topology(mesh, cfg=cfg)
+    samples = coverage.build_coverage_samples(mesh, islands, cfg)
     idx = pd.SurfaceSeedIndex(
         mesh, islands=islands, cfg=cfg,
-        candidate_pool_prepared=placement.candidate_pool(mesh, islands, cfg))
+        candidate_pool_prepared=placement.candidate_pool(mesh, islands, cfg),
+        coverage_samples=samples, face_topology=sidecar)
     c = np.array([0.0, 0.0, 0.0]); n0 = np.array([0.0, 0.0, 1.0])
     site = phase8.StubSite(
         site_id=0, c=c.copy(), n0=n0.copy(), r_tip=0.2,
         stub_length_mm=2.0, contact_depth_mm=cfg.contact_depth_mm)
     contact = dict(position=c.copy(), normal=n0.copy(), island_id=0,
-                   area_mm2=5.0)
+                   area_mm2=5.0, coverage_face_id=int(islands[0][0]),
+                   coverage_component_id=int(
+                       sidecar.component_ids[int(islands[0][0])]))
     if specialized_kind == "minimum":
         contact.update(minimum=True, region_pts=np.array([[0.0, 0.0, 0.0]]))
     else:
@@ -1571,16 +1948,20 @@ def test_r2_minimum_domain_uses_exact_verify_boundary(cfg):
     islands = [np.array([0])]
     c2 = dataclasses.replace(
         cfg, minima_contact_radius_mm=1.0, p8_reseat_radius_mm=2.0)
+    sidecar = topology.build_face_topology(mesh, cfg=c2)
+    samples = coverage.build_coverage_samples(mesh, islands, c2)
     idx = pd.SurfaceSeedIndex(
         mesh, islands=islands, cfg=c2,
-        candidate_pool_prepared=placement.candidate_pool(mesh, islands, c2))
+        candidate_pool_prepared=placement.candidate_pool(mesh, islands, c2),
+        coverage_samples=samples, face_topology=sidecar)
     site = phase8.StubSite(
         site_id=0, c=np.zeros(3), n0=np.array([0.0, 0.0, 1.0]),
         r_tip=0.2, stub_length_mm=2.0,
         contact_depth_mm=c2.contact_depth_mm)
     contact = dict(
         position=np.zeros(3), normal=np.array([0.0, 0.0, 1.0]),
-        island_id=0, minimum=True, region_pts=np.array([[0.0, 0.0, 0.0]]))
+        island_id=0, minimum=True, region_pts=np.array([[0.0, 0.0, 0.0]]),
+        coverage_face_id=0, coverage_component_id=0)
     exact = idx.seeds_for([site], {0: 0}, [contact], [], c2)[0]
     assert len(exact) == 1
     assert np.array_equal(exact[0][0], [1.0, 0.0, 0.0])

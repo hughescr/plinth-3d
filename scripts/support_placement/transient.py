@@ -585,7 +585,8 @@ def resize_forest(forest, plate_z, cfg):
     This function does not call revalidate.
 
     Returns dict(resized=[(idx, r_old_max, r_new), ...], report=<the
-    transient_report used>).
+    transient_report used>), listing only members whose r0 or r1 was
+    actually assigned a changed value beyond the 1e-9 guard.
     """
     report = transient_report(forest, plate_z, cfg)
     resized = []
@@ -610,17 +611,22 @@ def resize_forest(forest, plate_z, cfg):
         r_req = max(r_murray, r_tension, r_deflect, r_trans, kind_floor)
 
         r_old_max = max(m.r0, m.r1)
+        endpoint_changed = False
         uniform_or_branch = abs(m.r0 - m.r1) < 1e-9 or len(children) >= 2
         if uniform_or_branch:
             if abs(m.r0 - r_req) > 1e-9:
                 m.r0 = r_req
+                endpoint_changed = True
             if abs(m.r1 - r_req) > 1e-9:
                 m.r1 = r_req
+                endpoint_changed = True
             r_new = r_req
         else:
             r1_new = max(r_req, m.r0)
             if abs(m.r1 - r1_new) > 1e-9:
                 m.r1 = r1_new
+                endpoint_changed = True
             r_new = max(m.r0, m.r1)
-        resized.append((idx, r_old_max, r_new))
+        if endpoint_changed:
+            resized.append((idx, r_old_max, r_new))
     return dict(resized=resized, report=report)

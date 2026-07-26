@@ -287,6 +287,8 @@ class Candidate:
     seat_c: Optional[np.ndarray] = None
     seat_n: Optional[np.ndarray] = None
     seat_face_id: Optional[int] = None
+    seat_candidate_pool_row: Optional[int] = None
+    seat_coverage_face_id: Optional[int] = None
     reseat_dist_mm: float = 0.0
 
 
@@ -466,11 +468,25 @@ def reseat_candidates(site: StubSite, seeds, cfg) -> list:
     for si, seed in enumerate(seeds):
         # Legacy staged callers supplied the original 3-field specialized-seat
         # tuple. It remains source-compatible and means "no regular face id".
-        if len(seed) == 3:
+        if hasattr(seed, "candidate_pool_row"):
+            pos, nrm, dist, face_id = seed
+            candidate_pool_row = seed.candidate_pool_row
+            coverage_face_id = seed.coverage_face_id
+        elif len(seed) == 3:
             pos, nrm, dist = seed
             face_id = None
-        else:
+            candidate_pool_row = None
+            coverage_face_id = None
+        elif len(seed) == 4:
             pos, nrm, dist, face_id = seed
+            candidate_pool_row = None
+            coverage_face_id = face_id
+        elif len(seed) == 5:
+            pos, nrm, dist, face_id, candidate_pool_row = seed
+            coverage_face_id = face_id
+        else:
+            (pos, nrm, dist, face_id, candidate_pool_row,
+             coverage_face_id) = seed
         pos = np.asarray(pos, float)
         raw_nrm = np.asarray(nrm, float)
         n_hat = _unit(raw_nrm)
@@ -486,6 +502,12 @@ def reseat_candidates(site: StubSite, seeds, cfg) -> list:
                                  seat_c=pos.copy(), seat_n=raw_nrm.copy(),
                                  seat_face_id=(None if face_id is None
                                                else int(face_id)),
+                                 seat_candidate_pool_row=(
+                                     None if candidate_pool_row is None
+                                     else int(candidate_pool_row)),
+                                 seat_coverage_face_id=(
+                                     None if coverage_face_id is None
+                                     else int(coverage_face_id)),
                                  reseat_dist_mm=float(dist)))
     return out
 
