@@ -1,14 +1,12 @@
 # SPEC-P8-REACH — Contact Relocation + Concession Supports (v4 CCO, Phase 8)
 
 Author: Phase-8 designer. Charter: `skills/support-placement/references/design-v4.md`.
-Target commit: f02b7af (repo read-only). **Grounding note on citations:** the
-`~/Documents` working copy is TCC-blocked for this environment (file `open()` returns
-EPERM even outside the sandbox); every `file:line` below is verified against the
-most-advanced readable checkout of
-`scripts/support_placement/*` (engine.py 598, verify.py 517,
-tree.py 590, cco.py 667, bracing.py 1294, config.py 418, perception.py 564,
-routing.py 321, struts.py 117). Line numbers are exact against that checkout; if
-f02b7af differs, re-anchor by the quoted symbol, not the integer.
+Authority update: the A2 virtual-analysis-face and final-provenance amendments
+below were owner-ratified on 2026-07-25 and supersede this draft's older
+centroid/direct-source-face language wherever they conflict.
+Target commit: f02b7af (repo read-only). Citations below name the authoritative
+symbol; historical line numbers are only orientation and must not be treated as
+stable API.
 
 This spec covers TWO features shipped as one merge:
 
@@ -35,21 +33,87 @@ Insertion is `cco.build` (cco.py:157). Per contact it:
    (cco.py:294 `if not scored: return False`), and the build loop parks the contact:
    `if not ok: unrouted.append(i)` (cco.py:192-194).
 
-`unrouted` propagates out of `cco.build` (cco.py:197) → `engine.construct`
-(engine.py:85-90) → the fix-pass loop (engine.py:247-308). The gates that *demand*
-these contacts run **only over routed contacts** (engine.py:270
-`routed_contacts = [c for i,c in enumerate(contacts) if i not in unrouted]`; verify
-call engine.py:271-274). So an unrouted **minimum** trips `minima_report`
-(verify.py:192, gate at verify.py:454) and an unrouted **island-birth** trips
-`island_birth_report` (verify.py:220, gate at verify.py:455) and an uncovered
-**coverage** contact trips `coverage_report` (verify.py:18, gate at verify.py:451).
+`unrouted` propagates out of `cco.build` into `engine.construct` and the
+fix-pass loop. Coverage, minima, and island-birth demand gates deliberately
+receive only routed contacts, so a missing routed demand remains visible.
+Final regular-contact provenance is different: `engine` passes the complete
+original contact list to `verify.self_verify(provenance_contacts=...)`, and
+`regular_contact_invariant_report` checks it using the original contact
+indices, including contacts currently marked unrouted. Routing status must
+never hide stale position/face/normal provenance.
 
 **Both features hook the same seam: the transition at cco.py:192-194 from "candidate
 loop exhausted" to "append to unrouted".** Feature A interposes a relocation attempt;
 Feature B, a concession attempt; only if both decline does the contact stay unrouted.
 
 Determinism (charter §4, "No RNG anywhere"): every new candidate ordering below is a
-**stable sort on an explicit key**. No `mesh.sample`, no RNG.
+**stable sort on an explicit key**. No `mesh.sample`, no RNG, and no mutation of
+NumPy's global RNG state.
+
+**A2 regular-contact seat invariant (ratified, then coverage-superseded
+2026-07-25).** Initial regular
+placement, coverage repair, and every Phase-8 relocation of a regular/coverage
+contact select from one deterministic pool:
+
+1. each source face is uniformly refined by recursive 1-to-4 midpoint
+   subdivision until every virtual analysis-cell edge is at most
+   `target_spacing_mm * coverage_radius_factor - target_spacing_mm`; the margin
+   MUST be positive;
+2. refinement depth is
+   `ceil(log2(source_face_max_edge / margin))`, bounded by
+   `contact_pool_max_refine_depth`; exceeding the bound is a clear refusal, not
+   an unbounded allocation. A one-ULP excess at a nominal dyadic edge threshold
+   is accepted rather than spuriously adding a level;
+3. every virtual cell nominates every co-lowest vertex; equality uses a tight
+   8-ULP-scale absolute z tolerance so a flat cell is independent of arbitrary
+   vertex order without merging distinct geometric heights;
+4. nominations at the exact same position/identity are deduplicated;
+5. the owning **source** face is the nominator with the most-negative
+   face-normal `nz`, with global source face id as the deterministic tie-break;
+6. the persisted normal is that owning source **face normal** exactly, never an
+   averaged vertex normal or a routing-normalized rewrite, and the contact
+   record persists the owning source `face_id`.
+
+This refinement is invariant under prior **dyadic midpoint refinement**, not
+arbitrary retriangulation. It adds analysis points on the original planar
+triangle; it does not change the printable model or invent centroid/random
+fallbacks. The pool is built once as picklable prepared state and reused by
+initial placement, repair, Phase 8, and final verification.
+
+Before any virtual-cell allocation, a global pass plans every face and refuses
+if aggregate virtual cells, the conservative `3*cells` nomination bound, or its
+64-byte/candidate compact-payload bound exceeds configuration. Defaults are
+750,000 cells, 2,250,000 nominations/candidates, and 144 MiB: about 30% headroom
+over the known 576k-face depth-0 class. The byte limit is an honest bound on
+the retained compact struct-of-arrays payload, **not** a process-peak-memory
+claim. The aggregate caps are the primary allocation prevention: each island's
+one-cell-per-face lower bound is checked before face conversion or triangle
+materialization, and admitted faces are planned in fixed batches of at most
+2,048 with monotonic refusal as soon as any cap wins. As a last-resort
+assertion, every long construction loop also aborts if `getrusage`'s process
+**peak-RSS high-water mark** has risen by 2 GiB from its build-entry high-water
+mark; this is not a current-RSS measurement. Nominations are gathered, sorted,
+and deduplicated in bounded NumPy batches rather than per-nomination Python
+tuples/dicts.
+
+The prepared pool is a schema-versioned, picklable struct of four immutable
+NumPy arrays (position, raw normal, source face id, island id), exactly 64
+payload bytes per retained candidate. Construction and unpickling rebuild
+bytes-backed, C-contiguous, read-only arrays; staged validation checks shapes,
+dtypes, ordering, counters, face/island ranges, and raw-normal provenance.
+Synthetic-island extension repeats the same preflight and returns a new pool.
+Its island-id offset must be strictly above the prepared prefix, and admitted
+prefix/chunks are joined directly into one final immutable bytes allocation per
+SOA column rather than constructing and copying an intermediate pool.
+Prepared state also records deterministic SHA-256 fingerprints of canonical
+mesh arrays and semantic config JSON. Construct, finish, relocation, and
+performance-cache reuse reject mismatched mesh/config identity.
+
+This is deliberately a **regular/coverage-contact invariant only**. Minimum and
+island-birth contacts retain the stricter region/footprint domains below and do
+not acquire a false `face_id` merely to resemble a pool contact. Final verify
+hard-gates regular pool membership, owning `face_id`, exact source-face normal,
+and this class scope; emission cannot pass stale provenance.
 
 ---
 
@@ -83,7 +147,7 @@ was meant to satisfy. **The implementer MUST NOT read the class off an unordered
 |---|---|---|
 | island-birth | `c.get("island_birth")` set at engine.py:569 — **tested FIRST**, wins over `minimum` (both flags co-set at engine.py:569) | **only inside its birth footprint polygon** at the birth z (Craig's at-birth rule) |
 | minimum | `c.get("minimum")` set at engine.py:380 & 569 — **only reached when `island_birth` is falsy** | **only within the toe's cfg-derived connection reach** (the birth *region*) |
-| coverage / regular | neither flag; has `c["island_id"]` | **within its island region** (the island's own faces) |
+| coverage / regular | neither flag; has `c["island_id"]` | **only the prepared A2 virtual lowest-vertex pool for its own island** |
 
 ### 1a. Thread the footprint payload onto the contact (small, additive)
 
@@ -108,8 +172,9 @@ schema break, just extra keys downstream code ignores:
   222). Domain = points within `cfg.minima_contact_radius_mm` (verify.py:214) of any
   `region_pts` vertex. **This guarantees a relocated minimum still passes
   `minima_report`** (verify.py:206-216).
-- **coverage / regular**: domain is the island's own faces,
-  `mesh.triangles_center[islands[c["island_id"]]]`. `cco.build` already has `mesh`;
+- **coverage / regular**: domain is the island's A2 lowest-vertex pool (defined
+  above), not face centroids and not arbitrary surface samples. `cco.build`
+  already has `mesh`;
   **pass `islands` into it** (see §2c). A relocation stays inside the island, so
   `coverage_report`'s worst-gap (verify.py:37-39) is re-satisfiable — but coverage is a
   *worst-point* gate, so relocation MUST re-run coverage on the moved set (it does, via
@@ -165,14 +230,17 @@ def build(mesh, contacts, tip_r, carried, minima_flags, plate_z, surface_tree, c
 ### 2b. `_relocate_terminal` — search, sampling, scoring
 
 **Candidate positions (radius + sampling).** Enumerate the legal domain (§1) as a set
-of surface points, each with a normal:
+of surface points, each with a normal and (for regular contacts) owning `face_id`:
 
-- birth: interior-sample `birth_loop` on a deterministic grid at pitch
-  `cfg.reloc_sample_pitch_mm` (default 0.5mm) clipped to `point_in_polygon_xy`
-  (perception.py:311) at `birth_z`; normal = nearest `mesh.face_normals` face.
-- minimum: the `region_pts` themselves (already a discrete vertex set) plus their
-  vertex normals (`mesh.vertex_normals`); this set is small and exact.
-- coverage: `mesh.triangles_center[islands[iid]]` with `mesh.face_normals[face]`.
+- birth: source-face centers from the contact's own island, filtered by BOTH
+  `island_birth_xy_ok(..., birth_loop, ISLAND_ATTACH_REACH_MM)` and
+  `|z-birth_z| <= minima_connect_layers*layer_height_mm`. Birth is tested first
+  when both production flags are present.
+- minimum: source-face centers from the contact's own island whose batched
+  nearest distance to `region_pts` is at most
+  `cfg.minima_contact_radius_mm`.
+- coverage: the A2 lowest-vertex pool for `islands[iid]`, carrying the
+  most-negative-`nz` nominating face's `face_id` and exact face normal.
 
 **Radius / cap.** No fixed metric radius — the *domain* is the bound (that is the
 inviolable constraint). Add only an economy cap `cfg.reloc_max_candidates` (default 24)
@@ -208,8 +276,10 @@ in order:
    engine.py:450-478) — `uncovered_island_births` is a hard failure with no re-pass
    (engine.py:298). If the move would drop a neighbor birth, reject that candidate and fall
    to the next scored one (or leave the contact unrouted). Then commit, and:
-   - **mutate the contact dict in place**: `c["position"]=pos`, `c["normal"]=normal`,
-     and keep a `c["relocated_from"]=old_xy` breadcrumb. Because
+   - **mutate the contact dict in place**: for a regular contact update
+     `position`, `face_id`, and the owning face `normal` together in one schema
+     write; specialized minimum/birth contacts update only the fields their
+     existing domains define. Keep a `c["relocated_from"]=old_xy` breadcrumb. Because
      `engine.construct`/`run` hold the *same* dict objects (`pre["contacts"]`,
      engine.py:81, 248), verify's `routed_contacts` (engine.py:270) sees the moved
      position automatically — the gates re-evaluate against where support actually is.
@@ -498,8 +568,12 @@ unrouted (and thus re-trip their demand gate, visibly).
 
 ```
 # ---- Phase-8 reach: relocation ----
-reloc_sample_pitch_mm: float = 0.5      # birth-loop interior grid pitch
-reloc_max_candidates: int = 24          # economy cap; ordered nearest-to-demanded
+p8_reseat_max_seeds: int = 24           # economy cap; ordered nearest-to-demanded
+# ---- A2 regular-contact pool ----
+contact_pool_max_refine_depth: int = 8  # allocation guard; refusal, not physics
+contact_pool_max_virtual_cells: int = 750_000
+contact_pool_max_candidates: int = 2_250_000  # conservative 3*cells cap
+contact_pool_max_compact_payload_bytes: int = 144 * 1024 * 1024  # retained SOA only
 # ---- Phase-8 reach: concessions (Craig-authorized 2026-07-23) ----
 concessions_enabled: bool = True                       # default ON per Craig
 concession_standoff_ladder_mm: tuple = (0.3, 0.1)      # tried largest-first; floor > 0
@@ -579,7 +653,7 @@ harness's config, `unrouted_mesh_classes.json` meta):
    actually surfaces in cco. Called out so no one hunts for relocation in routing.py.
 3. **Coverage relocation vs the fix-pass loop.** Relocating a coverage contact changes
    `coverage_report`'s worst-point (verify.py:37); the engine already re-verifies each
-   fix pass (engine.py:271), but a relocation that *improves* one island's worst point
+   fix pass (`engine.run`), but a relocation that *improves* one island's worst point
    could nominally shift another face — bounded because the move stays *inside the same
    island*. Watch on the Treant that relocation does not thrash the ≤2-pass fix budget
    (engine.py:246 `max_fix_passes=2`).
@@ -615,7 +689,8 @@ harness's config, `unrouted_mesh_classes.json` meta):
 8. **Relocation must not un-cover a NEIGHBORING birth (no retry exists for it).** The
    fix-pass loop only continues on `uncovered_islands` (coverage, engine.py:298);
    `uncovered_island_births` is a hard `ok=False` failure with **no re-pass**. Because
-   ladder placements share footprints (engine.py:450-478), relocating a contact that
+   ladder placements share footprints (`engine._ensure_island_birth_contacts`),
+   relocating a contact that
    incidentally also held a *different* island birth can drop that birth's coverage and end
    the run `ok=False` with no recovery. **Constraint: a relocation MUST NOT reduce coverage
    of any island birth other than the one it is repairing.** Before committing a relocation

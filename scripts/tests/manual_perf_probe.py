@@ -154,11 +154,20 @@ def main():
           file=sys.stderr, flush=True)
     geom = KernelSurface(mesh)
     instrument(geom)
+    pre = None
     if os.path.exists(PRE_CACHE):
-        with open(PRE_CACHE, "rb") as f:
-            pre = pickle.load(f)
-        print("[probe] prepare loaded from cache", file=sys.stderr, flush=True)
-    else:
+        try:
+            with open(PRE_CACHE, "rb") as f:
+                cached = pickle.load(f)
+            engine.validate_prepared_state(cached, mesh, cfg)
+            pre = cached
+            print("[probe] prepare loaded from identity-validated cache",
+                  file=sys.stderr, flush=True)
+        except (ValueError, KeyError, TypeError, AttributeError,
+                pickle.UnpicklingError, EOFError) as exc:
+            print(f"[probe] prepare cache rejected ({exc}); rebuilding",
+                  file=sys.stderr, flush=True)
+    if pre is None:
         pre = engine.prepare(mesh, cfg, geom=geom)
         with open(PRE_CACHE, "wb") as f:
             pickle.dump(pre, f)

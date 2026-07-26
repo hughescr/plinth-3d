@@ -31,7 +31,9 @@ import trimesh
 import pytest
 
 from support_placement import phase8_driver as pd
-from support_placement import phase8, verify, engine, tree, joints, p8_accept
+from support_placement import (
+    phase8, verify, engine, tree, joints, p8_accept, placement, perception,
+)
 from support_placement.geometry_exact import ExactSurface
 from support_placement.config import SupportConfig
 
@@ -1410,8 +1412,11 @@ def test_r2_reseat_resolves_what_r1_cannot_and_migrates_the_contact(cfg):
     # --- treatment: R2 with the island domain ---
     f1, c1, carried, tip_r = _reseat_forest(cfg, mesh)
     m1, b1 = engine.live_member_lists(f1, [], -5.0, cfg)
-    rep = pd.run_phase8(f1, m1, b1, c1, carried, tip_r, -5.0, geom, cfg, mesh,
-                        unrouted=[], islands=islands)
+    prepared_pool = placement.candidate_pool(mesh, islands, cfg)
+    rep = pd.run_phase8(
+        f1, m1, b1, c1, carried, tip_r, -5.0, geom, cfg, mesh,
+        unrouted=[], islands=islands,
+        candidate_pool_prepared=prepared_pool)
     assert rep.stub_resolved == 1 and rep.stub_unresolved == 0
     assert len(rep.reseats) == 1, rep.reseats
     sid, ci, sx, sy, sz, dist = rep.reseats[0]
@@ -1423,10 +1428,34 @@ def test_r2_reseat_resolves_what_r1_cannot_and_migrates_the_contact(cfg):
     assert len(pd.classify_gate(mesh, m2, b2, geom, cfg).firm_transit) == 0
     # the demand migrated, and the record followed it to the SAME point.
     assert np.allclose(c1[0]["position"], [sx, sy, sz])
+    legal = {
+        (tuple(x["position"]), int(x["face_id"])): x["normal"]
+        for x in placement.candidate_pool(mesh, islands, cfg)
+    }
+    migrated_key = (tuple(c1[0]["position"]), int(c1[0]["face_id"]))
+    assert migrated_key in legal
+    assert np.array_equal(c1[0]["normal"], legal[migrated_key])
+    assert np.array_equal(
+        c1[0]["normal"], mesh.face_normals[c1[0]["face_id"]])
     # the embedded tip sits contact_depth below the new seat, on the seat normal.
     assert np.allclose(m2[0]["p0"],
                        np.asarray([sx, sy, sz]) - np.asarray(c1[0]["normal"])
                        * cfg.contact_depth_mm)
+
+
+def test_r2_regular_migration_preserves_raw_non_axis_face_normal():
+    """Record provenance stores the source normal, not routing's unit copy."""
+    from types import SimpleNamespace
+    raw = np.array([0.30000000000000004, -0.4, -0.8660254037844385])
+    cand = SimpleNamespace(
+        seat_c=np.array([1.0, 2.0, 3.0]), seat_n=raw.copy(),
+        seat_face_id=17)
+    rec = dict(position=np.zeros(3), normal=np.array([0.0, 0.0, -1.0]),
+               island_id=0, face_id=2)
+    pd._migrate_contact_record(rec, cand)
+    assert rec["face_id"] == 17
+    assert np.array_equal(rec["position"], cand.seat_c)
+    assert np.array_equal(rec["normal"], raw)
 
 
 def test_r2_seeds_are_domain_bounded_nearest_first_and_capped(cfg):
@@ -1439,7 +1468,9 @@ def test_r2_seeds_are_domain_bounded_nearest_first_and_capped(cfg):
     import dataclasses
     mesh = _reseat_mesh()
     islands = _reseat_islands(mesh)
-    idx = pd.SurfaceSeedIndex(mesh, islands=islands)
+    idx = pd.SurfaceSeedIndex(
+        mesh, islands=islands, cfg=cfg,
+        candidate_pool_prepared=placement.candidate_pool(mesh, islands, cfg))
     c = np.array([0.0, 0.0, 0.0]); n0 = np.array([0.0, 0.0, 1.0])
     sites = [phase8.StubSite(site_id=k, c=c.copy(), n0=n0.copy(), r_tip=0.2,
                              stub_length_mm=2.0,
@@ -1448,8 +1479,11 @@ def test_r2_seeds_are_domain_bounded_nearest_first_and_capped(cfg):
     contacts = [dict(position=c.copy(), normal=n0.copy(), island_id=0, area_mm2=5.0)]
     seeds = idx.seeds_for(sites, {0: 0, 1: 0, 2: 0}, contacts, [], cfg)
     assert set(seeds) == {0, 1, 2}
-    island_faces = set(int(f) for f in islands[0])
-    island_pts = mesh.triangles_center[sorted(island_faces)]
+    legal_pool = placement.candidate_pool(mesh, islands, cfg)
+    legal = {
+        (tuple(x["position"]), int(x["face_id"])): x["normal"]
+        for x in legal_pool if int(x["island_id"]) == 0
+    }
     for sid in (0, 1, 2):
         s = seeds[sid]
         assert s, "the fixture must offer seats"
@@ -1457,17 +1491,19 @@ def test_r2_seeds_are_domain_bounded_nearest_first_and_capped(cfg):
         d = [t[2] for t in s]
         assert d == sorted(d), "nearest-to-demanded ordering is pinned"
         assert all(0.0 < x <= cfg.p8_reseat_radius_mm + 1e-9 for x in d)
-        for pos, nrm, dist in s:
+        for pos, nrm, dist, face_id in s:
             assert np.isclose(np.linalg.norm(pos - c), dist)
-            assert np.min(np.linalg.norm(island_pts - pos, axis=1)) < 1e-9, \
-                "a seat outside the island domain is not a relocation of this demand"
+            assert (tuple(pos), face_id) in legal, \
+                "a regular-contact seat must be a legal lowest-vertex pool member"
+            assert np.array_equal(nrm, legal[(tuple(pos), face_id)])
+            assert np.array_equal(nrm, mesh.face_normals[face_id])
             assert np.isclose(np.linalg.norm(nrm), 1.0)
     # three sites at the SAME demand get the SAME seats -- the search is a pure
     # function of (demand, domain, cfg), which is what the batched call must not
     # break (a stacked query must not leak one site's neighbourhood into another).
     for a, b in zip(seeds[0], seeds[1]):
         assert np.array_equal(a[0], b[0]) and np.array_equal(a[1], b[1])
-        assert a[2] == b[2]
+        assert a[2:] == b[2:]
     assert len(seeds[0]) == len(seeds[1]) == len(seeds[2])
 
     # radius 0 / cap 0 / disabled all yield NO seats (each is a hard bound).
@@ -1475,6 +1511,205 @@ def test_r2_seeds_are_domain_bounded_nearest_first_and_capped(cfg):
                dict(p8_reseat_enable=False)):
         c2 = dataclasses.replace(cfg, **kw)
         assert idx.seeds_for(sites, {0: 0}, contacts, [], c2)[0] == []
+
+
+@pytest.mark.parametrize("specialized_kind", ["minimum", "dual-flag-birth"])
+def test_r2_specialized_contacts_keep_existing_domain_without_pool_face_id(
+        cfg, specialized_kind):
+    """The A2 vertex invariant is regular-contact-only.
+
+    Minimum/birth contacts keep the pre-existing specialized surface domain and
+    must not acquire a `face_id` that falsely claims a lowest-vertex seat.
+    """
+    mesh = _reseat_mesh()
+    islands = _reseat_islands(mesh)
+    idx = pd.SurfaceSeedIndex(
+        mesh, islands=islands, cfg=cfg,
+        candidate_pool_prepared=placement.candidate_pool(mesh, islands, cfg))
+    c = np.array([0.0, 0.0, 0.0]); n0 = np.array([0.0, 0.0, 1.0])
+    site = phase8.StubSite(
+        site_id=0, c=c.copy(), n0=n0.copy(), r_tip=0.2,
+        stub_length_mm=2.0, contact_depth_mm=cfg.contact_depth_mm)
+    contact = dict(position=c.copy(), normal=n0.copy(), island_id=0,
+                   area_mm2=5.0)
+    if specialized_kind == "minimum":
+        contact.update(minimum=True, region_pts=np.array([[0.0, 0.0, 0.0]]))
+    else:
+        # Production island-birth contacts carry BOTH flags; birth must win.
+        contact.update(
+            minimum=True, island_birth=True, birth_z=0.0,
+            birth_loop=np.array([
+                [-3.0, -3.0], [3.0, -3.0],
+                [3.0, 3.0], [-3.0, 3.0],
+            ]))
+    seeds = idx.seeds_for([site], {0: 0}, [contact], [], cfg)[0]
+    centers = mesh.triangles_center[islands[0]]
+    assert seeds
+    for pos, nrm, _dist, face_id in seeds:
+        assert face_id is None
+        assert np.min(np.linalg.norm(centers - pos, axis=1)) < 1e-9
+        assert np.isclose(np.linalg.norm(nrm), 1.0)
+        if specialized_kind == "minimum":
+            assert np.linalg.norm(pos) <= cfg.minima_contact_radius_mm + 1e-9
+        else:
+            assert abs(float(pos[2]) - contact["birth_z"]) <= (
+                cfg.minima_connect_layers * cfg.layer_height_mm)
+            assert perception.island_birth_xy_ok(
+                float(pos[0]), float(pos[1]), contact["birth_loop"],
+                perception.ISLAND_ATTACH_REACH_MM)[0]
+
+
+def test_r2_minimum_domain_uses_exact_verify_boundary(cfg):
+    """R2 admits exactly radius and rejects the next representable distance."""
+    import dataclasses
+    import trimesh
+    mesh = trimesh.Trimesh(
+        vertices=np.array([
+            [0.0, -1.0, 0.0], [2.0, -1.0, 0.0], [1.0, 2.0, 0.0],
+        ]),
+        faces=np.array([[0, 1, 2]]), process=False)
+    islands = [np.array([0])]
+    c2 = dataclasses.replace(
+        cfg, minima_contact_radius_mm=1.0, p8_reseat_radius_mm=2.0)
+    idx = pd.SurfaceSeedIndex(
+        mesh, islands=islands, cfg=c2,
+        candidate_pool_prepared=placement.candidate_pool(mesh, islands, c2))
+    site = phase8.StubSite(
+        site_id=0, c=np.zeros(3), n0=np.array([0.0, 0.0, 1.0]),
+        r_tip=0.2, stub_length_mm=2.0,
+        contact_depth_mm=c2.contact_depth_mm)
+    contact = dict(
+        position=np.zeros(3), normal=np.array([0.0, 0.0, 1.0]),
+        island_id=0, minimum=True, region_pts=np.array([[0.0, 0.0, 0.0]]))
+    exact = idx.seeds_for([site], {0: 0}, [contact], [], c2)[0]
+    assert len(exact) == 1
+    assert np.array_equal(exact[0][0], [1.0, 0.0, 0.0])
+    contact["region_pts"] = np.array([[-np.spacing(1.0), 0.0, 0.0]])
+    assert idx.seeds_for([site], {0: 0}, [contact], [], c2)[0] == []
+
+
+def test_r2_legacy_three_field_seed_tuple_is_admitted(cfg):
+    """The deprecated tuple is not merely parseable: it yields candidates."""
+    site = phase8.StubSite(
+        site_id=7, c=np.zeros(3), n0=np.array([0.0, 0.0, 1.0]),
+        r_tip=0.2, stub_length_mm=2.0,
+        contact_depth_mm=cfg.contact_depth_mm)
+    candidates = phase8.reseat_candidates(
+        site, [(np.array([0.0, 0.0, 1.0]),
+                np.array([0.0, 0.0, 1.0]), 1.0)], cfg)
+    assert candidates
+    assert all(c.seat_face_id is None for c in candidates)
+    assert all(np.array_equal(c.seat_c, [0.0, 0.0, 1.0])
+               for c in candidates)
+
+
+def test_r2_requires_prepared_pool_by_default_and_legacy_opt_in_is_explicit(cfg):
+    mesh = _reseat_mesh()
+    islands = _reseat_islands(mesh)
+    with pytest.raises(ValueError, match="requires a prepared candidate pool"):
+        pd.SurfaceSeedIndex(mesh, islands=islands, cfg=cfg)
+    idx = pd.SurfaceSeedIndex(
+        mesh, islands=islands, cfg=cfg,
+        allow_legacy_candidate_pool_recompute=True)
+    assert len(idx.pool_positions) > 0
+
+
+def test_engine_relocate_r2_requires_matching_prepared_state(cfg):
+    import copy
+    import dataclasses
+    mesh = _reseat_mesh()
+    islands = _reseat_islands(mesh)
+    geom = ExactSurface(mesh)
+    forest, contacts, carried, tip_r = _reseat_forest(cfg, mesh)
+    with pytest.raises(ValueError, match="requires prepared state"):
+        engine.relocate(
+            mesh, forest, [], contacts, carried, tip_r, -5.0, cfg,
+            geom=geom, islands=islands)
+    pre = engine.prepare(mesh, cfg)
+    bad_islands = copy.deepcopy(pre["islands"])
+    bad_islands.append([])
+    with pytest.raises(ValueError, match="islands mismatch"):
+        engine.relocate(
+            mesh, forest, [], contacts, carried, tip_r, -5.0, cfg,
+            prepared_state=pre, islands=bad_islands)
+    bad_births = copy.deepcopy(pre["island_births"])
+    bad_births.append(dict(
+        x=999.0, y=999.0, z=999.0, area_mm2=1.0,
+        loop=np.zeros((4, 2))))
+    with pytest.raises(ValueError, match="island_births mismatch"):
+        engine.relocate(
+            mesh, forest, [], contacts, carried, tip_r, -5.0, cfg,
+            prepared_state=pre, island_births=bad_births)
+    exact_copy = engine.relocate(
+        mesh, forest, [], contacts, carried, tip_r, -5.0, cfg,
+        prepared_state=pre,
+        islands=copy.deepcopy(pre["islands"]),
+        island_births=copy.deepcopy(pre["island_births"]))
+    assert exact_copy["skipped"] == "no exact geom oracle"
+    changed = dataclasses.replace(
+        cfg, target_spacing_mm=np.nextafter(cfg.target_spacing_mm, np.inf))
+    with pytest.raises(ValueError, match="config fingerprint mismatch"):
+        engine.relocate(
+            mesh, forest, [], contacts, carried, tip_r, -5.0, changed,
+            geom=geom, islands=islands, prepared_state=pre)
+
+
+def test_r2_joint_safety_admits_at_most_one_move_per_island():
+    """Two frozen-safe moves can jointly uncover the midpoint; only one wins."""
+    from types import SimpleNamespace
+    contacts = [
+        dict(island_id=4, position=np.array([0.0, 0.0, 0.0])),
+        dict(island_id=4, position=np.array([10.0, 0.0, 0.0])),
+    ]
+    proposed = {
+        2: SimpleNamespace(
+            winner=SimpleNamespace(seat_c=np.array([-5.0, 0.0, 0.0]))),
+        7: SimpleNamespace(
+            winner=SimpleNamespace(seat_c=np.array([15.0, 0.0, 0.0]))),
+    }
+    surface_x = np.array([0.0, 5.0, 10.0])
+    threshold = 5.0
+    original_x = np.array([0.0, 10.0])
+    for sid, moving_idx in ((2, 0), (7, 1)):
+        individual = original_x.copy()
+        individual[moving_idx] = proposed[sid].winner.seat_c[0]
+        worst = np.min(
+            np.abs(surface_x[:, None] - individual[None, :]), axis=1).max()
+        assert worst <= threshold
+    joint_x = np.array([-5.0, 15.0])
+    joint_worst = np.min(
+        np.abs(surface_x[:, None] - joint_x[None, :]), axis=1).max()
+    assert joint_worst > threshold
+    selected = pd._select_joint_safe_r2_winners(
+        proposed, {2: 0, 7: 1}, contacts)
+    assert list(selected) == [2]
+
+
+def test_r2_joint_safety_is_global_across_islands_with_shared_birth():
+    """Cross-island moves can each preserve, but jointly orphan, one birth."""
+    from types import SimpleNamespace
+    contacts = [
+        dict(island_id=4, position=np.array([0.0, 0.0, 0.0])),
+        dict(island_id=9, position=np.array([10.0, 0.0, 0.0])),
+    ]
+    proposed = {
+        2: SimpleNamespace(
+            winner=SimpleNamespace(seat_c=np.array([-5.0, 0.0, 0.0]))),
+        7: SimpleNamespace(
+            winner=SimpleNamespace(seat_c=np.array([15.0, 0.0, 0.0]))),
+    }
+    shared_birth_x = 5.0
+    hold_radius = 5.0
+    for sid, moving_idx in ((2, 0), (7, 1)):
+        positions = np.array([0.0, 10.0])
+        positions[moving_idx] = proposed[sid].winner.seat_c[0]
+        assert np.min(np.abs(positions - shared_birth_x)) <= hold_radius
+    joint = np.array([-5.0, 15.0])
+    assert np.min(np.abs(joint - shared_birth_x)) > hold_radius
+
+    selected = pd._select_joint_safe_r2_winners(
+        proposed, {2: 0, 7: 1}, contacts)
+    assert list(selected) == [2]
 
 
 def test_r2_coverage_guard_refuses_seats_that_would_uncover_the_island(cfg):
@@ -1490,7 +1725,9 @@ def test_r2_coverage_guard_refuses_seats_that_would_uncover_the_island(cfg):
     import dataclasses
     mesh = _reseat_mesh()
     islands = _reseat_islands(mesh)
-    idx = pd.SurfaceSeedIndex(mesh, islands=islands)
+    idx = pd.SurfaceSeedIndex(
+        mesh, islands=islands, cfg=cfg,
+        candidate_pool_prepared=placement.candidate_pool(mesh, islands, cfg))
     c = np.array([0.0, 0.0, 0.0]); n0 = np.array([0.0, 0.0, 1.0])
     site = phase8.StubSite(site_id=0, c=c.copy(), n0=n0.copy(), r_tip=0.2,
                            stub_length_mm=2.0, contact_depth_mm=cfg.contact_depth_mm)
@@ -1499,17 +1736,18 @@ def test_r2_coverage_guard_refuses_seats_that_would_uncover_the_island(cfg):
     loose = idx.seeds_for([site], {0: 0}, contacts, [], cfg)[0]
     assert loose, "the default threshold must admit seats"
 
-    # threshold = 4.0 * 1.5 = 6.0mm by default; the island radius is 3.0mm and
-    # the current worst gap is ~3.0mm. Squeeze the threshold to just above the
-    # CURRENT worst gap: now any displacement makes the worst gap worse, and the
-    # guard's `new_worst <= cur_worst` escape cannot save a seat that moves away.
-    tight = dataclasses.replace(cfg, target_spacing_mm=2.0, coverage_radius_factor=1.5)
+    # Tighten 6.0mm -> 4.5mm: the guard rejects some moves while retaining a
+    # NONEMPTY legal set, so this pins the real four-field regular-seat contract
+    # instead of passing vacuously on an empty result.
+    tight = dataclasses.replace(cfg, target_spacing_mm=3.0, coverage_radius_factor=1.5)
     got = idx.seeds_for([site], {0: 0}, contacts, [], tight)[0]
+    assert got, "guard regression must exercise admitted regular seats"
     assert len(got) < len(loose), (len(got), len(loose))
-    for pos, _n, _d in got:
+    for pos, _n, _d, face_id in got:
+        assert face_id is not None
         worst = float(np.linalg.norm(
             mesh.triangles_center[islands[0]] - pos[None, :], axis=1).max())
-        assert worst <= 3.0 + 1e-9, worst
+        assert worst <= 4.5 + 1e-9, worst
 
     # an ALREADY-uncovered island must not be made worse, but is not frozen: the
     # guard's second branch admits seats that do not increase the worst gap.
@@ -1809,9 +2047,12 @@ def test_ladder_never_reorders_r1_before_r2_before_d5(cfg):
     geom = ExactSurface(mesh)
     forest, contacts, carried, tip_r = _fin_forest(cfg)
     members, balls = engine.live_member_lists(forest, [], -5.0, cfg)
+    islands = _reseat_islands(mesh)
     rep = pd.run_phase8(forest, members, balls, contacts, carried, tip_r, -5.0,
                         geom, cfg, mesh, unrouted=[],
-                        islands=_reseat_islands(mesh))
+                        islands=islands,
+                        candidate_pool_prepared=placement.candidate_pool(
+                            mesh, islands, cfg))
     assert rep.stub_resolved == 1
     assert rep.reseats == () and rep.junction_reseats == ()
     assert rep.unresolvable_ledger == ()

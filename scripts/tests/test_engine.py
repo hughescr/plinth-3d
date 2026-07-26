@@ -1,11 +1,84 @@
 import json
 import os
+import pickle
+import dataclasses
 
 import numpy as np
 import pytest
 from scipy.spatial import cKDTree
 
-from support_placement import config as config_mod, engine, mesh_io, rewire, tree as tm
+from support_placement import (
+    config as config_mod, engine, mesh_io, phase8_driver, placement, rewire,
+    tree as tm, verify,
+)
+
+
+def test_prepared_state_pickle_roundtrip_reuses_pool_without_recompute(
+        table_mesh, cfg, monkeypatch):
+    pre = engine.prepare(table_mesh, cfg)
+    reloaded = pickle.loads(pickle.dumps(pre, protocol=pickle.HIGHEST_PROTOCOL))
+    assert reloaded["schema"] == engine.PREPARED_STATE_SCHEMA
+    assert reloaded["version"] == engine.PREPARED_STATE_SCHEMA_VERSION
+    assert reloaded["mesh_fingerprint"] == engine.mesh_fingerprint(table_mesh)
+    assert reloaded["config_fingerprint"] == engine.config_fingerprint(cfg)
+    engine.validate_prepared_state(reloaded, table_mesh, cfg)
+    pool = reloaded["contact_candidate_pool"]
+    assert pool.nbytes == len(pool) * placement.CONTACT_POOL_BYTES_PER_CANDIDATE
+
+    def _refuse_recompute(*_args, **_kwargs):
+        raise AssertionError("prepared pool was recomputed")
+
+    monkeypatch.setattr(placement, "candidate_pool", _refuse_recompute)
+    regular = placement.sample_candidates(
+        table_mesh, reloaded["islands"], cfg,
+        candidate_pool_prepared=pool)
+    assert regular
+    iid = int(regular[0]["island_id"])
+    repaired = engine._add_fix_contacts(
+        table_mesh, reloaded["islands"], [regular[0]],
+        [dict(island_id=iid, n_faces=len(reloaded["islands"][iid]))],
+        candidate_pool_prepared=pool)
+    assert len(repaired) == 2
+    idx = phase8_driver.SurfaceSeedIndex(
+        table_mesh, islands=reloaded["islands"],
+        candidate_pool_prepared=pool, cfg=cfg)
+    assert idx.pool_positions is pool.positions
+    report = verify.self_verify(
+        table_mesh, reloaded["islands"], regular, [], np.array([]), np.array([]),
+        cfg, plate_z=0.0, contact_candidate_pool=pool)
+    assert report["ok"] is True
+    assert report["regular_contact_invariant_violations"] == []
+
+
+def test_staged_consumers_reject_old_prepared_state(table_mesh, cfg):
+    with pytest.raises(ValueError, match="rerun prepare"):
+        engine.construct(table_mesh, {}, None, cfg)
+    with pytest.raises(ValueError, match="rerun prepare"):
+        engine.finish(
+            table_mesh, {}, None, [], [], np.array([]), np.array([]),
+            None, cfg)
+
+
+def test_prepared_state_rejects_mismatched_mesh_and_semantic_config(
+        table_mesh, cfg):
+    pre = engine.prepare(table_mesh, cfg)
+    changed_mesh = table_mesh.copy()
+    changed_mesh.vertices[0, 0] = np.nextafter(
+        changed_mesh.vertices[0, 0], np.inf)
+    with pytest.raises(ValueError, match="mesh fingerprint mismatch"):
+        engine.construct(changed_mesh, pre, None, cfg)
+    with pytest.raises(ValueError, match="mesh fingerprint mismatch"):
+        engine.finish(
+            changed_mesh, pre, None, [], [], np.array([]), np.array([]),
+            None, cfg)
+    with pytest.raises(ValueError, match="mesh fingerprint mismatch"):
+        engine.relocate(
+            changed_mesh, None, [], [], np.array([]), np.array([]), 0.0, cfg,
+            prepared_state=pre)
+    changed_cfg = dataclasses.replace(
+        cfg, target_spacing_mm=np.nextafter(cfg.target_spacing_mm, np.inf))
+    with pytest.raises(ValueError, match="config fingerprint mismatch"):
+        engine.construct(table_mesh, pre, None, changed_cfg)
 
 
 def test_engine_runs_end_to_end_on_table_fixture(table_mesh, cfg):
@@ -94,12 +167,18 @@ def test_engine_prepare_keeps_lifted_box_bottom_faces_as_demand(box_mesh, cfg):
 
 
 def test_engine_box_supports_bottom_plateau_demand(box_mesh, cfg):
-    """The lifted box's first FEP island remains demanded end to end."""
+    """The lifted box's first FEP island remains supported end to end.
+
+    A2's regular pool lands directly on the plateau's lowest vertices, so the
+    minimum demand is already satisfied and need not add a redundant
+    ``minimum=True`` specialized contact.
+    """
     result = engine.run(box_mesh, cfg)
     assert result["log"]["minima"] == 1
     assert len(result["contacts"]) > 0
-    assert any(c.get("minimum") is True for c in result["contacts"])
     assert result["verify"]["unsupported_minima"] == []
+    regular = [c for c in result["contacts"] if not c.get("minimum")]
+    assert regular and all("face_id" in c for c in regular)
     assert result["verify"]["ok"], result["verify"]
 
 
@@ -242,6 +321,34 @@ def test_engine_prepare_island_births_deterministic_despite_global_rng_state(
         assert np.array_equal(np.asarray(ca["position"]), np.asarray(cb["position"]))
         assert bool(ca.get("island_birth")) == bool(cb.get("island_birth"))
     assert log_a["island_birth_contacts_added"] == log_b["island_birth_contacts_added"]
+
+
+def test_engine_prepare_threads_specialized_reseat_domains(
+        raking_blade_mesh, cfg):
+    """Production birth contacts carry the dual-flag payload R2 must gate."""
+    pre = engine.prepare(raking_blade_mesh, cfg, {})
+    births = [c for c in pre["contacts"] if c.get("island_birth")]
+    assert births
+    for contact in births:
+        assert contact.get("minimum") is True
+        assert np.asarray(contact["birth_loop"]).ndim == 2
+        assert np.asarray(contact["birth_loop"]).shape[1] == 2
+        assert contact["birth_z"] == pytest.approx(
+            float(contact["position"][2]), abs=cfg.layer_height_mm
+            * cfg.minima_connect_layers)
+
+
+def test_minimum_contact_threads_region_payload(box_mesh, cfg):
+    pos = np.asarray(box_mesh.vertices[0], float)
+    region = np.asarray(box_mesh.vertices[[0, 2, 4]], float)
+    contacts, _islands, added = engine._ensure_minima_contacts(
+        box_mesh, [], [],
+        [dict(position=pos, normal=np.array([0.0, 0.0, -1.0]),
+              region_pts=region, z=float(pos[2]))],
+        cfg)
+    assert added == 1
+    assert contacts[0]["minimum"] is True
+    assert np.array_equal(contacts[0]["region_pts"], region)
 
 
 def test_engine_lifted_thin_box_does_not_take_no_contacts_path(cfg):
@@ -540,7 +647,13 @@ def test_table_and_toed_slab_full_run_not_worse_than_baseline(cfg):
     instead of the actual plate. Restoring that mandatory support demand
     necessarily raises volume and may add unrouted demand, so the table entry
     was re-measured twice after A1 and confirmed bit-identical. Toed-slab was
-    unchanged. The gate formula remains unchanged; fixtures/v4_p4_baseline.json
+    unchanged. A2 virtual-analysis-face re-freeze (2026-07-25): replacing
+    arbitrary surface samples/centroids with the coverage-capable dyadic
+    lowest-vertex pool intentionally changes both fixtures' contact sets.
+    `_refreeze_v5.py` again ran each fixture twice; volume reports were
+    exactly equal, all hard gates including regular-contact provenance were
+    clean, and only `v5_baseline.json` moved. The gate formula remains
+    unchanged; fixtures/v4_p4_baseline.json
     (and v4_p3, v3) are kept untouched for history/provenance."""
     baseline = json.load(open(_BASELINE_PATH))
 
@@ -549,10 +662,16 @@ def test_table_and_toed_slab_full_run_not_worse_than_baseline(cfg):
         mesh = mesh_fn()
         result = engine.run(mesh, config_mod.SupportConfig())
         v = result["verify"]
+        assert v["ok"], (name, v)
+        assert v["uncovered_islands"] == [], (name, v["uncovered_islands"])
         assert v["clearance_violations"] == [], (name, v["clearance_violations"])
+        assert v["ball_breach_violations"] == [], (
+            name, v["ball_breach_violations"])
         assert v["connectivity_violations"] == [], (name, v["connectivity_violations"])
         assert v["printability_violations"] == [], (name, v["printability_violations"])
         assert v["murray_violations"] == [], (name, v["murray_violations"])
+        assert v["regular_contact_invariant_violations"] == [], (
+            name, v["regular_contact_invariant_violations"])
         # v4 p6 (I3): HARD acceptance on these small fixtures -- the honest
         # island-birth gate, with the I2-demanded contacts actually
         # generated, routed, and covering.

@@ -1,6 +1,9 @@
 # SPEC-P8-RELOCATE — Phase-8 placement rebuild under SCAR-AREA-CAP + PRINT-FLOOR
 
-Status: **DRAFT — pending challenge + owner review.**
+Status: **OWNER-RATIFIED substrate with A2 contact-pool amendment
+(2026-07-25).** The historical defect counts and acceptance snapshots below
+remain provenance for the Phase-8 design; current implementation authority for
+regular contact seats is the amendment in §1/§3.1.
 Baseline: branch `v5-perf` @ ada5f56 (engine verify gate runs SCAR-AREA-CAP +
 rule 4, aligned with census). Governing law: SPEC-EMBED-POLICY (owner-ratified,
 cd989fe) **plus** the owner-ratified PRINT-FLOOR amendment (2026-07-24, §2).
@@ -40,6 +43,10 @@ reuses. **HOLDS, reused as substrate:**
 - the contact-class legal-domain table (REACH §1: island-birth footprint /
   minimum region / island faces — inviolable, order-sensitive class test with
   `island_birth` before `minimum`);
+- the A2 regular-contact seat amendment: one prepared deterministic virtual
+  pool is reused by initial placement, repair, R2 relocation, and final
+  verification; minimum and island-birth contacts retain their exact
+  specialized domains;
 - the neighbor-birth-coverage commit guard (REACH Open-Risk #8);
 - the determinism doctrine: no RNG, stable sorts on explicit keys;
 - Feature B (concession supports) as an ORTHOGONAL tool: a concession spends
@@ -234,12 +241,40 @@ ZERO legal candidates for that site, and the ladder never re-orders.
 
 **R2 (§3.1 R2, implemented).** Candidate seats are MODEL-SURFACE seeds near the
 demanded contact, ordered nearest-to-demanded under the REACH §2b
-`reloc_max_candidates` cap and bounded by `p8_reseat_radius_mm`; each is
-re-aimed at its own outward normal across the R1 shortening ladder. Legality is
-the full §5 law through the SAME shared certificate R1 uses, and commitment is
-the SAME guarded co-moving splice under the D6 invariant. Selection is the
-GLOBAL lexicographic minimum of the pinned tuple `(route_length_mm,
+`reloc_max_candidates` cap and bounded by `p8_reseat_radius_mm`. For a
+**regular/coverage contact**, the seed set is restricted further to REACH's A2
+virtual lowest-vertex pool. Source faces are uniformly refined by recursive
+1-to-4 midpoint subdivision to the coverage-derived edge bound; every virtual
+cell contributes every co-lowest vertex, and exact-position nominations are
+deduplicated. Every seat carries its owning source `face_id` and that source
+face's raw stored normal (never an averaged vertex normal or a
+routing-normalized rewrite). The same prepared pool is reused by initial
+placement, coverage repair, R2, and final verification. Specialized minimum/island-birth
+contacts retain their existing stricter region/footprint domains and do not
+inherit the regular-contact `face_id` invariant. Each seed is re-aimed at its
+own outward normal across the R1 shortening ladder. Legality is the full §5 law
+through the SAME shared certificate R1 uses, and commitment is the SAME guarded
+co-moving splice under the D6 invariant. Selection is the GLOBAL
+lexicographic minimum of the pinned tuple `(route_length_mm,
 reseat_distance_from_demanded_mm, candidate_index)`.
+
+R2 never reconstructs the regular pool implicitly in production. If an island
+domain makes R2 available, `engine.relocate` requires the matching prepared
+state and validates its schema, mesh fingerprint, config fingerprint, and
+immutable pool before the sweep. A low-level compatibility caller may request
+legacy recomputation only through the explicitly named
+`allow_legacy_candidate_pool_recompute=True` opt-in.
+
+Within a frozen sweep, at most one accepted R2 re-seat may be committed
+**globally**. The lowest site id wins and every other proposal continues down
+its ladder. Per-island arbitration is insufficient because two individually
+safe moves in different island domains can jointly orphan a shared
+island-birth demand before the next frozen coverage snapshot.
+
+The validated prepared state is also the relocation domain authority:
+`engine.relocate` derives `islands` and `island_births` from it. Omitted caller
+arguments use those prepared values; supplied values must be exact copies or
+the staged boundary rejects them.
 
 Two bounds on R2 are NOT config levers:
 
@@ -253,9 +288,14 @@ Two bounds on R2 are NOT config levers:
     seat that would regress island coverage or orphan a birth this contact
     uniquely covers is refused at SEED SELECTION, before any candidate exists.
 
-A committed re-seat MIGRATES the contact record with the stub. The demand moved;
-leaving the record behind would leave every coverage and carried-area gate
-judging a point no support stands on.
+A committed re-seat MIGRATES the contact record with the stub. For a regular
+contact, `position`, owning source `face_id`, and that face's exact raw
+`normal` are updated
+together in one schema write, preserving the lowest-vertex invariant in final
+output. Specialized minimum/birth records update under their own existing
+domain schema and do not acquire a false regular-pool `face_id`. The demand
+moved; leaving the record behind would leave every coverage and carried-area
+gate judging a point no support stands on.
 
 **D5 (new rung).** R1/S1 pivot the shaft about a fixed embed anchor; R2 moves
 the anchor. D5 owns the remaining degree of freedom: the site's PARENT JUNCTION
@@ -434,7 +474,14 @@ resin/quality guards (amendment H) below pass.
 
 **R2 — contact re-seat (relocation to an alternative anchor candidate).**
 Only if the R1 legal set is empty. Move the contact within its inviolable
-class domain (REACH §1 table, unchanged), candidates ordered
+class domain (REACH §1 table, unchanged); regular/coverage candidates MUST be
+members of REACH's prepared A2 virtual lowest-vertex pool and carry the owning
+source face's exact `face_id`/raw normal. Minimum candidates are source-face
+centers filtered to within `minima_contact_radius_mm` of their persisted
+`region_pts`; birth candidates are source-face centers filtered by their
+persisted `birth_loop` and `birth_z`, with birth taking precedence for
+dual-flag contacts. Specialized candidates never acquire a regular-pool
+`face_id`. Candidates are ordered
 nearest-to-demanded with the `reloc_max_candidates` cap (REACH §2b); the
 per-candidate legality test is the full §5 law (tip verdict + rule-4 +
 PRINT-FLOOR + clearance + H guards), not clearance alone. Old stub `mark_dead`
@@ -442,7 +489,9 @@ PRINT-FLOOR + clearance + H guards), not clearance alone. Old stub `mark_dead`
 before commit. Selection is again GLOBAL lexicographic minimum over the legal
 re-seat set: `(route_length_mm, reseat_distance_from_demanded_mm,
 candidate_index)` — REACH's pinned route objective first, least demand
-displacement next, index last.
+displacement next, index last. Sweep arbitration then admits only the global
+lowest-site-id accepted re-seat; every other proposal is not committed in that
+sweep.
 
 **R3 — quarantine + re-route (honest failure).** Only if R1 and R2 both yield
 empty legal sets. The stub is `mark_quarantined` (tree.py:348) — this is the
@@ -1070,6 +1119,12 @@ per-candidate legality guards, not just acceptance levers — a candidate that
 violates one is illegal at selection, never merely penalized. All
 deterministic; no RNG anywhere; every ordering in this spec is a stable sort
 on an explicit key with the index as final tiebreak.
+
+Final verification is a hard emission gate for the A2 invariant: every regular
+contact must match an entry in the prepared pool by island, exact position, and
+source `face_id`; its stored normal must be bit-exact to that source face's raw
+mesh normal. Specialized minimum/birth contacts must not carry a regular
+`face_id`. A violation sets `verify.ok = False`.
 
 ---
 

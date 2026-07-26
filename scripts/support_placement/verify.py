@@ -12,7 +12,10 @@ doesn't choose orientation, it evaluates candidates handed to it.
 import numpy as np
 from scipy.spatial import cKDTree
 
-from . import perception, routing, joints, tree as tree_mod, removal as removal_mod
+from . import (
+    perception, placement, routing, joints, tree as tree_mod,
+    removal as removal_mod,
+)
 from .geometry_exact import member_rays
 
 
@@ -1071,10 +1074,103 @@ def connectivity_report(members, plate_z, cfg, surface_tree=None, geom=None,
     return violations
 
 
+def regular_contact_invariant_report(
+        mesh, contacts, candidate_pool, islands=None):
+    """Hard-gate the final A2 regular-contact provenance contract.
+
+    Regular contacts must match one prepared-pool row exactly in island,
+    position, and owning source ``face_id``; their stored normal must be the
+    source mesh's face-normal bytes. Specialized minimum/island-birth contacts
+    are outside this invariant and must not carry a misleading ``face_id``.
+    """
+    out = []
+    regular_indices = []
+    for i, contact in enumerate(contacts):
+        specialized = bool(
+            contact.get("island_birth") or contact.get("minimum"))
+        if specialized:
+            if "face_id" in contact:
+                out.append(dict(
+                    contact_idx=int(i),
+                    reason="specialized-has-regular-face-id",
+                    face_id=int(contact["face_id"])))
+        else:
+            regular_indices.append(i)
+    if candidate_pool is None:
+        out.extend(
+            dict(contact_idx=int(i), reason="missing-prepared-pool")
+            for i in regular_indices)
+        return out
+    try:
+        placement.validate_candidate_pool(
+            candidate_pool, mesh=mesh, islands=islands)
+    except ValueError:
+        out.extend(
+            dict(contact_idx=int(i), reason="missing-prepared-pool")
+            for i in regular_indices)
+        return out
+    normals = np.asarray(mesh.face_normals, float)
+
+    def _pool_has(iid, position, face_id):
+        """Exact lookup in pool's island,z,x,y,face total order; no row set."""
+        sl = candidate_pool.island_slice(iid)
+        pos = candidate_pool.positions[sl]
+        fids = candidate_pool.face_ids[sl]
+        if not len(pos):
+            return False
+        lo = int(np.searchsorted(pos[:, 2], position[2], side="left"))
+        hi = int(np.searchsorted(pos[:, 2], position[2], side="right"))
+        if lo == hi:
+            return False
+        x = pos[lo:hi, 0]
+        xlo = lo + int(np.searchsorted(x, position[0], side="left"))
+        xhi = lo + int(np.searchsorted(x, position[0], side="right"))
+        if xlo == xhi:
+            return False
+        y = pos[xlo:xhi, 1]
+        ylo = xlo + int(np.searchsorted(y, position[1], side="left"))
+        yhi = xlo + int(np.searchsorted(y, position[1], side="right"))
+        if ylo == yhi:
+            return False
+        faces_here = fids[ylo:yhi]
+        j = int(np.searchsorted(faces_here, face_id, side="left"))
+        return j < len(faces_here) and int(faces_here[j]) == face_id
+
+    for ci, contact in enumerate(contacts):
+        specialized = bool(
+            contact.get("island_birth") or contact.get("minimum"))
+        if specialized:
+            continue
+        if "face_id" not in contact:
+            out.append(dict(contact_idx=int(ci), reason="missing-face-id"))
+            continue
+        face_id = int(contact["face_id"])
+        if not (0 <= face_id < len(normals)):
+            out.append(dict(contact_idx=int(ci), reason="invalid-face-id",
+                            face_id=face_id))
+            continue
+        position = np.asarray(contact.get("position"), float)
+        island_id = int(contact.get("island_id", -1))
+        if not _pool_has(island_id, position, face_id):
+            out.append(dict(
+                contact_idx=int(ci), reason="not-in-prepared-pool",
+                island_id=island_id,
+                face_id=face_id, position=position.tolist()))
+            continue
+        stored = np.asarray(contact.get("normal"), float)
+        if not np.array_equal(stored, normals[face_id]):
+            out.append(dict(
+                contact_idx=int(ci), reason="face-normal-mismatch",
+                face_id=face_id, normal=stored.tolist(),
+                expected_normal=normals[face_id].tolist()))
+    return out
+
+
 def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cfg,
                  plate_z, surface_tree=None, minima=None, forest=None, unrouted=(),
                  gate_on_removal=False, island_births=None, geom=None, balls=None,
-                 gate_on_ball_breach=True):
+                 gate_on_ball_breach=True, contact_candidate_pool=None,
+                 provenance_contacts=None):
     """Full design-v4.md #11 gate. Returns a report dict; `ok` is True
     only if all checks are clean: coverage, clearance, load, layer-island
     minima (only when the caller supplies `minima` from
@@ -1158,6 +1254,12 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
     floats. Never gates `ok`; it exists so a caller can feed
     `chord_canon.chord_parity_report` for the engine/census micron-canonical
     cross-implementation equality check without re-deriving intervals."""
+    # Coverage/minimum/birth gates deliberately judge only routed contacts.
+    # Provenance is different: every demanded contact, including unrouted ones,
+    # must remain legal A2 authority. Engine callers therefore pass the complete
+    # original-index contact list here; low-level callers default to `contacts`.
+    if provenance_contacts is None:
+        provenance_contacts = contacts
     coverage = coverage_report(mesh, islands, contacts, cfg)
     # PRINT-FLOOR amendment (OWNER RATIFIED 2026-07-24): clearance_report fills
     # `moot_transit_members` with the report-only moot rule-4 transits (all
@@ -1213,6 +1315,8 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
     unsupported_minima = minima_report(minima, contacts, cfg) if minima is not None else []
     uncovered_island_births = island_birth_report(island_births, contacts, cfg) \
         if island_births is not None else []
+    regular_contact_invariant_violations = regular_contact_invariant_report(
+        mesh, provenance_contacts, contact_candidate_pool, islands=islands)
     connectivity_violations = connectivity_report(members, plate_z, cfg,
                                                    surface_tree=surface_tree, geom=geom)
     if forest is not None:
@@ -1227,6 +1331,7 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
     uncovered = [c for c in coverage if not c["covered"]]
     ok = (len(uncovered) == 0 and len(clearance) == 0 and len(load) == 0
           and len(unsupported_minima) == 0 and len(uncovered_island_births) == 0
+          and len(regular_contact_invariant_violations) == 0
           and len(connectivity_violations) == 0
           and len(printability_violations) == 0 and len(murray_violations) == 0)
     if gate_on_removal:
@@ -1261,6 +1366,8 @@ def self_verify(mesh, islands, contacts, members, carried_area_mm2, tip_r_mm, cf
         load_violations=load,
         unsupported_minima=unsupported_minima,
         uncovered_island_births=uncovered_island_births,
+        regular_contact_invariant_violations=(
+            regular_contact_invariant_violations),
         connectivity_violations=connectivity_violations,
         printability_violations=printability_violations,
         murray_violations=murray_violations,

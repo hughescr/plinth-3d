@@ -789,9 +789,9 @@ def delicacy_field(mesh, cfg, n_samples=20000, seed=0, geom=None):
     """
     from scipy.spatial import cKDTree
 
-    # trimesh's sample() draws from the GLOBAL numpy random state (see
-    # placement.sample_candidates' identical note) -- seed it explicitly
-    # or this field silently varies with whatever ran before it.
+    # trimesh's sample() draws from the GLOBAL numpy random state -- seed it
+    # explicitly or this scoring field silently varies with whatever ran
+    # before it. Regular contact placement itself has been seed-free since A2.
     np.random.seed(seed)
     n = min(n_samples, max(2000, len(mesh.faces)))
     # Restrict the scoring sample to exterior faces when an exact oracle is

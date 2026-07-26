@@ -361,7 +361,7 @@ today), but each derives its own inset/exemption logic separately.
   (behavior unchanged); keeping breach-rejected thin-twig anchors as a
   fallback is explicitly rejected (appendix).
 
-### 2.4 Perception demand seeding — interior-face filter + true-surface guarantee
+### 2.4 Perception demand seeding — interior-face filter + A2 regular-contact pool
 
 The STL is a non-watertight overlapping assembly: ~40% of "unrouted" contacts
 were phantoms on faces INTERIOR to the solid union (audit finding). Fix at the
@@ -371,15 +371,46 @@ source so no downstream stage ever sees interior demand:
   (perception.py:116, `down & ~grounded`) additionally requires
   `geom.exterior_face_mask()`. Interior faces can neither found an island nor
   join one.
-- `placement.sample_candidates` (placement.py:11-64): islands now contain only
-  exterior faces, so its dense per-island `sub.sample` (placement.py:37) draws
-  positions that are exactly on true, exterior surface (barycentric points of
-  exterior triangles). The blue-noise selection itself REMAINS a seeded,
-  deterministic placement heuristic — it chooses WHERE to put contacts, it is
-  not a geometric measurement, and its output points are exact surface points.
-  (Recorded verdict, sec 2.6.)
-- `engine._ensure_minima_contacts` / `_ensure_island_birth_contacts`
-  (engine.py:319-382, 481-571): their nearest-face lookups
+- **A2 supersession (owner-ratified 2026-07-25):**
+  `placement.sample_candidates` no longer calls `sub.sample` and no longer
+  consumes RNG. Each exterior source face is uniformly refined by recursive
+  1-to-4 midpoint subdivision to the positive coverage margin
+  `target_spacing_mm * coverage_radius_factor - target_spacing_mm`; depth is
+  `ceil(log2(max_edge / margin))` and is refused above
+  `contact_pool_max_refine_depth`. Every virtual cell nominates every
+  co-lowest vertex. Exact-position nominations are deduplicated; ownership is
+  the source face with most-negative normal-z, then source `face_id`.
+  Positions, source `face_id`, and raw source-face normals form the regular
+  contact pool. The pool is built once in `engine.prepare`, logged, and reused
+  by initial placement, repair, Phase-8 R2, and final verification. This is
+  invariant under prior dyadic midpoint refinement, not arbitrary
+  retriangulation.
+- The build is globally preflighted before virtual allocation:
+  `sum(4**depth)`, `3*cells`, and `3*cells*64` must fit the explicit
+  750,000-cell, 2,250,000-candidate, and 144-MiB defaults. Those limits provide
+  about 30% headroom over the 576k-face depth-0 class; refusal telemetry names
+  every winning cap. The 144-MiB setting bounds only the retained compact SOA
+  payload, not process peak memory. These aggregate caps are the primary
+  allocation prevention: an island's one-cell-per-face lower bound is checked
+  before face conversion/triangle materialization, admitted planning uses
+  fixed batches of at most 2,048 faces, and refusal is monotonic. Nomination
+  handling is bounded, batch-first NumPy. Every long construction loop also
+  asserts that `getrusage`'s process peak-RSS high-water mark has not risen by
+  2 GiB from the build-entry high-water mark; this is a last resort, not a
+  current-RSS measurement. Retained rows live in a schema-versioned picklable struct-of-arrays
+  at exactly 64 ndarray bytes each. Its arrays are rebuilt bytes-backed,
+  C-contiguous, and read-only after construction and unpickling; validation
+  checks array metadata, counters, ordering, mesh/island ranges, and raw
+  normals. `engine.prepare` also records deterministic SHA-256 fingerprints of
+  canonical mesh arrays and semantic config JSON. Construct, finish,
+  relocation, and performance-cache reuse reject old, corrupted, or mismatched
+  checkpoints with an instruction to rerun prepare.
+- Minimum and island-birth contacts remain specialized. They persist
+  `region_pts`, or `birth_loop` plus `birth_z`, respectively; Phase-8 filters
+  their source-face-center candidates by those exact domains, with birth
+  precedence when both flags are set. They do not inherit regular-pool
+  `face_id` provenance.
+- `engine._ensure_minima_contacts` / `_ensure_island_birth_contacts`: their nearest-face lookups
   (`centers_tree.query_ball_point`) are restricted to exterior faces (build
   the centers KDTree over exterior faces only). `perception.local_z_minima`
   and `perception.island_births` operate on the full mesh (a slice birth is a
@@ -388,9 +419,9 @@ source so no downstream stage ever sees interior demand:
 - `perception.delicacy_field` (perception.py:474-563): sampling restricted to
   exterior faces; retains its seed for the SCORING field only (sec 3).
 
-### 2.5 Seed-dependent volumes — `placement.load_partition` (placement.py:80-110)
+### 2.5 Seed-dependent volumes — `placement.load_partition`
 
-The Monte-Carlo `sub.sample` partition (placement.py:102) makes carried areas
+The former Monte-Carlo `sub.sample` partition makes carried areas
 — hence tip radii, hence member volumes — seed-dependent. Replacement: exact,
 deterministic per-face assignment: each island face's centroid is assigned to
 its nearest contact (cKDTree over the island's contacts), and the face's full
@@ -399,6 +430,10 @@ at face granularity (faces are small vs. `target_spacing_mm` on this corpus).
 Same signature, `n_dense_samples`/`seed` parameters retired.
 
 ### 2.6 Inventory of remaining `build_surface_tree` / `.sample` consumers
+
+This is a historical migration inventory. Its `file:line` annotations are
+obsolete orientation only; the named symbols and dispositions are
+authoritative because live line numbers drift as the implementation evolves.
 
 | Consumer (file:line) | Load-bearing? | Disposition |
 |---|---|---|
@@ -416,7 +451,7 @@ Same signature, `n_dense_samples`/`seed` parameters retired.
 | trunks.py _column_clear/_segment_clear + braces.py (trunks.py:35-65 etc.; braces.py:194,296) | **NO** — retired v3 policy modules, not imported by the v4 engine (engine.py:5, bracing.py:4-5) | untouched; their tests keep building a local cloud via build_surface_tree (which survives as a deprecated test/legacy helper) |
 | verify.orientation_scar_cost (verify.py:490-516) | **NO** — orientation scoring only | unchanged |
 | perception.delicacy_field sample (perception.py:496) | **NO** as a SCORING field (weights rank regions) — its former load-bearing role as the anchor POSITION pool is removed by 2.3 | keep seeded sampling for weights, restricted to exterior faces |
-| placement.sample_candidates blue-noise (placement.py:37) | placement heuristic; positions exact-on-surface after 2.4 | keep, seeded, documented |
+| placement.sample_candidates (placement.py) | **YES** (regular demand positions) | A2 prepared virtual lowest-vertex pool; deterministic, seed-free; deprecated `seed=` accepted and ignored |
 | perception.grounded_mask rays (perception.py:75) | YES but already ray-exact (trimesh ray backend) | optionally route through geom.cast_rays for backend independence; not required for v5 |
 
 Explicitly deferred: `bracing.py:762` `if surface_tree is None: return []` and
@@ -430,10 +465,9 @@ similar None-guards keep their meaning with `geom is None`.
   ball breach, anchors, interior classification, and load partition are all
   exact functions of (mesh, cfg, contact set). No wall-clock dependence.
 - Parity votes use fixed axis rays and fixed grid bucketing — deterministic.
-- Remaining seeded sampling (documented, scoring/heuristic only):
-  `delicacy_field` (weights), `sample_candidates` (blue-noise placement).
-  Both already seed the global numpy state explicitly (seed=0) and stay
-  reproducible run-to-run; neither feeds a geometric measurement anymore.
+- Remaining seeded sampling is scoring-only: `delicacy_field` retains its
+  fixed seed for weights. Regular contact placement and load partition are
+  seed-free.
 - Ties broken by index everywhere (existing convention, e.g. struts.py:50-51),
   preserved in the new centroid pools.
 - Exact queries replace sampling — keep it that way: no new `.sample` calls
@@ -597,6 +631,47 @@ existing suites. All fixtures deterministic, no unseeded sampling.
 16. **Coverage pins** (review point 7): fixture unrouted-contact counts
     pinned; a synthetic thin-twig-only-anchor fixture MUST route to plate
     (not to the breach-rejected twig) with the contact still supported.
+17. **A2 regular-contact invariant:** a coarse planar source triangle is
+    coverage-clean without centroid/random fallback; a source triangle and
+    its dyadic midpoint subdivision produce identical pool geometry; source
+    face order does not alter selected geometry; stale position/face/normal
+    provenance (including an unrouted original contact) and specialized
+    contacts carrying a regular `face_id` hard-fail `verify.ok`.
+
+### 6.1 A2 representative acceptance evidence (2026-07-25)
+
+The re-freeze helper ran table and toed-slab twice each and asserted exact
+volume-report equality. Table: total 0.39602846189165186 ml, member
+0.29864423997554795 ml, 4 unrouted, 34 accepted rewires; prepared pool depth
+5, 2,176 virtual cells, 1,189 candidates, and 76,096 compact ndarray bytes.
+Toed slab: total
+0.5362920772872579 ml, member 0.43307741172616016 ml, 2 unrouted, 41 accepted
+rewires; pool depth 5, 2,080 virtual cells, 1,109 candidates, and 70,976 compact
+ndarray bytes. Both finish with
+`verify.ok = True`, zero uncovered islands, zero ball breaches, and zero A2
+    regular-contact invariant violations.
+18. **A2 resource/lifecycle gate:** aggregate many-face plans refuse before
+    virtual allocation; one depth-8 face is admitted; the 2-GiB peak-RSS
+    high-water-growth
+    guard is exercised; compact-pool payload stays bounded by its 64-byte rows
+    plus fixed metadata. Construction and pickle roundtrip preserve immutable
+    arrays; counter/order/range corruption is rejected. A full prepared-state
+    roundtrip is reused by placement, repair, R2, and final verify with pool
+    recomputation disabled; old schemas and mesh/config fingerprint mismatches
+    fail clearly. One accepted R2 move globally per frozen sweep is pinned by
+    same-island and cross-island shared-birth cases where two individually safe
+    moves are jointly unsafe.
+
+This is the deliberately bounded A2 acceptance set. The 37-model corpus batch
+is deferred until the A3/A4 changes land so the expensive corpus run validates
+the combined phase rather than an intermediate contact-pool snapshot.
+
+A prepare-only corpus smoke test on `minis-to-process/Round 25.stl` (2,996
+faces) completed in 0.76 s wall time: 1 island, 31 contacts, pool depth 4,
+37,250 virtual cells, 19,997 candidates, and 1,279,808 compact ndarray bytes.
+This validates bounded pool construction on an actual corpus STL without
+prematurely running the
+37-model batch.
 
 ---
 

@@ -156,7 +156,8 @@ full mesh — cProfile there would confirm/deny the cap-hit; see §0.*
 - `trimesh.section_multiplane` — the island_births slicer (shapely/C). Native
   *per call*, but the **loop over z-chunks is pure-Python and serial**.
 - `trimesh.Trimesh.sample()`, `mesh.area_faces`, `mesh.triangles_center` — numpy.
-- `placement.load_partition` Monte-Carlo — numpy `bincount`/`cKDTree` per island.
+- `placement.load_partition` exact face-area assignment — deterministic
+  `cKDTree` nearest-contact query per island; no RNG.
 - `placement.tip_radius_mm` — fully vectorized numpy.
 - `tree.revalidate` — *batched* clearance sampling (good), but wrapped in a
   per-member Python loop with a listcomp `dirty_members` scan each call.
@@ -186,27 +187,27 @@ Craig's rule: **parallel output must be bit-identical to the serial engine**, vi
 stream sharing.* This is not a nice-to-have; it dictates which strategies are even
 admissible. Two things in the current code make it sharp:
 
-### 4a. Global-RNG reseeding — threading is unsafe, processes or explicit
-Generators are mandatory
-Four hot spots seed the **process-global numpy RNG** and then sample:
-`placement.sample_candidates` / `load_partition` (`np.random.seed(seed)` then
-`sub.sample()`, placement.py:29,89), `perception.delicacy_field`
-(perception.py:494), `routing.build_surface_tree` (routing.py:115). trimesh's
-`.sample()` draws from the **global** `np.random` state, not a passed Generator.
+### 4a. Global-RNG reseeding — remaining sampling requires processes or explicit
+Generators
+
+**A2 update (2026-07-25):** `placement.sample_candidates` is now a
+deterministic prepared virtual pool and `load_partition` is an exact face-area
+assignment; neither reads or mutates RNG state. The deprecated
+`sample_candidates(seed=...)` argument remains accepted and ignored for
+compatibility.
+
+The remaining hot spots that seed the **process-global numpy RNG** and sample
+are `perception.delicacy_field` and `routing.build_surface_tree`. Trimesh's
+`.sample()` draws from global `np.random` state, not a passed Generator.
 Consequences that MUST be encoded as design rules:
 - **[HARD RULE] No shared-memory threading across any stage that samples.** Two
   threads sharing one global RNG interleave draws non-deterministically → not
   reproducible, let alone bit-identical. Use **processes** (each gets its own
   global RNG) *or* refactor every `.sample()` path to an explicit
   `np.random.Generator` seeded from a fixed, unit-id-derived seed.
-- **[HARD RULE] `load_partition` is order-dependent today.** It seeds *once* then
-  loops islands sharing that stream (placement.py:89-107). Parallelizing per
-  island (or even reordering islands) changes which draws each island consumes →
-  different carried areas → different radii → different file. Fix: **per-island
-  deterministic sub-seed** (`seed = base_seed ^ hash(island_id)` or
-  `SeedSequence(base).spawn`), applied in *both* serial and parallel modes so the
-  serial baseline is redefined to the per-island-seeded version *once* (a
-  deliberate, print-re-approved baseline change), after which serial==parallel.
+- **[RESOLVED BY A2]** `load_partition` no longer has an order-dependent random
+  stream. Fixed-index-order reduction remains mandatory because carried-area
+  sums still feed radii and topology decisions.
 
 ### 4b. Floating-point reduction order
 - **[HARD RULE] Every reduction sums/gathers in fixed index order, never
@@ -231,16 +232,15 @@ commit to a position:
 - **Reading A (frozen baseline):** parallel engine == *today's* serial Python
   engine, byte-for-byte. Forbids **any** change that alters a float result —
   including a language port (you cannot reproduce shapely/scipy/trimesh numerics
-  bit-for-bit in Rust/C++; see §6) and even the per-island-seed fix in §4a.
+  bit-for-bit in Rust/C++; see §6).
 - **Reading B (self-consistency + re-approval):** the shipped engine's
   **parallel mode == its own serial mode**, byte-for-byte; whenever a change
-  alters the *serial* baseline (per-island seeding, a native kernel, a port), that
+  alters the *serial* baseline (a native kernel or other arithmetic port), that
   new serial baseline is re-run through Craig's print-approval gate **once**, and
   from then on parallel must match it exactly.
 
 **I plan against Reading B**, because Reading A makes "parallelize as much as
-possible" nearly impossible (it even bans the deterministic per-island reseed that
-*enables* safe parallelism) and forbids a port outright, which the task explicitly
+possible" nearly impossible and forbids a port outright, which the task explicitly
 puts on the table. Under Reading B the acceptance gate per phase is: *(i)* the
 phase's serial baseline is unchanged OR re-approved by Craig; *(ii)* parallel
 output is byte-identical to that serial baseline; *(iii)* suite green; *(iv)*
@@ -296,8 +296,8 @@ No new cores, no determinism risk beyond §4b validation. Target the §2 hotspot
 - **A4. `tree.revalidate` dirty-set.** It rebuilds `dirty_members` via an O(N)
   listcomp each call (47k calls on the table). Maintain a dirty *set* incrementally
   (members already `_touch`ed). **Effort:** 1 day.
-- **Phase-1 Gate:** emitted file **byte-identical** to Phase-0 baseline (or, for
-  A2 if it moves a ULP, a one-time Craig re-approval + new frozen baseline); full
+- **Phase-1 Gate:** emitted file **byte-identical** to the frozen post-A2
+  Phase-0 baseline; full
   suite green; **target ≥2.5× full-mesh wall** (193.8s → ≲78s), driven by
   fix-pass shrink + A3.
 
@@ -320,16 +320,17 @@ NumPy-heavy chunks, `loky`/`joblib`. Order all gathers by unit index (§4b).
   independent — run as 4 concurrent processes. Modest (they're ~7% combined) but
   free once B1's harness exists. *Determinism:* each seeds its own global RNG in
   its own process (already the pattern) — safe by construction.
-- **B3. Parallel `load_partition` per island** — **only after** the §4a per-island
-  seed refactor (else non-deterministic). Per-island Monte-Carlo is independent.
-  **Effort:** 1 day incl. the seed refactor. *Determinism:* per-island sub-seed;
-  serial baseline redefined once (Reading B).
+- **B3. Parallel `load_partition` per island** — A2 removed the former
+  Monte-Carlo and replaced it with exact face-area assignment. Islands are now
+  independent; gather and reduce in fixed island/contact index order.
+  **Effort:** 0.5 day. *Determinism:* no RNG; serial arithmetic order remains
+  the baseline.
 - **B4. Parallel verify gates.** `verify.self_verify` runs several independent
   gate checks (clearance, connectivity, printability, murray, load, minima,
   island-birth coverage) — fan them out, gather violation lists in fixed gate
   order. **Effort:** 1–1.5 days.
-- **Phase-2 Gate:** byte-identical to Phase-1 baseline (B3 may need one re-approval
-  for the seed change); suite green; **target: prepare stage ≥4× (59s → ≲15s)**,
+- **Phase-2 Gate:** byte-identical to Phase-1 baseline; suite green;
+  **target: prepare stage ≥4× (59s → ≲15s)**,
   full run (with Phase 1) **≲45s**.
 
 ### Phase 3 — Parallelizing the greedy core (the hard 70%) — **highest risk**
@@ -465,8 +466,8 @@ mostly deliver, and doubles the determinism-validation burden.
 | Phase | Scope | Effort | Risk | Determinism story | Acceptance gate |
 |---|---|---|---|---|---|
 | 0 | Byte-hash harness + full-mesh cProfile + `n_workers` knob | 0.5 d | low | n/a | hash reproducible ×3 |
-| 1 | Incremental volume, de-numpy leaves, memoize delicacy, dirty-set | 4–5 d | low–med | byte-identical (A2 may need 1 re-approval) | **byte-identical**, suite green, **≥2.5× full run** |
-| 2 | Process-parallel births / prepare / load_partition / verify | 5–6 d | med | fixed-order gather; per-island seed (B3 re-approval) | byte-identical, suite green, **prepare ≥4×** |
+| 1 | Incremental volume, de-numpy leaves, memoize delicacy, dirty-set | 4–5 d | low–med | byte-identical to frozen post-A2 baseline | **byte-identical**, suite green, **≥2.5× full run** |
+| 2 | Process-parallel births / prepare / load_partition / verify | 5–6 d | med | fixed-order gather; exact load partition has no RNG stream | byte-identical, suite green, **prepare ≥4×** |
 | 3 | Parallel greedy core (C1 candidate → C2 tree-group → C3 sweep) | 3–12 d/tactic | med–high | speculative eval + fixed-order replay/commit | **byte-identical**, suite green, **fix ≥3×** |
 | 4 (opt) | Rust kernel via PyO3 for §2 hotspots + `rayon` sweep | 3–5 wk | med | new baseline (Reading B), numpy-parity harness | re-approved baseline, parallel==serial, **≥6–8× total** |
 
@@ -492,10 +493,10 @@ mostly deliver, and doubles the determinism-validation burden.
   INFERRED. Close before committing Phase-3 effort.
 
 ### Open questions for Craig / Codex
-1. **Determinism Reading A vs B (§4c)** — this single choice decides whether ports
-   and even per-island reseeding are admissible. I assume B.
+1. **Determinism Reading A vs B (§4c)** — this single choice decides whether
+   native ports with different arithmetic are admissible. I assume B.
 2. Is a **one-time print-re-approval** of a new serial baseline acceptable when a
-   change (per-island seed, native kernel) improves resin volume but alters the
-   emitted file? Phases 1(A2)/2(B3)/4 depend on it.
+   native kernel improves resin volume but alters the emitted file? Phase 4
+   depends on it.
 3. Is the engine **feature-frozen** enough to justify a native kernel, or is R&D
    churn still high (which argues for staying pure-Python longer)?

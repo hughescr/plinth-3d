@@ -286,6 +286,7 @@ class Candidate:
     # the contact record when the re-seat survives commit.
     seat_c: Optional[np.ndarray] = None
     seat_n: Optional[np.ndarray] = None
+    seat_face_id: Optional[int] = None
     reseat_dist_mm: float = 0.0
 
 
@@ -443,10 +444,13 @@ def evaluate_r1(sites: list, geom, cfg,
 # ---------------------------------------------------------------------------
 def reseat_candidates(site: StubSite, seeds, cfg) -> list:
     """Enumerate a site's R2 re-seat candidate set from `seeds` -- an ORDERED
-    (nearest-to-demanded first) list of `(position, outward_normal, distance)`
-    model-surface seats inside the site's inviolable class domain (REACH §1;
+    (nearest-to-demanded first) list of
+    `(position, outward_normal, distance, face_id)` model-surface seats inside
+    the site's inviolable class domain (REACH §1;
     the driver's `surface_seeds_for_sites` builds and orders them, and applies
     the domain + coverage/birth guard, so this function is pure algebra).
+    ``face_id`` is present for regular contacts whose seats come from the
+    lowest-vertex pool and ``None`` for specialized minimum/birth domains.
 
     Each seat is re-aimed at ITS OWN outward normal (polar 0 -- R2 moves the
     demand, it does not additionally re-aim: the cone belongs to R1, which by
@@ -459,9 +463,17 @@ def reseat_candidates(site: StubSite, seeds, cfg) -> list:
     factors = list(cfg.p8_reaim_length_factors)
     nlen = len(factors)
     out = []
-    for si, (pos, nrm, dist) in enumerate(seeds):
+    for si, seed in enumerate(seeds):
+        # Legacy staged callers supplied the original 3-field specialized-seat
+        # tuple. It remains source-compatible and means "no regular face id".
+        if len(seed) == 3:
+            pos, nrm, dist = seed
+            face_id = None
+        else:
+            pos, nrm, dist, face_id = seed
         pos = np.asarray(pos, float)
-        n_hat = _unit(np.asarray(nrm, float))
+        raw_nrm = np.asarray(nrm, float)
+        n_hat = _unit(raw_nrm)
         for li, f in enumerate(factors):
             L = float(site.stub_length_mm) * float(f)
             m = reaim_stub(pos, n_hat, site.contact_depth_mm, L, site.r_tip,
@@ -471,7 +483,9 @@ def reseat_candidates(site: StubSite, seeds, cfg) -> list:
             out.append(Candidate(site_id=site.site_id, cand_index=si * nlen + li,
                                  length_step=li, f=float(f), polar_deg=0.0,
                                  azimuth_deg=0.0, n_hat=n_hat, member=m,
-                                 seat_c=pos.copy(), seat_n=n_hat.copy(),
+                                 seat_c=pos.copy(), seat_n=raw_nrm.copy(),
+                                 seat_face_id=(None if face_id is None
+                                               else int(face_id)),
                                  reseat_dist_mm=float(dist)))
     return out
 

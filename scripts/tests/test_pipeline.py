@@ -52,8 +52,7 @@ def _empty_result():
 @pytest.mark.chitubox
 def test_prep_one_runs_all_three_stages(source_stl, tmp_path):
     out = tmp_path / "table.chitubox"
-    rep = pipeline.prep_one(source_stl, str(out), orient=False,
-                            allow_failed_gates=True)
+    rep = pipeline.prep_one(source_stl, str(out), orient=False)
 
     assert rep.status == pipeline.STATUS_OK
     assert rep.exit_code == pipeline.EXIT_OK and rep.ok
@@ -72,12 +71,12 @@ def test_prep_one_runs_all_three_stages(source_stl, tmp_path):
 
     sup = rep.stage("supports").report
     assert sup["n_members"] > 0
-    # A1 restores the lifted bottom-face demand this 0.7-scale wiring
-    # fixture used to omit. Its downstream ball geometry is not yet clean,
-    # so this test exercises the explicit development override without
-    # weakening the engine gate or pretending the layout is printable.
-    assert sup["gates"]["ok"] is False
-    assert sup["gates"]["ball_breach_violations"] > 0
+    # A2's dyadic virtual analysis cells keep the deliberately coarse fixture
+    # coverage-capable without centroid/random fallback.
+    assert sup["gates"]["ok"] is True
+    assert sup["gates"]["uncovered_islands"] == 0
+    assert sup["gates"]["ball_breach_violations"] == 0
+    assert sup["gates"]["regular_contact_invariant_violations"] == 0
     assert sup["plate_z"] == pytest.approx(
         rep.stage("emit").report["plate_z"], abs=1e-9)
 
@@ -93,12 +92,11 @@ def test_prep_one_runs_all_three_stages(source_stl, tmp_path):
 @pytest.mark.chitubox
 def test_report_is_written_to_disk_and_json_safe(source_stl, tmp_path):
     out = tmp_path / "r.chitubox"
-    rep = pipeline.prep_one(source_stl, str(out), orient=False,
-                            allow_failed_gates=True)
+    rep = pipeline.prep_one(source_stl, str(out), orient=False)
     assert rep.report_path == pipeline.default_report_path(str(out))
     on_disk = json.loads(open(rep.report_path).read())
     assert on_disk == json.loads(json.dumps(rep.to_dict()))
-    assert on_disk["stages"][1]["report"]["gates"]["ok"] is False
+    assert on_disk["stages"][1]["report"]["gates"]["ok"] is True
 
 
 @pytest.mark.kernel

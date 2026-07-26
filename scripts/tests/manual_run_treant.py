@@ -50,7 +50,10 @@ def stage_contacts():
     cfg = state["cfg"]
     islands = state["islands"]
     t0 = time.time()
-    contacts = placement.sample_candidates(mesh, islands, cfg)
+    contact_candidate_pool = placement.candidate_pool(mesh, islands, cfg)
+    contacts = placement.sample_candidates(
+        mesh, islands, cfg,
+        candidate_pool_prepared=contact_candidate_pool)
     print(f"{len(contacts)} contacts in {time.time()-t0:.1f}s")
     t0 = time.time()
     points, normals, weights, _query = perception.delicacy_field(mesh, cfg)
@@ -58,7 +61,8 @@ def stage_contacts():
     # the closure `query` fn isn't picklable -- save the raw arrays and
     # rebuild a cKDTree-backed query() in whichever stage needs it.
     save_state(contacts=contacts, delicacy_points=points, delicacy_normals=normals,
-               delicacy_weights=weights)
+               delicacy_weights=weights,
+               contact_candidate_pool=contact_candidate_pool)
     print("saved stage=contacts")
 
 
@@ -152,9 +156,12 @@ def stage_verify():
     carried = state["carried"]
     tip_r = state["tip_r"]
     surface_tree = state["surface_tree"]
+    contact_candidate_pool = state["contact_candidate_pool"]
     t0 = time.time()
     report = verify.self_verify(mesh, islands, contacts, routes, carried, tip_r, cfg,
-                                 surface_tree=surface_tree)
+                                 surface_tree=surface_tree,
+                                 contact_candidate_pool=contact_candidate_pool,
+                                 provenance_contacts=contacts)
     print(f"verify in {time.time()-t0:.1f}s: ok={report['ok']}, "
           f"uncovered={len(report['uncovered_islands'])}, "
           f"clearance={len(report['clearance_violations'])}, "

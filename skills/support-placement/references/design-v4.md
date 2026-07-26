@@ -15,6 +15,36 @@ the Treant with a measured diminishing-returns cutoff, not a fixed
 iteration count; removal model is grip-and-peel first, ordered
 outer-to-inner cut access as the honest fallback; stays Python.
 
+**A2 contact-position amendment (owner-ratified 2026-07-25).** Regular
+coverage contacts are the exception to older generic "sampling" and
+face-centroid language in this charter. Their only legal seats are one
+prepared deterministic virtual lowest-vertex pool: recursive uniform 1-to-4
+midpoint refinement to the coverage-derived edge bound, every co-lowest
+virtual-cell vertex nominated, exact-position dedupe, and deterministic source
+face ownership. Initial placement, repair, Phase-8 R2, and final verification
+reuse that pool. Regular records persist the source `face_id` and exact raw
+source-face normal; final verification hard-gates pool membership and
+provenance. Minimum and island-birth contacts retain their specialized
+`region_pts` and `birth_loop`/`birth_z` domains and never acquire a regular
+`face_id`. The pool is a schema-versioned picklable struct-of-arrays (64 bytes
+per retained candidate) whose canonical arrays are bytes-backed,
+C-contiguous, and read-only after construction or unpickling. Deep staged
+validation covers array metadata, counters, ordering, mesh/island ranges, and
+raw normals. A two-pass global plan refuses before virtual
+allocation when the configured aggregate cell, conservative `3*cells`
+nomination/candidate, or byte budget would be exceeded; the shipped
+750k/2.25m/144-MiB defaults leave about 30% headroom over the known 576k-face
+depth-0 class. That 144-MiB limit covers retained compact SOA payload only, not
+process peak RSS. Aggregate caps are primary: each island's one-cell-per-face
+lower bound is checked before face materialization and planning runs in
+fixed <=2,048-face NumPy batches with monotonic refusal. Long construction
+loops separately assert no 2-GiB rise in the process peak-RSS high-water mark
+since build entry (not current RSS), and nomination handling is batch-first
+NumPy. Extensions enforce monotonic island ids and join prepared/new chunks
+directly into final immutable bytes-backed columns. Prepared state fingerprints the
+canonical mesh and semantic config; staged consumers reject pre-A2,
+mismatched, or corrupted state and require prepare to be rerun.
+
 ## 0. Objective
 
 Minimize total resin volume + scar cost + removal effort, subject to:
@@ -51,7 +81,7 @@ the α-functional abstracts away.
 
 KEEP UNCHANGED (substrate): `config.py` (extended), `mesh_io.py`,
 `perception.py` (islands, local_z_minima, delicacy field),
-`placement.py` (sampling, load partition, tip sizing, `_shaft_r_for_L`
+`placement.py` (A2 deterministic contact pool, load partition, tip sizing, `_shaft_r_for_L`
 angle-aware solve — extended per §6), `routing.py` (Segment/Route,
 `build_surface_tree`, `check_clearance_batch`), `chitubox_emit.py`
 (+ one generic chain emitter §12), `corpus.py`.

@@ -74,6 +74,23 @@ class SupportConfig:
     spacing_floor_mm: float = 2.5
     # Small/isolated islands still need at least this many contacts.
     min_contacts_per_island: int = 1
+    # A2 virtual analysis-face safety bound. Each source triangle is uniformly
+    # midpoint-refined until its cells fit inside the unused
+    # coverage-radius/target-spacing margin. Refuse a face needing more than
+    # this many dyadic levels instead of allocating 4**depth cells without
+    # bound. Implementation/memory guard, not a physics lever.
+    contact_pool_max_refine_depth: int = 8
+    # A2 aggregate two-pass preflight budgets. The defaults admit the known
+    # 576k-face depth-0 class: 576k virtual cells and at most 1.728m
+    # co-lowest nominations. A compact retained row is exactly 64 bytes, so
+    # that conservative nomination upper bound is ~105.5 MiB. Defaults give
+    # ~30% explicit headroom: the 750k virtual-cell cap is the first effective
+    # limiter, its worst 2.25m nominations fit the matching candidate cap, and
+    # their 144,000,000-byte SOA upper bound fits under 144 MiB. These are
+    # refusal/memory-safety guards, not placement-quality levers.
+    contact_pool_max_virtual_cells: int = 750_000
+    contact_pool_max_candidates: int = 2_250_000
+    contact_pool_max_compact_payload_bytes: int = 144 * 1024 * 1024
 
     # ---- Overhang / island detection ----
     # A face counts as needing support if its normal points more than this

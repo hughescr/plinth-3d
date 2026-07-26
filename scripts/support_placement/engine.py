@@ -10,6 +10,9 @@ See references/design-v4.md for the charter and __init__.py for the
 module map.
 """
 import contextlib
+import dataclasses
+import hashlib
+import json
 import sys
 import threading
 import time
@@ -18,6 +21,109 @@ import numpy as np
 from . import perception, placement, routing, verify, joints, cco, tree, rewire
 from . import transient, bracing, phase8_driver
 from .geometry_kernel import KernelSurface
+
+
+PREPARED_STATE_SCHEMA = "support-placement/prepare"
+PREPARED_STATE_SCHEMA_VERSION = 1
+
+
+def mesh_fingerprint(mesh):
+    """Deterministic identity of staged mesh geometry (stdlib SHA-256)."""
+    h = hashlib.sha256()
+    for label, value, dtype in (
+            ("vertices", mesh.vertices, np.dtype("<f8")),
+            ("faces", mesh.faces, np.dtype("<i8"))):
+        arr = np.ascontiguousarray(np.asarray(value, dtype=dtype))
+        h.update(label.encode("ascii"))
+        h.update(json.dumps(
+            list(arr.shape), separators=(",", ":")).encode("ascii"))
+        h.update(arr.tobytes(order="C"))
+    return h.hexdigest()
+
+
+def _canonical_config_value(value):
+    if isinstance(value, dict):
+        return {
+            str(k): _canonical_config_value(v)
+            for k, v in sorted(value.items(), key=lambda kv: str(kv[0]))
+        }
+    if isinstance(value, (tuple, list)):
+        return [_canonical_config_value(v) for v in value]
+    if isinstance(value, np.generic):
+        return value.item()
+    return value
+
+
+def canonical_config_json(cfg):
+    """Stable semantic SupportConfig serialization; no repr/default coupling."""
+    if not dataclasses.is_dataclass(cfg):
+        raise TypeError("prepared state config must be a dataclass instance")
+    payload = _canonical_config_value(dataclasses.asdict(cfg))
+    return json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def config_fingerprint(cfg):
+    return hashlib.sha256(canonical_config_json(cfg).encode("utf-8")).hexdigest()
+
+
+def _prepared_value_exact_equal(left, right):
+    """Exact recursive equality for caller-supplied prepared domains."""
+    if left is right:
+        return True
+    if isinstance(left, np.ndarray) or isinstance(right, np.ndarray):
+        return (
+            isinstance(left, np.ndarray)
+            and isinstance(right, np.ndarray)
+            and left.dtype == right.dtype
+            and left.shape == right.shape
+            and np.array_equal(left, right))
+    if isinstance(left, dict) or isinstance(right, dict):
+        return (
+            isinstance(left, dict)
+            and isinstance(right, dict)
+            and left.keys() == right.keys()
+            and all(_prepared_value_exact_equal(left[k], right[k])
+                    for k in left))
+    if isinstance(left, (list, tuple)) or isinstance(right, (list, tuple)):
+        return (
+            isinstance(left, (list, tuple))
+            and isinstance(right, (list, tuple))
+            and len(left) == len(right)
+            and all(_prepared_value_exact_equal(a, b)
+                    for a, b in zip(left, right)))
+    return type(left) is type(right) and left == right
+
+
+def validate_prepared_state(pre, mesh=None, cfg=None):
+    """Fail clearly on checkpoints created before the A2 prepared-pool schema."""
+    if (not isinstance(pre, dict)
+            or pre.get("schema") != PREPARED_STATE_SCHEMA
+            or pre.get("version") != PREPARED_STATE_SCHEMA_VERSION):
+        raise ValueError(
+            "prepared state schema/version is missing or unsupported; rerun prepare")
+    if "contact_candidate_pool" not in pre:
+        raise ValueError(
+            "prepared state has no A2 contact candidate pool; rerun prepare")
+    if not isinstance(pre.get("mesh_fingerprint"), str):
+        raise ValueError(
+            "prepared state has no mesh fingerprint; rerun prepare")
+    if not isinstance(pre.get("config_fingerprint"), str):
+        raise ValueError(
+            "prepared state has no config fingerprint; rerun prepare")
+    if mesh is not None and pre["mesh_fingerprint"] != mesh_fingerprint(mesh):
+        raise ValueError(
+            "prepared state mesh fingerprint mismatch; rerun prepare")
+    if cfg is not None and pre["config_fingerprint"] != config_fingerprint(cfg):
+        raise ValueError(
+            "prepared state config fingerprint mismatch; rerun prepare")
+    placement.validate_candidate_pool(
+        pre["contact_candidate_pool"], mesh=mesh,
+        islands=pre.get("islands"))
+    return pre
+
+
+_require_prepared_state = validate_prepared_state
 
 
 @contextlib.contextmanager
@@ -85,10 +191,12 @@ def prepare(mesh, cfg, log=None, geom=None):
     """Stage 1 of the pipeline: everything that depends only on the mesh.
     Returns a picklable dict (no KDTree/KernelSurface -- rebuild per
     process with routing.build_surface_tree / KernelSurface(mesh)):
-    islands, minima, island_births, contacts, plate_z, sample_points,
-    sample_delicacy, log. Extracted from run() so Treant-scale runs can
-    checkpoint between bounded foreground calls; run() remains the
-    canonical composition.
+    ``schema``, ``version``, islands, minima, island_births, contacts, plate_z,
+    sample_points, sample_delicacy, the compact schema-versioned
+    ``contact_candidate_pool``, and log. Extracted from run() so Treant-scale
+    runs can checkpoint between bounded foreground calls; run() remains the
+    canonical composition. Staged consumers reject older checkpoints with an
+    explicit "rerun prepare" error.
 
     `geom` (v5, SPEC-V5-GEOM sec 2.3, optional): when supplied (a
     surface-EXACT oracle, NOT stored in the returned dict -- it is only
@@ -144,7 +252,20 @@ def prepare(mesh, cfg, log=None, geom=None):
         import dataclasses
         seed_cfg = dataclasses.replace(
             cfg, target_spacing_mm=cfg.target_spacing_mm * float(seed_f))
-    contacts = placement.sample_candidates(mesh, islands, seed_cfg)
+    # A2 prepared regular-contact pool: one picklable source of truth reused by
+    # initial placement, coverage repair, Phase 8, and final verification.
+    # Virtual refinement is derived from the UNCHANGED coverage contract, not
+    # the optional B3 seed-spacing quality lever.
+    pool_stats = {}
+    # Install the live stats dict before candidate_pool runs so a refusal still
+    # leaves its complete planned counts and winning-cap reasons in caller log.
+    log["contact_candidate_pool"] = pool_stats
+    contact_candidate_pool = placement.candidate_pool(
+        mesh, islands, cfg, stats_out=pool_stats)
+    n_pool_islands = len(islands)
+    contacts = placement.sample_candidates(
+        mesh, islands, seed_cfg,
+        candidate_pool_prepared=contact_candidate_pool)
     log["contacts_initial"] = len(contacts)
     contacts, islands, n_min_added = _ensure_minima_contacts(
         mesh, islands, contacts, minima, cfg, geom=geom)
@@ -159,12 +280,25 @@ def prepare(mesh, cfg, log=None, geom=None):
     contacts, islands, n_birth_added = _ensure_island_birth_contacts(
         mesh, islands, contacts, island_births, cfg, geom=geom)
     log["island_birth_contacts_added"] = n_birth_added
-
+    if len(islands) > n_pool_islands:
+        # Synthetic minimum/birth islands remain part of shared coverage and
+        # later A4 repair. Extend the same compact pool under the COMBINED
+        # aggregate preflight; candidate_pool refuses before generating the new
+        # virtual cells or allocating the concatenated arrays.
+        contact_candidate_pool = placement.candidate_pool(
+            mesh, islands[n_pool_islands:], cfg,
+            island_id_offset=n_pool_islands, stats_out=pool_stats,
+            existing_pool=contact_candidate_pool)
     sample_points, sample_delicacy = perception.exterior_anchor_pool(mesh, geom, cfg)
     log["t_delicacy"] = round(time.time() - t0, 2)
-    return dict(islands=islands, minima=minima, island_births=island_births,
+    return dict(schema=PREPARED_STATE_SCHEMA,
+                version=PREPARED_STATE_SCHEMA_VERSION,
+                mesh_fingerprint=mesh_fingerprint(mesh),
+                config_fingerprint=config_fingerprint(cfg),
+                islands=islands, minima=minima, island_births=island_births,
                 contacts=contacts, plate_z=plate_z, sample_points=sample_points,
-                sample_delicacy=sample_delicacy, log=log)
+                sample_delicacy=sample_delicacy,
+                contact_candidate_pool=contact_candidate_pool, log=log)
 
 
 def construct(mesh, pre, surface_tree, cfg, log=None, limit_contacts=None, geom=None,
@@ -176,6 +310,7 @@ def construct(mesh, pre, surface_tree, cfg, log=None, limit_contacts=None, geom=
     clearance revalidation when supplied; without it, the legacy cKDTree
     `surface_tree` does (tests/staged-legacy). Returns (forest, unrouted,
     carried, tip_r, contacts)."""
+    _require_prepared_state(pre, mesh=mesh, cfg=cfg)
     log = log if log is not None else {}
     oracle = geom if geom is not None else surface_tree
     contacts = pre["contacts"][:limit_contacts] if limit_contacts else pre["contacts"]
@@ -307,7 +442,8 @@ def brace_and_size(mesh, forest, unrouted, surface_tree, plate_z, cfg, log=None,
 
 def relocate(mesh, forest, unrouted, contacts, carried, tip_r, plate_z, cfg,
              geom=None, log=None, census_authority=frozenset(), pass_idx=0,
-             progress=None, islands=None, island_births=None, carry_ledger=None):
+             progress=None, islands=None, island_births=None, carry_ledger=None,
+             candidate_pool_prepared=None, prepared_state=None):
     """Phase-8 RELOCATION STAGE (SPEC-P8-RELOCATE §3.0), wired post-brace /
     pre-final-verify. Constructs the frozen defect snapshot + the SM-STUB /
     SM-STRUT / SM-BALL sites from the engine's OWN gate output, runs the state
@@ -321,9 +457,39 @@ def relocate(mesh, forest, unrouted, contacts, carried, tip_r, plate_z, cfg,
     (§6.10). Requires an exact `geom` oracle; a legacy cKDTree caller is a no-op
     (the transit/ball predicates need the exact kernel)."""
     log = log if log is not None else {}
+    if prepared_state is not None:
+        _require_prepared_state(prepared_state, mesh=mesh, cfg=cfg)
+        prepared_islands = prepared_state["islands"]
+        prepared_births = prepared_state["island_births"]
+        if (islands is not None
+                and not _prepared_value_exact_equal(
+                    islands, prepared_islands)):
+            raise ValueError(
+                "Phase-8 supplied islands mismatch prepared-state authority")
+        if (island_births is not None
+                and not _prepared_value_exact_equal(
+                    island_births, prepared_births)):
+            raise ValueError(
+                "Phase-8 supplied island_births mismatch prepared-state "
+                "authority")
+        islands = prepared_islands
+        island_births = prepared_births
     if geom is None or not hasattr(geom, "penetration_intervals"):
         log["relocate"] = log[f"relocate_p{pass_idx}"] = dict(skipped="no exact geom oracle")
         return log["relocate"]
+    r2_can_run = (
+        islands is not None and getattr(cfg, "p8_reseat_enable", True))
+    if r2_can_run:
+        if prepared_state is None:
+            raise ValueError(
+                "Phase-8 R2 requires prepared state; rerun prepare and pass "
+                "prepared_state")
+        authoritative_pool = prepared_state["contact_candidate_pool"]
+        if (candidate_pool_prepared is not None
+                and candidate_pool_prepared is not authoritative_pool):
+            raise ValueError(
+                "Phase-8 R2 candidate pool is not the prepared-state authority")
+        candidate_pool_prepared = authoritative_pool
     members, balls = live_member_lists(forest, unrouted, plate_z, cfg)
     # F1 convergence: hand the driver a closure that re-reads the LIVE member/ball
     # lists from the (mutated) forest between sweeps, so the relocation ladder runs
@@ -345,6 +511,7 @@ def relocate(mesh, forest, unrouted, contacts, carried, tip_r, plate_z, cfg,
         # `island_births`, the coverage / neighbor-birth guard's input. Without
         # them the driver does not offer R2 at all -- it never guesses a domain.
         islands=islands, island_births=island_births,
+        candidate_pool_prepared=candidate_pool_prepared,
         carry_ledger=carry_ledger)
     rep = dict(
         entered_ladder=report.entered_ladder, dt_s=report.dt_s,
@@ -408,6 +575,7 @@ def relocate(mesh, forest, unrouted, contacts, carried, tip_r, plate_z, cfg,
 def finish(mesh, pre, forest, unrouted, contacts, carried, tip_r,
            surface_tree, cfg, log=None, geom=None):
     """Stage 3b: verify gates + volume report on the final forest."""
+    _require_prepared_state(pre, mesh=mesh, cfg=cfg)
     log = log if log is not None else {}
     plate_z = pre["plate_z"]
     tree.assert_all_certified(forest)
@@ -418,7 +586,9 @@ def finish(mesh, pre, forest, unrouted, contacts, carried, tip_r,
                                  surface_tree=surface_tree, minima=pre["minima"],
                                  forest=forest, unrouted=unrouted,
                                  island_births=pre["island_births"],
-                                 geom=geom, balls=balls)
+                                 geom=geom, balls=balls,
+                                 contact_candidate_pool=pre["contact_candidate_pool"],
+                                 provenance_contacts=contacts)
     volume = tree.volume_report(members, balls)
     log["n_unrouted"] = len(unrouted)
     return dict(members=members, balls=balls, verify=report, volume=volume,
@@ -470,6 +640,7 @@ def run(mesh, cfg, log=None):
                         load_violations=[], unsupported_minima=[],
                         connectivity_violations=[], printability_violations=[],
                         murray_violations=[], uncovered_island_births=[],
+                        regular_contact_invariant_violations=[],
                         removal_report=dict(ok=True, n_trees=0, trees=[],
                                              removal_order=[], removal_effort={},
                                              blocked_trees=[]),
@@ -530,7 +701,10 @@ def run(mesh, cfg, log=None):
             report = verify.self_verify(mesh, islands, routed_contacts, members, carried, tip_r,
                                         cfg, plate_z, surface_tree=surface_tree, minima=minima,
                                         forest=forest, unrouted=unrouted,
-                                        island_births=island_births, geom=geom, balls=balls)
+                                        island_births=island_births, geom=geom, balls=balls,
+                                        contact_candidate_pool=pre[
+                                            "contact_candidate_pool"],
+                                        provenance_contacts=contacts)
         log[f"verify_pass{fix_pass}"] = dict(
             ok=report["ok"],
             n_uncovered=len(report["uncovered_islands"]),
@@ -542,6 +716,8 @@ def run(mesh, cfg, log=None):
             n_printability_violations=len(report["printability_violations"]),
             n_murray_violations=len(report["murray_violations"]),
             n_uncovered_island_births=len(report["uncovered_island_births"]),
+            n_regular_contact_invariant_violations=len(
+                report["regular_contact_invariant_violations"]),
             # Phase 5 (design-v4.md #10, amended 2026-07-22): MEASUREMENT
             # ONLY -- self_verify's default gate_on_removal=False means
             # this never affects `ok`. Per Craig's 2026-07-22 ruling
@@ -565,7 +741,12 @@ def run(mesh, cfg, log=None):
                    if u["island_id"] not in unroutable_islands]
         if not fixable:
             break
-        contacts = _add_fix_contacts(mesh, islands, contacts, fixable)
+        repaired = _add_fix_contacts(
+            mesh, islands, contacts, fixable,
+            candidate_pool_prepared=pre["contact_candidate_pool"], log=log)
+        if len(repaired) == len(contacts):
+            break
+        contacts = repaired
 
     # ---- Phase-8 RELOCATION: SINGLE FINAL-ONLY STAGE ------------------------
     # SPEC-P8-RELOCATE §3.0, implementation-consequence amendment (orchestrator-
@@ -603,6 +784,7 @@ def run(mesh, cfg, log=None):
                 relocate(mesh, forest, unrouted, contacts, carried, tip_r,
                          plate_z, cfg, geom=geom, log=log, progress=_prog_r,
                          islands=islands, island_births=island_births,
+                         prepared_state=pre,
                          carry_ledger=p8_ledger)
         tree.assert_all_certified(forest)
         members, balls = live_member_lists(forest, unrouted, plate_z, cfg)
@@ -616,7 +798,9 @@ def run(mesh, cfg, log=None):
                                         surface_tree=surface_tree, minima=minima,
                                         forest=forest, unrouted=unrouted,
                                         island_births=island_births, geom=geom,
-                                        balls=balls)
+                                        balls=balls,
+                                        contact_candidate_pool=pre["contact_candidate_pool"],
+                                        provenance_contacts=contacts)
         log["verify_final"] = dict(
             ok=report["ok"],
             n_uncovered=len(report["uncovered_islands"]),
@@ -628,6 +812,8 @@ def run(mesh, cfg, log=None):
             n_printability_violations=len(report["printability_violations"]),
             n_murray_violations=len(report["murray_violations"]),
             n_uncovered_island_births=len(report["uncovered_island_births"]),
+            n_regular_contact_invariant_violations=len(
+                report["regular_contact_invariant_violations"]),
             n_removal_blocked_trees=len(report["removal_violations"]),
             # ruling (5): the honest-failure count belongs next to the gate
             # numbers -- a reader of verify[final] must see what relocation gave
@@ -738,7 +924,8 @@ def _ensure_minima_contacts(mesh, islands, contacts, minima, cfg, geom=None):
         area = float(mesh.area_faces[islands[iid]].sum())
         contacts.append(dict(position=np.asarray(m["position"], float),
                              normal=np.asarray(m["normal"], float),
-                             island_id=iid, area_mm2=area, minimum=True))
+                             island_id=iid, area_mm2=area, minimum=True,
+                             region_pts=np.asarray(m["region_pts"], float).copy()))
         added += 1
     return contacts, islands, added
 
@@ -929,25 +1116,54 @@ def _ensure_island_birth_contacts(mesh, islands, contacts, island_births, cfg, g
                 face_island[fids] = iid
             area = float(mesh.area_faces[islands[iid]].sum())
             contacts.append(dict(position=pos, normal=normal, island_id=iid,
-                                 area_mm2=area, minimum=True, island_birth=True))
+                                 area_mm2=area, minimum=True, island_birth=True,
+                                 birth_loop=np.asarray(b["loop"], float).copy(),
+                                 birth_z=float(b["z"])))
             added += 1
     return contacts, islands, added
 
 
-def _add_fix_contacts(mesh, islands, contacts, uncovered):
-    """Ported verbatim from v3 engine.py: one extra contact at the
-    worst-covered point of each still-uncovered island."""
-    centers = mesh.triangles_center
-    normals = mesh.face_normals
+def _add_fix_contacts(mesh, islands, contacts, uncovered,
+                      candidate_pool_prepared=None, log=None, cfg=None):
+    """Add one regular contact at the worst-covered LEGAL pool seat.
+
+    The coverage-distance ranking is unchanged, but a repair may no longer
+    invent a face-centroid seat: selection is restricted to the same
+    lowest-vertex pool as initial regular placement.
+    """
     by_island = {}
     for c in contacts:
         by_island.setdefault(c["island_id"], []).append(np.asarray(c["position"]))
+    if candidate_pool_prepared is None:
+        if cfg is None:
+            raise ValueError("cfg is required when no prepared candidate pool is supplied")
+        prepared = placement.candidate_pool(mesh, islands, cfg)
+    else:
+        prepared = candidate_pool_prepared
+    placement.validate_candidate_pool(
+        prepared, mesh=mesh, islands=islands)
 
     extra = list(contacts)
     for u in uncovered:
         iid = u["island_id"]
-        face_ids = islands[iid]
-        pts = centers[face_ids]
+        occupied = {tuple(float(x) for x in p)
+                    for p in by_island.get(iid, ())}
+        island_slice = prepared.island_slice(iid)
+        pool_rows = np.arange(island_slice.start, island_slice.stop,
+                              dtype=np.int64)
+        available = np.fromiter(
+            (tuple(float(x) for x in prepared.positions[row]) not in occupied
+             for row in pool_rows),
+            dtype=bool, count=len(pool_rows))
+        candidate_rows = pool_rows[available]
+        if not len(candidate_rows):
+            if log is not None:
+                log.setdefault("contact_pool_exhausted", []).append(
+                    dict(island_id=int(iid),
+                         n_pool=len(pool_rows),
+                         n_occupied=len(occupied)))
+            continue
+        pts = prepared.positions[candidate_rows]
         existing = np.array(by_island.get(iid, []))
         if len(existing):
             from scipy.spatial import cKDTree
@@ -956,6 +1172,10 @@ def _add_fix_contacts(mesh, islands, contacts, uncovered):
         else:
             dist = np.full(len(pts), np.inf)
         worst = int(np.argmax(dist))
-        extra.append(dict(position=pts[worst], normal=normals[face_ids[worst]],
-                           island_id=iid, area_mm2=u["n_faces"]))
+        row = int(candidate_rows[worst])
+        extra.append(dict(
+            position=prepared.positions[row].copy(),
+            normal=prepared.normals[row].copy(),
+            island_id=iid, face_id=int(prepared.face_ids[row]),
+            area_mm2=u["n_faces"]))
     return extra

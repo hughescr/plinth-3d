@@ -51,7 +51,7 @@ from typing import Optional
 import numpy as np
 from scipy.spatial import cKDTree
 
-from . import phase8, verify, joints, p8_accept, tree, perception
+from . import phase8, verify, joints, p8_accept, tree, perception, placement
 
 # ---------------------------------------------------------------------------
 # Frozen-fixture target law (SPEC-P8-RELOCATE §3.0 / §5.3) -- the TREANT law.
@@ -606,8 +606,9 @@ def construct_sites(forest, members, balls, contacts, carried, cfg, geom, mesh,
 
 class SurfaceSeedIndex:
     """Model-surface seat source for R2 (and for D5 when a junction sits on the
-    surface). Holds the face-centroid KD-tree, the face normals, and the
-    face->island map, all built ONCE and reused across sweeps.
+    surface). Holds both the prepared regular-contact virtual lowest-vertex
+    pool and source-face centers used only after exact specialized-domain
+    filtering, all built ONCE and reused across sweeps.
 
     `islands` (the engine's island face-id lists) is optional: without it the
     per-island domain restriction cannot be applied, so `seeds_for` refuses to
@@ -615,7 +616,9 @@ class SurfaceSeedIndex:
     domain -- R2 simply does not fire for a caller that did not supply the
     domain (unit/legacy paths), which is the conservative failure direction."""
 
-    def __init__(self, mesh, islands=None, island_births=None):
+    def __init__(self, mesh, islands=None, island_births=None,
+                 candidate_pool_prepared=None, cfg=None,
+                 allow_legacy_candidate_pool_recompute=False):
         self.centers = np.asarray(mesh.triangles_center, float)
         self.normals = np.asarray(mesh.face_normals, float)
         self.tree = cKDTree(self.centers) if len(self.centers) else None
@@ -628,6 +631,23 @@ class SurfaceSeedIndex:
                 fi = np.asarray(face_ids, dtype=np.int64)
                 if len(fi):
                     self.island_of_face[fi] = int(iid)
+        if candidate_pool_prepared is None:
+            if not allow_legacy_candidate_pool_recompute:
+                raise ValueError(
+                    "SurfaceSeedIndex requires a prepared candidate pool; "
+                    "legacy/test recomputation must be explicitly enabled")
+            if cfg is None:
+                raise ValueError(
+                    "cfg is required when no prepared candidate pool is supplied")
+            pool = placement.candidate_pool(mesh, islands or (), cfg)
+        else:
+            pool = candidate_pool_prepared
+        placement.validate_candidate_pool(pool, mesh=mesh, islands=islands)
+        self.pool_positions = pool.positions
+        self.pool_normals = pool.normals
+        self.pool_face_ids = pool.face_ids
+        self.pool_islands = pool.island_ids
+        self.pool_tree = cKDTree(self.pool_positions) if len(pool) else None
 
     # -- coverage / birth guard ------------------------------------------------
     def _coverage_context(self, ci: int, contacts, unrouted, cfg):
@@ -691,15 +711,20 @@ class SurfaceSeedIndex:
 
     # -- the seed search -------------------------------------------------------
     def seeds_for(self, sites, contact_of_site, contacts, unrouted, cfg) -> dict:
-        """`{site_id: [(position, outward_normal, distance_from_demanded), ...]}`,
-        ordered nearest-to-demanded and capped at `cfg.p8_reseat_max_seeds`
-        (REACH §2b), restricted to the contact's own island (the inviolable class
-        domain) and filtered by the coverage / sole-birth guard.
+        """Return ordered R2 surface seats for each site.
 
-        ONE stacked `query_ball_point` over every site's demanded position; the
-        per-site work is then pure numpy over that site's own candidate faces."""
+        Regular/coverage contacts (neither ``minimum`` nor ``island_birth``)
+        draw only from the prepared virtual lowest-vertex pool and return the
+        owning source ``face_id``. Specialized contacts filter source-face
+        centers through their persisted minimum region or birth footprint and
+        return ``face_id=None`` so they do not acquire a false regular-contact
+        invariant. Every seat tuple is
+        ``(position, outward_normal, distance_from_demanded, face_id)``.
+
+        Each class is gathered into one stacked ``query_ball_point``; per-site
+        work is then pure numpy over that site's candidate rows."""
         out = {s.site_id: [] for s in sites}
-        if (self.tree is None or self.islands is None or not sites
+        if (self.islands is None or not sites
                 or not getattr(cfg, "p8_reseat_enable", True)):
             return out
         radius = float(getattr(cfg, "p8_reseat_radius_mm", 2.0))
@@ -707,30 +732,86 @@ class SurfaceSeedIndex:
         if radius <= 0.0 or cap <= 0:
             return out
         pts = np.array([np.asarray(s.c, float) for s in sites])
-        # ONE batched neighbourhood query for every site (batch-first).
-        neigh = self.tree.query_ball_point(pts, r=radius)
+        regular = []
+        specialized = []
         for k, site in enumerate(sites):
             ci = contact_of_site.get(site.site_id)
-            if ci is None:
+            if ci is None or not (0 <= ci < len(contacts)):
                 continue
-            faces = np.asarray(sorted(neigh[k]), dtype=np.int64)
-            if not len(faces):
+            rec = contacts[ci]
+            if rec.get("island_birth") or rec.get("minimum"):
+                specialized.append(k)
+            else:
+                regular.append(k)
+        neigh = {}
+        if regular and self.pool_tree is not None:
+            rows = self.pool_tree.query_ball_point(pts[regular], r=radius)
+            neigh.update((k, row) for k, row in zip(regular, rows))
+        if specialized and self.tree is not None:
+            rows = self.tree.query_ball_point(pts[specialized], r=radius)
+            neigh.update((k, row) for k, row in zip(specialized, rows))
+        for k, site in enumerate(sites):
+            ci = contact_of_site.get(site.site_id)
+            if ci is None or k not in neigh:
                 continue
             iid = int(contacts[ci].get("island_id", -1))
-            faces = faces[self.island_of_face[faces] == iid]      # class domain
-            if not len(faces):
+            rec = contacts[ci]
+            is_birth = bool(rec.get("island_birth"))
+            is_minimum = bool(rec.get("minimum")) and not is_birth
+            is_specialized = is_birth or is_minimum
+            rows = np.asarray(sorted(neigh[k]), dtype=np.int64)
+            if is_specialized:
+                rows = rows[self.island_of_face[rows] == iid]
+                cand = self.centers[rows]
+                cand_normals = self.normals[rows]
+                face_ids = np.full(len(rows), -1, dtype=np.int64)
+                if is_birth:
+                    loop = rec.get("birth_loop")
+                    birth_z = rec.get("birth_z")
+                    if loop is None or birth_z is None:
+                        continue
+                    z_tol = (float(cfg.minima_connect_layers)
+                             * float(cfg.layer_height_mm))
+                    domain_ok = np.abs(cand[:, 2] - float(birth_z)) <= z_tol
+                    for j in np.nonzero(domain_ok)[0]:
+                        domain_ok[j] = perception.island_birth_xy_ok(
+                            float(cand[j, 0]), float(cand[j, 1]), loop,
+                            perception.ISLAND_ATTACH_REACH_MM)[0]
+                else:
+                    region = rec.get("region_pts")
+                    if region is None or not len(region):
+                        continue
+                    domain_dist, _ = cKDTree(
+                        np.asarray(region, float)).query(cand)
+                    # Exact parity with verify.minima_report: a contact is in
+                    # domain iff its nearest persisted region point is <= r.
+                    domain_ok = np.asarray(domain_dist, float) <= float(
+                        cfg.minima_contact_radius_mm)
+                rows, cand, cand_normals, face_ids = (
+                    rows[domain_ok], cand[domain_ok],
+                    cand_normals[domain_ok], face_ids[domain_ok])
+            else:
+                rows = rows[self.pool_islands[rows] == iid]
+                cand = self.pool_positions[rows]
+                cand_normals = self.pool_normals[rows]
+                face_ids = self.pool_face_ids[rows]
+            if not len(rows):
                 continue
             c0 = np.asarray(site.c, float)
-            cand = self.centers[faces]
             dist = np.linalg.norm(cand - c0[None, :], axis=1)
             keep = dist > 1e-9                    # the demanded seat already failed
-            faces, cand, dist = faces[keep], cand[keep], dist[keep]
-            if not len(faces):
+            rows, cand, cand_normals, face_ids, dist = (
+                rows[keep], cand[keep], cand_normals[keep], face_ids[keep], dist[keep])
+            if not len(rows):
                 continue
             # nearest-to-demanded, face index as the total-order tiebreak.
-            order = np.lexsort((faces, dist))
-            faces, cand, dist = faces[order], cand[order], dist[order]
-            faces, cand, dist = faces[:cap], cand[:cap], dist[:cap]
+            order = np.lexsort((face_ids, dist))
+            rows, cand, cand_normals, face_ids, dist = (
+                rows[order], cand[order], cand_normals[order],
+                face_ids[order], dist[order])
+            rows, cand, cand_normals, face_ids, dist = (
+                rows[:cap], cand[:cap], cand_normals[:cap],
+                face_ids[:cap], dist[:cap])
             ctx = self._coverage_context(ci, contacts, unrouted, cfg)
             if ctx is None:
                 continue
@@ -761,7 +842,8 @@ class SurfaceSeedIndex:
                             break
             sel = np.nonzero(ok)[0]
             out[site.site_id] = [
-                (cand[j].copy(), phase8._unit(self.normals[faces[j]]), float(dist[j]))
+                (cand[j].copy(), cand_normals[j].copy(), float(dist[j]),
+                 None if is_specialized else int(face_ids[j]))
                 for j in sel]
         return out
 
@@ -785,6 +867,53 @@ def _apply_member_geometry(fmember, cand_member: dict, orig_embed_end):
     else:
         fmember.p0 = p0; fmember.p1 = p1
         fmember.r0 = r0; fmember.r1 = r1
+
+
+def _migrate_contact_record(rec: dict, cand) -> None:
+    """Atomically migrate one committed R2 demand record.
+
+    Routing math may normalize ``cand.seat_n`` independently, but this schema
+    write preserves the raw source-face normal exactly. Regular contacts also
+    require the owning source ``face_id``; specialized contacts intentionally
+    do not acquire it.
+    """
+    as_list = isinstance(rec.get("position"), list)
+    pos = np.asarray(cand.seat_c, float)
+    raw_nrm = np.asarray(cand.seat_n, float)
+    updates = dict(
+        position=pos.tolist() if as_list else pos.copy(),
+        normal=raw_nrm.tolist() if as_list else raw_nrm.copy(),
+    )
+    is_regular = not (rec.get("minimum") or rec.get("island_birth"))
+    if is_regular:
+        if cand.seat_face_id is None:
+            raise RuntimeError("regular-contact R2 winner has no owning face_id")
+        updates["face_id"] = int(cand.seat_face_id)
+    rec.update(updates)
+
+
+def _select_joint_safe_r2_winners(r2res, contact_of_site, contacts):
+    """Admit at most one R2 contact move globally in one frozen sweep.
+
+    Two moves can each be safe against the original contact set but jointly
+    uncover or orphan a demand shared across island domains. Smallest site id
+    wins deterministically; all later sites stay pending for D5/honest failure
+    and may retry against freshly derived geometry in a later sweep.
+    """
+    selected = {}
+    for sid in sorted(r2res):
+        res = r2res[sid]
+        if res.winner is None:
+            continue
+        ci = contact_of_site.get(sid)
+        if ci is None or not (0 <= ci < len(contacts)):
+            continue
+        iid = int(contacts[ci].get("island_id", -1))
+        if iid < 0:
+            continue
+        selected[sid] = (res, int(ci), iid)
+        break
+    return selected
 
 
 # ---------------------------------------------------------------------------
@@ -1961,11 +2090,13 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
                                    dual_cert_fn=dual_cert_fn)
         accepted = []
         acc_site = {}                       # fi -> (site_id, winner Candidate)
+        joint_safe = _select_joint_safe_r2_winners(
+            r2res, di.contact_of_site, contacts)
         for sid in sorted(r2res):
             final_rung[("STUB", sid)] = "R2"
-            res = r2res[sid]
-            if res.winner is None:
+            if sid not in joint_safe:
                 continue
+            res, _ci, _iid = joint_safe[sid]
             fi = di.site_forest_idx.get(sid)
             if fi is None:
                 continue
@@ -1996,12 +2127,7 @@ def _relocation_sweep(di: DriverInput, forest, geom, cfg,
             # never be the thing that fails a coverage gate.
             ci = di.contact_of_site.get(sid)
             if ci is not None and 0 <= ci < len(contacts):
-                rec = contacts[ci]
-                as_list = isinstance(rec.get("position"), list)
-                pos = np.asarray(cand.seat_c, float)
-                nrm = np.asarray(cand.seat_n, float)
-                rec["position"] = pos.tolist() if as_list else pos
-                rec["normal"] = nrm.tolist() if as_list else nrm
+                _migrate_contact_record(contacts[ci], cand)
             reseats.append((sid, ci, np.asarray(cand.seat_c, float),
                             float(cand.reseat_dist_mm)))
             stub_resolved += 1
@@ -2193,7 +2319,9 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
                census_authority=frozenset(), log=None,
                member_list_fn=None, frozen_snapshot=None,
                progress=None, islands=None, island_births=None,
-               carry_ledger=None) -> Phase8Report:
+               carry_ledger=None,
+               candidate_pool_prepared=None,
+               allow_legacy_candidate_pool_recompute=False) -> Phase8Report:
     """The Phase-8 orchestration driver (task step 1-2-3): construct sites from
     the engine gate, run the state machines in the §3.0 normative order, and
     splice accepted relocations back into `forest`. Idempotent by construction --
@@ -2271,7 +2399,12 @@ def run_phase8(forest, members, balls, contacts, carried, tip_r, plate_z, geom,
     if (mesh is not None and islands is not None
             and getattr(cfg, "p8_reseat_enable", True)):
         seed_index = SurfaceSeedIndex(mesh, islands=islands,
-                                      island_births=island_births)
+                                      island_births=island_births,
+                                      candidate_pool_prepared=(
+                                          candidate_pool_prepared),
+                                      cfg=cfg,
+                                      allow_legacy_candidate_pool_recompute=(
+                                          allow_legacy_candidate_pool_recompute))
     # ruling (5): the PERSISTENT formally-unresolvable ledger. Caller-owned when
     # supplied (`carry_ledger`), so its rows survive not just sweeps but PASSES --
     # a site the ladder gave up on in an earlier relocation call keeps its

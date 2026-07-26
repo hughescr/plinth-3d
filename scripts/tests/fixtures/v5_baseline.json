@@ -1,14 +1,14 @@
 {
  "table": {
-  "total_ml": 0.25689327434238046,
-  "member_ml": 0.19535942526272548,
-  "n_unrouted": 2,
-  "rewire_accepted": 23
+  "total_ml": 0.39602846189165186,
+  "member_ml": 0.29864423997554795,
+  "n_unrouted": 4,
+  "rewire_accepted": 34
  },
  "toed_slab": {
-  "total_ml": 0.3514180846641123,
-  "member_ml": 0.28614479297380024,
-  "n_unrouted": 1,
-  "rewire_accepted": 30
+  "total_ml": 0.5362920772872579,
+  "member_ml": 0.43307741172616016,
+  "n_unrouted": 2,
+  "rewire_accepted": 41
  }
 }
