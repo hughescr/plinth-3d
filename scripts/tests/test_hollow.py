@@ -534,30 +534,61 @@ def test_solid_decision_is_a_success_and_exports(solid_stl, tmp_path):
     log = hollow.run(solid_stl, str(out), orient=False)
     assert log["status"] == hollow.STATUS_OK
     assert log["decision"].startswith("SOLID")
+    assert log["hollow_attempted"] is True
+    assert log["hollow_eligible"] is False
+    assert log["hollow_fallback_applied"] is False
+    assert log["hollow_fallback_reason"] is None
+    assert log["final_geometry"] == "solid"
     assert log["exported"] == str(out)
     assert out.is_file() and out.stat().st_size > 0
     assert hollow.failed_checks(log) == []
 
+    source = trimesh.load(solid_stl)
+    result = trimesh.load(str(out))
+    assert len(result.faces) == len(source.faces)
+    assert result.volume == pytest.approx(source.volume, rel=1e-6)
+    assert np.allclose(result.bounds, source.bounds, atol=1e-4)
 
-def test_verify_failure_writes_nothing_and_names_the_checks(verify_failing_stl, tmp_path):
-    out = tmp_path / "must_not_exist.stl"
+
+def test_hollow_eligible_model_falls_back_to_watertight_solid(
+        verify_failing_stl, tmp_path):
+    out = tmp_path / "solid_fallback.stl"
     log = hollow.run(verify_failing_stl, str(out), orient=False)
-    assert log["status"] == hollow.STATUS_VERIFY_FAILED
-    assert not out.exists(), "a failed verification must not export"
-    failed = hollow.failed_checks(log)
-    assert failed, "a failed run must name at least one check"
-    assert set(failed) <= set(hollow.CHECK_DESCRIPTIONS)
-    assert log["failed_checks"] == failed
-    lines = hollow.describe_failure(log)
-    assert len(lines) == len(failed)
-    for name, line in zip(failed, lines):
-        assert line.startswith(name + ":")
-        assert "measured" in line
+    assert log["status"] == hollow.STATUS_OK
+    assert log["hollow_attempted"] is True
+    assert log["hollow_eligible"] is True
+    assert log["hollow_fallback_applied"] is True
+    assert log["hollow_fallback_reason"] == (
+        hollow.INTERNAL_SUPPORT_VERIFIER_UNAVAILABLE
+    )
+    assert log["decision"] == "SOLID_internal_support_verifier_unavailable"
+    assert log["final_geometry"] == "solid"
+    assert log["solid_volume_estimate_ml"] > log["hollow_volume_estimate_ml"]
+    assert "drains" not in log and "vent" not in log
+    assert "check_detail" not in log
+    assert out.is_file() and out.stat().st_size > 0
+
+    source = trimesh.load(verify_failing_stl)
+    result = trimesh.load(str(out))
+    assert result.is_watertight
+    assert result.is_volume
+    assert all(body.is_watertight for body in result.split(only_watertight=False))
+    assert len(result.faces) == len(source.faces)
+    assert result.volume == pytest.approx(source.volume, rel=1e-6)
+    assert np.allclose(result.bounds, source.bounds, atol=1e-4)
 
 
-def test_check_detail_covers_every_documented_check(verify_failing_stl, tmp_path):
-    log = hollow.run(verify_failing_stl, str(tmp_path / "x.stl"), orient=False)
-    assert set(log["check_detail"]) == set(hollow.CHECK_DESCRIPTIONS)
+def test_fallback_report_is_json_safe_and_names_final_geometry(
+        verify_failing_stl, tmp_path):
+    log = hollow.run(
+        verify_failing_stl, str(tmp_path / "fallback.stl"), orient=False,
+    )
+    payload = json.loads(json.dumps(log))
+    assert payload["final_geometry"] == "solid"
+    assert payload["hollow_fallback_applied"] is True
+    assert payload["solid_volume_estimate_ml"] == pytest.approx(
+        trimesh.load(verify_failing_stl).volume / 1000.0, abs=1e-3,
+    )
 
 
 def test_non_volume_input_raises_rather_than_reporting(tmp_path):
@@ -590,22 +621,21 @@ def test_cli_exits_zero_on_a_solid_decision(solid_stl, tmp_path):
     assert json.loads(r.stdout)["status"] == hollow.STATUS_OK
 
 
-def test_cli_exits_two_on_a_verify_failure(verify_failing_stl, tmp_path):
-    out = tmp_path / "nope.stl"
+def test_cli_exports_solid_fallback_for_hollow_eligible_model(
+        verify_failing_stl, tmp_path):
+    out = tmp_path / "fallback.stl"
     report = tmp_path / "r.json"
     r = _run_cli(verify_failing_stl, str(out), "--no-orient", "--report", str(report))
-    assert r.returncode == 2, r.stdout
-    assert not out.exists()
-    # the operator must be told WHICH check failed, on stderr, unmissably
-    assert "FAILED self-verification" in r.stderr
-    assert "FAILED CHECK" in r.stderr
+    assert r.returncode == 0, r.stderr
+    assert out.is_file()
     payload = json.loads(report.read_text())
-    assert payload["status"] == hollow.STATUS_VERIFY_FAILED
-    assert payload["failed_checks"]
-    for name in payload["failed_checks"]:
-        assert name in r.stderr
-    # the machine-readable record survives the failure on stdout too
-    assert json.loads(r.stdout)["failed_checks"] == payload["failed_checks"]
+    assert payload["status"] == hollow.STATUS_OK
+    assert payload["hollow_fallback_applied"] is True
+    assert payload["hollow_fallback_reason"] == (
+        hollow.INTERNAL_SUPPORT_VERIFIER_UNAVAILABLE
+    )
+    assert payload["final_geometry"] == "solid"
+    assert json.loads(r.stdout) == payload
 
 
 def test_cli_exits_one_on_pre_hollowed_input(pre_hollowed_stl, tmp_path):
@@ -631,12 +661,15 @@ def test_cli_exits_one_on_a_missing_input(tmp_path):
 
 
 @pytest.mark.parametrize("name", ["Cylinder.stl"])
-def test_cli_exit_code_on_the_committed_cylinder_fixture(name, tmp_path):
+def test_cli_falls_back_on_the_committed_cylinder_fixture(name, tmp_path):
     """The originally-reported case (task #79): the 30mm cylinder hollows into
-    4 bodies with a sealed cavity. Kept as a fixture-backed regression so the
-    reported bug has a test that names it."""
+    4 bodies with a sealed cavity. Until internal support verification exists,
+    it must be exported as a solid rather than reaching those booleans."""
     out = tmp_path / "cyl.stl"
-    r = _run_cli(os.path.join(FIXTURES, name), str(out), "--no-orient", "--quiet")
-    assert r.returncode == 2
-    assert not out.exists()
-    assert "single_body" in r.stderr or "cavity_breathes" in r.stderr
+    r = _run_cli(os.path.join(FIXTURES, name), str(out), "--no-orient")
+    assert r.returncode == 0, r.stderr
+    assert out.is_file()
+    payload = json.loads(r.stdout)
+    assert payload["hollow_eligible"] is True
+    assert payload["hollow_fallback_applied"] is True
+    assert payload["final_geometry"] == "solid"

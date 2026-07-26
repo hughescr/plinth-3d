@@ -27,16 +27,16 @@ So:
   can branch on it, and :meth:`PipelineReport.raise_for_status` exists for
   callers that would rather have an exception than a return value to check.
 
-THE ORIENTATION ORDER (why hollowing runs first)
-------------------------------------------------
+THE ORIENTATION ORDER (why hollow eligibility runs first)
+---------------------------------------------------------
 The orientation search is ON by default. Models arrive head-up but not
 support-optimised, and orientation must be FINAL before drilling because
 drain placement is gravity-dependent (holes go at each cavity lobe's lowest
-point, along a downward exit ray). The support engine then runs on the
-hollowed, drilled, re-rested mesh -- so it supports the geometry that will
-actually be printed, drain holes and all -- and the emit boundary is handed
-that same on-disk STL, which is what makes "the model in the file is the
-model the supports were computed for" a shared variable rather than a claim.
+point, along a downward exit ray). Until a dedicated internal-support verifier
+is supplied, hollow-eligible models safely fall back to that oriented SOLID
+mesh before support placement. The support engine and emit boundary are
+handed the same on-disk STL, which makes "the model in the file is the model
+the supports were computed for" a shared variable rather than a claim.
 
 THE INTERMEDIATE IS AN OUTPUT, NOT A TEMP FILE
 ----------------------------------------------
@@ -217,7 +217,8 @@ def _write_report(path, payload):
 def prep_one(stl_path, out_path, *, cfg=None, wall_mm=2.5, orient=True,
              hollow=True, prepped_stl=None, name=None, placement_xy=(0.0, 0.0),
              lift_mm=None, allow_failed_gates=False, skip_existing=False,
-             report_path=DEFAULT_REPORT, progress=None):
+             report_path=DEFAULT_REPORT, progress=None,
+             internal_support_verifier=None):
     """Take one source STL all the way to a supported ``.chitubox``.
 
     Parameters
@@ -255,6 +256,14 @@ def prep_one(stl_path, out_path, *, cfg=None, wall_mm=2.5, orient=True,
         is written on failure too -- that is the point of it.
     progress : callable, optional
         Called with one string per milestone. The library does not print.
+    internal_support_verifier : callable, optional
+        Future A5 hook. When absent (the safe default), hollow-eligible models
+        fall back to their oriented solid mesh before support placement. A
+        supplied callable enables hollow output and is invoked after support
+        placement as ``verifier(mesh=..., result=..., cfg=...,
+        hollow_report=...)``; it must return a dict with ``ok is True`` or the
+        pipeline refuses to emit. This wires the boundary only; it does not
+        implement the dedicated verifier.
 
     Returns
     -------
@@ -277,6 +286,7 @@ def prep_one(stl_path, out_path, *, cfg=None, wall_mm=2.5, orient=True,
         "p8_relocate_enable": bool(getattr(cfg, "p8_relocate_enable", False)),
         "allow_failed_gates": bool(allow_failed_gates),
         "skip_existing": bool(skip_existing),
+        "internal_support_verifier_configured": internal_support_verifier is not None,
     }
     stages = []
 
@@ -307,7 +317,13 @@ def prep_one(stl_path, out_path, *, cfg=None, wall_mm=2.5, orient=True,
         say(f"hollow: {stl_path} -> {prepped} (wall={wall_mm}mm orient={orient})")
         hlog = {}
         try:
-            hollow_mod.run(stl_path, prepped, wall=wall_mm, orient=orient, log=hlog)
+            hollow_kwargs = {}
+            if internal_support_verifier is not None:
+                hollow_kwargs["allow_hollow_output"] = True
+            hollow_mod.run(
+                stl_path, prepped, wall=wall_mm, orient=orient, log=hlog,
+                **hollow_kwargs,
+            )
         except Exception as e:
             stages.append(StageResult("hollow", STATUS_FAILED, time.time() - t0, hlog,
                                       f"{type(e).__name__}: {e}"))
@@ -340,7 +356,16 @@ def prep_one(stl_path, out_path, *, cfg=None, wall_mm=2.5, orient=True,
     else:
         prepped = stl_path
         stages.append(StageResult("hollow", STATUS_SKIPPED, 0.0,
-                                  {"reason": "hollow=False (orientation search skipped too)"}))
+                                  {
+                                      "reason": "hollow=False (orientation search skipped too)",
+                                      "hollow_attempted": False,
+                                      "hollow_eligible": False,
+                                      "hollow_fallback_applied": False,
+                                      "hollow_fallback_reason": None,
+                                      "solid_volume_estimate_ml": None,
+                                      "hollow_volume_estimate_ml": None,
+                                      "final_geometry": "solid",
+                                  }))
         say("hollow: skipped (hollow=False)")
 
     # ---- stage 2: support engine ------------------------------------------
@@ -371,6 +396,35 @@ def prep_one(stl_path, out_path, *, cfg=None, wall_mm=2.5, orient=True,
                       if isinstance(v, (int, float))},
         "stage_timings": {k: elog[k] for k in elog if k.startswith("t_")},
     }
+    hstage = next((s for s in stages if s.name == "hollow"), None)
+    hreport = hstage.report if hstage is not None else {}
+    if hreport.get("final_geometry") == "hollow":
+        if internal_support_verifier is None:
+            msg = ("hollow geometry reached support placement without the "
+                   "dedicated internal-support verifier")
+            stages.append(StageResult("supports", STATUS_FAILED, time.time() - t0,
+                                      srep, msg))
+            return finish(STATUS_FAILED, EXIT_SUPPORTS, "supports", msg)
+        try:
+            verifier_report = internal_support_verifier(
+                mesh=mesh, result=result, cfg=cfg, hollow_report=hreport,
+            )
+        except Exception as e:
+            msg = f"internal support verifier raised {type(e).__name__}: {e}"
+            stages.append(StageResult("supports", STATUS_FAILED, time.time() - t0,
+                                      srep, msg))
+            return finish(STATUS_FAILED, EXIT_SUPPORTS, "supports", msg)
+        if not isinstance(verifier_report, dict) or verifier_report.get("ok") is not True:
+            msg = ("internal support verifier did not approve hollow geometry; "
+                   "nothing emitted")
+            srep["internal_support_verifier"] = (
+                verifier_report if isinstance(verifier_report, dict)
+                else {"ok": False, "error": "verifier must return a dict"}
+            )
+            stages.append(StageResult("supports", STATUS_FAILED, time.time() - t0,
+                                      srep, msg))
+            return finish(STATUS_FAILED, EXIT_SUPPORTS, "supports", msg)
+        srep["internal_support_verifier"] = verifier_report
     stages.append(StageResult("supports", STATUS_OK, time.time() - t0, srep))
     say(f"supports: members={srep['n_members']} balls={srep['n_balls']} "
         f"unrouted={srep['n_unrouted']} verify.ok={srep['gates']['ok']} "

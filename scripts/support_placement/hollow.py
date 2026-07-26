@@ -28,10 +28,13 @@ Pipeline (all steps verified on real prints, July 2026):
     about X/Y scored by 0.5*support_area_cm2 + 3*peak_crosssection_cm2 +
     0.3*height_mm. Orientation MUST be final before drilling -- hole
     placement is gravity-dependent. Model is re-rested on z=0.
- 2. Hollow decision: voxelize 0.5mm -> fill -> EDT. Hollow only if max
-    bulk thickness > 10mm AND a wall-thickness cavity saves >15ml or >25%
-    of volume. Otherwise export solid (holes in small minis cost more
-    than the resin they save).
+ 2. Hollow decision: voxelize 0.5mm -> fill -> EDT. A model is eligible only
+    if max bulk thickness > 10mm AND a wall-thickness cavity saves >15ml or
+    >25% of volume. Otherwise export solid (holes in small minis cost more
+    than the resin they save). While the dedicated internal-support verifier
+    is unavailable, eligible models also export the oriented SOLID mesh:
+    generic exterior routing cannot prove that cavity births/islands are
+    supported, so emitting its accidental internal components is unsafe.
  3. Cavity = the LARGEST connected eroded component ONLY. Small pockets
     stay solid -- blind hollowing (e.g. slicers') creates sealed resin
     traps; a real model showed 1 true cavity vs 21 junk pockets.
@@ -145,6 +148,10 @@ CONTAINMENT_MIN_FRAC = 0.9
 STATUS_OK = "OK"
 #: Hollowing produced a mesh that failed step 8. NOTHING was written.
 STATUS_VERIFY_FAILED = "NOT_EXPORTED_verify_failed"
+
+# Machine-readable reason used by the temporary safe fallback. Keep this
+# stable: batch reports and the future A5 migration key off the exact value.
+INTERNAL_SUPPORT_VERIFIER_UNAVAILABLE = "internal_support_verifier_unavailable"
 
 #: The step-8 checks, in report order, with the failure they exist to catch.
 #: :func:`run` records each one's outcome under ``log["check_detail"]``; the
@@ -438,7 +445,8 @@ def describe_failure(log):
             for k in failed_checks(log)]
 
 
-def run(in_path, out_path, wall=2.5, orient=True, log=None):
+def run(in_path, out_path, wall=2.5, orient=True, log=None,
+        allow_hollow_output=False):
     """Hollow (or decide not to) and drill ``in_path``, writing ``out_path``.
 
     Returns the log dict (the same object if one was passed in), always
@@ -448,6 +456,12 @@ def run(in_path, out_path, wall=2.5, orient=True, log=None):
     (unreadable mesh, non-volume mesh, already-hollowed mesh) rather than
     reporting them -- those are not outcomes of the algorithm, they are bad
     inputs.
+
+    ``allow_hollow_output`` is the explicit future-verifier hook. It must
+    remain false unless the caller has a dedicated internal-support verifier
+    wired after support placement. The current pipeline leaves it false by
+    default, so a hollow-eligible model deterministically exports the
+    oriented solid before supports are computed.
     """
     log = {} if log is None else log
     t0 = time.time()
@@ -463,12 +477,32 @@ def run(in_path, out_path, wall=2.5, orient=True, log=None):
         m = orient_search(m, log)
     log["oriented"] = bool(orient)
     solid_ml = m.volume / 1000.0
-    log.update(solid_ml=round(solid_ml, 1), dims_mm=[round(x, 1) for x in m.extents])
+    log.update(
+        hollow_attempted=True,
+        solid_ml=round(solid_ml, 1),
+        solid_volume_estimate_ml=round(solid_ml, 3),
+        dims_mm=[round(x, 1) for x in m.extents],
+    )
 
-    def _export_solid(decision):
+    def _export_solid(decision, *, eligible=False, fallback=False,
+                      reason=None, hollow_volume_estimate_ml=None):
         m.export(out_path)
-        log.update(decision=decision, status=STATUS_OK, exported=out_path,
-                   verify="N/A_solid", elapsed_s=round(time.time() - t0, 1))
+        log.update(
+            decision=decision,
+            hollow_eligible=bool(eligible),
+            hollow_fallback_applied=bool(fallback),
+            hollow_fallback_reason=reason,
+            hollow_volume_estimate_ml=(
+                None if hollow_volume_estimate_ml is None
+                else round(float(hollow_volume_estimate_ml), 3)
+            ),
+            final_geometry="solid",
+            final_ml=round(solid_ml, 1),
+            status=STATUS_OK,
+            exported=out_path,
+            verify="N/A_solid",
+            elapsed_s=round(time.time() - t0, 1),
+        )
         return log
 
     vg = m.voxelized(PITCH).fill()
@@ -485,9 +519,28 @@ def run(in_path, out_path, wall=2.5, orient=True, log=None):
     cavity_ml = main.sum() * PITCH ** 3 / 1000.0
     log.update(bulk_mm=round(bulk, 1), cavity_ml=round(cavity_ml, 1),
                junk_pockets_left_solid=int(n - 1))
+    hollow_volume_estimate_ml = max(0.0, solid_ml - cavity_ml)
     if bulk < BULK_MIN_MM or (cavity_ml < SAVE_MIN_ML and cavity_ml < SAVE_MIN_FRAC * solid_ml):
-        return _export_solid("SOLID_below_threshold")
-    log.update(decision="HOLLOW")
+        return _export_solid(
+            "SOLID_below_threshold",
+            hollow_volume_estimate_ml=hollow_volume_estimate_ml,
+        )
+    if not allow_hollow_output:
+        return _export_solid(
+            "SOLID_internal_support_verifier_unavailable",
+            eligible=True,
+            fallback=True,
+            reason=INTERNAL_SUPPORT_VERIFIER_UNAVAILABLE,
+            hollow_volume_estimate_ml=hollow_volume_estimate_ml,
+        )
+    log.update(
+        decision="HOLLOW",
+        hollow_eligible=True,
+        hollow_fallback_applied=False,
+        hollow_fallback_reason=None,
+        hollow_volume_estimate_ml=round(hollow_volume_estimate_ml, 3),
+        final_geometry="hollow",
+    )
 
     idx = np.array(np.nonzero(main)).T
     world = trimesh.transformations.transform_points(idx.astype(float), T)
