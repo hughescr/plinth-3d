@@ -48,7 +48,7 @@ class PlateGeometryError(ValueError):
     """A support forest cannot be emitted safely in its declared plate frame."""
 
 
-def frustum_mesh(start, end, r0, r1, n_sides=N_SIDES):
+def frustum_mesh(start, end, r0, r1, n_sides=N_SIDES, ring_normal=None):
     """Capped frustum triangle soup from start (radius r0) to end (radius
     r1), matching the validated Chitubox synthesized-segment TOPOLOGY
     (reverse-engineered from spike_SYNTH2.chitubox): two rings of n_sides
@@ -56,7 +56,8 @@ def frustum_mesh(start, end, r0, r1, n_sides=N_SIDES):
     triangles per side, capped both ends. Winding is self-corrected to be
     outward/positive-volume via a signed-volume check rather than
     hand-tracking handedness through the local basis -- robust regardless
-    of axis direction.
+    of axis direction. ``ring_normal`` selects parallel end-ring planes for
+    the plate-root split; the default remains perpendicular to the axis.
 
     Returns float32 array shape (n_tri, 3, 3): (n_tri, vertex, xyz).
     """
@@ -66,10 +67,16 @@ def frustum_mesh(start, end, r0, r1, n_sides=N_SIDES):
     L = np.linalg.norm(axis)
     axis_n = axis / L if L > 1e-9 else np.array([0.0, 0.0, 1.0])
     # any vector not parallel to axis_n, for a stable perpendicular basis
-    ref = np.array([1.0, 0.0, 0.0]) if abs(axis_n[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
-    u = np.cross(axis_n, ref)
+    ring_n = axis_n
+    if ring_normal is not None:
+        ring_n = np.asarray(ring_normal, float)
+        ring_n /= np.linalg.norm(ring_n)
+        if np.dot(ring_n, axis_n) < 0.0:
+            ring_n = -ring_n
+    ref = np.array([1.0, 0.0, 0.0]) if abs(ring_n[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+    u = np.cross(ring_n, ref)
     u /= np.linalg.norm(u)
-    v = np.cross(axis_n, u)
+    v = np.cross(ring_n, u)
 
     ang = 2 * np.pi * np.arange(n_sides) / n_sides
     ring0 = start[None, :] + r0 * (np.cos(ang)[:, None] * u + np.sin(ang)[:, None] * v)
@@ -90,7 +97,7 @@ def frustum_mesh(start, end, r0, r1, n_sides=N_SIDES):
             j = (i + 1) % n_sides
             tri = [center, ring[i], ring[j]]
             n = np.cross(ring[i] - center, ring[j] - center)
-            if np.dot(n, axis_n) * outward_sign < 0:
+            if np.dot(n, ring_n) * outward_sign < 0:
                 tri = [center, ring[j], ring[i]]
             out.append(tri)
         return out
@@ -611,7 +618,14 @@ def member_chain_specs(members, balls, cfg, plate_z=None):
                 trailing=pedestal.trailing,
                 mesh=np.concatenate(parts))
             continue
-        parts = [frustum_mesh(col_p0, col_p1, col_r0, col_r1)]
+        parts = [frustum_mesh(
+            col_p0, col_p1, col_r0, col_r1,
+            # The root column starts immediately after a build-plane-normal
+            # pedestal.  Keep both of its end rings parallel to the plate:
+            # a short, wide angled root would otherwise project the
+            # perpendicular start ring below the build plane.
+            ring_normal=np.array([0.0, 0.0, 1.0])
+            if is_plate_root else None)]
         if kind == "stub":
             ball_r = cfg.tip_ball_r_factor * r0
             parts.append(sphere_mesh(p0, ball_r))

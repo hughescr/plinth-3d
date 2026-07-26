@@ -257,6 +257,30 @@ def test_plate_root_pedestal_is_vertical_before_angled_member(cfg):
     assert np.ptp(at_plate[:, 0]) > 0 and np.ptp(at_plate[:, 1]) > 0
 
 
+def test_short_wide_angled_root_starts_above_safe_run(cfg):
+    """The Thorny record-129 split must keep its angled mesh above plate."""
+    plate_z = -11.057884216308594
+    members = [_mk_member(
+        [-3.44175197, 9.28385124, -10.40368197],
+        [-3.40738346, 9.71617020, plate_z],
+        0.8, 0.8, "trunk", ("contact", 4))]
+
+    pedestal, angled = ce.member_chain_specs(
+        members, [], cfg, plate_z=plate_z)
+    raw_angled = ce.frustum_mesh(
+        angled.start, angled.end, angled.r0, angled.r1)
+
+    assert raw_angled[..., 2].min() < plate_z
+    assert angled.start == pytest.approx(pedestal.end)
+    assert not np.allclose(angled.start[:2], angled.end[:2])
+    min_vertical = ce.MIN_ROOT_VERTICAL_LAYERS * cfg.layer_height_mm
+    assert min(angled.start[2], angled.end[2]) >= (
+        plate_z + min_vertical - ce.PLATE_MESH_TOL_MM)
+    assert angled.mesh[..., 2].min() >= plate_z
+    ce.validate_support_mesh_plate_bound(
+        [pedestal, angled], plate_z)
+
+
 def test_plate_root_rejects_less_than_ten_layers_before_bend(cfg):
     plate_z = -5.0
     too_short = ce.MIN_ROOT_VERTICAL_LAYERS * cfg.layer_height_mm - 0.01
