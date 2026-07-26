@@ -85,8 +85,12 @@ def frustum_mesh(start, end, r0, r1, n_sides=N_SIDES, ring_normal=None):
     tris = []
     for i in range(n_sides):
         j = (i + 1) % n_sides
-        tris.append([ring0[i], ring1[i], ring1[j]])
-        tris.append([ring0[i], ring1[j], ring0[j]])
+        # Ring order is positive about ``ring_n``.  Reverse the previous
+        # side-wall order so its normals point radially outward and agree
+        # with both cap fans; a whole-mesh signed-volume flip cannot repair
+        # sides and caps that disagree with one another.
+        tris.append([ring0[i], ring1[j], ring1[i]])
+        tris.append([ring0[i], ring0[j], ring1[j]])
 
     # cap winding: pick the order whose normal points away from the solid
     # (start cap -> -axis_n side, end cap -> +axis_n side), verified
@@ -447,6 +451,13 @@ def _bridge_mesh(xy0, xy1, plate_z):
         [3, 0, 4], [3, 4, 7],
     ], dtype=np.int64)
     mesh = np.ascontiguousarray(vertices[faces], dtype="<f4")
+    # The vertex set and face connectivity above are native-style; normalize
+    # only the global orientation so cached raft meshes have outward normals.
+    import trimesh
+    signed_vol = trimesh.triangles.mass_properties(
+        triangles=mesh.astype(np.float64), skip_inertia=True).volume
+    if signed_vol < 0:
+        mesh = np.ascontiguousarray(mesh[:, [0, 2, 1], :])
     assert mesh.shape == (12, 3, 3) and mesh.nbytes == 432
     return mesh
 
