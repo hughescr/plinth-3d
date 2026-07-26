@@ -81,14 +81,24 @@ def test_engine_murray_conservation_holds_on_table(table_mesh, cfg):
     assert result["verify"]["murray_violations"] == [], result["verify"]
 
 
-def test_engine_box_gets_exactly_the_bottom_plateau_minimum(box_mesh, cfg):
-    """v3.6 rule, unchanged in v4: under lift a flat bottom is the
-    print's FIRST FEP island, so the honest answer is one bottom-plateau
-    minimum with one contact pinning it -- and nothing else."""
+def test_engine_prepare_keeps_lifted_box_bottom_faces_as_demand(box_mesh, cfg):
+    """A lifted flat bottom is unsupported demand, not plate-grounded."""
+    pre = engine.prepare(box_mesh, cfg)
+    bottom = set(np.flatnonzero(np.isclose(
+        box_mesh.triangles_center[:, 2], box_mesh.bounds[0][2])))
+    demanded = set(np.concatenate(pre["islands"]))
+    assert pre["plate_z"] == pytest.approx(
+        float(box_mesh.bounds[0][2]) - cfg.lift_mm)
+    assert bottom <= demanded
+    assert len(pre["contacts"]) > 0
+
+
+def test_engine_box_supports_bottom_plateau_demand(box_mesh, cfg):
+    """The lifted box's first FEP island remains demanded end to end."""
     result = engine.run(box_mesh, cfg)
     assert result["log"]["minima"] == 1
-    assert len(result["contacts"]) == 1
-    assert result["contacts"][0].get("minimum") is True
+    assert len(result["contacts"]) > 0
+    assert any(c.get("minimum") is True for c in result["contacts"])
     assert result["verify"]["unsupported_minima"] == []
     assert result["verify"]["ok"], result["verify"]
 
@@ -234,15 +244,22 @@ def test_engine_prepare_island_births_deterministic_despite_global_rng_state(
     assert log_a["island_birth_contacts_added"] == log_b["island_birth_contacts_added"]
 
 
-def test_engine_no_contacts_returns_honest_empty_result(cfg):
-    """Degenerate case: a mesh with essentially no down-facing overhang
-    beyond near_plate_mm still returns a complete, well-formed result
-    (the empty-contacts early-return path) instead of crashing."""
+def test_engine_lifted_thin_box_does_not_take_no_contacts_path(cfg):
+    """A lifted thin box still has unsupported bottom demand.
+
+    This used to exercise the empty-result path only because the mesh's own
+    z-min was mistaken for the plate.
+    """
     import trimesh
     flat = trimesh.creation.box(extents=(10, 10, 0.5))
     m = trimesh.Trimesh(vertices=flat.vertices.copy(), faces=flat.faces.copy(),
                          process=True)
     result = engine.run(m, cfg)
+    assert len(result["contacts"]) > 0
+    bottom = set(np.flatnonzero(np.isclose(
+        m.triangles_center[:, 2], m.bounds[0][2])))
+    demanded = set(np.concatenate(result["islands"]))
+    assert bottom <= demanded
     assert result["verify"]["clearance_violations"] == []
     assert result["verify"]["connectivity_violations"] == []
     assert set(result.keys()) >= {
@@ -518,8 +535,13 @@ def test_table_and_toed_slab_full_run_not_worse_than_baseline(cfg):
     and confirmed bit-identical across two independent engine.run calls per
     fixture before freezing (scripts/tests/_refreeze_v5.py: the double-run
     determinism proof; old->new values are in the SWAP-STEP-3 commit message).
-    fixtures/v4_p4_baseline.json (and v4_p3, v3) are kept untouched for
-    history/provenance."""
+    A1 plate-grounding re-freeze (2026-07-25): the old table baseline omitted
+    its lifted leg bottoms because grounded_mask compared against mesh z-min
+    instead of the actual plate. Restoring that mandatory support demand
+    necessarily raises volume and may add unrouted demand, so the table entry
+    was re-measured twice after A1 and confirmed bit-identical. Toed-slab was
+    unchanged. The gate formula remains unchanged; fixtures/v4_p4_baseline.json
+    (and v4_p3, v3) are kept untouched for history/provenance."""
     baseline = json.load(open(_BASELINE_PATH))
 
     for name, mesh_fn in (("table", mesh_io.make_overhang_table),

@@ -39,11 +39,11 @@ def toed_slab_result():
 
 def _build_forest(mesh, cfg):
     from support_placement import perception
-    islands = perception.overhang_islands(mesh, cfg)
+    plate_z = float(mesh.bounds[0][2]) - cfg.lift_mm
+    islands = perception.overhang_islands(mesh, cfg, plate_z)
     minima = perception.local_z_minima(mesh, cfg)
     contacts = placement.sample_candidates(mesh, islands, cfg)
     contacts, islands, _ = engine._ensure_minima_contacts(mesh, islands, contacts, minima, cfg)
-    plate_z = float(mesh.bounds[0][2]) - cfg.lift_mm
     surface_tree = routing.build_surface_tree(mesh, pitch_mm=0.3, max_points=400000)
     carried = placement.load_partition(mesh, islands, contacts, cfg)
     tip_r = placement.tip_radius_mm(carried, cfg)

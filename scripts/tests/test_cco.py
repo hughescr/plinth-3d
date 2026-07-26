@@ -227,13 +227,13 @@ def test_checkpoint_rollback_restores_state_after_a_rejected_candidate(cfg):
 # ---------------------------------------------------------------- build --
 def test_insertion_accounting_every_contact_routed_or_unrouted_exactly_once(cfg, table_mesh):
     from support_placement import perception, placement, routing
-    islands = perception.overhang_islands(table_mesh, cfg)
+    plate_z = float(table_mesh.bounds[0][2]) - cfg.lift_mm
+    islands = perception.overhang_islands(table_mesh, cfg, plate_z)
     minima = perception.local_z_minima(table_mesh, cfg)
     contacts = placement.sample_candidates(table_mesh, islands, cfg)
     contacts, islands, _ = eng._ensure_minima_contacts(table_mesh, islands, contacts, minima, cfg)
     carried = placement.load_partition(table_mesh, islands, contacts, cfg)
     tip_r = placement.tip_radius_mm(carried, cfg)
-    plate_z = float(table_mesh.bounds[0][2]) - cfg.lift_mm
     surface_tree = routing.build_surface_tree(table_mesh, pitch_mm=0.3)
     minima_flags = [bool(c.get("minimum")) for c in contacts]
 
@@ -257,13 +257,13 @@ def test_build_is_deterministic_across_repeated_runs(cfg, table_mesh):
     inputs must reproduce the identical forest (same unrouted set, same
     member count, same total volume)."""
     from support_placement import perception, placement, routing, tree as tm2
-    islands = perception.overhang_islands(table_mesh, cfg)
+    plate_z = float(table_mesh.bounds[0][2]) - cfg.lift_mm
+    islands = perception.overhang_islands(table_mesh, cfg, plate_z)
     minima = perception.local_z_minima(table_mesh, cfg)
     contacts = placement.sample_candidates(table_mesh, islands, cfg)
     contacts, islands, _ = eng._ensure_minima_contacts(table_mesh, islands, contacts, minima, cfg)
     carried = placement.load_partition(table_mesh, islands, contacts, cfg)
     tip_r = placement.tip_radius_mm(carried, cfg)
-    plate_z = float(table_mesh.bounds[0][2]) - cfg.lift_mm
     surface_tree = routing.build_surface_tree(table_mesh, pitch_mm=0.3)
     minima_flags = [bool(c.get("minimum")) for c in contacts]
 

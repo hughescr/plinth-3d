@@ -87,9 +87,9 @@ class SupportConfig:
     # from it hits more model geometry within this gap -- a short bridge
     # doesn't need a support, the cured layer stiffness spans it.
     bridge_free_gap_mm: float = 1.0
-    # A down-facing face within this height of the model's own lowest
-    # point is exempt -- close enough to plate/raft that no dedicated
-    # pillar is needed.
+    # A down-facing face within this height above the actual build plate
+    # is exempt -- close enough to plate/raft that no dedicated pillar is
+    # needed. Lifted model faces are not plate-grounded.
     near_plate_mm: float = 1.5
     # Islands merge across this spatial gap in addition to true mesh-edge
     # adjacency -- pure topological adjacency badly over-fragments organic/

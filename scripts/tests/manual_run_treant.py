@@ -37,7 +37,8 @@ def stage_islands():
     t0 = time.time()
     mesh = mesh_io.load_stl(STL_PATH)
     cfg = config.SupportConfig()
-    islands = perception.overhang_islands(mesh, cfg)
+    plate_z = float(mesh.bounds[0][2]) - cfg.lift_mm
+    islands = perception.overhang_islands(mesh, cfg, plate_z)
     print(f"loaded {len(mesh.faces)} faces, {len(islands)} islands in {time.time()-t0:.1f}s")
     save_state(cfg=cfg, islands=islands)
     print("saved stage=islands")

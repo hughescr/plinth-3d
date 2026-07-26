@@ -18,14 +18,16 @@ def _member(p0, p1, r0=0.5, r1=0.5, kind="trunk", owner=("contact", 0), embed_en
 
 
 def test_coverage_report_flags_island_with_no_contacts(table_mesh, cfg):
-    islands = perception.overhang_islands(table_mesh, cfg)
+    plate_z = float(table_mesh.bounds[0][2]) - cfg.lift_mm
+    islands = perception.overhang_islands(table_mesh, cfg, plate_z)
     report = verify.coverage_report(table_mesh, islands, [], cfg)
     assert len(report) == len(islands)
     assert all(not r["covered"] for r in report)
 
 
 def test_coverage_report_passes_with_real_sampling(table_mesh, cfg):
-    islands = perception.overhang_islands(table_mesh, cfg)
+    plate_z = float(table_mesh.bounds[0][2]) - cfg.lift_mm
+    islands = perception.overhang_islands(table_mesh, cfg, plate_z)
     contacts = placement.sample_candidates(table_mesh, islands, cfg, seed=5)
     report = verify.coverage_report(table_mesh, islands, contacts, cfg)
     assert all(r["covered"] for r in report), report
@@ -161,12 +163,11 @@ def test_load_report_clean_for_normal_load(cfg):
 
 
 def test_self_verify_ok_on_a_clean_small_case(table_mesh, cfg):
-    islands = perception.overhang_islands(table_mesh, cfg)
+    plate_z = float(table_mesh.bounds[0][2]) - cfg.lift_mm
+    islands = perception.overhang_islands(table_mesh, cfg, plate_z)
     contacts = placement.sample_candidates(table_mesh, islands, cfg, seed=7)
     carried = placement.load_partition(table_mesh, islands, contacts, cfg)
     tip_r = placement.tip_radius_mm(carried, cfg)
-    zmin = table_mesh.bounds[0][2]
-    plate_z = zmin - cfg.lift_mm
     members = []
     for ci, (c, r) in enumerate(zip(contacts, tip_r)):
         pos = np.asarray(c["position"], float)
@@ -350,12 +351,11 @@ def test_self_verify_gates_on_uncovered_island_births(table_mesh, cfg):
     caller omits island_births entirely -- same optional-parameter
     contract as `minima` (backward compatible for any caller that hasn't
     adopted I1 yet)."""
-    islands = perception.overhang_islands(table_mesh, cfg)
+    plate_z = float(table_mesh.bounds[0][2]) - cfg.lift_mm
+    islands = perception.overhang_islands(table_mesh, cfg, plate_z)
     contacts = placement.sample_candidates(table_mesh, islands, cfg, seed=7)
     carried = placement.load_partition(table_mesh, islands, contacts, cfg)
     tip_r = placement.tip_radius_mm(carried, cfg)
-    zmin = table_mesh.bounds[0][2]
-    plate_z = zmin - cfg.lift_mm
     members = []
     for ci, (c, r) in enumerate(zip(contacts, tip_r)):
         pos = np.asarray(c["position"], float)

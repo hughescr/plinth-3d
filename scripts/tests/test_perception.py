@@ -17,14 +17,42 @@ def test_down_facing_mask_flags_flat_underside_of_table(table_mesh, cfg):
     # that's grounded_mask's job (tested separately).
 
 
-def test_box_bottom_face_is_down_facing_but_grounded(box_mesh, cfg):
+def test_box_bottom_face_is_grounded_when_model_is_on_plate(box_mesh, cfg):
     down = perception.down_facing_mask(box_mesh, cfg)
-    grounded = perception.grounded_mask(box_mesh, cfg, down)
+    plate_z = float(box_mesh.bounds[0][2])
+    grounded = perception.grounded_mask(box_mesh, cfg, plate_z, down)
     centers = box_mesh.triangles_center
     zmin = box_mesh.bounds[0][2]
     bottom = down & (centers[:, 2] - zmin < 0.1)
     assert bottom.sum() > 0
-    assert grounded[bottom].all(), "box resting on its own base must be grounded, not an island"
+    assert grounded[bottom].all()
+
+
+def test_lifted_box_bottom_face_is_not_grounded(box_mesh, cfg):
+    down = perception.down_facing_mask(box_mesh, cfg)
+    plate_z = float(box_mesh.bounds[0][2]) - cfg.lift_mm
+    grounded = perception.grounded_mask(box_mesh, cfg, plate_z, down)
+    centers = box_mesh.triangles_center
+    bottom = down & np.isclose(centers[:, 2], box_mesh.bounds[0][2])
+    assert bottom.sum() > 0
+    assert not grounded[bottom].any()
+
+
+def test_bridge_shadow_still_grounds_a_face_above_nearby_material(cfg):
+    import trimesh
+
+    lower = trimesh.creation.box(extents=(10.0, 10.0, 1.0))
+    lower.apply_translation((0.0, 0.0, 0.5))
+    upper = trimesh.creation.box(extents=(10.0, 10.0, 1.0))
+    upper.apply_translation((0.0, 0.0, 2.0))
+    mesh = trimesh.util.concatenate((lower, upper))
+
+    down = perception.down_facing_mask(mesh, cfg)
+    grounded = perception.grounded_mask(mesh, cfg, plate_z=-5.0,
+                                         down_mask=down)
+    upper_bottom = down & np.isclose(mesh.triangles_center[:, 2], 1.5)
+    assert upper_bottom.sum() > 0
+    assert grounded[upper_bottom].all()
 
 
 def test_vertical_wall_is_not_down_facing(box_mesh, cfg):
@@ -35,17 +63,27 @@ def test_vertical_wall_is_not_down_facing(box_mesh, cfg):
 
 
 def test_table_underside_forms_islands_needing_support(table_mesh, cfg):
-    islands = perception.overhang_islands(table_mesh, cfg)
+    plate_z = float(table_mesh.bounds[0][2]) - cfg.lift_mm
+    islands = perception.overhang_islands(table_mesh, cfg, plate_z)
     assert len(islands) >= 1
     total_faces = sum(len(i) for i in islands)
     assert total_faces > 0
 
 
-def test_box_alone_has_no_islands(box_mesh, cfg):
-    # a simple box resting on the plate needs no support: its only
-    # down-facing face is its grounded base.
-    islands = perception.overhang_islands(box_mesh, cfg)
+def test_box_on_plate_has_no_overhang_islands(box_mesh, cfg):
+    on_plate = dataclasses.replace(cfg, lift_mm=0.0)
+    plate_z = float(box_mesh.bounds[0][2]) - on_plate.lift_mm
+    islands = perception.overhang_islands(box_mesh, on_plate, plate_z)
     assert islands == []
+
+
+def test_lifted_box_bottom_is_an_overhang_island(box_mesh, cfg):
+    plate_z = float(box_mesh.bounds[0][2]) - cfg.lift_mm
+    islands = perception.overhang_islands(box_mesh, cfg, plate_z)
+    bottom = set(np.flatnonzero(np.isclose(
+        box_mesh.triangles_center[:, 2], box_mesh.bounds[0][2])))
+    demanded = set(np.concatenate(islands))
+    assert bottom <= demanded
 
 
 class _FakeMesh:

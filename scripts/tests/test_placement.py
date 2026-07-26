@@ -31,7 +31,8 @@ def test_max_unbraced_len_is_consistent_inverse_with_angle(cfg):
 
 
 def test_spacing_floor_never_violated(table_mesh, cfg):
-    islands = perception.overhang_islands(table_mesh, cfg)
+    plate_z = float(table_mesh.bounds[0][2]) - cfg.lift_mm
+    islands = perception.overhang_islands(table_mesh, cfg, plate_z)
     contacts = placement.sample_candidates(table_mesh, islands, cfg, seed=1)
     positions = np.array([c["position"] for c in contacts])
     if len(positions) < 2:
@@ -49,7 +50,8 @@ def test_every_island_gets_min_contacts(cfg):
     # get at least min_contacts_per_island.
     from support_placement import mesh_io
     tiny_table = mesh_io.make_overhang_table(leg=(1, 1, 5), top=(3, 3, 1))
-    islands = perception.overhang_islands(tiny_table, cfg)
+    plate_z = float(tiny_table.bounds[0][2]) - cfg.lift_mm
+    islands = perception.overhang_islands(tiny_table, cfg, plate_z)
     assert len(islands) >= 1
     contacts = placement.sample_candidates(tiny_table, islands, cfg, seed=2)
     per_island = {}
@@ -61,7 +63,8 @@ def test_every_island_gets_min_contacts(cfg):
 
 
 def test_load_partition_conserves_area(table_mesh, cfg):
-    islands = perception.overhang_islands(table_mesh, cfg)
+    plate_z = float(table_mesh.bounds[0][2]) - cfg.lift_mm
+    islands = perception.overhang_islands(table_mesh, cfg, plate_z)
     contacts = placement.sample_candidates(table_mesh, islands, cfg, seed=3)
     carried = placement.load_partition(table_mesh, islands, contacts, cfg)
     by_island = {}
@@ -80,7 +83,8 @@ def test_load_partition_is_deterministic_despite_global_rng_state(table_mesh, cf
     carried-area partition silently varies with whatever ran before it.
     Perturb the global RNG differently before each call; the carried-area
     outputs must still match exactly."""
-    islands = perception.overhang_islands(table_mesh, cfg)
+    plate_z = float(table_mesh.bounds[0][2]) - cfg.lift_mm
+    islands = perception.overhang_islands(table_mesh, cfg, plate_z)
     contacts = placement.sample_candidates(table_mesh, islands, cfg, seed=3)
     np.random.seed(12345)
     carried_a = placement.load_partition(table_mesh, islands, contacts, cfg)

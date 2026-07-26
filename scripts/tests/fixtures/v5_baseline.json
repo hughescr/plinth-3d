@@ -1,9 +1,9 @@
 {
  "table": {
-  "total_ml": 0.21243683958626244,
-  "member_ml": 0.16511828577406576,
-  "n_unrouted": 1,
-  "rewire_accepted": 33
+  "total_ml": 0.25689327434238046,
+  "member_ml": 0.19535942526272548,
+  "n_unrouted": 2,
+  "rewire_accepted": 23
  },
  "toed_slab": {
   "total_ml": 0.3514180846641123,

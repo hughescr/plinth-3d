@@ -4,7 +4,7 @@ Design choice (documented, not silent): v0's island scan was voxel-grid
 based (see design.md history). v2 uses a face-adjacency-graph definition
 instead: an "island" is a connected component, over shared mesh edges, of
 faces that (a) are down-facing beyond the overhang threshold and (b) are
-not self-grounded (near the model's own base, or shadowed by more model
+not self-grounded (near the actual build plate, or shadowed by more model
 material a short bridge-gap below). This is simpler to reason about,
 cheaper to test, and composes directly with the face-based scar-cost field
 -- both walk the same face graph. Coverage (which islands still need
@@ -25,10 +25,13 @@ def down_facing_mask(mesh, cfg):
     return nz < -np.sin(np.radians(cfg.overhang_angle_deg))
 
 
-def grounded_mask(mesh, cfg, down_mask=None, column_pitch_mm=1.0):
+def grounded_mask(mesh, cfg, plate_z, down_mask=None, column_pitch_mm=1.0):
     """True for down-facing faces that don't actually need a printed
-    support: near the model's own lowest point, or shadowed by more model
+    support: near the actual build plate, or shadowed by more model
     material within a short bridge-spannable gap directly below.
+
+    ``plate_z`` is the authoritative plate coordinate for the prepared
+    scene; it must not be inferred from the lifted mesh bounds.
 
     Column-cached ray casting: one ray per occupied XY grid COLUMN
     (multiple_hits=True, so every z-crossing in that column is captured
@@ -46,8 +49,8 @@ def grounded_mask(mesh, cfg, down_mask=None, column_pitch_mm=1.0):
     if not down_mask.any():
         return grounded
     centers = mesh.triangles_center
-    zmin = float(mesh.bounds[0][2])
-    near_plate = (centers[:, 2] - zmin) <= cfg.near_plate_mm
+    plate_gap = centers[:, 2] - float(plate_z)
+    near_plate = (plate_gap >= 0.0) & (plate_gap <= cfg.near_plate_mm)
     grounded |= (down_mask & near_plate)
 
     idx = np.nonzero(down_mask & ~near_plate)[0]
@@ -103,7 +106,7 @@ def grounded_mask(mesh, cfg, down_mask=None, column_pitch_mm=1.0):
     return grounded
 
 
-def overhang_islands(mesh, cfg, geom=None):
+def overhang_islands(mesh, cfg, plate_z, geom=None):
     """Connected components of down-facing, non-grounded faces, merging
     across BOTH true mesh-edge adjacency AND cfg.island_merge_radius_mm of
     spatial proximity (see that field's docstring: pure topological
@@ -117,7 +120,9 @@ def overhang_islands(mesh, cfg, geom=None):
     not a real overhang -- nothing prints under it). When a surface-EXACT
     oracle `geom` is supplied, the need mask additionally requires
     `geom.exterior_face_mask()`: interior faces can neither found an island
-    nor join one, killing that phantom demand at the source. `geom` is
+    nor join one, killing that phantom demand at the source. ``plate_z``
+    is passed through to grounded_mask as the authoritative plate
+    coordinate. `geom` is
     duck-typed on `.exterior_face_mask`; callers without an exact oracle
     (unit tests / legacy) pass None and get the v4 behavior verbatim (the
     mask is FAIL-OPEN anyway -- ambiguous faces classify exterior -- so a
@@ -125,7 +130,7 @@ def overhang_islands(mesh, cfg, geom=None):
     from scipy.spatial import cKDTree
 
     down = down_facing_mask(mesh, cfg)
-    grounded = grounded_mask(mesh, cfg, down)
+    grounded = grounded_mask(mesh, cfg, plate_z, down)
     need = down & ~grounded
     if geom is not None and hasattr(geom, "exterior_face_mask"):
         need &= geom.exterior_face_mask()

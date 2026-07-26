@@ -100,7 +100,8 @@ def prepare(mesh, cfg, log=None, geom=None):
     log = log if log is not None else {}
     t0 = time.time()
 
-    islands = perception.overhang_islands(mesh, cfg, geom=geom)
+    plate_z = float(mesh.bounds[0][2]) - cfg.lift_mm
+    islands = perception.overhang_islands(mesh, cfg, plate_z, geom=geom)
     log["islands"] = len(islands)
     log["t_islands"] = round(time.time() - t0, 2)
 
@@ -159,7 +160,6 @@ def prepare(mesh, cfg, log=None, geom=None):
         mesh, islands, contacts, island_births, cfg, geom=geom)
     log["island_birth_contacts_added"] = n_birth_added
 
-    plate_z = float(mesh.bounds[0][2]) - cfg.lift_mm
     sample_points, sample_delicacy = perception.exterior_anchor_pool(mesh, geom, cfg)
     log["t_delicacy"] = round(time.time() - t0, 2)
     return dict(islands=islands, minima=minima, island_births=island_births,
