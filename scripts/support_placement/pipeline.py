@@ -49,13 +49,18 @@ directory outside it.)
 """
 import json
 import os
+import inspect
+import shutil
 import time
 from dataclasses import dataclass, field, asdict
+
+import numpy as np
 
 from . import config as config_mod
 from . import emit as emit_mod
 from . import engine as engine_mod
 from . import hollow as hollow_mod
+from . import internal as internal_mod
 from . import mesh_io
 
 #: Stage names, in execution order. ``hollow`` is skipped (not failed) when
@@ -287,6 +292,7 @@ def prep_one(stl_path, out_path, *, cfg=None, wall_mm=2.5, orient=True,
         "allow_failed_gates": bool(allow_failed_gates),
         "skip_existing": bool(skip_existing),
         "internal_support_verifier_configured": internal_support_verifier is not None,
+        "a5_internal_supports_enabled": True,
     }
     stages = []
 
@@ -316,10 +322,19 @@ def prep_one(stl_path, out_path, *, cfg=None, wall_mm=2.5, orient=True,
     if hollow:
         say(f"hollow: {stl_path} -> {prepped} (wall={wall_mm}mm orient={orient})")
         hlog = {}
+        cavity_runtime = {}
+        solid_backup = os.path.splitext(prepped)[0] + ".oriented-solid.stl"
         try:
+            # Test doubles and older embedders may expose the pre-A5 signature;
+            # pass only the integration arguments the callable declares.
+            hollow_params = inspect.signature(hollow_mod.run).parameters
             hollow_kwargs = {}
-            if internal_support_verifier is not None:
+            if "allow_hollow_output" in hollow_params:
                 hollow_kwargs["allow_hollow_output"] = True
+            if "cavity_out" in hollow_params:
+                hollow_kwargs["cavity_out"] = cavity_runtime
+            if "solid_backup_path" in hollow_params:
+                hollow_kwargs["solid_backup_path"] = solid_backup
             hollow_mod.run(
                 stl_path, prepped, wall=wall_mm, orient=orient, log=hlog,
                 **hollow_kwargs,
@@ -354,6 +369,8 @@ def prep_one(stl_path, out_path, *, cfg=None, wall_mm=2.5, orient=True,
                 f"({', '.join(str(b['faces']) + 'f' for b in extra[:4])}"
                 f"{', ...' if len(extra) > 4 else ''})")
     else:
+        cavity_runtime = {}
+        solid_backup = None
         prepped = stl_path
         stages.append(StageResult("hollow", STATUS_SKIPPED, 0.0,
                                   {
@@ -371,60 +388,139 @@ def prep_one(stl_path, out_path, *, cfg=None, wall_mm=2.5, orient=True,
     # ---- stage 2: support engine ------------------------------------------
     t0 = time.time()
     say(f"supports: engine.run on {prepped}")
-    try:
-        mesh = mesh_io.load_stl(prepped)
+    def run_exterior_engine(path):
+        mesh = mesh_io.load_stl(path)
         # The engine works in the model-centered frame; emit re-derives the
         # same center from the same STL, which is the model-fidelity contract.
-        mesh.apply_translation(-(mesh.bounds[0] + mesh.bounds[1]) / 2.0)
+        mesh_center = (mesh.bounds[0] + mesh.bounds[1]) / 2.0
+        mesh.apply_translation(-mesh_center)
         elog = {}
         result = engine_mod.run(mesh, cfg, log=elog)
+        return mesh, mesh_center, result, elog
+
+    try:
+        mesh, mesh_center, result, elog = run_exterior_engine(prepped)
     except Exception as e:
         stages.append(StageResult("supports", STATUS_FAILED, time.time() - t0, {},
                                   f"{type(e).__name__}: {e}"))
         return finish(STATUS_FAILED, EXIT_SUPPORTS, "supports", f"{type(e).__name__}: {e}")
+    def support_report(mesh, result, elog):
+        verify = result.get("verify") or {}
+        return {
+            "faces": int(len(mesh.faces)),
+            "n_members": int(len(result["members"])),
+            "n_balls": int(len(result["balls"])),
+            "n_unrouted": int(len(result.get("unrouted", []))),
+            "n_contacts": int(len(result.get("contacts", []))),
+            "plate_z": float(result["plate_z"]),
+            "gates": _gate_counts(verify),
+            "volume_ml": {k: round(float(v), 5)
+                          for k, v in (result.get("volume") or {}).items()
+                          if isinstance(v, (int, float))},
+            "stage_timings": {k: elog[k] for k in elog if k.startswith("t_")},
+        }
+
     verify = result.get("verify") or {}
-    srep = {
-        "faces": int(len(mesh.faces)),
-        "n_members": int(len(result["members"])),
-        "n_balls": int(len(result["balls"])),
-        "n_unrouted": int(len(result.get("unrouted", []))),
-        "n_contacts": int(len(result.get("contacts", []))),
-        "plate_z": float(result["plate_z"]),
-        "gates": _gate_counts(verify),
-        "volume_ml": {k: round(float(v), 5)
-                      for k, v in (result.get("volume") or {}).items()
-                      if isinstance(v, (int, float))},
-        "stage_timings": {k: elog[k] for k in elog if k.startswith("t_")},
-    }
+    srep = support_report(mesh, result, elog)
     hstage = next((s for s in stages if s.name == "hollow"), None)
     hreport = hstage.report if hstage is not None else {}
     if hreport.get("final_geometry") == "hollow":
-        if internal_support_verifier is None:
-            msg = ("hollow geometry reached support placement without the "
-                   "dedicated internal-support verifier")
-            stages.append(StageResult("supports", STATUS_FAILED, time.time() - t0,
-                                      srep, msg))
-            return finish(STATUS_FAILED, EXIT_SUPPORTS, "supports", msg)
         try:
-            verifier_report = internal_support_verifier(
-                mesh=mesh, result=result, cfg=cfg, hollow_report=hreport,
-            )
+            if internal_support_verifier is None:
+                verifier_report = internal_mod.plan_and_verify(
+                    mesh=mesh, result=result, cfg=cfg, hollow_report=hreport,
+                    cavity=cavity_runtime, mesh_center=mesh_center,
+                )
+            else:
+                verifier_report = internal_support_verifier(
+                    mesh=mesh, result=result, cfg=cfg, hollow_report=hreport,
+                )
         except Exception as e:
-            msg = f"internal support verifier raised {type(e).__name__}: {e}"
-            stages.append(StageResult("supports", STATUS_FAILED, time.time() - t0,
-                                      srep, msg))
-            return finish(STATUS_FAILED, EXIT_SUPPORTS, "supports", msg)
-        if not isinstance(verifier_report, dict) or verifier_report.get("ok") is not True:
-            msg = ("internal support verifier did not approve hollow geometry; "
-                   "nothing emitted")
-            srep["internal_support_verifier"] = (
-                verifier_report if isinstance(verifier_report, dict)
-                else {"ok": False, "error": "verifier must return a dict"}
+            verifier_report = {
+                "ok": False,
+                "fallback_required": True,
+                "reason_code": "internal_verifier_exception",
+                "reason": f"{type(e).__name__}: {e}",
+            }
+        runtime_members = []
+        if isinstance(verifier_report, dict):
+            runtime_members = verifier_report.pop("members", [])
+        else:
+            verifier_report = {
+                "ok": False,
+                "fallback_required": True,
+                "reason_code": "invalid_internal_verifier_report",
+                "reason": "verifier must return a dict",
+            }
+        if verifier_report.get("ok") is True and not runtime_members:
+            verifier_report.update(
+                ok=False,
+                fallback_required=True,
+                reason_code="no_internal_members",
+                reason="approved hollow result supplied no internal support members",
             )
-            stages.append(StageResult("supports", STATUS_FAILED, time.time() - t0,
-                                      srep, msg))
-            return finish(STATUS_FAILED, EXIT_SUPPORTS, "supports", msg)
+        srep["a5_internal"] = verifier_report
         srep["internal_support_verifier"] = verifier_report
+        srep["exterior_hollow_gates"] = dict(srep["gates"])
+        srep["internal_gates"] = _gate_counts(
+            verifier_report.get("gates") or {})
+        if verifier_report.get("ok") is True:
+            # Architecture seam: exterior verification is already complete.
+            # Internal members are independently gated and appended only now,
+            # so exterior connectivity never mistakes their non-plate roots
+            # for floating exterior support trees.
+            result["members"] = list(result["members"]) + list(runtime_members)
+            internal_ml = sum(
+                np.pi * np.linalg.norm(np.asarray(m["p1"]) - np.asarray(m["p0"]))
+                * (float(m["r0"]) ** 2 + float(m["r0"]) * float(m["r1"])
+                   + float(m["r1"]) ** 2) / 3.0 / 1000.0
+                for m in runtime_members)
+            result.setdefault("volume", {})["internal_member_ml"] = internal_ml
+            srep["n_internal_members"] = len(runtime_members)
+            srep["n_members"] = len(result["members"])
+            srep["volume_ml"]["internal_member_ml"] = round(float(internal_ml), 5)
+        else:
+            reason = verifier_report.get("reason_code") or "a5_internal_support_failed"
+            backup = hreport.get("oriented_solid_backup")
+            if backup and os.path.isfile(backup):
+                shutil.copyfile(backup, prepped)
+                hreport.update(
+                    decision="SOLID_a5_internal_support_failed",
+                    final_geometry="solid",
+                    hollow_fallback_applied=True,
+                    hollow_fallback_reason=reason,
+                    a5_candidate_cavity_fingerprint=(
+                        (hreport.get("cavity_descriptor") or {}).get(
+                            "cavity_fingerprint")),
+                )
+                say(f"supports: A5 refused hollow ({reason}); using preserved "
+                    "oriented solid and rerunning exterior engine")
+                try:
+                    mesh, mesh_center, result, elog = run_exterior_engine(prepped)
+                except Exception as e:
+                    msg = (f"A5 fallback selected preserved solid, but exterior "
+                           f"engine raised {type(e).__name__}: {e}")
+                    stages.append(StageResult(
+                        "supports", STATUS_FAILED, time.time() - t0, srep, msg))
+                    return finish(
+                        STATUS_FAILED, EXIT_SUPPORTS, "supports", msg)
+                fallback_srep = support_report(mesh, result, elog)
+                fallback_srep["a5_internal"] = verifier_report
+                fallback_srep["internal_support_verifier"] = verifier_report
+                fallback_srep["exterior_hollow_gates"] = srep[
+                    "exterior_hollow_gates"]
+                fallback_srep["internal_gates"] = srep["internal_gates"]
+                fallback_srep["solid_fallback"] = True
+                fallback_srep["solid_fallback_reason"] = reason
+                srep = fallback_srep
+                verify = result.get("verify") or {}
+            else:
+                msg = ("internal support verifier did not approve hollow geometry "
+                       f"and no oriented-solid backup is available ({reason})")
+                stages.append(StageResult(
+                    "supports", STATUS_FAILED, time.time() - t0, srep, msg))
+                return finish(
+                    STATUS_FAILED, EXIT_SUPPORTS, "supports", msg)
     stages.append(StageResult("supports", STATUS_OK, time.time() - t0, srep))
     say(f"supports: members={srep['n_members']} balls={srep['n_balls']} "
         f"unrouted={srep['n_unrouted']} verify.ok={srep['gates']['ok']} "
