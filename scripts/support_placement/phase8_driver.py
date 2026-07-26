@@ -972,6 +972,14 @@ class SurfaceSeedIndex:
                 continue
             rec = contacts[ci]
             if rec.get("island_birth") or rec.get("minimum"):
+                # One shared physical axis can carry several exact logical
+                # obligations.  R2's scalar legacy region/birth payload can
+                # certify only the representative obligation, so moving such
+                # a seat would discard the other owners' authoritative
+                # candidate and can orphan a birth.  Keep the shared seat
+                # fixed; re-aim/D5 may still repair its downstream geometry.
+                if rec.get("shared_specialized_contact"):
+                    continue
                 if self._contact_component(rec) is None:
                     self.coverage_stats[
                         "specialized_component_rejections"] += 1

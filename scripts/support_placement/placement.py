@@ -11,6 +11,8 @@ import sys
 import numpy as np
 from scipy.spatial import cKDTree
 
+from . import specialized_contacts
+
 
 CONTACT_POOL_SCHEMA = "support-placement/contact-candidate-pool"
 CONTACT_POOL_SCHEMA_VERSION = 1
@@ -733,39 +735,44 @@ def _farthest_point_fallback(pts, k, floor_mm):
 def load_partition(mesh, islands, contacts, cfg):
     """Exact, deterministic per-face load partition (SPEC-V5-GEOM sec 2.5).
 
-    Replaces the seed-dependent Monte-Carlo `sub.sample` Voronoi partition
-    (which made carried areas -- hence tip radii, hence member volumes --
-    depend on the RNG seed and on whatever perturbed the global numpy state
-    before it). Each island face's CENTROID is assigned to its nearest
-    contact (a cKDTree over that island's contacts), and the face's FULL
-    `mesh.area_faces` value accrues to that contact. No RNG, no sampling:
-    exact at face granularity (mesh faces are small vs cfg.target_spacing_mm
-    on this corpus, so per-face assignment is a faithful Voronoi partition
-    of the island's own area). Per-island carried areas sum EXACTLY to the
-    island's face-area total by construction. Returns an array of
-    carried_area_mm2 aligned with `contacts`."""
+    Replaces the seed-dependent Monte-Carlo partition.  Every unique source
+    face claimed by the named owner islands is assigned once to its nearest
+    eligible physical contact, and its FULL ``mesh.area_faces`` value accrues
+    there.  Shared specialized contacts participate for every logical owner;
+    overlapping named islands therefore contribute the union of their faces,
+    not duplicate load.  No RNG or sampling is involved.  Returns
+    ``carried_area_mm2`` aligned with physical ``contacts``."""
     carried = np.zeros(len(contacts))
-    by_island = {}
-    for i, c in enumerate(contacts):
-        by_island.setdefault(c["island_id"], []).append(i)
+    owners_by_contact = [
+        specialized_contacts.owner_island_ids(contact)
+        for contact in contacts]
+    contacts_by_face = {}
+    for contact_idx, owner_ids in enumerate(owners_by_contact):
+        for island_id in owner_ids:
+            for face_id in np.asarray(
+                    islands[int(island_id)], dtype=np.int64):
+                contacts_by_face.setdefault(int(face_id), set()).add(
+                    int(contact_idx))
 
-    centers = mesh.triangles_center
-    face_area = mesh.area_faces
-    for island_id, idxs in by_island.items():
-        face_ids = islands[island_id]
-        if len(face_ids) == 0:
+    centers = np.asarray(mesh.triangles_center, dtype=np.float64)
+    face_area = np.asarray(mesh.area_faces, dtype=np.float64)
+    # Named islands may overlap.  A shared physical contact carries the union
+    # of their source faces, never the sum of duplicate named claims.
+    for face_id in sorted(contacts_by_face):
+        eligible = sorted(contacts_by_face[face_id])
+        if not eligible:
             continue
-        if len(idxs) == 1:
-            carried[idxs[0]] = float(face_area[face_ids].sum())
-            continue
-        positions = np.array([contacts[i]["position"] for i in idxs])
-        tree = cKDTree(positions)
-        # nearest contact per island face centroid -- exact & deterministic
-        # (NN assignment is independent of `workers`; ties break by index).
-        _, nearest = tree.query(centers[face_ids], workers=-1)
-        areas = np.asarray(face_area[face_ids], float)
-        for j, i in enumerate(idxs):
-            carried[i] = float(areas[nearest == j].sum())
+        point = centers[face_id]
+        distances_sq = [
+            float(np.dot(
+                np.asarray(contacts[index]["position"], dtype=np.float64)
+                - point,
+                np.asarray(contacts[index]["position"], dtype=np.float64)
+                - point))
+            for index in eligible
+        ]
+        winner = eligible[int(np.argmin(distances_sq))]
+        carried[winner] += float(face_area[face_id])
     return carried
 
 
