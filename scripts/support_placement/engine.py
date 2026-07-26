@@ -21,13 +21,15 @@ import numpy as np
 
 from . import perception, placement, routing, verify, joints, cco, tree, rewire
 from . import transient, bracing, phase8_driver
-from . import topology, coverage, prepared_validation
+from . import (
+    topology, coverage, prepared_validation, specialized_contacts,
+)
 from .geometry_exact import closest_on_tri
 from .geometry_kernel import KernelSurface
 
 
 PREPARED_STATE_SCHEMA = "support-placement/prepare"
-PREPARED_STATE_SCHEMA_VERSION = 2
+PREPARED_STATE_SCHEMA_VERSION = 3
 
 
 def mesh_fingerprint(mesh):
@@ -120,6 +122,15 @@ def validate_prepared_state(pre, mesh=None, cfg=None):
     topology.validate_face_topology(pre["face_topology"], mesh=mesh)
     coverage.validate_coverage_samples(
         pre["coverage_samples"], mesh=mesh, islands=pre.get("islands"))
+    violations = specialized_physical_invariant_report(
+        mesh, pre.get("islands", ()), pre.get("contacts", ()), cfg,
+        face_topology=pre["face_topology"],
+        coverage_samples=pre["coverage_samples"],
+        minima=pre.get("minima"), island_births=pre.get("island_births"))
+    if violations:
+        raise ValueError(
+            "prepared state violates physical-contact invariant: "
+            f"{violations[0]}")
     return pre
 
 
@@ -168,6 +179,242 @@ class _ProgressCell:
 
     def __init__(self):
         self.n = 0
+
+
+def _coverage_gate_objective(
+        mesh, islands, contacts, cfg, face_topology, coverage_samples):
+    report = verify.coverage_report(
+        mesh, islands, contacts, cfg,
+        coverage_samples=coverage_samples,
+        face_topology=face_topology)
+    return _coverage_objective([
+        row for row in report if not row["covered"]
+    ])
+
+
+def _load_gate_count(mesh, islands, contacts, cfg):
+    carried = placement.load_partition(mesh, islands, contacts, cfg)
+    tip_r = placement.tip_radius_mm(carried, cfg)
+    return len(verify.load_report(carried, tip_r, cfg))
+
+
+def _specialized_gate_count(minima, island_births, contacts, cfg):
+    return (
+        len(verify.minima_report(minima, contacts, cfg))
+        if minima is not None else 0
+    ) + (
+        len(verify.island_birth_report(island_births, contacts, cfg))
+        if island_births is not None else 0
+    )
+
+
+def _candidate_specialized_merge(
+        mesh, islands, contacts, left_idx, right_idx, representative, cfg,
+        face_topology, coverage_samples, baseline_coverage, baseline_load,
+        minima=None, island_births=None, baseline_specialized=0):
+    merged = specialized_contacts.merged_contact(
+        contacts[left_idx], contacts[right_idx], representative,
+        islands, mesh)
+    proposed = [
+        contact for index, contact in enumerate(contacts)
+        if index not in (left_idx, right_idx)
+    ]
+    proposed.append(merged)
+    proposed.sort(key=_physical_contact_sort_key)
+    coverage_objective = _coverage_gate_objective(
+        mesh, islands, proposed, cfg, face_topology, coverage_samples)
+    if coverage_objective > baseline_coverage:
+        return None
+    load_count = _load_gate_count(mesh, islands, proposed, cfg)
+    if load_count > baseline_load:
+        return None
+    if _specialized_gate_count(
+            minima, island_births, proposed, cfg) > baseline_specialized:
+        return None
+    return proposed
+
+
+def _physical_contact_sort_key(contact):
+    specialized = specialized_contacts.is_specialized(contact)
+    return (
+        tuple(float(x) for x in np.asarray(
+            contact["position"], dtype=np.float64)),
+        1 if specialized else 0,
+        int(contact.get("coverage_component_id", -1)),
+        int(contact.get("coverage_face_id", contact.get("face_id", -1))),
+        int(contact.get("island_id", -1)),
+    )
+
+
+def _consolidate_specialized_contacts(
+        mesh, islands, contacts, cfg, face_topology, coverage_samples,
+        minima=None, island_births=None):
+    """Deterministically merge every gate-safe close specialized pair."""
+    contacts = [copy.deepcopy(contact) for contact in contacts]
+    contacts.sort(key=_physical_contact_sort_key)
+    initial_count = len(contacts)
+    merged_pairs = []
+    rejected_pairs = set()
+    # A regular A2 seat and a specialized nomination at the exact same
+    # coordinates are one physical axis.  Retain both authorities on that one
+    # record before considering movable specialized-only clusters.
+    while True:
+        attached = False
+        for left_idx, left in enumerate(contacts):
+            for right_idx in range(left_idx + 1, len(contacts)):
+                right = contacts[right_idx]
+                if not np.array_equal(
+                        np.asarray(left["position"], dtype=np.float64),
+                        np.asarray(right["position"], dtype=np.float64)):
+                    continue
+                classes = (
+                    specialized_contacts.is_specialized(left),
+                    specialized_contacts.is_specialized(right))
+                if classes not in ((False, True), (True, False)):
+                    continue
+                regular_idx, specialized_idx = (
+                    (left_idx, right_idx) if classes == (False, True)
+                    else (right_idx, left_idx))
+                regular = contacts[regular_idx]
+                specialized = contacts[specialized_idx]
+                if not all(
+                        specialized_contacts.candidate_satisfies_demand(
+                            regular["position"], demand, cfg)
+                        for demand in specialized_contacts.logical_demands(
+                            specialized)):
+                    continue
+                shared = specialized_contacts.attach_to_exact_regular(
+                    regular, specialized, islands, mesh)
+                contacts = [
+                    contact for index, contact in enumerate(contacts)
+                    if index not in (regular_idx, specialized_idx)
+                ] + [shared]
+                contacts.sort(key=_physical_contact_sort_key)
+                merged_pairs.append(dict(
+                    distance_mm=0.0,
+                    representative=("regular-pool-row",
+                                    int(regular["candidate_pool_row"]))))
+                attached = True
+                break
+            if attached:
+                break
+        if not attached:
+            break
+    while True:
+        baseline_coverage = _coverage_gate_objective(
+            mesh, islands, contacts, cfg, face_topology, coverage_samples)
+        baseline_load = _load_gate_count(mesh, islands, contacts, cfg)
+        baseline_specialized = _specialized_gate_count(
+            minima, island_births, contacts, cfg)
+        chosen = None
+        for left_idx, left in enumerate(contacts):
+            if not specialized_contacts.is_specialized(left):
+                continue
+            left_pos = np.asarray(left["position"], dtype=np.float64)
+            for right_idx in range(left_idx + 1, len(contacts)):
+                right = contacts[right_idx]
+                if not specialized_contacts.is_specialized(right):
+                    continue
+                right_pos = np.asarray(right["position"], dtype=np.float64)
+                distance = float(np.linalg.norm(left_pos - right_pos))
+                if distance >= float(cfg.spacing_floor_mm):
+                    continue
+                representatives = (
+                    specialized_contacts.compatible_representatives(
+                        left, right, cfg))
+                if not representatives:
+                    continue
+                pair_key = (
+                    specialized_contacts.demand_key(
+                        specialized_contacts.logical_demands(left)[0]),
+                    specialized_contacts.demand_key(
+                        specialized_contacts.logical_demands(right)[0]),
+                )
+                for representative in representatives:
+                    proposed = _candidate_specialized_merge(
+                        mesh, islands, contacts, left_idx, right_idx,
+                        representative, cfg, face_topology,
+                        coverage_samples, baseline_coverage, baseline_load)
+                    if proposed is not None and _specialized_gate_count(
+                            minima, island_births, proposed, cfg
+                    ) > baseline_specialized:
+                        proposed = None
+                    if proposed is not None:
+                        chosen = (
+                            proposed, distance,
+                            specialized_contacts.candidate_key(
+                                representative))
+                        break
+                if chosen is not None:
+                    break
+                rejected_pairs.add(pair_key)
+            if chosen is not None:
+                break
+        if chosen is None:
+            break
+        contacts = chosen[0]
+        merged_pairs.append(dict(
+            distance_mm=float(chosen[1]),
+            representative=chosen[2]))
+
+    return contacts, dict(
+        physical_contacts_before=int(initial_count),
+        physical_contacts_after=int(len(contacts)),
+        physical_contacts_removed=int(initial_count - len(contacts)),
+        merged_pairs=tuple(merged_pairs),
+        gate_incompatible_pairs=int(len(rejected_pairs)),
+    )
+
+
+def specialized_physical_invariant_report(
+        mesh, islands, contacts, cfg, face_topology, coverage_samples,
+        minima=None, island_births=None):
+    """Hard physical-seat invariant used at prepare and staged boundaries."""
+    out = [
+        dict(reason="duplicate-physical-contact-seat",
+             contact_indices=pair)
+        for pair in specialized_contacts.exact_duplicate_seat_pairs(contacts)
+    ]
+    if cfg is None:
+        return out
+    for contact_idx, contact in enumerate(contacts):
+        for reason in specialized_contacts.shared_contact_payload_violations(
+                contact, cfg):
+            out.append(dict(
+                reason=reason, contact_idx=int(contact_idx)))
+    baseline_coverage = _coverage_gate_objective(
+        mesh, islands, contacts, cfg, face_topology, coverage_samples)
+    baseline_load = _load_gate_count(mesh, islands, contacts, cfg)
+    baseline_specialized = _specialized_gate_count(
+        minima, island_births, contacts, cfg)
+    for left_idx, left in enumerate(contacts):
+        if not specialized_contacts.is_specialized(left):
+            continue
+        left_pos = np.asarray(left["position"], dtype=np.float64)
+        for right_idx in range(left_idx + 1, len(contacts)):
+            right = contacts[right_idx]
+            if not specialized_contacts.is_specialized(right):
+                continue
+            distance = float(np.linalg.norm(
+                left_pos - np.asarray(
+                    right["position"], dtype=np.float64)))
+            if distance >= float(cfg.spacing_floor_mm):
+                continue
+            for representative in (
+                    specialized_contacts.compatible_representatives(
+                        left, right, cfg)):
+                if _candidate_specialized_merge(
+                        mesh, islands, list(contacts), left_idx, right_idx,
+                        representative, cfg, face_topology, coverage_samples,
+                        baseline_coverage, baseline_load,
+                        minima=minima, island_births=island_births,
+                        baseline_specialized=baseline_specialized) is not None:
+                    out.append(dict(
+                        reason="unmerged-compatible-specialized-pair",
+                        contact_indices=(int(left_idx), int(right_idx)),
+                        distance_mm=distance))
+                    break
+    return out
 
 
 @contextlib.contextmanager
@@ -336,6 +583,18 @@ def prepare(mesh, cfg, log=None, geom=None):
             selected_count=0, selected_rows=(), components=(),
             searched_cardinality=0, pairs_examined=0,
             max_matrix_entries=0, exact=True)
+    contacts, consolidation = _consolidate_specialized_contacts(
+        mesh, islands, contacts, cfg, face_topology, coverage_samples,
+        minima=minima, island_births=island_births)
+    log["specialized_contact_consolidation"] = consolidation
+    invariant = specialized_physical_invariant_report(
+        mesh, islands, contacts, cfg, face_topology=face_topology,
+        coverage_samples=coverage_samples,
+        minima=minima, island_births=island_births)
+    if invariant:
+        raise ValueError(
+            "prepare produced an invalid physical contact layout: "
+            f"{invariant[0]}")
     sample_points, sample_delicacy = perception.exterior_anchor_pool(mesh, geom, cfg)
     log["t_delicacy"] = round(time.time() - t0, 2)
     return dict(schema=PREPARED_STATE_SCHEMA,
@@ -755,6 +1014,18 @@ def _apply_unrouted_specialized_gate(report, contacts, forest, unrouted):
     return violations
 
 
+def _apply_physical_contact_gate(report, mesh, pre, contacts, cfg):
+    violations = specialized_physical_invariant_report(
+        mesh, pre["islands"], contacts, cfg,
+        face_topology=pre["face_topology"],
+        coverage_samples=pre["coverage_samples"],
+        minima=pre["minima"], island_births=pre["island_births"])
+    report["physical_contact_invariant_violations"] = violations
+    if violations:
+        report["ok"] = False
+    return violations
+
+
 def finish(mesh, pre, forest, unrouted, contacts, carried, tip_r,
            surface_tree, cfg, log=None, geom=None,
            _prepared_validation_token=None):
@@ -780,6 +1051,7 @@ def finish(mesh, pre, forest, unrouted, contacts, carried, tip_r,
                                      _prepared_validation_token))
     _apply_unrouted_specialized_gate(
         report, contacts, forest, unrouted)
+    _apply_physical_contact_gate(report, mesh, pre, contacts, cfg)
     volume = tree.volume_report(members, balls)
     log["n_unrouted"] = len(unrouted)
     return dict(members=members, balls=balls, verify=report, volume=volume,
@@ -815,6 +1087,7 @@ def _canonical_empty_geometry_state(
         _prepared_validation_token=_prepared_validation_token)
     _apply_unrouted_specialized_gate(
         report, contacts, forest, specialized_unrouted)
+    _apply_physical_contact_gate(report, mesh, pre, contacts, cfg)
     return dict(
         forest=forest, members=members, balls=balls, report=report,
         carried=carried, tip_r=tip_r, unrouted=specialized_unrouted,
@@ -1024,6 +1297,7 @@ def run(mesh, cfg, log=None):
         coverage_assessment = coverage_assessments[0]
         unrouted_specialized_contacts = _apply_unrouted_specialized_gate(
             report, contacts, forest, unrouted)
+        _apply_physical_contact_gate(report, mesh, pre, contacts, cfg)
         log[f"verify_pass{fix_pass}"] = dict(
             ok=report["ok"],
             n_uncovered=len(report["uncovered_islands"]),
@@ -1221,6 +1495,7 @@ def run(mesh, cfg, log=None):
 
     unrouted_specialized_contacts = _apply_unrouted_specialized_gate(
         report, contacts, forest, unrouted)
+    _apply_physical_contact_gate(report, mesh, pre, contacts, cfg)
     if "verify_final" in log:
         log["verify_final"]["ok"] = report["ok"]
         log["verify_final"]["n_unrouted_specialized"] = len(
@@ -1392,10 +1667,10 @@ def _contact_positions_by_island(contacts, n_islands):
     """Stack contact positions once per named island for domain queries."""
     grouped = [[] for _ in range(n_islands)]
     for contact in contacts:
-        island_id = int(contact.get("island_id", -1))
-        if 0 <= island_id < n_islands:
-            grouped[island_id].append(
-                np.asarray(contact["position"], dtype=np.float64))
+        for island_id in specialized_contacts.owner_island_ids(contact):
+            if 0 <= island_id < n_islands:
+                grouped[island_id].append(
+                    np.asarray(contact["position"], dtype=np.float64))
     return [
         (np.asarray(rows, dtype=np.float64)
          if rows else np.empty((0, 3), dtype=np.float64))
@@ -2701,11 +2976,11 @@ def _select_synthetic_coverage_rows(
     selected_rows = []
     specialized_by_island = {}
     for contact in contacts:
-        iid = int(contact.get("island_id", -1))
-        if (first_island_id <= iid < n_islands
-                and (contact.get("minimum")
-                     or contact.get("island_birth"))):
-            specialized_by_island.setdefault(iid, []).append(contact)
+        if not (contact.get("minimum") or contact.get("island_birth")):
+            continue
+        for iid in specialized_contacts.owner_island_ids(contact):
+            if first_island_id <= iid < n_islands:
+                specialized_by_island.setdefault(iid, []).append(contact)
 
     for island_id in range(int(first_island_id), int(n_islands)):
         specialized = specialized_by_island.get(island_id, ())
@@ -2717,12 +2992,16 @@ def _select_synthetic_coverage_rows(
         fixed_positions = specialized_positions.copy()
         specialized_components = {}
         for contact in specialized:
-            face_id = contact.get("coverage_face_id")
-            if face_id is None:
-                continue
-            component_id = int(component_ids[int(face_id)])
-            specialized_components.setdefault(component_id, []).append(
-                np.asarray(contact["position"], dtype=np.float64))
+            for owner_iid, face_id, stored_component in (
+                    specialized_contacts.coverage_routes(contact)):
+                if owner_iid != island_id:
+                    continue
+                component_id = int(component_ids[int(face_id)])
+                if (stored_component is not None
+                        and int(stored_component) != component_id):
+                    continue
+                specialized_components.setdefault(component_id, []).append(
+                    np.asarray(contact["position"], dtype=np.float64))
 
         pool_slice = pool.island_slice(island_id)
         island_pool_rows = np.arange(

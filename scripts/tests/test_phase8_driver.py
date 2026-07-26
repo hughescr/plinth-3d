@@ -1781,6 +1781,13 @@ def test_r2_production_authorities_validate_once_tile_and_never_cross_component(
     assert idx.coverage_stats["route_contexts_built"] == 2
     assert idx.coverage_stats["max_matrix_entries"] <= 4
 
+    shared = dict(
+        specialized, shared_specialized_contact=True,
+        owner_island_ids=(0,),
+        specialized_demands=())
+    assert idx.seeds_for(
+        [site], {0: 0}, [shared], [], local_cfg)[0] == []
+
     corrupted = dict(
         specialized, coverage_face_id=1, coverage_component_id=0)
     assert idx.seeds_for(

@@ -19,6 +19,7 @@ from scipy.spatial import cKDTree
 from . import (
     perception, placement, routing, joints, tree as tree_mod,
     removal as removal_mod, prepared_validation, topology as topology_mod,
+    specialized_contacts,
 )
 from .geometry_exact import member_rays
 
@@ -149,19 +150,21 @@ def coverage_report(mesh, islands, contacts, cfg, coverage_samples=None,
     island_face_sets = _sorted_island_face_sets(islands)
     by_route = {}
     for contact_idx, contact in enumerate(contacts):
-        face_id = _coverage_contact_face(contact)
-        if face_id is None:
-            continue
-        iid = int(contact.get("island_id", -1))
-        face_id = int(face_id)
-        if not (0 <= iid < len(islands)
-                and 0 <= face_id < len(component_ids)
-                and _face_in_sorted_set(
-                    face_id, island_face_sets[iid])):
-            continue
-        key = (iid, int(component_ids[face_id]))
-        by_route.setdefault(key, []).append(
-            (int(contact_idx), np.asarray(contact["position"], dtype=np.float64)))
+        for iid, face_id, stored_component in (
+                specialized_contacts.coverage_routes(contact)):
+            if not (0 <= iid < len(islands)
+                    and 0 <= face_id < len(component_ids)
+                    and _face_in_sorted_set(
+                        face_id, island_face_sets[iid])):
+                continue
+            component_id = int(component_ids[face_id])
+            if (stored_component is not None
+                    and int(stored_component) != component_id):
+                continue
+            key = (iid, component_id)
+            by_route.setdefault(key, []).append(
+                (int(contact_idx),
+                 np.asarray(contact["position"], dtype=np.float64)))
     route_trees = {}
     for key, rows in sorted(by_route.items()):
         rows.sort(key=lambda item: item[0])
@@ -1329,66 +1332,77 @@ def regular_contact_invariant_report(
         specialized = bool(
             contact.get("island_birth") or contact.get("minimum"))
         if specialized:
-            if "face_id" in contact:
+            shared_regular = bool(contact.get("shared_regular_contact"))
+            if "face_id" in contact and not shared_regular:
                 out.append(dict(
                     contact_idx=int(i),
                     reason="specialized-has-regular-face-id",
                     face_id=int(contact["face_id"])))
-            if "candidate_pool_row" in contact:
+            if "candidate_pool_row" in contact and not shared_regular:
                 out.append(dict(
                     contact_idx=int(i),
                     reason="specialized-has-candidate-pool-row",
                     candidate_pool_row=int(contact["candidate_pool_row"])))
-            coverage_face_id = contact.get("coverage_face_id")
-            if coverage_face_id is None or not (
-                    0 <= int(coverage_face_id) < len(mesh.faces)):
+            demands = specialized_contacts.logical_demands(contact)
+            if not demands:
                 out.append(dict(
                     contact_idx=int(i),
-                    reason="specialized-missing-coverage-face-id"))
+                    reason="specialized-missing-logical-demand"))
                 continue
-            island_id = int(contact.get("island_id", -1))
-            coverage_face_id = int(coverage_face_id)
-            if not (0 <= island_id < len(island_face_sets)):
-                out.append(dict(
-                    contact_idx=int(i),
-                    reason="specialized-invalid-island-id",
-                    island_id=island_id))
-                continue
-            if not _face_in_sorted_set(
-                    coverage_face_id, island_face_sets[island_id]):
-                out.append(dict(
-                    contact_idx=int(i),
-                    reason="specialized-coverage-face-outside-island",
-                    island_id=island_id,
-                    coverage_face_id=coverage_face_id))
-                continue
-            if not topology_valid:
-                out.append(dict(
-                    contact_idx=int(i),
-                    reason="specialized-missing-face-topology",
-                    coverage_face_id=coverage_face_id))
-                continue
-            component_id = int(
-                face_topology.component_ids[coverage_face_id])
-            if component_id < 0:
-                out.append(dict(
-                    contact_idx=int(i),
-                    reason="specialized-unresolved-face-component",
-                    coverage_face_id=coverage_face_id))
-                continue
-            stored_component_id = contact.get("coverage_component_id")
-            if stored_component_id is None:
-                out.append(dict(
-                    contact_idx=int(i),
-                    reason="specialized-missing-coverage-component-id",
-                    coverage_face_id=coverage_face_id))
-            elif int(stored_component_id) != component_id:
-                out.append(dict(
-                    contact_idx=int(i),
-                    reason="specialized-coverage-component-mismatch",
-                    coverage_face_id=coverage_face_id,
-                    coverage_component_id=int(stored_component_id),
-                    resolved_component_id=component_id))
+            for demand_idx, demand in enumerate(demands):
+                coverage_face_id = demand.get("coverage_face_id")
+                if coverage_face_id is None or not (
+                        0 <= int(coverage_face_id) < len(mesh.faces)):
+                    out.append(dict(
+                        contact_idx=int(i),
+                        reason="specialized-missing-coverage-face-id"))
+                    continue
+                island_id = int(demand.get("island_id", -1))
+                coverage_face_id = int(coverage_face_id)
+                if not (0 <= island_id < len(island_face_sets)):
+                    out.append(dict(
+                        contact_idx=int(i),
+                        reason="specialized-invalid-island-id",
+                        island_id=island_id))
+                    continue
+                if not _face_in_sorted_set(
+                        coverage_face_id, island_face_sets[island_id]):
+                    out.append(dict(
+                        contact_idx=int(i),
+                        reason="specialized-coverage-face-outside-island",
+                        island_id=island_id,
+                        coverage_face_id=coverage_face_id))
+                    continue
+                if not topology_valid:
+                    out.append(dict(
+                        contact_idx=int(i),
+                        reason="specialized-missing-face-topology",
+                        coverage_face_id=coverage_face_id))
+                    continue
+                component_id = int(
+                    face_topology.component_ids[coverage_face_id])
+                if component_id < 0:
+                    out.append(dict(
+                        contact_idx=int(i),
+                        reason="specialized-unresolved-face-component",
+                        coverage_face_id=coverage_face_id))
+                    continue
+                stored_component_id = demand.get(
+                    "coverage_component_id")
+                if stored_component_id is None:
+                    out.append(dict(
+                        contact_idx=int(i),
+                        reason="specialized-missing-coverage-component-id",
+                        coverage_face_id=coverage_face_id))
+                elif int(stored_component_id) != component_id:
+                    out.append(dict(
+                        contact_idx=int(i),
+                        reason="specialized-coverage-component-mismatch",
+                        coverage_face_id=coverage_face_id,
+                        coverage_component_id=int(stored_component_id),
+                        resolved_component_id=component_id))
+            if shared_regular:
+                regular_indices.append(i)
         else:
             regular_indices.append(i)
     if candidate_pool is None:
@@ -1410,7 +1424,7 @@ def regular_contact_invariant_report(
     for ci, contact in enumerate(contacts):
         specialized = bool(
             contact.get("island_birth") or contact.get("minimum"))
-        if specialized:
+        if specialized and not contact.get("shared_regular_contact"):
             continue
         if "face_id" not in contact:
             out.append(dict(contact_idx=int(ci), reason="missing-face-id"))
