@@ -18,10 +18,24 @@ if os.path.isfile(_candidate):
     CORPUS_PATH = os.path.abspath(_candidate)
 
 
+def _assert_closed_outward(tri):
+    tri = np.asarray(tri, dtype=np.float64)
+    normals = np.cross(
+        tri[:, 1] - tri[:, 0], tri[:, 2] - tri[:, 0])
+    assert np.all(np.linalg.norm(normals, axis=1) > 1e-12)
+    mesh = trimesh.Trimesh(
+        **trimesh.triangles.to_kwargs(tri), process=False)
+    mesh.merge_vertices()
+    assert mesh.is_watertight
+    assert mesh.is_winding_consistent
+    assert mesh.volume > 0
+
+
 def test_frustum_cylinder_is_watertight_with_expected_volume():
     tri = ce.frustum_mesh([0, 0, 0], [0, 0, 10], 1.0, 1.0, n_sides=24)
     mesh = trimesh.Trimesh(vertices=tri.reshape(-1, 3), faces=np.arange(tri.shape[0] * 3).reshape(-1, 3))
     assert mesh.is_watertight
+    assert mesh.is_winding_consistent
     expected_vol = np.pi * 1.0 ** 2 * 10.0
     assert abs(mesh.volume - expected_vol) / expected_vol < 0.02  # 24-gon discretization error
     assert mesh.volume > 0  # outward-consistent winding
@@ -32,6 +46,7 @@ def test_frustum_taper_volume_matches_frustum_formula():
     tri = ce.frustum_mesh([0, 0, 0], [0, 0, h], r0, r1, n_sides=24)
     mesh = trimesh.Trimesh(vertices=tri.reshape(-1, 3), faces=np.arange(tri.shape[0] * 3).reshape(-1, 3))
     assert mesh.is_watertight
+    assert mesh.is_winding_consistent
     expected = (np.pi * h / 3) * (r0 ** 2 + r0 * r1 + r1 ** 2)
     assert abs(mesh.volume - expected) / expected < 0.02
 
@@ -39,6 +54,35 @@ def test_frustum_taper_volume_matches_frustum_formula():
 def test_frustum_triangle_count_matches_validated_topology():
     tri = ce.frustum_mesh([0, 0, 0], [0, 0, 1], 0.5, 0.5, n_sides=24)
     assert tri.shape[0] == 4 * 24  # 2*sides walls + sides caps, both ends
+
+
+@pytest.mark.parametrize("type_id,r0,r1", [
+    (ci.T_TIP, 0.2, 0.3),
+    (ci.T_TAPER, 0.3, 0.75),
+    (ci.T_SHAFT, 0.75, 0.75),
+    (ci.T_JOINER, 0.4, 0.4),
+    (ci.T_FLARE, 1.1, 0.75),
+])
+def test_generated_closed_segment_types_are_outward_wound(
+        type_id, r0, r1, cfg):
+    tri = ce.frustum_mesh(
+        [0.0, 0.0, 0.0], [1.0, -0.5, 3.0], r0, r1)
+    _assert_closed_outward(tri)
+    raw = ce.build_record(
+        type_id, [0.0, 0.0, 0.0], [1.0, -0.5, 3.0],
+        r0, r1, mesh_off=0, mesh_len=tri.nbytes, cfg=cfg)
+    assert ci.Record(raw).type == type_id
+
+
+def test_generated_pad_and_bridge_are_outward_wound_and_plate_safe():
+    plate_z = -7.25
+    pad = ce._pad_mesh([1.0, 2.0], plate_z)
+    bridge = ce._bridge_mesh([1.0, 2.0], [4.0, -1.0], plate_z)
+
+    _assert_closed_outward(pad)
+    _assert_closed_outward(bridge)
+    assert pad[..., 2].min() == pytest.approx(plate_z)
+    assert bridge[..., 2].min() == pytest.approx(plate_z)
 
 
 def test_build_record_round_trips_through_chitubox_inject_Record():
