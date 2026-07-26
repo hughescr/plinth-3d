@@ -107,8 +107,61 @@ def test_no_hollow_uses_the_source_mesh_untouched(source_stl, tmp_path):
         allow_failed_gates=True)
     assert rep.status == pipeline.STATUS_OK
     assert rep.stage("hollow").status == pipeline.STATUS_SKIPPED
+    assert rep.stage("hollow").report["hollow_attempted"] is False
+    assert rep.stage("hollow").report["hollow_fallback_applied"] is False
+    assert rep.stage("hollow").report["final_geometry"] == "solid"
     assert rep.prepped_stl == source_stl
     assert rep.stage("emit").report["model_stl"] == source_stl
+
+
+def test_future_internal_support_verifier_hook_refuses_unapproved_hollow(
+        source_stl, tmp_path, monkeypatch):
+    seen = {}
+
+    def fake_hollow(in_path, out_path, wall=2.5, orient=True, log=None,
+                    allow_hollow_output=False):
+        seen["allow_hollow_output"] = allow_hollow_output
+        mesh_io.load_stl(in_path).export(out_path)
+        log.update(
+            status=hollow.STATUS_OK,
+            decision="HOLLOW (test double)",
+            final_geometry="hollow",
+            hollow_eligible=True,
+            hollow_fallback_applied=False,
+        )
+        return log
+
+    def verifier(**kwargs):
+        seen["verifier_kwargs"] = set(kwargs)
+        return {"ok": False, "reason": "test verifier rejection"}
+
+    def must_not_emit(*args, **kwargs):
+        raise AssertionError("unapproved hollow geometry must not be emitted")
+
+    monkeypatch.setattr(pipeline.hollow_mod, "run", fake_hollow)
+    monkeypatch.setattr(pipeline.engine_mod, "run",
+                        lambda mesh, cfg, log=None: _empty_result())
+    monkeypatch.setattr(pipeline.emit_mod, "emit_project", must_not_emit)
+
+    out = tmp_path / "unapproved.chitubox"
+    rep = pipeline.prep_one(
+        source_stl,
+        str(out),
+        orient=False,
+        internal_support_verifier=verifier,
+    )
+
+    assert seen["allow_hollow_output"] is True
+    assert seen["verifier_kwargs"] == {"mesh", "result", "cfg", "hollow_report"}
+    assert rep.settings["internal_support_verifier_configured"] is True
+    assert rep.status == pipeline.STATUS_FAILED
+    assert rep.failed_stage == "supports"
+    assert rep.exit_code == pipeline.EXIT_SUPPORTS
+    assert rep.stage("supports").report["internal_support_verifier"] == {
+        "ok": False,
+        "reason": "test verifier rejection",
+    }
+    assert not out.exists()
 
 
 @pytest.mark.kernel
