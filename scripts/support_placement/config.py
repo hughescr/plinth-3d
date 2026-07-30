@@ -15,27 +15,105 @@ from dataclasses import dataclass, field, asdict
 @dataclass
 class SupportConfig:
     # ---- Mechanics framework (design.md "Mechanics framework") ----
-    # Dominant load is PEEL: a few kPa over each region's newly-cured area.
-    # NOT measured for this printer/resin yet -- design.md says "a few kPa";
-    # 3.0 kPa is the geometric mean of a plausible 1-5 kPa range. Flagged
-    # soft: recalibrate from print outcomes (tip failures -> raise; excess
-    # tip mass / hard removal -> lower).
+    # ANCHORED TO CALIBRATION PLATE 5 (2026-07-30). Read this block as one
+    # unit: peel_pressure_pa, tensile_green_mpa and tip_safety_factor are
+    # NOT three independent measurements, they are one measured ratio split
+    # three ways for modelling convenience.
+    #
+    # THE MEASUREMENT. Plate 5, Elegoo Saturn 4 Ultra, black resin, 30 C
+    # tank: 30 mushroom-cap-on-a-tip specimens, a cap of known supported
+    # area A_cap on a tapered support tip of known diameter d_t, spanning
+    # A_cap = 3.1 / 19.6 / 122.7 mm2 crossed against d_t = 0.100..2.500 mm.
+    # With
+    #     X = A_supported / A_tip     (both mm2; A_tip = pi*d_t**2/4)
+    # every specimen at X <= 25.3 SURVIVED and every specimen at X >= 25.0
+    # FAILED -- one boundary inversion only (X = 25.00 failed while 25.17
+    # and 25.34 survived). Failures span X = 25 to X = 6229, survivors span
+    # X = 0.64 to 25.3, and rows A and B (15 cells each) agree
+    # independently. So the support snaps at X ~ 25: the load scales with
+    # supported AREA, not perimeter, and not a squeeze-film law.
+    # DESIGN TARGET: X <= 12 (the measured boundary of 25 with a 2x safety
+    # factor).
+    #
+    # HOW THE CODE SPENDS IT. placement.tip_radius_mm sizes the tip as
+    #     A_tip = A_supported * peel_pressure_pa * tip_safety_factor
+    #             / (tensile_green_mpa * 1e6)
+    # (trunks.size_trunks and cco._r_tension_mm reuse the same expression
+    # unclamped; verify.load_report checks the realized SF against it), so
+    # the X this engine actually permits is exactly
+    #     X_allowed = tensile_green_pa / (peel_pressure_pa * tip_safety_factor).
+    # Before this re-anchoring that composed to 10e6 / (3000 * 8) = 416.7 --
+    # about 35x past the measured snap point, which is why the engine could
+    # certify a layout whose own tips were predicted to break.
+    #
+    # ONLY THE COMPOSITE IS MEASURED. Plate 5 pins X and nothing else; it
+    # cannot separate "peel pressure" from "green tensile strength", and
+    # neither number below should be quoted on its own as a physical
+    # property. The re-anchoring was applied to tensile_green_mpa (see
+    # there) because peel_pressure_pa is the one constant of the three that
+    # is ALSO read outside the tensile-sizing family -- it is the
+    # angle-aware lateral load term in placement._shaft_r_for_L /
+    # max_unbraced_len_mm -- and plate 5 measured nothing about deflection
+    # or bracing. Left at 3000.0 Pa, which is at least the right order for
+    # a real peel pressure: docs/datasheets/physics/lit-green-peel.md's
+    # instrumented community/peer-reviewed sources put MSLA peel stress at
+    # ~12-13 kPa (1-2 N/cm2). Still soft in its own right, still the knob
+    # to recalibrate if ribbing/whip (not tip snapping) is what a print
+    # shows.
     peel_pressure_pa: float = 3000.0
 
-    # Green-state (uncured, as-printed) resin properties. design.md: tensile
-    # ~10-25 MPa, E ~0.5-1.5 GPa. Using the CONSERVATIVE (weak) end of both
-    # ranges for sizing math, since under-sizing the tip is the failure mode
-    # that ruins a print; over-sizing merely costs a slightly harder snap.
-    tensile_green_mpa: float = 10.0
+    # tensile_green_mpa: THE PLATE-5 ANCHOR. This is no longer a green-resin
+    # datasheet number and must not be read as one -- it is the term that
+    # carries the measured ratio above, chosen so that
+    #     X_allowed = 0.288e6 / (3000 * 8) = 12.0
+    # lands exactly on the design target. (Pre-plate-5 this was 10.0 MPa,
+    # the conservative end of design.md's fully-cured 10-25 MPa range;
+    # that number described cured resin, not the freshly-cured green layer
+    # that actually snaps at the FEP, and it put X_allowed at 416.7.) Two
+    # honest notes on the split: (a) 0.288 MPa is a plausible GREEN tensile
+    # -- pairing plate 5's X ~ 25 with the literature's ~12-13 kPa peel
+    # implies ~0.33 MPa, same order; (b) tip_safety_factor is retained at
+    # 8.0 rather than the 2.08 the design target implies against the
+    # measured boundary, so this constant also absorbs that extra 3.8x of
+    # conservatism. Neither 0.288 nor 3000 is separately meaningful; their
+    # composite X_allowed = 12 is.
+    #
+    # WHERE THE SUPPORT ACTUALLY BREAKS: the failure section is the
+    # NARROWEST CROSS-SECTION of the support column just above the cone
+    # (observed physically at the base of the cylinder), NOT the model
+    # contact patch. A long slow taper is therefore a liability -- the taper
+    # should open fast above the tip. THIS ENGINE DOES NOT MODEL THAT
+    # TODAY: tip_radius_mm sizes one radius per contact and the tip
+    # geometry above it is fixed by tip_ball_r_factor / joint_ball_factor
+    # / the stub-to-shoot frustum, with no fast-flare term and nothing that
+    # locates the minimum section along the column. Logged as a follow-up,
+    # deliberately NOT implemented in this change.
+    tensile_green_mpa: float = 0.288
+    # modulus_green_gpa is untouched by plate 5 -- it drives the deflection/
+    # slenderness solve (placement._shaft_r_for_L), which plate 5 did not
+    # measure. design.md: E ~0.5-1.5 GPa; conservative (soft) end kept.
     modulus_green_gpa: float = 0.5
 
-    # Tip is the designed fuse (SF 5-10 per design.md); 8 sits mid-range,
-    # weighted toward the safe side since tip mass is cheap.
+    # SIZING safety factor, NOT a fuse setting -- despite design.md's "the
+    # tip is the designed fuse (SF 5-10)" framing. In code this number
+    # MULTIPLIES THE LOAD before the tip is sized (placement.tip_radius_mm,
+    # trunks.size_trunks, cco._r_tension_mm) and is the minimum realized SF
+    # verify.load_report demands, so raising it makes tips FATTER and
+    # STRONGER, never weaker. It divides X_allowed. Left at 8.0: the
+    # plate-5 anchoring was folded into tensile_green_mpa instead, and this
+    # value is also the threshold load_report compares realized safety
+    # factors against.
     tip_safety_factor: float = 8.0
 
     # Tip radius clamp -- explicit in design.md: "clamped to a
     # removal-friendly 0.2-1.0mm". This is a hobbyist-handling constraint,
-    # not a physics one; do not derive it.
+    # not a physics one; do not derive it. WHAT IT COSTS AT X <= 12: the
+    # 1.0mm ceiling caps what ONE tip may carry at pi*1.0**2 * 12 = 37.7
+    # mm2 -- a contact carrying more than that is clamped, genuinely
+    # under-strength, and reported by verify.load_report (which gates
+    # verify.ok); the fix is another contact to split the load, not a
+    # bigger tip. The 0.2mm floor over-sizes (safely) any contact carrying
+    # less than pi*0.2**2 * 12 = 1.51 mm2.
     tip_r_min_mm: float = 0.2
     tip_r_max_mm: float = 1.0
 
@@ -380,6 +458,27 @@ class SupportConfig:
     delicacy_thinness_weight: float = 0.4
     # Thickness at/below this counts as maximally thin (weight saturates).
     thin_feature_mm: float = 1.5
+
+    # Weight on the delicacy-weighted down-facing-area term added to
+    # hollow.orient_search's objective (design.md requirement 3: orient so
+    # fewer scar-sensitive parts need a downward-facing support in the
+    # first place -- cheaper than trying to hide the scar later). Scored
+    # via verify.orientation_scar_cost as sum(face_area_mm2 * delicacy) over
+    # down-facing faces, normalised by /100.0 to match orient_search's
+    # existing `sup` term (same "down-facing area in cm2" scale) -- do not
+    # invent a different scale here. `sup` (weight 0.5) already penalizes
+    # ALL down-facing area equally, support-material-cost style; this term
+    # is a refinement on TOP of it that additionally weights that area by
+    # how much a scar there would actually hurt (flat/thick regions sand
+    # out fine, curved/thin ones don't), so it is set comparable to but
+    # somewhat less than sup's own weight -- it should nudge the choice
+    # among otherwise-similar orientations, not override the support-cost
+    # term outright. 0.4 is the starting default; raise it (toward ~1.0) to
+    # more aggressively hide delicate detail at the cost of taller/slower
+    # prints, lower it (toward 0.0) to favour print speed and let scars
+    # fall where they may. 0.0 (or leaving cfg unset) exactly reproduces
+    # pre-scar-term orientation search -- this term is additive, opt-in.
+    orient_scar_weight: float = 0.4
 
     # ---- Local z-minima / layer-island birth support (v3.6, Craig:
     # TOP PRIORITY correctness) ----
