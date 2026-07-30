@@ -41,7 +41,7 @@ Binding constraints carried over unchanged:
 ### 1.1 Layout
 
 ```
-resin-print-prep/
+plinth-3d/
   rust/
     geom_kernel/
       Cargo.toml            # crate name geom_kernel, cdylib, pyo3 + numpy + rayon

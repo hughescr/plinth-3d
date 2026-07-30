@@ -1,0 +1,13 @@
+[package]
+name = "plinth-3d"
+version = "0.1.0"
+edition = "2021"
+description = "Resin 3D print preparation: orient, hollow, support, plate, slice."
+publish = false
+
+[[bin]]
+name = "plinth"
+path = "src/main.rs"
+
+[workspace]
+members = ["rust/chitubox_io", "rust/geom_kernel"]

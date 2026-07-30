@@ -17,3 +17,7 @@ scripts/treant_v2_results.json
 # maturin drops the compiled PyO3 extension into the crate source tree
 # (rust/*/python/*/_native.abi3.so). Never committable.
 *.so
+
+# Root cargo workspace build output. Cargo.lock IS committed (binary crate,
+# same convention as rust/*/Cargo.lock), only the build artifacts are not.
+/target/

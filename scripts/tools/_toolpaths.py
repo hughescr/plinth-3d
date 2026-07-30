@@ -31,7 +31,7 @@ def resolve_stl(name=STL_NAME):
 
     $TREANT_STL wins; otherwise probe the repo root and then its parent. The
     source models are not tracked in git: the repo is
-    ``dnd-campaigns/resin-print-prep`` and the ``*.stl`` files sit beside it in
+    ``dnd-campaigns/plinth-3d`` and the ``*.stl`` files sit beside it in
     the project directory ``dnd-campaigns/``, i.e. the repo's parent.
     """
     if os.environ.get("TREANT_STL"):

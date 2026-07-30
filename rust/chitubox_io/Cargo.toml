@@ -6,6 +6,7 @@ rust-version = "1.97"
 build = "build.rs"
 description = "Read/write ChituBox Basic .chitubox project files: add STL models, attach support records, set placement. Pure Rust, wrapper-friendly, batch-first."
 license = "MIT OR Apache-2.0"
+publish = false
 
 [lib]
 name = "chitubox_io"

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.97"
 build = "build.rs"
+publish = false
 
 [lib]
 name = "geom_kernel"
