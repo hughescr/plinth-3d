@@ -17,12 +17,13 @@ invented.
 
 PAD and BRIDGE (type 6) are synthesized from the owner's native
 ``basic-cube-supports-raft`` and ``cylinder-supported-bottom-connected``
-specimens. Both agree on the complete contract: fixed 2.2 mm width/diameter,
-0.2 mm height, 80-triangle/2,880-byte pads, 12-triangle/432-byte bridges,
-record endpoint Z sentinel 0, and trailing f32 pairs ``[0, 4]`` (pad) /
-``[1, 4]`` (bridge) followed by zeros. Geometry is built directly at the
-current run's local ``plate_z``; no donor coordinates or absolute specimen Z
-cross this boundary.
+specimens, committed at ``scripts/tests/fixtures/chitubox/`` (see that
+directory's README for provenance). Both agree on the complete contract:
+fixed 2.2 mm width/diameter, 0.2 mm height, 80-triangle/2,880-byte pads,
+12-triangle/432-byte bridges, record endpoint Z sentinel 0, and trailing
+f32 pairs ``[0, 4]`` (pad) / ``[1, 4]`` (bridge) followed by zeros.
+Geometry is built directly at the current run's local ``plate_z``; no
+donor coordinates or absolute specimen Z cross this boundary.
 """
 import struct
 from dataclasses import dataclass
