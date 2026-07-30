@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 import trimesh
 
-from support_placement import hollow, mesh_io
+from support_placement import config, hollow, mesh_io
 
 TOOLS = os.path.join(os.path.dirname(__file__), "..", "tools")
 HOLLOW_DRILL = os.path.abspath(os.path.join(TOOLS, "hollow_drill.py"))
@@ -658,6 +658,87 @@ def test_cli_exits_one_on_a_missing_input(tmp_path):
     assert r.returncode == 1
     assert "no such STL" in r.stderr
     assert json.loads(r.stdout)["status"] == "ERROR"
+
+
+def test_orient_search_scar_term_changes_the_winning_rotation(fin_mesh, monkeypatch):
+    """orient_search's scar term (design.md requirement 3) is additive and
+    opt-in: with a cfg carrying a nonzero orient_scar_weight, a candidate
+    that keeps delicate detail off the down-facing side can outrank one
+    that scores better on sup/peak/h alone; without cfg (or weight 0), the
+    plain sup/peak/h winner stands.
+
+    perception.delicacy_field's real curvature/thinness heuristic is
+    already exercised end-to-end by test_verify.py's
+    test_orientation_scar_cost_prefers_hiding_the_delicate_fin, and again
+    on a real model in this change's task report. Hand-building a
+    synthetic mesh where sup/peak/h AND that real heuristic disagree (the
+    actual condition needed to prove a rotation FLIP) turned out to be
+    fragile to construct deterministically -- small changes in triangle
+    density or attachment angle silently flipped which side the heuristic
+    called delicate. So here the scar VALUES are fixed directly (mocking
+    verify.orientation_scar_cost's return, not orient_search's own logic)
+    to a value that disagrees with sup/peak/h on fin_mesh's own proxy --
+    isolating exactly the wiring this test is responsible for: does
+    orient_search read cfg.orient_scar_weight, call orientation_scar_cost
+    once for every candidate rotation, and let a sufficiently-weighted scar
+    term override the base objective's own favourite.
+    """
+    import fast_simplification
+    v, f = fast_simplification.simplify(
+        fin_mesh.vertices.astype(np.float32), fin_mesh.faces.astype(np.int32),
+        target_reduction=0.9)
+    proxy = trimesh.Trimesh(vertices=v, faces=f)
+
+    def base_score(mesh):
+        sup = mesh.area_faces[mesh.face_normals[:, 2] < -0.707].sum() / 100.0
+        zs = np.arange(mesh.bounds[0][2] + 0.1, mesh.bounds[1][2] - 0.1, 4.0)
+        peak = 0.0
+        for s in mesh.section_multiplane([0, 0, 0], [0, 0, 1], zs):
+            if s:
+                peak = max(peak, sum(p.area for p in s.polygons_closed if p is not None))
+        h = mesh.bounds[1][2] - mesh.bounds[0][2]
+        return 0.5 * sup + 3.0 * peak / 100.0 + 0.3 * h
+
+    y_minus30 = trimesh.transformations.rotation_matrix(np.radians(-30), [0, 1, 0])
+    x_minus30 = trimesh.transformations.rotation_matrix(np.radians(-30), [1, 0, 0])
+    p_y = proxy.copy(); p_y.apply_transform(y_minus30)
+    p_x = proxy.copy(); p_x.apply_transform(x_minus30)
+    # Sanity check on the fixture: confirm sup/peak/h alone really does
+    # prefer the Y-axis candidate over the X-axis one, so the mock below is
+    # actually testing an override, not agreeing with the base objective.
+    assert base_score(p_y) < base_score(p_x)
+
+    def fake_scar_cost(mesh, cfg_, rotations, delicacy=None):
+        scores = []
+        for R in rotations:
+            if np.allclose(R, x_minus30[:3, :3], atol=1e-6):
+                scores.append(0.0)      # cheap: this is the one we want to win
+            else:
+                scores.append(100.0)    # everything else, including the
+                                         # sup/peak/h favourite, is expensive
+        return scores
+
+    monkeypatch.setattr(hollow.verify, "orientation_scar_cost", fake_scar_cost)
+
+    log_off = {}
+    hollow.orient_search(fin_mesh.copy(), log_off, cfg=None)
+    log_zero = {}
+    hollow.orient_search(fin_mesh.copy(), log_zero, cfg=config.SupportConfig(orient_scar_weight=0.0))
+    log_on = {}
+    hollow.orient_search(fin_mesh.copy(), log_on, cfg=config.SupportConfig(orient_scar_weight=3.0))
+
+    # Without the term (cfg=None) or with it explicitly zeroed, the plain
+    # sup/peak/h favourite (Y axis, -30deg) wins, unchanged from before this
+    # feature existed.
+    for log in (log_off, log_zero):
+        o = log.get("orientation")
+        assert o is not None and o["axis"] == [0, 1, 0] and o["deg"] == -30
+
+    # With the term weighted enough, the scar-cheap candidate (X axis,
+    # -30deg) overrides it -- this is the behavioural change the wiring
+    # causes.
+    o_on = log_on.get("orientation")
+    assert o_on is not None and o_on["axis"] == [1, 0, 0] and o_on["deg"] == -30
 
 
 @pytest.mark.parametrize("name", ["Cylinder.stl"])

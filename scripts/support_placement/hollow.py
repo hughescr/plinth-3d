@@ -87,6 +87,8 @@ import time
 import numpy as np
 import trimesh
 from scipy import ndimage
+
+from . import perception, verify
 from skimage import measure
 
 PITCH = 0.5
@@ -400,7 +402,32 @@ def triage_components(m, log, source=""):
     return m
 
 
-def orient_search(m, log):
+def orient_search(m, log, cfg=None):
+    """Pick the print orientation by scoring candidate rotations of a
+    decimated proxy: 0.5*support_area_cm2 + 3*peak_crosssection_cm2 +
+    0.3*height_mm (see module docstring step 1).
+
+    ``cfg``, if given and ``cfg.orient_scar_weight`` is truthy, adds a
+    fourth, additive term: ``orient_scar_weight`` times the delicacy-
+    weighted down-facing area (design.md requirement 3 -- prefer hiding
+    scar-sensitive detail from support-facing surfaces here, one stage
+    before support placement, rather than only after). This does not
+    replace the existing `sup` term -- `sup` already penalizes ALL
+    down-facing area equally (a proxy for support material/time cost);
+    the new term additionally weights that area by how much a scar there
+    would actually hurt (verify.orientation_scar_cost /
+    perception.delicacy_field). ``cfg is None`` (the default) reproduces
+    the pre-scar-term objective exactly, unchanged.
+
+    The delicacy field is computed ONCE on the FULL pre-decimation mesh
+    ``m`` (decimation destroys the curvature/thinness detail it measures)
+    and then queried at the proxy's face centres for every candidate --
+    see ``verify.orientation_scar_cost``'s ``query`` closure. All
+    candidates' scar costs are scored in one batched
+    ``orientation_scar_cost`` call up front (the field's sample/query
+    setup, not the per-candidate lookup, is the expensive part), not
+    recomputed per candidate.
+    """
     try:
         import fast_simplification
         v, f = fast_simplification.simplify(
@@ -408,7 +435,23 @@ def orient_search(m, log):
         proxy = trimesh.Trimesh(vertices=v, faces=f)
     except Exception:
         proxy = m
-    def score(mesh):
+
+    scar_weight = float(getattr(cfg, "orient_scar_weight", 0.0) or 0.0) if cfg is not None else 0.0
+    # Candidate 3x3 rotations in the same (axis, deg) order the search loop
+    # below uses, identity first (matches `best`'s np.eye(4) seed).
+    candidates = [([0, 0, 0], 0, np.eye(4))]
+    for axis in ([1, 0, 0], [0, 1, 0]):
+        for deg in (-30, -20, -10, 10, 20, 30):
+            candidates.append(
+                (axis, deg, trimesh.transformations.rotation_matrix(np.radians(deg), axis)))
+
+    scar_scores = None
+    if scar_weight:
+        delicacy = perception.delicacy_field(m, cfg)
+        scar_scores = verify.orientation_scar_cost(
+            proxy, cfg, [R[:3, :3] for _, _, R in candidates], delicacy=delicacy)
+
+    def score(mesh, scar):
         sup = mesh.area_faces[mesh.face_normals[:, 2] < -0.707].sum() / 100.0
         zs = np.arange(mesh.bounds[0][2] + 0.1, mesh.bounds[1][2] - 0.1, 4.0)
         peak = 0.0
@@ -416,16 +459,15 @@ def orient_search(m, log):
             if s:
                 peak = max(peak, sum(p.area for p in s.polygons_closed if p is not None))
         h = mesh.bounds[1][2] - mesh.bounds[0][2]
-        return 0.5 * sup + 3.0 * peak / 100.0 + 0.3 * h
-    best = (score(proxy), np.eye(4))
-    for axis in ([1, 0, 0], [0, 1, 0]):
-        for deg in (-30, -20, -10, 10, 20, 30):
-            R = trimesh.transformations.rotation_matrix(np.radians(deg), axis)
-            p = proxy.copy(); p.apply_transform(R)
-            s = score(p)
-            if s < best[0]:
-                best = (s, R)
-                log["orientation"] = {"axis": axis, "deg": deg, "score": round(s, 1)}
+        return 0.5 * sup + 3.0 * peak / 100.0 + 0.3 * h + scar_weight * scar / 100.0
+
+    best = (score(proxy, scar_scores[0] if scar_scores else 0.0), np.eye(4))
+    for i, (axis, deg, R) in enumerate(candidates[1:], start=1):
+        p = proxy.copy(); p.apply_transform(R)
+        s = score(p, scar_scores[i] if scar_scores else 0.0)
+        if s < best[0]:
+            best = (s, R)
+            log["orientation"] = {"axis": axis, "deg": deg, "score": round(s, 1)}
     m.apply_transform(best[1])
     m.apply_translation([-(m.bounds[0][0] + m.bounds[1][0]) / 2,
                          -(m.bounds[0][1] + m.bounds[1][1]) / 2, -m.bounds[0][2]])
@@ -459,7 +501,8 @@ def _array_fingerprint(parts):
 
 
 def run(in_path, out_path, wall=2.5, orient=True, log=None,
-        allow_hollow_output=False, cavity_out=None, solid_backup_path=None):
+        allow_hollow_output=False, cavity_out=None, solid_backup_path=None,
+        cfg=None):
     """Hollow (or decide not to) and drill ``in_path``, writing ``out_path``.
 
     Returns the log dict (the same object if one was passed in), always
@@ -476,7 +519,10 @@ def run(in_path, out_path, wall=2.5, orient=True, log=None,
     receives the exact post-refill cavity mask and its original voxel
     transforms; reader-facing identity/provenance is copied into ``log``.
     ``solid_backup_path`` preserves the already-oriented solid for fail-safe
-    fallback without repeating orientation.
+    fallback without repeating orientation. ``cfg``, if given, is passed to
+    :func:`orient_search` so its scar-avoidance term can run (see there);
+    ``cfg=None`` (the default) skips that term and orients exactly as
+    before. Ignored when ``orient=False``.
     """
     log = {} if log is None else log
     if cavity_out is not None:
@@ -491,7 +537,7 @@ def run(in_path, out_path, wall=2.5, orient=True, log=None,
             f"input is not a watertight volume: {in_path} (run prep-mini's "
             f"repair playbook first)")
     if orient:
-        m = orient_search(m, log)
+        m = orient_search(m, log, cfg=cfg)
     log["oriented"] = bool(orient)
     solid_ml = m.volume / 1000.0
     log.update(

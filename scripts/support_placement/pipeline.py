@@ -335,6 +335,8 @@ def prep_one(stl_path, out_path, *, cfg=None, wall_mm=2.5, orient=True,
                 hollow_kwargs["cavity_out"] = cavity_runtime
             if "solid_backup_path" in hollow_params:
                 hollow_kwargs["solid_backup_path"] = solid_backup
+            if "cfg" in hollow_params:
+                hollow_kwargs["cfg"] = cfg
             hollow_mod.run(
                 stl_path, prepped, wall=wall_mm, orient=orient, log=hlog,
                 **hollow_kwargs,

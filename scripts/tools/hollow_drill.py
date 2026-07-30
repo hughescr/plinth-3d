@@ -39,7 +39,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from support_placement import hollow  # noqa: E402
+from support_placement import config, hollow  # noqa: E402
 
 EXIT_OK = 0
 EXIT_INPUT = 1
@@ -69,7 +69,11 @@ def main(argv=None):
     try:
         if not os.path.isfile(a.input):
             raise hollow.HollowError(f"no such STL: {a.input}")
-        hollow.run(a.input, a.output, wall=a.wall, orient=not a.no_orient, log=log)
+        # Default config gets orient_search's scar-avoidance term (see
+        # config.SupportConfig.orient_scar_weight); this CLI has no dedicated
+        # engine cfg of its own to reuse, unlike pipeline.prep_one.
+        hollow.run(a.input, a.output, wall=a.wall, orient=not a.no_orient, log=log,
+                  cfg=config.SupportConfig())
         if log.get("status") != hollow.STATUS_OK:
             code = EXIT_VERIFY_FAILED
             print(f"hollow_drill: FAILED self-verification on {a.input} — "
