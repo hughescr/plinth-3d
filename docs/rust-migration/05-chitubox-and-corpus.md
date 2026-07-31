@@ -19,6 +19,11 @@ This doc supersedes nothing in those three files; it only adds a "what's
 ported vs. what's still Python" cut and a condensed corpus/gate reference for
 Codex to work from without re-deriving it.
 
+Do not conflate the two corpora in this guide. The files in
+`scripts/tests/fixtures/chitubox/` are **format and writer fixtures**. The frozen
+Python comparison baseline is built from a separate, exact model list under
+`corpus/models/` and produces committed artifacts under `corpus/baseline/`.
+
 ---
 
 ## 1. What `rust/chitubox_io` already does
@@ -184,6 +189,10 @@ Full detail and regeneration command
 is in `../../scripts/tests/fixtures/chitubox/README.md` — read it before
 adding or replacing any fixture.
 
+This table is not the M0 model-baseline manifest. It proves container and emitter
+format behavior; it neither adds models to nor removes models from the exact
+baseline set below.
+
 ---
 
 ## 4. `CHITUBOX_CORPUS_DIR` fallback
@@ -195,12 +204,12 @@ unset. This is how the uncommitted large treant specimen
 (`treant_v5_candidate.chitubox`, ~35 MB, pinned at 1360 support records in
 `support_parity.rs`) is located in Craig's environment without committing it.
 
-The **Treant source STL** follows the same convention for the same reason. Note the name:
-**"treant" and "Awakened Tree" are the same model** — the file is `Awakened Tree.stl`
-(21 MB), staged in `minis-to-process/` beside the repo. That folder is transient (the owner
-clears it after printing), so copy it into this same directory as
-`Weeping Treant v1.2.stl` and set `$TREANT_STL`. See `04-migration-plan.md` M0. It is never
-committed.
+The **Treant source STL** is a model-baseline input, not a ChituBox format
+fixture. **"treant" and "Awakened Tree" are the same model** — the source file is
+`Awakened Tree.stl` (21 MB), staged in transient `minis-to-process/`. Copy or
+symlink it locally as `corpus/models/Weeping Treant v1.2.stl` and point
+`$TREANT_STL` at it when the frozen Python tool needs that variable. Like every
+`corpus/models/*.stl` input it is ignored and never committed.
 
 For Codex running in a checkout without that file present: `support_parity.rs`
 tests referencing `treant_v5_candidate.chitubox` will print a `SKIP:` notice
@@ -212,6 +221,25 @@ than a skip (it would silently launder circularity into a large/complex test
 that looks authoritative). If real coverage on treant-scale data is needed,
 get a fresh export named `treant_v5_candidate.chitubox` from Craig or from a
 prior `CHITUBOX_CORPUS_DIR` location and place it there — never invent one.
+
+### 4.1 Exact M0 model-baseline membership
+
+The full baseline is exactly these eight models, in the binding order:
+
+1. `Sphere`
+2. `Cylinder`
+3. `make_box`
+4. `make_overhang_table`
+5. `make_toed_slab`
+6. `make_raking_blade`
+7. `make_thin_fin`
+8. `Weeping Treant v1.2` (source: `Awakened Tree.stl`; one model, not two)
+
+The sanctioned provisional corpus is the same set minus `Weeping Treant v1.2`,
+exactly seven models. **There is no `Cone` in either set.** All eight source STLs
+are ignored inputs in `corpus/models/`; the manifest and baseline `.chitubox` and
+report artifacts are committed. Fixture-corpus membership above never changes
+this list.
 
 ---
 

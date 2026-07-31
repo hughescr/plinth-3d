@@ -407,14 +407,44 @@ not implement.
 
 ```rust
 // plinth-core::consts
-pub struct Measured<T>    { value: T, plate: PlateId, err: Option<T>, date: String, note: String }
+pub struct EvidenceId(String);  // non-empty and already trimmed
+pub struct CalendarDate(String); // a real YYYY-MM-DD calendar date
+
+#[serde(tag = "precision", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EvidenceDate {
+    Exact { date: CalendarDate },
+    OnOrBefore { date: CalendarDate },
+    Unknown,
+}
+
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum EvidenceSource {
+    CalibrationPlate { plate: PlateId, record: String, locator: String, date: EvidenceDate },
+    VendorDocument { id: EvidenceId, record: String, locator: String, date: EvidenceDate },
+    InstalledHardware { id: EvidenceId, record: String, locator: String, date: EvidenceDate },
+    CorpusStudy { id: EvidenceId, record: String, locator: String, date: EvidenceDate },
+    ProjectRecord { id: EvidenceId, record: String, locator: String, date: EvidenceDate },
+    OwnerDecision { id: EvidenceId, record: String, locator: String, date: EvidenceDate },
+}
+
+#[serde(rename_all = "snake_case")]
+pub enum BoundKind { Inclusive, Exclusive }
+#[serde(deny_unknown_fields)]
+pub struct FiniteInterval {
+    lower: Finite,
+    upper: Finite,
+    lower_bound: BoundKind,
+    upper_bound: BoundKind,
+}
+
+pub struct Measured<T>    { value: T, source: EvidenceSource, err: Option<T>, note: String }
 pub struct Derived<T>     { v: T, from: Vec<String>, note: String }
 pub struct Placeholder<T> { v: T, note: String }
 pub struct Pending<T>     { conservative: T, optimistic: T, resolves_on: PlateId, question: String }
 
 pub trait MeasuredPayload: sealed::Sealed { /* core-owned payload validation */ }
 impl<T: MeasuredPayload> Measured<T> {
-    pub fn new(value: T, plate: PlateId, err: Option<T>, date: impl Into<String>,
+    pub fn new(value: T, source: EvidenceSource, err: Option<T>,
                note: impl Into<String>) -> Result<Self, ProvenanceError>;
 }
 impl<'de, T: serde::Deserialize<'de> + MeasuredPayload> serde::Deserialize<'de> for Measured<T> {
@@ -438,15 +468,30 @@ impl<T: Copy> Pending<T> {
 }
 ```
 
-`Measured::date` is a required `String` carried into the corresponding `ProvenanceRef`; it is never
-optional or silently dropped. `err: None` remains visible on the wire as `"err": null` for
-categorical values.
+There are exactly four provenance wrappers: `Measured`, `Derived`, `Placeholder`, and
+`Pending`. “Format”, “fixed”, “policy”, or “owner-ratified” describes evidence or
+acceptance disposition; none is a fifth wrapper.
+
+`EvidenceSource` is required and tagged. Every `record` is a non-empty repo-relative path and
+every `locator` is a non-empty stable locator inside that record. A vendor source points at the
+checked-in datasheet that carries URL/retrieval metadata; raw URLs do not enter runtime
+provenance. `EvidenceDate::Exact` means the evidence-producing date is known,
+`OnOrBefore` supplies a real upper bound, and `Unknown` has no `date` field at all. Generic
+`Unknown` is allowed only for genuinely unsourced legacy values, never as a shortcut around a
+known repo record. The Saturn build volume and pixel pitch therefore use known
+`VendorDocument` evidence, not a generic unknown source.
+
+`Measured` serializes exactly `value`, `source`, `err`, and `note`. Both `source` and `err` are
+required; there is no separate `plate` or `date` field. `ProvenanceRef::Measured` carries the same
+source and note. Missing or duplicate fields and unknown fields are rejected by fallible custom
+deserialization.
 
 Measurement payloads are a core-sealed approved set: at minimum `f64`, `Finite`, and
-`LoadSharing`; an interval joins the set only if and when core has a current interval type. Numeric
-payloads (`f64` and `Finite`) may use either `Some(error)` or `None`; they are not forced to invent
-an error bar. Categorical `LoadSharing` requires `None`. For every approved payload the `err` key
-is required on the wire: a missing key is rejected, while explicit `"err": null` means `None`.
+`LoadSharing`, plus the validated `FiniteInterval`. `FiniteInterval::new` requires finite endpoints
+with `lower < upper`; its bounds are explicit `inclusive`/`exclusive` values. Numeric payloads may
+use either `Some(error)` or `None`; they are not forced to invent an error bar. Interval and
+categorical `LoadSharing` measurements require `None`. For every approved payload the `err` key is
+required on the wire: a missing key is rejected, while explicit `"err": null` means `None`.
 
 Enforcement is **proven, not asserted**:
 
@@ -463,18 +508,19 @@ three tunables. Only the ratio is measured; the Pa/MPa split is a modelling conv
 `X = A_supported / A_arm_cross_section` (both mm²):
 
 ```rust
-pub static X_STAR_CONE: Measured<f64> = /* 25.0 — plate 5, 30 specimens: every X <= 25.3 survived,
+pub static X_STAR_CONE: Measured<FiniteInterval> = /* [25.00, 25.34] — inclusive/inclusive;
+    plate 5, source date OnOrBefore(2026-07-30), 30 specimens: every X <= 25.3 survived,
     every X >= 25.0 failed, one boundary inversion. Load scales with supported AREA (not perimeter,
-    not a squeeze-film law). Failure is tensile snap of the NARROWEST cross-section just above the
-    contact, so a long slow taper is a liability: supports must flare fast above the tip. */;
+    not a squeeze-film law). `err: null`: uncertainty is represented by the interval itself. */;
 pub static X_ALLOWED: Derived<f64> = /* 12.0, from X_STAR_CONE with a 2x safety factor;
     margin-checked against X_STAR_CYLINDER's binding edge at 19.91/12 = 1.66x */;
 // tensile_green_mpa / peel_pressure_pa / tip_safety_factor survive ONLY as Placeholder
-// diagnostics; they can never reach accept.
-pub static X_STAR_CYLINDER: Measured<f64> = /* (19.91, 30.48) — plate 6, scored 2026-07-31.
+// diagnostics; modulus_green_gpa is likewise a diagnostic Placeholder. They can never reach accept.
+pub static X_STAR_CYLINDER: Measured<FiniteInterval> = /* (19.91, 30.48) — exclusive/exclusive;
+    plate 6, Exact(2026-07-31).
     Cylindrical arms; n = 1 at each bracket edge, conditional on 4.00 mm arms and a 30 mm^2
     cap. It CONTAINS the conical bracket, so X* ~ 25 was not an artifact of conical arms.
-    Store the interval, never the 24.6 centre. Was Pending<f64> until 2026-07-31. */;
+    Store the interval, never the 24.6 centre. `err: null`; was Pending until 2026-07-31. */;
 ```
 
 `X_STAR_CYLINDER` was the worked example of `Pending` in this document until plate 6 scored;
@@ -482,18 +528,21 @@ it is kept here **as a `Measured`** so the declaration matches reality. The `Pen
 above stays — it is the mechanism for the next unmeasured constant, and `Pending::resolve()`
 is still what keeps an open question traceable into an accept decision.
 
-Other accept-path physics carried with provenance (full detail in `03-physics-and-constants.md`):
-bridge/sag limit ~3 mm at 0.300 mm section (Measured, approximate); squeeze-film suction 40–60 kPa
-at 30–40 °C (Measured envelope, diagnostic); and a `PrinterProfile` for the Elegoo Saturn 4 Ultra
-(build volume, 14×19 µm pixels, tilt-release peel front sweeping **front-to-back in −Y**, layer
-0.050 mm) which lives in `plinth-core::consts` because the X-rule, arrangement risk, decimation
-budget and the future plater all need it.
+Other values carried with provenance (full detail in `03-physics-and-constants.md`) include two
+distinct diagnostic Placeholders: free gap `1.0 mm`, and an approximately `3.0 mm` bridge/sag span
+conditional on a `0.300 mm` section. The Saturn `PrinterProfile` uses known official-vendor evidence
+for the vendor-order build volume `211.68 × 118.37 × 220 mm` and pixel pitch `14 × 19 µm`, mapped
+by the project to X/Y/Z and pitch X/Y. Its local kinematics are named separately:
+`leading_release_edge = NegativeY` and `release_front_sweep_direction = PositiveY`, so the front
+moves `-Y → +Y`. Never call that a “-Y sweep” or generic peel direction. The 0.050 mm layer and
+5.0 mm lift defaults are local project records, not vendor measurements.
 
 ### 3.6 Multi-arm load sharing — first-class, measured by plate 6
 
 `X ≤ 12` is **necessary, not sufficient**: it is blind to arrangement (three collinear arms have
-zero lateral stability perpendicular to their line). The peel front sweeps −Y, which predicted that
-Y-strung arms meet it one at a time (zipper conditions) while X-strung arms meet it together
+zero lateral stability perpendicular to their line). The leading release edge is `NegativeY` and
+the release front moves toward `PositiveY`; that predicted that Y-strung arms meet it one at a time
+(zipper conditions) while X-strung arms meet it together
 (sharing conditions). **Plate 6 scored 2026-07-31 and refuted the zipper branch:** strips along
 both axes survived at `X_arm = 60.15` while the matched single arm died, so sharing is **at least
 additive** and there is **no measured axis dependence**. Both variants stay code-complete:
@@ -539,14 +588,19 @@ The lattice generator takes `effective_x` as an **input** — density is never b
 2026-07-31 switch to `Additive` was one constant plus a re-run, and `plinth calibrate` still reports
 the corpus-wide A/B delta under both branches so the size of that switch is measured, not assumed.
 
-The `Measured<LoadSharing>::note` serializes all five `03-physics-and-constants.md` §4.2 caveats,
-not merely a pointer to them: **(1)** one cap area, arm diameter, and arm length were validated;
-**(2)** no strip failed, so sharing has no measured upper bracket; **(3)** strip fin roots have a
-roughly 20% section bonus, so never design on super-additive margin; **(4)** plate 6's one cap area
-makes `X_tot` algebraically degenerate, leaving the ratio form dependent on plate 5's cap-area
-spread; and **(5)** no axis dependence was observed at this load, while a near-boundary orientation
-effect remains untested. The reference is retained with the payload: see `03-physics-and-constants.md`
-§4.2 caveats 1–5.
+The `Measured<LoadSharing>::note` serializes all five
+`03-physics-and-constants.md` §4.2 core caveats, not merely a pointer to them:
+**(1)** one cap area, one arm diameter, and one arm length were validated; **(2)** no strip failed,
+so sharing has no measured upper bracket and N > 6 is extrapolation; **(3)** strip fin roots have a
+roughly **19.75%** section bonus, so never design on super-additive margin; **(4)** plate 6's one cap
+area makes `X_tot` algebraically degenerate, leaving the ratio form dependent on plate 5's cap-area
+spread; and **(5)** the N=2 alive/dead flip forces a tight **1.33%** single-boundary window.
+
+Two limitations travel beside that core note, not as replacements for caveat 5. First, no axis
+dependence was observed at this load but a near-boundary orientation effect is untested; the axis
+input is retained and unused today. Second, B6 was admitted only by a post-hoc override of the
+pre-registered plate-wide void. The override grounds and the unanswered counter-argument are part
+of the source record in `../reference/plate-06-results.md` §6 and must be cited by the declaration.
 
 This removes the root cause of the unsatisfiable Python gate: `config.py`'s `tip_r_max_mm = 1.0`
 (line 118) caps one tip at ~3.14 mm² of cross-section, i.e. ~37.7 mm² of supported area at X = 12,
@@ -1017,13 +1071,16 @@ recorded so they are not re-litigated.
 | D-18 | Mesh fingerprint semantics | **Canonicalize `-0.0`, reject non-finite as a Defect** — the raw-bit weld is a documented hazard chain. A's digest schema bump (topology arrays only, no allocator archaeology) also adopted |
 | D-19 | Metrics-harness dependencies | Stricter than either proposal: **no `plinth-verify` and no `geom_kernel`** — a kernel bug must not corrupt producer and judge together. Exception: `chitubox_io`'s reader, anchored non-circularly by the native fixtures (§9) |
 | D-20 | CLI contract | Exit code is a **projection of the DefectReport**; the pinned Python exit-code/JSONL contract dies with the Python, and the tests that pin it retire with their subject |
-| D-21 | Corpus location | Corpus STLs are **copied into the repo** at `corpus/models/`, baselines at `corpus/baseline/`, both committed. The source models currently live in the repo's parent directory (`scripts/tools/_toolpaths.py` probes `REPO_ROOT/..`), which the executing agent cannot reach; without the copy, the baseline freeze and every gate are unexecutable |
+| D-21 | Corpus location | Corpus STLs are copied or linked locally under `corpus/models/` but remain **ignored and uncommitted inputs**. `corpus/manifest.json` and `corpus/baseline/` are committed. Exact full membership is eight models (`Sphere`, `Cylinder`, five named synthetic fixtures, and one Treant/Awakened Tree model); provisional membership is the same minus Treant; there is no Cone. This preserves reproducibility metadata and outputs without committing transient/large source assets. |
 | D-22 | `scripts/tools/geometry_sweep.py` | **Deleted, not ported** — Blender-only manual degenerate-geometry repair; triage plus cut flags refuse what it repaired. Recorded so it is not treated as unported scope |
 | D-23 | Cache ownership | Cache in `plinth-pipeline`; per-search memoization in `plinth-cost`; a cache-disabled CI run must produce identical reports |
 | D-24 | Print-time term | `Σ layers (exposure + lift)` over the LayerPlan, not z-height — it reduces to z-height only under a constant plan, which is why LayerPlan is on the cost path from day one |
 | D-25 | Scalarization weights | **Placeholder**, therefore structurally barred from accept. Typing tuning weights as accept-safe is precisely what the provenance commitment exists to prevent |
 | D-26 | Concession supports (P8-REACH Feature B) | **Not ported** initially. If the parity gate shows a model unpassable without them, that is a recorded owner decision point, not a silent re-implementation |
 | D-27 | Murray dead-member filter | `verify.murray_report` sums dead children's radii — a live Python bug. The Rust gate filters dead members, with a named regression test |
+| D-28 | M0 constant closure | `m0-constants-source-ledger.json` is the independent, hand-maintained membership/source-disposition inventory. `03` remains numeric authority. The future runtime registry, a separate hand-maintained expected-ID set in a Rust test, and generated `constants.md` form the later golden-completeness check; the ledger is neither generated nor golden input. M7 migrates consumers. |
+| D-29 | Measurement evidence | `Measured<T>` carries a tagged `EvidenceSource` whose date is `Exact`, `OnOrBefore`, or `Unknown`; generic unknown is only for genuinely unsourced evidence. Intervals use `FiniteInterval` plus explicit `BoundKind`, and interval/categorical measurements require explicit `err: null`. |
+| D-30 | Saturn evidence disposition | The initial generic-unknown Saturn profile disposition is superseded for build volume and pixel pitch by known official-vendor evidence recorded in `docs/datasheets/printers/saturn-4-ultra-16k.md`, with the project axis mapping kept explicit. Local kinematics/layer/lift remain project records, not vendor claims. |
 
 **Conscious overrides of standing commitments:**
 

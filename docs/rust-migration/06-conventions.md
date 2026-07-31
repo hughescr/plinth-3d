@@ -105,6 +105,10 @@ Follow the pattern already established in `rust/geom_kernel/src/par.rs`:
 - **Every parallel path needs a thread-sweep test**: run it at 1, 2, and N threads
   and assert the outputs are identical, not merely close.
 
+`PLINTH_THREADS` is a documented runtime control, not a physical/tuning constant and
+not a member of the M0 constant-source ledger. The same applies to crate-local
+legacy runtime controls retained only for standalone compatibility.
+
 GPU (wgpu) is roadmap, not scope. Keep the batched API shapes such that a GPU backend
 could implement the same slice-in/slice-out signature later.
 
@@ -200,17 +204,38 @@ came from. This is a compile-time mechanism, not a documentation convention.
 
 | Wrapper | Meaning | On the accept path? |
 |---|---|---|
-| `Measured<T>` | Measured on a calibration plate. Carries the plate id, required measurement date (carried into `ProvenanceRef`), and `err: Option<T>`; a categorical measurement uses `None`, serialized explicitly as `"err": null` beside its tagged category. | Yes |
+| `Measured<T>` | Evidence-backed. Carries a required tagged `EvidenceSource`, `err: Option<T>`, and note. The source carries an `EvidenceDate` of `Exact`, `OnOrBefore`, or `Unknown`. | Yes |
 | `Derived<T>` | Computed from `Measured` values by a stated relation. | Yes |
 | `Placeholder<T>` | A guess. Search/tuning weights live here. | **No — will not compile** |
 | `Pending<T>` | Awaiting a measurement. Carries **both** a conservative and an optimistic value. `.resolve()` returns the conservative branch wrapped as a `Derived<T>` — an `AcceptSafe` value carrying the pending provenance, never a bare `T`. | Only via explicit `.resolve()` |
 
+Those are exactly the four provenance wrappers. “Format”, “fixed”, “policy”, or
+“owner-ratified” is a source or acceptance disposition, not another wrapper.
+
+`EvidenceSource` is a strict tagged enum:
+
+- `CalibrationPlate { plate, record, locator, date }`;
+- `VendorDocument`, `InstalledHardware`, `CorpusStudy`, `ProjectRecord`, and
+  `OwnerDecision`, each `{ id, record, locator, date }`.
+
+Evidence IDs are non-empty and trimmed. `record` is a non-empty repo-relative path;
+`locator` is a non-empty stable locator within it. A vendor source points to the
+checked-in datasheet that contains URL and retrieval metadata, never directly to a
+raw URL. `EvidenceDate` is tagged by `precision`: `Exact { date }`,
+`OnOrBefore { date }`, or `Unknown`; its dates are real `YYYY-MM-DD` calendar dates,
+and `Unknown` forbids a date field. Use generic `Unknown` only when the legacy value
+is genuinely unsourced. Known official Saturn vendor evidence is never downgraded to
+unknown.
+
 `Measured<T>` accepts only payloads covered by the core-sealed measurement-payload
-policy; downstream crates cannot invent new payload/error semantics. Approved numeric
-payloads include at minimum `f64` and `Finite`, and permit either `Some(error)` or
-`None`. Categorical `LoadSharing` requires `None`. The `err` field is required on the
-wire for every payload: omission is rejected, while `None` is emitted as explicit
-`"err": null`.
+policy; downstream crates cannot invent new payload/error semantics. Approved payloads
+include numeric scalars, `LoadSharing`, and validated `FiniteInterval`. An interval
+stores finite `lower < upper` plus explicit `BoundKind::{Inclusive, Exclusive}` for
+each endpoint. Numeric scalars permit either `Some(error)` or `None`; interval and
+categorical measurements require `None`. The measured wire has exactly
+`value`, `source`, `err`, and `note`. `source` and `err` are required, omission is
+rejected, and `None` is emitted as explicit `"err": null`. Unknown or duplicate
+fields are errors.
 
 **The mechanism:** an `AcceptSafe` trait implemented by `Measured` and `Derived` and
 **not** implemented by `Placeholder`. Everything on the acceptance path is generic
@@ -221,8 +246,19 @@ compile time — unconditionally, with no dependence on const-eval or a runtime 
 putting a `Placeholder` on the accept path fails to build. A mechanism without a test
 of the mechanism is a promise, not a guarantee.
 
-**Provenance cannot rot.** A golden test renders the constant registry to
-`docs/rust-migration/constants.md`; the test fails if the file is out of date.
+**Provenance cannot rot.** Once the runtime registry exists, completeness is a
+three-way check: the runtime registry, an independent hand-maintained expected-ID
+set in a Rust test, and generated `docs/rust-migration/constants.md`. A future
+registry is initialized as one fallible, batch-built `LazyLock` result: gather all
+declarations, validate uniqueness and provenance in one batch, then publish the
+complete registry or one error. Never register items one at a time into partially
+visible global state.
+
+`m0-constants-source-ledger.json` is a fourth, independent artifact. It is the
+hand-maintained source-membership and provenance-disposition inventory, not a dump of
+the runtime registry. It is never generated and never input to the golden test.
+`03-physics-and-constants.md` remains the authority for values, shapes, units, and
+grades; legacy values recorded in the ledger are nonnormative source snapshots.
 
 **Search weights are `Placeholder` by construction and that is correct.** Orientation
 scalarization weights select a candidate; they never accept one. Acceptance is the
@@ -231,6 +267,17 @@ its grade. The two plate-6 constants (`LOAD_SHARING`, `X_STAR_CYLINDER`) were th
 example of `Pending` until the plate scored on **2026-07-31**; both are `Measured` now,
 and the fact that the switch cost one constant each is the argument for keeping the
 wrapper. `Pending` stays as the mechanism for the next unmeasured constant.
+
+**Decision-gate table lifecycle.** Do not create an empty or partial gate table in
+M0. M1 creates it and backfills every guide decision (`D-*`), conscious override
+(`O-*`), and historical owner ratification with `EvidenceSource` and
+`EvidenceDate`. That backfill includes two distinct records: the evidence/date and
+interval policy itself, and the supersession of the initial generic-Unknown Saturn
+disposition by the known vendor record. It also explicitly preserves required
+`err: Option<T>`, LoadSharing/FixerId ownership splits, cost/metric DTO-versus-behavior
+splits, and Python-freeze-before-Rust-refreeze sequencing. After
+creation it is dated and append-only; later sign-offs and waivers are added, not
+rewritten.
 
 ---
 
@@ -248,6 +295,14 @@ metric**. Never byte-diff the two sides, and **never bridge via PyO3 to compare*
 a bridge lets one shared bug hide on both sides. The one place byte-level identity
 is a real contract is the `.chitubox` record structure, gated by the existing corpus
 round-trip tests (05-chitubox-and-corpus.md).
+
+The exact full baseline corpus is, in order: `Sphere`, `Cylinder`, `make_box`,
+`make_overhang_table`, `make_toed_slab`, `make_raking_blade`, `make_thin_fin`,
+and `Weeping Treant v1.2` (the same model as `Awakened Tree.stl`). The provisional
+corpus is the same list minus Treant, exactly seven; neither includes Cone. Source
+STLs in `corpus/models/` are ignored inputs, while `corpus/manifest.json` and the
+frozen baseline outputs are committed. Tests fail by name when a required member or
+artifact is missing.
 
 **Audit-the-file-as-written** — non-negotiable. The audit re-opens the emitted
 artifact from disk, parses it fresh, and fails on boundary edges, negative shells,

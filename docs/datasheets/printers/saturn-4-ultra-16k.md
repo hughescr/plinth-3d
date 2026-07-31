@@ -64,3 +64,12 @@ Use the X/Y pixel pitch and vendor-stated machine geometry as hardware inputs on
 Do not infer peel force, film tension, release distance, or a resin-specific print
 profile from this record. Any such value needs a condition-bearing measurement or
 a separately cited vendor source.
+
+**Project-profile disposition.** The Rust profile may record the vendor-order
+build volume and pitch as `X/Y/Z = 211.68/118.37/220 mm` and
+`pitch X/Y = 14/19 µm`, because the project mapping above is explicit and the
+vendor evidence is known. `leading_release_edge = NegativeY`,
+`release_front_sweep_direction = PositiveY`, the 0.050 mm layer default, and the
+5.0 mm lift default are local project records, not vendor claims. In particular,
+the 5.0 mm lift is a diagnostic `Placeholder`; this datasheet supplies no lift
+distance.

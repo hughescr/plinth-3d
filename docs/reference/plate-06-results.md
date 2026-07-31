@@ -556,29 +556,29 @@ rebuilt (§8).
 ## 9. Relationship to the migration guide
 
 [`../rust-migration/03-physics-and-constants.md`](../rust-migration/03-physics-and-constants.md)
-§4 is the interim record written before this file existed, and it carries the
+§4 is the engine-facing reconciliation of this record, and it carries the
 **engine-facing resolution** of each constant — `X_STAR_CYLINDER`,
 `X_STAR_CONE`, `X_ALLOWED`, `LOAD_SHARING`, `n_eff_cap`, `N_eff`, the
 orientation term, `tip_r_max_mm`. **Go there for what the Rust constants must
 say; come here for what the plate actually measured.**
 
-Nothing in this file contradicts §4. Three points where this file is more
-precise, flagged rather than silently diverging:
+The guide was reconciled to this record during M0. Three historical mismatches
+are kept here so a future reader can audit what changed:
 
 1. **The well-behaved z band.** §4.3 states it as "z ≤ 9.2 mm". The manifest
    gives every B6 cap a top face at **z = 9.00 mm** (underside 8.50). The two
    are consistent — 9.2 is simply the looser statement — and the anomalous band
    (≥ 10.95 mm) is unaffected either way.
-2. **The override.** §4.3 states the A6 void but does not record that admitting
-   B6 required overriding a gate whose literal text is plate-wide. §6 above is
-   that record. This is an addition, not a contradiction.
-3. **The still-owed pointer.** §4.4 says the results note "has not been written
-   yet" and §4's header block says that section is the record of record "until
-   it exists". **It now exists — this file.** Those two sentences in §4 are
-   stale as of this commit; the file paths they name have been repointed here,
-   but the surrounding prose was deliberately left alone (the migration guide is
-   Codex's working document and is out of scope for this change). Treat this
-   file as authoritative wherever the two disagree.
+2. **The old caveat 5 was wrong.** An earlier guide draft put the orientation
+   limitation in `LOAD_SHARING` caveat 5. Finding 1's fifth caveat is instead the
+   tight **1.33 % N=2 window**. Orientation is a separate limitation from Finding
+   3 and remains in the engine documentation, but it is not substituted for the
+   load-sharing caveat.
+3. **The override and pointer are now explicit.** The guide now records that B6
+   was admitted only by the post-hoc, plate-wide-gate override in §6, including
+   its counter-argument, and §4.4 points here as the completed record of record.
+   The earlier omitted-override and still-owed-pointer wording is historical,
+   not a live discrepancy.
 
 ---
 

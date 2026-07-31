@@ -3,6 +3,7 @@
 Test inputs for `rust/chitubox_io/tests/` and `scripts/tests/test_chitubox_emit.py`.
 Resolved by `rust/chitubox_io/tests/common/mod.rs::corpus_path()`, which checks this
 directory first and falls back to `CHITUBOX_CORPUS_DIR` for specimens too large to commit.
+This is the ChituBox format-fixture corpus, not the separate eight-model frozen baseline corpus under `corpus/models/` and `corpus/baseline/`.
 
 | File | Contents | Consumed by |
 | --- | --- | --- |
