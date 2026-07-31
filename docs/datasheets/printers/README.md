@@ -11,11 +11,9 @@ are inputs to the physics model, never outputs of a run:
   were measured with (FEP, nFEP, ACF — the film changes the number)
 - anything else per-printer that the model reads rather than derives
 
-Nothing lives here yet. Today the only printer facts in the repo are inline
-prose: `README.md` and `skills/prep-mini/references/sizing.md` both name the
-Elegoo Saturn 4 Ultra 16K at 14 × 19 µm. When a real datasheet is written,
-it goes here as `saturn-4-ultra-16k.md` and those prose mentions should cite
-it instead of restating the numbers.
+The current vendor record is
+[`saturn-4-ultra-16k.md`](saturn-4-ultra-16k.md). Inline prose should cite the
+record rather than restating its printer values.
 
 See `../README.md` for how datasheets differ from specs and from run
 artifacts.
