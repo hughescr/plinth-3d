@@ -66,8 +66,9 @@ plinth-3d/
     manifest.json       # model list, per-model Python exit code, metric directions (pre-committed)
   crates/
     plinth-core/        # ids, frames, units, provenance-typed constants + registry, DefectReport,
-                        #   ViolationKind, Termination, LayerPlan, Stage trait + typestate marks,
-                        #   digests, chord canonicalization, deterministic reduction helpers
+                        #   ViolationKind, Termination, LayerPlan, passive cost/report/metric DTOs,
+                        #   Stage trait + typestate marks, digests, chord canonicalization,
+                        #   deterministic reduction helpers
     plinth-mesh/        # f64 Mesh, STL IO with explicit WeldPolicy, face topology + cut flags,
                         #   canonical fingerprint, curvature/thinness/delicacy FaceTable,
                         #   exact z-slicing to 2D loops with winding, ProxyLadder container, triage
@@ -75,8 +76,9 @@ plinth-3d/
     plinth-voxel/       # voxelize/fill, signed EDT, 3D connected labels, morphology, marching cubes,
                         #   priority-flood drainability
     plinth-solid/       # trait SolidBoolean + manifold (C++ FFI) backend; watertight/winding/shell audit
-    plinth-cost/        # CostVector, Fidelity, CostProvider, CandidateBatch, Evaluator (rayon now,
-                        #   wgpu later), Pareto front + scalarization, per-search memoization
+    plinth-cost/        # CostProvider, CandidateBatch, Evaluator (rayon now, wgpu later),
+                        #   Pareto/scalarization algorithms and per-search memoization; its passive
+                        #   CostVector/Fidelity/Pareto DTOs come from plinth-core
     plinth-orient/      # candidate generation (coarse-to-fine SO3), search driver, orientation cost
                         #   providers. ITS OWN STAGE — never a side effect of hollowing
     plinth-hollow/      # hollow eligibility, cavity carve, drains/vents, drainability audit,
@@ -92,7 +94,8 @@ plinth-3d/
                         #   BOOLEAN UNION before write, .chitubox write via chitubox_io,
                         #   then re-read-FROM-DISK audit
     plinth-metrics/     # the parity harness. Links NEITHER plinth-verify NOR geom_kernel (own slow
-                        #   brute-force f64 primitives). MAY link chitubox_io's reader. Disk only.
+                        #   brute-force f64 primitives). MAY link chitubox_io's reader. Disk only;
+                        #   consumes Metric DTOs from plinth-core while owning scoring behaviour.
     plinth-pipeline/    # stage sequencing over typestate artifacts, content-addressed cache,
                         #   progress reporting, report writing
     plinth-cli/         # bin `plinth`. THE only entry point. Subcommands: prepare, score, calibrate
@@ -206,12 +209,12 @@ Delicacy is a property of the FaceTable **at the LOD being scored**. The Python 
 delicacy field came from the full mesh while face areas came from a 90%-decimated proxy (making
 scar magnitudes decimation-dependent) cannot recur: field and evaluation mesh are one object.
 
-### 3.4 One DefectReport, one violation enum, a responder table that must be total
+### 3.4 One DefectReport, one violation enum, and a future responder table that must be total
 
 ```rust
-// plinth-core — plain exhaustive enum. NOT #[non_exhaustive]: that attribute forces `_` arms in
-// downstream crates and would structurally defeat the exhaustive-responder commitment, because
-// the responder table lives in plinth-support, a different crate.
+// plinth-core — passive, plain exhaustive vocabulary only. NOT #[non_exhaustive]: that attribute
+// forces `_` arms in downstream crates and would structurally defeat the exhaustive-responder
+// commitment, because the M7 responder table lives in plinth-support, a different crate.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum ViolationKind {
     UncoveredIsland, UncoveredIslandBirth, UnsupportedMinimum,
@@ -238,7 +241,7 @@ pub struct DefectReport {
     pub defects: Vec<Defect>, pub metrics: MetricSet, pub stage: StageId,
     pub provenance: ProvenanceManifest,   // which constant, with which provenance, fed accept
     pub termination: Termination,
-    pub cost: CostVector, pub pareto: Vec<(OrientationId, CostVector)>,
+    pub search: SearchEvidence,
 }
 impl DefectReport {
     pub fn accepted(&self) -> bool { !self.defects.iter().any(|d| d.severity == Severity::Blocking) }
@@ -251,7 +254,9 @@ The `p8_accept.py` gates that are unwired in Python today (orphan/dead-ancestor,
 idempotence, re-verify-after-serialize) become ordinary kinds and tests, actually wired into the
 shipped accept path.
 
-**A gate that can fail with no responder is a compile error:**
+**A gate that can fail with no responder is a compile error.** This is M7 work: `plinth-core`
+contains `ViolationKind` only; `Response`, `FixerId`, and `response_for` belong together in
+`plinth-support::repair`, where the fixers exist:
 
 ```rust
 // plinth-support::repair
@@ -317,7 +322,7 @@ not implement.
 
 ```rust
 // plinth-core::consts
-pub struct Measured<T>    { v: T, pub plate: PlateId, pub err: T, pub date: &'static str, pub note: &'static str }
+pub struct Measured<T>    { v: T, pub plate: PlateId, pub err: Option<T>, pub date: &'static str, pub note: &'static str }
 pub struct Derived<T>     { v: T, pub from: &'static [&'static str], pub note: &'static str }
 pub struct Placeholder<T> { v: T, pub note: &'static str }
 pub struct Pending<T: 'static> { pub conservative: &'static T, pub optimistic: &'static T,
@@ -406,9 +411,10 @@ pub static LOAD_SHARING: Measured<LoadSharing> = /* Additive { n_eff_cap: 6.0 } 
     five caveats that belong in `note`. */;
 ```
 
-`Measured<T>` carries an `err: T`, and a **categorical** payload has no error bar. Either set `err`
-to the same variant or make it `Option<T>`; do **not** invent a numeric error and do **not** widen
-the enum to carry uncertainty. The uncertainty is conditional-scope, and it lives in `note`.
+`Measured<T>` carries `err: Option<T>`. A **categorical** payload has no error bar, so
+`Measured<LoadSharing>` uses `err: None`; its serialized record carries an explicit `"err": null`
+and an explicitly tagged `LoadSharing` variant. Do not invent a numeric error, omit the field, or
+widen the enum to carry uncertainty. The uncertainty is conditional-scope, and it lives in `note`.
 
 The lattice generator takes `effective_x` as an **input** — density is never baked in — so the
 2026-07-31 switch to `Additive` was one constant plus a re-run, and `plinth calibrate` still reports
@@ -448,7 +454,7 @@ transient activation, and the future slicer. The variable-height slicer later re
 ### 3.8 Cost — the type the search is arranged around
 
 ```rust
-// plinth-cost
+// plinth-core::cost — passive vocabulary shared by reports, search, and future plating.
 #[derive(Clone, Copy)]
 pub struct CostVector {
     pub z_height_mm: f64,
@@ -458,6 +464,19 @@ pub struct CostVector {
     pub risk: Risk,          // { max_effective_x, zipper_arms, min_lateral_spread_mm }
     pub fidelity: Fidelity,  // Surrogate | ProxyRefined | Exact — a cost always knows how much it lied
 }
+pub struct OrientationCost { pub orientation: OrientationId, pub cost: CostVector }
+pub struct ParetoPoint { pub orientation: OrientationId, pub cost: CostVector }
+pub struct OptimizationSummary {
+    pub selected: OrientationCost,
+    pub pareto: Vec<ParetoPoint>,
+    pub candidates_examined: u64,
+}
+pub enum SearchEvidence {
+    NotEvaluated,
+    Evaluated(OptimizationSummary),
+}
+
+// plinth-cost — behaviour over the shared vocabulary.
 pub trait CostProvider {
     fn surrogate(&self, batch: &CandidateBatch, ctx: &Ctx) -> Vec<PartialCost>;  // batched, no mutation
     fn realize(&self, cand: &Candidate, ctx: &Ctx) -> Result<(PartialCost, StageOutput), Defect>;
@@ -468,6 +487,11 @@ pub trait Evaluator { /* ordered map-collect; CpuEvaluator (rayon) now, WgpuEval
 Print time is `Σ layers (exposure + lift)` over the `LayerPlan`, not z-height — it reduces to
 z-height only under a constant plan, which is precisely why `LayerPlan` is in the CostVector's path
 from day one.
+
+`SearchEvidence::NotEvaluated` is the only valid report state before orientation evaluates a
+candidate. Never fabricate a sentinel cost or an empty-but-claimed Pareto result; after evaluation,
+`SearchEvidence::Evaluated` carries an `OptimizationSummary` with a mandatory selected typed
+orientation, Pareto points, and candidate count.
 
 **Scalarization weights are `Placeholder`** — and because they are Placeholder they *physically
 cannot* reach an accept decision. Search weights select; they never accept. Acceptance is the

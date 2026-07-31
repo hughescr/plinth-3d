@@ -134,7 +134,7 @@ came from. This is a compile-time mechanism, not a documentation convention.
 
 | Wrapper | Meaning | On the accept path? |
 |---|---|---|
-| `Measured<T>` | Measured on a calibration plate. Carries the plate id and an error bar. | Yes |
+| `Measured<T>` | Measured on a calibration plate. Carries the plate id and `err: Option<T>`; a categorical measurement uses `None`, serialized explicitly as `"err": null` beside its tagged category. | Yes |
 | `Derived<T>` | Computed from `Measured` values by a stated relation. | Yes |
 | `Placeholder<T>` | A guess. Search/tuning weights live here. | **No — will not compile** |
 | `Pending<T>` | Awaiting a measurement. Carries **both** a conservative and an optimistic value. `.resolve()` returns the conservative branch wrapped as a `Derived<T>` — an `AcceptSafe` value carrying the pending provenance, never a bare `T`. | Only via explicit `.resolve()` |

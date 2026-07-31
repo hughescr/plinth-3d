@@ -738,13 +738,12 @@ pub static LOAD_SHARING: Measured<LoadSharing> = /* LoadSharing::Additive { n_ef
     Caveats 1-5 of 03 section 4.2 belong verbatim in `note`. */;
 ```
 
-> **One mechanism wrinkle.** `Measured<T>` (02 §3.5) carries an `err: T`. For a
-> **categorical** payload like `LoadSharing` there is no error bar. Do **not** invent a
-> numeric one and do **not** widen the enum to carry uncertainty: either set `err` to
-> the same variant or make it `Option<T>` in 02's definition, and carry the real
-> uncertainty — caveats 1–4 — in `note`. Whichever 02 chooses, the fact that a
-> categorical measurement has no error bar must stay visible in the type, not be
-> papered over.
+> **One mechanism wrinkle.** `Measured<T>` (02 §3.5) carries `err: Option<T>`. For a
+> **categorical** payload like `LoadSharing`, use `err: None` and serialize it explicitly
+> as `"err": null` alongside an explicitly tagged `LoadSharing` variant. Do **not** invent
+> a numeric error, omit the field, or widen the enum to carry uncertainty: the real
+> uncertainty — all five caveats above — belongs in `note`. A categorical measurement's
+> lack of an error bar must stay visible in the type and wire form, not be papered over.
 
 The name is still `LOAD_SHARING`, the payload is still the
 `enum LoadSharing { Zipper, Additive { .. } }` from `plinth-support::load` — **not** a

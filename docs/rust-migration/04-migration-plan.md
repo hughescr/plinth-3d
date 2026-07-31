@@ -111,8 +111,8 @@ previous one's data model.
 
 | # | Name | Depends on | New crates | Gate |
 | --- | --- | --- | --- | --- |
-| M0 | Conventions, baseline freeze, core types, solid spike | — | `plinth-core`, `plinth-solid` | Baseline frozen; trybuild compile-fail proof |
-| M1 | The parity harness (`plinth score`) | M0 | `plinth-metrics`, `plinth-cli` | Self-comparison exact; injected defects detected |
+| M0 | Conventions, frozen-Python baseline, core types, solid spike | — | `plinth-core`, `plinth-solid` | Baseline frozen; trybuild compile-fail proof |
+| M1 | The parity harness and Rust refreeze (`plinth score`) | M0 | `plinth-metrics`, `plinth-cli` | Self-comparison exact; injected defects detected |
 | M2 | Mesh and geometry substrate | M0 | `plinth-mesh`, `plinth-voxel` | STL round-trip byte-identity; geom_kernel green |
 | M3 | Decimation | M2 | `plinth-decimate` | Self-verified error budgets on every model, at the **library** level (`cargo test -p plinth-decimate --test corpus_budgets`); CLI wiring verified at M4 |
 | M4 | The thin vertical slice | M1, M2 | `plinth-cost`, `plinth-orient`, `plinth-hollow`, `plinth-emit`, `plinth-pipeline` | Format metrics absolute; `islands`, `support_count`, `resin`, `scar` waived; `max_x` reported |
@@ -171,10 +171,11 @@ every milestone. Do not exclude those models from the corpus; they are the easie
 
 ---
 
-## M0 — Conventions, baseline freeze, core types, solid spike
+## M0 — Conventions, frozen-Python baseline, core types, solid spike
 
-**Goal.** The measuring stick exists before any Rust behaviour does, the types every crate
-shares exist, and the biggest schedule risk (the boolean kernel) is spiked.
+**Goal.** The measuring stick is frozen by the existing Python pipeline before any Rust output
+exists; the passive types every crate shares exist, and the biggest schedule risk (the boolean
+kernel) is spiked. Rust does not refreeze a baseline in M0.
 
 **Depends on:** nothing. **Parallel with:** nothing. **Unblocks:** M1, M2.
 
@@ -288,8 +289,8 @@ see the audit table in §M9.)
 | Module | Contents |
 | --- | --- |
 | `defect.rs` | `DefectReport`, `Defect`, `Severity`, `SiteId`, `Termination`. **`DefectReport` is the sole acceptance authority** — commitment 1. Nothing else may say "ok". |
-| `violation.rs` | `enum ViolationKind` with exhaustive match, and `fn response_for(ViolationKind) -> Response`. Commitment 3: a gate that can fail without a fixer that can respond must be a **compile error**. |
-| `provenance.rs` | `Measured { plate: PlateId, value: f64, err: f64 }`, `Derived { value: f64, from: &'static str }`, `Placeholder { value: f64, why: &'static str }`, `Pending { both: (f64, f64), resolves_on: PlateId }`, and the `AcceptSafe` marker trait. Commitment 2. |
+| `violation.rs` | The passive exhaustive `ViolationKind` vocabulary only. `Response`, `FixerId`, and `response_for` are M7 `plinth-support::repair` behaviour, when concrete fixers exist. Commitment 3 is enforced there. |
+| `provenance.rs` | `Measured<T> { plate: PlateId, value: T, err: Option<T> }`, `Derived<T>`, `Placeholder<T>`, `Pending<T>`, and the `AcceptSafe` marker trait. Categorical measurements serialize `err: None` explicitly as `"err": null`; no numeric pseudo-error or omitted field. Commitment 2. |
 | `constants.rs` | The typed constants registry. Every physical constant in the system, each carrying its provenance. |
 | `layer.rs` | `LayerPlan` — layer height is a **per-layer array from day one**, commitment 5. Ships `constant(0.050)` until calibrated. |
 | `frame.rs` | Frame typestate marks (`Source`, `Centered`, `Plated`) so a mis-framed point set will not compile. |
@@ -297,6 +298,8 @@ see the audit table in §M9.)
 | `digest.rs` | Content digests over typed arrays (not over allocator arithmetic — see the M2 note on `topology.py`). |
 | `chord.rs` | `canon_chord_micron`, `chords_match_micron`, `chord_parity_report`, ported from `chord_canon.py`. Integer-micron canonicalization; dependency-free by design. |
 | `printer.rs` | `PrinterProfile`. Ship `saturn4-ultra`: peel direction −Y (tilt release), pixel 14 × 19 µm, layer 0.050 mm. |
+| `cost.rs` | Passive shared cost/report DTOs: `CostVector`, `Fidelity`, `Resin`, `Scar`, `Risk`, `OrientationCost`, `ParetoPoint`, `OptimizationSummary`, and `SearchEvidence`. Pre-orientation reports use `SearchEvidence::NotEvaluated`, never a sentinel cost. Evaluation, scalarization, batching, Pareto algorithms, and memoization remain future `plinth-cost` behaviour. |
+| `metric.rs` | Passive shared `MetricId`, `MetricValue`, `MetricSet`, and report DTOs. Metric directions, independent metric computation, comparison, and waiver behaviour remain M1 `plinth-metrics`. |
 
 **`crates/plinth-solid`** — a **spike only** at this milestone.
 
@@ -308,7 +311,8 @@ see the audit table in §M9.)
 ### Work items
 
 1. Commit the `docs/rust-migration/` guide (this file and its siblings) before writing code.
-2. Workspace surgery as above; `cargo build --workspace` must succeed with zero crates.
+2. Workspace surgery as above; `cargo build --workspace` must succeed with the legacy crates and
+   the M0 crates present.
 3. Write `plinth-core` modules in the order listed — `defect` → `violation` → `provenance`
    → everything else. `violation.rs` must exist before any gate anywhere.
 4. **The trybuild proof.** Add `crates/plinth-core/tests/compile_fail/` with a case that
@@ -343,13 +347,6 @@ see the audit table in §M9.)
    `return` early, and it does not print a skip notice and pass. The one sanctioned skip in
    the whole tree is `chitubox_io`'s `treant_v5_candidate.chitubox` (see
    `05-chitubox-and-corpus.md` §4), which is uncommittable by size.
-10. **Ship the baseline-refreeze tool** as `plinth-cli`'s internal `refreeze` path (the
-    Rust re-expression of `scripts/tests/_refreeze_v5.py`). It is what re-freezes the
-    baseline after a physics change — `03-physics-and-constants.md` §4.3 step 3 requires a
-    re-freeze *before* comparing, or the comparison measures the physics change rather than
-    the port. It writes the new artifacts, rewrites `manifest.baseline_command`,
-    `frozen_at` and `baseline_git_rev`, and refuses to run without an explicit reason
-    string recorded in the manifest.
 
 ### `corpus/manifest.json` schema
 
@@ -422,10 +419,11 @@ right count, with the Treant present. Everything downstream is measured against 
 
 ---
 
-## M1 — The parity harness (`plinth score`)  ∥ M2
+## M1 — The parity harness and Rust refreeze (`plinth score`)  ∥ M2
 
 **Goal.** The harness is written before the things it measures and is validated against
-known-good output before it ever judges Rust.
+known-good output before it ever judges Rust. The first Rust CLI also owns the future baseline
+refreeze path; M0's baseline remains frozen by Python only.
 
 **Depends on:** M0. **Parallel with:** M2. **Unblocks:** M4.
 
@@ -458,7 +456,7 @@ known-good output before it ever judges Rust.
 | `supports.rs` | Support count, per-record resin volume, arm cross-sections, effective X. |
 | `scar.rs` | Scar area, worst patch, delicacy weighting. |
 | `geometry.rs` | Brute-force closest-point, ray parity, triangle intersection. Slow on purpose. |
-| `score.rs` | `MetricSet`, `ScoreReport`, the as-good-or-better comparator, waiver handling. |
+| `score.rs` | Independent metric computation plus the as-good-or-better comparator and waiver handling, all over `plinth-core`'s passive `MetricSet` and report DTOs. |
 
 **`crates/plinth-cli`** — the `plinth` binary is reborn here.
 
@@ -470,6 +468,11 @@ known-good output before it ever judges Rust.
 - Exit 0 iff candidate is as-good-or-better on every non-waived metric on every model.
   Exit non-zero otherwise, printing **which metric on which model regressed and by how
   much** — never a bare exit code (commitment 4 applies to the harness too).
+- Internal `refreeze` path: the Rust re-expression of `scripts/tests/_refreeze_v5.py`.
+  After a physics change it writes the new artifacts, rewrites `manifest.baseline_command`,
+  `frozen_at`, and `baseline_git_rev`, and refuses to run without an explicit reason string
+  recorded in the manifest. Re-freeze before comparing, or the comparison measures the physics
+  change rather than the port.
 
 ### Work items
 
@@ -495,6 +498,7 @@ known-good output before it ever judges Rust.
    - an interior cavity injected (must raise `cavities`).
    A test asserts each corruption is detected. **A harness that cannot fail cannot gate.**
 5. Write the metric table and directions into `corpus/manifest.json`.
+6. Implement and test `plinth-cli`'s internal `refreeze` path. It is unavailable in M0.
 
 ### Acceptance — run these
 
@@ -511,7 +515,7 @@ cargo test -p plinth-metrics --test corrupt_detection # each injected defect is 
 defect is detected.
 **Owner eyeball:** the owner reviews the metric table and its directions of goodness and
 **signs it**. This gate cannot be retrofitted later — from M4 onward, this table is what
-"better" means. Record the sign-off in the gate table (`06-conventions.md`).
+"better" means. Record the sign-off with the committed metric manifest.
 
 ---
 
@@ -768,8 +772,10 @@ stage**, never a side effect of hollowing, and there is **exactly one** path fro
 
 ### Rust deliverables
 
-**`crates/plinth-cost`** — `CostVector`, `Fidelity`, `CostProvider`, `Evaluator`, Pareto
-front. The joint cost function over the triad (fast / minimum resin / high quality).
+**`crates/plinth-cost`** — behaviour over `plinth-core`'s passive `CostVector`, `Fidelity`,
+and Pareto DTOs: `CostProvider`, `Evaluator`, batching, scalarization, Pareto algorithms, and
+per-search memoization. It implements the joint cost function over the triad (fast / minimum
+resin / high quality); it does not define a competing report vocabulary.
 
 **`crates/plinth-orient`** — a real stage.
 - `--orient pinned:<baseline-dir>` reads the orientation the Python baseline chose, so M4
@@ -1711,7 +1717,7 @@ re-expressions are **assigned deliverables**, not aspirations, because
 | Python concept | Rust re-expression | Lands at |
 | --- | --- | --- |
 | `conftest.py`'s **fail-not-skip** rule (missing/stale fixture ⇒ FAIL, never a silent skip) | A workspace test convention | **M0** work item 9 |
-| `_refreeze_v5.py`'s **baseline refreeze** (the tool that re-freezes after a physics change, `03-physics-and-constants.md` §4.3 step 3) | `plinth-cli`'s internal `refreeze` path | **M0** work item 10 |
+| `_refreeze_v5.py`'s **baseline refreeze** (the tool that re-freezes after a physics change, `03-physics-and-constants.md` §4.3 step 3) | `plinth-cli`'s internal `refreeze` path | **M1** work item 6 |
 | `_perf_fingerprint.py`'s **exact-bytes determinism fingerprint** (f64 as raw bit pattern, arrays as dtype + shape + raw bytes; never tolerance comparison) | The digest the thread- and cache-sweeps are computed with | **M8** determinism CI |
 
 Two more worth naming:

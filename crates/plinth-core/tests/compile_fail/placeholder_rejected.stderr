@@ -1,0 +1,21 @@
+error[E0277]: the trait bound `Placeholder<f64>: AcceptSafe<f64>` is not satisfied
+ --> tests/compile_fail/placeholder_rejected.rs:9:30
+  |
+9 |     let _ = acceptance_input(&guess);
+  |             ---------------- ^^^^^^ the trait `AcceptSafe<f64>` is not implemented for `Placeholder<f64>`
+  |             |
+  |             required by a bound introduced by this call
+  |
+help: the following other types implement trait `AcceptSafe<T>`
+ --> src/provenance.rs
+  |
+  | impl<T: Copy> AcceptSafe<T> for Measured<T> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `plinth_core::Measured<T>`
+...
+  | impl<T: Copy> AcceptSafe<T> for Derived<T> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `plinth_core::Derived<T>`
+note: required by a bound in `acceptance_input`
+ --> tests/compile_fail/placeholder_rejected.rs:3:34
+  |
+3 | fn acceptance_input(value: &impl AcceptSafe<f64>) -> f64 {
+  |                                  ^^^^^^^^^^^^^^^ required by this bound in `acceptance_input`
