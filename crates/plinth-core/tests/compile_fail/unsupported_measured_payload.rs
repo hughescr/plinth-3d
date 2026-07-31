@@ -1,11 +1,14 @@
-use plinth_core::{Measured, PlateId};
+use plinth_core::{MeasuredPayload, ProvenanceError};
 
-fn main() {
-    let _ = Measured::new(
-        "unsupported",
-        PlateId::from("plate"),
-        None,
-        "2026-07-31",
-        "strings have no numeric or categorical measurement policy",
-    );
+struct LocalPayload;
+
+impl MeasuredPayload for LocalPayload {
+    fn validate_measurement(
+        _value: &Self,
+        _err: Option<&Self>,
+    ) -> Result<(), ProvenanceError> {
+        Ok(())
+    }
 }
+
+fn main() {}

@@ -771,17 +771,54 @@ impl<'de> Deserialize<'de> for LoadSharing {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where D: serde::Deserializer<'de> {
         #[derive(Deserialize)]
-        #[serde(tag = "kind", rename_all = "snake_case")]
-        enum Wire { Zipper, Additive { n_eff_cap: f64 } }
+        #[serde(rename_all = "snake_case")]
+        enum ZipperKind {
+            Zipper,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum AdditiveKind {
+            Additive,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ZipperWire {
+            kind: ZipperKind,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct AdditiveWire {
+            kind: AdditiveKind,
+            n_eff_cap: f64,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Zipper(ZipperWire),
+            Additive(AdditiveWire),
+        }
 
         match Wire::deserialize(deserializer)? {
-            Wire::Zipper => Ok(Self::Zipper),
-            Wire::Additive { n_eff_cap } => {
+            Wire::Zipper(ZipperWire {
+                kind: ZipperKind::Zipper,
+            }) => Ok(Self::Zipper),
+            Wire::Additive(AdditiveWire {
+                kind: AdditiveKind::Additive,
+                n_eff_cap,
+            }) => {
                 Self::additive(n_eff_cap).map_err(serde::de::Error::custom)
             }
         }
     }
 }
+
+// The per-variant kind enums plus deny_unknown_fields make the wire strict:
+// {"kind":"zipper","n_eff_cap":1.0} is rejected as a surplus/cross-variant field,
+// and {"kind":"additive"} is rejected because the additive cap is required.
 
 // Later M0 constants work: plinth-core::constants::load declares:
 pub static LOAD_SHARING: Measured<LoadSharing> = /* LoadSharing::Additive { n_eff_cap: 6.0 }
