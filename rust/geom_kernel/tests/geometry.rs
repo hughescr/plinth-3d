@@ -47,7 +47,12 @@ fn bvh_nearest_matches_brute_force() {
     for &p in &pts {
         let (dk, ik, _) = surf_nearest(&surf, p);
         let (db, ib) = brute_nearest(&mesh, p);
-        assert!((dk - db).abs() <= 1e-9 * db.max(1.0), "dist {} vs {}", dk, db);
+        assert!(
+            (dk - db).abs() <= 1e-9 * db.max(1.0),
+            "dist {} vs {}",
+            dk,
+            db
+        );
         // index may differ only on exact ties; assert distance-consistency
         let _ = (ik, ib);
     }
@@ -179,12 +184,7 @@ fn r6_no_hashmap_in_src() {
             let txt = std::fs::read_to_string(&p).unwrap();
             // match real USAGE tokens, not the words in doc comments
             for bad in ["HashMap<", "HashMap::", "HashSet<", "HashSet::"] {
-                assert!(
-                    !txt.contains(bad),
-                    "forbidden {} in {:?} (spec R6)",
-                    bad,
-                    p
-                );
+                assert!(!txt.contains(bad), "forbidden {} in {:?} (spec R6)", bad, p);
             }
         }
     }

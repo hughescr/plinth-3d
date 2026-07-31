@@ -14,8 +14,8 @@ fn corpus_roundtrip_byte_identical() {
         let Some(original) = read_corpus(name) else {
             continue;
         };
-        let proj = Project::from_bytes(original.clone())
-            .unwrap_or_else(|e| panic!("parse {name}: {e}"));
+        let proj =
+            Project::from_bytes(original.clone()).unwrap_or_else(|e| panic!("parse {name}: {e}"));
         let out = proj
             .to_bytes()
             .unwrap_or_else(|e| panic!("to_bytes {name}: {e}"));

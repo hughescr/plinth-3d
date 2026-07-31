@@ -70,10 +70,11 @@ fn looks_like_binary(bytes: &[u8]) -> bool {
         bytes[STL_HEADER_LEN + 2],
         bytes[STL_HEADER_LEN + 3],
     ]) as usize;
-    STL_HEADER_LEN
-        .checked_add(4)
-        .and_then(|h| count.checked_mul(STL_BYTES_PER_TRI).and_then(|b| h.checked_add(b)))
-        == Some(bytes.len())
+    STL_HEADER_LEN.checked_add(4).and_then(|h| {
+        count
+            .checked_mul(STL_BYTES_PER_TRI)
+            .and_then(|b| h.checked_add(b))
+    }) == Some(bytes.len())
 }
 
 /// Center an already-decoded 9-f32/tri stream on its bbox center, in place.

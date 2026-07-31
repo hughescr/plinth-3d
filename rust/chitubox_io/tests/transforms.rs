@@ -13,13 +13,22 @@ fn open(name: &str) -> Option<Project> {
 
 #[test]
 fn probe_translation_reads_exact() {
-    let (Some(base), Some(moved)) = (open("sphere-cylinder.chitubox"), open("sphere-moved.chitubox"))
-    else {
+    let (Some(base), Some(moved)) = (
+        open("sphere-cylinder.chitubox"),
+        open("sphere-moved.chitubox"),
+    ) else {
         return;
     };
     let b = base.placements()[0];
     let m = moved.placements()[0];
-    assert_eq!(b, Placement { x: 0.0, y: 0.0, z_lift: 0.0 });
+    assert_eq!(
+        b,
+        Placement {
+            x: 0.0,
+            y: 0.0,
+            z_lift: 0.0
+        }
+    );
     // sphere moved +10.5 X, +5.25 Y exactly
     assert!((m.x - 10.5).abs() < 1e-4, "x = {}", m.x);
     assert!((m.y - 5.25).abs() < 1e-4, "y = {}", m.y);
@@ -28,14 +37,19 @@ fn probe_translation_reads_exact() {
 
 #[test]
 fn probe_scale_is_baked_1_5x() {
-    let (Some(base), Some(scaled)) = (open("sphere-cylinder.chitubox"), open("sphere-scaled.chitubox"))
-    else {
+    let (Some(base), Some(scaled)) = (
+        open("sphere-cylinder.chitubox"),
+        open("sphere-scaled.chitubox"),
+    ) else {
         return;
     };
     // model 0 = Sphere; same triangle count, bbox exactly 1.5x
     let bt = base.model_triangles(0).unwrap();
     let st = scaled.model_triangles(0).unwrap();
-    assert_eq!(base.model(0).unwrap().triangle_count, scaled.model(0).unwrap().triangle_count);
+    assert_eq!(
+        base.model(0).unwrap().triangle_count,
+        scaled.model(0).unwrap().triangle_count
+    );
     let be = extents(&bt);
     let se = extents(&st);
     for k in 0..3 {
@@ -60,8 +74,10 @@ fn ry_rz(v: [f32; 3], deg: f32) -> [f32; 3] {
 
 #[test]
 fn probe_rotation_matches_ry_rz_vertex_set() {
-    let (Some(base), Some(rot)) = (open("sphere-cylinder.chitubox"), open("cylinder-rotated.chitubox"))
-    else {
+    let (Some(base), Some(rot)) = (
+        open("sphere-cylinder.chitubox"),
+        open("cylinder-rotated.chitubox"),
+    ) else {
         return;
     };
     // model 1 = Cylinder (the faceted, non-symmetric probe)
@@ -82,7 +98,11 @@ fn library_set_placements_persists_exact() {
     };
     proj.set_placements(&[PlacementUpdate {
         model_index: 0,
-        placement: Placement { x: 10.5, y: 5.25, z_lift: 0.0 },
+        placement: Placement {
+            x: 10.5,
+            y: 5.25,
+            z_lift: 0.0,
+        },
     }])
     .unwrap();
     let bytes = proj.to_bytes().unwrap();
@@ -126,8 +146,16 @@ fn library_rotate_rebake_is_deterministic() {
     let mut a = Project::from_bytes(base_bytes.clone()).unwrap();
     let mut b = Project::from_bytes(base_bytes).unwrap();
     a.rotate_model_z(1, 90.0).unwrap();
-    b.rotate_models_z(&[ZRotation { model_index: 1, delta_deg: 45.0 }]).unwrap();
-    b.rotate_models_z(&[ZRotation { model_index: 1, delta_deg: 45.0 }]).unwrap();
+    b.rotate_models_z(&[ZRotation {
+        model_index: 1,
+        delta_deg: 45.0,
+    }])
+    .unwrap();
+    b.rotate_models_z(&[ZRotation {
+        model_index: 1,
+        delta_deg: 45.0,
+    }])
+    .unwrap();
     assert_eq!(
         a.model_triangles(1).unwrap(),
         b.model_triangles(1).unwrap(),

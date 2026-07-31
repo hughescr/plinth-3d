@@ -13,8 +13,7 @@ use std::path::PathBuf;
 
 /// Committed fixtures, resolved relative to this crate rather than the CWD.
 pub fn fixture_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../scripts/tests/fixtures/chitubox")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/tests/fixtures/chitubox")
 }
 
 /// Fallback for specimens too large to commit.

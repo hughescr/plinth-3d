@@ -80,7 +80,9 @@ impl Project {
             validate_name(&m.name)?;
             for v in [m.placement.x, m.placement.y, m.placement.z_lift] {
                 if !v.is_finite() {
-                    return Err(ChituboxError::NonFiniteValue { context: "placement" });
+                    return Err(ChituboxError::NonFiniteValue {
+                        context: "placement",
+                    });
                 }
             }
             let centered = match &m.geometry {
@@ -90,10 +92,14 @@ impl Project {
                 }
                 ModelGeometry::Triangles(soup) => {
                     if soup.xyz.is_empty() || soup.xyz.len() % FLOATS_PER_TRI != 0 {
-                        return Err(ChituboxError::BadTriangleBuffer { len: soup.xyz.len() });
+                        return Err(ChituboxError::BadTriangleBuffer {
+                            len: soup.xyz.len(),
+                        });
                     }
                     if !all_finite(&soup.xyz) {
-                        return Err(ChituboxError::NonFiniteValue { context: "triangles" });
+                        return Err(ChituboxError::NonFiniteValue {
+                            context: "triangles",
+                        });
                     }
                     center(soup.xyz.clone())?
                 }
@@ -105,13 +111,13 @@ impl Project {
             // NUL terminator already present (zeroed record)
             raw[M_TRANSLATE_X..M_TRANSLATE_X + 4].copy_from_slice(&m.placement.x.to_le_bytes());
             raw[M_TRANSLATE_Y..M_TRANSLATE_Y + 4].copy_from_slice(&m.placement.y.to_le_bytes());
-            raw[M_TRANSLATE_Z..M_TRANSLATE_Z + 4].copy_from_slice(&m.placement.z_lift.to_le_bytes());
+            raw[M_TRANSLATE_Z..M_TRANSLATE_Z + 4]
+                .copy_from_slice(&m.placement.z_lift.to_le_bytes());
             // Fail early on an impossibly-large mesh rather than truncating the
             // in-memory size field: `serialize` re-derives M_MESH_SIZE through
             // the same `u32_of` guard (write.rs), so a silent `as u32` here
             // would desync the cached record from the bytes that get written.
-            raw[M_MESH_SIZE..M_MESH_SIZE + 4]
-                .copy_from_slice(&u32_of(mesh.len())?.to_le_bytes());
+            raw[M_MESH_SIZE..M_MESH_SIZE + 4].copy_from_slice(&u32_of(mesh.len())?.to_le_bytes());
             built.push(ModelEntry {
                 raw_record: raw,
                 mesh,
@@ -210,18 +216,25 @@ impl Project {
                 });
             }
             if seen.contains(&u.model_index) {
-                return Err(ChituboxError::DuplicateBatchIndex { index: u.model_index });
+                return Err(ChituboxError::DuplicateBatchIndex {
+                    index: u.model_index,
+                });
             }
             seen.push(u.model_index);
             for v in [u.placement.x, u.placement.y, u.placement.z_lift] {
                 if !v.is_finite() {
-                    return Err(ChituboxError::NonFiniteValue { context: "placement" });
+                    return Err(ChituboxError::NonFiniteValue {
+                        context: "placement",
+                    });
                 }
             }
         }
         for u in updates {
-            self.doc.models[u.model_index]
-                .set_translate([u.placement.x, u.placement.y, u.placement.z_lift]);
+            self.doc.models[u.model_index].set_translate([
+                u.placement.x,
+                u.placement.y,
+                u.placement.z_lift,
+            ]);
         }
         self.mark_dirty();
         Ok(())
@@ -247,11 +260,15 @@ impl Project {
                 });
             }
             if seen.contains(&r.model_index) {
-                return Err(ChituboxError::DuplicateBatchIndex { index: r.model_index });
+                return Err(ChituboxError::DuplicateBatchIndex {
+                    index: r.model_index,
+                });
             }
             seen.push(r.model_index);
             if !r.delta_deg.is_finite() {
-                return Err(ChituboxError::NonFiniteValue { context: "rotation" });
+                return Err(ChituboxError::NonFiniteValue {
+                    context: "rotation",
+                });
             }
         }
         // Two-phase to preserve the no-partial-mutation invariant: STAGE every
@@ -290,9 +307,7 @@ impl Project {
                     s.records
                         .iter()
                         .map(|r| {
-                            let g = |o: usize| {
-                                f32::from_le_bytes(r[o..o + 4].try_into().unwrap())
-                            };
+                            let g = |o: usize| f32::from_le_bytes(r[o..o + 4].try_into().unwrap());
                             (
                                 [g(S_START), g(S_START + 4), g(S_START + 8)],
                                 [g(S_END), g(S_END + 4), g(S_END + 8)],
@@ -303,7 +318,11 @@ impl Project {
                 .unwrap_or_default();
             fresh_pristine = Some(Pristine {
                 mesh: me.mesh.clone(),
-                smesh: me.support.as_ref().map(|s| s.smesh.clone()).unwrap_or_default(),
+                smesh: me
+                    .support
+                    .as_ref()
+                    .map(|s| s.smesh.clone())
+                    .unwrap_or_default(),
                 record_geo,
             });
             fresh_pristine.as_ref().unwrap()
@@ -335,8 +354,8 @@ impl Project {
             let smesh_len = new_smesh.len();
             for rec in &section.records {
                 let abs = u32::from_le_bytes(rec[S_MESH_OFF..S_MESH_OFF + 4].try_into().unwrap());
-                let len =
-                    u32::from_le_bytes(rec[S_MESH_LEN..S_MESH_LEN + 4].try_into().unwrap()) as usize;
+                let len = u32::from_le_bytes(rec[S_MESH_LEN..S_MESH_LEN + 4].try_into().unwrap())
+                    as usize;
                 // Parse guarantees containment; on the impossible violation
                 // return an error rather than rotating endpoints while leaving
                 // the blob unrotated (silent desync).
@@ -345,9 +364,11 @@ impl Project {
                         detail: "record mesh_off precedes smesh start".into(),
                     },
                 )?;
-                let end = start.checked_add(len).ok_or(ChituboxError::ArithmeticOverflow {
-                    context: "rotate blob range",
-                })?;
+                let end = start
+                    .checked_add(len)
+                    .ok_or(ChituboxError::ArithmeticOverflow {
+                        context: "rotate blob range",
+                    })?;
                 if end > smesh_len {
                     return Err(ChituboxError::SupportSectionMalformed {
                         detail: "record blob exceeds smesh during rotate".into(),
@@ -438,7 +459,9 @@ impl Project {
                 });
             }
             if seen.contains(&b.model_index) {
-                return Err(ChituboxError::DuplicateBatchIndex { index: b.model_index });
+                return Err(ChituboxError::DuplicateBatchIndex {
+                    index: b.model_index,
+                });
             }
             seen.push(b.model_index);
             if let Some(z) = b.lift_mm {
@@ -745,26 +768,29 @@ fn validate_name(name: &str) -> Result<()> {
 /// Append new records + blobs onto an existing section verbatim (Python
 /// `write()` semantics): existing smesh/records bytes are untouched; new blobs
 /// land at the end of the mesh region with absolute (orig-based) offsets.
-fn append_into(
-    sec: &mut crate::document::SupportSection,
-    records: &[SupportRecord],
-) -> Result<()> {
+fn append_into(sec: &mut crate::document::SupportSection, records: &[SupportRecord]) -> Result<()> {
     let mut off = sec
         .orig_smesh_off
         .checked_add(sec.smesh.len() as u32)
-        .ok_or(ChituboxError::ArithmeticOverflow { context: "append offset" })?;
+        .ok_or(ChituboxError::ArithmeticOverflow {
+            context: "append offset",
+        })?;
     for r in records {
         // Zero-triangle record mesh rejected on the write path (mirrors
         // build_section and the model path; ChituBox semantics unprobed).
         if r.mesh.xyz.is_empty() || r.mesh.xyz.len() % FLOATS_PER_TRI != 0 {
-            return Err(ChituboxError::BadTriangleBuffer { len: r.mesh.xyz.len() });
+            return Err(ChituboxError::BadTriangleBuffer {
+                len: r.mesh.xyz.len(),
+            });
         }
         if !all_finite(&r.mesh.xyz)
             || !r.start.iter().chain(r.end.iter()).all(|v| v.is_finite())
             || !r.r_start.is_finite()
             || !r.r_end.is_finite()
         {
-            return Err(ChituboxError::NonFiniteValue { context: "append record" });
+            return Err(ChituboxError::NonFiniteValue {
+                context: "append record",
+            });
         }
         let blob = f32_to_bytes(&r.mesh.xyz);
         let mesh_len = blob.len() as u32;
@@ -784,7 +810,9 @@ fn append_into(
         sec.smesh.extend_from_slice(&blob);
         off = off
             .checked_add(mesh_len)
-            .ok_or(ChituboxError::ArithmeticOverflow { context: "append offset" })?;
+            .ok_or(ChituboxError::ArithmeticOverflow {
+                context: "append offset",
+            })?;
     }
     Ok(())
 }

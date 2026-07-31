@@ -63,9 +63,21 @@ impl ModelEntry {
 
     pub fn translate(&self) -> [f32; 3] {
         [
-            f32::from_le_bytes(self.raw_record[M_TRANSLATE_X..M_TRANSLATE_X + 4].try_into().unwrap()),
-            f32::from_le_bytes(self.raw_record[M_TRANSLATE_Y..M_TRANSLATE_Y + 4].try_into().unwrap()),
-            f32::from_le_bytes(self.raw_record[M_TRANSLATE_Z..M_TRANSLATE_Z + 4].try_into().unwrap()),
+            f32::from_le_bytes(
+                self.raw_record[M_TRANSLATE_X..M_TRANSLATE_X + 4]
+                    .try_into()
+                    .unwrap(),
+            ),
+            f32::from_le_bytes(
+                self.raw_record[M_TRANSLATE_Y..M_TRANSLATE_Y + 4]
+                    .try_into()
+                    .unwrap(),
+            ),
+            f32::from_le_bytes(
+                self.raw_record[M_TRANSLATE_Z..M_TRANSLATE_Z + 4]
+                    .try_into()
+                    .unwrap(),
+            ),
         ]
     }
 

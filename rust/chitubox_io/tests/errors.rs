@@ -58,10 +58,27 @@ fn duplicate_batch_index_leaves_project_unchanged() {
     let mut proj = one_model_project();
     let before = proj.placements();
     let err = proj.set_placements(&[
-        PlacementUpdate { model_index: 0, placement: Placement { x: 1.0, y: 2.0, z_lift: 0.0 } },
-        PlacementUpdate { model_index: 0, placement: Placement { x: 9.0, y: 9.0, z_lift: 0.0 } },
+        PlacementUpdate {
+            model_index: 0,
+            placement: Placement {
+                x: 1.0,
+                y: 2.0,
+                z_lift: 0.0,
+            },
+        },
+        PlacementUpdate {
+            model_index: 0,
+            placement: Placement {
+                x: 9.0,
+                y: 9.0,
+                z_lift: 0.0,
+            },
+        },
     ]);
-    assert!(matches!(err, Err(ChituboxError::DuplicateBatchIndex { index: 0 })));
+    assert!(matches!(
+        err,
+        Err(ChituboxError::DuplicateBatchIndex { index: 0 })
+    ));
     assert_eq!(proj.placements(), before, "no partial mutation");
 }
 
@@ -73,14 +90,24 @@ fn bad_triangle_buffer() {
         geometry: ModelGeometry::Triangles(TriangleSoup::new(vec![0.0, 1.0, 2.0, 3.0])), // 4 floats
         placement: Placement::default(),
     });
-    assert!(matches!(err, Err(ChituboxError::BadTriangleBuffer { len: 4 })));
+    assert!(matches!(
+        err,
+        Err(ChituboxError::BadTriangleBuffer { len: 4 })
+    ));
     assert_eq!(proj.model_count(), 0);
 }
 
 #[test]
 fn nan_placement() {
     let mut proj = one_model_project();
-    let err = proj.set_placement(0, Placement { x: f32::NAN, y: 0.0, z_lift: 0.0 });
+    let err = proj.set_placement(
+        0,
+        Placement {
+            x: f32::NAN,
+            y: 0.0,
+            z_lift: 0.0,
+        },
+    );
     assert!(matches!(err, Err(ChituboxError::NonFiniteValue { .. })));
 }
 
@@ -122,8 +149,8 @@ fn ascii_stl_unsupported() {
 
 #[test]
 fn oversized_opaque_overwrite() {
-    let Some(proj) = read_corpus("sphere-cylinder.chitubox")
-        .map(|b| Project::from_bytes(b).unwrap())
+    let Some(proj) =
+        read_corpus("sphere-cylinder.chitubox").map(|b| Project::from_bytes(b).unwrap())
     else {
         return;
     };
@@ -131,7 +158,10 @@ fn oversized_opaque_overwrite() {
     let regions = proj.opaque_regions();
     let settings = regions.iter().find(|r| r.kind == "settings").unwrap();
     let err = proj.overwrite_opaque_region_unchecked(settings.id, &vec![0u8; settings.len + 1]);
-    assert!(matches!(err, Err(ChituboxError::OpaqueLengthMismatch { .. })));
+    assert!(matches!(
+        err,
+        Err(ChituboxError::OpaqueLengthMismatch { .. })
+    ));
     // same-length succeeds and preserves round-trip structure
     proj.overwrite_opaque_region_unchecked(settings.id, &vec![0u8; settings.len])
         .unwrap();

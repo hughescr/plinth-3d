@@ -29,7 +29,9 @@ mod vec3;
 pub mod testkit;
 
 use numpy::ndarray::Array2;
-use numpy::{IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArrayDyn};
+use numpy::{
+    IntoPyArray, PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2, PyReadonlyArrayDyn,
+};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple};
@@ -202,10 +204,14 @@ impl NativeSurfacePy {
             .iter()
             .any(|&x| x != n)
         {
-            return Err(PyValueError::new_err("segment_clearance input length mismatch"));
+            return Err(PyValueError::new_err(
+                "segment_clearance input length mismatch",
+            ));
         }
-        let (clr, pt) =
-            py.allow_threads(|| self.inner.segment_clearance(&p0, &p1, &r0, &r1, standoff, &i0, &i1));
+        let (clr, pt) = py.allow_threads(|| {
+            self.inner
+                .segment_clearance(&p0, &p1, &r0, &r1, standoff, &i0, &i1)
+        });
         let c = PyArray1::from_vec(py, clr).into_any();
         let p = vec_to_pyarray2(py, &pt).into_any();
         PyTuple::new(py, [c, p])
@@ -339,7 +345,10 @@ impl NativeSurfacePy {
             "threshold_band",
             self.inner.band_counter.load(Ordering::Relaxed),
         )?;
-        d.set_item("measured_tie", self.inner.tie_counter.load(Ordering::Relaxed))?;
+        d.set_item(
+            "measured_tie",
+            self.inner.tie_counter.load(Ordering::Relaxed),
+        )?;
         Ok(d)
     }
 }

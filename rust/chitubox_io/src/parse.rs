@@ -51,7 +51,11 @@ pub(crate) fn parse(bytes: Vec<u8>) -> Result<Document> {
     }
 
     // header invariant
-    let table_end = add(off8, mul(MODEL_RECORD_LEN, model_count, "table")?, "table_end")?;
+    let table_end = add(
+        off8,
+        mul(MODEL_RECORD_LEN, model_count, "table")?,
+        "table_end",
+    )?;
     if model_count == 0 {
         if off20 != 0 {
             return Err(ChituboxError::HeaderInvariant {
@@ -322,11 +326,17 @@ fn check_unmapped(raw: &[u8; MODEL_RECORD_LEN], m: usize, warnings: &mut Vec<Par
     // span 1: after the NUL terminator up to 256
     let s1 = (name_end + 1).min(256);
     let nz1 = raw[s1..256].iter().filter(|&&b| b != 0).count();
-    let nz2 = raw[280..MODEL_RECORD_LEN].iter().filter(|&&b| b != 0).count();
+    let nz2 = raw[280..MODEL_RECORD_LEN]
+        .iter()
+        .filter(|&&b| b != 0)
+        .count();
     if nz1 + nz2 > 0 {
         warnings.push(ParseWarning {
             context: format!("model {m} record unmapped bytes ({s1}..256, 280..680)"),
-            detail: format!("{} nonzero bytes in assumed-zero spans (preserved verbatim)", nz1 + nz2),
+            detail: format!(
+                "{} nonzero bytes in assumed-zero spans (preserved verbatim)",
+                nz1 + nz2
+            ),
         });
     }
 }

@@ -294,5 +294,9 @@ fn sorted_set_max_diff(a: &[f32], b: &[f32]) -> f32 {
 fn save(p: &Project, dir: &Path, name: &str) {
     let path = dir.join(name);
     p.save(&path).unwrap_or_else(|e| panic!("save {name}: {e}"));
-    println!("  wrote {} ({} bytes)", path.display(), path.metadata().unwrap().len());
+    println!(
+        "  wrote {} ({} bytes)",
+        path.display(),
+        path.metadata().unwrap().len()
+    );
 }

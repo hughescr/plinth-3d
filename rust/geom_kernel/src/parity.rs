@@ -129,8 +129,7 @@ impl AxisGrid {
             }
             // Budget check per triangle: bounds overshoot to one triangle's
             // cell fan-out, so we fail before the pair vector grows unbounded.
-            let projected = per_tri_bytes
-                .saturating_add(pairs.len().saturating_mul(pair_bytes));
+            let projected = per_tri_bytes.saturating_add(pairs.len().saturating_mul(pair_bytes));
             if projected > max_grid_bytes {
                 return Err(format!(
                     "parity grid axis {} exceeds memory budget: {} bytes projected > {} budget \

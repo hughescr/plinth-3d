@@ -25,14 +25,21 @@ pub(crate) fn build_section(
         // whose ChituBox semantics are unprobed (probe5 rationale) and is
         // inconsistent with the model path, which rejects an empty soup.
         if r.mesh.xyz.is_empty() || r.mesh.xyz.len() % FLOATS_PER_TRI != 0 {
-            return Err(ChituboxError::BadTriangleBuffer { len: r.mesh.xyz.len() });
+            return Err(ChituboxError::BadTriangleBuffer {
+                len: r.mesh.xyz.len(),
+            });
         }
         if !all_finite(&r.mesh.xyz) {
             return Err(ChituboxError::NonFiniteValue {
                 context: "support record mesh",
             });
         }
-        for v in r.start.iter().chain(r.end.iter()).chain([r.r_start, r.r_end].iter()) {
+        for v in r
+            .start
+            .iter()
+            .chain(r.end.iter())
+            .chain([r.r_start, r.r_end].iter())
+        {
             if !v.is_finite() {
                 return Err(ChituboxError::NonFiniteValue {
                     context: "support record geometry",
@@ -46,7 +53,9 @@ pub(crate) fn build_section(
         smesh.extend_from_slice(&blob);
         off = off
             .checked_add(mesh_len)
-            .ok_or(ChituboxError::ArithmeticOverflow { context: "smesh assembly" })?;
+            .ok_or(ChituboxError::ArithmeticOverflow {
+                context: "smesh assembly",
+            })?;
         let _ = i;
     }
     Ok(SupportSection {
@@ -90,11 +99,11 @@ pub(crate) fn decode_record(
     let r_end = g(S_R2);
     let mesh_off = u(S_MESH_OFF) as usize;
     let mesh_len = u(S_MESH_LEN) as usize;
-    let rel = mesh_off
-        .checked_sub(orig_smesh_off as usize)
-        .ok_or(ChituboxError::SupportSectionMalformed {
+    let rel = mesh_off.checked_sub(orig_smesh_off as usize).ok_or(
+        ChituboxError::SupportSectionMalformed {
             detail: "record mesh_off precedes smesh start".into(),
-        })?;
+        },
+    )?;
     let blob = smesh
         .get(rel..rel + mesh_len)
         .ok_or(ChituboxError::SupportSectionMalformed {

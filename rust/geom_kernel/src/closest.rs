@@ -40,7 +40,11 @@ pub fn closest_on_tri(p: V3, a: V3, b: V3, cc: V3) -> V3 {
     let den_ac = d2 - d6;
     let t_ac = if den_ac != 0.0 { d2 / den_ac } else { 0.0 };
     let den_bc = (d4 - d3) + (d5 - d6);
-    let t_bc = if den_bc != 0.0 { (d4 - d3) / den_bc } else { 0.0 };
+    let t_bc = if den_bc != 0.0 {
+        (d4 - d3) / den_bc
+    } else {
+        0.0
+    };
     let c_ab = add(a, scale(ab, t_ab));
     let c_ac = add(a, scale(ac, t_ac));
     let c_bc = add(b, scale(sub(cc, b), t_bc)); // B + (Cc - B)*tBC

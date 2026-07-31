@@ -34,7 +34,11 @@ pub(crate) fn serialize(doc: &Document) -> Result<Vec<u8>> {
             pos = add(pos, SUPPORT_INDEX_LEN, "index")?;
             pos = add(pos, s.group_header.len(), "group header")?;
             let rec_off = pos;
-            pos = add(pos, mul(SEG_RECORD_LEN, s.records.len(), "records")?, "records")?;
+            pos = add(
+                pos,
+                mul(SEG_RECORD_LEN, s.records.len(), "records")?,
+                "records",
+            )?;
             (smesh_off, index_off, rec_off)
         } else {
             (0, 0, 0)
@@ -60,7 +64,11 @@ pub(crate) fn serialize(doc: &Document) -> Result<Vec<u8>> {
     write_u32(&mut header, H_OFF8, u32_of(off8)?);
     write_u32(&mut header, H_SETTINGS_SIZE, doc.settings_size);
     write_u32(&mut header, H_CONST16, doc.const16);
-    write_u32(&mut header, H_OFF20, if count == 0 { 0 } else { u32_of(off20)? });
+    write_u32(
+        &mut header,
+        H_OFF20,
+        if count == 0 { 0 } else { u32_of(off20)? },
+    );
     out.extend_from_slice(&header);
 
     out.extend_from_slice(&doc.settings);

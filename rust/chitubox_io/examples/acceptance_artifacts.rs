@@ -106,7 +106,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .map(|m| ModelSource {
             name: m.name.clone(),
             geometry: ModelGeometry::StlPath(stl_for(m, &base)),
-            placement: Placement { x: 0.0, y: 0.0, z_lift: 0.0 },
+            placement: Placement {
+                x: 0.0,
+                y: 0.0,
+                z_lift: 0.0,
+            },
         })
         .collect();
     packed.add_models(&base_sources)?;
@@ -128,16 +132,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     packed.set_placements(&[
         PlacementUpdate {
             model_index: sphere_i,
-            placement: Placement { x: -20.0, y: -15.0, z_lift: 0.0 },
+            placement: Placement {
+                x: -20.0,
+                y: -15.0,
+                z_lift: 0.0,
+            },
         },
         PlacementUpdate {
             model_index: cyl_i,
-            placement: Placement { x: 25.0, y: 10.0, z_lift: 0.0 },
+            placement: Placement {
+                x: 25.0,
+                y: 10.0,
+                z_lift: 0.0,
+            },
         },
     ])?;
     // 30deg Z rotation applied to the cylinder (a sphere's Z-rotation is
     // geometrically invisible; the cylinder makes the rotation legible).
-    packed.rotate_models_z(&[ZRotation { model_index: cyl_i, delta_deg: 30.0 }])?;
+    packed.rotate_models_z(&[ZRotation {
+        model_index: cyl_i,
+        delta_deg: 30.0,
+    }])?;
     let out_b = base.join("packed-demo.chitubox");
     packed.save(&out_b)?;
     reverify("b", &out_b);
@@ -160,7 +175,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let cur = supp.model(sphere_c)?.placement;
     supp.set_placement(
         sphere_c,
-        Placement { x: cur.x + 15.0, y: cur.y, z_lift: cur.z_lift },
+        Placement {
+            x: cur.x + 15.0,
+            y: cur.y,
+            z_lift: cur.z_lift,
+        },
     )?;
     let out_c = base.join("supports-move-demo.chitubox");
     supp.save(&out_c)?;

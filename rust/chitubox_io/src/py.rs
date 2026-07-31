@@ -177,9 +177,9 @@ fn decode_supports(d: &Bound<'_, PyDict>) -> PyResult<Vec<SupportRecord>> {
     };
 
     let seg_any = get("seg_type")?;
-    let seg_arr: PyReadonlyArray1<u32> = seg_any.extract().map_err(|_| {
-        bad_input("supports['seg_type'] must be a 1-D uint32 array")
-    })?;
+    let seg_arr: PyReadonlyArray1<u32> = seg_any
+        .extract()
+        .map_err(|_| bad_input("supports['seg_type'] must be a 1-D uint32 array"))?;
     let seg = vec1(&seg_arr, "seg_type")?;
     let n = seg.len();
 
@@ -232,9 +232,9 @@ fn decode_supports(d: &Bound<'_, PyDict>) -> PyResult<Vec<SupportRecord>> {
     let mut off: usize = 0;
     for i in 0..n {
         let len = mesh_len[i] as usize;
-        let end_off = off.checked_add(len).ok_or_else(|| {
-            bad_input("supports['mesh_len'] prefix sum overflows usize")
-        })?;
+        let end_off = off
+            .checked_add(len)
+            .ok_or_else(|| bad_input("supports['mesh_len'] prefix sum overflows usize"))?;
         if end_off > mesh.len() {
             return Err(bad_input(format!(
                 "supports['mesh_flat'] is too short: record {i} needs floats \
@@ -276,7 +276,9 @@ fn decode_model(item: &Bound<'_, PyAny>) -> PyResult<DecodedModel> {
     let tris = d.get_item("triangles")?;
     let geometry = match (stl.as_ref(), tris.as_ref()) {
         (Some(p), None) => {
-            let s: String = p.extract().map_err(|_| bad_input("'stl_path' must be a str"))?;
+            let s: String = p
+                .extract()
+                .map_err(|_| bad_input("'stl_path' must be a str"))?;
             ModelGeometry::StlPath(PathBuf::from(s))
         }
         (None, Some(t)) => {
@@ -339,7 +341,10 @@ struct WriteOutcome {
 
 /// Build a project from EMPTY, add every model, attach every support batch,
 /// save, then re-open the saved file and measure what came back.
-fn build_and_save(out_path: &str, decoded: Vec<DecodedModel>) -> Result<WriteOutcome, ChituboxError> {
+fn build_and_save(
+    out_path: &str,
+    decoded: Vec<DecodedModel>,
+) -> Result<WriteOutcome, ChituboxError> {
     let mut proj = Project::new_empty();
     let sources: Vec<ModelSource> = decoded.iter().map(|m| m.source.clone()).collect();
     let indices = proj.add_models(&sources)?;

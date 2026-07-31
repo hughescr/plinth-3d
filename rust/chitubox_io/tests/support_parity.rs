@@ -3,9 +3,7 @@
 //! asymmetric multi-model case.
 
 mod common;
-use chitubox_io::{
-    Project, SegmentType, SupportBatch, SupportMode, SupportRecord, TriangleSoup,
-};
+use chitubox_io::{Project, SegmentType, SupportBatch, SupportMode, SupportRecord, TriangleSoup};
 use common::*;
 use std::collections::BTreeMap;
 
@@ -97,11 +95,25 @@ fn asymmetric_multi_model_supports() {
     let Some(mut proj) = open("sphere-cylinder.chitubox") else {
         return;
     };
-    let recs0: Vec<_> = (0..3).map(|i| tiny_record(SegmentType::SHAFT, i as f32)).collect();
-    let recs1: Vec<_> = (0..17).map(|i| tiny_record(SegmentType::TIP, i as f32)).collect();
+    let recs0: Vec<_> = (0..3)
+        .map(|i| tiny_record(SegmentType::SHAFT, i as f32))
+        .collect();
+    let recs1: Vec<_> = (0..17)
+        .map(|i| tiny_record(SegmentType::TIP, i as f32))
+        .collect();
     proj.attach_supports(&[
-        SupportBatch { model_index: 0, records: recs0.clone(), mode: SupportMode::Replace, lift_mm: Some(3.0) },
-        SupportBatch { model_index: 1, records: recs1.clone(), mode: SupportMode::Replace, lift_mm: Some(3.0) },
+        SupportBatch {
+            model_index: 0,
+            records: recs0.clone(),
+            mode: SupportMode::Replace,
+            lift_mm: Some(3.0),
+        },
+        SupportBatch {
+            model_index: 1,
+            records: recs1.clone(),
+            mode: SupportMode::Replace,
+            lift_mm: Some(3.0),
+        },
     ])
     .unwrap();
     let bytes = proj.to_bytes().expect("asymmetric verifies");
@@ -121,7 +133,9 @@ fn append_mode_extends_existing_section() {
         return;
     };
     let before = proj.support_counts()[0];
-    let extra: Vec<_> = (0..3).map(|i| tiny_record(SegmentType::JOINER, 10.0 + i as f32)).collect();
+    let extra: Vec<_> = (0..3)
+        .map(|i| tiny_record(SegmentType::JOINER, 10.0 + i as f32))
+        .collect();
     proj.attach_supports(&[SupportBatch {
         model_index: 0,
         records: extra.clone(),

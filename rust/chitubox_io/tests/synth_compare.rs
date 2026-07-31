@@ -30,13 +30,21 @@ fn build_from_scratch_matches_reference_geometry() {
             ModelSource {
                 name: "Sphere.stl".into(),
                 geometry: ModelGeometry::StlPath(sphere),
-                placement: Placement { x: 0.0, y: 0.0, z_lift: 0.0 },
+                placement: Placement {
+                    x: 0.0,
+                    y: 0.0,
+                    z_lift: 0.0,
+                },
             },
             ModelSource {
                 name: "Cylinder.stl".into(),
                 geometry: ModelGeometry::StlPath(cylinder),
                 // reference cylinder placement
-                placement: Placement { x: 43.7035, y: 7.1448, z_lift: 0.0 },
+                placement: Placement {
+                    x: 43.7035,
+                    y: 7.1448,
+                    z_lift: 0.0,
+                },
             },
         ])
         .unwrap();
@@ -57,7 +65,10 @@ fn build_from_scratch_matches_reference_geometry() {
         let mine = proj.model_triangles(m).unwrap();
         let theirs = refproj.model_triangles(m).unwrap();
         let diff = sorted_set_max_diff(&mine, &theirs);
-        assert_eq!(diff, 0.0, "model {m} mesh sorted-set diff {diff} (must be bit-exact)");
+        assert_eq!(
+            diff, 0.0,
+            "model {m} mesh sorted-set diff {diff} (must be bit-exact)"
+        );
     }
 
     // the synthesized file passes structural verify + re-parses to itself

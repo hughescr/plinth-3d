@@ -46,7 +46,11 @@ impl Mesh {
             ));
         }
         if areas.len() != nfaces {
-            return Err(format!("areas length {} != nfaces ({})", areas.len(), nfaces));
+            return Err(format!(
+                "areas length {} != nfaces ({})",
+                areas.len(),
+                nfaces
+            ));
         }
         if bounds.len() != 6 {
             return Err(format!("bounds length {} != 6", bounds.len()));

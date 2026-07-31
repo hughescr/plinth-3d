@@ -21,10 +21,15 @@ pub struct TestMesh {
 struct Lcg(u64);
 impl Lcg {
     fn new(seed: u64) -> Self {
-        Lcg(seed.wrapping_mul(2862933555777941757).wrapping_add(3037000493))
+        Lcg(seed
+            .wrapping_mul(2862933555777941757)
+            .wrapping_add(3037000493))
     }
     fn next(&mut self) -> f64 {
-        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((self.0 >> 11) as f64) / ((1u64 << 53) as f64)
     }
 }
@@ -102,9 +107,7 @@ pub fn make_slivers(n: usize) -> TestMesh {
         let y = rng.next() * 10.0;
         let z = rng.next() * 10.0;
         // near-degenerate: 1e-9-scale extent
-        tris.extend_from_slice(&[
-            x, y, z, x + 1e-9, y, z, x, y + 1e-9, z,
-        ]);
+        tris.extend_from_slice(&[x, y, z, x + 1e-9, y, z, x, y + 1e-9, z]);
     }
     finalize(tris)
 }
@@ -192,7 +195,11 @@ pub fn surf_nearest(s: &NativeSurface, p: V3) -> (f64, usize, V3) {
 }
 
 pub fn surf_collect_hits(s: &NativeSurface, o: V3, d: V3, t_max: f64) -> Vec<u32> {
-    let mut v: Vec<u32> = s.collect_hits(o, d, t_max).into_iter().map(|h| h.1).collect();
+    let mut v: Vec<u32> = s
+        .collect_hits(o, d, t_max)
+        .into_iter()
+        .map(|h| h.1)
+        .collect();
     v.sort_unstable();
     v
 }

@@ -290,8 +290,14 @@ impl NativeSurface {
                     let cnt = node.b as usize;
                     for &tid in &self.bvh.order[start..start + cnt] {
                         let t = tid as usize;
-                        let (hit, tv) =
-                            moller(o, d, self.mesh.v0[t], self.mesh.e1[t], self.mesh.e2[t], t_max);
+                        let (hit, tv) = moller(
+                            o,
+                            d,
+                            self.mesh.v0[t],
+                            self.mesh.e1[t],
+                            self.mesh.e2[t],
+                            t_max,
+                        );
                         if hit {
                             out.push((tv, tid));
                         }
@@ -437,8 +443,10 @@ impl NativeSurface {
                 } else {
                     let l = node.a as usize;
                     let r = node.b as usize;
-                    let dl = box_box_dist(smin, smax, self.bvh.nodes[l].bmin, self.bvh.nodes[l].bmax);
-                    let dr = box_box_dist(smin, smax, self.bvh.nodes[r].bmin, self.bvh.nodes[r].bmax);
+                    let dl =
+                        box_box_dist(smin, smax, self.bvh.nodes[l].bmin, self.bvh.nodes[l].bmax);
+                    let dr =
+                        box_box_dist(smin, smax, self.bvh.nodes[r].bmin, self.bvh.nodes[r].bmax);
                     if dl <= dr {
                         stack.push(r as i32);
                         stack.push(l as i32);
@@ -746,7 +754,12 @@ impl NativeSurface {
                     let cnt = node.b as usize;
                     for &tid in &self.bvh.order[start..start + cnt] {
                         let t = tid as usize;
-                        let cp = closest_on_tri(c, self.mesh.v0[t], self.mesh.vertex_b(t), self.mesh.vertex_c(t));
+                        let cp = closest_on_tri(
+                            c,
+                            self.mesh.v0[t],
+                            self.mesh.vertex_b(t),
+                            self.mesh.vertex_c(t),
+                        );
                         let d = norm(sub(c, cp));
                         if d <= thr {
                             out.push(t);

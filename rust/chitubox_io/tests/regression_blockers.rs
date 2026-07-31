@@ -70,11 +70,16 @@ fn probe1_double_rotation_after_attach_supports() {
     p.rotate_model_z(0, 90.0).unwrap();
     // vertex (1,0,0) rotated 180 deg total should be (-1,0,0)
     let m = p.model_triangles(0).unwrap();
-    println!("PROBE1 first vertex after 90+attach+90: ({}, {}, {})", m[0], m[1], m[2]);
+    println!(
+        "PROBE1 first vertex after 90+attach+90: ({}, {}, {})",
+        m[0], m[1], m[2]
+    );
     assert!(
         (m[0] - (-1.0)).abs() < 1e-4 && m[1].abs() < 1e-4,
         "expected (-1,0,0); got ({}, {}, {}) => rotation state corrupted by attach_supports",
-        m[0], m[1], m[2]
+        m[0],
+        m[1],
+        m[2]
     );
 }
 
@@ -140,7 +145,11 @@ fn probe3_dead_smesh_tail_bytes_silently_dropped() {
     assert_eq!(clean.len(), total_in, "clean save lost bytes");
     // now rotate: dead bytes are unknown data; invariant (c) says preserve
     let mut p3 = p2.clone();
-    p3.rotate_models_z(&[ZRotation { model_index: 0, delta_deg: 90.0 }]).unwrap();
+    p3.rotate_models_z(&[ZRotation {
+        model_index: 0,
+        delta_deg: 90.0,
+    }])
+    .unwrap();
     match p3.to_bytes() {
         Ok(out) => {
             println!(
@@ -148,7 +157,11 @@ fn probe3_dead_smesh_tail_bytes_silently_dropped() {
                 total_in,
                 out.len()
             );
-            assert_eq!(out.len(), total_in, "PROBE3: unknown dead smesh bytes silently destroyed, verify passed");
+            assert_eq!(
+                out.len(),
+                total_in,
+                "PROBE3: unknown dead smesh bytes silently destroyed, verify passed"
+            );
         }
         Err(e) => println!("PROBE3: save refused (acceptable): {e}"),
     }
@@ -160,9 +173,13 @@ fn probe4_nan_stl_bypasses_finite_check() {
     let mut stl = vec![0u8; 80];
     stl.extend_from_slice(&1u32.to_le_bytes());
     let mut tri = Vec::new();
-    for _ in 0..3 { tri.extend_from_slice(&0.0f32.to_le_bytes()); } // normal
+    for _ in 0..3 {
+        tri.extend_from_slice(&0.0f32.to_le_bytes());
+    } // normal
     let verts: [f32; 9] = [f32::NAN, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0];
-    for v in verts { tri.extend_from_slice(&v.to_le_bytes()); }
+    for v in verts {
+        tri.extend_from_slice(&v.to_le_bytes());
+    }
     tri.extend_from_slice(&[0u8, 0u8]);
     stl.extend_from_slice(&tri);
     let dir = std::env::temp_dir();
@@ -207,7 +224,10 @@ fn probe6_empty_group_header_parses_and_saves_byte_identical() {
     let idx_end = sptr + 16; // SUPPORT_INDEX_LEN
     let rec_off = u32::from_le_bytes(bytes[sptr + 4..sptr + 8].try_into().unwrap()) as usize;
     let header_len = rec_off - idx_end;
-    assert!(header_len > 0, "expected a non-empty group header to excise");
+    assert!(
+        header_len > 0,
+        "expected a non-empty group header to excise"
+    );
 
     // Excise the group header and repoint rec_off at idx_end -> empty header.
     // Records are the tail region; nothing after them is referenced by offset,
@@ -304,9 +324,15 @@ fn blocker2b_rotation_overflow_rejected_no_partial_mutation() {
     .expect("centered symmetric large mesh is finite");
     let before = p.model_triangles(0).unwrap();
     let r = p.rotate_model_z(0, 45.0);
-    assert!(r.is_err(), "BLOCKER2b: rotation overflow baked non-finite geometry");
+    assert!(
+        r.is_err(),
+        "BLOCKER2b: rotation overflow baked non-finite geometry"
+    );
     let after = p.model_triangles(0).unwrap();
-    assert_eq!(before, after, "BLOCKER2b: failed rotate left partial mutation");
+    assert_eq!(
+        before, after,
+        "BLOCKER2b: failed rotate left partial mutation"
+    );
 }
 
 /// MAJOR 1 — a zero-triangle support-record mesh must be rejected on attach
@@ -407,8 +433,8 @@ fn major2_stale_opaque_id_errors_not_retargets() {
 #[test]
 fn rotation_consistency_all_primitives_agree() {
     let mut p = one_model_project(); // model mesh first vertex = (1,0,0)
-    // Endpoints and blob first vertex are OFF the rotation axis so a 90 deg turn
-    // is observable on every primitive.
+                                     // Endpoints and blob first vertex are OFF the rotation axis so a 90 deg turn
+                                     // is observable on every primitive.
     let rec = SupportRecord::new(
         SegmentType::SHAFT,
         [1.0, 0.0, 0.0],

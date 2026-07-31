@@ -71,7 +71,15 @@ impl Bvh {
 
         // Recursive build over order[lo..hi]; returns node index.
         build_range(
-            mesh, &tri_pad, &mut order, 0, n, 0, &mut nodes, &mut max_depth, depth_cap,
+            mesh,
+            &tri_pad,
+            &mut order,
+            0,
+            n,
+            0,
+            &mut nodes,
+            &mut max_depth,
+            depth_cap,
         )?;
 
         Ok(Bvh {
@@ -231,8 +239,8 @@ fn build_range(
             if lc == 0 || rc == 0 {
                 continue;
             }
-            let cost =
-                surface_area(l_min[p], l_max[p]) * lc as f64 + surface_area(r_min[p + 1], r_max[p + 1]) * rc as f64;
+            let cost = surface_area(l_min[p], l_max[p]) * lc as f64
+                + surface_area(r_min[p + 1], r_max[p + 1]) * rc as f64;
             if cost < best_cost {
                 best_cost = cost;
                 best_plane = p as isize;
@@ -273,10 +281,26 @@ fn build_range(
     }
 
     let left = build_range(
-        mesh, tri_pad, order, lo, split_pos, depth + 1, nodes, max_depth, depth_cap,
+        mesh,
+        tri_pad,
+        order,
+        lo,
+        split_pos,
+        depth + 1,
+        nodes,
+        max_depth,
+        depth_cap,
     )?;
     let right = build_range(
-        mesh, tri_pad, order, split_pos, hi, depth + 1, nodes, max_depth, depth_cap,
+        mesh,
+        tri_pad,
+        order,
+        split_pos,
+        hi,
+        depth + 1,
+        nodes,
+        max_depth,
+        depth_cap,
     )?;
     nodes[node_idx].a = left as i32;
     nodes[node_idx].b = right as i32;

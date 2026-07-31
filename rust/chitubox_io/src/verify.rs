@@ -42,21 +42,40 @@ fn audit(b: &[u8]) -> std::result::Result<(), String> {
     let off8 = rd(H_OFF8)? as usize;
     let off20 = rd(H_OFF20)? as usize;
     let table_end = off8
-        .checked_add(MODEL_RECORD_LEN.checked_mul(count).ok_or("table overflow")?)
+        .checked_add(
+            MODEL_RECORD_LEN
+                .checked_mul(count)
+                .ok_or("table overflow")?,
+        )
         .ok_or("table_end overflow")?;
     if count > 0 && off20 != table_end {
         return Err(format!("off20 {off20} != table_end {table_end}"));
     }
 
     let mut ivs: Vec<Interval> = vec![
-        Interval { start: 0, end: HEADER_LEN, what: "header" },
-        Interval { start: HEADER_LEN, end: EMPTY_BASELINE_LEN, what: "settings" },
-        Interval { start: EMPTY_BASELINE_LEN, end: off8, what: "preview" },
-        Interval { start: off8, end: table_end, what: "table" },
+        Interval {
+            start: 0,
+            end: HEADER_LEN,
+            what: "header",
+        },
+        Interval {
+            start: HEADER_LEN,
+            end: EMPTY_BASELINE_LEN,
+            what: "settings",
+        },
+        Interval {
+            start: EMPTY_BASELINE_LEN,
+            end: off8,
+            what: "preview",
+        },
+        Interval {
+            start: off8,
+            end: table_end,
+            what: "table",
+        },
     ];
 
-    let in_header_or_table =
-        |x: usize| x < HEADER_LEN || (count > 0 && x >= off8 && x < table_end);
+    let in_header_or_table = |x: usize| x < HEADER_LEN || (count > 0 && x >= off8 && x < table_end);
 
     for m in 0..count {
         let ro = off8 + m * MODEL_RECORD_LEN;
@@ -73,7 +92,11 @@ fn audit(b: &[u8]) -> std::result::Result<(), String> {
         if in_header_or_table(mesh_off) {
             return Err(format!("model {m} mesh_off {mesh_off} into header/table"));
         }
-        ivs.push(Interval { start: mesh_off, end: mesh_end, what: "mesh" });
+        ivs.push(Interval {
+            start: mesh_off,
+            end: mesh_end,
+            what: "mesh",
+        });
 
         if sptr != 0 {
             if in_header_or_table(sptr) {
@@ -83,10 +106,14 @@ fn audit(b: &[u8]) -> std::result::Result<(), String> {
             let rec_off = rd(sptr + 4)? as usize;
             let smesh_off = rd(sptr + 8)? as usize;
             let smesh_sz = rd(sptr + 12)? as usize;
-            let smesh_end = smesh_off.checked_add(smesh_sz).ok_or("smesh end overflow")?;
+            let smesh_end = smesh_off
+                .checked_add(smesh_sz)
+                .ok_or("smesh end overflow")?;
             // ordering: mesh < smesh < index < group < records
             if smesh_off != mesh_end {
-                return Err(format!("model {m} smesh_off {smesh_off} != mesh_end {mesh_end}"));
+                return Err(format!(
+                    "model {m} smesh_off {smesh_off} != mesh_end {mesh_end}"
+                ));
             }
             if smesh_end != sptr {
                 return Err(format!("model {m} smesh_end {smesh_end} != index {sptr}"));
@@ -105,10 +132,26 @@ fn audit(b: &[u8]) -> std::result::Result<(), String> {
             if recs_end > n {
                 return Err(format!("model {m} records end {recs_end} > EOF {n}"));
             }
-            ivs.push(Interval { start: smesh_off, end: smesh_end, what: "smesh" });
-            ivs.push(Interval { start: sptr, end: sptr + SUPPORT_INDEX_LEN, what: "index" });
-            ivs.push(Interval { start: sptr + SUPPORT_INDEX_LEN, end: rec_off, what: "group_header" });
-            ivs.push(Interval { start: rec_off, end: recs_end, what: "records" });
+            ivs.push(Interval {
+                start: smesh_off,
+                end: smesh_end,
+                what: "smesh",
+            });
+            ivs.push(Interval {
+                start: sptr,
+                end: sptr + SUPPORT_INDEX_LEN,
+                what: "index",
+            });
+            ivs.push(Interval {
+                start: sptr + SUPPORT_INDEX_LEN,
+                end: rec_off,
+                what: "group_header",
+            });
+            ivs.push(Interval {
+                start: rec_off,
+                end: recs_end,
+                what: "records",
+            });
             for k in 0..n_rec {
                 let o = rec_off + k * SEG_RECORD_LEN;
                 if rd(o)? != SEG_MAGIC {
@@ -131,7 +174,10 @@ fn audit(b: &[u8]) -> std::result::Result<(), String> {
     ivs.sort_by_key(|iv| iv.start);
     for iv in &ivs {
         if iv.start > iv.end || iv.end > n {
-            return Err(format!("bad interval {} [{}..{}]", iv.what, iv.start, iv.end));
+            return Err(format!(
+                "bad interval {} [{}..{}]",
+                iv.what, iv.start, iv.end
+            ));
         }
     }
     for w in ivs.windows(2) {
