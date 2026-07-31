@@ -86,7 +86,7 @@ and `geometry_sweep.py` (repair loop + scale/center bake).
 
 Real-world result: a 13-model minis folder went 13.3M → 1.37M triangles
 (9.7×), every model verified watertight with p99 surface deviation under
-half a [Saturn 4 Ultra 16K printer pixel](docs/datasheets/printers/saturn-4-ultra-16k.md).
+half the [coarser Saturn 4 Ultra 16K pixel pitch](docs/datasheets/printers/saturn-4-ultra-16k.md).
 
 Requires Blender 4.2+ with the Blender MCP add-on; numpy (bundled with
 Blender). Printer defaults assume the

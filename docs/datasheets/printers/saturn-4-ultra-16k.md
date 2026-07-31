@@ -25,12 +25,10 @@ this record was committed. P is the source for the fields R does not publish.
 
 | Field | Value | Status / interpretation | Source |
 |---|---:|---|---|
-| Build volume | **211.68 mm (X) × 118.37 mm (Y) × 220 mm (Z)** | Vendor order retained as X × Y × Z; see pixel-pitch arithmetic below, which fixes 211.68 mm to the 15,120-pixel / 14 μm axis and 118.37 mm to the 6,230-pixel / 19 μm axis. | P, R |
+| Build volume (vendor order) | **211.68 × 118.37 × 220 mm** | Vendor-published ordered triplet. Neither source labels its components X, Y, and Z. | P, R |
 | LCD | 10-inch 16K monochrome LCD | Vendor description. | P, R |
-| LCD pixel resolution | **15,120 (X) × 6,230 (Y) pixels** | Vendor resolution; X/Y axis assignment is corroborated by the exact pitch derivation below. | P |
-| XY pixel pitch | **14 μm (X) × 19 μm (Y)** | Vendor-published XY resolution, independently consistent with the calculation below. The pitches are anisotropic. | P, R |
-| X pitch derivation | 211.68 mm / 15,120 px = 0.014 mm/px = **14 μm/px** | Derived from P’s matching build-volume and pixel-resolution values; not a separate vendor measurement. | P |
-| Y pitch derivation | 118.37 mm / 6,230 px = 0.019 mm/px = **19 μm/px** | Derived from P’s matching build-volume and pixel-resolution values; not a separate vendor measurement. | P |
+| LCD pixel resolution (vendor order) | **15,120 × 6,230 pixels** | Vendor-published ordered pair; neither source assigns a component to X or Y. | P |
+| XY pixel pitch (vendor order) | **14 × 19 μm** | Vendor-published ordered pair. The pitches are anisotropic, but the vendor sources do not assign either component to a named axis. | P, R |
 | Z-axis accuracy | 0.02 mm | Vendor-described Z-axis accuracy; it is not a layer-height default. | P, R |
 | Vendor layer-thickness capability | **0.01–0.20 mm** | Vendor range. | P |
 | Project default layer height | **0.050 mm** | Project printer-profile setting, **not** a claimed Elegoo default and not a substitute for resin/process calibration. See the existing [printer-profile record](../../rust-migration/03-physics-and-constants.md). | Local project record |
@@ -45,6 +43,20 @@ this record was committed. P is the source for the fields R does not publish.
 | Lift distance | **Not specified** | No numeric lift distance in the official sources above. | P, R |
 | Retract distance | **Not specified** | No numeric retract distance in the official sources above. | P, R |
 | Peel / separation force or pressure | **Not specified** | No vendor force, pressure, displacement, resin, film-condition, or test-method evidence was found in these sources. | P, R |
+
+## Derived project axis mapping (not a vendor axis label)
+
+For project use, map the first vendor build-volume, pixel-resolution, and
+pixel-pitch components to **X**, the second components to **Y**, and the third
+build-volume component to **Z**. This is a project mapping, not a statement that
+Elegoo labels those axes. The exact first-to-first and second-to-second arithmetic
+demonstrates why the X/Y components must not be swapped:
+
+| Project axis | Corresponding vendor-order components | Derivation |
+|---|---|---|
+| X | first: 211.68 mm; 15,120 px; 14 μm | 211.68 mm / 15,120 px = 0.014 mm/px = **14 μm/px** |
+| Y | second: 118.37 mm; 6,230 px; 19 μm | 118.37 mm / 6,230 px = 0.019 mm/px = **19 μm/px** |
+| Z | third: 220 mm | Project designation for the third vendor build-volume component; no vendor X/Y/Z label was found. |
 
 ## Use boundary
 
