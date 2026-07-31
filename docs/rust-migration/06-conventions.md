@@ -178,6 +178,12 @@ boundary only for an existing layer (`i < count`), so it returns `None` for an e
 plan or `i == count`; `+0.0` and `-0.0` comparisons are numeric-coherent and never
 panic.
 
+`plinth-core::chord` uses a positive integer `MicronGranularity` and preserves the
+Python oracle's executable operation order and IEEE ties-to-even rounding. Its
+whole-population parity report canonicalizes every supplied member before comparing
+ordered multisets; `matches()` is diagnostic only. It cannot become a second
+acceptance authority: `DefectReport` remains the sole acceptance decision.
+
 ### CLI contract
 
 One `DefectReport` JSON per model on stdout. The **exit code is a projection of the

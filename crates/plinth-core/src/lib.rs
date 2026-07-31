@@ -4,6 +4,7 @@
 //! mechanisms only. Geometry, scoring algorithms, and acceptance policy live
 //! in their owning crates; [`DefectReport`] is the one acceptance authority.
 
+mod chord;
 mod cost;
 mod defect;
 mod digest;
@@ -17,6 +18,10 @@ mod provenance;
 mod stage;
 mod violation;
 
+pub use chord::{
+    canon_chord_micron, chord_parity_report, chords_match_micron, ChordError, ChordMismatch,
+    ChordParityError, ChordParityReport, ChordSource, MicronGranularity, MicronGranularityError,
+};
 pub use cost::{
     CostError, CostVector, Fidelity, OptimizationError, OptimizationSummary, OrientationCost,
     ParetoPoint, PartialCost, Resin, Risk, Scar, SearchEvidence,

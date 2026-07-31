@@ -69,7 +69,8 @@ plinth-3d/
                         #   ViolationKind, passive exhaustive FixerId, validated tagged LoadSharing,
                         #   Termination, LayerPlan, passive cost/report/metric DTOs,
                         #   Stage trait + typestate marks, digests, chord canonicalization,
-                        #   deterministic reduction helpers
+                        #   deterministic reduction helpers. Chord parity is diagnostic only:
+                        #   `DefectReport` remains the sole acceptance authority.
     plinth-mesh/        # f64 Mesh, STL IO with explicit WeldPolicy, face topology + cut flags,
                         #   canonical fingerprint, curvature/thinness/delicacy FaceTable,
                         #   exact z-slicing to 2D loops with winding, ProxyLadder container, triage
