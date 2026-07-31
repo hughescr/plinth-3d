@@ -289,8 +289,8 @@ see the audit table in §M9.)
 | Module | Contents |
 | --- | --- |
 | `defect.rs` | `DefectReport`, `Defect`, `Severity`, `SiteId`, `Termination`. **`DefectReport` is the sole acceptance authority** — commitment 1. Nothing else may say "ok". |
-| `violation.rs` | The passive exhaustive `ViolationKind` vocabulary only. `Response`, `FixerId`, and `response_for` are M7 `plinth-support::repair` behaviour, when concrete fixers exist. Commitment 3 is enforced there. |
-| `provenance.rs` | `Measured<T> { plate: PlateId, value: T, err: Option<T> }`, `Derived<T>`, `Placeholder<T>`, `Pending<T>`, and the `AcceptSafe` marker trait. Categorical measurements serialize `err: None` explicitly as `"err": null`; no numeric pseudo-error or omitted field. Commitment 2. |
+| `violation.rs` | The passive exhaustive `ViolationKind` vocabulary. Separately, core's passive ID vocabulary includes exhaustive `FixerId`, because `Termination` serializes it; `plinth-support::repair` later re-exports it. Only `Response`, `response_for`, and concrete fixer execution remain M7 `plinth-support::repair` behaviour. Commitment 3 is enforced there. |
+| `provenance.rs` | `Measured<T> { plate: PlateId, value: T, err: Option<T>, date: String, note: String }`, `Derived<T>`, `Placeholder<T>`, `Pending<T>`, and the `AcceptSafe` marker trait. A measurement date is required and carried into `ProvenanceRef`. The `err` wire field is required (a missing field is rejected); numeric measurements use `Some` or `None` as applicable, while categorical measurements serialize `None` explicitly as `"err": null`, never a numeric pseudo-error or omitted field. Commitment 2. |
 | `constants.rs` | The typed constants registry. Every physical constant in the system, each carrying its provenance. |
 | `layer.rs` | `LayerPlan` — layer height is a **per-layer array from day one**, commitment 5. Ships `constant(0.050)` until calibrated. |
 | `frame.rs` | Frame typestate marks (`Source`, `Centered`, `Plated`) so a mis-framed point set will not compile. |

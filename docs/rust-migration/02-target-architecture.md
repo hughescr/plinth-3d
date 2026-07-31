@@ -160,6 +160,10 @@ allocator-arithmetic counters are **not** reproduced. Byte-parity with Python di
 explicitly abandoned (§14 O-2) — it does not touch the one place byte-identity is a real
 contract, the `.chitubox` record structure.
 
+That canonicalization is specific to the **future mesh-fingerprint boundary**. Generic numeric
+content digests reject non-finite inputs and hash finite `f64` raw bits, preserving the distinction
+between `-0.0` and `+0.0`; they must not silently inherit the mesh policy.
+
 ### 3.2 Frames are types, stages are typestate — the bypass-emit defect dies here
 
 ```rust
@@ -306,13 +310,22 @@ string errors or erased trait objects.
 the ordered `DecisionId → ConstantId → ProvenanceRef` path. At the later constants-registry
 checkpoint, decision-scoped recorder access must make an accept-path read impossible unless its
 provenance is recorded; the finalized report must contain this complete ordered map.
+`ProvenanceManifest::new` is fallible: repeated decision batches merge, and repeating an identical
+decision/constant/provenance record is idempotent. `record` is likewise idempotent for an identical
+record, but a different provenance value for an existing pair fails with
+`ProvenanceError::ConflictingRecord`; neither API overwrites it. JSON is deliberately stricter:
+custom deserialization always rejects duplicate outer `DecisionId` keys with
+`ProvenanceError::DuplicateDecisionKey` and duplicate inner `ConstantId` keys with
+`ProvenanceError::DuplicateConstantKey`, even if their values are identical, rather than accepting
+serde's usual last-write-wins result.
 
 `DefectReport::new` validates termination against the defects before the report exists. A
 `CapExhausted` termination must name a non-`RepairCapExhausted` original kind and have a matching
 blocking `RepairCapExhausted` defect at the same site. A `PoolExhausted` termination must have a
 blocking defect with its same kind and site. `Converged`, `CapExhausted`, and `PoolExhausted` are
 the complete termination set; `accepted()` remains **only** the no-blocking-defects predicate
-shown above.
+shown above. In particular, `Converged` with a blocking defect is rejected solely by that blocker
+scan; termination neither adds another acceptance predicate nor overrides the scan.
 
 `DefectReport` is the **sole acceptance authority**. No `assert!`, no exception, no bare exit code,
 no stringly log key participates in acceptance. The CLI exit code is a *projection* of the report.
@@ -393,13 +406,22 @@ not implement.
 
 ```rust
 // plinth-core::consts
-pub struct Measured<T>    { v: T, plate: PlateId, err: Option<T>, date: String, note: String }
+pub struct Measured<T>    { value: T, plate: PlateId, err: Option<T>, date: String, note: String }
 pub struct Derived<T>     { v: T, from: Vec<String>, note: String }
 pub struct Placeholder<T> { v: T, note: String }
 pub struct Pending<T>     { conservative: T, optimistic: T, resolves_on: PlateId, question: String }
 
+pub trait MeasuredPayload: sealed::Sealed { /* core-owned payload validation */ }
+impl<T: MeasuredPayload> Measured<T> {
+    pub fn new(value: T, plate: PlateId, err: Option<T>, date: impl Into<String>,
+               note: impl Into<String>) -> Result<Self, ProvenanceError>;
+}
+impl<'de, T: serde::Deserialize<'de> + MeasuredPayload> serde::Deserialize<'de> for Measured<T> {
+    /* custom map visitor: `err` is required; JSON null becomes None */
+}
+
 pub trait AcceptSafe<T: Copy> { fn get(&self) -> T; fn provenance(&self) -> ProvenanceRef; }
-impl<T: Copy> AcceptSafe<T> for Measured<T> { /* ... */ }
+impl<T: Copy + MeasuredPayload> AcceptSafe<T> for Measured<T> { /* ... */ }
 impl<T: Copy> AcceptSafe<T> for Derived<T>  { /* ... */ }
 // Placeholder<T> does NOT implement AcceptSafe. Every accept-path signature takes
 // `&impl AcceptSafe<f64>`. Passing a Placeholder is a COMPILE ERROR, not a lint.
@@ -418,6 +440,12 @@ impl<T: Copy> Pending<T> {
 `Measured::date` is a required `String` carried into the corresponding `ProvenanceRef`; it is never
 optional or silently dropped. `err: None` remains visible on the wire as `"err": null` for
 categorical values.
+
+Measurement payloads are a core-sealed approved set: at minimum `f64`, `Finite`, and
+`LoadSharing`; an interval joins the set only if and when core has a current interval type. Numeric
+payloads (`f64` and `Finite`) may use either `Some(error)` or `None`; they are not forced to invent
+an error bar. Categorical `LoadSharing` requires `None`. For every approved payload the `err` key
+is required on the wire: a missing key is rejected, while explicit `"err": null` means `None`.
 
 Enforcement is **proven, not asserted**:
 
@@ -493,6 +521,9 @@ pub static LOAD_SHARING: Measured<LoadSharing> = /* Additive { n_eff_cap: 6.0 } 
     the enum as the strictly-conservative fallback and the A/B arm. All five caveats in
     `03-physics-and-constants.md` §4.2 belong verbatim in `note`. */;
 ```
+
+`LoadSharing`'s custom tagged-wire deserializer denies unknown fields for every variant; variant
+typos or surplus legacy fields are errors, never ignored input.
 
 The passive tagged `LoadSharing` type belongs to this core checkpoint; the `LOAD_SHARING`
 declaration shown above is normative for the later M0 constants work, not a current declaration in
@@ -646,9 +677,10 @@ for each model in DIR (rayon across models at the outer level):
 ```
 
 **Caching** (`plinth-pipeline`): a content-addressed store keyed by
-`H(stage_id ‖ input_digest ‖ config_digest ‖ code_digest)`, digests taken over canonicalized f64 bit
-patterns. A cache hit is by construction identical to a miss; CI runs the corpus cache-disabled and
-requires identical reports.
+`H(stage_id ‖ input_digest ‖ config_digest ‖ code_digest)`. Generic numeric digests reject
+non-finite inputs and hash finite raw `f64` bit patterns, including the sign of zero; only the
+future mesh-fingerprint boundary applies the §3.1 `-0.0 → 0.0` policy. A cache hit is by
+construction identical to a miss; CI runs the corpus cache-disabled and requires identical reports.
 
 **Rayon placement** — exactly one level active at a time, chosen by batch size: across models;
 across orientation candidates in the coarse sweep; or across faces/rays/members inside a kernel

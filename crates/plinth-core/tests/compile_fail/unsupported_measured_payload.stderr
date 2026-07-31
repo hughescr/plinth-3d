@@ -1,0 +1,19 @@
+error[E0277]: the trait bound `&str: MeasuredPayload` is not satisfied
+ --> tests/compile_fail/unsupported_measured_payload.rs:4:13
+  |
+4 |     let _ = Measured::new(
+  |             ^^^^^^^^^^^^^ the trait `MeasuredPayload` is not implemented for `&str`
+  |
+  = help: the following other types implement trait `MeasuredPayload`:
+            EffectiveArmCount
+            Finite
+            LoadSharing
+            MetricValue
+            f64
+note: required by a bound in `plinth_core::Measured::<T>::new`
+ --> src/provenance.rs
+  |
+  | impl<T: MeasuredPayload> Measured<T> {
+  |         ^^^^^^^^^^^^^^^ required by this bound in `Measured::<T>::new`
+  |     pub fn new(
+  |            --- required by a bound in this associated function

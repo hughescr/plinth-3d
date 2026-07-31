@@ -54,17 +54,19 @@ vertex adjacency, which flipped topology cut flags, which hard-failed coverage.
 
 Every `f64` reachable from a `DefectReport` is the transparent `Finite` wrapper: creation
 rejects `NaN` and both infinities, rather than allowing a late report serializer to
-discover them. Preserve signed zero everywhere; canonicalize `-0.0` only at the mesh
-fingerprint boundary. Measures used for reporting, including `MetricValue`,
+discover them. Preserve signed zero everywhere. Generic numeric content digests hash
+finite values by their raw IEEE bits, so `-0.0` remains distinct from `0.0`; only a
+future mesh fingerprint canonicalizes `-0.0`. Measures used for reporting, including `MetricValue`,
 `Defect.measure`, and termination before/after measures, are signed finite values —
 they are not silently clamped to a nonnegative type.
 
 Corollaries:
 
 - The boolean union kernel must be f64 (manifold-style). See 02-target-architecture.md.
-- Mesh fingerprints canonicalize `-0.0 → 0.0` before hashing and reject non-finite
-  coordinates as a `Defect`. Never weld or hash raw f64 bit patterns — that is the
-  documented Python hazard chain above.
+- A future mesh fingerprint canonicalizes `-0.0 → 0.0` before hashing and rejects
+  non-finite coordinates as a `Defect`. This mesh-specific rule does not apply to
+  generic numeric content digests, which preserve raw signed-zero bits. Never weld
+  vertices by raw f64 bit patterns — that is the documented Python hazard chain above.
 - The topology digest hashes topology arrays only. It carries a schema version and
   is explicitly not byte-compatible with the Python digest, which baked NumPy
   allocator arithmetic into a wire hash.
@@ -138,22 +140,29 @@ could implement the same slice-in/slice-out signature later.
   be `RepairCapExhausted`. `PoolExhausted` requires a matching **blocking** defect of
   the same named kind and site. No fourth "success with warning" path exists.
 - `LoadSharing` is a tagged physical model whose `Additive` cap is finite and at least
-  `1`. `FixerId` is likewise a passive core identifier. `plinth-core` owns both types
-  and their validation; `plinth-support::repair` later re-exports `FixerId` and owns
-  responder/fixer behavior, while `plinth-support::load` later re-exports
-  `LoadSharing` and owns `ArmGroup`/`effective_x`. Neither duplicates core tags,
-  validation rules, or identity logic.
+  `1`; its tagged wire representation denies unknown fields. `FixerId` is likewise a
+  passive core identifier. `plinth-core` owns both types and their validation;
+  `plinth-support::repair` later re-exports `FixerId` and owns responder/fixer behavior,
+  while `plinth-support::load` later re-exports `LoadSharing` and owns
+  `ArmGroup`/`effective_x`. Neither duplicates core tags, validation rules, or identity
+  logic.
 
 ### Report construction
 
 `DefectReport` fields are private; construction is fallible and validating. Report provenance
-is a deterministic ordered map: `DecisionId` → `ConstantId` → `ProvenanceRef`;
+is a deterministic ordered map: `DecisionId` → `ConstantId` → `ProvenanceRef`.
+`ProvenanceManifest` construction and recording are fallible: repeated identical
+records are idempotent, repeated decision batches merge their constants, and any
+conflicting value for an existing decision/constant pair is an error. JSON
+deserialization always rejects duplicate decision keys and duplicate constant keys
+instead of accepting last-write-wins data.
 `Measured` provenance includes its measurement date. Empty provenance is legitimate
 only before any accept decision runs. At the constants-registry checkpoint,
 decision-scoped automatic recording is enforced for every automatic decision, rather
 than added in a best-effort post-processing pass. The report is accepted only when it
-contains no blocking defects. Categorical measurements retain the existing explicit
-`"err": null` serialization contract.
+contains no blocking defects: `Termination::Converged` never overrides a blocking
+defect. Categorical measurements retain the existing explicit `"err": null`
+serialization contract.
 
 `OptimizationSummary` is private, fallible, and custom-deserialized: its Pareto set is
 nonempty; `candidates_examined > 0` and is at least the Pareto length; orientation IDs
@@ -189,6 +198,13 @@ came from. This is a compile-time mechanism, not a documentation convention.
 | `Derived<T>` | Computed from `Measured` values by a stated relation. | Yes |
 | `Placeholder<T>` | A guess. Search/tuning weights live here. | **No — will not compile** |
 | `Pending<T>` | Awaiting a measurement. Carries **both** a conservative and an optimistic value. `.resolve()` returns the conservative branch wrapped as a `Derived<T>` — an `AcceptSafe` value carrying the pending provenance, never a bare `T`. | Only via explicit `.resolve()` |
+
+`Measured<T>` accepts only payloads covered by the core-sealed measurement-payload
+policy; downstream crates cannot invent new payload/error semantics. Approved numeric
+payloads include at minimum `f64` and `Finite`, and permit either `Some(error)` or
+`None`. Categorical `LoadSharing` requires `None`. The `err` field is required on the
+wire for every payload: omission is rejected, while `None` is emitted as explicit
+`"err": null`.
 
 **The mechanism:** an `AcceptSafe` trait implemented by `Measured` and `Derived` and
 **not** implemented by `Placeholder`. Everything on the acceptance path is generic

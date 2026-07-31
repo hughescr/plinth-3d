@@ -181,18 +181,19 @@ review — do not write substantial code in your main context.
 Stop and ask — do not guess — when:
 
 - a doc contradiction has no stated precedence;
-- a decision the guide explicitly leaves open surfaces. The live one: `Measured<T>` carries
-  an `err: T`, and a **categorical** payload like `LoadSharing` has no error bar — either set
-  `err` to the same variant or make it `Option<T>` in `02`'s definition, carrying the real
-  uncertainty in `note`. Flagged in `02` §3.6 and `03` §4.2. Whichever way it goes, the fact
-  that a categorical measurement has no error bar must stay visible in the type, not be
-  papered over;
+- a decision the guide explicitly leaves open surfaces;
 - a gate cannot be made green without changing what it measures;
 - a metric would need a waiver — waivers are owner-signed only;
 - anything would require deleting or regenerating a corpus, baseline, or reference file. The
   baseline freeze happens **once**; a physics change requires a documented re-freeze *before*
   comparing, or the comparison measures the physics change rather than the port (`03` §4.4
   step 3, `04` M0 work item 10).
+
+`Measured<T>` has a settled wire policy: `err: Option<T>` is required; a missing `err` is
+rejected for every payload, and an explicit `"err": null` means `None`. Approved numeric
+payloads may use either `Some(error)` or `None`. A **categorical** measurement such as
+`LoadSharing` specifically uses `err: None`; its conditional-scope uncertainty belongs in
+`note`. Do not invent a numeric pseudo-error, omit the field, or widen the category type.
 
 **Where decisions get recorded.** The guide's mechanism is the **gate table**: `04` M1 says
 "Record the sign-off in the gate table (`06-conventions.md`)", and M7's owner sign-off

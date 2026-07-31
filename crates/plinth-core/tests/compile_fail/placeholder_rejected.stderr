@@ -9,8 +9,8 @@ error[E0277]: the trait bound `Placeholder<f64>: AcceptSafe<f64>` is not satisfi
 help: the following other types implement trait `AcceptSafe<T>`
  --> src/provenance.rs
   |
-  | impl<T: Copy> AcceptSafe<T> for Measured<T> {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `plinth_core::Measured<T>`
+  | impl<T: Copy + MeasuredPayload> AcceptSafe<T> for Measured<T> {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `plinth_core::Measured<T>`
 ...
   | impl<T: Copy> AcceptSafe<T> for Derived<T> {
   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `plinth_core::Derived<T>`

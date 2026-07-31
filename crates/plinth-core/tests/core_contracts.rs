@@ -1,9 +1,9 @@
 use plinth_core::{
-    canonical_f64_bits, digest_f64_slice, AcceptSafe, ConstantId, CostError, CostVector,
-    DecisionId, Defect, DefectReport, Derived, DigestError, Fidelity, Finite, FiniteError, FixerId,
-    LayerPlan, LayerPlanError, LoadSharing, LoadSharingError, Measured, MetricId, MetricSet,
-    MetricValue, ModelId, OptimizationError, OptimizationSummary, OrientationCost, OrientationId,
-    ParetoPoint, PartialCost, Pending, PlateId, ProvenanceManifest, ProvenanceRef, ReportError,
+    digest_f64_slice, AcceptSafe, ConstantId, CostError, CostVector, DecisionId, Defect,
+    DefectReport, Derived, DigestError, Fidelity, Finite, FiniteError, FixerId, LayerPlan,
+    LayerPlanError, LoadSharing, LoadSharingError, Measured, MetricId, MetricSet, MetricValue,
+    ModelId, OptimizationError, OptimizationSummary, OrientationCost, OrientationId, ParetoPoint,
+    PartialCost, Pending, PlateId, ProvenanceError, ProvenanceManifest, ProvenanceRef, ReportError,
     Resin, Risk, Scar, SearchEvidence, Severity, SiteId, Stage, StageId, Termination,
     TerminationError, ViolationKind,
 };
@@ -286,6 +286,11 @@ fn load_sharing_is_tagged_and_validated_at_the_measured_boundary() {
     assert!(
         serde_json::from_str::<LoadSharing>(r#"{"kind":"additive","n_eff_cap":1e9999}"#).is_err()
     );
+    assert!(serde_json::from_str::<LoadSharing>(r#"{"kind":"zipper","n_eff_cap":1.0}"#).is_err());
+    assert!(serde_json::from_str::<LoadSharing>(
+        r#"{"kind":"additive","n_eff_cap":1.0,"extra":true}"#
+    )
+    .is_err());
 
     let measured = Measured::new(
         LoadSharing::additive(6.0).unwrap(),
@@ -293,41 +298,65 @@ fn load_sharing_is_tagged_and_validated_at_the_measured_boundary() {
         None,
         "2026-07-31",
         "categorical measurement",
-    );
-    let measured_json = serde_json::to_value(measured).unwrap();
+    )
+    .unwrap();
+    let measured_json = serde_json::to_value(&measured).unwrap();
     assert!(measured_json["err"].is_null());
     assert_eq!(measured_json["value"]["kind"], "additive");
     assert_eq!(measured_json["value"]["n_eff_cap"], 6.0);
+    assert_eq!(
+        serde_json::from_value::<Measured<LoadSharing>>(measured_json.clone()).unwrap(),
+        measured
+    );
+    assert_eq!(
+        Measured::new(
+            LoadSharing::Zipper,
+            PlateId::from("plate-6"),
+            Some(LoadSharing::Zipper),
+            "2026-07-31",
+            "invalid categorical error bar",
+        ),
+        Err(ProvenanceError::CategoricalErrorBar)
+    );
+    let mut categorical_error = measured_json.clone();
+    categorical_error["err"] = json!({"kind": "zipper"});
+    assert!(serde_json::from_value::<Measured<LoadSharing>>(categorical_error).is_err());
 }
 
 #[test]
 fn provenance_is_nested_deterministic_and_measured_dates_are_required() {
     let mut manifest = ProvenanceManifest::default();
-    manifest.record(
-        DecisionId::from("decision_z"),
-        ConstantId::from("constant_z"),
-        ProvenanceRef::Derived {
-            from: vec!["source".into()],
-            note: "z".into(),
-        },
-    );
-    manifest.record(
-        DecisionId::from("decision_a"),
-        ConstantId::from("constant_z"),
-        ProvenanceRef::Derived {
-            from: vec!["source".into()],
-            note: "z".into(),
-        },
-    );
-    manifest.record(
-        DecisionId::from("decision_a"),
-        ConstantId::from("constant_a"),
-        ProvenanceRef::Measured {
-            plate: PlateId::from("plate-6"),
-            date: "2026-07-31".into(),
-            note: "a".into(),
-        },
-    );
+    manifest
+        .record(
+            DecisionId::from("decision_z"),
+            ConstantId::from("constant_z"),
+            ProvenanceRef::Derived {
+                from: vec!["source".into()],
+                note: "z".into(),
+            },
+        )
+        .unwrap();
+    manifest
+        .record(
+            DecisionId::from("decision_a"),
+            ConstantId::from("constant_z"),
+            ProvenanceRef::Derived {
+                from: vec!["source".into()],
+                note: "z".into(),
+            },
+        )
+        .unwrap();
+    manifest
+        .record(
+            DecisionId::from("decision_a"),
+            ConstantId::from("constant_a"),
+            ProvenanceRef::Measured {
+                plate: PlateId::from("plate-6"),
+                date: "2026-07-31".into(),
+                note: "a".into(),
+            },
+        )
+        .unwrap();
     let text = serde_json::to_string(&manifest).unwrap();
     assert!(text.find("decision_a").unwrap() < text.find("decision_z").unwrap());
     assert!(text.find("constant_a").unwrap() < text.find("constant_z").unwrap());
@@ -342,7 +371,8 @@ fn provenance_is_nested_deterministic_and_measured_dates_are_required() {
         None,
         "2026-07-31",
         "caliper",
-    );
+    )
+    .unwrap();
     let mut value = serde_json::to_value(&measured).unwrap();
     assert!(value["err"].is_null());
     assert_eq!(
@@ -355,6 +385,172 @@ fn provenance_is_nested_deterministic_and_measured_dates_are_required() {
     );
     value.as_object_mut().unwrap().remove("date");
     assert!(serde_json::from_value::<Measured<f64>>(value).is_err());
+}
+
+#[test]
+fn measured_payload_policy_validates_numeric_errors_and_required_wire_fields() {
+    let numeric = Measured::new(
+        12.0_f64,
+        PlateId::from("plate-5"),
+        Some(0.5),
+        "2026-07-24",
+        "numeric bracket",
+    )
+    .unwrap();
+    assert_eq!(numeric.value(), &12.0);
+    assert_eq!(numeric.plate(), &PlateId::from("plate-5"));
+    assert_eq!(numeric.err(), Some(&0.5));
+    assert_eq!(numeric.date(), "2026-07-24");
+    assert_eq!(numeric.note(), "numeric bracket");
+    assert_eq!(
+        serde_json::from_value::<Measured<f64>>(serde_json::to_value(&numeric).unwrap()).unwrap(),
+        numeric
+    );
+
+    let no_error = Measured::new(
+        6.0_f64,
+        PlateId::from("plate-6"),
+        None,
+        "2026-07-31",
+        "explicitly no numeric error bar",
+    )
+    .unwrap();
+    let no_error_json = serde_json::to_value(&no_error).unwrap();
+    assert!(no_error_json["err"].is_null());
+    assert_eq!(
+        serde_json::from_value::<Measured<f64>>(no_error_json.clone()).unwrap(),
+        no_error
+    );
+    let mut missing_error = no_error_json.clone();
+    missing_error.as_object_mut().unwrap().remove("err");
+    assert!(serde_json::from_value::<Measured<f64>>(missing_error).is_err());
+    let mut missing_date = no_error_json;
+    missing_date.as_object_mut().unwrap().remove("date");
+    assert!(serde_json::from_value::<Measured<f64>>(missing_date).is_err());
+
+    assert_eq!(
+        Measured::new(
+            f64::NAN,
+            PlateId::from("plate"),
+            None,
+            "2026-07-31",
+            "bad value",
+        ),
+        Err(ProvenanceError::NonFiniteMeasuredValue)
+    );
+    assert_eq!(
+        Measured::new(
+            1.0_f64,
+            PlateId::from("plate"),
+            Some(f64::INFINITY),
+            "2026-07-31",
+            "bad error",
+        ),
+        Err(ProvenanceError::NonFiniteMeasuredError)
+    );
+    assert!(serde_json::from_str::<Measured<f64>>(
+        r#"{"value":1e9999,"plate":"plate","err":null,"date":"2026-07-31","note":"bad"}"#
+    )
+    .is_err());
+
+    let finite = Measured::new(
+        Finite::new(2.0).unwrap(),
+        PlateId::from("plate"),
+        Some(Finite::new(0.1).unwrap()),
+        "2026-07-31",
+        "validated wrapper",
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::from_value::<Measured<Finite>>(serde_json::to_value(&finite).unwrap()).unwrap(),
+        finite
+    );
+}
+
+#[test]
+fn provenance_manifest_merges_api_batches_but_rejects_conflicts_and_wire_duplicates() {
+    let decision = DecisionId::from("accept");
+    let constant_a = ConstantId::from("a");
+    let constant_b = ConstantId::from("b");
+    let provenance_a = ProvenanceRef::Derived {
+        from: vec!["source-a".into()],
+        note: "a".into(),
+    };
+    let provenance_b = ProvenanceRef::Derived {
+        from: vec!["source-b".into()],
+        note: "b".into(),
+    };
+    let conflicting = ProvenanceRef::Derived {
+        from: vec!["other".into()],
+        note: "conflict".into(),
+    };
+
+    let mut manifest = ProvenanceManifest::new(vec![
+        (
+            decision.clone(),
+            vec![(constant_a.clone(), provenance_a.clone())],
+        ),
+        (
+            decision.clone(),
+            vec![(constant_b.clone(), provenance_b.clone())],
+        ),
+        (
+            decision.clone(),
+            vec![(constant_a.clone(), provenance_a.clone())],
+        ),
+    ])
+    .unwrap();
+    assert_eq!(manifest.iter().len(), 1);
+    assert_eq!(manifest.get(&decision, &constant_a), Some(&provenance_a));
+    assert_eq!(manifest.get(&decision, &constant_b), Some(&provenance_b));
+    manifest
+        .record(decision.clone(), constant_a.clone(), provenance_a.clone())
+        .unwrap();
+    assert_eq!(
+        manifest.record(decision.clone(), constant_a.clone(), conflicting.clone()),
+        Err(ProvenanceError::ConflictingRecord {
+            decision: decision.clone(),
+            constant: constant_a.clone(),
+        })
+    );
+    assert_eq!(
+        ProvenanceManifest::new(vec![(
+            decision.clone(),
+            vec![
+                (constant_a.clone(), provenance_a.clone()),
+                (constant_a.clone(), conflicting),
+            ],
+        )]),
+        Err(ProvenanceError::ConflictingRecord {
+            decision: decision.clone(),
+            constant: constant_a.clone(),
+        })
+    );
+
+    let duplicate_outer = r#"{
+        "accept":{"a":{"kind":"derived","from":["source-a"],"note":"a"}},
+        "accept":{"b":{"kind":"derived","from":["source-b"],"note":"b"}}
+    }"#;
+    assert!(serde_json::from_str::<ProvenanceManifest>(duplicate_outer).is_err());
+    let conflicting_outer = r#"{
+        "accept":{"a":{"kind":"derived","from":["source-a"],"note":"a"}},
+        "accept":{"a":{"kind":"derived","from":["other"],"note":"conflict"}}
+    }"#;
+    assert!(serde_json::from_str::<ProvenanceManifest>(conflicting_outer).is_err());
+    let duplicate_inner = r#"{
+        "accept":{
+            "a":{"kind":"derived","from":["source-a"],"note":"a"},
+            "a":{"kind":"derived","from":["source-a"],"note":"a"}
+        }
+    }"#;
+    assert!(serde_json::from_str::<ProvenanceManifest>(duplicate_inner).is_err());
+    let conflicting_inner = r#"{
+        "accept":{
+            "a":{"kind":"derived","from":["source-a"],"note":"a"},
+            "a":{"kind":"derived","from":["other"],"note":"conflict"}
+        }
+    }"#;
+    assert!(serde_json::from_str::<ProvenanceManifest>(conflicting_inner).is_err());
 }
 
 #[test]
@@ -406,6 +602,10 @@ fn report_requires_provenance_and_only_blocking_defects_control_acceptance() {
     )
     .unwrap();
     assert!(!rejected.accepted());
+    let rejected_round_trip =
+        serde_json::from_value::<DefectReport>(serde_json::to_value(&rejected).unwrap()).unwrap();
+    assert_eq!(rejected_round_trip, rejected);
+    assert!(!rejected_round_trip.accepted());
 
     let mut json = serde_json::to_value(accepted).unwrap();
     json.as_object_mut().unwrap().remove("provenance");
@@ -421,7 +621,8 @@ fn report_requires_provenance_and_only_blocking_defects_control_acceptance() {
                 note: "measured".into(),
             },
         )],
-    )]);
+    )])
+    .unwrap();
     let with_provenance = DefectReport::new(
         ModelId::from("treant"),
         vec![],
@@ -758,7 +959,8 @@ fn layer_plan_has_canonical_wire_data_and_validates_every_boundary() {
         Some(0.001),
         "2026-07-31",
         "caliper",
-    );
+    )
+    .unwrap();
     let plan = LayerPlan::constant(&height, 3).unwrap();
     assert_eq!(plan.heights_mm(), &[0.05, 0.05, 0.05]);
     assert_eq!(plan.z_of(2), Some(0.1));
@@ -980,11 +1182,26 @@ fn stage_contract_compiles_with_context_and_ok_or_report_error() {
 }
 
 #[test]
-fn digest_canonicalizes_negative_zero_and_rejects_nonfinite_values() {
-    assert_eq!(canonical_f64_bits(-0.0), canonical_f64_bits(0.0));
-    assert_eq!(
+fn digest_preserves_signed_zero_and_rejects_nonfinite_values() {
+    fn fnv_one(bits: u64) -> u64 {
+        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        bits.to_le_bytes().into_iter().fold(OFFSET, |state, byte| {
+            (state ^ u64::from(byte)).wrapping_mul(PRIME)
+        })
+    }
+
+    assert_ne!(
         digest_f64_slice(&[-0.0]).unwrap(),
         digest_f64_slice(&[0.0]).unwrap()
+    );
+    assert_eq!(
+        digest_f64_slice(&[-0.0]).unwrap().0,
+        fnv_one((-0.0_f64).to_bits())
+    );
+    assert_eq!(
+        digest_f64_slice(&[0.0]).unwrap().0,
+        fnv_one(0.0_f64.to_bits())
     );
     for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         assert_eq!(

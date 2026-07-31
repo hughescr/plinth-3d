@@ -14,18 +14,6 @@ pub enum DigestError {
     NonFinite { index: usize },
 }
 
-/// Normalizes values that compare equal but have distinct IEEE encodings.
-pub fn canonical_f64_bits(value: f64) -> Result<u64, DigestError> {
-    if !value.is_finite() {
-        return Err(DigestError::NonFinite { index: 0 });
-    }
-    if value == 0.0 {
-        Ok(0)
-    } else {
-        Ok(value.to_bits())
-    }
-}
-
 pub fn digest_f64(value: f64) -> Result<ContentDigest, DigestError> {
     digest_f64_slice(&[value])
 }
@@ -38,10 +26,7 @@ pub fn digest_f64_slice(values: &[f64]) -> Result<ContentDigest, DigestError> {
         if !value.is_finite() {
             return Err(DigestError::NonFinite { index });
         }
-        for byte in canonical_f64_bits(*value)
-            .expect("finite value was checked above")
-            .to_le_bytes()
-        {
+        for byte in value.to_bits().to_le_bytes() {
             state ^= u64::from(byte);
             state = state.wrapping_mul(PRIME);
         }

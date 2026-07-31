@@ -24,7 +24,7 @@ pub use cost::{
 pub use defect::{
     Defect, DefectError, DefectReport, ReportError, Severity, SiteId, Termination, TerminationError,
 };
-pub use digest::{canonical_f64_bits, digest_f64, digest_f64_slice, ContentDigest, DigestError};
+pub use digest::{digest_f64, digest_f64_slice, ContentDigest, DigestError};
 pub use frame::{Centered, Frame, Framed, Plated, Source};
 pub use id::{ConstantId, DecisionId, FixerId, ModelId, OrientationId, PlateId, StageId};
 pub use layer::{LayerPlan, LayerPlanError};
@@ -32,7 +32,8 @@ pub use load::{EffectiveArmCount, LoadSharing, LoadSharingError};
 pub use metric::{MetricId, MetricSet, MetricValue};
 pub use number::{Finite, FiniteError};
 pub use provenance::{
-    AcceptSafe, Derived, Measured, Pending, Placeholder, ProvenanceManifest, ProvenanceRef,
+    AcceptSafe, Derived, Measured, MeasuredPayload, Pending, Placeholder, ProvenanceError,
+    ProvenanceManifest, ProvenanceRef,
 };
 pub use stage::Stage;
 pub use violation::ViolationKind;

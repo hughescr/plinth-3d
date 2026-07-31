@@ -69,15 +69,45 @@ impl<'de> Deserialize<'de> for LoadSharing {
         D: Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        #[serde(tag = "kind", rename_all = "snake_case")]
-        enum Wire {
+        #[serde(rename_all = "snake_case")]
+        enum ZipperKind {
             Zipper,
-            Additive { n_eff_cap: f64 },
+        }
+
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum AdditiveKind {
+            Additive,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ZipperWire {
+            kind: ZipperKind,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct AdditiveWire {
+            kind: AdditiveKind,
+            n_eff_cap: f64,
+        }
+
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Zipper(ZipperWire),
+            Additive(AdditiveWire),
         }
 
         match Wire::deserialize(deserializer)? {
-            Wire::Zipper => Ok(Self::Zipper),
-            Wire::Additive { n_eff_cap } => Self::additive(n_eff_cap).map_err(de::Error::custom),
+            Wire::Zipper(ZipperWire {
+                kind: ZipperKind::Zipper,
+            }) => Ok(Self::Zipper),
+            Wire::Additive(AdditiveWire {
+                kind: AdditiveKind::Additive,
+                n_eff_cap,
+            }) => Self::additive(n_eff_cap).map_err(de::Error::custom),
         }
     }
 }
