@@ -5,8 +5,16 @@ use crate::StageId;
 pub trait Stage {
     type Input;
     type Output;
+    type Context: ?Sized;
 
     const ID: StageId;
 
-    fn run(&self, input: Self::Input) -> Self::Output;
+    // The report is deliberately the concrete, sole failure contract shared by
+    // every stage. Boxing it here would weaken the normative Stage signature.
+    #[allow(clippy::result_large_err)]
+    fn run(
+        &self,
+        input: Self::Input,
+        ctx: &Self::Context,
+    ) -> Result<Self::Output, crate::DefectReport>;
 }

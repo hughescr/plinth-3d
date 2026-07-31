@@ -66,7 +66,8 @@ plinth-3d/
     manifest.json       # model list, per-model Python exit code, metric directions (pre-committed)
   crates/
     plinth-core/        # ids, frames, units, provenance-typed constants + registry, DefectReport,
-                        #   ViolationKind, Termination, LayerPlan, passive cost/report/metric DTOs,
+                        #   ViolationKind, passive exhaustive FixerId, validated tagged LoadSharing,
+                        #   Termination, LayerPlan, passive cost/report/metric DTOs,
                         #   Stage trait + typestate marks, digests, chord canonicalization,
                         #   deterministic reduction helpers
     plinth-mesh/        # f64 Mesh, STL IO with explicit WeldPolicy, face topology + cut flags,
@@ -83,7 +84,9 @@ plinth-3d/
                         #   providers. ITS OWN STAGE — never a side effect of hollowing
     plinth-hollow/      # hollow eligibility, cavity carve, drains/vents, drainability audit,
                         #   internal-cavity support planning (A5)
-    plinth-support/     # ONE crate around the whole solver: perception (islands/minima/births),
+    plinth-support/     # ONE crate around the whole solver: reexports core FixerId/LoadSharing;
+                        #   owns Response/response_for/fixer, ArmGroup/effective_x;
+                        #   perception (islands/minima/births),
                         #   placement (pool, hex/CVT lattice, X-rule sizing incl. multi-arm sharing),
                         #   Forest arena, CCO growth, rewire, bracing, transient sizing,
                         #   repair dispatcher (exhaustive ViolationKind match) + relocation ladder
@@ -167,10 +170,20 @@ pub enum Raw {} pub enum Triaged {} pub enum Decimated {}
 pub enum Oriented {} pub enum Hollowed {} pub enum Supported {} pub enum Emitted {}
 
 pub trait Stage {
-    type In; type Out;
-    fn run(&self, input: Self::In, ctx: &Ctx) -> Result<Self::Out, DefectReport>;
+    type Input;
+    type Output;
+    type Context: ?Sized;
+    const ID: StageId;
+
+    fn run(&self, input: Self::Input, ctx: &Self::Context) -> Result<Self::Output, DefectReport>;
 }
 ```
+
+`Context` is deliberately an associated `?Sized` type: a stage may use a concrete shared context
+or a trait-object context without smuggling an untyped global through the pipeline. `Stage::ID`
+is the stable report-stage identity. Operational failure returns the sole validated
+`DefectReport` authority; concrete `thiserror`-style error enums remain required for lower-level
+library APIs that cannot produce a report.
 
 There is no constructor for `Model<Oriented>` outside `plinth-orient`. `plinth-emit` takes
 `&Model<Supported>`, which can only have come through `Oriented` and `Hollowed`. **A second entry
@@ -209,7 +222,7 @@ Delicacy is a property of the FaceTable **at the LOD being scored**. The Python 
 delicacy field came from the full mesh while face areas came from a 90%-decimated proxy (making
 scar magnitudes decimation-dependent) cannot recur: field and evaluation mesh are one object.
 
-### 3.4 One DefectReport, one violation enum, and a future responder table that must be total
+### 3.4 One validated DefectReport, one violation enum, and a responder table that must be total
 
 ```rust
 // plinth-core — passive, plain exhaustive vocabulary only. NOT #[non_exhaustive]: that attribute
@@ -228,25 +241,78 @@ pub enum ViolationKind {
     RepairCapExhausted,
 }
 
+// Passive identity only. It is exhaustive for the support responder table, but plinth-core
+// neither selects nor executes a fixer.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum FixerId {
+    AddSeatAtMarginalArea, AddBirthLadderSeat, AddMinimumSeat, SplitLoadAcrossArms,
+    RelocateForLateralSpread, ReaimReseatOrQuarantine, SlideOrReseatJoint,
+    ReaimReduceEmbed, RerouteToPlateOrAnchor, SteepenOrBrace, ResizeAncestors,
+    RerouteOrDropRegular, AddAuditDrainOrRefill,
+}
+
 pub enum SiteId { Member(u32), Quarantine(u32), Ball(u32), Contact(u32), Face(u32), Cavity(u32) }
 // A sum type — the phase8_driver.py `Q_SITE_OFFSET = 1_000_000` integer-space hack is dead.
 
+// JSON-visible floating values are finite signed numbers. This transparent wrapper preserves the
+// sign bit of -0.0 on the wire while rejecting NaN and both infinities in its fallible constructor
+// and custom Deserialize implementation.
+#[repr(transparent)]
+#[derive(serde::Serialize)]
+#[serde(transparent)]
+pub struct Finite(f64);
+
+pub struct ProvenanceManifest(
+    // Canonical serialized order: DecisionId -> ConstantId -> ProvenanceRef.
+    std::collections::BTreeMap<DecisionId,
+        std::collections::BTreeMap<ConstantId, ProvenanceRef>>,
+);
+
 pub struct Defect {
     pub kind: ViolationKind, pub site: SiteId, pub severity: Severity,
-    pub measure: f64,            // in the kind's own units
+    pub measure: Finite,         // signed finite, in the kind's own units
     pub detail: DefectDetail,
 }
 
 pub struct DefectReport {
-    pub defects: Vec<Defect>, pub metrics: MetricSet, pub stage: StageId,
-    pub provenance: ProvenanceManifest,   // which constant, with which provenance, fed accept
-    pub termination: Termination,
-    pub search: SearchEvidence,
+    subject: ModelId,
+    defects: Vec<Defect>,
+    metrics: MetricSet,
+    stage: StageId,
+    provenance: ProvenanceManifest,
+    termination: Termination,
+    search: SearchEvidence,
 }
 impl DefectReport {
+    pub fn new(/* all fields */) -> Result<Self, ReportError> { /* validate below */ }
     pub fn accepted(&self) -> bool { !self.defects.iter().any(|d| d.severity == Severity::Blocking) }
+    // Read-only accessors expose report data; callers cannot construct or mutate an unchecked report.
 }
+// Do not derive Deserialize for DefectReport. Deserialize a private wire DTO, then call new();
+// map ReportError to the serde error. This makes malformed reports unrepresentable in memory.
+impl<'de> serde::Deserialize<'de> for DefectReport { /* private wire DTO -> new */ }
 ```
+
+`Finite` is the one transparent wire representation for report floats: it is signed and
+finite, including `-0.0`. `MetricValue`, `Defect::measure`, and the before/after values in a
+termination therefore use it and may be negative where their semantics require it. Physical
+`CostVector`'s height/time, every resin/scar quantity, `max_effective_x`, and lateral spread are
+private `Finite` fields whose owning fallible constructors reject negative values (zero is valid).
+All validation failures use concrete error enums (`ReportError`, `FiniteError`, and the owning
+crate's error enum), not
+string errors or erased trait objects.
+
+`ProvenanceManifest` is required, not a best-effort manifest: every acceptance decision records
+the ordered `DecisionId → ConstantId → ProvenanceRef` path. At the later constants-registry
+checkpoint, decision-scoped recorder access must make an accept-path read impossible unless its
+provenance is recorded; the finalized report must contain this complete ordered map.
+
+`DefectReport::new` validates termination against the defects before the report exists. A
+`CapExhausted` termination must name a non-`RepairCapExhausted` original kind and have a matching
+blocking `RepairCapExhausted` defect at the same site. A `PoolExhausted` termination must have a
+blocking defect with its same kind and site. `Converged`, `CapExhausted`, and `PoolExhausted` are
+the complete termination set; `accepted()` remains **only** the no-blocking-defects predicate
+shown above.
 
 `DefectReport` is the **sole acceptance authority**. No `assert!`, no exception, no bare exit code,
 no stringly log key participates in acceptance. The CLI exit code is a *projection* of the report.
@@ -255,12 +321,15 @@ idempotence, re-verify-after-serialize) become ordinary kinds and tests, actuall
 shipped accept path.
 
 **A gate that can fail with no responder is a compile error.** This is M7 work: `plinth-core`
-contains `ViolationKind` only; `Response`, `FixerId`, and `response_for` belong together in
-`plinth-support::repair`, where the fixers exist:
+contains passive vocabulary and the exhaustive `FixerId` identity only. `plinth-support::repair`
+reexports `FixerId` and owns `Response`, `response_for`, and `fixer`, where the concrete fixers
+exist; `plinth-support::load` reexports `LoadSharing`:
 
 ```rust
 // plinth-support::repair
+pub use plinth_core::FixerId;
 pub enum Response { Repair(FixerId), Terminal(&'static str) }
+pub fn fixer(id: FixerId) -> &'static dyn Fixer { /* support-owned concrete implementation */ }
 
 pub const fn response_for(k: ViolationKind) -> Response {
     match k {                              // NO `_` ARM. Adding a kind breaks the build.
@@ -308,11 +377,13 @@ in-loop unrepairability. A kind with neither is a failing test.
 pub enum Termination {
     Converged,
     CapExhausted { kind: ViolationKind, fixer: FixerId, site: SiteId,
-                   attempts: u32, before: f64, after: f64, note: &'static str },
+                   attempts: u32, before: Finite, after: Finite, note: String },
     PoolExhausted { kind: ViolationKind, site: SiteId },
 }
-// CapExhausted ALSO injects Defect { kind: RepairCapExhausted, .. } so it flows through the one
-// authority. Never a bare exit code, never an anonymous "attempt cap reached".
+// These are exactly the three variants. CapExhausted rejects kind == RepairCapExhausted and
+// requires one matching Blocking Defect { kind: RepairCapExhausted, site }. PoolExhausted requires
+// a Blocking Defect of its same `kind` and `site`. Never a bare exit code, never an anonymous
+// "attempt cap reached".
 ```
 
 ### 3.5 Constants with typed provenance — the build fails on a reachable Placeholder
@@ -322,11 +393,10 @@ not implement.
 
 ```rust
 // plinth-core::consts
-pub struct Measured<T>    { v: T, pub plate: PlateId, pub err: Option<T>, pub date: &'static str, pub note: &'static str }
-pub struct Derived<T>     { v: T, pub from: &'static [&'static str], pub note: &'static str }
-pub struct Placeholder<T> { v: T, pub note: &'static str }
-pub struct Pending<T: 'static> { pub conservative: &'static T, pub optimistic: &'static T,
-                                 pub plate: PlateId, pub question: &'static str }
+pub struct Measured<T>    { v: T, plate: PlateId, err: Option<T>, date: String, note: String }
+pub struct Derived<T>     { v: T, from: Vec<String>, note: String }
+pub struct Placeholder<T> { v: T, note: String }
+pub struct Pending<T>     { conservative: T, optimistic: T, resolves_on: PlateId, question: String }
 
 pub trait AcceptSafe<T: Copy> { fn get(&self) -> T; fn provenance(&self) -> ProvenanceRef; }
 impl<T: Copy> AcceptSafe<T> for Measured<T> { /* ... */ }
@@ -344,6 +414,10 @@ impl<T: Copy> Pending<T> {
     pub fn optimistic(&self) -> Derived<T>;  // A/B only; `plinth calibrate` reports the corpus delta
 }
 ```
+
+`Measured::date` is a required `String` carried into the corresponding `ProvenanceRef`; it is never
+optional or silently dropped. `err: None` remains visible on the wire as `"err": null` for
+categorical values.
 
 Enforcement is **proven, not asserted**:
 
@@ -396,20 +470,33 @@ both axes survived at `X_arm = 60.15` while the matched single arm died, so shar
 additive** and there is **no measured axis dependence**. Both variants stay code-complete:
 
 ```rust
-// plinth-support::load
-#[derive(Clone, Copy)] pub enum LoadSharing { Zipper, Additive { n_eff_cap: f64 } }
-impl LoadSharing {
-    /// Effective X for an arm group. `peel_dir` is currently UNUSED BY MEASUREMENT — plate 6
-    /// found no axis dependence — and is retained so an orientation term can be added later
-    /// without changing this signature. Do not add one until plate 6 is contradicted.
-    pub fn effective_x(&self, group: &ArmGroup, peel_dir: [f64; 3]) -> f64 { /* ... */ }
-}
+// plinth-core::load — passive, tagged, and validated. Its manual Deserialize calls additive(),
+// which rejects a non-finite cap or an Additive cap below 1.0.
+#[derive(serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LoadSharing { Zipper, Additive { n_eff_cap: EffectiveArmCount } }
+pub struct EffectiveArmCount(Finite);
+impl LoadSharing { pub fn additive(n_eff_cap: f64) -> Result<Self, LoadSharingError>; }
+
+// plinth-support::load — behaviour over the core vocabulary.
+pub use plinth_core::LoadSharing;
+pub struct ArmGroup { /* co-carrying arms and their contiguous rigid region */ }
+/// Effective X for an arm group. `peel_dir` is currently UNUSED BY MEASUREMENT — plate 6 found
+/// no axis dependence — and is retained so an orientation term can be added later without
+/// changing this signature. Do not add one until plate 6 is contradicted.
+pub fn effective_x(sharing: &LoadSharing, group: &ArmGroup, peel_dir: [f64; 3]) -> f64 { /* ... */ }
+
+// Later M0 constants work, in plinth-core::constants, declares the normative static:
 pub static LOAD_SHARING: Measured<LoadSharing> = /* Additive { n_eff_cap: 6.0 } — plate 6,
     2026-07-31. AT LEAST additive: N arms co-carry, but never credit more than N. n_eff_cap = 6.0
     is the largest group measured. Was Pending<LoadSharing> until 2026-07-31; `Zipper` is kept in
-    the enum as the strictly-conservative fallback and the A/B arm. See 03 section 4.2 for the
-    five caveats that belong in `note`. */;
+    the enum as the strictly-conservative fallback and the A/B arm. All five caveats in
+    `03-physics-and-constants.md` §4.2 belong verbatim in `note`. */;
 ```
+
+The passive tagged `LoadSharing` type belongs to this core checkpoint; the `LOAD_SHARING`
+declaration shown above is normative for the later M0 constants work, not a current declaration in
+this bounded checkpoint.
 
 `Measured<T>` carries `err: Option<T>`. A **categorical** payload has no error bar, so
 `Measured<LoadSharing>` uses `err: None`; its serialized record carries an explicit `"err": null`
@@ -419,6 +506,15 @@ widen the enum to carry uncertainty. The uncertainty is conditional-scope, and i
 The lattice generator takes `effective_x` as an **input** — density is never baked in — so the
 2026-07-31 switch to `Additive` was one constant plus a re-run, and `plinth calibrate` still reports
 the corpus-wide A/B delta under both branches so the size of that switch is measured, not assumed.
+
+The `Measured<LoadSharing>::note` serializes all five `03-physics-and-constants.md` §4.2 caveats,
+not merely a pointer to them: **(1)** one cap area, arm diameter, and arm length were validated;
+**(2)** no strip failed, so sharing has no measured upper bracket; **(3)** strip fin roots have a
+roughly 20% section bonus, so never design on super-additive margin; **(4)** plate 6's one cap area
+makes `X_tot` algebraically degenerate, leaving the ratio form dependent on plate 5's cap-area
+spread; and **(5)** no axis dependence was observed at this load, while a near-boundary orientation
+effect remains untested. The reference is retained with the payload: see `03-physics-and-constants.md`
+§4.2 caveats 1–5.
 
 This removes the root cause of the unsatisfiable Python gate: `config.py`'s `tip_r_max_mm = 1.0`
 (line 118) caps one tip at ~3.14 mm² of cross-section, i.e. ~37.7 mm² of supported area at X = 12,
@@ -435,15 +531,28 @@ and **where the scars land**, and the cost function says exactly that.
 ### 3.7 Layer height is an array on day one
 
 ```rust
-// plinth-core
-pub struct LayerPlan { pub z0_mm: f64, pub heights_mm: Vec<f64>, cum: Vec<f64> }
+// plinth-core. The wire DTO has exactly z0_mm and heights_mm; cum is derived, never serialized.
+pub struct LayerPlan { z0_mm: f64, heights_mm: Vec<f64>, cum: Vec<f64> }
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LayerPlanWire { z0_mm: f64, heights_mm: Vec<f64> }
 impl LayerPlan {
-    pub fn constant(h: &impl AcceptSafe<f64>, n: usize) -> Self;  // ships constant(0.050, n)
-    pub fn z_of(&self, i: usize) -> f64;
-    pub fn index_at(&self, z: f64) -> usize;   // binary search on cum
+    pub fn new(z0_mm: f64, heights_mm: Vec<f64>) -> Result<Self, LayerPlanError>;
+    pub fn constant(h: &impl AcceptSafe<f64>, n: usize) -> Result<Self, LayerPlanError>; // ships constant(0.050, n)
+    pub fn z_of(&self, i: usize) -> Option<f64>;       // lower boundary only when i < count()
+    pub fn index_at(&self, z: f64) -> Option<usize>;   // binary search on cum
     pub fn count(&self) -> usize;
 }
 ```
+
+`LayerPlan` custom-serializes and deserializes through `LayerPlanWire` and `new`: its raw numeric
+fields stay private; `z0_mm` is a signed finite value, every height is finite and strictly
+positive, and each cumulative addition must remain finite **and strictly advance the boundary**.
+A finite positive height whose addition rounds away is rejected with `LayerPlanError`. An empty
+`heights_mm` list is valid (zero layers); `cum` is always recomputed from the two wire fields and
+cannot be supplied or trusted by a caller. `z_of(i)` returns a lower boundary only for an existing
+layer (`i < count()`), so an empty plan and `i == count()` return `None`. Numerical comparisons
+treat `+0.0` and `-0.0` coherently and never panic.
 
 **No `layer_height_mm: f64` exists anywhere.** Every consumer takes `&LayerPlan`: island-birth z
 tolerance, minima connect layers, the `_ISLAND_BIRTH_LINK_R_MM = 0.6` tuning in
@@ -457,20 +566,21 @@ transient activation, and the future slicer. The variable-height slicer later re
 // plinth-core::cost — passive vocabulary shared by reports, search, and future plating.
 #[derive(Clone, Copy)]
 pub struct CostVector {
-    pub z_height_mm: f64,
-    pub print_time_s: f64,   // Σ layers (exposure + lift) over the LayerPlan — NOT z alone
-    pub resin: Resin,        // { model_ml, support_ml, trapped_ml } — trapped is drainability-aware
-    pub scar: Scar,          // { area_mm2, delicacy_weighted, worst_patch_mm2 }
-    pub risk: Risk,          // { max_effective_x, zipper_arms, min_lateral_spread_mm }
-    pub fidelity: Fidelity,  // Surrogate | ProxyRefined | Exact — a cost always knows how much it lied
+    z_height_mm: Finite,
+    print_time_s: Finite,    // Σ layers (exposure + lift) over the LayerPlan — NOT z alone
+    resin: Resin,            // private Finite magnitudes: { model_ml, support_ml, trapped_ml }
+    scar: Scar,              // private Finite magnitudes: { area_mm2, delicacy_weighted, worst_patch_mm2 }
+    risk: Risk,              // private validated fields: { max_effective_x, zipper_arms, min_lateral_spread_mm }
+    fidelity: Fidelity,      // Surrogate | ProxyRefined | Exact — a cost always knows how much it lied
 }
-pub struct OrientationCost { pub orientation: OrientationId, pub cost: CostVector }
-pub struct ParetoPoint { pub orientation: OrientationId, pub cost: CostVector }
+pub struct OrientationCost { orientation: OrientationId, cost: CostVector }
+pub struct ParetoPoint { orientation: OrientationId, cost: CostVector }
 pub struct OptimizationSummary {
-    pub selected: OrientationCost,
-    pub pareto: Vec<ParetoPoint>,
-    pub candidates_examined: u64,
+    selected: OrientationCost,
+    pareto: Vec<ParetoPoint>,
+    candidates_examined: u64,
 }
+impl OptimizationSummary { pub fn new(/* all fields */) -> Result<Self, OptimizationError> { /* validate below */ } }
 pub enum SearchEvidence {
     NotEvaluated,
     Evaluated(OptimizationSummary),
@@ -483,6 +593,16 @@ pub trait CostProvider {
 }
 pub trait Evaluator { /* ordered map-collect; CpuEvaluator (rayon) now, WgpuEvaluator later */ }
 ```
+
+`CostVector`, `Resin`, `Scar`, and `Risk` keep their numeric fields private. Their fallible
+constructors reject non-finite values and reject negative physical quantities; their custom
+deserializers route through those constructors. Read-only accessors expose the validated values.
+
+`OptimizationSummary::new` (also used by custom deserialization) rejects an empty Pareto set,
+zero `candidates_examined`, or a candidate count smaller than `pareto.len()`. Pareto orientation
+IDs must be unique, and the selected `(OrientationId, CostVector)` pair must match exactly one
+Pareto point — not just the same ID or an approximately equal cost. This prevents a report from
+claiming an unevaluated or internally inconsistent winner.
 
 Print time is `Σ layers (exposure + lift)` over the `LayerPlan`, not z-height — it reduces to
 z-height only under a constant plan, which is precisely why `LayerPlan` is in the CostVector's path

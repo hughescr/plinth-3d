@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 /// A stable FNV-1a content digest for numeric buffers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -7,8 +8,9 @@ pub struct ContentDigest(pub u64);
 
 /// A numeric buffer that contains an IEEE value not valid for a content
 /// identity. Such input must be rejected rather than silently normalized.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub enum DigestError {
+    #[error("numeric buffer contains a non-finite value at index {index}")]
     NonFinite { index: usize },
 }
 

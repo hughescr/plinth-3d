@@ -395,7 +395,7 @@ name and value are the contract.
 |---|---|---|---|---|---|
 | `X_STAR_CONE` *(new; named `X_STAR_CONE` in 02 §3.5)* | **[25.00, 25.34]** | — | **M** plate 5, 2026-07-30 | `plinth-core::constants::load` | Store the interval, not a midpoint. One boundary inversion at 25.00. Plate-5 arms were **cones**; plate 6 reproduced the boundary on cylinders, so this is **not** a cone artifact — §4.1. |
 | `X_STAR_CYLINDER` *(new; named `X_STAR_CYLINDER` in 02 §3.5)* | **(19.91, 30.48)** | — | **M** plate 6, 2026-07-31 | `plinth-core::constants::load` | Cylindrical-arm boundary; geometric centre 24.6, **n = 1 at each bracket edge**, conditional on 4.00 mm arms and a 30 mm² cap. Store the interval, never 24.6. Contains `X_STAR_CONE` — that is what retires the cone-artifact question (§4.1). Was `Pending<f64>` until 2026-07-31. |
-| `LOAD_SHARING` *(new; `enum LoadSharing`, 02 §3.6)* | **`Additive { n_eff_cap: 6.0 }`** | — | **M** plate 6, 2026-07-31 | `plinth-support::load` | 12/12 strips survived `X_arm = 60.15` at N = 2,3,4,6 while the matched mono died — sharing is **at least additive**, `Zipper` is refuted. `n_eff_cap = 6.0` is the largest group measured. **All five §4.2 caveats must live in the `note` field.** Was `Pending<LoadSharing>` until 2026-07-31. Categorical payload → no meaningful `err`; see §4.2. |
+| `LOAD_SHARING` *(new; explicitly serde-tagged `enum LoadSharing`, 02 §3.6)* | **`Additive { n_eff_cap: 6.0 }`** | — | **M** plate 6, 2026-07-31 | `plinth-core::load` (type now); `plinth-core::constants::load` (constant, later M0); `plinth-support::load` (later reexports/consumes) | The passive validated type lives in core now; the `LOAD_SHARING` declaration is later M0 constants work. `plinth-support::load` later reexports the type and owns `ArmGroup` / `effective_x` behaviour. 12/12 strips survived `X_arm = 60.15` at N = 2,3,4,6 while the matched mono died — sharing is **at least additive**, `Zipper` is refuted. `n_eff_cap = 6.0` is the largest group measured and must validate finite and `>= 1.0`. **All five §4.2 caveats must live in the `note` field.** Was `Pending<LoadSharing>` until 2026-07-31. A `Measured` value requires its date. Categorical payload → `err: None`, serialized exactly as `"err": null`; see §4.2. |
 | `X_ALLOWED` *(new — does not exist in Python)* | **12.0** | — | **D** from `X_STAR_CONE` with a 2× safety factor, margin-checked against `X_STAR_CYLINDER` | `plinth-core::constants::load` | `Derived<f64>`, not `Measured` and not `Pending` — 02 §3.5 declares it exactly this way. All arm sizing derives from it; do not hardcode 12.0 anywhere else. Plate 6 did **not** move it: 12.0 clears the binding measured bracket edge by `19.91/12 = 1.66×` (§4.1). That is a margin check, not an `X*/2` recomputation. |
 | `peel_pressure_pa` (config.py:63) | 3000.0 | Pa | **P** — order-of-magnitude only | `plinth-core::constants::deflection` **only** | Literature puts real MSLA peel stress at **12–13 kPa** (`../reference/literature/lit-green-peel.md`), i.e. this may be ~4× low. Used unclamped as the angle-aware lateral load term in `_shaft_r_for_L`. Must **not** be recombined to re-derive X. |
 | `tensile_green_mpa` (config.py:91) | 0.288 | MPa | **D** from `X_ALLOWED` — *not* a green-tensile datasheet value | `plinth-core::constants::load` (derived) | Chosen so `0.288e6/(3000·8) = 12.0`. Pre-plate-5 it was 10.0 MPa, which put X_allowed at 416.7. Plausibility check only: pairing X*≈25 with the literature's 12–13 kPa implies ~0.33 MPa, same order. |
@@ -722,8 +722,8 @@ refuted as a description of this printer's behaviour.**
 
 | Constant / branch | Resolution |
 |---|---|
-| `LOAD_SHARING` | `Pending<LoadSharing>` → **`Measured<LoadSharing>`**, plate 6, 2026-07-31, value **`LoadSharing::Additive { n_eff_cap: 6.0 }`**. Per-arm demand becomes `A_supported_group / (N_eff · X_allowed)`. |
-| `n_eff_cap` | **6.0** — the largest group size measured. Caveat 2 gives no upper bracket, so the discount is granted only across the measured range; past N = 6 it is an extrapolation. This is the only free parameter the resolution introduces; it is a `Derived` choice from the plate's design grid, and it belongs in the same `note`. |
+| `LOAD_SHARING` | `Pending<LoadSharing>` → **`Measured<LoadSharing>`**, plate 6, 2026-07-31, value **`LoadSharing::Additive { n_eff_cap: 6.0 }`**. The passive, explicitly serde-tagged `LoadSharing` type lives in `plinth-core::load` now. Its `LOAD_SHARING` declaration is later M0 constants work in `plinth-core::constants::load`; `plinth-support::load` later reexports the type and owns `ArmGroup` / `effective_x` behaviour. Per-arm demand becomes `A_supported_group / (N_eff · X_allowed)`. |
+| `n_eff_cap` | **6.0** — the largest group size measured. Validate it as finite and `>= 1.0`. Caveat 2 gives no upper bracket, so the discount is granted only across the measured range; past N = 6 it is an extrapolation. This is the only free parameter the resolution introduces; it is a `Derived` choice from the plate's design grid, and it belongs in the same `note`. |
 | `N_eff` | **All arms rigidly co-carrying the region — no front-band filter.** The pre-registered additive branch defined `N_eff` as "arms within a front-normal (Y) band"; caveat 5 removes that restriction, because sharing appeared along both axes. `N_eff` still requires genuine co-carrying (arms under one contiguous rigid region), never mere proximity. |
 | Orientation term | **None.** Do not add a peel-axis term to sizing or placement until something contradicts caveat 5. Retain `peel_dir` as an input to `effective_x` (02 §3.6) so an orientation term can be added later without a signature change, and say in the doc comment that it is currently unused *by measurement*. |
 | `LoadSharing::Zipper` | **Kept in the enum.** It is the strictly-conservative branch (per-arm sizing can only over-size) and it is the A/B arm that `cargo test -p plinth-support --test load_sharing_both` and `plinth calibrate` exercise. Refuted is not deleted. |
@@ -731,11 +731,66 @@ refuted as a description of this printer's behaviour.**
 | Placement / CVT | The sharing term is a pluggable weight on the cell-area demand in the §2.3 objective, never an inline constant. It is now a *measured* weight rather than a speculative one, but the plumbing is unchanged. |
 
 ```rust
+// plinth-core::load now — passive type and validation only.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Serialize)]
+#[serde(transparent)]
+pub struct EffectiveArmCount(Finite);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum LoadSharingError {
+    #[error("n_eff_cap must be finite")]
+    NonFinite,
+    #[error("n_eff_cap must be at least 1.0")]
+    BelowOne,
+}
+
+impl EffectiveArmCount {
+    pub fn new(value: f64) -> Result<Self, LoadSharingError> {
+        let value = Finite::new(value).map_err(|_| LoadSharingError::NonFinite)?;
+        if value.get() < 1.0 {
+            return Err(LoadSharingError::BelowOne);
+        }
+        Ok(Self(value))
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LoadSharing {
+    Zipper,
+    Additive { n_eff_cap: EffectiveArmCount },
+}
+
+impl LoadSharing {
+    pub fn additive(n_eff_cap: f64) -> Result<Self, LoadSharingError> {
+        Ok(Self::Additive { n_eff_cap: EffectiveArmCount::new(n_eff_cap)? })
+    }
+}
+
+impl<'de> Deserialize<'de> for LoadSharing {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where D: serde::Deserializer<'de> {
+        #[derive(Deserialize)]
+        #[serde(tag = "kind", rename_all = "snake_case")]
+        enum Wire { Zipper, Additive { n_eff_cap: f64 } }
+
+        match Wire::deserialize(deserializer)? {
+            Wire::Zipper => Ok(Self::Zipper),
+            Wire::Additive { n_eff_cap } => {
+                Self::additive(n_eff_cap).map_err(serde::de::Error::custom)
+            }
+        }
+    }
+}
+
+// Later M0 constants work: plinth-core::constants::load declares:
 pub static LOAD_SHARING: Measured<LoadSharing> = /* LoadSharing::Additive { n_eff_cap: 6.0 }
-    — plate 6, 2026-07-31. 12/12 strips survived X_arm = 60.15 at N = 2,3,4,6 (pitch 2.0
-    and 2.8 mm, arm lines along X and along Y) while the matched mono died at the same X.
-    Survival tracks X_tot = A_cap/(N*A_arm). AT LEAST additive: never credit more than N.
-    Caveats 1-5 of 03 section 4.2 belong verbatim in `note`. */;
+    — plate 6, 2026-07-31. Measured requires this date. 12/12 strips survived X_arm = 60.15
+    at N = 2,3,4,6 (pitch 2.0 and 2.8 mm, arm lines along X and along Y) while the matched mono
+    died at the same X. Survival tracks X_tot = A_cap/(N*A_arm). AT LEAST additive: never credit
+    more than N. `err: None` serializes exactly as `"err": null`. Caveats 1-5 of 03 section 4.2
+    belong verbatim in `note`. `plinth-support::load` reexports LoadSharing and owns ArmGroup /
+    effective_x behaviour. */;
 ```
 
 > **One mechanism wrinkle.** `Measured<T>` (02 §3.5) carries `err: Option<T>`. For a
@@ -745,11 +800,13 @@ pub static LOAD_SHARING: Measured<LoadSharing> = /* LoadSharing::Additive { n_ef
 > uncertainty — all five caveats above — belongs in `note`. A categorical measurement's
 > lack of an error bar must stay visible in the type and wire form, not be papered over.
 
-The name is still `LOAD_SHARING`, the payload is still the
-`enum LoadSharing { Zipper, Additive { .. } }` from `plinth-support::load` — **not** a
-scalar discount factor, and **not** a constant named `MULTI_ARM_SHARING`. Route **all**
-group-sizing through it, so the A/B against `Zipper` stays runnable and so the
-corpus-wide delta of the 2026-07-31 switch is measurable rather than assumed.
+The passive payload is the explicitly serde-tagged `enum LoadSharing { Zipper,
+Additive { .. } }` from `plinth-core::load` now — **not** a scalar discount factor.
+The name is still `LOAD_SHARING`, not `MULTI_ARM_SHARING`, when the later M0 constants
+work declares it in `plinth-core::constants::load`. `plinth-support::load` later
+reexports the type and owns `ArmGroup` / `effective_x` behaviour. Route **all**
+group-sizing through that later declaration, so the A/B against `Zipper` stays runnable
+and so the corpus-wide delta of the 2026-07-31 switch is measurable rather than assumed.
 
 ### 4.3 Family A6 is VOID — an unexplained in-print loss above z ≈ 9 mm
 

@@ -1,61 +1,940 @@
 use plinth_core::{
-    canonical_f64_bits, digest_f64_slice, AcceptSafe, CostVector, Defect, DefectReport, Derived,
-    DigestError, Fidelity, LayerPlan, LayerPlanError, Measured, MetricId, MetricSet, MetricValue,
-    ModelId, OptimizationSummary, OrientationCost, OrientationId, ParetoPoint, Pending, PlateId,
-    Resin, Risk, Scar, Severity, SiteId, StageId, Termination, ViolationKind,
+    canonical_f64_bits, digest_f64_slice, AcceptSafe, ConstantId, CostError, CostVector,
+    DecisionId, Defect, DefectReport, Derived, DigestError, Fidelity, Finite, FiniteError, FixerId,
+    LayerPlan, LayerPlanError, LoadSharing, LoadSharingError, Measured, MetricId, MetricSet,
+    MetricValue, ModelId, OptimizationError, OptimizationSummary, OrientationCost, OrientationId,
+    ParetoPoint, PartialCost, Pending, PlateId, ProvenanceManifest, ProvenanceRef, ReportError,
+    Resin, Risk, Scar, SearchEvidence, Severity, SiteId, Stage, StageId, Termination,
+    TerminationError, ViolationKind,
 };
+use serde_json::json;
 
-#[test]
-fn only_blocking_defects_reject_a_report_independent_of_metrics_and_search() {
-    let cost = CostVector::new(
-        42.0,
+fn valid_cost(z_height_mm: f64) -> CostVector {
+    CostVector::new(
+        z_height_mm,
         1_200.0,
-        Resin::new(3.0, 0.5, 0.0),
-        Scar::new(1.0, 2.0, 0.2),
-        Risk::new(5.0, 0, 8.0),
+        Resin::new(3.0, 0.5, 0.0).unwrap(),
+        Scar::new(1.0, 2.0, 0.2).unwrap(),
+        Risk::new(5.0, 0, 8.0).unwrap(),
         Fidelity::Exact,
-    );
-    let search = plinth_core::SearchEvidence::Evaluated(OptimizationSummary::new(
+    )
+    .unwrap()
+}
+
+fn valid_summary() -> OptimizationSummary {
+    let cost = valid_cost(42.0);
+    OptimizationSummary::new(
         OrientationCost::new(OrientationId::from("orient-1"), cost),
         24,
         vec![ParetoPoint::new(OrientationId::from("orient-1"), cost)],
-    ));
-    let metrics = MetricSet::new([(MetricId::from("boundary_edges"), MetricValue::new(0.0))]);
-    let report = DefectReport::new(
-        ModelId::from("treant"),
-        vec![Defect {
-            kind: ViolationKind::ScarCapExceeded,
-            site: SiteId::Face(9),
-            severity: Severity::Warning,
-            measure: 2.0,
-            detail: "visible but waived by policy outside this type".into(),
-        }],
-        metrics.clone(),
-        StageId::Audit,
-        Termination::Converged,
-        search.clone(),
-    );
-    assert!(report.accepted());
+    )
+    .unwrap()
+}
 
-    let rejected = DefectReport::new(
-        report.subject.clone(),
-        vec![Defect {
-            severity: Severity::Blocking,
-            ..report.defects[0].clone()
-        }],
-        metrics,
+fn terminal_defect(site: SiteId) -> Defect {
+    Defect::new(
+        ViolationKind::EmitBoundaryEdge,
+        site,
+        Severity::Blocking,
+        -1.0,
+        "terminal audit defect",
+    )
+    .unwrap()
+}
+
+fn report(defects: Vec<Defect>, termination: Termination) -> Result<DefectReport, ReportError> {
+    DefectReport::new(
+        ModelId::from("treant"),
+        defects,
+        MetricSet::new([(
+            MetricId::from("signed_margin"),
+            MetricValue::new(-0.25).unwrap(),
+        )]),
         StageId::Audit,
-        Termination::Converged,
-        search,
-    );
-    assert!(!rejected.accepted());
+        ProvenanceManifest::default(),
+        termination,
+        SearchEvidence::NotEvaluated,
+    )
+}
+
+fn valid_cap_report() -> DefectReport {
+    let site = SiteId::Member(7);
+    let cap_defect = Defect::new(
+        ViolationKind::RepairCapExhausted,
+        site.clone(),
+        Severity::Blocking,
+        -1.0,
+        "repair budget exhausted",
+    )
+    .unwrap();
+    let termination = Termination::cap_exhausted(
+        ViolationKind::LoadExceeded,
+        FixerId::SplitLoadAcrossArms,
+        site,
+        3,
+        -2.0,
+        -1.0,
+        "no further improvement",
+    )
+    .unwrap();
+    report(vec![cap_defect], termination).unwrap()
+}
+
+fn valid_pool_report() -> DefectReport {
+    let site = SiteId::Contact(4);
+    let defect = Defect::new(
+        ViolationKind::UnroutedContact,
+        site.clone(),
+        Severity::Blocking,
+        1.0,
+        "no candidates remain",
+    )
+    .unwrap();
+    report(
+        vec![defect],
+        Termination::pool_exhausted(ViolationKind::UnroutedContact, site),
+    )
+    .unwrap()
 }
 
 #[test]
-fn measured_none_error_is_json_null() {
-    let measured = Measured::new(0.05_f64, PlateId::from("plate-6"), None, "caliper");
-    let json = serde_json::to_value(measured).unwrap();
-    assert!(json.get("err").unwrap().is_null());
+fn finite_rejects_nonfinite_and_preserves_signed_zero() {
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(Finite::new(value), Err(FiniteError::NonFinite));
+    }
+    let negative_zero = Finite::new(-0.0).unwrap();
+    assert!(negative_zero.get().is_sign_negative());
+    let round_trip: Finite =
+        serde_json::from_str(&serde_json::to_string(&negative_zero).unwrap()).unwrap();
+    assert!(round_trip.get().is_sign_negative());
+    assert!(serde_json::from_str::<Finite>("1e9999").is_err());
+}
+
+#[test]
+fn cost_physical_magnitudes_are_finite_and_nonnegative() {
+    assert!(matches!(
+        Resin::new(-1.0, 0.0, 0.0),
+        Err(CostError::Negative { field: "model_ml" })
+    ));
+    assert!(matches!(
+        Resin::new(0.0, -1.0, 0.0),
+        Err(CostError::Negative {
+            field: "support_ml"
+        })
+    ));
+    assert!(matches!(
+        Resin::new(0.0, 0.0, -1.0),
+        Err(CostError::Negative {
+            field: "trapped_ml"
+        })
+    ));
+    assert!(Scar::new(-1.0, 0.0, 0.0).is_err());
+    assert!(Scar::new(0.0, -1.0, 0.0).is_err());
+    assert!(Scar::new(0.0, 0.0, -1.0).is_err());
+    assert!(Risk::new(-1.0, 0, 0.0).is_err());
+    assert!(Risk::new(0.0, 0, -1.0).is_err());
+
+    let resin = Resin::new(0.0, 0.0, 0.0).unwrap();
+    let scar = Scar::new(0.0, 0.0, 0.0).unwrap();
+    let risk = Risk::new(0.0, 0, 0.0).unwrap();
+    assert!(CostVector::new(-1.0, 0.0, resin, scar, risk, Fidelity::Exact).is_err());
+    assert!(CostVector::new(0.0, -1.0, resin, scar, risk, Fidelity::Exact).is_err());
+    assert!(CostVector::new(f64::NAN, 0.0, resin, scar, risk, Fidelity::Exact).is_err());
+    assert!(CostVector::new(0.0, f64::NAN, resin, scar, risk, Fidelity::Exact).is_err());
+    assert!(Resin::new(f64::INFINITY, 0.0, 0.0).is_err());
+    assert!(Resin::new(0.0, f64::NAN, 0.0).is_err());
+    assert!(Resin::new(0.0, 0.0, f64::NEG_INFINITY).is_err());
+    assert!(Scar::new(f64::NAN, 0.0, 0.0).is_err());
+    assert!(Scar::new(0.0, f64::INFINITY, 0.0).is_err());
+    assert!(Scar::new(0.0, 0.0, f64::NEG_INFINITY).is_err());
+    assert!(Risk::new(f64::NAN, 0, 0.0).is_err());
+    assert!(Risk::new(0.0, 0, f64::INFINITY).is_err());
+    assert!(PartialCost::new(Fidelity::Surrogate, Some(-1.0), None, None, None, None).is_err());
+    assert!(PartialCost::new(Fidelity::Surrogate, None, Some(f64::NAN), None, None, None).is_err());
+
+    let zero = CostVector::new(-0.0, 0.0, resin, scar, risk, Fidelity::Exact).unwrap();
+    assert!(zero.z_height_mm().is_sign_negative());
+    assert_eq!(
+        serde_json::from_value::<CostVector>(serde_json::to_value(zero).unwrap()).unwrap(),
+        zero
+    );
+
+    let valid = valid_cost(42.0);
+    let valid_value = serde_json::to_value(valid).unwrap();
+    for pointer in [
+        "/z_height_mm",
+        "/print_time_s",
+        "/resin/model_ml",
+        "/resin/support_ml",
+        "/resin/trapped_ml",
+        "/scar/area_mm2",
+        "/scar/delicacy_weighted",
+        "/scar/worst_patch_mm2",
+        "/risk/max_effective_x",
+        "/risk/min_lateral_spread_mm",
+    ] {
+        let mut negative = valid_value.clone();
+        *negative.pointer_mut(pointer).unwrap() = json!(-1.0);
+        assert!(
+            serde_json::from_value::<CostVector>(negative).is_err(),
+            "negative JSON unexpectedly accepted at {pointer}"
+        );
+    }
+
+    let valid_text = serde_json::to_string(&valid).unwrap();
+    for (field, rendered) in [
+        ("z_height_mm", "42.0"),
+        ("print_time_s", "1200.0"),
+        ("model_ml", "3.0"),
+        ("support_ml", "0.5"),
+        ("trapped_ml", "0.0"),
+        ("area_mm2", "1.0"),
+        ("delicacy_weighted", "2.0"),
+        ("worst_patch_mm2", "0.2"),
+        ("max_effective_x", "5.0"),
+        ("min_lateral_spread_mm", "8.0"),
+    ] {
+        let original = format!("\"{field}\":{rendered}");
+        let replacement = format!("\"{field}\":1e9999");
+        let nonfinite = valid_text.replacen(&original, &replacement, 1);
+        assert_ne!(valid_text, nonfinite, "test did not find {field}");
+        assert!(
+            serde_json::from_str::<CostVector>(&nonfinite).is_err(),
+            "non-finite JSON unexpectedly accepted for {field}"
+        );
+    }
+
+    let partial =
+        PartialCost::new(Fidelity::Surrogate, Some(1.0), Some(2.0), None, None, None).unwrap();
+    let canonical_partial = json!({
+        "fidelity": "surrogate",
+        "z_height_mm": 1.0,
+        "print_time_s": 2.0,
+        "resin": null,
+        "scar": null,
+        "risk": null
+    });
+    assert_eq!(serde_json::to_value(partial).unwrap(), canonical_partial);
+    assert_eq!(
+        serde_json::from_value::<PartialCost>(canonical_partial.clone()).unwrap(),
+        partial
+    );
+    let mut partial_json = canonical_partial;
+    partial_json["z_height_mm"] = json!(-1.0);
+    assert!(serde_json::from_value::<PartialCost>(partial_json).is_err());
+}
+
+#[test]
+fn signed_report_measures_are_allowed_but_nonfinite_values_are_rejected() {
+    let metric = MetricValue::new(-4.5).unwrap();
+    assert_eq!(metric.get(), -4.5);
+    assert!(MetricValue::new(f64::NEG_INFINITY).is_err());
+    assert_eq!(serde_json::from_str::<MetricValue>("-4.5").unwrap(), metric);
+    assert!(serde_json::from_str::<MetricValue>("1e9999").is_err());
+
+    let defect = Defect::new(
+        ViolationKind::LoadExceeded,
+        SiteId::Member(1),
+        Severity::Warning,
+        -2.0,
+        "signed delta",
+    )
+    .unwrap();
+    assert_eq!(defect.measure.get(), -2.0);
+    assert!(Defect::new(
+        ViolationKind::LoadExceeded,
+        SiteId::Member(1),
+        Severity::Warning,
+        f64::NAN,
+        "bad"
+    )
+    .is_err());
+    assert!(serde_json::from_str::<Defect>(
+        r#"{"kind":"load_exceeded","site":{"kind":"member","id":1},"severity":"warning","measure":1e9999,"detail":"bad"}"#
+    )
+    .is_err());
+}
+
+#[test]
+fn load_sharing_is_tagged_and_validated_at_the_measured_boundary() {
+    let additive = LoadSharing::additive(1.0).unwrap();
+    assert_eq!(additive.n_eff_cap(), Some(1.0));
+    assert_eq!(
+        serde_json::to_value(additive).unwrap(),
+        json!({"kind": "additive", "n_eff_cap": 1.0})
+    );
+    assert_eq!(
+        serde_json::from_value::<LoadSharing>(serde_json::to_value(additive).unwrap()).unwrap(),
+        additive
+    );
+    assert_eq!(
+        serde_json::from_value::<LoadSharing>(json!({"kind": "zipper"})).unwrap(),
+        LoadSharing::Zipper
+    );
+    assert_eq!(
+        LoadSharing::additive(0.999),
+        Err(LoadSharingError::BelowOne)
+    );
+    assert_eq!(
+        LoadSharing::additive(f64::INFINITY),
+        Err(LoadSharingError::NonFinite)
+    );
+    assert!(
+        serde_json::from_value::<LoadSharing>(json!({"kind": "additive", "n_eff_cap": 0.999}))
+            .is_err()
+    );
+    assert!(
+        serde_json::from_str::<LoadSharing>(r#"{"kind":"additive","n_eff_cap":1e9999}"#).is_err()
+    );
+
+    let measured = Measured::new(
+        LoadSharing::additive(6.0).unwrap(),
+        PlateId::from("plate-6"),
+        None,
+        "2026-07-31",
+        "categorical measurement",
+    );
+    let measured_json = serde_json::to_value(measured).unwrap();
+    assert!(measured_json["err"].is_null());
+    assert_eq!(measured_json["value"]["kind"], "additive");
+    assert_eq!(measured_json["value"]["n_eff_cap"], 6.0);
+}
+
+#[test]
+fn provenance_is_nested_deterministic_and_measured_dates_are_required() {
+    let mut manifest = ProvenanceManifest::default();
+    manifest.record(
+        DecisionId::from("decision_z"),
+        ConstantId::from("constant_z"),
+        ProvenanceRef::Derived {
+            from: vec!["source".into()],
+            note: "z".into(),
+        },
+    );
+    manifest.record(
+        DecisionId::from("decision_a"),
+        ConstantId::from("constant_z"),
+        ProvenanceRef::Derived {
+            from: vec!["source".into()],
+            note: "z".into(),
+        },
+    );
+    manifest.record(
+        DecisionId::from("decision_a"),
+        ConstantId::from("constant_a"),
+        ProvenanceRef::Measured {
+            plate: PlateId::from("plate-6"),
+            date: "2026-07-31".into(),
+            note: "a".into(),
+        },
+    );
+    let text = serde_json::to_string(&manifest).unwrap();
+    assert!(text.find("decision_a").unwrap() < text.find("decision_z").unwrap());
+    assert!(text.find("constant_a").unwrap() < text.find("constant_z").unwrap());
+    assert_eq!(
+        serde_json::from_str::<ProvenanceManifest>(&text).unwrap(),
+        manifest
+    );
+
+    let measured = Measured::new(
+        0.05_f64,
+        PlateId::from("plate-6"),
+        None,
+        "2026-07-31",
+        "caliper",
+    );
+    let mut value = serde_json::to_value(&measured).unwrap();
+    assert!(value["err"].is_null());
+    assert_eq!(
+        measured.provenance(),
+        ProvenanceRef::Measured {
+            plate: PlateId::from("plate-6"),
+            date: "2026-07-31".into(),
+            note: "caliper".into(),
+        }
+    );
+    value.as_object_mut().unwrap().remove("date");
+    assert!(serde_json::from_value::<Measured<f64>>(value).is_err());
+}
+
+#[test]
+fn report_requires_provenance_and_only_blocking_defects_control_acceptance() {
+    let nonblocking = vec![
+        Defect::new(
+            ViolationKind::ScarCapExceeded,
+            SiteId::Face(1),
+            Severity::Info,
+            -2.0,
+            "informational signed delta",
+        )
+        .unwrap(),
+        Defect::new(
+            ViolationKind::ArrangementInstability,
+            SiteId::Member(2),
+            Severity::Warning,
+            3.0,
+            "warning remains visible",
+        )
+        .unwrap(),
+    ];
+    let metrics = MetricSet::new([(
+        MetricId::from("independent_metric"),
+        MetricValue::new(-99.0).unwrap(),
+    )]);
+    let search = SearchEvidence::Evaluated(valid_summary());
+    let accepted = DefectReport::new(
+        ModelId::from("treant"),
+        nonblocking.clone(),
+        metrics.clone(),
+        StageId::Audit,
+        ProvenanceManifest::default(),
+        Termination::Converged,
+        search.clone(),
+    )
+    .unwrap();
+    assert!(accepted.accepted());
+    let mut blocking = nonblocking;
+    blocking.push(terminal_defect(SiteId::Model(ModelId::from("treant"))));
+    let rejected = DefectReport::new(
+        ModelId::from("treant"),
+        blocking,
+        metrics,
+        StageId::Audit,
+        ProvenanceManifest::default(),
+        Termination::Converged,
+        search,
+    )
+    .unwrap();
+    assert!(!rejected.accepted());
+
+    let mut json = serde_json::to_value(accepted).unwrap();
+    json.as_object_mut().unwrap().remove("provenance");
+    assert!(serde_json::from_value::<DefectReport>(json).is_err());
+
+    let manifest = ProvenanceManifest::new([(
+        DecisionId::from("load_acceptance"),
+        [(
+            ConstantId::from("load_sharing"),
+            ProvenanceRef::Measured {
+                plate: PlateId::from("plate-6"),
+                date: "2026-07-31".into(),
+                note: "measured".into(),
+            },
+        )],
+    )]);
+    let with_provenance = DefectReport::new(
+        ModelId::from("treant"),
+        vec![],
+        MetricSet::default(),
+        StageId::Audit,
+        manifest,
+        Termination::Converged,
+        SearchEvidence::NotEvaluated,
+    )
+    .unwrap();
+    let mut missing_date = serde_json::to_value(with_provenance).unwrap();
+    missing_date["provenance"]["load_acceptance"]["load_sharing"]
+        .as_object_mut()
+        .unwrap()
+        .remove("date");
+    assert!(serde_json::from_value::<DefectReport>(missing_date).is_err());
+}
+
+#[test]
+fn cap_exhaustion_requires_complete_termination_and_matching_blocker() {
+    assert_eq!(
+        Termination::cap_exhausted(
+            ViolationKind::LoadExceeded,
+            FixerId::SplitLoadAcrossArms,
+            SiteId::Member(7),
+            0,
+            1.0,
+            1.0,
+            "bad"
+        ),
+        Err(TerminationError::ZeroAttempts)
+    );
+    assert_eq!(
+        Termination::cap_exhausted(
+            ViolationKind::RepairCapExhausted,
+            FixerId::SplitLoadAcrossArms,
+            SiteId::Member(7),
+            1,
+            1.0,
+            1.0,
+            "bad"
+        ),
+        Err(TerminationError::RepairCapAsOriginalKind)
+    );
+    assert!(Termination::cap_exhausted(
+        ViolationKind::LoadExceeded,
+        FixerId::SplitLoadAcrossArms,
+        SiteId::Member(7),
+        1,
+        f64::NAN,
+        1.0,
+        "bad"
+    )
+    .is_err());
+    assert!(Termination::cap_exhausted(
+        ViolationKind::LoadExceeded,
+        FixerId::SplitLoadAcrossArms,
+        SiteId::Member(7),
+        1,
+        1.0,
+        f64::INFINITY,
+        "bad"
+    )
+    .is_err());
+
+    let termination = Termination::cap_exhausted(
+        ViolationKind::LoadExceeded,
+        FixerId::SplitLoadAcrossArms,
+        SiteId::Member(7),
+        1,
+        -2.0,
+        -1.0,
+        "signed finite deltas are valid",
+    )
+    .unwrap();
+    assert_eq!(
+        report(vec![], termination),
+        Err(ReportError::MissingCapExhaustedDefect)
+    );
+
+    let wrong_site_termination = Termination::cap_exhausted(
+        ViolationKind::LoadExceeded,
+        FixerId::SplitLoadAcrossArms,
+        SiteId::Member(7),
+        1,
+        2.0,
+        1.0,
+        "wrong matching site",
+    )
+    .unwrap();
+    let wrong_site = Defect::new(
+        ViolationKind::RepairCapExhausted,
+        SiteId::Member(8),
+        Severity::Blocking,
+        1.0,
+        "wrong site",
+    )
+    .unwrap();
+    assert_eq!(
+        report(vec![wrong_site], wrong_site_termination),
+        Err(ReportError::MissingCapExhaustedDefect)
+    );
+
+    let wrong_kind_termination = Termination::cap_exhausted(
+        ViolationKind::LoadExceeded,
+        FixerId::SplitLoadAcrossArms,
+        SiteId::Member(7),
+        1,
+        2.0,
+        1.0,
+        "wrong matching kind",
+    )
+    .unwrap();
+    let wrong_kind = Defect::new(
+        ViolationKind::LoadExceeded,
+        SiteId::Member(7),
+        Severity::Blocking,
+        1.0,
+        "wrong kind",
+    )
+    .unwrap();
+    assert_eq!(
+        report(vec![wrong_kind], wrong_kind_termination),
+        Err(ReportError::MissingCapExhaustedDefect)
+    );
+
+    let valid = valid_cap_report();
+    let mut missing_fixer = serde_json::to_value(&valid).unwrap();
+    missing_fixer["termination"]
+        .as_object_mut()
+        .unwrap()
+        .remove("fixer");
+    assert!(serde_json::from_value::<DefectReport>(missing_fixer).is_err());
+
+    let mut missing_blocker = serde_json::to_value(&valid).unwrap();
+    missing_blocker["defects"] = json!([]);
+    assert!(serde_json::from_value::<DefectReport>(missing_blocker).is_err());
+
+    let mut zero_attempts = serde_json::to_value(&valid).unwrap();
+    zero_attempts["termination"]["attempts"] = json!(0);
+    assert!(serde_json::from_value::<DefectReport>(zero_attempts).is_err());
+
+    let mut repair_cap_kind = serde_json::to_value(&valid).unwrap();
+    repair_cap_kind["termination"]["kind"] = json!("repair_cap_exhausted");
+    assert!(serde_json::from_value::<DefectReport>(repair_cap_kind).is_err());
+
+    let mut wrong_site = serde_json::to_value(&valid).unwrap();
+    wrong_site["defects"][0]["site"]["id"] = json!(8);
+    assert!(serde_json::from_value::<DefectReport>(wrong_site).is_err());
+
+    let mut wrong_kind = serde_json::to_value(&valid).unwrap();
+    wrong_kind["defects"][0]["kind"] = json!("load_exceeded");
+    assert!(serde_json::from_value::<DefectReport>(wrong_kind).is_err());
+
+    let text = serde_json::to_string(&valid).unwrap();
+    let nonfinite = text.replace("\"before\":-2.0", "\"before\":1e9999");
+    assert_ne!(text, nonfinite);
+    assert!(serde_json::from_str::<DefectReport>(&nonfinite).is_err());
+    let nonfinite = text.replace("\"after\":-1.0", "\"after\":-1e9999");
+    assert_ne!(text, nonfinite);
+    assert!(serde_json::from_str::<DefectReport>(&nonfinite).is_err());
+    assert_eq!(serde_json::from_str::<DefectReport>(&text).unwrap(), valid);
+}
+
+#[test]
+fn pool_exhaustion_requires_a_matching_blocking_original_defect() {
+    assert_eq!(
+        report(
+            vec![],
+            Termination::pool_exhausted(ViolationKind::UnroutedContact, SiteId::Contact(4))
+        ),
+        Err(ReportError::MissingPoolExhaustedDefect)
+    );
+    let wrong_site = Defect::new(
+        ViolationKind::UnroutedContact,
+        SiteId::Contact(5),
+        Severity::Blocking,
+        1.0,
+        "wrong site",
+    )
+    .unwrap();
+    assert_eq!(
+        report(
+            vec![wrong_site],
+            Termination::pool_exhausted(ViolationKind::UnroutedContact, SiteId::Contact(4))
+        ),
+        Err(ReportError::MissingPoolExhaustedDefect)
+    );
+    let wrong_kind = Defect::new(
+        ViolationKind::LoadExceeded,
+        SiteId::Contact(4),
+        Severity::Blocking,
+        1.0,
+        "wrong kind",
+    )
+    .unwrap();
+    assert_eq!(
+        report(
+            vec![wrong_kind],
+            Termination::pool_exhausted(ViolationKind::UnroutedContact, SiteId::Contact(4))
+        ),
+        Err(ReportError::MissingPoolExhaustedDefect)
+    );
+    let valid = valid_pool_report();
+    let mut wrong_severity = serde_json::to_value(&valid).unwrap();
+    wrong_severity["defects"][0]["severity"] = json!("warning");
+    assert!(serde_json::from_value::<DefectReport>(wrong_severity).is_err());
+
+    let mut wrong_site = serde_json::to_value(&valid).unwrap();
+    wrong_site["defects"][0]["site"]["id"] = json!(5);
+    assert!(serde_json::from_value::<DefectReport>(wrong_site).is_err());
+
+    let mut wrong_kind = serde_json::to_value(&valid).unwrap();
+    wrong_kind["defects"][0]["kind"] = json!("load_exceeded");
+    assert!(serde_json::from_value::<DefectReport>(wrong_kind).is_err());
+    assert_eq!(
+        serde_json::from_value::<DefectReport>(serde_json::to_value(&valid).unwrap()).unwrap(),
+        valid
+    );
+}
+
+#[test]
+fn aborted_termination_is_rejected() {
+    let valid = report(vec![], Termination::Converged).unwrap();
+    let mut value = serde_json::to_value(valid).unwrap();
+    value["termination"] = json!({"outcome": "aborted", "reason": "legacy"});
+    assert!(serde_json::from_value::<DefectReport>(value).is_err());
+}
+
+#[test]
+fn fixer_vocabulary_is_exhaustive_and_wire_names_remain_stable() {
+    fn wire_name(fixer: FixerId) -> &'static str {
+        match fixer {
+            FixerId::AddSeatAtMarginalArea => "add_seat_at_marginal_area",
+            FixerId::AddBirthLadderSeat => "add_birth_ladder_seat",
+            FixerId::AddMinimumSeat => "add_minimum_seat",
+            FixerId::SplitLoadAcrossArms => "split_load_across_arms",
+            FixerId::RelocateForLateralSpread => "relocate_for_lateral_spread",
+            FixerId::ReaimReseatOrQuarantine => "reaim_reseat_or_quarantine",
+            FixerId::SlideOrReseatJoint => "slide_or_reseat_joint",
+            FixerId::ReaimReduceEmbed => "reaim_reduce_embed",
+            FixerId::RerouteToPlateOrAnchor => "reroute_to_plate_or_anchor",
+            FixerId::SteepenOrBrace => "steepen_or_brace",
+            FixerId::ResizeAncestors => "resize_ancestors",
+            FixerId::RerouteOrDropRegular => "reroute_or_drop_regular",
+            FixerId::AddAuditDrainOrRefill => "add_audit_drain_or_refill",
+        }
+    }
+
+    for fixer in [
+        FixerId::AddSeatAtMarginalArea,
+        FixerId::AddBirthLadderSeat,
+        FixerId::AddMinimumSeat,
+        FixerId::SplitLoadAcrossArms,
+        FixerId::RelocateForLateralSpread,
+        FixerId::ReaimReseatOrQuarantine,
+        FixerId::SlideOrReseatJoint,
+        FixerId::ReaimReduceEmbed,
+        FixerId::RerouteToPlateOrAnchor,
+        FixerId::SteepenOrBrace,
+        FixerId::ResizeAncestors,
+        FixerId::RerouteOrDropRegular,
+        FixerId::AddAuditDrainOrRefill,
+    ] {
+        assert_eq!(
+            serde_json::to_value(fixer).unwrap(),
+            json!(wire_name(fixer))
+        );
+    }
+}
+
+#[test]
+fn search_and_termination_wire_tags_and_numeric_shapes_remain_stable() {
+    let not_evaluated = SearchEvidence::NotEvaluated;
+    assert_eq!(
+        serde_json::to_value(&not_evaluated).unwrap(),
+        json!({"status": "not_evaluated"})
+    );
+    assert_eq!(
+        serde_json::from_value::<SearchEvidence>(serde_json::to_value(&not_evaluated).unwrap())
+            .unwrap(),
+        not_evaluated
+    );
+
+    let evaluated = SearchEvidence::Evaluated(valid_summary());
+    let value = serde_json::to_value(&evaluated).unwrap();
+    assert_eq!(value["status"], "evaluated");
+    assert!(value["summary"]["selected"]["cost"]["z_height_mm"].is_number());
+    assert_eq!(
+        serde_json::from_value::<SearchEvidence>(value).unwrap(),
+        evaluated
+    );
+
+    let converged = Termination::Converged;
+    let converged_json = json!({"outcome": "converged"});
+    assert_eq!(serde_json::to_value(&converged).unwrap(), converged_json);
+    assert_eq!(
+        serde_json::from_value::<Termination>(converged_json).unwrap(),
+        converged
+    );
+
+    let converged_report = report(vec![], Termination::Converged).unwrap();
+    let converged_report_json = json!({
+        "subject": "treant",
+        "defects": [],
+        "metrics": {"signed_margin": -0.25},
+        "stage": "audit",
+        "provenance": {},
+        "termination": {"outcome": "converged"},
+        "search": {"status": "not_evaluated"}
+    });
+    assert_eq!(
+        serde_json::to_value(&converged_report).unwrap(),
+        converged_report_json
+    );
+    assert_eq!(
+        serde_json::from_value::<DefectReport>(converged_report_json).unwrap(),
+        converged_report
+    );
+
+    let cap = serde_json::to_value(valid_cap_report()).unwrap();
+    assert_eq!(cap["termination"]["outcome"], "cap_exhausted");
+    assert_eq!(cap["termination"]["fixer"], "split_load_across_arms");
+    assert!(cap["termination"]["before"].is_number());
+    assert!(cap["termination"]["after"].is_number());
+    assert!(cap["defects"][0]["measure"].is_number());
+}
+
+#[test]
+fn layer_plan_has_canonical_wire_data_and_validates_every_boundary() {
+    let height = Measured::new(
+        0.05_f64,
+        PlateId::from("plate-6"),
+        Some(0.001),
+        "2026-07-31",
+        "caliper",
+    );
+    let plan = LayerPlan::constant(&height, 3).unwrap();
+    assert_eq!(plan.heights_mm(), &[0.05, 0.05, 0.05]);
+    assert_eq!(plan.z_of(2), Some(0.1));
+    assert_eq!(plan.index_at(0.049), Some(0));
+    assert_eq!(plan.index_at(0.05), Some(1));
+    let top = plan.z_of(2).unwrap() + plan.heights_mm()[2];
+    assert_eq!(plan.index_at(top), None);
+    assert_eq!(plan.z_of(plan.count()), None);
+
+    let positive_zero_origin = LayerPlan::new(0.0, vec![0.05]).unwrap();
+    assert_eq!(positive_zero_origin.index_at(-0.0), Some(0));
+    assert_eq!(positive_zero_origin.index_at(0.0), Some(0));
+    let negative_zero_origin = LayerPlan::new(-0.0, vec![0.05]).unwrap();
+    assert_eq!(negative_zero_origin.index_at(-0.0), Some(0));
+    assert_eq!(negative_zero_origin.index_at(0.0), Some(0));
+
+    let value = serde_json::to_value(&plan).unwrap();
+    assert_eq!(
+        value,
+        json!({"z0_mm": 0.0, "heights_mm": [0.05, 0.05, 0.05]})
+    );
+    assert!(value.get("cumulative_mm").is_none());
+    assert_eq!(serde_json::from_value::<LayerPlan>(value).unwrap(), plan);
+    assert!(serde_json::from_value::<LayerPlan>(json!({
+        "z0_mm": 0.0,
+        "heights_mm": [0.05],
+        "cumulative_mm": [0.0, 99.0]
+    }))
+    .is_err());
+
+    assert_eq!(
+        LayerPlan::new(f64::NAN, vec![0.05]),
+        Err(LayerPlanError::NonFiniteOrigin)
+    );
+    assert_eq!(
+        LayerPlan::new(0.0, vec![0.0]),
+        Err(LayerPlanError::NonPositiveHeight { index: 0 })
+    );
+    assert_eq!(
+        LayerPlan::new(0.0, vec![-0.05]),
+        Err(LayerPlanError::NonPositiveHeight { index: 0 })
+    );
+    assert_eq!(
+        LayerPlan::new(0.0, vec![f64::INFINITY]),
+        Err(LayerPlanError::NonFiniteHeight { index: 0 })
+    );
+    assert_eq!(
+        LayerPlan::new(f64::MAX, vec![f64::MAX]),
+        Err(LayerPlanError::CumulativeOverflow { index: 0 })
+    );
+    assert_eq!(
+        LayerPlan::new(9_007_199_254_740_992.0, vec![1.0]),
+        Err(LayerPlanError::NonIncreasingBoundary { index: 0 })
+    );
+    assert!(serde_json::from_str::<LayerPlan>(r#"{"z0_mm":0.0,"heights_mm":[1e9999]}"#).is_err());
+    assert!(serde_json::from_str::<LayerPlan>(r#"{"z0_mm":1e9999,"heights_mm":[0.05]}"#).is_err());
+    for height in [0.0, -0.05] {
+        assert!(serde_json::from_value::<LayerPlan>(json!({
+            "z0_mm": 0.0,
+            "heights_mm": [height]
+        }))
+        .is_err());
+    }
+    assert!(serde_json::from_value::<LayerPlan>(json!({
+        "z0_mm": f64::MAX,
+        "heights_mm": [f64::MAX]
+    }))
+    .is_err());
+    assert!(serde_json::from_value::<LayerPlan>(json!({
+        "z0_mm": 9_007_199_254_740_992.0,
+        "heights_mm": [1.0]
+    }))
+    .is_err());
+
+    let large_valid = LayerPlan::new(9_007_199_254_740_992.0, vec![2.0]).unwrap();
+    assert_eq!(large_valid.index_at(large_valid.z0_mm()), Some(0));
+    assert_eq!(
+        large_valid.index_at(large_valid.z0_mm() + large_valid.heights_mm()[0]),
+        None
+    );
+    assert_eq!(large_valid.index_at(large_valid.z0_mm() - 2.0), None);
+
+    let empty = LayerPlan::new(-1.0, vec![]).unwrap();
+    assert_eq!(empty.count(), 0);
+    assert_eq!(empty.z_of(0), None);
+    assert_eq!(empty.index_at(-1.0), None);
+    assert_eq!(
+        serde_json::from_str::<LayerPlan>(r#"{"z0_mm":-1.0,"heights_mm":[]}"#).unwrap(),
+        empty
+    );
+}
+
+#[test]
+fn optimization_summary_constructor_enforces_search_evidence() {
+    let cost = valid_cost(42.0);
+    let selected = OrientationCost::new(OrientationId::from("one"), cost);
+    let one = ParetoPoint::new(OrientationId::from("one"), cost);
+    let two = ParetoPoint::new(OrientationId::from("two"), valid_cost(43.0));
+
+    assert_eq!(
+        OptimizationSummary::new(selected.clone(), 0, vec![one.clone()]),
+        Err(OptimizationError::NoCandidatesExamined)
+    );
+    assert_eq!(
+        OptimizationSummary::new(selected.clone(), 1, vec![]),
+        Err(OptimizationError::EmptyPareto)
+    );
+    assert_eq!(
+        OptimizationSummary::new(selected.clone(), 1, vec![one.clone(), two]),
+        Err(OptimizationError::ParetoExceedsCandidates)
+    );
+    assert_eq!(
+        OptimizationSummary::new(selected.clone(), 2, vec![one.clone(), one.clone()]),
+        Err(OptimizationError::DuplicateOrientation {
+            orientation: OrientationId::from("one")
+        })
+    );
+    assert_eq!(
+        OptimizationSummary::new(
+            OrientationCost::new(OrientationId::from("missing"), cost),
+            1,
+            vec![one.clone()]
+        ),
+        Err(OptimizationError::SelectedNotInPareto)
+    );
+    assert_eq!(
+        OptimizationSummary::new(
+            OrientationCost::new(OrientationId::from("one"), valid_cost(99.0)),
+            1,
+            vec![one]
+        ),
+        Err(OptimizationError::SelectedNotInPareto)
+    );
+}
+
+#[test]
+fn optimization_summary_json_revalidates_every_cross_field_invariant() {
+    let valid = valid_summary();
+    let value = serde_json::to_value(&valid).unwrap();
+
+    let mut zero = value.clone();
+    zero["candidates_examined"] = json!(0);
+    assert!(serde_json::from_value::<OptimizationSummary>(zero).is_err());
+
+    let mut empty = value.clone();
+    empty["pareto"] = json!([]);
+    assert!(serde_json::from_value::<OptimizationSummary>(empty).is_err());
+
+    let mut too_small = value.clone();
+    let mut second = too_small["pareto"][0].clone();
+    second["orientation"] = json!("orient-2");
+    too_small["pareto"].as_array_mut().unwrap().push(second);
+    too_small["candidates_examined"] = json!(1);
+    assert!(serde_json::from_value::<OptimizationSummary>(too_small).is_err());
+
+    let mut duplicate = value.clone();
+    let duplicate_point = duplicate["pareto"][0].clone();
+    duplicate["pareto"]
+        .as_array_mut()
+        .unwrap()
+        .push(duplicate_point);
+    duplicate["candidates_examined"] = json!(2);
+    assert!(serde_json::from_value::<OptimizationSummary>(duplicate).is_err());
+
+    let mut absent = value.clone();
+    absent["selected"]["orientation"] = json!("missing");
+    assert!(serde_json::from_value::<OptimizationSummary>(absent).is_err());
+
+    let mut different_cost = value.clone();
+    different_cost["selected"]["cost"]["z_height_mm"] = json!(99.0);
+    assert!(serde_json::from_value::<OptimizationSummary>(different_cost).is_err());
+
+    assert_eq!(
+        serde_json::from_value::<OptimizationSummary>(value).unwrap(),
+        valid
+    );
 }
 
 #[test]
@@ -67,35 +946,46 @@ fn pending_resolves_to_accept_safe_derived_conservative_value() {
 }
 
 #[test]
-fn layer_plan_is_per_layer_and_binary_searches_boundaries() {
-    let height = Measured::new(0.05_f64, PlateId::from("plate-6"), Some(0.001), "caliper");
-    let plan = LayerPlan::constant(&height, 3).unwrap();
-    assert_eq!(plan.count(), 3);
-    assert_eq!(plan.z_of(2), Some(0.1));
-    assert_eq!(plan.index_at(0.049), Some(0));
-    assert_eq!(plan.index_at(0.05), Some(1));
-    assert_eq!(plan.index_at(plan.z_of(plan.count()).unwrap()), None);
+fn stage_contract_compiles_with_context_and_ok_or_report_error() {
+    struct AddOne;
+
+    impl Stage for AddOne {
+        type Input = u32;
+        type Output = u32;
+        type Context = str;
+
+        const ID: StageId = StageId::Build;
+
+        fn run(
+            &self,
+            input: Self::Input,
+            ctx: &Self::Context,
+        ) -> Result<Self::Output, DefectReport> {
+            if ctx == "fail" {
+                Err(report(
+                    vec![terminal_defect(SiteId::Model(ModelId::from("stage-input")))],
+                    Termination::Converged,
+                )
+                .unwrap())
+            } else {
+                Ok(input + 1)
+            }
+        }
+    }
+
+    let stage = AddOne;
+    assert_eq!(AddOne::ID, StageId::Build);
+    assert_eq!(stage.run(4, "ok").unwrap(), 5);
+    assert!(!stage.run(4, "fail").unwrap_err().accepted());
 }
 
 #[test]
-fn layer_plan_rejects_a_nonfinite_origin() {
-    assert_eq!(
-        LayerPlan::new(f64::NAN, vec![0.05]),
-        Err(LayerPlanError::NonFiniteOrigin)
-    );
-}
-
-#[test]
-fn digest_canonicalizes_negative_zero() {
+fn digest_canonicalizes_negative_zero_and_rejects_nonfinite_values() {
     assert_eq!(canonical_f64_bits(-0.0), canonical_f64_bits(0.0));
     assert_eq!(
         digest_f64_slice(&[-0.0]).unwrap(),
         digest_f64_slice(&[0.0]).unwrap()
     );
-}
-
-#[test]
-fn digest_rejects_every_nonfinite_value() {
     for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         assert_eq!(
             digest_f64_slice(&[1.0, value]),
@@ -105,72 +995,17 @@ fn digest_rejects_every_nonfinite_value() {
 }
 
 #[test]
-fn no_search_evidence_uses_the_explicit_variant() {
-    let report = DefectReport::new(
-        ModelId::from("unoriented"),
-        vec![],
-        MetricSet::default(),
-        StageId::Triage,
-        Termination::Converged,
-        plinth_core::SearchEvidence::NotEvaluated,
-    );
-    assert!(matches!(
-        report.search,
-        plinth_core::SearchEvidence::NotEvaluated
-    ));
-}
-
-#[test]
-fn evaluated_search_always_has_a_selected_cost() {
-    let cost = CostVector::new(
-        42.0,
-        1_200.0,
-        Resin::new(3.0, 0.5, 0.0),
-        Scar::new(1.0, 2.0, 0.2),
-        Risk::new(5.0, 0, 8.0),
-        Fidelity::Exact,
-    );
-    let search = plinth_core::SearchEvidence::Evaluated(OptimizationSummary::new(
-        OrientationCost::new(OrientationId::from("orient-1"), cost),
-        24,
-        vec![ParetoPoint::new(OrientationId::from("orient-1"), cost)],
-    ));
-    let plinth_core::SearchEvidence::Evaluated(summary) = search else {
-        panic!("the test constructs evaluated evidence");
-    };
-    assert_eq!(summary.selected().cost(), cost);
-    assert_eq!(summary.candidates_examined(), 24);
-
-    let json = serde_json::to_value(plinth_core::SearchEvidence::Evaluated(summary)).unwrap();
-    assert_eq!(json["status"], "evaluated");
-    assert_eq!(json["summary"]["candidates_examined"], 24);
-}
-
-#[test]
-fn search_evidence_json_round_trips_both_variants() {
-    let not_evaluated = plinth_core::SearchEvidence::NotEvaluated;
-    let not_evaluated_json = serde_json::to_string(&not_evaluated).unwrap();
-    assert_eq!(
-        serde_json::from_str::<plinth_core::SearchEvidence>(&not_evaluated_json).unwrap(),
-        not_evaluated
-    );
-
-    let cost = CostVector::new(
-        42.0,
-        1_200.0,
-        Resin::new(3.0, 0.5, 0.0),
-        Scar::new(1.0, 2.0, 0.2),
-        Risk::new(5.0, 0, 8.0),
-        Fidelity::Exact,
-    );
-    let evaluated = plinth_core::SearchEvidence::Evaluated(OptimizationSummary::new(
-        OrientationCost::new(OrientationId::from("orient-1"), cost),
-        24,
-        vec![ParetoPoint::new(OrientationId::from("orient-1"), cost)],
-    ));
-    let evaluated_json = serde_json::to_string(&evaluated).unwrap();
-    assert_eq!(
-        serde_json::from_str::<plinth_core::SearchEvidence>(&evaluated_json).unwrap(),
-        evaluated
-    );
+fn public_validation_errors_have_concrete_display_messages() {
+    assert_eq!(FiniteError::NonFinite.to_string(), "value must be finite");
+    assert!(LayerPlanError::CumulativeOverflow { index: 3 }
+        .to_string()
+        .contains("index 3"));
+    assert!(OptimizationError::DuplicateOrientation {
+        orientation: OrientationId::from("duplicate-id")
+    }
+    .to_string()
+    .contains("duplicate-id"));
+    assert!(ReportError::MissingCapExhaustedDefect
+        .to_string()
+        .contains("matching blocking"));
 }

@@ -42,6 +42,31 @@ macro_rules! string_id {
 string_id!(ModelId);
 string_id!(OrientationId);
 string_id!(PlateId);
+string_id!(ConstantId);
+string_id!(DecisionId);
+
+/// A stable passive name for a repair operation.
+///
+/// Dispatch and behavior remain owned by `plinth-support`; keeping this
+/// vocabulary in core lets termination reports name the attempted repair
+/// without reversing the workspace dependency graph.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FixerId {
+    AddSeatAtMarginalArea,
+    AddBirthLadderSeat,
+    AddMinimumSeat,
+    SplitLoadAcrossArms,
+    RelocateForLateralSpread,
+    ReaimReseatOrQuarantine,
+    SlideOrReseatJoint,
+    ReaimReduceEmbed,
+    RerouteToPlateOrAnchor,
+    SteepenOrBrace,
+    ResizeAncestors,
+    RerouteOrDropRegular,
+    AddAuditDrainOrRefill,
+}
 
 /// A stable name for the pipeline stage that emitted a report.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]

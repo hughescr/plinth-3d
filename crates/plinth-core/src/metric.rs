@@ -1,3 +1,4 @@
+use crate::{Finite, FiniteError};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -34,17 +35,16 @@ impl fmt::Display for MetricId {
 /// The numeric value of one reported metric.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct MetricValue(f64);
+pub struct MetricValue(Finite);
 
 impl MetricValue {
-    #[must_use]
-    pub const fn new(value: f64) -> Self {
-        Self(value)
+    pub fn new(value: f64) -> Result<Self, FiniteError> {
+        Ok(Self(Finite::new(value)?))
     }
 
     #[must_use]
     pub const fn get(self) -> f64 {
-        self.0
+        self.0.get()
     }
 }
 

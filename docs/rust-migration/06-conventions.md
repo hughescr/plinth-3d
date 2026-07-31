@@ -52,6 +52,13 @@ intermediate buffers, serialization of internal state, and test fixtures. A floa
 trimesh wrapper caused real bugs in the Python system: an f32 round-trip fragmented
 vertex adjacency, which flipped topology cut flags, which hard-failed coverage.
 
+Every `f64` reachable from a `DefectReport` is the transparent `Finite` wrapper: creation
+rejects `NaN` and both infinities, rather than allowing a late report serializer to
+discover them. Preserve signed zero everywhere; canonicalize `-0.0` only at the mesh
+fingerprint boundary. Measures used for reporting, including `MetricValue`,
+`Defect.measure`, and termination before/after measures, are signed finite values —
+they are not silently clamped to a nonnegative type.
+
 Corollaries:
 
 - The boolean union kernel must be f64 (manifold-style). See 02-target-architecture.md.
@@ -64,6 +71,10 @@ Corollaries:
 - `f32` is permissible only where an external format demands it — the `.chitubox`
   record fields already defined in `rust/chitubox_io`. Convert at the boundary, never
   inward.
+- Physical-cost dimensions have explicit domains: height and time are finite nonnegative
+  quantities; resin and scar are finite nonnegative quantities; maximum effective X
+  and lateral spread are finite nonnegative quantities. Do not use these domain rules
+  to alter signed diagnostic measures.
 
 ---
 
@@ -101,6 +112,9 @@ could implement the same slice-in/slice-out signature later.
 
 - **Library crates:** `thiserror`-style concrete error enums per crate. No
   `Box<dyn Error>` in a public signature. Follow `rust/chitubox_io/src/error.rs`.
+  Public `Error`/`Display` enums use semantic variants; no `Box<dyn Error>` or
+  string-only error channel. Fieldless semantic errors such as `LoadSharingError`
+  remain valid.
 - **Binary / CLI:** `anyhow` at the top level for context chaining is fine.
 - **`unwrap` / `expect`:** forbidden on anything that can fail from input data.
   Permitted on genuine invariants (a poisoned mutex, a `OnceLock` you just set), and
@@ -117,6 +131,43 @@ could implement the same slice-in/slice-out signature later.
   that was responding, the site, the attempt count, and the before/after measure — and
   it also injects a `RepairCapExhausted` defect so it flows through the single
   acceptance authority. See 02-target-architecture.md.
+- `Termination` has exactly three exhaustive outcomes: `Converged`,
+  `CapExhausted { kind, fixer, site, attempts, before, after, note }`, and
+  `PoolExhausted { kind, site }`. `CapExhausted` requires a matching **blocking**
+  `RepairCapExhausted` defect at the same site, and its original `kind` must not itself
+  be `RepairCapExhausted`. `PoolExhausted` requires a matching **blocking** defect of
+  the same named kind and site. No fourth "success with warning" path exists.
+- `LoadSharing` is a tagged physical model whose `Additive` cap is finite and at least
+  `1`. `FixerId` is likewise a passive core identifier. `plinth-core` owns both types
+  and their validation; `plinth-support::repair` later re-exports `FixerId` and owns
+  responder/fixer behavior, while `plinth-support::load` later re-exports
+  `LoadSharing` and owns `ArmGroup`/`effective_x`. Neither duplicates core tags,
+  validation rules, or identity logic.
+
+### Report construction
+
+`DefectReport` fields are private; construction is fallible and validating. Report provenance
+is a deterministic ordered map: `DecisionId` → `ConstantId` → `ProvenanceRef`;
+`Measured` provenance includes its measurement date. Empty provenance is legitimate
+only before any accept decision runs. At the constants-registry checkpoint,
+decision-scoped automatic recording is enforced for every automatic decision, rather
+than added in a best-effort post-processing pass. The report is accepted only when it
+contains no blocking defects. Categorical measurements retain the existing explicit
+`"err": null` serialization contract.
+
+`OptimizationSummary` is private, fallible, and custom-deserialized: its Pareto set is
+nonempty; `candidates_examined > 0` and is at least the Pareto length; orientation IDs
+are unique; and the selected `(orientation, cost)` is an exact member of that set.
+`LayerPlan` wires only `z0_mm` and `heights_mm`: `z0_mm` is signed finite, every height is
+strictly positive finite, and an empty plan is allowed. It recomputes cumulative
+heights and rejects overflow or any unknown legacy cumulative field. `Stage` uses an
+associated `Context: ?Sized` and returns `Result<Output, DefectReport>`.
+
+Construction also rejects a finite positive height if its addition rounds away and
+does not strictly advance the cumulative boundary. `z_of(i)` returns the lower
+boundary only for an existing layer (`i < count`), so it returns `None` for an empty
+plan or `i == count`; `+0.0` and `-0.0` comparisons are numeric-coherent and never
+panic.
 
 ### CLI contract
 
@@ -134,7 +185,7 @@ came from. This is a compile-time mechanism, not a documentation convention.
 
 | Wrapper | Meaning | On the accept path? |
 |---|---|---|
-| `Measured<T>` | Measured on a calibration plate. Carries the plate id and `err: Option<T>`; a categorical measurement uses `None`, serialized explicitly as `"err": null` beside its tagged category. | Yes |
+| `Measured<T>` | Measured on a calibration plate. Carries the plate id, required measurement date (carried into `ProvenanceRef`), and `err: Option<T>`; a categorical measurement uses `None`, serialized explicitly as `"err": null` beside its tagged category. | Yes |
 | `Derived<T>` | Computed from `Measured` values by a stated relation. | Yes |
 | `Placeholder<T>` | A guess. Search/tuning weights live here. | **No — will not compile** |
 | `Pending<T>` | Awaiting a measurement. Carries **both** a conservative and an optimistic value. `.resolve()` returns the conservative branch wrapped as a `Derived<T>` — an `AcceptSafe` value carrying the pending provenance, never a bare `T`. | Only via explicit `.resolve()` |

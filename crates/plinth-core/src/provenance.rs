@@ -1,12 +1,75 @@
-use crate::PlateId;
+use crate::{ConstantId, DecisionId, PlateId};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// A compact provenance description suitable for a run manifest.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ProvenanceRef {
-    Measured { plate: PlateId, note: String },
-    Derived { from: Vec<String>, note: String },
+    Measured {
+        plate: PlateId,
+        date: String,
+        note: String,
+    },
+    Derived {
+        from: Vec<String>,
+        note: String,
+    },
+}
+
+/// The constants that fed each acceptance decision.
+///
+/// Both map levels are ordered so serialization is deterministic.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ProvenanceManifest(BTreeMap<DecisionId, BTreeMap<ConstantId, ProvenanceRef>>);
+
+impl ProvenanceManifest {
+    #[must_use]
+    pub fn new(
+        entries: impl IntoIterator<
+            Item = (
+                DecisionId,
+                impl IntoIterator<Item = (ConstantId, ProvenanceRef)>,
+            ),
+        >,
+    ) -> Self {
+        Self(
+            entries
+                .into_iter()
+                .map(|(decision, constants)| (decision, constants.into_iter().collect()))
+                .collect(),
+        )
+    }
+
+    pub fn record(
+        &mut self,
+        decision: DecisionId,
+        constant: ConstantId,
+        provenance: ProvenanceRef,
+    ) -> Option<ProvenanceRef> {
+        self.0
+            .entry(decision)
+            .or_default()
+            .insert(constant, provenance)
+    }
+
+    #[must_use]
+    pub fn get(&self, decision: &DecisionId, constant: &ConstantId) -> Option<&ProvenanceRef> {
+        self.0.get(decision)?.get(constant)
+    }
+
+    #[must_use]
+    pub fn iter(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&DecisionId, &BTreeMap<ConstantId, ProvenanceRef>)> {
+        self.0.iter()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
 }
 
 /// Values that are admissible on an acceptance path.
@@ -21,16 +84,24 @@ pub struct Measured<T> {
     pub plate: PlateId,
     /// `None` is intentionally emitted as JSON `null`, never omitted.
     pub err: Option<T>,
+    pub date: String,
     pub note: String,
 }
 
 impl<T> Measured<T> {
     #[must_use]
-    pub fn new(value: T, plate: PlateId, err: Option<T>, note: impl Into<String>) -> Self {
+    pub fn new(
+        value: T,
+        plate: PlateId,
+        err: Option<T>,
+        date: impl Into<String>,
+        note: impl Into<String>,
+    ) -> Self {
         Self {
             value,
             plate,
             err,
+            date: date.into(),
             note: note.into(),
         }
     }
@@ -49,6 +120,7 @@ impl<T: Copy> AcceptSafe<T> for Measured<T> {
     fn provenance(&self) -> ProvenanceRef {
         ProvenanceRef::Measured {
             plate: self.plate.clone(),
+            date: self.date.clone(),
             note: self.note.clone(),
         }
     }
