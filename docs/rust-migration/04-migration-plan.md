@@ -238,6 +238,17 @@ frozen baseline without error"; M4–M8 all take `--baseline corpus/baseline`; M
 M7's gate. This is a **configuration** step, not a missing asset. Do not substitute a
 different model silently.
 
+**Second hazard on the same file: it may be refused rather than missing.** A run recorded
+2026-07-25 had `Awakened Tree.stl` fail immediately with `PreHollowedError`, exit code 2 and
+no output — `2 closed shell(s) sealed inside another component's material (largest: 9096
+faces, 55.3067x24.3381x64.281mm)`. The model was hollowed at some earlier point and never
+drilled, and `hollow.py` cannot process a pre-hollowed input because hollow and drill are one
+welded stage (**DEFECT D-46**, `01-current-system.md` §11). **Check for this before assuming
+the freeze will run**, and if it fires: the guard is correct, do **not** delete it, and do
+**not** reach for `--no-hollow` (that emits an undrilled hollow model — sealed liquid resin,
+a suction and burst risk during peel). Either source a solid export of the model, or take the
+provisional-baseline route below and clear the flag once D-46's stage split lands at M4/M5.
+
 **Sanctioned fallback if the file still cannot be placed:** freeze a *provisional*
 baseline over the seven repo-obtainable models — the five synthetic fixtures plus
 `scripts/tests/fixtures/chitubox/Sphere.stl` and `Cylinder.stl` — record
@@ -944,12 +955,41 @@ gate becomes satisfiable by construction.
 | --- | --- |
 | `perceive.rs` | Overhang islands, local z-minima, island births (uses `plinth-mesh::slice` + `LayerPlan`). |
 | `coverage.rs` | Coverage samples via **the ONE generic dyadic sample-builder**. `placement.candidate_pool` and `coverage._build_coverage_samples_inner` are two parallel ~300-line implementations of the same two-pass dyadic refine/preflight algorithm with different byte-per-row constants (64 vs 49). Factor to one generic builder parameterized by row type. |
-| `pool.rs` | Deterministic legal candidate seat pool. |
+| `pool.rs` | Deterministic legal candidate seat pool. **Trap, stated because it has been walked into:** once contacts sit on vertices it is tempting to give each contact the vertex's *averaged* normal. Do not. The contact normal must come from **the specific face that contact serves** — a vertex shared between faces of differing orientation has an average normal pointing where *neither* face faces, which aims the support wrongly. |
 | `lattice.rs` | Hex/triangular lattice with **delicacy-weighted Lloyd (CVT) relaxation**. Hex beats a square grid by ~23 % fewer points for the same worst-case gap; each arm's Voronoi cell area **is** its supported area, which gives per-arm sizing directly. |
 | `load.rs` | X-rule sizing with `ArmGroup` and `enum LoadSharing { Zipper, Additive }`. |
 | `specialized.rs` | Specialized-contact consolidation, redesigned **batched**, with **one** acceptance predicate. |
 
-**`plinth-hollow::internal`** — the A5 internal-cavity planner, batched.
+**`plinth-hollow::internal`** — the A5 internal-cavity planner, batched. Its design
+constraints are **owner-ratified and normative**; the Python implementation satisfies them and
+the port must too:
+
+- **Same physics as external supports**, but the **removability and anchoring constraints are
+  dropped** — internal supports are never removed and never scar a visible surface, so they may
+  be as robust as needed.
+- **They must not pierce the model.** Entirely within the void.
+- The radius cap, where one applies, applies **only to the short contact terminal**. The
+  canonical contact sphere and its short taper feed a **separately represented structural
+  carrier**; carriers, shared trunks and lower-wall roots stay **uncapped** and keep the full
+  tension, deflection, transient-span, propagated-load and Murray sizing result.
+- **Never clamp an overloaded contact down to the cap.** A bounded contact refinement may be
+  tried; otherwise A5 **fails safely** and the oriented solid is retained.
+- **Keep-out zones around drain holes** and their approach paths, so drainage is not blocked.
+- **Refuse, loudly, on a trapped lobe** — never silently emit. One narrow owner override: after
+  conservative coarse drainability alone fails, a single fixed pitch/3 physical audit may accept
+  **support-induced** trapped pockets when each is ≤ 0.005 mL and their total is ≤ 0.01 mL.
+  Anything larger keeps the oriented-solid fallback, and this override never permits an
+  originally sealed or unvented cavity.
+
+⚠ **The hard sub-problem is telling a cavity from a crevice**, and the obvious method does not
+work: a point inside a sealed cavity and a point in a deep surface crevice both read as "not
+solid", and straight-line ray occlusion measured **0.001 for a crevice versus 0.014 for a
+cavity** — not a usable margin. The method that does work: **virtually re-plug the drill holes,
+then flood-fill the empty space from a far corner of the bounding box; anything the fill cannot
+reach is a genuine cavity.** It degenerates correctly on an undrilled model (the plug list is
+simply empty). In Rust the drill stage and the planner are both inside `plinth-hollow`, so the
+hole geometry passes in memory as a typed artifact — Python needed a sidecar only because STL
+cannot carry it.
 
 ### The physics you must encode (see `03-physics-and-constants.md` for full provenance)
 
