@@ -1,3 +1,8 @@
+//! Integer-micron chord comparison primitives.
+//!
+//! Canonicalization is comparison-only. The raw-chord `< 0.08` firm/moot
+//! classification remains authoritative and must never use canonical microns.
+
 use serde::{
     de::{self, Unexpected, Visitor},
     ser::SerializeStruct,
@@ -138,6 +143,8 @@ pub enum ChordError {
 }
 
 /// Canonicalize a raw crossing chord using the Python oracle's actual IEEE ties-to-even rule.
+///
+/// This comparison representation must not be used for raw-chord firm/moot classification.
 pub fn canon_chord_micron(chord_mm: f64, micron: MicronGranularity) -> Result<i64, ChordError> {
     if !chord_mm.is_finite() {
         return Err(ChordError::NonFiniteChord);

@@ -163,6 +163,22 @@ fn parity_gathers_every_member_retains_duplicates_and_is_order_independent() {
 }
 
 #[test]
+fn parity_treats_canonical_chords_as_multisets_not_sets() {
+    let report = chord_parity_report(
+        &map(&[(7, &[0.2501, 0.2502])]),
+        &map(&[(7, &[0.2501])]),
+        MicronGranularity::ONE_MICRON,
+    )
+    .unwrap();
+
+    assert!(!report.matches());
+    assert_eq!(report.mismatches().len(), 1);
+    assert_eq!(report.mismatches()[0].member_idx(), 7);
+    assert_eq!(report.mismatches()[0].engine_micron(), [250, 250]);
+    assert_eq!(report.mismatches()[0].census_micron(), [250]);
+}
+
+#[test]
 fn parity_reports_population_and_chord_mismatches_without_claiming_acceptance() {
     let population = chord_parity_report(
         &map(&[(100, &[0.25]), (445, &[0.2531])]),
@@ -199,6 +215,23 @@ fn parity_reports_population_and_chord_mismatches_without_claiming_acceptance() 
     let wire = serde_json::to_value(chords).unwrap();
     assert_eq!(wire["matches"], false);
     assert!(wire.get("ok").is_none());
+}
+
+#[test]
+fn parity_report_wire_is_exact_and_has_no_ok_key() {
+    let report = chord_parity_report(
+        &map(&[(1, &[0.2501, 0.2502]), (5, &[0.12])]),
+        &map(&[(1, &[0.2501]), (3, &[0.12])]),
+        MicronGranularity::ONE_MICRON,
+    )
+    .unwrap();
+    let rendered = serde_json::to_string(&report).unwrap();
+
+    assert_eq!(
+        rendered,
+        r#"{"matches":false,"only_engine":[5],"only_census":[3],"mismatches":[{"member_idx":1,"engine_micron":[250,250],"census_micron":[250]}],"micron":1,"n_engine":2,"n_census":2,"n_shared":1}"#
+    );
+    assert!(!rendered.contains("\"ok\""));
 }
 
 #[test]

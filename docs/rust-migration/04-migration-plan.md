@@ -268,7 +268,7 @@ Treant** (see above); do not add it to the corpus twice under two names.
 
 | Path | Disposition |
 | --- | --- |
-| `scripts/support_placement/chord_canon.py` | Ported verbatim → `plinth-core::chord` |
+| `scripts/support_placement/chord_canon.py` | Semantic algorithm and report intent ported → `plinth-core::chord`; invalid-input and schema defects are deliberately hardened, including computed `matches` and no `ok` wire key. |
 
 (`scripts/support_placement/config.py` **begins** its conversion here and is retired at M7;
 see the audit table in §M9.)
@@ -296,7 +296,7 @@ see the audit table in §M9.)
 | `frame.rs` | Frame typestate marks (`Source`, `Centered`, `Plated`) so a mis-framed point set will not compile. |
 | `stage.rs` | The `Stage` trait every pipeline step implements. |
 | `digest.rs` | Content digests over typed arrays (not over allocator arithmetic — see the M2 note on `topology.py`). |
-| `chord.rs` | `canon_chord_micron`, `chords_match_micron`, `chord_parity_report`, ported from `chord_canon.py`'s executable behavior. Integer-micron ties-to-even canonicalization; dependency-free by design. Its computed parity `matches` is diagnostic only, never an acceptance decision. |
+| `chord.rs` | `canon_chord_micron`, `chords_match_micron`, `chord_parity_report`, ported from `chord_canon.py`'s executable behavior. Integer-micron ties-to-even canonicalization; dependency-free by design. Invalid-input and schema defects are deliberately hardened: its computed diagnostic parity key is `matches`, never `ok`, and it is never an acceptance decision. |
 | `printer.rs` | `PrinterProfile`. Ship `saturn4-ultra`: peel direction −Y (tilt release), pixel 14 × 19 µm, layer 0.050 mm. |
 | `cost.rs` | Passive shared cost/report DTOs: `CostVector`, `Fidelity`, `Resin`, `Scar`, `Risk`, `OrientationCost`, `ParetoPoint`, `OptimizationSummary`, and `SearchEvidence`. Pre-orientation reports use `SearchEvidence::NotEvaluated`, never a sentinel cost. Evaluation, scalarization, batching, Pareto algorithms, and memoization remain future `plinth-cost` behaviour. |
 | `metric.rs` | Passive shared `MetricId`, `MetricValue`, `MetricSet`, and report DTOs. Metric directions, independent metric computation, comparison, and waiver behaviour remain M1 `plinth-metrics`. |
