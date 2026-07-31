@@ -359,11 +359,20 @@ pub static X_STAR_CONE: Measured<f64> = /* 25.0 — plate 5, 30 specimens: every
     every X >= 25.0 failed, one boundary inversion. Load scales with supported AREA (not perimeter,
     not a squeeze-film law). Failure is tensile snap of the NARROWEST cross-section just above the
     contact, so a long slow taper is a liability: supports must flare fast above the tip. */;
-pub static X_ALLOWED: Derived<f64> = /* 12.0, from X_STAR_CONE with a 2x safety factor */;
+pub static X_ALLOWED: Derived<f64> = /* 12.0, from X_STAR_CONE with a 2x safety factor;
+    margin-checked against X_STAR_CYLINDER's binding edge at 19.91/12 = 1.66x */;
 // tensile_green_mpa / peel_pressure_pa / tip_safety_factor survive ONLY as Placeholder
 // diagnostics; they can never reach accept.
-pub static X_STAR_CYLINDER: Pending<f64> = /* plate 6: was X* ~ 25 an artifact of conical arms? */;
+pub static X_STAR_CYLINDER: Measured<f64> = /* (19.91, 30.48) — plate 6, scored 2026-07-31.
+    Cylindrical arms; n = 1 at each bracket edge, conditional on 4.00 mm arms and a 30 mm^2
+    cap. It CONTAINS the conical bracket, so X* ~ 25 was not an artifact of conical arms.
+    Store the interval, never the 24.6 centre. Was Pending<f64> until 2026-07-31. */;
 ```
+
+`X_STAR_CYLINDER` was the worked example of `Pending` in this document until plate 6 scored;
+it is kept here **as a `Measured`** so the declaration matches reality. The `Pending` machinery
+above stays — it is the mechanism for the next unmeasured constant, and `Pending::resolve()`
+is still what keeps an open question traceable into an accept decision.
 
 Other accept-path physics carried with provenance (full detail in `03-physics-and-constants.md`):
 bridge/sag limit ~3 mm at 0.300 mm section (Measured, approximate); squeeze-film suction 40–60 kPa
@@ -372,31 +381,38 @@ at 30–40 °C (Measured envelope, diagnostic); and a `PrinterProfile` for the E
 0.050 mm) which lives in `plinth-core::consts` because the X-rule, arrangement risk, decimation
 budget and the future plater all need it.
 
-### 3.6 Multi-arm load sharing — first-class, with plate 6 as a plug-in point
+### 3.6 Multi-arm load sharing — first-class, measured by plate 6
 
 `X ≤ 12` is **necessary, not sufficient**: it is blind to arrangement (three collinear arms have
-zero lateral stability perpendicular to their line). The peel front sweeps −Y, so Y-strung arms
-meet it one at a time (zipper conditions) while X-strung arms meet it together (sharing
-conditions). Both plate-6 outcomes are code-complete from the milestone that builds placement:
+zero lateral stability perpendicular to their line). The peel front sweeps −Y, which predicted that
+Y-strung arms meet it one at a time (zipper conditions) while X-strung arms meet it together
+(sharing conditions). **Plate 6 scored 2026-07-31 and refuted the zipper branch:** strips along
+both axes survived at `X_arm = 60.15` while the matched single arm died, so sharing is **at least
+additive** and there is **no measured axis dependence**. Both variants stay code-complete:
 
 ```rust
 // plinth-support::load
 #[derive(Clone, Copy)] pub enum LoadSharing { Zipper, Additive { n_eff_cap: f64 } }
 impl LoadSharing {
-    /// Effective X for an arm group given the printer's peel direction.
+    /// Effective X for an arm group. `peel_dir` is currently UNUSED BY MEASUREMENT — plate 6
+    /// found no axis dependence — and is retained so an orientation term can be added later
+    /// without changing this signature. Do not add one until plate 6 is contradicted.
     pub fn effective_x(&self, group: &ArmGroup, peel_dir: [f64; 3]) -> f64 { /* ... */ }
 }
-pub static LOAD_SHARING: Pending<LoadSharing> = Pending {
-    conservative: &LoadSharing::Zipper,                               // never under-flags
-    optimistic:   &LoadSharing::Additive { n_eff_cap: f64::INFINITY },
-    plate: PlateId::P6,
-    question: "additive (X_tot/N governs) vs zipper (each arm meets the peel front alone at full X)",
-};
+pub static LOAD_SHARING: Measured<LoadSharing> = /* Additive { n_eff_cap: 6.0 } — plate 6,
+    2026-07-31. AT LEAST additive: N arms co-carry, but never credit more than N. n_eff_cap = 6.0
+    is the largest group measured. Was Pending<LoadSharing> until 2026-07-31; `Zipper` is kept in
+    the enum as the strictly-conservative fallback and the A/B arm. See 03 section 4.2 for the
+    five caveats that belong in `note`. */;
 ```
 
-The lattice generator takes `effective_x` as an **input** — density is never baked in — so flipping
-the resolved branch when plate 6 scores is one constant plus a re-run. `plinth calibrate` reports
-the corpus-wide A/B delta under both branches before any switch.
+`Measured<T>` carries an `err: T`, and a **categorical** payload has no error bar. Either set `err`
+to the same variant or make it `Option<T>`; do **not** invent a numeric error and do **not** widen
+the enum to carry uncertainty. The uncertainty is conditional-scope, and it lives in `note`.
+
+The lattice generator takes `effective_x` as an **input** — density is never baked in — so the
+2026-07-31 switch to `Additive` was one constant plus a re-run, and `plinth calibrate` still reports
+the corpus-wide A/B delta under both branches so the size of that switch is measured, not assumed.
 
 This removes the root cause of the unsatisfiable Python gate: `config.py`'s `tip_r_max_mm = 1.0`
 (line 118) caps one tip at ~3.14 mm² of cross-section, i.e. ~37.7 mm² of supported area at X = 12,

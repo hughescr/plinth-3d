@@ -195,6 +195,13 @@ unset. This is how the uncommitted large treant specimen
 (`treant_v5_candidate.chitubox`, ~35 MB, pinned at 1360 support records in
 `support_parity.rs`) is located in Craig's environment without committing it.
 
+The **Treant source STL** follows the same convention for the same reason. Note the name:
+**"treant" and "Awakened Tree" are the same model** — the file is `Awakened Tree.stl`
+(21 MB), staged in `minis-to-process/` beside the repo. That folder is transient (the owner
+clears it after printing), so copy it into this same directory as
+`Weeping Treant v1.2.stl` and set `$TREANT_STL`. See `04-migration-plan.md` M0. It is never
+committed.
+
 For Codex running in a checkout without that file present: `support_parity.rs`
 tests referencing `treant_v5_candidate.chitubox` will print a `SKIP:` notice
 and pass trivially — this is expected, not a failure to chase. Do not

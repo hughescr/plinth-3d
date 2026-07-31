@@ -130,7 +130,12 @@ tip diameters. It did.
 
 **(b) The failure section is the narrowest cross-section of the arm just above
 the contact — not the model contact patch.** Observed physically at the base of
-the cylinder on the plate-5 specimens. Consequences:
+the cylinder on the plate-5 specimens. Plate 6 (§4.1) later measured
+**constant-diameter cylindrical** arms and found `X*` in the same place, so this is
+not a cone-vs-cylinder artifact — but that also means **there is no measured taper
+penalty**. The consequences below rest on the observed failure *location*, not on a
+sized cone discount, and must not be quoted as if a plate had measured one.
+Consequences:
 
 - A long slow taper is a **liability**. The arm must **flare fast above the tip**.
 - Sizing one radius at the contact is not sufficient. The Rust arm model must be
@@ -173,6 +178,17 @@ angle-aware lateral load term in `placement._shaft_r_for_L` /
 `placement.max_unbraced_len_mm` — and plate 5 measured nothing about deflection
 or bracing.
 
+> **X is a phenomenological index, not a closed stress ratio — which is exactly why
+> the engine must never compute a force.** The plate-6 scoring analysis (2026-07-31)
+> tried to close it and could not: the measured slender-wall peel pressure (~1 kPa)
+> predicts `X*` in the **thousands**, against an observed `X* ≈ 25`. The only
+> self-consistent reading is a **cavitation-capped squeeze** of ~100 kPa acting on flat
+> patches of ~5 mm and up, which lands ~2–3 MPa at the arm/flare notch — the right
+> order for a green-resin snap. Record that as the physical story; do **not** wire it
+> into sizing. Engine posture is unchanged and load-bearing: **never compute a force —
+> use the ratio.** See §5 conflict 6 for how it sits against the owner's 40–60 kPa
+> squeeze-film figure.
+
 > Historical note worth carrying: before the plate-5 re-anchoring, this composed
 > to `10e6 / (3000 · 8) = 416.7`, about **17× past the measured snap point**
 > `X* ≈ 25` (and ≈ 35× past the `X ≤ 12` design target). `config.py:47-48` states
@@ -182,7 +198,9 @@ or bracing.
 > applied to `tensile_green_mpa` (10.0 → 0.288).
 
 **Rust requirement.** Store `X_ALLOWED = 12.0` as a `Derived<f64>`, derived from
-`X_STAR_CONE` (`Measured`, plate 5) with a 2× safety factor — exactly as
+`X_STAR_CONE` (`Measured`, plate 5) with a 2× safety factor and **cross-checked
+against `X_STAR_CYLINDER`** (`Measured`, plate 6): 12.0 clears the binding measured
+bracket edge with `19.91 / 12 = 1.66×` of margin (§4.1). Exactly as
 `02-target-architecture.md` §3.5 declares it. Derive the sizing expression from it:
 
 ```rust
@@ -229,8 +247,8 @@ an enum with an exhaustive match, so a gate that can fail without a fixer that c
 respond is a compile error.**
 
 **(ii) The data model has no concept of several arms co-carrying one region
-(physics — plate 6 decides the formula).** `tip_r_max_mm = 1.0` caps what one tip
-may carry at
+(physics — plate 6 measured the formula: sharing is **at least additive**, §4.2).**
+`tip_r_max_mm = 1.0` caps what one tip may carry at
 
 ```
 π · 1.0² · 12 = 37.70 mm²
@@ -330,22 +348,29 @@ Two failure modes it cannot see:
   serving one region does *not* meet the front simultaneously unless it is
   arranged across the front.
 
-| Arrangement | Relation to the −Y peel front | Loading condition |
+| Arrangement | Relation to the −Y peel front | Predicted loading condition |
 |---|---|---|
 | Arms strung out along **Y** | front reaches them **one at a time** | **zipper** — each arm meets the front alone, at full X |
-| Arms strung out along **X** (constant Y) | front reaches them **together** | **sharing** — the group co-carries, `X_tot/N` may govern |
+| Arms strung out along **X** (constant Y) | front reaches them **together** | **sharing** — the group co-carries, `X_tot/N` governs |
 
-This is the geometric statement of plate 6 question (b) (§4). Two design notes
-that hold whichever way it resolves:
+That was plate 6 question (b), and **the measurement came back against the
+arrangement hypothesis** (§4.2, 2026-07-31): strips along **both** axes survived at
+`X_arm = 60.15` while the matched single arm died at the same X. Sharing is real and
+is **at least additive**; the axis-dependent zipper collapse did not happen. Keep the
+table as the mechanism the experiment was reasoned from, **not as a rule** — there is
+**no orientation term in the engine** until something contradicts §4.2 caveat 5. Two
+design notes survive:
 
 1. **Position along Y changes peel load, so randomize over Y and do not tune it.**
    Prior calibration settled that front-to-back sensitivity is ≤ 1 rung of the
    test ladder — real but small. Spend replication budget on build-to-build
    variation instead of on Y position.
-2. **The current per-arm sizing rule IS the zipper assumption** (each arm sized
-   for its own full cell). That is the conservative branch. A confirmed sharing
-   law can only *relax* sizing; it cannot tighten it. Design accordingly: ship
-   zipper, keep the sharing term behind a `Pending` constant.
+2. **The per-arm sizing rule inherited from Python IS the zipper assumption** (each
+   arm sized for its own full cell) — now known to be *conservative*, not correct. A
+   measured sharing law can only *relax* sizing, never tighten it, so nothing already
+   shipped becomes unsafe. But the group rule of §4.2 is what the Rust engine ships,
+   because the per-arm rule is precisely what makes the load gate unsatisfiable
+   (§1.5(ii)).
 
 ---
 
@@ -357,8 +382,8 @@ name and value are the contract.
 
 **Provenance tags:** `M` = Measured (plate/instrument cited), `D` = Derived,
 `P` = **Placeholder — build must fail if reachable from the accept path**,
-`Pend` = Pending measurement (§4), `F` = Format/interface contract (byte-level,
-not physics).
+`Pend` = Pending measurement — **none outstanding**, plate 6 resolved the last two on
+2026-07-31 (§4), `F` = Format/interface contract (byte-level, not physics).
 
 ### 3.1 The load family — one measured ratio, three knobs
 
@@ -368,8 +393,10 @@ not physics).
 
 | Name | Value | Unit | Prov. | Rust owner | Notes |
 |---|---|---|---|---|---|
-| `X_STAR_CONE` *(new; named `X_STAR_CONE` in 02 §3.5)* | **[25.00, 25.34]** | — | **M** plate 5, 2026-07-30 | `plinth-core::constants::load` | The **only measured** number in this table. Store the interval, not a midpoint. One boundary inversion at 25.00. Plate-5 arms were **cones** — see §4.1. |
-| `X_ALLOWED` *(new — does not exist in Python)* | **12.0** | — | **D** from `X_STAR_CONE` with a 2× safety factor | `plinth-core::constants::load` | `Derived<f64>`, not `Measured` and not `Pending` — 02 §3.5 declares it exactly this way. All arm sizing derives from it; do not hardcode 12.0 anywhere else. The plate-6 open question lives on `X_STAR_CYLINDER: Pending<f64>` (§4.1), never on this constant. |
+| `X_STAR_CONE` *(new; named `X_STAR_CONE` in 02 §3.5)* | **[25.00, 25.34]** | — | **M** plate 5, 2026-07-30 | `plinth-core::constants::load` | Store the interval, not a midpoint. One boundary inversion at 25.00. Plate-5 arms were **cones**; plate 6 reproduced the boundary on cylinders, so this is **not** a cone artifact — §4.1. |
+| `X_STAR_CYLINDER` *(new; named `X_STAR_CYLINDER` in 02 §3.5)* | **(19.91, 30.48)** | — | **M** plate 6, 2026-07-31 | `plinth-core::constants::load` | Cylindrical-arm boundary; geometric centre 24.6, **n = 1 at each bracket edge**, conditional on 4.00 mm arms and a 30 mm² cap. Store the interval, never 24.6. Contains `X_STAR_CONE` — that is what retires the cone-artifact question (§4.1). Was `Pending<f64>` until 2026-07-31. |
+| `LOAD_SHARING` *(new; `enum LoadSharing`, 02 §3.6)* | **`Additive { n_eff_cap: 6.0 }`** | — | **M** plate 6, 2026-07-31 | `plinth-support::load` | 12/12 strips survived `X_arm = 60.15` at N = 2,3,4,6 while the matched mono died — sharing is **at least additive**, `Zipper` is refuted. `n_eff_cap = 6.0` is the largest group measured. **All five §4.2 caveats must live in the `note` field.** Was `Pending<LoadSharing>` until 2026-07-31. Categorical payload → no meaningful `err`; see §4.2. |
+| `X_ALLOWED` *(new — does not exist in Python)* | **12.0** | — | **D** from `X_STAR_CONE` with a 2× safety factor, margin-checked against `X_STAR_CYLINDER` | `plinth-core::constants::load` | `Derived<f64>`, not `Measured` and not `Pending` — 02 §3.5 declares it exactly this way. All arm sizing derives from it; do not hardcode 12.0 anywhere else. Plate 6 did **not** move it: 12.0 clears the binding measured bracket edge by `19.91/12 = 1.66×` (§4.1). That is a margin check, not an `X*/2` recomputation. |
 | `peel_pressure_pa` (config.py:63) | 3000.0 | Pa | **P** — order-of-magnitude only | `plinth-core::constants::deflection` **only** | Literature puts real MSLA peel stress at **12–13 kPa** (`../datasheets/physics/lit-green-peel.md`), i.e. this may be ~4× low. Used unclamped as the angle-aware lateral load term in `_shaft_r_for_L`. Must **not** be recombined to re-derive X. |
 | `tensile_green_mpa` (config.py:91) | 0.288 | MPa | **D** from `X_ALLOWED` — *not* a green-tensile datasheet value | `plinth-core::constants::load` (derived) | Chosen so `0.288e6/(3000·8) = 12.0`. Pre-plate-5 it was 10.0 MPa, which put X_allowed at 416.7. Plausibility check only: pairing X*≈25 with the literature's 12–13 kPa implies ~0.33 MPa, same order. |
 | `tip_safety_factor` (config.py:106) | 8.0 | — | **P** — policy, not measured | `plinth-core::constants::load` | Multiplies load *before* sizing → fatter arms. Retained at 8.0 vs the 2.08 the target implies, so `tensile_green_mpa` absorbs ~3.8× extra conservatism. Also the threshold `load_report` compares realized SF against. |
@@ -592,99 +619,203 @@ thing to keep honest.
 
 ---
 
-## 4. PENDING — calibration plate 6
+## 4. MEASURED — calibration plate 6, scored 2026-07-31
 
-Plate 6 was printed **2026-07-30**; scoring is imminent and results may land while
-this port is in progress. **Design both branches now.** When the results note
-arrives, only the values and the branch selection change — no restructuring.
+Plate 6 was printed **2026-07-30** and **scored 2026-07-31**. Both pre-registered
+questions resolved, and a third, unplanned result voided one of the two specimen
+families. **Nothing in the port waits on this section any more** — it is the results
+record, not a branch design.
 
-### 4.1 Question (a) — is `X* ≈ 25` an artifact of the cone assumption?
+| Field | Value |
+|---|---|
+| Plate | **6** (`md5 2fff011d1cfee56ac0b49b3e759e5a60`) |
+| Printed / scored | 2026-07-30 / **2026-07-31** |
+| Printer | Elegoo Saturn 4 Ultra |
+| Specimens | **34**, in two families |
+| Family **A6** | single-arm ladder, **6.00 mm** arms, caps at z **10.95–12.70 mm** — **VOID**, §4.3 |
+| Family **B6** | multi-arm sharing, **4.00 mm** arms, caps at z **8.50–9.00 mm**, one cap area **30.00 mm²** |
+| Scoring integrity | wash basket **empty** — every failure occurred **in-print**, none in post-print handling |
+| Verification | two blind analysts plus an adversarial-refuter panel |
 
-**The problem.** Plate 5's arms were **tapered cones**. `A_arm_cross_section` was
+> **The `docs/datasheets/physics/plate-06-results.md` note has not been written yet**
+> (§4.4). Until it exists, **this section is the record of record** for the plate-6
+> numbers.
+
+### 4.1 Question (a) — RESOLVED: cylindrical `X*` brackets `(19.91, 30.48)`
+
+**The question was.** Plate 5's arms were **tapered cones**. `A_arm_cross_section` was
 computed from the assumed tip diameter `d_t`, but §1.3(b) established that the
 failure section is the *narrowest* cross-section just above the contact — which on
-a cone is not the tip disc. So `X* ≈ 25` may be measuring a cone-specific ratio
-between the nominal tip and the true minimum section, not a material property.
+a cone is not the tip disc. So `X* ≈ 25` might have been measuring a cone-specific
+ratio between the nominal tip and the true minimum section, not a material property.
 
-**Specimen design that answers it.** Repeat the plate-5 ladder with
-**constant-diameter cylindrical arms**, so the nominal section and the minimum
-section are the same by construction. Cross the same `A_cap` values against a
-cylinder diameter ladder spanning the same X range, with the mandatory control
-set present and the row/column assignment randomized (never assigned by position
-formula), contiguous row bases, and Y position randomized (§2.4 note 1).
+**The measurement.** Constant-diameter cylindrical arms, so the nominal section and
+the minimum section are the same by construction:
 
-**What updates when the number lands:**
+| Cell | X | Verdict |
+|---|---|---|
+| **M3** | **19.91** | **ALIVE** (front row) |
+| **M2** | **30.48** | **DEAD** |
 
-| Constant / branch | Update |
+**Measured failure boundary: `X*_cylinder ∈ (19.91, 30.48)`**, geometric centre
+**24.6**, **n = 1 at each bracket edge**, conditional on **4.00 mm** arms and the
+**30 mm²** cap. Quote the bracket, never the centre — this plate brackets the
+transition far more loosely than plate 5's 30-specimen ladder did.
+
+**What it establishes.** The cylindrical bracket **contains** plate 5's conical
+`X* ∈ [25.00, 25.34]`. **The cone was not the confound:** `X* ≈ 25` reproduces on a
+second geometry.
+
+| Constant / branch | Resolution |
 |---|---|
-| `X_STAR_CYLINDER` | Promote from `Pending<f64>` to `Measured<f64>`, carrying the cylindrical bracket. Keep `X_STAR_CONE` (the plate-5 conical bracket) as a separate named constant — they are different quantities if they differ. |
-| `X_ALLOWED` | Stays `Derived<f64>`; **re-derive it from `X_STAR_CYLINDER`** at `= X*_cylindrical / 2.0`. If cylindrical `X*` differs materially from 25, **every arm in the engine resizes**. Do not hardcode 12.0 anywhere except this one derivation. |
-| Arm-geometry model | If cylindrical `X*` ≫ conical `X*`, the taper penalty is real and large → the fast-flare requirement of §1.3(b) becomes a hard sizing term, and the minimum-section locator becomes mandatory rather than desirable. If they agree, the cone was not the confound and tip-disc sizing stands. |
-| `tensile_green_mpa` | Recompute the derived value so the composite still equals the new `X_ALLOWED`. It is a derived carrier, not an independent number. |
+| `X_STAR_CYLINDER` | `Pending<f64>` → **`Measured<f64>`**, plate 6, 2026-07-31, carrying the interval `(19.91, 30.48)`. Store the interval, not 24.6. The `note` field must carry all three conditionals: n = 1 per bracket edge, 4.00 mm arms, 30 mm² cap. |
+| `X_STAR_CONE` | Unchanged. **Keep it a separate named constant** — the two are measured on different geometries at very different precision, and merging them would launder that difference away. |
+| `X_ALLOWED` | **Stays `Derived<f64> = 12.0`.** It is *not* re-derived as `X*/2` from the new bracket: plate 6 is single-specimen at each edge, so the re-derivation is a **margin check** against the binding (lower) edge — `19.91 / 12 = 1.66×` — and 12.0 passes it. **No arm in the engine resizes.** Do not hardcode 12.0 anywhere except this one derivation. |
+| `tensile_green_mpa` | Unchanged at 0.288 MPa. `X_ALLOWED` did not move, so its derived carrier does not either. |
+| Arm-geometry model | The brackets agree, so **there is no measured taper penalty** and tip-disc sizing stands. The fast-flare requirement of §1.3(b) keeps its original justification — the *observed* failure location — and the minimum-section locator stays **required**, because the X rule applies at the minimum section wherever it is. Neither is carrying a measured cone-vs-cylinder discount, and neither may be sold as if it were. |
 
-**Interim:** ship `X_STAR_CYLINDER: Pending<f64>` with the plate-6 question, and leave
-`X_ALLOWED: Derived<f64> = 12.0` derived from `X_STAR_CONE` as it is today. **`X_ALLOWED`
-is never a `Pending`** — 02 §3.5 declares it `Derived`, and the open question belongs on
-the thing that is actually unmeasured. When plate 6 lands, re-derive `X_ALLOWED` from the
-new `X_STAR_CYLINDER` per the table above.
+**`X_ALLOWED` is still never a `Pending`** — 02 §3.5 declares it `Derived`, and after
+2026-07-31 there is no open question left for it to carry.
 
-### 4.2 Question (b) — multi-arm load sharing: additive or zipper?
+### 4.2 Question (b) — RESOLVED: sharing is **at least additive**; the zipper model is **refuted**
 
-**The problem.** When N arms serve one down-face region, does the group share the
+**The question was.** When N arms serve one down-face region, does the group share the
 load (**additive**: the region's total load is divided, so `X_tot/N` governs), or
 does each arm meet the peel front alone at its own full X (**zipper**)? §2.4
-explains why the printer's −Y tilt-release makes this an *arrangement-dependent*
-question rather than a global one.
+explains why the printer's −Y tilt-release made this look like an
+*arrangement-dependent* question rather than a global one.
 
-**Specimen design that answers it.** Caps of known area on **groups of N arms**
-(N = 1, 2, 3, 4) at fixed per-arm X, with each group replicated in two
-orientations: arms strung along **Y** (sequential encounter with the front →
-zipper conditions) and along **X** (simultaneous encounter → sharing conditions).
-If sharing is real, the X-arranged groups survive at per-arm X well above 25 while
-Y-arranged groups fail near 25. If zipper is real, both fail near 25 regardless
-of orientation.
+**The measurement.** All **12** strip cells survived at per-arm **`X_arm = 60.15`** —
+`N ∈ {2, 3, 4, 6}`, arm pitches **2.0 and 2.8 mm**, arm lines along **both X and Y**,
+both replicates included — while the matched **mono** cell **M1 died at the same
+`X = 60.15`**. Survival tracks the **group** ratio
 
-**What updates when the number lands:**
-
-| Outcome | Constants / branches |
-|---|---|
-| **Zipper** (each arm alone at full X) | No sizing change — the current per-arm Voronoi rule is already the zipper assumption. Resolve `LOAD_SHARING` to `LoadSharing::Zipper` and let the exhaustive match on the two-variant enum prove no sharing discount survives anywhere. **The `tip_r_max_mm` cap then bites for real**: a region needing more than 37.70 mm² per arm must be split into more cells, which requires the load-driven fixer of §1.5(i). Ship that fixer regardless. |
-| **Additive** (group co-carries) | Resolve `LOAD_SHARING` to `LoadSharing::Additive { n_eff_cap }`: per-arm demand becomes `A_supported_group / (N_eff · X_allowed)`, where `N_eff` counts only arms that meet the peel front *together* — i.e. arms within a front-normal (Y) band, not merely nearby. Placement gains a new degree of freedom: cluster arms **across** the front (constant Y) to earn the discount. This is a real change to the CVT objective in §2.3, so keep the sharing term as a pluggable weight on the cell-area demand rather than an inline constant. |
-| **Either** | The `X ≤ 12` rule is necessary-not-sufficient in both branches. The arrangement gate (lateral non-degeneracy + front-band awareness) ships regardless. |
-
-**Interim:** ship the constant `02-target-architecture.md` §3.6 declares —
-
-```rust
-pub static LOAD_SHARING: Pending<LoadSharing> = Pending {
-    conservative: &LoadSharing::Zipper,                            // no discount; never under-flags
-    optimistic:   &LoadSharing::Additive { n_eff_cap: f64::INFINITY },
-    plate: PlateId::P6,
-    question: "plate6-b-additive-vs-zipper",
-};
+```
+X_tot = A_cap / (N · A_arm)
 ```
 
-Its name is `LOAD_SHARING`, its payload is the `enum LoadSharing { Zipper, Additive { .. } }`
-from `plinth-support::load` — **not** a scalar discount factor, and **not** a constant named
-`MULTI_ARM_SHARING`. `.resolve()` yields the conservative (Zipper) branch. Route **all**
-group-sizing through it so switching branches is one constant plus enabling the front-band
-grouping in placement, and so `cargo test -p plinth-support --test load_sharing_both`
-(04-migration-plan.md M5) can exercise both variants.
+not the per-arm ratio. N arms do co-carry one region. **`LoadSharing::Zipper` is
+refuted as a description of this printer's behaviour.**
 
-### 4.3 Slotting in a results note
+**Five caveats that MUST travel with the constant** — all of them in the `Measured`
+`note` field, not in a comment somewhere else:
 
-Write the results into a new `docs/datasheets/physics/plate-06-results.md` (or
-wherever `06-conventions.md` says calibration results live) with, at minimum: the
-bracketing interval for each `X*`, the number of specimens and inversions, the
-per-group survival table for question (b), and the printer/resin/temperature
-conditions. Then:
+1. Validated at **one** cap area (30 mm²), **one** arm diameter (0.798 mm), **one**
+   arm length (4.00 mm).
+2. **No strip ever failed**, so there is **no measured upper bracket on sharing**. The
+   result bounds sharing from below only.
+3. Strip arms carry a **~20 % fin-root section bonus** that the mono cells lack. Treat
+   sharing as **"at least N×"** and **never design on a super-additive margin** — part
+   of the observed headroom is section, not sharing.
+4. On this plate `X_tot` is **algebraically degenerate** with total arm area (a single
+   cap area was used). The **ratio** form rests on **plate 5's** cap-area spread, not
+   on plate 6.
+5. **No axis dependence at this load.** Strips along X and along Y both survived, so an
+   axis-dependent zipper collapse at `X_arm = 60` is **excluded**. A smaller
+   orientation effect *near the boundary* is **untested** — every strip survived, so
+   the orientation contrast has zero variance.
 
-1. Update the two `Pending` constants in the physics crate to `Measured`, citing
-   plate 6 and the interval.
-2. Select the §4.2 `LOAD_SHARING` branch. If additive, enable the front-band
-   grouping in placement; if zipper, assert the sharing term is absent.
+**What updates:**
+
+| Constant / branch | Resolution |
+|---|---|
+| `LOAD_SHARING` | `Pending<LoadSharing>` → **`Measured<LoadSharing>`**, plate 6, 2026-07-31, value **`LoadSharing::Additive { n_eff_cap: 6.0 }`**. Per-arm demand becomes `A_supported_group / (N_eff · X_allowed)`. |
+| `n_eff_cap` | **6.0** — the largest group size measured. Caveat 2 gives no upper bracket, so the discount is granted only across the measured range; past N = 6 it is an extrapolation. This is the only free parameter the resolution introduces; it is a `Derived` choice from the plate's design grid, and it belongs in the same `note`. |
+| `N_eff` | **All arms rigidly co-carrying the region — no front-band filter.** The pre-registered additive branch defined `N_eff` as "arms within a front-normal (Y) band"; caveat 5 removes that restriction, because sharing appeared along both axes. `N_eff` still requires genuine co-carrying (arms under one contiguous rigid region), never mere proximity. |
+| Orientation term | **None.** Do not add a peel-axis term to sizing or placement until something contradicts caveat 5. Retain `peel_dir` as an input to `effective_x` (02 §3.6) so an orientation term can be added later without a signature change, and say in the doc comment that it is currently unused *by measurement*. |
+| `LoadSharing::Zipper` | **Kept in the enum.** It is the strictly-conservative branch (per-arm sizing can only over-size) and it is the A/B arm that `cargo test -p plinth-support --test load_sharing_both` and `plinth calibrate` exercise. Refuted is not deleted. |
+| `tip_r_max_mm` cap | Stops being a hard wall. A region needing more than 37.70 mm² is served by an `ArmGroup`, not by one fatter tip. **The load-driven fixer of §1.5(i) ships regardless** — a group still has to be *created* in response to a load violation. |
+| Placement / CVT | The sharing term is a pluggable weight on the cell-area demand in the §2.3 objective, never an inline constant. It is now a *measured* weight rather than a speculative one, but the plumbing is unchanged. |
+
+```rust
+pub static LOAD_SHARING: Measured<LoadSharing> = /* LoadSharing::Additive { n_eff_cap: 6.0 }
+    — plate 6, 2026-07-31. 12/12 strips survived X_arm = 60.15 at N = 2,3,4,6 (pitch 2.0
+    and 2.8 mm, arm lines along X and along Y) while the matched mono died at the same X.
+    Survival tracks X_tot = A_cap/(N*A_arm). AT LEAST additive: never credit more than N.
+    Caveats 1-5 of 03 section 4.2 belong verbatim in `note`. */;
+```
+
+> **One mechanism wrinkle.** `Measured<T>` (02 §3.5) carries an `err: T`. For a
+> **categorical** payload like `LoadSharing` there is no error bar. Do **not** invent a
+> numeric one and do **not** widen the enum to carry uncertainty: either set `err` to
+> the same variant or make it `Option<T>` in 02's definition, and carry the real
+> uncertainty — caveats 1–4 — in `note`. Whichever 02 chooses, the fact that a
+> categorical measurement has no error bar must stay visible in the type, not be
+> papered over.
+
+The name is still `LOAD_SHARING`, the payload is still the
+`enum LoadSharing { Zipper, Additive { .. } }` from `plinth-support::load` — **not** a
+scalar discount factor, and **not** a constant named `MULTI_ARM_SHARING`. Route **all**
+group-sizing through it, so the A/B against `Zipper` stays runnable and so the
+corpus-wide delta of the 2026-07-31 switch is measurable rather than assumed.
+
+### 4.3 Family A6 is VOID — an unexplained in-print loss above z ≈ 9 mm
+
+Plate 6's single-arm family **A6** (6.00 mm arms, caps at z 10.95–12.70 mm) is **void
+by its own pre-registered validity gate**: control cell **KS at X = 8.0**, a
+must-survive control, **died**. Nothing in the A6 family may be quoted as a load
+measurement, and §4.1's bracket comes from the B6-family mono cells, which sit in the
+well-behaved z band.
+
+The failure is not a soft one. **A6-S was wiped 0/11 across X = 8…409** — a **51×
+load range** with an identical outcome at every rung. An outcome invariant across 51×
+of load is **not a load-capacity outcome**.
+
+**Mechanism: UNIDENTIFIED.** Eliminated by the scoring panel:
+
+- **Post-print handling** — the wash basket was empty, so every loss happened
+  in-print; a quantitative inversion argument rules out handling independently.
+- **Pure bending / slenderness** — every standard cantilever law misses by **≥ 2×**,
+  and the A6-L sub-ladder is **non-monotone** in the direction a bending law requires.
+- **Row gradient** — excluded.
+- **Cap area** — excluded.
+
+**Leading candidate: an in-print, family-confounded artifact, possibly tied to cap-plane
+z.** Every well-behaved cap on this plate sits at **z ≤ 9.2 mm**; every anomalous loss
+sits at **z ≥ 10.95 mm**. That split is **100 % confounded with family**, so the plate
+cannot separate "z band" from "family A6" — which is exactly why it is a candidate and
+not a finding.
+
+**Free arm length is bounded, not measured.** The 4 → 6 mm arm-length change is bounded
+to a **≤ ~18 %** effect, but it was never cleanly measured: the **C6** family that
+would have isolated it was **dropped from the build**. Do not derive an arm-length term
+from this plate.
+
+**Two coupon-design rules follow, and they bind every future calibration plate:**
+
+1. **Never score a feature above z ≈ 9 mm on this printer** until the A6-S artifact is
+   understood. Above that band the printer is doing something this plate could not
+   explain, and any number measured up there is uninterpretable.
+2. **Never place a validity control in a different z band than the specimens it
+   validates.** A6's control was in the anomalous band with its specimens, which is why
+   the family self-voided cleanly — but the same mistake with the control in the *good*
+   band would have certified an anomalous family as valid.
+
+These join the standing coupon rules (mandatory control set, randomized row/column
+assignment never by position formula, contiguous row bases, Y position randomized per
+§2.4 note 1) and apply to the specimen design of every plate from 7 onward.
+
+### 4.4 Slotting in a results note
+
+**Still owed for plate 6.** Write the results into a new
+`docs/datasheets/physics/plate-06-results.md` (or wherever `06-conventions.md` says
+calibration results live) with, at minimum: the bracketing interval for each `X*`, the
+number of specimens and inversions, the per-group survival table for question (b), the
+A6 void finding and its elimination list, and the printer/resin/temperature
+conditions. §4.1–§4.3 above are the interim record and must be reconciled against it.
+
+**The same procedure for every plate after 6:**
+
+1. Update the named `Pending` constants in the physics crate to `Measured`, citing the
+   plate, the date and the interval — and put every conditional the plate could not
+   remove into the `note` field, not into prose elsewhere.
+2. Select the branch of any `Pending` enum. Keep the refuted variant in the enum as the
+   conservative fallback and the A/B arm; refuted is not deleted.
 3. Re-run the parity harness (see `04-migration-plan.md` / `05-chitubox-and-corpus.md`).
    A physics change moves every artifact, so re-freeze the Python baseline *before*
    comparing, or the comparison measures the physics change rather than the port.
+4. Check the specimen design against §4.3's two coupon rules **before** the plate is
+   built, not after it is scored.
 
 ---
 
@@ -732,6 +863,10 @@ fresh reader.
    this caveat, and note that **it is not the number the code uses** — the code's
    `peel_pressure_pa = 3000 Pa` sits an order of magnitude below it, which is one
    more reason that constant must never be quoted as a physical property.
+   **Plate 6's scoring analysis lands in the same band from a different direction**
+   (§1.4): the only self-consistent reading of `X* ≈ 25` is a cavitation-capped
+   squeeze of ~100 kPa on flat patches of ~5 mm and up. Same order, independently
+   arrived at — and still not a number the sizing path may use.
 
 7. **Bridge/sag limit ~3 mm at 0.300 mm section.** The owner's brief records this
    as approximate. In-repo, `bridge_free_gap_mm = 1.0 mm` is the only self-support

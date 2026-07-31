@@ -190,11 +190,38 @@ uv sync                                              # creates .venv from uv.loc
 scripts/build_kernel.sh                              # builds geom_kernel + chitubox_io into .venv
 ```
 
-`corpus/models/` must contain `Weeping Treant v1.2.stl`. That file is **not in the repo**
-and, as verified on 2026-07-31, is **not at any location the frozen Python probes for it**
-(neither the repo root, nor the repo's parent, nor `minis-to-process/`).
+`corpus/models/` must contain the Treant STL. **The model exists.** As of 2026-07-31 the
+owner confirms that **"treant" and "Awakened Tree" are the same model** — the source STL is
+`Awakened Tree.stl` (21 MB), sitting beside the repo at
+
+```
+/Users/craig/code/hughescr/dnd-campaigns/minis-to-process/Awakened Tree.stl
+```
+
+An earlier pass recorded this file as absent everywhere; that search was for the string
+`Weeping Treant` and therefore missed a file sitting in a directory it had already looked
+in. Do not repeat that search — look for the **Awakened Tree** name.
+
 `scripts/tools/_toolpaths.py::resolve_stl()` honours `$TREANT_STL`, then the repo root, then
-the repo's parent directory. Resolve it with:
+the repo's parent directory. It does **not** descend into `minis-to-process/` and it does not
+know the alternate name, so **set `$TREANT_STL` explicitly**:
+
+```
+export TREANT_STL="/Users/craig/code/hughescr/dnd-campaigns/minis-to-process/Awakened Tree.stl"
+```
+
+**`minis-to-process/` is transient staging — the owner clears it after printing**, so that
+path is not durable. The durable home is the same out-of-repo directory that holds
+`treant_v5_candidate.chitubox` — `$CHITUBOX_CORPUS_DIR`, defaulting to the repo's parent
+(`05-chitubox-and-corpus.md` §4). Copy the STL there under the name the manifest and
+`resolve_stl()` expect (`Weeping Treant v1.2.stl`) and point `$TREANT_STL` at the copy.
+
+**Never commit it.** At 21 MB it follows the same rule as `treant_v5_candidate.chitubox`:
+out of the repo, located by environment variable. `corpus/` is **not** in `.gitignore`
+today, so whoever first creates `corpus/models/` adds `corpus/models/*.stl` to it in the
+same commit.
+
+Verify whichever route you took with:
 
 ```
 uv run --frozen python -c "import sys; sys.path.insert(0,'scripts'); from tools._toolpaths import resolve_stl; print(resolve_stl())"
@@ -205,24 +232,25 @@ Note that `resolve_stl()` **never raises** — it falls through to
 `return os.path.join(REPO_ROOT, name)`, a path that does not exist. So test the printed
 path with `test -f`; a successful print proves nothing.
 
-**Without the Treant, M1's gate and every gate from M4 onward are blocked, not just the
-freeze.** M1's parity gate is "the harness scores the frozen baseline without error";
-M4–M8 all take `--baseline corpus/baseline`; M9 re-fires M7's gate. Do not substitute a
-different model silently. Ask the owner to place the file or set `$TREANT_STL`, and record
-the blocker.
+**M1's gate and every gate from M4 onward require `$TREANT_STL` to be set** (the file is
+available — see above), not just the freeze. M1's parity gate is "the harness scores the
+frozen baseline without error"; M4–M8 all take `--baseline corpus/baseline`; M9 re-fires
+M7's gate. This is a **configuration** step, not a missing asset. Do not substitute a
+different model silently.
 
-**Sanctioned interim while you wait:** freeze a *provisional* baseline over the seven
-repo-obtainable models — the five synthetic fixtures plus
+**Sanctioned fallback if the file still cannot be placed:** freeze a *provisional*
+baseline over the seven repo-obtainable models — the five synthetic fixtures plus
 `scripts/tests/fixtures/chitubox/Sphere.stl` and `Cylinder.stl` — record
 `"provisional": true` in `corpus/manifest.json`, and proceed through M1, M2 and M3 against
 it. **M4 may not be called done on a provisional corpus**, because the Treant is the model
 every physics constant in this repo was tuned against and a baseline without it is not the
 corpus the gate assumes. Re-freeze in full when the Treant lands, and clear the flag.
 
-The other source models sit beside the repo, outside Codex's reach, in `minis-to-process/`
-(provenance footnote only — the owner copies them in). `Morel Mudskipper.stl` and
-`Awakened Tree.stl` are the two the existing code and fixtures reference by name and are
-the highest-value additions after the Treant.
+The other source models sit beside the repo in `minis-to-process/` (transient staging — the
+owner clears it after printing, so copy anything you need out). `Morel Mudskipper.stl` is
+the other model the existing code and fixtures reference by name and is the highest-value
+addition after the Treant. **`Awakened Tree.stl` is not a separate model — it *is* the
+Treant** (see above); do not add it to the corpus twice under two names.
 
 ### Python retired here
 
@@ -280,7 +308,9 @@ see the audit table in §M9.)
    `docs/rust-migration/constants.md` and fails if the committed file differs. The doc is
    generated, never hand-edited.
 6. Create `corpus/models/` **inside the repo** and populate it:
-   - `Weeping Treant v1.2.stl` (owner prerequisite above);
+   - `Weeping Treant v1.2.stl` — i.e. `Awakened Tree.stl`, the same model (prerequisite
+     above). Reference it via `$TREANT_STL` or copy it in; either way **do not commit it**,
+     it is 21 MB;
    - `scripts/tests/fixtures/chitubox/Sphere.stl` and `Cylinder.stl` (copy, do not move —
      `rust/chitubox_io/tests/synth_compare.rs` consumes them where they are);
    - STL exports of the five synthetic fixtures, via the single sanctioned one-off:
@@ -925,7 +955,9 @@ gate becomes satisfiable by construction.
 
 - **X = A_supported / A_arm_cross_section**, both mm². Measured failure boundary
   **X\* ≈ 25** (plate 5, 30 specimens: every X ≤ 25.3 survived, every X ≥ 25.0 failed, one
-  boundary inversion). Design target **X ≤ 12** (2× safety factor).
+  boundary inversion), reproduced on **cylindrical** arms at **(19.91, 30.48)** (plate 6,
+  n = 1 per bracket edge). Design target **X ≤ 12** (2× safety factor, 1.66× against the
+  binding plate-6 edge).
 - Load scales with supported **AREA** — not perimeter, not a squeeze-film law.
 - Failure is **tensile snap of the narrowest cross-section just above the contact**. A long
   slow taper is a liability; supports must **flare fast** above the tip.
@@ -934,19 +966,29 @@ gate becomes satisfiable by construction.
   The only scar levers are **X** and **WHERE the scars land**. Do not build a knob that
   claims to reduce total scar area by changing spacing; it cannot.
 - **X ≤ 12 is necessary, NOT sufficient.** It is blind to arrangement: three collinear arms
-  have zero lateral stability perpendicular to their line. The peel front sweeps
-  front-to-back in **−Y** on this printer (tilt release), so **Y-arranged arms meet the
-  front one at a time (zipper conditions)** while **X-arranged arms meet it together
-  (sharing conditions)**. Arrangement is a first-class input, not a tie-break.
+  have zero lateral stability perpendicular to their line, whatever their X. The lateral
+  non-degeneracy gate ships regardless. The peel front sweeps front-to-back in **−Y** on
+  this printer (tilt release), which *predicted* that Y-arranged arms meet the front one at
+  a time (zipper) while X-arranged arms meet it together (sharing) — **plate 6 measured no
+  such axis dependence** (03 §4.2 caveat 5), so arrangement enters through `ArmGroup`
+  membership, **not** through a peel-axis term.
 
-**`LoadSharing` is a `Pending` constant with both outcomes designed.** Plate 6 (printed
-2026-07-30, scoring imminent — results may arrive during this migration) resolves two
-things: (a) X\* under **constant-diameter cylindrical** arms, since plate 5's arms were
-**cones** and X\* ≈ 25 could be an artifact of the assumed section; (b) whether multi-arm
-load is **Additive** (N arms share; `X_tot/N` governs) or **Zipper** (each arm meets the
-peel front alone at full X). Ship **`Zipper` as the conservative default**. `Additive` must
-be **code-complete and tested**, not a TODO. When plate 6 scores, the result plugs into the
-typed constant and M8's A/B measures the delta — **no redesign**.
+**`LoadSharing` is a `Measured` constant as of 2026-07-31 — both variants stay
+code-complete.** Plate 6 (printed 2026-07-30, **scored 2026-07-31**) resolved two things:
+(a) X\* under **constant-diameter cylindrical** arms brackets **(19.91, 30.48)**, which
+*contains* plate 5's conical `X* ≈ 25`, so the cone was **not** the confound and
+**`X_ALLOWED` stays 12.0 — no arm resizes**; (b) multi-arm load is **at least Additive** —
+12/12 strip cells survived `X_arm = 60.15` at N = 2,3,4,6 along **both** axes while the
+matched single arm died at the same X. **`Zipper` is refuted** and ships only as the
+strictly-conservative fallback and the A/B arm. Ship
+**`Additive { n_eff_cap: 6.0 }`** — `n_eff_cap` is the largest group measured — with
+`N_eff` counting **all** arms rigidly co-carrying the region: plate 6 found **no axis
+dependence**, so there is **no front-band filter and no orientation term**. The five
+scope caveats (one cap area, one arm diameter, one arm length; no upper bracket on
+sharing; a ~20 % fin-root section bonus on the strip arms, so never credit more than N;
+`X_tot` degenerate with total arm area on this plate) are in
+`03-physics-and-constants.md` §4.2 and must travel in the constant's `note`. M8's A/B
+measures the corpus-wide delta of the switch — **no redesign**.
 
 ### Work items
 
@@ -1369,9 +1411,10 @@ visible in the Pareto record.
 **`plinth calibrate`** (new `plinth-cli` subcommand):
 - Surrogate-vs-exact **Spearman correlation**, **regret**, and an **exact-best-in-top-K**
   gate.
-- **`LoadSharing` Zipper/Additive corpus A/B delta report** — ready for plate 6's scores,
-  which may arrive mid-migration. When they do, set the `Pending` constant and re-run; no
-  redesign.
+- **`LoadSharing` Zipper/Additive corpus A/B delta report.** Plate 6 scored 2026-07-31 and
+  selected `Additive { n_eff_cap: 6.0 }` (`03-physics-and-constants.md` §4.2); the A/B stays
+  because the size of that switch must be **measured**, not assumed, and because `Zipper`
+  remains the strictly-conservative fallback.
 - The plate-analysis role of `corpus.py` (nearest-neighbour spacing distribution, tip-radius
   histogram, z-quartile share) reading `.chitubox` through `chitubox_io`, not through the
   Python `chitubox_inject.Project`.

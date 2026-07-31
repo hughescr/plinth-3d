@@ -124,7 +124,7 @@ NumPy allocator arithmetic and raw-f64-bit welding into wire hashes.
 | 0 | **README.md** (this file) | Mission, scope, acceptance strategy, how to work. |
 | 1 | **01-current-system.md** | What exists in Python today, module by module, plus the known defects the port must **fix, not reproduce**. |
 | 2 | **02-target-architecture.md** | The Rust crate graph, the typestate stage spine, `DefectReport`, `ViolationKind`, the orientation funnel, `FaceTable`, `CostVector`, `LayerPlan`, and the `plinth-solid` FFI decision. |
-| 3 | **03-physics-and-constants.md** | The measured physics (X-rule, scar invariance, hex lattice, peel direction), every constant with its provenance grade, and the `Pending` plate-6 constants with both outcomes pre-designed. |
+| 3 | **03-physics-and-constants.md** | The measured physics (X-rule, scar invariance, hex lattice, peel direction), every constant with its provenance grade, and the **plate-6 results (scored 2026-07-31)**: `X*` reproduced on cylindrical arms, multi-arm load sharing measured as **at least additive**, and the coupon-design rules that came out of the voided A6 family. |
 | 4 | **04-migration-plan.md** | Milestones M0…M9 in dependency order, with the gate that must pass before each one is called done; M9 is the Python-deletion milestone. |
 | 5 | **05-chitubox-and-corpus.md** | The `.chitubox` format contract, the fixture corpus and which fixtures are native ground truth vs. regenerated (and therefore circular for writer bugs), the model corpus, and the baseline freeze procedure. |
 | 6 | **06-conventions.md** | Standing rules: batch-first, f64, rayon, errors, typed-provenance constants, testing standards, git discipline, no-new-Python, no stray artifacts. |

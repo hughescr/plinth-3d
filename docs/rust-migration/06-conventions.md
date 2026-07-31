@@ -154,8 +154,10 @@ of the mechanism is a promise, not a guarantee.
 **Search weights are `Placeholder` by construction and that is correct.** Orientation
 scalarization weights select a candidate; they never accept one. Acceptance is the
 `DefectReport`, never a score. See 03-physics-and-constants.md for every constant and
-its grade, including the `Pending` plate-6 constants (`LOAD_SHARING`, `X_STAR_CYLINDER`)
-whose two outcomes are both designed so a measurement plugs in without a redesign.
+its grade. The two plate-6 constants (`LOAD_SHARING`, `X_STAR_CYLINDER`) were the worked
+example of `Pending` until the plate scored on **2026-07-31**; both are `Measured` now,
+and the fact that the switch cost one constant each is the argument for keeping the
+wrapper. `Pending` stays as the mechanism for the next unmeasured constant.
 
 ---
 
