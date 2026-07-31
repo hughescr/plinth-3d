@@ -55,7 +55,7 @@ class SupportConfig:
     # angle-aware lateral load term in placement._shaft_r_for_L /
     # max_unbraced_len_mm -- and plate 5 measured nothing about deflection
     # or bracing. Left at 3000.0 Pa, which is at least the right order for
-    # a real peel pressure: docs/datasheets/physics/lit-green-peel.md's
+    # a real peel pressure: docs/reference/literature/lit-green-peel.md's
     # instrumented community/peer-reviewed sources put MSLA peel stress at
     # ~12-13 kPa (1-2 N/cm2). Still soft in its own right, still the knob
     # to recalibrate if ribbing/whip (not tip snapping) is what a print

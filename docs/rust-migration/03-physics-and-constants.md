@@ -117,7 +117,7 @@ onto a single `A_supported/A_arm` threshold across 3 cap areas and a 25× span o
 tip diameters. It did.
 
 > Corroborating and complicating: the literature review in
-> `../datasheets/physics/LITERATURE-NOTES.md` §"the linear area law is wrong"
+> `../reference/literature/LITERATURE-NOTES.md` §"the linear area law is wrong"
 > argues from three independent published datasets that separation **force** vs
 > cross-section goes as `A^n` with `n ≈ 0.25–0.5`, not `n = 1`. That is a claim
 > about the *total plate-level separation force vs the slice image*, measured on
@@ -397,10 +397,10 @@ name and value are the contract.
 | `X_STAR_CYLINDER` *(new; named `X_STAR_CYLINDER` in 02 §3.5)* | **(19.91, 30.48)** | — | **M** plate 6, 2026-07-31 | `plinth-core::constants::load` | Cylindrical-arm boundary; geometric centre 24.6, **n = 1 at each bracket edge**, conditional on 4.00 mm arms and a 30 mm² cap. Store the interval, never 24.6. Contains `X_STAR_CONE` — that is what retires the cone-artifact question (§4.1). Was `Pending<f64>` until 2026-07-31. |
 | `LOAD_SHARING` *(new; `enum LoadSharing`, 02 §3.6)* | **`Additive { n_eff_cap: 6.0 }`** | — | **M** plate 6, 2026-07-31 | `plinth-support::load` | 12/12 strips survived `X_arm = 60.15` at N = 2,3,4,6 while the matched mono died — sharing is **at least additive**, `Zipper` is refuted. `n_eff_cap = 6.0` is the largest group measured. **All five §4.2 caveats must live in the `note` field.** Was `Pending<LoadSharing>` until 2026-07-31. Categorical payload → no meaningful `err`; see §4.2. |
 | `X_ALLOWED` *(new — does not exist in Python)* | **12.0** | — | **D** from `X_STAR_CONE` with a 2× safety factor, margin-checked against `X_STAR_CYLINDER` | `plinth-core::constants::load` | `Derived<f64>`, not `Measured` and not `Pending` — 02 §3.5 declares it exactly this way. All arm sizing derives from it; do not hardcode 12.0 anywhere else. Plate 6 did **not** move it: 12.0 clears the binding measured bracket edge by `19.91/12 = 1.66×` (§4.1). That is a margin check, not an `X*/2` recomputation. |
-| `peel_pressure_pa` (config.py:63) | 3000.0 | Pa | **P** — order-of-magnitude only | `plinth-core::constants::deflection` **only** | Literature puts real MSLA peel stress at **12–13 kPa** (`../datasheets/physics/lit-green-peel.md`), i.e. this may be ~4× low. Used unclamped as the angle-aware lateral load term in `_shaft_r_for_L`. Must **not** be recombined to re-derive X. |
+| `peel_pressure_pa` (config.py:63) | 3000.0 | Pa | **P** — order-of-magnitude only | `plinth-core::constants::deflection` **only** | Literature puts real MSLA peel stress at **12–13 kPa** (`../reference/literature/lit-green-peel.md`), i.e. this may be ~4× low. Used unclamped as the angle-aware lateral load term in `_shaft_r_for_L`. Must **not** be recombined to re-derive X. |
 | `tensile_green_mpa` (config.py:91) | 0.288 | MPa | **D** from `X_ALLOWED` — *not* a green-tensile datasheet value | `plinth-core::constants::load` (derived) | Chosen so `0.288e6/(3000·8) = 12.0`. Pre-plate-5 it was 10.0 MPa, which put X_allowed at 416.7. Plausibility check only: pairing X*≈25 with the literature's 12–13 kPa implies ~0.33 MPa, same order. |
 | `tip_safety_factor` (config.py:106) | 8.0 | — | **P** — policy, not measured | `plinth-core::constants::load` | Multiplies load *before* sizing → fatter arms. Retained at 8.0 vs the 2.08 the target implies, so `tensile_green_mpa` absorbs ~3.8× extra conservatism. Also the threshold `load_report` compares realized SF against. |
-| `modulus_green_gpa` (config.py:95) | 0.5 | GPa | **P** — conservative end of a charter range | `plinth-core::constants::deflection` | Plate 5 measured nothing about stiffness. `../datasheets/physics/LITERATURE-NOTES.md` §4 measures a green envelope of **0.2–0.8 GPa, median 0.4**; 0.5 sits *above* the measured median, i.e. optimistic, under-predicting deflection. A recorded proposal of **0.35 GPa** has two independent supports. Do not silently change it; make the change a documented decision. |
+| `modulus_green_gpa` (config.py:95) | 0.5 | GPa | **P** — conservative end of a charter range | `plinth-core::constants::deflection` | Plate 5 measured nothing about stiffness. `../reference/literature/LITERATURE-NOTES.md` §4 measures a green envelope of **0.2–0.8 GPa, median 0.4**; 0.5 sits *above* the measured median, i.e. optimistic, under-predicting deflection. A recorded proposal of **0.35 GPa** has two independent supports. Do not silently change it; make the change a documented decision. |
 
 ### 3.2 Arm / tip geometry
 
@@ -479,7 +479,7 @@ same population from the same formulas without sharing code.
 
 | Name | Value | Unit | Prov. | Rust owner | Notes |
 |---|---|---|---|---|---|
-| `verify.A_ABS_MM2` | 2.0 | mm² | **P from spec** — owner-ratified, no measurement (1.60 mm equivalent scar dia) | `plinth-core::constants::scar` | `../datasheets/physics/LITERATURE-NOTES.md` explicitly found **no literature support** for this or the next two. |
+| `verify.A_ABS_MM2` | 2.0 | mm² | **P from spec** — owner-ratified, no measurement (1.60 mm equivalent scar dia) | `plinth-core::constants::scar` | `../reference/literature/LITERATURE-NOTES.md` explicitly found **no literature support** for this or the next two. |
 | `verify.KAPPA` | 1.25 | — | **P from spec** | `plinth-core::constants::scar` | Headroom multiplier on the designed crossing disc. |
 | `verify.L_SCAR_MAX_MM` | 2.5 | mm | **P from spec** | `plinth-core::constants::scar` | Max scar patch dimension. |
 | `verify.PRINT_FLOOR_CHORD_MM` | 0.08 | mm | **D** — owner-ratified 2026-07-24; a ~20 µm guard band above the 0.0502 mm census population minimum | `plinth-core::constants::scar` | A rule-4 unanchored transit whose chord is below this is MOOT — a foliage knife-edge that cannot print as coherent material. Test-pinned. |
@@ -637,7 +637,7 @@ record, not a branch design.
 | Scoring integrity | wash basket **empty** — every failure occurred **in-print**, none in post-print handling |
 | Verification | two blind analysts plus an adversarial-refuter panel |
 
-> **The `docs/datasheets/physics/plate-06-results.md` note has not been written yet**
+> **The `docs/reference/plate-06-results.md` note has not been written yet**
 > (§4.4). Until it exists, **this section is the record of record** for the plate-6
 > numbers.
 
@@ -798,7 +798,7 @@ assignment never by position formula, contiguous row bases, Y position randomize
 ### 4.4 Slotting in a results note
 
 **Still owed for plate 6.** Write the results into a new
-`docs/datasheets/physics/plate-06-results.md` (or wherever `06-conventions.md` says
+`docs/reference/plate-06-results.md` (or wherever `06-conventions.md` says
 calibration results live) with, at minimum: the bracketing interval for each `X*`, the
 number of specimens and inversions, the per-group survival table for question (b), the
 A6 void finding and its elimination list, and the printer/resin/temperature
@@ -833,7 +833,7 @@ fresh reader.
    formula analysis, dimensional checks, and §4 defect list remain valid and are
    worth reading; its numbers are not.**
 
-2. **`docs/datasheets/physics/LITERATURE-NOTES.md` §"What this changes in our
+2. **`docs/reference/literature/LITERATURE-NOTES.md` §"What this changes in our
    config" is also pre-plate-5.** It recommends *raising* `peel_pressure_pa` to
    8–10 kPa and *keeping* `tensile_green_mpa` at 10.0 MPa. Both recommendations
    were overtaken by plate 5, which re-anchored the composite. Its measured
@@ -906,8 +906,8 @@ prerequisite.
 | `../reference/physics_printability.md` | The angle limits, and the clearest statement of what "SF 8" is a safety factor *of*, plus radius sensitivities (`√F` for tension-floored members, `F^¼` for deflection-floored). | |
 | `../reference/physics_transient_peel.md` | The build-time transient model: restraint activation sweep, worst free-cantilever span, `N^0.125`. | |
 | `../datasheets/README.md` | The `specs` / `datasheets` / artifacts taxonomy — where a new physics number belongs. | Quotes a stale comment (conflict 3). |
-| `../datasheets/physics/LITERATURE-NOTES.md` | Primary-source measurements with test conditions attached to every figure: peel stress vs speed and interface, green modulus envelope, green tensile vs degree of cure, a measured as-printed strut fracture stress. | Config recommendations are pre-plate-5 (conflict 2). |
-| `../datasheets/physics/lit-green-peel.md` | Earlier confidence-classed review (MEASURED-PEER-REVIEW / MEASURED-COMMUNITY / RULE-OF-THUMB / MARKETING tags). Source of the 12–13 kPa FEP peel figure and of the "no source quantifies sealed-cavity blowout" gap. | |
+| `../reference/literature/LITERATURE-NOTES.md` | Primary-source measurements with test conditions attached to every figure: peel stress vs speed and interface, green modulus envelope, green tensile vs degree of cure, a measured as-printed strut fracture stress. | Config recommendations are pre-plate-5 (conflict 2). |
+| `../reference/literature/lit-green-peel.md` | Earlier confidence-classed review (MEASURED-PEER-REVIEW / MEASURED-COMMUNITY / RULE-OF-THUMB / MARKETING tags). Source of the 12–13 kPa FEP peel figure and of the "no source quantifies sealed-cavity blowout" gap. | |
 | `../datasheets/resins/RESIN-ENVELOPE.md` | Cross-manufacturer property envelope for the water-washable ABS-like class; flexural modulus spans ~790–2500 MPa, and **every** manufacturer number is post-cured or of unstated cure state. | |
 | `../datasheets/printers/README.md` | Printer physical parameters. | |
 | `../specs/SPEC-EMBED-POLICY.md` | Normative SCAR-AREA-CAP formula and the PRINT-FLOOR amendment. The law behind §3.6. | |

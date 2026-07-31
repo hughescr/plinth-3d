@@ -21,3 +21,8 @@ scripts/treant_v2_results.json
 # Root cargo workspace build output. Cargo.lock IS committed (binary crate,
 # same convention as rust/*/Cargo.lock), only the build artifacts are not.
 /target/
+
+# Test-corpus meshes. The migration guide's M0 step creates corpus/models/
+# in-repo, but the models themselves are inputs we fetch, not source -- the
+# treant alone is 21 MB. Keep the directory and its manifest, never the STLs.
+corpus/models/*.stl
