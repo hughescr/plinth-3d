@@ -637,9 +637,11 @@ record, not a branch design.
 | Scoring integrity | wash basket **empty** — every failure occurred **in-print**, none in post-print handling |
 | Verification | two blind analysts plus an adversarial-refuter panel |
 
-> **The `docs/reference/plate-06-results.md` note has not been written yet**
-> (§4.4). Until it exists, **this section is the record of record** for the plate-6
-> numbers.
+> **`docs/reference/plate-06-results.md` is the record of record** for the plate-6
+> numbers (written 2026-07-31, §4.4). It carries the full 34-specimen table, the
+> pre-registered gates and the override record; this section carries the
+> **engine-facing** resolution of each constant. Where the two disagree, the
+> results note governs.
 
 ### 4.1 Question (a) — RESOLVED: cylindrical `X*` brackets `(19.91, 30.48)`
 
@@ -797,12 +799,13 @@ assignment never by position formula, contiguous row bases, Y position randomize
 
 ### 4.4 Slotting in a results note
 
-**Still owed for plate 6.** Write the results into a new
-`docs/reference/plate-06-results.md` (or wherever `06-conventions.md` says
-calibration results live) with, at minimum: the bracketing interval for each `X*`, the
-number of specimens and inversions, the per-group survival table for question (b), the
-A6 void finding and its elimination list, and the printer/resin/temperature
-conditions. §4.1–§4.3 above are the interim record and must be reconciled against it.
+**DONE for plate 6** — [`../reference/plate-06-results.md`](../reference/plate-06-results.md),
+written 2026-07-31. It carries the bracketing interval for each `X*`, the number of
+specimens and inversions, the per-group survival table for question (b), the A6 void
+finding and its elimination list, and the printer/resin/temperature conditions, plus
+the full 34-specimen table and the three adversarial-panel memos beside it. §4.1–§4.3
+above were reconciled against it and agree. **Cite the results note, not this section,
+for what the plate measured.**
 
 **The same procedure for every plate after 6:**
 
@@ -841,10 +844,13 @@ fresh reader.
    0.2–0.8 GPa, Cao's 4.8 MPa as-printed strut fracture stress) are good primary
    data and are cited above. Its config recommendations are not current guidance.
 
-3. **`docs/datasheets/README.md` quotes a `config.py` comment that no longer
-   exists** (the "geometric mean of a plausible 1–5 kPa range" line). Its
-   three-way taxonomy (`specs` = law, `datasheets` = external input, artifacts =
-   not in git) is still correct and worth adopting.
+3. **RESOLVED 2026-07-31** — `docs/datasheets/README.md` used to quote a
+   `config.py` comment that no longer exists (the "geometric mean of a plausible
+   1–5 kPa range" line). The README was rewritten: the stale quote is gone, and
+   the taxonomy is now **four-way** (`specs` = law, `datasheets` = vendor and
+   hardware data, `reference` = our own findings, artifacts = not in git).
+   Adopt the four-way split; the physics literature moved from
+   `datasheets/physics/` to `reference/literature/` in the same change.
 
 4. **The linear vs sublinear area law** — §1.3(a). Plate 5 (per-arm failure,
    direct) governs over the literature's `A^n, n ≈ 0.25–0.5` (plate-level

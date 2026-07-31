@@ -21,9 +21,11 @@ the repo.
 
 ## Measured calibration-plate results
 
-The physical plates. These are where the engine's load constants come from, and
-the plates' own working folder no longer exists — **these files are the only
-copy of that data.**
+The physical plates. These are where the engine's load constants come from. The
+generator folder that produced the plates (`calibration-coupons/`) was
+**deleted on 2026-07-31**, once plate 6 was scored and everything
+learning-bearing had been harvested here — **these files are the only copy of
+that data, design and results alike.**
 
 | file | what it is | read it when |
 |---|---|---|
@@ -32,6 +34,8 @@ copy of that data.**
 | [`plate-06-verification-protocol.md`](plate-06-verification-protocol.md) | Appendix — protocol memo: build provenance, gate-by-gate validity ruling, and the literal plate-wide reading of the void. | You want to check whether a plate-6 conclusion was admissible. |
 | [`plate-06-verification-refutation.json`](plate-06-verification-refutation.json) | Appendix — the refuter's per-claim verdicts and reasoning. Every caveat in the results file traces back to a verdict here. Two `//` provenance lines at the top make it JSONC: `tail -n +3` before `jq`. | You are about to quote a plate-6 finding without its caveats. |
 | [`plate-05-results.md`](plate-05-results.md) | **Salvage record for calibration plate 5** (compliant vs stiff). Geometry for all 72 specimens; the conical `X* = [25.00, 25.34]` boundary, the area law, the narrowest-section failure mode. Outcomes are only **partly** recovered and every gap is marked. | You need the cap-area evidence that `X` is a ratio rather than a total-area threshold, or you are trying to recover the missing reads. |
+| [`plate-generator-PLATE-LAYOUT.md`](plate-generator-PLATE-LAYOUT.md) | **Archive** — the generator's own layout document for **all six** plates: pre-registered purpose, specimen tables, validity gates, train/ballast structure, scoring sheets. Verbatim under a four-line provenance header. **For plates 1–4 this is the only surviving design record.** | You need a plate's design intent or its pre-registration — especially for plates 1–4, which have no results file here. |
+| [`plate-generator-manifest.json`](plate-generator-manifest.json) | **Archive** — the generator's `manifest.json`, byte-identical, as-built geometry for every specimen on all six plates (ids, families, positions, diameters, areas, ratios, critical layers). Top-level keys are the six plate names. **Provenance, kept here because the file is JSON and must not be edited:** copied into git 2026-07-31 from the `calibration-coupons/` generator folder, which was **deliberately deleted the same day** per the owner's standing decision that it was condemned once plate 6 was scored. Nothing else holds plates 1–4's geometry. | You need a specimen's exact as-built dimensions — `jq '.["COUPON-PLATE-6-support-arm-capacity"]'` and so on. |
 
 ## Literature
 
