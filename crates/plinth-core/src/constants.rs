@@ -1,9 +1,11 @@
 use crate::{
     BoundKind, BuildVolumeMm, ConstantId, Derived, EffectiveArmCount, EvidenceDate, EvidenceSource,
     EvidenceSourceView, Finite, FiniteInterval, LoadSharing, Measured, MeasuredPayload,
-    MetricValue, MicronGranularity, Pending, Placeholder, PlateId, YDirection,
+    MetricValue, MicronGranularity, Pending, Placeholder, PlateId, PrinterProfile,
+    PrinterProfileError, YDirection,
 };
 use std::collections::BTreeMap;
+use std::sync::LazyLock;
 use thiserror::Error;
 
 mod evidence;
@@ -17,6 +19,86 @@ pub use placeholders::{
     M0PlaceholderConstantsError, NonNegativeFinite, PlaceholderValueError, PlacementXyMm,
     PositiveFinite, SeedSpacingFactor, SphereTessellationPolicy, TrialSetting, UnitFraction,
 };
+
+/// Errors while atomically constructing the complete M0 constants registry.
+#[derive(Clone, Debug, PartialEq, Error)]
+pub enum M0ConstantsError {
+    #[error(transparent)]
+    Evidence(#[from] M0EvidenceConstantsError),
+    #[error(transparent)]
+    Placeholder(#[from] M0PlaceholderConstantsError),
+    #[error(transparent)]
+    Registry(#[from] RegistryError),
+    #[error(transparent)]
+    PrinterProfile(#[from] PrinterProfileError),
+}
+
+/// The one complete, immutable M0 constants publication.
+///
+/// Construction gathers both declaration components, validates their combined
+/// batch, constructs the typed Saturn profile, and only then publishes this
+/// value through [`m0_constants`]. There is no incremental global registry.
+#[derive(Clone, Debug, PartialEq)]
+pub struct M0Constants {
+    registry: ConstantsRegistry,
+    saturn4_ultra: PrinterProfile,
+}
+
+impl M0Constants {
+    fn build() -> Result<Self, M0ConstantsError> {
+        let evidence = M0EvidenceConstants::new()?;
+        let placeholders = M0PlaceholderConstants::new()?;
+
+        // Gather every declaration before one structural batch validation and
+        // publication. Do not register constants incrementally.
+        let mut declarations = Vec::with_capacity(207);
+        declarations.extend(evidence.descriptors()?);
+        declarations.extend(placeholders.descriptors()?);
+        let registry = ConstantsRegistry::build_batch(declarations)?;
+
+        let saturn4_ultra = PrinterProfile::new(
+            "saturn4-ultra",
+            evidence.saturn_build_volume_mm().clone(),
+            evidence.pixel_pitch_x_um().clone(),
+            evidence.pixel_pitch_y_um().clone(),
+            evidence.layer_height_default_mm().clone(),
+            Placeholder::new(
+                placeholders.lift_mm().diagnostic().get(),
+                placeholders.lift_mm().note.clone(),
+            ),
+            evidence.saturn_leading_release_edge().clone(),
+            evidence.saturn_release_front_sweep_direction().clone(),
+            evidence.saturn_release_film_thickness_mm().clone(),
+        )?;
+
+        Ok(Self {
+            registry,
+            saturn4_ultra,
+        })
+    }
+
+    #[must_use]
+    pub const fn registry(&self) -> &ConstantsRegistry {
+        &self.registry
+    }
+
+    #[must_use]
+    pub const fn saturn4_ultra(&self) -> &PrinterProfile {
+        &self.saturn4_ultra
+    }
+}
+
+/// The sole workspace-wide global constants initialization point.
+///
+/// Its fallible result is itself published atomically: callers observe either
+/// the complete 207-entry registry and profile or the same construction error.
+static M0_CONSTANTS: LazyLock<Result<M0Constants, M0ConstantsError>> =
+    LazyLock::new(M0Constants::build);
+
+/// Returns the complete M0 constants registry and printer profile.
+pub fn m0_constants() -> Result<&'static M0Constants, &'static M0ConstantsError> {
+    M0_CONSTANTS.as_ref()
+}
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum RegistryError {
