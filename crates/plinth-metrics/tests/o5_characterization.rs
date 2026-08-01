@@ -213,6 +213,13 @@ fn native_analytic_cubes(cubes: &[(Vec3, f64)], bounds: [[f64; 3]; 2]) -> Native
     .expect("fixed analytic cube fixture must construct a native surface")
 }
 
+/// Exact local transcription of `closed_cavities`' probe identity rule.  It is
+/// characterization-only evidence that signed zero does not create a second
+/// boundary probe; it is not reusable production geometry logic.
+fn topology_probe_key(point: Vec3) -> [u64; 3] {
+    point.map(|value| if value == 0.0 { 0 } else { value.to_bits() })
+}
+
 #[test]
 fn metrics_boundary_wrapper_and_kernel_inside_are_intentionally_not_equivalent() {
     let mesh = cube([0.0, 0.0, 0.0], 1.0);
@@ -254,7 +261,7 @@ fn metrics_boundary_wrapper_and_kernel_inside_are_intentionally_not_equivalent()
 }
 
 #[test]
-fn cavity_counts_and_actual_boundary_probe_subset_contract_are_characterized() {
+fn cavity_counts_and_actual_boundary_probe_ownership_are_characterized() {
     let outer = cube([0.0, 0.0, 0.0], 16.0);
     let depth_one = join(&[outer.clone(), cube([2.0, 2.0, 2.0], 8.0)]);
     let depth_two = join(&[
@@ -280,7 +287,12 @@ fn cavity_counts_and_actual_boundary_probe_subset_contract_are_characterized() {
     assert_eq!(analyze_topology(&concave).unwrap().cavities, 1);
 
     // This is the actual candidate-shell boundary batch used by closed_cavities:
-    // source-face traversal, bitwise coordinate deduplication, then one batch.
+    // source-face traversal, its signed-zero-normalizing key, then one batch.
+    assert_eq!(
+        topology_probe_key([0.0, -0.0, 1.0]),
+        topology_probe_key([-0.0, 0.0, 1.0]),
+        "closed_cavities must coalesce signed-zero-equivalent boundary probes"
+    );
     let inner = cube([2.0, 2.0, 2.0], 8.0);
     let mut seen = BTreeSet::new();
     let mut probes = Vec::new();
@@ -290,7 +302,7 @@ fn cavity_counts_and_actual_boundary_probe_subset_contract_are_characterized() {
             inner.vertices()[b],
             inner.vertices()[c],
         ] {
-            if seen.insert(point.map(f64::to_bits)) {
+            if seen.insert(topology_probe_key(point)) {
                 probes.push(point);
             }
         }
@@ -303,19 +315,27 @@ fn cavity_counts_and_actual_boundary_probe_subset_contract_are_characterized() {
         "an actual inner-shell boundary probe must be admitted by the full-model metrics wrapper"
     );
     let outer_subset = cube([0.0, 0.0, 0.0], 16.0);
+    let full_metrics = contains_points(&depth_one, &probes).unwrap();
     let outer_metrics = contains_points(&outer_subset, &probes).unwrap();
+    // These metrics wrapper results are policy evidence: every inner boundary
+    // point is admitted on both surfaces before parity can distinguish them.
+    assert_eq!(full_metrics, vec![true; probes.len()]);
     let full_native = native_analytic_cubes(
         &[([0.0, 0.0, 0.0], 16.0), ([2.0, 2.0, 2.0], 8.0)],
         [[0.0; 3], [16.0; 3]],
     )
     .inside(&probes);
+    let outer_native =
+        native_analytic_cubes(&[([0.0, 0.0, 0.0], 16.0)], [[0.0; 3], [16.0; 3]]).inside(&probes);
     assert_eq!(
         outer_metrics,
         vec![true; probes.len()],
-        "the actual outer-subset boundary-probe decision admits the inner shell"
+        "the metrics boundary wrapper admits the actual outer-subset probe batch"
     );
+    // This is ownership evidence only: both operands use bare kernel parity on
+    // the same gathered batch, so their difference cannot be wrapper policy.
     assert_ne!(
-        full_native, outer_metrics,
-        "bare full-model kernel containment diverges from the required outer-subset decision"
+        full_native, outer_native,
+        "bare full-model and outer-subset kernel ownership diverge on actual probes"
     );
 }
