@@ -179,6 +179,15 @@ kernel) is spiked. Rust does not refreeze a baseline in M0.
 
 **Depends on:** nothing. **Parallel with:** nothing. **Unblocks:** M1, M2.
 
+**M0 constant-inventory boundary.** Inventory every live literal/default that can
+change emitted geometry, printer framing/compatibility, a physical model,
+acceptance/gate behavior, metric meaning, or deterministic tuning/search. Search
+and repair caps that alter output are included. Exclude binary offsets/magic/schema,
+test-only fixture values, explicitly retired/no-port behavior, and demonstrated
+result-invariant resource/memory guards. `PLINTH_THREADS` remains documented runtime
+control, not a ledger constant. M0 closes membership; M7 completes consumer
+migration. Do not create the M1 decision gate table during this checkpoint.
+
 ### Owner prerequisite — read this before starting
 
 First, the venv. Every `uv run --frozen` and every `@pytest.mark.kernel` test in this plan
@@ -191,7 +200,7 @@ uv sync                                              # creates .venv from uv.loc
 scripts/build_kernel.sh                              # builds geom_kernel + chitubox_io into .venv
 ```
 
-`corpus/models/` must contain the Treant STL. **The model exists.** As of 2026-07-31 the
+`corpus/models/` must contain the exact eight-model local input set. **The Treant model exists.** As of 2026-07-31 the
 owner confirms that **"treant" and "Awakened Tree" are the same model** — the source STL is
 `Awakened Tree.stl` (21 MB), sitting beside the repo at
 
@@ -205,22 +214,28 @@ in. Do not repeat that search — look for the **Awakened Tree** name.
 
 `scripts/tools/_toolpaths.py::resolve_stl()` honours `$TREANT_STL`, then the repo root, then
 the repo's parent directory. It does **not** descend into `minis-to-process/` and it does not
-know the alternate name, so **set `$TREANT_STL` explicitly**:
+know the alternate name. **`minis-to-process/` is transient staging — the owner clears it after
+printing.** Copy the source to the durable canonical home first, then set `$TREANT_STL`
+explicitly; also copy it to the ignored local model-input set:
 
 ```
-export TREANT_STL="/Users/craig/code/hughescr/dnd-campaigns/minis-to-process/Awakened Tree.stl"
+DIR="${CHITUBOX_CORPUS_DIR:-/Users/craig/code/hughescr/dnd-campaigns}"
+cp "/Users/craig/code/hughescr/dnd-campaigns/minis-to-process/Awakened Tree.stl" \
+   "$DIR/Weeping Treant v1.2.stl"
+export TREANT_STL="$DIR/Weeping Treant v1.2.stl"
+cp "$TREANT_STL" "corpus/models/Weeping Treant v1.2.stl"
 ```
 
-**`minis-to-process/` is transient staging — the owner clears it after printing**, so that
-path is not durable. The durable home is the same out-of-repo directory that holds
+The durable home is the same out-of-repo directory that holds
 `treant_v5_candidate.chitubox` — `$CHITUBOX_CORPUS_DIR`, defaulting to the repo's parent
-(`05-chitubox-and-corpus.md` §4). Copy the STL there under the name the manifest and
-`resolve_stl()` expect (`Weeping Treant v1.2.stl`) and point `$TREANT_STL` at the copy.
+(`05-chitubox-and-corpus.md` §4). Its canonical path is
+`${CHITUBOX_CORPUS_DIR:-/Users/craig/code/hughescr/dnd-campaigns}/Weeping Treant v1.2.stl`.
+`TREANT_STL` points to that durable canonical copy;
+`corpus/models/Weeping Treant v1.2.stl` is the ignored local copy for the exact input set.
 
-**Never commit it.** At 21 MB it follows the same rule as `treant_v5_candidate.chitubox`:
-out of the repo, located by environment variable. `corpus/` is **not** in `.gitignore`
-today, so whoever first creates `corpus/models/` adds `corpus/models/*.stl` to it in the
-same commit.
+**Never commit it or any other model input.** All `corpus/models/*.stl` files are
+ignored local inputs. `corpus/manifest.json` and the frozen artifacts under
+`corpus/baseline/` are committed; those are the reproducibility record and measuring stick.
 
 Verify whichever route you took with:
 
@@ -251,8 +266,9 @@ a suction and burst risk during peel). Either source a solid export of the model
 provisional-baseline route below and clear the flag once D-46's stage split lands at M4/M5.
 
 **Sanctioned fallback if the file still cannot be placed:** freeze a *provisional*
-baseline over the seven repo-obtainable models — the five synthetic fixtures plus
-`scripts/tests/fixtures/chitubox/Sphere.stl` and `Cylinder.stl` — record
+baseline over exactly `Sphere`, `Cylinder`, `make_box`, `make_overhang_table`,
+`make_toed_slab`, `make_raking_blade`, and `make_thin_fin` — **seven models, no
+Cone** — and record
 `"provisional": true` in `corpus/manifest.json`, and proceed through M1, M2 and M3 against
 it. **M4 may not be called done on a provisional corpus**, because the Treant is the model
 every physics constant in this repo was tuned against and a baseline without it is not the
@@ -290,14 +306,14 @@ see the audit table in §M9.)
 | --- | --- |
 | `defect.rs` | `DefectReport`, `Defect`, `Severity`, `SiteId`, `Termination`. **`DefectReport` is the sole acceptance authority** — commitment 1. Nothing else may say "ok". |
 | `violation.rs` | The passive exhaustive `ViolationKind` vocabulary. Separately, core's passive ID vocabulary includes exhaustive `FixerId`, because `Termination` serializes it; `plinth-support::repair` later re-exports it. Only `Response`, `response_for`, and concrete fixer execution remain M7 `plinth-support::repair` behaviour. Commitment 3 is enforced there. |
-| `provenance.rs` | `Measured<T> { plate: PlateId, value: T, err: Option<T>, date: String, note: String }`, `Derived<T>`, `Placeholder<T>`, `Pending<T>`, and the `AcceptSafe` marker trait. A measurement date is required and carried into `ProvenanceRef`. The `err` wire field is required (a missing field is rejected); numeric measurements use `Some` or `None` as applicable, while categorical measurements serialize `None` explicitly as `"err": null`, never a numeric pseudo-error or omitted field. Commitment 2. |
-| `constants.rs` | The typed constants registry. Every physical constant in the system, each carrying its provenance. |
+| `provenance.rs` | Exactly four wrappers: `Measured<T> { value, source: EvidenceSource, err, note }`, `Derived<T>`, `Placeholder<T>`, `Pending<T>`, plus `AcceptSafe`. `EvidenceSource` is tagged and carries repo record/locator plus `EvidenceDate::{Exact, OnOrBefore, Unknown}`; no direct plate/date fields remain on `Measured`. `FiniteInterval` carries finite ordered endpoints and explicit inclusive/exclusive `BoundKind`. Source and err are required; interval/categorical values serialize explicit `"err": null`; duplicate/unknown fields fail. Commitment 2. |
+| `constants.rs` | M0 implements the typed constants registry: declarations, a fallible batch-built `LazyLock`, an independent expected-ID Rust test, and the generated `constants.md` golden test. The hand-maintained ledger is additional source-membership/disposition evidence, never a replacement or golden input. Named milestones migrate consumers; M7 closes every remaining consumer. |
 | `layer.rs` | `LayerPlan` — layer height is a **per-layer array from day one**, commitment 5. Ships `constant(0.050)` until calibrated. |
 | `frame.rs` | Frame typestate marks (`Source`, `Centered`, `Plated`) so a mis-framed point set will not compile. |
 | `stage.rs` | The `Stage` trait every pipeline step implements. |
 | `digest.rs` | Content digests over typed arrays (not over allocator arithmetic — see the M2 note on `topology.py`). |
 | `chord.rs` | `canon_chord_micron`, `chords_match_micron`, `chord_parity_report`, ported from `chord_canon.py`'s executable behavior. Integer-micron ties-to-even canonicalization; dependency-free by design. Invalid-input and schema defects are deliberately hardened: its computed diagnostic parity key is `matches`, never `ok`, and it is never an acceptance decision. |
-| `printer.rs` | `PrinterProfile`. Ship `saturn4-ultra`: peel direction −Y (tilt release), pixel 14 × 19 µm, layer 0.050 mm. |
+| `printer.rs` | `PrinterProfile`. Ship `saturn4-ultra`: known vendor-order volume 211.68 × 118.37 × 220 mm and pitch 14 × 19 µm mapped to project X/Y/Z and X/Y; local `leading_release_edge = NegativeY`, `release_front_sweep_direction = PositiveY` (front moves `-Y → +Y`); layer 0.050 mm and `LIFT_MM = 5.0` are local defaults, not vendor claims. |
 | `cost.rs` | Passive shared cost/report DTOs: `CostVector`, `Fidelity`, `Resin`, `Scar`, `Risk`, `OrientationCost`, `ParetoPoint`, `OptimizationSummary`, and `SearchEvidence`. Pre-orientation reports use `SearchEvidence::NotEvaluated`, never a sentinel cost. Evaluation, scalarization, batching, Pareto algorithms, and memoization remain future `plinth-cost` behaviour. |
 | `metric.rs` | Passive shared `MetricId`, `MetricValue`, `MetricSet`, and report DTOs. Metric directions, independent metric computation, comparison, and waiver behaviour remain M1 `plinth-metrics`. |
 
@@ -319,10 +335,17 @@ see the audit table in §M9.)
    routes a `Placeholder` constant onto the accept path and a `trybuild` harness that
    asserts it fails to compile. This is the enforcement mechanism for commitment 2; without
    it the provenance types are decoration.
-5. **The constants golden test.** A test that renders the registry to
-   `docs/rust-migration/constants.md` and fails if the committed file differs. The doc is
-   generated, never hand-edited.
-6. Create `corpus/models/` **inside the repo** and populate it:
+5. **Implement and prove the typed registry, then close the source inventory.** Implement
+   `constants.rs`; declare the M0 constants; construct the registry in one fallible batch;
+   test exact membership against an independent hand-maintained expected-ID set; and render
+   and diff generated `docs/rust-migration/constants.md` in the M0 golden test. Also commit
+   `docs/rust-migration/m0-constants-source-ledger.json` as a closed inventory: every
+   live output/physical/gate/metric/search literal accounted as registry, alias,
+   retired, or excluded, and every registry row pointing to a normative locator in
+   `03-physics-and-constants.md`. The ledger is hand-maintained and never generated.
+   The ledger is an additional fourth artifact and never golden input; M7 migrates
+   remaining consumers, not discovery, declarations, registry membership, or this test.
+6. Create ignored `corpus/models/` **inside the repo** and populate it:
    - `Weeping Treant v1.2.stl` — i.e. `Awakened Tree.stl`, the same model (prerequisite
      above). Reference it via `$TREANT_STL` or copy it in; either way **do not commit it**,
      it is 21 MB;
@@ -338,7 +361,11 @@ see the audit table in §M9.)
      "
      ```
      Run it once. Do not commit it as a file.
-7. Freeze the baseline (see acceptance). Write `corpus/manifest.json`.
+   The complete binding order is `Sphere`, `Cylinder`, `make_box`,
+   `make_overhang_table`, `make_toed_slab`, `make_raking_blade`,
+   `make_thin_fin`, `Weeping Treant v1.2`; there is no Cone. Do not commit any STL.
+7. Freeze the baseline (see acceptance). Commit `corpus/manifest.json` and the
+   baseline artifacts/reports, not the source STLs.
 8. Spike `plinth-solid`.
 9. **Adopt the fail-not-skip fixture rule as a workspace convention.**
    `scripts/tests/conftest.py:158` documents it — "missing/stale/version-mismatch => FAIL,
@@ -396,6 +423,8 @@ cargo build --workspace
 cargo test -p plinth-core                            # includes the trybuild compile-fail case
 cargo test -p plinth-core --test constants_golden    # renders and diffs constants.md
 cargo test -p plinth-solid                           # spike union + difference, watertight
+jq -e 'has("registry_entries") and has("aliases") and has("retired") and has("excluded")' \
+    docs/rust-migration/m0-constants-source-ledger.json
 ```
 
 **`--p8-relocate` is mandatory on the freeze.** `prep_one.py:73` makes Phase-8 relocation
@@ -499,6 +528,16 @@ refreeze path; M0's baseline remains frozen by Python only.
    A test asserts each corruption is detected. **A harness that cannot fail cannot gate.**
 5. Write the metric table and directions into `corpus/manifest.json`.
 6. Implement and test `plinth-cli`'s internal `refreeze` path. It is unavailable in M0.
+7. Create the decision gate table in `06-conventions.md` now — not in M0 — and
+   backfill every guide `D-*` decision, `O-*` override, and historical owner
+   ratification with `EvidenceSource` and `EvidenceDate`. Enumerate, rather than
+   compressing into “all”: the required `err: Option<T>` policy; passive
+   `LoadSharing` core ownership versus `plinth-support` behavior; passive `FixerId`
+   core ownership; cost DTO versus cost behavior and metric DTO versus independent
+   metric behavior; Python-only M0 freeze followed by the Rust M1 refreeze path;
+   every `D-*` and `O-*`; the EvidenceSource/EvidenceDate/FiniteInterval policy; and
+   a distinct record superseding the initial generic-Unknown Saturn disposition with
+   known official-vendor evidence. Then make the table dated and append-only.
 
 ### Acceptance — run these
 
@@ -1013,10 +1052,11 @@ cannot carry it.
   claims to reduce total scar area by changing spacing; it cannot.
 - **X ≤ 12 is necessary, NOT sufficient.** It is blind to arrangement: three collinear arms
   have zero lateral stability perpendicular to their line, whatever their X. The lateral
-  non-degeneracy gate ships regardless. The peel front sweeps front-to-back in **−Y** on
-  this printer (tilt release), which *predicted* that Y-arranged arms meet the front one at
+  non-degeneracy gate ships regardless. `leading_release_edge = NegativeY` and
+  `release_front_sweep_direction = PositiveY` (front moves `-Y → +Y`), which *predicted*
+  that Y-arranged arms meet the front one at
   a time (zipper) while X-arranged arms meet it together (sharing) — **plate 6 measured no
-  such axis dependence** (03 §4.2 caveat 5), so arrangement enters through `ArmGroup`
+  such axis dependence** (03 §4.2's separate orientation limitation), so arrangement enters through `ArmGroup`
   membership, **not** through a peel-axis term.
 
 **`LoadSharing` is a `Measured` constant as of 2026-07-31 — both variants stay
@@ -1030,10 +1070,12 @@ strictly-conservative fallback and the A/B arm. Ship
 **`Additive { n_eff_cap: 6.0 }`** — `n_eff_cap` is the largest group measured — with
 `N_eff` counting **all** arms rigidly co-carrying the region: plate 6 found **no axis
 dependence**, so there is **no front-band filter and no orientation term**. The five
-scope caveats (one cap area, one arm diameter, one arm length; no upper bracket on
-sharing; a ~20 % fin-root section bonus on the strip arms, so never credit more than N;
-`X_tot` degenerate with total arm area on this plate) are in
-`03-physics-and-constants.md` §4.2 and must travel in the constant's `note`. M8's A/B
+  core caveats (one cap/diameter/length; no strip failure, no upper bracket and no
+  N>6 extrapolation; a ~19.75% fin-root section bonus and no super-additivity;
+  one-cap degeneracy with the ratio dependent on plate 5; and the tight 1.33% N=2
+  window) are in `03-physics-and-constants.md` §4.2 and must travel in the constant's
+  note. The separate orientation limitation and B6 post-hoc plate-wide-gate override,
+  including its counter-argument, cite `docs/reference/plate-06-results.md`. M8's A/B
 measures the corpus-wide delta of the switch — **no redesign**.
 
 ### Work items

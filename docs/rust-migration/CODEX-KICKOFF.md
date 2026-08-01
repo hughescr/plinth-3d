@@ -39,6 +39,12 @@ Python corpus. It applies to you.
   execute.**" It governs sequencing and milestone gates.
 - `06-conventions.md` §5 defers constants: "See 03-physics-and-constants.md for every
   constant and its grade."
+- `03-physics-and-constants.md` is numeric authority (value, shape, unit, grade);
+  `m0-constants-source-ledger.json` is the independent hand-maintained membership and
+  source-disposition authority; future generated `constants.md` is only a checked view
+  of the runtime registry. M0 still implements the typed constants registry, independent
+  expected-ID test, and generated-`constants.md` golden test; the ledger is additional,
+  never generated, and never golden input. M7 migrates consumers, not registry discovery.
 - `03` §4, on plate 6: "**`docs/reference/plate-06-results.md` is the record of record** for
   the plate-6 numbers … this section carries the **engine-facing** resolution of each
   constant. Where the two disagree, the results note governs." §4.4: "**Cite the results
@@ -80,6 +86,11 @@ do both.
   commit message, and the cache-disabled run produces identical reports (`README` §5,
   `06` §10). The gate is as-good-or-better versus the frozen Python baselines — never a
   byte-diff, always measured on files as written to disk. Commit per milestone on `master`.
+- **Release-front vocabulary is exact.** The Saturn profile says
+  `leading_release_edge = NegativeY` and
+  `release_front_sweep_direction = PositiveY`; the front moves `-Y → +Y`. Never
+  call that a “-Y sweep” or generic peel direction. The axis input is retained but
+  unused by the current measured load-sharing formula.
 - **Git safety.** Never `git checkout --`, `git restore`, `git reset --hard`, or
   `git clean`; never force-push; never rewrite published history. Undo your own edits by
   editing (`06` §9).
@@ -93,20 +104,21 @@ do both.
   if not, stop and report.
 - **The parity stress model.** "treant" and "Awakened Tree" are the same model. The source
   STL exists at `/Users/craig/code/hughescr/dnd-campaigns/minis-to-process/Awakened Tree.stl`
-  (21 MB). `minis-to-process/` is transient staging the owner clears after printing, so per
-  `04` M0 and `05` §4 the durable home is `$CHITUBOX_CORPUS_DIR` — the same out-of-repo
-  directory that holds `treant_v5_candidate.chitubox`, defaulting to the repo's parent
-  `/Users/craig/code/hughescr/dnd-campaigns`. Copy it there **under the name the manifest and
-  `resolve_stl()` expect**, then point `$TREANT_STL` at the copy:
+  (21 MB). `minis-to-process/` is transient staging the owner clears after printing. Copy it
+  to the durable canonical home first, then point `$TREANT_STL` there; also copy it to ignored
+  `corpus/models/` under the manifest name for the exact local input set. The durable path is
+  `${CHITUBOX_CORPUS_DIR:-/Users/craig/code/hughescr/dnd-campaigns}/Weeping Treant v1.2.stl`:
 
   ```
   DIR="${CHITUBOX_CORPUS_DIR:-/Users/craig/code/hughescr/dnd-campaigns}"
   cp "/Users/craig/code/hughescr/dnd-campaigns/minis-to-process/Awakened Tree.stl" \
      "$DIR/Weeping Treant v1.2.stl"
   export TREANT_STL="$DIR/Weeping Treant v1.2.stl"
+  cp "$TREANT_STL" "corpus/models/Weeping Treant v1.2.stl"
   ```
 
-  Never commit it. Verify with `04` M0's `test -f` check, not with the printed path:
+  Never commit either STL or any `corpus/models/*.stl`; commit the manifest and frozen
+  baseline outputs. Verify with `04` M0's `test -f` check, not with the printed path:
   `resolve_stl()` never raises — it falls through to a path that does not exist, so a
   successful print proves nothing.
 - **One staleness correction to `04` M0.** It says "`corpus/` is **not** in `.gitignore`
@@ -118,6 +130,10 @@ do both.
   M0's sanctioned provisional-corpus fallback applies — and **M4 may not be called done on a
   provisional corpus**, because the Treant is the model every physics constant in this repo
   was tuned against.
+- The full corpus is exactly, in order: `Sphere`, `Cylinder`, `make_box`,
+  `make_overhang_table`, `make_toed_slab`, `make_raking_blade`, `make_thin_fin`,
+  `Weeping Treant v1.2`. The provisional corpus is the same list minus Treant,
+  exactly seven. There is no Cone.
 
 ## How to orchestrate
 
@@ -189,19 +205,23 @@ Stop and ask — do not guess — when:
   comparing, or the comparison measures the physics change rather than the port (`03` §4.4
   step 3, `04` M0 work item 10).
 
-`Measured<T>` has a settled wire policy: `err: Option<T>` is required; a missing `err` is
-rejected for every payload, and an explicit `"err": null` means `None`. Approved numeric
-payloads may use either `Some(error)` or `None`. A **categorical** measurement such as
-`LoadSharing` specifically uses `err: None`; its conditional-scope uncertainty belongs in
-`note`. Do not invent a numeric pseudo-error, omit the field, or widen the category type.
+`Measured<T>` has a settled wire policy: exactly `value`, tagged `source`, required
+`err`, and `note`. `EvidenceSource` carries a repo record/locator and an
+`EvidenceDate::{Exact, OnOrBefore, Unknown}`; generic unknown is only for genuinely
+unsourced evidence. Missing, duplicate, or unknown fields are rejected.
+`FiniteInterval` uses explicit inclusive/exclusive `BoundKind`; intervals and
+categorical values such as `LoadSharing` require explicit `"err": null`. The Saturn
+volume/pitch source is known official-vendor evidence, not generic unknown.
 
 **Where decisions get recorded.** The guide's mechanism is the **gate table**: `04` M1 says
 "Record the sign-off in the gate table (`06-conventions.md`)", and M7's owner sign-off
 recorded there is the stated precondition for M9. That table does not exist in
-`06-conventions.md` yet. Create it there as a new section at M1, and record every owner
-sign-off, signed waiver, and resolved open decision in it — dated, append-only, never edited
-afterward. Signed waivers also go in `corpus/manifest.json`'s `waivers` array, which stays
-empty until the owner signs an entry. Report the doc gap when you create the section.
+`06-conventions.md` yet. Do not create it in M0. Create it at M1 and backfill every
+guide `D-*` decision, `O-*` override, and historical owner ratification with
+`EvidenceSource` and `EvidenceDate`, including the evidence/date model and the entry
+that supersedes generic-unknown Saturn with known vendor evidence. It is then dated,
+append-only, and never edited afterward. Signed waivers also go in
+`corpus/manifest.json`'s `waivers` array, which stays empty until the owner signs an entry.
 
 ## Reporting
 
