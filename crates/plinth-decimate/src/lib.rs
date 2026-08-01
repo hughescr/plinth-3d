@@ -10,8 +10,11 @@
 
 use std::mem::size_of;
 
+use geom_kernel::{NativeSurface, NativeSurfaceConfig};
 use meshopt::{simplify_with_locks, typed_to_bytes, SimplifyOptions, VertexDataAdapter};
 use plinth_mesh::{Mesh, StrictMeshAuditError};
+use rand_chacha::ChaCha8Rng;
+use rand_core::{Rng, SeedableRng};
 use thiserror::Error;
 
 /// A single locked QEM request.  `true` means protected: the vertex is passed
@@ -87,6 +90,322 @@ pub enum SimplifyError {
     OutputMesh { message: String },
     #[error("hard-locked source vertex {vertex} disappeared from the result")]
     LockedVertexRemoved { vertex: usize },
+}
+
+/// Explicit construction and nearest-query limits for D1 probe surfaces.
+/// There are deliberately no hidden grid-pitch or nearest-distance defaults.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProbeConfig {
+    pub surface: NativeSurfaceConfig,
+    pub nearest_upper_bound_mm: f64,
+}
+
+/// Select all points for final verification or capped deterministic samples for
+/// exploratory probes. Sampling uses ChaCha8 as Plinth's ratified replacement,
+/// not a claim of byte-identical numpy RNG output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProbePopulation {
+    Full,
+    Sampled,
+}
+
+/// Reproducible selection evidence without retaining a large point copy.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectionEvidence {
+    pub source_count: usize,
+    pub selected_count: usize,
+    pub seed: Option<u64>,
+    pub selected_index_digest: u64,
+}
+
+/// Two-sided nearest-surface evidence for later M3 budget policy.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TwoSidedProbe {
+    pub candidate_face_count: usize,
+    pub forward: SelectionEvidence,
+    pub backward: SelectionEvidence,
+    pub p99_mm: f64,
+    pub p99_9_mm: f64,
+    pub max_mm: Option<f64>,
+    /// Digest of the finite, source-order gathered distances before percentile
+    /// sorting; this permits deterministic report comparisons across threads.
+    pub distance_digest: u64,
+}
+
+/// Typed D1 failures. No non-finite distance or bounded-query miss is ignored.
+#[derive(Clone, Debug, Error, PartialEq)]
+pub enum ProbeError {
+    #[error("strict {side} mesh audit failed: {message}")]
+    StrictAudit { side: &'static str, message: String },
+    #[error("nearest upper bound must be finite and non-negative, got {value}")]
+    InvalidNearestUpperBound { value: f64 },
+    #[error("failed to construct {side} nearest surface: {message}")]
+    SurfaceBuild { side: &'static str, message: String },
+    #[error("{side} point {point} has non-finite {axis} coordinate {value}")]
+    NonFinitePoint {
+        side: &'static str,
+        point: usize,
+        axis: usize,
+        value: f64,
+    },
+    #[error("{side} nearest query returned no hit at point {point}")]
+    NoHit { side: &'static str, point: usize },
+    #[error("{side} nearest query returned non-finite distance {distance} at point {point}")]
+    NonFiniteDistance {
+        side: &'static str,
+        point: usize,
+        distance: f64,
+    },
+    #[error("cannot compute a percentile over an empty distance population")]
+    EmptyPopulation,
+}
+
+const FORWARD_CAP: usize = 150_000;
+const BACKWARD_CAP: usize = 120_000;
+const FORWARD_SEED: u64 = 1;
+const BACKWARD_SEED: u64 = 42;
+
+/// Builds one candidate surface and queries every original vertex in one batch.
+/// Returned distances preserve original vertex order for feature-map generation.
+pub fn backward_error_map(
+    original: &Mesh,
+    candidate: &Mesh,
+    config: ProbeConfig,
+) -> Result<Vec<f64>, ProbeError> {
+    audit_probe_inputs(original, candidate, config)?;
+    let candidate_surface = surface(candidate, "candidate", config.surface)?;
+    query_batch(
+        &candidate_surface,
+        original.verts(),
+        config.nearest_upper_bound_mm,
+        "backward",
+    )
+}
+
+/// Performs exactly two whole-batch nearest queries: candidate face centres to
+/// original, and original vertices to candidate. Both result populations are
+/// concatenated before NumPy-compatible linear percentiles are calculated.
+pub fn probe_two_sided(
+    original: &Mesh,
+    candidate: &Mesh,
+    population: ProbePopulation,
+    config: ProbeConfig,
+) -> Result<TwoSidedProbe, ProbeError> {
+    audit_probe_inputs(original, candidate, config)?;
+    let original_surface = surface(original, "original", config.surface)?;
+    let candidate_surface = surface(candidate, "candidate", config.surface)?;
+    let all_forward = face_centres(candidate)?;
+    let (forward_indices, forward) =
+        select_points(all_forward.len(), population, FORWARD_CAP, FORWARD_SEED);
+    let (backward_indices, backward) = select_points(
+        original.verts().len(),
+        population,
+        BACKWARD_CAP,
+        BACKWARD_SEED,
+    );
+    let forward_points = forward_indices
+        .iter()
+        .map(|&index| all_forward[index])
+        .collect::<Vec<_>>();
+    let backward_points = backward_indices
+        .iter()
+        .map(|&index| original.verts()[index])
+        .collect::<Vec<_>>();
+    let mut distances = query_batch(
+        &original_surface,
+        &forward_points,
+        config.nearest_upper_bound_mm,
+        "forward",
+    )?;
+    distances.extend(query_batch(
+        &candidate_surface,
+        &backward_points,
+        config.nearest_upper_bound_mm,
+        "backward",
+    )?);
+    if distances.is_empty() {
+        return Err(ProbeError::EmptyPopulation);
+    }
+    let mut sorted = distances.clone();
+    sorted.sort_by(f64::total_cmp);
+    let p99_mm = linear_percentile(&sorted, 0.99)?;
+    let p99_9_mm = linear_percentile(&sorted, 0.999)?;
+    let max_mm = sorted.last().copied();
+    Ok(TwoSidedProbe {
+        candidate_face_count: candidate.tris().len(),
+        forward,
+        backward,
+        p99_mm,
+        p99_9_mm,
+        max_mm,
+        distance_digest: digest_f64_bits(&distances),
+    })
+}
+
+fn audit_probe_inputs(
+    original: &Mesh,
+    candidate: &Mesh,
+    config: ProbeConfig,
+) -> Result<(), ProbeError> {
+    original
+        .audit_strict()
+        .map_err(|error| ProbeError::StrictAudit {
+            side: "original",
+            message: error.to_string(),
+        })?;
+    candidate
+        .audit_strict()
+        .map_err(|error| ProbeError::StrictAudit {
+            side: "candidate",
+            message: error.to_string(),
+        })?;
+    if !config.nearest_upper_bound_mm.is_finite() || config.nearest_upper_bound_mm < 0.0 {
+        return Err(ProbeError::InvalidNearestUpperBound {
+            value: config.nearest_upper_bound_mm,
+        });
+    }
+    Ok(())
+}
+
+fn surface(
+    mesh: &Mesh,
+    side: &'static str,
+    config: NativeSurfaceConfig,
+) -> Result<NativeSurface, ProbeError> {
+    NativeSurface::from_indexed(mesh.verts(), mesh.tris(), config).map_err(|error| {
+        ProbeError::SurfaceBuild {
+            side,
+            message: error.to_string(),
+        }
+    })
+}
+
+fn query_batch(
+    surface: &NativeSurface,
+    points: &[[f64; 3]],
+    upper_bound: f64,
+    side: &'static str,
+) -> Result<Vec<f64>, ProbeError> {
+    for (point, value) in points.iter().enumerate() {
+        for (axis, coordinate) in value.iter().copied().enumerate() {
+            if !coordinate.is_finite() {
+                return Err(ProbeError::NonFinitePoint {
+                    side,
+                    point,
+                    axis,
+                    value: coordinate,
+                });
+            }
+        }
+    }
+    let (distances, indices) = surface.query(points, upper_bound);
+    debug_assert_eq!(distances.len(), points.len());
+    debug_assert_eq!(indices.len(), points.len());
+    for (point, &distance) in distances.iter().enumerate() {
+        if indices[point] < 0 || indices[point] as usize >= surface.nfaces() {
+            return Err(ProbeError::NoHit { side, point });
+        }
+        if !distance.is_finite() {
+            return Err(ProbeError::NonFiniteDistance {
+                side,
+                point,
+                distance,
+            });
+        }
+    }
+    Ok(distances)
+}
+
+fn face_centres(mesh: &Mesh) -> Result<Vec<[f64; 3]>, ProbeError> {
+    mesh.tris()
+        .iter()
+        .enumerate()
+        .map(|(face, indices)| {
+            let a = mesh.verts()[indices[0] as usize];
+            let b = mesh.verts()[indices[1] as usize];
+            let c = mesh.verts()[indices[2] as usize];
+            let centre = [
+                (a[0] + b[0] + c[0]) / 3.0,
+                (a[1] + b[1] + c[1]) / 3.0,
+                (a[2] + b[2] + c[2]) / 3.0,
+            ];
+            for (axis, value) in centre.iter().copied().enumerate() {
+                if !value.is_finite() {
+                    return Err(ProbeError::NonFinitePoint {
+                        side: "forward",
+                        point: face,
+                        axis,
+                        value,
+                    });
+                }
+            }
+            Ok(centre)
+        })
+        .collect()
+}
+
+fn select_points(
+    source_count: usize,
+    population: ProbePopulation,
+    cap: usize,
+    seed: u64,
+) -> (Vec<usize>, SelectionEvidence) {
+    let use_sample = matches!(population, ProbePopulation::Sampled) && source_count > cap;
+    let mut indices = (0..source_count).collect::<Vec<_>>();
+    if use_sample {
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        for index in 0..cap {
+            let chosen = index + uniform_index(&mut rng, source_count - index);
+            indices.swap(index, chosen);
+        }
+        indices.truncate(cap);
+        indices.sort_unstable();
+    }
+    let evidence = SelectionEvidence {
+        source_count,
+        selected_count: indices.len(),
+        seed: use_sample.then_some(seed),
+        selected_index_digest: digest_indices(&indices),
+    };
+    (indices, evidence)
+}
+
+fn uniform_index(rng: &mut ChaCha8Rng, upper: usize) -> usize {
+    let upper = upper as u64;
+    let zone = u64::MAX - u64::MAX % upper;
+    loop {
+        let value = rng.next_u64();
+        if value < zone {
+            return (value % upper) as usize;
+        }
+    }
+}
+
+fn linear_percentile(sorted: &[f64], quantile: f64) -> Result<f64, ProbeError> {
+    if sorted.is_empty() {
+        return Err(ProbeError::EmptyPopulation);
+    }
+    let rank = (sorted.len() - 1) as f64 * quantile;
+    let lower = rank.floor() as usize;
+    let upper = rank.ceil() as usize;
+    Ok(sorted[lower] + (sorted[upper] - sorted[lower]) * (rank - lower as f64))
+}
+
+fn digest_indices(indices: &[usize]) -> u64 {
+    digest_words(indices.iter().map(|&index| index as u64))
+}
+fn digest_f64_bits(values: &[f64]) -> u64 {
+    digest_words(values.iter().map(|value| value.to_bits()))
+}
+fn digest_words(words: impl IntoIterator<Item = u64>) -> u64 {
+    let mut state = 0xcbf2_9ce4_8422_2325_u64;
+    for word in words {
+        for byte in word.to_le_bytes() {
+            state ^= u64::from(byte);
+            state = state.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    state
 }
 
 /// Simplifies `mesh` once using upstream locked QEM.
@@ -361,6 +680,24 @@ mod tests {
         }
     }
 
+    fn probe_config(bound: f64) -> ProbeConfig {
+        ProbeConfig {
+            surface: NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: usize::MAX,
+            },
+            nearest_upper_bound_mm: bound,
+        }
+    }
+
+    fn triangle(z: f64) -> Mesh {
+        Mesh::new(
+            vec![[0.0, 0.0, z], [3.0, 0.0, z], [0.0, 3.0, z]],
+            vec![[0, 1, 2]],
+        )
+        .unwrap()
+    }
+
     #[test]
     fn ratio_one_is_exact_identity() {
         let mesh = octahedron();
@@ -466,6 +803,155 @@ mod tests {
         let request = request(0.5, vec![false; 6]);
         let first = simplify_locked(&mesh, &request).unwrap();
         let second = simplify_locked(&mesh, &request).unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn numpy_linear_percentiles_cover_tiny_odd_even_and_boundaries() {
+        assert_eq!(linear_percentile(&[4.0], 0.99).unwrap(), 4.0);
+        assert_eq!(linear_percentile(&[0.0, 10.0], 0.99).unwrap(), 9.9);
+        assert_eq!(linear_percentile(&[0.0, 10.0, 20.0], 0.5).unwrap(), 10.0);
+        assert_eq!(
+            linear_percentile(&[0.0, 10.0, 20.0, 30.0], 0.0).unwrap(),
+            0.0
+        );
+        assert_eq!(
+            linear_percentile(&[0.0, 10.0, 20.0, 30.0], 1.0).unwrap(),
+            30.0
+        );
+        assert!(
+            (linear_percentile(&[0.0, 10.0, 20.0, 30.0], 0.999).unwrap() - 29.97).abs() < 1e-12
+        );
+    }
+
+    #[test]
+    fn batched_two_sided_probe_has_exact_parallel_plane_distances() {
+        let original = triangle(1.0);
+        let candidate = triangle(0.0);
+        let backward = backward_error_map(&original, &candidate, probe_config(2.0)).unwrap();
+        assert_eq!(backward, vec![1.0; 3]);
+        let report = probe_two_sided(
+            &original,
+            &candidate,
+            ProbePopulation::Full,
+            probe_config(2.0),
+        )
+        .unwrap();
+        assert_eq!(report.forward.selected_count, 1);
+        assert_eq!(report.backward.selected_count, 3);
+        assert_eq!(report.p99_mm, 1.0);
+        assert_eq!(report.p99_9_mm, 1.0);
+        assert_eq!(report.max_mm, Some(1.0));
+    }
+
+    #[test]
+    fn backward_probe_exposes_a_lost_thin_feature_that_forward_misses() {
+        let original = Mesh::new(
+            vec![
+                [0.0, 0.0, 0.0],
+                [10.0, 0.0, 0.0],
+                [0.0, 10.0, 0.0],
+                [1.0, 1.0, 10.0],
+                [2.0, 1.0, 10.0],
+                [1.0, 2.0, 10.0],
+            ],
+            vec![[0, 1, 2], [3, 4, 5]],
+        )
+        .unwrap();
+        let candidate = Mesh::new(
+            vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]],
+            vec![[0, 1, 2]],
+        )
+        .unwrap();
+        let report = probe_two_sided(
+            &original,
+            &candidate,
+            ProbePopulation::Full,
+            probe_config(20.0),
+        )
+        .unwrap();
+        assert_eq!(report.forward.selected_count, 1);
+        assert!(report.p99_mm > 9.9);
+        let map = backward_error_map(&original, &candidate, probe_config(20.0)).unwrap();
+        assert_eq!(&map[..3], &[0.0, 0.0, 0.0]);
+        assert!(map[3..].iter().all(|&distance| distance > 9.9));
+    }
+
+    #[test]
+    fn capped_selection_is_seeded_sorted_and_reproducible() {
+        let (first_indices, first) = select_points(
+            FORWARD_CAP + 11,
+            ProbePopulation::Sampled,
+            FORWARD_CAP,
+            FORWARD_SEED,
+        );
+        let (again_indices, again) = select_points(
+            FORWARD_CAP + 11,
+            ProbePopulation::Sampled,
+            FORWARD_CAP,
+            FORWARD_SEED,
+        );
+        let (_, different_seed) = select_points(
+            BACKWARD_CAP + 11,
+            ProbePopulation::Sampled,
+            BACKWARD_CAP,
+            BACKWARD_SEED,
+        );
+        assert_eq!(first.selected_count, FORWARD_CAP);
+        assert_eq!(first.seed, Some(1));
+        assert_eq!(first, again);
+        assert_eq!(first_indices, again_indices);
+        assert!(first_indices.windows(2).all(|pair| pair[0] < pair[1]));
+        assert_ne!(
+            first.selected_index_digest,
+            different_seed.selected_index_digest
+        );
+        let (full_indices, full) =
+            select_points(3, ProbePopulation::Full, FORWARD_CAP, FORWARD_SEED);
+        assert_eq!(full_indices, vec![0, 1, 2]);
+        assert_eq!(full.seed, None);
+    }
+
+    #[test]
+    fn bounded_no_hit_and_invalid_config_are_typed() {
+        let original = triangle(1.0);
+        let candidate = triangle(0.0);
+        assert!(matches!(
+            backward_error_map(&original, &candidate, probe_config(0.5)),
+            Err(ProbeError::NoHit {
+                side: "backward",
+                ..
+            })
+        ));
+        assert!(matches!(
+            probe_two_sided(
+                &original,
+                &candidate,
+                ProbePopulation::Full,
+                probe_config(f64::INFINITY)
+            ),
+            Err(ProbeError::InvalidNearestUpperBound { .. })
+        ));
+    }
+
+    #[test]
+    fn probe_report_is_thread_count_invariant() {
+        let original = triangle(1.0);
+        let candidate = triangle(0.0);
+        let first = probe_two_sided(
+            &original,
+            &candidate,
+            ProbePopulation::Full,
+            probe_config(2.0),
+        )
+        .unwrap();
+        let second = probe_two_sided(
+            &original,
+            &candidate,
+            ProbePopulation::Full,
+            probe_config(2.0),
+        )
+        .unwrap();
         assert_eq!(first, second);
     }
 }
