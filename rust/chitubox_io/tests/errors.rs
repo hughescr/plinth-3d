@@ -26,9 +26,7 @@ fn truncated_header() {
 
 #[test]
 fn truncated_body() {
-    let Some(mut bytes) = read_corpus("sphere-cylinder.chitubox") else {
-        return;
-    };
+    let mut bytes = read_required_fixture("sphere-cylinder.chitubox");
     bytes.truncate(bytes.len() / 2); // cut through the mesh region
     assert!(matches!(
         Project::from_bytes(bytes),
@@ -149,11 +147,7 @@ fn ascii_stl_unsupported() {
 
 #[test]
 fn oversized_opaque_overwrite() {
-    let Some(proj) =
-        read_corpus("sphere-cylinder.chitubox").map(|b| Project::from_bytes(b).unwrap())
-    else {
-        return;
-    };
+    let proj = Project::from_bytes(read_required_fixture("sphere-cylinder.chitubox")).unwrap();
     let mut proj = proj;
     let regions = proj.opaque_regions();
     let settings = regions.iter().find(|r| r.kind == "settings").unwrap();
@@ -170,9 +164,7 @@ fn oversized_opaque_overwrite() {
 
 #[test]
 fn corrupt_support_pointer() {
-    let Some(mut bytes) = read_corpus("sphere-cylinder-supported.chitubox") else {
-        return;
-    };
+    let mut bytes = read_required_fixture("sphere-cylinder-supported.chitubox");
     // model 0 record off268 -> point into the header (garbage)
     let off8 = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
     let ptr_pos = off8 + 268;

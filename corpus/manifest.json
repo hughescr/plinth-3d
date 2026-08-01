@@ -13,7 +13,6 @@
     {"id": "negative_shells", "direction": "lower_is_better", "hard_bound": 0},
     {"id": "winding", "direction": "lower_is_better", "hard_bound": 0},
     {"id": "max_x", "direction": "lower_is_better", "hard_bound": null},
-    {"id": "max_x_group", "direction": "lower_is_better", "hard_bound": null},
     {"id": "support_count", "direction": "lower_is_better", "hard_bound": null},
     {"id": "resin_model", "direction": "lower_is_better", "hard_bound": null},
     {"id": "resin_support", "direction": "lower_is_better", "hard_bound": null},
@@ -28,6 +27,8 @@
     {
       "name": "Sphere",
       "stl": "corpus/models/Sphere.stl",
+      "source_digest": {"algorithm": "sha256", "hex": "48c27bb596a265900a614171d7ffe3a7a4ea80d95f1c620cf3ab00f67fe0a1d5"},
+      "report": "corpus/baseline/Sphere.pipeline.json",
       "baseline_artifact": "corpus/baseline/Sphere.chitubox",
       "python_exit_code": 0,
       "python_seconds": 3.7,
@@ -36,7 +37,9 @@
     {
       "name": "Cylinder",
       "stl": "corpus/models/Cylinder.stl",
-      "baseline_artifact": "corpus/baseline/Cylinder.chitubox",
+      "source_digest": {"algorithm": "sha256", "hex": "7bd60bd7fb83882f2bdc9c977e4f15e55f5cf0342c05c31584c586782505f741"},
+      "report": "corpus/baseline/Cylinder.pipeline.json",
+      "baseline_artifact": null,
       "python_exit_code": 2,
       "python_seconds": 8.1,
       "python_failed_stage": "hollow"
@@ -44,7 +47,9 @@
     {
       "name": "make_box",
       "stl": "corpus/models/make_box.stl",
-      "baseline_artifact": "corpus/baseline/make_box.chitubox",
+      "source_digest": {"algorithm": "sha256", "hex": "aada5b79e87461c6f74afe4e16a5f651aed47fd6638a50a225e35760a8010c3b"},
+      "report": "corpus/baseline/make_box.pipeline.json",
+      "baseline_artifact": null,
       "python_exit_code": 2,
       "python_seconds": 0.25,
       "python_failed_stage": "hollow"
@@ -52,7 +57,9 @@
     {
       "name": "make_overhang_table",
       "stl": "corpus/models/make_overhang_table.stl",
-      "baseline_artifact": "corpus/baseline/make_overhang_table.chitubox",
+      "source_digest": {"algorithm": "sha256", "hex": "a776132a2cc4a43298d9ca646a4265a7ba60ed7d37de7618147ac754dfe8c996"},
+      "report": "corpus/baseline/make_overhang_table.pipeline.json",
+      "baseline_artifact": null,
       "python_exit_code": 3,
       "python_seconds": 8.89,
       "python_failed_stage": "emit"
@@ -60,7 +67,9 @@
     {
       "name": "make_toed_slab",
       "stl": "corpus/models/make_toed_slab.stl",
-      "baseline_artifact": "corpus/baseline/make_toed_slab.chitubox",
+      "source_digest": {"algorithm": "sha256", "hex": "ceb70f2b549fb131b0f177033401c50879a8fbc6d575b27459c0f9574d9f1169"},
+      "report": "corpus/baseline/make_toed_slab.pipeline.json",
+      "baseline_artifact": null,
       "python_exit_code": 5,
       "python_seconds": 184.86,
       "python_failed_stage": "supports"
@@ -68,7 +77,9 @@
     {
       "name": "make_raking_blade",
       "stl": "corpus/models/make_raking_blade.stl",
-      "baseline_artifact": "corpus/baseline/make_raking_blade.chitubox",
+      "source_digest": {"algorithm": "sha256", "hex": "0979f5812c26b3bd88f6e36bb792573fbdc9c023656c46544f2bffdecddefb97"},
+      "report": "corpus/baseline/make_raking_blade.pipeline.json",
+      "baseline_artifact": null,
       "python_exit_code": 5,
       "python_seconds": 0.42,
       "python_failed_stage": "supports"
@@ -76,7 +87,9 @@
     {
       "name": "make_thin_fin",
       "stl": "corpus/models/make_thin_fin.stl",
-      "baseline_artifact": "corpus/baseline/make_thin_fin.chitubox",
+      "source_digest": {"algorithm": "sha256", "hex": "09bec5c6ff8ff169f91438c209b12c3e6d9eb0dbb7e2fd7611e98d1884516c4c"},
+      "report": "corpus/baseline/make_thin_fin.pipeline.json",
+      "baseline_artifact": null,
       "python_exit_code": 5,
       "python_seconds": 165.74,
       "python_failed_stage": "supports"
@@ -84,7 +97,9 @@
     {
       "name": "Weeping Treant v1.2",
       "stl": "corpus/models/Weeping Treant v1.2.stl",
-      "baseline_artifact": "corpus/baseline/Weeping Treant v1.2.chitubox",
+      "source_digest": {"algorithm": "sha256", "hex": "4c027b7849019ab9598c85f285b9df7d480aacfd1733123a32a8a81239525552"},
+      "report": "corpus/baseline/Weeping Treant v1.2.pipeline.json",
+      "baseline_artifact": null,
       "python_exit_code": 3,
       "python_seconds": 2505.61,
       "python_failed_stage": "emit"

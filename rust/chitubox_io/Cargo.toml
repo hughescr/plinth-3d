@@ -28,6 +28,10 @@ version = "0.23"
 features = ["abi3-py311"]
 optional = true
 
+[dev-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
 [features]
 default = []
 # extension-module is NOT listed here: it disables libpython linking, which

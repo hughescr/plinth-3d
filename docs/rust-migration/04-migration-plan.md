@@ -398,6 +398,8 @@ checkpoint, that state is **pending M0 work** — do not fabricate or refreeze e
     {
       "name": "Weeping Treant v1.2",
       "stl": "corpus/models/Weeping Treant v1.2.stl",
+      "source_digest": {"algorithm": "sha256", "hex": "<64 lowercase hex digits>"},
+      "report": "corpus/baseline/Weeping Treant v1.2.pipeline.json",
       "baseline_artifact": "corpus/baseline/Weeping Treant v1.2.chitubox",
       "python_exit_code": 0,
       "python_seconds": 402.1,
@@ -413,6 +415,13 @@ cannot be retrofitted later.** `waivers` stays empty until the owner signs an en
 `baseline_command` records the exact freeze invocation verbatim, because a baseline is
 only meaningful with its configuration attached; `provisional` is true only for the
 Treant-less interim corpus described above.
+
+Every model row records its ignored input's `source_digest` and the committed pipeline
+`report`. The digest is identity metadata, not a clean-checkout fixture requirement:
+clean CI validates its typed SHA-256 shape but does not require a local source STL.
+`baseline_artifact` is the emitted `.chitubox` path only when Python exit code is `0`;
+it is explicitly `null` for a nonzero Python result, whose committed report remains the
+baseline record.
 
 ### Acceptance — run these
 

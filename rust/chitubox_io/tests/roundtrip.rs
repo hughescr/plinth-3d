@@ -9,11 +9,8 @@ use common::*;
 
 #[test]
 fn corpus_roundtrip_byte_identical() {
-    let mut ran = 0;
-    for name in ROUNDTRIP_FILES {
-        let Some(original) = read_corpus(name) else {
-            continue;
-        };
+    for name in REQUIRED_ROUNDTRIP_FILES {
+        let original = read_required_fixture(name);
         let proj =
             Project::from_bytes(original.clone()).unwrap_or_else(|e| panic!("parse {name}: {e}"));
         let out = proj
@@ -31,10 +28,17 @@ fn corpus_roundtrip_byte_identical() {
             "{name}: bytes differ (first diff at {:?})",
             out.iter().zip(&original).position(|(a, b)| a != b)
         );
-        ran += 1;
     }
-    assert!(ran > 0, "no corpus files were available to round-trip");
-    eprintln!("round-tripped {ran} corpus files byte-identically");
+
+    if let Some(original) = read_optional_treant_candidate() {
+        let name = OPTIONAL_TREANT_CANDIDATE;
+        let proj = Project::from_bytes(original.clone())
+            .unwrap_or_else(|error| panic!("parse {name}: {error}"));
+        let out = proj
+            .to_bytes()
+            .unwrap_or_else(|error| panic!("to_bytes {name}: {error}"));
+        assert_eq!(out, original, "{name}: bytes differ after round-trip");
+    }
 }
 
 #[test]

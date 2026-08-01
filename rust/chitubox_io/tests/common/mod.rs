@@ -1,9 +1,8 @@
-//! Shared test helpers. Most corpus specimens are committed under
-//! `scripts/tests/fixtures/chitubox/` and resolve with no setup. The handful
-//! that are too large to commit (the multi-tens-of-MB emitter deliverables)
-//! still live outside the repo and are looked up under `CHITUBOX_CORPUS_DIR`
-//! (default: the dnd-campaigns working dir). A missing corpus file makes the
-//! test SKIP with a printed notice, never silently pass.
+//! Shared test helpers. Committed specimens under
+//! `scripts/tests/fixtures/chitubox/` are required and fail by named path when
+//! absent. The sole optional specimen is the oversized
+//! `treant_v5_candidate.chitubox`, found outside the repo through
+//! `CHITUBOX_CORPUS_DIR`; only that exact fixture may print `SKIP:`.
 //!
 //! See `scripts/tests/fixtures/chitubox/README.md` for what each file is.
 
@@ -16,37 +15,45 @@ pub fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../scripts/tests/fixtures/chitubox")
 }
 
-/// Fallback for specimens too large to commit.
-pub fn corpus_dir() -> PathBuf {
+/// The sole optional oversized specimen. No other test fixture may use this
+/// fallback: required fixture absence is a test failure.
+pub const OPTIONAL_TREANT_CANDIDATE: &str = "treant_v5_candidate.chitubox";
+
+/// Fallback directory for the sole optional oversized specimen.
+fn optional_treant_dir() -> PathBuf {
     std::env::var("CHITUBOX_CORPUS_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("/Users/craig/code/hughescr/dnd-campaigns"))
 }
 
-pub fn corpus_path(name: &str) -> Option<PathBuf> {
-    let fixture = fixture_dir().join(name);
-    if fixture.exists() {
-        return Some(fixture);
-    }
-    let external = corpus_dir().join(name);
-    if external.exists() {
-        return Some(external);
-    }
-    eprintln!(
-        "SKIP: corpus file not found: {} (nor {})",
-        fixture.display(),
-        external.display()
+/// Resolve a committed fixture. This intentionally never falls back outside
+/// the repository and names the missing fixture in the failure.
+pub fn required_fixture_path(name: &str) -> PathBuf {
+    assert_ne!(
+        name, OPTIONAL_TREANT_CANDIDATE,
+        "the optional Treant candidate must use optional_treant_candidate_path"
     );
-    None
+    let fixture = fixture_dir().join(name);
+    assert!(
+        fixture.is_file(),
+        "required committed ChituBox fixture is missing: {}",
+        fixture.display()
+    );
+    fixture
 }
 
-pub fn read_corpus(name: &str) -> Option<Vec<u8>> {
-    let p = corpus_path(name)?;
-    Some(std::fs::read(p).expect("read corpus file"))
+pub fn read_required_fixture(name: &str) -> Vec<u8> {
+    let path = required_fixture_path(name);
+    std::fs::read(&path).unwrap_or_else(|error| {
+        panic!(
+            "required committed ChituBox fixture is unreadable ({}): {error}",
+            path.display()
+        )
+    })
 }
 
-/// All corpus round-trip specimens (small + large).
-pub const ROUNDTRIP_FILES: &[&str] = &[
+/// All required committed round-trip specimens.
+pub const REQUIRED_ROUNDTRIP_FILES: &[&str] = &[
     "empty.chitubox",
     "sphere-cylinder.chitubox",
     "sphere-cylinder-supported.chitubox",
@@ -55,11 +62,31 @@ pub const ROUNDTRIP_FILES: &[&str] = &[
     "cylinder-rotated.chitubox",
     "morel.chitubox",
     "morel_mudskipper_supports.chitubox",
-    // Large emitter deliverable: lives outside the repo, so this entry SKIPs
-    // unless CHITUBOX_CORPUS_DIR has it. Replaced treant_v4_supports.chitubox,
-    // which was lost with the v4 engine that produced it.
-    "treant_v5_candidate.chitubox",
 ];
+
+/// Return the sole optional oversized Treant candidate, if it exists.
+pub fn optional_treant_candidate_path() -> Option<PathBuf> {
+    let path = optional_treant_dir().join(OPTIONAL_TREANT_CANDIDATE);
+    if path.is_file() {
+        Some(path)
+    } else {
+        eprintln!(
+            "SKIP: optional oversized ChituBox fixture is not available: {}",
+            path.display()
+        );
+        None
+    }
+}
+
+pub fn read_optional_treant_candidate() -> Option<Vec<u8>> {
+    let path = optional_treant_candidate_path()?;
+    Some(std::fs::read(&path).unwrap_or_else(|error| {
+        panic!(
+            "optional oversized ChituBox fixture is unreadable ({}): {error}",
+            path.display()
+        )
+    }))
+}
 
 /// Reshape a flat 9-f32/tri stream into points sorted by total_cmp — for
 /// order-independent geometry comparison (ChituBox reorders triangles).

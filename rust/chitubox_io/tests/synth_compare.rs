@@ -9,19 +9,17 @@ use chitubox_io::{ModelGeometry, ModelSource, Placement, Project};
 use common::*;
 use std::path::PathBuf;
 
-fn stl(name: &str) -> Option<PathBuf> {
-    corpus_path(name)
+fn stl(name: &str) -> PathBuf {
+    required_fixture_path(name)
 }
 
 #[test]
 fn build_from_scratch_matches_reference_geometry() {
-    let (Some(sphere), Some(cylinder), Some(reference)) = (
+    let (sphere, cylinder, reference) = (
         stl("Sphere.stl"),
         stl("Cylinder.stl"),
-        read_corpus("sphere-cylinder.chitubox"),
-    ) else {
-        return;
-    };
+        read_required_fixture("sphere-cylinder.chitubox"),
+    );
     let refproj = Project::from_bytes(reference).unwrap();
 
     let mut proj = Project::new_empty();
@@ -83,9 +81,7 @@ fn build_from_scratch_matches_reference_geometry() {
 #[test]
 fn triangles_input_path_centers_like_stl() {
     // Feeding the same geometry as raw Triangles must center identically.
-    let Some(sphere) = stl("Sphere.stl") else {
-        return;
-    };
+    let sphere = stl("Sphere.stl");
     let via_stl = {
         let mut p = Project::new_empty();
         p.add_model(ModelSource {

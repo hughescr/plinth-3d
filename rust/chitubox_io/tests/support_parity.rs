@@ -7,9 +7,38 @@ use chitubox_io::{Project, SegmentType, SupportBatch, SupportMode, SupportRecord
 use common::*;
 use std::collections::BTreeMap;
 
-fn open(name: &str) -> Option<Project> {
-    let bytes = read_corpus(name)?;
-    Some(Project::from_bytes(bytes).unwrap_or_else(|e| panic!("parse {name}: {e}")))
+fn open_required(name: &str) -> Project {
+    let bytes = read_required_fixture(name);
+    Project::from_bytes(bytes).unwrap_or_else(|error| panic!("parse {name}: {error}"))
+}
+
+fn open_optional_treant_candidate() -> Option<Project> {
+    read_optional_treant_candidate().map(|bytes| {
+        Project::from_bytes(bytes)
+            .unwrap_or_else(|error| panic!("parse {OPTIONAL_TREANT_CANDIDATE}: {error}"))
+    })
+}
+
+fn assert_real_emitter_output(name: &str, expect: usize, proj: Project) {
+    let counts = proj.support_counts();
+    let total: usize = counts.iter().sum();
+    assert_eq!(total, expect, "{name}: record count");
+
+    // Decode every record; build a type histogram; fields must be finite.
+    let mut hist: BTreeMap<u32, usize> = BTreeMap::new();
+    for model_index in 0..proj.model_count() {
+        for record in proj.supports(model_index).unwrap() {
+            *hist.entry(record.segment_type.0).or_default() += 1;
+            assert!(record.start.iter().all(|value| value.is_finite()));
+            assert!(record.end.iter().all(|value| value.is_finite()));
+            assert!(record.r_start.is_finite() && record.r_end.is_finite());
+            assert!(record.mesh.xyz.len().is_multiple_of(9));
+        }
+    }
+    let decoded: usize = hist.values().sum();
+    assert_eq!(decoded, expect, "{name}: decoded all records");
+    assert!(!hist.is_empty(), "{name}: empty histogram");
+    eprintln!("{name}: type histogram {hist:?}");
 }
 
 /// A minimal well-formed support record with a 1-triangle mesh.
@@ -26,44 +55,22 @@ fn tiny_record(t: SegmentType, x: f32) -> SupportRecord {
 
 #[test]
 fn parse_real_emitter_outputs() {
-    for (name, expect) in [
-        ("morel_mudskipper_supports.chitubox", 243usize),
-        // Was treant_v4_supports.chitubox @ 1783 records. That file and the v4
-        // engine that emitted it are both gone, so the census is re-pinned on
-        // the current emitter's deliverable. Too large to commit: SKIPs unless
-        // CHITUBOX_CORPUS_DIR has it.
-        ("treant_v5_candidate.chitubox", 1360usize),
-    ] {
-        let Some(proj) = open(name) else { continue };
-        let counts = proj.support_counts();
-        let total: usize = counts.iter().sum();
-        assert_eq!(total, expect, "{name}: record count");
+    assert_real_emitter_output(
+        "morel_mudskipper_supports.chitubox",
+        243,
+        open_required("morel_mudskipper_supports.chitubox"),
+    );
 
-        // decode every record; build a type histogram; fields must be finite
-        let mut hist: BTreeMap<u32, usize> = BTreeMap::new();
-        for m in 0..proj.model_count() {
-            for r in proj.supports(m).unwrap() {
-                *hist.entry(r.segment_type.0).or_default() += 1;
-                assert!(r.start.iter().all(|v| v.is_finite()));
-                assert!(r.end.iter().all(|v| v.is_finite()));
-                assert!(r.r_start.is_finite() && r.r_end.is_finite());
-                assert!(r.mesh.xyz.len().is_multiple_of(9));
-            }
-        }
-        let decoded: usize = hist.values().sum();
-        assert_eq!(decoded, expect, "{name}: decoded all records");
-        // every record carried a known-vocabulary type id and non-empty mesh
-        assert!(!hist.is_empty(), "{name}: empty histogram");
-        eprintln!("{name}: type histogram {hist:?}");
+    // The oversized candidate is the sole sanctioned optional fixture.
+    if let Some(proj) = open_optional_treant_candidate() {
+        assert_real_emitter_output(OPTIONAL_TREANT_CANDIDATE, 1360, proj);
     }
 }
 
 #[test]
 fn replace_with_same_records_roundtrips() {
     // supports() -> attach_supports(Replace, same records) -> re-parse equal.
-    let Some(mut proj) = open("sphere-cylinder-supported.chitubox") else {
-        return;
-    };
+    let mut proj = open_required("sphere-cylinder-supported.chitubox");
     let orig0 = proj.supports(0).unwrap();
     let orig1 = proj.supports(1).unwrap();
     proj.attach_supports(&[
@@ -92,9 +99,7 @@ fn replace_with_same_records_roundtrips() {
 #[test]
 fn asymmetric_multi_model_supports() {
     // 3 records on model 0, 17 on model 1 — the interleaved-offset stress case.
-    let Some(mut proj) = open("sphere-cylinder.chitubox") else {
-        return;
-    };
+    let mut proj = open_required("sphere-cylinder.chitubox");
     let recs0: Vec<_> = (0..3)
         .map(|i| tiny_record(SegmentType::SHAFT, i as f32))
         .collect();
@@ -129,9 +134,7 @@ fn asymmetric_multi_model_supports() {
 
 #[test]
 fn append_mode_extends_existing_section() {
-    let Some(mut proj) = open("sphere-cylinder-supported.chitubox") else {
-        return;
-    };
+    let mut proj = open_required("sphere-cylinder-supported.chitubox");
     let before = proj.support_counts()[0];
     let extra: Vec<_> = (0..3)
         .map(|i| tiny_record(SegmentType::JOINER, 10.0 + i as f32))
@@ -153,9 +156,7 @@ fn append_mode_extends_existing_section() {
 
 #[test]
 fn replace_empty_removes_section() {
-    let Some(mut proj) = open("sphere-cylinder-supported.chitubox") else {
-        return;
-    };
+    let mut proj = open_required("sphere-cylinder-supported.chitubox");
     assert!(proj.model(0).unwrap().has_supports);
     proj.attach_supports(&[SupportBatch {
         model_index: 0,

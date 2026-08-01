@@ -6,19 +6,17 @@ mod common;
 use chitubox_io::{Placement, PlacementUpdate, Project, ZRotation};
 use common::*;
 
-fn open(name: &str) -> Option<Project> {
-    let bytes = read_corpus(name)?;
-    Some(Project::from_bytes(bytes).unwrap_or_else(|e| panic!("parse {name}: {e}")))
+fn open_required(name: &str) -> Project {
+    let bytes = read_required_fixture(name);
+    Project::from_bytes(bytes).unwrap_or_else(|error| panic!("parse {name}: {error}"))
 }
 
 #[test]
 fn probe_translation_reads_exact() {
-    let (Some(base), Some(moved)) = (
-        open("sphere-cylinder.chitubox"),
-        open("sphere-moved.chitubox"),
-    ) else {
-        return;
-    };
+    let (base, moved) = (
+        open_required("sphere-cylinder.chitubox"),
+        open_required("sphere-moved.chitubox"),
+    );
     let b = base.placements()[0];
     let m = moved.placements()[0];
     assert_eq!(
@@ -37,12 +35,10 @@ fn probe_translation_reads_exact() {
 
 #[test]
 fn probe_scale_is_baked_1_5x() {
-    let (Some(base), Some(scaled)) = (
-        open("sphere-cylinder.chitubox"),
-        open("sphere-scaled.chitubox"),
-    ) else {
-        return;
-    };
+    let (base, scaled) = (
+        open_required("sphere-cylinder.chitubox"),
+        open_required("sphere-scaled.chitubox"),
+    );
     // model 0 = Sphere; same triangle count, bbox exactly 1.5x
     let bt = base.model_triangles(0).unwrap();
     let st = scaled.model_triangles(0).unwrap();
@@ -74,12 +70,10 @@ fn ry_rz(v: [f32; 3], deg: f32) -> [f32; 3] {
 
 #[test]
 fn probe_rotation_matches_ry_rz_vertex_set() {
-    let (Some(base), Some(rot)) = (
-        open("sphere-cylinder.chitubox"),
-        open("cylinder-rotated.chitubox"),
-    ) else {
-        return;
-    };
+    let (base, rot) = (
+        open_required("sphere-cylinder.chitubox"),
+        open_required("cylinder-rotated.chitubox"),
+    );
     // model 1 = Cylinder (the faceted, non-symmetric probe)
     let bt = base.model_triangles(1).unwrap();
     let rt = rot.model_triangles(1).unwrap();
@@ -93,9 +87,7 @@ fn probe_rotation_matches_ry_rz_vertex_set() {
 
 #[test]
 fn library_set_placements_persists_exact() {
-    let Some(mut proj) = open("sphere-cylinder.chitubox") else {
-        return;
-    };
+    let mut proj = open_required("sphere-cylinder.chitubox");
     proj.set_placements(&[PlacementUpdate {
         model_index: 0,
         placement: Placement {
@@ -115,9 +107,7 @@ fn library_set_placements_persists_exact() {
 
 #[test]
 fn library_rotate_z_90_rotates_vertices() {
-    let Some(mut proj) = open("sphere-cylinder.chitubox") else {
-        return;
-    };
+    let mut proj = open_required("sphere-cylinder.chitubox");
     let before = proj.model_triangles(1).unwrap();
     proj.rotate_model_z(1, 90.0).unwrap();
     let after = proj.model_triangles(1).unwrap();
@@ -130,7 +120,7 @@ fn library_rotate_z_90_rotates_vertices() {
     }
     // translation fields untouched by rotation
     let p = proj.placements()[1];
-    let base = Project::from_bytes(read_corpus("sphere-cylinder.chitubox").unwrap())
+    let base = Project::from_bytes(read_required_fixture("sphere-cylinder.chitubox"))
         .unwrap()
         .placements()[1];
     assert_eq!(p, base);
@@ -140,9 +130,7 @@ fn library_rotate_z_90_rotates_vertices() {
 #[test]
 fn library_rotate_rebake_is_deterministic() {
     // 45 + 45 == one 90 turn, bit-for-bit (rebake from pristine).
-    let Some(base_bytes) = read_corpus("sphere-cylinder.chitubox") else {
-        return;
-    };
+    let base_bytes = read_required_fixture("sphere-cylinder.chitubox");
     let mut a = Project::from_bytes(base_bytes.clone()).unwrap();
     let mut b = Project::from_bytes(base_bytes).unwrap();
     a.rotate_model_z(1, 90.0).unwrap();
@@ -169,9 +157,7 @@ fn library_rotate_rebake_is_deterministic() {
 fn rotate_supported_assembly_moves_records_and_blobs() {
     // Rotating a supported model rebakes model mesh, support blobs, AND record
     // endpoints as one rigid assembly.
-    let Some(mut proj) = open("sphere-cylinder-supported.chitubox") else {
-        return;
-    };
+    let mut proj = open_required("sphere-cylinder-supported.chitubox");
     let before = proj.supports(0).unwrap();
     proj.rotate_model_z(0, 90.0).unwrap();
     let after = proj.supports(0).unwrap();

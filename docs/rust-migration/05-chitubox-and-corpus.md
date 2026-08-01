@@ -137,11 +137,13 @@ workspace surgery and milestone sequencing.
 ## 3. Test corpus — the provenance table
 
 Corpus location: `scripts/tests/fixtures/chitubox/` (committed, small
-fixtures) with `CHITUBOX_CORPUS_DIR` as fallback for large specimens (default
+fixtures). Missing committed fixtures fail by their named path; they never
+skip. The sole exception is the uncommittable large
+`treant_v5_candidate.chitubox`, looked up under `CHITUBOX_CORPUS_DIR` (default
 `/Users/craig/code/hughescr/dnd-campaigns`, i.e. this repo's parent — see §4).
-Resolution logic: `rust/chitubox_io/tests/common/mod.rs::corpus_path()`
-checks the committed fixture dir first, then `CHITUBOX_CORPUS_DIR`; a missing
-file makes the test **skip with a printed notice**, never silently pass.
+Only tests for that exact named specimen may print `SKIP:` and pass when it is
+absent. This corrects the earlier broad helper wording to the normative
+fail-not-skip rule in `04-migration-plan.md` M0 work item 9.
 
 **Critical distinction — read before using ANY fixture as ground truth**:
 some fixtures are files ChituBox itself authored (real, independent oracle
@@ -172,7 +174,8 @@ pinned at 1360 support records by `support_parity.rs` (replaces the older
 `treant_v4_supports.chitubox`/`supported-treant.chitubox` referenced in
 `CHITUBOX-FORMAT.md`/`SPEC-CHITUBOX-RS.md` — those were superseded and the
 current pinned name is `treant_v5_candidate.chitubox`). Tests referencing it
-skip cleanly without the env var set.
+alone skip cleanly without the env var set; every committed fixture remains a
+named required input.
 
 **The two most important fixtures for any new geometry-synthesis code**:
 `basic-cube-supports-raft.chitubox` and `cylinder-supported-bottom-connected.chitubox`
