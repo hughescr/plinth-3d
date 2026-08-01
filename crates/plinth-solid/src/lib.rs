@@ -196,6 +196,7 @@ fn run_batch(meshes: &[Mesh], operation: NativeOperation) -> Result<Mesh, SolidE
 fn map_native_response(response: ffi::FfiResponse) -> Result<Mesh, SolidError> {
     use ffi::FfiErrorCode as Code;
 
+    validate_native_envelope(&response)?;
     match response.code {
         Code::Success => unflatten(response.mesh).map_err(SolidError::InvalidOutput),
         Code::OffsetArrayShape => Err(SolidError::NativeValidation(
@@ -241,6 +242,96 @@ fn map_native_response(response: ffi::FfiResponse) -> Result<Mesh, SolidError> {
             NativeExceptionKind::NonStandard,
         )),
         _ => Err(SolidError::InvalidNativeResponse),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum StatusField {
+    Zero,
+    NonZero,
+}
+
+#[derive(Clone, Copy)]
+enum MeshIndexField {
+    Absent,
+    Required,
+}
+
+#[derive(Clone, Copy)]
+enum PayloadField {
+    Empty,
+    Required,
+}
+
+#[derive(Clone, Copy)]
+struct ResponseSchema {
+    status: StatusField,
+    mesh_index: MeshIndexField,
+    payload: PayloadField,
+}
+
+fn response_schema(code: ffi::FfiErrorCode) -> Option<ResponseSchema> {
+    use ffi::FfiErrorCode as Code;
+
+    let schema = match code {
+        Code::Success => ResponseSchema {
+            status: StatusField::Zero,
+            mesh_index: MeshIndexField::Absent,
+            payload: PayloadField::Required,
+        },
+        Code::InputManifoldStatus => ResponseSchema {
+            status: StatusField::NonZero,
+            mesh_index: MeshIndexField::Required,
+            payload: PayloadField::Empty,
+        },
+        Code::ResultManifoldStatus => ResponseSchema {
+            status: StatusField::NonZero,
+            mesh_index: MeshIndexField::Absent,
+            payload: PayloadField::Empty,
+        },
+        Code::OffsetArrayShape
+        | Code::OffsetSpan
+        | Code::OffsetOrderOrAlignment
+        | Code::DifferenceArity
+        | Code::OutputPropertyStride
+        | Code::OutputOverflow
+        | Code::EmptyResult
+        | Code::UnexpectedInvalidArgument
+        | Code::UnexpectedOverflow
+        | Code::UnexpectedAllocation
+        | Code::UnexpectedStandardException
+        | Code::UnexpectedNonStandardException => ResponseSchema {
+            status: StatusField::Zero,
+            mesh_index: MeshIndexField::Absent,
+            payload: PayloadField::Empty,
+        },
+        _ => return None,
+    };
+    Some(schema)
+}
+
+fn validate_native_envelope(response: &ffi::FfiResponse) -> Result<(), SolidError> {
+    let schema = response_schema(response.code).ok_or(SolidError::InvalidNativeResponse)?;
+    let status_valid = match schema.status {
+        StatusField::Zero => response.manifold_status == 0,
+        StatusField::NonZero => response.manifold_status != 0,
+    };
+    let mesh_index_valid = match schema.mesh_index {
+        MeshIndexField::Absent => !response.has_mesh_index && response.mesh_index == 0,
+        MeshIndexField::Required => response.has_mesh_index,
+    };
+    let payload_valid = match schema.payload {
+        PayloadField::Empty => {
+            response.mesh.vertices.is_empty() && response.mesh.triangles.is_empty()
+        }
+        PayloadField::Required => {
+            !response.mesh.vertices.is_empty() && !response.mesh.triangles.is_empty()
+        }
+    };
+    if status_valid && mesh_index_valid && payload_valid {
+        Ok(())
+    } else {
+        Err(SolidError::InvalidNativeResponse)
     }
 }
 
@@ -373,59 +464,184 @@ fn validate_mesh(vertices: &[[f64; 3]], triangles: &[[u64; 3]]) -> Result<(), Me
 #[cfg(test)]
 mod tests {
     use super::{
-        ffi, map_native_response, ManifoldStatus, NativeExceptionKind, NativeValidationError,
-        SolidError,
+        ffi, map_native_response, validate_native_envelope, ManifoldStatus, NativeExceptionKind,
+        NativeValidationError, SolidError,
     };
 
-    fn error_response(code: ffi::FfiErrorCode, manifold_status: i32) -> ffi::FfiResponse {
-        ffi::FfiResponse {
-            code,
-            manifold_status,
-            has_mesh_index: true,
-            mesh_index: 7,
-            mesh: ffi::FfiMesh {
+    #[derive(Clone, Copy)]
+    enum TestPayload {
+        Empty,
+        Present,
+    }
+
+    #[derive(Clone, Copy)]
+    struct EnvelopeCase {
+        code: ffi::FfiErrorCode,
+        status: i32,
+        mesh_index: Option<u64>,
+        payload: TestPayload,
+    }
+
+    impl EnvelopeCase {
+        const fn new(
+            code: ffi::FfiErrorCode,
+            status: i32,
+            mesh_index: Option<u64>,
+            payload: TestPayload,
+        ) -> Self {
+            Self {
+                code,
+                status,
+                mesh_index,
+                payload,
+            }
+        }
+    }
+
+    use ffi::FfiErrorCode as Code;
+
+    const ENVELOPES: [EnvelopeCase; 15] = [
+        EnvelopeCase::new(Code::Success, 0, None, TestPayload::Present),
+        EnvelopeCase::new(Code::OffsetArrayShape, 0, None, TestPayload::Empty),
+        EnvelopeCase::new(Code::OffsetSpan, 0, None, TestPayload::Empty),
+        EnvelopeCase::new(Code::OffsetOrderOrAlignment, 0, None, TestPayload::Empty),
+        EnvelopeCase::new(Code::DifferenceArity, 0, None, TestPayload::Empty),
+        EnvelopeCase::new(Code::OutputPropertyStride, 0, None, TestPayload::Empty),
+        EnvelopeCase::new(Code::OutputOverflow, 0, None, TestPayload::Empty),
+        EnvelopeCase::new(Code::InputManifoldStatus, 2, Some(7), TestPayload::Empty),
+        EnvelopeCase::new(Code::ResultManifoldStatus, 2, None, TestPayload::Empty),
+        EnvelopeCase::new(Code::EmptyResult, 0, None, TestPayload::Empty),
+        EnvelopeCase::new(Code::UnexpectedInvalidArgument, 0, None, TestPayload::Empty),
+        EnvelopeCase::new(Code::UnexpectedOverflow, 0, None, TestPayload::Empty),
+        EnvelopeCase::new(Code::UnexpectedAllocation, 0, None, TestPayload::Empty),
+        EnvelopeCase::new(
+            Code::UnexpectedStandardException,
+            0,
+            None,
+            TestPayload::Empty,
+        ),
+        EnvelopeCase::new(
+            Code::UnexpectedNonStandardException,
+            0,
+            None,
+            TestPayload::Empty,
+        ),
+    ];
+
+    fn response(case: EnvelopeCase) -> ffi::FfiResponse {
+        let mesh = match case.payload {
+            TestPayload::Empty => ffi::FfiMesh {
                 vertices: Vec::new(),
                 triangles: Vec::new(),
             },
+            TestPayload::Present => ffi::FfiMesh {
+                vertices: vec![0.0],
+                triangles: vec![0],
+            },
+        };
+        ffi::FfiResponse {
+            code: case.code,
+            manifold_status: case.status,
+            has_mesh_index: case.mesh_index.is_some(),
+            mesh_index: case.mesh_index.unwrap_or(0),
+            mesh,
+        }
+    }
+
+    fn case(code: ffi::FfiErrorCode) -> EnvelopeCase {
+        ENVELOPES
+            .iter()
+            .copied()
+            .find(|case| case.code == code)
+            .expect("every tested response code has one independent canonical envelope")
+    }
+
+    #[test]
+    fn every_native_response_code_has_one_strict_canonical_envelope() {
+        for case in ENVELOPES {
+            assert_eq!(validate_native_envelope(&response(case)), Ok(()));
+        }
+    }
+
+    #[test]
+    fn every_envelope_rejects_status_index_and_payload_contradictions() {
+        for canonical in ENVELOPES {
+            let mut bad_status = response(canonical);
+            bad_status.manifold_status = if canonical.status == 0 { 1 } else { 0 };
+            assert_eq!(
+                validate_native_envelope(&bad_status),
+                Err(SolidError::InvalidNativeResponse)
+            );
+
+            let mut bad_index_presence = response(canonical);
+            bad_index_presence.has_mesh_index = canonical.mesh_index.is_none();
+            assert_eq!(
+                validate_native_envelope(&bad_index_presence),
+                Err(SolidError::InvalidNativeResponse)
+            );
+
+            if canonical.mesh_index.is_none() {
+                let mut hidden_index = response(canonical);
+                hidden_index.mesh_index = 9;
+                assert_eq!(
+                    validate_native_envelope(&hidden_index),
+                    Err(SolidError::InvalidNativeResponse)
+                );
+            }
+
+            let mut bad_payload = response(canonical);
+            match canonical.payload {
+                TestPayload::Empty => bad_payload.mesh.vertices.push(1.0),
+                TestPayload::Present => bad_payload.mesh.triangles.clear(),
+            }
+            assert_eq!(
+                validate_native_envelope(&bad_payload),
+                Err(SolidError::InvalidNativeResponse)
+            );
         }
     }
 
     #[test]
     fn native_response_codes_retain_semantic_rust_errors() {
         assert_eq!(
-            map_native_response(error_response(ffi::FfiErrorCode::OffsetSpan, 0)),
+            map_native_response(response(case(ffi::FfiErrorCode::OffsetSpan))),
             Err(SolidError::NativeValidation(
                 NativeValidationError::OffsetSpan
             ))
         );
         assert_eq!(
-            map_native_response(error_response(ffi::FfiErrorCode::OutputOverflow, 0)),
+            map_native_response(response(case(ffi::FfiErrorCode::OutputOverflow))),
             Err(SolidError::NativeOverflow)
         );
         assert_eq!(
-            map_native_response(error_response(
-                ffi::FfiErrorCode::UnexpectedStandardException,
-                0
-            )),
+            map_native_response(response(case(
+                ffi::FfiErrorCode::UnexpectedStandardException
+            ))),
             Err(SolidError::UnexpectedNativeException(
                 NativeExceptionKind::Standard
             ))
         );
         assert_eq!(
-            map_native_response(error_response(ffi::FfiErrorCode::InputManifoldStatus, 2)),
+            map_native_response(response(case(ffi::FfiErrorCode::InputManifoldStatus))),
             Err(SolidError::ManifoldInput {
                 mesh_index: 7,
                 status: ManifoldStatus::NotManifold,
             })
         );
         assert_eq!(
-            map_native_response(error_response(ffi::FfiErrorCode::ResultManifoldStatus, 99)),
+            map_native_response(response(EnvelopeCase {
+                status: 99,
+                ..case(ffi::FfiErrorCode::ResultManifoldStatus)
+            })),
             Err(SolidError::ManifoldResult {
                 status: ManifoldStatus::Unknown(99),
             })
         );
         assert_eq!(
-            map_native_response(error_response(ffi::FfiErrorCode::ResultManifoldStatus, 0)),
+            map_native_response(response(EnvelopeCase {
+                status: 0,
+                ..case(ffi::FfiErrorCode::ResultManifoldStatus)
+            })),
             Err(SolidError::InvalidNativeResponse)
         );
     }

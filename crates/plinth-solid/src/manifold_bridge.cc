@@ -27,8 +27,22 @@
 #error "M0 plinth-solid must not compile the cross-section backend"
 #endif
 
-static_assert(sizeof(double) == 8, "Manifold scalar must be IEEE-754 f64-sized");
+using Mesh64PropertyContainer = std::remove_cv_t<std::remove_reference_t<
+    decltype(manifold::MeshGL64{}.vertProperties)>>;
+
+static_assert(sizeof(double) == 8, "Manifold scalar must be f64-sized");
+static_assert(std::numeric_limits<double>::is_iec559,
+              "Manifold scalar must implement IEEE-754");
+static_assert(std::numeric_limits<double>::radix == 2,
+              "Manifold scalar must use a binary radix");
+static_assert(std::numeric_limits<double>::digits == 53,
+              "Manifold scalar must be binary64 precision");
+static_assert(std::numeric_limits<double>::max_exponent == 1024,
+              "Manifold scalar must be binary64 exponent range");
 static_assert(sizeof(std::uint64_t) == 8, "Manifold mesh index must be u64-sized");
+static_assert(
+    std::is_same_v<typename Mesh64PropertyContainer::value_type, double>,
+    "MeshGL64 vertex properties must remain exactly double");
 static_assert(
     std::is_same_v<decltype(manifold::MeshGL64{}.triVerts)::value_type,
                    std::uint64_t>,
