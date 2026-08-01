@@ -521,7 +521,7 @@ pub enum ComparisonScope {
 
 /// One freshly loaded, non-retainable waiver row. It is crate-private so a
 /// caller cannot hold authority across a later on-disk table edit.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct AuthorizedWaiver {
     pub(crate) model: ModelId,
     pub(crate) metric: &'static str,

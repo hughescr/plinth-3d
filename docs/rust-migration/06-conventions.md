@@ -285,17 +285,21 @@ rewritten.
 ## Decision gate table
 
 This section closes the guide's former table gap: M1 creates it, rather than M0.
-It is an append-only, machine-parseable authority record.  Its single Markdown
-table has exactly ten columns; `-` means "not applicable", never an omitted
-field.  `recorded` is when the entry was entered here, `evidence_date` is the
-date carried by its cited authority, and `status` intentionally distinguishes a
-guide commitment, a documented owner approval, a Sol compliance adjudication,
-and a future owner signature.  A row is a waiver only when `kind` is `waiver`,
-`authority` is exactly `owner:Craig Hughes`, and `status` is exactly `signed`.
-The final column is five semicolon-separated fields in this fixed order:
-`model;metric;scope;reason;expires`.  Procedural file authority is deliberately
-not a cryptographic signature scheme: the trusted boundary is a checked-in,
-reviewed repository checkout plus Craig's recorded sign-off.
+It is an append-only, machine-parseable authority record consisting of exactly
+two uniquely marked Markdown tables. The main table has exactly ten columns;
+the correction table has exactly twelve columns and records full replacements
+without rewriting historical rows. In either table, `-` means "not applicable",
+never an omitted field. `recorded` is when the entry was entered here,
+`evidence_date` is the date carried by its cited authority, and `status`
+intentionally distinguishes a guide commitment, a documented owner approval, a
+Sol compliance adjudication, and a future owner signature. A row is a waiver
+only when `kind` is `waiver`, `authority` is exactly `owner:Craig Hughes`, and
+`status` is exactly `signed`; its final cell is the strict JSON object specified
+below, not a semicolon-delimited payload. This paragraph corrects the conflicting
+pre-parser single-table/semicolon wording without altering any recorded row.
+Procedural file authority is deliberately not a cryptographic signature scheme:
+the trusted boundary is a checked-in, reviewed repository checkout plus Craig's
+recorded sign-off.
 
 <!-- PLINTH_GATE_MAIN_START -->
 | id | kind | recorded | authority | status | evidence_date | resolution | source | locator | waiver |

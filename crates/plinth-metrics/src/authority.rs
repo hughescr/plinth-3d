@@ -97,6 +97,8 @@ pub enum AuthorityError {
         path: PathBuf,
         source: serde_json::Error,
     },
+    #[error("manifest {path} strict schema is missing required nullable field {field}")]
+    ManifestMissingField { path: PathBuf, field: &'static str },
     #[error("manifest metric table differs from the exact M1 table at index {index}")]
     ManifestMetric { index: usize },
     #[error("manifest model table differs from the exact corpus at index {index}")]
@@ -119,8 +121,8 @@ pub enum AuthorityError {
     UnknownCorrectionTarget { id: String, target: String },
     #[error("correction chain contains a cycle at {id}")]
     CorrectionCycle { id: String },
-    #[error("multiple corrections directly replace {target}")]
-    MultipleCorrections { target: String },
+    #[error("multiple correction chains effectively replace {target}")]
+    DuplicateEffectiveReplacement { target: String },
     #[error("correction {id} does not preserve its target identity")]
     CorrectionIdentity { id: String },
     #[error("gate row {id} has invalid typed fields")]
@@ -141,6 +143,8 @@ pub enum AuthorityError {
     WaiverTarget { id: String },
     #[error("waiver {id} expired on {expires_on}")]
     WaiverExpired { id: String, expires_on: String },
+    #[error("waiver {id} was signed after the comparison date on {date}")]
+    WaiverFutureDate { id: String, date: String },
     #[error("required correction {id} is absent or does not cite its record")]
     RequiredCorrection { id: &'static str },
 }
@@ -205,8 +209,12 @@ struct Manifest {
 struct ManifestMetric {
     id: String,
     direction: String,
-    hard_bound: Option<HardBound>,
+    hard_bound: RequiredNullable<HardBound>,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(transparent)]
+struct RequiredNullable<T>(Option<T>);
 
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
@@ -223,10 +231,10 @@ struct ManifestModel {
     stl: String,
     source_digest: SourceDigest,
     report: String,
-    baseline_artifact: Option<String>,
+    baseline_artifact: RequiredNullable<String>,
     python_exit_code: i64,
     python_seconds: f64,
-    python_failed_stage: Option<String>,
+    python_failed_stage: RequiredNullable<String>,
 }
 
 #[allow(dead_code)]
@@ -308,6 +316,12 @@ fn load_authorized_waivers(
         path: manifest.clone(),
         source,
     })?;
+    let manifest_value: serde_json::Value =
+        serde_json::from_str(&manifest_text).map_err(|source| AuthorityError::ManifestSchema {
+            path: manifest.clone(),
+            source,
+        })?;
+    validate_required_manifest_fields(&manifest_value, &manifest)?;
     let manifest_data: Manifest =
         serde_json::from_str(&manifest_text).map_err(|source| AuthorityError::ManifestSchema {
             path: manifest,
@@ -317,6 +331,44 @@ fn load_authorized_waivers(
     let effective = parse_effective_gate_rows(&gate_text)?;
     validate_required_corrections(&effective, &manifest_data, &root)?;
     match_waivers(&effective, &manifest_data, &manifest_relative, as_of)
+}
+
+fn validate_required_manifest_fields(
+    manifest: &serde_json::Value,
+    path: &Path,
+) -> Result<(), AuthorityError> {
+    for row in manifest
+        .get("metrics")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if !row
+            .as_object()
+            .is_some_and(|row| row.contains_key("hard_bound"))
+        {
+            return Err(AuthorityError::ManifestMissingField {
+                path: path.to_path_buf(),
+                field: "hard_bound",
+            });
+        }
+    }
+    for row in manifest
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        for field in ["baseline_artifact", "python_failed_stage"] {
+            if !row.as_object().is_some_and(|row| row.contains_key(field)) {
+                return Err(AuthorityError::ManifestMissingField {
+                    path: path.to_path_buf(),
+                    field,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_manifest(manifest: &Manifest) -> Result<(), AuthorityError> {
@@ -329,7 +381,7 @@ fn validate_manifest(manifest: &Manifest) -> Result<(), AuthorityError> {
         });
     }
     for (index, (row, expected)) in manifest.metrics.iter().zip(EXPECTED_METRICS).enumerate() {
-        let actual_bound = match &row.hard_bound {
+        let actual_bound = match &row.hard_bound.0 {
             None => None,
             Some(HardBound::Number(value)) => Some(value.to_string()),
             Some(HardBound::Text(value)) => Some(value.clone()),
@@ -382,7 +434,7 @@ fn parse_effective_gate_rows(text: &str) -> Result<BTreeMap<String, GateRow>, Au
     let mut direct_targets = BTreeSet::new();
     for correction in corrections {
         if !direct_targets.insert(correction.target.clone()) {
-            return Err(AuthorityError::MultipleCorrections {
+            return Err(AuthorityError::DuplicateEffectiveReplacement {
                 target: correction.target,
             });
         }
@@ -404,32 +456,48 @@ fn parse_effective_gate_rows(text: &str) -> Result<BTreeMap<String, GateRow>, Au
             });
         }
     }
-    let mut effective = originals.clone();
+    let mut roots = BTreeMap::new();
     for correction in correction_map.values() {
-        let target = resolve_target(
+        let root_id = resolve_root_id(
             &correction.target,
             &originals,
             &correction_map,
             &mut BTreeSet::new(),
         )?;
-        if correction.row.id != target.id {
+        if correction.row.id != root_id {
             return Err(AuthorityError::CorrectionIdentity {
                 id: correction.id.clone(),
             });
         }
-        effective.insert(target.id, correction.row.clone());
+        roots.insert(correction.id.clone(), root_id);
+    }
+    let mut effective = originals.clone();
+    let mut replaced = BTreeSet::new();
+    for correction in correction_map
+        .values()
+        .filter(|correction| !direct_targets.contains(&correction.id))
+    {
+        let root_id = roots
+            .get(&correction.id)
+            .expect("every validated correction has a root");
+        if !replaced.insert(root_id.clone()) {
+            return Err(AuthorityError::DuplicateEffectiveReplacement {
+                target: root_id.clone(),
+            });
+        }
+        effective.insert(root_id.clone(), correction.row.clone());
     }
     Ok(effective)
 }
 
-fn resolve_target(
+fn resolve_root_id(
     target: &str,
     originals: &BTreeMap<String, GateRow>,
     corrections: &BTreeMap<String, Correction>,
     visiting: &mut BTreeSet<String>,
-) -> Result<GateRow, AuthorityError> {
-    if let Some(row) = originals.get(target) {
-        return Ok(row.clone());
+) -> Result<String, AuthorityError> {
+    if originals.contains_key(target) {
+        return Ok(target.to_owned());
     }
     if !visiting.insert(target.to_owned()) {
         return Err(AuthorityError::CorrectionCycle {
@@ -443,14 +511,9 @@ fn resolve_target(
                 id: target.to_owned(),
                 target: target.to_owned(),
             })?;
-    let row = resolve_target(&correction.target, originals, corrections, visiting)?;
-    if correction.row.id != row.id {
-        return Err(AuthorityError::CorrectionIdentity {
-            id: correction.id.clone(),
-        });
-    }
+    let root = resolve_root_id(&correction.target, originals, corrections, visiting)?;
     visiting.remove(target);
-    Ok(correction.row.clone())
+    Ok(root)
 }
 
 fn marked_lines<'a>(
@@ -678,10 +741,17 @@ fn validate_required_corrections(
                 && row.locator == "version=3.5.2;tag=v3.5.2"
         })
         .ok_or(AuthorityError::RequiredCorrection { id: "C-1" })?;
-    let upstream =
-        fs::read_to_string(root.join("crates/plinth-solid/vendor/manifold/UPSTREAM.toml"))
-            .map_err(|_| AuthorityError::RequiredCorrection { id: "C-1" })?;
-    if !upstream.contains("version = \"3.5.2\"") || !upstream.contains("tag = \"v3.5.2\"") {
+    let expected_upstream = root.join("crates/plinth-solid/vendor/manifold/UPSTREAM.toml");
+    let upstream_path = fs::canonicalize(&expected_upstream)
+        .map_err(|_| AuthorityError::RequiredCorrection { id: "C-1" })?;
+    if upstream_path != expected_upstream || !upstream_path.starts_with(root) {
+        return Err(AuthorityError::RequiredCorrection { id: "C-1" });
+    }
+    let upstream = fs::read_to_string(&upstream_path)
+        .map_err(|_| AuthorityError::RequiredCorrection { id: "C-1" })?;
+    let (version, tag) = parse_upstream_identity(&upstream)
+        .ok_or(AuthorityError::RequiredCorrection { id: "C-1" })?;
+    if version != "3.5.2" || tag != "v3.5.2" {
         return Err(AuthorityError::RequiredCorrection { id: "C-1" });
     }
     let expected_h6 = format!(
@@ -697,6 +767,42 @@ fn validate_required_corrections(
         })
         .ok_or(AuthorityError::RequiredCorrection { id: "C-2" })?;
     Ok(())
+}
+
+fn parse_upstream_identity(text: &str) -> Option<(String, String)> {
+    let mut version = None;
+    let mut tag = None;
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            break;
+        }
+        let Some((raw_key, raw_value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = raw_key.trim();
+        let slot = match key {
+            "version" => &mut version,
+            "tag" => &mut tag,
+            _ => continue,
+        };
+        let value = parse_plain_toml_string(raw_value.trim())?;
+        if slot.replace(value).is_some() {
+            return None;
+        }
+    }
+    Some((version?, tag?))
+}
+
+fn parse_plain_toml_string(value: &str) -> Option<String> {
+    let content = value.strip_prefix('"')?.strip_suffix('"')?;
+    if content.contains(['"', '\\', '\n', '\r']) {
+        return None;
+    }
+    Some(content.to_owned())
 }
 
 fn match_waivers(
@@ -733,6 +839,7 @@ fn match_waivers(
             });
         };
         if gate.recorded != waiver.date
+            || gate.evidence_date != format!("exact:{}", waiver.date)
             || gate.source != manifest_relative
             || gate.locator != expected_pointer
             || waiver.source != manifest_relative
@@ -751,8 +858,18 @@ fn match_waivers(
         let milestone = parse_scope(&waiver.id, &waiver.scope)?;
         if CalendarDate::new(&waiver.date).is_err()
             || CalendarDate::new(&waiver.expires_on).is_err()
-            || waiver.expires_on.as_str() < as_of.as_str()
         {
+            return Err(AuthorityError::WaiverMismatch {
+                id: waiver.id.clone(),
+            });
+        }
+        if waiver.date.as_str() > as_of.as_str() {
+            return Err(AuthorityError::WaiverFutureDate {
+                id: waiver.id.clone(),
+                date: waiver.date.clone(),
+            });
+        }
+        if waiver.expires_on.as_str() < as_of.as_str() {
             return Err(AuthorityError::WaiverExpired {
                 id: waiver.id.clone(),
                 expires_on: waiver.expires_on.clone(),
@@ -923,6 +1040,30 @@ mod tests {
             load_authorized_waivers(&root, &manifest_path, &date()),
             Err(AuthorityError::ManifestModel { .. })
         ));
+        for (field, missing) in [
+            (
+                "hard_bound",
+                manifest_document("[]").replacen(",\"hard_bound\":null", "", 1),
+            ),
+            (
+                "baseline_artifact",
+                manifest_document("[]").replacen(",\"baseline_artifact\":null", "", 1),
+            ),
+            (
+                "python_failed_stage",
+                manifest_document("[]").replacen(",\"python_failed_stage\":null", "", 1),
+            ),
+        ] {
+            fs::write(&manifest_path, missing).unwrap();
+            let result = load_authorized_waivers(&root, &manifest_path, &date());
+            assert!(matches!(
+                result,
+                Err(AuthorityError::ManifestMissingField {
+                    field: missing_field,
+                    ..
+                }) if missing_field == field
+            ));
+        }
     }
 
     #[test]
@@ -946,6 +1087,94 @@ mod tests {
             load_authorized_waivers(&root, &manifest, &date()),
             Err(AuthorityError::RequiredCorrection { id: "C-2" })
         ));
+        fs::write(root.join(GATE_DOCUMENT_RELATIVE), &document).unwrap();
+        let upstream = root.join("crates/plinth-solid/vendor/manifold/UPSTREAM.toml");
+        fs::write(
+            &upstream,
+            "version = \"3.5.1\"\ntag = \"v3.5.1\"\n# version = \"3.5.2\"\n# tag = \"v3.5.2\"\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            load_authorized_waivers(&root, &manifest, &date()),
+            Err(AuthorityError::RequiredCorrection { id: "C-1" })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn required_upstream_rejects_a_symlink_escape() {
+        use std::os::unix::fs::symlink;
+
+        let root = root("upstream-symlink");
+        let document = docs(&main_rows(""), &corrections());
+        let manifest = write(&root, &document, "[]");
+        let upstream = root.join("crates/plinth-solid/vendor/manifold/UPSTREAM.toml");
+        let outside = std::env::temp_dir().join(format!(
+            "plinth-upstream-outside-{}.toml",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::write(&outside, "version = \"3.5.2\"\ntag = \"v3.5.2\"\n").unwrap();
+        fs::remove_file(&upstream).unwrap();
+        symlink(&outside, &upstream).unwrap();
+        assert!(matches!(
+            load_authorized_waivers(&root, &manifest, &date()),
+            Err(AuthorityError::RequiredCorrection { id: "C-1" })
+        ));
+    }
+
+    fn correction_row(correction_id: &str, target: &str, source: &str) -> String {
+        format!(
+            "| {correction_id} | {target} | O-1 | override | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-07-31 | replacement | {source} | x | - |\n"
+        )
+    }
+
+    #[test]
+    fn correction_graph_selects_the_leaf_independent_of_lexical_order() {
+        let za = format!(
+            "{}{}",
+            correction_row("Z", "O-1", "docs/z.md"),
+            correction_row("A", "Z", "docs/a.md")
+        );
+        let effective = parse_effective_gate_rows(&docs(&main_rows(""), &za)).unwrap();
+        assert_eq!(effective["O-1"].source, "docs/a.md");
+
+        let numbered = format!(
+            "{}{}",
+            correction_row("C-10", "O-1", "docs/c10.md"),
+            correction_row("C-9", "C-10", "docs/c9.md")
+        );
+        let effective = parse_effective_gate_rows(&docs(&main_rows(""), &numbered)).unwrap();
+        assert_eq!(effective["O-1"].source, "docs/c9.md");
+    }
+
+    #[test]
+    fn correction_graph_rejects_cycles_dangling_targets_and_ambiguity() {
+        let cycle = format!(
+            "{}{}",
+            correction_row("C-A", "C-B", "docs/a.md"),
+            correction_row("C-B", "C-A", "docs/b.md")
+        );
+        assert!(matches!(
+            parse_effective_gate_rows(&docs(&main_rows(""), &cycle)),
+            Err(AuthorityError::CorrectionCycle { .. })
+        ));
+        let dangling = correction_row("C-D", "missing", "docs/d.md");
+        assert!(matches!(
+            parse_effective_gate_rows(&docs(&main_rows(""), &dangling)),
+            Err(AuthorityError::UnknownCorrectionTarget { .. })
+        ));
+        let ambiguous = format!(
+            "{}{}",
+            correction_row("C-A", "O-1", "docs/a.md"),
+            correction_row("C-B", "O-1", "docs/b.md")
+        );
+        assert!(matches!(
+            parse_effective_gate_rows(&docs(&main_rows(""), &ambiguous)),
+            Err(AuthorityError::DuplicateEffectiveReplacement { .. })
+        ));
     }
 
     #[test]
@@ -966,19 +1195,27 @@ mod tests {
         ));
     }
 
-    fn waiver_json(id: &str, scope: &str, expires_on: &str) -> String {
+    fn waiver_json_on(id: &str, signed_on: &str, scope: &str, expires_on: &str) -> String {
         format!(
-            r#"[{{"id":"{id}","date":"2026-08-01","model":"Sphere","metric":"scar_area","scope":"{scope}","reason":"semicolon; is ordinary","expires_on":"{expires_on}","source":"corpus/manifest.json","locator":"corpus/manifest.json#/waivers/{id}"}}]"#
+            r#"[{{"id":"{id}","date":"{signed_on}","model":"Sphere","metric":"scar_area","scope":"{scope}","reason":"semicolon; is ordinary","expires_on":"{expires_on}","source":"corpus/manifest.json","locator":"corpus/manifest.json#/waivers/{id}"}}]"#
         )
     }
 
-    fn waiver_row(id: &str, scope: &str, expires_on: &str) -> String {
+    fn waiver_json(id: &str, scope: &str, expires_on: &str) -> String {
+        waiver_json_on(id, "2026-08-01", scope, expires_on)
+    }
+
+    fn waiver_row_on(id: &str, signed_on: &str, scope: &str, expires_on: &str) -> String {
         let payload = format!(
             r#"{{"model":"Sphere","metric":"scar_area","scope":"{scope}","reason":"semicolon; is ordinary","expires_on":"{expires_on}"}}"#
         );
         format!(
-            "| {id} | waiver | 2026-08-01 | owner:Craig Hughes | signed | exact:2026-08-01 | Waiver {id}: semicolon; is ordinary | corpus/manifest.json | corpus/manifest.json#/waivers/{id} | {payload} |\n"
+            "| {id} | waiver | {signed_on} | owner:Craig Hughes | signed | exact:{signed_on} | Waiver {id}: semicolon; is ordinary | corpus/manifest.json | corpus/manifest.json#/waivers/{id} | {payload} |\n"
         )
+    }
+
+    fn waiver_row(id: &str, scope: &str, expires_on: &str) -> String {
+        waiver_row_on(id, "2026-08-01", scope, expires_on)
     }
 
     #[test]
@@ -1086,6 +1323,52 @@ mod tests {
         assert!(matches!(
             load_authorized_waivers(&root, &manifest, &date()),
             Err(AuthorityError::WaiverMismatch { .. })
+        ));
+
+        let duplicate_item = waiver_json("W-1", "candidate:M7", "2026-08-02");
+        let item = &duplicate_item[1..duplicate_item.len() - 1];
+        let duplicates = format!("[{item},{item}]");
+        let manifest = write(&root, &docs(&main_rows(&row), &corrections()), &duplicates);
+        assert!(matches!(
+            load_authorized_waivers(&root, &manifest, &date()),
+            Err(AuthorityError::DuplicateManifestWaiver { .. })
+        ));
+
+        for forged in [
+            row.replace("owner:Craig Hughes", "owner:Mallory"),
+            row.replace("| signed |", "| documented-owner-approval |"),
+        ] {
+            let manifest = write(
+                &root,
+                &docs(&main_rows(&forged), &corrections()),
+                &waiver_json("W-1", "candidate:M7", "2026-08-02"),
+            );
+            assert!(matches!(
+                load_authorized_waivers(&root, &manifest, &date()),
+                Err(AuthorityError::WaiverSignature { .. })
+            ));
+        }
+
+        let evidence_mismatch = row.replace("exact:2026-08-01", "exact:2026-07-31");
+        let manifest = write(
+            &root,
+            &docs(&main_rows(&evidence_mismatch), &corrections()),
+            &waiver_json("W-1", "candidate:M7", "2026-08-02"),
+        );
+        assert!(matches!(
+            load_authorized_waivers(&root, &manifest, &date()),
+            Err(AuthorityError::WaiverMismatch { .. })
+        ));
+
+        let future_row = waiver_row_on("W-1", "2026-08-02", "candidate:M7", "2026-08-03");
+        let manifest = write(
+            &root,
+            &docs(&main_rows(&future_row), &corrections()),
+            &waiver_json_on("W-1", "2026-08-02", "candidate:M7", "2026-08-03"),
+        );
+        assert!(matches!(
+            load_authorized_waivers(&root, &manifest, &date()),
+            Err(AuthorityError::WaiverFutureDate { .. })
         ));
     }
 }
