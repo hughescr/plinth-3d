@@ -509,9 +509,8 @@ impl NativeSurface {
 
     // Same rationale as `seg_clear_one` immediately above: this is that
     // primitive's batched (SoA) entry point, one argument per per-member
-    // input array plus the shared `standoff` -- the PyO3 boundary's own
-    // shape (verify.py's `_batch_axis_intervals` calls this signature
-    // directly), not a candidate for bundling.
+    // input array plus the shared `standoff` -- the established batch shape,
+    // not a candidate for bundling.
     #[allow(clippy::too_many_arguments)]
     pub fn segment_clearance(
         &self,
@@ -545,8 +544,7 @@ impl NativeSurface {
 
     // ---- penetration intervals -------------------------------------------
     // Same rationale as `seg_clear_one` above: the per-member primitive
-    // behind the batched `penetration_intervals`/`penetration_intervals_
-    // batch` PyO3 entry points verify.py's `_batch_axis_intervals` calls
+    // behind the batched `penetration_intervals_batch` entry point
     // (SPEC-EMBED-POLICY rule-4 transit detection) -- every argument is the
     // geometry + sampling config a single interval extraction needs.
     #[allow(clippy::too_many_arguments)]
@@ -611,7 +609,7 @@ impl NativeSurface {
                 let tb = b_bounds[si + 1];
                 let lsub = (tb - ta) * seg;
                 let ns = cap.min((3usize).max((lsub / majority_step_mm).trunc() as usize));
-                // numpy linspace(ta,tb,ns+2)[1:-1]: step=(tb-ta)/(ns+1), i=1..ns
+                // Interior linear spacing: step=(tb-ta)/(ns+1), i=1..ns.
                 let step = (tb - ta) / ((ns + 1) as f64);
                 let run0 = sample_pts.len();
                 for i in 1..=ns {

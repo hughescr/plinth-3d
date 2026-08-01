@@ -1,5 +1,5 @@
 //! Minimal 3-vector helpers over `[f64; 3]`. All operations are written to
-//! mirror the numpy element order of geometry_exact.py; no FMA, no reassociation
+//! mirror the reference element order of geometry_exact.py; no FMA, no reassociation
 //! (spec sec 5.1). Kept tiny and `#[inline]` — but the geometry primitives that
 //! feed bit-parity pins live in closest.rs/moller.rs and control their own
 //! evaluation order there, not here.
@@ -23,7 +23,7 @@ pub fn scale(a: V3, s: f64) -> V3 {
 
 #[inline]
 pub fn dot(a: V3, b: V3) -> f64 {
-    // Left-to-right association, matching numpy's (a*b).sum(1) reduction over 3
+    // Left-to-right association, matching the reference reduction over 3
     // contiguous elements.
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
@@ -39,7 +39,7 @@ pub fn cross(a: V3, b: V3) -> V3 {
 
 #[inline]
 pub fn norm(a: V3) -> f64 {
-    // numpy's np.linalg.norm computes sqrt(sum of squares); sqrt is correctly
+    // The reference norm computes sqrt(sum of squares); sqrt is correctly
     // rounded on both sides.
     dot(a, a).sqrt()
 }

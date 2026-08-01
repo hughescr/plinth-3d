@@ -15,8 +15,6 @@ mod mesh;
 mod moller;
 mod par;
 mod parity;
-#[cfg(feature = "python")]
-mod py;
 mod queries;
 mod vec3;
 

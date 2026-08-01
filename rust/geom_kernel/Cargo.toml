@@ -3,31 +3,10 @@ name = "geom_kernel"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.97"
-build = "build.rs"
 publish = false
 
 [lib]
 name = "geom_kernel"
-# cdylib: the PyO3 extension module. rlib: so `cargo test` can link the crate.
-crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 rayon = "1.10"
-
-# Python bindings are optional and off by default. Native Rust consumers and
-# ordinary workspace checks therefore do not link libpython.
-numpy = { version = "0.23", optional = true }
-
-# extension-module is NOT hardcoded here: it disables libpython linking, which
-# would break `cargo test`'s test binary. maturin passes pyo3/extension-module
-# at build time (see pyproject.toml [tool.maturin] features). `cargo test` links
-# libpython (needs PYO3_PYTHON pointing at the venv python).
-[dependencies.pyo3]
-version = "0.23"
-features = ["abi3-py311"]
-optional = true
-
-[features]
-default = []
-# maturin additionally enables pyo3/extension-module (see pyproject.toml).
-python = ["dep:pyo3", "dep:numpy"]
