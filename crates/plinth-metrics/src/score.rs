@@ -364,7 +364,6 @@ fn z_height_and_build_bounds(
     artifact: &DiskArtifact,
     profile: &PrinterProfile,
 ) -> Result<MetricValue, ScoreError> {
-    let volume = profile.build_volume_mm().value();
     let mut bounds = [
         f64::INFINITY,
         f64::NEG_INFINITY,
@@ -422,11 +421,25 @@ fn z_height_and_build_bounds(
             model: artifact.model().clone(),
         });
     }
+    validate_build_bounds(artifact.model(), bounds, profile)
+}
+
+fn validate_build_bounds(
+    model: &ModelId,
+    bounds: [f64; 6],
+    profile: &PrinterProfile,
+) -> Result<MetricValue, ScoreError> {
+    let volume = profile.build_volume_mm().value();
+    if bounds[0] == f64::INFINITY {
+        return Err(ScoreError::EmptyBounds {
+            model: model.clone(),
+        });
+    }
     let x_half_extent = volume.x() / 2.0;
     let y_half_extent = volume.y() / 2.0;
     if bounds[0] < -x_half_extent || bounds[1] > x_half_extent {
         return Err(ScoreError::BuildVolumeExceeded {
-            model: artifact.model().clone(),
+            model: model.clone(),
             axis: "x",
             observed_mm: bounds[0].abs().max(bounds[1].abs()),
             allowed_mm: x_half_extent,
@@ -434,7 +447,7 @@ fn z_height_and_build_bounds(
     }
     if bounds[2] < -y_half_extent || bounds[3] > y_half_extent {
         return Err(ScoreError::BuildVolumeExceeded {
-            model: artifact.model().clone(),
+            model: model.clone(),
             axis: "y",
             observed_mm: bounds[2].abs().max(bounds[3].abs()),
             allowed_mm: y_half_extent,
@@ -442,7 +455,7 @@ fn z_height_and_build_bounds(
     }
     if bounds[4] < 0.0 || bounds[5] > volume.z() {
         return Err(ScoreError::BuildVolumeExceeded {
-            model: artifact.model().clone(),
+            model: model.clone(),
             axis: "z",
             observed_mm: if bounds[4] < 0.0 {
                 -bounds[4]
@@ -453,7 +466,7 @@ fn z_height_and_build_bounds(
         });
     }
     MetricValue::new(bounds[5]).map_err(|_| ScoreError::ArithmeticOverflow {
-        model: artifact.model().clone(),
+        model: model.clone(),
         metric: "z_height",
     })
 }
@@ -733,6 +746,12 @@ fn compare_metric(
     waived: bool,
     policy: &ComparisonPolicy<'_>,
 ) -> MetricOutcome {
+    // A self-comparison is a reproducibility check, not an opportunity to
+    // back-apply a later candidate gate. Its fixed contract is exact green
+    // rows for all fifteen metrics.
+    if policy.scope == ComparisonScope::SelfComparison {
+        return MetricOutcome::Equal;
+    }
     if report_only(id, policy) {
         return MetricOutcome::Reported;
     }
@@ -777,13 +796,15 @@ fn metric_deltas(
 }
 
 fn report_only(id: &str, policy: &ComparisonPolicy<'_>) -> bool {
-    id == "max_x" && policy.milestone <= ComparisonMilestone::M4
+    policy.scope == ComparisonScope::Candidate
+        && id == "max_x"
+        && policy.milestone <= ComparisonMilestone::M4
 }
 
 fn hard_bound_active(id: &str, policy: &ComparisonPolicy<'_>) -> bool {
     policy.scope == ComparisonScope::Candidate
         && match id {
-            "cavities" | "boundary_edges" | "negative_shells" | "winding" | "loadable" => {
+            "boundary_edges" | "negative_shells" | "winding" | "loadable" => {
                 policy.milestone >= ComparisonMilestone::M4
             }
             "max_x" => policy.milestone >= ComparisonMilestone::M7,
@@ -985,11 +1006,15 @@ mod tests {
             .clone()
     }
 
-    fn values(values: [f64; 15]) -> ScoredArtifact {
+    fn values_for(model: &str, values: [f64; 15]) -> ScoredArtifact {
         ScoredArtifact::Success(ScoredModel {
-            model: ModelId::from("Sphere"),
+            model: ModelId::from(model),
             values: values.map(|value| MetricValue::new(value).unwrap()),
         })
+    }
+
+    fn values(values: [f64; 15]) -> ScoredArtifact {
+        values_for("Sphere", values)
     }
 
     fn policy(scope: ComparisonScope, milestone: ComparisonMilestone) -> ComparisonPolicy<'static> {
@@ -1019,9 +1044,10 @@ mod tests {
         )
         .unwrap();
         assert!(report.accepted());
-        assert!(report.rows().iter().all(
-            |row| row.outcome == MetricOutcome::Equal || row.outcome == MetricOutcome::Reported
-        ));
+        assert!(report
+            .rows()
+            .iter()
+            .all(|row| row.outcome == MetricOutcome::Equal));
     }
 
     #[test]
@@ -1072,7 +1098,7 @@ mod tests {
 
     #[test]
     fn every_m4_format_absolute_is_inclusive_at_zero_and_rejects_the_next_value() {
-        for index in [1_usize, 2, 3, 4] {
+        for index in [2_usize, 3, 4] {
             let baseline = values([0.0; 15]);
             let zero = values([0.0; 15]);
             let accepted = compare_artifacts(
@@ -1115,6 +1141,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(fail.rows()[14].outcome, MetricOutcome::HardBoundViolation);
+    }
+
+    #[test]
+    fn cavities_remain_relative_not_worse_at_m4() {
+        let mut one = [0.0; 15];
+        one[1] = 1.0;
+        let baseline = values(one);
+        let same = compare_artifacts(
+            std::slice::from_ref(&baseline),
+            std::slice::from_ref(&baseline),
+            &policy(ComparisonScope::Candidate, ComparisonMilestone::M4),
+        )
+        .unwrap();
+        assert_eq!(same.rows()[1].outcome, MetricOutcome::Equal);
+        let mut two = one;
+        two[1] = 2.0;
+        let worse = compare_artifacts(
+            std::slice::from_ref(&baseline),
+            std::slice::from_ref(&values(two)),
+            &policy(ComparisonScope::Candidate, ComparisonMilestone::M4),
+        )
+        .unwrap();
+        assert_eq!(worse.rows()[1].outcome, MetricOutcome::Worse);
+        let mut zero = one;
+        zero[1] = 0.0;
+        let better = compare_artifacts(
+            std::slice::from_ref(&baseline),
+            std::slice::from_ref(&values(zero)),
+            &policy(ComparisonScope::Candidate, ComparisonMilestone::M4),
+        )
+        .unwrap();
+        assert_eq!(better.rows()[1].outcome, MetricOutcome::Better);
     }
 
     #[test]
@@ -1316,6 +1374,39 @@ mod tests {
     }
 
     #[test]
+    fn physical_build_bounds_are_inclusive_then_fail_at_the_next_representable_value() {
+        let profile = m0_constants().unwrap().saturn4_ultra();
+        let volume = profile.build_volume_mm().value();
+        let x_half = volume.x() / 2.0;
+        let y_half = volume.y() / 2.0;
+        let at_boundary = [-x_half, x_half, -y_half, y_half, 0.0, volume.z()];
+        assert_eq!(
+            validate_build_bounds(&ModelId::from("Frame"), at_boundary, profile)
+                .unwrap()
+                .get(),
+            volume.z()
+        );
+        let mut y_positive = at_boundary;
+        y_positive[3] = f64::from_bits(y_half.to_bits() + 1);
+        assert!(matches!(
+            validate_build_bounds(&ModelId::from("Frame"), y_positive, profile),
+            Err(ScoreError::BuildVolumeExceeded { axis: "y", .. })
+        ));
+        let mut y_negative = at_boundary;
+        y_negative[2] = -f64::from_bits(y_half.to_bits() + 1);
+        assert!(matches!(
+            validate_build_bounds(&ModelId::from("Frame"), y_negative, profile),
+            Err(ScoreError::BuildVolumeExceeded { axis: "y", .. })
+        ));
+        let mut z_next = at_boundary;
+        z_next[5] = f64::from_bits(volume.z().to_bits() + 1);
+        assert!(matches!(
+            validate_build_bounds(&ModelId::from("Frame"), z_next, profile),
+            Err(ScoreError::BuildVolumeExceeded { axis: "z", .. })
+        ));
+    }
+
+    #[test]
     fn python_failure_is_an_unconditional_rust_success_win() {
         let baseline = ScoredArtifact::ProducerFailed {
             model: ModelId::from("Sphere"),
@@ -1332,6 +1423,99 @@ mod tests {
             report.producer_rows()[0].outcome,
             ProducerOutcome::BaselineFailedCandidateSucceeded
         );
+    }
+
+    #[test]
+    fn producer_failure_outcomes_and_comparator_batch_shape_fail_loudly() {
+        let failed = ScoredArtifact::ProducerFailed {
+            model: ModelId::from("Sphere"),
+        };
+        let successful = values([0.0; 15]);
+        let candidate_failed = compare_artifacts(
+            std::slice::from_ref(&successful),
+            std::slice::from_ref(&failed),
+            &policy(ComparisonScope::Candidate, ComparisonMilestone::M1),
+        )
+        .unwrap();
+        assert_eq!(
+            candidate_failed.producer_rows()[0].outcome,
+            ProducerOutcome::CandidateFailed
+        );
+        assert!(!candidate_failed.accepted());
+        let both_failed = compare_artifacts(
+            std::slice::from_ref(&failed),
+            std::slice::from_ref(&failed),
+            &policy(ComparisonScope::Candidate, ComparisonMilestone::M1),
+        )
+        .unwrap();
+        assert_eq!(
+            both_failed.producer_rows()[0].outcome,
+            ProducerOutcome::BothFailed
+        );
+        assert!(!both_failed.accepted());
+        assert!(matches!(
+            compare_artifacts(
+                std::slice::from_ref(&successful),
+                &[],
+                &policy(ComparisonScope::Candidate, ComparisonMilestone::M1),
+            ),
+            Err(ComparisonError::ModelCount { .. })
+        ));
+        assert!(matches!(
+            compare_artifacts(
+                &[values([0.0; 15]), values([0.0; 15])],
+                &[values([0.0; 15]), values([0.0; 15])],
+                &policy(ComparisonScope::Candidate, ComparisonMilestone::M1),
+            ),
+            Err(ComparisonError::DuplicateModel { .. })
+        ));
+        assert!(matches!(
+            compare_artifacts(
+                &[
+                    values_for("Sphere", [0.0; 15]),
+                    values_for("Treant", [0.0; 15])
+                ],
+                &[
+                    values_for("Treant", [0.0; 15]),
+                    values_for("Sphere", [0.0; 15])
+                ],
+                &policy(ComparisonScope::Candidate, ComparisonMilestone::M1),
+            ),
+            Err(ComparisonError::ModelOrder { .. })
+        ));
+    }
+
+    #[test]
+    fn scoring_input_count_and_duplicate_requests_are_named_failures() {
+        let evidence = ArtifactMetricInputs {
+            topology: Vec::new(),
+            supports: Vec::new(),
+            scars: Vec::new(),
+        };
+        assert!(matches!(
+            score_saturn_artifacts(&[], &[evidence]),
+            Err(ScoreError::InputCount { .. })
+        ));
+        let requests = [
+            ArtifactRequest::new(
+                ModelId::from("Sphere"),
+                ArtifactDisposition::Produced {
+                    path: std::path::PathBuf::from("unused-a.chitubox"),
+                },
+            ),
+            ArtifactRequest::new(
+                ModelId::from("Sphere"),
+                ArtifactDisposition::Produced {
+                    path: std::path::PathBuf::from("unused-b.chitubox"),
+                },
+            ),
+        ];
+        assert!(matches!(
+            score_saturn_artifacts(&requests, &[]),
+            Err(ScoreError::DiskRead(
+                DiskReadError::DuplicateCorpusModel { .. }
+            ))
+        ));
     }
 
     #[test]
