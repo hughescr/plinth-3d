@@ -241,11 +241,10 @@ fn reconstruct_contacts(
             }
             SegmentType::TAPER => tapers.push(index),
             SegmentType::JOINER => joiners.push(index),
-            SegmentType::SHAFT => {
-                sphere(source_index, index, support)?;
-                foot_ball(source_index, index, support)?;
-                balls.push(index);
-            }
+            // Type-9 is also the ordinary joint-ball encoding.  It only claims
+            // contact identity when a complete foot relation exists, so an
+            // unrelated or malformed ordinary ball is not itself an error.
+            SegmentType::SHAFT => balls.push(index),
             _ => {}
         }
     }
@@ -256,7 +255,7 @@ fn reconstruct_contacts(
     let mut stub_by_taper: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for &tip in &tips {
         for &taper in &tapers {
-            if stub_candidate(source_index, tip, taper, supports, settings)? {
+            if stub_candidate(tip, taper, supports, settings) {
                 stub_by_tip.entry(tip).or_default().push(taper);
                 stub_by_taper.entry(taper).or_default().push(tip);
             }
@@ -315,56 +314,13 @@ fn reconstruct_contacts(
                 if ball <= member {
                     continue;
                 }
-                let centre = midpoint(supports[ball].start(), supports[ball].end());
-                let (ball_radius, _) = supports[ball].radii();
-                if !near(point, centre) {
-                    continue;
-                }
-                if support.segment_type() == SegmentType::JOINER && !stored_equal(r0, r1) {
-                    return Err(ScarMetricError::FootGeometry {
-                        source_index,
+                if foot_candidate(point, radius, support, &supports[ball], settings) {
+                    foot_candidates.push(FootCandidate {
                         member,
                         ball,
-                        detail: "type-3 foot member is not constant-radius",
+                        endpoint,
                     });
                 }
-                if !positive(radius) {
-                    if stub_tapers.contains_key(&member) {
-                        continue;
-                    }
-                    return Err(ScarMetricError::FootGeometry {
-                        source_index,
-                        member,
-                        ball,
-                        detail: "non-positive endpoint radius",
-                    });
-                }
-                if !stored_scaled_equal(ball_radius, settings.foot_factor, radius) {
-                    // A stub taper can legitimately terminate beside a later
-                    // ordinary type-9 joint.  It is a second contact class only
-                    // when the complete foot relation, including its factor,
-                    // is present.
-                    if stub_tapers.contains_key(&member) {
-                        continue;
-                    }
-                    if support.segment_type() == SegmentType::JOINER {
-                        // Joiners commonly meet ordinary type-9 joints.  A
-                        // type-3 becomes a foot only when its complete
-                        // constant-radius/factor relation holds.
-                        continue;
-                    }
-                    return Err(ScarMetricError::FootGeometry {
-                        source_index,
-                        member,
-                        ball,
-                        detail: "ball-factor mismatch",
-                    });
-                }
-                foot_candidates.push(FootCandidate {
-                    member,
-                    ball,
-                    endpoint,
-                });
             }
         }
     }
@@ -464,7 +420,7 @@ fn sphere(
     support: &DiskSupport,
 ) -> Result<(Vec3, f64), ScarMetricError> {
     let (r0, r1) = support.radii();
-    if !positive(r0) || !stored_equal(r0, r1) {
+    if !positive_stored_radius(r0) || !stored_equal(r0, r1) {
         return Err(ScarMetricError::InvalidSphereRadii {
             source_index,
             record,
@@ -473,9 +429,7 @@ fn sphere(
     let centre = midpoint(support.start(), support.end());
     let radius = r0;
     if !segment_length_matches_radius(support.start(), support.end(), radius, 2.0)
-        || support.mesh().vertices().iter().any(|vertex| {
-            !point_radius_matches_sphere(*vertex, support.start(), support.end(), radius)
-        })
+        || !sphere_mesh_matches(support, radius)
     {
         return Err(ScarMetricError::NonSphereMesh {
             source_index,
@@ -493,7 +447,8 @@ fn foot_ball(
     let (radius, _) = support.radii();
     let start = support.start();
     let end = support.end();
-    if !stored_equal(start[0], end[0])
+    if !positive_stored_radius(radius)
+        || !stored_equal(start[0], end[0])
         || !stored_equal(start[1], end[1])
         || start[2] <= end[2]
         || !segment_length_matches_radius(start, end, radius, 2.0)
@@ -507,52 +462,51 @@ fn foot_ball(
 }
 
 fn stub_candidate(
-    source_index: usize,
     tip_index: usize,
     taper_index: usize,
     supports: &[DiskSupport],
     settings: Settings,
-) -> Result<bool, ScarMetricError> {
+) -> bool {
     let tip = &supports[tip_index];
     let taper = &supports[taper_index];
-    let (centre, ball_radius) = sphere(source_index, tip_index, tip)?;
+    let (ball_radius, other_ball_radius) = tip.radii();
     let (r0, r1) = taper.radii();
-    if !near(taper.start(), centre) {
-        return Ok(false);
-    }
-    if !positive(r0) || !positive(r1) {
-        return Err(ScarMetricError::StubGeometry {
-            source_index,
-            tip: tip_index,
-            member: taper_index,
-            detail: "non-positive taper radius",
-        });
-    }
-    if !positive(length(sub(taper.end(), taper.start()))) {
-        return Err(ScarMetricError::StubGeometry {
-            source_index,
-            tip: tip_index,
-            member: taper_index,
-            detail: "zero-length taper axis",
-        });
-    }
-    if !parallel_stored_segments(taper.start(), taper.end(), tip.start(), tip.end()) {
-        return Err(ScarMetricError::StubGeometry {
-            source_index,
-            tip: tip_index,
-            member: taper_index,
-            detail: "pole and taper axes are not aligned",
-        });
-    }
-    if !stored_scaled_equal(ball_radius, settings.stub_factor, r0) {
-        return Err(ScarMetricError::StubGeometry {
-            source_index,
-            tip: tip_index,
-            member: taper_index,
-            detail: "ball-factor mismatch",
-        });
-    }
-    Ok(true)
+    positive_stored_radius(ball_radius)
+        && stored_equal(ball_radius, other_ball_radius)
+        && positive_stored_radius(r0)
+        && positive_stored_radius(r1)
+        && endpoint_matches_midpoint(taper.start(), tip.start(), tip.end())
+        && stored_scaled_equal(ball_radius, settings.stub_factor, r0)
+        && segment_nonzero(taper.start(), taper.end())
+        // Axis feasibility is a post-identity geometry validation.  The
+        // identity-bearing center and factor predicates above are exact
+        // preimage-intersection tests over the stored binary32 fields.
+        && parallel_stored_segments(taper.start(), taper.end(), tip.start(), tip.end())
+}
+
+fn foot_candidate(
+    endpoint: Vec3,
+    endpoint_radius: f64,
+    member: &DiskSupport,
+    ball: &DiskSupport,
+    settings: Settings,
+) -> bool {
+    let (r0, r1) = member.radii();
+    let (ball_radius, ball_radius_end) = ball.radii();
+    let start = ball.start();
+    let end = ball.end();
+    positive_stored_radius(endpoint_radius)
+        && positive_stored_radius(ball_radius)
+        && stored_equal(ball_radius, ball_radius_end)
+        && (member.segment_type() != SegmentType::JOINER || stored_equal(r0, r1))
+        && endpoint_matches_midpoint(endpoint, start, end)
+        && stored_scaled_equal(ball_radius, settings.foot_factor, endpoint_radius)
+        && stored_equal(start[0], end[0])
+        && stored_equal(start[1], end[1])
+        && start[2] > end[2]
+        && segment_length_matches_radius(start, end, ball_radius, 2.0)
+        && sphere_mesh_matches(ball, ball_radius)
+        && segment_nonzero(member.start(), member.end())
 }
 
 fn stub_contact(
@@ -566,7 +520,7 @@ fn stub_contact(
     let taper = &supports[taper_index];
     let (centre, ball_radius) = sphere(source_index, tip_index, tip)?;
     let (r0, r1) = taper.radii();
-    if !positive(r0) || !positive(r1) {
+    if !positive_stored_radius(r0) || !positive_stored_radius(r1) {
         return Err(ScarMetricError::StubGeometry {
             source_index,
             tip: tip_index,
@@ -574,7 +528,7 @@ fn stub_contact(
             detail: "non-positive taper radius",
         });
     }
-    if !near(taper.start(), centre) {
+    if !endpoint_matches_midpoint(taper.start(), tip.start(), tip.end()) {
         return Err(ScarMetricError::StubGeometry {
             source_index,
             tip: tip_index,
@@ -646,7 +600,7 @@ fn foot_contact(
     } else {
         (support.start(), r0, support.end(), r1)
     };
-    if !near(endpoint, centre)
+    if !endpoint_matches_midpoint(endpoint, ball_support.start(), ball_support.end())
         || !stored_scaled_equal(ball_radius, settings.foot_factor, endpoint_radius)
     {
         return Err(ScarMetricError::FootGeometry {
@@ -689,7 +643,18 @@ fn contact_scars(
         .iter()
         .map(|contact| contact.anchor)
         .collect::<Vec<_>>();
-    let closest = closest_points(mesh, &anchors)?;
+    let other_endpoints = contacts
+        .iter()
+        .map(|contact| contact.other)
+        .collect::<Vec<_>>();
+    let closest = closest_points(
+        mesh,
+        &anchors
+            .iter()
+            .chain(&other_endpoints)
+            .copied()
+            .collect::<Vec<_>>(),
+    )?;
     let rays = contacts
         .iter()
         .map(|contact| Ray {
@@ -707,17 +672,21 @@ fn contact_scars(
     }
     let mut intervals = Vec::new();
     let mut probes = Vec::new();
+    let merge_bound = intersection_merge_bound(mesh, contacts);
     for (index, (contact, hits)) in contacts.iter().zip(intersections).enumerate() {
         let member_length = length(sub(contact.other, contact.anchor));
         let mut unique = Vec::new();
         for hit in hits {
-            if hit.distance <= member_length
-                && hit.distance > 0.0
-                && unique
-                    .last()
-                    .is_none_or(|last: &crate::RayHit| !ray_hit_equal(last.distance, hit.distance))
+            if hit.distance <= member_length + merge_bound
+                && hit.distance >= -merge_bound
+                && unique.last().is_none_or(|last: &crate::RayHit| {
+                    !ray_hit_equal(last.distance, hit.distance, merge_bound)
+                })
             {
-                unique.push(hit);
+                unique.push(crate::RayHit {
+                    distance: hit.distance.clamp(0.0, member_length),
+                    triangle_index: hit.triangle_index,
+                });
             }
         }
         let mut start = 0.0;
@@ -725,7 +694,7 @@ fn contact_scars(
             distance: member_length,
             triangle_index: usize::MAX,
         })) {
-            if event.distance > start && !ray_hit_equal(event.distance, start) {
+            if event.distance > start && !ray_hit_equal(event.distance, start, merge_bound) {
                 let distance = (start + event.distance) * 0.5;
                 probes.push(add(
                     contact.anchor,
@@ -743,6 +712,7 @@ fn contact_scars(
         }
     }
     let probe_inside = contains_points(mesh, &probes)?;
+    let probe_closest = closest_points(mesh, &probes)?;
     let mut scars = Vec::with_capacity(contacts.len());
     for (index, contact) in contacts.iter().enumerate() {
         let member_axis = sub(contact.other, contact.anchor);
@@ -753,35 +723,45 @@ fn contact_scars(
         let selected = intervals
             .iter()
             .zip(&probe_inside)
-            .find_map(|(interval, inside)| {
-                (*inside && interval.contact == index && interval.start <= settings.tol_mm)
-                    .then_some(*interval)
+            .zip(&probe_closest)
+            .find_map(|((interval, inside), closest)| {
+                if interval.contact != index
+                    || !anchored_entry_is_eligible(interval.start, settings.tol_mm)
+                {
+                    return None;
+                }
+                if closest.squared_distance <= merge_bound * merge_bound {
+                    return Some(Err(ScarMetricError::BoundaryAmbiguity {
+                        source_index,
+                        contact: index,
+                        distance_mm: (interval.start + interval.end) * 0.5,
+                    }));
+                }
+                (*inside).then_some(Ok(*interval))
             });
-        let (interval_length, exit_s, exit_triangle) = selected
-            .and_then(|interval| {
-                interval
-                    .exit_triangle
-                    .map(|triangle| (interval.end - interval.start, interval.end, triangle))
-            })
-            .unwrap_or((0.0, 0.0, closest[index].triangle_index));
-        let fraction = if member_length == 0.0 {
-            0.0
-        } else {
-            exit_s / member_length
-        };
-        let radius = contact.radius_at_anchor
-            + (contact.radius_at_other - contact.radius_at_anchor) * fraction;
-        let shaft = if interval_length <= settings.tol_mm {
-            0.0
-        } else {
-            let normal = face_normal(source_index, mesh, exit_triangle)?;
-            let cosine = dot(unit(member_axis), normal).abs();
-            (PI * radius * radius / cosine.max(settings.eps_cos))
-                .min(2.0 * radius * interval_length)
-        };
+        let selected = selected.transpose()?;
+        let (interval_length, exit_triangle) =
+            selected.map_or((0.0, closest[index].triangle_index), |interval| {
+                (
+                    interval.end - interval.start,
+                    interval
+                        .exit_triangle
+                        .unwrap_or(closest[contacts.len() + index].triangle_index),
+                )
+            });
+        let normal = face_normal(source_index, mesh, exit_triangle)?;
+        let cosine = dot(unit(member_axis), normal).abs();
         let d = closest[index].squared_distance.sqrt();
-        let ball = PI * (contact.ball_radius * contact.ball_radius - d * d).max(0.0);
-        let area = shaft + ball;
+        let area = contact_patch_area(
+            member_length,
+            interval_length,
+            contact.radius_at_anchor,
+            contact.radius_at_other,
+            contact.ball_radius,
+            d,
+            cosine,
+            settings,
+        );
         if !area.is_finite() {
             return Err(ScarMetricError::NonFinite {
                 source_index,
@@ -796,6 +776,36 @@ fn contact_scars(
         scars.push(Scar { area, reference });
     }
     Ok(scars)
+}
+
+fn anchored_entry_is_eligible(entry: f64, tolerance: f64) -> bool {
+    entry.is_finite() && tolerance.is_finite() && entry >= 0.0 && entry <= tolerance
+}
+
+#[allow(clippy::too_many_arguments)]
+fn contact_patch_area(
+    member_length: f64,
+    anchored_length: f64,
+    radius_at_anchor: f64,
+    radius_at_other: f64,
+    ball_radius: f64,
+    ball_distance: f64,
+    cosine: f64,
+    settings: Settings,
+) -> f64 {
+    let fraction = if member_length > 0.0 {
+        (anchored_length / member_length).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let radius = radius_at_anchor + (radius_at_other - radius_at_anchor) * fraction;
+    let shaft = if anchored_length <= settings.tol_mm {
+        0.0
+    } else {
+        (PI * radius * radius / cosine.max(settings.eps_cos)).min(2.0 * radius * anchored_length)
+    };
+    let ball = PI * (ball_radius * ball_radius - ball_distance * ball_distance).max(0.0);
+    shaft + ball
 }
 
 #[derive(Clone, Copy)]
@@ -1136,123 +1146,246 @@ fn canonical_key(value: Vec3) -> (u64, u64, u64) {
     }
     (bit(value[0]), bit(value[1]), bit(value[2]))
 }
-/// The exact real-value interval that could have rounded to a stored finite
-/// f32 under IEEE round-to-nearest.  Record fields are f32 on disk, so contact
-/// reconstruction compares these intervals rather than attaching an arbitrary
-/// epsilon to f64 values after decoding.
+/// Exact real preimage of one finite binary32 value under IEEE-754
+/// round-to-nearest, ties-to-even.  Endpoint closure matters: a midpoint tie
+/// belongs to the adjacent value whose significand is even, never both.
 #[derive(Clone, Copy, Debug)]
-struct F32Envelope {
+struct RealInterval {
     lo: f64,
     hi: f64,
+    lo_closed: bool,
+    hi_closed: bool,
 }
 
-impl F32Envelope {
-    fn stored(value: f64) -> Self {
-        let value = value as f32;
-        debug_assert!(value.is_finite());
-        if value == 0.0 {
-            let edge = (f32::from_bits(1) as f64) * 0.5;
-            return Self {
-                lo: -edge,
-                hi: edge,
-            };
+impl RealInterval {
+    fn stored(value: f64) -> Option<Self> {
+        let stored = value as f32;
+        if !stored.is_finite() || f64::from(stored).to_bits() != value.to_bits() {
+            return None;
         }
-        let bits = value.to_bits();
-        let previous = if value.is_sign_positive() {
-            f32::from_bits(bits - 1)
-        } else {
-            f32::from_bits(bits + 1)
-        };
-        let next = if value.is_sign_positive() {
-            f32::from_bits(bits + 1)
-        } else {
-            f32::from_bits(bits - 1)
-        };
-        let lo = (previous as f64 + value as f64) * 0.5;
-        let hi = (value as f64 + next as f64) * 0.5;
+        let bits = stored.to_bits();
+        let half_min_subnormal = f64::from(f32::from_bits(1)) * 0.5;
+        if bits == 0 {
+            return Some(Self {
+                lo: 0.0,
+                hi: half_min_subnormal,
+                lo_closed: true,
+                hi_closed: true,
+            });
+        }
+        if bits == 0x8000_0000 {
+            return Some(Self {
+                lo: -half_min_subnormal,
+                hi: -0.0,
+                lo_closed: true,
+                hi_closed: true,
+            });
+        }
+        if bits == 0x7f7f_ffff {
+            let previous = f32::from_bits(bits - 1);
+            return Some(Self {
+                lo: midpoint_exact(f64::from(previous), value),
+                hi: value + 2.0_f64.powi(103),
+                lo_closed: false,
+                hi_closed: false,
+            });
+        }
+        if bits == 0xff7f_ffff {
+            let next = f32::from_bits(bits - 1);
+            return Some(Self {
+                lo: value - 2.0_f64.powi(103),
+                hi: midpoint_exact(value, f64::from(next)),
+                lo_closed: false,
+                hi_closed: false,
+            });
+        }
+        let previous = next_down_f32(stored)?;
+        let next = next_up_f32(stored)?;
+        let even = bits & 1 == 0;
+        Some(Self {
+            lo: midpoint_exact(f64::from(previous), value),
+            hi: midpoint_exact(value, f64::from(next)),
+            lo_closed: even,
+            hi_closed: even,
+        })
+    }
+
+    fn add(self, other: Self) -> Self {
         Self {
-            lo: lo.min(hi),
-            hi: lo.max(hi),
+            lo: self.lo + other.lo,
+            hi: self.hi + other.hi,
+            lo_closed: self.lo_closed && other.lo_closed,
+            hi_closed: self.hi_closed && other.hi_closed,
+        }
+    }
+
+    fn sub(self, other: Self) -> Self {
+        Self {
+            lo: self.lo - other.hi,
+            hi: self.hi - other.lo,
+            lo_closed: self.lo_closed && other.hi_closed,
+            hi_closed: self.hi_closed && other.lo_closed,
         }
     }
 
     fn scaled(self, factor: f64) -> Self {
+        debug_assert!(factor.is_finite());
         let a = self.lo * factor;
         let b = self.hi * factor;
-        Self {
-            lo: a.min(b),
-            hi: a.max(b),
+        if factor >= 0.0 {
+            Self {
+                lo: a,
+                hi: b,
+                lo_closed: self.lo_closed,
+                hi_closed: self.hi_closed,
+            }
+        } else {
+            Self {
+                lo: b,
+                hi: a,
+                lo_closed: self.hi_closed,
+                hi_closed: self.lo_closed,
+            }
         }
     }
 
     fn overlaps(self, other: Self) -> bool {
-        self.lo <= other.hi && other.lo <= self.hi
+        if self.hi < other.lo || other.hi < self.lo {
+            return false;
+        }
+        if self.hi == other.lo {
+            return self.hi_closed && other.lo_closed;
+        }
+        if other.hi == self.lo {
+            return other.hi_closed && self.lo_closed;
+        }
+        true
     }
+
+    fn contains_zero(self) -> bool {
+        (self.lo < 0.0 && self.hi > 0.0)
+            || (self.lo == 0.0 && self.lo_closed)
+            || (self.hi == 0.0 && self.hi_closed)
+    }
+}
+
+fn midpoint_exact(left: f64, right: f64) -> f64 {
+    left * 0.5 + right * 0.5
+}
+
+fn next_down_f32(value: f32) -> Option<f32> {
+    let bits = value.to_bits();
+    let next = if value > 0.0 {
+        bits.checked_sub(1)?
+    } else {
+        bits.checked_add(1)?
+    };
+    let value = f32::from_bits(next);
+    value.is_finite().then_some(value)
+}
+
+fn next_up_f32(value: f32) -> Option<f32> {
+    let bits = value.to_bits();
+    let next = if value >= 0.0 {
+        bits.checked_add(1)?
+    } else {
+        bits.checked_sub(1)?
+    };
+    let value = f32::from_bits(next);
+    value.is_finite().then_some(value)
 }
 
 fn stored_equal(left: f64, right: f64) -> bool {
-    left.is_finite()
-        && right.is_finite()
-        && F32Envelope::stored(left).overlaps(F32Envelope::stored(right))
+    RealInterval::stored(left)
+        .zip(RealInterval::stored(right))
+        .is_some_and(|(left, right)| left.overlaps(right))
 }
 
 fn stored_scaled_equal(left: f64, factor: f64, right: f64) -> bool {
-    left.is_finite()
-        && right.is_finite()
-        && F32Envelope::stored(left).overlaps(F32Envelope::stored(right).scaled(factor))
+    factor.is_finite()
+        && RealInterval::stored(left)
+            .zip(RealInterval::stored(right))
+            .is_some_and(|(left, right)| left.overlaps(right.scaled(factor)))
 }
 
 fn segment_length_matches_radius(start: Vec3, end: Vec3, radius: f64, factor: f64) -> bool {
-    // Each decoded coordinate can differ from its real pre-rounding value by
-    // half an f32 ULP.  The Euclidean norm is 1-Lipschitz, so the norm error is
-    // bounded by the L2 norm of the three component-difference envelopes.
-    let delta = sub(start, end);
-    let error = start
-        .into_iter()
-        .zip(end)
-        .map(|(a, b)| {
-            let ea = F32Envelope::stored(a);
-            let eb = F32Envelope::stored(b);
-            let exact = a - b;
-            (ea.lo - eb.hi - exact)
-                .abs()
-                .max((ea.hi - eb.lo - exact).abs())
+    vector_intervals(start, end)
+        .zip(RealInterval::stored(radius))
+        .is_some_and(|(components, radius)| {
+            norm_interval(components).overlaps(radius.scaled(factor))
         })
-        .map(|bound| bound * bound)
-        .sum::<f64>()
-        .sqrt();
-    let length = length(delta);
-    let observed = F32Envelope {
-        lo: (length - error).max(0.0),
-        hi: length + error,
-    };
-    observed.overlaps(F32Envelope::stored(radius).scaled(factor))
 }
 
 fn point_radius_matches_sphere(vertex: Vec3, start: Vec3, end: Vec3, radius: f64) -> bool {
-    let centre = midpoint(start, end);
-    let coordinate_error = vertex
-        .into_iter()
-        .zip(start)
-        .zip(end)
-        .map(|((v, a), b)| {
-            let ev = F32Envelope::stored(v);
-            let ea = F32Envelope::stored(a);
-            let eb = F32Envelope::stored(b);
-            let exact = v - (a + b) * 0.5;
-            let lo = ev.lo - (ea.hi + eb.hi) * 0.5;
-            let hi = ev.hi - (ea.lo + eb.lo) * 0.5;
-            (lo - exact).abs().max((hi - exact).abs())
-        })
-        .map(|bound| bound * bound)
-        .sum::<f64>()
-        .sqrt();
-    let distance = distance(vertex, centre);
-    F32Envelope {
-        lo: (distance - coordinate_error).max(0.0),
-        hi: distance + coordinate_error,
+    let component = |axis| {
+        Some(
+            RealInterval::stored(vertex[axis])?.sub(
+                RealInterval::stored(start[axis])?
+                    .add(RealInterval::stored(end[axis])?)
+                    .scaled(0.5),
+            ),
+        )
+    };
+    let components = component(0)
+        .zip(component(1))
+        .zip(component(2))
+        .map(|((x, y), z)| [x, y, z]);
+    components
+        .zip(RealInterval::stored(radius))
+        .is_some_and(|(components, radius)| norm_interval(components).overlaps(radius))
+}
+
+fn vector_intervals(start: Vec3, end: Vec3) -> Option<[RealInterval; 3]> {
+    Some([
+        RealInterval::stored(end[0])?.sub(RealInterval::stored(start[0])?),
+        RealInterval::stored(end[1])?.sub(RealInterval::stored(start[1])?),
+        RealInterval::stored(end[2])?.sub(RealInterval::stored(start[2])?),
+    ])
+}
+
+fn norm_interval(components: [RealInterval; 3]) -> RealInterval {
+    let mut minimum_squared = 0.0;
+    let mut maximum_squared = 0.0;
+    for component in components {
+        let minimum = if component.contains_zero() {
+            0.0
+        } else {
+            component.lo.abs().min(component.hi.abs())
+        };
+        let maximum = component.lo.abs().max(component.hi.abs());
+        minimum_squared += minimum * minimum;
+        maximum_squared += maximum * maximum;
     }
-    .overlaps(F32Envelope::stored(radius))
+    RealInterval {
+        lo: minimum_squared.sqrt(),
+        hi: maximum_squared.sqrt(),
+        lo_closed: true,
+        hi_closed: true,
+    }
+}
+
+fn endpoint_matches_midpoint(endpoint: Vec3, start: Vec3, end: Vec3) -> bool {
+    (0..3).all(|axis| {
+        RealInterval::stored(endpoint[axis])
+            .zip(RealInterval::stored(start[axis]))
+            .zip(RealInterval::stored(end[axis]))
+            .is_some_and(|((endpoint, start), end)| endpoint.overlaps(start.add(end).scaled(0.5)))
+    })
+}
+
+fn sphere_mesh_matches(support: &DiskSupport, radius: f64) -> bool {
+    support
+        .mesh()
+        .vertices()
+        .iter()
+        .all(|vertex| point_radius_matches_sphere(*vertex, support.start(), support.end(), radius))
+}
+
+fn segment_nonzero(start: Vec3, end: Vec3) -> bool {
+    vector_intervals(start, end).is_some_and(|components| {
+        let interval = norm_interval(components);
+        interval.hi > 0.0
+    })
 }
 
 fn parallel_stored_segments(
@@ -1261,69 +1394,89 @@ fn parallel_stored_segments(
     right_start: Vec3,
     right_end: Vec3,
 ) -> bool {
-    let left = sub(left_end, left_start);
-    let right = sub(right_end, right_start);
-    if !positive(length(left)) || !positive(length(right)) {
+    let Some(left) = vector_intervals(left_start, left_end) else {
+        return false;
+    };
+    let Some(right) = vector_intervals(right_start, right_end) else {
+        return false;
+    };
+    if norm_interval(left).hi == 0.0 || norm_interval(right).hi == 0.0 {
         return false;
     }
-    // Cross-product interval arithmetic: 0 must remain possible in every
-    // component after the stored endpoint roundoff is propagated.  This accepts
-    // either orientation; reversed sphere poles are a valid writer encoding.
-    let component_error = |start: Vec3, end: Vec3, component: usize| {
-        let a = F32Envelope::stored(start[component]);
-        let b = F32Envelope::stored(end[component]);
-        (a.lo - b.hi - (start[component] - end[component]))
-            .abs()
-            .max((a.hi - b.lo - (start[component] - end[component])).abs())
-    };
-    let le = [
-        component_error(left_end, left_start, 0),
-        component_error(left_end, left_start, 1),
-        component_error(left_end, left_start, 2),
-    ];
-    let re = [
-        component_error(right_end, right_start, 0),
-        component_error(right_end, right_start, 1),
-        component_error(right_end, right_start, 2),
-    ];
-    let cross_value = cross(left, right);
-    let cross_error = [
-        left[1].abs() * re[2]
-            + right[2].abs() * le[1]
-            + le[1] * re[2]
-            + left[2].abs() * re[1]
-            + right[1].abs() * le[2]
-            + le[2] * re[1],
-        left[2].abs() * re[0]
-            + right[0].abs() * le[2]
-            + le[2] * re[0]
-            + left[0].abs() * re[2]
-            + right[2].abs() * le[0]
-            + le[0] * re[2],
-        left[0].abs() * re[1]
-            + right[1].abs() * le[0]
-            + le[0] * re[1]
-            + left[1].abs() * re[0]
-            + right[0].abs() * le[1],
-    ];
-    cross_value
-        .into_iter()
-        .zip(cross_error)
-        .all(|(value, error)| value.abs() <= error)
+    // Conservative post-match validation for the nonlinear axis predicate.
+    // The original endpoint intervals flow through each product; no derived
+    // vector is reinterpreted as an independently stored binary32 value.
+    [
+        interval_product(left[1], right[2]).sub(interval_product(left[2], right[1])),
+        interval_product(left[2], right[0]).sub(interval_product(left[0], right[2])),
+        interval_product(left[0], right[1]).sub(interval_product(left[1], right[0])),
+    ]
+    .into_iter()
+    .all(RealInterval::contains_zero)
 }
 
-fn ray_hit_equal(left: f64, right: f64) -> bool {
-    // These are f64 calculations over the same triangle soup, not f32 fields.
-    // The bound only coalesces duplicate face/edge hits from arithmetic noise.
-    (left - right).abs() <= 128.0 * f64::EPSILON * left.abs().max(right.abs()).max(1.0)
+fn interval_product(left: RealInterval, right: RealInterval) -> RealInterval {
+    let values = [
+        (left.lo * right.lo, left.lo_closed && right.lo_closed),
+        (left.lo * right.hi, left.lo_closed && right.hi_closed),
+        (left.hi * right.lo, left.hi_closed && right.lo_closed),
+        (left.hi * right.hi, left.hi_closed && right.hi_closed),
+    ];
+    let lo = values
+        .iter()
+        .map(|value| value.0)
+        .fold(f64::INFINITY, f64::min);
+    let hi = values
+        .iter()
+        .map(|value| value.0)
+        .fold(f64::NEG_INFINITY, f64::max);
+    RealInterval {
+        lo,
+        hi,
+        lo_closed: values.iter().any(|value| value.0 == lo && value.1),
+        hi_closed: values.iter().any(|value| value.0 == hi && value.1),
+    }
 }
-fn near(left: Vec3, right: Vec3) -> bool {
-    left.into_iter()
-        .zip(right)
-        .all(|(left, right)| stored_equal(left, right))
+
+fn intersection_merge_bound(mesh: &Mesh, contacts: &[Contact]) -> f64 {
+    let coordinate_scale = mesh
+        .vertices()
+        .iter()
+        .flat_map(|vertex| vertex.iter())
+        .chain(
+            contacts
+                .iter()
+                .flat_map(|contact| contact.anchor.iter().chain(contact.other.iter())),
+        )
+        .map(|value| value.abs())
+        .fold(0.0_f64, f64::max);
+    let length_scale = contacts
+        .iter()
+        .map(|contact| length(sub(contact.other, contact.anchor)))
+        .fold(0.0_f64, f64::max);
+    let scale = coordinate_scale.max(length_scale);
+    // `geometry::ray_triangle_distance` normalizes the ray and triangle, then
+    // evaluates Moller-Trumbore.  Counting every add/subtract/multiply/divide
+    // along the distance path gives at most 48 rounded binary64 operations.
+    // Higham's gamma_n bound therefore supplies a scale-derived merge radius;
+    // it is an error analysis of this operation graph, not a tuned epsilon.
+    let operations = 48.0;
+    let gamma = operations * f64::EPSILON / (1.0 - operations * f64::EPSILON);
+    gamma * scale
+}
+
+fn ray_hit_equal(left: f64, right: f64, bound: f64) -> bool {
+    (left - right).abs() <= bound
 }
 fn positive(value: f64) -> bool {
     value.is_finite() && value > 0.0
+}
+fn positive_stored_radius(value: f64) -> bool {
+    let stored = value as f32;
+    stored.is_finite()
+        && stored.is_normal()
+        && stored.is_sign_positive()
+        && f64::from(stored).to_bits() == value.to_bits()
 }
 fn midpoint(left: Vec3, right: Vec3) -> Vec3 {
     scale(add(left, right), 0.5)
@@ -1406,7 +1559,11 @@ impl LegacyMt19937 {
 
 #[cfg(test)]
 mod tests {
-    use super::{integer_linspace, linear_percentile, stored_equal, LegacyMt19937};
+    use super::{
+        anchored_entry_is_eligible, contact_patch_area, endpoint_matches_midpoint,
+        integer_linspace, linear_percentile, parallel_stored_segments, positive_stored_radius,
+        stored_equal, stored_scaled_equal, LegacyMt19937, RealInterval, Settings,
+    };
     #[test]
     fn legacy_seed_zero_matches_numpy_randomstate_prefix() {
         let mut rng = LegacyMt19937::seeded(0);
@@ -1420,13 +1577,149 @@ mod tests {
     }
 
     #[test]
-    fn stored_f32_relations_accept_only_touching_rounding_envelopes() {
+    fn binary32_preimages_assign_midpoint_ties_to_even_only() {
         let one = 1.0_f32 as f64;
         let next = f32::from_bits(1.0_f32.to_bits() + 1) as f64;
         let two_away = f32::from_bits(1.0_f32.to_bits() + 2) as f64;
-        // Adjacent f32 bins share their rounding midpoint; two intervening
-        // bins cannot represent one original real coordinate.
-        assert!(stored_equal(one, next));
+        let one_interval = RealInterval::stored(one).unwrap();
+        let next_interval = RealInterval::stored(next).unwrap();
+        assert!(one_interval.hi_closed);
+        assert!(!next_interval.lo_closed);
+        assert_eq!(one_interval.hi, next_interval.lo);
+        assert!(!stored_equal(one, next));
         assert!(!stored_equal(one, two_away));
+
+        let negative_even = -(two_away as f32);
+        let negative_odd = -f32::from_bits(1.0_f32.to_bits() + 1);
+        let even_interval = RealInterval::stored(f64::from(negative_even)).unwrap();
+        let odd_interval = RealInterval::stored(f64::from(negative_odd)).unwrap();
+        assert!(even_interval.hi_closed);
+        assert!(!odd_interval.lo_closed);
+        assert_eq!(even_interval.hi, odd_interval.lo);
+    }
+
+    #[test]
+    fn binary32_preimages_preserve_signed_zero_and_reject_non_stored_values() {
+        let positive_zero = RealInterval::stored(0.0).unwrap();
+        let negative_zero = RealInterval::stored(-0.0).unwrap();
+        assert_eq!(positive_zero.lo.to_bits(), 0.0_f64.to_bits());
+        assert_eq!(negative_zero.hi.to_bits(), (-0.0_f64).to_bits());
+        assert!(stored_equal(0.0, -0.0));
+        assert!(RealInterval::stored(f64::from(f32::from_bits(1))).is_some());
+        assert!(RealInterval::stored(f64::INFINITY).is_none());
+        assert!(RealInterval::stored(1.0 + f64::EPSILON).is_none());
+        assert!(!positive_stored_radius(0.0));
+        assert!(!positive_stored_radius(f64::from(f32::from_bits(1))));
+    }
+
+    #[test]
+    fn factor_and_midpoint_constraints_propagate_stored_endpoint_intervals() {
+        assert!(stored_scaled_equal(0.3_f32.into(), 1.5, 0.2_f32.into()));
+        assert!(stored_scaled_equal(0.35_f32.into(), 1.4, 0.25_f32.into()));
+        let first_outside = (1..=8)
+            .find(|offset| {
+                !stored_scaled_equal(
+                    f64::from(f32::from_bits(0.35_f32.to_bits() + offset)),
+                    1.4,
+                    f64::from(0.25_f32),
+                )
+            })
+            .expect("a nearby binary32 lies beyond the exact factor interval");
+        assert!(stored_scaled_equal(
+            f64::from(f32::from_bits(0.35_f32.to_bits() + first_outside - 1)),
+            1.4,
+            f64::from(0.25_f32),
+        ));
+        assert!(endpoint_matches_midpoint(
+            [f64::from(0.3_f32), f64::from(-1.5_f32), f64::from(1.4_f32),],
+            [f64::from(0.1_f32), f64::from(-2.0_f32), f64::from(1.0_f32),],
+            [f64::from(0.5_f32), f64::from(-1.0_f32), f64::from(1.8_f32),],
+        ));
+
+        let exact = parallel_stored_segments(
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0],
+        );
+        assert!(exact, "reversed poles describe the same axis");
+        let first_outside = (1..=16)
+            .find(|offset| {
+                let x = f64::from(f32::from_bits(*offset));
+                !parallel_stored_segments(
+                    [0.0, 0.0, 0.0],
+                    [0.0, 0.0, 1.0],
+                    [0.0, 0.0, 0.0],
+                    [x, 0.0, 1.0],
+                )
+            })
+            .expect("an axis perturbation eventually leaves the endpoint boxes");
+        if first_outside > 1 {
+            let x = f64::from(f32::from_bits(first_outside - 1));
+            assert!(parallel_stored_segments(
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 0.0],
+                [x, 0.0, 1.0],
+            ));
+        }
+    }
+
+    #[test]
+    fn closed_form_patch_uses_anchored_length_and_never_applies_an_area_cap() {
+        let settings = Settings {
+            curvature_weight: 0.0,
+            thinness_weight: 0.0,
+            thin_feature_mm: 1.0,
+            eps_cos: 0.1,
+            tol_mm: 0.05,
+            stub_factor: 1.5,
+            foot_factor: 1.4,
+        };
+        assert!(anchored_entry_is_eligible(0.05, 0.05));
+        assert!(!anchored_entry_is_eligible(
+            f64::from_bits(0.05_f64.to_bits() + 1),
+            0.05,
+        ));
+        // T/L=.25 gives r_x=.25, independently of the absolute exit position.
+        let expected_shaft = (std::f64::consts::PI * 0.25_f64.powi(2) / 0.5).min(2.0 * 0.25 * 0.5);
+        let expected_ball = std::f64::consts::PI * (0.3_f64.powi(2) - 0.1_f64.powi(2));
+        let area = contact_patch_area(2.0, 0.5, 0.2, 0.4, 0.3, 0.1, 0.5, settings);
+        assert_eq!(area, expected_shaft + expected_ball);
+        assert!(
+            area > 0.2,
+            "A_patch > a hypothetical A_max remains unclamped"
+        );
+
+        let at_tol = contact_patch_area(2.0, 0.05, 0.2, 0.4, 0.3, 0.1, 0.5, settings);
+        assert_eq!(at_tol, expected_ball);
+        let above_tol = contact_patch_area(
+            2.0,
+            f64::from_bits(0.05_f64.to_bits() + 1),
+            0.2,
+            0.4,
+            0.3,
+            0.1,
+            0.0,
+            settings,
+        );
+        assert!(above_tol > expected_ball);
+
+        let perpendicular = contact_patch_area(1.0, 1.0, 0.2, 0.2, 0.0, 0.0, 1.0, settings);
+        assert_eq!(perpendicular, std::f64::consts::PI * 0.2_f64.powi(2));
+        let grazing = contact_patch_area(1.0, 1.0, 0.2, 0.2, 0.0, 0.0, 0.0, settings);
+        assert_eq!(grazing, 2.0 * 0.2 * 1.0);
+        let ellipse_chord_boundary = std::f64::consts::PI * 0.2 / (2.0 * 1.0);
+        let boundary = contact_patch_area(
+            1.0,
+            1.0,
+            0.2,
+            0.2,
+            0.0,
+            0.0,
+            ellipse_chord_boundary,
+            settings,
+        );
+        assert_eq!(boundary, 2.0 * 0.2 * 1.0);
     }
 }
