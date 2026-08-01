@@ -29,7 +29,7 @@ pub use score::{
     compare_artifacts, score_artifacts, score_saturn_artifacts, ArtifactMetricInputs,
     ComparisonError, ComparisonMilestone, ComparisonPolicy, ComparisonReport, ComparisonScope,
     MetricComparison, MetricOutcome, ProducerComparison, ProducerOutcome, ScoreError,
-    ScoredArtifact, ScoredModel, SignedWaiver, M1_METRIC_ORDER,
+    ScoredArtifact, ScoredModel, ValidatedWaivers, M1_METRIC_ORDER,
 };
 pub use supports::{
     support_metric_rows, ContactArmInput, SupportMetricError, SupportMetricInput, SupportMetricRow,
