@@ -7,8 +7,16 @@ use std::collections::BTreeMap;
 use thiserror::Error;
 
 mod evidence;
+mod placeholders;
 
 pub use evidence::{M0EvidenceConstants, M0EvidenceConstantsError};
+pub use placeholders::{
+    AnchorCandidateCap, BeamWidth, BridgeSagLimit, CcoSplitSlidePolicy, DecimationAdaptationPolicy,
+    DecimationRatioSearchPolicy, DecimationSamplingPolicy, DrainDirection, DrainDirections,
+    FixBraceIterationCap, HollowExtraDrainPolicy, M0PlaceholderConstants,
+    M0PlaceholderConstantsError, NonNegativeFinite, PlaceholderValueError, PlacementXyMm,
+    PositiveFinite, SeedSpacingFactor, SphereTessellationPolicy, TrialSetting, UnitFraction,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum RegistryError {

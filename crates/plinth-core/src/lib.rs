@@ -25,9 +25,14 @@ pub use chord::{
     ChordParityError, ChordParityReport, ChordSource, MicronGranularity, MicronGranularityError,
 };
 pub use constants::{
-    ConstantDescriptor, ConstantValue, ConstantValueView, ConstantsRegistry, M0EvidenceConstants,
-    M0EvidenceConstantsError, RegistryError, RegistryProvenance, RegistryProvenanceClass,
-    RegistryProvenanceView, ToConstantValue,
+    AnchorCandidateCap, BeamWidth, BridgeSagLimit, CcoSplitSlidePolicy, ConstantDescriptor,
+    ConstantValue, ConstantValueView, ConstantsRegistry, DecimationAdaptationPolicy,
+    DecimationRatioSearchPolicy, DecimationSamplingPolicy, DrainDirection, DrainDirections,
+    FixBraceIterationCap, HollowExtraDrainPolicy, M0EvidenceConstants, M0EvidenceConstantsError,
+    M0PlaceholderConstants, M0PlaceholderConstantsError, NonNegativeFinite, PlaceholderValueError,
+    PlacementXyMm, PositiveFinite, RegistryError, RegistryProvenance, RegistryProvenanceClass,
+    RegistryProvenanceView, SeedSpacingFactor, SphereTessellationPolicy, ToConstantValue,
+    TrialSetting, UnitFraction,
 };
 pub use cost::{
     CostError, CostVector, Fidelity, OptimizationError, OptimizationSummary, OrientationCost,
