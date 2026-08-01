@@ -112,6 +112,17 @@ pub enum ScarMetricError {
         source_index: usize,
         index: &'static str,
     },
+    #[error("model {source_index} diagnostic sample count must be positive, got {n_samples}")]
+    InvalidSampleCount {
+        source_index: usize,
+        n_samples: usize,
+    },
+    #[error("model {source_index} diagnostic point {point} coordinate {component} is not finite")]
+    InvalidDiagnosticPoint {
+        source_index: usize,
+        point: usize,
+        component: usize,
+    },
     #[error("M0 constants registry is unavailable: {detail}")]
     Constants { detail: String },
     #[error(transparent)]
@@ -204,7 +215,7 @@ pub fn scar_metric_rows(
             let weights = if scars.is_empty() {
                 Vec::new()
             } else {
-                DelicacyField::build(source_index, model.mesh(), settings, 0)?.at_points(
+                DelicacyField::build(source_index, model.mesh(), settings, 0, 20_000)?.at_points(
                     source_index,
                     &scars.iter().map(|scar| scar.reference).collect::<Vec<_>>(),
                 )?
@@ -851,18 +862,24 @@ pub struct DelicacyPointQuery {
 /// metric path deliberately passes zero, while diagnostics can demonstrate a
 /// different frozen stream without relying on process-global RNG state.
 pub struct DelicacyField {
+    exterior_mask: Vec<bool>,
+    selected_faces: Vec<usize>,
     samples: Vec<DelicacySample>,
+    curvature_scores: Vec<f64>,
+    thinness_scores: Vec<f64>,
     weights: Vec<f64>,
     sample_index: PointKdTree,
     stats: DelicacyIndexStats,
 }
 
 impl DelicacyField {
-    /// Builds the full independent field with an explicit sampling seed.
+    /// Builds the full independent field with an explicit sampling seed and
+    /// sample-count ceiling.
     pub fn build_diagnostic(
         source_index: usize,
         mesh: &Mesh,
         seed: u32,
+        n_samples: usize,
     ) -> Result<Self, ScarMetricError> {
         let constants = m0_constants().map_err(|error| ScarMetricError::Constants {
             detail: error.to_string(),
@@ -877,7 +894,7 @@ impl DelicacyField {
             stub_factor: values.ball_factor_stub().diagnostic().get(),
             foot_factor: values.ball_factor_foot().diagnostic().get(),
         };
-        Self::build(source_index, mesh, settings, seed)
+        Self::build(source_index, mesh, settings, seed, n_samples)
     }
 
     fn build(
@@ -885,11 +902,19 @@ impl DelicacyField {
         mesh: &Mesh,
         settings: Settings,
         seed: u32,
+        n_samples: usize,
     ) -> Result<Self, ScarMetricError> {
+        if n_samples == 0 {
+            return Err(ScarMetricError::InvalidSampleCount {
+                source_index,
+                n_samples,
+            });
+        }
         let mut stats = DelicacyIndexStats::default();
         let triangles = TriangleBvh::build(mesh);
-        let selected_faces = exterior_sample_faces(source_index, mesh, &triangles, &mut stats)?;
-        let samples = sample_faces(source_index, mesh, &selected_faces, seed)?;
+        let exterior = exterior_selection(source_index, mesh, &triangles, &mut stats)?;
+        let count = n_samples.min(mesh.triangles().len().max(2_000));
+        let samples = sample_faces(source_index, mesh, &exterior.selected_faces, seed, count)?;
         let welded = welded_defects(source_index, mesh)?;
         let curvature = curvature_scores(
             source_index,
@@ -906,8 +931,8 @@ impl DelicacyField {
             &mut stats,
         )?;
         let mut weights = curvature
-            .into_iter()
-            .zip(thinness)
+            .iter()
+            .zip(&thinness)
             .map(|(curvature, thinness)| {
                 settings.curvature_weight * curvature + settings.thinness_weight * thinness
             })
@@ -915,7 +940,11 @@ impl DelicacyField {
         normalize_weights(&mut weights);
         let sample_index = PointKdTree::build(samples.iter().map(|sample| sample.point).collect());
         Ok(Self {
+            exterior_mask: exterior.mask,
+            selected_faces: exterior.selected_faces,
             samples,
+            curvature_scores: curvature,
+            thinness_scores: thinness,
             weights,
             sample_index,
             stats,
@@ -925,6 +954,26 @@ impl DelicacyField {
     #[must_use]
     pub fn samples(&self) -> &[DelicacySample] {
         &self.samples
+    }
+
+    #[must_use]
+    pub fn exterior_mask(&self) -> &[bool] {
+        &self.exterior_mask
+    }
+
+    #[must_use]
+    pub fn selected_face_indices(&self) -> &[usize] {
+        &self.selected_faces
+    }
+
+    #[must_use]
+    pub fn curvature_scores(&self) -> &[f64] {
+        &self.curvature_scores
+    }
+
+    #[must_use]
+    pub fn thinness_scores(&self) -> &[f64] {
+        &self.thinness_scores
     }
 
     #[must_use]
@@ -944,7 +993,13 @@ impl DelicacyField {
         points: &[Vec3],
     ) -> Result<DelicacyPointQuery, ScarMetricError> {
         for (point, value) in points.iter().enumerate() {
-            crate::validate_vec3(*value, crate::CoordinateKind::Point { point })?;
+            if let Some(component) = value.iter().position(|coordinate| !coordinate.is_finite()) {
+                return Err(ScarMetricError::InvalidDiagnosticPoint {
+                    source_index,
+                    point,
+                    component,
+                });
+            }
         }
         let mut stats = DelicacyIndexStats::default();
         let nearest = self
@@ -970,12 +1025,17 @@ impl DelicacyField {
     }
 }
 
-fn exterior_sample_faces(
+struct ExteriorSelection {
+    mask: Vec<bool>,
+    selected_faces: Vec<usize>,
+}
+
+fn exterior_selection(
     source_index: usize,
     mesh: &Mesh,
     triangles: &TriangleBvh,
     stats: &mut DelicacyIndexStats,
-) -> Result<Vec<usize>, ScarMetricError> {
+) -> Result<ExteriorSelection, ScarMetricError> {
     let face_count = mesh.triangles().len();
     let mut probes = Vec::with_capacity(face_count * 6);
     for face in 0..face_count {
@@ -991,9 +1051,9 @@ fn exterior_sample_faces(
             }
         }
     }
-    let inside = triangles.frozen_contains_batch(mesh, &probes, stats)?;
-    let exterior = (0..face_count)
-        .filter(|face| {
+    let inside = triangles.frozen_contains_batch(mesh, &probes, stats);
+    let mask = (0..face_count)
+        .map(|face| {
             let start = face * 6;
             inside[start..start + 6]
                 .iter()
@@ -1002,13 +1062,22 @@ fn exterior_sample_faces(
                 < 4
         })
         .collect::<Vec<_>>();
+    let exterior = mask
+        .iter()
+        .enumerate()
+        .filter_map(|(face, exterior)| exterior.then_some(face))
+        .collect::<Vec<_>>();
     // A shell has no meaningful exterior subset when every face has the same
     // frozen classification.  Preserve full-face sampling in either case.
-    if exterior.is_empty() || exterior.len() == face_count {
-        Ok((0..face_count).collect())
+    let selected_faces = if exterior.is_empty() || exterior.len() == face_count {
+        (0..face_count).collect()
     } else {
-        Ok(exterior)
-    }
+        exterior
+    };
+    Ok(ExteriorSelection {
+        mask,
+        selected_faces,
+    })
 }
 
 fn sample_faces(
@@ -1016,8 +1085,8 @@ fn sample_faces(
     mesh: &Mesh,
     faces: &[usize],
     seed: u32,
+    count: usize,
 ) -> Result<Vec<DelicacySample>, ScarMetricError> {
-    let count = mesh.triangles().len().clamp(2_000, 20_000);
     let mut areas = Vec::with_capacity(faces.len());
     let mut total = 0.0;
     for &face in faces {
@@ -1208,7 +1277,6 @@ fn welded_defects(source_index: usize, mesh: &Mesh) -> Result<WeldedVertices, Sc
     })
 }
 
-const SURFACE_NEAR_MM: f64 = 1.0e-9;
 const AXIS_BARYCENTRIC_EPSILON: f64 = 1.0e-9;
 const AXIS_DETERMINANT_EPSILON: f64 = 1.0e-14;
 const AXIS_CROSSING_CLUSTER_MM: f64 = 0.005;
@@ -1310,73 +1378,16 @@ impl TriangleBvh {
         mesh: &Mesh,
         points: &[Vec3],
         stats: &mut DelicacyIndexStats,
-    ) -> Result<Vec<bool>, ScarMetricError> {
-        let nearest = self.nearest_squared_batch(mesh, points, stats);
-        let mut inside = Vec::with_capacity(points.len());
-        for (point, nearest) in points.iter().zip(nearest) {
-            if nearest <= SURFACE_NEAR_MM * SURFACE_NEAR_MM {
-                inside.push(true);
-                continue;
-            }
-            let votes = (0..3)
-                .filter(|axis| self.axis_inside(mesh, *point, *axis, stats))
-                .count();
-            inside.push(votes >= 2);
-        }
-        Ok(inside)
-    }
-
-    fn nearest_squared_batch(
-        &self,
-        mesh: &Mesh,
-        points: &[Vec3],
-        stats: &mut DelicacyIndexStats,
-    ) -> Vec<f64> {
+    ) -> Vec<bool> {
         points
             .iter()
             .map(|point| {
-                let mut nearest = f64::INFINITY;
-                self.nearest_node(mesh, self.root, *point, &mut nearest, stats);
-                nearest
+                (0..3)
+                    .filter(|axis| self.axis_inside(mesh, *point, *axis, stats))
+                    .count()
+                    >= 2
             })
             .collect()
-    }
-
-    fn nearest_node(
-        &self,
-        mesh: &Mesh,
-        node: usize,
-        point: Vec3,
-        nearest: &mut f64,
-        stats: &mut DelicacyIndexStats,
-    ) {
-        stats.triangle_nodes_visited += 1;
-        let node = self.nodes[node];
-        if point_box_squared_distance(point, node.min, node.max) > *nearest {
-            return;
-        }
-        if let Some((left, right)) = node.children {
-            let left_distance =
-                point_box_squared_distance(point, self.nodes[left].min, self.nodes[left].max);
-            let right_distance =
-                point_box_squared_distance(point, self.nodes[right].min, self.nodes[right].max);
-            if left_distance <= right_distance {
-                self.nearest_node(mesh, left, point, nearest, stats);
-                self.nearest_node(mesh, right, point, nearest, stats);
-            } else {
-                self.nearest_node(mesh, right, point, nearest, stats);
-                self.nearest_node(mesh, left, point, nearest, stats);
-            }
-            return;
-        }
-        for &face in &self.order[node.start..node.end] {
-            stats.triangle_faces_tested += 1;
-            let (a, b, c) = mesh.triangle_points(face);
-            *nearest = (*nearest).min(distance_squared_between(
-                point,
-                closest_point_on_triangle(point, a, b, c),
-            ));
-        }
     }
 
     fn axis_inside(
@@ -1492,48 +1503,6 @@ fn axis_triangle_crossing(point: Vec3, axis: usize, a: Vec3, b: Vec3, c: Vec3) -
     }
     let crossing = a[axis] + alpha * ab[axis] + beta * ac[axis];
     (crossing > point[axis] + AXIS_BARYCENTRIC_EPSILON).then_some(crossing)
-}
-
-fn closest_point_on_triangle(point: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
-    // Ericson's region tests, duplicated privately so this indexed path does
-    // not call the deliberately brute-force public geometry batch API.
-    let ab = sub(b, a);
-    let ac = sub(c, a);
-    let ap = sub(point, a);
-    let d1 = dot(ab, ap);
-    let d2 = dot(ac, ap);
-    if d1 <= 0.0 && d2 <= 0.0 {
-        return a;
-    }
-    let bp = sub(point, b);
-    let d3 = dot(ab, bp);
-    let d4 = dot(ac, bp);
-    if d3 >= 0.0 && d4 <= d3 {
-        return b;
-    }
-    let vc = d1 * d4 - d3 * d2;
-    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
-        return add(a, scale(ab, d1 / (d1 - d3)));
-    }
-    let cp = sub(point, c);
-    let d5 = dot(ab, cp);
-    let d6 = dot(ac, cp);
-    if d6 >= 0.0 && d5 <= d6 {
-        return c;
-    }
-    let vb = d5 * d2 - d1 * d6;
-    if vb <= 0.0 && d2 <= 0.0 && d6 >= 0.0 {
-        return add(a, scale(ac, d2 / (d2 - d6)));
-    }
-    let va = d3 * d6 - d5 * d4;
-    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
-        return add(b, scale(sub(c, b), (d4 - d3) / ((d4 - d3) + (d5 - d6))));
-    }
-    let denominator = 1.0 / (va + vb + vc);
-    add(
-        a,
-        add(scale(ab, vb * denominator), scale(ac, vc * denominator)),
-    )
 }
 
 #[derive(Clone, Copy)]
@@ -2367,12 +2336,12 @@ impl LegacyMt19937 {
 #[cfg(test)]
 mod tests {
     use super::{
-        anchored_entry_is_eligible, axis_triangle_crossing, contact_patch_area, curvature_divisor,
-        curvature_scores, endpoint_matches_midpoint, exterior_sample_faces, integer_linspace,
-        linear_percentile, normalize_weights, parallel_stored_segments, positive_stored_radius,
-        sample_faces, stored_equal, stored_scaled_equal, thinness_scores, welded_defects,
-        DelicacyField, DelicacyIndexStats, DelicacySample, LegacyMt19937, PointKdTree,
-        RealInterval, Settings, TriangleBvh, VertexRadiusGrid,
+        anchored_entry_is_eligible, contact_patch_area, curvature_divisor,
+        endpoint_matches_midpoint, exterior_selection, integer_linspace, linear_percentile,
+        normalize_weights, parallel_stored_segments, positive_stored_radius, sample_faces,
+        stored_equal, stored_scaled_equal, thinness_scores, welded_defects, DelicacyField,
+        DelicacyIndexStats, DelicacySample, LegacyMt19937, PointKdTree, RealInterval, Settings,
+        TriangleBvh, VertexRadiusGrid,
     };
     use crate::{Mesh, Vec3};
     #[test]
@@ -2403,7 +2372,7 @@ mod tests {
             vec![[0, 1, 2], [3, 4, 5]],
         )
         .expect("two valid faces");
-        let samples = sample_faces(0, &mesh, &[0, 1], 0).expect("legacy sample batch");
+        let samples = sample_faces(0, &mesh, &[0, 1], 0, 2_000).expect("legacy sample batch");
         // Golden values deliberately include the RNG position after 2,000
         // face draws; an interleaved implementation produces different bits.
         assert_eq!(
@@ -2470,6 +2439,126 @@ mod tests {
     }
 
     #[test]
+    fn thinness_uses_the_nearest_forty_before_opposite_filtering() {
+        let mut vertices = Vec::new();
+        let mut triangles = Vec::new();
+        for face in 0..41 {
+            let centre = [(face + 1) as f64 * 0.01, 0.0, 0.0];
+            let base = vertices.len();
+            let points = [
+                [centre[0] - 0.001, -0.001, 0.0],
+                [centre[0] + 0.001, -0.001, 0.0],
+                [centre[0], 0.002, 0.0],
+            ];
+            vertices.extend(points);
+            triangles.push(if face == 40 {
+                [base, base + 2, base + 1]
+            } else {
+                [base, base + 1, base + 2]
+            });
+        }
+        let mesh = Mesh::new(vertices, triangles).expect("forty-one face centres");
+        let samples = [DelicacySample {
+            point: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+            face_index: 0,
+        }];
+        let mut stats = DelicacyIndexStats::default();
+        let scores = thinness_scores(0, &mesh, &samples, 1.0, &mut stats).expect("thinness");
+        assert_eq!(scores, [0.0]);
+        let (a, b, c) = mesh.triangle_points(40);
+        let opposite_centre = reference_scale(reference_add(reference_add(a, b), c), 1.0 / 3.0);
+        assert!(
+            1.0 - reference_squared_distance(samples[0].point, opposite_centre).sqrt() > 0.0,
+            "the excluded 41st opposite face would score hot"
+        );
+    }
+
+    #[test]
+    fn diagnostic_counts_and_points_fail_with_their_source_index() {
+        let mesh = cubes_mesh(&[[0.0, 0.0, 0.0]]);
+        assert!(matches!(
+            DelicacyField::build_diagnostic(73, &mesh, 9, 0),
+            Err(super::ScarMetricError::InvalidSampleCount {
+                source_index: 73,
+                n_samples: 0
+            })
+        ));
+        let field = DelicacyField::build_diagnostic(73, &mesh, 9, 7).expect("seven samples");
+        assert_eq!(field.samples().len(), 7);
+        assert!(matches!(
+            field.query_points(73, &[[0.0, 0.0, 0.0], [0.0, 1.0, f64::NAN]]),
+            Err(super::ScarMetricError::InvalidDiagnosticPoint {
+                source_index: 73,
+                point: 1,
+                component: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn parity_only_exterior_does_not_promote_near_surface_probes() {
+        let normal = reference_normal([1.0, -1.0, 0.0], [0.0, 1.0, -1.0], [-1.0, 0.0, 1.0]);
+        let base = [[1.0, -1.0, 0.0], [0.0, 1.0, -1.0], [-1.0, 0.0, 1.0]];
+        let first = tetra_soup(base, reference_scale(normal, -2.0));
+        let second_base = base.map(|point| reference_add(point, reference_scale(normal, 0.05)));
+        let second = tetra_soup(second_base, reference_scale(normal, -2.0));
+        let third_base = base.map(|point| {
+            reference_add(reference_scale(point, 10.0), reference_scale(normal, 0.10))
+        });
+        let third = tetra_soup(third_base, reference_scale(normal, 5.0));
+        let vertices = first
+            .into_iter()
+            .chain(second)
+            .chain(third)
+            .collect::<Vec<_>>();
+        let triangles = (0..12)
+            .map(|face| [face * 3, face * 3 + 1, face * 3 + 2])
+            .collect::<Vec<_>>();
+        let mesh = Mesh::new(vertices, triangles).expect("three tetrahedra");
+
+        let candidate = base;
+        let probes = [[1.0 / 3.0; 3], [0.6, 0.2, 0.2], [0.2, 0.6, 0.2]]
+            .into_iter()
+            .flat_map(|weights| {
+                let point = reference_add(
+                    reference_scale(candidate[0], weights[0]),
+                    reference_add(
+                        reference_scale(candidate[1], weights[1]),
+                        reference_scale(candidate[2], weights[2]),
+                    ),
+                );
+                [0.05, 0.15].map(|offset| reference_add(point, reference_scale(normal, offset)))
+            })
+            .collect::<Vec<_>>();
+        for pair in probes.chunks_exact(2) {
+            assert!(
+                reference_dot(reference_sub(pair[0], second_base[0]), normal).abs() < 1.0e-12,
+                "the first probe is on the middle tetrahedron's face"
+            );
+            assert!(!reference_contains(&mesh, pair[0]));
+            assert!(reference_contains(&mesh, pair[1]));
+        }
+        assert_eq!(
+            probes
+                .iter()
+                .filter(|point| reference_contains(&mesh, **point))
+                .count(),
+            3,
+            "parity alone sees only the three probes inside the upper tetrahedron"
+        );
+        let bvh = TriangleBvh::build(&mesh);
+        let mut stats = DelicacyIndexStats::default();
+        let inside = bvh.frozen_contains_batch(&mesh, &probes, &mut stats);
+        assert_eq!(inside.iter().filter(|inside| **inside).count(), 3);
+        let selection = exterior_selection(0, &mesh, &bvh, &mut stats).expect("exterior");
+        assert!(
+            selection.mask[0],
+            "three of six inside leaves the candidate exterior"
+        );
+    }
+
+    #[test]
     fn frozen_exterior_subset_retains_original_face_mapping() {
         let outer = cube_soup(2.0, [0.0, 0.0, 0.0]);
         let inner = cube_soup(0.5, [0.0, 0.0, 0.0]);
@@ -2480,8 +2569,8 @@ mod tests {
         let mesh = Mesh::new(vertices, triangles).expect("nested cubes");
         let bvh = TriangleBvh::build(&mesh);
         let mut stats = DelicacyIndexStats::default();
-        let selected = exterior_sample_faces(0, &mesh, &bvh, &mut stats).expect("exterior field");
-        assert_eq!(selected, (0..12).collect::<Vec<_>>());
+        let selection = exterior_selection(0, &mesh, &bvh, &mut stats).expect("exterior field");
+        assert_eq!(selection.selected_faces, (0..12).collect::<Vec<_>>());
         assert!(
             stats.triangle_faces_tested < 24 * 24 * 6 * 4,
             "BVH avoids the complete parity Cartesian scan"
@@ -2495,17 +2584,23 @@ mod tests {
             vec![[-0.75, 0.0, 0.0], [0.0, 0.0, 0.0], [0.75, 0.0, 0.0]],
         ] {
             let mesh = cubes_mesh(&centres);
-            let expected = naive_exterior_faces(&mesh);
+            let expected = reference_exterior(&mesh);
             let bvh = TriangleBvh::build(&mesh);
             let mut stats = DelicacyIndexStats::default();
-            let selected =
-                exterior_sample_faces(0, &mesh, &bvh, &mut stats).expect("frozen exterior");
-            assert_eq!(selected, expected, "independent parity oracle");
+            let selection =
+                exterior_selection(0, &mesh, &bvh, &mut stats).expect("frozen exterior");
+            assert_eq!(
+                selection.selected_faces, expected.1,
+                "independent parity oracle"
+            );
+            assert_eq!(selection.mask, expected.0, "complete exterior mask");
             assert!(
-                selected.len() < mesh.triangles().len() && !selected.is_empty(),
+                selection.selected_faces.len() < mesh.triangles().len()
+                    && !selection.selected_faces.is_empty(),
                 "overlap produces a proper frozen exterior subset"
             );
-            let samples = sample_faces(0, &mesh, &selected, 23).expect("mapped samples");
+            let samples = sample_faces(0, &mesh, &selection.selected_faces, 23, 2_000)
+                .expect("mapped samples");
             assert!(samples.iter().all(|sample| {
                 sample.normal == super::face_normal(0, &mesh, sample.face_index).expect("normal")
             }));
@@ -2515,6 +2610,8 @@ mod tests {
     #[test]
     fn batch_contact_lookup_uses_nearest_sample_index_ties() {
         let field = DelicacyField {
+            exterior_mask: vec![true, true],
+            selected_faces: vec![9, 4],
             samples: vec![
                 DelicacySample {
                     point: [-1.0, 0.0, 0.0],
@@ -2527,6 +2624,8 @@ mod tests {
                     face_index: 4,
                 },
             ],
+            curvature_scores: vec![0.0, 0.0],
+            thinness_scores: vec![0.0, 0.0],
             weights: vec![0.25, 0.75],
             sample_index: PointKdTree::build(vec![[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
             stats: DelicacyIndexStats::default(),
@@ -2561,10 +2660,8 @@ mod tests {
         let mesh = Mesh::new(vertices, triangles).expect("separated field faces");
         let bvh = TriangleBvh::build(&mesh);
         let mut stats = DelicacyIndexStats::default();
-        let nearest = bvh.nearest_squared_batch(&mesh, &points, &mut stats);
-        assert!(nearest
-            .iter()
-            .all(|distance| (*distance - 0.16).abs() < 1.0e-12));
+        let inside = bvh.frozen_contains_batch(&mesh, &points, &mut stats);
+        assert_eq!(inside, vec![false; points.len()]);
         assert!(
             stats.triangle_faces_tested < mesh.triangles().len() * points.len() / 8,
             "test-only visit count proves the indexed batch does not scan every face"
@@ -2597,39 +2694,37 @@ mod tests {
         let settings = test_settings();
         let bvh = TriangleBvh::build(&mesh);
         let mut stats = DelicacyIndexStats::default();
-        let selected = exterior_sample_faces(0, &mesh, &bvh, &mut stats).expect("indexed exterior");
-        let expected_selected = naive_exterior_faces(&mesh);
+        let selection = exterior_selection(0, &mesh, &bvh, &mut stats).expect("indexed exterior");
+        let (expected_mask, expected_selected) = reference_exterior(&mesh);
+        assert_eq!(selection.mask, expected_mask, "complete exterior mask");
         assert_eq!(
-            selected, expected_selected,
-            "complete exterior face selection"
+            selection.selected_faces, expected_selected,
+            "selected original face ids"
         );
 
-        let expected_samples =
-            sample_faces(0, &mesh, &expected_selected, 17).expect("naive sample stream");
-        let field = DelicacyField::build(0, &mesh, settings, 17).expect("indexed field");
-        assert_eq!(
-            field.samples, expected_samples,
-            "raw face ids, points, and normals"
-        );
+        let expected_samples = reference_samples(&mesh, &expected_selected, 17, 2_000);
+        let field = DelicacyField::build(0, &mesh, settings, 17, 2_000).expect("indexed field");
+        assert_eq!(field.exterior_mask(), expected_mask);
+        assert_eq!(field.selected_face_indices(), expected_selected);
+        assert_eq!(field.samples.len(), expected_samples.len());
+        for (actual, expected) in field.samples.iter().zip(&expected_samples) {
+            assert_eq!(actual.face_index, expected.face_index);
+            assert_eq!(
+                actual.point.map(f64::to_bits),
+                expected.point.map(f64::to_bits)
+            );
+            assert_eq!(
+                actual.normal.map(f64::to_bits),
+                expected.normal.map(f64::to_bits)
+            );
+        }
 
-        let welded = welded_defects(0, &mesh).expect("welded oracle");
-        let expected_curvature =
-            naive_curvature(&field.samples, &welded.vertices, &welded.defects, 1.5);
-        let expected_thinness = naive_thinness(&mesh, &field.samples, 1.5);
-        let mut expected_weights = expected_curvature
-            .iter()
-            .zip(&expected_thinness)
-            .map(|(curvature, thinness)| 0.6 * curvature + 0.4 * thinness)
-            .collect::<Vec<_>>();
-        normalize_weights(&mut expected_weights);
-        let mut indexed_stats = DelicacyIndexStats::default();
-        let indexed_curvature =
-            curvature_scores(0, &field.samples, &welded, 1.5, &mut indexed_stats)
-                .expect("indexed curvature");
-        let indexed_thinness = thinness_scores(0, &mesh, &field.samples, 1.5, &mut indexed_stats)
-            .expect("indexed thinness");
-        assert_close_slices(&indexed_curvature, &expected_curvature);
-        assert_close_slices(&indexed_thinness, &expected_thinness);
+        let (vertices, defects) = reference_welded_defects(&mesh);
+        let expected_curvature = reference_curvature(&field.samples, &vertices, &defects, 1.5);
+        let expected_thinness = reference_thinness(&mesh, &field.samples, 1.5);
+        let expected_weights = reference_blend(&expected_curvature, &expected_thinness);
+        assert_close_slices(field.curvature_scores(), &expected_curvature);
+        assert_close_slices(field.thinness_scores(), &expected_thinness);
         assert_close_slices(field.weights(), &expected_weights);
 
         let contact = [[0.0, 0.0, 1.0], [0.0, 0.0, 0.25]];
@@ -2641,8 +2736,8 @@ mod tests {
                     .iter()
                     .enumerate()
                     .min_by(|(left, left_sample), (right, right_sample)| {
-                        super::distance_squared_between(*point, left_sample.point)
-                            .total_cmp(&super::distance_squared_between(*point, right_sample.point))
+                        reference_squared_distance(*point, left_sample.point)
+                            .total_cmp(&reference_squared_distance(*point, right_sample.point))
                             .then(left.cmp(right))
                     })
                     .expect("samples")
@@ -2683,63 +2778,59 @@ mod tests {
         }
     }
 
-    fn naive_exterior_faces(mesh: &Mesh) -> Vec<usize> {
-        let mut exterior = Vec::new();
-        for face in 0..mesh.triangles().len() {
-            let (a, b, c) = mesh.triangle_points(face);
-            let normal = super::face_normal(0, mesh, face).expect("normal");
-            let inside = [[1.0 / 3.0; 3], [0.6, 0.2, 0.2], [0.2, 0.6, 0.2]]
-                .into_iter()
-                .flat_map(|barycentric| {
-                    let point = super::add(
-                        super::scale(a, barycentric[0]),
-                        super::add(
-                            super::scale(b, barycentric[1]),
-                            super::scale(c, barycentric[2]),
-                        ),
-                    );
-                    [0.05, 0.15].map(|offset| super::add(point, super::scale(normal, offset)))
-                })
-                .filter(|point| naive_frozen_contains(mesh, *point))
-                .count();
-            if inside < 4 {
-                exterior.push(face);
-            }
-        }
-        if exterior.is_empty() || exterior.len() == mesh.triangles().len() {
+    fn reference_exterior(mesh: &Mesh) -> (Vec<bool>, Vec<usize>) {
+        let mask = (0..mesh.triangles().len())
+            .map(|face| {
+                let (a, b, c) = mesh.triangle_points(face);
+                let normal = reference_normal(a, b, c);
+                let inside = [[1.0 / 3.0; 3], [0.6, 0.2, 0.2], [0.2, 0.6, 0.2]]
+                    .into_iter()
+                    .flat_map(|barycentric| {
+                        let point = reference_add(
+                            reference_scale(a, barycentric[0]),
+                            reference_add(
+                                reference_scale(b, barycentric[1]),
+                                reference_scale(c, barycentric[2]),
+                            ),
+                        );
+                        [0.05, 0.15]
+                            .map(|offset| reference_add(point, reference_scale(normal, offset)))
+                    })
+                    .filter(|point| reference_contains(mesh, *point))
+                    .count();
+                inside < 4
+            })
+            .collect::<Vec<_>>();
+        let exterior = mask
+            .iter()
+            .enumerate()
+            .filter_map(|(face, exterior)| exterior.then_some(face))
+            .collect::<Vec<_>>();
+        let selected = if exterior.is_empty() || exterior.len() == mesh.triangles().len() {
             (0..mesh.triangles().len()).collect()
         } else {
             exterior
-        }
+        };
+        (mask, selected)
     }
 
-    fn naive_frozen_contains(mesh: &Mesh, point: Vec3) -> bool {
-        let surface = (0..mesh.triangles().len()).any(|face| {
-            let (a, b, c) = mesh.triangle_points(face);
-            super::distance_squared_between(point, super::closest_point_on_triangle(point, a, b, c))
-                <= super::SURFACE_NEAR_MM * super::SURFACE_NEAR_MM
-        });
-        if surface {
-            return true;
-        }
+    fn reference_contains(mesh: &Mesh, point: Vec3) -> bool {
         (0..3)
             .filter(|axis| {
                 let mut crossings = (0..mesh.triangles().len())
                     .filter_map(|face| {
                         let (a, b, c) = mesh.triangle_points(face);
-                        axis_triangle_crossing(point, *axis, a, b, c)
+                        reference_axis_crossing(point, *axis, a, b, c)
                     })
                     .collect::<Vec<_>>();
                 crossings.sort_by(f64::total_cmp);
                 let mut clusters = 0;
-                let mut last = None;
+                let mut previous = None;
                 for crossing in crossings {
-                    if last.is_none_or(|previous: f64| {
-                        crossing - previous > super::AXIS_CROSSING_CLUSTER_MM
-                    }) {
+                    if previous.is_none_or(|last: f64| crossing - last > 0.005) {
                         clusters += 1;
                     }
-                    last = Some(crossing);
+                    previous = Some(crossing);
                 }
                 clusters % 2 == 1
             })
@@ -2747,13 +2838,186 @@ mod tests {
             >= 2
     }
 
-    fn naive_curvature(
+    fn reference_axis_crossing(point: Vec3, axis: usize, a: Vec3, b: Vec3, c: Vec3) -> Option<f64> {
+        let projected = match axis {
+            0 => [1, 2],
+            1 => [0, 2],
+            _ => [0, 1],
+        };
+        let ab = reference_sub(b, a);
+        let ac = reference_sub(c, a);
+        let from_a = reference_sub(point, a);
+        let denominator = ab[projected[0]] * ac[projected[1]] - ab[projected[1]] * ac[projected[0]];
+        if denominator.abs() <= 1.0e-14 {
+            return None;
+        }
+        let first = (from_a[projected[0]] * ac[projected[1]]
+            - from_a[projected[1]] * ac[projected[0]])
+            / denominator;
+        let second = (ab[projected[0]] * from_a[projected[1]]
+            - ab[projected[1]] * from_a[projected[0]])
+            / denominator;
+        if first < -1.0e-9 || second < -1.0e-9 || first + second > 1.0 + 1.0e-9 {
+            return None;
+        }
+        let crossing = a[axis] + first * ab[axis] + second * ac[axis];
+        (crossing > point[axis] + 1.0e-9).then_some(crossing)
+    }
+
+    fn reference_samples(
+        mesh: &Mesh,
+        faces: &[usize],
+        seed: u32,
+        count: usize,
+    ) -> Vec<DelicacySample> {
+        let mut cumulative = Vec::with_capacity(faces.len());
+        let mut total = 0.0;
+        for &face in faces {
+            let (a, b, c) = mesh.triangle_points(face);
+            total +=
+                0.5 * reference_length(reference_cross(reference_sub(b, a), reference_sub(c, a)));
+            cumulative.push(total);
+        }
+        let mut rng = ReferenceMt19937::seeded(seed);
+        let selected = (0..count)
+            .map(|_| {
+                let target = rng.next_f64() * total;
+                let local = cumulative
+                    .iter()
+                    .position(|value| *value >= target)
+                    .unwrap_or(cumulative.len() - 1);
+                faces[local]
+            })
+            .collect::<Vec<_>>();
+        selected
+            .into_iter()
+            .map(|face| {
+                let mut first = rng.next_f64();
+                let mut second = rng.next_f64();
+                if first + second > 1.0 {
+                    first = 1.0 - first;
+                    second = 1.0 - second;
+                }
+                let (a, b, c) = mesh.triangle_points(face);
+                DelicacySample {
+                    point: reference_add(
+                        a,
+                        reference_add(
+                            reference_scale(reference_sub(b, a), first),
+                            reference_scale(reference_sub(c, a), second),
+                        ),
+                    ),
+                    normal: reference_normal(a, b, c),
+                    face_index: face,
+                }
+            })
+            .collect()
+    }
+
+    struct ReferenceMt19937 {
+        state: [u32; 624],
+        index: usize,
+    }
+
+    impl ReferenceMt19937 {
+        fn seeded(seed: u32) -> Self {
+            let mut state = [0; 624];
+            state[0] = seed;
+            for index in 1..624 {
+                state[index] = 1_812_433_253u32
+                    .wrapping_mul(state[index - 1] ^ (state[index - 1] >> 30))
+                    .wrapping_add(index as u32);
+            }
+            Self { state, index: 624 }
+        }
+
+        fn next_u32(&mut self) -> u32 {
+            if self.index == 624 {
+                for index in 0..624 {
+                    let combined = (self.state[index] & 0x8000_0000)
+                        | (self.state[(index + 1) % 624] & 0x7fff_ffff);
+                    self.state[index] = self.state[(index + 397) % 624]
+                        ^ (combined >> 1)
+                        ^ if combined & 1 == 0 { 0 } else { 0x9908_b0df };
+                }
+                self.index = 0;
+            }
+            let mut value = self.state[self.index];
+            self.index += 1;
+            value ^= value >> 11;
+            value ^= (value << 7) & 0x9d2c_5680;
+            value ^= (value << 15) & 0xefc6_0000;
+            value ^ (value >> 18)
+        }
+
+        fn next_f64(&mut self) -> f64 {
+            let high = (self.next_u32() >> 5) as f64;
+            let low = (self.next_u32() >> 6) as f64;
+            (high * 67_108_864.0 + low) / 9_007_199_254_740_992.0
+        }
+    }
+
+    fn reference_welded_defects(mesh: &Mesh) -> (Vec<Vec3>, Vec<f64>) {
+        let mut ids = std::collections::BTreeMap::new();
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+        for face in 0..mesh.triangles().len() {
+            let (a, b, c) = mesh.triangle_points(face);
+            let mut face_ids = [0; 3];
+            for (corner, point) in [a, b, c].into_iter().enumerate() {
+                let key = point.map(|coordinate| {
+                    if coordinate == 0.0 {
+                        0
+                    } else {
+                        coordinate.to_bits()
+                    }
+                });
+                let next = vertices.len();
+                face_ids[corner] = *ids.entry(key).or_insert_with(|| {
+                    vertices.push(point);
+                    next
+                });
+            }
+            faces.push(face_ids);
+        }
+        let mut sums = vec![0.0; vertices.len()];
+        for (face, ids) in faces.iter().enumerate() {
+            let (a, b, c) = mesh.triangle_points(face);
+            let angle = |left: Vec3, right: Vec3| {
+                (reference_dot(left, right) / (reference_length(left) * reference_length(right)))
+                    .clamp(-1.0, 1.0)
+                    .acos()
+            };
+            let first = angle(reference_sub(b, a), reference_sub(c, a));
+            let second = angle(reference_sub(a, b), reference_sub(c, b));
+            let third = std::f64::consts::PI - first - second;
+            let angles = if [first, second, third]
+                .into_iter()
+                .any(|value| value < 1.0e-8)
+            {
+                [0.0; 3]
+            } else {
+                [first, second, third]
+            };
+            for (vertex, angle) in ids.iter().zip(angles) {
+                sums[*vertex] += angle;
+            }
+        }
+        (
+            vertices,
+            sums.into_iter()
+                .map(|sum| 2.0 * std::f64::consts::PI - sum)
+                .collect(),
+        )
+    }
+
+    fn reference_curvature(
         samples: &[DelicacySample],
         vertices: &[Vec3],
         defects: &[f64],
         thin: f64,
     ) -> Vec<f64> {
-        let indices = integer_linspace(samples.len(), samples.len().min(4_000));
+        let indices = reference_linspace(samples.len(), samples.len().min(4_000));
         let radius = thin.max(0.5);
         let values = indices
             .iter()
@@ -2762,7 +3026,7 @@ mod tests {
                     .iter()
                     .zip(defects)
                     .filter(|(vertex, _)| {
-                        super::distance_squared_between(**vertex, samples[*sample].point)
+                        reference_squared_distance(**vertex, samples[*sample].point)
                             <= radius * radius
                     })
                     .map(|(_, defect)| *defect)
@@ -2770,7 +3034,8 @@ mod tests {
                     .abs()
             })
             .collect::<Vec<_>>();
-        let divisor = curvature_divisor(&values);
+        let percentile = reference_percentile(&values, 0.95);
+        let divisor = if percentile == 0.0 { 1.0 } else { percentile }.max(1.0e-9);
         samples
             .iter()
             .map(|sample| {
@@ -2778,8 +3043,8 @@ mod tests {
                     .iter()
                     .enumerate()
                     .min_by(|(left, left_index), (right, right_index)| {
-                        super::distance_squared_between(sample.point, samples[**left_index].point)
-                            .total_cmp(&super::distance_squared_between(
+                        reference_squared_distance(sample.point, samples[**left_index].point)
+                            .total_cmp(&reference_squared_distance(
                                 sample.point,
                                 samples[**right_index].point,
                             ))
@@ -2792,13 +3057,34 @@ mod tests {
             .collect()
     }
 
-    fn naive_thinness(mesh: &Mesh, samples: &[DelicacySample], thin: f64) -> Vec<f64> {
+    fn reference_linspace(length: usize, count: usize) -> Vec<usize> {
+        if count == 1 {
+            return vec![0];
+        }
+        let step = (length - 1) as f64 / (count - 1) as f64;
+        let mut values = (0..count)
+            .map(|index| (index as f64 * step).floor() as usize)
+            .collect::<Vec<_>>();
+        values[count - 1] = length - 1;
+        values
+    }
+
+    fn reference_percentile(values: &[f64], quantile: f64) -> f64 {
+        let mut values = values.to_vec();
+        values.sort_by(f64::total_cmp);
+        let position = quantile * (values.len() - 1) as f64;
+        let lower = position.floor() as usize;
+        let upper = position.ceil() as usize;
+        values[lower] + (values[upper] - values[lower]) * (position - lower as f64)
+    }
+
+    fn reference_thinness(mesh: &Mesh, samples: &[DelicacySample], thin: f64) -> Vec<f64> {
         let centres = (0..mesh.triangles().len())
             .map(|face| {
                 let (a, b, c) = mesh.triangle_points(face);
                 (
-                    super::scale(super::add(super::add(a, b), c), 1.0 / 3.0),
-                    super::face_normal(0, mesh, face).expect("normal"),
+                    reference_scale(reference_add(reference_add(a, b), c), 1.0 / 3.0),
+                    reference_normal(a, b, c),
                 )
             })
             .collect::<Vec<_>>();
@@ -2809,7 +3095,7 @@ mod tests {
                     .iter()
                     .enumerate()
                     .filter_map(|(face, (centre, _))| {
-                        let distance = super::distance(sample.point, *centre);
+                        let distance = reference_squared_distance(sample.point, *centre).sqrt();
                         (distance < 4.0 * thin).then_some((distance, face))
                     })
                     .collect::<Vec<_>>();
@@ -2817,7 +3103,7 @@ mod tests {
                 near.truncate(40);
                 let thickness = near
                     .into_iter()
-                    .filter(|(_, face)| super::dot(sample.normal, centres[*face].1) < -0.3)
+                    .filter(|(_, face)| reference_dot(sample.normal, centres[*face].1) < -0.3)
                     .map(|(distance, _)| distance)
                     .fold(f64::INFINITY, f64::min);
                 if thickness.is_finite() {
@@ -2827,6 +3113,61 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    fn reference_blend(curvature: &[f64], thinness: &[f64]) -> Vec<f64> {
+        let mut values = curvature
+            .iter()
+            .zip(thinness)
+            .map(|(curvature, thinness)| 0.6 * curvature + 0.4 * thinness)
+            .collect::<Vec<_>>();
+        let maximum = values
+            .iter()
+            .copied()
+            .filter(|value| *value > 0.0)
+            .fold(0.0_f64, f64::max);
+        let divisor = if maximum > 0.0 { maximum } else { 1.0 };
+        for value in &mut values {
+            *value = (*value / divisor).clamp(0.0, 1.0);
+        }
+        values
+    }
+
+    fn reference_add(left: Vec3, right: Vec3) -> Vec3 {
+        [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
+    }
+
+    fn reference_sub(left: Vec3, right: Vec3) -> Vec3 {
+        [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
+    }
+
+    fn reference_scale(value: Vec3, factor: f64) -> Vec3 {
+        [value[0] * factor, value[1] * factor, value[2] * factor]
+    }
+
+    fn reference_dot(left: Vec3, right: Vec3) -> f64 {
+        left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+    }
+
+    fn reference_cross(left: Vec3, right: Vec3) -> Vec3 {
+        [
+            left[1] * right[2] - left[2] * right[1],
+            left[2] * right[0] - left[0] * right[2],
+            left[0] * right[1] - left[1] * right[0],
+        ]
+    }
+
+    fn reference_length(value: Vec3) -> f64 {
+        reference_dot(value, value).sqrt()
+    }
+
+    fn reference_squared_distance(left: Vec3, right: Vec3) -> f64 {
+        reference_dot(reference_sub(left, right), reference_sub(left, right))
+    }
+
+    fn reference_normal(a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
+        let value = reference_cross(reference_sub(b, a), reference_sub(c, a));
+        reference_scale(value, 1.0 / reference_length(value))
     }
 
     fn assert_close_slices(left: &[f64], right: &[f64]) {
@@ -2886,6 +3227,18 @@ mod tests {
             .map(|face| [face * 3, face * 3 + 1, face * 3 + 2])
             .collect::<Vec<_>>();
         Mesh::new(vertices, triangles).expect("cube soups")
+    }
+
+    fn tetra_soup(base: [Vec3; 3], apex: Vec3) -> Vec<Vec3> {
+        [
+            [base[0], base[1], base[2]],
+            [base[0], apex, base[1]],
+            [base[1], apex, base[2]],
+            [base[2], apex, base[0]],
+        ]
+        .into_iter()
+        .flatten()
+        .collect()
     }
 
     #[test]

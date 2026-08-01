@@ -11,6 +11,9 @@ cargo run -p plinth-metrics --release --example treant_delicacy_gate -- \
   '/Users/craig/code/hughescr/dnd-campaigns/Weeping Treant v1.2.stl'
 ```
 
-The example accepts binary STL only. It reports deterministic field digest and
-result-owned index-visit counts, duration, and best-effort RSS. The values are
-evidence, not a wall-clock threshold: hardware affects timing and RSS.
+The example accepts binary STL only and builds with seed zero and a 20,000
+sample ceiling. Its deterministic digest covers the complete exterior mask,
+selected original face ids, and every sample face id, point, normal, and final
+weight. It also reports result-owned index-visit counts, duration, and
+best-effort RSS. The values are evidence, not a wall-clock threshold: hardware
+affects timing and RSS.

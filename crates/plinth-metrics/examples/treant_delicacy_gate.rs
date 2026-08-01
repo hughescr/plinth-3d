@@ -19,12 +19,14 @@ fn main() -> Result<(), String> {
         .ok_or_else(|| "missing binary STL path".to_owned())?;
     let mesh = read_binary_stl(&path)?;
     let started = Instant::now();
-    let field = DelicacyField::build_diagnostic(0, &mesh, 0).map_err(|error| error.to_string())?;
+    let field =
+        DelicacyField::build_diagnostic(0, &mesh, 0, 20_000).map_err(|error| error.to_string())?;
     let elapsed = started.elapsed();
     let stats = field.build_stats();
     println!("path={}", path.display());
     println!("faces={}", mesh.triangles().len());
     println!("samples={}", field.samples().len());
+    println!("selected_faces={}", field.selected_face_indices().len());
     println!("duration_ms={:.3}", elapsed.as_secs_f64() * 1_000.0);
     match rss_bytes() {
         Some(bytes) => println!("rss_bytes={bytes}"),
@@ -106,6 +108,21 @@ fn rss_bytes() -> Option<u64> {
 
 fn field_digest(field: &DelicacyField) -> u64 {
     let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+    digest_bytes(
+        &mut digest,
+        &(field.exterior_mask().len() as u64).to_le_bytes(),
+    );
+    for exterior in field.exterior_mask() {
+        digest_bytes(&mut digest, &[u8::from(*exterior)]);
+    }
+    digest_bytes(
+        &mut digest,
+        &(field.selected_face_indices().len() as u64).to_le_bytes(),
+    );
+    for face in field.selected_face_indices() {
+        digest_bytes(&mut digest, &(*face as u64).to_le_bytes());
+    }
+    digest_bytes(&mut digest, &(field.samples().len() as u64).to_le_bytes());
     for (sample, weight) in field.samples().iter().zip(field.weights()) {
         for value in sample.point.into_iter().chain(sample.normal) {
             digest_bytes(&mut digest, &value.to_bits().to_le_bytes());
