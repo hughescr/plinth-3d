@@ -783,11 +783,10 @@ impl ConstantDescriptor {
 
 /// An immutable registry published only after a declaration batch validates.
 ///
-/// This is the future global hook: one `LazyLock<Result<ConstantsRegistry,
-/// RegistryError>>` may gather a declaration batch and call `build_batch` once.
-/// This structural builder deliberately does not claim that the batch contains
-/// every expected constant; the future all-declarations task owns that check.
-/// The framework provides no global, `Default`, incremental registration, or
+/// The current M0 publication is one `LazyLock<Result<M0Constants,
+/// M0ConstantsError>>`: it gathers all declarations, calls `build_batch` once,
+/// and then exposes the complete registry or one construction error. This
+/// structural type deliberately has no `Default`, incremental registration, or
 /// mutation API.
 ///
 /// Incremental publication is intentionally not part of the public surface:

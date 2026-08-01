@@ -250,11 +250,12 @@ of the mechanism is a promise, not a guarantee.
 
 **Provenance cannot rot.** Once the runtime registry exists, completeness is a
 three-way check: the runtime registry, an independent hand-maintained expected-ID
-set in a Rust test, and generated `docs/rust-migration/constants.md`. A future
-registry is initialized as one fallible, batch-built `LazyLock` result: gather all
-declarations, validate uniqueness and provenance in one batch, then publish the
-complete registry or one error. Never register items one at a time into partially
-visible global state.
+set in a Rust test, and generated `docs/rust-migration/constants.md`. The current
+registry is initialized as one fallible, batch-built
+`LazyLock<Result<M0Constants, M0ConstantsError>>`: gather all declarations,
+validate uniqueness and provenance in one batch, then publish the complete
+registry or one error. Never register items one at a time into partially visible
+global state.
 
 `m0-constants-source-ledger.json` is a fourth, independent artifact. It is the
 hand-maintained source-membership and provenance-disposition inventory, not a dump of
