@@ -225,8 +225,8 @@ or bracing.
 > could certify a layout whose own tips were predicted to break. The re-anchor was
 > applied to `tensile_green_mpa` (10.0 → 0.288).
 
-**Rust requirement.** Store `X_ALLOWED = 12.0` as a `Derived<f64>`, derived from
-`X_STAR_CONE` (`Measured`, plate 5) with a 2× safety factor and **cross-checked
+**Rust requirement.** Store `X_ALLOWED = 12.0` as a `Derived<f64>`, with the
+binding relation `floor(lower(X_STAR_CONE) / 2) = floor(25.00 / 2) = 12`, and **cross-check it
 against `X_STAR_CYLINDER`** (`Measured`, plate 6): 12.0 clears the binding measured
 bracket edge with `19.91 / 12 = 1.66×` of margin (§4.1). Exactly as
 `02-target-architecture.md` §3.5 declares it. Derive the sizing expression from it:
@@ -433,7 +433,7 @@ accept-safe dispositions.
 | `X_STAR_CONE` *(new; named `X_STAR_CONE` in 02 §3.5)* | **[25.00, 25.34]**, inclusive/inclusive `FiniteInterval` | — | **M** calibration plate 5, `OnOrBefore(2026-07-30)`, `err: null` | `plinth-core::constants::load` | Store the interval, not a midpoint. One boundary inversion at 25.00. Plate-5 arms were **cones**; plate 6 reproduced the boundary on cylinders, so this is **not** a cone artifact — §4.1. |
 | `X_STAR_CYLINDER` *(new; named `X_STAR_CYLINDER` in 02 §3.5)* | **(19.91, 30.48)**, exclusive/exclusive `FiniteInterval` | — | **M** calibration plate 6, `Exact(2026-07-31)`, `err: null` | `plinth-core::constants::load` | Cylindrical-arm boundary; geometric centre 24.6, **n = 1 at each bracket edge**, conditional on 4.00 mm arms and a 30 mm² cap. Store the interval, never 24.6. Contains `X_STAR_CONE` — that is what retires the cone-artifact question (§4.1). Was `Pending<FiniteInterval>` until 2026-07-31. |
 | `LOAD_SHARING` *(new; explicitly serde-tagged `enum LoadSharing`, 02 §3.6)* | **`Additive { n_eff_cap: 6.0 }`** | — | **M** plate 6, 2026-07-31 | `plinth-core::load` (type now); `plinth-core::constants::load` (constant, later M0); `plinth-support::load` (later reexports/consumes) | The passive validated type lives in core now; the `LOAD_SHARING` declaration is later M0 constants work. `plinth-support::load` later reexports the type and owns `ArmGroup` / `effective_x` behaviour. 12/12 strips survived `X_arm = 60.15` at N = 2,3,4,6 while the matched mono died — sharing is **at least additive**, `Zipper` is refuted. `n_eff_cap = 6.0` is the largest group measured and must validate finite and `>= 1.0`. **All five §4.2 caveats must live in the `note` field.** Was `Pending<LoadSharing>` until 2026-07-31. A `Measured` value requires its date. Categorical payload → `err: None`, serialized exactly as `"err": null`; see §4.2. |
-| `X_ALLOWED` *(new — does not exist in Python)* | **12.0** | — | **D** from `X_STAR_CONE` with a 2× safety factor, margin-checked against `X_STAR_CYLINDER` | `plinth-core::constants::load` | `Derived<f64>`, not `Measured` and not `Pending` — 02 §3.5 declares it exactly this way. All arm sizing derives from it; do not hardcode 12.0 anywhere else. Plate 6 did **not** move it: 12.0 clears the binding measured bracket edge by `19.91/12 = 1.66×` (§4.1). That is a margin check, not an `X*/2` recomputation. |
+| `X_ALLOWED` *(new — does not exist in Python)* | **12.0** | — | **D** from `[X_STAR_CONE]`: `floor(lower(X_STAR_CONE)/2) = floor(25.00/2) = 12`; margin-checked against `X_STAR_CYLINDER` | `plinth-core::constants::load` | `Derived<f64>`, not `Measured` and not `Pending` — 02 §3.5 declares it exactly this way. All arm sizing derives from it; do not hardcode 12.0 anywhere else. Plate 6 did **not** move it: 12.0 clears the binding measured bracket edge by `19.91/12 = 1.66×` (§4.1). That is a margin check, not a derivation input. |
 | `PEEL_PRESSURE_PA` (config.py:63) | 3000.0 | Pa | **P**, diagnostic only — order-of-magnitude legacy split | `plinth-core::constants::diagnostics` | Literature puts real MSLA peel stress at **12–13 kPa** (`../reference/literature/lit-green-peel.md`), i.e. this may be ~4× low. Must **not** be recombined to re-derive X or reach acceptance. |
 | `TENSILE_GREEN_MPA` (config.py:91) | 0.288 | MPa | **P**, diagnostic only — algebraic legacy split, *not* a derived or datasheet property | `plinth-core::constants::diagnostics` | Chosen so `0.288e6/(3000·8) = 12.0`, but that historical arithmetic does not promote it to `Derived`. Pre-plate-5 it was 10.0 MPa. |
 | `TIP_SAFETY_FACTOR` (config.py:106) | 8.0 | — | **P**, diagnostic only — policy, not measured | `plinth-core::constants::diagnostics` | Multiplies the legacy load before sizing. Retained for diagnosis only; the accept-safe rule reads `X_ALLOWED` directly. |
@@ -454,7 +454,7 @@ accept-safe dispositions.
 | `DEFAULT_CONTACT_DEPTH_MM` (legacy `contact_depth_mm`, 250) | 0.3 | mm | **P** — generation/profile default | `plinth-support::placement` + `plinth-emit` | This is not a ChituBox format grade or fixed wire value; the format field is variable. Keep the 0.3 mm policy in geometry generation, not `chitubox_io` format constants. |
 | `stub_length_mm` (247) | 2.5 | mm | **P** | `plinth-support::placement` | |
 | `min_shaft_r_mm` (139) | 0.3 | mm | **P** | `plinth-support::placement` | |
-| `max_unbraced_shaft_r_mm` (138) | 0.9 | mm | **D** from corpus — realized "Heavy" shaft radius was 0.75 mm | `plinth-support::placement` | Above this, brace instead of thickening. |
+| `max_unbraced_shaft_r_mm` (138) | 0.9 | mm | **P** — corpus-rationale policy; realized "Heavy" radius 0.75 mm does not derive the ceiling | `plinth-support::placement` | Above this, brace instead of thickening. |
 | `min_trunk_r_mm` / `max_trunk_r_mm` (348/349) | 0.8 / 2.4 | mm | **P** — "removal-friendly band" | `plinth-support::placement` | |
 | `min_shoot_r_mm` (351) | 0.35 | mm | **P** | `plinth-support::placement` | Also the threshold selecting `branch_angle_deg` over `max_segment_angle_deg`. This is the **shaft/member** minimum and it governs **routing through narrow gaps** — a different question from tip size, and the tip-diameter floor above does **not** set it. Observed consequence: at 0.35 mm the router cannot reach into thin-rib features, which are then left genuinely unsupported. Counter-pressure in the other direction: Cao measured a 0.5 × 0.5 mm as-printed strut fracturing at **4.8 MPa**, so thin struts are real but weak. Resolving this one needs a strut ladder printed on this machine, not more reading. |
 
@@ -471,7 +471,7 @@ accept-safe dispositions.
 | `brace_r_mm` (327) | 0.5 | mm | **P** | `plinth-support::brace` | |
 | `twin_single_brace_xy_mm` (375) | 3.0 | mm | **P** | `plinth-support::brace` | |
 | `model_brace_max_len_mm` (382) | 5.0 | mm | **P** | `plinth-support::brace` | |
-| transient shoot-count exponent (`transient.r_transient_mm`) | `N^0.125` | — | **D from v3** — `0.5 × 0.25` | `plinth-support::transient` | v3 spelled it two ways; the composite is 1/8. |
+| transient shoot-count exponent (`transient.r_transient_mm`) | `N^0.125` | — | **P** — inherited v3 heuristic; multiplying `0.5 × 0.25` does not establish physical authority | `plinth-support::transient` | v3 spelled it two ways; the composite is 1/8. |
 | `trunk_merge_radius_mm` / `trunk_branch_merge_xy_mm` (368/413) | 3.0 / 10.0 | mm | **P** | `plinth-support` (dead v3 — not ported) | |
 | `trunk_search_radii_mm` (343) | (0, 2, 4, 7, 10, 14, 19, 25) | mm | **P** | `plinth-support::cco` | |
 | `trunk_search_directions` (344) | 12 | — | **P** | `plinth-support::cco` | |
@@ -482,31 +482,31 @@ accept-safe dispositions.
 
 | Name | Value | Unit | Prov. | Rust owner | Notes |
 |---|---|---|---|---|---|
-| `target_spacing_mm` (148) | 4.0 | mm | **D** — corpus realized median tip spacing 3.1 mm, documented as an **upper bound on required density** (evidence of sufficiency, not optimum) | `plinth-support::placement` | Cross-check: hexagonal cells at 4.0 mm spacing have area `(√3/2)·16 = 13.86 mm²`; at X=12 that needs `A_arm = 1.155 mm²`, i.e. `r = 0.606 mm` — comfortably inside the [0.2, 1.0] band. The spacing default and the load rule are mutually consistent. |
-| `spacing_floor_mm` (152) | 2.5 | mm | **D** — "pryable, not too densely packed" hard floor | `plinth-support::placement` | Never place two tips closer, even where load math allows. Also the specialized-merge proximity threshold. |
+| `target_spacing_mm` (148) | 4.0 | mm | **P** — corpus realized median 3.1 mm shows sufficiency, not an optimum or derived boundary | `plinth-support::placement` | Cross-check: hexagonal cells at 4.0 mm spacing have area `(√3/2)·16 = 13.86 mm²`; at X=12 that needs `A_arm = 1.155 mm²`, i.e. `r = 0.606 mm` — comfortably inside the [0.2, 1.0] band. The spacing default and the load rule are mutually consistent. |
+| `spacing_floor_mm` (152) | 2.5 | mm | **P** — selected "pryable, not too densely packed" ergonomics policy | `plinth-support::placement` | Never place two tips closer, even where load math allows. Also the specialized-merge proximity threshold. |
 | `coverage_radius_factor` (609) | 1.5 | — | **P** | `plinth-support::coverage` | Coverage radius = `4.0 × 1.5 = 6.0 mm`. Deliberately looser than spacing so verify doesn't nag in-spec gaps. |
 | `min_contacts_per_island` (154) | 1 | — | **P** | `plinth-support::placement` | |
 | `island_merge_radius_mm` (230) | 2.0 | mm | **P** — geometric closing radius, explicitly *not* physics | `plinth-support::perceive` | Must stay well under `target_spacing_mm`. |
-| `overhang_angle_deg` (210) | 45.0 | ° | **D** — matches the ChituBox `autosupportangle` convention | `plinth-support::perceive` | Down-facing test is `n_z < −sin(45°)`. **The angle is only half an instrument.** `perception.down_facing_mask` judges each face by its **normal alone**, with no notion of how far the overhang spans, so a 2 mm overhang and a 20 mm overhang at the same angle are treated identically. **Geometric extent is the missing second criterion** — carry it as an input to `perceive`, alongside the force-side test that `load.rs` already provides. Literature context for *why*, not for a number: a commercial tool at a fixed 30° failed 4 of 5 models, and tuned per model it needed 55°/30°/49°/41°/46° — a **25° spread** — while still producing 85 % more supports than a force-aware method (`../reference/literature/LITERATURE-NOTES.md`). Cao's **2.4 mm** self-supporting reach is one machine/resin result and is explicitly **not approved as any shipping spacing, reach, span or default** here; see §5 conflict 7. |
-| `voxel_pitch_mm` (213) | 0.4 | mm | **D** from v0's working scale (261×175×335 grid on a ~130 mm model) | `plinth-support::perceive` | Also the coverage-patch area floor: `0.4² = 0.16 mm²`. |
+| `overhang_angle_deg` (210) | 45.0 | ° | **P** — legacy ChituBox convention, not a measurement or binding derivation | `plinth-support::perceive` | Down-facing test is `n_z < −sin(45°)`. **The angle is only half an instrument.** `perception.down_facing_mask` judges each face by its **normal alone**, with no notion of how far the overhang spans, so a 2 mm overhang and a 20 mm overhang at the same angle are treated identically. **Geometric extent is the missing second criterion** — carry it as an input to `perceive`, alongside the force-side test that `load.rs` already provides. Literature context for *why*, not for a number: a commercial tool at a fixed 30° failed 4 of 5 models, and tuned per model it needed 55°/30°/49°/41°/46° — a **25° spread** — while still producing 85 % more supports than a force-aware method (`../reference/literature/LITERATURE-NOTES.md`). Cao's **2.4 mm** self-supporting reach is one machine/resin result and is explicitly **not approved as any shipping spacing, reach, span or default** here; see §5 conflict 7. |
+| `voxel_pitch_mm` (213) | 0.4 | mm | **P** — legacy working-scale policy inferred from one v0 corpus run | `plinth-support::perceive` | Also the coverage-patch area floor: `0.4² = 0.16 mm²`. |
 | `BRIDGE_FREE_GAP_MM` (legacy `bridge_free_gap_mm`, 217) | 1.0 | mm | **P** — free-gap perception default | `plinth-support::perceive` | A local unsupported-gap rule. It is not the bridge/sag span below. |
 | `BRIDGE_SAG_SPAN_APPROX_MM` *(new)* | ~3.0, conditional on a 0.300 mm section | mm | **P** — owner-supplied approximate limit | `plinth-emit` / `plinth-verify` diagnostics | Keep the span and its section condition together. It does not replace or derive from `BRIDGE_FREE_GAP_MM = 1.0`. |
 | `near_plate_mm` (221) | 1.5 | mm | **P** | `plinth-support::perceive` | |
-| `perception.ISLAND_ATTACH_REACH_MM` | 0.2 | mm | **D** — tied to `tip_r_min_mm`, deliberately not a config field | `plinth-support::perceive` | Test-pinned (`test_island_attach_reach_mm_is_pinned`). |
+| `perception.ISLAND_ATTACH_REACH_MM` | 0.2 | mm | **P** — tuning tied to a legacy Placeholder tip default | `plinth-support::perceive` | Test-pinned (`test_island_attach_reach_mm_is_pinned`). |
 | `engine._ISLAND_BIRTH_LINK_R_MM` | 0.6 | mm | **P** *(tuned once, no error bar)* | `plinth-support` | Tuned against the 0.05 mm-layer Weeping Treant corpus. **Its own comment flags that dynamic layer height invalidates the tuning** — see §3.7. |
 
 ### 3.5 Clearance, routing, printability
 
 | Name | Value | Unit | Prov. | Rust owner | Notes |
 |---|---|---|---|---|---|
-| `standoff_mm` (244) | 0.6 | mm | **D** from v0's 0.6 mm centerline clearance | `plinth-support::cco` | v0 checked only the ray centerline and still had 27/137 violations; v4+ checks the full swept envelope, so this is now genuinely free clearance. |
+| `standoff_mm` (244) | 0.6 | mm | **P** — legacy clearance policy; corpus use does not derive the selected distance | `plinth-support::cco` | v0 checked only the ray centerline and still had 27/137 violations; v4+ checks the full swept envelope, so this is now genuinely free clearance. |
 | `clearance_sample_step_mm` (252) | 0.3 | mm | **P** — legacy sampled path only | `plinth-support::cco` | The sampled clearance path is legacy/test-only; production uses the exact kernel. |
-| `surface_pitch_bound_percentile` (278) | 99.0 | — | **M** from a real distribution — Weeping Treant at pitch 0.3 mm: p95 = 0.28, p99 = 0.35, max = 0.61 mm over 400k points | `plinth-support::cco` | 99 (not max) is deliberate: max over 400k points is single-outlier-sensitive. The anchor that crashed `brace_and_size` measured 0.537 mm — inside the tail p95 misses and p99 covers. |
-| `max_segment_angle_deg` (293) | 45.0 | ° | **D** from a layer-continuity argument | `plinth-verify` (gate) / `plinth-support::cco` (sizing) | Keeps every layer >90 % seated on cured material for members ≥0.7 mm across, and bounds the peel moment arm. Pure horizontal runs are banned except two-end-supported raft bridges at plate level. |
+| `surface_pitch_bound_percentile` (278) | 99.0 | — | **RETIRED — no-port** | — | Sampled-cloud pitch uncertainty is identically zero on exact triangle paths; `SPEC-V5-GEOM` §2.1/§2.6 retires this control. |
+| `max_segment_angle_deg` (293) | 45.0 | ° | **P** — qualitative layer-continuity policy, not measured or binding-derived | `plinth-verify` (gate) / `plinth-support::cco` (sizing) | Keeps every layer >90 % seated on cured material for members ≥0.7 mm across, and bounds the peel moment arm. Pure horizontal runs are banned except two-end-supported raft bridges at plate level. |
 | `branch_angle_deg` (405) | 60.0 | ° | **P** — widened by fiat (v3.6) | `plinth-verify` (gate) / `plinth-support::cco` (sizing) | **Required pairing:** any member past 45° must be sized with the angle-aware term `F_eff = F_drag + peel · π·r²·tan θ` in `_shaft_r_for_L`. Do not allow the wider cone without the load term. |
 | `strut_fallback_max_angle_deg` (390) | 60.0 | ° | **P** | `plinth-support::anchor` | |
 | `strut_min_length_saved_mm` (432) | 8.0 | mm | **P** | `plinth-support::anchor` | Minimum material saving to justify a second scar. |
-| `strut_max_length_mm` (442) | 20.0 | mm | **D from measurement** — uncapped, 307/353 Treant contacts chose model anchors, most producing clearance violations | `plinth-support::anchor` | |
+| `strut_max_length_mm` (442) | 20.0 | mm | **P** — corpus outcomes do not establish a safe maximum | `plinth-support::anchor` | Uncapped, 307/353 Treant contacts chose model anchors, most producing clearance violations; that rationale does not make 20.0 AcceptSafe. |
 | `scar_cost_weight` / `material_cost_per_mm` (445/450) | 1.0 / 0.05 | — / per-mm | **P** | `plinth-support::anchor` | Cost-function weights. |
 | `LIFT_MM` (legacy config `lift_mm`, 235) | **5.0** | mm | **P**, diagnostic local profile default | `plinth-core::printer` | Canonical future value and one owner. It is not vendor evidence. Retire the pipeline's 3.0 override and remove any emit-time authority: emit consumes the plated frame/profile and cannot override lift. |
 | `wall_mm` (`pipeline.prep_one` signature) | 2.5 | mm | **P** — bare default, no cited measurement | `plinth-hollow` | |
@@ -522,15 +522,15 @@ same population from the same formulas without sharing code.
 | `verify.A_ABS_MM2` | 2.0 | mm² | **P from spec** — owner-ratified, no measurement (1.60 mm equivalent scar dia) | `plinth-core::constants::scar` | `../reference/literature/LITERATURE-NOTES.md` explicitly found **no literature support** for this or the next two. |
 | `verify.KAPPA` | 1.25 | — | **P from spec** | `plinth-core::constants::scar` | Headroom multiplier on the designed crossing disc. |
 | `verify.L_SCAR_MAX_MM` | 2.5 | mm | **P from spec** | `plinth-core::constants::scar` | Max scar patch dimension. |
-| `verify.PRINT_FLOOR_CHORD_MM` | 0.08 | mm | **D** — owner-ratified 2026-07-24; a ~20 µm guard band above the 0.0502 mm census population minimum | `plinth-core::constants::scar` | A rule-4 unanchored transit whose chord is below this is MOOT — a foliage knife-edge that cannot print as coherent material. Test-pinned. |
+| `verify.PRINT_FLOOR_CHORD_MM` | 0.08 | mm | **M** `OwnerDecision` `print-floor-owner-decision-2026-07-24`, `Exact(2026-07-24)`, `err: null` | `plinth-core::constants::scar` | A rule-4 unanchored transit whose chord is below this is MOOT — a foliage knife-edge that cannot print as coherent material. Test-pinned. |
 | `verify.MIN_ILLEGAL_LEN_MM` | 0.05 | mm | **P** — sliver cutoff | `plinth-core::constants::scar` | **Ordering is load-bearing:** the length filter is applied *after* tip anchoring, per crossing. A pre-anchoring filter promotes an unanchored transit into the tip slot where a legal scar verdict exempts it. Do not offer a kernel-side pre-anchoring filter at all. |
 | `verify.TOL_MM` | 0.05 | mm | **P** — interval anchoring / detection tolerance | `plinth-core::constants::scar` | Same number as above, different concept. Keep them distinct. |
-| `verify.EPS_COS` | 1e-9 | — | **D** — divide-by-zero guard, explicitly **not** a physics floor | `plinth-core::constants::scar` | |
+| `verify.EPS_COS` | 1e-9 | — | **P** — selected divide-by-zero guard, explicitly **not** a physics floor | `plinth-core::constants::scar` | No measurement or binding proof selects 1e-9. |
 | `joints.ENCLOSURE_TOL_MM` | 0.02 | mm | **P** — legacy tolerance with no valid pixel derivation | `plinth-support::joints` | The old resolution-based derivation is invalid; printer pitch does not establish this enclosure-certificate tolerance. |
-| `joints.ENCLOSURE_PROOF_TOL_MM` | 0.018 | mm | **D**, diagnostic, exactly `0.9 × ENCLOSURE_TOL_MM` | `plinth-support::joints` | Its arithmetic is derived, but its authority is bounded by the Placeholder source tolerance. |
+| `joints.ENCLOSURE_PROOF_TOL_MM` | 0.018 | mm | **P**, diagnostic, exactly `0.9 × ENCLOSURE_TOL_MM` | `plinth-support::joints` | Arithmetic cannot improve the Placeholder authority of the source tolerance. |
 | `joints.COINCIDE_TOL_MM` / `ON_AXIS_TOL_MM` / `PLATE_BAND_MM` | 0.15 / 0.2 / 0.2 | mm | **P** | `plinth-support::joints` | `PLATE_BAND_MM` is **duplicated by hand** in `chitubox_emit.py` and mirrored in `verify.connectivity_report`. One constant, one owner, in Rust. |
 | `joints.COLINEAR_ANGLE_DEG` / `COLINEAR_RADIUS_FRAC` | 10.0 / 0.20 | ° / — | **P** | `plinth-support::joints` | |
-| `p8_chord_canon_micron` (736) | 1 | µm | **D** — canonicalization granularity for cross-implementation equality | `plinth-core::constants::scar` | Integer-micron chord canon. |
+| `p8_chord_canon_micron` (736) | 1 | µm | **M** `CorpusStudy` `phase8-micron-chord-canonicalization-2026-07-24`, `Exact(2026-07-24)`, `err: null` | `plinth-core::constants::scar` | Integer-micron f64 chord canon; record `SPEC-P8-RELOCATE` §5.3 Layer 3/amendment G. |
 | concession standoff ladder (SPEC-P8-REACH Feature B) | (0.3, 0.1) | mm | **P** — owner-authorized 2026-07-23, floored > 0 | `plinth-support::repair` | Locally weakens the clearance envelope to 0.1 mm expecting a human to buff the print. **Not a target design pattern** — the port should need fewer concessions, not reproduce the ladder as load-bearing. |
 
 ### 3.7 Printer profile — layer height
@@ -542,12 +542,12 @@ same population from the same formulas without sharing code.
 | LCD pixel pitch, project axes X/Y | 14 × 19 | µm | **M** `VendorDocument`, known source, vendor order mapped first/second to X/Y | `plinth-core::printer::PrinterProfile` | `19.0` (the coarser Y axis) is the canonical source for the decimation pixel input; its legacy copy is an alias, not another measurement. |
 | release-front kinematics | `leading_release_edge = NegativeY`; `release_front_sweep_direction = PositiveY` | enum pair | **M** `ProjectRecord` | `plinth-core::printer::PrinterProfile` | The front moves `-Y → +Y`. Never call this a “-Y sweep.” Axis effect is an unused input today. |
 | release film | **official Elegoo PFA, 0.127 mm** | mm | **M** — the installed hardware, fitted 2026-07-25 | `plinth-core::printer::PrinterProfile` | **A model input that does not exist in `config.py` at all.** On a tilting machine the film feeds the adhesion term directly, and `../datasheets/printers/README.md` already states that the film changes the peel number. **No paper in the literature set measures PFA** — the available data is FEP (Manizani) and PDMS (Cao), so every peel figure quoted here is a *transfer*, not a match, and fluoropolymer films fare worst under tilt. Stable by inertia: swapping it is a 27-screw job, not a casual change. Record the film alongside any peel figure so a future measurement is attributable to an interface. |
-| decimation error budget | p99 ≤ `pixel_um/2000` mm, p99.9 ≤ `pixel_um/1000` mm | mm | **D** from pixel pitch — half a pixel / one pixel | `plinth-decimate` | Measured **two-sided** (decimated face centers → original surface, and original verts → decimated surface). Final full-population re-check applies **1.1× slack** on both — "intentional, not a loosened spec". |
-| `minima_connect_layers` (500) | 2.0 | layers | **D** — rule of thumb; measured max real offset ~1.1 layers on the morel/treant corpus, so this keeps headroom | `plinth-support::perceive` | `z_tol = 2.0 × 0.05 = 0.1 mm` **today**. Under a per-layer array this must be computed from the actual local layer heights, not a scalar product. |
-| `minima_birth_match_layers` (555) | 2.0 | layers | **D** — same measurement | `plinth-support::perceive` | |
+| decimation error budget | p99 ≤ `pixel_um/2000` mm, p99.9 ≤ `pixel_um/1000` mm | mm | **P** — selected fractions of measured pixel pitch; arithmetic does not establish authority | `plinth-decimate` | Measured **two-sided** (decimated face centers → original surface, and original verts → decimated surface). Final full-population re-check's **1.1× slack** is also Placeholder policy. |
+| `minima_connect_layers` (500) | 2.0 | layers | **P** — corpus rule of thumb; ~1.1 observed layers plus selected headroom is not a measured boundary | `plinth-support::perceive` | `z_tol = 2.0 × 0.05 = 0.1 mm` **today**. Under a per-layer array this must be computed from the actual local layer heights, not a scalar product. |
+| `minima_birth_match_layers` (555) | 2.0 | layers | **P** — same corpus rule of thumb and selected headroom | `plinth-support::perceive` | |
 | `minima_eps_mm` (503) | 0.02 | mm | **P** — sub-layer tie tolerance | `plinth-support::perceive` | |
 | `minima_contact_radius_mm` (508) | 1.0 | mm | **P** — discretization slack, explicitly **not** a coverage radius | `plinth-support::perceive` | |
-| `minima_support_area_tips` (571) | 1.0 | — | **M from a sensitivity sweep** — rescued-site count moves by only 5 across a 1×–8× sweep, so chosen in the flat region | `plinth-support::perceive` | Threshold is `× π·tip_r_min_mm² = 0.1257 mm²`. |
+| `minima_support_area_tips` (571) | 1.0 | — | **P** — selected in a flat sensitivity region; flatness does not measure a preferred value | `plinth-support::perceive` | Threshold is `× π·tip_r_min_mm² = 0.1257 mm²`. |
 | `minima_require_island_birth` / `minima_drop_interior_faces` (538/549) | True / True | — | **M** — flipped 2026-07-24 after measuring **38.1 % / 21.7 %** false minima-stage contacts (treant / morel) under the old surface-only rule | `plinth-support::perceive` | |
 
 **Per-layer-height propagation checklist.** When layer height stops being a
@@ -594,7 +594,7 @@ caps pinned by SPEC-P8-RELOCATE / SPEC-P8-REACH.
 | `p8_reaim_polar_deg` (657) | (0, 10, 20, 30) | ° | **P** — pinned cone grid |
 | `p8_reaim_azimuth_deg` (658) | (0, 45, 90, 135, 180, 225, 270, 315) | ° | **P** — pinned enumeration order |
 | `p8_reaim_length_factors` (659) | (1.0, 0.75, 0.5) | — | **P** |
-| `p8_pocket_voxel_mm` (666) | 6.0 | mm | **D** from adjudicated cluster geometry |
+| `p8_pocket_voxel_mm` (666) | 6.0 | mm | **M** `OwnerDecision` `p8-pocket-voxel-owner-decision`, `Exact(2026-07-25)`, `err: null` |
 | `p8_pocket_min_members` (667) | 8 | — | **P** |
 | `p8_pocket_corridor_pad_mm` (668) | 0.5 | mm | **P** |
 | `p8_ball_slide_step_mm` / `p8_ball_slide_max_mm` (672/673) | 0.25 / 2.0 | mm | **P** |
@@ -672,12 +672,12 @@ that coupled heuristic. Its independently useful enable default remains register
 |---|---|---|
 | `CCO_FERMAT_MAX_ITERATIONS` / `CCO_CONE_TOLERANCE_DEG` | 12 / 1e-6 degrees | bounded Fermat solve and cone comparison |
 | `CCO_XIA_ALPHA` | 0.5, **Placeholder** | legacy topology-search heuristic with weak/unmeasured justification; the equations describe consequences of choosing α=1/2 but do not derive that policy |
-| `CCO_X_PAIR_LOAD_DISCOUNT` | `0.5**0.25`, **Derived** | fourth-root radius discount for each rod in a load-sharing X pair; shared by CCO estimation and bracing geometry |
+| `CCO_X_PAIR_LOAD_DISCOUNT` | `0.5**0.25`, **Derived**, `from=[]` | proof-only fourth-root load/radius relation for each rod in a load-sharing X pair; shared by CCO estimation and bracing geometry |
 | `CCO_BIFURCATION_HOSTS` / `CCO_MIN_SPLIT_LENGTH_MM` | 5 / 0.5 mm | bifurcation candidate policy |
 | `CCO_SPLIT_SLIDE_POLICY` | start 0.03; end 0.97; step 0.03; cap 40 | one structured deterministic slide grid |
 | `P8_RESEAT_ENABLE` / `P8_JUNCTION_RESEAT_ENABLE` / `P8_RELOCATE_ENABLE` | true / true / true | independent Phase-8 enables; reseat's live fallbacks agree, while `engine.run` has a conflicting false relocation compatibility fallback that the migration eliminates rather than ports |
 | `P8_JUNCTION_RESEAT_STEP_MM` / `P8_JUNCTION_RESEAT_MAX_MM` | 0.25 / 1.0 mm | junction re-seat grid |
-| `P8_CHORD_CANON_MICRON` | 1 micron | canonical/config value and `phase8_driver.run_phase8` fallback agree |
+| `P8_CHORD_CANON_MICRON` | 1 micron, **Measured** | `CorpusStudy` canonicalization result; canonical/config value and `phase8_driver.run_phase8` fallback agree |
 | `P8_MAX_RELOCATE_SWEEPS` / `P8_MAX_RELOCATE_ROUNDS` / `P8_RESIZE_FIXED_POINT_MAX_ROUNDS` | 8 / 4 / 4 | canonical/config values and live engine/driver fallbacks agree |
 | `PERF_BEAM_K` / `PERF_ANCHOR_CAP` / `PERF_SEED_SPACING_FACTOR` | `TrialSetting<T>::Disabled`, **Placeholder** | B1–B3 disabled preserve the full-search baseline; no enabled value has been selected |
 | `PERF_FIX_ITER_CAPS` | `TrialSetting<T>::Disabled`, **Placeholder** | B4's nominal Python tuple has two fields but consumes only index 1; do not port the inert first field |
@@ -719,8 +719,9 @@ claim that 25 is physics.
 
 `PIXEL_PITCH_Y_UM = 19` is the one canonical pixel source for decimation;
 the decimator's local pixel input is an alias. The p99 `/2000`, p99.9 `/1000`,
-and final `1.1` recheck slack remain the three independently registered Derived
-policies in §3.7.
+and final `1.1` recheck slack remain three independently registered Placeholder
+policies in §3.7: their arithmetic preserves the values but cannot promote
+selected fractions/slack to AcceptSafe evidence.
 
 ### 3.10.6 Retired and runtime-control dispositions
 
@@ -734,6 +735,59 @@ policies in §3.7.
   `06-conventions.md` §3 and M8, outside the physics/tuning registry.
   Frozen-Python `GEOM_KERNEL_THREADS` is a distinct legacy kernel scheduling
   control, excluded/no-port with an M8 thread-sweep disposition. They are not aliases.
+
+### 3.10.7 Closed evidence-grade audit
+
+Every `Measured` declaration below has enough information to construct its
+`EvidenceSource` directly. Dates are evidence dates, not retrieval dates, and every
+listed payload has `err: null`.
+
+| Stable ID | `EvidenceSource` constructor inputs | Date / error and required note |
+|---|---|---|
+| `LAYER_HEIGHT_DEFAULT_MM` | `project_record(id=saturn4-ultra-layer-profile-plate6, record=docs/reference/plate-06-results.md, locator=§1 Layer height)` | `Exact(2026-07-30)`, `err: null` |
+| `LOAD_SHARING` | `calibration_plate(plate=COUPON-PLATE-6-support-arm-capacity, record=docs/reference/plate-06-results.md, locator=§5 Finding 1)` | `Exact(2026-07-31)`, categorical `err: null`; note carries all five §4.2 caveats, orientation Finding 3, and the §6 B6 override citation |
+| `MINIMA_DROP_INTERIOR_FACES` | `project_record(id=minima-contact-fix-2026-07-24, record=docs/reference/acceptance-run-2026-07-24-contactfix.md, locator=Provenance and What moved)` | `Exact(2026-07-24)`, `err: null`; cross-reference §3.7 |
+| `MINIMA_REQUIRE_ISLAND_BIRTH` | `project_record(id=minima-contact-fix-2026-07-24, record=docs/reference/acceptance-run-2026-07-24-contactfix.md, locator=Provenance and What moved)` | `Exact(2026-07-24)`, `err: null`; cross-reference §3.7 |
+| `PIXEL_PITCH_X_UM` | `vendor_document(id=elegoo-saturn4-ultra-16k-press-2025-01-22, record=docs/datasheets/printers/saturn-4-ultra-16k.md, locator=Physical parameters plus project axis mapping)` | `Exact(2025-01-22)`, `err: null`; vendor first pitch maps to project X |
+| `PIXEL_PITCH_Y_UM` | same vendor document and locator | `Exact(2025-01-22)`, `err: null`; vendor second pitch maps to project Y |
+| `SATURN_BUILD_VOLUME_MM` | same vendor document and locator | `Exact(2025-01-22)`, `err: null`; vendor first/second/third dimensions map to project X/Y/Z |
+| `SATURN_LEADING_RELEASE_EDGE` | `project_record(id=saturn4-ultra-release-front-plate6, record=docs/reference/plate-06-results.md, locator=§1 Printer)` | `Exact(2026-07-31)`, `err: null`; project `NegativeY` |
+| `SATURN_RELEASE_FRONT_SWEEP_DIRECTION` | same project record and locator | `Exact(2026-07-31)`, `err: null`; project `PositiveY`, front moves `-Y → +Y` |
+| `SATURN_RELEASE_FILM_THICKNESS_MM` | `installed_hardware(id=saturn4-ultra-pfa-install-2026-07-25, record=docs/rust-migration/03-physics-and-constants.md, locator=§3.7 release film)` | `Exact(2026-07-25)`, `err: null`; nominal thickness identifies installed PFA and is not peel evidence |
+| `TIP_DIAMETER_MIN_ALLOWED_MM` | `owner_decision(id=tip-diameter-floor-owner-decision, record=docs/rust-migration/03-physics-and-constants.md, locator=§3.2)` | `OnOrBefore(2026-07-31)`, `err: null` |
+| `X_STAR_CONE` | `calibration_plate(plate=COUPON-PLATE-5-compliant-vs-stiff, record=docs/reference/plate-05-results.md, locator=§1 and §5)` | `OnOrBefore(2026-07-30)`, interval `err: null` |
+| `X_STAR_CYLINDER` | `calibration_plate(plate=COUPON-PLATE-6-support-arm-capacity, record=docs/reference/plate-06-results.md, locator=§5 Finding 2)` | `Exact(2026-07-31)`, interval `err: null` |
+| `P8_CHORD_CANON_MICRON` | `corpus_study(id=phase8-micron-chord-canonicalization-2026-07-24, record=docs/specs/SPEC-P8-RELOCATE.md, locator=§5.3 Layer 3/amendment G)` | `Exact(2026-07-24)`, f64/integer-micron `err: null` |
+| `P8_POCKET_VOXEL_MM` | `owner_decision(id=p8-pocket-voxel-owner-decision, record=docs/specs/SPEC-P8-RELOCATE.md, locator=§4.1)` | `Exact(2026-07-25)`, `err: null` |
+| `PRINT_FLOOR_CHORD_MM` | `owner_decision(id=print-floor-owner-decision-2026-07-24, record=docs/specs/SPEC-EMBED-POLICY.md, locator=PRINT-FLOOR amendment and Normative constants)` | `Exact(2026-07-24)`, `err: null` |
+
+The vendor document's retrieval date, 2026-07-31, remains metadata; its evidence
+date is the checked-in document's 2025-01-22 publication date.
+
+Exactly four declarations remain `Derived`:
+
+| Stable ID | `from` | Exact relation / proof |
+|---|---|---|
+| `CCO_X_PAIR_LOAD_DISCOUNT` | `[]` | `(F/2)^0.25 / F^0.25 = 0.5^0.25`; proof-only relation in `docs/reference/physics_transient_peel.md`, implemented in both `cco.py` and `bracing.py` |
+| `N_EFF_CAP` | `[LOAD_SHARING]` | reads the measured `Additive` payload's largest tested group size, `6.0`; not a separate measurement |
+| `TIP_RADIUS_MIN_ALLOWED_MM` | `[TIP_DIAMETER_MIN_ALLOWED_MM]` | `TIP_DIAMETER_MIN_ALLOWED_MM / 2 = 0.075 mm` |
+| `X_ALLOWED` | `[X_STAR_CONE]` | binding commitment/precedence: `floor(lower(X_STAR_CONE)/2) = floor(25.00/2) = 12`; `X_STAR_CYLINDER` only supplies the `19.91/12 = 1.66×` margin check |
+
+The following source values remain unchanged but are `Placeholder`, hence
+non-AcceptSafe: `DECIMATION_P999_FACTOR`, `DECIMATION_P99_FACTOR`,
+`DECIMATION_RECHECK_SLACK`, `ENCLOSURE_PROOF_TOL_MM`, `EPS_COS`,
+`ISLAND_ATTACH_REACH_MM`, `MAX_SEGMENT_ANGLE_DEG`,
+`MAX_UNBRACED_SHAFT_R_MM`, `MINIMA_BIRTH_MATCH_LAYERS`,
+`MINIMA_CONNECT_LAYERS`, `OVERHANG_ANGLE_DEG`, `SPACING_FLOOR_MM`,
+`STANDOFF_MM`, `STRUT_MAX_LENGTH_MM`, `TARGET_SPACING_MM`,
+`TRANSIENT_SHOOT_COUNT_EXPONENT`, and `VOXEL_PITCH_MM`. Their arithmetic,
+version convention, or corpus rationale preserves an explanation, not
+AcceptSafe authority; in particular arithmetic from a Placeholder cannot improve
+its provenance. `MINIMA_SUPPORT_AREA_TIPS = 1.0` is likewise Placeholder tuning
+selected in a flat sensitivity region, not a measurement.
+
+`SURFACE_PITCH_BOUND_PERCENTILE` is retired/no-port: `SPEC-V5-GEOM` §2.1 and
+§2.6 make sampled-cloud pitch uncertainty identically zero on exact triangle paths.
 
 ### 3.11 NOT constants — resource guards
 
@@ -858,7 +912,7 @@ second geometry.
 |---|---|
 | `X_STAR_CYLINDER` | `Pending<FiniteInterval>` → **`Measured<FiniteInterval>`**, `CalibrationPlate` 6 with `Exact(2026-07-31)`, carrying `(19.91, 30.48)` as exclusive/exclusive and `err: null`. Store the interval, not 24.6. The `note` field carries all three conditionals: n = 1 per bracket edge, 4.00 mm arms, 30 mm² cap. |
 | `X_STAR_CONE` | Unchanged. **Keep it a separate named constant** — the two are measured on different geometries at very different precision, and merging them would launder that difference away. |
-| `X_ALLOWED` | **Stays `Derived<f64> = 12.0`.** It is *not* re-derived as `X*/2` from the new bracket: plate 6 is single-specimen at each edge, so the re-derivation is a **margin check** against the binding (lower) edge — `19.91 / 12 = 1.66×` — and 12.0 passes it. **No arm in the engine resizes.** Do not hardcode 12.0 anywhere except this one derivation. |
+| `X_ALLOWED` | **Stays `Derived<f64> = 12.0` from `[X_STAR_CONE]`: `floor(lower(X_STAR_CONE)/2) = floor(25.00/2) = 12`.** It is *not* re-derived from the new plate-6 bracket: plate 6 is single-specimen at each edge, so it supplies only the **margin check** `19.91 / 12 = 1.66×`. **No arm in the engine resizes.** Do not hardcode 12.0 anywhere except this one derivation. |
 | `TENSILE_GREEN_MPA` | Unchanged numerically at 0.288 MPa, but classified correctly as a diagnostic `Placeholder`, not a `Derived` carrier and never an input to acceptance. |
 | Arm-geometry model | The brackets agree, so **there is no measured taper penalty** and tip-disc sizing stands. The fast-flare requirement of §1.3(b) keeps its original justification — the *observed* failure location — and the minimum-section locator stays **required**, because the X rule applies at the minimum section wherever it is. Neither is carrying a measured cone-vs-cylinder discount, and neither may be sold as if it were. |
 
@@ -921,7 +975,7 @@ the constant; it is not silently normalized into the five core caveats.
 | Constant / branch | Resolution |
 |---|---|
 | `LOAD_SHARING` | `Pending<LoadSharing>` → **`Measured<LoadSharing>`**, `CalibrationPlate` 6 with `Exact(2026-07-31)`, explicit `err: null`, value **`LoadSharing::Additive { n_eff_cap: 6.0 }`**. The passive tagged type lives in `plinth-core::load`; the future declaration lives in `plinth-core::constants::load`, and `plinth-support::load` later owns `ArmGroup` / `effective_x` behavior. |
-| `n_eff_cap` | **6.0** — the largest group size measured. Validate it as finite and `>= 1.0`. Caveat 2 gives no upper bracket, so the discount is granted only across the measured range; past N = 6 it is an extrapolation. This is the only free parameter the resolution introduces; it is a `Derived` choice from the plate's design grid, and it belongs in the same `note`. |
+| `n_eff_cap` | **Derived 6.0 from `[LOAD_SHARING]`** — the measured `Additive` payload's largest tested group size. Validate it as finite and `>= 1.0`. Caveat 2 gives no upper bracket, so the discount is granted only across the measured range; past N = 6 it is an extrapolation. It belongs in the same `note`, not a separate measurement. |
 | `N_eff` | **All arms rigidly co-carrying the region — no front-band filter.** The separate orientation result removes that restriction because sharing appeared along both axes. `N_eff` still requires genuine co-carrying under one contiguous rigid region, never mere proximity. |
 | Orientation term | **None.** Do not add an axis term to sizing or placement until the separate orientation limitation is contradicted. Retain the release-axis input to `effective_x` so a term can be added later without a signature change; document that it is currently unused by measurement. |
 | `LoadSharing::Zipper` | **Kept in the enum.** It is the strictly-conservative branch (per-arm sizing can only over-size) and it is the A/B arm that `cargo test -p plinth-support --test load_sharing_both` and `plinth calibrate` exercise. Refuted is not deleted. |

@@ -252,10 +252,11 @@
       "provenance_wrapper": "Derived",
       "source_locators": [
         "scripts/support_placement/cco.py:brace_estimate_ml r_raw * 0.5 ** 0.25",
-        "scripts/support_placement/bracing.py:_cross_link_rods duty_r = r_raw * 0.5 ** 0.25"
+        "scripts/support_placement/bracing.py:_cross_link_rods duty_r = r_raw * 0.5 ** 0.25",
+        "docs/reference/physics_transient_peel.md:X-pair load-sharing discount proof"
       ],
-      "normative": "03-physics-and-constants.md §3.10.4 = 0.5**0.25",
-      "provenance_detail": "Derived fourth-root radius factor for half-load sharing across each rod of an X pair"
+      "normative": "03-physics-and-constants.md §3.10.7 = Derived 0.5**0.25, from=[]; proof-only load/radius relation",
+      "provenance_detail": "Derived from=[] relation=(F/2)^0.25/F^0.25=0.5^0.25; proof=docs/reference/physics_transient_peel.md X-pair load/radius relation plus both live implementations"
     },
     {
       "id": "CHITUBOX_DEFAULT_PLACEMENT_XY_MM",
@@ -463,12 +464,12 @@
     {
       "id": "DECIMATION_P999_FACTOR",
       "classification": "runtime_metric",
-      "normative": "03-physics-and-constants.md §3.7 = pixel_um/1000",
+      "normative": "03-physics-and-constants.md §3.7 = pixel_um/1000; Placeholder policy fraction",
       "source_locators": [
         "scripts/tools/decimate_pipeline.py:tol999"
       ],
-      "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived pixel-pitch policy"
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "non-AcceptSafe policy: arithmetic from measured pixel pitch does not establish the selected fraction"
     },
     {
       "id": "DECIMATION_P999_SAMPLE_POLICY",
@@ -483,12 +484,12 @@
     {
       "id": "DECIMATION_P99_FACTOR",
       "classification": "runtime_metric",
-      "normative": "03-physics-and-constants.md §3.7 = pixel_um/2000",
+      "normative": "03-physics-and-constants.md §3.7 = pixel_um/2000; Placeholder policy fraction",
       "source_locators": [
         "scripts/tools/decimate_pipeline.py:tol"
       ],
-      "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived pixel-pitch policy"
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "non-AcceptSafe policy: arithmetic from measured pixel pitch does not establish the selected fraction"
     },
     {
       "id": "DECIMATION_P99_SAMPLE_POLICY",
@@ -525,12 +526,12 @@
     {
       "id": "DECIMATION_RECHECK_SLACK",
       "classification": "runtime_metric",
-      "normative": "03-physics-and-constants.md §3.7 = 1.1",
+      "normative": "03-physics-and-constants.md §3.7 = 1.1; Placeholder recheck policy",
       "source_locators": [
         "scripts/tools/decimate_pipeline.py:full-population verification"
       ],
-      "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived policy"
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "non-AcceptSafe selected verification slack with no measurement or binding derivation"
     },
     {
       "id": "DECIMATION_SCALE_ACCEPTANCE_MM",
@@ -606,12 +607,12 @@
     {
       "id": "ENCLOSURE_PROOF_TOL_MM",
       "classification": "runtime_geometry",
-      "normative": "03-physics-and-constants.md §3.6 = 0.018 mm",
+      "normative": "03-physics-and-constants.md §3.6 = 0.018 mm; Placeholder authority",
       "source_locators": [
         "scripts/support_placement/joints.py:ENCLOSURE_PROOF_TOL_MM"
       ],
-      "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived diagnostic from Placeholder"
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "non-AcceptSafe: 0.9 arithmetic cannot improve the Placeholder authority of ENCLOSURE_TOL_MM"
     },
     {
       "id": "ENCLOSURE_TOL_MM",
@@ -646,12 +647,12 @@
     {
       "id": "EPS_COS",
       "classification": "runtime_numeric_guard",
-      "normative": "03-physics-and-constants.md §3.6 = 1e-9; not a physics floor",
+      "normative": "03-physics-and-constants.md §3.6 = 1e-9; Placeholder guard, not a physics floor",
       "source_locators": [
         "scripts/support_placement/verify.py:EPS_COS"
       ],
-      "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived divide-by-zero guard"
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "non-AcceptSafe selected numeric guard; no measurement or binding proof selects 1e-9"
     },
     {
       "id": "EXPECTED_CHITUBOX_API_VERSION",
@@ -953,12 +954,12 @@
     {
       "id": "ISLAND_ATTACH_REACH_MM",
       "classification": "runtime_perception",
-      "normative": "03-physics-and-constants.md §3.4 = 0.2 mm",
+      "normative": "03-physics-and-constants.md §3.4 = 0.2 mm; Placeholder tuning policy",
       "source_locators": [
         "scripts/support_placement/perception.py:ISLAND_ATTACH_REACH_MM"
       ],
-      "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived"
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "non-AcceptSafe tuning policy tied to a legacy Placeholder tip default"
     },
     {
       "id": "ISLAND_BIRTH_LINK_R_MM",
@@ -1004,12 +1005,13 @@
     {
       "id": "LAYER_HEIGHT_DEFAULT_MM",
       "classification": "runtime_printer_profile",
-      "normative": "03-physics-and-constants.md §3.7 = 0.050 mm",
+      "normative": "03-physics-and-constants.md §3.10.7 = Measured ProjectRecord saturn4-ultra-layer-profile-plate6, 0.050 mm, err null",
       "source_locators": [
-        "scripts/support_placement/config.py:layer_height_mm"
+        "scripts/support_placement/config.py:layer_height_mm",
+        "docs/reference/plate-06-results.md:§1 Provenance Layer height"
       ],
       "provenance_wrapper": "Measured",
-      "provenance_detail": "Measured ProjectRecord"
+      "provenance_detail": "Measured EvidenceSource kind=ProjectRecord id=saturn4-ultra-layer-profile-plate6 record=docs/reference/plate-06-results.md locator=§1 Layer height date=Exact(2026-07-30) err=null"
     },
     {
       "id": "LIFT_MM",
@@ -1035,12 +1037,14 @@
     {
       "id": "LOAD_SHARING",
       "classification": "runtime_physics",
-      "normative": "03-physics-and-constants.md §3.1 and §4.2 = Additive { n_eff_cap: 6.0 }, err null; note includes five caveats, orientation and B6 override citation",
+      "normative": "03-physics-and-constants.md §3.10.7 and §4.2 = Measured CalibrationPlate COUPON-PLATE-6-support-arm-capacity, Additive { n_eff_cap: 6.0 }, categorical err null; note includes all five caveats, orientation finding and B6 override citation",
       "source_locators": [
-        "docs/reference/plate-06-results.md:heading 5 Finding 1"
+        "docs/reference/plate-06-results.md:§5 Finding 1",
+        "docs/reference/plate-06-results.md:§6 B6 override record",
+        "docs/rust-migration/03-physics-and-constants.md:§4.2 five caveats"
       ],
       "provenance_wrapper": "Measured",
-      "provenance_detail": "Measured CalibrationPlate 6 Exact 2026-07-31"
+      "provenance_detail": "Measured EvidenceSource kind=CalibrationPlate plate=COUPON-PLATE-6-support-arm-capacity record=docs/reference/plate-06-results.md locator=§5 Finding 1 date=Exact(2026-07-31) err=null categorical; note carries §4.2 caveats 1-5, orientation Finding 3 and §6 B6 override citation"
     },
     {
       "id": "L_SCAR_MAX_MM",
@@ -1076,12 +1080,12 @@
     {
       "id": "MAX_SEGMENT_ANGLE_DEG",
       "classification": "runtime_gate",
-      "normative": "03-physics-and-constants.md §3.5 = 45.0 deg",
+      "normative": "03-physics-and-constants.md §3.5 = 45.0 deg; Placeholder printability policy",
       "source_locators": [
         "scripts/support_placement/config.py:max_segment_angle_deg"
       ],
-      "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived"
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "non-AcceptSafe printability policy justified qualitatively but not measured or binding-derived"
     },
     {
       "id": "MAX_TRUNK_R_MM",
@@ -1097,32 +1101,32 @@
     {
       "id": "MAX_UNBRACED_SHAFT_R_MM",
       "classification": "runtime_tuning",
-      "normative": "03-physics-and-constants.md §3.2 = 0.9 mm",
+      "normative": "03-physics-and-constants.md §3.2 = 0.9 mm; Placeholder corpus-rationale policy",
       "source_locators": [
         "scripts/support_placement/config.py:max_unbraced_shaft_r_mm"
       ],
-      "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived corpus"
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "non-AcceptSafe corpus-rationale policy; observed shaft sizes do not derive the selected ceiling"
     },
     {
       "id": "MINIMA_BIRTH_MATCH_LAYERS",
       "classification": "runtime_perception",
-      "normative": "03-physics-and-constants.md §3.7 = 2.0 layers",
+      "normative": "03-physics-and-constants.md §3.7 = 2.0 layers; Placeholder corpus rule",
       "source_locators": [
         "scripts/support_placement/config.py:minima_birth_match_layers"
       ],
-      "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived corpus"
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "non-AcceptSafe corpus rule of thumb with selected headroom, not a measured boundary"
     },
     {
       "id": "MINIMA_CONNECT_LAYERS",
       "classification": "runtime_perception",
-      "normative": "03-physics-and-constants.md §3.7 = 2.0 layers",
+      "normative": "03-physics-and-constants.md §3.7 = 2.0 layers; Placeholder corpus rule",
       "source_locators": [
         "scripts/support_placement/config.py:minima_connect_layers"
       ],
-      "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived corpus"
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "non-AcceptSafe corpus rule of thumb with selected headroom, not a measured boundary"
     },
     {
       "id": "MINIMA_CONTACT_RADIUS_MM",
@@ -1137,12 +1141,14 @@
     {
       "id": "MINIMA_DROP_INTERIOR_FACES",
       "classification": "runtime_perception",
-      "normative": "03-physics-and-constants.md §3.7 = true",
+      "normative": "03-physics-and-constants.md §3.10.7 and §3.7 = Measured ProjectRecord minima-contact-fix-2026-07-24, true, err null",
       "source_locators": [
-        "scripts/support_placement/config.py:minima_drop_interior_faces"
+        "scripts/support_placement/config.py:minima_drop_interior_faces",
+        "docs/reference/acceptance-run-2026-07-24-contactfix.md:Provenance and What moved",
+        "docs/rust-migration/03-physics-and-constants.md:§3.7 minima booleans"
       ],
       "provenance_wrapper": "Measured",
-      "provenance_detail": "Measured ProjectRecord"
+      "provenance_detail": "Measured EvidenceSource kind=ProjectRecord id=minima-contact-fix-2026-07-24 record=docs/reference/acceptance-run-2026-07-24-contactfix.md locator=Provenance and What moved date=Exact(2026-07-24) err=null"
     },
     {
       "id": "MINIMA_EPS_MM",
@@ -1157,22 +1163,24 @@
     {
       "id": "MINIMA_REQUIRE_ISLAND_BIRTH",
       "classification": "runtime_perception",
-      "normative": "03-physics-and-constants.md §3.7 = true",
+      "normative": "03-physics-and-constants.md §3.10.7 and §3.7 = Measured ProjectRecord minima-contact-fix-2026-07-24, true, err null",
       "source_locators": [
-        "scripts/support_placement/config.py:minima_require_island_birth"
+        "scripts/support_placement/config.py:minima_require_island_birth",
+        "docs/reference/acceptance-run-2026-07-24-contactfix.md:Provenance and What moved",
+        "docs/rust-migration/03-physics-and-constants.md:§3.7 minima booleans"
       ],
       "provenance_wrapper": "Measured",
-      "provenance_detail": "Measured ProjectRecord"
+      "provenance_detail": "Measured EvidenceSource kind=ProjectRecord id=minima-contact-fix-2026-07-24 record=docs/reference/acceptance-run-2026-07-24-contactfix.md locator=Provenance and What moved date=Exact(2026-07-24) err=null"
     },
     {
       "id": "MINIMA_SUPPORT_AREA_TIPS",
       "classification": "runtime_perception",
-      "normative": "03-physics-and-constants.md §3.7 = 1.0",
+      "normative": "03-physics-and-constants.md §3.7 = 1.0; Placeholder selected tuning policy in a flat sensitivity region",
       "source_locators": [
         "scripts/support_placement/config.py:minima_support_area_tips"
       ],
-      "provenance_wrapper": "Measured",
-      "provenance_detail": "Measured sensitivity sweep"
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "non-AcceptSafe selected tuning policy; a flat sensitivity region does not measure a boundary or preferred value"
     },
     {
       "id": "MIN_CONTACTS_PER_ISLAND",
@@ -1267,12 +1275,13 @@
     {
       "id": "N_EFF_CAP",
       "classification": "runtime_physics_parameter",
-      "normative": "03-physics-and-constants.md §4.2 = 6.0; part of LOAD_SHARING note, not a separate measurement",
+      "normative": "03-physics-and-constants.md §3.10.7 and §4.2 = Derived 6.0 from=[LOAD_SHARING]",
       "source_locators": [
-        "docs/reference/plate-06-results.md:heading 5 Finding 1"
+        "docs/reference/plate-06-results.md:§5 Finding 1",
+        "docs/rust-migration/03-physics-and-constants.md:§4.2 n_eff_cap"
       ],
       "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived plate-6 design-grid choice"
+      "provenance_detail": "Derived from=[LOAD_SHARING] relation=n_eff_cap is the measured Additive payload's largest tested group size, 6.0; not a separate measurement"
     },
     {
       "id": "ON_AXIS_TOL_MM",
@@ -1297,12 +1306,12 @@
     {
       "id": "OVERHANG_ANGLE_DEG",
       "classification": "runtime_perception",
-      "normative": "03-physics-and-constants.md §3.4 = 45.0 deg",
+      "normative": "03-physics-and-constants.md §3.4 = 45.0 deg; Placeholder tool convention",
       "source_locators": [
         "scripts/support_placement/config.py:overhang_angle_deg"
       ],
-      "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived ChituBox convention"
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "non-AcceptSafe legacy tool convention; it is not a measurement or binding derivation"
     },
     {
       "id": "P8_BALL_SLIDE_MAX_MM",
@@ -1327,13 +1336,14 @@
     {
       "id": "P8_CHORD_CANON_MICRON",
       "classification": "runtime_determinism",
-      "normative": "03-physics-and-constants.md §3.10.4 = 1 micron; phase8_driver fallback agrees",
+      "normative": "03-physics-and-constants.md §3.10.7 = Measured CorpusStudy phase8-micron-chord-canonicalization-2026-07-24, integer micron, err null",
       "source_locators": [
         "scripts/support_placement/config.py:p8_chord_canon_micron",
-        "scripts/support_placement/phase8_driver.py:run_phase8 p8_chord_canon_micron fallback 1"
+        "scripts/support_placement/phase8_driver.py:run_phase8 p8_chord_canon_micron fallback 1",
+        "docs/specs/SPEC-P8-RELOCATE.md:§5.3 Layer 3 amendment G"
       ],
-      "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived"
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured EvidenceSource kind=CorpusStudy id=phase8-micron-chord-canonicalization-2026-07-24 record=docs/specs/SPEC-P8-RELOCATE.md locator=§5.3 Layer 3 amendment G date=Exact(2026-07-24) err=null; f64 chords canonicalize to integer microns"
     },
     {
       "id": "P8_JUNCTION_RESEAT_ENABLE",
@@ -1437,12 +1447,13 @@
     {
       "id": "P8_POCKET_VOXEL_MM",
       "classification": "runtime_search",
-      "normative": "03-physics-and-constants.md §3.10 = 6.0 mm",
+      "normative": "03-physics-and-constants.md §3.10.7 = Measured OwnerDecision p8-pocket-voxel-owner-decision, 6.0 mm, err null",
       "source_locators": [
-        "scripts/support_placement/config.py:p8_pocket_voxel_mm"
+        "scripts/support_placement/config.py:p8_pocket_voxel_mm",
+        "docs/specs/SPEC-P8-RELOCATE.md:§4.1 Pocket detection"
       ],
-      "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived"
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured EvidenceSource kind=OwnerDecision id=p8-pocket-voxel-owner-decision record=docs/specs/SPEC-P8-RELOCATE.md locator=§4.1 date=Exact(2026-07-25) err=null"
     },
     {
       "id": "P8_REAIM_AZIMUTH_DEG",
@@ -1681,22 +1692,24 @@
     {
       "id": "PIXEL_PITCH_X_UM",
       "classification": "runtime_printer_profile",
-      "normative": "03-physics-and-constants.md §3.7 = 14 um",
+      "normative": "03-physics-and-constants.md §3.10.7 = Measured VendorDocument elegoo-saturn4-ultra-16k-press-2025-01-22, project X=14 um, err null",
       "source_locators": [
-        "docs/datasheets/printers/saturn-4-ultra-16k.md:Physical parameters XY pixel pitch row"
+        "docs/datasheets/printers/saturn-4-ultra-16k.md:§Physical parameters XY pixel pitch row",
+        "docs/datasheets/printers/saturn-4-ultra-16k.md:§Derived project axis mapping"
       ],
       "provenance_wrapper": "Measured",
-      "provenance_detail": "Measured VendorDocument"
+      "provenance_detail": "Measured EvidenceSource kind=VendorDocument id=elegoo-saturn4-ultra-16k-press-2025-01-22 record=docs/datasheets/printers/saturn-4-ultra-16k.md locator=Physical parameters plus project axis mapping date=Exact(2025-01-22) err=null; retrieval 2026-07-31 is metadata; vendor first pitch maps explicitly to project X"
     },
     {
       "id": "PIXEL_PITCH_Y_UM",
       "classification": "runtime_printer_profile",
-      "normative": "03-physics-and-constants.md §3.7 = 19 um",
+      "normative": "03-physics-and-constants.md §3.10.7 = Measured VendorDocument elegoo-saturn4-ultra-16k-press-2025-01-22, project Y=19 um, err null",
       "source_locators": [
-        "docs/datasheets/printers/saturn-4-ultra-16k.md:Physical parameters XY pixel pitch row"
+        "docs/datasheets/printers/saturn-4-ultra-16k.md:§Physical parameters XY pixel pitch row",
+        "docs/datasheets/printers/saturn-4-ultra-16k.md:§Derived project axis mapping"
       ],
       "provenance_wrapper": "Measured",
-      "provenance_detail": "Measured VendorDocument"
+      "provenance_detail": "Measured EvidenceSource kind=VendorDocument id=elegoo-saturn4-ultra-16k-press-2025-01-22 record=docs/datasheets/printers/saturn-4-ultra-16k.md locator=Physical parameters plus project axis mapping date=Exact(2025-01-22) err=null; retrieval 2026-07-31 is metadata; vendor second pitch maps explicitly to project Y"
     },
     {
       "id": "PLATE_BAND_MM",
@@ -1712,12 +1725,13 @@
     {
       "id": "PRINT_FLOOR_CHORD_MM",
       "classification": "runtime_gate",
-      "normative": "03-physics-and-constants.md §3.6 = 0.08 mm",
+      "normative": "03-physics-and-constants.md §3.10.7 = Measured OwnerDecision print-floor-owner-decision-2026-07-24, 0.08 mm, err null",
       "source_locators": [
-        "scripts/support_placement/verify.py:PRINT_FLOOR_CHORD_MM"
+        "scripts/support_placement/verify.py:PRINT_FLOOR_CHORD_MM",
+        "docs/specs/SPEC-EMBED-POLICY.md:PRINT-FLOOR amendment and Normative constants"
       ],
-      "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived owner-ratified"
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured EvidenceSource kind=OwnerDecision id=print-floor-owner-decision-2026-07-24 record=docs/specs/SPEC-EMBED-POLICY.md locator=PRINT-FLOOR amendment and Normative constants date=Exact(2026-07-24) err=null"
     },
     {
       "id": "PULL_DIST_MM",
@@ -1792,42 +1806,45 @@
     {
       "id": "SATURN_BUILD_VOLUME_MM",
       "classification": "runtime_printer_profile",
-      "normative": "03-physics-and-constants.md §3.7 = X/Y/Z 211.68/118.37/220 mm",
+      "normative": "03-physics-and-constants.md §3.10.7 = Measured VendorDocument elegoo-saturn4-ultra-16k-press-2025-01-22, project X/Y/Z=211.68/118.37/220 mm, err null",
       "source_locators": [
-        "docs/datasheets/printers/saturn-4-ultra-16k.md:Physical parameters Build volume row"
+        "docs/datasheets/printers/saturn-4-ultra-16k.md:§Physical parameters Build volume row",
+        "docs/datasheets/printers/saturn-4-ultra-16k.md:§Derived project axis mapping"
       ],
       "provenance_wrapper": "Measured",
-      "provenance_detail": "Measured VendorDocument"
+      "provenance_detail": "Measured EvidenceSource kind=VendorDocument id=elegoo-saturn4-ultra-16k-press-2025-01-22 record=docs/datasheets/printers/saturn-4-ultra-16k.md locator=Physical parameters plus project axis mapping date=Exact(2025-01-22) err=null; retrieval 2026-07-31 is metadata; vendor first/second/third dimensions map explicitly to project X/Y/Z"
     },
     {
       "id": "SATURN_LEADING_RELEASE_EDGE",
       "classification": "runtime_printer_profile",
-      "normative": "03-physics-and-constants.md §3.7 = NegativeY",
+      "normative": "03-physics-and-constants.md §3.10.7 = Measured ProjectRecord saturn4-ultra-release-front-plate6, NegativeY, err null",
       "source_locators": [
-        "docs/rust-migration/03-physics-and-constants.md:heading 3.7 Printer profile"
+        "docs/rust-migration/03-physics-and-constants.md:§3.7 release-front kinematics",
+        "docs/reference/plate-06-results.md:§1 Provenance Printer"
       ],
       "provenance_wrapper": "Measured",
-      "provenance_detail": "Measured ProjectRecord"
+      "provenance_detail": "Measured EvidenceSource kind=ProjectRecord id=saturn4-ultra-release-front-plate6 record=docs/reference/plate-06-results.md locator=§1 Printer date=Exact(2026-07-31) err=null; leading release edge is project NegativeY"
     },
     {
       "id": "SATURN_RELEASE_FILM_THICKNESS_MM",
       "classification": "runtime_printer_profile",
-      "normative": "03-physics-and-constants.md §3.7 = 0.127 mm official Elegoo PFA",
+      "normative": "03-physics-and-constants.md §3.10.7 = Measured InstalledHardware saturn4-ultra-pfa-install-2026-07-25, 0.127 mm PFA, err null",
       "source_locators": [
-        "docs/rust-migration/03-physics-and-constants.md:heading 3.7 release film row"
+        "docs/rust-migration/03-physics-and-constants.md:§3.7 release film"
       ],
       "provenance_wrapper": "Measured",
-      "provenance_detail": "Measured InstalledHardware"
+      "provenance_detail": "Measured EvidenceSource kind=InstalledHardware id=saturn4-ultra-pfa-install-2026-07-25 record=docs/rust-migration/03-physics-and-constants.md locator=§3.7 release film date=Exact(2026-07-25) err=null; nominal thickness identifies installed hardware and is not peel evidence"
     },
     {
       "id": "SATURN_RELEASE_FRONT_SWEEP_DIRECTION",
       "classification": "runtime_printer_profile",
-      "normative": "03-physics-and-constants.md §3.7 = PositiveY; front moves -Y to +Y",
+      "normative": "03-physics-and-constants.md §3.10.7 = Measured ProjectRecord saturn4-ultra-release-front-plate6, PositiveY, err null",
       "source_locators": [
-        "docs/rust-migration/03-physics-and-constants.md:heading 3.7 Printer profile"
+        "docs/rust-migration/03-physics-and-constants.md:§3.7 release-front kinematics",
+        "docs/reference/plate-06-results.md:§1 Provenance Printer"
       ],
       "provenance_wrapper": "Measured",
-      "provenance_detail": "Measured ProjectRecord"
+      "provenance_detail": "Measured EvidenceSource kind=ProjectRecord id=saturn4-ultra-release-front-plate6 record=docs/reference/plate-06-results.md locator=§1 Printer date=Exact(2026-07-31) err=null; release front sweeps project PositiveY from -Y to +Y"
     },
     {
       "id": "SCAR_COST_WEIGHT",
@@ -1842,22 +1859,22 @@
     {
       "id": "SPACING_FLOOR_MM",
       "classification": "runtime_placement",
-      "normative": "03-physics-and-constants.md §3.4 = 2.5 mm",
+      "normative": "03-physics-and-constants.md §3.4 = 2.5 mm; Placeholder ergonomics policy",
       "source_locators": [
         "scripts/support_placement/config.py:spacing_floor_mm"
       ],
-      "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived"
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "non-AcceptSafe removal-ergonomics policy selected without measurement"
     },
     {
       "id": "STANDOFF_MM",
       "classification": "runtime_routing",
-      "normative": "03-physics-and-constants.md §3.5 = 0.6 mm",
+      "normative": "03-physics-and-constants.md §3.5 = 0.6 mm; Placeholder clearance policy",
       "source_locators": [
         "scripts/support_placement/config.py:standoff_mm"
       ],
-      "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived"
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "non-AcceptSafe legacy clearance policy; corpus use does not derive the selected distance"
     },
     {
       "id": "STRUT_FALLBACK_MAX_ANGLE_DEG",
@@ -1872,12 +1889,12 @@
     {
       "id": "STRUT_MAX_LENGTH_MM",
       "classification": "runtime_routing",
-      "normative": "03-physics-and-constants.md §3.5 = 20.0 mm",
+      "normative": "03-physics-and-constants.md §3.5 = 20.0 mm; Placeholder corpus-rationale policy",
       "source_locators": [
         "scripts/support_placement/config.py:strut_max_length_mm"
       ],
-      "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived measurement"
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "non-AcceptSafe corpus-rationale policy; observed anchor outcomes do not establish a safe maximum"
     },
     {
       "id": "STRUT_MIN_LENGTH_SAVED_MM",
@@ -1932,16 +1949,6 @@
       "provenance_detail": "Placeholder"
     },
     {
-      "id": "SURFACE_PITCH_BOUND_PERCENTILE",
-      "classification": "runtime_routing",
-      "normative": "03-physics-and-constants.md §3.5 = 99.0",
-      "source_locators": [
-        "scripts/support_placement/config.py:surface_pitch_bound_percentile"
-      ],
-      "provenance_wrapper": "Measured",
-      "provenance_detail": "Measured corpus"
-    },
-    {
       "id": "SURFACE_TREE_MAX_POINTS",
       "classification": "runtime_sampled_surface",
       "provenance_wrapper": "Placeholder",
@@ -1974,12 +1981,12 @@
     {
       "id": "TARGET_SPACING_MM",
       "classification": "runtime_placement",
-      "normative": "03-physics-and-constants.md §3.4 = 4.0 mm",
+      "normative": "03-physics-and-constants.md §3.4 = 4.0 mm; Placeholder corpus-rationale policy",
       "source_locators": [
         "scripts/support_placement/config.py:target_spacing_mm"
       ],
-      "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived corpus"
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "non-AcceptSafe corpus-rationale policy: observed sufficiency does not derive an optimum or boundary"
     },
     {
       "id": "TENSILE_GREEN_MPA",
@@ -2004,12 +2011,12 @@
     {
       "id": "TIP_DIAMETER_MIN_ALLOWED_MM",
       "classification": "runtime_validation",
-      "normative": "03-physics-and-constants.md §3.2 = 0.150 mm",
+      "normative": "03-physics-and-constants.md §3.10.7 and §3.2 = Measured OwnerDecision tip-diameter-floor-owner-decision, 0.150 mm, err null",
       "source_locators": [
         "docs/rust-migration/03-physics-and-constants.md:heading 3.2 Arm / tip geometry"
       ],
       "provenance_wrapper": "Measured",
-      "provenance_detail": "Measured OwnerDecision"
+      "provenance_detail": "Measured EvidenceSource kind=OwnerDecision id=tip-diameter-floor-owner-decision record=docs/rust-migration/03-physics-and-constants.md locator=§3.2 date=OnOrBefore(2026-07-31) err=null"
     },
     {
       "id": "TIP_RADIUS_DEFAULT_MM",
@@ -2034,12 +2041,12 @@
     {
       "id": "TIP_RADIUS_MIN_ALLOWED_MM",
       "classification": "runtime_validation",
-      "normative": "03-physics-and-constants.md §3.2 = 0.075 mm",
+      "normative": "03-physics-and-constants.md §3.10.7 and §3.2 = Derived TIP_DIAMETER_MIN_ALLOWED_MM/2 = 0.075 mm from=[TIP_DIAMETER_MIN_ALLOWED_MM]",
       "source_locators": [
         "docs/rust-migration/03-physics-and-constants.md:heading 3.2 Arm / tip geometry"
       ],
       "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived"
+      "provenance_detail": "Derived from=[TIP_DIAMETER_MIN_ALLOWED_MM] relation=TIP_DIAMETER_MIN_ALLOWED_MM/2=0.075 mm; proof=diameter-to-radius identity"
     },
     {
       "id": "TIP_SAFETY_FACTOR",
@@ -2064,12 +2071,12 @@
     {
       "id": "TRANSIENT_SHOOT_COUNT_EXPONENT",
       "classification": "runtime_transient",
-      "normative": "03-physics-and-constants.md §3.3 = N^0.125",
+      "normative": "03-physics-and-constants.md §3.3 = N^0.125; Placeholder inherited heuristic",
       "source_locators": [
         "scripts/support_placement/transient.py:r_transient_mm"
       ],
-      "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived v3"
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "non-AcceptSafe inherited v3 heuristic; multiplying exponents does not establish physical authority"
     },
     {
       "id": "TRUNK_SEARCH_DIRECTIONS",
@@ -2104,42 +2111,46 @@
     {
       "id": "VOXEL_PITCH_MM",
       "classification": "runtime_perception",
-      "normative": "03-physics-and-constants.md §3.4 = 0.4 mm",
+      "normative": "03-physics-and-constants.md §3.4 = 0.4 mm; Placeholder legacy working scale",
       "source_locators": [
         "scripts/support_placement/config.py:voxel_pitch_mm"
       ],
-      "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived v0"
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "non-AcceptSafe legacy working-scale policy inferred from one corpus run"
     },
     {
       "id": "X_ALLOWED",
       "classification": "runtime_physics",
-      "normative": "03-physics-and-constants.md §3.1 = 12.0",
+      "normative": "03-physics-and-constants.md §3.10.7 and §3.1 = Derived floor(lower(X_STAR_CONE)/2)=floor(25.00/2)=12 from=[X_STAR_CONE]",
       "source_locators": [
-        "docs/rust-migration/03-physics-and-constants.md:heading 1.4 How the constant is encoded today, and what Rust must do instead"
+        "docs/rust-migration/03-physics-and-constants.md:heading 1.4 How the constant is encoded today, and what Rust must do instead",
+        "docs/reference/plate-05-results.md:§5 Findings carried forward",
+        "docs/reference/plate-06-results.md:§5 Finding 2 margin check"
       ],
       "provenance_wrapper": "Derived",
-      "provenance_detail": "Derived from X_STAR_CONE"
+      "provenance_detail": "Derived from=[X_STAR_CONE] relation=floor(lower(X_STAR_CONE)/2)=floor(25.00/2)=12 by binding commitment and precedence; X_STAR_CYLINDER only checks margin 19.91/12=1.66x and is not a derivation input"
     },
     {
       "id": "X_STAR_CONE",
       "classification": "runtime_physics",
-      "normative": "03-physics-and-constants.md §3.1 = [25.00,25.34] inclusive/inclusive, err null",
+      "normative": "03-physics-and-constants.md §3.10.7 and §3.1 = Measured CalibrationPlate COUPON-PLATE-5-compliant-vs-stiff, [25.00,25.34] inclusive/inclusive, err null",
       "source_locators": [
-        "scripts/support_placement/config.py:plate-5 log comment at peel_pressure_pa"
+        "scripts/support_placement/config.py:plate-5 log comment at peel_pressure_pa",
+        "docs/reference/plate-05-results.md:§1 Provenance",
+        "docs/reference/plate-05-results.md:§5 Findings carried forward"
       ],
       "provenance_wrapper": "Measured",
-      "provenance_detail": "Measured CalibrationPlate 5 OnOrBefore 2026-07-30"
+      "provenance_detail": "Measured EvidenceSource kind=CalibrationPlate plate=COUPON-PLATE-5-compliant-vs-stiff record=docs/reference/plate-05-results.md locator=§1 and §5 date=OnOrBefore(2026-07-30) err=null interval"
     },
     {
       "id": "X_STAR_CYLINDER",
       "classification": "runtime_physics",
-      "normative": "03-physics-and-constants.md §3.1 = (19.91,30.48) exclusive/exclusive, err null",
+      "normative": "03-physics-and-constants.md §3.10.7 and §3.1 = Measured CalibrationPlate COUPON-PLATE-6-support-arm-capacity, (19.91,30.48) exclusive/exclusive, err null",
       "source_locators": [
-        "docs/reference/plate-06-results.md:heading Finding 2"
+        "docs/reference/plate-06-results.md:§5 Finding 2"
       ],
       "provenance_wrapper": "Measured",
-      "provenance_detail": "Measured CalibrationPlate 6 Exact 2026-07-31"
+      "provenance_detail": "Measured EvidenceSource kind=CalibrationPlate plate=COUPON-PLATE-6-support-arm-capacity record=docs/reference/plate-06-results.md locator=§5 Finding 2 date=Exact(2026-07-31) err=null interval"
     }
   ],
   "aliases": [
@@ -2276,6 +2287,15 @@
       "reason": "identical per-shaft pseudo-drag is not a physical law",
       "source_locators": [
         "scripts/support_placement/config.py:shaft_drag_force_n"
+      ]
+    },
+    {
+      "id": "SURFACE_PITCH_BOUND_PERCENTILE",
+      "reason": "retired/no-port from exact paths: sampled-cloud pitch uncertainty is identically zero under the exact triangle oracle",
+      "source_locators": [
+        "scripts/support_placement/config.py:surface_pitch_bound_percentile",
+        "docs/specs/SPEC-V5-GEOM.md:§2.1 pitch_bound_mm identically 0 for exact oracle",
+        "docs/specs/SPEC-V5-GEOM.md:§2.6 routing surface pitch bound RETIRED from exact paths"
       ]
     },
     {
