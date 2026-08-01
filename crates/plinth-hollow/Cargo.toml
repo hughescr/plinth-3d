@@ -1,0 +1,16 @@
+[package]
+name = "plinth-hollow"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+publish = false
+
+[dependencies]
+plinth-core = { path = "../plinth-core" }
+plinth-mesh = { path = "../plinth-mesh" }
+plinth-orient = { path = "../plinth-orient" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+plinth-decimate = { path = "../plinth-decimate" }
