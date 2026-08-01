@@ -23,7 +23,7 @@ pub mod testkit;
 use std::borrow::Cow;
 
 use mesh::Mesh;
-pub use queries::{Interval, NativeSurface};
+pub use queries::{BatchInputError, CastRaysBatch, Interval, NativeSurface, SphereBreachBatch};
 pub use vec3::V3;
 
 pub const KERNEL_API_VERSION: u32 = 1;

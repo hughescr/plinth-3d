@@ -1,7 +1,6 @@
-//! Pure-Rust unit tests: closed-form geometry cases + BVH structural
-//! properties (spec sec 6 items 8, R2). These exercise the geometry modules
-//! directly (no Python), using the crate's public-in-crate API via a tiny
-//! re-export shim in lib.rs test builds.
+//! Native unit tests: closed-form geometry cases + BVH structural properties
+//! (spec sec 6 items 8, R2). These exercise the geometry modules directly via
+//! the crate's testkit API.
 
 use geom_kernel::testkit::*;
 

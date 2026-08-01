@@ -32,6 +32,50 @@ pub struct Interval {
     pub ray: i32,
 }
 
+/// A companion input slice did not match its batch's authoritative length.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BatchInputError {
+    pub operation: &'static str,
+    pub field: &'static str,
+    pub expected: usize,
+    pub actual: usize,
+}
+
+impl BatchInputError {
+    fn require_len(
+        operation: &'static str,
+        field: &'static str,
+        expected: usize,
+        actual: usize,
+    ) -> Result<(), Self> {
+        if actual == expected {
+            Ok(())
+        } else {
+            Err(Self {
+                operation,
+                field,
+                expected,
+                actual,
+            })
+        }
+    }
+}
+
+impl std::fmt::Display for BatchInputError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{}: {} has {} items; expected {}",
+            self.operation, self.field, self.actual, self.expected
+        )
+    }
+}
+
+impl std::error::Error for BatchInputError {}
+
+pub type CastRaysBatch = (Vec<i64>, Vec<f64>, Vec<i64>);
+pub type SphereBreachBatch = (Vec<bool>, Vec<f64>, Vec<f64>);
+
 pub struct NativeSurface {
     pub mesh: Mesh,
     pub bvh: Bvh,
@@ -348,8 +392,9 @@ impl NativeSurface {
         origins: &[V3],
         dirs: &[V3],
         t_max: f64,
-    ) -> (Vec<i64>, Vec<f64>, Vec<i64>) {
+    ) -> Result<CastRaysBatch, BatchInputError> {
         let n = origins.len();
+        BatchInputError::require_len("cast_rays", "dirs", n, dirs.len())?;
         let per: Vec<(Vec<f64>, Vec<i64>)> = par::run(|| {
             (0..n)
                 .into_par_iter()
@@ -366,7 +411,7 @@ impl NativeSurface {
             f_all.extend_from_slice(fs);
             offsets.push(t_all.len() as i64);
         }
-        (offsets, t_all, f_all)
+        Ok((offsets, t_all, f_all))
     }
 
     // ---- segment / capsule minimum distance ------------------------------
@@ -521,8 +566,13 @@ impl NativeSurface {
         standoff: f64,
         inset0s: &[f64],
         inset1s: &[f64],
-    ) -> (Vec<f64>, Vec<V3>) {
+    ) -> Result<(Vec<f64>, Vec<V3>), BatchInputError> {
         let n = p0s.len();
+        BatchInputError::require_len("segment_clearance", "p1s", n, p1s.len())?;
+        BatchInputError::require_len("segment_clearance", "r0s", n, r0s.len())?;
+        BatchInputError::require_len("segment_clearance", "r1s", n, r1s.len())?;
+        BatchInputError::require_len("segment_clearance", "inset0s", n, inset0s.len())?;
+        BatchInputError::require_len("segment_clearance", "inset1s", n, inset1s.len())?;
         let res: Vec<(f64, V3)> = par::run(|| {
             (0..n)
                 .into_par_iter()
@@ -539,7 +589,7 @@ impl NativeSurface {
             clr.push(c);
             pt.push(p);
         }
-        (clr, pt)
+        Ok((clr, pt))
     }
 
     // ---- penetration intervals -------------------------------------------
@@ -710,9 +760,12 @@ impl NativeSurface {
         cap: usize,
         min_illegal_len_mm: f64,
         rays_all: bool,
-    ) -> Vec<Vec<Interval>> {
+    ) -> Result<Vec<Vec<Interval>>, BatchInputError> {
         let n = p0s.len();
-        par::run(|| {
+        BatchInputError::require_len("penetration_intervals_batch", "p1s", n, p1s.len())?;
+        BatchInputError::require_len("penetration_intervals_batch", "r0s", n, r0s.len())?;
+        BatchInputError::require_len("penetration_intervals_batch", "r1s", n, r1s.len())?;
+        Ok(par::run(|| {
             (0..n)
                 .into_par_iter()
                 .map(|i| {
@@ -729,7 +782,7 @@ impl NativeSurface {
                     )
                 })
                 .collect()
-        })
+        }))
     }
 
     // ---- sphere breach ----------------------------------------------------
@@ -892,8 +945,9 @@ impl NativeSurface {
         eps_mm: f64,
         half_deg: f64,
         n_cone: usize,
-    ) -> (Vec<bool>, Vec<f64>, Vec<f64>) {
+    ) -> Result<SphereBreachBatch, BatchInputError> {
         let n = centers.len();
+        BatchInputError::require_len("sphere_breach", "radii", n, radii.len())?;
         let res: Vec<(bool, f64, f64)> = par::run(|| {
             (0..n)
                 .into_par_iter()
@@ -908,7 +962,7 @@ impl NativeSurface {
             th.push(t);
             po.push(p);
         }
-        (br, th, po)
+        Ok((br, th, po))
     }
 
     // ---- exterior-face mask ----------------------------------------------

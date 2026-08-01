@@ -1,6 +1,6 @@
-//! Test-only helpers exposed for the integration tests in tests/. Not part of
-//! the Python-facing API. Provides deterministic synthetic meshes and
-//! brute-force references so the BVH / primitives can be checked in pure Rust.
+//! Test-only helpers exposed for the integration tests in tests/. Provides
+//! deterministic synthetic meshes and brute-force references so the BVH /
+//! primitives can be checked directly.
 
 use crate::bvh::Bvh;
 use crate::closest::closest_on_tri as _closest;
