@@ -1,7 +1,7 @@
 use plinth_core::{
     BoundKind, CalendarDate, ConstantDescriptor, ConstantId, ConstantValue, ConstantValueView,
-    ConstantsRegistry, Derived, EnumValue, EvidenceDate, EvidenceSource, FiniteInterval,
-    LoadSharing, Measured, Pending, Placeholder, PlateId, RegistryError, RegistryProvenanceClass,
+    ConstantsRegistry, Derived, EvidenceDate, EvidenceSource, FiniteInterval, LoadSharing,
+    Measured, Pending, Placeholder, PlateId, RegistryError, RegistryProvenanceClass,
     RegistryProvenanceView, ToConstantValue,
 };
 use std::collections::BTreeMap;
@@ -20,12 +20,12 @@ fn sample_descriptors() -> Vec<ConstantDescriptor> {
     let measured = Measured::new(-0.0_f64, measured_source(), Some(0.25), "measured note").unwrap();
     let derived = Derived::new(vec![2_i64, 1_i64], ["alpha|measured"], "computed | stable");
     let pending = Pending::new(false, true, PlateId::from("plate-next"), "choose branch");
-    let placeholder = Placeholder::new(EnumValue::new("negative_y").unwrap(), "guess <only>");
+    let placeholder = Placeholder::new(true, "guess <only>");
 
     vec![
         ConstantDescriptor::from_placeholder(
             ConstantId::from("gamma"),
-            "enum",
+            "1",
             "scalar",
             &placeholder,
         )
@@ -45,9 +45,9 @@ fn sample_descriptors() -> Vec<ConstantDescriptor> {
 }
 
 #[test]
-fn complete_batch_is_atomic_immutable_and_sorted() {
+fn batch_build_is_atomic_immutable_and_sorted() {
     let descriptors = sample_descriptors();
-    let registry = ConstantsRegistry::build_complete(descriptors.clone()).unwrap();
+    let registry = ConstantsRegistry::build_batch(descriptors.clone()).unwrap();
     assert_eq!(registry.len(), 4);
     assert!(!registry.is_empty());
     assert_eq!(
@@ -64,7 +64,7 @@ fn complete_batch_is_atomic_immutable_and_sorted() {
 
     let mut reversed = descriptors;
     reversed.reverse();
-    let reversed_registry = ConstantsRegistry::build_complete(reversed).unwrap();
+    let reversed_registry = ConstantsRegistry::build_batch(reversed).unwrap();
     assert_eq!(registry, reversed_registry);
     assert_eq!(
         registry.render_markdown(),
@@ -75,7 +75,7 @@ fn complete_batch_is_atomic_immutable_and_sorted() {
 #[test]
 fn duplicate_or_empty_batch_never_publishes_a_registry() {
     assert_eq!(
-        ConstantsRegistry::build_complete(Vec::new()),
+        ConstantsRegistry::build_batch(Vec::new()),
         Err(RegistryError::EmptyBatch)
     );
 
@@ -95,7 +95,7 @@ fn duplicate_or_empty_batch_never_publishes_a_registry() {
     )
     .unwrap();
     assert_eq!(
-        ConstantsRegistry::build_complete([first, second]),
+        ConstantsRegistry::build_batch([first, second]),
         Err(RegistryError::DuplicateConstantId {
             id: ConstantId::from("duplicate")
         })
@@ -103,7 +103,7 @@ fn duplicate_or_empty_batch_never_publishes_a_registry() {
 }
 
 #[test]
-fn every_constant_value_variant_converts_without_debug_fallbacks() {
+fn every_supported_constant_value_variant_converts_without_debug_fallbacks() {
     assert_eq!(
         true.to_constant_value().unwrap().view(),
         ConstantValueView::Bool(true)
@@ -120,16 +120,8 @@ fn every_constant_value_variant_converts_without_debug_fallbacks() {
     let ConstantValueView::FiniteScalar(value) = negative_zero.view() else {
         panic!("finite scalar converted to the wrong variant");
     };
-    assert_eq!(value.to_bits(), 0.0_f64.to_bits());
-    assert_eq!(
-        "text".to_constant_value().unwrap().view(),
-        ConstantValueView::Text("text")
-    );
-    let enumeration = EnumValue::new("positive_y").unwrap();
-    assert_eq!(
-        enumeration.to_constant_value().unwrap().view(),
-        ConstantValueView::Enumeration("positive_y")
-    );
+    assert_eq!(value.to_bits(), (-0.0_f64).to_bits());
+    assert_ne!(value.to_bits(), 0.0_f64.to_bits());
 
     let interval =
         FiniteInterval::new(1.0, 2.0, BoundKind::Exclusive, BoundKind::Inclusive).unwrap();
@@ -168,13 +160,16 @@ fn invalid_metadata_and_values_fail_before_batch_publication() {
         f64::NAN.to_constant_value(),
         Err(RegistryError::NonFiniteScalar)
     );
-    assert!(ConstantValue::text("").is_err());
-    assert!(ConstantValue::text(" text").is_err());
-    assert!(EnumValue::new("enum ").is_err());
     assert_eq!(
         ConstantValue::record([("field", true), ("field", false)]),
         Err(RegistryError::DuplicateRecordField {
             field: "field".to_owned()
+        })
+    );
+    assert_eq!(
+        ConstantValue::record([("bad\0field", true)]),
+        Err(RegistryError::ControlCharacter {
+            field: "record field"
         })
     );
 
@@ -192,6 +187,34 @@ fn invalid_metadata_and_values_fail_before_batch_publication() {
     assert!(
         ConstantDescriptor::from_derived(ConstantId::from("id"), "count", "scalar ", &valid)
             .is_err()
+    );
+    assert_eq!(
+        ConstantDescriptor::from_derived(ConstantId::from("bad\nid"), "count", "scalar", &valid),
+        Err(RegistryError::ControlCharacter {
+            field: "constant id"
+        })
+    );
+    assert_eq!(
+        ConstantDescriptor::from_derived(
+            ConstantId::from("bad_unit"),
+            "count\tper item",
+            "scalar",
+            &valid
+        ),
+        Err(RegistryError::ControlCharacter {
+            field: "constant unit"
+        })
+    );
+    assert_eq!(
+        ConstantDescriptor::from_derived(
+            ConstantId::from("bad_shape"),
+            "count",
+            "list\rshape",
+            &valid
+        ),
+        Err(RegistryError::ControlCharacter {
+            field: "constant shape"
+        })
     );
 
     let no_sources = Derived::new(1_i64, std::iter::empty::<&str>(), "note");
@@ -301,17 +324,95 @@ fn provenance_is_extracted_only_from_actual_wrappers() {
 
 #[test]
 fn markdown_renderer_is_exact_escaped_and_input_order_invariant() {
-    let registry = ConstantsRegistry::build_complete(sample_descriptors()).unwrap();
+    let registry = ConstantsRegistry::build_batch(sample_descriptors()).unwrap();
     assert_eq!(
         registry.render_markdown(),
         r##"# Constants Registry
 
 | ID | Value | Unit | Shape | Provenance |
 | --- | --- | --- | --- | --- |
-| alpha&#124;measured | 0.0 | mm&#124;s | scalar | measured(source=calibration_plate(plate="plate-1",record="records/evidence.md",locator="#row&#124;1",date=exact("2026-07-31")),err=0.25,note="measured note") |
-| beta | [2,1] | count | list[2] | derived(from=["alpha&#124;measured"],note="computed &#124; stable") |
-| delta | {"conservative":false,"optimistic":true} | 1 | branch | pending(conservative=false,optimistic=true,resolves_on="plate-next",question="choose branch") |
-| gamma | enum("negative_y") | enum | scalar | placeholder(note="guess &lt;only&gt;") |
+| alpha&#124;measured | -0.0 | mm&#124;s | scalar | measured(source=calibration&#95;plate(plate="plate-1",record="records/evidence.md",locator="#row&#124;1",date=exact("2026-07-31")),err=0.25,note="measured note") |
+| beta | &#91;2,1&#93; | count | list&#91;2&#93; | derived(from=&#91;"alpha&#124;measured"&#93;,note="computed &#124; stable") |
+| delta | {"conservative":false,"optimistic":true} | 1 | branch | pending(conservative=false,optimistic=true,resolves&#95;on="plate-next",question="choose branch") |
+| gamma | true | 1 | scalar | placeholder(note="guess &lt;only&gt;") |
 "##
     );
+}
+
+fn render_placeholder_scalar(value: f64) -> String {
+    let placeholder = Placeholder::new(value, "signed zero");
+    let descriptor = ConstantDescriptor::from_placeholder(
+        ConstantId::from("signed_zero"),
+        "1",
+        "scalar",
+        &placeholder,
+    )
+    .unwrap();
+    ConstantsRegistry::build_batch([descriptor])
+        .unwrap()
+        .render_markdown()
+}
+
+#[test]
+fn markdown_renderer_distinguishes_signed_zero() {
+    let negative = render_placeholder_scalar(-0.0);
+    let positive = render_placeholder_scalar(0.0);
+    assert_ne!(negative, positive);
+    assert!(negative.contains(" | -0.0 | "));
+    assert!(positive.contains(" | 0.0 | "));
+}
+
+fn render_placeholder_note(note: &str) -> String {
+    let placeholder = Placeholder::new(true, note);
+    let descriptor = ConstantDescriptor::from_placeholder(
+        ConstantId::from("control_safe"),
+        "1",
+        "scalar",
+        &placeholder,
+    )
+    .unwrap();
+    ConstantsRegistry::build_batch([descriptor])
+        .unwrap()
+        .render_markdown()
+}
+
+#[test]
+fn markdown_renderer_is_injective_and_emits_no_field_controls() {
+    let carriage_return = render_placeholder_note("left\rright");
+    let literal_escape = render_placeholder_note(r"left\rright");
+    let deleted_control = render_placeholder_note("leftright");
+    assert_ne!(carriage_return, literal_escape);
+    assert_ne!(carriage_return, deleted_control);
+    assert!(carriage_return.contains(r"left&#92;rright"));
+
+    let markdown_metacharacter = render_placeholder_note("left|right");
+    let literal_entity = render_placeholder_note("left&#124;right");
+    assert_ne!(markdown_metacharacter, literal_entity);
+    assert!(markdown_metacharacter.contains("left&#124;right"));
+    assert!(literal_entity.contains("left&amp;#124;right"));
+
+    let source = EvidenceSource::calibration_plate(
+        PlateId::from("plate\rcontrol"),
+        "records/evidence\titem.md",
+        "#row\ncontrol",
+        EvidenceDate::Unknown,
+    )
+    .unwrap();
+    let measured = Measured::new(1.0_f64, source, None::<f64>, "note\0with\u{7f}controls").unwrap();
+    let descriptor = ConstantDescriptor::from_measured(
+        ConstantId::from("source_control_safe"),
+        "1",
+        "scalar",
+        &measured,
+    )
+    .unwrap();
+    let markdown = ConstantsRegistry::build_batch([descriptor])
+        .unwrap()
+        .render_markdown();
+    assert!(markdown
+        .bytes()
+        .all(|byte| byte == b'\n' || !byte.is_ascii_control()));
+    assert!(markdown.contains(r"plate&#92;rcontrol"));
+    assert!(markdown.contains(r"evidence&#92;titem.md"));
+    assert!(markdown.contains(r"#row&#92;ncontrol"));
 }

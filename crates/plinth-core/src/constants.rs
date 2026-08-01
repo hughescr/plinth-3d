@@ -12,13 +12,15 @@ pub enum RegistryError {
     EmptyText { field: &'static str },
     #[error("{field} must not have leading or trailing whitespace")]
     SurroundingWhitespace { field: &'static str },
+    #[error("{field} must not contain control characters")]
+    ControlCharacter { field: &'static str },
     #[error("constant scalar values must be finite")]
     NonFiniteScalar,
     #[error("constant record contains duplicate field {field}")]
     DuplicateRecordField { field: String },
     #[error("derived provenance must name at least one source")]
     EmptyDerivedSources,
-    #[error("a complete constants-registry batch must not be empty")]
+    #[error("a constants-registry batch must not be empty")]
     EmptyBatch,
     #[error("duplicate constant id {id}")]
     DuplicateConstantId { id: ConstantId },
@@ -36,17 +38,15 @@ fn validated_text(value: impl Into<String>, field: &'static str) -> Result<Strin
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct EnumValue(String);
-
-impl EnumValue {
-    pub fn new(value: impl Into<String>) -> Result<Self, RegistryError> {
-        Ok(Self(validated_text(value, "enum value")?))
-    }
-
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
+fn validated_registry_text(
+    value: impl Into<String>,
+    field: &'static str,
+) -> Result<String, RegistryError> {
+    let value = validated_text(value, field)?;
+    if value.chars().any(char::is_control) {
+        Err(RegistryError::ControlCharacter { field })
+    } else {
+        Ok(value)
     }
 }
 
@@ -56,8 +56,11 @@ enum ConstantValueData {
     SignedInteger(i64),
     UnsignedInteger(u64),
     FiniteScalar(Finite),
+    #[allow(
+        dead_code,
+        reason = "reserved for explicit core-owned text conversions"
+    )]
     Text(String),
-    Enumeration(EnumValue),
     FiniteInterval(FiniteInterval),
     LoadSharing(LoadSharing),
     List(Vec<ConstantValue>),
@@ -79,7 +82,6 @@ pub enum ConstantValueView<'a> {
     UnsignedInteger(u64),
     FiniteScalar(f64),
     Text(&'a str),
-    Enumeration(&'a str),
     FiniteInterval(&'a FiniteInterval),
     LoadSharing(&'a LoadSharing),
     List(&'a [ConstantValue]),
@@ -103,21 +105,19 @@ impl ConstantValue {
     }
 
     pub fn finite_scalar(value: f64) -> Result<Self, RegistryError> {
-        let canonical = if value == 0.0 { 0.0 } else { value };
-        let value = Finite::new(canonical).map_err(|_| RegistryError::NonFiniteScalar)?;
+        let value = Finite::new(value).map_err(|_| RegistryError::NonFiniteScalar)?;
         Ok(Self(ConstantValueData::FiniteScalar(value)))
     }
 
-    pub fn text(value: impl Into<String>) -> Result<Self, RegistryError> {
-        Ok(Self(ConstantValueData::Text(validated_text(
+    #[allow(
+        dead_code,
+        reason = "reserved for explicit core-owned text conversions"
+    )]
+    fn core_text(value: impl Into<String>) -> Result<Self, RegistryError> {
+        Ok(Self(ConstantValueData::Text(validated_registry_text(
             value,
             "text value",
         )?)))
-    }
-
-    #[must_use]
-    pub fn enumeration(value: EnumValue) -> Self {
-        Self(ConstantValueData::Enumeration(value))
     }
 
     #[must_use]
@@ -150,7 +150,7 @@ impl ConstantValue {
     {
         let mut record = BTreeMap::new();
         for (key, value) in fields {
-            let key = validated_text(key, "record field")?;
+            let key = validated_registry_text(key, "record field")?;
             if record.contains_key(&key) {
                 return Err(RegistryError::DuplicateRecordField { field: key });
             }
@@ -167,7 +167,6 @@ impl ConstantValue {
             ConstantValueData::UnsignedInteger(value) => ConstantValueView::UnsignedInteger(*value),
             ConstantValueData::FiniteScalar(value) => ConstantValueView::FiniteScalar(value.get()),
             ConstantValueData::Text(value) => ConstantValueView::Text(value),
-            ConstantValueData::Enumeration(value) => ConstantValueView::Enumeration(value.as_str()),
             ConstantValueData::FiniteInterval(value) => ConstantValueView::FiniteInterval(value),
             ConstantValueData::LoadSharing(value) => ConstantValueView::LoadSharing(value),
             ConstantValueData::List(value) => ConstantValueView::List(value),
@@ -180,14 +179,13 @@ impl ConstantValue {
             ConstantValueData::FiniteScalar(value) if !value.get().is_finite() => {
                 Err(RegistryError::NonFiniteScalar)
             }
-            ConstantValueData::Text(value) => validated_text(value, "text value").map(|_| ()),
-            ConstantValueData::Enumeration(value) => {
-                validated_text(value.as_str(), "enum value").map(|_| ())
+            ConstantValueData::Text(value) => {
+                validated_registry_text(value, "text value").map(|_| ())
             }
             ConstantValueData::List(values) => values.iter().try_for_each(Self::validate),
             ConstantValueData::Record(fields) => {
                 for (key, value) in fields {
-                    validated_text(key, "record field")?;
+                    validated_registry_text(key, "record field")?;
                     value.validate()?;
                 }
                 Ok(())
@@ -211,6 +209,20 @@ mod sealed {
 /// The trait is sealed so unsupported domain values cannot silently degrade to
 /// arbitrary `Debug` strings. New domain types require an explicit core-owned
 /// conversion policy.
+///
+/// Generic strings are deliberately unsupported:
+///
+/// ```compile_fail
+/// use plinth_core::ToConstantValue;
+///
+/// let _ = String::from("not a typed domain value").to_constant_value();
+/// ```
+///
+/// ```compile_fail
+/// use plinth_core::ToConstantValue;
+///
+/// let _ = "not a typed domain value".to_constant_value();
+/// ```
 pub trait ToConstantValue: sealed::ConstantValueSource {
     fn to_constant_value(&self) -> Result<ConstantValue, RegistryError>;
 }
@@ -280,23 +292,12 @@ constant_value_conversion!(EffectiveArmCount, |value: &EffectiveArmCount| {
 constant_value_conversion!(MetricValue, |value: &MetricValue| {
     ConstantValue::finite_scalar(value.get())
 });
-constant_value_conversion!(String, |value: &String| ConstantValue::text(value.clone()));
-constant_value_conversion!(EnumValue, |value: &EnumValue| {
-    Ok(ConstantValue::enumeration(value.clone()))
-});
 constant_value_conversion!(FiniteInterval, |value: &FiniteInterval| {
     Ok(ConstantValue::finite_interval(*value))
 });
 constant_value_conversion!(LoadSharing, |value: &LoadSharing| {
     Ok(ConstantValue::load_sharing(*value))
 });
-
-impl sealed::ConstantValueSource for str {}
-impl ToConstantValue for str {
-    fn to_constant_value(&self) -> Result<ConstantValue, RegistryError> {
-        ConstantValue::text(self)
-    }
-}
 
 impl<T: ToConstantValue> sealed::ConstantValueSource for Vec<T> {}
 impl<T: ToConstantValue> ToConstantValue for Vec<T> {
@@ -651,8 +652,8 @@ impl ConstantDescriptor {
         let descriptor = Self {
             id,
             value,
-            unit: validated_text(unit, "constant unit")?,
-            shape: validated_text(shape, "constant shape")?,
+            unit: validated_registry_text(unit, "constant unit")?,
+            shape: validated_registry_text(shape, "constant shape")?,
             provenance,
         };
         descriptor.validate()?;
@@ -660,9 +661,9 @@ impl ConstantDescriptor {
     }
 
     fn validate(&self) -> Result<(), RegistryError> {
-        validated_text(self.id.as_str(), "constant id")?;
-        validated_text(&self.unit, "constant unit")?;
-        validated_text(&self.shape, "constant shape")?;
+        validated_registry_text(self.id.as_str(), "constant id")?;
+        validated_registry_text(&self.unit, "constant unit")?;
+        validated_registry_text(&self.shape, "constant shape")?;
         self.value.validate()?;
         self.provenance.validate()
     }
@@ -693,12 +694,14 @@ impl ConstantDescriptor {
     }
 }
 
-/// An immutable registry published only after a complete batch validates.
+/// An immutable registry published only after a declaration batch validates.
 ///
 /// This is the future global hook: one `LazyLock<Result<ConstantsRegistry,
-/// RegistryError>>` may gather the complete declaration batch and call
-/// `build_complete` once. This framework deliberately provides no global,
-/// `Default`, incremental registration, or mutation API.
+/// RegistryError>>` may gather a declaration batch and call `build_batch` once.
+/// This structural builder deliberately does not claim that the batch contains
+/// every expected constant; the future all-declarations task owns that check.
+/// The framework provides no global, `Default`, incremental registration, or
+/// mutation API.
 ///
 /// Incremental publication is intentionally not part of the public surface:
 ///
@@ -715,7 +718,7 @@ pub struct ConstantsRegistry {
 }
 
 impl ConstantsRegistry {
-    pub fn build_complete(
+    pub fn build_batch(
         descriptors: impl IntoIterator<Item = ConstantDescriptor>,
     ) -> Result<Self, RegistryError> {
         let mut descriptors = descriptors.into_iter().collect::<Vec<_>>();
@@ -794,7 +797,6 @@ fn format_constant_value(value: &ConstantValue) -> String {
         ConstantValueView::UnsignedInteger(value) => value.to_string(),
         ConstantValueView::FiniteScalar(value) => format_finite(value),
         ConstantValueView::Text(value) => quoted(value),
-        ConstantValueView::Enumeration(value) => format!("enum({})", quoted(value)),
         ConstantValueView::FiniteInterval(value) => format!(
             "interval(lower={},lower_bound={},upper={},upper_bound={})",
             format_finite(value.lower()),
@@ -939,8 +941,7 @@ const fn format_bound(bound: BoundKind) -> &'static str {
 }
 
 fn format_finite(value: f64) -> String {
-    let canonical = if value == 0.0 { 0.0 } else { value };
-    let mut formatted = canonical.to_string();
+    let mut formatted = value.to_string();
     if !formatted.contains(['.', 'e', 'E']) {
         formatted.push_str(".0");
     }
@@ -973,8 +974,18 @@ fn escape_markdown_cell(value: &str) -> String {
             '<' => output.push_str("&lt;"),
             '>' => output.push_str("&gt;"),
             '|' => output.push_str("&#124;"),
-            '\n' => output.push_str("<br>"),
-            '\r' => {}
+            '\\' => output.push_str("&#92;"),
+            '`' => output.push_str("&#96;"),
+            '*' => output.push_str("&#42;"),
+            '_' => output.push_str("&#95;"),
+            '[' => output.push_str("&#91;"),
+            ']' => output.push_str("&#93;"),
+            '~' => output.push_str("&#126;"),
+            character if character.is_control() => {
+                output.push_str("&#");
+                output.push_str(&(character as u32).to_string());
+                output.push(';');
+            }
             character => output.push(character),
         }
     }

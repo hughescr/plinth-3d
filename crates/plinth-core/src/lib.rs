@@ -24,9 +24,8 @@ pub use chord::{
     ChordParityError, ChordParityReport, ChordSource, MicronGranularity, MicronGranularityError,
 };
 pub use constants::{
-    ConstantDescriptor, ConstantValue, ConstantValueView, ConstantsRegistry, EnumValue,
-    RegistryError, RegistryProvenance, RegistryProvenanceClass, RegistryProvenanceView,
-    ToConstantValue,
+    ConstantDescriptor, ConstantValue, ConstantValueView, ConstantsRegistry, RegistryError,
+    RegistryProvenance, RegistryProvenanceClass, RegistryProvenanceView, ToConstantValue,
 };
 pub use cost::{
     CostError, CostVector, Fidelity, OptimizationError, OptimizationSummary, OrientationCost,
