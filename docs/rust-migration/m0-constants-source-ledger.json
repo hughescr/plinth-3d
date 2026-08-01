@@ -1512,7 +1512,9 @@
       "source_locators": [
         "scripts/support_placement/config.py:p8_reseat_enable",
         "scripts/support_placement/engine.py:relocate p8_reseat_enable fallback true",
-        "scripts/support_placement/phase8_driver.py:SurfaceSeedIndex.seeds_for p8_reseat_enable fallback true"
+        "scripts/support_placement/phase8_driver.py:SurfaceSeedIndex.seeds_for p8_reseat_enable fallback true",
+        "scripts/support_placement/phase8_driver.py:_relocation_sweep p8_reseat_enable fallback true",
+        "scripts/support_placement/phase8_driver.py:run_phase8 p8_reseat_enable fallback true"
       ],
       "normative": "03-physics-and-constants.md §3.10.4 = true; engine.relocate and SurfaceSeedIndex.seeds_for fallbacks agree",
       "provenance_detail": "surface reseat enable with consistent live true fallbacks"
