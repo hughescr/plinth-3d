@@ -511,7 +511,7 @@ fn exact_weld(points: &[[f64; 3]]) -> Result<WeldedView, TopologyError> {
                 let id =
                     u32::try_from(verts.len()).map_err(|_| TopologyError::VertexCountOverflow)?;
                 ids.insert(key, id);
-                verts.push(*point);
+                verts.push(canonical_zero_point(*point));
                 id
             }
         };
@@ -572,7 +572,7 @@ fn epsilon_weld(points: &[[f64; 3]], tolerance: f64) -> Result<WeldedView, Topol
                 let id =
                     u32::try_from(verts.len()).map_err(|_| TopologyError::VertexCountOverflow)?;
                 roots.insert(root, id);
-                verts.push(*point);
+                verts.push(canonical_zero_point(*point));
                 id
             }
         };
@@ -590,13 +590,18 @@ fn grid_cell(
     tolerance: f64,
     vertex: usize,
 ) -> Result<(i64, i64, i64), TopologyError> {
+    // The upper endpoint is exclusive: `+2^63` cannot be represented by an
+    // `i64`, while `-2^63` is its valid inclusive lower endpoint.
+    const GRID_CELL_MIN: f64 = -9_223_372_036_854_775_808.0;
+    const GRID_CELL_MAX_EXCLUSIVE: f64 = 9_223_372_036_854_775_808.0;
     let values = [
         point[0] / tolerance,
         point[1] / tolerance,
         point[2] / tolerance,
     ];
     for (axis, value) in values.iter().enumerate() {
-        if !value.is_finite() || *value < (i64::MIN + 1) as f64 || *value > (i64::MAX - 1) as f64 {
+        let cell = value.floor();
+        if !(GRID_CELL_MIN..GRID_CELL_MAX_EXCLUSIVE).contains(&cell) {
             return Err(TopologyError::GridCellOutOfRange {
                 vertex,
                 axis,
@@ -610,6 +615,10 @@ fn grid_cell(
         values[1].floor() as i64,
         values[2].floor() as i64,
     ))
+}
+
+fn canonical_zero_point(point: [f64; 3]) -> [f64; 3] {
+    point.map(|coordinate| if coordinate == 0.0 { 0.0 } else { coordinate })
 }
 
 fn find(parent: &mut [usize], node: usize) -> usize {

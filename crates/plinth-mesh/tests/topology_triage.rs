@@ -89,6 +89,31 @@ fn fingerprint_canonicalizes_signed_zero_but_welding_remains_an_explicit_choice(
         epsilon.source_vertex_to_welded()
     );
 
+    let signed_zero_tetra = Mesh::new(
+        vec![
+            [-0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+    )
+    .expect("finite tetra");
+    for policy in [WeldPolicy::ExactBits, WeldPolicy::Epsilon(1e-9)] {
+        let triaged = triage_components(&signed_zero_tetra, policy).expect("triaged tetra");
+        let representative = triaged
+            .mesh()
+            .verts()
+            .iter()
+            .find(|point| point[0] == 0.0 && point[1] == 0.0 && point[2] == 0.0)
+            .expect("zero representative");
+        assert_eq!(
+            representative[0].to_bits(),
+            0.0_f64.to_bits(),
+            "{policy:?} emits a positive-zero stored representative"
+        );
+    }
+
     let near = Mesh::new(
         vec![
             [0.0, 0.0, 0.0],
@@ -168,12 +193,37 @@ fn triage_settings_are_read_from_the_atomic_typed_m0_publication() {
 }
 
 #[test]
-fn huge_finite_coordinate_has_a_distinct_grid_range_error() {
-    let mesh = Mesh::new(
-        vec![[1e308, 0.0, 0.0], [1e308, 1.0, 0.0], [1e308, 0.0, 1.0]],
+fn epsilon_grid_enforces_the_exact_i64_bounds_without_saturating_casts() {
+    const TWO_TO_63: f64 = 9_223_372_036_854_775_808.0;
+    for coordinate in [TWO_TO_63 - 1024.0, -TWO_TO_63 + 2048.0, -TWO_TO_63] {
+        build_face_topology(&grid_mesh(coordinate), WeldPolicy::Epsilon(1.0))
+            .expect("an in-range grid cell");
+    }
+
+    for coordinate in [TWO_TO_63, 1e308, -1e308] {
+        let mesh = grid_mesh(coordinate);
+        assert!(matches!(
+            build_face_topology(&mesh, WeldPolicy::Epsilon(1.0)),
+            Err(TopologyError::GridCellOutOfRange {
+                vertex: 0,
+                axis: 0,
+                ..
+            })
+        ));
+    }
+}
+
+fn grid_mesh(x: f64) -> Mesh {
+    Mesh::new(
+        vec![[x, 0.0, 0.0], [x, 1.0, 0.0], [x, 0.0, 1.0]],
         vec![[0, 1, 2]],
     )
-    .expect("finite");
+    .expect("finite")
+}
+
+#[test]
+fn huge_finite_coordinate_has_a_distinct_grid_range_error() {
+    let mesh = grid_mesh(1e308);
     assert!(matches!(
         build_face_topology(&mesh, WeldPolicy::Epsilon(1e-300)),
         Err(TopologyError::GridCellOutOfRange {
