@@ -476,7 +476,8 @@ accept-safe dispositions.
 | `trunk_search_radii_mm` (343) | (0, 2, 4, 7, 10, 14, 19, 25) | mm | **P** | `plinth-support::cco` | |
 | `trunk_search_directions` (344) | 12 | — | **P** | `plinth-support::cco` | |
 | `shoot_max_xy_mm` / `trunk_max_shoots` (333/337) | 9.0 / 10 | mm / — | **P** | `plinth-support` (dead v3 — not ported) | v3-era; see `01-current-system.md` on dead v3 modules. |
-| `rewire_time_cap_s` (580) | 30.0 | s | **P — DO NOT PORT** | — | A wall-clock cap makes the optimizer non-deterministic: a faster implementation completes more moves before the cap fires and silently changes topology. Use a deterministic work budget (`perf_rewire_work_budget`) as the only mode. |
+| legacy `rewire_time_cap_s` (580) | 30.0 | s | **RETIRED — no-port** | — | A wall-clock cap makes the optimizer non-deterministic: a faster implementation completes more moves before the cap fires and silently changes topology. Rust has no wall-clock fallback. |
+| `REWIRE_WORK_BUDGET` (legacy alias `config.perf_rewire_work_budget`) | `TrialSetting<NonZeroU64>::Disabled` | move evaluations | **P** — disabled exact-search baseline | `plinth-support::rewire` | No numeric enabled budget is selected. `Disabled` runs exact search to convergence, never the retired 30-second fallback. Any future `Enabled` value must be deterministic, nonzero, and evidence-backed. |
 
 ### 3.4 Placement density and coverage
 
@@ -681,7 +682,7 @@ that coupled heuristic. Its independently useful enable default remains register
 | `P8_MAX_RELOCATE_SWEEPS` / `P8_MAX_RELOCATE_ROUNDS` / `P8_RESIZE_FIXED_POINT_MAX_ROUNDS` | 8 / 4 / 4 | canonical/config values and live engine/driver fallbacks agree |
 | `PERF_BEAM_K` / `PERF_ANCHOR_CAP` / `PERF_SEED_SPACING_FACTOR` | `TrialSetting<T>::Disabled`, **Placeholder** | B1–B3 disabled preserve the full-search baseline; no enabled value has been selected |
 | `PERF_FIX_ITER_CAPS` | `TrialSetting<T>::Disabled`, **Placeholder** | B4's nominal Python tuple has two fields but consumes only index 1; do not port the inert first field |
-| `PERF_REWIRE_WORK_BUDGET` | `TrialSetting<T>::Disabled`, **Placeholder** | B5 disabled falls back in Python to the banned nondeterministic 30-second wall-clock cap; historical inventory only and unreachable from Rust acceptance until a concrete deterministic budget exists |
+| `REWIRE_WORK_BUDGET` | `TrialSetting<NonZeroU64>::Disabled`, **Placeholder** | B5 disabled is the exact-search baseline with no wall-clock fallback; `config.perf_rewire_work_budget` is its legacy Python alias, not a second constant. No numeric enabled budget is selected; any future `Enabled` value must be deterministic, nonzero, and evidence-backed |
 | `PERF_GATE_EMIT_ON_VERIFY` | **retired/no-port** | the false compatibility switch does not survive: Rust always refuses blocking defects and canonical `EMIT_REQUIRE_PASSED_GATES_DEFAULT=true` is the sole emission gate |
 
 For B1–B5, any future enabled candidate remains experimental `Placeholder` and

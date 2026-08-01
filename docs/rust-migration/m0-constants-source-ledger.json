@@ -1647,17 +1647,6 @@
       "provenance_detail": "Python's nominal two-field tuple consumes only index 1; do not port inert index 0, and keep any enabled cap experimental and non-emittable pending corpus protocol and owner decision"
     },
     {
-      "id": "PERF_REWIRE_WORK_BUDGET",
-      "classification": "runtime_performance_trial",
-      "provenance_wrapper": "Placeholder",
-      "source_locators": [
-        "scripts/support_placement/config.py:perf_rewire_work_budget",
-        "scripts/support_placement/rewire.py:perf_rewire_work_budget"
-      ],
-      "normative": "03-physics-and-constants.md §3.10.4 = Placeholder TrialSetting<T>::Disabled; no concrete deterministic budget selected",
-      "provenance_detail": "historical inventory only while disabled because Python falls back to banned nondeterministic wall-clock stopping; unreachable from Rust acceptance until a corpus protocol and owner decision select a concrete deterministic budget"
-    },
-    {
       "id": "PERF_SEED_SPACING_FACTOR",
       "classification": "runtime_performance_trial",
       "provenance_wrapper": "Placeholder",
@@ -1796,12 +1785,13 @@
     {
       "id": "REWIRE_WORK_BUDGET",
       "classification": "runtime_search_cap",
-      "normative": "03-physics-and-constants.md §3.3 = deterministic replacement for retired wall-clock cap",
+      "normative": "03-physics-and-constants.md §3.3 and §3.10.4 = Placeholder TrialSetting<NonZeroU64>::Disabled; disabled exact-search baseline with no wall-clock fallback; no numeric enabled budget selected",
       "source_locators": [
-        "scripts/support_placement/config.py:perf_rewire_work_budget"
+        "scripts/support_placement/config.py:perf_rewire_work_budget",
+        "scripts/support_placement/rewire.py:perf_rewire_work_budget consumer and legacy wall-clock fallback"
       ],
       "provenance_wrapper": "Placeholder",
-      "provenance_detail": "Placeholder deterministic mode"
+      "provenance_detail": "Placeholder TrialSetting<NonZeroU64>::Disabled is the exact-search baseline; no numeric enabled budget is selected, Disabled never falls back to wall clock in Rust, and any future Enabled value must be deterministic, nonzero and evidence-backed"
     },
     {
       "id": "SATURN_BUILD_VOLUME_MM",
@@ -2171,6 +2161,15 @@
       ]
     },
     {
+      "alias": "config.perf_rewire_work_budget",
+      "canonical_id": "REWIRE_WORK_BUDGET",
+      "reason": "legacy Python B5 spelling names the same live disabled work-budget control, not a second constant; the nondeterministic wall-clock fallback is retired/no-port",
+      "source_locators": [
+        "scripts/support_placement/config.py:perf_rewire_work_budget",
+        "scripts/support_placement/rewire.py:perf_rewire_work_budget consumer and legacy wall-clock fallback"
+      ]
+    },
+    {
       "alias": "config.tip_r_min_mm",
       "canonical_id": "TIP_RADIUS_DEFAULT_MM",
       "reason": "legacy name is a generation default, not validator floor",
@@ -2277,9 +2276,10 @@
     },
     {
       "id": "REWIRE_TIME_CAP_S",
-      "reason": "wall-clock stopping changes topology across machines; use deterministic work budget",
+      "reason": "retired/no-port: the legacy 30-second wall-clock stop changes topology across machines; Rust Disabled runs exact search to convergence and never falls back to this cap",
       "source_locators": [
-        "scripts/support_placement/config.py:rewire_time_cap_s"
+        "scripts/support_placement/config.py:rewire_time_cap_s",
+        "scripts/support_placement/rewire.py:_stop_now legacy wall-clock fallback"
       ]
     },
     {
