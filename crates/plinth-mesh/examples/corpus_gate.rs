@@ -8,7 +8,11 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use plinth_mesh::{load_binary_stls, write_binary_stls, Mesh, WeldPolicy};
+use plinth_mesh::{
+    load_binary_stl, load_binary_stls, make_box_default, make_overhang_table, make_raking_blade,
+    make_thin_fin, make_toed_slab, write_binary_stl, write_binary_stls, Mesh, MeshError,
+    WeldPolicy,
+};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
@@ -128,6 +132,7 @@ fn run() -> Result<(), String> {
             Ok((out_dir.join(filename), mesh.clone()))
         })
         .collect::<Result<Vec<(PathBuf, Mesh)>, String>>()?;
+    verify_native_synthetic_builders(&out_dir, &loaded)?;
     write_binary_stls(&outputs)
         .map_err(|error| format!("could not write corpus-gate fresh disk artifacts: {error}"))?;
     let reread_paths = outputs
@@ -146,6 +151,72 @@ fn run() -> Result<(), String> {
         )
     })?;
     Ok(())
+}
+
+fn verify_native_synthetic_builders(out_dir: &Path, frozen: &[Mesh]) -> Result<(), String> {
+    type Builder = fn() -> Result<Mesh, MeshError>;
+    let builders: [Builder; 5] = [
+        make_box_default,
+        make_overhang_table,
+        make_toed_slab,
+        make_raking_blade,
+        make_thin_fin,
+    ];
+    for ((expected, frozen), builder) in EXPECTED.iter().zip(frozen).skip(2).take(5).zip(builders) {
+        let native = builder().map_err(|error| {
+            format!(
+                "native synthetic builder for {} failed: {error}",
+                expected.name
+            )
+        })?;
+        let wire_normalized = normalize_stl_wire(&native, expected.name)?;
+        let path = out_dir.join(format!("native-{}", expected.name));
+        write_binary_stl(&path, &wire_normalized).map_err(|error| {
+            format!(
+                "could not apply STL f32 wire normalization for native {}: {error}",
+                expected.name
+            )
+        })?;
+        let normalized = load_binary_stl(&path, WeldPolicy::None).map_err(|error| {
+            format!(
+                "could not fresh-decode normalized native {} STL: {error}",
+                expected.name
+            )
+        })?;
+        assert_mesh_bits_equal(
+            frozen,
+            &normalized,
+            &format!(
+                "native synthetic {} versus frozen Python STL",
+                expected.name
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+fn normalize_stl_wire(mesh: &Mesh, name: &str) -> Result<Mesh, String> {
+    let verts = mesh
+        .verts()
+        .iter()
+        .enumerate()
+        .map(|(vertex, coordinates)| {
+            let mut normalized = [0.0_f64; 3];
+            for axis in 0..3 {
+                let wire = coordinates[axis] as f32;
+                if !wire.is_finite() {
+                    return Err(format!(
+                        "native {name} vertex {vertex} axis {axis} cannot encode as finite STL f32"
+                    ));
+                }
+                normalized[axis] = f64::from(wire);
+            }
+            Ok(normalized)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Mesh::new(verts, mesh.tris().to_vec()).map_err(|error| {
+        format!("native {name} became invalid under STL wire normalization: {error}")
+    })
 }
 
 fn read_manifest(path: &Path) -> Result<Manifest, String> {

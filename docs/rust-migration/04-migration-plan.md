@@ -666,16 +666,17 @@ cargo test -p plinth-mesh -p plinth-voxel
 # signed EDT matches brute force on random grids; topology cut-flag fixtures
 
 cargo test -p plinth-mesh --test stl_roundtrip
-# ARRAY identity over every file in corpus/models/: read -> write -> read must return a
-# bit-identical vertex array and triangle index array IN THE SAME ORDER (f64 bits
-# preserved, no implicit weld, no reorder, no f32 downcast). NOT file-byte identity: the
-# 80-byte header, the per-facet normals and the attribute-count bytes are not part of the
-# contract. See section 0 above.
+# Self-contained binary-STL regression: source-order triangle soup, repeated
+# coordinates, signed zero, malformed input and lossy-f32 handling. It must
+# pass from a clean checkout without ignored corpus/models inputs.
 
 cargo run -p plinth-mesh --locked --example corpus_gate
 # The explicit provisioned-corpus audit. It structurally checks the committed
 # manifest's exact ordered eight-member binding and SHA-256s, then re-opens
-# fresh round-trip files from disk. It intentionally fails by named reason
+# fresh round-trip files from disk for every member; f64 vertex bits and
+# triangle-index order must match. It also wire-normalizes every native
+# synthetic builder and compares its complete ordered arrays to the
+# authoritative Python-generated STL. It intentionally fails by named reason
 # when ignored corpus/models inputs have not been provisioned.
 
 cargo test -p geom_kernel
