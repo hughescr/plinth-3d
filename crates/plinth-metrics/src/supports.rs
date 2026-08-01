@@ -129,6 +129,12 @@ pub enum SupportMetricError {
         expected: usize,
         actual: usize,
     },
+    #[error("model {source_index} arm {arm} record {support_record_index} was validated as a type-1 taper but is absent from the canonical taper map")]
+    ContactTaperMappingInvariant {
+        source_index: usize,
+        arm: usize,
+        support_record_index: usize,
+    },
     #[error("model {source_index} arm {arm} Voronoi area must be finite and nonnegative")]
     InvalidVoronoiArea { source_index: usize, arm: usize },
     #[error("model {source_index} arm {arm} has a nonpositive or nonfinite contact-tip radius")]
@@ -307,7 +313,11 @@ fn max_per_arm_x(
         let expected_taper_index = taper_records
             .iter()
             .position(|record_index| *record_index == input.support_record_index)
-            .expect("type-1 record was gathered from this support slice");
+            .ok_or(SupportMetricError::ContactTaperMappingInvariant {
+                source_index,
+                arm,
+                support_record_index: input.support_record_index,
+            })?;
         if input.taper_index != expected_taper_index {
             return Err(SupportMetricError::ContactTaperOrdinalMismatch {
                 source_index,

@@ -693,8 +693,48 @@ fn batch_rows_preserve_disk_model_order() {
     assert!(value(&rows[1], "resin_model") > value(&rows[0], "resin_model"));
 }
 
+fn raw_signed_tetra_volume(mesh: &plinth_metrics::Mesh) -> f64 {
+    mesh.triangles().iter().fold(0.0, |sum, triangle| {
+        let a = mesh.vertices()[triangle[0]];
+        let b = mesh.vertices()[triangle[1]];
+        let c = mesh.vertices()[triangle[2]];
+        let cross = [
+            b[1] * c[2] - b[2] * c[1],
+            b[2] * c[0] - b[0] * c[2],
+            b[0] * c[1] - b[1] * c[0],
+        ];
+        sum + (a[0] * cross[0] + a[1] * cross[1] + a[2] * cross[2]) / 6.0
+    })
+}
+
+fn raw_artifact_volumes_mm3(artifact: &DiskArtifact) -> (f64, f64) {
+    let model = artifact.models()[0].mesh();
+    let model_mm3 = raw_signed_tetra_volume(model);
+    let support_mm3 = artifact.models()[0]
+        .supports()
+        .iter()
+        .map(|support| raw_signed_tetra_volume(support.mesh()))
+        .sum();
+    (model_mm3, support_mm3)
+}
+
+fn sphere_contact_arms(artifact: &DiskArtifact) -> Vec<ContactArmInput> {
+    artifact.models()[0]
+        .supports()
+        .iter()
+        .enumerate()
+        .filter(|(_, support)| support.segment_type() == SegmentType::TAPER)
+        .enumerate()
+        .map(|(taper_index, (support_record_index, _))| ContactArmInput {
+            support_record_index,
+            taper_index,
+            voronoi_area_mm2: 0.0,
+        })
+        .collect()
+}
+
 #[test]
-fn ordered_batch_reopens_committed_sphere_without_a_producer_memory_escape_hatch() {
+fn committed_sphere_missing_contact_arm_inputs_fail_closed() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let sphere = root.join("corpus/baseline/Sphere.chitubox");
     assert!(
@@ -718,29 +758,120 @@ fn ordered_batch_reopens_committed_sphere_without_a_producer_memory_escape_hatch
             ..
         })
     ));
-    let analysis = plinth_metrics::analyze_artifact_topology(&artifact)
-        .expect("independent topology volume derivation over fresh Sphere disk data");
-    let model_mm3 = analysis.models[0]
-        .model
-        .shells
-        .iter()
-        .map(|shell| shell.signed_volume)
-        .sum::<f64>();
-    let support_mm3 = analysis.models[0]
-        .supports
-        .iter()
-        .flat_map(|support| support.shells.iter())
-        .map(|shell| shell.signed_volume)
-        .sum::<f64>();
+}
+
+#[test]
+fn committed_sphere_scores_complete_disk_taper_batch_and_matches_raw_oracle() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let sphere = root.join("corpus/baseline/Sphere.chitubox");
+    assert!(
+        sphere.is_file(),
+        "required committed Sphere artifact missing: {}",
+        sphere.display()
+    );
+    let artifact = reopen(&sphere, "Sphere");
+    let contact_arms = sphere_contact_arms(&artifact);
+    assert_eq!(
+        contact_arms
+            .iter()
+            .map(|arm| (arm.support_record_index, arm.taper_index))
+            .collect::<Vec<_>>(),
+        [(1, 0), (3, 1), (5, 2), (7, 3), (9, 4), (11, 5), (13, 6)],
+        "exact disk record/ordinal identities, not inferred planner memory"
+    );
+    let type_count = |segment_type| {
+        artifact.models()[0]
+            .supports()
+            .iter()
+            .filter(|support| support.segment_type() == segment_type)
+            .count()
+    };
+    assert_eq!(
+        [
+            (SegmentType::TAPER, type_count(SegmentType::TAPER)),
+            (SegmentType::JOINER, type_count(SegmentType::JOINER)),
+            (SegmentType::FLARE, type_count(SegmentType::FLARE)),
+            (
+                SegmentType::PAD_OR_BRIDGE,
+                type_count(SegmentType::PAD_OR_BRIDGE)
+            ),
+            (SegmentType::TIP, type_count(SegmentType::TIP)),
+            (SegmentType::SHAFT, type_count(SegmentType::SHAFT)),
+        ],
+        [
+            (SegmentType::TAPER, 7),
+            (SegmentType::JOINER, 7),
+            (SegmentType::FLARE, 7),
+            (SegmentType::PAD_OR_BRIDGE, 13),
+            (SegmentType::TIP, 7),
+            (SegmentType::SHAFT, 6),
+        ]
+    );
+    let rows = support_metric_rows(
+        &artifact,
+        &[SupportMetricInput {
+            source_index: 0,
+            contact_arms,
+        }],
+    )
+    .expect("complete disk-derived taper batch scores committed Sphere");
+    let row = &rows[0];
+    assert_eq!(
+        row.entries().map(|(id, _)| id.as_str().to_owned()),
+        SUPPORT_METRIC_ORDER.map(str::to_owned)
+    );
+    assert_eq!(value(row, "max_x"), 0.0);
+    assert_eq!(value(row, "support_count"), 47.0);
+    assert_eq!(value(row, "resin_model"), 4.174747768289511);
+    assert_eq!(value(row, "resin_support"), 0.09353672721774903);
+    assert_eq!(value(row, "resin_total"), 4.2682844955072605);
+
+    let (model_mm3, support_mm3) = raw_artifact_volumes_mm3(&artifact);
     // Pinned from committed corpus/baseline/Sphere.chitubox, re-opened above;
     // these are independently summed from raw signed tetrahedra, then mm^3
     // divided by the exact 1,000 mm^3/mL conversion.
-    assert_eq!(artifact.models()[0].supports().len(), 47);
     assert_eq!(model_mm3 / 1_000.0, 4.174747768289511);
     assert_eq!(support_mm3 / 1_000.0, 0.09353672721774903);
     assert_eq!(
         model_mm3 / 1_000.0 + support_mm3 / 1_000.0,
         4.2682844955072605
+    );
+
+    let source = Project::open(&sphere).expect("fresh typed container read of committed Sphere");
+    let mut records = source
+        .supports(0)
+        .expect("committed Sphere typed support records");
+    assert!(
+        records.pop().is_some(),
+        "mutation control removes one actual support record"
+    );
+    let mutation_temp = TempDir::new();
+    let mutated_path = mutation_temp
+        .path()
+        .join("sphere-minus-one-record.chitubox");
+    write_artifact(
+        &mutated_path,
+        &[(
+            source
+                .model_triangles(0)
+                .expect("committed Sphere model triangles"),
+            records,
+        )],
+    );
+    let mutated = reopen(&mutated_path, "Sphere-minus-one-record");
+    let (_, mutated_support_mm3) = raw_artifact_volumes_mm3(&mutated);
+    let mutated_rows = support_metric_rows(
+        &mutated,
+        &[SupportMetricInput {
+            source_index: 0,
+            contact_arms: sphere_contact_arms(&mutated),
+        }],
+    )
+    .expect("mutated record set remains a complete scoreable disk batch");
+    assert_ne!(support_mm3, mutated_support_mm3);
+    assert_ne!(
+        value(row, "resin_support"),
+        value(&mutated_rows[0], "resin_support")
     );
 }
 
