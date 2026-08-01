@@ -9,9 +9,10 @@
 //! kinds and f64 geometry; `plinth-emit` alone maps them to ChituBox record identities and f32.
 #![forbid(unsafe_code)]
 
-use plinth_core::{Finite, PositiveFinite};
+use geom_kernel::{NativeSurface, NativeSurfaceConfig};
+use plinth_core::{m0_constants, Finite, PositiveFinite};
 use plinth_hollow::HollowHistory;
-use plinth_mesh::Mesh;
+use plinth_mesh::{build_face_topology, Mesh, WeldPolicy};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -424,6 +425,294 @@ pub enum SupportError {
     InconsistentPrimitiveCount,
 }
 
+/// Stable identity of one legal source-face contact seat.
+///
+/// S0 assigns it directly from the source face id. Later placement can add a
+/// local row identity without severing the face provenance this value pins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ContactCandidateId(pub u64);
+
+/// A legal, exterior, down-facing contact seat on the one support input mesh.
+///
+/// `normal_mm` is deliberately the native surface normal for `face_id`, never
+/// a vertex normal. `supported_area_mm2` and `overhang_excess` are retained as
+/// evidence for the subsequent placement/load stages; S0 makes no placement
+/// decision from them.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContactCandidate {
+    pub id: ContactCandidateId,
+    pub face_id: u32,
+    pub point_mm: [f64; 3],
+    pub normal: [f64; 3],
+    pub supported_area_mm2: f64,
+    pub overhang_excess: f64,
+    pub delicacy: f64,
+}
+
+/// Immutable source-face candidate pool in deterministic source-face order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContactCandidatePool {
+    candidates: Vec<ContactCandidate>,
+}
+
+impl ContactCandidatePool {
+    #[must_use]
+    pub fn candidates(&self) -> &[ContactCandidate] {
+        &self.candidates
+    }
+
+    /// Stable FNV-1a digest for thread-count and integration checks.
+    #[must_use]
+    pub fn digest(&self) -> u64 {
+        const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+        const PRIME: u64 = 0x0000_0100_0000_01b3;
+        let mut state = OFFSET;
+        for candidate in &self.candidates {
+            for byte in candidate.id.0.to_le_bytes() {
+                state ^= u64::from(byte);
+                state = state.wrapping_mul(PRIME);
+            }
+            for byte in candidate.face_id.to_le_bytes() {
+                state ^= u64::from(byte);
+                state = state.wrapping_mul(PRIME);
+            }
+            for value in candidate
+                .point_mm
+                .iter()
+                .chain(candidate.normal.iter())
+                .chain(
+                    [
+                        candidate.supported_area_mm2,
+                        candidate.overhang_excess,
+                        candidate.delicacy,
+                    ]
+                    .iter(),
+                )
+            {
+                for byte in value.to_bits().to_le_bytes() {
+                    state ^= u64::from(byte);
+                    state = state.wrapping_mul(PRIME);
+                }
+            }
+        }
+        state
+    }
+}
+
+/// Perception inputs whose values are not globally registered constants.
+///
+/// The three behavioral thresholds are read from `plinth-core` by
+/// [`SupportPerceptionConfig::current`]. The column pitch is deliberately a
+/// local typed field: current Python fixes it at 1 mm but M0 has no registered
+/// authority for it yet, so this crate must not invent a second global owner.
+#[derive(Clone, Copy, Debug)]
+pub struct SupportPerceptionConfig<'a> {
+    pub plate_z_mm: Finite,
+    pub column_pitch_mm: PositiveFinite,
+    pub surface_grid_pitch_mm: PositiveFinite,
+    pub max_grid_bytes: usize,
+    /// Required face-order sidecar. S0 transports it; it does not recreate a
+    /// competing delicacy implementation.
+    pub delicacy_by_face: Option<&'a [f64]>,
+    overhang_angle_deg: PositiveFinite,
+    bridge_free_gap_mm: PositiveFinite,
+    near_plate_mm: PositiveFinite,
+}
+
+impl<'a> SupportPerceptionConfig<'a> {
+    /// Binds the current perception thresholds to their registered M0 values.
+    pub fn current(
+        plate_z_mm: Finite,
+        column_pitch_mm: PositiveFinite,
+        surface_grid_pitch_mm: PositiveFinite,
+        max_grid_bytes: usize,
+        delicacy_by_face: Option<&'a [f64]>,
+    ) -> Result<Self, SupportPerceptionError> {
+        let constants = m0_constants().map_err(|error| {
+            SupportPerceptionError::RegisteredConstantsUnavailable(error.to_string())
+        })?;
+        let placeholders = constants.placeholders();
+        Ok(Self {
+            plate_z_mm,
+            column_pitch_mm,
+            surface_grid_pitch_mm,
+            max_grid_bytes,
+            delicacy_by_face,
+            overhang_angle_deg: *placeholders.overhang_angle_deg().diagnostic(),
+            bridge_free_gap_mm: *placeholders.bridge_free_gap_mm().diagnostic(),
+            near_plate_mm: *placeholders.near_plate_mm().diagnostic(),
+        })
+    }
+}
+
+/// Named refusal modes for the S0 perception boundary.
+#[derive(Clone, Debug, Error, PartialEq)]
+pub enum SupportPerceptionError {
+    #[error("support perception requires a face-order delicacy sidecar")]
+    MissingDelicacySidecar,
+    #[error("delicacy sidecar has {actual} rows; support mesh has {expected} faces")]
+    DelicacyLength { expected: usize, actual: usize },
+    #[error("delicacy sidecar value {index} is not finite")]
+    NonFiniteDelicacy { index: usize },
+    #[error("support perception rejected strict mesh geometry: {0}")]
+    StrictMesh(String),
+    #[error("support perception rejected open or invalid topology at face {face} (cut flags {cut_flags:#x})")]
+    OpenOrInvalidTopology { face: usize, cut_flags: u8 },
+    #[error("support perception could not build the sole native surface: {0}")]
+    NativeSurface(String),
+    #[error("support perception column coordinate cannot be represented for face {face}")]
+    UnqueryableColumn { face: usize },
+    #[error("registered M0 constants are unavailable: {0}")]
+    RegisteredConstantsUnavailable(String),
+}
+
+/// Perceive legal regular-contact seats on the current hollowed or solid-fallback mesh.
+///
+/// This leaf is intentionally not a support plan and does not expose `run`.
+/// It first validates a closed strict mesh, then constructs exactly one
+/// `NativeSurface::from_indexed` authority. Candidate face centroids and their
+/// column ray origins are gathered before one native batched ray call and
+/// scattered back to source-face order.
+pub fn perceive_contacts(
+    mesh: &Mesh,
+    config: &SupportPerceptionConfig<'_>,
+) -> Result<ContactCandidatePool, SupportPerceptionError> {
+    mesh.audit_strict()
+        .map_err(|error| SupportPerceptionError::StrictMesh(error.to_string()))?;
+    let topology = build_face_topology(mesh, WeldPolicy::ExactBits)
+        .map_err(|error| SupportPerceptionError::StrictMesh(error.to_string()))?;
+    if let Some((face, &cut_flags)) = topology
+        .cut_flags()
+        .iter()
+        .enumerate()
+        .find(|(_, flags)| **flags != 0)
+    {
+        return Err(SupportPerceptionError::OpenOrInvalidTopology { face, cut_flags });
+    }
+
+    let delicacy = config
+        .delicacy_by_face
+        .ok_or(SupportPerceptionError::MissingDelicacySidecar)?;
+    if delicacy.len() != mesh.tris().len() {
+        return Err(SupportPerceptionError::DelicacyLength {
+            expected: mesh.tris().len(),
+            actual: delicacy.len(),
+        });
+    }
+    if let Some((index, _)) = delicacy
+        .iter()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+    {
+        return Err(SupportPerceptionError::NonFiniteDelicacy { index });
+    }
+
+    let surface = NativeSurface::from_indexed(
+        mesh.verts(),
+        mesh.tris(),
+        NativeSurfaceConfig {
+            grid_pitch_mm: config.surface_grid_pitch_mm.get(),
+            max_grid_bytes: config.max_grid_bytes,
+        },
+    )
+    .map_err(|error| SupportPerceptionError::NativeSurface(error.to_string()))?;
+    let geometry = surface.geometry();
+    let normals = geometry.normals();
+    let centroids = geometry.centroids();
+    let areas = geometry.areas();
+    let exterior = surface.exterior_face_mask();
+    let down_limit = -config.overhang_angle_deg.get().to_radians().sin();
+    let plate_z = config.plate_z_mm.get();
+    let near_plate = config.near_plate_mm.get();
+
+    let candidates: Vec<usize> = (0..surface.nfaces())
+        .filter(|&face| {
+            normals[face][2] < down_limit && exterior[face] && {
+                let plate_gap = centroids[face][2] - plate_z;
+                !(plate_gap >= 0.0 && plate_gap <= near_plate)
+            }
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Ok(ContactCandidatePool {
+            candidates: Vec::new(),
+        });
+    }
+
+    let xmin = candidates
+        .iter()
+        .map(|&face| centroids[face][0])
+        .fold(f64::INFINITY, f64::min);
+    let ymin = candidates
+        .iter()
+        .map(|&face| centroids[face][1])
+        .fold(f64::INFINITY, f64::min);
+    let pitch = config.column_pitch_mm.get();
+    let mut columns: std::collections::BTreeMap<(i64, i64), Vec<usize>> =
+        std::collections::BTreeMap::new();
+    for &face in &candidates {
+        let x = ((centroids[face][0] - xmin) / pitch).floor();
+        let y = ((centroids[face][1] - ymin) / pitch).floor();
+        if !x.is_finite()
+            || !y.is_finite()
+            || x < i64::MIN as f64
+            || x > i64::MAX as f64
+            || y < i64::MIN as f64
+            || y > i64::MAX as f64
+        {
+            return Err(SupportPerceptionError::UnqueryableColumn { face });
+        }
+        columns.entry((x as i64, y as i64)).or_default().push(face);
+    }
+    let bounds = geometry.bounds();
+    let ztop = bounds[1][2] + 1.0;
+    let t_max = ztop - bounds[0][2] + 1.0;
+    let origins: Vec<[f64; 3]> = columns
+        .keys()
+        .map(|&(x, y)| {
+            [
+                xmin + (x as f64 + 0.5) * pitch,
+                ymin + (y as f64 + 0.5) * pitch,
+                ztop,
+            ]
+        })
+        .collect();
+    let directions = vec![[0.0, 0.0, -1.0]; origins.len()];
+    let (offsets, hits, _) = surface
+        .cast_rays(&origins, &directions, t_max)
+        .map_err(|error| SupportPerceptionError::NativeSurface(error.to_string()))?;
+
+    let mut grounded = vec![false; surface.nfaces()];
+    for (column, faces) in columns.values().enumerate() {
+        let start = offsets[column] as usize;
+        let end = offsets[column + 1] as usize;
+        for &face in faces {
+            let face_z = centroids[face][2];
+            let below = hits[start..end]
+                .iter()
+                .map(|&t| ztop - t)
+                .filter(|&z| z < face_z - 1e-3)
+                .fold(f64::NEG_INFINITY, f64::max);
+            grounded[face] = below.is_finite() && face_z - below <= config.bridge_free_gap_mm.get();
+        }
+    }
+
+    let candidates = candidates
+        .into_iter()
+        .filter(|&face| !grounded[face])
+        .map(|face| ContactCandidate {
+            id: ContactCandidateId(face as u64),
+            face_id: face as u32,
+            point_mm: centroids[face],
+            normal: normals[face],
+            supported_area_mm2: areas[face],
+            overhang_excess: -normals[face][2] - down_limit.abs(),
+            delicacy: delicacy[face],
+        })
+        .collect();
+    Ok(ContactCandidatePool { candidates })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,6 +721,191 @@ mod tests {
     use plinth_hollow::{HollowDisposition, HollowReport};
     use plinth_orient::{BaselineSelection, OrientationHistory, OrientationReport, RigidTransform};
     use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    fn config<'a>(_mesh: &Mesh, delicacy: &'a [f64]) -> SupportPerceptionConfig<'a> {
+        SupportPerceptionConfig::current(
+            Finite::new(-5.0).expect("finite fixture plate"),
+            PositiveFinite::new(1.0).expect("positive fixture column pitch"),
+            PositiveFinite::new(0.5).expect("positive fixture native-grid pitch"),
+            usize::MAX,
+            Some(delicacy),
+        )
+        .expect("registered M0 constants are available")
+    }
+
+    fn perceive_fixture(mesh: &Mesh) -> ContactCandidatePool {
+        let delicacy = vec![0.25; mesh.tris().len()];
+        perceive_contacts(mesh, &config(mesh, &delicacy)).expect("closed fixture is perceptible")
+    }
+
+    #[test]
+    fn fixture_contacts_are_exterior_down_faces_in_source_order() {
+        for mesh in [
+            plinth_mesh::make_raking_blade().expect("raking blade"),
+            plinth_mesh::make_overhang_table().expect("overhang table"),
+            plinth_mesh::make_thin_fin().expect("thin fin"),
+        ] {
+            let pool = perceive_fixture(&mesh);
+            assert!(
+                !pool.candidates().is_empty(),
+                "fixture must retain a real underside contact candidate"
+            );
+            let mut previous = None;
+            for candidate in pool.candidates() {
+                assert!(candidate.normal[2] < -45_f64.to_radians().sin());
+                assert_eq!(candidate.id.0, u64::from(candidate.face_id));
+                assert!(candidate.supported_area_mm2 > 0.0);
+                assert!(candidate.overhang_excess > 0.0);
+                if let Some(face) = previous {
+                    assert!(face < candidate.face_id, "source face order is stable");
+                }
+                previous = Some(candidate.face_id);
+            }
+        }
+    }
+
+    #[test]
+    fn contact_normal_is_the_specific_shared_face_normal_not_vertex_average() {
+        let mesh = Mesh::new(
+            vec![
+                [-1.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 2.0],
+            ],
+            vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]],
+        )
+        .expect("closed tetrahedron");
+        let pool = perceive_fixture(&mesh);
+        let base = pool
+            .candidates()
+            .iter()
+            .find(|candidate| candidate.face_id == 0)
+            .expect("downward base is a candidate");
+        assert_eq!(base.normal, [0.0, 0.0, -1.0]);
+        assert_ne!(base.normal, [0.0, 0.0, -0.5]);
+    }
+
+    #[test]
+    fn exact_overhang_threshold_is_excluded_and_steeper_underside_is_included() {
+        let prism = |depth: f64| {
+            Mesh::new(
+                vec![
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [0.0, 0.0, -depth],
+                    [0.0, 1.0, 0.0],
+                    [1.0, 1.0, 0.0],
+                    [0.0, 1.0, -depth],
+                ],
+                vec![
+                    [0, 2, 1],
+                    [3, 4, 5],
+                    [0, 1, 4],
+                    [0, 4, 3],
+                    [0, 3, 5],
+                    [0, 5, 2],
+                    [1, 2, 5],
+                    [1, 5, 4],
+                ],
+            )
+            .expect("closed triangular prism")
+        };
+        assert!(perceive_fixture(&prism(1.0)).candidates().is_empty());
+        let steeper_mesh = prism(0.99);
+        let steeper = perceive_fixture(&steeper_mesh);
+        assert!(
+            steeper
+                .candidates()
+                .iter()
+                .any(|candidate| candidate.normal[2] < -45_f64.to_radians().sin()),
+            "{steeper:?}"
+        );
+    }
+
+    #[test]
+    fn near_plate_down_faces_are_excluded() {
+        let mesh = plinth_mesh::make_box_default().expect("closed box");
+        let delicacy = vec![0.0; mesh.tris().len()];
+        let config = SupportPerceptionConfig::current(
+            Finite::new(-1.0).expect("finite fixture plate"),
+            PositiveFinite::new(1.0).expect("positive fixture column pitch"),
+            PositiveFinite::new(0.5).expect("positive fixture native-grid pitch"),
+            usize::MAX,
+            Some(&delicacy),
+        )
+        .expect("registered M0 constants are available");
+        assert!(perceive_contacts(&mesh, &config)
+            .expect("closed box")
+            .candidates()
+            .is_empty());
+    }
+
+    #[test]
+    fn strict_open_and_missing_delicacy_inputs_fail_named() {
+        let open = Mesh::new(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[0, 1, 2]],
+        )
+        .expect("representable open triangle");
+        let delicacy = vec![0.0];
+        assert!(matches!(
+            perceive_contacts(&open, &config(&open, &delicacy)),
+            Err(SupportPerceptionError::OpenOrInvalidTopology { .. })
+        ));
+
+        let closed = plinth_mesh::make_box_default().expect("closed box");
+        let missing = SupportPerceptionConfig::current(
+            Finite::new(-5.0).expect("finite plate"),
+            PositiveFinite::new(1.0).expect("positive column pitch"),
+            PositiveFinite::new(0.5).expect("positive grid pitch"),
+            usize::MAX,
+            None,
+        )
+        .expect("registered constants");
+        assert!(matches!(
+            perceive_contacts(&closed, &missing),
+            Err(SupportPerceptionError::MissingDelicacySidecar)
+        ));
+
+        let degenerate = Mesh::new(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+            vec![[0, 1, 2]],
+        )
+        .expect("representable degenerate mesh");
+        let degenerate_delicacy = vec![0.0];
+        assert!(matches!(
+            perceive_contacts(&degenerate, &config(&degenerate, &degenerate_delicacy)),
+            Err(SupportPerceptionError::StrictMesh(_))
+        ));
+    }
+
+    #[test]
+    fn gathered_native_perception_is_thread_count_invariant() {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("test environment lock");
+        let previous = std::env::var_os("PLINTH_THREADS");
+        let mesh = plinth_mesh::make_overhang_table().expect("overhang table");
+        let delicacy = vec![0.75; mesh.tris().len()];
+        let mut digest = None;
+        for threads in ["1", "4", "16"] {
+            std::env::set_var("PLINTH_THREADS", threads);
+            let candidate_digest = perceive_contacts(&mesh, &config(&mesh, &delicacy))
+                .expect("closed fixture")
+                .digest();
+            assert_eq!(Some(candidate_digest), digest.or(Some(candidate_digest)));
+            digest = Some(candidate_digest);
+        }
+        if let Some(previous) = previous {
+            std::env::set_var("PLINTH_THREADS", previous);
+        } else {
+            std::env::remove_var("PLINTH_THREADS");
+        }
+    }
 
     #[test]
     fn consuming_scene_transition_moves_model_and_primitives_together() {
