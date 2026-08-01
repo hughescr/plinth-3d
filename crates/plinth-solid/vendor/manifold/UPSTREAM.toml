@@ -1,0 +1,49 @@
+name = "Manifold"
+version = "3.5.2"
+tag = "v3.5.2"
+commit = "11235e6b8ebea2dbed8aec4285685aafd3d95667"
+archive_url = "https://github.com/elalish/manifold/archive/11235e6b8ebea2dbed8aec4285685aafd3d95667.tar.gz"
+archive_sha256 = "4fa8ba091b4b905fe19f9acd550484640426c5f10ccc0e0100143aa89fa8f5b9"
+retrieved = "2026-07-31"
+license = "Apache-2.0"
+local_patches = []
+oracle_correspondence = "uv.lock pins manifold3d 3.5.2"
+
+[subset]
+root = ["CMakeLists.txt", "LICENSE", "AUTHORS"]
+recursive = ["include/manifold", "src"]
+excluded = [
+  "bindings",
+  "test",
+  "examples",
+  "docs",
+  "extras",
+  "third_party",
+  "submodules",
+  "generated build products",
+]
+
+[build]
+standard = "C++17"
+parallel_macro = "MANIFOLD_PAR=-1"
+cross_section = false
+translation_units = [
+  "boolean3.cpp",
+  "boolean_result.cpp",
+  "constructors.cpp",
+  "csg_tree.cpp",
+  "edge_op.cpp",
+  "execution_impl.cpp",
+  "face_op.cpp",
+  "impl.cpp",
+  "manifold.cpp",
+  "minkowski.cpp",
+  "polygon.cpp",
+  "properties.cpp",
+  "quickhull.cpp",
+  "sdf.cpp",
+  "smoothing.cpp",
+  "sort.cpp",
+  "subdivision.cpp",
+  "tree2d.cpp",
+]
