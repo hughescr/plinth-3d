@@ -514,9 +514,10 @@ accept-safe dispositions.
 
 ### 3.6 Embed / scar policy (SPEC-EMBED-POLICY)
 
-These are spec literals. They must be **bit-identical** to any independent audit
-implementation, which is the whole point: the engine gate and the audit count the
-same population from the same formulas without sharing code.
+These are spec literals. Every consumer and disk-first audit must use the same typed
+registry values; O-5 forbids hand-copied audit constants and algorithms. The engine
+gate and disk-first adapter count the same population through the sole implementation;
+fresh disk provenance and non-circular fixtures provide independent evidence.
 
 | Name | Value | Unit | Prov. | Rust owner | Notes |
 |---|---|---|---|---|---|
@@ -1239,12 +1240,12 @@ fresh reader.
    "per the module's style". Nothing enforces they stay equal. One typed constant
    in Rust.
 
-10. **Deliberate duplication that must be KEPT** — the SCAR-AREA-CAP and
-    PRINT-FLOOR constants are copied by hand into the independent audit
-    (`scripts/tools/census_run.py`) so the engine and the audit share no code.
-    That independence is the point. If a Rust-side independent audit survives the
-    port, keep the duplication **and add an automated equality assertion** so a
-    change in one place is caught rather than silently divergent.
+10. **Historical deliberate duplication — superseded by O-5.** The Python
+    SCAR-AREA-CAP and PRINT-FLOOR audit copied constants and algorithms by hand.
+    Rust must not reproduce that duplication: one typed registry value and one
+    capability implementation serve producers and the disk-first scoring adapter.
+    Fresh disk provenance plus analytic, injected-corruption, and native fixtures
+    provide the independent evidence instead.
 
 11. **`contact_depth_mm = 0.3` was over-graded as format evidence.** ChituBox
     stores a variable field; 0.3 mm is the project's

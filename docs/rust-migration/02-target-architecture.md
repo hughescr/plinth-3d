@@ -11,6 +11,21 @@ for git and code conventions.
 Everything you need is in this directory. Repo docs linked below are supplemental depth, never
 prerequisites.
 
+## 0.1 Owner-override architecture boundary (2026-08-01)
+
+O-5 and O-6 in `06-conventions.md` override the earlier duplication and sequencing
+assumptions in this chapter. There is one implementation of each capability:
+`geom_kernel` owns spatial geometry; `plinth-mesh` owns `Mesh`, topology, and
+delicacy; `plinth-metrics` is a disk-first adapter over those capabilities.
+Adapters and explicit boundary conversions are allowed; second implementations of
+the same algorithms are not. Audit independence is established with fresh disk
+provenance, analytic fixtures, injected corruptions, and native ChituBox fixtures.
+
+The immediate architecture target is the minimum batch-first Rust pipeline that
+reproduces current preparation and emission behavior well enough to delete Python.
+The more ambitious search, solver, repair, calibration, and GPU designs below are
+post-elimination extensions unless essential acceptance proves one necessary.
+
 ---
 
 ## 1. Mission and rationale
@@ -32,9 +47,10 @@ C++ FFI does not carry the agent-productivity cost that motivates the migration.
 per-item call in a hot path is a defect, not a style choice. It applies to every crate below and
 is the deeper reason a GPU backend can bolt on later (§11).
 
-**The frozen Python engine stays runnable as the measuring stick** until the Rust core beats it.
-The standing rule is *no new Python*. The migration is additive until the final milestone, which
-deletes all Python. The acceptance criterion is **not** byte-identical output; it is *"rust is
+**The frozen Python engine stays runnable as the measuring stick** until the minimal Rust
+replacement passes the revised acceptance/delete gate. The standing rule is *no new Python*.
+The migration is additive until that gate, then Python is deleted before enhancement work.
+The acceptance criterion is **not** byte-identical output; it is *"rust is
 producing as-good-as or better output in chitubox files"*, measured by the harness in §12, with a
 named owner-eyeball checkpoint per milestone for the subjective part. Byte-level identity applies
 only where a real format contract exists: the `.chitubox` record structure must round-trip and
@@ -97,9 +113,9 @@ plinth-3d/
     plinth-emit/        # support-solid synthesis (frustum/sphere/pad/bridge/raft-MST),
                         #   BOOLEAN UNION before write, .chitubox write via chitubox_io,
                         #   then re-read-FROM-DISK audit
-    plinth-metrics/     # the parity harness. Links NEITHER plinth-verify NOR geom_kernel (own slow
-                        #   brute-force f64 primitives). MAY link chitubox_io's reader. Disk only;
-                        #   consumes Metric DTOs from plinth-core while owning scoring behaviour.
+    plinth-metrics/     # disk-first parity/scoring adapter. Uses geom_kernel and plinth-mesh;
+                        #   owns metric policy/reporting, not duplicate geometry, topology,
+                        #   Mesh, or delicacy algorithms. MAY link chitubox_io's reader.
     plinth-pipeline/    # stage sequencing over typestate artifacts, content-addressed cache,
                         #   progress reporting, report writing
     plinth-cli/         # bin `plinth`. THE only entry point. Subcommands: prepare, score, calibrate
@@ -935,8 +951,10 @@ indices, and checkpoint/rollback represented as data (the Python append-only con
 deterministic tie-breaks, work-unit budgets instead of wall clocks, thread-count invariance proven
 in CI at 1/4/16 threads.
 
-**Later: wgpu.** Add `WgpuEvaluator: Evaluator` and a wgpu `SurfaceOracle` implementation; both must
-pass the same differential suites as the CPU path. Determinism policy: **GPU proposes, CPU
+**Later: wgpu.** After Python deletion, introduce a backend abstraction only when a
+second backend is actually being implemented; do not add a premature `SurfaceOracle`
+trait during the elimination path. A future GPU backend must pass the same fixture suites
+as the CPU path. Determinism policy: **GPU proposes, CPU
 disposes** — the GPU may rank at `Fidelity::Surrogate`, but anything committed is re-scored on the
 deterministic CPU path. Bit-determinism of the accept path is never delegated to a driver.
 Batch-first is exactly why this is a drop-in rather than a rewrite.
@@ -970,8 +988,10 @@ it from workspace crates needs no manifest change. Existing batched entry points
 `cast_rays`, `segment_clearance`, `penetration_intervals_batch`, `sphere_breach` and
 `exterior_face_mask` — all batch-in/batch-out, which is the shape the new crates consume.
 
-Changes to make: add a `trait SurfaceOracle` so the wgpu backend and the CPU backend are
-interchangeable, and add point-kNN and radius-pair queries for the lattice/CVT work. Its
+Changes on the elimination path: add only the batched queries required to reproduce
+current behavior. Do not add `SurfaceOracle` until a second real backend exists; the
+previous mandate to add it preemptively is superseded by O-5/O-6. Post-deletion work may
+add point-kNN and radius-pair queries for lattice/CVT work. Its
 determinism checklist (index-parallel map-collect only, no rayon float reductions, no HashMap
 iteration feeding results, no wall-clock reads in the kernel) at the top of
 `rust/geom_kernel/src/lib.rs` is **binding on all new code**.
@@ -984,17 +1004,19 @@ holds the pure-Rust `NativeSurface` methods (`query`, `project`, `inside`, `cast
 `segment_clearance`, `penetration_intervals_batch`, `sphere_breach`, `exterior_face_mask`) and
 carries no PyO3 attributes at all. Note also that `rust/geom_kernel/Cargo.toml` has **no
 `[features]` block today**: `numpy` and `pyo3` are unconditional dependencies, which is why M2
-makes them optional before M9 can strip the code. All of it — the inline surface and the
-`rust/geom_kernel/python/` shim directory — is deleted in the final milestone, along with the
+makes them optional before the acceptance/delete step can strip the code. All of it —
+the inline surface and the `rust/geom_kernel/python/` shim directory — is deleted at
+that step, along with the
 `numpy`/`pyo3` dependencies and the `cdylib` crate type.
 
 **`rust/chitubox_io`** — `.chitubox` container read/write plus an independent structural audit
 (`src/verify.rs`). `plinth-emit` writes through it; `plinth-metrics` may link its **reader** (§14
 D-19). Its PyO3 layer is `rust/chitubox_io/src/py.rs` plus the `rust/chitubox_io/python/` shim
-directory; both are deleted in the final milestone.
+directory; both are deleted at the acceptance/delete step.
 
-Removal of PyO3 happens only once nothing consumes it — i.e. in the same final milestone that
-deletes `scripts/` Python, `pyproject.toml`, `uv.lock` and `.venv`, after the parity gates pass.
+Removal of PyO3 happens only once nothing consumes it — i.e. in the same
+acceptance/delete step that deletes `scripts/` Python, `pyproject.toml`, `uv.lock`
+and `.venv`, after the parity gates pass.
 
 ---
 
@@ -1014,11 +1036,12 @@ Directions of goodness are pre-committed **before anyone knows which side wins**
 as-good-or-better on **every** metric, per model, with a written waiver protocol (the owner may sign
 a named regression into the gate table with the reason recorded).
 
-**Independence is mandatory:** `plinth-metrics` links neither `plinth-verify` nor `geom_kernel` —
-its geometry is its own slow brute-force f64 implementation. A kernel bug must not corrupt producer
-and judge together; this independence is the property that caught census item mi=445. Slow is fine.
-The one exception is `chitubox_io`'s reader, because reimplementing the container parser would be
-waste and the native ChituBox fixtures (§9) anchor it non-circularly.
+**Disk independence is mandatory; algorithm duplication is forbidden.**
+`plinth-metrics` reopens artifacts and source/prepped meshes from disk, then uses
+`geom_kernel` and `plinth-mesh` for their sole owned capabilities. It owns scoring
+policy and report comparison, not geometry, topology, `Mesh`, or delicacy algorithms.
+Analytic fixtures, injected corruptions, native ChituBox fixtures, and fresh disk
+provenance provide non-circular audit evidence.
 
 Per-milestone owner-eyeball checkpoints are **named artifacts, not vibes**: Pareto sheets, scar heat
 maps, per-model before/after tables (support count, resin, z-height), and ChituBox load tests.
@@ -1038,8 +1061,9 @@ You will read the old documents cold. These clauses are dead:
 | `skills/*/SKILL.md` | they describe the CURRENT interactive Blender/Python workflow, not the target; marked superseded at the final milestone | the algorithms they document, notably decimate-for-print's error-budget QEM staging |
 | The Python topology/geometry digests | byte-parity with them is explicitly not attempted; schema-bumped and redefined over topology arrays | the `.chitubox` record-structure byte contract, which is unaffected |
 
-The differential-oracle role that `SPEC-RUST-KERNEL.md` §6 assigned to Python transfers to the
-frozen baseline artifacts plus `plinth-metrics`' independent implementation.
+The differential-oracle role that `SPEC-RUST-KERNEL.md` §6 assigned to Python transfers to
+frozen baseline artifacts, fresh disk reads, and the analytic/corrupt/native fixture suite;
+O-5 forbids a duplicate `plinth-metrics` geometry implementation.
 
 ---
 
@@ -1052,7 +1076,7 @@ recorded so they are not re-litigated.
 | # | Question | Ruling and reason |
 |---|---|---|
 | D-1 | Pipeline of staged functions (A) vs one optimizer with orientation as decision variable (B) | **A's staged spine with B's data model.** The spine is cheap to reason about; search-shaped types (CostVector, Fidelity, Pareto output, orientation-invariant FaceTable, per-layer LayerPlan) are expensive to retrofit. Take both |
-| D-2 | Crate layout | Constants folded into `plinth-core`; `plinth-decimate` separate (maps 1:1 to a milestone and to "convert, don't reinvent"); perception split between `plinth-mesh` and `plinth-support`; `plinth-cost` and `plinth-pipeline` adopted; no `plinth-calib` crate (`plinth calibrate` is a subcommand); no `xtask` crate; one independent implementation in `plinth-metrics`, not two |
+| D-2 | Crate layout | **Historical; O-5 controls capability ownership.** Constants remain in `plinth-core`; `geom_kernel` solely owns spatial geometry, `plinth-mesh` solely owns `Mesh`/topology/delicacy, and `plinth-metrics` adapts them from disk. Other proposed crate splits are post-elimination choices, not prerequisites |
 | D-3 | Bypass-path prevention | **Typestate `Model<Stage>`** (A) — the Python bypass-emit defect becomes a compile error, not a convention — plus B's owned-value discipline and `Validated<T>` newtype replacing `prepared_validation.py` |
 | D-4 | Orientation-invariant FaceTable | **Adopted from B verbatim.** It makes the dense sweep arithmetic rather than aspiration, and structurally fixes scoring scar on a different mesh than the delicacy field |
 | D-5 | Source of the surrogate's support-demand term | **B**: total scar invariance (`A_face / X`) needs no layout. A's per-seat volume estimate appears at the refine tier, where a layout exists |
@@ -1069,7 +1093,7 @@ recorded so they are not re-litigated.
 | D-16 | Where `transient.py` lives | `plinth-support` — it mutates radii, so it is sizing, not verification. Added rule: sizing returns new arrays and never mutates what verify measures |
 | D-17 | `removal.py` | Ported as an **opt-in diagnostic**, never on the accept path (it is inert-by-charter in Python yet computed on every verify — dead compute the port drops) |
 | D-18 | Mesh fingerprint semantics | **Canonicalize `-0.0`, reject non-finite as a Defect** — the raw-bit weld is a documented hazard chain. A's digest schema bump (topology arrays only, no allocator archaeology) also adopted |
-| D-19 | Metrics-harness dependencies | Stricter than either proposal: **no `plinth-verify` and no `geom_kernel`** — a kernel bug must not corrupt producer and judge together. Exception: `chitubox_io`'s reader, anchored non-circularly by the native fixtures (§9) |
+| D-19 | Metrics-harness dependencies | **Superseded by O-5.** `plinth-metrics` may and should use `geom_kernel` and `plinth-mesh`; independence comes from disk provenance and non-circular fixtures rather than duplicate algorithms |
 | D-20 | CLI contract | Exit code is a **projection of the DefectReport**; the pinned Python exit-code/JSONL contract dies with the Python, and the tests that pin it retire with their subject |
 | D-21 | Corpus location | Corpus STLs are copied or linked locally under `corpus/models/` but remain **ignored and uncommitted inputs**. `corpus/manifest.json` and `corpus/baseline/` are committed. Exact full membership is eight models (`Sphere`, `Cylinder`, five named synthetic fixtures, and one Treant/Awakened Tree model); provisional membership is the same minus Treant; there is no Cone. This preserves reproducibility metadata and outputs without committing transient/large source assets. |
 | D-22 | `scripts/tools/geometry_sweep.py` | **Deleted, not ported** — Blender-only manual degenerate-geometry repair; triage plus cut flags refuse what it repaired. Recorded so it is not treated as unported scope |

@@ -1,8 +1,11 @@
 # plinth-metrics
 
-`plinth-metrics` is an independent audit crate.  Its scar delicacy field owns
-its triangle BVH, exact-welded vertex radius grid, and point KD trees; it does
-not link producer geometry or mesh crates.
+`plinth-metrics` is a disk-first scoring adapter. It owns metric policy,
+comparison, and reporting, while `geom_kernel` solely owns spatial geometry and
+`plinth-mesh` solely owns `Mesh`, topology, and delicacy. Adapters and boundary
+conversions are allowed; duplicate algorithms are not. Audit independence comes
+from freshly reopened files plus analytic, injected-corruption, and native
+ChituBox fixtures.
 
 Run the release delicacy gate against the durable Treant source input with:
 

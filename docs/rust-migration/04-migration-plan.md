@@ -1,12 +1,56 @@
 # 04 — Migration Plan (NORMATIVE)
 
-**This is the document you execute.** It is a DAG of ten milestones, M0 through M9, that
-takes `plinth-3d` from "a Python engine with two Rust crates bolted on via PyO3" to
-"a pure-Rust workspace with zero Python."
+**Execute the revised critical path below.** The former M0–M9 DAG remains in this
+document as detailed acceptance/reference material and a post-elimination backlog;
+O-5 and O-6 supersede its sequencing and duplicate-implementation mandates.
 
 Read `README.md`, `01-current-system.md`, `02-target-architecture.md` and
 `03-physics-and-constants.md` first. Read `06-conventions.md` before your first commit.
-`05-chitubox-and-corpus.md` is the format authority for everything M4 and later emits.
+`05-chitubox-and-corpus.md` is the format authority for every emitted `.chitubox`.
+
+---
+
+## Owner-approved critical path — O-5/O-6 (2026-08-01)
+
+The owner has prioritized Python elimination over simultaneous redesign. One
+implementation owns each capability: `geom_kernel` owns spatial geometry;
+`plinth-mesh` owns `Mesh`, topology, and delicacy; `plinth-metrics` is a disk-first
+adapter using them. Adapters and explicit boundary conversions are allowed; second
+algorithms are not. Batch-first remains law.
+
+Execute this path in order:
+
+1. **Consolidate.** Reconcile the existing Rust work around the single-owner boundaries;
+   retain the frozen Python baseline and disk-first scoring.
+2. **Native kernel/mesh.** Complete only the batched geometry and mesh capabilities the
+   current Python pipeline actually needs.
+3. **Port current preparation.** Reproduce STL preparation, current decimation,
+   orientation, hollowing, and drilling without redesigning their policy.
+4. **Port current support.** Reproduce the current support and raft behavior, fixing only
+   the enumerated fix-don't-reproduce defects.
+5. **Emit and CLI.** Produce one loadable supported-and-rafted `.chitubox` per input model
+   through the single Rust command and audit the freshly reopened file.
+6. **Accept and delete.** Require essential artifact parity, ChituBox loadability,
+   deterministic outputs/reports, and the owner's real print checkpoint; then remove all
+   Python and PyO3 surfaces and re-run those gates from a clean checkout.
+7. **Post-Python enhancements.** Only after deletion, pursue the dense orientation search,
+   error-bounded/proxy decimation improvements, CVT/lattice and load-model redesign,
+   forest/repair redesign, calibration, GPU abstraction, and other quality improvements.
+
+The following former requirements are explicitly superseded:
+
+| Former detail | O-5/O-6 resolution |
+| --- | --- |
+| M1 requires independent geometry inside `plinth-metrics` | `plinth-metrics` uses the sole `geom_kernel` and `plinth-mesh` implementations after reopening files from disk; analytic, corrupt, and native fixtures supply independent evidence |
+| M3 makes the full error-bounded QEM/proxy redesign a pre-deletion milestone | Port the current decimation behavior first; the enhanced error-bounded proxy ladder is post-Python work |
+| M4 deliberately emits naive throwaway supports before the real solver | Do not build a throwaway support algorithm; port current support/raft behavior once on the elimination path |
+| M5–M8 redesigns and enhancements block deletion | Only behavior essential to reproduce the current pipeline and pass acceptance blocks deletion; the listed redesigns and enhancements move to step 7 |
+| M9 is reachable only after the full old M5–M8 program | The acceptance/delete step takes precedence and occurs as soon as essential parity, loadability, determinism, and owner-print gates pass |
+| M2 requires a premature `SurfaceOracle` abstraction | Add an abstraction only when a second real backend is implemented after Python deletion |
+
+No numeric point estimate is normative here. The detailed material below continues to
+define useful metrics, fixtures, hazards, and desired end-state behavior wherever it does
+not conflict with this override.
 
 ---
 
@@ -74,12 +118,15 @@ gate against the Python output; you will fail it for the wrong reasons and then 
 
 Commit **per milestone** on `master`. Never use `git checkout --`, `git restore`,
 `git reset --hard`, or `git clean` — they silently destroy uncommitted work. Never
-force-push. Python deletions happen only in M9, after the M7 gate passes with owner
-sign-off and M8's determinism CI is green.
+force-push. Under O-6, Python deletion happens at the revised acceptance/delete step;
+the old M7/M8 precondition chain below is superseded.
 
 ---
 
-## 1. The DAG
+## 1. Former M0–M9 DAG (reference and post-elimination backlog)
+
+The diagram and edge table in this section are retained for their dependency analysis,
+not as the current execution order. The owner-approved critical path above controls.
 
 ```
 M0 ──┬── M1 (parity harness) ─────────────┐
@@ -131,7 +178,7 @@ stable and are what you pass to `--allow-worse`.
 
 | Id | Metric | Direction | Hard bound | Notes |
 | --- | --- | --- | --- | --- |
-| `islands` | Unsupported overhang islands remaining in the emitted scene | ↓ lower better | — | Recomputed by plinth-metrics' own geometry, not read from a report |
+| `islands` | Unsupported overhang islands remaining in the emitted scene | ↓ lower better | — | Recomputed from the reopened artifact through the sole geometry/mesh implementations, not read from a producer report |
 | `cavities` | Closed interior cavities in the emitted solid union | ↓ | — | The defect ChituBox surfaced four times from coincident coplanar faces |
 | `boundary_edges` | Edges with exactly one incident face | ↓ | **= 0** | Absolute from M4 onward |
 | `negative_shells` | Connected shells with negative signed volume | ↓ | **= 0** | Absolute from M4 onward |
@@ -315,7 +362,7 @@ see the audit table in §M9.)
 | `chord.rs` | `canon_chord_micron`, `chords_match_micron`, `chord_parity_report`, ported from `chord_canon.py`'s executable behavior. Integer-micron ties-to-even canonicalization; dependency-free by design. Invalid-input and schema defects are deliberately hardened: its computed diagnostic parity key is `matches`, never `ok`, and it is never an acceptance decision. |
 | `printer.rs` | `PrinterProfile`. Ship `saturn4-ultra`: known vendor-order volume 211.68 × 118.37 × 220 mm and pitch 14 × 19 µm mapped to project X/Y/Z and X/Y; local `leading_release_edge = NegativeY`, `release_front_sweep_direction = PositiveY` (front moves `-Y → +Y`); layer 0.050 mm and `LIFT_MM = 5.0` are local defaults, not vendor claims. |
 | `cost.rs` | Passive shared cost/report DTOs: `CostVector`, `Fidelity`, `Resin`, `Scar`, `Risk`, `OrientationCost`, `ParetoPoint`, `OptimizationSummary`, and `SearchEvidence`. Pre-orientation reports use `SearchEvidence::NotEvaluated`, never a sentinel cost. Evaluation, scalarization, batching, Pareto algorithms, and memoization remain future `plinth-cost` behaviour. |
-| `metric.rs` | Passive shared `MetricId`, `MetricValue`, `MetricSet`, and report DTOs. Metric directions, independent metric computation, comparison, and waiver behaviour remain M1 `plinth-metrics`. |
+| `metric.rs` | Passive shared `MetricId`, `MetricValue`, `MetricSet`, and report DTOs. Metric directions, disk-first metric orchestration, comparison, and waiver behaviour remain `plinth-metrics`; geometry and mesh capabilities are reused under O-5. |
 
 **`crates/plinth-solid`** — a **spike only** at this milestone.
 
@@ -471,7 +518,7 @@ refreeze path; M0's baseline remains frozen by Python only.
 
 | Path | Disposition |
 | --- | --- |
-| `scripts/tools/census_core.py` | Superseded → `plinth-metrics` (independent-audit role transfers) |
+| `scripts/tools/census_core.py` | Superseded → `plinth-metrics` disk-first adapter plus analytic/corrupt/native fixtures |
 | `scripts/tools/census_run.py` | Superseded → `plinth-metrics` |
 | `scripts/tools/p11_crossexam.py` | Superseded → `plinth-metrics` + M7's fixer-efficacy tests |
 | `scripts/tools/validate_buried_end_fix.py` | Superseded → `plinth-metrics` |
@@ -479,24 +526,20 @@ refreeze path; M0's baseline remains frozen by Python only.
 
 ### Rust deliverables
 
-**`crates/plinth-metrics`** — the independent auditor.
+**`crates/plinth-metrics`** — the disk-first scoring adapter.
 
-> **Independence is a hard requirement.** `plinth-metrics` must **not** depend on
-> `plinth-verify` and must **not** depend on `geom_kernel`. It carries its **own slow
-> brute-force f64 geometry**. It may depend on `chitubox_io` for the *reader* only.
-> This preserves the property that made the Python census valuable: two implementations
-> that disagree reveal a bug, and one implementation cannot audit itself. `census_core.py`
-> exists today precisely because `geometry_exact.py` was ported from it — do not collapse
-> them back together.
+> **O-5 supersedes the former duplicate-auditor requirement.** `plinth-metrics`
+> reopens artifacts from disk and uses `geom_kernel` and `plinth-mesh`; it does not
+> carry second geometry, topology, `Mesh`, or delicacy implementations. Independence
+> comes from disk provenance and analytic, corrupt, and native fixtures.
 
 | Module | Contents |
 | --- | --- |
 | `read.rs` | Re-open a `.chitubox` from disk, extract models + support records + meshes. |
-| `topology.rs` | Boundary edges, shells, signed volumes, winding consistency, closed cavities. Brute force; no BVH. |
+| `topology.rs` | Disk-first topology metric adapter over `plinth-mesh`. |
 | `supports.rs` | Support count, per-record resin volume, arm cross-sections, effective X. |
-| `scar.rs` | Scar area, worst patch, delicacy weighting. |
-| `geometry.rs` | Brute-force closest-point, ray parity, triangle intersection. Slow on purpose. |
-| `score.rs` | Independent metric computation plus the as-good-or-better comparator and waiver handling, all over `plinth-core`'s passive `MetricSet` and report DTOs. |
+| `scar.rs` | Scar area, worst patch, and delicacy scoring using the sole mesh/kernel capabilities. |
+| `score.rs` | Disk-first metric orchestration plus the as-good-or-better comparator and waiver handling, all over `plinth-core`'s passive `MetricSet` and report DTOs. |
 
 **`crates/plinth-cli`** — the `plinth` binary is reborn here.
 
@@ -516,13 +559,10 @@ refreeze path; M0's baseline remains frozen by Python only.
 
 ### Work items
 
-1. Scaffold `plinth-metrics` with its own geometry. Resist reaching for `geom_kernel`.
-   It also carries its **own independent delicacy implementation** for `scar_weighted`,
-   built from the weights in `03-physics-and-constants.md` §3.8
-   (`delicacy_curvature_weight = 0.6`, `delicacy_thinness_weight = 0.4`,
-   `thin_feature_mm = 1.5`). It may **not** link `plinth-mesh::delicacy` — the harness
-   sharing the producer's delicacy field would let one field bug make producer and judge
-   agree, which is exactly the independence this crate exists for. Slow is fine.
+1. Scaffold `plinth-metrics` as a disk-first adapter over `geom_kernel` and
+   `plinth-mesh`. It must not duplicate their geometry, topology, `Mesh`, or delicacy
+   algorithms. Add analytic and corruption fixtures that prove failures independently
+   of producer reports.
 2. Implement each metric in §3, in table order. Each gets a unit test on a hand-built
    fixture. **`max_x` is per-arm** (`A_voronoi_cell / (π·r_tip²)`) and that definition is
    frozen at this milestone; the arm-group form arrives at M5 as the separate id
@@ -613,7 +653,8 @@ respectively (see the audit table).
   mirroring what `rust/chitubox_io/Cargo.toml` already does: make them
   `optional = true` behind a `python` feature (`python = ["dep:pyo3", "dep:numpy"]`,
   `default = []`), and have `rust/geom_kernel/pyproject.toml`'s maturin config enable it.
-- Add `trait SurfaceOracle` so `plinth-*` crates depend on the trait, not the crate.
+- Do not add `SurfaceOracle` on the elimination path. Introduce a backend trait only
+  when a second real backend is implemented after Python deletion.
 - Add **point-kNN** and **radius-pairs** queries. These are the `scipy.spatial.cKDTree`
   replacements that M5 and M6 need (`query_pairs` in `joints.compute_joint_balls`,
   ball-point queries in `engine._ensure_minima_contacts`).
@@ -702,6 +743,10 @@ weighting will be wrong with it.
 
 ## M3 — Decimation  ∥ M4
 
+**O-6 disposition:** port current decimation behavior on the elimination path. The
+full error-bounded QEM/proxy redesign below is post-Python enhancement work and does
+not block deletion.
+
 **Goal.** Convert `scripts/tools/decimate_pipeline.py`'s logic to native Rust —
 **not reinvent it** (owner's explicit instruction). Blender is retired.
 
@@ -786,12 +831,13 @@ ratio per model. The owner is checking that foliage survived.
 
 ## M4 — The thin vertical slice (the most important milestone)  ∥ M3
 
-**Goal.** A real `.chitubox` end-to-end from Rust with **deliberately naive** supports —
-proving the contract closes: typestate pipeline, `DefectReport`, boolean union, on-disk
-audit, format byte-contract, one CLI.
+**Goal under O-6.** A real `.chitubox` end-to-end from Rust using the minimally
+ported current support/raft behavior. Do not build deliberately naive throwaway
+supports; implement the capability once while proving the contract closes: pipeline,
+`DefectReport`, boolean union, on-disk audit, format byte-contract, one CLI.
 
-**It will score worse than baseline on support metrics. That is expected and stated in the
-gate command.** The point of M4 is that the *pipe* works.
+The former M4 plan expected naive supports to score worse than baseline. O-6 supersedes
+that expectation: port current support behavior once and measure the resulting artifact.
 
 **Depends on:** M1, M2. **Parallel with:** M3. **Unblocks:** M5.
 
@@ -953,7 +999,8 @@ cargo test --workspace                               # all format and audit gate
 metrics are **explicitly waived this milestone only** via `--allow-worse`, and the waiver
 is spelled in the command, not hidden in a config. What is waived and why:
 
-- `support_count`, `scar*` — the supports are deliberately naive.
+- `support_count`, `scar*` — historical M4 waiver rationale only; O-6 replaces
+  the naive-support stage with one minimal port of current support behavior.
 - **`resin`, the whole group** (`resin_model`, `resin_support`, `resin_total`) — waiving
   `resin_support` alone is unsatisfiable arithmetic: `resin_total = resin_model +
   resin_support`, so any support-resin regression big enough to need a waiver also makes
@@ -1116,8 +1163,8 @@ measures the corpus-wide delta of the switch — **no redesign**.
    tuples. Parallelism must not reorder reductions.
 7. Add the **`max_x_group`** metric to `plinth-metrics` (§3) — arm-group effective X under
    the resolved `LoadSharing`. It is a **new id**, not a redefinition: `max_x` keeps the
-   per-arm meaning the owner signed at M1. `plinth-metrics` computes it with its own
-   independent geometry, as it does every other metric.
+   per-arm meaning the owner signed at M1. `plinth-metrics` computes it from the
+   reopened artifact using the sole `geom_kernel`/`plinth-mesh` capabilities.
 
 ### Acceptance — run these
 
@@ -1593,12 +1640,17 @@ the second-best point on the numbers is the right print.
 
 ## M9 — Deletion
 
+**O-6 precedence:** this deletion work moves to the revised acceptance/delete step
+and is not blocked by post-Python M5–M8 enhancements. Its clean-checkout re-fire and
+zero-Python assertions remain binding.
+
 **Goal.** Zero Python.
 
-**Preconditions, both required:** M7's gate passed **with owner sign-off recorded in the
-gate table**, and M8's determinism CI is green. Neither alone is sufficient.
+**Current preconditions under O-6:** essential artifact parity, ChituBox loadability,
+deterministic artifacts/reports, and the owner-print checkpoint have passed. The old
+M7/M8 dependency below is reference material, not a deletion blocker.
 
-**Depends on:** M8. **Parallel with:** nothing.
+**Depends on:** revised critical-path step 5. **Parallel with:** nothing.
 
 ### Delete
 
@@ -1770,7 +1822,8 @@ audits.)
 
 **Test infrastructure** (`scripts/tests/*.py` — all `test_*.py`, all `manual_*.py`,
 `conftest.py`, `_refreeze_v5.py`, `_perf_fingerprint.py`) is exempt from the one-milestone
-rule: it keeps the frozen Python runnable until M9 and then deletes with it. Its **pinned
+rule: it keeps the frozen Python runnable until the revised acceptance/delete step and
+then deletes with it. Its **pinned
 semantics** — determinism contracts, wall-time pins, not-worse-than-baseline gates — are
 re-expressed as Rust tests at the milestone that ports each subject. Three of those
 re-expressions are **assigned deliverables**, not aspirations, because
@@ -1800,7 +1853,7 @@ reach M9.
 | --- | --- | --- |
 | `docs/reference/port_plan.md` | Central recommendation: **"stay Python"**; a full Rust port is "not recommended." Also proposes tactics **C2** (independent-tree parallelism) and **C3** (whole-sweep speculative replay). | **Superseded on the language question.** The verdict was reached on a performance cost/benefit basis, and this migration is not a performance decision — it exists to remove Python's influence on future agent work in this repo (§0). `SPEC-RUST-KERNEL.md` already overrode it once on language grounds after a 576 k-face run took 2 h 22 m without finishing; this plan completes that override. **C2 and C3 are separately dead** — the Codex review adjudicated them unsound (trees are not independent: root reanchor and bifurcation cross trees, the KD cache is forest-wide, and the convergence test is global) and Rust's cheap threading does not make an unsound decomposition sound. **What survives intact:** §5's serial-generate / parallel-evaluate / serial-commit discipline (M6 uses it verbatim) and its identification of `rewire_time_cap_s` as a determinism defect (M6 fixes it). |
 | `docs/reference/port_plan_codex_review.md` | Adversarial review of the above; confirms the wall-clock-cap determinism defect and rejects C2/C3. | **Not superseded on findings — superseded only on its "stay Python" conclusion**, for the same reason. Its determinism finding is *adopted* as a binding M6 requirement. Read it. |
-| `docs/specs/SPEC-RUST-KERNEL.md` | Binding 2026-07-23 ruling that the kernel goes to Rust. Scope: a **PyO3 hybrid** — a Rust kernel under a Python orchestrator. States the Python `ExactSurface` stays **"permanently"** as the differential-test oracle, and lays out Stages 2–5, none of which started. | **Superseded on scope, adopted on substance.** A reader coming to it cold would reasonably conclude the Python orchestrator stays forever; it does not — M9 deletes it, including `geometry_exact.py`. The "permanent" differential oracle is **replaced, not abandoned**: `corpus/baseline/` (frozen artifacts) plus `plinth-metrics` (an independent second implementation) preserve the same property without an interpreter. Its Stage 2–5 roadmap is the direct ancestor of M4–M8 and its numerical hazard notes — argmin tie-breaking is unspecifiable in the Python oracle, so pick a deterministic rule (lowest face index) and accept **consequence-based** parity; pin the pyo3/rust-numpy version pair first; never hold a numpy borrow across `allow_threads` — remain correct and worth reading. |
+| `docs/specs/SPEC-RUST-KERNEL.md` | Binding 2026-07-23 ruling that the kernel goes to Rust. Scope: a **PyO3 hybrid** — a Rust kernel under a Python orchestrator. States the Python `ExactSurface` stays **"permanently"** as the differential-test oracle, and lays out Stages 2–5, none of which started. | **Superseded on scope, adopted on substance.** The revised acceptance/delete step removes the Python orchestrator and `geometry_exact.py`. The oracle role transfers to `corpus/baseline/`, fresh disk reads, and analytic/corrupt/native fixtures using the sole geometry implementation. Its numerical hazard notes remain useful; its redesign roadmap is post-Python work under O-6. |
 | `docs/specs/SPEC-EMBED-POLICY.md` | SCAR-AREA-CAP and PRINT-FLOOR normative constants and formulas. | **Not superseded.** M7 implements it bit-faithfully. The one carve-out: the retired `COS_FLOOR = 0.5` (60° clamp) is *not* reintroduced — it conceals grazing growth, and the spec already abolished it. |
 | `docs/specs/SPEC-P8-RELOCATE.md`, `SPEC-P8-REACH.md` | The relocation ladder, as amended repeatedly. | **Superseded as an implementation blueprint; adopted as an invariant source.** M7 re-derives a unified ladder from the stated invariants (see the M7 invariant table) rather than transliterating ~4 800 lines of patch history. `SPEC-P8-REACH`'s **concession ladder** is explicitly not ported. |
 | `docs/specs/SPEC-CHITUBOX-RS.md`, `docs/specs/CHITUBOX-FORMAT.md` | The `.chitubox` container and record format. | **Not superseded — this is the format authority.** `rust/chitubox_io` already implements it. See `05-chitubox-and-corpus.md`. |

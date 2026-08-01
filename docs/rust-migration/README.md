@@ -4,6 +4,27 @@ You are the engineer executing this migration. This directory is the authoritati
 plan. Read it before touching code. Where it conflicts with any older document in
 this repo, **this guide wins** — see [What this guide supersedes](#what-this-guide-supersedes).
 
+## 0. Owner overrides adopted 2026-08-01
+
+Two append-only owner decisions, O-5 and O-6 in `06-conventions.md`, supersede
+parts of this guide written before them:
+
+- **One implementation per capability.** `geom_kernel` is the sole spatial-geometry
+  implementation; `plinth-mesh` is the sole `Mesh`, topology, and delicacy
+  implementation; `plinth-metrics` is a disk-first scoring adapter that uses those
+  implementations. Adapters and boundary conversions are allowed; a second algorithm
+  for the same capability is not. Audit independence comes from fresh disk provenance,
+  analytic fixtures, injected-corruption fixtures, and native ChituBox fixtures.
+- **Python elimination first.** Reproduce the current
+  STL → decimate → orient → hollow/drill → support/raft → `.chitubox` behavior in Rust
+  with the minimum architecture needed to preserve batch-first data flow and future
+  extension points. Delete Python after essential parity, ChituBox loadability,
+  determinism, and owner-print gates pass. Redesigns and enhancements follow deletion.
+
+These decisions govern sequencing and implementation ownership. The detailed M0–M9
+material remains useful acceptance/reference material and a post-elimination backlog,
+but its old sequence and duplicate-auditor mandates are no longer normative.
+
 ---
 
 ## 1. Mission
@@ -29,7 +50,7 @@ Consequences of the mission, all binding:
 | No new Python | Not in `scripts/`, not for scratch, not for debug one-offs. See 06-conventions.md. **One named exception:** the two one-off `python -c` invocations in 04-migration-plan.md M0 (the `resolve_stl()` probe and the synthetic-fixture STL export), run once from a shell and never committed as a `.py` file. |
 | Pure Rust expected | TypeScript/bun is permitted **only** with a concrete blocker named in writing (see §6). |
 | One named exception exists | The C++ `manifold` boolean kernel behind FFI in `plinth-solid`. Justified in 02-target-architecture.md; no pure-Rust f64 manifold-grade boolean kernel is mature enough, and this project has been burned four times by coincident-coplanar-face defects. |
-| PyO3 goes away | `rust/chitubox_io/src/py.rs`, the **inline** PyO3 surface in `rust/geom_kernel/src/lib.rs` (geom_kernel has no `py.rs`), and the `rust/*/python/` shim dirs are deleted once nothing consumes them — in the final milestone, not before. |
+| PyO3 goes away | `rust/chitubox_io/src/py.rs`, the **inline** PyO3 surface in `rust/geom_kernel/src/lib.rs` (geom_kernel has no `py.rs`), and the `rust/*/python/` shim dirs are deleted once the essential acceptance/delete gate passes. |
 | Blender is retired | Its scripting surface is Python and it segfaults headless in sandboxes. The decimation logic it hosts is converted to native Rust, not re-invented. |
 
 ---
@@ -76,9 +97,9 @@ the orientation-invariant `FaceTable`, and the surrogate-scoring design.
 
 ## 3. Acceptance strategy (read this twice)
 
-The frozen Python engine stays runnable as the **measuring stick** until the Rust
-core beats it. The migration is therefore **additive** until the final milestone,
-which is the only milestone that deletes Python.
+The frozen Python engine stays runnable as the **measuring stick** until its minimally
+complete Rust replacement passes the essential acceptance/delete gate. The migration is
+additive until that gate, then Python is deleted before post-port redesign work begins.
 
 **The acceptance criterion is NOT byte-identical output.** The owner's words: the
 criterion is *"rust is producing as-good-as or better output in chitubox files"*,
@@ -103,10 +124,10 @@ Hard rules around the harness:
   the artifact from disk and fails on boundary edges, negative shells, or inconsistent
   winding. Repairing the artifact to pass the audit is forbidden — the only correct
   fix is fixing the producer.
-- **`plinth-metrics` is independent.** It links neither `plinth-verify` nor
-  `geom_kernel`, so a kernel bug cannot corrupt producer and judge together. Slow
-  brute-force f64 primitives are fine there. The one exception: it may link the
-  `chitubox_io` **reader**, anchored by the native ChituBox fixtures (05-chitubox-and-corpus.md).
+- **`plinth-metrics` is disk-first, not a duplicate geometry engine.** It reopens
+  emitted artifacts and source/prepped meshes from disk, then uses the sole
+  `geom_kernel` and `plinth-mesh` implementations. Independence is supplied by fresh
+  disk provenance plus analytic, corruption-injection, and native ChituBox fixtures.
 
 **Byte-level identity applies in exactly one place:** the `.chitubox` record
 structure, which must round-trip and load in ChituBox. The existing corpus
@@ -142,7 +163,7 @@ the Treant, exactly **seven** members. There is no `Cone`. Source STLs under
 | 1 | **01-current-system.md** | What exists in Python today, module by module, plus the known defects the port must **fix, not reproduce**. |
 | 2 | **02-target-architecture.md** | The Rust crate graph, the typestate stage spine, `DefectReport`, `ViolationKind`, the orientation funnel, `FaceTable`, `CostVector`, `LayerPlan`, and the `plinth-solid` FFI decision. |
 | 3 | **03-physics-and-constants.md** | The numeric authority: the measured physics (X-rule, scar invariance, hex lattice, release-front kinematics), every runtime constant's value/shape/unit/grade, and the **plate-6 results (scored 2026-07-31)**: `X*` reproduced on cylindrical arms, multi-arm load sharing measured as **at least additive**, and the coupon-design rules that came out of the voided A6 family. Its stable locators are referenced by the separate M0 source ledger. |
-| 4 | **04-migration-plan.md** | Milestones M0…M9 in dependency order, with the gate that must pass before each one is called done; M9 is the Python-deletion milestone. |
+| 4 | **04-migration-plan.md** | The revised Python-elimination critical path, followed by former M0…M9 acceptance/reference detail and post-elimination backlog. |
 | 5 | **05-chitubox-and-corpus.md** | The `.chitubox` format-fixture corpus and which fixtures are native ground truth vs. regenerated (and therefore circular for writer bugs), the distinct eight-model baseline corpus, and the baseline freeze procedure. |
 | 6 | **06-conventions.md** | Standing rules: batch-first, f64, rayon, errors, typed-provenance constants, testing standards, git discipline, no-new-Python, no stray artifacts. |
 
@@ -186,8 +207,9 @@ compiles. It is done when:
    spelling `plinth prepare --no-cache` and produces identical reports; there is no
    `PLINTH_CACHE` environment-variable form (see 06-conventions.md).
 
-**Do not delete any Python until the final milestone**, and then only after the
-parity gates pass. The deletion set is: `scripts/` Python, `rust/chitubox_io/src/py.rs`,
+**Do not delete Python until the essential acceptance/delete gate passes.** Do not
+delay deletion for redesign or enhancement work after that gate. The deletion set is:
+`scripts/` Python, `rust/chitubox_io/src/py.rs`,
 the **inline** PyO3 surface in `rust/geom_kernel/src/lib.rs` (the `#[pymodule]` for
 `geom_kernel._native` plus every `#[pyfunction]`/`#[pyclass]` item — geom_kernel has no
 `py.rs`), the `rust/*/python/` shim dirs and their `pyproject.toml` files, the top-level
@@ -223,7 +245,7 @@ describe, but where they conflict with this guide, **this guide is correct**:
 
 | Document | Superseded claim |
 |---|---|
-| [../specs/SPEC-RUST-KERNEL.md](../specs/SPEC-RUST-KERNEL.md) §6 | "the Python `ExactSurface` stays permanently" — **overridden.** Total Python elimination is the mission. The differential-oracle role transfers to the frozen baseline artifacts plus `plinth-metrics`' independent implementation. |
+| [../specs/SPEC-RUST-KERNEL.md](../specs/SPEC-RUST-KERNEL.md) §6 | "the Python `ExactSurface` stays permanently" — **overridden.** Total Python elimination is the mission. The oracle role transfers to frozen baseline artifacts scored disk-first through the sole geometry and mesh implementations, anchored by non-circular fixtures. |
 | [../reference/port_plan.md](../reference/port_plan.md) | Its "stay Python" verdicts and its milestone numbering. Superseded by the owner's 2026-07-23 ruling and by 04-migration-plan.md. |
 | [../reference/port_plan_codex_review.md](../reference/port_plan_codex_review.md) | Still useful — its finding that wall-clock caps make baselines non-reproducible is **binding on all new code**. Its plan-level recommendations are superseded. |
 | Python CLI contract (`scripts/tools/prep_one.py` exit codes, JSONL stdout) | Retired. The new contract is one `DefectReport` JSON per model with the exit code derived from it (06-conventions.md). The Python tests that pin the old contract retire with their subject. |

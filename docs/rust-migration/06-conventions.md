@@ -4,6 +4,21 @@ Standing rules for every line of code you write in this migration. These are not
 style preferences; several of them exist because a specific bug shipped. Read this
 before your first commit. Start at README.md if you have not.
 
+## 0. Owner overrides adopted 2026-08-01
+
+O-5 establishes **one implementation per capability**. `geom_kernel` is the sole
+spatial-geometry implementation; `plinth-mesh` is the sole `Mesh`, topology, and
+delicacy implementation; `plinth-metrics` is a disk-first adapter using them.
+Adapters and explicit boundary conversions are allowed. A second algorithm for the
+same capability is not. Audit independence comes from reopening artifacts from disk
+and testing with analytic, injected-corruption, and native ChituBox fixtures.
+
+O-6 establishes **Python elimination first**. Minimally reproduce the current
+STL → decimate/orient/hollow/drill/support/raft/`.chitubox` behavior in Rust, pass
+essential parity, loadability, determinism, and owner-print gates, then delete Python.
+Redesigns and enhancements follow deletion. These owner decisions supersede the old
+M0–M9 sequence and duplication mandates wherever they conflict; batch-first remains law.
+
 ---
 
 ## 1. Batch-first is law
@@ -347,6 +362,8 @@ recorded sign-off.
 | H-7 | historical | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-07-31 | Replace generic Unknown Saturn disposition with official vendor evidence | docs/rust-migration/06-conventions.md | section-5-generic-unknown-supersession | - |
 | H-8 | historical | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-07-31 | Exact corpus is eight models and excludes Cone | docs/rust-migration/04-migration-plan.md | corpus-membership | - |
 | H-9 | historical | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-07-31 | Release edge is NegativeY and sweep is PositiveY from negative to positive Y | docs/datasheets/printers/saturn-4-ultra-16k.md | axis-mapping | - |
+| O-5 | override | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-08-01 | One implementation per capability with disk and fixture based audit independence | docs/rust-migration/06-conventions.md | owner-override-O-5 | - |
+| O-6 | override | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-08-01 | Python elimination precedes redesign and enhancement work | docs/rust-migration/06-conventions.md | owner-override-O-6 | - |
 <!-- PLINTH_GATE_MAIN_END -->
 
 ## Decision gate corrections
@@ -440,9 +457,10 @@ Additional required fixtures:
 - **Out-of-repo writes have exactly two named carve-outs.** The owner-authorized M0
   prerequisite copies the durable Treant STL to
   `${CHITUBOX_CORPUS_DIR:-/Users/craig/code/hughescr/dnd-campaigns}`; that same directory
-  may hold an oversized ChituBox corpus fixture. M9's clean-checkout proof clones into
-  a throwaway directory under `$TMPDIR`, builds there, writes no artifact back, and
-  deletes the clone. Nothing else may write outside the repository.
+  may hold an oversized ChituBox corpus fixture. The acceptance/delete
+  clean-checkout proof clones into a throwaway directory under `$TMPDIR`, builds
+  there, writes no artifact back, and deletes the clone. Nothing else may write
+  outside the repository.
 
 ---
 
@@ -472,7 +490,8 @@ rule targets.
 | Shell glue, file wrangling, JSON poking | POSIX shell plus `jq`. Never `python -c "import json"`. |
 | A data-munging notebook | A small Rust binary in the relevant crate. |
 
-The existing Python remains runnable as the frozen oracle until the final milestone.
+The existing Python remains runnable as the frozen oracle until the revised
+acceptance/delete step.
 **Do not edit it.** Reading it is how you learn the algorithms; changing it
 invalidates the baseline you are being measured against. If you find a bug in the
 Python, record it in the Rust port's tests as a fix-don't-reproduce item — do not
@@ -485,8 +504,8 @@ procedure is in README.md §5. Python is never an escape hatch.
 
 ## 9. Git discipline
 
-- **Commit per milestone on `master`.** The repo is local-only git. Work-in-progress
-  commits within a milestone are fine; a milestone boundary must be a commit.
+- **Commit per revised critical-path checkpoint on `master`.** The repo is local-only
+  git. Work-in-progress commits are fine; each checkpoint boundary must be a commit.
 - **Forbidden, always, no exceptions** — these silently destroy uncommitted work:
   - `git checkout --` (checkout with a double-dash path form)
   - `git restore`
@@ -496,7 +515,7 @@ procedure is in README.md §5. Python is never an escape hatch.
     and ask.
 - **Never force-push.**
 - **Never rewrite published history.**
-- **Python deletions happen only in the final milestone**, after the parity gates
+- **Python deletions happen only at the acceptance/delete step**, after the essential gates
   pass. The deletion set is enumerated in README.md §5 and 04-migration-plan.md.
 - Commit messages state the milestone, the gate result, and the **human checkpoint** —
   the specific thing the owner should eyeball for the subjective half of "as-good-or-better".
