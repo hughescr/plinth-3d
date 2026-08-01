@@ -377,6 +377,8 @@ unique effective replacement while auditing both original and correction rows.
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | C-1 | O-1 | O-1 | override | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-07-31 | Bounded C++ Manifold 3.5.2 FFI exception | crates/plinth-solid/vendor/manifold/UPSTREAM.toml | version=3.5.2;tag=v3.5.2 | - |
 | C-2 | H-6 | H-6 | historical | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-08-01 | Python M0 freeze recorded before Rust future refreeze | corpus/manifest.json | frozen_at=2026-08-01T08:20:35Z;baseline_git_rev=6eb7f6a65e1a3442aa860d63d920788da778faed | - |
+| C-3 | D-2 | D-2 | decision | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-08-01 | O-5 supersedes independent geometry and delicacy implementations; canonical geom_kernel and plinth-mesh reuse is required | docs/rust-migration/06-conventions.md | owner-override-O-5 | - |
+| C-4 | D-19 | D-19 | decision | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-08-01 | O-5 supersedes geom_kernel exclusion; plinth-metrics must reuse canonical geom_kernel and plinth-mesh capabilities | docs/rust-migration/06-conventions.md | owner-override-O-5 | - |
 <!-- PLINTH_GATE_CORRECTIONS_END -->
 
 For any future `waiver` row, the final cell is one strict JSON object with

@@ -78,8 +78,35 @@ files"**, and *better* has a subjective element. Concretely:
 
 1. Freeze the Python pipeline's outputs over the corpus **once**, as BASELINE artifacts (M0).
 2. Score baseline artifacts and Rust artifacts with the **same objective metrics** (M1).
-3. Gate on Rust being **as-good-or-better on EVERY metric on EVERY model** (M7).
+3. Gate on Rust being **as-good-or-better on every existing M1 metric on every model**
+   at the revised acceptance/delete step.
 4. At each milestone, hand the owner a named **eyeball checkpoint** for the subjective part.
+
+### Executable essential parity for acceptance/delete
+
+The acceptance/delete gate uses the already-ratified M1 table, not a reduced or
+new metric set. For every baseline-success artifact, compare these 15 IDs in this
+order: `islands`, `cavities`, `boundary_edges`, `negative_shells`, `winding`,
+`max_x`, `support_count`, `resin_model`, `resin_support`, `resin_total`,
+`scar_area`, `scar_worst_patch`, `scar_weighted`, `z_height`, `loadable`.
+All numeric metrics are lower-is-better; `loadable` is pass/fail. The candidate
+must be as-good-or-better on every row. For a corpus member where Python failed,
+any complete Rust success wins on every metric, as the frozen manifest already records.
+
+The revised path collapses the old milestone timing for existing hard bounds into
+the acceptance/delete gate. At that gate the exact candidate hard bounds are
+`boundary_edges = 0`, `negative_shells = 0`, `winding = 0`, `max_x ≤ 12`, and
+`loadable = pass`. `cavities` remains a relative not-worse metric, not a newly
+invented absolute bound. The candidate must also pass the ported current verifier
+safety gates: uncovered islands, clearance, load, unsupported minima, island births,
+regular-contact invariants, unrouted specialized contacts, connectivity,
+printability, Murray, ball breach, and the engine-side physical-contact invariant.
+
+Both sides are artifacts freshly reopened from disk; no repair may occur between
+emit and audit. The owner must load the Rust artifact in ChituBox and print one model.
+Only redesign-dependent additions such as `max_x_group`, dense orientation search,
+and calibration are excluded until post-Python work; no existing M1 metric or current
+verifier evidence is excluded.
 
 **Byte-level identity applies in exactly one place, and nowhere else:** the `.chitubox`
 record structure round-trip. That is a real format contract — ChituBox Basic 1.3.0 must load
@@ -97,11 +124,11 @@ M2's STL gate is **not** a file-byte gate and must not be written as one:
 Everywhere else, "as-good-or-better on the metric" is the law. Do not write a diff-the-bytes
 gate against the Python output; you will fail it for the wrong reasons and then loosen it.
 
-### Four rules that bind every milestone
+### Four rules that bind every revised critical-path checkpoint
 
-1. **Additive until M9.** The frozen Python engine stays runnable as the measuring stick.
-   No Python file is deleted before M9. "Python mapped here" in a milestone means the Rust
-   replacement lands and the Python file's *role* ends — the file stays on disk.
+1. **Additive until acceptance/delete.** The frozen Python engine stays runnable as the
+   measuring stick until the executable essential-parity gate above passes. Python is
+   then deleted before post-Python enhancements; the old M9 timing is superseded.
 2. **No new Python.** Not a script, not a helper, not a `conftest` addition. Reading the
    frozen Python is allowed and expected; writing it is not. The sanctioned exception is
    the **two** one-off `python -c` invocations in M0 — the `resolve_stl()` corpus probe in
@@ -116,7 +143,7 @@ gate against the Python output; you will fail it for the wrong reasons and then 
 
 ### Git discipline (binding, repeated from `06-conventions.md`)
 
-Commit **per milestone** on `master`. Never use `git checkout --`, `git restore`,
+Commit **per revised critical-path checkpoint** on `master`. Never use `git checkout --`, `git restore`,
 `git reset --hard`, or `git clean` — they silently destroy uncommitted work. Never
 force-push. Under O-6, Python deletion happens at the revised acceptance/delete step;
 the old M7/M8 precondition chain below is superseded.
@@ -140,17 +167,17 @@ M0 ──┬── M1 (parity harness) ─────────────�
 
 | Edge | Meaning |
 | --- | --- |
-| M0 → M1, M0 → M2 | Nothing starts until the baseline is frozen and the shared types exist. |
-| M1 ∥ M2 | Fully parallel. The harness is written before the things it measures. |
-| M3 ∥ M4 | Both depend on M2 and neither depends on the other. M4 uses `--orient pinned:` until M3's proxies exist; M3 gates at the library level so it does not wait on M4's `prepare` subcommand. |
-| M1 → M4 | M4's first act is to run `plinth score`; the harness must already work. |
-| M4 → M5 → M6 → M7 | Strictly sequential. M7's repair stage hard-depends on M6's forest and on M7's own certificate primitives. |
-| M3 → M8 | The dense orientation sweep needs the decimated proxy ladder. |
-| M7 → M8 → M9 | M8 may start its calibration plumbing after M3+M4, but its final gate needs M7. M9 is strictly last. |
+| M0 → M1, M0 → M2 | **Former edge:** baseline and shared-type dependency analysis only; revised steps 1–2 govern. |
+| M1 ∥ M2 | **Former edge:** the harness/mesh parallelization is reference only. |
+| M3 ∥ M4 | **Former edge:** proxy and pinned-orientation staging is post-Python reference where O-6 says so. |
+| M1 → M4 | **Former edge:** retain the useful rule that disk scoring precedes emitted-artifact acceptance, without restoring old milestone order. |
+| M4 → M5 → M6 → M7 | **Former edge:** the redesign chain is post-Python and does not block deletion. |
+| M3 → M8 | **Former edge:** dense orientation depends on enhanced proxies after deletion. |
+| M7 → M8 → M9 | **Former sequence only; O-6 supersedes it.** M8 redesign/calibration is post-Python and does not block the revised acceptance/delete step. |
 
-**What two agents can work on at once:** (M1, M2) after M0; (M3, M4) after M2. Everything
-else is a chain. Do not try to parallelize M5/M6/M7 — each one's fixtures are built on the
-previous one's data model.
+**Former parallelization note, not current sequencing:** the old plan allowed (M1, M2)
+and then (M3, M4) in parallel and chained M5/M6/M7. Execute the revised critical path
+instead.
 
 ---
 
@@ -158,16 +185,16 @@ previous one's data model.
 
 | # | Name | Depends on | New crates | Gate |
 | --- | --- | --- | --- | --- |
-| M0 | Conventions, frozen-Python baseline, core types, solid spike | — | `plinth-core`, `plinth-solid` | Baseline frozen; trybuild compile-fail proof |
-| M1 | The parity harness and Rust refreeze (`plinth score`) | M0 | `plinth-metrics`, `plinth-cli` | Self-comparison exact; injected defects detected |
-| M2 | Mesh and geometry substrate | M0 | `plinth-mesh`, `plinth-voxel` | STL round-trip array/mesh identity; geom_kernel green |
-| M3 | Decimation | M2 | `plinth-decimate` | Self-verified error budgets on every model, at the **library** level (`cargo test -p plinth-decimate --test corpus_budgets`); CLI wiring verified at M4 |
-| M4 | The thin vertical slice | M1, M2 | `plinth-cost`, `plinth-orient`, `plinth-hollow`, `plinth-emit`, `plinth-pipeline` | Format metrics absolute; `islands`, `support_count`, `resin`, `scar` waived; `max_x` reported |
-| M5 | Perception, placement, load model | M4 | `plinth-support` | Load gate becomes satisfiable |
-| M6 | Forest, growth, sizing | M5 | (extends `plinth-support`) | Resin + clearance metrics at-or-better |
-| M7 | Verify + repair complete — **THE GATE FIRES** | M6 | `plinth-verify` | Full gate, every metric, every model |
-| M8 | Search quality + calibration + determinism CI | M3, M7 | (extends existing) | M7's gate held under dense sweep |
-| M9 | Deletion | M7 sign-off, M8 green | — | Full gate re-fires from a clean checkout |
+| Former M0 | Conventions, frozen-Python baseline, core types, solid spike | Historical only | `plinth-core`, `plinth-solid` | Useful completed foundation |
+| Former M1 | The parity harness and Rust refreeze (`plinth score`) | Historical only | `plinth-metrics`, `plinth-cli` | M1 metric table remains the acceptance vocabulary |
+| Former M2 | Mesh and geometry substrate | Historical only | `plinth-mesh`, `plinth-voxel` | Reuse completed substrate under revised steps 1–2 |
+| Former M3 | Decimation | Post-Python except minimal current behavior | `plinth-decimate` | Enhanced error-budget/proxy work does not block deletion |
+| Former M4 | The thin vertical slice | Replaced by revised steps 3–5 | `plinth-cost`, `plinth-orient`, `plinth-hollow`, `plinth-emit`, `plinth-pipeline` | Port current behavior once; no throwaway supports |
+| Former M5 | Perception, placement, load model | Post-Python redesign | `plinth-support` | Does not block deletion except current behavior needed by parity |
+| Former M6 | Forest, growth, sizing | Post-Python redesign | (extends `plinth-support`) | Does not block deletion except current behavior needed by parity |
+| Former M7 | Verify + repair complete | Post-Python redesign | `plinth-verify` | Port current verifier safety behavior before deletion; redesign later |
+| Former M8 | Search quality + calibration | Post-Python | (extends existing) | Enhancement work; pipeline determinism still blocks deletion |
+| Former M9 | Deletion | Revised step 5 plus executable essential parity | — | Moved to acceptance/delete; clean-checkout gate still re-fires |
 
 ---
 
@@ -180,11 +207,11 @@ stable and are what you pass to `--allow-worse`.
 | --- | --- | --- | --- | --- |
 | `islands` | Unsupported overhang islands remaining in the emitted scene | ↓ lower better | — | Recomputed from the reopened artifact through the sole geometry/mesh implementations, not read from a producer report |
 | `cavities` | Closed interior cavities in the emitted solid union | ↓ | — | The defect ChituBox surfaced four times from coincident coplanar faces |
-| `boundary_edges` | Edges with exactly one incident face | ↓ | **= 0** | Absolute from M4 onward |
-| `negative_shells` | Connected shells with negative signed volume | ↓ | **= 0** | Absolute from M4 onward |
-| `winding` | Faces whose winding disagrees with their shell | ↓ | **= 0** | Absolute from M4 onward |
-| `max_x` | Max **per-arm** X = A_voronoi_cell / (π·r_tip²) | ↓ | — | **Definition pinned at M1 and never changed:** per-arm, exactly the `placement.load_partition` semantics in `03-physics-and-constants.md` §2.3. Arm-**group** effective X under the resolved `LoadSharing` is a *separate* metric id, `max_x_group`, added at M5 when `ArmGroup` exists. Target is `≤ 12`; gated **relatively** (at-or-better vs baseline) from M5, **absolutely** on the candidate from M7 |
-| `max_x_group` | Max arm-group effective X under the resolved `LoadSharing` | ↓ | — | Added at **M5** (it needs `ArmGroup` + `LoadSharing`, which do not exist before then). Reported-only until M7, then gated relatively. Adding it at M5 is not a retrofit of the signed table: it is a *new* id, and `max_x` keeps its M1 meaning untouched |
+| `boundary_edges` | Edges with exactly one incident face | ↓ | **= 0** | Absolute at revised acceptance/delete; old M4 timing is historical |
+| `negative_shells` | Connected shells with negative signed volume | ↓ | **= 0** | Absolute at revised acceptance/delete; old M4 timing is historical |
+| `winding` | Faces whose winding disagrees with their shell | ↓ | **= 0** | Absolute at revised acceptance/delete; old M4 timing is historical |
+| `max_x` | Max **per-arm** X = A_voronoi_cell / (π·r_tip²) | ↓ | **≤ 12** | **Definition pinned at M1 and never changed:** per-arm, exactly the `placement.load_partition` semantics in `03-physics-and-constants.md` §2.3. Relative not-worse plus the candidate absolute bound apply at revised acceptance/delete |
+| `max_x_group` | Max arm-group effective X under the resolved `LoadSharing` | ↓ | — | New redesign-dependent metric excluded from acceptance/delete; add post-Python without redefining `max_x` |
 | `support_count` | Number of support records | ↓ | — | |
 | `resin_model` | Model resin, ml | ↓ | — | |
 | `resin_support` | Support resin, ml | ↓ | — | |
@@ -205,8 +232,9 @@ resin_support` by construction, so any `resin_support` regression large enough t
 waiver necessarily makes `resin_total` worse too. Waive the `resin` group, or name both
 ids — never `resin_support` alone. The group aliases exist precisely to stop this.
 
-**Hard bounds are enforced on the CANDIDATE only, and only from the milestone named in
-the `Notes` column.** They are never applied to the baseline — the frozen Python output
+**On the revised path, all existing hard bounds are enforced on the CANDIDATE at
+acceptance/delete:** `boundary_edges = 0`, `negative_shells = 0`, `winding = 0`,
+`max_x ≤ 12`, and `loadable = pass`. They are never applied to the baseline — the frozen Python output
 violates several by construction (the `tip_r_max_mm = 1.0` cap makes `max_x ≤ 12`
 unreachable on a large flat down-face; see `03-physics-and-constants.md` §1.5(ii)) — and
 never to a self-comparison. Without this rule M1's own acceptance
@@ -224,7 +252,7 @@ every milestone. Do not exclude those models from the corpus; they are the easie
 exists; the passive types every crate shares exist, and the biggest schedule risk (the boolean
 kernel) is spiked. Rust does not refreeze a baseline in M0.
 
-**Depends on:** nothing. **Parallel with:** nothing. **Unblocks:** M1, M2.
+**Former M0 dependency (reference only):** none; execute revised critical-path step 1.
 
 **M0 constant-inventory boundary.** Inventory every live literal/default that can
 change emitted geometry, printer framing/compatibility, a physical model,
@@ -512,7 +540,7 @@ right count, with the Treant present. Everything downstream is measured against 
 known-good output before it ever judges Rust. The first Rust CLI also owns the future baseline
 refreeze path; M0's baseline remains frozen by Python only.
 
-**Depends on:** M0. **Parallel with:** M2. **Unblocks:** M4.
+**Former M1 dependency (reference only):** M0; reuse its completed scoring work in revised step 1.
 
 ### Python retired here
 
@@ -613,7 +641,7 @@ defect is detected.
 
 **Goal.** The f64 substrate every stage stands on.
 
-**Depends on:** M0. **Parallel with:** M1. **Unblocks:** M3, M4.
+**Former M2 dependency (reference only):** M0; complete only revised step 2 needs.
 
 ### Python retired here
 
@@ -750,7 +778,7 @@ not block deletion.
 **Goal.** Convert `scripts/tools/decimate_pipeline.py`'s logic to native Rust —
 **not reinvent it** (owner's explicit instruction). Blender is retired.
 
-**Depends on:** M2. **Parallel with:** M4. **Unblocks:** M8.
+**Former M3 dependency (reference only):** M2; enhanced proxy work is post-Python.
 
 ### Python retired here
 
@@ -839,7 +867,7 @@ supports; implement the capability once while proving the contract closes: pipel
 The former M4 plan expected naive supports to score worse than baseline. O-6 supersedes
 that expectation: port current support behavior once and measure the resulting artifact.
 
-**Depends on:** M1, M2. **Parallel with:** M3. **Unblocks:** M5.
+**Former M4 dependency (reference only):** M1/M2; revised steps 3–5 replace it.
 
 ### Python retired here
 
@@ -1023,7 +1051,7 @@ the first moment the migration produces something the owner can hold.
 **Goal.** Support demand and placement land, and **the load gate becomes satisfiable** —
 the first milestone where a large flat down-face can pass, which Python cannot do at all.
 
-**Depends on:** M4. **Parallel with:** nothing. **Unblocks:** M6.
+**Former M5 dependency (reference only):** M4; redesign is post-Python.
 
 ### Python retired here
 
@@ -1202,7 +1230,7 @@ that scars are landing on the bland surfaces and avoiding the delicate ones — 
 
 **Goal.** The structural solver.
 
-**Depends on:** M5. **Parallel with:** nothing. **Unblocks:** M7.
+**Former M6 dependency (reference only):** M5; redesign is post-Python.
 
 ### Python retired here
 
@@ -1330,11 +1358,13 @@ consolidate, braces where spans are long — not a thicket.
 
 ---
 
-## M7 — Verify + repair complete: THE GATE FIRES
+## M7 — Verify + repair complete (post-Python reference/backlog)
 
-**Goal.** Every gate, every fixer, the full repair loop, full parity.
+**O-6 status:** the full fixer/repair redesign is post-Python backlog. Before deletion,
+port current verifier safety behavior required by executable essential parity; the full
+redesign is not a deletion precondition.
 
-**Depends on:** M6. **Parallel with:** nothing. **Unblocks:** M8 (and, with owner sign-off, M9).
+**Former dependency:** M6 → M7 → M8. This does not unblock or block revised deletion.
 
 ### Python retired here
 
@@ -1499,23 +1529,23 @@ Note the `prepare` command **drops `--orient pinned:`**. From M7 the Rust orient
 runs on its own (coarse sweep). If that costs you the gate, pin it, pass the gate, and
 record the pin as a known deviation to close in M8 — do **not** waive a metric to hide it.
 
-**Parity gate — THE full gate.** Every metric, every model, **no waivers** except entries
-the owner has signed into the gate table. This is the milestone the whole plan exists to
-reach.
+**Historical M7 gate:** every then-defined metric and every model, with only signed
+waivers. The current deletion gate is the executable essential-parity contract above.
 **Owner eyeball — the owner pass.** Hand over: Pareto sheets; scar heat maps; per-model
 before/after for (support count, resin, z-height); and every emitted file loaded in
-ChituBox. **The owner's sign-off, recorded in the gate table, is the precondition for M9.**
-Nothing gets deleted on a green `score` alone.
+ChituBox. Under O-6, the binding human precondition is loading the Rust artifact in
+ChituBox and printing one model at acceptance/delete; full redesign artifacts are post-Python.
 
 ---
 
 ## M8 — Search quality + calibration + determinism CI
 
-**Goal.** The migration is now allowed to be *better*, not merely equal — and determinism is
-proven continuously rather than assumed.
+**O-6 status:** dense search, calibration, and related quality enhancement are
+post-Python backlog. Determinism of the minimally ported pipeline remains an essential
+pre-deletion gate.
 
-**Depends on:** M7 (final gate) and M3 (proxy ladder). Calibration plumbing may start after
-M3 + M4. **Unblocks:** M9.
+**Former dependency:** M7 plus the M3 proxy ladder. This section does not unblock or
+block revised deletion.
 
 ### Python retired here
 

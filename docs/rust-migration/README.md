@@ -111,9 +111,35 @@ and "better" has a subjective element. Concretely:
    from disk and computes: island count, closed cavities, watertightness / boundary
    edges, X-rule load compliance, support count and resin volume, scar area and
    placement, ChituBox loadability.
-3. **Gate:** Rust must be **as-good-or-better on every metric**, per model.
+3. **Gate:** Rust must be **as-good-or-better on every existing M1 metric**, per model.
 4. **Plus a named human checkpoint** at each milestone listing exactly what the
    owner should eyeball, for the subjective part of "better".
+
+### Executable essential parity for acceptance/delete
+
+The acceptance/delete gate uses the already-ratified M1 table, not a reduced or
+new metric set. For every baseline-success artifact, compare these 15 IDs in this
+order: `islands`, `cavities`, `boundary_edges`, `negative_shells`, `winding`,
+`max_x`, `support_count`, `resin_model`, `resin_support`, `resin_total`,
+`scar_area`, `scar_worst_patch`, `scar_weighted`, `z_height`, `loadable`.
+All numeric metrics are lower-is-better; `loadable` is pass/fail. The candidate
+must be as-good-or-better on every row. For a corpus member where Python failed,
+any complete Rust success wins on every metric, as the frozen manifest already records.
+
+The revised path collapses the old milestone timing for existing hard bounds into
+the acceptance/delete gate. At that gate the exact candidate hard bounds are
+`boundary_edges = 0`, `negative_shells = 0`, `winding = 0`, `max_x ≤ 12`, and
+`loadable = pass`. `cavities` remains a relative not-worse metric, not a newly
+invented absolute bound. The candidate must also pass the ported current verifier
+safety gates: uncovered islands, clearance, load, unsupported minima, island births,
+regular-contact invariants, unrouted specialized contacts, connectivity,
+printability, Murray, ball breach, and the engine-side physical-contact invariant.
+
+Both sides are artifacts freshly reopened from disk; no repair may occur between
+emit and audit. The owner must load the Rust artifact in ChituBox and print one model.
+Only redesign-dependent additions such as `max_x_group`, dense orientation search,
+and calibration are excluded until post-Python work; no existing M1 metric or current
+verifier evidence is excluded.
 
 Hard rules around the harness:
 
@@ -199,7 +225,7 @@ compiles. It is done when:
 1. `cargo test --workspace` passes and `cargo clippy --workspace -- -D warnings` is clean.
 2. The milestone's gate in 04-migration-plan.md passes — for any milestone that emits
    artifacts, that means `plinth score` over the corpus shows Rust as-good-or-better
-   than the frozen baseline on every metric.
+   than the frozen baseline on every existing M1 metric.
 3. The milestone's human checkpoint is written into the commit message so the owner
    knows what to eyeball.
 4. At M0 cache equality is not applicable because no `plinth` CLI or cache exists yet.
