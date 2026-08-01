@@ -7,16 +7,78 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use plinth_core::{m0_constants, M0ConstantsError};
 use thiserror::Error;
 
 use crate::topology::{TopologyError, WeldedView};
 use crate::{Mesh, MeshError, WeldPolicy};
 
-pub const HOLLOW_SHARD_MAX_FACES: usize = 64;
-pub const HOLLOW_SHARD_MAX_DIM_MM: f64 = 1.0;
-pub const HOLLOW_SHARD_MAX_VOLUME_MM3: f64 = 0.01;
-pub const HOLLOW_CONTAINMENT_SAMPLES: usize = 32;
-pub const HOLLOW_CONTAINMENT_MIN_FRACTION: f64 = 0.9;
+/// Typed triage settings read from the sole atomic M0 constants publication.
+/// They remain diagnostic-only Placeholder values; this stage uses them to
+/// classify input, never to claim accept-safe calibration.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TriageSettings {
+    shard_max_faces: usize,
+    shard_max_dim_mm: f64,
+    shard_max_volume_mm3: f64,
+    containment_samples: usize,
+    containment_min_fraction: f64,
+}
+
+impl TriageSettings {
+    fn load() -> Result<Self, TriageError> {
+        let constants = m0_constants().map_err(TriageError::Constants)?;
+        let placeholders = constants.placeholders();
+        Ok(Self {
+            shard_max_faces: usize::try_from(
+                placeholders.hollow_shard_max_faces().diagnostic().get(),
+            )
+            .map_err(|_| TriageError::ConstantCountOverflow {
+                id: "HOLLOW_SHARD_MAX_FACES",
+            })?,
+            shard_max_dim_mm: placeholders.hollow_shard_max_dim_mm().diagnostic().get(),
+            shard_max_volume_mm3: placeholders
+                .hollow_shard_max_volume_mm3()
+                .diagnostic()
+                .get(),
+            containment_samples: usize::try_from(
+                placeholders.hollow_containment_samples().diagnostic().get(),
+            )
+            .map_err(|_| TriageError::ConstantCountOverflow {
+                id: "HOLLOW_CONTAINMENT_SAMPLES",
+            })?,
+            containment_min_fraction: placeholders
+                .hollow_containment_min_fraction()
+                .diagnostic()
+                .get(),
+        })
+    }
+
+    #[must_use]
+    pub const fn shard_max_faces(self) -> usize {
+        self.shard_max_faces
+    }
+    #[must_use]
+    pub const fn shard_max_dim_mm(self) -> f64 {
+        self.shard_max_dim_mm
+    }
+    #[must_use]
+    pub const fn shard_max_volume_mm3(self) -> f64 {
+        self.shard_max_volume_mm3
+    }
+    #[must_use]
+    pub const fn containment_samples(self) -> usize {
+        self.containment_samples
+    }
+    #[must_use]
+    pub const fn containment_min_fraction(self) -> f64 {
+        self.containment_min_fraction
+    }
+}
+
+pub fn triage_settings() -> Result<TriageSettings, TriageError> {
+    TriageSettings::load()
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreHollowed {
@@ -103,6 +165,10 @@ pub enum TriageError {
     Topology(#[from] TopologyError),
     #[error(transparent)]
     Mesh(#[from] MeshError),
+    #[error("M0 constants publication failed: {0}")]
+    Constants(&'static M0ConstantsError),
+    #[error("M0 constant {id} does not fit this platform's usize")]
+    ConstantCountOverflow { id: &'static str },
     #[error("triage requires an actual welding policy, not WeldPolicy::None")]
     UnweldedInput,
     #[error("pre-hollowed input: {0:?}")]
@@ -120,6 +186,7 @@ pub fn triage_components(mesh: &Mesh, weld_policy: WeldPolicy) -> Result<Triaged
     if matches!(weld_policy, WeldPolicy::None) {
         return Err(TriageError::UnweldedInput);
     }
+    let settings = TriageSettings::load()?;
     let view = WeldedView::build(mesh, weld_policy)?;
     let faces = remap_faces(mesh, &view.map);
     let components = face_components(&faces);
@@ -152,10 +219,10 @@ pub fn triage_components(mesh: &Mesh, weld_policy: WeldPolicy) -> Result<Triaged
         if !foreign_edges.contains(&component)
             && detail.touches_any(&main_vertices)
             && detail.inside_bbox(&details[main])
-            && detail.face_ids.len() <= HOLLOW_SHARD_MAX_FACES
-            && detail.max_dim() <= HOLLOW_SHARD_MAX_DIM_MM
+            && detail.face_ids.len() <= settings.shard_max_faces()
+            && detail.max_dim() <= settings.shard_max_dim_mm()
             && detail.is_watertight(&faces)
-            && detail.signed_volume(&view.verts, &faces).abs() <= HOLLOW_SHARD_MAX_VOLUME_MM3
+            && detail.signed_volume(&view.verts, &faces).abs() <= settings.shard_max_volume_mm3()
         {
             shards.insert(component);
         }
@@ -191,17 +258,23 @@ pub fn triage_components(mesh: &Mesh, weld_policy: WeldPolicy) -> Result<Triaged
         let mut ranges = Vec::with_capacity(candidates.len());
         for candidate in candidates {
             let start = gathered.len();
-            gathered
-                .extend(details[candidate].sample_points(&view.verts, HOLLOW_CONTAINMENT_SAMPLES));
+            gathered.extend(
+                details[candidate].sample_points(&view.verts, settings.containment_samples()),
+            );
             ranges.push((candidate, start, gathered.len()));
         }
-        let inside =
-            contains_points_batch(&view.verts, &faces, &details[container].face_ids, &gathered)?;
+        let classifier =
+            ContainmentClassifier::build(&view.verts, &faces, &details[container].face_ids)?;
+        let inside = classifier.classify_batch(&gathered)?;
         for (candidate, start, end) in ranges {
             let samples = end - start;
             if samples > 0
-                && inside[start..end].iter().filter(|value| **value).count() as f64 / samples as f64
-                    >= HOLLOW_CONTAINMENT_MIN_FRACTION
+                && inside[start..end]
+                    .iter()
+                    .filter(|value| **value == ContainmentClass::Inside)
+                    .count() as f64
+                    / samples as f64
+                    >= settings.containment_min_fraction()
             {
                 cavities.insert(candidate);
             }
@@ -406,37 +479,135 @@ impl ComponentDetail {
     }
 }
 
-/// One parity operation over a gathered point batch.  This is deliberately
-/// private: callers cannot accidentally turn containment into scalar calls.
-fn contains_points_batch(
-    verts: &[[f64; 3]],
-    faces: &[[u32; 3]],
-    container_faces: &[usize],
-    points: &[[f64; 3]],
-) -> Result<Vec<bool>, TriageError> {
-    const DIRECTION: [f64; 3] = [1.0, 0.371_390_676_354_103_7, 0.137_503_523_749_935_02];
-    let mut result = Vec::with_capacity(points.len());
-    for point in points {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ContainmentClass {
+    Inside,
+    Outside,
+    Ambiguous,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ContainmentFace {
+    vertices: [[f64; 3]; 3],
+    lo: [f64; 3],
+    hi: [f64; 3],
+}
+
+/// A container-specific, immutable classifier. It builds the triangle table
+/// once, accepts only gathered batches, and scatters classifications in input
+/// order. There is deliberately no public scalar query API.
+struct ContainmentClassifier {
+    faces: Vec<ContainmentFace>,
+}
+
+impl ContainmentClassifier {
+    fn build(
+        verts: &[[f64; 3]],
+        faces: &[[u32; 3]],
+        container_faces: &[usize],
+    ) -> Result<Self, TriageError> {
+        let mut table = Vec::with_capacity(container_faces.len());
+        for &face in container_faces {
+            let [a, b, c] = faces[face];
+            let vertices = [verts[a as usize], verts[b as usize], verts[c as usize]];
+            let mut lo = [f64::INFINITY; 3];
+            let mut hi = [f64::NEG_INFINITY; 3];
+            for point in &vertices {
+                for axis in 0..3 {
+                    lo[axis] = lo[axis].min(point[axis]);
+                    hi[axis] = hi[axis].max(point[axis]);
+                }
+            }
+            if !lo.iter().chain(hi.iter()).all(|value| value.is_finite()) {
+                return Err(TriageError::RayArithmetic);
+            }
+            table.push(ContainmentFace { vertices, lo, hi });
+        }
+        Ok(Self { faces: table })
+    }
+
+    fn classify_batch(&self, points: &[[f64; 3]]) -> Result<Vec<ContainmentClass>, TriageError> {
+        points.iter().map(|point| self.classify(*point)).collect()
+    }
+
+    fn classify(&self, point: [f64; 3]) -> Result<ContainmentClass, TriageError> {
+        const DIRECTIONS: [[f64; 3]; 3] = [
+            [1.0, 0.371_390_676_354_103_7, 0.137_503_523_749_935_02],
+            [0.211_324_865_405_187_1, 1.0, 0.109_381_654_230_983_1],
+            [0.127_412_352_941_232_4, 0.333_333_333_333_333_3, 1.0],
+        ];
+        let mut inside = 0;
+        let mut outside = 0;
+        for direction in DIRECTIONS {
+            match self.classify_ray(point, direction)? {
+                ContainmentClass::Inside => inside += 1,
+                ContainmentClass::Outside => outside += 1,
+                ContainmentClass::Ambiguous => {}
+            }
+        }
+        if inside >= 2 {
+            Ok(ContainmentClass::Inside)
+        } else if outside >= 2 {
+            Ok(ContainmentClass::Outside)
+        } else {
+            Ok(ContainmentClass::Ambiguous)
+        }
+    }
+
+    fn classify_ray(
+        &self,
+        point: [f64; 3],
+        direction: [f64; 3],
+    ) -> Result<ContainmentClass, TriageError> {
         let mut hits = Vec::new();
-        for face in container_faces {
-            let [a, b, c] = faces[*face];
-            if let Some(distance) = ray_triangle_distance(
-                *point,
-                DIRECTION,
-                verts[a as usize],
-                verts[b as usize],
-                verts[c as usize],
+        for face in &self.faces {
+            if point_on_triangle(point, *face)? {
+                return Ok(ContainmentClass::Ambiguous);
+            }
+            if !ray_can_reach_bbox(point, direction, face.lo, face.hi) {
+                continue;
+            }
+            match ray_triangle_distance(
+                point,
+                direction,
+                face.vertices[0],
+                face.vertices[1],
+                face.vertices[2],
             )? {
-                hits.push(distance);
+                RayHit::Hit(distance) => hits.push(distance),
+                RayHit::Miss => {}
+                RayHit::Ambiguous => return Ok(ContainmentClass::Ambiguous),
             }
         }
         hits.sort_by(f64::total_cmp);
         hits.dedup_by(|left, right| {
             (*left - *right).abs() <= 1e-9 * left.abs().max(right.abs()).max(1.0)
         });
-        result.push(hits.len() % 2 == 1);
+        Ok(if hits.len() % 2 == 1 {
+            ContainmentClass::Inside
+        } else {
+            ContainmentClass::Outside
+        })
     }
-    Ok(result)
+}
+
+fn ray_can_reach_bbox(origin: [f64; 3], direction: [f64; 3], lo: [f64; 3], hi: [f64; 3]) -> bool {
+    (0..3).all(|axis| {
+        if direction[axis] > 0.0 {
+            hi[axis] >= origin[axis] - 1e-12
+        } else if direction[axis] < 0.0 {
+            lo[axis] <= origin[axis] + 1e-12
+        } else {
+            origin[axis] >= lo[axis] - 1e-12 && origin[axis] <= hi[axis] + 1e-12
+        }
+    })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum RayHit {
+    Hit(f64),
+    Miss,
+    Ambiguous,
 }
 
 fn ray_triangle_distance(
@@ -445,7 +616,7 @@ fn ray_triangle_distance(
     a: [f64; 3],
     b: [f64; 3],
     c: [f64; 3],
-) -> Result<Option<f64>, TriageError> {
+) -> Result<RayHit, TriageError> {
     let edge_a = subtract(b, a);
     let edge_b = subtract(c, a);
     let p = cross(direction, edge_b);
@@ -454,24 +625,68 @@ fn ray_triangle_distance(
         return Err(TriageError::RayArithmetic);
     }
     if determinant.abs() < 1e-12 {
-        return Ok(None);
+        return Ok(RayHit::Miss);
     }
     let inverse = determinant.recip();
     let offset = subtract(origin, a);
     let u = dot(offset, p) * inverse;
     if !(0.0..=1.0).contains(&u) {
-        return Ok(None);
+        return Ok(RayHit::Miss);
     }
     let q = cross(offset, edge_a);
     let v = dot(direction, q) * inverse;
     if v < 0.0 || u + v > 1.0 {
-        return Ok(None);
+        return Ok(RayHit::Miss);
     }
     let distance = dot(edge_b, q) * inverse;
     if !distance.is_finite() {
         return Err(TriageError::RayArithmetic);
     }
-    Ok((distance > 1e-9).then_some(distance))
+    if distance <= 1e-9 {
+        return Ok(RayHit::Ambiguous);
+    }
+    const EDGE_EPS: f64 = 1e-10;
+    if u <= EDGE_EPS || v <= EDGE_EPS || 1.0 - u - v <= EDGE_EPS {
+        return Ok(RayHit::Ambiguous);
+    }
+    Ok(RayHit::Hit(distance))
+}
+
+fn point_on_triangle(point: [f64; 3], face: ContainmentFace) -> Result<bool, TriageError> {
+    if (0..3).any(|axis| point[axis] < face.lo[axis] - 1e-10 || point[axis] > face.hi[axis] + 1e-10)
+    {
+        return Ok(false);
+    }
+    let edge_a = subtract(face.vertices[1], face.vertices[0]);
+    let edge_b = subtract(face.vertices[2], face.vertices[0]);
+    let normal = cross(edge_a, edge_b);
+    let normal_length = normal[0].hypot(normal[1]).hypot(normal[2]);
+    if !normal_length.is_finite() {
+        return Err(TriageError::RayArithmetic);
+    }
+    if normal_length <= 1e-15 {
+        return Ok(false);
+    }
+    let plane_distance = dot(subtract(point, face.vertices[0]), normal).abs() / normal_length;
+    if plane_distance > 1e-10 {
+        return Ok(false);
+    }
+    let p = subtract(point, face.vertices[0]);
+    let dot_aa = dot(edge_a, edge_a);
+    let dot_ab = dot(edge_a, edge_b);
+    let dot_bb = dot(edge_b, edge_b);
+    let dot_ap = dot(edge_a, p);
+    let dot_bp = dot(edge_b, p);
+    let determinant = dot_aa * dot_bb - dot_ab * dot_ab;
+    if !determinant.is_finite() {
+        return Err(TriageError::RayArithmetic);
+    }
+    if determinant.abs() <= 1e-20 {
+        return Ok(false);
+    }
+    let u = (dot_bb * dot_ap - dot_ab * dot_bp) / determinant;
+    let v = (dot_aa * dot_bp - dot_ab * dot_ap) / determinant;
+    Ok(u >= -1e-10 && v >= -1e-10 && u + v <= 1.0 + 1e-10)
 }
 
 fn compact_mesh(
@@ -514,4 +729,47 @@ fn cross(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
 }
 fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
     left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifier_builds_one_reused_face_table_and_classifies_a_gathered_batch() {
+        let mesh = crate::fixtures::make_box_default().expect("box");
+        let face_ids = (0..mesh.tris().len()).collect::<Vec<_>>();
+        let classifier = ContainmentClassifier::build(mesh.verts(), mesh.tris(), &face_ids)
+            .expect("one table build");
+        assert_eq!(classifier.faces.len(), face_ids.len());
+        assert_eq!(
+            classifier
+                .classify_batch(&[[0.0, 0.0, 5.0], [20.0, 0.0, 5.0], [5.0, 0.0, 5.0]])
+                .expect("ordered batch"),
+            [
+                ContainmentClass::Inside,
+                ContainmentClass::Outside,
+                ContainmentClass::Ambiguous,
+            ],
+            "inside, outside, and boundary/ray-edge ambiguity never share a boolean path"
+        );
+    }
+
+    #[test]
+    fn sampling_more_than_the_authoritative_limit_is_bounded_and_deterministic() {
+        let settings = TriageSettings::load().expect("M0 settings");
+        let detail = ComponentDetail {
+            face_ids: Vec::new(),
+            vertices: (0..65_u32).collect(),
+            lo: [0.0; 3],
+            hi: [1.0; 3],
+        };
+        let points = (0..65)
+            .map(|value| [value as f64, 0.0, 0.0])
+            .collect::<Vec<_>>();
+        let first = detail.sample_points(&points, settings.containment_samples());
+        let second = detail.sample_points(&points, settings.containment_samples());
+        assert_eq!(first.len(), settings.containment_samples());
+        assert_eq!(first, second);
+    }
 }

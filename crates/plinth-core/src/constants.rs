@@ -41,6 +41,7 @@ pub enum M0ConstantsError {
 #[derive(Clone, Debug, PartialEq)]
 pub struct M0Constants {
     registry: ConstantsRegistry,
+    placeholders: M0PlaceholderConstants,
     saturn4_ultra: PrinterProfile,
 }
 
@@ -73,6 +74,7 @@ impl M0Constants {
 
         Ok(Self {
             registry,
+            placeholders,
             saturn4_ultra,
         })
     }
@@ -80,6 +82,14 @@ impl M0Constants {
     #[must_use]
     pub const fn registry(&self) -> &ConstantsRegistry {
         &self.registry
+    }
+
+    /// The immutable, typed Placeholder component that backs this atomic M0
+    /// publication. Consumers may read diagnostic/search settings from it,
+    /// but its wrapper still structurally bars those settings from acceptance.
+    #[must_use]
+    pub const fn placeholders(&self) -> &M0PlaceholderConstants {
+        &self.placeholders
     }
 
     #[must_use]

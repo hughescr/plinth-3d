@@ -410,6 +410,7 @@ dependencies = [
 name = "plinth-mesh"
 version = "0.1.0"
 dependencies = [
+ "plinth-core",
  "serde",
  "serde_json",
  "sha2",

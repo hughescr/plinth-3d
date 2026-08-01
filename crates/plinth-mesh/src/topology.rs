@@ -16,6 +16,37 @@ use crate::{Mesh, WeldPolicy};
 pub const FACE_TOPOLOGY_SCHEMA: &str = "support-placement/face-topology";
 pub const FACE_TOPOLOGY_SCHEMA_VERSION: u32 = 4;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TopologySchema {
+    V4,
+}
+
+impl TopologySchema {
+    #[must_use]
+    pub const fn version(self) -> u32 {
+        match self {
+            Self::V4 => FACE_TOPOLOGY_SCHEMA_VERSION,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TopologyDigest {
+    schema: TopologySchema,
+    hex: String,
+}
+
+impl TopologyDigest {
+    #[must_use]
+    pub const fn schema(&self) -> TopologySchema {
+        self.schema
+    }
+    #[must_use]
+    pub fn as_hex(&self) -> &str {
+        &self.hex
+    }
+}
+
 pub const TOPOLOGY_CUT_BOUNDARY: u8 = 1;
 pub const TOPOLOGY_CUT_NONMANIFOLD: u8 = 2;
 pub const TOPOLOGY_CUT_SAME_DIRECTION: u8 = 4;
@@ -35,6 +66,13 @@ pub enum TopologyError {
     NonFiniteVertex { vertex: usize, axis: usize },
     #[error("epsilon welding requires a positive finite tolerance, got {tolerance}")]
     InvalidWeldTolerance { tolerance: f64 },
+    #[error("epsilon welding grid cannot represent vertex {vertex} axis {axis} coordinate {coordinate} at tolerance {tolerance}")]
+    GridCellOutOfRange {
+        vertex: usize,
+        axis: usize,
+        coordinate: f64,
+        tolerance: f64,
+    },
     #[error("topology vertex count exceeds u32")]
     VertexCountOverflow,
     #[error("topology face count exceeds u32")]
@@ -104,7 +142,7 @@ pub struct FaceTopology {
     welded_vertex_count: u32,
     weld_policy: WeldPolicy,
     mesh_fingerprint: String,
-    content_digest: String,
+    content_digest: TopologyDigest,
 }
 
 impl FaceTopology {
@@ -142,6 +180,10 @@ impl FaceTopology {
     }
     #[must_use]
     pub fn content_digest(&self) -> &str {
+        self.content_digest.as_hex()
+    }
+    #[must_use]
+    pub const fn topology_digest(&self) -> &TopologyDigest {
         &self.content_digest
     }
     #[must_use]
@@ -328,7 +370,10 @@ pub fn build_face_topology(
         welded_vertex_count: welded.vertex_count,
         weld_policy,
         mesh_fingerprint: fingerprint,
-        content_digest: String::new(),
+        content_digest: TopologyDigest {
+            schema: TopologySchema::V4,
+            hex: String::new(),
+        },
     };
     topology.content_digest = topology_digest(&topology);
     debug_assert!(validate_face_topology(&topology).is_ok());
@@ -337,7 +382,10 @@ pub fn build_face_topology(
 
 /// Expensive diagnostic validation, intentionally not a normal hot-path API.
 pub fn validate_face_topology(topology: &FaceTopology) -> Result<(), TopologyValidationError> {
-    if FACE_TOPOLOGY_SCHEMA.is_empty() || FACE_TOPOLOGY_SCHEMA_VERSION != 4 {
+    if FACE_TOPOLOGY_SCHEMA.is_empty()
+        || topology.content_digest.schema() != TopologySchema::V4
+        || topology.content_digest.schema().version() != FACE_TOPOLOGY_SCHEMA_VERSION
+    {
         return Err(TopologyValidationError::UnsupportedSchema);
     }
     let n = topology.cut_flags.len();
@@ -450,7 +498,13 @@ fn exact_weld(points: &[[f64; 3]]) -> Result<WeldedView, TopologyError> {
     let mut verts = Vec::new();
     let mut map = Vec::with_capacity(points.len());
     for point in points {
-        let key = [point[0].to_bits(), point[1].to_bits(), point[2].to_bits()];
+        let key = point.map(|coordinate| {
+            if coordinate == 0.0 {
+                0.0_f64.to_bits()
+            } else {
+                coordinate.to_bits()
+            }
+        });
         let id = match ids.get(&key) {
             Some(id) => *id,
             None => {
@@ -477,8 +531,7 @@ fn epsilon_weld(points: &[[f64; 3]], tolerance: f64) -> Result<WeldedView, Topol
     let mut parent = (0..points.len()).collect::<Vec<_>>();
     let mut cells = BTreeMap::<(i64, i64, i64), Vec<usize>>::new();
     for (index, point) in points.iter().enumerate() {
-        let cell = grid_cell(*point, tolerance)
-            .ok_or(TopologyError::InvalidWeldTolerance { tolerance })?;
+        let cell = grid_cell(*point, tolerance, index)?;
         for dx in -1_i64..=1 {
             for dy in -1_i64..=1 {
                 for dz in -1_i64..=1 {
@@ -532,18 +585,27 @@ fn epsilon_weld(points: &[[f64; 3]], tolerance: f64) -> Result<WeldedView, Topol
     })
 }
 
-fn grid_cell(point: [f64; 3], tolerance: f64) -> Option<(i64, i64, i64)> {
+fn grid_cell(
+    point: [f64; 3],
+    tolerance: f64,
+    vertex: usize,
+) -> Result<(i64, i64, i64), TopologyError> {
     let values = [
         point[0] / tolerance,
         point[1] / tolerance,
         point[2] / tolerance,
     ];
-    if values.iter().any(|value| {
-        !value.is_finite() || *value < (i64::MIN + 1) as f64 || *value > (i64::MAX - 1) as f64
-    }) {
-        return None;
+    for (axis, value) in values.iter().enumerate() {
+        if !value.is_finite() || *value < (i64::MIN + 1) as f64 || *value > (i64::MAX - 1) as f64 {
+            return Err(TopologyError::GridCellOutOfRange {
+                vertex,
+                axis,
+                coordinate: point[axis],
+                tolerance,
+            });
+        }
     }
-    Some((
+    Ok((
         values[0].floor() as i64,
         values[1].floor() as i64,
         values[2].floor() as i64,
@@ -591,32 +653,35 @@ fn component_labels(adjacency: &[Vec<u32>]) -> Result<Vec<u32>, TopologyError> {
     Ok(labels)
 }
 
-fn topology_digest(topology: &FaceTopology) -> String {
+fn topology_digest(topology: &FaceTopology) -> TopologyDigest {
     let mut hasher = Sha256::new();
-    hash_tagged_bytes(
-        &mut hasher,
-        b"mesh_fingerprint",
-        topology.mesh_fingerprint.as_bytes(),
-    );
-    hash_u32_array(&mut hasher, b"indptr", &topology.indptr);
-    hash_u32_array(&mut hasher, b"indices", &topology.indices);
-    hash_u32_array(&mut hasher, b"component_ids", &topology.component_ids);
-    hash_tagged_bytes(&mut hasher, b"cut_flags", &topology.cut_flags);
-    hex_digest(hasher)
+    hasher.update(b"plinth/topology-digest\0");
+    hasher.update(TopologySchema::V4.version().to_le_bytes());
+    hash_bytes(&mut hasher, topology.mesh_fingerprint.as_bytes());
+    hash_u32_array(&mut hasher, &topology.indptr);
+    hash_u32_array(&mut hasher, &topology.indices);
+    hash_u32_array(&mut hasher, &topology.component_ids);
+    hash_bytes(&mut hasher, &topology.cut_flags);
+    TopologyDigest {
+        schema: TopologySchema::V4,
+        hex: hex_digest(hasher),
+    }
 }
 
-fn hash_u32_array(hasher: &mut Sha256, tag: &[u8], values: &[u32]) {
-    let mut bytes = Vec::with_capacity(values.len() * 4);
+fn hash_u32_array(hasher: &mut Sha256, values: &[u32]) {
+    hasher.update((values.len() as u64).to_le_bytes());
     for value in values {
-        bytes.extend(value.to_le_bytes());
+        hasher.update(value.to_le_bytes());
     }
-    hash_tagged_bytes(hasher, tag, &bytes);
+}
+fn hash_bytes(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(bytes);
 }
 fn hash_tagged_bytes(hasher: &mut Sha256, tag: &[u8], bytes: &[u8]) {
     hasher.update((tag.len() as u64).to_le_bytes());
     hasher.update(tag);
-    hasher.update((bytes.len() as u64).to_le_bytes());
-    hasher.update(bytes);
+    hash_bytes(hasher, bytes);
 }
 fn hex_digest(hasher: Sha256) -> String {
     let bytes = hasher.finalize();

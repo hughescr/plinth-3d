@@ -6,6 +6,7 @@ rust-version = "1.97"
 publish = false
 
 [dependencies]
+plinth-core = { path = "../plinth-core" }
 sha2 = "0.10"
 thiserror = { workspace = true }
 
