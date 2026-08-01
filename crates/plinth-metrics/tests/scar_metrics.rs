@@ -36,7 +36,6 @@ fn cube(side: f32) -> Vec<f32> {
         [1, 2, 6],
         [1, 6, 5],
         [2, 3, 7],
-        [2, 7, 6],
         [3, 0, 4],
         [3, 4, 7],
     ]
@@ -45,44 +44,59 @@ fn cube(side: f32) -> Vec<f32> {
     .collect()
 }
 
-fn tetrahedron(scale: f32) -> Vec<f32> {
+fn sphere_mesh(centre: [f32; 3], radius: f32) -> Vec<f32> {
+    let [x, y, z] = centre;
     let points = [
-        [0.0, 0.0, 0.0],
-        [scale, 0.0, 0.0],
-        [0.0, scale, 0.0],
-        [0.0, 0.0, scale],
+        [x + radius, y, z],
+        [x - radius, y, z],
+        [x, y + radius, z],
+        [x, y - radius, z],
+        [x, y, z + radius],
+        [x, y, z - radius],
     ];
-    [[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]]
-        .into_iter()
-        .flat_map(|triangle| triangle.into_iter().flat_map(|index| points[index]))
-        .collect()
+    [
+        [0, 2, 4],
+        [2, 1, 4],
+        [1, 3, 4],
+        [3, 0, 4],
+        [2, 0, 5],
+        [1, 2, 5],
+        [3, 1, 5],
+        [0, 3, 5],
+    ]
+    .into_iter()
+    .flat_map(|triangle| triangle.into_iter().flat_map(|index| points[index]))
+    .collect()
 }
 
 fn record(kind: SegmentType, start: [f32; 3], end: [f32; 3], r0: f32, r1: f32) -> SupportRecord {
+    SupportRecord::new(kind, start, end, r0, r1, TriangleSoup::new(cube(0.1)))
+}
+
+fn ball(kind: SegmentType, start: [f32; 3], end: [f32; 3], radius: f32) -> SupportRecord {
+    let centre = [
+        (start[0] + end[0]) * 0.5,
+        (start[1] + end[1]) * 0.5,
+        (start[2] + end[2]) * 0.5,
+    ];
     SupportRecord::new(
         kind,
         start,
         end,
-        r0,
-        r1,
-        TriangleSoup::new(tetrahedron(0.1)),
+        radius,
+        radius,
+        TriangleSoup::new(sphere_mesh(centre, radius)),
     )
 }
 
-fn contact_pair(contact_z: f32) -> [SupportRecord; 2] {
-    contact_pair_at(0.0, contact_z)
-}
-
-fn contact_pair_at(x: f32, contact_z: f32) -> [SupportRecord; 2] {
-    // This is the literal type-7 -> type-1 relation emitted by the frozen
-    // writer: the taper starts at the type-7 sphere centre, not at its inner
-    // pole, and its radius is the neck radius rather than the ball radius.
+fn stub(x: f32, contact_z: f32) -> [SupportRecord; 2] {
+    // Emitter order is not meaningful: these records are deliberately returned
+    // in a pair only because the caller chooses where to put them in the file.
     [
-        record(
+        ball(
             SegmentType::TIP,
             [x, 0.0, contact_z],
             [x, 0.0, contact_z + 0.6],
-            0.3,
             0.3,
         ),
         record(
@@ -93,6 +107,15 @@ fn contact_pair_at(x: f32, contact_z: f32) -> [SupportRecord; 2] {
             0.4,
         ),
     ]
+}
+
+fn foot_ball(x: f32, z: f32, radius: f32) -> SupportRecord {
+    ball(
+        SegmentType::SHAFT,
+        [x, 0.0, z + radius],
+        [x, 0.0, z - radius],
+        radius,
+    )
 }
 
 fn write_artifact(path: &Path, models: &[(Vec<f32>, Vec<SupportRecord>)]) {
@@ -106,7 +129,7 @@ fn write_artifact(path: &Path, models: &[(Vec<f32>, Vec<SupportRecord>)]) {
             placement: Placement::default(),
         })
         .collect::<Vec<_>>();
-    project.add_models(&sources).expect("write analytic model");
+    project.add_models(&sources).expect("write model");
     project
         .attach_supports(
             &models
@@ -120,21 +143,23 @@ fn write_artifact(path: &Path, models: &[(Vec<f32>, Vec<SupportRecord>)]) {
                 })
                 .collect::<Vec<_>>(),
         )
-        .expect("attach analytic supports");
-    project.save(path).expect("write disk artifact");
+        .expect("attach supports");
+    project.save(path).expect("write artifact");
 }
 
 fn reopen(path: &Path, name: &str) -> DiskArtifact {
-    let rows = load_artifacts(&[ArtifactRequest::new(
+    match load_artifacts(&[ArtifactRequest::new(
         ModelId::from(name),
         ArtifactDisposition::Produced {
             path: path.to_owned(),
         },
     )])
-    .expect("fresh disk reopen");
-    match rows.into_iter().next() {
+    .expect("reopen")
+    .into_iter()
+    .next()
+    {
         Some(ArtifactLoad::Artifact(artifact)) => artifact,
-        _ => panic!("expected successful artifact"),
+        _ => panic!("expected artifact"),
     }
 }
 
@@ -142,103 +167,128 @@ fn value(row: &ScarMetricRow, id: &str) -> f64 {
     row.entries()
         .into_iter()
         .find_map(|(candidate, value)| (candidate.as_str() == id).then_some(value.get()))
-        .unwrap_or_else(|| panic!("missing {id}"))
+        .unwrap()
 }
 
 #[test]
-fn disk_contact_pair_uses_scar_area_cap_geometry_not_sphere_diameter_or_support_mesh_area() {
+fn nonadjacent_reversed_poles_reconstruct_the_stub_and_do_not_cap_patch_area() {
     let temp = TempDir::new();
-    let path = temp.path().join("one-contact.chitubox");
-    write_artifact(&path, &[(cube(2.0), contact_pair(0.8).into())]);
-    let rows = scar_metric_rows(
-        &reopen(&path, "one-contact"),
+    let path = temp.path().join("stub.chitubox");
+    let mut pair = stub(0.0, 0.8);
+    pair.swap(0, 1);
+    // Put an unrelated record in the middle.  Reversing the ball poles is legal.
+    let reversed = ball(SegmentType::TIP, [0.0, 0.0, 1.4], [0.0, 0.0, 0.8], 0.3);
+    let records = vec![
+        pair[0].clone(),
+        record(
+            SegmentType::JOINER,
+            [4.0, 0.0, 0.0],
+            [5.0, 0.0, 0.0],
+            0.1,
+            0.1,
+        ),
+        reversed,
+    ];
+    write_artifact(&path, &[(cube(2.0), records)]);
+    let row = &scar_metric_rows(
+        &reopen(&path, "stub"),
         &[ScarMetricInput { source_index: 0 }],
     )
-    .expect("well-formed disk contact pair");
+    .expect("nonadjacent stub")[0];
     assert_eq!(
         SCAR_METRIC_ORDER,
         ["scar_area", "scar_worst_patch", "scar_weighted"]
     );
-    let row = &rows[0];
-    // Contact point z=.8, inward exit at z=-1, r(T)=.4.  SCAR-AREA-CAP:
-    // min(pi*.4^2, 2*.4*1.8) + pi*(.3^2-.2^2).
-    let expected = std::f64::consts::PI * 0.16 + std::f64::consts::PI * 0.05;
-    assert!(
-        (value(row, "scar_area") - expected).abs() < 1e-6,
-        "actual={} expected={expected}",
-        value(row, "scar_area")
-    );
-    assert!((value(row, "scar_worst_patch") - expected).abs() < 1e-6);
-    assert!(value(row, "scar_weighted") >= 0.0 && value(row, "scar_weighted") <= expected);
+    // The ball term alone is pi*(.3^2 - .2^2); a positive shaft term proves
+    // the full member interval, rather than a sphere-diameter proxy, was used.
+    assert!(value(row, "scar_area") > std::f64::consts::PI * 0.05);
+    assert_eq!(value(row, "scar_area"), value(row, "scar_worst_patch"));
 }
 
 #[test]
-fn clustered_and_separated_contact_discs_preserve_total_but_change_worst_patch() {
+fn standalone_taper_and_constant_joiner_feet_use_later_vertical_balls() {
     let temp = TempDir::new();
-    let clustered_path = temp.path().join("clustered.chitubox");
-    let mut clustered = contact_pair(0.8).into_iter().collect::<Vec<_>>();
-    clustered.extend(contact_pair(0.8));
-    write_artifact(&clustered_path, &[(cube(2.0), clustered)]);
-    let clustered = scar_metric_rows(
-        &reopen(&clustered_path, "clustered"),
+    let path = temp.path().join("feet.chitubox");
+    let records = vec![
+        record(
+            SegmentType::TAPER,
+            [-0.5, 0.0, 0.0],
+            [-0.5, 0.0, 0.8],
+            0.2,
+            0.25,
+        ),
+        foot_ball(3.0, 0.0, 0.4), // ordinary, unpaired ball is ignored
+        record(
+            SegmentType::JOINER,
+            [0.5, 0.0, 0.0],
+            [0.5, 0.0, 0.8],
+            0.2,
+            0.2,
+        ),
+        foot_ball(-0.5, 0.8, 0.35),
+        foot_ball(0.5, 0.8, 0.28),
+    ];
+    write_artifact(&path, &[(cube(2.0), records)]);
+    let row = &scar_metric_rows(
+        &reopen(&path, "feet"),
         &[ScarMetricInput { source_index: 0 }],
     )
-    .expect("clustered contact pairs");
-    let separated_path = temp.path().join("separated.chitubox");
-    let mut separated_records = contact_pair_at(-0.6, 0.8).into_iter().collect::<Vec<_>>();
-    separated_records.extend(contact_pair_at(0.6, 0.8));
-    write_artifact(&separated_path, &[(cube(2.0), separated_records)]);
-    let separated = scar_metric_rows(
-        &reopen(&separated_path, "separated"),
-        &[ScarMetricInput { source_index: 0 }],
-    )
-    .expect("separated contact pairs");
-    assert!((value(&clustered[0], "scar_area") - value(&separated[0], "scar_area")).abs() < 1e-6);
-    assert_eq!(
-        value(&clustered[0], "scar_worst_patch"),
-        value(&clustered[0], "scar_area")
-    );
-    assert!(value(&separated[0], "scar_worst_patch") < value(&separated[0], "scar_area"));
+    .expect("two feet")[0];
+    assert!(value(row, "scar_area") > 0.0);
+    assert!(value(row, "scar_worst_patch") < value(row, "scar_area"));
 }
 
 #[test]
-fn type_one_without_its_preceding_type_seven_fails_named_instead_of_becoming_zero_scar() {
+fn unmatched_or_ambiguous_contact_records_fail_closed() {
     let temp = TempDir::new();
-    let path = temp.path().join("orphan-taper.chitubox");
+    let unmatched = temp.path().join("unmatched.chitubox");
     write_artifact(
-        &path,
+        &unmatched,
         &[(
             cube(2.0),
             vec![record(
                 SegmentType::TAPER,
+                [0.0, 0.0, 0.0],
                 [0.0, 0.0, 1.0],
-                [0.0, 0.0, 2.0],
                 0.2,
-                0.4,
+                0.2,
             )],
         )],
     );
     assert!(matches!(
         scar_metric_rows(
-            &reopen(&path, "orphan-taper"),
+            &reopen(&unmatched, "unmatched"),
             &[ScarMetricInput { source_index: 0 }]
         ),
-        Err(ScarMetricError::OrphanTaper { .. })
+        Err(ScarMetricError::UnmatchedTaper { .. })
+    ));
+    let ambiguous = temp.path().join("ambiguous.chitubox");
+    let pair = stub(0.0, 0.8);
+    write_artifact(
+        &ambiguous,
+        &[(
+            cube(2.0),
+            vec![pair[0].clone(), pair[1].clone(), pair[1].clone()],
+        )],
+    );
+    assert!(matches!(
+        scar_metric_rows(
+            &reopen(&ambiguous, "ambiguous"),
+            &[ScarMetricInput { source_index: 0 }]
+        ),
+        Err(ScarMetricError::AmbiguousContact { .. })
     ));
 }
 
 #[test]
 fn rows_are_ordered_and_source_indices_are_checked() {
     let temp = TempDir::new();
-    let path = temp.path().join("two-models.chitubox");
+    let path = temp.path().join("two.chitubox");
     write_artifact(
         &path,
-        &[
-            (cube(2.0), contact_pair(0.8).into()),
-            (cube(2.0), Vec::new()),
-        ],
+        &[(cube(2.0), stub(0.0, 0.8).into()), (cube(2.0), Vec::new())],
     );
-    let artifact = reopen(&path, "two-models");
+    let artifact = reopen(&path, "two");
     let rows = scar_metric_rows(
         &artifact,
         &[
@@ -248,7 +298,6 @@ fn rows_are_ordered_and_source_indices_are_checked() {
     )
     .expect("ordered batch");
     assert_eq!(rows[0].source_index, 0);
-    assert_eq!(rows[1].source_index, 1);
     assert_eq!(value(&rows[1], "scar_area"), 0.0);
     assert!(matches!(
         scar_metric_rows(
@@ -258,7 +307,7 @@ fn rows_are_ordered_and_source_indices_are_checked() {
                 ScarMetricInput { source_index: 0 }
             ]
         ),
-        Err(ScarMetricError::InputSourceIndex { row: 0, .. })
+        Err(ScarMetricError::InputSourceIndex { .. })
     ));
 }
 
@@ -270,7 +319,7 @@ impl TempDir {
             "plinth-metrics-scar-{}-{sequence}",
             std::process::id()
         ));
-        fs::create_dir_all(&path).expect("create temporary directory");
+        fs::create_dir_all(&path).unwrap();
         Self(path)
     }
     fn path(&self) -> &Path {

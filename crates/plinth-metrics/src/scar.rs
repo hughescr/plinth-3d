@@ -1,10 +1,9 @@
-//! Independent scar metrics over type-7/type-1 contact pairs written to disk.
+//! Independent scar audit of the support records stored in a `.chitubox` file.
 //!
-//! The scorer deliberately reconstructs contact geometry from the emitted
-//! ChituBox records.  It does not inspect a producer-side contact list, does
-//! not use support meshes as a proxy for scars, and does not depend on the
-//! producer's delicacy implementation.  The public operation is whole-artifact
-//! and ordered: gather one row per model, call once, then scatter the rows.
+//! This module intentionally owns both its contact reconstruction and its
+//! delicacy field.  In particular it has no producer-side contact list and no
+//! dependency on the mesh or verify crates.  Queries are batch-shaped: gather
+//! all model points first, make one query per primitive, then scatter results.
 
 use std::collections::BTreeMap;
 use std::f64::consts::PI;
@@ -21,20 +20,13 @@ use crate::{
 /// Fixed M1 scar metric order from `04-migration-plan.md` §3.
 pub const SCAR_METRIC_ORDER: [&str; 3] = ["scar_area", "scar_worst_patch", "scar_weighted"];
 
-const CONTACT_PAIR_TOL_MM: f64 = 1.0e-5;
-const RAY_START_TOL_MM: f64 = 1.0e-9;
-
 /// One ordered model input to [`scar_metric_rows`].
-///
-/// The row deliberately carries no producer contact list: the emitted adjacent
-/// type-7/type-1 pair is the scar-contact authority.  `source_index` makes a
-/// stale caller unable to silently score a different disk model.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ScarMetricInput {
     pub source_index: usize,
 }
 
-/// One M1 scar row in the normative fixed order.
+/// One M1 scar row in normative table order.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ScarMetricRow {
     pub source_index: usize,
@@ -42,20 +34,18 @@ pub struct ScarMetricRow {
 }
 
 impl ScarMetricRow {
-    /// Entries in stable M1 table order.
     #[must_use]
     pub fn entries(&self) -> [(MetricId, MetricValue); SCAR_METRIC_ORDER.len()] {
         std::array::from_fn(|index| (MetricId::from(SCAR_METRIC_ORDER[index]), self.values[index]))
     }
 
-    /// Converts this ordered transport row into core's passive DTO.
     #[must_use]
     pub fn metric_set(&self) -> MetricSet {
         MetricSet::new(self.entries())
     }
 }
 
-/// Fail-closed structural and numerical failures for independent scar metrics.
+/// Fail-closed errors from the artifact-side reconstruction and audit.
 #[derive(Debug, Error)]
 pub enum ScarMetricError {
     #[error(
@@ -68,41 +58,37 @@ pub enum ScarMetricError {
         expected: usize,
         actual: usize,
     },
-    #[error(
-        "model {source_index} type-7 record {tip_index} is not followed by a type-1 contact taper"
-    )]
-    OrphanTip {
+    #[error("model {source_index} record {record} has non-positive or unequal sphere radii")]
+    InvalidSphereRadii { source_index: usize, record: usize },
+    #[error("model {source_index} record {record} claims a sphere but its triangle soup is not a sphere")]
+    NonSphereMesh { source_index: usize, record: usize },
+    #[error("model {source_index} type-9 record {record} is not a vertical two-pole ball")]
+    InvalidFootBallAxis { source_index: usize, record: usize },
+    #[error("model {source_index} type-7 record {record} has no unique type-1 stub member")]
+    UnmatchedTip { source_index: usize, record: usize },
+    #[error("model {source_index} type-1 record {record} has no unique stub or foot contact")]
+    UnmatchedTaper { source_index: usize, record: usize },
+    #[error("model {source_index} record {record} has ambiguous {class} contact identity")]
+    AmbiguousContact {
         source_index: usize,
-        tip_index: usize,
+        record: usize,
+        class: &'static str,
     },
-    #[error("model {source_index} type-1 record {taper_index} has no immediately preceding type-7 contact tip")]
-    OrphanTaper {
+    #[error("model {source_index} type-1 record {record} matches both the stub and foot classes")]
+    BothContactClasses { source_index: usize, record: usize },
+    #[error("model {source_index} type-7 record {tip} and type-1 record {member} have invalid stub geometry: {detail}")]
+    StubGeometry {
         source_index: usize,
-        taper_index: usize,
+        tip: usize,
+        member: usize,
+        detail: &'static str,
     },
-    #[error("model {source_index} contact pair type-7 record {tip_index}/type-1 record {taper_index} has invalid sphere radii")]
-    InvalidTipSphere {
+    #[error("model {source_index} member record {member} and type-9 record {ball} have invalid foot geometry: {detail}")]
+    FootGeometry {
         source_index: usize,
-        tip_index: usize,
-        taper_index: usize,
-    },
-    #[error("model {source_index} contact pair type-7 record {tip_index}/type-1 record {taper_index} has a zero-length taper axis")]
-    ZeroTaperAxis {
-        source_index: usize,
-        tip_index: usize,
-        taper_index: usize,
-    },
-    #[error("model {source_index} contact pair type-7 record {tip_index}/type-1 record {taper_index} does not start at the tip sphere centre")]
-    ContactPairGeometry {
-        source_index: usize,
-        tip_index: usize,
-        taper_index: usize,
-    },
-    #[error("model {source_index} contact pair type-7 record {tip_index}/type-1 record {taper_index} has invalid taper radii")]
-    InvalidTaperRadius {
-        source_index: usize,
-        tip_index: usize,
-        taper_index: usize,
+        member: usize,
+        ball: usize,
+        detail: &'static str,
     },
     #[error("model {source_index} contact {contact} produced non-finite {field}")]
     NonFinite {
@@ -121,49 +107,43 @@ pub enum ScarMetricError {
     Geometry(#[from] MetricsError),
 }
 
-#[derive(Clone, Copy, Debug)]
-struct ContactPair {
-    /// The planned deepest contact point: the inner pole of the type-7 ball.
-    contact_point: Vec3,
-    /// From the deepest point through solid, opposite the free taper direction.
-    inward_axis: Vec3,
-    ball_radius_mm: f64,
-    neck_radius_mm: f64,
-    root_radius_mm: f64,
-    member_length_mm: f64,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ContactClass {
+    Stub,
+    Foot,
 }
 
 #[derive(Clone, Copy, Debug)]
-struct Face {
-    centroid: Vec3,
-    normal: Vec3,
+struct Contact {
+    class: ContactClass,
+    member: usize,
+    ball: usize,
+    /// Designed contact endpoint, followed by the member's opposite endpoint.
+    anchor: Vec3,
+    other: Vec3,
+    radius_at_anchor: f64,
+    radius_at_other: f64,
+    ball_radius: f64,
 }
 
-#[derive(Clone, Debug)]
-struct FaceTable {
-    faces: Vec<Face>,
-    /// Exact f64 coordinate keys preserve the disk soup's signed-zero identity.
-    neighbours: Vec<Vec<usize>>,
-    thinness: Vec<f64>,
+#[derive(Clone, Copy)]
+struct Settings {
+    curvature_weight: f64,
+    thinness_weight: f64,
+    thin_feature_mm: f64,
+    eps_cos: f64,
+    tol_mm: f64,
+    stub_factor: f64,
+    foot_factor: f64,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct ContactScar {
-    surface_point: Vec3,
-    area_mm2: f64,
-    equivalent_radius_mm: f64,
-    delicacy: f64,
+#[derive(Clone, Copy)]
+struct Scar {
+    area: f64,
+    reference: Vec3,
 }
 
-/// Computes all three M1 scar metrics for every model in one opened artifact.
-///
-/// Contact identity is the exact adjacent `[type 7, type 1]` pair emitted by
-/// `member_chain_specs`: type 7 owns the contact sphere; type 1 owns the taper
-/// and therefore its neck/root radii.  Type 9 is a joint sphere, never a
-/// contact.  A missing or ambiguous mapping is a named error rather than a
-/// zero scar.  The patch quantity follows `SPEC-EMBED-POLICY`'s
-/// SCAR-AREA-CAP formula verbatim; overlapping equivalent patch discs form one
-/// connected scar patch and the largest component is `scar_worst_patch`.
+/// Computes all three M1 scar metrics for a whole reopened artifact.
 pub fn scar_metric_rows(
     artifact: &DiskArtifact,
     inputs: &[ScarMetricInput],
@@ -177,12 +157,16 @@ pub fn scar_metric_rows(
     let constants = m0_constants().map_err(|error| ScarMetricError::Constants {
         detail: error.to_string(),
     })?;
-    let settings = constants.placeholders();
-    let curvature_weight = settings.delicacy_curvature_weight().diagnostic().get();
-    let thinness_weight = settings.delicacy_thinness_weight().diagnostic().get();
-    let thin_feature_mm = settings.thin_feature_mm().diagnostic().get();
-    let eps_cos = settings.eps_cos().diagnostic().get();
-    let tol_mm = settings.tol_mm().diagnostic().get();
+    let values = constants.placeholders();
+    let settings = Settings {
+        curvature_weight: values.delicacy_curvature_weight().diagnostic().get(),
+        thinness_weight: values.delicacy_thinness_weight().diagnostic().get(),
+        thin_feature_mm: values.thin_feature_mm().diagnostic().get(),
+        eps_cos: values.eps_cos().diagnostic().get(),
+        tol_mm: values.tol_mm().diagnostic().get(),
+        stub_factor: values.ball_factor_stub().diagnostic().get(),
+        foot_factor: values.ball_factor_foot().diagnostic().get(),
+    };
 
     artifact
         .models()
@@ -198,30 +182,30 @@ pub fn scar_metric_rows(
                     actual: input.source_index,
                 });
             }
-            let pairs = contact_pairs(source_index, model.supports())?;
-            let scars = contact_scars(
-                source_index,
-                model.mesh(),
-                &pairs,
-                ScarSettings {
-                    curvature_weight,
-                    thinness_weight,
-                    thin_feature_mm,
-                    eps_cos,
-                    tol_mm,
-                },
-            )?;
+            let contacts = reconstruct_contacts(source_index, model.supports(), settings)?;
+            let scars = contact_scars(source_index, model.mesh(), &contacts, settings)?;
             let scar_area = checked_sum(
                 source_index,
                 "scar_area",
-                scars.iter().map(|scar| scar.area_mm2),
+                scars.iter().map(|scar| scar.area),
             )?;
+            let scar_worst_patch = scars.iter().map(|scar| scar.area).fold(0.0_f64, f64::max);
+            let weights = if scars.is_empty() {
+                Vec::new()
+            } else {
+                DelicacyField::build(source_index, model.mesh(), settings)?.at_points(
+                    source_index,
+                    &scars.iter().map(|scar| scar.reference).collect::<Vec<_>>(),
+                )?
+            };
             let scar_weighted = checked_sum(
                 source_index,
                 "scar_weighted",
-                scars.iter().map(|scar| scar.area_mm2 * scar.delicacy),
+                scars
+                    .iter()
+                    .zip(weights)
+                    .map(|(scar, weight)| scar.area * weight),
             )?;
-            let scar_worst_patch = largest_patch(source_index, &scars)?;
             Ok(ScarMetricRow {
                 source_index,
                 values: [
@@ -234,509 +218,962 @@ pub fn scar_metric_rows(
         .collect()
 }
 
-#[derive(Clone, Copy)]
-struct ScarSettings {
-    curvature_weight: f64,
-    thinness_weight: f64,
-    thin_feature_mm: f64,
-    eps_cos: f64,
-    tol_mm: f64,
-}
-
-fn contact_pairs(
+fn reconstruct_contacts(
     source_index: usize,
     supports: &[DiskSupport],
-) -> Result<Vec<ContactPair>, ScarMetricError> {
-    let mut pairs = Vec::new();
+    settings: Settings,
+) -> Result<Vec<Contact>, ScarMetricError> {
+    let mut tips = Vec::new();
+    let mut tapers = Vec::new();
+    let mut joiners = Vec::new();
+    let mut balls = Vec::new();
     for (index, support) in supports.iter().enumerate() {
-        if support.segment_type() == SegmentType::TIP {
-            let Some(taper) = supports.get(index + 1) else {
-                return Err(ScarMetricError::OrphanTip {
-                    source_index,
-                    tip_index: index,
-                });
-            };
-            if taper.segment_type() != SegmentType::TAPER {
-                return Err(ScarMetricError::OrphanTip {
-                    source_index,
-                    tip_index: index,
-                });
+        match support.segment_type() {
+            SegmentType::TIP => {
+                sphere(source_index, index, support)?;
+                tips.push(index);
             }
-            pairs.push(validate_contact_pair(source_index, index, support, taper)?);
-        } else if support.segment_type() == SegmentType::TAPER
-            && (index == 0 || supports[index - 1].segment_type() != SegmentType::TIP)
-        {
-            return Err(ScarMetricError::OrphanTaper {
-                source_index,
-                taper_index: index,
-            });
+            SegmentType::TAPER => tapers.push(index),
+            SegmentType::JOINER => joiners.push(index),
+            SegmentType::SHAFT => {
+                sphere(source_index, index, support)?;
+                foot_ball(source_index, index, support)?;
+                balls.push(index);
+            }
+            _ => {}
         }
     }
-    Ok(pairs)
+
+    // Form the complete bipartite candidate set before resolving identity;
+    // adjacency is deliberately not a contact rule.
+    let mut stub_by_tip: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    let mut stub_by_taper: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
+    for &tip in &tips {
+        for &taper in &tapers {
+            if stub_candidate(supports[tip].clone(), supports[taper].clone(), settings)? {
+                stub_by_tip.entry(tip).or_default().push(taper);
+                stub_by_taper.entry(taper).or_default().push(tip);
+            }
+        }
+    }
+    let mut contacts = Vec::new();
+    let mut stub_tapers = BTreeMap::new();
+    for tip in tips {
+        let matches = stub_by_tip.get(&tip).map_or(&[][..], Vec::as_slice);
+        if matches.len() != 1 {
+            return Err(if matches.is_empty() {
+                ScarMetricError::UnmatchedTip {
+                    source_index,
+                    record: tip,
+                }
+            } else {
+                ScarMetricError::AmbiguousContact {
+                    source_index,
+                    record: tip,
+                    class: "stub",
+                }
+            });
+        }
+        let taper = matches[0];
+        if stub_by_taper
+            .get(&taper)
+            .is_none_or(|other| other.len() != 1)
+        {
+            return Err(ScarMetricError::AmbiguousContact {
+                source_index,
+                record: taper,
+                class: "stub",
+            });
+        }
+        stub_tapers.insert(taper, tip);
+        contacts.push(stub_contact(source_index, tip, taper, supports, settings)?);
+    }
+
+    #[derive(Clone, Copy)]
+    struct FootCandidate {
+        member: usize,
+        ball: usize,
+        endpoint: bool,
+    }
+    let mut foot_candidates = Vec::new();
+    for &member in tapers.iter().chain(joiners.iter()) {
+        let support = &supports[member];
+        let (r0, r1) = support.radii();
+        if support.segment_type() == SegmentType::JOINER && !f32_close(r0, r1) {
+            continue;
+        }
+        for endpoint in [false, true] {
+            let (point, radius) = if endpoint {
+                (support.end(), r1)
+            } else {
+                (support.start(), r0)
+            };
+            if !positive(radius) {
+                continue;
+            }
+            for &ball in &balls {
+                if ball <= member {
+                    continue;
+                }
+                let centre = midpoint(supports[ball].start(), supports[ball].end());
+                let (ball_radius, _) = supports[ball].radii();
+                if near(point, centre) && f32_close(ball_radius, settings.foot_factor * radius) {
+                    foot_candidates.push(FootCandidate {
+                        member,
+                        ball,
+                        endpoint,
+                    });
+                }
+            }
+        }
+    }
+    let mut foot_by_member: BTreeMap<usize, Vec<FootCandidate>> = BTreeMap::new();
+    let mut foot_by_ball: BTreeMap<usize, Vec<FootCandidate>> = BTreeMap::new();
+    for candidate in foot_candidates {
+        foot_by_member
+            .entry(candidate.member)
+            .or_default()
+            .push(candidate);
+        foot_by_ball
+            .entry(candidate.ball)
+            .or_default()
+            .push(candidate);
+    }
+    for taper in tapers {
+        let feet = foot_by_member.get(&taper).map_or(&[][..], Vec::as_slice);
+        if stub_tapers.contains_key(&taper) {
+            if !feet.is_empty() {
+                return Err(ScarMetricError::BothContactClasses {
+                    source_index,
+                    record: taper,
+                });
+            }
+        } else if feet.len() != 1 {
+            return Err(if feet.is_empty() {
+                ScarMetricError::UnmatchedTaper {
+                    source_index,
+                    record: taper,
+                }
+            } else {
+                ScarMetricError::AmbiguousContact {
+                    source_index,
+                    record: taper,
+                    class: "foot",
+                }
+            });
+        } else {
+            let candidate = feet[0];
+            if foot_by_ball
+                .get(&candidate.ball)
+                .is_none_or(|other| other.len() != 1)
+            {
+                return Err(ScarMetricError::AmbiguousContact {
+                    source_index,
+                    record: candidate.ball,
+                    class: "foot",
+                });
+            }
+            contacts.push(foot_contact(
+                source_index,
+                candidate.member,
+                candidate.ball,
+                candidate.endpoint,
+                supports,
+                settings,
+            )?);
+        }
+    }
+    for joiner in joiners {
+        let feet = foot_by_member.get(&joiner).map_or(&[][..], Vec::as_slice);
+        if feet.len() > 1 {
+            return Err(ScarMetricError::AmbiguousContact {
+                source_index,
+                record: joiner,
+                class: "foot",
+            });
+        }
+        if let Some(candidate) = feet.first().copied() {
+            if foot_by_ball
+                .get(&candidate.ball)
+                .is_none_or(|other| other.len() != 1)
+            {
+                return Err(ScarMetricError::AmbiguousContact {
+                    source_index,
+                    record: candidate.ball,
+                    class: "foot",
+                });
+            }
+            contacts.push(foot_contact(
+                source_index,
+                candidate.member,
+                candidate.ball,
+                candidate.endpoint,
+                supports,
+                settings,
+            )?);
+        }
+    }
+    contacts.sort_by_key(|contact| (contact.member, contact.ball));
+    Ok(contacts)
 }
 
-fn validate_contact_pair(
+fn sphere(
+    source_index: usize,
+    record: usize,
+    support: &DiskSupport,
+) -> Result<(Vec3, f64), ScarMetricError> {
+    let (r0, r1) = support.radii();
+    if !positive(r0) || !f32_close(r0, r1) {
+        return Err(ScarMetricError::InvalidSphereRadii {
+            source_index,
+            record,
+        });
+    }
+    let centre = midpoint(support.start(), support.end());
+    let radius = r0;
+    if !f32_close(distance(support.start(), support.end()), 2.0 * radius)
+        || support
+            .mesh()
+            .vertices()
+            .iter()
+            .any(|vertex| !f32_close(distance(*vertex, centre), radius))
+    {
+        return Err(ScarMetricError::NonSphereMesh {
+            source_index,
+            record,
+        });
+    }
+    Ok((centre, radius))
+}
+
+fn foot_ball(
+    source_index: usize,
+    record: usize,
+    support: &DiskSupport,
+) -> Result<(), ScarMetricError> {
+    let (radius, _) = support.radii();
+    let start = support.start();
+    let end = support.end();
+    if !f32_close(start[0], end[0])
+        || !f32_close(start[1], end[1])
+        || start[2] <= end[2]
+        || !f32_close(start[2] - end[2], 2.0 * radius)
+    {
+        return Err(ScarMetricError::InvalidFootBallAxis {
+            source_index,
+            record,
+        });
+    }
+    Ok(())
+}
+
+fn stub_candidate(
+    tip: DiskSupport,
+    taper: DiskSupport,
+    settings: Settings,
+) -> Result<bool, ScarMetricError> {
+    let (centre, ball_radius) = sphere(usize::MAX, usize::MAX, &tip)?;
+    let (r0, r1) = taper.radii();
+    if !positive(r0) || !positive(r1) || !near(taper.start(), centre) {
+        return Ok(false);
+    }
+    let axis = sub(taper.end(), taper.start());
+    let poles = sub(tip.end(), tip.start());
+    if !positive(length(axis)) || !positive(length(poles)) {
+        return Ok(false);
+    }
+    Ok(f32_close(ball_radius, settings.stub_factor * r0) && parallel(axis, poles))
+}
+
+fn stub_contact(
     source_index: usize,
     tip_index: usize,
-    tip: &DiskSupport,
-    taper: &DiskSupport,
-) -> Result<ContactPair, ScarMetricError> {
-    let taper_index = tip_index + 1;
-    let (tip_start_radius, tip_end_radius) = tip.radii();
-    if !(tip_start_radius.is_finite() && tip_end_radius.is_finite())
-        || tip_start_radius <= 0.0
-        || tip_end_radius <= 0.0
-        || (tip_start_radius - tip_end_radius).abs() > CONTACT_PAIR_TOL_MM
-    {
-        return Err(ScarMetricError::InvalidTipSphere {
+    taper_index: usize,
+    supports: &[DiskSupport],
+    settings: Settings,
+) -> Result<Contact, ScarMetricError> {
+    let tip = &supports[tip_index];
+    let taper = &supports[taper_index];
+    let (centre, ball_radius) = sphere(source_index, tip_index, tip)?;
+    let (r0, r1) = taper.radii();
+    if !positive(r0) || !positive(r1) {
+        return Err(ScarMetricError::StubGeometry {
             source_index,
-            tip_index,
-            taper_index,
+            tip: tip_index,
+            member: taper_index,
+            detail: "non-positive taper radius",
         });
     }
-    let contact_point = tip.start();
-    let sphere_center = midpoint(tip.start(), tip.end());
-    if distance(sphere_center, taper.start()) > CONTACT_PAIR_TOL_MM {
-        return Err(ScarMetricError::ContactPairGeometry {
+    if !near(taper.start(), centre) {
+        return Err(ScarMetricError::StubGeometry {
             source_index,
-            tip_index,
-            taper_index,
+            tip: tip_index,
+            member: taper_index,
+            detail: "taper does not start at ball centre",
         });
     }
-    let taper_direction = sub(taper.end(), contact_point);
-    let member_length_mm = length(taper_direction);
-    if !member_length_mm.is_finite() || member_length_mm <= 0.0 {
-        return Err(ScarMetricError::ZeroTaperAxis {
+    if !f32_close(ball_radius, settings.stub_factor * r0) {
+        return Err(ScarMetricError::StubGeometry {
             source_index,
-            tip_index,
-            taper_index,
+            tip: tip_index,
+            member: taper_index,
+            detail: "ball-factor mismatch",
         });
     }
-    let (neck_radius_mm, root_radius_mm) = taper.radii();
-    if !(neck_radius_mm.is_finite() && root_radius_mm.is_finite())
-        || neck_radius_mm <= 0.0
-        || root_radius_mm <= 0.0
-    {
-        return Err(ScarMetricError::InvalidTaperRadius {
+    let outward = sub(taper.end(), centre);
+    if !positive(length(outward)) || !parallel(outward, sub(tip.end(), tip.start())) {
+        return Err(ScarMetricError::StubGeometry {
             source_index,
-            tip_index,
-            taper_index,
+            tip: tip_index,
+            member: taper_index,
+            detail: "pole and taper axes are not aligned",
         });
     }
-    Ok(ContactPair {
-        contact_point,
-        inward_axis: scale(taper_direction, -1.0 / member_length_mm),
-        ball_radius_mm: tip_start_radius,
-        neck_radius_mm,
-        root_radius_mm,
-        member_length_mm,
+    let start_offset = sub(tip.start(), centre);
+    let end_offset = sub(tip.end(), centre);
+    let anchor = if dot(start_offset, outward) < dot(end_offset, outward) {
+        tip.start()
+    } else {
+        tip.end()
+    };
+    Ok(Contact {
+        class: ContactClass::Stub,
+        member: taper_index,
+        ball: tip_index,
+        anchor,
+        other: taper.end(),
+        radius_at_anchor: r0,
+        radius_at_other: r1,
+        ball_radius,
+    })
+}
+
+fn foot_contact(
+    source_index: usize,
+    member: usize,
+    ball: usize,
+    endpoint_is_end: bool,
+    supports: &[DiskSupport],
+    settings: Settings,
+) -> Result<Contact, ScarMetricError> {
+    let support = &supports[member];
+    let ball_support = &supports[ball];
+    let (centre, ball_radius) = sphere(source_index, ball, ball_support)?;
+    foot_ball(source_index, ball, ball_support)?;
+    let (r0, r1) = support.radii();
+    if support.segment_type() == SegmentType::JOINER && !f32_close(r0, r1) {
+        return Err(ScarMetricError::FootGeometry {
+            source_index,
+            member,
+            ball,
+            detail: "type-3 foot member is not constant-radius",
+        });
+    }
+    let (endpoint, endpoint_radius, other, other_radius) = if endpoint_is_end {
+        (support.end(), r1, support.start(), r0)
+    } else {
+        (support.start(), r0, support.end(), r1)
+    };
+    if !near(endpoint, centre) || !f32_close(ball_radius, settings.foot_factor * endpoint_radius) {
+        return Err(ScarMetricError::FootGeometry {
+            source_index,
+            member,
+            ball,
+            detail: "endpoint or ball-factor mismatch",
+        });
+    }
+    if !positive(length(sub(other, centre))) {
+        return Err(ScarMetricError::FootGeometry {
+            source_index,
+            member,
+            ball,
+            detail: "zero-length member axis",
+        });
+    }
+    Ok(Contact {
+        class: ContactClass::Foot,
+        member,
+        ball,
+        anchor: centre,
+        other,
+        radius_at_anchor: endpoint_radius,
+        radius_at_other: other_radius,
+        ball_radius,
     })
 }
 
 fn contact_scars(
     source_index: usize,
     mesh: &Mesh,
-    pairs: &[ContactPair],
-    settings: ScarSettings,
-) -> Result<Vec<ContactScar>, ScarMetricError> {
-    if pairs.is_empty() {
+    contacts: &[Contact],
+    settings: Settings,
+) -> Result<Vec<Scar>, ScarMetricError> {
+    if contacts.is_empty() {
         return Ok(Vec::new());
     }
-    // Gather all contact queries, perform each geometric operation once for
-    // the model, then scatter ordered answers.  There is no per-contact public
-    // query path.
-    let points = pairs
+    let anchors = contacts
         .iter()
-        .map(|pair| pair.contact_point)
+        .map(|contact| contact.anchor)
         .collect::<Vec<_>>();
-    let nearest = closest_points(mesh, &points)?;
-    let inside = contains_points(mesh, &points)?;
-    let rays = pairs
+    let closest = closest_points(mesh, &anchors)?;
+    let contained = contains_points(mesh, &anchors)?;
+    let rays = contacts
         .iter()
-        .map(|pair| Ray {
-            origin: pair.contact_point,
-            direction: pair.inward_axis,
+        .map(|contact| Ray {
+            origin: contact.anchor,
+            direction: sub(contact.other, contact.anchor),
         })
         .collect::<Vec<_>>();
-    let hits = ray_intersections(mesh, &rays)?;
-    let faces = FaceTable::build(source_index, mesh, settings.thin_feature_mm)?;
-
-    pairs
-        .iter()
-        .zip(nearest.iter().zip(inside.iter().zip(hits.iter())))
-        .enumerate()
-        .map(|(contact, (pair, (nearest, (inside, hits))))| {
-            let exit = inside.then(|| hits.iter().find(|hit| hit.distance > RAY_START_TOL_MM));
-            let (interval_length, cosine) = match exit.flatten() {
-                Some(hit) => {
-                    let normal = faces.faces[hit.triangle_index].normal;
-                    (hit.distance, dot(pair.inward_axis, normal).abs())
+    let intersections = ray_intersections(mesh, &rays)?;
+    let mut crossings = Vec::with_capacity(contacts.len());
+    let mut probes = Vec::new();
+    let mut probe_owner = Vec::new();
+    for (index, (contact, hits)) in contacts.iter().zip(intersections).enumerate() {
+        let member_length = length(sub(contact.other, contact.anchor));
+        let mut unique = Vec::new();
+        for hit in hits {
+            if hit.distance <= member_length + settings.tol_mm
+                && hit.distance > 0.0
+                && unique
+                    .last()
+                    .is_none_or(|last: &crate::RayHit| !f32_close(last.distance, hit.distance))
+            {
+                unique.push(hit);
+            }
+        }
+        for event in 0..unique.len() {
+            let next = unique
+                .get(event + 1)
+                .map_or(member_length, |hit| hit.distance.min(member_length));
+            if next > unique[event].distance {
+                let distance = (unique[event].distance + next) * 0.5;
+                probes.push(add(
+                    contact.anchor,
+                    scale(unit(sub(contact.other, contact.anchor)), distance),
+                ));
+                probe_owner.push((index, event));
+            }
+        }
+        crossings.push(unique);
+    }
+    let probe_inside = contains_points(mesh, &probes)?;
+    let mut after = vec![Vec::new(); contacts.len()];
+    for ((contact, event), inside) in probe_owner.into_iter().zip(probe_inside) {
+        if after[contact].len() == event {
+            after[contact].push(inside);
+        }
+    }
+    let mut scars = Vec::with_capacity(contacts.len());
+    for (index, contact) in contacts.iter().enumerate() {
+        let member_axis = sub(contact.other, contact.anchor);
+        let member_length = length(member_axis);
+        let anchored =
+            contained[index] || closest[index].squared_distance.sqrt() <= settings.tol_mm;
+        let mut interval = if anchored { member_length } else { 0.0 };
+        let mut exit_triangle = closest[index].triangle_index;
+        if anchored {
+            for (event, hit) in crossings[index].iter().enumerate() {
+                if hit.distance <= settings.tol_mm {
+                    continue;
                 }
-                None => (0.0, 0.0),
-            };
-            let radius_at_exit = pair.neck_radius_mm
-                + (pair.root_radius_mm - pair.neck_radius_mm)
-                    * (interval_length / pair.member_length_mm).clamp(0.0, 1.0);
-            let shaft_area = if interval_length <= settings.tol_mm {
-                0.0
-            } else {
-                (PI * radius_at_exit.powi(2) / cosine.max(settings.eps_cos))
-                    .min(2.0 * radius_at_exit * interval_length)
-            };
-            let surface_distance = nearest.squared_distance.sqrt();
-            let ball_area = PI * (pair.ball_radius_mm.powi(2) - surface_distance.powi(2)).max(0.0);
-            let area_mm2 = shaft_area + ball_area;
-            let equivalent_radius_mm = (area_mm2 / PI).sqrt();
-            let delicacy = faces.delicacy(nearest.triangle_index, settings);
-            for (field, value) in [
-                ("interval length", interval_length),
-                ("radius at exit", radius_at_exit),
-                ("shaft area", shaft_area),
-                ("ball area", ball_area),
-                ("patch area", area_mm2),
-                ("patch radius", equivalent_radius_mm),
-                ("delicacy", delicacy),
-            ] {
-                if !value.is_finite() || value < 0.0 {
-                    return Err(ScarMetricError::NonFinite {
-                        source_index,
-                        contact,
-                        field,
-                    });
+                if after[index].get(event).copied() == Some(false) {
+                    interval = hit.distance.min(member_length);
+                    exit_triangle = hit.triangle_index;
+                    break;
                 }
             }
-            Ok(ContactScar {
-                surface_point: nearest.point,
-                area_mm2,
-                equivalent_radius_mm,
-                delicacy,
+        }
+        let fraction = if member_length == 0.0 {
+            0.0
+        } else {
+            interval / member_length
+        };
+        let radius = contact.radius_at_anchor
+            + (contact.radius_at_other - contact.radius_at_anchor) * fraction;
+        let normal = face_normal(mesh, exit_triangle)?;
+        let cosine = dot(unit(member_axis), normal).abs();
+        let shaft = if interval <= settings.tol_mm {
+            0.0
+        } else {
+            (PI * radius * radius / cosine.max(settings.eps_cos)).min(2.0 * radius * interval)
+        };
+        let d = closest[index].squared_distance.sqrt();
+        let ball = PI * (contact.ball_radius * contact.ball_radius - d * d).max(0.0);
+        let area = shaft + ball;
+        if !area.is_finite() {
+            return Err(ScarMetricError::NonFinite {
+                source_index,
+                contact: index,
+                field: "patch area",
+            });
+        }
+        let reference = match contact.class {
+            ContactClass::Stub => contact.anchor,
+            ContactClass::Foot => contact.anchor,
+        };
+        scars.push(Scar { area, reference });
+    }
+    Ok(scars)
+}
+
+#[derive(Clone, Copy)]
+struct Sample {
+    point: Vec3,
+    normal: Vec3,
+}
+
+struct DelicacyField {
+    samples: Vec<Sample>,
+    weights: Vec<f64>,
+}
+
+impl DelicacyField {
+    fn build(
+        source_index: usize,
+        mesh: &Mesh,
+        settings: Settings,
+    ) -> Result<Self, ScarMetricError> {
+        let samples = sample_faces(source_index, mesh)?;
+        let curvature = curvature_scores(source_index, mesh, &samples, settings.thin_feature_mm)?;
+        let thinness = thinness_scores(source_index, mesh, &samples, settings.thin_feature_mm)?;
+        let mut weights = curvature
+            .into_iter()
+            .zip(thinness)
+            .map(|(curvature, thinness)| {
+                settings.curvature_weight * curvature + settings.thinness_weight * thinness
             })
+            .collect::<Vec<_>>();
+        let maximum = weights
+            .iter()
+            .copied()
+            .filter(|value| *value > 0.0)
+            .fold(0.0_f64, f64::max);
+        let divisor = if maximum > 0.0 { maximum } else { 1.0 };
+        for weight in &mut weights {
+            *weight = (*weight / divisor).clamp(0.0, 1.0);
+        }
+        Ok(Self { samples, weights })
+    }
+
+    fn at_points(&self, source_index: usize, points: &[Vec3]) -> Result<Vec<f64>, ScarMetricError> {
+        points
+            .iter()
+            .enumerate()
+            .map(|(contact, point)| {
+                let mut nearest = 0;
+                let mut distance_squared = f64::INFINITY;
+                for (index, sample) in self.samples.iter().enumerate() {
+                    let candidate = distance_squared_between(*point, sample.point);
+                    if candidate < distance_squared {
+                        distance_squared = candidate;
+                        nearest = index;
+                    }
+                }
+                let weight = self.weights[nearest];
+                if weight.is_finite() {
+                    Ok(weight)
+                } else {
+                    Err(ScarMetricError::NonFinite {
+                        source_index,
+                        contact,
+                        field: "delicacy",
+                    })
+                }
+            })
+            .collect()
+    }
+}
+
+fn sample_faces(source_index: usize, mesh: &Mesh) -> Result<Vec<Sample>, ScarMetricError> {
+    let face_count = mesh.triangles().len();
+    let count = face_count.clamp(2_000, 20_000);
+    let mut areas = Vec::with_capacity(face_count);
+    let mut total = 0.0;
+    for face in 0..face_count {
+        let (a, b, c) = mesh.triangle_points(face);
+        total += 0.5 * length(cross(sub(b, a), sub(c, a)));
+        areas.push(total);
+    }
+    if !(total.is_finite() && total > 0.0) {
+        return Err(ScarMetricError::ArithmeticOverflow {
+            source_index,
+            metric: "sampling area",
+        });
+    }
+    let mut rng = LegacyMt19937::seeded(0);
+    let faces = (0..count)
+        .map(|_| lower_bound(&areas, rng.next_f64() * total))
+        .collect::<Vec<_>>();
+    let mut samples = Vec::with_capacity(count);
+    for face in faces {
+        let mut u = rng.next_f64();
+        let mut v = rng.next_f64();
+        if u + v > 1.0 {
+            u = 1.0 - u;
+            v = 1.0 - v;
+        }
+        let (a, b, c) = mesh.triangle_points(face);
+        samples.push(Sample {
+            point: add(a, add(scale(sub(b, a), u), scale(sub(c, a), v))),
+            normal: face_normal(mesh, face)?,
+        });
+    }
+    Ok(samples)
+}
+
+fn curvature_scores(
+    source_index: usize,
+    mesh: &Mesh,
+    samples: &[Sample],
+    thin: f64,
+) -> Result<Vec<f64>, ScarMetricError> {
+    let (vertices, defects) = welded_defects(source_index, mesh)?;
+    let count = samples.len();
+    let sub_count = count.min(4_000);
+    let indices = integer_linspace(count, sub_count);
+    let radius = thin.max(0.5);
+    let mut values = Vec::with_capacity(sub_count);
+    for &sample in &indices {
+        values.push(
+            vertices
+                .iter()
+                .zip(&defects)
+                .filter(|(vertex, _)| {
+                    distance_squared_between(**vertex, samples[sample].point) <= radius * radius
+                })
+                .map(|(_, defect)| defect.abs())
+                .sum::<f64>(),
+        );
+    }
+    let percentile = linear_percentile(&values, 95.0).max(1.0e-9);
+    let mut scores = Vec::with_capacity(count);
+    for sample in samples {
+        let mut nearest = 0;
+        let mut nearest_distance = f64::INFINITY;
+        for (candidate, &index) in indices.iter().enumerate() {
+            let distance = distance_squared_between(sample.point, samples[index].point);
+            if distance < nearest_distance {
+                nearest_distance = distance;
+                nearest = candidate;
+            }
+        }
+        scores.push((values[nearest] / percentile).clamp(0.0, 1.0));
+    }
+    Ok(scores)
+}
+
+fn thinness_scores(
+    source_index: usize,
+    mesh: &Mesh,
+    samples: &[Sample],
+    thin: f64,
+) -> Result<Vec<f64>, ScarMetricError> {
+    let centres = (0..mesh.triangles().len())
+        .map(|face| {
+            let (a, b, c) = mesh.triangle_points(face);
+            face_normal(mesh, face).map(|normal| (scale(add(add(a, b), c), 1.0 / 3.0), normal))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let limit = 40.min(centres.len());
+    let search = thin * 4.0;
+    samples
+        .iter()
+        .enumerate()
+        .map(|(sample_index, sample)| {
+            let mut near = Vec::new();
+            for (face, (centre, _)) in centres.iter().enumerate() {
+                let distance = distance(sample.point, *centre);
+                if distance <= search {
+                    insert_nearest(&mut near, (distance, face), limit);
+                }
+            }
+            let mut thickness = f64::INFINITY;
+            // Selecting K happens before normal filtering, matching the frozen audit.
+            for (_, face) in near {
+                if dot(sample.normal, centres[face].1) < -0.3 {
+                    thickness = thickness.min(distance(sample.point, centres[face].0));
+                }
+            }
+            let score = if thickness.is_finite() {
+                (1.0 - thickness / thin).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            if score.is_finite() {
+                Ok(score)
+            } else {
+                Err(ScarMetricError::NonFinite {
+                    source_index,
+                    contact: sample_index,
+                    field: "thinness",
+                })
+            }
         })
         .collect()
 }
 
-impl FaceTable {
-    fn build(
-        source_index: usize,
-        mesh: &Mesh,
-        thin_feature_mm: f64,
-    ) -> Result<Self, ScarMetricError> {
-        let mut faces = Vec::with_capacity(mesh.triangles().len());
-        let mut by_vertex: BTreeMap<(u64, u64, u64), Vec<usize>> = BTreeMap::new();
-        for (index, triangle) in mesh.triangles().iter().enumerate() {
-            let [a, b, c] = *triangle;
-            let pa = mesh.vertices()[a];
-            let pb = mesh.vertices()[b];
-            let pc = mesh.vertices()[c];
-            let normal =
-                unit(cross(sub(pb, pa), sub(pc, pa))).ok_or(ScarMetricError::NonFinite {
-                    source_index,
-                    contact: index,
-                    field: "face normal",
-                })?;
-            faces.push(Face {
-                centroid: scale(add(add(pa, pb), pc), 1.0 / 3.0),
-                normal,
+fn welded_defects(
+    source_index: usize,
+    mesh: &Mesh,
+) -> Result<(Vec<Vec3>, Vec<f64>), ScarMetricError> {
+    let mut ids = BTreeMap::new();
+    let mut vertices = Vec::new();
+    let mut face_ids = Vec::with_capacity(mesh.triangles().len());
+    for face in 0..mesh.triangles().len() {
+        let (a, b, c) = mesh.triangle_points(face);
+        let mut ids_for_face = [0; 3];
+        for (corner, value) in [a, b, c].into_iter().enumerate() {
+            let key = canonical_key(value);
+            let next = vertices.len();
+            let id = *ids.entry(key).or_insert_with(|| {
+                vertices.push(value);
+                next
             });
-            for point in [pa, pb, pc] {
-                by_vertex.entry(vector_key(point)).or_default().push(index);
-            }
+            ids_for_face[corner] = id;
         }
-        let mut neighbours = vec![Vec::new(); faces.len()];
-        for connected in by_vertex.values() {
-            for &face in connected {
-                neighbours[face].extend(connected.iter().copied().filter(|other| *other != face));
-            }
-        }
-        for connected in &mut neighbours {
-            connected.sort_unstable();
-            connected.dedup();
-        }
-        // The frozen Python proxy searches face centres only out to four
-        // thin-feature widths.  This deterministic uniform grid implements
-        // that same bounded opposite-normal search without a producer KD-tree
-        // and is built once per model, rather than once per contact.
-        let cell_width = 4.0 * thin_feature_mm;
-        let mut cells: BTreeMap<(i64, i64, i64), Vec<usize>> = BTreeMap::new();
-        for (index, face) in faces.iter().enumerate() {
-            cells
-                .entry(
-                    grid_cell(face.centroid, cell_width).ok_or(ScarMetricError::NonFinite {
-                        source_index,
-                        contact: index,
-                        field: "face grid coordinate",
-                    })?,
-                )
-                .or_default()
-                .push(index);
-        }
-        let mut thinness = Vec::with_capacity(faces.len());
-        for (index, face) in faces.iter().enumerate() {
-            let cell = grid_cell(face.centroid, cell_width).ok_or(ScarMetricError::NonFinite {
-                source_index,
-                contact: index,
-                field: "face grid coordinate",
-            })?;
-            let mut nearest = f64::INFINITY;
-            for dx in -1..=1 {
-                for dy in -1..=1 {
-                    for dz in -1..=1 {
-                        if let Some(candidates) =
-                            cells.get(&(cell.0 + dx, cell.1 + dy, cell.2 + dz))
-                        {
-                            for &candidate in candidates {
-                                let other = faces[candidate];
-                                if dot(face.normal, other.normal) < -0.3 {
-                                    nearest = nearest.min(distance(face.centroid, other.centroid));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            thinness.push(nearest);
-        }
-        Ok(Self {
-            faces,
-            neighbours,
-            thinness,
-        })
+        face_ids.push(ids_for_face);
     }
-
-    fn delicacy(&self, face_index: usize, settings: ScarSettings) -> f64 {
-        let face = self.faces[face_index];
-        let curvature = match self.neighbours[face_index].as_slice() {
-            [] => 0.0,
-            neighbours => {
-                neighbours
-                    .iter()
-                    .map(|&other| {
-                        (1.0 - dot(face.normal, self.faces[other].normal)).clamp(0.0, 2.0) * 0.5
-                    })
-                    .sum::<f64>()
-                    / neighbours.len() as f64
+    let mut sums = vec![0.0; vertices.len()];
+    for (face, ids) in face_ids.iter().enumerate() {
+        let (a, b, c) = mesh.triangle_points(face);
+        for (at, left, right) in [
+            (ids[0], sub(b, a), sub(c, a)),
+            (ids[1], sub(a, b), sub(c, b)),
+            (ids[2], sub(a, c), sub(b, c)),
+        ] {
+            let denominator = length(left) * length(right);
+            if !(denominator.is_finite() && denominator > 0.0) {
+                return Err(ScarMetricError::ArithmeticOverflow {
+                    source_index,
+                    metric: "welded angle defect",
+                });
             }
-        };
-        // The table is built once.  A deterministic whole-table scan is slow
-        // by design but avoids borrowing a producer KD-tree or delicacy field.
-        let thinness = (1.0 - self.thinness[face_index] / settings.thin_feature_mm).clamp(0.0, 1.0);
-        (settings.curvature_weight * curvature + settings.thinness_weight * thinness)
-            .clamp(0.0, 1.0)
+            sums[at] += (dot(left, right) / denominator).clamp(-1.0, 1.0).acos();
+        }
     }
+    Ok((
+        vertices,
+        sums.into_iter().map(|sum| 2.0 * PI - sum).collect(),
+    ))
 }
 
-fn largest_patch(source_index: usize, scars: &[ContactScar]) -> Result<f64, ScarMetricError> {
-    if scars.is_empty() {
-        return Ok(0.0);
+fn face_normal(mesh: &Mesh, face: usize) -> Result<Vec3, ScarMetricError> {
+    let (a, b, c) = mesh.triangle_points(face);
+    let normal = cross(sub(b, a), sub(c, a));
+    if !positive(length(normal)) {
+        return Err(ScarMetricError::ArithmeticOverflow {
+            source_index: 0,
+            metric: "face normal",
+        });
     }
-    let mut parents = (0..scars.len()).collect::<Vec<_>>();
-    for left in 0..scars.len() {
-        for right in left + 1..scars.len() {
-            if distance(scars[left].surface_point, scars[right].surface_point)
-                <= scars[left].equivalent_radius_mm + scars[right].equivalent_radius_mm
-            {
-                union(&mut parents, left, right);
-            }
-        }
-    }
-    let mut areas: BTreeMap<usize, f64> = BTreeMap::new();
-    for (index, scar) in scars.iter().enumerate() {
-        let root = find(&mut parents, index);
-        *areas.entry(root).or_insert(0.0) += scar.area_mm2;
-    }
-    checked_sum(source_index, "scar_worst_patch", areas.values().copied())?;
-    areas
-        .values()
-        .copied()
-        .max_by(f64::total_cmp)
-        .ok_or(ScarMetricError::ArithmeticOverflow {
-            source_index,
-            metric: "scar_worst_patch",
-        })
+    Ok(unit(normal))
 }
 
-fn find(parents: &mut [usize], index: usize) -> usize {
-    if parents[index] != index {
-        parents[index] = find(parents, parents[index]);
-    }
-    parents[index]
-}
-
-fn union(parents: &mut [usize], left: usize, right: usize) {
-    let left_root = find(parents, left);
-    let right_root = find(parents, right);
-    if left_root != right_root {
-        // Lowest stable index wins, independent of input traversal accidents.
-        if left_root < right_root {
-            parents[right_root] = left_root;
-        } else {
-            parents[left_root] = right_root;
-        }
-    }
-}
-
-fn checked_sum(
+fn checked_sum<I: Iterator<Item = f64>>(
     source_index: usize,
     metric: &'static str,
-    values: impl IntoIterator<Item = f64>,
+    values: I,
 ) -> Result<f64, ScarMetricError> {
-    let sum = values.into_iter().try_fold(0.0, |sum, value| {
-        let next = sum + value;
-        next.is_finite().then_some(next)
-    });
-    sum.ok_or(ScarMetricError::ArithmeticOverflow {
-        source_index,
-        metric,
-    })
+    let mut sum = 0.0;
+    for value in values {
+        sum += value;
+        if !sum.is_finite() {
+            return Err(ScarMetricError::ArithmeticOverflow {
+                source_index,
+                metric,
+            });
+        }
+    }
+    Ok(sum)
 }
 
 fn metric_value(
     source_index: usize,
-    metric: &'static str,
+    field: &'static str,
     value: f64,
 ) -> Result<MetricValue, ScarMetricError> {
-    MetricValue::new(value).map_err(|_| ScarMetricError::ArithmeticOverflow {
+    if !value.is_finite() {
+        return Err(ScarMetricError::NonFinite {
+            source_index,
+            contact: 0,
+            field,
+        });
+    }
+    MetricValue::new(value).map_err(|_| ScarMetricError::NonFinite {
         source_index,
-        metric,
+        contact: 0,
+        field,
     })
 }
 
-fn vector_key(value: Vec3) -> (u64, u64, u64) {
-    (value[0].to_bits(), value[1].to_bits(), value[2].to_bits())
+fn insert_nearest(values: &mut Vec<(f64, usize)>, candidate: (f64, usize), limit: usize) {
+    let position = values.partition_point(|value| {
+        value
+            .0
+            .total_cmp(&candidate.0)
+            .then(value.1.cmp(&candidate.1))
+            .is_lt()
+    });
+    if position < limit {
+        values.insert(position, candidate);
+        if values.len() > limit {
+            values.pop();
+        }
+    }
 }
-fn grid_cell(value: Vec3, width: f64) -> Option<(i64, i64, i64)> {
-    let coordinate = |component: f64| {
-        let scaled = (component / width).floor();
-        (scaled.is_finite() && scaled >= i64::MIN as f64 && scaled <= i64::MAX as f64)
-            .then_some(scaled as i64)
+
+fn lower_bound(values: &[f64], target: f64) -> usize {
+    values
+        .partition_point(|value| *value < target)
+        .min(values.len() - 1)
+}
+fn integer_linspace(length: usize, count: usize) -> Vec<usize> {
+    if count == 1 {
+        vec![0]
+    } else {
+        (0..count)
+            .map(|index| ((index as f64 * (length - 1) as f64) / (count - 1) as f64) as usize)
+            .collect()
+    }
+}
+fn linear_percentile(values: &[f64], percentile: f64) -> f64 {
+    let mut ordered = values.to_vec();
+    ordered.sort_by(f64::total_cmp);
+    let position = percentile / 100.0 * (ordered.len() - 1) as f64;
+    let low = position.floor() as usize;
+    ordered[low] + (ordered[position.ceil() as usize] - ordered[low]) * (position - low as f64)
+}
+fn canonical_key(value: Vec3) -> (u64, u64, u64) {
+    fn bit(value: f64) -> u64 {
+        if value == 0.0 {
+            0
+        } else {
+            value.to_bits()
+        }
+    }
+    (bit(value[0]), bit(value[1]), bit(value[2]))
+}
+fn f32_close(left: f64, right: f64) -> bool {
+    if left == right {
+        return true;
+    }
+    if !(left.is_finite() && right.is_finite()) {
+        return false;
+    }
+    let ulp = |value: f64| {
+        let value = value.abs() as f32;
+        let next = f32::from_bits(value.to_bits().saturating_add(1));
+        (next - value).abs() as f64
     };
-    Some((
-        coordinate(value[0])?,
-        coordinate(value[1])?,
-        coordinate(value[2])?,
-    ))
+    (left - right).abs() <= 16.0 * ulp(left).max(ulp(right)).max(f32::MIN_POSITIVE as f64)
 }
-fn add(a: Vec3, b: Vec3) -> Vec3 {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+fn near(left: Vec3, right: Vec3) -> bool {
+    left.into_iter()
+        .zip(right)
+        .all(|(left, right)| f32_close(left, right))
 }
-fn sub(a: Vec3, b: Vec3) -> Vec3 {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+fn parallel(left: Vec3, right: Vec3) -> bool {
+    let left_length = length(left);
+    let right_length = length(right);
+    left_length > 0.0
+        && right_length > 0.0
+        && 1.0 - (dot(left, right) / (left_length * right_length)).abs()
+            <= 64.0 * f32::EPSILON as f64
 }
-fn scale(a: Vec3, factor: f64) -> Vec3 {
-    [a[0] * factor, a[1] * factor, a[2] * factor]
+fn positive(value: f64) -> bool {
+    value.is_finite() && value > 0.0
 }
-fn dot(a: Vec3, b: Vec3) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+fn midpoint(left: Vec3, right: Vec3) -> Vec3 {
+    scale(add(left, right), 0.5)
 }
-fn cross(a: Vec3, b: Vec3) -> Vec3 {
+fn add(left: Vec3, right: Vec3) -> Vec3 {
+    [left[0] + right[0], left[1] + right[1], left[2] + right[2]]
+}
+fn sub(left: Vec3, right: Vec3) -> Vec3 {
+    [left[0] - right[0], left[1] - right[1], left[2] - right[2]]
+}
+fn scale(value: Vec3, factor: f64) -> Vec3 {
+    [value[0] * factor, value[1] * factor, value[2] * factor]
+}
+fn dot(left: Vec3, right: Vec3) -> f64 {
+    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
+}
+fn cross(left: Vec3, right: Vec3) -> Vec3 {
     [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
+        left[1] * right[2] - left[2] * right[1],
+        left[2] * right[0] - left[0] * right[2],
+        left[0] * right[1] - left[1] * right[0],
     ]
 }
 fn length(value: Vec3) -> f64 {
     dot(value, value).sqrt()
 }
-fn distance(a: Vec3, b: Vec3) -> f64 {
-    length(sub(a, b))
+fn distance(left: Vec3, right: Vec3) -> f64 {
+    length(sub(left, right))
 }
-fn midpoint(a: Vec3, b: Vec3) -> Vec3 {
-    scale(add(a, b), 0.5)
+fn distance_squared_between(left: Vec3, right: Vec3) -> f64 {
+    dot(sub(left, right), sub(left, right))
 }
-fn unit(value: Vec3) -> Option<Vec3> {
-    let length = length(value);
-    (length.is_finite() && length > 0.0).then(|| scale(value, 1.0 / length))
+fn unit(value: Vec3) -> Vec3 {
+    scale(value, 1.0 / length(value))
+}
+
+/// The legacy `RandomState` MT19937 stream used by NumPy's frozen scorer.
+struct LegacyMt19937 {
+    state: [u32; 624],
+    index: usize,
+}
+impl LegacyMt19937 {
+    fn seeded(seed: u32) -> Self {
+        let mut state = [0; 624];
+        state[0] = seed;
+        for index in 1..624 {
+            state[index] = 1_812_433_253u32
+                .wrapping_mul(state[index - 1] ^ (state[index - 1] >> 30))
+                .wrapping_add(index as u32);
+        }
+        Self { state, index: 624 }
+    }
+    fn twist(&mut self) {
+        for index in 0..624 {
+            let bits =
+                (self.state[index] & 0x8000_0000) | (self.state[(index + 1) % 624] & 0x7fff_ffff);
+            self.state[index] = self.state[(index + 397) % 624]
+                ^ (bits >> 1)
+                ^ if bits & 1 == 0 { 0 } else { 0x9908_b0df };
+        }
+        self.index = 0;
+    }
+    fn next_u32(&mut self) -> u32 {
+        if self.index == 624 {
+            self.twist();
+        }
+        let mut value = self.state[self.index];
+        self.index += 1;
+        value ^= value >> 11;
+        value ^= (value << 7) & 0x9d2c_5680;
+        value ^= (value << 15) & 0xefc6_0000;
+        value ^ (value >> 18)
+    }
+    fn next_f64(&mut self) -> f64 {
+        let first = (self.next_u32() >> 5) as f64;
+        let second = (self.next_u32() >> 6) as f64;
+        (first * 67_108_864.0 + second) / 9_007_199_254_740_992.0
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    fn settings() -> ScarSettings {
-        ScarSettings {
-            curvature_weight: 0.6,
-            thinness_weight: 0.4,
-            thin_feature_mm: 1.5,
-            eps_cos: 1.0e-9,
-            tol_mm: 0.05,
-        }
-    }
-
+    use super::{integer_linspace, linear_percentile, LegacyMt19937};
     #[test]
-    fn delicacy_uses_the_authoritative_point_six_point_four_blend_and_one_point_five_boundary() {
-        // Two adjacent right-angle faces give curvature = (1 - 0) / 2 = .5
-        // at face zero and no opposite-facing match, hence .6 * .5 = .3.
-        let curved = FaceTable {
-            faces: vec![
-                Face {
-                    centroid: [0.0; 3],
-                    normal: [0.0, 0.0, 1.0],
-                },
-                Face {
-                    centroid: [0.0; 3],
-                    normal: [1.0, 0.0, 0.0],
-                },
-            ],
-            neighbours: vec![vec![1], vec![0]],
-            thinness: vec![f64::INFINITY, f64::INFINITY],
-        };
-        assert!((curved.delicacy(0, settings()) - 0.3).abs() < 1.0e-12);
-
-        // The score saturates at zero exactly at the 1.5 mm thin-feature
-        // boundary, rather than treating it as a radius or a diameter.
-        let at_boundary = FaceTable {
-            faces: vec![Face {
-                centroid: [0.0; 3],
-                normal: [0.0, 0.0, 1.0],
-            }],
-            neighbours: vec![vec![]],
-            thinness: vec![1.5],
-        };
-        assert_eq!(at_boundary.delicacy(0, settings()), 0.0);
-
-        let mixed = FaceTable {
-            faces: vec![
-                Face {
-                    centroid: [0.0; 3],
-                    normal: [0.0, 0.0, 1.0],
-                },
-                Face {
-                    centroid: [0.0; 3],
-                    normal: [1.0, 0.0, 0.0],
-                },
-            ],
-            neighbours: vec![vec![1], vec![0]],
-            thinness: vec![0.75, f64::INFINITY],
-        };
-        // .6 * .5 curvature + .4 * .5 thinness.
-        assert!((mixed.delicacy(0, settings()) - 0.5).abs() < 1.0e-12);
+    fn legacy_seed_zero_matches_numpy_randomstate_prefix() {
+        let mut rng = LegacyMt19937::seeded(0);
+        assert!((rng.next_f64() - 0.548_813_503_927_324_8).abs() < f64::EPSILON);
+        assert!((rng.next_f64() - 0.715_189_366_372_419_5).abs() < f64::EPSILON);
     }
-
     #[test]
-    fn union_find_clustering_is_order_deterministic() {
-        let scars = vec![
-            ContactScar {
-                surface_point: [0.0; 3],
-                area_mm2: 1.0,
-                equivalent_radius_mm: 1.0,
-                delicacy: 0.0,
-            },
-            ContactScar {
-                surface_point: [1.0, 0.0, 0.0],
-                area_mm2: 2.0,
-                equivalent_radius_mm: 1.0,
-                delicacy: 0.0,
-            },
-            ContactScar {
-                surface_point: [9.0, 0.0, 0.0],
-                area_mm2: 4.0,
-                equivalent_radius_mm: 1.0,
-                delicacy: 0.0,
-            },
-        ];
-        assert_eq!(largest_patch(0, &scars).unwrap(), 4.0);
-        let reordered = vec![scars[2], scars[1], scars[0]];
-        assert_eq!(largest_patch(0, &reordered).unwrap(), 4.0);
+    fn numpy_integer_linspace_and_percentile_are_linear() {
+        assert_eq!(integer_linspace(8, 4), [0, 2, 4, 7]);
+        assert!((linear_percentile(&[0.0, 10.0, 20.0, 30.0], 95.0) - 28.5).abs() < 1.0e-12);
     }
 }
