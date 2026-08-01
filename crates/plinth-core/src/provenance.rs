@@ -337,7 +337,106 @@ impl EvidenceKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EvidenceSource(EvidenceSourceData);
 
+/// An exhaustive borrowed view of an [`EvidenceSource`].
+///
+/// The view exposes validated source metadata without permitting mutation or
+/// reconstructing invalid combinations of variant-specific fields.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EvidenceSourceView<'a> {
+    CalibrationPlate {
+        plate: &'a PlateId,
+        record: &'a str,
+        locator: &'a str,
+        date: &'a EvidenceDate,
+    },
+    VendorDocument {
+        id: &'a EvidenceId,
+        record: &'a str,
+        locator: &'a str,
+        date: &'a EvidenceDate,
+    },
+    InstalledHardware {
+        id: &'a EvidenceId,
+        record: &'a str,
+        locator: &'a str,
+        date: &'a EvidenceDate,
+    },
+    CorpusStudy {
+        id: &'a EvidenceId,
+        record: &'a str,
+        locator: &'a str,
+        date: &'a EvidenceDate,
+    },
+    ProjectRecord {
+        id: &'a EvidenceId,
+        record: &'a str,
+        locator: &'a str,
+        date: &'a EvidenceDate,
+    },
+    OwnerDecision {
+        id: &'a EvidenceId,
+        record: &'a str,
+        locator: &'a str,
+        date: &'a EvidenceDate,
+    },
+}
+
 impl EvidenceSource {
+    #[must_use]
+    pub fn view(&self) -> EvidenceSourceView<'_> {
+        match &self.0 {
+            EvidenceSourceData::CalibrationPlate {
+                plate,
+                record,
+                locator,
+                date,
+            } => EvidenceSourceView::CalibrationPlate {
+                plate,
+                record,
+                locator,
+                date,
+            },
+            EvidenceSourceData::Identified {
+                kind,
+                id,
+                record,
+                locator,
+                date,
+            } => match kind {
+                EvidenceKind::VendorDocument => EvidenceSourceView::VendorDocument {
+                    id,
+                    record,
+                    locator,
+                    date,
+                },
+                EvidenceKind::InstalledHardware => EvidenceSourceView::InstalledHardware {
+                    id,
+                    record,
+                    locator,
+                    date,
+                },
+                EvidenceKind::CorpusStudy => EvidenceSourceView::CorpusStudy {
+                    id,
+                    record,
+                    locator,
+                    date,
+                },
+                EvidenceKind::ProjectRecord => EvidenceSourceView::ProjectRecord {
+                    id,
+                    record,
+                    locator,
+                    date,
+                },
+                EvidenceKind::OwnerDecision => EvidenceSourceView::OwnerDecision {
+                    id,
+                    record,
+                    locator,
+                    date,
+                },
+            },
+        }
+    }
+
     pub fn calibration_plate(
         plate: PlateId,
         record: impl Into<String>,

@@ -12,10 +12,10 @@ help: the trait `plinth_core::provenance::sealed::Sealed` is not implemented for
   = help: the following other types implement trait `plinth_core::provenance::sealed::Sealed`:
             EffectiveArmCount
             Finite
-            FiniteInterval
-            LoadSharing
             MetricValue
             f64
+            plinth_core::FiniteInterval
+            plinth_core::LoadSharing
 note: required by a bound in `MeasuredPayload`
  --> src/provenance.rs
   |

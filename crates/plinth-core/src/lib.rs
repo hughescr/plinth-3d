@@ -5,6 +5,7 @@
 //! in their owning crates; [`DefectReport`] is the one acceptance authority.
 
 mod chord;
+mod constants;
 mod cost;
 mod defect;
 mod digest;
@@ -22,6 +23,11 @@ pub use chord::{
     canon_chord_micron, chord_parity_report, chords_match_micron, ChordError, ChordMismatch,
     ChordParityError, ChordParityReport, ChordSource, MicronGranularity, MicronGranularityError,
 };
+pub use constants::{
+    ConstantDescriptor, ConstantValue, ConstantValueView, ConstantsRegistry, EnumValue,
+    RegistryError, RegistryProvenance, RegistryProvenanceClass, RegistryProvenanceView,
+    ToConstantValue,
+};
 pub use cost::{
     CostError, CostVector, Fidelity, OptimizationError, OptimizationSummary, OrientationCost,
     ParetoPoint, PartialCost, Resin, Risk, Scar, SearchEvidence,
@@ -38,8 +44,8 @@ pub use metric::{MetricId, MetricSet, MetricValue};
 pub use number::{Finite, FiniteError};
 pub use provenance::{
     AcceptSafe, BoundKind, CalendarDate, Derived, EvidenceDate, EvidenceId, EvidenceSource,
-    FiniteInterval, Measured, MeasuredPayload, Pending, Placeholder, ProvenanceError,
-    ProvenanceManifest, ProvenanceRef,
+    EvidenceSourceView, FiniteInterval, Measured, MeasuredPayload, Pending, Placeholder,
+    ProvenanceError, ProvenanceManifest, ProvenanceRef,
 };
 pub use stage::Stage;
 pub use violation::ViolationKind;

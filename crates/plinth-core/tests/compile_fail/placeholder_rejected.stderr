@@ -1,8 +1,8 @@
-error[E0277]: the trait bound `Placeholder<f64>: AcceptSafe<f64>` is not satisfied
+error[E0277]: the trait bound `plinth_core::Placeholder<f64>: AcceptSafe<f64>` is not satisfied
  --> tests/compile_fail/placeholder_rejected.rs:9:30
   |
 9 |     let _ = acceptance_input(&guess);
-  |             ---------------- ^^^^^^ the trait `AcceptSafe<f64>` is not implemented for `Placeholder<f64>`
+  |             ---------------- ^^^^^^ the trait `AcceptSafe<f64>` is not implemented for `plinth_core::Placeholder<f64>`
   |             |
   |             required by a bound introduced by this call
   |

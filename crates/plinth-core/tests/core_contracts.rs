@@ -1,11 +1,11 @@
 use plinth_core::{
     digest_f64_slice, AcceptSafe, BoundKind, CalendarDate, ConstantId, CostError, CostVector,
     DecisionId, Defect, DefectReport, Derived, DigestError, EvidenceDate, EvidenceId,
-    EvidenceSource, Fidelity, Finite, FiniteError, FiniteInterval, FixerId, LayerPlan,
-    LayerPlanError, LoadSharing, LoadSharingError, Measured, MetricId, MetricSet, MetricValue,
-    ModelId, OptimizationError, OptimizationSummary, OrientationCost, OrientationId, ParetoPoint,
-    PartialCost, Pending, PlateId, ProvenanceError, ProvenanceManifest, ProvenanceRef, ReportError,
-    Resin, Risk, Scar, SearchEvidence, Severity, SiteId, Stage, StageId, Termination,
+    EvidenceSource, EvidenceSourceView, Fidelity, Finite, FiniteError, FiniteInterval, FixerId,
+    LayerPlan, LayerPlanError, LoadSharing, LoadSharingError, Measured, MetricId, MetricSet,
+    MetricValue, ModelId, OptimizationError, OptimizationSummary, OrientationCost, OrientationId,
+    ParetoPoint, PartialCost, Pending, PlateId, ProvenanceError, ProvenanceManifest, ProvenanceRef,
+    ReportError, Resin, Risk, Scar, SearchEvidence, Severity, SiteId, Stage, StageId, Termination,
     TerminationError, ViolationKind,
 };
 use serde_json::json;
@@ -40,6 +40,97 @@ fn calibration_source(date: &str) -> EvidenceSource {
         EvidenceDate::exact(CalendarDate::new(date).unwrap()),
     )
     .unwrap()
+}
+
+#[test]
+fn evidence_source_view_is_exhaustive_and_borrowed() {
+    let date = EvidenceDate::Unknown;
+    let plate = PlateId::from("plate-view");
+    let calibration = EvidenceSource::calibration_plate(
+        plate.clone(),
+        "records/calibration",
+        "#plate",
+        date.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        calibration.view(),
+        EvidenceSourceView::CalibrationPlate {
+            plate: &plate,
+            record: "records/calibration",
+            locator: "#plate",
+            date: &date,
+        }
+    );
+
+    let id = EvidenceId::new("source-view").unwrap();
+    let vendor =
+        EvidenceSource::vendor_document(id.clone(), "records/vendor", "#vendor", date.clone())
+            .unwrap();
+    assert_eq!(
+        vendor.view(),
+        EvidenceSourceView::VendorDocument {
+            id: &id,
+            record: "records/vendor",
+            locator: "#vendor",
+            date: &date,
+        }
+    );
+
+    let hardware = EvidenceSource::installed_hardware(
+        id.clone(),
+        "records/hardware",
+        "#hardware",
+        date.clone(),
+    )
+    .unwrap();
+    assert_eq!(
+        hardware.view(),
+        EvidenceSourceView::InstalledHardware {
+            id: &id,
+            record: "records/hardware",
+            locator: "#hardware",
+            date: &date,
+        }
+    );
+
+    let corpus =
+        EvidenceSource::corpus_study(id.clone(), "records/corpus", "#corpus", date.clone())
+            .unwrap();
+    assert_eq!(
+        corpus.view(),
+        EvidenceSourceView::CorpusStudy {
+            id: &id,
+            record: "records/corpus",
+            locator: "#corpus",
+            date: &date,
+        }
+    );
+
+    let project =
+        EvidenceSource::project_record(id.clone(), "records/project", "#project", date.clone())
+            .unwrap();
+    assert_eq!(
+        project.view(),
+        EvidenceSourceView::ProjectRecord {
+            id: &id,
+            record: "records/project",
+            locator: "#project",
+            date: &date,
+        }
+    );
+
+    let owner = EvidenceSource::owner_decision(id.clone(), "records/owner", "#owner", date.clone())
+        .unwrap();
+    assert_eq!(
+        owner.view(),
+        EvidenceSourceView::OwnerDecision {
+            id: &id,
+            record: "records/owner",
+            locator: "#owner",
+            date: &date,
+        }
+    );
 }
 
 #[test]
