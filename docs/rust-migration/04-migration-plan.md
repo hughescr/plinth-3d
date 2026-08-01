@@ -1670,9 +1670,11 @@ CLEAN="${TMPDIR:-/tmp}/plinth-clean-$$"
 git clone . "$CLEAN" && (cd "$CLEAN" && cargo test --workspace) ; rm -rf "$CLEAN"
 ```
 
-This is the **one sanctioned write outside the repository**, and it is named as such in
+This M9 clean-checkout clone is the **only additional out-of-repo write** beyond the
+explicitly authorized M0 durable corpus/oversized-fixture carve-out in
 `06-conventions.md` §7. It reads nothing back into the working tree and the clone is
-deleted after the run. Do not generalize it into a habit of working in `$TMPDIR`.
+deleted after the run. Do not generalize either carve-out into permission to work in
+`$TMPDIR`.
 
 **Parity gate:** the full M7 gate **re-fires post-deletion, from a clean checkout**. If
 removing PyO3 changed a number, you find out here.

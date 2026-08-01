@@ -654,6 +654,8 @@ remain `Placeholder` unless another wrapper is stated explicitly.
 | `HOLLOW_SHARD_MAX_FACES` / `HOLLOW_SHARD_MAX_DIM_MM` / `HOLLOW_SHARD_MAX_VOLUME_MM3` | 64 / 1.0 mm / 0.01 mm3 | component-triage gates |
 | `HOLLOW_CONTAINMENT_SAMPLES` / `HOLLOW_CONTAINMENT_MIN_FRACTION` | 32 / 0.9 | internal-component evidence gate |
 | `HOLLOW_ALLOW_OUTPUT_DEFAULT` | false, **P** | hollow output stays disabled without the dedicated verifier |
+| `HOLLOW_BREATHING_VOXEL_PITCH_MM` | 0.4 mm | final cavity-breathing verification/export voxel pitch |
+| `HOLLOW_VOLUME_BALANCE_REL_TOL` | 0.02 | final volume-balance tolerance relative to the solid-model volume |
 | `HOLLOW_EXIT_RAY_MAX_MM` | 45 mm | drain/vent exit search ceiling |
 | `HOLLOW_DRAIN_DIRECTIONS` | `(0,0,-1)`, `(0.5,0,-1)`, `(-0.5,0,-1)`, `(0,0.5,-1)`, `(0,-0.5,-1)` | one structured downward-direction policy |
 | `HOLLOW_EXTRA_DRAIN_POLICY` | min 0.5 mL; max 3; exit <= 8 mm; extensions 4/8/9 mm; 24 cylinder sides | one structured trapped-pocket repair policy |
@@ -669,6 +671,8 @@ that coupled heuristic. Its independently useful enable default remains register
 | Stable ID | Value / disposition | Source meaning |
 |---|---|---|
 | `CCO_FERMAT_MAX_ITERATIONS` / `CCO_CONE_TOLERANCE_DEG` | 12 / 1e-6 degrees | bounded Fermat solve and cone comparison |
+| `CCO_XIA_ALPHA` | 0.5, **Derived** | Xia load exponent used by the junction-angle and weighted-Fermat math |
+| `CCO_X_PAIR_LOAD_DISCOUNT` | `0.5**0.25`, **Derived** | fourth-root radius discount for each rod in a load-sharing X pair; shared by CCO estimation and bracing geometry |
 | `CCO_BIFURCATION_HOSTS` / `CCO_MIN_SPLIT_LENGTH_MM` | 5 / 0.5 mm | bifurcation candidate policy |
 | `CCO_SPLIT_SLIDE_POLICY` | start 0.03; end 0.97; step 0.03; cap 40 | one structured deterministic slide grid |
 | `P8_RESEAT_ENABLE` / `P8_JUNCTION_RESEAT_ENABLE` / `P8_RELOCATE_ENABLE` | true / true / true | independent Phase-8 enables |
@@ -679,7 +683,7 @@ that coupled heuristic. Its independently useful enable default remains register
 `perf_exact_opts_disable = false` is excluded only because it disables
 exact-result-preserving caches/accelerators; a cache-disabled equality run is the
 required proof. `KDTREE_REBUILD_EVERY = 25` is likewise excluded only because
-`_DynamicMemberIndex.nearest_members` brute-forces the unindexed tail before
+`_KDCache.nearest_members` brute-forces the unindexed tail before
 returning exact nearest members. The exclusion is implementation exactness, not a
 claim that 25 is physics.
 
@@ -689,8 +693,11 @@ claim that 25 is physics.
 |---|---|---|
 | `PIPELINE_HOLLOW_ENABLE_DEFAULT` / `PIPELINE_P8_RELOCATE_DEFAULT` | true / false | pipeline/tool interface defaults; orientation aliases `HOLLOW_ORIENT_ENABLE_DEFAULT` |
 | `EMIT_REQUIRE_PASSED_GATES_DEFAULT` | true | output authorization default |
+| `EXPECTED_CHITUBOX_API_VERSION` | 1 | native writer compatibility contract, checked at emission and by the ChituBox test gate |
+| `LIFT_TOL_MM` | 1e-6 mm | emitted output frame-invariant tolerance for `zmin_centered - plate_z == lift_mm` |
 | `CHITUBOX_DEFAULT_PLACEMENT_XY_MM` | (0.0, 0.0) mm | emitted project placement default |
 | `CHITUBOX_ROOT_LAYERS` / `CHITUBOX_ROOT_HEIGHT_MM` | 10 / 0.5 mm | root straightness contract |
+| `CHITUBOX_SPHERE_MESH_TESSELLATION_POLICY` | `n_lat=8`, `n_lon=16` | default 224-triangle UV-sphere policy; changes the cached geometry of every default-emitted tip/contact and joint sphere |
 | `DECIMATION_FEATURE_PROBE_RATIO` / `DECIMATION_SEED_ERROR_MM` / `DECIMATION_FEATURE_HALO_MM` / `DECIMATION_PROTECTED_CAP_FRACTION` | 0.2 / 0.050 mm / 0.4 mm / 0.12 | feature-protection controls |
 | `DECIMATION_ADAPTATION_POLICY` | 3 adaptations; feature multiplier 2.0; error multiplier 0.6 | one structured adaptive policy |
 | `DECIMATION_VERTEX_GROUP_FACTOR` | 10 | protected vertex-group sizing |

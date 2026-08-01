@@ -188,7 +188,7 @@
       "classification": "runtime_search",
       "provenance_wrapper": "Placeholder",
       "source_locators": [
-        "scripts/support_placement/cco.py:_bifurcation_candidates nearest_members"
+        "scripts/support_placement/cco.py:_bifurcation_builders kdc.nearest_members"
       ],
       "normative": "03-physics-and-constants.md §3.10.4 = 5",
       "provenance_detail": "host shortlist"
@@ -232,6 +232,28 @@
       ],
       "normative": "03-physics-and-constants.md §3.10.4 = start 0.03, end 0.97, step 0.03, cap 40",
       "provenance_detail": "structured deterministic slide grid"
+    },
+    {
+      "id": "CCO_XIA_ALPHA",
+      "classification": "runtime_physics",
+      "provenance_wrapper": "Derived",
+      "source_locators": [
+        "scripts/support_placement/cco.py:xia_angles alpha=1/2 junction-angle derivation",
+        "scripts/support_placement/cco.py:_weighted_fermat_point load^alpha = sqrt(load)"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.4 = 0.5",
+      "provenance_detail": "Derived from the Xia alpha=1/2 equations implemented as square-root load weights"
+    },
+    {
+      "id": "CCO_X_PAIR_LOAD_DISCOUNT",
+      "classification": "runtime_physics",
+      "provenance_wrapper": "Derived",
+      "source_locators": [
+        "scripts/support_placement/cco.py:brace_estimate_ml r_raw * 0.5 ** 0.25",
+        "scripts/support_placement/bracing.py:_cross_link_rods duty_r = r_raw * 0.5 ** 0.25"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.4 = 0.5**0.25",
+      "provenance_detail": "Derived fourth-root radius factor for half-load sharing across each rod of an X pair"
     },
     {
       "id": "CHITUBOX_DEFAULT_PLACEMENT_XY_MM",
@@ -313,6 +335,18 @@
       ],
       "normative": "03-physics-and-constants.md §3.10.5 = 10",
       "provenance_detail": "minimum vertical root layers"
+    },
+    {
+      "id": "CHITUBOX_SPHERE_MESH_TESSELLATION_POLICY",
+      "classification": "runtime_emit_geometry",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/chitubox_emit.py:sphere_mesh defaults n_lat=8 n_lon=16",
+        "scripts/support_placement/chitubox_emit.py:_ball_meshes and synth_v3_support default sphere_mesh calls",
+        "scripts/support_placement/chitubox_emit.py:member_chain_specs default sphere_mesh calls"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = n_lat 8, n_lon 16, 224 triangles",
+      "provenance_detail": "structured default UV-sphere policy affecting all default-emitted tip/contact and joint sphere geometry"
     },
     {
       "id": "CLEARANCE_SAMPLE_STEP_MM",
@@ -618,6 +652,19 @@
       "provenance_detail": "Derived divide-by-zero guard"
     },
     {
+      "id": "EXPECTED_CHITUBOX_API_VERSION",
+      "classification": "runtime_emit_compatibility",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/emit.py:EXPECTED_CHITUBOX_API_VERSION",
+        "scripts/support_placement/emit.py:_native API version compatibility check",
+        "scripts/tests/conftest.py:_chitubox_gate_reason API version compatibility check",
+        "scripts/tests/test_chitubox_bindings.py:test_extension_exposes_version_and_digest"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = 1",
+      "provenance_detail": "native writer compatibility version checked before emission and by the ChituBox test gate"
+    },
+    {
       "id": "FLARE_LEN_MM",
       "classification": "runtime_geometry",
       "normative": "03-physics-and-constants.md §3.2 = 1.5 mm",
@@ -696,6 +743,16 @@
       ],
       "normative": "03-physics-and-constants.md §3.10.3 = false",
       "provenance_detail": "requires dedicated verifier"
+    },
+    {
+      "id": "HOLLOW_BREATHING_VOXEL_PITCH_MM",
+      "classification": "runtime_hollowing_gate",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:run final.voxelized(0.4) cavity-breathing verification"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.3 = 0.4 mm",
+      "provenance_detail": "final export verification voxel pitch used to test cavity breathing"
     },
     {
       "id": "HOLLOW_BULK_MIN_MM",
@@ -869,6 +926,16 @@
       "provenance_detail": "Placeholder"
     },
     {
+      "id": "HOLLOW_VOLUME_BALANCE_REL_TOL",
+      "classification": "runtime_hollowing_gate",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:run vol_tol = 0.02 * solid_ml volume-balance gate"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.3 = 0.02 relative to solid-model volume",
+      "provenance_detail": "final export volume-balance relative tolerance"
+    },
+    {
       "id": "HOLLOW_WALL_DEFAULT_MM",
       "classification": "runtime_hollowing",
       "provenance_wrapper": "Placeholder",
@@ -951,6 +1018,17 @@
       ],
       "provenance_wrapper": "Placeholder",
       "provenance_detail": "Placeholder local project default"
+    },
+    {
+      "id": "LIFT_TOL_MM",
+      "classification": "runtime_emit_gate",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/emit.py:LIFT_TOL_MM",
+        "scripts/support_placement/emit.py:emit_project frame-invariant check"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = 1e-6 mm",
+      "provenance_detail": "output frame-invariant tolerance for zmin_centered - plate_z == lift_mm"
     },
     {
       "id": "LOAD_SHARING",
@@ -1271,7 +1349,8 @@
       "provenance_wrapper": "Placeholder",
       "source_locators": [
         "scripts/support_placement/config.py:p8_junction_reseat_max_mm",
-        "scripts/support_placement/phase8_driver.py:_junction_reseat_trials reach"
+        "scripts/support_placement/phase8_driver.py:junction_lattice p8_junction_reseat_max_mm fallback",
+        "scripts/support_placement/phase8_driver.py:try_junction_reseat junction_lattice call"
       ],
       "normative": "03-physics-and-constants.md §3.10.4 = 1.0 mm",
       "provenance_detail": "junction reseat reach"
@@ -1282,7 +1361,8 @@
       "provenance_wrapper": "Placeholder",
       "source_locators": [
         "scripts/support_placement/config.py:p8_junction_reseat_step_mm",
-        "scripts/support_placement/phase8_driver.py:_junction_reseat_trials step"
+        "scripts/support_placement/phase8_driver.py:junction_lattice p8_junction_reseat_step_mm fallback",
+        "scripts/support_placement/phase8_driver.py:try_junction_reseat junction_lattice call"
       ],
       "normative": "03-physics-and-constants.md §3.10.4 = 0.25 mm",
       "provenance_detail": "junction reseat step"
@@ -1292,7 +1372,8 @@
       "classification": "runtime_search_cap",
       "normative": "03-physics-and-constants.md §3.10 = 4",
       "source_locators": [
-        "scripts/support_placement/config.py:p8_max_relocate_rounds"
+        "scripts/support_placement/config.py:p8_max_relocate_rounds",
+        "scripts/support_placement/phase8_driver.py:run_phase8 p8_max_relocate_rounds fallback 4"
       ],
       "provenance_wrapper": "Placeholder",
       "provenance_detail": "Placeholder"
@@ -1302,7 +1383,8 @@
       "classification": "runtime_search_cap",
       "normative": "03-physics-and-constants.md §3.10 = 8",
       "source_locators": [
-        "scripts/support_placement/config.py:p8_max_relocate_sweeps"
+        "scripts/support_placement/config.py:p8_max_relocate_sweeps",
+        "scripts/support_placement/phase8_driver.py:run_phase8 p8_max_relocate_sweeps fallback 8"
       ],
       "provenance_wrapper": "Placeholder",
       "provenance_detail": "Placeholder"
@@ -1434,7 +1516,8 @@
       "classification": "runtime_search_cap",
       "normative": "03-physics-and-constants.md §3.10 = 24",
       "source_locators": [
-        "scripts/support_placement/config.py:p8_reseat_max_seeds"
+        "scripts/support_placement/config.py:p8_reseat_max_seeds",
+        "scripts/support_placement/phase8_driver.py:SurfaceSeedIndex.seeds_for p8_reseat_max_seeds fallback 24"
       ],
       "provenance_wrapper": "Placeholder",
       "provenance_detail": "Placeholder"
@@ -1444,7 +1527,8 @@
       "classification": "runtime_search",
       "normative": "03-physics-and-constants.md §3.10 = 2.0 mm",
       "source_locators": [
-        "scripts/support_placement/config.py:p8_reseat_radius_mm"
+        "scripts/support_placement/config.py:p8_reseat_radius_mm",
+        "scripts/support_placement/phase8_driver.py:SurfaceSeedIndex.seeds_for p8_reseat_radius_mm fallback 2.0"
       ],
       "provenance_wrapper": "Placeholder",
       "provenance_detail": "Placeholder"
@@ -2226,7 +2310,7 @@
       "id": "KDTREE_REBUILD_EVERY",
       "source_locators": [
         "scripts/support_placement/cco.py:KDTREE_REBUILD_EVERY",
-        "scripts/support_placement/cco.py:_DynamicMemberIndex.nearest_members"
+        "scripts/support_placement/cco.py:_KDCache.nearest_members"
       ],
       "reason": "exactness-preserving cadence only: nearest_members brute-forces the unindexed tail between rebuilds"
     },
@@ -2242,7 +2326,7 @@
       "id": "PLINTH_THREADS",
       "reason": "new mandatory Rust-wide runtime scheduling contract outside the physics/tuning registry",
       "source_locators": [
-        "docs/rust-migration/06-conventions.md:heading 3 Performance rules",
+        "docs/rust-migration/06-conventions.md:heading 3 Parallelism (rayon)",
         "docs/rust-migration/04-migration-plan.md:heading M8"
       ]
     },
