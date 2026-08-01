@@ -63,16 +63,6 @@ const M1_SCORE_ORDER_ORACLE: [&str; 15] = [
     "loadable",
 ];
 
-const FORMAT_METRICS: [&str; 5] = [
-    "boundary_edges",
-    "negative_shells",
-    "winding",
-    "cavities",
-    "loadable",
-];
-const SCAR_METRICS: [&str; 3] = ["scar_area", "scar_worst_patch", "scar_weighted"];
-const RESIN_METRICS: [&str; 3] = ["resin_model", "resin_support", "resin_total"];
-
 /// All independently supplied evidence required to score one successful disk
 /// artifact.  Each nested slice must cover every model in that artifact in its
 /// on-disk source order.
@@ -529,52 +519,22 @@ pub enum ComparisonScope {
     Candidate,
 }
 
-/// A validated, opaque waiver set.
-///
-/// The only public constructor is the safe empty set. Nonempty construction is
-/// deliberately reserved for the upcoming canonical manifest plus §06 gate
-/// table validator; caller-provided DTOs cannot authorise regressions.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct ValidatedWaivers {
-    entries: Vec<ValidatedWaiver>,
-}
-
-impl ValidatedWaivers {
-    #[must_use]
-    pub const fn empty() -> Self {
-        Self {
-            entries: Vec::new(),
-        }
-    }
-
-    pub(crate) fn from_authority(entries: Vec<ValidatedWaiver>) -> Self {
-        Self { entries }
-    }
-}
-
+/// One freshly loaded, non-retainable waiver row. It is crate-private so a
+/// caller cannot hold authority across a later on-disk table edit.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ValidatedWaiver {
+pub(crate) struct AuthorizedWaiver {
     pub(crate) model: ModelId,
-    pub(crate) ids: Vec<&'static str>,
+    pub(crate) metric: &'static str,
+    pub(crate) milestone: ComparisonMilestone,
 }
 
-// Intentionally private: no CLI or library caller can turn a raw owner claim
-// into a waiver until the canonical cross-validator exists.
-#[cfg(test)]
-#[derive(Clone, Debug, PartialEq)]
-struct RawWaiver {
-    model: ModelId,
-    target: String,
-    signature: plinth_core::EvidenceSource,
-    expires_on: plinth_core::CalendarDate,
-}
-
-/// Comparator settings supplied by the manifest/gate-table owner.
-#[derive(Clone, Debug, PartialEq)]
-pub struct ComparisonPolicy<'a> {
+/// Public comparison settings. The ordinary public comparator always has an
+/// empty waiver set; file authority is loaded only by
+/// `compare_artifacts_with_authority`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ComparisonPolicy {
     pub milestone: ComparisonMilestone,
     pub scope: ComparisonScope,
-    pub waivers: &'a ValidatedWaivers,
 }
 
 /// One deterministic per-model / per-metric result.
@@ -667,22 +627,6 @@ pub enum ComparisonError {
         baseline: ModelId,
         candidate: ModelId,
     },
-    #[error("waiver for unknown corpus model {model}")]
-    WaiverUnknownModel { model: ModelId },
-    #[error("waiver target {target} is not a known M1 metric or ratified group alias")]
-    UnknownWaiverTarget { target: String },
-    #[error("format metric {id} may never be waived")]
-    UnwaivableFormat { id: String },
-    #[error("waiver for model {model} / metric {id} duplicates an already expanded waiver")]
-    DuplicateWaiver { model: ModelId, id: String },
-    #[error("waiver for model {model} / target {target} expired on {expires_on}")]
-    ExpiredWaiver {
-        model: ModelId,
-        target: String,
-        expires_on: String,
-    },
-    #[error("waiver for model {model} / target {target} is not signed by an OwnerDecision evidence source")]
-    UnsignedWaiver { model: ModelId, target: String },
     #[error("metric delta for {model} / {id} is non-finite")]
     MetricDelta { model: ModelId, id: MetricId },
 }
@@ -693,10 +637,19 @@ pub enum ComparisonError {
 pub fn compare_artifacts(
     baseline: &[ScoredArtifact],
     candidate: &[ScoredArtifact],
-    policy: &ComparisonPolicy<'_>,
+    policy: ComparisonPolicy,
+) -> Result<ComparisonReport, ComparisonError> {
+    compare_artifacts_with_authorized_waivers(baseline, candidate, policy, &[])
+}
+
+pub(crate) fn compare_artifacts_with_authorized_waivers(
+    baseline: &[ScoredArtifact],
+    candidate: &[ScoredArtifact],
+    policy: ComparisonPolicy,
+    waivers: &[AuthorizedWaiver],
 ) -> Result<ComparisonReport, ComparisonError> {
     validate_model_order(baseline, candidate)?;
-    let waived = expand_waivers(policy.waivers);
+    let waived = expand_waivers(waivers, policy);
     let mut rows = Vec::new();
     let mut producer_rows = Vec::new();
     for (baseline, candidate) in baseline.iter().zip(candidate) {
@@ -728,7 +681,7 @@ pub fn compare_artifacts(
                     let (raw_delta, regression_delta) =
                         metric_deltas(id, baseline_value, candidate_value, baseline.model())?;
                     let outcome =
-                        compare_metric(id, baseline_value, candidate_value, is_waived, policy);
+                        compare_metric(id, baseline_value, candidate_value, is_waived, &policy);
                     rows.push(MetricComparison {
                         model: baseline.model.clone(),
                         id: MetricId::from(*id),
@@ -754,7 +707,7 @@ fn compare_metric(
     baseline: MetricValue,
     candidate: MetricValue,
     waived: bool,
-    policy: &ComparisonPolicy<'_>,
+    policy: &ComparisonPolicy,
 ) -> MetricOutcome {
     if report_only(id, policy) {
         return MetricOutcome::Reported;
@@ -799,13 +752,13 @@ fn metric_deltas(
     Ok((Some(raw_delta), Some(regression_delta)))
 }
 
-fn report_only(id: &str, policy: &ComparisonPolicy<'_>) -> bool {
+fn report_only(id: &str, policy: &ComparisonPolicy) -> bool {
     policy.scope == ComparisonScope::Candidate
         && id == "max_x"
         && policy.milestone <= ComparisonMilestone::M4
 }
 
-fn hard_bound_active(id: &str, policy: &ComparisonPolicy<'_>) -> bool {
+fn hard_bound_active(id: &str, policy: &ComparisonPolicy) -> bool {
     policy.scope == ComparisonScope::Candidate
         && match id {
             "boundary_edges" | "negative_shells" | "winding" | "loadable" => {
@@ -859,84 +812,21 @@ fn validate_model_order(
     Ok(())
 }
 
-fn expand_waivers(waivers: &ValidatedWaivers) -> BTreeSet<(ModelId, String)> {
+fn expand_waivers(
+    waivers: &[AuthorizedWaiver],
+    policy: ComparisonPolicy,
+) -> BTreeSet<(ModelId, String)> {
     let mut expanded = BTreeSet::new();
-    for waiver in &waivers.entries {
-        for id in &waiver.ids {
-            expanded.insert((waiver.model.clone(), (*id).to_owned()));
-        }
+    if policy.scope != ComparisonScope::Candidate {
+        return expanded;
+    }
+    for waiver in waivers
+        .iter()
+        .filter(|waiver| waiver.milestone == policy.milestone)
+    {
+        expanded.insert((waiver.model.clone(), waiver.metric.to_owned()));
     }
     expanded
-}
-
-#[cfg(test)]
-fn validate_waivers(
-    raw: &[RawWaiver],
-    known_models: &BTreeSet<ModelId>,
-    as_of: &plinth_core::CalendarDate,
-) -> Result<ValidatedWaivers, ComparisonError> {
-    let mut entries = Vec::with_capacity(raw.len());
-    let mut expanded = BTreeSet::new();
-    for waiver in raw {
-        if !known_models.contains(&waiver.model) {
-            return Err(ComparisonError::WaiverUnknownModel {
-                model: waiver.model.clone(),
-            });
-        }
-        if !matches!(
-            waiver.signature.view(),
-            plinth_core::EvidenceSourceView::OwnerDecision { .. }
-        ) {
-            return Err(ComparisonError::UnsignedWaiver {
-                model: waiver.model.clone(),
-                target: waiver.target.clone(),
-            });
-        }
-        if waiver.expires_on.as_str() < as_of.as_str() {
-            return Err(ComparisonError::ExpiredWaiver {
-                model: waiver.model.clone(),
-                target: waiver.target.clone(),
-                expires_on: waiver.expires_on.as_str().to_owned(),
-            });
-        }
-        let ids = expand_target(&waiver.target)?;
-        for id in &ids {
-            if FORMAT_METRICS.contains(id) {
-                return Err(ComparisonError::UnwaivableFormat {
-                    id: (*id).to_owned(),
-                });
-            }
-            if !expanded.insert((waiver.model.clone(), (*id).to_owned())) {
-                return Err(ComparisonError::DuplicateWaiver {
-                    model: waiver.model.clone(),
-                    id: (*id).to_owned(),
-                });
-            }
-        }
-        entries.push(ValidatedWaiver {
-            model: waiver.model.clone(),
-            ids,
-        });
-    }
-    Ok(ValidatedWaivers { entries })
-}
-
-pub(crate) fn expand_target(target: &str) -> Result<Vec<&'static str>, ComparisonError> {
-    let ids = match target {
-        "scar" => SCAR_METRICS.to_vec(),
-        "resin" => RESIN_METRICS.to_vec(),
-        "format" => FORMAT_METRICS.to_vec(),
-        "resin_model" => vec!["resin_model", "resin_total"],
-        "resin_support" => vec!["resin_support", "resin_total"],
-        _ => M1_METRIC_ORDER
-            .into_iter()
-            .find(|id| *id == target)
-            .map(|id| vec![id])
-            .ok_or_else(|| ComparisonError::UnknownWaiverTarget {
-                target: target.to_owned(),
-            })?,
-    };
-    Ok(ids)
 }
 
 #[cfg(test)]
@@ -947,7 +837,6 @@ mod tests {
         ModelGeometry, ModelSource, Placement, Project, SegmentType, SupportBatch, SupportMode,
         SupportRecord, TriangleSoup,
     };
-    use plinth_core::{CalendarDate, EvidenceDate, EvidenceId, EvidenceSource};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static TEST_FILE_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
@@ -1020,12 +909,16 @@ mod tests {
         values_for("Sphere", values)
     }
 
-    fn policy(scope: ComparisonScope, milestone: ComparisonMilestone) -> ComparisonPolicy<'static> {
-        ComparisonPolicy {
-            milestone,
-            scope,
-            waivers: Box::leak(Box::new(ValidatedWaivers::empty())),
-        }
+    fn policy(scope: ComparisonScope, milestone: ComparisonMilestone) -> ComparisonPolicy {
+        ComparisonPolicy { milestone, scope }
+    }
+
+    fn compare_artifacts(
+        baseline: &[ScoredArtifact],
+        candidate: &[ScoredArtifact],
+        policy: &ComparisonPolicy,
+    ) -> Result<ComparisonReport, ComparisonError> {
+        super::compare_artifacts_with_authorized_waivers(baseline, candidate, *policy, &[])
     }
 
     #[test]
@@ -1544,97 +1437,6 @@ mod tests {
             Err(ScoreError::DiskRead(
                 DiskReadError::DuplicateCorpusModel { .. }
             ))
-        ));
-    }
-
-    #[test]
-    fn raw_waiver_validation_is_private_and_checks_authority_scope_and_expansion() {
-        let signature = EvidenceSource::owner_decision(
-            EvidenceId::new("test-owner-signature").unwrap(),
-            "docs/rust-migration/06-conventions.md",
-            "gate table",
-            EvidenceDate::exact(CalendarDate::new("2026-08-01").unwrap()),
-        )
-        .unwrap();
-        let expires = CalendarDate::new("2026-08-02").unwrap();
-        let format = RawWaiver {
-            model: ModelId::from("Sphere"),
-            target: "format".to_owned(),
-            signature: signature.clone(),
-            expires_on: expires.clone(),
-        };
-        assert!(matches!(
-            validate_waivers(
-                &[format],
-                &BTreeSet::from([ModelId::from("Sphere")]),
-                &CalendarDate::new("2026-08-01").unwrap(),
-            ),
-            Err(ComparisonError::UnwaivableFormat { .. })
-        ));
-        let resin = RawWaiver {
-            model: ModelId::from("Sphere"),
-            target: "resin_support".to_owned(),
-            signature,
-            expires_on: expires,
-        };
-        let date = CalendarDate::new("2026-08-01").unwrap();
-        let validated =
-            validate_waivers(&[resin], &BTreeSet::from([ModelId::from("Sphere")]), &date).unwrap();
-        let expanded = expand_waivers(&validated);
-        assert!(expanded.contains(&(ModelId::from("Sphere"), "resin_total".to_owned())));
-    }
-
-    #[test]
-    fn raw_waiver_validation_rejects_unknown_duplicate_and_expired_entries() {
-        let signature = EvidenceSource::owner_decision(
-            EvidenceId::new("test-owner-signature-2").unwrap(),
-            "docs/rust-migration/06-conventions.md",
-            "gate table",
-            EvidenceDate::exact(CalendarDate::new("2026-08-01").unwrap()),
-        )
-        .unwrap();
-        let known = BTreeSet::from([ModelId::from("Sphere")]);
-        let unknown = RawWaiver {
-            model: ModelId::from("Other"),
-            target: "scar_area".to_owned(),
-            signature: signature.clone(),
-            expires_on: CalendarDate::new("2026-08-02").unwrap(),
-        };
-        assert!(matches!(
-            validate_waivers(
-                &[unknown],
-                &known,
-                &CalendarDate::new("2026-08-01").unwrap()
-            ),
-            Err(ComparisonError::WaiverUnknownModel { .. })
-        ));
-        let valid = RawWaiver {
-            model: ModelId::from("Sphere"),
-            target: "scar_area".to_owned(),
-            signature: signature.clone(),
-            expires_on: CalendarDate::new("2026-08-02").unwrap(),
-        };
-        assert!(matches!(
-            validate_waivers(
-                &[valid.clone(), valid],
-                &known,
-                &CalendarDate::new("2026-08-01").unwrap()
-            ),
-            Err(ComparisonError::DuplicateWaiver { .. })
-        ));
-        let expired = RawWaiver {
-            model: ModelId::from("Sphere"),
-            target: "scar_area".to_owned(),
-            signature,
-            expires_on: CalendarDate::new("2026-07-31").unwrap(),
-        };
-        assert!(matches!(
-            validate_waivers(
-                &[expired],
-                &known,
-                &CalendarDate::new("2026-08-01").unwrap()
-            ),
-            Err(ComparisonError::ExpiredWaiver { .. })
         ));
     }
 

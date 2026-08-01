@@ -14,7 +14,7 @@ mod score;
 mod supports;
 mod topology;
 
-pub use authority::{load_validated_waivers, AuthorityError};
+pub use authority::{compare_artifacts_with_authority, AuthorityComparisonError, AuthorityError};
 pub use geometry::{
     closest_points, contains_points, ray_intersections, triangle_intersections, ClosestPoint, Ray,
     RayHit,
@@ -31,7 +31,7 @@ pub use score::{
     compare_artifacts, score_artifacts, score_saturn_artifacts, ArtifactMetricInputs,
     ComparisonError, ComparisonMilestone, ComparisonPolicy, ComparisonReport, ComparisonScope,
     MetricComparison, MetricOutcome, ProducerComparison, ProducerOutcome, ScoreError,
-    ScoredArtifact, ScoredModel, ValidatedWaivers, M1_METRIC_ORDER,
+    ScoredArtifact, ScoredModel, M1_METRIC_ORDER,
 };
 pub use supports::{
     support_metric_rows, ContactArmInput, SupportMetricError, SupportMetricInput, SupportMetricRow,

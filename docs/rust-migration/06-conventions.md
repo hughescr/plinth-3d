@@ -297,6 +297,7 @@ The final column is five semicolon-separated fields in this fixed order:
 not a cryptographic signature scheme: the trusted boundary is a checked-in,
 reviewed repository checkout plus Craig's recorded sign-off.
 
+<!-- PLINTH_GATE_MAIN_START -->
 | id | kind | recorded | authority | status | evidence_date | resolution | source | locator | waiver |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | D-1 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Staged spine with search-shaped data model | docs/rust-migration/02-target-architecture.md | section-16-D-1 | - |
@@ -342,6 +343,29 @@ reviewed repository checkout plus Craig's recorded sign-off.
 | H-7 | historical | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-07-31 | Replace generic Unknown Saturn disposition with official vendor evidence | docs/rust-migration/06-conventions.md | section-5-generic-unknown-supersession | - |
 | H-8 | historical | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-07-31 | Exact corpus is eight models and excludes Cone | docs/rust-migration/04-migration-plan.md | corpus-membership | - |
 | H-9 | historical | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-07-31 | Release edge is NegativeY and sweep is PositiveY from negative to positive Y | docs/datasheets/printers/saturn-4-ultra-16k.md | axis-mapping | - |
+<!-- PLINTH_GATE_MAIN_END -->
+
+## Decision gate corrections
+
+This full replacement table is append-only correction evidence. Each correction
+retains its target and all replacement fields; the authority parser applies the
+unique effective replacement while auditing both original and correction rows.
+
+<!-- PLINTH_GATE_CORRECTIONS_START -->
+| correction_id | target_id | id | kind | recorded | authority | status | evidence_date | resolution | source | locator | waiver |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| C-1 | O-1 | O-1 | override | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-07-31 | Bounded C++ Manifold 3.5.2 FFI exception | crates/plinth-solid/vendor/manifold/UPSTREAM.toml | version=3.5.2;tag=v3.5.2 | - |
+| C-2 | H-6 | H-6 | historical | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-08-01 | Python M0 freeze recorded before Rust future refreeze | corpus/manifest.json | frozen_at=2026-08-01T08:20:35Z;baseline_git_rev=6eb7f6a65e1a3442aa860d63d920788da778faed | - |
+<!-- PLINTH_GATE_CORRECTIONS_END -->
+
+For any future `waiver` row, the final cell is one strict JSON object with
+exactly `model`, `metric`, `scope`, `reason`, and `expires_on`; it names one
+metric, and semicolons are ordinary text. In either authority table, `\\` and
+`\|` are the only escapes permitted inside a cell. A future waiver's `source`
+is the selected canonical manifest path and its `locator` is
+`<manifest-path>#/waivers/<id>`; its resolution is exactly
+`Waiver <id>: <reason>`. The public score comparator never accepts a retained
+waiver token: only its fresh file-authority entry point can apply one.
 
 ---
 
