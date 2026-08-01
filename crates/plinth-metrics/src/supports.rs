@@ -16,7 +16,7 @@ use chitubox_io::SegmentType;
 use plinth_core::{MetricId, MetricSet, MetricValue};
 use thiserror::Error;
 
-use crate::{signed_shell_volumes, DiskArtifact, MetricsError};
+use crate::{signed_shell_volumes, DiskArtifact, Mesh, MetricsError, ShellWinding};
 
 /// The fixed M1 support/resin metric order from `04-migration-plan.md` §3.
 pub const SUPPORT_METRIC_ORDER: [&str; 5] = [
@@ -30,15 +30,20 @@ pub const SUPPORT_METRIC_ORDER: [&str; 5] = [
 /// Exact SI-derived conversion: one millilitre is one thousand cubic millimetres.
 const CUBIC_MILLIMETRES_PER_MILLILITRE: f64 = 1_000.0;
 
-/// One independently supplied Voronoi load cell for a contact taper.
+/// One independently supplied Voronoi load cell for a disk contact taper.
 ///
-/// `support_index` names a type-1 taper record in the disk-read model.  Its
+/// The pair is the stable M1 arm identity: `support_record_index` names an
+/// on-disk type-1 taper record and `taper_index` is that record's zero-based
+/// ordinal amongst all such records in the same disk model.  Both are checked
+/// so stale or shifted planner output cannot silently score a different arm.
+/// Its
 /// `r_start` is the planner's tip radius in millimetres; keeping the radius in
 /// the written artifact prevents a caller from accidentally measuring a
 /// contact sphere (`type 7`) or substituting its diameter.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct ArmLoadInput {
-    pub support_index: usize,
+pub struct ContactArmInput {
+    pub support_record_index: usize,
+    pub taper_index: usize,
     pub voronoi_area_mm2: f64,
 }
 
@@ -46,7 +51,7 @@ pub struct ArmLoadInput {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SupportMetricInput {
     pub source_index: usize,
-    pub arms: Vec<ArmLoadInput>,
+    pub contact_arms: Vec<ContactArmInput>,
 }
 
 /// One M1 support/resin metric row in the normative fixed order.
@@ -88,24 +93,41 @@ pub enum SupportMetricError {
         expected: usize,
         actual: usize,
     },
-    #[error("model {source_index} arm {arm} repeats support record {support_index}")]
-    DuplicateArmSupport {
+    #[error("model {source_index} contact arm count {actual} does not cover its {expected} disk contact tapers")]
+    ContactArmCount {
         source_index: usize,
-        arm: usize,
-        support_index: usize,
+        expected: usize,
+        actual: usize,
     },
-    #[error("model {source_index} arm {arm} names support record {support_index}, but there are only {support_count}")]
-    ArmSupportOutOfBounds {
+    #[error(
+        "model {source_index} arm {arm} repeats disk contact taper record {support_record_index}"
+    )]
+    DuplicateContactTaper {
         source_index: usize,
         arm: usize,
-        support_index: usize,
+        support_record_index: usize,
+    },
+    #[error("model {source_index} arm {arm} names support record {support_record_index}, but there are only {support_count}")]
+    ContactTaperOutOfBounds {
+        source_index: usize,
+        arm: usize,
+        support_record_index: usize,
         support_count: usize,
     },
-    #[error("model {source_index} arm {arm} must name a type-1 contact taper, not segment type {segment_type}")]
-    ArmSupportNotContactTaper {
+    #[error("model {source_index} arm {arm} names record {support_record_index}, which is segment type {segment_type}, not a type-1 contact taper")]
+    ContactTaperWrongKind {
         source_index: usize,
         arm: usize,
+        support_record_index: usize,
         segment_type: u32,
+    },
+    #[error("model {source_index} arm {arm} names taper ordinal {actual}, but record {support_record_index} has canonical ordinal {expected}")]
+    ContactTaperOrdinalMismatch {
+        source_index: usize,
+        arm: usize,
+        support_record_index: usize,
+        expected: usize,
+        actual: usize,
     },
     #[error("model {source_index} arm {arm} Voronoi area must be finite and nonnegative")]
     InvalidVoronoiArea { source_index: usize, arm: usize },
@@ -115,6 +137,26 @@ pub enum SupportMetricError {
     NegativeSignedVolume {
         source_index: usize,
         subject: VolumeSubject,
+        volume_mm3: f64,
+    },
+    #[error("model {source_index} support record {support_index} shell {shell_index} is open or non-manifold")]
+    SupportShellNotClosed {
+        source_index: usize,
+        support_index: usize,
+        shell_index: usize,
+    },
+    #[error("model {source_index} support record {support_index} shell {shell_index} has invalid winding {winding:?}")]
+    SupportShellInvalidWinding {
+        source_index: usize,
+        support_index: usize,
+        shell_index: usize,
+        winding: ShellWinding,
+    },
+    #[error("model {source_index} support record {support_index} shell {shell_index} has nonpositive or nonfinite signed volume {volume_mm3} mm^3")]
+    SupportShellNonPositiveVolume {
+        source_index: usize,
+        support_index: usize,
+        shell_index: usize,
         volume_mm3: f64,
     },
     #[error("model {source_index} {subject:?} volume is non-finite")]
@@ -144,9 +186,10 @@ pub enum VolumeSubject {
 ///
 /// `max_x` is permanently the M1 *per-arm* maximum:
 /// `A_voronoi_cell / (pi * r_tip^2)`.  It deliberately has no arm-group
-/// interpretation or fallback.  An empty arm batch has no loaded arm, so its
-/// maximum is zero; any nonempty batch is fully validated and cannot silently
-/// degrade to zero.
+/// interpretation or fallback. Every on-disk type-1 contact taper must appear
+/// exactly once in `contact_arms`; an empty list is valid only if the artifact
+/// has no contact tapers. Thus a missing load partition is a named failure,
+/// never a plausible zero score.
 ///
 /// `resin_model` sums the artifact model soup's signed shell volumes.  This
 /// preserves a correctly oriented hollow inner shell as a subtraction, while
@@ -180,15 +223,15 @@ pub fn support_metric_rows(
                 });
             }
 
-            let max_x = max_per_arm_x(source_index, model.supports(), &input.arms)?;
+            let max_x = max_per_arm_x(source_index, model.supports(), &input.contact_arms)?;
             let model_mm3 =
                 signed_mesh_volume(source_index, VolumeSubject::ModelMesh, model.mesh())?;
             let support_mm3 = model.supports().iter().enumerate().try_fold(
                 0.0,
                 |sum, (support_index, support)| {
-                    let volume = signed_mesh_volume(
+                    let volume = validated_support_record_volume(
                         source_index,
-                        VolumeSubject::SupportRecord { support_index },
+                        support_index,
                         support.mesh(),
                     )?;
                     checked_add(source_index, "resin_support", sum, volume)
@@ -219,32 +262,59 @@ pub fn support_metric_rows(
 fn max_per_arm_x(
     source_index: usize,
     supports: &[crate::DiskSupport],
-    arms: &[ArmLoadInput],
+    arms: &[ContactArmInput],
 ) -> Result<f64, SupportMetricError> {
+    let taper_records = supports
+        .iter()
+        .enumerate()
+        .filter_map(|(record_index, support)| {
+            (support.segment_type() == SegmentType::TAPER).then_some(record_index)
+        })
+        .collect::<Vec<_>>();
+    if arms.len() != taper_records.len() {
+        return Err(SupportMetricError::ContactArmCount {
+            source_index,
+            expected: taper_records.len(),
+            actual: arms.len(),
+        });
+    }
     let mut seen = std::collections::BTreeSet::new();
     let mut max_x: f64 = 0.0;
     for (arm, input) in arms.iter().enumerate() {
-        if !seen.insert(input.support_index) {
-            return Err(SupportMetricError::DuplicateArmSupport {
+        if !seen.insert(input.support_record_index) {
+            return Err(SupportMetricError::DuplicateContactTaper {
                 source_index,
                 arm,
-                support_index: input.support_index,
+                support_record_index: input.support_record_index,
             });
         }
-        let support =
-            supports
-                .get(input.support_index)
-                .ok_or(SupportMetricError::ArmSupportOutOfBounds {
-                    source_index,
-                    arm,
-                    support_index: input.support_index,
-                    support_count: supports.len(),
-                })?;
-        if support.segment_type() != SegmentType::TAPER {
-            return Err(SupportMetricError::ArmSupportNotContactTaper {
+        let support = supports.get(input.support_record_index).ok_or(
+            SupportMetricError::ContactTaperOutOfBounds {
                 source_index,
                 arm,
+                support_record_index: input.support_record_index,
+                support_count: supports.len(),
+            },
+        )?;
+        if support.segment_type() != SegmentType::TAPER {
+            return Err(SupportMetricError::ContactTaperWrongKind {
+                source_index,
+                arm,
+                support_record_index: input.support_record_index,
                 segment_type: support.segment_type().0,
+            });
+        }
+        let expected_taper_index = taper_records
+            .iter()
+            .position(|record_index| *record_index == input.support_record_index)
+            .expect("type-1 record was gathered from this support slice");
+        if input.taper_index != expected_taper_index {
+            return Err(SupportMetricError::ContactTaperOrdinalMismatch {
+                source_index,
+                arm,
+                support_record_index: input.support_record_index,
+                expected: expected_taper_index,
+                actual: input.taper_index,
             });
         }
         if !input.voronoi_area_mm2.is_finite() || input.voronoi_area_mm2 < 0.0 {
@@ -264,6 +334,7 @@ fn max_per_arm_x(
         }
         max_x = max_x.max(x);
     }
+    debug_assert_eq!(seen.len(), taper_records.len());
     Ok(max_x)
 }
 
@@ -272,7 +343,8 @@ fn signed_mesh_volume(
     subject: VolumeSubject,
     mesh: &crate::Mesh,
 ) -> Result<f64, SupportMetricError> {
-    let volume = signed_shell_volumes(mesh)?
+    let canonical = canonical_shell_mesh(mesh)?;
+    let volume = signed_shell_volumes(&canonical)?
         .iter()
         .try_fold(0.0, |sum, shell| {
             checked_add(source_index, "signed_volume", sum, shell.signed_volume)
@@ -291,6 +363,88 @@ fn signed_mesh_volume(
         });
     }
     Ok(volume)
+}
+
+/// Rebuilds a triangle soup with exact coordinate-sharing before topology.
+///
+/// The ChituBox wire is a triangle soup, so `read.rs` retains each triangle's
+/// three vertices.  Shell topology must deliberately canonicalize that soup;
+/// it is a metric-local structural view, not a producer-side repair.  Signed
+/// zero is normalized only for geometric connectivity: `-0.0` and `0.0`
+/// denote the same point, while all nonzero f64 bit patterns remain exact.
+fn canonical_shell_mesh(mesh: &Mesh) -> Result<Mesh, MetricsError> {
+    let mut vertices = Vec::new();
+    let mut indices = std::collections::BTreeMap::<[u64; 3], usize>::new();
+    let mut triangles = Vec::with_capacity(mesh.triangles().len());
+    for triangle in mesh.triangles() {
+        let mut canonical_triangle = [0; 3];
+        for (corner, source_index) in triangle.iter().enumerate() {
+            let point = mesh.vertices()[*source_index];
+            let key = point.map(canonical_coordinate_bits);
+            let index = match indices.get(&key) {
+                Some(index) => *index,
+                None => {
+                    let index = vertices.len();
+                    vertices.push(point);
+                    indices.insert(key, index);
+                    index
+                }
+            };
+            canonical_triangle[corner] = index;
+        }
+        triangles.push(canonical_triangle);
+    }
+    Mesh::new(vertices, triangles)
+}
+
+fn canonical_coordinate_bits(value: f64) -> u64 {
+    if value == 0.0 {
+        0
+    } else {
+        value.to_bits()
+    }
+}
+
+fn validated_support_record_volume(
+    source_index: usize,
+    support_index: usize,
+    mesh: &Mesh,
+) -> Result<f64, SupportMetricError> {
+    let canonical = canonical_shell_mesh(mesh)?;
+    signed_shell_volumes(&canonical)?
+        .into_iter()
+        .enumerate()
+        .try_fold(0.0, |sum, (shell_index, shell)| {
+            if !shell.sealed {
+                return Err(SupportMetricError::SupportShellNotClosed {
+                    source_index,
+                    support_index,
+                    shell_index,
+                });
+            }
+            if !matches!(
+                &shell.winding,
+                ShellWinding::Outward {
+                    ref faces_requiring_flip
+                } if faces_requiring_flip.is_empty()
+            ) {
+                return Err(SupportMetricError::SupportShellInvalidWinding {
+                    source_index,
+                    support_index,
+                    shell_index,
+                    winding: shell.winding,
+                });
+            }
+            if !shell.signed_volume.is_finite() || shell.signed_volume <= 0.0 {
+                return Err(SupportMetricError::SupportShellNonPositiveVolume {
+                    source_index,
+                    support_index,
+                    shell_index,
+                    volume_mm3: shell.signed_volume,
+                });
+            }
+            checked_add(source_index, "resin_support", sum, shell.signed_volume)
+        })
 }
 
 fn checked_add(

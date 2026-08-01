@@ -20,7 +20,7 @@ pub use read::{
     DiskArtifact, DiskModel, DiskReadError, DiskSupport, ProducerFailure, ProducerStage,
 };
 pub use supports::{
-    support_metric_rows, ArmLoadInput, SupportMetricError, SupportMetricInput, SupportMetricRow,
+    support_metric_rows, ContactArmInput, SupportMetricError, SupportMetricInput, SupportMetricRow,
     VolumeSubject, SUPPORT_METRIC_ORDER,
 };
 pub use topology::{
