@@ -18,9 +18,24 @@ scripts/treant_v2_results.json
 # (rust/*/python/*/_native.abi3.so). Never committable.
 *.so
 
-# Root cargo workspace build output. Cargo.lock IS committed (binary crate,
-# same convention as rust/*/Cargo.lock), only the build artifacts are not.
+# Root Cargo.lock is the workspace's sole tracked lockfile. Member-local
+# build products, tool caches, and accidental lockfiles are never source.
 /target/
+/crates/*/target/
+/crates/*/.cargo/
+/crates/*/.cache/
+/crates/*/Cargo.lock
+/rust/*/target/
+/rust/*/.cargo/
+/rust/*/.cache/
+/rust/*/Cargo.lock
+
+# Vendored source is exceptional: retain the pinned Manifold snapshot only.
+/crates/*/vendor/
+!/crates/plinth-solid/
+!/crates/plinth-solid/vendor/
+!/crates/plinth-solid/vendor/manifold/
+!/crates/plinth-solid/vendor/manifold/**
 
 # Test-corpus meshes. The migration guide's M0 step creates corpus/models/
 # in-repo, but the models themselves are inputs we fetch, not source -- the
