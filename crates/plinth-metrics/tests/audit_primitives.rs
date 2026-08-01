@@ -94,7 +94,7 @@ fn topology_detects_boundary_nonmanifold_and_winding() {
         vec![[0, 1, 2]],
     )
     .unwrap();
-    assert_eq!(boundary_edges(&open).len(), 3);
+    assert_eq!(boundary_edges(&open).unwrap().len(), 3);
 
     let nonmanifold = Mesh::new(
         vec![
@@ -107,7 +107,13 @@ fn topology_detects_boundary_nonmanifold_and_winding() {
         vec![[0, 1, 2], [1, 0, 3], [0, 1, 4]],
     )
     .unwrap();
-    assert_eq!(analyze_topology(&nonmanifold).nonmanifold_edges.len(), 1);
+    assert_eq!(
+        analyze_topology(&nonmanifold)
+            .unwrap()
+            .nonmanifold_edges
+            .len(),
+        1
+    );
 
     let inconsistent = Mesh::new(
         vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
@@ -115,17 +121,19 @@ fn topology_detects_boundary_nonmanifold_and_winding() {
     )
     .unwrap();
     assert_eq!(
-        analyze_topology(&inconsistent).inconsistent_winding_faces,
+        analyze_topology(&inconsistent)
+            .unwrap()
+            .inconsistent_winding_faces,
         vec![0, 1]
     );
 }
 
 #[test]
 fn signed_volume_and_triangle_intersection_catch_wrong_sign_and_stubs() {
-    let positive = signed_shell_volumes(&tetrahedron(false));
+    let positive = signed_shell_volumes(&tetrahedron(false)).unwrap();
     assert_eq!(positive.len(), 1);
     assert!((positive[0].signed_volume - (1.0 / 6.0)).abs() < 1.0e-12);
-    assert!(signed_shell_volumes(&tetrahedron(true))[0].signed_volume < 0.0);
+    assert!(signed_shell_volumes(&tetrahedron(true)).unwrap()[0].signed_volume < 0.0);
 
     let mesh = Mesh::new(
         vec![

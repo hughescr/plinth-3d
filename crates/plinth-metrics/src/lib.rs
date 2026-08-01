@@ -19,8 +19,9 @@ pub use read::{
     DiskArtifact, DiskModel, DiskReadError, DiskSupport, ProducerFailure, ProducerStage,
 };
 pub use topology::{
-    analyze_topology, boundary_edges, signed_shell_volumes, Edge, EdgeIncidence, EdgeUse, Shell,
-    TopologyAnalysis,
+    analyze_artifact_topology, analyze_topology, boundary_edges, signed_shell_volumes,
+    ArtifactTopologyAnalysis, ArtifactTopologyMetrics, Edge, EdgeIncidence, EdgeUse,
+    ModelTopologyAnalysis, Shell, TopologyAnalysis,
 };
 
 use thiserror::Error;
@@ -155,6 +156,7 @@ pub enum TriangleSide {
 pub enum GeometryPrimitive {
     TriangleArea,
     RayTriangle,
+    SignedVolume,
 }
 
 pub(crate) fn validate_vec3(value: Vec3, kind: CoordinateKind) -> Result<(), MetricsError> {
