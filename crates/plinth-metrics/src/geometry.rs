@@ -65,7 +65,9 @@ pub fn ray_intersections(mesh: &Mesh, rays: &[Ray]) -> Result<Vec<Vec<RayHit>>, 
     for (ray, value) in rays.iter().enumerate() {
         validate_vec3(value.origin, CoordinateKind::RayOrigin { ray })?;
         validate_vec3(value.direction, CoordinateKind::RayDirection { ray })?;
-        if norm_squared(value.direction) == 0.0 {
+        // Do not use a squared norm here: a nonzero subnormal direction can
+        // legitimately underflow to zero when squared.
+        if value.direction.iter().all(|component| *component == 0.0) {
             return Err(MetricsError::ZeroRayDirection { ray });
         }
     }
@@ -75,7 +77,7 @@ pub fn ray_intersections(mesh: &Mesh, rays: &[Ray]) -> Result<Vec<Vec<RayHit>>, 
         let mut hits = Vec::new();
         for triangle_index in 0..mesh.triangles().len() {
             let (a, b, c) = mesh.triangle_points(triangle_index);
-            if let Some(distance) = ray_triangle_distance(*ray, a, b, c, false) {
+            if let Some(distance) = ray_triangle_distance(*ray, a, b, c) {
                 hits.push(RayHit {
                     distance,
                     triangle_index,
@@ -198,7 +200,7 @@ fn closest_point_on_triangle(point: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     )
 }
 
-fn ray_triangle_distance(ray: Ray, a: Vec3, b: Vec3, c: Vec3, segment: bool) -> Option<f64> {
+fn ray_triangle_distance(ray: Ray, a: Vec3, b: Vec3, c: Vec3) -> Option<f64> {
     let edge_one = sub(b, a);
     let edge_two = sub(c, a);
     let p = cross(ray.direction, edge_two);
@@ -218,7 +220,7 @@ fn ray_triangle_distance(ray: Ray, a: Vec3, b: Vec3, c: Vec3, segment: bool) -> 
         return None;
     }
     let distance = dot(edge_two, q) * inverse;
-    if distance < -EPSILON || (segment && distance > 1.0 + EPSILON) {
+    if distance < -EPSILON {
         None
     } else {
         Some(distance.max(0.0))
@@ -247,45 +249,39 @@ fn triangles_intersect_points(first: (Vec3, Vec3, Vec3), second: (Vec3, Vec3, Ve
         return false;
     }
     for (start, end) in [(a, b), (b, c), (c, a)] {
-        if ray_triangle_distance(
-            Ray {
-                origin: start,
-                direction: sub(end, start),
-            },
-            d,
-            e,
-            f,
-            true,
-        )
-        .is_some()
-        {
+        if segment_intersects_triangle_exact(start, end, d, e, f) {
             return true;
         }
     }
     for (start, end) in [(d, e), (e, f), (f, d)] {
-        if ray_triangle_distance(
-            Ray {
-                origin: start,
-                direction: sub(end, start),
-            },
-            a,
-            b,
-            c,
-            true,
-        )
-        .is_some()
-        {
+        if segment_intersects_triangle_exact(start, end, a, b, c) {
             return true;
         }
     }
-    let first_normal = cross(sub(b, a), sub(c, a));
-    let second_normal = cross(sub(e, d), sub(f, d));
-    if norm_squared(cross(first_normal, second_normal)) <= EPSILON * EPSILON
-        && dot(first_normal, sub(d, a)).abs() <= EPSILON
-    {
+    let first_normal = scaled_normal(a, b, c);
+    let second_normal = scaled_normal(d, e, f);
+    // Triangle-pair intersection has exact f64 input semantics: unlike the
+    // parity ray path, it must not turn a separated near-coplanar pair into a
+    // hit through an arbitrary absolute tolerance band.
+    if cross(first_normal, second_normal) == [0.0; 3] && dot(first_normal, sub(d, a)) == 0.0 {
         return coplanar_overlap([a, b, c], [d, e, f], first_normal);
     }
     false
+}
+
+fn scaled_normal(a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
+    let first = sub(b, a);
+    let second = sub(c, a);
+    let scale = first
+        .into_iter()
+        .chain(second)
+        .map(f64::abs)
+        .fold(0.0, f64::max);
+    // Mesh construction has already rejected coincident and degenerate faces.
+    cross(
+        [first[0] / scale, first[1] / scale, first[2] / scale],
+        [second[0] / scale, second[1] / scale, second[2] / scale],
+    )
 }
 
 fn aabb_overlaps(left: [Vec3; 3], right: [Vec3; 3]) -> bool {
@@ -306,7 +302,7 @@ fn aabb_overlaps(left: [Vec3; 3], right: [Vec3; 3]) -> bool {
             .iter()
             .map(|point| point[axis])
             .fold(f64::NEG_INFINITY, f64::max);
-        left_min <= right_max + EPSILON && right_min <= left_max + EPSILON
+        left_min <= right_max && right_min <= left_max
     })
 }
 
@@ -353,10 +349,10 @@ fn segments_intersect_2d(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> 
     let ab_d = orientation_2d(a, b, d);
     let cd_a = orientation_2d(c, d, a);
     let cd_b = orientation_2d(c, d, b);
-    if ab_c.abs() <= EPSILON && on_segment_2d(a, b, c)
-        || ab_d.abs() <= EPSILON && on_segment_2d(a, b, d)
-        || cd_a.abs() <= EPSILON && on_segment_2d(c, d, a)
-        || cd_b.abs() <= EPSILON && on_segment_2d(c, d, b)
+    if ab_c == 0.0 && on_segment_2d(a, b, c)
+        || ab_d == 0.0 && on_segment_2d(a, b, d)
+        || cd_a == 0.0 && on_segment_2d(c, d, a)
+        || cd_b == 0.0 && on_segment_2d(c, d, b)
     {
         return true;
     }
@@ -364,10 +360,10 @@ fn segments_intersect_2d(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> 
 }
 
 fn on_segment_2d(a: [f64; 2], b: [f64; 2], point: [f64; 2]) -> bool {
-    point[0] >= a[0].min(b[0]) - EPSILON
-        && point[0] <= a[0].max(b[0]) + EPSILON
-        && point[1] >= a[1].min(b[1]) - EPSILON
-        && point[1] <= a[1].max(b[1]) + EPSILON
+    point[0] >= a[0].min(b[0])
+        && point[0] <= a[0].max(b[0])
+        && point[1] >= a[1].min(b[1])
+        && point[1] <= a[1].max(b[1])
 }
 
 fn point_in_triangle_2d(point: [f64; 2], triangle: [[f64; 2]; 3]) -> bool {
@@ -376,5 +372,29 @@ fn point_in_triangle_2d(point: [f64; 2], triangle: [[f64; 2]; 3]) -> bool {
         orientation_2d(triangle[1], triangle[2], point),
         orientation_2d(triangle[2], triangle[0], point),
     ];
-    values.iter().all(|value| *value >= -EPSILON) || values.iter().all(|value| *value <= EPSILON)
+    values.iter().all(|value| *value >= 0.0) || values.iter().all(|value| *value <= 0.0)
+}
+
+fn segment_intersects_triangle_exact(start: Vec3, end: Vec3, a: Vec3, b: Vec3, c: Vec3) -> bool {
+    let direction = sub(end, start);
+    let edge_one = sub(b, a);
+    let edge_two = sub(c, a);
+    let p = cross(direction, edge_two);
+    let determinant = dot(edge_one, p);
+    if determinant == 0.0 {
+        return false;
+    }
+    let inverse = 1.0 / determinant;
+    let from_vertex = sub(start, a);
+    let u = dot(from_vertex, p) * inverse;
+    if !(0.0..=1.0).contains(&u) {
+        return false;
+    }
+    let q = cross(from_vertex, edge_one);
+    let v = dot(direction, q) * inverse;
+    if v < 0.0 || u + v > 1.0 {
+        return false;
+    }
+    let distance = dot(edge_two, q) * inverse;
+    (0.0..=1.0).contains(&distance)
 }

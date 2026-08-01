@@ -58,12 +58,18 @@ impl Mesh {
                 }
             }
             let [a, b, c] = *indices;
-            if a == b
-                || b == c
-                || c == a
-                || triangle_double_area(vertices[a], vertices[b], vertices[c]) == 0.0
-            {
+            if a == b || b == c || c == a {
                 return Err(MetricsError::DegenerateTriangle { triangle });
+            }
+            match triangle_has_nonzero_area(vertices[a], vertices[b], vertices[c]) {
+                Ok(true) => {}
+                Ok(false) => return Err(MetricsError::DegenerateTriangle { triangle }),
+                Err(()) => {
+                    return Err(MetricsError::ArithmeticOverflow {
+                        triangle,
+                        primitive: GeometryPrimitive::TriangleArea,
+                    })
+                }
             }
         }
         Ok(Self {
@@ -118,6 +124,11 @@ pub enum MetricsError {
     },
     #[error("ray {ray} has a zero-length direction")]
     ZeroRayDirection { ray: usize },
+    #[error("triangle {triangle} overflows while evaluating {primitive:?}")]
+    ArithmeticOverflow {
+        triangle: usize,
+        primitive: GeometryPrimitive,
+    },
     #[error("triangle query {query} {side:?} index {triangle} is outside the mesh's {triangle_count} triangles")]
     QueryTriangleIndexOutOfBounds {
         query: usize,
@@ -132,6 +143,12 @@ pub enum MetricsError {
 pub enum TriangleSide {
     Left,
     Right,
+}
+
+/// A finite geometry primitive whose intermediate arithmetic may be unrepresentable.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GeometryPrimitive {
+    TriangleArea,
 }
 
 pub(crate) fn validate_vec3(value: Vec3, kind: CoordinateKind) -> Result<(), MetricsError> {
@@ -171,6 +188,34 @@ pub(crate) fn norm_squared(value: Vec3) -> f64 {
     dot(value, value)
 }
 
-pub(crate) fn triangle_double_area(a: Vec3, b: Vec3, c: Vec3) -> f64 {
-    norm_squared(cross(sub(b, a), sub(c, a)))
+/// Returns whether a triangle has nonzero area without squaring its normal.
+///
+/// Scaling the finite edge vectors before their cross product avoids the former
+/// underflow for tiny valid triangles and overflow for large valid triangles.
+/// A coordinate subtraction that itself overflows is not an honest geometric
+/// answer, so callers turn it into a typed semantic input error.
+pub(crate) fn triangle_has_nonzero_area(a: Vec3, b: Vec3, c: Vec3) -> Result<bool, ()> {
+    let ab = checked_sub(a, b)?;
+    let ac = checked_sub(c, a)?;
+    let scale = ab.into_iter().chain(ac).map(f64::abs).fold(0.0, f64::max);
+    if scale == 0.0 {
+        return Ok(false);
+    }
+    let normal = cross(
+        [ab[0] / scale, ab[1] / scale, ab[2] / scale],
+        [ac[0] / scale, ac[1] / scale, ac[2] / scale],
+    );
+    if normal.iter().any(|value| !value.is_finite()) {
+        return Err(());
+    }
+    Ok(normal.iter().any(|value| *value != 0.0))
+}
+
+fn checked_sub(a: Vec3, b: Vec3) -> Result<Vec3, ()> {
+    let value = sub(a, b);
+    if value.iter().all(|coordinate| coordinate.is_finite()) {
+        Ok(value)
+    } else {
+        Err(())
+    }
 }

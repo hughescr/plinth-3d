@@ -174,3 +174,93 @@ fn rejects_nonfinite_degenerate_and_invalid_ray_data() {
         Err(MetricsError::QueryTriangleIndexOutOfBounds { .. })
     ));
 }
+
+#[test]
+fn accepts_subnormal_rays_and_scale_safe_finite_triangles() {
+    let mesh = tetrahedron(false);
+    let subnormal = f64::from_bits(1);
+    assert!(ray_intersections(
+        &mesh,
+        &[Ray {
+            origin: [0.0, 0.0, 0.0],
+            direction: [subnormal, 0.0, 0.0],
+        }]
+    )
+    .is_ok());
+
+    let tiny = Mesh::new(
+        vec![[0.0, 0.0, 0.0], [1.0e-200, 0.0, 0.0], [0.0, 1.0e-200, 0.0]],
+        vec![[0, 1, 2]],
+    );
+    assert!(tiny.is_ok(), "small finite nonzero area must not underflow");
+    let huge = Mesh::new(
+        vec![[0.0, 0.0, 0.0], [1.0e150, 0.0, 0.0], [0.0, 1.0e150, 0.0]],
+        vec![[0, 1, 2]],
+    );
+    assert!(
+        huge.is_ok(),
+        "large finite nonzero area must not overflow when squared"
+    );
+    assert!(matches!(
+        Mesh::new(
+            vec![[f64::MAX, 0.0, 0.0], [-f64::MAX, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[0, 1, 2]],
+        ),
+        Err(MetricsError::ArithmeticOverflow { .. })
+    ));
+}
+
+#[test]
+fn retains_signed_zero_and_rejects_all_nonfinite_queries() {
+    let negative_zero = -0.0_f64;
+    let mesh = Mesh::new(
+        vec![[negative_zero, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
+    assert_eq!(mesh.vertices()[0][0].to_bits(), negative_zero.to_bits());
+    assert!(matches!(
+        closest_points(&mesh, &[[f64::INFINITY, 0.0, 0.0]]),
+        Err(MetricsError::NonFiniteCoordinate { .. })
+    ));
+    assert!(matches!(
+        ray_intersections(
+            &mesh,
+            &[Ray {
+                origin: [f64::NEG_INFINITY, 0.0, 0.0],
+                direction: [1.0, 0.0, 0.0],
+            }],
+        ),
+        Err(MetricsError::NonFiniteCoordinate { .. })
+    ));
+    assert!(matches!(
+        ray_intersections(
+            &mesh,
+            &[Ray {
+                origin: [0.0, 0.0, 0.0],
+                direction: [f64::NAN, 0.0, 0.0],
+            }],
+        ),
+        Err(MetricsError::NonFiniteCoordinate { .. })
+    ));
+}
+
+#[test]
+fn separated_near_coplanar_triangles_do_not_intersect() {
+    let mesh = Mesh::new(
+        vec![
+            [0.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [0.5, 0.5, 1.0e-12],
+            [2.5, 0.5, 1.0e-12],
+            [0.5, 2.5, 1.0e-12],
+        ],
+        vec![[0, 1, 2], [3, 4, 5]],
+    )
+    .unwrap();
+    assert_eq!(
+        triangle_intersections(&mesh, &[(0, 1)]).unwrap(),
+        vec![false]
+    );
+}
