@@ -8,12 +8,25 @@
 
 mod fixtures;
 mod io;
+mod topology;
+mod triage;
 
 pub use fixtures::{
     make_box, make_box_default, make_overhang_table, make_overhang_table_with, make_raking_blade,
     make_raking_blade_with, make_thin_fin, make_thin_fin_with, make_toed_slab, make_toed_slab_with,
 };
 pub use io::{load_binary_stl, load_binary_stls, write_binary_stl, write_binary_stls, MeshIoError};
+pub use topology::{
+    build_face_topology, mesh_fingerprint, validate_face_topology, FaceTopology, TopologyError,
+    TopologyValidationError, FACE_TOPOLOGY_SCHEMA, FACE_TOPOLOGY_SCHEMA_VERSION,
+    TOPOLOGY_CUT_BOUNDARY, TOPOLOGY_CUT_DEGENERATE, TOPOLOGY_CUT_DUPLICATE,
+    TOPOLOGY_CUT_NONMANIFOLD, TOPOLOGY_CUT_POINT_ONLY, TOPOLOGY_CUT_SAME_DIRECTION,
+};
+pub use triage::{
+    triage_components, ComponentDescription, PreHollowed, TriageError, TriageSummary, TriagedMesh,
+    HOLLOW_CONTAINMENT_MIN_FRACTION, HOLLOW_CONTAINMENT_SAMPLES, HOLLOW_SHARD_MAX_DIM_MM,
+    HOLLOW_SHARD_MAX_FACES, HOLLOW_SHARD_MAX_VOLUME_MM3,
+};
 
 use thiserror::Error;
 
@@ -40,6 +53,23 @@ impl Mesh {
             verts,
             tris,
             weld_policy: WeldPolicy::None,
+        })
+    }
+
+    /// Builds a mesh whose arrays were already explicitly welded by the
+    /// caller.  This is crate-private so an IO path cannot falsely advertise
+    /// a welding policy without changing the arrays it returns.
+    pub(crate) fn new_welded(
+        verts: Vec<[f64; 3]>,
+        tris: Vec<[u32; 3]>,
+        weld_policy: WeldPolicy,
+    ) -> Result<Self, MeshError> {
+        Self::validate_parts(&verts, &tris)?;
+        debug_assert!(!matches!(weld_policy, WeldPolicy::None));
+        Ok(Self {
+            verts,
+            tris,
+            weld_policy,
         })
     }
 

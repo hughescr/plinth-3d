@@ -6,9 +6,9 @@ rust-version = "1.97"
 publish = false
 
 [dependencies]
+sha2 = "0.10"
 thiserror = { workspace = true }
 
 [dev-dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-sha2 = "0.10"
