@@ -2,7 +2,8 @@
 
 **Execute the revised critical path below.** The former M0–M9 DAG remains in this
 document as detailed acceptance/reference material and a post-elimination backlog;
-O-5 and O-6 supersede its sequencing and duplicate-implementation mandates.
+O-5 through O-8 supersede its sequencing, compatibility-retention, and
+duplicate-implementation mandates.
 
 Read `README.md`, `01-current-system.md`, `02-target-architecture.md` and
 `03-physics-and-constants.md` first. Read `06-conventions.md` before your first commit.
@@ -10,42 +11,51 @@ Read `README.md`, `01-current-system.md`, `02-target-architecture.md` and
 
 ---
 
-## Owner-approved critical path — O-5/O-6 (2026-08-01)
+## Owner-approved critical path — O-5 through O-8 (2026-08-01)
 
 The owner has prioritized Python elimination over simultaneous redesign. One
 implementation owns each capability: `geom_kernel` owns spatial geometry;
 `plinth-mesh` owns `Mesh`, topology, and delicacy; `plinth-metrics` is a disk-first
 adapter using them. Adapters and explicit boundary conversions are allowed; second
 algorithms are not. Batch-first remains law.
+Frozen disk artifacts, not a runnable Python engine, are the oracle. Each Python,
+PyO3, maturin, shim, and legacy Python-only control is deleted as soon as its native
+Rust boundary lands. Protected error-bounded decimation is the first production stage;
+its print-scale mesh is the sole mesh consumed downstream, and any orientation proxy
+derives from it.
 
 Execute this path in order:
 
 1. **Consolidate.** Reconcile the existing Rust work around the single-owner boundaries;
    retain the frozen Python baseline and disk-first scoring.
-2. **Native kernel/mesh.** Complete only the batched geometry and mesh capabilities the
-   current Python pipeline actually needs.
-3. **Port current preparation.** Reproduce STL preparation, current decimation,
-   orientation, hollowing, and drilling without redesigning their policy.
-4. **Port current support.** Reproduce the current support and raft behavior, fixing only
+2. **Native kernel/mesh and compatibility removal.** Complete only the batched geometry
+   and mesh capabilities the pipeline needs; immediately remove their Python/PyO3/maturin
+   and shim surfaces plus `GEOM_KERNEL_THREADS`.
+3. **Protected decimation first.** Implement error-bounded, feature-protecting production
+   decimation. Its print-scale output is the sole production mesh for every later stage;
+   any additional orientation proxy is derived from it.
+4. **Port current downstream preparation.** Reproduce orientation, hollowing, and drilling
+   against that decimated production mesh without otherwise redesigning their policy.
+5. **Port current support.** Reproduce the current support and raft behavior, fixing only
    the enumerated fix-don't-reproduce defects.
-5. **Emit and CLI.** Produce one loadable supported-and-rafted `.chitubox` per input model
+6. **Emit and CLI.** Produce one loadable supported-and-rafted `.chitubox` per input model
    through the single Rust command and audit the freshly reopened file.
-6. **Accept and delete.** Require essential artifact parity, ChituBox loadability,
-   deterministic outputs/reports, and the owner's real print checkpoint; then remove all
-   Python and PyO3 surfaces and re-run those gates from a clean checkout.
-7. **Post-Python enhancements.** Only after deletion, pursue the dense orientation search,
-   error-bounded/proxy decimation improvements, CVT/lattice and load-model redesign,
+7. **Accept and finish deletion.** Require essential artifact parity, ChituBox loadability,
+   deterministic outputs/reports, and the owner's real print checkpoint; remove any remaining
+   Python orchestration/tests and re-run those gates from a clean checkout with zero Python.
+8. **Post-Python enhancements.** Only after deletion, pursue the dense orientation search,
+   extra proxy tiers, CVT/lattice and load-model redesign,
    forest/repair redesign, calibration, GPU abstraction, and other quality improvements.
 
 The following former requirements are explicitly superseded:
 
-| Former detail | O-5/O-6 resolution |
+| Former detail | O-5–O-8 resolution |
 | --- | --- |
 | M1 requires independent geometry inside `plinth-metrics` | `plinth-metrics` uses the sole `geom_kernel` and `plinth-mesh` implementations after reopening files from disk; analytic, corrupt, and native fixtures supply independent evidence |
-| M3 makes the full error-bounded QEM/proxy redesign a pre-deletion milestone | Port the current decimation behavior first; the enhanced error-bounded proxy ladder is post-Python work |
+| M3 makes decimation late or optional while deferring protected QEM | O-8 makes protected, error-bounded production decimation the first production stage; only extra orientation proxy tiers are post-Python work |
 | M4 deliberately emits naive throwaway supports before the real solver | Do not build a throwaway support algorithm; port current support/raft behavior once on the elimination path |
 | M5–M8 redesigns and enhancements block deletion | Only behavior essential to reproduce the current pipeline and pass acceptance blocks deletion; the listed redesigns and enhancements move to step 7 |
-| M9 is reachable only after the full old M5–M8 program | The acceptance/delete step takes precedence and occurs as soon as essential parity, loadability, determinism, and owner-print gates pass |
+| Python/PyO3 survives until M9 | O-7 removes each compatibility surface at its native handoff; the final gate proves zero Python after essential parity, loadability, determinism, and owner-print gates pass |
 | M2 requires a premature `SurfaceOracle` abstraction | Add an abstraction only when a second real backend is implemented after Python deletion |
 
 No numeric point estimate is normative here. The detailed material below continues to
@@ -126,9 +136,9 @@ gate against the Python output; you will fail it for the wrong reasons and then 
 
 ### Four rules that bind every revised critical-path checkpoint
 
-1. **Additive until acceptance/delete.** The frozen Python engine stays runnable as the
-   measuring stick until the executable essential-parity gate above passes. Python is
-   then deleted before post-Python enhancements; the old M9 timing is superseded.
+1. **Disk-oracle, incremental deletion.** Frozen artifacts remain the measuring stick.
+   A runnable Python engine is not preserved for its own sake: delete each compatibility
+   surface when its native boundary lands, then prove zero Python at the final gate.
 2. **No new Python.** Not a script, not a helper, not a `conftest` addition. Reading the
    frozen Python is allowed and expected; writing it is not. The sanctioned exception is
    the **two** one-off `python -c` invocations in M0 — the `resolve_stl()` corpus probe in
@@ -188,13 +198,13 @@ instead.
 | Former M0 | Conventions, frozen-Python baseline, core types, solid spike | Historical only | `plinth-core`, `plinth-solid` | Useful completed foundation |
 | Former M1 | The parity harness and Rust refreeze (`plinth score`) | Historical only | `plinth-metrics`, `plinth-cli` | M1 metric table remains the acceptance vocabulary |
 | Former M2 | Mesh and geometry substrate | Historical only | `plinth-mesh`, `plinth-voxel` | Reuse completed substrate under revised steps 1–2 |
-| Former M3 | Decimation | Post-Python except minimal current behavior | `plinth-decimate` | Enhanced error-budget/proxy work does not block deletion |
-| Former M4 | The thin vertical slice | Replaced by revised steps 3–5 | `plinth-cost`, `plinth-orient`, `plinth-hollow`, `plinth-emit`, `plinth-pipeline` | Port current behavior once; no throwaway supports |
+| Former M3 | Protected production decimation | Revised step 3; first production stage | `plinth-decimate` | Error-bounded feature protection blocks every downstream stage; only extra proxies are deferred |
+| Former M4 | The thin vertical slice | Revised steps 4–6, after decimation | `plinth-cost`, `plinth-orient`, `plinth-hollow`, `plinth-emit`, `plinth-pipeline` | Port current downstream behavior once; no throwaway supports |
 | Former M5 | Perception, placement, load model | Post-Python redesign | `plinth-support` | Does not block deletion except current behavior needed by parity |
 | Former M6 | Forest, growth, sizing | Post-Python redesign | (extends `plinth-support`) | Does not block deletion except current behavior needed by parity |
 | Former M7 | Verify + repair complete | Post-Python redesign | `plinth-verify` | Port current verifier safety behavior before deletion; redesign later |
 | Former M8 | Search quality + calibration | Post-Python | (extends existing) | Enhancement work; pipeline determinism still blocks deletion |
-| Former M9 | Deletion | Revised step 5 plus executable essential parity | — | Moved to acceptance/delete; clean-checkout gate still re-fires |
+| Former M9 | Final zero-Python proof | Revised step 6 plus executable essential parity | — | Compatibility deletes at native handoff; clean-checkout gate still re-fires |
 
 ---
 
@@ -264,6 +274,10 @@ control, not a ledger constant. M0 closes membership; M7 completes consumer
 migration. Do not create the M1 decision gate table during this checkpoint.
 
 ### Owner prerequisite — read this before starting
+
+**Historical completed-freeze instruction.** This bootstrap was used for the one M0
+freeze. Under O-7, do not repeat or maintain it after the relevant native handoff; frozen
+disk artifacts and native fixtures replace the runnable extension as oracle evidence.
 
 First, the venv. Every `uv run --frozen` and every `@pytest.mark.kernel` test in this plan
 needs `.venv/` (gitignored, so absent from a fresh checkout) with the compiled PyO3
@@ -672,21 +686,19 @@ respectively (see the audit table).
 (erosion/dilation), marching cubes. Replaces `scipy.ndimage` + `skimage.measure` +
 `trimesh.voxelized`.
 
-**`rust/geom_kernel`** — extend, do not rewrite.
+**`rust/geom_kernel`** — extend natively, then remove its compatibility surface.
 
-- **Correction to prior planning notes:** `geom_kernel` **already declares
-  `crate-type = ["cdylib", "rlib"]`** in `rust/geom_kernel/Cargo.toml`. The rlib target
-  exists. What is actually missing is that `pyo3` and `numpy` are **non-optional**
-  dependencies there, so any crate linking `geom_kernel` drags in libpython. Fix that by
-  mirroring what `rust/chitubox_io/Cargo.toml` already does: make them
-  `optional = true` behind a `python` feature (`python = ["dep:pyo3", "dep:numpy"]`,
-  `default = []`), and have `rust/geom_kernel/pyproject.toml`'s maturin config enable it.
+- **O-7 correction to prior planning notes:** do not make `pyo3`/`numpy` optional and do
+  not preserve a maturin-enabled `python` feature. Once native Rust callers use the rlib,
+  delete the inline PyO3 surface, shim, `pyproject.toml`, `cdylib` crate type, Python-only
+  dependencies, and `GEOM_KERNEL_THREADS` in that same checkpoint.
 - Do not add `SurfaceOracle` on the elimination path. Introduce a backend trait only
   when a second real backend is implemented after Python deletion.
 - Add **point-kNN** and **radius-pairs** queries. These are the `scipy.spatial.cKDTree`
   replacements that M5 and M6 need (`query_pairs` in `joints.compute_joint_balls`,
   ball-point queries in `engine._ensure_minima_contacts`).
-- **Leave the PyO3 surface working.** Python still runs until M9.
+- Do not leave the PyO3 surface working after the native handoff; disk artifacts carry
+  the oracle role.
 
 ### Work items
 
@@ -710,22 +722,10 @@ respectively (see the audit table).
    construction establishes the invariant; validation is a debug-assert and an opt-in
    diagnostic.
 5. `plinth-voxel` primitives with property tests against brute force.
-6. Extend `geom_kernel` as above; keep its existing suites green.
-7. **Rebuild the extension before the pytest parity run — this will otherwise fail for a
-   reason unrelated to numerics.** `rust/geom_kernel/build.rs` bakes
-   `GEOM_KERNEL_SOURCE_DIGEST` over the sorted `src/*.rs` **plus `Cargo.toml`,
-   `Cargo.lock`, `build.rs` and `pyproject.toml`** (build.rs:29), and
-   `scripts/tests/conftest.py:71-80` recomputes the same digest and hard-**FAILS** every
-   `@pytest.mark.kernel` test on a mismatch ("missing/stale/version-mismatch => FAIL, never
-   silently skip", conftest.py:158). Work item 6 edits exactly those two config files, so
-   after editing them run:
-   ```
-   scripts/build_kernel.sh geom_kernel
-   ```
-   `scripts/build_kernel.sh` requires `.venv/bin/maturin` and errors out without it; if
-   `.venv/` is absent from your checkout, run M0's venv bootstrap first. (`conftest.py`
-   also honours `GEOM_KERNEL_ALLOW_STALE=1` as a dev escape — **do not use it here**: the
-   whole point of this gate is to prove the feature change did not move the numerics.)
+6. Extend `geom_kernel` as above; keep its native suites green, then remove the complete
+   Python compatibility surface in the same checkpoint. Do not rebuild it through maturin
+   or retain `GEOM_KERNEL_THREADS`; use frozen disk/analytic/native fixtures for parity and
+   `PLINTH_THREADS` for every live thread sweep.
 
 ### Acceptance — run these
 
@@ -752,17 +752,13 @@ cargo test -p geom_kernel
 # rust/geom_kernel/tests/geometry.rs stays green, including
 # deterministic_build_bit_identical and r6_no_hashmap_in_src
 
-scripts/build_kernel.sh geom_kernel      # MANDATORY after work item 6 edits Cargo.toml /
-                                         # pyproject.toml -- both are in build.rs's digest
-uv run --frozen python -m pytest scripts/tests/test_kernel_parity.py scripts/tests/test_kernel_parity_baseline.py
-# the Python-side parity oracle still agrees; it runs until M9
+# no maturin/PyO3 rebuild: O-7 deletes that compatibility surface at native handoff
+# parity evidence comes from frozen disk artifacts and native/analytic fixtures
 ```
 
 **Parity gate:** STL round-trip **array** identity over the corpus; `geom_kernel` suites
-green; Python kernel-parity suites still green (you changed its Cargo features — prove you
-did not change its numerics). A stale-binary FAIL from `conftest.py` is a rebuild, not a
-numerics regression — clear it with `scripts/build_kernel.sh`, never with
-`GEOM_KERNEL_ALLOW_STALE=1`.
+green; frozen artifact, analytic, and native-fixture parity evidence remains green after
+the compatibility surface is removed. No stale-extension or Python-side parity gate remains.
 **Owner eyeball:** a delicacy heat-map render of the Treant. Sanity: thin foliage hot,
 trunk cold. If the trunk is hot, the curvature/thinness blend is wrong and M5's scar
 weighting will be wrong with it.
@@ -787,9 +783,9 @@ not block deletion.
 | `scripts/tools/decimate_pipeline.py` | Logic converted → `plinth-decimate`; Blender retired |
 | `scripts/tools/geometry_sweep.py` | **Deleted with reason** — Blender-only degenerate-repair sweep; not ported. M2's triage + topology cut flags *refuse* what this repaired. The owner repairs pathological meshes upstream. |
 
-`skills/decimate-for-print/SKILL.md` describes the *current interactive Blender workflow*,
+`skills/decimate-for-print/SKILL.md` describes the *historical interactive Blender workflow*,
 not the target. Only its algorithm is in scope; the Blender/MCP delivery mechanism is not.
-Mark it superseded in M9.
+Mark it superseded when `plinth-decimate` lands; do not wait for the final gate.
 
 ### Rust deliverables
 
@@ -848,16 +844,16 @@ cargo test -p plinth-decimate --test corpus_budgets
 The CLI wiring (`plinth prepare --stop-after decimate`) is verified at **M4**, which owns
 the `prepare` subcommand. Do not make M3's gate depend on it.
 
-**Parity gate:** self-verified error budgets on every corpus model, at the library level. There is no Python
-baseline to compare against here — `decimate_pipeline.py` was never wired into the
-automated pipeline (grep confirms no module imports it), so decimation has always been a
-manual out-of-band step. The budget *is* the gate.
+**Parity gate:** self-verified error budgets on every corpus model, at the library level.
+The historical Python tool was manual/out-of-band, but O-8 makes this Rust stage mandatory
+production policy. The budget is the gate, and no downstream production stage may accept
+the pre-decimation mesh.
 **Owner eyeball:** before/after renders of the Treant at production ratio, plus the chosen
 ratio per model. The owner is checking that foliage survived.
 
 ---
 
-## M4 — The thin vertical slice (the most important milestone)  ∥ M3
+## M4 — The thin vertical slice (the most important milestone) after M3
 
 **Goal under O-6.** A real `.chitubox` end-to-end from Rust using the minimally
 ported current support/raft behavior. Do not build deliberately naive throwaway
@@ -867,7 +863,8 @@ supports; implement the capability once while proving the contract closes: pipel
 The former M4 plan expected naive supports to score worse than baseline. O-6 supersedes
 that expectation: port current support behavior once and measure the resulting artifact.
 
-**Former M4 dependency (reference only):** M1/M2; revised steps 3–5 replace it.
+**Former M4 dependency (reference only):** M1/M2; revised steps 3–6 replace it, with
+protected decimation complete before any downstream production work.
 
 ### Python retired here
 
@@ -976,10 +973,9 @@ wire format — never upstream.
    points for vents) with one batched ray query.
 4. `plinth-orient` with `pinned:` mode working end to end before the coarse sweep.
 5. `plinth-pipeline` typestate, using **02 §3.2's mark names verbatim**:
-   `Raw → Triaged → [Decimated] → Oriented → Hollowed → Supported → Emitted`, each
+   `Raw → Triaged → Decimated → Oriented → Hollowed → Supported → Emitted`, each
    transition consuming the previous state by value. The `Decimated` mark and its
-   transition are **declared here and filled by M3's `plinth-decimate`** — M4 passes
-   through it identity-style until M3 lands, which is what lets M3 and M4 run in parallel.
+   transition are filled by M3's `plinth-decimate`; identity pass-through is forbidden.
    (`Raw`, not `Loaded`: one name for one thing, and 02 §3.2 is the declaration site.)
 6. `plinth prepare` with **naive supports**: hex-lattice contacts, straight X-rule pillars,
    no rewire, no bracing. Naive is the point.
@@ -1586,7 +1582,7 @@ real search, and M4–M7 made per-candidate re-evaluation cheap enough to afford
 | --- | --- | --- | --- |
 | Coarse | ~512 quasi-uniform + convex-hull-face-aligned + the legacy 13 | L2 proxy (~2 %) | ranked |
 | Refine | top 24 | L1 proxy (~10 %) | ranked |
-| Exact | top 3 | full mesh | Pareto front recorded |
+| Exact | top 3 | protected decimated production mesh | Pareto front recorded |
 
 The legacy 13 stay in the candidate set permanently so the old objective's choice is always
 visible in the Pareto record.
@@ -1603,11 +1599,9 @@ visible in the Pareto record.
   Python `chitubox_inject.Project`.
 
 **CI jobs** (`06-conventions.md` has the runner config):
-- Corpus at **1, 4, 16 threads** → identical artifact digests, driven by the single
-  workspace-wide `PLINTH_THREADS` (06 §3). Do **not** sweep `GEOM_KERNEL_THREADS`: it sets
-  only `geom_kernel`'s pool, leaving `plinth-support`, `plinth-orient` and `plinth-cost` —
-  the crates whose determinism is actually at issue here — at their defaults, so the sweep
-  would pass vacuously for everything that matters.
+- Corpus at **1, 4, 16 threads** → identical artifact digests, driven by the sole
+  workspace-wide `PLINTH_THREADS` (06 §3), including `geom_kernel`. O-7 removes
+  `GEOM_KERNEL_THREADS`; it is not swept or retained as an exclusion.
 - **Cache-disabled ≡ cache-enabled** reports, using the one sanctioned spelling
   `plinth prepare --no-cache` (06 §6). There is no `PLINTH_CACHE` environment variable.
 - **The exact-bytes determinism fingerprint**, the Rust re-expression of
@@ -1674,13 +1668,17 @@ the second-best point on the numbers is the right print.
 and is not blocked by post-Python M5–M8 enhancements. Its clean-checkout re-fire and
 zero-Python assertions remain binding.
 
+**O-7 timing:** the inventory below is also the final zero-Python checklist. Each
+compatibility row should already have been deleted at its native handoff; delete any
+remainder here, and treat retention for optional compatibility as a failed checkpoint.
+
 **Goal.** Zero Python.
 
 **Current preconditions under O-6:** essential artifact parity, ChituBox loadability,
 deterministic artifacts/reports, and the owner-print checkpoint have passed. The old
 M7/M8 dependency below is reference material, not a deletion blocker.
 
-**Depends on:** revised critical-path step 5. **Parallel with:** nothing.
+**Depends on:** revised critical-path step 6. **Parallel with:** nothing.
 
 ### Delete
 
@@ -1775,7 +1773,7 @@ deleted after the run. Do not generalize either carve-out into permission to wor
 `$TMPDIR`.
 
 **Parity gate:** the full M7 gate **re-fires post-deletion, from a clean checkout**. If
-removing PyO3 changed a number, you find out here.
+an earlier native-handoff compatibility removal changed a number, you find out here.
 **Owner eyeball:** the owner **prints one model** from a Rust-emitted file. That is the
 real acceptance test and always was.
 
@@ -1844,16 +1842,16 @@ audits.)
 | 49 | `scripts/tools/instrument.py` | **M8** | Superseded → determinism CI |
 | 50 | `scripts/tools/common.py` | **M8** | Superseded → cargo/CLI conventions |
 | 51 | `scripts/tools/_toolpaths.py` | **M8** | Superseded → cargo/CLI conventions |
-| 52 | `scripts/support_placement/__init__.py` | **M9** | Deleted with the package |
-| 53 | `scripts/support_placement/geometry_exact.py` | **M9** | Already ported (`geom_kernel`); its differential-oracle role transfers to `corpus/baseline` + `plinth-metrics` |
-| 54 | `scripts/support_placement/geometry_kernel.py` | **M9** | Deleted — PyO3 wrapper; native callers use `geom_kernel` directly |
-| 55 | `rust/chitubox_io/python/chitubox_io/__init__.py` | **M9** | Deleted with the PyO3 surface |
-| 56 | `rust/geom_kernel/python/geom_kernel/__init__.py` | **M9** | Deleted with the PyO3 surface |
+| 52 | `scripts/support_placement/__init__.py` | **Native handoff/final remainder** | Deleted when the package's remaining native boundaries land |
+| 53 | `scripts/support_placement/geometry_exact.py` | **Native kernel handoff** | Already ported (`geom_kernel`); oracle role transfers to frozen disk artifacts + `plinth-metrics` |
+| 54 | `scripts/support_placement/geometry_kernel.py` | **Native kernel handoff** | Deleted with the PyO3 wrapper; native callers use `geom_kernel` directly |
+| 55 | `rust/chitubox_io/python/chitubox_io/__init__.py` | **Native IO handoff** | Deleted with the PyO3 surface |
+| 56 | `rust/geom_kernel/python/geom_kernel/__init__.py` | **Native kernel handoff** | Deleted with the PyO3 surface |
 
 **Test infrastructure** (`scripts/tests/*.py` — all `test_*.py`, all `manual_*.py`,
-`conftest.py`, `_refreeze_v5.py`, `_perf_fingerprint.py`) is exempt from the one-milestone
-rule: it keeps the frozen Python runnable until the revised acceptance/delete step and
-then deletes with it. Its **pinned
+`conftest.py`, `_refreeze_v5.py`, `_perf_fingerprint.py`) is retired piecemeal when its
+Rust test boundary lands; no exemption exists merely to keep Python runnable. Any remainder
+deletes at the final gate. Its **pinned
 semantics** — determinism contracts, wall-time pins, not-worse-than-baseline gates — are
 re-expressed as Rust tests at the milestone that ports each subject. Three of those
 re-expressions are **assigned deliverables**, not aspirations, because

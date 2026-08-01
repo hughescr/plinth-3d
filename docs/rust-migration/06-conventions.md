@@ -14,10 +14,19 @@ same capability is not. Audit independence comes from reopening artifacts from d
 and testing with analytic, injected-corruption, and native ChituBox fixtures.
 
 O-6 establishes **Python elimination first**. Minimally reproduce the current
-STL → decimate/orient/hollow/drill/support/raft/`.chitubox` behavior in Rust, pass
-essential parity, loadability, determinism, and owner-print gates, then delete Python.
+STL → decimate/orient/hollow/drill/support/raft/`.chitubox` behavior in Rust and defer
+redesign until essential parity, loadability, determinism, owner-print, and zero-Python
+gates pass. O-7 below refines deletion timing to native-boundary handoffs.
 Redesigns and enhancements follow deletion. These owner decisions supersede the old
 M0–M9 sequence and duplication mandates wherever they conflict; batch-first remains law.
+
+O-7 establishes **no optional compatibility tail**. Frozen disk artifacts are the
+oracle; a runnable Python engine is not preserved for its own sake. Each Python, PyO3,
+maturin, shim, and legacy Python-only control is removed as soon as its native Rust
+boundary lands. The final gate still requires zero Python. O-8 establishes **protected
+decimation first**: error-bounded, feature-protecting decimation creates the sole
+production mesh consumed by every downstream stage; any orientation proxy derives from
+that mesh. It is neither late nor optional/manual-only.
 
 ---
 
@@ -110,10 +119,10 @@ Follow the pattern already established in `rust/geom_kernel/src/par.rs`:
   order.
 - **Thread count comes from exactly one workspace-wide environment variable,
   `PLINTH_THREADS`**, with an all-cores default, read once in `plinth-core` and
-  threaded to every crate's `par::run` pool. Frozen `geom_kernel` has the distinct legacy
-  `GEOM_KERNEL_THREADS` control for its existing standalone suites; it is excluded/no-port
-  once the workspace migration is complete. When driven from `plinth-*`,
-  `PLINTH_THREADS` is what sets the pool. **Do not give each
+  threaded to every crate's `par::run` pool, including `geom_kernel`.
+  `GEOM_KERNEL_THREADS` is a historical Python-compatibility control removed at the
+  native handoff under O-7; it is not a retained exclusion, alias, or test input.
+  **Do not give each
   new crate its own variable name.** A per-crate variable makes the determinism sweep
   in 04-migration-plan.md M8 pass vacuously: setting one crate's variable leaves every
   other crate's pool at its default, so the 1/4/16-thread digests match for the
@@ -123,8 +132,8 @@ Follow the pattern already established in `rust/geom_kernel/src/par.rs`:
 
 `PLINTH_THREADS` is a mandatory runtime contract, not a physical/tuning registry
 constant; the M0 source ledger records it only as an excluded/nonregistry disposition.
-`GEOM_KERNEL_THREADS` is a distinct frozen-Python/kernel scheduling control with its
-own excluded/no-port row and M8 determinism proof. They are not aliases.
+`GEOM_KERNEL_THREADS` has no live disposition after the native handoff. The determinism
+proof sweeps only `PLINTH_THREADS` across the whole workspace.
 
 GPU (wgpu) is roadmap, not scope. Keep the batched API shapes such that a GPU backend
 could implement the same slice-in/slice-out signature later.
@@ -364,6 +373,8 @@ recorded sign-off.
 | H-9 | historical | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-07-31 | Release edge is NegativeY and sweep is PositiveY from negative to positive Y | docs/datasheets/printers/saturn-4-ultra-16k.md | axis-mapping | - |
 | O-5 | override | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-08-01 | One implementation per capability with disk and fixture based audit independence | docs/rust-migration/06-conventions.md | owner-override-O-5 | - |
 | O-6 | override | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-08-01 | Python elimination precedes redesign and enhancement work | docs/rust-migration/06-conventions.md | owner-override-O-6 | - |
+| O-7 | override | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-08-01 | Remove each Python compatibility surface at native Rust handoff; frozen disk artifacts remain the oracle and final gate proves zero Python | docs/rust-migration/06-conventions.md | owner-override-O-7 | - |
+| O-8 | override | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-08-01 | Protected error-bounded decimation is the first production stage and its output is the sole downstream production mesh | docs/rust-migration/06-conventions.md | owner-override-O-8 | - |
 <!-- PLINTH_GATE_MAIN_END -->
 
 ## Decision gate corrections
@@ -379,6 +390,7 @@ unique effective replacement while auditing both original and correction rows.
 | C-2 | H-6 | H-6 | historical | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-08-01 | Python M0 freeze recorded before Rust future refreeze | corpus/manifest.json | frozen_at=2026-08-01T08:20:35Z;baseline_git_rev=6eb7f6a65e1a3442aa860d63d920788da778faed | - |
 | C-3 | D-2 | D-2 | decision | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-08-01 | O-5 supersedes independent geometry and delicacy implementations; canonical geom_kernel and plinth-mesh reuse is required | docs/rust-migration/06-conventions.md | owner-override-O-5 | - |
 | C-4 | D-19 | D-19 | decision | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-08-01 | O-5 supersedes geom_kernel exclusion; plinth-metrics must reuse canonical geom_kernel and plinth-mesh capabilities | docs/rust-migration/06-conventions.md | owner-override-O-5 | - |
+| C-5 | O-6 | O-6 | override | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-08-01 | O-7 supersedes final-gate compatibility retention; Python PyO3 maturin shims and legacy controls are removed at each native Rust handoff while frozen disk artifacts remain the oracle | docs/rust-migration/06-conventions.md | owner-override-O-7 | - |
 <!-- PLINTH_GATE_CORRECTIONS_END -->
 
 For any future `waiver` row, the final cell is one strict JSON object with
@@ -492,12 +504,10 @@ rule targets.
 | Shell glue, file wrangling, JSON poking | POSIX shell plus `jq`. Never `python -c "import json"`. |
 | A data-munging notebook | A small Rust binary in the relevant crate. |
 
-The existing Python remains runnable as the frozen oracle until the revised
-acceptance/delete step.
-**Do not edit it.** Reading it is how you learn the algorithms; changing it
-invalidates the baseline you are being measured against. If you find a bug in the
-Python, record it in the Rust port's tests as a fix-don't-reproduce item — do not
-patch the oracle.
+Frozen disk artifacts are the oracle. Existing Python may be read until its native
+boundary lands, but optional compatibility is not preserved and the Python engine need
+not remain runnable. **Do not edit it.** If you find a bug, record it in Rust tests as a
+fix-don't-reproduce item; delete the superseded surface at native handoff.
 
 TypeScript/bun is permitted only with a written, owner-approved blocker; the
 procedure is in README.md §5. Python is never an escape hatch.
@@ -517,8 +527,9 @@ procedure is in README.md §5. Python is never an escape hatch.
     and ask.
 - **Never force-push.**
 - **Never rewrite published history.**
-- **Python deletions happen only at the acceptance/delete step**, after the essential gates
-  pass. The deletion set is enumerated in README.md §5 and 04-migration-plan.md.
+- **Python compatibility is deleted incrementally at each native handoff.** The final
+  acceptance/delete step removes any remaining orchestration/tests and proves the complete
+  deletion set in README.md §5 and 04-migration-plan.md is gone.
 - Commit messages state the milestone, the gate result, and the **human checkpoint** —
   the specific thing the owner should eyeball for the subjective half of "as-good-or-better".
 - Interactive git flags (`-i`) are unavailable in this environment.

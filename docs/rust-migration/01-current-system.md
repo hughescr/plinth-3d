@@ -566,7 +566,7 @@ Format detail lives in `05-chitubox-and-corpus.md`; this section is the map only
 | `chitubox_emit.member_chain_specs / bottom_connected_specs / synth_member_chain / frustum_mesh / sphere_mesh / build_record` | `emit`, legacy inject path, tests |
 | `chitubox_inject.Project / clone_support / make_bridge / write / write_replace` | `chitubox_emit` (for `T_*` type ids and `clone_support`), `corpus.py` |
 | `chitubox_io::Project::{new_empty, open, add_models, set_placements, rotate_models_z, attach_supports, supports, to_bytes, save}` | Rust-side public API |
-| `chitubox_io` PyO3 `write_project(out_path, models)` / `read_project(path)` (`src/py.rs`) | `emit.py` — deleted in the final milestone |
+| `chitubox_io` PyO3 `write_project(out_path, models)` / `read_project(path)` (`src/py.rs`) | `emit.py` — historical consumer; O-7 deletes this binding at native handoff |
 
 **Algorithms worth knowing**
 
@@ -652,7 +652,7 @@ These documents exist and Codex will find them. Their status:
 |---|---|
 | `../reference/port_plan.md` | **Superseded as to language.** Its verdict was "stay Python, a full Rust port is not recommended". `../specs/SPEC-RUST-KERNEL.md` explicitly supersedes that verdict after the 2026-07-23 ruling, and this migration supersedes it entirely. Its determinism/parallelism discipline (§5 serial-generate / parallel-evaluate / serial-commit) remains valid. |
 | `../reference/port_plan_codex_review.md` | Conclusion superseded; findings still binding. Its central finding — `rewire.optimize`'s 30 s wall-clock cap makes the "frozen serial baseline" itself non-reproducible — is still true. It adjudicated independent-tree parallelism and whole-sweep speculative replay UNSOUND; do not resurrect those. |
-| `../specs/SPEC-RUST-KERNEL.md` | Binding for `geom_kernel`'s numerics and its Stage 2–5 roadmap, which is the best in-repo sequencing precedent. **But its scope limit is superseded**: it proposed a PyO3 hybrid and states the Python `ExactSurface` "stays permanently as the differential-test oracle". The total-elimination mission overrides that clause — the final milestone deletes it. |
+| `../specs/SPEC-RUST-KERNEL.md` | Binding for `geom_kernel`'s numerics and its Stage 2–5 roadmap. **But its scope limit is superseded**: it proposed a PyO3 hybrid and permanent Python oracle. O-7 transfers that role to frozen disk/fixture evidence and deletes compatibility at native handoff. |
 | `../specs/SPEC-V5-GEOM.md`, `SPEC-EMBED-POLICY.md`, `SPEC-A3-A4-COVERAGE.md`, `SPEC-P8-REACH.md`, `SPEC-P8-RELOCATE.md`, `SPEC-V5-PERF.md`, `SPEC-CHITUBOX-RS.md`, `CHITUBOX-FORMAT.md` | Normative; cited as law from code comments. Carry their formulas forward. `SPEC-P8-*` §4 is authoritative for the pocket solver but expect to simplify (§6). |
 | `../datasheets/` | External reference data intended to parameterize `config.py`. Its own README says "Nothing is wired up that way today," and documents that `peel_pressure_pa` and `shaft_drag_force_n` admit in-code to being unmeasured guesses — the existing acknowledgment of the Placeholder-provenance problem. |
 | `../../skills/{prep-mini,decimate-for-print,support-placement,chitubox-support-injection}/SKILL.md` | Describe the CURRENT interactive Blender-MCP workflow, not the target. Only the decimation ALGORITHM (§7) must be mirrored; the Blender/MCP delivery mechanism is out of scope. |
@@ -760,7 +760,7 @@ Disposition of every file under `scripts/tools/` and every `manual_`/helper file
 64 files. Each is listed with the section that covers it and its disposition. `.venv/` and
 `target/` are excluded (build/vendor).
 
-### `scripts/support_placement/` (35 files) — §2–§8, all deleted in the final milestone
+### `scripts/support_placement/` (35 files) — historical inventory; O-7 retires each at native handoff
 
 | File | Section | Note |
 |---|---|---|
@@ -816,14 +816,15 @@ Disposition of every file under `scripts/tools/` and every `manual_`/helper file
 (Everything else under `scripts/tests/` is `test_*.py` and out of scope for this audit; those files
 are the parity evidence discussed in `04-migration-plan.md`.)
 
-### Rust crate Python shims (2) — deleted in the final milestone
+### Rust crate Python shims (2) — historical inventory; O-7 deletes each at native handoff
 
 | File | Note |
 |---|---|
-| `rust/chitubox_io/python/chitubox_io/__init__.py` | Loads `_native`, checks `API_VERSION == 1`. Deleted with `src/py.rs`. |
-| `rust/geom_kernel/python/geom_kernel/__init__.py` | Loads `_native`, checks `KERNEL_API_VERSION == 1` and numpy major 2. Deleted with the bindings. |
+| `rust/chitubox_io/python/chitubox_io/__init__.py` | Loads `_native`, checks `API_VERSION == 1`. O-7 supersedes final-milestone retention: delete with `src/py.rs` when the native Rust boundary lands. |
+| `rust/geom_kernel/python/geom_kernel/__init__.py` | Loads `_native`, checks `KERNEL_API_VERSION == 1` and numpy major 2. O-7 supersedes final-milestone retention: delete with the bindings when the native Rust boundary lands. |
 
-Also deleted in the final milestone, though not `.py`: `pyproject.toml`, `uv.lock`, `.venv/`,
+Historically assigned to the final milestone, but superseded by O-7 for incremental
+native-boundary deletion: `pyproject.toml`, `uv.lock`, `.venv/`,
 `rust/chitubox_io/src/py.rs`, the **inline** PyO3 surface in `rust/geom_kernel/src/lib.rs`
 (`geom_kernel` has **no** `py.rs` — the `#[pymodule]`, `#[pyclass]` and `#[pyfunction]` items live
 directly in `lib.rs`, currently un-gated by any feature), the `rust/*/python/` shim directories,

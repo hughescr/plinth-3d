@@ -2,6 +2,13 @@
 
 *Standing kickoff prompt for the migration orchestrator — paste this to Codex to start or resume the port. It is committed here so a future reader knows what the orchestrator was told.*
 
+**Current owner overrides (2026-08-01):** O-5 through O-8 in `06-conventions.md`
+control. Optional Python compatibility is not a goal: delete each Python/PyO3/maturin/
+shim surface and `GEOM_KERNEL_THREADS` as soon as its native Rust boundary lands; frozen
+disk artifacts remain the oracle and the final gate proves zero Python. Protected,
+error-bounded decimation is the first production stage, and its print-scale mesh is the
+sole production mesh consumed downstream; any orientation proxy derives from it.
+
 You are the primary orchestrator for a full migration of this repo from Python to Rust. The
 repo is `/Users/craig/code/hughescr/dnd-campaigns/plinth-3d` (local git, branch `master`). A
 complete, self-contained execution guide was prepared for you and lives in
@@ -70,7 +77,8 @@ do both.
   synthetic-fixture STL export in work item 6. Both run once from a shell, neither may be
   committed as a `.py` file, and there is no third (`06` §8, `04` §0 rule 2). For everything
   else use a `cargo example`, a `#[test]`, or POSIX shell plus `jq`.
-- **Do not edit the existing Python.** It is the frozen oracle and stays runnable until M9.
+- **Do not edit the existing Python.** Frozen disk artifacts are the oracle; the runnable
+  engine is not preserved for its own sake, and each surface deletes at native handoff.
   Reading it is how you learn the algorithms; changing it invalidates the baseline you are
   measured against. A bug you find in it becomes a fix-don't-reproduce item in the Rust
   tests, never a patch to the oracle (`06` §8).
@@ -80,7 +88,7 @@ do both.
   `## Escape-hatch justifications`**, with the blocker and the bounded scope of the
   exception; (3) owner sign-off *before* you write the non-Rust code (`README` §5). Python is
   never an escape hatch.
-- **Work the milestone DAG in `04`, starting at M0.** A milestone is done when
+- **Work the O-5–O-8 critical path in `04`.** A checkpoint is done when
   `cargo test --workspace` passes, `cargo clippy --workspace -- -D warnings` and `cargo fmt`
   are clean, the milestone's gate in `04` passes, the human checkpoint is written into the
   commit message, and the cache-disabled run produces identical reports (`README` §5,
@@ -95,13 +103,14 @@ do both.
   `git clean`; never force-push; never rewrite published history. Undo your own edits by
   editing (`06` §9).
 
-## Environment setup before M0
+## Historical environment setup used for the completed M0 freeze
 
-- **Network is required for the venv bootstrap** in `04` M0's owner prerequisite:
+- **Do not repeat this bootstrap after the native handoff.** M0 used the following once
+  to create the frozen disk oracle; O-7 removes these compatibility surfaces rather than
+  maintaining them. The historical prerequisite was:
   `uv sync`, then `.venv/bin/python -m pip install "maturin==1.8.3"` (pinned; needs network),
   then `scripts/build_kernel.sh`. Every `uv run --frozen` and every `@pytest.mark.kernel`
-  test depends on it, including the baseline freeze. Verify you have network before starting;
-  if not, stop and report.
+  test depended on it for that freeze. New validation uses native Rust and frozen artifacts.
 - **The parity stress model.** "treant" and "Awakened Tree" are the same model. The source
   STL exists at `/Users/craig/code/hughescr/dnd-campaigns/minis-to-process/Awakened Tree.stl`
   (21 MB). `minis-to-process/` is transient staging the owner clears after printing. Copy it
@@ -154,9 +163,8 @@ review — do not write substantial code in your main context.
   implementation agent's brief. `04` M3 work item 2 is the worked example:
   `decimate_pipeline.probe()`'s one-point-at-a-time `bvh.find_nearest` loop is the defect,
   not the design.
-- Parallelizable work, per `04` §1: (M1, M2) after M0; (M3, M4) after M2. Everything else is
-  a chain — do not try to parallelize M5/M6/M7, each one's fixtures are built on the
-  previous one's data model.
+- Follow the current O-5–O-8 critical path. In particular, protected decimation must land
+  before the downstream vertical slice; the former M3/M4 parallelism is historical only.
 
 ## Adversarial verification — mandatory, not optional
 
@@ -177,8 +185,8 @@ review — do not write substantial code in your main context.
     `plinth prepare --no-cache` as the one spelling of cache-off, with no environment-variable
     form (`06` §6 — there is no `PLINTH_CACHE`); and `max_x_group` as a *separate* metric id
     added at M5, with `max_x` keeping its M1 per-arm definition untouched (`04` §3).
-    Frozen `GEOM_KERNEL_THREADS` is a distinct legacy kernel scheduling control and
-    no-port/excluded disposition; it is never an alias for `PLINTH_THREADS`.
+    `GEOM_KERNEL_THREADS` is a historical compatibility control deleted at the native
+    kernel handoff; `PLINTH_THREADS` is the sole live workspace control and sweep input.
   - **Silent-failure patterns must not be ported.** `resolve_stl()` is the named specimen: it
     never raises, it returns a path that does not exist. So is the fail-not-skip fixture rule
     (`04` M0 work item 9): a test whose required fixture, corpus model or baseline artifact is
@@ -188,9 +196,9 @@ review — do not write substantial code in your main context.
   - **Emitted files are audited as written to disk** — re-opened from the filesystem, parsed
     fresh, with **no repair pass** between writing and auditing. When the audit fires the fix
     is in the producer, never in the artifact (`06` §6, `05` §6, `04` §0 rule 4).
-  - **`plinth-metrics` independence is structural**, not aspirational: it links neither
-    `plinth-verify` nor `geom_kernel`, and it carries its own delicacy implementation rather
-    than `plinth-mesh::delicacy`. Check the dependency list, not the prose.
+  - **`plinth-metrics` disk independence is structural**, not duplicate implementation:
+    it reopens files, then uses canonical `geom_kernel` and `plinth-mesh`; it does not link
+    `plinth-verify`. Check the dependency list, disk provenance, and fixtures.
   - **Never bridge via PyO3 for comparison.** Both sides emit files; `plinth score` compares
     artifacts on disk. A bridge lets one shared kernel bug hide on both sides.
 
@@ -215,14 +223,9 @@ unsourced evidence. Missing, duplicate, or unknown fields are rejected.
 categorical values such as `LoadSharing` require explicit `"err": null`. The Saturn
 volume/pitch source is known official-vendor evidence, not generic unknown.
 
-**Where decisions get recorded.** The guide's mechanism is the **gate table**: `04` M1 says
-"Record the sign-off in the gate table (`06-conventions.md`)", and M7's owner sign-off
-recorded there is the stated precondition for M9. That table does not exist in
-`06-conventions.md` yet. Do not create it in M0. Create it at M1 and backfill every
-guide `D-*` decision, `O-*` override, and historical owner ratification with
-`EvidenceSource` and `EvidenceDate`, including the evidence/date model and the entry
-that supersedes generic-unknown Saturn with known vendor evidence. It is then dated,
-append-only, and never edited afterward. Signed waivers also go in
+**Where decisions get recorded.** The machine-parseable gate and correction tables now
+exist in `06-conventions.md`. They are dated and append-only: never edit an existing main
+or correction row; append new owner decisions and formal replacements. Signed waivers also go in
 `corpus/manifest.json`'s `waivers` array, which stays empty until the owner signs an entry.
 
 ## Reporting
@@ -243,11 +246,11 @@ folder of STLs in, one supported-and-rafted `.chitubox` per model out. Plates, s
 sending to the printer are **roadmap — do not build them**, but do not structure anything so
 they would need a restructure later (`README` §2).
 
-M7 is where the full gate fires: every metric, every model, no waivers except entries the
-owner has signed into the gate table, followed by the owner pass. M8 proves determinism
-(corpus at 1/4/16 threads yielding identical digests, cache-off ≡ cache-on reports) and is
-where the port is allowed to be *better* rather than merely equal. Only with M7 signed off and
-M8's CI green does M9 delete `scripts/`, `rust/chitubox_io/src/py.rs`, the **inline** PyO3
+The revised final gate fires every existing M1 metric on every model, permits only
+owner-signed waivers, proves determinism at 1/4/16 `PLINTH_THREADS` and cache-off ≡
+cache-on, and includes the owner pass. Compatibility surfaces delete earlier at their
+native handoffs; the final gate removes any remainder including `scripts/`,
+`rust/chitubox_io/src/py.rs`, and the **inline** PyO3
 surface in `rust/geom_kernel/src/lib.rs` (that crate has **no** `py.rs` — assert on file
 *content* with a grep, since `test -f` on a path that never existed passes trivially), the
 `rust/*/python/` shims and their `pyproject.toml` files, the top-level `pyproject.toml`,

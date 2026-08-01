@@ -735,8 +735,9 @@ selected fractions/slack to AcceptSafe evidence.
   row. None aliases canonical `LIFT_MM = 5.0 mm`.
 - `PLINTH_THREADS` is the new mandatory Rust workspace scheduling contract in
   `06-conventions.md` §3 and M8, outside the physics/tuning registry.
-  Frozen-Python `GEOM_KERNEL_THREADS` is a distinct legacy kernel scheduling
-  control, excluded/no-port with an M8 thread-sweep disposition. They are not aliases.
+  `GEOM_KERNEL_THREADS` is a historical Python-compatibility control, not an alias or
+  retained exclusion. O-7 removes it with the native `geom_kernel` boundary;
+  `PLINTH_THREADS` is the sole live workspace control and the only determinism sweep.
 
 ### 3.10.7 Closed evidence-grade audit
 

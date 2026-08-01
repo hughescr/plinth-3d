@@ -13,7 +13,7 @@ prerequisites.
 
 ## 0.1 Owner-override architecture boundary (2026-08-01)
 
-O-5 and O-6 in `06-conventions.md` override the earlier duplication and sequencing
+O-5 through O-8 in `06-conventions.md` override the earlier duplication and sequencing
 assumptions in this chapter. There is one implementation of each capability:
 `geom_kernel` owns spatial geometry; `plinth-mesh` owns `Mesh`, topology, and
 delicacy; `plinth-metrics` is a disk-first adapter over those capabilities.
@@ -25,6 +25,11 @@ The immediate architecture target is the minimum batch-first Rust pipeline that
 reproduces current preparation and emission behavior well enough to delete Python.
 The more ambitious search, solver, repair, calibration, and GPU designs below are
 post-elimination extensions unless essential acceptance proves one necessary.
+Optional Python compatibility is not part of that target: each PyO3, maturin, shim,
+and Python-only control disappears as soon as the corresponding native boundary lands.
+Protected, error-bounded decimation is the first production stage; its print-scale
+mesh is the sole production mesh for every downstream stage, and any search proxy is
+derived from it.
 
 ---
 
@@ -47,9 +52,9 @@ C++ FFI does not carry the agent-productivity cost that motivates the migration.
 per-item call in a hot path is a defect, not a style choice. It applies to every crate below and
 is the deeper reason a GPU backend can bolt on later (§11).
 
-**The frozen Python engine stays runnable as the measuring stick** until the minimal Rust
-replacement passes the revised acceptance/delete gate. The standing rule is *no new Python*.
-The migration is additive until that gate, then Python is deleted before enhancement work.
+**The frozen disk artifacts are the measuring stick.** The standing rule is *no new
+Python*, and optional compatibility is not a goal. Delete each Python-facing surface as
+its native Rust boundary lands; the final gate proves zero Python before enhancement work.
 The acceptance criterion is **not** byte-identical output; it is *"rust is
 producing as-good-as or better output in chitubox files"*, measured by the harness in §12, with a
 named owner-eyeball checkpoint per milestone for the subjective part. Byte-level identity applies
@@ -234,6 +239,10 @@ pub struct Proxy { pub mesh: Arc<Mesh>, pub faces: FaceTable, pub bvh: Bvh,
                    pub level: Lod, pub max_deviation_mm: f64 }
 pub struct ProxyLadder { pub exact: Arc<Proxy>, pub l1: Arc<Proxy>, pub l2: Arc<Proxy> } // ~10%, ~2%
 ```
+
+Here `exact` means the protected, decimated **production mesh**, not the original
+high-detail input. L1/L2 are optional search accelerators derived from that production
+mesh and may never become alternate downstream production meshes.
 
 Down-face masks, z-height, scar weighting and support demand become masked reductions over this
 table — microseconds per candidate on a 20k-face proxy. This is what turns "dense sweep on a
@@ -735,9 +744,11 @@ dead), no `getattr`-style config defaults (typed config only), and no signature 
 for each model in DIR (rayon across models at the outer level):
  0. LOAD + TRIAGE   Model<Raw> -> Model<Triaged>       plinth-mesh (explicit WeldPolicy; shard strip;
                                                         pre-hollowed refusal; canonical fingerprint)
- 1. BUILD ONCE      BVH(exact) · FaceTable · topology + cut flags · EDT/thickness · delicacy
-                    · ProxyLadder (QEM, error-bounded)  — ALL orientation-invariant; cached
- 2. DECIMATE        Model<Triaged> -> Model<Decimated>  plinth-decimate (production decimation)
+ 1. DECIMATE        Model<Triaged> -> Model<Decimated>  plinth-decimate
+                    protected error-bounded production decimation to print-scale features
+ 2. BUILD ONCE      BVH(decimated production mesh) · FaceTable · topology + cut flags
+                    · EDT/thickness · delicacy · optional orientation ProxyLadder derived
+                    from the decimated mesh — ALL orientation-invariant; cached
  3. ORIENT (search) Model<Decimated> -> Model<Oriented> plinth-orient — §6
  4. HOLLOW + DRILL  Model<Oriented> -> Model<Hollowed>  plinth-hollow + plinth-voxel + plinth-solid
                     (eligibility, cavity, drains/vents, priority-flood drainability, internal supports)
@@ -1003,20 +1014,20 @@ in this crate. It is the `use numpy::…`/`use pyo3::…` imports (lines 31-35),
 holds the pure-Rust `NativeSurface` methods (`query`, `project`, `inside`, `cast_rays`,
 `segment_clearance`, `penetration_intervals_batch`, `sphere_breach`, `exterior_face_mask`) and
 carries no PyO3 attributes at all. Note also that `rust/geom_kernel/Cargo.toml` has **no
-`[features]` block today**: `numpy` and `pyo3` are unconditional dependencies, which is why M2
-makes them optional before the acceptance/delete step can strip the code. All of it —
-the inline surface and the `rust/geom_kernel/python/` shim directory — is deleted at
-that step, along with the
-`numpy`/`pyo3` dependencies and the `cdylib` crate type.
+`[features]` block today**: `numpy` and `pyo3` are unconditional dependencies. O-7 forbids
+turning that into optional compatibility. At native handoff, delete the inline surface,
+`rust/geom_kernel/python/` shim, `numpy`/`pyo3`, maturin configuration, Python-only controls,
+and the `cdylib` crate type together.
 
 **`rust/chitubox_io`** — `.chitubox` container read/write plus an independent structural audit
 (`src/verify.rs`). `plinth-emit` writes through it; `plinth-metrics` may link its **reader** (§14
 D-19). Its PyO3 layer is `rust/chitubox_io/src/py.rs` plus the `rust/chitubox_io/python/` shim
-directory; both are deleted at the acceptance/delete step.
+directory; both are deleted when the native `chitubox_io` boundary lands.
 
-Removal of PyO3 happens only once nothing consumes it — i.e. in the same
-acceptance/delete step that deletes `scripts/` Python, `pyproject.toml`, `uv.lock`
-and `.venv`, after the parity gates pass.
+Removal of PyO3 happens once nothing consumes each binding, at that native boundary's
+handoff. It is not delayed to preserve a runnable Python engine. The final gate deletes
+any remaining orchestration/tests, `pyproject.toml`, `uv.lock`, and `.venv`, and proves
+zero Python.
 
 ---
 
@@ -1058,7 +1069,7 @@ You will read the old documents cold. These clauses are dead:
 | [../reference/port_plan_codex_review.md](../reference/port_plan_codex_review.md) | — | all of it, especially the solver-parallelism ruling (§4) and the wall-clock-budget finding (§4) |
 | [../specs/SPEC-RUST-KERNEL.md](../specs/SPEC-RUST-KERNEL.md) | §6's claim that the Python `ExactSurface` stays "permanently" as differential oracle; its PyO3-hybrid scope | its numerical-hazard notes (tie-breaking, consequence-based parity) |
 | The Python CLI exit-code/JSONL contract (`scripts/tools/prep_one.py` et al.) | entirely — replaced by the DefectReport-projection contract; the Python tests that pin it retire with their subject | — |
-| `skills/*/SKILL.md` | they describe the CURRENT interactive Blender/Python workflow, not the target; marked superseded at the final milestone | the algorithms they document, notably decimate-for-print's error-budget QEM staging |
+| `skills/*/SKILL.md` | they describe the historical interactive Blender/Python workflow, not the target; mark each superseded when its native boundary lands | the algorithms they document, notably decimate-for-print's error-budget QEM staging |
 | The Python topology/geometry digests | byte-parity with them is explicitly not attempted; schema-bumped and redefined over topology arrays | the `.chitubox` record-structure byte contract, which is unaffected |
 
 The differential-oracle role that `SPEC-RUST-KERNEL.md` §6 assigned to Python transfers to

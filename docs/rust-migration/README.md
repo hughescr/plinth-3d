@@ -6,7 +6,7 @@ this repo, **this guide wins** — see [What this guide supersedes](#what-this-g
 
 ## 0. Owner overrides adopted 2026-08-01
 
-Two append-only owner decisions, O-5 and O-6 in `06-conventions.md`, supersede
+Four append-only owner decisions, O-5 through O-8 in `06-conventions.md`, supersede
 parts of this guide written before them:
 
 - **One implementation per capability.** `geom_kernel` is the sole spatial-geometry
@@ -15,11 +15,21 @@ parts of this guide written before them:
   implementations. Adapters and boundary conversions are allowed; a second algorithm
   for the same capability is not. Audit independence comes from fresh disk provenance,
   analytic fixtures, injected-corruption fixtures, and native ChituBox fixtures.
-- **Python elimination first.** Reproduce the current
+- **Python elimination first (O-6, timing refined by O-7).** Reproduce the current
   STL → decimate → orient → hollow/drill → support/raft → `.chitubox` behavior in Rust
   with the minimum architecture needed to preserve batch-first data flow and future
-  extension points. Delete Python after essential parity, ChituBox loadability,
-  determinism, and owner-print gates pass. Redesigns and enhancements follow deletion.
+  extension points. Delete compatibility surfaces incrementally under O-7; after
+  essential parity, ChituBox loadability, determinism, and owner-print gates pass,
+  prove zero Python. Redesigns and enhancements follow deletion.
+- **No compatibility tail.** Optional Python compatibility is not a goal. Remove each
+  Python, PyO3, maturin, shim, and legacy Python-only control as soon as its native Rust
+  boundary lands. Frozen disk artifacts remain the oracle; keeping a runnable Python
+  engine is not independently valuable. The final gate still requires zero Python.
+- **Protected decimation first.** Error-bounded, feature-protecting decimation is the
+  first production stage. Its print-scale mesh is the sole production mesh consumed by
+  orientation, hollow/drill, support/repair, raft, and emit. Any extra orientation proxy
+  derives from that decimated mesh; decimation is neither a late final-mesh step nor an
+  optional/manual-only tool.
 
 These decisions govern sequencing and implementation ownership. The detailed M0–M9
 material remains useful acceptance/reference material and a post-elimination backlog,
@@ -50,7 +60,7 @@ Consequences of the mission, all binding:
 | No new Python | Not in `scripts/`, not for scratch, not for debug one-offs. See 06-conventions.md. **One named exception:** the two one-off `python -c` invocations in 04-migration-plan.md M0 (the `resolve_stl()` probe and the synthetic-fixture STL export), run once from a shell and never committed as a `.py` file. |
 | Pure Rust expected | TypeScript/bun is permitted **only** with a concrete blocker named in writing (see §6). |
 | One named exception exists | The C++ `manifold` boolean kernel behind FFI in `plinth-solid`. Justified in 02-target-architecture.md; no pure-Rust f64 manifold-grade boolean kernel is mature enough, and this project has been burned four times by coincident-coplanar-face defects. |
-| PyO3 goes away | `rust/chitubox_io/src/py.rs`, the **inline** PyO3 surface in `rust/geom_kernel/src/lib.rs` (geom_kernel has no `py.rs`), and the `rust/*/python/` shim dirs are deleted once the essential acceptance/delete gate passes. |
+| PyO3 goes away incrementally | Remove each binding, maturin configuration, shim, and Python-only build path in the same checkpoint that lands its native Rust boundary. Do not preserve optional compatibility until the final gate. |
 | Blender is retired | Its scripting surface is Python and it segfaults headless in sandboxes. The decimation logic it hosts is converted to native Rust, not re-invented. |
 
 ---
@@ -97,9 +107,10 @@ the orientation-invariant `FaceTable`, and the surrogate-scoring design.
 
 ## 3. Acceptance strategy (read this twice)
 
-The frozen Python engine stays runnable as the **measuring stick** until its minimally
-complete Rust replacement passes the essential acceptance/delete gate. The migration is
-additive until that gate, then Python is deleted before post-port redesign work begins.
+The frozen **disk artifacts** are the measuring stick. A runnable Python engine is not
+preserved for its own sake: each compatibility surface is deleted when its native Rust
+boundary lands. The final acceptance/delete gate confirms essential parity, then proves
+that zero Python remains before post-port redesign work begins.
 
 **The acceptance criterion is NOT byte-identical output.** The owner's words: the
 criterion is *"rust is producing as-good-as or better output in chitubox files"*,
@@ -233,8 +244,11 @@ compiles. It is done when:
    spelling `plinth prepare --no-cache` and produces identical reports; there is no
    `PLINTH_CACHE` environment-variable form (see 06-conventions.md).
 
-**Do not delete Python until the essential acceptance/delete gate passes.** Do not
-delay deletion for redesign or enhancement work after that gate. The deletion set is:
+**Delete compatibility incrementally; prove zero Python at the final gate.** As each
+native Rust boundary lands, remove its Python/PyO3/maturin/shim surface in that same
+checkpoint. Do not retain it merely to keep the Python engine runnable. The final
+acceptance/delete gate removes any remaining orchestration and test infrastructure and
+proves the complete deletion set is gone:
 `scripts/` Python, `rust/chitubox_io/src/py.rs`,
 the **inline** PyO3 surface in `rust/geom_kernel/src/lib.rs` (the `#[pymodule]` for
 `geom_kernel._native` plus every `#[pyfunction]`/`#[pyclass]` item — geom_kernel has no
