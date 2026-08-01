@@ -1,20 +1,19 @@
-//! Data boundary for the pinned-baseline orientation stage.
+//! Pinned-baseline orientation for the vertical slice.
 //!
-//! This checkpoint intentionally contains no orientation algorithm or baseline reader. Behavior
-//! lands on the parallel `plinth-orient` implementation branch with this signature:
-//!
-//! `plinth_orient::run(DecimatedModel, &OrientRequest) -> Result<OrientedModel, OrientError>`
-//!
-//! Dense orientation search is deliberately absent until after Python elimination. The output
-//! replaces the production mesh with the transformed mesh and retains only reports, never an
-//! untransformed second mesh.
+//! This stage deliberately does not search. It takes the selected legacy orientation from the
+//! required pipeline JSON, applies that rigid rotation, then recreates the legacy frame: the
+//! transformed bounding box is centered in XY and rests at Z=0. The output replaces the
+//! production mesh and retains only reports, never an untransformed second mesh.
 #![forbid(unsafe_code)]
 
 use plinth_core::Finite;
-use plinth_decimate::DecimationReport;
+use plinth_decimate::{DecimatedModel, DecimationReport};
 use plinth_mesh::Mesh;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 use thiserror::Error;
 
 /// The only orientation policy required on the elimination path.
@@ -61,6 +60,482 @@ impl RigidTransform {
             rotation: [[one, zero, zero], [zero, one, zero], [zero, zero, one]],
             translation_mm: [zero; 3],
         }
+    }
+}
+
+/// Applies the frozen legacy orientation choice and frame restoration.
+///
+/// The pinned report is required. A valid report whose hollow stage was absent or skipped, or
+/// whose hollow report has no `orientation` entry, intentionally selects the identity rotation.
+/// Identity still receives frame restoration, matching the legacy implementation.
+pub fn run(model: DecimatedModel, request: &OrientRequest) -> Result<OrientedModel, OrientError> {
+    let pinned_report = request.pinned.pipeline_report.clone();
+    let selection = read_selection(&pinned_report)?;
+    let transform = transform_for(selection)?;
+    let (mesh, decimation) = model.into_parts();
+    let (mesh, transform) = transform_mesh(mesh, transform)?;
+    let orientation = OrientationReport {
+        pinned_report,
+        selection,
+        transform,
+    };
+
+    Ok(OrientedModel {
+        mesh,
+        history: OrientationHistory::from_reports(decimation, orientation),
+    })
+}
+
+fn read_selection(path: &Path) -> Result<BaselineSelection, OrientError> {
+    let bytes = fs::read(path).map_err(|_| OrientError::PinnedBaselineUnreadable {
+        path: path.to_path_buf(),
+    })?;
+    let report =
+        JsonParser::new(&bytes)
+            .parse()
+            .map_err(|_| OrientError::PinnedBaselineInvalid {
+                path: path.to_path_buf(),
+            })?;
+    selection_from_report(&report).ok_or_else(|| OrientError::PinnedBaselineInvalid {
+        path: path.to_path_buf(),
+    })
+}
+
+/// Returns `None` only when the report does not have the required pipeline shape.
+fn selection_from_report(report: &JsonValue) -> Option<BaselineSelection> {
+    let stages = report.object_field("stages")?.as_array()?;
+    let mut hollow = None;
+    for stage in stages {
+        let stage = stage.as_object()?;
+        let name = object_field(stage, "name")?.as_str()?;
+        if name == "hollow" && hollow.replace(stage).is_some() {
+            return None;
+        }
+    }
+
+    let Some(hollow) = hollow else {
+        return Some(BaselineSelection::Identity);
+    };
+    let status = object_field(hollow, "status")?.as_str()?;
+    if status.eq_ignore_ascii_case("skipped") {
+        return Some(BaselineSelection::Identity);
+    }
+    let log = object_field(hollow, "report")?.as_object()?;
+    let Some(orientation) = object_field(log, "orientation") else {
+        return Some(BaselineSelection::Identity);
+    };
+    let orientation = orientation.as_object()?;
+    let axis = object_field(orientation, "axis")?.as_array()?;
+    let axis = match axis {
+        [JsonValue::Number(x), JsonValue::Number(y), JsonValue::Number(z)]
+            if *x == 1.0 && *y == 0.0 && *z == 0.0 =>
+        {
+            BaselineAxis::X
+        }
+        [JsonValue::Number(x), JsonValue::Number(y), JsonValue::Number(z)]
+            if *x == 0.0 && *y == 1.0 && *z == 0.0 =>
+        {
+            BaselineAxis::Y
+        }
+        _ => return None,
+    };
+    let degrees = Finite::new(*object_field(orientation, "deg")?.as_number()?).ok()?;
+    if !matches!(degrees.get(), -30.0 | -20.0 | -10.0 | 10.0 | 20.0 | 30.0) {
+        return None;
+    }
+    Some(BaselineSelection::AxisDegrees { axis, degrees })
+}
+
+fn transform_for(selection: BaselineSelection) -> Result<RigidTransform, OrientError> {
+    let rotation = match selection {
+        BaselineSelection::Identity => identity_rotation(),
+        BaselineSelection::AxisDegrees { axis, degrees } => rotation(axis, degrees.get())?,
+    };
+    Ok(RigidTransform {
+        rotation: finite_matrix(rotation)?,
+        // The true translation depends on the transformed mesh bounds and is filled in by
+        // `transform_mesh`; keeping this initialized avoids a second transform representation.
+        translation_mm: finite_vector([0.0; 3])?,
+    })
+}
+
+fn rotation(axis: BaselineAxis, degrees: f64) -> Result<[[f64; 3]; 3], OrientError> {
+    let radians = degrees.to_radians();
+    let (sin, cos) = radians.sin_cos();
+    let matrix = match axis {
+        BaselineAxis::X => [[1.0, 0.0, 0.0], [0.0, cos, -sin], [0.0, sin, cos]],
+        BaselineAxis::Y => [[cos, 0.0, sin], [0.0, 1.0, 0.0], [-sin, 0.0, cos]],
+    };
+    for row in matrix {
+        for value in row {
+            if !value.is_finite() {
+                return Err(OrientError::InvalidTransformedMesh);
+            }
+        }
+    }
+    Ok(matrix)
+}
+
+fn identity_rotation() -> [[f64; 3]; 3] {
+    [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+}
+
+fn transform_mesh(
+    mesh: Mesh,
+    mut transform: RigidTransform,
+) -> Result<(Mesh, RigidTransform), OrientError> {
+    let mut transformed = Vec::with_capacity(mesh.verts().len());
+    for vertex in mesh.verts() {
+        transformed.push(rotate_vertex(transform.rotation, *vertex)?);
+    }
+    let (min, max) = bounds(&transformed)?;
+    let translation = [-(min[0] + max[0]) / 2.0, -(min[1] + max[1]) / 2.0, -min[2]];
+    transform.translation_mm = finite_vector(translation)?;
+    for vertex in &mut transformed {
+        for (coordinate, offset) in vertex.iter_mut().zip(transform.translation_mm) {
+            *coordinate = checked_add(*coordinate, offset.get())?;
+        }
+    }
+    let mesh = Mesh::new(transformed, mesh.tris().to_vec())
+        .map_err(|_| OrientError::InvalidTransformedMesh)?;
+    Ok((mesh, transform))
+}
+
+fn rotate_vertex(rotation: [[Finite; 3]; 3], vertex: [f64; 3]) -> Result<[f64; 3], OrientError> {
+    let mut result = [0.0; 3];
+    for (row, value) in rotation.iter().zip(&mut result) {
+        let mut sum = 0.0;
+        for (coefficient, coordinate) in row.iter().zip(vertex) {
+            let product = coefficient.get() * coordinate;
+            if !product.is_finite() {
+                return Err(OrientError::InvalidTransformedMesh);
+            }
+            sum = checked_add(sum, product)?;
+        }
+        *value = sum;
+    }
+    Ok(result)
+}
+
+fn bounds(vertices: &[[f64; 3]]) -> Result<([f64; 3], [f64; 3]), OrientError> {
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    for vertex in vertices {
+        for axis in 0..3 {
+            min[axis] = min[axis].min(vertex[axis]);
+            max[axis] = max[axis].max(vertex[axis]);
+        }
+    }
+    if min.into_iter().chain(max).all(f64::is_finite) {
+        Ok((min, max))
+    } else {
+        Err(OrientError::InvalidTransformedMesh)
+    }
+}
+
+fn checked_add(left: f64, right: f64) -> Result<f64, OrientError> {
+    let sum = left + right;
+    if sum.is_finite() {
+        Ok(sum)
+    } else {
+        Err(OrientError::InvalidTransformedMesh)
+    }
+}
+
+fn finite_matrix(matrix: [[f64; 3]; 3]) -> Result<[[Finite; 3]; 3], OrientError> {
+    Ok([
+        finite_vector(matrix[0])?,
+        finite_vector(matrix[1])?,
+        finite_vector(matrix[2])?,
+    ])
+}
+
+fn finite_vector(vector: [f64; 3]) -> Result<[Finite; 3], OrientError> {
+    Ok([
+        Finite::new(vector[0]).map_err(|_| OrientError::InvalidTransformedMesh)?,
+        Finite::new(vector[1]).map_err(|_| OrientError::InvalidTransformedMesh)?,
+        Finite::new(vector[2]).map_err(|_| OrientError::InvalidTransformedMesh)?,
+    ])
+}
+
+/// A deliberately narrow, dependency-free JSON reader for immutable pipeline reports.
+///
+/// The workspace lock is frozen for this vertical slice. Keeping this reader local avoids a
+/// lockfile change merely to decode the four fields this stage owns, while still parsing the
+/// entire JSON document rather than searching its text for lookalike keys.
+#[derive(Clone, Debug, PartialEq)]
+enum JsonValue {
+    Object(Vec<(String, JsonValue)>),
+    Array(Vec<JsonValue>),
+    String(String),
+    Number(f64),
+    Bool,
+    Null,
+}
+
+impl JsonValue {
+    fn as_object(&self) -> Option<&[(String, JsonValue)]> {
+        match self {
+            Self::Object(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    fn as_array(&self) -> Option<&[JsonValue]> {
+        match self {
+            Self::Array(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    fn as_str(&self) -> Option<&str> {
+        match self {
+            Self::String(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    fn as_number(&self) -> Option<&f64> {
+        match self {
+            Self::Number(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    fn object_field(&self, name: &str) -> Option<&JsonValue> {
+        object_field(self.as_object()?, name)
+    }
+}
+
+fn object_field<'a>(object: &'a [(String, JsonValue)], name: &str) -> Option<&'a JsonValue> {
+    let mut found = None;
+    for (key, value) in object {
+        if key == name && found.replace(value).is_some() {
+            return None;
+        }
+    }
+    found
+}
+
+struct JsonParser<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> JsonParser<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn parse(mut self) -> Result<JsonValue, ()> {
+        let value = self.value()?;
+        self.whitespace();
+        if self.offset == self.bytes.len() {
+            Ok(value)
+        } else {
+            Err(())
+        }
+    }
+
+    fn value(&mut self) -> Result<JsonValue, ()> {
+        self.whitespace();
+        match self.peek() {
+            Some(b'{') => self.object(),
+            Some(b'[') => self.array(),
+            Some(b'\"') => self.string().map(JsonValue::String),
+            Some(b'-' | b'0'..=b'9') => self.number().map(JsonValue::Number),
+            Some(b't') => self.literal(b"true", JsonValue::Bool),
+            Some(b'f') => self.literal(b"false", JsonValue::Bool),
+            Some(b'n') => self.literal(b"null", JsonValue::Null),
+            _ => Err(()),
+        }
+    }
+
+    fn object(&mut self) -> Result<JsonValue, ()> {
+        self.expect(b'{')?;
+        self.whitespace();
+        let mut values = Vec::new();
+        if self.consume(b'}') {
+            return Ok(JsonValue::Object(values));
+        }
+        loop {
+            self.whitespace();
+            let key = self.string()?;
+            self.whitespace();
+            self.expect(b':')?;
+            let value = self.value()?;
+            values.push((key, value));
+            self.whitespace();
+            if self.consume(b'}') {
+                return Ok(JsonValue::Object(values));
+            }
+            self.expect(b',')?;
+        }
+    }
+
+    fn array(&mut self) -> Result<JsonValue, ()> {
+        self.expect(b'[')?;
+        self.whitespace();
+        let mut values = Vec::new();
+        if self.consume(b']') {
+            return Ok(JsonValue::Array(values));
+        }
+        loop {
+            values.push(self.value()?);
+            self.whitespace();
+            if self.consume(b']') {
+                return Ok(JsonValue::Array(values));
+            }
+            self.expect(b',')?;
+        }
+    }
+
+    fn string(&mut self) -> Result<String, ()> {
+        self.expect(b'\"')?;
+        let mut value = String::new();
+        loop {
+            let byte = self.advance().ok_or(())?;
+            match byte {
+                b'\"' => return Ok(value),
+                b'\\' => match self.advance().ok_or(())? {
+                    b'\"' => value.push('\"'),
+                    b'\\' => value.push('\\'),
+                    b'/' => value.push('/'),
+                    b'b' => value.push('\u{0008}'),
+                    b'f' => value.push('\u{000C}'),
+                    b'n' => value.push('\n'),
+                    b'r' => value.push('\r'),
+                    b't' => value.push('\t'),
+                    b'u' => value.push(self.unicode_escape()?),
+                    _ => return Err(()),
+                },
+                0..=0x1f => return Err(()),
+                _ => {
+                    let start = self.offset - 1;
+                    let width = utf8_width(byte).ok_or(())?;
+                    for _ in 1..width {
+                        if !matches!(self.advance(), Some(0x80..=0xbf)) {
+                            return Err(());
+                        }
+                    }
+                    value.push_str(
+                        std::str::from_utf8(&self.bytes[start..self.offset]).map_err(|_| ())?,
+                    );
+                }
+            }
+        }
+    }
+
+    fn unicode_escape(&mut self) -> Result<char, ()> {
+        let mut code = 0_u32;
+        for _ in 0..4 {
+            code = code
+                .checked_mul(16)
+                .and_then(|value| hex(self.advance()?).map(|digit| value + digit))
+                .ok_or(())?;
+        }
+        char::from_u32(code).ok_or(())
+    }
+
+    fn number(&mut self) -> Result<f64, ()> {
+        let start = self.offset;
+        self.consume(b'-');
+        if self.consume(b'0') {
+            if matches!(self.peek(), Some(b'0'..=b'9')) {
+                return Err(());
+            }
+        } else {
+            self.digits_one_or_more()?;
+        }
+        if self.consume(b'.') {
+            self.digits_one_or_more()?;
+        }
+        if matches!(self.peek(), Some(b'e' | b'E')) {
+            self.offset += 1;
+            if matches!(self.peek(), Some(b'+' | b'-')) {
+                self.offset += 1;
+            }
+            self.digits_one_or_more()?;
+        }
+        std::str::from_utf8(&self.bytes[start..self.offset])
+            .map_err(|_| ())?
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .ok_or(())
+    }
+
+    fn literal(&mut self, literal: &[u8], value: JsonValue) -> Result<JsonValue, ()> {
+        if self.bytes.get(self.offset..self.offset + literal.len()) == Some(literal) {
+            self.offset += literal.len();
+            Ok(value)
+        } else {
+            Err(())
+        }
+    }
+
+    fn digits_one_or_more(&mut self) -> Result<(), ()> {
+        let start = self.offset;
+        while matches!(self.peek(), Some(b'0'..=b'9')) {
+            self.offset += 1;
+        }
+        if self.offset == start {
+            Err(())
+        } else {
+            Ok(())
+        }
+    }
+
+    fn whitespace(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\n' | b'\r' | b'\t')) {
+            self.offset += 1;
+        }
+    }
+
+    fn expect(&mut self, byte: u8) -> Result<(), ()> {
+        if self.consume(byte) {
+            Ok(())
+        } else {
+            Err(())
+        }
+    }
+
+    fn consume(&mut self, byte: u8) -> bool {
+        if self.peek() == Some(byte) {
+            self.offset += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.offset).copied()
+    }
+
+    fn advance(&mut self) -> Option<u8> {
+        let byte = self.peek()?;
+        self.offset += 1;
+        Some(byte)
+    }
+}
+
+fn utf8_width(byte: u8) -> Option<usize> {
+    match byte {
+        0x00..=0x7f => Some(1),
+        0xc2..=0xdf => Some(2),
+        0xe0..=0xef => Some(3),
+        0xf0..=0xf4 => Some(4),
+        _ => None,
+    }
+}
+
+fn hex(byte: u8) -> Option<u32> {
+    match byte {
+        b'0'..=b'9' => Some(u32::from(byte - b'0')),
+        b'a'..=b'f' => Some(u32::from(byte - b'a' + 10)),
+        b'A'..=b'F' => Some(u32::from(byte - b'A' + 10)),
+        _ => None,
     }
 }
 
@@ -144,6 +619,105 @@ pub enum OrientError {
 mod tests {
     use super::*;
     use plinth_core::{ContentDigest, NonNegativeFinite, UnitFraction};
+    use plinth_mesh::{load_binary_stl, WeldPolicy};
+
+    fn baseline(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/baseline")
+            .join(name)
+    }
+
+    fn parse(input: &str) -> Option<BaselineSelection> {
+        selection_from_report(
+            &JsonParser::new(input.as_bytes())
+                .parse()
+                .expect("valid JSON"),
+        )
+    }
+
+    fn assert_close(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= 1e-12,
+            "expected {expected}, got {actual}"
+        );
+    }
+
+    #[test]
+    fn sphere_baseline_selects_the_frozen_x_rotation_and_real_artifact_is_reframed() {
+        let selection = read_selection(&baseline("Sphere.pipeline.json"))
+            .expect("the committed Sphere pipeline report is valid");
+        assert_eq!(
+            selection,
+            BaselineSelection::AxisDegrees {
+                axis: BaselineAxis::X,
+                degrees: Finite::new(-20.0).expect("fixture degree is finite"),
+            }
+        );
+
+        let artifact = load_binary_stl(
+            baseline("Sphere.prepped.oriented-solid.stl"),
+            WeldPolicy::None,
+        )
+        .expect("the committed Sphere orientation artifact loads");
+        let (min, max) = bounds(artifact.verts()).expect("the artifact is finite");
+        assert!((min[0] + max[0]).abs() < 1e-6);
+        assert!((min[1] + max[1]).abs() < 1e-6);
+        assert!(min[2].abs() < 1e-6);
+    }
+
+    #[test]
+    fn absent_or_skipped_hollow_orientation_selects_identity() {
+        for report in [
+            r#"{"stages":[]}"#,
+            r#"{"stages":[{"name":"hollow","status":"skipped","report":{}}]}"#,
+            r#"{"stages":[{"name":"hollow","status":"ok","report":{}}]}"#,
+        ] {
+            assert_eq!(parse(report), Some(BaselineSelection::Identity));
+        }
+    }
+
+    #[test]
+    fn only_the_legacy_axes_and_candidate_degrees_are_accepted() {
+        let invalid_axis = r#"{"stages":[{"name":"hollow","status":"ok","report":{"orientation":{"axis":[0,0,1],"deg":-30}}}]}"#;
+        let invalid_degrees = r#"{"stages":[{"name":"hollow","status":"ok","report":{"orientation":{"axis":[1,0,0],"deg":-45}}}]}"#;
+        assert_eq!(parse(invalid_axis), None);
+        assert_eq!(parse(invalid_degrees), None);
+    }
+
+    #[test]
+    fn malformed_or_unreadable_reports_are_typed_failures() {
+        let missing = PathBuf::from("this-pinned-baseline-does-not-exist.pipeline.json");
+        assert_eq!(
+            read_selection(&missing),
+            Err(OrientError::PinnedBaselineUnreadable { path: missing })
+        );
+        assert!(JsonParser::new(br#"{"stages":[}"#).parse().is_err());
+        assert_eq!(parse(r#"{"stages":{"name":"hollow"}}"#), None);
+    }
+
+    #[test]
+    fn rotation_and_reframing_record_the_exact_matrix_and_translation() {
+        let mesh = Mesh::new(
+            vec![[3.0, 5.0, -2.0], [7.0, 5.0, -2.0], [3.0, 9.0, 4.0]],
+            vec![[0, 1, 2]],
+        )
+        .expect("fixture mesh is valid");
+        let transform = transform_for(BaselineSelection::Identity).expect("identity is valid");
+        let (mesh, transform) = transform_mesh(mesh, transform).expect("fixture transforms");
+        assert_eq!(transform.translation_mm.map(Finite::get), [-5.0, -7.0, 2.0]);
+        assert_eq!(mesh.verts()[0], [-2.0, -2.0, 0.0]);
+        assert_eq!(mesh.verts()[1], [2.0, -2.0, 0.0]);
+        assert_eq!(mesh.verts()[2], [-2.0, 2.0, 6.0]);
+
+        let selection = BaselineSelection::AxisDegrees {
+            axis: BaselineAxis::Y,
+            degrees: Finite::new(-30.0).expect("fixture degree is finite"),
+        };
+        let transform = transform_for(selection).expect("rotation is valid");
+        assert_close(transform.rotation[0][0].get(), 3.0_f64.sqrt() / 2.0);
+        assert_close(transform.rotation[0][2].get(), -0.5);
+        assert_close(transform.rotation[2][0].get(), 0.5);
+    }
 
     #[test]
     fn consuming_transition_keeps_only_the_transformed_mesh() {
