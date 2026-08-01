@@ -36,6 +36,15 @@ pub struct TopologyDigest {
     hex: String,
 }
 
+/// Counts of undirected edge incidences as classified by Plinth's canonical
+/// face-topology construction.  These are edge counts, not counts of faces
+/// bearing a cut flag.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EdgeTopologyCounts {
+    pub boundary_edges: usize,
+    pub nonmanifold_edges: usize,
+}
+
 impl TopologyDigest {
     #[must_use]
     pub const fn schema(&self) -> TopologySchema {
@@ -138,6 +147,7 @@ pub struct FaceTopology {
     indices: Vec<u32>,
     component_ids: Vec<u32>,
     cut_flags: Vec<u8>,
+    edge_counts: EdgeTopologyCounts,
     source_vertex_to_welded: Vec<u32>,
     welded_vertex_count: u32,
     weld_policy: WeldPolicy,
@@ -161,6 +171,13 @@ impl FaceTopology {
     #[must_use]
     pub fn cut_flags(&self) -> &[u8] {
         &self.cut_flags
+    }
+    /// Edge-incidence counts established by this topology view's one canonical
+    /// construction pass.  Consumers must use these rather than re-auditing
+    /// raw triangle indices locally.
+    #[must_use]
+    pub const fn edge_counts(&self) -> EdgeTopologyCounts {
+        self.edge_counts
     }
     #[must_use]
     pub fn source_vertex_to_welded(&self) -> &[u32] {
@@ -259,11 +276,21 @@ pub fn build_face_topology(
 
     let mut adjacency = vec![Vec::<u32>::new(); n_faces];
     let mut accepted_edges = Vec::<(usize, usize)>::new();
+    let mut edge_counts = EdgeTopologyCounts::default();
     for occurrences in edges.values() {
         let degenerate = occurrences.iter().any(|occurrence| occurrence.degenerate);
         let duplicate = occurrences
             .iter()
             .any(|occurrence| cut_flags[occurrence.face] & TOPOLOGY_CUT_DUPLICATE != 0);
+        if occurrences.len() == 1 {
+            edge_counts.boundary_edges += 1;
+        }
+        // Keep the existing classification's exclusions: a degenerate edge
+        // or duplicate face is surfaced under its own canonical cut reason,
+        // not silently relabelled as a non-manifold edge.
+        if occurrences.len() > 2 && !degenerate && !duplicate {
+            edge_counts.nonmanifold_edges += 1;
+        }
         let valid_pair = occurrences.len() == 2
             && occurrences[0].face != occurrences[1].face
             && occurrences[0].forward != occurrences[1].forward
@@ -366,6 +393,7 @@ pub fn build_face_topology(
         indices,
         component_ids,
         cut_flags,
+        edge_counts,
         source_vertex_to_welded: welded.map,
         welded_vertex_count: welded.vertex_count,
         weld_policy,
