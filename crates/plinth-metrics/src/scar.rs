@@ -96,6 +96,12 @@ pub enum ScarMetricError {
         contact: usize,
         field: &'static str,
     },
+    #[error("model {source_index} contact {contact} has an ambiguous segment boundary at {distance_mm} mm")]
+    BoundaryAmbiguity {
+        source_index: usize,
+        contact: usize,
+        distance_mm: f64,
+    },
     #[error("model {source_index} arithmetic overflow while computing {metric}")]
     ArithmeticOverflow {
         source_index: usize,
@@ -250,7 +256,7 @@ fn reconstruct_contacts(
     let mut stub_by_taper: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
     for &tip in &tips {
         for &taper in &tapers {
-            if stub_candidate(supports[tip].clone(), supports[taper].clone(), settings)? {
+            if stub_candidate(source_index, tip, taper, supports, settings)? {
                 stub_by_tip.entry(tip).or_default().push(taper);
                 stub_by_taper.entry(taper).or_default().push(tip);
             }
@@ -299,31 +305,66 @@ fn reconstruct_contacts(
     for &member in tapers.iter().chain(joiners.iter()) {
         let support = &supports[member];
         let (r0, r1) = support.radii();
-        if support.segment_type() == SegmentType::JOINER && !f32_close(r0, r1) {
-            continue;
-        }
         for endpoint in [false, true] {
             let (point, radius) = if endpoint {
                 (support.end(), r1)
             } else {
                 (support.start(), r0)
             };
-            if !positive(radius) {
-                continue;
-            }
             for &ball in &balls {
                 if ball <= member {
                     continue;
                 }
                 let centre = midpoint(supports[ball].start(), supports[ball].end());
                 let (ball_radius, _) = supports[ball].radii();
-                if near(point, centre) && f32_close(ball_radius, settings.foot_factor * radius) {
-                    foot_candidates.push(FootCandidate {
+                if !near(point, centre) {
+                    continue;
+                }
+                if support.segment_type() == SegmentType::JOINER && !stored_equal(r0, r1) {
+                    return Err(ScarMetricError::FootGeometry {
+                        source_index,
                         member,
                         ball,
-                        endpoint,
+                        detail: "type-3 foot member is not constant-radius",
                     });
                 }
+                if !positive(radius) {
+                    if stub_tapers.contains_key(&member) {
+                        continue;
+                    }
+                    return Err(ScarMetricError::FootGeometry {
+                        source_index,
+                        member,
+                        ball,
+                        detail: "non-positive endpoint radius",
+                    });
+                }
+                if !stored_scaled_equal(ball_radius, settings.foot_factor, radius) {
+                    // A stub taper can legitimately terminate beside a later
+                    // ordinary type-9 joint.  It is a second contact class only
+                    // when the complete foot relation, including its factor,
+                    // is present.
+                    if stub_tapers.contains_key(&member) {
+                        continue;
+                    }
+                    if support.segment_type() == SegmentType::JOINER {
+                        // Joiners commonly meet ordinary type-9 joints.  A
+                        // type-3 becomes a foot only when its complete
+                        // constant-radius/factor relation holds.
+                        continue;
+                    }
+                    return Err(ScarMetricError::FootGeometry {
+                        source_index,
+                        member,
+                        ball,
+                        detail: "ball-factor mismatch",
+                    });
+                }
+                foot_candidates.push(FootCandidate {
+                    member,
+                    ball,
+                    endpoint,
+                });
             }
         }
     }
@@ -423,7 +464,7 @@ fn sphere(
     support: &DiskSupport,
 ) -> Result<(Vec3, f64), ScarMetricError> {
     let (r0, r1) = support.radii();
-    if !positive(r0) || !f32_close(r0, r1) {
+    if !positive(r0) || !stored_equal(r0, r1) {
         return Err(ScarMetricError::InvalidSphereRadii {
             source_index,
             record,
@@ -431,12 +472,10 @@ fn sphere(
     }
     let centre = midpoint(support.start(), support.end());
     let radius = r0;
-    if !f32_close(distance(support.start(), support.end()), 2.0 * radius)
-        || support
-            .mesh()
-            .vertices()
-            .iter()
-            .any(|vertex| !f32_close(distance(*vertex, centre), radius))
+    if !segment_length_matches_radius(support.start(), support.end(), radius, 2.0)
+        || support.mesh().vertices().iter().any(|vertex| {
+            !point_radius_matches_sphere(*vertex, support.start(), support.end(), radius)
+        })
     {
         return Err(ScarMetricError::NonSphereMesh {
             source_index,
@@ -454,10 +493,10 @@ fn foot_ball(
     let (radius, _) = support.radii();
     let start = support.start();
     let end = support.end();
-    if !f32_close(start[0], end[0])
-        || !f32_close(start[1], end[1])
+    if !stored_equal(start[0], end[0])
+        || !stored_equal(start[1], end[1])
         || start[2] <= end[2]
-        || !f32_close(start[2] - end[2], 2.0 * radius)
+        || !segment_length_matches_radius(start, end, radius, 2.0)
     {
         return Err(ScarMetricError::InvalidFootBallAxis {
             source_index,
@@ -468,21 +507,52 @@ fn foot_ball(
 }
 
 fn stub_candidate(
-    tip: DiskSupport,
-    taper: DiskSupport,
+    source_index: usize,
+    tip_index: usize,
+    taper_index: usize,
+    supports: &[DiskSupport],
     settings: Settings,
 ) -> Result<bool, ScarMetricError> {
-    let (centre, ball_radius) = sphere(usize::MAX, usize::MAX, &tip)?;
+    let tip = &supports[tip_index];
+    let taper = &supports[taper_index];
+    let (centre, ball_radius) = sphere(source_index, tip_index, tip)?;
     let (r0, r1) = taper.radii();
-    if !positive(r0) || !positive(r1) || !near(taper.start(), centre) {
+    if !near(taper.start(), centre) {
         return Ok(false);
     }
-    let axis = sub(taper.end(), taper.start());
-    let poles = sub(tip.end(), tip.start());
-    if !positive(length(axis)) || !positive(length(poles)) {
-        return Ok(false);
+    if !positive(r0) || !positive(r1) {
+        return Err(ScarMetricError::StubGeometry {
+            source_index,
+            tip: tip_index,
+            member: taper_index,
+            detail: "non-positive taper radius",
+        });
     }
-    Ok(f32_close(ball_radius, settings.stub_factor * r0) && parallel(axis, poles))
+    if !positive(length(sub(taper.end(), taper.start()))) {
+        return Err(ScarMetricError::StubGeometry {
+            source_index,
+            tip: tip_index,
+            member: taper_index,
+            detail: "zero-length taper axis",
+        });
+    }
+    if !parallel_stored_segments(taper.start(), taper.end(), tip.start(), tip.end()) {
+        return Err(ScarMetricError::StubGeometry {
+            source_index,
+            tip: tip_index,
+            member: taper_index,
+            detail: "pole and taper axes are not aligned",
+        });
+    }
+    if !stored_scaled_equal(ball_radius, settings.stub_factor, r0) {
+        return Err(ScarMetricError::StubGeometry {
+            source_index,
+            tip: tip_index,
+            member: taper_index,
+            detail: "ball-factor mismatch",
+        });
+    }
+    Ok(true)
 }
 
 fn stub_contact(
@@ -512,7 +582,7 @@ fn stub_contact(
             detail: "taper does not start at ball centre",
         });
     }
-    if !f32_close(ball_radius, settings.stub_factor * r0) {
+    if !stored_scaled_equal(ball_radius, settings.stub_factor, r0) {
         return Err(ScarMetricError::StubGeometry {
             source_index,
             tip: tip_index,
@@ -521,7 +591,9 @@ fn stub_contact(
         });
     }
     let outward = sub(taper.end(), centre);
-    if !positive(length(outward)) || !parallel(outward, sub(tip.end(), tip.start())) {
+    if !positive(length(outward))
+        || !parallel_stored_segments(taper.start(), taper.end(), tip.start(), tip.end())
+    {
         return Err(ScarMetricError::StubGeometry {
             source_index,
             tip: tip_index,
@@ -561,7 +633,7 @@ fn foot_contact(
     let (centre, ball_radius) = sphere(source_index, ball, ball_support)?;
     foot_ball(source_index, ball, ball_support)?;
     let (r0, r1) = support.radii();
-    if support.segment_type() == SegmentType::JOINER && !f32_close(r0, r1) {
+    if support.segment_type() == SegmentType::JOINER && !stored_equal(r0, r1) {
         return Err(ScarMetricError::FootGeometry {
             source_index,
             member,
@@ -574,7 +646,9 @@ fn foot_contact(
     } else {
         (support.start(), r0, support.end(), r1)
     };
-    if !near(endpoint, centre) || !f32_close(ball_radius, settings.foot_factor * endpoint_radius) {
+    if !near(endpoint, centre)
+        || !stored_scaled_equal(ball_radius, settings.foot_factor, endpoint_radius)
+    {
         return Err(ScarMetricError::FootGeometry {
             source_index,
             member,
@@ -616,7 +690,6 @@ fn contact_scars(
         .map(|contact| contact.anchor)
         .collect::<Vec<_>>();
     let closest = closest_points(mesh, &anchors)?;
-    let contained = contains_points(mesh, &anchors)?;
     let rays = contacts
         .iter()
         .map(|contact| Ray {
@@ -625,77 +698,86 @@ fn contact_scars(
         })
         .collect::<Vec<_>>();
     let intersections = ray_intersections(mesh, &rays)?;
-    let mut crossings = Vec::with_capacity(contacts.len());
+    #[derive(Clone, Copy)]
+    struct InteriorProbe {
+        contact: usize,
+        start: f64,
+        end: f64,
+        exit_triangle: Option<usize>,
+    }
+    let mut intervals = Vec::new();
     let mut probes = Vec::new();
-    let mut probe_owner = Vec::new();
     for (index, (contact, hits)) in contacts.iter().zip(intersections).enumerate() {
         let member_length = length(sub(contact.other, contact.anchor));
         let mut unique = Vec::new();
         for hit in hits {
-            if hit.distance <= member_length + settings.tol_mm
+            if hit.distance <= member_length
                 && hit.distance > 0.0
                 && unique
                     .last()
-                    .is_none_or(|last: &crate::RayHit| !f32_close(last.distance, hit.distance))
+                    .is_none_or(|last: &crate::RayHit| !ray_hit_equal(last.distance, hit.distance))
             {
                 unique.push(hit);
             }
         }
-        for event in 0..unique.len() {
-            let next = unique
-                .get(event + 1)
-                .map_or(member_length, |hit| hit.distance.min(member_length));
-            if next > unique[event].distance {
-                let distance = (unique[event].distance + next) * 0.5;
+        let mut start = 0.0;
+        for event in unique.iter().copied().chain(std::iter::once(crate::RayHit {
+            distance: member_length,
+            triangle_index: usize::MAX,
+        })) {
+            if event.distance > start && !ray_hit_equal(event.distance, start) {
+                let distance = (start + event.distance) * 0.5;
                 probes.push(add(
                     contact.anchor,
                     scale(unit(sub(contact.other, contact.anchor)), distance),
                 ));
-                probe_owner.push((index, event));
+                intervals.push(InteriorProbe {
+                    contact: index,
+                    start,
+                    end: event.distance,
+                    exit_triangle: (event.triangle_index != usize::MAX)
+                        .then_some(event.triangle_index),
+                });
             }
+            start = event.distance;
         }
-        crossings.push(unique);
     }
     let probe_inside = contains_points(mesh, &probes)?;
-    let mut after = vec![Vec::new(); contacts.len()];
-    for ((contact, event), inside) in probe_owner.into_iter().zip(probe_inside) {
-        if after[contact].len() == event {
-            after[contact].push(inside);
-        }
-    }
     let mut scars = Vec::with_capacity(contacts.len());
     for (index, contact) in contacts.iter().enumerate() {
         let member_axis = sub(contact.other, contact.anchor);
         let member_length = length(member_axis);
-        let anchored =
-            contained[index] || closest[index].squared_distance.sqrt() <= settings.tol_mm;
-        let mut interval = if anchored { member_length } else { 0.0 };
-        let mut exit_triangle = closest[index].triangle_index;
-        if anchored {
-            for (event, hit) in crossings[index].iter().enumerate() {
-                if hit.distance <= settings.tol_mm {
-                    continue;
-                }
-                if after[index].get(event).copied() == Some(false) {
-                    interval = hit.distance.min(member_length);
-                    exit_triangle = hit.triangle_index;
-                    break;
-                }
-            }
-        }
+        // A tip is not made interior merely because it is near the mesh.  The
+        // midpoint must classify as actual solid, and the interval entry must
+        // be within the physical anchoring tolerance of the designed endpoint.
+        let selected = intervals
+            .iter()
+            .zip(&probe_inside)
+            .find_map(|(interval, inside)| {
+                (*inside && interval.contact == index && interval.start <= settings.tol_mm)
+                    .then_some(*interval)
+            });
+        let (interval_length, exit_s, exit_triangle) = selected
+            .and_then(|interval| {
+                interval
+                    .exit_triangle
+                    .map(|triangle| (interval.end - interval.start, interval.end, triangle))
+            })
+            .unwrap_or((0.0, 0.0, closest[index].triangle_index));
         let fraction = if member_length == 0.0 {
             0.0
         } else {
-            interval / member_length
+            exit_s / member_length
         };
         let radius = contact.radius_at_anchor
             + (contact.radius_at_other - contact.radius_at_anchor) * fraction;
-        let normal = face_normal(mesh, exit_triangle)?;
-        let cosine = dot(unit(member_axis), normal).abs();
-        let shaft = if interval <= settings.tol_mm {
+        let shaft = if interval_length <= settings.tol_mm {
             0.0
         } else {
-            (PI * radius * radius / cosine.max(settings.eps_cos)).min(2.0 * radius * interval)
+            let normal = face_normal(source_index, mesh, exit_triangle)?;
+            let cosine = dot(unit(member_axis), normal).abs();
+            (PI * radius * radius / cosine.max(settings.eps_cos))
+                .min(2.0 * radius * interval_length)
         };
         let d = closest[index].squared_distance.sqrt();
         let ball = PI * (contact.ball_radius * contact.ball_radius - d * d).max(0.0);
@@ -815,7 +897,7 @@ fn sample_faces(source_index: usize, mesh: &Mesh) -> Result<Vec<Sample>, ScarMet
         let (a, b, c) = mesh.triangle_points(face);
         samples.push(Sample {
             point: add(a, add(scale(sub(b, a), u), scale(sub(c, a), v))),
-            normal: face_normal(mesh, face)?,
+            normal: face_normal(source_index, mesh, face)?,
         });
     }
     Ok(samples)
@@ -871,7 +953,8 @@ fn thinness_scores(
     let centres = (0..mesh.triangles().len())
         .map(|face| {
             let (a, b, c) = mesh.triangle_points(face);
-            face_normal(mesh, face).map(|normal| (scale(add(add(a, b), c), 1.0 / 3.0), normal))
+            face_normal(source_index, mesh, face)
+                .map(|normal| (scale(add(add(a, b), c), 1.0 / 3.0), normal))
         })
         .collect::<Result<Vec<_>, _>>()?;
     let limit = 40.min(centres.len());
@@ -957,12 +1040,12 @@ fn welded_defects(
     ))
 }
 
-fn face_normal(mesh: &Mesh, face: usize) -> Result<Vec3, ScarMetricError> {
+fn face_normal(source_index: usize, mesh: &Mesh, face: usize) -> Result<Vec3, ScarMetricError> {
     let (a, b, c) = mesh.triangle_points(face);
     let normal = cross(sub(b, a), sub(c, a));
     if !positive(length(normal)) {
         return Err(ScarMetricError::ArithmeticOverflow {
-            source_index: 0,
+            source_index,
             metric: "face normal",
         });
     }
@@ -1053,32 +1136,191 @@ fn canonical_key(value: Vec3) -> (u64, u64, u64) {
     }
     (bit(value[0]), bit(value[1]), bit(value[2]))
 }
-fn f32_close(left: f64, right: f64) -> bool {
-    if left == right {
-        return true;
+/// The exact real-value interval that could have rounded to a stored finite
+/// f32 under IEEE round-to-nearest.  Record fields are f32 on disk, so contact
+/// reconstruction compares these intervals rather than attaching an arbitrary
+/// epsilon to f64 values after decoding.
+#[derive(Clone, Copy, Debug)]
+struct F32Envelope {
+    lo: f64,
+    hi: f64,
+}
+
+impl F32Envelope {
+    fn stored(value: f64) -> Self {
+        let value = value as f32;
+        debug_assert!(value.is_finite());
+        if value == 0.0 {
+            let edge = (f32::from_bits(1) as f64) * 0.5;
+            return Self {
+                lo: -edge,
+                hi: edge,
+            };
+        }
+        let bits = value.to_bits();
+        let previous = if value.is_sign_positive() {
+            f32::from_bits(bits - 1)
+        } else {
+            f32::from_bits(bits + 1)
+        };
+        let next = if value.is_sign_positive() {
+            f32::from_bits(bits + 1)
+        } else {
+            f32::from_bits(bits - 1)
+        };
+        let lo = (previous as f64 + value as f64) * 0.5;
+        let hi = (value as f64 + next as f64) * 0.5;
+        Self {
+            lo: lo.min(hi),
+            hi: lo.max(hi),
+        }
     }
-    if !(left.is_finite() && right.is_finite()) {
+
+    fn scaled(self, factor: f64) -> Self {
+        let a = self.lo * factor;
+        let b = self.hi * factor;
+        Self {
+            lo: a.min(b),
+            hi: a.max(b),
+        }
+    }
+
+    fn overlaps(self, other: Self) -> bool {
+        self.lo <= other.hi && other.lo <= self.hi
+    }
+}
+
+fn stored_equal(left: f64, right: f64) -> bool {
+    left.is_finite()
+        && right.is_finite()
+        && F32Envelope::stored(left).overlaps(F32Envelope::stored(right))
+}
+
+fn stored_scaled_equal(left: f64, factor: f64, right: f64) -> bool {
+    left.is_finite()
+        && right.is_finite()
+        && F32Envelope::stored(left).overlaps(F32Envelope::stored(right).scaled(factor))
+}
+
+fn segment_length_matches_radius(start: Vec3, end: Vec3, radius: f64, factor: f64) -> bool {
+    // Each decoded coordinate can differ from its real pre-rounding value by
+    // half an f32 ULP.  The Euclidean norm is 1-Lipschitz, so the norm error is
+    // bounded by the L2 norm of the three component-difference envelopes.
+    let delta = sub(start, end);
+    let error = start
+        .into_iter()
+        .zip(end)
+        .map(|(a, b)| {
+            let ea = F32Envelope::stored(a);
+            let eb = F32Envelope::stored(b);
+            let exact = a - b;
+            (ea.lo - eb.hi - exact)
+                .abs()
+                .max((ea.hi - eb.lo - exact).abs())
+        })
+        .map(|bound| bound * bound)
+        .sum::<f64>()
+        .sqrt();
+    let length = length(delta);
+    let observed = F32Envelope {
+        lo: (length - error).max(0.0),
+        hi: length + error,
+    };
+    observed.overlaps(F32Envelope::stored(radius).scaled(factor))
+}
+
+fn point_radius_matches_sphere(vertex: Vec3, start: Vec3, end: Vec3, radius: f64) -> bool {
+    let centre = midpoint(start, end);
+    let coordinate_error = vertex
+        .into_iter()
+        .zip(start)
+        .zip(end)
+        .map(|((v, a), b)| {
+            let ev = F32Envelope::stored(v);
+            let ea = F32Envelope::stored(a);
+            let eb = F32Envelope::stored(b);
+            let exact = v - (a + b) * 0.5;
+            let lo = ev.lo - (ea.hi + eb.hi) * 0.5;
+            let hi = ev.hi - (ea.lo + eb.lo) * 0.5;
+            (lo - exact).abs().max((hi - exact).abs())
+        })
+        .map(|bound| bound * bound)
+        .sum::<f64>()
+        .sqrt();
+    let distance = distance(vertex, centre);
+    F32Envelope {
+        lo: (distance - coordinate_error).max(0.0),
+        hi: distance + coordinate_error,
+    }
+    .overlaps(F32Envelope::stored(radius))
+}
+
+fn parallel_stored_segments(
+    left_start: Vec3,
+    left_end: Vec3,
+    right_start: Vec3,
+    right_end: Vec3,
+) -> bool {
+    let left = sub(left_end, left_start);
+    let right = sub(right_end, right_start);
+    if !positive(length(left)) || !positive(length(right)) {
         return false;
     }
-    let ulp = |value: f64| {
-        let value = value.abs() as f32;
-        let next = f32::from_bits(value.to_bits().saturating_add(1));
-        (next - value).abs() as f64
+    // Cross-product interval arithmetic: 0 must remain possible in every
+    // component after the stored endpoint roundoff is propagated.  This accepts
+    // either orientation; reversed sphere poles are a valid writer encoding.
+    let component_error = |start: Vec3, end: Vec3, component: usize| {
+        let a = F32Envelope::stored(start[component]);
+        let b = F32Envelope::stored(end[component]);
+        (a.lo - b.hi - (start[component] - end[component]))
+            .abs()
+            .max((a.hi - b.lo - (start[component] - end[component])).abs())
     };
-    (left - right).abs() <= 16.0 * ulp(left).max(ulp(right)).max(f32::MIN_POSITIVE as f64)
+    let le = [
+        component_error(left_end, left_start, 0),
+        component_error(left_end, left_start, 1),
+        component_error(left_end, left_start, 2),
+    ];
+    let re = [
+        component_error(right_end, right_start, 0),
+        component_error(right_end, right_start, 1),
+        component_error(right_end, right_start, 2),
+    ];
+    let cross_value = cross(left, right);
+    let cross_error = [
+        left[1].abs() * re[2]
+            + right[2].abs() * le[1]
+            + le[1] * re[2]
+            + left[2].abs() * re[1]
+            + right[1].abs() * le[2]
+            + le[2] * re[1],
+        left[2].abs() * re[0]
+            + right[0].abs() * le[2]
+            + le[2] * re[0]
+            + left[0].abs() * re[2]
+            + right[2].abs() * le[0]
+            + le[0] * re[2],
+        left[0].abs() * re[1]
+            + right[1].abs() * le[0]
+            + le[0] * re[1]
+            + left[1].abs() * re[0]
+            + right[0].abs() * le[1],
+    ];
+    cross_value
+        .into_iter()
+        .zip(cross_error)
+        .all(|(value, error)| value.abs() <= error)
+}
+
+fn ray_hit_equal(left: f64, right: f64) -> bool {
+    // These are f64 calculations over the same triangle soup, not f32 fields.
+    // The bound only coalesces duplicate face/edge hits from arithmetic noise.
+    (left - right).abs() <= 128.0 * f64::EPSILON * left.abs().max(right.abs()).max(1.0)
 }
 fn near(left: Vec3, right: Vec3) -> bool {
     left.into_iter()
         .zip(right)
-        .all(|(left, right)| f32_close(left, right))
-}
-fn parallel(left: Vec3, right: Vec3) -> bool {
-    let left_length = length(left);
-    let right_length = length(right);
-    left_length > 0.0
-        && right_length > 0.0
-        && 1.0 - (dot(left, right) / (left_length * right_length)).abs()
-            <= 64.0 * f32::EPSILON as f64
+        .all(|(left, right)| stored_equal(left, right))
 }
 fn positive(value: f64) -> bool {
     value.is_finite() && value > 0.0
@@ -1164,7 +1406,7 @@ impl LegacyMt19937 {
 
 #[cfg(test)]
 mod tests {
-    use super::{integer_linspace, linear_percentile, LegacyMt19937};
+    use super::{integer_linspace, linear_percentile, stored_equal, LegacyMt19937};
     #[test]
     fn legacy_seed_zero_matches_numpy_randomstate_prefix() {
         let mut rng = LegacyMt19937::seeded(0);
@@ -1175,5 +1417,16 @@ mod tests {
     fn numpy_integer_linspace_and_percentile_are_linear() {
         assert_eq!(integer_linspace(8, 4), [0, 2, 4, 7]);
         assert!((linear_percentile(&[0.0, 10.0, 20.0, 30.0], 95.0) - 28.5).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn stored_f32_relations_accept_only_touching_rounding_envelopes() {
+        let one = 1.0_f32 as f64;
+        let next = f32::from_bits(1.0_f32.to_bits() + 1) as f64;
+        let two_away = f32::from_bits(1.0_f32.to_bits() + 2) as f64;
+        // Adjacent f32 bins share their rounding midpoint; two intervening
+        // bins cannot represent one original real coordinate.
+        assert!(stored_equal(one, next));
+        assert!(!stored_equal(one, two_away));
     }
 }

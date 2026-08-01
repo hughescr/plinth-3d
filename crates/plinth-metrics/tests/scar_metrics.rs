@@ -109,6 +109,24 @@ fn stub(x: f32, contact_z: f32) -> [SupportRecord; 2] {
     ]
 }
 
+fn stub_with_axis(contact_z: f32, end_z: f32) -> [SupportRecord; 2] {
+    [
+        ball(
+            SegmentType::TIP,
+            [0.0, 0.0, contact_z],
+            [0.0, 0.0, contact_z + 0.6],
+            0.3,
+        ),
+        record(
+            SegmentType::TAPER,
+            [0.0, 0.0, contact_z + 0.3],
+            [0.0, 0.0, end_z],
+            0.2,
+            0.4,
+        ),
+    ]
+}
+
 fn foot_ball(x: f32, z: f32, radius: f32) -> SupportRecord {
     ball(
         SegmentType::SHAFT,
@@ -281,6 +299,30 @@ fn unmatched_or_ambiguous_contact_records_fail_closed() {
 }
 
 #[test]
+fn anchored_interval_requires_actual_solid_and_uses_the_tolerance_branch() {
+    let temp = TempDir::new();
+    let shallow = temp.path().join("shallow.chitubox");
+    write_artifact(&shallow, &[(cube(2.0), stub_with_axis(0.98, 2.0).into())]);
+    let shallow = &scar_metric_rows(
+        &reopen(&shallow, "shallow"),
+        &[ScarMetricInput { source_index: 0 }],
+    )
+    .expect("shallow interior interval")[0];
+    // T=.02 <= TOL, so only the angle-independent ball disc remains.
+    assert!((value(shallow, "scar_area") - std::f64::consts::PI * (0.09 - 0.0004)).abs() < 3.0e-7);
+
+    let outside = temp.path().join("outside.chitubox");
+    write_artifact(&outside, &[(cube(2.0), stub_with_axis(1.2, 2.2).into())]);
+    let outside = &scar_metric_rows(
+        &reopen(&outside, "outside"),
+        &[ScarMetricInput { source_index: 0 }],
+    )
+    .expect("outside contact has a valid record identity")[0];
+    // The ray never enters the model: no whole-member fallback is allowed.
+    assert!((value(outside, "scar_area") - std::f64::consts::PI * 0.05).abs() < 3.0e-7);
+}
+
+#[test]
 fn rows_are_ordered_and_source_indices_are_checked() {
     let temp = TempDir::new();
     let path = temp.path().join("two.chitubox");
@@ -309,6 +351,34 @@ fn rows_are_ordered_and_source_indices_are_checked() {
         ),
         Err(ScarMetricError::InputSourceIndex { .. })
     ));
+}
+
+#[test]
+fn committed_sphere_has_seven_reconstructed_stubs() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let sphere = root.join("corpus/baseline/Sphere.chitubox");
+    assert!(
+        sphere.is_file(),
+        "required committed Sphere artifact missing: {}",
+        sphere.display()
+    );
+    let artifact = reopen(&sphere, "Sphere");
+    let rows = scar_metric_rows(&artifact, &[ScarMetricInput { source_index: 0 }])
+        .expect("committed Sphere must satisfy the complete scar-record contract");
+    let row = &rows[0];
+    assert_eq!(
+        artifact.models()[0]
+            .supports()
+            .iter()
+            .filter(|support| support.segment_type() == SegmentType::TIP)
+            .count(),
+        7
+    );
+    // Pinned from the committed file, reopened fresh above.  This test keeps
+    // its own record-count assertion and does not ask the producer for a
+    // contact list, so changed contact reconstruction cannot self-certify.
+    assert_eq!(value(row, "scar_area"), 18.207_723_309_160_54);
+    assert_eq!(value(row, "scar_worst_patch"), 3.339_084_784_039_538);
 }
 
 struct TempDir(PathBuf);
