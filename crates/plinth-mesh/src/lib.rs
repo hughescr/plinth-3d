@@ -85,6 +85,61 @@ impl Mesh {
         &self.tris
     }
 
+    /// Audits geometry required by semantic consumers without changing this
+    /// source-preserving triangle soup.
+    ///
+    /// [`Mesh::new`] deliberately accepts finite, index-valid raw STL soup,
+    /// including repeated indices and zero-area faces.  Call this method at a
+    /// boundary which instead requires every face to name three distinct
+    /// vertices and enclose a nonzero area.  It is a single pass over the
+    /// mesh's local arrays: it neither welds, repairs, reorders, nor mutates
+    /// source vertices or triangles.
+    ///
+    /// Normalization before the cross product makes the nonzero-area check
+    /// safe for both very small and very large finite triangles.  A finite
+    /// coordinate subtraction that cannot be represented is reported as an
+    /// arithmetic failure rather than guessed about.
+    pub fn audit_strict(&self) -> Result<(), StrictMeshAuditError> {
+        for (triangle, indices) in self.tris.iter().enumerate() {
+            if indices[0] == indices[1] {
+                return Err(StrictMeshAuditError::RepeatedVertexIndex {
+                    triangle,
+                    first_corner: 0,
+                    second_corner: 1,
+                    vertex: indices[0],
+                });
+            }
+            if indices[1] == indices[2] {
+                return Err(StrictMeshAuditError::RepeatedVertexIndex {
+                    triangle,
+                    first_corner: 1,
+                    second_corner: 2,
+                    vertex: indices[1],
+                });
+            }
+            if indices[2] == indices[0] {
+                return Err(StrictMeshAuditError::RepeatedVertexIndex {
+                    triangle,
+                    first_corner: 2,
+                    second_corner: 0,
+                    vertex: indices[2],
+                });
+            }
+
+            let a = self.verts[indices[0] as usize];
+            let b = self.verts[indices[1] as usize];
+            let c = self.verts[indices[2] as usize];
+            match triangle_has_nonzero_area(a, b, c) {
+                Ok(true) => {}
+                Ok(false) => return Err(StrictMeshAuditError::ZeroAreaOrCollinear { triangle }),
+                Err(()) => {
+                    return Err(StrictMeshAuditError::DerivedArithmeticOverflow { triangle })
+                }
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn validate(&self) -> Result<(), MeshError> {
         Self::validate_parts(&self.verts, &self.tris)
     }
@@ -212,4 +267,59 @@ pub enum MeshError {
     InvalidFiniteFixtureParameter { parameter: &'static str, value: f64 },
     #[error("fixture has too many vertices for u32 triangle indices")]
     FixtureIndexOverflow,
+}
+
+/// A strict semantic-audit failure for an otherwise representable [`Mesh`].
+///
+/// These errors are intentionally separate from [`MeshError`]: construction
+/// establishes that raw source soup is finite and index-valid, while strict
+/// audit establishes the stronger geometric contract required by a caller.
+#[derive(Clone, Debug, Error, PartialEq)]
+pub enum StrictMeshAuditError {
+    #[error(
+        "triangle {triangle} repeats vertex {vertex} at corners {first_corner} and {second_corner}"
+    )]
+    RepeatedVertexIndex {
+        triangle: usize,
+        first_corner: usize,
+        second_corner: usize,
+        vertex: u32,
+    },
+    #[error("triangle {triangle} has zero area or collinear distinct vertices")]
+    ZeroAreaOrCollinear { triangle: usize },
+    #[error("triangle {triangle} overflowed while deriving strict-audit geometry")]
+    DerivedArithmeticOverflow { triangle: usize },
+}
+
+/// Returns whether a triangle has nonzero area without squaring its normal.
+///
+/// Scale finite edges before crossing them so a valid tiny triangle cannot
+/// underflow and a valid huge triangle cannot overflow.  Coordinate
+/// subtraction itself may overflow even for finite endpoints; that is an
+/// unrepresentable derived quantity and cannot honestly be classified.
+fn triangle_has_nonzero_area(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> Result<bool, ()> {
+    let ab = checked_sub(a, b)?;
+    let ac = checked_sub(c, a)?;
+    let scale = ab.into_iter().chain(ac).map(f64::abs).fold(0.0, f64::max);
+    if scale == 0.0 {
+        return Ok(false);
+    }
+    let normal = [
+        (ab[1] / scale) * (ac[2] / scale) - (ab[2] / scale) * (ac[1] / scale),
+        (ab[2] / scale) * (ac[0] / scale) - (ab[0] / scale) * (ac[2] / scale),
+        (ab[0] / scale) * (ac[1] / scale) - (ab[1] / scale) * (ac[0] / scale),
+    ];
+    if normal.iter().any(|value| !value.is_finite()) {
+        return Err(());
+    }
+    Ok(normal.iter().any(|value| *value != 0.0))
+}
+
+fn checked_sub(left: [f64; 3], right: [f64; 3]) -> Result<[f64; 3], ()> {
+    let result = [left[0] - right[0], left[1] - right[1], left[2] - right[2]];
+    result
+        .iter()
+        .all(|coordinate| coordinate.is_finite())
+        .then_some(result)
+        .ok_or(())
 }
