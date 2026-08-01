@@ -23,10 +23,19 @@ pub mod testkit;
 use std::borrow::Cow;
 
 use mesh::Mesh;
+pub use mesh::{FaceBounds, FaceGeometry};
 pub use queries::{BatchInputError, CastRaysBatch, Interval, NativeSurface, SphereBreachBatch};
 pub use vec3::V3;
 
 pub const KERNEL_API_VERSION: u32 = 1;
+
+/// Explicit parity-grid construction settings. There is deliberately no
+/// default: callers must select their production memory/precision budget.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NativeSurfaceConfig {
+    pub grid_pitch_mm: f64,
+    pub max_grid_bytes: usize,
+}
 
 /// Typed triangle-soup inputs accepted by the native construction boundary.
 ///
@@ -93,6 +102,22 @@ impl TriangleSoup<'static> {
 #[derive(Debug, PartialEq)]
 pub enum SurfaceBuildError {
     EmptyTriangleSoup,
+    EmptyVertices,
+    EmptyFaces,
+    NonFiniteVertex {
+        vertex: usize,
+        axis: usize,
+    },
+    FaceIndexOutOfBounds {
+        face: usize,
+        corner: usize,
+        index: u32,
+        vertex_count: usize,
+    },
+    IndexedDerivedArithmetic {
+        face: usize,
+        operation: &'static str,
+    },
     LengthMismatch {
         field: &'static str,
         expected: usize,
@@ -117,6 +142,27 @@ impl std::fmt::Display for SurfaceBuildError {
             Self::EmptyTriangleSoup => {
                 write!(formatter, "triangle soup must contain at least one face")
             }
+            Self::EmptyVertices => write!(
+                formatter,
+                "indexed surface must contain at least one vertex"
+            ),
+            Self::EmptyFaces => write!(formatter, "indexed surface must contain at least one face"),
+            Self::NonFiniteVertex { vertex, axis } => {
+                write!(formatter, "vertices[{vertex}][{axis}] is not finite")
+            }
+            Self::FaceIndexOutOfBounds {
+                face,
+                corner,
+                index,
+                vertex_count,
+            } => write!(
+                formatter,
+                "faces[{face}][{corner}] index {index} is outside {vertex_count} vertices"
+            ),
+            Self::IndexedDerivedArithmetic { face, operation } => write!(
+                formatter,
+                "indexed face {face} produced non-finite {operation}"
+            ),
             Self::LengthMismatch {
                 field,
                 expected,
@@ -210,9 +256,135 @@ impl NativeSurface {
         Self::new(mesh, grid_pitch_mm, max_grid_bytes).map_err(SurfaceBuildError::Kernel)
     }
 
+    /// Construct a surface from indexed vertices and faces, deriving face
+    /// metadata exactly once. Unlike `from_triangle_soup`, this path owns the
+    /// normal/area/bounds derivation because there is no source metadata.
+    pub fn from_indexed(
+        vertices: &[[f64; 3]],
+        faces: &[[u32; 3]],
+        config: NativeSurfaceConfig,
+    ) -> Result<Self, SurfaceBuildError> {
+        if vertices.is_empty() {
+            return Err(SurfaceBuildError::EmptyVertices);
+        }
+        if faces.is_empty() {
+            return Err(SurfaceBuildError::EmptyFaces);
+        }
+        if !config.grid_pitch_mm.is_finite() || config.grid_pitch_mm <= 0.0 {
+            return Err(SurfaceBuildError::InvalidGridPitch(config.grid_pitch_mm));
+        }
+        for (vertex, point) in vertices.iter().enumerate() {
+            for (axis, value) in point.iter().enumerate() {
+                if !value.is_finite() {
+                    return Err(SurfaceBuildError::NonFiniteVertex { vertex, axis });
+                }
+            }
+        }
+        let mut triangles = Vec::with_capacity(faces.len());
+        let mut normals = Vec::with_capacity(faces.len());
+        let mut areas = Vec::with_capacity(faces.len());
+        let mut bounds = [[f64::INFINITY; 3], [f64::NEG_INFINITY; 3]];
+        for (face, indices) in faces.iter().enumerate() {
+            let mut triangle = [[0.0; 3]; 3];
+            for (corner, &index) in indices.iter().enumerate() {
+                let Some(point) = vertices.get(index as usize) else {
+                    return Err(SurfaceBuildError::FaceIndexOutOfBounds {
+                        face,
+                        corner,
+                        index,
+                        vertex_count: vertices.len(),
+                    });
+                };
+                triangle[corner] = *point;
+                for axis in 0..3 {
+                    bounds[0][axis] = bounds[0][axis].min(point[axis]);
+                    bounds[1][axis] = bounds[1][axis].max(point[axis]);
+                }
+            }
+            let e1 = [
+                triangle[1][0] - triangle[0][0],
+                triangle[1][1] - triangle[0][1],
+                triangle[1][2] - triangle[0][2],
+            ];
+            let e2 = [
+                triangle[2][0] - triangle[0][0],
+                triangle[2][1] - triangle[0][1],
+                triangle[2][2] - triangle[0][2],
+            ];
+            if !e1.iter().chain(&e2).all(|value| value.is_finite()) {
+                return Err(SurfaceBuildError::IndexedDerivedArithmetic {
+                    face,
+                    operation: "edge subtraction",
+                });
+            }
+            let cross = [
+                e1[1] * e2[2] - e1[2] * e2[1],
+                e1[2] * e2[0] - e1[0] * e2[2],
+                e1[0] * e2[1] - e1[1] * e2[0],
+            ];
+            if !cross.iter().all(|value| value.is_finite()) {
+                return Err(SurfaceBuildError::IndexedDerivedArithmetic {
+                    face,
+                    operation: "normal cross product",
+                });
+            }
+            let length = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+            if !length.is_finite() {
+                return Err(SurfaceBuildError::IndexedDerivedArithmetic {
+                    face,
+                    operation: "normal length",
+                });
+            }
+            let denominator = length.max(1e-30);
+            let normal = [
+                cross[0] / denominator,
+                cross[1] / denominator,
+                cross[2] / denominator,
+            ];
+            if !normal.iter().all(|value| value.is_finite()) {
+                return Err(SurfaceBuildError::IndexedDerivedArithmetic {
+                    face,
+                    operation: "normalization",
+                });
+            }
+            let area = 0.5 * length;
+            if !area.is_finite() {
+                return Err(SurfaceBuildError::IndexedDerivedArithmetic {
+                    face,
+                    operation: "area",
+                });
+            }
+            let centroid = [
+                (triangle[0][0] + triangle[1][0] + triangle[2][0]) / 3.0,
+                (triangle[0][1] + triangle[1][1] + triangle[2][1]) / 3.0,
+                (triangle[0][2] + triangle[1][2] + triangle[2][2]) / 3.0,
+            ];
+            if !centroid.iter().all(|value| value.is_finite()) {
+                return Err(SurfaceBuildError::IndexedDerivedArithmetic {
+                    face,
+                    operation: "centroid",
+                });
+            }
+            triangles.push(triangle);
+            normals.push(normal);
+            areas.push(area);
+        }
+        Self::from_triangle_soup(
+            TriangleSoup::owned(triangles, normals, areas, bounds),
+            config.grid_pitch_mm,
+            config.max_grid_bytes,
+        )
+    }
+
     /// Number of faces in the immutable surface.
     pub fn nfaces(&self) -> usize {
-        self.mesh.nfaces
+        self.mesh.nfaces()
+    }
+
+    /// Immutable global face metadata. This view has no mutable access and
+    /// does not expose the shared ownership mechanism.
+    pub fn geometry(&self) -> &FaceGeometry {
+        &self.geometry
     }
 }
 

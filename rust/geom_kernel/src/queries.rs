@@ -11,7 +11,7 @@ use rayon::prelude::*;
 use crate::bvh::Bvh;
 use crate::closest::{closest_on_tri, segseg};
 use crate::consts::{DEDUP_LOC_MM, EPS, NEAR_WALL_SKIP, THRESHOLD_BAND_MM};
-use crate::mesh::Mesh;
+use crate::mesh::{FaceGeometry, Mesh};
 use crate::moller::{dedup_loc, moller};
 use crate::par;
 use crate::parity::ParityVote;
@@ -77,7 +77,8 @@ pub type CastRaysBatch = (Vec<i64>, Vec<f64>, Vec<i64>);
 pub type SphereBreachBatch = (Vec<bool>, Vec<f64>, Vec<f64>);
 
 pub struct NativeSurface {
-    pub mesh: Mesh,
+    pub(crate) mesh: Mesh,
+    pub(crate) geometry: std::sync::Arc<FaceGeometry>,
     pub bvh: Bvh,
     pub pv: ParityVote,
     pub grid_pitch_mm: f64,
@@ -169,8 +170,10 @@ impl NativeSurface {
     ) -> Result<NativeSurface, String> {
         let bvh = Bvh::build(&mesh)?;
         let pv = ParityVote::build(&mesh, grid_pitch_mm, max_grid_bytes)?;
+        let geometry = mesh.geometry.clone();
         Ok(NativeSurface {
             mesh,
+            geometry,
             bvh,
             pv,
             grid_pitch_mm,
@@ -198,7 +201,7 @@ impl NativeSurface {
     /// Exact nearest via branch-and-bound with lexicographic (dist, idx),
     /// strict `>` pruning, seed (upper_bound, nfaces) (Amendment A12).
     pub(crate) fn nearest_one(&self, p: V3, upper_bound: f64) -> (f64, usize, V3) {
-        let nf = self.mesh.nfaces;
+        let nf = self.mesh.nfaces();
         let mut best_d = upper_bound;
         let mut best_i = nf;
         let mut best_cp: V3 = [0.0; 3];
@@ -217,7 +220,7 @@ impl NativeSurface {
                     let cnt = node.b as usize;
                     for &tid in &self.bvh.order[start..start + cnt] {
                         let t = tid as usize;
-                        let a = self.mesh.v0[t];
+                        let a = self.mesh.v0(t);
                         let b = self.mesh.vertex_b(t);
                         let cc = self.mesh.vertex_c(t);
                         let cp = closest_on_tri(p, a, b, cc);
@@ -249,7 +252,7 @@ impl NativeSurface {
 
     /// query facade: (dist, idx) with over-bound => (inf, nfaces).
     pub fn query(&self, pts: &[V3], upper_bound: f64) -> (Vec<f64>, Vec<i64>) {
-        let nf = self.mesh.nfaces;
+        let nf = self.mesh.nfaces();
         let res: Vec<(f64, i64)> = par::run(|| {
             pts.par_iter()
                 .map(|&p| {
@@ -277,8 +280,8 @@ impl NativeSurface {
             pts.par_iter()
                 .map(|&p| {
                     let (d, i, cp) = self.nearest_one(p, f64::INFINITY);
-                    let fn_ = if i < self.mesh.nfaces {
-                        self.mesh.normals[i]
+                    let fn_ = if i < self.mesh.nfaces() {
+                        self.mesh.normal(i)
                     } else {
                         [0.0; 3]
                     };
@@ -337,9 +340,9 @@ impl NativeSurface {
                         let (hit, tv) = moller(
                             o,
                             d,
-                            self.mesh.v0[t],
-                            self.mesh.e1[t],
-                            self.mesh.e2[t],
+                            self.mesh.v0(t),
+                            self.mesh.e1(t),
+                            self.mesh.e2(t),
                             t_max,
                         );
                         if hit {
@@ -419,10 +422,10 @@ impl NativeSurface {
     /// Mirrors _seg_tri_dist (geometry_exact.py:596-630).
     #[inline]
     pub(crate) fn seg_tri_dist(&self, a: V3, b: V3, t: usize) -> (f64, V3) {
-        let v0 = self.mesh.v0[t];
+        let v0 = self.mesh.v0(t);
         let p = v0;
-        let q = add(v0, self.mesh.e1[t]);
-        let r = add(v0, self.mesh.e2[t]);
+        let q = add(v0, self.mesh.e1(t));
+        let r = add(v0, self.mesh.e2(t));
         let mut best_d = f64::INFINITY;
         let mut best_pt: V3 = [0.0; 3];
         // (a) endpoints vs triangle
@@ -448,7 +451,7 @@ impl NativeSurface {
         }
         // (c) interior pierce -> distance 0 at crossing point
         let dv = sub(b, a);
-        let (hit, tv) = moller(a, dv, v0, self.mesh.e1[t], self.mesh.e2[t], 1.0);
+        let (hit, tv) = moller(a, dv, v0, self.mesh.e1(t), self.mesh.e2(t), 1.0);
         if hit {
             let pierce = add(a, scale(dv, tv));
             if 0.0 < best_d {
@@ -807,7 +810,7 @@ impl NativeSurface {
                         let t = tid as usize;
                         let cp = closest_on_tri(
                             c,
-                            self.mesh.v0[t],
+                            self.mesh.v0(t),
                             self.mesh.vertex_b(t),
                             self.mesh.vertex_c(t),
                         );
@@ -865,8 +868,8 @@ impl NativeSurface {
     ) -> (bool, f64, f64) {
         let (nd, _cp, tri, fn_) = {
             let (d, i, cp) = self.nearest_one(c, f64::INFINITY);
-            let n = if i < self.mesh.nfaces {
-                self.mesh.normals[i]
+            let n = if i < self.mesh.nfaces() {
+                self.mesh.normal(i)
             } else {
                 [0.0; 3]
             };
@@ -895,9 +898,9 @@ impl NativeSurface {
         let tied = self.faces_at_distance(c, nd, 1e-12);
         if tied.len() > 1 {
             for &f in &tied {
-                if dot(self.mesh.normals[f], fn_) < 0.0 {
+                if dot(self.mesh.normal(f), fn_) < 0.0 {
                     let inw2 = {
-                        let iv = scale(self.mesh.normals[f], -1.0);
+                        let iv = scale(self.mesh.normal(f), -1.0);
                         let nrm = norm(iv);
                         if nrm == 0.0 {
                             iv
@@ -968,7 +971,7 @@ impl NativeSurface {
     // ---- exterior-face mask ----------------------------------------------
     pub fn exterior_face_mask(&self) -> &[bool] {
         self.exterior_mask.get_or_init(|| {
-            let n = self.mesh.nfaces;
+            let n = self.mesh.nfaces();
             let bary: [[f64; 3]; 3] = [
                 [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
                 [0.6, 0.2, 0.2],
@@ -979,10 +982,10 @@ impl NativeSurface {
                 (0..n)
                     .into_par_iter()
                     .map(|f| {
-                        let a = self.mesh.v0[f];
+                        let a = self.mesh.v0(f);
                         let b = self.mesh.vertex_b(f);
                         let cc = self.mesh.vertex_c(f);
-                        let fn_ = self.mesh.normals[f];
+                        let fn_ = self.mesh.normal(f);
                         let mut votes = 0u32;
                         for w in &bary {
                             let base = add(add(scale(a, w[0]), scale(b, w[1])), scale(cc, w[2]));

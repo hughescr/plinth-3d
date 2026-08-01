@@ -47,7 +47,7 @@ impl AxisGrid {
         h: f64,
         max_grid_bytes: usize,
     ) -> Result<AxisGrid, String> {
-        let n = mesh.nfaces;
+        let n = mesh.nfaces();
         // Peak-memory accounting (Amendment A17 / spec sec 3.5): a large
         // projected triangle bins into every overlapped cell, so the CSR ref
         // count — not nfaces — dominates. Fail CLEANLY past the configured
@@ -60,9 +60,10 @@ impl AxisGrid {
         let (p0, p1) = (pp[0], pp[1]);
 
         // origin = bounds[0, p] - 1.0 ; NY = floor((bounds[1,p1]+1 - origin1)/h)+3
-        let origin0 = mesh.bounds[0][p0] - 1.0;
-        let origin1 = mesh.bounds[0][p1] - 1.0;
-        let ny = ((mesh.bounds[1][p1] + 1.0 - origin1) / h).floor() as i64 + 3;
+        let bounds = mesh.bounds();
+        let origin0 = bounds[0][p0] - 1.0;
+        let origin1 = bounds[0][p1] - 1.0;
+        let ny = ((bounds[1][p1] + 1.0 - origin1) / h).floor() as i64 + 3;
 
         let mut a2x = vec![0.0; n];
         let mut a2y = vec![0.0; n];
@@ -80,7 +81,7 @@ impl AxisGrid {
         let mut pairs: Vec<(i64, u32)> = Vec::with_capacity(n * 2);
 
         for f in 0..n {
-            let a = mesh.v0[f];
+            let a = mesh.v0(f);
             let b = mesh.vertex_b(f);
             let cc = mesh.vertex_c(f);
             // 2D projected verts

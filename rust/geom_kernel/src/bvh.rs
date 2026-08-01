@@ -52,12 +52,12 @@ fn surface_area(mn: V3, mx: V3) -> f64 {
 
 impl Bvh {
     pub fn build(mesh: &Mesh) -> Result<Bvh, String> {
-        let n = mesh.nfaces;
+        let n = mesh.nfaces();
         // per-triangle Möller pad = 2*EPS*(||E1||_inf + ||E2||_inf) (A11)
         let tri_pad: Vec<f64> = (0..n)
             .map(|i| {
-                let e1 = mesh.e1[i];
-                let e2 = mesh.e2[i];
+                let e1 = mesh.e1(i);
+                let e2 = mesh.e2(i);
                 let ni = e1[0].abs().max(e1[1].abs()).max(e1[2].abs());
                 let mi = e2[0].abs().max(e2[1].abs()).max(e2[2].abs());
                 2.0 * EPS * (ni + mi)
@@ -118,7 +118,7 @@ fn build_range(
     let mut pad = 0.0f64;
     for &p in &order[lo..hi] {
         let pi = p as usize;
-        union_box(&mut bmin, &mut bmax, mesh.tri_min[pi], mesh.tri_max[pi]);
+        union_box(&mut bmin, &mut bmax, mesh.tri_min(pi), mesh.tri_max(pi));
         if tri_pad[pi] > pad {
             pad = tri_pad[pi];
         }
@@ -146,7 +146,7 @@ fn build_range(
     let mut cmin = [f64::INFINITY; 3];
     let mut cmax = [f64::NEG_INFINITY; 3];
     for &p in &order[lo..hi] {
-        let c = mesh.centroid[p as usize];
+        let c = mesh.centroid(p as usize);
         for k in 0..3 {
             if c[k] < cmin[k] {
                 cmin[k] = c[k];
@@ -180,7 +180,7 @@ fn build_range(
         let mut bin_of = vec![0usize; count];
         for (j, &p) in order[lo..hi].iter().enumerate() {
             let pi = p as usize;
-            let c = mesh.centroid[pi][axis];
+            let c = mesh.centroid(pi)[axis];
             let mut bi = ((c - clo) * inv) as usize;
             if bi >= N_BINS {
                 bi = N_BINS - 1;
@@ -189,8 +189,8 @@ fn build_range(
             union_box(
                 &mut bin_min[bi],
                 &mut bin_max[bi],
-                mesh.tri_min[pi],
-                mesh.tri_max[pi],
+                mesh.tri_min(pi),
+                mesh.tri_max(pi),
             );
             bin_cnt[bi] += 1;
         }

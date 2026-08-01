@@ -1,4 +1,6 @@
-use geom_kernel::{BatchInputError, NativeSurface, SurfaceBuildError, TriangleSoup};
+use geom_kernel::{
+    BatchInputError, NativeSurface, NativeSurfaceConfig, SurfaceBuildError, TriangleSoup,
+};
 
 const TRIANGLES: [[[f64; 3]; 3]; 1] = [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]];
 const NORMALS: [[f64; 3]; 1] = [[0.0, 0.0, 1.0]];
@@ -231,4 +233,109 @@ fn every_multi_slice_batch_rejects_each_mismatched_companion() {
         1,
         0,
     );
+}
+
+#[test]
+fn indexed_geometry_and_batched_results_match_equivalent_soup() {
+    let vertices = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+    let faces = [[0, 1, 2]];
+    let indexed = NativeSurface::from_indexed(
+        &vertices,
+        &faces,
+        NativeSurfaceConfig {
+            grid_pitch_mm: 2.0,
+            max_grid_bytes: usize::MAX,
+        },
+    )
+    .unwrap();
+    let soup = surface();
+    assert_eq!(indexed.geometry().normals(), soup.geometry().normals());
+    assert_eq!(indexed.geometry().areas(), soup.geometry().areas());
+    assert_eq!(indexed.geometry().centroids(), soup.geometry().centroids());
+    assert_eq!(
+        indexed.geometry().face_bounds(),
+        soup.geometry().face_bounds()
+    );
+    assert_eq!(indexed.geometry().bounds(), soup.geometry().bounds());
+
+    let points = [[0.25, 0.25, 1.0], [2.0, 2.0, 0.0]];
+    let origins = [[0.25, 0.25, 1.0], [2.0, 2.0, 1.0]];
+    let dirs = [[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]];
+    assert_eq!(
+        indexed.query(&points, f64::INFINITY),
+        soup.query(&points, f64::INFINITY)
+    );
+    assert_eq!(indexed.project(&points), soup.project(&points));
+    assert_eq!(indexed.inside(&points), soup.inside(&points));
+    assert_eq!(
+        indexed.cast_rays(&origins, &dirs, 2.0),
+        soup.cast_rays(&origins, &dirs, 2.0)
+    );
+}
+
+#[test]
+fn indexed_constructor_reports_typed_input_and_derivation_failures() {
+    let config = NativeSurfaceConfig {
+        grid_pitch_mm: 2.0,
+        max_grid_bytes: usize::MAX,
+    };
+    assert!(matches!(
+        NativeSurface::from_indexed(&[], &[[0, 0, 0]], config),
+        Err(SurfaceBuildError::EmptyVertices)
+    ));
+    assert!(matches!(
+        NativeSurface::from_indexed(&[[0.0; 3]], &[], config),
+        Err(SurfaceBuildError::EmptyFaces)
+    ));
+    assert!(matches!(
+        NativeSurface::from_indexed(&[[0.0, f64::NAN, 0.0]], &[[0, 0, 0]], config),
+        Err(SurfaceBuildError::NonFiniteVertex { vertex: 0, axis: 1 })
+    ));
+    assert!(matches!(
+        NativeSurface::from_indexed(&[[0.0; 3]], &[[0, 1, 0]], config),
+        Err(SurfaceBuildError::FaceIndexOutOfBounds {
+            face: 0,
+            corner: 1,
+            index: 1,
+            vertex_count: 1
+        })
+    ));
+    assert!(matches!(
+        NativeSurface::from_indexed(
+            &[[0.0; 3]],
+            &[[0, 0, 0]],
+            NativeSurfaceConfig {
+                grid_pitch_mm: 0.0,
+                max_grid_bytes: usize::MAX
+            }
+        ),
+        Err(SurfaceBuildError::InvalidGridPitch(0.0))
+    ));
+    assert!(matches!(
+        NativeSurface::from_indexed(
+            &[[f64::MAX, 0.0, 0.0], [-f64::MAX, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            &[[0, 1, 2]],
+            config
+        ),
+        Err(SurfaceBuildError::IndexedDerivedArithmetic {
+            face: 0,
+            operation: "edge subtraction"
+        })
+    ));
+}
+
+#[test]
+fn indexed_repeated_index_face_keeps_kernel_degenerate_behavior() {
+    let surface = NativeSurface::from_indexed(
+        &[[0.0, 0.0, 0.0]],
+        &[[0, 0, 0]],
+        NativeSurfaceConfig {
+            grid_pitch_mm: 2.0,
+            max_grid_bytes: usize::MAX,
+        },
+    )
+    .unwrap();
+    assert_eq!(surface.nfaces(), 1);
+    assert_eq!(surface.geometry().areas(), &[0.0]);
+    assert_eq!(surface.geometry().normals(), &[[0.0, 0.0, 0.0]]);
 }
