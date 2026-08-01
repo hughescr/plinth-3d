@@ -274,6 +274,14 @@ fn indexed_geometry_and_batched_results_match_equivalent_soup() {
         usize::MAX,
     )
     .unwrap();
+    assert_eq!(indexed.geometry().nfaces(), faces.len());
+    assert_eq!(soup.geometry().nfaces(), faces.len());
+    for geometry in [indexed.geometry(), soup.geometry()] {
+        assert_eq!(geometry.normals().len(), faces.len());
+        assert_eq!(geometry.areas().len(), faces.len());
+        assert_eq!(geometry.centroids().len(), faces.len());
+        assert_eq!(geometry.face_bounds().len(), faces.len());
+    }
     for (left, right) in indexed
         .geometry()
         .normals()
@@ -282,6 +290,16 @@ fn indexed_geometry_and_batched_results_match_equivalent_soup() {
     {
         for axis in 0..3 {
             assert_eq!(left[axis].to_bits(), right[axis].to_bits());
+        }
+    }
+    let indexed_bounds = indexed.geometry().bounds();
+    let soup_bounds = soup.geometry().bounds();
+    for endpoint in 0..2 {
+        for axis in 0..3 {
+            assert_eq!(
+                indexed_bounds[endpoint][axis].to_bits(),
+                soup_bounds[endpoint][axis].to_bits()
+            );
         }
     }
     for (&left, &right) in indexed

@@ -40,8 +40,8 @@ pub struct NativeSurfaceConfig {
 /// Typed triangle-soup inputs accepted by the native construction boundary.
 ///
 /// `borrowed` avoids copying at the API boundary; `owned` lets callers transfer
-/// ownership. Construction still flattens once for the unchanged `Mesh::new`
-/// implementation.
+/// ownership. Construction builds one immutable face store directly from this
+/// source metadata; it does not flatten or recompute supplied metadata.
 #[derive(Clone, Debug)]
 pub struct TriangleSoup<'a> {
     triangles: Cow<'a, [[[f64; 3]; 3]]>,
