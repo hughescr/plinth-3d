@@ -21,7 +21,8 @@ pub use read::{
     DiskArtifact, DiskModel, DiskReadError, DiskSupport, ProducerFailure, ProducerStage,
 };
 pub use scar::{
-    scar_metric_rows, ScarMetricError, ScarMetricInput, ScarMetricRow, SCAR_METRIC_ORDER,
+    scar_metric_rows, DelicacyField, DelicacyIndexStats, DelicacyPointQuery, DelicacySample,
+    ScarMetricError, ScarMetricInput, ScarMetricRow, SCAR_METRIC_ORDER,
 };
 pub use supports::{
     support_metric_rows, ContactArmInput, SupportMetricError, SupportMetricInput, SupportMetricRow,

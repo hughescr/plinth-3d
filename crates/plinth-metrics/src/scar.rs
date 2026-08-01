@@ -107,6 +107,11 @@ pub enum ScarMetricError {
         source_index: usize,
         metric: &'static str,
     },
+    #[error("model {source_index} cannot build the {index} spatial index")]
+    SpatialIndex {
+        source_index: usize,
+        index: &'static str,
+    },
     #[error("M0 constants registry is unavailable: {detail}")]
     Constants { detail: String },
     #[error(transparent)]
@@ -199,7 +204,7 @@ pub fn scar_metric_rows(
             let weights = if scars.is_empty() {
                 Vec::new()
             } else {
-                DelicacyField::build(source_index, model.mesh(), settings)?.at_points(
+                DelicacyField::build(source_index, model.mesh(), settings, 0)?.at_points(
                     source_index,
                     &scars.iter().map(|scar| scar.reference).collect::<Vec<_>>(),
                 )?
@@ -808,26 +813,98 @@ fn contact_patch_area(
     shaft + ball
 }
 
-#[derive(Clone, Copy)]
-struct Sample {
-    point: Vec3,
-    normal: Vec3,
+/// One sampled raw face in the independent delicacy field.
+///
+/// `face_index` is always the original soup index, even when the frozen
+/// exterior classifier selected a proper subset for area sampling.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DelicacySample {
+    pub point: Vec3,
+    pub normal: Vec3,
+    pub face_index: usize,
 }
 
-struct DelicacyField {
-    samples: Vec<Sample>,
+/// Honest work performed by an immutable indexed field build or batch query.
+///
+/// These are result-owned observations, not a mutable global counter or a
+/// production tuning hook.  They make the release gate reproducible without
+/// changing any field decision.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DelicacyIndexStats {
+    pub triangle_nodes_visited: usize,
+    pub triangle_faces_tested: usize,
+    pub vertex_grid_candidates: usize,
+    pub sample_kd_nodes_visited: usize,
+    pub centre_kd_nodes_visited: usize,
+}
+
+/// Result of a diagnostic whole-slice delicacy lookup.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DelicacyPointQuery {
+    pub weights: Vec<f64>,
+    pub stats: DelicacyIndexStats,
+}
+
+/// Immutable, auditor-owned delicacy field.
+///
+/// Construction consumes an explicit legacy MT19937 seed.  The normal scar
+/// metric path deliberately passes zero, while diagnostics can demonstrate a
+/// different frozen stream without relying on process-global RNG state.
+pub struct DelicacyField {
+    samples: Vec<DelicacySample>,
     weights: Vec<f64>,
+    sample_index: PointKdTree,
+    stats: DelicacyIndexStats,
 }
 
 impl DelicacyField {
+    /// Builds the full independent field with an explicit sampling seed.
+    pub fn build_diagnostic(
+        source_index: usize,
+        mesh: &Mesh,
+        seed: u32,
+    ) -> Result<Self, ScarMetricError> {
+        let constants = m0_constants().map_err(|error| ScarMetricError::Constants {
+            detail: error.to_string(),
+        })?;
+        let values = constants.placeholders();
+        let settings = Settings {
+            curvature_weight: values.delicacy_curvature_weight().diagnostic().get(),
+            thinness_weight: values.delicacy_thinness_weight().diagnostic().get(),
+            thin_feature_mm: values.thin_feature_mm().diagnostic().get(),
+            eps_cos: values.eps_cos().diagnostic().get(),
+            tol_mm: values.tol_mm().diagnostic().get(),
+            stub_factor: values.ball_factor_stub().diagnostic().get(),
+            foot_factor: values.ball_factor_foot().diagnostic().get(),
+        };
+        Self::build(source_index, mesh, settings, seed)
+    }
+
     fn build(
         source_index: usize,
         mesh: &Mesh,
         settings: Settings,
+        seed: u32,
     ) -> Result<Self, ScarMetricError> {
-        let samples = sample_faces(source_index, mesh)?;
-        let curvature = curvature_scores(source_index, mesh, &samples, settings.thin_feature_mm)?;
-        let thinness = thinness_scores(source_index, mesh, &samples, settings.thin_feature_mm)?;
+        let mut stats = DelicacyIndexStats::default();
+        let triangles = TriangleBvh::build(mesh);
+        let selected_faces = exterior_sample_faces(source_index, mesh, &triangles, &mut stats)?;
+        let samples = sample_faces(source_index, mesh, &selected_faces, seed)?;
+        let welded = welded_defects(source_index, mesh)?;
+        let curvature = curvature_scores(
+            source_index,
+            &samples,
+            &welded,
+            settings.thin_feature_mm,
+            &mut stats,
+        )?;
+        let thinness = thinness_scores(
+            source_index,
+            mesh,
+            &samples,
+            settings.thin_feature_mm,
+            &mut stats,
+        )?;
         let mut weights = curvature
             .into_iter()
             .zip(thinness)
@@ -835,53 +912,115 @@ impl DelicacyField {
                 settings.curvature_weight * curvature + settings.thinness_weight * thinness
             })
             .collect::<Vec<_>>();
-        let maximum = weights
-            .iter()
-            .copied()
-            .filter(|value| *value > 0.0)
-            .fold(0.0_f64, f64::max);
-        let divisor = if maximum > 0.0 { maximum } else { 1.0 };
-        for weight in &mut weights {
-            *weight = (*weight / divisor).clamp(0.0, 1.0);
+        normalize_weights(&mut weights);
+        let sample_index = PointKdTree::build(samples.iter().map(|sample| sample.point).collect());
+        Ok(Self {
+            samples,
+            weights,
+            sample_index,
+            stats,
+        })
+    }
+
+    #[must_use]
+    pub fn samples(&self) -> &[DelicacySample] {
+        &self.samples
+    }
+
+    #[must_use]
+    pub fn weights(&self) -> &[f64] {
+        &self.weights
+    }
+
+    #[must_use]
+    pub fn build_stats(&self) -> DelicacyIndexStats {
+        self.stats
+    }
+
+    /// Looks up every point in one deterministic nearest-sample batch.
+    pub fn query_points(
+        &self,
+        source_index: usize,
+        points: &[Vec3],
+    ) -> Result<DelicacyPointQuery, ScarMetricError> {
+        for (point, value) in points.iter().enumerate() {
+            crate::validate_vec3(*value, crate::CoordinateKind::Point { point })?;
         }
-        Ok(Self { samples, weights })
+        let mut stats = DelicacyIndexStats::default();
+        let nearest = self
+            .sample_index
+            .nearest_batch(points, &mut stats.sample_kd_nodes_visited);
+        let mut weights = Vec::with_capacity(points.len());
+        for (contact, sample) in nearest.into_iter().enumerate() {
+            let weight = self.weights[sample];
+            if !weight.is_finite() {
+                return Err(ScarMetricError::NonFinite {
+                    source_index,
+                    contact,
+                    field: "delicacy",
+                });
+            }
+            weights.push(weight);
+        }
+        Ok(DelicacyPointQuery { weights, stats })
     }
 
     fn at_points(&self, source_index: usize, points: &[Vec3]) -> Result<Vec<f64>, ScarMetricError> {
-        points
-            .iter()
-            .enumerate()
-            .map(|(contact, point)| {
-                let mut nearest = 0;
-                let mut distance_squared = f64::INFINITY;
-                for (index, sample) in self.samples.iter().enumerate() {
-                    let candidate = distance_squared_between(*point, sample.point);
-                    if candidate < distance_squared {
-                        distance_squared = candidate;
-                        nearest = index;
-                    }
-                }
-                let weight = self.weights[nearest];
-                if weight.is_finite() {
-                    Ok(weight)
-                } else {
-                    Err(ScarMetricError::NonFinite {
-                        source_index,
-                        contact,
-                        field: "delicacy",
-                    })
-                }
-            })
-            .collect()
+        Ok(self.query_points(source_index, points)?.weights)
     }
 }
 
-fn sample_faces(source_index: usize, mesh: &Mesh) -> Result<Vec<Sample>, ScarMetricError> {
+fn exterior_sample_faces(
+    source_index: usize,
+    mesh: &Mesh,
+    triangles: &TriangleBvh,
+    stats: &mut DelicacyIndexStats,
+) -> Result<Vec<usize>, ScarMetricError> {
     let face_count = mesh.triangles().len();
-    let count = face_count.clamp(2_000, 20_000);
-    let mut areas = Vec::with_capacity(face_count);
-    let mut total = 0.0;
+    let mut probes = Vec::with_capacity(face_count * 6);
     for face in 0..face_count {
+        let (a, b, c) = mesh.triangle_points(face);
+        let normal = face_normal(source_index, mesh, face)?;
+        for barycentric in [[1.0 / 3.0; 3], [0.6, 0.2, 0.2], [0.2, 0.6, 0.2]] {
+            let point = add(
+                scale(a, barycentric[0]),
+                add(scale(b, barycentric[1]), scale(c, barycentric[2])),
+            );
+            for offset in [0.05, 0.15] {
+                probes.push(add(point, scale(normal, offset)));
+            }
+        }
+    }
+    let inside = triangles.frozen_contains_batch(mesh, &probes, stats)?;
+    let exterior = (0..face_count)
+        .filter(|face| {
+            let start = face * 6;
+            inside[start..start + 6]
+                .iter()
+                .filter(|inside| **inside)
+                .count()
+                < 4
+        })
+        .collect::<Vec<_>>();
+    // A shell has no meaningful exterior subset when every face has the same
+    // frozen classification.  Preserve full-face sampling in either case.
+    if exterior.is_empty() || exterior.len() == face_count {
+        Ok((0..face_count).collect())
+    } else {
+        Ok(exterior)
+    }
+}
+
+fn sample_faces(
+    source_index: usize,
+    mesh: &Mesh,
+    faces: &[usize],
+    seed: u32,
+) -> Result<Vec<DelicacySample>, ScarMetricError> {
+    let count = mesh.triangles().len().clamp(2_000, 20_000);
+    let mut areas = Vec::with_capacity(faces.len());
+    let mut total = 0.0;
+    for &face in faces {
         let (a, b, c) = mesh.triangle_points(face);
         total += 0.5 * length(cross(sub(b, a), sub(c, a)));
         areas.push(total);
@@ -892,12 +1031,14 @@ fn sample_faces(source_index: usize, mesh: &Mesh) -> Result<Vec<Sample>, ScarMet
             metric: "sampling area",
         });
     }
-    let mut rng = LegacyMt19937::seeded(0);
-    let faces = (0..count)
-        .map(|_| lower_bound(&areas, rng.next_f64() * total))
+    let mut rng = LegacyMt19937::seeded(seed);
+    // NumPy's mesh.sample first consumes the whole face-uniform vector, then
+    // consumes its 2*n barycentric uniforms.  Interleaving changes the stream.
+    let selected = (0..count)
+        .map(|_| faces[lower_bound(&areas, rng.next_f64() * total)])
         .collect::<Vec<_>>();
     let mut samples = Vec::with_capacity(count);
-    for face in faces {
+    for face in selected {
         let mut u = rng.next_f64();
         let mut v = rng.next_f64();
         if u + v > 1.0 {
@@ -905,61 +1046,69 @@ fn sample_faces(source_index: usize, mesh: &Mesh) -> Result<Vec<Sample>, ScarMet
             v = 1.0 - v;
         }
         let (a, b, c) = mesh.triangle_points(face);
-        samples.push(Sample {
+        samples.push(DelicacySample {
             point: add(a, add(scale(sub(b, a), u), scale(sub(c, a), v))),
             normal: face_normal(source_index, mesh, face)?,
+            face_index: face,
         });
     }
     Ok(samples)
 }
 
+struct WeldedVertices {
+    vertices: Vec<Vec3>,
+    defects: Vec<f64>,
+}
+
 fn curvature_scores(
     source_index: usize,
-    mesh: &Mesh,
-    samples: &[Sample],
+    samples: &[DelicacySample],
+    welded: &WeldedVertices,
     thin: f64,
+    stats: &mut DelicacyIndexStats,
 ) -> Result<Vec<f64>, ScarMetricError> {
-    let (vertices, defects) = welded_defects(source_index, mesh)?;
     let count = samples.len();
     let sub_count = count.min(4_000);
     let indices = integer_linspace(count, sub_count);
     let radius = thin.max(0.5);
+    let grid = VertexRadiusGrid::build(&welded.vertices, &welded.defects, radius, source_index)?;
     let mut values = Vec::with_capacity(sub_count);
     for &sample in &indices {
-        values.push(
-            vertices
-                .iter()
-                .zip(&defects)
-                .filter(|(vertex, _)| {
-                    distance_squared_between(**vertex, samples[sample].point) <= radius * radius
-                })
-                .map(|(_, defect)| defect.abs())
-                .sum::<f64>(),
-        );
+        values.push(grid.signed_abs_sum(samples[sample].point, &mut stats.vertex_grid_candidates));
     }
-    let percentile = linear_percentile(&values, 95.0).max(1.0e-9);
-    let mut scores = Vec::with_capacity(count);
-    for sample in samples {
-        let mut nearest = 0;
-        let mut nearest_distance = f64::INFINITY;
-        for (candidate, &index) in indices.iter().enumerate() {
-            let distance = distance_squared_between(sample.point, samples[index].point);
-            if distance < nearest_distance {
-                nearest_distance = distance;
-                nearest = candidate;
-            }
-        }
-        scores.push((values[nearest] / percentile).clamp(0.0, 1.0));
-    }
-    Ok(scores)
+    let divisor = curvature_divisor(&values);
+    let propagator = PointKdTree::build(
+        indices
+            .iter()
+            .map(|&sample| samples[sample].point)
+            .collect(),
+    );
+    let nearest = propagator.nearest_batch(
+        &samples
+            .iter()
+            .map(|sample| sample.point)
+            .collect::<Vec<_>>(),
+        &mut stats.sample_kd_nodes_visited,
+    );
+    Ok(nearest
+        .into_iter()
+        .map(|candidate| (values[candidate] / divisor).clamp(0.0, 1.0))
+        .collect())
 }
 
 fn thinness_scores(
     source_index: usize,
     mesh: &Mesh,
-    samples: &[Sample],
+    samples: &[DelicacySample],
     thin: f64,
+    stats: &mut DelicacyIndexStats,
 ) -> Result<Vec<f64>, ScarMetricError> {
+    if !(thin.is_finite() && thin > 0.0) {
+        return Err(ScarMetricError::ArithmeticOverflow {
+            source_index,
+            metric: "thin feature",
+        });
+    }
     let centres = (0..mesh.triangles().len())
         .map(|face| {
             let (a, b, c) = mesh.triangle_points(face);
@@ -967,24 +1116,28 @@ fn thinness_scores(
                 .map(|normal| (scale(add(add(a, b), c), 1.0 / 3.0), normal))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let limit = 40.min(centres.len());
-    let search = thin * 4.0;
-    samples
+    let centres_index = PointKdTree::build(centres.iter().map(|(centre, _)| *centre).collect());
+    let query = samples
         .iter()
+        .map(|sample| sample.point)
+        .collect::<Vec<_>>();
+    let nearest = centres_index.nearest_k_within_batch(
+        &query,
+        40.min(centres.len()),
+        thin * 4.0,
+        &mut stats.centre_kd_nodes_visited,
+    );
+    nearest
+        .into_iter()
         .enumerate()
-        .map(|(sample_index, sample)| {
-            let mut near = Vec::new();
-            for (face, (centre, _)) in centres.iter().enumerate() {
-                let distance = distance(sample.point, *centre);
-                if distance <= search {
-                    insert_nearest(&mut near, (distance, face), limit);
-                }
-            }
+        .map(|(sample_index, near)| {
+            let sample = samples[sample_index];
             let mut thickness = f64::INFINITY;
-            // Selecting K happens before normal filtering, matching the frozen audit.
-            for (_, face) in near {
+            // K is selected before filtering normals.  In particular, a
+            // 41st opposite face cannot replace one of the first forty.
+            for (distance, face) in near {
                 if dot(sample.normal, centres[face].1) < -0.3 {
-                    thickness = thickness.min(distance(sample.point, centres[face].0));
+                    thickness = thickness.min(distance);
                 }
             }
             let score = if thickness.is_finite() {
@@ -1005,10 +1158,7 @@ fn thinness_scores(
         .collect()
 }
 
-fn welded_defects(
-    source_index: usize,
-    mesh: &Mesh,
-) -> Result<(Vec<Vec3>, Vec<f64>), ScarMetricError> {
+fn welded_defects(source_index: usize, mesh: &Mesh) -> Result<WeldedVertices, ScarMetricError> {
     let mut ids = BTreeMap::new();
     let mut vertices = Vec::new();
     let mut face_ids = Vec::with_capacity(mesh.triangles().len());
@@ -1029,25 +1179,659 @@ fn welded_defects(
     let mut sums = vec![0.0; vertices.len()];
     for (face, ids) in face_ids.iter().enumerate() {
         let (a, b, c) = mesh.triangle_points(face);
-        for (at, left, right) in [
-            (ids[0], sub(b, a), sub(c, a)),
-            (ids[1], sub(a, b), sub(c, b)),
-            (ids[2], sub(a, c), sub(b, c)),
-        ] {
+        let angle = |left: Vec3, right: Vec3| {
             let denominator = length(left) * length(right);
-            if !(denominator.is_finite() && denominator > 0.0) {
-                return Err(ScarMetricError::ArithmeticOverflow {
-                    source_index,
-                    metric: "welded angle defect",
-                });
-            }
-            sums[at] += (dot(left, right) / denominator).clamp(-1.0, 1.0).acos();
+            (denominator.is_finite() && denominator > 0.0)
+                .then(|| (dot(left, right) / denominator).clamp(-1.0, 1.0).acos())
+        };
+        let first = angle(sub(b, a), sub(c, a));
+        let second = angle(sub(a, b), sub(c, b));
+        let (Some(first), Some(second)) = (first, second) else {
+            return Err(ScarMetricError::ArithmeticOverflow {
+                source_index,
+                metric: "welded angle defect",
+            });
+        };
+        let third = PI - first - second;
+        let angles = if first < 1.0e-8 || second < 1.0e-8 || third < 1.0e-8 {
+            [0.0; 3]
+        } else {
+            [first, second, third]
+        };
+        for (vertex, angle) in ids.iter().zip(angles) {
+            sums[*vertex] += angle;
         }
     }
-    Ok((
+    Ok(WeldedVertices {
         vertices,
-        sums.into_iter().map(|sum| 2.0 * PI - sum).collect(),
-    ))
+        defects: sums.into_iter().map(|sum| 2.0 * PI - sum).collect(),
+    })
+}
+
+const SURFACE_NEAR_MM: f64 = 1.0e-9;
+const AXIS_BARYCENTRIC_EPSILON: f64 = 1.0e-9;
+const AXIS_DETERMINANT_EPSILON: f64 = 1.0e-14;
+const AXIS_CROSSING_CLUSTER_MM: f64 = 0.005;
+const BVH_LEAF_FACES: usize = 12;
+
+#[derive(Clone, Copy)]
+struct FaceBounds {
+    min: Vec3,
+    max: Vec3,
+    centre: Vec3,
+}
+
+#[derive(Clone, Copy)]
+struct BvhNode {
+    min: Vec3,
+    max: Vec3,
+    start: usize,
+    end: usize,
+    children: Option<(usize, usize)>,
+}
+
+/// Deterministic face index owned by this audit module.  It is intentionally
+/// separate from the public brute-force geometry APIs, so field construction
+/// cannot accidentally inherit producer-side geometry behaviour.
+struct TriangleBvh {
+    order: Vec<usize>,
+    nodes: Vec<BvhNode>,
+    root: usize,
+}
+
+impl TriangleBvh {
+    fn build(mesh: &Mesh) -> Self {
+        let bounds = (0..mesh.triangles().len())
+            .map(|face| {
+                let (a, b, c) = mesh.triangle_points(face);
+                let min = [
+                    a[0].min(b[0]).min(c[0]),
+                    a[1].min(b[1]).min(c[1]),
+                    a[2].min(b[2]).min(c[2]),
+                ];
+                let max = [
+                    a[0].max(b[0]).max(c[0]),
+                    a[1].max(b[1]).max(c[1]),
+                    a[2].max(b[2]).max(c[2]),
+                ];
+                FaceBounds {
+                    min,
+                    max,
+                    centre: scale(add(add(a, b), c), 1.0 / 3.0),
+                }
+            })
+            .collect::<Vec<_>>();
+        let mut order = Vec::with_capacity(bounds.len());
+        let mut nodes = Vec::with_capacity(bounds.len() * 2);
+        let root = Self::build_node(&bounds, (0..bounds.len()).collect(), &mut order, &mut nodes);
+        Self { order, nodes, root }
+    }
+
+    fn build_node(
+        bounds: &[FaceBounds],
+        mut faces: Vec<usize>,
+        order: &mut Vec<usize>,
+        nodes: &mut Vec<BvhNode>,
+    ) -> usize {
+        let (min, max) = face_bounds(bounds, &faces);
+        let node = nodes.len();
+        nodes.push(BvhNode {
+            min,
+            max,
+            start: 0,
+            end: 0,
+            children: None,
+        });
+        if faces.len() <= BVH_LEAF_FACES {
+            let start = order.len();
+            order.append(&mut faces);
+            nodes[node].start = start;
+            nodes[node].end = order.len();
+            return node;
+        }
+        let extent = [max[0] - min[0], max[1] - min[1], max[2] - min[2]];
+        let axis = (0..3)
+            .max_by(|left, right| extent[*left].total_cmp(&extent[*right]))
+            .unwrap_or(0);
+        faces.sort_by(|left, right| {
+            bounds[*left].centre[axis]
+                .total_cmp(&bounds[*right].centre[axis])
+                .then(left.cmp(right))
+        });
+        let right = faces.split_off(faces.len() / 2);
+        let left = Self::build_node(bounds, faces, order, nodes);
+        let right = Self::build_node(bounds, right, order, nodes);
+        nodes[node].children = Some((left, right));
+        node
+    }
+
+    fn frozen_contains_batch(
+        &self,
+        mesh: &Mesh,
+        points: &[Vec3],
+        stats: &mut DelicacyIndexStats,
+    ) -> Result<Vec<bool>, ScarMetricError> {
+        let nearest = self.nearest_squared_batch(mesh, points, stats);
+        let mut inside = Vec::with_capacity(points.len());
+        for (point, nearest) in points.iter().zip(nearest) {
+            if nearest <= SURFACE_NEAR_MM * SURFACE_NEAR_MM {
+                inside.push(true);
+                continue;
+            }
+            let votes = (0..3)
+                .filter(|axis| self.axis_inside(mesh, *point, *axis, stats))
+                .count();
+            inside.push(votes >= 2);
+        }
+        Ok(inside)
+    }
+
+    fn nearest_squared_batch(
+        &self,
+        mesh: &Mesh,
+        points: &[Vec3],
+        stats: &mut DelicacyIndexStats,
+    ) -> Vec<f64> {
+        points
+            .iter()
+            .map(|point| {
+                let mut nearest = f64::INFINITY;
+                self.nearest_node(mesh, self.root, *point, &mut nearest, stats);
+                nearest
+            })
+            .collect()
+    }
+
+    fn nearest_node(
+        &self,
+        mesh: &Mesh,
+        node: usize,
+        point: Vec3,
+        nearest: &mut f64,
+        stats: &mut DelicacyIndexStats,
+    ) {
+        stats.triangle_nodes_visited += 1;
+        let node = self.nodes[node];
+        if point_box_squared_distance(point, node.min, node.max) > *nearest {
+            return;
+        }
+        if let Some((left, right)) = node.children {
+            let left_distance =
+                point_box_squared_distance(point, self.nodes[left].min, self.nodes[left].max);
+            let right_distance =
+                point_box_squared_distance(point, self.nodes[right].min, self.nodes[right].max);
+            if left_distance <= right_distance {
+                self.nearest_node(mesh, left, point, nearest, stats);
+                self.nearest_node(mesh, right, point, nearest, stats);
+            } else {
+                self.nearest_node(mesh, right, point, nearest, stats);
+                self.nearest_node(mesh, left, point, nearest, stats);
+            }
+            return;
+        }
+        for &face in &self.order[node.start..node.end] {
+            stats.triangle_faces_tested += 1;
+            let (a, b, c) = mesh.triangle_points(face);
+            *nearest = (*nearest).min(distance_squared_between(
+                point,
+                closest_point_on_triangle(point, a, b, c),
+            ));
+        }
+    }
+
+    fn axis_inside(
+        &self,
+        mesh: &Mesh,
+        point: Vec3,
+        axis: usize,
+        stats: &mut DelicacyIndexStats,
+    ) -> bool {
+        let mut crossings = Vec::new();
+        self.axis_crossings_node(mesh, self.root, point, axis, &mut crossings, stats);
+        crossings.sort_by(f64::total_cmp);
+        let mut clusters = 0;
+        let mut previous = None;
+        for crossing in crossings {
+            if previous.is_none_or(|last: f64| crossing - last > AXIS_CROSSING_CLUSTER_MM) {
+                clusters += 1;
+            }
+            previous = Some(crossing);
+        }
+        clusters % 2 == 1
+    }
+
+    fn axis_crossings_node(
+        &self,
+        mesh: &Mesh,
+        node: usize,
+        point: Vec3,
+        axis: usize,
+        crossings: &mut Vec<f64>,
+        stats: &mut DelicacyIndexStats,
+    ) {
+        stats.triangle_nodes_visited += 1;
+        let node = self.nodes[node];
+        if node.max[axis] <= point[axis] + AXIS_BARYCENTRIC_EPSILON {
+            return;
+        }
+        if (0..3)
+            .filter(|candidate| *candidate != axis)
+            .any(|candidate| {
+                point[candidate] < node.min[candidate] - AXIS_BARYCENTRIC_EPSILON
+                    || point[candidate] > node.max[candidate] + AXIS_BARYCENTRIC_EPSILON
+            })
+        {
+            return;
+        }
+        if let Some((left, right)) = node.children {
+            self.axis_crossings_node(mesh, left, point, axis, crossings, stats);
+            self.axis_crossings_node(mesh, right, point, axis, crossings, stats);
+            return;
+        }
+        for &face in &self.order[node.start..node.end] {
+            stats.triangle_faces_tested += 1;
+            let (a, b, c) = mesh.triangle_points(face);
+            if let Some(crossing) = axis_triangle_crossing(point, axis, a, b, c) {
+                crossings.push(crossing);
+            }
+        }
+    }
+}
+
+fn face_bounds(bounds: &[FaceBounds], faces: &[usize]) -> (Vec3, Vec3) {
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    for &face in faces {
+        for axis in 0..3 {
+            min[axis] = min[axis].min(bounds[face].min[axis]);
+            max[axis] = max[axis].max(bounds[face].max[axis]);
+        }
+    }
+    (min, max)
+}
+
+fn point_box_squared_distance(point: Vec3, min: Vec3, max: Vec3) -> f64 {
+    (0..3)
+        .map(|axis| {
+            if point[axis] < min[axis] {
+                min[axis] - point[axis]
+            } else if point[axis] > max[axis] {
+                point[axis] - max[axis]
+            } else {
+                0.0
+            }
+        })
+        .map(|distance| distance * distance)
+        .sum()
+}
+
+fn axis_triangle_crossing(point: Vec3, axis: usize, a: Vec3, b: Vec3, c: Vec3) -> Option<f64> {
+    let projected = match axis {
+        0 => [1, 2],
+        1 => [0, 2],
+        _ => [0, 1],
+    };
+    let ab = sub(b, a);
+    let ac = sub(c, a);
+    let to_point = sub(point, a);
+    let determinant = ab[projected[0]] * ac[projected[1]] - ab[projected[1]] * ac[projected[0]];
+    if determinant.abs() <= AXIS_DETERMINANT_EPSILON {
+        return None;
+    }
+    let alpha = (to_point[projected[0]] * ac[projected[1]]
+        - to_point[projected[1]] * ac[projected[0]])
+        / determinant;
+    let beta = (ab[projected[0]] * to_point[projected[1]]
+        - ab[projected[1]] * to_point[projected[0]])
+        / determinant;
+    if alpha < -AXIS_BARYCENTRIC_EPSILON
+        || beta < -AXIS_BARYCENTRIC_EPSILON
+        || alpha + beta > 1.0 + AXIS_BARYCENTRIC_EPSILON
+    {
+        return None;
+    }
+    let crossing = a[axis] + alpha * ab[axis] + beta * ac[axis];
+    (crossing > point[axis] + AXIS_BARYCENTRIC_EPSILON).then_some(crossing)
+}
+
+fn closest_point_on_triangle(point: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
+    // Ericson's region tests, duplicated privately so this indexed path does
+    // not call the deliberately brute-force public geometry batch API.
+    let ab = sub(b, a);
+    let ac = sub(c, a);
+    let ap = sub(point, a);
+    let d1 = dot(ab, ap);
+    let d2 = dot(ac, ap);
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return a;
+    }
+    let bp = sub(point, b);
+    let d3 = dot(ab, bp);
+    let d4 = dot(ac, bp);
+    if d3 >= 0.0 && d4 <= d3 {
+        return b;
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        return add(a, scale(ab, d1 / (d1 - d3)));
+    }
+    let cp = sub(point, c);
+    let d5 = dot(ab, cp);
+    let d6 = dot(ac, cp);
+    if d6 >= 0.0 && d5 <= d6 {
+        return c;
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 <= 0.0 && d6 >= 0.0 {
+        return add(a, scale(ac, d2 / (d2 - d6)));
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        return add(b, scale(sub(c, b), (d4 - d3) / ((d4 - d3) + (d5 - d6))));
+    }
+    let denominator = 1.0 / (va + vb + vc);
+    add(
+        a,
+        add(scale(ab, vb * denominator), scale(ac, vc * denominator)),
+    )
+}
+
+#[derive(Clone, Copy)]
+struct KdNode {
+    point: usize,
+    min: Vec3,
+    max: Vec3,
+    children: [Option<usize>; 2],
+}
+
+/// Deterministic point KD tree used for both full sample propagation and
+/// bounded face-centre neighbour selection.
+struct PointKdTree {
+    points: Vec<Vec3>,
+    nodes: Vec<KdNode>,
+    root: usize,
+}
+
+impl PointKdTree {
+    fn build(points: Vec<Vec3>) -> Self {
+        debug_assert!(!points.is_empty());
+        let mut nodes = Vec::with_capacity(points.len());
+        let root = Self::build_node(&points, (0..points.len()).collect(), &mut nodes);
+        Self {
+            points,
+            nodes,
+            root,
+        }
+    }
+
+    fn build_node(points: &[Vec3], mut ids: Vec<usize>, nodes: &mut Vec<KdNode>) -> usize {
+        let (min, max) = point_bounds(points, &ids);
+        let axis = (0..3)
+            .max_by(|left, right| (max[*left] - min[*left]).total_cmp(&(max[*right] - min[*right])))
+            .unwrap_or(0);
+        ids.sort_by(|left, right| {
+            points[*left][axis]
+                .total_cmp(&points[*right][axis])
+                .then(left.cmp(right))
+        });
+        let median = ids.len() / 2;
+        let point = ids[median];
+        let right_ids = ids.split_off(median + 1);
+        ids.pop();
+        let node = nodes.len();
+        nodes.push(KdNode {
+            point,
+            min,
+            max,
+            children: [None, None],
+        });
+        let left = (!ids.is_empty()).then(|| Self::build_node(points, ids, nodes));
+        let right = (!right_ids.is_empty()).then(|| Self::build_node(points, right_ids, nodes));
+        nodes[node].children = [left, right];
+        node
+    }
+
+    fn nearest_batch(&self, points: &[Vec3], visits: &mut usize) -> Vec<usize> {
+        points
+            .iter()
+            .map(|point| {
+                let mut best = (f64::INFINITY, usize::MAX);
+                self.nearest_node(self.root, *point, &mut best, visits);
+                best.1
+            })
+            .collect()
+    }
+
+    fn nearest_node(&self, node: usize, point: Vec3, best: &mut (f64, usize), visits: &mut usize) {
+        *visits += 1;
+        let node = self.nodes[node];
+        if point_box_squared_distance(point, node.min, node.max) > best.0 {
+            return;
+        }
+        let candidate = (
+            distance_squared_between(point, self.points[node.point]),
+            node.point,
+        );
+        if candidate
+            .0
+            .total_cmp(&best.0)
+            .then(candidate.1.cmp(&best.1))
+            .is_lt()
+        {
+            *best = candidate;
+        }
+        self.visit_nearest_children(node.children, point, best, visits);
+    }
+
+    fn nearest_k_within_batch(
+        &self,
+        points: &[Vec3],
+        limit: usize,
+        maximum_distance: f64,
+        visits: &mut usize,
+    ) -> Vec<Vec<(f64, usize)>> {
+        points
+            .iter()
+            .map(|point| {
+                let mut nearest = Vec::with_capacity(limit);
+                self.nearest_k_node(
+                    self.root,
+                    *point,
+                    limit,
+                    maximum_distance,
+                    &mut nearest,
+                    visits,
+                );
+                nearest
+            })
+            .collect()
+    }
+
+    fn nearest_k_node(
+        &self,
+        node: usize,
+        point: Vec3,
+        limit: usize,
+        maximum_distance: f64,
+        nearest: &mut Vec<(f64, usize)>,
+        visits: &mut usize,
+    ) {
+        *visits += 1;
+        let node = self.nodes[node];
+        let box_distance = point_box_squared_distance(point, node.min, node.max).sqrt();
+        let worst = if nearest.len() < limit {
+            maximum_distance
+        } else {
+            nearest
+                .last()
+                .map_or(maximum_distance, |value| value.0.min(maximum_distance))
+        };
+        if box_distance > worst {
+            return;
+        }
+        let distance = distance(point, self.points[node.point]);
+        if distance < maximum_distance {
+            insert_nearest(nearest, (distance, node.point), limit);
+        }
+        self.visit_nearest_k_children(
+            node.children,
+            point,
+            limit,
+            maximum_distance,
+            nearest,
+            visits,
+        );
+    }
+
+    fn visit_nearest_children(
+        &self,
+        children: [Option<usize>; 2],
+        point: Vec3,
+        best: &mut (f64, usize),
+        visits: &mut usize,
+    ) {
+        match children {
+            [Some(left), Some(right)] => {
+                let left_distance =
+                    point_box_squared_distance(point, self.nodes[left].min, self.nodes[left].max);
+                let right_distance =
+                    point_box_squared_distance(point, self.nodes[right].min, self.nodes[right].max);
+                if left_distance <= right_distance {
+                    self.nearest_node(left, point, best, visits);
+                    self.nearest_node(right, point, best, visits);
+                } else {
+                    self.nearest_node(right, point, best, visits);
+                    self.nearest_node(left, point, best, visits);
+                }
+            }
+            [Some(child), None] | [None, Some(child)] => {
+                self.nearest_node(child, point, best, visits)
+            }
+            [None, None] => {}
+        }
+    }
+
+    fn visit_nearest_k_children(
+        &self,
+        children: [Option<usize>; 2],
+        point: Vec3,
+        limit: usize,
+        maximum_distance: f64,
+        nearest: &mut Vec<(f64, usize)>,
+        visits: &mut usize,
+    ) {
+        match children {
+            [Some(left), Some(right)] => {
+                let left_distance =
+                    point_box_squared_distance(point, self.nodes[left].min, self.nodes[left].max);
+                let right_distance =
+                    point_box_squared_distance(point, self.nodes[right].min, self.nodes[right].max);
+                if left_distance <= right_distance {
+                    self.nearest_k_node(left, point, limit, maximum_distance, nearest, visits);
+                    self.nearest_k_node(right, point, limit, maximum_distance, nearest, visits);
+                } else {
+                    self.nearest_k_node(right, point, limit, maximum_distance, nearest, visits);
+                    self.nearest_k_node(left, point, limit, maximum_distance, nearest, visits);
+                }
+            }
+            [Some(child), None] | [None, Some(child)] => {
+                self.nearest_k_node(child, point, limit, maximum_distance, nearest, visits);
+            }
+            [None, None] => {}
+        }
+    }
+}
+
+fn point_bounds(points: &[Vec3], ids: &[usize]) -> (Vec3, Vec3) {
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    for &id in ids {
+        for axis in 0..3 {
+            min[axis] = min[axis].min(points[id][axis]);
+            max[axis] = max[axis].max(points[id][axis]);
+        }
+    }
+    (min, max)
+}
+
+/// Exact-coordinate welded vertex grid.  The grid only accelerates radius
+/// lookup; identity remains the canonical IEEE key, with +0 and -0 equal.
+struct VertexRadiusGrid {
+    radius: f64,
+    vertices: Vec<Vec3>,
+    defects: Vec<f64>,
+    cells: BTreeMap<[i64; 3], Vec<usize>>,
+}
+
+impl VertexRadiusGrid {
+    fn build(
+        vertices: &[Vec3],
+        defects: &[f64],
+        radius: f64,
+        source_index: usize,
+    ) -> Result<Self, ScarMetricError> {
+        if !(radius.is_finite() && radius > 0.0) {
+            return Err(ScarMetricError::SpatialIndex {
+                source_index,
+                index: "welded-vertex radius",
+            });
+        }
+        let mut cells = BTreeMap::new();
+        for (index, vertex) in vertices.iter().enumerate() {
+            let cell = radius_cell(*vertex, radius).ok_or(ScarMetricError::SpatialIndex {
+                source_index,
+                index: "welded-vertex radius",
+            })?;
+            cells.entry(cell).or_insert_with(Vec::new).push(index);
+        }
+        Ok(Self {
+            radius,
+            vertices: vertices.to_vec(),
+            defects: defects.to_vec(),
+            cells,
+        })
+    }
+
+    fn signed_abs_sum(&self, point: Vec3, candidates: &mut usize) -> f64 {
+        let Some(cell) = radius_cell(point, self.radius) else {
+            return 0.0;
+        };
+        let mut sum = 0.0;
+        for x in -1..=1 {
+            for y in -1..=1 {
+                for z in -1..=1 {
+                    let key = [
+                        cell[0].saturating_add(x),
+                        cell[1].saturating_add(y),
+                        cell[2].saturating_add(z),
+                    ];
+                    if let Some(vertices) = self.cells.get(&key) {
+                        for &vertex in vertices {
+                            *candidates += 1;
+                            if distance_squared_between(self.vertices[vertex], point)
+                                <= self.radius * self.radius
+                            {
+                                sum += self.defects[vertex];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        sum.abs()
+    }
+}
+
+fn radius_cell(point: Vec3, radius: f64) -> Option<[i64; 3]> {
+    point
+        .map(|component| (component / radius).floor())
+        .map(|component| {
+            (component.is_finite() && component >= i64::MIN as f64 && component <= i64::MAX as f64)
+                .then_some(component as i64)
+        })
+        .into_iter()
+        .collect::<Option<Vec<_>>>()
+        .and_then(|components| components.try_into().ok())
 }
 
 fn face_normal(source_index: usize, mesh: &Mesh, face: usize) -> Result<Vec3, ScarMetricError> {
@@ -1120,12 +1904,35 @@ fn lower_bound(values: &[f64], target: f64) -> usize {
         .partition_point(|value| *value < target)
         .min(values.len() - 1)
 }
+fn normalize_weights(weights: &mut [f64]) {
+    let maximum = weights
+        .iter()
+        .copied()
+        .filter(|value| *value > 0.0)
+        .fold(0.0_f64, f64::max);
+    let divisor = if maximum > 0.0 { maximum } else { 1.0 };
+    for weight in weights {
+        *weight = (*weight / divisor).clamp(0.0, 1.0);
+    }
+}
+fn curvature_divisor(values: &[f64]) -> f64 {
+    let percentile = linear_percentile(values, 95.0);
+    let c_hi = if percentile == 0.0 { 1.0 } else { percentile };
+    c_hi.max(1.0e-9)
+}
 fn integer_linspace(length: usize, count: usize) -> Vec<usize> {
     if count == 1 {
         vec![0]
     } else {
+        let step = (length - 1) as f64 / (count - 1) as f64;
         (0..count)
-            .map(|index| ((index as f64 * (length - 1) as f64) / (count - 1) as f64) as usize)
+            .map(|index| {
+                if index + 1 == count {
+                    length - 1
+                } else {
+                    (index as f64 * step).floor() as usize
+                }
+            })
             .collect()
     }
 }
@@ -1560,10 +2367,14 @@ impl LegacyMt19937 {
 #[cfg(test)]
 mod tests {
     use super::{
-        anchored_entry_is_eligible, contact_patch_area, endpoint_matches_midpoint,
-        integer_linspace, linear_percentile, parallel_stored_segments, positive_stored_radius,
-        stored_equal, stored_scaled_equal, LegacyMt19937, RealInterval, Settings,
+        anchored_entry_is_eligible, axis_triangle_crossing, contact_patch_area, curvature_divisor,
+        curvature_scores, endpoint_matches_midpoint, exterior_sample_faces, integer_linspace,
+        linear_percentile, normalize_weights, parallel_stored_segments, positive_stored_radius,
+        sample_faces, stored_equal, stored_scaled_equal, thinness_scores, welded_defects,
+        DelicacyField, DelicacyIndexStats, DelicacySample, LegacyMt19937, PointKdTree,
+        RealInterval, Settings, TriangleBvh, VertexRadiusGrid,
     };
+    use crate::{Mesh, Vec3};
     #[test]
     fn legacy_seed_zero_matches_numpy_randomstate_prefix() {
         let mut rng = LegacyMt19937::seeded(0);
@@ -1573,7 +2384,508 @@ mod tests {
     #[test]
     fn numpy_integer_linspace_and_percentile_are_linear() {
         assert_eq!(integer_linspace(8, 4), [0, 2, 4, 7]);
+        assert_eq!(integer_linspace(8, 1), [0]);
+        assert_eq!(integer_linspace(4_001, 4_000).last(), Some(&4_000));
         assert!((linear_percentile(&[0.0, 10.0, 20.0, 30.0], 95.0) - 28.5).abs() < 1.0e-12);
+    }
+
+    #[test]
+    fn sampling_consumes_all_face_uniforms_before_barycentric_uniforms() {
+        let mesh = Mesh::new(
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [0.0, 2.0, 0.0],
+            ],
+            vec![[0, 1, 2], [3, 4, 5]],
+        )
+        .expect("two valid faces");
+        let samples = sample_faces(0, &mesh, &[0, 1], 0).expect("legacy sample batch");
+        // Golden values deliberately include the RNG position after 2,000
+        // face draws; an interleaved implementation produces different bits.
+        assert_eq!(
+            samples[..3]
+                .iter()
+                .map(|sample| (sample.face_index, sample.point.map(f64::to_bits)))
+                .collect::<Vec<_>>(),
+            vec![
+                (1, [4_600_462_382_681_693_984, 4_607_397_835_103_780_724, 0]),
+                (1, [4_607_390_989_415_816_823, 4_602_688_197_223_824_590, 0]),
+                (1, [4_608_128_562_182_748_440, 4_603_631_867_479_093_218, 0]),
+            ]
+        );
+    }
+
+    #[test]
+    fn exact_welding_signed_zero_and_signed_defects_are_preserved() {
+        let faces = [
+            [[0.0, -0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]],
+            [[0.0, -0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 1.0, 0.0]],
+        ];
+        let vertices = faces.into_iter().flatten().collect::<Vec<_>>();
+        let mesh = Mesh::new(vertices, vec![[0, 1, 2], [3, 4, 5], [6, 7, 8], [9, 10, 11]])
+            .expect("closed duplicated-corner tetrahedron");
+        let welded = welded_defects(0, &mesh).expect("welded tetra defects");
+        assert_eq!(welded.vertices.len(), 4);
+        assert!((welded.defects.iter().sum::<f64>() - 4.0 * std::f64::consts::PI).abs() < 1.0e-12);
+
+        let grid =
+            VertexRadiusGrid::build(&[[0.0, 0.0, 0.0], [0.25, 0.0, 0.0]], &[2.0, -2.0], 0.5, 0)
+                .expect("grid");
+        let mut candidates = 0;
+        assert_eq!(grid.signed_abs_sum([0.0, 0.0, 0.0], &mut candidates), 0.0);
+        let distinct = VertexRadiusGrid::build(
+            &[[0.0, 0.0, 0.0], [f64::from(f32::from_bits(1)), 0.0, 0.0]],
+            &[1.0, 1.0],
+            0.5,
+            0,
+        )
+        .expect("exact near-equal vertices remain distinct");
+        assert_eq!(distinct.vertices.len(), 2);
+    }
+
+    #[test]
+    fn kd_selection_is_stable_bounded_and_strict() {
+        let tied = PointKdTree::build(vec![[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]);
+        let mut visits = 0;
+        assert_eq!(tied.nearest_batch(&[[0.0, 0.0, 0.0]], &mut visits), [0]);
+        let forty_one = PointKdTree::build(
+            (0..41)
+                .map(|index| [index as f64 * 0.01, 0.0, 0.0])
+                .collect(),
+        );
+        let nearest = forty_one.nearest_k_within_batch(&[[0.0, 0.0, 0.0]], 40, 1.0, &mut visits);
+        assert_eq!(nearest[0].len(), 40);
+        assert_eq!(nearest[0].last().map(|value| value.1), Some(39));
+        let strict = tied.nearest_k_within_batch(&[[0.0, 0.0, 0.0]], 2, 1.0, &mut visits);
+        assert!(
+            strict[0].is_empty(),
+            "distance exactly at the bound is excluded"
+        );
+    }
+
+    #[test]
+    fn frozen_exterior_subset_retains_original_face_mapping() {
+        let outer = cube_soup(2.0, [0.0, 0.0, 0.0]);
+        let inner = cube_soup(0.5, [0.0, 0.0, 0.0]);
+        let vertices = outer.into_iter().chain(inner).collect::<Vec<_>>();
+        let triangles = (0..24)
+            .map(|face| [face * 3, face * 3 + 1, face * 3 + 2])
+            .collect::<Vec<_>>();
+        let mesh = Mesh::new(vertices, triangles).expect("nested cubes");
+        let bvh = TriangleBvh::build(&mesh);
+        let mut stats = DelicacyIndexStats::default();
+        let selected = exterior_sample_faces(0, &mesh, &bvh, &mut stats).expect("exterior field");
+        assert_eq!(selected, (0..12).collect::<Vec<_>>());
+        assert!(
+            stats.triangle_faces_tested < 24 * 24 * 6 * 4,
+            "BVH avoids the complete parity Cartesian scan"
+        );
+    }
+
+    #[test]
+    fn frozen_exterior_keeps_odd_coverage_for_overlap_and_triple_overlap() {
+        for centres in [
+            vec![[0.0, 0.0, 0.0], [0.75, 0.0, 0.0]],
+            vec![[-0.75, 0.0, 0.0], [0.0, 0.0, 0.0], [0.75, 0.0, 0.0]],
+        ] {
+            let mesh = cubes_mesh(&centres);
+            let expected = naive_exterior_faces(&mesh);
+            let bvh = TriangleBvh::build(&mesh);
+            let mut stats = DelicacyIndexStats::default();
+            let selected =
+                exterior_sample_faces(0, &mesh, &bvh, &mut stats).expect("frozen exterior");
+            assert_eq!(selected, expected, "independent parity oracle");
+            assert!(
+                selected.len() < mesh.triangles().len() && !selected.is_empty(),
+                "overlap produces a proper frozen exterior subset"
+            );
+            let samples = sample_faces(0, &mesh, &selected, 23).expect("mapped samples");
+            assert!(samples.iter().all(|sample| {
+                sample.normal == super::face_normal(0, &mesh, sample.face_index).expect("normal")
+            }));
+        }
+    }
+
+    #[test]
+    fn batch_contact_lookup_uses_nearest_sample_index_ties() {
+        let field = DelicacyField {
+            samples: vec![
+                DelicacySample {
+                    point: [-1.0, 0.0, 0.0],
+                    normal: [1.0, 0.0, 0.0],
+                    face_index: 9,
+                },
+                DelicacySample {
+                    point: [1.0, 0.0, 0.0],
+                    normal: [-1.0, 0.0, 0.0],
+                    face_index: 4,
+                },
+            ],
+            weights: vec![0.25, 0.75],
+            sample_index: PointKdTree::build(vec![[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+            stats: DelicacyIndexStats::default(),
+        };
+        assert_eq!(
+            field
+                .query_points(0, &[[0.0, 0.0, 0.0]])
+                .expect("batch lookup")
+                .weights,
+            [0.25]
+        );
+    }
+
+    #[test]
+    fn indexed_triangle_batch_avoids_representative_cartesian_scan() {
+        let mut vertices = Vec::new();
+        let mut triangles = Vec::new();
+        let mut points = Vec::new();
+        for y in 0..16 {
+            for x in 0..16 {
+                let base = vertices.len();
+                let origin = [x as f64 * 10.0, y as f64 * 10.0, 0.0];
+                vertices.extend([
+                    origin,
+                    [origin[0] + 1.0, origin[1], 0.0],
+                    [origin[0], origin[1] + 1.0, 0.0],
+                ]);
+                triangles.push([base, base + 1, base + 2]);
+                points.push([origin[0] + 0.2, origin[1] + 0.2, 0.4]);
+            }
+        }
+        let mesh = Mesh::new(vertices, triangles).expect("separated field faces");
+        let bvh = TriangleBvh::build(&mesh);
+        let mut stats = DelicacyIndexStats::default();
+        let nearest = bvh.nearest_squared_batch(&mesh, &points, &mut stats);
+        assert!(nearest
+            .iter()
+            .all(|distance| (*distance - 0.16).abs() < 1.0e-12));
+        assert!(
+            stats.triangle_faces_tested < mesh.triangles().len() * points.len() / 8,
+            "test-only visit count proves the indexed batch does not scan every face"
+        );
+    }
+
+    #[test]
+    fn closed_curvature_radius_includes_its_boundary_only() {
+        let grid = VertexRadiusGrid::build(&[[0.0, 0.0, 0.0]], &[3.0], 0.5, 0).expect("grid");
+        let mut candidates = 0;
+        assert_eq!(grid.signed_abs_sum([0.5, 0.0, 0.0], &mut candidates), 3.0);
+        assert_eq!(
+            grid.signed_abs_sum(
+                [f64::from_bits(0.5_f64.to_bits() + 1), 0.0, 0.0],
+                &mut candidates
+            ),
+            0.0
+        );
+    }
+
+    #[test]
+    fn indexed_field_matches_the_straightforward_complete_small_mesh_oracle() {
+        let outer = cube_soup(2.0, [0.0, 0.0, 0.0]);
+        let inner = cube_soup(0.5, [0.0, 0.0, 0.0]);
+        let vertices = outer.into_iter().chain(inner).collect::<Vec<_>>();
+        let triangles = (0..24)
+            .map(|face| [face * 3, face * 3 + 1, face * 3 + 2])
+            .collect::<Vec<_>>();
+        let mesh = Mesh::new(vertices, triangles).expect("nested cubes");
+        let settings = test_settings();
+        let bvh = TriangleBvh::build(&mesh);
+        let mut stats = DelicacyIndexStats::default();
+        let selected = exterior_sample_faces(0, &mesh, &bvh, &mut stats).expect("indexed exterior");
+        let expected_selected = naive_exterior_faces(&mesh);
+        assert_eq!(
+            selected, expected_selected,
+            "complete exterior face selection"
+        );
+
+        let expected_samples =
+            sample_faces(0, &mesh, &expected_selected, 17).expect("naive sample stream");
+        let field = DelicacyField::build(0, &mesh, settings, 17).expect("indexed field");
+        assert_eq!(
+            field.samples, expected_samples,
+            "raw face ids, points, and normals"
+        );
+
+        let welded = welded_defects(0, &mesh).expect("welded oracle");
+        let expected_curvature =
+            naive_curvature(&field.samples, &welded.vertices, &welded.defects, 1.5);
+        let expected_thinness = naive_thinness(&mesh, &field.samples, 1.5);
+        let mut expected_weights = expected_curvature
+            .iter()
+            .zip(&expected_thinness)
+            .map(|(curvature, thinness)| 0.6 * curvature + 0.4 * thinness)
+            .collect::<Vec<_>>();
+        normalize_weights(&mut expected_weights);
+        let mut indexed_stats = DelicacyIndexStats::default();
+        let indexed_curvature =
+            curvature_scores(0, &field.samples, &welded, 1.5, &mut indexed_stats)
+                .expect("indexed curvature");
+        let indexed_thinness = thinness_scores(0, &mesh, &field.samples, 1.5, &mut indexed_stats)
+            .expect("indexed thinness");
+        assert_close_slices(&indexed_curvature, &expected_curvature);
+        assert_close_slices(&indexed_thinness, &expected_thinness);
+        assert_close_slices(field.weights(), &expected_weights);
+
+        let contact = [[0.0, 0.0, 1.0], [0.0, 0.0, 0.25]];
+        let expected_lookup = contact
+            .iter()
+            .map(|point| {
+                let sample = field
+                    .samples
+                    .iter()
+                    .enumerate()
+                    .min_by(|(left, left_sample), (right, right_sample)| {
+                        super::distance_squared_between(*point, left_sample.point)
+                            .total_cmp(&super::distance_squared_between(*point, right_sample.point))
+                            .then(left.cmp(right))
+                    })
+                    .expect("samples")
+                    .0;
+                field.weights[sample]
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            field
+                .query_points(0, &contact)
+                .expect("indexed contacts")
+                .weights,
+            expected_lookup
+        );
+    }
+
+    #[test]
+    fn curvature_and_blend_zero_fallbacks_are_explicit() {
+        assert_eq!(curvature_divisor(&[0.0, 0.0]), 1.0);
+        assert!((curvature_divisor(&[0.0, 2.0, 4.0]) - 3.8).abs() < 1.0e-12);
+        let mut zero = vec![0.0, 0.0];
+        normalize_weights(&mut zero);
+        assert_eq!(zero, [0.0, 0.0]);
+        let mut mixed = vec![0.0, 0.5, 2.0];
+        normalize_weights(&mut mixed);
+        assert_eq!(mixed, [0.0, 0.25, 1.0]);
+    }
+
+    fn test_settings() -> Settings {
+        Settings {
+            curvature_weight: 0.6,
+            thinness_weight: 0.4,
+            thin_feature_mm: 1.5,
+            eps_cos: 1.0e-9,
+            tol_mm: 0.05,
+            stub_factor: 1.5,
+            foot_factor: 1.4,
+        }
+    }
+
+    fn naive_exterior_faces(mesh: &Mesh) -> Vec<usize> {
+        let mut exterior = Vec::new();
+        for face in 0..mesh.triangles().len() {
+            let (a, b, c) = mesh.triangle_points(face);
+            let normal = super::face_normal(0, mesh, face).expect("normal");
+            let inside = [[1.0 / 3.0; 3], [0.6, 0.2, 0.2], [0.2, 0.6, 0.2]]
+                .into_iter()
+                .flat_map(|barycentric| {
+                    let point = super::add(
+                        super::scale(a, barycentric[0]),
+                        super::add(
+                            super::scale(b, barycentric[1]),
+                            super::scale(c, barycentric[2]),
+                        ),
+                    );
+                    [0.05, 0.15].map(|offset| super::add(point, super::scale(normal, offset)))
+                })
+                .filter(|point| naive_frozen_contains(mesh, *point))
+                .count();
+            if inside < 4 {
+                exterior.push(face);
+            }
+        }
+        if exterior.is_empty() || exterior.len() == mesh.triangles().len() {
+            (0..mesh.triangles().len()).collect()
+        } else {
+            exterior
+        }
+    }
+
+    fn naive_frozen_contains(mesh: &Mesh, point: Vec3) -> bool {
+        let surface = (0..mesh.triangles().len()).any(|face| {
+            let (a, b, c) = mesh.triangle_points(face);
+            super::distance_squared_between(point, super::closest_point_on_triangle(point, a, b, c))
+                <= super::SURFACE_NEAR_MM * super::SURFACE_NEAR_MM
+        });
+        if surface {
+            return true;
+        }
+        (0..3)
+            .filter(|axis| {
+                let mut crossings = (0..mesh.triangles().len())
+                    .filter_map(|face| {
+                        let (a, b, c) = mesh.triangle_points(face);
+                        axis_triangle_crossing(point, *axis, a, b, c)
+                    })
+                    .collect::<Vec<_>>();
+                crossings.sort_by(f64::total_cmp);
+                let mut clusters = 0;
+                let mut last = None;
+                for crossing in crossings {
+                    if last.is_none_or(|previous: f64| {
+                        crossing - previous > super::AXIS_CROSSING_CLUSTER_MM
+                    }) {
+                        clusters += 1;
+                    }
+                    last = Some(crossing);
+                }
+                clusters % 2 == 1
+            })
+            .count()
+            >= 2
+    }
+
+    fn naive_curvature(
+        samples: &[DelicacySample],
+        vertices: &[Vec3],
+        defects: &[f64],
+        thin: f64,
+    ) -> Vec<f64> {
+        let indices = integer_linspace(samples.len(), samples.len().min(4_000));
+        let radius = thin.max(0.5);
+        let values = indices
+            .iter()
+            .map(|sample| {
+                vertices
+                    .iter()
+                    .zip(defects)
+                    .filter(|(vertex, _)| {
+                        super::distance_squared_between(**vertex, samples[*sample].point)
+                            <= radius * radius
+                    })
+                    .map(|(_, defect)| *defect)
+                    .sum::<f64>()
+                    .abs()
+            })
+            .collect::<Vec<_>>();
+        let divisor = curvature_divisor(&values);
+        samples
+            .iter()
+            .map(|sample| {
+                let nearest = indices
+                    .iter()
+                    .enumerate()
+                    .min_by(|(left, left_index), (right, right_index)| {
+                        super::distance_squared_between(sample.point, samples[**left_index].point)
+                            .total_cmp(&super::distance_squared_between(
+                                sample.point,
+                                samples[**right_index].point,
+                            ))
+                            .then(left.cmp(right))
+                    })
+                    .expect("curvature samples")
+                    .0;
+                (values[nearest] / divisor).clamp(0.0, 1.0)
+            })
+            .collect()
+    }
+
+    fn naive_thinness(mesh: &Mesh, samples: &[DelicacySample], thin: f64) -> Vec<f64> {
+        let centres = (0..mesh.triangles().len())
+            .map(|face| {
+                let (a, b, c) = mesh.triangle_points(face);
+                (
+                    super::scale(super::add(super::add(a, b), c), 1.0 / 3.0),
+                    super::face_normal(0, mesh, face).expect("normal"),
+                )
+            })
+            .collect::<Vec<_>>();
+        samples
+            .iter()
+            .map(|sample| {
+                let mut near = centres
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(face, (centre, _))| {
+                        let distance = super::distance(sample.point, *centre);
+                        (distance < 4.0 * thin).then_some((distance, face))
+                    })
+                    .collect::<Vec<_>>();
+                near.sort_by(|left, right| left.0.total_cmp(&right.0).then(left.1.cmp(&right.1)));
+                near.truncate(40);
+                let thickness = near
+                    .into_iter()
+                    .filter(|(_, face)| super::dot(sample.normal, centres[*face].1) < -0.3)
+                    .map(|(distance, _)| distance)
+                    .fold(f64::INFINITY, f64::min);
+                if thickness.is_finite() {
+                    (1.0 - thickness / thin).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                }
+            })
+            .collect()
+    }
+
+    fn assert_close_slices(left: &[f64], right: &[f64]) {
+        assert_eq!(left.len(), right.len());
+        for (index, (left, right)) in left.iter().zip(right).enumerate() {
+            assert!(
+                (left - right).abs() < 1.0e-12,
+                "index {index}: {left} != {right}"
+            );
+        }
+    }
+
+    fn cube_soup(side: f64, centre: Vec3) -> Vec<Vec3> {
+        let h = side * 0.5;
+        let vertices = [
+            [-h, -h, -h],
+            [h, -h, -h],
+            [h, h, -h],
+            [-h, h, -h],
+            [-h, -h, h],
+            [h, -h, h],
+            [h, h, h],
+            [-h, h, h],
+        ]
+        .map(|point| {
+            [
+                point[0] + centre[0],
+                point[1] + centre[1],
+                point[2] + centre[2],
+            ]
+        });
+        [
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ]
+        .into_iter()
+        .flat_map(|triangle| triangle.into_iter().map(|index| vertices[index]))
+        .collect()
+    }
+
+    fn cubes_mesh(centres: &[Vec3]) -> Mesh {
+        let vertices = centres
+            .iter()
+            .flat_map(|centre| cube_soup(2.0, *centre))
+            .collect::<Vec<_>>();
+        let triangles = (0..centres.len() * 12)
+            .map(|face| [face * 3, face * 3 + 1, face * 3 + 2])
+            .collect::<Vec<_>>();
+        Mesh::new(vertices, triangles).expect("cube soups")
     }
 
     #[test]

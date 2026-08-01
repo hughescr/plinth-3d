@@ -807,6 +807,7 @@ fn committed_sphere_has_seven_reconstructed_stubs() {
     // contact list, so changed contact reconstruction cannot self-certify.
     assert_eq!(value(row, "scar_area"), 18.207_723_309_160_54);
     assert_eq!(value(row, "scar_worst_patch"), 3.339_084_784_039_538);
+    assert_eq!(value(row, "scar_weighted"), 16.101_929_450_319_485);
 }
 
 #[test]
