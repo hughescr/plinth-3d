@@ -348,6 +348,18 @@ fn sparse_nested_subset_matches_every_native_query_family_and_owns_its_cache() {
     );
     assert_eq!(child.exterior_face_mask(), &parent_mask[1..]);
     assert_eq!(child.exterior_face_mask().len(), child.nfaces());
+    assert_eq!(
+        child
+            .face_ids()
+            .iter()
+            .copied()
+            .zip(child.exterior_face_mask().iter().copied())
+            .collect::<Vec<_>>(),
+        (12..24)
+            .zip(parent_mask[1..].iter().copied())
+            .collect::<Vec<_>>(),
+        "sparse mask entries pair one-to-one with ascending global face IDs"
+    );
 }
 
 #[test]

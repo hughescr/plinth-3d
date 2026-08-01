@@ -1028,6 +1028,12 @@ impl NativeSurface {
     }
 
     // ---- exterior-face mask ----------------------------------------------
+    /// Classifies the faces selected by this surface in selected-face order.
+    ///
+    /// Entry `i` corresponds one-to-one to `self.face_ids()[i]`. Those IDs are
+    /// deterministic ascending global face IDs, including for subsets. The
+    /// returned length is therefore [`Self::nfaces`], not the global immutable
+    /// geometry's face count.
     pub fn exterior_face_mask(&self) -> &[bool] {
         self.exterior_mask.get_or_init(|| {
             let bary: [[f64; 3]; 3] = [
