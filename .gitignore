@@ -34,6 +34,7 @@ scripts/treant_v2_results.json
 /crates/*/vendor/
 !/crates/plinth-solid/
 !/crates/plinth-solid/vendor/
+/crates/plinth-solid/vendor/*
 !/crates/plinth-solid/vendor/manifold/
 !/crates/plinth-solid/vendor/manifold/**
 
