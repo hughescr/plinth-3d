@@ -50,6 +50,13 @@ fn evidence_source_and_date_wire_contracts_are_strict() {
         "1900-02-29",
         "2100-02-29",
         "2024-02-30",
+        "2024-00-01",
+        "2024-13-01",
+        "2024-01-00",
+        "024-01-01",
+        "02024-01-01",
+        "2024-1-01",
+        "2024-01-1",
     ] {
         assert!(
             CalendarDate::new(date).is_err(),
@@ -144,6 +151,40 @@ fn evidence_source_and_date_wire_contracts_are_strict() {
             "accepted blank {field}"
         );
     }
+    for (record, locator, field) in [
+        ("", "#x", "record"),
+        ("   ", "#x", "record"),
+        ("fixtures/a", "", "locator"),
+        ("fixtures/a", "   ", "locator"),
+    ] {
+        assert_eq!(
+            EvidenceSource::calibration_plate(
+                PlateId::from("p"),
+                record,
+                locator,
+                EvidenceDate::Unknown,
+            ),
+            Err(ProvenanceError::EmptyField { field })
+        );
+    }
+    for invalid in ["", "   "] {
+        assert_eq!(
+            EvidenceId::new(invalid),
+            Err(ProvenanceError::EmptyField {
+                field: "evidence id"
+            })
+        );
+        assert!(serde_json::from_str::<EvidenceId>(&format!("{invalid:?}")).is_err());
+    }
+    for invalid in [" source", "source "] {
+        assert_eq!(
+            EvidenceId::new(invalid),
+            Err(ProvenanceError::SurroundingWhitespace {
+                field: "evidence id"
+            })
+        );
+        assert!(serde_json::from_str::<EvidenceId>(&format!("{invalid:?}")).is_err());
+    }
     for invalid in [
         "/absolute",
         "../escape",
@@ -151,6 +192,7 @@ fn evidence_source_and_date_wire_contracts_are_strict() {
         "C:/drive",
         "C:\\drive",
         "\\\\server\\share",
+        "//server/share",
         "https://example.test/a",
     ] {
         assert!(
@@ -168,6 +210,12 @@ fn evidence_source_and_date_wire_contracts_are_strict() {
         "https://example.test/a",
         "file:///tmp/a",
         "mailto:a@example.test",
+        "//example.test/a",
+        "\\\\example.test\\a",
+        "C:/external",
+        "C:\\external",
+        "../external",
+        "..\\external",
     ] {
         assert!(
             EvidenceSource::calibration_plate(
@@ -180,12 +228,55 @@ fn evidence_source_and_date_wire_contracts_are_strict() {
             "accepted locator {locator}"
         );
     }
+    for (record, locator) in [
+        (" fixtures/a", "#x"),
+        ("fixtures/a ", "#x"),
+        ("fixtures/a", " #x"),
+        ("fixtures/a", "#x "),
+        (" https://example.test/a", "#x"),
+        ("fixtures/a", " https://example.test/a"),
+    ] {
+        assert_eq!(
+            EvidenceSource::calibration_plate(
+                PlateId::from("p"),
+                record,
+                locator,
+                EvidenceDate::Unknown,
+            ),
+            Err(ProvenanceError::SurroundingWhitespace {
+                field: if record != "fixtures/a" {
+                    "record"
+                } else {
+                    "locator"
+                }
+            })
+        );
+    }
+    for missing in [
+        r#"{"plate":"p","record":"a","locator":"x","date":{"precision":"unknown"}}"#,
+        r#"{"kind":"calibration_plate","record":"a","locator":"x","date":{"precision":"unknown"}}"#,
+        r#"{"kind":"vendor_document","record":"a","locator":"x","date":{"precision":"unknown"}}"#,
+        r#"{"kind":"vendor_document","id":"x","locator":"x","date":{"precision":"unknown"}}"#,
+        r#"{"kind":"vendor_document","id":"x","record":"a","date":{"precision":"unknown"}}"#,
+        r#"{"kind":"vendor_document","id":"x","record":"a","locator":"x"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<EvidenceSource>(missing).is_err(),
+            "accepted missing field in {missing}"
+        );
+    }
     for malformed in [
         r#"{"kind":"calibration_plate","plate":"p","record":"a","locator":"x","date":{"precision":"unknown"},"extra":true}"#,
         r#"{"kind":"calibration_plate","plate":"p","record":"a","record":"b","locator":"x","date":{"precision":"unknown"}}"#,
         r#"{"kind":"calibration_plate","kind":"vendor_document","plate":"p","record":"a","locator":"x","date":{"precision":"unknown"}}"#,
         r#"{"kind":"calibration_plate","plate":"p","record":"https://example.test/a","locator":"x","date":{"precision":"unknown"}}"#,
         r#"{"kind":"vendor_document","id":"x","record":"a","locator":"https://example.test/a","date":{"precision":"unknown"}}"#,
+        r#"{"kind":"vendor_document","id":"x","record":" a","locator":"x","date":{"precision":"unknown"}}"#,
+        r#"{"kind":"vendor_document","id":"x","record":"a ","locator":"x","date":{"precision":"unknown"}}"#,
+        r#"{"kind":"vendor_document","id":"x","record":"a","locator":" x","date":{"precision":"unknown"}}"#,
+        r#"{"kind":"vendor_document","id":"x","record":"a","locator":"x ","date":{"precision":"unknown"}}"#,
+        r#"{"kind":"vendor_document","id":"x","record":"a","locator":"C:\\external","date":{"precision":"unknown"}}"#,
+        r#"{"kind":"vendor_document","id":"x","record":"a","locator":"..\\external","date":{"precision":"unknown"}}"#,
         r#"{"kind":"vendor_document","id":" ","record":"a","locator":"x","date":{"precision":"unknown"}}"#,
         r#"{"kind":"calibration_plate","plate":"p","record":"a","locator":"x","date":{"precision":"unknown"},"id":"bad"}"#,
     ] {
@@ -198,11 +289,33 @@ fn evidence_source_and_date_wire_contracts_are_strict() {
 
 #[test]
 fn finite_intervals_and_measured_evidence_have_exact_boundaries() {
+    for (lower_bound, upper_bound, contains_lower, contains_upper) in [
+        (BoundKind::Inclusive, BoundKind::Inclusive, true, true),
+        (BoundKind::Inclusive, BoundKind::Exclusive, true, false),
+        (BoundKind::Exclusive, BoundKind::Inclusive, false, true),
+        (BoundKind::Exclusive, BoundKind::Exclusive, false, false),
+    ] {
+        let interval = FiniteInterval::new(0.0, 1.0, lower_bound, upper_bound).unwrap();
+        assert_eq!(interval.contains(0.0), contains_lower);
+        assert_eq!(interval.contains(1.0), contains_upper);
+        assert!(interval.contains(0.5));
+    }
+    for (lower, upper) in [
+        (1.0, 0.0),
+        (1.0, 1.0),
+        (f64::NAN, 1.0),
+        (0.0, f64::NAN),
+        (f64::INFINITY, 1.0),
+        (0.0, f64::INFINITY),
+        (f64::NEG_INFINITY, 1.0),
+        (0.0, f64::NEG_INFINITY),
+    ] {
+        assert!(
+            FiniteInterval::new(lower, upper, BoundKind::Inclusive, BoundKind::Inclusive).is_err()
+        );
+    }
     let interval =
         FiniteInterval::new(0.0, 1.0, BoundKind::Inclusive, BoundKind::Exclusive).unwrap();
-    assert!(interval.contains(0.0));
-    assert!(interval.contains(0.5));
-    assert!(!interval.contains(1.0));
     assert!(!interval.contains(f64::NAN));
     assert_eq!(
         serde_json::to_string(&BoundKind::Inclusive).unwrap(),
@@ -218,6 +331,9 @@ fn finite_intervals_and_measured_evidence_have_exact_boundaries() {
     );
     for malformed in [
         r#"{"lower":1.0,"upper":1.0,"lower_bound":"inclusive","upper_bound":"exclusive"}"#,
+        r#"{"lower":1.0,"upper":0.0,"lower_bound":"inclusive","upper_bound":"exclusive"}"#,
+        r#"{"lower":1e9999,"upper":1.0,"lower_bound":"inclusive","upper_bound":"exclusive"}"#,
+        r#"{"lower":0.0,"upper":1e9999,"lower_bound":"inclusive","upper_bound":"exclusive"}"#,
         r#"{"lower":0.0,"upper":1.0,"lower_bound":"inclusive"}"#,
         r#"{"lower":0.0,"lower":0.1,"upper":1.0,"lower_bound":"inclusive","upper_bound":"exclusive"}"#,
         r#"{"lower":0.0,"upper":1.0,"lower_bound":"inclusive","upper_bound":"exclusive","extra":true}"#,
@@ -238,7 +354,17 @@ fn finite_intervals_and_measured_evidence_have_exact_boundaries() {
     );
     let measured =
         Measured::new(interval, calibration_source("2026-07-31"), None, "interval").unwrap();
-    let mut non_null = serde_json::to_value(measured).unwrap();
+    let measured_json = serde_json::to_value(&measured).unwrap();
+    assert_eq!(
+        measured_json,
+        json!({
+            "value":{"lower":0.0,"upper":1.0,"lower_bound":"inclusive","upper_bound":"exclusive"},
+            "source":{"kind":"calibration_plate","plate":"plate-6","record":"fixtures/calibration.json","locator":"/measurements/0","date":{"precision":"exact","date":"2026-07-31"}},
+            "err":null,
+            "note":"interval"
+        })
+    );
+    let mut non_null = measured_json;
     non_null["err"] = serde_json::to_value(interval).unwrap();
     assert!(serde_json::from_value::<Measured<FiniteInterval>>(non_null).is_err());
 
@@ -263,7 +389,37 @@ fn finite_intervals_and_measured_evidence_have_exact_boundaries() {
             "accepted {malformed}"
         );
     }
-    assert!(Measured::new(1.0_f64, calibration_source("2026-07-31"), None, " ").is_err());
+    for note in ["", " ", " note", "note "] {
+        assert!(Measured::new(1.0_f64, calibration_source("2026-07-31"), None, note).is_err());
+        let raw = format!(
+            r#"{{"value":1.0,"source":{{"kind":"calibration_plate","plate":"p","record":"a","locator":"x","date":{{"precision":"unknown"}}}},"err":null,"note":{note:?}}}"#
+        );
+        assert!(serde_json::from_str::<Measured<f64>>(&raw).is_err());
+    }
+
+    let derived = ProvenanceRef::Derived {
+        from: vec!["source-a".into()],
+        note: "computed".into(),
+    };
+    let derived_json = json!({"kind":"derived","from":["source-a"],"note":"computed"});
+    assert_eq!(serde_json::to_value(&derived).unwrap(), derived_json);
+    assert_eq!(
+        serde_json::from_value::<ProvenanceRef>(derived_json).unwrap(),
+        derived
+    );
+    for malformed in [
+        r#"{"kind":"derived","from":["a"],"note":"n","extra":true}"#,
+        r#"{"kind":"derived","from":["a"],"from":["b"],"note":"n"}"#,
+        r#"{"kind":"derived","from":["a"],"note":"n","note":"other"}"#,
+        r#"{"from":["a"],"note":"n"}"#,
+        r#"{"kind":"derived","note":"n"}"#,
+        r#"{"kind":"derived","from":["a"]}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<ProvenanceRef>(malformed).is_err(),
+            "accepted {malformed}"
+        );
+    }
 }
 
 fn terminal_defect(site: SiteId) -> Defect {

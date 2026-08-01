@@ -14,8 +14,11 @@ use thiserror::Error;
 
 fn require_text(value: impl Into<String>, field: &'static str) -> Result<String, ProvenanceError> {
     let value = value.into();
-    if value.trim().is_empty() {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
         Err(ProvenanceError::EmptyField { field })
+    } else if trimmed != value {
+        Err(ProvenanceError::SurroundingWhitespace { field })
     } else {
         Ok(value)
     }
@@ -273,10 +276,22 @@ fn validate_record(value: impl Into<String>) -> Result<String, ProvenanceError> 
 
 fn validate_locator(value: impl Into<String>) -> Result<String, ProvenanceError> {
     let value = require_text(value, "locator")?;
-    if has_uri_scheme(&value) {
+    let normalized = value.replace('\\', "/");
+    if has_uri_scheme(&value) || normalized.starts_with("//") {
         Err(ProvenanceError::ExternalLocator { value })
     } else {
-        Ok(value)
+        let drive_rooted = normalized.len() >= 2
+            && normalized.as_bytes()[0].is_ascii_alphabetic()
+            && normalized.as_bytes()[1] == b':';
+        let has_parent = Path::new(&normalized)
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+            || normalized.split('/').any(|component| component == "..");
+        if drive_rooted || value.starts_with('\\') || has_parent {
+            Err(ProvenanceError::InvalidLocator { value })
+        } else {
+            Ok(value)
+        }
     }
 }
 
@@ -697,12 +712,16 @@ impl<'de> Deserialize<'de> for ProvenanceRef {
 pub enum ProvenanceError {
     #[error("{field} must not be empty or whitespace")]
     EmptyField { field: &'static str },
+    #[error("{field} must not have leading or trailing whitespace")]
+    SurroundingWhitespace { field: &'static str },
     #[error("invalid calendar date {value}")]
     InvalidCalendarDate { value: String },
     #[error("record must be repository-relative and cannot traverse parents: {value}")]
     InvalidRecordPath { value: String },
     #[error("locator must not be an external URI: {value}")]
     ExternalLocator { value: String },
+    #[error("locator must be a stable internal reference: {value}")]
+    InvalidLocator { value: String },
     #[error("measured numeric value must be finite")]
     NonFiniteMeasuredValue,
     #[error("measured numeric error must be finite")]
@@ -843,12 +862,13 @@ impl<'de> Deserialize<'de> for ProvenanceManifest {
 }
 
 /// Values that are admissible on an acceptance path.
-pub trait AcceptSafe<T: Copy> {
+pub trait AcceptSafe<T: Copy>: sealed::AcceptSafe {
     fn get(&self) -> T;
     fn provenance(&self) -> ProvenanceRef;
 }
 mod sealed {
     pub trait Sealed {}
+    pub trait AcceptSafe {}
 }
 /// Payload policy for measured constants. This trait is sealed by core.
 pub trait MeasuredPayload: sealed::Sealed {
@@ -1190,6 +1210,7 @@ impl<T: Copy + MeasuredPayload> AcceptSafe<T> for Measured<T> {
         }
     }
 }
+impl<T: Copy + MeasuredPayload> sealed::AcceptSafe for Measured<T> {}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Derived<T> {
@@ -1226,6 +1247,7 @@ impl<T: Copy> AcceptSafe<T> for Derived<T> {
         }
     }
 }
+impl<T: Copy> sealed::AcceptSafe for Derived<T> {}
 /// A value useful for diagnostics or search, but forbidden on acceptance paths.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Placeholder<T> {
