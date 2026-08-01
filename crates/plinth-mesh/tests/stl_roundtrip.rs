@@ -10,21 +10,11 @@ fn self_contained_two_facet_triangle_soup_round_trip_preserves_order_repetition_
     fs::create_dir_all(path.parent().expect("test parent")).expect("create test directory");
     fs::write(&path, two_facet_triangle_soup_bytes()).expect("write tracked in-memory fixture");
     let loaded = load_binary_stl(&path, WeldPolicy::None).expect("load source");
-    assert_eq!(
-        loaded.verts().len(),
-        6,
-        "reader must not weld triangle soup"
-    );
-    assert_eq!(
-        loaded.tris(),
-        &[[0, 1, 2], [3, 4, 5]],
-        "reader must not reorder indices"
-    );
-    assert_eq!(loaded.verts()[0][0].to_bits(), (-0.0_f64).to_bits());
-    assert_eq!(loaded.verts()[3][0].to_bits(), (-0.0_f64).to_bits());
+    assert_two_facet_source_order(&loaded);
     let output = path.parent().expect("test parent").join("roundtrip.stl");
     write_binary_stl(&output, &loaded).expect("write source without repair");
     let reread = load_binary_stl(&output, WeldPolicy::None).expect("fresh disk re-read");
+    assert_two_facet_source_order(&reread);
     assert_mesh_bits_equal(&loaded, &reread, "two-facet in-memory fixture");
     fs::remove_dir_all(path.parent().expect("test parent"))
         .expect("remove test-only output directory");
@@ -152,6 +142,37 @@ fn two_facet_triangle_soup_bytes() -> Vec<u8> {
         }
     }
     bytes
+}
+
+fn assert_two_facet_source_order(mesh: &Mesh) {
+    let expected_verts = [
+        [-0.0_f64, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [-0.0_f64, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ];
+    let expected_tris = [[0, 1, 2], [3, 4, 5]];
+    assert_eq!(
+        mesh.tris(),
+        expected_tris,
+        "facet block order or indices changed"
+    );
+    assert_eq!(
+        mesh.verts().len(),
+        expected_verts.len(),
+        "triangle soup was deduplicated"
+    );
+    for (vertex, (actual, expected)) in mesh.verts().iter().zip(expected_verts).enumerate() {
+        for axis in 0..3 {
+            assert_eq!(
+                actual[axis].to_bits(),
+                expected[axis].to_bits(),
+                "source vertex {vertex} axis {axis} changed bits"
+            );
+        }
+    }
 }
 
 fn assert_mesh_bits_equal(expected: &Mesh, actual: &Mesh, name: &str) {

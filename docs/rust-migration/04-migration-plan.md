@@ -672,6 +672,12 @@ cargo test -p plinth-mesh --test stl_roundtrip
 # 80-byte header, the per-facet normals and the attribute-count bytes are not part of the
 # contract. See section 0 above.
 
+cargo run -p plinth-mesh --locked --example corpus_gate
+# The explicit provisioned-corpus audit. It structurally checks the committed
+# manifest's exact ordered eight-member binding and SHA-256s, then re-opens
+# fresh round-trip files from disk. It intentionally fails by named reason
+# when ignored corpus/models inputs have not been provisioned.
+
 cargo test -p geom_kernel
 # rust/geom_kernel/tests/geometry.rs stays green, including
 # deterministic_build_bit_identical and r6_no_hashmap_in_src
