@@ -1,0 +1,91 @@
+{
+  "input_stl": "corpus/models/make_toed_slab.stl",
+  "out_path": "corpus/baseline/make_toed_slab.chitubox",
+  "prepped_stl": "corpus/baseline/make_toed_slab.prepped.stl",
+  "status": "failed",
+  "exit_code": 5,
+  "failed_stage": "supports",
+  "error": "RuntimeError: synthetic A3 coverage exact search refused by packed-mask resource bound; refusing an under-covered initial construct",
+  "seconds": 184.86,
+  "settings": {
+    "wall_mm": 2.5,
+    "orient": true,
+    "hollow": true,
+    "lift_mm": 3.0,
+    "cfg_lift_mm": 3.0,
+    "p8_relocate_enable": true,
+    "allow_failed_gates": false,
+    "skip_existing": true,
+    "internal_support_verifier_configured": false,
+    "a5_internal_supports_enabled": true
+  },
+  "report_path": "corpus/baseline/make_toed_slab.pipeline.json",
+  "stages": [
+    {
+      "name": "hollow",
+      "status": "ok",
+      "seconds": 0.16,
+      "report": {
+        "components": 3,
+        "extra_bodies": [
+          {
+            "faces": 64,
+            "dims_mm": [
+              6.0,
+              6.0,
+              4.0
+            ]
+          },
+          {
+            "faces": 64,
+            "dims_mm": [
+              3.0,
+              3.0,
+              6.0
+            ]
+          }
+        ],
+        "orientation": {
+          "axis": [
+            0,
+            1,
+            0
+          ],
+          "deg": -30,
+          "score": 17.5
+        },
+        "oriented": true,
+        "hollow_attempted": true,
+        "solid_ml": 3.7,
+        "solid_volume_estimate_ml": 3.652,
+        "dims_mm": [
+          28.0,
+          30.0,
+          18.5
+        ],
+        "bulk_mm": 6.4,
+        "cavity_ml": 0.0,
+        "junk_pockets_left_solid": 1,
+        "decision": "SOLID_below_threshold",
+        "hollow_eligible": false,
+        "hollow_fallback_applied": false,
+        "hollow_fallback_reason": null,
+        "hollow_volume_estimate_ml": 3.644,
+        "final_geometry": "solid",
+        "final_ml": 3.7,
+        "status": "OK",
+        "exported": "corpus/baseline/make_toed_slab.prepped.stl",
+        "verify": "N/A_solid",
+        "elapsed_s": 0.2
+      },
+      "error": null
+    },
+    {
+      "name": "supports",
+      "status": "failed",
+      "seconds": 184.7,
+      "report": {},
+      "error": "RuntimeError: synthetic A3 coverage exact search refused by packed-mask resource bound; refusing an under-covered initial construct"
+    }
+  ]
+}

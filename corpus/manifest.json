@@ -1,0 +1,94 @@
+{
+  "schema": "plinth/corpus-manifest",
+  "version": 1,
+  "frozen_at": "2026-08-01T08:20:35Z",
+  "provisional": false,
+  "baseline_tool": "scripts/tools/prep_one.py",
+  "baseline_command": "uv run --frozen python scripts/tools/prep_one.py --p8-relocate --out-dir corpus/baseline --skip-existing corpus/models/*.stl",
+  "baseline_git_rev": "6eb7f6a65e1a3442aa860d63d920788da778faed",
+  "metrics": [
+    {"id": "islands", "direction": "lower_is_better", "hard_bound": null},
+    {"id": "cavities", "direction": "lower_is_better", "hard_bound": null},
+    {"id": "boundary_edges", "direction": "lower_is_better", "hard_bound": 0},
+    {"id": "negative_shells", "direction": "lower_is_better", "hard_bound": 0},
+    {"id": "winding", "direction": "lower_is_better", "hard_bound": 0},
+    {"id": "max_x", "direction": "lower_is_better", "hard_bound": null},
+    {"id": "max_x_group", "direction": "lower_is_better", "hard_bound": null},
+    {"id": "support_count", "direction": "lower_is_better", "hard_bound": null},
+    {"id": "resin_model", "direction": "lower_is_better", "hard_bound": null},
+    {"id": "resin_support", "direction": "lower_is_better", "hard_bound": null},
+    {"id": "resin_total", "direction": "lower_is_better", "hard_bound": null},
+    {"id": "scar_area", "direction": "lower_is_better", "hard_bound": null},
+    {"id": "scar_worst_patch", "direction": "lower_is_better", "hard_bound": null},
+    {"id": "scar_weighted", "direction": "lower_is_better", "hard_bound": null},
+    {"id": "z_height", "direction": "lower_is_better", "hard_bound": null},
+    {"id": "loadable", "direction": "pass_fail", "hard_bound": "pass"}
+  ],
+  "models": [
+    {
+      "name": "Sphere",
+      "stl": "corpus/models/Sphere.stl",
+      "baseline_artifact": "corpus/baseline/Sphere.chitubox",
+      "python_exit_code": 0,
+      "python_seconds": 3.7,
+      "python_failed_stage": null
+    },
+    {
+      "name": "Cylinder",
+      "stl": "corpus/models/Cylinder.stl",
+      "baseline_artifact": "corpus/baseline/Cylinder.chitubox",
+      "python_exit_code": 2,
+      "python_seconds": 8.1,
+      "python_failed_stage": "hollow"
+    },
+    {
+      "name": "make_box",
+      "stl": "corpus/models/make_box.stl",
+      "baseline_artifact": "corpus/baseline/make_box.chitubox",
+      "python_exit_code": 2,
+      "python_seconds": 0.25,
+      "python_failed_stage": "hollow"
+    },
+    {
+      "name": "make_overhang_table",
+      "stl": "corpus/models/make_overhang_table.stl",
+      "baseline_artifact": "corpus/baseline/make_overhang_table.chitubox",
+      "python_exit_code": 3,
+      "python_seconds": 8.89,
+      "python_failed_stage": "emit"
+    },
+    {
+      "name": "make_toed_slab",
+      "stl": "corpus/models/make_toed_slab.stl",
+      "baseline_artifact": "corpus/baseline/make_toed_slab.chitubox",
+      "python_exit_code": 5,
+      "python_seconds": 184.86,
+      "python_failed_stage": "supports"
+    },
+    {
+      "name": "make_raking_blade",
+      "stl": "corpus/models/make_raking_blade.stl",
+      "baseline_artifact": "corpus/baseline/make_raking_blade.chitubox",
+      "python_exit_code": 5,
+      "python_seconds": 0.42,
+      "python_failed_stage": "supports"
+    },
+    {
+      "name": "make_thin_fin",
+      "stl": "corpus/models/make_thin_fin.stl",
+      "baseline_artifact": "corpus/baseline/make_thin_fin.chitubox",
+      "python_exit_code": 5,
+      "python_seconds": 165.74,
+      "python_failed_stage": "supports"
+    },
+    {
+      "name": "Weeping Treant v1.2",
+      "stl": "corpus/models/Weeping Treant v1.2.stl",
+      "baseline_artifact": "corpus/baseline/Weeping Treant v1.2.chitubox",
+      "python_exit_code": 3,
+      "python_seconds": 2505.61,
+      "python_failed_stage": "emit"
+    }
+  ],
+  "waivers": []
+}

@@ -1,0 +1,459 @@
+{
+  "input_stl": "corpus/models/Sphere.stl",
+  "out_path": "corpus/baseline/Sphere.chitubox",
+  "prepped_stl": "corpus/baseline/Sphere.prepped.stl",
+  "status": "ok",
+  "exit_code": 0,
+  "failed_stage": null,
+  "error": null,
+  "seconds": 3.7,
+  "settings": {
+    "wall_mm": 2.5,
+    "orient": true,
+    "hollow": true,
+    "lift_mm": 3.0,
+    "cfg_lift_mm": 3.0,
+    "p8_relocate_enable": true,
+    "allow_failed_gates": false,
+    "skip_existing": true,
+    "internal_support_verifier_configured": false,
+    "a5_internal_supports_enabled": true
+  },
+  "report_path": "corpus/baseline/Sphere.pipeline.json",
+  "stages": [
+    {
+      "name": "hollow",
+      "status": "ok",
+      "seconds": 0.66,
+      "report": {
+        "components": 1,
+        "orientation": {
+          "axis": [
+            1,
+            0,
+            0
+          ],
+          "deg": -20,
+          "score": 16.6
+        },
+        "oriented": true,
+        "hollow_attempted": true,
+        "solid_ml": 4.2,
+        "solid_volume_estimate_ml": 4.175,
+        "dims_mm": [
+          20.0,
+          20.0,
+          20.0
+        ],
+        "bulk_mm": 20.6,
+        "cavity_ml": 2.1,
+        "junk_pockets_left_solid": 0,
+        "oriented_solid_backup": "corpus/baseline/Sphere.prepped.oriented-solid.stl",
+        "decision": "SOLID_a5_internal_support_failed",
+        "hollow_eligible": true,
+        "hollow_fallback_applied": true,
+        "hollow_fallback_reason": "unroutable_or_trapped_internal_lobe",
+        "hollow_volume_estimate_ml": 2.104,
+        "final_geometry": "solid",
+        "drains": [
+          {
+            "xyz": [
+              0.0,
+              0.0,
+              0.5
+            ],
+            "lobe_ml": 1.92,
+            "wall_mm": 1.0
+          }
+        ],
+        "vent": {
+          "xyz": [
+            0.0,
+            0.0,
+            19.5
+          ],
+          "wall_mm": 4.0
+        },
+        "trapped_resin_ml": 0.0,
+        "audit_added_drains": 0,
+        "refilled_ml": 0.0,
+        "cavity_descriptor": {
+          "schema": "support-placement/a5-cavity",
+          "schema_version": 1,
+          "pitch_mm": 0.5,
+          "shape": [
+            41,
+            41,
+            41
+          ],
+          "cavity_voxels": 16563,
+          "solid_voxels": 20424,
+          "outside_voxels": 31934,
+          "cavity_fingerprint": "f65cd9550d5004e6256bf0f49216f98b3486bd9992e4808ff1185a23d98205b2",
+          "inner_mesh_fingerprint": "61c4b5d5d52db896e2dc1157402d00ee93abe335bb5b0ffec1c6ab4f5e38ff36",
+          "transform": [
+            [
+              0.5,
+              0.0,
+              0.0,
+              -10.0
+            ],
+            [
+              0.0,
+              0.5,
+              0.0,
+              -10.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "inverse_transform": [
+            [
+              2.0,
+              0.0,
+              0.0,
+              20.0
+            ],
+            [
+              0.0,
+              2.0,
+              0.0,
+              20.0
+            ],
+            [
+              0.0,
+              0.0,
+              2.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "drain_keepouts": [
+            {
+              "role": "drain",
+              "p0": [
+                0.0,
+                0.0,
+                4.5
+              ],
+              "p1": [
+                0.0,
+                0.0,
+                -4.5
+              ],
+              "axis": [
+                0.0,
+                0.0,
+                -1.0
+              ],
+              "radius_mm": 1.5
+            },
+            {
+              "role": "vent",
+              "p0": [
+                -4.0,
+                0.0,
+                19.5
+              ],
+              "p1": [
+                9.0,
+                0.0,
+                19.5
+              ],
+              "axis": [
+                1.0,
+                0.0,
+                0.0
+              ],
+              "radius_mm": 1.25
+            }
+          ],
+          "descriptor_fingerprint": "c6d1b4aa7f2454dd62727165de99082a90b5ae16b1f0ec71d6aad69d253a964d"
+        },
+        "final_ml": 2.1,
+        "bodies": 1,
+        "watertight": true,
+        "winding": true,
+        "cavity_breathes": true,
+        "check_detail": {
+          "single_body": {
+            "ok": true,
+            "measured": "1 bodies"
+          },
+          "watertight": {
+            "ok": true,
+            "measured": "is_watertight=True"
+          },
+          "winding_consistent": {
+            "ok": true,
+            "measured": "is_winding_consistent=True"
+          },
+          "volume_balance": {
+            "ok": true,
+            "measured": "|2.07 - (4.17 - 2.07)| = 0.03 ml vs tol 0.08 ml"
+          },
+          "cavity_breathes": {
+            "ok": true,
+            "measured": "cavity_breathes=True"
+          }
+        },
+        "verify": "PASS",
+        "elapsed_s": 0.7,
+        "status": "OK",
+        "exported": "corpus/baseline/Sphere.prepped.stl",
+        "failed_checks": [],
+        "a5_candidate_cavity_fingerprint": "f65cd9550d5004e6256bf0f49216f98b3486bd9992e4808ff1185a23d98205b2"
+      },
+      "error": null
+    },
+    {
+      "name": "supports",
+      "status": "ok",
+      "seconds": 2.99,
+      "report": {
+        "faces": 4760,
+        "n_members": 14,
+        "n_balls": 6,
+        "n_unrouted": 0,
+        "n_contacts": 7,
+        "plate_z": -12.998292922973633,
+        "gates": {
+          "uncovered_islands": 0,
+          "clearance_violations": 0,
+          "moot_transit_members": 0,
+          "ball_breach_violations": 0,
+          "endcap_breach_diagnostic": 7,
+          "load_violations": 0,
+          "unsupported_minima": 0,
+          "uncovered_island_births": 0,
+          "regular_contact_invariant_violations": 0,
+          "unrouted_specialized_contacts": 0,
+          "connectivity_violations": 0,
+          "printability_violations": 0,
+          "murray_violations": 0,
+          "removal_violations": 7,
+          "physical_contact_invariant_violations": 0,
+          "ok": true
+        },
+        "volume_ml": {
+          "member_ml": 0.04544,
+          "ball_ml": 0.01287,
+          "total_ml": 0.0583
+        },
+        "stage_timings": {
+          "t_geom_build": 0.0,
+          "t_islands": 0.03,
+          "t_island_births": 0.47,
+          "t_minima": 0.47,
+          "t_delicacy": 0.56,
+          "t_prepare": 0.56,
+          "t_surface_tree": 0.59,
+          "t_construct[p0]": 0.6,
+          "t_rewire[p0]": 0.65,
+          "t_brace_and_size[p0]": 0.7,
+          "t_verify[p0]": 0.72,
+          "t_relocate": 0.74,
+          "t_verify[final]": 0.76,
+          "t_finish": 0.78,
+          "t_total": 0.78
+        },
+        "a5_internal": {
+          "schema": "support-placement/a5-internal",
+          "schema_version": 1,
+          "ok": false,
+          "fallback_required": true,
+          "reason_code": "unroutable_or_trapped_internal_lobe",
+          "reason": "2 inner-ceiling lobe(s) have no safe route within target spacing 4mm",
+          "gates": {
+            "ok": false,
+            "descriptor_violations": [],
+            "endpoint_violations": [],
+            "containment_violations": [],
+            "clearance_violations": [],
+            "keepout_violations": [],
+            "uncovered_overhangs": [],
+            "uncovered_minima": [],
+            "uncovered_births": [],
+            "uncovered_a3": [],
+            "unsupported_lobes": [
+              2,
+              4
+            ],
+            "provenance_violations": []
+          },
+          "provenance": {
+            "source": "hollow.post_refill_main_mask",
+            "demand_source": "authoritative_cavity_boundary",
+            "exterior_engine_covers_internal": false,
+            "exterior_verify_ok_before_a5": false,
+            "cavity_fingerprint": "f65cd9550d5004e6256bf0f49216f98b3486bd9992e4808ff1185a23d98205b2",
+            "cavity_descriptor_fingerprint": "c6d1b4aa7f2454dd62727165de99082a90b5ae16b1f0ec71d6aad69d253a964d",
+            "centered_descriptor_fingerprint": "81aee1c53aff131f3f07ec7bad7345dabe05cc0b54bee2b3ac7568f6a645eb31",
+            "hollow_mesh_fingerprint": "fc38a8b6ad0e0c19d69655393182130507f7b43c9fb193c334ed281aaa840720",
+            "pitch_mm": 0.5,
+            "voxel_shape": [
+              41,
+              41,
+              41
+            ],
+            "overhang_angle_deg": 45.0,
+            "route_candidate_counts": {
+              "demands": 232,
+              "same_run_lower_wall": 232,
+              "valid_endpoint_pairs": 232,
+              "interior_band": 232,
+              "swept_radius_contained": 154,
+              "clearance_clean": 225,
+              "keepout_clean": 167,
+              "all_constraints": 104
+            },
+            "unsupported_lobes": [
+              2,
+              4
+            ]
+          },
+          "n_demands": 232,
+          "n_inner_lobes": 4
+        },
+        "internal_support_verifier": {
+          "schema": "support-placement/a5-internal",
+          "schema_version": 1,
+          "ok": false,
+          "fallback_required": true,
+          "reason_code": "unroutable_or_trapped_internal_lobe",
+          "reason": "2 inner-ceiling lobe(s) have no safe route within target spacing 4mm",
+          "gates": {
+            "ok": false,
+            "descriptor_violations": [],
+            "endpoint_violations": [],
+            "containment_violations": [],
+            "clearance_violations": [],
+            "keepout_violations": [],
+            "uncovered_overhangs": [],
+            "uncovered_minima": [],
+            "uncovered_births": [],
+            "uncovered_a3": [],
+            "unsupported_lobes": [
+              2,
+              4
+            ],
+            "provenance_violations": []
+          },
+          "provenance": {
+            "source": "hollow.post_refill_main_mask",
+            "demand_source": "authoritative_cavity_boundary",
+            "exterior_engine_covers_internal": false,
+            "exterior_verify_ok_before_a5": false,
+            "cavity_fingerprint": "f65cd9550d5004e6256bf0f49216f98b3486bd9992e4808ff1185a23d98205b2",
+            "cavity_descriptor_fingerprint": "c6d1b4aa7f2454dd62727165de99082a90b5ae16b1f0ec71d6aad69d253a964d",
+            "centered_descriptor_fingerprint": "81aee1c53aff131f3f07ec7bad7345dabe05cc0b54bee2b3ac7568f6a645eb31",
+            "hollow_mesh_fingerprint": "fc38a8b6ad0e0c19d69655393182130507f7b43c9fb193c334ed281aaa840720",
+            "pitch_mm": 0.5,
+            "voxel_shape": [
+              41,
+              41,
+              41
+            ],
+            "overhang_angle_deg": 45.0,
+            "route_candidate_counts": {
+              "demands": 232,
+              "same_run_lower_wall": 232,
+              "valid_endpoint_pairs": 232,
+              "interior_band": 232,
+              "swept_radius_contained": 154,
+              "clearance_clean": 225,
+              "keepout_clean": 167,
+              "all_constraints": 104
+            },
+            "unsupported_lobes": [
+              2,
+              4
+            ]
+          },
+          "n_demands": 232,
+          "n_inner_lobes": 4
+        },
+        "exterior_hollow_gates": {
+          "uncovered_islands": 0,
+          "clearance_violations": 0,
+          "moot_transit_members": 0,
+          "ball_breach_violations": 0,
+          "endcap_breach_diagnostic": 10,
+          "load_violations": 0,
+          "unsupported_minima": 0,
+          "uncovered_island_births": 0,
+          "regular_contact_invariant_violations": 0,
+          "unrouted_specialized_contacts": 1,
+          "connectivity_violations": 0,
+          "printability_violations": 0,
+          "murray_violations": 0,
+          "removal_violations": 16,
+          "physical_contact_invariant_violations": 0,
+          "ok": false
+        },
+        "internal_gates": {
+          "descriptor_violations": 0,
+          "endpoint_violations": 0,
+          "containment_violations": 0,
+          "clearance_violations": 0,
+          "keepout_violations": 0,
+          "uncovered_overhangs": 0,
+          "uncovered_minima": 0,
+          "uncovered_births": 0,
+          "uncovered_a3": 0,
+          "unsupported_lobes": 2,
+          "provenance_violations": 0,
+          "ok": false
+        },
+        "solid_fallback": true,
+        "solid_fallback_reason": "unroutable_or_trapped_internal_lobe"
+      },
+      "error": null
+    },
+    {
+      "name": "emit",
+      "status": "ok",
+      "seconds": 0.05,
+      "report": {
+        "out_path": "corpus/baseline/Sphere.chitubox",
+        "model_name": "Sphere",
+        "model_stl": "corpus/baseline/Sphere.prepped.stl",
+        "model_triangles": 4760,
+        "source_triangles": 4760,
+        "center_delta_mm": 0.0,
+        "n_records": 47,
+        "n_members": 14,
+        "n_balls": 6,
+        "n_flares": 7,
+        "n_pads": 7,
+        "n_bridges": 6,
+        "support_mesh_bytes": 200160,
+        "plate_z": -12.998292922973633,
+        "lift_mm": 3.0,
+        "placement_xy": [
+          0.0,
+          0.0
+        ],
+        "bytes_written": 376468,
+        "reparse_ok": true,
+        "verify_ok": true
+      },
+      "error": null
+    }
+  ]
+}

@@ -1,0 +1,81 @@
+{
+  "input_stl": "corpus/models/make_raking_blade.stl",
+  "out_path": "corpus/baseline/make_raking_blade.chitubox",
+  "prepped_stl": "corpus/baseline/make_raking_blade.prepped.stl",
+  "status": "failed",
+  "exit_code": 5,
+  "failed_stage": "supports",
+  "error": "ValueError: prepare produced an invalid physical contact layout: {'reason': 'owner-island-ids-mismatch', 'contact_idx': 4}",
+  "seconds": 0.42,
+  "settings": {
+    "wall_mm": 2.5,
+    "orient": true,
+    "hollow": true,
+    "lift_mm": 3.0,
+    "cfg_lift_mm": 3.0,
+    "p8_relocate_enable": true,
+    "allow_failed_gates": false,
+    "skip_existing": true,
+    "internal_support_verifier_configured": false,
+    "a5_internal_supports_enabled": true
+  },
+  "report_path": "corpus/baseline/make_raking_blade.pipeline.json",
+  "stages": [
+    {
+      "name": "hollow",
+      "status": "ok",
+      "seconds": 0.08,
+      "report": {
+        "components": 2,
+        "extra_bodies": [
+          {
+            "faces": 12,
+            "dims_mm": [
+              4.9836,
+              2.0,
+              0.4657
+            ]
+          }
+        ],
+        "orientation": {
+          "axis": [
+            1,
+            0,
+            0
+          ],
+          "deg": -30,
+          "score": 10.9
+        },
+        "oriented": true,
+        "hollow_attempted": true,
+        "solid_ml": 1.6,
+        "solid_volume_estimate_ml": 1.6,
+        "dims_mm": [
+          20.0,
+          19.3,
+          13.5
+        ],
+        "bulk_mm": 5.0,
+        "decision": "SOLID_no_cavity",
+        "hollow_eligible": false,
+        "hollow_fallback_applied": false,
+        "hollow_fallback_reason": null,
+        "hollow_volume_estimate_ml": null,
+        "final_geometry": "solid",
+        "final_ml": 1.6,
+        "status": "OK",
+        "exported": "corpus/baseline/make_raking_blade.prepped.stl",
+        "verify": "N/A_solid",
+        "elapsed_s": 0.1
+      },
+      "error": null
+    },
+    {
+      "name": "supports",
+      "status": "failed",
+      "seconds": 0.34,
+      "report": {},
+      "error": "ValueError: prepare produced an invalid physical contact layout: {'reason': 'owner-island-ids-mismatch', 'contact_idx': 4}"
+    }
+  ]
+}

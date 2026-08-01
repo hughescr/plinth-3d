@@ -1,0 +1,217 @@
+{
+  "input_stl": "corpus/models/make_box.stl",
+  "out_path": "corpus/baseline/make_box.chitubox",
+  "prepped_stl": "corpus/baseline/make_box.prepped.stl",
+  "status": "failed",
+  "exit_code": 2,
+  "failed_stage": "hollow",
+  "error": "hollowing failed self-verification (nothing written); failed checks: volume_balance, cavity_breathes. volume_balance: final volume must equal solid - cavity within 2% of solid \u2014 measured |0.01 - (1.00 - 1.15)| = 0.15 ml vs tol 0.02 ml | cavity_breathes: a flood-fill from outside must reach the cavity (drains/vent actually pierce the wall) \u2014 measured cavity_breathes=False",
+  "seconds": 0.25,
+  "settings": {
+    "wall_mm": 2.5,
+    "orient": true,
+    "hollow": true,
+    "lift_mm": 3.0,
+    "cfg_lift_mm": 3.0,
+    "p8_relocate_enable": true,
+    "allow_failed_gates": false,
+    "skip_existing": true,
+    "internal_support_verifier_configured": false,
+    "a5_internal_supports_enabled": true
+  },
+  "report_path": "corpus/baseline/make_box.pipeline.json",
+  "stages": [
+    {
+      "name": "hollow",
+      "status": "failed",
+      "seconds": 0.25,
+      "report": {
+        "components": 1,
+        "oriented": true,
+        "hollow_attempted": true,
+        "solid_ml": 1.0,
+        "solid_volume_estimate_ml": 1.0,
+        "dims_mm": [
+          10.0,
+          10.0,
+          10.0
+        ],
+        "bulk_mm": 35.2,
+        "cavity_ml": 1.1,
+        "junk_pockets_left_solid": 0,
+        "oriented_solid_backup": "corpus/baseline/make_box.prepped.oriented-solid.stl",
+        "decision": "HOLLOW",
+        "hollow_eligible": true,
+        "hollow_fallback_applied": false,
+        "hollow_fallback_reason": null,
+        "hollow_volume_estimate_ml": 0.0,
+        "final_geometry": "hollow",
+        "drains": [
+          {
+            "xyz": [
+              0.2,
+              0.2,
+              0.0
+            ],
+            "lobe_ml": 1.15,
+            "wall_mm": 0.5
+          }
+        ],
+        "vent": {
+          "xyz": [
+            -5.0,
+            -5.0,
+            8.5
+          ],
+          "wall_mm": 0.5
+        },
+        "trapped_resin_ml": 0.0,
+        "audit_added_drains": 0,
+        "refilled_ml": 0.0,
+        "cavity_descriptor": {
+          "schema": "support-placement/a5-cavity",
+          "schema_version": 1,
+          "pitch_mm": 0.5,
+          "shape": [
+            21,
+            21,
+            21
+          ],
+          "cavity_voxels": 9188,
+          "solid_voxels": 73,
+          "outside_voxels": 0,
+          "cavity_fingerprint": "04ab9b70bae357e338c89759eae975a6e4bda4869e04a438a552c1235d724289",
+          "inner_mesh_fingerprint": "ee652c8ba6a2855efb61bbdd9fd9775de87298105873da7bba469cd406f4b15f",
+          "transform": [
+            [
+              0.5,
+              0.0,
+              0.0,
+              -5.0
+            ],
+            [
+              0.0,
+              0.5,
+              0.0,
+              -5.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "inverse_transform": [
+            [
+              2.0,
+              0.0,
+              0.0,
+              10.0
+            ],
+            [
+              0.0,
+              2.0,
+              0.0,
+              10.0
+            ],
+            [
+              0.0,
+              0.0,
+              2.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "drain_keepouts": [
+            {
+              "role": "drain",
+              "p0": [
+                0.187574,
+                0.180473,
+                4.0
+              ],
+              "p1": [
+                0.187574,
+                0.180473,
+                -4.5
+              ],
+              "axis": [
+                0.0,
+                0.0,
+                -1.0
+              ],
+              "radius_mm": 1.5
+            },
+            {
+              "role": "vent",
+              "p0": [
+                -1.0,
+                -5.0,
+                8.5
+              ],
+              "p1": [
+                -10.5,
+                -5.0,
+                8.5
+              ],
+              "axis": [
+                -1.0,
+                0.0,
+                0.0
+              ],
+              "radius_mm": 1.25
+            }
+          ],
+          "descriptor_fingerprint": "98a04b6070b60ac5982be037af3909c81e6e105b05a04fe4ea4ae1ca44ee41ff"
+        },
+        "final_ml": 0.0,
+        "bodies": 1,
+        "watertight": true,
+        "winding": true,
+        "cavity_breathes": false,
+        "check_detail": {
+          "single_body": {
+            "ok": true,
+            "measured": "1 bodies"
+          },
+          "watertight": {
+            "ok": true,
+            "measured": "is_watertight=True"
+          },
+          "winding_consistent": {
+            "ok": true,
+            "measured": "is_winding_consistent=True"
+          },
+          "volume_balance": {
+            "ok": false,
+            "measured": "|0.01 - (1.00 - 1.15)| = 0.15 ml vs tol 0.02 ml"
+          },
+          "cavity_breathes": {
+            "ok": false,
+            "measured": "cavity_breathes=False"
+          }
+        },
+        "verify": "FAIL",
+        "elapsed_s": 0.2,
+        "status": "NOT_EXPORTED_verify_failed",
+        "failed_checks": [
+          "volume_balance",
+          "cavity_breathes"
+        ]
+      },
+      "error": "hollowing failed self-verification (nothing written); failed checks: volume_balance, cavity_breathes. volume_balance: final volume must equal solid - cavity within 2% of solid \u2014 measured |0.01 - (1.00 - 1.15)| = 0.15 ml vs tol 0.02 ml | cavity_breathes: a flood-fill from outside must reach the cavity (drains/vent actually pierce the wall) \u2014 measured cavity_breathes=False"
+    }
+  ]
+}

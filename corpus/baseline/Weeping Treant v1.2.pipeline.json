@@ -1,0 +1,672 @@
+{
+  "input_stl": "corpus/models/Weeping Treant v1.2.stl",
+  "out_path": "corpus/baseline/Weeping Treant v1.2.chitubox",
+  "prepped_stl": "corpus/baseline/Weeping Treant v1.2.prepped.stl",
+  "status": "failed",
+  "exit_code": 3,
+  "failed_stage": "emit",
+  "error": "refusing to emit: engine verify.ok is False. Pass allow_failed_gates=True to emit a gate-failing layout anyway.",
+  "seconds": 2505.61,
+  "settings": {
+    "wall_mm": 2.5,
+    "orient": true,
+    "hollow": true,
+    "lift_mm": 3.0,
+    "cfg_lift_mm": 3.0,
+    "p8_relocate_enable": true,
+    "allow_failed_gates": false,
+    "skip_existing": true,
+    "internal_support_verifier_configured": false,
+    "a5_internal_supports_enabled": true
+  },
+  "report_path": "corpus/baseline/Weeping Treant v1.2.pipeline.json",
+  "stages": [
+    {
+      "name": "hollow",
+      "status": "ok",
+      "seconds": 35.3,
+      "report": {
+        "components": 1,
+        "orientation": {
+          "axis": [
+            1,
+            0,
+            0
+          ],
+          "deg": -30,
+          "score": 57.6
+        },
+        "oriented": true,
+        "hollow_attempted": true,
+        "solid_ml": 24.6,
+        "solid_volume_estimate_ml": 24.568,
+        "dims_mm": [
+          82.2,
+          87.0,
+          91.5
+        ],
+        "bulk_mm": 16.3,
+        "cavity_ml": 8.0,
+        "junk_pockets_left_solid": 30,
+        "oriented_solid_backup": "corpus/baseline/Weeping Treant v1.2.prepped.oriented-solid.stl",
+        "decision": "SOLID_a5_internal_support_failed",
+        "hollow_eligible": true,
+        "hollow_fallback_applied": true,
+        "hollow_fallback_reason": "unroutable_or_trapped_internal_lobe",
+        "hollow_volume_estimate_ml": 16.51,
+        "final_geometry": "solid",
+        "drains": [
+          {
+            "xyz": [
+              -20.7,
+              -14.2,
+              6.5
+            ],
+            "lobe_ml": 1.13,
+            "wall_mm": 2.5
+          },
+          {
+            "xyz": [
+              24.6,
+              -21.6,
+              11.0
+            ],
+            "lobe_ml": 0.54,
+            "wall_mm": 3.0
+          }
+        ],
+        "vent": {
+          "xyz": [
+            10.5,
+            7.0,
+            72.5
+          ],
+          "wall_mm": 3.0
+        },
+        "trapped_resin_ml": 0.0,
+        "audit_added_drains": 0,
+        "refilled_ml": 0.03,
+        "cavity_descriptor": {
+          "schema": "support-placement/a5-cavity",
+          "schema_version": 1,
+          "pitch_mm": 0.5,
+          "shape": [
+            165,
+            175,
+            184
+          ],
+          "cavity_voxels": 64238,
+          "solid_voxels": 172430,
+          "outside_voxels": 5076332,
+          "cavity_fingerprint": "fd5a88df30f56edbac1d9f0dae7436e232e6cefb75d2d342aa09bce0b47e1167",
+          "inner_mesh_fingerprint": "bb834fad105f180a323a24b0d29b46bbdb9f1c6634c8aafd52b81792c19736e7",
+          "transform": [
+            [
+              0.5,
+              0.0,
+              0.0,
+              -41.0
+            ],
+            [
+              0.0,
+              0.5,
+              0.0,
+              -43.5
+            ],
+            [
+              0.0,
+              0.0,
+              0.5,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "inverse_transform": [
+            [
+              2.0,
+              0.0,
+              0.0,
+              82.0
+            ],
+            [
+              0.0,
+              2.0,
+              0.0,
+              87.0
+            ],
+            [
+              0.0,
+              0.0,
+              2.0,
+              0.0
+            ],
+            [
+              0.0,
+              0.0,
+              0.0,
+              1.0
+            ]
+          ],
+          "drain_keepouts": [
+            {
+              "role": "drain",
+              "p0": [
+                -20.678571,
+                -14.178571,
+                10.5
+              ],
+              "p1": [
+                -20.678571,
+                -14.178571,
+                0.0
+              ],
+              "axis": [
+                0.0,
+                0.0,
+                -1.0
+              ],
+              "radius_mm": 1.5
+            },
+            {
+              "role": "drain",
+              "p0": [
+                24.564,
+                -21.556,
+                15.0
+              ],
+              "p1": [
+                24.564,
+                -21.556,
+                4.0
+              ],
+              "axis": [
+                0.0,
+                0.0,
+                -1.0
+              ],
+              "radius_mm": 1.5
+            },
+            {
+              "role": "vent",
+              "p0": [
+                10.5,
+                11.0,
+                72.5
+              ],
+              "p1": [
+                10.5,
+                -1.0,
+                72.5
+              ],
+              "axis": [
+                0.0,
+                -1.0,
+                0.0
+              ],
+              "radius_mm": 1.25
+            }
+          ],
+          "descriptor_fingerprint": "a7e6eba732ce125a1dbe9bf9d53ad621f7f349802a63cac710c5e63322b39f4e"
+        },
+        "final_ml": 16.5,
+        "bodies": 1,
+        "watertight": true,
+        "winding": true,
+        "cavity_breathes": true,
+        "check_detail": {
+          "single_body": {
+            "ok": true,
+            "measured": "1 bodies"
+          },
+          "watertight": {
+            "ok": true,
+            "measured": "is_watertight=True"
+          },
+          "winding_consistent": {
+            "ok": true,
+            "measured": "is_winding_consistent=True"
+          },
+          "volume_balance": {
+            "ok": true,
+            "measured": "|16.48 - (24.57 - 8.03)| = 0.05 ml vs tol 0.49 ml"
+          },
+          "cavity_breathes": {
+            "ok": true,
+            "measured": "cavity_breathes=True"
+          }
+        },
+        "verify": "PASS",
+        "elapsed_s": 35.3,
+        "status": "OK",
+        "exported": "corpus/baseline/Weeping Treant v1.2.prepped.stl",
+        "failed_checks": [],
+        "a5_candidate_cavity_fingerprint": "fd5a88df30f56edbac1d9f0dae7436e232e6cefb75d2d342aa09bce0b47e1167"
+      },
+      "error": null
+    },
+    {
+      "name": "supports",
+      "status": "ok",
+      "seconds": 2470.31,
+      "report": {
+        "faces": 429120,
+        "n_members": 1148,
+        "n_balls": 852,
+        "n_unrouted": 43,
+        "n_contacts": 482,
+        "plate_z": -48.76778030395508,
+        "gates": {
+          "uncovered_islands": 15,
+          "clearance_violations": 24,
+          "moot_transit_members": 36,
+          "ball_breach_violations": 5,
+          "endcap_breach_diagnostic": 275,
+          "load_violations": 2,
+          "unsupported_minima": 5,
+          "uncovered_island_births": 66,
+          "regular_contact_invariant_violations": 0,
+          "unrouted_specialized_contacts": 43,
+          "connectivity_violations": 0,
+          "printability_violations": 0,
+          "murray_violations": 0,
+          "removal_violations": 230,
+          "physical_contact_invariant_violations": 0,
+          "ok": false
+        },
+        "volume_ml": {
+          "member_ml": 7.02636,
+          "ball_ml": 1.1155,
+          "total_ml": 8.14186
+        },
+        "stage_timings": {
+          "t_geom_build": 0.25,
+          "t_islands": 23.93,
+          "t_island_births": 52.06,
+          "t_minima": 58.73,
+          "t_delicacy": 1178.34,
+          "t_prepare": 1178.61,
+          "t_surface_tree": 1191.63,
+          "t_construct[p0]": 1203.41,
+          "t_construct[p1]": 1214.63,
+          "t_rewire[p1]": 1222.81,
+          "t_brace_and_size[p1]": 1227.35,
+          "t_verify[p1]": 1229.92,
+          "t_construct[p2]": 1254.62,
+          "t_construct[p3]": 1269.85,
+          "t_construct[p4]": 1285.27,
+          "t_construct[p5]": 1300.61,
+          "t_construct[p6]": 1312.55,
+          "t_construct[p7]": 1324.26,
+          "t_construct[p8]": 1336.04,
+          "t_construct[p9]": 1347.84,
+          "t_relocate": 1401.31,
+          "t_verify[final]": 1403.89,
+          "t_finish": 1414.67,
+          "t_total": 1414.67
+        },
+        "a5_internal": {
+          "schema": "support-placement/a5-internal",
+          "schema_version": 1,
+          "ok": false,
+          "fallback_required": true,
+          "reason_code": "unroutable_or_trapped_internal_lobe",
+          "reason": "47 inner-ceiling lobe(s) have no safe route within target spacing 4mm",
+          "gates": {
+            "ok": false,
+            "descriptor_violations": [],
+            "endpoint_violations": [],
+            "containment_violations": [],
+            "clearance_violations": [],
+            "keepout_violations": [],
+            "uncovered_overhangs": [],
+            "uncovered_minima": [],
+            "uncovered_births": [],
+            "uncovered_a3": [],
+            "unsupported_lobes": [
+              1,
+              5,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13,
+              15,
+              16,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              24,
+              27,
+              28,
+              29,
+              30,
+              32,
+              33,
+              34,
+              35,
+              36,
+              37,
+              38,
+              39,
+              40,
+              41,
+              42,
+              43,
+              45,
+              46,
+              47,
+              48,
+              49,
+              50,
+              51,
+              52,
+              53,
+              54,
+              55,
+              56,
+              57
+            ],
+            "provenance_violations": []
+          },
+          "provenance": {
+            "source": "hollow.post_refill_main_mask",
+            "demand_source": "authoritative_cavity_boundary",
+            "exterior_engine_covers_internal": false,
+            "exterior_verify_ok_before_a5": false,
+            "cavity_fingerprint": "fd5a88df30f56edbac1d9f0dae7436e232e6cefb75d2d342aa09bce0b47e1167",
+            "cavity_descriptor_fingerprint": "a7e6eba732ce125a1dbe9bf9d53ad621f7f349802a63cac710c5e63322b39f4e",
+            "centered_descriptor_fingerprint": "33a78ce8c9f34f4899bb3093ea2dc63b3259efe8709e01d1f1ca48ff816ea992",
+            "hollow_mesh_fingerprint": "ce106cbbc21d7f130623ad5feb730656a79b015358302121a5a496a79cbbcc81",
+            "pitch_mm": 0.5,
+            "voxel_shape": [
+              165,
+              175,
+              184
+            ],
+            "overhang_angle_deg": 45.0,
+            "route_candidate_counts": {
+              "demands": 791,
+              "same_run_lower_wall": 791,
+              "valid_endpoint_pairs": 791,
+              "interior_band": 670,
+              "swept_radius_contained": 116,
+              "clearance_clean": 314,
+              "keepout_clean": 786,
+              "all_constraints": 71
+            },
+            "unsupported_lobes": [
+              1,
+              5,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13,
+              15,
+              16,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              24,
+              27,
+              28,
+              29,
+              30,
+              32,
+              33,
+              34,
+              35,
+              36,
+              37,
+              38,
+              39,
+              40,
+              41,
+              42,
+              43,
+              45,
+              46,
+              47,
+              48,
+              49,
+              50,
+              51,
+              52,
+              53,
+              54,
+              55,
+              56,
+              57
+            ]
+          },
+          "n_demands": 791,
+          "n_inner_lobes": 57
+        },
+        "internal_support_verifier": {
+          "schema": "support-placement/a5-internal",
+          "schema_version": 1,
+          "ok": false,
+          "fallback_required": true,
+          "reason_code": "unroutable_or_trapped_internal_lobe",
+          "reason": "47 inner-ceiling lobe(s) have no safe route within target spacing 4mm",
+          "gates": {
+            "ok": false,
+            "descriptor_violations": [],
+            "endpoint_violations": [],
+            "containment_violations": [],
+            "clearance_violations": [],
+            "keepout_violations": [],
+            "uncovered_overhangs": [],
+            "uncovered_minima": [],
+            "uncovered_births": [],
+            "uncovered_a3": [],
+            "unsupported_lobes": [
+              1,
+              5,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13,
+              15,
+              16,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              24,
+              27,
+              28,
+              29,
+              30,
+              32,
+              33,
+              34,
+              35,
+              36,
+              37,
+              38,
+              39,
+              40,
+              41,
+              42,
+              43,
+              45,
+              46,
+              47,
+              48,
+              49,
+              50,
+              51,
+              52,
+              53,
+              54,
+              55,
+              56,
+              57
+            ],
+            "provenance_violations": []
+          },
+          "provenance": {
+            "source": "hollow.post_refill_main_mask",
+            "demand_source": "authoritative_cavity_boundary",
+            "exterior_engine_covers_internal": false,
+            "exterior_verify_ok_before_a5": false,
+            "cavity_fingerprint": "fd5a88df30f56edbac1d9f0dae7436e232e6cefb75d2d342aa09bce0b47e1167",
+            "cavity_descriptor_fingerprint": "a7e6eba732ce125a1dbe9bf9d53ad621f7f349802a63cac710c5e63322b39f4e",
+            "centered_descriptor_fingerprint": "33a78ce8c9f34f4899bb3093ea2dc63b3259efe8709e01d1f1ca48ff816ea992",
+            "hollow_mesh_fingerprint": "ce106cbbc21d7f130623ad5feb730656a79b015358302121a5a496a79cbbcc81",
+            "pitch_mm": 0.5,
+            "voxel_shape": [
+              165,
+              175,
+              184
+            ],
+            "overhang_angle_deg": 45.0,
+            "route_candidate_counts": {
+              "demands": 791,
+              "same_run_lower_wall": 791,
+              "valid_endpoint_pairs": 791,
+              "interior_band": 670,
+              "swept_radius_contained": 116,
+              "clearance_clean": 314,
+              "keepout_clean": 786,
+              "all_constraints": 71
+            },
+            "unsupported_lobes": [
+              1,
+              5,
+              7,
+              8,
+              9,
+              10,
+              11,
+              12,
+              13,
+              15,
+              16,
+              17,
+              18,
+              19,
+              20,
+              21,
+              22,
+              24,
+              27,
+              28,
+              29,
+              30,
+              32,
+              33,
+              34,
+              35,
+              36,
+              37,
+              38,
+              39,
+              40,
+              41,
+              42,
+              43,
+              45,
+              46,
+              47,
+              48,
+              49,
+              50,
+              51,
+              52,
+              53,
+              54,
+              55,
+              56,
+              57
+            ]
+          },
+          "n_demands": 791,
+          "n_inner_lobes": 57
+        },
+        "exterior_hollow_gates": {
+          "uncovered_islands": 19,
+          "clearance_violations": 28,
+          "moot_transit_members": 33,
+          "ball_breach_violations": 6,
+          "endcap_breach_diagnostic": 279,
+          "load_violations": 0,
+          "unsupported_minima": 5,
+          "uncovered_island_births": 53,
+          "regular_contact_invariant_violations": 0,
+          "unrouted_specialized_contacts": 40,
+          "connectivity_violations": 0,
+          "printability_violations": 0,
+          "murray_violations": 0,
+          "removal_violations": 259,
+          "physical_contact_invariant_violations": 0,
+          "ok": false
+        },
+        "internal_gates": {
+          "descriptor_violations": 0,
+          "endpoint_violations": 0,
+          "containment_violations": 0,
+          "clearance_violations": 0,
+          "keepout_violations": 0,
+          "uncovered_overhangs": 0,
+          "uncovered_minima": 0,
+          "uncovered_births": 0,
+          "uncovered_a3": 0,
+          "unsupported_lobes": 47,
+          "provenance_violations": 0,
+          "ok": false
+        },
+        "solid_fallback": true,
+        "solid_fallback_reason": "unroutable_or_trapped_internal_lobe"
+      },
+      "error": null
+    },
+    {
+      "name": "emit",
+      "status": "failed",
+      "seconds": 0.0,
+      "report": {
+        "gates": {
+          "uncovered_islands": 15,
+          "clearance_violations": 24,
+          "moot_transit_members": 36,
+          "ball_breach_violations": 5,
+          "endcap_breach_diagnostic": 275,
+          "load_violations": 2,
+          "unsupported_minima": 5,
+          "uncovered_island_births": 66,
+          "regular_contact_invariant_violations": 0,
+          "unrouted_specialized_contacts": 43,
+          "connectivity_violations": 0,
+          "printability_violations": 0,
+          "murray_violations": 0,
+          "removal_violations": 230,
+          "physical_contact_invariant_violations": 0,
+          "ok": false
+        }
+      },
+      "error": "refusing to emit: engine verify.ok is False. Pass allow_failed_gates=True to emit a gate-failing layout anyway."
+    }
+  ]
+}

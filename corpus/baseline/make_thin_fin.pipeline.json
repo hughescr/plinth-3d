@@ -1,0 +1,81 @@
+{
+  "input_stl": "corpus/models/make_thin_fin.stl",
+  "out_path": "corpus/baseline/make_thin_fin.chitubox",
+  "prepped_stl": "corpus/baseline/make_thin_fin.prepped.stl",
+  "status": "failed",
+  "exit_code": 5,
+  "failed_stage": "supports",
+  "error": "ValueError: prepare produced an invalid physical contact layout: {'reason': 'duplicate-physical-contact-seat', 'contact_indices': (17, 18)}",
+  "seconds": 165.74,
+  "settings": {
+    "wall_mm": 2.5,
+    "orient": true,
+    "hollow": true,
+    "lift_mm": 3.0,
+    "cfg_lift_mm": 3.0,
+    "p8_relocate_enable": true,
+    "allow_failed_gates": false,
+    "skip_existing": true,
+    "internal_support_verifier_configured": false,
+    "a5_internal_supports_enabled": true
+  },
+  "report_path": "corpus/baseline/make_thin_fin.pipeline.json",
+  "stages": [
+    {
+      "name": "hollow",
+      "status": "ok",
+      "seconds": 0.11,
+      "report": {
+        "components": 2,
+        "extra_bodies": [
+          {
+            "faces": 12,
+            "dims_mm": [
+              0.6,
+              10.0,
+              15.0
+            ]
+          }
+        ],
+        "orientation": {
+          "axis": [
+            0,
+            1,
+            0
+          ],
+          "deg": -30,
+          "score": 13.3
+        },
+        "oriented": true,
+        "hollow_attempted": true,
+        "solid_ml": 1.7,
+        "solid_volume_estimate_ml": 1.69,
+        "dims_mm": [
+          19.3,
+          20.0,
+          21.6
+        ],
+        "bulk_mm": 5.0,
+        "decision": "SOLID_no_cavity",
+        "hollow_eligible": false,
+        "hollow_fallback_applied": false,
+        "hollow_fallback_reason": null,
+        "hollow_volume_estimate_ml": null,
+        "final_geometry": "solid",
+        "final_ml": 1.7,
+        "status": "OK",
+        "exported": "corpus/baseline/make_thin_fin.prepped.stl",
+        "verify": "N/A_solid",
+        "elapsed_s": 0.1
+      },
+      "error": null
+    },
+    {
+      "name": "supports",
+      "status": "failed",
+      "seconds": 165.63,
+      "report": {},
+      "error": "ValueError: prepare produced an invalid physical contact layout: {'reason': 'duplicate-physical-contact-seat', 'contact_indices': (17, 18)}"
+    }
+  ]
+}

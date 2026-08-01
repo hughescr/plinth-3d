@@ -1,0 +1,216 @@
+{
+  "input_stl": "corpus/models/make_overhang_table.stl",
+  "out_path": "corpus/baseline/make_overhang_table.chitubox",
+  "prepped_stl": "corpus/baseline/make_overhang_table.prepped.stl",
+  "status": "failed",
+  "exit_code": 3,
+  "failed_stage": "emit",
+  "error": "refusing to emit: engine verify.ok is False. Pass allow_failed_gates=True to emit a gate-failing layout anyway.",
+  "seconds": 8.89,
+  "settings": {
+    "wall_mm": 2.5,
+    "orient": true,
+    "hollow": true,
+    "lift_mm": 3.0,
+    "cfg_lift_mm": 3.0,
+    "p8_relocate_enable": true,
+    "allow_failed_gates": false,
+    "skip_existing": true,
+    "internal_support_verifier_configured": false,
+    "a5_internal_supports_enabled": true
+  },
+  "report_path": "corpus/baseline/make_overhang_table.pipeline.json",
+  "stages": [
+    {
+      "name": "hollow",
+      "status": "ok",
+      "seconds": 0.32,
+      "report": {
+        "components": 5,
+        "extra_bodies": [
+          {
+            "faces": 12,
+            "dims_mm": [
+              4.0,
+              4.0,
+              20.0
+            ]
+          },
+          {
+            "faces": 12,
+            "dims_mm": [
+              4.0,
+              4.0,
+              20.0
+            ]
+          },
+          {
+            "faces": 12,
+            "dims_mm": [
+              4.0,
+              4.0,
+              20.0
+            ]
+          },
+          {
+            "faces": 12,
+            "dims_mm": [
+              4.0,
+              4.0,
+              20.0
+            ]
+          }
+        ],
+        "orientation": {
+          "axis": [
+            1,
+            0,
+            0
+          ],
+          "deg": -30,
+          "score": 23.4
+        },
+        "oriented": true,
+        "hollow_attempted": true,
+        "solid_ml": 4.9,
+        "solid_volume_estimate_ml": 4.88,
+        "dims_mm": [
+          30.0,
+          35.4,
+          34.3
+        ],
+        "bulk_mm": 6.1,
+        "cavity_ml": 0.0,
+        "junk_pockets_left_solid": 3,
+        "decision": "SOLID_below_threshold",
+        "hollow_eligible": false,
+        "hollow_fallback_applied": false,
+        "hollow_fallback_reason": null,
+        "hollow_volume_estimate_ml": 4.876,
+        "final_geometry": "solid",
+        "final_ml": 4.9,
+        "status": "OK",
+        "exported": "corpus/baseline/make_overhang_table.prepped.stl",
+        "verify": "N/A_solid",
+        "elapsed_s": 0.3
+      },
+      "error": null
+    },
+    {
+      "name": "supports",
+      "status": "ok",
+      "seconds": 8.57,
+      "report": {
+        "faces": 60,
+        "n_members": 24,
+        "n_balls": 20,
+        "n_unrouted": 0,
+        "n_contacts": 12,
+        "plate_z": -20.142305374145508,
+        "gates": {
+          "uncovered_islands": 1,
+          "clearance_violations": 0,
+          "moot_transit_members": 0,
+          "ball_breach_violations": 0,
+          "endcap_breach_diagnostic": 4,
+          "load_violations": 4,
+          "unsupported_minima": 0,
+          "uncovered_island_births": 1,
+          "regular_contact_invariant_violations": 0,
+          "unrouted_specialized_contacts": 0,
+          "connectivity_violations": 0,
+          "printability_violations": 0,
+          "murray_violations": 0,
+          "removal_violations": 12,
+          "physical_contact_invariant_violations": 0,
+          "ok": false
+        },
+        "volume_ml": {
+          "member_ml": 0.16757,
+          "ball_ml": 0.07827,
+          "total_ml": 0.24584
+        },
+        "stage_timings": {
+          "t_geom_build": 0.0,
+          "t_islands": 0.0,
+          "t_island_births": 0.47,
+          "t_minima": 0.47,
+          "t_delicacy": 0.9,
+          "t_prepare": 0.9,
+          "t_surface_tree": 0.94,
+          "t_construct[p0]": 1.2,
+          "t_construct[p1]": 1.44,
+          "t_construct[p2]": 1.67,
+          "t_construct[p3]": 1.89,
+          "t_construct[p4]": 2.1,
+          "t_construct[p5]": 2.3,
+          "t_construct[p6]": 2.5,
+          "t_construct[p7]": 2.69,
+          "t_construct[p8]": 2.86,
+          "t_construct[p9]": 3.03,
+          "t_construct[p10]": 3.19,
+          "t_construct[p11]": 3.35,
+          "t_construct[p12]": 3.48,
+          "t_construct[p13]": 3.63,
+          "t_construct[p14]": 3.76,
+          "t_construct[p15]": 3.89,
+          "t_construct[p16]": 4.01,
+          "t_construct[p17]": 4.12,
+          "t_construct[p18]": 4.22,
+          "t_construct[p19]": 4.32,
+          "t_construct[p20]": 4.41,
+          "t_construct[p21]": 4.5,
+          "t_construct[p22]": 4.58,
+          "t_construct[p23]": 4.65,
+          "t_construct[p24]": 4.7,
+          "t_construct[p25]": 4.75,
+          "t_construct[p26]": 4.8,
+          "t_construct[p27]": 4.84,
+          "t_construct[p28]": 4.88,
+          "t_rewire[p28]": 4.91,
+          "t_brace_and_size[p28]": 4.93,
+          "t_verify[p28]": 4.98,
+          "t_construct[p29]": 5.44,
+          "t_construct[p30]": 5.88,
+          "t_construct[p31]": 6.32,
+          "t_construct[p32]": 6.76,
+          "t_construct[p33]": 7.2,
+          "t_construct[p34]": 7.63,
+          "t_construct[p35]": 8.07,
+          "t_construct[p36]": 8.51,
+          "t_relocate": 8.51,
+          "t_verify[final]": 8.55,
+          "t_finish": 8.57,
+          "t_total": 8.57
+        }
+      },
+      "error": null
+    },
+    {
+      "name": "emit",
+      "status": "failed",
+      "seconds": 0.0,
+      "report": {
+        "gates": {
+          "uncovered_islands": 1,
+          "clearance_violations": 0,
+          "moot_transit_members": 0,
+          "ball_breach_violations": 0,
+          "endcap_breach_diagnostic": 4,
+          "load_violations": 4,
+          "unsupported_minima": 0,
+          "uncovered_island_births": 1,
+          "regular_contact_invariant_violations": 0,
+          "unrouted_specialized_contacts": 0,
+          "connectivity_violations": 0,
+          "printability_violations": 0,
+          "murray_violations": 0,
+          "removal_violations": 12,
+          "physical_contact_invariant_violations": 0,
+          "ok": false
+        }
+      },
+      "error": "refusing to emit: engine verify.ok is False. Pass allow_failed_gates=True to emit a gate-failing layout anyway."
+    }
+  ]
+}
