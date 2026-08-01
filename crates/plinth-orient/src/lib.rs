@@ -66,7 +66,7 @@ impl RigidTransform {
 /// Applies the frozen legacy orientation choice and frame restoration.
 ///
 /// The pinned report is required. A valid report whose hollow stage was absent or skipped, or
-/// whose hollow report has no `orientation` entry, intentionally selects the identity rotation.
+/// whose hollow log has no `orientation` entry, intentionally selects the identity rotation.
 /// Identity still receives frame restoration, matching the legacy implementation.
 pub fn run(model: DecimatedModel, request: &OrientRequest) -> Result<OrientedModel, OrientError> {
     let pinned_report = request.pinned.pipeline_report.clone();
@@ -120,7 +120,7 @@ fn selection_from_report(report: &JsonValue) -> Option<BaselineSelection> {
     if status.eq_ignore_ascii_case("skipped") {
         return Some(BaselineSelection::Identity);
     }
-    let log = object_field(hollow, "report")?.as_object()?;
+    let log = stage_log(hollow)?;
     let Some(orientation) = object_field(log, "orientation") else {
         return Some(BaselineSelection::Identity);
     };
@@ -140,10 +140,17 @@ fn selection_from_report(report: &JsonValue) -> Option<BaselineSelection> {
         _ => return None,
     };
     let degrees = Finite::new(*object_field(orientation, "deg")?.as_number()?).ok()?;
-    if !matches!(degrees.get(), -30.0 | -20.0 | -10.0 | 10.0 | 20.0 | 30.0) {
-        return None;
-    }
     Some(BaselineSelection::AxisDegrees { axis, degrees })
+}
+
+/// The migration contract calls this data `log`; committed pipeline reports serialize the same
+/// stage payload under `report`. Accept exactly one spelling so an ambiguous or malformed stage
+/// remains a typed invalid-baseline failure rather than silently selecting a transform.
+fn stage_log(hollow: &[(String, JsonValue)]) -> Option<&[(String, JsonValue)]> {
+    match (object_field(hollow, "log"), object_field(hollow, "report")) {
+        (Some(log), None) | (None, Some(log)) => log.as_object(),
+        (None, None) | (Some(_), Some(_)) => None,
+    }
 }
 
 fn transform_for(selection: BaselineSelection) -> Result<RigidTransform, OrientError> {
@@ -677,11 +684,29 @@ mod tests {
     }
 
     #[test]
-    fn only_the_legacy_axes_and_candidate_degrees_are_accepted() {
+    fn normative_log_shape_and_fixture_report_shape_both_select_the_pinned_rotation() {
+        let log = r#"{"stages":[{"name":"hollow","status":"ok","log":{"orientation":{"axis":[0,1,0],"deg":-45}}}]}"#;
+        let report = r#"{"stages":[{"name":"hollow","status":"ok","report":{"orientation":{"axis":[0,1,0],"deg":-45}}}]}"#;
+        let expected = Some(BaselineSelection::AxisDegrees {
+            axis: BaselineAxis::Y,
+            degrees: Finite::new(-45.0).expect("fixture degree is finite"),
+        });
+        assert_eq!(parse(log), expected);
+        assert_eq!(parse(report), expected);
+    }
+
+    #[test]
+    fn only_the_frozen_axes_and_finite_degrees_are_accepted() {
         let invalid_axis = r#"{"stages":[{"name":"hollow","status":"ok","report":{"orientation":{"axis":[0,0,1],"deg":-30}}}]}"#;
-        let invalid_degrees = r#"{"stages":[{"name":"hollow","status":"ok","report":{"orientation":{"axis":[1,0,0],"deg":-45}}}]}"#;
+        let invalid_degrees = r#"{"stages":[{"name":"hollow","status":"ok","report":{"orientation":{"axis":[1,0,0],"deg":"-45"}}}]}"#;
         assert_eq!(parse(invalid_axis), None);
         assert_eq!(parse(invalid_degrees), None);
+    }
+
+    #[test]
+    fn conflicting_log_and_report_wrappers_are_invalid() {
+        let report = r#"{"stages":[{"name":"hollow","status":"ok","log":{},"report":{}}]}"#;
+        assert_eq!(parse(report), None);
     }
 
     #[test]
