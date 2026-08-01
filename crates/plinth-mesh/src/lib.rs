@@ -95,10 +95,14 @@ impl Mesh {
     /// mesh's local arrays: it neither welds, repairs, reorders, nor mutates
     /// source vertices or triangles.
     ///
-    /// Normalization before the cross product makes the nonzero-area check
-    /// safe for both very small and very large finite triangles.  A finite
-    /// coordinate subtraction that cannot be represented is reported as an
-    /// arithmetic failure rather than guessed about.
+    /// The audit uses an adaptive robust 2D orientation predicate against the
+    /// original coordinates on the XY, YZ, and ZX projections.  Its private
+    /// numerical envelope accepts zero (including signed zero) and nonzero
+    /// coordinates with an inclusive magnitude from 2^-400 through 2^400.
+    /// Those bounds are implementation safety limits for this predicate, not
+    /// printer or physics constants.  A finite coordinate subtraction that
+    /// cannot be represented is reported as an arithmetic failure rather than
+    /// guessed about.
     pub fn audit_strict(&self) -> Result<(), StrictMeshAuditError> {
         for (triangle, indices) in self.tris.iter().enumerate() {
             if indices[0] == indices[1] {
@@ -129,12 +133,8 @@ impl Mesh {
             let a = self.verts[indices[0] as usize];
             let b = self.verts[indices[1] as usize];
             let c = self.verts[indices[2] as usize];
-            match triangle_has_nonzero_area(a, b, c) {
-                Ok(true) => {}
-                Ok(false) => return Err(StrictMeshAuditError::ZeroAreaOrCollinear { triangle }),
-                Err(()) => {
-                    return Err(StrictMeshAuditError::DerivedArithmeticOverflow { triangle })
-                }
+            if let Some(error) = strict_triangle_error(triangle, a, b, c) {
+                return Err(error);
             }
         }
         Ok(())
@@ -289,37 +289,114 @@ pub enum StrictMeshAuditError {
     ZeroAreaOrCollinear { triangle: usize },
     #[error("triangle {triangle} overflowed while deriving strict-audit geometry")]
     DerivedArithmeticOverflow { triangle: usize },
+    #[error(
+        "triangle {triangle} corner {corner} axis {axis} coordinate {value} is outside the robust-predicate envelope"
+    )]
+    PredicateOutOfDomain {
+        triangle: usize,
+        corner: usize,
+        axis: usize,
+        value: f64,
+    },
+    #[error(
+        "triangle {triangle} robust orientation on axes {first_axis}/{second_axis} returned non-finite {value}"
+    )]
+    PredicateNonFiniteResult {
+        triangle: usize,
+        first_axis: usize,
+        second_axis: usize,
+        value: f64,
+    },
 }
 
-/// Returns whether a triangle has nonzero area without squaring its normal.
-///
-/// Scale finite edges before crossing them so a valid tiny triangle cannot
-/// underflow and a valid huge triangle cannot overflow.  Coordinate
-/// subtraction itself may overflow even for finite endpoints; that is an
-/// unrepresentable derived quantity and cannot honestly be classified.
-fn triangle_has_nonzero_area(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> Result<bool, ()> {
-    let ab = checked_sub(a, b)?;
-    let ac = checked_sub(c, a)?;
-    let scale = ab.into_iter().chain(ac).map(f64::abs).fold(0.0, f64::max);
-    if scale == 0.0 {
-        return Ok(false);
-    }
-    let normal = [
-        (ab[1] / scale) * (ac[2] / scale) - (ab[2] / scale) * (ac[1] / scale),
-        (ab[2] / scale) * (ac[0] / scale) - (ab[0] / scale) * (ac[2] / scale),
-        (ab[0] / scale) * (ac[1] / scale) - (ab[1] / scale) * (ac[0] / scale),
-    ];
-    if normal.iter().any(|value| !value.is_finite()) {
-        return Err(());
-    }
-    Ok(normal.iter().any(|value| *value != 0.0))
-}
+// Exact powers of two: an input to the adaptive predicate is either zero or
+// within this inclusive magnitude envelope.  This avoids relying on its
+// unsupported underflow/overflow regimes while preserving all normal model
+// and promoted-f32 coordinates.
+const PREDICATE_MIN_ABS: f64 = f64::from_bits(623_u64 << 52); // 2^-400
+const PREDICATE_MAX_ABS: f64 = f64::from_bits(1423_u64 << 52); // 2^400
+const PROJECTIONS: [(usize, usize); 3] = [(0, 1), (1, 2), (2, 0)];
 
-fn checked_sub(left: [f64; 3], right: [f64; 3]) -> Result<[f64; 3], ()> {
-    let result = [left[0] - right[0], left[1] - right[1], left[2] - right[2]];
-    result
-        .iter()
-        .all(|coordinate| coordinate.is_finite())
-        .then_some(result)
-        .ok_or(())
+/// Returns the first strict-audit failure, or `None` once one projection
+/// proves nonzero area.  A safe later projection can prove area despite an
+/// earlier unsafe one, so failures are retained until all projections finish.
+fn strict_triangle_error(
+    triangle: usize,
+    a: [f64; 3],
+    b: [f64; 3],
+    c: [f64; 3],
+) -> Option<StrictMeshAuditError> {
+    let vertices = [a, b, c];
+    let mut first_failure = None;
+
+    for (first_axis, second_axis) in PROJECTIONS {
+        // `robust::orient2d(a, b, c)` starts from precisely these four
+        // subtractions.  Check them before the coordinate envelope so a
+        // derived overflow has deterministic precedence within a projection.
+        let subtractions = [
+            a[first_axis] - c[first_axis],
+            a[second_axis] - c[second_axis],
+            b[first_axis] - c[first_axis],
+            b[second_axis] - c[second_axis],
+        ];
+        if subtractions.iter().any(|value| !value.is_finite()) {
+            first_failure
+                .get_or_insert(StrictMeshAuditError::DerivedArithmeticOverflow { triangle });
+            continue;
+        }
+
+        let mut out_of_domain = None;
+        for (corner, vertex) in vertices.iter().enumerate() {
+            for axis in [first_axis, second_axis] {
+                let value = vertex[axis];
+                if value != 0.0 && !(PREDICATE_MIN_ABS..=PREDICATE_MAX_ABS).contains(&value.abs()) {
+                    out_of_domain = Some(StrictMeshAuditError::PredicateOutOfDomain {
+                        triangle,
+                        corner,
+                        axis,
+                        value,
+                    });
+                    break;
+                }
+            }
+            if out_of_domain.is_some() {
+                break;
+            }
+        }
+        if let Some(error) = out_of_domain {
+            first_failure.get_or_insert(error);
+            continue;
+        }
+
+        let result = robust::orient2d(
+            robust::Coord {
+                x: a[first_axis],
+                y: a[second_axis],
+            },
+            robust::Coord {
+                x: b[first_axis],
+                y: b[second_axis],
+            },
+            robust::Coord {
+                x: c[first_axis],
+                y: c[second_axis],
+            },
+        );
+        if !result.is_finite() {
+            first_failure.get_or_insert(StrictMeshAuditError::PredicateNonFiniteResult {
+                triangle,
+                first_axis,
+                second_axis,
+                value: result,
+            });
+        } else if result != 0.0 {
+            return None;
+        }
+    }
+
+    if first_failure.is_none() {
+        Some(StrictMeshAuditError::ZeroAreaOrCollinear { triangle })
+    } else {
+        first_failure
+    }
 }
