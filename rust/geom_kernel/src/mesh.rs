@@ -1,151 +1,305 @@
-//! Immutable face-local geometry shared by a surface and its future indexes.
-//!
-//! Soup construction deliberately preserves caller-supplied normals, areas and
-//! bounds. Indexed construction derives the same face-local representation.
+//! Immutable face-local geometry shared by surface-local query indexes.
 
 use std::sync::Arc;
 
 use crate::vec3::{add, V3};
+use crate::SurfaceBuildError;
 
-/// Read-only per-face bounds, represented as `[minimum, maximum]`.
 pub type FaceBounds = [V3; 2];
 
-/// Immutable, face-local geometry. Its data is never mutated after surface
-/// construction; indexes and result-inert caches live on `NativeSurface`.
+/// Immutable global face data. Query indexes and caches deliberately do not
+/// live here: a future subset can share this store but own independent indexes.
 pub struct FaceGeometry {
-    pub(crate) nfaces: usize,
-    pub(crate) v0: Vec<V3>,
-    pub(crate) e1: Vec<V3>,
-    pub(crate) e2: Vec<V3>,
-    pub(crate) normals: Vec<V3>,
-    pub(crate) areas: Vec<f64>,
-    pub(crate) face_bounds: Vec<FaceBounds>,
-    pub(crate) centroid: Vec<V3>,
-    pub(crate) bounds: FaceBounds,
+    v0: Vec<V3>,
+    e1: Vec<V3>,
+    e2: Vec<V3>,
+    normals: Vec<V3>,
+    areas: Vec<f64>,
+    face_bounds: Vec<FaceBounds>,
+    centroid: Vec<V3>,
+    bounds: FaceBounds,
 }
 
 impl FaceGeometry {
-    /// Global face normals in input/indexed face order.
     pub fn normals(&self) -> &[[f64; 3]] {
         &self.normals
     }
-    /// Global face areas in input/indexed face order.
     pub fn areas(&self) -> &[f64] {
         &self.areas
     }
-    /// Global face centroids in input/indexed face order.
     pub fn centroids(&self) -> &[[f64; 3]] {
         &self.centroid
     }
-    /// Per-face `[minimum, maximum]` bounds in global face order.
     pub fn face_bounds(&self) -> &[FaceBounds] {
         &self.face_bounds
     }
-    /// Overall `[minimum, maximum]` bounds supplied or derived at construction.
     pub fn bounds(&self) -> FaceBounds {
         self.bounds
     }
-    /// Number of global faces.
     pub fn nfaces(&self) -> usize {
-        self.nfaces
+        self.v0.len()
     }
 }
 
-/// Internal query view. The Arc ensures future subset surfaces can share one
-/// immutable face store while retaining independent BVH/parity caches.
 pub struct Mesh {
-    pub(crate) geometry: Arc<FaceGeometry>,
-    pub(crate) nfaces: usize,
+    geometry: Arc<FaceGeometry>,
 }
 
 impl Mesh {
+    #[allow(clippy::too_many_arguments)] // exact parallel face arrays are the immutable storage layout
+    fn from_parts(
+        v0: Vec<V3>,
+        e1: Vec<V3>,
+        e2: Vec<V3>,
+        normals: Vec<V3>,
+        areas: Vec<f64>,
+        face_bounds: Vec<FaceBounds>,
+        centroid: Vec<V3>,
+        bounds: FaceBounds,
+    ) -> Self {
+        let n = v0.len();
+        debug_assert!(n > 0);
+        debug_assert_eq!(e1.len(), n);
+        debug_assert_eq!(e2.len(), n);
+        debug_assert_eq!(normals.len(), n);
+        debug_assert_eq!(areas.len(), n);
+        debug_assert_eq!(face_bounds.len(), n);
+        debug_assert_eq!(centroid.len(), n);
+        Self {
+            geometry: Arc::new(FaceGeometry {
+                v0,
+                e1,
+                e2,
+                normals,
+                areas,
+                face_bounds,
+                centroid,
+                bounds,
+            }),
+        }
+    }
+
+    /// Build once from source-supplied soup metadata. The caller has already
+    /// validated shape/finite/bounds; normals, areas and overall bounds are
+    /// copied verbatim and never recomputed.
+    pub(crate) fn from_soup(
+        triangles: &[[[f64; 3]; 3]],
+        normals: &[[f64; 3]],
+        areas: &[f64],
+        bounds: FaceBounds,
+    ) -> Self {
+        let n = triangles.len();
+        let mut v0 = Vec::with_capacity(n);
+        let mut e1 = Vec::with_capacity(n);
+        let mut e2 = Vec::with_capacity(n);
+        let mut face_bounds = Vec::with_capacity(n);
+        let mut centroid = Vec::with_capacity(n);
+        for triangle in triangles {
+            let [a, b, c] = *triangle;
+            v0.push(a);
+            e1.push([b[0] - a[0], b[1] - a[1], b[2] - a[2]]);
+            e2.push([c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
+            face_bounds.push([
+                [
+                    a[0].min(b[0]).min(c[0]),
+                    a[1].min(b[1]).min(c[1]),
+                    a[2].min(b[2]).min(c[2]),
+                ],
+                [
+                    a[0].max(b[0]).max(c[0]),
+                    a[1].max(b[1]).max(c[1]),
+                    a[2].max(b[2]).max(c[2]),
+                ],
+            ]);
+            centroid.push([
+                (a[0] + b[0] + c[0]) / 3.0,
+                (a[1] + b[1] + c[1]) / 3.0,
+                (a[2] + b[2] + c[2]) / 3.0,
+            ]);
+        }
+        Self::from_parts(
+            v0,
+            e1,
+            e2,
+            normals.to_vec(),
+            areas.to_vec(),
+            face_bounds,
+            centroid,
+            bounds,
+        )
+    }
+
+    /// Validate and derive the complete immutable indexed face store in one
+    /// pass. No temporary triangle soup or second metadata derivation exists.
+    pub(crate) fn from_indexed(
+        vertices: &[[f64; 3]],
+        faces: &[[u32; 3]],
+    ) -> Result<Self, SurfaceBuildError> {
+        if vertices.is_empty() {
+            return Err(SurfaceBuildError::EmptyVertices);
+        }
+        if faces.is_empty() {
+            return Err(SurfaceBuildError::EmptyFaces);
+        }
+        for (vertex, point) in vertices.iter().enumerate() {
+            for (axis, value) in point.iter().enumerate() {
+                if !value.is_finite() {
+                    return Err(SurfaceBuildError::NonFiniteVertex { vertex, axis });
+                }
+            }
+        }
+        let n = faces.len();
+        let mut v0 = Vec::with_capacity(n);
+        let mut e1s = Vec::with_capacity(n);
+        let mut e2s = Vec::with_capacity(n);
+        let mut normals = Vec::with_capacity(n);
+        let mut areas = Vec::with_capacity(n);
+        let mut face_bounds = Vec::with_capacity(n);
+        let mut centroids = Vec::with_capacity(n);
+        let mut bounds = [[f64::INFINITY; 3], [f64::NEG_INFINITY; 3]];
+        for (face, indices) in faces.iter().enumerate() {
+            let mut points = [[0.0; 3]; 3];
+            for (corner, &index) in indices.iter().enumerate() {
+                let Some(point) = vertices.get(index as usize) else {
+                    return Err(SurfaceBuildError::FaceIndexOutOfBounds {
+                        face,
+                        corner,
+                        index,
+                        vertex_count: vertices.len(),
+                    });
+                };
+                points[corner] = *point;
+                for axis in 0..3 {
+                    bounds[0][axis] = bounds[0][axis].min(point[axis]);
+                    bounds[1][axis] = bounds[1][axis].max(point[axis]);
+                }
+            }
+            let [a, b, c] = points;
+            let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+            let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+            if !e1.iter().chain(&e2).all(|v| v.is_finite()) {
+                return Err(SurfaceBuildError::IndexedDerivedArithmetic {
+                    face,
+                    operation: "edge subtraction",
+                });
+            }
+            let cross = [
+                e1[1] * e2[2] - e1[2] * e2[1],
+                e1[2] * e2[0] - e1[0] * e2[2],
+                e1[0] * e2[1] - e1[1] * e2[0],
+            ];
+            if !cross.iter().all(|v| v.is_finite()) {
+                return Err(SurfaceBuildError::IndexedDerivedArithmetic {
+                    face,
+                    operation: "normal cross product",
+                });
+            }
+            let length = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
+            if !length.is_finite() {
+                return Err(SurfaceBuildError::IndexedDerivedArithmetic {
+                    face,
+                    operation: "normal length",
+                });
+            }
+            let normal = [
+                cross[0] / length.max(1e-30),
+                cross[1] / length.max(1e-30),
+                cross[2] / length.max(1e-30),
+            ];
+            if !normal.iter().all(|v| v.is_finite()) {
+                return Err(SurfaceBuildError::IndexedDerivedArithmetic {
+                    face,
+                    operation: "normalization",
+                });
+            }
+            let area = 0.5 * length;
+            if !area.is_finite() {
+                return Err(SurfaceBuildError::IndexedDerivedArithmetic {
+                    face,
+                    operation: "area",
+                });
+            }
+            let centroid = [
+                (a[0] + b[0] + c[0]) / 3.0,
+                (a[1] + b[1] + c[1]) / 3.0,
+                (a[2] + b[2] + c[2]) / 3.0,
+            ];
+            if !centroid.iter().all(|v| v.is_finite()) {
+                return Err(SurfaceBuildError::IndexedDerivedArithmetic {
+                    face,
+                    operation: "centroid",
+                });
+            }
+            v0.push(a);
+            e1s.push(e1);
+            e2s.push(e2);
+            normals.push(normal);
+            areas.push(area);
+            face_bounds.push([
+                [
+                    a[0].min(b[0]).min(c[0]),
+                    a[1].min(b[1]).min(c[1]),
+                    a[2].min(b[2]).min(c[2]),
+                ],
+                [
+                    a[0].max(b[0]).max(c[0]),
+                    a[1].max(b[1]).max(c[1]),
+                    a[2].max(b[2]).max(c[2]),
+                ],
+            ]);
+            centroids.push(centroid);
+        }
+        Ok(Self::from_parts(
+            v0,
+            e1s,
+            e2s,
+            normals,
+            areas,
+            face_bounds,
+            centroids,
+            bounds,
+        ))
+    }
+
+    // Existing test-only flat construction compatibility.
     pub fn new(
         tris: &[f64],
         normals: &[f64],
         areas: &[f64],
         bounds: &[f64],
     ) -> Result<Self, String> {
-        if !tris.len().is_multiple_of(9) {
-            return Err(format!("tris length {} not a multiple of 9", tris.len()));
+        if !tris.len().is_multiple_of(9)
+            || tris.is_empty()
+            || normals.len() != tris.len() / 3
+            || areas.len() != tris.len() / 9
+            || bounds.len() != 6
+        {
+            return Err("invalid mesh buffers".into());
         }
-        let nfaces = tris.len() / 9;
-        if nfaces == 0 {
-            return Err("empty mesh (0 faces) — the oracle cannot build one either".into());
-        }
-        if normals.len() != nfaces * 3 {
-            return Err(format!(
-                "normals length {} != nfaces*3 ({})",
-                normals.len(),
-                nfaces * 3
-            ));
-        }
-        if areas.len() != nfaces {
-            return Err(format!(
-                "areas length {} != nfaces ({})",
-                areas.len(),
-                nfaces
-            ));
-        }
-        if bounds.len() != 6 {
-            return Err(format!("bounds length {} != 6", bounds.len()));
-        }
-
-        let mut v0 = Vec::with_capacity(nfaces);
-        let mut e1 = Vec::with_capacity(nfaces);
-        let mut e2 = Vec::with_capacity(nfaces);
-        let mut nrm = Vec::with_capacity(nfaces);
-        let mut face_bounds = Vec::with_capacity(nfaces);
-        let mut centroid = Vec::with_capacity(nfaces);
-        for f in 0..nfaces {
-            let base = f * 9;
-            let a: V3 = [tris[base], tris[base + 1], tris[base + 2]];
-            let b: V3 = [tris[base + 3], tris[base + 4], tris[base + 5]];
-            let c: V3 = [tris[base + 6], tris[base + 7], tris[base + 8]];
-            let ee1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-            let ee2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-            let mn = [
-                a[0].min(b[0]).min(c[0]),
-                a[1].min(b[1]).min(c[1]),
-                a[2].min(b[2]).min(c[2]),
-            ];
-            let mx = [
-                a[0].max(b[0]).max(c[0]),
-                a[1].max(b[1]).max(c[1]),
-                a[2].max(b[2]).max(c[2]),
-            ];
-            let ctr = [
-                (a[0] + b[0] + c[0]) / 3.0,
-                (a[1] + b[1] + c[1]) / 3.0,
-                (a[2] + b[2] + c[2]) / 3.0,
-            ];
-            v0.push(a);
-            e1.push(ee1);
-            e2.push(ee2);
-            nrm.push([normals[f * 3], normals[f * 3 + 1], normals[f * 3 + 2]]);
-            face_bounds.push([mn, mx]);
-            centroid.push(ctr);
-        }
-        Ok(Self {
-            geometry: Arc::new(FaceGeometry {
-                nfaces,
-                v0,
-                e1,
-                e2,
-                normals: nrm,
-                areas: areas.to_vec(),
-                face_bounds,
-                centroid,
-                bounds: [
-                    [bounds[0], bounds[1], bounds[2]],
-                    [bounds[3], bounds[4], bounds[5]],
-                ],
-            }),
-            nfaces,
-        })
+        let triangles: Vec<[[f64; 3]; 3]> = tris
+            .chunks_exact(9)
+            .map(|t| [[t[0], t[1], t[2]], [t[3], t[4], t[5]], [t[6], t[7], t[8]]])
+            .collect();
+        let nrms: Vec<V3> = normals
+            .chunks_exact(3)
+            .map(|n| [n[0], n[1], n[2]])
+            .collect();
+        Ok(Self::from_soup(
+            &triangles,
+            &nrms,
+            areas,
+            [
+                [bounds[0], bounds[1], bounds[2]],
+                [bounds[3], bounds[4], bounds[5]],
+            ],
+        ))
+    }
+    pub(crate) fn geometry(&self) -> &FaceGeometry {
+        &self.geometry
     }
     #[inline]
     pub(crate) fn nfaces(&self) -> usize {
-        self.nfaces
+        self.geometry.nfaces()
     }
     #[inline]
     pub(crate) fn v0(&self, i: usize) -> V3 {

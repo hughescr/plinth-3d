@@ -144,7 +144,7 @@ pub fn surf_seg_min(s: &NativeSurface, a: V3, b: V3) -> (f64, V3) {
 pub fn brute_seg_min(s: &NativeSurface, a: V3, b: V3) -> (f64, V3) {
     let mut best_d = f64::INFINITY;
     let mut best_pt: V3 = [f64::NAN; 3];
-    for t in 0..s.mesh.nfaces {
+    for t in 0..s.mesh.nfaces() {
         let (d, pt) = s.seg_tri_dist(a, b, t);
         if d < best_d {
             best_d = d;

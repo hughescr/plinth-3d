@@ -237,8 +237,14 @@ fn every_multi_slice_batch_rejects_each_mismatched_companion() {
 
 #[test]
 fn indexed_geometry_and_batched_results_match_equivalent_soup() {
-    let vertices = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
-    let faces = [[0, 1, 2]];
+    let vertices = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+    ];
+    let faces = [[0, 1, 2], [1, 3, 2], [4, 2, 1]];
     let indexed = NativeSurface::from_indexed(
         &vertices,
         &faces,
@@ -248,29 +254,101 @@ fn indexed_geometry_and_batched_results_match_equivalent_soup() {
         },
     )
     .unwrap();
-    let soup = surface();
-    assert_eq!(indexed.geometry().normals(), soup.geometry().normals());
-    assert_eq!(indexed.geometry().areas(), soup.geometry().areas());
-    assert_eq!(indexed.geometry().centroids(), soup.geometry().centroids());
-    assert_eq!(
-        indexed.geometry().face_bounds(),
-        soup.geometry().face_bounds()
-    );
-    assert_eq!(indexed.geometry().bounds(), soup.geometry().bounds());
+    let root_three = 3.0_f64.sqrt();
+    let soup = NativeSurface::from_triangle_soup(
+        TriangleSoup::borrowed(
+            &[
+                [vertices[0], vertices[1], vertices[2]],
+                [vertices[1], vertices[3], vertices[2]],
+                [vertices[4], vertices[2], vertices[1]],
+            ],
+            &[
+                [0.0, 0.0, 1.0],
+                [0.0, -0.0, 1.0],
+                [-1.0 / root_three, -1.0 / root_three, -1.0 / root_three],
+            ],
+            &[0.5, 0.5, root_three / 2.0],
+            [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]],
+        ),
+        2.0,
+        usize::MAX,
+    )
+    .unwrap();
+    for (left, right) in indexed
+        .geometry()
+        .normals()
+        .iter()
+        .zip(soup.geometry().normals())
+    {
+        for axis in 0..3 {
+            assert_eq!(left[axis].to_bits(), right[axis].to_bits());
+        }
+    }
+    for (&left, &right) in indexed
+        .geometry()
+        .areas()
+        .iter()
+        .zip(soup.geometry().areas())
+    {
+        assert_eq!(left.to_bits(), right.to_bits());
+    }
+    for (left, right) in indexed
+        .geometry()
+        .centroids()
+        .iter()
+        .zip(soup.geometry().centroids())
+    {
+        for axis in 0..3 {
+            assert_eq!(left[axis].to_bits(), right[axis].to_bits());
+        }
+    }
+    for (left, right) in indexed
+        .geometry()
+        .face_bounds()
+        .iter()
+        .zip(soup.geometry().face_bounds())
+    {
+        for endpoint in 0..2 {
+            for axis in 0..3 {
+                assert_eq!(
+                    left[endpoint][axis].to_bits(),
+                    right[endpoint][axis].to_bits()
+                );
+            }
+        }
+    }
 
-    let points = [[0.25, 0.25, 1.0], [2.0, 2.0, 0.0]];
-    let origins = [[0.25, 0.25, 1.0], [2.0, 2.0, 1.0]];
-    let dirs = [[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]];
-    assert_eq!(
-        indexed.query(&points, f64::INFINITY),
-        soup.query(&points, f64::INFINITY)
-    );
-    assert_eq!(indexed.project(&points), soup.project(&points));
+    let points = [[0.5, 0.5, 0.0], [0.25, 0.25, 1.0], [2.0, 2.0, 0.0]];
+    let origins = [[0.5, 0.5, 2.0], [0.25, 0.25, 1.0], [2.0, 2.0, 1.0]];
+    let dirs = [[0.0, 0.0, -1.0], [0.0, 0.0, -1.0], [0.0, 0.0, -1.0]];
+    let (id, ii) = indexed.query(&points, f64::INFINITY);
+    let (sd, si) = soup.query(&points, f64::INFINITY);
+    assert_eq!(ii, si);
+    for (&left, &right) in id.iter().zip(&sd) {
+        assert_eq!(left.to_bits(), right.to_bits());
+    }
+    let (id, ip, ii, inorm) = indexed.project(&points);
+    let (sd, sp, si, snorm) = soup.project(&points);
+    assert_eq!(ii, si);
+    for ((&left, &right), (lp, rp)) in id.iter().zip(&sd).zip(ip.iter().zip(&sp)) {
+        assert_eq!(left.to_bits(), right.to_bits());
+        for axis in 0..3 {
+            assert_eq!(lp[axis].to_bits(), rp[axis].to_bits());
+        }
+    }
+    for (ln, rn) in inorm.iter().zip(&snorm) {
+        for axis in 0..3 {
+            assert_eq!(ln[axis].to_bits(), rn[axis].to_bits());
+        }
+    }
     assert_eq!(indexed.inside(&points), soup.inside(&points));
-    assert_eq!(
-        indexed.cast_rays(&origins, &dirs, 2.0),
-        soup.cast_rays(&origins, &dirs, 2.0)
-    );
+    let (io, it, ifaces) = indexed.cast_rays(&origins, &dirs, 2.0).unwrap();
+    let (so, st, sfaces) = soup.cast_rays(&origins, &dirs, 2.0).unwrap();
+    assert_eq!(io, so);
+    assert_eq!(ifaces, sfaces);
+    for (&left, &right) in it.iter().zip(&st) {
+        assert_eq!(left.to_bits(), right.to_bits());
+    }
 }
 
 #[test]
@@ -283,6 +361,48 @@ fn indexed_constructor_reports_typed_input_and_derivation_failures() {
         NativeSurface::from_indexed(&[], &[[0, 0, 0]], config),
         Err(SurfaceBuildError::EmptyVertices)
     ));
+    for (value, axis) in [(f64::NAN, 0), (f64::INFINITY, 1), (f64::NEG_INFINITY, 2)] {
+        let mut vertices = [[0.0; 3]; 2];
+        vertices[1][axis] = value;
+        assert!(
+            matches!(NativeSurface::from_indexed(&vertices, &[[0, 0, 0]], config), Err(SurfaceBuildError::NonFiniteVertex { vertex: 1, axis: got }) if got == axis)
+        );
+    }
+    for corner in 0..3 {
+        let mut face = [0, 0, 0];
+        face[corner] = 2;
+        assert!(
+            matches!(NativeSurface::from_indexed(&[[0.0; 3]], &[face, [0, 0, 3]], config), Err(SurfaceBuildError::FaceIndexOutOfBounds { face: 0, corner: got, .. }) if got == corner)
+        );
+    }
+    assert!(matches!(
+        NativeSurface::from_indexed(&[[0.0; 3]], &[[0, 0, 0], [0, 0, 1]], config),
+        Err(SurfaceBuildError::FaceIndexOutOfBounds {
+            face: 1,
+            corner: 2,
+            ..
+        })
+    ));
+    for value in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(
+            matches!(NativeSurface::from_indexed(&[[0.0; 3]], &[[0,0,0]], NativeSurfaceConfig { grid_pitch_mm: value, max_grid_bytes: usize::MAX }), Err(SurfaceBuildError::InvalidGridPitch(got)) if got.to_bits() == value.to_bits())
+        );
+    }
+    let budget_indexed = NativeSurface::from_indexed(
+        &TRIANGLES[0],
+        &[[0, 1, 2]],
+        NativeSurfaceConfig {
+            grid_pitch_mm: 2.0,
+            max_grid_bytes: 0,
+        },
+    );
+    let budget_soup = NativeSurface::from_triangle_soup(
+        TriangleSoup::borrowed(&TRIANGLES, &NORMALS, &AREAS, BOUNDS),
+        2.0,
+        0,
+    );
+    assert!(matches!(budget_indexed, Err(SurfaceBuildError::Kernel(_))));
+    assert!(matches!(budget_soup, Err(SurfaceBuildError::Kernel(_))));
     assert!(matches!(
         NativeSurface::from_indexed(&[[0.0; 3]], &[], config),
         Err(SurfaceBuildError::EmptyFaces)

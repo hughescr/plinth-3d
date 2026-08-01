@@ -11,7 +11,7 @@ use rayon::prelude::*;
 use crate::bvh::Bvh;
 use crate::closest::{closest_on_tri, segseg};
 use crate::consts::{DEDUP_LOC_MM, EPS, NEAR_WALL_SKIP, THRESHOLD_BAND_MM};
-use crate::mesh::{FaceGeometry, Mesh};
+use crate::mesh::Mesh;
 use crate::moller::{dedup_loc, moller};
 use crate::par;
 use crate::parity::ParityVote;
@@ -78,7 +78,6 @@ pub type SphereBreachBatch = (Vec<bool>, Vec<f64>, Vec<f64>);
 
 pub struct NativeSurface {
     pub(crate) mesh: Mesh,
-    pub(crate) geometry: std::sync::Arc<FaceGeometry>,
     pub bvh: Bvh,
     pub pv: ParityVote,
     pub grid_pitch_mm: f64,
@@ -170,10 +169,8 @@ impl NativeSurface {
     ) -> Result<NativeSurface, String> {
         let bvh = Bvh::build(&mesh)?;
         let pv = ParityVote::build(&mesh, grid_pitch_mm, max_grid_bytes)?;
-        let geometry = mesh.geometry.clone();
         Ok(NativeSurface {
             mesh,
-            geometry,
             bvh,
             pv,
             grid_pitch_mm,
