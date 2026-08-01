@@ -1605,68 +1605,57 @@
     {
       "id": "PERF_ANCHOR_CAP",
       "classification": "runtime_performance_trial",
-      "provenance_wrapper": "Pending",
+      "provenance_wrapper": "Placeholder",
       "source_locators": [
         "scripts/support_placement/config.py:perf_anchor_cap",
         "scripts/support_placement/cco.py:perf_anchor_cap"
       ],
-      "normative": "03-physics-and-constants.md §3.10.4 = Pending, disabled None",
-      "provenance_detail": "result-changing when enabled"
+      "normative": "03-physics-and-constants.md §3.10.4 = Placeholder TrialSetting<T>::Disabled; no enabled value selected",
+      "provenance_detail": "disabled preserves the full-search baseline; any enabled candidate remains experimental and non-emittable pending a corpus protocol and owner decision"
     },
     {
       "id": "PERF_BEAM_K",
       "classification": "runtime_performance_trial",
-      "provenance_wrapper": "Pending",
+      "provenance_wrapper": "Placeholder",
       "source_locators": [
         "scripts/support_placement/config.py:perf_beam_k",
         "scripts/support_placement/cco.py:perf_beam_k"
       ],
-      "normative": "03-physics-and-constants.md §3.10.4 = Pending, disabled None",
-      "provenance_detail": "result-changing when enabled"
+      "normative": "03-physics-and-constants.md §3.10.4 = Placeholder TrialSetting<T>::Disabled; no enabled value selected",
+      "provenance_detail": "disabled preserves the full-search baseline; any enabled candidate remains experimental and non-emittable pending a corpus protocol and owner decision"
     },
     {
       "id": "PERF_FIX_ITER_CAPS",
       "classification": "runtime_performance_trial",
-      "provenance_wrapper": "Pending",
+      "provenance_wrapper": "Placeholder",
       "source_locators": [
         "scripts/support_placement/config.py:perf_fix_iter_caps",
         "scripts/support_placement/engine.py:perf_fix_iter_caps"
       ],
-      "normative": "03-physics-and-constants.md §3.10.4 = Pending, disabled None",
-      "provenance_detail": "termination-changing when enabled"
-    },
-    {
-      "id": "PERF_GATE_EMIT_ON_VERIFY",
-      "classification": "runtime_performance_trial",
-      "provenance_wrapper": "Pending",
-      "source_locators": [
-        "scripts/support_placement/config.py:perf_gate_emit_on_verify",
-        "scripts/support_placement/engine.py:perf_gate_emit_on_verify"
-      ],
-      "normative": "03-physics-and-constants.md §3.10.4 = Pending, disabled false",
-      "provenance_detail": "gate-changing trial"
+      "normative": "03-physics-and-constants.md §3.10.4 = Placeholder TrialSetting<T>::Disabled; no enabled value selected",
+      "provenance_detail": "Python's nominal two-field tuple consumes only index 1; do not port inert index 0, and keep any enabled cap experimental and non-emittable pending corpus protocol and owner decision"
     },
     {
       "id": "PERF_REWIRE_WORK_BUDGET",
       "classification": "runtime_performance_trial",
-      "provenance_wrapper": "Pending",
+      "provenance_wrapper": "Placeholder",
       "source_locators": [
         "scripts/support_placement/config.py:perf_rewire_work_budget",
         "scripts/support_placement/rewire.py:perf_rewire_work_budget"
       ],
-      "normative": "03-physics-and-constants.md §3.10.4 = Pending, disabled None",
-      "provenance_detail": "deterministic result-changing budget"
+      "normative": "03-physics-and-constants.md §3.10.4 = Placeholder TrialSetting<T>::Disabled; no concrete deterministic budget selected",
+      "provenance_detail": "historical inventory only while disabled because Python falls back to banned nondeterministic wall-clock stopping; unreachable from Rust acceptance until a corpus protocol and owner decision select a concrete deterministic budget"
     },
     {
       "id": "PERF_SEED_SPACING_FACTOR",
       "classification": "runtime_performance_trial",
-      "provenance_wrapper": "Pending",
+      "provenance_wrapper": "Placeholder",
       "source_locators": [
         "scripts/support_placement/config.py:perf_seed_spacing_factor",
         "scripts/support_placement/engine.py:perf_seed_spacing_factor"
       ],
-      "normative": "03-physics-and-constants.md §3.10.4 = Pending, disabled None",
-      "provenance_detail": "result-changing when enabled"
+      "normative": "03-physics-and-constants.md §3.10.4 = Placeholder TrialSetting<T>::Disabled; no enabled value selected",
+      "provenance_detail": "disabled preserves the full-search baseline; any enabled candidate remains experimental and non-emittable pending a corpus protocol and owner decision"
     },
     {
       "id": "PIPELINE_HOLLOW_ENABLE_DEFAULT",
@@ -2266,6 +2255,14 @@
         "docs/specs/SPEC-P8-REACH.md:heading 5 FEATURE B"
       ],
       "reason": "Feature-B concession ladder (0.3,0.1) mm is explicitly not ported"
+    },
+    {
+      "id": "PERF_GATE_EMIT_ON_VERIFY",
+      "source_locators": [
+        "scripts/support_placement/config.py:perf_gate_emit_on_verify",
+        "scripts/support_placement/engine.py:perf_gate_emit_on_verify"
+      ],
+      "reason": "retired/no-port false compatibility switch; Rust always refuses blocking defects and EMIT_REQUIRE_PASSED_GATES_DEFAULT=true is the sole emission gate"
     },
     {
       "id": "REWIRE_TIME_CAP_S",

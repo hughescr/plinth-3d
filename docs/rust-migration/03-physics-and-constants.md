@@ -679,8 +679,17 @@ that coupled heuristic. Its independently useful enable default remains register
 | `P8_JUNCTION_RESEAT_STEP_MM` / `P8_JUNCTION_RESEAT_MAX_MM` | 0.25 / 1.0 mm | junction re-seat grid |
 | `P8_CHORD_CANON_MICRON` | 1 micron | canonical/config value and `phase8_driver.run_phase8` fallback agree |
 | `P8_MAX_RELOCATE_SWEEPS` / `P8_MAX_RELOCATE_ROUNDS` / `P8_RESIZE_FIXED_POINT_MAX_ROUNDS` | 8 / 4 / 4 | canonical/config values and live engine/driver fallbacks agree |
-| `PERF_BEAM_K` / `PERF_ANCHOR_CAP` / `PERF_SEED_SPACING_FACTOR` | **Pending**, disabled (`None`) | enabled values change search results |
-| `PERF_FIX_ITER_CAPS` / `PERF_GATE_EMIT_ON_VERIFY` / `PERF_REWIRE_WORK_BUDGET` | **Pending**, disabled (`None`/false/`None`) | enabled values change termination or gate outcome |
+| `PERF_BEAM_K` / `PERF_ANCHOR_CAP` / `PERF_SEED_SPACING_FACTOR` | `TrialSetting<T>::Disabled`, **Placeholder** | B1–B3 disabled preserve the full-search baseline; no enabled value has been selected |
+| `PERF_FIX_ITER_CAPS` | `TrialSetting<T>::Disabled`, **Placeholder** | B4's nominal Python tuple has two fields but consumes only index 1; do not port the inert first field |
+| `PERF_REWIRE_WORK_BUDGET` | `TrialSetting<T>::Disabled`, **Placeholder** | B5 disabled falls back in Python to the banned nondeterministic 30-second wall-clock cap; historical inventory only and unreachable from Rust acceptance until a concrete deterministic budget exists |
+| `PERF_GATE_EMIT_ON_VERIFY` | **retired/no-port** | the false compatibility switch does not survive: Rust always refuses blocking defects and canonical `EMIT_REQUIRE_PASSED_GATES_DEFAULT=true` is the sole emission gate |
+
+For B1–B5, any future enabled candidate remains experimental `Placeholder` and
+non-emittable until a corpus protocol plus owner decision selects a concrete
+value. Do not invent a candidate, `PlateId`, or null/zero sentinel. `Pending<T>`
+remains unchanged: it requires two concrete executable branches and a real
+`PlateId`. Do not generalize `ResolutionTarget` now; a corpus-resolved Pending
+design is deferred until an actual candidate exists.
 
 `perf_exact_opts_disable = false` is excluded only because it disables
 exact-result-preserving caches/accelerators; a cache-disabled equality run is the
