@@ -6,4 +6,10 @@ rust-version = "1.97"
 publish = false
 
 [dependencies]
+chitubox_io = { path = "../../rust/chitubox_io" }
+plinth-core = { path = "../plinth-core" }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

@@ -7,11 +7,16 @@
 #![forbid(unsafe_code)]
 
 mod geometry;
+mod read;
 mod topology;
 
 pub use geometry::{
     closest_points, contains_points, ray_intersections, triangle_intersections, ClosestPoint, Ray,
     RayHit,
+};
+pub use read::{
+    load_artifacts, ArtifactDisposition, ArtifactLoad, ArtifactRequest, ArtifactRequestError,
+    DiskArtifact, DiskModel, DiskReadError, DiskSupport, ProducerFailure, ProducerStage,
 };
 pub use topology::{
     analyze_topology, boundary_edges, signed_shell_volumes, Edge, EdgeIncidence, EdgeUse, Shell,

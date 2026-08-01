@@ -420,6 +420,10 @@ dependencies = [
 name = "plinth-metrics"
 version = "0.1.0"
 dependencies = [
+ "chitubox_io",
+ "plinth-core",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 
