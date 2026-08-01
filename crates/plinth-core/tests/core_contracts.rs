@@ -1,6 +1,7 @@
 use plinth_core::{
-    digest_f64_slice, AcceptSafe, ConstantId, CostError, CostVector, DecisionId, Defect,
-    DefectReport, Derived, DigestError, Fidelity, Finite, FiniteError, FixerId, LayerPlan,
+    digest_f64_slice, AcceptSafe, BoundKind, CalendarDate, ConstantId, CostError, CostVector,
+    DecisionId, Defect, DefectReport, Derived, DigestError, EvidenceDate, EvidenceId,
+    EvidenceSource, Fidelity, Finite, FiniteError, FiniteInterval, FixerId, LayerPlan,
     LayerPlanError, LoadSharing, LoadSharingError, Measured, MetricId, MetricSet, MetricValue,
     ModelId, OptimizationError, OptimizationSummary, OrientationCost, OrientationId, ParetoPoint,
     PartialCost, Pending, PlateId, ProvenanceError, ProvenanceManifest, ProvenanceRef, ReportError,
@@ -29,6 +30,240 @@ fn valid_summary() -> OptimizationSummary {
         vec![ParetoPoint::new(OrientationId::from("orient-1"), cost)],
     )
     .unwrap()
+}
+
+fn calibration_source(date: &str) -> EvidenceSource {
+    EvidenceSource::calibration_plate(
+        PlateId::from("plate-6"),
+        "fixtures/calibration.json",
+        "/measurements/0",
+        EvidenceDate::exact(CalendarDate::new(date).unwrap()),
+    )
+    .unwrap()
+}
+
+#[test]
+fn evidence_source_and_date_wire_contracts_are_strict() {
+    for date in [
+        "0000-01-01",
+        "0000-02-29",
+        "1900-02-29",
+        "2100-02-29",
+        "2024-02-30",
+    ] {
+        assert!(
+            CalendarDate::new(date).is_err(),
+            "accepted invalid date {date}"
+        );
+    }
+    for date in ["2000-02-29", "2400-02-29"] {
+        assert!(CalendarDate::new(date).is_ok(), "rejected leap date {date}");
+    }
+    assert_eq!(
+        serde_json::to_value(EvidenceDate::exact(
+            CalendarDate::new("2024-02-29").unwrap()
+        ))
+        .unwrap(),
+        json!({"precision":"exact","date":"2024-02-29"})
+    );
+    for evidence_date in [
+        EvidenceDate::exact(CalendarDate::new("2024-02-29").unwrap()),
+        EvidenceDate::on_or_before(CalendarDate::new("2024-02-29").unwrap()),
+        EvidenceDate::Unknown,
+    ] {
+        assert_eq!(
+            serde_json::from_value::<EvidenceDate>(serde_json::to_value(&evidence_date).unwrap())
+                .unwrap(),
+            evidence_date
+        );
+    }
+    for malformed in [
+        r#"{"precision":"unknown","date":"2024-02-29"}"#,
+        r#"{"precision":"exact"}"#,
+        r#"{"precision":"exact","date":"2024-02-29","extra":true}"#,
+        r#"{"precision":"exact","precision":"unknown","date":"2024-02-29"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<EvidenceDate>(malformed).is_err(),
+            "accepted {malformed}"
+        );
+    }
+
+    let source = calibration_source("2026-07-31");
+    assert_eq!(
+        serde_json::to_value(&source).unwrap(),
+        json!({
+            "kind":"calibration_plate", "plate":"plate-6", "record":"fixtures/calibration.json",
+            "locator":"/measurements/0", "date":{"precision":"exact","date":"2026-07-31"}
+        })
+    );
+    let vendor = EvidenceSource::vendor_document(
+        EvidenceId::new("vendor-42").unwrap(),
+        "docs/vendor.pdf",
+        "#section-2",
+        EvidenceDate::Unknown,
+    )
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(vendor).unwrap()["kind"],
+        "vendor_document"
+    );
+    let id = EvidenceId::new("source-1").unwrap();
+    for source in [
+        calibration_source("2026-07-31"),
+        EvidenceSource::vendor_document(id.clone(), "docs/vendor", "#v", EvidenceDate::Unknown)
+            .unwrap(),
+        EvidenceSource::installed_hardware(
+            id.clone(),
+            "inventory/hardware",
+            "#h",
+            EvidenceDate::Unknown,
+        )
+        .unwrap(),
+        EvidenceSource::corpus_study(id.clone(), "corpus/study", "#c", EvidenceDate::Unknown)
+            .unwrap(),
+        EvidenceSource::project_record(id.clone(), "records/project", "#p", EvidenceDate::Unknown)
+            .unwrap(),
+        EvidenceSource::owner_decision(id, "records/decisions", "#o", EvidenceDate::Unknown)
+            .unwrap(),
+    ] {
+        assert_eq!(
+            serde_json::from_value::<EvidenceSource>(serde_json::to_value(&source).unwrap())
+                .unwrap(),
+            source
+        );
+    }
+    for field in ["record", "locator"] {
+        let value = if field == "record" {
+            r#"{"kind":"calibration_plate","plate":"p","record":" ","locator":"x","date":{"precision":"unknown"}}"#
+        } else {
+            r#"{"kind":"calibration_plate","plate":"p","record":"a","locator":" ","date":{"precision":"unknown"}}"#
+        };
+        assert!(
+            serde_json::from_str::<EvidenceSource>(value).is_err(),
+            "accepted blank {field}"
+        );
+    }
+    for invalid in [
+        "/absolute",
+        "../escape",
+        "..\\escape",
+        "C:/drive",
+        "C:\\drive",
+        "\\\\server\\share",
+        "https://example.test/a",
+    ] {
+        assert!(
+            EvidenceSource::calibration_plate(
+                PlateId::from("p"),
+                invalid,
+                "#x",
+                EvidenceDate::Unknown
+            )
+            .is_err(),
+            "accepted record {invalid}"
+        );
+    }
+    for locator in [
+        "https://example.test/a",
+        "file:///tmp/a",
+        "mailto:a@example.test",
+    ] {
+        assert!(
+            EvidenceSource::calibration_plate(
+                PlateId::from("p"),
+                "fixtures/a",
+                locator,
+                EvidenceDate::Unknown
+            )
+            .is_err(),
+            "accepted locator {locator}"
+        );
+    }
+    for malformed in [
+        r#"{"kind":"calibration_plate","plate":"p","record":"a","locator":"x","date":{"precision":"unknown"},"extra":true}"#,
+        r#"{"kind":"calibration_plate","plate":"p","record":"a","record":"b","locator":"x","date":{"precision":"unknown"}}"#,
+        r#"{"kind":"calibration_plate","kind":"vendor_document","plate":"p","record":"a","locator":"x","date":{"precision":"unknown"}}"#,
+        r#"{"kind":"calibration_plate","plate":"p","record":"https://example.test/a","locator":"x","date":{"precision":"unknown"}}"#,
+        r#"{"kind":"vendor_document","id":"x","record":"a","locator":"https://example.test/a","date":{"precision":"unknown"}}"#,
+        r#"{"kind":"vendor_document","id":" ","record":"a","locator":"x","date":{"precision":"unknown"}}"#,
+        r#"{"kind":"calibration_plate","plate":"p","record":"a","locator":"x","date":{"precision":"unknown"},"id":"bad"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<EvidenceSource>(malformed).is_err(),
+            "accepted {malformed}"
+        );
+    }
+}
+
+#[test]
+fn finite_intervals_and_measured_evidence_have_exact_boundaries() {
+    let interval =
+        FiniteInterval::new(0.0, 1.0, BoundKind::Inclusive, BoundKind::Exclusive).unwrap();
+    assert!(interval.contains(0.0));
+    assert!(interval.contains(0.5));
+    assert!(!interval.contains(1.0));
+    assert!(!interval.contains(f64::NAN));
+    assert_eq!(
+        serde_json::to_string(&BoundKind::Inclusive).unwrap(),
+        r#""inclusive""#
+    );
+    assert_eq!(
+        serde_json::to_string(&BoundKind::Exclusive).unwrap(),
+        r#""exclusive""#
+    );
+    assert_eq!(
+        serde_json::to_value(interval).unwrap(),
+        json!({"lower":0.0,"upper":1.0,"lower_bound":"inclusive","upper_bound":"exclusive"})
+    );
+    for malformed in [
+        r#"{"lower":1.0,"upper":1.0,"lower_bound":"inclusive","upper_bound":"exclusive"}"#,
+        r#"{"lower":0.0,"upper":1.0,"lower_bound":"inclusive"}"#,
+        r#"{"lower":0.0,"lower":0.1,"upper":1.0,"lower_bound":"inclusive","upper_bound":"exclusive"}"#,
+        r#"{"lower":0.0,"upper":1.0,"lower_bound":"inclusive","upper_bound":"exclusive","extra":true}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<FiniteInterval>(malformed).is_err(),
+            "accepted {malformed}"
+        );
+    }
+    assert_eq!(
+        Measured::new(
+            interval,
+            calibration_source("2026-07-31"),
+            Some(interval),
+            "interval"
+        ),
+        Err(ProvenanceError::IntervalErrorBar)
+    );
+    let measured =
+        Measured::new(interval, calibration_source("2026-07-31"), None, "interval").unwrap();
+    let mut non_null = serde_json::to_value(measured).unwrap();
+    non_null["err"] = serde_json::to_value(interval).unwrap();
+    assert!(serde_json::from_value::<Measured<FiniteInterval>>(non_null).is_err());
+
+    for malformed in [
+        r#"{"value":{"kind":"zipper"},"source":{"kind":"calibration_plate","plate":"p","record":"a","locator":"x","date":{"precision":"unknown"}},"note":"n"}"#,
+        r#"{"value":{"kind":"zipper"},"source":{"kind":"calibration_plate","plate":"p","record":"a","locator":"x","date":{"precision":"unknown"}},"err":null,"note":"n","plate":"legacy"}"#,
+        r#"{"value":{"kind":"zipper"},"source":{"kind":"calibration_plate","plate":"p","record":"a","locator":"x","date":{"precision":"unknown"}},"err":null,"note":"n","date":"legacy"}"#,
+        r#"{"value":{"kind":"zipper"},"source":{"kind":"calibration_plate","plate":"p","record":"a","locator":"x","date":{"precision":"unknown"}},"err":null,"err":null,"note":"n"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<Measured<LoadSharing>>(malformed).is_err(),
+            "accepted {malformed}"
+        );
+    }
+    for malformed in [
+        r#"{"kind":"measured","source":{"kind":"calibration_plate","plate":"p","record":"a","locator":"x","date":{"precision":"unknown"}},"note":"n","extra":true}"#,
+        r#"{"kind":"measured","kind":"derived","source":{"kind":"calibration_plate","plate":"p","record":"a","locator":"x","date":{"precision":"unknown"}},"note":"n"}"#,
+        r#"{"kind":"measured","note":"n"}"#,
+    ] {
+        assert!(
+            serde_json::from_str::<ProvenanceRef>(malformed).is_err(),
+            "accepted {malformed}"
+        );
+    }
+    assert!(Measured::new(1.0_f64, calibration_source("2026-07-31"), None, " ").is_err());
 }
 
 fn terminal_defect(site: SiteId) -> Defect {
@@ -294,9 +529,8 @@ fn load_sharing_is_tagged_and_validated_at_the_measured_boundary() {
 
     let measured = Measured::new(
         LoadSharing::additive(6.0).unwrap(),
-        PlateId::from("plate-6"),
+        calibration_source("2026-07-31"),
         None,
-        "2026-07-31",
         "categorical measurement",
     )
     .unwrap();
@@ -311,9 +545,8 @@ fn load_sharing_is_tagged_and_validated_at_the_measured_boundary() {
     assert_eq!(
         Measured::new(
             LoadSharing::Zipper,
-            PlateId::from("plate-6"),
+            calibration_source("2026-07-31"),
             Some(LoadSharing::Zipper),
-            "2026-07-31",
             "invalid categorical error bar",
         ),
         Err(ProvenanceError::CategoricalErrorBar)
@@ -351,8 +584,7 @@ fn provenance_is_nested_deterministic_and_measured_dates_are_required() {
             DecisionId::from("decision_a"),
             ConstantId::from("constant_a"),
             ProvenanceRef::Measured {
-                plate: PlateId::from("plate-6"),
-                date: "2026-07-31".into(),
+                source: calibration_source("2026-07-31"),
                 note: "a".into(),
             },
         )
@@ -365,25 +597,18 @@ fn provenance_is_nested_deterministic_and_measured_dates_are_required() {
         manifest
     );
 
-    let measured = Measured::new(
-        0.05_f64,
-        PlateId::from("plate-6"),
-        None,
-        "2026-07-31",
-        "caliper",
-    )
-    .unwrap();
+    let measured =
+        Measured::new(0.05_f64, calibration_source("2026-07-31"), None, "caliper").unwrap();
     let mut value = serde_json::to_value(&measured).unwrap();
     assert!(value["err"].is_null());
     assert_eq!(
         measured.provenance(),
         ProvenanceRef::Measured {
-            plate: PlateId::from("plate-6"),
-            date: "2026-07-31".into(),
+            source: calibration_source("2026-07-31"),
             note: "caliper".into(),
         }
     );
-    value.as_object_mut().unwrap().remove("date");
+    value.as_object_mut().unwrap().remove("source");
     assert!(serde_json::from_value::<Measured<f64>>(value).is_err());
 }
 
@@ -391,16 +616,13 @@ fn provenance_is_nested_deterministic_and_measured_dates_are_required() {
 fn measured_payload_policy_validates_numeric_errors_and_required_wire_fields() {
     let numeric = Measured::new(
         12.0_f64,
-        PlateId::from("plate-5"),
+        calibration_source("2026-07-24"),
         Some(0.5),
-        "2026-07-24",
         "numeric bracket",
     )
     .unwrap();
     assert_eq!(numeric.value(), &12.0);
-    assert_eq!(numeric.plate(), &PlateId::from("plate-5"));
     assert_eq!(numeric.err(), Some(&0.5));
-    assert_eq!(numeric.date(), "2026-07-24");
     assert_eq!(numeric.note(), "numeric bracket");
     assert_eq!(
         serde_json::from_value::<Measured<f64>>(serde_json::to_value(&numeric).unwrap()).unwrap(),
@@ -409,9 +631,8 @@ fn measured_payload_policy_validates_numeric_errors_and_required_wire_fields() {
 
     let no_error = Measured::new(
         6.0_f64,
-        PlateId::from("plate-6"),
+        calibration_source("2026-07-31"),
         None,
-        "2026-07-31",
         "explicitly no numeric error bar",
     )
     .unwrap();
@@ -424,16 +645,15 @@ fn measured_payload_policy_validates_numeric_errors_and_required_wire_fields() {
     let mut missing_error = no_error_json.clone();
     missing_error.as_object_mut().unwrap().remove("err");
     assert!(serde_json::from_value::<Measured<f64>>(missing_error).is_err());
-    let mut missing_date = no_error_json;
-    missing_date.as_object_mut().unwrap().remove("date");
-    assert!(serde_json::from_value::<Measured<f64>>(missing_date).is_err());
+    let mut missing_source = no_error_json;
+    missing_source.as_object_mut().unwrap().remove("source");
+    assert!(serde_json::from_value::<Measured<f64>>(missing_source).is_err());
 
     assert_eq!(
         Measured::new(
             f64::NAN,
-            PlateId::from("plate"),
+            calibration_source("2026-07-31"),
             None,
-            "2026-07-31",
             "bad value",
         ),
         Err(ProvenanceError::NonFiniteMeasuredValue)
@@ -441,23 +661,21 @@ fn measured_payload_policy_validates_numeric_errors_and_required_wire_fields() {
     assert_eq!(
         Measured::new(
             1.0_f64,
-            PlateId::from("plate"),
+            calibration_source("2026-07-31"),
             Some(f64::INFINITY),
-            "2026-07-31",
             "bad error",
         ),
         Err(ProvenanceError::NonFiniteMeasuredError)
     );
     assert!(serde_json::from_str::<Measured<f64>>(
-        r#"{"value":1e9999,"plate":"plate","err":null,"date":"2026-07-31","note":"bad"}"#
+        r#"{"value":1e9999,"source":{"kind":"calibration_plate","plate":"plate","record":"a","locator":"x","date":{"precision":"unknown"}},"err":null,"note":"bad"}"#
     )
     .is_err());
 
     let finite = Measured::new(
         Finite::new(2.0).unwrap(),
-        PlateId::from("plate"),
+        calibration_source("2026-07-31"),
         Some(Finite::new(0.1).unwrap()),
-        "2026-07-31",
         "validated wrapper",
     )
     .unwrap();
@@ -616,8 +834,7 @@ fn report_requires_provenance_and_only_blocking_defects_control_acceptance() {
         [(
             ConstantId::from("load_sharing"),
             ProvenanceRef::Measured {
-                plate: PlateId::from("plate-6"),
-                date: "2026-07-31".into(),
+                source: calibration_source("2026-07-31"),
                 note: "measured".into(),
             },
         )],
@@ -634,7 +851,7 @@ fn report_requires_provenance_and_only_blocking_defects_control_acceptance() {
     )
     .unwrap();
     let mut missing_date = serde_json::to_value(with_provenance).unwrap();
-    missing_date["provenance"]["load_acceptance"]["load_sharing"]
+    missing_date["provenance"]["load_acceptance"]["load_sharing"]["source"]
         .as_object_mut()
         .unwrap()
         .remove("date");
@@ -955,9 +1172,8 @@ fn search_and_termination_wire_tags_and_numeric_shapes_remain_stable() {
 fn layer_plan_has_canonical_wire_data_and_validates_every_boundary() {
     let height = Measured::new(
         0.05_f64,
-        PlateId::from("plate-6"),
+        calibration_source("2026-07-31"),
         Some(0.001),
-        "2026-07-31",
         "caliper",
     )
     .unwrap();

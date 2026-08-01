@@ -37,7 +37,8 @@ pub use load::{EffectiveArmCount, LoadSharing, LoadSharingError};
 pub use metric::{MetricId, MetricSet, MetricValue};
 pub use number::{Finite, FiniteError};
 pub use provenance::{
-    AcceptSafe, Derived, Measured, MeasuredPayload, Pending, Placeholder, ProvenanceError,
+    AcceptSafe, BoundKind, CalendarDate, Derived, EvidenceDate, EvidenceId, EvidenceSource,
+    FiniteInterval, Measured, MeasuredPayload, Pending, Placeholder, ProvenanceError,
     ProvenanceManifest, ProvenanceRef,
 };
 pub use stage::Stage;

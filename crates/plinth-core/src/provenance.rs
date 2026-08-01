@@ -1,18 +1,574 @@
 use crate::{ConstantId, DecisionId, EffectiveArmCount, Finite, LoadSharing, MetricValue, PlateId};
 use serde::{
     de::{self, MapAccess, Visitor},
-    Deserialize, Deserializer, Serialize,
+    ser::SerializeStruct,
+    Deserialize, Deserializer, Serialize, Serializer,
 };
-use std::{collections::BTreeMap, fmt, marker::PhantomData};
+use std::{
+    collections::BTreeMap,
+    fmt,
+    marker::PhantomData,
+    path::{Component, Path},
+};
 use thiserror::Error;
 
+fn require_text(value: impl Into<String>, field: &'static str) -> Result<String, ProvenanceError> {
+    let value = value.into();
+    if value.trim().is_empty() {
+        Err(ProvenanceError::EmptyField { field })
+    } else {
+        Ok(value)
+    }
+}
+
+/// An evidence identifier whose text is meaningful rather than a placeholder.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EvidenceId(String);
+
+impl EvidenceId {
+    pub fn new(value: impl Into<String>) -> Result<Self, ProvenanceError> {
+        Ok(Self(require_text(value, "evidence id")?))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Serialize for EvidenceId {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for EvidenceId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(de::Error::custom)
+    }
+}
+
+/// A validated proleptic Gregorian calendar date serialized as `YYYY-MM-DD`.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CalendarDate(String);
+
+impl CalendarDate {
+    pub fn new(value: impl Into<String>) -> Result<Self, ProvenanceError> {
+        let value = value.into();
+        let bytes = value.as_bytes();
+        let valid_shape = bytes.len() == 10
+            && bytes[4] == b'-'
+            && bytes[7] == b'-'
+            && bytes
+                .iter()
+                .enumerate()
+                .all(|(index, byte)| matches!(index, 4 | 7) || byte.is_ascii_digit());
+        if !valid_shape {
+            return Err(ProvenanceError::InvalidCalendarDate { value });
+        }
+        let parse = |start| {
+            std::str::from_utf8(&bytes[start..start + 2])
+                .ok()
+                .and_then(|part| part.parse::<u32>().ok())
+        };
+        let year = std::str::from_utf8(&bytes[..4])
+            .ok()
+            .and_then(|part| part.parse::<u32>().ok());
+        let (Some(year), Some(month), Some(day)) = (year, parse(5), parse(8)) else {
+            return Err(ProvenanceError::InvalidCalendarDate { value });
+        };
+        if year == 0 {
+            return Err(ProvenanceError::InvalidCalendarDate { value });
+        }
+        let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+        let days = match month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 if leap => 29,
+            2 => 28,
+            _ => 0,
+        };
+        if day == 0 || day > days {
+            return Err(ProvenanceError::InvalidCalendarDate { value });
+        }
+        Ok(Self(value))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Serialize for CalendarDate {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for CalendarDate {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(String::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+/// The precision with which an evidence date is known.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EvidenceDate {
+    Exact(CalendarDate),
+    OnOrBefore(CalendarDate),
+    Unknown,
+}
+
+impl EvidenceDate {
+    #[must_use]
+    pub fn exact(date: CalendarDate) -> Self {
+        Self::Exact(date)
+    }
+
+    #[must_use]
+    pub fn on_or_before(date: CalendarDate) -> Self {
+        Self::OnOrBefore(date)
+    }
+}
+
+impl Serialize for EvidenceDate {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Exact(date) => {
+                let mut state = serializer.serialize_struct("EvidenceDate", 2)?;
+                state.serialize_field("precision", "exact")?;
+                state.serialize_field("date", date)?;
+                state.end()
+            }
+            Self::OnOrBefore(date) => {
+                let mut state = serializer.serialize_struct("EvidenceDate", 2)?;
+                state.serialize_field("precision", "on_or_before")?;
+                state.serialize_field("date", date)?;
+                state.end()
+            }
+            Self::Unknown => {
+                let mut state = serializer.serialize_struct("EvidenceDate", 1)?;
+                state.serialize_field("precision", "unknown")?;
+                state.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EvidenceDate {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field {
+            Precision,
+            Date,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Precision {
+            Exact,
+            OnOrBefore,
+            Unknown,
+        }
+        struct DateVisitor;
+        impl<'de> Visitor<'de> for DateVisitor {
+            type Value = EvidenceDate;
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a strict evidence date")
+            }
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut precision = None;
+                let mut date = None;
+                while let Some(field) = map.next_key::<Field>()? {
+                    match field {
+                        Field::Precision => {
+                            if precision.is_some() {
+                                return Err(de::Error::duplicate_field("precision"));
+                            }
+                            precision = Some(map.next_value()?);
+                        }
+                        Field::Date => {
+                            if date.is_some() {
+                                return Err(de::Error::duplicate_field("date"));
+                            }
+                            date = Some(map.next_value::<CalendarDate>()?);
+                        }
+                    }
+                }
+                match precision.ok_or_else(|| de::Error::missing_field("precision"))? {
+                    Precision::Exact => Ok(EvidenceDate::Exact(
+                        date.ok_or_else(|| de::Error::missing_field("date"))?,
+                    )),
+                    Precision::OnOrBefore => Ok(EvidenceDate::OnOrBefore(
+                        date.ok_or_else(|| de::Error::missing_field("date"))?,
+                    )),
+                    Precision::Unknown => {
+                        if date.is_some() {
+                            Err(de::Error::custom("unknown evidence date forbids date"))
+                        } else {
+                            Ok(EvidenceDate::Unknown)
+                        }
+                    }
+                }
+            }
+        }
+        deserializer.deserialize_struct("EvidenceDate", &["precision", "date"], DateVisitor)
+    }
+}
+
+fn has_uri_scheme(value: &str) -> bool {
+    let Some((scheme, _)) = value.split_once(':') else {
+        return false;
+    };
+    !scheme.is_empty()
+        && scheme.as_bytes()[0].is_ascii_alphabetic()
+        && scheme
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
+}
+
+fn validate_record(value: impl Into<String>) -> Result<String, ProvenanceError> {
+    let value = require_text(value, "record")?;
+    let normalized = value.replace('\\', "/");
+    let drive_rooted = normalized.len() >= 2
+        && normalized.as_bytes()[0].is_ascii_alphabetic()
+        && normalized.as_bytes()[1] == b':';
+    let path = Path::new(&normalized);
+    if has_uri_scheme(&value)
+        || normalized.starts_with('/')
+        || drive_rooted
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, Component::ParentDir))
+        || normalized.split('/').any(|component| component == "..")
+    {
+        return Err(ProvenanceError::InvalidRecordPath { value });
+    }
+    Ok(value)
+}
+
+fn validate_locator(value: impl Into<String>) -> Result<String, ProvenanceError> {
+    let value = require_text(value, "locator")?;
+    if has_uri_scheme(&value) {
+        Err(ProvenanceError::ExternalLocator { value })
+    } else {
+        Ok(value)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum EvidenceSourceData {
+    CalibrationPlate {
+        plate: PlateId,
+        record: String,
+        locator: String,
+        date: EvidenceDate,
+    },
+    Identified {
+        kind: EvidenceKind,
+        id: EvidenceId,
+        record: String,
+        locator: String,
+        date: EvidenceDate,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EvidenceKind {
+    VendorDocument,
+    InstalledHardware,
+    CorpusStudy,
+    ProjectRecord,
+    OwnerDecision,
+}
+
+impl EvidenceKind {
+    const fn wire_name(self) -> &'static str {
+        match self {
+            Self::VendorDocument => "vendor_document",
+            Self::InstalledHardware => "installed_hardware",
+            Self::CorpusStudy => "corpus_study",
+            Self::ProjectRecord => "project_record",
+            Self::OwnerDecision => "owner_decision",
+        }
+    }
+}
+
+/// A strict, repository-locatable source for a measurement.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvidenceSource(EvidenceSourceData);
+
+impl EvidenceSource {
+    pub fn calibration_plate(
+        plate: PlateId,
+        record: impl Into<String>,
+        locator: impl Into<String>,
+        date: EvidenceDate,
+    ) -> Result<Self, ProvenanceError> {
+        Ok(Self(EvidenceSourceData::CalibrationPlate {
+            plate,
+            record: validate_record(record)?,
+            locator: validate_locator(locator)?,
+            date,
+        }))
+    }
+
+    fn identified(
+        kind: EvidenceKind,
+        id: EvidenceId,
+        record: impl Into<String>,
+        locator: impl Into<String>,
+        date: EvidenceDate,
+    ) -> Result<Self, ProvenanceError> {
+        Ok(Self(EvidenceSourceData::Identified {
+            kind,
+            id,
+            record: validate_record(record)?,
+            locator: validate_locator(locator)?,
+            date,
+        }))
+    }
+
+    pub fn vendor_document(
+        id: EvidenceId,
+        record: impl Into<String>,
+        locator: impl Into<String>,
+        date: EvidenceDate,
+    ) -> Result<Self, ProvenanceError> {
+        Self::identified(EvidenceKind::VendorDocument, id, record, locator, date)
+    }
+    pub fn installed_hardware(
+        id: EvidenceId,
+        record: impl Into<String>,
+        locator: impl Into<String>,
+        date: EvidenceDate,
+    ) -> Result<Self, ProvenanceError> {
+        Self::identified(EvidenceKind::InstalledHardware, id, record, locator, date)
+    }
+    pub fn corpus_study(
+        id: EvidenceId,
+        record: impl Into<String>,
+        locator: impl Into<String>,
+        date: EvidenceDate,
+    ) -> Result<Self, ProvenanceError> {
+        Self::identified(EvidenceKind::CorpusStudy, id, record, locator, date)
+    }
+    pub fn project_record(
+        id: EvidenceId,
+        record: impl Into<String>,
+        locator: impl Into<String>,
+        date: EvidenceDate,
+    ) -> Result<Self, ProvenanceError> {
+        Self::identified(EvidenceKind::ProjectRecord, id, record, locator, date)
+    }
+    pub fn owner_decision(
+        id: EvidenceId,
+        record: impl Into<String>,
+        locator: impl Into<String>,
+        date: EvidenceDate,
+    ) -> Result<Self, ProvenanceError> {
+        Self::identified(EvidenceKind::OwnerDecision, id, record, locator, date)
+    }
+}
+
+impl Serialize for EvidenceSource {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match &self.0 {
+            EvidenceSourceData::CalibrationPlate {
+                plate,
+                record,
+                locator,
+                date,
+            } => {
+                let mut state = serializer.serialize_struct("EvidenceSource", 5)?;
+                state.serialize_field("kind", "calibration_plate")?;
+                state.serialize_field("plate", plate)?;
+                state.serialize_field("record", record)?;
+                state.serialize_field("locator", locator)?;
+                state.serialize_field("date", date)?;
+                state.end()
+            }
+            EvidenceSourceData::Identified {
+                kind,
+                id,
+                record,
+                locator,
+                date,
+            } => {
+                let mut state = serializer.serialize_struct("EvidenceSource", 5)?;
+                state.serialize_field("kind", kind.wire_name())?;
+                state.serialize_field("id", id)?;
+                state.serialize_field("record", record)?;
+                state.serialize_field("locator", locator)?;
+                state.serialize_field("date", date)?;
+                state.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for EvidenceSource {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field {
+            Kind,
+            Plate,
+            Id,
+            Record,
+            Locator,
+            Date,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Kind {
+            CalibrationPlate,
+            VendorDocument,
+            InstalledHardware,
+            CorpusStudy,
+            ProjectRecord,
+            OwnerDecision,
+        }
+        struct SourceVisitor;
+        impl<'de> Visitor<'de> for SourceVisitor {
+            type Value = EvidenceSource;
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a strict evidence source")
+            }
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut kind = None;
+                let mut plate: Option<PlateId> = None;
+                let mut id: Option<EvidenceId> = None;
+                let mut record: Option<String> = None;
+                let mut locator: Option<String> = None;
+                let mut date: Option<EvidenceDate> = None;
+                while let Some(field) = map.next_key::<Field>()? {
+                    match field {
+                        Field::Kind => {
+                            if kind.is_some() {
+                                return Err(de::Error::duplicate_field("kind"));
+                            }
+                            kind = Some(map.next_value()?);
+                        }
+                        Field::Plate => {
+                            if plate.is_some() {
+                                return Err(de::Error::duplicate_field("plate"));
+                            }
+                            plate = Some(map.next_value()?);
+                        }
+                        Field::Id => {
+                            if id.is_some() {
+                                return Err(de::Error::duplicate_field("id"));
+                            }
+                            id = Some(map.next_value()?);
+                        }
+                        Field::Record => {
+                            if record.is_some() {
+                                return Err(de::Error::duplicate_field("record"));
+                            }
+                            record = Some(map.next_value()?);
+                        }
+                        Field::Locator => {
+                            if locator.is_some() {
+                                return Err(de::Error::duplicate_field("locator"));
+                            }
+                            locator = Some(map.next_value()?);
+                        }
+                        Field::Date => {
+                            if date.is_some() {
+                                return Err(de::Error::duplicate_field("date"));
+                            }
+                            date = Some(map.next_value()?);
+                        }
+                    }
+                }
+                let record = record.ok_or_else(|| de::Error::missing_field("record"))?;
+                let locator = locator.ok_or_else(|| de::Error::missing_field("locator"))?;
+                let date = date.ok_or_else(|| de::Error::missing_field("date"))?;
+                match kind.ok_or_else(|| de::Error::missing_field("kind"))? {
+                    Kind::CalibrationPlate => {
+                        if id.is_some() {
+                            return Err(de::Error::custom("calibration_plate forbids id"));
+                        }
+                        EvidenceSource::calibration_plate(
+                            plate.ok_or_else(|| de::Error::missing_field("plate"))?,
+                            record,
+                            locator,
+                            date,
+                        )
+                    }
+                    kind => {
+                        if plate.is_some() {
+                            return Err(de::Error::custom(
+                                "identified evidence source forbids plate",
+                            ));
+                        }
+                        let kind = match kind {
+                            Kind::VendorDocument => EvidenceKind::VendorDocument,
+                            Kind::InstalledHardware => EvidenceKind::InstalledHardware,
+                            Kind::CorpusStudy => EvidenceKind::CorpusStudy,
+                            Kind::ProjectRecord => EvidenceKind::ProjectRecord,
+                            Kind::OwnerDecision => EvidenceKind::OwnerDecision,
+                            Kind::CalibrationPlate => unreachable!(),
+                        };
+                        EvidenceSource::identified(
+                            kind,
+                            id.ok_or_else(|| de::Error::missing_field("id"))?,
+                            record,
+                            locator,
+                            date,
+                        )
+                    }
+                }
+                .map_err(de::Error::custom)
+            }
+        }
+        deserializer.deserialize_struct(
+            "EvidenceSource",
+            &["kind", "plate", "id", "record", "locator", "date"],
+            SourceVisitor,
+        )
+    }
+}
+
 /// A compact provenance description suitable for a run manifest.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProvenanceRef {
     Measured {
-        plate: PlateId,
-        date: String,
+        source: EvidenceSource,
         note: String,
     },
     Derived {
@@ -21,14 +577,144 @@ pub enum ProvenanceRef {
     },
 }
 
+impl Serialize for ProvenanceRef {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Measured { source, note } => {
+                let mut state = serializer.serialize_struct("ProvenanceRef", 3)?;
+                state.serialize_field("kind", "measured")?;
+                state.serialize_field("source", source)?;
+                state.serialize_field("note", note)?;
+                state.end()
+            }
+            Self::Derived { from, note } => {
+                let mut state = serializer.serialize_struct("ProvenanceRef", 3)?;
+                state.serialize_field("kind", "derived")?;
+                state.serialize_field("from", from)?;
+                state.serialize_field("note", note)?;
+                state.end()
+            }
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ProvenanceRef {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field {
+            Kind,
+            Source,
+            From,
+            Note,
+        }
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Kind {
+            Measured,
+            Derived,
+        }
+        struct RefVisitor;
+        impl<'de> Visitor<'de> for RefVisitor {
+            type Value = ProvenanceRef;
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a strict provenance reference")
+            }
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut kind = None;
+                let mut source = None;
+                let mut from = None;
+                let mut note = None;
+                while let Some(field) = map.next_key::<Field>()? {
+                    match field {
+                        Field::Kind => {
+                            if kind.is_some() {
+                                return Err(de::Error::duplicate_field("kind"));
+                            }
+                            kind = Some(map.next_value()?);
+                        }
+                        Field::Source => {
+                            if source.is_some() {
+                                return Err(de::Error::duplicate_field("source"));
+                            }
+                            source = Some(map.next_value()?);
+                        }
+                        Field::From => {
+                            if from.is_some() {
+                                return Err(de::Error::duplicate_field("from"));
+                            }
+                            from = Some(map.next_value()?);
+                        }
+                        Field::Note => {
+                            if note.is_some() {
+                                return Err(de::Error::duplicate_field("note"));
+                            }
+                            note = Some(map.next_value()?);
+                        }
+                    }
+                }
+                let note = note.ok_or_else(|| de::Error::missing_field("note"))?;
+                match kind.ok_or_else(|| de::Error::missing_field("kind"))? {
+                    Kind::Measured => {
+                        if from.is_some() {
+                            return Err(de::Error::custom("measured provenance forbids from"));
+                        }
+                        Ok(ProvenanceRef::Measured {
+                            source: source.ok_or_else(|| de::Error::missing_field("source"))?,
+                            note,
+                        })
+                    }
+                    Kind::Derived => {
+                        if source.is_some() {
+                            return Err(de::Error::custom("derived provenance forbids source"));
+                        }
+                        Ok(ProvenanceRef::Derived {
+                            from: from.ok_or_else(|| de::Error::missing_field("from"))?,
+                            note,
+                        })
+                    }
+                }
+            }
+        }
+        deserializer.deserialize_struct(
+            "ProvenanceRef",
+            &["kind", "source", "from", "note"],
+            RefVisitor,
+        )
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum ProvenanceError {
+    #[error("{field} must not be empty or whitespace")]
+    EmptyField { field: &'static str },
+    #[error("invalid calendar date {value}")]
+    InvalidCalendarDate { value: String },
+    #[error("record must be repository-relative and cannot traverse parents: {value}")]
+    InvalidRecordPath { value: String },
+    #[error("locator must not be an external URI: {value}")]
+    ExternalLocator { value: String },
     #[error("measured numeric value must be finite")]
     NonFiniteMeasuredValue,
     #[error("measured numeric error must be finite")]
     NonFiniteMeasuredError,
     #[error("categorical measured payloads require err to be null")]
     CategoricalErrorBar,
+    #[error("finite intervals require err to be null")]
+    IntervalErrorBar,
+    #[error("finite interval bounds must be finite")]
+    NonFiniteIntervalBound,
+    #[error("finite interval lower bound must be less than upper bound")]
+    InvalidIntervalBounds,
     #[error("conflicting provenance for decision {decision} and constant {constant}")]
     ConflictingRecord {
         decision: DecisionId,
@@ -41,8 +727,6 @@ pub enum ProvenanceError {
 }
 
 /// The constants that fed each acceptance decision.
-///
-/// Both map levels are ordered so serialization is deterministic.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(transparent)]
 pub struct ProvenanceManifest(BTreeMap<DecisionId, BTreeMap<ConstantId, ProvenanceRef>>);
@@ -62,9 +746,6 @@ impl ProvenanceManifest {
         }
         Ok(manifest)
     }
-
-    /// Records one constant use. Repeating the identical record is idempotent;
-    /// changing provenance for the same decision/constant pair is an error.
     pub fn record(
         &mut self,
         decision: DecisionId,
@@ -81,19 +762,16 @@ impl ProvenanceManifest {
             }
         }
     }
-
     #[must_use]
     pub fn get(&self, decision: &DecisionId, constant: &ConstantId) -> Option<&ProvenanceRef> {
         self.0.get(decision)?.get(constant)
     }
-
     #[must_use]
     pub fn iter(
         &self,
     ) -> impl ExactSizeIterator<Item = (&DecisionId, &BTreeMap<ConstantId, ProvenanceRef>)> {
         self.0.iter()
     }
-
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
@@ -101,21 +779,17 @@ impl ProvenanceManifest {
 }
 
 struct ConstantBatch(BTreeMap<ConstantId, ProvenanceRef>);
-
 impl<'de> Deserialize<'de> for ConstantBatch {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         struct BatchVisitor;
-
         impl<'de> Visitor<'de> for BatchVisitor {
             type Value = ConstantBatch;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a uniquely keyed provenance constant map")
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a uniquely keyed provenance constant map")
             }
-
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
             where
                 A: MapAccess<'de>,
@@ -133,25 +807,20 @@ impl<'de> Deserialize<'de> for ConstantBatch {
                 Ok(ConstantBatch(constants))
             }
         }
-
         deserializer.deserialize_map(BatchVisitor)
     }
 }
-
 impl<'de> Deserialize<'de> for ProvenanceManifest {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         struct ManifestVisitor;
-
         impl<'de> Visitor<'de> for ManifestVisitor {
             type Value = ProvenanceManifest;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a uniquely keyed provenance decision map")
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a uniquely keyed provenance decision map")
             }
-
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
             where
                 A: MapAccess<'de>,
@@ -169,7 +838,6 @@ impl<'de> Deserialize<'de> for ProvenanceManifest {
                 Ok(ProvenanceManifest(decisions))
             }
         }
-
         deserializer.deserialize_map(ManifestVisitor)
     }
 }
@@ -179,21 +847,14 @@ pub trait AcceptSafe<T: Copy> {
     fn get(&self) -> T;
     fn provenance(&self) -> ProvenanceRef;
 }
-
 mod sealed {
     pub trait Sealed {}
 }
-
-/// Payload policy for measured constants.
-///
-/// This trait is sealed: core explicitly decides which payloads have a sound
-/// error-bar interpretation.
+/// Payload policy for measured constants. This trait is sealed by core.
 pub trait MeasuredPayload: sealed::Sealed {
     fn validate_measurement(value: &Self, err: Option<&Self>) -> Result<(), ProvenanceError>;
 }
-
 impl sealed::Sealed for f64 {}
-
 impl MeasuredPayload for f64 {
     fn validate_measurement(value: &Self, err: Option<&Self>) -> Result<(), ProvenanceError> {
         if !value.is_finite() {
@@ -205,28 +866,9 @@ impl MeasuredPayload for f64 {
         Ok(())
     }
 }
-
-macro_rules! finite_payload {
-    ($($payload:ty),+ $(,)?) => {
-        $(
-            impl sealed::Sealed for $payload {}
-
-            impl MeasuredPayload for $payload {
-                fn validate_measurement(
-                    _value: &Self,
-                    _err: Option<&Self>,
-                ) -> Result<(), ProvenanceError> {
-                    Ok(())
-                }
-            }
-        )+
-    };
-}
-
+macro_rules! finite_payload { ($($payload:ty),+ $(,)?) => { $( impl sealed::Sealed for $payload {} impl MeasuredPayload for $payload { fn validate_measurement(_value: &Self, _err: Option<&Self>) -> Result<(), ProvenanceError> { Ok(()) } } )+ }; }
 finite_payload!(Finite, EffectiveArmCount, MetricValue);
-
 impl sealed::Sealed for LoadSharing {}
-
 impl MeasuredPayload for LoadSharing {
     fn validate_measurement(_value: &Self, err: Option<&Self>) -> Result<(), ProvenanceError> {
         if err.is_some() {
@@ -237,62 +879,221 @@ impl MeasuredPayload for LoadSharing {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
-pub struct Measured<T> {
-    value: T,
-    plate: PlateId,
-    /// `None` is intentionally emitted as JSON `null`, never omitted.
-    err: Option<T>,
-    date: String,
-    note: String,
+/// Endpoint inclusion semantics for a finite interval.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoundKind {
+    Inclusive,
+    Exclusive,
 }
 
+/// A strictly ordered interval with explicitly specified endpoint inclusion.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FiniteInterval {
+    lower: f64,
+    upper: f64,
+    lower_bound: BoundKind,
+    upper_bound: BoundKind,
+}
+impl FiniteInterval {
+    pub fn new(
+        lower: f64,
+        upper: f64,
+        lower_bound: BoundKind,
+        upper_bound: BoundKind,
+    ) -> Result<Self, ProvenanceError> {
+        if !lower.is_finite() || !upper.is_finite() {
+            return Err(ProvenanceError::NonFiniteIntervalBound);
+        }
+        if lower >= upper {
+            return Err(ProvenanceError::InvalidIntervalBounds);
+        }
+        Ok(Self {
+            lower,
+            upper,
+            lower_bound,
+            upper_bound,
+        })
+    }
+    #[must_use]
+    pub const fn lower(&self) -> f64 {
+        self.lower
+    }
+    #[must_use]
+    pub const fn upper(&self) -> f64 {
+        self.upper
+    }
+    #[must_use]
+    pub const fn lower_bound(&self) -> BoundKind {
+        self.lower_bound
+    }
+    #[must_use]
+    pub const fn upper_bound(&self) -> BoundKind {
+        self.upper_bound
+    }
+    #[must_use]
+    pub fn contains(&self, value: f64) -> bool {
+        value.is_finite()
+            && (if self.lower_bound == BoundKind::Inclusive {
+                value >= self.lower
+            } else {
+                value > self.lower
+            })
+            && (if self.upper_bound == BoundKind::Inclusive {
+                value <= self.upper
+            } else {
+                value < self.upper
+            })
+    }
+}
+impl Serialize for FiniteInterval {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("FiniteInterval", 4)?;
+        state.serialize_field("lower", &self.lower)?;
+        state.serialize_field("upper", &self.upper)?;
+        state.serialize_field("lower_bound", &self.lower_bound)?;
+        state.serialize_field("upper_bound", &self.upper_bound)?;
+        state.end()
+    }
+}
+impl<'de> Deserialize<'de> for FiniteInterval {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field {
+            Lower,
+            Upper,
+            LowerBound,
+            UpperBound,
+        }
+        struct IntervalVisitor;
+        impl<'de> Visitor<'de> for IntervalVisitor {
+            type Value = FiniteInterval;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a strict finite interval")
+            }
+            fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+            where
+                A: MapAccess<'de>,
+            {
+                let mut lower = None;
+                let mut upper = None;
+                let mut lower_bound = None;
+                let mut upper_bound = None;
+                while let Some(field) = map.next_key::<Field>()? {
+                    match field {
+                        Field::Lower => {
+                            if lower.is_some() {
+                                return Err(de::Error::duplicate_field("lower"));
+                            }
+                            lower = Some(map.next_value()?);
+                        }
+                        Field::Upper => {
+                            if upper.is_some() {
+                                return Err(de::Error::duplicate_field("upper"));
+                            }
+                            upper = Some(map.next_value()?);
+                        }
+                        Field::LowerBound => {
+                            if lower_bound.is_some() {
+                                return Err(de::Error::duplicate_field("lower_bound"));
+                            }
+                            lower_bound = Some(map.next_value()?);
+                        }
+                        Field::UpperBound => {
+                            if upper_bound.is_some() {
+                                return Err(de::Error::duplicate_field("upper_bound"));
+                            }
+                            upper_bound = Some(map.next_value()?);
+                        }
+                    }
+                }
+                FiniteInterval::new(
+                    lower.ok_or_else(|| de::Error::missing_field("lower"))?,
+                    upper.ok_or_else(|| de::Error::missing_field("upper"))?,
+                    lower_bound.ok_or_else(|| de::Error::missing_field("lower_bound"))?,
+                    upper_bound.ok_or_else(|| de::Error::missing_field("upper_bound"))?,
+                )
+                .map_err(de::Error::custom)
+            }
+        }
+        deserializer.deserialize_struct(
+            "FiniteInterval",
+            &["lower", "upper", "lower_bound", "upper_bound"],
+            IntervalVisitor,
+        )
+    }
+}
+impl sealed::Sealed for FiniteInterval {}
+impl MeasuredPayload for FiniteInterval {
+    fn validate_measurement(_value: &Self, err: Option<&Self>) -> Result<(), ProvenanceError> {
+        if err.is_some() {
+            Err(ProvenanceError::IntervalErrorBar)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Measured<T> {
+    value: T,
+    source: EvidenceSource,
+    err: Option<T>,
+    note: String,
+}
 impl<T: MeasuredPayload> Measured<T> {
     pub fn new(
         value: T,
-        plate: PlateId,
+        source: EvidenceSource,
         err: Option<T>,
-        date: impl Into<String>,
         note: impl Into<String>,
     ) -> Result<Self, ProvenanceError> {
         T::validate_measurement(&value, err.as_ref())?;
         Ok(Self {
             value,
-            plate,
+            source,
             err,
-            date: date.into(),
-            note: note.into(),
+            note: require_text(note, "note")?,
         })
     }
-
     #[must_use]
     pub fn value(&self) -> &T {
         &self.value
     }
-
     #[must_use]
-    pub const fn plate(&self) -> &PlateId {
-        &self.plate
+    pub const fn source(&self) -> &EvidenceSource {
+        &self.source
     }
-
     #[must_use]
     pub const fn err(&self) -> Option<&T> {
         self.err.as_ref()
     }
-
-    #[must_use]
-    pub fn date(&self) -> &str {
-        &self.date
-    }
-
     #[must_use]
     pub fn note(&self) -> &str {
         &self.note
     }
 }
-
+impl<T: Serialize> Serialize for Measured<T> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let mut state = serializer.serialize_struct("Measured", 4)?;
+        state.serialize_field("value", &self.value)?;
+        state.serialize_field("source", &self.source)?;
+        state.serialize_field("err", &self.err)?;
+        state.serialize_field("note", &self.note)?;
+        state.end()
+    }
+}
 struct RequiredOption<T>(Option<T>);
-
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for RequiredOption<T> {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -301,7 +1102,6 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for RequiredOption<T> {
         Option::<T>::deserialize(deserializer).map(Self)
     }
 }
-
 impl<'de, T> Deserialize<'de> for Measured<T>
 where
     T: Deserialize<'de> + MeasuredPayload,
@@ -310,36 +1110,30 @@ where
     where
         D: Deserializer<'de>,
     {
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field {
+            Value,
+            Source,
+            Err,
+            Note,
+        }
         struct MeasuredVisitor<T>(PhantomData<T>);
-
         impl<'de, T> Visitor<'de> for MeasuredVisitor<T>
         where
             T: Deserialize<'de> + MeasuredPayload,
         {
             type Value = Measured<T>;
-
-            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-                formatter.write_str("a complete measured payload")
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a complete measured payload")
             }
-
             fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
             where
                 A: MapAccess<'de>,
             {
-                #[derive(Deserialize)]
-                #[serde(field_identifier, rename_all = "snake_case")]
-                enum Field {
-                    Value,
-                    Plate,
-                    Err,
-                    Date,
-                    Note,
-                }
-
                 let mut value: Option<T> = None;
-                let mut plate: Option<PlateId> = None;
+                let mut source: Option<EvidenceSource> = None;
                 let mut err: Option<Option<T>> = None;
-                let mut date: Option<String> = None;
                 let mut note: Option<String> = None;
                 while let Some(field) = map.next_key::<Field>()? {
                     match field {
@@ -349,23 +1143,17 @@ where
                             }
                             value = Some(map.next_value()?);
                         }
-                        Field::Plate => {
-                            if plate.is_some() {
-                                return Err(de::Error::duplicate_field("plate"));
+                        Field::Source => {
+                            if source.is_some() {
+                                return Err(de::Error::duplicate_field("source"));
                             }
-                            plate = Some(map.next_value()?);
+                            source = Some(map.next_value()?);
                         }
                         Field::Err => {
                             if err.is_some() {
                                 return Err(de::Error::duplicate_field("err"));
                             }
                             err = Some(map.next_value::<RequiredOption<T>>()?.0);
-                        }
-                        Field::Date => {
-                            if date.is_some() {
-                                return Err(de::Error::duplicate_field("date"));
-                            }
-                            date = Some(map.next_value()?);
                         }
                         Field::Note => {
                             if note.is_some() {
@@ -375,35 +1163,29 @@ where
                         }
                     }
                 }
-
                 Measured::new(
                     value.ok_or_else(|| de::Error::missing_field("value"))?,
-                    plate.ok_or_else(|| de::Error::missing_field("plate"))?,
+                    source.ok_or_else(|| de::Error::missing_field("source"))?,
                     err.ok_or_else(|| de::Error::missing_field("err"))?,
-                    date.ok_or_else(|| de::Error::missing_field("date"))?,
                     note.ok_or_else(|| de::Error::missing_field("note"))?,
                 )
                 .map_err(de::Error::custom)
             }
         }
-
         deserializer.deserialize_struct(
             "Measured",
-            &["value", "plate", "err", "date", "note"],
+            &["value", "source", "err", "note"],
             MeasuredVisitor(PhantomData),
         )
     }
 }
-
 impl<T: Copy + MeasuredPayload> AcceptSafe<T> for Measured<T> {
     fn get(&self) -> T {
         self.value
     }
-
     fn provenance(&self) -> ProvenanceRef {
         ProvenanceRef::Measured {
-            plate: self.plate.clone(),
-            date: self.date.clone(),
+            source: self.source.clone(),
             note: self.note.clone(),
         }
     }
@@ -415,7 +1197,6 @@ pub struct Derived<T> {
     pub from: Vec<String>,
     pub note: String,
 }
-
 impl<T> Derived<T> {
     #[must_use]
     pub fn new(
@@ -429,18 +1210,15 @@ impl<T> Derived<T> {
             note: note.into(),
         }
     }
-
     #[must_use]
     pub fn value(&self) -> &T {
         &self.value
     }
 }
-
 impl<T: Copy> AcceptSafe<T> for Derived<T> {
     fn get(&self) -> T {
         self.value
     }
-
     fn provenance(&self) -> ProvenanceRef {
         ProvenanceRef::Derived {
             from: self.from.clone(),
@@ -448,14 +1226,12 @@ impl<T: Copy> AcceptSafe<T> for Derived<T> {
         }
     }
 }
-
 /// A value useful for diagnostics or search, but forbidden on acceptance paths.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Placeholder<T> {
     value: T,
     pub note: String,
 }
-
 impl<T> Placeholder<T> {
     #[must_use]
     pub fn new(value: T, note: impl Into<String>) -> Self {
@@ -464,13 +1240,11 @@ impl<T> Placeholder<T> {
             note: note.into(),
         }
     }
-
     #[must_use]
     pub fn diagnostic(&self) -> &T {
         &self.value
     }
 }
-
 /// An explicitly unresolved calibration range.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Pending<T> {
@@ -479,7 +1253,6 @@ pub struct Pending<T> {
     pub resolves_on: PlateId,
     pub question: String,
 }
-
 impl<T: Copy> Pending<T> {
     #[must_use]
     pub fn new(
@@ -495,8 +1268,6 @@ impl<T: Copy> Pending<T> {
             question: question.into(),
         }
     }
-
-    /// Resolving uses the conservative branch and returns an acceptance-safe value.
     #[must_use]
     pub fn resolve(&self) -> Derived<T> {
         Derived::new(
@@ -505,8 +1276,6 @@ impl<T: Copy> Pending<T> {
             format!("resolved conservatively: {}", self.question),
         )
     }
-
-    /// This is for calibration comparison only; it is still explicitly derived.
     #[must_use]
     pub fn optimistic(&self) -> Derived<T> {
         Derived::new(
