@@ -1,6 +1,6 @@
 use crate::{
     BuildVolumeMm, ConstantId, DecisionId, EffectiveArmCount, Finite, LoadSharing, MetricValue,
-    PlateId, YDirection,
+    MicronGranularity, PlateId, YDirection,
 };
 use serde::{
     de::{self, MapAccess, Visitor},
@@ -1009,7 +1009,13 @@ macro_rules! categorical_payload {
         )+
     };
 }
-categorical_payload!(bool, BuildVolumeMm, YDirection, LoadSharing);
+categorical_payload!(
+    bool,
+    BuildVolumeMm,
+    YDirection,
+    LoadSharing,
+    MicronGranularity
+);
 
 /// Endpoint inclusion semantics for a finite interval.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

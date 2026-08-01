@@ -14,11 +14,11 @@ help: the trait `plinth_core::provenance::sealed::Sealed` is not implemented for
             EffectiveArmCount
             Finite
             MetricValue
+            MicronGranularity
             YDirection
             bool
             f64
-            plinth_core::FiniteInterval
-            plinth_core::LoadSharing
+          and $N others
 note: required by a bound in `MeasuredPayload`
  --> src/provenance.rs
   |
@@ -34,4 +34,4 @@ note: required by a bound in `MeasuredPayload`
             plinth_core::BuildVolumeMm
             plinth_core::YDirection
             plinth_core::LoadSharing
-            plinth_core::FiniteInterval
+          and $N others

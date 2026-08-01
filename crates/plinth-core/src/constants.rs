@@ -1,10 +1,14 @@
 use crate::{
     BoundKind, BuildVolumeMm, ConstantId, Derived, EffectiveArmCount, EvidenceDate, EvidenceSource,
     EvidenceSourceView, Finite, FiniteInterval, LoadSharing, Measured, MeasuredPayload,
-    MetricValue, Pending, Placeholder, PlateId, YDirection,
+    MetricValue, MicronGranularity, Pending, Placeholder, PlateId, YDirection,
 };
 use std::collections::BTreeMap;
 use thiserror::Error;
+
+mod evidence;
+
+pub use evidence::{M0EvidenceConstants, M0EvidenceConstantsError};
 
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum RegistryError {
@@ -18,8 +22,6 @@ pub enum RegistryError {
     NonFiniteScalar,
     #[error("constant record contains duplicate field {field}")]
     DuplicateRecordField { field: String },
-    #[error("derived provenance must name at least one source")]
-    EmptyDerivedSources,
     #[error("a constants-registry batch must not be empty")]
     EmptyBatch,
     #[error("duplicate constant id {id}")]
@@ -296,6 +298,9 @@ constant_value_conversion!(BuildVolumeMm, |value: &BuildVolumeMm| {
 constant_value_conversion!(YDirection, |value: &YDirection| {
     ConstantValue::core_text(value.as_str())
 });
+constant_value_conversion!(MicronGranularity, |value: &MicronGranularity| {
+    Ok(ConstantValue::unsigned_integer(u64::from(value.get())))
+});
 
 impl<T: ToConstantValue> sealed::ConstantValueSource for Vec<T> {}
 impl<T: ToConstantValue> ToConstantValue for Vec<T> {
@@ -396,9 +401,6 @@ impl RegistryProvenance {
     }
 
     fn from_derived<T>(derived: &Derived<T>) -> Result<Self, RegistryError> {
-        if derived.from.is_empty() {
-            return Err(RegistryError::EmptyDerivedSources);
-        }
         let from = derived
             .from
             .iter()
@@ -477,9 +479,6 @@ impl RegistryProvenance {
                 validated_text(note, "provenance note").map(|_| ())
             }
             RegistryProvenanceData::Derived { from, note } => {
-                if from.is_empty() {
-                    return Err(RegistryError::EmptyDerivedSources);
-                }
                 for source in from {
                     validated_text(source, "derived source")?;
                 }

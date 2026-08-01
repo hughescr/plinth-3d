@@ -103,6 +103,27 @@ fn duplicate_or_empty_batch_never_publishes_a_registry() {
 }
 
 #[test]
+fn proof_only_derived_values_may_have_an_empty_source_list() {
+    let proof_only = Derived::new(
+        0.5_f64.powf(0.25),
+        std::iter::empty::<&str>(),
+        "self-contained algebraic proof",
+    );
+    let descriptor = ConstantDescriptor::from_derived(
+        ConstantId::from("proof_only"),
+        "1",
+        "scalar",
+        &proof_only,
+    )
+    .unwrap();
+    let RegistryProvenanceView::Derived { from, note } = descriptor.provenance().view() else {
+        panic!("proof-only value lost derived provenance");
+    };
+    assert!(from.is_empty());
+    assert_eq!(note, "self-contained algebraic proof");
+}
+
+#[test]
 fn every_supported_constant_value_variant_converts_without_debug_fallbacks() {
     assert_eq!(
         true.to_constant_value().unwrap().view(),
@@ -323,16 +344,6 @@ fn invalid_metadata_and_values_fail_before_batch_publication() {
         })
     );
 
-    let no_sources = Derived::new(1_i64, std::iter::empty::<&str>(), "note");
-    assert_eq!(
-        ConstantDescriptor::from_derived(
-            ConstantId::from("no_sources"),
-            "count",
-            "scalar",
-            &no_sources
-        ),
-        Err(RegistryError::EmptyDerivedSources)
-    );
     let bad_note = Placeholder::new(1_i64, " note");
     assert!(ConstantDescriptor::from_placeholder(
         ConstantId::from("bad_note"),
