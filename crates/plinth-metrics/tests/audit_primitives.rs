@@ -278,3 +278,39 @@ fn separated_near_coplanar_triangles_do_not_intersect() {
         vec![false]
     );
 }
+
+#[test]
+fn small_faces_produce_real_ray_hits_and_containment() {
+    let edge = 1.0e-5;
+    let mesh = Mesh::new(
+        vec![
+            [0.0, 0.0, 0.0],
+            [edge, 0.0, 0.0],
+            [0.0, edge, 0.0],
+            [0.0, 0.0, edge],
+        ],
+        vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]],
+    )
+    .unwrap();
+    let hits = ray_intersections(
+        &mesh,
+        &[Ray {
+            origin: [-edge, edge * 0.2, edge * 0.2],
+            direction: [1.0, 0.0, 0.0],
+        }],
+    )
+    .unwrap();
+    assert_eq!(
+        hits[0].len(),
+        2,
+        "the small closed tetrahedron has two x-ray crossings"
+    );
+    assert_eq!(
+        contains_points(
+            &mesh,
+            &[[edge * 0.2, edge * 0.2, edge * 0.2], [edge * 2.0, 0.0, 0.0]]
+        )
+        .unwrap(),
+        vec![true, false]
+    );
+}

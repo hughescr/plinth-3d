@@ -82,7 +82,7 @@ pub fn ray_intersections(mesh: &Mesh, rays: &[Ray]) -> Result<Vec<Vec<RayHit>>, 
         let mut hits = Vec::new();
         for triangle_index in 0..mesh.triangles().len() {
             let (a, b, c) = mesh.triangle_points(triangle_index);
-            if let Some(distance) = ray_triangle_distance(ray, a, b, c) {
+            if let Some(distance) = ray_triangle_distance(ray, a, b, c, triangle_index)? {
                 hits.push(RayHit {
                     distance,
                     triangle_index,
@@ -223,30 +223,88 @@ fn closest_point_on_triangle(point: Vec3, a: Vec3, b: Vec3, c: Vec3) -> Vec3 {
     )
 }
 
-fn ray_triangle_distance(ray: Ray, a: Vec3, b: Vec3, c: Vec3) -> Option<f64> {
+fn ray_triangle_distance(
+    ray: Ray,
+    a: Vec3,
+    b: Vec3,
+    c: Vec3,
+    triangle: usize,
+) -> Result<Option<f64>, MetricsError> {
     let edge_one = sub(b, a);
     let edge_two = sub(c, a);
+    let triangle_scale = edge_one
+        .into_iter()
+        .chain(edge_two)
+        .map(f64::abs)
+        .fold(0.0, f64::max);
+    let error = || MetricsError::ArithmeticOverflow {
+        triangle,
+        primitive: crate::GeometryPrimitive::RayTriangle,
+    };
+    let to_first_vertex = sub(a, ray.origin);
+    if to_first_vertex.iter().any(|value| !value.is_finite()) {
+        return Err(error());
+    }
+    let first = [
+        to_first_vertex[0] / triangle_scale,
+        to_first_vertex[1] / triangle_scale,
+        to_first_vertex[2] / triangle_scale,
+    ];
+    let edge_one = [
+        edge_one[0] / triangle_scale,
+        edge_one[1] / triangle_scale,
+        edge_one[2] / triangle_scale,
+    ];
+    let edge_two = [
+        edge_two[0] / triangle_scale,
+        edge_two[1] / triangle_scale,
+        edge_two[2] / triangle_scale,
+    ];
+    if first
+        .iter()
+        .chain(edge_one.iter())
+        .chain(edge_two.iter())
+        .any(|value| !value.is_finite())
+    {
+        return Err(error());
+    }
     let p = cross(ray.direction, edge_two);
     let determinant = dot(edge_one, p);
-    if determinant.abs() <= EPSILON {
-        return None;
+    // The inputs above are bounded by the triangle's largest edge component,
+    // so zero is now a scale-independent parallel/coplanar predicate.  An
+    // absolute determinant tolerance would incorrectly erase small faces.
+    if determinant == 0.0 {
+        return Ok(None);
     }
     let inverse = 1.0 / determinant;
-    let from_vertex = sub(ray.origin, a);
+    let from_vertex = scale(first, -1.0);
     let u = dot(from_vertex, p) * inverse;
+    if !u.is_finite() {
+        return Err(error());
+    }
     if !(-EPSILON..=1.0 + EPSILON).contains(&u) {
-        return None;
+        return Ok(None);
     }
     let q = cross(from_vertex, edge_one);
     let v = dot(ray.direction, q) * inverse;
-    if v < -EPSILON || u + v > 1.0 + EPSILON {
-        return None;
+    if !v.is_finite() {
+        return Err(error());
     }
-    let distance = dot(edge_two, q) * inverse;
-    if distance < -EPSILON {
-        None
+    if v < -EPSILON || u + v > 1.0 + EPSILON {
+        return Ok(None);
+    }
+    let local_distance = dot(edge_two, q) * inverse;
+    if !local_distance.is_finite() {
+        return Err(error());
+    }
+    if local_distance < 0.0 {
+        Ok(None)
     } else {
-        Some(distance.max(0.0))
+        let distance = local_distance * triangle_scale;
+        if !distance.is_finite() {
+            return Err(error());
+        }
+        Ok(Some(distance))
     }
 }
 

@@ -149,6 +149,7 @@ pub enum TriangleSide {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GeometryPrimitive {
     TriangleArea,
+    RayTriangle,
 }
 
 pub(crate) fn validate_vec3(value: Vec3, kind: CoordinateKind) -> Result<(), MetricsError> {
