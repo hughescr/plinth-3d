@@ -13,3 +13,4 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+geom_kernel = { path = "../../rust/geom_kernel" }
