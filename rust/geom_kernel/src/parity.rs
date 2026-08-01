@@ -9,6 +9,12 @@
 use crate::consts::{PARITY_DEN_EPS, PARITY_SLACK, ZDEDUP};
 use crate::mesh::Mesh;
 
+#[derive(Clone, Copy)]
+struct FaceRef {
+    face_id: u32,
+    slot: u32,
+}
+
 /// One axis' projected triangle data + CSR grid.
 pub struct AxisGrid {
     pub ax: usize,
@@ -18,7 +24,8 @@ pub struct AxisGrid {
     pub origin1: f64,
     pub h: f64,
     pub ny: i64,
-    // per-triangle projected quantities (indexed by original face id)
+    // Per-triangle projected quantities are compact and indexed by a selected
+    // local slot retained alongside the global ID in each CSR reference.
     a2x: Vec<f64>,
     a2y: Vec<f64>,
     v0x: Vec<f64>,
@@ -30,10 +37,12 @@ pub struct AxisGrid {
     az: Vec<f64>,
     bz: Vec<f64>,
     cz: Vec<f64>,
-    // CSR: sorted unique flat cell ids -> contiguous tri-id ranges
+    // CSR: sorted unique flat cell ids -> contiguous selected-face references.
+    // Every reference retains its global ID; the slot keeps the hot query path
+    // O(1) without allocating global-face-count-sized projected arrays.
     keys: Vec<i64>,
     offs: Vec<u32>,
-    tri_ids: Vec<u32>,
+    tri_refs: Vec<FaceRef>,
     // telemetry
     pub n_cells: usize,
     pub n_refs: usize,
@@ -55,7 +64,7 @@ impl AxisGrid {
         // fixed (11 f64 + 1 bool); the transient (flat_id, tri) pair vector is
         // the growing term we bound as it accumulates.
         let per_tri_bytes = n.saturating_mul(11 * 8 + 1);
-        let pair_bytes = std::mem::size_of::<(i64, u32)>();
+        let pair_bytes = std::mem::size_of::<(i64, FaceRef)>();
         let pp: Vec<usize> = (0..3).filter(|&i| i != ax).collect();
         let (p0, p1) = (pp[0], pp[1]);
 
@@ -78,12 +87,13 @@ impl AxisGrid {
         let mut cz = vec![0.0; n];
 
         // (flat_id, tri) pairs for the CSR
-        let mut pairs: Vec<(i64, u32)> = Vec::with_capacity(n * 2);
+        let mut pairs: Vec<(i64, FaceRef)> = Vec::with_capacity(n * 2);
 
-        for f in 0..n {
-            let a = mesh.v0(f);
-            let b = mesh.vertex_b(f);
-            let cc = mesh.vertex_c(f);
+        for (slot, &face_id) in mesh.face_ids().iter().enumerate() {
+            let face = face_id as usize;
+            let a = mesh.v0(face);
+            let b = mesh.vertex_b(face);
+            let cc = mesh.vertex_c(face);
             // 2D projected verts
             let ax0 = a[p0];
             let ay0 = a[p1];
@@ -91,24 +101,24 @@ impl AxisGrid {
             let by = b[p1];
             let cx = cc[p0];
             let cy = cc[p1];
-            a2x[f] = ax0;
-            a2y[f] = ay0;
+            a2x[slot] = ax0;
+            a2y[slot] = ay0;
             // v0 = C2 - A2 ; v1 = B2 - A2 (geometry_exact.py:232)
             let v0xf = cx - ax0;
             let v0yf = cy - ay0;
             let v1xf = bx - ax0;
             let v1yf = by - ay0;
-            v0x[f] = v0xf;
-            v0y[f] = v0yf;
-            v1x[f] = v1xf;
-            v1y[f] = v1yf;
+            v0x[slot] = v0xf;
+            v0y[slot] = v0yf;
+            v1x[slot] = v1xf;
+            v1y[slot] = v1yf;
             // den = v0x*v1y - v1x*v0y (line 233)
             let d = v0xf * v1yf - v1xf * v0yf;
-            den[f] = d;
-            good[f] = d.abs() > PARITY_DEN_EPS;
-            az[f] = a[ax];
-            bz[f] = b[ax];
-            cz[f] = cc[ax];
+            den[slot] = d;
+            good[slot] = d.abs() > PARITY_DEN_EPS;
+            az[slot] = a[ax];
+            bz[slot] = b[ax];
+            cz[slot] = cc[ax];
 
             // cell range of the 2D AABB
             let xmin = ax0.min(bx).min(cx);
@@ -125,7 +135,13 @@ impl AxisGrid {
                         .checked_mul(ny)
                         .and_then(|v| v.checked_add(iy))
                         .ok_or_else(|| "parity flat-id overflow".to_string())?;
-                    pairs.push((flat, f as u32));
+                    pairs.push((
+                        flat,
+                        FaceRef {
+                            face_id,
+                            slot: slot as u32,
+                        },
+                    ));
                 }
             }
             // Budget check per triangle: bounds overshoot to one triangle's
@@ -146,22 +162,22 @@ impl AxisGrid {
 
         // sort by flat id (stable-not-required; intra-cell order is irrelevant
         // to parity because crossings are re-sorted per query)
-        pairs.sort_unstable_by_key(|&(k, _)| k);
+        pairs.sort_unstable_by_key(|&(key, face)| (key, face.face_id));
 
         let mut keys: Vec<i64> = Vec::new();
         let mut offs: Vec<u32> = vec![0];
-        let mut tri_ids: Vec<u32> = Vec::with_capacity(pairs.len());
+        let mut tri_refs: Vec<FaceRef> = Vec::with_capacity(pairs.len());
         let mut max_occ = 0usize;
         let mut i = 0usize;
         while i < pairs.len() {
             let k = pairs[i].0;
             let mut j = i;
             while j < pairs.len() && pairs[j].0 == k {
-                tri_ids.push(pairs[j].1);
+                tri_refs.push(pairs[j].1);
                 j += 1;
             }
             keys.push(k);
-            offs.push(tri_ids.len() as u32);
+            offs.push(tri_refs.len() as u32);
             let occ = j - i;
             if occ > max_occ {
                 max_occ = occ;
@@ -189,11 +205,11 @@ impl AxisGrid {
             bz,
             cz,
             n_cells: keys.len(),
-            n_refs: tri_ids.len(),
+            n_refs: tri_refs.len(),
             max_occ,
             keys,
             offs,
-            tri_ids,
+            tri_refs,
         })
     }
 
@@ -203,7 +219,11 @@ impl AxisGrid {
         per_tri * self.a2x.len()
             + self.keys.len() * 8
             + self.offs.len() * 4
-            + self.tri_ids.len() * 4
+            + self.tri_refs.len() * std::mem::size_of::<FaceRef>()
+    }
+
+    pub(crate) fn referenced_face_ids(&self) -> impl Iterator<Item = u32> + '_ {
+        self.tri_refs.iter().map(|face| face.face_id)
     }
 
     #[inline]
@@ -237,8 +257,8 @@ impl AxisGrid {
         };
 
         scratch.clear();
-        for &tid in &self.tri_ids[s..e] {
-            let t = tid as usize;
+        for face in &self.tri_refs[s..e] {
+            let t = face.slot as usize;
             if !self.good[t] {
                 continue;
             }

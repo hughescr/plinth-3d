@@ -24,7 +24,7 @@ pub struct Node {
 
 pub struct Bvh {
     pub nodes: Vec<Node>,
-    /// triangle indices, reordered by the build (leaf ranges index into this)
+    /// Global face IDs, reordered by the build (leaf ranges index into this).
     pub order: Vec<u32>,
     pub depth: usize,
 }
@@ -54,17 +54,20 @@ impl Bvh {
     pub fn build(mesh: &Mesh) -> Result<Bvh, String> {
         let n = mesh.nfaces();
         // per-triangle Möller pad = 2*EPS*(||E1||_inf + ||E2||_inf) (A11)
-        let tri_pad: Vec<f64> = (0..n)
-            .map(|i| {
-                let e1 = mesh.e1(i);
-                let e2 = mesh.e2(i);
+        let tri_pad: Vec<f64> = mesh
+            .face_ids()
+            .iter()
+            .map(|&face_id| {
+                let e1 = mesh.e1(face_id as usize);
+                let e2 = mesh.e2(face_id as usize);
                 let ni = e1[0].abs().max(e1[1].abs()).max(e1[2].abs());
                 let mi = e2[0].abs().max(e2[1].abs()).max(e2[2].abs());
                 2.0 * EPS * (ni + mi)
             })
             .collect();
 
-        let mut order: Vec<u32> = (0..n as u32).collect();
+        // Leaf order carries global face IDs even for a narrowed mesh view.
+        let mut order = mesh.face_ids().to_vec();
         let mut nodes: Vec<Node> = Vec::with_capacity(2 * n / LEAF_MAX + 1);
         let mut max_depth = 0usize;
         let depth_cap = (2.0 * (n as f64).log2()).ceil() as usize + 64;
@@ -119,8 +122,11 @@ fn build_range(
     for &p in &order[lo..hi] {
         let pi = p as usize;
         union_box(&mut bmin, &mut bmax, mesh.tri_min(pi), mesh.tri_max(pi));
-        if tri_pad[pi] > pad {
-            pad = tri_pad[pi];
+        let slot = mesh
+            .face_slot(p)
+            .expect("BVH order must contain only selected global face IDs");
+        if tri_pad[slot] > pad {
+            pad = tri_pad[slot];
         }
     }
 

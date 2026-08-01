@@ -94,6 +94,32 @@ fn deterministic_build_bit_identical() {
     assert_eq!(surf_bvh_signature(&s1), surf_bvh_signature(&s2));
 }
 
+#[test]
+fn subset_views_share_geometry_and_build_global_id_indexes() {
+    let mesh = make_grid_mesh(4);
+    let full = build_surface(&mesh);
+    let subset = full.subset(&[12, 3, 7]).unwrap();
+    let nested = subset.subset(&[7, 3]).unwrap();
+
+    assert!(surfaces_share_geometry(&full, &subset));
+    assert!(surfaces_share_geometry(&subset, &nested));
+    assert_eq!(subset.face_ids(), &[3, 7, 12]);
+    assert_eq!(nested.face_ids(), &[3, 7]);
+    assert_eq!(surf_bvh_face_ids(&subset), vec![3, 7, 12]);
+    assert_eq!(surf_parity_face_ids(&subset), vec![3, 7, 12]);
+    assert_ne!(surf_index_stats(&full), surf_index_stats(&subset));
+
+    let mut expected = [[f64::INFINITY; 3], [f64::NEG_INFINITY; 3]];
+    for &face_id in subset.face_ids() {
+        let bounds = full.geometry().face_bounds()[face_id as usize];
+        for axis in 0..3 {
+            expected[0][axis] = expected[0][axis].min(bounds[0][axis]);
+            expected[1][axis] = expected[1][axis].max(bounds[1][axis]);
+        }
+    }
+    assert_eq!(subset.bounds(), expected);
+}
+
 // ---- Amendment A11: conservative ray pad guard ---------------------------
 // These rays graze just OUTSIDE an AABB-boundary triangle edge, at a
 // barycentric offset inside Moller's tolerant [-EPS,0) band. The tolerant

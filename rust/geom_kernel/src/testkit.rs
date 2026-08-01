@@ -144,7 +144,8 @@ pub fn surf_seg_min(s: &NativeSurface, a: V3, b: V3) -> (f64, V3) {
 pub fn brute_seg_min(s: &NativeSurface, a: V3, b: V3) -> (f64, V3) {
     let mut best_d = f64::INFINITY;
     let mut best_pt: V3 = [f64::NAN; 3];
-    for t in 0..s.mesh.nfaces() {
+    for &face_id in s.mesh.face_ids() {
+        let t = face_id as usize;
         let (d, pt) = s.seg_tri_dist(a, b, t);
         if d < best_d {
             best_d = d;
@@ -152,6 +153,39 @@ pub fn brute_seg_min(s: &NativeSurface, a: V3, b: V3) -> (f64, V3) {
         }
     }
     (best_d, best_pt)
+}
+
+/// Proves that two surface views retain the same immutable face allocation.
+pub fn surfaces_share_geometry(a: &NativeSurface, b: &NativeSurface) -> bool {
+    a.mesh.shares_geometry(&b.mesh)
+}
+
+pub fn surf_bvh_face_ids(s: &NativeSurface) -> Vec<u32> {
+    let mut face_ids = s.bvh.order.clone();
+    face_ids.sort_unstable();
+    face_ids
+}
+
+pub fn surf_parity_face_ids(s: &NativeSurface) -> Vec<u32> {
+    let mut face_ids =
+        s.pv.grids
+            .iter()
+            .flat_map(|grid| grid.referenced_face_ids())
+            .collect::<Vec<_>>();
+    face_ids.sort_unstable();
+    face_ids.dedup();
+    face_ids
+}
+
+/// Structural index statistics for proving that a view owns fresh indexes.
+pub fn surf_index_stats(s: &NativeSurface) -> (usize, usize, [(usize, usize, usize); 3]) {
+    (
+        s.bvh.nodes.len(),
+        s.bvh.order.len(),
+        s.pv.grids
+            .each_ref()
+            .map(|grid| (grid.n_cells, grid.n_refs, grid.max_occ)),
+    )
 }
 
 pub fn sample_points(m: &TestMesh, n: usize) -> Vec<V3> {

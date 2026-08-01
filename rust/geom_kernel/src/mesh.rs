@@ -43,6 +43,11 @@ impl FaceGeometry {
 
 pub struct Mesh {
     geometry: Arc<FaceGeometry>,
+    /// Selected global face IDs, always strictly ascending.
+    face_ids: Vec<u32>,
+    /// Query bounds for this view. Full soup views retain source bounds;
+    /// proper subsets tightly enclose selected faces.
+    bounds: FaceBounds,
 }
 
 impl Mesh {
@@ -65,17 +70,20 @@ impl Mesh {
         debug_assert_eq!(areas.len(), n);
         debug_assert_eq!(face_bounds.len(), n);
         debug_assert_eq!(centroid.len(), n);
+        let geometry = Arc::new(FaceGeometry {
+            v0,
+            e1,
+            e2,
+            normals,
+            areas,
+            face_bounds,
+            centroid,
+            bounds,
+        });
         Self {
-            geometry: Arc::new(FaceGeometry {
-                v0,
-                e1,
-                e2,
-                normals,
-                areas,
-                face_bounds,
-                centroid,
-                bounds,
-            }),
+            geometry,
+            face_ids: (0..n as u32).collect(),
+            bounds,
         }
     }
 
@@ -297,8 +305,57 @@ impl Mesh {
     pub(crate) fn geometry(&self) -> &FaceGeometry {
         &self.geometry
     }
+    pub(crate) fn subset(&self, face_ids: Vec<u32>) -> Self {
+        debug_assert!(!face_ids.is_empty());
+        debug_assert!(face_ids.windows(2).all(|pair| pair[0] < pair[1]));
+        debug_assert!(face_ids
+            .iter()
+            .all(|face_id| (*face_id as usize) < self.geometry.nfaces()));
+
+        // An identity view preserves the parent's validated query bounds. In
+        // particular, triangle-soup callers own the full surface bounds and
+        // identity subsets must remain bit-equivalent. Proper subsets use the
+        // tight union of only their selected faces.
+        let bounds = if face_ids == self.face_ids {
+            self.bounds
+        } else {
+            let mut bounds = [[f64::INFINITY; 3], [f64::NEG_INFINITY; 3]];
+            for &face_id in &face_ids {
+                let face_bounds = self.geometry.face_bounds[face_id as usize];
+                for axis in 0..3 {
+                    bounds[0][axis] = bounds[0][axis].min(face_bounds[0][axis]);
+                    bounds[1][axis] = bounds[1][axis].max(face_bounds[1][axis]);
+                }
+            }
+            bounds
+        };
+        Self {
+            geometry: Arc::clone(&self.geometry),
+            face_ids,
+            bounds,
+        }
+    }
+    pub(crate) fn shares_geometry(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.geometry, &other.geometry)
+    }
+    #[inline]
+    pub(crate) fn face_ids(&self) -> &[u32] {
+        &self.face_ids
+    }
+    #[inline]
+    pub(crate) fn contains_face(&self, face_id: u32) -> bool {
+        self.face_ids.binary_search(&face_id).is_ok()
+    }
+    #[inline]
+    pub(crate) fn face_slot(&self, face_id: u32) -> Option<usize> {
+        self.face_ids.binary_search(&face_id).ok()
+    }
     #[inline]
     pub(crate) fn nfaces(&self) -> usize {
+        self.face_ids.len()
+    }
+    #[inline]
+    pub(crate) fn global_nfaces(&self) -> usize {
         self.geometry.nfaces()
     }
     #[inline]
@@ -331,7 +388,7 @@ impl Mesh {
     }
     #[inline]
     pub(crate) fn bounds(&self) -> FaceBounds {
-        self.geometry.bounds
+        self.bounds
     }
     #[inline]
     pub(crate) fn vertex_b(&self, i: usize) -> V3 {

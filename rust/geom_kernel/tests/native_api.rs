@@ -1,5 +1,6 @@
 use geom_kernel::{
-    BatchInputError, NativeSurface, NativeSurfaceConfig, SurfaceBuildError, TriangleSoup,
+    BatchInputError, Interval, NativeSurface, NativeSurfaceConfig, SurfaceBuildError,
+    SurfaceSubsetError, TriangleSoup,
 };
 
 const TRIANGLES: [[[f64; 3]; 3]; 1] = [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]];
@@ -14,6 +15,74 @@ fn surface() -> NativeSurface {
         usize::MAX,
     )
     .unwrap()
+}
+
+fn cubes_surface(origins: &[[f64; 3]]) -> NativeSurface {
+    const VERTICES: [[f64; 3]; 8] = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [1.0, 0.0, 1.0],
+        [1.0, 1.0, 1.0],
+        [0.0, 1.0, 1.0],
+    ];
+    const FACES: [[u32; 3]; 12] = [
+        [0, 2, 1],
+        [0, 3, 2],
+        [4, 5, 6],
+        [4, 6, 7],
+        [0, 1, 5],
+        [0, 5, 4],
+        [1, 2, 6],
+        [1, 6, 5],
+        [2, 3, 7],
+        [2, 7, 6],
+        [3, 0, 4],
+        [3, 4, 7],
+    ];
+    let mut vertices = Vec::with_capacity(origins.len() * VERTICES.len());
+    let mut faces = Vec::with_capacity(origins.len() * FACES.len());
+    for &origin in origins {
+        let offset = vertices.len() as u32;
+        vertices.extend(VERTICES.map(|vertex| {
+            [
+                vertex[0] + origin[0],
+                vertex[1] + origin[1],
+                vertex[2] + origin[2],
+            ]
+        }));
+        faces.extend(FACES.map(|[a, b, c]| [a + offset, b + offset, c + offset]));
+    }
+    NativeSurface::from_indexed(
+        &vertices,
+        &faces,
+        NativeSurfaceConfig {
+            grid_pitch_mm: 2.0,
+            max_grid_bytes: usize::MAX,
+        },
+    )
+    .unwrap()
+}
+
+fn cube_surface() -> NativeSurface {
+    cubes_surface(&[[0.0; 3]])
+}
+
+fn assert_intervals_equal(left: &[Vec<Interval>], right: &[Vec<Interval>]) {
+    assert_eq!(left.len(), right.len());
+    for (left_row, right_row) in left.iter().zip(right) {
+        assert_eq!(left_row.len(), right_row.len());
+        for (left, right) in left_row.iter().zip(right_row) {
+            assert_eq!(left.s_a.to_bits(), right.s_a.to_bits());
+            assert_eq!(left.s_b.to_bits(), right.s_b.to_bits());
+            assert_eq!(left.entered, right.entered);
+            assert_eq!(left.exited, right.exited);
+            assert_eq!(left.max_depth.to_bits(), right.max_depth.to_bits());
+            assert_eq!(left.ray, right.ray);
+        }
+    }
 }
 
 fn assert_batch_error<T>(
@@ -34,6 +103,13 @@ fn assert_batch_error<T>(
             }
         ),
         Ok(_) => panic!("{operation} accepted mismatched {field}"),
+    }
+}
+
+fn subset_error(result: Result<NativeSurface, SurfaceSubsetError>) -> SurfaceSubsetError {
+    match result {
+        Err(error) => error,
+        Ok(_) => panic!("invalid subset selection unexpectedly succeeded"),
     }
 }
 
@@ -58,6 +134,220 @@ fn owned_and_borrowed_triangle_soups_expose_the_same_batch_api() {
         borrowed.query(&points, f64::INFINITY),
         owned.query(&points, f64::INFINITY)
     );
+}
+
+#[test]
+fn subsets_validate_caller_order_and_return_global_face_ids() {
+    let triangles = [
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        [[10.0, 0.0, 0.0], [11.0, 0.0, 0.0], [10.0, 1.0, 0.0]],
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+    ];
+    let full = NativeSurface::from_triangle_soup(
+        TriangleSoup::borrowed(
+            &triangles,
+            &[[0.0, 0.0, 1.0]; 3],
+            &[0.5; 3],
+            [[-3.0, -4.0, -5.0], [20.0, 21.0, 22.0]],
+        ),
+        2.0,
+        usize::MAX,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        full.subset(&[]),
+        Err(SurfaceSubsetError::EmptySelection)
+    ));
+    assert_eq!(
+        subset_error(full.subset(&[2, 3, 2])),
+        SurfaceSubsetError::FaceIdOutOfBounds {
+            position: 1,
+            face_id: 3,
+            global_face_count: 3,
+        }
+    );
+    assert_eq!(
+        subset_error(full.subset(&[2, 0, 2])),
+        SurfaceSubsetError::DuplicateFaceId { face_id: 2 }
+    );
+
+    let identity = full.subset(&[2, 1, 0]).unwrap();
+    assert_eq!(identity.bounds(), full.bounds());
+    assert_eq!(
+        identity.query(&[[0.25, 0.25, 1.0]], f64::INFINITY),
+        full.query(&[[0.25, 0.25, 1.0]], f64::INFINITY),
+        "identity subsets preserve caller-owned soup bounds and query behavior"
+    );
+
+    let tied = full.subset(&[2, 0]).unwrap();
+    let tied_reordered = full.subset(&[0, 2]).unwrap();
+    assert_eq!(tied.face_ids(), &[0, 2]);
+    assert_eq!(tied.face_ids(), tied_reordered.face_ids());
+    assert_eq!(tied.nfaces(), 2);
+    assert_eq!(tied.geometry().nfaces(), 3);
+    assert_eq!(tied.bounds(), [[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]]);
+    assert_eq!(tied.query(&[[0.25, 0.25, 1.0]], f64::INFINITY).1, [0]);
+    assert_eq!(
+        tied.query(&[[0.25, 0.25, 1.0]], 0.5).1,
+        [3],
+        "no-hit sentinel remains the immutable global face count"
+    );
+    assert_eq!(
+        tied.cast_rays(&[[0.25, 0.25, 1.0]], &[[0.0, 0.0, -1.0]], 2.0)
+            .unwrap()
+            .2,
+        [0],
+        "coincident-hit tie-break returns the lowest global face ID"
+    );
+    assert_eq!(
+        tied.query(&[[0.25, 0.25, 1.0], [10.25, 0.25, 1.0]], f64::INFINITY),
+        tied_reordered.query(&[[0.25, 0.25, 1.0], [10.25, 0.25, 1.0]], f64::INFINITY),
+        "caller order cannot change canonical subset query bits"
+    );
+    assert_eq!(
+        tied.cast_rays(&[[0.25, 0.25, 1.0]], &[[0.0, 0.0, -1.0]], 2.0),
+        tied_reordered.cast_rays(&[[0.25, 0.25, 1.0]], &[[0.0, 0.0, -1.0]], 2.0),
+        "caller order cannot change canonical subset ray ties"
+    );
+    assert_eq!(
+        full.subset(&[2])
+            .unwrap()
+            .query(&[[0.25, 0.25, 1.0]], f64::INFINITY)
+            .1,
+        [2]
+    );
+
+    let nested = tied.subset(&[2]).unwrap();
+    assert_eq!(nested.face_ids(), &[2]);
+    assert_eq!(
+        subset_error(nested.subset(&[1])),
+        SurfaceSubsetError::FaceIdNotSelected {
+            position: 0,
+            face_id: 1,
+        }
+    );
+    assert_eq!(
+        subset_error(nested.subset(&[2, 1, 2])),
+        SurfaceSubsetError::FaceIdNotSelected {
+            position: 1,
+            face_id: 1,
+        },
+        "caller-order parent membership failure precedes a later duplicate"
+    );
+}
+
+#[test]
+fn identity_subset_matches_every_native_query_family() {
+    let full = cube_surface();
+    let subset = full
+        .subset(&(0..full.nfaces() as u32).rev().collect::<Vec<_>>())
+        .unwrap();
+    let points = [[0.5, 0.5, 0.5], [0.25, 0.25, 1.5], [2.0, 2.0, 2.0]];
+    let origins = [[0.5, 0.5, 2.0], [-1.0, 0.5, 0.5]];
+    let dirs = [[0.0, 0.0, -2.0], [2.0, 0.0, 0.0]];
+    let p0s = [[-1.0, 0.5, 0.5], [0.5, 0.5, 2.0]];
+    let p1s = [[2.0, 0.5, 0.5], [0.5, 0.5, -1.0]];
+    let radii = [0.1, 0.2];
+    let insets = [0.0, 0.05];
+
+    assert_eq!(subset.face_ids(), &(0..12).collect::<Vec<_>>());
+    assert_eq!(
+        full.query(&points, f64::INFINITY),
+        subset.query(&points, f64::INFINITY)
+    );
+    assert_eq!(full.project(&points), subset.project(&points));
+    assert_eq!(full.inside(&points), subset.inside(&points));
+    assert_eq!(
+        full.cast_rays(&origins, &dirs, 1.0).unwrap(),
+        subset.cast_rays(&origins, &dirs, 1.0).unwrap()
+    );
+    assert_eq!(
+        full.segment_clearance(&p0s, &p1s, &radii, &radii, 0.05, &insets, &insets)
+            .unwrap(),
+        subset
+            .segment_clearance(&p0s, &p1s, &radii, &radii, 0.05, &insets, &insets)
+            .unwrap()
+    );
+    let full_intervals = full
+        .penetration_intervals_batch(&p0s, &p1s, &radii, &radii, 4, 0.12, 80, 0.05, true)
+        .unwrap();
+    let subset_intervals = subset
+        .penetration_intervals_batch(&p0s, &p1s, &radii, &radii, 4, 0.12, 80, 0.05, true)
+        .unwrap();
+    assert_intervals_equal(&full_intervals, &subset_intervals);
+    assert_eq!(
+        full.sphere_breach(&points[..2], &radii, 0.05, 25.0, 8)
+            .unwrap(),
+        subset
+            .sphere_breach(&points[..2], &radii, 0.05, 25.0, 8)
+            .unwrap()
+    );
+    assert_eq!(full.exterior_face_mask(), subset.exterior_face_mask());
+}
+
+#[test]
+fn sparse_nested_subset_matches_every_native_query_family_and_owns_its_cache() {
+    let full = cubes_surface(&[[-20.0, 0.0, 0.0], [0.0, 0.0, 0.0]]);
+    let mut parent_ids = vec![0];
+    parent_ids.extend(12..24);
+    let parent = full.subset(&parent_ids).unwrap();
+    let parent_mask = parent.exterior_face_mask().to_vec();
+    let child = parent.subset(&(12..24).collect::<Vec<_>>()).unwrap();
+
+    let points = [[0.5, 0.5, 0.5], [0.25, 0.25, 1.5], [2.0, 2.0, 2.0]];
+    let origins = [[0.5, 0.5, 2.0], [-1.0, 0.5, 0.5]];
+    let dirs = [[0.0, 0.0, -2.0], [2.0, 0.0, 0.0]];
+    let p0s = [[-1.0, 0.5, 0.5], [0.5, 0.5, 2.0]];
+    let p1s = [[2.0, 0.5, 0.5], [0.5, 0.5, -1.0]];
+    let radii = [0.1, 0.2];
+    let insets = [0.0, 0.05];
+
+    assert_eq!(
+        parent.face_ids(),
+        &[0, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]
+    );
+    assert_eq!(child.face_ids(), &(12..24).collect::<Vec<_>>());
+    assert_eq!(child.nfaces(), 12);
+    assert_eq!(child.geometry().nfaces(), 24);
+    assert_eq!(
+        parent.query(&points, f64::INFINITY),
+        child.query(&points, f64::INFINITY)
+    );
+    let parent_project = parent.project(&points);
+    let child_project = child.project(&points);
+    assert_eq!(parent_project, child_project);
+    assert!(child_project.2.iter().all(|&face_id| face_id >= 12));
+    assert_eq!(parent.inside(&points), child.inside(&points));
+    assert_eq!(
+        parent.cast_rays(&origins, &dirs, 1.0).unwrap(),
+        child.cast_rays(&origins, &dirs, 1.0).unwrap()
+    );
+    assert_eq!(
+        parent
+            .segment_clearance(&p0s, &p1s, &radii, &radii, 0.05, &insets, &insets)
+            .unwrap(),
+        child
+            .segment_clearance(&p0s, &p1s, &radii, &radii, 0.05, &insets, &insets)
+            .unwrap()
+    );
+    let parent_intervals = parent
+        .penetration_intervals_batch(&p0s, &p1s, &radii, &radii, 4, 0.12, 80, 0.05, true)
+        .unwrap();
+    let child_intervals = child
+        .penetration_intervals_batch(&p0s, &p1s, &radii, &radii, 4, 0.12, 80, 0.05, true)
+        .unwrap();
+    assert_intervals_equal(&parent_intervals, &child_intervals);
+    assert_eq!(
+        parent
+            .sphere_breach(&points[..2], &radii, 0.05, 25.0, 8)
+            .unwrap(),
+        child
+            .sphere_breach(&points[..2], &radii, 0.05, 25.0, 8)
+            .unwrap()
+    );
+    assert_eq!(child.exterior_face_mask(), &parent_mask[1..]);
+    assert_eq!(child.exterior_face_mask().len(), child.nfaces());
 }
 
 #[test]

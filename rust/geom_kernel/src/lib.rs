@@ -186,6 +186,62 @@ impl std::fmt::Display for SurfaceBuildError {
 
 impl std::error::Error for SurfaceBuildError {}
 
+/// Native index whose construction failed while creating a surface subset.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SurfaceIndexKind {
+    Bvh,
+    Parity,
+}
+
+/// Named failures from narrowing an existing native surface by global face ID.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SurfaceSubsetError {
+    EmptySelection,
+    DuplicateFaceId {
+        face_id: u32,
+    },
+    FaceIdOutOfBounds {
+        position: usize,
+        face_id: u32,
+        global_face_count: usize,
+    },
+    FaceIdNotSelected {
+        position: usize,
+        face_id: u32,
+    },
+    IndexBuild {
+        index: SurfaceIndexKind,
+    },
+}
+
+impl std::fmt::Display for SurfaceSubsetError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptySelection => write!(formatter, "surface subset must select at least one face"),
+            Self::DuplicateFaceId { face_id } => {
+                write!(formatter, "surface subset repeats global face ID {face_id}")
+            }
+            Self::FaceIdOutOfBounds {
+                position,
+                face_id,
+                global_face_count,
+            } => write!(
+                formatter,
+                "surface subset face_ids[{position}] is {face_id}, outside {global_face_count} global faces"
+            ),
+            Self::FaceIdNotSelected { position, face_id } => write!(
+                formatter,
+                "surface subset face_ids[{position}] global face ID {face_id} is not selected by the parent surface"
+            ),
+            Self::IndexBuild { index } => {
+                write!(formatter, "surface subset {index:?} index construction failed")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SurfaceSubsetError {}
+
 impl NativeSurface {
     /// Construct the existing query engine from typed owned or borrowed data.
     ///
@@ -281,13 +337,25 @@ impl NativeSurface {
             .map_err(SurfaceBuildError::Kernel)
     }
 
-    /// Number of faces in the immutable surface.
+    /// Number of faces selected by this immutable surface view.
     pub fn nfaces(&self) -> usize {
         self.mesh.nfaces()
     }
 
-    /// Immutable global face metadata. This view has no mutable access and
-    /// does not expose the shared ownership mechanism.
+    /// Selected global face IDs in deterministic ascending order.
+    pub fn face_ids(&self) -> &[u32] {
+        self.mesh.face_ids()
+    }
+
+    /// Query-index bounds for this surface view. A full triangle-soup surface
+    /// retains its validated source-supplied bounds; proper subsets tightly
+    /// enclose only their selected faces.
+    pub fn bounds(&self) -> FaceBounds {
+        self.mesh.bounds()
+    }
+
+    /// Immutable global face metadata shared with every subset. Selected IDs
+    /// are exposed separately by [`Self::face_ids`].
     pub fn geometry(&self) -> &FaceGeometry {
         self.mesh.geometry()
     }
@@ -343,6 +411,7 @@ mod thread_tests {
             usize::MAX,
         )
         .unwrap();
+        let subset = surface.subset(&[0]).unwrap();
         let points = [[0.25, 0.25, 1.0], [2.0, 2.0, 0.0]];
         let mut baseline = None;
 
@@ -351,7 +420,11 @@ mod thread_tests {
             assert_eq!(current_threads(), expected);
             assert_eq!(par::run(rayon::current_num_threads), expected);
 
-            let result = surface.query(&points, f64::INFINITY);
+            let result = (
+                surface.query(&points, f64::INFINITY),
+                subset.query(&points, f64::INFINITY),
+                subset.inside(&points),
+            );
             if let Some(previous) = &baseline {
                 assert_eq!(&result, previous);
             } else {

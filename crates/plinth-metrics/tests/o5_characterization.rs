@@ -320,20 +320,23 @@ fn cavity_counts_and_actual_boundary_probe_ownership_are_characterized() {
     // These metrics wrapper results are policy evidence: every inner boundary
     // point is admitted on both surfaces before parity can distinguish them.
     assert_eq!(full_metrics, vec![true; probes.len()]);
-    let full_native = native_analytic_cubes(
+    let full_native_surface = native_analytic_cubes(
         &[([0.0, 0.0, 0.0], 16.0), ([2.0, 2.0, 2.0], 8.0)],
         [[0.0; 3], [16.0; 3]],
-    )
-    .inside(&probes);
-    let outer_native =
-        native_analytic_cubes(&[([0.0, 0.0, 0.0], 16.0)], [[0.0; 3], [16.0; 3]]).inside(&probes);
+    );
+    let full_native = full_native_surface.inside(&probes);
+    let outer_native = full_native_surface
+        .subset(&(0..12).collect::<Vec<_>>())
+        .expect("outer cube faces are a valid native subset")
+        .inside(&probes);
     assert_eq!(
         outer_metrics,
         vec![true; probes.len()],
         "the metrics boundary wrapper admits the actual outer-subset probe batch"
     );
     // This is ownership evidence only: both operands use bare kernel parity on
-    // the same gathered batch, so their difference cannot be wrapper policy.
+    // the same gathered batch and shared immutable geometry, so their
+    // difference cannot be wrapper policy or reconstructed geometry.
     assert_ne!(
         full_native, outer_native,
         "bare full-model and outer-subset kernel ownership diverge on actual probes"

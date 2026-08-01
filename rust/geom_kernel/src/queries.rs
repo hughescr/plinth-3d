@@ -3,6 +3,7 @@
 //! cross-query reductions anywhere.
 
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
@@ -16,6 +17,7 @@ use crate::moller::{dedup_loc, moller};
 use crate::par;
 use crate::parity::ParityVote;
 use crate::vec3::{add, cross, dot, norm, scale, sub, V3};
+use crate::{SurfaceIndexKind, SurfaceSubsetError};
 
 thread_local! {
     static STACK: RefCell<Vec<i32>> = RefCell::new(Vec::with_capacity(128));
@@ -81,6 +83,7 @@ pub struct NativeSurface {
     pub bvh: Bvh,
     pub pv: ParityVote,
     pub grid_pitch_mm: f64,
+    max_grid_bytes: usize,
     exterior_mask: OnceLock<Vec<bool>>,
     // result-inert telemetry (spec sec 4.2): decisions within 1e-6 of a
     // threshold, and measured-tie breach disagreements.
@@ -161,19 +164,76 @@ fn ray_box(o: V3, d: V3, bmin: V3, bmax: V3, pad: f64, t0: f64, t1: f64) -> bool
     true
 }
 
+fn build_indexes(
+    mesh: &Mesh,
+    grid_pitch_mm: f64,
+    max_grid_bytes: usize,
+) -> Result<(Bvh, ParityVote), (SurfaceIndexKind, String)> {
+    let bvh = Bvh::build(mesh).map_err(|reason| (SurfaceIndexKind::Bvh, reason))?;
+    let pv = ParityVote::build(mesh, grid_pitch_mm, max_grid_bytes)
+        .map_err(|reason| (SurfaceIndexKind::Parity, reason))?;
+    Ok((bvh, pv))
+}
+
 impl NativeSurface {
     pub fn new(
         mesh: Mesh,
         grid_pitch_mm: f64,
         max_grid_bytes: usize,
     ) -> Result<NativeSurface, String> {
-        let bvh = Bvh::build(&mesh)?;
-        let pv = ParityVote::build(&mesh, grid_pitch_mm, max_grid_bytes)?;
+        // Preserve the established construction error text. Typed index
+        // attribution is specific to the subset boundary below.
+        let (bvh, pv) = build_indexes(&mesh, grid_pitch_mm, max_grid_bytes)
+            .map_err(|(_index, reason)| reason)?;
         Ok(NativeSurface {
             mesh,
             bvh,
             pv,
             grid_pitch_mm,
+            max_grid_bytes,
+            exterior_mask: OnceLock::new(),
+            band_counter: AtomicU64::new(0),
+            tie_counter: AtomicU64::new(0),
+        })
+    }
+
+    /// Narrow this surface to global face IDs selected by the current view.
+    /// Validation follows caller order; accepted IDs are canonicalized to
+    /// ascending global order before building independent indexes and caches.
+    pub fn subset(&self, face_ids: &[u32]) -> Result<NativeSurface, SurfaceSubsetError> {
+        if face_ids.is_empty() {
+            return Err(SurfaceSubsetError::EmptySelection);
+        }
+
+        let global_face_count = self.mesh.global_nfaces();
+        let mut seen = BTreeSet::new();
+        for (position, &face_id) in face_ids.iter().enumerate() {
+            if face_id as usize >= global_face_count {
+                return Err(SurfaceSubsetError::FaceIdOutOfBounds {
+                    position,
+                    face_id,
+                    global_face_count,
+                });
+            }
+            if !self.mesh.contains_face(face_id) {
+                return Err(SurfaceSubsetError::FaceIdNotSelected { position, face_id });
+            }
+            if !seen.insert(face_id) {
+                return Err(SurfaceSubsetError::DuplicateFaceId { face_id });
+            }
+        }
+
+        let mut canonical = face_ids.to_vec();
+        canonical.sort_unstable();
+        let mesh = self.mesh.subset(canonical);
+        let (bvh, pv) = build_indexes(&mesh, self.grid_pitch_mm, self.max_grid_bytes)
+            .map_err(|(index, _reason)| SurfaceSubsetError::IndexBuild { index })?;
+        Ok(NativeSurface {
+            mesh,
+            bvh,
+            pv,
+            grid_pitch_mm: self.grid_pitch_mm,
+            max_grid_bytes: self.max_grid_bytes,
             exterior_mask: OnceLock::new(),
             band_counter: AtomicU64::new(0),
             tie_counter: AtomicU64::new(0),
@@ -196,9 +256,11 @@ impl NativeSurface {
 
     // ---- nearest triangle (query/project) -------------------------------
     /// Exact nearest via branch-and-bound with lexicographic (dist, idx),
-    /// strict `>` pruning, seed (upper_bound, nfaces) (Amendment A12).
+    /// strict `>` pruning, seed (upper_bound, global_nfaces) (Amendment A12).
     pub(crate) fn nearest_one(&self, p: V3, upper_bound: f64) -> (f64, usize, V3) {
-        let nf = self.mesh.nfaces();
+        // Keep the historical full-surface face count as the no-hit sentinel.
+        // A selected global ID can never collide with this value.
+        let nf = self.mesh.global_nfaces();
         let mut best_d = upper_bound;
         let mut best_i = nf;
         let mut best_cp: V3 = [0.0; 3];
@@ -247,9 +309,9 @@ impl NativeSurface {
         (best_d, best_i, best_cp)
     }
 
-    /// query facade: (dist, idx) with over-bound => (inf, nfaces).
+    /// query facade: (dist, idx) with over-bound => (inf, global_nfaces).
     pub fn query(&self, pts: &[V3], upper_bound: f64) -> (Vec<f64>, Vec<i64>) {
-        let nf = self.mesh.nfaces();
+        let nf = self.mesh.global_nfaces();
         let res: Vec<(f64, i64)> = par::run(|| {
             pts.par_iter()
                 .map(|&p| {
@@ -277,7 +339,7 @@ impl NativeSurface {
             pts.par_iter()
                 .map(|&p| {
                     let (d, i, cp) = self.nearest_one(p, f64::INFINITY);
-                    let fn_ = if i < self.mesh.nfaces() {
+                    let fn_ = if i < self.mesh.global_nfaces() {
                         self.mesh.normal(i)
                     } else {
                         [0.0; 3]
@@ -865,7 +927,7 @@ impl NativeSurface {
     ) -> (bool, f64, f64) {
         let (nd, _cp, tri, fn_) = {
             let (d, i, cp) = self.nearest_one(c, f64::INFINITY);
-            let n = if i < self.mesh.nfaces() {
+            let n = if i < self.mesh.global_nfaces() {
                 self.mesh.normal(i)
             } else {
                 [0.0; 3]
@@ -968,7 +1030,6 @@ impl NativeSurface {
     // ---- exterior-face mask ----------------------------------------------
     pub fn exterior_face_mask(&self) -> &[bool] {
         self.exterior_mask.get_or_init(|| {
-            let n = self.mesh.nfaces();
             let bary: [[f64; 3]; 3] = [
                 [1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0],
                 [0.6, 0.2, 0.2],
@@ -976,9 +1037,11 @@ impl NativeSurface {
             ];
             let eps_ladder = [0.05f64, 0.15f64];
             par::run(|| {
-                (0..n)
-                    .into_par_iter()
-                    .map(|f| {
+                self.mesh
+                    .face_ids()
+                    .par_iter()
+                    .map(|&face_id| {
+                        let f = face_id as usize;
                         let a = self.mesh.v0(f);
                         let b = self.mesh.vertex_b(f);
                         let cc = self.mesh.vertex_c(f);
