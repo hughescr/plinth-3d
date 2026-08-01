@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use plinth_solid::{backend_configuration, ManifoldBackend, Mesh, SolidBoolean};
+use plinth_solid::{ManifoldBackend, ManifoldStatus, Mesh, SolidBoolean, SolidError};
 
 fn cuboid(min: [f64; 3], max: [f64; 3]) -> Mesh {
     let vertices = vec![
@@ -134,14 +134,22 @@ fn assert_volume(actual: f64, expected: f64) {
     );
 }
 
-#[test]
-fn backend_is_the_pinned_serial_f64_configuration() {
-    let config = backend_configuration();
-    assert_eq!(config.version, (3, 5, 2));
-    assert_eq!(config.parallel_mode, -1);
-    assert_eq!(config.scalar_bytes, 8);
-    assert_eq!(config.index_bytes, 8);
-    assert!(!config.cross_section_enabled);
+fn meshes_are_bit_identical(left: &Mesh, right: &Mesh) -> bool {
+    left.triangles() == right.triangles()
+        && left.vertices().len() == right.vertices().len()
+        && left
+            .vertices()
+            .iter()
+            .flatten()
+            .zip(right.vertices().iter().flatten())
+            .all(|(left, right)| left.to_bits() == right.to_bits())
+}
+
+fn assert_mesh_bits_equal(left: &Mesh, right: &Mesh) {
+    assert!(
+        meshes_are_bit_identical(left, right),
+        "mesh coordinates and indices must be bit-identical"
+    );
 }
 
 #[test]
@@ -155,10 +163,7 @@ fn batch_union_is_watertight_wound_finite_and_deterministic() {
         .union(&inputs)
         .expect("overlapping cuboids must union");
     let repeated = backend.union(&inputs).expect("repeat union must succeed");
-    assert_eq!(
-        result, repeated,
-        "serial union output must be deterministic"
-    );
+    assert_mesh_bits_equal(&result, &repeated);
     let report = audit(&result);
     assert_eq!(report.shell_count, 1);
     assert_volume(report.signed_volume, 12.0);
@@ -178,10 +183,7 @@ fn batch_difference_is_watertight_wound_finite_and_deterministic() {
     let repeated = backend
         .difference(&inputs)
         .expect("repeat difference must succeed");
-    assert_eq!(
-        result, repeated,
-        "serial difference output must be deterministic"
-    );
+    assert_mesh_bits_equal(&result, &repeated);
     let report = audit(&result);
     assert_eq!(report.shell_count, 1);
     assert_volume(report.signed_volume, 25.5);
@@ -194,4 +196,44 @@ fn validation_and_batch_shape_fail_loudly() {
     assert!(backend.union(&[]).is_err());
     let cube = cuboid([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
     assert!(backend.difference(&[cube]).is_err());
+}
+
+#[test]
+fn determinism_comparison_distinguishes_signed_zero() {
+    let positive_zero = cuboid([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+    let negative_zero = cuboid([-0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+    assert!(!meshes_are_bit_identical(&positive_zero, &negative_zero));
+}
+
+#[test]
+fn nonmanifold_input_preserves_the_typed_manifold_status() {
+    let open_tetrahedron = Mesh::new(
+        vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        vec![[0, 2, 1], [0, 1, 3], [1, 2, 3]],
+    )
+    .expect("open fixture is structurally valid at the Rust boundary");
+    let error = ManifoldBackend
+        .union(&[open_tetrahedron])
+        .expect_err("Manifold must reject an open input");
+    assert_eq!(
+        error,
+        SolidError::ManifoldInput {
+            mesh_index: 0,
+            status: ManifoldStatus::NotManifold,
+        }
+    );
+}
+
+#[test]
+fn valid_empty_difference_is_a_semantic_error_in_the_m0_policy() {
+    let cube = cuboid([0.0, 0.0, 0.0], [1.0, 1.0, 1.0]);
+    let error = ManifoldBackend
+        .difference(&[cube.clone(), cube])
+        .expect_err("A minus itself is a valid empty boolean result");
+    assert_eq!(error, SolidError::EmptyResult);
 }

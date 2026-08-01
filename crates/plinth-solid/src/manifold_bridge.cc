@@ -5,8 +5,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <new>
 #include <stdexcept>
-#include <string>
 #include <type_traits>
 #include <utility>
 #include <vector>
@@ -33,45 +33,39 @@ static_assert(
     std::is_same_v<decltype(manifold::MeshGL64{}.triVerts)::value_type,
                    std::uint64_t>,
     "MeshGL64 must retain its u64 index ABI");
+static_assert(static_cast<int>(manifold::Manifold::Error::NoError) == 0);
+static_assert(static_cast<int>(manifold::Manifold::Error::NonFiniteVertex) == 1);
+static_assert(static_cast<int>(manifold::Manifold::Error::NotManifold) == 2);
+static_assert(static_cast<int>(manifold::Manifold::Error::VertexOutOfBounds) == 3);
+static_assert(static_cast<int>(manifold::Manifold::Error::PropertiesWrongLength) == 4);
+static_assert(static_cast<int>(manifold::Manifold::Error::MissingPositionProperties) == 5);
+static_assert(static_cast<int>(manifold::Manifold::Error::MergeVectorsDifferentLengths) == 6);
+static_assert(static_cast<int>(manifold::Manifold::Error::MergeIndexOutOfBounds) == 7);
+static_assert(static_cast<int>(manifold::Manifold::Error::TransformWrongLength) == 8);
+static_assert(static_cast<int>(manifold::Manifold::Error::RunIndexWrongLength) == 9);
+static_assert(static_cast<int>(manifold::Manifold::Error::FaceIDWrongLength) == 10);
+static_assert(static_cast<int>(manifold::Manifold::Error::InvalidConstruction) == 11);
+static_assert(static_cast<int>(manifold::Manifold::Error::ResultTooLarge) == 12);
+static_assert(static_cast<int>(manifold::Manifold::Error::InvalidTangents) == 13);
+static_assert(static_cast<int>(manifold::Manifold::Error::Cancelled) == 14);
 
 namespace plinth::solid {
 namespace {
 
-const char* status_name(manifold::Manifold::Error status) noexcept {
-  using Error = manifold::Manifold::Error;
-  switch (status) {
-    case Error::NoError:
-      return "NoError";
-    case Error::NonFiniteVertex:
-      return "NonFiniteVertex";
-    case Error::NotManifold:
-      return "NotManifold";
-    case Error::VertexOutOfBounds:
-      return "VertexOutOfBounds";
-    case Error::PropertiesWrongLength:
-      return "PropertiesWrongLength";
-    case Error::MissingPositionProperties:
-      return "MissingPositionProperties";
-    case Error::MergeVectorsDifferentLengths:
-      return "MergeVectorsDifferentLengths";
-    case Error::MergeIndexOutOfBounds:
-      return "MergeIndexOutOfBounds";
-    case Error::TransformWrongLength:
-      return "TransformWrongLength";
-    case Error::RunIndexWrongLength:
-      return "RunIndexWrongLength";
-    case Error::FaceIDWrongLength:
-      return "FaceIDWrongLength";
-    case Error::InvalidConstruction:
-      return "InvalidConstruction";
-    case Error::ResultTooLarge:
-      return "ResultTooLarge";
-    case Error::InvalidTangents:
-      return "InvalidTangents";
-    case Error::Cancelled:
-      return "Cancelled";
-  }
-  return "UnknownStatus";
+struct ExpectedError {
+  FfiErrorCode code;
+  std::int32_t manifold_status = 0;
+  bool has_mesh_index = false;
+  std::uint64_t mesh_index = 0;
+};
+
+FfiResponse error_response(FfiErrorCode code) noexcept {
+  return FfiResponse{code, 0, false, 0, FfiMesh{}};
+}
+
+FfiResponse error_response(const ExpectedError& error) noexcept {
+  return FfiResponse{error.code, error.manifold_status, error.has_mesh_index,
+                     error.mesh_index, FfiMesh{}};
 }
 
 void validate_offsets(rust::Slice<const double> vertices,
@@ -80,20 +74,18 @@ void validate_offsets(rust::Slice<const double> vertices,
                       rust::Slice<const std::uint64_t> triangle_offsets) {
   if (vertex_offsets.size() != triangle_offsets.size() ||
       vertex_offsets.size() < 2) {
-    throw std::invalid_argument(
-        "mesh offset arrays must have equal length and at least two entries");
+    throw ExpectedError{FfiErrorCode::OffsetArrayShape};
   }
   if (vertex_offsets[0] != 0 || triangle_offsets[0] != 0 ||
       vertex_offsets[vertex_offsets.size() - 1] != vertices.size() ||
       triangle_offsets[triangle_offsets.size() - 1] != triangles.size()) {
-    throw std::invalid_argument("mesh offsets do not span the flattened buffers");
+    throw ExpectedError{FfiErrorCode::OffsetSpan};
   }
   for (std::size_t i = 1; i < vertex_offsets.size(); ++i) {
     if (vertex_offsets[i] <= vertex_offsets[i - 1] ||
         triangle_offsets[i] <= triangle_offsets[i - 1] ||
         vertex_offsets[i] % 3 != 0 || triangle_offsets[i] % 3 != 0) {
-      throw std::invalid_argument(
-          "mesh offsets must be strictly increasing triangle-aligned triples");
+      throw ExpectedError{FfiErrorCode::OffsetOrderOrAlignment};
     }
   }
 }
@@ -119,9 +111,9 @@ std::vector<manifold::Manifold> import_batch(
     manifold::Manifold solid(mesh);
     const auto status = solid.Status();
     if (status != manifold::Manifold::Error::NoError) {
-      throw std::runtime_error("Manifold rejected input mesh " +
-                               std::to_string(mesh_index) + ": " +
-                               status_name(status));
+      throw ExpectedError{FfiErrorCode::InputManifoldStatus,
+                          static_cast<std::int32_t>(status), true,
+                          static_cast<std::uint64_t>(mesh_index)};
     }
     solids.push_back(std::move(solid));
   }
@@ -131,19 +123,22 @@ std::vector<manifold::Manifold> import_batch(
 FfiMesh export_result(manifold::Manifold result) {
   const auto status = result.Status();
   if (status != manifold::Manifold::Error::NoError) {
-    throw std::runtime_error(std::string("Manifold boolean failed: ") +
-                             status_name(status));
+    throw ExpectedError{FfiErrorCode::ResultManifoldStatus,
+                        static_cast<std::int32_t>(status)};
+  }
+  if (result.IsEmpty()) {
+    throw ExpectedError{FfiErrorCode::EmptyResult};
   }
 
   const manifold::MeshGL64 mesh = result.GetMeshGL64();
   if (mesh.numProp < 3) {
-    throw std::runtime_error("Manifold output has fewer than three coordinates");
+    throw ExpectedError{FfiErrorCode::OutputPropertyStride};
   }
 
   FfiMesh out;
   const std::size_t num_vertices = mesh.NumVert();
   if (num_vertices > std::numeric_limits<std::size_t>::max() / 3) {
-    throw std::overflow_error("Manifold output vertex count overflow");
+    throw ExpectedError{FfiErrorCode::OutputOverflow};
   }
   out.vertices.reserve(num_vertices * 3);
   for (std::size_t vertex = 0; vertex < num_vertices; ++vertex) {
@@ -159,45 +154,61 @@ FfiMesh export_result(manifold::Manifold result) {
   return out;
 }
 
+template <typename Operation>
+FfiResponse execute(Operation&& operation) noexcept {
+  try {
+    return FfiResponse{FfiErrorCode::Success, 0, false, 0,
+                       operation()};
+  } catch (const ExpectedError& error) {
+    return error_response(error);
+  } catch (const std::invalid_argument&) {
+    return error_response(FfiErrorCode::UnexpectedInvalidArgument);
+  } catch (const std::overflow_error&) {
+    return error_response(FfiErrorCode::UnexpectedOverflow);
+  } catch (const std::bad_alloc&) {
+    return error_response(FfiErrorCode::UnexpectedAllocation);
+  } catch (const std::exception&) {
+    return error_response(FfiErrorCode::UnexpectedStandardException);
+  } catch (...) {
+    return error_response(FfiErrorCode::UnexpectedNonStandardException);
+  }
+}
+
 }  // namespace
 
-BackendConfig manifold_config() noexcept {
-  return BackendConfig{
-      3,
-      5,
-      2,
-      MANIFOLD_PAR,
-      static_cast<std::uint32_t>(sizeof(double)),
-      static_cast<std::uint32_t>(sizeof(std::uint64_t)),
-      false,
-  };
+FfiResponse manifold_union_batch(rust::Slice<const double> vertices,
+                                 rust::Slice<const std::uint64_t> triangles,
+                                 rust::Slice<const std::uint64_t> vertex_offsets,
+                                 rust::Slice<const std::uint64_t> triangle_offsets) noexcept {
+  return execute([&] {
+    auto solids =
+        import_batch(vertices, triangles, vertex_offsets, triangle_offsets);
+    return export_result(
+        manifold::Manifold::BatchBoolean(solids, manifold::OpType::Add));
+  });
 }
 
-FfiMesh manifold_union_batch(rust::Slice<const double> vertices,
-                             rust::Slice<const std::uint64_t> triangles,
-                             rust::Slice<const std::uint64_t> vertex_offsets,
-                             rust::Slice<const std::uint64_t> triangle_offsets) {
-  auto solids = import_batch(vertices, triangles, vertex_offsets, triangle_offsets);
-  return export_result(manifold::Manifold::BatchBoolean(solids, manifold::OpType::Add));
-}
-
-FfiMesh manifold_difference_batch(
+FfiResponse manifold_difference_batch(
     rust::Slice<const double> vertices,
     rust::Slice<const std::uint64_t> triangles,
     rust::Slice<const std::uint64_t> vertex_offsets,
-    rust::Slice<const std::uint64_t> triangle_offsets) {
-  auto solids = import_batch(vertices, triangles, vertex_offsets, triangle_offsets);
-  if (solids.size() < 2) {
-    throw std::invalid_argument(
-        "difference requires a minuend and at least one subtrahend");
-  }
-  std::vector<manifold::Manifold> tail;
-  tail.reserve(solids.size() - 1);
-  for (std::size_t i = 1; i < solids.size(); ++i) {
-    tail.push_back(std::move(solids[i]));
-  }
-  auto subtractor = manifold::Manifold::BatchBoolean(tail, manifold::OpType::Add);
-  return export_result(solids.front().Boolean(subtractor, manifold::OpType::Subtract));
+    rust::Slice<const std::uint64_t> triangle_offsets) noexcept {
+  return execute([&] {
+    auto solids =
+        import_batch(vertices, triangles, vertex_offsets, triangle_offsets);
+    if (solids.size() < 2) {
+      throw ExpectedError{FfiErrorCode::DifferenceArity};
+    }
+    std::vector<manifold::Manifold> tail;
+    tail.reserve(solids.size() - 1);
+    for (std::size_t i = 1; i < solids.size(); ++i) {
+      tail.push_back(std::move(solids[i]));
+    }
+    auto subtractor =
+        manifold::Manifold::BatchBoolean(tail, manifold::OpType::Add);
+    return export_result(
+        solids.front().Boolean(subtractor, manifold::OpType::Subtract));
+  });
 }
 
 }  // namespace plinth::solid

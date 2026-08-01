@@ -2,11 +2,12 @@
 //!
 //! M0 intentionally exposes only a narrow spike behind [`SolidBoolean`]. The
 //! full artifact audit belongs to M4; tests here independently inspect the
-//! returned triangle mesh to prove the selected backend is viable.
+//! returned triangle mesh to prove the selected backend is viable. The M0
+//! [`Mesh`] represents non-empty solids only, so a valid empty boolean is
+//! reported as [`SolidError::EmptyResult`]. Revisit that policy with M2's mesh
+//! data model instead of speculating about its public result shape here.
 
 mod ffi;
-
-use std::fmt;
 
 use thiserror::Error;
 
@@ -60,7 +61,68 @@ pub enum MeshValidationError {
     TriangleBufferLength { index_count: usize },
 }
 
-#[derive(Debug, Error)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ManifoldStatus {
+    NoError,
+    NonFiniteVertex,
+    NotManifold,
+    VertexOutOfBounds,
+    PropertiesWrongLength,
+    MissingPositionProperties,
+    MergeVectorsDifferentLengths,
+    MergeIndexOutOfBounds,
+    TransformWrongLength,
+    RunIndexWrongLength,
+    FaceIdWrongLength,
+    InvalidConstruction,
+    ResultTooLarge,
+    InvalidTangents,
+    Cancelled,
+    Unknown(i32),
+}
+
+impl ManifoldStatus {
+    fn from_code(code: i32) -> Self {
+        match code {
+            0 => Self::NoError,
+            1 => Self::NonFiniteVertex,
+            2 => Self::NotManifold,
+            3 => Self::VertexOutOfBounds,
+            4 => Self::PropertiesWrongLength,
+            5 => Self::MissingPositionProperties,
+            6 => Self::MergeVectorsDifferentLengths,
+            7 => Self::MergeIndexOutOfBounds,
+            8 => Self::TransformWrongLength,
+            9 => Self::RunIndexWrongLength,
+            10 => Self::FaceIdWrongLength,
+            11 => Self::InvalidConstruction,
+            12 => Self::ResultTooLarge,
+            13 => Self::InvalidTangents,
+            14 => Self::Cancelled,
+            unknown => Self::Unknown(unknown),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeValidationError {
+    OffsetArrayShape,
+    OffsetSpan,
+    OffsetOrderOrAlignment,
+    DifferenceArity,
+    OutputPropertyStride,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeExceptionKind {
+    InvalidArgument,
+    Overflow,
+    Allocation,
+    Standard,
+    NonStandard,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
 pub enum SolidError {
     #[error("union requires at least one mesh")]
     EmptyUnion,
@@ -68,8 +130,23 @@ pub enum SolidError {
     DifferenceRequiresSubtrahend,
     #[error("flattened mesh batch exceeds addressable storage")]
     BatchTooLarge,
-    #[error("Manifold backend failed: {0}")]
-    Backend(String),
+    #[error("native mesh-batch validation failed: {0:?}")]
+    NativeValidation(NativeValidationError),
+    #[error("native mesh output exceeded addressable storage")]
+    NativeOverflow,
+    #[error("Manifold rejected input mesh {mesh_index}: {status:?}")]
+    ManifoldInput {
+        mesh_index: u64,
+        status: ManifoldStatus,
+    },
+    #[error("Manifold boolean result failed: {status:?}")]
+    ManifoldResult { status: ManifoldStatus },
+    #[error("boolean operation produced an empty solid")]
+    EmptyResult,
+    #[error("unexpected native exception: {0:?}")]
+    UnexpectedNativeException(NativeExceptionKind),
+    #[error("native response violated its typed protocol")]
+    InvalidNativeResponse,
     #[error("Manifold returned an invalid mesh: {0}")]
     InvalidOutput(#[source] MeshValidationError),
 }
@@ -103,42 +180,75 @@ impl SolidBoolean for ManifoldBackend {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BackendConfiguration {
-    pub version: (u32, u32, u32),
-    pub parallel_mode: i32,
-    pub scalar_bytes: u32,
-    pub index_bytes: u32,
-    pub cross_section_enabled: bool,
-}
-
-pub fn backend_configuration() -> BackendConfiguration {
-    let config = ffi::manifold_config();
-    BackendConfiguration {
-        version: (
-            config.version_major,
-            config.version_minor,
-            config.version_patch,
-        ),
-        parallel_mode: config.parallel_mode,
-        scalar_bytes: config.scalar_bytes,
-        index_bytes: config.index_bytes,
-        cross_section_enabled: config.cross_section_enabled,
-    }
-}
-
-type NativeOperation = fn(&[f64], &[u64], &[u64], &[u64]) -> Result<ffi::FfiMesh, cxx::Exception>;
+type NativeOperation = fn(&[f64], &[u64], &[u64], &[u64]) -> ffi::FfiResponse;
 
 fn run_batch(meshes: &[Mesh], operation: NativeOperation) -> Result<Mesh, SolidError> {
     let batch = FlatBatch::gather(meshes)?;
-    let output = operation(
+    let response = operation(
         &batch.vertices,
         &batch.triangles,
         &batch.vertex_offsets,
         &batch.triangle_offsets,
-    )
-    .map_err(|error| SolidError::Backend(error.to_string()))?;
-    unflatten(output).map_err(SolidError::InvalidOutput)
+    );
+    map_native_response(response)
+}
+
+fn map_native_response(response: ffi::FfiResponse) -> Result<Mesh, SolidError> {
+    use ffi::FfiErrorCode as Code;
+
+    match response.code {
+        Code::Success => unflatten(response.mesh).map_err(SolidError::InvalidOutput),
+        Code::OffsetArrayShape => Err(SolidError::NativeValidation(
+            NativeValidationError::OffsetArrayShape,
+        )),
+        Code::OffsetSpan => Err(SolidError::NativeValidation(
+            NativeValidationError::OffsetSpan,
+        )),
+        Code::OffsetOrderOrAlignment => Err(SolidError::NativeValidation(
+            NativeValidationError::OffsetOrderOrAlignment,
+        )),
+        Code::DifferenceArity => Err(SolidError::NativeValidation(
+            NativeValidationError::DifferenceArity,
+        )),
+        Code::OutputPropertyStride => Err(SolidError::NativeValidation(
+            NativeValidationError::OutputPropertyStride,
+        )),
+        Code::OutputOverflow => Err(SolidError::NativeOverflow),
+        Code::InputManifoldStatus => Err(SolidError::ManifoldInput {
+            mesh_index: response
+                .has_mesh_index
+                .then_some(response.mesh_index)
+                .ok_or(SolidError::InvalidNativeResponse)?,
+            status: manifold_error_status(response.manifold_status)?,
+        }),
+        Code::ResultManifoldStatus => Err(SolidError::ManifoldResult {
+            status: manifold_error_status(response.manifold_status)?,
+        }),
+        Code::EmptyResult => Err(SolidError::EmptyResult),
+        Code::UnexpectedInvalidArgument => Err(SolidError::UnexpectedNativeException(
+            NativeExceptionKind::InvalidArgument,
+        )),
+        Code::UnexpectedOverflow => Err(SolidError::UnexpectedNativeException(
+            NativeExceptionKind::Overflow,
+        )),
+        Code::UnexpectedAllocation => Err(SolidError::UnexpectedNativeException(
+            NativeExceptionKind::Allocation,
+        )),
+        Code::UnexpectedStandardException => Err(SolidError::UnexpectedNativeException(
+            NativeExceptionKind::Standard,
+        )),
+        Code::UnexpectedNonStandardException => Err(SolidError::UnexpectedNativeException(
+            NativeExceptionKind::NonStandard,
+        )),
+        _ => Err(SolidError::InvalidNativeResponse),
+    }
+}
+
+fn manifold_error_status(code: i32) -> Result<ManifoldStatus, SolidError> {
+    match ManifoldStatus::from_code(code) {
+        ManifoldStatus::NoError => Err(SolidError::InvalidNativeResponse),
+        status => Ok(status),
+    }
 }
 
 struct FlatBatch {
@@ -260,18 +370,63 @@ fn validate_mesh(vertices: &[[f64; 3]], triangles: &[[u64; 3]]) -> Result<(), Me
     Ok(())
 }
 
-impl fmt::Display for BackendConfiguration {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "Manifold {}.{}.{} (parallel={}, f{} / u{}, cross-section={})",
-            self.version.0,
-            self.version.1,
-            self.version.2,
-            self.parallel_mode,
-            self.scalar_bytes * 8,
-            self.index_bytes * 8,
-            self.cross_section_enabled
-        )
+#[cfg(test)]
+mod tests {
+    use super::{
+        ffi, map_native_response, ManifoldStatus, NativeExceptionKind, NativeValidationError,
+        SolidError,
+    };
+
+    fn error_response(code: ffi::FfiErrorCode, manifold_status: i32) -> ffi::FfiResponse {
+        ffi::FfiResponse {
+            code,
+            manifold_status,
+            has_mesh_index: true,
+            mesh_index: 7,
+            mesh: ffi::FfiMesh {
+                vertices: Vec::new(),
+                triangles: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn native_response_codes_retain_semantic_rust_errors() {
+        assert_eq!(
+            map_native_response(error_response(ffi::FfiErrorCode::OffsetSpan, 0)),
+            Err(SolidError::NativeValidation(
+                NativeValidationError::OffsetSpan
+            ))
+        );
+        assert_eq!(
+            map_native_response(error_response(ffi::FfiErrorCode::OutputOverflow, 0)),
+            Err(SolidError::NativeOverflow)
+        );
+        assert_eq!(
+            map_native_response(error_response(
+                ffi::FfiErrorCode::UnexpectedStandardException,
+                0
+            )),
+            Err(SolidError::UnexpectedNativeException(
+                NativeExceptionKind::Standard
+            ))
+        );
+        assert_eq!(
+            map_native_response(error_response(ffi::FfiErrorCode::InputManifoldStatus, 2)),
+            Err(SolidError::ManifoldInput {
+                mesh_index: 7,
+                status: ManifoldStatus::NotManifold,
+            })
+        );
+        assert_eq!(
+            map_native_response(error_response(ffi::FfiErrorCode::ResultManifoldStatus, 99)),
+            Err(SolidError::ManifoldResult {
+                status: ManifoldStatus::Unknown(99),
+            })
+        );
+        assert_eq!(
+            map_native_response(error_response(ffi::FfiErrorCode::ResultManifoldStatus, 0)),
+            Err(SolidError::InvalidNativeResponse)
+        );
     }
 }

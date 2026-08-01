@@ -6,20 +6,18 @@
 
 namespace plinth::solid {
 
-struct BackendConfig;
 struct FfiMesh;
+struct FfiResponse;
 
-BackendConfig manifold_config() noexcept;
+FfiResponse manifold_union_batch(rust::Slice<const double> vertices,
+                                 rust::Slice<const std::uint64_t> triangles,
+                                 rust::Slice<const std::uint64_t> vertex_offsets,
+                                 rust::Slice<const std::uint64_t> triangle_offsets) noexcept;
 
-FfiMesh manifold_union_batch(rust::Slice<const double> vertices,
-                             rust::Slice<const std::uint64_t> triangles,
-                             rust::Slice<const std::uint64_t> vertex_offsets,
-                             rust::Slice<const std::uint64_t> triangle_offsets);
-
-FfiMesh manifold_difference_batch(
+FfiResponse manifold_difference_batch(
     rust::Slice<const double> vertices,
     rust::Slice<const std::uint64_t> triangles,
     rust::Slice<const std::uint64_t> vertex_offsets,
-    rust::Slice<const std::uint64_t> triangle_offsets);
+    rust::Slice<const std::uint64_t> triangle_offsets) noexcept;
 
 }  // namespace plinth::solid
