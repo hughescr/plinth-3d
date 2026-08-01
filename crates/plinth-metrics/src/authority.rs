@@ -117,6 +117,8 @@ pub enum AuthorityError {
     DuplicateGateId { id: String },
     #[error("correction ID {id} is duplicated")]
     DuplicateCorrectionId { id: String },
+    #[error("correction ID {id} collides with a main gate-row ID")]
+    CorrectionIdCollision { id: String },
     #[error("correction {id} targets unknown entry {target}")]
     UnknownCorrectionTarget { id: String, target: String },
     #[error("correction chain contains a cycle at {id}")]
@@ -439,6 +441,9 @@ fn parse_effective_gate_rows(text: &str) -> Result<BTreeMap<String, GateRow>, Au
             });
         }
         let id = correction.id.clone();
+        if originals.contains_key(&id) {
+            return Err(AuthorityError::CorrectionIdCollision { id });
+        }
         if correction_map.insert(id.clone(), correction).is_some() {
             return Err(AuthorityError::DuplicateCorrectionId { id });
         }
@@ -1174,6 +1179,25 @@ mod tests {
         assert!(matches!(
             parse_effective_gate_rows(&docs(&main_rows(""), &ambiguous)),
             Err(AuthorityError::DuplicateEffectiveReplacement { .. })
+        ));
+    }
+
+    #[test]
+    fn correction_ids_must_be_disjoint_from_main_ids_before_graph_resolution() {
+        let self_collision = correction_row("O-1", "O-1", "docs/self.md");
+        assert!(matches!(
+            parse_effective_gate_rows(&docs(&main_rows(""), &self_collision)),
+            Err(AuthorityError::CorrectionIdCollision { id }) if id == "O-1"
+        ));
+
+        let cycle_masked_by_collision = format!(
+            "{}{}",
+            correction_row("O-1", "C-A", "docs/collision.md"),
+            correction_row("C-A", "O-1", "docs/cycle.md")
+        );
+        assert!(matches!(
+            parse_effective_gate_rows(&docs(&main_rows(""), &cycle_masked_by_collision)),
+            Err(AuthorityError::CorrectionIdCollision { id }) if id == "O-1"
         ));
     }
 
