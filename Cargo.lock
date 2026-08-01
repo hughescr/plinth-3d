@@ -359,6 +359,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "plinth-mesh"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "plinth-metrics"
 version = "0.1.0"
 dependencies = [
