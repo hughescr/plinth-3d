@@ -17,4 +17,4 @@ dynamic = ["version"]
 # geom_kernel._native.
 python-source = "python"
 module-name = "geom_kernel._native"
-features = ["pyo3/extension-module"]
+features = ["pyo3/extension-module", "python"]

@@ -1,7 +1,7 @@
 //! Deterministic rayon parallelism (spec sec 4). The kernel NEVER uses rayon's
 //! global pool (Amendment A4 — a one-shot global pool would make the
 //! thread-sweep test inert). It keeps a cache of explicit per-count pools; each
-//! batch call re-reads GEOM_KERNEL_THREADS and runs under the matching pool.
+//! batch call re-reads PLINTH_THREADS and runs under the matching pool.
 //!
 //! The only sanctioned pattern is index-parallel map-collect: every output lands
 //! in the slot of its own index, so results are bit-identical for any thread
@@ -19,10 +19,10 @@ fn pools() -> &'static PoolList {
     POOLS.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// Effective thread count the next batch call will use: GEOM_KERNEL_THREADS if
+/// Effective thread count the next batch call will use: PLINTH_THREADS if
 /// set and > 0, else all available cores (the multi-core mandate).
 pub fn current_threads() -> usize {
-    match std::env::var("GEOM_KERNEL_THREADS") {
+    match std::env::var("PLINTH_THREADS") {
         Ok(s) => match s.trim().parse::<usize>() {
             Ok(0) | Err(_) => all_cores(),
             Ok(k) => k,

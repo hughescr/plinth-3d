@@ -12,11 +12,11 @@ name = "geom_kernel"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# rust-numpy is selected FIRST (spec sec 1.2 Amendment A20) and its required
-# pyo3 version drives the top-level pyo3 pin. numpy 0.23 -> pyo3 0.23; matches
-# the numpy 2.x runtime ABI (venv numpy 2.2.6).
-numpy = "0.23"
 rayon = "1.10"
+
+# Python bindings are optional and off by default. Native Rust consumers and
+# ordinary workspace checks therefore do not link libpython.
+numpy = { version = "0.23", optional = true }
 
 # extension-module is NOT hardcoded here: it disables libpython linking, which
 # would break `cargo test`'s test binary. maturin passes pyo3/extension-module
@@ -25,3 +25,9 @@ rayon = "1.10"
 [dependencies.pyo3]
 version = "0.23"
 features = ["abi3-py311"]
+optional = true
+
+[features]
+default = []
+# maturin additionally enables pyo3/extension-module (see pyproject.toml).
+python = ["dep:pyo3", "dep:numpy"]
