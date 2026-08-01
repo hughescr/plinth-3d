@@ -8,6 +8,7 @@
 
 mod geometry;
 mod read;
+mod supports;
 mod topology;
 
 pub use geometry::{
@@ -17,6 +18,10 @@ pub use geometry::{
 pub use read::{
     load_artifacts, ArtifactDisposition, ArtifactLoad, ArtifactRequest, ArtifactRequestError,
     DiskArtifact, DiskModel, DiskReadError, DiskSupport, ProducerFailure, ProducerStage,
+};
+pub use supports::{
+    support_metric_rows, ArmLoadInput, SupportMetricError, SupportMetricInput, SupportMetricRow,
+    VolumeSubject, SUPPORT_METRIC_ORDER,
 };
 pub use topology::{
     analyze_artifact_topology, analyze_topology, boundary_edges, signed_shell_volumes,
