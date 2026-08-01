@@ -7,7 +7,7 @@
 use std::collections::BTreeSet;
 
 use geom_kernel::{NativeSurface, TriangleSoup};
-use plinth_metrics::{analyze_topology, contains_points, Mesh, Vec3};
+use plinth_metrics::{analyze_topology, closest_points, contains_points, Mesh, Vec3};
 
 const METRICS_BOUNDARY_TOLERANCE: f64 = 1.0e-9;
 
@@ -154,54 +154,69 @@ fn concave_voxel_ring() -> Mesh {
     Mesh::new(vertices, triangles).expect("analytic concave ring must be valid")
 }
 
-fn native_surface(mesh: &Mesh) -> NativeSurface {
-    let triangles = mesh
-        .triangles()
-        .iter()
-        .map(|&[a, b, c]| [mesh.vertices()[a], mesh.vertices()[b], mesh.vertices()[c]])
-        .collect::<Vec<_>>();
-    let mut normals = Vec::with_capacity(triangles.len());
-    let mut areas = Vec::with_capacity(triangles.len());
-    for &[a, b, c] in &triangles {
-        let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-        let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-        let cross = [
-            ab[1] * ac[2] - ab[2] * ac[1],
-            ab[2] * ac[0] - ab[0] * ac[2],
-            ab[0] * ac[1] - ab[1] * ac[0],
+/// Fixed analytic cube metadata for native-kernel characterization only.  This
+/// never accepts a `Mesh`, computes cross products, or reduces bounds: the
+/// face normals, areas, and caller-supplied bounds are known cube facts.
+fn native_analytic_cubes(cubes: &[(Vec3, f64)], bounds: [[f64; 3]; 2]) -> NativeSurface {
+    const FACES: [[usize; 3]; 12] = [
+        [0, 2, 1],
+        [0, 3, 2],
+        [4, 5, 6],
+        [4, 6, 7],
+        [0, 1, 5],
+        [0, 5, 4],
+        [1, 2, 6],
+        [1, 6, 5],
+        [2, 3, 7],
+        [2, 7, 6],
+        [3, 0, 4],
+        [3, 4, 7],
+    ];
+    const NORMALS: [[f64; 3]; 12] = [
+        [0.0, 0.0, -1.0],
+        [0.0, 0.0, -1.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, 1.0],
+        [0.0, -1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0],
+    ];
+    let mut triangles = Vec::with_capacity(cubes.len() * FACES.len());
+    let mut normals = Vec::with_capacity(cubes.len() * NORMALS.len());
+    let mut areas = Vec::with_capacity(cubes.len() * FACES.len());
+    for &(origin, edge) in cubes {
+        let [x, y, z] = origin;
+        let vertices = [
+            [x, y, z],
+            [x + edge, y, z],
+            [x + edge, y + edge, z],
+            [x, y + edge, z],
+            [x, y, z + edge],
+            [x + edge, y, z + edge],
+            [x + edge, y + edge, z + edge],
+            [x, y + edge, z + edge],
         ];
-        let twice_area = (cross[0] * cross[0] + cross[1] * cross[1] + cross[2] * cross[2]).sqrt();
-        assert!(
-            twice_area.is_finite() && twice_area > 0.0,
-            "analytic cube face must have finite area"
-        );
-        normals.push([
-            cross[0] / twice_area,
-            cross[1] / twice_area,
-            cross[2] / twice_area,
-        ]);
-        areas.push(twice_area * 0.5);
-    }
-    let mut lower = [f64::INFINITY; 3];
-    let mut upper = [f64::NEG_INFINITY; 3];
-    for point in mesh.vertices() {
-        for axis in 0..3 {
-            lower[axis] = lower[axis].min(point[axis]);
-            upper[axis] = upper[axis].max(point[axis]);
-        }
+        triangles.extend(FACES.map(|[a, b, c]| [vertices[a], vertices[b], vertices[c]]));
+        normals.extend(NORMALS);
+        areas.extend([edge * edge * 0.5; FACES.len()]);
     }
     NativeSurface::from_triangle_soup(
-        TriangleSoup::owned(triangles, normals, areas, [lower, upper]),
+        TriangleSoup::owned(triangles, normals, areas, bounds),
         2.0,
         usize::MAX,
     )
-    .expect("analytic cube must construct a native surface")
+    .expect("fixed analytic cube fixture must construct a native surface")
 }
 
 #[test]
 fn metrics_boundary_wrapper_and_kernel_inside_are_intentionally_not_equivalent() {
     let mesh = cube([0.0, 0.0, 0.0], 1.0);
-    let native = native_surface(&mesh);
+    let native = native_analytic_cubes(&[([0.0, 0.0, 0.0], 1.0)], [[0.0; 3], [1.0; 3]]);
     let at_face = [0.0, 0.5, 0.5];
     let points = [
         at_face,
@@ -239,7 +254,7 @@ fn metrics_boundary_wrapper_and_kernel_inside_are_intentionally_not_equivalent()
 }
 
 #[test]
-fn cavity_count_preserves_per_outer_subset_isolation_for_ordered_shells() {
+fn cavity_counts_and_actual_boundary_probe_subset_contract_are_characterized() {
     let outer = cube([0.0, 0.0, 0.0], 16.0);
     let depth_one = join(&[outer.clone(), cube([2.0, 2.0, 2.0], 8.0)]);
     let depth_two = join(&[
@@ -264,18 +279,43 @@ fn cavity_count_preserves_per_outer_subset_isolation_for_ordered_shells() {
     assert_eq!(analyze_topology(&boundary_touching).unwrap().cavities, 1);
     assert_eq!(analyze_topology(&concave).unwrap().cavities, 1);
 
-    // The combined parity model alternates material inside the nested shell.
-    // The topology metric instead gathers each candidate shell's boundary
-    // probes and queries the corresponding outer subset once; using full-model
-    // containment for that outer decision would change its result.
-    let intershell_point = [[3.0, 3.0, 3.0]];
-    assert_eq!(
-        contains_points(&depth_one, &intershell_point).unwrap(),
-        vec![false],
-        "full-model containment is not a substitute for per-outer-shell isolation"
+    // This is the actual candidate-shell boundary batch used by closed_cavities:
+    // source-face traversal, bitwise coordinate deduplication, then one batch.
+    let inner = cube([2.0, 2.0, 2.0], 8.0);
+    let mut seen = BTreeSet::new();
+    let mut probes = Vec::new();
+    for &[a, b, c] in inner.triangles() {
+        for point in [
+            inner.vertices()[a],
+            inner.vertices()[b],
+            inner.vertices()[c],
+        ] {
+            if seen.insert(point.map(f64::to_bits)) {
+                probes.push(point);
+            }
+        }
+    }
+    let full_nearest = closest_points(&depth_one, &probes).unwrap();
+    assert!(
+        full_nearest
+            .iter()
+            .any(|nearest| nearest.squared_distance <= METRICS_BOUNDARY_TOLERANCE.powi(2)),
+        "an actual inner-shell boundary probe must be admitted by the full-model metrics wrapper"
     );
+    let outer_subset = cube([0.0, 0.0, 0.0], 16.0);
+    let outer_metrics = contains_points(&outer_subset, &probes).unwrap();
+    let full_native = native_analytic_cubes(
+        &[([0.0, 0.0, 0.0], 16.0), ([2.0, 2.0, 2.0], 8.0)],
+        [[0.0; 3], [16.0; 3]],
+    )
+    .inside(&probes);
     assert_eq!(
-        contains_points(&cube([0.0, 0.0, 0.0], 16.0), &intershell_point).unwrap(),
-        vec![true]
+        outer_metrics,
+        vec![true; probes.len()],
+        "the actual outer-subset boundary-probe decision admits the inner shell"
+    );
+    assert_ne!(
+        full_native, outer_metrics,
+        "bare full-model kernel containment diverges from the required outer-subset decision"
     );
 }
