@@ -46,13 +46,22 @@ pub struct SupportReport {
 pub struct SupportHistory {
     hollow: HollowHistory,
     support: SupportReport,
+    lift_mm: PositiveFinite,
 }
 
 impl SupportHistory {
     /// Builds passive accumulated report state; this does not construct a supported model.
     #[must_use]
-    pub fn from_reports(hollow: HollowHistory, support: SupportReport) -> Self {
-        Self { hollow, support }
+    pub fn from_reports(
+        hollow: HollowHistory,
+        support: SupportReport,
+        lift_mm: PositiveFinite,
+    ) -> Self {
+        Self {
+            hollow,
+            support,
+            lift_mm,
+        }
     }
 
     #[must_use]
@@ -65,9 +74,15 @@ impl SupportHistory {
         &self.support
     }
 
+    /// The sole lift authority shared by support planning and emission.
     #[must_use]
-    pub fn into_reports(self) -> (HollowHistory, SupportReport) {
-        (self.hollow, self.support)
+    pub const fn lift_mm(&self) -> PositiveFinite {
+        self.lift_mm
+    }
+
+    #[must_use]
+    pub fn into_reports(self) -> (HollowHistory, SupportReport, PositiveFinite) {
+        (self.hollow, self.support, self.lift_mm)
     }
 }
 
@@ -80,6 +95,32 @@ pub struct SupportedModel {
 }
 
 impl SupportedModel {
+    /// Constructs a scene only when its sole mesh, primitive vector, and
+    /// auditable report agree. This is the production hand-off constructor for
+    /// support planning and the emitter; no caller can manufacture a scene
+    /// with stale counts or an invalid source mesh.
+    pub fn from_parts(
+        mesh: Mesh,
+        primitives: Vec<SupportPrimitive>,
+        history: SupportHistory,
+    ) -> Result<Self, SupportError> {
+        mesh.audit_strict()
+            .map_err(|_| SupportError::InvalidModelMesh)?;
+        let reported = history
+            .support()
+            .support_primitive_count
+            .checked_add(history.support().raft_primitive_count)
+            .ok_or(SupportError::InconsistentPrimitiveCount)?;
+        if reported != primitives.len() {
+            return Err(SupportError::InconsistentPrimitiveCount);
+        }
+        Ok(Self {
+            mesh,
+            primitives,
+            history,
+        })
+    }
+
     #[must_use]
     pub fn mesh(&self) -> &Mesh {
         &self.mesh
@@ -95,6 +136,12 @@ impl SupportedModel {
         &self.history
     }
 
+    /// The one lift value selected by support planning and consumed by emit.
+    #[must_use]
+    pub const fn lift_mm(&self) -> PositiveFinite {
+        self.history.lift_mm()
+    }
+
     /// Moves the sole model mesh, all f64 primitives, and report history together.
     #[must_use]
     pub fn into_parts(self) -> (Mesh, Vec<SupportPrimitive>, SupportHistory) {
@@ -108,6 +155,10 @@ pub enum SupportError {
     NoLegalSupportPlan,
     #[error("support planning produced an invalid f64 primitive")]
     InvalidPrimitive,
+    #[error("supported model mesh fails the strict production geometry audit")]
+    InvalidModelMesh,
+    #[error("support report primitive counts do not match the scene primitive vector")]
+    InconsistentPrimitiveCount,
 }
 
 #[cfg(test)]
@@ -162,20 +213,40 @@ mod tests {
             start_radius_mm: PositiveFinite::new(0.5).expect("positive fixture radius"),
             end_radius_mm: PositiveFinite::new(0.5).expect("positive fixture radius"),
         }];
-        let model = SupportedModel {
+        let lift_mm = PositiveFinite::new(5.0).expect("positive fixture lift");
+        let mismatch = SupportedModel::from_parts(
+            mesh.clone(),
+            Vec::new(),
+            SupportHistory::from_reports(
+                hollow.clone(),
+                SupportReport {
+                    support_primitive_count: 1,
+                    raft_primitive_count: 0,
+                },
+                lift_mm,
+            ),
+        );
+        assert!(matches!(
+            mismatch,
+            Err(SupportError::InconsistentPrimitiveCount)
+        ));
+        let model = SupportedModel::from_parts(
             mesh,
             primitives,
-            history: SupportHistory::from_reports(
+            SupportHistory::from_reports(
                 hollow,
                 SupportReport {
                     support_primitive_count: 1,
                     raft_primitive_count: 0,
                 },
+                lift_mm,
             ),
-        };
+        )
+        .expect("scene report and primitive vector agree");
         let (mesh, primitives, history) = model.into_parts();
         assert_eq!(mesh.verts().as_ptr(), allocation);
         assert_eq!(primitives.len(), 1);
         assert_eq!(history.support().support_primitive_count, 1);
+        assert_eq!(history.lift_mm(), lift_mm);
     }
 }
