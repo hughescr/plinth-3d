@@ -30,9 +30,10 @@ Python comparison baseline is built from a separate, exact model list under
 
 Crate root: `rust/chitubox_io/`. Modules: `lib.rs`, `error.rs`, `consts.rs`,
 `types.rs`, `document.rs`, `parse.rs`, `write.rs`, `verify.rs`, `stl.rs`,
-`transform.rs`, `support.rs`, `project.rs`, plus `py.rs` gated behind the
-`python` feature (PyO3 boundary, scheduled for deletion — see
-`04-migration-plan.md`). `#![forbid(unsafe_code)]` is set in `lib.rs`.
+`transform.rs`, `support.rs`, `project.rs`, plus the historical `py.rs`/`python`
+feature compatibility boundary. O-7 requires that PyO3 surface, maturin configuration,
+and shim to be deleted at the native Rust IO handoff; they are not retained as optional
+compatibility (see `04-migration-plan.md`). `#![forbid(unsafe_code)]` is set in `lib.rs`.
 
 Implemented and tested today:
 
@@ -46,7 +47,7 @@ Implemented and tested today:
 | Binary STL read + identity-centering (bbox-center subtraction) | `stl.rs` | Rejects ASCII STL explicitly (`AsciiStlUnsupported`) |
 | Z-rotation rebake from a pristine snapshot (accumulates without f32 drift across repeated small rotations) | `transform.rs` | `PristineGeometry` cached in `Document`, `SPEC-CHITUBOX-RS.md` §6.4 |
 | All format constants (magics, field offsets, record/section lengths) | `consts.rs` | `FILE_MAGIC = 0xAB23_1243`, `SEG_MAGIC = 3_929_285_513`, `MODEL_RECORD_LEN = 680`, `SEG_RECORD_LEN = 72`, `SUPPORT_INDEX_LEN = 16`, `GROUP_HEADER_LEN = 400`, `MESH_BYTES_PER_TRI = 36` |
-| PyO3 boundary: `write_project(out_path, models: list[dict])`, `read_project(path)` | `py.rs` (feature `python`) | The **only** two PyO3-exposed functions; models dicts carry `stl_path`/`triangles`, placement, and a `supports` dict of parallel numpy arrays. This is the boundary being deleted once nothing in `scripts/` calls `chitubox_io._native` — see `04-migration-plan.md` and `06-conventions.md` |
+| Historical PyO3 boundary: `write_project(out_path, models: list[dict])`, `read_project(path)` | `py.rs` (feature `python`) | The **only** two PyO3-exposed functions; models dicts carry `stl_path`/`triangles`, placement, and a `supports` dict of parallel numpy arrays. O-7 deletes this boundary, its maturin configuration, and its shim at native Rust IO handoff; no `scripts/` compatibility tail is preserved — see `04-migration-plan.md` and `06-conventions.md` |
 
 Record types the container already round-trips (it stores/reads any `u32`
 type id opaquely — no special-casing per type in the container layer):

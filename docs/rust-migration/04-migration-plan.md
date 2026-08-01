@@ -179,7 +179,7 @@ M0 ──┬── M1 (parity harness) ─────────────�
 | --- | --- |
 | M0 → M1, M0 → M2 | **Former edge:** baseline and shared-type dependency analysis only; revised steps 1–2 govern. |
 | M1 ∥ M2 | **Former edge:** the harness/mesh parallelization is reference only. |
-| M3 ∥ M4 | **Former edge:** proxy and pinned-orientation staging is post-Python reference where O-6 says so. |
+| M3 ∥ M4 | **Former edge:** O-8 supersedes this parallelism; protected production decimation blocks M4. Only extra L1/L2 orientation proxies and dense search are post-Python. |
 | M1 → M4 | **Former edge:** retain the useful rule that disk scoring precedes emitted-artifact acceptance, without restoring old milestone order. |
 | M4 → M5 → M6 → M7 | **Former edge:** the redesign chain is post-Python and does not block deletion. |
 | M3 → M8 | **Former edge:** dense orientation depends on enhanced proxies after deletion. |
@@ -765,16 +765,19 @@ weighting will be wrong with it.
 
 ---
 
-## M3 — Decimation  ∥ M4
+## M3 — Protected production decimation; blocks M4
 
-**O-6 disposition:** port current decimation behavior on the elimination path. The
-full error-bounded QEM/proxy redesign below is post-Python enhancement work and does
-not block deletion.
+**O-8 disposition:** the protected, staged, error-bounded decimation contract below is
+the mandatory first production stage and blocks every downstream production stage. Its
+print-scale output is the sole production mesh consumed by orientation through emit.
+Only extra L1/L2 orientation-proxy tiers and their dense-search ladder are post-Python
+enhancements; those proxies must derive from the production-decimated mesh.
 
 **Goal.** Convert `scripts/tools/decimate_pipeline.py`'s logic to native Rust —
 **not reinvent it** (owner's explicit instruction). Blender is retired.
 
-**Former M3 dependency (reference only):** M2; enhanced proxy work is post-Python.
+**Former M3 dependency (reference only):** M2. The production contract below is current;
+only extra L1/L2 orientation-proxy tiers are post-Python.
 
 ### Python retired here
 
