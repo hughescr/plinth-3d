@@ -671,12 +671,14 @@ that coupled heuristic. Its independently useful enable default remains register
 | Stable ID | Value / disposition | Source meaning |
 |---|---|---|
 | `CCO_FERMAT_MAX_ITERATIONS` / `CCO_CONE_TOLERANCE_DEG` | 12 / 1e-6 degrees | bounded Fermat solve and cone comparison |
-| `CCO_XIA_ALPHA` | 0.5, **Derived** | Xia load exponent used by the junction-angle and weighted-Fermat math |
+| `CCO_XIA_ALPHA` | 0.5, **Placeholder** | legacy topology-search heuristic with weak/unmeasured justification; the equations describe consequences of choosing α=1/2 but do not derive that policy |
 | `CCO_X_PAIR_LOAD_DISCOUNT` | `0.5**0.25`, **Derived** | fourth-root radius discount for each rod in a load-sharing X pair; shared by CCO estimation and bracing geometry |
 | `CCO_BIFURCATION_HOSTS` / `CCO_MIN_SPLIT_LENGTH_MM` | 5 / 0.5 mm | bifurcation candidate policy |
 | `CCO_SPLIT_SLIDE_POLICY` | start 0.03; end 0.97; step 0.03; cap 40 | one structured deterministic slide grid |
-| `P8_RESEAT_ENABLE` / `P8_JUNCTION_RESEAT_ENABLE` / `P8_RELOCATE_ENABLE` | true / true / true | independent Phase-8 enables |
+| `P8_RESEAT_ENABLE` / `P8_JUNCTION_RESEAT_ENABLE` / `P8_RELOCATE_ENABLE` | true / true / true | independent Phase-8 enables; reseat's live fallbacks agree, while `engine.run` has a conflicting false relocation compatibility fallback that the migration eliminates rather than ports |
 | `P8_JUNCTION_RESEAT_STEP_MM` / `P8_JUNCTION_RESEAT_MAX_MM` | 0.25 / 1.0 mm | junction re-seat grid |
+| `P8_CHORD_CANON_MICRON` | 1 micron | canonical/config value and `phase8_driver.run_phase8` fallback agree |
+| `P8_MAX_RELOCATE_SWEEPS` / `P8_MAX_RELOCATE_ROUNDS` / `P8_RESIZE_FIXED_POINT_MAX_ROUNDS` | 8 / 4 / 4 | canonical/config values and live engine/driver fallbacks agree |
 | `PERF_BEAM_K` / `PERF_ANCHOR_CAP` / `PERF_SEED_SPACING_FACTOR` | **Pending**, disabled (`None`) | enabled values change search results |
 | `PERF_FIX_ITER_CAPS` / `PERF_GATE_EMIT_ON_VERIFY` / `PERF_REWIRE_WORK_BUDGET` | **Pending**, disabled (`None`/false/`None`) | enabled values change termination or gate outcome |
 

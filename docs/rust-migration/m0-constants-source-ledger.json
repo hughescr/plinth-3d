@@ -236,13 +236,15 @@
     {
       "id": "CCO_XIA_ALPHA",
       "classification": "runtime_physics",
-      "provenance_wrapper": "Derived",
+      "provenance_wrapper": "Placeholder",
       "source_locators": [
-        "scripts/support_placement/cco.py:xia_angles alpha=1/2 junction-angle derivation",
-        "scripts/support_placement/cco.py:_weighted_fermat_point load^alpha = sqrt(load)"
+        "scripts/support_placement/cco.py:xia_angles legacy alpha=1/2 angle policy",
+        "scripts/support_placement/cco.py:_make_bifurcation_builder -> _weighted_fermat_point with m1 ** 0.5, (m1 + m2) ** 0.5, m2 ** 0.5",
+        "docs/reference/physics_load_sizing.md:§3 item 7 lines 221-225",
+        "docs/reference/physics_load_sizing.md:§4 issue 2 lines 247-266"
       ],
-      "normative": "03-physics-and-constants.md §3.10.4 = 0.5",
-      "provenance_detail": "Derived from the Xia alpha=1/2 equations implemented as square-root load weights"
+      "normative": "03-physics-and-constants.md §3.10.4 = 0.5 Placeholder legacy topology-search heuristic with weak/unmeasured justification",
+      "provenance_detail": "Placeholder legacy topology-search heuristic; choosing alpha=1/2 is not derived by the conditional equations and its physical justification is weak/unmeasured"
     },
     {
       "id": "CCO_X_PAIR_LOAD_DISCOUNT",
@@ -1325,9 +1327,10 @@
     {
       "id": "P8_CHORD_CANON_MICRON",
       "classification": "runtime_determinism",
-      "normative": "03-physics-and-constants.md §3.6 = 1 micron",
+      "normative": "03-physics-and-constants.md §3.10.4 = 1 micron; phase8_driver fallback agrees",
       "source_locators": [
-        "scripts/support_placement/config.py:p8_chord_canon_micron"
+        "scripts/support_placement/config.py:p8_chord_canon_micron",
+        "scripts/support_placement/phase8_driver.py:run_phase8 p8_chord_canon_micron fallback 1"
       ],
       "provenance_wrapper": "Derived",
       "provenance_detail": "Derived"
@@ -1370,10 +1373,11 @@
     {
       "id": "P8_MAX_RELOCATE_ROUNDS",
       "classification": "runtime_search_cap",
-      "normative": "03-physics-and-constants.md §3.10 = 4",
+      "normative": "03-physics-and-constants.md §3.10.4 = 4; engine and phase8_driver fallbacks agree",
       "source_locators": [
         "scripts/support_placement/config.py:p8_max_relocate_rounds",
-        "scripts/support_placement/phase8_driver.py:run_phase8 p8_max_relocate_rounds fallback 4"
+        "scripts/support_placement/phase8_driver.py:run_phase8 p8_max_relocate_rounds fallback 4",
+        "scripts/support_placement/engine.py:run p8_max_relocate_rounds fallback 4"
       ],
       "provenance_wrapper": "Placeholder",
       "provenance_detail": "Placeholder"
@@ -1381,10 +1385,11 @@
     {
       "id": "P8_MAX_RELOCATE_SWEEPS",
       "classification": "runtime_search_cap",
-      "normative": "03-physics-and-constants.md §3.10 = 8",
+      "normative": "03-physics-and-constants.md §3.10.4 = 8; engine and phase8_driver fallbacks agree",
       "source_locators": [
         "scripts/support_placement/config.py:p8_max_relocate_sweeps",
-        "scripts/support_placement/phase8_driver.py:run_phase8 p8_max_relocate_sweeps fallback 8"
+        "scripts/support_placement/phase8_driver.py:run_phase8 p8_max_relocate_sweeps fallback 8",
+        "scripts/support_placement/engine.py:run p8_max_relocate_sweeps fallback 8"
       ],
       "provenance_wrapper": "Placeholder",
       "provenance_detail": "Placeholder"
@@ -1495,10 +1500,10 @@
       "provenance_wrapper": "Placeholder",
       "source_locators": [
         "scripts/support_placement/config.py:p8_relocate_enable",
-        "scripts/support_placement/engine.py:run p8_relocate_enable"
+        "scripts/support_placement/engine.py:run p8_relocate_enable compatibility fallback false"
       ],
-      "normative": "03-physics-and-constants.md §3.10.4 = true",
-      "provenance_detail": "Phase-8 enable"
+      "normative": "03-physics-and-constants.md §3.10.4 = true migration target; engine.run compatibility fallback false conflicts and is eliminated rather than ported",
+      "provenance_detail": "Phase-8 enable; canonical/config true wins, while the live false compatibility fallback is disclosed and removed during migration"
     },
     {
       "id": "P8_RESEAT_ENABLE",
@@ -1506,10 +1511,11 @@
       "provenance_wrapper": "Placeholder",
       "source_locators": [
         "scripts/support_placement/config.py:p8_reseat_enable",
-        "scripts/support_placement/phase8_driver.py:run_phase8 p8_reseat_enable"
+        "scripts/support_placement/engine.py:relocate p8_reseat_enable fallback true",
+        "scripts/support_placement/phase8_driver.py:SurfaceSeedIndex.seeds_for p8_reseat_enable fallback true"
       ],
-      "normative": "03-physics-and-constants.md §3.10.4 = true",
-      "provenance_detail": "surface reseat enable"
+      "normative": "03-physics-and-constants.md §3.10.4 = true; engine.relocate and SurfaceSeedIndex.seeds_for fallbacks agree",
+      "provenance_detail": "surface reseat enable with consistent live true fallbacks"
     },
     {
       "id": "P8_RESEAT_MAX_SEEDS",
@@ -1546,9 +1552,10 @@
     {
       "id": "P8_RESIZE_FIXED_POINT_MAX_ROUNDS",
       "classification": "runtime_search_cap",
-      "normative": "03-physics-and-constants.md §3.10 = 4",
+      "normative": "03-physics-and-constants.md §3.10.4 = 4; engine.relocate fallback agrees",
       "source_locators": [
-        "scripts/support_placement/config.py:p8_resize_fixed_point_max_rounds"
+        "scripts/support_placement/config.py:p8_resize_fixed_point_max_rounds",
+        "scripts/support_placement/engine.py:relocate p8_resize_fixed_point_max_rounds fallback 4"
       ],
       "provenance_wrapper": "Placeholder",
       "provenance_detail": "Placeholder"
