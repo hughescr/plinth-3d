@@ -38,6 +38,3 @@ default = []
 # would break a plain `cargo build --features python`. maturin passes
 # pyo3/extension-module itself.
 python = ["dep:pyo3", "dep:numpy"]
-
-[profile.test]
-opt-level = 2

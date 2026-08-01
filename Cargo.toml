@@ -12,3 +12,17 @@ rayon = "1.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
+
+# Workspace-wide build profiles.  These were previously (and ineffectively)
+# declared in legacy member manifests; preserve their exact intent here.
+[profile.test]
+opt-level = 2
+
+[profile.release]
+# Default codegen units; no target-cpu=native or fast-math.
+lto = "thin"
+
+[profile.dev-opt]
+inherits = "dev"
+opt-level = 2
+debug-assertions = true
