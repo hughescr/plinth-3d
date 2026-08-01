@@ -62,6 +62,7 @@ pub fn closest_points(mesh: &Mesh, points: &[Vec3]) -> Result<Vec<ClosestPoint>,
 
 /// Computes all positive ray crossings for every ray, preserving input order.
 pub fn ray_intersections(mesh: &Mesh, rays: &[Ray]) -> Result<Vec<Vec<RayHit>>, MetricsError> {
+    let mut normalized = Vec::with_capacity(rays.len());
     for (ray, value) in rays.iter().enumerate() {
         validate_vec3(value.origin, CoordinateKind::RayOrigin { ray })?;
         validate_vec3(value.direction, CoordinateKind::RayDirection { ray })?;
@@ -70,14 +71,18 @@ pub fn ray_intersections(mesh: &Mesh, rays: &[Ray]) -> Result<Vec<Vec<RayHit>>, 
         if value.direction.iter().all(|component| *component == 0.0) {
             return Err(MetricsError::ZeroRayDirection { ray });
         }
+        normalized.push(Ray {
+            origin: value.origin,
+            direction: normalize_direction(value.direction),
+        });
     }
 
     let mut output = Vec::with_capacity(rays.len());
-    for ray in rays {
+    for ray in normalized {
         let mut hits = Vec::new();
         for triangle_index in 0..mesh.triangles().len() {
             let (a, b, c) = mesh.triangle_points(triangle_index);
-            if let Some(distance) = ray_triangle_distance(*ray, a, b, c) {
+            if let Some(distance) = ray_triangle_distance(ray, a, b, c) {
                 hits.push(RayHit {
                     distance,
                     triangle_index,
@@ -92,6 +97,24 @@ pub fn ray_intersections(mesh: &Mesh, rays: &[Ray]) -> Result<Vec<Vec<RayHit>>, 
         output.push(hits);
     }
     Ok(output)
+}
+
+/// Normalizes after first scaling by the greatest-magnitude component.  The
+/// preliminary division turns a nonzero subnormal into an ordinary finite
+/// value, so neither its squared norm nor the Möller determinant underflows
+/// solely because the caller chose a different scale for the same direction.
+fn normalize_direction(direction: Vec3) -> Vec3 {
+    let magnitude = direction
+        .iter()
+        .map(|value| value.abs())
+        .fold(0.0, f64::max);
+    let scaled = [
+        direction[0] / magnitude,
+        direction[1] / magnitude,
+        direction[2] / magnitude,
+    ];
+    let length = norm_squared(scaled).sqrt();
+    [scaled[0] / length, scaled[1] / length, scaled[2] / length]
 }
 
 /// Classifies a batch with three independently oriented rays per point.

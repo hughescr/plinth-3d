@@ -177,16 +177,30 @@ fn rejects_nonfinite_degenerate_and_invalid_ray_data() {
 
 #[test]
 fn accepts_subnormal_rays_and_scale_safe_finite_triangles() {
-    let mesh = tetrahedron(false);
+    let mesh = cube();
     let subnormal = f64::from_bits(1);
-    assert!(ray_intersections(
+    let normal_hits = ray_intersections(
         &mesh,
         &[Ray {
-            origin: [0.0, 0.0, 0.0],
-            direction: [subnormal, 0.0, 0.0],
-        }]
+            origin: [-1.0, 0.5, 0.5],
+            direction: [1.0, 0.0, 0.0],
+        }],
     )
-    .is_ok());
+    .unwrap();
+    let subnormal_hits = ray_intersections(
+        &mesh,
+        &[Ray {
+            origin: [-1.0, 0.5, 0.5],
+            direction: [subnormal, 0.0, 0.0],
+        }],
+    )
+    .unwrap();
+    assert_eq!(subnormal_hits, normal_hits);
+    assert_eq!(
+        contains_points(&mesh, &[[0.5, 0.5, 0.5], [2.0, 0.5, 0.5]]).unwrap(),
+        vec![true, false],
+        "interior and exterior containment remains stable alongside equivalent ray crossings"
+    );
 
     let tiny = Mesh::new(
         vec![[0.0, 0.0, 0.0], [1.0e-200, 0.0, 0.0], [0.0, 1.0e-200, 0.0]],
