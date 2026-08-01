@@ -10,9 +10,12 @@ help: the trait `plinth_core::provenance::sealed::Sealed` is not implemented for
 3 | struct LocalPayload;
   | ^^^^^^^^^^^^^^^^^^^
   = help: the following other types implement trait `plinth_core::provenance::sealed::Sealed`:
+            BuildVolumeMm
             EffectiveArmCount
             Finite
             MetricValue
+            YDirection
+            bool
             f64
             plinth_core::FiniteInterval
             plinth_core::LoadSharing
@@ -27,5 +30,8 @@ note: required by a bound in `MeasuredPayload`
             plinth_core::Finite
             plinth_core::EffectiveArmCount
             plinth_core::MetricValue
+            bool
+            plinth_core::BuildVolumeMm
+            plinth_core::YDirection
             plinth_core::LoadSharing
             plinth_core::FiniteInterval

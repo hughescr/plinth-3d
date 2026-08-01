@@ -1,4 +1,7 @@
-use crate::{ConstantId, DecisionId, EffectiveArmCount, Finite, LoadSharing, MetricValue, PlateId};
+use crate::{
+    BuildVolumeMm, ConstantId, DecisionId, EffectiveArmCount, Finite, LoadSharing, MetricValue,
+    PlateId, YDirection,
+};
 use serde::{
     de::{self, MapAccess, Visitor},
     ser::SerializeStruct,
@@ -825,7 +828,7 @@ pub enum ProvenanceError {
     NonFiniteMeasuredValue,
     #[error("measured numeric error must be finite")]
     NonFiniteMeasuredError,
-    #[error("categorical measured payloads require err to be null")]
+    #[error("categorical or structured measured payloads require err to be null")]
     CategoricalErrorBar,
     #[error("finite intervals require err to be null")]
     IntervalErrorBar,
@@ -987,16 +990,26 @@ impl MeasuredPayload for f64 {
 }
 macro_rules! finite_payload { ($($payload:ty),+ $(,)?) => { $( impl sealed::Sealed for $payload {} impl MeasuredPayload for $payload { fn validate_measurement(_value: &Self, _err: Option<&Self>) -> Result<(), ProvenanceError> { Ok(()) } } )+ }; }
 finite_payload!(Finite, EffectiveArmCount, MetricValue);
-impl sealed::Sealed for LoadSharing {}
-impl MeasuredPayload for LoadSharing {
-    fn validate_measurement(_value: &Self, err: Option<&Self>) -> Result<(), ProvenanceError> {
-        if err.is_some() {
-            Err(ProvenanceError::CategoricalErrorBar)
-        } else {
-            Ok(())
-        }
-    }
+macro_rules! categorical_payload {
+    ($($payload:ty),+ $(,)?) => {
+        $(
+            impl sealed::Sealed for $payload {}
+            impl MeasuredPayload for $payload {
+                fn validate_measurement(
+                    _value: &Self,
+                    err: Option<&Self>,
+                ) -> Result<(), ProvenanceError> {
+                    if err.is_some() {
+                        Err(ProvenanceError::CategoricalErrorBar)
+                    } else {
+                        Ok(())
+                    }
+                }
+            }
+        )+
+    };
 }
+categorical_payload!(bool, BuildVolumeMm, YDirection, LoadSharing);
 
 /// Endpoint inclusion semantics for a finite interval.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

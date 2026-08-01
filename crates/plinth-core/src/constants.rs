@@ -1,7 +1,7 @@
 use crate::{
-    BoundKind, ConstantId, Derived, EffectiveArmCount, EvidenceDate, EvidenceSource,
+    BoundKind, BuildVolumeMm, ConstantId, Derived, EffectiveArmCount, EvidenceDate, EvidenceSource,
     EvidenceSourceView, Finite, FiniteInterval, LoadSharing, Measured, MeasuredPayload,
-    MetricValue, Pending, Placeholder, PlateId,
+    MetricValue, Pending, Placeholder, PlateId, YDirection,
 };
 use std::collections::BTreeMap;
 use thiserror::Error;
@@ -56,10 +56,6 @@ enum ConstantValueData {
     SignedInteger(i64),
     UnsignedInteger(u64),
     FiniteScalar(Finite),
-    #[allow(
-        dead_code,
-        reason = "reserved for explicit core-owned text conversions"
-    )]
     Text(String),
     FiniteInterval(FiniteInterval),
     LoadSharing(LoadSharing),
@@ -109,10 +105,6 @@ impl ConstantValue {
         Ok(Self(ConstantValueData::FiniteScalar(value)))
     }
 
-    #[allow(
-        dead_code,
-        reason = "reserved for explicit core-owned text conversions"
-    )]
     fn core_text(value: impl Into<String>) -> Result<Self, RegistryError> {
         Ok(Self(ConstantValueData::Text(validated_registry_text(
             value,
@@ -297,6 +289,12 @@ constant_value_conversion!(FiniteInterval, |value: &FiniteInterval| {
 });
 constant_value_conversion!(LoadSharing, |value: &LoadSharing| {
     Ok(ConstantValue::load_sharing(*value))
+});
+constant_value_conversion!(BuildVolumeMm, |value: &BuildVolumeMm| {
+    ConstantValue::record([("x", value.x()), ("y", value.y()), ("z", value.z())])
+});
+constant_value_conversion!(YDirection, |value: &YDirection| {
+    ConstantValue::core_text(value.as_str())
 });
 
 impl<T: ToConstantValue> sealed::ConstantValueSource for Vec<T> {}

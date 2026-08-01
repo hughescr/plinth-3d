@@ -1,8 +1,8 @@
 use plinth_core::{
-    BoundKind, CalendarDate, ConstantDescriptor, ConstantId, ConstantValue, ConstantValueView,
-    ConstantsRegistry, Derived, EvidenceDate, EvidenceSource, FiniteInterval, LoadSharing,
-    Measured, Pending, Placeholder, PlateId, RegistryError, RegistryProvenanceClass,
-    RegistryProvenanceView, ToConstantValue,
+    BoundKind, BuildVolumeMm, CalendarDate, ConstantDescriptor, ConstantId, ConstantValue,
+    ConstantValueView, ConstantsRegistry, Derived, EvidenceDate, EvidenceSource, FiniteInterval,
+    LoadSharing, Measured, Pending, Placeholder, PlateId, RegistryError, RegistryProvenanceClass,
+    RegistryProvenanceView, ToConstantValue, YDirection,
 };
 use std::collections::BTreeMap;
 
@@ -152,6 +152,112 @@ fn every_supported_constant_value_variant_converts_without_debug_fallbacks() {
         fields.keys().map(String::as_str).collect::<Vec<_>>(),
         ["a", "b"]
     );
+}
+
+#[test]
+fn printer_payloads_convert_to_exact_typed_registry_shapes() {
+    let volume = BuildVolumeMm::new(211.68, 118.37, 220.0).unwrap();
+    let converted_volume = volume.to_constant_value().unwrap();
+    let ConstantValueView::Record(fields) = converted_volume.view() else {
+        panic!("build volume converted to the wrong registry variant");
+    };
+    assert_eq!(
+        fields.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["x", "y", "z"]
+    );
+    assert_eq!(fields["x"].view(), ConstantValueView::FiniteScalar(211.68));
+    assert_eq!(fields["y"].view(), ConstantValueView::FiniteScalar(118.37));
+    assert_eq!(fields["z"].view(), ConstantValueView::FiniteScalar(220.0));
+    assert_eq!(
+        YDirection::NegativeY.to_constant_value().unwrap().view(),
+        ConstantValueView::Text("negative_y")
+    );
+    assert_eq!(
+        YDirection::PositiveY.to_constant_value().unwrap().view(),
+        ConstantValueView::Text("positive_y")
+    );
+    assert_eq!(
+        true.to_constant_value().unwrap().view(),
+        ConstantValueView::Bool(true)
+    );
+
+    let build_volume = Measured::new(
+        volume,
+        measured_source(),
+        None,
+        "vendor-order axes mapped to project X/Y/Z",
+    )
+    .unwrap();
+    let leading_edge = Measured::new(
+        YDirection::NegativeY,
+        measured_source(),
+        None,
+        "leading edge",
+    )
+    .unwrap();
+    let front_sweep = Measured::new(
+        YDirection::PositiveY,
+        measured_source(),
+        None,
+        "front sweep",
+    )
+    .unwrap();
+    let require_birth = Measured::new(true, measured_source(), None, "measured rule").unwrap();
+    let drop_interior = Measured::new(true, measured_source(), None, "measured rule").unwrap();
+    let registry = ConstantsRegistry::build_batch([
+        ConstantDescriptor::from_measured(
+            ConstantId::from("test_build_volume"),
+            "mm",
+            "record{x,y,z}",
+            &build_volume,
+        )
+        .unwrap(),
+        ConstantDescriptor::from_measured(
+            ConstantId::from("test_leading_release_edge"),
+            "enum",
+            "y_direction",
+            &leading_edge,
+        )
+        .unwrap(),
+        ConstantDescriptor::from_measured(
+            ConstantId::from("test_release_front_sweep_direction"),
+            "enum",
+            "y_direction",
+            &front_sweep,
+        )
+        .unwrap(),
+        ConstantDescriptor::from_measured(
+            ConstantId::from("test_require_island_birth"),
+            "1",
+            "scalar",
+            &require_birth,
+        )
+        .unwrap(),
+        ConstantDescriptor::from_measured(
+            ConstantId::from("test_drop_interior_faces"),
+            "1",
+            "scalar",
+            &drop_interior,
+        )
+        .unwrap(),
+    ])
+    .unwrap();
+
+    assert_eq!(registry.len(), 5);
+    let leading = registry
+        .get(&ConstantId::from("test_leading_release_edge"))
+        .unwrap();
+    let sweep = registry
+        .get(&ConstantId::from("test_release_front_sweep_direction"))
+        .unwrap();
+    assert_eq!(leading.shape(), "y_direction");
+    assert_eq!(sweep.shape(), "y_direction");
+    assert_eq!(
+        leading.value().view(),
+        ConstantValueView::Text("negative_y")
+    );
+    assert_eq!(sweep.value().view(), ConstantValueView::Text("positive_y"));
+    assert_ne!(leading.id(), sweep.id());
 }
 
 #[test]

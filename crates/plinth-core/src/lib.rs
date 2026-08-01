@@ -15,6 +15,7 @@ mod layer;
 mod load;
 mod metric;
 mod number;
+mod printer;
 mod provenance;
 mod stage;
 mod violation;
@@ -41,6 +42,10 @@ pub use layer::{LayerPlan, LayerPlanError};
 pub use load::{EffectiveArmCount, LoadSharing, LoadSharingError};
 pub use metric::{MetricId, MetricSet, MetricValue};
 pub use number::{Finite, FiniteError};
+pub use printer::{
+    BuildVolumeError, BuildVolumeMm, PrinterProfile, PrinterProfileError, PrinterProfileId,
+    YDirection,
+};
 pub use provenance::{
     AcceptSafe, BoundKind, CalendarDate, Derived, EvidenceDate, EvidenceId, EvidenceSource,
     EvidenceSourceView, FiniteInterval, Measured, MeasuredPayload, Pending, Placeholder,
