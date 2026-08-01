@@ -1,19 +1,26 @@
 use std::path::{Path, PathBuf};
 
 use chitubox_io::Project;
-use serde::de::Error as _;
+use serde::de::{Error as _, IgnoredAny};
 use serde::{Deserialize, Deserializer};
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CorpusManifest {
     schema: String,
     version: u32,
+    frozen_at: FrozenAt,
     provisional: bool,
+    baseline_tool: BaselineTool,
+    baseline_command: FreezeCommand,
+    baseline_git_rev: GitRevision,
+    metrics: Vec<MetricDefinition>,
     models: Vec<CorpusModel>,
     waivers: Vec<NoWaiver>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CorpusModel {
     name: String,
     stl: PathBuf,
@@ -21,22 +28,24 @@ struct CorpusModel {
     report: PathBuf,
     baseline_artifact: Option<PathBuf>,
     python_exit_code: u8,
-    python_failed_stage: Option<String>,
+    python_seconds: f64,
+    python_failed_stage: Option<StageName>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SourceDigest {
     algorithm: DigestAlgorithm,
     hex: Sha256Hex,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq, Eq, Copy, Clone)]
 #[serde(rename_all = "lowercase")]
 enum DigestAlgorithm {
     Sha256,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 struct Sha256Hex([u8; 32]);
 
 impl<'de> Deserialize<'de> for Sha256Hex {
@@ -72,7 +81,7 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq, Eq, Copy, Clone)]
 #[serde(rename_all = "snake_case")]
 enum PipelineStatus {
     Ok,
@@ -80,17 +89,23 @@ enum PipelineStatus {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PipelineReport {
     input_stl: PathBuf,
     out_path: PathBuf,
+    prepped_stl: PathBuf,
     status: PipelineStatus,
     exit_code: u8,
-    failed_stage: Option<String>,
+    failed_stage: Option<StageName>,
+    error: Option<String>,
+    seconds: f64,
     report_path: PathBuf,
     settings: PipelineSettings,
+    stages: Vec<PipelineStage>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PipelineSettings {
     wall_mm: f64,
     orient: bool,
@@ -100,10 +115,222 @@ struct PipelineSettings {
     p8_relocate_enable: bool,
     allow_failed_gates: bool,
     skip_existing: bool,
+    internal_support_verifier_configured: bool,
+    a5_internal_supports_enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PipelineStage {
+    name: StageName,
+    status: PipelineStatus,
+    seconds: f64,
+    report: IgnoredAny,
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq, Copy, Clone)]
+#[serde(rename_all = "snake_case")]
+enum StageName {
+    Hollow,
+    Supports,
+    Emit,
 }
 
 #[derive(Debug, Deserialize)]
 enum NoWaiver {}
+
+#[derive(Debug, Deserialize, PartialEq, Eq, Copy, Clone)]
+#[serde(rename_all = "snake_case")]
+enum MetricId {
+    Islands,
+    Cavities,
+    BoundaryEdges,
+    NegativeShells,
+    Winding,
+    MaxX,
+    SupportCount,
+    ResinModel,
+    ResinSupport,
+    ResinTotal,
+    ScarArea,
+    ScarWorstPatch,
+    ScarWeighted,
+    ZHeight,
+    Loadable,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq, Copy, Clone)]
+#[serde(rename_all = "snake_case")]
+enum MetricDirection {
+    LowerIsBetter,
+    PassFail,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq, Copy, Clone)]
+#[serde(untagged)]
+enum MetricHardBound {
+    Zero(u8),
+    Pass(PassBound),
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq, Copy, Clone)]
+#[serde(rename_all = "lowercase")]
+enum PassBound {
+    Pass,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq, Copy, Clone)]
+#[serde(deny_unknown_fields)]
+struct MetricDefinition {
+    id: MetricId,
+    direction: MetricDirection,
+    hard_bound: Option<MetricHardBound>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FrozenAt {
+    year: u16,
+    month: u8,
+    day: u8,
+    hour: u8,
+    minute: u8,
+    second: u8,
+}
+
+impl<'de> Deserialize<'de> for FrozenAt {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        let bytes = encoded.as_bytes();
+        if bytes.len() != 20
+            || bytes[4] != b'-'
+            || bytes[7] != b'-'
+            || bytes[10] != b'T'
+            || bytes[13] != b':'
+            || bytes[16] != b':'
+            || bytes[19] != b'Z'
+        {
+            return Err(D::Error::custom(
+                "frozen_at must be UTC ISO-8601 YYYY-MM-DDTHH:MM:SSZ",
+            ));
+        }
+        let numeric = |start, end| {
+            bytes[start..end]
+                .iter()
+                .try_fold(0_u16, |value, byte| match byte {
+                    b'0'..=b'9' => Ok(value * 10 + u16::from(byte - b'0')),
+                    _ => Err(D::Error::custom(
+                        "frozen_at contains a non-numeric date field",
+                    )),
+                })
+        };
+        let year = numeric(0, 4)?;
+        let month = numeric(5, 7)? as u8;
+        let day = numeric(8, 10)? as u8;
+        let hour = numeric(11, 13)? as u8;
+        let minute = numeric(14, 16)? as u8;
+        let second = numeric(17, 19)? as u8;
+        if !(1..=12).contains(&month)
+            || day == 0
+            || day > days_in_month(year, month)
+            || hour > 23
+            || minute > 59
+            || second > 59
+        {
+            return Err(D::Error::custom(
+                "frozen_at is not a real UTC calendar instant",
+            ));
+        }
+        Ok(Self {
+            year,
+            month,
+            day,
+            hour,
+            minute,
+            second,
+        })
+    }
+}
+
+const fn days_in_month(year: u16, month: u8) -> u8 {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400)) => {
+            29
+        }
+        2 => 28,
+        _ => 0,
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct BaselineTool;
+
+impl<'de> Deserialize<'de> for BaselineTool {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let path = String::deserialize(deserializer)?;
+        if path == "scripts/tools/prep_one.py" {
+            Ok(Self)
+        } else {
+            Err(D::Error::custom(
+                "baseline_tool must be scripts/tools/prep_one.py",
+            ))
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct FreezeCommand;
+
+impl<'de> Deserialize<'de> for FreezeCommand {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let command = String::deserialize(deserializer)?;
+        if command == "uv run --frozen python scripts/tools/prep_one.py --p8-relocate --out-dir corpus/baseline --skip-existing corpus/models/*.stl" {
+            Ok(Self)
+        } else {
+            Err(D::Error::custom("baseline_command must preserve the exact M0 frozen batch invocation"))
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct GitRevision([u8; 20]);
+
+impl<'de> Deserialize<'de> for GitRevision {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let encoded = String::deserialize(deserializer)?;
+        if encoded.len() != 40 || !encoded.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(D::Error::custom(
+                "baseline_git_rev must contain 40 hexadecimal digits",
+            ));
+        }
+        if encoded.bytes().any(|byte| byte.is_ascii_uppercase()) {
+            return Err(D::Error::custom("baseline_git_rev must use lowercase hex"));
+        }
+        let mut bytes = [0_u8; 20];
+        for (index, pair) in encoded.as_bytes().chunks_exact(2).enumerate() {
+            let high =
+                hex_nibble(pair[0]).ok_or_else(|| D::Error::custom("invalid baseline_git_rev"))?;
+            let low =
+                hex_nibble(pair[1]).ok_or_else(|| D::Error::custom("invalid baseline_git_rev"))?;
+            bytes[index] = (high << 4) | low;
+        }
+        Ok(Self(bytes))
+    }
+}
 
 const EXPECTED_NAMES: [&str; 8] = [
     "Sphere",
@@ -114,6 +341,98 @@ const EXPECTED_NAMES: [&str; 8] = [
     "make_raking_blade",
     "make_thin_fin",
     "Weeping Treant v1.2",
+];
+
+const EXPECTED_FROZEN_AT: FrozenAt = FrozenAt {
+    year: 2026,
+    month: 8,
+    day: 1,
+    hour: 8,
+    minute: 20,
+    second: 35,
+};
+
+const EXPECTED_BASELINE_GIT_REV: GitRevision = GitRevision([
+    0x6e, 0xb7, 0xf6, 0xa6, 0x5e, 0x1a, 0x34, 0x42, 0xaa, 0x86, 0x0d, 0x63, 0xd9, 0x20, 0x78, 0x8d,
+    0xa7, 0x78, 0xfa, 0xed,
+]);
+
+const EXPECTED_METRICS: [MetricDefinition; 15] = [
+    MetricDefinition {
+        id: MetricId::Islands,
+        direction: MetricDirection::LowerIsBetter,
+        hard_bound: None,
+    },
+    MetricDefinition {
+        id: MetricId::Cavities,
+        direction: MetricDirection::LowerIsBetter,
+        hard_bound: None,
+    },
+    MetricDefinition {
+        id: MetricId::BoundaryEdges,
+        direction: MetricDirection::LowerIsBetter,
+        hard_bound: Some(MetricHardBound::Zero(0)),
+    },
+    MetricDefinition {
+        id: MetricId::NegativeShells,
+        direction: MetricDirection::LowerIsBetter,
+        hard_bound: Some(MetricHardBound::Zero(0)),
+    },
+    MetricDefinition {
+        id: MetricId::Winding,
+        direction: MetricDirection::LowerIsBetter,
+        hard_bound: Some(MetricHardBound::Zero(0)),
+    },
+    MetricDefinition {
+        id: MetricId::MaxX,
+        direction: MetricDirection::LowerIsBetter,
+        hard_bound: None,
+    },
+    MetricDefinition {
+        id: MetricId::SupportCount,
+        direction: MetricDirection::LowerIsBetter,
+        hard_bound: None,
+    },
+    MetricDefinition {
+        id: MetricId::ResinModel,
+        direction: MetricDirection::LowerIsBetter,
+        hard_bound: None,
+    },
+    MetricDefinition {
+        id: MetricId::ResinSupport,
+        direction: MetricDirection::LowerIsBetter,
+        hard_bound: None,
+    },
+    MetricDefinition {
+        id: MetricId::ResinTotal,
+        direction: MetricDirection::LowerIsBetter,
+        hard_bound: None,
+    },
+    MetricDefinition {
+        id: MetricId::ScarArea,
+        direction: MetricDirection::LowerIsBetter,
+        hard_bound: None,
+    },
+    MetricDefinition {
+        id: MetricId::ScarWorstPatch,
+        direction: MetricDirection::LowerIsBetter,
+        hard_bound: None,
+    },
+    MetricDefinition {
+        id: MetricId::ScarWeighted,
+        direction: MetricDirection::LowerIsBetter,
+        hard_bound: None,
+    },
+    MetricDefinition {
+        id: MetricId::ZHeight,
+        direction: MetricDirection::LowerIsBetter,
+        hard_bound: None,
+    },
+    MetricDefinition {
+        id: MetricId::Loadable,
+        direction: MetricDirection::PassFail,
+        hard_bound: Some(MetricHardBound::Pass(PassBound::Pass)),
+    },
 ];
 
 fn repo_root() -> PathBuf {
@@ -151,6 +470,10 @@ fn expected_artifact(name: &str) -> PathBuf {
     PathBuf::from("corpus/baseline").join(format!("{name}.chitubox"))
 }
 
+fn expected_prepped_stl(name: &str) -> PathBuf {
+    PathBuf::from("corpus/baseline").join(format!("{name}.prepped.stl"))
+}
+
 fn assert_freeze_settings(name: &str, settings: &PipelineSettings) {
     assert_eq!(settings.wall_mm, 2.5, "{name}: baseline wall differs");
     assert!(settings.orient, "{name}: orientation was disabled");
@@ -168,6 +491,101 @@ fn assert_freeze_settings(name: &str, settings: &PipelineSettings) {
     assert!(
         settings.skip_existing,
         "{name}: baseline command lost --skip-existing"
+    );
+    assert!(
+        !settings.internal_support_verifier_configured,
+        "{name}: baseline unexpectedly configured an internal-support verifier"
+    );
+    assert!(
+        settings.a5_internal_supports_enabled,
+        "{name}: baseline unexpectedly disabled A5 internal supports"
+    );
+}
+
+fn stage_index(stage: StageName) -> usize {
+    match stage {
+        StageName::Hollow => 0,
+        StageName::Supports => 1,
+        StageName::Emit => 2,
+    }
+}
+
+fn assert_report_stages(name: &str, report: &PipelineReport) {
+    const ORDER: [StageName; 3] = [StageName::Hollow, StageName::Supports, StageName::Emit];
+
+    assert!(
+        report.seconds.is_finite() && report.seconds >= 0.0,
+        "{name}: report total seconds must be finite and nonnegative"
+    );
+    let terminal_index = match report.failed_stage {
+        None => {
+            assert_eq!(report.exit_code, 0, "{name}: success must have exit code 0");
+            assert!(
+                report.error.is_none(),
+                "{name}: success must not have an error"
+            );
+            ORDER.len() - 1
+        }
+        Some(stage) => {
+            assert_ne!(
+                report.exit_code, 0,
+                "{name}: failure must have nonzero exit code"
+            );
+            assert!(
+                report
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| !error.is_empty()),
+                "{name}: failed report must carry a nonempty error"
+            );
+            stage_index(stage)
+        }
+    };
+    assert_eq!(
+        report.stages.len(),
+        terminal_index + 1,
+        "{name}: stage sequence must end at its terminal stage"
+    );
+
+    let mut summed_seconds = 0.0;
+    for (index, stage) in report.stages.iter().enumerate() {
+        assert_eq!(stage.name, ORDER[index], "{name}: stage order");
+        let expected_status = if report.failed_stage.is_some() && index == terminal_index {
+            PipelineStatus::Failed
+        } else {
+            PipelineStatus::Ok
+        };
+        assert_eq!(stage.status, expected_status, "{name}: stage status");
+        assert!(
+            stage.seconds.is_finite() && stage.seconds >= 0.0,
+            "{name}: stage timing must be finite and nonnegative"
+        );
+        if matches!(stage.status, PipelineStatus::Ok) {
+            assert!(
+                stage.error.is_none(),
+                "{name}: successful stage has an error"
+            );
+        } else {
+            assert!(
+                stage
+                    .error
+                    .as_deref()
+                    .is_some_and(|error| !error.is_empty()),
+                "{name}: failed stage lacks an error"
+            );
+        }
+        let _ = &stage.report;
+        summed_seconds += stage.seconds;
+    }
+
+    // Pipeline reports store each stage and the total independently as decimal
+    // seconds. Each persisted stage can be rounded to centiseconds, so permit
+    // half a centisecond per stage plus the independently rounded total.
+    let allowed_rounding = (report.stages.len() as f64 + 1.0) * 0.005 + f64::EPSILON;
+    assert!(
+        (summed_seconds - report.seconds).abs() <= allowed_rounding,
+        "{name}: stage timings {summed_seconds} disagree with total {} beyond persisted rounding",
+        report.seconds
     );
 }
 
@@ -203,6 +621,27 @@ fn frozen_baseline_manifest_and_artifacts_are_complete_and_truthful() {
 
     assert_eq!(manifest.schema, "plinth/corpus-manifest");
     assert_eq!(manifest.version, 1);
+    assert_eq!(
+        manifest.frozen_at, EXPECTED_FROZEN_AT,
+        "baseline freeze instant"
+    );
+    assert_eq!(
+        manifest.baseline_tool, BaselineTool,
+        "baseline tool identity changed"
+    );
+    assert_eq!(
+        manifest.baseline_command, FreezeCommand,
+        "baseline command must retain --p8-relocate and the binding batch glob"
+    );
+    assert_eq!(
+        manifest.baseline_git_rev, EXPECTED_BASELINE_GIT_REV,
+        "baseline source revision changed"
+    );
+    assert_eq!(
+        manifest.metrics.as_slice(),
+        EXPECTED_METRICS,
+        "M0 metric set changed; max_x_group belongs only at M5"
+    );
     assert!(
         !manifest.provisional,
         "the committed baseline must include Treant"
@@ -265,11 +704,22 @@ fn frozen_baseline_manifest_and_artifacts_are_complete_and_truthful() {
             "{name}: failed stage"
         );
         assert_eq!(
+            report.seconds.to_bits(),
+            model.python_seconds.to_bits(),
+            "{name}: manifest seconds must be the exact stored report seconds"
+        );
+        assert_eq!(
             report.out_path,
             expected_artifact(name),
             "{name}: output path"
         );
+        assert_eq!(
+            report.prepped_stl,
+            expected_prepped_stl(name),
+            "{name}: prepped STL path"
+        );
         assert_freeze_settings(name, &report.settings);
+        assert_report_stages(name, &report);
 
         let disk_artifact = root.join(&report.out_path);
         if model.python_exit_code == 0 {

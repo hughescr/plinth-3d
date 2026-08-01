@@ -1599,7 +1599,7 @@ gate table**, and M8's determinism CI is green. Neither alone is sufficient.
 | --- | --- |
 | `scripts/support_placement/` | The entire package, all 35 `.py` files including `__init__.py`, `geometry_exact.py` and `geometry_kernel.py` |
 | `scripts/tools/` | All 19 `.py` files, plus `host.blend` |
-| `scripts/tests/` | All `test_*.py`, all `manual_*.py`, `conftest.py`, `_refreeze_v5.py`, `_perf_fingerprint.py`. **Keep `scripts/tests/fixtures/chitubox/`** — move it to `corpus/fixtures/chitubox/` and repoint `rust/chitubox_io/tests/common/mod.rs::corpus_path()`. Those are the native ChituBox ground-truth specimens; they are not test infrastructure, they are irreplaceable data. |
+| `scripts/tests/` | All `test_*.py`, all `manual_*.py`, `conftest.py`, `_refreeze_v5.py`, `_perf_fingerprint.py`. **Keep `scripts/tests/fixtures/chitubox/`** — move it to `corpus/fixtures/chitubox/` and repoint `rust/chitubox_io/tests/common/mod.rs::required_fixture_path()` plus the sole optional `optional_treant_candidate_path()` fallback. Those are the native ChituBox ground-truth specimens; they are not test infrastructure, they are irreplaceable data. |
 | `scripts/build_kernel.sh` | Builds both PyO3 extensions into the venv; nothing to build |
 | `rust/chitubox_io/src/py.rs` | PyO3 binding |
 | `rust/chitubox_io/python/` | Package shim (`chitubox_io/__init__.py`) |

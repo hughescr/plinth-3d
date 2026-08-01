@@ -200,12 +200,13 @@ baseline set below.
 
 ## 4. `CHITUBOX_CORPUS_DIR` fallback
 
-`rust/chitubox_io/tests/common/mod.rs::corpus_dir()` reads
-`CHITUBOX_CORPUS_DIR` and falls back to
+`rust/chitubox_io/tests/common/mod.rs::optional_treant_candidate_path()` is
+the sole helper that reads `CHITUBOX_CORPUS_DIR` and falls back to
 `/Users/craig/code/hughescr/dnd-campaigns` (this repo's parent directory) if
-unset. This is how the uncommitted large treant specimen
+unset. It resolves only the uncommitted large treant specimen
 (`treant_v5_candidate.chitubox`, ~35 MB, pinned at 1360 support records in
-`support_parity.rs`) is located in Craig's environment without committing it.
+`support_parity.rs`) in Craig's environment without committing it; committed
+fixtures use `required_fixture_path()` and never consult the fallback.
 
 The **Treant source STL** is a model-baseline input, not a ChituBox format
 fixture. **"treant" and "Awakened Tree" are the same model** — the source file is
