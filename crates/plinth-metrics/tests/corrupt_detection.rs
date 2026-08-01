@@ -12,8 +12,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use chitubox_io::{ModelGeometry, ModelSource, Placement, Project, TriangleSoup};
 use plinth_core::ModelId;
 use plinth_metrics::{
-    analyze_artifact_topology, load_artifacts, ArtifactDisposition, ArtifactLoad, ArtifactRequest,
-    DiskArtifact,
+    analyze_artifact_topology, load_artifacts, topology_metric_rows, ArtifactDisposition,
+    ArtifactLoad, ArtifactRequest, DiskArtifact, TopologyMetricError, TopologyMetricInput,
+    TOPOLOGY_METRIC_ORDER,
 };
 
 static TEMP_SEQUENCE: AtomicUsize = AtomicUsize::new(0);
@@ -164,6 +165,47 @@ fn disk_reopened_corruptions_raise_their_named_format_metrics() {
         clean_metrics.cavities, 0,
         "clean artifact has no interior shell"
     );
+
+    let clean_artifact = reopen(&clean, "clean-topology-row");
+    let rows = topology_metric_rows(
+        &clean_artifact,
+        &[TopologyMetricInput {
+            source_index: 0,
+            islands: 7,
+        }],
+    )
+    .expect("ordered islands input is carried into the M1 topology row");
+    assert_eq!(
+        rows[0].entries().map(|(id, _)| id.as_str().to_owned()),
+        TOPOLOGY_METRIC_ORDER.map(str::to_owned),
+        "the public topology row uses the normative metric order"
+    );
+    assert_eq!(
+        rows[0].entries()[0].1.get(),
+        7.0,
+        "islands is supplied, not fabricated"
+    );
+    assert!(matches!(
+        topology_metric_rows(&clean_artifact, &[]),
+        Err(TopologyMetricError::InputCount {
+            expected: 1,
+            actual: 0
+        })
+    ));
+    assert!(matches!(
+        topology_metric_rows(
+            &clean_artifact,
+            &[TopologyMetricInput {
+                source_index: 1,
+                islands: 7
+            }]
+        ),
+        Err(TopologyMetricError::InputSourceIndex {
+            row: 0,
+            expected: 0,
+            actual: 1
+        })
+    ));
 
     let mut deleted = source.clone();
     deleted.truncate(deleted.len() - 9);

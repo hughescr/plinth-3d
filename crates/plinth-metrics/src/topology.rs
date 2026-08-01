@@ -1,8 +1,24 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
+use plinth_core::{MetricId, MetricSet, MetricValue};
+use thiserror::Error;
+
 use crate::{contains_points, cross, dot, DiskArtifact, Mesh, MetricsError, Vec3};
 
-/// An undirected vertex edge.  Its endpoints are always in ascending order.
+/// The fixed M1 topology metric order from `04-migration-plan.md` §3.
+pub const TOPOLOGY_METRIC_ORDER: [&str; 5] = [
+    "islands",
+    "cavities",
+    "boundary_edges",
+    "negative_shells",
+    "winding",
+];
+
+const CAVITY_CONTAINMENT_MIN_NUMERATOR: usize = 9;
+const CAVITY_CONTAINMENT_MIN_DENOMINATOR: usize = 10;
+const CAVITY_PROBE_LIMIT: usize = 32;
+
+/// An undirected vertex edge. Its endpoints are always in ascending order.
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct Edge {
     pub low: usize,
@@ -23,14 +39,53 @@ pub struct EdgeUse {
     pub forward: bool,
 }
 
-/// A face-connected shell with a signed f64 volume.
+/// The winding state of one face-connected shell.
+///
+/// `Sealed` is intentionally separate from this state: a shell can be
+/// watertight while its faces need reorientation. This mirrors the frozen
+/// hollow containment rule, which tests closure from incidence counts before
+/// considering winding.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ShellWinding {
+    /// A globally outward assignment exists; these original faces differ from it.
+    Outward { faces_requiring_flip: Vec<usize> },
+    /// An open component cannot establish an outward shell orientation.
+    Open { faces: Vec<usize> },
+    /// A non-manifold component cannot establish an outward shell orientation.
+    NonManifold { faces: Vec<usize> },
+    /// Pairwise orientation constraints are mutually contradictory.
+    Contradictory { faces: Vec<usize> },
+    /// The constraints are satisfiable but have no signed-volume polarity.
+    Degenerate { faces: Vec<usize> },
+}
+
+impl ShellWinding {
+    fn metric_count(&self) -> usize {
+        match self {
+            Self::Outward {
+                faces_requiring_flip,
+            } => faces_requiring_flip.len(),
+            Self::Open { faces }
+            | Self::NonManifold { faces }
+            | Self::Contradictory { faces }
+            | Self::Degenerate { faces } => faces.len(),
+        }
+    }
+}
+
+/// A face-connected shell with original and outward-corrected signed volume.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Shell {
     pub faces: Vec<usize>,
+    /// Signed tetrahedron sum in the artifact's original orientation.
     pub signed_volume: f64,
-    /// A shell is closed only when every one of its edges has exactly two
-    /// incident faces and those faces traverse the edge in opposing directions.
-    pub closed: bool,
+    /// Whether every canonical edge has exactly two incident faces. Winding is
+    /// deliberately not part of this orientation-blind sealedness predicate.
+    pub sealed: bool,
+    pub winding: ShellWinding,
+    /// The signed volume after selecting the outward global orientation.
+    /// `None` means that no trustworthy outward assignment exists.
+    pub outward_signed_volume: Option<f64>,
 }
 
 /// Independent topology findings used by M1 format metrics.
@@ -38,27 +93,76 @@ pub struct Shell {
 pub struct TopologyAnalysis {
     pub boundary_edges: Vec<EdgeIncidence>,
     pub nonmanifold_edges: Vec<EdgeIncidence>,
+    /// Local edge-orientation disagreements, retained as diagnostic evidence.
     pub inconsistent_winding_faces: Vec<usize>,
     pub shells: Vec<Shell>,
-    /// Closed shells nested at odd depth inside another closed shell.
+    /// Sealed shells nested at odd depth inside another sealed shell.
     pub cavities: usize,
 }
 
 /// The artifact-level portion of the M1 format metrics.
-///
-/// This deliberately reports only metrics that topology can establish from a
-/// fresh disk read.  `islands` is a later independent support-perception
-/// metric, not a topology proxy, and therefore is never fabricated here.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ArtifactTopologyMetrics {
-    pub boundary_edges: usize,
     pub cavities: usize,
+    pub boundary_edges: usize,
     pub negative_shells: usize,
     pub winding: usize,
 }
 
-/// One model's independent topology result, retaining the source slot from
-/// the on-disk artifact for a caller's per-model report row.
+/// An independently supplied island count for one disk-read model row.
+///
+/// M1 wires this count into the fixed score shape but does not lie that it can
+/// produce slice-based overhang perception before that implementation exists.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TopologyMetricInput {
+    pub source_index: usize,
+    pub islands: usize,
+}
+
+/// One row of M1 metrics in the normative order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TopologyMetricRow {
+    pub source_index: usize,
+    values: [MetricValue; TOPOLOGY_METRIC_ORDER.len()],
+}
+
+impl TopologyMetricRow {
+    /// Returns the fixed metric entries in the exact M1 order, not map order.
+    #[must_use]
+    pub fn entries(&self) -> [(MetricId, MetricValue); TOPOLOGY_METRIC_ORDER.len()] {
+        std::array::from_fn(|index| {
+            (
+                MetricId::from(TOPOLOGY_METRIC_ORDER[index]),
+                self.values[index],
+            )
+        })
+    }
+
+    /// Converts this ordered transport row into core's passive deterministic map DTO.
+    #[must_use]
+    pub fn metric_set(&self) -> MetricSet {
+        MetricSet::new(self.entries())
+    }
+}
+
+/// Ordering/analysis errors for the public M1 topology metric boundary.
+#[derive(Debug, Error)]
+pub enum TopologyMetricError {
+    #[error(
+        "topology metric input count {actual} does not match disk artifact model count {expected}"
+    )]
+    InputCount { expected: usize, actual: usize },
+    #[error("topology metric input row {row} names source model {actual}, expected {expected}")]
+    InputSourceIndex {
+        row: usize,
+        expected: usize,
+        actual: usize,
+    },
+    #[error(transparent)]
+    Analysis(#[from] MetricsError),
+}
+
+/// One model's independent topology result, retaining its disk source slot.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ModelTopologyAnalysis {
     pub source_index: usize,
@@ -74,7 +178,7 @@ pub struct ArtifactTopologyAnalysis {
     pub metrics: ArtifactTopologyMetrics,
 }
 
-/// Runs all brute-force edge-incidence, shell, volume, and winding checks.
+/// Runs all brute-force edge-incidence, shell, volume, winding, and cavity checks.
 pub fn analyze_topology(mesh: &Mesh) -> Result<TopologyAnalysis, MetricsError> {
     let incidences = all_edge_incidences(mesh);
     let boundary_edges = incidences
@@ -87,23 +191,16 @@ pub fn analyze_topology(mesh: &Mesh) -> Result<TopologyAnalysis, MetricsError> {
         .filter(|incidence| incidence.uses.len() > 2)
         .cloned()
         .collect();
-    let inconsistent = inconsistent_faces(&incidences);
+    let inconsistent_winding_faces = inconsistent_faces(&incidences);
     let shells = shell_faces(mesh, &incidences)
         .into_iter()
-        .map(|faces| {
-            let closed = shell_is_closed(&faces, &incidences, &inconsistent);
-            Ok(Shell {
-                signed_volume: signed_volume(mesh, &faces)?,
-                faces,
-                closed,
-            })
-        })
-        .collect::<Result<Vec<_>, MetricsError>>()?;
+        .map(|faces| analyze_shell(mesh, &faces, &incidences))
+        .collect::<Result<Vec<_>, _>>()?;
     let cavities = closed_cavities(mesh, &shells)?;
     Ok(TopologyAnalysis {
         boundary_edges,
         nonmanifold_edges,
-        inconsistent_winding_faces: inconsistent.into_iter().collect(),
+        inconsistent_winding_faces: inconsistent_winding_faces.into_iter().collect(),
         shells,
         cavities,
     })
@@ -121,9 +218,8 @@ pub fn signed_shell_volumes(mesh: &Mesh) -> Result<Vec<Shell>, MetricsError> {
 
 /// Audits every model and support soup in one artifact loaded from disk.
 ///
-/// The caller must obtain `artifact` from [`crate::load_artifacts`]; this API
-/// intentionally has no path or producer-memory variant.  All components are
-/// gathered first, then analyzed in deterministic source order.
+/// The caller must obtain `artifact` from [`crate::load_artifacts`]; there is
+/// intentionally no path or producer-memory variant.
 pub fn analyze_artifact_topology(
     artifact: &DiskArtifact,
 ) -> Result<ArtifactTopologyAnalysis, MetricsError> {
@@ -154,35 +250,75 @@ pub fn analyze_artifact_topology(
     })
 }
 
-fn metrics_for(analysis: &TopologyAnalysis) -> ArtifactTopologyMetrics {
-    let negative_shells = analysis
-        .shells
-        .iter()
-        .filter(|shell| shell.signed_volume < 0.0)
-        .count();
-    let mut winding_faces = BTreeSet::new();
-    winding_faces.extend(analysis.inconsistent_winding_faces.iter().copied());
-    // A coherent but globally inverted shell is also a winding failure.  This
-    // is deliberately separate from edge-local consistency: the M1 corruption
-    // fixture flips a whole shell and must not evade the winding metric.
-    for shell in analysis
-        .shells
-        .iter()
-        .filter(|shell| shell.signed_volume < 0.0)
-    {
-        winding_faces.extend(shell.faces.iter().copied());
+/// Adds independently perceived islands to disk-derived topology metrics.
+///
+/// Inputs are a batch and must exactly match the artifact's model source order;
+/// a mismatched or partial batch is a named error rather than silently paired.
+pub fn topology_metric_rows(
+    artifact: &DiskArtifact,
+    inputs: &[TopologyMetricInput],
+) -> Result<Vec<TopologyMetricRow>, TopologyMetricError> {
+    if inputs.len() != artifact.models().len() {
+        return Err(TopologyMetricError::InputCount {
+            expected: artifact.models().len(),
+            actual: inputs.len(),
+        });
     }
+    let topology = analyze_artifact_topology(artifact)?;
+    topology
+        .models
+        .iter()
+        .zip(inputs)
+        .enumerate()
+        .map(|(row, (model, input))| {
+            if input.source_index != model.source_index {
+                return Err(TopologyMetricError::InputSourceIndex {
+                    row,
+                    expected: model.source_index,
+                    actual: input.source_index,
+                });
+            }
+            let metrics = model.metrics;
+            Ok(TopologyMetricRow {
+                source_index: model.source_index,
+                values: [
+                    metric_value(input.islands),
+                    metric_value(metrics.cavities),
+                    metric_value(metrics.boundary_edges),
+                    metric_value(metrics.negative_shells),
+                    metric_value(metrics.winding),
+                ],
+            })
+        })
+        .collect()
+}
+
+fn metric_value(value: usize) -> MetricValue {
+    // usize is always finite when represented as f64. Precision is sufficient
+    // for mesh counts in the file format; a count this large cannot be loaded.
+    MetricValue::new(value as f64).expect("usize converts to finite f64")
+}
+
+fn metrics_for(analysis: &TopologyAnalysis) -> ArtifactTopologyMetrics {
     ArtifactTopologyMetrics {
-        boundary_edges: analysis.boundary_edges.len(),
         cavities: analysis.cavities,
-        negative_shells,
-        winding: winding_faces.len(),
+        boundary_edges: analysis.boundary_edges.len(),
+        negative_shells: analysis
+            .shells
+            .iter()
+            .filter(|shell| shell.signed_volume < 0.0)
+            .count(),
+        winding: analysis
+            .shells
+            .iter()
+            .map(|shell| shell.winding.metric_count())
+            .sum(),
     }
 }
 
 fn add_metrics(total: &mut ArtifactTopologyMetrics, item: ArtifactTopologyMetrics) {
-    total.boundary_edges += item.boundary_edges;
     total.cavities += item.cavities;
+    total.boundary_edges += item.boundary_edges;
     total.negative_shells += item.negative_shells;
     total.winding += item.winding;
 }
@@ -213,12 +349,10 @@ fn all_edge_incidences(mesh: &Mesh) -> Vec<EdgeIncidence> {
 
 /// Gives repeated triangle-soup coordinates a local topological identity.
 ///
-/// ChituBox stores triangle soup, so a file parsed into [`Mesh`] has distinct
-/// indices for the same f32 vertex.  The metric must find its shared edges
-/// without mutating/replacing source coordinates or borrowing the producer's
-/// weld implementation.  Finite coordinates have already been checked by
-/// `Mesh::new`; only numeric zero is canonicalized so `-0.0` and `+0.0` meet
-/// geometrically while all other f64 bits remain exact artifact data.
+/// ChituBox stores triangle soup, so this local independent auditor must find
+/// shared edges without mutating source coordinates or borrowing a producer
+/// weld implementation. Only numeric zero is canonicalized; all other finite
+/// f64 bits remain exact artifact data.
 fn canonical_vertex_indices(mesh: &Mesh) -> Vec<usize> {
     #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
     struct Key([u64; 3]);
@@ -281,31 +415,150 @@ fn inconsistent_faces(incidences: &[EdgeIncidence]) -> BTreeSet<usize> {
     inconsistent
 }
 
-fn shell_is_closed(
+fn analyze_shell(
+    mesh: &Mesh,
     faces: &[usize],
     incidences: &[EdgeIncidence],
-    inconsistent: &BTreeSet<usize>,
-) -> bool {
+) -> Result<Shell, MetricsError> {
+    let original_signed_volume = signed_volume(mesh, faces, None)?;
     let face_set = faces.iter().copied().collect::<BTreeSet<_>>();
-    !faces.iter().any(|face| inconsistent.contains(face))
-        && incidences
+    let local_incidences = incidences
+        .iter()
+        .filter(|incidence| {
+            incidence
+                .uses
+                .iter()
+                .any(|item| face_set.contains(&item.face))
+        })
+        .collect::<Vec<_>>();
+    let sealed = local_incidences
+        .iter()
+        .all(|incidence| incidence.uses.len() == 2);
+    let winding = if !sealed {
+        if local_incidences
             .iter()
-            .filter(|incidence| {
-                incidence
-                    .uses
-                    .iter()
-                    .any(|item| face_set.contains(&item.face))
-            })
-            .all(|incidence| incidence.uses.len() == 2)
+            .any(|incidence| incidence.uses.len() > 2)
+        {
+            ShellWinding::NonManifold {
+                faces: faces.to_vec(),
+            }
+        } else {
+            ShellWinding::Open {
+                faces: faces.to_vec(),
+            }
+        }
+    } else {
+        solve_outward_winding(mesh, faces, &local_incidences)?
+    };
+    let outward_signed_volume = match &winding {
+        ShellWinding::Outward {
+            faces_requiring_flip,
+        } => {
+            let flips = faces_requiring_flip
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>();
+            Some(signed_volume(mesh, faces, Some(&flips))?.abs())
+        }
+        ShellWinding::Open { .. }
+        | ShellWinding::NonManifold { .. }
+        | ShellWinding::Contradictory { .. }
+        | ShellWinding::Degenerate { .. } => None,
+    };
+    Ok(Shell {
+        faces: faces.to_vec(),
+        signed_volume: original_signed_volume,
+        sealed,
+        winding,
+        outward_signed_volume,
+    })
 }
 
-fn signed_volume(mesh: &Mesh, faces: &[usize]) -> Result<f64, MetricsError> {
-    // Serial ordered summation is intentional: float reductions must not change
-    // when a future caller changes a thread count.
+fn solve_outward_winding(
+    mesh: &Mesh,
+    faces: &[usize],
+    incidences: &[&EdgeIncidence],
+) -> Result<ShellWinding, MetricsError> {
+    let mut neighbors = BTreeMap::<usize, Vec<(usize, bool)>>::new();
+    for &EdgeIncidence { uses, .. } in incidences {
+        let left = uses[0];
+        let right = uses[1];
+        // Equal directions need one face reversed; opposing directions need
+        // equal flip parity.
+        let xor_required = left.forward == right.forward;
+        neighbors
+            .entry(left.face)
+            .or_default()
+            .push((right.face, xor_required));
+        neighbors
+            .entry(right.face)
+            .or_default()
+            .push((left.face, xor_required));
+    }
+    let mut flips = BTreeMap::<usize, bool>::new();
+    for &start in faces {
+        if flips.contains_key(&start) {
+            continue;
+        }
+        flips.insert(start, false);
+        let mut queue = VecDeque::from([start]);
+        while let Some(face) = queue.pop_front() {
+            let flip = flips[&face];
+            for &(neighbor, xor_required) in neighbors.get(&face).into_iter().flatten() {
+                let expected = flip ^ xor_required;
+                match flips.get(&neighbor) {
+                    Some(actual) if *actual != expected => {
+                        return Ok(ShellWinding::Contradictory {
+                            faces: faces.to_vec(),
+                        });
+                    }
+                    Some(_) => {}
+                    None => {
+                        flips.insert(neighbor, expected);
+                        queue.push_back(neighbor);
+                    }
+                }
+            }
+        }
+    }
+    let initial_flips = flips
+        .iter()
+        .filter_map(|(&face, &flipped)| flipped.then_some(face))
+        .collect::<BTreeSet<_>>();
+    let corrected = signed_volume(mesh, faces, Some(&initial_flips))?;
+    if corrected == 0.0 {
+        return Ok(ShellWinding::Degenerate {
+            faces: faces.to_vec(),
+        });
+    }
+    let faces_requiring_flip = if corrected > 0.0 {
+        initial_flips.into_iter().collect()
+    } else {
+        faces
+            .iter()
+            .copied()
+            .filter(|face| !initial_flips.contains(face))
+            .collect()
+    };
+    Ok(ShellWinding::Outward {
+        faces_requiring_flip,
+    })
+}
+
+fn signed_volume(
+    mesh: &Mesh,
+    faces: &[usize],
+    flipped: Option<&BTreeSet<usize>>,
+) -> Result<f64, MetricsError> {
+    // Serial ordered summation is intentional: float reductions cannot vary
+    // with a future caller's thread count.
     let mut sum = 0.0;
     for &face in faces {
         let (a, b, c) = mesh.triangle_points(face);
-        let term = dot(a, cross(b, c)) / 6.0;
+        let mut term = dot(a, cross(b, c)) / 6.0;
+        if flipped.is_some_and(|set| set.contains(&face)) {
+            term = -term;
+        }
         if !term.is_finite() {
             return Err(MetricsError::ArithmeticOverflow {
                 triangle: face,
@@ -324,23 +577,42 @@ fn signed_volume(mesh: &Mesh, faces: &[usize]) -> Result<f64, MetricsError> {
 }
 
 fn closed_cavities(mesh: &Mesh, shells: &[Shell]) -> Result<usize, MetricsError> {
-    let closed = shells
+    let sealed = shells
         .iter()
-        .enumerate()
-        .filter(|(_, shell)| shell.closed && shell.signed_volume != 0.0)
+        .filter(|shell| shell.sealed)
         .collect::<Vec<_>>();
-    let probes = closed
+    let bounds = sealed
         .iter()
-        .map(|(_, shell)| shell_volume_centroid(mesh, shell))
+        .map(|shell| shell_bounds(mesh, shell))
         .collect::<Result<Vec<_>, _>>()?;
-    let mut depths = vec![0_usize; closed.len()];
-    // Gather all points to test against a shell, perform one batched parity
-    // query, then scatter containment votes back into depth counters.
-    for (outer_index, (_, outer)) in closed.iter().enumerate() {
+    let probes = sealed
+        .iter()
+        .map(|shell| shell_boundary_probes(mesh, shell))
+        .collect::<Vec<_>>();
+    let mut depths = vec![0_usize; sealed.len()];
+    for (outer_index, outer) in sealed.iter().enumerate() {
         let shell_mesh = shell_mesh(mesh, &outer.faces)?;
-        let contains = contains_points(&shell_mesh, &probes)?;
-        for (inner_index, contained) in contains.into_iter().enumerate() {
-            if inner_index != outer_index && contained {
+        let mut gathered = Vec::new();
+        let mut rows = Vec::new();
+        for (inner_index, _) in sealed.iter().enumerate() {
+            if outer_index == inner_index || !bounds[outer_index].contains(bounds[inner_index]) {
+                continue;
+            }
+            let start = gathered.len();
+            gathered.extend_from_slice(&probes[inner_index]);
+            rows.push((inner_index, start, gathered.len()));
+        }
+        // Different shells require distinct triangle sets, so one global ray
+        // traversal is not meaningful. This is the required batch boundary:
+        // all candidate probe points for this outer shell go through exactly
+        // one independent parity call, then results scatter by saved ranges.
+        let contained = contains_points(&shell_mesh, &gathered)?;
+        for (inner_index, start, end) in rows {
+            let inside = contained[start..end].iter().filter(|&&value| value).count();
+            let count = end - start;
+            if inside * CAVITY_CONTAINMENT_MIN_DENOMINATOR
+                >= count * CAVITY_CONTAINMENT_MIN_NUMERATOR
+            {
                 depths[inner_index] += 1;
             }
         }
@@ -348,41 +620,68 @@ fn closed_cavities(mesh: &Mesh, shells: &[Shell]) -> Result<usize, MetricsError>
     Ok(depths.into_iter().filter(|depth| depth % 2 == 1).count())
 }
 
-fn shell_mesh(mesh: &Mesh, faces: &[usize]) -> Result<Mesh, MetricsError> {
-    Mesh::new(
-        mesh.vertices().to_vec(),
-        faces.iter().map(|&face| mesh.triangles()[face]).collect(),
-    )
+#[derive(Clone, Copy)]
+struct Bounds {
+    lower: Vec3,
+    upper: Vec3,
 }
 
-fn shell_volume_centroid(mesh: &Mesh, shell: &Shell) -> Result<Vec3, MetricsError> {
-    let mut volume = 0.0;
-    let mut weighted = [0.0; 3];
-    for &face in &shell.faces {
-        let (a, b, c) = mesh.triangle_points(face);
-        let tetra_volume = dot(a, cross(b, c)) / 6.0;
-        let tetra_centroid = [
-            (a[0] + b[0] + c[0]) / 4.0,
-            (a[1] + b[1] + c[1]) / 4.0,
-            (a[2] + b[2] + c[2]) / 4.0,
-        ];
-        volume += tetra_volume;
+impl Bounds {
+    fn contains(self, other: Self) -> bool {
+        (0..3).all(|component| {
+            self.lower[component] <= other.lower[component]
+                && other.upper[component] <= self.upper[component]
+        })
+    }
+}
+
+fn shell_bounds(mesh: &Mesh, shell: &Shell) -> Result<Bounds, MetricsError> {
+    let mut lower = [f64::INFINITY; 3];
+    let mut upper = [f64::NEG_INFINITY; 3];
+    for point in shell_vertices(mesh, shell) {
         for component in 0..3 {
-            weighted[component] += tetra_volume * tetra_centroid[component];
-        }
-        if !volume.is_finite() || weighted.iter().any(|value| !value.is_finite()) {
-            return Err(MetricsError::ArithmeticOverflow {
-                triangle: face,
-                primitive: crate::GeometryPrimitive::SignedVolume,
-            });
+            lower[component] = lower[component].min(point[component]);
+            upper[component] = upper[component].max(point[component]);
         }
     }
-    let centroid = weighted.map(|value| value / volume);
-    if centroid.iter().any(|value| !value.is_finite()) {
+    if lower
+        .iter()
+        .chain(upper.iter())
+        .any(|value| !value.is_finite())
+    {
         return Err(MetricsError::ArithmeticOverflow {
             triangle: shell.faces[0],
             primitive: crate::GeometryPrimitive::SignedVolume,
         });
     }
-    Ok(centroid)
+    Ok(Bounds { lower, upper })
+}
+
+fn shell_boundary_probes(mesh: &Mesh, shell: &Shell) -> Vec<Vec3> {
+    let mut seen = BTreeSet::new();
+    let mut probes = Vec::new();
+    for point in shell_vertices(mesh, shell) {
+        let key = point.map(|value| if value == 0.0 { 0 } else { value.to_bits() });
+        if seen.insert(key) {
+            probes.push(point);
+            if probes.len() == CAVITY_PROBE_LIMIT {
+                break;
+            }
+        }
+    }
+    probes
+}
+
+fn shell_vertices<'a>(mesh: &'a Mesh, shell: &'a Shell) -> impl Iterator<Item = Vec3> + 'a {
+    shell.faces.iter().flat_map(|&face| {
+        let [a, b, c] = mesh.triangles()[face];
+        [mesh.vertices()[a], mesh.vertices()[b], mesh.vertices()[c]]
+    })
+}
+
+fn shell_mesh(mesh: &Mesh, faces: &[usize]) -> Result<Mesh, MetricsError> {
+    Mesh::new(
+        mesh.vertices().to_vec(),
+        faces.iter().map(|&face| mesh.triangles()[face]).collect(),
+    )
 }

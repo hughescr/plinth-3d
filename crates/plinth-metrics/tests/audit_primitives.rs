@@ -1,6 +1,6 @@
 use plinth_metrics::{
     analyze_topology, boundary_edges, closest_points, contains_points, ray_intersections,
-    signed_shell_volumes, triangle_intersections, Mesh, MetricsError, Ray,
+    signed_shell_volumes, triangle_intersections, Mesh, MetricsError, Ray, ShellWinding,
 };
 
 fn tetrahedron(flipped: bool) -> Mesh {
@@ -95,6 +95,10 @@ fn topology_detects_boundary_nonmanifold_and_winding() {
     )
     .unwrap();
     assert_eq!(boundary_edges(&open).unwrap().len(), 3);
+    assert!(matches!(
+        &analyze_topology(&open).unwrap().shells[0].winding,
+        ShellWinding::Open { faces } if faces == &[0]
+    ));
 
     let nonmanifold = Mesh::new(
         vec![
@@ -107,13 +111,12 @@ fn topology_detects_boundary_nonmanifold_and_winding() {
         vec![[0, 1, 2], [1, 0, 3], [0, 1, 4]],
     )
     .unwrap();
-    assert_eq!(
-        analyze_topology(&nonmanifold)
-            .unwrap()
-            .nonmanifold_edges
-            .len(),
-        1
-    );
+    let nonmanifold_analysis = analyze_topology(&nonmanifold).unwrap();
+    assert_eq!(nonmanifold_analysis.nonmanifold_edges.len(), 1);
+    assert!(matches!(
+        &nonmanifold_analysis.shells[0].winding,
+        ShellWinding::NonManifold { faces } if faces == &[0, 1, 2]
+    ));
 
     let inconsistent = Mesh::new(
         vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
