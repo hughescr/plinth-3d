@@ -177,6 +177,8 @@ review — do not write substantial code in your main context.
     `plinth prepare --no-cache` as the one spelling of cache-off, with no environment-variable
     form (`06` §6 — there is no `PLINTH_CACHE`); and `max_x_group` as a *separate* metric id
     added at M5, with `max_x` keeping its M1 per-arm definition untouched (`04` §3).
+    Frozen `GEOM_KERNEL_THREADS` is a distinct legacy kernel scheduling control and
+    no-port/excluded disposition; it is never an alias for `PLINTH_THREADS`.
   - **Silent-failure patterns must not be ported.** `resolve_stl()` is the named specimen: it
     never raises, it returns a path that does not exist. So is the fail-not-skip fixture rule
     (`04` M0 work item 9): a test whose required fixture, corpus model or baseline artifact is

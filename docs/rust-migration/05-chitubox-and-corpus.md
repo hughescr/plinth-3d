@@ -206,10 +206,16 @@ unset. This is how the uncommitted large treant specimen
 
 The **Treant source STL** is a model-baseline input, not a ChituBox format
 fixture. **"treant" and "Awakened Tree" are the same model** — the source file is
-`Awakened Tree.stl` (21 MB), staged in transient `minis-to-process/`. Copy or
-symlink it locally as `corpus/models/Weeping Treant v1.2.stl` and point
-`$TREANT_STL` at it when the frozen Python tool needs that variable. Like every
-`corpus/models/*.stl` input it is ignored and never committed.
+`Awakened Tree.stl` (21 MB), staged in transient `minis-to-process/`. Copy it
+first to the durable canonical path
+`${CHITUBOX_CORPUS_DIR:-/Users/craig/code/hughescr/dnd-campaigns}/Weeping Treant v1.2.stl`
+and point `$TREANT_STL` at that durable copy. Then copy it locally as the ignored
+`corpus/models/Weeping Treant v1.2.stl` member of the exact input set. Never
+commit either STL or any `corpus/models/*.stl` input.
+
+Verify the resolver result with the explicit `test -f` command in
+`04-migration-plan.md` M0. `resolve_stl()` can print its fall-through path even
+when no file exists, so a printed path alone is not verification.
 
 For Codex running in a checkout without that file present: `support_parity.rs`
 tests referencing `treant_v5_candidate.chitubox` will print a `SKIP:` notice
@@ -238,8 +244,10 @@ The full baseline is exactly these eight models, in the binding order:
 The sanctioned provisional corpus is the same set minus `Weeping Treant v1.2`,
 exactly seven models. **There is no `Cone` in either set.** All eight source STLs
 are ignored inputs in `corpus/models/`; the manifest and baseline `.chitubox` and
-report artifacts are committed. Fixture-corpus membership above never changes
-this list.
+report artifacts are committed once the later M0 freeze work item produces them.
+Their current absence is pending M0 work, not permission to fabricate or regenerate
+them during a documentation correction. Fixture-corpus membership above never
+changes this list.
 
 ---
 

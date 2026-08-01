@@ -95,9 +95,10 @@ Follow the pattern already established in `rust/geom_kernel/src/par.rs`:
   order.
 - **Thread count comes from exactly one workspace-wide environment variable,
   `PLINTH_THREADS`**, with an all-cores default, read once in `plinth-core` and
-  threaded to every crate's `par::run` pool. `geom_kernel` keeps `GEOM_KERNEL_THREADS`
-  as its own crate-local variable for its existing standalone suites, but when it is
-  driven from `plinth-*`, `PLINTH_THREADS` is what sets the pool. **Do not give each
+  threaded to every crate's `par::run` pool. Frozen `geom_kernel` has the distinct legacy
+  `GEOM_KERNEL_THREADS` control for its existing standalone suites; it is excluded/no-port
+  once the workspace migration is complete. When driven from `plinth-*`,
+  `PLINTH_THREADS` is what sets the pool. **Do not give each
   new crate its own variable name.** A per-crate variable makes the determinism sweep
   in 04-migration-plan.md M8 pass vacuously: setting one crate's variable leaves every
   other crate's pool at its default, so the 1/4/16-thread digests match for the
@@ -105,9 +106,10 @@ Follow the pattern already established in `rust/geom_kernel/src/par.rs`:
 - **Every parallel path needs a thread-sweep test**: run it at 1, 2, and N threads
   and assert the outputs are identical, not merely close.
 
-`PLINTH_THREADS` is a documented runtime control, not a physical/tuning constant and
-not a member of the M0 constant-source ledger. The same applies to crate-local
-legacy runtime controls retained only for standalone compatibility.
+`PLINTH_THREADS` is a mandatory runtime contract, not a physical/tuning registry
+constant; the M0 source ledger records it only as an excluded/nonregistry disposition.
+`GEOM_KERNEL_THREADS` is a distinct frozen-Python/kernel scheduling control with its
+own excluded/no-port row and M8 determinism proof. They are not aliases.
 
 GPU (wgpu) is roadmap, not scope. Keep the batched API shapes such that a GPU backend
 could implement the same slice-in/slice-out signature later.
@@ -341,14 +343,16 @@ Additional required fixtures:
 - **Write the artifact once, at the end of a run.** Stages return owned values; the
   emitted file is produced from the final owned value. Mid-run rewriting of an
   artifact must be unrepresentable in the type system.
-- **The corpus and the baseline are committed** — `corpus/models/` and
-  `corpus/baseline/`. Large binaries are acceptable here; the repo is local-only git,
-  and without them the gates are unexecutable. Do not regenerate baselines casually;
-  the freeze happens once, per 04-migration-plan.md.
-- **Never write outside the repository.** Exactly one carve-out exists, and it is
-  named: M9's clean-checkout proof clones the repo into a throwaway directory under
-  `$TMPDIR` and builds there (04-migration-plan.md M9). It writes no artifact back,
-  and the clone is deleted after the run. Nothing else may write outside the repo.
+- **The model inputs are never committed.** Every `corpus/models/*.stl` is ignored
+  and local. `corpus/manifest.json` and `corpus/baseline/**` are committed when the
+  later M0 freeze work item produces them. Do not fabricate a missing manifest or
+  baseline during documentation or source-inventory work.
+- **Out-of-repo writes have exactly two named carve-outs.** The owner-authorized M0
+  prerequisite copies the durable Treant STL to
+  `${CHITUBOX_CORPUS_DIR:-/Users/craig/code/hughescr/dnd-campaigns}`; that same directory
+  may hold an oversized ChituBox corpus fixture. M9's clean-checkout proof clones into
+  a throwaway directory under `$TMPDIR`, builds there, writes no artifact back, and
+  deletes the clone. Nothing else may write outside the repository.
 
 ---
 

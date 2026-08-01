@@ -624,6 +624,99 @@ machines. Its deterministic replacement is a work budget.
 | `hollow` policy family | pitch 0.5 mm; bulk 10.0 mm; save 15.0 mL / 0.25; lobe 0.5 mL / 15.0 mm; drain 1.5 mm; vent 1.25 mm | mixed | **P**, output-changing hollowing policy |
 | ChituBox-emission geometry | 24 sides; plate tolerance 1e-5 mm; root 10 layers / 0.5 mm; pad 2.2 mm; raft 0.2 mm; pad 20 sides | mixed | format/generation contract, separate from binary offsets |
 
+### 3.10.2 Closed source-ledger additions — support and verification
+
+These independently varying frozen-Python controls are registry members. They
+remain `Placeholder` unless another wrapper is stated explicitly.
+
+| Stable ID | Value / disposition | Source meaning |
+|---|---|---|
+| `JOINT_BALL_FACTOR` | 1.0 | joint-ball geometry factor |
+| `MAX_TRUNK_R_MM` | 2.4 mm | live trunk-radius ceiling |
+| `MATERIAL_COST_PER_MM` | 0.05 per mm | strut-selection material weight |
+| `TIP_RADIUS_MAX_LEGACY_MM` | 1.0 mm, **P** | live output-affecting placement clamp; legacy, but not merely diagnostic |
+| `BRACING_MODEL_RUNG_MAX_CANDIDATES` / `BRACING_MODEL_RUNG_Z_TOL_MM` / `BRACING_MODEL_RUNG_MIN_LENGTH_MM` | 6 / 0.75 mm / 1.0 mm | model-rung candidate policy |
+| `BALL_BREACH_EPS_MM` / `MURRAY_TOLERANCE` | 0.05 mm / 0.05 | verification tolerances |
+| `CONNECTIVITY_AXIS_ATTACH_TOL_MM` / `CONNECTIVITY_EMBED_PAD_MM` | 0.25 mm / 0.45 mm | connectivity attachment policy |
+| `GATE_ON_REMOVAL_DEFAULT` / `GATE_ON_BALL_BREACH_DEFAULT` | false / true | independent verification defaults |
+| `SURFACE_TREE_PITCH_MM` / `SURFACE_TREE_MAX_POINTS` / `SURFACE_TREE_SEED` | 0.4 mm / 150000 / 0 | result-changing sampled-surface defaults, never batch/resource exclusions |
+| `ENGINE_SURFACE_TREE_PITCH_MM` / `ENGINE_SURFACE_TREE_MAX_POINTS` | 0.3 mm / 400000 | live engine call-site overrides; distinct from the callable defaults and not aliases |
+
+`verify.connectivity_report`'s 0.2 mm plate band is an alias of
+`PLATE_BAND_MM`, not a third independently owned value.
+
+### 3.10.3 Closed source-ledger additions — hollowing and drainage
+
+| Stable ID | Value / disposition | Source meaning |
+|---|---|---|
+| `HOLLOW_WALL_DEFAULT_MM` | 2.5 mm, **P** | generation/tool default |
+| `HOLLOW_ORIENT_ENABLE_DEFAULT` | true, **P** | independently surviving pipeline default |
+| `HOLLOW_SHARD_MAX_FACES` / `HOLLOW_SHARD_MAX_DIM_MM` / `HOLLOW_SHARD_MAX_VOLUME_MM3` | 64 / 1.0 mm / 0.01 mm3 | component-triage gates |
+| `HOLLOW_CONTAINMENT_SAMPLES` / `HOLLOW_CONTAINMENT_MIN_FRACTION` | 32 / 0.9 | internal-component evidence gate |
+| `HOLLOW_ALLOW_OUTPUT_DEFAULT` | false, **P** | hollow output stays disabled without the dedicated verifier |
+| `HOLLOW_EXIT_RAY_MAX_MM` | 45 mm | drain/vent exit search ceiling |
+| `HOLLOW_DRAIN_DIRECTIONS` | `(0,0,-1)`, `(0.5,0,-1)`, `(-0.5,0,-1)`, `(0,0.5,-1)`, `(0,-0.5,-1)` | one structured downward-direction policy |
+| `HOLLOW_EXTRA_DRAIN_POLICY` | min 0.5 mL; max 3; exit <= 8 mm; extensions 4/8/9 mm; 24 cylinder sides | one structured trapped-pocket repair policy |
+
+The frozen orientation heuristic is **retired/no-port as a policy**, not silently
+unaccounted: proxy reduction 0.9; identity plus ±10/20/30 degrees about X and Y;
+score `0.5*support + 3*peak + 0.3*height`; section margin 0.1 mm at a 4 mm step;
+support-normal cutoff -0.707. The target dense orientation search in §3.8 replaces
+that coupled heuristic. Its independently useful enable default remains registered.
+
+### 3.10.4 Closed source-ledger additions — CCO, Phase 8 and performance trials
+
+| Stable ID | Value / disposition | Source meaning |
+|---|---|---|
+| `CCO_FERMAT_MAX_ITERATIONS` / `CCO_CONE_TOLERANCE_DEG` | 12 / 1e-6 degrees | bounded Fermat solve and cone comparison |
+| `CCO_BIFURCATION_HOSTS` / `CCO_MIN_SPLIT_LENGTH_MM` | 5 / 0.5 mm | bifurcation candidate policy |
+| `CCO_SPLIT_SLIDE_POLICY` | start 0.03; end 0.97; step 0.03; cap 40 | one structured deterministic slide grid |
+| `P8_RESEAT_ENABLE` / `P8_JUNCTION_RESEAT_ENABLE` / `P8_RELOCATE_ENABLE` | true / true / true | independent Phase-8 enables |
+| `P8_JUNCTION_RESEAT_STEP_MM` / `P8_JUNCTION_RESEAT_MAX_MM` | 0.25 / 1.0 mm | junction re-seat grid |
+| `PERF_BEAM_K` / `PERF_ANCHOR_CAP` / `PERF_SEED_SPACING_FACTOR` | **Pending**, disabled (`None`) | enabled values change search results |
+| `PERF_FIX_ITER_CAPS` / `PERF_GATE_EMIT_ON_VERIFY` / `PERF_REWIRE_WORK_BUDGET` | **Pending**, disabled (`None`/false/`None`) | enabled values change termination or gate outcome |
+
+`perf_exact_opts_disable = false` is excluded only because it disables
+exact-result-preserving caches/accelerators; a cache-disabled equality run is the
+required proof. `KDTREE_REBUILD_EVERY = 25` is likewise excluded only because
+`_DynamicMemberIndex.nearest_members` brute-forces the unindexed tail before
+returning exact nearest members. The exclusion is implementation exactness, not a
+claim that 25 is physics.
+
+### 3.10.5 Closed source-ledger additions — emission, decimation and tools
+
+| Stable ID | Value / disposition | Source meaning |
+|---|---|---|
+| `PIPELINE_HOLLOW_ENABLE_DEFAULT` / `PIPELINE_P8_RELOCATE_DEFAULT` | true / false | pipeline/tool interface defaults; orientation aliases `HOLLOW_ORIENT_ENABLE_DEFAULT` |
+| `EMIT_REQUIRE_PASSED_GATES_DEFAULT` | true | output authorization default |
+| `CHITUBOX_DEFAULT_PLACEMENT_XY_MM` | (0.0, 0.0) mm | emitted project placement default |
+| `CHITUBOX_ROOT_LAYERS` / `CHITUBOX_ROOT_HEIGHT_MM` | 10 / 0.5 mm | root straightness contract |
+| `DECIMATION_FEATURE_PROBE_RATIO` / `DECIMATION_SEED_ERROR_MM` / `DECIMATION_FEATURE_HALO_MM` / `DECIMATION_PROTECTED_CAP_FRACTION` | 0.2 / 0.050 mm / 0.4 mm / 0.12 | feature-protection controls |
+| `DECIMATION_ADAPTATION_POLICY` | 3 adaptations; feature multiplier 2.0; error multiplier 0.6 | one structured adaptive policy |
+| `DECIMATION_VERTEX_GROUP_FACTOR` | 10 | protected vertex-group sizing |
+| `DECIMATION_RATIO_SEARCH` | [0.05, 0.50], 5 bisections | one structured ratio-search policy |
+| `DECIMATION_P99_SAMPLE_POLICY` / `DECIMATION_P999_SAMPLE_POLICY` | seed/cap 42/120000 and 1/150000 | independent error-sampling policies |
+| `DECIMATION_SCALE_ACCEPTANCE_MM` | [10, 300] mm | scale sanity interval |
+| `GEOMETRY_SWEEP_MAX_PASSES` / `GEOMETRY_SWEEP_ZERO_THRESHOLD` | 8 / 1e-4 | Blender repair-loop defaults; retained only until the tool is retired |
+
+`PIXEL_PITCH_Y_UM = 19` is the one canonical pixel source for decimation;
+the decimator's local pixel input is an alias. The p99 `/2000`, p99.9 `/1000`,
+and final `1.1` recheck slack remain the three independently registered Derived
+policies in §3.7.
+
+### 3.10.6 Retired and runtime-control dispositions
+
+- `P8_CONCESSION_STANDOFF_LADDER = (0.3, 0.1) mm` is explicit **retired/no-port**
+  Feature-B concession behavior.
+- Every live 3.0 mm lift override in `pipeline.py`, `emit_supports.py`,
+  `prep_one.py`, `run_v5.py`, `run_engine_full.py`, and
+  `recheck_rewire_cap.py` belongs to the one retired `LIFT_MM_PIPELINE_OVERRIDE`
+  row. None aliases canonical `LIFT_MM = 5.0 mm`.
+- `PLINTH_THREADS` is the new mandatory Rust workspace scheduling contract in
+  `06-conventions.md` §3 and M8, outside the physics/tuning registry.
+  Frozen-Python `GEOM_KERNEL_THREADS` is a distinct legacy kernel scheduling
+  control, excluded/no-port with an M8 thread-sweep disposition. They are not aliases.
+
 ### 3.11 NOT constants — resource guards
 
 These exist in `config.py` and in module scope but are **not physics and not

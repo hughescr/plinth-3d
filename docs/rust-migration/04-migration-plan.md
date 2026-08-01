@@ -377,7 +377,9 @@ see the audit table in §M9.)
 
 ### `corpus/manifest.json` schema
 
-Fix this now; M1 reads it and every later milestone depends on it.
+Fix this during the later M0 baseline-freeze work item; M1 reads it and every later
+milestone depends on it. If the manifest or baseline is absent during this documentation
+checkpoint, that state is **pending M0 work** — do not fabricate or refreeze either artifact.
 
 ```json
 {

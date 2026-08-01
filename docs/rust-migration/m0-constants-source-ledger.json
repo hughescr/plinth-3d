@@ -1,169 +1,2284 @@
 {
+  "schema": "plinth/m0-constant-source-ledger",
+  "version": 1,
+  "closed": true,
   "registry_entries": [
-    {"id":"A_ABS_MM2","classification":"runtime_gate","provenance":"Placeholder owner-ratified spec","python_source_locators":["scripts/support_placement/verify.py:A_ABS_MM2"],"normative":"03-physics-and-constants.md §3.6 = 2.0 mm2"},
-    {"id":"BALL_FACTOR_FOOT","classification":"runtime_geometry","provenance":"Placeholder","python_source_locators":["scripts/support_placement/joints.py:MODEL_FOOT_FACTOR"],"normative":"03-physics-and-constants.md §3.2 = 1.4"},
-    {"id":"BALL_FACTOR_STUB","classification":"runtime_geometry","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:tip_ball_r_factor"],"normative":"03-physics-and-constants.md §3.2 = 1.5"},
-    {"id":"BRACE_LADDER_Z_MM","classification":"runtime_tuning","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:brace_ladder_z_mm"],"normative":"03-physics-and-constants.md §3.3 = 8.0 mm"},
-    {"id":"BRACE_NEIGHBOR_MAX_XY_MM","classification":"runtime_tuning","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:brace_neighbor_max_xy_mm"],"normative":"03-physics-and-constants.md §3.3 = 15.0 mm"},
-    {"id":"BRACE_REACH_MAX_FACTOR_X","classification":"runtime_tuning","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:brace_reach_max_factor_x"],"normative":"03-physics-and-constants.md §3.3 = 1.5"},
-    {"id":"BRACE_R_MM","classification":"runtime_tuning","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:brace_r_mm"],"normative":"03-physics-and-constants.md §3.3 = 0.5 mm"},
-    {"id":"BRACING_FALLBACK_FRACTIONS","classification":"runtime_search","provenance":"Placeholder","python_source_locators":["scripts/support_placement/bracing.py:_FALLBACK_FRACTIONS"],"normative":"03-physics-and-constants.md §3.10.1 = (0.5,0.25,0.75,0.1,0.9)"},
-    {"id":"BRACING_MAX_STACKED_FALLBACKS","classification":"runtime_search_cap","provenance":"Placeholder","python_source_locators":["scripts/support_placement/bracing.py:_MAX_STACKED_FALLBACKS"],"normative":"03-physics-and-constants.md §3.10.1 = 6"},
-    {"id":"BRACING_MIN_CROSS_LINK_XY_MM","classification":"runtime_search","provenance":"Placeholder","python_source_locators":["scripts/support_placement/bracing.py:_MIN_CROSS_LINK_XY_MM"],"normative":"03-physics-and-constants.md §3.10.1 = 1/sqrt(2) mm"},
-    {"id":"BRACING_REACH_TIER_BASE_FACTOR","classification":"runtime_search","provenance":"Placeholder","python_source_locators":["scripts/support_placement/bracing.py:_REACH_TIER_BASE_FACTOR"],"normative":"03-physics-and-constants.md §3.10.1 = 1.25"},
-    {"id":"BRANCH_ANGLE_DEG","classification":"runtime_gate","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:branch_angle_deg"],"normative":"03-physics-and-constants.md §3.5 = 60.0 deg"},
-    {"id":"BRIDGE_FREE_GAP_MM","classification":"runtime_perception","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:bridge_free_gap_mm"],"normative":"03-physics-and-constants.md §3.4 = 1.0 mm"},
-    {"id":"BRIDGE_SAG_SPAN_APPROX_MM","classification":"runtime_diagnostic","provenance":"Placeholder owner approximate","python_source_locators":[],"normative":"03-physics-and-constants.md §3.4 = about 3.0 mm at 0.300 mm section; distinct from BRIDGE_FREE_GAP_MM"},
-    {"id":"CHITUBOX_EMIT_N_SIDES","classification":"runtime_emit_geometry","provenance":"format/generation contract","python_source_locators":["scripts/support_placement/chitubox_emit.py:N_SIDES"],"normative":"03-physics-and-constants.md §3.10.1 = 24"},
-    {"id":"CHITUBOX_PAD_DIAMETER_MM","classification":"runtime_emit_geometry","provenance":"format/generation contract","python_source_locators":["scripts/support_placement/chitubox_emit.py:PAD_DIAMETER_MM"],"normative":"03-physics-and-constants.md §3.10.1 = 2.2 mm"},
-    {"id":"CHITUBOX_PAD_N_SIDES","classification":"runtime_emit_geometry","provenance":"format/generation contract","python_source_locators":["scripts/support_placement/chitubox_emit.py:PAD_N_SIDES"],"normative":"03-physics-and-constants.md §3.10.1 = 20"},
-    {"id":"CHITUBOX_PLATE_MESH_TOL_MM","classification":"runtime_emit_geometry","provenance":"format/generation contract","python_source_locators":["scripts/support_placement/chitubox_emit.py:PLATE_MESH_TOL_MM"],"normative":"03-physics-and-constants.md §3.10.1 = 1e-5 mm"},
-    {"id":"CHITUBOX_RAFT_HEIGHT_MM","classification":"runtime_emit_geometry","provenance":"format/generation contract","python_source_locators":["scripts/support_placement/chitubox_emit.py:RAFT_HEIGHT_MM"],"normative":"03-physics-and-constants.md §3.10.1 = 0.2 mm"},
-    {"id":"CLEARANCE_SAMPLE_STEP_MM","classification":"legacy_diagnostic","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:clearance_sample_step_mm"],"normative":"03-physics-and-constants.md §3.5 = 0.3 mm"},
-    {"id":"COINCIDE_TOL_MM","classification":"runtime_geometry","provenance":"Placeholder","python_source_locators":["scripts/support_placement/joints.py:COINCIDE_TOL_MM"],"normative":"03-physics-and-constants.md §3.6 = 0.15 mm"},
-    {"id":"COLINEAR_ANGLE_DEG","classification":"runtime_geometry","provenance":"Placeholder","python_source_locators":["scripts/support_placement/joints.py:COLINEAR_ANGLE_DEG"],"normative":"03-physics-and-constants.md §3.6 = 10.0 deg"},
-    {"id":"COLINEAR_RADIUS_FRAC","classification":"runtime_geometry","provenance":"Placeholder","python_source_locators":["scripts/support_placement/joints.py:COLINEAR_RADIUS_FRAC"],"normative":"03-physics-and-constants.md §3.6 = 0.20"},
-    {"id":"COVERAGE_RADIUS_FACTOR","classification":"runtime_gate","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:coverage_radius_factor"],"normative":"03-physics-and-constants.md §3.4 = 1.5"},
-    {"id":"COVERAGE_REPAIR_MAX_ATTEMPTS","classification":"runtime_search_cap","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:coverage_repair_max_attempts"],"normative":"03-physics-and-constants.md §3.11 = 8; result-changing cap"},
-    {"id":"DECIMATION_P999_FACTOR","classification":"runtime_metric","provenance":"Derived pixel-pitch policy","python_source_locators":[],"normative":"03-physics-and-constants.md §3.7 = pixel_um/1000"},
-    {"id":"DECIMATION_P99_FACTOR","classification":"runtime_metric","provenance":"Derived pixel-pitch policy","python_source_locators":[],"normative":"03-physics-and-constants.md §3.7 = pixel_um/2000"},
-    {"id":"DECIMATION_RECHECK_SLACK","classification":"runtime_metric","provenance":"Derived policy","python_source_locators":[],"normative":"03-physics-and-constants.md §3.7 = 1.1"},
-    {"id":"DEFAULT_CONTACT_DEPTH_MM","classification":"runtime_generation_profile","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:contact_depth_mm"],"normative":"03-physics-and-constants.md §3.2 = 0.3 mm; stable declaration name"},
-    {"id":"DELICACY_CURVATURE_WEIGHT","classification":"runtime_search_weight","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:delicacy_curvature_weight"],"normative":"03-physics-and-constants.md §3.8 = 0.6"},
-    {"id":"DELICACY_THINNESS_WEIGHT","classification":"runtime_search_weight","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:delicacy_thinness_weight"],"normative":"03-physics-and-constants.md §3.8 = 0.4"},
-    {"id":"ENCLOSURE_PROOF_TOL_MM","classification":"runtime_geometry","provenance":"Derived diagnostic from Placeholder","python_source_locators":["scripts/support_placement/joints.py:ENCLOSURE_PROOF_TOL_MM"],"normative":"03-physics-and-constants.md §3.6 = 0.018 mm"},
-    {"id":"ENCLOSURE_TOL_MM","classification":"runtime_geometry","provenance":"Placeholder","python_source_locators":["scripts/support_placement/joints.py:ENCLOSURE_TOL_MM"],"normative":"03-physics-and-constants.md §3.6 = 0.02 mm; old pixel derivation is false"},
-    {"id":"EPS_COS","classification":"runtime_numeric_guard","provenance":"Derived divide-by-zero guard","python_source_locators":["scripts/support_placement/verify.py:EPS_COS"],"normative":"03-physics-and-constants.md §3.6 = 1e-9; not a physics floor"},
-    {"id":"FLARE_LEN_MM","classification":"runtime_geometry","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:flare_len_mm"],"normative":"03-physics-and-constants.md §3.2 = 1.5 mm"},
-    {"id":"FLARE_R_FACTOR","classification":"runtime_geometry","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:flare_r_factor"],"normative":"03-physics-and-constants.md §3.2 = 1.6"},
-    {"id":"GRIP_CLEAR_MM","classification":"runtime_opt_in_metric","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:grip_clear_mm"],"normative":"03-physics-and-constants.md §3.9 = 5.0 mm"},
-    {"id":"GRIP_HANDLE_LEN_MM","classification":"runtime_opt_in_metric","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:grip_handle_len_mm"],"normative":"03-physics-and-constants.md §3.9 = 10.0 mm"},
-    {"id":"GRIP_HANDLE_R_MM","classification":"runtime_opt_in_metric","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:grip_handle_r_mm"],"normative":"03-physics-and-constants.md §3.9 = 1.0 mm"},
-    {"id":"HOLLOW_BULK_MIN_MM","classification":"runtime_hollowing","provenance":"Placeholder","python_source_locators":["scripts/support_placement/hollow.py:BULK_MIN_MM"],"normative":"03-physics-and-constants.md §3.10.1 = 10.0 mm"},
-    {"id":"HOLLOW_DRAIN_R_MM","classification":"runtime_hollowing","provenance":"Placeholder","python_source_locators":["scripts/support_placement/hollow.py:DRAIN_R"],"normative":"03-physics-and-constants.md §3.10.1 = 1.5 mm"},
-    {"id":"HOLLOW_LOBE_BAND_MM","classification":"runtime_hollowing","provenance":"Placeholder","python_source_locators":["scripts/support_placement/hollow.py:LOBE_BAND_MM"],"normative":"03-physics-and-constants.md §3.10.1 = 15.0 mm"},
-    {"id":"HOLLOW_LOBE_MIN_ML","classification":"runtime_hollowing","provenance":"Placeholder","python_source_locators":["scripts/support_placement/hollow.py:LOBE_MIN_ML"],"normative":"03-physics-and-constants.md §3.10.1 = 0.5 mL"},
-    {"id":"HOLLOW_PITCH_MM","classification":"runtime_hollowing","provenance":"Placeholder","python_source_locators":["scripts/support_placement/hollow.py:PITCH"],"normative":"03-physics-and-constants.md §3.10.1 = 0.5 mm"},
-    {"id":"HOLLOW_SAVE_MIN_FRAC","classification":"runtime_hollowing","provenance":"Placeholder","python_source_locators":["scripts/support_placement/hollow.py:SAVE_MIN_FRAC"],"normative":"03-physics-and-constants.md §3.10.1 = 0.25"},
-    {"id":"HOLLOW_SAVE_MIN_ML","classification":"runtime_hollowing","provenance":"Placeholder","python_source_locators":["scripts/support_placement/hollow.py:SAVE_MIN_ML"],"normative":"03-physics-and-constants.md §3.10.1 = 15.0 mL"},
-    {"id":"HOLLOW_VENT_R_MM","classification":"runtime_hollowing","provenance":"Placeholder","python_source_locators":["scripts/support_placement/hollow.py:VENT_R"],"normative":"03-physics-and-constants.md §3.10.1 = 1.25 mm"},
-    {"id":"ISLAND_ATTACH_REACH_MM","classification":"runtime_perception","provenance":"Derived","python_source_locators":["scripts/support_placement/perception.py:ISLAND_ATTACH_REACH_MM"],"normative":"03-physics-and-constants.md §3.4 = 0.2 mm"},
-    {"id":"ISLAND_BIRTH_LINK_R_MM","classification":"runtime_perception","provenance":"Placeholder tuned","python_source_locators":["scripts/support_placement/engine.py:_ISLAND_BIRTH_LINK_R_MM"],"normative":"03-physics-and-constants.md §3.4 = 0.6 mm"},
-    {"id":"ISLAND_MERGE_RADIUS_MM","classification":"runtime_perception","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:island_merge_radius_mm"],"normative":"03-physics-and-constants.md §3.4 = 2.0 mm"},
-    {"id":"KAPPA","classification":"runtime_gate","provenance":"Placeholder owner-ratified spec","python_source_locators":["scripts/support_placement/verify.py:KAPPA"],"normative":"03-physics-and-constants.md §3.6 = 1.25"},
-    {"id":"LAYER_HEIGHT_DEFAULT_MM","classification":"runtime_printer_profile","provenance":"Measured ProjectRecord","python_source_locators":["scripts/support_placement/config.py:layer_height_mm"],"normative":"03-physics-and-constants.md §3.7 = 0.050 mm"},
-    {"id":"LIFT_MM","classification":"runtime_printer_profile","provenance":"Placeholder local project default","python_source_locators":["scripts/support_placement/config.py:lift_mm"],"normative":"03-physics-and-constants.md §3.5 = 5.0 mm; pipeline 3.0 is retired"},
-    {"id":"LOAD_SHARING","classification":"runtime_physics","provenance":"Measured CalibrationPlate 6 Exact 2026-07-31","python_source_locators":[],"normative":"03-physics-and-constants.md §3.1 and §4.2 = Additive { n_eff_cap: 6.0 }, err null; note includes five caveats, orientation and B6 override citation"},
-    {"id":"L_SCAR_MAX_MM","classification":"runtime_gate","provenance":"Placeholder owner-ratified spec","python_source_locators":["scripts/support_placement/verify.py:L_SCAR_MAX_MM"],"normative":"03-physics-and-constants.md §3.6 = 2.5 mm"},
-    {"id":"MAX_DEFLECTION_MM","classification":"runtime_deflection","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:max_deflection_mm"],"normative":"03-physics-and-constants.md §3.3 = 0.15 mm"},
-    {"id":"MAX_SEGMENT_ANGLE_DEG","classification":"runtime_gate","provenance":"Derived","python_source_locators":["scripts/support_placement/config.py:max_segment_angle_deg"],"normative":"03-physics-and-constants.md §3.5 = 45.0 deg"},
-    {"id":"MAX_UNBRACED_SHAFT_R_MM","classification":"runtime_tuning","provenance":"Derived corpus","python_source_locators":["scripts/support_placement/config.py:max_unbraced_shaft_r_mm"],"normative":"03-physics-and-constants.md §3.2 = 0.9 mm"},
-    {"id":"MINIMA_BIRTH_MATCH_LAYERS","classification":"runtime_perception","provenance":"Derived corpus","python_source_locators":["scripts/support_placement/config.py:minima_birth_match_layers"],"normative":"03-physics-and-constants.md §3.7 = 2.0 layers"},
-    {"id":"MINIMA_CONNECT_LAYERS","classification":"runtime_perception","provenance":"Derived corpus","python_source_locators":["scripts/support_placement/config.py:minima_connect_layers"],"normative":"03-physics-and-constants.md §3.7 = 2.0 layers"},
-    {"id":"MINIMA_CONTACT_RADIUS_MM","classification":"runtime_perception","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:minima_contact_radius_mm"],"normative":"03-physics-and-constants.md §3.7 = 1.0 mm"},
-    {"id":"MINIMA_DROP_INTERIOR_FACES","classification":"runtime_perception","provenance":"Measured ProjectRecord","python_source_locators":["scripts/support_placement/config.py:minima_drop_interior_faces"],"normative":"03-physics-and-constants.md §3.7 = true"},
-    {"id":"MINIMA_EPS_MM","classification":"runtime_perception","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:minima_eps_mm"],"normative":"03-physics-and-constants.md §3.7 = 0.02 mm"},
-    {"id":"MINIMA_REQUIRE_ISLAND_BIRTH","classification":"runtime_perception","provenance":"Measured ProjectRecord","python_source_locators":["scripts/support_placement/config.py:minima_require_island_birth"],"normative":"03-physics-and-constants.md §3.7 = true"},
-    {"id":"MINIMA_SUPPORT_AREA_TIPS","classification":"runtime_perception","provenance":"Measured sensitivity sweep","python_source_locators":["scripts/support_placement/config.py:minima_support_area_tips"],"normative":"03-physics-and-constants.md §3.7 = 1.0"},
-    {"id":"MIN_CONTACTS_PER_ISLAND","classification":"runtime_placement","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:min_contacts_per_island"],"normative":"03-physics-and-constants.md §3.4 = 1"},
-    {"id":"MIN_ILLEGAL_LEN_MM","classification":"runtime_gate","provenance":"Placeholder","python_source_locators":["scripts/support_placement/verify.py:MIN_ILLEGAL_LEN_MM"],"normative":"03-physics-and-constants.md §3.6 = 0.05 mm"},
-    {"id":"MIN_SHAFT_R_MM","classification":"runtime_geometry","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:min_shaft_r_mm"],"normative":"03-physics-and-constants.md §3.2 = 0.3 mm"},
-    {"id":"MIN_SHOOT_R_MM","classification":"runtime_routing","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:min_shoot_r_mm"],"normative":"03-physics-and-constants.md §3.2 = 0.35 mm"},
-    {"id":"MIN_TRUNK_R_MM","classification":"runtime_geometry","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:min_trunk_r_mm"],"normative":"03-physics-and-constants.md §3.2 = 0.8 mm"},
-    {"id":"MODEL_BRACE_MAX_LEN_MM","classification":"runtime_tuning","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:model_brace_max_len_mm"],"normative":"03-physics-and-constants.md §3.3 = 5.0 mm"},
-    {"id":"MODULUS_GREEN_GPA","classification":"runtime_diagnostic","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:modulus_green_gpa"],"normative":"03-physics-and-constants.md §3.1 = 0.5 GPa"},
-    {"id":"NEAR_PLATE_MM","classification":"runtime_perception","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:near_plate_mm"],"normative":"03-physics-and-constants.md §3.4 = 1.5 mm"},
-    {"id":"N_EFF_CAP","classification":"runtime_physics_parameter","provenance":"Derived plate-6 design-grid choice","python_source_locators":[],"normative":"03-physics-and-constants.md §4.2 = 6.0; part of LOAD_SHARING note, not a separate measurement"},
-    {"id":"ON_AXIS_TOL_MM","classification":"runtime_geometry","provenance":"Placeholder","python_source_locators":["scripts/support_placement/joints.py:ON_AXIS_TOL_MM"],"normative":"03-physics-and-constants.md §3.6 = 0.2 mm"},
-    {"id":"ORIENT_SCAR_WEIGHT","classification":"runtime_search_weight","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:orient_scar_weight"],"normative":"03-physics-and-constants.md §3.8 = 0.4"},
-    {"id":"OVERHANG_ANGLE_DEG","classification":"runtime_perception","provenance":"Derived ChituBox convention","python_source_locators":["scripts/support_placement/config.py:overhang_angle_deg"],"normative":"03-physics-and-constants.md §3.4 = 45.0 deg"},
-    {"id":"P8_BALL_SLIDE_MAX_MM","classification":"runtime_search","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:p8_ball_slide_max_mm"],"normative":"03-physics-and-constants.md §3.10 = 2.0 mm"},
-    {"id":"P8_BALL_SLIDE_STEP_MM","classification":"runtime_search","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:p8_ball_slide_step_mm"],"normative":"03-physics-and-constants.md §3.10 = 0.25 mm"},
-    {"id":"P8_CHORD_CANON_MICRON","classification":"runtime_determinism","provenance":"Derived","python_source_locators":["scripts/support_placement/config.py:p8_chord_canon_micron"],"normative":"03-physics-and-constants.md §3.6 = 1 micron"},
-    {"id":"P8_MAX_RELOCATE_ROUNDS","classification":"runtime_search_cap","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:p8_max_relocate_rounds"],"normative":"03-physics-and-constants.md §3.10 = 4"},
-    {"id":"P8_MAX_RELOCATE_SWEEPS","classification":"runtime_search_cap","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:p8_max_relocate_sweeps"],"normative":"03-physics-and-constants.md §3.10 = 8"},
-    {"id":"P8_MAX_UNRESOLVED","classification":"runtime_gate","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:p8_max_unresolved"],"normative":"03-physics-and-constants.md §3.10 = 10"},
-    {"id":"P8_MAX_UNRESOLVED_WEIGHT","classification":"runtime_gate","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:p8_max_unresolved_weight"],"normative":"03-physics-and-constants.md §3.10 = 3.0"},
-    {"id":"P8_POCKET_CORRIDOR_PAD_MM","classification":"runtime_search","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:p8_pocket_corridor_pad_mm"],"normative":"03-physics-and-constants.md §3.10 = 0.5 mm"},
-    {"id":"P8_POCKET_MIN_MEMBERS","classification":"runtime_search","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:p8_pocket_min_members"],"normative":"03-physics-and-constants.md §3.10 = 8"},
-    {"id":"P8_POCKET_VOXEL_MM","classification":"runtime_search","provenance":"Derived","python_source_locators":["scripts/support_placement/config.py:p8_pocket_voxel_mm"],"normative":"03-physics-and-constants.md §3.10 = 6.0 mm"},
-    {"id":"P8_REAIM_AZIMUTH_DEG","classification":"runtime_search","provenance":"Placeholder pinned enumeration","python_source_locators":["scripts/support_placement/config.py:p8_reaim_azimuth_deg"],"normative":"03-physics-and-constants.md §3.10 = (0,45,90,135,180,225,270,315)"},
-    {"id":"P8_REAIM_LENGTH_FACTORS","classification":"runtime_search","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:p8_reaim_length_factors"],"normative":"03-physics-and-constants.md §3.10 = (1.0,0.75,0.5)"},
-    {"id":"P8_REAIM_POLAR_DEG","classification":"runtime_search","provenance":"Placeholder pinned enumeration","python_source_locators":["scripts/support_placement/config.py:p8_reaim_polar_deg"],"normative":"03-physics-and-constants.md §3.10 = (0,10,20,30)"},
-    {"id":"P8_REAIM_ROUTE_GROWTH_MAX_FACTOR","classification":"runtime_gate","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:p8_reaim_route_growth_max_factor"],"normative":"03-physics-and-constants.md §3.10 = 1.50"},
-    {"id":"P8_REAIM_VOLUME_DELTA_MAX_ML","classification":"runtime_gate","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:p8_reaim_volume_delta_max_ml"],"normative":"03-physics-and-constants.md §3.10 = 0.02 mL"},
-    {"id":"P8_RESEAT_MAX_SEEDS","classification":"runtime_search_cap","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:p8_reseat_max_seeds"],"normative":"03-physics-and-constants.md §3.10 = 24"},
-    {"id":"P8_RESEAT_RADIUS_MM","classification":"runtime_search","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:p8_reseat_radius_mm"],"normative":"03-physics-and-constants.md §3.10 = 2.0 mm"},
-    {"id":"P8_RESIN_DELTA_MAX","classification":"runtime_gate","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:p8_resin_delta_max"],"normative":"03-physics-and-constants.md §3.10 = 0.03"},
-    {"id":"P8_RESIZE_FIXED_POINT_MAX_ROUNDS","classification":"runtime_search_cap","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:p8_resize_fixed_point_max_rounds"],"normative":"03-physics-and-constants.md §3.10 = 4"},
-    {"id":"P8_SITE_COMMIT_BUDGET","classification":"runtime_search_cap","provenance":"Placeholder","python_source_locators":["scripts/support_placement/phase8_driver.py:_SITE_COMMIT_BUDGET"],"normative":"03-physics-and-constants.md §3.10.1 = 2"},
-    {"id":"P8_STRUT_GROWTH_MAX_FACTOR","classification":"runtime_gate","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:p8_strut_growth_max_factor"],"normative":"03-physics-and-constants.md §3.10 = 1.25"},
-    {"id":"PEEL_ELEVATIONS_DEG","classification":"runtime_opt_in_metric","provenance":"Placeholder","python_source_locators":["scripts/support_placement/removal.py:_PEEL_ELEVATIONS_DEG"],"normative":"03-physics-and-constants.md §3.9 = (0,25,45,65,90) deg"},
-    {"id":"PEEL_PRESSURE_PA","classification":"runtime_diagnostic","provenance":"Placeholder legacy split","python_source_locators":["scripts/support_placement/config.py:peel_pressure_pa"],"normative":"03-physics-and-constants.md §3.1 = 3000.0 Pa"},
-    {"id":"PIXEL_PITCH_X_UM","classification":"runtime_printer_profile","provenance":"Measured VendorDocument","python_source_locators":[],"normative":"03-physics-and-constants.md §3.7 = 14 um"},
-    {"id":"PIXEL_PITCH_Y_UM","classification":"runtime_printer_profile","provenance":"Measured VendorDocument","python_source_locators":[],"normative":"03-physics-and-constants.md §3.7 = 19 um"},
-    {"id":"PLATE_BAND_MM","classification":"runtime_geometry","provenance":"Placeholder","python_source_locators":["scripts/support_placement/joints.py:PLATE_BAND_MM","scripts/support_placement/chitubox_emit.py:PLATE_BAND_MM"],"normative":"03-physics-and-constants.md §3.6 = 0.2 mm; one Rust owner"},
-    {"id":"PRINT_FLOOR_CHORD_MM","classification":"runtime_gate","provenance":"Derived owner-ratified","python_source_locators":["scripts/support_placement/verify.py:PRINT_FLOOR_CHORD_MM"],"normative":"03-physics-and-constants.md §3.6 = 0.08 mm"},
-    {"id":"PULL_DIST_MM","classification":"runtime_opt_in_metric","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:pull_dist_mm"],"normative":"03-physics-and-constants.md §3.9 = 15.0 mm"},
-    {"id":"REWIRE_DEGENERATE_LEN_MM","classification":"runtime_search","provenance":"Placeholder","python_source_locators":["scripts/support_placement/rewire.py:DEGENERATE_LEN_MM"],"normative":"03-physics-and-constants.md §3.10.1 = 1e-4 mm"},
-    {"id":"REWIRE_MAX_SLIDE_EVALS","classification":"runtime_search_cap","provenance":"Placeholder","python_source_locators":["scripts/support_placement/rewire.py:MAX_SLIDE_EVALS"],"normative":"03-physics-and-constants.md §3.10.1 = 50"},
-    {"id":"REWIRE_ROLL_EPS","classification":"runtime_search","provenance":"Placeholder","python_source_locators":["scripts/support_placement/rewire.py:ROLL_EPS"],"normative":"03-physics-and-constants.md §3.10.1 = 0.0025"},
-    {"id":"REWIRE_ROLL_WINDOW","classification":"runtime_search","provenance":"Placeholder","python_source_locators":["scripts/support_placement/rewire.py:ROLL_WINDOW"],"normative":"03-physics-and-constants.md §3.10.1 = 20"},
-    {"id":"REWIRE_TWIG_MERGE_LEN_MM","classification":"runtime_search","provenance":"Placeholder","python_source_locators":["scripts/support_placement/rewire.py:TWIG_MERGE_LEN_MM"],"normative":"03-physics-and-constants.md §3.10.1 = 0.5 mm"},
-    {"id":"REWIRE_WORK_BUDGET","classification":"runtime_search_cap","provenance":"Placeholder deterministic mode","python_source_locators":["scripts/support_placement/config.py:perf_rewire_work_budget"],"normative":"03-physics-and-constants.md §3.3 = deterministic replacement for retired wall-clock cap"},
-    {"id":"SATURN_BUILD_VOLUME_MM","classification":"runtime_printer_profile","provenance":"Measured VendorDocument","python_source_locators":[],"normative":"03-physics-and-constants.md §3.7 = X/Y/Z 211.68/118.37/220 mm"},
-    {"id":"SATURN_LEADING_RELEASE_EDGE","classification":"runtime_printer_profile","provenance":"Measured ProjectRecord","python_source_locators":[],"normative":"03-physics-and-constants.md §3.7 = NegativeY"},
-    {"id":"SATURN_RELEASE_FILM_THICKNESS_MM","classification":"runtime_printer_profile","provenance":"Measured InstalledHardware","python_source_locators":[],"normative":"03-physics-and-constants.md §3.7 = 0.127 mm official Elegoo PFA"},
-    {"id":"SATURN_RELEASE_FRONT_SWEEP_DIRECTION","classification":"runtime_printer_profile","provenance":"Measured ProjectRecord","python_source_locators":[],"normative":"03-physics-and-constants.md §3.7 = PositiveY; front moves -Y to +Y"},
-    {"id":"SCAR_COST_WEIGHT","classification":"runtime_search_weight","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:scar_cost_weight"],"normative":"03-physics-and-constants.md §3.5 = 1.0"},
-    {"id":"SPACING_FLOOR_MM","classification":"runtime_placement","provenance":"Derived","python_source_locators":["scripts/support_placement/config.py:spacing_floor_mm"],"normative":"03-physics-and-constants.md §3.4 = 2.5 mm"},
-    {"id":"STANDOFF_MM","classification":"runtime_routing","provenance":"Derived","python_source_locators":["scripts/support_placement/config.py:standoff_mm"],"normative":"03-physics-and-constants.md §3.5 = 0.6 mm"},
-    {"id":"STRUT_FALLBACK_MAX_ANGLE_DEG","classification":"runtime_routing","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:strut_fallback_max_angle_deg"],"normative":"03-physics-and-constants.md §3.5 = 60.0 deg"},
-    {"id":"STRUT_MAX_LENGTH_MM","classification":"runtime_routing","provenance":"Derived measurement","python_source_locators":["scripts/support_placement/config.py:strut_max_length_mm"],"normative":"03-physics-and-constants.md §3.5 = 20.0 mm"},
-    {"id":"STRUT_MIN_LENGTH_SAVED_MM","classification":"runtime_routing","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:strut_min_length_saved_mm"],"normative":"03-physics-and-constants.md §3.5 = 8.0 mm"},
-    {"id":"STRUT_MODEL_ANCHOR_MAX_CANDIDATES","classification":"runtime_search_cap","provenance":"Placeholder","python_source_locators":["scripts/support_placement/struts.py:choose_model_anchor max_candidates"],"normative":"03-physics-and-constants.md §3.10.1 = 40"},
-    {"id":"STRUT_MODEL_ANCHOR_MAX_DELICACY","classification":"runtime_search","provenance":"Placeholder","python_source_locators":["scripts/support_placement/struts.py:choose_model_anchor max_delicacy"],"normative":"03-physics-and-constants.md §3.10.1 = 0.5"},
-    {"id":"STRUT_MODEL_ANCHOR_MIN_LEN_MM","classification":"runtime_search","provenance":"Placeholder","python_source_locators":["scripts/support_placement/struts.py:choose_model_anchor min_len_mm"],"normative":"03-physics-and-constants.md §3.10.1 = 5.0 mm"},
-    {"id":"STUB_LENGTH_MM","classification":"runtime_geometry","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:stub_length_mm"],"normative":"03-physics-and-constants.md §3.2 = 2.5 mm"},
-    {"id":"SURFACE_PITCH_BOUND_PERCENTILE","classification":"runtime_routing","provenance":"Measured corpus","python_source_locators":["scripts/support_placement/config.py:surface_pitch_bound_percentile"],"normative":"03-physics-and-constants.md §3.5 = 99.0"},
-    {"id":"TARGET_SPACING_MM","classification":"runtime_placement","provenance":"Derived corpus","python_source_locators":["scripts/support_placement/config.py:target_spacing_mm"],"normative":"03-physics-and-constants.md §3.4 = 4.0 mm"},
-    {"id":"TENSILE_GREEN_MPA","classification":"runtime_diagnostic","provenance":"Placeholder legacy split","python_source_locators":["scripts/support_placement/config.py:tensile_green_mpa"],"normative":"03-physics-and-constants.md §3.1 = 0.288 MPa"},
-    {"id":"THIN_FEATURE_MM","classification":"runtime_perception","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:thin_feature_mm"],"normative":"03-physics-and-constants.md §3.8 = 1.5 mm"},
-    {"id":"TIP_DIAMETER_MIN_ALLOWED_MM","classification":"runtime_validation","provenance":"Measured OwnerDecision","python_source_locators":[],"normative":"03-physics-and-constants.md §3.2 = 0.150 mm"},
-    {"id":"TIP_RADIUS_DEFAULT_MM","classification":"runtime_generation_profile","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:tip_r_min_mm"],"normative":"03-physics-and-constants.md §3.2 = 0.200 mm"},
-    {"id":"TIP_RADIUS_MAX_LEGACY_MM","classification":"legacy_diagnostic","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:tip_r_max_mm"],"normative":"03-physics-and-constants.md §3.2 = 1.0 mm"},
-    {"id":"TIP_RADIUS_MIN_ALLOWED_MM","classification":"runtime_validation","provenance":"Derived","python_source_locators":[],"normative":"03-physics-and-constants.md §3.2 = 0.075 mm"},
-    {"id":"TIP_SAFETY_FACTOR","classification":"runtime_diagnostic","provenance":"Placeholder policy","python_source_locators":["scripts/support_placement/config.py:tip_safety_factor"],"normative":"03-physics-and-constants.md §3.1 = 8.0"},
-    {"id":"TOL_MM","classification":"runtime_gate","provenance":"Placeholder","python_source_locators":["scripts/support_placement/verify.py:TOL_MM"],"normative":"03-physics-and-constants.md §3.6 = 0.05 mm"},
-    {"id":"TRANSIENT_SHOOT_COUNT_EXPONENT","classification":"runtime_transient","provenance":"Derived v3","python_source_locators":["scripts/support_placement/transient.py:r_transient_mm"],"normative":"03-physics-and-constants.md §3.3 = N^0.125"},
-    {"id":"TRUNK_SEARCH_DIRECTIONS","classification":"runtime_search","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:trunk_search_directions"],"normative":"03-physics-and-constants.md §3.3 = 12"},
-    {"id":"TRUNK_SEARCH_RADII_MM","classification":"runtime_search","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:trunk_search_radii_mm"],"normative":"03-physics-and-constants.md §3.3 = (0,2,4,7,10,14,19,25) mm"},
-    {"id":"TWIN_SINGLE_BRACE_XY_MM","classification":"runtime_tuning","provenance":"Placeholder","python_source_locators":["scripts/support_placement/config.py:twin_single_brace_xy_mm"],"normative":"03-physics-and-constants.md §3.3 = 3.0 mm"},
-    {"id":"VOXEL_PITCH_MM","classification":"runtime_perception","provenance":"Derived v0","python_source_locators":["scripts/support_placement/config.py:voxel_pitch_mm"],"normative":"03-physics-and-constants.md §3.4 = 0.4 mm"},
-    {"id":"X_ALLOWED","classification":"runtime_physics","provenance":"Derived from X_STAR_CONE","python_source_locators":[],"normative":"03-physics-and-constants.md §3.1 = 12.0"},
-    {"id":"X_STAR_CONE","classification":"runtime_physics","provenance":"Measured CalibrationPlate 5 OnOrBefore 2026-07-30","python_source_locators":["scripts/support_placement/config.py:plate-5 log comment at peel_pressure_pa"],"normative":"03-physics-and-constants.md §3.1 = [25.00,25.34] inclusive/inclusive, err null"},
-    {"id":"X_STAR_CYLINDER","classification":"runtime_physics","provenance":"Measured CalibrationPlate 6 Exact 2026-07-31","python_source_locators":[],"normative":"03-physics-and-constants.md §3.1 = (19.91,30.48) exclusive/exclusive, err null"}
+    {
+      "id": "A_ABS_MM2",
+      "classification": "runtime_gate",
+      "normative": "03-physics-and-constants.md §3.6 = 2.0 mm2",
+      "source_locators": [
+        "scripts/support_placement/verify.py:A_ABS_MM2"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder owner-ratified spec"
+    },
+    {
+      "id": "BALL_BREACH_EPS_MM",
+      "classification": "runtime_gate",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/verify.py:ball_breach_report eps_mm"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.2 = 0.05 mm",
+      "provenance_detail": "legacy gate tolerance"
+    },
+    {
+      "id": "BALL_FACTOR_FOOT",
+      "classification": "runtime_geometry",
+      "normative": "03-physics-and-constants.md §3.2 = 1.4",
+      "source_locators": [
+        "scripts/support_placement/joints.py:MODEL_FOOT_FACTOR"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "BALL_FACTOR_STUB",
+      "classification": "runtime_geometry",
+      "normative": "03-physics-and-constants.md §3.2 = 1.5",
+      "source_locators": [
+        "scripts/support_placement/config.py:tip_ball_r_factor"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "BRACE_LADDER_Z_MM",
+      "classification": "runtime_tuning",
+      "normative": "03-physics-and-constants.md §3.3 = 8.0 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:brace_ladder_z_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "BRACE_NEIGHBOR_MAX_XY_MM",
+      "classification": "runtime_tuning",
+      "normative": "03-physics-and-constants.md §3.3 = 15.0 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:brace_neighbor_max_xy_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "BRACE_REACH_MAX_FACTOR_X",
+      "classification": "runtime_tuning",
+      "normative": "03-physics-and-constants.md §3.3 = 1.5",
+      "source_locators": [
+        "scripts/support_placement/config.py:brace_reach_max_factor_x"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "BRACE_R_MM",
+      "classification": "runtime_tuning",
+      "normative": "03-physics-and-constants.md §3.3 = 0.5 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:brace_r_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "BRACING_FALLBACK_FRACTIONS",
+      "classification": "runtime_search",
+      "normative": "03-physics-and-constants.md §3.10.1 = (0.5,0.25,0.75,0.1,0.9)",
+      "source_locators": [
+        "scripts/support_placement/bracing.py:_FALLBACK_FRACTIONS"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "BRACING_MAX_STACKED_FALLBACKS",
+      "classification": "runtime_search_cap",
+      "normative": "03-physics-and-constants.md §3.10.1 = 6",
+      "source_locators": [
+        "scripts/support_placement/bracing.py:_MAX_STACKED_FALLBACKS"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "BRACING_MIN_CROSS_LINK_XY_MM",
+      "classification": "runtime_search",
+      "normative": "03-physics-and-constants.md §3.10.1 = 1/sqrt(2) mm",
+      "source_locators": [
+        "scripts/support_placement/bracing.py:_MIN_CROSS_LINK_XY_MM"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "BRACING_MODEL_RUNG_MAX_CANDIDATES",
+      "classification": "runtime_search_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/bracing.py:_find_model_rung_anchors limit"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.2 = 6",
+      "provenance_detail": "model-rung shortlist"
+    },
+    {
+      "id": "BRACING_MODEL_RUNG_MIN_LENGTH_MM",
+      "classification": "runtime_geometry",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/bracing.py:_place_one_rung length floor"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.2 = 1.0 mm",
+      "provenance_detail": "model-rung floor"
+    },
+    {
+      "id": "BRACING_MODEL_RUNG_Z_TOL_MM",
+      "classification": "runtime_geometry",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/bracing.py:_find_model_rung_anchors z band"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.2 = 0.75 mm",
+      "provenance_detail": "model-rung z band"
+    },
+    {
+      "id": "BRACING_REACH_TIER_BASE_FACTOR",
+      "classification": "runtime_search",
+      "normative": "03-physics-and-constants.md §3.10.1 = 1.25",
+      "source_locators": [
+        "scripts/support_placement/bracing.py:_REACH_TIER_BASE_FACTOR"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "BRANCH_ANGLE_DEG",
+      "classification": "runtime_gate",
+      "normative": "03-physics-and-constants.md §3.5 = 60.0 deg",
+      "source_locators": [
+        "scripts/support_placement/config.py:branch_angle_deg"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "BRIDGE_FREE_GAP_MM",
+      "classification": "runtime_perception",
+      "normative": "03-physics-and-constants.md §3.4 = 1.0 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:bridge_free_gap_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "BRIDGE_SAG_SPAN_APPROX_MM",
+      "classification": "runtime_diagnostic",
+      "normative": "03-physics-and-constants.md §3.4 = about 3.0 mm at 0.300 mm section; distinct from BRIDGE_FREE_GAP_MM",
+      "source_locators": [
+        "docs/rust-migration/03-physics-and-constants.md:heading 3.4 Placement density and coverage"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder owner approximate"
+    },
+    {
+      "id": "CCO_BIFURCATION_HOSTS",
+      "classification": "runtime_search",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/cco.py:_bifurcation_candidates nearest_members"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.4 = 5",
+      "provenance_detail": "host shortlist"
+    },
+    {
+      "id": "CCO_CONE_TOLERANCE_DEG",
+      "classification": "runtime_numeric_policy",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/cco.py:_within_cone tol_deg"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.4 = 1e-6 degrees",
+      "provenance_detail": "cone comparison tolerance"
+    },
+    {
+      "id": "CCO_FERMAT_MAX_ITERATIONS",
+      "classification": "runtime_search_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/cco.py:_weighted_fermat_point n_iter"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.4 = 12",
+      "provenance_detail": "bounded Weiszfeld iterations"
+    },
+    {
+      "id": "CCO_MIN_SPLIT_LENGTH_MM",
+      "classification": "runtime_geometry",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/cco.py:_make_bifurcation_builder MIN_SPLIT_LEN_MM"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.4 = 0.5 mm",
+      "provenance_detail": "split-piece floor"
+    },
+    {
+      "id": "CCO_SPLIT_SLIDE_POLICY",
+      "classification": "runtime_search",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/cco.py:_make_bifurcation_builder fallback slide"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.4 = start 0.03, end 0.97, step 0.03, cap 40",
+      "provenance_detail": "structured deterministic slide grid"
+    },
+    {
+      "id": "CHITUBOX_DEFAULT_PLACEMENT_XY_MM",
+      "classification": "runtime_emit_default",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/emit.py:emit_project placement_xy",
+        "scripts/support_placement/pipeline.py:prep_one placement_xy"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = (0.0,0.0) mm",
+      "provenance_detail": "project placement default"
+    },
+    {
+      "id": "CHITUBOX_EMIT_N_SIDES",
+      "classification": "runtime_emit_geometry",
+      "normative": "03-physics-and-constants.md §3.10.1 = 24",
+      "source_locators": [
+        "scripts/support_placement/chitubox_emit.py:N_SIDES"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "format/generation contract"
+    },
+    {
+      "id": "CHITUBOX_PAD_DIAMETER_MM",
+      "classification": "runtime_emit_geometry",
+      "normative": "03-physics-and-constants.md §3.10.1 = 2.2 mm",
+      "source_locators": [
+        "scripts/support_placement/chitubox_emit.py:PAD_DIAMETER_MM"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "format/generation contract"
+    },
+    {
+      "id": "CHITUBOX_PAD_N_SIDES",
+      "classification": "runtime_emit_geometry",
+      "normative": "03-physics-and-constants.md §3.10.1 = 20",
+      "source_locators": [
+        "scripts/support_placement/chitubox_emit.py:PAD_N_SIDES"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "format/generation contract"
+    },
+    {
+      "id": "CHITUBOX_PLATE_MESH_TOL_MM",
+      "classification": "runtime_emit_geometry",
+      "normative": "03-physics-and-constants.md §3.10.1 = 1e-5 mm",
+      "source_locators": [
+        "scripts/support_placement/chitubox_emit.py:PLATE_MESH_TOL_MM"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "format/generation contract"
+    },
+    {
+      "id": "CHITUBOX_RAFT_HEIGHT_MM",
+      "classification": "runtime_emit_geometry",
+      "normative": "03-physics-and-constants.md §3.10.1 = 0.2 mm",
+      "source_locators": [
+        "scripts/support_placement/chitubox_emit.py:RAFT_HEIGHT_MM"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "format/generation contract"
+    },
+    {
+      "id": "CHITUBOX_ROOT_HEIGHT_MM",
+      "classification": "runtime_emit_geometry",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/chitubox_emit.py:MIN_ROOT_NO_BEND_MM"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = 0.5 mm",
+      "provenance_detail": "root no-bend height"
+    },
+    {
+      "id": "CHITUBOX_ROOT_LAYERS",
+      "classification": "runtime_emit_geometry",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/chitubox_emit.py:MIN_ROOT_VERTICAL_LAYERS"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = 10",
+      "provenance_detail": "minimum vertical root layers"
+    },
+    {
+      "id": "CLEARANCE_SAMPLE_STEP_MM",
+      "classification": "legacy_diagnostic",
+      "normative": "03-physics-and-constants.md §3.5 = 0.3 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:clearance_sample_step_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "COINCIDE_TOL_MM",
+      "classification": "runtime_geometry",
+      "normative": "03-physics-and-constants.md §3.6 = 0.15 mm",
+      "source_locators": [
+        "scripts/support_placement/joints.py:COINCIDE_TOL_MM"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "COLINEAR_ANGLE_DEG",
+      "classification": "runtime_geometry",
+      "normative": "03-physics-and-constants.md §3.6 = 10.0 deg",
+      "source_locators": [
+        "scripts/support_placement/joints.py:COLINEAR_ANGLE_DEG"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "COLINEAR_RADIUS_FRAC",
+      "classification": "runtime_geometry",
+      "normative": "03-physics-and-constants.md §3.6 = 0.20",
+      "source_locators": [
+        "scripts/support_placement/joints.py:COLINEAR_RADIUS_FRAC"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "CONNECTIVITY_AXIS_ATTACH_TOL_MM",
+      "classification": "runtime_gate",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/verify.py:connectivity_report axis attachment"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.2 = 0.25 mm",
+      "provenance_detail": "connectivity axis tolerance"
+    },
+    {
+      "id": "CONNECTIVITY_EMBED_PAD_MM",
+      "classification": "runtime_gate",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/verify.py:connectivity_report embed attachment"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.2 = 0.45 mm",
+      "provenance_detail": "added to contact depth"
+    },
+    {
+      "id": "COVERAGE_RADIUS_FACTOR",
+      "classification": "runtime_gate",
+      "normative": "03-physics-and-constants.md §3.4 = 1.5",
+      "source_locators": [
+        "scripts/support_placement/config.py:coverage_radius_factor"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "COVERAGE_REPAIR_MAX_ATTEMPTS",
+      "classification": "runtime_search_cap",
+      "normative": "03-physics-and-constants.md §3.11 = 8; result-changing cap",
+      "source_locators": [
+        "scripts/support_placement/config.py:coverage_repair_max_attempts"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "DECIMATION_ADAPTATION_POLICY",
+      "classification": "runtime_decimation",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/tools/decimate_pipeline.py:feature protection adaptation loop"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = 3 adaptations, x2 seed, x0.6 halo",
+      "provenance_detail": "structured adaptation policy"
+    },
+    {
+      "id": "DECIMATION_FEATURE_HALO_MM",
+      "classification": "runtime_decimation",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/tools/decimate_pipeline.py:HALO"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = 0.4 mm",
+      "provenance_detail": "feature halo"
+    },
+    {
+      "id": "DECIMATION_FEATURE_PROBE_RATIO",
+      "classification": "runtime_decimation",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/tools/decimate_pipeline.py:aggressive feature probe ratio"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = 0.2",
+      "provenance_detail": "probe ratio"
+    },
+    {
+      "id": "DECIMATION_P999_FACTOR",
+      "classification": "runtime_metric",
+      "normative": "03-physics-and-constants.md §3.7 = pixel_um/1000",
+      "source_locators": [
+        "scripts/tools/decimate_pipeline.py:tol999"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived pixel-pitch policy"
+    },
+    {
+      "id": "DECIMATION_P999_SAMPLE_POLICY",
+      "classification": "runtime_metric",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/tools/decimate_pipeline.py:probe forward sampling"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = seed 1, cap 150000",
+      "provenance_detail": "forward percentile sampling"
+    },
+    {
+      "id": "DECIMATION_P99_FACTOR",
+      "classification": "runtime_metric",
+      "normative": "03-physics-and-constants.md §3.7 = pixel_um/2000",
+      "source_locators": [
+        "scripts/tools/decimate_pipeline.py:tol"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived pixel-pitch policy"
+    },
+    {
+      "id": "DECIMATION_P99_SAMPLE_POLICY",
+      "classification": "runtime_metric",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/tools/decimate_pipeline.py:run backward sampling"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = seed 42, cap 120000",
+      "provenance_detail": "backward percentile sampling"
+    },
+    {
+      "id": "DECIMATION_PROTECTED_CAP_FRACTION",
+      "classification": "runtime_decimation",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/tools/decimate_pipeline.py:PROT_CAP"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = 0.12",
+      "provenance_detail": "protected vertex fraction cap"
+    },
+    {
+      "id": "DECIMATION_RATIO_SEARCH",
+      "classification": "runtime_search",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/tools/decimate_pipeline.py:RATIO_LO",
+        "scripts/tools/decimate_pipeline.py:RATIO_HI",
+        "scripts/tools/decimate_pipeline.py:ratio bisection loop"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = [0.05,0.50], 5 bisections",
+      "provenance_detail": "structured ratio search"
+    },
+    {
+      "id": "DECIMATION_RECHECK_SLACK",
+      "classification": "runtime_metric",
+      "normative": "03-physics-and-constants.md §3.7 = 1.1",
+      "source_locators": [
+        "scripts/tools/decimate_pipeline.py:full-population verification"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived policy"
+    },
+    {
+      "id": "DECIMATION_SCALE_ACCEPTANCE_MM",
+      "classification": "runtime_gate",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/tools/decimate_pipeline.py:run min_dim_mm max_dim_mm"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = [10,300] mm",
+      "provenance_detail": "scale sanity interval"
+    },
+    {
+      "id": "DECIMATION_SEED_ERROR_MM",
+      "classification": "runtime_decimation",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/tools/decimate_pipeline.py:SEED_ERR"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = 0.050 mm",
+      "provenance_detail": "feature seed error"
+    },
+    {
+      "id": "DECIMATION_VERTEX_GROUP_FACTOR",
+      "classification": "runtime_decimation",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/tools/decimate_pipeline.py:vertex_group_factor"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = 10",
+      "provenance_detail": "decimation vertex-group factor"
+    },
+    {
+      "id": "DEFAULT_CONTACT_DEPTH_MM",
+      "classification": "runtime_generation_profile",
+      "normative": "03-physics-and-constants.md §3.2 = 0.3 mm; stable declaration name",
+      "source_locators": [
+        "scripts/support_placement/config.py:contact_depth_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "DELICACY_CURVATURE_WEIGHT",
+      "classification": "runtime_search_weight",
+      "normative": "03-physics-and-constants.md §3.8 = 0.6",
+      "source_locators": [
+        "scripts/support_placement/config.py:delicacy_curvature_weight"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "DELICACY_THINNESS_WEIGHT",
+      "classification": "runtime_search_weight",
+      "normative": "03-physics-and-constants.md §3.8 = 0.4",
+      "source_locators": [
+        "scripts/support_placement/config.py:delicacy_thinness_weight"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "EMIT_REQUIRE_PASSED_GATES_DEFAULT",
+      "classification": "runtime_emit_gate",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/emit.py:emit_project allow_failed_gates",
+        "scripts/support_placement/pipeline.py:prep_one allow_failed_gates"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = true",
+      "provenance_detail": "inverse of allow_failed_gates false"
+    },
+    {
+      "id": "ENCLOSURE_PROOF_TOL_MM",
+      "classification": "runtime_geometry",
+      "normative": "03-physics-and-constants.md §3.6 = 0.018 mm",
+      "source_locators": [
+        "scripts/support_placement/joints.py:ENCLOSURE_PROOF_TOL_MM"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived diagnostic from Placeholder"
+    },
+    {
+      "id": "ENCLOSURE_TOL_MM",
+      "classification": "runtime_geometry",
+      "normative": "03-physics-and-constants.md §3.6 = 0.02 mm; old pixel derivation is false",
+      "source_locators": [
+        "scripts/support_placement/joints.py:ENCLOSURE_TOL_MM"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "ENGINE_SURFACE_TREE_MAX_POINTS",
+      "classification": "runtime_sampled_surface",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/engine.py:run build_surface_tree max_points"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.2 = 400000",
+      "provenance_detail": "live engine override"
+    },
+    {
+      "id": "ENGINE_SURFACE_TREE_PITCH_MM",
+      "classification": "runtime_sampled_surface",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/engine.py:run build_surface_tree pitch_mm"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.2 = 0.3 mm",
+      "provenance_detail": "live engine override"
+    },
+    {
+      "id": "EPS_COS",
+      "classification": "runtime_numeric_guard",
+      "normative": "03-physics-and-constants.md §3.6 = 1e-9; not a physics floor",
+      "source_locators": [
+        "scripts/support_placement/verify.py:EPS_COS"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived divide-by-zero guard"
+    },
+    {
+      "id": "FLARE_LEN_MM",
+      "classification": "runtime_geometry",
+      "normative": "03-physics-and-constants.md §3.2 = 1.5 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:flare_len_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "FLARE_R_FACTOR",
+      "classification": "runtime_geometry",
+      "normative": "03-physics-and-constants.md §3.2 = 1.6",
+      "source_locators": [
+        "scripts/support_placement/config.py:flare_r_factor"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "GATE_ON_BALL_BREACH_DEFAULT",
+      "classification": "runtime_gate",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/verify.py:self_verify gate_on_ball_breach"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.2 = true",
+      "provenance_detail": "verification default"
+    },
+    {
+      "id": "GATE_ON_REMOVAL_DEFAULT",
+      "classification": "runtime_gate",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/verify.py:self_verify gate_on_removal"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.2 = false",
+      "provenance_detail": "verification default"
+    },
+    {
+      "id": "GRIP_CLEAR_MM",
+      "classification": "runtime_opt_in_metric",
+      "normative": "03-physics-and-constants.md §3.9 = 5.0 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:grip_clear_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "GRIP_HANDLE_LEN_MM",
+      "classification": "runtime_opt_in_metric",
+      "normative": "03-physics-and-constants.md §3.9 = 10.0 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:grip_handle_len_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "GRIP_HANDLE_R_MM",
+      "classification": "runtime_opt_in_metric",
+      "normative": "03-physics-and-constants.md §3.9 = 1.0 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:grip_handle_r_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "HOLLOW_ALLOW_OUTPUT_DEFAULT",
+      "classification": "runtime_hollowing",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:run allow_hollow_output"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.3 = false",
+      "provenance_detail": "requires dedicated verifier"
+    },
+    {
+      "id": "HOLLOW_BULK_MIN_MM",
+      "classification": "runtime_hollowing",
+      "normative": "03-physics-and-constants.md §3.10.1 = 10.0 mm",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:BULK_MIN_MM"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "HOLLOW_CONTAINMENT_MIN_FRACTION",
+      "classification": "runtime_hollowing_gate",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:CONTAINMENT_MIN_FRAC"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.3 = 0.9",
+      "provenance_detail": "containment threshold"
+    },
+    {
+      "id": "HOLLOW_CONTAINMENT_SAMPLES",
+      "classification": "runtime_hollowing_gate",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:CONTAINMENT_SAMPLES"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.3 = 32",
+      "provenance_detail": "containment sample count"
+    },
+    {
+      "id": "HOLLOW_DRAIN_DIRECTIONS",
+      "classification": "runtime_hollowing",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:run down directions"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.3 = five downward directions",
+      "provenance_detail": "structured direction set"
+    },
+    {
+      "id": "HOLLOW_DRAIN_R_MM",
+      "classification": "runtime_hollowing",
+      "normative": "03-physics-and-constants.md §3.10.1 = 1.5 mm",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:DRAIN_R"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "HOLLOW_EXIT_RAY_MAX_MM",
+      "classification": "runtime_hollowing",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:run exit_ray"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.3 = 45 mm",
+      "provenance_detail": "drain/vent search ceiling"
+    },
+    {
+      "id": "HOLLOW_EXTRA_DRAIN_POLICY",
+      "classification": "runtime_hollowing",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:run trapped-pocket repair loop"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.3 = min 0.5 mL, max 3, exit <=8 mm, extensions 4/8/9 mm, 24 sides",
+      "provenance_detail": "structured trapped-pocket policy"
+    },
+    {
+      "id": "HOLLOW_LOBE_BAND_MM",
+      "classification": "runtime_hollowing",
+      "normative": "03-physics-and-constants.md §3.10.1 = 15.0 mm",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:LOBE_BAND_MM"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "HOLLOW_LOBE_MIN_ML",
+      "classification": "runtime_hollowing",
+      "normative": "03-physics-and-constants.md §3.10.1 = 0.5 mL",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:LOBE_MIN_ML"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "HOLLOW_ORIENT_ENABLE_DEFAULT",
+      "classification": "runtime_hollowing",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:run orient",
+        "scripts/support_placement/pipeline.py:prep_one orient"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.3 = true",
+      "provenance_detail": "orientation enable survives independently"
+    },
+    {
+      "id": "HOLLOW_PITCH_MM",
+      "classification": "runtime_hollowing",
+      "normative": "03-physics-and-constants.md §3.10.1 = 0.5 mm",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:PITCH"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "HOLLOW_SAVE_MIN_FRAC",
+      "classification": "runtime_hollowing",
+      "normative": "03-physics-and-constants.md §3.10.1 = 0.25",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:SAVE_MIN_FRAC"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "HOLLOW_SAVE_MIN_ML",
+      "classification": "runtime_hollowing",
+      "normative": "03-physics-and-constants.md §3.10.1 = 15.0 mL",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:SAVE_MIN_ML"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "HOLLOW_SHARD_MAX_DIM_MM",
+      "classification": "runtime_hollowing_gate",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:SHARD_MAX_DIM_MM"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.3 = 1.0 mm",
+      "provenance_detail": "triage dimension ceiling"
+    },
+    {
+      "id": "HOLLOW_SHARD_MAX_FACES",
+      "classification": "runtime_hollowing_gate",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:SHARD_MAX_FACES"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.3 = 64",
+      "provenance_detail": "triage face ceiling"
+    },
+    {
+      "id": "HOLLOW_SHARD_MAX_VOLUME_MM3",
+      "classification": "runtime_hollowing_gate",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:SHARD_MAX_VOL_MM3"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.3 = 0.01 mm3",
+      "provenance_detail": "triage volume ceiling"
+    },
+    {
+      "id": "HOLLOW_VENT_R_MM",
+      "classification": "runtime_hollowing",
+      "normative": "03-physics-and-constants.md §3.10.1 = 1.25 mm",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:VENT_R"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "HOLLOW_WALL_DEFAULT_MM",
+      "classification": "runtime_hollowing",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:run wall",
+        "scripts/support_placement/pipeline.py:prep_one wall_mm",
+        "scripts/tools/prep_one.py:wall option",
+        "scripts/tools/hollow_drill.py:wall option"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.3 = 2.5 mm",
+      "provenance_detail": "wall default"
+    },
+    {
+      "id": "ISLAND_ATTACH_REACH_MM",
+      "classification": "runtime_perception",
+      "normative": "03-physics-and-constants.md §3.4 = 0.2 mm",
+      "source_locators": [
+        "scripts/support_placement/perception.py:ISLAND_ATTACH_REACH_MM"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived"
+    },
+    {
+      "id": "ISLAND_BIRTH_LINK_R_MM",
+      "classification": "runtime_perception",
+      "normative": "03-physics-and-constants.md §3.4 = 0.6 mm",
+      "source_locators": [
+        "scripts/support_placement/engine.py:_ISLAND_BIRTH_LINK_R_MM"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder tuned"
+    },
+    {
+      "id": "ISLAND_MERGE_RADIUS_MM",
+      "classification": "runtime_perception",
+      "normative": "03-physics-and-constants.md §3.4 = 2.0 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:island_merge_radius_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "JOINT_BALL_FACTOR",
+      "classification": "runtime_geometry",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/config.py:joint_ball_factor",
+        "scripts/support_placement/joints.py:compute_joint_balls"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.2 = 1.0",
+      "provenance_detail": "joint ball sizing"
+    },
+    {
+      "id": "KAPPA",
+      "classification": "runtime_gate",
+      "normative": "03-physics-and-constants.md §3.6 = 1.25",
+      "source_locators": [
+        "scripts/support_placement/verify.py:KAPPA"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder owner-ratified spec"
+    },
+    {
+      "id": "LAYER_HEIGHT_DEFAULT_MM",
+      "classification": "runtime_printer_profile",
+      "normative": "03-physics-and-constants.md §3.7 = 0.050 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:layer_height_mm"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured ProjectRecord"
+    },
+    {
+      "id": "LIFT_MM",
+      "classification": "runtime_printer_profile",
+      "normative": "03-physics-and-constants.md §3.5 = 5.0 mm; pipeline 3.0 is retired",
+      "source_locators": [
+        "scripts/support_placement/config.py:lift_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder local project default"
+    },
+    {
+      "id": "LOAD_SHARING",
+      "classification": "runtime_physics",
+      "normative": "03-physics-and-constants.md §3.1 and §4.2 = Additive { n_eff_cap: 6.0 }, err null; note includes five caveats, orientation and B6 override citation",
+      "source_locators": [
+        "docs/reference/plate-06-results.md:heading 5 Finding 1"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured CalibrationPlate 6 Exact 2026-07-31"
+    },
+    {
+      "id": "L_SCAR_MAX_MM",
+      "classification": "runtime_gate",
+      "normative": "03-physics-and-constants.md §3.6 = 2.5 mm",
+      "source_locators": [
+        "scripts/support_placement/verify.py:L_SCAR_MAX_MM"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder owner-ratified spec"
+    },
+    {
+      "id": "MATERIAL_COST_PER_MM",
+      "classification": "runtime_search_weight",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/config.py:material_cost_per_mm",
+        "scripts/support_placement/struts.py:_cost"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.2 = 0.05 per mm",
+      "provenance_detail": "material-cost weight"
+    },
+    {
+      "id": "MAX_DEFLECTION_MM",
+      "classification": "runtime_deflection",
+      "normative": "03-physics-and-constants.md §3.3 = 0.15 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:max_deflection_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "MAX_SEGMENT_ANGLE_DEG",
+      "classification": "runtime_gate",
+      "normative": "03-physics-and-constants.md §3.5 = 45.0 deg",
+      "source_locators": [
+        "scripts/support_placement/config.py:max_segment_angle_deg"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived"
+    },
+    {
+      "id": "MAX_TRUNK_R_MM",
+      "classification": "runtime_geometry",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/config.py:max_trunk_r_mm",
+        "scripts/support_placement/trunks.py:size_trunks"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.2 = 2.4 mm",
+      "provenance_detail": "live trunk ceiling"
+    },
+    {
+      "id": "MAX_UNBRACED_SHAFT_R_MM",
+      "classification": "runtime_tuning",
+      "normative": "03-physics-and-constants.md §3.2 = 0.9 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:max_unbraced_shaft_r_mm"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived corpus"
+    },
+    {
+      "id": "MINIMA_BIRTH_MATCH_LAYERS",
+      "classification": "runtime_perception",
+      "normative": "03-physics-and-constants.md §3.7 = 2.0 layers",
+      "source_locators": [
+        "scripts/support_placement/config.py:minima_birth_match_layers"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived corpus"
+    },
+    {
+      "id": "MINIMA_CONNECT_LAYERS",
+      "classification": "runtime_perception",
+      "normative": "03-physics-and-constants.md §3.7 = 2.0 layers",
+      "source_locators": [
+        "scripts/support_placement/config.py:minima_connect_layers"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived corpus"
+    },
+    {
+      "id": "MINIMA_CONTACT_RADIUS_MM",
+      "classification": "runtime_perception",
+      "normative": "03-physics-and-constants.md §3.7 = 1.0 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:minima_contact_radius_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "MINIMA_DROP_INTERIOR_FACES",
+      "classification": "runtime_perception",
+      "normative": "03-physics-and-constants.md §3.7 = true",
+      "source_locators": [
+        "scripts/support_placement/config.py:minima_drop_interior_faces"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured ProjectRecord"
+    },
+    {
+      "id": "MINIMA_EPS_MM",
+      "classification": "runtime_perception",
+      "normative": "03-physics-and-constants.md §3.7 = 0.02 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:minima_eps_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "MINIMA_REQUIRE_ISLAND_BIRTH",
+      "classification": "runtime_perception",
+      "normative": "03-physics-and-constants.md §3.7 = true",
+      "source_locators": [
+        "scripts/support_placement/config.py:minima_require_island_birth"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured ProjectRecord"
+    },
+    {
+      "id": "MINIMA_SUPPORT_AREA_TIPS",
+      "classification": "runtime_perception",
+      "normative": "03-physics-and-constants.md §3.7 = 1.0",
+      "source_locators": [
+        "scripts/support_placement/config.py:minima_support_area_tips"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured sensitivity sweep"
+    },
+    {
+      "id": "MIN_CONTACTS_PER_ISLAND",
+      "classification": "runtime_placement",
+      "normative": "03-physics-and-constants.md §3.4 = 1",
+      "source_locators": [
+        "scripts/support_placement/config.py:min_contacts_per_island"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "MIN_ILLEGAL_LEN_MM",
+      "classification": "runtime_gate",
+      "normative": "03-physics-and-constants.md §3.6 = 0.05 mm",
+      "source_locators": [
+        "scripts/support_placement/verify.py:MIN_ILLEGAL_LEN_MM"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "MIN_SHAFT_R_MM",
+      "classification": "runtime_geometry",
+      "normative": "03-physics-and-constants.md §3.2 = 0.3 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:min_shaft_r_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "MIN_SHOOT_R_MM",
+      "classification": "runtime_routing",
+      "normative": "03-physics-and-constants.md §3.2 = 0.35 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:min_shoot_r_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "MIN_TRUNK_R_MM",
+      "classification": "runtime_geometry",
+      "normative": "03-physics-and-constants.md §3.2 = 0.8 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:min_trunk_r_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "MODEL_BRACE_MAX_LEN_MM",
+      "classification": "runtime_tuning",
+      "normative": "03-physics-and-constants.md §3.3 = 5.0 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:model_brace_max_len_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "MODULUS_GREEN_GPA",
+      "classification": "runtime_diagnostic",
+      "normative": "03-physics-and-constants.md §3.1 = 0.5 GPa",
+      "source_locators": [
+        "scripts/support_placement/config.py:modulus_green_gpa"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "MURRAY_TOLERANCE",
+      "classification": "runtime_gate",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/verify.py:murray_report tolerance"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.2 = 0.05",
+      "provenance_detail": "Murray gate tolerance"
+    },
+    {
+      "id": "NEAR_PLATE_MM",
+      "classification": "runtime_perception",
+      "normative": "03-physics-and-constants.md §3.4 = 1.5 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:near_plate_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "N_EFF_CAP",
+      "classification": "runtime_physics_parameter",
+      "normative": "03-physics-and-constants.md §4.2 = 6.0; part of LOAD_SHARING note, not a separate measurement",
+      "source_locators": [
+        "docs/reference/plate-06-results.md:heading 5 Finding 1"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived plate-6 design-grid choice"
+    },
+    {
+      "id": "ON_AXIS_TOL_MM",
+      "classification": "runtime_geometry",
+      "normative": "03-physics-and-constants.md §3.6 = 0.2 mm",
+      "source_locators": [
+        "scripts/support_placement/joints.py:ON_AXIS_TOL_MM"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "ORIENT_SCAR_WEIGHT",
+      "classification": "runtime_search_weight",
+      "normative": "03-physics-and-constants.md §3.8 = 0.4",
+      "source_locators": [
+        "scripts/support_placement/config.py:orient_scar_weight"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "OVERHANG_ANGLE_DEG",
+      "classification": "runtime_perception",
+      "normative": "03-physics-and-constants.md §3.4 = 45.0 deg",
+      "source_locators": [
+        "scripts/support_placement/config.py:overhang_angle_deg"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived ChituBox convention"
+    },
+    {
+      "id": "P8_BALL_SLIDE_MAX_MM",
+      "classification": "runtime_search",
+      "normative": "03-physics-and-constants.md §3.10 = 2.0 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_ball_slide_max_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "P8_BALL_SLIDE_STEP_MM",
+      "classification": "runtime_search",
+      "normative": "03-physics-and-constants.md §3.10 = 0.25 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_ball_slide_step_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "P8_CHORD_CANON_MICRON",
+      "classification": "runtime_determinism",
+      "normative": "03-physics-and-constants.md §3.6 = 1 micron",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_chord_canon_micron"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived"
+    },
+    {
+      "id": "P8_JUNCTION_RESEAT_ENABLE",
+      "classification": "runtime_search",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_junction_reseat_enable",
+        "scripts/support_placement/phase8_driver.py:run_phase8 junction reseat"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.4 = true",
+      "provenance_detail": "junction reseat enable"
+    },
+    {
+      "id": "P8_JUNCTION_RESEAT_MAX_MM",
+      "classification": "runtime_search",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_junction_reseat_max_mm",
+        "scripts/support_placement/phase8_driver.py:_junction_reseat_trials reach"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.4 = 1.0 mm",
+      "provenance_detail": "junction reseat reach"
+    },
+    {
+      "id": "P8_JUNCTION_RESEAT_STEP_MM",
+      "classification": "runtime_search",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_junction_reseat_step_mm",
+        "scripts/support_placement/phase8_driver.py:_junction_reseat_trials step"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.4 = 0.25 mm",
+      "provenance_detail": "junction reseat step"
+    },
+    {
+      "id": "P8_MAX_RELOCATE_ROUNDS",
+      "classification": "runtime_search_cap",
+      "normative": "03-physics-and-constants.md §3.10 = 4",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_max_relocate_rounds"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "P8_MAX_RELOCATE_SWEEPS",
+      "classification": "runtime_search_cap",
+      "normative": "03-physics-and-constants.md §3.10 = 8",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_max_relocate_sweeps"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "P8_MAX_UNRESOLVED",
+      "classification": "runtime_gate",
+      "normative": "03-physics-and-constants.md §3.10 = 10",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_max_unresolved"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "P8_MAX_UNRESOLVED_WEIGHT",
+      "classification": "runtime_gate",
+      "normative": "03-physics-and-constants.md §3.10 = 3.0",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_max_unresolved_weight"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "P8_POCKET_CORRIDOR_PAD_MM",
+      "classification": "runtime_search",
+      "normative": "03-physics-and-constants.md §3.10 = 0.5 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_pocket_corridor_pad_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "P8_POCKET_MIN_MEMBERS",
+      "classification": "runtime_search",
+      "normative": "03-physics-and-constants.md §3.10 = 8",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_pocket_min_members"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "P8_POCKET_VOXEL_MM",
+      "classification": "runtime_search",
+      "normative": "03-physics-and-constants.md §3.10 = 6.0 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_pocket_voxel_mm"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived"
+    },
+    {
+      "id": "P8_REAIM_AZIMUTH_DEG",
+      "classification": "runtime_search",
+      "normative": "03-physics-and-constants.md §3.10 = (0,45,90,135,180,225,270,315)",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_reaim_azimuth_deg"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder pinned enumeration"
+    },
+    {
+      "id": "P8_REAIM_LENGTH_FACTORS",
+      "classification": "runtime_search",
+      "normative": "03-physics-and-constants.md §3.10 = (1.0,0.75,0.5)",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_reaim_length_factors"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "P8_REAIM_POLAR_DEG",
+      "classification": "runtime_search",
+      "normative": "03-physics-and-constants.md §3.10 = (0,10,20,30)",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_reaim_polar_deg"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder pinned enumeration"
+    },
+    {
+      "id": "P8_REAIM_ROUTE_GROWTH_MAX_FACTOR",
+      "classification": "runtime_gate",
+      "normative": "03-physics-and-constants.md §3.10 = 1.50",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_reaim_route_growth_max_factor"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "P8_REAIM_VOLUME_DELTA_MAX_ML",
+      "classification": "runtime_gate",
+      "normative": "03-physics-and-constants.md §3.10 = 0.02 mL",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_reaim_volume_delta_max_ml"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "P8_RELOCATE_ENABLE",
+      "classification": "runtime_search",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_relocate_enable",
+        "scripts/support_placement/engine.py:run p8_relocate_enable"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.4 = true",
+      "provenance_detail": "Phase-8 enable"
+    },
+    {
+      "id": "P8_RESEAT_ENABLE",
+      "classification": "runtime_search",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_reseat_enable",
+        "scripts/support_placement/phase8_driver.py:run_phase8 p8_reseat_enable"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.4 = true",
+      "provenance_detail": "surface reseat enable"
+    },
+    {
+      "id": "P8_RESEAT_MAX_SEEDS",
+      "classification": "runtime_search_cap",
+      "normative": "03-physics-and-constants.md §3.10 = 24",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_reseat_max_seeds"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "P8_RESEAT_RADIUS_MM",
+      "classification": "runtime_search",
+      "normative": "03-physics-and-constants.md §3.10 = 2.0 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_reseat_radius_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "P8_RESIN_DELTA_MAX",
+      "classification": "runtime_gate",
+      "normative": "03-physics-and-constants.md §3.10 = 0.03",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_resin_delta_max"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "P8_RESIZE_FIXED_POINT_MAX_ROUNDS",
+      "classification": "runtime_search_cap",
+      "normative": "03-physics-and-constants.md §3.10 = 4",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_resize_fixed_point_max_rounds"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "P8_SITE_COMMIT_BUDGET",
+      "classification": "runtime_search_cap",
+      "normative": "03-physics-and-constants.md §3.10.1 = 2",
+      "source_locators": [
+        "scripts/support_placement/phase8_driver.py:_SITE_COMMIT_BUDGET"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "P8_STRUT_GROWTH_MAX_FACTOR",
+      "classification": "runtime_gate",
+      "normative": "03-physics-and-constants.md §3.10 = 1.25",
+      "source_locators": [
+        "scripts/support_placement/config.py:p8_strut_growth_max_factor"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "PEEL_ELEVATIONS_DEG",
+      "classification": "runtime_opt_in_metric",
+      "normative": "03-physics-and-constants.md §3.9 = (0,25,45,65,90) deg",
+      "source_locators": [
+        "scripts/support_placement/removal.py:_PEEL_ELEVATIONS_DEG"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "PEEL_PRESSURE_PA",
+      "classification": "runtime_diagnostic",
+      "normative": "03-physics-and-constants.md §3.1 = 3000.0 Pa",
+      "source_locators": [
+        "scripts/support_placement/config.py:peel_pressure_pa"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder legacy split"
+    },
+    {
+      "id": "PERF_ANCHOR_CAP",
+      "classification": "runtime_performance_trial",
+      "provenance_wrapper": "Pending",
+      "source_locators": [
+        "scripts/support_placement/config.py:perf_anchor_cap",
+        "scripts/support_placement/cco.py:perf_anchor_cap"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.4 = Pending, disabled None",
+      "provenance_detail": "result-changing when enabled"
+    },
+    {
+      "id": "PERF_BEAM_K",
+      "classification": "runtime_performance_trial",
+      "provenance_wrapper": "Pending",
+      "source_locators": [
+        "scripts/support_placement/config.py:perf_beam_k",
+        "scripts/support_placement/cco.py:perf_beam_k"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.4 = Pending, disabled None",
+      "provenance_detail": "result-changing when enabled"
+    },
+    {
+      "id": "PERF_FIX_ITER_CAPS",
+      "classification": "runtime_performance_trial",
+      "provenance_wrapper": "Pending",
+      "source_locators": [
+        "scripts/support_placement/config.py:perf_fix_iter_caps",
+        "scripts/support_placement/engine.py:perf_fix_iter_caps"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.4 = Pending, disabled None",
+      "provenance_detail": "termination-changing when enabled"
+    },
+    {
+      "id": "PERF_GATE_EMIT_ON_VERIFY",
+      "classification": "runtime_performance_trial",
+      "provenance_wrapper": "Pending",
+      "source_locators": [
+        "scripts/support_placement/config.py:perf_gate_emit_on_verify",
+        "scripts/support_placement/engine.py:perf_gate_emit_on_verify"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.4 = Pending, disabled false",
+      "provenance_detail": "gate-changing trial"
+    },
+    {
+      "id": "PERF_REWIRE_WORK_BUDGET",
+      "classification": "runtime_performance_trial",
+      "provenance_wrapper": "Pending",
+      "source_locators": [
+        "scripts/support_placement/config.py:perf_rewire_work_budget",
+        "scripts/support_placement/rewire.py:perf_rewire_work_budget"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.4 = Pending, disabled None",
+      "provenance_detail": "deterministic result-changing budget"
+    },
+    {
+      "id": "PERF_SEED_SPACING_FACTOR",
+      "classification": "runtime_performance_trial",
+      "provenance_wrapper": "Pending",
+      "source_locators": [
+        "scripts/support_placement/config.py:perf_seed_spacing_factor",
+        "scripts/support_placement/engine.py:perf_seed_spacing_factor"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.4 = Pending, disabled None",
+      "provenance_detail": "result-changing when enabled"
+    },
+    {
+      "id": "PIPELINE_HOLLOW_ENABLE_DEFAULT",
+      "classification": "runtime_pipeline_default",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/pipeline.py:prep_one hollow"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = true",
+      "provenance_detail": "pipeline stage enable"
+    },
+    {
+      "id": "PIPELINE_P8_RELOCATE_DEFAULT",
+      "classification": "runtime_pipeline_default",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/tools/prep_one.py:p8-relocate option",
+        "scripts/tools/prep_one.py:SupportConfig p8_relocate_enable"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.5 = false",
+      "provenance_detail": "CLI/pipeline interface default distinct from SupportConfig true"
+    },
+    {
+      "id": "PIXEL_PITCH_X_UM",
+      "classification": "runtime_printer_profile",
+      "normative": "03-physics-and-constants.md §3.7 = 14 um",
+      "source_locators": [
+        "docs/datasheets/printers/saturn-4-ultra-16k.md:Physical parameters XY pixel pitch row"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured VendorDocument"
+    },
+    {
+      "id": "PIXEL_PITCH_Y_UM",
+      "classification": "runtime_printer_profile",
+      "normative": "03-physics-and-constants.md §3.7 = 19 um",
+      "source_locators": [
+        "docs/datasheets/printers/saturn-4-ultra-16k.md:Physical parameters XY pixel pitch row"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured VendorDocument"
+    },
+    {
+      "id": "PLATE_BAND_MM",
+      "classification": "runtime_geometry",
+      "normative": "03-physics-and-constants.md §3.6 = 0.2 mm; one Rust owner",
+      "source_locators": [
+        "scripts/support_placement/joints.py:PLATE_BAND_MM",
+        "scripts/support_placement/chitubox_emit.py:PLATE_BAND_MM"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "PRINT_FLOOR_CHORD_MM",
+      "classification": "runtime_gate",
+      "normative": "03-physics-and-constants.md §3.6 = 0.08 mm",
+      "source_locators": [
+        "scripts/support_placement/verify.py:PRINT_FLOOR_CHORD_MM"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived owner-ratified"
+    },
+    {
+      "id": "PULL_DIST_MM",
+      "classification": "runtime_opt_in_metric",
+      "normative": "03-physics-and-constants.md §3.9 = 15.0 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:pull_dist_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "REWIRE_DEGENERATE_LEN_MM",
+      "classification": "runtime_search",
+      "normative": "03-physics-and-constants.md §3.10.1 = 1e-4 mm",
+      "source_locators": [
+        "scripts/support_placement/rewire.py:DEGENERATE_LEN_MM"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "REWIRE_MAX_SLIDE_EVALS",
+      "classification": "runtime_search_cap",
+      "normative": "03-physics-and-constants.md §3.10.1 = 50",
+      "source_locators": [
+        "scripts/support_placement/rewire.py:MAX_SLIDE_EVALS"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "REWIRE_ROLL_EPS",
+      "classification": "runtime_search",
+      "normative": "03-physics-and-constants.md §3.10.1 = 0.0025",
+      "source_locators": [
+        "scripts/support_placement/rewire.py:ROLL_EPS"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "REWIRE_ROLL_WINDOW",
+      "classification": "runtime_search",
+      "normative": "03-physics-and-constants.md §3.10.1 = 20",
+      "source_locators": [
+        "scripts/support_placement/rewire.py:ROLL_WINDOW"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "REWIRE_TWIG_MERGE_LEN_MM",
+      "classification": "runtime_search",
+      "normative": "03-physics-and-constants.md §3.10.1 = 0.5 mm",
+      "source_locators": [
+        "scripts/support_placement/rewire.py:TWIG_MERGE_LEN_MM"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "REWIRE_WORK_BUDGET",
+      "classification": "runtime_search_cap",
+      "normative": "03-physics-and-constants.md §3.3 = deterministic replacement for retired wall-clock cap",
+      "source_locators": [
+        "scripts/support_placement/config.py:perf_rewire_work_budget"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder deterministic mode"
+    },
+    {
+      "id": "SATURN_BUILD_VOLUME_MM",
+      "classification": "runtime_printer_profile",
+      "normative": "03-physics-and-constants.md §3.7 = X/Y/Z 211.68/118.37/220 mm",
+      "source_locators": [
+        "docs/datasheets/printers/saturn-4-ultra-16k.md:Physical parameters Build volume row"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured VendorDocument"
+    },
+    {
+      "id": "SATURN_LEADING_RELEASE_EDGE",
+      "classification": "runtime_printer_profile",
+      "normative": "03-physics-and-constants.md §3.7 = NegativeY",
+      "source_locators": [
+        "docs/rust-migration/03-physics-and-constants.md:heading 3.7 Printer profile"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured ProjectRecord"
+    },
+    {
+      "id": "SATURN_RELEASE_FILM_THICKNESS_MM",
+      "classification": "runtime_printer_profile",
+      "normative": "03-physics-and-constants.md §3.7 = 0.127 mm official Elegoo PFA",
+      "source_locators": [
+        "docs/rust-migration/03-physics-and-constants.md:heading 3.7 release film row"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured InstalledHardware"
+    },
+    {
+      "id": "SATURN_RELEASE_FRONT_SWEEP_DIRECTION",
+      "classification": "runtime_printer_profile",
+      "normative": "03-physics-and-constants.md §3.7 = PositiveY; front moves -Y to +Y",
+      "source_locators": [
+        "docs/rust-migration/03-physics-and-constants.md:heading 3.7 Printer profile"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured ProjectRecord"
+    },
+    {
+      "id": "SCAR_COST_WEIGHT",
+      "classification": "runtime_search_weight",
+      "normative": "03-physics-and-constants.md §3.5 = 1.0",
+      "source_locators": [
+        "scripts/support_placement/config.py:scar_cost_weight"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "SPACING_FLOOR_MM",
+      "classification": "runtime_placement",
+      "normative": "03-physics-and-constants.md §3.4 = 2.5 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:spacing_floor_mm"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived"
+    },
+    {
+      "id": "STANDOFF_MM",
+      "classification": "runtime_routing",
+      "normative": "03-physics-and-constants.md §3.5 = 0.6 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:standoff_mm"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived"
+    },
+    {
+      "id": "STRUT_FALLBACK_MAX_ANGLE_DEG",
+      "classification": "runtime_routing",
+      "normative": "03-physics-and-constants.md §3.5 = 60.0 deg",
+      "source_locators": [
+        "scripts/support_placement/config.py:strut_fallback_max_angle_deg"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "STRUT_MAX_LENGTH_MM",
+      "classification": "runtime_routing",
+      "normative": "03-physics-and-constants.md §3.5 = 20.0 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:strut_max_length_mm"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived measurement"
+    },
+    {
+      "id": "STRUT_MIN_LENGTH_SAVED_MM",
+      "classification": "runtime_routing",
+      "normative": "03-physics-and-constants.md §3.5 = 8.0 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:strut_min_length_saved_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "STRUT_MODEL_ANCHOR_MAX_CANDIDATES",
+      "classification": "runtime_search_cap",
+      "normative": "03-physics-and-constants.md §3.10.1 = 40",
+      "source_locators": [
+        "scripts/support_placement/struts.py:find_model_anchor_candidates max_candidates"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "STRUT_MODEL_ANCHOR_MAX_DELICACY",
+      "classification": "runtime_search",
+      "normative": "03-physics-and-constants.md §3.10.1 = 0.5",
+      "source_locators": [
+        "scripts/support_placement/struts.py:find_model_anchor_candidates max_delicacy",
+        "scripts/support_placement/struts.py:find_model_anchor max_delicacy"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "STRUT_MODEL_ANCHOR_MIN_LEN_MM",
+      "classification": "runtime_search",
+      "normative": "03-physics-and-constants.md §3.10.1 = 5.0 mm",
+      "source_locators": [
+        "scripts/support_placement/struts.py:find_model_anchor_candidates min_len_mm",
+        "scripts/support_placement/struts.py:find_model_anchor min_len_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "STUB_LENGTH_MM",
+      "classification": "runtime_geometry",
+      "normative": "03-physics-and-constants.md §3.2 = 2.5 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:stub_length_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "SURFACE_PITCH_BOUND_PERCENTILE",
+      "classification": "runtime_routing",
+      "normative": "03-physics-and-constants.md §3.5 = 99.0",
+      "source_locators": [
+        "scripts/support_placement/config.py:surface_pitch_bound_percentile"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured corpus"
+    },
+    {
+      "id": "SURFACE_TREE_MAX_POINTS",
+      "classification": "runtime_sampled_surface",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/routing.py:build_surface_tree max_points"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.2 = 150000",
+      "provenance_detail": "result-changing sample cap"
+    },
+    {
+      "id": "SURFACE_TREE_PITCH_MM",
+      "classification": "runtime_sampled_surface",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/routing.py:build_surface_tree pitch_mm"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.2 = 0.4 mm",
+      "provenance_detail": "result-changing sample pitch"
+    },
+    {
+      "id": "SURFACE_TREE_SEED",
+      "classification": "runtime_sampled_surface",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/routing.py:build_surface_tree seed"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.2 = 0",
+      "provenance_detail": "deterministic sample seed"
+    },
+    {
+      "id": "TARGET_SPACING_MM",
+      "classification": "runtime_placement",
+      "normative": "03-physics-and-constants.md §3.4 = 4.0 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:target_spacing_mm"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived corpus"
+    },
+    {
+      "id": "TENSILE_GREEN_MPA",
+      "classification": "runtime_diagnostic",
+      "normative": "03-physics-and-constants.md §3.1 = 0.288 MPa",
+      "source_locators": [
+        "scripts/support_placement/config.py:tensile_green_mpa"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder legacy split"
+    },
+    {
+      "id": "THIN_FEATURE_MM",
+      "classification": "runtime_perception",
+      "normative": "03-physics-and-constants.md §3.8 = 1.5 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:thin_feature_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "TIP_DIAMETER_MIN_ALLOWED_MM",
+      "classification": "runtime_validation",
+      "normative": "03-physics-and-constants.md §3.2 = 0.150 mm",
+      "source_locators": [
+        "docs/rust-migration/03-physics-and-constants.md:heading 3.2 Arm / tip geometry"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured OwnerDecision"
+    },
+    {
+      "id": "TIP_RADIUS_DEFAULT_MM",
+      "classification": "runtime_generation_profile",
+      "normative": "03-physics-and-constants.md §3.2 = 0.200 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:tip_r_min_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "TIP_RADIUS_MAX_LEGACY_MM",
+      "classification": "runtime_output_clamp",
+      "normative": "03-physics-and-constants.md §3.2 = 1.0 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:tip_r_max_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "TIP_RADIUS_MIN_ALLOWED_MM",
+      "classification": "runtime_validation",
+      "normative": "03-physics-and-constants.md §3.2 = 0.075 mm",
+      "source_locators": [
+        "docs/rust-migration/03-physics-and-constants.md:heading 3.2 Arm / tip geometry"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived"
+    },
+    {
+      "id": "TIP_SAFETY_FACTOR",
+      "classification": "runtime_diagnostic",
+      "normative": "03-physics-and-constants.md §3.1 = 8.0",
+      "source_locators": [
+        "scripts/support_placement/config.py:tip_safety_factor"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder policy"
+    },
+    {
+      "id": "TOL_MM",
+      "classification": "runtime_gate",
+      "normative": "03-physics-and-constants.md §3.6 = 0.05 mm",
+      "source_locators": [
+        "scripts/support_placement/verify.py:TOL_MM"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "TRANSIENT_SHOOT_COUNT_EXPONENT",
+      "classification": "runtime_transient",
+      "normative": "03-physics-and-constants.md §3.3 = N^0.125",
+      "source_locators": [
+        "scripts/support_placement/transient.py:r_transient_mm"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived v3"
+    },
+    {
+      "id": "TRUNK_SEARCH_DIRECTIONS",
+      "classification": "runtime_search",
+      "normative": "03-physics-and-constants.md §3.3 = 12",
+      "source_locators": [
+        "scripts/support_placement/config.py:trunk_search_directions"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "TRUNK_SEARCH_RADII_MM",
+      "classification": "runtime_search",
+      "normative": "03-physics-and-constants.md §3.3 = (0,2,4,7,10,14,19,25) mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:trunk_search_radii_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "TWIN_SINGLE_BRACE_XY_MM",
+      "classification": "runtime_tuning",
+      "normative": "03-physics-and-constants.md §3.3 = 3.0 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:twin_single_brace_xy_mm"
+      ],
+      "provenance_wrapper": "Placeholder",
+      "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "VOXEL_PITCH_MM",
+      "classification": "runtime_perception",
+      "normative": "03-physics-and-constants.md §3.4 = 0.4 mm",
+      "source_locators": [
+        "scripts/support_placement/config.py:voxel_pitch_mm"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived v0"
+    },
+    {
+      "id": "X_ALLOWED",
+      "classification": "runtime_physics",
+      "normative": "03-physics-and-constants.md §3.1 = 12.0",
+      "source_locators": [
+        "docs/rust-migration/03-physics-and-constants.md:heading 1.4 How the constant is encoded today, and what Rust must do instead"
+      ],
+      "provenance_wrapper": "Derived",
+      "provenance_detail": "Derived from X_STAR_CONE"
+    },
+    {
+      "id": "X_STAR_CONE",
+      "classification": "runtime_physics",
+      "normative": "03-physics-and-constants.md §3.1 = [25.00,25.34] inclusive/inclusive, err null",
+      "source_locators": [
+        "scripts/support_placement/config.py:plate-5 log comment at peel_pressure_pa"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured CalibrationPlate 5 OnOrBefore 2026-07-30"
+    },
+    {
+      "id": "X_STAR_CYLINDER",
+      "classification": "runtime_physics",
+      "normative": "03-physics-and-constants.md §3.1 = (19.91,30.48) exclusive/exclusive, err null",
+      "source_locators": [
+        "docs/reference/plate-06-results.md:heading Finding 2"
+      ],
+      "provenance_wrapper": "Measured",
+      "provenance_detail": "Measured CalibrationPlate 6 Exact 2026-07-31"
+    }
   ],
   "aliases": [
-    {"alias":"chitubox_emit.PLATE_BAND_MM","canonical_id":"PLATE_BAND_MM","python_source_locator":"scripts/support_placement/chitubox_emit.py:PLATE_BAND_MM","reason":"hand-maintained duplicate; one Rust owner"},
-    {"alias":"config.contact_depth_mm","canonical_id":"DEFAULT_CONTACT_DEPTH_MM","python_source_locator":"scripts/support_placement/config.py:contact_depth_mm","reason":"legacy field becomes the generation/profile default; it is not format authority"},
-    {"alias":"config.tip_r_min_mm","canonical_id":"TIP_RADIUS_DEFAULT_MM","python_source_locator":"scripts/support_placement/config.py:tip_r_min_mm","reason":"legacy name is a generation default, not validator floor"},
-    {"alias":"verify.BALL_FACTOR_FOOT","canonical_id":"BALL_FACTOR_FOOT","python_source_locator":"scripts/support_placement/verify.py:BALL_FACTOR_FOOT","reason":"copies joints.MODEL_FOOT_FACTOR"},
-    {"alias":"verify.BALL_FACTOR_STUB","canonical_id":"BALL_FACTOR_STUB","python_source_locator":"scripts/support_placement/verify.py:BALL_FACTOR_STUB","reason":"copies config.tip_ball_r_factor"}
+    {
+      "alias": "chitubox_emit.PLATE_BAND_MM",
+      "canonical_id": "PLATE_BAND_MM",
+      "reason": "hand-maintained duplicate; one Rust owner",
+      "source_locators": [
+        "scripts/support_placement/chitubox_emit.py:PLATE_BAND_MM"
+      ]
+    },
+    {
+      "alias": "config.contact_depth_mm",
+      "canonical_id": "DEFAULT_CONTACT_DEPTH_MM",
+      "reason": "legacy field becomes the generation/profile default; it is not format authority",
+      "source_locators": [
+        "scripts/support_placement/config.py:contact_depth_mm"
+      ]
+    },
+    {
+      "alias": "config.tip_r_min_mm",
+      "canonical_id": "TIP_RADIUS_DEFAULT_MM",
+      "reason": "legacy name is a generation default, not validator floor",
+      "source_locators": [
+        "scripts/support_placement/config.py:tip_r_min_mm"
+      ]
+    },
+    {
+      "alias": "decimate_pipeline.DEFAULT_PIXEL_UM",
+      "canonical_id": "PIXEL_PITCH_Y_UM",
+      "source_locators": [
+        "scripts/tools/decimate_pipeline.py:DEFAULT_PIXEL_UM"
+      ],
+      "reason": "coarser Y-axis pixel source, not a second measurement"
+    },
+    {
+      "alias": "pipeline.orient",
+      "canonical_id": "HOLLOW_ORIENT_ENABLE_DEFAULT",
+      "source_locators": [
+        "scripts/support_placement/pipeline.py:prep_one orient"
+      ],
+      "reason": "pipeline forwards the canonical hollow-orientation enable"
+    },
+    {
+      "alias": "verify.BALL_FACTOR_FOOT",
+      "canonical_id": "BALL_FACTOR_FOOT",
+      "reason": "copies joints.MODEL_FOOT_FACTOR",
+      "source_locators": [
+        "scripts/support_placement/verify.py:BALL_FACTOR_FOOT"
+      ]
+    },
+    {
+      "alias": "verify.BALL_FACTOR_STUB",
+      "canonical_id": "BALL_FACTOR_STUB",
+      "reason": "copies config.tip_ball_r_factor",
+      "source_locators": [
+        "scripts/support_placement/verify.py:BALL_FACTOR_STUB"
+      ]
+    },
+    {
+      "alias": "verify.CONNECTIVITY_PLATE_BAND_MM",
+      "canonical_id": "PLATE_BAND_MM",
+      "source_locators": [
+        "scripts/support_placement/verify.py:connectivity_report plate attachment"
+      ],
+      "reason": "same 0.2 mm plate band"
+    }
   ],
   "retired": [
-    {"id":"BRACE_FREE_SPAN_MM","python_source_locator":"scripts/support_placement/config.py:brace_free_span_mm","reason":"depends on retired SHAFT_DRAG_FORCE_N pseudo-drag; rederive from replacement load model"},
-    {"id":"LIFT_MM_PIPELINE_OVERRIDE","python_source_locator":"scripts/support_placement/pipeline.py:prep_one SupportConfig(lift_mm=3.0)","reason":"conflicts with canonical 5.0 mm profile; do not alias or port"},
-    {"id":"REWIRE_TIME_CAP_S","python_source_locator":"scripts/support_placement/config.py:rewire_time_cap_s","reason":"wall-clock stopping changes topology across machines; use deterministic work budget"},
-    {"id":"SHAFT_DRAG_FORCE_N","python_source_locator":"scripts/support_placement/config.py:shaft_drag_force_n","reason":"identical per-shaft pseudo-drag is not a physical law"},
-    {"id":"TRUNK_V3_MERGE_FAMILY","python_source_locators":["scripts/support_placement/config.py:trunk_merge_radius_mm","scripts/support_placement/config.py:trunk_branch_merge_xy_mm","scripts/support_placement/config.py:shoot_max_xy_mm","scripts/support_placement/config.py:trunk_max_shoots"],"reason":"dead v3 mechanism, not a current port target"}
+    {
+      "id": "BRACE_FREE_SPAN_MM",
+      "reason": "depends on retired SHAFT_DRAG_FORCE_N pseudo-drag; rederive from replacement load model",
+      "source_locators": [
+        "scripts/support_placement/config.py:brace_free_span_mm"
+      ]
+    },
+    {
+      "id": "GEOMETRY_SWEEP_MAX_PASSES",
+      "source_locators": [
+        "scripts/tools/geometry_sweep.py:sweep passes"
+      ],
+      "reason": "Blender-only manual repair tool is deleted rather than ported; legacy default 8"
+    },
+    {
+      "id": "GEOMETRY_SWEEP_ZERO_THRESHOLD",
+      "source_locators": [
+        "scripts/tools/geometry_sweep.py:sweep zero_thresh"
+      ],
+      "reason": "Blender-only manual repair tool is deleted rather than ported; legacy threshold 1e-4"
+    },
+    {
+      "id": "HOLLOW_LEGACY_ORIENTATION_HEURISTIC",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:orient_search"
+      ],
+      "reason": "no-port coupled heuristic: proxy 0.9, identity plus +/-10/20/30 degrees X/Y, weights 0.5/3/0.3, section margin/step 0.1/4 mm, normal cutoff -0.707; replaced by target dense search"
+    },
+    {
+      "id": "LIFT_MM_PIPELINE_OVERRIDE",
+      "reason": "conflicts with canonical 5.0 mm profile; do not alias or port",
+      "source_locators": [
+        "scripts/support_placement/pipeline.py:prep_one SupportConfig lift_mm 3.0",
+        "scripts/tools/emit_supports.py:lift-mm default",
+        "scripts/tools/prep_one.py:lift-mm default",
+        "scripts/tools/run_v5.py:SupportConfig lift_mm 3.0",
+        "scripts/tools/run_engine_full.py:SupportConfig lift_mm 3.0",
+        "scripts/tools/recheck_rewire_cap.py:SupportConfig lift_mm 3.0"
+      ]
+    },
+    {
+      "id": "P8_CONCESSION_STANDOFF_LADDER",
+      "source_locators": [
+        "docs/specs/SPEC-P8-REACH.md:heading 5 FEATURE B"
+      ],
+      "reason": "Feature-B concession ladder (0.3,0.1) mm is explicitly not ported"
+    },
+    {
+      "id": "REWIRE_TIME_CAP_S",
+      "reason": "wall-clock stopping changes topology across machines; use deterministic work budget",
+      "source_locators": [
+        "scripts/support_placement/config.py:rewire_time_cap_s"
+      ]
+    },
+    {
+      "id": "SHAFT_DRAG_FORCE_N",
+      "reason": "identical per-shaft pseudo-drag is not a physical law",
+      "source_locators": [
+        "scripts/support_placement/config.py:shaft_drag_force_n"
+      ]
+    },
+    {
+      "id": "TRUNK_V3_MERGE_FAMILY",
+      "reason": "dead v3 mechanism, not a current port target",
+      "source_locators": [
+        "scripts/support_placement/config.py:trunk_merge_radius_mm",
+        "scripts/support_placement/config.py:trunk_branch_merge_xy_mm",
+        "scripts/support_placement/config.py:shoot_max_xy_mm",
+        "scripts/support_placement/config.py:trunk_max_shoots"
+      ]
+    }
   ],
   "excluded": [
-    {"id":"BINARY_FORMAT_OFFSETS_AND_TYPE_IDS","python_source_locator":"scripts/support_placement/chitubox_inject.py:FILE_MAGIC through T_PAD","reason":"binary-format decoder/encoder layout, not runtime policy registry material"},
-    {"id":"CHITUBOX_FIXTURE_CONTENTS","python_source_locator":"scripts/tests/fixtures/chitubox/","reason":"pure test fixtures; fixture README governs only format corpus"},
-    {"id":"PLINTH_THREADS","python_source_locator":"runtime environment PLINTH_THREADS","reason":"runtime scheduling control, not physics or tuning constant"},
-    {"id":"PURE_TEST_FIXTURE_BASELINES","python_source_locator":"scripts/tests/fixtures/*.json","reason":"frozen expected artifacts, not runtime declarations"},
-    {"id":"RESOURCE_AND_MEMORY_GUARDS","python_source_locators":["scripts/support_placement/config.py:contact_pool_max_*","scripts/support_placement/config.py:topology_max_*","scripts/support_placement/config.py:coverage_samples_max_*","scripts/support_placement/config.py:coverage_query_block_size","scripts/support_placement/config.py:coverage_score_matrix_max_entries","scripts/support_placement/config.py:synthetic_coverage_mask_max_words","scripts/support_placement/config.py:p8_coverage_matrix_max_entries","scripts/support_placement/geometry_exact.py:ROW_BUDGET","scripts/support_placement/geometry_exact.py:RSS_LIMIT_GB","scripts/support_placement/joints.py:_CERT_MAX_DEPTH","scripts/support_placement/joints.py:_CERT_MAX_PATCHES","scripts/support_placement/tree.py:_VERDICT_CACHE_CAP"],"reason":"true resource guards or result-invariant allocation accounting, not registry material"}
-    ,{"id":"RESULT_INVARIANT_BATCH_AND_CHUNK_SIZES","python_source_locators":["scripts/support_placement/joints.py:_AXIS_SCAN_CHUNK","scripts/support_placement/verify.py:CHUNK","scripts/support_placement/perception.py:CHUNK","scripts/support_placement/routing.py:build_surface_tree defaults"],"reason":"implementation batching; must not change result"}
+    {
+      "id": "BINARY_FORMAT_OFFSETS_AND_TYPE_IDS",
+      "reason": "binary-format decoder/encoder layout, not runtime policy registry material",
+      "source_locators": [
+        "scripts/support_placement/chitubox_inject.py:FILE_MAGIC through T_PAD"
+      ]
+    },
+    {
+      "id": "CHITUBOX_FIXTURE_CONTENTS",
+      "reason": "pure test fixtures; fixture README governs only format corpus",
+      "source_locators": [
+        "scripts/tests/fixtures/chitubox/"
+      ]
+    },
+    {
+      "id": "GEOM_KERNEL_THREADS",
+      "source_locators": [
+        "rust/geom_kernel/src/par.rs:GEOM_KERNEL_THREADS",
+        "docs/rust-migration/04-migration-plan.md:heading M8"
+      ],
+      "reason": "distinct frozen-kernel scheduling control; no-port once PLINTH_THREADS owns the Rust workspace; thread-sweep proves determinism"
+    },
+    {
+      "id": "KDTREE_REBUILD_EVERY",
+      "source_locators": [
+        "scripts/support_placement/cco.py:KDTREE_REBUILD_EVERY",
+        "scripts/support_placement/cco.py:_DynamicMemberIndex.nearest_members"
+      ],
+      "reason": "exactness-preserving cadence only: nearest_members brute-forces the unindexed tail between rebuilds"
+    },
+    {
+      "id": "PERF_EXACT_OPTS_DISABLE",
+      "source_locators": [
+        "scripts/support_placement/config.py:perf_exact_opts_disable",
+        "scripts/tests/test_perf_cache.py"
+      ],
+      "reason": "cache/accelerator disable switch only; cache-disabled equality test proves exact result preservation"
+    },
+    {
+      "id": "PLINTH_THREADS",
+      "reason": "new mandatory Rust-wide runtime scheduling contract outside the physics/tuning registry",
+      "source_locators": [
+        "docs/rust-migration/06-conventions.md:heading 3 Performance rules",
+        "docs/rust-migration/04-migration-plan.md:heading M8"
+      ]
+    },
+    {
+      "id": "PURE_TEST_FIXTURE_BASELINES",
+      "reason": "frozen expected artifacts, not runtime declarations",
+      "source_locators": [
+        "scripts/tests/fixtures/:JSON baselines"
+      ]
+    },
+    {
+      "id": "RESOURCE_AND_MEMORY_GUARDS",
+      "reason": "true resource guards or result-invariant allocation accounting, not registry material",
+      "source_locators": [
+        "scripts/support_placement/config.py:contact_pool_max_*",
+        "scripts/support_placement/config.py:topology_max_*",
+        "scripts/support_placement/config.py:coverage_samples_max_*",
+        "scripts/support_placement/config.py:coverage_query_block_size",
+        "scripts/support_placement/config.py:coverage_score_matrix_max_entries",
+        "scripts/support_placement/config.py:synthetic_coverage_mask_max_words",
+        "scripts/support_placement/config.py:p8_coverage_matrix_max_entries",
+        "scripts/support_placement/geometry_exact.py:ROW_BUDGET",
+        "scripts/support_placement/geometry_exact.py:RSS_LIMIT_GB",
+        "scripts/support_placement/joints.py:_CERT_MAX_DEPTH",
+        "scripts/support_placement/joints.py:_CERT_MAX_PATCHES",
+        "scripts/support_placement/tree.py:_VERDICT_CACHE_CAP"
+      ]
+    },
+    {
+      "id": "RESULT_INVARIANT_BATCH_AND_CHUNK_SIZES",
+      "reason": "implementation batching; must not change result",
+      "source_locators": [
+        "scripts/support_placement/joints.py:_AXIS_SCAN_CHUNK",
+        "scripts/support_placement/verify.py:CHUNK",
+        "scripts/support_placement/perception.py:CHUNK"
+      ]
+    }
   ]
 }
