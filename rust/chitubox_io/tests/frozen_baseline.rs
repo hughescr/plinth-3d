@@ -19,17 +19,16 @@ struct CorpusManifest {
     waivers: Vec<NoWaiver>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug)]
 struct CorpusModel {
     name: String,
     stl: PathBuf,
     source_digest: SourceDigest,
     report: PathBuf,
-    baseline_artifact: Option<PathBuf>,
+    baseline_artifact: PresentNullable<PathBuf>,
     python_exit_code: u8,
     python_seconds: f64,
-    python_failed_stage: Option<StageName>,
+    python_failed_stage: PresentNullable<StageName>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -88,16 +87,14 @@ enum PipelineStatus {
     Failed,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct PipelineReport {
     input_stl: PathBuf,
     out_path: PathBuf,
     prepped_stl: PathBuf,
     status: PipelineStatus,
     exit_code: u8,
-    failed_stage: Option<StageName>,
-    error: Option<String>,
+    failed_stage: PresentNullable<StageName>,
+    error: PresentNullable<String>,
     seconds: f64,
     report_path: PathBuf,
     settings: PipelineSettings,
@@ -119,14 +116,12 @@ struct PipelineSettings {
     a5_internal_supports_enabled: bool,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
 struct PipelineStage {
     name: StageName,
     status: PipelineStatus,
     seconds: f64,
     report: IgnoredAny,
-    error: Option<String>,
+    error: PresentNullable<String>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq, Copy, Clone)]
@@ -180,12 +175,270 @@ enum PassBound {
     Pass,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq, Copy, Clone)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
 struct MetricDefinition {
     id: MetricId,
     direction: MetricDirection,
-    hard_bound: Option<MetricHardBound>,
+    hard_bound: PresentNullable<MetricHardBound>,
+}
+
+/// A nullable JSON field that was present in the input. `Option<T>` alone
+/// accepts an omitted key and JSON `null` alike, so the wire representation
+/// below records absence separately before each parent type rejects it.
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+struct PresentNullable<T>(Option<T>);
+
+#[derive(Debug)]
+struct RequiredNullable<T>(Option<Option<T>>);
+
+impl<T> Default for RequiredNullable<T> {
+    fn default() -> Self {
+        Self(None)
+    }
+}
+
+impl<'de, T> Deserialize<'de> for RequiredNullable<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<T>::deserialize(deserializer).map(|value| Self(Some(value)))
+    }
+}
+
+impl<T> RequiredNullable<T> {
+    fn require<E: serde::de::Error>(self, field: &'static str) -> Result<PresentNullable<T>, E> {
+        self.0
+            .map(PresentNullable)
+            .ok_or_else(|| E::missing_field(field))
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CorpusModelWire {
+    name: String,
+    stl: PathBuf,
+    source_digest: SourceDigest,
+    report: PathBuf,
+    #[serde(default)]
+    baseline_artifact: RequiredNullable<PathBuf>,
+    python_exit_code: u8,
+    python_seconds: f64,
+    #[serde(default)]
+    python_failed_stage: RequiredNullable<StageName>,
+}
+
+impl<'de> Deserialize<'de> for CorpusModel {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = CorpusModelWire::deserialize(deserializer)?;
+        Ok(Self {
+            name: wire.name,
+            stl: wire.stl,
+            source_digest: wire.source_digest,
+            report: wire.report,
+            baseline_artifact: wire.baseline_artifact.require("baseline_artifact")?,
+            python_exit_code: wire.python_exit_code,
+            python_seconds: wire.python_seconds,
+            python_failed_stage: wire.python_failed_stage.require("python_failed_stage")?,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PipelineReportWire {
+    input_stl: PathBuf,
+    out_path: PathBuf,
+    prepped_stl: PathBuf,
+    status: PipelineStatus,
+    exit_code: u8,
+    #[serde(default)]
+    failed_stage: RequiredNullable<StageName>,
+    #[serde(default)]
+    error: RequiredNullable<String>,
+    seconds: f64,
+    report_path: PathBuf,
+    settings: PipelineSettings,
+    stages: Vec<PipelineStage>,
+}
+
+impl<'de> Deserialize<'de> for PipelineReport {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = PipelineReportWire::deserialize(deserializer)?;
+        Ok(Self {
+            input_stl: wire.input_stl,
+            out_path: wire.out_path,
+            prepped_stl: wire.prepped_stl,
+            status: wire.status,
+            exit_code: wire.exit_code,
+            failed_stage: wire.failed_stage.require("failed_stage")?,
+            error: wire.error.require("error")?,
+            seconds: wire.seconds,
+            report_path: wire.report_path,
+            settings: wire.settings,
+            stages: wire.stages,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PipelineStageWire {
+    name: StageName,
+    status: PipelineStatus,
+    seconds: f64,
+    report: IgnoredAny,
+    #[serde(default)]
+    error: RequiredNullable<String>,
+}
+
+impl<'de> Deserialize<'de> for PipelineStage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = PipelineStageWire::deserialize(deserializer)?;
+        Ok(Self {
+            name: wire.name,
+            status: wire.status,
+            seconds: wire.seconds,
+            report: wire.report,
+            error: wire.error.require("error")?,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetricDefinitionWire {
+    id: MetricId,
+    direction: MetricDirection,
+    #[serde(default)]
+    hard_bound: RequiredNullable<MetricHardBound>,
+}
+
+impl<'de> Deserialize<'de> for MetricDefinition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = MetricDefinitionWire::deserialize(deserializer)?;
+        Ok(Self {
+            id: wire.id,
+            direction: wire.direction,
+            hard_bound: wire.hard_bound.require("hard_bound")?,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelNullableContractWire {
+    #[serde(default)]
+    baseline_artifact: RequiredNullable<PathBuf>,
+    #[serde(default)]
+    python_failed_stage: RequiredNullable<StageName>,
+}
+
+struct ModelNullableContract {
+    baseline_artifact: PresentNullable<PathBuf>,
+    python_failed_stage: PresentNullable<StageName>,
+}
+
+impl<'de> Deserialize<'de> for ModelNullableContract {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ModelNullableContractWire::deserialize(deserializer)?;
+        Ok(Self {
+            baseline_artifact: wire.baseline_artifact.require("baseline_artifact")?,
+            python_failed_stage: wire.python_failed_stage.require("python_failed_stage")?,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReportNullableContractWire {
+    #[serde(default)]
+    failed_stage: RequiredNullable<StageName>,
+    #[serde(default)]
+    error: RequiredNullable<String>,
+}
+
+struct ReportNullableContract {
+    failed_stage: PresentNullable<StageName>,
+    error: PresentNullable<String>,
+}
+
+impl<'de> Deserialize<'de> for ReportNullableContract {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = ReportNullableContractWire::deserialize(deserializer)?;
+        Ok(Self {
+            failed_stage: wire.failed_stage.require("failed_stage")?,
+            error: wire.error.require("error")?,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StageNullableContractWire {
+    #[serde(default)]
+    error: RequiredNullable<String>,
+}
+
+struct StageNullableContract {
+    error: PresentNullable<String>,
+}
+
+impl<'de> Deserialize<'de> for StageNullableContract {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = StageNullableContractWire::deserialize(deserializer)?;
+        Ok(Self {
+            error: wire.error.require("error")?,
+        })
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetricNullableContractWire {
+    #[serde(default)]
+    hard_bound: RequiredNullable<MetricHardBound>,
+}
+
+struct MetricNullableContract {
+    hard_bound: PresentNullable<MetricHardBound>,
+}
+
+impl<'de> Deserialize<'de> for MetricNullableContract {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let wire = MetricNullableContractWire::deserialize(deserializer)?;
+        Ok(Self {
+            hard_bound: wire.hard_bound.require("hard_bound")?,
+        })
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -361,77 +614,77 @@ const EXPECTED_METRICS: [MetricDefinition; 15] = [
     MetricDefinition {
         id: MetricId::Islands,
         direction: MetricDirection::LowerIsBetter,
-        hard_bound: None,
+        hard_bound: PresentNullable(None),
     },
     MetricDefinition {
         id: MetricId::Cavities,
         direction: MetricDirection::LowerIsBetter,
-        hard_bound: None,
+        hard_bound: PresentNullable(None),
     },
     MetricDefinition {
         id: MetricId::BoundaryEdges,
         direction: MetricDirection::LowerIsBetter,
-        hard_bound: Some(MetricHardBound::Zero(0)),
+        hard_bound: PresentNullable(Some(MetricHardBound::Zero(0))),
     },
     MetricDefinition {
         id: MetricId::NegativeShells,
         direction: MetricDirection::LowerIsBetter,
-        hard_bound: Some(MetricHardBound::Zero(0)),
+        hard_bound: PresentNullable(Some(MetricHardBound::Zero(0))),
     },
     MetricDefinition {
         id: MetricId::Winding,
         direction: MetricDirection::LowerIsBetter,
-        hard_bound: Some(MetricHardBound::Zero(0)),
+        hard_bound: PresentNullable(Some(MetricHardBound::Zero(0))),
     },
     MetricDefinition {
         id: MetricId::MaxX,
         direction: MetricDirection::LowerIsBetter,
-        hard_bound: None,
+        hard_bound: PresentNullable(None),
     },
     MetricDefinition {
         id: MetricId::SupportCount,
         direction: MetricDirection::LowerIsBetter,
-        hard_bound: None,
+        hard_bound: PresentNullable(None),
     },
     MetricDefinition {
         id: MetricId::ResinModel,
         direction: MetricDirection::LowerIsBetter,
-        hard_bound: None,
+        hard_bound: PresentNullable(None),
     },
     MetricDefinition {
         id: MetricId::ResinSupport,
         direction: MetricDirection::LowerIsBetter,
-        hard_bound: None,
+        hard_bound: PresentNullable(None),
     },
     MetricDefinition {
         id: MetricId::ResinTotal,
         direction: MetricDirection::LowerIsBetter,
-        hard_bound: None,
+        hard_bound: PresentNullable(None),
     },
     MetricDefinition {
         id: MetricId::ScarArea,
         direction: MetricDirection::LowerIsBetter,
-        hard_bound: None,
+        hard_bound: PresentNullable(None),
     },
     MetricDefinition {
         id: MetricId::ScarWorstPatch,
         direction: MetricDirection::LowerIsBetter,
-        hard_bound: None,
+        hard_bound: PresentNullable(None),
     },
     MetricDefinition {
         id: MetricId::ScarWeighted,
         direction: MetricDirection::LowerIsBetter,
-        hard_bound: None,
+        hard_bound: PresentNullable(None),
     },
     MetricDefinition {
         id: MetricId::ZHeight,
         direction: MetricDirection::LowerIsBetter,
-        hard_bound: None,
+        hard_bound: PresentNullable(None),
     },
     MetricDefinition {
         id: MetricId::Loadable,
         direction: MetricDirection::PassFail,
-        hard_bound: Some(MetricHardBound::Pass(PassBound::Pass)),
+        hard_bound: PresentNullable(Some(MetricHardBound::Pass(PassBound::Pass))),
     },
 ];
 
@@ -456,6 +709,21 @@ fn read_json<T: for<'de> Deserialize<'de>>(path: &Path, label: &str) -> T {
             path.display()
         )
     })
+}
+
+fn assert_required_nullable_field<T>(label: &str, explicit_null: &str, missing: &[&str]) -> T
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let parsed = serde_json::from_str(explicit_null)
+        .unwrap_or_else(|error| panic!("{label}: explicit JSON null must deserialize: {error}"));
+    for omitted in missing {
+        assert!(
+            serde_json::from_str::<T>(omitted).is_err(),
+            "{label}: omission must fail: {omitted}"
+        );
+    }
+    parsed
 }
 
 fn expected_stl(name: &str) -> PathBuf {
@@ -517,11 +785,11 @@ fn assert_report_stages(name: &str, report: &PipelineReport) {
         report.seconds.is_finite() && report.seconds >= 0.0,
         "{name}: report total seconds must be finite and nonnegative"
     );
-    let terminal_index = match report.failed_stage {
+    let terminal_index = match report.failed_stage.0 {
         None => {
             assert_eq!(report.exit_code, 0, "{name}: success must have exit code 0");
             assert!(
-                report.error.is_none(),
+                report.error.0.is_none(),
                 "{name}: success must not have an error"
             );
             ORDER.len() - 1
@@ -534,6 +802,7 @@ fn assert_report_stages(name: &str, report: &PipelineReport) {
             assert!(
                 report
                     .error
+                    .0
                     .as_deref()
                     .is_some_and(|error| !error.is_empty()),
                 "{name}: failed report must carry a nonempty error"
@@ -550,7 +819,7 @@ fn assert_report_stages(name: &str, report: &PipelineReport) {
     let mut summed_seconds = 0.0;
     for (index, stage) in report.stages.iter().enumerate() {
         assert_eq!(stage.name, ORDER[index], "{name}: stage order");
-        let expected_status = if report.failed_stage.is_some() && index == terminal_index {
+        let expected_status = if report.failed_stage.0.is_some() && index == terminal_index {
             PipelineStatus::Failed
         } else {
             PipelineStatus::Ok
@@ -562,13 +831,14 @@ fn assert_report_stages(name: &str, report: &PipelineReport) {
         );
         if matches!(stage.status, PipelineStatus::Ok) {
             assert!(
-                stage.error.is_none(),
+                stage.error.0.is_none(),
                 "{name}: successful stage has an error"
             );
         } else {
             assert!(
                 stage
                     .error
+                    .0
                     .as_deref()
                     .is_some_and(|error| !error.is_empty()),
                 "{name}: failed stage lacks an error"
@@ -611,6 +881,36 @@ fn assert_artifact_as_written(name: &str, path: &Path) {
         audited_bytes, disk_bytes,
         "{name}: fresh structural audit must preserve original artifact bytes without repair"
     );
+}
+
+#[test]
+fn required_nullable_contract_keys_accept_null_and_reject_omission() {
+    let model: ModelNullableContract = assert_required_nullable_field(
+        "model nullable keys",
+        r#"{"baseline_artifact":null,"python_failed_stage":null}"#,
+        &[
+            r#"{"python_failed_stage":null}"#,
+            r#"{"baseline_artifact":null}"#,
+        ],
+    );
+    assert!(model.baseline_artifact.0.is_none());
+    assert!(model.python_failed_stage.0.is_none());
+
+    let report: ReportNullableContract = assert_required_nullable_field(
+        "report nullable keys",
+        r#"{"failed_stage":null,"error":null}"#,
+        &[r#"{"error":null}"#, r#"{"failed_stage":null}"#],
+    );
+    assert!(report.failed_stage.0.is_none());
+    assert!(report.error.0.is_none());
+
+    let stage: StageNullableContract =
+        assert_required_nullable_field("stage error", r#"{"error":null}"#, &[r#"{}"#]);
+    assert!(stage.error.0.is_none());
+
+    let metric: MetricNullableContract =
+        assert_required_nullable_field("metric hard_bound", r#"{"hard_bound":null}"#, &[r#"{}"#]);
+    assert!(metric.hard_bound.0.is_none());
 }
 
 #[test]
@@ -700,7 +1000,7 @@ fn frozen_baseline_manifest_and_artifacts_are_complete_and_truthful() {
             "{name}: exit code"
         );
         assert_eq!(
-            report.failed_stage, model.python_failed_stage,
+            report.failed_stage.0, model.python_failed_stage.0,
             "{name}: failed stage"
         );
         assert_eq!(
@@ -728,11 +1028,11 @@ fn frozen_baseline_manifest_and_artifacts_are_complete_and_truthful() {
                 "{name}: successful exit has non-ok status"
             );
             assert!(
-                model.python_failed_stage.is_none(),
+                model.python_failed_stage.0.is_none(),
                 "{name}: successful exit has a failed stage"
             );
             assert_eq!(
-                model.baseline_artifact.as_deref(),
+                model.baseline_artifact.0.as_deref(),
                 Some(report.out_path.as_path()),
                 "{name}: successful exit must name its emitted artifact"
             );
@@ -743,11 +1043,11 @@ fn frozen_baseline_manifest_and_artifacts_are_complete_and_truthful() {
                 "{name}: failed exit has non-failed status"
             );
             assert!(
-                model.python_failed_stage.is_some(),
+                model.python_failed_stage.0.is_some(),
                 "{name}: failed exit lacks a named failed stage"
             );
             assert!(
-                model.baseline_artifact.is_none(),
+                model.baseline_artifact.0.is_none(),
                 "{name}: failed exit must carry a null baseline_artifact"
             );
             assert!(
