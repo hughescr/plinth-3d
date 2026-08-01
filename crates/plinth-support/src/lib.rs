@@ -372,7 +372,6 @@ impl SupportedModel {
     pub const fn plate_z_mm(&self) -> Finite {
         self.history.plate_z_mm()
     }
-
     /// Moves the sole model mesh, all f64 primitives, and report history together.
     #[must_use]
     pub fn into_parts(self) -> (Mesh, Vec<SupportPrimitive>, SupportHistory) {
