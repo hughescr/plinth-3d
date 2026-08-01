@@ -6,6 +6,7 @@
 //! perform one audit pass.
 #![forbid(unsafe_code)]
 
+mod authority;
 mod geometry;
 mod read;
 mod scar;
@@ -13,6 +14,7 @@ mod score;
 mod supports;
 mod topology;
 
+pub use authority::{load_validated_waivers, AuthorityError};
 pub use geometry::{
     closest_points, contains_points, ray_intersections, triangle_intersections, ClosestPoint, Ray,
     RayHit,

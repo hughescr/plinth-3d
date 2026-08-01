@@ -282,6 +282,67 @@ splits, and Python-freeze-before-Rust-refreeze sequencing. After
 creation it is dated and append-only; later sign-offs and waivers are added, not
 rewritten.
 
+## Decision gate table
+
+This section closes the guide's former table gap: M1 creates it, rather than M0.
+It is an append-only, machine-parseable authority record.  Its single Markdown
+table has exactly ten columns; `-` means "not applicable", never an omitted
+field.  `recorded` is when the entry was entered here, `evidence_date` is the
+date carried by its cited authority, and `status` intentionally distinguishes a
+guide commitment, a documented owner approval, a Sol compliance adjudication,
+and a future owner signature.  A row is a waiver only when `kind` is `waiver`,
+`authority` is exactly `owner:Craig Hughes`, and `status` is exactly `signed`.
+The final column is five semicolon-separated fields in this fixed order:
+`model;metric;scope;reason;expires`.  Procedural file authority is deliberately
+not a cryptographic signature scheme: the trusted boundary is a checked-in,
+reviewed repository checkout plus Craig's recorded sign-off.
+
+| id | kind | recorded | authority | status | evidence_date | resolution | source | locator | waiver |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| D-1 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Staged spine with search-shaped data model | docs/rust-migration/02-target-architecture.md | section-16-D-1 | - |
+| D-2 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Ratified crate layout and one independent metrics implementation | docs/rust-migration/02-target-architecture.md | section-16-D-2 | - |
+| D-3 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Typestate plus owned values and Validated newtype | docs/rust-migration/02-target-architecture.md | section-16-D-3 | - |
+| D-4 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Orientation-invariant FaceTable | docs/rust-migration/02-target-architecture.md | section-16-D-4 | - |
+| D-5 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Scar invariant surrogate then layout refine | docs/rust-migration/02-target-architecture.md | section-16-D-5 | - |
+| D-6 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Provenance wrappers AcceptSafe registry and compile-fail proof | docs/rust-migration/02-target-architecture.md | section-16-D-6 | - |
+| D-7 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Pending keeps conservative and optimistic branches | docs/rust-migration/02-target-architecture.md | section-16-D-7 | - |
+| D-8 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | LoadSharing is an exhaustive tagged enum | docs/rust-migration/02-target-architecture.md | section-16-D-8 | - |
+| D-9 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Ratified ViolationKind union and RepairCapExhausted treatment | docs/rust-migration/02-target-architecture.md | section-16-D-9 | - |
+| D-10 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | ViolationKind remains exhaustively matchable | docs/rust-migration/02-target-architecture.md | section-16-D-10 | - |
+| D-11 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Response is Repair or Terminal with fixture discipline | docs/rust-migration/02-target-architecture.md | section-16-D-11 | - |
+| D-12 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Three-tier orientation funnel with fixed counts | docs/rust-migration/02-target-architecture.md | section-16-D-12 | - |
+| D-13 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | One-way coupling and measured escalation ladder | docs/rust-migration/02-target-architecture.md | section-16-D-13 | - |
+| D-14 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Solid FFI then metrics then thin vertical slice | docs/rust-migration/02-target-architecture.md | section-16-D-14 | - |
+| D-15 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Redesign orchestration and port geometric proofs as coded | docs/rust-migration/02-target-architecture.md | section-16-D-15 | - |
+| D-16 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | transient.py maps to support sizing with immutable measured arrays | docs/rust-migration/02-target-architecture.md | section-16-D-16 | - |
+| D-17 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | removal.py is opt-in diagnostic only | docs/rust-migration/02-target-architecture.md | section-16-D-17 | - |
+| D-18 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Mesh fingerprints canonicalize negative zero and reject nonfinite | docs/rust-migration/02-target-architecture.md | section-16-D-18 | - |
+| D-19 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Metrics excludes plinth-verify and geom_kernel | docs/rust-migration/02-target-architecture.md | section-16-D-19 | - |
+| D-20 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | CLI exit projects DefectReport | docs/rust-migration/02-target-architecture.md | section-16-D-20 | - |
+| D-21 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Ignored source STLs and committed corpus metadata plus outputs | docs/rust-migration/02-target-architecture.md | section-16-D-21 | - |
+| D-22 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Delete Blender geometry sweep and refuse bad geometry | docs/rust-migration/02-target-architecture.md | section-16-D-22 | - |
+| D-23 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Pipeline cache and cost memoization with cache-off equality | docs/rust-migration/02-target-architecture.md | section-16-D-23 | - |
+| D-24 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Print time sums layer exposure and lift | docs/rust-migration/02-target-architecture.md | section-16-D-24 | - |
+| D-25 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Scalarization weights are Placeholder and not accept-safe | docs/rust-migration/02-target-architecture.md | section-16-D-25 | - |
+| D-26 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Concession supports deferred pending named owner decision | docs/rust-migration/02-target-architecture.md | section-16-D-26 | - |
+| D-27 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Filter dead Murray members in Rust | docs/rust-migration/02-target-architecture.md | section-16-D-27 | - |
+| D-28 | decision | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Ledger plus registry expected IDs and golden constants artifact | docs/rust-migration/02-target-architecture.md | section-16-D-28 | - |
+| D-29 | decision | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-07-31 | Tagged evidence dates finite intervals and explicit categorical null error | docs/rust-migration/02-target-architecture.md | section-16-D-29 | - |
+| D-30 | decision | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-07-31 | Saturn build volume and pixel pitch use official vendor record | docs/rust-migration/02-target-architecture.md | section-16-D-30 | - |
+| O-1 | override | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-07-31 | Bounded C++ Manifold 3.5.2 FFI exception | docs/rust-migration/02-target-architecture.md | section-16-O-1 | - |
+| O-2 | override | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Python byte parity for fingerprints is abandoned | docs/rust-migration/02-target-architecture.md | section-16-O-2 | - |
+| O-3 | override | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | ExactSurface permanent-Python commitment is overridden | docs/rust-migration/02-target-architecture.md | section-16-O-3 | - |
+| O-4 | override | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Wall-clock budgets are banned | docs/rust-migration/02-target-architecture.md | section-16-O-4 | - |
+| H-1 | historical | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-07-31 | Measured err is Option and categorical payloads serialize err null | docs/rust-migration/03-physics-and-constants.md | section-4.2 | - |
+| H-2 | historical | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | LoadSharing passive type is core and support owns behavior | docs/rust-migration/02-target-architecture.md | section-3.6 | - |
+| H-3 | historical | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | FixerId is passive core identity and support owns responders | docs/rust-migration/02-target-architecture.md | section-3.3 | - |
+| H-4 | historical | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Core owns passive cost DTOs and plinth-cost owns behavior | docs/rust-migration/04-migration-plan.md | section-2-cost-rs | - |
+| H-5 | historical | 2026-08-01 | guide | guide-ratified | exact:2026-07-31 | Core owns passive metric DTOs and plinth-metrics owns behavior | docs/rust-migration/04-migration-plan.md | section-2-metric-rs | - |
+| H-6 | historical | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-08-01 | Python made the one M0 freeze and Rust owns future refreeze | docs/rust-migration/04-migration-plan.md | M1-refreeze | - |
+| H-7 | historical | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-07-31 | Replace generic Unknown Saturn disposition with official vendor evidence | docs/rust-migration/06-conventions.md | section-5-generic-unknown-supersession | - |
+| H-8 | historical | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-07-31 | Exact corpus is eight models and excludes Cone | docs/rust-migration/04-migration-plan.md | corpus-membership | - |
+| H-9 | historical | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-07-31 | Release edge is NegativeY and sweep is PositiveY from negative to positive Y | docs/datasheets/printers/saturn-4-ultra-16k.md | axis-mapping | - |
+
 ---
 
 ## 6. Testing standards

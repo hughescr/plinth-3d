@@ -63,7 +63,6 @@ const M1_SCORE_ORDER_ORACLE: [&str; 15] = [
     "loadable",
 ];
 
-#[cfg(test)]
 const FORMAT_METRICS: [&str; 5] = [
     "boundary_edges",
     "negative_shells",
@@ -71,9 +70,7 @@ const FORMAT_METRICS: [&str; 5] = [
     "cavities",
     "loadable",
 ];
-#[cfg(test)]
 const SCAR_METRICS: [&str; 3] = ["scar_area", "scar_worst_patch", "scar_weighted"];
-#[cfg(test)]
 const RESIN_METRICS: [&str; 3] = ["resin_model", "resin_support", "resin_total"];
 
 /// All independently supplied evidence required to score one successful disk
@@ -134,6 +131,15 @@ impl ScoredModel {
             .position(|candidate| *candidate == id)
             .map(|index| self.values[index])
     }
+}
+
+#[cfg(test)]
+pub(crate) fn scored_for_authority_test(model: &str, value: f64) -> ScoredArtifact {
+    let value = MetricValue::new(value).expect("test fixture is finite");
+    ScoredArtifact::Success(ScoredModel {
+        model: ModelId::from(model),
+        values: [value; M1_METRIC_ORDER.len()],
+    })
 }
 
 /// Semantic score-assembly failures.
@@ -540,12 +546,16 @@ impl ValidatedWaivers {
             entries: Vec::new(),
         }
     }
+
+    pub(crate) fn from_authority(entries: Vec<ValidatedWaiver>) -> Self {
+        Self { entries }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct ValidatedWaiver {
-    model: ModelId,
-    ids: Vec<&'static str>,
+pub(crate) struct ValidatedWaiver {
+    pub(crate) model: ModelId,
+    pub(crate) ids: Vec<&'static str>,
 }
 
 // Intentionally private: no CLI or library caller can turn a raw owner claim
@@ -911,8 +921,7 @@ fn validate_waivers(
     Ok(ValidatedWaivers { entries })
 }
 
-#[cfg(test)]
-fn expand_target(target: &str) -> Result<Vec<&'static str>, ComparisonError> {
+pub(crate) fn expand_target(target: &str) -> Result<Vec<&'static str>, ComparisonError> {
     let ids = match target {
         "scar" => SCAR_METRICS.to_vec(),
         "resin" => RESIN_METRICS.to_vec(),
