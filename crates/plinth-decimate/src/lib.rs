@@ -849,20 +849,31 @@ mod tests {
         let original = Mesh::new(
             vec![
                 [0.0, 0.0, 0.0],
-                [10.0, 0.0, 0.0],
-                [0.0, 10.0, 0.0],
+                [3.0, 0.0, 0.0],
+                [0.0, 3.0, 0.0],
                 [1.0, 1.0, 10.0],
-                [2.0, 1.0, 10.0],
-                [1.0, 2.0, 10.0],
+                [1.5, 1.0, 10.0],
+                [1.0, 1.5, 10.0],
             ],
             vec![[0, 1, 2], [3, 4, 5]],
         )
         .unwrap();
         let candidate = Mesh::new(
-            vec![[0.0, 0.0, 0.0], [10.0, 0.0, 0.0], [0.0, 10.0, 0.0]],
+            vec![[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [0.0, 3.0, 0.0]],
             vec![[0, 1, 2]],
         )
         .unwrap();
+        let original_surface = NativeSurface::from_indexed(
+            original.verts(),
+            original.tris(),
+            probe_config(20.0).surface,
+        )
+        .unwrap();
+        let candidate_centres = face_centres(&candidate).unwrap();
+        let (forward_distances, _) = original_surface.query(&candidate_centres, 20.0);
+        assert!(forward_distances
+            .iter()
+            .all(|distance| distance.to_bits() == 0.0_f64.to_bits()));
         let report = probe_two_sided(
             &original,
             &candidate,
