@@ -8,6 +8,7 @@
 
 mod geometry;
 mod read;
+mod scar;
 mod supports;
 mod topology;
 
@@ -18,6 +19,9 @@ pub use geometry::{
 pub use read::{
     load_artifacts, ArtifactDisposition, ArtifactLoad, ArtifactRequest, ArtifactRequestError,
     DiskArtifact, DiskModel, DiskReadError, DiskSupport, ProducerFailure, ProducerStage,
+};
+pub use scar::{
+    scar_metric_rows, ScarMetricError, ScarMetricInput, ScarMetricRow, SCAR_METRIC_ORDER,
 };
 pub use supports::{
     support_metric_rows, ContactArmInput, SupportMetricError, SupportMetricInput, SupportMetricRow,
