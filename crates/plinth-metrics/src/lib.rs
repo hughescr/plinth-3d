@@ -9,6 +9,7 @@
 mod geometry;
 mod read;
 mod scar;
+mod score;
 mod supports;
 mod topology;
 
@@ -23,6 +24,12 @@ pub use read::{
 pub use scar::{
     scar_metric_rows, DelicacyField, DelicacyIndexStats, DelicacyPointQuery, DelicacySample,
     ScarMetricError, ScarMetricInput, ScarMetricRow, SCAR_METRIC_ORDER,
+};
+pub use score::{
+    compare_artifacts, score_artifacts, score_saturn_artifacts, ArtifactMetricInputs,
+    ComparisonError, ComparisonMilestone, ComparisonPolicy, ComparisonReport, ComparisonScope,
+    MetricComparison, MetricOutcome, ProducerComparison, ProducerOutcome, ScoreError,
+    ScoredArtifact, ScoredModel, SignedWaiver, M1_METRIC_ORDER,
 };
 pub use supports::{
     support_metric_rows, ContactArmInput, SupportMetricError, SupportMetricInput, SupportMetricRow,
