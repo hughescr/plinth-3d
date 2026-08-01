@@ -176,6 +176,26 @@ fn coincident_anchor_stubs() -> Vec<SupportRecord> {
     ]
 }
 
+fn saturn_volume_scale_stub(taper_x: f32) -> [SupportRecord; 2] {
+    // Model-centred coordinates near the Saturn 4 Ultra 16K build limits
+    // (211.68 x 118.37 x 220 mm), not a near-origin toy relation.
+    [
+        ball(
+            SegmentType::TIP,
+            [100.0, 50.0, 199.7],
+            [100.0, 50.0, 200.3],
+            0.3,
+        ),
+        record(
+            SegmentType::TAPER,
+            [taper_x, 50.0, 200.0],
+            [taper_x, 50.0, 210.0],
+            0.2,
+            0.4,
+        ),
+    ]
+}
+
 fn foot_ball(x: f32, z: f32, radius: f32) -> SupportRecord {
     ball(
         SegmentType::SHAFT,
@@ -370,6 +390,42 @@ fn foot_candidates_ignore_incomplete_coincident_balls_then_use_the_unique_comple
             &[ScarMetricInput { source_index: 0 }]
         ),
         Err(ScarMetricError::UnmatchedTaper { .. })
+    ));
+}
+
+#[test]
+fn saturn_volume_scale_quantized_emitter_relation_has_an_exact_midpoint_boundary() {
+    let temp = TempDir::new();
+    let valid = temp.path().join("saturn-scale-valid.chitubox");
+    write_artifact(
+        &valid,
+        &[(cube(2.0), saturn_volume_scale_stub(100.0).into())],
+    );
+    scar_metric_rows(
+        &reopen(&valid, "saturn-scale-valid"),
+        &[ScarMetricInput { source_index: 0 }],
+    )
+    .expect("the quantized emitter center/factor/axis/sphere relation is feasible");
+
+    // The ball poles both store x=100, so their exact midpoint preimage is the
+    // x=100 binary32 bin.  Ties-to-even assigns the shared midpoint boundary
+    // to exactly one bin; the immediately following representable value is
+    // therefore the first stored x outside that derived midpoint constraint.
+    let first_outside = f32::from_bits(100.0_f32.to_bits() + 1);
+    let invalid = temp.path().join("saturn-scale-first-outside.chitubox");
+    write_artifact(
+        &invalid,
+        &[(cube(2.0), saturn_volume_scale_stub(first_outside).into())],
+    );
+    assert!(matches!(
+        scar_metric_rows(
+            &reopen(&invalid, "saturn-scale-first-outside"),
+            &[ScarMetricInput { source_index: 0 }]
+        ),
+        Err(ScarMetricError::UnmatchedTip {
+            source_index: 0,
+            record: 0,
+        })
     ));
 }
 
@@ -754,7 +810,7 @@ fn committed_sphere_has_seven_reconstructed_stubs() {
 }
 
 #[test]
-fn committed_sphere_raw_disk_oracle_pins_each_individual_patch() {
+fn committed_sphere_record_and_formula_oracle_pins_each_individual_patch() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let sphere = root.join("corpus/baseline/Sphere.chitubox");
     assert!(
@@ -762,7 +818,7 @@ fn committed_sphere_raw_disk_oracle_pins_each_individual_patch() {
         "required Sphere oracle missing: {}",
         sphere.display()
     );
-    let artifact = reopen(&sphere, "Sphere-raw-oracle");
+    let artifact = reopen(&sphere, "Sphere-record-formula-oracle");
     let model = &artifact.models()[0];
     let supports = model.supports();
 
@@ -781,7 +837,7 @@ fn committed_sphere_raw_disk_oracle_pins_each_individual_patch() {
             direction: sub64(supports[member].end(), supports[ball].start()),
         })
         .collect::<Vec<_>>();
-    let crossings = ray_intersections(model.mesh(), &rays).expect("raw oracle rays");
+    let crossings = ray_intersections(model.mesh(), &rays).expect("audited shared ray batch");
 
     #[derive(Clone, Copy)]
     struct Probe {
@@ -815,8 +871,9 @@ fn committed_sphere_raw_disk_oracle_pins_each_individual_patch() {
             start = end;
         }
     }
-    let inside = contains_points(model.mesh(), &probe_points).expect("raw oracle containment");
-    let closest = closest_points(model.mesh(), &anchors).expect("raw oracle closest points");
+    let inside =
+        contains_points(model.mesh(), &probe_points).expect("audited shared containment batch");
+    let closest = closest_points(model.mesh(), &anchors).expect("audited shared closest batch");
     let mut patches = Vec::new();
     for (contact, &(ball, member)) in pairs.iter().enumerate() {
         let interval = probes
@@ -846,9 +903,9 @@ fn committed_sphere_raw_disk_oracle_pins_each_individual_patch() {
         patches.push(shaft + disc);
     }
 
-    // Independently derived from the raw fields and public triangle queries
-    // above.  Pinning each patch prevents an unchanged sum from hiding a
-    // reconstruction swap or a compensating formula error.
+    // This is an independent record-pairing and formula oracle over the shared,
+    // separately audited geometry primitives above. Pinning each patch prevents
+    // an unchanged sum from hiding a reconstruction swap or compensating error.
     let expected = [
         1.843_017_580_677_558_6,
         2.311_807_711_025_12,
