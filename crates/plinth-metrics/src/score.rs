@@ -746,12 +746,6 @@ fn compare_metric(
     waived: bool,
     policy: &ComparisonPolicy<'_>,
 ) -> MetricOutcome {
-    // A self-comparison is a reproducibility check, not an opportunity to
-    // back-apply a later candidate gate. Its fixed contract is exact green
-    // rows for all fifteen metrics.
-    if policy.scope == ComparisonScope::SelfComparison {
-        return MetricOutcome::Equal;
-    }
     if report_only(id, policy) {
         return MetricOutcome::Reported;
     }
@@ -1048,6 +1042,32 @@ mod tests {
             .rows()
             .iter()
             .all(|row| row.outcome == MetricOutcome::Equal));
+    }
+
+    #[test]
+    fn self_scope_compares_values_exactly_but_never_applies_report_or_hard_policies() {
+        let baseline = values([
+            2.0, 0.0, 1.0, 1.0, 1.0, 3.0, 2.0, 1.0, 1.0, 2.0, 1.0, 1.0, 1.0, 20.0, 1.0,
+        ]);
+        let mut candidate_values = [
+            2.0, 0.0, 1.0, 1.0, 1.0, 3.0, 2.0, 1.0, 1.0, 2.0, 1.0, 1.0, 1.0, 20.0, 1.0,
+        ];
+        candidate_values[0] = 1.0;
+        candidate_values[14] = 0.0;
+        let report = compare_artifacts(
+            std::slice::from_ref(&baseline),
+            std::slice::from_ref(&values(candidate_values)),
+            &policy(ComparisonScope::SelfComparison, ComparisonMilestone::M9),
+        )
+        .unwrap();
+        assert_eq!(report.rows()[0].outcome, MetricOutcome::Better);
+        assert_eq!(report.rows()[5].outcome, MetricOutcome::Equal);
+        assert_eq!(report.rows()[14].outcome, MetricOutcome::Worse);
+        assert!(!report.accepted());
+        assert!(report
+            .rows()
+            .iter()
+            .any(|row| row.outcome != MetricOutcome::Equal));
     }
 
     #[test]
