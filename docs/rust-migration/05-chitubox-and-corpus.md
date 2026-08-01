@@ -93,12 +93,12 @@ MODEL, silently" if misused — do not port `write()`/`write_replace()`. Only
 **Constants to carry over with typed provenance** (per architectural
 commitment #2 in the parent guide — see `03-physics-and-constants.md` for the
 full table and required `Provenance` enum): `N_SIDES=24`, `PAD_N_SIDES=20`,
-`PAD_DIAMETER_MM=2.2`, `RAFT_HEIGHT_MM=0.2` are Measured (reverse-engineered
-from native ChituBox specimens, see §3 provenance column below);
-`PLATE_BAND_MM=0.2` is Derived (duplicated from `joints.PLATE_BAND_MM` in
-Python — the Rust port must have exactly one copy, not two);
-`MIN_ROOT_VERTICAL_LAYERS=10` and `MIN_ROOT_NO_BEND_MM=0.5` are Placeholder
-(no measurement citation in `chitubox_emit.py`).
+`PAD_DIAMETER_MM=2.2`, `RAFT_HEIGHT_MM=0.2`, `PLATE_BAND_MM=0.2`,
+`MIN_ROOT_VERTICAL_LAYERS=10`, and `MIN_ROOT_NO_BEND_MM=0.5` are all
+Placeholder. This resolves this document's earlier Measured/Derived grading
+against the authoritative grades in `03-physics-and-constants.md`;
+`PLATE_BAND_MM` remains one Rust-owned constant despite its duplicated Python
+sources.
 
 **Winding-check dependency to replace, not port:** `frustum_mesh`,
 `sphere_mesh`, and `_bridge_mesh` each `import trimesh` locally only to call

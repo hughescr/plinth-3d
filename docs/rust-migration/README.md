@@ -181,7 +181,10 @@ compiles. It is done when:
    than the frozen baseline on every metric.
 3. The milestone's human checkpoint is written into the commit message so the owner
    knows what to eyeball.
-4. The cache-disabled run produces identical reports (see 06-conventions.md).
+4. At M0 cache equality is not applicable because no `plinth` CLI or cache exists yet.
+   Once `plinth prepare` and its cache exist, the cache-disabled run uses the sole
+   spelling `plinth prepare --no-cache` and produces identical reports; there is no
+   `PLINTH_CACHE` environment-variable form (see 06-conventions.md).
 
 **Do not delete any Python until the final milestone**, and then only after the
 parity gates pass. The deletion set is: `scripts/` Python, `rust/chitubox_io/src/py.rs`,

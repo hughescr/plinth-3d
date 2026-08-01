@@ -113,7 +113,7 @@ previous one's data model.
 | --- | --- | --- | --- | --- |
 | M0 | Conventions, frozen-Python baseline, core types, solid spike | — | `plinth-core`, `plinth-solid` | Baseline frozen; trybuild compile-fail proof |
 | M1 | The parity harness and Rust refreeze (`plinth score`) | M0 | `plinth-metrics`, `plinth-cli` | Self-comparison exact; injected defects detected |
-| M2 | Mesh and geometry substrate | M0 | `plinth-mesh`, `plinth-voxel` | STL round-trip byte-identity; geom_kernel green |
+| M2 | Mesh and geometry substrate | M0 | `plinth-mesh`, `plinth-voxel` | STL round-trip array/mesh identity; geom_kernel green |
 | M3 | Decimation | M2 | `plinth-decimate` | Self-verified error budgets on every model, at the **library** level (`cargo test -p plinth-decimate --test corpus_budgets`); CLI wiring verified at M4 |
 | M4 | The thin vertical slice | M1, M2 | `plinth-cost`, `plinth-orient`, `plinth-hollow`, `plinth-emit`, `plinth-pipeline` | Format metrics absolute; `islands`, `support_count`, `resin`, `scar` waived; `max_x` reported |
 | M5 | Perception, placement, load model | M4 | `plinth-support` | Load gate becomes satisfiable |
