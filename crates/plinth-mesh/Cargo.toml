@@ -7,3 +7,14 @@ publish = false
 
 [dependencies]
 thiserror = { workspace = true }
+
+[dev-dependencies]
+sha2 = "0.10"
+
+[features]
+corpus-gate = []
+
+[[test]]
+name = "corpus_roundtrip"
+path = "tests/corpus_roundtrip.rs"
+required-features = ["corpus-gate"]

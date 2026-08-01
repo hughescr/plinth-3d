@@ -46,6 +46,8 @@ pub enum MeshIoError {
         field: &'static str,
         coordinate: usize,
     },
+    #[error("STL IO cannot apply requested welding policy {policy:?}; M2 currently supports only WeldPolicy::None")]
+    UnsupportedWeldPolicy { policy: WeldPolicy },
     #[error("STL output {path} has {triangles} triangles, more than u32 permits")]
     TooManyTriangles { path: PathBuf, triangles: usize },
     #[error("STL output {path} triangle {triangle} uses f64 coordinate {coordinate} that cannot be represented exactly as f32")]
@@ -63,6 +65,7 @@ pub fn load_binary_stl(
     path: impl AsRef<Path>,
     weld_policy: WeldPolicy,
 ) -> Result<Mesh, MeshIoError> {
+    require_unwelded(weld_policy)?;
     let path = path.as_ref();
     let bytes = fs::read(path).map_err(|source| MeshIoError::Read {
         path: path.to_path_buf(),
@@ -76,6 +79,7 @@ pub fn load_binary_stls(
     paths: &[PathBuf],
     weld_policy: WeldPolicy,
 ) -> Result<Vec<Mesh>, MeshIoError> {
+    require_unwelded(weld_policy)?;
     paths
         .iter()
         .map(|path| load_binary_stl(path, weld_policy))
@@ -85,6 +89,7 @@ pub fn load_binary_stls(
 /// Write one binary STL.  f64 values must round-trip exactly through STL's f32 wire value.
 pub fn write_binary_stl(path: impl AsRef<Path>, mesh: &Mesh) -> Result<(), MeshIoError> {
     let path = path.as_ref();
+    mesh.validate()?;
     let bytes = encode_binary_stl(path, mesh)?;
     fs::write(path, bytes).map_err(|source| MeshIoError::Write {
         path: path.to_path_buf(),
@@ -105,6 +110,7 @@ fn decode_binary_stl(
     bytes: &[u8],
     weld_policy: WeldPolicy,
 ) -> Result<Mesh, MeshIoError> {
+    require_unwelded(weld_policy)?;
     if starts_with_solid(bytes) && !looks_like_binary_stl(bytes) {
         return Err(MeshIoError::AsciiStlUnsupported {
             path: path.to_path_buf(),
@@ -162,10 +168,22 @@ fn decode_binary_stl(
             path: path.to_path_buf(),
             triangles,
         })?;
+        let one = base
+            .checked_add(1)
+            .ok_or_else(|| MeshIoError::CountOverflow {
+                path: path.to_path_buf(),
+                triangles,
+            })?;
+        let two = base
+            .checked_add(2)
+            .ok_or_else(|| MeshIoError::CountOverflow {
+                path: path.to_path_buf(),
+                triangles,
+            })?;
         verts.extend(corners);
-        tris.push([base, base + 1, base + 2]);
+        tris.push([base, one, two]);
     }
-    Mesh::with_weld_policy(verts, tris, weld_policy).map_err(Into::into)
+    Mesh::new_unwelded(verts, tris).map_err(Into::into)
 }
 
 fn encode_binary_stl(path: &Path, mesh: &Mesh) -> Result<Vec<u8>, MeshIoError> {
@@ -201,6 +219,14 @@ fn encode_binary_stl(path: &Path, mesh: &Mesh) -> Result<Vec<u8>, MeshIoError> {
         // Attribute count remains intentionally zero.  It is outside array identity.
     }
     Ok(bytes)
+}
+
+fn require_unwelded(policy: WeldPolicy) -> Result<(), MeshIoError> {
+    if policy == WeldPolicy::None {
+        Ok(())
+    } else {
+        Err(MeshIoError::UnsupportedWeldPolicy { policy })
+    }
 }
 
 fn expected_len(path: &Path, triangles: u32) -> Result<usize, MeshIoError> {

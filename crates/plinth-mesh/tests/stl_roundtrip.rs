@@ -1,70 +1,31 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use plinth_mesh::{
-    load_binary_stl, load_binary_stls, write_binary_stl, write_binary_stls, Mesh, MeshIoError,
-    WeldPolicy,
-};
-
-const CORPUS: [&str; 8] = [
-    "Sphere.stl",
-    "Cylinder.stl",
-    "make_box.stl",
-    "make_overhang_table.stl",
-    "make_toed_slab.stl",
-    "make_raking_blade.stl",
-    "make_thin_fin.stl",
-    "Weeping Treant v1.2.stl",
-];
+use plinth_mesh::{load_binary_stl, write_binary_stl, Mesh, MeshIoError, WeldPolicy};
 
 #[test]
-fn corpus_binary_stls_round_trip_as_arrays_not_file_bytes() {
-    let input_dir = workspace_root().join("corpus/models");
-    let paths = CORPUS
-        .iter()
-        .map(|name| required_fixture(&input_dir.join(name)))
-        .collect::<Vec<_>>();
-    let loaded = load_binary_stls(&paths, WeldPolicy::None).expect("all required corpus STLs load");
-    let out_dir = temporary_directory("corpus-roundtrip");
-    fs::create_dir_all(&out_dir).expect("create round-trip output directory");
-    let outputs = CORPUS
-        .iter()
-        .zip(&loaded)
-        .map(|(name, mesh)| (out_dir.join(name), mesh.clone()))
-        .collect::<Vec<_>>();
-    write_binary_stls(&outputs).expect("write corpus round-trip outputs");
-    let reread_paths = outputs
-        .iter()
-        .map(|(path, _)| path.clone())
-        .collect::<Vec<_>>();
-    let reread = load_binary_stls(&reread_paths, WeldPolicy::None).expect("fresh disk re-read");
-    for ((name, before), after) in CORPUS.iter().zip(&loaded).zip(&reread) {
-        assert_mesh_bits_equal(before, after, name);
-        assert_eq!(
-            after.weld_policy(),
-            WeldPolicy::None,
-            "{name} changed weld policy"
-        );
-    }
-    fs::remove_dir_all(out_dir).expect("remove test-only output directory");
-}
-
-#[test]
-fn reader_preserves_triangle_soup_order_repetition_and_signed_zero() {
+fn self_contained_two_facet_triangle_soup_round_trip_preserves_order_repetition_and_signed_zero() {
     let path = temporary_directory("signed-zero").join("source.stl");
     fs::create_dir_all(path.parent().expect("test parent")).expect("create test directory");
-    let source = face_soup_with_signed_zero();
-    write_binary_stl(&path, &source).expect("write f32-exact source");
+    fs::write(&path, two_facet_triangle_soup_bytes()).expect("write tracked in-memory fixture");
     let loaded = load_binary_stl(&path, WeldPolicy::None).expect("load source");
-    assert_eq!(loaded.verts.len(), 3, "reader must not weld triangle soup");
     assert_eq!(
-        loaded.tris,
-        vec![[0, 1, 2]],
+        loaded.verts().len(),
+        6,
+        "reader must not weld triangle soup"
+    );
+    assert_eq!(
+        loaded.tris(),
+        &[[0, 1, 2], [3, 4, 5]],
         "reader must not reorder indices"
     );
-    assert_eq!(loaded.verts[0][0].to_bits(), (-0.0_f64).to_bits());
-    assert_eq!(loaded.verts[1][0].to_bits(), (-0.0_f64).to_bits());
+    assert_eq!(loaded.verts()[0][0].to_bits(), (-0.0_f64).to_bits());
+    assert_eq!(loaded.verts()[3][0].to_bits(), (-0.0_f64).to_bits());
+    let output = path.parent().expect("test parent").join("roundtrip.stl");
+    write_binary_stl(&output, &loaded).expect("write source without repair");
+    let reread = load_binary_stl(&output, WeldPolicy::None).expect("fresh disk re-read");
+    assert_mesh_bits_equal(&loaded, &reread, "two-facet in-memory fixture");
     fs::remove_dir_all(path.parent().expect("test parent"))
         .expect("remove test-only output directory");
 }
@@ -120,6 +81,23 @@ fn malformed_nonfinite_and_lossy_stls_are_semantic_errors() {
 }
 
 #[test]
+fn requested_welding_is_rejected_before_stl_decode() {
+    let unreadable = PathBuf::from("this-file-must-not-be-read.stl");
+    assert!(matches!(
+        load_binary_stl(&unreadable, WeldPolicy::ExactBits),
+        Err(MeshIoError::UnsupportedWeldPolicy {
+            policy: WeldPolicy::ExactBits
+        })
+    ));
+    assert!(matches!(
+        load_binary_stl(&unreadable, WeldPolicy::Epsilon(0.1)),
+        Err(MeshIoError::UnsupportedWeldPolicy {
+            policy: WeldPolicy::Epsilon(value)
+        }) if value == 0.1
+    ));
+}
+
+#[test]
 fn binary_stl_declared_count_is_checked_before_allocation() {
     let path = temporary_directory("count-overflow").join("huge.stl");
     fs::create_dir_all(path.parent().expect("test parent")).expect("create test directory");
@@ -132,14 +110,6 @@ fn binary_stl_declared_count_is_checked_before_allocation() {
     ));
     fs::remove_dir_all(path.parent().expect("test parent"))
         .expect("remove test-only output directory");
-}
-
-fn face_soup_with_signed_zero() -> Mesh {
-    Mesh::new(
-        vec![[-0.0, 0.0, 0.0], [-0.0, 1.0, 0.0], [-0.0, 0.0, 1.0]],
-        vec![[0, 1, 2]],
-    )
-    .expect("valid signed-zero face soup")
 }
 
 fn one_facet_bytes() -> Vec<u8> {
@@ -158,17 +128,44 @@ fn one_facet_bytes() -> Vec<u8> {
     bytes
 }
 
+fn two_facet_triangle_soup_bytes() -> Vec<u8> {
+    let mut bytes = vec![0_u8; 84 + 2 * 50];
+    bytes[80..84].copy_from_slice(&2_u32.to_le_bytes());
+    let facets = [
+        [
+            0.0_f32, 0.0, 1.0, // normal
+            -0.0, 0.0, 0.0, // a
+            1.0, 0.0, 0.0, // b
+            0.0, 1.0, 0.0, // c
+        ],
+        [
+            1.0_f32, 0.0, 0.0, // normal
+            -0.0, 0.0, 0.0, // repeated a, distinct soup vertex
+            0.0, 1.0, 0.0, // repeated c, distinct soup vertex
+            0.0, 0.0, 1.0, // d
+        ],
+    ];
+    for (facet, values) in facets.iter().enumerate() {
+        for (index, value) in values.iter().enumerate() {
+            let start = 84 + facet * 50 + index * 4;
+            bytes[start..start + 4].copy_from_slice(&value.to_le_bytes());
+        }
+    }
+    bytes
+}
+
 fn assert_mesh_bits_equal(expected: &Mesh, actual: &Mesh, name: &str) {
     assert_eq!(
-        expected.tris, actual.tris,
+        expected.tris(),
+        actual.tris(),
         "{name} triangle identity/order differs"
     );
     assert_eq!(
-        expected.verts.len(),
-        actual.verts.len(),
+        expected.verts().len(),
+        actual.verts().len(),
         "{name} vertex length differs"
     );
-    for (vertex, (left, right)) in expected.verts.iter().zip(&actual.verts).enumerate() {
+    for (vertex, (left, right)) in expected.verts().iter().zip(actual.verts()).enumerate() {
         for axis in 0..3 {
             assert_eq!(
                 left[axis].to_bits(),
@@ -177,23 +174,6 @@ fn assert_mesh_bits_equal(expected: &Mesh, actual: &Mesh, name: &str) {
             );
         }
     }
-}
-
-fn required_fixture(path: &Path) -> PathBuf {
-    assert!(
-        path.is_file(),
-        "required corpus fixture missing: {}; provision the exact eight-model corpus before this gate",
-        path.display()
-    );
-    path.to_path_buf()
-}
-
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("crate has workspace parent")
-        .to_path_buf()
 }
 
 fn temporary_directory(label: &str) -> PathBuf {

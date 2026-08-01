@@ -20,28 +20,46 @@ use thiserror::Error;
 /// An owned f64 triangle mesh.  Vertex and triangle ordering are source data.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Mesh {
-    pub verts: Vec<[f64; 3]>,
-    pub tris: Vec<[u32; 3]>,
+    verts: Vec<[f64; 3]>,
+    tris: Vec<[u32; 3]>,
     weld_policy: WeldPolicy,
 }
 
 impl Mesh {
     /// Builds a finite, indexed mesh without altering its representation.
     pub fn new(verts: Vec<[f64; 3]>, tris: Vec<[u32; 3]>) -> Result<Self, MeshError> {
-        Self::with_weld_policy(verts, tris, WeldPolicy::None)
+        Self::new_unwelded(verts, tris)
     }
 
-    /// Builds a mesh and records the explicit welding policy which produced it.
-    ///
-    /// This constructor intentionally does not weld.  Welding is a future,
-    /// named topology operation; recording a policy here prevents a load path
-    /// from silently choosing one.
-    pub fn with_weld_policy(
+    pub(crate) fn new_unwelded(
         verts: Vec<[f64; 3]>,
         tris: Vec<[u32; 3]>,
-        weld_policy: WeldPolicy,
     ) -> Result<Self, MeshError> {
-        validate_weld_policy(weld_policy)?;
+        Self::validate_parts(&verts, &tris)?;
+        Ok(Self {
+            verts,
+            tris,
+            weld_policy: WeldPolicy::None,
+        })
+    }
+
+    /// Borrow source-order vertices without permitting mutation.
+    #[must_use]
+    pub fn verts(&self) -> &[[f64; 3]] {
+        &self.verts
+    }
+
+    /// Borrow source-order triangle indices without permitting mutation.
+    #[must_use]
+    pub fn tris(&self) -> &[[u32; 3]] {
+        &self.tris
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), MeshError> {
+        Self::validate_parts(&self.verts, &self.tris)
+    }
+
+    fn validate_parts(verts: &[[f64; 3]], tris: &[[u32; 3]]) -> Result<(), MeshError> {
         if verts.is_empty() {
             return Err(MeshError::NoVertices);
         }
@@ -67,11 +85,7 @@ impl Mesh {
                 }
             }
         }
-        Ok(Self {
-            verts,
-            tris,
-            weld_policy,
-        })
+        Ok(())
     }
 
     /// The policy explicitly selected for this mesh's construction or load.
@@ -127,6 +141,11 @@ impl Mesh {
 }
 
 /// A deliberately explicit vertex welding choice.
+///
+/// M2's IO applies only [`WeldPolicy::None`].  The other variants remain
+/// vocabulary for the later topology/triage operation; requesting either at
+/// this boundary returns a typed unsupported-policy error rather than merely
+/// recording a false label.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum WeldPolicy {
     /// Preserve the source triangle soup exactly (the STL default).
@@ -153,8 +172,6 @@ pub enum MeshError {
         index: u32,
         vertex_count: usize,
     },
-    #[error("epsilon weld policy must be finite and greater than zero, got {epsilon}")]
-    InvalidWeldEpsilon { epsilon: f64 },
     #[error("triangle {triangle} has zero area")]
     DegenerateTriangle { triangle: usize },
     #[error("triangle {triangle} overflowed while calculating its normal")]
@@ -165,13 +182,4 @@ pub enum MeshError {
     InvalidFiniteFixtureParameter { parameter: &'static str, value: f64 },
     #[error("fixture has too many vertices for u32 triangle indices")]
     FixtureIndexOverflow,
-}
-
-fn validate_weld_policy(policy: WeldPolicy) -> Result<(), MeshError> {
-    if let WeldPolicy::Epsilon(epsilon) = policy {
-        if !epsilon.is_finite() || epsilon <= 0.0 {
-            return Err(MeshError::InvalidWeldEpsilon { epsilon });
-        }
-    }
-    Ok(())
 }
