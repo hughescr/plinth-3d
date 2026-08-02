@@ -1046,32 +1046,14 @@ pub fn select_contacts(
                 .then_with(|| left.point_mm[1].total_cmp(&right.point_mm[1]))
                 .then_with(|| left.id.cmp(&right.id))
         });
-        let start = selected.len();
-        for candidate in &eligible {
-            if selected[start..].iter().all(|contact| {
-                squared_distance(contact.point_mm, candidate.point_mm).sqrt()
-                    >= config.target_spacing_mm.get()
-            }) {
-                selected.push(selected_contact(island.id, candidate));
-            }
-        }
-        while selected.len() - start < config.min_contacts_per_island.min(eligible.len()) {
-            debug_assert!(config.spacing_floor_mm.get() > 0.0);
-            let best = eligible
-                .iter()
-                .filter(|candidate| {
-                    !selected[start..]
-                        .iter()
-                        .any(|contact| contact.candidate_id == candidate.id)
-                })
-                .max_by(|left, right| {
-                    minimum_distance_sq(&selected[start..], left.point_mm)
-                        .total_cmp(&minimum_distance_sq(&selected[start..], right.point_mm))
-                        .then_with(|| right.id.cmp(&left.id))
-                })
-                .expect("minimum fallback has an unselected legal candidate");
-            selected.push(selected_contact(island.id, best));
-        }
+        let (island_contacts, _) = select_island_contacts(
+            island.id,
+            &eligible,
+            config.target_spacing_mm.get(),
+            config.min_contacts_per_island,
+        );
+        debug_assert!(config.spacing_floor_mm.get() > 0.0);
+        selected.extend(island_contacts);
     }
 
     for attempt in 0..=config.coverage_repair_max_attempts {
@@ -1507,12 +1489,129 @@ fn squared_distance(left: [f64; 3], right: [f64; 3]) -> f64 {
     )
 }
 
-fn minimum_distance_sq(contacts: &[SelectedContact], point: [f64; 3]) -> f64 {
-    contacts
-        .iter()
-        .map(|contact| squared_distance(contact.point_mm, point))
-        .min_by(f64::total_cmp)
-        .unwrap_or(f64::INFINITY)
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct SelectionWork {
+    distance_evaluations: usize,
+}
+
+/// Incremental fixed-radius index for the ordered Poisson pass. A point closer
+/// than `cell_width` can only occupy its own cell or one of the 26 neighbours,
+/// so selection does not rescan the growing output for every candidate.
+struct PoissonGrid {
+    cell_width: f64,
+    cells: std::collections::BTreeMap<(i64, i64, i64), Vec<[f64; 3]>>,
+}
+
+impl PoissonGrid {
+    fn new(cell_width: f64) -> Self {
+        Self {
+            cell_width,
+            cells: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn key(&self, point: [f64; 3]) -> (i64, i64, i64) {
+        let cell = |coordinate: f64| (coordinate / self.cell_width).floor() as i64;
+        (cell(point[0]), cell(point[1]), cell(point[2]))
+    }
+
+    fn accepts(&self, point: [f64; 3], work: &mut SelectionWork) -> bool {
+        let (x, y, z) = self.key(point);
+        let x0 = x.saturating_sub(1);
+        let x1 = x.saturating_add(1);
+        let y0 = y.saturating_sub(1);
+        let y1 = y.saturating_add(1);
+        let z0 = z.saturating_sub(1);
+        let z1 = z.saturating_add(1);
+        for nx in x0..=x1 {
+            for ny in y0..=y1 {
+                for nz in z0..=z1 {
+                    if let Some(points) = self.cells.get(&(nx, ny, nz)) {
+                        for &selected in points {
+                            work.distance_evaluations += 1;
+                            // Preserve the frozen comparison, including its square-root
+                            // rounding at an exact spacing boundary.
+                            if squared_distance(selected, point).sqrt() < self.cell_width {
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
+    fn insert(&mut self, point: [f64; 3]) {
+        self.cells.entry(self.key(point)).or_default().push(point);
+    }
+}
+
+fn select_island_contacts(
+    island_id: u32,
+    eligible: &[&ContactCandidate],
+    target_spacing_mm: f64,
+    min_contacts_per_island: usize,
+) -> (Vec<SelectedContact>, SelectionWork) {
+    let mut work = SelectionWork::default();
+    let mut grid = PoissonGrid::new(target_spacing_mm);
+    let mut chosen = vec![false; eligible.len()];
+    let mut contacts = Vec::new();
+
+    for (row, candidate) in eligible.iter().enumerate() {
+        if grid.accepts(candidate.point_mm, &mut work) {
+            chosen[row] = true;
+            grid.insert(candidate.point_mm);
+            contacts.push(selected_contact(island_id, candidate));
+        }
+    }
+
+    let required = min_contacts_per_island.min(eligible.len());
+    if contacts.len() >= required {
+        return (contacts, work);
+    }
+
+    // The Poisson result has fewer than the fixed policy minimum here. Compute
+    // each candidate's nearest selected distance once, then update that cache
+    // only against each newly inserted fallback. This preserves the frozen
+    // farthest-point ordering without repeatedly rescanning selected contacts.
+    let mut nearest_distance_sq = vec![f64::INFINITY; eligible.len()];
+    for (row, candidate) in eligible.iter().enumerate() {
+        if chosen[row] {
+            continue;
+        }
+        for contact in &contacts {
+            work.distance_evaluations += 1;
+            nearest_distance_sq[row] = nearest_distance_sq[row]
+                .min(squared_distance(contact.point_mm, candidate.point_mm));
+        }
+    }
+
+    while contacts.len() < required {
+        let best_row = (0..eligible.len())
+            .filter(|&row| !chosen[row])
+            .max_by(|&left, &right| {
+                nearest_distance_sq[left]
+                    .total_cmp(&nearest_distance_sq[right])
+                    .then_with(|| eligible[right].id.cmp(&eligible[left].id))
+            })
+            .expect("minimum fallback has an unselected legal candidate");
+        chosen[best_row] = true;
+        let best = eligible[best_row];
+        contacts.push(selected_contact(island_id, best));
+        if contacts.len() == required {
+            break;
+        }
+        for (row, candidate) in eligible.iter().enumerate() {
+            if chosen[row] {
+                continue;
+            }
+            work.distance_evaluations += 1;
+            nearest_distance_sq[row] =
+                nearest_distance_sq[row].min(squared_distance(best.point_mm, candidate.point_mm));
+        }
+    }
+    (contacts, work)
 }
 
 #[cfg(test)]
@@ -2006,6 +2105,135 @@ mod tests {
     fn selection_config<'a>(delicacy: &'a [f64]) -> ContactSelectionConfig<'a> {
         ContactSelectionConfig::current(Some(delicacy), 200_000, 64, 64 * 1024 * 1024)
             .expect("registered selection constants")
+    }
+
+    fn selection_candidate(id: u64, point_mm: [f64; 3]) -> ContactCandidate {
+        ContactCandidate {
+            id: ContactCandidateId(id),
+            face_id: 0,
+            point_mm,
+            normal: [0.0, 0.0, -1.0],
+            supported_area_mm2: 1.0,
+            overhang_excess: 1.0,
+            delicacy: 0.0,
+        }
+    }
+
+    fn reference_island_selection(
+        island_id: u32,
+        eligible: &[&ContactCandidate],
+        spacing: f64,
+        minimum: usize,
+    ) -> Vec<SelectedContact> {
+        let mut selected = Vec::new();
+        for candidate in eligible {
+            if selected.iter().all(|contact: &SelectedContact| {
+                squared_distance(contact.point_mm, candidate.point_mm).sqrt() >= spacing
+            }) {
+                selected.push(selected_contact(island_id, candidate));
+            }
+        }
+        while selected.len() < minimum.min(eligible.len()) {
+            let best = eligible
+                .iter()
+                .filter(|candidate| {
+                    !selected
+                        .iter()
+                        .any(|contact| contact.candidate_id == candidate.id)
+                })
+                .max_by(|left, right| {
+                    let nearest = |candidate: &&ContactCandidate| {
+                        selected
+                            .iter()
+                            .map(|contact| squared_distance(contact.point_mm, candidate.point_mm))
+                            .min_by(f64::total_cmp)
+                            .unwrap_or(f64::INFINITY)
+                    };
+                    nearest(left)
+                        .total_cmp(&nearest(right))
+                        .then_with(|| right.id.cmp(&left.id))
+                })
+                .expect("reference fallback candidate");
+            selected.push(selected_contact(island_id, best));
+        }
+        selected
+    }
+
+    #[test]
+    fn spatial_poisson_selection_matches_frozen_pairwise_reference() {
+        let cases = [
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.49, 0.0, 0.0],
+                [1.5, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+            ],
+            vec![
+                [-1.49, -1.49, -1.49],
+                [0.0, 0.0, 0.0],
+                [1.49, 1.49, 1.49],
+                [4.0, 4.0, 4.0],
+            ],
+            vec![
+                [-3.0, 0.0, 0.0],
+                [-1.5, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+                [1.5, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+            ],
+        ];
+        for points in cases {
+            let candidates: Vec<_> = points
+                .into_iter()
+                .enumerate()
+                .map(|(row, point)| selection_candidate(row as u64, point))
+                .collect();
+            let eligible: Vec<_> = candidates.iter().collect();
+            let expected = reference_island_selection(9, &eligible, 1.5, 3);
+            let (actual, _) = select_island_contacts(9, &eligible, 1.5, 3);
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn spatial_poisson_preserves_fallback_distance_and_id_ties() {
+        let candidates = [
+            selection_candidate(10, [0.0, 0.0, 0.0]),
+            selection_candidate(11, [0.0, 0.0, 0.0]),
+            selection_candidate(12, [0.0, 0.0, 0.0]),
+            selection_candidate(13, [0.0, 0.0, 0.0]),
+        ];
+        let eligible: Vec<_> = candidates.iter().collect();
+        let expected = reference_island_selection(4, &eligible, 1.5, 3);
+        let (actual, _) = select_island_contacts(4, &eligible, 1.5, 3);
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual
+                .iter()
+                .map(|contact| contact.candidate_id)
+                .collect::<Vec<_>>(),
+            vec![
+                ContactCandidateId(10),
+                ContactCandidateId(11),
+                ContactCandidateId(12)
+            ]
+        );
+    }
+
+    #[test]
+    fn spatial_poisson_work_is_bounded_for_high_cardinality_fallback() {
+        const COUNT: usize = 20_000;
+        let candidates: Vec<_> = (0..COUNT)
+            .map(|row| selection_candidate(row as u64, [0.0, 0.0, 0.0]))
+            .collect();
+        let eligible: Vec<_> = candidates.iter().collect();
+        let (selected, work) = select_island_contacts(1, &eligible, 1.5, 3);
+        assert_eq!(selected.len(), 3);
+        assert!(
+            work.distance_evaluations < COUNT * 3,
+            "incremental selection performed {} distance evaluations",
+            work.distance_evaluations
+        );
     }
 
     fn pool_islands(pool: &ContactCandidatePool) -> Vec<SupportIsland> {
