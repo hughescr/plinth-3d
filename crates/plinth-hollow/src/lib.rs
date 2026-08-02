@@ -414,7 +414,13 @@ pub fn create_shell_with_resources(
     .map_err(|_| HollowError::Kernel)?;
     let resources = resource_estimate(&source, spec, native, limits)?;
     let grid = voxelize_filled(&source, spec, native, resources.query_batch_points)?;
-    let edt = frozen_distance_transform(&grid.material, grid.pitch)?;
+    let VoxelGrid {
+        origin: grid_origin,
+        pitch: grid_pitch,
+        material,
+    } = grid;
+    let edt = frozen_distance_transform(&material, grid_pitch)?;
+    drop(material);
     let bulk_mm = 2.0 * edt.iter().copied().fold(0.0_f64, f64::max);
     if !bulk_mm.is_finite() {
         return Err(HollowError::InvalidArithmetic);
@@ -433,7 +439,7 @@ pub fn create_shell_with_resources(
     let largest = largest_label(&labels, label_count)?;
     let main = labels.mapv(|label| label == largest);
     let cavity_voxels = main.iter().filter(|value| **value).count();
-    let cavity_volume_mm3 = (cavity_voxels as f64) * grid.pitch.powi(3);
+    let cavity_volume_mm3 = (cavity_voxels as f64) * grid_pitch.powi(3);
     if !cavity_volume_mm3.is_finite() {
         return Err(HollowError::InvalidArithmetic);
     }
@@ -446,7 +452,7 @@ pub fn create_shell_with_resources(
         return Err(HollowError::IneligibleSavings);
     }
 
-    let inner = marching_cavity(&main, grid.origin, grid.pitch)?;
+    let inner = marching_cavity(&main, grid_origin, grid_pitch)?;
     drop(main);
     let shell = ManifoldBackend
         .difference(&[to_solid(&source)?, to_solid(&inner)?])
@@ -644,6 +650,99 @@ fn checked_sum(values: &[usize]) -> Result<usize, HollowError> {
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LabelMemoryEstimate {
+    requested_live_bytes: usize,
+    conservative_peak_bytes: usize,
+}
+
+fn allocator_allocation_bound(
+    count: usize,
+    element_size: usize,
+    element_align: usize,
+) -> Result<usize, HollowError> {
+    let requested = checked_scale(count, element_size)?;
+    let allocation_align = element_align.max(2 * std::mem::size_of::<usize>());
+    let rounded = requested
+        .checked_add(allocation_align - 1)
+        .map(|value| value / allocation_align * allocation_align)
+        .ok_or(HollowError::ResourceAccountingOverflow)?;
+    // These exact-size Vec allocations do not intentionally reserve spare
+    // capacity. Doubling the aligned request plus two words conservatively
+    // covers allocator size classes, alignment padding, and block metadata.
+    rounded
+        .checked_mul(2)
+        .and_then(|value| value.checked_add(2 * std::mem::size_of::<usize>()))
+        .ok_or(HollowError::ResourceAccountingOverflow)
+}
+
+fn label_phase_memory(voxel_count: usize) -> Result<LabelMemoryEstimate, HollowError> {
+    let union_find_count = voxel_count
+        .checked_add(1)
+        .ok_or(HollowError::ResourceAccountingOverflow)?;
+    let usize_size = std::mem::size_of::<usize>();
+    let usize_align = std::mem::align_of::<usize>();
+    let tuple_size = std::mem::size_of::<(isize, isize, isize)>();
+    let tuple_align = std::mem::align_of::<(isize, isize, isize)>();
+
+    // scirs2-ndimage 0.6.5 label3d first pass: input mask, provisional
+    // labels, UnionFind parent/rank, three fixed 6-neighbor offsets, and one
+    // per-voxel neighbor Vec (capacity conservatively bounded at eight).
+    let first_requested = checked_sum(&[
+        checked_scale(voxel_count, std::mem::size_of::<bool>())?,
+        checked_scale(voxel_count, usize_size)?,
+        checked_scale(union_find_count, usize_size)?,
+        checked_scale(union_find_count, usize_size)?,
+        checked_scale(3, tuple_size)?,
+        checked_scale(8, usize_size)?,
+    ])?;
+    let first_conservative = checked_sum(&[
+        allocator_allocation_bound(
+            voxel_count,
+            std::mem::size_of::<bool>(),
+            std::mem::align_of::<bool>(),
+        )?,
+        allocator_allocation_bound(voxel_count, usize_size, usize_align)?,
+        allocator_allocation_bound(union_find_count, usize_size, usize_align)?,
+        allocator_allocation_bound(union_find_count, usize_size, usize_align)?,
+        allocator_allocation_bound(3, tuple_size, tuple_align)?,
+        allocator_allocation_bound(8, usize_size, usize_align)?,
+    ])?;
+
+    // Second pass retains the mask, provisional labels, both UnionFind
+    // vectors and offsets while adding root_to_final and the i32 Array3.
+    let second_requested = checked_sum(&[
+        checked_scale(voxel_count, std::mem::size_of::<bool>())?,
+        checked_scale(voxel_count, usize_size)?,
+        checked_scale(union_find_count, usize_size)?,
+        checked_scale(union_find_count, usize_size)?,
+        checked_scale(3, tuple_size)?,
+        checked_scale(union_find_count, usize_size)?,
+        checked_scale(voxel_count, std::mem::size_of::<i32>())?,
+    ])?;
+    let second_conservative = checked_sum(&[
+        allocator_allocation_bound(
+            voxel_count,
+            std::mem::size_of::<bool>(),
+            std::mem::align_of::<bool>(),
+        )?,
+        allocator_allocation_bound(voxel_count, usize_size, usize_align)?,
+        allocator_allocation_bound(union_find_count, usize_size, usize_align)?,
+        allocator_allocation_bound(union_find_count, usize_size, usize_align)?,
+        allocator_allocation_bound(3, tuple_size, tuple_align)?,
+        allocator_allocation_bound(union_find_count, usize_size, usize_align)?,
+        allocator_allocation_bound(
+            voxel_count,
+            std::mem::size_of::<i32>(),
+            std::mem::align_of::<i32>(),
+        )?,
+    ])?;
+    Ok(LabelMemoryEstimate {
+        requested_live_bytes: first_requested.max(second_requested),
+        conservative_peak_bytes: first_conservative.max(second_conservative),
+    })
+}
+
 fn resource_estimate(
     mesh: &Mesh,
     spec: GridSpec,
@@ -671,13 +770,9 @@ fn resource_estimate(
     )?;
     let edt_peak_bytes = checked_sum(&[edt_arrays, edt_line])?;
 
-    // label3d's mask, provisional labels, union-find parent/rank, root map,
-    // and final i32 labels. This intentionally assumes one provisional label
-    // per voxel.
-    let label_peak_bytes = checked_scale(
-        spec.count,
-        std::mem::size_of::<bool>() + 3 * std::mem::size_of::<usize>() + std::mem::size_of::<i32>(),
-    )?;
+    let label_memory = label_phase_memory(spec.count)?;
+    debug_assert!(label_memory.conservative_peak_bytes >= label_memory.requested_live_bytes);
+    let label_peak_bytes = label_memory.conservative_peak_bytes;
 
     // Surface Nets worst case: one surface vertex per cell, up to three quads
     // (six triangles) per vertex, all library scratch/output buffers, the f32
@@ -1345,6 +1440,24 @@ mod tests {
         assert!(matches!(
             grid_spec(&source, f64::MIN_POSITIVE),
             Err(HollowError::VoxelGridTooLarge)
+        ));
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn label_phase_bound_matches_hand_derived_live_allocations() {
+        // N=8 second-pass live requests: mask 8, labels 64, three N+1
+        // usize arrays 216, offsets 72, and output 32 = 392 bytes.
+        let estimate = label_phase_memory(8).expect("label bound");
+        assert_eq!(estimate.requested_live_bytes, 392);
+        // Each of those seven live allocations is rounded to 16 bytes,
+        // doubled for allocator size-class slack, then charged 16 metadata
+        // bytes: 48 + 144 + 3*176 + 176 + 80 = 976.
+        assert_eq!(estimate.conservative_peak_bytes, 976);
+        assert!(estimate.conservative_peak_bytes >= estimate.requested_live_bytes);
+        assert!(matches!(
+            label_phase_memory(usize::MAX),
+            Err(HollowError::ResourceAccountingOverflow)
         ));
     }
 
