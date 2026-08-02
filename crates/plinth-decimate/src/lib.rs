@@ -243,6 +243,14 @@ pub struct BudgetSearchSuccess {
 }
 
 impl BudgetSearchSuccess {
+    /// Borrows the verified production mesh for a disk-audit or rendering
+    /// boundary without transferring its one-shot downstream authorization.
+    /// The caller cannot mutate this mesh or construct another verified result.
+    #[must_use]
+    pub const fn mesh(&self) -> &Mesh {
+        &self.mesh
+    }
+
     /// Consumes the verified result and transfers its production mesh to the
     /// next pipeline stage. No cloneable verified authorization is retained.
     #[must_use]

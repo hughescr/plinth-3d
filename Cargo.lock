@@ -542,6 +542,9 @@ dependencies = [
  "plinth-mesh",
  "rand_chacha",
  "rand_core",
+ "serde",
+ "serde_json",
+ "sha2",
  "thiserror 1.0.69",
 ]
 
