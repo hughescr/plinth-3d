@@ -1,6 +1,46 @@
-use std::sync::{Mutex, OnceLock};
-
 use geom_kernel::{NeighborCsr, PointCloudIndex, PointIndexBuildError, PointQueryError};
+
+const THREAD_SWEEP_CHILD: &str = "GEOM_KERNEL_POINT_INDEX_THREAD_SWEEP_CHILD";
+const THREAD_SWEEP_SIGNATURE: &str = "GEOM_KERNEL_POINT_INDEX_THREAD_SWEEP_SIGNATURE=";
+
+fn sweep_threads(test_name: &str) -> Option<Vec<String>> {
+    if std::env::var(THREAD_SWEEP_CHILD).as_deref() == Ok("1") {
+        return None;
+    }
+    Some(
+        [1, 4, 16]
+            .into_iter()
+            .map(|threads| {
+                let output = std::process::Command::new(
+                    std::env::current_exe().expect("current test executable"),
+                )
+                .args(["--exact", test_name, "--nocapture"])
+                .env("PLINTH_THREADS", threads.to_string())
+                .env(THREAD_SWEEP_CHILD, "1")
+                .output()
+                .expect("spawn isolated thread-sweep test");
+                assert!(
+                    output.status.success(),
+                    "thread sweep child {threads} failed:\n{}\n{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr),
+                );
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                let sentinel = format!("\n{THREAD_SWEEP_SIGNATURE}");
+                assert_eq!(
+                    stdout.matches(&sentinel).count(),
+                    1,
+                    "thread sweep child must emit exactly one signature sentinel:\n{stdout}"
+                );
+                stdout
+                    .split_once(&sentinel)
+                    .and_then(|(_, signature)| signature.lines().next())
+                    .map(str::to_owned)
+                    .expect("thread sweep child must report its deterministic signature")
+            })
+            .collect(),
+    )
+}
 
 fn rows(result: &NeighborCsr) -> Vec<Vec<(u64, u64)>> {
     (0..result.query_count())
@@ -186,20 +226,17 @@ fn public_api_is_batch_only_and_batch_results_are_thread_identical() {
         index.radius_neighbors_batch(&[[0.0; 3], [1.0; 3]], 3.0)
     }
 
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    let _guard = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
-    let previous = std::env::var_os("PLINTH_THREADS");
-    struct Restore(Option<std::ffi::OsString>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            if let Some(value) = self.0.take() {
-                std::env::set_var("PLINTH_THREADS", value);
-            } else {
-                std::env::remove_var("PLINTH_THREADS");
-            }
-        }
+    if let Some(signatures) =
+        sweep_threads("public_api_is_batch_only_and_batch_results_are_thread_identical")
+    {
+        assert!(signatures.windows(2).all(|pair| pair[0] == pair[1]));
+        return;
     }
-    let _restore = Restore(previous);
+    let expected = std::env::var("PLINTH_THREADS")
+        .expect("isolated sweep config")
+        .parse::<usize>()
+        .expect("positive isolated thread count");
+    assert_eq!(geom_kernel::current_threads(), expected);
 
     let points = (0..4096)
         .map(|index| {
@@ -215,16 +252,9 @@ fn public_api_is_batch_only_and_batch_results_are_thread_identical() {
     let index = PointCloudIndex::new(&points).unwrap();
     let _ = consume_batch_api(&index).unwrap();
 
-    let mut baseline = None;
-    for threads in [1, 4, 16] {
-        std::env::set_var("PLINTH_THREADS", threads.to_string());
-        let current = signature(&index.radius_neighbors_batch(&queries, 5.0).unwrap());
-        let current_knn = signature(&index.knn_batch(&queries, 8).unwrap());
-        if let Some((previous_radius, previous_knn)) = &baseline {
-            assert_eq!(&current, previous_radius);
-            assert_eq!(&current_knn, previous_knn);
-        } else {
-            baseline = Some((current, current_knn));
-        }
-    }
+    let result = (
+        signature(&index.radius_neighbors_batch(&queries, 5.0).unwrap()),
+        signature(&index.knn_batch(&queries, 8).unwrap()),
+    );
+    println!("\n{THREAD_SWEEP_SIGNATURE}{result:?}");
 }

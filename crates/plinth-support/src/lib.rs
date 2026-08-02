@@ -106,8 +106,12 @@ impl SphereGeometry {
         Ok(Self::joint(finite_array(center_mm)?))
     }
 
-    #[must_use]
-    pub fn canonical_poles(&self, radius: PositiveFinite) -> ([Finite; 3], [Finite; 3]) {
+    /// Derive the canonical serialized poles, rejecting finite inputs whose
+    /// arithmetic would overflow the finite semantic boundary.
+    pub fn canonical_poles(
+        &self,
+        radius: PositiveFinite,
+    ) -> Result<([Finite; 3], [Finite; 3]), SupportError> {
         let radius = radius.get();
         match &self.0 {
             SphereGeometryKind::Tip {
@@ -116,29 +120,19 @@ impl SphereGeometry {
             } => {
                 let axis = outward_axis_unit.map(Finite::get);
                 let center = center_mm.map(Finite::get);
-                let start = std::array::from_fn(|index| {
-                    Finite::new(center[index] - radius * axis[index])
-                        .expect("finite typed sphere pole")
-                });
-                let end = std::array::from_fn(|index| {
-                    Finite::new(center[index] + radius * axis[index])
-                        .expect("finite typed sphere pole")
-                });
-                (start, end)
+                let start = finite_array(std::array::from_fn(|index| {
+                    center[index] - radius * axis[index]
+                }))?;
+                let end = finite_array(std::array::from_fn(|index| {
+                    center[index] + radius * axis[index]
+                }))?;
+                Ok((start, end))
             }
             SphereGeometryKind::Joint { center_mm } => {
                 let center = center_mm.map(Finite::get);
-                let start = [
-                    Finite::new(center[0]).expect("finite typed joint pole"),
-                    Finite::new(center[1]).expect("finite typed joint pole"),
-                    Finite::new(center[2] + radius).expect("finite typed joint pole"),
-                ];
-                let end = [
-                    Finite::new(center[0]).expect("finite typed joint pole"),
-                    Finite::new(center[1]).expect("finite typed joint pole"),
-                    Finite::new(center[2] - radius).expect("finite typed joint pole"),
-                ];
-                (start, end)
+                let start = finite_array([center[0], center[1], center[2] + radius])?;
+                let end = finite_array([center[0], center[1], center[2] - radius])?;
+                Ok((start, end))
             }
         }
     }
@@ -384,6 +378,12 @@ impl SupportedModel {
 
 impl SupportPrimitive {
     fn is_semantically_valid(&self) -> bool {
+        let nonzero_frustum = !matches!(
+            self.segment_kind,
+            SupportSegmentKind::ContactTaper
+                | SupportSegmentKind::Member
+                | SupportSegmentKind::RootFlare
+        ) || self.start_mm != self.end_mm;
         let taper_depth_matches = (self.segment_kind == SupportSegmentKind::ContactTaper)
             == self.contact_depth_mm.is_some();
         let ring_provenance_matches = match self.ring_normal {
@@ -395,23 +395,25 @@ impl SupportPrimitive {
                 self.start_radius_mm == self.end_radius_mm
                     && geometry.has_finite_canonical_fields()
                     && {
-                        let (start, end) = geometry.canonical_poles(self.start_radius_mm);
-                        self.start_mm == start && self.end_mm == end
+                        geometry
+                            .canonical_poles(self.start_radius_mm)
+                            .is_ok_and(|(start, end)| self.start_mm == start && self.end_mm == end)
                     }
             }
             (SupportSegmentKind::JointSphere, Some(geometry)) if geometry.is_joint() => {
                 self.start_radius_mm == self.end_radius_mm
                     && geometry.has_finite_canonical_fields()
                     && {
-                        let (start, end) = geometry.canonical_poles(self.start_radius_mm);
-                        self.start_mm == start && self.end_mm == end
+                        geometry
+                            .canonical_poles(self.start_radius_mm)
+                            .is_ok_and(|(start, end)| self.start_mm == start && self.end_mm == end)
                     }
             }
             (SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere, _) => false,
             (_, None) => true,
             _ => false,
         };
-        taper_depth_matches && ring_provenance_matches && sphere_poles_match
+        nonzero_frustum && taper_depth_matches && ring_provenance_matches && sphere_poles_match
     }
 }
 
@@ -1711,10 +1713,9 @@ mod tests {
     use super::*;
     use plinth_core::{ContentDigest, NonNegativeFinite, UnitFraction};
     use plinth_decimate::DecimationReport;
-    use plinth_hollow::{HollowDisposition, HollowReport};
+    use plinth_hollow::{HollowDisposition, HollowHistory, HollowReport};
     use plinth_orient::{BaselineSelection, OrientationHistory, OrientationReport, RigidTransform};
     use std::path::PathBuf;
-    use std::sync::{Mutex, OnceLock};
 
     const TEST_GRID_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 
@@ -1732,6 +1733,108 @@ mod tests {
     fn perceive_fixture(mesh: &Mesh) -> ContactCandidatePool {
         let delicacy = vec![0.25; mesh.tris().len()];
         perceive_contacts(mesh, &config(mesh, &delicacy)).expect("closed fixture is perceptible")
+    }
+
+    fn fixture_history(primitives: &[SupportPrimitive]) -> SupportHistory {
+        let decimation = DecimationReport {
+            budget_id: ContentDigest(17),
+            input_faces: 4,
+            output_faces: 4,
+            chosen_ratio: UnitFraction::new(1.0).expect("fixture ratio"),
+            p99_mm: NonNegativeFinite::new(0.0).expect("fixture error"),
+            p999_mm: NonNegativeFinite::new(0.0).expect("fixture error"),
+            boundary_edges_before: 0,
+            boundary_edges_after: 0,
+            nonmanifold_edges_before: 0,
+            nonmanifold_edges_after: 0,
+        };
+        let orientation = OrientationHistory::from_reports(
+            decimation,
+            OrientationReport {
+                pinned_report: PathBuf::from("fixture.pipeline.json"),
+                selection: BaselineSelection::Identity,
+                transform: RigidTransform::identity(),
+            },
+        );
+        let hollow = HollowHistory::from_reports(
+            orientation,
+            HollowReport {
+                disposition: HollowDisposition::HollowedAndDrilled,
+                cavities: Vec::new(),
+                drains: Vec::new(),
+            },
+        );
+        let raft_primitive_count = primitives
+            .iter()
+            .filter(|primitive| primitive.segment_kind == SupportSegmentKind::RaftPadOrBridge)
+            .count();
+        SupportHistory::from_reports(
+            hollow,
+            SupportReport {
+                support_primitive_count: primitives.len() - raft_primitive_count,
+                raft_primitive_count,
+            },
+            BuildFrame::new(
+                Finite::new(-3.0).expect("fixture plate"),
+                PositiveFinite::new(3.0).expect("fixture lift"),
+            ),
+        )
+    }
+
+    fn non_sphere_primitive(kind: SupportSegmentKind, point: [f64; 3]) -> SupportPrimitive {
+        SupportPrimitive {
+            segment_kind: kind,
+            start_mm: point.map(|value| Finite::new(value).expect("fixture coordinate")),
+            end_mm: point.map(|value| Finite::new(value).expect("fixture coordinate")),
+            start_radius_mm: PositiveFinite::new(1.0).expect("fixture radius"),
+            end_radius_mm: PositiveFinite::new(0.5).expect("fixture radius"),
+            contact_depth_mm: (kind == SupportSegmentKind::ContactTaper)
+                .then(|| PositiveFinite::new(0.2).expect("fixture contact depth")),
+            ring_normal: FrustumRingNormal::SegmentAxis,
+            sphere_geometry: None,
+        }
+    }
+
+    const THREAD_SWEEP_CHILD: &str = "PLINTH_SUPPORT_THREAD_SWEEP_CHILD";
+    const THREAD_SWEEP_SIGNATURE: &str = "PLINTH_SUPPORT_THREAD_SWEEP_SIGNATURE=";
+
+    fn sweep_threads(test_name: &str) -> Option<Vec<String>> {
+        if std::env::var(THREAD_SWEEP_CHILD).as_deref() == Ok("1") {
+            return None;
+        }
+        Some(
+            [1, 4, 16]
+                .into_iter()
+                .map(|threads| {
+                    let output = std::process::Command::new(
+                        std::env::current_exe().expect("current test executable"),
+                    )
+                    .args(["--exact", test_name, "--nocapture"])
+                    .env("PLINTH_THREADS", threads.to_string())
+                    .env(THREAD_SWEEP_CHILD, "1")
+                    .output()
+                    .expect("spawn isolated thread-sweep test");
+                    assert!(
+                        output.status.success(),
+                        "thread sweep child {threads} failed:\n{}\n{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    );
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let sentinel = format!("\n{THREAD_SWEEP_SIGNATURE}");
+                    assert_eq!(
+                        stdout.matches(&sentinel).count(),
+                        1,
+                        "thread sweep child must emit exactly one signature sentinel:\n{stdout}"
+                    );
+                    stdout
+                        .split_once(&sentinel)
+                        .and_then(|(_, signature)| signature.lines().next())
+                        .map(str::to_owned)
+                        .expect("thread sweep child must report its deterministic signature")
+                })
+                .collect(),
+        )
     }
 
     #[test]
@@ -1878,28 +1981,23 @@ mod tests {
 
     #[test]
     fn gathered_native_perception_is_thread_count_invariant() {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("test environment lock");
-        let previous = std::env::var_os("PLINTH_THREADS");
+        if let Some(signatures) =
+            sweep_threads("tests::gathered_native_perception_is_thread_count_invariant")
+        {
+            assert!(signatures.windows(2).all(|pair| pair[0] == pair[1]));
+            return;
+        }
+        let expected = std::env::var("PLINTH_THREADS")
+            .expect("isolated sweep config")
+            .parse::<usize>()
+            .expect("positive isolated thread count");
+        assert_eq!(geom_kernel::current_threads(), expected);
         let mesh = plinth_mesh::make_overhang_table().expect("overhang table");
         let delicacy = vec![0.75; mesh.tris().len()];
-        let mut digest = None;
-        for threads in ["1", "4", "16"] {
-            std::env::set_var("PLINTH_THREADS", threads);
-            let candidate_digest = perceive_contacts(&mesh, &config(&mesh, &delicacy))
-                .expect("closed fixture")
-                .digest();
-            assert_eq!(Some(candidate_digest), digest.or(Some(candidate_digest)));
-            digest = Some(candidate_digest);
-        }
-        if let Some(previous) = previous {
-            std::env::set_var("PLINTH_THREADS", previous);
-        } else {
-            std::env::remove_var("PLINTH_THREADS");
-        }
+        let candidate_digest = perceive_contacts(&mesh, &config(&mesh, &delicacy))
+            .expect("closed fixture")
+            .digest();
+        println!("\n{THREAD_SWEEP_SIGNATURE}{candidate_digest:?}");
     }
 
     #[test]
@@ -2041,6 +2139,66 @@ mod tests {
         assert_eq!(history.support().support_primitive_count, 1);
         assert_eq!(history.lift_mm(), lift_mm);
         assert_eq!(history.plate_z_mm().get(), -5.0);
+    }
+
+    #[test]
+    fn canonical_pole_overflow_is_rejected_at_supported_model_boundary() {
+        let radius = PositiveFinite::new(f64::MAX).expect("finite positive radius");
+        let tip = SphereGeometry::tip(
+            [Finite::new(f64::MAX).expect("finite center"); 3],
+            [
+                Finite::new(1.0).expect("finite axis"),
+                Finite::new(0.0).expect("finite axis"),
+                Finite::new(0.0).expect("finite axis"),
+            ],
+        )
+        .expect("finite semantic authority");
+        let joint = SphereGeometry::joint([Finite::new(f64::MAX).expect("finite center"); 3]);
+        for (kind, sphere_geometry) in [
+            (SupportSegmentKind::ContactSphere, tip),
+            (SupportSegmentKind::JointSphere, joint),
+        ] {
+            let primitive = SupportPrimitive {
+                segment_kind: kind,
+                start_mm: [Finite::new(0.0).expect("finite fixture coordinate"); 3],
+                end_mm: [Finite::new(0.0).expect("finite fixture coordinate"); 3],
+                start_radius_mm: radius,
+                end_radius_mm: radius,
+                contact_depth_mm: None,
+                ring_normal: FrustumRingNormal::SegmentAxis,
+                sphere_geometry: Some(sphere_geometry),
+            };
+            let history = fixture_history(std::slice::from_ref(&primitive));
+            assert!(matches!(
+                SupportedModel::from_parts(small_closed_tetra(), vec![primitive], history),
+                Err(SupportError::InvalidPrimitive)
+            ));
+        }
+    }
+
+    #[test]
+    fn semantic_boundary_rejects_zero_length_frusta_but_accepts_coincident_raft_pad() {
+        for kind in [
+            SupportSegmentKind::ContactTaper,
+            SupportSegmentKind::Member,
+            SupportSegmentKind::RootFlare,
+        ] {
+            let primitive = non_sphere_primitive(kind, [0.0; 3]);
+            let history = fixture_history(std::slice::from_ref(&primitive));
+            assert!(matches!(
+                SupportedModel::from_parts(small_closed_tetra(), vec![primitive], history),
+                Err(SupportError::InvalidPrimitive)
+            ));
+        }
+
+        let raft_pad = non_sphere_primitive(SupportSegmentKind::RaftPadOrBridge, [0.0; 3]);
+        let history = fixture_history(std::slice::from_ref(&raft_pad));
+        let model = SupportedModel::from_parts(small_closed_tetra(), vec![raft_pad], history)
+            .expect("coincident raft primitive is a valid pad");
+        assert_eq!(
+            model.primitives()[0].segment_kind,
+            SupportSegmentKind::RaftPadOrBridge
+        );
     }
 
     fn selection_config<'a>(delicacy: &'a [f64]) -> ContactSelectionConfig<'a> {
@@ -2621,28 +2779,24 @@ mod tests {
 
     #[test]
     fn s1_selection_digest_is_thread_setting_invariant_with_batched_pool_validation() {
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("environment lock");
-        let previous = std::env::var_os("PLINTH_THREADS");
+        if let Some(signatures) = sweep_threads(
+            "tests::s1_selection_digest_is_thread_setting_invariant_with_batched_pool_validation",
+        ) {
+            assert!(signatures.windows(2).all(|pair| pair[0] == pair[1]));
+            return;
+        }
+        let expected = std::env::var("PLINTH_THREADS")
+            .expect("isolated sweep config")
+            .parse::<usize>()
+            .expect("positive isolated thread count");
+        assert_eq!(geom_kernel::current_threads(), expected);
         let mesh = small_closed_tetra();
         let pool = perceive_fixture(&mesh);
         let delicacy = vec![0.25; mesh.tris().len()];
         let islands = pool_islands(&pool);
-        let mut digest = None;
-        for threads in ["1", "4", "16"] {
-            std::env::set_var("PLINTH_THREADS", threads);
-            let plan = select_contacts(&mesh, &pool, &islands, &selection_config(&delicacy))
-                .expect("selection uses only already-gathered S0 evidence");
-            assert_eq!(Some(plan.digest()), digest.or(Some(plan.digest())));
-            digest = Some(plan.digest());
-        }
-        if let Some(previous) = previous {
-            std::env::set_var("PLINTH_THREADS", previous);
-        } else {
-            std::env::remove_var("PLINTH_THREADS");
-        }
+        let digest = select_contacts(&mesh, &pool, &islands, &selection_config(&delicacy))
+            .expect("selection uses only already-gathered S0 evidence")
+            .digest();
+        println!("\n{THREAD_SWEEP_SIGNATURE}{digest:?}");
     }
 }
