@@ -998,6 +998,7 @@ fn run_budget_search(
             .then_with(|| left.ratio.total_cmp(&right.ratio))
     });
     if candidates.is_empty() {
+        record_unexplored_dense_interval(original.tris().len(), &mut trace);
         return already_print_scale(
             original,
             budget.probe,
@@ -1171,6 +1172,26 @@ fn run_budget_search(
             geometrically_eligible_candidate_count,
         },
     )
+}
+
+fn record_unexplored_dense_interval(input_faces: usize, trace: &mut BudgetSearchTrace) {
+    let Some(first_target_faces) = trace
+        .steps
+        .iter()
+        .filter(|step| step.reduced)
+        .map(|step| step.output_face_count)
+        .max()
+        .and_then(|faces| faces.checked_add(1))
+    else {
+        return;
+    };
+    if first_target_faces < input_faces {
+        trace.adaptive_exploration.remaining_intervals = vec![IntegerTargetInterval {
+            first_target_faces,
+            last_target_faces: input_faces - 1,
+        }];
+        trace.adaptive_exploration.complete = false;
+    }
 }
 
 fn assess_downstream_utility(_candidate: &SimplifyOutcome) -> DownstreamUtilityEvidence {
@@ -2867,6 +2888,25 @@ mod tests {
         assert_eq!(success.final_probe().p99_mm, 0.0);
         assert_eq!(success.final_probe().p99_9_mm, 0.0);
         assert_eq!(success.trace().steps.len(), 6);
+        assert!(success.trace().steps[1..]
+            .iter()
+            .all(|step| step.reduced && !step.passed));
+        assert!(!success.trace().adaptive_exploration.complete);
+        assert!(!success
+            .trace()
+            .adaptive_exploration
+            .remaining_intervals
+            .is_empty());
+        assert_eq!(
+            success
+                .trace()
+                .adaptive_exploration
+                .remaining_intervals
+                .last()
+                .unwrap()
+                .last_target_faces,
+            mesh.tris().len() - 1
+        );
         assert!(success
             .trace()
             .reduction_refusals
