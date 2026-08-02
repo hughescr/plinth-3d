@@ -1108,6 +1108,41 @@ mod tests {
             .expect("frozen eligible shell")
     }
 
+    fn frozen_candidate_with_unequal_field_capacities() -> ShellCandidate {
+        let candidate = frozen_candidate();
+        let (mesh, cavity, field) = candidate.into_parts();
+        let dimensions = field.dimensions();
+        let origin = field.origin_mm();
+        let pitch = field.pitch_mm();
+        let member_count = field.member_count();
+        let members = field.member_flats().collect::<Vec<_>>();
+        let source_members = (0..field.flat_count())
+            .filter(|flat| field.source_contains_flat(*flat))
+            .collect::<Vec<_>>();
+        let field = field.with_test_unequal_retained_capacities();
+        assert_eq!(field.dimensions(), dimensions);
+        assert_eq!(field.origin_mm(), origin);
+        assert_eq!(field.pitch_mm(), pitch);
+        assert_eq!(field.member_count(), member_count);
+        assert_eq!(field.member_flats().collect::<Vec<_>>(), members);
+        assert_eq!(
+            (0..field.flat_count())
+                .filter(|flat| field.source_contains_flat(*flat))
+                .collect::<Vec<_>>(),
+            source_members
+        );
+        let allocations = field.retained_allocations();
+        assert_ne!(
+            allocations.membership_bytes(),
+            allocations.source_occupancy_bytes()
+        );
+        ShellCandidate {
+            mesh,
+            cavity,
+            cavity_field: field,
+        }
+    }
+
     fn frozen_hollow_report() -> serde_json::Value {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../corpus/baseline/Sphere.pipeline.json");
@@ -1614,33 +1649,67 @@ mod tests {
     }
 
     #[test]
-    fn unequal_retained_field_allocations_have_an_exact_cap_boundary() {
-        let field = CavityField::with_test_retained_buffers(1, 1, 2, 17);
-        let allocations = field.retained_allocations();
-        assert_eq!(field.retained_word_lengths(), (1, 2));
-        assert_ne!(
-            allocations.membership_bytes(),
-            allocations.source_occupancy_bytes()
-        );
-
-        let exact = retained_field_allocation_peak(&field, usize::MAX)
-            .expect("unequal retained allocations");
-        let combined = crate::allocator_allocation_bound_bytes(
-            allocations.membership_bytes() + allocations.source_occupancy_bytes(),
-            std::mem::align_of::<u64>(),
+    fn unequal_retained_field_capacities_have_a_real_planner_cap_boundary() {
+        let unlimited = frozen_candidate_with_unequal_field_capacities();
+        let constants = m0_constants().expect("M0 constants");
+        let policy = constants.placeholders();
+        let native = NativeSurface::estimate_index_memory_from_indexed(
+            unlimited.mesh().verts(),
+            unlimited.mesh().tris(),
+            unlimited.cavity_field().pitch_mm().get(),
         )
-        .expect("combined allocation comparison");
-        assert!(exact > combined);
-        assert_eq!(
-            retained_field_allocation_peak(&field, exact).expect("exact cap"),
-            exact
-        );
+        .expect("native preflight");
+        let preflight = planner_preflight(
+            &unlimited,
+            unlimited.cavity_field(),
+            unlimited.cavity().resources(),
+            native.peak_bytes(),
+            PlannerPolicy {
+                drain_direction_count: policy
+                    .hollow_drain_directions()
+                    .diagnostic()
+                    .directions()
+                    .len(),
+                vent_direction_count: policy
+                    .hollow_vent_directions()
+                    .diagnostic()
+                    .directions()
+                    .len(),
+                lobe_band_mm: policy.hollow_lobe_band_mm().diagnostic().get(),
+                lobe_min_ml: policy.hollow_lobe_min_ml().diagnostic().get(),
+                vent_top_band_mm: policy.hollow_vent_top_band_mm().diagnostic().get(),
+                vent_sample_divisor: usize::try_from(
+                    policy.hollow_vent_sample_divisor().diagnostic().get(),
+                )
+                .expect("sample divisor fits usize"),
+                exit_ceiling_mm: policy.hollow_exit_ray_max_mm().diagnostic().get(),
+            },
+        )
+        .expect("unequal-capacity planner preflight");
+        let exact = preflight.requested_bytes;
+
+        let (mesh, mut cavity, field) = unlimited.into_parts();
+        cavity.resource_cap_bytes = exact;
+        plan_drains(ShellCandidate {
+            mesh,
+            cavity,
+            cavity_field: field,
+        })
+        .expect("exact unequal-capacity H1a cap");
+
+        let below = frozen_candidate_with_unequal_field_capacities();
+        let (mesh, mut cavity, field) = below.into_parts();
+        cavity.resource_cap_bytes = exact - 1;
+        let refusal = plan_drains(ShellCandidate {
+            mesh,
+            cavity,
+            cavity_field: field,
+        })
+        .expect_err("cap minus one must refuse in planner preflight");
         assert!(matches!(
-            retained_field_allocation_peak(&field, exact - 1),
-            Err(DrainPlanningRefusal::ResourceLimitExceeded {
-                requested_bytes,
-                cap_bytes
-            }) if requested_bytes == exact && cap_bytes == exact - 1
+            refusal.reason(),
+            DrainPlanningRefusal::ResourceLimitExceeded { requested_bytes, cap_bytes }
+                if *requested_bytes == exact && *cap_bytes == exact - 1
         ));
     }
 }

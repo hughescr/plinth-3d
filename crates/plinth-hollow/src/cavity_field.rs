@@ -39,24 +39,19 @@ pub struct CavityField {
 
 impl CavityField {
     #[cfg(test)]
-    pub(crate) fn with_test_retained_buffers(
-        membership_len: usize,
-        membership_capacity: usize,
-        source_occupancy_len: usize,
-        source_occupancy_capacity: usize,
-    ) -> Self {
-        let mut membership = Vec::with_capacity(membership_capacity);
-        membership.resize(membership_len, 0_u64);
-        let mut source_occupancy = Vec::with_capacity(source_occupancy_capacity);
-        source_occupancy.resize(source_occupancy_len, 0_u64);
-        Self {
-            dims: [membership_len.max(source_occupancy_len) * 64, 1, 1],
-            origin_mm: [Finite::new(0.0).expect("finite"); 3],
-            pitch_mm: Finite::new(0.5).expect("finite"),
-            membership,
-            source_occupancy,
-            member_count: 0,
-        }
+    pub(crate) fn with_test_unequal_retained_capacities(mut self) -> Self {
+        let minimum_capacity = self
+            .membership
+            .capacity()
+            .checked_add(1)
+            .expect("test capacity fits usize");
+        let original = self.source_occupancy.clone();
+        let mut expanded = Vec::with_capacity(minimum_capacity.max(original.len()));
+        expanded.extend_from_slice(&original);
+        assert_eq!(expanded, original);
+        self.source_occupancy = expanded;
+        assert!(self.source_occupancy.capacity() > self.membership.capacity());
+        self
     }
 
     #[cfg(test)]
@@ -153,11 +148,6 @@ impl CavityField {
             membership_bytes: self.membership.capacity() * std::mem::size_of::<u64>(),
             source_occupancy_bytes: self.source_occupancy.capacity() * std::mem::size_of::<u64>(),
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn retained_word_lengths(&self) -> (usize, usize) {
-        (self.membership.len(), self.source_occupancy.len())
     }
 
     #[must_use]
