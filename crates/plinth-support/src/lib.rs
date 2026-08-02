@@ -965,6 +965,15 @@ pub fn select_contacts(
     islands: &[SupportIsland],
     config: &ContactSelectionConfig<'_>,
 ) -> Result<SelectedContacts, ContactSelectionError> {
+    select_contacts_with_work(mesh, candidates, islands, config).map(|(selected, _)| selected)
+}
+
+fn select_contacts_with_work(
+    mesh: &Mesh,
+    candidates: &ContactCandidatePool,
+    islands: &[SupportIsland],
+    config: &ContactSelectionConfig<'_>,
+) -> Result<(SelectedContacts, SelectionWork), ContactSelectionError> {
     let delicacy = config
         .delicacy_by_face
         .ok_or(ContactSelectionError::MissingDelicacySidecar)?;
@@ -1021,16 +1030,33 @@ pub fn select_contacts(
     }
     validate_candidate_pool(mesh, candidates, delicacy, config)?;
 
+    // Build membership authority once. Island face ids are canonical and the
+    // final candidate comparator is total (validated ids are unique), so
+    // gathering face buckets cannot change frozen selection order.
+    let mut work = SelectionWork::default();
+    let mut candidates_by_face = vec![Vec::new(); mesh.tris().len()];
+    for candidate in candidates.candidates() {
+        candidates_by_face[candidate.face_id as usize].push(candidate);
+        work.candidate_membership_evaluations =
+            work.candidate_membership_evaluations.saturating_add(1);
+    }
+
     let topology = build_face_topology(mesh, WeldPolicy::ExactBits)
         .map_err(|error| ContactSelectionError::Topology(error.to_string()))?;
     let samples = build_dyadic_coverage_samples(mesh, islands, topology.component_ids(), config)?;
     let mut selected: Vec<SelectedContact> = Vec::new();
     for island in islands {
-        let mut eligible: Vec<&ContactCandidate> = candidates
-            .candidates()
-            .iter()
-            .filter(|candidate| island.face_ids.binary_search(&candidate.face_id).is_ok())
-            .collect();
+        let eligible_count = island.face_ids.iter().fold(0_usize, |count, &face_id| {
+            count.saturating_add(candidates_by_face[face_id as usize].len())
+        });
+        let mut eligible = Vec::with_capacity(eligible_count);
+        for &face_id in &island.face_ids {
+            let bucket = &candidates_by_face[face_id as usize];
+            work.candidate_membership_evaluations = work
+                .candidate_membership_evaluations
+                .saturating_add(bucket.len());
+            eligible.extend_from_slice(bucket);
+        }
         if eligible.is_empty() {
             return Err(ContactSelectionError::NoLegalCandidate {
                 island_id: island.id,
@@ -1046,12 +1072,15 @@ pub fn select_contacts(
                 .then_with(|| left.point_mm[1].total_cmp(&right.point_mm[1]))
                 .then_with(|| left.id.cmp(&right.id))
         });
-        let (island_contacts, _) = select_island_contacts(
+        let (island_contacts, island_work) = select_island_contacts(
             island.id,
             &eligible,
             config.target_spacing_mm.get(),
             config.min_contacts_per_island,
         );
+        work.distance_evaluations = work
+            .distance_evaluations
+            .saturating_add(island_work.distance_evaluations);
         debug_assert!(config.spacing_floor_mm.get() > 0.0);
         selected.extend(island_contacts);
     }
@@ -1065,10 +1094,13 @@ pub fn select_contacts(
             config.voxel_pitch_mm.get(),
         );
         if failing.is_empty() {
-            return Ok(SelectedContacts {
-                contacts: selected,
-                coverage_samples: samples,
-            });
+            return Ok((
+                SelectedContacts {
+                    contacts: selected,
+                    coverage_samples: samples,
+                },
+                work,
+            ));
         }
         if attempt == config.coverage_repair_max_attempts {
             return Err(ContactSelectionError::UnsatisfiedCoverage {
@@ -1491,6 +1523,7 @@ fn squared_distance(left: [f64; 3], right: [f64; 3]) -> f64 {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct SelectionWork {
+    candidate_membership_evaluations: usize,
     distance_evaluations: usize,
 }
 
@@ -1528,7 +1561,7 @@ impl PoissonGrid {
                 for nz in z0..=z1 {
                     if let Some(points) = self.cells.get(&(nx, ny, nz)) {
                         for &selected in points {
-                            work.distance_evaluations += 1;
+                            work.distance_evaluations = work.distance_evaluations.saturating_add(1);
                             // Preserve the frozen comparison, including its square-root
                             // rounding at an exact spacing boundary.
                             if squared_distance(selected, point).sqrt() < self.cell_width {
@@ -1581,7 +1614,7 @@ fn select_island_contacts(
             continue;
         }
         for contact in &contacts {
-            work.distance_evaluations += 1;
+            work.distance_evaluations = work.distance_evaluations.saturating_add(1);
             nearest_distance_sq[row] = nearest_distance_sq[row]
                 .min(squared_distance(contact.point_mm, candidate.point_mm));
         }
@@ -1606,7 +1639,7 @@ fn select_island_contacts(
             if chosen[row] {
                 continue;
             }
-            work.distance_evaluations += 1;
+            work.distance_evaluations = work.distance_evaluations.saturating_add(1);
             nearest_distance_sq[row] =
                 nearest_distance_sq[row].min(squared_distance(best.point_mm, candidate.point_mm));
         }
@@ -2234,6 +2267,56 @@ mod tests {
             "incremental selection performed {} distance evaluations",
             work.distance_evaluations
         );
+    }
+
+    #[test]
+    fn overlapping_islands_use_one_candidate_face_index_not_pool_rescans() {
+        const COUNT: usize = 512;
+        const ISLANDS: usize = 512;
+        let mesh = small_closed_tetra();
+        let delicacy = vec![0.25; mesh.tris().len()];
+        let surface = NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
+            NativeSurfaceConfig {
+                grid_pitch_mm: 0.4,
+                max_grid_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .expect("fixture surface");
+        let geometry = surface.geometry();
+        let candidate_for_face = |id: u64, face: usize| ContactCandidate {
+            id: ContactCandidateId(id),
+            face_id: face as u32,
+            point_mm: geometry.centroids()[face],
+            normal: geometry.normals()[face],
+            supported_area_mm2: geometry.areas()[face],
+            overhang_excess: 1.0,
+            delicacy: delicacy[face],
+        };
+        let mut candidate_rows = Vec::with_capacity(COUNT);
+        candidate_rows.push(candidate_for_face(0, 0));
+        candidate_rows.extend((1..COUNT).map(|id| candidate_for_face(id as u64, 1)));
+        let pool = ContactCandidatePool {
+            candidates: candidate_rows,
+        };
+        let islands: Vec<_> = (0..ISLANDS)
+            .map(|id| SupportIsland {
+                id: id as u32,
+                face_ids: vec![0],
+            })
+            .collect();
+
+        let (selected, work) =
+            select_contacts_with_work(&mesh, &pool, &islands, &selection_config(&delicacy))
+                .expect("overlapping logical owners select from the indexed face bucket");
+        assert_eq!(selected.contacts().len(), ISLANDS);
+        assert_eq!(
+            work.candidate_membership_evaluations,
+            COUNT + ISLANDS,
+            "membership work is one index row per candidate plus one gathered row per island"
+        );
+        assert_eq!(work.distance_evaluations, 0);
     }
 
     fn pool_islands(pool: &ContactCandidatePool) -> Vec<SupportIsland> {
