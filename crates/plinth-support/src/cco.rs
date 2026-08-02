@@ -19,15 +19,18 @@ use crate::legacy_compat::{LegacyCompatibility, LegacyCompatibilityError};
 use crate::transient::{derive_brace_attachments, TransientError};
 use crate::{
     anchor::{
-        validate_anchor_feet, AnchorFootOutcome, AnchorFootRefusal, AnchorFootRequest,
-        AnchorGeometryAuthority, AnchorSearchConfig, AnchorSearchError, AnchorTerminalBinding,
-        QualifiedAnchorSeat, ValidatedModelAnchor,
+        discover_rewire_anchor_seats, validate_anchor_feet, validate_rewire_anchor_feet,
+        AnchorFootOutcome, AnchorFootRefusal, AnchorFootRefusalReason, AnchorFootRequest,
+        AnchorGeometryAuthority, AnchorSearchConfig, AnchorSearchError, AnchorSeatRefusal,
+        AnchorTerminalBinding, QualifiedAnchorSeat, RewireAnchorBinding, SurfaceAnchorSample,
+        ValidatedModelAnchor,
     },
     BuildFrame, SelectedContact,
 };
 
 const MILLIMETRES_PER_MILLILITRE: f64 = 1_000.0;
 const DEGENERATE_MM: f64 = 1e-6;
+const REWIRE_DEGENERATE_MM: f64 = 1e-4;
 const KDTREE_REBUILD_EVERY: usize = 25;
 
 #[cfg(test)]
@@ -191,6 +194,13 @@ pub(crate) struct RewireCcoBinding {
     splice: RewireSpliceFacts,
 }
 
+pub(crate) struct RewireAnchorRoute<'a> {
+    pub(crate) samples: &'a [SurfaceAnchorSample],
+    pub(crate) delicacy_by_face: Option<&'a [f64]>,
+    pub(crate) config: AnchorSearchConfig,
+    pub(crate) geometry: &'a AnchorGeometryAuthority<'a>,
+}
+
 impl RewireCcoBinding {
     pub(crate) fn bind_detached_subtree(
         forest: &Forest,
@@ -348,6 +358,15 @@ impl RewireCcoBinding {
 
     pub(crate) fn excluded_hosts(&self) -> &BTreeSet<MemberKey> {
         &self.excluded_hosts
+    }
+
+    fn anchor_binding(&self) -> RewireAnchorBinding {
+        RewireAnchorBinding::new(
+            self.request.stub,
+            self.live_digest,
+            self.snapshot_digest,
+            self.request.attach_point_mm,
+        )
     }
 }
 
@@ -577,6 +596,8 @@ struct EvaluatedCandidate {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RewireCandidateRefusalReason {
     InfeasibleGeometry,
+    DegenerateNewMember,
+    AnchorFoot(AnchorFootRefusalReason),
     Clearance,
 }
 
@@ -587,19 +608,23 @@ pub(crate) struct RewireCandidateRefusal {
     pub(crate) reason: RewireCandidateRefusalReason,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct RewireEvaluatedCandidate {
     pub(crate) descriptor: Descriptor,
     pub(crate) evidence: CcoCandidateEvidence,
     pub(crate) evaluated_digest: u64,
+    pub(crate) validated_model_anchor: Option<Box<ValidatedModelAnchor>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) struct RewireCandidateBatch {
     pub(crate) candidates: Vec<RewireEvaluatedCandidate>,
     pub(crate) refusals: Vec<RewireCandidateRefusal>,
     pub(crate) descriptors_generated: usize,
     pub(crate) clearance_batches: usize,
+    pub(crate) anchor_ray_batches: usize,
+    pub(crate) anchor_foot_batches: usize,
+    pub(crate) anchor_seat_refusals: Vec<AnchorSeatRefusal>,
     pub(crate) splice: RewireSpliceFacts,
     pub(crate) excluded_hosts: BTreeSet<MemberKey>,
     snapshot_digest: u64,
@@ -757,9 +782,20 @@ impl CcoController {
     pub(crate) fn evaluate_rewire_candidates(
         &self,
         binding: &RewireCcoBinding,
-        surface: &NativeSurface,
+        anchor_route: RewireAnchorRoute<'_>,
     ) -> Result<RewireCandidateBatch, CcoError> {
         let config = Config::current()?;
+        let anchor_binding = binding.anchor_binding();
+        let discovery = discover_rewire_anchor_seats(
+            anchor_binding,
+            anchor_route.samples,
+            anchor_route.delicacy_by_face,
+            anchor_route.config,
+            anchor_route.geometry,
+        )?;
+        let anchor_ray_batches = discovery.query_counts().ray_batches;
+        let anchor_seat_refusals = discovery.refusals().to_vec();
+        let mut seats = discovery.into_seats();
         let hosts = self.hosts.nearest_excluding(
             binding.request.stub_end_mm().map(Finite::get),
             config.bifurcation_hosts,
@@ -770,7 +806,7 @@ impl CcoController {
             &binding.snapshot,
             &binding.request,
             &config,
-            &[],
+            &seats,
             Some(hosts),
             false,
         );
@@ -781,6 +817,14 @@ impl CcoController {
         let mut feasible = Vec::new();
         for (index, result) in evaluated.into_iter().enumerate() {
             if let Some(mut candidate) = result {
+                if has_rewire_degenerate_new_member(&binding.snapshot, &candidate.forest) {
+                    refusals.push(RewireCandidateRefusal {
+                        generation_index: index,
+                        family: descriptors[index].family(),
+                        reason: RewireCandidateRefusalReason::DegenerateNewMember,
+                    });
+                    continue;
+                }
                 // Python rewire compares total live forest volume, not the
                 // insertion-only plate/anchor heuristic. The prepared base is
                 // common to the whole batch, so its exact volume delta is the
@@ -796,18 +840,67 @@ impl CcoController {
                 });
             }
         }
+        let mut validated_anchors = BTreeMap::new();
+        let mut anchor_foot_batches = 0;
+        if !seats.is_empty() {
+            let mut seats: Vec<Option<QualifiedAnchorSeat>> = seats.drain(..).map(Some).collect();
+            let mut generation_indices = Vec::new();
+            let mut foot_requests = Vec::new();
+            for candidate in &feasible {
+                if let Some((seat_index, final_radius)) = candidate.anchor {
+                    let seat = seats
+                        .get_mut(seat_index)
+                        .and_then(Option::take)
+                        .ok_or(CcoError::InvalidGeometry)?;
+                    generation_indices.push(candidate.generation_index);
+                    foot_requests.push(AnchorFootRequest::new(seat, final_radius));
+                }
+            }
+            let validation = validate_rewire_anchor_feet(
+                foot_requests,
+                anchor_binding,
+                anchor_route.config,
+                anchor_route.geometry,
+            )?;
+            anchor_foot_batches = validation.query_counts().sphere_breach_batches;
+            let mut valid = BTreeSet::new();
+            for (generation_index, outcome) in generation_indices
+                .into_iter()
+                .zip(validation.into_outcomes())
+            {
+                match outcome {
+                    AnchorFootOutcome::Validated(anchor) => {
+                        valid.insert(generation_index);
+                        validated_anchors.insert(generation_index, anchor);
+                    }
+                    AnchorFootOutcome::Refused(refusal) => {
+                        refusals.push(RewireCandidateRefusal {
+                            generation_index,
+                            family: descriptors[generation_index].family(),
+                            reason: RewireCandidateRefusalReason::AnchorFoot(refusal.reason()),
+                        });
+                    }
+                }
+            }
+            feasible.retain(|candidate| {
+                candidate.anchor.is_none() || valid.contains(&candidate.generation_index)
+            });
+        }
         if feasible.is_empty() {
             return Ok(RewireCandidateBatch {
                 candidates: Vec::new(),
                 refusals,
                 descriptors_generated,
                 clearance_batches: 0,
+                anchor_ray_batches,
+                anchor_foot_batches,
+                anchor_seat_refusals,
                 splice: binding.splice.clone(),
                 excluded_hosts: binding.excluded_hosts.clone(),
                 snapshot_digest: binding.snapshot_digest,
             });
         }
-        let survives = clearance_survival(surface, &config, &feasible)?;
+        let survives = clearance_survival(anchor_route.geometry.surface(), &config, &feasible)?;
         let mut candidates = Vec::new();
         for (candidate, survives) in feasible.into_iter().zip(survives) {
             if survives {
@@ -821,6 +914,7 @@ impl CcoController {
                         clearance_rows: candidate.rows.len(),
                     },
                     evaluated_digest: candidate.forest.digest(),
+                    validated_model_anchor: validated_anchors.remove(&generation_index),
                 });
             } else {
                 refusals.push(RewireCandidateRefusal {
@@ -836,6 +930,9 @@ impl CcoController {
             refusals,
             descriptors_generated,
             clearance_batches: 1,
+            anchor_ray_batches,
+            anchor_foot_batches,
+            anchor_seat_refusals,
             splice: binding.splice.clone(),
             excluded_hosts: binding.excluded_hosts.clone(),
             snapshot_digest: binding.snapshot_digest,
@@ -1208,6 +1305,18 @@ fn evaluate(
         rows,
         anchor,
     }))
+}
+
+fn has_rewire_degenerate_new_member(before: &Forest, after: &Forest) -> bool {
+    after.live_tree_members().into_iter().any(|key| {
+        before.member(key).is_none()
+            && after.member(key).is_some_and(|member| {
+                norm(sub(
+                    member.p1_mm().map(Finite::get),
+                    member.p0_mm().map(Finite::get),
+                )) < REWIRE_DEGENERATE_MM
+            })
+    })
 }
 
 fn apply_and_size(
@@ -1831,6 +1940,7 @@ fn norm(a: [f64; 3]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plinth_mesh::{build_face_topology, FaceTopology, Mesh, WeldPolicy};
 
     #[test]
     fn frozen_xia_vectors_sum_to_right_angle() {
@@ -2191,21 +2301,74 @@ mod tests {
         })
     }
 
-    fn far_surface() -> NativeSurface {
-        NativeSurface::from_indexed(
-            &[
-                [100.0, 100.0, 100.0],
-                [101.0, 100.0, 100.0],
-                [100.0, 101.0, 100.0],
-                [100.0, 100.0, 101.0],
-            ],
-            &[[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+    struct RewireAnchorFixture {
+        mesh: Mesh,
+        topology: FaceTopology,
+        surface: NativeSurface,
+        samples: Vec<SurfaceAnchorSample>,
+        sidecar: Vec<f64>,
+    }
+
+    impl RewireAnchorFixture {
+        fn with_route<T>(&self, use_route: impl FnOnce(RewireAnchorRoute<'_>) -> T) -> T {
+            let geometry =
+                AnchorGeometryAuthority::new(&self.mesh, &self.topology, &self.surface).unwrap();
+            use_route(RewireAnchorRoute {
+                samples: &self.samples,
+                delicacy_by_face: Some(&self.sidecar),
+                config: AnchorSearchConfig::current().unwrap(),
+                geometry: &geometry,
+            })
+        }
+    }
+
+    fn rewire_anchor_fixture() -> RewireAnchorFixture {
+        let vertices = vec![
+            [-20.0, -20.0, 0.0],
+            [20.0, -20.0, 0.0],
+            [20.0, 20.0, 0.0],
+            [-20.0, 20.0, 0.0],
+            [-20.0, -20.0, 5.0],
+            [20.0, -20.0, 5.0],
+            [20.0, 20.0, 5.0],
+            [-20.0, 20.0, 5.0],
+        ];
+        let triangles = vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        let mesh = Mesh::new(vertices, triangles).unwrap();
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let surface = NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
             geom_kernel::NativeSurfaceConfig {
-                grid_pitch_mm: 0.4,
-                max_grid_bytes: 8 * 1024 * 1024,
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 64 * 1024 * 1024,
             },
         )
-        .unwrap()
+        .unwrap();
+        RewireAnchorFixture {
+            sidecar: vec![0.0; surface.nfaces()],
+            samples: vec![SurfaceAnchorSample {
+                source_face_id: 0,
+                point_mm: [0.0, 0.0, 0.0],
+                delicacy: 0.0,
+            }],
+            mesh,
+            topology,
+            surface,
+        }
     }
 
     fn rewire_fixture() -> (Forest, RewireFixtureKeys) {
@@ -2334,9 +2497,12 @@ mod tests {
         }
         assert!(!binding.excluded_hosts().contains(&keys.eligible));
 
-        let batch = CcoController::default()
-            .evaluate_rewire_candidates(&binding, &far_surface())
-            .unwrap();
+        let anchors = rewire_anchor_fixture();
+        let batch = anchors.with_route(|route| {
+            CcoController::default()
+                .evaluate_rewire_candidates(&binding, route)
+                .unwrap()
+        });
         for candidate in &batch.candidates {
             if let Descriptor::Bifurcate { host } = candidate.descriptor {
                 assert!(!batch.excluded_hosts.contains(&host));
@@ -2364,6 +2530,18 @@ mod tests {
                 && own_children == &vec![keys.child]
                 && *fixed_point_mm == forest.member(keys.root).unwrap().p0_mm()
         ));
+        let anchors = rewire_anchor_fixture();
+        let batch = anchors.with_route(|route| {
+            CcoController::default()
+                .evaluate_rewire_candidates(&binding, route)
+                .unwrap()
+        });
+        assert!(batch
+            .candidates
+            .iter()
+            .map(|candidate| candidate.evidence.family)
+            .chain(batch.refusals.iter().map(|refusal| refusal.family))
+            .any(|family| family == CandidateFamily::ModelAnchor));
 
         forest.set_parent(keys.root, Some(keys.eligible)).unwrap();
         assert!(matches!(
@@ -2382,10 +2560,19 @@ mod tests {
             BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
         )
         .unwrap();
-        let batch = CcoController::default()
-            .evaluate_rewire_candidates(&binding, &far_surface())
-            .unwrap();
+        let anchors = rewire_anchor_fixture();
+        let batch = anchors.with_route(|route| {
+            CcoController::default()
+                .evaluate_rewire_candidates(&binding, route)
+                .unwrap()
+        });
         assert_eq!(batch.clearance_batches, 1);
+        assert_eq!(batch.anchor_ray_batches, 1);
+        assert_eq!(batch.anchor_foot_batches, 1);
+        assert!(batch.refusals.iter().any(|refusal| {
+            refusal.family == CandidateFamily::ModelAnchor
+                && refusal.reason == RewireCandidateRefusalReason::Clearance
+        }));
         assert_eq!(forest.digest(), before);
         assert_eq!(binding.live_digest, before);
         assert_eq!(batch.snapshot_digest(), binding.snapshot.digest());
@@ -2422,12 +2609,16 @@ mod tests {
                 clearance_rows: 1,
             },
             evaluated_digest: before,
+            validated_model_anchor: None,
         };
         let tie_batch = RewireCandidateBatch {
             candidates: vec![tied(9), tied(3)],
             refusals: Vec::new(),
             descriptors_generated: 2,
             clearance_batches: 1,
+            anchor_ray_batches: 1,
+            anchor_foot_batches: 0,
+            anchor_seat_refusals: Vec::new(),
             splice: binding.splice().clone(),
             excluded_hosts: binding.excluded_hosts().clone(),
             snapshot_digest: before,
@@ -2436,6 +2627,29 @@ mod tests {
             tie_batch.ranked_candidates()[0].evidence.generation_index,
             3
         );
+    }
+
+    #[test]
+    fn rewire_rejects_new_members_between_shared_and_rewire_degenerate_thresholds() {
+        let before = Forest::new();
+        let mut after = before.clone();
+        after.add_member(rewire_member(
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 5.0e-5],
+            MemberKind::Shoot,
+            90,
+        ));
+        // This is above shared CCO's 1e-6 guard but below rewire.py's 1e-4 guard.
+        assert!(has_rewire_degenerate_new_member(&before, &after));
+
+        let mut printable = before.clone();
+        printable.add_member(rewire_member(
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 2.0e-4],
+            MemberKind::Shoot,
+            91,
+        ));
+        assert!(!has_rewire_degenerate_new_member(&before, &printable));
     }
 
     #[test]
@@ -2449,9 +2663,12 @@ mod tests {
                 BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
             )
             .unwrap();
-            let batch = CcoController::default()
-                .evaluate_rewire_candidates(&binding, &far_surface())
-                .unwrap();
+            let anchors = rewire_anchor_fixture();
+            let batch = anchors.with_route(|route| {
+                CcoController::default()
+                    .evaluate_rewire_candidates(&binding, route)
+                    .unwrap()
+            });
             let rows = batch
                 .candidates
                 .iter()

@@ -67,6 +67,32 @@ impl AnchorTerminalBinding {
     }
 }
 
+/// Exact immutable rewire checkpoint identity. Construction is crate-private;
+/// CCO creates it only from a validated `RewireCcoBinding`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RewireAnchorBinding {
+    root: MemberKey,
+    live_digest: u64,
+    snapshot_digest: u64,
+    attach_point_mm: [Finite; 3],
+}
+
+impl RewireAnchorBinding {
+    pub(crate) const fn new(
+        root: MemberKey,
+        live_digest: u64,
+        snapshot_digest: u64,
+        attach_point_mm: [Finite; 3],
+    ) -> Self {
+        Self {
+            root,
+            live_digest,
+            snapshot_digest,
+            attach_point_mm,
+        }
+    }
+}
+
 /// Production anchor policy. Every result-changing scalar is bound to M0.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AnchorSearchConfig {
@@ -205,6 +231,31 @@ struct TerminalFingerprint {
     stub_end_bits: [u64; 3],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RewireFingerprint {
+    root: MemberKey,
+    live_digest: u64,
+    snapshot_digest: u64,
+    attach_point_bits: [u64; 3],
+}
+
+impl RewireFingerprint {
+    fn from_binding(binding: RewireAnchorBinding) -> Self {
+        Self {
+            root: binding.root,
+            live_digest: binding.live_digest,
+            snapshot_digest: binding.snapshot_digest,
+            attach_point_bits: binding.attach_point_mm.map(|value| value.get().to_bits()),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AnchorSubjectFingerprint {
+    Terminal(TerminalFingerprint),
+    Rewire(RewireFingerprint),
+}
+
 impl TerminalFingerprint {
     fn from_binding(binding: AnchorTerminalBinding) -> Self {
         Self {
@@ -253,9 +304,9 @@ impl AnchorCandidateProvenance {
 pub struct QualifiedAnchorSeat {
     provenance: AnchorCandidateProvenance,
     #[cfg_attr(not(test), allow(dead_code))]
-    contact: ContactFingerprint,
+    contact: Option<ContactFingerprint>,
     #[cfg_attr(not(test), allow(dead_code))]
-    terminal: TerminalFingerprint,
+    subject: AnchorSubjectFingerprint,
     #[cfg_attr(not(test), allow(dead_code))]
     geometry: GeometryFingerprint,
     #[cfg_attr(not(test), allow(dead_code))]
@@ -382,8 +433,57 @@ pub fn discover_anchor_seats(
     geometry: &AnchorGeometryAuthority<'_>,
 ) -> Result<AnchorSeatDiscovery, AnchorSearchError> {
     validate_contact_and_sidecar(contact, delicacy_by_face, geometry.surface)?;
+    discover_anchor_seats_bound(
+        terminal.stub_end_mm,
+        Some(ContactFingerprint::from_contact(contact)),
+        AnchorSubjectFingerprint::Terminal(TerminalFingerprint::from_binding(terminal)),
+        contact.candidate_id.0,
+        Some(contact.served_face_id),
+        samples,
+        delicacy_by_face,
+        config,
+        geometry,
+    )
+}
+
+/// Rewire-specific discovery. The resulting move-only seats are bound to the
+/// exact live digest, prepared checkpoint digest, generational root, attach
+/// point, geometry authority, and current anchor policy.
+pub(crate) fn discover_rewire_anchor_seats(
+    binding: RewireAnchorBinding,
+    samples: &[SurfaceAnchorSample],
+    delicacy_by_face: Option<&[f64]>,
+    config: AnchorSearchConfig,
+    geometry: &AnchorGeometryAuthority<'_>,
+) -> Result<AnchorSeatDiscovery, AnchorSearchError> {
+    validate_sidecar(delicacy_by_face, geometry.surface)?;
+    discover_anchor_seats_bound(
+        binding.attach_point_mm,
+        None,
+        AnchorSubjectFingerprint::Rewire(RewireFingerprint::from_binding(binding)),
+        u64::from(binding.root.slot()),
+        None,
+        samples,
+        delicacy_by_face,
+        config,
+        geometry,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn discover_anchor_seats_bound(
+    anchor_start_mm: [Finite; 3],
+    contact_fingerprint: Option<ContactFingerprint>,
+    subject_fingerprint: AnchorSubjectFingerprint,
+    provenance_candidate_id: u64,
+    provenance_contact_face_id: Option<u32>,
+    samples: &[SurfaceAnchorSample],
+    delicacy_by_face: Option<&[f64]>,
+    config: AnchorSearchConfig,
+    geometry: &AnchorGeometryAuthority<'_>,
+) -> Result<AnchorSeatDiscovery, AnchorSearchError> {
     let sidecar = delicacy_by_face.expect("validated above");
-    let stub_end = finite3_to_f64(terminal.stub_end_mm);
+    let stub_end = finite3_to_f64(anchor_start_mm);
     let mut refusals = Vec::new();
     let mut qualified = Vec::new();
     for (sample_index, sample) in samples.iter().copied().enumerate() {
@@ -452,8 +552,6 @@ pub fn discover_anchor_seats(
         .cast_rays(&origins, &directions, RAY_T_MAX)
         .map_err(|error| AnchorSearchError::NativeQuery(error.to_string()))?;
     let exterior = geometry.surface.exterior_face_mask();
-    let contact_fingerprint = ContactFingerprint::from_contact(contact);
-    let terminal_fingerprint = TerminalFingerprint::from_binding(terminal);
     let config_fingerprint = config.fingerprint();
     let mut seats = Vec::new();
     for (ordinal, candidate) in qualified.into_iter().enumerate() {
@@ -473,13 +571,14 @@ pub fn discover_anchor_seats(
                 let face = face as usize;
                 seats.push(QualifiedAnchorSeat {
                     provenance: AnchorCandidateProvenance {
-                        contact_candidate_id: contact.candidate_id.0,
-                        contact_face_id: contact.served_face_id,
+                        contact_candidate_id: provenance_candidate_id,
+                        contact_face_id: provenance_contact_face_id
+                            .unwrap_or(candidate.sample.source_face_id),
                         sample_index: candidate.sample_index,
                         source_sample_face_id: candidate.sample.source_face_id,
                     },
                     contact: contact_fingerprint,
-                    terminal: terminal_fingerprint,
+                    subject: subject_fingerprint,
                     geometry: geometry.fingerprint.clone(),
                     config: config_fingerprint,
                     snapped_point_mm: finite3(point, "snapped anchor point")?,
@@ -547,6 +646,7 @@ impl AnchorFootRequest {
 pub enum AnchorFootRefusalReason {
     ReboundContact,
     ReboundTerminal,
+    ReboundRewireBinding,
     StaleConfig,
     StaleGeometry,
     FootBallBreached,
@@ -672,16 +772,49 @@ pub(crate) fn validate_anchor_feet(
     config: AnchorSearchConfig,
     geometry: &AnchorGeometryAuthority<'_>,
 ) -> Result<AnchorFootValidation, AnchorSearchError> {
-    let contact_fingerprint = ContactFingerprint::from_contact(contact);
-    let terminal_fingerprint = TerminalFingerprint::from_binding(terminal);
+    validate_anchor_feet_bound(
+        requests,
+        Some(ContactFingerprint::from_contact(contact)),
+        AnchorSubjectFingerprint::Terminal(TerminalFingerprint::from_binding(terminal)),
+        config,
+        geometry,
+    )
+}
+
+pub(crate) fn validate_rewire_anchor_feet(
+    requests: Vec<AnchorFootRequest>,
+    binding: RewireAnchorBinding,
+    config: AnchorSearchConfig,
+    geometry: &AnchorGeometryAuthority<'_>,
+) -> Result<AnchorFootValidation, AnchorSearchError> {
+    validate_anchor_feet_bound(
+        requests,
+        None,
+        AnchorSubjectFingerprint::Rewire(RewireFingerprint::from_binding(binding)),
+        config,
+        geometry,
+    )
+}
+
+fn validate_anchor_feet_bound(
+    requests: Vec<AnchorFootRequest>,
+    contact_fingerprint: Option<ContactFingerprint>,
+    subject_fingerprint: AnchorSubjectFingerprint,
+    config: AnchorSearchConfig,
+    geometry: &AnchorGeometryAuthority<'_>,
+) -> Result<AnchorFootValidation, AnchorSearchError> {
     let config_fingerprint = config.fingerprint();
+    let rebound_subject = match subject_fingerprint {
+        AnchorSubjectFingerprint::Terminal(_) => AnchorFootRefusalReason::ReboundTerminal,
+        AnchorSubjectFingerprint::Rewire(_) => AnchorFootRefusalReason::ReboundRewireBinding,
+    };
     let mut slots: Vec<Option<AnchorFootOutcome>> = (0..requests.len()).map(|_| None).collect();
     let mut valid = Vec::new();
     for (ordinal, request) in requests.into_iter().enumerate() {
         let reason = if request.seat.contact != contact_fingerprint {
             Some(AnchorFootRefusalReason::ReboundContact)
-        } else if request.seat.terminal != terminal_fingerprint {
-            Some(AnchorFootRefusalReason::ReboundTerminal)
+        } else if request.seat.subject != subject_fingerprint {
+            Some(rebound_subject)
         } else if request.seat.config != config_fingerprint {
             Some(AnchorFootRefusalReason::StaleConfig)
         } else if request.seat.geometry != geometry.fingerprint {
@@ -791,20 +924,8 @@ fn validate_contact_and_sidecar(
     sidecar: Option<&[f64]>,
     surface: &NativeSurface,
 ) -> Result<(), AnchorSearchError> {
-    let sidecar = sidecar.ok_or(AnchorSearchError::MissingDelicacySidecar)?;
-    if sidecar.len() != surface.nfaces() {
-        return Err(AnchorSearchError::DelicacyLength {
-            expected: surface.nfaces(),
-            actual: sidecar.len(),
-        });
-    }
-    if let Some((index, _)) = sidecar
-        .iter()
-        .enumerate()
-        .find(|(_, value)| !value.is_finite())
-    {
-        return Err(AnchorSearchError::NonFiniteDelicacy { index });
-    }
+    validate_sidecar(sidecar, surface)?;
+    let sidecar = sidecar.expect("validated above");
     let face = contact.served_face_id as usize;
     if face >= surface.nfaces() {
         return Err(AnchorSearchError::ContactFaceOutOfRange {
@@ -822,6 +943,27 @@ fn validate_contact_and_sidecar(
     }
     if contact.delicacy.to_bits() != sidecar[face].to_bits() {
         return Err(AnchorSearchError::ContactDelicacyMismatch);
+    }
+    Ok(())
+}
+
+fn validate_sidecar(
+    sidecar: Option<&[f64]>,
+    surface: &NativeSurface,
+) -> Result<(), AnchorSearchError> {
+    let sidecar = sidecar.ok_or(AnchorSearchError::MissingDelicacySidecar)?;
+    if sidecar.len() != surface.nfaces() {
+        return Err(AnchorSearchError::DelicacyLength {
+            expected: surface.nfaces(),
+            actual: sidecar.len(),
+        });
+    }
+    if let Some((index, _)) = sidecar
+        .iter()
+        .enumerate()
+        .find(|(_, value)| !value.is_finite())
+    {
+        return Err(AnchorSearchError::NonFiniteDelicacy { index });
     }
     Ok(())
 }
@@ -1086,6 +1228,50 @@ mod tests {
         .unwrap()
         .into_seats()
         .remove(0)
+    }
+
+    #[test]
+    fn rewire_seat_is_bound_to_exact_root_checkpoint_and_validated_in_one_batch() {
+        let (mesh, topology, surface) = box_parts(10.0);
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let (forest, terminal, _) = bindings();
+        let binding = RewireAnchorBinding::new(
+            terminal.stub(),
+            forest.digest(),
+            forest.digest().wrapping_add(1),
+            terminal.stub_end_mm(),
+        );
+        let sidecar = vec![0.25; surface.nfaces()];
+        let discovery = discover_rewire_anchor_seats(
+            binding,
+            &[sample()],
+            Some(&sidecar),
+            AnchorSearchConfig::current().unwrap(),
+            &geometry,
+        )
+        .unwrap();
+        assert_eq!(discovery.query_counts().ray_batches, 1);
+        let seat = discovery.into_seats().remove(0);
+
+        let rebound = RewireAnchorBinding::new(
+            terminal.stub(),
+            forest.digest(),
+            forest.digest().wrapping_add(2),
+            terminal.stub_end_mm(),
+        );
+        let validation = validate_rewire_anchor_feet(
+            vec![AnchorFootRequest::new(seat, p(0.35))],
+            rebound,
+            AnchorSearchConfig::current().unwrap(),
+            &geometry,
+        )
+        .unwrap();
+        assert_eq!(validation.query_counts().sphere_breach_batches, 0);
+        assert!(matches!(
+            validation.outcomes(),
+            [AnchorFootOutcome::Refused(refusal)]
+                if refusal.reason() == AnchorFootRefusalReason::ReboundRewireBinding
+        ));
     }
 
     #[test]
