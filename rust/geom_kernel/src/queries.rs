@@ -5,7 +5,7 @@
 use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use rayon::prelude::*;
 
@@ -33,6 +33,42 @@ pub struct Interval {
     /// -1 = axis ray; k >= 0 = offset ray k
     pub ray: i32,
 }
+
+/// Result-shape limits for the recoverable ragged interval batch boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PenetrationIntervalBatchLimits {
+    pub max_intervals_per_member: usize,
+    pub max_output_bytes: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PenetrationIntervalBatchError {
+    Input(BatchInputError),
+    ResourceOverflow,
+    OutputLimit { required: usize, limit: usize },
+    Allocation { required_bytes: usize },
+}
+
+impl std::fmt::Display for PenetrationIntervalBatchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Input(error) => error.fmt(formatter),
+            Self::ResourceOverflow => {
+                write!(formatter, "penetration interval output size overflow")
+            }
+            Self::OutputLimit { required, limit } => write!(
+                formatter,
+                "penetration interval output requires {required}; limit is {limit}"
+            ),
+            Self::Allocation { required_bytes } => write!(
+                formatter,
+                "penetration interval output could not allocate {required_bytes} bytes"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PenetrationIntervalBatchError {}
 
 /// A companion input slice did not match its batch's authoritative length.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -669,11 +705,19 @@ impl NativeSurface {
         cap: usize,
         min_illegal_len_mm: f64,
         rays_all: bool,
-    ) -> Vec<Interval> {
+        output_cap: Option<usize>,
+        required_output_bytes: usize,
+    ) -> Result<Vec<Interval>, PenetrationIntervalBatchError> {
         let l = norm(sub(p1, p0));
         let mut out = Vec::new();
+        if let Some(cap) = output_cap {
+            out.try_reserve_exact(cap)
+                .map_err(|_| PenetrationIntervalBatchError::Allocation {
+                    required_bytes: required_output_bytes,
+                })?;
+        }
         if l < 1e-9 {
-            return out;
+            return Ok(out);
         }
         // build ray list: (ray_id, O, Dv, seg)
         let mut raylist: Vec<(i32, V3, V3, f64)> = Vec::new();
@@ -788,6 +832,12 @@ impl NativeSurface {
                     // interval-length vs min_illegal_len threshold band (sec 5.4 item 3)
                     self.band_check(s_b - s_a, min_illegal_len_mm);
                     if (s_b - s_a) > min_illegal_len_mm {
+                        if output_cap.is_some_and(|cap| out.len() == cap) {
+                            return Err(PenetrationIntervalBatchError::OutputLimit {
+                                required: out.len().saturating_add(1),
+                                limit: output_cap.expect("checked some"),
+                            });
+                        }
                         out.push(Interval {
                             s_a,
                             s_b,
@@ -803,7 +853,7 @@ impl NativeSurface {
                 }
             }
         }
-        out
+        Ok(out)
     }
 
     /// Batched penetration_intervals (Amendment A7). Returns per-member interval
@@ -839,10 +889,94 @@ impl NativeSurface {
                         cap,
                         min_illegal_len_mm,
                         rays_all,
+                        None,
+                        0,
                     )
+                    .expect("unbounded compatibility batch has no recoverable output cap")
                 })
                 .collect()
         }))
+    }
+
+    /// Bounded, fallible ragged interval batch for production stages which
+    /// must refuse oversized result payloads before publishing any state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn penetration_intervals_batch_bounded(
+        &self,
+        p0s: &[V3],
+        p1s: &[V3],
+        r0s: &[f64],
+        r1s: &[f64],
+        n_offset_rays: usize,
+        majority_step_mm: f64,
+        cap: usize,
+        min_illegal_len_mm: f64,
+        rays_all: bool,
+        limits: PenetrationIntervalBatchLimits,
+    ) -> Result<Vec<Vec<Interval>>, PenetrationIntervalBatchError> {
+        let n = p0s.len();
+        BatchInputError::require_len("penetration_intervals_batch_bounded", "p1s", n, p1s.len())
+            .map_err(PenetrationIntervalBatchError::Input)?;
+        BatchInputError::require_len("penetration_intervals_batch_bounded", "r0s", n, r0s.len())
+            .map_err(PenetrationIntervalBatchError::Input)?;
+        BatchInputError::require_len("penetration_intervals_batch_bounded", "r1s", n, r1s.len())
+            .map_err(PenetrationIntervalBatchError::Input)?;
+        let interval_count = n
+            .checked_mul(limits.max_intervals_per_member)
+            .ok_or(PenetrationIntervalBatchError::ResourceOverflow)?;
+        let interval_bytes = interval_count
+            .checked_mul(std::mem::size_of::<Interval>())
+            .ok_or(PenetrationIntervalBatchError::ResourceOverflow)?;
+        let outer_bytes = n
+            .checked_mul(std::mem::size_of::<Vec<Interval>>())
+            .ok_or(PenetrationIntervalBatchError::ResourceOverflow)?;
+        let required_bytes = interval_bytes
+            .checked_add(outer_bytes)
+            .ok_or(PenetrationIntervalBatchError::ResourceOverflow)?;
+        if required_bytes > limits.max_output_bytes {
+            return Err(PenetrationIntervalBatchError::OutputLimit {
+                required: required_bytes,
+                limit: limits.max_output_bytes,
+            });
+        }
+        let mut output = Vec::new();
+        output
+            .try_reserve_exact(n)
+            .map_err(|_| PenetrationIntervalBatchError::Allocation { required_bytes })?;
+        let failure = Mutex::new(None);
+        par::run(|| {
+            (0..n)
+                .into_par_iter()
+                .map(|i| {
+                    match self.pen_intervals_one(
+                        p0s[i],
+                        p1s[i],
+                        r0s[i],
+                        r1s[i],
+                        n_offset_rays,
+                        majority_step_mm,
+                        cap,
+                        min_illegal_len_mm,
+                        rays_all,
+                        Some(limits.max_intervals_per_member),
+                        required_bytes,
+                    ) {
+                        Ok(rows) => rows,
+                        Err(error) => {
+                            let mut slot = failure.lock().expect("interval error mutex poisoned");
+                            if slot.is_none() {
+                                *slot = Some(error);
+                            }
+                            Vec::new()
+                        }
+                    }
+                })
+                .collect_into_vec(&mut output);
+        });
+        if let Some(error) = failure.into_inner().expect("interval error mutex poisoned") {
+            return Err(error);
+        }
+        Ok(output)
     }
 
     // ---- sphere breach ----------------------------------------------------

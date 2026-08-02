@@ -3,16 +3,17 @@
 
 use std::cmp::Ordering;
 
-use geom_kernel::NativeSurface;
+use geom_kernel::{Interval, PenetrationIntervalBatchLimits};
 use plinth_core::{m0_constants, Finite, PositiveFinite};
 use plinth_mesh::Mesh;
 use thiserror::Error;
 
 use crate::{
+    anchor::{AnchorGeometryAuthority, AnchorSearchError},
     dyadic::CandidatePayloadConfig,
     forest::{
-        EmbedEnd, Forest, ForestError, Member, MemberKey, MemberKind, MemberSpec, Owner,
-        RootwardEndRadius, TerminalEndRadius, TerminalLedgerState,
+        modeled_initial_contact_bytes, EmbedEnd, Forest, ForestError, Member, MemberKey,
+        MemberKind, MemberSpec, Owner, RootwardEndRadius, TerminalEndRadius, TerminalLedgerState,
     },
     perception::{
         FinalizedContactLoads, GenericContactPlan, GenericPerceptionError, GenericPerceptionLimits,
@@ -81,8 +82,9 @@ pub(crate) struct CondemnedInitialStub {
 }
 
 /// Opaque binding for the completed all-stub construction/quarantine leaf.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub(crate) struct InitialContactBuild {
+    forest: Forest,
     plan_digest: u64,
     load_digest: u64,
     policy_digest: u64,
@@ -95,9 +97,17 @@ pub(crate) struct InitialContactBuild {
     interval_batch_count: usize,
     queried_stubs: usize,
     scratch_bytes: usize,
+    all_terminals_registered_before_quarantine: bool,
 }
 
 impl InitialContactBuild {
+    #[must_use]
+    pub(crate) const fn forest(&self) -> &Forest {
+        &self.forest
+    }
+    pub(crate) const fn forest_mut(&mut self) -> &mut Forest {
+        &mut self.forest
+    }
     #[must_use]
     pub(crate) const fn plan_digest(&self) -> u64 {
         self.plan_digest
@@ -146,6 +156,10 @@ impl InitialContactBuild {
     pub(crate) const fn scratch_bytes(&self) -> usize {
         self.scratch_bytes
     }
+    #[must_use]
+    pub(crate) const fn all_terminals_registered_before_quarantine(&self) -> bool {
+        self.all_terminals_registered_before_quarantine
+    }
 }
 
 #[derive(Clone, Debug, Error, PartialEq)]
@@ -156,14 +170,14 @@ pub(crate) enum InitialContactError {
     Loads(#[from] GenericPerceptionError),
     #[error(transparent)]
     Forest(#[from] ForestError),
+    #[error(transparent)]
+    Geometry(#[from] AnchorSearchError),
     #[error("M0 constants are unavailable: {0}")]
     Constants(String),
     #[error("contact {contact_id} cannot be represented by the terminal namespace")]
     ContactIdOutOfRange { contact_id: u64 },
     #[error("physical contact id {contact_id} occurs more than once")]
     DuplicatePhysicalContact { contact_id: u64 },
-    #[error("physical contact {contact_id} is already registered in the forest")]
-    ExistingTerminal { contact_id: u32 },
     #[error("physical contact {contact_id} has an invalid position, normal, or carried area")]
     InvalidContact { contact_id: u64 },
     #[error("initial-contact {resource} requires {required}, limit is {limit}")]
@@ -216,9 +230,8 @@ pub(crate) fn build_initial_contacts(
     regular: &SelectedContacts,
     selection_config: &ContactSelectionConfig<'_>,
     specialized_limits: SpecializedLimits,
-    surface: &NativeSurface,
+    geometry: &AnchorGeometryAuthority<'_>,
     limits: ContactConstructionLimits,
-    forest: &mut Forest,
 ) -> Result<InitialContactBuild, InitialContactError> {
     // This is intentionally first: no contact-sized allocation or forest
     // mutation is legal until the plan's complete authority matrix is fresh.
@@ -235,13 +248,16 @@ pub(crate) fn build_initial_contacts(
         selection_config,
         specialized_limits,
     )?;
+    geometry.validate_mesh(mesh)?;
     let contacts = plan.contacts();
     let policy = m0_constants()
         .map_err(|error| InitialContactError::Constants(error.to_string()))?
         .placeholders();
     let contact_count = contacts.len();
     preflight(contact_count, plan.load_partition().rows().len(), limits)?;
-    let scratch_bytes = required_scratch_bytes(contact_count)?;
+    let interval_cap = usize::try_from(policy.initial_axis_majority_cap().diagnostic().get())
+        .map_err(|_| InitialContactError::ResourceOverflow("majority cap"))?;
+    let scratch_bytes = required_scratch_bytes(contact_count, interval_cap)?;
     if scratch_bytes > limits.max_scratch_bytes {
         return Err(InitialContactError::Limit {
             resource: "scratch bytes",
@@ -268,8 +284,7 @@ pub(crate) fn build_initial_contacts(
     }
     loads.validate_binding(plan.load_partition(), &contact_ids)?;
 
-    let initial_forest_digest = forest.digest();
-    let native_digest = native_digest(surface);
+    let native_digest = geometry.digest();
     let mut seeds = Vec::new();
     seeds
         .try_reserve_exact(contact_count)
@@ -278,11 +293,6 @@ pub(crate) fn build_initial_contacts(
         let contact_id = contact.contact_id();
         let terminal = u32::try_from(contact_id)
             .map_err(|_| InitialContactError::ContactIdOutOfRange { contact_id })?;
-        if forest.terminal_key(terminal).is_some() {
-            return Err(InitialContactError::ExistingTerminal {
-                contact_id: terminal,
-            });
-        }
         let position = contact.position_mm();
         let normal = contact.normal();
         let carried = loads.carried_area_mm2()[slot];
@@ -320,15 +330,31 @@ pub(crate) fn build_initial_contacts(
     }
 
     let routing_order = routing_order(&seeds)?;
-    let axis_batch = axis_batch_input(&seeds)?;
+    let (overlaps, interval_batch_count) = classify_initial_overlaps(
+        &seeds,
+        geometry,
+        policy.initial_axis_majority_step_mm().diagnostic().get(),
+        interval_cap,
+        policy.default_contact_depth_mm().diagnostic().get(),
+    )?;
     let mut terminals = Vec::new();
     terminals
         .try_reserve_exact(contact_count)
         .map_err(|_| InitialContactError::Allocation("terminal evidence"))?;
 
+    let mut condemned = Vec::new();
+    condemned
+        .try_reserve_exact(contact_count)
+        .map_err(|_| InitialContactError::Allocation("quarantine evidence"))?;
+    // All recoverable validation, allocation, native work, and classification
+    // have succeeded. The fresh local forest is now materialized. Standard
+    // allocator abort while building Forest's private BTree nodes is outside
+    // the recoverable API; its modeled payload was capped above.
     let mut keys = Vec::new();
     keys.try_reserve_exact(contact_count)
         .map_err(|_| InitialContactError::Allocation("terminal keys"))?;
+    let initial_forest_digest = Forest::new().digest();
+    let mut forest = Forest::new();
     for seed in &seeds {
         keys.push(forest.add_member(Member::new(MemberSpec {
             p0_mm: seed.p0,
@@ -344,41 +370,18 @@ pub(crate) fn build_initial_contacts(
     for (seed, key) in seeds.iter().zip(&keys) {
         forest.register_terminal(seed.terminal, *key)?;
     }
-
-    let mut condemned = Vec::new();
-    condemned
-        .try_reserve_exact(contact_count)
-        .map_err(|_| InitialContactError::Allocation("quarantine evidence"))?;
-    let mut interval_batch_count = 0;
-    if !seeds.is_empty() {
-        interval_batch_count = 1;
-        let intervals = surface
-            .penetration_intervals_batch(
-                &axis_batch.p0,
-                &axis_batch.p1,
-                &axis_batch.r0,
-                &axis_batch.r1,
-                8,
-                policy.initial_axis_majority_step_mm().diagnostic().get(),
-                usize::try_from(policy.initial_axis_majority_cap().diagnostic().get())
-                    .map_err(|_| InitialContactError::ResourceOverflow("majority cap"))?,
-                0.0,
-                false,
-            )
-            .map_err(|error| InitialContactError::NativeQuery(error.to_string()))?;
-        let depth = policy.default_contact_depth_mm().diagnostic().get();
-        let cutoff = policy.min_illegal_len_mm().diagnostic().get();
-        for ((seed, key), rows) in seeds.iter().zip(&keys).zip(intervals) {
-            let length = distance(seed.p0, seed.p1);
-            let overlap = remaining_illegal_axis_overlap(&rows, length, depth);
-            if overlap > cutoff {
-                forest.quarantine(*key)?;
-                condemned.push(CondemnedInitialStub {
-                    terminal: seed.terminal,
-                    key: *key,
-                    remaining_inside_axis_mm: overlap,
-                });
-            }
+    debug_assert!(seeds
+        .iter()
+        .all(|seed| forest.terminal(seed.terminal).is_some()));
+    let cutoff = policy.min_illegal_len_mm().diagnostic().get();
+    for ((seed, key), overlap) in seeds.iter().zip(&keys).zip(&overlaps) {
+        if *overlap > cutoff {
+            forest.quarantine(*key)?;
+            condemned.push(CondemnedInitialStub {
+                terminal: seed.terminal,
+                key: *key,
+                remaining_inside_axis_mm: *overlap,
+            });
         }
     }
 
@@ -392,20 +395,68 @@ pub(crate) fn build_initial_contacts(
             state: entry.state,
         });
     }
+    let post_quarantine_forest_digest = forest.digest();
     Ok(InitialContactBuild {
+        forest,
         plan_digest: plan.digest(),
         load_digest: loads.digest(),
         policy_digest: policy_digest(policy),
         native_digest,
         initial_forest_digest,
-        post_quarantine_forest_digest: forest.digest(),
+        post_quarantine_forest_digest,
         routing_order,
         terminals,
         condemned,
         interval_batch_count,
         queried_stubs: contact_count,
         scratch_bytes,
+        all_terminals_registered_before_quarantine: true,
     })
+}
+
+fn classify_initial_overlaps(
+    seeds: &[StubSeed],
+    geometry: &AnchorGeometryAuthority<'_>,
+    majority_step_mm: f64,
+    interval_cap: usize,
+    contact_depth_mm: f64,
+) -> Result<(Vec<f64>, usize), InitialContactError> {
+    let mut overlaps = Vec::new();
+    overlaps
+        .try_reserve_exact(seeds.len())
+        .map_err(|_| InitialContactError::Allocation("quarantine classification"))?;
+    if seeds.is_empty() {
+        return Ok((overlaps, 0));
+    }
+    let axis_batch = axis_batch_input(seeds)?;
+    let query_output_bytes = interval_output_bytes(seeds.len(), interval_cap)?;
+    let intervals = geometry
+        .surface()
+        .penetration_intervals_batch_bounded(
+            &axis_batch.p0,
+            &axis_batch.p1,
+            &axis_batch.r0,
+            &axis_batch.r1,
+            8,
+            majority_step_mm,
+            interval_cap,
+            0.0,
+            false,
+            PenetrationIntervalBatchLimits {
+                max_intervals_per_member: interval_cap,
+                max_output_bytes: query_output_bytes,
+            },
+        )
+        .map_err(|error| InitialContactError::NativeQuery(error.to_string()))?;
+    for (seed, rows) in seeds.iter().zip(intervals) {
+        let length = distance(seed.p0, seed.p1);
+        overlaps.push(remaining_illegal_axis_overlap(
+            &rows,
+            length,
+            contact_depth_mm,
+        ));
+    }
+    Ok((overlaps, 1))
 }
 
 fn preflight(
@@ -440,8 +491,21 @@ fn preflight(
     Ok(())
 }
 
-fn required_scratch_bytes(contacts: usize) -> Result<usize, InitialContactError> {
-    contacts
+fn interval_output_bytes(contacts: usize, cap: usize) -> Result<usize, InitialContactError> {
+    let rows = contacts
+        .checked_mul(cap)
+        .ok_or(InitialContactError::ResourceOverflow("interval rows"))?;
+    rows.checked_mul(std::mem::size_of::<Interval>())
+        .and_then(|bytes| {
+            bytes.checked_add(contacts.checked_mul(std::mem::size_of::<Vec<Interval>>())?)
+        })
+        .ok_or(InitialContactError::ResourceOverflow(
+            "interval output bytes",
+        ))
+}
+
+fn required_scratch_bytes(contacts: usize, cap: usize) -> Result<usize, InitialContactError> {
+    let staging = contacts
         .checked_mul(std::mem::size_of::<StubSeed>())
         .and_then(|value| {
             value.checked_add(contacts.checked_mul(std::mem::size_of::<MemberKey>())?)
@@ -461,6 +525,11 @@ fn required_scratch_bytes(contacts: usize) -> Result<usize, InitialContactError>
         .and_then(|value| {
             value.checked_add(contacts.checked_mul(2 * std::mem::size_of::<&StubSeed>())?)
         })
+        .and_then(|value| value.checked_add(contacts.checked_mul(std::mem::size_of::<f64>())?))
+        .ok_or(InitialContactError::ResourceOverflow("scratch bytes"))?;
+    staging
+        .checked_add(interval_output_bytes(contacts, cap)?)
+        .and_then(|value| value.checked_add(modeled_initial_contact_bytes(contacts)?))
         .ok_or(InitialContactError::ResourceOverflow("scratch bytes"))
 }
 
@@ -486,7 +555,7 @@ fn distance(a: [Finite; 3], b: [Finite; 3]) -> f64 {
 }
 
 fn remaining_illegal_axis_overlap(
-    intervals: &[geom_kernel::Interval],
+    intervals: &[Interval],
     length: f64,
     terminalward_embed_depth: f64,
 ) -> f64 {
@@ -584,32 +653,6 @@ fn policy_digest(policy: &plinth_core::M0PlaceholderConstants) -> u64 {
         .flat_map(|value| value.to_bits().to_le_bytes()))
 }
 
-fn native_digest(surface: &NativeSurface) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325;
-    let mut write = |bytes: &[u8]| {
-        for &byte in bytes {
-            hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
-        }
-    };
-    for bound in surface.bounds() {
-        for value in bound {
-            write(&value.to_bits().to_le_bytes());
-        }
-    }
-    for face in surface.face_ids() {
-        write(&face.to_le_bytes());
-    }
-    for normal in surface.geometry().normals() {
-        for value in normal {
-            write(&value.to_bits().to_le_bytes());
-        }
-    }
-    for area in surface.geometry().areas() {
-        write(&area.to_bits().to_le_bytes());
-    }
-    hash
-}
-
 fn fnv(bytes: impl IntoIterator<Item = u8>) -> u64 {
     bytes.into_iter().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
         (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
@@ -618,7 +661,170 @@ fn fnv(bytes: impl IntoIterator<Item = u8>) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
+    use geom_kernel::{NativeSurface, NativeSurfaceConfig};
+    use plinth_core::LayerPlan;
+    use plinth_mesh::{
+        build_face_topology, make_overhang_table, make_raking_blade, make_thin_fin, make_toed_slab,
+        FaceTopology, WeldPolicy,
+    };
+
     use super::*;
+    use crate::{
+        perception::{prepare_generic_contacts, FinalizedContactLoadLimits},
+        select_contacts,
+        specialized::prepare_specialized_contacts,
+    };
+
+    const SWEEP_CHILD: &str = "PLINTH_INITIAL_SWEEP_CHILD";
+    const SWEEP_LINE: &str = "INITIAL_SWEEP=";
+
+    struct Fixture {
+        mesh: Mesh,
+        delicacy: Vec<f64>,
+        layers: LayerPlan,
+        candidate: CandidatePayloadConfig,
+        generic: GenericContactPlan,
+        regular: SelectedContacts,
+        plan: SpecializedContactPlan,
+        loads: FinalizedContactLoads,
+        surface: NativeSurface,
+        topology: FaceTopology,
+    }
+
+    fn perception_config(delicacy: &[f64]) -> SupportPerceptionConfig<'_> {
+        SupportPerceptionConfig::current(
+            Finite::new(0.0).unwrap(),
+            PositiveFinite::new(1.0).unwrap(),
+            PositiveFinite::new(1.0).unwrap(),
+            64 * 1024 * 1024,
+            Some(delicacy),
+        )
+        .unwrap()
+    }
+
+    fn frame() -> BuildFrame {
+        BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap())
+    }
+
+    impl Fixture {
+        fn new(mesh: Mesh) -> Self {
+            Self::new_with_layer_count(mesh, 1_000)
+        }
+
+        fn new_with_layer_count(mesh: Mesh, layer_count: usize) -> Self {
+            let delicacy = vec![0.0; mesh.tris().len()];
+            let layers = LayerPlan::new(0.0, vec![50.0 / layer_count as f64; layer_count]).unwrap();
+            let candidate =
+                CandidatePayloadConfig::current(8, 1_000_000, 3_000_000, 256 * 1024 * 1024, 65_536)
+                    .unwrap();
+            let config = perception_config(&delicacy);
+            let generic = prepare_generic_contacts(
+                &mesh,
+                &config,
+                frame(),
+                &layers,
+                &candidate,
+                &[],
+                GenericPerceptionLimits::production(),
+            )
+            .unwrap();
+            let selection =
+                ContactSelectionConfig::current_defaults(Some(&delicacy), config.max_grid_bytes)
+                    .unwrap();
+            let regular = if generic.islands().is_empty() {
+                SelectedContacts {
+                    contacts: Vec::new(),
+                    coverage_samples: Vec::new(),
+                }
+            } else {
+                select_contacts(&mesh, generic.candidates(), generic.islands(), &selection).unwrap()
+            };
+            let plan = prepare_specialized_contacts(
+                &mesh,
+                &config,
+                frame(),
+                &layers,
+                &candidate,
+                &[],
+                GenericPerceptionLimits::production(),
+                &generic,
+                &regular,
+                &selection,
+                SpecializedLimits::production(),
+            )
+            .unwrap();
+            let ids = plan
+                .contacts()
+                .iter()
+                .map(|contact| contact.contact_id())
+                .collect::<Vec<_>>();
+            let loads = FinalizedContactLoads::from_partition(
+                plan.load_partition(),
+                &ids,
+                FinalizedContactLoadLimits::new(
+                    ids.len(),
+                    plan.load_partition().rows().len(),
+                    usize::MAX,
+                ),
+            )
+            .unwrap();
+            let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+            let surface = NativeSurface::from_indexed(
+                mesh.verts(),
+                mesh.tris(),
+                NativeSurfaceConfig {
+                    grid_pitch_mm: 1.0,
+                    max_grid_bytes: 64 * 1024 * 1024,
+                },
+            )
+            .unwrap();
+            Self {
+                mesh,
+                delicacy,
+                layers,
+                candidate,
+                generic,
+                regular,
+                plan,
+                loads,
+                surface,
+                topology,
+            }
+        }
+
+        fn build(
+            &self,
+            limits: ContactConstructionLimits,
+        ) -> Result<InitialContactBuild, InitialContactError> {
+            let config = perception_config(&self.delicacy);
+            let selection = ContactSelectionConfig::current_defaults(
+                Some(&self.delicacy),
+                config.max_grid_bytes,
+            )
+            .unwrap();
+            let geometry =
+                AnchorGeometryAuthority::new(&self.mesh, &self.topology, &self.surface).unwrap();
+            build_initial_contacts(
+                &self.plan,
+                &self.loads,
+                &self.mesh,
+                &config,
+                frame(),
+                &self.layers,
+                &self.candidate,
+                &[],
+                GenericPerceptionLimits::production(),
+                &self.generic,
+                &self.regular,
+                &selection,
+                SpecializedLimits::production(),
+                &geometry,
+                limits,
+            )
+        }
+    }
 
     fn seed(terminal: u32, z: f64, carried_mm2: f64, specialized: bool) -> StubSeed {
         StubSeed {
@@ -646,8 +852,8 @@ mod tests {
     }
 
     #[test]
-    fn terminalward_embed_masks_only_the_exact_contact_depth_and_keeps_boundary_clean() {
-        let row = geom_kernel::Interval {
+    fn terminalward_embed_classifies_clean_transit_and_buried_boundaries() {
+        let clean = geom_kernel::Interval {
             s_a: 0.3,
             s_b: 0.35,
             entered: true,
@@ -655,11 +861,17 @@ mod tests {
             max_depth: 0.1,
             ray: -1,
         };
-        assert!(remaining_illegal_axis_overlap(std::slice::from_ref(&row), 2.8, 0.3) <= 0.05);
+        assert!(remaining_illegal_axis_overlap(std::slice::from_ref(&clean), 2.8, 0.3) <= 0.05);
+        let transit = geom_kernel::Interval {
+            s_a: 0.2,
+            s_b: 0.6,
+            ..clean
+        };
+        assert!(remaining_illegal_axis_overlap(&[transit], 2.8, 0.3) > 0.05);
         let buried = geom_kernel::Interval {
             s_a: 0.0,
             s_b: 0.3,
-            ..row
+            ..clean
         };
         assert_eq!(remaining_illegal_axis_overlap(&[buried], 2.8, 0.3), 0.0);
     }
@@ -667,8 +879,248 @@ mod tests {
     #[test]
     fn scratch_preflight_rejects_overflow() {
         assert_eq!(
-            required_scratch_bytes(usize::MAX),
+            required_scratch_bytes(usize::MAX, 80),
             Err(InitialContactError::ResourceOverflow("scratch bytes"))
         );
+    }
+
+    #[test]
+    fn zero_contact_classification_returns_without_a_native_query() {
+        let fixture = Fixture::new(make_overhang_table().unwrap());
+        let geometry =
+            AnchorGeometryAuthority::new(&fixture.mesh, &fixture.topology, &fixture.surface)
+                .unwrap();
+        let (overlaps, interval_batch_count) =
+            classify_initial_overlaps(&[], &geometry, 0.12, 80, 0.3).unwrap();
+        assert!(overlaps.is_empty());
+        assert_eq!(interval_batch_count, 0);
+    }
+
+    #[test]
+    fn real_table_build_materializes_exact_registered_stub_geometry_and_ledger() {
+        let fixture = Fixture::new(make_overhang_table().unwrap());
+        let build = fixture
+            .build(ContactConstructionLimits::production())
+            .unwrap();
+        assert!(!fixture.plan.contacts().is_empty());
+        assert_eq!(build.queried_stubs(), fixture.plan.contacts().len());
+        assert_eq!(build.interval_batch_count(), 1);
+        assert!(build.all_terminals_registered_before_quarantine());
+        assert_eq!(build.terminals().len(), fixture.plan.contacts().len());
+        let policy = m0_constants().unwrap().placeholders();
+        for (slot, (contact, evidence)) in fixture
+            .plan
+            .contacts()
+            .iter()
+            .zip(build.terminals())
+            .enumerate()
+        {
+            let record = build
+                .forest()
+                .terminal_ledger_evidence(evidence.terminal)
+                .unwrap();
+            let normal = contact.normal();
+            let norm = normal.into_iter().map(|v| v * v).sum::<f64>().sqrt();
+            let unit = normal.map(|v| v / norm);
+            let expected_p0 = std::array::from_fn(|axis| {
+                contact.position_mm()[axis]
+                    - unit[axis] * policy.default_contact_depth_mm().diagnostic().get()
+            });
+            let expected_p1 = std::array::from_fn(|axis| {
+                contact.position_mm()[axis]
+                    + unit[axis] * policy.stub_length_mm().diagnostic().get()
+            });
+            assert_eq!(record.p0_mm.map(Finite::get), expected_p0);
+            assert_eq!(record.p1_mm.map(Finite::get), expected_p1);
+            assert_eq!(record.r0_mm.get(), fixture.loads.tip_radii_mm()[slot]);
+            assert_eq!(
+                record.r1_mm.get().get(),
+                fixture.loads.tip_radii_mm()[slot]
+                    .get()
+                    .max(policy.min_shoot_r_mm().diagnostic().get())
+            );
+            assert_eq!(record.kind, MemberKind::Stub);
+            assert_eq!(record.owner, Owner::Contact(evidence.terminal));
+            assert_eq!(record.embed_end, Some(EmbedEnd::Terminalward));
+            assert_eq!(
+                record.carried_mm2.get(),
+                fixture.loads.carried_area_mm2()[slot]
+            );
+            assert!(record.certificate.cert_version.is_none());
+            assert!(matches!(
+                evidence.state,
+                TerminalLedgerState::Live | TerminalLedgerState::Quarantined
+            ));
+        }
+    }
+
+    #[test]
+    fn geometry_mismatch_and_cap_minus_one_refuse_without_a_result_forest() {
+        let table = Fixture::new(make_overhang_table().unwrap());
+        let toe = Fixture::new(make_toed_slab().unwrap());
+        let config = perception_config(&table.delicacy);
+        let selection =
+            ContactSelectionConfig::current_defaults(Some(&table.delicacy), config.max_grid_bytes)
+                .unwrap();
+        let alien = AnchorGeometryAuthority::new(&toe.mesh, &toe.topology, &toe.surface).unwrap();
+        assert!(matches!(
+            build_initial_contacts(
+                &table.plan,
+                &table.loads,
+                &table.mesh,
+                &config,
+                frame(),
+                &table.layers,
+                &table.candidate,
+                &[],
+                GenericPerceptionLimits::production(),
+                &table.generic,
+                &table.regular,
+                &selection,
+                SpecializedLimits::production(),
+                &alien,
+                ContactConstructionLimits::production(),
+            ),
+            Err(InitialContactError::Geometry(
+                AnchorSearchError::TopologyMeshMismatch
+            ))
+        ));
+        let count = table.plan.contacts().len();
+        let required = required_scratch_bytes(count, 80).unwrap();
+        let exact = ContactConstructionLimits {
+            max_contacts: count,
+            max_load_rows: table.plan.load_partition().rows().len(),
+            max_work_items: count * 4,
+            max_scratch_bytes: required,
+        };
+        assert!(table.build(exact).is_ok());
+        assert!(matches!(
+            table.build(ContactConstructionLimits {
+                max_scratch_bytes: required - 1,
+                ..exact
+            }),
+            Err(InitialContactError::Limit {
+                resource: "scratch bytes",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn table_and_toed_slab_real_plans_return_complete_fresh_forests() {
+        let table = Fixture::new(make_overhang_table().unwrap())
+            .build(ContactConstructionLimits::production())
+            .unwrap();
+        let toe = Fixture::new(make_toed_slab().unwrap())
+            .build(ContactConstructionLimits::production())
+            .unwrap();
+        for build in [&table, &toe] {
+            assert_eq!(build.terminals().len(), build.queried_stubs());
+            assert_eq!(
+                build.interval_batch_count(),
+                usize::from(build.queried_stubs() > 0)
+            );
+            assert!(build.all_terminals_registered_before_quarantine());
+            assert!(build
+                .terminals()
+                .iter()
+                .all(|terminal| { build.forest().terminal_ledger(terminal.terminal).is_some() }));
+            assert_eq!(
+                build
+                    .terminals()
+                    .iter()
+                    .filter(|terminal| terminal.state == TerminalLedgerState::Quarantined)
+                    .count(),
+                build.condemned().len()
+            );
+        }
+    }
+
+    #[test]
+    fn initial_thread_sweep_child() {
+        if std::env::var_os(SWEEP_CHILD).is_none() {
+            return;
+        }
+        let fixture = Fixture::new(make_overhang_table().unwrap());
+        let evidence = [
+            fixture.plan.generic_slice_thread_evidence(),
+            Fixture::new(make_raking_blade().unwrap())
+                .plan
+                .generic_slice_thread_evidence(),
+            Fixture::new(make_thin_fin().unwrap())
+                .plan
+                .generic_slice_thread_evidence(),
+            Fixture::new_with_layer_count(make_toed_slab().unwrap(), 20_000)
+                .plan
+                .generic_slice_thread_evidence(),
+        ]
+        .into_iter()
+        .max()
+        .unwrap();
+        let build = fixture
+            .build(ContactConstructionLimits::production())
+            .unwrap();
+        let requested = std::env::var("PLINTH_THREADS")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        if requested > 1 {
+            assert!(
+                evidence.0 > 1 && evidence.1 > 1,
+                "fixture corpus must exercise multiple workers at {requested} threads: {evidence:?}"
+            );
+        }
+        println!(
+            "{SWEEP_LINE}{}:{}:{}:{}",
+            build.post_quarantine_forest_digest(),
+            build.queried_stubs(),
+            build.condemned().len(),
+            evidence.1
+        );
+    }
+
+    #[test]
+    fn real_initial_digest_is_identical_at_one_four_and_sixteen_threads() {
+        if std::env::var_os(SWEEP_CHILD).is_some() {
+            return;
+        }
+        let executable = std::env::current_exe().unwrap();
+        let signatures = [1, 4, 16]
+            .into_iter()
+            .map(|threads| {
+                let output = Command::new(&executable)
+                    .arg("--exact")
+                    .arg("initial::tests::initial_thread_sweep_child")
+                    .arg("--nocapture")
+                    .env(SWEEP_CHILD, "1")
+                    .env("PLINTH_THREADS", threads.to_string())
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .split_once(SWEEP_LINE)
+                    .unwrap()
+                    .1
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect::<Vec<_>>();
+        let parsed = signatures
+            .iter()
+            .map(|signature| {
+                let (fingerprint, participating) = signature.rsplit_once(':').unwrap();
+                (fingerprint, participating.parse::<usize>().unwrap())
+            })
+            .collect::<Vec<_>>();
+        assert!(parsed.windows(2).all(|pair| pair[0].0 == pair[1].0));
+        assert_eq!(parsed[0].1, 1);
+        assert!(parsed[1].1 > 1 && parsed[2].1 > 1);
     }
 }

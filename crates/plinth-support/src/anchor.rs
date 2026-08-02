@@ -204,6 +204,27 @@ impl<'a> AnchorGeometryAuthority<'a> {
     pub(crate) fn fingerprint(&self) -> GeometryFingerprint {
         self.fingerprint.clone()
     }
+
+    /// Revalidate the exact mesh/native pairing before a downstream stage
+    /// stages or allocates result-shaped work.
+    pub(crate) fn validate_mesh(&self, mesh: &Mesh) -> Result<(), AnchorSearchError> {
+        let actual_mesh = mesh_fingerprint(mesh)
+            .map_err(|error| AnchorSearchError::InvalidTopology(error.to_string()))?;
+        if actual_mesh != self.fingerprint.mesh_sha256 {
+            return Err(AnchorSearchError::TopologyMeshMismatch);
+        }
+        validate_surface_matches_mesh(mesh, self.surface)
+    }
+
+    /// Stable binding for the validated indexed mesh, topology, and native
+    /// grid pitch. No native surface may be substituted after construction.
+    pub(crate) fn digest(&self) -> u64 {
+        let mut hash = AnchorFnv::new();
+        hash.bytes(self.fingerprint.mesh_sha256.as_bytes());
+        hash.bytes(self.fingerprint.topology_sha256.as_bytes());
+        hash.u64(self.fingerprint.native_grid_pitch_bits);
+        hash.finish()
+    }
 }
 
 /// Opaque, native-surface-bound exterior centroid authority. Production

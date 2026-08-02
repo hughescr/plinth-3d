@@ -1,6 +1,7 @@
 use geom_kernel::{
-    BatchInputError, Interval, NativeSurface, NativeSurfaceConfig, PlaneIntersectionKind,
-    PlaneSliceError, PlaneSliceLimits, SurfaceBuildError, SurfaceSubsetError, TriangleSoup,
+    BatchInputError, Interval, NativeSurface, NativeSurfaceConfig, PenetrationIntervalBatchError,
+    PenetrationIntervalBatchLimits, PlaneIntersectionKind, PlaneSliceError, PlaneSliceLimits,
+    SurfaceBuildError, SurfaceSubsetError, TriangleSoup,
 };
 use std::process::Command;
 
@@ -471,6 +472,48 @@ fn assert_intervals_equal(left: &[Vec<Interval>], right: &[Vec<Interval>]) {
             assert_eq!(left.ray, right.ray);
         }
     }
+}
+
+#[test]
+fn bounded_penetration_batch_accepts_exact_bytes_and_refuses_smaller_caps() {
+    let surface = cube_surface();
+    let p0s = [[-1.0, 0.5, 0.5]];
+    let p1s = [[2.0, 0.5, 0.5]];
+    let radii = [0.1];
+    let exact_bytes = std::mem::size_of::<Vec<Interval>>() + std::mem::size_of::<Interval>();
+    let query = |limits| {
+        surface.penetration_intervals_batch_bounded(
+            &p0s, &p1s, &radii, &radii, 0, 0.12, 80, 0.0, false, limits,
+        )
+    };
+    let exact = query(PenetrationIntervalBatchLimits {
+        max_intervals_per_member: 1,
+        max_output_bytes: exact_bytes,
+    })
+    .unwrap();
+    assert_eq!(exact.len(), 1);
+    assert_eq!(exact[0].len(), 1);
+    assert!(matches!(
+        query(PenetrationIntervalBatchLimits {
+            max_intervals_per_member: 1,
+            max_output_bytes: exact_bytes - 1,
+        }),
+        Err(PenetrationIntervalBatchError::OutputLimit {
+            required,
+            limit,
+        })
+            if required == exact_bytes && limit == exact_bytes - 1
+    ));
+    assert!(matches!(
+        query(PenetrationIntervalBatchLimits {
+            max_intervals_per_member: 0,
+            max_output_bytes: std::mem::size_of::<Vec<Interval>>(),
+        }),
+        Err(PenetrationIntervalBatchError::OutputLimit {
+            required: 1,
+            limit: 0,
+        })
+    ));
 }
 
 #[test]

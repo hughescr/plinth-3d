@@ -1128,6 +1128,22 @@ impl Forest {
     }
 }
 
+/// Conservative byte model for a fresh all-contact forest with every stub
+/// quarantined. It includes retained terminal evidence and every container
+/// payload represented by this stage; allocator node headers are deliberately
+/// outside the recoverable API and remain subject to the process allocator's
+/// standard abort semantics.
+pub(crate) fn modeled_initial_contact_bytes(contact_count: usize) -> Option<usize> {
+    let per_contact = std::mem::size_of::<Slot>()
+        .checked_add(std::mem::size_of::<MemberKey>())?
+        .checked_add(std::mem::size_of::<(MemberKey, Vec<MemberKey>)>())?
+        .checked_add(std::mem::size_of::<MemberKey>())?
+        .checked_add(std::mem::size_of::<(u32, MemberKey)>())?
+        .checked_add(std::mem::size_of::<(u32, QuarantineRecord)>())?
+        .checked_add(std::mem::size_of::<(MemberKey, QuarantineRecord)>())?;
+    std::mem::size_of::<ForestState>().checked_add(contact_count.checked_mul(per_contact)?)
+}
+
 struct DigestWriter(u64);
 
 impl DigestWriter {
