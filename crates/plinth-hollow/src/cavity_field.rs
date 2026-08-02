@@ -9,6 +9,24 @@ use scirs2_core::ndarray::Array3;
 
 use crate::HollowError;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CavityFieldRetainedAllocations {
+    membership_bytes: usize,
+    source_occupancy_bytes: usize,
+}
+
+impl CavityFieldRetainedAllocations {
+    #[must_use]
+    pub const fn membership_bytes(self) -> usize {
+        self.membership_bytes
+    }
+
+    #[must_use]
+    pub const fn source_occupancy_bytes(self) -> usize {
+        self.source_occupancy_bytes
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub struct CavityField {
     dims: [usize; 3],
@@ -20,6 +38,27 @@ pub struct CavityField {
 }
 
 impl CavityField {
+    #[cfg(test)]
+    pub(crate) fn with_test_retained_buffers(
+        membership_len: usize,
+        membership_capacity: usize,
+        source_occupancy_len: usize,
+        source_occupancy_capacity: usize,
+    ) -> Self {
+        let mut membership = Vec::with_capacity(membership_capacity);
+        membership.resize(membership_len, 0_u64);
+        let mut source_occupancy = Vec::with_capacity(source_occupancy_capacity);
+        source_occupancy.resize(source_occupancy_len, 0_u64);
+        Self {
+            dims: [membership_len.max(source_occupancy_len) * 64, 1, 1],
+            origin_mm: [Finite::new(0.0).expect("finite"); 3],
+            pitch_mm: Finite::new(0.5).expect("finite"),
+            membership,
+            source_occupancy,
+            member_count: 0,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn from_selected_mask(
         mask: &Array3<bool>,
@@ -109,8 +148,16 @@ impl CavityField {
     }
 
     #[must_use]
-    pub const fn retained_bytes(&self) -> usize {
-        (self.membership.len() + self.source_occupancy.len()) * std::mem::size_of::<u64>()
+    pub const fn retained_allocations(&self) -> CavityFieldRetainedAllocations {
+        CavityFieldRetainedAllocations {
+            membership_bytes: self.membership.capacity() * std::mem::size_of::<u64>(),
+            source_occupancy_bytes: self.source_occupancy.capacity() * std::mem::size_of::<u64>(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn retained_word_lengths(&self) -> (usize, usize) {
+        (self.membership.len(), self.source_occupancy.len())
     }
 
     #[must_use]
@@ -157,12 +204,18 @@ impl CavityField {
     }
 }
 
-pub(crate) fn packed_bytes_for_voxels(voxel_count: usize) -> Result<usize, HollowError> {
-    voxel_count
+pub(crate) fn retained_allocation_bytes_for_voxels(
+    voxel_count: usize,
+) -> Result<CavityFieldRetainedAllocations, HollowError> {
+    let bytes = voxel_count
         .checked_add(63)
         .map(|value| value / 64)
         .and_then(|words| words.checked_mul(std::mem::size_of::<u64>()))
-        .ok_or(HollowError::ResourceAccountingOverflow)
+        .ok_or(HollowError::ResourceAccountingOverflow)?;
+    Ok(CavityFieldRetainedAllocations {
+        membership_bytes: bytes,
+        source_occupancy_bytes: bytes,
+    })
 }
 
 #[cfg(test)]
@@ -181,6 +234,12 @@ mod tests {
         assert_eq!(field.flat_to_index(8), [2, 0, 1]);
         assert_eq!(field.world_at_flat(8), [0.0, 2.0, 3.5]);
         assert_eq!(field.member_flats().collect::<Vec<_>>(), vec![8]);
-        assert_eq!(field.retained_bytes(), 16);
+        assert_eq!(
+            field.retained_allocations(),
+            CavityFieldRetainedAllocations {
+                membership_bytes: 8,
+                source_occupancy_bytes: 8,
+            }
+        );
     }
 }

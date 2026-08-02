@@ -14,7 +14,7 @@
 mod cavity_field;
 pub mod drains;
 
-pub use cavity_field::CavityField;
+pub use cavity_field::{CavityField, CavityFieldRetainedAllocations};
 
 use fast_surface_nets::ndshape::RuntimeShape;
 use fast_surface_nets::{surface_nets, SurfaceNetsBuffer};
@@ -296,7 +296,6 @@ pub struct HollowResourceEstimate {
     voxel_count: usize,
     query_batch_points: usize,
     grid_coordinate_bytes: usize,
-    occupancy_bytes: usize,
     edt_peak_bytes: usize,
     label_peak_bytes: usize,
     surface_peak_bytes: usize,
@@ -304,7 +303,8 @@ pub struct HollowResourceEstimate {
     source_mesh_peak_bytes: usize,
     selected_mask_peak_bytes: usize,
     boolean_peak_bytes: usize,
-    retained_cavity_field_bytes: usize,
+    retained_cavity_membership_bytes: usize,
+    retained_source_occupancy_bytes: usize,
     output_upper_bound_bytes: usize,
     peak_bytes: usize,
 }
@@ -324,7 +324,7 @@ impl HollowResourceEstimate {
     }
     #[must_use]
     pub const fn occupancy_bytes(self) -> usize {
-        self.occupancy_bytes
+        self.voxel_count * std::mem::size_of::<bool>()
     }
     #[must_use]
     pub const fn edt_peak_bytes(self) -> usize {
@@ -355,8 +355,12 @@ impl HollowResourceEstimate {
         self.boolean_peak_bytes
     }
     #[must_use]
-    pub const fn retained_cavity_field_bytes(self) -> usize {
-        self.retained_cavity_field_bytes
+    pub const fn retained_cavity_membership_bytes(self) -> usize {
+        self.retained_cavity_membership_bytes
+    }
+    #[must_use]
+    pub const fn retained_source_occupancy_bytes(self) -> usize {
+        self.retained_source_occupancy_bytes
     }
     #[must_use]
     pub const fn output_upper_bound_bytes(self) -> usize {
@@ -870,7 +874,6 @@ fn resource_estimate(
         .min(limits.query_working_bytes / QUERY_BYTES_PER_POINT)
         .max(1);
     let grid_coordinate_bytes = checked_scale(query_batch_points, std::mem::size_of::<[f64; 3]>())?;
-    let occupancy_bytes = checked_scale(spec.count, std::mem::size_of::<bool>())?;
     let source_mesh_peak_bytes = allocator_allocation_bound_bytes(
         mesh.retained_buffer_bytes()
             .ok_or(HollowError::ResourceAccountingOverflow)?,
@@ -914,10 +917,22 @@ fn resource_estimate(
 
     let label_memory = label_phase_memory(spec.count)?;
     debug_assert!(label_memory.conservative_peak_bytes >= label_memory.requested_live_bytes);
-    let packed_field_bytes = cavity_field::packed_bytes_for_voxels(spec.count)?;
-    let retained_cavity_field_bytes = checked_scale(packed_field_bytes, 2)?;
-    let retained_cavity_field_peak_bytes =
-        allocator_allocation_bound_bytes(retained_cavity_field_bytes, std::mem::align_of::<u64>())?;
+    let retained_field_allocations =
+        cavity_field::retained_allocation_bytes_for_voxels(spec.count)?;
+    let retained_cavity_membership_bytes = retained_field_allocations.membership_bytes();
+    let retained_source_occupancy_bytes = retained_field_allocations.source_occupancy_bytes();
+    let retained_cavity_membership_peak_bytes = allocator_allocation_bound_bytes(
+        retained_cavity_membership_bytes,
+        std::mem::align_of::<u64>(),
+    )?;
+    let retained_source_occupancy_field_peak_bytes = allocator_allocation_bound_bytes(
+        retained_source_occupancy_bytes,
+        std::mem::align_of::<u64>(),
+    )?;
+    let retained_cavity_field_peak_bytes = checked_sum(&[
+        retained_cavity_membership_peak_bytes,
+        retained_source_occupancy_field_peak_bytes,
+    ])?;
     let selected_mask_peak_bytes = allocator_allocation_bound(
         spec.count,
         std::mem::size_of::<bool>(),
@@ -1070,7 +1085,6 @@ fn resource_estimate(
         voxel_count: spec.count,
         query_batch_points,
         grid_coordinate_bytes,
-        occupancy_bytes,
         edt_peak_bytes,
         label_peak_bytes,
         surface_peak_bytes,
@@ -1078,7 +1092,8 @@ fn resource_estimate(
         source_mesh_peak_bytes,
         selected_mask_peak_bytes,
         boolean_peak_bytes,
-        retained_cavity_field_bytes,
+        retained_cavity_membership_bytes,
+        retained_source_occupancy_bytes,
         output_upper_bound_bytes,
         peak_bytes,
     };
@@ -2174,11 +2189,20 @@ mod tests {
             std::mem::align_of::<bool>(),
         )
         .expect("selected mask");
-        let retained_field = allocator_allocation_bound_bytes(
-            cavity_field::packed_bytes_for_voxels(spec.count).expect("packed field") * 2,
+        let retained_allocations = cavity_field::retained_allocation_bytes_for_voxels(spec.count)
+            .expect("retained field allocations");
+        let retained_membership = allocator_allocation_bound_bytes(
+            retained_allocations.membership_bytes(),
             std::mem::align_of::<u64>(),
         )
-        .expect("field allocation");
+        .expect("membership allocation");
+        let retained_source_occupancy = allocator_allocation_bound_bytes(
+            retained_allocations.source_occupancy_bytes(),
+            std::mem::align_of::<u64>(),
+        )
+        .expect("source occupancy allocation");
+        let retained_field = checked_sum(&[retained_membership, retained_source_occupancy])
+            .expect("retained field sum");
         let expected_label = checked_sum(&[
             estimate.source_mesh_peak_bytes(),
             label_phase_memory(spec.count)
@@ -2190,6 +2214,14 @@ mod tests {
         ])
         .expect("label sum");
         assert_eq!(estimate.selected_mask_peak_bytes(), selected_mask);
+        assert_eq!(
+            estimate.retained_cavity_membership_bytes(),
+            retained_allocations.membership_bytes()
+        );
+        assert_eq!(
+            estimate.retained_source_occupancy_bytes(),
+            retained_allocations.source_occupancy_bytes()
+        );
         assert_eq!(estimate.label_peak_bytes(), expected_label);
         assert!(phase_fits_cap(expected_label, expected_label));
         assert!(!phase_fits_cap(expected_label, expected_label - 1));

@@ -815,11 +815,9 @@ fn planner_preflight(
         std::mem::align_of::<V3>(),
     )
     .map_err(|_| DrainPlanningRefusal::ResourceAccountingOverflow)?;
-    let retained_field = crate::allocator_allocation_bound_bytes(
-        field.retained_bytes(),
-        std::mem::align_of::<u64>(),
-    )
-    .map_err(|_| DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    // The aggregate check below remains the single source of the planner's
+    // cap diagnostic; this helper separately bills both retained allocations.
+    let retained_field = retained_field_allocation_peak(field, usize::MAX)?;
     let field_cells = field.flat_count();
     let lobe_workspace = [
         allocator(
@@ -995,6 +993,33 @@ fn planner_preflight(
         requested_bytes: requested,
         normalized_direction_bytes,
     })
+}
+
+fn retained_field_allocation_peak(
+    field: &CavityField,
+    cap: usize,
+) -> Result<usize, DrainPlanningRefusal> {
+    let allocations = field.retained_allocations();
+    let membership = crate::allocator_allocation_bound_bytes(
+        allocations.membership_bytes(),
+        std::mem::align_of::<u64>(),
+    )
+    .map_err(|_| DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    let source_occupancy = crate::allocator_allocation_bound_bytes(
+        allocations.source_occupancy_bytes(),
+        std::mem::align_of::<u64>(),
+    )
+    .map_err(|_| DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    let requested = membership
+        .checked_add(source_occupancy)
+        .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    if requested > cap {
+        return Err(DrainPlanningRefusal::ResourceLimitExceeded {
+            requested_bytes: requested,
+            cap_bytes: cap,
+        });
+    }
+    Ok(requested)
 }
 
 fn neighbors(field: &CavityField, flat: usize) -> impl Iterator<Item = usize> {
@@ -1415,7 +1440,6 @@ mod tests {
             voxel_count: 1,
             query_batch_points: 1_000,
             grid_coordinate_bytes: 0,
-            occupancy_bytes: 0,
             edt_peak_bytes: 0,
             label_peak_bytes: 0,
             surface_peak_bytes: 0,
@@ -1423,7 +1447,8 @@ mod tests {
             source_mesh_peak_bytes: 0,
             selected_mask_peak_bytes: 0,
             boolean_peak_bytes: 0,
-            retained_cavity_field_bytes: 8,
+            retained_cavity_membership_bytes: 8,
+            retained_source_occupancy_bytes: 8,
             output_upper_bound_bytes: 0,
             peak_bytes: 0,
         };
@@ -1585,6 +1610,37 @@ mod tests {
             refusal.reason(),
             DrainPlanningRefusal::ResourceLimitExceeded { requested_bytes, cap_bytes }
                 if *requested_bytes == exact && *cap_bytes == exact - 1
+        ));
+    }
+
+    #[test]
+    fn unequal_retained_field_allocations_have_an_exact_cap_boundary() {
+        let field = CavityField::with_test_retained_buffers(1, 1, 2, 17);
+        let allocations = field.retained_allocations();
+        assert_eq!(field.retained_word_lengths(), (1, 2));
+        assert_ne!(
+            allocations.membership_bytes(),
+            allocations.source_occupancy_bytes()
+        );
+
+        let exact = retained_field_allocation_peak(&field, usize::MAX)
+            .expect("unequal retained allocations");
+        let combined = crate::allocator_allocation_bound_bytes(
+            allocations.membership_bytes() + allocations.source_occupancy_bytes(),
+            std::mem::align_of::<u64>(),
+        )
+        .expect("combined allocation comparison");
+        assert!(exact > combined);
+        assert_eq!(
+            retained_field_allocation_peak(&field, exact).expect("exact cap"),
+            exact
+        );
+        assert!(matches!(
+            retained_field_allocation_peak(&field, exact - 1),
+            Err(DrainPlanningRefusal::ResourceLimitExceeded {
+                requested_bytes,
+                cap_bytes
+            }) if requested_bytes == exact && cap_bytes == exact - 1
         ));
     }
 }
