@@ -522,7 +522,7 @@ mod tests {
     use super::*;
     use crate::{
         forest::{EmbedEnd, MemberSpec, Owner, RootwardEndRadius, TerminalEndRadius},
-        joints::{plan_joint_balls_filtered, LiveViewLimits},
+        joints::{plan_joint_balls_filtered, JointStagingLimits, LiveViewLimits},
         raft::{plan_bottom_connected, RaftLimits},
     };
 
@@ -622,7 +622,13 @@ mod tests {
         let cfg = LoweringConfig::current(frame, &layers, max_primitives, max_bytes).unwrap();
         let view = FilteredLiveView::current(&forest, &[4], LiveViewLimits::new(100, 10, 100_000))
             .unwrap();
-        let joints = plan_joint_balls_filtered(&forest, &view, cfg.joint).unwrap();
+        let joints = plan_joint_balls_filtered(
+            &forest,
+            &view,
+            cfg.joint,
+            JointStagingLimits::from_joint_config(cfg.joint),
+        )
+        .unwrap();
         let raft = plan_bottom_connected(
             &forest,
             &view,
@@ -720,7 +726,13 @@ mod tests {
         let cfg = LoweringConfig::current(frame, &layers, 100, 100_000).unwrap();
         let view =
             FilteredLiveView::current(&forest, &[], LiveViewLimits::new(10, 1, 10_000)).unwrap();
-        let joints = plan_joint_balls_filtered(&forest, &view, cfg.joint).unwrap();
+        let joints = plan_joint_balls_filtered(
+            &forest,
+            &view,
+            cfg.joint,
+            JointStagingLimits::from_joint_config(cfg.joint),
+        )
+        .unwrap();
         let raft = plan_bottom_connected(
             &forest,
             &view,
@@ -767,7 +779,13 @@ mod tests {
         let cfg = LoweringConfig::current(frame, &layers, 100, 100_000).unwrap();
         let view = FilteredLiveView::current(&forest, &[4], LiveViewLimits::new(100, 10, 100_000))
             .unwrap();
-        let joints = plan_joint_balls_filtered(&forest, &view, cfg.joint).unwrap();
+        let joints = plan_joint_balls_filtered(
+            &forest,
+            &view,
+            cfg.joint,
+            JointStagingLimits::from_joint_config(cfg.joint),
+        )
+        .unwrap();
         let raft = plan_bottom_connected(
             &forest,
             &view,
@@ -795,7 +813,13 @@ mod tests {
         let joints_cfg = LoweringConfig::current(frame, &layers, 100, 100_000).unwrap();
         let view = FilteredLiveView::current(&forest, &[4], LiveViewLimits::new(100, 10, 100_000))
             .unwrap();
-        let joints = plan_joint_balls_filtered(&forest, &view, joints_cfg.joint).unwrap();
+        let joints = plan_joint_balls_filtered(
+            &forest,
+            &view,
+            joints_cfg.joint,
+            JointStagingLimits::from_joint_config(joints_cfg.joint),
+        )
+        .unwrap();
         let raft = plan_bottom_connected(
             &forest,
             &view,

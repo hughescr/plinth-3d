@@ -307,6 +307,22 @@ pub struct ForestReport {
     pub digest: u64,
 }
 
+/// Read-only lifecycle state for one terminal's original member binding. This ledger never
+/// turns a retired or quarantined generation back into a live member.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TerminalLedgerState {
+    Live,
+    Quarantined,
+    Retired,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TerminalLedgerEntry {
+    pub(crate) contact: u32,
+    pub(crate) original_key: MemberKey,
+    pub(crate) state: TerminalLedgerState,
+}
+
 #[derive(Clone, Debug)]
 struct CheckpointFrame {
     token: ForestCheckpoint,
@@ -493,6 +509,34 @@ impl Forest {
     #[must_use]
     pub fn terminal_key(&self, terminal: u32) -> Option<MemberKey> {
         self.state.terminal_of.get(&terminal).copied()
+    }
+
+    /// Resolve the append-only contact-to-generation ledger even after physical removal.
+    #[must_use]
+    pub(crate) fn terminal_ledger(&self, terminal: u32) -> Option<TerminalLedgerEntry> {
+        let original_key = self.terminal_key(terminal)?;
+        let state = if self.member(original_key).is_some() {
+            TerminalLedgerState::Live
+        } else if self.state.quarantined.contains_key(&original_key) {
+            TerminalLedgerState::Quarantined
+        } else if self.state.dead.contains(&original_key) {
+            TerminalLedgerState::Retired
+        } else {
+            return None;
+        };
+        Some(TerminalLedgerEntry {
+            contact: terminal,
+            original_key,
+            state,
+        })
+    }
+
+    pub(crate) fn terminal_ledger_iter(&self) -> impl Iterator<Item = TerminalLedgerEntry> + '_ {
+        self.state
+            .terminal_of
+            .keys()
+            .copied()
+            .filter_map(|contact| self.terminal_ledger(contact))
     }
 
     /// Read-only Q-REAL/regrade evidence for a terminal, never a live member.

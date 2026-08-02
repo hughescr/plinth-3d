@@ -5,12 +5,10 @@
 //! contains the ball centre.  Any numerical, depth, work, or memory limit
 //! leaves the ball in the result.
 
-use std::collections::{BTreeMap, BTreeSet};
-
 use plinth_core::{Finite, PositiveFinite};
 use thiserror::Error;
 
-use crate::forest::{EmbedEnd, Forest, Member, MemberKey, MemberKind, Owner};
+use crate::forest::{EmbedEnd, Forest, Member, MemberKey, MemberKind, Owner, TerminalLedgerState};
 
 const MODEL_FOOT_FACTOR: f64 = 1.4;
 const COINCIDE_TOL_MM: f64 = 0.15;
@@ -30,6 +28,51 @@ pub struct JointConfig {
     max_patches: usize,
     max_work_items: usize,
     max_scratch_bytes: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct JointStagingLimits {
+    max_members: usize,
+    max_nodes: usize,
+    max_neighbor_checks: usize,
+    max_neighbor_pairs: usize,
+    max_clusters: usize,
+    max_axis_members: usize,
+    max_bytes: usize,
+}
+
+impl JointStagingLimits {
+    pub(crate) const fn new(
+        max_members: usize,
+        max_nodes: usize,
+        max_neighbor_checks: usize,
+        max_neighbor_pairs: usize,
+        max_clusters: usize,
+        max_axis_members: usize,
+        max_bytes: usize,
+    ) -> Self {
+        Self {
+            max_members,
+            max_nodes,
+            max_neighbor_checks,
+            max_neighbor_pairs,
+            max_clusters,
+            max_axis_members,
+            max_bytes,
+        }
+    }
+
+    pub(crate) fn from_joint_config(config: JointConfig) -> Self {
+        Self::new(
+            config.max_work_items,
+            config.max_work_items,
+            config.max_work_items,
+            config.max_work_items,
+            config.max_work_items,
+            config.max_work_items,
+            config.max_scratch_bytes,
+        )
+    }
 }
 
 impl JointConfig {
@@ -138,18 +181,40 @@ impl FilteredLiveView {
         if terminal_ids.windows(2).any(|pair| pair[0] == pair[1]) {
             return Err(JointError::DuplicateUnroutedTerminal);
         }
+        for entry in forest.terminal_ledger_iter() {
+            if entry.state != TerminalLedgerState::Live
+                && terminal_ids.binary_search(&entry.contact).is_err()
+            {
+                return Err(JointError::MissingUnroutedTerminalProvenance(entry.contact));
+            }
+        }
         let mut excluded = Vec::with_capacity(terminal_ids.len());
         for terminal in terminal_ids {
-            let key = forest
-                .terminal(terminal)
+            let entry = forest
+                .terminal_ledger(terminal)
                 .ok_or(JointError::InvalidUnroutedTerminal(terminal))?;
-            let member = forest
-                .member(key)
-                .ok_or(JointError::InvalidUnroutedTerminal(terminal))?;
-            if member.kind() != &MemberKind::Stub || member.owner() != &Owner::Contact(terminal) {
-                return Err(JointError::InvalidUnroutedTerminal(terminal));
+            match entry.state {
+                TerminalLedgerState::Live => {
+                    let member = forest
+                        .member(entry.original_key)
+                        .ok_or(JointError::InvalidUnroutedTerminal(terminal))?;
+                    if member.kind() != &MemberKind::Stub
+                        || member.owner() != &Owner::Contact(terminal)
+                    {
+                        return Err(JointError::InvalidUnroutedTerminal(terminal));
+                    }
+                    excluded.push(entry.original_key);
+                }
+                TerminalLedgerState::Quarantined => {
+                    let record = forest
+                        .quarantine_record(entry.original_key)
+                        .ok_or(JointError::InvalidUnroutedTerminal(terminal))?;
+                    if record.kind != MemberKind::Stub || record.owner != Owner::Contact(terminal) {
+                        return Err(JointError::InvalidUnroutedTerminal(terminal));
+                    }
+                }
+                TerminalLedgerState::Retired => {}
             }
-            excluded.push(key);
         }
         excluded.sort_unstable();
         let keys = forest
@@ -399,12 +464,22 @@ pub enum JointError {
     LiveViewBytesLimit,
     #[error("unrouted terminal list contains a duplicate")]
     DuplicateUnroutedTerminal,
-    #[error("terminal {0} is not a live registered contact stub")]
+    #[error("terminal {0} is not valid unrouted terminal-ledger provenance")]
     InvalidUnroutedTerminal(u32),
+    #[error("retired or quarantined terminal {0} is missing from unrouted provenance")]
+    MissingUnroutedTerminalProvenance(u32),
     #[error("joint planning would exceed its typed work limit")]
     WorkLimit,
     #[error("joint planning would exceed its typed scratch-memory limit")]
     ScratchLimit,
+    #[error("joint staging limits must all be nonzero")]
+    InvalidStagingLimits,
+    #[error("joint staging exceeds its caller-owned member/node/cluster/axis limit")]
+    StagingCountLimit,
+    #[error("joint spatial clustering exceeds its caller-owned work limit")]
+    StagingWorkLimit,
+    #[error("joint spatial clustering exceeds its caller-owned candidate-pair limit")]
+    StagingPairLimit,
     #[error("joint result contains non-finite or non-positive geometry")]
     InvalidGeometry,
     #[error("joint plan authority is stale or belongs to another input")]
@@ -446,7 +521,6 @@ impl LiveMember {
 struct Node {
     point: [f64; 3],
     radius: f64,
-    owner: Owner,
     embedded: bool,
     outward: [f64; 3],
     member: usize,
@@ -474,7 +548,12 @@ pub fn plan_joint_balls(forest: &Forest, config: JointConfig) -> Result<JointPla
             config.max_scratch_bytes,
         ),
     )?;
-    plan_joint_balls_filtered(forest, &view, config)
+    plan_joint_balls_filtered(
+        forest,
+        &view,
+        config,
+        JointStagingLimits::from_joint_config(config),
+    )
 }
 
 /// The production entry: joint clustering and enclosure certification consume the exact same
@@ -483,19 +562,64 @@ pub(crate) fn plan_joint_balls_filtered(
     forest: &Forest,
     view: &FilteredLiveView,
     config: JointConfig,
+    staging: JointStagingLimits,
 ) -> Result<JointPlan, JointError> {
     validate_limits(config)?;
+    validate_staging_limits(staging)?;
     view.validate(forest)?;
-    let members: Vec<_> = view
-        .keys()
-        .iter()
-        .copied()
-        .filter_map(|key| {
-            forest
-                .member(key)
-                .map(|member| LiveMember::from_forest(key, member))
-        })
-        .collect();
+    let member_count = view.keys().len();
+    if member_count > staging.max_members {
+        return Err(JointError::StagingCountLimit);
+    }
+    let mut node_count = 0_usize;
+    let mut axis_count = 0_usize;
+    let mut owner_clone_bytes = 0_usize;
+    let mut max_owner_clone_bytes = 0_usize;
+    for key in view.keys() {
+        let member = forest.member(*key).ok_or(JointError::StaleAuthority)?;
+        if member.kind() != &MemberKind::Stub {
+            axis_count = axis_count
+                .checked_add(1)
+                .ok_or(JointError::StagingCountLimit)?;
+        }
+        if member.kind() != &MemberKind::Stub
+            && (member.p0_mm()[2].get() - config.plate_z_mm.get()).abs() > PLATE_BAND_MM
+        {
+            node_count = node_count
+                .checked_add(1)
+                .ok_or(JointError::StagingCountLimit)?;
+        }
+        if (member.p1_mm()[2].get() - config.plate_z_mm.get()).abs() > PLATE_BAND_MM {
+            node_count = node_count
+                .checked_add(1)
+                .ok_or(JointError::StagingCountLimit)?;
+        }
+        if let Owner::Generated { family, .. } = member.owner() {
+            owner_clone_bytes = owner_clone_bytes
+                .checked_add(family.len())
+                .ok_or(JointError::ScratchLimit)?;
+            max_owner_clone_bytes = max_owner_clone_bytes.max(family.len());
+        }
+    }
+    if node_count > staging.max_nodes || axis_count > staging.max_axis_members {
+        return Err(JointError::StagingCountLimit);
+    }
+    let node_bytes = node_count
+        .checked_mul(std::mem::size_of::<Node>())
+        .ok_or(JointError::ScratchLimit)?;
+    let base_bytes = member_count
+        .checked_mul(std::mem::size_of::<LiveMember>())
+        .and_then(|bytes| bytes.checked_add(owner_clone_bytes))
+        .and_then(|bytes| bytes.checked_add(node_bytes))
+        .ok_or(JointError::ScratchLimit)?;
+    if base_bytes > staging.max_bytes {
+        return Err(JointError::ScratchLimit);
+    }
+    let mut members = Vec::with_capacity(member_count);
+    for key in view.keys().iter().copied() {
+        let member = forest.member(key).ok_or(JointError::StaleAuthority)?;
+        members.push(LiveMember::from_forest(key, member));
+    }
     let forest_digest = forest.digest();
     let config_fingerprint = config.fingerprint();
     if members.is_empty() {
@@ -508,7 +632,7 @@ pub(crate) fn plan_joint_balls_filtered(
         });
     }
 
-    let nodes = gather_nodes(&members, config.plate_z_mm.get());
+    let nodes = gather_nodes(&members, config.plate_z_mm.get(), node_count);
     if nodes.is_empty() {
         return Ok(JointPlan {
             forest_digest,
@@ -518,12 +642,25 @@ pub(crate) fn plan_joint_balls_filtered(
             certified_dropped: 0,
         });
     }
-    let clusters = cluster_nodes(&nodes);
-    let axis_members: Vec<_> = members
-        .iter()
-        .enumerate()
-        .filter_map(|(index, member)| (member.kind != MemberKind::Stub).then_some(index))
-        .collect();
+    let clusters = cluster_nodes(&nodes, staging, base_bytes)?;
+    if clusters.len() > staging.max_clusters {
+        return Err(JointError::StagingCountLimit);
+    }
+    preflight_post_cluster_staging(
+        base_bytes,
+        node_count,
+        axis_count,
+        clusters.len(),
+        max_owner_clone_bytes,
+        staging.max_bytes,
+    )?;
+    let mut axis_members = Vec::with_capacity(axis_count);
+    axis_members.extend(
+        members
+            .iter()
+            .enumerate()
+            .filter_map(|(index, member)| (member.kind != MemberKind::Stub).then_some(index)),
+    );
     let pairs = clusters
         .len()
         .checked_mul(axis_members.len())
@@ -567,7 +704,7 @@ pub(crate) fn plan_joint_balls_filtered(
         axis_batch.effective_threads(),
         geom_kernel::current_threads()
     );
-    let mut candidates = Vec::new();
+    let mut candidates = Vec::with_capacity(clusters.len());
     for (cluster_index, cluster) in clusters.iter().enumerate() {
         if is_colinear_seam(cluster, &nodes) {
             continue;
@@ -586,7 +723,8 @@ pub(crate) fn plan_joint_balls_filtered(
             .expect("cluster nonempty");
         let mut radius = nodes[fattest_node].radius;
         let mut owner = None;
-        let mut touching: BTreeSet<usize> = cluster.iter().map(|i| nodes[*i].member).collect();
+        let mut touching = Vec::with_capacity(cluster.len() + axis_members.len());
+        touching.extend(cluster.iter().map(|i| nodes[*i].member));
         let distance_row = axis_batch
             .distance_row(cluster_index)
             .expect("native batch retains one row per gathered cluster");
@@ -595,7 +733,7 @@ pub(crate) fn plan_joint_balls_filtered(
             .expect("native batch retains one radius row per gathered cluster");
         for (axis_col, member_index) in axis_members.iter().copied().enumerate() {
             if distance_row[axis_col] <= ON_AXIS_TOL_MM {
-                touching.insert(member_index);
+                touching.push(member_index);
                 let local = radius_row[axis_col];
                 if local >= radius {
                     radius = local;
@@ -614,6 +752,8 @@ pub(crate) fn plan_joint_balls_filtered(
         if center[2] - ball_radius < config.plate_z_mm.get() {
             continue;
         }
+        touching.sort_unstable();
+        touching.dedup();
         candidates.push(CandidateBall {
             center,
             radius: ball_radius,
@@ -622,8 +762,8 @@ pub(crate) fn plan_joint_balls_filtered(
                 .map_or(members[nodes[fattest_node].member].key, |(key, _)| *key),
             owner: owner
                 .map(|(_, owner)| owner)
-                .unwrap_or_else(|| nodes[fattest_node].owner.clone()),
-            touching: touching.into_iter().collect(),
+                .unwrap_or_else(|| members[nodes[fattest_node].member].owner.clone()),
+            touching,
         });
     }
 
@@ -636,7 +776,7 @@ pub(crate) fn plan_joint_balls_filtered(
         decisions.effective_threads(),
         geom_kernel::current_threads()
     );
-    let mut balls = Vec::new();
+    let mut balls = Vec::with_capacity(candidates.len());
     let mut certified_dropped = 0;
     for (candidate, enclosed) in candidates.into_iter().zip(decisions.into_values()) {
         if enclosed {
@@ -677,8 +817,22 @@ fn validate_limits(config: JointConfig) -> Result<(), JointError> {
     Ok(())
 }
 
-fn gather_nodes(members: &[LiveMember], plate_z: f64) -> Vec<Node> {
-    let mut nodes = Vec::new();
+fn validate_staging_limits(staging: JointStagingLimits) -> Result<(), JointError> {
+    if staging.max_members == 0
+        || staging.max_nodes == 0
+        || staging.max_neighbor_checks == 0
+        || staging.max_neighbor_pairs == 0
+        || staging.max_clusters == 0
+        || staging.max_axis_members == 0
+        || staging.max_bytes == 0
+    {
+        return Err(JointError::InvalidStagingLimits);
+    }
+    Ok(())
+}
+
+fn gather_nodes(members: &[LiveMember], plate_z: f64, node_count: usize) -> Vec<Node> {
+    let mut nodes = Vec::with_capacity(node_count);
     for (index, member) in members.iter().enumerate() {
         let d = sub(member.p1, member.p0);
         let length = norm(d);
@@ -691,7 +845,6 @@ fn gather_nodes(members: &[LiveMember], plate_z: f64) -> Vec<Node> {
             nodes.push(Node {
                 point: member.p0,
                 radius: member.r0,
-                owner: member.owner.clone(),
                 embedded: member.embed_end == Some(EmbedEnd::Terminalward),
                 outward: unit,
                 member: index,
@@ -701,7 +854,6 @@ fn gather_nodes(members: &[LiveMember], plate_z: f64) -> Vec<Node> {
             nodes.push(Node {
                 point: member.p1,
                 radius: member.r1,
-                owner: member.owner.clone(),
                 embedded: member.embed_end == Some(EmbedEnd::Rootward),
                 outward: scale(unit, -1.0),
                 member: index,
@@ -711,25 +863,215 @@ fn gather_nodes(members: &[LiveMember], plate_z: f64) -> Vec<Node> {
     nodes
 }
 
-fn cluster_nodes(nodes: &[Node]) -> Vec<Vec<usize>> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct CellRow {
+    cell: [i64; 3],
+    node: usize,
+}
+
+fn cluster_nodes(
+    nodes: &[Node],
+    staging: JointStagingLimits,
+    base_bytes: usize,
+) -> Result<Vec<Vec<usize>>, JointError> {
+    let row_bytes = nodes
+        .len()
+        .checked_mul(std::mem::size_of::<CellRow>())
+        .ok_or(JointError::ScratchLimit)?;
+    ensure_staging_bytes(base_bytes, row_bytes, staging.max_bytes)?;
+    let mut rows = Vec::with_capacity(nodes.len());
+    for (node, value) in nodes.iter().enumerate() {
+        rows.push(CellRow {
+            cell: point_cell(value.point)?,
+            node,
+        });
+    }
+    rows.sort_unstable();
+
+    let mut checks = 0_usize;
+    let mut pair_count = 0_usize;
+    visit_neighbor_pairs(nodes, &rows, |_, _, coincident| {
+        checks = checks.checked_add(1).ok_or(JointError::StagingWorkLimit)?;
+        if checks > staging.max_neighbor_checks {
+            return Err(JointError::StagingWorkLimit);
+        }
+        if coincident {
+            pair_count = pair_count
+                .checked_add(1)
+                .ok_or(JointError::StagingPairLimit)?;
+            if pair_count > staging.max_neighbor_pairs {
+                return Err(JointError::StagingPairLimit);
+            }
+        }
+        Ok(())
+    })?;
+    let pair_bytes = pair_count
+        .checked_mul(std::mem::size_of::<(usize, usize)>())
+        .ok_or(JointError::ScratchLimit)?;
+    let parent_bytes = nodes
+        .len()
+        .checked_mul(std::mem::size_of::<usize>())
+        .ok_or(JointError::ScratchLimit)?;
+    ensure_staging_bytes(
+        base_bytes,
+        row_bytes
+            .checked_add(pair_bytes)
+            .and_then(|value| value.checked_add(parent_bytes))
+            .ok_or(JointError::ScratchLimit)?,
+        staging.max_bytes,
+    )?;
+    let mut pairs = Vec::with_capacity(pair_count);
+    visit_neighbor_pairs(nodes, &rows, |a, b, coincident| {
+        if coincident {
+            pairs.push((a, b));
+        }
+        Ok(())
+    })?;
+    pairs.sort_unstable();
+    drop(rows);
+
     let mut parent: Vec<_> = (0..nodes.len()).collect();
-    for a in 0..nodes.len() {
-        for b in (a + 1)..nodes.len() {
-            if norm(sub(nodes[a].point, nodes[b].point)) <= COINCIDE_TOL_MM {
-                let ra = find_root(&mut parent, a);
-                let rb = find_root(&mut parent, b);
-                if ra != rb {
-                    parent[rb] = ra;
+    for (a, b) in pairs {
+        let ra = find_root(&mut parent, a);
+        let rb = find_root(&mut parent, b);
+        if ra != rb {
+            parent[rb] = ra;
+        }
+    }
+    let mut grouped: Vec<_> = (0..nodes.len())
+        .map(|node| (find_root(&mut parent, node), node))
+        .collect();
+    grouped.sort_unstable();
+    let cluster_count = grouped
+        .iter()
+        .enumerate()
+        .filter(|(index, row)| *index == 0 || grouped[*index - 1].0 != row.0)
+        .count();
+    if cluster_count > staging.max_clusters {
+        return Err(JointError::StagingCountLimit);
+    }
+    let grouping_bytes = grouped
+        .len()
+        .checked_mul(std::mem::size_of::<(usize, usize)>())
+        .and_then(|value| value.checked_add(parent_bytes))
+        .and_then(|value| {
+            value.checked_add(cluster_count.checked_mul(std::mem::size_of::<Vec<usize>>())?)
+        })
+        .and_then(|value| value.checked_add(nodes.len().checked_mul(std::mem::size_of::<usize>())?))
+        .ok_or(JointError::ScratchLimit)?;
+    ensure_staging_bytes(base_bytes, grouping_bytes, staging.max_bytes)?;
+    let mut clusters: Vec<Vec<usize>> = Vec::with_capacity(cluster_count);
+    let mut start = 0_usize;
+    while start < grouped.len() {
+        let root = grouped[start].0;
+        let end = grouped[start..]
+            .partition_point(|row| row.0 == root)
+            .checked_add(start)
+            .ok_or(JointError::StagingCountLimit)?;
+        let mut cluster = Vec::with_capacity(end - start);
+        cluster.extend(grouped[start..end].iter().map(|row| row.1));
+        clusters.push(cluster);
+        start = end;
+    }
+    Ok(clusters)
+}
+
+fn ensure_staging_bytes(base: usize, additional: usize, limit: usize) -> Result<(), JointError> {
+    if base
+        .checked_add(additional)
+        .ok_or(JointError::ScratchLimit)?
+        > limit
+    {
+        return Err(JointError::ScratchLimit);
+    }
+    Ok(())
+}
+
+fn preflight_post_cluster_staging(
+    base_bytes: usize,
+    node_count: usize,
+    axis_count: usize,
+    cluster_count: usize,
+    max_owner_clone_bytes: usize,
+    limit: usize,
+) -> Result<(), JointError> {
+    let pairs = cluster_count
+        .checked_mul(axis_count)
+        .ok_or(JointError::ScratchLimit)?;
+    let touching_slots = node_count
+        .checked_add(pairs)
+        .ok_or(JointError::ScratchLimit)?;
+    let terms = [
+        cluster_count.checked_mul(std::mem::size_of::<Vec<usize>>()),
+        node_count.checked_mul(std::mem::size_of::<usize>()),
+        axis_count.checked_mul(std::mem::size_of::<usize>()),
+        cluster_count.checked_mul(std::mem::size_of::<[f64; 3]>()),
+        axis_count.checked_mul(2 * std::mem::size_of::<[f64; 3]>()),
+        axis_count.checked_mul(2 * std::mem::size_of::<f64>()),
+        pairs.checked_mul(16),
+        cluster_count.checked_mul(std::mem::size_of::<CandidateBall>()),
+        touching_slots.checked_mul(std::mem::size_of::<usize>()),
+        cluster_count.checked_mul(max_owner_clone_bytes),
+        cluster_count.checked_mul(std::mem::size_of::<bool>()),
+        cluster_count.checked_mul(std::mem::size_of::<JointBall>()),
+    ];
+    let additional = terms
+        .into_iter()
+        .try_fold(0_usize, |total, term| total.checked_add(term?).or(None));
+    ensure_staging_bytes(
+        base_bytes,
+        additional.ok_or(JointError::ScratchLimit)?,
+        limit,
+    )
+}
+
+fn point_cell(point: [f64; 3]) -> Result<[i64; 3], JointError> {
+    let mut cell = [0_i64; 3];
+    for axis in 0..3 {
+        let value = (point[axis] / COINCIDE_TOL_MM).floor();
+        if !value.is_finite() || value < i64::MIN as f64 || value > i64::MAX as f64 {
+            return Err(JointError::InvalidGeometry);
+        }
+        cell[axis] = value as i64;
+    }
+    Ok(cell)
+}
+
+fn visit_neighbor_pairs(
+    nodes: &[Node],
+    rows: &[CellRow],
+    mut visit: impl FnMut(usize, usize, bool) -> Result<(), JointError>,
+) -> Result<(), JointError> {
+    for (a, node) in nodes.iter().enumerate() {
+        let cell = point_cell(node.point)?;
+        for dx in -1_i64..=1 {
+            for dy in -1_i64..=1 {
+                for dz in -1_i64..=1 {
+                    let Some(neighbor) = cell[0]
+                        .checked_add(dx)
+                        .zip(cell[1].checked_add(dy))
+                        .zip(cell[2].checked_add(dz))
+                        .map(|((x, y), z)| [x, y, z])
+                    else {
+                        continue;
+                    };
+                    let start = rows.partition_point(|row| row.cell < neighbor);
+                    let end = rows.partition_point(|row| row.cell <= neighbor);
+                    for row in &rows[start..end] {
+                        if row.node <= a {
+                            continue;
+                        }
+                        visit(
+                            a,
+                            row.node,
+                            norm(sub(node.point, nodes[row.node].point)) <= COINCIDE_TOL_MM,
+                        )?;
+                    }
                 }
             }
         }
     }
-    let mut groups: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for index in 0..nodes.len() {
-        let root = find_root(&mut parent, index);
-        groups.entry(root).or_default().push(index);
-    }
-    groups.into_values().collect()
+    Ok(())
 }
 
 fn find_root(parent: &mut [usize], mut index: usize) -> usize {
@@ -1099,7 +1441,14 @@ mod tests {
             JointError::LiveViewBytesLimit
         );
 
-        let filtered = plan_joint_balls_filtered(&forest, &view, config(-10.0)).unwrap();
+        let joint_config = config(-10.0);
+        let filtered = plan_joint_balls_filtered(
+            &forest,
+            &view,
+            joint_config,
+            JointStagingLimits::from_joint_config(joint_config),
+        )
+        .unwrap();
         let all = plan_joint_balls(&forest, config(-10.0)).unwrap();
         assert!(all.balls.iter().any(|ball| ball.center_mm[0].get() == 9.0));
         assert!(filtered
@@ -1109,6 +1458,49 @@ mod tests {
         assert!(filtered
             .validate_filtered(&forest, &view, config(-10.0))
             .is_ok());
+    }
+
+    #[test]
+    fn filtered_view_requires_retired_and_quarantined_terminal_ledger_provenance_without_resurrection(
+    ) {
+        let mut forest = Forest::new();
+        let mut keys = Vec::new();
+        for contact in 0..3 {
+            let key = add_member(
+                &mut forest,
+                [contact as f64, 0.0, 5.0],
+                [contact as f64, 0.0, 3.0],
+                0.2,
+                0.4,
+                MemberKind::Stub,
+                Owner::Contact(contact),
+                Some(EmbedEnd::Terminalward),
+            );
+            forest.register_terminal(contact, key).unwrap();
+            keys.push(key);
+        }
+        forest.retire(keys[1]).unwrap();
+        forest.quarantine(keys[2]).unwrap();
+        assert_eq!(
+            forest.terminal_ledger(1).unwrap().state,
+            TerminalLedgerState::Retired
+        );
+        assert_eq!(
+            forest.terminal_ledger(2).unwrap().state,
+            TerminalLedgerState::Quarantined
+        );
+        assert_eq!(
+            FilteredLiveView::current(&forest, &[1], LiveViewLimits::new(3, 3, 10_000),)
+                .unwrap_err(),
+            JointError::MissingUnroutedTerminalProvenance(2)
+        );
+        let view =
+            FilteredLiveView::current(&forest, &[1, 2], LiveViewLimits::new(3, 3, 10_000)).unwrap();
+        assert_eq!(view.keys(), &[keys[0]]);
+        assert!(forest.member(keys[1]).is_none());
+        assert!(forest.member(keys[2]).is_none());
+        assert_eq!(forest.terminal(1), None);
+        assert_eq!(forest.terminal(2), None);
     }
 
     #[test]
@@ -1353,13 +1745,13 @@ mod tests {
         let node = |point, ordinal| Node {
             point,
             radius: 0.5,
-            owner: Owner::Contact(ordinal),
             embedded: false,
             outward: [0.0, 0.0, 1.0],
             member: ordinal as usize,
         };
+        let staging = JointStagingLimits::new(10, 10, 10, 10, 10, 10, 10_000);
         let inclusive = vec![node([-0.0, 0.0, 1.0], 0), node([0.15, 0.0, 1.0], 1)];
-        let clusters = cluster_nodes(&inclusive);
+        let clusters = cluster_nodes(&inclusive, staging, 0).unwrap();
         assert_eq!(clusters, vec![vec![0, 1]]);
         let center = cluster_center(&clusters[0], &inclusive);
         assert!(center[0].is_sign_negative());
@@ -1368,7 +1760,77 @@ mod tests {
             node([0.0, 0.0, 1.0], 0),
             node([f64::from_bits(0.15_f64.to_bits() + 1), 0.0, 1.0], 1),
         ];
-        assert_eq!(cluster_nodes(&outside), vec![vec![0], vec![1]]);
+        assert_eq!(
+            cluster_nodes(&outside, staging, 0).unwrap(),
+            vec![vec![0], vec![1]]
+        );
+    }
+
+    #[test]
+    fn spatial_staging_caps_are_exact_and_separated_stubs_do_not_form_quadratic_work() {
+        let node = |x| Node {
+            point: [x, 0.0, 1.0],
+            radius: 0.5,
+            embedded: false,
+            outward: [0.0, 0.0, 1.0],
+            member: 0,
+        };
+        let coincident = vec![node(0.0), node(0.0), node(0.0)];
+        assert_eq!(
+            cluster_nodes(
+                &coincident,
+                JointStagingLimits::new(3, 3, 2, 3, 3, 3, 100_000),
+                0,
+            )
+            .unwrap_err(),
+            JointError::StagingWorkLimit
+        );
+        assert_eq!(
+            cluster_nodes(
+                &coincident,
+                JointStagingLimits::new(3, 3, 3, 2, 3, 3, 100_000),
+                0,
+            )
+            .unwrap_err(),
+            JointError::StagingPairLimit
+        );
+
+        let two = vec![node(0.0), node(0.0)];
+        let clustering_peak = 2 * std::mem::size_of::<CellRow>()
+            + std::mem::size_of::<(usize, usize)>()
+            + 2 * std::mem::size_of::<usize>();
+        let grouping_peak = 2 * std::mem::size_of::<(usize, usize)>()
+            + 2 * std::mem::size_of::<usize>()
+            + std::mem::size_of::<Vec<usize>>()
+            + 2 * std::mem::size_of::<usize>();
+        let exact_bytes = clustering_peak.max(grouping_peak);
+        assert_eq!(
+            cluster_nodes(
+                &two,
+                JointStagingLimits::new(2, 2, 1, 1, 1, 2, exact_bytes),
+                0,
+            )
+            .unwrap(),
+            vec![vec![0, 1]]
+        );
+        assert_eq!(
+            cluster_nodes(
+                &two,
+                JointStagingLimits::new(2, 2, 1, 1, 1, 2, exact_bytes - 1),
+                0,
+            )
+            .unwrap_err(),
+            JointError::ScratchLimit
+        );
+
+        let separated: Vec<_> = (0..2_000).map(|index| node(index as f64)).collect();
+        let clusters = cluster_nodes(
+            &separated,
+            JointStagingLimits::new(2_000, 2_000, 1, 1, 2_000, 2_000, 1_000_000),
+            0,
+        )
+        .unwrap();
+        assert_eq!(clusters.len(), 2_000);
     }
 
     #[test]

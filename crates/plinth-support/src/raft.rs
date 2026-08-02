@@ -187,25 +187,27 @@ pub(crate) fn plan_bottom_connected(
         return Err(SupportError::SupportScratchLimit);
     }
 
-    let mut candidates: Vec<PlateRoot> = view
-        .keys()
-        .iter()
-        .copied()
-        .filter_map(|key| forest.member(key).map(|member| (key, member)))
-        .filter(|(key, member)| match (member.kind(), member.owner()) {
-            (MemberKind::Stub, Owner::Contact(contact)) => forest.terminal(*contact) == Some(*key),
+    let mut candidates = Vec::with_capacity(candidate_count);
+    for key in view.keys().iter().copied() {
+        let member = forest
+            .member(key)
+            .ok_or(SupportError::StaleSupportAuthority)?;
+        let eligible = match (member.kind(), member.owner()) {
+            (MemberKind::Stub, Owner::Contact(contact)) => forest.terminal(*contact) == Some(key),
             (MemberKind::Stub, _) => false,
             _ => true,
-        })
-        .filter_map(|(_, member)| {
+        };
+        if eligible {
             let point = member.p1_mm();
-            ((point[2].get() - plate_z_mm.get()).abs() <= plate_band).then_some(PlateRoot {
-                xy_mm: [point[0], point[1]],
-                root_radius_mm: member.rootward_radius_mm().get(),
-            })
-        })
-        .collect();
-    candidates.sort_by(|a, b| {
+            if (point[2].get() - plate_z_mm.get()).abs() <= plate_band {
+                candidates.push(PlateRoot {
+                    xy_mm: [point[0], point[1]],
+                    root_radius_mm: member.rootward_radius_mm().get(),
+                });
+            }
+        }
+    }
+    candidates.sort_unstable_by(|a, b| {
         a.xy_mm[0]
             .get()
             .total_cmp(&b.xy_mm[0].get())
@@ -238,8 +240,19 @@ pub(crate) fn plan_bottom_connected(
     let primitive_bytes = primitive_count
         .checked_mul(std::mem::size_of::<SupportPrimitive>())
         .ok_or(SupportError::SupportScratchLimit)?;
+    let visited_bytes = roots
+        .len()
+        .checked_mul(std::mem::size_of::<u8>())
+        .ok_or(SupportError::SupportScratchLimit)?;
+    let edge_bytes = roots
+        .len()
+        .saturating_sub(1)
+        .checked_mul(std::mem::size_of::<(usize, usize)>())
+        .ok_or(SupportError::SupportScratchLimit)?;
     let scratch = candidate_bytes
         .checked_add(primitive_bytes)
+        .and_then(|bytes| bytes.checked_add(visited_bytes))
+        .and_then(|bytes| bytes.checked_add(edge_bytes))
         .ok_or(SupportError::SupportScratchLimit)?;
     if scratch > limits.max_bytes {
         return Err(SupportError::SupportScratchLimit);
@@ -302,17 +315,17 @@ fn euclidean_mst_edges(roots: &[PlateRoot]) -> Vec<(usize, usize)> {
     if roots.len() < 2 {
         return Vec::new();
     }
-    let mut visited = vec![false; roots.len()];
-    visited[0] = true;
+    let mut visited = vec![0_u8; roots.len()];
+    visited[0] = 1;
     let mut edges = Vec::with_capacity(roots.len() - 1);
     while edges.len() + 1 < roots.len() {
         let mut best: Option<(f64, usize, usize, usize, usize)> = None;
         for i in 0..roots.len() {
-            if !visited[i] {
+            if visited[i] == 0 {
                 continue;
             }
             for j in 0..roots.len() {
-                if visited[j] {
+                if visited[j] != 0 {
                     continue;
                 }
                 let dx = roots[j].xy_mm[0].get() - roots[i].xy_mm[0].get();
@@ -335,7 +348,7 @@ fn euclidean_mst_edges(roots: &[PlateRoot]) -> Vec<(usize, usize)> {
         }
         let (_, lo, hi, _, new_vertex) = best.expect("an unvisited root has a connecting edge");
         edges.push((lo, hi));
-        visited[new_vertex] = true;
+        visited[new_vertex] = 1;
     }
     edges
 }
@@ -498,8 +511,10 @@ mod tests {
         let forest = forest_for(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
         let view =
             FilteredLiveView::current(&forest, &[], LiveViewLimits::new(2, 1, 10_000)).unwrap();
-        let exact_bytes =
-            2 * std::mem::size_of::<PlateRoot>() + 3 * std::mem::size_of::<SupportPrimitive>();
+        let exact_bytes = 2 * std::mem::size_of::<PlateRoot>()
+            + 3 * std::mem::size_of::<SupportPrimitive>()
+            + 2 * std::mem::size_of::<u8>()
+            + std::mem::size_of::<(usize, usize)>();
         assert!(plan_bottom_connected(
             &forest,
             &view,
@@ -541,8 +556,9 @@ mod tests {
         let dedup_view =
             FilteredLiveView::current(&dedup_forest, &[], LiveViewLimits::new(2, 1, 10_000))
                 .unwrap();
-        let dedup_bytes =
-            2 * std::mem::size_of::<PlateRoot>() + std::mem::size_of::<SupportPrimitive>();
+        let dedup_bytes = 2 * std::mem::size_of::<PlateRoot>()
+            + std::mem::size_of::<SupportPrimitive>()
+            + std::mem::size_of::<u8>();
         assert!(plan_bottom_connected(
             &dedup_forest,
             &dedup_view,
