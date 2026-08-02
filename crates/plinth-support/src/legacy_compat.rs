@@ -57,6 +57,14 @@ impl LegacyCompatibility {
         O10_POLICY_ID
     }
 
+    /// Single typed authority for the frozen brace cadence used by the live
+    /// CCO candidate price.  Crate-private prevents the placeholder from
+    /// becoming a downstream configuration or calibration claim.
+    #[must_use]
+    pub(crate) const fn brace_free_span_mm(&self) -> &Placeholder<PositiveFinite> {
+        &self.brace_free_span_mm
+    }
+
     /// Sizes one live tree member and evaluates that member's frozen brace
     /// trigger. Retired members and braces are excluded through `Forest`'s
     /// official live-tree APIs; this never invents or places a brace.

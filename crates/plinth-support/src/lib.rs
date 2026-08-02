@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 pub mod anchor;
+mod cco;
 mod coverage;
 pub mod dyadic;
 pub mod forest;
