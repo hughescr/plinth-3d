@@ -1876,6 +1876,17 @@ pub(crate) fn finalize_load_partition(
     )
 }
 
+/// Test-only empty-contact load authority. It still traverses the production
+/// finalizer, so mesh binding and the canonical empty-contact fingerprint are
+/// computed exactly as normal rather than forged by the caller.
+#[cfg(test)]
+pub(crate) fn authority_consistent_empty_load_partition_for_test(
+    plan: &GenericContactPlan,
+    mesh: &Mesh,
+) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
+    finalize_load_rows(plan, mesh, &[], &[], plan.load_limits)
+}
+
 fn load_resource_plan_from_counts(
     face_count: usize,
     eligible_owner_count: usize,

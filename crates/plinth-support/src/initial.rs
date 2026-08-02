@@ -534,16 +534,12 @@ fn required_scratch_bytes(contacts: usize, cap: usize) -> Result<usize, InitialC
 }
 
 fn finite(values: [f64; 3], contact_id: u64) -> Result<[Finite; 3], InitialContactError> {
-    values
-        .map(Finite::new)
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()
-        .and_then(|values| {
-            values
-                .try_into()
-                .map_err(|_| plinth_core::FiniteError::NonFinite)
-        })
-        .map_err(|_| InitialContactError::NonFiniteStub { contact_id })
+    let [x, y, z] = values;
+    Ok([
+        Finite::new(x).map_err(|_| InitialContactError::NonFiniteStub { contact_id })?,
+        Finite::new(y).map_err(|_| InitialContactError::NonFiniteStub { contact_id })?,
+        Finite::new(z).map_err(|_| InitialContactError::NonFiniteStub { contact_id })?,
+    ])
 }
 
 fn distance(a: [Finite; 3], b: [Finite; 3]) -> f64 {
@@ -674,7 +670,9 @@ mod tests {
     use crate::{
         perception::{prepare_generic_contacts, FinalizedContactLoadLimits},
         select_contacts,
-        specialized::prepare_specialized_contacts,
+        specialized::{
+            authority_consistent_empty_plan_for_initial_test, prepare_specialized_contacts,
+        },
     };
 
     const SWEEP_CHILD: &str = "PLINTH_INITIAL_SWEEP_CHILD";
@@ -708,14 +706,42 @@ mod tests {
         BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap())
     }
 
+    fn combine_meshes(parts: &[Mesh]) -> Mesh {
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+        for part in parts {
+            let offset = u32::try_from(vertices.len()).unwrap();
+            vertices.extend_from_slice(part.verts());
+            faces.extend(
+                part.tris()
+                    .iter()
+                    .map(|face| face.map(|index| index + offset)),
+            );
+        }
+        Mesh::new(vertices, faces).unwrap()
+    }
+
+    fn stacked_obstruction(obstacle_top_z: f64) -> Mesh {
+        combine_meshes(&[
+            plinth_mesh::make_box([30.0, 30.0, 1.0], [0.0, 0.0, obstacle_top_z - 1.0]).unwrap(),
+            plinth_mesh::make_box([30.0, 30.0, 4.0], [0.0, 0.0, 20.0]).unwrap(),
+        ])
+    }
+
     impl Fixture {
         fn new(mesh: Mesh) -> Self {
             Self::new_with_layer_count(mesh, 1_000)
         }
 
         fn new_with_layer_count(mesh: Mesh, layer_count: usize) -> Self {
+            Self::new_with_layers(
+                mesh,
+                LayerPlan::new(0.0, vec![50.0 / layer_count as f64; layer_count]).unwrap(),
+            )
+        }
+
+        fn new_with_layers(mesh: Mesh, layers: LayerPlan) -> Self {
             let delicacy = vec![0.0; mesh.tris().len()];
-            let layers = LayerPlan::new(0.0, vec![50.0 / layer_count as f64; layer_count]).unwrap();
             let candidate =
                 CandidatePayloadConfig::current(8, 1_000_000, 3_000_000, 256 * 1024 * 1024, 65_536)
                     .unwrap();
@@ -853,6 +879,18 @@ mod tests {
 
     #[test]
     fn terminalward_embed_classifies_clean_transit_and_buried_boundaries() {
+        let exact_cutoff = geom_kernel::Interval {
+            s_a: 0.0,
+            s_b: 0.05,
+            entered: true,
+            exited: true,
+            max_depth: 0.1,
+            ray: -1,
+        };
+        assert_eq!(
+            remaining_illegal_axis_overlap(&[exact_cutoff], 2.8, 0.0),
+            0.05
+        );
         let clean = geom_kernel::Interval {
             s_a: 0.3,
             s_b: 0.35,
@@ -885,15 +923,65 @@ mod tests {
     }
 
     #[test]
-    fn zero_contact_classification_returns_without_a_native_query() {
+    fn zero_contact_builder_returns_a_fresh_empty_forest_without_a_native_query() {
         let fixture = Fixture::new(make_overhang_table().unwrap());
+        let config = perception_config(&fixture.delicacy);
+        let selection = ContactSelectionConfig::current_defaults(
+            Some(&fixture.delicacy),
+            config.max_grid_bytes,
+        )
+        .unwrap();
+        let plan = authority_consistent_empty_plan_for_initial_test(
+            &fixture.mesh,
+            &config,
+            frame(),
+            &fixture.layers,
+            &fixture.candidate,
+            &[],
+            GenericPerceptionLimits::production(),
+            &fixture.generic,
+            &fixture.regular,
+            &selection,
+            SpecializedLimits::production(),
+        )
+        .unwrap();
+        let loads = FinalizedContactLoads::from_partition(
+            plan.load_partition(),
+            &[],
+            FinalizedContactLoadLimits::new(0, 0, usize::MAX),
+        )
+        .unwrap();
         let geometry =
             AnchorGeometryAuthority::new(&fixture.mesh, &fixture.topology, &fixture.surface)
                 .unwrap();
-        let (overlaps, interval_batch_count) =
-            classify_initial_overlaps(&[], &geometry, 0.12, 80, 0.3).unwrap();
-        assert!(overlaps.is_empty());
-        assert_eq!(interval_batch_count, 0);
+        let build = build_initial_contacts(
+            &plan,
+            &loads,
+            &fixture.mesh,
+            &config,
+            frame(),
+            &fixture.layers,
+            &fixture.candidate,
+            &[],
+            GenericPerceptionLimits::production(),
+            &fixture.generic,
+            &fixture.regular,
+            &selection,
+            SpecializedLimits::production(),
+            &geometry,
+            ContactConstructionLimits::production(),
+        )
+        .unwrap();
+        assert!(plan.contacts().is_empty());
+        assert!(plan.load_partition().rows().is_empty());
+        assert_eq!(build.queried_stubs(), 0);
+        assert_eq!(build.interval_batch_count(), 0);
+        assert!(build.terminals().is_empty());
+        assert!(build.condemned().is_empty());
+        assert_eq!(
+            build.initial_forest_digest(),
+            build.post_quarantine_forest_digest()
+        );
     }
 
     #[test]
@@ -1037,6 +1125,77 @@ mod tests {
     }
 
     #[test]
+    fn real_stacked_obstruction_accepts_cutoff_and_condemns_above_it() {
+        let cutoff = m0_constants()
+            .unwrap()
+            .placeholders()
+            .min_illegal_len_mm()
+            .diagnostic()
+            .get();
+        let boundary_top = f64::from_bits(17.55_f64.to_bits() - 1);
+        let boundary = Fixture::new(stacked_obstruction(boundary_top))
+            .build(ContactConstructionLimits::production())
+            .unwrap();
+        assert!(cutoff - (boundary_top - 17.5) < 1e-12);
+        assert!(boundary.condemned().is_empty());
+        assert!(boundary
+            .terminals()
+            .iter()
+            .all(|terminal| terminal.state == TerminalLedgerState::Live));
+
+        let above = Fixture::new(stacked_obstruction(17.56))
+            .build(ContactConstructionLimits::production())
+            .unwrap();
+        assert!(!above.condemned().is_empty());
+        assert!(above
+            .condemned()
+            .iter()
+            .all(|row| row.remaining_inside_axis_mm > cutoff));
+    }
+
+    #[test]
+    fn buried_free_ends_quarantine_and_retain_both_ledger_records_and_loads() {
+        let fixture = Fixture::new(make_overhang_table().unwrap());
+        let build = fixture
+            .build(ContactConstructionLimits::production())
+            .unwrap();
+        assert!(!build.condemned().is_empty());
+        for condemned in build.condemned() {
+            let terminal = condemned.terminal;
+            let slot = fixture
+                .plan
+                .contacts()
+                .iter()
+                .position(|contact| contact.contact_id() == u64::from(terminal))
+                .unwrap();
+            let sealed = build.forest().terminal_ledger_evidence(terminal).unwrap();
+            let quarantined = build.forest().terminal_quarantine(terminal).unwrap();
+            assert!(
+                fixture
+                    .surface
+                    .inside(&[quarantined.p1_mm.map(Finite::get)])[0]
+            );
+            assert_eq!(build.forest().terminal(terminal), None);
+            assert_eq!(sealed.terminal_contacts, [terminal]);
+            assert_eq!(quarantined.terminal_contacts, [terminal]);
+            assert_eq!(sealed.original_key, condemned.key);
+            assert_eq!(quarantined.original_key, condemned.key);
+            assert_eq!(
+                sealed.carried_mm2.get(),
+                fixture.loads.carried_area_mm2()[slot]
+            );
+            assert_eq!(
+                quarantined.carried_mm2.get(),
+                fixture.loads.carried_area_mm2()[slot]
+            );
+            assert_eq!(
+                build.forest().terminal_ledger(terminal).unwrap().state,
+                TerminalLedgerState::Quarantined
+            );
+        }
+    }
+
+    #[test]
     fn initial_thread_sweep_child() {
         if std::env::var_os(SWEEP_CHILD).is_none() {
             return;
@@ -1064,17 +1223,14 @@ mod tests {
             .unwrap()
             .parse::<usize>()
             .unwrap();
-        if requested > 1 {
-            assert!(
-                evidence.0 > 1 && evidence.1 > 1,
-                "fixture corpus must exercise multiple workers at {requested} threads: {evidence:?}"
-            );
-        }
+        assert_eq!(evidence.0, requested);
+        assert!((1..=requested).contains(&evidence.1));
         println!(
-            "{SWEEP_LINE}{}:{}:{}:{}",
+            "{SWEEP_LINE}{}:{}:{}:{}:{}",
             build.post_quarantine_forest_digest(),
             build.queried_stubs(),
             build.condemned().len(),
+            evidence.0,
             evidence.1
         );
     }
@@ -1115,12 +1271,19 @@ mod tests {
         let parsed = signatures
             .iter()
             .map(|signature| {
-                let (fingerprint, participating) = signature.rsplit_once(':').unwrap();
-                (fingerprint, participating.parse::<usize>().unwrap())
+                let (prefix, participating) = signature.rsplit_once(':').unwrap();
+                let (fingerprint, effective) = prefix.rsplit_once(':').unwrap();
+                (
+                    fingerprint,
+                    effective.parse::<usize>().unwrap(),
+                    participating.parse::<usize>().unwrap(),
+                )
             })
             .collect::<Vec<_>>();
         assert!(parsed.windows(2).all(|pair| pair[0].0 == pair[1].0));
-        assert_eq!(parsed[0].1, 1);
-        assert!(parsed[1].1 > 1 && parsed[2].1 > 1);
+        for ((_, effective, participating), requested) in parsed.iter().zip([1, 4, 16]) {
+            assert_eq!(*effective, requested);
+            assert!((1..=requested).contains(participating));
+        }
     }
 }

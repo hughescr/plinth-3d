@@ -792,12 +792,19 @@ impl Forest {
             return Err(ForestError::QuarantineHasChildren);
         }
         let member = self.member(key).expect("checked active").clone();
-        let terminal_contacts = self
+        let terminal_contact_count = self
             .state
             .terminal_of
             .iter()
-            .filter_map(|(terminal, member_key)| (*member_key == key).then_some(*terminal))
-            .collect();
+            .filter(|(_, member_key)| **member_key == key)
+            .count();
+        let mut terminal_contacts = Vec::with_capacity(terminal_contact_count);
+        terminal_contacts.extend(
+            self.state
+                .terminal_of
+                .iter()
+                .filter_map(|(terminal, member_key)| (*member_key == key).then_some(*terminal)),
+        );
         let record = QuarantineRecord::from_member(key, &member, terminal_contacts);
         self.retire(key)?;
         self.state.dead.remove(&key);
@@ -1134,13 +1141,17 @@ impl Forest {
 /// outside the recoverable API and remain subject to the process allocator's
 /// standard abort semantics.
 pub(crate) fn modeled_initial_contact_bytes(contact_count: usize) -> Option<usize> {
+    let retained_terminal_ids = 2usize.checked_mul(std::mem::size_of::<u32>())?;
     let per_contact = std::mem::size_of::<Slot>()
         .checked_add(std::mem::size_of::<MemberKey>())?
         .checked_add(std::mem::size_of::<(MemberKey, Vec<MemberKey>)>())?
         .checked_add(std::mem::size_of::<MemberKey>())?
         .checked_add(std::mem::size_of::<(u32, MemberKey)>())?
         .checked_add(std::mem::size_of::<(u32, QuarantineRecord)>())?
-        .checked_add(std::mem::size_of::<(MemberKey, QuarantineRecord)>())?;
+        .checked_add(std::mem::size_of::<(MemberKey, QuarantineRecord)>())?
+        // Registration seals one QuarantineRecord and quarantine clones a
+        // second. Each owns its own one-terminal Vec payload.
+        .checked_add(retained_terminal_ids)?;
     std::mem::size_of::<ForestState>().checked_add(contact_count.checked_mul(per_contact)?)
 }
 
@@ -1301,6 +1312,21 @@ mod tests {
             embed_end: None,
             carried_mm2: finite(1.0),
         })
+    }
+
+    #[test]
+    fn initial_contact_model_bills_both_owned_terminal_id_payloads() {
+        let base = modeled_initial_contact_bytes(0).unwrap();
+        let one = modeled_initial_contact_bytes(1).unwrap();
+        let expected_per_contact = std::mem::size_of::<Slot>()
+            + std::mem::size_of::<MemberKey>()
+            + std::mem::size_of::<(MemberKey, Vec<MemberKey>)>()
+            + std::mem::size_of::<MemberKey>()
+            + std::mem::size_of::<(u32, MemberKey)>()
+            + std::mem::size_of::<(u32, QuarantineRecord)>()
+            + std::mem::size_of::<(MemberKey, QuarantineRecord)>()
+            + 2 * std::mem::size_of::<u32>();
+        assert_eq!(one - base, expected_per_contact);
     }
 
     #[test]

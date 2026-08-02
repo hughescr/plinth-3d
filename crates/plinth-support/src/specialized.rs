@@ -853,6 +853,59 @@ pub fn prepare_specialized_contacts(
     })
 }
 
+/// Construct an empty-contact test authority only after the complete
+/// production authority matrix has validated and produced a genuine plan.
+/// This helper is absent from non-test builds and cannot bypass normal replay
+/// validation.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn authority_consistent_empty_plan_for_initial_test(
+    mesh: &Mesh,
+    perception_config: &SupportPerceptionConfig<'_>,
+    frame: BuildFrame,
+    layers: &LayerPlan,
+    candidate_config: &CandidatePayloadConfig,
+    reservations: &[SpecializedOwnerReservation],
+    perception_limits: GenericPerceptionLimits,
+    generic: &GenericContactPlan,
+    regular: &SelectedContacts,
+    selection_config: &ContactSelectionConfig<'_>,
+    limits: SpecializedLimits,
+) -> Result<SpecializedContactPlan, SpecializedError> {
+    let mut plan = prepare_specialized_contacts(
+        mesh,
+        perception_config,
+        frame,
+        layers,
+        candidate_config,
+        reservations,
+        perception_limits,
+        generic,
+        regular,
+        selection_config,
+        limits,
+    )?;
+    plan.contacts.clear();
+    plan.load_partition =
+        crate::perception::authority_consistent_empty_load_partition_for_test(generic, mesh)?;
+    debug_assert!(plan.contacts.is_empty());
+    debug_assert!(plan.load_partition.rows().is_empty());
+    plan.validate_binding(
+        mesh,
+        perception_config,
+        frame,
+        layers,
+        candidate_config,
+        reservations,
+        perception_limits,
+        generic,
+        regular,
+        selection_config,
+        limits,
+    )?;
+    Ok(plan)
+}
+
 fn validate_regular(
     mesh: &Mesh,
     generic: &GenericContactPlan,
