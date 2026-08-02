@@ -4,11 +4,6 @@
 //! evaluated independently, flattened into one native clearance batch, and
 //! scattered back to their original indices.  Only the deterministic winner
 //! is committed to the live forest.
-#![allow(
-    dead_code,
-    reason = "crate-private controller is consumed by the pending support runner integration"
-)]
-
 use std::collections::{BTreeMap, BTreeSet};
 
 use geom_kernel::NativeSurface;
@@ -27,13 +22,14 @@ use crate::{
         AnchorGeometryAuthority, AnchorSearchConfig, AnchorSearchError, AnchorTerminalBinding,
         QualifiedAnchorSeat, ValidatedModelAnchor,
     },
-    SelectedContact,
+    BuildFrame, SelectedContact,
 };
 
 const MILLIMETRES_PER_MILLILITRE: f64 = 1_000.0;
 const DEGENERATE_MM: f64 = 1e-6;
 const KDTREE_REBUILD_EVERY: usize = 25;
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct XiaAngles {
     pub(crate) child_one_turn_deg: f64,
@@ -42,6 +38,7 @@ pub(crate) struct XiaAngles {
 }
 
 /// Frozen Xia alpha=1/2 closed form from `cco.py::xia_angles`.
+#[cfg(test)]
 pub(crate) fn xia_angles(m1: f64, m2: f64) -> XiaAngles {
     let total = m1 + m2;
     if total <= 0.0 {
@@ -67,7 +64,7 @@ pub(crate) fn xia_angles(m1: f64, m2: f64) -> XiaAngles {
 }
 
 /// Frozen bounded Weiszfeld polish: exactly `iterations` updates at most.
-pub(crate) fn weighted_fermat_point(
+fn weighted_fermat_point(
     targets: &[([f64; 3], f64)],
     seed: [f64; 3],
     iterations: usize,
@@ -100,30 +97,97 @@ pub(crate) fn weighted_fermat_point(
 pub(crate) struct TerminalCcoRequest {
     terminal_id: u32,
     stub: MemberKey,
-    stub_end_mm: [Finite; 3],
-    carried_mm2: Finite,
-    tip_radius_mm: PositiveFinite,
-    plate_z_mm: Finite,
+    stub_snapshot: Member,
+    frame: BuildFrame,
 }
 
 impl TerminalCcoRequest {
-    pub(crate) fn new(
+    pub(crate) fn bind(
+        forest: &Forest,
         terminal_id: u32,
-        stub: MemberKey,
-        stub_end_mm: [Finite; 3],
-        carried_mm2: Finite,
-        tip_radius_mm: PositiveFinite,
-        plate_z_mm: Finite,
-    ) -> Self {
-        Self {
+        frame: BuildFrame,
+    ) -> Result<Self, CcoError> {
+        let stub = forest
+            .terminal(terminal_id)
+            .ok_or(CcoError::InvalidTerminalStub {
+                terminal_id,
+                reason: "terminal map has no live member",
+            })?;
+        let stub_snapshot = forest
+            .member(stub)
+            .ok_or(CcoError::InvalidTerminalStub {
+                terminal_id,
+                reason: "terminal key is stale",
+            })?
+            .clone();
+        validate_terminal_stub(forest, terminal_id, stub, &stub_snapshot)?;
+        Ok(Self {
             terminal_id,
             stub,
-            stub_end_mm,
-            carried_mm2,
-            tip_radius_mm,
-            plate_z_mm,
-        }
+            stub_snapshot,
+            frame,
+        })
     }
+
+    fn validate(&self, forest: &Forest) -> Result<(), CcoError> {
+        if forest.terminal(self.terminal_id) != Some(self.stub)
+            || forest.member(self.stub) != Some(&self.stub_snapshot)
+        {
+            return Err(CcoError::StaleTerminal(self.terminal_id));
+        }
+        validate_terminal_stub(forest, self.terminal_id, self.stub, &self.stub_snapshot)
+    }
+
+    fn stub_end_mm(&self) -> [Finite; 3] {
+        self.stub_snapshot.p1_mm()
+    }
+
+    fn carried_mm2(&self) -> Finite {
+        self.stub_snapshot.carried_mm2()
+    }
+
+    fn tip_radius_mm(&self) -> PositiveFinite {
+        self.stub_snapshot.terminal_radius_mm().get()
+    }
+
+    fn plate_z_mm(&self) -> Finite {
+        self.frame.plate_z_mm()
+    }
+}
+
+fn validate_terminal_stub(
+    forest: &Forest,
+    terminal_id: u32,
+    stub: MemberKey,
+    member: &Member,
+) -> Result<(), CcoError> {
+    let invalid = |reason| CcoError::InvalidTerminalStub {
+        terminal_id,
+        reason,
+    };
+    if !matches!(member.kind(), MemberKind::Stub) {
+        return Err(invalid("terminal member is not a stub"));
+    }
+    if member.owner() != &Owner::Contact(terminal_id) {
+        return Err(invalid("stub owner does not match terminal"));
+    }
+    if member.embed_end() != Some(EmbedEnd::Terminalward) {
+        return Err(invalid("stub is not terminalward-embedded"));
+    }
+    if forest.parent_of(stub).is_some() {
+        return Err(invalid("stub is already parented"));
+    }
+    if norm(sub(
+        member.p1_mm().map(Finite::get),
+        member.p0_mm().map(Finite::get),
+    )) <= DEGENERATE_MM
+    {
+        return Err(invalid("stub endpoints are degenerate"));
+    }
+    if member.carried_mm2().get() < 0.0 {
+        return Err(invalid("stub carried area is negative"));
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -157,6 +221,13 @@ pub(crate) enum CcoError {
     Constants(String),
     #[error("terminal {0} is not bound to its requested live stub")]
     StaleTerminal(u32),
+    #[error("terminal {terminal_id} has invalid CCO stub state: {reason}")]
+    InvalidTerminalStub {
+        terminal_id: u32,
+        reason: &'static str,
+    },
+    #[error("anchor route is not the exact binding used for this CCO request")]
+    AnchorBindingMismatch,
     #[error("CCO input or derived geometry is not finite and positive where required")]
     InvalidGeometry,
     #[error(transparent)]
@@ -276,41 +347,6 @@ impl Config {
     }
 }
 
-/// Grow one already-bound terminal using current plate and bifurcation CCO
-/// families.  No candidate can be constructed outside this crate, and the
-/// live forest changes only after the batched verdict selects a winner.
-pub(crate) fn grow_terminal(
-    forest: &mut Forest,
-    request: &TerminalCcoRequest,
-    surface: &NativeSurface,
-) -> Result<TerminalCcoOutcome, CcoError> {
-    grow_terminal_inner(forest, request, surface, Vec::new(), None, None)
-}
-
-pub(crate) fn grow_terminal_with_anchor_seats(
-    forest: &mut Forest,
-    request: &TerminalCcoRequest,
-    contact: &SelectedContact,
-    terminal: AnchorTerminalBinding,
-    anchor_config: AnchorSearchConfig,
-    geometry: &AnchorGeometryAuthority<'_>,
-    seats: Vec<QualifiedAnchorSeat>,
-) -> Result<TerminalCcoOutcome, CcoError> {
-    grow_terminal_inner(
-        forest,
-        request,
-        geometry.surface(),
-        seats,
-        Some(AnchorValidationContext {
-            contact,
-            terminal,
-            config: anchor_config,
-            geometry,
-        }),
-        None,
-    )
-}
-
 struct AnchorValidationContext<'a> {
     contact: &'a SelectedContact,
     terminal: AnchorTerminalBinding,
@@ -327,6 +363,7 @@ pub(crate) struct AnchorTerminalRoute<'a> {
 }
 
 #[derive(Default)]
+/// The only integration seam retained for the pending support runner.
 pub(crate) struct CcoController {
     hosts: HostCache,
     inserted: usize,
@@ -334,7 +371,7 @@ pub(crate) struct CcoController {
 
 #[derive(Default)]
 struct HostCache {
-    indexed_slots: u32,
+    indexed_members: BTreeSet<MemberKey>,
     samples: Vec<([f64; 3], MemberKey)>,
 }
 
@@ -347,7 +384,7 @@ impl CcoController {
     ) -> Result<TerminalCcoOutcome, CcoError> {
         let config = Config::current()?;
         let hosts = self.hosts.nearest(
-            request.stub_end_mm.map(Finite::get),
+            request.stub_end_mm().map(Finite::get),
             config.bifurcation_hosts,
             forest,
         );
@@ -362,9 +399,10 @@ impl CcoController {
         request: &TerminalCcoRequest,
         route: AnchorTerminalRoute<'_>,
     ) -> Result<TerminalCcoOutcome, CcoError> {
+        validate_anchor_route(request, route.terminal)?;
         let config = Config::current()?;
         let hosts = self.hosts.nearest(
-            request.stub_end_mm.map(Finite::get),
+            request.stub_end_mm().map(Finite::get),
             config.bifurcation_hosts,
             forest,
         );
@@ -393,15 +431,23 @@ impl CcoController {
     }
 }
 
+fn validate_anchor_route(
+    request: &TerminalCcoRequest,
+    terminal: AnchorTerminalBinding,
+) -> Result<(), CcoError> {
+    if terminal.terminal_id() != request.terminal_id
+        || terminal.stub() != request.stub
+        || terminal.stub_end_mm() != request.stub_end_mm()
+    {
+        return Err(CcoError::AnchorBindingMismatch);
+    }
+    Ok(())
+}
+
 impl HostCache {
     fn rebuild(&mut self, forest: &Forest) {
         self.samples.clear();
-        self.indexed_slots = forest
-            .live_members()
-            .into_iter()
-            .map(MemberKey::slot)
-            .max()
-            .map_or(0, |slot| slot.saturating_add(1));
+        self.indexed_members.clear();
         for key in forest.live_tree_members() {
             let Some(member) = forest.member(key) else {
                 continue;
@@ -409,6 +455,7 @@ impl HostCache {
             if matches!(member.kind(), MemberKind::Stub) {
                 continue;
             }
+            self.indexed_members.insert(key);
             let p0 = member.p0_mm().map(Finite::get);
             let p1 = member.p1_mm().map(Finite::get);
             self.samples.push((p0, key));
@@ -429,7 +476,7 @@ impl HostCache {
             }
         }
         for key in forest.live_tree_members() {
-            if key.slot() < self.indexed_slots {
+            if self.indexed_members.contains(&key) {
                 continue;
             }
             let Some(member) = forest.member(key) else {
@@ -466,9 +513,7 @@ fn grow_terminal_inner(
     anchor_context: Option<AnchorValidationContext<'_>>,
     cached_hosts: Option<Vec<MemberKey>>,
 ) -> Result<TerminalCcoOutcome, CcoError> {
-    if forest.terminal(request.terminal_id) != Some(request.stub) {
-        return Err(CcoError::StaleTerminal(request.terminal_id));
-    }
+    request.validate(forest)?;
     let config = Config::current()?;
     let descriptors = generate_descriptors(forest, request, &config, &seats, cached_hosts);
     let candidates_generated = descriptors.len();
@@ -577,11 +622,7 @@ fn grow_terminal_inner(
                 .then_some(candidate)
         })
         .collect();
-    survivors.sort_by(|left, right| {
-        left.price_ml
-            .total_cmp(&right.price_ml)
-            .then(left.generation_index.cmp(&right.generation_index))
-    });
+    survivors.sort_by(|left, right| compare_candidates(left, right));
     let Some(winner) = survivors.first() else {
         return Ok(TerminalCcoOutcome {
             winner: None,
@@ -620,6 +661,12 @@ fn grow_terminal_inner(
     })
 }
 
+fn compare_candidates(left: &EvaluatedCandidate, right: &EvaluatedCandidate) -> std::cmp::Ordering {
+    left.price_ml
+        .total_cmp(&right.price_ml)
+        .then(left.generation_index.cmp(&right.generation_index))
+}
+
 fn generate_descriptors(
     forest: &Forest,
     request: &TerminalCcoRequest,
@@ -627,7 +674,7 @@ fn generate_descriptors(
     anchor_seats: &[QualifiedAnchorSeat],
     cached_hosts: Option<Vec<MemberKey>>,
 ) -> Vec<Descriptor> {
-    let se = request.stub_end_mm.map(Finite::get);
+    let se = request.stub_end_mm().map(Finite::get);
     let mut out = vec![Descriptor::Plate {
         xy: [se[0], se[1]],
         top_z: se[2],
@@ -640,7 +687,7 @@ fn generate_descriptors(
             let angle = std::f64::consts::TAU * direction as f64 / config.trunk_directions as f64;
             let xy = [se[0] + radius * angle.cos(), se[1] + radius * angle.sin()];
             let top_z = se[2] - radius / config.branch_angle_deg.to_radians().tan().max(1e-9);
-            if top_z > request.plate_z_mm.get() + 1.0 {
+            if top_z > request.plate_z_mm().get() + 1.0 {
                 out.push(Descriptor::Plate { xy, top_z });
             }
         }
@@ -735,21 +782,21 @@ fn apply_model_anchor(
     point_mm: [f64; 3],
     config: &Config,
 ) -> Result<bool, CcoError> {
-    let stub_end = request.stub_end_mm.map(Finite::get);
+    let stub_end = request.stub_end_mm().map(Finite::get);
     if norm(sub(point_mm, stub_end)) <= DEGENERATE_MM
         || !within_cone(stub_end, point_mm, config.min_shoot_radius_mm.get(), config)
     {
         return Ok(false);
     }
     let strut = forest.add_member(Member::new(MemberSpec {
-        p0_mm: request.stub_end_mm,
+        p0_mm: request.stub_end_mm(),
         p1_mm: finite3(point_mm)?,
         r0_mm: TerminalEndRadius::new(cco_terminal_radius(request, config)?),
         r1_mm: RootwardEndRadius::new(config.min_shoot_radius_mm),
         kind: MemberKind::Strut,
         owner: Owner::Contact(request.terminal_id),
         embed_end: Some(EmbedEnd::Rootward),
-        carried_mm2: request.carried_mm2,
+        carried_mm2: request.carried_mm2(),
     }));
     forest.set_parent(request.stub, Some(strut))?;
     Ok(true)
@@ -762,9 +809,9 @@ fn apply_plate(
     top_z: f64,
     config: &Config,
 ) -> Result<bool, CcoError> {
-    let se = request.stub_end_mm.map(Finite::get);
+    let se = request.stub_end_mm().map(Finite::get);
     let top = [xy[0], xy[1], top_z];
-    let bottom = [xy[0], xy[1], request.plate_z_mm.get()];
+    let bottom = [xy[0], xy[1], request.plate_z_mm().get()];
     if top_z - bottom[2] <= DEGENERATE_MM {
         return Ok(false);
     }
@@ -808,7 +855,7 @@ fn apply_bifurcation(
     };
     let p0 = host.p0_mm().map(Finite::get);
     let p1 = host.p1_mm().map(Finite::get);
-    let se = request.stub_end_mm.map(Finite::get);
+    let se = request.stub_end_mm().map(Finite::get);
     let direction = sub(p1, p0);
     let length_squared = dot(direction, direction);
     if length_squared < 1e-12 {
@@ -818,7 +865,7 @@ fn apply_bifurcation(
         (dot(sub(se, p0), direction) / length_squared).clamp(config.split_start, config.split_end);
     let seed = add(p0, scale(direction, t0));
     let m1 = host.carried_mm2().get().max(1e-9);
-    let m2 = request.carried_mm2.get().max(1e-9);
+    let m2 = request.carried_mm2().get().max(1e-9);
     let mut junction = weighted_fermat_point(
         &[(p0, m1.sqrt()), (p1, (m1 + m2).sqrt()), (se, m2.sqrt())],
         seed,
@@ -876,7 +923,7 @@ fn apply_bifurcation(
     )?);
     forest.set_parent(child, Some(upper))?;
     forest.set_parent(request.stub, Some(child))?;
-    propagate_carried(forest, upper, request.carried_mm2)?;
+    propagate_carried(forest, upper, request.carried_mm2())?;
     Ok(true)
 }
 
@@ -961,7 +1008,7 @@ fn member(
         kind,
         owner: Owner::Contact(request.terminal_id),
         embed_end: None,
-        carried_mm2: request.carried_mm2,
+        carried_mm2: request.carried_mm2(),
     }))
 }
 
@@ -971,7 +1018,7 @@ fn cco_terminal_radius(
 ) -> Result<PositiveFinite, CcoError> {
     PositiveFinite::new(
         request
-            .tip_radius_mm
+            .tip_radius_mm()
             .get()
             .max(config.min_shoot_radius_mm.get()),
     )
@@ -1038,7 +1085,7 @@ fn candidate_price(
         .ok_or(CcoError::InvalidGeometry)?;
     let (diagonal, column) = if candidate
         .member(first)
-        .is_some_and(|member| member.p1_mm()[2].get() == request.plate_z_mm.get())
+        .is_some_and(|member| member.p1_mm()[2].get() == request.plate_z_mm().get())
     {
         (None, first)
     } else {
@@ -1068,7 +1115,7 @@ fn candidate_price(
         [0.0, 0.0, priced_span],
         MemberKind::Trunk,
         config.min_trunk_radius_mm,
-        request.carried_mm2,
+        request.carried_mm2(),
     )?;
     let column_price = std::f64::consts::PI * priced_radius.get().powi(2) * column_length
         / MILLIMETRES_PER_MILLILITRE;
@@ -1273,14 +1320,13 @@ mod tests {
             carried_mm2: Finite::new(1.0).unwrap(),
         });
         let key = key_source.add_member(temporary);
-        let request = TerminalCcoRequest::new(
+        key_source.register_terminal(0, key).unwrap();
+        let request = TerminalCcoRequest::bind(
+            &key_source,
             0,
-            key,
-            [Finite::new(0.0).unwrap(); 3],
-            Finite::new(1.0).unwrap(),
-            PositiveFinite::new(0.2).unwrap(),
-            Finite::new(0.0).unwrap(),
-        );
+            BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
+        )
+        .unwrap();
         let host = member(
             [0.0, 0.0, 0.0],
             [0.0, 0.0, 10.0],
@@ -1349,6 +1395,173 @@ mod tests {
         );
     }
 
+    #[test]
+    fn host_cache_treats_reused_low_slot_as_unindexed_tail() {
+        let finite = |value| Finite::new(value).unwrap();
+        let positive = |value| PositiveFinite::new(value).unwrap();
+        let make_host = |x: f64| {
+            Member::new(MemberSpec {
+                p0_mm: [finite(x), finite(0.0), finite(0.0)],
+                p1_mm: [finite(x), finite(0.0), finite(10.0)],
+                r0_mm: TerminalEndRadius::new(positive(0.4)),
+                r1_mm: RootwardEndRadius::new(positive(0.8)),
+                kind: MemberKind::Trunk,
+                owner: Owner::Generated {
+                    family: "cache-generation-vector".to_owned(),
+                    ordinal: 0,
+                },
+                embed_end: None,
+                carried_mm2: finite(1.0),
+            })
+        };
+        let mut forest = Forest::new();
+        let old = forest.add_member(make_host(50.0));
+        let mut cache = HostCache::default();
+        cache.rebuild(&forest);
+
+        forest.retire(old).unwrap();
+        let replacement = forest.add_member(make_host(0.0));
+        assert_eq!(replacement.slot(), old.slot());
+        assert_ne!(replacement, old);
+
+        assert_eq!(
+            cache.nearest([0.0, 0.0, 5.0], 1, &forest),
+            vec![replacement]
+        );
+    }
+
+    #[test]
+    fn bound_request_rejects_endpoint_load_radius_and_generation_changes() {
+        let (forest, request, _) = growth_fixture();
+
+        let mut changed_endpoint = forest.clone();
+        changed_endpoint
+            .set_endpoints(
+                request.stub,
+                request.stub_snapshot.p0_mm(),
+                [
+                    Finite::new(0.25).unwrap(),
+                    request.stub_end_mm()[1],
+                    request.stub_end_mm()[2],
+                ],
+            )
+            .unwrap();
+        assert!(matches!(
+            request.validate(&changed_endpoint),
+            Err(CcoError::StaleTerminal(7))
+        ));
+
+        let mut changed_load = forest.clone();
+        changed_load
+            .set_carried_mm2(request.stub, Finite::new(3.0).unwrap())
+            .unwrap();
+        assert!(matches!(
+            request.validate(&changed_load),
+            Err(CcoError::StaleTerminal(7))
+        ));
+
+        let mut changed_radius = forest.clone();
+        changed_radius
+            .set_radii(
+                request.stub,
+                TerminalEndRadius::new(PositiveFinite::new(0.21).unwrap()),
+                request.stub_snapshot.rootward_radius_mm(),
+            )
+            .unwrap();
+        assert!(matches!(
+            request.validate(&changed_radius),
+            Err(CcoError::StaleTerminal(7))
+        ));
+
+        let mut reused = forest.clone();
+        reused.retire(request.stub).unwrap();
+        let replacement = reused.add_member(request.stub_snapshot.clone());
+        assert_eq!(replacement.slot(), request.stub.slot());
+        assert_ne!(replacement, request.stub);
+        assert!(matches!(
+            request.validate(&reused),
+            Err(CcoError::StaleTerminal(7))
+        ));
+    }
+
+    #[test]
+    fn anchor_route_requires_the_exact_terminal_binding() {
+        let (_, request, _) = growth_fixture();
+        let different_endpoint = AnchorTerminalBinding::new(
+            request.terminal_id,
+            request.stub,
+            [
+                Finite::new(1.0).unwrap(),
+                request.stub_end_mm()[1],
+                request.stub_end_mm()[2],
+            ],
+        );
+        assert!(matches!(
+            validate_anchor_route(&request, different_endpoint),
+            Err(CcoError::AnchorBindingMismatch)
+        ));
+
+        let exact =
+            AnchorTerminalBinding::new(request.terminal_id, request.stub, request.stub_end_mm());
+        assert!(validate_anchor_route(&request, exact).is_ok());
+    }
+
+    #[test]
+    fn request_binding_refuses_non_stub_mismatched_owner_and_parented_state() {
+        let frame = BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap());
+        let (forest, request, _) = growth_fixture();
+
+        let mut wrong_kind = forest.clone();
+        wrong_kind
+            .set_kind(request.stub, MemberKind::Shoot)
+            .unwrap();
+        assert!(matches!(
+            TerminalCcoRequest::bind(&wrong_kind, 7, frame),
+            Err(CcoError::InvalidTerminalStub { .. })
+        ));
+
+        let mut parented = forest.clone();
+        let parent = parented.add_member(Member::new(MemberSpec {
+            p0_mm: request.stub_end_mm(),
+            p1_mm: [
+                Finite::new(0.0).unwrap(),
+                Finite::new(0.0).unwrap(),
+                Finite::new(0.0).unwrap(),
+            ],
+            r0_mm: TerminalEndRadius::new(PositiveFinite::new(0.35).unwrap()),
+            r1_mm: RootwardEndRadius::new(PositiveFinite::new(0.8).unwrap()),
+            kind: MemberKind::Trunk,
+            owner: Owner::Generated {
+                family: "binding-vector".to_owned(),
+                ordinal: 0,
+            },
+            embed_end: None,
+            carried_mm2: Finite::new(2.0).unwrap(),
+        }));
+        parented.set_parent(request.stub, Some(parent)).unwrap();
+        assert!(matches!(
+            TerminalCcoRequest::bind(&parented, 7, frame),
+            Err(CcoError::InvalidTerminalStub { .. })
+        ));
+
+        let mut wrong_owner = Forest::new();
+        let stub = wrong_owner.add_member(Member::new(MemberSpec {
+            p0_mm: request.stub_snapshot.p0_mm(),
+            p1_mm: request.stub_snapshot.p1_mm(),
+            r0_mm: request.stub_snapshot.terminal_radius_mm(),
+            r1_mm: request.stub_snapshot.rootward_radius_mm(),
+            kind: MemberKind::Stub,
+            owner: Owner::Contact(8),
+            embed_end: Some(EmbedEnd::Terminalward),
+            carried_mm2: request.stub_snapshot.carried_mm2(),
+        }));
+        wrong_owner.register_terminal(7, stub).unwrap();
+        assert!(matches!(
+            TerminalCcoRequest::bind(&wrong_owner, 7, frame),
+            Err(CcoError::InvalidTerminalStub { .. })
+        ));
+    }
+
     fn growth_fixture() -> (Forest, TerminalCcoRequest, NativeSurface) {
         let finite = |value| Finite::new(value).unwrap();
         let positive = |value| PositiveFinite::new(value).unwrap();
@@ -1364,14 +1577,9 @@ mod tests {
             carried_mm2: finite(2.0),
         }));
         forest.register_terminal(7, stub).unwrap();
-        let request = TerminalCcoRequest::new(
-            7,
-            stub,
-            [finite(0.0), finite(0.0), finite(12.5)],
-            finite(2.0),
-            positive(0.2),
-            finite(0.0),
-        );
+        let request =
+            TerminalCcoRequest::bind(&forest, 7, BuildFrame::new(finite(0.0), positive(5.0)))
+                .unwrap();
         let vertices = vec![
             [100.0, 100.0, 100.0],
             [101.0, 100.0, 100.0],
@@ -1392,10 +1600,99 @@ mod tests {
     }
 
     #[test]
+    fn candidate_source_ledger_vectors() {
+        let (mut forest, request, _) = growth_fixture();
+        let finite = |value| Finite::new(value).unwrap();
+        let positive = |value| PositiveFinite::new(value).unwrap();
+        let host = forest.add_member(Member::new(MemberSpec {
+            p0_mm: [finite(1.0), finite(0.0), finite(20.0)],
+            p1_mm: [finite(1.0), finite(0.0), finite(0.0)],
+            r0_mm: TerminalEndRadius::new(positive(0.45)),
+            r1_mm: RootwardEndRadius::new(positive(0.8)),
+            kind: MemberKind::Trunk,
+            owner: Owner::Generated {
+                family: "source-ledger-host".to_owned(),
+                ordinal: 0,
+            },
+            embed_end: None,
+            carried_mm2: finite(4.0),
+        }));
+        let config = Config::current().unwrap();
+        let descriptors = [
+            Descriptor::Plate {
+                xy: [0.0, 0.0],
+                top_z: 12.5,
+            },
+            Descriptor::ModelAnchor {
+                seat_index: 0,
+                point_mm: [3.0, 0.0, 5.0],
+            },
+            Descriptor::Bifurcate { host },
+        ];
+        let candidates = descriptors
+            .iter()
+            .enumerate()
+            .map(|(index, descriptor)| {
+                evaluate(&forest, &request, descriptor, index, &config)
+                    .unwrap()
+                    .unwrap_or_else(|| {
+                        panic!("frozen {:?} candidate is feasible", descriptor.family())
+                    })
+            })
+            .collect::<Vec<_>>();
+        // Frozen from the live `cco.py` family equations and generation ledger:
+        // plate candidates precede model anchors, which precede bifurcations;
+        // price wins and generation index is the stable equal-price tiebreak.
+        assert_eq!(
+            candidates.iter().map(|c| c.price_ml).collect::<Vec<_>>(),
+            vec![
+                0.025_132_741_228_718_35,
+                0.004_674_708_071_732_998,
+                0.010_013_605_074_968_252,
+            ]
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|c| c.forest.digest())
+                .collect::<Vec<_>>(),
+            vec![
+                14_611_506_079_914_898_802,
+                12_687_715_610_185_838_542,
+                10_584_030_910_390_518_412,
+            ]
+        );
+        let mut by_price = candidates.iter().collect::<Vec<_>>();
+        by_price.sort_by(|left, right| compare_candidates(left, right));
+        assert_eq!(
+            by_price.iter().map(|c| c.family).collect::<Vec<_>>(),
+            vec![
+                CandidateFamily::ModelAnchor,
+                CandidateFamily::Bifurcation,
+                CandidateFamily::PlateDescent,
+            ]
+        );
+
+        let later = evaluate(&forest, &request, &descriptors[0], 9, &config)
+            .unwrap()
+            .unwrap();
+        let earlier = evaluate(&forest, &request, &descriptors[0], 3, &config)
+            .unwrap()
+            .unwrap();
+        assert_eq!(later.price_ml, earlier.price_ml);
+        assert_eq!(
+            compare_candidates(&earlier, &later),
+            std::cmp::Ordering::Less
+        );
+    }
+
+    #[test]
     fn terminal_growth_commits_only_the_batched_winner() {
         let (mut forest, request, surface) = growth_fixture();
         let before = forest.digest();
-        let outcome = grow_terminal(&mut forest, &request, &surface).unwrap();
+        let outcome = CcoController::default()
+            .grow_terminal(&mut forest, &request, &surface)
+            .unwrap();
         let winner = outcome.winner.expect("plate descent survives");
         assert_eq!(winner.family, CandidateFamily::PlateDescent);
         assert_eq!(outcome.clearance_batches, 1);
@@ -1410,7 +1707,9 @@ mod tests {
         let (mut forest, request, surface) = growth_fixture();
         let before = forest.digest();
         let outer = forest.checkpoint();
-        grow_terminal(&mut forest, &request, &surface).unwrap();
+        CcoController::default()
+            .grow_terminal(&mut forest, &request, &surface)
+            .unwrap();
         assert_ne!(forest.digest(), before);
         forest.rollback(outer).unwrap();
         assert_eq!(forest.digest(), before);
@@ -1421,7 +1720,9 @@ mod tests {
         const CHILD: &str = "PLINTH_CCO_SWEEP_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let (mut forest, request, surface) = growth_fixture();
-            let outcome = grow_terminal(&mut forest, &request, &surface).unwrap();
+            let outcome = CcoController::default()
+                .grow_terminal(&mut forest, &request, &surface)
+                .unwrap();
             println!(
                 "CCO_SWEEP_DIGEST={:016x}:{}:{}",
                 forest.digest(),
