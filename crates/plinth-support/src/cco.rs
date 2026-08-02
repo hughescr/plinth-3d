@@ -16,17 +16,21 @@ use crate::forest::{
     RootwardEndRadius, TerminalEndRadius,
 };
 use crate::legacy_compat::{LegacyCompatibility, LegacyCompatibilityError};
+use crate::transient::{derive_brace_attachments, TransientError};
 use crate::{
     anchor::{
-        validate_anchor_feet, AnchorFootOutcome, AnchorFootRefusal, AnchorFootRequest,
-        AnchorGeometryAuthority, AnchorSearchConfig, AnchorSearchError, AnchorTerminalBinding,
-        QualifiedAnchorSeat, ValidatedModelAnchor,
+        discover_rewire_anchor_seats, validate_anchor_feet, validate_rewire_anchor_feet,
+        AnchorFootOutcome, AnchorFootRefusal, AnchorFootRefusalReason, AnchorFootRequest,
+        AnchorGeometryAuthority, AnchorSearchConfig, AnchorSearchError, AnchorSeatRefusal,
+        AnchorTerminalBinding, QualifiedAnchorSeat, RewireAnchorBinding, SurfaceAnchorSample,
+        ValidatedModelAnchor,
     },
     BuildFrame, SelectedContact,
 };
 
 const MILLIMETRES_PER_MILLILITRE: f64 = 1_000.0;
 const DEGENERATE_MM: f64 = 1e-6;
+const REWIRE_DEGENERATE_MM: f64 = 1e-4;
 const KDTREE_REBUILD_EVERY: usize = 25;
 
 #[cfg(test)]
@@ -98,6 +102,9 @@ pub(crate) struct TerminalCcoRequest {
     terminal_id: u32,
     stub: MemberKey,
     stub_snapshot: Member,
+    attach_point_mm: [Finite; 3],
+    attach_radius_mm: PositiveFinite,
+    connector_owner: Owner,
     frame: BuildFrame,
 }
 
@@ -124,6 +131,9 @@ impl TerminalCcoRequest {
         Ok(Self {
             terminal_id,
             stub,
+            attach_point_mm: stub_snapshot.p1_mm(),
+            attach_radius_mm: stub_snapshot.terminal_radius_mm().get(),
+            connector_owner: Owner::Contact(terminal_id),
             stub_snapshot,
             frame,
         })
@@ -139,7 +149,7 @@ impl TerminalCcoRequest {
     }
 
     fn stub_end_mm(&self) -> [Finite; 3] {
-        self.stub_snapshot.p1_mm()
+        self.attach_point_mm
     }
 
     fn carried_mm2(&self) -> Finite {
@@ -147,12 +157,307 @@ impl TerminalCcoRequest {
     }
 
     fn tip_radius_mm(&self) -> PositiveFinite {
-        self.stub_snapshot.terminal_radius_mm().get()
+        self.attach_radius_mm
     }
 
     fn plate_z_mm(&self) -> Finite {
         self.frame.plate_z_mm()
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum RewireSpliceFacts {
+    DetachedSubtree {
+        root: MemberKey,
+        old_parent: MemberKey,
+        carried_mm2: Finite,
+    },
+    RootReanchor {
+        retiring_root: MemberKey,
+        own_children: Vec<MemberKey>,
+        fixed_point_mm: [Finite; 3],
+    },
+}
+
+/// Unforgeable immutable candidate checkpoint for one current rewire root.
+/// Geometry, radii, carried load, subtree membership, brace exclusions, and
+/// splice facts are all derived from one exact generational Forest snapshot.
+#[derive(Clone, Debug)]
+pub(crate) struct RewireCcoBinding {
+    snapshot: Forest,
+    snapshot_digest: u64,
+    live_digest: u64,
+    request: TerminalCcoRequest,
+    root_snapshot: Member,
+    subtree: BTreeSet<MemberKey>,
+    excluded_hosts: BTreeSet<MemberKey>,
+    splice: RewireSpliceFacts,
+}
+
+pub(crate) struct RewireAnchorRoute<'a> {
+    pub(crate) samples: &'a [SurfaceAnchorSample],
+    pub(crate) delicacy_by_face: Option<&'a [f64]>,
+    pub(crate) config: AnchorSearchConfig,
+    pub(crate) geometry: &'a AnchorGeometryAuthority<'a>,
+}
+
+impl RewireCcoBinding {
+    pub(crate) fn bind_detached_subtree(
+        forest: &Forest,
+        root: MemberKey,
+        frame: BuildFrame,
+    ) -> Result<Self, CcoError> {
+        let root_member = validate_rewire_root(forest, root)?;
+        let old_parent = forest.parent_of(root).ok_or(CcoError::InvalidRewireRoot {
+            root,
+            reason: "detached-subtree root has no parent",
+        })?;
+        if forest.children_of(old_parent).len() < 2 {
+            return Err(CcoError::InvalidRewireRoot {
+                root,
+                reason: "detachment would leave a pass-through parent",
+            });
+        }
+        Self::bind(
+            forest,
+            root,
+            root_member.p1_mm(),
+            root_member.rootward_radius_mm().get(),
+            frame,
+            Some(old_parent),
+        )
+    }
+
+    pub(crate) fn bind_root_reanchor(
+        forest: &Forest,
+        root: MemberKey,
+        frame: BuildFrame,
+    ) -> Result<Self, CcoError> {
+        let root_member = validate_rewire_root(forest, root)?;
+        if forest.parent_of(root).is_some() {
+            return Err(CcoError::InvalidRewireRoot {
+                root,
+                reason: "root-reanchor binding is not parentless",
+            });
+        }
+        Self::bind(
+            forest,
+            root,
+            root_member.p0_mm(),
+            root_member.terminal_radius_mm().get(),
+            frame,
+            None,
+        )
+    }
+
+    fn bind(
+        forest: &Forest,
+        root: MemberKey,
+        attach_point_mm: [Finite; 3],
+        attach_radius_mm: PositiveFinite,
+        frame: BuildFrame,
+        old_parent: Option<MemberKey>,
+    ) -> Result<Self, CcoError> {
+        let root_snapshot = forest
+            .member(root)
+            .ok_or(CcoError::InvalidRewireRoot {
+                root,
+                reason: "rewire root is stale",
+            })?
+            .clone();
+        let subtree = subtree_members(forest, root);
+        let braces = forest.braces().into_iter().collect::<BTreeSet<_>>();
+        let braced_hosts = derive_brace_attachments(forest)?
+            .into_iter()
+            .filter_map(|(host, attachments)| (!attachments.is_empty()).then_some(host))
+            .collect::<BTreeSet<_>>();
+        if old_parent.is_none() && braced_hosts.contains(&root) {
+            return Err(CcoError::InvalidRewireRoot {
+                root,
+                reason: "root-reanchor would retire a braced host",
+            });
+        }
+        let mut excluded_hosts = subtree.clone();
+        excluded_hosts.extend(forest.dead().iter().copied());
+        excluded_hosts.extend(braces);
+        excluded_hosts.extend(braced_hosts);
+        if let Some(parent) = old_parent {
+            excluded_hosts.insert(parent);
+        }
+        let own_children = forest.children_of(root);
+        let splice = old_parent.map_or_else(
+            || RewireSpliceFacts::RootReanchor {
+                retiring_root: root,
+                own_children,
+                fixed_point_mm: attach_point_mm,
+            },
+            |old_parent| RewireSpliceFacts::DetachedSubtree {
+                root,
+                old_parent,
+                carried_mm2: root_snapshot.carried_mm2(),
+            },
+        );
+        let request = TerminalCcoRequest {
+            terminal_id: root.slot(),
+            stub: root,
+            stub_snapshot: root_snapshot.clone(),
+            attach_point_mm,
+            attach_radius_mm,
+            connector_owner: Owner::Contact(root.slot()),
+            frame,
+        };
+        let mut snapshot = forest.clone();
+        if let Some(parent) = old_parent {
+            snapshot.set_parent(root, None)?;
+            slim_rewire_ancestors(
+                &mut snapshot,
+                parent,
+                root_snapshot.carried_mm2(),
+                &Config::current()?,
+            )?;
+        }
+        let snapshot_digest = snapshot.digest();
+        Ok(Self {
+            snapshot,
+            snapshot_digest,
+            live_digest: forest.digest(),
+            request,
+            root_snapshot,
+            subtree,
+            excluded_hosts,
+            splice,
+        })
+    }
+
+    pub(crate) fn validate_live(&self, forest: &Forest) -> Result<(), CcoError> {
+        let root = self.request.stub;
+        if forest.member(root) != Some(&self.root_snapshot) {
+            return Err(CcoError::StaleRewireBinding(root));
+        }
+        match &self.splice {
+            RewireSpliceFacts::DetachedSubtree { old_parent, .. } => {
+                if forest.parent_of(root) != Some(*old_parent) {
+                    return Err(CcoError::ReanchorBindingMismatch(root));
+                }
+            }
+            RewireSpliceFacts::RootReanchor { own_children, .. } => {
+                if forest.parent_of(root).is_some() || forest.children_of(root) != *own_children {
+                    return Err(CcoError::ReanchorBindingMismatch(root));
+                }
+            }
+        }
+        if forest.digest() != self.live_digest || subtree_members(forest, root) != self.subtree {
+            return Err(CcoError::StaleRewireBinding(root));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn splice(&self) -> &RewireSpliceFacts {
+        &self.splice
+    }
+
+    pub(crate) fn excluded_hosts(&self) -> &BTreeSet<MemberKey> {
+        &self.excluded_hosts
+    }
+
+    fn anchor_binding(&self) -> RewireAnchorBinding {
+        RewireAnchorBinding::new(
+            self.request.stub,
+            self.live_digest,
+            self.snapshot_digest,
+            self.request.attach_point_mm,
+        )
+    }
+}
+
+/// Exact `rewire.py::_slim_ancestors` preparation of the immutable
+/// detached-subtree checkpoint. Candidate evaluation starts from this one
+/// prepared base so every descriptor sees identical old-path slimming.
+fn slim_rewire_ancestors(
+    forest: &mut Forest,
+    mut key: MemberKey,
+    removed_carried_mm2: Finite,
+    config: &Config,
+) -> Result<(), CcoError> {
+    loop {
+        let member = forest
+            .member(key)
+            .ok_or(ForestError::InactiveKey(key))?
+            .clone();
+        let carried =
+            Finite::new((member.carried_mm2().get() - removed_carried_mm2.get()).max(0.0))
+                .map_err(|_| CcoError::InvalidGeometry)?;
+        forest.set_carried_mm2(key, carried)?;
+        let murray = forest
+            .children_of(key)
+            .into_iter()
+            .filter_map(|child| forest.member(child))
+            .map(|child| child.rootward_radius_mm().get().get().powi(4))
+            .sum::<f64>()
+            .powf(0.25);
+        let kind_floor = if matches!(member.kind(), MemberKind::Trunk) {
+            config.min_trunk_radius_mm
+        } else {
+            config.min_shoot_radius_mm
+        };
+        let own_floor = o10_uniform_radius_for_span(
+            member.p0_mm().map(Finite::get),
+            member.p1_mm().map(Finite::get),
+            member.kind().clone(),
+            kind_floor,
+            carried,
+        )?;
+        let radius = PositiveFinite::new(murray.max(own_floor.get()))
+            .map_err(|_| CcoError::InvalidGeometry)?;
+        forest.set_radii(
+            key,
+            TerminalEndRadius::new(radius),
+            RootwardEndRadius::new(radius),
+        )?;
+        let Some(parent) = forest.parent_of(key) else {
+            break;
+        };
+        key = parent;
+    }
+    Ok(())
+}
+
+fn validate_rewire_root(forest: &Forest, root: MemberKey) -> Result<&Member, CcoError> {
+    let member = forest.member(root).ok_or(CcoError::InvalidRewireRoot {
+        root,
+        reason: "rewire root is not live",
+    })?;
+    if !forest.live_tree_members().contains(&root) {
+        return Err(CcoError::InvalidRewireRoot {
+            root,
+            reason: "rewire root is a brace",
+        });
+    }
+    if matches!(member.kind(), MemberKind::Stub) {
+        return Err(CcoError::InvalidRewireRoot {
+            root,
+            reason: "rewire root is a terminal stub",
+        });
+    }
+    if member.carried_mm2().get() < 0.0 {
+        return Err(CcoError::InvalidRewireRoot {
+            root,
+            reason: "rewire root carried area is negative",
+        });
+    }
+    Ok(member)
+}
+
+fn subtree_members(forest: &Forest, root: MemberKey) -> BTreeSet<MemberKey> {
+    let mut subtree = BTreeSet::new();
+    let mut stack = vec![root];
+    while let Some(key) = stack.pop() {
+        if !subtree.insert(key) {
+            continue;
+        }
+        stack.extend(forest.children_of(key));
+    }
+    subtree
 }
 
 fn validate_terminal_stub(
@@ -228,6 +533,15 @@ pub(crate) enum CcoError {
     },
     #[error("anchor route is not the exact binding used for this CCO request")]
     AnchorBindingMismatch,
+    #[error("rewire root {root:?} is invalid: {reason}")]
+    InvalidRewireRoot {
+        root: MemberKey,
+        reason: &'static str,
+    },
+    #[error("rewire binding for root {0:?} no longer matches live generational state")]
+    StaleRewireBinding(MemberKey),
+    #[error("rewire splice binding for root {0:?} no longer matches its reanchor facts")]
+    ReanchorBindingMismatch(MemberKey),
     #[error("CCO input or derived geometry is not finite and positive where required")]
     InvalidGeometry,
     #[error(transparent)]
@@ -240,10 +554,12 @@ pub(crate) enum CcoError {
     NonDeterministicWinner,
     #[error(transparent)]
     Anchor(#[from] AnchorSearchError),
+    #[error(transparent)]
+    Transient(#[from] TransientError),
 }
 
 #[derive(Clone, Debug)]
-enum Descriptor {
+pub(crate) enum Descriptor {
     Plate {
         xy: [f64; 2],
         top_z: f64,
@@ -275,6 +591,43 @@ struct EvaluatedCandidate {
     price_ml: f64,
     rows: Vec<ClearanceRow>,
     anchor: Option<(usize, PositiveFinite)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RewireCandidateRefusalReason {
+    InfeasibleGeometry,
+    DegenerateNewMember,
+    AnchorFoot(AnchorFootRefusalReason),
+    Clearance,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RewireCandidateRefusal {
+    pub(crate) generation_index: usize,
+    pub(crate) family: CandidateFamily,
+    pub(crate) reason: RewireCandidateRefusalReason,
+}
+
+#[derive(Debug)]
+pub(crate) struct RewireEvaluatedCandidate {
+    pub(crate) descriptor: Descriptor,
+    pub(crate) evidence: CcoCandidateEvidence,
+    pub(crate) evaluated_digest: u64,
+    pub(crate) validated_model_anchor: Option<Box<ValidatedModelAnchor>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct RewireCandidateBatch {
+    pub(crate) candidates: Vec<RewireEvaluatedCandidate>,
+    pub(crate) refusals: Vec<RewireCandidateRefusal>,
+    pub(crate) descriptors_generated: usize,
+    pub(crate) clearance_batches: usize,
+    pub(crate) anchor_ray_batches: usize,
+    pub(crate) anchor_foot_batches: usize,
+    pub(crate) anchor_seat_refusals: Vec<AnchorSeatRefusal>,
+    pub(crate) splice: RewireSpliceFacts,
+    pub(crate) excluded_hosts: BTreeSet<MemberKey>,
+    snapshot_digest: u64,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -423,12 +776,180 @@ impl CcoController {
         Ok(outcome)
     }
 
+    /// Evaluate the frozen rewire candidate batch against its immutable
+    /// forest checkpoint. This never mutates a live forest, selects a winner,
+    /// or commits a move; rewire owns the later serial splice transaction.
+    pub(crate) fn evaluate_rewire_candidates(
+        &self,
+        binding: &RewireCcoBinding,
+        anchor_route: RewireAnchorRoute<'_>,
+    ) -> Result<RewireCandidateBatch, CcoError> {
+        let config = Config::current()?;
+        let anchor_binding = binding.anchor_binding();
+        let discovery = discover_rewire_anchor_seats(
+            anchor_binding,
+            anchor_route.samples,
+            anchor_route.delicacy_by_face,
+            anchor_route.config,
+            anchor_route.geometry,
+        )?;
+        let anchor_ray_batches = discovery.query_counts().ray_batches;
+        let anchor_seat_refusals = discovery.refusals().to_vec();
+        let mut seats = discovery.into_seats();
+        let hosts = self.hosts.nearest_excluding(
+            binding.request.stub_end_mm().map(Finite::get),
+            config.bifurcation_hosts,
+            &binding.snapshot,
+            &binding.excluded_hosts,
+        );
+        let descriptors = generate_descriptors(
+            &binding.snapshot,
+            &binding.request,
+            &config,
+            &seats,
+            Some(hosts),
+            false,
+        );
+        let descriptors_generated = descriptors.len();
+        let evaluated =
+            evaluate_descriptors(&binding.snapshot, &binding.request, &descriptors, &config)?;
+        let mut refusals = Vec::new();
+        let mut feasible = Vec::new();
+        for (index, result) in evaluated.into_iter().enumerate() {
+            if let Some(mut candidate) = result {
+                if has_rewire_degenerate_new_member(&binding.snapshot, &candidate.forest) {
+                    refusals.push(RewireCandidateRefusal {
+                        generation_index: index,
+                        family: descriptors[index].family(),
+                        reason: RewireCandidateRefusalReason::DegenerateNewMember,
+                    });
+                    continue;
+                }
+                // Python rewire compares total live forest volume, not the
+                // insertion-only plate/anchor heuristic. The prepared base is
+                // common to the whole batch, so its exact volume delta is the
+                // stable equivalent ranking value.
+                candidate.price_ml =
+                    changed_forest_volume_delta(&binding.snapshot, &candidate.forest)?;
+                feasible.push(candidate);
+            } else {
+                refusals.push(RewireCandidateRefusal {
+                    generation_index: index,
+                    family: descriptors[index].family(),
+                    reason: RewireCandidateRefusalReason::InfeasibleGeometry,
+                });
+            }
+        }
+        let mut validated_anchors = BTreeMap::new();
+        let mut anchor_foot_batches = 0;
+        if !seats.is_empty() {
+            let mut seats: Vec<Option<QualifiedAnchorSeat>> = seats.drain(..).map(Some).collect();
+            let mut generation_indices = Vec::new();
+            let mut foot_requests = Vec::new();
+            for candidate in &feasible {
+                if let Some((seat_index, final_radius)) = candidate.anchor {
+                    let seat = seats
+                        .get_mut(seat_index)
+                        .and_then(Option::take)
+                        .ok_or(CcoError::InvalidGeometry)?;
+                    generation_indices.push(candidate.generation_index);
+                    foot_requests.push(AnchorFootRequest::new(seat, final_radius));
+                }
+            }
+            let validation = validate_rewire_anchor_feet(
+                foot_requests,
+                anchor_binding,
+                anchor_route.config,
+                anchor_route.geometry,
+            )?;
+            anchor_foot_batches = validation.query_counts().sphere_breach_batches;
+            let mut valid = BTreeSet::new();
+            for (generation_index, outcome) in generation_indices
+                .into_iter()
+                .zip(validation.into_outcomes())
+            {
+                match outcome {
+                    AnchorFootOutcome::Validated(anchor) => {
+                        valid.insert(generation_index);
+                        validated_anchors.insert(generation_index, anchor);
+                    }
+                    AnchorFootOutcome::Refused(refusal) => {
+                        refusals.push(RewireCandidateRefusal {
+                            generation_index,
+                            family: descriptors[generation_index].family(),
+                            reason: RewireCandidateRefusalReason::AnchorFoot(refusal.reason()),
+                        });
+                    }
+                }
+            }
+            feasible.retain(|candidate| {
+                candidate.anchor.is_none() || valid.contains(&candidate.generation_index)
+            });
+        }
+        if feasible.is_empty() {
+            sort_rewire_refusals(&mut refusals);
+            return Ok(RewireCandidateBatch {
+                candidates: Vec::new(),
+                refusals,
+                descriptors_generated,
+                clearance_batches: 0,
+                anchor_ray_batches,
+                anchor_foot_batches,
+                anchor_seat_refusals,
+                splice: binding.splice.clone(),
+                excluded_hosts: binding.excluded_hosts.clone(),
+                snapshot_digest: binding.snapshot_digest,
+            });
+        }
+        let survives = clearance_survival(anchor_route.geometry.surface(), &config, &feasible)?;
+        let mut candidates = Vec::new();
+        for (candidate, survives) in feasible.into_iter().zip(survives) {
+            if survives {
+                let generation_index = candidate.generation_index;
+                candidates.push(RewireEvaluatedCandidate {
+                    descriptor: descriptors[generation_index].clone(),
+                    evidence: CcoCandidateEvidence {
+                        family: candidate.family,
+                        generation_index,
+                        price_ml: candidate.price_ml,
+                        clearance_rows: candidate.rows.len(),
+                    },
+                    evaluated_digest: candidate.forest.digest(),
+                    validated_model_anchor: validated_anchors.remove(&generation_index),
+                });
+            } else {
+                refusals.push(RewireCandidateRefusal {
+                    generation_index: candidate.generation_index,
+                    family: candidate.family,
+                    reason: RewireCandidateRefusalReason::Clearance,
+                });
+            }
+        }
+        sort_rewire_refusals(&mut refusals);
+        Ok(RewireCandidateBatch {
+            candidates,
+            refusals,
+            descriptors_generated,
+            clearance_batches: 1,
+            anchor_ray_batches,
+            anchor_foot_batches,
+            anchor_seat_refusals,
+            splice: binding.splice.clone(),
+            excluded_hosts: binding.excluded_hosts.clone(),
+            snapshot_digest: binding.snapshot_digest,
+        })
+    }
+
     fn finish_insertion(&mut self, forest: &Forest) {
         self.inserted += 1;
         if self.inserted.is_multiple_of(KDTREE_REBUILD_EVERY) {
             self.hosts.rebuild(forest);
         }
     }
+}
+
+fn sort_rewire_refusals(refusals: &mut [RewireCandidateRefusal]) {
+    refusals.sort_by_key(|refusal| refusal.generation_index);
 }
 
 fn validate_anchor_route(
@@ -465,9 +986,19 @@ impl HostCache {
     }
 
     fn nearest(&self, point: [f64; 3], count: usize, forest: &Forest) -> Vec<MemberKey> {
+        self.nearest_excluding(point, count, forest, &BTreeSet::new())
+    }
+
+    fn nearest_excluding(
+        &self,
+        point: [f64; 3],
+        count: usize,
+        forest: &Forest,
+        excluded: &BTreeSet<MemberKey>,
+    ) -> Vec<MemberKey> {
         let mut scored = std::collections::BTreeMap::<MemberKey, f64>::new();
         for &(sample, key) in &self.samples {
-            if forest.member(key).is_some() {
+            if !excluded.contains(&key) && forest.member(key).is_some() {
                 let distance = norm(sub(sample, point));
                 scored
                     .entry(key)
@@ -476,7 +1007,7 @@ impl HostCache {
             }
         }
         for key in forest.live_tree_members() {
-            if self.indexed_members.contains(&key) {
+            if excluded.contains(&key) || self.indexed_members.contains(&key) {
                 continue;
             }
             let Some(member) = forest.member(key) else {
@@ -515,24 +1046,10 @@ fn grow_terminal_inner(
 ) -> Result<TerminalCcoOutcome, CcoError> {
     request.validate(forest)?;
     let config = Config::current()?;
-    let descriptors = generate_descriptors(forest, request, &config, &seats, cached_hosts);
+    let descriptors = generate_descriptors(forest, request, &config, &seats, cached_hosts, true);
     let candidates_generated = descriptors.len();
     let snapshot = forest.clone();
-    let threads = geom_kernel::current_threads();
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .build()
-        .map_err(|error| CcoError::Constants(error.to_string()))?;
-    let evaluated: Vec<Result<Option<EvaluatedCandidate>, CcoError>> = pool.install(|| {
-        descriptors
-            .par_iter()
-            .enumerate()
-            .map(|(index, descriptor)| evaluate(&snapshot, request, descriptor, index, &config))
-            .collect()
-    });
-    let mut evaluated = evaluated
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?
+    let mut evaluated = evaluate_descriptors(&snapshot, request, &descriptors, &config)?
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
@@ -589,38 +1106,11 @@ fn grow_terminal_inner(
         });
     }
 
-    let mut p0 = Vec::new();
-    let mut p1 = Vec::new();
-    let mut r0 = Vec::new();
-    let mut r1 = Vec::new();
-    let mut inset0 = Vec::new();
-    let mut inset1 = Vec::new();
-    let mut ranges = Vec::with_capacity(evaluated.len());
-    for candidate in &evaluated {
-        let start = p0.len();
-        for row in &candidate.rows {
-            p0.push(row.p0);
-            p1.push(row.p1);
-            r0.push(row.r0);
-            r1.push(row.r1);
-            inset0.push(row.inset0);
-            inset1.push(row.inset1);
-        }
-        ranges.push(start..p0.len());
-    }
-    let (clearances, _) = surface
-        .segment_clearance(&p0, &p1, &r0, &r1, config.standoff_mm, &inset0, &inset1)
-        .map_err(|error| CcoError::Native(error.to_string()))?;
-
+    let survival = clearance_survival(surface, &config, &evaluated)?;
     let mut survivors: Vec<&EvaluatedCandidate> = evaluated
         .iter()
-        .zip(ranges.iter())
-        .filter_map(|(candidate, range)| {
-            clearances[range.clone()]
-                .iter()
-                .all(|clearance| *clearance >= 0.0)
-                .then_some(candidate)
-        })
+        .zip(survival)
+        .filter_map(|(candidate, survives)| survives.then_some(candidate))
         .collect();
     survivors.sort_by(|left, right| compare_candidates(left, right));
     let Some(winner) = survivors.first() else {
@@ -661,10 +1151,84 @@ fn grow_terminal_inner(
     })
 }
 
+fn evaluate_descriptors(
+    snapshot: &Forest,
+    request: &TerminalCcoRequest,
+    descriptors: &[Descriptor],
+    config: &Config,
+) -> Result<Vec<Option<EvaluatedCandidate>>, CcoError> {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(geom_kernel::current_threads())
+        .build()
+        .map_err(|error| CcoError::Constants(error.to_string()))?;
+    let evaluated: Vec<Result<Option<EvaluatedCandidate>, CcoError>> = pool.install(|| {
+        descriptors
+            .par_iter()
+            .enumerate()
+            .map(|(index, descriptor)| evaluate(snapshot, request, descriptor, index, config))
+            .collect()
+    });
+    evaluated.into_iter().collect()
+}
+
+fn clearance_survival(
+    surface: &NativeSurface,
+    config: &Config,
+    candidates: &[EvaluatedCandidate],
+) -> Result<Vec<bool>, CcoError> {
+    let mut p0 = Vec::new();
+    let mut p1 = Vec::new();
+    let mut r0 = Vec::new();
+    let mut r1 = Vec::new();
+    let mut inset0 = Vec::new();
+    let mut inset1 = Vec::new();
+    let mut ranges = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let start = p0.len();
+        for row in &candidate.rows {
+            p0.push(row.p0);
+            p1.push(row.p1);
+            r0.push(row.r0);
+            r1.push(row.r1);
+            inset0.push(row.inset0);
+            inset1.push(row.inset1);
+        }
+        ranges.push(start..p0.len());
+    }
+    let (clearances, _) = surface
+        .segment_clearance(&p0, &p1, &r0, &r1, config.standoff_mm, &inset0, &inset1)
+        .map_err(|error| CcoError::Native(error.to_string()))?;
+    Ok(ranges
+        .into_iter()
+        .map(|range| clearances[range].iter().all(|clearance| *clearance >= 0.0))
+        .collect())
+}
+
 fn compare_candidates(left: &EvaluatedCandidate, right: &EvaluatedCandidate) -> std::cmp::Ordering {
     left.price_ml
         .total_cmp(&right.price_ml)
         .then(left.generation_index.cmp(&right.generation_index))
+}
+
+impl RewireCandidateBatch {
+    pub(crate) fn ranked_candidates(&self) -> Vec<&RewireEvaluatedCandidate> {
+        let mut ranked = self.candidates.iter().collect::<Vec<_>>();
+        ranked.sort_by(|left, right| {
+            left.evidence
+                .price_ml
+                .total_cmp(&right.evidence.price_ml)
+                .then(
+                    left.evidence
+                        .generation_index
+                        .cmp(&right.evidence.generation_index),
+                )
+        });
+        ranked
+    }
+
+    pub(crate) fn snapshot_digest(&self) -> u64 {
+        self.snapshot_digest
+    }
 }
 
 fn generate_descriptors(
@@ -673,22 +1237,26 @@ fn generate_descriptors(
     config: &Config,
     anchor_seats: &[QualifiedAnchorSeat],
     cached_hosts: Option<Vec<MemberKey>>,
+    include_plate_spiral: bool,
 ) -> Vec<Descriptor> {
     let se = request.stub_end_mm().map(Finite::get);
     let mut out = vec![Descriptor::Plate {
         xy: [se[0], se[1]],
         top_z: se[2],
     }];
-    for &radius in &config.trunk_radii_mm {
-        if radius == 0.0 {
-            continue;
-        }
-        for direction in 0..config.trunk_directions {
-            let angle = std::f64::consts::TAU * direction as f64 / config.trunk_directions as f64;
-            let xy = [se[0] + radius * angle.cos(), se[1] + radius * angle.sin()];
-            let top_z = se[2] - radius / config.branch_angle_deg.to_radians().tan().max(1e-9);
-            if top_z > request.plate_z_mm().get() + 1.0 {
-                out.push(Descriptor::Plate { xy, top_z });
+    if include_plate_spiral {
+        for &radius in &config.trunk_radii_mm {
+            if radius == 0.0 {
+                continue;
+            }
+            for direction in 0..config.trunk_directions {
+                let angle =
+                    std::f64::consts::TAU * direction as f64 / config.trunk_directions as f64;
+                let xy = [se[0] + radius * angle.cos(), se[1] + radius * angle.sin()];
+                let top_z = se[2] - radius / config.branch_angle_deg.to_radians().tan().max(1e-9);
+                if top_z > request.plate_z_mm().get() + 1.0 {
+                    out.push(Descriptor::Plate { xy, top_z });
+                }
             }
         }
     }
@@ -744,6 +1312,18 @@ fn evaluate(
     }))
 }
 
+fn has_rewire_degenerate_new_member(before: &Forest, after: &Forest) -> bool {
+    after.live_tree_members().into_iter().any(|key| {
+        before.member(key).is_none()
+            && after.member(key).is_some_and(|member| {
+                norm(sub(
+                    member.p1_mm().map(Finite::get),
+                    member.p0_mm().map(Finite::get),
+                )) < REWIRE_DEGENERATE_MM
+            })
+    })
+}
+
 fn apply_and_size(
     candidate: &mut Forest,
     request: &TerminalCcoRequest,
@@ -794,7 +1374,7 @@ fn apply_model_anchor(
         r0_mm: TerminalEndRadius::new(cco_terminal_radius(request, config)?),
         r1_mm: RootwardEndRadius::new(config.min_shoot_radius_mm),
         kind: MemberKind::Strut,
-        owner: Owner::Contact(request.terminal_id),
+        owner: request.connector_owner.clone(),
         embed_end: Some(EmbedEnd::Rootward),
         carried_mm2: request.carried_mm2(),
     }));
@@ -1092,7 +1672,7 @@ fn member(
         r0_mm: TerminalEndRadius::new(r0),
         r1_mm: RootwardEndRadius::new(r1),
         kind,
-        owner: Owner::Contact(request.terminal_id),
+        owner: request.connector_owner.clone(),
         embed_end: None,
         carried_mm2: request.carried_mm2(),
     }))
@@ -1365,6 +1945,7 @@ fn norm(a: [f64; 3]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plinth_mesh::{build_face_topology, FaceTopology, Mesh, WeldPolicy};
 
     #[test]
     fn frozen_xia_vectors_sum_to_right_angle() {
@@ -1694,6 +2275,490 @@ mod tests {
         )
         .unwrap();
         (forest, request, surface)
+    }
+
+    #[derive(Clone, Copy)]
+    struct RewireFixtureKeys {
+        root: MemberKey,
+        old_parent: MemberKey,
+        child: MemberKey,
+        eligible: MemberKey,
+        braced_host: MemberKey,
+        brace: MemberKey,
+        dead: MemberKey,
+    }
+
+    fn rewire_member(p0: [f64; 3], p1: [f64; 3], kind: MemberKind, ordinal: u32) -> Member {
+        let finite = |value| Finite::new(value).unwrap();
+        let positive = |value| PositiveFinite::new(value).unwrap();
+        Member::new(MemberSpec {
+            p0_mm: p0.map(finite),
+            p1_mm: p1.map(finite),
+            r0_mm: TerminalEndRadius::new(positive(0.45)),
+            r1_mm: RootwardEndRadius::new(positive(0.65)),
+            kind,
+            owner: Owner::Generated {
+                family: "rewire-vector".to_owned(),
+                ordinal,
+            },
+            embed_end: None,
+            carried_mm2: finite(2.0),
+        })
+    }
+
+    struct RewireAnchorFixture {
+        mesh: Mesh,
+        topology: FaceTopology,
+        surface: NativeSurface,
+        samples: Vec<SurfaceAnchorSample>,
+        sidecar: Vec<f64>,
+    }
+
+    impl RewireAnchorFixture {
+        fn with_route<T>(&self, use_route: impl FnOnce(RewireAnchorRoute<'_>) -> T) -> T {
+            let geometry =
+                AnchorGeometryAuthority::new(&self.mesh, &self.topology, &self.surface).unwrap();
+            use_route(RewireAnchorRoute {
+                samples: &self.samples,
+                delicacy_by_face: Some(&self.sidecar),
+                config: AnchorSearchConfig::current().unwrap(),
+                geometry: &geometry,
+            })
+        }
+    }
+
+    fn rewire_anchor_fixture() -> RewireAnchorFixture {
+        let vertices = vec![
+            [-20.0, -20.0, 0.0],
+            [20.0, -20.0, 0.0],
+            [20.0, 20.0, 0.0],
+            [-20.0, 20.0, 0.0],
+            [-20.0, -20.0, 5.0],
+            [20.0, -20.0, 5.0],
+            [20.0, 20.0, 5.0],
+            [-20.0, 20.0, 5.0],
+        ];
+        let triangles = vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        let mesh = Mesh::new(vertices, triangles).unwrap();
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let surface = NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
+            geom_kernel::NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        RewireAnchorFixture {
+            sidecar: vec![0.0; surface.nfaces()],
+            samples: vec![SurfaceAnchorSample {
+                source_face_id: 0,
+                point_mm: [0.0, 0.0, 0.0],
+                delicacy: 0.0,
+            }],
+            mesh,
+            topology,
+            surface,
+        }
+    }
+
+    fn rewire_fixture() -> (Forest, RewireFixtureKeys) {
+        let mut forest = Forest::new();
+        let old_parent = forest.add_member(rewire_member(
+            [0.0, 0.0, 10.0],
+            [0.0, 0.0, 0.0],
+            MemberKind::Trunk,
+            0,
+        ));
+        let root = forest.add_member(rewire_member(
+            [0.0, 0.0, 15.0],
+            [0.0, 0.0, 10.0],
+            MemberKind::Shoot,
+            1,
+        ));
+        forest.set_parent(root, Some(old_parent)).unwrap();
+        let sibling = forest.add_member(rewire_member(
+            [2.0, 0.0, 15.0],
+            [0.0, 0.0, 10.0],
+            MemberKind::Shoot,
+            2,
+        ));
+        forest.set_parent(sibling, Some(old_parent)).unwrap();
+        let child = forest.add_member(rewire_member(
+            [0.0, 0.0, 18.0],
+            [0.0, 0.0, 15.0],
+            MemberKind::Shoot,
+            3,
+        ));
+        forest.set_parent(child, Some(root)).unwrap();
+        let eligible = forest.add_member(rewire_member(
+            [4.0, 0.0, 20.0],
+            [4.0, 0.0, 0.0],
+            MemberKind::Trunk,
+            4,
+        ));
+        let braced_host = forest.add_member(rewire_member(
+            [8.0, 0.0, 20.0],
+            [8.0, 0.0, 0.0],
+            MemberKind::Trunk,
+            5,
+        ));
+        let brace = forest.add_brace(rewire_member(
+            [8.1, 0.0, 5.0],
+            [12.0, 0.0, 5.0],
+            MemberKind::Brace,
+            6,
+        ));
+        let dead = forest.add_member(rewire_member(
+            [40.0, 0.0, 10.0],
+            [40.0, 0.0, 0.0],
+            MemberKind::Trunk,
+            7,
+        ));
+        forest.retire(dead).unwrap();
+        forest.validate().unwrap();
+        (
+            forest,
+            RewireFixtureKeys {
+                root,
+                old_parent,
+                child,
+                eligible,
+                braced_host,
+                brace,
+                dead,
+            },
+        )
+    }
+
+    #[test]
+    fn rewire_binding_rejects_stale_and_reused_root_generations() {
+        let (forest, keys) = rewire_fixture();
+        let binding = RewireCcoBinding::bind_detached_subtree(
+            &forest,
+            keys.root,
+            BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
+        )
+        .unwrap();
+
+        let mut changed = forest.clone();
+        let root = changed.member(keys.root).unwrap().clone();
+        changed
+            .set_endpoints(
+                keys.root,
+                [Finite::new(0.25).unwrap(), root.p0_mm()[1], root.p0_mm()[2]],
+                root.p1_mm(),
+            )
+            .unwrap();
+        assert!(matches!(
+            binding.validate_live(&changed),
+            Err(CcoError::StaleRewireBinding(root)) if root == keys.root
+        ));
+
+        let mut reused = forest.clone();
+        let replacement_member = reused.member(keys.root).unwrap().clone();
+        reused.retire(keys.root).unwrap();
+        let replacement = reused.add_member(replacement_member);
+        assert_eq!(replacement.slot(), keys.root.slot());
+        assert_ne!(replacement, keys.root);
+        assert!(matches!(
+            binding.validate_live(&reused),
+            Err(CcoError::StaleRewireBinding(root)) if root == keys.root
+        ));
+    }
+
+    #[test]
+    fn rewire_binding_excludes_subtree_dead_braces_braced_hosts_and_old_parent() {
+        let (forest, keys) = rewire_fixture();
+        let binding = RewireCcoBinding::bind_detached_subtree(
+            &forest,
+            keys.root,
+            BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
+        )
+        .unwrap();
+        for excluded in [
+            keys.root,
+            keys.child,
+            keys.old_parent,
+            keys.braced_host,
+            keys.brace,
+            keys.dead,
+        ] {
+            assert!(binding.excluded_hosts().contains(&excluded), "{excluded:?}");
+        }
+        assert!(!binding.excluded_hosts().contains(&keys.eligible));
+
+        let anchors = rewire_anchor_fixture();
+        let batch = anchors.with_route(|route| {
+            CcoController::default()
+                .evaluate_rewire_candidates(&binding, route)
+                .unwrap()
+        });
+        for candidate in &batch.candidates {
+            if let Descriptor::Bifurcate { host } = candidate.descriptor {
+                assert!(!batch.excluded_hosts.contains(&host));
+            }
+        }
+    }
+
+    #[test]
+    fn root_reanchor_binding_reports_splice_mismatch_before_general_staleness() {
+        let (mut forest, keys) = rewire_fixture();
+        forest.set_parent(keys.root, None).unwrap();
+        let binding = RewireCcoBinding::bind_root_reanchor(
+            &forest,
+            keys.root,
+            BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
+        )
+        .unwrap();
+        assert!(matches!(
+            binding.splice(),
+            RewireSpliceFacts::RootReanchor {
+                retiring_root,
+                own_children,
+                fixed_point_mm,
+            } if *retiring_root == keys.root
+                && own_children == &vec![keys.child]
+                && *fixed_point_mm == forest.member(keys.root).unwrap().p0_mm()
+        ));
+        let anchors = rewire_anchor_fixture();
+        let batch = anchors.with_route(|route| {
+            CcoController::default()
+                .evaluate_rewire_candidates(&binding, route)
+                .unwrap()
+        });
+        assert!(batch
+            .candidates
+            .iter()
+            .map(|candidate| candidate.evidence.family)
+            .chain(batch.refusals.iter().map(|refusal| refusal.family))
+            .any(|family| family == CandidateFamily::ModelAnchor));
+
+        forest.set_parent(keys.root, Some(keys.eligible)).unwrap();
+        assert!(matches!(
+            binding.validate_live(&forest),
+            Err(CcoError::ReanchorBindingMismatch(root)) if root == keys.root
+        ));
+    }
+
+    #[test]
+    fn rewire_batch_is_indexed_stably_uses_one_clearance_batch_and_never_commits() {
+        let (forest, keys) = rewire_fixture();
+        let before = forest.digest();
+        let binding = RewireCcoBinding::bind_detached_subtree(
+            &forest,
+            keys.root,
+            BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
+        )
+        .unwrap();
+        let anchors = rewire_anchor_fixture();
+        let batch = anchors.with_route(|route| {
+            CcoController::default()
+                .evaluate_rewire_candidates(&binding, route)
+                .unwrap()
+        });
+        assert_eq!(batch.clearance_batches, 1);
+        assert_eq!(batch.anchor_ray_batches, 1);
+        assert_eq!(batch.anchor_foot_batches, 1);
+        assert!(batch.refusals.iter().any(|refusal| {
+            refusal.family == CandidateFamily::ModelAnchor
+                && refusal.reason == RewireCandidateRefusalReason::Clearance
+        }));
+        assert_eq!(forest.digest(), before);
+        assert_eq!(binding.live_digest, before);
+        assert_eq!(batch.snapshot_digest(), binding.snapshot.digest());
+        assert_ne!(batch.snapshot_digest(), before);
+        assert_eq!(binding.snapshot.parent_of(keys.root), None);
+        assert_eq!(
+            binding
+                .snapshot
+                .member(keys.old_parent)
+                .unwrap()
+                .carried_mm2()
+                .get(),
+            0.0
+        );
+        assert!(batch
+            .candidates
+            .windows(2)
+            .all(|pair| { pair[0].evidence.generation_index < pair[1].evidence.generation_index }));
+        assert!(batch
+            .candidates
+            .iter()
+            .all(|candidate| candidate.evaluated_digest != 0));
+
+        let descriptor = Descriptor::Plate {
+            xy: [0.0, 0.0],
+            top_z: 10.0,
+        };
+        let tied = |generation_index| RewireEvaluatedCandidate {
+            descriptor: descriptor.clone(),
+            evidence: CcoCandidateEvidence {
+                family: CandidateFamily::PlateDescent,
+                generation_index,
+                price_ml: 1.0,
+                clearance_rows: 1,
+            },
+            evaluated_digest: before,
+            validated_model_anchor: None,
+        };
+        let tie_batch = RewireCandidateBatch {
+            candidates: vec![tied(9), tied(3)],
+            refusals: Vec::new(),
+            descriptors_generated: 2,
+            clearance_batches: 1,
+            anchor_ray_batches: 1,
+            anchor_foot_batches: 0,
+            anchor_seat_refusals: Vec::new(),
+            splice: binding.splice().clone(),
+            excluded_hosts: binding.excluded_hosts().clone(),
+            snapshot_digest: before,
+        };
+        assert_eq!(
+            tie_batch.ranked_candidates()[0].evidence.generation_index,
+            3
+        );
+    }
+
+    #[test]
+    fn rewire_rejects_new_members_between_shared_and_rewire_degenerate_thresholds() {
+        let before = Forest::new();
+        let mut after = before.clone();
+        after.add_member(rewire_member(
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 5.0e-5],
+            MemberKind::Shoot,
+            90,
+        ));
+        // This is above shared CCO's 1e-6 guard but below rewire.py's 1e-4 guard.
+        assert!(has_rewire_degenerate_new_member(&before, &after));
+
+        let mut printable = before.clone();
+        printable.add_member(rewire_member(
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 2.0e-4],
+            MemberKind::Shoot,
+            91,
+        ));
+        assert!(!has_rewire_degenerate_new_member(&before, &printable));
+    }
+
+    #[test]
+    fn all_refused_mixed_family_ledger_is_in_generation_order() {
+        let mut refusals = vec![
+            RewireCandidateRefusal {
+                generation_index: 0,
+                family: CandidateFamily::PlateDescent,
+                reason: RewireCandidateRefusalReason::InfeasibleGeometry,
+            },
+            RewireCandidateRefusal {
+                generation_index: 3,
+                family: CandidateFamily::Bifurcation,
+                reason: RewireCandidateRefusalReason::DegenerateNewMember,
+            },
+            RewireCandidateRefusal {
+                generation_index: 1,
+                family: CandidateFamily::ModelAnchor,
+                reason: RewireCandidateRefusalReason::AnchorFoot(
+                    AnchorFootRefusalReason::FootBallBreached,
+                ),
+            },
+            RewireCandidateRefusal {
+                generation_index: 2,
+                family: CandidateFamily::Bifurcation,
+                reason: RewireCandidateRefusalReason::InfeasibleGeometry,
+            },
+        ];
+        sort_rewire_refusals(&mut refusals);
+        assert_eq!(
+            refusals
+                .iter()
+                .map(|refusal| (refusal.generation_index, refusal.family))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, CandidateFamily::PlateDescent),
+                (1, CandidateFamily::ModelAnchor),
+                (2, CandidateFamily::Bifurcation),
+                (3, CandidateFamily::Bifurcation),
+            ]
+        );
+    }
+
+    #[test]
+    fn rewire_batch_thread_sweep_is_identical() {
+        const CHILD: &str = "PLINTH_REWIRE_CCO_SWEEP_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let (forest, keys) = rewire_fixture();
+            let binding = RewireCcoBinding::bind_detached_subtree(
+                &forest,
+                keys.root,
+                BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
+            )
+            .unwrap();
+            let anchors = rewire_anchor_fixture();
+            let batch = anchors.with_route(|route| {
+                CcoController::default()
+                    .evaluate_rewire_candidates(&binding, route)
+                    .unwrap()
+            });
+            let rows = batch
+                .candidates
+                .iter()
+                .map(|candidate| {
+                    format!(
+                        "{:?}:{}:{:016x}:{}:{:016x}",
+                        candidate.evidence.family,
+                        candidate.evidence.generation_index,
+                        candidate.evidence.price_ml.to_bits(),
+                        candidate.evidence.clearance_rows,
+                        candidate.evaluated_digest,
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("|");
+            println!("REWIRE_CCO_SWEEP={rows}");
+            return;
+        }
+        let executable = std::env::current_exe().unwrap();
+        let mut results = Vec::new();
+        for threads in [1, 4, 16] {
+            let output = std::process::Command::new(&executable)
+                .arg("--exact")
+                .arg("cco::tests::rewire_batch_thread_sweep_is_identical")
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .env("PLINTH_THREADS", threads.to_string())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            results.push(
+                stdout
+                    .lines()
+                    .find_map(|line| line.strip_prefix("REWIRE_CCO_SWEEP="))
+                    .expect("child emitted rewire result")
+                    .to_owned(),
+            );
+        }
+        assert!(results.windows(2).all(|pair| pair[0] == pair[1]));
     }
 
     #[test]
