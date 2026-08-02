@@ -6,14 +6,15 @@
 //! Both values retain `Placeholder` provenance and are never acceptance or
 //! calibration evidence.
 
-use plinth_core::{NonNegativeFinite, Placeholder, PositiveFinite};
+use plinth_core::{Finite, NonNegativeFinite, Placeholder, PositiveFinite};
 use thiserror::Error;
 
 use crate::{
     forest::{Forest, MemberKey, RootwardEndRadius, TerminalEndRadius},
     member_sizing::{
-        diagnostic_required_tapered_member_end_radii, ActualLateralLoad,
-        DiagnosticMemberSizingPolicy, MemberSizingError, MemberSpan,
+        diagnostic_deflection_radius_for_geometry, diagnostic_required_radius_for_geometry,
+        ActualLateralLoad, DiagnosticMemberSizingPolicy, LeanAngleDeg, MemberSizingError,
+        MemberSpan,
     },
 };
 
@@ -97,25 +98,69 @@ impl LegacyCompatibility {
                     .ok_or(LegacyCompatibilityError::MissingLiveMember(child))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let policy = DiagnosticMemberSizingPolicy::current()?;
-        let diagnostic = diagnostic_required_tapered_member_end_radii(
-            member.terminal_radius_mm(),
+        let required = self.required_radius_for_geometry(
             member.kind(),
             &child_rootward_radii,
             member.carried_mm2(),
-            span,
+            span.length_mm(),
+            span.lean_angle_deg(),
+        )?;
+        let rootward = required.get().max(member.terminal_radius_mm().get().get());
+
+        Ok(LiveCurrentSupportRaftSizing {
+            terminal_continuity: member.terminal_radius_mm(),
+            rootward_radius: RootwardEndRadius::new(
+                PositiveFinite::new(rootward).map_err(|_| MemberSizingError::NonFiniteResult)?,
+            ),
+            brace_span_exceeded: span.length_mm().get()
+                > self.brace_free_span_mm.diagnostic().get(),
+        })
+    }
+
+    /// Frozen O-10 radius floor for an explicitly supplied free length and
+    /// the owning member's lean. This remains crate-private and Placeholder-
+    /// tainted by policy; it is the single reuse hook for transient sizing.
+    pub(crate) fn required_radius_for_geometry(
+        &self,
+        kind: &crate::forest::MemberKind,
+        child_rootward_radii: &[RootwardEndRadius],
+        carried_area_mm2: Finite,
+        length_3d_mm: PositiveFinite,
+        lean_angle_deg: LeanAngleDeg,
+    ) -> Result<PositiveFinite, LegacyCompatibilityError> {
+        let policy = DiagnosticMemberSizingPolicy::current()?;
+        diagnostic_required_radius_for_geometry(
+            kind,
+            child_rootward_radii,
+            carried_area_mm2,
+            length_3d_mm,
+            lean_angle_deg,
             &ActualLateralLoad::legacy_compatibility_o10_frozen_shaft_drag(
                 &self.shaft_drag_force_n,
             ),
             &policy,
-        )?;
+        )
+        .map_err(Into::into)
+    }
 
-        Ok(LiveCurrentSupportRaftSizing {
-            terminal_continuity: diagnostic.terminal_continuity(),
-            rootward_radius: RootwardEndRadius::new(diagnostic.diagnostic_rootward().diagnostic()),
-            brace_span_exceeded: span.length_mm().get()
-                > self.brace_free_span_mm.diagnostic().get(),
-        })
+    /// Frozen O-10 deflection component for a transient path length. It calls
+    /// the same mechanics leaf as full-span sizing and cannot be constructed
+    /// outside this crate.
+    pub(crate) fn deflection_radius_for_geometry(
+        &self,
+        length_3d_mm: PositiveFinite,
+        lean_angle_deg: LeanAngleDeg,
+    ) -> Result<PositiveFinite, LegacyCompatibilityError> {
+        let policy = DiagnosticMemberSizingPolicy::current()?;
+        Ok(diagnostic_deflection_radius_for_geometry(
+            length_3d_mm,
+            lean_angle_deg,
+            &ActualLateralLoad::legacy_compatibility_o10_frozen_shaft_drag(
+                &self.shaft_drag_force_n,
+            ),
+            &policy,
+        )?
+        .diagnostic())
     }
 }
 
@@ -217,6 +262,51 @@ mod tests {
             result.rootward_radius().get().get().to_bits(),
             0x4011_b0ac_d986_f739
         );
+    }
+
+    #[test]
+    fn full_span_and_explicit_geometry_share_the_exact_required_radius_leaf() {
+        let mut forest = Forest::new();
+        let key = forest.add_member(member([50.0, 0.0, 50.0]));
+        let member = forest.member(key).unwrap();
+        let span = MemberSpan::new(member.p0_mm(), member.p1_mm()).unwrap();
+        let policy = LegacyCompatibility::o10_live_current_support_and_raft();
+        let through_member = policy
+            .size_live_current_support_member(&forest, key)
+            .unwrap();
+        let through_geometry = policy
+            .required_radius_for_geometry(
+                member.kind(),
+                &[],
+                member.carried_mm2(),
+                span.length_mm(),
+                span.lean_angle_deg(),
+            )
+            .unwrap()
+            .get()
+            .max(member.terminal_radius_mm().get().get());
+        assert_eq!(
+            through_member.rootward_radius().get().get().to_bits(),
+            through_geometry.to_bits()
+        );
+
+        let arbitrary = policy
+            .deflection_radius_for_geometry(
+                positive(17.25),
+                LeanAngleDeg::new(finite(58.0)).unwrap(),
+            )
+            .unwrap();
+        let direct = diagnostic_deflection_radius_for_geometry(
+            positive(17.25),
+            LeanAngleDeg::new(finite(58.0)).unwrap(),
+            &ActualLateralLoad::legacy_compatibility_o10_frozen_shaft_drag(
+                &policy.shaft_drag_force_n,
+            ),
+            &DiagnosticMemberSizingPolicy::current().unwrap(),
+        )
+        .unwrap()
+        .diagnostic();
+        assert_eq!(arbitrary.get().to_bits(), direct.get().to_bits());
     }
 
     #[test]
