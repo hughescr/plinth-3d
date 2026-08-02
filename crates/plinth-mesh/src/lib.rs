@@ -235,7 +235,11 @@ impl Mesh {
 pub enum WeldPolicy {
     /// Preserve the source triangle soup exactly (the STL default).
     None,
-    /// Weld only coordinates with identical IEEE f64 bit patterns.
+    /// Weld only numerically identical coordinates. Distinct finite values,
+    /// including adjacent one-ULP values, remain separate; `+0.0` and `-0.0`
+    /// weld because they are the same physical coordinate despite their
+    /// different IEEE sign bits. The historical variant name refers to the
+    /// nonzero finite-value comparison.
     ExactBits,
     /// Weld coordinates within this positive, finite distance.
     Epsilon(f64),

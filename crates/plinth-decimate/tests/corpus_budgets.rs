@@ -190,6 +190,50 @@ fn corpus_budgets() {
     );
 }
 
+#[test]
+fn report_writer_canonicalizes_arithmetic_floats_before_the_only_disk_write() {
+    let report = GateReport {
+        schema: REPORT_SCHEMA.to_owned(),
+        cache: CacheStatus {
+            exists: false,
+            equivalence: "not_applicable_no_library_cache".to_owned(),
+        },
+        models: vec![ModelReport {
+            name: "arithmetic-f64-regression".to_owned(),
+            expected_status: ExpectedStatus::Verified,
+            actual_status: "verified".to_owned(),
+            input_faces: Some(2),
+            output_faces: Some(1),
+            chosen_ratio: Some(0.5),
+            search_steps: vec![SearchStepReport {
+                ratio: 0.5,
+                p99_mm: 0.0,
+                p99_9_mm: 0.0,
+                passed: true,
+            }],
+            search_p99_mm: Some(0.0),
+            search_p99_9_mm: Some(0.0),
+            final_p99_mm: Some(0.0),
+            final_p99_9_mm: Some(0.0),
+            final_p99_limit_mm: Some(0.0095 * 1.1),
+            final_p99_9_limit_mm: Some(0.019 * 1.1),
+            topology_before: Some(TopologyReport {
+                boundary_edges: 0,
+                nonmanifold_edges: 0,
+            }),
+            topology_after: Some(TopologyReport {
+                boundary_edges: 0,
+                nonmanifold_edges: 0,
+            }),
+            error: None,
+        }],
+    };
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target/report-f64-canonicalization-regression.json");
+    fs::create_dir_all(path.parent().expect("target parent")).expect("create target directory");
+    write_and_reopen_report(&path, &report).expect("canonical report audit");
+}
+
 fn execute_gate(root: &Path, output_dir: &Path) -> Result<GateReport, String> {
     let models_dir = root.join("corpus/models");
     let metadata = fs::metadata(&models_dir).map_err(|error| {
@@ -532,7 +576,17 @@ fn expected_status_name(status: ExpectedStatus) -> &'static str {
 }
 
 fn write_and_reopen_report(path: &Path, report: &GateReport) -> Result<(), String> {
-    let bytes = serde_json::to_vec_pretty(report)
+    // serde_json's formatter and parser do not always select the same lexical
+    // representative for an f64 produced by arithmetic (for example,
+    // 0.0095 * 1.1 formats as 0.010450000000000001 but parses to the adjacent
+    // value that formats as 0.01045). Canonicalize through the typed parser
+    // before the only disk write, then audit exact f64 bits after reopening.
+    // This is producer-side serialization, never a repair of the artifact.
+    let provisional = serde_json::to_vec_pretty(report)
+        .map_err(|error| format!("could not encode provisional typed report: {error}"))?;
+    let canonical: GateReport = serde_json::from_slice(&provisional)
+        .map_err(|error| format!("could not canonicalize typed report numbers: {error}"))?;
+    let bytes = serde_json::to_vec_pretty(&canonical)
         .map_err(|error| format!("could not encode deterministic report: {error}"))?;
     fs::write(path, &bytes)
         .map_err(|error| format!("could not write report {}: {error}", path.display()))?;
@@ -540,6 +594,12 @@ fn write_and_reopen_report(path: &Path, report: &GateReport) -> Result<(), Strin
         .map_err(|error| format!("could not reopen report {}: {error}", path.display()))?;
     let parsed: GateReport = serde_json::from_slice(&reread)
         .map_err(|error| format!("report {} is not valid typed JSON: {error}", path.display()))?;
+    if report_f64_bits(&canonical) != report_f64_bits(&parsed) {
+        return Err(format!(
+            "report {} changed canonical f64 bits after disk reopen",
+            path.display()
+        ));
+    }
     let recoded = serde_json::to_vec_pretty(&parsed)
         .map_err(|error| format!("could not re-encode reopened report: {error}"))?;
     if bytes != recoded {
@@ -549,6 +609,29 @@ fn write_and_reopen_report(path: &Path, report: &GateReport) -> Result<(), Strin
         ));
     }
     Ok(())
+}
+
+fn report_f64_bits(report: &GateReport) -> Vec<Option<u64>> {
+    let mut bits = Vec::new();
+    for model in &report.models {
+        bits.push(model.chosen_ratio.map(f64::to_bits));
+        for step in &model.search_steps {
+            bits.extend([
+                Some(step.ratio.to_bits()),
+                Some(step.p99_mm.to_bits()),
+                Some(step.p99_9_mm.to_bits()),
+            ]);
+        }
+        bits.extend([
+            model.search_p99_mm.map(f64::to_bits),
+            model.search_p99_9_mm.map(f64::to_bits),
+            model.final_p99_mm.map(f64::to_bits),
+            model.final_p99_9_mm.map(f64::to_bits),
+            model.final_p99_limit_mm.map(f64::to_bits),
+            model.final_p99_9_limit_mm.map(f64::to_bits),
+        ]);
+    }
+    bits
 }
 
 fn output_directory(root: &Path) -> PathBuf {

@@ -364,6 +364,12 @@ pub struct FeatureProtectionAttempt {
     pub seed_threshold_mm: f64,
     pub halo_radius_mm: f64,
     pub seed_count: usize,
+    /// Source-order vertices selected by the geometric halo before the
+    /// structural survival closure.
+    pub halo_vertex_count: usize,
+    /// Additional source-order aliases locked so every protected welded
+    /// position owns at least one fully locked incident triangle.
+    pub lock_closure_added_vertex_count: usize,
     pub protected_vertex_count: usize,
 }
 
@@ -392,6 +398,12 @@ pub enum FeatureProtectionError {
     PointIndex { message: String },
     #[error("feature-protection halo query failed: {message}")]
     HaloQuery { message: String },
+    #[error("feature-protection operational lock topology failed: {message}")]
+    OperationalLockTopology { message: String },
+    #[error(
+        "protected exact-coordinate vertex represented by source vertex {source_vertex} has no incident triangle"
+    )]
+    ProtectedVertexWithoutIncidentFace { source_vertex: usize },
     #[error(
         "FeatureProtectionCapExceeded: protected vertices exceed the 12% cap after bounded backoff"
     )]
@@ -527,6 +539,7 @@ fn select_feature_protection_from_errors(
             message: point_index_message(error),
         }
     })?;
+    let lock_topology = OperationalLockTopology::build(original)?;
     let cap_count = (original.verts().len() as f64 * policy.cap_fraction).floor() as usize;
     let mut trace = FeatureProtectionTrace {
         probe_ratio: policy.probe_ratio,
@@ -561,16 +574,24 @@ fn select_feature_protection_from_errors(
                 locks[vertex] = true;
             }
         }
-        let protected_vertex_count = locks.iter().filter(|&&locked| locked).count();
+        let halo_vertex_count = locks.iter().filter(|&&locked| locked).count();
+        let closure = lock_topology.close(&locks)?;
+        let protected_vertex_count = closure
+            .source_locks
+            .iter()
+            .filter(|&&locked| locked)
+            .count();
         trace.attempts.push(FeatureProtectionAttempt {
             attempt,
             seed_threshold_mm: threshold,
             halo_radius_mm: radius,
             seed_count: seed_ids.len(),
+            halo_vertex_count,
+            lock_closure_added_vertex_count: protected_vertex_count - halo_vertex_count,
             protected_vertex_count,
         });
         if protected_vertex_count <= cap_count {
-            return Ok((locks, trace));
+            return Ok((closure.source_locks, trace));
         }
         threshold *= policy.seed_multiplier;
         radius *= policy.halo_multiplier;
@@ -578,6 +599,116 @@ fn select_feature_protection_from_errors(
     Err(FeatureProtectionError::CapExceeded {
         trace: Box::new(trace),
     })
+}
+
+struct OperationalLockTopology {
+    source_to_welded: Vec<u32>,
+    representative_source: Vec<u32>,
+    faces: Vec<[u32; 3]>,
+    incident_faces: Vec<Vec<usize>>,
+}
+
+struct OperationalLockClosure {
+    source_locks: Vec<bool>,
+}
+
+impl OperationalLockTopology {
+    fn build(mesh: &Mesh) -> Result<Self, FeatureProtectionError> {
+        let view = WeldedView::build(mesh, WeldPolicy::ExactBits).map_err(|error| {
+            FeatureProtectionError::OperationalLockTopology {
+                message: error.to_string(),
+            }
+        })?;
+        let source_to_welded = view.map().to_vec();
+        let mut representative_source = vec![u32::MAX; view.vertex_count() as usize];
+        for (source, &welded) in source_to_welded.iter().enumerate() {
+            let representative = &mut representative_source[welded as usize];
+            if *representative == u32::MAX {
+                *representative = source as u32;
+            }
+        }
+        let faces = mesh
+            .tris()
+            .iter()
+            .map(|triangle| triangle.map(|source| source_to_welded[source as usize]))
+            .collect::<Vec<_>>();
+        let mut incident_faces = vec![Vec::new(); view.vertex_count() as usize];
+        for (face, triangle) in faces.iter().enumerate() {
+            for &vertex in triangle {
+                let incidents = &mut incident_faces[vertex as usize];
+                if incidents.last().copied() != Some(face) {
+                    incidents.push(face);
+                }
+            }
+        }
+        Ok(Self {
+            source_to_welded,
+            representative_source,
+            faces,
+            incident_faces,
+        })
+    }
+
+    /// Meshoptimizer's lock bit prevents a locked vertex from moving, but it
+    /// does not prevent all of that vertex's incident triangles from becoming
+    /// degenerate when its unlocked neighbors collapse.  For each geometric
+    /// halo vertex, reserve one incident triangle.  The locally minimal face
+    /// adds the fewest currently-unlocked welded vertices; source face order is
+    /// the deterministic tie break.  Every newly locked vertex lies in that
+    /// same fully locked triangle, so the one pass closes the complete final
+    /// operational lock set.
+    fn close(
+        &self,
+        source_locks: &[bool],
+    ) -> Result<OperationalLockClosure, FeatureProtectionError> {
+        debug_assert_eq!(source_locks.len(), self.source_to_welded.len());
+        let mut welded_locks = vec![false; self.incident_faces.len()];
+        for (&welded, &locked) in self.source_to_welded.iter().zip(source_locks) {
+            welded_locks[welded as usize] |= locked;
+        }
+        let halo_welded_vertices = welded_locks
+            .iter()
+            .enumerate()
+            .filter_map(|(vertex, &locked)| locked.then_some(vertex))
+            .collect::<Vec<_>>();
+
+        for vertex in halo_welded_vertices {
+            let incidents = &self.incident_faces[vertex];
+            if incidents.is_empty() {
+                return Err(FeatureProtectionError::ProtectedVertexWithoutIncidentFace {
+                    source_vertex: self.representative_source[vertex] as usize,
+                });
+            }
+            if incidents
+                .iter()
+                .any(|&face| self.faces[face].iter().all(|&v| welded_locks[v as usize]))
+            {
+                continue;
+            }
+            let face = *incidents
+                .iter()
+                .min_by_key(|&&face| {
+                    (
+                        self.faces[face]
+                            .iter()
+                            .filter(|&&v| !welded_locks[v as usize])
+                            .count(),
+                        face,
+                    )
+                })
+                .expect("nonempty incidents checked above");
+            for &face_vertex in &self.faces[face] {
+                welded_locks[face_vertex as usize] = true;
+            }
+        }
+
+        let source_locks = self
+            .source_to_welded
+            .iter()
+            .map(|&welded| welded_locks[welded as usize])
+            .collect();
+        Ok(OperationalLockClosure { source_locks })
+    }
 }
 
 fn point_index_message(error: PointIndexBuildError) -> String {
@@ -1498,6 +1629,19 @@ mod tests {
         }
         Mesh::new(vertices, triangles).unwrap()
     }
+
+    fn captured_treant_locked_fan() -> Mesh {
+        Mesh::new(
+            vec![
+                [-11.470499038696289, -6.670965671539307, 91.73716735839844],
+                [-11.429944038391113, -6.334640026092529, 92.0300521850586],
+                [-11.352010726928711, -6.334236145019531, 91.598388671875],
+                [-11.398161888122559, -6.333822250366211, 91.85111236572266],
+            ],
+            vec![[0, 1, 2], [0, 2, 3], [1, 0, 3]],
+        )
+        .unwrap()
+    }
     fn request(ratio: f64, locks: Vec<bool>) -> SimplifyRequest {
         SimplifyRequest {
             target_ratio: ratio,
@@ -1564,6 +1708,23 @@ mod tests {
     }
 
     #[test]
+    fn physically_identical_signed_zero_coordinates_are_welded() {
+        let mesh = Mesh::new(
+            vec![
+                [0.0, 0.0, 0.0],
+                [-0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+            ],
+            vec![[0, 2, 3], [1, 2, 3]],
+        )
+        .unwrap();
+        let welded = prepare_welded_input(&mesh, &[false; 4]).unwrap();
+        assert_eq!(welded.view.map()[0], welded.view.map()[1]);
+        assert_eq!(welded.view.vertex_count(), 3);
+    }
+
+    #[test]
     fn lock_on_a_nonrepresentative_triangle_soup_alias_survives() {
         let soup = triangle_soup(&octahedron());
         // Soup IDs 1 and 3 are aliases of shared octahedron vertex 2. Lock
@@ -1591,6 +1752,84 @@ mod tests {
         assert_eq!(welded.view.map(), &[0, 1, 2, 3, 4, 5]);
         let outcome = simplify_locked(&mesh, &request(0.5, vec![false; 6])).unwrap();
         assert_eq!(outcome.output_face_count, 4);
+    }
+
+    #[test]
+    fn captured_treant_fan_closes_a_bare_lock_over_the_minimum_incident_face() {
+        let mesh = captured_treant_locked_fan();
+        let mut locks = vec![false; 4];
+        locks[0] = true;
+        assert!(matches!(
+            simplify_locked(&mesh, &request(0.34, locks.clone())),
+            Err(SimplifyError::EmptyResult)
+        ));
+        let topology = OperationalLockTopology::build(&mesh).unwrap();
+        let first = topology.close(&locks).unwrap();
+        let second = topology.close(&locks).unwrap();
+        assert_eq!(first.source_locks, vec![true, true, true, false]);
+        assert_eq!(first.source_locks, second.source_locks);
+        let outcome = simplify_locked(&mesh, &request(0.34, first.source_locks)).unwrap();
+        assert!(outcome.output_face_count < mesh.tris().len());
+        assert!(outcome.mesh.tris().iter().any(|triangle| {
+            let mut sources =
+                triangle.map(|output| outcome.retained_original_vertex_ids[output as usize]);
+            sources.sort_unstable();
+            sources == [0, 1, 2]
+        }));
+    }
+
+    #[test]
+    fn operational_lock_closure_is_part_of_every_cap_preflight() {
+        let mesh = captured_treant_locked_fan();
+        let mut errors = vec![0.0; 4];
+        errors[0] = 1.0;
+        let failure = select_feature_protection_from_errors(
+            &mesh,
+            &errors,
+            FeatureProtectionPolicy {
+                halo_radius_mm: 0.0,
+                cap_fraction: 0.5,
+                ..feature_policy(0.5)
+            },
+        )
+        .unwrap_err();
+        let FeatureProtectionError::CapExceeded { trace } = failure else {
+            panic!("closure exceeding the cap must be a typed no-candidate failure")
+        };
+        assert_eq!(trace.cap_count, 2);
+        assert_eq!(trace.attempts.len(), 4);
+        assert!(trace.attempts.iter().all(|attempt| {
+            attempt.halo_vertex_count == 1
+                && attempt.lock_closure_added_vertex_count == 2
+                && attempt.protected_vertex_count == 3
+        }));
+    }
+
+    #[test]
+    fn protected_unreferenced_vertex_is_a_typed_no_candidate_failure() {
+        let mesh = Mesh::new(
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [2.0, 2.0, 2.0],
+            ],
+            vec![[0, 1, 2]],
+        )
+        .unwrap();
+        let errors = vec![0.0, 0.0, 0.0, 1.0];
+        assert!(matches!(
+            select_feature_protection_from_errors(
+                &mesh,
+                &errors,
+                FeatureProtectionPolicy {
+                    halo_radius_mm: 0.0,
+                    cap_fraction: 1.0,
+                    ..feature_policy(1.0)
+                },
+            ),
+            Err(FeatureProtectionError::ProtectedVertexWithoutIncidentFace { source_vertex: 3 })
+        ));
     }
 
     #[test]
@@ -2166,7 +2405,8 @@ mod tests {
 
     #[test]
     fn feature_cap_uses_exact_floor_twelve_percent() {
-        let original = point_cloud_mesh((0..25).map(|id| [id as f64, 0.0, 0.0]).collect());
+        let points = (0..25).map(|id| [id as f64, 0.0, 0.0]).collect();
+        let original = Mesh::new(points, vec![[0, 2, 4]]).unwrap();
         let mut errors = vec![0.0; 25];
         errors[0] = 0.1;
         errors[2] = 0.1;
@@ -2180,7 +2420,8 @@ mod tests {
 
     #[test]
     fn feature_cap_backoff_is_bounded_and_deterministic() {
-        let original = point_cloud_mesh((0..25).map(|id| [id as f64, 0.0, 0.0]).collect());
+        let points = (0..25).map(|id| [id as f64, 0.0, 0.0]).collect();
+        let original = Mesh::new(points, vec![[0, 2, 4], [0, 4, 6]]).unwrap();
         let mut errors = vec![0.0; 25];
         for id in [0, 2, 4, 6] {
             errors[id] = 1.0;
