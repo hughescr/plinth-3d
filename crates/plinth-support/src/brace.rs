@@ -37,6 +37,7 @@ const CROSS_LINK_DUTY_FACTOR: f64 = 0.840_896_415_253_714_5; // 0.5^(1/4)
 struct BraceConfig {
     ladder_z_mm: f64,
     neighbor_max_xy_mm: f64,
+    reach_tier_base_factor: f64,
     reach_max_factor: f64,
     brace_radius_mm: PositiveFinite,
     fallback_fractions: Vec<f64>,
@@ -52,6 +53,7 @@ struct BraceConfig {
     standoff_mm: f64,
     ball_factor_foot: f64,
     ball_breach_epsilon_mm: f64,
+    min_illegal_len_mm: f64,
 }
 
 impl BraceConfig {
@@ -61,6 +63,7 @@ impl BraceConfig {
         Ok(Self {
             ladder_z_mm: p.brace_ladder_z_mm().diagnostic().get(),
             neighbor_max_xy_mm: p.brace_neighbor_max_xy_mm().diagnostic().get(),
+            reach_tier_base_factor: p.bracing_reach_tier_base_factor().diagnostic().get(),
             reach_max_factor: p.brace_reach_max_factor_x().diagnostic().get(),
             brace_radius_mm: *p.brace_r_mm().diagnostic(),
             fallback_fractions: p
@@ -85,6 +88,7 @@ impl BraceConfig {
             standoff_mm: p.standoff_mm().diagnostic().get(),
             ball_factor_foot: p.ball_factor_foot().diagnostic().get(),
             ball_breach_epsilon_mm: p.ball_breach_eps_mm().diagnostic().get(),
+            min_illegal_len_mm: p.min_illegal_len_mm().diagnostic().get(),
         })
     }
 }
@@ -176,6 +180,13 @@ struct NeedBatch {
     needs: Vec<Need>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TriggerReliefResult {
+    pending: Vec<MemberKey>,
+    resize_batches: usize,
+    exact_clearance_batches: usize,
+}
+
 #[derive(Clone, Debug)]
 struct Rod {
     p0: [f64; 3],
@@ -192,7 +203,6 @@ struct PlacementCandidate {
     rank: usize,
     kind: BraceAdditionKind,
     rods: Vec<Rod>,
-    model_foot: Option<([f64; 3], f64)>,
     printable: bool,
 }
 
@@ -204,6 +214,13 @@ struct RawModelCandidate {
     host: MemberKey,
     z_mm: f64,
     centroid: [f64; 3],
+}
+
+#[derive(Clone, Debug)]
+struct ProjectedModelCandidate {
+    raw: RawModelCandidate,
+    point: [f64; 3],
+    normal: [f64; 3],
 }
 
 /// Port of the live `compute_needs` plus candidate placement, without mutating
@@ -226,6 +243,7 @@ pub(crate) fn brace_pass_current_parity(
     let mut planned = forest.clone();
     let mut additions = Vec::new();
     let mut ordinals = BTreeMap::<BraceAdditionKind, u32>::new();
+    let mut tried_zs = BTreeMap::<MemberKey, Vec<f64>>::new();
     let mut rungs_placed = 0;
     let mut rungs_unplaceable = 0;
     for (need_index, need) in need_batch.needs.iter().enumerate() {
@@ -234,6 +252,17 @@ pub(crate) fn brace_pass_current_parity(
         let mut placed_this_need = false;
         let site_count = 1 + need.alternatives.len();
         for site_index in 0..site_count {
+            let (site_host, site_z) = if site_index == 0 {
+                (need.host, need.z_mm)
+            } else {
+                need.alternatives[site_index - 1]
+            };
+            if site_was_attempted(&tried_zs, site_host, site_z, config.ladder_z_mm) {
+                continue;
+            }
+            // Frozen Python parity records the attempted host/height before
+            // trying any of its primary or fallback geometry candidates.
+            tried_zs.entry(site_host).or_default().push(site_z);
             let winner = candidates
                 .iter()
                 .enumerate()
@@ -252,13 +281,10 @@ pub(crate) fn brace_pass_current_parity(
                 break;
             }
             let fresh = transient_report(&planned, plate_z_mm)?;
-            let mut still_pending = Vec::new();
-            for trigger in pending {
-                if !trigger_relieved(&planned, surface, plate_z_mm, &fresh, trigger, &config)? {
-                    still_pending.push(trigger);
-                }
-            }
-            pending = still_pending;
+            pending = pending_triggers_after_trial(
+                &planned, surface, plate_z_mm, &fresh, pending, &config,
+            )?
+            .pending;
             if pending.is_empty() {
                 break;
             }
@@ -306,7 +332,11 @@ pub(crate) fn brace_fixed_point_current_parity(
                 forest: working,
                 additions,
                 iterations: iteration,
-                termination: BraceFixedPointTermination::Converged,
+                termination: if saw_unplaceable {
+                    BraceFixedPointTermination::Unplaceable
+                } else {
+                    BraceFixedPointTermination::Converged
+                },
             });
         }
         if iteration == FROZEN_PASS_CAP {
@@ -377,41 +407,63 @@ fn append_candidate(
     Ok(())
 }
 
-fn trigger_relieved(
+fn pending_triggers_after_trial(
     forest: &Forest,
     surface: &NativeSurface,
     plate_z_mm: Finite,
     report: &TransientReport,
-    trigger: MemberKey,
+    pending: Vec<MemberKey>,
     config: &BraceConfig,
-) -> Result<bool, BraceError> {
-    let Some(evidence) = report.member(trigger) else {
-        return Ok(true);
-    };
-    let member = forest
-        .member(trigger)
-        .ok_or(BraceError::MissingMember(trigger))?;
+) -> Result<TriggerReliefResult, BraceError> {
     let compatibility = LegacyCompatibility::o10_live_current_support_and_raft();
-    let transient = transient_radius(
-        evidence.worst_span_mm.get(),
-        lean_angle(member)?,
-        evidence.n_terminals,
-        &compatibility,
-    )?;
-    if evidence.worst_span_mm.get() > compatibility.brace_free_span_mm().diagnostic().get()
-        || transient > config.max_unbraced_radius_mm
-    {
-        return Ok(false);
+    let mut threshold_relieved = BTreeSet::new();
+    for trigger in &pending {
+        let Some(evidence) = report.member(*trigger) else {
+            threshold_relieved.insert(*trigger);
+            continue;
+        };
+        let member = forest
+            .member(*trigger)
+            .ok_or(BraceError::MissingMember(*trigger))?;
+        let transient = transient_radius(
+            evidence.worst_span_mm.get(),
+            lean_angle(member)?,
+            evidence.n_terminals,
+            &compatibility,
+        )?;
+        if evidence.worst_span_mm.get() <= compatibility.brace_free_span_mm().diagnostic().get()
+            && transient <= config.max_unbraced_radius_mm
+        {
+            threshold_relieved.insert(*trigger);
+        }
     }
-    // The live path trials the complete resize formula and exact revalidation
-    // before declaring a fallback sufficient. This is one state-dependent
-    // batch over the whole immutable trial forest, never a scalar query.
+
+    if threshold_relieved.is_empty() {
+        return Ok(TriggerReliefResult {
+            pending,
+            resize_batches: 0,
+            exact_clearance_batches: 0,
+        });
+    }
+    // Shared triggers use one complete resize and one exact-clearance batch.
+    // The immutable trial is common to every trigger because the forest does
+    // not change while their relief verdicts are scattered.
     let resize = resize_forest_current_parity(forest, plate_z_mm)?;
     let trial = apply_resize(forest.clone(), &resize)?;
-    Ok(exact_clearance_rows(&trial, surface, config)?
+    let clearance = exact_clearance_rows(&trial, surface, config)?
         .into_iter()
-        .find_map(|(key, clearance)| (key == trigger).then_some(clearance >= 0.0))
-        .unwrap_or(true))
+        .collect::<BTreeMap<_, _>>();
+    Ok(TriggerReliefResult {
+        pending: pending
+            .into_iter()
+            .filter(|trigger| {
+                !threshold_relieved.contains(trigger)
+                    || clearance.get(trigger).is_some_and(|value| *value < 0.0)
+            })
+            .collect(),
+        resize_batches: 1,
+        exact_clearance_batches: 1,
+    })
 }
 
 fn append_clearance_needs(
@@ -676,6 +728,19 @@ fn merge_alternatives(existing: &mut Vec<(MemberKey, f64)>, additions: Vec<(Memb
     existing.dedup_by(|left, right| left.0 == right.0 && left.1.to_bits() == right.1.to_bits());
 }
 
+fn site_was_attempted(
+    tried_zs: &BTreeMap<MemberKey, Vec<f64>>,
+    host: MemberKey,
+    z_mm: f64,
+    ladder_z_mm: f64,
+) -> bool {
+    tried_zs.get(&host).is_some_and(|heights| {
+        heights
+            .iter()
+            .any(|height| (z_mm - height).abs() <= ladder_z_mm / 2.0)
+    })
+}
+
 fn gather_candidates(
     forest: &Forest,
     surface: &NativeSurface,
@@ -689,9 +754,25 @@ fn gather_candidates(
         sites.extend(need.alternatives.iter().copied());
         let mut rank = 0;
         for (site_index, (host, z)) in sites.into_iter().enumerate() {
-            let mut cross = cross_link_candidates(forest, host, z, need.rung_index, config, false)?;
-            if cross.is_empty() && need.path_mapped {
-                cross = cross_link_candidates(forest, host, z, need.rung_index, config, true)?;
+            let standard = cross_link_candidates(
+                forest,
+                host,
+                z,
+                need.rung_index,
+                config,
+                config.neighbor_max_xy_mm,
+            )?;
+            let mut cross = standard.clone();
+            if standard.is_empty() && need.path_mapped {
+                let mut tried = BTreeSet::new();
+                for cap in reach_tiers_mm(config) {
+                    for row in cross_link_candidates(forest, host, z, need.rung_index, config, cap)?
+                    {
+                        if tried.insert(row.1) {
+                            cross.push(row);
+                        }
+                    }
+                }
             }
             for (distance, neighbor) in cross {
                 let rods =
@@ -703,7 +784,6 @@ fn gather_candidates(
                     kind: BraceAdditionKind::CrossLink,
                     printable: rods_printable(&rods)?,
                     rods,
-                    model_foot: None,
                 });
                 rank += 1;
             }
@@ -720,6 +800,7 @@ fn gather_candidates(
             }
         }
     }
+    let mut projected_model = Vec::new();
     if !raw_model.is_empty() {
         let probes = raw_model.iter().map(|row| row.centroid).collect::<Vec<_>>();
         let (_, projected, _, normals) = surface.project(&probes);
@@ -727,42 +808,101 @@ fn gather_candidates(
             if (p1[2] - raw.z_mm).abs() > config.model_rung_z_tolerance_mm + HEIGHT_TOLERANCE_MM {
                 continue;
             }
-            let member = forest
-                .member(raw.host)
-                .ok_or(BraceError::MissingMember(raw.host))?;
-            let p0 = axis_point_at_z(member, p1[2]);
-            let length = norm(sub(p1, p0));
-            if length + HEIGHT_TOLERANCE_MM < config.model_rung_min_length_mm
-                || length > config.model_brace_max_length_mm + HEIGHT_TOLERANCE_MM
-            {
-                continue;
-            }
-            let radius = config.brace_radius_mm;
-            let axis = scale(sub(p1, p0), 1.0 / length);
-            let cosine = dot(axis, normal).abs().max(0.5);
-            let inset1 = (config.contact_depth_mm + radius.get() + config.standoff_mm) / cosine;
-            candidates.push(PlacementCandidate {
-                need_index: raw.need_index,
-                site_index: raw.site_index,
-                rank: raw.rank,
-                kind: BraceAdditionKind::ModelRung,
-                rods: vec![Rod {
-                    p0,
-                    p1,
-                    radius,
-                    inset0: 0.0,
-                    inset1,
-                }],
-                model_foot: Some((p1, config.ball_factor_foot * radius.get())),
-                // The frozen current path exempts only short, exactly
-                // horizontal model_rung members from the cone gate.
-                printable: (p0[2] - p1[2]).abs() <= HEIGHT_TOLERANCE_MM,
+            projected_model.push(ProjectedModelCandidate {
+                raw,
+                point: p1,
+                normal,
             });
         }
+    }
+    // The six-anchor cap applies after exact projection and foot-breach
+    // filtering. Gather every surviving projected foot into one sphere batch,
+    // then scatter the first six per deterministic need/site order.
+    let breached = if projected_model.is_empty() {
+        Vec::new()
+    } else {
+        surface
+            .sphere_breach(
+                &projected_model
+                    .iter()
+                    .map(|candidate| candidate.point)
+                    .collect::<Vec<_>>(),
+                &projected_model
+                    .iter()
+                    .map(|_| config.ball_factor_foot * config.brace_radius_mm.get())
+                    .collect::<Vec<_>>(),
+                config.ball_breach_epsilon_mm,
+                FOOT_BREACH_HALF_DEG,
+                FOOT_BREACH_CONE_RAYS,
+            )
+            .map_err(|error| BraceError::NativeQuery(error.to_string()))?
+            .0
+    };
+    retain_projected_model_survivors(
+        &mut projected_model,
+        &breached,
+        config.model_rung_max_candidates,
+    );
+    for projected in projected_model {
+        let member = forest
+            .member(projected.raw.host)
+            .ok_or(BraceError::MissingMember(projected.raw.host))?;
+        let p0 = axis_point_at_z(member, projected.point[2]);
+        let length = norm(sub(projected.point, p0));
+        if length + HEIGHT_TOLERANCE_MM < config.model_rung_min_length_mm
+            || length > config.model_brace_max_length_mm + HEIGHT_TOLERANCE_MM
+        {
+            continue;
+        }
+        let radius = config.brace_radius_mm;
+        let axis = scale(sub(projected.point, p0), 1.0 / length);
+        let cosine = dot(axis, projected.normal).abs().max(0.5);
+        candidates.push(PlacementCandidate {
+            need_index: projected.raw.need_index,
+            site_index: projected.raw.site_index,
+            rank: projected.raw.rank,
+            kind: BraceAdditionKind::ModelRung,
+            rods: vec![Rod {
+                p0,
+                p1: projected.point,
+                radius,
+                inset0: 0.0,
+                inset1: embed_inset_mm(
+                    config.contact_depth_mm,
+                    radius.get(),
+                    config.standoff_mm,
+                    cosine,
+                ),
+            }],
+            printable: (p0[2] - projected.point[2]).abs() <= HEIGHT_TOLERANCE_MM,
+        });
     }
     candidates
         .sort_by_key(|candidate| (candidate.need_index, candidate.site_index, candidate.rank));
     Ok(candidates)
+}
+
+fn retain_projected_model_survivors(
+    candidates: &mut Vec<ProjectedModelCandidate>,
+    breached: &[bool],
+    cap: usize,
+) {
+    let mut surviving_counts = BTreeMap::<(usize, usize), usize>::new();
+    let mut index = 0;
+    candidates.retain(|candidate| {
+        let keep = if breached.get(index).copied().unwrap_or(false) {
+            false
+        } else {
+            let count = surviving_counts
+                .entry((candidate.raw.need_index, candidate.raw.site_index))
+                .or_default();
+            let within_cap = *count < cap;
+            *count += 1;
+            within_cap
+        };
+        index += 1;
+        keep
+    });
 }
 
 fn evaluate_candidates(
@@ -797,44 +937,121 @@ fn evaluate_candidates(
             .map_err(|error| BraceError::NativeQuery(error.to_string()))?
             .0
     };
-    let model_indices = candidates
+    candidate_revalidation(surface, candidates, &ranges, &clearances, config)
+}
+
+fn candidate_revalidation(
+    surface: &NativeSurface,
+    candidates: &[PlacementCandidate],
+    ranges: &[std::ops::Range<usize>],
+    clearances: &[f64],
+    config: &BraceConfig,
+) -> Result<Vec<bool>, BraceError> {
+    let rods = candidates
         .iter()
-        .enumerate()
-        .filter_map(|(index, candidate)| candidate.model_foot.map(|foot| (index, foot)))
+        .flat_map(|candidate| candidate.rods.iter())
         .collect::<Vec<_>>();
-    let breached = if model_indices.is_empty() {
-        Vec::new()
-    } else {
-        let centers = model_indices
-            .iter()
-            .map(|(_, (point, _))| *point)
-            .collect::<Vec<_>>();
-        let radii = model_indices
-            .iter()
-            .map(|(_, (_, radius))| *radius)
-            .collect::<Vec<_>>();
-        surface
-            .sphere_breach(
-                &centers,
-                &radii,
-                config.ball_breach_epsilon_mm,
-                FOOT_BREACH_HALF_DEG,
-                FOOT_BREACH_CONE_RAYS,
-            )
-            .map_err(|error| BraceError::NativeQuery(error.to_string()))?
-            .0
-    };
-    let mut foot_breached = BTreeMap::new();
-    for ((candidate_index, _), value) in model_indices.into_iter().zip(breached) {
-        foot_breached.insert(candidate_index, value);
-    }
+    let p0 = rods.iter().map(|rod| rod.p0).collect::<Vec<_>>();
+    let p1 = rods.iter().map(|rod| rod.p1).collect::<Vec<_>>();
+    let radii = rods.iter().map(|rod| rod.radius.get()).collect::<Vec<_>>();
+    let inset0 = rods.iter().map(|rod| rod.inset0).collect::<Vec<_>>();
+    let inset1 = rods.iter().map(|rod| rod.inset1).collect::<Vec<_>>();
+    let illegal_rods = axis_illegal_rows(
+        surface, &p0, &p1, &radii, &radii, &inset0, &inset1, clearances, config,
+    )?;
     Ok(ranges
         .iter()
         .enumerate()
-        .map(|(index, range)| {
-            candidates[index].printable
-                && clearances[range.clone()].iter().all(|value| *value >= 0.0)
-                && !foot_breached.get(&index).copied().unwrap_or(false)
+        .map(|(candidate_index, range)| {
+            candidates[candidate_index].printable
+                && range.clone().all(|rod_index| {
+                    clearances[rod_index] >= 0.0 && !illegal_rods.contains(&rod_index)
+                })
+        })
+        .collect())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn axis_illegal_rows(
+    surface: &NativeSurface,
+    p0: &[[f64; 3]],
+    p1: &[[f64; 3]],
+    r0: &[f64],
+    r1: &[f64],
+    inset0: &[f64],
+    inset1: &[f64],
+    clearances: &[f64],
+    config: &BraceConfig,
+) -> Result<BTreeSet<usize>, BraceError> {
+    let midpoint_rows = p0
+        .iter()
+        .zip(p1)
+        .enumerate()
+        .filter(|(index, _)| clearances[*index] >= 0.1)
+        .map(|(index, (start, end))| {
+            (
+                index,
+                std::array::from_fn(|axis| 0.5 * (start[axis] + end[axis])),
+            )
+        })
+        .collect::<Vec<_>>();
+    let midpoint_inside = surface.inside(
+        &midpoint_rows
+            .iter()
+            .map(|(_, point)| *point)
+            .collect::<Vec<_>>(),
+    );
+    let inside_by_rod = midpoint_rows
+        .into_iter()
+        .zip(midpoint_inside)
+        .map(|((index, _), inside)| (index, inside))
+        .collect::<BTreeMap<_, _>>();
+    let interval_indices = (0..p0.len())
+        .filter(|index| {
+            clearances[*index] >= 0.0
+                && (clearances[*index] < 0.1 || inside_by_rod.get(index).copied().unwrap_or(false))
+        })
+        .collect::<Vec<_>>();
+    if interval_indices.is_empty() {
+        return Ok(BTreeSet::new());
+    }
+    let intervals = surface
+        .penetration_intervals_batch(
+            &interval_indices
+                .iter()
+                .map(|index| p0[*index])
+                .collect::<Vec<_>>(),
+            &interval_indices
+                .iter()
+                .map(|index| p1[*index])
+                .collect::<Vec<_>>(),
+            &interval_indices
+                .iter()
+                .map(|index| r0[*index])
+                .collect::<Vec<_>>(),
+            &interval_indices
+                .iter()
+                .map(|index| r1[*index])
+                .collect::<Vec<_>>(),
+            8,
+            0.12,
+            80,
+            config.min_illegal_len_mm,
+            false,
+        )
+        .map_err(|error| BraceError::NativeQuery(error.to_string()))?;
+    Ok(interval_indices
+        .into_iter()
+        .zip(intervals)
+        .filter_map(|(index, intervals)| {
+            let length = norm(sub(p1[index], p0[index]));
+            let lo = inset0[index];
+            let hi = length - inset1[index];
+            (hi - lo > HEIGHT_TOLERANCE_MM
+                && intervals.iter().any(|interval| {
+                    interval.s_b.min(hi) - interval.s_a.max(lo) > config.min_illegal_len_mm
+                }))
+            .then_some(index)
         })
         .collect())
 }
@@ -845,7 +1062,7 @@ fn cross_link_candidates(
     z: f64,
     rung_index: usize,
     config: &BraceConfig,
-    widened: bool,
+    cap: f64,
 ) -> Result<Vec<(f64, MemberKey)>, BraceError> {
     let member = forest.member(host).ok_or(BraceError::MissingMember(host))?;
     let (host_lo, host_hi) = z_extent(member);
@@ -853,15 +1070,6 @@ fn cross_link_candidates(
         return Ok(Vec::new());
     }
     let host_point = axis_point_at_z(member, z);
-    let cap = config.neighbor_max_xy_mm
-        * if widened {
-            config
-                .reach_max_factor
-                .max(1.25)
-                .min(config.reach_max_factor)
-        } else {
-            1.0
-        };
     let braces = forest.braces().into_iter().collect::<BTreeSet<_>>();
     let mut out = Vec::new();
     for neighbor in forest.live_members() {
@@ -903,6 +1111,22 @@ fn cross_link_candidates(
     Ok(out)
 }
 
+fn reach_tiers_mm(config: &BraceConfig) -> Vec<f64> {
+    let mut factors = [config.reach_tier_base_factor, config.reach_max_factor]
+        .into_iter()
+        .filter(|factor| {
+            *factor > 1.0 + HEIGHT_TOLERANCE_MM
+                && *factor <= config.reach_max_factor + HEIGHT_TOLERANCE_MM
+        })
+        .collect::<Vec<_>>();
+    factors.sort_by(f64::total_cmp);
+    factors.dedup_by(|left, right| left.to_bits() == right.to_bits());
+    factors
+        .into_iter()
+        .map(|factor| config.neighbor_max_xy_mm * factor)
+        .collect()
+}
+
 fn cross_link_rods(
     forest: &Forest,
     host: MemberKey,
@@ -924,15 +1148,22 @@ fn cross_link_rods(
     let raw = deflection_radius(distance * 2.0_f64.sqrt(), 45.0, &compatibility)?;
     let make = |p0, p1, paired: bool| -> Result<Rod, BraceError> {
         let span = MemberSpan::new(finite3(p0)?, finite3(p1)?)?;
-        let own = compatibility
-            .deflection_radius_for_geometry(span.length_mm(), span.lean_angle_deg())?;
-        let radius =
-            PositiveFinite::new(config.brace_radius_mm.get().max(own.get()).max(if paired {
-                raw * CROSS_LINK_DUTY_FACTOR
-            } else {
-                raw
-            }))
-            .map_err(|_| BraceError::InvalidGeometry)?;
+        let radius = if paired {
+            let own = compatibility
+                .deflection_radius_for_geometry(span.length_mm(), span.lean_angle_deg())?;
+            PositiveFinite::new(
+                config
+                    .brace_radius_mm
+                    .get()
+                    .max(own.get())
+                    .max(raw * CROSS_LINK_DUTY_FACTOR),
+            )
+        } else {
+            // Frozen twin parity deliberately uses the 45-degree construction
+            // estimate only; the real-endpoint own floor belongs to X pairs.
+            PositiveFinite::new(config.brace_radius_mm.get().max(raw))
+        }
+        .map_err(|_| BraceError::InvalidGeometry)?;
         Ok(Rod {
             p0,
             p1,
@@ -986,7 +1217,6 @@ fn model_rung_anchor_centroids(
             .total_cmp(&right.0)
             .then_with(|| left.1.cmp(&right.1))
     });
-    rows.truncate(config.model_rung_max_candidates);
     Ok(rows.into_iter().map(|(_, _, point)| point).collect())
 }
 
@@ -1085,22 +1315,33 @@ fn exact_clearance_rows(
                 EmbedEnd::Terminalward => member.terminal_radius_mm().get().get(),
                 EmbedEnd::Rootward => member.rootward_radius_mm().get().get(),
             };
-            let inset = (config.contact_depth_mm + radius + config.standoff_mm) / cosine;
+            let inset = embed_inset_mm(config.contact_depth_mm, radius, config.standoff_mm, cosine);
             match end {
                 EmbedEnd::Terminalward => inset0[index] = inset,
                 EmbedEnd::Rootward => inset1[index] = inset,
             }
         }
     }
-    let clearance = surface
+    let mut clearance = surface
         .segment_clearance(&p0, &p1, &r0, &r1, config.standoff_mm, &inset0, &inset1)
         .map_err(|error| BraceError::NativeQuery(error.to_string()))?
         .0;
+    for index in axis_illegal_rows(
+        surface, &p0, &p1, &r0, &r1, &inset0, &inset1, &clearance, config,
+    )? {
+        // Exact-clearance consumers need a single sign verdict. Preserve any
+        // harder distance violation and encode belt-only transit as negative.
+        clearance[index] = clearance[index].min(-config.min_illegal_len_mm);
+    }
     Ok(rows
         .into_iter()
         .zip(clearance)
         .map(|((key, _), value)| (key, value))
         .collect())
+}
+
+fn embed_inset_mm(contact_depth_mm: f64, radius_mm: f64, standoff_mm: f64, cosine: f64) -> f64 {
+    contact_depth_mm + (radius_mm + standoff_mm) / cosine
 }
 
 fn slender_rungs(
@@ -1154,9 +1395,16 @@ fn lean_angle(member: &Member) -> Result<f64, BraceError> {
 }
 
 fn largest_gap(gaps: &[ZInterval]) -> Option<ZInterval> {
-    gaps.iter().copied().max_by(|left, right| {
-        (left.hi_mm.get() - left.lo_mm.get()).total_cmp(&(right.hi_mm.get() - right.lo_mm.get()))
-    })
+    let first = gaps.first().copied()?;
+    Some(gaps[1..].iter().copied().fold(first, |best, candidate| {
+        let best_span = best.hi_mm.get() - best.lo_mm.get();
+        let candidate_span = candidate.hi_mm.get() - candidate.lo_mm.get();
+        if candidate_span > best_span {
+            candidate
+        } else {
+            best
+        }
+    }))
 }
 
 fn rungs_that_fit(span: f64, requested: usize) -> usize {
@@ -1355,6 +1603,42 @@ mod tests {
         .unwrap()
     }
 
+    fn enclosing_box() -> NativeSurface {
+        let vertices = vec![
+            [0.0, 0.0, 0.0],
+            [20.0, 0.0, 0.0],
+            [20.0, 20.0, 0.0],
+            [0.0, 20.0, 0.0],
+            [0.0, 0.0, 20.0],
+            [20.0, 0.0, 20.0],
+            [20.0, 20.0, 20.0],
+            [0.0, 20.0, 20.0],
+        ];
+        let faces = vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        NativeSurface::from_indexed(
+            &vertices,
+            &faces,
+            NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 4 * 1024 * 1024,
+            },
+        )
+        .unwrap()
+    }
+
     #[test]
     fn frozen_cross_link_thresholds_and_twin_parity_match_source_ledger() {
         let mut forest = Forest::new();
@@ -1371,7 +1655,8 @@ mod tests {
             1,
         ));
         let config = BraceConfig::current().unwrap();
-        let rows = cross_link_candidates(&forest, a, 10.0, 0, &config, false).unwrap();
+        let rows =
+            cross_link_candidates(&forest, a, 10.0, 0, &config, config.neighbor_max_xy_mm).unwrap();
         assert_eq!(rows, vec![(2.0, b)]);
         let even = cross_link_rods(&forest, a, b, 10.0, 2.0, 0, &config).unwrap();
         let odd = cross_link_rods(&forest, a, b, 10.0, 2.0, 1, &config).unwrap();
@@ -1379,6 +1664,200 @@ mod tests {
         assert_eq!(odd.len(), 1);
         assert_eq!(even[0].p0, [0.0, 0.0, 10.0]);
         assert_eq!(odd[0].p0, [2.0, 0.0, 10.0]);
+    }
+
+    #[test]
+    fn registered_reach_tiers_preserve_the_intermediate_cap() {
+        let config = BraceConfig::current().unwrap();
+        assert_eq!(
+            reach_tiers_mm(&config),
+            vec![
+                config.neighbor_max_xy_mm * config.reach_tier_base_factor,
+                config.neighbor_max_xy_mm * config.reach_max_factor,
+            ]
+        );
+    }
+
+    #[test]
+    fn twin_sizing_does_not_apply_the_x_pair_real_endpoint_floor() {
+        let mut forest = Forest::new();
+        let host = forest.add_member(member(
+            [15.0, 0.0, 30.0],
+            [0.0, 0.0, 0.0],
+            MemberKind::Trunk,
+            0,
+        ));
+        let neighbor = forest.add_member(member(
+            [2.0, 0.0, 30.0],
+            [2.0, 0.0, 0.0],
+            MemberKind::Trunk,
+            1,
+        ));
+        let config = BraceConfig::current().unwrap();
+        let rods = cross_link_rods(&forest, host, neighbor, 2.0, 2.0, 0, &config).unwrap();
+        let compatibility = LegacyCompatibility::o10_live_current_support_and_raft();
+        let expected = config
+            .brace_radius_mm
+            .get()
+            .max(deflection_radius(2.0 * 2.0_f64.sqrt(), 45.0, &compatibility).unwrap());
+        assert_eq!(rods.len(), 1);
+        assert!((rods[0].radius.get() - expected).abs() <= 1e-12);
+    }
+
+    #[test]
+    fn angled_embed_inset_leaves_contact_depth_unscaled() {
+        let inset = embed_inset_mm(0.3, 0.5, 0.2, 0.5);
+        assert!((inset - 1.7).abs() <= 1e-12);
+        assert_ne!(inset, (0.3 + 0.5 + 0.2) / 0.5);
+    }
+
+    #[test]
+    fn equal_largest_gap_keeps_first_source_row() {
+        let gaps = vec![
+            ZInterval {
+                lo_mm: finite(1.0).unwrap(),
+                hi_mm: finite(4.0).unwrap(),
+            },
+            ZInterval {
+                lo_mm: finite(10.0).unwrap(),
+                hi_mm: finite(13.0).unwrap(),
+            },
+        ];
+        assert_eq!(largest_gap(&gaps), Some(gaps[0]));
+    }
+
+    #[test]
+    fn attempted_host_height_is_suppressed_across_primary_and_fallback_sites() {
+        let mut forest = Forest::new();
+        let host = forest.add_member(member(
+            [0.0, 0.0, 10.0],
+            [0.0, 0.0, 0.0],
+            MemberKind::Trunk,
+            0,
+        ));
+        let tried = BTreeMap::from([(host, vec![5.0])]);
+        assert!(site_was_attempted(&tried, host, 5.49, 1.0));
+        assert!(!site_was_attempted(&tried, host, 5.51, 1.0));
+    }
+
+    #[test]
+    fn shared_trigger_relief_uses_one_resize_and_one_clearance_batch() {
+        let mut forest = Forest::new();
+        let first = forest.add_member(member(
+            [0.0, 0.0, 2.0],
+            [0.0, 0.0, 0.0],
+            MemberKind::Trunk,
+            0,
+        ));
+        let second = forest.add_member(member(
+            [2.0, 0.0, 2.0],
+            [2.0, 0.0, 0.0],
+            MemberKind::Trunk,
+            1,
+        ));
+        let plate = finite(0.0).unwrap();
+        let report = transient_report(&forest, plate).unwrap();
+        let result = pending_triggers_after_trial(
+            &forest,
+            &remote_box(),
+            plate,
+            &report,
+            vec![first, second],
+            &BraceConfig::current().unwrap(),
+        )
+        .unwrap();
+        assert!(result.pending.is_empty());
+        assert_eq!(result.resize_batches, 1);
+        assert_eq!(result.exact_clearance_batches, 1);
+    }
+
+    #[test]
+    fn model_anchor_cap_counts_only_post_breach_survivors() {
+        let mut forest = Forest::new();
+        let host = forest.add_member(member(
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0],
+            MemberKind::Trunk,
+            0,
+        ));
+        let mut candidates = (0..8)
+            .map(|rank| ProjectedModelCandidate {
+                raw: RawModelCandidate {
+                    need_index: 0,
+                    site_index: 0,
+                    rank,
+                    host,
+                    z_mm: 0.0,
+                    centroid: [rank as f64, 0.0, 0.0],
+                },
+                point: [rank as f64, 0.0, 0.0],
+                normal: [1.0, 0.0, 0.0],
+            })
+            .collect::<Vec<_>>();
+        retain_projected_model_survivors(
+            &mut candidates,
+            &[true, true, false, false, false, false, false, false],
+            6,
+        );
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.raw.rank)
+                .collect::<Vec<_>>(),
+            vec![2, 3, 4, 5, 6, 7]
+        );
+    }
+
+    #[test]
+    fn axis_penetration_belt_rejects_inside_rods_in_one_batch() {
+        let surface = enclosing_box();
+        let config = BraceConfig::current().unwrap();
+        let candidates = vec![
+            PlacementCandidate {
+                need_index: 0,
+                site_index: 0,
+                rank: 0,
+                kind: BraceAdditionKind::CrossLink,
+                rods: vec![Rod {
+                    p0: [5.0, 8.0, 10.0],
+                    p1: [15.0, 8.0, 10.0],
+                    radius: positive(0.1),
+                    inset0: 0.0,
+                    inset1: 0.0,
+                }],
+                printable: true,
+            },
+            PlacementCandidate {
+                need_index: 1,
+                site_index: 0,
+                rank: 0,
+                kind: BraceAdditionKind::CrossLink,
+                rods: vec![Rod {
+                    p0: [5.0, 12.0, 10.0],
+                    p1: [15.0, 12.0, 10.0],
+                    radius: positive(0.1),
+                    inset0: 0.0,
+                    inset1: 0.0,
+                }],
+                printable: true,
+            },
+        ];
+        let viable = evaluate_candidates(&surface, &candidates, &config).unwrap();
+        assert_eq!(viable, vec![false, false]);
+    }
+
+    #[test]
+    fn stable_unplaceable_fixed_point_is_not_reported_as_converged() {
+        let mut forest = Forest::new();
+        forest.add_member(member(
+            [0.0, 0.0, 30.0],
+            [0.0, 0.0, 0.0],
+            MemberKind::Trunk,
+            0,
+        ));
+        let plan =
+            brace_fixed_point_current_parity(&forest, &remote_box(), finite(0.0).unwrap()).unwrap();
+        assert_eq!(plan.termination, BraceFixedPointTermination::Unplaceable);
     }
 
     #[test]
