@@ -4473,6 +4473,106 @@ mod tests {
     }
 
     #[test]
+    fn finalized_cco_rejects_equal_load_contact_swap_before_mutation() {
+        use crate::{
+            anchor::{AnchorGeometryAuthority, AnchorSearchConfig, SurfaceAnchorPool},
+            cco::{CcoController, CcoError, FinalizedAnchorTerminalRoute, TerminalCcoRequest},
+            forest::{
+                EmbedEnd, Forest, Member, MemberKind, MemberSpec, Owner, RootwardEndRadius,
+                TerminalEndRadius,
+            },
+            perception::{FinalizedContactLoadLimits, FinalizedContactLoads},
+        };
+
+        let mesh = make_overhang_table().unwrap();
+        let plan = full_fixture(mesh.clone(), "equal-load contact swap").unwrap();
+        let contact_ids = plan
+            .contacts()
+            .iter()
+            .map(SpecializedPhysicalContact::contact_id)
+            .collect::<Vec<_>>();
+        let loads = FinalizedContactLoads::from_partition(
+            plan.load_partition(),
+            &contact_ids,
+            FinalizedContactLoadLimits::new(
+                contact_ids.len(),
+                plan.load_partition().rows().len(),
+                usize::MAX,
+            ),
+        )
+        .unwrap();
+        let (bound_contact, rebound_contact) = plan
+            .contacts()
+            .iter()
+            .enumerate()
+            .flat_map(|(left_index, left)| {
+                plan.contacts()[left_index + 1..]
+                    .iter()
+                    .map(move |right| (left, right))
+            })
+            .find(|(left, right)| {
+                let left_load = loads.leaf_for(left.contact_id()).unwrap();
+                let right_load = loads.leaf_for(right.contact_id()).unwrap();
+                left.contact_id() != right.contact_id()
+                    && left_load.carried_area_mm2().to_bits()
+                        == right_load.carried_area_mm2().to_bits()
+                    && left_load.tip_radius_mm() == right_load.tip_radius_mm()
+            })
+            .expect("required fixture must contain two distinct equal-load contacts");
+        let bound_load = loads.leaf_for(bound_contact.contact_id()).unwrap();
+
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let surface = NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
+            NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let delicacy = vec![0.0; mesh.tris().len()];
+        let pool = SurfaceAnchorPool::from_geometry(&geometry, &delicacy).unwrap();
+
+        let terminal_id = u32::try_from(bound_contact.contact_id()).unwrap();
+        let p0_mm = bound_contact
+            .position_mm()
+            .map(|value| Finite::new(value).unwrap());
+        let mut p1_mm = p0_mm;
+        p1_mm[2] = Finite::new(p1_mm[2].get() - 1.0).unwrap();
+        let mut forest = Forest::new();
+        let stub = forest.add_member(Member::new(MemberSpec {
+            p0_mm,
+            p1_mm,
+            r0_mm: TerminalEndRadius::new(bound_load.tip_radius_mm()),
+            r1_mm: RootwardEndRadius::new(bound_load.tip_radius_mm()),
+            kind: MemberKind::Stub,
+            owner: Owner::Contact(terminal_id),
+            embed_end: Some(EmbedEnd::Terminalward),
+            carried_mm2: Finite::new(bound_load.carried_area_mm2()).unwrap(),
+        }));
+        forest.register_terminal(terminal_id, stub).unwrap();
+        let request = TerminalCcoRequest::bind(&forest, terminal_id, frame()).unwrap();
+        let before = forest.digest();
+        let result = CcoController::default().grow_terminal_with_finalized_anchor(
+            &mut forest,
+            &request,
+            FinalizedAnchorTerminalRoute {
+                plan: &plan,
+                contact: rebound_contact,
+                contact_id: rebound_contact.contact_id(),
+                loads: &loads,
+                pool: &pool,
+                config: AnchorSearchConfig::current().unwrap(),
+                geometry: &geometry,
+            },
+        );
+        assert!(matches!(result, Err(CcoError::FinalizedContactMismatch)));
+        assert_eq!(forest.digest(), before);
+    }
+
+    #[test]
     fn required_table_raking_and_thin_fin_fixtures_finalize_full_evidence() {
         let mut failures = Vec::new();
         for (name, mesh, expected_digest, expected_counts, expected_gate) in [
