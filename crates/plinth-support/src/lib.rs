@@ -1264,85 +1264,13 @@ struct CoverageBuildPlan {
     validation_peak_bytes: usize,
 }
 
+#[cfg(test)]
 fn plan_dyadic_coverage(
     mesh: &Mesh,
     islands: &[SupportIsland],
     config: &ContactSelectionConfig<'_>,
 ) -> Result<CoverageBuildPlan, ContactSelectionError> {
-    let source_faces = islands.iter().try_fold(0_usize, |total, island| {
-        total
-            .checked_add(island.face_ids.len())
-            .ok_or(ContactSelectionError::CoverageResourceOverflow)
-    })?;
-    let mut total_cells = 0_usize;
-    for island in islands {
-        for &face_id in &island.face_ids {
-            let triangle = mesh.tris()[face_id as usize];
-            let cell = [
-                mesh.verts()[triangle[0] as usize],
-                mesh.verts()[triangle[1] as usize],
-                mesh.verts()[triangle[2] as usize],
-            ];
-            let max_edge = dyadic::max_edge_mm(cell);
-            let depth = dyadic::refine_depth(max_edge, config.voxel_pitch_mm.get());
-            let terminal_cells =
-                dyadic::terminal_cells(depth).map_err(coverage::map_dyadic_error)?;
-            total_cells = total_cells
-                .checked_add(terminal_cells)
-                .ok_or(ContactSelectionError::CoverageResourceOverflow)?;
-        }
-    }
-    if total_cells > config.coverage_samples_max_virtual_cells {
-        return Err(ContactSelectionError::CoverageVirtualCellLimit {
-            required: total_cells,
-            limit: config.coverage_samples_max_virtual_cells,
-        });
-    }
-    let working_cells = total_cells.min(config.coverage_samples_max_working_cells);
-    let compact_bytes = coverage_compact_bytes(total_cells, source_faces, islands.len())?;
-    if compact_bytes > config.coverage_samples_max_compact_payload_bytes {
-        return Err(ContactSelectionError::CoverageCompactPayloadLimit {
-            required: compact_bytes,
-            limit: config.coverage_samples_max_compact_payload_bytes,
-        });
-    }
-    let build_peak_bytes = coverage_build_peak_bytes(
-        total_cells,
-        source_faces,
-        working_cells,
-        islands.len(),
-        mesh.tris().len(),
-        mesh.verts().len(),
-    )?;
-    if build_peak_bytes > config.coverage_samples_max_peak_bytes {
-        return Err(ContactSelectionError::CoveragePeakLimit {
-            phase: "build",
-            required: build_peak_bytes,
-            limit: config.coverage_samples_max_peak_bytes,
-        });
-    }
-    let validation_peak_bytes = coverage_validation_peak_bytes(
-        total_cells,
-        source_faces,
-        islands.len(),
-        mesh.tris().len(),
-        mesh.verts().len(),
-    )?;
-    if validation_peak_bytes > config.coverage_samples_max_peak_bytes {
-        return Err(ContactSelectionError::CoveragePeakLimit {
-            phase: "validation",
-            required: validation_peak_bytes,
-            limit: config.coverage_samples_max_peak_bytes,
-        });
-    }
-    Ok(CoverageBuildPlan {
-        total_cells,
-        source_faces,
-        working_cells,
-        compact_bytes,
-        build_peak_bytes,
-        validation_peak_bytes,
-    })
+    coverage::plan_dyadic_coverage(mesh, islands, config)
 }
 
 fn checked_sum(values: &[usize]) -> Result<usize, ContactSelectionError> {
@@ -1585,17 +1513,6 @@ fn minimum_distance_sq(contacts: &[SelectedContact], point: [f64; 3]) -> f64 {
         .map(|contact| squared_distance(contact.point_mm, point))
         .min_by(f64::total_cmp)
         .unwrap_or(f64::INFINITY)
-}
-
-fn triangle_area_mm2([a, b, c]: [[f64; 3]; 3]) -> f64 {
-    let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-    let cross = [
-        ab[1].mul_add(ac[2], -ab[2] * ac[1]),
-        ab[2].mul_add(ac[0], -ab[0] * ac[2]),
-        ab[0].mul_add(ac[1], -ab[1] * ac[0]),
-    ];
-    0.5 * squared_distance(cross, [0.0; 3]).sqrt()
 }
 
 #[cfg(test)]
@@ -2641,6 +2558,36 @@ mod tests {
         ));
         assert_eq!(mesh, original);
         assert_eq!(forward[0].face_ids, vec![0]);
+    }
+
+    #[test]
+    fn candidate_and_coverage_adapters_enter_the_same_generic_dyadic_skeleton() {
+        let mesh = small_closed_tetra();
+        let islands = [SupportIsland {
+            id: 7,
+            face_ids: vec![0],
+        }];
+        let delicacy = vec![0.25; mesh.tris().len()];
+        let coverage_config = selection_config(&delicacy);
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).expect("topology");
+
+        dyadic::reset_generic_dyadic_build_calls();
+        dyadic::build_candidate_payload(
+            &mesh,
+            &islands,
+            &dyadic::CandidatePayloadConfig::current(
+                8,
+                1_000_000,
+                3_000_000,
+                192 * 1024 * 1024,
+                64,
+            )
+            .expect("candidate config"),
+        )
+        .expect("candidate adapter");
+        build_dyadic_coverage_samples(&mesh, &islands, topology.component_ids(), &coverage_config)
+            .expect("coverage adapter");
+        assert_eq!(dyadic::generic_dyadic_build_calls(), 2);
     }
 
     #[test]
