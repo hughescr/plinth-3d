@@ -690,7 +690,11 @@ impl Forest {
         Ok(())
     }
 
-    pub fn issue_certificate(&mut self, key: MemberKey) -> Result<(), ForestError> {
+    // Test-only until the CCO verifier can supply an unforgeable proof-bearing
+    // production API. In particular, production callers must not be able to
+    // certify arbitrary live geometry merely by holding its member key.
+    #[cfg(test)]
+    fn issue_certificate(&mut self, key: MemberKey) -> Result<(), ForestError> {
         let member = self.member_mut(key)?;
         member.certificate.cert_version = Some(member.certificate.geom_version);
         member.certificate.cert_radius_mm = Some(member.maximum_radius());

@@ -115,7 +115,15 @@ fn indexed_memory_estimate_is_checked_and_is_the_exact_grid_cap_boundary() {
             max_grid_bytes: estimate.max_axis_grid_bytes() - 1,
         },
     );
-    assert!(matches!(below, Err(SurfaceBuildError::Kernel(_))));
+    assert!(matches!(
+        below,
+        Err(SurfaceBuildError::GridBudget {
+            projected_bytes,
+            limit_bytes,
+            ..
+        }) if projected_bytes == estimate.max_axis_grid_bytes()
+            && limit_bytes == estimate.max_axis_grid_bytes() - 1
+    ));
 
     assert!(matches!(
         NativeSurface::estimate_index_memory_from_indexed(&vertices, &faces, 0.0),
