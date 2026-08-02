@@ -312,6 +312,17 @@ impl FilteredLiveView {
     pub(crate) const fn digest(&self) -> u64 {
         self.digest
     }
+
+    #[cfg(test)]
+    pub(crate) fn test_view_with_keys(forest: &Forest, keys: Vec<MemberKey>) -> Self {
+        let forest_digest = forest.digest();
+        let digest = live_view_digest(forest_digest, &keys);
+        Self {
+            forest_digest,
+            keys,
+            digest,
+        }
+    }
 }
 
 fn live_view_digest(forest_digest: u64, keys: &[MemberKey]) -> u64 {

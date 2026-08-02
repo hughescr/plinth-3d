@@ -88,6 +88,7 @@ impl LoweringConfig {
 #[derive(Clone, Debug)]
 pub(crate) struct LoweredSupportPlan {
     forest_digest: u64,
+    live_view_digest: u64,
     frame_bits: [u64; 2],
     primitives: Vec<SupportPrimitive>,
     support_primitive_count: usize,
@@ -99,9 +100,13 @@ impl LoweredSupportPlan {
     pub(crate) fn validate<'a>(
         &'a self,
         forest: &Forest,
+        view: &FilteredLiveView,
         frame: BuildFrame,
     ) -> Result<&'a [SupportPrimitive], LoweringError> {
+        view.validate(forest)
+            .map_err(|_| LoweringError::StaleAuthority)?;
         if self.forest_digest != forest.digest()
+            || self.live_view_digest != view.digest()
             || self.frame_bits
                 != [
                     frame.plate_z_mm().get().to_bits(),
@@ -138,7 +143,7 @@ pub(crate) enum LoweringError {
     PrimitiveLimit,
     #[error("support lowering would exceed its primitive-memory limit")]
     PrimitiveBytesLimit,
-    #[error("support lowering authority is stale or belongs to another forest/frame")]
+    #[error("support lowering authority is stale or belongs to another forest/view/frame")]
     StaleAuthority,
     #[error("support member {member:?} has zero length")]
     ZeroLengthMember { member: MemberKey },
@@ -212,9 +217,10 @@ pub(crate) fn lower_current(
     {
         return Err(LoweringError::InvalidGeometry);
     }
-    let digest = primitive_digest(&primitives, support_count, raft_count);
+    let digest = primitive_digest(view.digest(), &primitives, support_count, raft_count);
     Ok(LoweredSupportPlan {
         forest_digest: forest.digest(),
+        live_view_digest: view.digest(),
         frame_bits: [
             config.frame.plate_z_mm().get().to_bits(),
             config.frame.lift_mm().get().to_bits(),
@@ -448,11 +454,13 @@ fn positive(value: f64) -> Result<PositiveFinite, LoweringError> {
 }
 
 fn primitive_digest(
+    live_view_digest: u64,
     primitives: &[SupportPrimitive],
     support_count: usize,
     raft_count: usize,
 ) -> ContentDigest {
     let mut digest = DigestWriter::new();
+    digest.u64(live_view_digest);
     digest.usize(support_count);
     digest.usize(raft_count);
     digest.usize(primitives.len());
@@ -810,7 +818,7 @@ mod tests {
         )
         .unwrap();
         let plan = lower_current(&forest, &view, &joints, &raft, config).unwrap();
-        let primitives = plan.validate(&forest, frame).unwrap();
+        let primitives = plan.validate(&forest, &view, frame).unwrap();
         assert!(primitives.len() >= 3);
         assert_eq!(primitives[0].segment_kind, SupportSegmentKind::ContactTaper);
         assert_eq!(
@@ -868,10 +876,43 @@ mod tests {
         .unwrap();
         let lowered = lower_current(&forest, &view, &joints, &raft, config).unwrap();
         assert!(lowered
-            .validate(&forest, frame)
+            .validate(&forest, &view, frame)
             .unwrap()
             .iter()
             .any(|primitive| primitive.segment_kind == SupportSegmentKind::ContactSphere));
+    }
+
+    #[test]
+    fn lowered_plan_rejects_a_different_valid_filtered_view_for_the_same_forest() {
+        let (forest, frame, layers) = fixture();
+        let config = LoweringConfig::current(frame, &layers, 100, 100_000).unwrap();
+        let view = FilteredLiveView::current(&forest, &[4], LiveViewLimits::new(100, 10, 100_000))
+            .unwrap();
+        let joints = plan_joint_balls_filtered(
+            &forest,
+            &view,
+            config.joint,
+            JointStagingLimits::from_joint_config(config.joint),
+        )
+        .unwrap();
+        let raft = plan_bottom_connected(
+            &forest,
+            &view,
+            frame.plate_z_mm(),
+            RaftLimits::new(100, 100, 200, 100_000),
+        )
+        .unwrap();
+        let plan = lower_current(&forest, &view, &joints, &raft, config).unwrap();
+
+        let different_view =
+            FilteredLiveView::test_view_with_keys(&forest, view.keys()[1..].to_vec());
+        assert!(different_view.validate(&forest).is_ok());
+        assert_ne!(view.digest(), different_view.digest());
+        assert_eq!(
+            plan.validate(&forest, &different_view, frame).unwrap_err(),
+            LoweringError::StaleAuthority,
+            "the forest is unchanged; the rejected authority is only the filtered view"
+        );
     }
 
     #[test]
@@ -910,7 +951,7 @@ mod tests {
             None,
         ));
         assert_eq!(
-            plan.validate(&forest, frame).unwrap_err(),
+            plan.validate(&forest, &view, frame).unwrap_err(),
             LoweringError::StaleAuthority
         );
 
