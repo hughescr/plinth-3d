@@ -86,6 +86,18 @@ pub struct PhysicalContact {
     pub point_mm: [f64; 3],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LoadFinalizeLimits {
+    pub(crate) max_scratch_bytes: usize,
+    pub(crate) max_operations: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LoadResourcePlan {
+    pub(crate) scratch_bytes: usize,
+    pub(crate) operations: usize,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 struct LoadEligibility {
     face_id: u32,
@@ -166,6 +178,18 @@ impl SliceSolid {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn test_slice_solid(points_xy_mm: Vec<[f64; 2]>) -> SliceSolid {
+    SliceSolid {
+        outer: SliceLoop {
+            signed_area_mm2: signed_area(&points_xy_mm),
+            points_xy_mm,
+            hole: false,
+        },
+        holes: Vec::new(),
+    }
+}
+
 /// First printable appearance of one solid slice component.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IslandBirth {
@@ -208,6 +232,7 @@ pub struct GenericContactPlan {
     island_births: Vec<IslandBirth>,
     local_z_minima: Vec<LocalZMinimum>,
     load_eligibility: Vec<LoadEligibility>,
+    load_limits: LoadFinalizeLimits,
     slice_effective_threads: usize,
     slice_participating_threads: usize,
 }
@@ -416,6 +441,12 @@ pub enum GenericPerceptionError {
         contact_id: u64,
         contact_count: usize,
     },
+    #[error("load finalization scratch requires {required} bytes; limit is {limit}")]
+    LoadScratchLimit { required: usize, limit: usize },
+    #[error("load finalization requires {required} operations; limit is {limit}")]
+    LoadOperationLimit { required: usize, limit: usize },
+    #[error("load finalization resource arithmetic overflowed")]
+    LoadResourceOverflow,
     #[error("generic perception produced an island without a legal dyadic candidate: {island_id}")]
     NoLegalCandidate { island_id: u32 },
     #[error("generic perception authority is stale or belongs to another input")]
@@ -530,6 +561,13 @@ pub fn prepare_generic_contacts(
         island_births,
         local_z_minima,
         load_eligibility,
+        load_limits: LoadFinalizeLimits {
+            max_scratch_bytes: limits.max_overlap_bytes,
+            max_operations: limits
+                .max_overlap_vertex_tests
+                .checked_add(limits.max_overlap_edge_tests)
+                .ok_or(GenericPerceptionError::LoadResourceOverflow)?,
+        },
         slice_effective_threads: sliced.effective_threads,
         slice_participating_threads: sliced.participating_threads,
     })
@@ -1479,7 +1517,81 @@ pub(crate) fn finalize_load_partition(
     mesh: &Mesh,
     contacts: &[PhysicalContact],
 ) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
-    finalize_load_rows(plan, mesh, &plan.load_eligibility, contacts)
+    finalize_load_rows(
+        plan,
+        mesh,
+        &plan.load_eligibility,
+        contacts,
+        plan.load_limits,
+    )
+}
+
+fn load_resource_plan_from_counts(
+    face_count: usize,
+    eligible_owner_count: usize,
+    contact_count: usize,
+    retained_bytes: usize,
+) -> Result<LoadResourcePlan, GenericPerceptionError> {
+    let scratch_bytes = retained_bytes
+        .checked_add(
+            contact_count
+                .checked_mul(std::mem::size_of::<usize>())
+                .ok_or(GenericPerceptionError::LoadResourceOverflow)?,
+        )
+        .and_then(|bytes| {
+            face_count
+                .checked_mul(std::mem::size_of::<FinalizedFaceLoad>())
+                .and_then(|rows| bytes.checked_add(rows))
+        })
+        .and_then(|bytes| {
+            face_count
+                .checked_mul(std::mem::size_of::<Option<(usize, f64)>>())
+                .and_then(|nearest| bytes.checked_add(nearest))
+        })
+        .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
+    let log = usize::BITS as usize - contact_count.max(1).leading_zeros() as usize;
+    let owner_log = usize::BITS as usize - eligible_owner_count.max(1).leading_zeros() as usize;
+    let face_log = usize::BITS as usize - face_count.max(1).leading_zeros() as usize;
+    let operations = face_count
+        .checked_mul(contact_count)
+        .and_then(|pairs| pairs.checked_mul(owner_log.saturating_add(4)))
+        .and_then(|work| {
+            contact_count
+                .checked_mul(log.saturating_add(2))
+                .and_then(|contacts| work.checked_add(contacts))
+        })
+        .and_then(|work| {
+            eligible_owner_count
+                .checked_mul(owner_log.saturating_mul(2))
+                .and_then(|owners| work.checked_add(owners))
+        })
+        .and_then(|work| {
+            face_count
+                .checked_mul(face_log.saturating_mul(2).saturating_add(1))
+                .and_then(|faces| work.checked_add(faces))
+        })
+        .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
+    Ok(LoadResourcePlan {
+        scratch_bytes,
+        operations,
+    })
+}
+
+fn load_resource_plan(
+    load_eligibility: &[LoadEligibility],
+    contacts: &[PhysicalContact],
+) -> Result<LoadResourcePlan, GenericPerceptionError> {
+    let eligible_owner_count = load_eligibility.iter().try_fold(0usize, |total, row| {
+        total
+            .checked_add(row.eligible_owners.len())
+            .ok_or(GenericPerceptionError::LoadResourceOverflow)
+    })?;
+    load_resource_plan_from_counts(
+        load_eligibility.len(),
+        eligible_owner_count,
+        contacts.len(),
+        0,
+    )
 }
 
 fn finalize_load_rows(
@@ -1487,81 +1599,79 @@ fn finalize_load_rows(
     mesh: &Mesh,
     load_eligibility: &[LoadEligibility],
     contacts: &[PhysicalContact],
+    limits: LoadFinalizeLimits,
 ) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
     let fingerprint = mesh_fingerprint(mesh)
         .map_err(|error| GenericPerceptionError::Topology(error.to_string()))?;
     if fingerprint != plan.authority.mesh {
         return Err(GenericPerceptionError::StaleAuthority);
     }
-    let mut ids = BTreeSet::new();
+    let resource = load_resource_plan(load_eligibility, contacts)?;
+    if resource.scratch_bytes > limits.max_scratch_bytes {
+        return Err(GenericPerceptionError::LoadScratchLimit {
+            required: resource.scratch_bytes,
+            limit: limits.max_scratch_bytes,
+        });
+    }
+    if resource.operations > limits.max_operations {
+        return Err(GenericPerceptionError::LoadOperationLimit {
+            required: resource.operations,
+            limit: limits.max_operations,
+        });
+    }
+    let mut contact_order = Vec::with_capacity(contacts.len());
     for contact in contacts {
-        if !ids.insert(contact.contact_id) {
-            return Err(GenericPerceptionError::DuplicatePhysicalContact {
-                contact_id: contact.contact_id,
-            });
-        }
         if contact.point_mm.iter().any(|value| !value.is_finite()) {
             return Err(GenericPerceptionError::NonFinitePhysicalContact {
                 contact_id: contact.contact_id,
             });
         }
+        contact_order.push(contact_order.len());
     }
-    let mut by_owner = BTreeMap::<LoadOwner, Vec<&PhysicalContact>>::new();
-    for contact in contacts {
-        by_owner.entry(contact.owner).or_default().push(contact);
-    }
-    for values in by_owner.values_mut() {
-        values.sort_by_key(|contact| contact.contact_id);
-    }
-    let mut nearest = BTreeMap::<(usize, LoadOwner), (&PhysicalContact, f64)>::new();
-    for (owner, owner_contacts) in &by_owner {
-        let face_rows = load_eligibility
-            .iter()
-            .enumerate()
-            .filter(|(_, eligibility)| eligibility.eligible_owners.binary_search(owner).is_ok())
-            .collect::<Vec<_>>();
-        if face_rows.is_empty() {
-            continue;
-        }
-        let index = PointCloudIndex::new(
-            &owner_contacts
-                .iter()
-                .map(|contact| contact.point_mm)
-                .collect::<Vec<_>>(),
-        )
-        .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?;
-        let result = index
-            .knn_batch(
-                &face_rows
-                    .iter()
-                    .map(|(_, eligibility)| eligibility.centroid_mm)
-                    .collect::<Vec<_>>(),
-                1,
-            )
-            .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?;
-        for (query, (row, _)) in face_rows.into_iter().enumerate() {
-            let range = result.row_range(query).expect("one nearest row per face");
-            let point = result.point_ids[range.start] as usize;
-            nearest.insert(
-                (row, *owner),
-                (owner_contacts[point], result.squared_distances[range.start]),
-            );
+    contact_order.sort_unstable_by_key(|&index| contacts[index].contact_id);
+    for pair in contact_order.windows(2) {
+        if contacts[pair[0]].contact_id == contacts[pair[1]].contact_id {
+            return Err(GenericPerceptionError::DuplicatePhysicalContact {
+                contact_id: contacts[pair[0]].contact_id,
+            });
         }
     }
     let mut rows = Vec::with_capacity(load_eligibility.len());
-    for (row, eligibility) in load_eligibility.iter().enumerate() {
-        let (contact, _) = eligibility
-            .eligible_owners
-            .iter()
-            .filter_map(|owner| nearest.get(&(row, *owner)).copied())
-            .min_by(|(left, left_distance), (right, right_distance)| {
-                left_distance
-                    .total_cmp(right_distance)
-                    .then_with(|| left.contact_id.cmp(&right.contact_id))
-            })
-            .ok_or(GenericPerceptionError::MissingPhysicalContact {
+    // One flattened owner x face x contact batch.  The matrix is streamed into
+    // a caller-budgeted nearest row rather than issuing scalar spatial calls.
+    let mut nearest = vec![None::<(usize, f64)>; load_eligibility.len()];
+    for (contact_index, contact) in contacts.iter().enumerate() {
+        for (face_index, eligibility) in load_eligibility.iter().enumerate() {
+            if eligibility
+                .eligible_owners
+                .binary_search(&contact.owner)
+                .is_err()
+            {
+                continue;
+            }
+            let distance = contact
+                .point_mm
+                .iter()
+                .zip(eligibility.centroid_mm)
+                .map(|(left, right)| (left - right).powi(2))
+                .sum::<f64>();
+            let replace = nearest[face_index].is_none_or(|(old_index, old_distance)| {
+                distance
+                    .total_cmp(&old_distance)
+                    .then_with(|| contact.contact_id.cmp(&contacts[old_index].contact_id))
+                    .is_lt()
+            });
+            if replace {
+                nearest[face_index] = Some((contact_index, distance));
+            }
+        }
+    }
+    for (face_index, eligibility) in load_eligibility.iter().enumerate() {
+        let (contact_index, _) =
+            nearest[face_index].ok_or(GenericPerceptionError::MissingPhysicalContact {
                 face_id: eligibility.face_id,
             })?;
+        let contact = &contacts[contact_index];
         rows.push(FinalizedFaceLoad {
             face_id: eligibility.face_id,
             contact_id: contact.contact_id,
@@ -1570,9 +1680,8 @@ fn finalize_load_rows(
         });
     }
     let mut contact_hash = Fnv::new();
-    let mut canonical_contacts = contacts.iter().collect::<Vec<_>>();
-    canonical_contacts.sort_by_key(|contact| contact.contact_id);
-    for contact in canonical_contacts {
+    for index in contact_order {
+        let contact = &contacts[index];
         contact_hash.u64(contact.contact_id);
         hash_owner(&mut contact_hash, contact.owner);
         for value in contact.point_mm {
@@ -1590,40 +1699,141 @@ fn finalize_load_rows(
 /// specialized physical contacts, then invoke the sole load finalizer.  The
 /// extension is crate-private so callers cannot manufacture eligible load
 /// routes or bypass the generic plan's mesh binding.
+pub(crate) fn specialized_load_resource_plan(
+    plan: &GenericContactPlan,
+    contact_count: usize,
+    specialized_owner_face_count: usize,
+) -> Result<LoadResourcePlan, GenericPerceptionError> {
+    let base_owner_count = plan
+        .load_eligibility
+        .iter()
+        .try_fold(0usize, |total, row| {
+            total
+                .checked_add(row.eligible_owners.len())
+                .ok_or(GenericPerceptionError::LoadResourceOverflow)
+        })?;
+    let row_count = plan
+        .load_eligibility
+        .len()
+        .checked_add(specialized_owner_face_count)
+        .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
+    let owner_count = base_owner_count
+        .checked_add(specialized_owner_face_count)
+        .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
+    let retained_bytes = row_count
+        .checked_mul(std::mem::size_of::<LoadEligibility>())
+        .and_then(|bytes| {
+            owner_count
+                .checked_mul(std::mem::size_of::<LoadOwner>())
+                .and_then(|owners| bytes.checked_add(owners))
+        })
+        .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
+    let mut resource =
+        load_resource_plan_from_counts(row_count, owner_count, contact_count, retained_bytes)?;
+    resource.operations = resource
+        .operations
+        .checked_add(
+            specialized_owner_face_count
+                .checked_mul(specialized_owner_face_count)
+                .ok_or(GenericPerceptionError::LoadResourceOverflow)?,
+        )
+        .and_then(|work| {
+            plan.load_eligibility
+                .len()
+                .checked_mul(specialized_owner_face_count)
+                .and_then(|extension| work.checked_add(extension))
+        })
+        .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
+    Ok(resource)
+}
+
 pub(crate) fn finalize_specialized_load_partition(
     plan: &GenericContactPlan,
     mesh: &Mesh,
     surface: &NativeSurface,
     contacts: &[PhysicalContact],
     specialized_owner_faces: &[(u32, u32)],
+    limits: LoadFinalizeLimits,
 ) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
     let fingerprint = mesh_fingerprint(mesh)
         .map_err(|error| GenericPerceptionError::Topology(error.to_string()))?;
     if fingerprint != plan.authority.mesh {
         return Err(GenericPerceptionError::StaleAuthority);
     }
-    let mut extended = plan.load_eligibility.clone();
-    for &(owner_id, face_id) in specialized_owner_faces {
-        let owner = LoadOwner::Specialized(owner_id);
+    let resource =
+        specialized_load_resource_plan(plan, contacts.len(), specialized_owner_faces.len())?;
+    if resource.scratch_bytes > limits.max_scratch_bytes {
+        return Err(GenericPerceptionError::LoadScratchLimit {
+            required: resource.scratch_bytes,
+            limit: limits.max_scratch_bytes,
+        });
+    }
+    if resource.operations > limits.max_operations {
+        return Err(GenericPerceptionError::LoadOperationLimit {
+            required: resource.operations,
+            limit: limits.max_operations,
+        });
+    }
+    let mut extended =
+        Vec::with_capacity(plan.load_eligibility.len() + specialized_owner_faces.len());
+    for base in &plan.load_eligibility {
+        let additions = specialized_owner_faces
+            .iter()
+            .filter(|(_, face_id)| *face_id == base.face_id)
+            .count();
+        let mut owners = Vec::with_capacity(base.eligible_owners.len() + additions);
+        owners.extend(base.eligible_owners.iter().copied());
+        owners.extend(
+            specialized_owner_faces
+                .iter()
+                .filter(|(_, face_id)| *face_id == base.face_id)
+                .map(|(owner_id, _)| LoadOwner::Specialized(*owner_id)),
+        );
+        owners.sort_unstable();
+        owners.dedup();
+        extended.push(LoadEligibility {
+            face_id: base.face_id,
+            eligible_owners: owners,
+            centroid_mm: base.centroid_mm,
+            area_mm2: base.area_mm2,
+        });
+    }
+    for (pair_index, &(_, face_id)) in specialized_owner_faces.iter().enumerate() {
         if face_id as usize >= mesh.tris().len() {
             return Err(GenericPerceptionError::SpecializedFaceOutOfRange { face_id });
         }
-        if let Some(row) = extended.iter_mut().find(|row| row.face_id == face_id) {
-            match row.eligible_owners.binary_search(&owner) {
-                Ok(_) => {}
-                Err(index) => row.eligible_owners.insert(index, owner),
-            }
-        } else {
-            extended.push(LoadEligibility {
-                face_id,
-                eligible_owners: vec![owner],
-                centroid_mm: surface.geometry().centroids()[face_id as usize],
-                area_mm2: surface.geometry().areas()[face_id as usize],
-            });
+        if plan
+            .load_eligibility
+            .iter()
+            .any(|row| row.face_id == face_id)
+            || specialized_owner_faces[..pair_index]
+                .iter()
+                .any(|(_, earlier_face)| *earlier_face == face_id)
+        {
+            continue;
         }
+        let owner_count = specialized_owner_faces
+            .iter()
+            .filter(|(_, candidate_face)| *candidate_face == face_id)
+            .count();
+        let mut owners = Vec::with_capacity(owner_count);
+        owners.extend(
+            specialized_owner_faces
+                .iter()
+                .filter(|(_, candidate_face)| *candidate_face == face_id)
+                .map(|(owner_id, _)| LoadOwner::Specialized(*owner_id)),
+        );
+        owners.sort_unstable();
+        owners.dedup();
+        extended.push(LoadEligibility {
+            face_id,
+            eligible_owners: owners,
+            centroid_mm: surface.geometry().centroids()[face_id as usize],
+            area_mm2: surface.geometry().areas()[face_id as usize],
+        });
     }
     extended.sort_by_key(|eligibility| eligibility.face_id);
-    finalize_load_rows(plan, mesh, &extended, contacts)
+    finalize_load_rows(plan, mesh, &extended, contacts, limits)
 }
 
 /// Exact live `placement.tip_radius_mm` plus `verify.load_report` predicate.
@@ -2169,6 +2379,44 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let partition = finalize_load_partition(&plan, &mesh, &contacts).unwrap();
+        let resource = load_resource_plan(&plan.load_eligibility, &contacts).unwrap();
+        assert!(finalize_load_rows(
+            &plan,
+            &mesh,
+            &plan.load_eligibility,
+            &contacts,
+            LoadFinalizeLimits {
+                max_scratch_bytes: resource.scratch_bytes,
+                max_operations: resource.operations,
+            },
+        )
+        .is_ok());
+        assert!(matches!(
+            finalize_load_rows(
+                &plan,
+                &mesh,
+                &plan.load_eligibility,
+                &contacts,
+                LoadFinalizeLimits {
+                    max_scratch_bytes: resource.scratch_bytes - 1,
+                    max_operations: resource.operations,
+                },
+            ),
+            Err(GenericPerceptionError::LoadScratchLimit { .. })
+        ));
+        assert!(matches!(
+            finalize_load_rows(
+                &plan,
+                &mesh,
+                &plan.load_eligibility,
+                &contacts,
+                LoadFinalizeLimits {
+                    max_scratch_bytes: resource.scratch_bytes,
+                    max_operations: resource.operations - 1,
+                },
+            ),
+            Err(GenericPerceptionError::LoadOperationLimit { .. })
+        ));
         let unique = partition
             .rows()
             .iter()

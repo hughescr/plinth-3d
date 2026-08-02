@@ -15,14 +15,14 @@ use thiserror::Error;
 
 use crate::dyadic::{build_candidate_payload, CandidatePayloadConfig, DyadicError};
 use crate::perception::{
-    finalize_specialized_load_partition, load_violation_count, FinalizedLoadPartition,
-    GenericContactPlan, GenericPerceptionError, GenericPerceptionLimits, LoadOwner,
-    PhysicalContact, SliceSolid, SpecializedOwnerReservation,
+    finalize_specialized_load_partition, load_violation_count, specialized_load_resource_plan,
+    FinalizedLoadPartition, GenericContactPlan, GenericPerceptionError, GenericPerceptionLimits,
+    LoadFinalizeLimits, LoadOwner, PhysicalContact, SliceSolid, SpecializedOwnerReservation,
 };
 use crate::{
-    assess_coverage, build_dyadic_coverage_samples, BuildFrame, ContactSelectionConfig,
-    ContactSelectionError, CoverageObjective, CoverageSample, SelectedContact, SelectedContacts,
-    SupportIsland, SupportPerceptionConfig,
+    assess_coverage, build_dyadic_coverage_samples, coverage_assessment_resource_plan, BuildFrame,
+    ContactSelectionConfig, ContactSelectionError, CoverageAssessmentLimits, CoverageObjective,
+    CoverageSample, SelectedContact, SelectedContacts, SupportIsland, SupportPerceptionConfig,
 };
 
 const SYNTHETIC_PATCH_RADIUS_MM: f64 = 1.5;
@@ -38,6 +38,8 @@ pub struct SpecializedLimits {
     pub max_satisfaction_neighbor_bytes: usize,
     pub max_merge_pairs: usize,
     pub max_merge_proposals: usize,
+    pub max_merge_proposal_bytes: usize,
+    pub max_merge_descriptor_operations: usize,
     pub max_merge_total_proposals: usize,
     pub max_merge_iterations: usize,
     pub max_merge_commit_bytes: usize,
@@ -46,6 +48,11 @@ pub struct SpecializedLimits {
     pub max_gate_contact_matrix_bytes: usize,
     pub max_gate_operations: usize,
     pub max_gate_window_variants: usize,
+    pub max_coverage_scratch_bytes: usize,
+    pub max_coverage_operations: usize,
+    pub max_load_scratch_bytes: usize,
+    pub max_load_operations: usize,
+    pub max_gate_peak_bytes: usize,
 }
 
 impl SpecializedLimits {
@@ -59,6 +66,8 @@ impl SpecializedLimits {
             max_satisfaction_neighbor_bytes: 2 * 1024 * 1024 * 1024,
             max_merge_pairs: 20_000_000,
             max_merge_proposals: 20_000_000,
+            max_merge_proposal_bytes: 512 * 1024 * 1024,
+            max_merge_descriptor_operations: 2_000_000_000,
             max_merge_total_proposals: 100_000_000,
             max_merge_iterations: 100_000,
             max_merge_commit_bytes: 512 * 1024 * 1024,
@@ -67,6 +76,11 @@ impl SpecializedLimits {
             max_gate_contact_matrix_bytes: 512 * 1024 * 1024,
             max_gate_operations: 2_000_000_000,
             max_gate_window_variants: 1_024,
+            max_coverage_scratch_bytes: 512 * 1024 * 1024,
+            max_coverage_operations: 2_000_000_000,
+            max_load_scratch_bytes: 512 * 1024 * 1024,
+            max_load_operations: 2_000_000_000,
+            max_gate_peak_bytes: 1024 * 1024 * 1024,
         }
     }
 }
@@ -179,6 +193,7 @@ impl RegularContactRoute {
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpecializedContactPlan {
     authority_digest: u64,
+    semantic_authority_digest: u64,
     generic_slice_thread_evidence: (usize, usize),
     islands: Vec<SupportIsland>,
     coverage_samples: Vec<CoverageSample>,
@@ -250,7 +265,7 @@ impl SpecializedContactPlan {
     #[must_use]
     pub fn digest(&self) -> u64 {
         let mut hash = Fnv::new();
-        hash.u64(self.authority_digest);
+        hash.u64(self.semantic_authority_digest);
         for island in &self.islands {
             hash.u32(island.id);
             for &face in &island.face_ids {
@@ -382,6 +397,12 @@ pub enum SpecializedError {
     MergePairLimit { required: usize, limit: usize },
     #[error("specialized merge produced {required} proposals; limit is {limit}")]
     MergeProposalLimit { required: usize, limit: usize },
+    #[error("specialized merge descriptors require {required} bytes; limit is {limit}")]
+    MergeProposalByteLimit { required: usize, limit: usize },
+    #[error(
+        "specialized merge descriptor generation requires {required} operations; limit is {limit}"
+    )]
+    MergeDescriptorOperationLimit { required: usize, limit: usize },
     #[error("specialized merge evaluated {required} total proposals; limit is {limit}")]
     MergeTotalProposalLimit { required: usize, limit: usize },
     #[error("specialized merge requires {required} iterations; limit is {limit}")]
@@ -394,6 +415,8 @@ pub enum SpecializedError {
     GateVectorByteLimit { required: usize, limit: usize },
     #[error("specialized gate contact window requires {required} bytes; limit is {limit}")]
     GateContactMatrixByteLimit { required: usize, limit: usize },
+    #[error("specialized gate peak requires {required} bytes; limit is {limit}")]
+    GatePeakByteLimit { required: usize, limit: usize },
     #[error("specialized gate requires {required} operations; limit is {limit}")]
     GateOperationLimit { required: usize, limit: usize },
     #[error("specialized gate window size must be positive")]
@@ -680,9 +703,19 @@ pub fn prepare_specialized_contacts(
         &surface,
         &load_inputs.contacts,
         &load_inputs.specialized_owner_faces,
+        LoadFinalizeLimits {
+            max_scratch_bytes: limits.max_load_scratch_bytes,
+            max_operations: limits.max_load_operations,
+        },
     )?;
     Ok(SpecializedContactPlan {
         authority_digest: bound_authority_digest(generic, regular, selection_config, limits),
+        semantic_authority_digest: bound_semantic_authority_digest(
+            generic,
+            regular,
+            selection_config,
+            limits,
+        ),
         generic_slice_thread_evidence: generic.slice_thread_evidence(),
         islands,
         coverage_samples,
@@ -1054,25 +1087,20 @@ fn consolidate(
     loop {
         check_merge_pair_limit(contacts.len(), limits.max_merge_pairs)?;
         let mut proposals = Vec::new();
+        let mut descriptor_operations = 0usize;
         for left in 0..contacts.len() {
             for right in left + 1..contacts.len() {
-                let Some(mut proposal) = accepted_merge(
-                    &contacts[left],
-                    &contacts[right],
+                gather_pair_proposals(
+                    contacts,
+                    left,
+                    right,
                     layers,
                     attach_reach,
                     spacing_floor,
-                ) else {
-                    continue;
-                };
-                let required = proposals
-                    .len()
-                    .checked_add(1)
-                    .ok_or(SpecializedError::GateResourceOverflow)?;
-                check_merge_proposal_limit(required, limits.max_merge_proposals)?;
-                proposal.left = left;
-                proposal.right = right;
-                proposals.push(proposal);
+                    limits,
+                    &mut descriptor_operations,
+                    &mut proposals,
+                )?;
             }
         }
         total_proposals = total_proposals
@@ -1105,11 +1133,7 @@ fn consolidate(
             limits,
         )?;
         let baseline = vectors[0];
-        let Some(proposal_index) = proposals
-            .iter()
-            .enumerate()
-            .find_map(|(index, _)| gate_not_worse(vectors[index + 1], baseline).then_some(index))
-        else {
+        let Some(proposal_index) = first_safe_proposal(&vectors, baseline) else {
             break;
         };
         let required_iterations = iterations
@@ -1203,6 +1227,30 @@ fn gate_not_worse(
     coverage_key(candidate) <= coverage_key(baseline)
         && candidate.load_violation_count <= baseline.load_violation_count
         && candidate.unsupported_specialized_count <= baseline.unsupported_specialized_count
+}
+
+fn first_safe_proposal(
+    vectors: &[FrozenSpecializedGateVector],
+    baseline: FrozenSpecializedGateVector,
+) -> Option<usize> {
+    vectors
+        .iter()
+        .skip(1)
+        .position(|vector| gate_not_worse(*vector, baseline))
+}
+
+fn check_gate_peak(
+    working_bytes: usize,
+    assessor_scratch_bytes: usize,
+    limit: usize,
+) -> Result<usize, SpecializedError> {
+    let required = working_bytes
+        .checked_add(assessor_scratch_bytes)
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    if required > limit {
+        return Err(SpecializedError::GatePeakByteLimit { required, limit });
+    }
+    Ok(required)
 }
 
 fn coverage_key(
@@ -1463,6 +1511,30 @@ fn evaluate_gate_batch(
                 limit: limits.max_gate_contact_matrix_bytes,
             });
         }
+        let coverage_scratch = coverage_assessment_resource_plan(coverage_samples, topology)?;
+        let max_load_scratch =
+            (window_start..window_end).try_fold(0usize, |maximum, variant| {
+                let proposal = variant
+                    .checked_sub(1)
+                    .and_then(|index| proposals.get(index));
+                let owner_faces = variant_specialized_owner_face_count(
+                    contacts,
+                    proposal,
+                    generic.islands(),
+                    islands,
+                )?;
+                let resource = specialized_load_resource_plan(
+                    generic,
+                    variant_contact_count(contacts.len(), variant),
+                    owner_faces,
+                )?;
+                Ok::<_, SpecializedError>(maximum.max(resource.scratch_bytes))
+            })?;
+        check_gate_peak(
+            working_bytes,
+            coverage_scratch.scratch_bytes.max(max_load_scratch),
+            limits.max_gate_peak_bytes,
+        )?;
         let mut nearest_matrix = vec![f64::INFINITY; nearest_len];
         let mut physical_matrix = Vec::with_capacity(physical_len);
         let mut physical_offsets = Vec::with_capacity(window_variants + 1);
@@ -1503,13 +1575,26 @@ fn evaluate_gate_batch(
                 nearest,
                 coverage_radius,
                 coverage_area_floor_mm2,
+                CoverageAssessmentLimits {
+                    max_scratch_bytes: limits.max_coverage_scratch_bytes,
+                    max_operations: limits.max_coverage_operations,
+                },
             )?;
             let physical =
                 &physical_matrix[physical_offsets[window_row]..physical_offsets[window_row + 1]];
             let owner_faces = &owner_face_matrix
                 [owner_face_offsets[window_row]..owner_face_offsets[window_row + 1]];
-            let partition =
-                finalize_specialized_load_partition(generic, mesh, surface, physical, owner_faces)?;
+            let partition = finalize_specialized_load_partition(
+                generic,
+                mesh,
+                surface,
+                physical,
+                owner_faces,
+                LoadFinalizeLimits {
+                    max_scratch_bytes: limits.max_load_scratch_bytes,
+                    max_operations: limits.max_load_operations,
+                },
+            )?;
             let unsupported_specialized_count = authoritative_demands
                 .iter()
                 .filter(|demand| {
@@ -1769,16 +1854,41 @@ fn contact_serves_sample(contact: &WorkingContact, sample: &CoverageSample) -> b
     })
 }
 
-/// The sole acceptance predicate, used both by construction and the final
-/// invariant.  It checks physical locking, topology routing and every logical
-/// minimum/birth gate together; no second verifier can disagree about a pair.
-fn accepted_merge(
-    left: &WorkingContact,
-    right: &WorkingContact,
+fn demand_satisfaction_work(demand: &SpecializedDemand) -> Result<usize, SpecializedError> {
+    match demand.kind {
+        SpecializedDemandKind::Minimum => Ok(demand.region_points_mm.len().max(1)),
+        SpecializedDemandKind::IslandBirth => {
+            demand.birth_footprint.as_ref().map_or(Ok(1), |solid| {
+                solid
+                    .holes()
+                    .iter()
+                    .try_fold(solid.outer().points_xy_mm().len(), |total, hole| {
+                        total
+                            .checked_add(hole.points_xy_mm().len())
+                            .ok_or(SpecializedError::GateResourceOverflow)
+                    })?
+                    .checked_mul(2)
+                    .and_then(|work| work.checked_add(1))
+                    .ok_or(SpecializedError::GateResourceOverflow)
+            })
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gather_pair_proposals(
+    contacts: &[WorkingContact],
+    left_index: usize,
+    right_index: usize,
     layers: &LayerPlan,
     attach_reach: f64,
     spacing_floor: f64,
-) -> Option<MergeProposal> {
+    limits: SpecializedLimits,
+    descriptor_operations: &mut usize,
+    proposals: &mut Vec<MergeProposal>,
+) -> Result<(), SpecializedError> {
+    let left = &contacts[left_index];
+    let right = &contacts[right_index];
     let classes = (
         !left.regular_routes.is_empty(),
         !right.regular_routes.is_empty(),
@@ -1786,47 +1896,126 @@ fn accepted_merge(
     let distance = distance3(left.position_mm, right.position_mm);
     if classes.0 || classes.1 {
         if !same_point(left.position_mm, right.position_mm) {
-            return None;
+            return Ok(());
         }
     } else if distance >= spacing_floor {
-        return None;
+        return Ok(());
     }
     let demands = || left.demands.iter().chain(&right.demands);
     if demands().all(|demand| demand.kind == SpecializedDemandKind::IslandBirth)
         && distance > BIRTH_LINK_RADIUS_MM
     {
-        return None;
+        return Ok(());
     }
     if let Some(component) = demands().next().map(|demand| demand.coverage_component_id) {
         if demands().any(|demand| demand.coverage_component_id != component) {
-            return None;
+            return Ok(());
         }
     } else if !(classes.0 && classes.1) {
-        return None;
+        return Ok(());
     }
-    let representative = if classes.0 {
-        Some((left.position_mm, left.normal))
-    } else if classes.1 {
-        Some((right.position_mm, right.normal))
+    let candidate_count = if classes.0 || classes.1 {
+        1
     } else {
-        demands()
-            .filter_map(|candidate| {
-                let seat = (candidate.nominated_position_mm, candidate.nominated_normal);
-                demands()
-                    .all(|demand| satisfies(seat.0, demand, layers, attach_reach))
-                    .then_some(seat)
-            })
-            .min_by(compare_seats)
-    }?;
-    if !demands().all(|demand| satisfies(representative.0, demand, layers, attach_reach)) {
-        return None;
+        left.demands.len().saturating_add(right.demands.len())
+    };
+    let satisfaction_work = demands().try_fold(0usize, |total, demand| {
+        total
+            .checked_add(demand_satisfaction_work(demand)?)
+            .ok_or(SpecializedError::GateResourceOverflow)
+    })?;
+    let pair_work = candidate_count
+        .checked_mul(candidate_count)
+        .and_then(|selection| {
+            candidate_count
+                .checked_mul(satisfaction_work)
+                .and_then(|satisfaction| selection.checked_add(satisfaction))
+        })
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    let required_work = descriptor_operations
+        .checked_add(pair_work)
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    if required_work > limits.max_merge_descriptor_operations {
+        return Err(SpecializedError::MergeDescriptorOperationLimit {
+            required: required_work,
+            limit: limits.max_merge_descriptor_operations,
+        });
     }
-    Some(MergeProposal {
-        left: 0,
-        right: 0,
-        position_mm: representative.0,
-        normal: representative.1,
-    })
+    *descriptor_operations = required_work;
+    let mut append = |representative: ([f64; 3], [f64; 3])| -> Result<(), SpecializedError> {
+        if !demands().all(|demand| satisfies(representative.0, demand, layers, attach_reach)) {
+            return Ok(());
+        }
+        let required = proposals
+            .len()
+            .checked_add(1)
+            .ok_or(SpecializedError::GateResourceOverflow)?;
+        check_merge_proposal_limit(required, limits.max_merge_proposals)?;
+        let required_bytes = required
+            .checked_mul(std::mem::size_of::<MergeProposal>())
+            .ok_or(SpecializedError::GateResourceOverflow)?;
+        if required_bytes > limits.max_merge_proposal_bytes {
+            return Err(SpecializedError::MergeProposalByteLimit {
+                required: required_bytes,
+                limit: limits.max_merge_proposal_bytes,
+            });
+        }
+        if proposals.len() == proposals.capacity() {
+            proposals
+                .try_reserve_exact(1)
+                .map_err(|_| SpecializedError::GateResourceOverflow)?;
+        }
+        proposals.push(MergeProposal {
+            left: left_index,
+            right: right_index,
+            position_mm: representative.0,
+            normal: representative.1,
+        });
+        Ok(())
+    };
+    if classes.0 {
+        append((left.position_mm, left.normal))?;
+    } else if classes.1 {
+        append((right.position_mm, right.normal))?;
+    } else {
+        let mut last = None;
+        loop {
+            let next = demands()
+                .map(|demand| (demand.nominated_position_mm, demand.nominated_normal))
+                .filter(|seat| last.is_none_or(|last| compare_seats(seat, &last).is_gt()))
+                .min_by(compare_seats);
+            let Some(next) = next else {
+                break;
+            };
+            append(next)?;
+            last = Some(next);
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn test_pair_proposals(
+    contacts: &[WorkingContact],
+    layers: &LayerPlan,
+    attach_reach: f64,
+    spacing_floor: f64,
+) -> Vec<MergeProposal> {
+    let mut proposals = Vec::new();
+    let mut operations = 0;
+    gather_pair_proposals(
+        contacts,
+        0,
+        1,
+        layers,
+        attach_reach,
+        spacing_floor,
+        SpecializedLimits::production(),
+        &mut operations,
+        &mut proposals,
+    )
+    .unwrap();
+    proposals
 }
 
 #[derive(Default)]
@@ -2156,12 +2345,12 @@ fn distance3(left: [f64; 3], right: [f64; 3]) -> f64 {
         .hypot(left[2] - right[2])
 }
 
-fn bound_authority_digest(
+fn bound_authority_base(
     generic: &GenericContactPlan,
     regular: &SelectedContacts,
     config: &ContactSelectionConfig<'_>,
     limits: SpecializedLimits,
-) -> u64 {
+) -> Fnv {
     let mut hash = Fnv::new();
     hash.u64(generic.digest());
     hash.u64(regular.digest());
@@ -2202,6 +2391,32 @@ fn bound_authority_digest(
     hash.usize(limits.max_gate_contact_matrix_bytes);
     hash.usize(limits.max_gate_operations);
     hash.usize(limits.max_gate_window_variants);
+    hash
+}
+
+fn bound_semantic_authority_digest(
+    generic: &GenericContactPlan,
+    regular: &SelectedContacts,
+    config: &ContactSelectionConfig<'_>,
+    limits: SpecializedLimits,
+) -> u64 {
+    bound_authority_base(generic, regular, config, limits).finish()
+}
+
+fn bound_authority_digest(
+    generic: &GenericContactPlan,
+    regular: &SelectedContacts,
+    config: &ContactSelectionConfig<'_>,
+    limits: SpecializedLimits,
+) -> u64 {
+    let mut hash = bound_authority_base(generic, regular, config, limits);
+    hash.usize(limits.max_merge_proposal_bytes);
+    hash.usize(limits.max_merge_descriptor_operations);
+    hash.usize(limits.max_coverage_scratch_bytes);
+    hash.usize(limits.max_coverage_operations);
+    hash.usize(limits.max_load_scratch_bytes);
+    hash.usize(limits.max_load_operations);
+    hash.usize(limits.max_gate_peak_bytes);
     hash.finish()
 }
 
@@ -2269,7 +2484,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_near_and_cross_face_demands_use_one_canonical_representative() {
+    fn exact_near_and_cross_face_demands_emit_every_canonical_representative() {
         let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
         let left = minimum_demand(0, 2, 7, [1.0, 2.0, 0.1]);
         let right = minimum_demand(1, 9, 7, [1.1, 2.0, 0.1]);
@@ -2277,11 +2492,13 @@ mod tests {
             WorkingContact::specialized(right),
             WorkingContact::specialized(left),
         ];
-        let mut proposal = accepted_merge(&contacts[0], &contacts[1], &layers, 0.2, 2.5).unwrap();
-        proposal.left = 0;
-        proposal.right = 1;
+        let proposals = test_pair_proposals(&contacts, &layers, 0.2, 2.5);
+        assert_eq!(proposals.len(), 2);
+        assert_eq!(proposals[0].position_mm, [1.0, 2.0, 0.1]);
+        assert_eq!(proposals[1].position_mm, [1.1, 2.0, 0.1]);
+        let proposal = &proposals[0];
         let merged = commit_merge(
-            &proposal,
+            proposal,
             &contacts,
             usize::MAX,
             &mut MergeAllocationTelemetry::default(),
@@ -2311,11 +2528,11 @@ mod tests {
             },
             WorkingContact::specialized(demand),
         ];
-        let mut proposal = accepted_merge(&contacts[0], &contacts[1], &layers, 0.2, 2.5).unwrap();
-        proposal.left = 0;
-        proposal.right = 1;
+        let proposals = test_pair_proposals(&contacts, &layers, 0.2, 2.5);
+        assert_eq!(proposals.len(), 1);
+        let proposal = &proposals[0];
         let merged = commit_merge(
-            &proposal,
+            proposal,
             &contacts,
             usize::MAX,
             &mut MergeAllocationTelemetry::default(),
@@ -2338,6 +2555,155 @@ mod tests {
     }
 
     #[test]
+    fn proposal_generation_refuses_before_the_cap_plus_one_push_or_byte_allocation() {
+        let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
+        let contacts = vec![
+            WorkingContact::specialized(minimum_demand(0, 2, 7, [1.0, 2.0, 0.1])),
+            WorkingContact::specialized(minimum_demand(1, 9, 7, [1.1, 2.0, 0.1])),
+        ];
+        let mut proposals = Vec::new();
+        let mut operations = 0;
+        let mut limits = SpecializedLimits::production();
+        limits.max_merge_proposals = 1;
+        assert_eq!(
+            gather_pair_proposals(
+                &contacts,
+                0,
+                1,
+                &layers,
+                0.2,
+                2.5,
+                limits,
+                &mut operations,
+                &mut proposals,
+            ),
+            Err(SpecializedError::MergeProposalLimit {
+                required: 2,
+                limit: 1,
+            })
+        );
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals.capacity(), 1);
+
+        proposals.clear();
+        operations = 0;
+        limits.max_merge_proposals = 2;
+        limits.max_merge_proposal_bytes = 2 * std::mem::size_of::<MergeProposal>() - 1;
+        assert_eq!(
+            gather_pair_proposals(
+                &contacts,
+                0,
+                1,
+                &layers,
+                0.2,
+                2.5,
+                limits,
+                &mut operations,
+                &mut proposals,
+            ),
+            Err(SpecializedError::MergeProposalByteLimit {
+                required: 2 * std::mem::size_of::<MergeProposal>(),
+                limit: 2 * std::mem::size_of::<MergeProposal>() - 1,
+            })
+        );
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals.capacity(), 1);
+    }
+
+    #[test]
+    fn representative_selection_skips_a_worse_lowest_seat_for_the_next_safe_seat() {
+        let baseline = FrozenSpecializedGateVector {
+            failing_uncovered_area_mm2: 0.0,
+            max_patch_area_mm2: 0.0,
+            failing_patch_count: 0,
+            worst_gap_mm: 0.0,
+            load_violation_count: 0,
+            unsupported_specialized_count: 0,
+        };
+        let mut worse = baseline;
+        worse.load_violation_count = 1;
+        assert_eq!(
+            first_safe_proposal(&[baseline, worse, baseline], baseline),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn descriptor_work_caps_huge_region_and_polygon_payloads_before_generation() {
+        let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
+        let mut huge_region = minimum_demand(0, 2, 7, [0.0, 0.0, 0.1]);
+        huge_region.region_points_mm = vec![[0.0, 0.0, 0.1]; 10_000];
+        let polygon = crate::perception::test_slice_solid(
+            (0..10_000)
+                .map(|index| {
+                    let angle = index as f64 * std::f64::consts::TAU / 10_000.0;
+                    [angle.cos(), angle.sin()]
+                })
+                .collect(),
+        );
+        let birth = SpecializedDemand {
+            kind: SpecializedDemandKind::IslandBirth,
+            owner_island_id: 1,
+            coverage_face_id: 9,
+            coverage_component_id: 7,
+            nominated_position_mm: [0.1, 0.0, 0.1],
+            nominated_normal: [0.0, 0.0, -1.0],
+            region_points_mm: Vec::new(),
+            birth_z_mm: Some(0.1),
+            birth_layer_index: Some(0),
+            birth_footprint: Some(polygon),
+        };
+        let contacts = vec![
+            WorkingContact::specialized(huge_region),
+            WorkingContact::specialized(birth),
+        ];
+        let satisfaction = contacts
+            .iter()
+            .flat_map(|contact| &contact.demands)
+            .try_fold(0usize, |total, demand| {
+                total
+                    .checked_add(demand_satisfaction_work(demand)?)
+                    .ok_or(SpecializedError::GateResourceOverflow)
+            })
+            .unwrap();
+        let exact = 4 + 2 * satisfaction;
+        let mut limits = SpecializedLimits::production();
+        limits.max_merge_descriptor_operations = exact - 1;
+        let mut operations = 0;
+        let mut proposals = Vec::new();
+        assert_eq!(
+            gather_pair_proposals(
+                &contacts,
+                0,
+                1,
+                &layers,
+                0.2,
+                2.5,
+                limits,
+                &mut operations,
+                &mut proposals,
+            ),
+            Err(SpecializedError::MergeDescriptorOperationLimit {
+                required: exact,
+                limit: exact - 1,
+            })
+        );
+        assert!(proposals.is_empty());
+    }
+
+    #[test]
+    fn combined_gate_peak_accepts_the_cap_and_refuses_cap_plus_one() {
+        assert_eq!(check_gate_peak(40, 60, 100), Ok(100));
+        assert_eq!(
+            check_gate_peak(40, 61, 100),
+            Err(SpecializedError::GatePeakByteLimit {
+                required: 101,
+                limit: 100,
+            })
+        );
+    }
+
+    #[test]
     fn merge_commit_preflights_deep_payload_at_exact_cap_before_clone() {
         let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
         let mut left_demand = minimum_demand(0, 2, 7, [1.0, 2.0, 0.1]);
@@ -2346,9 +2712,8 @@ mod tests {
             WorkingContact::specialized(left_demand),
             WorkingContact::specialized(minimum_demand(1, 9, 7, [1.1, 2.0, 0.1])),
         ];
-        let mut proposal = accepted_merge(&contacts[0], &contacts[1], &layers, 0.2, 2.5).unwrap();
-        proposal.left = 0;
-        proposal.right = 1;
+        let proposals = test_pair_proposals(&contacts, &layers, 0.2, 2.5);
+        let proposal = &proposals[0];
         let exact = contacts
             .iter()
             .flat_map(|contact| contact.demands.iter())
@@ -2360,7 +2725,7 @@ mod tests {
             .unwrap();
         let mut refused = MergeAllocationTelemetry::default();
         assert!(matches!(
-            commit_merge(&proposal, &contacts, exact - 1, &mut refused),
+            commit_merge(proposal, &contacts, exact - 1, &mut refused),
             Err(SpecializedError::MergeCommitByteLimit {
                 required: exact,
                 limit,
@@ -2370,7 +2735,7 @@ mod tests {
         assert_eq!(refused.deep_clone_count, 0);
         assert_eq!(refused.max_commit_bytes, 0);
         let mut accepted = MergeAllocationTelemetry::default();
-        let merged = commit_merge(&proposal, &contacts, exact, &mut accepted).unwrap();
+        let merged = commit_merge(proposal, &contacts, exact, &mut accepted).unwrap();
         assert_eq!(merged.demands.len(), 2);
         assert_eq!(accepted.deep_clone_count, 1);
         assert_eq!(accepted.max_commit_bytes, exact);
@@ -2730,6 +3095,10 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
+            plan.authority_digest, 9_893_034_867_712_234_337_u64,
+            "bound resource authority"
+        );
+        assert_eq!(
             plan.validate_binding(
                 &mesh,
                 &perception,
@@ -2858,6 +3227,47 @@ mod tests {
             ),
             Err(SpecializedError::StaleAuthority)
         );
+
+        let mut new_limit_mutations = Vec::new();
+        let mut changed = limits;
+        changed.max_merge_proposal_bytes += 1;
+        new_limit_mutations.push(changed);
+        changed = limits;
+        changed.max_merge_descriptor_operations += 1;
+        new_limit_mutations.push(changed);
+        changed = limits;
+        changed.max_coverage_scratch_bytes += 1;
+        new_limit_mutations.push(changed);
+        changed = limits;
+        changed.max_coverage_operations += 1;
+        new_limit_mutations.push(changed);
+        changed = limits;
+        changed.max_load_scratch_bytes += 1;
+        new_limit_mutations.push(changed);
+        changed = limits;
+        changed.max_load_operations += 1;
+        new_limit_mutations.push(changed);
+        changed = limits;
+        changed.max_gate_peak_bytes += 1;
+        new_limit_mutations.push(changed);
+        for changed in new_limit_mutations {
+            assert_eq!(
+                plan.validate_binding(
+                    &mesh,
+                    &perception,
+                    frame(),
+                    &layers,
+                    &candidate,
+                    &[],
+                    perception_limits,
+                    &generic,
+                    &regular,
+                    &selection,
+                    changed,
+                ),
+                Err(SpecializedError::StaleAuthority)
+            );
+        }
     }
 
     const SWEEP_CHILD: &str = "PLINTH_SPECIALIZED_SWEEP_CHILD";
