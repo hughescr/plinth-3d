@@ -35,6 +35,7 @@ pub mod member_sizing;
 pub mod perception;
 pub mod raft;
 pub(crate) mod rewire;
+pub mod specialized;
 pub mod transient;
 
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, SurfaceBuildError};
@@ -984,6 +985,12 @@ pub enum ContactSelectionError {
     RegisteredConstantsUnavailable(String),
     #[error("registered count cannot be represented on this platform")]
     CountNotRepresentable,
+    #[error("coverage assessment has {actual} distances for {expected} samples")]
+    CoverageAssessmentLength { expected: usize, actual: usize },
+    #[error("coverage assessment scratch requires {required} bytes; limit is {limit}")]
+    CoverageAssessmentScratchLimit { required: usize, limit: usize },
+    #[error("coverage assessment requires {required} operations; limit is {limit}")]
+    CoverageAssessmentOperationLimit { required: usize, limit: usize },
 }
 
 /// Select current regular contacts from S0 candidates and prove A3 coverage.
@@ -1131,9 +1138,16 @@ fn select_contacts_with_work(
             &samples,
             &coverage_index,
             &topology,
-            config.voxel_pitch_mm.get(),
+            config.voxel_pitch_mm.get().powi(2),
+            CoverageAssessmentLimits {
+                max_scratch_bytes: config.coverage_samples_max_peak_bytes,
+                max_operations: config
+                    .coverage_samples_max_virtual_cells
+                    .checked_mul(256)
+                    .ok_or(ContactSelectionError::CoverageResourceOverflow)?,
+            },
             &mut work,
-        );
+        )?;
         if failing.is_empty() {
             return Ok((
                 SelectedContacts {
@@ -1253,11 +1267,16 @@ fn validate_candidate_pool(
         .iter()
         .map(|candidate| candidate.point_mm)
         .collect();
-    let (distances, _, faces, _) = surface.project(&points);
+    let (distances, _, _faces, _) = surface.project(&points);
     let canonical_normals = surface.geometry().normals();
     for (row, candidate) in candidates.candidates().iter().enumerate() {
         let face = candidate.face_id as usize;
-        if distances[row] > 1.0e-6 || faces[row] != i64::from(candidate.face_id) {
+        // A dyadic nomination may be a shared source vertex.  The nearest
+        // projection then has several exact owners and the BVH's deterministic
+        // tie winner need not be the nominated source face.  Candidate pools
+        // are opaque and crate-built; distance plus the separately checked
+        // source-face normal is the correct boundary here.
+        if distances[row] > 1.0e-6 {
             return Err(ContactSelectionError::CandidatePointOffSourceFace {
                 candidate_id: candidate.id,
             });
@@ -1288,7 +1307,7 @@ fn selected_contact(island_id: u32, candidate: &ContactCandidate) -> SelectedCon
     }
 }
 
-fn build_dyadic_coverage_samples(
+pub(crate) fn build_dyadic_coverage_samples(
     mesh: &Mesh,
     islands: &[SupportIsland],
     components: &[u32],
@@ -1429,55 +1448,236 @@ fn coverage_validation_peak_bytes(
         .ok_or(ContactSelectionError::CoverageResourceOverflow)
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct CoverageObjective {
+    pub(crate) failing_uncovered_area_mm2: f64,
+    pub(crate) max_patch_area_mm2: f64,
+    pub(crate) failing_patch_count: usize,
+    pub(crate) worst_gap_mm: f64,
+}
+
+pub(crate) struct CoverageAssessment {
+    pub(crate) objective: CoverageObjective,
+    pub(crate) failing_sample_indices: Vec<usize>,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct CoverageAssessmentLimits {
+    pub(crate) max_scratch_bytes: usize,
+    pub(crate) max_operations: usize,
+}
+
+#[cfg(test)]
+impl CoverageAssessmentLimits {
+    pub(crate) const UNBOUNDED: Self = Self {
+        max_scratch_bytes: usize::MAX,
+        max_operations: usize::MAX,
+    };
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CoverageAssessmentResourcePlan {
+    pub(crate) scratch_bytes: usize,
+    pub(crate) operations: usize,
+}
+
+#[derive(Clone, Copy)]
+struct UncoveredFaceGroup {
+    island_id: u32,
+    face_id: u32,
+    area_mm2: f64,
+    sample_start: usize,
+    sample_end: usize,
+}
+
+pub(crate) fn coverage_assessment_resource_plan(
+    samples: &[CoverageSample],
+    topology: &plinth_mesh::FaceTopology,
+) -> Result<CoverageAssessmentResourcePlan, ContactSelectionError> {
+    let count = samples.len();
+    let scratch_bytes = count
+        .checked_mul(
+            std::mem::size_of::<usize>() * 4
+                + std::mem::size_of::<u32>()
+                + std::mem::size_of::<u8>()
+                + std::mem::size_of::<UncoveredFaceGroup>(),
+        )
+        .ok_or(ContactSelectionError::CoverageResourceOverflow)?;
+    let log = usize::BITS as usize - count.max(1).leading_zeros() as usize;
+    let neighbor_visits = samples.iter().try_fold(0usize, |total, sample| {
+        total
+            .checked_add(
+                topology
+                    .neighbors(sample.face_id as usize)
+                    .unwrap_or(&[])
+                    .len(),
+            )
+            .ok_or(ContactSelectionError::CoverageResourceOverflow)
+    })?;
+    let operations = count
+        .checked_mul(log.saturating_mul(4).saturating_add(4))
+        .and_then(|work| {
+            neighbor_visits
+                .checked_mul(log.max(1))
+                .and_then(|neighbors| work.checked_add(neighbors))
+        })
+        .ok_or(ContactSelectionError::CoverageResourceOverflow)?;
+    Ok(CoverageAssessmentResourcePlan {
+        scratch_bytes,
+        operations,
+    })
+}
+
+pub(crate) fn assess_coverage(
+    samples: &[CoverageSample],
+    topology: &plinth_mesh::FaceTopology,
+    nearest_mm: &[f64],
+    radius_mm: f64,
+    area_floor_mm2: f64,
+    limits: CoverageAssessmentLimits,
+) -> Result<CoverageAssessment, ContactSelectionError> {
+    if nearest_mm.len() != samples.len() {
+        return Err(ContactSelectionError::CoverageAssessmentLength {
+            expected: samples.len(),
+            actual: nearest_mm.len(),
+        });
+    }
+    let plan = coverage_assessment_resource_plan(samples, topology)?;
+    if plan.scratch_bytes > limits.max_scratch_bytes {
+        return Err(ContactSelectionError::CoverageAssessmentScratchLimit {
+            required: plan.scratch_bytes,
+            limit: limits.max_scratch_bytes,
+        });
+    }
+    if plan.operations > limits.max_operations {
+        return Err(ContactSelectionError::CoverageAssessmentOperationLimit {
+            required: plan.operations,
+            limit: limits.max_operations,
+        });
+    }
+    let mut uncovered_indices = Vec::with_capacity(samples.len());
+    for (sample_index, &nearest) in nearest_mm.iter().enumerate() {
+        if nearest > radius_mm {
+            uncovered_indices.push(sample_index);
+        }
+    }
+    uncovered_indices
+        .sort_unstable_by_key(|&index| (samples[index].island_id, samples[index].face_id, index));
+    let mut groups = Vec::with_capacity(samples.len());
+    let mut start = 0usize;
+    while start < uncovered_indices.len() {
+        let first = &samples[uncovered_indices[start]];
+        let mut end = start + 1;
+        let mut area = first.area_mm2;
+        while end < uncovered_indices.len() {
+            let sample = &samples[uncovered_indices[end]];
+            if (sample.island_id, sample.face_id) != (first.island_id, first.face_id) {
+                break;
+            }
+            area += sample.area_mm2;
+            end += 1;
+        }
+        groups.push(UncoveredFaceGroup {
+            island_id: first.island_id,
+            face_id: first.face_id,
+            area_mm2: area,
+            sample_start: start,
+            sample_end: end,
+        });
+        start = end;
+    }
+    let mut assessment = CoverageAssessment {
+        objective: CoverageObjective::default(),
+        failing_sample_indices: Vec::with_capacity(samples.len()),
+    };
+    let mut failing_islands = Vec::with_capacity(samples.len());
+    let mut visited = vec![false; groups.len()];
+    let mut stack = Vec::with_capacity(samples.len());
+    let mut patch_samples = Vec::with_capacity(samples.len());
+    for group_index in 0..groups.len() {
+        if visited[group_index] {
+            continue;
+        }
+        visited[group_index] = true;
+        stack.clear();
+        stack.push(group_index);
+        let mut patch_area = 0.0;
+        let mut patch_ambiguous = false;
+        patch_samples.clear();
+        while let Some(current_index) = stack.pop() {
+            let current = groups[current_index];
+            patch_area += current.area_mm2;
+            patch_ambiguous |= topology.cut_flags()[current.face_id as usize] != 0;
+            patch_samples
+                .extend_from_slice(&uncovered_indices[current.sample_start..current.sample_end]);
+            for &neighbor in topology.neighbors(current.face_id as usize).unwrap_or(&[]) {
+                if let Ok(neighbor_index) = groups
+                    .binary_search_by_key(&(current.island_id, neighbor), |group| {
+                        (group.island_id, group.face_id)
+                    })
+                {
+                    if !visited[neighbor_index] {
+                        visited[neighbor_index] = true;
+                        stack.push(neighbor_index);
+                    }
+                }
+            }
+        }
+        if patch_area > area_floor_mm2 || patch_ambiguous {
+            assessment.objective.failing_uncovered_area_mm2 += patch_area;
+            assessment.objective.max_patch_area_mm2 =
+                assessment.objective.max_patch_area_mm2.max(patch_area);
+            assessment.objective.failing_patch_count =
+                assessment.objective.failing_patch_count.saturating_add(1);
+            assessment
+                .failing_sample_indices
+                .extend_from_slice(&patch_samples);
+            failing_islands.push(groups[group_index].island_id);
+        }
+    }
+    assessment.failing_sample_indices.sort_unstable();
+    failing_islands.sort_unstable();
+    failing_islands.dedup();
+    assessment.objective.worst_gap_mm = samples
+        .iter()
+        .zip(nearest_mm)
+        .filter_map(|(sample, nearest)| {
+            failing_islands
+                .binary_search(&sample.island_id)
+                .is_ok()
+                .then_some(*nearest)
+        })
+        .fold(0.0, f64::max);
+    Ok(assessment)
+}
+
 fn failing_coverage_samples(
     samples: &[CoverageSample],
     contacts: &CoverageContactIndex,
     topology: &plinth_mesh::FaceTopology,
     area_floor_mm2: f64,
+    limits: CoverageAssessmentLimits,
     work: &mut SelectionWork,
-) -> Vec<usize> {
-    let mut uncovered_by_face = std::collections::BTreeMap::<(u32, u32), (f64, Vec<usize>)>::new();
-    for (sample_index, sample) in samples.iter().enumerate() {
-        let covered = contacts.covers(sample, work);
-        if !covered {
-            let row = uncovered_by_face
-                .entry((sample.island_id, sample.face_id))
-                .or_insert((0.0, Vec::new()));
-            row.0 += sample.area_mm2;
-            row.1.push(sample_index);
-        }
-    }
-    let mut failing = Vec::new();
-    let mut visited = std::collections::BTreeSet::new();
-    for &(island_id, face_id) in uncovered_by_face.keys() {
-        if !visited.insert((island_id, face_id)) {
-            continue;
-        }
-        let mut stack = vec![face_id];
-        let mut patch_area = 0.0;
-        let mut patch_ambiguous = false;
-        let mut patch_samples: Vec<usize> = Vec::new();
-        while let Some(face) = stack.pop() {
-            let Some((area, rows)) = uncovered_by_face.get(&(island_id, face)) else {
-                continue;
-            };
-            patch_area += area;
-            patch_ambiguous |= topology.cut_flags()[face as usize] != 0;
-            patch_samples.extend(rows);
-            for &neighbor in topology.neighbors(face as usize).unwrap_or(&[]) {
-                if uncovered_by_face.contains_key(&(island_id, neighbor))
-                    && visited.insert((island_id, neighbor))
-                {
-                    stack.push(neighbor);
-                }
+) -> Result<Vec<usize>, ContactSelectionError> {
+    let nearest = samples
+        .iter()
+        .map(|sample| {
+            if contacts.covers(sample, work) {
+                0.0
+            } else {
+                f64::INFINITY
             }
-        }
-        if patch_area > area_floor_mm2 || patch_ambiguous {
-            failing.extend(patch_samples);
-        }
-    }
-    failing.sort_unstable();
-    failing
+        })
+        .collect::<Vec<_>>();
+    Ok(assess_coverage(
+        samples,
+        topology,
+        &nearest,
+        contacts.radius_mm,
+        area_floor_mm2,
+        limits,
+    )?
+    .failing_sample_indices)
 }
 
 fn best_coverage_repair<'a>(
@@ -2489,6 +2689,135 @@ mod tests {
     }
 
     #[test]
+    fn shared_coverage_assessment_aggregates_connected_faces_and_ambiguity_cuts() {
+        let mesh = small_closed_tetra();
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let samples = vec![
+            CoverageSample {
+                island_id: 0,
+                face_id: 0,
+                component_id: topology.component_ids()[0],
+                point_mm: [0.0, 0.0, 0.0],
+                area_mm2: 0.1,
+            },
+            CoverageSample {
+                island_id: 0,
+                face_id: 1,
+                component_id: topology.component_ids()[1],
+                point_mm: [0.0, 0.0, 0.0],
+                area_mm2: 0.1,
+            },
+        ];
+        let connected = assess_coverage(
+            &samples,
+            &topology,
+            &[2.0, 3.0],
+            1.0,
+            0.16,
+            CoverageAssessmentLimits::UNBOUNDED,
+        )
+        .unwrap();
+        assert_eq!(connected.failing_sample_indices, vec![0, 1]);
+        assert_eq!(
+            connected.objective,
+            CoverageObjective {
+                failing_uncovered_area_mm2: 0.2,
+                max_patch_area_mm2: 0.2,
+                failing_patch_count: 1,
+                worst_gap_mm: 3.0,
+            }
+        );
+        let below_floor = assess_coverage(
+            &samples,
+            &topology,
+            &[2.0, 0.0],
+            1.0,
+            0.16,
+            CoverageAssessmentLimits::UNBOUNDED,
+        )
+        .unwrap();
+        assert!(below_floor.failing_sample_indices.is_empty());
+
+        let open = Mesh::new(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[0, 1, 2]],
+        )
+        .unwrap();
+        let open_topology = build_face_topology(&open, WeldPolicy::ExactBits).unwrap();
+        let ambiguous = assess_coverage(
+            &[CoverageSample {
+                island_id: 0,
+                face_id: 0,
+                component_id: 0,
+                point_mm: [0.0, 0.0, 0.0],
+                area_mm2: 0.01,
+            }],
+            &open_topology,
+            &[2.0],
+            1.0,
+            0.16,
+            CoverageAssessmentLimits::UNBOUNDED,
+        )
+        .unwrap();
+        assert_eq!(ambiguous.failing_sample_indices, vec![0]);
+        assert_eq!(ambiguous.objective.failing_patch_count, 1);
+    }
+
+    #[test]
+    fn coverage_assessment_scratch_and_operation_caps_are_preflighted_exactly() {
+        let mesh = small_closed_tetra();
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let samples = vec![CoverageSample {
+            island_id: 0,
+            face_id: 0,
+            component_id: topology.component_ids()[0],
+            point_mm: [0.0, 0.0, 0.0],
+            area_mm2: 0.1,
+        }];
+        let plan = coverage_assessment_resource_plan(&samples, &topology).unwrap();
+        assert!(assess_coverage(
+            &samples,
+            &topology,
+            &[2.0],
+            1.0,
+            0.0,
+            CoverageAssessmentLimits {
+                max_scratch_bytes: plan.scratch_bytes,
+                max_operations: plan.operations,
+            },
+        )
+        .is_ok());
+        assert!(matches!(
+            assess_coverage(
+                &samples,
+                &topology,
+                &[2.0],
+                1.0,
+                0.0,
+                CoverageAssessmentLimits {
+                    max_scratch_bytes: plan.scratch_bytes - 1,
+                    max_operations: plan.operations,
+                },
+            ),
+            Err(ContactSelectionError::CoverageAssessmentScratchLimit { .. })
+        ));
+        assert!(matches!(
+            assess_coverage(
+                &samples,
+                &topology,
+                &[2.0],
+                1.0,
+                0.0,
+                CoverageAssessmentLimits {
+                    max_scratch_bytes: plan.scratch_bytes,
+                    max_operations: plan.operations - 1,
+                },
+            ),
+            Err(ContactSelectionError::CoverageAssessmentOperationLimit { .. })
+        ));
+    }
+
+    #[test]
     fn s1_consumes_s0_fixture_and_retains_face_specific_evidence() {
         let mesh = small_closed_tetra();
         let pool = perceive_fixture(&mesh);
@@ -2527,8 +2856,10 @@ mod tests {
             &contact_index,
             &topology,
             0.4,
+            CoverageAssessmentLimits::UNBOUNDED,
             &mut work,
         )
+        .unwrap()
         .is_empty());
     }
 
