@@ -1,0 +1,14 @@
+error[E0603]: function `resize_forest_current_parity` is private
+ --> tests/compile_fail/transient_resize_private.rs:6:40
+  |
+6 |     let _ = plinth_support::transient::resize_forest_current_parity(
+  |                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private function
+  |
+note: the function `resize_forest_current_parity` is defined here
+ --> src/transient.rs
+  |
+  | / pub(crate) fn resize_forest_current_parity(
+  | |     forest: &Forest,
+  | |     plate_z_mm: Finite,
+  | | ) -> Result<TransientResizePlan, TransientError> {
+  | |________________________________________________^

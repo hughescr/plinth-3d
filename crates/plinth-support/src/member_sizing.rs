@@ -425,7 +425,7 @@ pub fn diagnostic_deflection_radius_mm(
     )
 }
 
-fn diagnostic_deflection_radius_for_geometry(
+pub(crate) fn diagnostic_deflection_radius_for_geometry(
     length_3d_mm: PositiveFinite,
     lean_angle_deg: LeanAngleDeg,
     lateral_load: &ActualLateralLoad,
@@ -547,13 +547,42 @@ fn diagnostic_required_radius(
     lateral_load: &ActualLateralLoad,
     policy: &DiagnosticMemberSizingPolicy,
 ) -> Result<PositiveFinite, MemberSizingError> {
+    diagnostic_required_radius_for_geometry(
+        kind,
+        child_rootward_radii,
+        carried_area_mm2,
+        span.length_mm(),
+        span.lean_angle_deg(),
+        lateral_load,
+        policy,
+    )
+}
+
+/// Shared crate-internal leaf for compatibility controllers that already
+/// carry a physical free length and the owning member's lean independently.
+/// Keeping it here ensures the full-span and transient-span paths cannot
+/// drift into separate implementations of the frozen mechanics.
+pub(crate) fn diagnostic_required_radius_for_geometry(
+    kind: &MemberKind,
+    child_rootward_radii: &[RootwardEndRadius],
+    carried_area_mm2: Finite,
+    length_3d_mm: PositiveFinite,
+    lean_angle_deg: LeanAngleDeg,
+    lateral_load: &ActualLateralLoad,
+    policy: &DiagnosticMemberSizingPolicy,
+) -> Result<PositiveFinite, MemberSizingError> {
     let murray = murray_radius_mm(child_rootward_radii)?.get().get();
     let tension = diagnostic_peel_tension_radius_mm(carried_area_mm2, policy)?
         .diagnostic()
         .get();
-    let deflection = diagnostic_deflection_radius_mm(span, lateral_load, policy)?
-        .diagnostic()
-        .get();
+    let deflection = diagnostic_deflection_radius_for_geometry(
+        length_3d_mm,
+        lean_angle_deg,
+        lateral_load,
+        policy,
+    )?
+    .diagnostic()
+    .get();
     let kind_floor = diagnostic_member_kind_floor_mm(kind, policy)
         .diagnostic()
         .get();
