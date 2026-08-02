@@ -28,7 +28,7 @@ pub(crate) struct ParityMemoryEstimate {
 /// assumes every reference has a unique key: key i64 + offset u32 + FaceRef.
 fn axis_memory_bounds(face_count: usize, references: usize) -> Result<(usize, usize), String> {
     let per_axis_triangle_bytes = face_count
-        .checked_mul(11 * std::mem::size_of::<f64>() + std::mem::size_of::<bool>())
+        .checked_mul(10 * std::mem::size_of::<f64>() + std::mem::size_of::<u8>())
         .ok_or_else(|| "parity triangle memory estimate overflow".to_string())?;
     let csr_bytes = references
         .checked_mul(
@@ -48,6 +48,43 @@ fn axis_memory_bounds(face_count: usize, references: usize) -> Result<(usize, us
         .checked_add(pair_bytes)
         .ok_or_else(|| "parity peak memory estimate overflow".to_string())?;
     Ok((retained, peak))
+}
+
+fn mesh_axis_reference_count(
+    mesh: &Mesh,
+    axes: [usize; 2],
+    origin: [f64; 2],
+    h: f64,
+) -> Result<usize, String> {
+    let mut references = 0usize;
+    for &face_id in mesh.face_ids() {
+        let face = face_id as usize;
+        let (ix0, ix1, iy0, iy1) = projected_cell_bounds(
+            mesh.v0(face),
+            mesh.vertex_b(face),
+            mesh.vertex_c(face),
+            axes,
+            origin,
+            h,
+        );
+        let nx = i128::from(ix1) - i128::from(ix0) + 1;
+        let ny = i128::from(iy1) - i128::from(iy0) + 1;
+        if nx <= 0 || ny <= 0 {
+            return Err(format!("parity projected range is invalid at face {face}"));
+        }
+        let face_references = usize::try_from(
+            nx.checked_mul(ny)
+                .ok_or_else(|| format!("parity reference estimate overflow at face {face}"))?,
+        )
+        .map_err(|_| format!("parity reference estimate exceeds usize at face {face}"))?;
+        references = references
+            .checked_add(face_references)
+            .ok_or_else(|| format!("parity reference total overflows usize at face {face}"))?;
+    }
+    if references > u32::MAX as usize {
+        return Err("parity grid exceeds 2^32 triangle references".into());
+    }
+    Ok(references)
 }
 
 fn projection_axes(axis: usize) -> (usize, usize) {
@@ -189,7 +226,7 @@ pub struct AxisGrid {
     v1x: Vec<f64>,
     v1y: Vec<f64>,
     den: Vec<f64>,
-    good: Vec<bool>,
+    good: Vec<u8>,
     az: Vec<f64>,
     bz: Vec<f64>,
     cz: Vec<f64>,
@@ -212,6 +249,15 @@ impl AxisGrid {
         h: f64,
         max_grid_bytes: usize,
     ) -> Result<AxisGrid, String> {
+        Self::build_with_reserved_peak(mesh, ax, h, max_grid_bytes).map(|(grid, _)| grid)
+    }
+
+    fn build_with_reserved_peak(
+        mesh: &Mesh,
+        ax: usize,
+        h: f64,
+        max_grid_bytes: usize,
+    ) -> Result<(AxisGrid, usize), String> {
         let n = mesh.nfaces();
         // Peak-memory accounting (Amendment A17 / spec sec 3.5): a large
         // projected triangle bins into every overlapped cell, so the CSR ref
@@ -227,6 +273,16 @@ impl AxisGrid {
         let origin1 = bounds[0][p1] - 1.0;
         let ny = ((bounds[1][p1] + 1.0 - origin1) / h).floor() as i64 + 3;
 
+        let reference_count = mesh_axis_reference_count(mesh, [p0, p1], [origin0, origin1], h)?;
+        let (_, projected_peak) = axis_memory_bounds(n, reference_count)?;
+        if projected_peak > max_grid_bytes {
+            return Err(format!(
+                "parity grid axis {} exceeds memory budget: {} bytes projected > {} budget \
+                 (spec sec 3.5 / Amendment A17)",
+                ax, projected_peak, max_grid_bytes
+            ));
+        }
+
         let mut a2x = vec![0.0; n];
         let mut a2y = vec![0.0; n];
         let mut v0x = vec![0.0; n];
@@ -234,13 +290,13 @@ impl AxisGrid {
         let mut v1x = vec![0.0; n];
         let mut v1y = vec![0.0; n];
         let mut den = vec![0.0; n];
-        let mut good = vec![false; n];
+        let mut good = vec![0u8; n];
         let mut az = vec![0.0; n];
         let mut bz = vec![0.0; n];
         let mut cz = vec![0.0; n];
 
         // (flat_id, tri) pairs for the CSR
-        let mut pairs: Vec<(i64, FaceRef)> = Vec::with_capacity(n * 2);
+        let mut pairs: Vec<(i64, FaceRef)> = Vec::with_capacity(reference_count);
 
         for (slot, &face_id) in mesh.face_ids().iter().enumerate() {
             let face = face_id as usize;
@@ -268,7 +324,7 @@ impl AxisGrid {
             // den = v0x*v1y - v1x*v0y (line 233)
             let d = v0xf * v1yf - v1xf * v0yf;
             den[slot] = d;
-            good[slot] = d.abs() > PARITY_DEN_EPS;
+            good[slot] = u8::from(d.abs() > PARITY_DEN_EPS);
             az[slot] = a[ax];
             bz[slot] = b[ax];
             cz[slot] = cc[ax];
@@ -292,29 +348,23 @@ impl AxisGrid {
                     ));
                 }
             }
-            // Budget check per triangle: bounds overshoot to one triangle's
-            // cell fan-out, so we fail before the pair vector grows unbounded.
-            let (_, projected) = axis_memory_bounds(n, pairs.len())?;
-            if projected > max_grid_bytes {
-                return Err(format!(
-                    "parity grid axis {} exceeds memory budget: {} bytes projected > {} budget \
-                     (spec sec 3.5 / Amendment A17)",
-                    ax, projected, max_grid_bytes
-                ));
-            }
         }
 
-        if pairs.len() > u32::MAX as usize {
-            return Err("parity grid exceeds 2^32 triangle references".into());
-        }
+        debug_assert_eq!(pairs.len(), reference_count);
 
         // sort by flat id (stable-not-required; intra-cell order is irrelevant
         // to parity because crossings are re-sorted per query)
         pairs.sort_unstable_by_key(|&(key, face)| (key, face.face_id));
 
-        let mut keys: Vec<i64> = Vec::new();
-        let mut offs: Vec<u32> = vec![0];
-        let mut tri_refs: Vec<FaceRef> = Vec::with_capacity(pairs.len());
+        let unique_key_count = usize::from(!pairs.is_empty())
+            + pairs
+                .windows(2)
+                .filter(|pair| pair[0].0 != pair[1].0)
+                .count();
+        let mut keys: Vec<i64> = Vec::with_capacity(unique_key_count);
+        let mut offs: Vec<u32> = Vec::with_capacity(unique_key_count + 1);
+        offs.push(0);
+        let mut tri_refs: Vec<FaceRef> = Vec::with_capacity(reference_count);
         let mut max_occ = 0usize;
         let mut i = 0usize;
         while i < pairs.len() {
@@ -333,7 +383,63 @@ impl AxisGrid {
             i = j;
         }
 
-        Ok(AxisGrid {
+        debug_assert_eq!(keys.len(), unique_key_count);
+        debug_assert_eq!(offs.len(), unique_key_count + 1);
+        debug_assert_eq!(tri_refs.len(), reference_count);
+
+        let f64_capacity = [
+            a2x.capacity(),
+            a2y.capacity(),
+            v0x.capacity(),
+            v0y.capacity(),
+            v1x.capacity(),
+            v1y.capacity(),
+            den.capacity(),
+            az.capacity(),
+            bz.capacity(),
+            cz.capacity(),
+        ]
+        .into_iter()
+        .try_fold(0usize, |bytes, capacity| {
+            capacity
+                .checked_mul(std::mem::size_of::<f64>())
+                .and_then(|part| bytes.checked_add(part))
+        })
+        .ok_or_else(|| "parity reserved-capacity arithmetic overflow".to_string())?;
+        let reserved_peak = f64_capacity
+            .checked_add(good.capacity() * std::mem::size_of::<u8>())
+            .and_then(|bytes| {
+                pairs
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<(i64, FaceRef)>())
+                    .and_then(|part| bytes.checked_add(part))
+            })
+            .and_then(|bytes| {
+                keys.capacity()
+                    .checked_mul(std::mem::size_of::<i64>())
+                    .and_then(|part| bytes.checked_add(part))
+            })
+            .and_then(|bytes| {
+                offs.capacity()
+                    .checked_mul(std::mem::size_of::<u32>())
+                    .and_then(|part| bytes.checked_add(part))
+            })
+            .and_then(|bytes| {
+                tri_refs
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<FaceRef>())
+                    .and_then(|part| bytes.checked_add(part))
+            })
+            .ok_or_else(|| "parity reserved-capacity arithmetic overflow".to_string())?;
+        if reserved_peak > max_grid_bytes {
+            return Err(format!(
+                "parity grid axis {} reserved buffers exceed memory budget: {} bytes > {} budget \
+                 (spec sec 3.5 / Amendment A17)",
+                ax, reserved_peak, max_grid_bytes
+            ));
+        }
+
+        let grid = AxisGrid {
             ax,
             p0,
             p1,
@@ -358,12 +464,13 @@ impl AxisGrid {
             keys,
             offs,
             tri_refs,
-        })
+        };
+        Ok((grid, reserved_peak))
     }
 
     /// Approx bytes for telemetry.
     pub fn bytes(&self) -> usize {
-        let per_tri = 11 * 8 + 1; // 11 f64 + 1 bool per face
+        let per_tri = 10 * 8 + 1; // 10 f64 + 1 byte flag per face
         per_tri * self.a2x.len()
             + self.keys.len() * 8
             + self.offs.len() * 4
@@ -407,7 +514,7 @@ impl AxisGrid {
         scratch.clear();
         for face in &self.tri_refs[s..e] {
             let t = face.slot as usize;
-            if !self.good[t] {
+            if self.good[t] == 0 {
                 continue;
             }
             let den = self.den[t];
@@ -483,11 +590,13 @@ mod memory_tests {
         assert_eq!(estimate.axis_references, [17, 17, 289]);
 
         let (retained, peak) = axis_memory_bounds(1, 289).unwrap();
-        let per_triangle = 11 * std::mem::size_of::<f64>() + std::mem::size_of::<bool>();
+        let per_triangle = 10 * std::mem::size_of::<f64>() + std::mem::size_of::<u8>();
         assert_eq!(peak - per_triangle, 10_408);
         assert_eq!(estimate.max_axis_build_bytes, peak);
 
-        let grid = AxisGrid::build(&mesh, 2, 1.0, peak).expect("exact logical peak cap");
+        let (grid, reserved_peak) =
+            AxisGrid::build_with_reserved_peak(&mesh, 2, 1.0, peak).expect("exact peak cap");
+        assert_eq!(reserved_peak, peak);
         assert_eq!(grid.n_refs, 289);
         assert_eq!(grid.n_cells, 289);
         assert_eq!(grid.bytes(), retained);
