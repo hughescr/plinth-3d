@@ -881,6 +881,67 @@ mod tests {
     }
 
     #[test]
+    fn co_lowest_tolerance_pins_scale_two_boundary_and_next_above() {
+        // The negative minimum fixes `max(1, abs(z))` at exactly 2.0 while
+        // the other values remain inside that scale.  Replacing the frozen
+        // scale with a constant 1.0 would reject the middle vertex.
+        let tolerance = 8.0 * f64::EPSILON * 2.0;
+        let boundary = -2.0 + tolerance;
+        assert_eq!(
+            co_lowest_mask([[0.0, 0.0, -2.0], [0.0, 0.0, boundary], [0.0, 0.0, boundary],]),
+            [true, true, true]
+        );
+        assert_eq!(
+            co_lowest_mask([
+                [0.0, 0.0, -2.0],
+                [0.0, 0.0, boundary],
+                [0.0, 0.0, boundary.next_up()],
+            ]),
+            [true, true, false]
+        );
+    }
+
+    #[test]
+    fn shared_position_keeps_most_negative_nz_then_lowest_face_id_in_final_order() {
+        let mesh = Mesh::new(
+            vec![
+                [0.0, 0.0, 0.0],
+                [2.0, 0.0, 4.0],
+                [0.0, 2.0, 1.0],
+                [2.0, 0.0, 2.0],
+                [0.0, 2.0, 1.0],
+                [2.0, 0.0, 1.0],
+                [0.0, 2.0, 2.0],
+            ],
+            // Every face owns [0, 0, 0]. Face 1 and face 2 have identical
+            // nz; face 1 must win their face-id tie, ahead of face 0's less
+            // negative nz.
+            vec![[0, 2, 1], [0, 4, 3], [0, 6, 5]],
+        )
+        .expect("shared-position fixture");
+        let payload = build_candidate_payload(
+            &mesh,
+            &[SupportIsland {
+                id: 9,
+                face_ids: vec![2, 0, 1],
+            }],
+            &config(8, 1_000_000, 3_000_000, 192 * 1024 * 1024, 64),
+        )
+        .expect("shared-position candidate payload");
+        let shared: Vec<_> = payload
+            .rows()
+            .iter()
+            .filter(|row| row.point_mm == [0.0, 0.0, 0.0])
+            .collect();
+        assert_eq!(shared.len(), 1);
+        assert_eq!(shared[0].face_id, 1);
+        assert_eq!(shared[0].normal, [2.0 / 3.0, 1.0 / 3.0, -2.0 / 3.0]);
+        // Final output is `(island, z, x, y, face)`, so the shared lowest
+        // point must be the first retained row as well as the dedup winner.
+        assert_eq!(payload.rows()[0], *shared[0]);
+    }
+
+    #[test]
     fn multi_face_candidate_vector_pins_order_dedup_and_literal_64_byte_accounting() {
         const FROZEN_ROW_BYTES: usize = 64;
         assert_eq!(
