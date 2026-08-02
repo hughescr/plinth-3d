@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 mod cavity_field;
+pub mod drains;
 
 pub use cavity_field::CavityField;
 
