@@ -10,6 +10,9 @@
 //! and evidence can land. There is no public `run` stub.
 #![forbid(unsafe_code)]
 
+mod coverage;
+pub mod dyadic;
+
 pub mod forest;
 
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, SurfaceBuildError};
@@ -1230,80 +1233,17 @@ fn build_dyadic_coverage_samples(
     components: &[u32],
     config: &ContactSelectionConfig<'_>,
 ) -> Result<Vec<CoverageSample>, ContactSelectionError> {
-    build_dyadic_coverage_samples_with_high_water(mesh, islands, components, config)
-        .map(|(samples, _)| samples)
+    coverage::build_dyadic_coverage_samples(mesh, islands, components, config)
 }
 
+#[cfg(test)]
 fn build_dyadic_coverage_samples_with_high_water(
     mesh: &Mesh,
     islands: &[SupportIsland],
     components: &[u32],
     config: &ContactSelectionConfig<'_>,
 ) -> Result<(Vec<CoverageSample>, usize), ContactSelectionError> {
-    let plan = plan_dyadic_coverage(mesh, islands, config)?;
-    let mut samples = vec![
-        CoverageSample {
-            island_id: 0,
-            face_id: 0,
-            component_id: 0,
-            point_mm: [0.0; 3],
-            area_mm2: 0.0,
-        };
-        plan.total_cells
-    ];
-    let mut offset = 0;
-    let mut observed_working_high_water = 0;
-    for island in islands {
-        for &face_id in &island.face_ids {
-            let triangle = mesh.tris()[face_id as usize];
-            let cell = [
-                mesh.verts()[triangle[0] as usize],
-                mesh.verts()[triangle[1] as usize],
-                mesh.verts()[triangle[2] as usize],
-            ];
-            let depth = dyadic_refine_depth(max_edge_mm(cell), config.voxel_pitch_mm.get());
-            let terminal_cells = 4_usize
-                .checked_pow(depth)
-                .ok_or(ContactSelectionError::CoverageResourceOverflow)?;
-            let template = CoverageSample {
-                island_id: island.id,
-                face_id,
-                component_id: components[face_id as usize],
-                point_mm: [0.0; 3],
-                area_mm2: triangle_area_mm2(cell) / terminal_cells as f64,
-            };
-            let mut face_start = 0;
-            while face_start < terminal_cells {
-                let window_len =
-                    (terminal_cells - face_start).min(config.coverage_samples_max_working_cells);
-                observed_working_high_water = observed_working_high_water.max(window_len);
-                for local in 0..window_len {
-                    let leaf = dyadic_cell_at_index(cell, depth, face_start + local);
-                    let [a, b, c] = leaf;
-                    samples[offset + face_start + local] = CoverageSample {
-                        point_mm: [
-                            (a[0] + b[0] + c[0]) / 3.0,
-                            (a[1] + b[1] + c[1]) / 3.0,
-                            (a[2] + b[2] + c[2]) / 3.0,
-                        ],
-                        ..template.clone()
-                    };
-                }
-                face_start += window_len;
-            }
-            offset += terminal_cells;
-        }
-    }
-    debug_assert_eq!(offset, samples.len());
-    samples.sort_unstable_by(|left, right| {
-        left.island_id
-            .cmp(&right.island_id)
-            .then_with(|| left.face_id.cmp(&right.face_id))
-            .then_with(|| left.point_mm[0].total_cmp(&right.point_mm[0]))
-            .then_with(|| left.point_mm[1].total_cmp(&right.point_mm[1]))
-            .then_with(|| left.point_mm[2].total_cmp(&right.point_mm[2]))
-    });
-    Ok((samples, observed_working_high_water))
+    coverage::build_dyadic_coverage_samples_with_high_water(mesh, islands, components, config)
 }
 
 const COVERAGE_SAMPLE_BYTES: usize = 49;
@@ -1501,42 +1441,11 @@ fn coverage_validation_peak_bytes(
         .ok_or(ContactSelectionError::CoverageResourceOverflow)
 }
 
-fn dyadic_cell_at_index(mut cell: [[f64; 3]; 3], depth: u32, index: usize) -> [[f64; 3]; 3] {
-    for level in (0..depth).rev() {
-        let [a, b, c] = cell;
-        let ab = midpoint(a, b);
-        let bc = midpoint(b, c);
-        let ca = midpoint(c, a);
-        let digit = (index >> (2 * level)) & 3;
-        cell = match digit {
-            0 => [a, ab, ca],
-            1 => [ab, b, bc],
-            2 => [ca, bc, c],
-            _ => [ab, bc, ca],
-        };
-    }
-    cell
-}
-
 /// Frozen `placement._refine_depths` scalar rule, including its one-ULP
 /// boundary correction.  The builder applies this same generic rule to every
 /// source face before allocating any terminal cells.
 fn dyadic_refine_depth(max_edge_mm: f64, cell_edge_limit_mm: f64) -> u32 {
-    if max_edge_mm <= cell_edge_limit_mm {
-        return 0;
-    }
-    let mut depth = (max_edge_mm / cell_edge_limit_mm).log2().ceil() as u32;
-    if depth > 0 {
-        let parent_bound = cell_edge_limit_mm * 2_f64.powi((depth - 1) as i32);
-        if max_edge_mm <= parent_bound.next_up() {
-            depth -= 1;
-        }
-    }
-    let bound = cell_edge_limit_mm * 2_f64.powi(depth as i32);
-    if max_edge_mm > bound.next_up() {
-        depth += 1;
-    }
-    depth
+    dyadic::refine_depth(max_edge_mm, cell_edge_limit_mm)
 }
 
 fn failing_coverage_samples(
@@ -1680,14 +1589,6 @@ fn minimum_distance_sq(contacts: &[SelectedContact], point: [f64; 3]) -> f64 {
         .map(|contact| squared_distance(contact.point_mm, point))
         .min_by(f64::total_cmp)
         .unwrap_or(f64::INFINITY)
-}
-
-fn midpoint(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
-    [
-        (left[0] + right[0]) * 0.5,
-        (left[1] + right[1]) * 0.5,
-        (left[2] + right[2]) * 0.5,
-    ]
 }
 
 fn max_edge_mm([a, b, c]: [[f64; 3]; 3]) -> f64 {
