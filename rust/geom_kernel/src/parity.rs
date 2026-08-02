@@ -103,6 +103,7 @@ fn checked_grid_layout(
 ) -> Result<([f64; 2], [i64; 2]), String> {
     let mut origins = [0.0; 2];
     let mut dimensions = [0i64; 2];
+    let mut max_used_indices = [0i64; 2];
     for (slot, &axis) in axes.iter().enumerate() {
         let origin = bounds[0][axis] - 1.0;
         let upper = bounds[1][axis] + 1.0;
@@ -130,9 +131,20 @@ fn checked_grid_layout(
         let dimension = (cells as i64).checked_add(3).ok_or_else(|| {
             format!("parity grid dimension overflows i64 on projected axis {axis}")
         })?;
+        let max_used = ((bounds[1][axis] - origin) / h).floor();
+        if !max_used.is_finite() || max_used < 0.0 || max_used >= i64::MAX as f64 {
+            return Err(format!(
+                "parity grid cell index is unrepresentable on projected axis {axis}"
+            ));
+        }
         origins[slot] = origin;
         dimensions[slot] = dimension;
+        max_used_indices[slot] = max_used as i64;
     }
+    max_used_indices[0]
+        .checked_mul(dimensions[1])
+        .and_then(|flat| flat.checked_add(max_used_indices[1]))
+        .ok_or_else(|| "parity flat-id is unrepresentable for projected grid".to_string())?;
     Ok((origins, dimensions))
 }
 
@@ -648,13 +660,54 @@ mod memory_tests {
         ));
 
         let saturation_boundary = i64::MAX as f64;
-        let neighboring_representable =
-            f64::from_bits(saturation_boundary.to_bits().checked_sub(1).unwrap());
-        let safe_bounds = [[0.0; 3], [neighboring_representable; 3]];
+        let safe_extent = 1_000_000_000.0;
+        let safe_bounds = [[0.0; 3], [safe_extent; 3]];
         let (_, dimensions) = checked_grid_layout(safe_bounds, [0, 1], 1.0).unwrap();
-        assert_eq!(dimensions, [neighboring_representable as i64 + 3; 2]);
+        assert_eq!(dimensions, [safe_extent as i64 + 5; 2]);
         let rejected_bounds = [[0.0; 3], [saturation_boundary; 3]];
         assert!(checked_grid_layout(rejected_bounds, [0, 1], 1.0).is_err());
+    }
+
+    #[test]
+    fn grid_layout_rejects_flat_id_overflow_before_estimator_builder_diverge() {
+        let overflowing_extent = 4_000_000_000.0;
+        let vertices = [
+            [0.0, 0.0, 0.0],
+            [overflowing_extent, overflowing_extent, overflowing_extent],
+        ];
+        let faces = [[0, 0, 0], [1, 1, 1]];
+        let bounds = [[0.0; 3], [overflowing_extent; 3]];
+
+        assert!(checked_grid_layout(bounds, [0, 1], 1.0)
+            .unwrap_err()
+            .contains("flat-id is unrepresentable"));
+        assert!(matches!(
+            NativeSurface::estimate_index_memory_from_indexed(&vertices, &faces, 1.0),
+            Err(SurfaceBuildError::MemoryEstimateOverflow {
+                section: "parity grid"
+            })
+        ));
+        assert!(matches!(
+            NativeSurface::from_indexed(
+                &vertices,
+                &faces,
+                NativeSurfaceConfig {
+                    grid_pitch_mm: 1.0,
+                    max_grid_bytes: usize::MAX,
+                },
+            ),
+            Err(SurfaceBuildError::Kernel(reason))
+                if reason.contains("flat-id is unrepresentable")
+        ));
+
+        // For integer extent `m` and unit pitch, the largest used key is
+        // `(m + 1) * (m + 6)`. This is the last integer extent that fits i64.
+        let largest_representable_extent = 3_037_000_496.0;
+        let neighboring_bounds = [[0.0; 3], [largest_representable_extent; 3]];
+        checked_grid_layout(neighboring_bounds, [0, 1], 1.0)
+            .expect("neighboring flattened key fits i64");
+        let first_overflowing_bounds = [[0.0; 3], [largest_representable_extent + 1.0; 3]];
+        assert!(checked_grid_layout(first_overflowing_bounds, [0, 1], 1.0).is_err());
     }
 
     #[test]
