@@ -311,7 +311,7 @@ impl NativeSurface {
         let faces_len = faces.len();
         let face_store_bytes = faces_len
             .checked_mul(
-                5 * std::mem::size_of::<[f64; 3]>()
+                7 * std::mem::size_of::<[f64; 3]>()
                     + std::mem::size_of::<f64>()
                     + std::mem::size_of::<mesh::FaceBounds>(),
             )

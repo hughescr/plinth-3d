@@ -20,8 +20,9 @@ pub const PLANE_SLICE_MERGE_TOLERANCE_MM: f64 = 1.0e-8;
 /// Explicit resource limits for [`NativeSurface::slice_z_batch`].
 ///
 /// Every cap is checked from deterministic BVH candidate counts before
-/// candidate or output buffers are allocated. `max_output_bytes` describes
-/// only the returned offset and worst-case segment storage, not allocator or
+/// candidate or result buffers are allocated. Candidate counting uses one
+/// reusable depth-bounded BVH traversal stack. `max_output_bytes` describes
+/// only returned offset and worst-case segment storage, not allocator or
 /// temporary-heap behavior.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PlaneSliceLimits {
@@ -123,12 +124,13 @@ impl NativeSurface {
             });
         }
 
-        // Allocation-free candidate preflight. Each candidate can emit at most
-        // one segment, so the same count is a conservative output bound.
+        // Candidate preflight reuses one small BVH-depth stack. Each candidate
+        // can emit at most one segment, so the count is an output upper bound.
         let mut candidate_work = 0usize;
+        let mut traversal_stack = Vec::with_capacity(self.bvh.depth + 1);
         for &z in planes {
             candidate_work = candidate_work
-                .checked_add(self.count_z_candidates(z))
+                .checked_add(self.count_z_candidates(z, &mut traversal_stack))
                 .ok_or(PlaneSliceError::ArithmeticOverflow {
                     section: "candidate work",
                 })?;
@@ -202,24 +204,31 @@ impl NativeSurface {
         })
     }
 
-    fn count_z_candidates(&self, z: f64) -> usize {
+    fn count_z_candidates(&self, z: f64, traversal_stack: &mut Vec<i32>) -> usize {
         let mut count = 0usize;
-        self.visit_z_candidates(z, |_| count += 1);
+        self.visit_z_candidates(z, traversal_stack, |_| count += 1);
         count
     }
 
     fn z_candidates(&self, z: f64) -> Vec<u32> {
         let mut candidates = Vec::new();
-        self.visit_z_candidates(z, |face_id| candidates.push(face_id));
+        let mut traversal_stack = Vec::with_capacity(self.bvh.depth + 1);
+        self.visit_z_candidates(z, &mut traversal_stack, |face_id| candidates.push(face_id));
         candidates.sort_unstable();
         candidates
     }
 
-    fn visit_z_candidates(&self, z: f64, mut visit: impl FnMut(u32)) {
+    fn visit_z_candidates(
+        &self,
+        z: f64,
+        traversal_stack: &mut Vec<i32>,
+        mut visit: impl FnMut(u32),
+    ) {
         let low = z - PLANE_SLICE_MERGE_TOLERANCE_MM;
         let high = z + PLANE_SLICE_MERGE_TOLERANCE_MM;
-        let mut stack = vec![0i32];
-        while let Some(node_id) = stack.pop() {
+        traversal_stack.clear();
+        traversal_stack.push(0);
+        while let Some(node_id) = traversal_stack.pop() {
             let node = &self.bvh.nodes[node_id as usize];
             if node.bmin[2] > high || node.bmax[2] < low {
                 continue;
@@ -234,8 +243,8 @@ impl NativeSurface {
                     }
                 }
             } else {
-                stack.push(node.a);
-                stack.push(node.b);
+                traversal_stack.push(node.a);
+                traversal_stack.push(node.b);
             }
         }
     }
@@ -249,8 +258,8 @@ impl NativeSurface {
             let i = face_id as usize;
             let vertices = [
                 self.mesh.v0(i),
-                self.mesh.vertex_b(i),
-                self.mesh.vertex_c(i),
+                self.mesh.source_vertex_b(i),
+                self.mesh.source_vertex_c(i),
             ];
             if let Some(event) = intersect_triangle_z(face_id, vertices, z) {
                 match event.kind {

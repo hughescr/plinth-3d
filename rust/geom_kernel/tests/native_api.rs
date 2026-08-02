@@ -228,6 +228,96 @@ fn slice_z_batch_matches_frozen_shared_edge_coplanar_vertex_and_tolerance_fixtur
 }
 
 #[test]
+fn slice_z_batch_uses_exact_source_vertex_bits_at_tol_merge_boundary_neighbors() {
+    const PLANE_BITS: u64 = 0x3eb0_9c04_82f1_8c75;
+    const LOW_Z_BITS: u64 = 0x3eb0_c6f7_a0b5_ed8d;
+    const EXPECTED_B: [u64; 3] = [0x3ff0_0000_0000_0000, 0, LOW_Z_BITS];
+    const EXPECTED_C: [u64; 3] = [0, 0x3ff0_0000_0000_0000, LOW_Z_BITS];
+
+    let plane = f64::from_bits(PLANE_BITS);
+    assert_eq!(plane, 9.9e-7);
+    let planes = [
+        f64::from_bits(PLANE_BITS - 1),
+        plane,
+        f64::from_bits(PLANE_BITS + 1),
+    ];
+    let triangle = [
+        [0.0, 0.0, 0.1],
+        [1.0, 0.0, f64::from_bits(LOW_Z_BITS)],
+        [0.0, 1.0, f64::from_bits(LOW_Z_BITS)],
+    ];
+    let indexed = NativeSurface::from_indexed(
+        &triangle,
+        &[[0, 1, 2]],
+        NativeSurfaceConfig {
+            grid_pitch_mm: 2.0,
+            max_grid_bytes: usize::MAX,
+        },
+    )
+    .unwrap();
+    let soup = NativeSurface::from_triangle_soup(
+        TriangleSoup::borrowed(
+            &[triangle],
+            &[[0.0, 0.0, 1.0]],
+            &[0.5],
+            [[0.0, 0.0, f64::from_bits(LOW_Z_BITS)], [1.0, 1.0, 0.1]],
+        ),
+        2.0,
+        usize::MAX,
+    )
+    .unwrap();
+
+    for surface in [&indexed, &soup] {
+        let batch = surface.slice_z_batch(&planes, slice_limits()).unwrap();
+        // Frozen Trimesh: one ULP below makes both low vertices positive;
+        // the exact plane and one ULP above classify them on-plane.
+        assert_eq!(batch.plane_offsets, vec![0, 0, 1, 2]);
+        assert_eq!(batch.intersections.len(), 2);
+        for event in &batch.intersections {
+            assert_eq!(event.kind, PlaneIntersectionKind::PositiveEdge);
+            assert_eq!(event.segment[0].map(f64::to_bits), EXPECTED_B);
+            assert_eq!(event.segment[1].map(f64::to_bits), EXPECTED_C);
+        }
+    }
+}
+
+#[test]
+fn slice_z_batch_preserves_both_frozen_face_owners_for_duplicate_positive_edge() {
+    let vertices = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 1.0],
+        [0.0, -1.0, 2.0],
+    ];
+    let surface = NativeSurface::from_indexed(
+        &vertices,
+        &[[0, 1, 2], [1, 0, 3]],
+        NativeSurfaceConfig {
+            grid_pitch_mm: 2.0,
+            max_grid_bytes: usize::MAX,
+        },
+    )
+    .unwrap();
+    let batch = surface.slice_z_batch(&[0.0], slice_limits()).unwrap();
+    assert_eq!(batch.plane_offsets, vec![0, 2]);
+    assert_eq!(
+        batch.plane(0),
+        [
+            geom_kernel::PlaneIntersection {
+                face_id: 0,
+                kind: PlaneIntersectionKind::PositiveEdge,
+                segment: [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            },
+            geom_kernel::PlaneIntersection {
+                face_id: 1,
+                kind: PlaneIntersectionKind::PositiveEdge,
+                segment: [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+            },
+        ]
+    );
+}
+
+#[test]
 fn slice_z_batch_preflights_bvh_candidate_caps_at_exact_boundary() {
     let surface = cube_surface();
     let planes = [0.5];
