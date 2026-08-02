@@ -1,12 +1,13 @@
 //! Data boundary for current support and raft behavior.
 //!
-//! This checkpoint intentionally contains no placement, support, or raft algorithm. Behavior
-//! lands on the parallel `plinth-support` implementation branch with this signature:
-//!
-//! `plinth_support::run(HollowedModel, &SupportRequest) -> Result<SupportedModel, SupportError>`
-//!
 //! Support planning depends on hollowing, never on emission. The scene retains semantic support
 //! kinds and f64 geometry; `plinth-emit` alone maps them to ChituBox record identities and f32.
+//!
+//! The implemented foundation is intentionally leaf-shaped: this module owns the typed scene
+//! boundary, perception, and dyadic contact selection; [`forest`] owns generational topology.
+//! Future work has named homes without a fake solver entrypoint: CCO growth, member sizing,
+//! model-anchor search, and raft construction extend this crate only when their real authority
+//! and evidence can land. There is no public `run` stub.
 #![forbid(unsafe_code)]
 
 pub mod forest;
@@ -714,6 +715,8 @@ pub fn perceive_contacts(
     Ok(ContactCandidatePool { candidates })
 }
 
+// Contact selection owns the generic dyadic coverage boundary. It remains colocated with S1
+// until a real `dyadic` module can own both its preflight and streamed builder together.
 /// One caller-owned support island.  S1 deliberately consumes this sidecar
 /// rather than trying to rediscover islands (which belongs to perception).
 #[derive(Clone, Debug, PartialEq, Eq)]

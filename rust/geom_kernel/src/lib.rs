@@ -25,8 +25,8 @@ use std::borrow::Cow;
 
 use mesh::Mesh;
 pub use mesh::{FaceBounds, FaceGeometry};
-pub use point_index::{NeighborCsr, PointCloudIndex, PointIndexBuildError, PointQueryError};
 use parity::ParityBuildError;
+pub use point_index::{NeighborCsr, PointCloudIndex, PointIndexBuildError, PointQueryError};
 pub use queries::{BatchInputError, CastRaysBatch, Interval, NativeSurface, SphereBreachBatch};
 pub use vec3::V3;
 
