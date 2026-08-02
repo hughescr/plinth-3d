@@ -2322,6 +2322,10 @@ fn gather_pair_proposals(
         !left.regular_routes.is_empty(),
         !right.regular_routes.is_empty(),
     );
+    let shared_regular = (
+        classes.0 && !left.demands.is_empty(),
+        classes.1 && !right.demands.is_empty(),
+    );
     let distance = distance3(left.position_mm, right.position_mm);
     if classes.0 || classes.1 {
         if !same_point(left.position_mm, right.position_mm) {
@@ -2419,20 +2423,30 @@ fn gather_pair_proposals(
                     normal: demand.nominated_normal,
                 })
                 .filter(|key| {
+                    (!shared_regular.0 || same_point(key.position_mm, left.position_mm))
+                        && (!shared_regular.1 || same_point(key.position_mm, right.position_mm))
+                })
+                .filter(|key| {
                     last.is_none_or(|last| compare_representative_keys(key, &last).is_gt())
                 })
                 .min_by(compare_representative_keys);
             let Some(next) = next else {
                 break;
             };
-            let position_mm = if classes.0 {
-                left.position_mm
+            let physical = if shared_regular.0 {
+                left
+            } else if shared_regular.1 {
+                right
+            } else if classes.0 {
+                left
             } else if classes.1 {
-                right.position_mm
+                right
             } else {
-                next.position_mm
+                append(Some(next), next.position_mm, next.normal)?;
+                last = Some(next);
+                continue;
             };
-            append(Some(next), position_mm, next.normal)?;
+            append(Some(next), physical.position_mm, physical.normal)?;
             last = Some(next);
         }
     }
@@ -3229,13 +3243,114 @@ mod tests {
         assert_eq!(proposals.len(), 2);
         assert_eq!(proposals[0].representative_component_id, Some(7));
         assert_eq!(proposals[0].representative_face_id, Some(1));
-        assert_eq!(proposals[0].normal, [1.0, 0.0, 0.0]);
+        // Logical keys still enumerate the demands, while the committed physical
+        // fields retain the first shared regular contact exactly.
+        assert_eq!(proposals[0].normal, contacts[0].normal);
         assert_eq!(proposals[1].representative_component_id, Some(7));
         assert_eq!(proposals[1].representative_face_id, Some(10));
-        assert_eq!(proposals[1].normal, [-1.0, 0.0, 0.0]);
+        assert_eq!(proposals[1].normal, contacts[0].normal);
         assert!(proposals
             .iter()
             .all(|proposal| proposal.representative_face_id != Some(99)));
+    }
+
+    #[test]
+    fn shared_regular_rejects_logical_keys_not_at_an_original_regular_lock() {
+        let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
+        let locked = [1.0, 2.0, 0.1];
+        let displaced = [1.1, 2.0, 0.1];
+        let specialized = vec![
+            WorkingContact::specialized(minimum_demand(0, 1, 7, locked)),
+            WorkingContact::specialized(minimum_demand(1, 2, 7, displaced)),
+        ];
+        let first_proposals = test_pair_proposals(&specialized, &layers, 0.2, 2.5);
+        assert_eq!(first_proposals[0].position_mm, locked);
+        let combined = commit_merge(
+            &first_proposals[0],
+            &specialized,
+            usize::MAX,
+            &mut MergeAllocationTelemetry::default(),
+        )
+        .unwrap();
+        assert_eq!(combined.demands.len(), 2);
+
+        let attach_contacts = vec![
+            WorkingContact {
+                position_mm: locked,
+                normal: [0.0, 0.0, -1.0],
+                regular_routes: vec![RegularContactRoute {
+                    candidate_id: 44,
+                    owner_island_id: 0,
+                    coverage_face_id: 99,
+                    component_id: 7,
+                }],
+                demands: Vec::new(),
+            },
+            combined,
+        ];
+        let attach_proposals = test_pair_proposals(&attach_contacts, &layers, 0.2, 2.5);
+        let shared = commit_merge(
+            &attach_proposals[0],
+            &attach_contacts,
+            usize::MAX,
+            &mut MergeAllocationTelemetry::default(),
+        )
+        .unwrap();
+        let shared_proposals = test_pair_proposals(
+            &[
+                shared,
+                WorkingContact::specialized(minimum_demand(2, 3, 7, locked)),
+            ],
+            &layers,
+            0.2,
+            2.5,
+        );
+        assert_eq!(shared_proposals.len(), 2);
+        assert_eq!(shared_proposals[0].representative_face_id, Some(1));
+        assert_eq!(shared_proposals[1].representative_face_id, Some(3));
+        assert!(shared_proposals
+            .iter()
+            .all(|proposal| proposal.representative_position_mm == Some(locked)));
+    }
+
+    #[test]
+    fn iterative_shared_commits_keep_regular_physical_normal() {
+        let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
+        let locked = [1.0, 2.0, 0.1];
+        let regular_normal = [0.0, 0.0, -1.0];
+        let mut first = minimum_demand(0, 10, 7, locked);
+        first.nominated_normal = [1.0, 0.0, 0.0];
+        let mut second = minimum_demand(1, 11, 7, locked);
+        second.nominated_normal = [0.0, 1.0, 0.0];
+        let mut third = minimum_demand(2, 12, 7, locked);
+        third.nominated_normal = [-1.0, 0.0, 0.0];
+        let mut shared = WorkingContact {
+            position_mm: locked,
+            normal: regular_normal,
+            regular_routes: vec![RegularContactRoute {
+                candidate_id: 44,
+                owner_island_id: 0,
+                coverage_face_id: 99,
+                component_id: 7,
+            }],
+            demands: vec![first],
+        };
+        for next in [second, third] {
+            let contacts = vec![shared, WorkingContact::specialized(next)];
+            let proposals = test_pair_proposals(&contacts, &layers, 0.2, 2.5);
+            assert!(!proposals.is_empty());
+            assert_eq!(proposals[0].normal, regular_normal);
+            shared = commit_merge(
+                &proposals[0],
+                &contacts,
+                usize::MAX,
+                &mut MergeAllocationTelemetry::default(),
+            )
+            .unwrap();
+            assert_eq!(shared.position_mm, locked);
+            assert_eq!(shared.normal, regular_normal);
+        }
+        assert_eq!(shared.demands.len(), 3);
     }
 
     #[test]
@@ -3715,27 +3830,30 @@ mod tests {
             (
                 "overhang table",
                 make_overhang_table().unwrap(),
-                // Updated for the fixed Python-exact shared-regular representative
-                // key/order; this is not a corpus, baseline, physics, or reference re-freeze.
-                9_852_675_517_045_937_360_u64,
+                // Updated after preserving the committed physical regular normal;
+                // the intermediate value encoded the incorrect demand normal.
+                // This is not a corpus, baseline, physics, or reference re-freeze.
+                2_380_499_546_943_577_664_u64,
                 (95, 51_200, 14),
                 (6, 10, 4),
             ),
             (
                 "raking blade",
                 make_raking_blade().unwrap(),
-                // Updated for the fixed Python-exact shared-regular representative
-                // key/order; this is not a corpus, baseline, physics, or reference re-freeze.
-                7_393_986_023_976_210_503_u64,
+                // Updated after preserving the committed physical regular fields;
+                // the intermediate value encoded incomplete shared-regular parity.
+                // This is not a corpus, baseline, physics, or reference re-freeze.
+                12_391_582_424_958_741_190_u64,
                 (40, 40_192, 13),
                 (3, 43, 8),
             ),
             (
                 "thin fin",
                 make_thin_fin().unwrap(),
-                // Updated for the fixed Python-exact shared-regular representative
-                // key/order; this is not a corpus, baseline, physics, or reference re-freeze.
-                13_057_415_443_656_672_379_u64,
+                // Updated after preserving the committed physical regular fields;
+                // the intermediate value encoded incomplete shared-regular parity.
+                // This is not a corpus, baseline, physics, or reference re-freeze.
+                1_794_713_636_406_357_628_u64,
                 (19, 20_480, 2),
                 (2, 1, 1),
             ),
