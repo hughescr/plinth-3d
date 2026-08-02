@@ -2881,42 +2881,85 @@ fn compare_demands(left: &SpecializedDemand, right: &SpecializedDemand) -> Order
         .then_with(|| compare_point3(left.nominated_position_mm, right.nominated_position_mm))
         .then_with(|| left.coverage_face_id.cmp(&right.coverage_face_id))
         .then_with(|| left.owner_island_id.cmp(&right.owner_island_id))
-        .then_with(|| (left.kind as u8).cmp(&(right.kind as u8)))
-        .then_with(|| compare_points3(&left.region_points_mm, &right.region_points_mm))
-        .then_with(|| compare_option_f64(left.birth_z_mm, right.birth_z_mm))
-        .then_with(|| compare_optional_solids(&left.birth_footprint, &right.birth_footprint))
+        .then_with(|| demand_kind_key(left.kind).cmp(&demand_kind_key(right.kind)))
+        .then_with(|| {
+            compare_optional_f64_array_keys(
+                (left.kind == SpecializedDemandKind::Minimum)
+                    .then_some(left.region_points_mm.as_slice()),
+                (right.kind == SpecializedDemandKind::Minimum)
+                    .then_some(right.region_points_mm.as_slice()),
+            )
+        })
+        .then_with(|| {
+            numeric_cmp(
+                left.birth_z_mm.unwrap_or(0.0),
+                right.birth_z_mm.unwrap_or(0.0),
+            )
+        })
+        .then_with(|| {
+            compare_optional_f64_array_keys(
+                left.birth_footprint
+                    .as_ref()
+                    .map(|solid| solid.outer().points_xy_mm()),
+                right
+                    .birth_footprint
+                    .as_ref()
+                    .map(|solid| solid.outer().points_xy_mm()),
+            )
+        })
 }
 
-fn compare_optional_solids(left: &Option<SliceSolid>, right: &Option<SliceSolid>) -> Ordering {
+const fn demand_kind_key(kind: SpecializedDemandKind) -> (bool, bool) {
+    match kind {
+        SpecializedDemandKind::Minimum => (true, false),
+        SpecializedDemandKind::IslandBirth => (false, true),
+    }
+}
+
+fn compare_optional_f64_array_keys<const N: usize>(
+    left: Option<&[[f64; N]]>,
+    right: Option<&[[f64; N]]>,
+) -> Ordering {
     match (left, right) {
         (None, None) => Ordering::Equal,
         (None, Some(_)) => Ordering::Less,
         (Some(_), None) => Ordering::Greater,
-        (Some(left), Some(right)) => {
-            compare_points2(left.outer().points_xy_mm(), right.outer().points_xy_mm())
-                .then_with(|| left.holes().len().cmp(&right.holes().len()))
-                .then_with(|| {
-                    left.holes()
-                        .iter()
-                        .zip(right.holes())
-                        .find_map(|(a, b)| {
-                            let ordering = compare_points2(a.points_xy_mm(), b.points_xy_mm());
-                            (ordering != Ordering::Equal).then_some(ordering)
-                        })
-                        .unwrap_or(Ordering::Equal)
-                })
-        }
+        (Some(left), Some(right)) => compare_f64_array_keys(
+            &[left.len(), N],
+            left.iter().flat_map(|point| point.iter().copied()),
+            &[right.len(), N],
+            right.iter().flat_map(|point| point.iter().copied()),
+        ),
     }
 }
 
-fn compare_points2(left: &[[f64; 2]], right: &[[f64; 2]]) -> Ordering {
-    left.iter()
-        .zip(right)
-        .find_map(|(a, b)| {
-            let ordering = numeric_cmp(a[0], b[0]).then_with(|| numeric_cmp(a[1], b[1]));
-            (ordering != Ordering::Equal).then_some(ordering)
-        })
-        .unwrap_or_else(|| left.len().cmp(&right.len()))
+fn compare_f64_array_keys<L, R>(
+    left_shape: &[usize],
+    left_values: L,
+    right_shape: &[usize],
+    right_values: R,
+) -> Ordering
+where
+    L: IntoIterator<Item = f64>,
+    R: IntoIterator<Item = f64>,
+{
+    left_shape.cmp(right_shape).then_with(|| {
+        let mut left = left_values.into_iter();
+        let mut right = right_values.into_iter();
+        loop {
+            match (left.next(), right.next()) {
+                (Some(a), Some(b)) => {
+                    let ordering = a.to_ne_bytes().cmp(&b.to_ne_bytes());
+                    if ordering != Ordering::Equal {
+                        return ordering;
+                    }
+                }
+                (None, None) => return Ordering::Equal,
+                (None, Some(_)) => return Ordering::Less,
+                (Some(_), None) => return Ordering::Greater,
+            }
+        }
+    })
 }
 
 fn compare_contacts(left: &WorkingContact, right: &WorkingContact) -> Ordering {
@@ -2953,29 +2996,10 @@ fn compare_demand_slices(left: &[SpecializedDemand], right: &[SpecializedDemand]
         .unwrap_or_else(|| left.len().cmp(&right.len()))
 }
 
-fn compare_points3(left: &[[f64; 3]], right: &[[f64; 3]]) -> Ordering {
-    left.iter()
-        .zip(right)
-        .find_map(|(a, b)| {
-            let ordering = compare_point3(*a, *b);
-            (ordering != Ordering::Equal).then_some(ordering)
-        })
-        .unwrap_or_else(|| left.len().cmp(&right.len()))
-}
-
 fn compare_point3(left: [f64; 3], right: [f64; 3]) -> Ordering {
     numeric_cmp(left[0], right[0])
         .then_with(|| numeric_cmp(left[1], right[1]))
         .then_with(|| numeric_cmp(left[2], right[2]))
-}
-
-fn compare_option_f64(left: Option<f64>, right: Option<f64>) -> Ordering {
-    match (left, right) {
-        (Some(a), Some(b)) => numeric_cmp(a, b),
-        (None, None) => Ordering::Equal,
-        (None, Some(_)) => Ordering::Less,
-        (Some(_), None) => Ordering::Greater,
-    }
 }
 
 fn numeric_cmp(left: f64, right: f64) -> Ordering {
@@ -3983,6 +4007,61 @@ mod tests {
         let a = minimum_demand(0, 2, 7, [-0.0, 1.0, 2.0]);
         let b = minimum_demand(0, 3, 7, [0.0, 1.0, 2.0]);
         assert_eq!(compare_demands(&a, &b), Ordering::Less);
+    }
+
+    #[test]
+    fn demand_key_orders_coincident_birth_before_minimum_by_python_boolean_tuple() {
+        let position = [0.0, 0.0, 0.1];
+        let minimum = minimum_demand(0, 2, 7, position);
+        let birth = SpecializedDemand {
+            kind: SpecializedDemandKind::IslandBirth,
+            owner_island_id: 0,
+            coverage_face_id: 2,
+            coverage_component_id: 7,
+            nominated_position_mm: position,
+            nominated_normal: [0.0, 0.0, -1.0],
+            region_points_mm: Vec::new(),
+            birth_z_mm: Some(0.1),
+            birth_layer_index: Some(2),
+            birth_footprint: Some(crate::perception::test_slice_solid(vec![
+                [-1.0, -1.0],
+                [1.0, -1.0],
+                [1.0, 1.0],
+                [-1.0, 1.0],
+            ])),
+        };
+        assert_eq!(demand_kind_key(birth.kind), (false, true));
+        assert_eq!(demand_kind_key(minimum.kind), (true, false));
+        assert_eq!(compare_demands(&birth, &minimum), Ordering::Less);
+        let mut demands = [minimum, birth];
+        demands.sort_by(compare_demands);
+        assert_eq!(demands[0].kind, SpecializedDemandKind::IslandBirth);
+    }
+
+    #[test]
+    fn demand_array_key_distinguishes_signed_zero_raw_bytes() {
+        let position = [0.0, 0.0, 0.1];
+        let mut positive = minimum_demand(0, 2, 7, position);
+        positive.region_points_mm = vec![[0.0, 1.0, 2.0]];
+        let mut negative = positive.clone();
+        negative.region_points_mm[0][0] = -0.0;
+        assert_eq!(compare_demands(&positive, &negative), Ordering::Less);
+
+        let mut demands = vec![negative, positive];
+        demands.sort_by(compare_demands);
+        demands.dedup_by(|left, right| compare_demands(left, right) == Ordering::Equal);
+        assert_eq!(demands.len(), 2);
+        assert_eq!(demands[0].region_points_mm[0][0].to_bits(), 0);
+        assert_eq!(demands[1].region_points_mm[0][0].to_bits(), 1_u64 << 63);
+    }
+
+    #[test]
+    fn demand_array_key_compares_shape_before_identical_flat_bytes() {
+        let flat = [1.0, 2.0];
+        assert_eq!(
+            compare_f64_array_keys(&[1, 2], flat, &[2, 1], flat),
+            Ordering::Less
+        );
     }
 
     #[test]
