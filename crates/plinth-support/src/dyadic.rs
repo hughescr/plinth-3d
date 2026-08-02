@@ -70,6 +70,19 @@ impl CandidatePayloadConfig {
             cell_edge_limit_mm,
         })
     }
+
+    /// Crate-private authority material for binding a perception plan to the
+    /// exact dyadic request that produced its candidate evidence.
+    pub(crate) const fn authority_fields(&self) -> (u32, usize, usize, usize, usize, u64) {
+        (
+            self.max_refine_depth,
+            self.limits.max_virtual_cells,
+            self.max_candidates,
+            self.max_compact_payload_bytes,
+            self.limits.max_working_cells,
+            self.cell_edge_limit_mm.to_bits(),
+        )
+    }
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]

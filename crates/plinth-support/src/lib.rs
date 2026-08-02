@@ -22,6 +22,7 @@ pub mod dyadic;
 pub mod forest;
 pub mod legacy_compat;
 pub mod member_sizing;
+pub mod perception;
 pub mod raft;
 pub mod transient;
 
@@ -594,6 +595,23 @@ pub fn perceive_contacts(
     mesh: &Mesh,
     config: &SupportPerceptionConfig<'_>,
 ) -> Result<ContactCandidatePool, SupportPerceptionError> {
+    let (topology, delicacy) = validate_perception_input(mesh, config)?;
+    let surface = NativeSurface::from_indexed(
+        mesh.verts(),
+        mesh.tris(),
+        NativeSurfaceConfig {
+            grid_pitch_mm: config.surface_grid_pitch_mm.get(),
+            max_grid_bytes: config.max_grid_bytes,
+        },
+    )
+    .map_err(|error| SupportPerceptionError::NativeSurface(error.to_string()))?;
+    perceive_contacts_on_surface(mesh, config, &topology, delicacy, &surface)
+}
+
+pub(crate) fn validate_perception_input<'a>(
+    mesh: &Mesh,
+    config: &'a SupportPerceptionConfig<'a>,
+) -> Result<(plinth_mesh::FaceTopology, &'a [f64]), SupportPerceptionError> {
     mesh.audit_strict()
         .map_err(|error| SupportPerceptionError::StrictMesh(error.to_string()))?;
     let topology = build_face_topology(mesh, WeldPolicy::ExactBits)
@@ -624,15 +642,16 @@ pub fn perceive_contacts(
         return Err(SupportPerceptionError::NonFiniteDelicacy { index });
     }
 
-    let surface = NativeSurface::from_indexed(
-        mesh.verts(),
-        mesh.tris(),
-        NativeSurfaceConfig {
-            grid_pitch_mm: config.surface_grid_pitch_mm.get(),
-            max_grid_bytes: config.max_grid_bytes,
-        },
-    )
-    .map_err(|error| SupportPerceptionError::NativeSurface(error.to_string()))?;
+    Ok((topology, delicacy))
+}
+
+pub(crate) fn perceive_contacts_on_surface(
+    _mesh: &Mesh,
+    config: &SupportPerceptionConfig<'_>,
+    _topology: &plinth_mesh::FaceTopology,
+    delicacy: &[f64],
+    surface: &NativeSurface,
+) -> Result<ContactCandidatePool, SupportPerceptionError> {
     let geometry = surface.geometry();
     let normals = geometry.normals();
     let centroids = geometry.centroids();
