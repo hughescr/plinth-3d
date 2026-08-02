@@ -229,21 +229,56 @@ pub struct BudgetSearchTrace {
     pub steps: Vec<BudgetSearchStep>,
 }
 
-/// A verified production candidate.  This is the only variant that owns a
-/// candidate mesh, so failed and skipped calls cannot be exported by mistake.
-#[derive(Clone, Debug, PartialEq)]
+/// An opaque verified production candidate. Only this crate can construct one;
+/// callers may inspect immutable verification evidence or consume it to take
+/// ownership of the mesh.
+#[derive(Debug, PartialEq)]
 pub struct BudgetSearchSuccess {
-    pub mesh: Mesh,
-    pub chosen_ratio: f64,
-    pub trace: BudgetSearchTrace,
-    pub final_probe: TwoSidedProbe,
-    pub topology_before: EdgeTopologyCounts,
-    pub topology_after: EdgeTopologyCounts,
+    mesh: Mesh,
+    chosen_ratio: f64,
+    trace: BudgetSearchTrace,
+    final_probe: TwoSidedProbe,
+    topology_before: EdgeTopologyCounts,
+    topology_after: EdgeTopologyCounts,
+}
+
+impl BudgetSearchSuccess {
+    /// Consumes the verified result and transfers its production mesh to the
+    /// next pipeline stage. No cloneable verified authorization is retained.
+    #[must_use]
+    pub fn into_mesh(self) -> Mesh {
+        self.mesh
+    }
+
+    #[must_use]
+    pub const fn chosen_ratio(&self) -> f64 {
+        self.chosen_ratio
+    }
+
+    #[must_use]
+    pub const fn trace(&self) -> &BudgetSearchTrace {
+        &self.trace
+    }
+
+    #[must_use]
+    pub const fn final_probe(&self) -> &TwoSidedProbe {
+        &self.final_probe
+    }
+
+    #[must_use]
+    pub const fn topology_before(&self) -> EdgeTopologyCounts {
+        self.topology_before
+    }
+
+    #[must_use]
+    pub const fn topology_after(&self) -> EdgeTopologyCounts {
+        self.topology_after
+    }
 }
 
 /// Successful scale validation either produces one verified mesh or a named,
 /// candidate-free scale skip.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum BudgetSearchOutcome {
     SkippedScaleSuspicious { scale: ScaleSanity },
     Verified(Box<BudgetSearchSuccess>),
@@ -367,6 +402,44 @@ pub enum DecimationError {
 ///
 /// ```compile_fail,E0603
 /// use plinth_decimate::run_budget_search;
+/// ```
+///
+/// ```compile_fail,E0451
+/// use plinth_decimate::{BudgetSearchOutcome, BudgetSearchSuccess};
+///
+/// let forged = BudgetSearchSuccess {
+///     mesh: todo!(),
+///     chosen_ratio: 0.2,
+///     trace: todo!(),
+///     final_probe: todo!(),
+///     topology_before: todo!(),
+///     topology_after: todo!(),
+/// };
+/// let _ = BudgetSearchOutcome::Verified(Box::new(forged));
+/// ```
+///
+/// ```compile_fail,E0616
+/// use plinth_decimate::BudgetSearchSuccess;
+///
+/// fn rewrite_evidence(success: &mut BudgetSearchSuccess) {
+///     success.chosen_ratio = 1.0;
+/// }
+/// ```
+///
+/// ```compile_fail,E0596
+/// use plinth_decimate::BudgetSearchSuccess;
+///
+/// fn mutate_read_only_trace(success: &BudgetSearchSuccess) {
+///     success.trace().steps.clear();
+/// }
+/// ```
+///
+/// ```compile_fail,E0599
+/// use plinth_decimate::BudgetSearchSuccess;
+///
+/// fn duplicate_authorization(success: BudgetSearchSuccess) {
+///     let _copy = success.clone();
+/// }
 /// ```
 pub fn run(
     original: &Mesh,
