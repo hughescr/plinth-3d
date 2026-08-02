@@ -221,6 +221,7 @@ fn execute_gate(root: &Path, output_dir: &Path) -> Result<GateReport, String> {
     .map_err(|error| format!("could not construct default 19um M3 budget: {error}"))?;
     let mut models = Vec::with_capacity(EXPECTED.len());
     for expected in EXPECTED {
+        eprintln!("M3 corpus budget gate: running {}", expected.name);
         let input = required_input(root, expected)?;
         let original = load_binary_stl(&input, WeldPolicy::None).map_err(|error| {
             format!(
@@ -394,6 +395,13 @@ fn independently_audit_verified(
     let final_probe = success.final_probe();
     let topology_before = success.topology_before();
     let topology_after = success.topology_after();
+    if success.mesh().tris().len() >= original.tris().len() {
+        return Err(format!(
+            "M3NoReduction: requested production decimation retained {} of {} faces",
+            success.mesh().tris().len(),
+            original.tris().len()
+        ));
+    }
     if trace.steps.len() != 6 {
         return Err(format!(
             "M3SearchStepCount: expected ratio-high plus five bisections, found {}",
