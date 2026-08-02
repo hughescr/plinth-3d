@@ -93,7 +93,6 @@ pub struct TriageTopologyLimits {
     edge_occurrences: usize,
     vertex_incidences: usize,
     containment_probe_slots: usize,
-    containment_samples_per_component: usize,
 }
 
 impl TriageTopologyLimits {
@@ -105,7 +104,6 @@ impl TriageTopologyLimits {
         edge_occurrences: usize,
         vertex_incidences: usize,
         containment_probe_slots: usize,
-        containment_samples_per_component: usize,
     ) -> Self {
         Self {
             raw_vertices,
@@ -114,7 +112,6 @@ impl TriageTopologyLimits {
             edge_occurrences,
             vertex_incidences,
             containment_probe_slots,
-            containment_samples_per_component,
         }
     }
 }
@@ -124,8 +121,10 @@ impl TriageTopologyLimits {
 /// It deliberately records source buffer capacity exactly.  It does not turn
 /// that number into a whole-process heap claim: later topology structures and
 /// allocator overhead are owned and bounded at their respective boundaries.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct TriageTopologyAdmission {
+#[derive(Debug, PartialEq)]
+pub struct TriageTopologyAdmission<'mesh> {
+    mesh: &'mesh Mesh,
+    settings: TriageSettings,
     raw_vertices: usize,
     raw_faces: usize,
     retained_source_buffer_bytes: usize,
@@ -135,14 +134,23 @@ pub struct TriageTopologyAdmission {
     raw_bounds: RawMeshBounds,
 }
 
-impl TriageTopologyAdmission {
+impl<'mesh> TriageTopologyAdmission<'mesh> {
     /// Measures and admits raw source inputs without allocating.  The
     /// containment bound uses the worst case of one component per face and
     /// therefore reserves `faces * samples` slots for a single batched query.
     pub fn from_raw_mesh(
-        mesh: &Mesh,
+        mesh: &'mesh Mesh,
         limits: TriageTopologyLimits,
     ) -> Result<Self, TriageAdmissionError> {
+        // Admission and execution share this exact settings value.  Callers
+        // cannot substitute a smaller sample count after the bound is proven.
+        let settings = TriageSettings::load().map_err(|error| match error {
+            TriageError::Constants(source) => TriageAdmissionError::Constants(source),
+            TriageError::ConstantCountOverflow { id } => {
+                TriageAdmissionError::ConstantCountOverflow { id }
+            }
+            _ => unreachable!("loading settings has no mesh or topology inputs"),
+        })?;
         let raw_vertices = mesh.verts().len();
         let raw_faces = mesh.tris().len();
         let retained_source_buffer_bytes =
@@ -150,23 +158,8 @@ impl TriageTopologyAdmission {
                 .ok_or(TriageAdmissionError::ArithmeticOverflow {
                     field: "retained source buffer bytes",
                 })?;
-        let edge_occurrences =
-            raw_faces
-                .checked_mul(3)
-                .ok_or(TriageAdmissionError::ArithmeticOverflow {
-                    field: "edge occurrences",
-                })?;
-        let vertex_incidences =
-            raw_faces
-                .checked_mul(3)
-                .ok_or(TriageAdmissionError::ArithmeticOverflow {
-                    field: "vertex incidences",
-                })?;
-        let containment_probe_slots = raw_faces
-            .checked_mul(limits.containment_samples_per_component)
-            .ok_or(TriageAdmissionError::ArithmeticOverflow {
-                field: "containment probe slots",
-            })?;
+        let (edge_occurrences, vertex_incidences, containment_probe_slots) =
+            triage_work_counts(raw_faces, settings.containment_samples())?;
 
         enforce_limit("raw vertices", raw_vertices, limits.raw_vertices)?;
         enforce_limit("raw faces", raw_faces, limits.raw_faces)?;
@@ -192,6 +185,8 @@ impl TriageTopologyAdmission {
         )?;
 
         Ok(Self {
+            mesh,
+            settings,
             raw_vertices,
             raw_faces,
             retained_source_buffer_bytes,
@@ -207,7 +202,7 @@ impl TriageTopologyAdmission {
     /// meaningful for the exact-bit triage path; epsilon welding is allowed
     /// to move vertices and must establish a separate downstream invariant.
     pub fn verify_exact_bit_triage_output(
-        self,
+        &self,
         triaged: &TriagedMesh,
     ) -> Result<(), TriageAdmissionError> {
         if !matches!(triaged.mesh().weld_policy(), WeldPolicy::ExactBits) {
@@ -237,28 +232,34 @@ impl TriageTopologyAdmission {
     }
 
     #[must_use]
-    pub const fn raw_vertices(self) -> usize {
+    pub const fn raw_vertices(&self) -> usize {
         self.raw_vertices
     }
     #[must_use]
-    pub const fn raw_faces(self) -> usize {
+    pub const fn raw_faces(&self) -> usize {
         self.raw_faces
     }
     #[must_use]
-    pub const fn retained_source_buffer_bytes(self) -> usize {
+    pub const fn retained_source_buffer_bytes(&self) -> usize {
         self.retained_source_buffer_bytes
     }
     #[must_use]
-    pub const fn edge_occurrences(self) -> usize {
+    pub const fn edge_occurrences(&self) -> usize {
         self.edge_occurrences
     }
     #[must_use]
-    pub const fn vertex_incidences(self) -> usize {
+    pub const fn vertex_incidences(&self) -> usize {
         self.vertex_incidences
     }
     #[must_use]
-    pub const fn containment_probe_slots(self) -> usize {
+    pub const fn containment_probe_slots(&self) -> usize {
         self.containment_probe_slots
+    }
+
+    /// Consumes the admission capability and starts the allocation-bearing
+    /// triage operation with the exact settings used for its resource bound.
+    pub fn triage(self, weld_policy: WeldPolicy) -> Result<TriagedMesh, TriageError> {
+        triage_components(self, weld_policy)
     }
 }
 
@@ -301,8 +302,36 @@ fn enforce_limit(
     Ok(())
 }
 
-#[derive(Clone, Debug, Error, PartialEq, Eq)]
+fn triage_work_counts(
+    raw_faces: usize,
+    containment_samples: usize,
+) -> Result<(usize, usize, usize), TriageAdmissionError> {
+    let edge_occurrences =
+        raw_faces
+            .checked_mul(3)
+            .ok_or(TriageAdmissionError::ArithmeticOverflow {
+                field: "edge occurrences",
+            })?;
+    let vertex_incidences =
+        raw_faces
+            .checked_mul(3)
+            .ok_or(TriageAdmissionError::ArithmeticOverflow {
+                field: "vertex incidences",
+            })?;
+    let containment_probe_slots = raw_faces.checked_mul(containment_samples).ok_or(
+        TriageAdmissionError::ArithmeticOverflow {
+            field: "containment probe slots",
+        },
+    )?;
+    Ok((edge_occurrences, vertex_incidences, containment_probe_slots))
+}
+
+#[derive(Clone, Debug, Error, PartialEq)]
 pub enum TriageAdmissionError {
+    #[error("M0 constants publication failed during triage admission: {0}")]
+    Constants(&'static M0ConstantsError),
+    #[error("M0 constant {id} does not fit this platform's usize during triage admission")]
+    ConstantCountOverflow { id: &'static str },
     #[error("triage admission arithmetic overflowed while calculating {field}")]
     ArithmeticOverflow { field: &'static str },
     #[error("triage admission {field} {actual} exceeds limit {limit}")]
@@ -405,6 +434,8 @@ impl TriagedMesh {
 #[derive(Clone, Debug, Error, PartialEq)]
 pub enum TriageError {
     #[error(transparent)]
+    Admission(#[from] TriageAdmissionError),
+    #[error(transparent)]
     Topology(#[from] TopologyError),
     #[error(transparent)]
     Mesh(#[from] MeshError),
@@ -420,16 +451,32 @@ pub enum TriageError {
     RayArithmetic,
 }
 
-/// Weld, classify, strip only measured shards, and refuse sealed cavities.
+/// Weld, classify, strip only measured shards, and refuse sealed cavities
+/// after consuming a successful allocation-free admission capability.
 ///
 /// `WeldPolicy::ExactBits` mirrors the legacy `merge_vertices()` behavior;
 /// callers may deliberately select an epsilon weld instead.  `None` is
 /// rejected rather than quietly labelling an unwelded triangle soup as welded.
-pub fn triage_components(mesh: &Mesh, weld_policy: WeldPolicy) -> Result<TriagedMesh, TriageError> {
+pub fn triage_components(
+    admission: TriageTopologyAdmission<'_>,
+    weld_policy: WeldPolicy,
+) -> Result<TriagedMesh, TriageError> {
+    let triaged = triage_components_admitted(admission.mesh, weld_policy, admission.settings)?;
+    if matches!(weld_policy, WeldPolicy::ExactBits) {
+        admission.verify_exact_bit_triage_output(&triaged)?;
+    }
+    Ok(triaged)
+}
+
+fn triage_components_admitted(
+    mesh: &Mesh,
+    weld_policy: WeldPolicy,
+    settings: TriageSettings,
+) -> Result<TriagedMesh, TriageError> {
     if matches!(weld_policy, WeldPolicy::None) {
         return Err(TriageError::UnweldedInput);
     }
-    let settings = TriageSettings::load()?;
+    mark_triage_work_started();
     let view = WeldedView::build(mesh, weld_policy)?;
     let faces = remap_faces(mesh, &view.map);
     let components = face_components(&faces);
@@ -551,6 +598,15 @@ pub fn triage_components(mesh: &Mesh, weld_policy: WeldPolicy) -> Result<Triaged
             stripped_components: shards.into_iter().collect(),
         },
     })
+}
+
+#[cfg(test)]
+static TRIAGE_WORK_STARTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[inline]
+fn mark_triage_work_started() {
+    #[cfg(test)]
+    TRIAGE_WORK_STARTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn remap_faces(mesh: &Mesh, map: &[u32]) -> Vec<[u32; 3]> {
@@ -977,6 +1033,72 @@ fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn exact_limits(mesh: &Mesh) -> TriageTopologyLimits {
+        let faces = mesh.tris().len();
+        let samples = TriageSettings::load()
+            .expect("settings")
+            .containment_samples();
+        TriageTopologyLimits::new(
+            mesh.verts().len(),
+            faces,
+            mesh.retained_buffer_bytes().expect("small mesh"),
+            faces * 3,
+            faces * 3,
+            faces * samples,
+        )
+    }
+
+    #[test]
+    fn cap_minus_one_refuses_before_real_triage_work_starts() {
+        use std::sync::atomic::Ordering;
+
+        let closed = crate::fixtures::make_box_default().expect("box");
+        let open = Mesh::new(closed.verts().to_vec(), closed.tris()[1..].to_vec()).expect("open");
+        let exact = exact_limits(&open);
+        let rejected = TriageTopologyLimits::new(
+            open.verts().len() - 1,
+            exact.raw_faces,
+            exact.retained_source_buffer_bytes,
+            exact.edge_occurrences,
+            exact.vertex_incidences,
+            exact.containment_probe_slots,
+        );
+        let before = TRIAGE_WORK_STARTED.load(Ordering::Relaxed);
+        assert!(matches!(
+            TriageTopologyAdmission::from_raw_mesh(&open, rejected),
+            Err(TriageAdmissionError::LimitExceeded {
+                field: "raw vertices",
+                ..
+            })
+        ));
+        assert_eq!(
+            TRIAGE_WORK_STARTED.load(Ordering::Relaxed),
+            before,
+            "refusal must precede the first allocation-bearing topology operation"
+        );
+
+        let admission = TriageTopologyAdmission::from_raw_mesh(&open, exact)
+            .expect("the exact cap admits the actual path");
+        triage_components(admission, WeldPolicy::ExactBits).expect("open soup remains triageable");
+        assert_eq!(TRIAGE_WORK_STARTED.load(Ordering::Relaxed), before + 1);
+    }
+
+    #[test]
+    fn raw_work_arithmetic_overflow_is_typed() {
+        assert!(matches!(
+            triage_work_counts(usize::MAX / 3 + 1, 1),
+            Err(TriageAdmissionError::ArithmeticOverflow {
+                field: "edge occurrences"
+            })
+        ));
+        assert!(matches!(
+            triage_work_counts(2, usize::MAX),
+            Err(TriageAdmissionError::ArithmeticOverflow {
+                field: "containment probe slots"
+            })
+        ));
+    }
 
     #[test]
     fn classifier_builds_one_reused_face_table_and_classifies_a_gathered_batch() {

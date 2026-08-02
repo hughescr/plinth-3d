@@ -1,10 +1,13 @@
 use plinth_mesh::{
-    make_box_default, triage_components, Mesh, TriageAdmissionError, TriageTopologyAdmission,
-    TriageTopologyLimits, WeldPolicy,
+    make_box_default, triage_components, triage_settings, Mesh, TriageAdmissionError,
+    TriageTopologyAdmission, TriageTopologyLimits, WeldPolicy,
 };
 
-fn limits_for(mesh: &Mesh, samples: usize) -> TriageTopologyLimits {
+fn limits_for(mesh: &Mesh) -> TriageTopologyLimits {
     let faces = mesh.tris().len();
+    let samples = triage_settings()
+        .expect("registered triage settings")
+        .containment_samples();
     TriageTopologyLimits::new(
         mesh.verts().len(),
         faces,
@@ -13,21 +16,26 @@ fn limits_for(mesh: &Mesh, samples: usize) -> TriageTopologyLimits {
         faces.checked_mul(3).expect("small fixture"),
         faces.checked_mul(3).expect("small fixture"),
         faces.checked_mul(samples).expect("small fixture"),
-        samples,
     )
 }
 
 #[test]
 fn admission_accepts_exact_caps_and_records_checked_raw_work() {
     let mesh = make_box_default().expect("box");
-    let admission = TriageTopologyAdmission::from_raw_mesh(&mesh, limits_for(&mesh, 32))
+    let admission = TriageTopologyAdmission::from_raw_mesh(&mesh, limits_for(&mesh))
         .expect("exact cap accepts");
+    let samples = triage_settings()
+        .expect("registered triage settings")
+        .containment_samples();
 
     assert_eq!(admission.raw_vertices(), mesh.verts().len());
     assert_eq!(admission.raw_faces(), mesh.tris().len());
     assert_eq!(admission.edge_occurrences(), 3 * mesh.tris().len());
     assert_eq!(admission.vertex_incidences(), 3 * mesh.tris().len());
-    assert_eq!(admission.containment_probe_slots(), 32 * mesh.tris().len());
+    assert_eq!(
+        admission.containment_probe_slots(),
+        samples * mesh.tris().len()
+    );
     assert_eq!(
         admission.retained_source_buffer_bytes(),
         mesh.retained_buffer_bytes()
@@ -46,8 +54,7 @@ fn admission_rejects_cap_minus_one_before_topology_work_on_open_soup() {
             .expect("representable source buffers"),
         3 * open.tris().len(),
         3 * open.tris().len(),
-        open.tris().len(),
-        1,
+        usize::MAX,
     );
 
     assert!(matches!(
@@ -60,32 +67,11 @@ fn admission_rejects_cap_minus_one_before_topology_work_on_open_soup() {
 }
 
 #[test]
-fn admission_reports_checked_containment_slot_overflow() {
-    let mesh = make_box_default().expect("box");
-    let limits = TriageTopologyLimits::new(
-        usize::MAX,
-        usize::MAX,
-        usize::MAX,
-        usize::MAX,
-        usize::MAX,
-        usize::MAX,
-        usize::MAX,
-    );
-    assert!(matches!(
-        TriageTopologyAdmission::from_raw_mesh(&mesh, limits),
-        Err(TriageAdmissionError::ArithmeticOverflow {
-            field: "containment probe slots"
-        })
-    ));
-}
-
-#[test]
-fn exact_bit_triage_output_cannot_expand_raw_voxel_grid_inputs() {
+fn exact_cap_runs_the_actual_admitted_triage_path_and_checks_output_invariants() {
     let mesh = make_box_default().expect("box");
     let admission =
-        TriageTopologyAdmission::from_raw_mesh(&mesh, limits_for(&mesh, 32)).expect("admitted");
-    let triaged = triage_components(&mesh, WeldPolicy::ExactBits).expect("triaged");
-    admission
-        .verify_exact_bit_triage_output(&triaged)
-        .expect("triage cannot grow raw counts or bounds");
+        TriageTopologyAdmission::from_raw_mesh(&mesh, limits_for(&mesh)).expect("exact cap admits");
+    let triaged = triage_components(admission, WeldPolicy::ExactBits).expect("admitted triage");
+    assert!(triaged.mesh().verts().len() <= mesh.verts().len());
+    assert!(triaged.mesh().tris().len() <= mesh.tris().len());
 }
