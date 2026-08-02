@@ -159,6 +159,8 @@ impl AnchorSearchConfig {
 pub(crate) struct GeometryFingerprint {
     mesh_sha256: String,
     topology_sha256: String,
+    // Grid pitch changes native query results. `max_grid_bytes` is only a
+    // construction refusal cap and is result-inert once a surface exists.
     native_grid_pitch_bits: u64,
 }
 
@@ -289,7 +291,7 @@ impl<'a> SurfaceAnchorPool<'a> {
                 });
             }
         }
-        let digest = surface_anchor_pool_digest(&geometry.fingerprint, &rows);
+        let digest = surface_anchor_pool_digest(&geometry.fingerprint, delicacy_by_face, &rows);
         Ok(Self {
             surface: geometry.surface(),
             geometry: geometry.fingerprint(),
@@ -317,7 +319,9 @@ impl<'a> SurfaceAnchorPool<'a> {
         {
             return Err(AnchorSearchError::StaleSurfaceAnchorPool);
         }
-        if self.digest != surface_anchor_pool_digest(&self.geometry, &self.rows) {
+        if self.digest
+            != surface_anchor_pool_digest(&self.geometry, &self.delicacy_by_face, &self.rows)
+        {
             return Err(AnchorSearchError::StaleSurfaceAnchorPool);
         }
         Ok(())
@@ -328,11 +332,19 @@ impl<'a> SurfaceAnchorPool<'a> {
     dead_code,
     reason = "the pending controller consumes this bounded authority seam"
 )]
-fn surface_anchor_pool_digest(geometry: &GeometryFingerprint, rows: &[SurfaceAnchorSample]) -> u64 {
+fn surface_anchor_pool_digest(
+    geometry: &GeometryFingerprint,
+    delicacy_by_face: &[f64],
+    rows: &[SurfaceAnchorSample],
+) -> u64 {
     let mut hash = AnchorFnv::new();
     hash.bytes(geometry.mesh_sha256.as_bytes());
     hash.bytes(geometry.topology_sha256.as_bytes());
     hash.u64(geometry.native_grid_pitch_bits);
+    hash.usize(delicacy_by_face.len());
+    for &delicacy in delicacy_by_face {
+        hash.u64(delicacy.to_bits());
+    }
     hash.usize(rows.len());
     for row in rows {
         hash.u32(row.source_face_id);
@@ -1659,6 +1671,73 @@ mod tests {
                 .unwrap()
                 .digest()
         );
+
+        // An enclosed shell supplies known non-exterior faces. Mutating only
+        // one of those sidecar rows must still change pool authority even
+        // though every derived exterior row remains bit-identical.
+        let (nested_mesh, nested_topology, nested_surface) = nested_box_parts();
+        let nested_geometry =
+            AnchorGeometryAuthority::new(&nested_mesh, &nested_topology, &nested_surface).unwrap();
+        let nested_delicacy = vec![0.25; nested_surface.nfaces()];
+        let nested_pool =
+            SurfaceAnchorPool::from_geometry(&nested_geometry, &nested_delicacy).unwrap();
+        let non_exterior_face = nested_surface
+            .exterior_face_mask()
+            .iter()
+            .position(|exterior| !exterior)
+            .expect("nested shell has non-exterior faces");
+        let mut changed_non_exterior = nested_delicacy.clone();
+        changed_non_exterior[non_exterior_face] = 0.75;
+        let rebound_pool =
+            SurfaceAnchorPool::from_geometry(&nested_geometry, &changed_non_exterior).unwrap();
+        assert_eq!(nested_pool.rows(), rebound_pool.rows());
+        assert_ne!(nested_pool.digest(), rebound_pool.digest());
+
+        let (_, terminal, _) = bindings();
+        let config = AnchorSearchConfig::current().unwrap();
+        let subject =
+            AnchorSubjectFingerprint::Terminal(TerminalFingerprint::from_binding(terminal));
+        let seat = QualifiedAnchorSeat {
+            provenance: AnchorCandidateProvenance {
+                regular_identity: None,
+                physical_contact_id: None,
+                sample_index: 0,
+                source_sample_face_id: 0,
+            },
+            contact: None,
+            subject,
+            geometry: nested_geometry.fingerprint(),
+            config: config.fingerprint(),
+            pool_digest: Some(nested_pool.digest()),
+            snapped_point_mm: [f(5.0), f(5.0), f(0.0)],
+            snapped_normal: [f(0.0), f(0.0), f(-1.0)],
+            snapped_face_id: 0,
+            delicacy: f(0.25),
+            length_mm: p(12.5),
+            lean_deg: NonNegativeFinite::new(0.0).unwrap(),
+            first_hit_t: f(1.0),
+            rootward_clearance_inset_mm: NonNegativeFinite::new(0.0).unwrap(),
+        };
+        let rebound = validate_anchor_feet_bound(
+            vec![AnchorFootRequest::new(seat, p(0.35))],
+            None,
+            subject,
+            config,
+            &nested_geometry,
+            Some(rebound_pool.digest()),
+        )
+        .unwrap();
+        assert_eq!(
+            rebound.query_counts(),
+            AnchorFootQueryCounts {
+                sphere_breach_batches: 0
+            }
+        );
+        assert!(matches!(
+            rebound.outcomes(),
+            [AnchorFootOutcome::Refused(refusal)]
+                if refusal.reason() == AnchorFootRefusalReason::StalePool
+        ));
 
         let other_surface = NativeSurface::from_indexed(
             mesh.verts(),
