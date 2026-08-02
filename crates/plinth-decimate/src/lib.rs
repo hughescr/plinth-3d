@@ -10,7 +10,9 @@
 
 use std::mem::size_of;
 
-use geom_kernel::{NativeSurface, NativeSurfaceConfig};
+use geom_kernel::{
+    NativeSurface, NativeSurfaceConfig, PointCloudIndex, PointIndexBuildError, PointQueryError,
+};
 use meshopt::{simplify_with_locks, typed_to_bytes, SimplifyOptions, VertexDataAdapter};
 use plinth_core::{m0_constants, PositiveFinite};
 use plinth_mesh::{
@@ -305,6 +307,72 @@ pub enum BudgetSearchError {
     VerificationFailed { failure: Box<VerificationFailure> },
 }
 
+/// One deterministic feature-protection selection attempt.  Attempt zero uses
+/// the ratified seed threshold and halo; later attempts are the bounded
+/// cap-backoff sequence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FeatureProtectionAttempt {
+    pub attempt: usize,
+    pub seed_threshold_mm: f64,
+    pub halo_radius_mm: f64,
+    pub seed_count: usize,
+    pub protected_vertex_count: usize,
+}
+
+/// Evidence from the feature probe and the complete cap-adaptation sequence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FeatureProtectionTrace {
+    pub probe_ratio: f64,
+    pub cap_count: usize,
+    pub attempts: Vec<FeatureProtectionAttempt>,
+}
+
+/// Typed failures from M3's mandatory protected-feature step.  Neither error
+/// contains a candidate mesh, so a cap failure cannot accidentally escape into
+/// the production budget search or export path.
+#[derive(Clone, Debug, Error, PartialEq)]
+pub enum FeatureProtectionError {
+    #[error("registered M0 constants are unavailable: {message}")]
+    Constants { message: String },
+    #[error("feature-probe simplification failed: {message}")]
+    ProbeSimplify { message: String },
+    #[error("feature-probe backward error map failed: {message}")]
+    ProbeBackward { message: String },
+    #[error("feature-protection input has {errors} errors for {vertices} vertices")]
+    ErrorMapLength { vertices: usize, errors: usize },
+    #[error("feature-protection point index failed: {message}")]
+    PointIndex { message: String },
+    #[error("feature-protection halo query failed: {message}")]
+    HaloQuery { message: String },
+    #[error(
+        "FeatureProtectionCapExceeded: protected vertices exceed the 12% cap after bounded backoff"
+    )]
+    CapExceeded { trace: Box<FeatureProtectionTrace> },
+}
+
+/// The only public M3 entry point.  It first derives hard locks from the
+/// aggressive backward-only feature probe, then performs the accepted D2
+/// budget search with exactly those locks.
+#[derive(Clone, Debug, Error, PartialEq)]
+pub enum DecimationError {
+    #[error(transparent)]
+    FeatureProtection(#[from] FeatureProtectionError),
+    #[error(transparent)]
+    Budget(#[from] BudgetSearchError),
+}
+
+/// Selects M3's protected original vertices from one ratio-0.20 backward
+/// probe, then runs the staged budget search.  This is deliberately the only
+/// production path: callers cannot omit feature protection by passing a lock
+/// vector themselves.
+pub fn run(
+    original: &Mesh,
+    budget: DecimationBudget,
+) -> Result<BudgetSearchOutcome, DecimationError> {
+    let (protected, _) = select_feature_protection(original, budget.probe)?;
+    Ok(run_budget_search(original, &protected, budget)?)
+}
+
 #[derive(Clone, Copy)]
 struct SearchPolicy {
     scale_min_mm: f64,
@@ -315,6 +383,143 @@ struct SearchPolicy {
     p99_factor: f64,
     p99_9_factor: f64,
     final_slack: f64,
+}
+
+#[derive(Clone, Copy)]
+struct FeatureProtectionPolicy {
+    probe_ratio: f64,
+    seed_threshold_mm: f64,
+    halo_radius_mm: f64,
+    cap_fraction: f64,
+    backoff_attempts: usize,
+    seed_multiplier: f64,
+    halo_multiplier: f64,
+}
+
+/// Runs the mandatory ratio-0.20 D1 backward map and turns it into hard locks.
+/// The spatial portion is one gathered batch query over every seed; the CSR
+/// result is scattered into original global vertex IDs without renumbering.
+pub fn select_feature_protection(
+    original: &Mesh,
+    probe_config: ProbeConfig,
+) -> Result<(Vec<bool>, FeatureProtectionTrace), FeatureProtectionError> {
+    let policy = feature_protection_policy()?;
+    let probe = simplify_locked(
+        original,
+        &SimplifyRequest {
+            target_ratio: policy.probe_ratio,
+            vertex_locks: vec![false; original.verts().len()],
+        },
+    )
+    .map_err(|error| FeatureProtectionError::ProbeSimplify {
+        message: error.to_string(),
+    })?;
+    let errors = backward_error_map(original, &probe.mesh, probe_config).map_err(|error| {
+        FeatureProtectionError::ProbeBackward {
+            message: error.to_string(),
+        }
+    })?;
+    select_feature_protection_from_errors(original, &errors, policy)
+}
+
+fn select_feature_protection_from_errors(
+    original: &Mesh,
+    errors: &[f64],
+    policy: FeatureProtectionPolicy,
+) -> Result<(Vec<bool>, FeatureProtectionTrace), FeatureProtectionError> {
+    if errors.len() != original.verts().len() {
+        return Err(FeatureProtectionError::ErrorMapLength {
+            vertices: original.verts().len(),
+            errors: errors.len(),
+        });
+    }
+    let index = PointCloudIndex::new(original.verts()).map_err(|error| {
+        FeatureProtectionError::PointIndex {
+            message: point_index_message(error),
+        }
+    })?;
+    let cap_count = (original.verts().len() as f64 * policy.cap_fraction).floor() as usize;
+    let mut trace = FeatureProtectionTrace {
+        probe_ratio: policy.probe_ratio,
+        cap_count,
+        attempts: Vec::with_capacity(policy.backoff_attempts + 1),
+    };
+    let mut threshold = policy.seed_threshold_mm;
+    let mut radius = policy.halo_radius_mm;
+
+    // Attempt zero plus precisely the configured number of bounded backoffs.
+    for attempt in 0..=policy.backoff_attempts {
+        let seed_ids = errors
+            .iter()
+            .enumerate()
+            .filter_map(|(vertex, &error)| (error > threshold).then_some(vertex))
+            .collect::<Vec<_>>();
+        let seed_points = seed_ids
+            .iter()
+            .map(|&vertex| original.verts()[vertex])
+            .collect::<Vec<_>>();
+        let mut locks = vec![false; original.verts().len()];
+        if !seed_points.is_empty() {
+            let neighbors =
+                index
+                    .radius_neighbors_batch(&seed_points, radius)
+                    .map_err(|error| FeatureProtectionError::HaloQuery {
+                        message: point_query_message(error),
+                    })?;
+            for point_id in neighbors.point_ids {
+                let vertex =
+                    usize::try_from(point_id).expect("point index IDs originate from usize");
+                locks[vertex] = true;
+            }
+        }
+        let protected_vertex_count = locks.iter().filter(|&&locked| locked).count();
+        trace.attempts.push(FeatureProtectionAttempt {
+            attempt,
+            seed_threshold_mm: threshold,
+            halo_radius_mm: radius,
+            seed_count: seed_ids.len(),
+            protected_vertex_count,
+        });
+        if protected_vertex_count <= cap_count {
+            return Ok((locks, trace));
+        }
+        threshold *= policy.seed_multiplier;
+        radius *= policy.halo_multiplier;
+    }
+    Err(FeatureProtectionError::CapExceeded {
+        trace: Box::new(trace),
+    })
+}
+
+fn point_index_message(error: PointIndexBuildError) -> String {
+    error.to_string()
+}
+
+fn point_query_message(error: PointQueryError) -> String {
+    error.to_string()
+}
+
+fn feature_protection_policy() -> Result<FeatureProtectionPolicy, FeatureProtectionError> {
+    let constants = m0_constants().map_err(|error| FeatureProtectionError::Constants {
+        message: error.to_string(),
+    })?;
+    let placeholders = constants.placeholders();
+    let adaptation = placeholders.decimation_adaptation_policy().diagnostic();
+    Ok(FeatureProtectionPolicy {
+        probe_ratio: placeholders
+            .decimation_feature_probe_ratio()
+            .diagnostic()
+            .get(),
+        seed_threshold_mm: placeholders.decimation_seed_error_mm().diagnostic().get(),
+        halo_radius_mm: placeholders.decimation_feature_halo_mm().diagnostic().get(),
+        cap_fraction: placeholders
+            .decimation_protected_cap_fraction()
+            .diagnostic()
+            .get(),
+        backoff_attempts: adaptation.adaptations().get() as usize,
+        seed_multiplier: adaptation.feature_multiplier(),
+        halo_multiplier: adaptation.error_multiplier(),
+    })
 }
 
 /// Runs M3 stages 1, 4b, 5, 6, and 7 over the accepted D0/D1 primitives.
@@ -1437,6 +1642,24 @@ mod tests {
         (mesh, locks)
     }
 
+    fn point_cloud_mesh(points: Vec<[f64; 3]>) -> Mesh {
+        // Feature selection only owns the original global vertex ID space; it
+        // does not inspect triangles after D1 has provided the error map.
+        Mesh::new(points, vec![[0, 1, 2]]).unwrap()
+    }
+
+    fn feature_policy(cap_fraction: f64) -> FeatureProtectionPolicy {
+        FeatureProtectionPolicy {
+            probe_ratio: 0.2,
+            seed_threshold_mm: 0.05,
+            halo_radius_mm: 0.4,
+            cap_fraction,
+            backoff_attempts: 3,
+            seed_multiplier: 2.0,
+            halo_multiplier: 0.6,
+        }
+    }
+
     fn probe_with_percentiles(p99_mm: f64, p99_9_mm: f64) -> TwoSidedProbe {
         TwoSidedProbe {
             candidate_face_count: 1,
@@ -1524,7 +1747,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let error = run_budget_search(&mesh, &vec![false; 6], d2_budget(1e-100)).unwrap_err();
+        let error = run_budget_search(&mesh, &[false; 6], d2_budget(1e-100)).unwrap_err();
         match error {
             BudgetSearchError::DecimationBudgetUnreachable { trace } => {
                 assert_eq!(trace.steps.len(), 1);
@@ -1658,5 +1881,145 @@ mod tests {
         }
         assert_eq!(outcomes[0], outcomes[1]);
         assert_eq!(outcomes[1], outcomes[2]);
+    }
+
+    #[test]
+    fn feature_seeds_use_only_the_backward_error_map() {
+        let original = Mesh::new(
+            vec![
+                [0.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+                [0.0, 3.0, 0.0],
+                [1.0, 1.0, 10.0],
+                [1.5, 1.0, 10.0],
+                [1.0, 1.5, 10.0],
+            ],
+            vec![[0, 1, 2], [3, 4, 5]],
+        )
+        .unwrap();
+        let candidate = Mesh::new(
+            vec![[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [0.0, 3.0, 0.0]],
+            vec![[0, 1, 2]],
+        )
+        .unwrap();
+        let backward = backward_error_map(&original, &candidate, probe_config(20.0)).unwrap();
+        assert_eq!(&backward[..3], &[0.0, 0.0, 0.0]);
+        let (locks, trace) = select_feature_protection_from_errors(
+            &original,
+            &backward,
+            FeatureProtectionPolicy {
+                halo_radius_mm: 0.0,
+                cap_fraction: 1.0,
+                ..feature_policy(1.0)
+            },
+        )
+        .unwrap();
+        assert_eq!(trace.attempts[0].seed_count, 3);
+        assert_eq!(locks, vec![false, false, false, true, true, true]);
+    }
+
+    #[test]
+    fn feature_halo_is_inclusive_and_scattered_to_original_ids() {
+        let mut points = vec![
+            [0.0, 0.0, 0.0],
+            [0.2, 0.0, 0.0],
+            [0.4, 0.0, 0.0],
+            [0.400_001, 0.0, 0.0],
+        ];
+        points.extend((4..25).map(|id| [10.0 + id as f64, 0.0, 0.0]));
+        let original = point_cloud_mesh(points);
+        let mut errors = vec![0.0; 25];
+        errors[0] = 0.051;
+        let (locks, trace) =
+            select_feature_protection_from_errors(&original, &errors, feature_policy(0.12))
+                .unwrap();
+        assert_eq!(trace.cap_count, 3);
+        assert_eq!(trace.attempts[0].protected_vertex_count, 3);
+        assert_eq!(&locks[..4], &[true, true, true, false]);
+        assert_eq!(locks.iter().filter(|&&locked| locked).count(), 3);
+    }
+
+    #[test]
+    fn feature_cap_uses_exact_floor_twelve_percent() {
+        let original = point_cloud_mesh((0..25).map(|id| [id as f64, 0.0, 0.0]).collect());
+        let mut errors = vec![0.0; 25];
+        errors[0] = 0.1;
+        errors[2] = 0.1;
+        errors[4] = 0.1;
+        let (locks, trace) =
+            select_feature_protection_from_errors(&original, &errors, feature_policy(0.12))
+                .unwrap();
+        assert_eq!(trace.cap_count, 3);
+        assert_eq!(locks.iter().filter(|&&locked| locked).count(), 3);
+    }
+
+    #[test]
+    fn feature_cap_backoff_is_bounded_and_deterministic() {
+        let original = point_cloud_mesh((0..25).map(|id| [id as f64, 0.0, 0.0]).collect());
+        let mut errors = vec![0.0; 25];
+        for id in [0, 2, 4, 6] {
+            errors[id] = 1.0;
+        }
+        let failure =
+            select_feature_protection_from_errors(&original, &errors, feature_policy(0.12))
+                .unwrap_err();
+        let FeatureProtectionError::CapExceeded { trace } = failure else {
+            panic!("cap exhaustion must be typed")
+        };
+        assert_eq!(trace.cap_count, 3);
+        assert_eq!(
+            trace.attempts.len(),
+            4,
+            "initial attempt plus exactly three backoffs"
+        );
+        assert_eq!(
+            trace
+                .attempts
+                .iter()
+                .map(|attempt| attempt.seed_threshold_mm)
+                .collect::<Vec<_>>(),
+            vec![0.05, 0.1, 0.2, 0.4]
+        );
+        assert_eq!(
+            trace
+                .attempts
+                .iter()
+                .map(|attempt| attempt.halo_radius_mm)
+                .collect::<Vec<_>>(),
+            vec![0.4, 0.4 * 0.6, 0.4 * 0.6 * 0.6, 0.4 * 0.6 * 0.6 * 0.6]
+        );
+        assert!(trace
+            .attempts
+            .iter()
+            .all(|attempt| attempt.protected_vertex_count > trace.cap_count));
+    }
+
+    #[test]
+    fn feature_locks_are_hard_constraints_in_simplification() {
+        let mesh = octahedron();
+        let mut errors = vec![0.0; mesh.verts().len()];
+        errors[2] = 1.0;
+        let (locks, _) = select_feature_protection_from_errors(
+            &mesh,
+            &errors,
+            FeatureProtectionPolicy {
+                halo_radius_mm: 0.0,
+                cap_fraction: 1.0,
+                ..feature_policy(1.0)
+            },
+        )
+        .unwrap();
+        let outcome = simplify_locked(&mesh, &request(0.5, locks)).unwrap();
+        assert!(outcome.retained_original_vertex_ids.contains(&2));
+    }
+
+    #[test]
+    fn production_feature_selection_pins_the_ratio_twenty_probe() {
+        let (mesh, _) = locked_box(10.0);
+        let error = select_feature_protection(&mesh, d2_probe_config()).unwrap_err();
+        let FeatureProtectionError::CapExceeded { trace } = error else {
+            panic!("the production path must refuse a candidate when the cap cannot be met")
+        };
+        assert_eq!(trace.probe_ratio, 0.2);
     }
 }
