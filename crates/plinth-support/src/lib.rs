@@ -16,6 +16,7 @@ pub mod anchor;
 pub mod forest;
 pub mod legacy_compat;
 pub mod member_sizing;
+pub mod raft;
 
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, SurfaceBuildError};
 use plinth_core::{m0_constants, Finite, PositiveFinite};
