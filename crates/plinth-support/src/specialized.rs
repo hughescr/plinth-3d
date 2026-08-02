@@ -2077,7 +2077,7 @@ fn evaluate_gate_batch(
                 .count();
             vectors.push(FrozenSpecializedGateVector::from_live(
                 coverage.objective,
-                load_violation_count(&partition, physical.len())?,
+                load_violation_count(&partition, physical)?,
                 unsupported_specialized_count,
             ));
         }
