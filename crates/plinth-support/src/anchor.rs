@@ -19,9 +19,9 @@ const RAY_T_MAX: f64 = 1.0;
 // Frozen kernel cone defaults from SPEC-RUST-KERNEL. These shape the thickness
 // probe; result-changing foot radius/epsilon come from M0 below.
 #[cfg_attr(not(test), allow(dead_code))]
-const FOOT_BREACH_HALF_DEG: f64 = 25.0;
+pub(crate) const FOOT_BREACH_HALF_DEG: f64 = 25.0;
 #[cfg_attr(not(test), allow(dead_code))]
-const FOOT_BREACH_CONE_RAYS: usize = 8;
+pub(crate) const FOOT_BREACH_CONE_RAYS: usize = 8;
 
 /// One deterministic exterior-surface pool row.
 #[derive(Clone, Copy, Debug, PartialEq)]

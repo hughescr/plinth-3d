@@ -14,6 +14,11 @@
 pub mod anchor;
 #[allow(
     dead_code,
+    reason = "crate-private current-parity bracing is consumed by the pending support runner"
+)]
+mod brace;
+#[allow(
+    dead_code,
     reason = "crate-private CCO controller is consumed by the pending support runner integration"
 )]
 mod cco;
