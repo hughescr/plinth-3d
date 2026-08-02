@@ -17,7 +17,7 @@ use crate::moller::{dedup_loc, moller};
 use crate::par;
 use crate::parity::{ParityBuildError, ParityVote};
 use crate::vec3::{add, cross, dot, norm, scale, sub, V3};
-use crate::{SurfaceIndexKind, SurfaceSubsetError};
+use crate::{SurfaceIndexKind, SurfaceSubsetError, SurfaceTriangleSoupDigest};
 
 thread_local! {
     static STACK: RefCell<Vec<i32>> = RefCell::new(Vec::with_capacity(128));
@@ -84,6 +84,7 @@ pub struct NativeSurface {
     pub pv: ParityVote,
     pub grid_pitch_mm: f64,
     max_grid_bytes: usize,
+    pub(crate) source_triangle_soup_digest: SurfaceTriangleSoupDigest,
     exterior_mask: OnceLock<Vec<bool>>,
     // result-inert telemetry (spec sec 4.2): decisions within 1e-6 of a
     // threshold, and measured-tie breach disagreements.
@@ -181,6 +182,7 @@ impl NativeSurface {
         grid_pitch_mm: f64,
         max_grid_bytes: usize,
     ) -> Result<NativeSurface, ParityBuildError> {
+        let source_triangle_soup_digest = mesh.triangle_soup_digest();
         let bvh = Bvh::build(&mesh).map_err(ParityBuildError::Other)?;
         let pv = ParityVote::build(&mesh, grid_pitch_mm, max_grid_bytes)?;
         Ok(NativeSurface {
@@ -189,6 +191,7 @@ impl NativeSurface {
             pv,
             grid_pitch_mm,
             max_grid_bytes,
+            source_triangle_soup_digest,
             exterior_mask: OnceLock::new(),
             band_counter: AtomicU64::new(0),
             tie_counter: AtomicU64::new(0),
@@ -224,6 +227,7 @@ impl NativeSurface {
         let mut canonical = face_ids.to_vec();
         canonical.sort_unstable();
         let mesh = self.mesh.subset(canonical);
+        let source_triangle_soup_digest = mesh.triangle_soup_digest();
         let (bvh, pv) = build_indexes(&mesh, self.grid_pitch_mm, self.max_grid_bytes)
             .map_err(|(index, _reason)| SurfaceSubsetError::IndexBuild { index })?;
         Ok(NativeSurface {
@@ -232,6 +236,7 @@ impl NativeSurface {
             pv,
             grid_pitch_mm: self.grid_pitch_mm,
             max_grid_bytes: self.max_grid_bytes,
+            source_triangle_soup_digest,
             exterior_mask: OnceLock::new(),
             band_counter: AtomicU64::new(0),
             tie_counter: AtomicU64::new(0),

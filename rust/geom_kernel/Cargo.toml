@@ -11,3 +11,4 @@ name = "geom_kernel"
 [dependencies]
 kiddo.workspace = true
 rayon = "1.10"
+sha2 = "0.10"

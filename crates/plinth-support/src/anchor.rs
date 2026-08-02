@@ -6,7 +6,7 @@
 //! ordering prevents an undersized provisional radius from certifying geometry
 //! that the actually emitted support would breach.
 
-use geom_kernel::NativeSurface;
+use geom_kernel::{indexed_triangle_soup_digest, NativeSurface, SurfaceTriangleSoupDigest};
 use plinth_core::{m0_constants, Finite, NonNegativeFinite, PositiveFinite};
 use plinth_mesh::{mesh_fingerprint, validate_face_topology, FaceTopology, Mesh};
 use thiserror::Error;
@@ -159,6 +159,7 @@ impl AnchorSearchConfig {
 pub(crate) struct GeometryFingerprint {
     mesh_sha256: String,
     topology_sha256: String,
+    native_triangle_soup_digest: SurfaceTriangleSoupDigest,
     // Grid pitch changes native query results. `max_grid_bytes` is only a
     // construction refusal cap and is result-inert once a surface exists.
     native_grid_pitch_bits: u64,
@@ -184,12 +185,13 @@ impl<'a> AnchorGeometryAuthority<'a> {
         if topology.mesh_fingerprint() != actual_mesh {
             return Err(AnchorSearchError::TopologyMeshMismatch);
         }
-        validate_surface_matches_mesh(mesh, surface)?;
+        let native_triangle_soup_digest = validate_surface_matches_mesh(mesh, surface)?;
         Ok(Self {
             surface,
             fingerprint: GeometryFingerprint {
                 mesh_sha256: actual_mesh,
                 topology_sha256: topology.content_digest().to_owned(),
+                native_triangle_soup_digest,
                 native_grid_pitch_bits: surface.grid_pitch_mm.to_bits(),
             },
         })
@@ -353,6 +355,9 @@ fn surface_anchor_pool_required_bytes(
         .mesh_sha256
         .len()
         .checked_add(geometry.topology_sha256.len())
+        .and_then(|bytes| {
+            bytes.checked_add(std::mem::size_of_val(&geometry.native_triangle_soup_digest))
+        })
         .and_then(|bytes| bytes.checked_add(sidecar_bytes))
         .and_then(|bytes| bytes.checked_add(row_bytes))
         .ok_or(AnchorSearchError::SurfaceAnchorPoolResourceOverflow)
@@ -379,6 +384,7 @@ fn try_clone_geometry_fingerprint(
     Ok(GeometryFingerprint {
         mesh_sha256,
         topology_sha256,
+        native_triangle_soup_digest: geometry.native_triangle_soup_digest,
         native_grid_pitch_bits: geometry.native_grid_pitch_bits,
     })
 }
@@ -395,6 +401,7 @@ fn surface_anchor_pool_digest(
     let mut hash = AnchorFnv::new();
     hash.bytes(geometry.mesh_sha256.as_bytes());
     hash.bytes(geometry.topology_sha256.as_bytes());
+    hash.bytes(geometry.native_triangle_soup_digest.as_bytes());
     hash.u64(geometry.native_grid_pitch_bits);
     hash.usize(delicacy_by_face.len());
     for &delicacy in delicacy_by_face {
@@ -1450,10 +1457,18 @@ fn validate_sidecar(
 fn validate_surface_matches_mesh(
     mesh: &Mesh,
     surface: &NativeSurface,
-) -> Result<(), AnchorSearchError> {
+) -> Result<SurfaceTriangleSoupDigest, AnchorSearchError> {
     if mesh.tris().len() != surface.nfaces() {
         return Err(AnchorSearchError::SurfaceMeshMismatch { face: 0 });
     }
+    let digest = indexed_triangle_soup_digest(mesh.verts(), mesh.tris())
+        .expect("Mesh validates every triangle index");
+    if digest != surface.source_triangle_soup_digest() {
+        return Err(AnchorSearchError::SurfaceMeshMismatch { face: 0 });
+    }
+    // Coordinate identity is authoritative. Retain the existing metadata
+    // check as well because `from_triangle_soup` admits explicitly supplied
+    // normals, areas, and bounds that can alter downstream query semantics.
     let geometry = surface.geometry();
     for (face, indices) in mesh.tris().iter().enumerate() {
         let [a, b, c] = indices.map(|index| mesh.verts()[index as usize]);
@@ -1492,7 +1507,7 @@ fn validate_surface_matches_mesh(
             return Err(AnchorSearchError::SurfaceMeshMismatch { face });
         }
     }
-    Ok(())
+    Ok(digest)
 }
 
 fn finite(value: f64, field: &'static str) -> Result<Finite, AnchorSearchError> {
@@ -1785,6 +1800,26 @@ mod tests {
             SurfaceAnchorPool::from_geometry(&nested_geometry, &changed_non_exterior).unwrap();
         assert_eq!(nested_pool.rows(), rebound_pool.rows());
         assert_ne!(nested_pool.digest(), rebound_pool.digest());
+
+        // A separately allocated native surface over the same exact source
+        // geometry has the same value fingerprint, but remains stale: rebound
+        // checks intentionally retain pointer identity.
+        let identical_surface = NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
+            NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        let identical_geometry =
+            AnchorGeometryAuthority::new(&mesh, &topology, &identical_surface).unwrap();
+        assert_eq!(geometry.fingerprint(), identical_geometry.fingerprint());
+        assert_eq!(
+            pool.validate_against(&identical_geometry),
+            Err(AnchorSearchError::StaleSurfaceAnchorPool)
+        );
 
         let (_, terminal, _) = bindings();
         let config = AnchorSearchConfig::current().unwrap();
@@ -2227,6 +2262,57 @@ mod tests {
     }
 
     #[test]
+    fn geometry_authority_rejects_distinct_triangles_with_identical_derived_metadata() {
+        // Negating each centered vertex preserves this triangle's centroid,
+        // AABB, normal, and area, while changing its exact triangle soup.
+        // The old derived-metadata comparison accepted this collision.
+        let source_vertices = vec![[-1.0, 0.0, 1.0], [0.0, 1.0, -1.0], [1.0, -1.0, 0.0]];
+        let surface_vertices = vec![[1.0, 0.0, -1.0], [0.0, -1.0, 1.0], [-1.0, 1.0, 0.0]];
+        let faces = vec![[0, 1, 2]];
+        let mesh = Mesh::new(source_vertices, faces.clone()).unwrap();
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let surface = NativeSurface::from_indexed(
+            &surface_vertices,
+            &faces,
+            NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+
+        let expected = NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
+            NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            expected.geometry().normals()[0].map(f64::to_bits),
+            surface.geometry().normals()[0].map(f64::to_bits)
+        );
+        assert_eq!(
+            expected.geometry().areas()[0].to_bits(),
+            surface.geometry().areas()[0].to_bits()
+        );
+        assert_eq!(
+            expected.geometry().centroids()[0].map(f64::to_bits),
+            surface.geometry().centroids()[0].map(f64::to_bits)
+        );
+        assert_eq!(
+            expected.geometry().face_bounds()[0].map(bits3),
+            surface.geometry().face_bounds()[0].map(bits3)
+        );
+        assert!(matches!(
+            AnchorGeometryAuthority::new(&mesh, &topology, &surface),
+            Err(AnchorSearchError::SurfaceMeshMismatch { face: 0 })
+        ));
+    }
+
+    #[test]
     fn thread_report_child() {
         if std::env::var_os("PLINTH_ANCHOR_REPORT_CHILD").is_none() {
             return;
@@ -2300,6 +2386,10 @@ mod tests {
                 }
                 AnchorFootOutcome::Refused(row) => out.push_str(&format!("R{:?}", row.reason())),
             }
+        }
+        out.push_str(":surface=");
+        for byte in geometry.fingerprint.native_triangle_soup_digest.as_bytes() {
+            out.push_str(&format!("{byte:02x}"));
         }
         out
     }

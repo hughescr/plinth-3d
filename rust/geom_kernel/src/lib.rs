@@ -26,6 +26,7 @@ pub mod testkit;
 use std::borrow::Cow;
 
 use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 
 use mesh::Mesh;
 pub use mesh::{FaceBounds, FaceGeometry};
@@ -46,6 +47,82 @@ pub use slicing::{
 pub use vec3::V3;
 
 pub const KERNEL_API_VERSION: u32 = 1;
+
+/// Collision-resistant identity for the exact, ordered triangle soup from
+/// which a native surface was constructed.
+///
+/// The bytes are deliberately opaque: callers may compare or inspect the
+/// identity, but cannot manufacture one through this API.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SurfaceTriangleSoupDigest([u8; 32]);
+
+impl SurfaceTriangleSoupDigest {
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+const TRIANGLE_SOUP_DIGEST_DOMAIN: &[u8] = b"plinth.native-surface.triangle-soup.sha256.v1\0";
+
+/// Hash the logical triangle soup in face, vertex, and coordinate order.
+///
+/// Components are encoded as their raw IEEE-754 bits in little-endian order,
+/// so signed zero remains distinct. `NativeSurface` construction rejects
+/// non-finite coordinates before retaining this identity.
+#[must_use]
+pub fn triangle_soup_digest(triangles: &[[[f64; 3]; 3]]) -> SurfaceTriangleSoupDigest {
+    triangle_soup_digest_from_iter(triangles.iter().copied())
+}
+
+pub(crate) fn triangle_soup_digest_from_iter<I>(triangles: I) -> SurfaceTriangleSoupDigest
+where
+    I: ExactSizeIterator<Item = [[f64; 3]; 3]>,
+{
+    let mut hasher = Sha256::new();
+    hasher.update(TRIANGLE_SOUP_DIGEST_DOMAIN);
+    hasher.update(
+        u64::try_from(triangles.len())
+            .expect("triangle soup length always fits in u64")
+            .to_le_bytes(),
+    );
+    for triangle in triangles {
+        for vertex in triangle {
+            for component in vertex {
+                hasher.update(component.to_bits().to_le_bytes());
+            }
+        }
+    }
+    SurfaceTriangleSoupDigest(hasher.finalize().into())
+}
+
+/// Hash an indexed mesh as its ordered, expanded triangle soup.
+///
+/// Returns `None` when a face index is outside `vertices`. This helper does
+/// not perform `NativeSurface`'s finite-input validation; use it only after a
+/// mesh boundary has established valid source coordinates.
+#[must_use]
+pub fn indexed_triangle_soup_digest(
+    vertices: &[[f64; 3]],
+    faces: &[[u32; 3]],
+) -> Option<SurfaceTriangleSoupDigest> {
+    let mut hasher = Sha256::new();
+    hasher.update(TRIANGLE_SOUP_DIGEST_DOMAIN);
+    hasher.update(
+        u64::try_from(faces.len())
+            .expect("face count always fits in u64")
+            .to_le_bytes(),
+    );
+    for indices in faces {
+        for &index in indices {
+            let vertex = vertices.get(index as usize)?;
+            for component in vertex {
+                hasher.update(component.to_bits().to_le_bytes());
+            }
+        }
+    }
+    Some(SurfaceTriangleSoupDigest(hasher.finalize().into()))
+}
 
 /// Explicit parity-grid construction settings. There is deliberately no
 /// default: callers must select their production memory/precision budget.
@@ -534,6 +611,12 @@ impl NativeSurface {
     /// are exposed separately by [`Self::face_ids`].
     pub fn geometry(&self) -> &FaceGeometry {
         self.mesh.geometry()
+    }
+
+    /// Exact source triangle-soup identity retained at construction.
+    #[must_use]
+    pub const fn source_triangle_soup_digest(&self) -> SurfaceTriangleSoupDigest {
+        self.source_triangle_soup_digest
     }
 }
 

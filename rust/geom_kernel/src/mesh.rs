@@ -340,6 +340,16 @@ impl Mesh {
     pub(crate) fn geometry(&self) -> &FaceGeometry {
         &self.geometry
     }
+    pub(crate) fn triangle_soup_digest(&self) -> crate::SurfaceTriangleSoupDigest {
+        crate::triangle_soup_digest_from_iter(self.face_ids.iter().map(|&face_id| {
+            let face = face_id as usize;
+            [
+                self.geometry.v0[face],
+                self.geometry.v1[face],
+                self.geometry.v2[face],
+            ]
+        }))
+    }
     pub(crate) fn subset(&self, face_ids: Vec<u32>) -> Self {
         debug_assert!(!face_ids.is_empty());
         debug_assert!(face_ids.windows(2).all(|pair| pair[0] < pair[1]));
