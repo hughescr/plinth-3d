@@ -104,6 +104,7 @@ pub fn write(model: &SupportedModel, request: &EmitRequest) -> Result<EmitReport
         &request.target_path,
         &request.printer,
         lift,
+        f32_of(model.plate_z_mm().get() - center[2])?,
         &geometry,
         &records,
     )
@@ -122,6 +123,7 @@ fn audit_disk(
     path: &Path,
     printer: &PrinterProfile,
     expected_lift: f32,
+    expected_plate_z: f32,
     expected_model: &TriangleSoup,
     expected_records: &[SupportRecord],
 ) -> Result<EmitReport, EmitError> {
@@ -153,8 +155,19 @@ fn audit_disk(
         return Err(EmitError::DiskAuditRejected);
     }
 
-    let mut bounds = Bounds::empty();
-    bounds.extend_f32(&model_triangles)?;
+    let model_local_min_z = min_z(&model_triangles)?;
+    // This is the physical frame invariant frozen by the Python emitter:
+    // centring moves the model and the planned plate together, while the sole
+    // placement lift separates their local Z values by exactly `lift_mm`.
+    let reopened_plate_z = model_local_min_z - info.placement.z_lift;
+    if !same_f32_frame_value(reopened_plate_z, expected_plate_z)
+        || !same_f32_frame_value(model_local_min_z - reopened_plate_z, info.placement.z_lift)
+    {
+        return Err(EmitError::DiskAuditRejected);
+    }
+
+    let mut bounds = WorldBounds::empty();
+    bounds.extend_f32(&model_triangles, info.placement, reopened_plate_z)?;
     for record in &records {
         if !record.r_start.is_finite()
             || !record.r_end.is_finite()
@@ -166,7 +179,9 @@ fn audit_disk(
         {
             return Err(EmitError::DiskAuditRejected);
         }
-        bounds.extend_f32(&record.mesh.xyz)?;
+        bounds.extend_f32(&record.mesh.xyz, info.placement, reopened_plate_z)?;
+        bounds.extend_point(record.start, info.placement, reopened_plate_z)?;
+        bounds.extend_point(record.end, info.placement, reopened_plate_z)?;
     }
     bounds.validate_against(printer)?;
 
@@ -184,6 +199,61 @@ fn audit_disk(
 struct Bounds {
     min: [f64; 3],
     max: [f64; 3],
+}
+
+fn min_z(values: &[f32]) -> Result<f32, EmitError> {
+    if values.is_empty() || !values.len().is_multiple_of(3) {
+        return Err(EmitError::DiskAuditRejected);
+    }
+    values
+        .chunks_exact(3)
+        .map(|point| point[2])
+        .filter(|value| value.is_finite())
+        .min_by(f32::total_cmp)
+        .ok_or(EmitError::DiskAuditRejected)
+}
+
+/// Bounds in printer coordinates, never merely local mesh coordinates.
+#[derive(Clone, Copy)]
+struct WorldBounds(Bounds);
+
+impl WorldBounds {
+    fn empty() -> Self {
+        Self(Bounds::empty())
+    }
+
+    fn extend_f32(
+        &mut self,
+        values: &[f32],
+        placement: Placement,
+        plate_z: f32,
+    ) -> Result<(), EmitError> {
+        if values.is_empty() || !values.len().is_multiple_of(3) {
+            return Err(EmitError::DiskAuditRejected);
+        }
+        for point in values.chunks_exact(3) {
+            self.extend_point([point[0], point[1], point[2]], placement, plate_z)?;
+        }
+        Ok(())
+    }
+
+    fn extend_point(
+        &mut self,
+        point: [f32; 3],
+        placement: Placement,
+        plate_z: f32,
+    ) -> Result<(), EmitError> {
+        let world = [
+            point[0] + placement.x,
+            point[1] + placement.y,
+            point[2] - plate_z,
+        ];
+        self.0.extend_f32(&world)
+    }
+
+    fn validate_against(self, printer: &PrinterProfile) -> Result<(), EmitError> {
+        self.0.validate_against(printer)
+    }
 }
 
 impl Bounds {
@@ -226,6 +296,8 @@ impl Bounds {
             || self.max[0] > volume.x() * 0.5
             || self.min[1] < -volume.y() * 0.5
             || self.max[1] > volume.y() * 0.5
+            || self.min[2] < 0.0
+            || self.max[2] > volume.z()
         {
             return Err(EmitError::DiskAuditRejected);
         }
@@ -286,13 +358,23 @@ fn build_record(
     let end = sub_center(finite_point(primitive.end_mm), center);
     let r_start = primitive.start_radius_mm.get();
     let r_end = primitive.end_radius_mm.get();
+    if matches!(
+        primitive.segment_type,
+        SegmentType::TIP | SegmentType::SHAFT
+    ) && r_start != r_end
+    {
+        return Err(EmitError::RecordEncodingRejected);
+    }
     let mut triangles = match primitive.segment_type {
-        SegmentType::JOINER => sphere_triangles(start, r_start)?,
+        // Frozen semantics: type 7 owns the contact sphere; type 9 owns a
+        // standalone joint sphere; types 1 and 3 are frusta.
+        SegmentType::TIP => sphere_triangles(midpoint(start, end), r_start)?,
+        SegmentType::SHAFT => sphere_triangles(midpoint(start, end), r_start)?,
         SegmentType::PAD_OR_BRIDGE if same_point(start, end) => {
             raft_pad_triangles(start, r_start, r_end)?
         }
         SegmentType::PAD_OR_BRIDGE => raft_bridge_triangles(start, end, r_start, r_end)?,
-        SegmentType::TIP | SegmentType::TAPER | SegmentType::SHAFT | SegmentType::FLARE => {
+        SegmentType::TAPER | SegmentType::JOINER | SegmentType::FLARE => {
             frustum_triangles(start, end, r_start, r_end, FRUSTUM_SIDES)?
         }
         _ => return Err(EmitError::RecordEncodingRejected),
@@ -307,9 +389,11 @@ fn build_record(
         soup_from_triangles(&triangles)?,
     );
     if primitive.segment_type == SegmentType::TAPER {
-        // The retained supported-scene contract currently carries no independent contact-depth;
-        // all-zero trailing bytes are the documented wire default rather than a guessed value.
-        record = record.with_contact_depth(0.0);
+        let depth = primitive
+            .contact_depth_mm
+            .ok_or(EmitError::RecordEncodingRejected)?
+            .get();
+        record = record.with_contact_depth(f32_of(depth)?);
     }
     if primitive.segment_type == SegmentType::PAD_OR_BRIDGE {
         let is_bridge = !same_point(start, end);
@@ -334,6 +418,22 @@ fn sub_center(point: [f64; 3], center: [f64; 3]) -> [f64; 3] {
 
 fn same_point(a: [f64; 3], b: [f64; 3]) -> bool {
     a == b
+}
+
+fn midpoint(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        (a[0] + b[0]) * 0.5,
+        (a[1] + b[1]) * 0.5,
+        (a[2] + b[2]) * 0.5,
+    ]
+}
+
+/// The disk format stores every frame coordinate as binary32.  This permits
+/// only the bounded roundoff introduced by separately rounded subtraction,
+/// not a changed plate or a second lift.
+fn same_f32_frame_value(actual: f32, expected: f32) -> bool {
+    let scale = actual.abs().max(expected.abs()).max(1.0);
+    (actual - expected).abs() <= 32.0 * f32::EPSILON * scale
 }
 
 fn f32_of(value: f64) -> Result<f32, EmitError> {
@@ -564,7 +664,7 @@ mod tests {
     use plinth_decimate::DecimationReport;
     use plinth_hollow::{HollowDisposition, HollowHistory, HollowReport};
     use plinth_orient::{BaselineSelection, OrientationHistory, OrientationReport, RigidTransform};
-    use plinth_support::{SupportHistory, SupportReport};
+    use plinth_support::{BuildFrame, SupportHistory, SupportReport};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     fn fixture_path(name: &str) -> PathBuf {
@@ -629,13 +729,19 @@ mod tests {
             .iter()
             .filter(|primitive| primitive.segment_type == SegmentType::PAD_OR_BRIDGE)
             .count();
+        let frame = BuildFrame::new(
+            // Fixture model minimum is 0: its sole lift establishes the
+            // planned plate in the same un-centred support frame.
+            Finite::new(-lift_mm).unwrap(),
+            PositiveFinite::new(lift_mm).unwrap(),
+        );
         SupportHistory::from_reports(
             hollow,
             SupportReport {
                 support_primitive_count: primitives.len() - raft_count,
                 raft_primitive_count: raft_count,
             },
-            PositiveFinite::new(lift_mm).unwrap(),
+            frame,
         )
     }
 
@@ -650,8 +756,110 @@ mod tests {
             start_mm: start.map(|value| Finite::new(value).unwrap()),
             end_mm: end.map(|value| Finite::new(value).unwrap()),
             start_radius_mm: PositiveFinite::new(2.2).unwrap(),
-            end_radius_mm: PositiveFinite::new(0.2).unwrap(),
+            end_radius_mm: PositiveFinite::new(
+                if matches!(segment_type, SegmentType::TIP | SegmentType::SHAFT) {
+                    2.2
+                } else {
+                    0.2
+                },
+            )
+            .unwrap(),
+            contact_depth_mm: (segment_type == SegmentType::TAPER).then(|| {
+                m0_constants()
+                    .unwrap()
+                    .placeholders()
+                    .default_contact_depth_mm()
+                    .diagnostic()
+                    .to_owned()
+            }),
         }
+    }
+
+    fn primitive_with_radii(
+        segment_type: SegmentType,
+        start: [f64; 3],
+        end: [f64; 3],
+        start_radius: f64,
+        end_radius: f64,
+    ) -> SupportPrimitive {
+        let mut primitive = primitive(segment_type, start, end);
+        primitive.start_radius_mm = PositiveFinite::new(start_radius).unwrap();
+        primitive.end_radius_mm = PositiveFinite::new(end_radius).unwrap();
+        primitive
+    }
+
+    fn record_bounds(record: &SupportRecord) -> Bounds {
+        let mut bounds = Bounds::empty();
+        bounds.extend_f32(&record.mesh.xyz).unwrap();
+        bounds
+    }
+
+    #[test]
+    fn frozen_contact_joiner_and_joint_ball_records_keep_their_distinct_roles() {
+        // This is the frozen `member_chain_specs` vocabulary: a type-7
+        // contact sphere, adjacent type-1 taper carrying configured depth,
+        // nonzero type-3 member frustum, and a standalone type-9 joint ball.
+        let depth = m0_constants()
+            .unwrap()
+            .placeholders()
+            .default_contact_depth_mm()
+            .diagnostic()
+            .get();
+        let records = build_records(
+            &[
+                primitive_with_radii(SegmentType::TIP, [1.0, 2.0, 3.0], [1.0, 2.0, 5.0], 1.0, 1.0),
+                primitive_with_radii(
+                    SegmentType::TAPER,
+                    [1.0, 2.0, 4.0],
+                    [1.0, 2.0, 8.0],
+                    0.8,
+                    0.3,
+                ),
+                primitive_with_radii(
+                    SegmentType::JOINER,
+                    [1.0, 2.0, 8.0],
+                    [1.0, 2.0, 11.0],
+                    0.6,
+                    0.4,
+                ),
+                primitive_with_radii(
+                    SegmentType::SHAFT,
+                    [1.0, 2.0, 14.0],
+                    [1.0, 2.0, 10.0],
+                    0.75,
+                    0.75,
+                ),
+            ],
+            [0.0; 3],
+        )
+        .unwrap();
+        assert_eq!(records[0].segment_type, SegmentType::TIP);
+        assert_eq!(records[0].start, [1.0, 2.0, 3.0]);
+        assert_eq!(records[0].end, [1.0, 2.0, 5.0]);
+        let tip_bounds = record_bounds(&records[0]);
+        assert_eq!((tip_bounds.min[2], tip_bounds.max[2]), (3.0, 5.0));
+
+        assert_eq!(records[1].segment_type, SegmentType::TAPER);
+        assert_eq!(records[1].start, [1.0, 2.0, 4.0]);
+        assert_eq!(records[1].end, [1.0, 2.0, 8.0]);
+        assert_eq!(
+            f32::from_le_bytes(records[1].trailing[0..4].try_into().unwrap()),
+            depth as f32
+        );
+        let taper_bounds = record_bounds(&records[1]);
+        assert_eq!((taper_bounds.min[2], taper_bounds.max[2]), (4.0, 8.0));
+
+        assert_eq!(records[2].segment_type, SegmentType::JOINER);
+        assert_eq!(records[2].start, [1.0, 2.0, 8.0]);
+        assert_eq!(records[2].end, [1.0, 2.0, 11.0]);
+        let joiner_bounds = record_bounds(&records[2]);
+        assert_eq!((joiner_bounds.min[2], joiner_bounds.max[2]), (8.0, 11.0));
+
+        assert_eq!(records[3].segment_type, SegmentType::SHAFT);
+        assert_eq!(records[3].start, [1.0, 2.0, 14.0]);
+        assert_eq!(records[3].end, [1.0, 2.0, 10.0]);
+        let shaft_bounds = record_bounds(&records[3]);
+        assert_eq!((shaft_bounds.min[2], shaft_bounds.max[2]), (11.25, 12.75));
     }
 
     #[test]
@@ -687,8 +895,8 @@ mod tests {
             primitive(SegmentType::TIP, [0.0, 0.0, 0.0], [0.0, 0.0, 3.0]),
             primitive(SegmentType::TAPER, [0.0, 0.0, 3.0], [0.0, 0.0, 6.0]),
             primitive(SegmentType::SHAFT, [0.0, 0.0, 6.0], [0.0, 0.0, 9.0]),
-            primitive(SegmentType::JOINER, [0.0, 0.0, 9.0], [0.0, 0.0, 9.0]),
-            primitive(SegmentType::FLARE, [0.0, 0.0, 9.0], [0.0, 0.0, 12.0]),
+            primitive(SegmentType::JOINER, [0.0, 0.0, 9.0], [0.0, 0.0, 11.0]),
+            primitive(SegmentType::FLARE, [0.0, 0.0, 11.0], [0.0, 0.0, 12.0]),
             primitive(SegmentType::PAD_OR_BRIDGE, [0.0, 0.0, 0.0], [3.0, 0.0, 0.0]),
             primitive(SegmentType::PAD_OR_BRIDGE, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
         ];
@@ -785,8 +993,8 @@ mod tests {
             primitive(SegmentType::TIP, [0.0, 0.0, 1.0], [0.0, 0.0, 3.0]),
             primitive(SegmentType::TAPER, [0.0, 0.0, 3.0], [0.0, 0.0, 5.0]),
             primitive(SegmentType::SHAFT, [0.0, 0.0, 5.0], [0.0, 0.0, 8.0]),
-            primitive(SegmentType::JOINER, [0.0, 0.0, 8.0], [0.0, 0.0, 8.0]),
-            primitive(SegmentType::FLARE, [0.0, 0.0, 8.0], [0.0, 0.0, 10.0]),
+            primitive(SegmentType::JOINER, [0.0, 0.0, 8.0], [0.0, 0.0, 9.0]),
+            primitive(SegmentType::FLARE, [0.0, 0.0, 9.0], [0.0, 0.0, 10.0]),
             primitive(SegmentType::PAD_OR_BRIDGE, [0.0, 0.0, 0.0], [3.0, 0.0, 0.0]),
             primitive(SegmentType::PAD_OR_BRIDGE, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
         ];
@@ -913,7 +1121,7 @@ mod tests {
         let mesh = fixture_mesh();
         let expected_model = model_triangle_soup(&mesh, mesh_bbox_center(&mesh).unwrap()).unwrap();
         assert_eq!(
-            audit_disk(&target, &printer(), 3.0, &expected_model, &[]),
+            audit_disk(&target, &printer(), 3.0, -3.5, &expected_model, &[]),
             Err(EmitError::DiskAuditRejected)
         );
         assert_eq!(
@@ -922,5 +1130,74 @@ mod tests {
             "audit must not repair or rewrite disk bytes"
         );
         std::fs::remove_file(target).expect("remove unique fixture artifact");
+    }
+
+    #[test]
+    fn disk_audit_rejects_support_geometry_below_the_planned_plate() {
+        let model = fixture_model(
+            vec![primitive(
+                SegmentType::JOINER,
+                [0.0, 0.0, -4.0],
+                [0.0, 0.0, -3.1],
+            )],
+            3.0,
+        );
+        let target = fixture_path("below-plate.chitubox");
+        assert_eq!(
+            write(
+                &model,
+                &EmitRequest {
+                    target_path: target.clone(),
+                    printer: printer()
+                }
+            ),
+            Err(EmitError::DiskAuditRejected)
+        );
+        std::fs::remove_file(target).unwrap();
+    }
+
+    #[test]
+    fn disk_audit_rejects_support_geometry_above_printer_height() {
+        let model = fixture_model(
+            vec![primitive(
+                SegmentType::JOINER,
+                [0.0, 0.0, 221.0],
+                [0.0, 0.0, 222.0],
+            )],
+            3.0,
+        );
+        let target = fixture_path("above-height.chitubox");
+        assert_eq!(
+            write(
+                &model,
+                &EmitRequest {
+                    target_path: target.clone(),
+                    printer: printer()
+                }
+            ),
+            Err(EmitError::DiskAuditRejected)
+        );
+        std::fs::remove_file(target).unwrap();
+    }
+
+    #[test]
+    fn disk_audit_rejects_a_reopened_lift_or_plate_frame_mismatch() {
+        let model = fixture_model(Vec::new(), 3.0);
+        let target = fixture_path("lift-mismatch.chitubox");
+        write(
+            &model,
+            &EmitRequest {
+                target_path: target.clone(),
+                printer: printer(),
+            },
+        )
+        .unwrap();
+        let mesh = fixture_mesh();
+        let expected_model = model_triangle_soup(&mesh, mesh_bbox_center(&mesh).unwrap()).unwrap();
+        assert_eq!(
+            audit_disk(&target, &printer(), 3.0, -3.4, &expected_model, &[]),
+            Err(EmitError::DiskAuditRejected)
+        );
+        std::fs::remove_file(target).unwrap();
     }
 }

@@ -24,6 +24,35 @@ pub struct SupportRequest {
     pub lift_mm: PositiveFinite,
 }
 
+/// The one physical frame selected while planning supports.  `plate_z_mm` is
+/// expressed in the same un-centred model-local coordinates as every support
+/// primitive; the emitter centres both together before serialising.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BuildFrame {
+    plate_z_mm: Finite,
+    lift_mm: PositiveFinite,
+}
+
+impl BuildFrame {
+    #[must_use]
+    pub const fn new(plate_z_mm: Finite, lift_mm: PositiveFinite) -> Self {
+        Self {
+            plate_z_mm,
+            lift_mm,
+        }
+    }
+
+    #[must_use]
+    pub const fn plate_z_mm(self) -> Finite {
+        self.plate_z_mm
+    }
+
+    #[must_use]
+    pub const fn lift_mm(self) -> PositiveFinite {
+        self.lift_mm
+    }
+}
+
 /// One f64 support/raft primitive. `segment_type` is the canonical ChituBox record identity.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SupportPrimitive {
@@ -32,6 +61,10 @@ pub struct SupportPrimitive {
     pub end_mm: [Finite; 3],
     pub start_radius_mm: PositiveFinite,
     pub end_radius_mm: PositiveFinite,
+    /// The support planner's configured contact embed depth.  It exists only
+    /// on a type-1 contact taper and is written verbatim into that record's
+    /// trailing field by `plinth-emit`; it is never a format default.
+    pub contact_depth_mm: Option<PositiveFinite>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -46,21 +79,17 @@ pub struct SupportReport {
 pub struct SupportHistory {
     hollow: HollowHistory,
     support: SupportReport,
-    lift_mm: PositiveFinite,
+    frame: BuildFrame,
 }
 
 impl SupportHistory {
     /// Builds passive accumulated report state; this does not construct a supported model.
     #[must_use]
-    pub fn from_reports(
-        hollow: HollowHistory,
-        support: SupportReport,
-        lift_mm: PositiveFinite,
-    ) -> Self {
+    pub fn from_reports(hollow: HollowHistory, support: SupportReport, frame: BuildFrame) -> Self {
         Self {
             hollow,
             support,
-            lift_mm,
+            frame,
         }
     }
 
@@ -77,12 +106,18 @@ impl SupportHistory {
     /// The sole lift authority shared by support planning and emission.
     #[must_use]
     pub const fn lift_mm(&self) -> PositiveFinite {
-        self.lift_mm
+        self.frame.lift_mm()
+    }
+
+    /// The one plate plane selected by support planning.
+    #[must_use]
+    pub const fn plate_z_mm(&self) -> Finite {
+        self.frame.plate_z_mm()
     }
 
     #[must_use]
-    pub fn into_reports(self) -> (HollowHistory, SupportReport, PositiveFinite) {
-        (self.hollow, self.support, self.lift_mm)
+    pub fn into_reports(self) -> (HollowHistory, SupportReport, BuildFrame) {
+        (self.hollow, self.support, self.frame)
     }
 }
 
@@ -114,6 +149,15 @@ impl SupportedModel {
         if reported != primitives.len() {
             return Err(SupportError::InconsistentPrimitiveCount);
         }
+        if primitives.iter().any(|primitive| {
+            ((primitive.segment_type == SegmentType::TAPER) != primitive.contact_depth_mm.is_some())
+                || (matches!(
+                    primitive.segment_type,
+                    SegmentType::TIP | SegmentType::SHAFT
+                ) && primitive.start_radius_mm != primitive.end_radius_mm)
+        }) {
+            return Err(SupportError::InvalidPrimitive);
+        }
         Ok(Self {
             mesh,
             primitives,
@@ -140,6 +184,12 @@ impl SupportedModel {
     #[must_use]
     pub const fn lift_mm(&self) -> PositiveFinite {
         self.history.lift_mm()
+    }
+
+    /// The sole physical plate plane shared by support planning and emission.
+    #[must_use]
+    pub const fn plate_z_mm(&self) -> Finite {
+        self.history.plate_z_mm()
     }
 
     /// Moves the sole model mesh, all f64 primitives, and report history together.
@@ -212,6 +262,7 @@ mod tests {
             end_mm: [Finite::new(1.0).expect("finite fixture coordinate"); 3],
             start_radius_mm: PositiveFinite::new(0.5).expect("positive fixture radius"),
             end_radius_mm: PositiveFinite::new(0.5).expect("positive fixture radius"),
+            contact_depth_mm: None,
         }];
         let lift_mm = PositiveFinite::new(5.0).expect("positive fixture lift");
         let mismatch = SupportedModel::from_parts(
@@ -223,7 +274,7 @@ mod tests {
                     support_primitive_count: 1,
                     raft_primitive_count: 0,
                 },
-                lift_mm,
+                BuildFrame::new(Finite::new(-5.0).unwrap(), lift_mm),
             ),
         );
         assert!(matches!(
@@ -239,7 +290,7 @@ mod tests {
                     support_primitive_count: 1,
                     raft_primitive_count: 0,
                 },
-                lift_mm,
+                BuildFrame::new(Finite::new(-5.0).unwrap(), lift_mm),
             ),
         )
         .expect("scene report and primitive vector agree");
@@ -248,5 +299,6 @@ mod tests {
         assert_eq!(primitives.len(), 1);
         assert_eq!(history.support().support_primitive_count, 1);
         assert_eq!(history.lift_mm(), lift_mm);
+        assert_eq!(history.plate_z_mm().get(), -5.0);
     }
 }
