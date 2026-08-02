@@ -1570,6 +1570,54 @@ pub(crate) fn finalize_load_partition(
     })
 }
 
+/// Extend the one generic load authority with the faces served by finalized
+/// specialized physical contacts, then invoke the sole load finalizer.  The
+/// extension is crate-private so callers cannot manufacture eligible load
+/// routes or bypass the generic plan's mesh binding.
+pub(crate) fn finalize_specialized_load_partition(
+    plan: &GenericContactPlan,
+    mesh: &Mesh,
+    surface: &NativeSurface,
+    contacts: &[PhysicalContact],
+    specialized_owner_faces: &[(u32, Vec<u32>)],
+) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
+    let fingerprint = mesh_fingerprint(mesh)
+        .map_err(|error| GenericPerceptionError::Topology(error.to_string()))?;
+    if fingerprint != plan.authority.mesh {
+        return Err(GenericPerceptionError::StaleAuthority);
+    }
+    let mut extended = plan.clone();
+    for (owner_id, faces) in specialized_owner_faces {
+        let owner = LoadOwner::Specialized(*owner_id);
+        for &face_id in faces {
+            if face_id as usize >= mesh.tris().len() {
+                return Err(GenericPerceptionError::SpecializedFaceOutOfRange { face_id });
+            }
+            if let Some(row) = extended
+                .load_eligibility
+                .iter_mut()
+                .find(|row| row.face_id == face_id)
+            {
+                match row.eligible_owners.binary_search(&owner) {
+                    Ok(_) => {}
+                    Err(index) => row.eligible_owners.insert(index, owner),
+                }
+            } else {
+                extended.load_eligibility.push(LoadEligibility {
+                    face_id,
+                    eligible_owners: vec![owner],
+                    centroid_mm: surface.geometry().centroids()[face_id as usize],
+                    area_mm2: surface.geometry().areas()[face_id as usize],
+                });
+            }
+        }
+    }
+    extended
+        .load_eligibility
+        .sort_by_key(|eligibility| eligibility.face_id);
+    finalize_load_partition(&extended, mesh, contacts)
+}
+
 #[cfg_attr(
     not(test),
     allow(dead_code, reason = "used by the crate-private load finalizer")

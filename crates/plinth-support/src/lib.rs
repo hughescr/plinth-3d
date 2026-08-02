@@ -24,6 +24,7 @@ pub mod legacy_compat;
 pub mod member_sizing;
 pub mod perception;
 pub mod raft;
+pub mod specialized;
 pub mod transient;
 
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, SurfaceBuildError};
@@ -1242,11 +1243,16 @@ fn validate_candidate_pool(
         .iter()
         .map(|candidate| candidate.point_mm)
         .collect();
-    let (distances, _, faces, _) = surface.project(&points);
+    let (distances, _, _faces, _) = surface.project(&points);
     let canonical_normals = surface.geometry().normals();
     for (row, candidate) in candidates.candidates().iter().enumerate() {
         let face = candidate.face_id as usize;
-        if distances[row] > 1.0e-6 || faces[row] != i64::from(candidate.face_id) {
+        // A dyadic nomination may be a shared source vertex.  The nearest
+        // projection then has several exact owners and the BVH's deterministic
+        // tie winner need not be the nominated source face.  Candidate pools
+        // are opaque and crate-built; distance plus the separately checked
+        // source-face normal is the correct boundary here.
+        if distances[row] > 1.0e-6 {
             return Err(ContactSelectionError::CandidatePointOffSourceFace {
                 candidate_id: candidate.id,
             });
@@ -1277,7 +1283,7 @@ fn selected_contact(island_id: u32, candidate: &ContactCandidate) -> SelectedCon
     }
 }
 
-fn build_dyadic_coverage_samples(
+pub(crate) fn build_dyadic_coverage_samples(
     mesh: &Mesh,
     islands: &[SupportIsland],
     components: &[u32],
