@@ -17,6 +17,7 @@ mod par;
 mod parity;
 mod point_index;
 mod queries;
+mod segment_batch;
 mod vec3;
 
 pub mod testkit;
@@ -28,6 +29,9 @@ pub use mesh::{FaceBounds, FaceGeometry};
 use parity::ParityBuildError;
 pub use point_index::{NeighborCsr, PointCloudIndex, PointIndexBuildError, PointQueryError};
 pub use queries::{BatchInputError, CastRaysBatch, Interval, NativeSurface, SphereBreachBatch};
+pub use segment_batch::{
+    point_segment_distances_batch, PointSegmentBatchError, PointSegmentDistanceBatch,
+};
 pub use vec3::V3;
 
 pub const KERNEL_API_VERSION: u32 = 1;

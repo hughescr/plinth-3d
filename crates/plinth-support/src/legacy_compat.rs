@@ -146,6 +146,10 @@ impl LegacyCompatibility {
     /// Frozen O-10 deflection component for a transient path length. It calls
     /// the same mechanics leaf as full-span sizing and cannot be constructed
     /// outside this crate.
+    #[allow(
+        dead_code,
+        reason = "the crate-private current-support controller integration follows this parity leaf"
+    )]
     pub(crate) fn deflection_radius_for_geometry(
         &self,
         length_3d_mm: PositiveFinite,

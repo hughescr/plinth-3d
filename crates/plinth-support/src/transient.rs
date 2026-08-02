@@ -21,8 +21,17 @@ use crate::{
 };
 
 const BRACE_ATTACHMENT_TOLERANCE_MM: f64 = 0.25;
+const BRACE_ENDPOINT_BATCH_SIZE: usize = 256;
 const TRANSIENT_TIE_TOLERANCE_MM: f64 = 1e-9;
+#[allow(
+    dead_code,
+    reason = "the crate-private current-support controller integration follows this parity leaf"
+)]
 const MIN_GEOMETRY_LENGTH_MM: f64 = 1e-6;
+#[allow(
+    dead_code,
+    reason = "the crate-private current-support controller integration follows this parity leaf"
+)]
 const MIN_Z_EXTENT_MM: f64 = 1e-9;
 
 /// A restraint grips the path at `point_z_mm`, but exists only once the build
@@ -127,6 +136,8 @@ pub enum TransientError {
     #[error("transient arithmetic produced a non-finite result")]
     NonFiniteResult,
     #[error(transparent)]
+    PointSegmentBatch(#[from] geom_kernel::PointSegmentBatchError),
+    #[error(transparent)]
     Compatibility(#[from] LegacyCompatibilityError),
     #[error(transparent)]
     Sizing(#[from] MemberSizingError),
@@ -208,14 +219,38 @@ pub fn derive_brace_attachments(
         }
     }
 
+    let segment_starts = host_geometry
+        .iter()
+        .map(|(_, (start, _))| *start)
+        .collect::<Vec<_>>();
+    let segment_ends = host_geometry
+        .iter()
+        .map(|(_, (_, end))| *end)
+        .collect::<Vec<_>>();
     let mut out = BTreeMap::<MemberKey, Vec<BraceAttachment>>::new();
-    for (brace, endpoint) in endpoints {
-        for (host, (start, end)) in &host_geometry {
-            if point_segment_distance(endpoint, *start, *end) <= BRACE_ATTACHMENT_TOLERANCE_MM {
-                out.entry(*host).or_default().push(BraceAttachment {
-                    brace,
-                    z_mm: finite(endpoint[2])?,
-                });
+    for endpoint_window in endpoints.chunks(BRACE_ENDPOINT_BATCH_SIZE) {
+        let points = endpoint_window
+            .iter()
+            .map(|(_, point)| *point)
+            .collect::<Vec<_>>();
+        let distances =
+            geom_kernel::point_segment_distances_batch(&points, &segment_starts, &segment_ends)?;
+        debug_assert_eq!(
+            distances.effective_threads(),
+            geom_kernel::current_threads()
+        );
+        for (endpoint_index, (brace, endpoint)) in endpoint_window.iter().enumerate() {
+            let row = distances
+                .row(endpoint_index)
+                .expect("batch retains one result row per gathered endpoint");
+            for (host_index, distance) in row.iter().enumerate() {
+                if *distance <= BRACE_ATTACHMENT_TOLERANCE_MM {
+                    let host = host_geometry[host_index].0;
+                    out.entry(host).or_default().push(BraceAttachment {
+                        brace: *brace,
+                        z_mm: finite(endpoint[2])?,
+                    });
+                }
             }
         }
     }
@@ -373,7 +408,11 @@ pub fn transient_report(
 /// Compute a new complete radius array in child-before-parent order. The
 /// O-10 bridge supplies the sole frozen 0.01 N compatibility load; this module
 /// neither calibrates it nor promotes it to acceptance evidence.
-pub fn resize_forest_current_parity(
+#[allow(
+    dead_code,
+    reason = "the crate-private current-support controller integration follows this parity leaf"
+)]
+pub(crate) fn resize_forest_current_parity(
     forest: &Forest,
     plate_z_mm: Finite,
 ) -> Result<TransientResizePlan, TransientError> {
@@ -630,6 +669,10 @@ fn free_gaps(zlo: f64, zhi: f64, restraints: &[Finite]) -> Result<Vec<ZInterval>
         .collect()
 }
 
+#[allow(
+    dead_code,
+    reason = "the crate-private current-support controller integration follows this parity leaf"
+)]
 fn postorder(forest: &Forest) -> Vec<MemberKey> {
     fn visit(
         forest: &Forest,
@@ -698,36 +741,12 @@ fn best_member_interval(
     (best, winner)
 }
 
+#[allow(
+    dead_code,
+    reason = "the crate-private current-support controller integration follows this parity leaf"
+)]
 fn equivalent_free_length_mm(worst_gap_z_mm: f64, own_length_mm: f64, z_extent_mm: f64) -> f64 {
     worst_gap_z_mm * own_length_mm / z_extent_mm.max(MIN_Z_EXTENT_MM)
-}
-
-fn point_segment_distance(point: [f64; 3], start: [f64; 3], end: [f64; 3]) -> f64 {
-    let axis = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
-    let relative = [
-        point[0] - start[0],
-        point[1] - start[1],
-        point[2] - start[2],
-    ];
-    let length_squared = dot(axis, axis);
-    let t = if length_squared < 1e-18 {
-        0.0
-    } else {
-        (dot(relative, axis) / length_squared).clamp(0.0, 1.0)
-    };
-    let projection = [
-        start[0] + t * axis[0],
-        start[1] + t * axis[1],
-        start[2] + t * axis[2],
-    ];
-    ((point[0] - projection[0]).powi(2)
-        + (point[1] - projection[1]).powi(2)
-        + (point[2] - projection[2]).powi(2))
-    .sqrt()
-}
-
-fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
-    left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
 }
 
 fn interval(lo: f64, hi: f64) -> Result<ZInterval, TransientError> {
@@ -741,6 +760,10 @@ fn finite(value: f64) -> Result<Finite, TransientError> {
     Finite::new(value).map_err(|_| TransientError::NonFiniteResult)
 }
 
+#[allow(
+    dead_code,
+    reason = "the crate-private current-support controller integration follows this parity leaf"
+)]
 fn positive(value: f64) -> Result<PositiveFinite, TransientError> {
     PositiveFinite::new(value).map_err(|_| TransientError::NonFiniteResult)
 }
@@ -987,6 +1010,41 @@ mod tests {
     }
 
     #[test]
+    fn brace_endpoint_batch_crosses_the_frozen_256_row_window_without_reordering() {
+        let mut forest = Forest::new();
+        let host = forest.add_member(member(
+            0,
+            [0.0, 0.0, 20.0],
+            [0.0, 0.0, 0.0],
+            MemberKind::Trunk,
+            0.8,
+            0.8,
+        ));
+        let mut expected = Vec::new();
+        for ordinal in 1..=129 {
+            let z = f64::from(ordinal) / 10.0;
+            let brace = forest.add_brace(member(
+                ordinal,
+                [0.1, 0.0, z],
+                [0.1, 0.0, z],
+                MemberKind::Brace,
+                0.3,
+                0.3,
+            ));
+            expected.extend([brace, brace]);
+        }
+        let attachments = derive_brace_attachments(&forest).unwrap();
+        assert_eq!(attachments[&host].len(), 258);
+        assert_eq!(
+            attachments[&host]
+                .iter()
+                .map(|attachment| attachment.brace)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+
+    #[test]
     fn leaning_free_gap_is_converted_back_to_true_3d_length() {
         let own_length = 20.0;
         let z_extent = 10.0;
@@ -1020,8 +1078,33 @@ mod tests {
     fn plan_is_identical_at_one_four_and_sixteen_workspace_threads() {
         const MARKER: &str = "PLINTH_TRANSIENT_THREAD_CHILD";
         if std::env::var_os(MARKER).is_some() {
-            let (forest, ..) = branched_fixture();
+            let expected_threads = std::env::var("PLINTH_THREADS")
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            let pool_probe = geom_kernel::point_segment_distances_batch(
+                &[[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+                &[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+                &[[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+            )
+            .unwrap();
+            assert_eq!(pool_probe.effective_threads(), expected_threads);
+            assert_eq!(geom_kernel::current_threads(), expected_threads);
+
+            let (mut forest, root, ..) = branched_fixture();
+            let brace = forest.add_brace(member(
+                100,
+                [0.1, 0.0, 5.0],
+                [4.0, 0.0, 5.0],
+                MemberKind::Brace,
+                0.3,
+                0.3,
+            ));
+            let attachments = derive_brace_attachments(&forest).unwrap();
+            assert_eq!(attachments[&root][0].brace, brace);
             let plan = resize_forest_current_parity(&forest, f(0.0)).unwrap();
+            assert!(!plan.radii.is_empty());
+            assert!(!plan.report.members.is_empty());
             println!("TRANSIENT_PLAN={}", serde_json::to_string(&plan).unwrap());
             return;
         }
