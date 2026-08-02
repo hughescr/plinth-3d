@@ -9,6 +9,25 @@
 use crate::consts::{PARITY_DEN_EPS, PARITY_SLACK, ZDEDUP};
 use crate::mesh::Mesh;
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum ParityBuildError {
+    GridBudget {
+        axis: usize,
+        projected_bytes: usize,
+        limit_bytes: usize,
+    },
+    Other(String),
+}
+
+impl std::fmt::Display for ParityBuildError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::GridBudget { axis, projected_bytes, limit_bytes } => write!(formatter, "parity grid axis {axis} exceeds memory budget: {projected_bytes} bytes projected > {limit_bytes} budget (spec sec 3.5 / Amendment A17)"),
+            Self::Other(message) => formatter.write_str(message),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct FaceRef {
     face_id: u32,
@@ -50,12 +69,12 @@ pub struct AxisGrid {
 }
 
 impl AxisGrid {
-    pub fn build(
+    pub(crate) fn build(
         mesh: &Mesh,
         ax: usize,
         h: f64,
         max_grid_bytes: usize,
-    ) -> Result<AxisGrid, String> {
+    ) -> Result<AxisGrid, ParityBuildError> {
         let n = mesh.nfaces();
         // Peak-memory accounting (Amendment A17 / spec sec 3.5): a large
         // projected triangle bins into every overlapped cell, so the CSR ref
@@ -134,7 +153,9 @@ impl AxisGrid {
                     let flat = ix
                         .checked_mul(ny)
                         .and_then(|v| v.checked_add(iy))
-                        .ok_or_else(|| "parity flat-id overflow".to_string())?;
+                        .ok_or_else(|| {
+                            ParityBuildError::Other("parity flat-id overflow".to_string())
+                        })?;
                     pairs.push((
                         flat,
                         FaceRef {
@@ -148,16 +169,18 @@ impl AxisGrid {
             // cell fan-out, so we fail before the pair vector grows unbounded.
             let projected = per_tri_bytes.saturating_add(pairs.len().saturating_mul(pair_bytes));
             if projected > max_grid_bytes {
-                return Err(format!(
-                    "parity grid axis {} exceeds memory budget: {} bytes projected > {} budget \
-                     (spec sec 3.5 / Amendment A17)",
-                    ax, projected, max_grid_bytes
-                ));
+                return Err(ParityBuildError::GridBudget {
+                    axis: ax,
+                    projected_bytes: projected,
+                    limit_bytes: max_grid_bytes,
+                });
             }
         }
 
         if pairs.len() > u32::MAX as usize {
-            return Err("parity grid exceeds 2^32 triangle references".into());
+            return Err(ParityBuildError::Other(
+                "parity grid exceeds 2^32 triangle references".into(),
+            ));
         }
 
         // sort by flat id (stable-not-required; intra-cell order is irrelevant
@@ -300,7 +323,11 @@ pub struct ParityVote {
 }
 
 impl ParityVote {
-    pub fn build(mesh: &Mesh, h: f64, max_grid_bytes: usize) -> Result<ParityVote, String> {
+    pub(crate) fn build(
+        mesh: &Mesh,
+        h: f64,
+        max_grid_bytes: usize,
+    ) -> Result<ParityVote, ParityBuildError> {
         let g0 = AxisGrid::build(mesh, 0, h, max_grid_bytes)?;
         let g1 = AxisGrid::build(mesh, 1, h, max_grid_bytes)?;
         let g2 = AxisGrid::build(mesh, 2, h, max_grid_bytes)?;

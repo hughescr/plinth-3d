@@ -9,7 +9,7 @@
 //! kinds and f64 geometry; `plinth-emit` alone maps them to ChituBox record identities and f32.
 #![forbid(unsafe_code)]
 
-use geom_kernel::{NativeSurface, NativeSurfaceConfig};
+use geom_kernel::{NativeSurface, NativeSurfaceConfig, SurfaceBuildError};
 use plinth_core::{m0_constants, Finite, PositiveFinite};
 use plinth_hollow::HollowHistory;
 use plinth_mesh::{build_face_topology, Mesh, WeldPolicy};
@@ -914,12 +914,6 @@ pub enum ContactSelectionError {
     InvalidResourceRequest,
     #[error("dyadic coverage requires {required} virtual cells; limit is {limit}")]
     CoverageVirtualCellLimit { required: usize, limit: usize },
-    #[error("dyadic coverage face {face_id} requires {required} working cells; limit is {limit}")]
-    CoverageWorkingCellLimit {
-        face_id: u32,
-        required: usize,
-        limit: usize,
-    },
     #[error("dyadic coverage compact payload requires {required} bytes; limit is {limit}")]
     CoverageCompactPayloadLimit { required: usize, limit: usize },
     #[error("dyadic coverage {phase} peak requires {required} bytes; limit is {limit}")]
@@ -1177,15 +1171,11 @@ fn validate_candidate_pool(
             max_grid_bytes: config.surface_max_grid_bytes,
         },
     )
-    .map_err(|error| {
-        let message = error.to_string();
-        if message.contains("exceeds memory budget") {
-            ContactSelectionError::CandidateSurfaceGridLimit {
-                limit: config.surface_max_grid_bytes,
-            }
-        } else {
-            ContactSelectionError::CandidateSurface(message)
+    .map_err(|error| match error {
+        SurfaceBuildError::GridBudget { limit_bytes, .. } => {
+            ContactSelectionError::CandidateSurfaceGridLimit { limit: limit_bytes }
         }
+        other => ContactSelectionError::CandidateSurface(other.to_string()),
     })?;
     let points: Vec<[f64; 3]> = candidates
         .candidates()
@@ -1233,6 +1223,16 @@ fn build_dyadic_coverage_samples(
     components: &[u32],
     config: &ContactSelectionConfig<'_>,
 ) -> Result<Vec<CoverageSample>, ContactSelectionError> {
+    build_dyadic_coverage_samples_with_high_water(mesh, islands, components, config)
+        .map(|(samples, _)| samples)
+}
+
+fn build_dyadic_coverage_samples_with_high_water(
+    mesh: &Mesh,
+    islands: &[SupportIsland],
+    components: &[u32],
+    config: &ContactSelectionConfig<'_>,
+) -> Result<(Vec<CoverageSample>, usize), ContactSelectionError> {
     let plan = plan_dyadic_coverage(mesh, islands, config)?;
     let mut samples = vec![
         CoverageSample {
@@ -1245,27 +1245,47 @@ fn build_dyadic_coverage_samples(
         plan.total_cells
     ];
     let mut offset = 0;
-    for face in &plan.faces {
-        let triangle = mesh.tris()[face.face_id as usize];
-        let cell = [
-            mesh.verts()[triangle[0] as usize],
-            mesh.verts()[triangle[1] as usize],
-            mesh.verts()[triangle[2] as usize],
-        ];
-        let end = offset + face.terminal_cells;
-        fill_dyadic_cells(
-            cell,
-            face.depth,
-            &mut samples[offset..end],
-            CoverageSample {
-                island_id: face.island_id,
-                face_id: face.face_id,
-                component_id: components[face.face_id as usize],
+    let mut observed_working_high_water = 0;
+    for island in islands {
+        for &face_id in &island.face_ids {
+            let triangle = mesh.tris()[face_id as usize];
+            let cell = [
+                mesh.verts()[triangle[0] as usize],
+                mesh.verts()[triangle[1] as usize],
+                mesh.verts()[triangle[2] as usize],
+            ];
+            let depth = dyadic_refine_depth(max_edge_mm(cell), config.voxel_pitch_mm.get());
+            let terminal_cells = 4_usize
+                .checked_pow(depth)
+                .ok_or(ContactSelectionError::CoverageResourceOverflow)?;
+            let template = CoverageSample {
+                island_id: island.id,
+                face_id,
+                component_id: components[face_id as usize],
                 point_mm: [0.0; 3],
-                area_mm2: triangle_area_mm2(cell) / face.terminal_cells as f64,
-            },
-        );
-        offset = end;
+                area_mm2: triangle_area_mm2(cell) / terminal_cells as f64,
+            };
+            let mut face_start = 0;
+            while face_start < terminal_cells {
+                let window_len =
+                    (terminal_cells - face_start).min(config.coverage_samples_max_working_cells);
+                observed_working_high_water = observed_working_high_water.max(window_len);
+                for local in 0..window_len {
+                    let leaf = dyadic_cell_at_index(cell, depth, face_start + local);
+                    let [a, b, c] = leaf;
+                    samples[offset + face_start + local] = CoverageSample {
+                        point_mm: [
+                            (a[0] + b[0] + c[0]) / 3.0,
+                            (a[1] + b[1] + c[1]) / 3.0,
+                            (a[2] + b[2] + c[2]) / 3.0,
+                        ],
+                        ..template.clone()
+                    };
+                }
+                face_start += window_len;
+            }
+            offset += terminal_cells;
+        }
     }
     debug_assert_eq!(offset, samples.len());
     samples.sort_unstable_by(|left, right| {
@@ -1276,24 +1296,15 @@ fn build_dyadic_coverage_samples(
             .then_with(|| left.point_mm[1].total_cmp(&right.point_mm[1]))
             .then_with(|| left.point_mm[2].total_cmp(&right.point_mm[2]))
     });
-    Ok(samples)
+    Ok((samples, observed_working_high_water))
 }
 
 const COVERAGE_SAMPLE_BYTES: usize = 49;
 const COVERAGE_PLAN_FACE_BATCH: usize = 2_048;
 const COVERAGE_METADATA_BYTES: usize = 330;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct CoverageFacePlan {
-    island_id: u32,
-    face_id: u32,
-    depth: u32,
-    terminal_cells: usize,
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct CoverageBuildPlan {
-    faces: Vec<CoverageFacePlan>,
     total_cells: usize,
     source_faces: usize,
     working_cells: usize,
@@ -1312,7 +1323,6 @@ fn plan_dyadic_coverage(
             .checked_add(island.face_ids.len())
             .ok_or(ContactSelectionError::CoverageResourceOverflow)
     })?;
-    let mut faces = Vec::with_capacity(source_faces);
     let mut total_cells = 0_usize;
     for island in islands {
         for &face_id in &island.face_ids {
@@ -1327,22 +1337,9 @@ fn plan_dyadic_coverage(
             let terminal_cells = 4_usize
                 .checked_pow(depth)
                 .ok_or(ContactSelectionError::CoverageResourceOverflow)?;
-            if terminal_cells > config.coverage_samples_max_working_cells {
-                return Err(ContactSelectionError::CoverageWorkingCellLimit {
-                    face_id,
-                    required: terminal_cells,
-                    limit: config.coverage_samples_max_working_cells,
-                });
-            }
             total_cells = total_cells
                 .checked_add(terminal_cells)
                 .ok_or(ContactSelectionError::CoverageResourceOverflow)?;
-            faces.push(CoverageFacePlan {
-                island_id: island.id,
-                face_id,
-                depth,
-                terminal_cells,
-            });
         }
     }
     if total_cells > config.coverage_samples_max_virtual_cells {
@@ -1389,7 +1386,6 @@ fn plan_dyadic_coverage(
         });
     }
     Ok(CoverageBuildPlan {
-        faces,
         total_cells,
         source_faces,
         working_cells,
@@ -1498,35 +1494,21 @@ fn coverage_validation_peak_bytes(
         .ok_or(ContactSelectionError::CoverageResourceOverflow)
 }
 
-fn fill_dyadic_cells(
-    [a, b, c]: [[f64; 3]; 3],
-    depth: u32,
-    output: &mut [CoverageSample],
-    template: CoverageSample,
-) {
-    if depth == 0 {
-        debug_assert_eq!(output.len(), 1);
-        output[0] = CoverageSample {
-            point_mm: [
-                (a[0] + b[0] + c[0]) / 3.0,
-                (a[1] + b[1] + c[1]) / 3.0,
-                (a[2] + b[2] + c[2]) / 3.0,
-            ],
-            ..template
+fn dyadic_cell_at_index(mut cell: [[f64; 3]; 3], depth: u32, index: usize) -> [[f64; 3]; 3] {
+    for level in (0..depth).rev() {
+        let [a, b, c] = cell;
+        let ab = midpoint(a, b);
+        let bc = midpoint(b, c);
+        let ca = midpoint(c, a);
+        let digit = (index >> (2 * level)) & 3;
+        cell = match digit {
+            0 => [a, ab, ca],
+            1 => [ab, b, bc],
+            2 => [ca, bc, c],
+            _ => [ab, bc, ca],
         };
-        return;
     }
-    let ab = midpoint(a, b);
-    let bc = midpoint(b, c);
-    let ca = midpoint(c, a);
-    let quarter = output.len() / 4;
-    let (first, rest) = output.split_at_mut(quarter);
-    let (second, rest) = rest.split_at_mut(quarter);
-    let (third, fourth) = rest.split_at_mut(quarter);
-    fill_dyadic_cells([a, ab, ca], depth - 1, first, template.clone());
-    fill_dyadic_cells([ab, b, bc], depth - 1, second, template.clone());
-    fill_dyadic_cells([ca, bc, c], depth - 1, third, template.clone());
-    fill_dyadic_cells([ab, bc, ca], depth - 1, fourth, template);
+    cell
 }
 
 /// Frozen `placement._refine_depths` scalar rule, including its one-ULP
@@ -1729,12 +1711,14 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
 
+    const TEST_GRID_BUDGET_BYTES: usize = 64 * 1024 * 1024;
+
     fn config<'a>(_mesh: &Mesh, delicacy: &'a [f64]) -> SupportPerceptionConfig<'a> {
         SupportPerceptionConfig::current(
             Finite::new(-5.0).expect("finite fixture plate"),
             PositiveFinite::new(1.0).expect("positive fixture column pitch"),
             PositiveFinite::new(0.5).expect("positive fixture native-grid pitch"),
-            usize::MAX,
+            TEST_GRID_BUDGET_BYTES,
             Some(delicacy),
         )
         .expect("registered M0 constants are available")
@@ -1838,7 +1822,7 @@ mod tests {
             Finite::new(-1.0).expect("finite fixture plate"),
             PositiveFinite::new(1.0).expect("positive fixture column pitch"),
             PositiveFinite::new(0.5).expect("positive fixture native-grid pitch"),
-            usize::MAX,
+            TEST_GRID_BUDGET_BYTES,
             Some(&delicacy),
         )
         .expect("registered M0 constants are available");
@@ -1866,7 +1850,7 @@ mod tests {
             Finite::new(-5.0).expect("finite plate"),
             PositiveFinite::new(1.0).expect("positive column pitch"),
             PositiveFinite::new(0.5).expect("positive grid pitch"),
-            usize::MAX,
+            TEST_GRID_BUDGET_BYTES,
             None,
         )
         .expect("registered constants");
@@ -2444,14 +2428,9 @@ mod tests {
         );
         let mut config = base;
         config.coverage_samples_max_working_cells = 63;
-        assert_eq!(
-            plan_dyadic_coverage(&mesh, &islands, &config),
-            Err(ContactSelectionError::CoverageWorkingCellLimit {
-                face_id: 0,
-                required: 64,
-                limit: 63
-            })
-        );
+        let windowed = plan_dyadic_coverage(&mesh, &islands, &config).unwrap();
+        assert_eq!(windowed.total_cells, 64);
+        assert_eq!(windowed.working_cells, 63);
         let mut config = base;
         config.coverage_samples_max_compact_payload_bytes = 3_497;
         assert_eq!(
@@ -2493,9 +2472,14 @@ mod tests {
             ]);
         }
         let many = Mesh::new(verts, tris).expect("closed component batch");
-        let build = coverage_build_peak_bytes(64, 1, 64, 1, 400, 400).unwrap();
-        let validation = coverage_validation_peak_bytes(64, 1, 1, 400, 400).unwrap();
-        assert!(validation > build);
+        // Independent frozen equations for N=64,S=1,I=1,W=64,F=400,V=400.
+        let build = 19_939;
+        let validation = 40_170;
+        assert_eq!(coverage_build_peak_bytes(64, 1, 64, 1, 400, 400), Ok(build));
+        assert_eq!(
+            coverage_validation_peak_bytes(64, 1, 1, 400, 400),
+            Ok(validation)
+        );
         let mut config = base;
         config.coverage_samples_max_peak_bytes = validation - 1;
         assert_eq!(
@@ -2506,6 +2490,71 @@ mod tests {
                 limit: validation - 1
             })
         );
+    }
+
+    #[test]
+    fn validation_peak_vectors_are_independent_and_pin_multiple_axes() {
+        // N=16,S=2,I=3,W=7,F=10,V=12. These literals are evaluated from the
+        // normative equations, not from another implementation helper.
+        assert_eq!(coverage_compact_bytes(16, 2, 3), Ok(1_186));
+        assert_eq!(coverage_build_peak_bytes(16, 2, 7, 3, 10, 12), Ok(3_380));
+        assert_eq!(coverage_validation_peak_bytes(16, 2, 3, 10, 12), Ok(3_874));
+    }
+
+    #[test]
+    fn planning_streams_malicious_overlapping_islands_without_plan_rows() {
+        let mesh = small_closed_tetra();
+        let delicacy = vec![0.25; mesh.tris().len()];
+        let mut config = selection_config(&delicacy);
+        config.coverage_samples_max_virtual_cells = 1_000;
+        let islands: Vec<SupportIsland> = (0..50_000_u32)
+            .map(|id| SupportIsland {
+                id,
+                face_ids: vec![0],
+            })
+            .collect();
+        assert_eq!(
+            plan_dyadic_coverage(&mesh, &islands, &config),
+            Err(ContactSelectionError::CoverageVirtualCellLimit {
+                required: 3_200_000,
+                limit: 1_000,
+            })
+        );
+        assert_eq!(
+            std::mem::size_of::<CoverageBuildPlan>(),
+            6 * std::mem::size_of::<usize>()
+        );
+    }
+
+    #[test]
+    fn one_face_larger_than_working_window_is_bit_identical_and_bounded() {
+        let mesh = small_closed_tetra();
+        let delicacy = vec![0.25; mesh.tris().len()];
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let islands = vec![SupportIsland {
+            id: 7,
+            face_ids: vec![0],
+        }];
+        let mut expected = None;
+        for working in [1, 3, 7, 63, 64] {
+            let mut config = selection_config(&delicacy);
+            config.coverage_samples_max_working_cells = working;
+            let (samples, observed) = build_dyadic_coverage_samples_with_high_water(
+                &mesh,
+                &islands,
+                topology.component_ids(),
+                &config,
+            )
+            .unwrap();
+            assert_eq!(samples.len(), 64);
+            assert!(observed <= working, "observed {observed} > W={working}");
+            assert_eq!(observed, working.min(64));
+            if let Some(ref prior) = expected {
+                assert_eq!(&samples, prior);
+            } else {
+                expected = Some(samples);
+            }
+        }
     }
 
     #[test]

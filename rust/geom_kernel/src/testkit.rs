@@ -9,6 +9,8 @@ use crate::moller::moller as _moller;
 use crate::queries::NativeSurface;
 use crate::vec3::{norm, sub, V3};
 
+const TEST_UNBOUNDED_GRID_BYTES: usize = usize::MAX;
+
 pub struct TestMesh {
     pub tris: Vec<f64>, // n*9
     pub normals: Vec<f64>,
@@ -114,7 +116,7 @@ pub fn make_slivers(n: usize) -> TestMesh {
 
 pub fn build_surface(m: &TestMesh) -> NativeSurface {
     let mesh = Mesh::new(&m.tris, &m.normals, &m.areas, &m.bounds).unwrap();
-    NativeSurface::new(mesh, 2.0, usize::MAX).unwrap()
+    NativeSurface::new(mesh, 2.0, TEST_UNBOUNDED_GRID_BYTES).unwrap()
 }
 
 /// Build a surface directly from a flat n*9 triangle list (test fixtures).
@@ -125,7 +127,7 @@ pub fn build_from_tris(tris: Vec<f64>) -> NativeSurface {
 /// Build with an explicit parity-grid memory budget (A17 budget-failure test).
 pub fn build_surface_budget(m: &TestMesh, max_grid_bytes: usize) -> Result<NativeSurface, String> {
     let mesh = Mesh::new(&m.tris, &m.normals, &m.areas, &m.bounds)?;
-    NativeSurface::new(mesh, 2.0, max_grid_bytes)
+    NativeSurface::new(mesh, 2.0, max_grid_bytes).map_err(|error| error.to_string())
 }
 
 /// Public accessor for the make_* meshes so the budget test can reuse them.

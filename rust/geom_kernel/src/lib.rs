@@ -26,6 +26,7 @@ use std::borrow::Cow;
 use mesh::Mesh;
 pub use mesh::{FaceBounds, FaceGeometry};
 pub use point_index::{NeighborCsr, PointCloudIndex, PointIndexBuildError, PointQueryError};
+use parity::ParityBuildError;
 pub use queries::{BatchInputError, CastRaysBatch, Interval, NativeSurface, SphereBreachBatch};
 pub use vec3::V3;
 
@@ -135,6 +136,11 @@ pub enum SurfaceBuildError {
         max: f64,
     },
     InvalidGridPitch(f64),
+    GridBudget {
+        axis: usize,
+        projected_bytes: usize,
+        limit_bytes: usize,
+    },
     Kernel(String),
 }
 
@@ -180,6 +186,14 @@ impl std::fmt::Display for SurfaceBuildError {
             Self::InvalidGridPitch(value) => write!(
                 formatter,
                 "grid_pitch_mm must be finite and greater than zero, got {value}"
+            ),
+            Self::GridBudget {
+                axis,
+                projected_bytes,
+                limit_bytes,
+            } => write!(
+                formatter,
+                "parity grid axis {axis} exceeds memory budget: {projected_bytes} bytes projected > {limit_bytes} budget"
             ),
             Self::Kernel(message) => write!(formatter, "kernel construction failed: {message}"),
         }
@@ -243,6 +257,21 @@ impl std::fmt::Display for SurfaceSubsetError {
 }
 
 impl std::error::Error for SurfaceSubsetError {}
+
+fn map_surface_kernel_error(error: ParityBuildError) -> SurfaceBuildError {
+    match error {
+        ParityBuildError::GridBudget {
+            axis,
+            projected_bytes,
+            limit_bytes,
+        } => SurfaceBuildError::GridBudget {
+            axis,
+            projected_bytes,
+            limit_bytes,
+        },
+        ParityBuildError::Other(message) => SurfaceBuildError::Kernel(message),
+    }
+}
 
 impl NativeSurface {
     /// Construct the existing query engine from typed owned or borrowed data.
@@ -320,7 +349,7 @@ impl NativeSurface {
         }
 
         let mesh = Mesh::from_soup(&soup.triangles, &soup.normals, &soup.areas, soup.bounds);
-        Self::new(mesh, grid_pitch_mm, max_grid_bytes).map_err(SurfaceBuildError::Kernel)
+        Self::new(mesh, grid_pitch_mm, max_grid_bytes).map_err(map_surface_kernel_error)
     }
 
     /// Construct a surface from indexed vertices and faces, deriving face
@@ -336,7 +365,7 @@ impl NativeSurface {
         }
         let mesh = Mesh::from_indexed(vertices, faces)?;
         Self::new(mesh, config.grid_pitch_mm, config.max_grid_bytes)
-            .map_err(SurfaceBuildError::Kernel)
+            .map_err(map_surface_kernel_error)
     }
 
     /// Number of faces selected by this immutable surface view.
@@ -386,6 +415,8 @@ fn validate_finite(field: &'static str, values: &[f64]) -> Result<(), SurfaceBui
 mod thread_tests {
     use super::*;
 
+    const TEST_UNBOUNDED_GRID_BYTES: usize = usize::MAX;
+
     struct RestoreVar(Option<std::ffi::OsString>);
 
     impl Drop for RestoreVar {
@@ -410,7 +441,7 @@ mod thread_tests {
                 [[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
             ),
             2.0,
-            usize::MAX,
+            TEST_UNBOUNDED_GRID_BYTES,
         )
         .unwrap();
         let subset = surface.subset(&[0]).unwrap();
