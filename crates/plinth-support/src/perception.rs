@@ -1095,35 +1095,29 @@ fn solids_overlap(
     if aa[1] < bb[0] || bb[1] < aa[0] || aa[3] < bb[2] || bb[3] < aa[2] {
         return Ok(false);
     }
-    for (source, target) in [(&a.outer, b), (&b.outer, a)] {
+    for (source, target) in [(&a.outer, &b.outer), (&b.outer, &a.outer)] {
         let step = (source.points_xy_mm.len() / 40).max(1);
         for index in (0..source.points_xy_mm.len()).step_by(step) {
             budget.vertex()?;
-            if solid_contains(target, source.points_xy_mm[index]) {
+            if point_in_polygon(source.points_xy_mm[index], target.points_xy_mm()) {
                 return Ok(true);
             }
         }
     }
-    let boundaries_a = std::iter::once(&a.outer).chain(a.holes.iter());
-    let boundaries_b = std::iter::once(&b.outer)
-        .chain(b.holes.iter())
-        .collect::<Vec<_>>();
-    for left in boundaries_a {
-        let left_step = (left.points_xy_mm.len() / 60).max(1);
-        for right in &boundaries_b {
-            let right_step = (right.points_xy_mm.len() / 60).max(1);
-            for i in (0..left.points_xy_mm.len()).step_by(left_step) {
-                for j in (0..right.points_xy_mm.len()).step_by(right_step) {
-                    budget.edge()?;
-                    if segments_intersect(
-                        left.points_xy_mm[i],
-                        left.points_xy_mm[(i + left_step) % left.points_xy_mm.len()],
-                        right.points_xy_mm[j],
-                        right.points_xy_mm[(j + right_step) % right.points_xy_mm.len()],
-                    ) {
-                        return Ok(true);
-                    }
-                }
+    let left = &a.outer;
+    let right = &b.outer;
+    let left_step = (left.points_xy_mm.len() / 60).max(1);
+    let right_step = (right.points_xy_mm.len() / 60).max(1);
+    for i in (0..left.points_xy_mm.len()).step_by(left_step) {
+        for j in (0..right.points_xy_mm.len()).step_by(right_step) {
+            budget.edge()?;
+            if segments_intersect(
+                left.points_xy_mm[i],
+                left.points_xy_mm[(i + left_step) % left.points_xy_mm.len()],
+                right.points_xy_mm[j],
+                right.points_xy_mm[(j + right_step) % right.points_xy_mm.len()],
+            ) {
+                return Ok(true);
             }
         }
     }
@@ -1758,7 +1752,7 @@ mod tests {
     }
 
     #[test]
-    fn frozen_loop_birth_and_hole_vectors_are_not_self_generated() {
+    fn frozen_birth_overlap_ignores_retained_negative_winding_holes_like_python() {
         let square =
             |x0: f64, y0: f64, x1: f64, y1: f64| vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
         let outer = SliceLoop {
@@ -1776,10 +1770,16 @@ mod tests {
             signed_area_mm2: 0.36,
             hole: false,
         };
+        let disjoint_asymmetric = SliceLoop {
+            points_xy_mm: vec![[5.1, 1.1], [5.9, 1.1], [5.9, 1.3], [5.1, 1.8]],
+            signed_area_mm2: 0.36,
+            hole: false,
+        };
         let first = SliceSolid {
             outer: outer.clone(),
             holes: vec![hole],
         };
+        assert_eq!(first.holes.len(), 1, "hole remains retained as evidence");
         let births = find_births(
             &[0, 1],
             &[0.025, 0.075],
@@ -1789,6 +1789,10 @@ mod tests {
                     first,
                     SliceSolid {
                         outer: inside_prior_hole,
+                        holes: vec![],
+                    },
+                    SliceSolid {
+                        outer: disjoint_asymmetric,
                         holes: vec![],
                     },
                 ],
@@ -1802,9 +1806,15 @@ mod tests {
         .unwrap();
         assert_eq!(births.len(), 2);
         assert_eq!(births[0].centroid_xy_mm, [2.0, 2.0]);
+        assert!(
+            !births
+                .iter()
+                .any(|birth| birth.centroid_xy_mm == [1.5, 1.325]),
+            "a current outer inside the prior outer is overlapping in the live Python predicate, even when it lies in a retained hole"
+        );
         // Boundary-point mean, matching frozen Path2D.discrete behavior;
         // deliberately asymmetric so an area centroid cannot pass.
-        assert_eq!(births[1].centroid_xy_mm, [1.5, 1.325]);
+        assert_eq!(births[1].centroid_xy_mm, [5.5, 1.325]);
     }
 
     #[test]
