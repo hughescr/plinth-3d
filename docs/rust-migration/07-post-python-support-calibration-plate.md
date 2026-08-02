@@ -20,20 +20,28 @@ Create a dated preregistration that fixes the following without post-hoc changes
 1. **Geometry manifest.** Assign immutable IDs and exact dimensions/files to every
    arm, cap, load-proxy, brace, coupon location, and orientation. Record member
    angle, free length, diameter, brace geometry, and orientation relative to the
-   peel sweep.
+   peel sweep. Pin the exact generated and printable artifact paths and their
+   cryptographic digests before fabrication; the results note must cite the same
+   paths and digests or record a deviation.
 2. **Factorial conditions.** Vary member angle, free length, diameter, and
    orientation to the peel sweep. Include brace/no-brace (and the declared brace
    geometry) so the result identifies brace behavior rather than assuming it.
 3. **Controlled loading.** Hold the declared cap geometry and load proxy constant
    within each comparison. State the lateral-load/deflection proxy, its application
-   point and direction, the failure definition, and the measurement method.
+   point and direction, the failure definition, and the measurement method. Define
+   the load path through the member and brace, and record the brace attachment and
+   activation heights so a brace is credited only after both endpoints exist in the
+   layer sequence.
 4. **Controls and repeats.** Predeclare control coupons, randomized/blocked plate
    placement as applicable, repeat count per condition, exclusion rules, and how
    failed prints versus failed coupons are reported. Repeats are evidence, not
    optional retries.
 5. **Fixed production environment.** Use the Saturn 4 Ultra 16K with the unchanged
    production resin and production print profile. Record printer, resin lot, profile
-   digest/settings, plate file digest, and print date for every run.
+   digest/settings, plate file digest, and print date for every run. Preregister the
+   allowed tank-temperature window and the release-film type, thickness, installation
+   date/usage condition, inspection method, and replacement rule; record the actual
+   tank temperature and film condition for every plate.
 6. **Hypotheses and scoring.** Preregister directional hypotheses for lateral-load
    capacity, deflection, and brace effect; the scoring equations/thresholds; and
    how uncertainty and inconclusive outcomes are represented. Do not promote a
