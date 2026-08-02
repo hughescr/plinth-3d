@@ -3715,21 +3715,27 @@ mod tests {
             (
                 "overhang table",
                 make_overhang_table().unwrap(),
-                2_380_499_546_943_577_664_u64,
+                // Updated for the fixed Python-exact shared-regular representative
+                // key/order; this is not a corpus, baseline, physics, or reference re-freeze.
+                9_852_675_517_045_937_360_u64,
                 (95, 51_200, 14),
                 (6, 10, 4),
             ),
             (
                 "raking blade",
                 make_raking_blade().unwrap(),
-                6_330_805_288_930_875_620_u64,
+                // Updated for the fixed Python-exact shared-regular representative
+                // key/order; this is not a corpus, baseline, physics, or reference re-freeze.
+                7_393_986_023_976_210_503_u64,
                 (40, 40_192, 13),
                 (3, 43, 8),
             ),
             (
                 "thin fin",
                 make_thin_fin().unwrap(),
-                1_794_713_636_406_357_628_u64,
+                // Updated for the fixed Python-exact shared-regular representative
+                // key/order; this is not a corpus, baseline, physics, or reference re-freeze.
+                13_057_415_443_656_672_379_u64,
                 (19, 20_480, 2),
                 (2, 1, 1),
             ),
