@@ -1,19 +1,27 @@
-//! Data boundary for the single final ChituBox write.
+//! The single final ChituBox emission boundary.
 //!
-//! This checkpoint intentionally contains no geometry synthesis, boolean union, file write, or
-//! audit behavior. Behavior lands on the parallel `plinth-emit` implementation branch with this
-//! signature:
-//!
-//! `plinth_emit::write(&SupportedModel, &EmitRequest) -> Result<EmitReport, EmitError>`
-//!
-//! That implementation writes once through `chitubox_io`, then reopens the target from disk for
-//! audit. This crate has no input type other than `SupportedModel`.
+//! This crate is deliberately only a conversion boundary.  It turns the f64
+//! [`plinth_support::SupportedModel`] into `chitubox_io`'s f32 wire records,
+//! writes one fresh project, then audits a *newly opened* copy of that file.
+//! It neither plans supports nor uses a model-bearing template.
 #![forbid(unsafe_code)]
 
+use chitubox_io::{
+    ModelGeometry, ModelSource, Placement, PlacementUpdate, Project, SegmentType, SupportBatch,
+    SupportMode, SupportRecord, TriangleSoup,
+};
 use plinth_core::PrinterProfile;
+use plinth_mesh::Mesh;
+use plinth_support::{SupportPrimitive, SupportedModel};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
+
+const MODEL_NAME: &str = "plinth-model";
+const FRUSTUM_SIDES: usize = 24;
+const SPHERE_LATITUDES: usize = 8;
+const SPHERE_LONGITUDES: usize = 16;
+const RAFT_SIDES: usize = 20;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct EmitRequest {
@@ -39,23 +47,880 @@ pub enum EmitError {
     DiskAuditRejected,
 }
 
+/// Write one newly-created project and derive the report from a fresh disk read.
+///
+/// `SupportedModel` is the only source of model and support geometry.  Its retained lift is
+/// assigned to the ChituBox model placement exactly once; support vertices remain in their
+/// model-local frame, where that placement applies to the complete assembly.
+pub fn write(model: &SupportedModel, request: &EmitRequest) -> Result<EmitReport, EmitError> {
+    validate_target(&request.target_path)?;
+
+    let center = mesh_bbox_center(model.mesh()).ok_or(EmitError::RecordEncodingRejected)?;
+    let geometry = model_triangle_soup(model.mesh(), center)?;
+    let lift = model.lift_mm().get();
+    let lift = f32_of(lift)?;
+    let records = build_records(model.primitives(), center)?;
+
+    let mut project = Project::new_empty();
+    let index = project
+        .add_model(ModelSource {
+            name: MODEL_NAME.to_owned(),
+            geometry: ModelGeometry::Triangles(geometry.clone()),
+            placement: Placement::default(),
+        })
+        .map_err(|_| EmitError::RecordEncodingRejected)?;
+    debug_assert_eq!(index, 0);
+
+    // `attach_supports` is the only format-side operation which applies a lift to a model with
+    // records.  For the empty support case, use the analogous placement update explicitly.
+    if records.is_empty() {
+        project
+            .set_placements(&[PlacementUpdate {
+                model_index: index,
+                placement: Placement {
+                    x: 0.0,
+                    y: 0.0,
+                    z_lift: lift,
+                },
+            }])
+            .map_err(|_| EmitError::RecordEncodingRejected)?;
+    } else {
+        project
+            .attach_supports(&[SupportBatch {
+                model_index: index,
+                records: records.clone(),
+                mode: SupportMode::Replace,
+                lift_mm: Some(lift),
+            }])
+            .map_err(|_| EmitError::RecordEncodingRejected)?;
+    }
+    project
+        .save(&request.target_path)
+        .map_err(|_| EmitError::TargetUnavailable {
+            path: request.target_path.clone(),
+        })?;
+
+    audit_disk(
+        &request.target_path,
+        &request.printer,
+        lift,
+        &geometry,
+        &records,
+    )
+}
+
+fn validate_target(path: &Path) -> Result<(), EmitError> {
+    if path.is_dir() || !path.parent().unwrap_or_else(|| Path::new(".")).is_dir() {
+        return Err(EmitError::TargetUnavailable {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
+}
+
+fn audit_disk(
+    path: &Path,
+    printer: &PrinterProfile,
+    expected_lift: f32,
+    expected_model: &TriangleSoup,
+    expected_records: &[SupportRecord],
+) -> Result<EmitReport, EmitError> {
+    let project = Project::open(path).map_err(|_| EmitError::DiskAuditRejected)?;
+    if project.model_count() != 1 {
+        return Err(EmitError::DiskAuditRejected);
+    }
+    let info = project.model(0).map_err(|_| EmitError::DiskAuditRejected)?;
+    if info.name != MODEL_NAME
+        || info.placement
+            != (Placement {
+                x: 0.0,
+                y: 0.0,
+                z_lift: expected_lift,
+            })
+    {
+        return Err(EmitError::DiskAuditRejected);
+    }
+    let model_triangles = project
+        .model_triangles(0)
+        .map_err(|_| EmitError::DiskAuditRejected)?;
+    if model_triangles != expected_model.xyz {
+        return Err(EmitError::DiskAuditRejected);
+    }
+    let records = project
+        .supports(0)
+        .map_err(|_| EmitError::DiskAuditRejected)?;
+    if records != expected_records {
+        return Err(EmitError::DiskAuditRejected);
+    }
+
+    let mut bounds = Bounds::empty();
+    bounds.extend_f32(&model_triangles)?;
+    for record in &records {
+        if !record.r_start.is_finite()
+            || !record.r_end.is_finite()
+            || !record
+                .start
+                .iter()
+                .chain(record.end.iter())
+                .all(|value| value.is_finite())
+        {
+            return Err(EmitError::DiskAuditRejected);
+        }
+        bounds.extend_f32(&record.mesh.xyz)?;
+    }
+    bounds.validate_against(printer)?;
+
+    let artifact_bytes = std::fs::metadata(path)
+        .map_err(|_| EmitError::DiskAuditRejected)?
+        .len();
+    Ok(EmitReport {
+        artifact_path: path.to_path_buf(),
+        support_record_count: records.len(),
+        artifact_bytes,
+    })
+}
+
+#[derive(Clone, Copy)]
+struct Bounds {
+    min: [f64; 3],
+    max: [f64; 3],
+}
+
+impl Bounds {
+    fn empty() -> Self {
+        Self {
+            min: [f64::INFINITY; 3],
+            max: [f64::NEG_INFINITY; 3],
+        }
+    }
+
+    fn extend_f32(&mut self, values: &[f32]) -> Result<(), EmitError> {
+        if values.is_empty() || !values.len().is_multiple_of(3) {
+            return Err(EmitError::DiskAuditRejected);
+        }
+        for point in values.chunks_exact(3) {
+            for (axis, value) in point.iter().enumerate() {
+                if !value.is_finite() {
+                    return Err(EmitError::DiskAuditRejected);
+                }
+                let value = f64::from(*value);
+                self.min[axis] = self.min[axis].min(value);
+                self.max[axis] = self.max[axis].max(value);
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_against(self, printer: &PrinterProfile) -> Result<(), EmitError> {
+        let volume = printer.build_volume_mm().value();
+        let span = [
+            self.max[0] - self.min[0],
+            self.max[1] - self.min[1],
+            self.max[2] - self.min[2],
+        ];
+        if !span.iter().all(|value| value.is_finite())
+            || span[0] > volume.x()
+            || span[1] > volume.y()
+            || span[2] > volume.z()
+            || self.min[0] < -volume.x() * 0.5
+            || self.max[0] > volume.x() * 0.5
+            || self.min[1] < -volume.y() * 0.5
+            || self.max[1] > volume.y() * 0.5
+        {
+            return Err(EmitError::DiskAuditRejected);
+        }
+        Ok(())
+    }
+}
+
+fn mesh_bbox_center(mesh: &Mesh) -> Option<[f64; 3]> {
+    let mut bounds = Bounds::empty();
+    for vertex in mesh.verts() {
+        for (axis, value) in vertex.iter().enumerate() {
+            if !value.is_finite() {
+                return None;
+            }
+            bounds.min[axis] = bounds.min[axis].min(*value);
+            bounds.max[axis] = bounds.max[axis].max(*value);
+        }
+    }
+    Some([
+        (bounds.min[0] + bounds.max[0]) * 0.5,
+        (bounds.min[1] + bounds.max[1]) * 0.5,
+        (bounds.min[2] + bounds.max[2]) * 0.5,
+    ])
+}
+
+fn model_triangle_soup(mesh: &Mesh, center: [f64; 3]) -> Result<TriangleSoup, EmitError> {
+    let mut triangles = Vec::with_capacity(mesh.tris().len());
+    for indices in mesh.tris() {
+        let mut triangle = [[0.0; 3]; 3];
+        for (corner, index) in indices.iter().enumerate() {
+            let source = mesh
+                .verts()
+                .get(*index as usize)
+                .ok_or(EmitError::RecordEncodingRejected)?;
+            triangle[corner] = sub_center(*source, center);
+        }
+        triangles.push(triangle);
+    }
+    wind_outward(&mut triangles)?;
+    soup_from_triangles(&triangles)
+}
+
+fn build_records(
+    primitives: &[SupportPrimitive],
+    center: [f64; 3],
+) -> Result<Vec<SupportRecord>, EmitError> {
+    primitives
+        .iter()
+        .map(|primitive| build_record(primitive, center))
+        .collect()
+}
+
+fn build_record(
+    primitive: &SupportPrimitive,
+    center: [f64; 3],
+) -> Result<SupportRecord, EmitError> {
+    let start = sub_center(finite_point(primitive.start_mm), center);
+    let end = sub_center(finite_point(primitive.end_mm), center);
+    let r_start = primitive.start_radius_mm.get();
+    let r_end = primitive.end_radius_mm.get();
+    let mut triangles = match primitive.segment_type {
+        SegmentType::JOINER => sphere_triangles(start, r_start)?,
+        SegmentType::PAD_OR_BRIDGE if same_point(start, end) => {
+            raft_pad_triangles(start, r_start, r_end)?
+        }
+        SegmentType::PAD_OR_BRIDGE => raft_bridge_triangles(start, end, r_start, r_end)?,
+        SegmentType::TIP | SegmentType::TAPER | SegmentType::SHAFT | SegmentType::FLARE => {
+            frustum_triangles(start, end, r_start, r_end, FRUSTUM_SIDES)?
+        }
+        _ => return Err(EmitError::RecordEncodingRejected),
+    };
+    wind_outward(&mut triangles)?;
+    let mut record = SupportRecord::new(
+        primitive.segment_type,
+        point_f32(start)?,
+        point_f32(end)?,
+        f32_of(r_start)?,
+        f32_of(r_end)?,
+        soup_from_triangles(&triangles)?,
+    );
+    if primitive.segment_type == SegmentType::TAPER {
+        // The retained supported-scene contract currently carries no independent contact-depth;
+        // all-zero trailing bytes are the documented wire default rather than a guessed value.
+        record = record.with_contact_depth(0.0);
+    }
+    if primitive.segment_type == SegmentType::PAD_OR_BRIDGE {
+        let is_bridge = !same_point(start, end);
+        record.trailing[0..4]
+            .copy_from_slice(&(if is_bridge { 1.0_f32 } else { 0.0_f32 }).to_le_bytes());
+        record.trailing[4..8].copy_from_slice(&4.0_f32.to_le_bytes());
+    }
+    Ok(record)
+}
+
+fn finite_point(point: [plinth_core::Finite; 3]) -> [f64; 3] {
+    point.map(plinth_core::Finite::get)
+}
+
+fn sub_center(point: [f64; 3], center: [f64; 3]) -> [f64; 3] {
+    [
+        point[0] - center[0],
+        point[1] - center[1],
+        point[2] - center[2],
+    ]
+}
+
+fn same_point(a: [f64; 3], b: [f64; 3]) -> bool {
+    a == b
+}
+
+fn f32_of(value: f64) -> Result<f32, EmitError> {
+    let value = value as f32;
+    value
+        .is_finite()
+        .then_some(value)
+        .ok_or(EmitError::RecordEncodingRejected)
+}
+
+fn point_f32(point: [f64; 3]) -> Result<[f32; 3], EmitError> {
+    Ok([f32_of(point[0])?, f32_of(point[1])?, f32_of(point[2])?])
+}
+
+fn soup_from_triangles(triangles: &[[[f64; 3]; 3]]) -> Result<TriangleSoup, EmitError> {
+    let mut xyz = Vec::with_capacity(triangles.len() * 9);
+    for triangle in triangles {
+        for point in triangle {
+            xyz.extend(point_f32(*point)?);
+        }
+    }
+    Ok(TriangleSoup::new(xyz))
+}
+
+fn frustum_triangles(
+    start: [f64; 3],
+    end: [f64; 3],
+    r_start: f64,
+    r_end: f64,
+    sides: usize,
+) -> Result<Vec<[[f64; 3]; 3]>, EmitError> {
+    if sides < 3 || !r_start.is_finite() || !r_end.is_finite() {
+        return Err(EmitError::RecordEncodingRejected);
+    }
+    let axis = sub(end, start);
+    let axis_length = length(axis);
+    if !axis_length.is_finite() || axis_length <= f64::EPSILON {
+        return Err(EmitError::RecordEncodingRejected);
+    }
+    let normal = scale(axis, 1.0 / axis_length);
+    let (u, v) = perpendicular_basis(normal)?;
+    let mut ring_start = Vec::with_capacity(sides);
+    let mut ring_end = Vec::with_capacity(sides);
+    for index in 0..sides {
+        let angle = std::f64::consts::TAU * index as f64 / sides as f64;
+        let radial = add(scale(u, angle.cos()), scale(v, angle.sin()));
+        ring_start.push(add(start, scale(radial, r_start)));
+        ring_end.push(add(end, scale(radial, r_end)));
+    }
+    let mut triangles = Vec::with_capacity(sides * 4);
+    for index in 0..sides {
+        let next = (index + 1) % sides;
+        triangles.push([ring_start[index], ring_end[next], ring_end[index]]);
+        triangles.push([ring_start[index], ring_start[next], ring_end[next]]);
+        triangles.push([start, ring_start[next], ring_start[index]]);
+        triangles.push([end, ring_end[index], ring_end[next]]);
+    }
+    Ok(triangles)
+}
+
+fn sphere_triangles(center: [f64; 3], radius: f64) -> Result<Vec<[[f64; 3]; 3]>, EmitError> {
+    if !radius.is_finite() || radius <= 0.0 {
+        return Err(EmitError::RecordEncodingRejected);
+    }
+    let mut triangles = Vec::with_capacity(2 * SPHERE_LONGITUDES * (SPHERE_LATITUDES - 1));
+    for latitude in 0..SPHERE_LATITUDES {
+        let a0 = std::f64::consts::PI * latitude as f64 / SPHERE_LATITUDES as f64;
+        let a1 = std::f64::consts::PI * (latitude + 1) as f64 / SPHERE_LATITUDES as f64;
+        for longitude in 0..SPHERE_LONGITUDES {
+            let l0 = std::f64::consts::TAU * longitude as f64 / SPHERE_LONGITUDES as f64;
+            let l1 = std::f64::consts::TAU * ((longitude + 1) % SPHERE_LONGITUDES) as f64
+                / SPHERE_LONGITUDES as f64;
+            let p00 = sphere_point(center, radius, a0, l0);
+            let p01 = sphere_point(center, radius, a0, l1);
+            let p10 = sphere_point(center, radius, a1, l0);
+            let p11 = sphere_point(center, radius, a1, l1);
+            if latitude + 1 < SPHERE_LATITUDES {
+                triangles.push([p00, p10, p11]);
+            }
+            if latitude > 0 {
+                triangles.push([p00, p11, p01]);
+            }
+        }
+    }
+    Ok(triangles)
+}
+
+fn sphere_point(center: [f64; 3], radius: f64, latitude: f64, longitude: f64) -> [f64; 3] {
+    [
+        center[0] + radius * latitude.sin() * longitude.cos(),
+        center[1] + radius * latitude.sin() * longitude.sin(),
+        center[2] + radius * latitude.cos(),
+    ]
+}
+
+fn raft_pad_triangles(
+    start: [f64; 3],
+    diameter: f64,
+    height: f64,
+) -> Result<Vec<[[f64; 3]; 3]>, EmitError> {
+    if !diameter.is_finite() || !height.is_finite() || height <= 0.0 {
+        return Err(EmitError::RecordEncodingRejected);
+    }
+    frustum_triangles(
+        start,
+        add(start, [0.0, 0.0, height]),
+        diameter * 0.5,
+        diameter * 0.5,
+        RAFT_SIDES,
+    )
+}
+
+fn raft_bridge_triangles(
+    start: [f64; 3],
+    end: [f64; 3],
+    width: f64,
+    height: f64,
+) -> Result<Vec<[[f64; 3]; 3]>, EmitError> {
+    if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+        return Err(EmitError::RecordEncodingRejected);
+    }
+    let axis = [end[0] - start[0], end[1] - start[1], 0.0];
+    let length = length(axis);
+    if !length.is_finite() || length <= f64::EPSILON {
+        return Err(EmitError::RecordEncodingRejected);
+    }
+    let across = [
+        -axis[1] / length * width * 0.5,
+        axis[0] / length * width * 0.5,
+        0.0,
+    ];
+    let lo = [
+        sub(start, across),
+        add(start, across),
+        add(end, across),
+        sub(end, across),
+    ];
+    let hi = lo.map(|point| add(point, [0.0, 0.0, height]));
+    let vertices = [lo[0], lo[1], lo[2], lo[3], hi[0], hi[1], hi[2], hi[3]];
+    const FACES: [[usize; 3]; 12] = [
+        [0, 2, 1],
+        [0, 3, 2],
+        [4, 5, 6],
+        [4, 6, 7],
+        [0, 1, 5],
+        [0, 5, 4],
+        [1, 2, 6],
+        [1, 6, 5],
+        [2, 3, 7],
+        [2, 7, 6],
+        [3, 0, 4],
+        [3, 4, 7],
+    ];
+    Ok(FACES
+        .map(|face| [vertices[face[0]], vertices[face[1]], vertices[face[2]]])
+        .to_vec())
+}
+
+fn perpendicular_basis(normal: [f64; 3]) -> Result<([f64; 3], [f64; 3]), EmitError> {
+    let reference = if normal[0].abs() < 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let u = cross(normal, reference);
+    let length = length(u);
+    if !length.is_finite() || length <= f64::EPSILON {
+        return Err(EmitError::RecordEncodingRejected);
+    }
+    let u = scale(u, 1.0 / length);
+    Ok((u, cross(normal, u)))
+}
+
+fn wind_outward(triangles: &mut [[[f64; 3]; 3]]) -> Result<(), EmitError> {
+    let volume = signed_volume(triangles)?;
+    if volume < 0.0 {
+        for triangle in triangles {
+            triangle.swap(1, 2);
+        }
+    }
+    Ok(())
+}
+
+fn signed_volume(triangles: &[[[f64; 3]; 3]]) -> Result<f64, EmitError> {
+    let mut sum = 0.0;
+    for triangle in triangles {
+        let term = dot(triangle[0], cross(triangle[1], triangle[2])) / 6.0;
+        if !term.is_finite() {
+            return Err(EmitError::RecordEncodingRejected);
+        }
+        sum += term;
+        if !sum.is_finite() {
+            return Err(EmitError::RecordEncodingRejected);
+        }
+    }
+    Ok(sum)
+}
+
+fn add(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+}
+fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+fn scale(a: [f64; 3], scalar: f64) -> [f64; 3] {
+    [a[0] * scalar, a[1] * scalar, a[2] * scalar]
+}
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+fn length(a: [f64; 3]) -> f64 {
+    dot(a, a).sqrt()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plinth_core::{
+        m0_constants, ContentDigest, Finite, NonNegativeFinite, PositiveFinite, UnitFraction,
+    };
+    use plinth_decimate::DecimationReport;
+    use plinth_hollow::{HollowDisposition, HollowHistory, HollowReport};
+    use plinth_orient::{BaselineSelection, OrientationHistory, OrientationReport, RigidTransform};
+    use plinth_support::{SupportHistory, SupportReport};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    fn fixture_path(name: &str) -> PathBuf {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!(
+            "plinth-emit-{name}-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    fn printer() -> PrinterProfile {
+        m0_constants()
+            .expect("fixture constants")
+            .saturn4_ultra()
+            .clone()
+    }
+
+    fn fixture_mesh() -> Mesh {
+        Mesh::new(
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+        )
+        .expect("fixture mesh")
+    }
+
+    fn fixture_history(primitives: &[SupportPrimitive], lift_mm: f64) -> SupportHistory {
+        let decimation = DecimationReport {
+            budget_id: ContentDigest(13),
+            input_faces: 4,
+            output_faces: 4,
+            chosen_ratio: UnitFraction::new(1.0).unwrap(),
+            p99_mm: NonNegativeFinite::new(0.0).unwrap(),
+            p999_mm: NonNegativeFinite::new(0.0).unwrap(),
+            boundary_edges_before: 0,
+            boundary_edges_after: 0,
+            nonmanifold_edges_before: 0,
+            nonmanifold_edges_after: 0,
+        };
+        let orientation = OrientationHistory::from_reports(
+            decimation,
+            OrientationReport {
+                pinned_report: PathBuf::from("fixture.pipeline.json"),
+                selection: BaselineSelection::Identity,
+                transform: RigidTransform::identity(),
+            },
+        );
+        let hollow = HollowHistory::from_reports(
+            orientation,
+            HollowReport {
+                disposition: HollowDisposition::HollowedAndDrilled,
+                cavities: Vec::new(),
+                drains: Vec::new(),
+            },
+        );
+        let raft_count = primitives
+            .iter()
+            .filter(|primitive| primitive.segment_type == SegmentType::PAD_OR_BRIDGE)
+            .count();
+        SupportHistory::from_reports(
+            hollow,
+            SupportReport {
+                support_primitive_count: primitives.len() - raft_count,
+                raft_primitive_count: raft_count,
+            },
+            PositiveFinite::new(lift_mm).unwrap(),
+        )
+    }
+
+    fn fixture_model(primitives: Vec<SupportPrimitive>, lift_mm: f64) -> SupportedModel {
+        let history = fixture_history(&primitives, lift_mm);
+        SupportedModel::from_parts(fixture_mesh(), primitives, history).expect("fixture scene")
+    }
+
+    fn primitive(segment_type: SegmentType, start: [f64; 3], end: [f64; 3]) -> SupportPrimitive {
+        SupportPrimitive {
+            segment_type,
+            start_mm: start.map(|value| Finite::new(value).unwrap()),
+            end_mm: end.map(|value| Finite::new(value).unwrap()),
+            start_radius_mm: PositiveFinite::new(2.2).unwrap(),
+            end_radius_mm: PositiveFinite::new(0.2).unwrap(),
+        }
+    }
 
     #[test]
-    fn successful_emit_report_names_the_single_written_artifact() {
-        let report = EmitReport {
-            artifact_path: PathBuf::from("out/mini.chitubox"),
-            support_record_count: 12,
-            artifact_bytes: 4096,
-        };
-        let wire = serde_json::to_value(&report).expect("emit report serializes");
-        assert_eq!(wire["artifact_path"], "out/mini.chitubox");
-        assert_eq!(wire["support_record_count"], 12);
+    fn model_winding_is_fixed_in_f64_before_wire_cast() {
+        let mesh = Mesh::new(
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+        )
+        .unwrap();
+        let soup = model_triangle_soup(&mesh, mesh_bbox_center(&mesh).unwrap()).unwrap();
+        let triangles: Vec<_> = soup
+            .xyz
+            .chunks_exact(9)
+            .map(|t| {
+                [
+                    [t[0] as f64, t[1] as f64, t[2] as f64],
+                    [t[3] as f64, t[4] as f64, t[5] as f64],
+                    [t[6] as f64, t[7] as f64, t[8] as f64],
+                ]
+            })
+            .collect();
+        assert!(signed_volume(&triangles).unwrap() > 0.0);
+    }
+
+    #[test]
+    fn record_builder_covers_current_segment_vocabulary_in_order() {
+        let primitives = vec![
+            primitive(SegmentType::TIP, [0.0, 0.0, 0.0], [0.0, 0.0, 3.0]),
+            primitive(SegmentType::TAPER, [0.0, 0.0, 3.0], [0.0, 0.0, 6.0]),
+            primitive(SegmentType::SHAFT, [0.0, 0.0, 6.0], [0.0, 0.0, 9.0]),
+            primitive(SegmentType::JOINER, [0.0, 0.0, 9.0], [0.0, 0.0, 9.0]),
+            primitive(SegmentType::FLARE, [0.0, 0.0, 9.0], [0.0, 0.0, 12.0]),
+            primitive(SegmentType::PAD_OR_BRIDGE, [0.0, 0.0, 0.0], [3.0, 0.0, 0.0]),
+            primitive(SegmentType::PAD_OR_BRIDGE, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+        ];
+        let records = build_records(&primitives, [0.0; 3]).unwrap();
         assert_eq!(
-            serde_json::from_value::<EmitReport>(wire).expect("emit report deserializes"),
-            report
+            records
+                .iter()
+                .map(|record| record.segment_type)
+                .collect::<Vec<_>>(),
+            primitives
+                .iter()
+                .map(|primitive| primitive.segment_type)
+                .collect::<Vec<_>>()
         );
+        for record in records {
+            assert!(!record.mesh.xyz.is_empty());
+            assert!(record.mesh.xyz.iter().all(|value| value.is_finite()));
+            let triangles: Vec<_> = record
+                .mesh
+                .xyz
+                .chunks_exact(9)
+                .map(|t| {
+                    [
+                        [t[0] as f64, t[1] as f64, t[2] as f64],
+                        [t[3] as f64, t[4] as f64, t[5] as f64],
+                        [t[6] as f64, t[7] as f64, t[8] as f64],
+                    ]
+                })
+                .collect();
+            assert!(signed_volume(&triangles).unwrap() >= 0.0);
+        }
+    }
+
+    #[test]
+    fn malformed_prewrite_geometry_is_rejected() {
+        assert_eq!(
+            frustum_triangles([0.0; 3], [0.0; 3], 1.0, 1.0, FRUSTUM_SIDES),
+            Err(EmitError::RecordEncodingRejected)
+        );
+        assert_eq!(
+            raft_bridge_triangles([0.0; 3], [0.0; 3], 2.2, 0.2),
+            Err(EmitError::RecordEncodingRejected)
+        );
+    }
+
+    #[test]
+    fn malformed_supported_primitive_is_rejected_before_target_creation() {
+        let model = fixture_model(
+            vec![primitive(
+                SegmentType(999),
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 4.0],
+            )],
+            3.0,
+        );
+        let target = fixture_path("malformed-prewrite.chitubox");
+        assert_eq!(
+            write(
+                &model,
+                &EmitRequest {
+                    target_path: target.clone(),
+                    printer: printer(),
+                },
+            ),
+            Err(EmitError::RecordEncodingRejected)
+        );
+        assert!(
+            !target.exists(),
+            "pre-write rejection must not create an artifact"
+        );
+    }
+
+    #[test]
+    fn native_raft_fixtures_are_required_and_contain_type_six_records() {
+        const BASIC: &[u8] = include_bytes!(
+            "../../../scripts/tests/fixtures/chitubox/basic-cube-supports-raft.chitubox"
+        );
+        const CYLINDER: &[u8] = include_bytes!(
+            "../../../scripts/tests/fixtures/chitubox/cylinder-supported-bottom-connected.chitubox"
+        );
+        for bytes in [BASIC, CYLINDER] {
+            let project = Project::from_bytes(bytes.to_vec()).expect("native required fixture");
+            assert!(project
+                .supports(0)
+                .unwrap()
+                .iter()
+                .any(|record| record.segment_type == SegmentType::PAD_OR_BRIDGE));
+        }
+    }
+
+    #[test]
+    fn writes_and_reopens_one_fresh_supported_artifact_in_exact_record_order() {
+        let primitives = vec![
+            primitive(SegmentType::TIP, [0.0, 0.0, 1.0], [0.0, 0.0, 3.0]),
+            primitive(SegmentType::TAPER, [0.0, 0.0, 3.0], [0.0, 0.0, 5.0]),
+            primitive(SegmentType::SHAFT, [0.0, 0.0, 5.0], [0.0, 0.0, 8.0]),
+            primitive(SegmentType::JOINER, [0.0, 0.0, 8.0], [0.0, 0.0, 8.0]),
+            primitive(SegmentType::FLARE, [0.0, 0.0, 8.0], [0.0, 0.0, 10.0]),
+            primitive(SegmentType::PAD_OR_BRIDGE, [0.0, 0.0, 0.0], [3.0, 0.0, 0.0]),
+            primitive(SegmentType::PAD_OR_BRIDGE, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+        ];
+        let expected_types: Vec<_> = primitives
+            .iter()
+            .map(|primitive| primitive.segment_type)
+            .collect();
+        let model = fixture_model(primitives, 3.0);
+        let target = fixture_path("all-types.chitubox");
+        let report = write(
+            &model,
+            &EmitRequest {
+                target_path: target.clone(),
+                printer: printer(),
+            },
+        )
+        .expect("fresh write and disk audit");
+        assert_eq!(report.artifact_path, target);
+        assert_eq!(report.support_record_count, expected_types.len());
+        assert!(report.artifact_bytes > 0);
+
+        let reopened = Project::open(&target).expect("reopen emitted file");
+        assert_eq!(reopened.model_count(), 1);
+        assert_eq!(reopened.model(0).unwrap().placement.z_lift, 3.0);
+        let records = reopened.supports(0).unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.segment_type)
+                .collect::<Vec<_>>(),
+            expected_types
+        );
+        assert!(records
+            .iter()
+            .flat_map(|record| record.mesh.xyz.iter())
+            .all(|value| value.is_finite()));
+        std::fs::remove_file(target).expect("remove unique fixture artifact");
+    }
+
+    #[test]
+    fn writes_zero_support_scene_and_applies_retained_lift_once() {
+        let model = fixture_model(Vec::new(), 3.0);
+        let target = fixture_path("zero-supports.chitubox");
+        let report = write(
+            &model,
+            &EmitRequest {
+                target_path: target.clone(),
+                printer: printer(),
+            },
+        )
+        .expect("zero-support write");
+        assert_eq!(report.support_record_count, 0);
+        let reopened = Project::open(&target).unwrap();
+        assert_eq!(reopened.supports(0).unwrap(), Vec::new());
+        assert_eq!(reopened.model(0).unwrap().placement.z_lift, 3.0);
+        std::fs::remove_file(target).expect("remove unique fixture artifact");
+    }
+
+    #[test]
+    fn deterministic_emission_is_byte_identical() {
+        let model = fixture_model(
+            vec![primitive(
+                SegmentType::SHAFT,
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 4.0],
+            )],
+            3.0,
+        );
+        let first = fixture_path("determinism-a.chitubox");
+        let second = fixture_path("determinism-b.chitubox");
+        for target_path in [&first, &second] {
+            write(
+                &model,
+                &EmitRequest {
+                    target_path: target_path.clone(),
+                    printer: printer(),
+                },
+            )
+            .expect("deterministic fixture write");
+        }
+        assert_eq!(
+            std::fs::read(&first).unwrap(),
+            std::fs::read(&second).unwrap()
+        );
+        std::fs::remove_file(first).expect("remove first deterministic fixture");
+        std::fs::remove_file(second).expect("remove second deterministic fixture");
+    }
+
+    #[test]
+    fn target_directory_is_rejected_before_any_write() {
+        let model = fixture_model(Vec::new(), 3.0);
+        let target = fixture_path("target-dir");
+        std::fs::create_dir(&target).unwrap();
+        let result = write(
+            &model,
+            &EmitRequest {
+                target_path: target.clone(),
+                printer: printer(),
+            },
+        );
+        assert_eq!(
+            result,
+            Err(EmitError::TargetUnavailable {
+                path: target.clone()
+            })
+        );
+        std::fs::remove_dir(target).expect("remove unique fixture directory");
+    }
+
+    #[test]
+    fn fresh_disk_corruption_fails_without_repairing_or_rewriting() {
+        let model = fixture_model(Vec::new(), 3.0);
+        let target = fixture_path("corruption.chitubox");
+        write(
+            &model,
+            &EmitRequest {
+                target_path: target.clone(),
+                printer: printer(),
+            },
+        )
+        .unwrap();
+        let corrupt = vec![0_u8; 9];
+        std::fs::write(&target, &corrupt).unwrap();
+        let mesh = fixture_mesh();
+        let expected_model = model_triangle_soup(&mesh, mesh_bbox_center(&mesh).unwrap()).unwrap();
+        assert_eq!(
+            audit_disk(&target, &printer(), 3.0, &expected_model, &[]),
+            Err(EmitError::DiskAuditRejected)
+        );
+        assert_eq!(
+            std::fs::read(&target).unwrap(),
+            corrupt,
+            "audit must not repair or rewrite disk bytes"
+        );
+        std::fs::remove_file(target).expect("remove unique fixture artifact");
     }
 }
