@@ -529,7 +529,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        forest::{EmbedEnd, MemberSpec, Owner, RootwardEndRadius, TerminalEndRadius},
+        forest::{
+            EmbedEnd, MemberSpec, Owner, RootwardEndRadius, TerminalEndRadius, TerminalLedgerState,
+        },
         joints::{plan_joint_balls_filtered, JointStagingLimits, LiveViewLimits},
         raft::{plan_bottom_connected, RaftLimits},
     };
@@ -790,10 +792,26 @@ mod tests {
             Some(EmbedEnd::Terminalward),
         );
         let mut forest = Forest::new();
-        let key = forest.add_member(member);
-        let mut primitives = Vec::new();
-        lower_member(key, forest.member(key).unwrap(), config, &mut primitives).unwrap();
-        assert_eq!(primitives.len(), 2);
+        forest.add_member(member);
+        let view =
+            FilteredLiveView::current(&forest, &[], LiveViewLimits::new(1, 1, 10_000)).unwrap();
+        let joints = plan_joint_balls_filtered(
+            &forest,
+            &view,
+            config.joint,
+            JointStagingLimits::from_joint_config(config.joint),
+        )
+        .unwrap();
+        let raft = plan_bottom_connected(
+            &forest,
+            &view,
+            frame.plate_z_mm(),
+            RaftLimits::new(1, 1, 2, 100_000),
+        )
+        .unwrap();
+        let plan = lower_current(&forest, &view, &joints, &raft, config).unwrap();
+        let primitives = plan.validate(&forest, frame).unwrap();
+        assert!(primitives.len() >= 3);
         assert_eq!(primitives[0].segment_kind, SupportSegmentKind::ContactTaper);
         assert_eq!(
             primitives[0].contact_depth_mm,
@@ -801,6 +819,59 @@ mod tests {
         );
         assert_eq!(primitives[0].ring_normal, FrustumRingNormal::PlateZ);
         assert_eq!(primitives[1].segment_kind, SupportSegmentKind::RootFlare);
+        assert_eq!(
+            primitives.last().unwrap().segment_kind,
+            SupportSegmentKind::RaftPadOrBridge
+        );
+    }
+
+    #[test]
+    fn consumed_terminal_is_the_only_mutable_live_terminal_path_into_production_lowering() {
+        let (mut forest, frame, layers) = fixture();
+        let stub = forest.terminal(0).unwrap();
+        assert_eq!(
+            forest.set_radii(
+                stub,
+                TerminalEndRadius::new(r(0.2)),
+                RootwardEndRadius::new(r(0.45)),
+            ),
+            Err(crate::forest::ForestError::RegisteredTerminalMutation { terminal: 0 })
+        );
+        forest.consume_terminal(0, stub).unwrap();
+        forest
+            .set_radii(
+                stub,
+                TerminalEndRadius::new(r(0.2)),
+                RootwardEndRadius::new(r(0.45)),
+            )
+            .unwrap();
+        assert_eq!(
+            forest.terminal_ledger(0).unwrap().state,
+            TerminalLedgerState::Consumed
+        );
+        let config = LoweringConfig::current(frame, &layers, 100, 100_000).unwrap();
+        let view = FilteredLiveView::current(&forest, &[4], LiveViewLimits::new(100, 10, 100_000))
+            .unwrap();
+        let joints = plan_joint_balls_filtered(
+            &forest,
+            &view,
+            config.joint,
+            JointStagingLimits::from_joint_config(config.joint),
+        )
+        .unwrap();
+        let raft = plan_bottom_connected(
+            &forest,
+            &view,
+            frame.plate_z_mm(),
+            RaftLimits::new(100, 100, 200, 100_000),
+        )
+        .unwrap();
+        let lowered = lower_current(&forest, &view, &joints, &raft, config).unwrap();
+        assert!(lowered
+            .validate(&forest, frame)
+            .unwrap()
+            .iter()
+            .any(|primitive| primitive.segment_kind == SupportSegmentKind::ContactSphere));
     }
 
     #[test]

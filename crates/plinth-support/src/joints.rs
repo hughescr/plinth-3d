@@ -28,6 +28,7 @@ pub struct JointConfig {
     max_patches: usize,
     max_work_items: usize,
     max_scratch_bytes: usize,
+    max_certificate_bytes: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -84,6 +85,7 @@ impl JointConfig {
             max_patches: 2_000_000,
             max_work_items: 50_000_000,
             max_scratch_bytes: 512 * 1024 * 1024,
+            max_certificate_bytes: 256 * 1024 * 1024,
         }
     }
 
@@ -102,6 +104,7 @@ impl JointConfig {
             max_patches: self.max_patches,
             max_work_items: self.max_work_items,
             max_scratch_bytes: self.max_scratch_bytes,
+            max_certificate_bytes: self.max_certificate_bytes,
         }
     }
 }
@@ -114,6 +117,7 @@ struct ConfigFingerprint {
     max_patches: usize,
     max_work_items: usize,
     max_scratch_bytes: usize,
+    max_certificate_bytes: usize,
 }
 
 /// Caller-owned preflight bounds for the one filtered live-member view shared by joint
@@ -192,8 +196,36 @@ impl FilteredLiveView {
             {
                 return Err(JointError::InvalidUnroutedTerminal(entry.contact));
             }
-            if entry.state != TerminalLedgerState::Live
-                && terminal_ids.binary_search(&entry.contact).is_err()
+            match entry.state {
+                TerminalLedgerState::Live => {
+                    let member = forest
+                        .member(entry.original_key)
+                        .ok_or(JointError::InvalidUnroutedTerminal(entry.contact))?;
+                    if !crate::forest::terminal_member_matches_evidence(
+                        member,
+                        entry.original_key,
+                        entry.contact,
+                        evidence,
+                    ) {
+                        return Err(JointError::InvalidUnroutedTerminal(entry.contact));
+                    }
+                }
+                TerminalLedgerState::Consumed => {
+                    let member = forest
+                        .member(entry.original_key)
+                        .ok_or(JointError::InvalidUnroutedTerminal(entry.contact))?;
+                    if member.kind() != &MemberKind::Stub
+                        || member.owner() != &Owner::Contact(entry.contact)
+                    {
+                        return Err(JointError::InvalidUnroutedTerminal(entry.contact));
+                    }
+                }
+                TerminalLedgerState::Quarantined | TerminalLedgerState::Retired => {}
+            }
+            if !matches!(
+                entry.state,
+                TerminalLedgerState::Live | TerminalLedgerState::Consumed
+            ) && terminal_ids.binary_search(&entry.contact).is_err()
             {
                 return Err(JointError::MissingUnroutedTerminalProvenance(entry.contact));
             }
@@ -208,13 +240,22 @@ impl FilteredLiveView {
                     let member = forest
                         .member(entry.original_key)
                         .ok_or(JointError::InvalidUnroutedTerminal(terminal))?;
-                    if member.kind() != &MemberKind::Stub
-                        || member.owner() != &Owner::Contact(terminal)
-                    {
+                    let evidence = forest
+                        .terminal_ledger_evidence(terminal)
+                        .ok_or(JointError::InvalidUnroutedTerminal(terminal))?;
+                    if !crate::forest::terminal_member_matches_evidence(
+                        member,
+                        entry.original_key,
+                        terminal,
+                        evidence,
+                    ) {
                         return Err(JointError::InvalidUnroutedTerminal(terminal));
                     }
                     // A caller cannot turn a still-live routed contact into an unrouted one by
                     // assertion alone. Failed terminals must first become lifecycle evidence.
+                    return Err(JointError::InvalidUnroutedTerminal(terminal));
+                }
+                TerminalLedgerState::Consumed => {
                     return Err(JointError::InvalidUnroutedTerminal(terminal));
                 }
                 TerminalLedgerState::Quarantined => {
@@ -410,6 +451,12 @@ impl JointPlan {
             byte(value);
         }
         for value in u64::try_from(self.config.max_scratch_bytes)
+            .expect("platform usize fits u64")
+            .to_le_bytes()
+        {
+            byte(value);
+        }
+        for value in u64::try_from(self.config.max_certificate_bytes)
             .expect("platform usize fits u64")
             .to_le_bytes()
         {
@@ -798,25 +845,28 @@ pub(crate) fn plan_joint_balls_filtered(
         });
     }
 
-    let certificate_scratch = certificate_scratch_for_parallel(
-        retained_staging_bytes,
-        staging.max_bytes,
-        config.max_scratch_bytes,
-        candidates.len(),
-        geom_kernel::current_threads(),
-    )?;
-    let decisions = geom_kernel::ordered_index_map(
-        &candidates,
-        geom_kernel::OrderedMapLimits::new(config.max_work_items, config.max_scratch_bytes),
-        |_, ball| ball_enclosed(ball, &members, config, certificate_scratch),
-    )?;
-    debug_assert_eq!(
-        decisions.effective_threads(),
-        geom_kernel::current_threads()
-    );
+    let certificate_scratch = CertificateScratch {
+        max_bytes: config.max_certificate_bytes,
+    };
+    let mut decisions = Vec::with_capacity(candidates.len());
+    if !candidates.is_empty() {
+        let certificate_window = certificate_parallel_window(
+            retained_staging_bytes,
+            staging.max_bytes,
+            config.max_certificate_bytes,
+        )?;
+        for window in candidates.chunks(certificate_window) {
+            let mapped = geom_kernel::ordered_index_map(
+                window,
+                geom_kernel::OrderedMapLimits::new(config.max_work_items, config.max_scratch_bytes),
+                |_, ball| ball_enclosed(ball, &members, config, certificate_scratch),
+            )?;
+            decisions.extend(mapped.into_values());
+        }
+    }
     let mut balls = Vec::with_capacity(candidates.len());
     let mut certified_dropped = 0;
-    for (candidate, enclosed) in candidates.into_iter().zip(decisions.into_values()) {
+    for (candidate, enclosed) in candidates.into_iter().zip(decisions) {
         if enclosed {
             certified_dropped += 1;
             continue;
@@ -849,6 +899,8 @@ fn validate_limits(config: JointConfig) -> Result<(), JointError> {
         || config.max_patches == 0
         || config.max_work_items == 0
         || config.max_scratch_bytes == 0
+        || config.max_certificate_bytes == 0
+        || config.max_certificate_bytes > config.max_scratch_bytes
     {
         return Err(JointError::InvalidLimits);
     }
@@ -1155,21 +1207,19 @@ struct CertificateScratch {
     max_bytes: usize,
 }
 
-fn certificate_scratch_for_parallel(
+fn certificate_parallel_window(
     retained_bytes: usize,
     staging_limit: usize,
     per_certificate_limit: usize,
-    candidate_count: usize,
-    threads: usize,
-) -> Result<CertificateScratch, JointError> {
-    let workers = threads.max(1).min(candidate_count).max(1);
-    let per_worker = staging_limit
+) -> Result<usize, JointError> {
+    let available = staging_limit
         .checked_sub(retained_bytes)
-        .ok_or(JointError::ScratchLimit)?
-        / workers;
-    Ok(CertificateScratch {
-        max_bytes: per_worker.min(per_certificate_limit),
-    })
+        .ok_or(JointError::ScratchLimit)?;
+    let window = available / per_certificate_limit;
+    if window == 0 {
+        return Err(JointError::ScratchLimit);
+    }
+    Ok(window)
 }
 
 fn ball_enclosed(
@@ -2155,6 +2205,9 @@ mod tests {
         changed.config.max_scratch_bytes -= 1;
         variants.push(changed);
         let mut changed = base.clone();
+        changed.config.max_certificate_bytes -= 1;
+        variants.push(changed);
+        let mut changed = base.clone();
         changed.balls[0].center_mm[0] = Finite::new(1.5).unwrap();
         variants.push(changed);
         let mut changed = base.clone();
@@ -2249,31 +2302,34 @@ mod tests {
         let exact_certificate_peak = std::mem::size_of::<usize>()
             + 20 * (2 * std::mem::size_of::<Patch>() + 6 * std::mem::size_of::<f64>());
         let retained = 137;
-        let exact_parallel = certificate_scratch_for_parallel(
-            retained,
-            retained + 2 * exact_certificate_peak,
-            usize::MAX,
-            2,
-            16,
-        )
-        .unwrap();
-        assert_eq!(exact_parallel.max_bytes, exact_certificate_peak);
-        let cap_minus_one = certificate_scratch_for_parallel(
-            retained,
-            retained + 2 * exact_certificate_peak - 1,
-            usize::MAX,
-            2,
-            16,
-        )
-        .unwrap();
-        assert_eq!(cap_minus_one.max_bytes, exact_certificate_peak - 1);
+        let fixed_certificate = CertificateScratch {
+            max_bytes: exact_certificate_peak,
+        };
+        assert_eq!(
+            certificate_parallel_window(
+                retained,
+                retained + 2 * exact_certificate_peak,
+                exact_certificate_peak,
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            certificate_parallel_window(
+                retained,
+                retained + 2 * exact_certificate_peak - 1,
+                exact_certificate_peak,
+            )
+            .unwrap(),
+            1
+        );
         assert!(certify_sphere(
             &easy,
             &[0],
             std::mem::size_of::<usize>(),
             std::slice::from_ref(&live),
             config(-100.0).with_limits(22, 20),
-            exact_parallel,
+            fixed_certificate,
         ));
         assert!(!certify_sphere(
             &easy,
@@ -2281,7 +2337,9 @@ mod tests {
             std::mem::size_of::<usize>(),
             std::slice::from_ref(&live),
             config(-100.0).with_limits(22, 20),
-            cap_minus_one,
+            CertificateScratch {
+                max_bytes: exact_certificate_peak - 1,
+            },
         ));
         assert!(matches!(
             plan_joint_balls(&forest, config(-100.0).with_limits(23, 20)),
@@ -2355,7 +2413,10 @@ mod tests {
                     None,
                 );
             }
-            let cfg = config(-100.0);
+            let mut cfg = config(-100.0);
+            // Deliberately between the old 512 MiB / 16 and / 4 thread-derived ranges. Proof
+            // authority is now this fixed per-certificate policy, never the worker count.
+            cfg.max_certificate_bytes = 48 * 1024 * 1024;
             let plan = plan_joint_balls(&forest, cfg).unwrap();
             assert!(plan.validate(&forest, cfg).unwrap().len() >= 96);
             println!("JOINT_PLAN={:016x}", plan.digest());

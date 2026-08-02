@@ -464,7 +464,10 @@ impl SupportPrimitive {
             == self.contact_depth_mm.is_some();
         let ring_provenance_matches = match self.ring_normal {
             FrustumRingNormal::SegmentAxis => true,
-            FrustumRingNormal::PlateZ => self.segment_kind == SupportSegmentKind::Member,
+            FrustumRingNormal::PlateZ => matches!(
+                self.segment_kind,
+                SupportSegmentKind::Member | SupportSegmentKind::ContactTaper
+            ),
         };
         let sphere_poles_match = match (self.segment_kind, &self.sphere_geometry) {
             (SupportSegmentKind::ContactSphere, Some(geometry)) if geometry.is_tip() => {

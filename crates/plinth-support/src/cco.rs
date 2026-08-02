@@ -1522,6 +1522,9 @@ fn apply_and_size(
     descriptor: &Descriptor,
     config: &Config,
 ) -> Result<bool, CcoError> {
+    if candidate.terminal_key(request.terminal_id) == Some(request.stub) {
+        candidate.consume_terminal(request.terminal_id, request.stub)?;
+    }
     match descriptor {
         Descriptor::Plate { xy, top_z } => {
             if !apply_plate(candidate, request, *xy, *top_z, config)? {
@@ -2306,6 +2309,9 @@ mod tests {
 
         let mut changed_endpoint = forest.clone();
         changed_endpoint
+            .consume_terminal(request.terminal_id, request.stub)
+            .unwrap();
+        changed_endpoint
             .set_endpoints(
                 request.stub,
                 request.stub_snapshot.p0_mm(),
@@ -2323,6 +2329,9 @@ mod tests {
 
         let mut changed_load = forest.clone();
         changed_load
+            .consume_terminal(request.terminal_id, request.stub)
+            .unwrap();
+        changed_load
             .set_carried_mm2(request.stub, Finite::new(3.0).unwrap())
             .unwrap();
         assert!(matches!(
@@ -2331,6 +2340,9 @@ mod tests {
         ));
 
         let mut changed_radius = forest.clone();
+        changed_radius
+            .consume_terminal(request.terminal_id, request.stub)
+            .unwrap();
         changed_radius
             .set_radii(
                 request.stub,
@@ -2382,6 +2394,13 @@ mod tests {
         let (forest, request, _) = growth_fixture();
 
         let mut wrong_kind = forest.clone();
+        assert_eq!(
+            wrong_kind.set_kind(request.stub, MemberKind::Shoot),
+            Err(ForestError::RegisteredTerminalMutation { terminal: 7 })
+        );
+        wrong_kind
+            .consume_terminal(request.terminal_id, request.stub)
+            .unwrap();
         wrong_kind
             .set_kind(request.stub, MemberKind::Shoot)
             .unwrap();
@@ -2408,6 +2427,13 @@ mod tests {
             embed_end: None,
             carried_mm2: Finite::new(2.0).unwrap(),
         }));
+        assert_eq!(
+            parented.set_parent(request.stub, Some(parent)),
+            Err(ForestError::RegisteredTerminalMutation { terminal: 7 })
+        );
+        parented
+            .consume_terminal(request.terminal_id, request.stub)
+            .unwrap();
         parented.set_parent(request.stub, Some(parent)).unwrap();
         assert!(matches!(
             TerminalCcoRequest::bind(&parented, 7, frame),
