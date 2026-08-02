@@ -374,6 +374,7 @@ pub struct JointPlan {
     config: ConfigFingerprint,
     balls: Vec<JointBall>,
     certified_dropped: usize,
+    certification_resource_refused: usize,
 }
 
 impl JointPlan {
@@ -415,6 +416,12 @@ impl JointPlan {
 
     pub const fn certified_dropped(&self) -> usize {
         self.certified_dropped
+    }
+
+    /// Candidates conservatively retained because aggregate staging could not admit even one
+    /// certificate at the fixed per-certificate proof budget.
+    pub const fn certification_resource_refused(&self) -> usize {
+        self.certification_resource_refused
     }
 
     /// Stable semantic digest used by the thread-count determinism gate.
@@ -514,6 +521,12 @@ impl JointPlan {
             }
         }
         for value in u64::try_from(self.certified_dropped)
+            .expect("platform usize fits u64")
+            .to_le_bytes()
+        {
+            byte(value);
+        }
+        for value in u64::try_from(self.certification_resource_refused)
             .expect("platform usize fits u64")
             .to_le_bytes()
         {
@@ -707,6 +720,7 @@ pub(crate) fn plan_joint_balls_filtered(
             config: config_fingerprint,
             balls: Vec::new(),
             certified_dropped: 0,
+            certification_resource_refused: 0,
         });
     }
 
@@ -718,6 +732,7 @@ pub(crate) fn plan_joint_balls_filtered(
             config: config_fingerprint,
             balls: Vec::new(),
             certified_dropped: 0,
+            certification_resource_refused: 0,
         });
     }
     let clusters = cluster_nodes(&nodes, staging, base_bytes)?;
@@ -849,19 +864,28 @@ pub(crate) fn plan_joint_balls_filtered(
         max_bytes: config.max_certificate_bytes,
     };
     let mut decisions = Vec::with_capacity(candidates.len());
+    let mut certification_resource_refused = 0;
     if !candidates.is_empty() {
         let certificate_window = certificate_parallel_window(
             retained_staging_bytes,
             staging.max_bytes,
             config.max_certificate_bytes,
         )?;
-        for window in candidates.chunks(certificate_window) {
-            let mapped = geom_kernel::ordered_index_map(
-                window,
-                geom_kernel::OrderedMapLimits::new(config.max_work_items, config.max_scratch_bytes),
-                |_, ball| ball_enclosed(ball, &members, config, certificate_scratch),
-            )?;
-            decisions.extend(mapped.into_values());
+        if certificate_window == 0 {
+            certification_resource_refused = candidates.len();
+            decisions.resize(candidates.len(), false);
+        } else {
+            for window in candidates.chunks(certificate_window) {
+                let mapped = geom_kernel::ordered_index_map(
+                    window,
+                    geom_kernel::OrderedMapLimits::new(
+                        config.max_work_items,
+                        config.max_scratch_bytes,
+                    ),
+                    |_, ball| ball_enclosed(ball, &members, config, certificate_scratch),
+                )?;
+                decisions.extend(mapped.into_values());
+            }
         }
     }
     let mut balls = Vec::with_capacity(candidates.len());
@@ -891,6 +915,7 @@ pub(crate) fn plan_joint_balls_filtered(
         config: config_fingerprint,
         balls,
         certified_dropped,
+        certification_resource_refused,
     })
 }
 
@@ -1216,9 +1241,6 @@ fn certificate_parallel_window(
         .checked_sub(retained_bytes)
         .ok_or(JointError::ScratchLimit)?;
     let window = available / per_certificate_limit;
-    if window == 0 {
-        return Err(JointError::ScratchLimit);
-    }
     Ok(window)
 }
 
@@ -2177,6 +2199,7 @@ mod tests {
             config: config(-100.0).fingerprint(),
             balls: vec![ball],
             certified_dropped: 2,
+            certification_resource_refused: 3,
         };
         let base_digest = base.digest();
         let mut variants = Vec::new();
@@ -2224,6 +2247,9 @@ mod tests {
         variants.push(changed);
         let mut changed = base.clone();
         changed.certified_dropped += 1;
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.certification_resource_refused += 1;
         variants.push(changed);
         assert!(variants
             .iter()
@@ -2322,6 +2348,20 @@ mod tests {
             )
             .unwrap(),
             1
+        );
+        assert_eq!(
+            certificate_parallel_window(
+                retained,
+                retained + exact_certificate_peak - 1,
+                exact_certificate_peak,
+            )
+            .unwrap(),
+            0
+        );
+        assert_eq!(
+            certificate_parallel_window(retained + 1, retained, exact_certificate_peak)
+                .unwrap_err(),
+            JointError::ScratchLimit
         );
         assert!(certify_sphere(
             &easy,
@@ -2440,6 +2480,91 @@ mod tests {
                 .unwrap()
                 .lines()
                 .find(|line| line.starts_with("JOINT_PLAN="))
+                .unwrap()
+                .to_owned()
+        });
+        assert!(outputs.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    #[test]
+    fn unavailable_aggregate_certificate_reservation_keeps_every_ball_at_all_thread_counts() {
+        const MARKER: &str = "PLINTH_JOINT_RESOURCE_REFUSAL_CHILD";
+        if std::env::var_os(MARKER).is_some() {
+            let expected_threads = std::env::var("PLINTH_THREADS")
+                .unwrap()
+                .parse::<usize>()
+                .unwrap();
+            assert_eq!(geom_kernel::current_threads(), expected_threads);
+            let mut forest = Forest::new();
+            for ordinal in 0..24_u32 {
+                let x = f64::from(ordinal) * 25.0;
+                add_member(
+                    &mut forest,
+                    [x, 0.0, 0.0],
+                    [x, 0.0, 10.0],
+                    0.6,
+                    0.6,
+                    MemberKind::Trunk,
+                    Owner::Generated {
+                        family: "joint-resource-fixture".into(),
+                        ordinal: ordinal * 2,
+                    },
+                    None,
+                );
+                add_member(
+                    &mut forest,
+                    [x, 0.0, 10.0],
+                    [x + 10.0, 0.0, 10.0],
+                    0.6,
+                    0.6,
+                    MemberKind::Shoot,
+                    Owner::Generated {
+                        family: "joint-resource-fixture".into(),
+                        ordinal: ordinal * 2 + 1,
+                    },
+                    None,
+                );
+            }
+            let mut cfg = config(-100.0);
+            cfg.max_certificate_bytes = 48 * 1024 * 1024;
+            let view =
+                FilteredLiveView::current(&forest, &[], LiveViewLimits::new(48, 1, 1024 * 1024))
+                    .unwrap();
+            let plan = plan_joint_balls_filtered(
+                &forest,
+                &view,
+                cfg,
+                JointStagingLimits::new(48, 96, 10_000, 10_000, 96, 48, 1024 * 1024),
+            )
+            .unwrap();
+            let kept = plan.validate_filtered(&forest, &view, cfg).unwrap().len();
+            assert!(kept > 0);
+            assert_eq!(plan.certified_dropped(), 0);
+            assert_eq!(plan.certification_resource_refused(), kept);
+            println!(
+                "JOINT_RESOURCE_REFUSAL={:016x}:{kept}:{}",
+                plan.digest(),
+                plan.certification_resource_refused()
+            );
+            return;
+        }
+        let test_name = "joints::tests::unavailable_aggregate_certificate_reservation_keeps_every_ball_at_all_thread_counts";
+        let outputs = ["1", "4", "16"].map(|threads| {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test_name, "--nocapture"])
+                .env(MARKER, "1")
+                .env("PLINTH_THREADS", threads)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .find(|line| line.starts_with("JOINT_RESOURCE_REFUSAL="))
                 .unwrap()
                 .to_owned()
         });
