@@ -6,6 +6,7 @@ rust-version = "1.97"
 publish = false
 
 [dependencies]
+geom_kernel = { path = "../../rust/geom_kernel" }
 plinth-core = { path = "../plinth-core" }
 plinth-hollow = { path = "../plinth-hollow" }
 plinth-mesh = { path = "../plinth-mesh" }
@@ -15,4 +16,5 @@ thiserror = { workspace = true }
 [dev-dependencies]
 plinth-decimate = { path = "../plinth-decimate" }
 plinth-orient = { path = "../plinth-orient" }
+serde_json = { workspace = true }
 trybuild = "1"

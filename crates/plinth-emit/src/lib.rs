@@ -463,7 +463,8 @@ fn build_record(
             .sphere_geometry
             .as_ref()
             .ok_or(EmitError::RecordEncodingRejected)?
-            .canonical_poles(primitive.start_radius_mm),
+            .canonical_poles(primitive.start_radius_mm)
+            .map_err(|_| EmitError::RecordEncodingRejected)?,
         _ => (primitive.start_mm, primitive.end_mm),
     };
     let start = sub_center(finite_point(source_start), center);
@@ -903,7 +904,11 @@ mod tests {
                     end.map(|value| Finite::new(value).unwrap()),
                 )
             },
-            |geometry| geometry.canonical_poles(start_radius_mm),
+            |geometry| {
+                geometry
+                    .canonical_poles(start_radius_mm)
+                    .expect("fixture sphere geometry remains finite")
+            },
         );
         SupportPrimitive {
             segment_kind,
@@ -945,8 +950,9 @@ mod tests {
         primitive.start_radius_mm = PositiveFinite::new(start_radius).unwrap();
         primitive.end_radius_mm = PositiveFinite::new(end_radius).unwrap();
         if let Some(geometry) = &primitive.sphere_geometry {
-            (primitive.start_mm, primitive.end_mm) =
-                geometry.canonical_poles(primitive.start_radius_mm);
+            (primitive.start_mm, primitive.end_mm) = geometry
+                .canonical_poles(primitive.start_radius_mm)
+                .expect("fixture sphere geometry remains finite");
         }
         primitive
     }
@@ -1191,6 +1197,34 @@ mod tests {
             raft_bridge_triangles([0.0; 3], [0.0; 3], 2.2, 0.2),
             Err(EmitError::RecordEncodingRejected)
         );
+    }
+
+    #[test]
+    fn emitter_handoff_accepts_coincident_raft_pad_only_after_semantic_validation() {
+        for kind in [
+            SupportSegmentKind::ContactTaper,
+            SupportSegmentKind::Member,
+            SupportSegmentKind::RootFlare,
+        ] {
+            let primitive = primitive(kind, [0.0; 3], [0.0; 3]);
+            let history = fixture_history(std::slice::from_ref(&primitive), 3.0);
+            assert!(matches!(
+                SupportedModel::from_parts(fixture_mesh(), vec![primitive], history),
+                Err(plinth_support::SupportError::InvalidPrimitive)
+            ));
+        }
+
+        let model = fixture_model(
+            vec![primitive(
+                SupportSegmentKind::RaftPadOrBridge,
+                [0.0; 3],
+                [0.0; 3],
+            )],
+            3.0,
+        );
+        let record = build_record(&model.primitives()[0], [0.0; 3])
+            .expect("validated coincident raft primitive emits a pad record");
+        assert_eq!(record.segment_type, SegmentType::PAD_OR_BRIDGE);
     }
 
     #[test]

@@ -58,6 +58,65 @@ The following former requirements are explicitly superseded:
 | Python/PyO3 survives until M9 | O-7 removes each compatibility surface at its native handoff; the final gate proves zero Python after essential parity, loadability, determinism, and owner-print gates pass |
 | M2 requires a premature `SurfaceOracle` abstraction | Add an abstraction only when a second real backend is implemented after Python deletion |
 
+### O-10 — support compatibility is explicitly uncalibrated legacy behavior
+
+**Owner clarification, 2026-08-01.** The frozen Python support pipeline is a
+compatibility target only: it is known not to crash, but it does **not** produce
+viable models. The elimination-step support port therefore reproduces its current
+observable behavior as **explicitly uncalibrated legacy compatibility**. This is
+not a claim that the behavior is print-safe, mechanically adequate, or measured
+for lateral load, deflection, or brace performance.
+
+This bounded compatibility policy does not retain the Python runtime, change a
+retired/no-runtime declaration into `Measured`, or waive any metric. The emitted
+Rust artifact remains subject to every ordinary executable essential-parity,
+as-good-or-better, loadability, determinism, and ported verifier gate. In
+particular, `corpus/manifest.json` waivers remain empty. The frozen artifacts and
+source behavior are the legacy comparison target; they are not safety evidence.
+
+Support-physics redesign and calibration remain post-Python work under O-6. The
+concrete next task is
+[`07-post-python-support-calibration-plate.md`](07-post-python-support-calibration-plate.md):
+its preregistered plate must be challenged before fabrication, and it is roadmap
+work rather than a Python-deletion blocker.
+
+<!-- owner-override-O-10-live-compatibility -->
+#### O-10 operative precedence for the live compatibility path
+
+O-10 narrowly supersedes `03-physics-and-constants.md` §3.3's **RETIRED — no
+runtime declaration / do not port** disposition and §0's `Placeholder`
+accept-path prohibition only for calculations on the live legacy support/raft
+path that are required to reproduce current observable behavior. Inspection of
+the frozen baseline revision recorded in `corpus/manifest.json`,
+`6eb7f6a65e1a3442aa860d63d920788da778faed`, confirms both values are live:
+
+- `shaft_drag_force_n = 0.01 N` is declared at
+  `scripts/support_placement/config.py:128`, consumed by
+  `placement.py:_shaft_r_for_L` at lines 815 and 817 and
+  `max_unbraced_len_mm` at line 831, and reaches the production path through
+  the sizing/bracing calls.
+- `brace_free_span_mm = 18 mm` is declared at
+  `scripts/support_placement/config.py:365`, directly controls rung requests
+  and activation-trigger decisions in `bracing.py:compute_needs` at lines
+  260, 291, and 294, and reaches production through
+  `engine.py:brace_and_size` at lines 1266–1272.
+
+In the Rust compatibility port, declare these two values with the scoped
+disposition `LegacyCompatibility`, each still carrying the existing
+**uncalibrated `Placeholder`** provenance wrapper; `LegacyCompatibility` is not
+a fifth provenance wrapper. They are never `Measured`, `Derived`, `AcceptSafe`,
+or safety evidence. O-10 permits
+them to affect parity production output and its `DefectReport` solely for the
+current support/raft compatibility calculation. It does not grant either value
+to a new or redesigned algorithm, and no other retired or Placeholder value is
+admitted by implication.
+
+The exception remains until an owner-approved result from the post-Python
+calibration task replaces it. Until then, all 15 ordinary metrics, candidate
+hard bounds, verifier gates, loadability, determinism, and the owner print gate
+remain unchanged. There is no waived metric, and `corpus/manifest.json` waivers
+remain empty.
+
 No numeric point estimate is normative here. The detailed material below continues to
 define useful metrics, fixtures, hazards, and desired end-state behavior wherever it does
 not conflict with this override.

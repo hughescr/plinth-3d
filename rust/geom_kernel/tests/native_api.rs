@@ -7,12 +7,13 @@ const TRIANGLES: [[[f64; 3]; 3]; 1] = [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 
 const NORMALS: [[f64; 3]; 1] = [[0.0, 0.0, 1.0]];
 const AREAS: [f64; 1] = [0.5];
 const BOUNDS: [[f64; 3]; 2] = [[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]];
+const TEST_UNBOUNDED_GRID_BYTES: usize = usize::MAX;
 
 fn surface() -> NativeSurface {
     NativeSurface::from_triangle_soup(
         TriangleSoup::borrowed(&TRIANGLES, &NORMALS, &AREAS, BOUNDS),
         2.0,
-        usize::MAX,
+        TEST_UNBOUNDED_GRID_BYTES,
     )
     .unwrap()
 }
@@ -189,13 +190,13 @@ fn owned_and_borrowed_triangle_soups_expose_the_same_batch_api() {
     let borrowed = NativeSurface::from_triangle_soup(
         TriangleSoup::borrowed(&TRIANGLES, &NORMALS, &AREAS, BOUNDS),
         2.0,
-        usize::MAX,
+        TEST_UNBOUNDED_GRID_BYTES,
     )
     .unwrap();
     let owned = NativeSurface::from_triangle_soup(
         TriangleSoup::owned(TRIANGLES.to_vec(), NORMALS.to_vec(), AREAS.to_vec(), BOUNDS),
         2.0,
-        usize::MAX,
+        TEST_UNBOUNDED_GRID_BYTES,
     )
     .unwrap();
 
@@ -438,14 +439,14 @@ fn malformed_and_nonfinite_inputs_return_named_errors() {
     let empty = NativeSurface::from_triangle_soup(
         TriangleSoup::borrowed(&[], &[], &[], BOUNDS),
         2.0,
-        usize::MAX,
+        TEST_UNBOUNDED_GRID_BYTES,
     );
     assert!(matches!(empty, Err(SurfaceBuildError::EmptyTriangleSoup)));
 
     let mismatch = NativeSurface::from_triangle_soup(
         TriangleSoup::borrowed(&TRIANGLES, &[], &AREAS, BOUNDS),
         2.0,
-        usize::MAX,
+        TEST_UNBOUNDED_GRID_BYTES,
     );
     assert!(matches!(
         mismatch,
@@ -461,7 +462,7 @@ fn malformed_and_nonfinite_inputs_return_named_errors() {
     let error = NativeSurface::from_triangle_soup(
         TriangleSoup::borrowed(&nonfinite, &NORMALS, &AREAS, BOUNDS),
         2.0,
-        usize::MAX,
+        TEST_UNBOUNDED_GRID_BYTES,
     );
     assert!(matches!(
         error,
@@ -479,7 +480,7 @@ fn malformed_and_nonfinite_inputs_return_named_errors() {
             [[2.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
         ),
         2.0,
-        usize::MAX,
+        TEST_UNBOUNDED_GRID_BYTES,
     );
     assert!(matches!(
         malformed_bounds,
@@ -489,7 +490,7 @@ fn malformed_and_nonfinite_inputs_return_named_errors() {
     let invalid_pitch = NativeSurface::from_triangle_soup(
         TriangleSoup::borrowed(&TRIANGLES, &NORMALS, &AREAS, BOUNDS),
         f64::INFINITY,
-        usize::MAX,
+        TEST_UNBOUNDED_GRID_BYTES,
     );
     assert!(matches!(
         invalid_pitch,
@@ -623,7 +624,7 @@ fn indexed_geometry_and_batched_results_match_equivalent_soup() {
         &faces,
         NativeSurfaceConfig {
             grid_pitch_mm: 2.0,
-            max_grid_bytes: usize::MAX,
+            max_grid_bytes: TEST_UNBOUNDED_GRID_BYTES,
         },
     )
     .unwrap();
@@ -644,7 +645,7 @@ fn indexed_geometry_and_batched_results_match_equivalent_soup() {
             [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]],
         ),
         2.0,
-        usize::MAX,
+        TEST_UNBOUNDED_GRID_BYTES,
     )
     .unwrap();
     assert_eq!(indexed.geometry().nfaces(), faces.len());
@@ -746,7 +747,7 @@ fn indexed_geometry_and_batched_results_match_equivalent_soup() {
 fn indexed_constructor_reports_typed_input_and_derivation_failures() {
     let config = NativeSurfaceConfig {
         grid_pitch_mm: 2.0,
-        max_grid_bytes: usize::MAX,
+        max_grid_bytes: TEST_UNBOUNDED_GRID_BYTES,
     };
     assert!(matches!(
         NativeSurface::from_indexed(&[], &[[0, 0, 0]], config),
@@ -776,7 +777,7 @@ fn indexed_constructor_reports_typed_input_and_derivation_failures() {
     ));
     for value in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         assert!(
-            matches!(NativeSurface::from_indexed(&[[0.0; 3]], &[[0,0,0]], NativeSurfaceConfig { grid_pitch_mm: value, max_grid_bytes: usize::MAX }), Err(SurfaceBuildError::InvalidGridPitch(got)) if got.to_bits() == value.to_bits())
+            matches!(NativeSurface::from_indexed(&[[0.0; 3]], &[[0,0,0]], NativeSurfaceConfig { grid_pitch_mm: value, max_grid_bytes: TEST_UNBOUNDED_GRID_BYTES }), Err(SurfaceBuildError::InvalidGridPitch(got)) if got.to_bits() == value.to_bits())
         );
     }
     let budget_indexed = NativeSurface::from_indexed(
@@ -792,8 +793,14 @@ fn indexed_constructor_reports_typed_input_and_derivation_failures() {
         2.0,
         0,
     );
-    assert!(matches!(budget_indexed, Err(SurfaceBuildError::Kernel(_))));
-    assert!(matches!(budget_soup, Err(SurfaceBuildError::Kernel(_))));
+    assert!(matches!(
+        budget_indexed,
+        Err(SurfaceBuildError::GridBudget { limit_bytes: 0, .. })
+    ));
+    assert!(matches!(
+        budget_soup,
+        Err(SurfaceBuildError::GridBudget { limit_bytes: 0, .. })
+    ));
     assert!(matches!(
         NativeSurface::from_indexed(&[[0.0; 3]], &[], config),
         Err(SurfaceBuildError::EmptyFaces)
@@ -817,7 +824,7 @@ fn indexed_constructor_reports_typed_input_and_derivation_failures() {
             &[[0, 0, 0]],
             NativeSurfaceConfig {
                 grid_pitch_mm: 0.0,
-                max_grid_bytes: usize::MAX
+                max_grid_bytes: TEST_UNBOUNDED_GRID_BYTES
             }
         ),
         Err(SurfaceBuildError::InvalidGridPitch(0.0))
@@ -842,7 +849,7 @@ fn indexed_repeated_index_face_keeps_kernel_degenerate_behavior() {
         &[[0, 0, 0]],
         NativeSurfaceConfig {
             grid_pitch_mm: 2.0,
-            max_grid_bytes: usize::MAX,
+            max_grid_bytes: TEST_UNBOUNDED_GRID_BYTES,
         },
     )
     .unwrap();

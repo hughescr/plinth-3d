@@ -25,6 +25,7 @@ use std::borrow::Cow;
 
 use mesh::Mesh;
 pub use mesh::{FaceBounds, FaceGeometry};
+use parity::ParityBuildError;
 pub use point_index::{NeighborCsr, PointCloudIndex, PointIndexBuildError, PointQueryError};
 pub use queries::{BatchInputError, CastRaysBatch, Interval, NativeSurface, SphereBreachBatch};
 pub use vec3::V3;
@@ -173,6 +174,11 @@ pub enum SurfaceBuildError {
         max: f64,
     },
     InvalidGridPitch(f64),
+    GridBudget {
+        axis: usize,
+        projected_bytes: usize,
+        limit_bytes: usize,
+    },
     Kernel(String),
 }
 
@@ -221,6 +227,14 @@ impl std::fmt::Display for SurfaceBuildError {
             Self::InvalidGridPitch(value) => write!(
                 formatter,
                 "grid_pitch_mm must be finite and greater than zero, got {value}"
+            ),
+            Self::GridBudget {
+                axis,
+                projected_bytes,
+                limit_bytes,
+            } => write!(
+                formatter,
+                "parity grid axis {axis} exceeds memory budget: {projected_bytes} bytes projected > {limit_bytes} budget"
             ),
             Self::Kernel(message) => write!(formatter, "kernel construction failed: {message}"),
         }
@@ -284,6 +298,21 @@ impl std::fmt::Display for SurfaceSubsetError {
 }
 
 impl std::error::Error for SurfaceSubsetError {}
+
+fn map_surface_kernel_error(error: ParityBuildError) -> SurfaceBuildError {
+    match error {
+        ParityBuildError::GridBudget {
+            axis,
+            projected_bytes,
+            limit_bytes,
+        } => SurfaceBuildError::GridBudget {
+            axis,
+            projected_bytes,
+            limit_bytes,
+        },
+        ParityBuildError::Other(message) => SurfaceBuildError::Kernel(message),
+    }
+}
 
 impl NativeSurface {
     /// Compute a checked conservative peak before constructing any native
@@ -445,7 +474,7 @@ impl NativeSurface {
         }
 
         let mesh = Mesh::from_soup(&soup.triangles, &soup.normals, &soup.areas, soup.bounds);
-        Self::new(mesh, grid_pitch_mm, max_grid_bytes).map_err(SurfaceBuildError::Kernel)
+        Self::new(mesh, grid_pitch_mm, max_grid_bytes).map_err(map_surface_kernel_error)
     }
 
     /// Construct a surface from indexed vertices and faces, deriving face
@@ -461,7 +490,7 @@ impl NativeSurface {
         }
         let mesh = Mesh::from_indexed(vertices, faces)?;
         Self::new(mesh, config.grid_pitch_mm, config.max_grid_bytes)
-            .map_err(SurfaceBuildError::Kernel)
+            .map_err(map_surface_kernel_error)
     }
 
     /// Number of faces selected by this immutable surface view.
@@ -511,21 +540,63 @@ fn validate_finite(field: &'static str, values: &[f64]) -> Result<(), SurfaceBui
 mod thread_tests {
     use super::*;
 
-    struct RestoreVar(Option<std::ffi::OsString>);
+    const TEST_UNBOUNDED_GRID_BYTES: usize = usize::MAX;
+    const THREAD_SWEEP_CHILD: &str = "GEOM_KERNEL_THREAD_SWEEP_CHILD";
+    const THREAD_SWEEP_SIGNATURE: &str = "GEOM_KERNEL_THREAD_SWEEP_SIGNATURE=";
 
-    impl Drop for RestoreVar {
-        fn drop(&mut self) {
-            if let Some(value) = self.0.take() {
-                std::env::set_var("PLINTH_THREADS", value);
-            } else {
-                std::env::remove_var("PLINTH_THREADS");
-            }
+    fn sweep_threads(test_name: &str) -> Option<Vec<String>> {
+        if std::env::var(THREAD_SWEEP_CHILD).as_deref() == Ok("1") {
+            return None;
         }
+        Some(
+            [1, 4, 16]
+                .into_iter()
+                .map(|threads| {
+                    let output = std::process::Command::new(
+                        std::env::current_exe().expect("current test executable"),
+                    )
+                    .args(["--exact", test_name, "--nocapture"])
+                    .env("PLINTH_THREADS", threads.to_string())
+                    .env(THREAD_SWEEP_CHILD, "1")
+                    .output()
+                    .expect("spawn isolated thread-sweep test");
+                    assert!(
+                        output.status.success(),
+                        "thread sweep child {threads} failed:\n{}\n{}",
+                        String::from_utf8_lossy(&output.stdout),
+                        String::from_utf8_lossy(&output.stderr),
+                    );
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let sentinel = format!("\n{THREAD_SWEEP_SIGNATURE}");
+                    assert_eq!(
+                        stdout.matches(&sentinel).count(),
+                        1,
+                        "thread sweep child must emit exactly one signature sentinel:\n{stdout}"
+                    );
+                    stdout
+                        .split_once(&sentinel)
+                        .and_then(|(_, signature)| signature.lines().next())
+                        .map(str::to_owned)
+                        .expect("thread sweep child must report its deterministic signature")
+                })
+                .collect(),
+        )
     }
 
     #[test]
     fn batch_queries_reread_live_thread_pool_and_remain_identical() {
-        let _restore = RestoreVar(std::env::var_os("PLINTH_THREADS"));
+        if let Some(signatures) = sweep_threads(
+            "thread_tests::batch_queries_reread_live_thread_pool_and_remain_identical",
+        ) {
+            assert!(signatures.windows(2).all(|pair| pair[0] == pair[1]));
+            return;
+        }
+        let expected = std::env::var("PLINTH_THREADS")
+            .expect("isolated sweep config")
+            .parse::<usize>()
+            .expect("positive isolated thread count");
+        assert_eq!(current_threads(), expected);
+        assert_eq!(par::run(rayon::current_num_threads), expected);
         let triangles = vec![[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]];
         let surface = NativeSurface::from_triangle_soup(
             TriangleSoup::owned(
@@ -535,28 +606,21 @@ mod thread_tests {
                 [[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
             ),
             2.0,
-            usize::MAX,
+            TEST_UNBOUNDED_GRID_BYTES,
         )
         .unwrap();
         let subset = surface.subset(&[0]).unwrap();
         let points = [[0.25, 0.25, 1.0], [2.0, 2.0, 0.0]];
-        let mut baseline = None;
-
-        for expected in [1, 4, 16] {
-            std::env::set_var("PLINTH_THREADS", expected.to_string());
-            assert_eq!(current_threads(), expected);
-            assert_eq!(par::run(rayon::current_num_threads), expected);
-
-            let result = (
-                surface.query(&points, f64::INFINITY),
-                subset.query(&points, f64::INFINITY),
-                subset.inside(&points),
-            );
-            if let Some(previous) = &baseline {
-                assert_eq!(&result, previous);
-            } else {
-                baseline = Some(result);
-            }
-        }
+        let result = (
+            surface.query(&points, f64::INFINITY),
+            subset.query(&points, f64::INFINITY),
+            subset.inside(&points),
+            surface.cast_rays(
+                &[[0.25, 0.25, 1.0], [2.0, 2.0, 1.0]],
+                &[[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]],
+                2.0,
+            ),
+        );
+        println!("\n{THREAD_SWEEP_SIGNATURE}{result:?}");
     }
 }

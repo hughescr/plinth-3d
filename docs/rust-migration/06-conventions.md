@@ -28,6 +28,17 @@ decimation first**: error-bounded, feature-protecting decimation creates the sol
 production mesh consumed by every downstream stage; any orientation proxy derives from
 that mesh. It is neither late nor optional/manual-only.
 
+O-10 records a bounded support-port compatibility policy. The frozen Python support
+pipeline is known not to crash but not to produce viable models, so Rust ports its
+current observable behavior as **explicitly uncalibrated legacy compatibility**. It is
+not `Measured`, not a safety claim, not a metric waiver, and not a reason to retain or
+reclassify the retired Python runtime. All ordinary artifact, as-good-or-better,
+loadability, determinism, and ported verifier gates still bind; `corpus/manifest.json`
+waivers stay empty. Lateral-load, deflection, and brace behavior require the
+post-Python preregistered calibration task in
+`07-post-python-support-calibration-plate.md`, whose design must be challenged before
+fabrication and which is not a deletion blocker.
+
 ---
 
 ## 1. Batch-first is law
@@ -378,6 +389,7 @@ recorded sign-off.
 | O-9 | override | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-08-01 | Printer-resolution error limits are binding; the 0.50 RATIO_HI was an unmeasured Placeholder mistakenly promoted into a hard ceiling. Search through 1.00, reduce only when safe/useful, and return named verified AlreadyPrintScale with unchanged move-only production mesh, zero identity error, unchanged topology, and recorded refusal reason when no reduced candidate survives error, topology, or protection. A requested ratio below 1.00 that returns unchanged is M3NoReduction and cannot pass. | docs/rust-migration/04-migration-plan.md | M3-owner-correction-2026-08-01 | - |
 | A-1 | decision | 2026-08-01 | reviewer:Sol | sol-compliance-adjudication | exact:2026-08-01 | O-9 safe/useful requires two independent gates: measured geometric eligibility and registered AcceptSafe DownstreamUseful evidence. Face removal alone is not utility; until a witness exists production retains the bit-identical original with NoDownstreamUtilityEvidence while preserving diagnostic geometry evidence. | docs/rust-migration/04-migration-plan.md | M3-downstream-utility-gate | - |
 | A-2 | decision | 2026-08-01 | reviewer:Sol | sol-compliance-adjudication | exact:2026-08-01 | M3 diagnostic discovery may adaptively explore deterministic integer-face targets under a fixed work bound, but must not claim topology monotonicity or complete coverage when intervals remain. Topology audit precedes the expensive full-population distance probe, and diagnostic eligibility cannot authorize production without A-1 utility evidence. | docs/rust-migration/04-migration-plan.md | M3-adaptive-diagnostic-search | - |
+| O-10 | override | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-08-01 | Port the non-crashing but non-viable frozen Python support behavior only as explicitly uncalibrated legacy compatibility; retain every ordinary gate, no metric waiver, no Measured reclassification, and defer support-physics calibration | docs/rust-migration/04-migration-plan.md | owner-override-O-10 | - |
 <!-- PLINTH_GATE_MAIN_END -->
 
 ## Decision gate corrections
@@ -394,6 +406,7 @@ unique effective replacement while auditing both original and correction rows.
 | C-3 | D-2 | D-2 | decision | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-08-01 | O-5 supersedes independent geometry and delicacy implementations; canonical geom_kernel and plinth-mesh reuse is required | docs/rust-migration/06-conventions.md | owner-override-O-5 | - |
 | C-4 | D-19 | D-19 | decision | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-08-01 | O-5 supersedes geom_kernel exclusion; plinth-metrics must reuse canonical geom_kernel and plinth-mesh capabilities | docs/rust-migration/06-conventions.md | owner-override-O-5 | - |
 | C-5 | O-6 | O-6 | override | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-08-01 | O-7 supersedes final-gate compatibility retention; Python PyO3 maturin shims and legacy controls are removed at each native Rust handoff while frozen disk artifacts remain the oracle | docs/rust-migration/06-conventions.md | owner-override-O-7 | - |
+| C-6 | O-10 | O-10 | override | 2026-08-01 | owner:Craig Hughes | documented-owner-approval | exact:2026-08-01 | O-10 supersedes the no-runtime do-not-port disposition and Placeholder accept-path prohibition only for live current-support and raft parity calculations using shaft_drag_force_n 0.01 N and brace_free_span_mm 18 mm as LegacyCompatibility uncalibrated Placeholder values; they may affect parity output and DefectReport but are not Measured Derived AcceptSafe safety evidence or reusable by new algorithms; every ordinary gate remains and calibration replaces the exception | docs/rust-migration/04-migration-plan.md | owner-override-O-10-live-compatibility | - |
 <!-- PLINTH_GATE_CORRECTIONS_END -->
 
 For any future `waiver` row, the final cell is one strict JSON object with

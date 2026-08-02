@@ -15,7 +15,7 @@ use crate::consts::{DEDUP_LOC_MM, EPS, NEAR_WALL_SKIP, THRESHOLD_BAND_MM};
 use crate::mesh::Mesh;
 use crate::moller::{dedup_loc, moller};
 use crate::par;
-use crate::parity::ParityVote;
+use crate::parity::{ParityBuildError, ParityVote};
 use crate::vec3::{add, cross, dot, norm, scale, sub, V3};
 use crate::{SurfaceIndexKind, SurfaceSubsetError};
 
@@ -171,20 +171,18 @@ fn build_indexes(
 ) -> Result<(Bvh, ParityVote), (SurfaceIndexKind, String)> {
     let bvh = Bvh::build(mesh).map_err(|reason| (SurfaceIndexKind::Bvh, reason))?;
     let pv = ParityVote::build(mesh, grid_pitch_mm, max_grid_bytes)
-        .map_err(|reason| (SurfaceIndexKind::Parity, reason))?;
+        .map_err(|reason| (SurfaceIndexKind::Parity, reason.to_string()))?;
     Ok((bvh, pv))
 }
 
 impl NativeSurface {
-    pub fn new(
+    pub(crate) fn new(
         mesh: Mesh,
         grid_pitch_mm: f64,
         max_grid_bytes: usize,
-    ) -> Result<NativeSurface, String> {
-        // Preserve the established construction error text. Typed index
-        // attribution is specific to the subset boundary below.
-        let (bvh, pv) = build_indexes(&mesh, grid_pitch_mm, max_grid_bytes)
-            .map_err(|(_index, reason)| reason)?;
+    ) -> Result<NativeSurface, ParityBuildError> {
+        let bvh = Bvh::build(&mesh).map_err(ParityBuildError::Other)?;
+        let pv = ParityVote::build(&mesh, grid_pitch_mm, max_grid_bytes)?;
         Ok(NativeSurface {
             mesh,
             bvh,

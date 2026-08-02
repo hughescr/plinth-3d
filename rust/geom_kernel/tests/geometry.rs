@@ -4,6 +4,8 @@
 
 use geom_kernel::testkit::*;
 
+const TEST_UNBOUNDED_GRID_BYTES: usize = usize::MAX;
+
 fn tri(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> ([f64; 3], [f64; 3], [f64; 3]) {
     (a, b, c)
 }
@@ -184,7 +186,7 @@ fn a17_parity_grid_budget_fails_cleanly() {
     let mesh = grid_mesh(6);
     // generous budget builds fine
     assert!(
-        build_surface_budget(&mesh, usize::MAX).is_ok(),
+        build_surface_budget(&mesh, TEST_UNBOUNDED_GRID_BYTES).is_ok(),
         "unbounded budget must build"
     );
     // a tiny budget must fail with a clean Err, never panic or OOM
