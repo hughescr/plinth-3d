@@ -505,6 +505,131 @@ fn generous_penetration_limits() -> PenetrationBatchLimits {
     }
 }
 
+const HETEROGENEOUS_P0: [[f64; 3]; 3] = [[-1.0, 0.5, 0.5], [0.25, 0.25, -1.0], [1.25, 2.0, 0.5]];
+const HETEROGENEOUS_P1: [[f64; 3]; 3] = [[4.0, 0.5, 0.5], [0.25, 0.25, 2.0], [3.75, 2.0, 0.5]];
+const HETEROGENEOUS_RADII: [f64; 3] = [0.1, 0.05, 0.2];
+
+fn heterogeneous_penetration(
+    surface: &NativeSurface,
+    limits: PenetrationBatchLimits,
+) -> Result<Vec<Vec<Interval>>, PenetrationBatchError> {
+    surface.penetration_intervals_batch_bounded(
+        &HETEROGENEOUS_P0,
+        &HETEROGENEOUS_P1,
+        &HETEROGENEOUS_RADII,
+        &HETEROGENEOUS_RADII,
+        2,
+        0.12,
+        8,
+        0.05,
+        true,
+        limits,
+    )
+}
+
+#[test]
+fn bounded_penetration_frozen_heterogeneous_rows_are_bit_exact_and_ordered() {
+    let surface = cubes_surface(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+    let rows = heterogeneous_penetration(&surface, generous_penetration_limits()).unwrap();
+    type FrozenInterval = (i32, u64, u64, u64, bool, bool);
+    let expected: [&[FrozenInterval]; 3] = [
+        &[
+            (
+                -1,
+                4_607_182_418_800_017_408,
+                4_611_686_018_427_387_904,
+                4_601_678_019_255_453_472,
+                true,
+                true,
+            ),
+            (
+                -1,
+                4_613_937_818_241_073_153,
+                4_616_189_618_054_758_400,
+                4_601_678_019_255_453_480,
+                true,
+                true,
+            ),
+            (
+                0,
+                4_607_182_418_800_017_408,
+                4_611_686_018_427_387_904,
+                4_600_877_379_321_698_714,
+                true,
+                true,
+            ),
+            (
+                0,
+                4_613_937_818_241_073_153,
+                4_616_189_618_054_758_400,
+                4_600_877_379_321_698_714,
+                true,
+                true,
+            ),
+            (
+                1,
+                4_607_182_418_800_017_408,
+                4_611_686_018_427_387_904,
+                4_600_877_379_321_698_714,
+                true,
+                true,
+            ),
+            (
+                1,
+                4_613_937_818_241_073_153,
+                4_616_189_618_054_758_400,
+                4_600_877_379_321_698_714,
+                true,
+                true,
+            ),
+        ],
+        &[
+            (
+                -1,
+                4_607_182_418_800_017_408,
+                4_611_686_018_427_387_904,
+                4_598_175_219_545_276_416,
+                true,
+                true,
+            ),
+            (
+                0,
+                4_607_182_418_800_017_408,
+                4_611_686_018_427_387_904,
+                4_598_175_219_545_276_416,
+                true,
+                true,
+            ),
+            (
+                1,
+                4_607_182_418_800_017_408,
+                4_611_686_018_427_387_904,
+                4_596_373_779_694_328_218,
+                true,
+                true,
+            ),
+        ],
+        &[],
+    ];
+    assert_eq!(rows.len(), expected.len());
+    for (row, expected_row) in rows.iter().zip(expected) {
+        let actual = row
+            .iter()
+            .map(|interval| {
+                (
+                    interval.ray,
+                    interval.s_a.to_bits(),
+                    interval.s_b.to_bits(),
+                    interval.max_depth.to_bits(),
+                    interval.entered,
+                    interval.exited,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected_row);
+    }
+}
+
 #[test]
 fn bounded_penetration_preflights_every_resource_at_exact_cap() {
     let surface = cube_surface();
@@ -664,15 +789,14 @@ fn update_penetration_hash(hash: &mut u64, value: u64) {
 
 #[test]
 fn bounded_penetration_thread_identity_child() {
-    let surface = cube_surface();
-    let p0s = vec![[-1.0, 0.5, 0.5]; 1024];
-    let p1s = vec![[2.0, 0.5, 0.5]; 1024];
+    let surface = cubes_surface(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
     let limits = surface
-        .penetration_intervals_batch_worst_case_limits(p0s.len(), 0, 8, false)
+        .penetration_intervals_batch_worst_case_limits(HETEROGENEOUS_P0.len(), 2, 8, true)
         .unwrap();
-    let rows = bounded_penetration(&surface, &p0s, &p1s, limits).unwrap();
+    let rows = heterogeneous_penetration(&surface, limits).unwrap();
     let mut hash = 1_469_598_103_934_665_603u64;
-    for row in rows {
+    for (row_index, row) in rows.into_iter().enumerate() {
+        update_penetration_hash(&mut hash, 0x524f_575f_4245_4749 ^ row_index as u64);
         update_penetration_hash(&mut hash, row.len() as u64);
         for interval in row {
             update_penetration_hash(&mut hash, interval.s_a.to_bits());
@@ -682,11 +806,17 @@ fn bounded_penetration_thread_identity_child() {
             update_penetration_hash(&mut hash, interval.exited as u64);
             update_penetration_hash(&mut hash, interval.ray as u64);
         }
+        update_penetration_hash(&mut hash, 0x524f_575f_454e_4421 ^ row_index as u64);
     }
-    println!(
-        "PENETRATION_FINGERPRINT:{}:{hash}",
-        geom_kernel::current_threads()
-    );
+    let configured = geom_kernel::current_threads();
+    let effective = geom_kernel::ordered_index_map(
+        &[0u8],
+        geom_kernel::OrderedMapLimits::new(1, std::mem::size_of::<u8>()),
+        |_, value| *value,
+    )
+    .unwrap()
+    .effective_threads();
+    println!("PENETRATION_FINGERPRINT:{configured}:{effective}:{hash}");
 }
 
 #[test]
@@ -714,8 +844,9 @@ fn bounded_penetration_thread_identity_is_subprocess_invariant() {
             .find(|line| line.starts_with("PENETRATION_FINGERPRINT:"))
             .unwrap();
         let fields: Vec<&str> = line.split(':').collect();
-        assert_eq!(fields[1], threads, "configured pool mismatch: {line}");
-        fingerprints.push(fields[2].to_owned());
+        assert_eq!(fields[1], threads, "configured count mismatch: {line}");
+        assert_eq!(fields[2], threads, "effective pool mismatch: {line}");
+        fingerprints.push(fields[3].to_owned());
     }
     assert!(fingerprints.windows(2).all(|pair| pair[0] == pair[1]));
 }
