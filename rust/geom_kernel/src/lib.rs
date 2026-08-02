@@ -26,6 +26,7 @@ pub mod testkit;
 use std::borrow::Cow;
 
 use rayon::prelude::*;
+use sha2::{Digest, Sha256};
 
 use mesh::Mesh;
 pub use mesh::{FaceBounds, FaceGeometry};
@@ -46,6 +47,87 @@ pub use slicing::{
 pub use vec3::V3;
 
 pub const KERNEL_API_VERSION: u32 = 1;
+
+/// Collision-resistant content identity for an exact, ordered triangle soup.
+///
+/// This is an opaque value, not an unforgeable capability. It has no unchecked
+/// raw-byte constructor, but callers can reproducibly compute the same value
+/// through [`triangle_soup_digest`] or [`indexed_triangle_soup_digest`]. A
+/// caller can compare or inspect digest values; it cannot overwrite the digest
+/// retained inside an already constructed [`NativeSurface`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SurfaceTriangleSoupDigest([u8; 32]);
+
+impl SurfaceTriangleSoupDigest {
+    /// Borrow the canonical digest bytes for comparison or serialization.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+const TRIANGLE_SOUP_DIGEST_DOMAIN: &[u8] = b"plinth.native-surface.triangle-soup.sha256.v1\0";
+
+/// Reproducibly compute the canonical content identity for a logical triangle
+/// soup in face, vertex, and coordinate order.
+///
+/// Components are encoded as their raw IEEE-754 bits in little-endian order,
+/// so signed zero remains distinct. `NativeSurface` construction rejects
+/// non-finite coordinates before retaining this identity.
+#[must_use]
+pub fn triangle_soup_digest(triangles: &[[[f64; 3]; 3]]) -> SurfaceTriangleSoupDigest {
+    triangle_soup_digest_from_iter(triangles.iter().copied())
+}
+
+pub(crate) fn triangle_soup_digest_from_iter<I>(triangles: I) -> SurfaceTriangleSoupDigest
+where
+    I: ExactSizeIterator<Item = [[f64; 3]; 3]>,
+{
+    let mut hasher = Sha256::new();
+    hasher.update(TRIANGLE_SOUP_DIGEST_DOMAIN);
+    hasher.update(
+        u64::try_from(triangles.len())
+            .expect("triangle soup length always fits in u64")
+            .to_le_bytes(),
+    );
+    for triangle in triangles {
+        for vertex in triangle {
+            for component in vertex {
+                hasher.update(component.to_bits().to_le_bytes());
+            }
+        }
+    }
+    SurfaceTriangleSoupDigest(hasher.finalize().into())
+}
+
+/// Reproducibly compute the canonical content identity for an indexed mesh as
+/// its ordered, expanded triangle soup.
+///
+/// Returns `None` when a face index is outside `vertices`. This helper does
+/// not perform `NativeSurface`'s finite-input validation; use it only after a
+/// mesh boundary has established valid source coordinates.
+#[must_use]
+pub fn indexed_triangle_soup_digest(
+    vertices: &[[f64; 3]],
+    faces: &[[u32; 3]],
+) -> Option<SurfaceTriangleSoupDigest> {
+    let mut hasher = Sha256::new();
+    hasher.update(TRIANGLE_SOUP_DIGEST_DOMAIN);
+    hasher.update(
+        u64::try_from(faces.len())
+            .expect("face count always fits in u64")
+            .to_le_bytes(),
+    );
+    for indices in faces {
+        for &index in indices {
+            let vertex = vertices.get(index as usize)?;
+            for component in vertex {
+                hasher.update(component.to_bits().to_le_bytes());
+            }
+        }
+    }
+    Some(SurfaceTriangleSoupDigest(hasher.finalize().into()))
+}
 
 /// Explicit parity-grid construction settings. There is deliberately no
 /// default: callers must select their production memory/precision budget.
@@ -534,6 +616,17 @@ impl NativeSurface {
     /// are exposed separately by [`Self::face_ids`].
     pub fn geometry(&self) -> &FaceGeometry {
         self.mesh.geometry()
+    }
+
+    /// Read the exact source triangle-soup content identity retained at
+    /// construction.
+    ///
+    /// Callers can independently reproduce this value with the canonical
+    /// digest helpers, but cannot replace the immutable value stored by this
+    /// surface.
+    #[must_use]
+    pub const fn source_triangle_soup_digest(&self) -> SurfaceTriangleSoupDigest {
+        self.source_triangle_soup_digest
     }
 }
 

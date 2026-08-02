@@ -1,6 +1,7 @@
 use geom_kernel::{
-    BatchInputError, Interval, NativeSurface, NativeSurfaceConfig, PlaneIntersectionKind,
-    PlaneSliceError, PlaneSliceLimits, SurfaceBuildError, SurfaceSubsetError, TriangleSoup,
+    indexed_triangle_soup_digest, triangle_soup_digest, BatchInputError, Interval, NativeSurface,
+    NativeSurfaceConfig, PlaneIntersectionKind, PlaneSliceError, PlaneSliceLimits,
+    SurfaceBuildError, SurfaceSubsetError, TriangleSoup,
 };
 use std::process::Command;
 
@@ -604,6 +605,68 @@ fn owned_and_borrowed_triangle_soups_expose_the_same_batch_api() {
 }
 
 #[test]
+fn source_triangle_soup_digest_binds_face_vertex_and_ieee_order() {
+    let triangles = [
+        [[-0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]],
+        [[0.0, 0.0, 1.0], [2.0, 0.0, 1.0], [0.0, 2.0, 1.0]],
+    ];
+    let canonical = triangle_soup_digest(&triangles);
+
+    let mut face_reordered = triangles;
+    face_reordered.swap(0, 1);
+    assert_ne!(canonical, triangle_soup_digest(&face_reordered));
+
+    let mut vertex_permuted = triangles;
+    vertex_permuted[0].rotate_left(1);
+    assert_ne!(canonical, triangle_soup_digest(&vertex_permuted));
+
+    let mut winding_reversed = triangles;
+    winding_reversed[0].swap(1, 2);
+    assert_ne!(canonical, triangle_soup_digest(&winding_reversed));
+
+    let mut positive_zero = triangles;
+    positive_zero[0][0][0] = 0.0;
+    assert_ne!(canonical, triangle_soup_digest(&positive_zero));
+
+    let vertices = [
+        [-0.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0],
+        [0.0, 2.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [2.0, 0.0, 1.0],
+        [0.0, 2.0, 1.0],
+    ];
+    let faces = [[0, 1, 2], [3, 4, 5]];
+    assert_eq!(
+        indexed_triangle_soup_digest(&vertices, &faces),
+        Some(canonical)
+    );
+    let indexed = NativeSurface::from_indexed(
+        &vertices,
+        &faces,
+        NativeSurfaceConfig {
+            grid_pitch_mm: 2.0,
+            max_grid_bytes: TEST_UNBOUNDED_GRID_BYTES,
+        },
+    )
+    .unwrap();
+    assert_eq!(indexed.source_triangle_soup_digest(), canonical);
+
+    let soup = NativeSurface::from_triangle_soup(
+        TriangleSoup::borrowed(
+            &triangles,
+            &[[0.0, 0.0, 1.0]; 2],
+            &[2.0, 2.0],
+            [[-0.0, 0.0, 0.0], [2.0, 2.0, 1.0]],
+        ),
+        2.0,
+        TEST_UNBOUNDED_GRID_BYTES,
+    )
+    .unwrap();
+    assert_eq!(soup.source_triangle_soup_digest(), canonical);
+}
+
+#[test]
 fn subsets_validate_caller_order_and_return_global_face_ids() {
     let triangles = [
         [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
@@ -640,6 +703,10 @@ fn subsets_validate_caller_order_and_return_global_face_ids() {
     );
 
     let identity = full.subset(&[2, 1, 0]).unwrap();
+    assert_eq!(
+        identity.source_triangle_soup_digest(),
+        full.source_triangle_soup_digest()
+    );
     assert_eq!(identity.bounds(), full.bounds());
     assert_eq!(
         identity.query(&[[0.25, 0.25, 1.0]], f64::INFINITY),
@@ -650,6 +717,10 @@ fn subsets_validate_caller_order_and_return_global_face_ids() {
     let tied = full.subset(&[2, 0]).unwrap();
     let tied_reordered = full.subset(&[0, 2]).unwrap();
     assert_eq!(tied.face_ids(), &[0, 2]);
+    assert_ne!(
+        tied.source_triangle_soup_digest(),
+        full.source_triangle_soup_digest()
+    );
     assert_eq!(tied.face_ids(), tied_reordered.face_ids());
     assert_eq!(tied.nfaces(), 2);
     assert_eq!(tied.geometry().nfaces(), 3);
