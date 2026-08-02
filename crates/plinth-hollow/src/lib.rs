@@ -301,6 +301,9 @@ pub struct HollowResourceEstimate {
     label_peak_bytes: usize,
     surface_peak_bytes: usize,
     rasterization_peak_bytes: usize,
+    source_mesh_peak_bytes: usize,
+    selected_mask_peak_bytes: usize,
+    boolean_peak_bytes: usize,
     retained_cavity_field_bytes: usize,
     output_upper_bound_bytes: usize,
     peak_bytes: usize,
@@ -338,6 +341,18 @@ impl HollowResourceEstimate {
     #[must_use]
     pub const fn rasterization_peak_bytes(self) -> usize {
         self.rasterization_peak_bytes
+    }
+    #[must_use]
+    pub const fn source_mesh_peak_bytes(self) -> usize {
+        self.source_mesh_peak_bytes
+    }
+    #[must_use]
+    pub const fn selected_mask_peak_bytes(self) -> usize {
+        self.selected_mask_peak_bytes
+    }
+    #[must_use]
+    pub const fn boolean_peak_bytes(self) -> usize {
+        self.boolean_peak_bytes
     }
     #[must_use]
     pub const fn retained_cavity_field_bytes(self) -> usize {
@@ -714,6 +729,10 @@ fn checked_sum(values: &[usize]) -> Result<usize, HollowError> {
     })
 }
 
+const fn phase_fits_cap(phase_peak_bytes: usize, cap_bytes: usize) -> bool {
+    phase_peak_bytes <= cap_bytes
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct LabelMemoryEstimate {
     requested_live_bytes: usize,
@@ -746,6 +765,32 @@ fn allocator_allocation_bound_bytes(
         .and_then(|value| value.checked_add(2 * std::mem::size_of::<usize>()))
         .ok_or(HollowError::ResourceAccountingOverflow)
 }
+
+fn mesh_allocation_bound(
+    vertex_count: usize,
+    triangle_count: usize,
+    index_size: usize,
+) -> Result<usize, HollowError> {
+    checked_sum(&[
+        allocator_allocation_bound(
+            vertex_count,
+            std::mem::size_of::<[f64; 3]>(),
+            std::mem::align_of::<[f64; 3]>(),
+        )?,
+        allocator_allocation_bound(triangle_count, 3 * index_size, index_size)?,
+    ])
+}
+
+/// Serial Manifold's nested-difference kernel contract. H0's generated inner
+/// surface is wholly inside the validated source, so the operation has no
+/// edge/face intersections and cannot create more vertices or triangles than
+/// the two inputs contain. The native implementation retains position,
+/// halfedge, normal, relation, collider, winding and result arrays. Charging
+/// 192 bytes per vertex and triangle covers those typed arrays,
+/// their serial scratch counterparts, and allocator/capacity slack; the bridge
+/// input/import/export copies are charged separately below.
+const MANIFOLD_NESTED_VERTEX_WORK_BYTES: usize = 192;
+const MANIFOLD_NESTED_TRIANGLE_WORK_BYTES: usize = 192;
 
 fn label_phase_memory(voxel_count: usize) -> Result<LabelMemoryEstimate, HollowError> {
     let union_find_count = voxel_count
@@ -871,10 +916,18 @@ fn resource_estimate(
     let retained_cavity_field_bytes = cavity_field::packed_bytes_for_voxels(spec.count)?;
     let retained_cavity_field_peak_bytes =
         allocator_allocation_bound_bytes(retained_cavity_field_bytes, std::mem::align_of::<u64>())?;
+    let selected_mask_peak_bytes = allocator_allocation_bound(
+        spec.count,
+        std::mem::size_of::<bool>(),
+        std::mem::align_of::<bool>(),
+    )?;
     // Packing the selected mask occurs while labels and the selected bool mask
-    // are still live. The compact field remains in the returned candidate.
+    // are still live. The source mesh also remains owned until the Boolean and
+    // the compact field remains in the returned candidate.
     let label_peak_bytes = checked_sum(&[
+        source_mesh_peak_bytes,
         label_memory.conservative_peak_bytes,
+        selected_mask_peak_bytes,
         retained_cavity_field_peak_bytes,
     ])?;
 
@@ -888,17 +941,109 @@ fn resource_estimate(
             .ok_or(HollowError::ResourceAccountingOverflow)
     })?;
     let surface_peak_bytes = checked_scale(surface_lattice_count, 224)?;
-    let inner_mesh_upper = checked_scale(
-        surface_lattice_count,
-        std::mem::size_of::<[f64; 3]>() + 6 * std::mem::size_of::<[u32; 3]>(),
+    let inner_vertex_upper = surface_lattice_count;
+    let inner_triangle_upper = checked_scale(surface_lattice_count, 6)?;
+    let inner_mesh_peak_bytes = mesh_allocation_bound(
+        inner_vertex_upper,
+        inner_triangle_upper,
+        std::mem::size_of::<u32>(),
     )?;
-    let output_upper_bound_bytes = checked_sum(&[source_mesh_peak_bytes, inner_mesh_upper])?;
-    // Rust source/inner meshes, FFI conversion, native Boolean result, and
-    // returned Mesh can coexist at the boundary.
-    let boolean_peak = checked_sum(&[
-        checked_scale(output_upper_bound_bytes, 3)?,
-        retained_cavity_field_peak_bytes,
+    let output_upper_bound_bytes = checked_sum(&[source_mesh_peak_bytes, inner_mesh_peak_bytes])?;
+
+    let source_vertices = mesh.verts().len();
+    let source_triangles = mesh.tris().len();
+    let combined_vertices = source_vertices
+        .checked_add(inner_vertex_upper)
+        .ok_or(HollowError::ResourceAccountingOverflow)?;
+    let combined_triangles = source_triangles
+        .checked_add(inner_triangle_upper)
+        .ok_or(HollowError::ResourceAccountingOverflow)?;
+    let solid_input_meshes = checked_sum(&[
+        mesh_allocation_bound(
+            source_vertices,
+            source_triangles,
+            std::mem::size_of::<u64>(),
+        )?,
+        mesh_allocation_bound(
+            inner_vertex_upper,
+            inner_triangle_upper,
+            std::mem::size_of::<u64>(),
+        )?,
     ])?;
+    // `FlatBatch::gather` owns four exact-capacity Vecs. The native bridge
+    // then copies both payloads into MeshGL64 before constructing Manifold's
+    // internal meshes, so both copies are live concurrently.
+    let flat_batch = checked_sum(&[
+        allocator_allocation_bound(combined_vertices, 3 * std::mem::size_of::<f64>(), 8)?,
+        allocator_allocation_bound(combined_triangles, 3 * std::mem::size_of::<u64>(), 8)?,
+        allocator_allocation_bound(3, std::mem::size_of::<u64>(), 8)?,
+        allocator_allocation_bound(3, std::mem::size_of::<u64>(), 8)?,
+    ])?;
+    let native_import = mesh_allocation_bound(
+        combined_vertices,
+        combined_triangles,
+        std::mem::size_of::<u64>(),
+    )?;
+    // The per-element contract constants already include capacity and native
+    // allocator slack; applying Rust's Vec bound again would double-charge it.
+    let native_workspace = checked_sum(&[
+        checked_scale(combined_vertices, MANIFOLD_NESTED_VERTEX_WORK_BYTES)?,
+        checked_scale(combined_triangles, MANIFOLD_NESTED_TRIANGLE_WORK_BYTES)?,
+    ])?;
+    let result_solid_mesh = mesh_allocation_bound(
+        combined_vertices,
+        combined_triangles,
+        std::mem::size_of::<u64>(),
+    )?;
+    let result_u32_mesh = mesh_allocation_bound(
+        combined_vertices,
+        combined_triangles,
+        std::mem::size_of::<u32>(),
+    )?;
+    // Native import/work/export is one lifetime. Once the call returns, all
+    // Manifold internals are gone before Rust unflattens the FFI vectors; once
+    // `difference` returns, its input array and FlatBatch are gone before H0
+    // converts the returned SolidMesh to its u32 Mesh. Charging those three
+    // real peaks separately avoids pretending mutually exclusive buffers are
+    // simultaneous.
+    let retained_before_boolean = checked_sum(&[
+        source_mesh_peak_bytes,
+        inner_mesh_peak_bytes,
+        retained_cavity_field_peak_bytes,
+        solid_input_meshes,
+    ])?;
+    let native_call_peak = checked_sum(&[
+        retained_before_boolean,
+        flat_batch,
+        native_import,
+        native_workspace,
+        mesh_allocation_bound(
+            combined_vertices,
+            combined_triangles,
+            std::mem::size_of::<u64>(),
+        )?,
+        mesh_allocation_bound(
+            combined_vertices,
+            combined_triangles,
+            std::mem::size_of::<u64>(),
+        )?,
+    ])?;
+    let rust_unflatten_peak = checked_sum(&[
+        retained_before_boolean,
+        flat_batch,
+        result_solid_mesh,
+        result_solid_mesh,
+    ])?;
+    let final_conversion_peak = checked_sum(&[
+        source_mesh_peak_bytes,
+        inner_mesh_peak_bytes,
+        retained_cavity_field_peak_bytes,
+        result_solid_mesh,
+        result_u32_mesh,
+    ])?;
+    let boolean_peak_bytes = native_call_peak
+        .max(rust_unflatten_peak)
+        .max(final_conversion_peak);
     let peak_bytes = [
         rasterization_peak_bytes,
         edt_peak_bytes,
@@ -908,7 +1053,7 @@ fn resource_estimate(
             surface_peak_bytes,
             retained_cavity_field_peak_bytes,
         ])?,
-        boolean_peak,
+        boolean_peak_bytes,
     ]
     .into_iter()
     .max()
@@ -922,11 +1067,14 @@ fn resource_estimate(
         label_peak_bytes,
         surface_peak_bytes,
         rasterization_peak_bytes,
+        source_mesh_peak_bytes,
+        selected_mask_peak_bytes,
+        boolean_peak_bytes,
         retained_cavity_field_bytes,
         output_upper_bound_bytes,
         peak_bytes,
     };
-    if estimate.peak_bytes > limits.max_peak_bytes {
+    if !phase_fits_cap(estimate.peak_bytes, limits.max_peak_bytes) {
         Err(HollowError::ResourceLimitExceeded {
             estimate,
             cap_bytes: limits.max_peak_bytes,
@@ -1997,6 +2145,53 @@ mod tests {
             label_phase_memory(usize::MAX),
             Err(HollowError::ResourceAccountingOverflow)
         ));
+    }
+
+    #[test]
+    fn label_and_boolean_phase_terms_have_exact_individual_cap_boundaries() {
+        let source = frozen_mesh("Sphere.prepped.oriented-solid.stl");
+        let settings = HollowSettings::from_registered_constants().expect("M0 settings");
+        let spec = grid_spec(&source, settings.voxel_pitch_mm().get()).expect("grid spec");
+        let estimate = resource_estimate(
+            &source,
+            spec,
+            HollowResourceLimits::new(usize::MAX, DEFAULT_QUERY_WORKING_BYTES)
+                .expect("unbounded test cap"),
+        )
+        .expect("resource estimate");
+
+        let selected_mask = allocator_allocation_bound(
+            spec.count,
+            std::mem::size_of::<bool>(),
+            std::mem::align_of::<bool>(),
+        )
+        .expect("selected mask");
+        let retained_field = allocator_allocation_bound_bytes(
+            cavity_field::packed_bytes_for_voxels(spec.count).expect("packed field"),
+            std::mem::align_of::<u64>(),
+        )
+        .expect("field allocation");
+        let expected_label = checked_sum(&[
+            estimate.source_mesh_peak_bytes(),
+            label_phase_memory(spec.count)
+                .expect("label phase")
+                .conservative_peak_bytes,
+            selected_mask,
+            retained_field,
+        ])
+        .expect("label sum");
+        assert_eq!(estimate.selected_mask_peak_bytes(), selected_mask);
+        assert_eq!(estimate.label_peak_bytes(), expected_label);
+        assert!(phase_fits_cap(expected_label, expected_label));
+        assert!(!phase_fits_cap(expected_label, expected_label - 1));
+
+        // The Boolean term is independently cap-checked rather than inferred
+        // from whichever phase happens to be the aggregate maximum.
+        let boolean = estimate.boolean_peak_bytes();
+        assert!(boolean > estimate.source_mesh_peak_bytes());
+        assert!(boolean > retained_field);
+        assert!(phase_fits_cap(boolean, boolean));
+        assert!(!phase_fits_cap(boolean, boolean - 1));
     }
 
     #[test]
