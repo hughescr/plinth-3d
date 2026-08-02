@@ -724,8 +724,8 @@ pub fn perceive_contacts(
     Ok(ContactCandidatePool { candidates })
 }
 
-// Contact selection owns the generic dyadic coverage boundary. It remains colocated with S1
-// until a real `dyadic` module can own both its preflight and streamed builder together.
+// S1 owns coverage policy and its boundary; `dyadic` owns the shared bounded
+// traversal and preflight used by coverage and additive candidate payloads.
 /// One caller-owned support island.  S1 deliberately consumes this sidecar
 /// rather than trying to rediscover islands (which belongs to perception).
 #[derive(Clone, Debug, PartialEq, Eq)]
