@@ -29,6 +29,7 @@ pub mod legacy_compat;
 pub mod member_sizing;
 pub mod perception;
 pub mod raft;
+pub(crate) mod rewire;
 pub mod transient;
 
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, SurfaceBuildError};
