@@ -172,7 +172,7 @@ impl NativeSurface {
             });
         }
 
-        let effective_threads = par::current_threads();
+        let effective_threads = par::configured_pool_threads();
         let worker_mask = AtomicU64::new(0);
         let per_plane: Vec<Vec<PlaneIntersection>> = par::run(|| {
             planes

@@ -23,6 +23,33 @@ pub(crate) struct ParityMemoryEstimate {
     pub axis_references: [usize; 3],
 }
 
+/// Conservative logical bytes for one completed axis and for the build peak
+/// while its `(cell, face)` pairs coexist with the CSR outputs. The CSR bound
+/// assumes every reference has a unique key: key i64 + offset u32 + FaceRef.
+fn axis_memory_bounds(face_count: usize, references: usize) -> Result<(usize, usize), String> {
+    let per_axis_triangle_bytes = face_count
+        .checked_mul(11 * std::mem::size_of::<f64>() + std::mem::size_of::<bool>())
+        .ok_or_else(|| "parity triangle memory estimate overflow".to_string())?;
+    let csr_bytes = references
+        .checked_mul(
+            std::mem::size_of::<i64>()
+                + std::mem::size_of::<u32>()
+                + std::mem::size_of::<FaceRef>(),
+        )
+        .and_then(|bytes| bytes.checked_add(std::mem::size_of::<u32>()))
+        .ok_or_else(|| "parity retained memory estimate overflow".to_string())?;
+    let retained = per_axis_triangle_bytes
+        .checked_add(csr_bytes)
+        .ok_or_else(|| "parity retained memory estimate overflow".to_string())?;
+    let pair_bytes = references
+        .checked_mul(std::mem::size_of::<(i64, FaceRef)>())
+        .ok_or_else(|| "parity transient memory estimate overflow".to_string())?;
+    let peak = retained
+        .checked_add(pair_bytes)
+        .ok_or_else(|| "parity peak memory estimate overflow".to_string())?;
+    Ok((retained, peak))
+}
+
 fn projection_axes(axis: usize) -> (usize, usize) {
     match axis {
         0 => (1, 2),
@@ -64,10 +91,6 @@ pub(crate) fn estimate_indexed_memory(
     bounds: [[f64; 3]; 2],
     h: f64,
 ) -> Result<ParityMemoryEstimate, String> {
-    let per_axis_triangle_bytes = faces
-        .len()
-        .checked_mul(11 * std::mem::size_of::<f64>() + std::mem::size_of::<bool>())
-        .ok_or_else(|| "parity triangle memory estimate overflow".to_string())?;
     let mut axis_references = [0_usize; 3];
     let mut retained_axes = [0_usize; 3];
     let mut build_axes = [0_usize; 3];
@@ -123,20 +146,8 @@ pub(crate) fn estimate_indexed_memory(
             return Err("parity grid exceeds 2^32 triangle references".into());
         }
         axis_references[ax] = references;
-        let transient = references
-            .checked_mul(std::mem::size_of::<(i64, u32)>())
-            .and_then(|bytes| bytes.checked_add(per_axis_triangle_bytes))
-            .ok_or_else(|| "parity transient memory estimate overflow".to_string())?;
-        let retained = references
-            .checked_mul(
-                std::mem::size_of::<i64>()
-                    + std::mem::size_of::<u32>()
-                    + std::mem::size_of::<u32>(),
-            )
-            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<u32>()))
-            .and_then(|bytes| bytes.checked_add(per_axis_triangle_bytes))
-            .ok_or_else(|| "parity retained memory estimate overflow".to_string())?;
-        build_axes[ax] = transient;
+        let (retained, peak) = axis_memory_bounds(faces.len(), references)?;
+        build_axes[ax] = peak;
         retained_axes[ax] = retained;
     }
     let mut retained_before = 0_usize;
@@ -205,11 +216,9 @@ impl AxisGrid {
         // Peak-memory accounting (Amendment A17 / spec sec 3.5): a large
         // projected triangle bins into every overlapped cell, so the CSR ref
         // count — not nfaces — dominates. Fail CLEANLY past the configured
-        // budget instead of thrashing toward OOM. per-tri projected arrays are
-        // fixed (11 f64 + 1 bool); the transient (flat_id, tri) pair vector is
-        // the growing term we bound as it accumulates.
-        let per_tri_bytes = n.saturating_mul(11 * 8 + 1);
-        let pair_bytes = std::mem::size_of::<(i64, FaceRef)>();
+        // budget instead of thrashing toward OOM. Per-triangle projected arrays
+        // are fixed; the checked bound includes both the accumulating pair
+        // vector and worst-case unique-key CSR outputs that later coexist.
         let (p0, p1) = projection_axes(ax);
 
         // origin = bounds[0, p] - 1.0 ; NY = floor((bounds[1,p1]+1 - origin1)/h)+3
@@ -285,7 +294,7 @@ impl AxisGrid {
             }
             // Budget check per triangle: bounds overshoot to one triangle's
             // cell fan-out, so we fail before the pair vector grows unbounded.
-            let projected = per_tri_bytes.saturating_add(pairs.len().saturating_mul(pair_bytes));
+            let (_, projected) = axis_memory_bounds(n, pairs.len())?;
             if projected > max_grid_bytes {
                 return Err(format!(
                     "parity grid axis {} exceeds memory budget: {} bytes projected > {} budget \
@@ -457,5 +466,50 @@ impl ParityVote {
             }
         }
         s >= 2
+    }
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+    use crate::{NativeSurface, NativeSurfaceConfig};
+
+    #[test]
+    fn unique_key_csr_peak_counts_pairs_keys_offsets_and_face_refs_together() {
+        let vertices = [[0.0, 0.0, 0.0], [16.0, 0.0, 0.0], [0.0, 16.0, 0.0]];
+        let faces = [[0, 1, 2]];
+        let mesh = Mesh::from_indexed(&vertices, &faces).unwrap();
+        let estimate = estimate_indexed_memory(&vertices, &faces, mesh.bounds(), 1.0).unwrap();
+        assert_eq!(estimate.axis_references, [17, 17, 289]);
+
+        let (retained, peak) = axis_memory_bounds(1, 289).unwrap();
+        let per_triangle = 11 * std::mem::size_of::<f64>() + std::mem::size_of::<bool>();
+        assert_eq!(peak - per_triangle, 10_408);
+        assert_eq!(estimate.max_axis_build_bytes, peak);
+
+        let grid = AxisGrid::build(&mesh, 2, 1.0, peak).expect("exact logical peak cap");
+        assert_eq!(grid.n_refs, 289);
+        assert_eq!(grid.n_cells, 289);
+        assert_eq!(grid.bytes(), retained);
+        assert!(AxisGrid::build(&mesh, 2, 1.0, peak - 1).is_err());
+
+        NativeSurface::from_indexed(
+            &vertices,
+            &faces,
+            NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: peak,
+            },
+        )
+        .expect("public admission accepts exact axis peak cap");
+        assert!(NativeSurface::from_indexed(
+            &vertices,
+            &faces,
+            NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: peak - 1,
+            },
+        )
+        .is_err());
     }
 }

@@ -53,6 +53,13 @@ fn pool_for(k: usize) -> Arc<ThreadPool> {
     p
 }
 
+/// Number of workers in the explicit pool selected for the next batch.
+/// Unlike [`current_threads`], this proves the pool was constructed with the
+/// requested width; it does not claim Rayon scheduled work on every worker.
+pub(crate) fn configured_pool_threads() -> usize {
+    pool_for(current_threads()).current_num_threads()
+}
+
 /// Run `f` under the pool for the current thread count. `f` typically issues an
 /// index-parallel `par_iter().map().collect()` (the sanctioned pattern).
 pub fn run<F, R>(f: F) -> R

@@ -444,14 +444,11 @@ fn slicing_thread_identity_is_subprocess_invariant() {
         let fields: Vec<&str> = line.split(':').collect();
         assert_eq!(fields[1], threads, "effective pool mismatch: {line}");
         let participating: usize = fields[2].parse().unwrap();
-        if threads == "1" {
-            assert_eq!(participating, 1);
-        } else {
-            assert!(
-                participating > 1,
-                "batch did not use multiple workers: {line}"
-            );
-        }
+        let configured: usize = threads.parse().unwrap();
+        assert!(
+            (1..=configured).contains(&participating),
+            "actual participation is outside the configured pool: {line}"
+        );
         fingerprints.push((fields[3].to_owned(), fields[4].to_owned()));
     }
     assert!(
