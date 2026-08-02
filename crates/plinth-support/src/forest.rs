@@ -274,6 +274,25 @@ impl QuarantineRecord {
     }
 }
 
+pub(crate) fn terminal_member_matches_evidence(
+    member: &Member,
+    key: MemberKey,
+    terminal: u32,
+    evidence: &QuarantineRecord,
+) -> bool {
+    evidence.original_key == key
+        && evidence.p0_mm == member.p0_mm
+        && evidence.p1_mm == member.p1_mm
+        && evidence.r0_mm == member.r0_mm
+        && evidence.r1_mm == member.r1_mm
+        && evidence.kind == member.kind
+        && evidence.owner == member.owner
+        && evidence.embed_end == member.embed_end
+        && evidence.carried_mm2 == member.carried_mm2
+        && evidence.certificate == member.certificate
+        && evidence.terminal_contacts.as_slice() == [terminal]
+}
+
 #[derive(Clone, Debug, PartialEq, Default)]
 struct ForestState {
     slots: Vec<Slot>,
@@ -284,6 +303,10 @@ struct ForestState {
     children: BTreeMap<MemberKey, Vec<MemberKey>>,
     roots: BTreeSet<MemberKey>,
     terminal_of: BTreeMap<u32, MemberKey>,
+    /// Sealed pre-growth member evidence for every registered terminal. It remains unchanged
+    /// across consumption and retirement, including after the arena slot is cleared.
+    terminal_evidence: BTreeMap<u32, QuarantineRecord>,
+    terminal_consumed: BTreeSet<u32>,
     braces: BTreeSet<MemberKey>,
     quarantined: BTreeMap<MemberKey, QuarantineRecord>,
     dead: BTreeSet<MemberKey>,
@@ -307,6 +330,23 @@ pub struct ForestReport {
     pub digest: u64,
 }
 
+/// Read-only lifecycle state for one terminal's original member binding. This ledger never
+/// turns a retired or quarantined generation back into a live member.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TerminalLedgerState {
+    Live,
+    Consumed,
+    Quarantined,
+    Retired,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TerminalLedgerEntry {
+    pub(crate) contact: u32,
+    pub(crate) original_key: MemberKey,
+    pub(crate) state: TerminalLedgerState,
+}
+
 #[derive(Clone, Debug)]
 struct CheckpointFrame {
     token: ForestCheckpoint,
@@ -327,6 +367,10 @@ pub enum ForestError {
     Cycle,
     #[error("terminal {terminal} is already registered to {existing:?}")]
     DuplicateTerminal { terminal: u32, existing: MemberKey },
+    #[error("terminal {terminal} must register its exact live contact stub")]
+    InvalidTerminalMember { terminal: u32 },
+    #[error("registered live terminal {terminal} must be consumed before mutation")]
+    RegisteredTerminalMutation { terminal: u32 },
     #[error("only the innermost checkpoint may be committed or rolled back")]
     CheckpointOrder,
     #[error("a quarantined member must have no live tree children")]
@@ -495,6 +539,42 @@ impl Forest {
         self.state.terminal_of.get(&terminal).copied()
     }
 
+    /// Resolve the append-only contact-to-generation ledger even after physical removal.
+    #[must_use]
+    pub(crate) fn terminal_ledger(&self, terminal: u32) -> Option<TerminalLedgerEntry> {
+        let original_key = self.terminal_key(terminal)?;
+        let state = if self.member(original_key).is_some() {
+            if self.state.terminal_consumed.contains(&terminal) {
+                TerminalLedgerState::Consumed
+            } else {
+                TerminalLedgerState::Live
+            }
+        } else if self.state.quarantined.contains_key(&original_key) {
+            TerminalLedgerState::Quarantined
+        } else if self.state.dead.contains(&original_key) {
+            TerminalLedgerState::Retired
+        } else {
+            return None;
+        };
+        Some(TerminalLedgerEntry {
+            contact: terminal,
+            original_key,
+            state,
+        })
+    }
+
+    pub(crate) fn terminal_ledger_iter(&self) -> impl Iterator<Item = TerminalLedgerEntry> + '_ {
+        self.state
+            .terminal_of
+            .keys()
+            .copied()
+            .filter_map(|contact| self.terminal_ledger(contact))
+    }
+
+    pub(crate) fn terminal_ledger_evidence(&self, terminal: u32) -> Option<&QuarantineRecord> {
+        self.state.terminal_evidence.get(&terminal)
+    }
+
     /// Read-only Q-REAL/regrade evidence for a terminal, never a live member.
     #[must_use]
     pub fn terminal_quarantine(&self, terminal: u32) -> Option<&QuarantineRecord> {
@@ -532,12 +612,19 @@ impl Forest {
     /// moves a later-born member ahead of an older live member.
     #[must_use]
     pub fn live_members_in_creation_order(&self) -> Vec<MemberKey> {
+        self.live_members_in_creation_order_iter().collect()
+    }
+
+    /// Allocation-free source for bounded downstream preflight. Consumers must still bind any
+    /// derived view to [`Self::digest`] before treating it as authority.
+    pub(crate) fn live_members_in_creation_order_iter(
+        &self,
+    ) -> impl Iterator<Item = MemberKey> + '_ {
         self.state
             .creation_order
             .iter()
             .copied()
             .filter(|key| self.member(*key).is_some())
-            .collect()
     }
 
     /// Registers the member which owns a terminal contact.
@@ -552,14 +639,65 @@ impl Forest {
                 existing: *existing,
             });
         }
+        let member = self.member(key).expect("checked active");
+        if member.kind() != &MemberKind::Stub || member.owner() != &Owner::Contact(terminal) {
+            return Err(ForestError::InvalidTerminalMember { terminal });
+        }
+        let evidence = QuarantineRecord::from_member(key, member, vec![terminal]);
         self.state.terminal_of.insert(terminal, key);
+        self.state.terminal_evidence.insert(terminal, evidence);
         Ok(())
     }
 
     /// Removes a terminal registration when later placement deliberately
     /// replaces the contact, rather than silently overwriting its provenance.
     pub fn unregister_terminal(&mut self, terminal: u32) -> Option<MemberKey> {
+        self.state.terminal_consumed.remove(&terminal);
+        self.state.terminal_evidence.remove(&terminal);
         self.state.terminal_of.remove(&terminal)
+    }
+
+    /// Typed transition used when successful growth is about to attach and resize a terminal
+    /// stub. The sealed pre-growth facts are checked before mutation becomes legal.
+    pub(crate) fn consume_terminal(
+        &mut self,
+        terminal: u32,
+        key: MemberKey,
+    ) -> Result<(), ForestError> {
+        if self.state.terminal_of.get(&terminal).copied() != Some(key) {
+            return Err(ForestError::InvalidTerminalMember { terminal });
+        }
+        let member = self
+            .member(key)
+            .ok_or(ForestError::InvalidTerminalMember { terminal })?;
+        if self.state.terminal_consumed.contains(&terminal) {
+            return if member.kind() == &MemberKind::Stub
+                && member.owner() == &Owner::Contact(terminal)
+            {
+                Ok(())
+            } else {
+                Err(ForestError::InvalidTerminalMember { terminal })
+            };
+        }
+        let evidence = self
+            .state
+            .terminal_evidence
+            .get(&terminal)
+            .ok_or(ForestError::InvalidTerminalMember { terminal })?;
+        if !terminal_member_matches_evidence(member, key, terminal, evidence) {
+            return Err(ForestError::InvalidTerminalMember { terminal });
+        }
+        self.state.terminal_consumed.insert(terminal);
+        Ok(())
+    }
+
+    fn require_terminal_mutation_allowed(&self, key: MemberKey) -> Result<(), ForestError> {
+        if let Some((&terminal, _)) = self.state.terminal_of.iter().find(|(terminal, member)| {
+            **member == key && !self.state.terminal_consumed.contains(terminal)
+        }) {
+            return Err(ForestError::RegisteredTerminalMutation { terminal });
+        }
+        Ok(())
     }
 
     /// Attaches `child` to `parent` at the parent's terminal-ward (`p0`) end.
@@ -569,6 +707,7 @@ impl Forest {
         parent: Option<MemberKey>,
     ) -> Result<(), ForestError> {
         self.require_active(child)?;
+        self.require_terminal_mutation_allowed(child)?;
         if self.state.braces.contains(&child) {
             return Err(ForestError::BraceInTree);
         }
@@ -613,6 +752,15 @@ impl Forest {
     /// the old key is permanently stale, even if its slot is reused.
     pub fn retire(&mut self, key: MemberKey) -> Result<(), ForestError> {
         self.require_active(key)?;
+        let terminal_contacts: Vec<_> = self
+            .state
+            .terminal_of
+            .iter()
+            .filter_map(|(terminal, member_key)| (*member_key == key).then_some(*terminal))
+            .collect();
+        for terminal in terminal_contacts {
+            self.state.terminal_consumed.insert(terminal);
+        }
         let children = self.children_of(key);
         for child in children {
             self.set_parent(child, None)?;
@@ -663,6 +811,7 @@ impl Forest {
         p0_mm: [Finite; 3],
         p1_mm: [Finite; 3],
     ) -> Result<(), ForestError> {
+        self.require_terminal_mutation_allowed(key)?;
         let member = self.member_mut(key)?;
         member.p0_mm = p0_mm;
         member.p1_mm = p1_mm;
@@ -676,6 +825,7 @@ impl Forest {
         r0_mm: TerminalEndRadius,
         r1_mm: RootwardEndRadius,
     ) -> Result<(), ForestError> {
+        self.require_terminal_mutation_allowed(key)?;
         let member = self.member_mut(key)?;
         member.r0_mm = r0_mm;
         member.r1_mm = r1_mm;
@@ -684,6 +834,7 @@ impl Forest {
     }
 
     pub fn set_kind(&mut self, key: MemberKey, kind: MemberKind) -> Result<(), ForestError> {
+        self.require_terminal_mutation_allowed(key)?;
         let member = self.member_mut(key)?;
         member.kind = kind;
         member.invalidate_geometry();
@@ -695,6 +846,7 @@ impl Forest {
         key: MemberKey,
         end: Option<EmbedEnd>,
     ) -> Result<(), ForestError> {
+        self.require_terminal_mutation_allowed(key)?;
         let member = self.member_mut(key)?;
         member.embed_end = end;
         member.invalidate_geometry();
@@ -707,6 +859,7 @@ impl Forest {
         key: MemberKey,
         carried_mm2: Finite,
     ) -> Result<(), ForestError> {
+        self.require_terminal_mutation_allowed(key)?;
         self.member_mut(key)?.carried_mm2 = carried_mm2;
         Ok(())
     }
@@ -716,6 +869,7 @@ impl Forest {
     // certify arbitrary live geometry merely by holding its member key.
     #[cfg(test)]
     fn issue_certificate(&mut self, key: MemberKey) -> Result<(), ForestError> {
+        self.require_terminal_mutation_allowed(key)?;
         let member = self.member_mut(key)?;
         member.certificate.cert_version = Some(member.certificate.geom_version);
         member.certificate.cert_radius_mm = Some(member.maximum_radius());
@@ -836,7 +990,22 @@ impl Forest {
                 }
             }
         }
-        for key in self.state.terminal_of.values() {
+        if self.state.terminal_of.len() != self.state.terminal_evidence.len() {
+            return Err(ForestError::Invariant(
+                "terminal registry and sealed evidence differ in membership",
+            ));
+        }
+        if self
+            .state
+            .terminal_consumed
+            .iter()
+            .any(|terminal| !self.state.terminal_of.contains_key(terminal))
+        {
+            return Err(ForestError::Invariant(
+                "consumed terminal is absent from the terminal ledger",
+            ));
+        }
+        for (terminal, key) in &self.state.terminal_of {
             if self.member(*key).is_none()
                 && !self.state.dead.contains(key)
                 && !self.state.quarantined.contains_key(key)
@@ -844,6 +1013,38 @@ impl Forest {
                 return Err(ForestError::Invariant(
                     "terminal registry references inactive member",
                 ));
+            }
+            let evidence =
+                self.state
+                    .terminal_evidence
+                    .get(terminal)
+                    .ok_or(ForestError::Invariant(
+                        "terminal registry lacks sealed evidence",
+                    ))?;
+            if evidence.original_key != *key
+                || evidence.kind != MemberKind::Stub
+                || evidence.owner != Owner::Contact(*terminal)
+                || evidence.terminal_contacts.as_slice() != [*terminal]
+            {
+                return Err(ForestError::Invariant(
+                    "terminal sealed evidence does not match its exact contact stub",
+                ));
+            }
+            if let Some(member) = self.member(*key) {
+                if member.kind() != &MemberKind::Stub
+                    || member.owner() != &Owner::Contact(*terminal)
+                {
+                    return Err(ForestError::Invariant(
+                        "live terminal no longer has its exact stub role and owner",
+                    ));
+                }
+                if !self.state.terminal_consumed.contains(terminal)
+                    && !terminal_member_matches_evidence(member, *key, *terminal, evidence)
+                {
+                    return Err(ForestError::Invariant(
+                        "unconsumed live terminal differs from its sealed facts",
+                    ));
+                }
             }
         }
         self.postorder().map(|_| ())
@@ -899,6 +1100,13 @@ impl Forest {
         for (contact, key) in &self.state.terminal_of {
             digest.u32(*contact);
             digest.key(*key);
+            digest.quarantine(
+                self.state
+                    .terminal_evidence
+                    .get(contact)
+                    .expect("validated terminal evidence"),
+            );
+            digest.bool(self.state.terminal_consumed.contains(contact));
         }
         digest.tag(5);
         digest.len(self.state.quarantined.len());
@@ -1083,7 +1291,9 @@ mod tests {
     fn tree_terminal_brace_and_postorder_are_deterministic() {
         let mut forest = Forest::new();
         let root = forest.add_member(member(MemberKind::Trunk));
-        let child = forest.add_member(member(MemberKind::Shoot));
+        let mut terminal = member(MemberKind::Stub);
+        terminal.owner = Owner::Contact(7);
+        let child = forest.add_member(terminal);
         let brace = forest.add_brace(member(MemberKind::Brace));
         forest.set_parent(child, Some(root)).unwrap();
         forest.register_terminal(7, child).unwrap();
@@ -1092,6 +1302,36 @@ mod tests {
         assert_eq!(forest.terminal(7), Some(child));
         assert_eq!(forest.postorder().unwrap(), vec![child, root]);
         forest.validate().unwrap();
+    }
+
+    #[test]
+    fn terminal_registration_requires_exact_contact_stub_and_seals_retirement_evidence() {
+        let mut forest = Forest::new();
+        let mut wrong_kind = member(MemberKind::Shoot);
+        wrong_kind.owner = Owner::Contact(5);
+        let wrong_kind = forest.add_member(wrong_kind);
+        assert_eq!(
+            forest.register_terminal(5, wrong_kind),
+            Err(ForestError::InvalidTerminalMember { terminal: 5 })
+        );
+        let mut terminal = member(MemberKind::Stub);
+        terminal.owner = Owner::Contact(6);
+        let terminal = forest.add_member(terminal);
+        forest.register_terminal(6, terminal).unwrap();
+        assert_eq!(
+            forest.set_endpoints(
+                terminal,
+                [finite(2.0), finite(0.0), finite(0.0)],
+                [finite(3.0), finite(0.0), finite(0.0)],
+            ),
+            Err(ForestError::RegisteredTerminalMutation { terminal: 6 })
+        );
+        forest.retire(terminal).unwrap();
+        let evidence = forest.terminal_ledger_evidence(6).unwrap();
+        assert_eq!(evidence.original_key, terminal);
+        assert_eq!(evidence.owner, Owner::Contact(6));
+        assert_eq!(evidence.p0_mm[0], finite(0.0));
+        assert_eq!(evidence.terminal_contacts, vec![6]);
     }
 
     #[test]
@@ -1214,11 +1454,13 @@ mod tests {
     fn retirement_and_quarantine_cannot_leak_into_live_views() {
         let mut forest = Forest::new();
         let root = forest.add_member(member(MemberKind::Trunk));
-        let child = forest.add_member(member(MemberKind::Stub));
+        let mut terminal = member(MemberKind::Stub);
+        terminal.owner = Owner::Contact(4);
+        let child = forest.add_member(terminal);
         forest.set_parent(child, Some(root)).unwrap();
-        forest.register_terminal(4, child).unwrap();
         forest.set_carried_mm2(child, finite(5.0)).unwrap();
         forest.issue_certificate(child).unwrap();
+        forest.register_terminal(4, child).unwrap();
         forest.quarantine(child).unwrap();
         assert!(forest.children_of(root).is_empty());
         assert!(forest.terminal(4).is_none());
@@ -1228,13 +1470,7 @@ mod tests {
         let record = forest.terminal_quarantine(4).unwrap();
         assert_eq!(record.original_key, child);
         assert_eq!(record.terminal_contacts, vec![4]);
-        assert_eq!(
-            record.owner,
-            Owner::Generated {
-                family: "test".into(),
-                ordinal: 0
-            }
-        );
+        assert_eq!(record.owner, Owner::Contact(4));
         assert_eq!(record.p0_mm, [finite(0.0); 3]);
         assert_eq!(record.r0_mm, TerminalEndRadius::new(radius(0.2)));
         assert_eq!(record.carried_mm2, finite(5.0));

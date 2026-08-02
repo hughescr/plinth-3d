@@ -31,8 +31,17 @@ pub mod forest;
 )]
 mod joints;
 pub mod legacy_compat;
+#[allow(
+    dead_code,
+    reason = "crate-private current-parity lowering is consumed by the pending support runner"
+)]
+mod lower;
 pub mod member_sizing;
 pub mod perception;
+#[allow(
+    dead_code,
+    reason = "crate-private bounded raft planning is consumed by the pending support runner"
+)]
 pub mod raft;
 pub(crate) mod rewire;
 pub mod specialized;
@@ -85,6 +94,7 @@ enum SphereGeometryKind {
     Tip {
         center_mm: [Finite; 3],
         outward_axis_unit: [Finite; 3],
+        exact_record_poles: Option<(PositiveFinite, [Finite; 3], [Finite; 3])>,
     },
     Joint {
         center_mm: [Finite; 3],
@@ -110,6 +120,32 @@ impl SphereGeometry {
         Ok(Self(SphereGeometryKind::Tip {
             center_mm,
             outward_axis_unit,
+            exact_record_poles: None,
+        }))
+    }
+
+    /// Bind a contact sphere to the Python record arithmetic: its metadata poles are authored
+    /// directly as `p0` and `p0 + 2*r*u`, rather than reconstructed from the rounded center.
+    pub(crate) fn tip_with_exact_record_poles(
+        center_mm: [Finite; 3],
+        outward_axis_unit: [Finite; 3],
+        radius: PositiveFinite,
+        start_mm: [Finite; 3],
+        end_mm: [Finite; 3],
+    ) -> Result<Self, SupportError> {
+        let base = Self::tip(center_mm, outward_axis_unit)?;
+        let Self(SphereGeometryKind::Tip {
+            center_mm,
+            outward_axis_unit,
+            ..
+        }) = base
+        else {
+            unreachable!("tip constructor always yields tip geometry")
+        };
+        Ok(Self(SphereGeometryKind::Tip {
+            center_mm,
+            outward_axis_unit,
+            exact_record_poles: Some((radius, start_mm, end_mm)),
         }))
     }
 
@@ -143,7 +179,17 @@ impl SphereGeometry {
             SphereGeometryKind::Tip {
                 center_mm,
                 outward_axis_unit,
+                exact_record_poles,
             } => {
+                if let Some((bound_radius, start, end)) = exact_record_poles {
+                    if *bound_radius
+                        != PositiveFinite::new(radius)
+                            .map_err(|_| SupportError::InvalidPrimitive)?
+                    {
+                        return Err(SupportError::InvalidPrimitive);
+                    }
+                    return Ok((*start, *end));
+                }
                 let axis = outward_axis_unit.map(Finite::get);
                 let center = center_mm.map(Finite::get);
                 let start = finite_array(std::array::from_fn(|index| {
@@ -181,6 +227,7 @@ impl SphereGeometry {
             SphereGeometryKind::Tip {
                 center_mm,
                 outward_axis_unit,
+                ..
             } => Some((*center_mm, *outward_axis_unit)),
             SphereGeometryKind::Joint { .. } => None,
         }
@@ -202,9 +249,13 @@ impl SphereGeometry {
             SphereGeometryKind::Tip {
                 center_mm,
                 outward_axis_unit,
+                exact_record_poles,
             } => {
                 finite(center_mm)
                     && finite(outward_axis_unit)
+                    && exact_record_poles
+                        .as_ref()
+                        .is_none_or(|(_, start, end)| finite(start) && finite(end))
                     && outward_axis_unit
                         .map(Finite::get)
                         .iter()
@@ -414,7 +465,10 @@ impl SupportPrimitive {
             == self.contact_depth_mm.is_some();
         let ring_provenance_matches = match self.ring_normal {
             FrustumRingNormal::SegmentAxis => true,
-            FrustumRingNormal::PlateZ => self.segment_kind == SupportSegmentKind::Member,
+            FrustumRingNormal::PlateZ => matches!(
+                self.segment_kind,
+                SupportSegmentKind::Member | SupportSegmentKind::ContactTaper
+            ),
         };
         let sphere_poles_match = match (self.segment_kind, &self.sphere_geometry) {
             (SupportSegmentKind::ContactSphere, Some(geometry)) if geometry.is_tip() => {
@@ -453,6 +507,16 @@ pub enum SupportError {
     InvalidModelMesh,
     #[error("support report primitive counts do not match the scene primitive vector")]
     InconsistentPrimitiveCount,
+    #[error("support planning resource limits must be nonzero")]
+    InvalidResourceLimits,
+    #[error("support planning input exceeds its caller-owned limit")]
+    SupportInputLimit,
+    #[error("support planning output exceeds its caller-owned primitive limit")]
+    SupportPrimitiveLimit,
+    #[error("support planning exceeds its caller-owned scratch-memory limit")]
+    SupportScratchLimit,
+    #[error("support planning authority is stale or belongs to another filtered live view")]
+    StaleSupportAuthority,
 }
 
 /// Stable identity of one legal source-face contact seat.
