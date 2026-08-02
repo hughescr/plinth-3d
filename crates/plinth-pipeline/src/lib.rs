@@ -13,7 +13,7 @@
 use plinth_core::ModelId;
 use plinth_decimate::{DecimationBudget, DecimationError};
 use plinth_emit::{EmitError, EmitReport};
-use plinth_hollow::{HollowError, HollowRequest, HollowedModel};
+use plinth_hollow::{HollowDisposition, HollowError, HollowRequest, HollowStageOutput};
 use plinth_orient::{OrientError, OrientedModel};
 use plinth_support::{SupportError, SupportRequest};
 use serde::{Deserialize, Serialize};
@@ -29,8 +29,37 @@ use thiserror::Error;
 pub fn hollow_stage(
     model: OrientedModel,
     request: &HollowRequest,
-) -> Result<HollowedModel, HollowError> {
+) -> Result<HollowStageOutput, HollowError> {
     plinth_hollow::run(model, request)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HollowStageProjection {
+    pub disposition: HollowDisposition,
+    pub awaiting_internal_support: bool,
+    pub oriented_solid_reserve_retained: bool,
+}
+
+#[must_use]
+pub fn project_hollow_stage(output: &HollowStageOutput) -> HollowStageProjection {
+    let awaiting = matches!(output, HollowStageOutput::AwaitingInternalSupport(_));
+    HollowStageProjection {
+        disposition: output.report().disposition(),
+        awaiting_internal_support: awaiting,
+        oriented_solid_reserve_retained: awaiting,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum PipelineExitCode {
+    Ok = 0,
+    Input = 1,
+    Hollow = 2,
+    Gates = 3,
+    Emit = 4,
+    Supports = 5,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -128,12 +157,31 @@ pub enum PipelineError {
     },
 }
 
+impl PipelineError {
+    #[must_use]
+    pub const fn exit_code(&self) -> PipelineExitCode {
+        match self {
+            Self::InputFolder { .. } | Self::Decimate { .. } | Self::Orient { .. } => {
+                PipelineExitCode::Input
+            }
+            Self::Hollow { .. } => PipelineExitCode::Hollow,
+            Self::Support { .. } => PipelineExitCode::Supports,
+            Self::Emit { .. } => PipelineExitCode::Emit,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plinth_core::m0_constants;
+    use plinth_core::{m0_constants, Finite};
     use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
-    use plinth_hollow::{HollowDisposition, SolidFallbackReason};
+    use plinth_hollow::{
+        drains::{CandidateDiagnostic, DrainPlanningRefusal, HoleRole},
+        drilling::DrillingRefusal,
+        HollowDisposition, HollowFailureCategory, HollowStageOutput, InternalSupportRefusalReason,
+        SolidDecisionReason,
+    };
     use plinth_mesh::{load_binary_stl, make_box, Mesh, WeldPolicy};
     use plinth_orient::{run as run_orientation, OrientRequest, PinnedBaseline};
 
@@ -176,15 +224,41 @@ mod tests {
         let sphere = load_binary_stl(baseline("Sphere.prepped.stl"), WeldPolicy::None)
             .expect("committed Sphere fixture");
         let oriented = oriented(sphere);
+        let reserve_allocation = oriented.mesh().verts().as_ptr();
+        let expected_reserve_mesh = oriented.mesh().clone();
         let expected_history = oriented.history().clone();
-        let model = hollow_stage(oriented, &hollow_request()).expect("Sphere hollow transition");
+        let output = hollow_stage(oriented, &hollow_request()).expect("Sphere hollow transition");
+        let projection = project_hollow_stage(&output);
+        assert!(projection.awaiting_internal_support);
+        assert!(projection.oriented_solid_reserve_retained);
+        let HollowStageOutput::AwaitingInternalSupport(candidate) = output else {
+            panic!("eligible Sphere must await A5")
+        };
+        assert_eq!(
+            candidate.reserve_mesh().verts().as_ptr(),
+            reserve_allocation
+        );
+        assert_eq!(candidate.reserve_mesh(), &expected_reserve_mesh);
+        assert_eq!(candidate.reserve_history(), &expected_history);
+        let evidence = candidate
+            .hollowed()
+            .history()
+            .hollow()
+            .drilling_evidence()
+            .expect("complete drilling proof retained");
+        assert!(evidence
+            .holes()
+            .iter()
+            .any(|hole| hole.role() == plinth_hollow::drains::HoleRole::Vent));
+        assert_eq!(evidence.cavity_voxels(), evidence.drainable_voxels());
+        let model = (*candidate).approve_hollow();
 
         assert_eq!(
-            model.history().hollow().disposition,
+            model.history().hollow().disposition(),
             HollowDisposition::HollowedAndDrilled
         );
-        assert!(!model.history().hollow().cavities.is_empty());
-        assert!(!model.history().hollow().drains.is_empty());
+        assert!(!model.history().hollow().cavities().is_empty());
+        assert!(!model.history().hollow().drains().is_empty());
         assert_eq!(model.history().orientation(), &expected_history);
         assert_eq!(
             model.history().orientation().decimation().trace(),
@@ -193,24 +267,141 @@ mod tests {
     }
 
     #[test]
-    fn hollow_stage_retains_original_oriented_solid_for_explicit_fallback() {
+    fn hollow_stage_records_legitimate_solid_decision_without_calling_it_a_fallback() {
         let oriented = oriented(make_box([20.0, 8.0, 8.0], [0.0; 3]).expect("thin closed box"));
         let allocation = oriented.mesh().verts().as_ptr();
         let expected_mesh = oriented.mesh().clone();
         let expected_history = oriented.history().clone();
-        let model = hollow_stage(oriented, &hollow_request()).expect("explicit solid fallback");
+        let output = hollow_stage(oriented, &hollow_request()).expect("solid decision");
+        let HollowStageOutput::Solid(model) = output else {
+            panic!("below-threshold box must remain solid")
+        };
 
         assert_eq!(model.mesh().verts().as_ptr(), allocation);
         assert_eq!(model.mesh(), &expected_mesh);
         assert_eq!(model.history().orientation(), &expected_history);
         assert_eq!(
-            model.history().hollow().disposition,
-            HollowDisposition::SolidFallback {
-                reason: SolidFallbackReason::IneligibleForHollowing,
+            model.history().hollow().disposition(),
+            HollowDisposition::Solid {
+                reason: SolidDecisionReason::BelowThreshold,
             }
         );
-        assert!(model.history().hollow().cavities.is_empty());
-        assert!(model.history().hollow().drains.is_empty());
+        assert!(model.history().hollow().cavities().is_empty());
+        assert!(model.history().hollow().drains().is_empty());
+    }
+
+    #[test]
+    fn successful_hollow_reserve_is_consumed_once_by_exact_a5_refusal() {
+        let sphere = load_binary_stl(baseline("Sphere.prepped.stl"), WeldPolicy::None)
+            .expect("committed Sphere fixture");
+        let oriented = oriented(sphere);
+        let allocation = oriented.mesh().verts().as_ptr();
+        let expected_mesh = oriented.mesh().clone();
+        let expected_history = oriented.history().clone();
+        let output = hollow_stage(oriented, &hollow_request()).expect("Sphere hollow transition");
+        let HollowStageOutput::AwaitingInternalSupport(candidate) = output else {
+            panic!("eligible Sphere must retain the A5 reserve")
+        };
+        let model = (*candidate)
+            .into_solid_fallback(InternalSupportRefusalReason::A5GateFailure)
+            .expect("authorized A5 fallback");
+        assert_eq!(model.mesh().verts().as_ptr(), allocation);
+        assert_eq!(model.mesh(), &expected_mesh);
+        assert_eq!(model.history().orientation(), &expected_history);
+        assert_eq!(
+            model.history().hollow().disposition(),
+            HollowDisposition::SolidFallback {
+                reason: InternalSupportRefusalReason::A5GateFailure,
+            }
+        );
+    }
+
+    #[test]
+    fn operational_hollow_failures_project_to_frozen_hollow_exit() {
+        let cases = [
+            HollowError::DrainPlanning(DrainPlanningRefusal::Constants),
+            HollowError::DrainPlanning(DrainPlanningRefusal::Kernel),
+            HollowError::DrainPlanning(DrainPlanningRefusal::NoExit {
+                lobe_id: 7,
+                diagnostics: Vec::new(),
+            }),
+            HollowError::DrainPlanning(DrainPlanningRefusal::NoVentSite {
+                diagnostics: Vec::new(),
+            }),
+            HollowError::DrainPlanning(DrainPlanningRefusal::ResourceAccountingOverflow),
+            HollowError::Drilling(DrillingRefusal::Boolean),
+            HollowError::Drilling(DrillingRefusal::InvalidDrilledTopology),
+            HollowError::Drilling(DrillingRefusal::BoundsChanged),
+            HollowError::Drilling(DrillingRefusal::VolumeBalance {
+                error_mm3: 2.0,
+                tolerance_mm3: 1.0,
+            }),
+            HollowError::Drilling(DrillingRefusal::BlockedOpening { hole: 0 }),
+            HollowError::Drilling(DrillingRefusal::TrappedCavity { trapped_voxels: 1 }),
+            HollowError::Drilling(DrillingRefusal::MissingRequiredRole),
+        ];
+        for source in cases {
+            assert!(matches!(
+                source.category(),
+                HollowFailureCategory::DrainPlanning | HollowFailureCategory::Drilling
+            ));
+            let error = PipelineError::Hollow {
+                model: ModelId::new("fixture"),
+                source,
+            };
+            assert_eq!(error.exit_code(), PipelineExitCode::Hollow);
+        }
+    }
+
+    #[test]
+    fn hollow_request_rejects_any_profile_other_than_the_registered_authority() {
+        let mut wire = serde_json::to_value(
+            m0_constants()
+                .expect("registered constants")
+                .saturn4_ultra(),
+        )
+        .expect("profile serializes");
+        wire["id"] = serde_json::Value::String("unregistered-profile".to_owned());
+        let printer = serde_json::from_value(wire).expect("alternate profile remains well-formed");
+        let request = HollowRequest { printer };
+        let model = oriented(make_box([20.0, 8.0, 8.0], [0.0; 3]).expect("thin closed box"));
+        let error = hollow_stage(model, &request).expect_err("profile mismatch must refuse");
+        assert_eq!(error.category(), HollowFailureCategory::PrinterProfile);
+        let wrapped = PipelineError::Hollow {
+            model: ModelId::new("fixture"),
+            source: error,
+        };
+        assert_eq!(wrapped.exit_code(), PipelineExitCode::Hollow);
+    }
+
+    #[test]
+    fn drain_refusal_diagnostics_survive_pipeline_error_projection() {
+        let diagnostic = CandidateDiagnostic {
+            role: HoleRole::Vent,
+            lobe_id: None,
+            site: 12,
+            direction: [
+                Finite::new(1.0).unwrap(),
+                Finite::new(0.0).unwrap(),
+                Finite::new(0.0).unwrap(),
+            ],
+            crossings: 3,
+        };
+        let error = PipelineError::Hollow {
+            model: ModelId::new("fixture"),
+            source: HollowError::DrainPlanning(DrainPlanningRefusal::NoVentSite {
+                diagnostics: vec![diagnostic.clone()],
+            }),
+        };
+        assert_eq!(error.exit_code(), PipelineExitCode::Hollow);
+        let PipelineError::Hollow {
+            source: HollowError::DrainPlanning(DrainPlanningRefusal::NoVentSite { diagnostics }),
+            ..
+        } = error
+        else {
+            panic!("typed diagnostic was collapsed")
+        };
+        assert_eq!(diagnostics, vec![diagnostic]);
     }
 
     #[test]

@@ -127,6 +127,11 @@ impl DrainPlanningFailure {
     pub fn into_candidate(self) -> ShellCandidate {
         *self.candidate
     }
+
+    #[must_use]
+    pub fn into_reason(self) -> DrainPlanningRefusal {
+        self.reason
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Error)]

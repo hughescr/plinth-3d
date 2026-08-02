@@ -146,15 +146,54 @@ impl DrillingLimits {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DrilledHoleEvidence {
-    pub source: DrilledHoleSource,
-    pub role: HoleRole,
-    pub lobe_id: Option<u32>,
-    pub center_mm: [Finite; 3],
-    pub inner_crossing_mm: Finite,
-    pub sampled_exit_mm: Finite,
-    pub exact_outer_exit_mm: [Finite; 3],
-    pub radius_mm: Finite,
-    pub clear_centerline_crossings: usize,
+    source: DrilledHoleSource,
+    role: HoleRole,
+    lobe_id: Option<u32>,
+    center_mm: [Finite; 3],
+    inner_crossing_mm: Finite,
+    sampled_exit_mm: Finite,
+    exact_outer_exit_mm: [Finite; 3],
+    radius_mm: Finite,
+    clear_centerline_crossings: usize,
+}
+
+impl DrilledHoleEvidence {
+    #[must_use]
+    pub const fn source(&self) -> DrilledHoleSource {
+        self.source
+    }
+    #[must_use]
+    pub const fn role(&self) -> HoleRole {
+        self.role
+    }
+    #[must_use]
+    pub const fn lobe_id(&self) -> Option<u32> {
+        self.lobe_id
+    }
+    #[must_use]
+    pub const fn center_mm(&self) -> [Finite; 3] {
+        self.center_mm
+    }
+    #[must_use]
+    pub const fn inner_crossing_mm(&self) -> Finite {
+        self.inner_crossing_mm
+    }
+    #[must_use]
+    pub const fn sampled_exit_mm(&self) -> Finite {
+        self.sampled_exit_mm
+    }
+    #[must_use]
+    pub const fn exact_outer_exit_mm(&self) -> [Finite; 3] {
+        self.exact_outer_exit_mm
+    }
+    #[must_use]
+    pub const fn radius_mm(&self) -> Finite {
+        self.radius_mm
+    }
+    #[must_use]
+    pub const fn clear_centerline_crossings(&self) -> usize {
+        self.clear_centerline_crossings
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -167,32 +206,122 @@ pub enum DrilledHoleSource {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DrillingEvidence {
-    pub holes: Vec<DrilledHoleEvidence>,
-    pub cavity_voxels: usize,
-    pub drainable_voxels: usize,
-    pub audit_added_drains: usize,
-    pub refilled_voxels: usize,
-    pub refilled_mm3: Finite,
-    pub refilled_pockets: Vec<RefilledPocketEvidence>,
-    pub source_material_mm3: Finite,
-    pub drilled_material_mm3: Finite,
-    pub removed_material_mm3: Finite,
-    pub source_bounds_mm: [[Finite; 3]; 2],
-    pub drilled_bounds_mm: [[Finite; 3]; 2],
-    pub bounds_delta_mm: [[Finite; 3]; 2],
-    pub expected_material_mm3: Finite,
-    pub volume_balance_residual_mm3: Finite,
-    pub volume_balance_tolerance_mm3: Finite,
-    pub final_cavity_mm3: Finite,
-    pub boolean_input_primitive_units: u64,
-    pub boolean_marshaled_input_bytes: u64,
+    holes: Vec<DrilledHoleEvidence>,
+    cavity_voxels: usize,
+    drainable_voxels: usize,
+    audit_added_drains: usize,
+    refilled_voxels: usize,
+    refilled_mm3: Finite,
+    refilled_pockets: Vec<RefilledPocketEvidence>,
+    source_material_mm3: Finite,
+    drilled_material_mm3: Finite,
+    removed_material_mm3: Finite,
+    source_bounds_mm: [[Finite; 3]; 2],
+    drilled_bounds_mm: [[Finite; 3]; 2],
+    bounds_delta_mm: [[Finite; 3]; 2],
+    expected_material_mm3: Finite,
+    volume_balance_residual_mm3: Finite,
+    volume_balance_tolerance_mm3: Finite,
+    final_cavity_mm3: Finite,
+    boolean_input_primitive_units: u64,
+    boolean_marshaled_input_bytes: u64,
+}
+
+impl DrillingEvidence {
+    #[must_use]
+    pub fn holes(&self) -> &[DrilledHoleEvidence] {
+        &self.holes
+    }
+    #[must_use]
+    pub const fn cavity_voxels(&self) -> usize {
+        self.cavity_voxels
+    }
+    #[must_use]
+    pub const fn drainable_voxels(&self) -> usize {
+        self.drainable_voxels
+    }
+    #[must_use]
+    pub const fn audit_added_drains(&self) -> usize {
+        self.audit_added_drains
+    }
+    #[must_use]
+    pub const fn refilled_voxels(&self) -> usize {
+        self.refilled_voxels
+    }
+    #[must_use]
+    pub const fn refilled_mm3(&self) -> Finite {
+        self.refilled_mm3
+    }
+    #[must_use]
+    pub fn refilled_pockets(&self) -> &[RefilledPocketEvidence] {
+        &self.refilled_pockets
+    }
+    #[must_use]
+    pub const fn source_material_mm3(&self) -> Finite {
+        self.source_material_mm3
+    }
+    #[must_use]
+    pub const fn drilled_material_mm3(&self) -> Finite {
+        self.drilled_material_mm3
+    }
+    #[must_use]
+    pub const fn removed_material_mm3(&self) -> Finite {
+        self.removed_material_mm3
+    }
+    #[must_use]
+    pub const fn source_bounds_mm(&self) -> [[Finite; 3]; 2] {
+        self.source_bounds_mm
+    }
+    #[must_use]
+    pub const fn drilled_bounds_mm(&self) -> [[Finite; 3]; 2] {
+        self.drilled_bounds_mm
+    }
+    #[must_use]
+    pub const fn bounds_delta_mm(&self) -> [[Finite; 3]; 2] {
+        self.bounds_delta_mm
+    }
+    #[must_use]
+    pub const fn expected_material_mm3(&self) -> Finite {
+        self.expected_material_mm3
+    }
+    #[must_use]
+    pub const fn volume_balance_residual_mm3(&self) -> Finite {
+        self.volume_balance_residual_mm3
+    }
+    #[must_use]
+    pub const fn volume_balance_tolerance_mm3(&self) -> Finite {
+        self.volume_balance_tolerance_mm3
+    }
+    #[must_use]
+    pub const fn final_cavity_mm3(&self) -> Finite {
+        self.final_cavity_mm3
+    }
+    #[must_use]
+    pub const fn boolean_input_primitive_units(&self) -> u64 {
+        self.boolean_input_primitive_units
+    }
+    #[must_use]
+    pub const fn boolean_marshaled_input_bytes(&self) -> u64 {
+        self.boolean_marshaled_input_bytes
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RefilledPocketEvidence {
-    pub voxel_count: usize,
-    pub volume_ml: Finite,
+    voxel_count: usize,
+    volume_ml: Finite,
+}
+
+impl RefilledPocketEvidence {
+    #[must_use]
+    pub const fn voxel_count(&self) -> usize {
+        self.voxel_count
+    }
+    #[must_use]
+    pub const fn volume_ml(&self) -> Finite {
+        self.volume_ml
+    }
 }
 
 struct AuditPlan {
@@ -266,8 +395,9 @@ impl HollowedAndDrilled {
     /// an undrilled `PlannedShell` has no corresponding conversion.
     #[must_use]
     pub fn into_hollowed_model(self, orientation: OrientationHistory) -> HollowedModel {
-        let drains: Vec<DrainRecord> = self
-            .evidence
+        let evidence = self.evidence;
+        let drain_plan_report = self.drain_plan.clone();
+        let drains: Vec<DrainRecord> = evidence
             .holes
             .iter()
             .filter(|hole| hole.role == HoleRole::Drain)
@@ -283,15 +413,19 @@ impl HollowedAndDrilled {
             disposition: HollowDisposition::HollowedAndDrilled,
             cavities: vec![CavityRecord {
                 cavity_id: 1,
-                volume_ml: Finite::new(self.evidence.final_cavity_mm3.get() / 1000.0)
+                volume_ml: Finite::new(evidence.final_cavity_mm3.get() / 1000.0)
                     .expect("proved finite cavity volume"),
                 drain_ids,
             }],
             drains,
+            drilling_evidence: Some(evidence),
+            drain_plan: Some(drain_plan_report),
         };
         HollowedModel::from_verified_hollow(
             self.mesh,
             HollowHistory::from_reports(orientation, report),
+            self.cavity,
+            self.cavity_field,
         )
     }
 }
@@ -310,6 +444,11 @@ impl DrillingFailure {
     #[must_use]
     pub fn into_planned(self) -> PlannedShell {
         *self.planned
+    }
+
+    #[must_use]
+    pub fn into_reason(self) -> DrillingRefusal {
+        self.reason
     }
 }
 
@@ -1656,21 +1795,35 @@ mod tests {
 
     #[test]
     fn proved_drilling_uses_the_public_hollowed_model_handoff() {
-        let model = drill_planned_shell(sphere_plan())
-            .expect("drilled Sphere")
-            .into_hollowed_model(orientation_history());
+        let drilled = drill_planned_shell(sphere_plan()).expect("drilled Sphere");
+        let expected = drilled.evidence().clone();
+        let expected_plan = drilled.drain_plan().clone();
+        assert!(expected
+            .holes
+            .iter()
+            .any(|hole| hole.role == HoleRole::Vent));
+        let model = drilled.into_hollowed_model(orientation_history());
         assert_eq!(
-            model.history().hollow().disposition,
+            model.history().hollow().disposition(),
             HollowDisposition::HollowedAndDrilled
         );
-        assert_eq!(model.history().hollow().cavities.len(), 1);
-        assert_eq!(model.history().hollow().drains.len(), 1);
+        assert_eq!(model.history().hollow().cavities().len(), 1);
+        assert_eq!(model.history().hollow().drains().len(), 1);
+        assert_eq!(
+            model.history().hollow().drilling_evidence(),
+            Some(&expected)
+        );
+        assert_eq!(model.history().hollow().drain_plan(), Some(&expected_plan));
+        assert!(model.cavity_evidence().is_some());
+        assert!(model.cavity_field().is_some());
         let (mesh, history) = model.into_parts();
         assert!(!mesh.tris().is_empty());
         assert_eq!(
-            history.hollow().disposition,
+            history.hollow().disposition(),
             HollowDisposition::HollowedAndDrilled
         );
+        assert_eq!(history.hollow().drilling_evidence(), Some(&expected));
+        assert_eq!(history.hollow().drain_plan(), Some(&expected_plan));
     }
 
     #[test]

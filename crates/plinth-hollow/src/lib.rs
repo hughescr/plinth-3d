@@ -2,7 +2,7 @@
 //!
 //! The later stage entry point owns drain and vent placement:
 //!
-//! `plinth_hollow::run(OrientedModel, &HollowRequest) -> Result<HollowedModel, HollowError>`.
+//! `plinth_hollow::run(OrientedModel, &HollowRequest) -> Result<HollowStageOutput, HollowError>`.
 //!
 //! H0 deliberately does not claim that entry point: a shell without drilled
 //! drains must not become a `HollowedAndDrilled` production model. Instead
@@ -42,17 +42,39 @@ pub struct HollowRequest {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SolidFallbackReason {
-    IneligibleForHollowing,
-    CavityNotDrainable,
-    InternalSupportRefused,
+pub enum SolidDecisionReason {
+    NoCavity,
+    BelowThreshold,
+}
+
+/// Exact frozen A5 refusal codes authorized to consume the oriented-solid reserve.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InternalSupportRefusalReason {
+    MissingCavityAuthority,
+    InvalidCavityAuthority,
+    CavityFingerprintMismatch,
+    DescriptorProvenanceMismatch,
+    NoInnerCeilingDemand,
+    NoContainedInternalRoute,
+    UnroutableOrTrappedInternalLobe,
+    A5GateFailure,
+    InternalVerifierException,
+    InvalidInternalVerifierReport,
+    NoInternalMembers,
+    A5InternalSupportFailed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HollowDisposition {
     HollowedAndDrilled,
-    SolidFallback { reason: SolidFallbackReason },
+    Solid {
+        reason: SolidDecisionReason,
+    },
+    SolidFallback {
+        reason: InternalSupportRefusalReason,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -75,9 +97,51 @@ pub struct CavityRecord {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HollowReport {
-    pub disposition: HollowDisposition,
-    pub cavities: Vec<CavityRecord>,
-    pub drains: Vec<DrainRecord>,
+    disposition: HollowDisposition,
+    cavities: Vec<CavityRecord>,
+    drains: Vec<DrainRecord>,
+    drilling_evidence: Option<drilling::DrillingEvidence>,
+    drain_plan: Option<drains::DrainPlan>,
+}
+
+impl HollowReport {
+    #[must_use]
+    pub fn solid_decision(reason: SolidDecisionReason) -> Self {
+        Self {
+            disposition: HollowDisposition::Solid { reason },
+            cavities: Vec::new(),
+            drains: Vec::new(),
+            drilling_evidence: None,
+            drain_plan: None,
+        }
+    }
+
+    #[must_use]
+    pub const fn disposition(&self) -> HollowDisposition {
+        self.disposition
+    }
+
+    #[must_use]
+    pub fn cavities(&self) -> &[CavityRecord] {
+        &self.cavities
+    }
+
+    #[must_use]
+    pub fn drains(&self) -> &[DrainRecord] {
+        &self.drains
+    }
+
+    /// Complete original H1b proof, including planned and audit drains, vent,
+    /// refill, opening, volume, bounds, drainability, and Boolean resources.
+    #[must_use]
+    pub const fn drilling_evidence(&self) -> Option<&drilling::DrillingEvidence> {
+        self.drilling_evidence.as_ref()
+    }
+
+    #[must_use]
+    pub const fn drain_plan(&self) -> Option<&drains::DrainPlan> {
+        self.drain_plan.as_ref()
+    }
 }
 
 /// Accumulated report state after hollowing; it contains no historical mesh.
@@ -118,30 +182,57 @@ impl HollowHistory {
 pub struct HollowedModel {
     mesh: Mesh,
     history: HollowHistory,
+    cavity_authority: Option<CavityAuthority>,
+}
+
+#[derive(Debug)]
+struct CavityAuthority {
+    cavity: CavityEvidence,
+    field: CavityField,
 }
 
 impl HollowedModel {
-    pub(crate) fn from_verified_hollow(mesh: Mesh, history: HollowHistory) -> Self {
-        Self { mesh, history }
+    pub(crate) fn from_verified_hollow(
+        mesh: Mesh,
+        history: HollowHistory,
+        cavity: CavityEvidence,
+        field: CavityField,
+    ) -> Self {
+        Self {
+            mesh,
+            history,
+            cavity_authority: Some(CavityAuthority { cavity, field }),
+        }
     }
 
     /// Explicit non-hollow support handoff. The caller must name why the
     /// oriented solid was retained; no shell candidate can use this path.
-    pub fn solid_fallback(
+    fn solid(
         mesh: Mesh,
         orientation: OrientationHistory,
-        reason: SolidFallbackReason,
+        disposition: HollowDisposition,
     ) -> Result<Self, HollowError> {
         validate_oriented_solid(&mesh)?;
         let report = HollowReport {
-            disposition: HollowDisposition::SolidFallback { reason },
+            disposition,
             cavities: Vec::new(),
             drains: Vec::new(),
+            drilling_evidence: None,
+            drain_plan: None,
         };
         Ok(Self {
             mesh,
             history: HollowHistory::from_reports(orientation, report),
+            cavity_authority: None,
         })
+    }
+
+    pub fn solid_decision(
+        mesh: Mesh,
+        orientation: OrientationHistory,
+        reason: SolidDecisionReason,
+    ) -> Result<Self, HollowError> {
+        Self::solid(mesh, orientation, HollowDisposition::Solid { reason })
     }
     #[must_use]
     pub fn mesh(&self) -> &Mesh {
@@ -153,10 +244,87 @@ impl HollowedModel {
         &self.history
     }
 
+    #[must_use]
+    pub const fn cavity_evidence(&self) -> Option<&CavityEvidence> {
+        match &self.cavity_authority {
+            Some(authority) => Some(&authority.cavity),
+            None => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn cavity_field(&self) -> Option<&CavityField> {
+        match &self.cavity_authority {
+            Some(authority) => Some(&authority.field),
+            None => None,
+        }
+    }
+
     /// Moves the sole downstream mesh and report history into support planning.
     #[must_use]
     pub fn into_parts(self) -> (Mesh, HollowHistory) {
         (self.mesh, self.history)
+    }
+}
+
+/// A proved hollow paired with the exact oriented solid reserved for A5.
+/// Neither geometry can be extracted independently: resolving A5 consumes the
+/// pair exactly once and yields the sole support input.
+#[derive(Debug)]
+pub struct HollowedWithSolidReserve {
+    hollowed: HollowedModel,
+    reserve_mesh: Mesh,
+    reserve_history: OrientationHistory,
+}
+
+impl HollowedWithSolidReserve {
+    #[must_use]
+    pub const fn hollowed(&self) -> &HollowedModel {
+        &self.hollowed
+    }
+
+    #[must_use]
+    pub const fn reserve_mesh(&self) -> &Mesh {
+        &self.reserve_mesh
+    }
+
+    #[must_use]
+    pub const fn reserve_history(&self) -> &OrientationHistory {
+        &self.reserve_history
+    }
+
+    /// A5 approved the hollow and its internal members.
+    #[must_use]
+    pub fn approve_hollow(self) -> HollowedModel {
+        self.hollowed
+    }
+
+    /// A5 refused the hollow with one exact frozen reason code.
+    pub fn into_solid_fallback(
+        self,
+        reason: InternalSupportRefusalReason,
+    ) -> Result<HollowedModel, HollowError> {
+        HollowedModel::solid(
+            self.reserve_mesh,
+            self.reserve_history,
+            HollowDisposition::SolidFallback { reason },
+        )
+    }
+}
+
+#[derive(Debug)]
+pub enum HollowStageOutput {
+    Solid(Box<HollowedModel>),
+    AwaitingInternalSupport(Box<HollowedWithSolidReserve>),
+}
+
+impl HollowStageOutput {
+    #[must_use]
+    pub fn report(&self) -> &HollowReport {
+        match self {
+            Self::Solid(model) => model.history().hollow(),
+            Self::AwaitingInternalSupport(candidate) => candidate.hollowed().history().hollow(),
+        }
     }
 }
 
@@ -170,42 +338,49 @@ impl HollowedModel {
 pub fn run(
     model: plinth_orient::OrientedModel,
     request: &HollowRequest,
-) -> Result<HollowedModel, HollowError> {
-    let _printer = &request.printer;
+) -> Result<HollowStageOutput, HollowError> {
+    let constants = m0_constants().map_err(HollowError::Constants)?;
+    let registered = constants.saturn4_ultra();
+    if &request.printer != registered {
+        return Err(HollowError::PrinterProfileMismatch {
+            expected: registered.id().as_str().to_owned(),
+            actual: request.printer.id().as_str().to_owned(),
+        });
+    }
     let (solid, orientation) = model.into_parts();
     let candidate = match create_shell(solid.clone()) {
         Ok(candidate) => candidate,
-        Err(
-            HollowError::IneligibleBelowBulk
-            | HollowError::IneligibleNoCavity
-            | HollowError::IneligibleSavings,
-        ) => {
-            return HollowedModel::solid_fallback(
+        Err(HollowError::IneligibleNoCavity) => {
+            return HollowedModel::solid_decision(
                 solid,
                 orientation,
-                SolidFallbackReason::IneligibleForHollowing,
-            );
+                SolidDecisionReason::NoCavity,
+            )
+            .map(|model| HollowStageOutput::Solid(Box::new(model)));
+        }
+        Err(HollowError::IneligibleBelowBulk | HollowError::IneligibleSavings) => {
+            return HollowedModel::solid_decision(
+                solid,
+                orientation,
+                SolidDecisionReason::BelowThreshold,
+            )
+            .map(|model| HollowStageOutput::Solid(Box::new(model)));
         }
         Err(error) => return Err(error),
     };
-    let planned = match drains::plan_drains(candidate) {
-        Ok(planned) => planned,
-        Err(_refusal) => {
-            return HollowedModel::solid_fallback(
-                solid,
-                orientation,
-                SolidFallbackReason::CavityNotDrainable,
-            );
-        }
-    };
-    match drilling::drill_planned_shell(planned) {
-        Ok(drilled) => Ok(drilled.into_hollowed_model(orientation)),
-        Err(_refusal) => HollowedModel::solid_fallback(
-            solid,
-            orientation,
-            SolidFallbackReason::CavityNotDrainable,
-        ),
-    }
+    let planned = drains::plan_drains(candidate)
+        .map_err(|failure| HollowError::DrainPlanning(failure.into_reason()))?;
+    let drilled = drilling::drill_planned_shell(planned)
+        .map_err(|failure| HollowError::Drilling(failure.into_reason()))?;
+    let reserve_history = orientation;
+    let hollowed = drilled.into_hollowed_model(reserve_history.clone());
+    Ok(HollowStageOutput::AwaitingInternalSupport(Box::new(
+        HollowedWithSolidReserve {
+            hollowed,
+            reserve_mesh: solid,
+            reserve_history,
+        },
+    )))
 }
 
 /// H0's explicit extraction settings. Both values come from the one typed M0
@@ -1624,6 +1799,14 @@ fn finite(value: f64) -> Result<Finite, HollowError> {
 pub enum HollowError {
     #[error("M0 constants publication failed: {0}")]
     Constants(&'static M0ConstantsError),
+    #[error(
+        "hollow request printer profile {actual} does not match registered profile {expected}"
+    )]
+    PrinterProfileMismatch { expected: String, actual: String },
+    #[error("drain planning refused: {0}")]
+    DrainPlanning(drains::DrainPlanningRefusal),
+    #[error("drilling proof refused: {0}")]
+    Drilling(drilling::DrillingRefusal),
     #[error(transparent)]
     Triage(#[from] TriageError),
     #[error(transparent)]
@@ -1696,6 +1879,26 @@ pub enum HollowError {
     DrainGeometryFailed,
     #[error("the hollowed or retained-solid production mesh is invalid")]
     InvalidProductionMesh,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HollowFailureCategory {
+    PrinterProfile,
+    Shell,
+    DrainPlanning,
+    Drilling,
+}
+
+impl HollowError {
+    #[must_use]
+    pub const fn category(&self) -> HollowFailureCategory {
+        match self {
+            Self::PrinterProfileMismatch { .. } => HollowFailureCategory::PrinterProfile,
+            Self::DrainPlanning(_) => HollowFailureCategory::DrainPlanning,
+            Self::Drilling(_) => HollowFailureCategory::Drilling,
+            _ => HollowFailureCategory::Shell,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1881,21 +2084,23 @@ mod tests {
     }
 
     #[test]
-    fn solid_fallback_moves_one_mesh_and_is_visible_in_history() {
+    fn authorized_internal_fallback_moves_one_mesh_and_is_visible_in_history() {
         let mesh = frozen_mesh("Sphere.prepped.oriented-solid.stl");
         let allocation = mesh.verts().as_ptr();
-        let model = HollowedModel::solid_fallback(
+        let model = HollowedModel::solid(
             mesh,
             orientation_history(),
-            SolidFallbackReason::CavityNotDrainable,
+            HollowDisposition::SolidFallback {
+                reason: InternalSupportRefusalReason::InternalVerifierException,
+            },
         )
         .expect("closed oriented solid is an executable public fallback handoff");
         let (mesh, history) = model.into_parts();
         assert_eq!(mesh.verts().as_ptr(), allocation);
         assert_eq!(
-            history.hollow().disposition,
+            history.hollow().disposition(),
             HollowDisposition::SolidFallback {
-                reason: SolidFallbackReason::CavityNotDrainable
+                reason: InternalSupportRefusalReason::InternalVerifierException
             }
         );
     }
@@ -1913,10 +2118,12 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            HollowedModel::solid_fallback(
+            HollowedModel::solid(
                 inverted,
                 orientation_history(),
-                SolidFallbackReason::CavityNotDrainable
+                HollowDisposition::SolidFallback {
+                    reason: InternalSupportRefusalReason::A5GateFailure,
+                }
             ),
             Err(HollowError::NotClosedOrOriented)
         ));
@@ -1931,10 +2138,12 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            HollowedModel::solid_fallback(
+            HollowedModel::solid(
                 oversized,
                 orientation_history(),
-                SolidFallbackReason::CavityNotDrainable
+                HollowDisposition::SolidFallback {
+                    reason: InternalSupportRefusalReason::A5GateFailure,
+                }
             ),
             Err(HollowError::OutsidePrintableEnvelope { .. })
         ));

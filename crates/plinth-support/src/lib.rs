@@ -428,7 +428,7 @@ pub enum SupportError {
 mod tests {
     use super::*;
     use plinth_decimate::{run as run_decimation, DecimationAudit, DecimationBudget, ProbeConfig};
-    use plinth_hollow::{HollowDisposition, HollowedModel, SolidFallbackReason};
+    use plinth_hollow::{HollowDisposition, HollowedModel, SolidDecisionReason};
     use plinth_orient::{BaselineSelection, OrientationHistory, OrientationReport, RigidTransform};
     use std::path::PathBuf;
 
@@ -467,12 +467,9 @@ mod tests {
                 transform: RigidTransform::identity(),
             },
         );
-        let hollowed = HollowedModel::solid_fallback(
-            mesh,
-            orientation,
-            SolidFallbackReason::CavityNotDrainable,
-        )
-        .expect("public solid fallback must enter the support type path");
+        let hollowed =
+            HollowedModel::solid_decision(mesh, orientation, SolidDecisionReason::BelowThreshold)
+                .expect("public solid fallback must enter the support type path");
         let (mesh, hollow) = hollowed.into_parts();
         let primitives = vec![SupportPrimitive {
             segment_kind: SupportSegmentKind::JointSphere,
@@ -578,9 +575,9 @@ mod tests {
         assert_eq!(history.lift_mm(), lift_mm);
         assert_eq!(history.plate_z_mm().get(), -5.0);
         assert_eq!(
-            history.hollow().hollow().disposition,
-            HollowDisposition::SolidFallback {
-                reason: SolidFallbackReason::CavityNotDrainable
+            history.hollow().hollow().disposition(),
+            HollowDisposition::Solid {
+                reason: SolidDecisionReason::BelowThreshold
             }
         );
     }

@@ -786,7 +786,7 @@ mod tests {
     use super::*;
     use plinth_core::{m0_constants, Finite, PositiveFinite};
     use plinth_decimate::{run as run_decimation, DecimationAudit, DecimationBudget, ProbeConfig};
-    use plinth_hollow::{HollowDisposition, HollowHistory, HollowReport};
+    use plinth_hollow::{HollowHistory, HollowReport, SolidDecisionReason};
     use plinth_orient::{BaselineSelection, OrientationHistory, OrientationReport, RigidTransform};
     use plinth_support::{
         BuildFrame, FrustumRingNormal, SphereGeometry, SupportHistory, SupportReport,
@@ -847,11 +847,7 @@ mod tests {
         );
         let hollow = HollowHistory::from_reports(
             orientation,
-            HollowReport {
-                disposition: HollowDisposition::HollowedAndDrilled,
-                cavities: Vec::new(),
-                drains: Vec::new(),
-            },
+            HollowReport::solid_decision(SolidDecisionReason::BelowThreshold),
         );
         let raft_count = primitives
             .iter()
