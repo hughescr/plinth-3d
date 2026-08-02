@@ -167,6 +167,13 @@ pub(crate) struct GeometryFingerprint {
 
 /// One checked geometry authority shared by both phases. It binds the native
 /// query engine to the exact indexed coordinates and topology sidecar.
+///
+/// Authority does not come from treating `SurfaceTriangleSoupDigest` as a
+/// capability: callers can reproducibly compute that content identity. It
+/// comes from comparing the mesh-computed digest with the immutable digest
+/// retained by `NativeSurface`, binding the mesh/topology/config fingerprint,
+/// and retaining the exact surface reference for pointer-identity rebound
+/// checks. Callers cannot overwrite the digest stored by a native surface.
 pub struct AnchorGeometryAuthority<'a> {
     surface: &'a NativeSurface,
     fingerprint: GeometryFingerprint,
@@ -1466,9 +1473,11 @@ fn validate_surface_matches_mesh(
     if digest != surface.source_triangle_soup_digest() {
         return Err(AnchorSearchError::SurfaceMeshMismatch { face: 0 });
     }
-    // Coordinate identity is authoritative. Retain the existing metadata
-    // check as well because `from_triangle_soup` admits explicitly supplied
-    // normals, areas, and bounds that can alter downstream query semantics.
+    // Digest equality is the exact coordinate-content check, not a capability
+    // proof. The authority also retains the native pointer and binds mesh,
+    // topology, and result-changing config. Keep the metadata check because
+    // `from_triangle_soup` admits explicitly supplied normals, areas, and
+    // bounds that can alter downstream query semantics.
     let geometry = surface.geometry();
     for (face, indices) in mesh.tris().iter().enumerate() {
         let [a, b, c] = indices.map(|index| mesh.verts()[index as usize]);

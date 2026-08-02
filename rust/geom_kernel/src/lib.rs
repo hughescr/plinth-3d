@@ -48,15 +48,18 @@ pub use vec3::V3;
 
 pub const KERNEL_API_VERSION: u32 = 1;
 
-/// Collision-resistant identity for the exact, ordered triangle soup from
-/// which a native surface was constructed.
+/// Collision-resistant content identity for an exact, ordered triangle soup.
 ///
-/// The bytes are deliberately opaque: callers may compare or inspect the
-/// identity, but cannot manufacture one through this API.
+/// This is an opaque value, not an unforgeable capability. It has no unchecked
+/// raw-byte constructor, but callers can reproducibly compute the same value
+/// through [`triangle_soup_digest`] or [`indexed_triangle_soup_digest`]. A
+/// caller can compare or inspect digest values; it cannot overwrite the digest
+/// retained inside an already constructed [`NativeSurface`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct SurfaceTriangleSoupDigest([u8; 32]);
 
 impl SurfaceTriangleSoupDigest {
+    /// Borrow the canonical digest bytes for comparison or serialization.
     #[must_use]
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
@@ -65,7 +68,8 @@ impl SurfaceTriangleSoupDigest {
 
 const TRIANGLE_SOUP_DIGEST_DOMAIN: &[u8] = b"plinth.native-surface.triangle-soup.sha256.v1\0";
 
-/// Hash the logical triangle soup in face, vertex, and coordinate order.
+/// Reproducibly compute the canonical content identity for a logical triangle
+/// soup in face, vertex, and coordinate order.
 ///
 /// Components are encoded as their raw IEEE-754 bits in little-endian order,
 /// so signed zero remains distinct. `NativeSurface` construction rejects
@@ -96,7 +100,8 @@ where
     SurfaceTriangleSoupDigest(hasher.finalize().into())
 }
 
-/// Hash an indexed mesh as its ordered, expanded triangle soup.
+/// Reproducibly compute the canonical content identity for an indexed mesh as
+/// its ordered, expanded triangle soup.
 ///
 /// Returns `None` when a face index is outside `vertices`. This helper does
 /// not perform `NativeSurface`'s finite-input validation; use it only after a
@@ -613,7 +618,12 @@ impl NativeSurface {
         self.mesh.geometry()
     }
 
-    /// Exact source triangle-soup identity retained at construction.
+    /// Read the exact source triangle-soup content identity retained at
+    /// construction.
+    ///
+    /// Callers can independently reproduce this value with the canonical
+    /// digest helpers, but cannot replace the immutable value stored by this
+    /// surface.
     #[must_use]
     pub const fn source_triangle_soup_digest(&self) -> SurfaceTriangleSoupDigest {
         self.source_triangle_soup_digest
