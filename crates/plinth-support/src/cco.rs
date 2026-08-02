@@ -714,14 +714,13 @@ fn evaluate(
     generation_index: usize,
     config: &Config,
 ) -> Result<Option<EvaluatedCandidate>, CcoError> {
-    let before = forest_volume(snapshot)?;
     let mut candidate = snapshot.clone();
     if !apply_and_size(&mut candidate, request, descriptor, config)? {
         return Ok(None);
     }
     candidate.validate()?;
-    let after = forest_volume(&candidate)?;
-    let price_ml = candidate_price(descriptor, &candidate, request, config, after - before)?;
+    let changed_delta_ml = changed_forest_volume_delta(snapshot, &candidate)?;
+    let price_ml = candidate_price(descriptor, &candidate, request, config, changed_delta_ml)?;
     if !price_ml.is_finite() {
         return Err(CcoError::InvalidGeometry);
     }
@@ -751,27 +750,28 @@ fn apply_and_size(
     descriptor: &Descriptor,
     config: &Config,
 ) -> Result<bool, CcoError> {
-    let feasible = match descriptor {
-        Descriptor::Plate { xy, top_z } => apply_plate(candidate, request, *xy, *top_z, config)?,
-        Descriptor::Bifurcate { host } => apply_bifurcation(candidate, request, *host, config)?,
-        Descriptor::ModelAnchor { point_mm, .. } => {
-            apply_model_anchor(candidate, request, *point_mm, config)?
+    match descriptor {
+        Descriptor::Plate { xy, top_z } => {
+            if !apply_plate(candidate, request, *xy, *top_z, config)? {
+                return Ok(false);
+            }
+            size_plate_candidate(candidate, request)?;
         }
-    };
-    if !feasible {
-        return Ok(false);
-    }
-    size_postorder(candidate)?;
-    if let Descriptor::Bifurcate { host } = descriptor {
-        let upper = candidate
-            .parent_of(*host)
-            .ok_or(CcoError::InvalidGeometry)?;
-        let new_child_radius = candidate
-            .parent_of(request.stub)
-            .and_then(|key| candidate.member(key))
-            .map(Member::rootward_radius_mm)
-            .ok_or(CcoError::InvalidGeometry)?;
-        uniformly_size_ancestor_path(candidate, upper, new_child_radius)?;
+        Descriptor::Bifurcate { host } => {
+            if !apply_bifurcation(candidate, request, *host, config)? {
+                return Ok(false);
+            }
+            size_bifurcation_candidate(candidate, request, *host)?;
+        }
+        Descriptor::ModelAnchor { point_mm, .. } => {
+            if !apply_model_anchor(candidate, request, *point_mm, config)? {
+                return Ok(false);
+            }
+            let strut = candidate
+                .parent_of(request.stub)
+                .ok_or(CcoError::InvalidGeometry)?;
+            size_tapered_without_tree_fanin(candidate, strut)?;
+        }
     }
     Ok(true)
 }
@@ -927,18 +927,105 @@ fn apply_bifurcation(
     Ok(true)
 }
 
-fn size_postorder(forest: &mut Forest) -> Result<(), CcoError> {
-    let compatibility = LegacyCompatibility::o10_live_current_support_and_raft();
-    for key in forest.postorder()? {
-        if forest
-            .member(key)
-            .is_some_and(|member| matches!(member.kind(), MemberKind::Stub))
-        {
-            continue;
-        }
-        let sized = compatibility.size_live_current_support_member(forest, key)?;
-        forest.set_radii(key, sized.terminal_continuity(), sized.rootward_radius())?;
+fn size_plate_candidate(forest: &mut Forest, request: &TerminalCcoRequest) -> Result<(), CcoError> {
+    let first = forest
+        .parent_of(request.stub)
+        .ok_or(CcoError::InvalidGeometry)?;
+    let first_reaches_plate = forest
+        .member(first)
+        .is_some_and(|member| member.p1_mm()[2] == request.plate_z_mm());
+    if first_reaches_plate {
+        let radius = required_rootward_without_tree_fanin(forest, first)?;
+        forest.set_radii(
+            first,
+            TerminalEndRadius::new(radius),
+            RootwardEndRadius::new(radius),
+        )?;
+        return Ok(());
     }
+
+    let diagonal = first;
+    let column = forest
+        .parent_of(diagonal)
+        .ok_or(CcoError::InvalidGeometry)?;
+    let column_radius = required_rootward_without_tree_fanin(forest, column)?;
+    let diagonal_radius = required_rootward_without_tree_fanin(forest, diagonal)?;
+    let final_radius = if diagonal_radius.get() >= column_radius.get() {
+        diagonal_radius
+    } else {
+        column_radius
+    };
+    let diagonal_terminal = forest
+        .member(diagonal)
+        .ok_or(ForestError::InactiveKey(diagonal))?
+        .terminal_radius_mm();
+    forest.set_radii(
+        diagonal,
+        diagonal_terminal,
+        RootwardEndRadius::new(final_radius),
+    )?;
+    forest.set_radii(
+        column,
+        TerminalEndRadius::new(final_radius),
+        RootwardEndRadius::new(final_radius),
+    )?;
+    Ok(())
+}
+
+fn size_bifurcation_candidate(
+    forest: &mut Forest,
+    request: &TerminalCcoRequest,
+    host: MemberKey,
+) -> Result<(), CcoError> {
+    let upper = forest.parent_of(host).ok_or(CcoError::InvalidGeometry)?;
+    let child = forest
+        .parent_of(request.stub)
+        .ok_or(CcoError::InvalidGeometry)?;
+
+    let junction_radius = required_rootward_without_tree_fanin(forest, host)?;
+    let host_terminal = forest
+        .member(host)
+        .ok_or(ForestError::InactiveKey(host))?
+        .terminal_radius_mm();
+    forest.set_radii(host, host_terminal, RootwardEndRadius::new(junction_radius))?;
+    let upper_rootward = forest
+        .member(upper)
+        .ok_or(ForestError::InactiveKey(upper))?
+        .rootward_radius_mm();
+    forest.set_radii(
+        upper,
+        TerminalEndRadius::new(junction_radius),
+        upper_rootward,
+    )?;
+    size_tapered_without_tree_fanin(forest, child)?;
+    let child_radius = forest
+        .member(child)
+        .ok_or(ForestError::InactiveKey(child))?
+        .rootward_radius_mm();
+    uniformly_size_ancestor_path(forest, upper, child_radius)
+}
+
+fn required_rootward_without_tree_fanin(
+    forest: &Forest,
+    key: MemberKey,
+) -> Result<PositiveFinite, CcoError> {
+    let member = forest.member(key).ok_or(ForestError::InactiveKey(key))?;
+    o10_uniform_radius_for_span(
+        member.p0_mm().map(Finite::get),
+        member.p1_mm().map(Finite::get),
+        member.kind().clone(),
+        member.terminal_radius_mm().get(),
+        member.carried_mm2(),
+    )
+}
+
+fn size_tapered_without_tree_fanin(forest: &mut Forest, key: MemberKey) -> Result<(), CcoError> {
+    let radius = required_rootward_without_tree_fanin(forest, key)?;
+    let terminal = forest
+        .member(key)
+        .ok_or(ForestError::InactiveKey(key))?
+        .terminal_radius_mm();
+    forest.set_radii(key, terminal, RootwardEndRadius::new(radius))?;
     Ok(())
 }
 
@@ -947,9 +1034,7 @@ fn uniformly_size_ancestor_path(
     mut key: MemberKey,
     mut incoming_radius: RootwardEndRadius,
 ) -> Result<(), CcoError> {
-    let compatibility = LegacyCompatibility::o10_live_current_support_and_raft();
     loop {
-        let sized = compatibility.size_live_current_support_member(forest, key)?;
         let entry = forest
             .member(key)
             .ok_or(ForestError::InactiveKey(key))?
@@ -958,7 +1043,8 @@ fn uniformly_size_ancestor_path(
             .get();
         let incoming = incoming_radius.get().get();
         let murray = (entry.powi(4) + incoming.powi(4)).powf(0.25);
-        let radius = PositiveFinite::new(murray.max(sized.rootward_radius().get().get()))
+        let no_fanin = required_rootward_without_tree_fanin(forest, key)?;
+        let radius = PositiveFinite::new(murray.max(no_fanin.get()))
             .map_err(|_| CcoError::InvalidGeometry)?;
         forest.set_radii(
             key,
@@ -1052,22 +1138,22 @@ fn clearance_rows(forest: &Forest, snapshot: &Forest, config: &Config) -> Vec<Cl
         .collect()
 }
 
-fn forest_volume(forest: &Forest) -> Result<f64, CcoError> {
-    forest
+fn changed_forest_volume_delta(before: &Forest, after: &Forest) -> Result<f64, CcoError> {
+    let keys = before
         .live_tree_members()
         .into_iter()
-        .try_fold(0.0, |sum, key| {
-            let member = forest.member(key).ok_or(ForestError::InactiveKey(key))?;
-            let length = norm(sub(
-                member.p1_mm().map(Finite::get),
-                member.p0_mm().map(Finite::get),
-            ));
-            let r0 = member.terminal_radius_mm().get().get();
-            let r1 = member.rootward_radius_mm().get().get();
-            Ok(sum
-                + std::f64::consts::PI / 3.0 * length * (r0 * r0 + r0 * r1 + r1 * r1)
-                    / MILLIMETRES_PER_MILLILITRE)
-        })
+        .chain(after.live_tree_members())
+        .collect::<BTreeSet<_>>();
+    keys.into_iter().try_fold(0.0, |delta, key| {
+        let old = before.member(key);
+        let new = after.member(key);
+        if old == new {
+            return Ok(delta);
+        }
+        let removed = old.map(member_volume).transpose()?.unwrap_or(0.0);
+        let added = new.map(member_volume).transpose()?.unwrap_or(0.0);
+        Ok(delta + added - removed)
+    })
 }
 
 fn candidate_price(
@@ -1077,8 +1163,16 @@ fn candidate_price(
     config: &Config,
     ordinary_delta_ml: f64,
 ) -> Result<f64, CcoError> {
-    if !matches!(descriptor, Descriptor::Plate { .. }) {
-        return Ok(ordinary_delta_ml);
+    match descriptor {
+        Descriptor::ModelAnchor { .. } => {
+            let strut = candidate
+                .parent_of(request.stub)
+                .and_then(|key| candidate.member(key))
+                .ok_or(CcoError::InvalidGeometry)?;
+            return member_volume(strut);
+        }
+        Descriptor::Bifurcate { .. } => return Ok(ordinary_delta_ml),
+        Descriptor::Plate { .. } => {}
     }
     let first = candidate
         .parent_of(request.stub)
@@ -1168,10 +1262,13 @@ fn o10_uniform_radius_for_span(
 }
 
 fn member_volume(member: &Member) -> Result<f64, CcoError> {
-    let length = norm(sub(
+    let delta = sub(
         member.p1_mm().map(Finite::get),
         member.p0_mm().map(Finite::get),
-    ));
+    );
+    // NumPy's frozen `linalg.norm` vector executes sqrt(sum(delta**2));
+    // `f64::hypot` has different rounding on mixed-axis spans.
+    let length = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
     let r0 = member.terminal_radius_mm().get().get();
     let r1 = member.rootward_radius_mm().get().get();
     let volume = std::f64::consts::PI / 3.0 * length * (r0 * r0 + r0 * r1 + r1 * r1)
@@ -1617,6 +1714,33 @@ mod tests {
             embed_end: None,
             carried_mm2: finite(4.0),
         }));
+        let unrelated = forest.add_member(Member::new(MemberSpec {
+            p0_mm: [finite(50.0), finite(0.0), finite(30.0)],
+            p1_mm: [finite(50.0), finite(0.0), finite(0.0)],
+            r0_mm: TerminalEndRadius::new(positive(0.05)),
+            r1_mm: RootwardEndRadius::new(positive(0.05)),
+            kind: MemberKind::Trunk,
+            owner: Owner::Generated {
+                family: "unrelated-undersized-parity-guard".to_owned(),
+                ordinal: 0,
+            },
+            embed_end: None,
+            carried_mm2: finite(0.0),
+        }));
+        let unrelated_before = forest.member(unrelated).unwrap().clone();
+        let member_bits = |member: &Member| {
+            let mut bits = member
+                .p0_mm()
+                .into_iter()
+                .chain(member.p1_mm())
+                .map(|value| value.get().to_bits())
+                .collect::<Vec<_>>();
+            bits.push(member.terminal_radius_mm().get().get().to_bits());
+            bits.push(member.rootward_radius_mm().get().get().to_bits());
+            bits.push(member.carried_mm2().get().to_bits());
+            bits
+        };
+        let unrelated_before_bits = member_bits(&unrelated_before);
         let config = Config::current().unwrap();
         let descriptors = [
             Descriptor::Plate {
@@ -1643,25 +1767,29 @@ mod tests {
         // Frozen from the live `cco.py` family equations and generation ledger:
         // plate candidates precede model anchors, which precede bifurcations;
         // price wins and generation index is the stable equal-price tiebreak.
-        assert_eq!(
-            candidates.iter().map(|c| c.price_ml).collect::<Vec<_>>(),
-            vec![
-                0.025_132_741_228_718_35,
-                0.004_674_708_071_732_998,
-                0.010_013_605_074_968_252,
-            ]
-        );
-        assert_eq!(
-            candidates
+        let python_prices = [
+            0.025_132_741_228_718_35,
+            0.003_796_009_366_922_39,
+            0.010_013_605_074_968_252,
+        ];
+        for (candidate, python_price) in candidates.iter().zip(python_prices) {
+            assert!((candidate.price_ml - python_price).abs() <= 5e-18);
+            assert_eq!(candidate.forest.member(unrelated), Some(&unrelated_before));
+            assert_eq!(
+                candidate
+                    .forest
+                    .member(unrelated)
+                    .map(&member_bits)
+                    .unwrap(),
+                unrelated_before_bits
+            );
+            let unrelated_p0 = unrelated_before.p0_mm().map(Finite::get);
+            let unrelated_p1 = unrelated_before.p1_mm().map(Finite::get);
+            assert!(!candidate
+                .rows
                 .iter()
-                .map(|c| c.forest.digest())
-                .collect::<Vec<_>>(),
-            vec![
-                14_611_506_079_914_898_802,
-                12_687_715_610_185_838_542,
-                10_584_030_910_390_518_412,
-            ]
-        );
+                .any(|row| row.p0 == unrelated_p0 && row.p1 == unrelated_p1));
+        }
         let mut by_price = candidates.iter().collect::<Vec<_>>();
         by_price.sort_by(|left, right| compare_candidates(left, right));
         assert_eq!(
