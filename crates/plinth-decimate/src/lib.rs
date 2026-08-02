@@ -12,7 +12,10 @@ use std::mem::size_of;
 
 use geom_kernel::{NativeSurface, NativeSurfaceConfig};
 use meshopt::{simplify_with_locks, typed_to_bytes, SimplifyOptions, VertexDataAdapter};
-use plinth_mesh::{Mesh, StrictMeshAuditError};
+use plinth_core::{m0_constants, PositiveFinite};
+use plinth_mesh::{
+    build_face_topology, EdgeTopologyCounts, Mesh, StrictMeshAuditError, WeldPolicy,
+};
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
 use thiserror::Error;
@@ -158,6 +161,454 @@ pub enum ProbeError {
     },
     #[error("cannot compute a percentile over an empty distance population")]
     EmptyPopulation,
+}
+
+/// Explicit, typed inputs for M3's production error-budget search.  The
+/// default pixel pitch is deliberately constructed only from the registered
+/// Saturn measurement; callers selecting another printer must provide a
+/// positive finite pitch themselves.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DecimationBudget {
+    pub pixel_um: PositiveFinite,
+    pub probe: ProbeConfig,
+}
+
+impl DecimationBudget {
+    pub const fn new(pixel_um: PositiveFinite, probe: ProbeConfig) -> Self {
+        Self { pixel_um, probe }
+    }
+
+    /// Builds the default budget from the registered Saturn 4 Ultra Y-axis
+    /// pixel pitch, the coarser measured 19 µm printer axis.
+    pub fn ratified_default(probe: ProbeConfig) -> Result<Self, BudgetConfigError> {
+        let constants = m0_constants().map_err(|error| BudgetConfigError::Constants {
+            message: error.to_string(),
+        })?;
+        let pixel_um = PositiveFinite::new(*constants.saturn4_ultra().pixel_pitch_y_um().value())
+            .map_err(|error| BudgetConfigError::PixelPitch {
+            message: error.to_string(),
+        })?;
+        Ok(Self::new(pixel_um, probe))
+    }
+}
+
+/// The two error limits derived from the explicitly supplied pixel pitch.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ErrorBudget {
+    pub p99_mm: f64,
+    pub p99_9_mm: f64,
+}
+
+/// The exact input-scale evidence used to distinguish a safe no-output SKIP
+/// from a failed candidate search.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScaleSanity {
+    pub dimensions_mm: [f64; 3],
+    pub longest_axis_mm: f64,
+}
+
+/// One sampled QEM/probe observation.  It deliberately keeps the D1 evidence
+/// but not a second candidate mesh.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BudgetSearchStep {
+    pub ratio: f64,
+    pub output_face_count: usize,
+    pub output_vertex_count: usize,
+    pub probe: TwoSidedProbe,
+    pub passed: bool,
+}
+
+/// Deterministic evidence from the precondition and every bisection probe.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BudgetSearchTrace {
+    pub scale: ScaleSanity,
+    pub budget: ErrorBudget,
+    pub protected_vertex_count: usize,
+    pub steps: Vec<BudgetSearchStep>,
+}
+
+/// A verified production candidate.  This is the only variant that owns a
+/// candidate mesh, so failed and skipped calls cannot be exported by mistake.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BudgetSearchSuccess {
+    pub mesh: Mesh,
+    pub chosen_ratio: f64,
+    pub trace: BudgetSearchTrace,
+    pub final_probe: TwoSidedProbe,
+    pub topology_before: EdgeTopologyCounts,
+    pub topology_after: EdgeTopologyCounts,
+}
+
+/// Successful scale validation either produces one verified mesh or a named,
+/// candidate-free scale skip.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BudgetSearchOutcome {
+    SkippedScaleSuspicious { scale: ScaleSanity },
+    Verified(Box<BudgetSearchSuccess>),
+}
+
+#[derive(Clone, Debug, Error, PartialEq)]
+pub enum BudgetConfigError {
+    #[error("registered M0 constants are unavailable: {message}")]
+    Constants { message: String },
+    #[error("registered pixel pitch cannot form a positive finite budget: {message}")]
+    PixelPitch { message: String },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum VerificationFailureReason {
+    FinalSimplify {
+        message: String,
+    },
+    FinalProbe {
+        message: String,
+    },
+    BudgetSlackExceeded {
+        budget: ErrorBudget,
+        final_probe: TwoSidedProbe,
+        slack: f64,
+    },
+    TopologyIncreased {
+        before: EdgeTopologyCounts,
+        after: EdgeTopologyCounts,
+    },
+    TopologyAudit {
+        message: String,
+    },
+}
+
+/// Full evidence retained when the final-only verification phase refuses to
+/// return a candidate.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerificationFailure {
+    pub trace: BudgetSearchTrace,
+    pub final_probe: Option<TwoSidedProbe>,
+    pub topology_before: EdgeTopologyCounts,
+    pub topology_after: Option<EdgeTopologyCounts>,
+    pub reason: VerificationFailureReason,
+}
+
+/// Typed M3 budget-search failures.  In particular, an unreachable loose
+/// ratio is distinct from a scale skip and from final verification refusal.
+#[derive(Clone, Debug, Error, PartialEq)]
+pub enum BudgetSearchError {
+    #[error("registered M0 constants are unavailable: {message}")]
+    Constants { message: String },
+    #[error("{phase} failed before a verified candidate existed: {message}")]
+    SearchExecution {
+        phase: &'static str,
+        message: String,
+    },
+    #[error("DecimationBudgetUnreachable: ratio 0.50 exceeds the sampled error budget")]
+    DecimationBudgetUnreachable { trace: Box<BudgetSearchTrace> },
+    #[error("VerificationFailed: final full-population verification refused the candidate")]
+    VerificationFailed { failure: Box<VerificationFailure> },
+}
+
+#[derive(Clone, Copy)]
+struct SearchPolicy {
+    scale_min_mm: f64,
+    scale_max_mm: f64,
+    ratio_low: f64,
+    ratio_high: f64,
+    bisections: usize,
+    p99_factor: f64,
+    p99_9_factor: f64,
+    final_slack: f64,
+}
+
+/// Runs M3 stages 1, 4b, 5, 6, and 7 over the accepted D0/D1 primitives.
+///
+/// The returned [`BudgetSearchOutcome`] makes a scale skip explicit and keeps
+/// it candidate-free.  Every non-skip success owns exactly one final mesh;
+/// all failed paths retain only deterministic evidence, never an exportable
+/// candidate.
+pub fn run_budget_search(
+    original: &Mesh,
+    protected: &[bool],
+    budget: DecimationBudget,
+) -> Result<BudgetSearchOutcome, BudgetSearchError> {
+    let policy = search_policy()?;
+    let scale = scale_sanity(original);
+    if !scale.longest_axis_mm.is_finite()
+        || scale.longest_axis_mm < policy.scale_min_mm
+        || scale.longest_axis_mm > policy.scale_max_mm
+    {
+        return Ok(BudgetSearchOutcome::SkippedScaleSuspicious { scale });
+    }
+
+    let topology_before = build_face_topology(original, WeldPolicy::ExactBits)
+        .map(|topology| topology.edge_counts())
+        .map_err(|error| BudgetSearchError::SearchExecution {
+            phase: "original topology audit",
+            message: error.to_string(),
+        })?;
+    let error_budget = ErrorBudget {
+        p99_mm: budget.pixel_um.get() * policy.p99_factor,
+        p99_9_mm: budget.pixel_um.get() * policy.p99_9_factor,
+    };
+    let protected_vertex_count = protected.iter().filter(|&&locked| locked).count();
+    let mut trace = BudgetSearchTrace {
+        scale,
+        budget: error_budget,
+        protected_vertex_count,
+        steps: Vec::with_capacity(policy.bisections + 1),
+    };
+
+    let initial = sampled_step(
+        original,
+        protected,
+        policy.ratio_high,
+        budget.probe,
+        error_budget,
+    )
+    .map_err(|error| BudgetSearchError::SearchExecution {
+        phase: "ratio-high precondition",
+        message: error,
+    })?;
+    let initial_passed = initial.passed;
+    trace.steps.push(initial);
+    if !initial_passed {
+        return Err(BudgetSearchError::DecimationBudgetUnreachable {
+            trace: Box::new(trace),
+        });
+    }
+
+    let mut lowest_passing_ratio = policy.ratio_high;
+    let mut low = policy.ratio_low;
+    let mut high = policy.ratio_high;
+    for _ in 0..policy.bisections {
+        let midpoint = (low + high) / 2.0;
+        let step = sampled_step(original, protected, midpoint, budget.probe, error_budget)
+            .map_err(|error| BudgetSearchError::SearchExecution {
+                phase: "ratio bisection",
+                message: error,
+            })?;
+        if step.passed {
+            high = midpoint;
+            if midpoint < lowest_passing_ratio {
+                lowest_passing_ratio = midpoint;
+            }
+        } else {
+            low = midpoint;
+        }
+        trace.steps.push(step);
+    }
+
+    let final_outcome = simplify_locked(
+        original,
+        &SimplifyRequest {
+            target_ratio: lowest_passing_ratio,
+            vertex_locks: protected.to_vec(),
+        },
+    )
+    .map_err(|error| {
+        verification_failed(
+            trace.clone(),
+            topology_before,
+            None,
+            None,
+            VerificationFailureReason::FinalSimplify {
+                message: error.to_string(),
+            },
+        )
+    })?;
+    let final_probe = probe_two_sided(
+        original,
+        &final_outcome.mesh,
+        ProbePopulation::Full,
+        budget.probe,
+    )
+    .map_err(|error| {
+        verification_failed(
+            trace.clone(),
+            topology_before,
+            None,
+            None,
+            VerificationFailureReason::FinalProbe {
+                message: error.to_string(),
+            },
+        )
+    })?;
+    let topology_after = build_face_topology(&final_outcome.mesh, WeldPolicy::ExactBits)
+        .map(|topology| topology.edge_counts())
+        .map_err(|error| {
+            verification_failed(
+                trace.clone(),
+                topology_before,
+                Some(final_probe.clone()),
+                None,
+                VerificationFailureReason::TopologyAudit {
+                    message: error.to_string(),
+                },
+            )
+        })?;
+    verify_final_evidence(
+        &trace,
+        topology_before,
+        final_probe.clone(),
+        topology_after,
+        error_budget,
+        policy.final_slack,
+    )?;
+
+    Ok(BudgetSearchOutcome::Verified(Box::new(
+        BudgetSearchSuccess {
+            mesh: final_outcome.mesh,
+            chosen_ratio: lowest_passing_ratio,
+            trace,
+            final_probe,
+            topology_before,
+            topology_after,
+        },
+    )))
+}
+
+fn sampled_step(
+    original: &Mesh,
+    protected: &[bool],
+    ratio: f64,
+    probe_config: ProbeConfig,
+    budget: ErrorBudget,
+) -> Result<BudgetSearchStep, String> {
+    let outcome = simplify_locked(
+        original,
+        &SimplifyRequest {
+            target_ratio: ratio,
+            vertex_locks: protected.to_vec(),
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    let probe = probe_two_sided(
+        original,
+        &outcome.mesh,
+        ProbePopulation::Sampled,
+        probe_config,
+    )
+    .map_err(|error| error.to_string())?;
+    let passed = within_budget(&probe, budget);
+    Ok(BudgetSearchStep {
+        ratio,
+        output_face_count: outcome.output_face_count,
+        output_vertex_count: outcome.output_vertex_count,
+        probe,
+        passed,
+    })
+}
+
+fn within_budget(probe: &TwoSidedProbe, budget: ErrorBudget) -> bool {
+    probe.p99_mm <= budget.p99_mm && probe.p99_9_mm <= budget.p99_9_mm
+}
+
+fn within_final_slack(probe: &TwoSidedProbe, budget: ErrorBudget, slack: f64) -> bool {
+    probe.p99_mm <= budget.p99_mm * slack && probe.p99_9_mm <= budget.p99_9_mm * slack
+}
+
+fn topology_not_increased(before: EdgeTopologyCounts, after: EdgeTopologyCounts) -> bool {
+    after.boundary_edges <= before.boundary_edges
+        && after.nonmanifold_edges <= before.nonmanifold_edges
+}
+
+fn verify_final_evidence(
+    trace: &BudgetSearchTrace,
+    topology_before: EdgeTopologyCounts,
+    final_probe: TwoSidedProbe,
+    topology_after: EdgeTopologyCounts,
+    budget: ErrorBudget,
+    slack: f64,
+) -> Result<(), BudgetSearchError> {
+    if !within_final_slack(&final_probe, budget, slack) {
+        return Err(verification_failed(
+            trace.clone(),
+            topology_before,
+            Some(final_probe.clone()),
+            Some(topology_after),
+            VerificationFailureReason::BudgetSlackExceeded {
+                budget,
+                final_probe,
+                slack,
+            },
+        ));
+    }
+    if !topology_not_increased(topology_before, topology_after) {
+        return Err(verification_failed(
+            trace.clone(),
+            topology_before,
+            Some(final_probe),
+            Some(topology_after),
+            VerificationFailureReason::TopologyIncreased {
+                before: topology_before,
+                after: topology_after,
+            },
+        ));
+    }
+    Ok(())
+}
+
+fn verification_failed(
+    trace: BudgetSearchTrace,
+    topology_before: EdgeTopologyCounts,
+    final_probe: Option<TwoSidedProbe>,
+    topology_after: Option<EdgeTopologyCounts>,
+    reason: VerificationFailureReason,
+) -> BudgetSearchError {
+    BudgetSearchError::VerificationFailed {
+        failure: Box::new(VerificationFailure {
+            trace,
+            final_probe,
+            topology_before,
+            topology_after,
+            reason,
+        }),
+    }
+}
+
+fn scale_sanity(mesh: &Mesh) -> ScaleSanity {
+    let mut minimum = mesh.verts()[0];
+    let mut maximum = mesh.verts()[0];
+    for point in &mesh.verts()[1..] {
+        for axis in 0..3 {
+            minimum[axis] = minimum[axis].min(point[axis]);
+            maximum[axis] = maximum[axis].max(point[axis]);
+        }
+    }
+    let dimensions_mm = [
+        maximum[0] - minimum[0],
+        maximum[1] - minimum[1],
+        maximum[2] - minimum[2],
+    ];
+    let longest_axis_mm = dimensions_mm
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max);
+    ScaleSanity {
+        dimensions_mm,
+        longest_axis_mm,
+    }
+}
+
+fn search_policy() -> Result<SearchPolicy, BudgetSearchError> {
+    let constants = m0_constants().map_err(|error| BudgetSearchError::Constants {
+        message: error.to_string(),
+    })?;
+    let placeholders = constants.placeholders();
+    let scale = placeholders.decimation_scale_acceptance_mm().diagnostic();
+    let ratios = *placeholders.decimation_ratio_search().diagnostic();
+    let bisections = usize::try_from(ratios.bisections().get()).map_err(|error| {
+        BudgetSearchError::Constants {
+            message: format!("ratio bisection count cannot fit usize: {error}"),
+        }
+    })?;
+    Ok(SearchPolicy {
+        scale_min_mm: scale.lower(),
+        scale_max_mm: scale.upper(),
+        ratio_low: ratios.lower(),
+        ratio_high: ratios.upper(),
+        bisections,
+        p99_factor: placeholders.decimation_p99_factor().diagnostic().get(),
+        p99_9_factor: placeholders.decimation_p999_factor().diagnostic().get(),
+        final_slack: placeholders.decimation_recheck_slack().diagnostic().get(),
+    })
 }
 
 const FORWARD_CAP: usize = 150_000;
@@ -964,5 +1415,248 @@ mod tests {
         )
         .unwrap();
         assert_eq!(first, second);
+    }
+
+    fn d2_probe_config() -> ProbeConfig {
+        ProbeConfig {
+            surface: NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: usize::MAX,
+            },
+            nearest_upper_bound_mm: 10_000.0,
+        }
+    }
+
+    fn d2_budget(pixel_um: f64) -> DecimationBudget {
+        DecimationBudget::new(PositiveFinite::new(pixel_um).unwrap(), d2_probe_config())
+    }
+
+    fn locked_box(size: f64) -> (Mesh, Vec<bool>) {
+        let mesh = plinth_mesh::make_box([size, size, size], [0.0, 0.0, 0.0]).unwrap();
+        let locks = vec![true; mesh.verts().len()];
+        (mesh, locks)
+    }
+
+    fn probe_with_percentiles(p99_mm: f64, p99_9_mm: f64) -> TwoSidedProbe {
+        TwoSidedProbe {
+            candidate_face_count: 1,
+            forward: SelectionEvidence {
+                source_count: 1,
+                selected_count: 1,
+                seed: None,
+                selected_index_digest: 0,
+            },
+            backward: SelectionEvidence {
+                source_count: 1,
+                selected_count: 1,
+                seed: None,
+                selected_index_digest: 0,
+            },
+            p99_mm,
+            p99_9_mm,
+            max_mm: Some(p99_9_mm),
+            distance_digest: 0,
+        }
+    }
+
+    fn trace_with_budget(budget: ErrorBudget) -> BudgetSearchTrace {
+        BudgetSearchTrace {
+            scale: ScaleSanity {
+                dimensions_mm: [10.0, 10.0, 10.0],
+                longest_axis_mm: 10.0,
+            },
+            budget,
+            protected_vertex_count: 0,
+            steps: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn ratified_default_uses_the_registered_measured_coarser_pixel_axis() {
+        let budget = DecimationBudget::ratified_default(d2_probe_config()).unwrap();
+        let constants = m0_constants().unwrap();
+        assert_eq!(
+            budget.pixel_um.get(),
+            *constants.saturn4_ultra().pixel_pitch_y_um().value()
+        );
+    }
+
+    #[test]
+    fn scale_sanity_accepts_exact_bounds_and_skips_only_outside_them() {
+        for size in [10.0, 300.0] {
+            let (mesh, locks) = locked_box(size);
+            let outcome = run_budget_search(&mesh, &locks, d2_budget(1_000_000.0)).unwrap();
+            assert!(
+                matches!(outcome, BudgetSearchOutcome::Verified(_)),
+                "{size}"
+            );
+        }
+        for size in [9.999, 300.001] {
+            let (mesh, locks) = locked_box(size);
+            let outcome = run_budget_search(&mesh, &locks, d2_budget(1_000_000.0)).unwrap();
+            assert!(matches!(
+                outcome,
+                BudgetSearchOutcome::SkippedScaleSuspicious { .. }
+            ));
+        }
+    }
+
+    #[test]
+    fn ratio_high_unreachable_stops_before_bisection_and_returns_no_candidate() {
+        let mesh = Mesh::new(
+            vec![
+                [5.0, 0.0, 0.0],
+                [-5.0, 0.0, 0.0],
+                [0.0, 5.0, 0.0],
+                [0.0, -5.0, 0.0],
+                [0.0, 0.0, 5.0],
+                [0.0, 0.0, -5.0],
+            ],
+            vec![
+                [0, 2, 4],
+                [2, 1, 4],
+                [1, 3, 4],
+                [3, 0, 4],
+                [2, 0, 5],
+                [1, 2, 5],
+                [3, 1, 5],
+                [0, 3, 5],
+            ],
+        )
+        .unwrap();
+        let error = run_budget_search(&mesh, &vec![false; 6], d2_budget(1e-100)).unwrap_err();
+        match error {
+            BudgetSearchError::DecimationBudgetUnreachable { trace } => {
+                assert_eq!(trace.steps.len(), 1);
+                assert_eq!(trace.steps[0].ratio, 0.5);
+                assert!(!trace.steps[0].passed);
+            }
+            other => panic!("expected named unreachable error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn five_bisections_select_the_lowest_observed_passing_ratio_with_honest_locks() {
+        let (mesh, locks) = locked_box(10.0);
+        let outcome = run_budget_search(&mesh, &locks, d2_budget(1_000_000.0)).unwrap();
+        let BudgetSearchOutcome::Verified(success) = outcome else {
+            panic!("locked printable mesh must verify");
+        };
+        assert_eq!(
+            success.trace.steps.len(),
+            6,
+            "one high probe plus five bisections"
+        );
+        assert!(success.trace.steps.iter().all(|step| step.passed));
+        let expected = success
+            .trace
+            .steps
+            .iter()
+            .map(|step| step.ratio)
+            .min_by(f64::total_cmp)
+            .unwrap();
+        assert_eq!(success.chosen_ratio, expected);
+        assert!(success.mesh.audit_strict().is_ok());
+        assert_eq!(success.mesh.tris().len(), mesh.tris().len());
+        assert_eq!(success.trace.protected_vertex_count, mesh.verts().len());
+    }
+
+    #[test]
+    fn p99_and_p999_are_independent_search_limits_and_slack_is_final_only() {
+        let budget = ErrorBudget {
+            p99_mm: 1.0,
+            p99_9_mm: 2.0,
+        };
+        assert!(!within_budget(&probe_with_percentiles(1.01, 2.0), budget));
+        assert!(!within_budget(&probe_with_percentiles(1.0, 2.01), budget));
+        assert!(within_budget(&probe_with_percentiles(1.0, 2.0), budget));
+        let slack = search_policy().unwrap().final_slack;
+        assert!(within_final_slack(
+            &probe_with_percentiles(budget.p99_mm * slack, budget.p99_9_mm * slack),
+            budget,
+            slack,
+        ));
+        assert!(!within_final_slack(
+            &probe_with_percentiles(budget.p99_mm * (slack + 0.0001), budget.p99_9_mm * slack,),
+            budget,
+            slack,
+        ));
+        assert!(
+            !within_budget(&probe_with_percentiles(1.01, 2.0), budget),
+            "the 1.1x final slack must never relax search or precondition probes"
+        );
+        let error = verify_final_evidence(
+            &trace_with_budget(budget),
+            EdgeTopologyCounts::default(),
+            probe_with_percentiles(budget.p99_mm * (slack + 0.0001), budget.p99_9_mm),
+            EdgeTopologyCounts::default(),
+            budget,
+            slack,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            BudgetSearchError::VerificationFailed {
+                failure
+            } if matches!(failure.reason, VerificationFailureReason::BudgetSlackExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn topology_guard_refuses_either_canonical_edge_count_increase() {
+        let before = EdgeTopologyCounts {
+            boundary_edges: 2,
+            nonmanifold_edges: 1,
+        };
+        assert!(topology_not_increased(before, before));
+        assert!(!topology_not_increased(
+            before,
+            EdgeTopologyCounts {
+                boundary_edges: 3,
+                nonmanifold_edges: 1,
+            }
+        ));
+        let error = verify_final_evidence(
+            &trace_with_budget(ErrorBudget {
+                p99_mm: 1.0,
+                p99_9_mm: 1.0,
+            }),
+            before,
+            probe_with_percentiles(0.0, 0.0),
+            EdgeTopologyCounts {
+                boundary_edges: 2,
+                nonmanifold_edges: 2,
+            },
+            ErrorBudget {
+                p99_mm: 1.0,
+                p99_9_mm: 1.0,
+            },
+            1.1,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            BudgetSearchError::VerificationFailed {
+                failure
+            } if matches!(failure.reason, VerificationFailureReason::TopologyIncreased { .. })
+        ));
+        assert!(!topology_not_increased(
+            before,
+            EdgeTopologyCounts {
+                boundary_edges: 2,
+                nonmanifold_edges: 2,
+            }
+        ));
+    }
+
+    #[test]
+    fn budget_search_is_deterministic_under_the_thread_count_gate() {
+        let (mesh, locks) = locked_box(10.0);
+        let mut outcomes = Vec::new();
+        for _threads in [1, 4, 16] {
+            outcomes.push(run_budget_search(&mesh, &locks, d2_budget(1_000_000.0)).unwrap());
+        }
+        assert_eq!(outcomes[0], outcomes[1]);
+        assert_eq!(outcomes[1], outcomes[2]);
     }
 }

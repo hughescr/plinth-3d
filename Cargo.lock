@@ -437,6 +437,7 @@ version = "0.1.0"
 dependencies = [
  "geom_kernel",
  "meshopt",
+ "plinth-core",
  "plinth-mesh",
  "rand_chacha",
  "rand_core",
