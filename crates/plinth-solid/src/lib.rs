@@ -122,6 +122,83 @@ pub enum NativeExceptionKind {
     NonStandard,
 }
 
+/// Exact primitive counts and logical payload bytes for one complete boolean
+/// batch. This is derived before flattening the meshes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BooleanInputEstimate {
+    pub vertex_scalars: u64,
+    pub triangle_indices: u64,
+    pub vertex_offset_units: u64,
+    pub triangle_offset_units: u64,
+    pub operand_primitive_units: u64,
+    pub logical_marshaled_input_bytes: u64,
+}
+
+impl BooleanInputEstimate {
+    pub fn for_meshes(meshes: &[Mesh]) -> Result<Self, SolidError> {
+        let mesh_count = u64::try_from(meshes.len()).map_err(|_| SolidError::BatchTooLarge)?;
+        let offset_units = mesh_count.checked_add(1).ok_or(SolidError::BatchTooLarge)?;
+        let vertex_scalars =
+            checked_u64_scalar_count(meshes.iter().map(|mesh| mesh.vertices.len()))?;
+        let triangle_indices =
+            checked_u64_scalar_count(meshes.iter().map(|mesh| mesh.triangles.len()))?;
+        let operand_primitive_units = vertex_scalars
+            .checked_add(triangle_indices)
+            .and_then(|total| total.checked_add(offset_units))
+            .and_then(|total| total.checked_add(offset_units))
+            .ok_or(SolidError::BatchTooLarge)?;
+        // The CXX ABI contains four primitive slices, whose element types are
+        // each eight bytes. This intentionally excludes Manifold private heap.
+        let logical_marshaled_input_bytes = operand_primitive_units
+            .checked_mul(8)
+            .ok_or(SolidError::BatchTooLarge)?;
+        Ok(Self {
+            vertex_scalars,
+            triangle_indices,
+            vertex_offset_units: offset_units,
+            triangle_offset_units: offset_units,
+            operand_primitive_units,
+            logical_marshaled_input_bytes,
+        })
+    }
+}
+
+/// Limits for the public boolean ABI, not estimates of Manifold internals.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BooleanLimits {
+    pub max_input_primitive_units: u64,
+    pub max_logical_marshaled_input_bytes: u64,
+    pub max_output_vertices: u64,
+    pub max_output_triangles: u64,
+}
+
+impl BooleanLimits {
+    pub const UNLIMITED: Self = Self {
+        max_input_primitive_units: u64::MAX,
+        max_logical_marshaled_input_bytes: u64::MAX,
+        max_output_vertices: u64::MAX,
+        max_output_triangles: u64::MAX,
+    };
+}
+
+impl Default for BooleanLimits {
+    fn default() -> Self {
+        Self::UNLIMITED
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BooleanInputLimit {
+    PrimitiveUnits,
+    LogicalMarshalledInputBytes,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BooleanOutputLimit {
+    Vertices,
+    Triangles,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum SolidError {
     #[error("union requires at least one mesh")]
@@ -130,6 +207,18 @@ pub enum SolidError {
     DifferenceRequiresSubtrahend,
     #[error("flattened mesh batch exceeds addressable storage")]
     BatchTooLarge,
+    #[error("boolean input exceeds {limit:?}: actual {actual}, limit {maximum}")]
+    InputLimitExceeded {
+        limit: BooleanInputLimit,
+        actual: u64,
+        maximum: u64,
+    },
+    #[error("boolean output exceeds {limit:?}: actual {actual}, limit {maximum}")]
+    OutputLimitExceeded {
+        limit: BooleanOutputLimit,
+        actual: u64,
+        maximum: u64,
+    },
     #[error("native mesh-batch validation failed: {0:?}")]
     NativeValidation(NativeValidationError),
     #[error("native mesh output exceeded addressable storage")]
@@ -164,6 +253,21 @@ pub trait SolidBoolean {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ManifoldBackend;
 
+impl ManifoldBackend {
+    /// Runs one batch-shaped difference while enforcing explicit ABI limits.
+    /// Input limits are checked before gathering or crossing the native boundary.
+    pub fn difference_limited(
+        &self,
+        meshes: &[Mesh],
+        limits: BooleanLimits,
+    ) -> Result<Mesh, SolidError> {
+        if meshes.len() < 2 {
+            return Err(SolidError::DifferenceRequiresSubtrahend);
+        }
+        run_batch_limited(meshes, limits, ffi::manifold_difference_batch)
+    }
+}
+
 impl SolidBoolean for ManifoldBackend {
     fn union(&self, meshes: &[Mesh]) -> Result<Mesh, SolidError> {
         if meshes.is_empty() {
@@ -180,20 +284,61 @@ impl SolidBoolean for ManifoldBackend {
     }
 }
 
-type NativeOperation = fn(&[f64], &[u64], &[u64], &[u64]) -> ffi::FfiResponse;
+type NativeOperation = fn(&[f64], &[u64], &[u64], &[u64], u64, u64) -> ffi::FfiResponse;
 
 fn run_batch(meshes: &[Mesh], operation: NativeOperation) -> Result<Mesh, SolidError> {
+    run_batch_limited(meshes, BooleanLimits::UNLIMITED, operation)
+}
+
+fn run_batch_limited(
+    meshes: &[Mesh],
+    limits: BooleanLimits,
+    operation: NativeOperation,
+) -> Result<Mesh, SolidError> {
+    let estimate = BooleanInputEstimate::for_meshes(meshes)?;
+    validate_input_limits(estimate, limits)?;
     let batch = FlatBatch::gather(meshes)?;
     let response = operation(
         &batch.vertices,
         &batch.triangles,
         &batch.vertex_offsets,
         &batch.triangle_offsets,
+        limits.max_output_vertices,
+        limits.max_output_triangles,
     );
-    map_native_response(response)
+    map_native_response_with_limits(response, limits)
 }
 
+fn validate_input_limits(
+    estimate: BooleanInputEstimate,
+    limits: BooleanLimits,
+) -> Result<(), SolidError> {
+    if estimate.operand_primitive_units > limits.max_input_primitive_units {
+        return Err(SolidError::InputLimitExceeded {
+            limit: BooleanInputLimit::PrimitiveUnits,
+            actual: estimate.operand_primitive_units,
+            maximum: limits.max_input_primitive_units,
+        });
+    }
+    if estimate.logical_marshaled_input_bytes > limits.max_logical_marshaled_input_bytes {
+        return Err(SolidError::InputLimitExceeded {
+            limit: BooleanInputLimit::LogicalMarshalledInputBytes,
+            actual: estimate.logical_marshaled_input_bytes,
+            maximum: limits.max_logical_marshaled_input_bytes,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
 fn map_native_response(response: ffi::FfiResponse) -> Result<Mesh, SolidError> {
+    map_native_response_with_limits(response, BooleanLimits::UNLIMITED)
+}
+
+fn map_native_response_with_limits(
+    response: ffi::FfiResponse,
+    limits: BooleanLimits,
+) -> Result<Mesh, SolidError> {
     use ffi::FfiErrorCode as Code;
 
     validate_native_envelope(&response)?;
@@ -215,6 +360,25 @@ fn map_native_response(response: ffi::FfiResponse) -> Result<Mesh, SolidError> {
             NativeValidationError::OutputPropertyStride,
         )),
         Code::OutputOverflow => Err(SolidError::NativeOverflow),
+        Code::OutputLimitExceeded => {
+            let (limit, maximum) = match response.output_limit {
+                ffi::FfiOutputLimit::Vertices => {
+                    (BooleanOutputLimit::Vertices, limits.max_output_vertices)
+                }
+                ffi::FfiOutputLimit::Triangles => {
+                    (BooleanOutputLimit::Triangles, limits.max_output_triangles)
+                }
+                _ => return Err(SolidError::InvalidNativeResponse),
+            };
+            if response.output_count <= maximum {
+                return Err(SolidError::InvalidNativeResponse);
+            }
+            Err(SolidError::OutputLimitExceeded {
+                limit,
+                actual: response.output_count,
+                maximum,
+            })
+        }
         Code::InputManifoldStatus => Err(SolidError::ManifoldInput {
             mesh_index: response
                 .has_mesh_index
@@ -295,6 +459,7 @@ fn response_schema(code: ffi::FfiErrorCode) -> Option<ResponseSchema> {
         | Code::DifferenceArity
         | Code::OutputPropertyStride
         | Code::OutputOverflow
+        | Code::OutputLimitExceeded
         | Code::EmptyResult
         | Code::UnexpectedInvalidArgument
         | Code::UnexpectedOverflow
@@ -328,7 +493,11 @@ fn validate_native_envelope(response: &ffi::FfiResponse) -> Result<(), SolidErro
             !response.mesh.vertices.is_empty() && !response.mesh.triangles.is_empty()
         }
     };
-    if status_valid && mesh_index_valid && payload_valid {
+    let output_limit_valid = match response.code {
+        ffi::FfiErrorCode::OutputLimitExceeded => response.output_count > 0,
+        _ => response.output_limit == ffi::FfiOutputLimit::Vertices && response.output_count == 0,
+    };
+    if status_valid && mesh_index_valid && payload_valid && output_limit_valid {
         Ok(())
     } else {
         Err(SolidError::InvalidNativeResponse)
@@ -401,6 +570,16 @@ fn checked_scalar_count(mut lengths: impl Iterator<Item = usize>) -> Result<usiz
     })
 }
 
+fn checked_u64_scalar_count(mut lengths: impl Iterator<Item = usize>) -> Result<u64, SolidError> {
+    lengths.try_fold(0u64, |total, length| {
+        u64::try_from(length)
+            .ok()
+            .and_then(|count| count.checked_mul(3))
+            .and_then(|scalars| total.checked_add(scalars))
+            .ok_or(SolidError::BatchTooLarge)
+    })
+}
+
 fn unflatten(output: ffi::FfiMesh) -> Result<Mesh, MeshValidationError> {
     if !output.vertices.len().is_multiple_of(3) {
         return Err(MeshValidationError::VertexBufferLength {
@@ -463,10 +642,41 @@ fn validate_mesh(vertices: &[[f64; 3]], triangles: &[[u64; 3]]) -> Result<(), Me
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use super::{
-        ffi, map_native_response, validate_native_envelope, ManifoldStatus, NativeExceptionKind,
-        NativeValidationError, SolidError,
+        ffi, map_native_response, run_batch_limited, validate_input_limits,
+        validate_native_envelope, BooleanInputEstimate, BooleanInputLimit, BooleanLimits,
+        BooleanOutputLimit, ManifoldStatus, Mesh, NativeExceptionKind, NativeValidationError,
+        SolidError,
     };
+
+    static NATIVE_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+    fn counted_operation(
+        _: &[f64],
+        _: &[u64],
+        _: &[u64],
+        _: &[u64],
+        _: u64,
+        _: u64,
+    ) -> ffi::FfiResponse {
+        NATIVE_CALLS.fetch_add(1, Ordering::SeqCst);
+        unreachable!("an input-limited batch must not cross FFI")
+    }
+
+    fn tetrahedron() -> Mesh {
+        Mesh::new(
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]],
+        )
+        .expect("fixture is structurally valid")
+    }
 
     #[derive(Clone, Copy)]
     enum TestPayload {
@@ -544,6 +754,8 @@ mod tests {
             manifold_status: case.status,
             has_mesh_index: case.mesh_index.is_some(),
             mesh_index: case.mesh_index.unwrap_or(0),
+            output_limit: ffi::FfiOutputLimit::Vertices,
+            output_count: 0,
             mesh,
         }
     }
@@ -643,6 +855,105 @@ mod tests {
                 ..case(ffi::FfiErrorCode::ResultManifoldStatus)
             })),
             Err(SolidError::InvalidNativeResponse)
+        );
+    }
+
+    #[test]
+    fn input_estimate_counts_every_marshaled_primitive_exactly() {
+        let meshes = [tetrahedron(), tetrahedron()];
+        let estimate = BooleanInputEstimate::for_meshes(&meshes).unwrap();
+        assert_eq!(estimate.vertex_scalars, 24);
+        assert_eq!(estimate.triangle_indices, 24);
+        assert_eq!(estimate.vertex_offset_units, 3);
+        assert_eq!(estimate.triangle_offset_units, 3);
+        assert_eq!(estimate.operand_primitive_units, 54);
+        assert_eq!(estimate.logical_marshaled_input_bytes, 432);
+
+        let exact = BooleanLimits {
+            max_input_primitive_units: 54,
+            max_logical_marshaled_input_bytes: 432,
+            ..BooleanLimits::UNLIMITED
+        };
+        assert_eq!(validate_input_limits(estimate, exact), Ok(()));
+        assert_eq!(
+            validate_input_limits(
+                estimate,
+                BooleanLimits {
+                    max_input_primitive_units: 53,
+                    ..exact
+                },
+            ),
+            Err(SolidError::InputLimitExceeded {
+                limit: BooleanInputLimit::PrimitiveUnits,
+                actual: 54,
+                maximum: 53,
+            })
+        );
+        assert_eq!(
+            validate_input_limits(
+                estimate,
+                BooleanLimits {
+                    max_logical_marshaled_input_bytes: 431,
+                    ..exact
+                },
+            ),
+            Err(SolidError::InputLimitExceeded {
+                limit: BooleanInputLimit::LogicalMarshalledInputBytes,
+                actual: 432,
+                maximum: 431,
+            })
+        );
+    }
+
+    #[test]
+    fn input_limit_rejection_does_not_gather_or_call_native() {
+        let meshes = [tetrahedron(), tetrahedron()];
+        NATIVE_CALLS.store(0, Ordering::SeqCst);
+        let error = run_batch_limited(
+            &meshes,
+            BooleanLimits {
+                max_input_primitive_units: 53,
+                ..BooleanLimits::UNLIMITED
+            },
+            counted_operation,
+        )
+        .expect_err("cap minus one must reject before FFI");
+        assert_eq!(NATIVE_CALLS.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            error,
+            SolidError::InputLimitExceeded {
+                limit: BooleanInputLimit::PrimitiveUnits,
+                actual: 54,
+                maximum: 53,
+            }
+        );
+    }
+
+    #[test]
+    fn native_output_limit_is_typed_and_must_exceed_the_requested_cap() {
+        let response = ffi::FfiResponse {
+            code: ffi::FfiErrorCode::OutputLimitExceeded,
+            manifold_status: 0,
+            has_mesh_index: false,
+            mesh_index: 0,
+            output_limit: ffi::FfiOutputLimit::Triangles,
+            output_count: 13,
+            mesh: ffi::FfiMesh {
+                vertices: Vec::new(),
+                triangles: Vec::new(),
+            },
+        };
+        let limits = BooleanLimits {
+            max_output_triangles: 12,
+            ..BooleanLimits::UNLIMITED
+        };
+        assert_eq!(
+            super::map_native_response_with_limits(response, limits),
+            Err(SolidError::OutputLimitExceeded {
+                limit: BooleanOutputLimit::Triangles,
+                actual: 13,
+                maximum: 12,
+            })
         );
     }
 }
