@@ -350,9 +350,7 @@ pub enum FeatureProtectionError {
     CapExceeded { trace: Box<FeatureProtectionTrace> },
 }
 
-/// The only public M3 entry point.  It first derives hard locks from the
-/// aggressive backward-only feature probe, then performs the accepted D2
-/// budget search with exactly those locks.
+/// Typed failures from the sole public production decimation path.
 #[derive(Clone, Debug, Error, PartialEq)]
 pub enum DecimationError {
     #[error(transparent)]
@@ -361,10 +359,15 @@ pub enum DecimationError {
     Budget(#[from] BudgetSearchError),
 }
 
-/// Selects M3's protected original vertices from one ratio-0.20 backward
-/// probe, then runs the staged budget search.  This is deliberately the only
-/// production path: callers cannot omit feature protection by passing a lock
-/// vector themselves.
+/// The only public M3 production entry point. It selects protected original
+/// vertices from one ratio-0.20 backward probe, then runs the D2 budget search
+/// with exactly those locks. The lock-accepting search helper is private, so an
+/// external caller cannot obtain a verified production mesh by supplying an
+/// all-false lock vector.
+///
+/// ```compile_fail,E0603
+/// use plinth_decimate::run_budget_search;
+/// ```
 pub fn run(
     original: &Mesh,
     budget: DecimationBudget,
@@ -528,7 +531,7 @@ fn feature_protection_policy() -> Result<FeatureProtectionPolicy, FeatureProtect
 /// it candidate-free.  Every non-skip success owns exactly one final mesh;
 /// all failed paths retain only deterministic evidence, never an exportable
 /// candidate.
-pub fn run_budget_search(
+fn run_budget_search(
     original: &Mesh,
     protected: &[bool],
     budget: DecimationBudget,
