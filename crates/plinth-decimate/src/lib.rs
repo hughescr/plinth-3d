@@ -1914,11 +1914,12 @@ mod tests {
         );
     }
 
-    /// The CI gate runs this under `PLINTH_THREADS=1`, `4`, and `16`; D0 is
-    /// one whole-mesh meshopt call and must not vary with the workspace-wide
-    /// scheduler setting.
+    /// Repeated D0 calls within one process produce the same result. The
+    /// workspace thread-setting sweep is an isolated-process integration test
+    /// (`tests/thread_sweep.rs`), because process-global environment mutation
+    /// inside this parallel unit-test binary would be unsound.
     #[test]
-    fn plinth_threads_does_not_change_the_deterministic_outcome() {
+    fn repeated_d0_calls_do_not_change_the_deterministic_outcome() {
         let mesh = octahedron();
         let request = request(0.5, vec![false; 6]);
         let first = simplify_locked(&mesh, &request).unwrap();
