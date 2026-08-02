@@ -242,6 +242,7 @@ pub struct BudgetSearchTrace {
     /// Every full-population attempt, in deterministic most-aggressive-first
     /// order. A failed attempt never suppresses denser sampled-safe candidates.
     pub final_attempts: Vec<FinalVerificationAttempt>,
+    pub adaptive_exploration: AdaptiveExplorationTrace,
     /// Why no safely reduced mesh was authorized when this trace backs an
     /// [`BudgetSearchOutcome::AlreadyPrintScale`] result.
     pub reduction_refusals: Vec<ReductionRefusalReason>,
@@ -256,10 +257,48 @@ pub struct FinalVerificationAttempt {
     pub achieved_ratio: f64,
     pub output_face_count: usize,
     pub candidate_fingerprint: String,
-    pub probe: TwoSidedProbe,
+    /// Absent when topology refused the candidate before the expensive full
+    /// population probe.
+    pub probe: Option<TwoSidedProbe>,
     pub topology_after: EdgeTopologyCounts,
     pub result: FinalVerificationResult,
     pub downstream_utility: DownstreamUtilityEvidence,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdaptiveExplorationTrace {
+    pub probe_limit: usize,
+    pub probes: Vec<AdaptiveProbeStep>,
+    pub remaining_intervals: Vec<IntegerTargetInterval>,
+    pub complete: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IntegerTargetInterval {
+    pub first_target_faces: usize,
+    pub last_target_faces: usize,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AdaptiveProbeStep {
+    pub target_face_count: usize,
+    pub output_face_count: usize,
+    pub candidate_fingerprint: String,
+    pub plateau_of_fingerprint: Option<String>,
+    pub sampled_probe: TwoSidedProbe,
+    pub topology_after: Option<EdgeTopologyCounts>,
+    pub full_probe: Option<TwoSidedProbe>,
+    pub result: AdaptiveProbeResult,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AdaptiveProbeResult {
+    NoActualReduction,
+    Plateau,
+    SampledBudgetExceeded,
+    TopologyIncreased,
+    FullBudgetExceeded,
+    GeometricallyEligible,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1005,6 +1044,39 @@ fn run_budget_search(
                 ),
             });
         }
+        let topology_after = build_face_topology(&final_outcome.mesh, WeldPolicy::ExactBits)
+            .map(|topology| topology.edge_counts())
+            .map_err(|error| {
+                verification_failed(
+                    trace.clone(),
+                    topology_before,
+                    None,
+                    None,
+                    VerificationFailureReason::TopologyAudit {
+                        message: error.to_string(),
+                    },
+                )
+            })?;
+        if !topology_not_increased(topology_before, topology_after) {
+            trace.final_attempts.push(FinalVerificationAttempt {
+                requested_ratio: candidate.ratio,
+                achieved_ratio: final_outcome.achieved_ratio,
+                output_face_count: final_outcome.output_face_count,
+                candidate_fingerprint: rebuilt_fingerprint,
+                probe: None,
+                topology_after,
+                result: FinalVerificationResult::TopologyIncreased,
+                downstream_utility: DownstreamUtilityEvidence::NoDownstreamUtilityEvidence,
+            });
+            trace
+                .reduction_refusals
+                .push(ReductionRefusalReason::TopologyIncreased {
+                    requested_ratio: candidate.ratio,
+                    before: topology_before,
+                    after: topology_after,
+                });
+            continue;
+        }
         let final_probe = probe_two_sided(
             original,
             &final_outcome.mesh,
@@ -1016,25 +1088,12 @@ fn run_budget_search(
                 trace.clone(),
                 topology_before,
                 None,
-                None,
+                Some(topology_after),
                 VerificationFailureReason::FinalProbe {
                     message: error.to_string(),
                 },
             )
         })?;
-        let topology_after = build_face_topology(&final_outcome.mesh, WeldPolicy::ExactBits)
-            .map(|topology| topology.edge_counts())
-            .map_err(|error| {
-                verification_failed(
-                    trace.clone(),
-                    topology_before,
-                    Some(final_probe.clone()),
-                    None,
-                    VerificationFailureReason::TopologyAudit {
-                        message: error.to_string(),
-                    },
-                )
-            })?;
         let result = classify_final_attempt(
             &final_probe,
             error_budget,
@@ -1048,7 +1107,7 @@ fn run_budget_search(
             achieved_ratio: final_outcome.achieved_ratio,
             output_face_count: final_outcome.output_face_count,
             candidate_fingerprint: rebuilt_fingerprint,
-            probe: final_probe.clone(),
+            probe: Some(final_probe.clone()),
             topology_after,
             result: result.clone(),
             downstream_utility: downstream_utility.clone(),
@@ -1079,22 +1138,31 @@ fn run_budget_search(
                     });
             }
             FinalVerificationResult::TopologyIncreased => {
-                trace
-                    .reduction_refusals
-                    .push(ReductionRefusalReason::TopologyIncreased {
-                        requested_ratio: candidate.ratio,
-                        before: topology_before,
-                        after: topology_after,
-                    });
+                unreachable!("topology is audited before the expensive full-population probe")
             }
         }
     }
+
+    run_adaptive_diagnostics(
+        original,
+        protected,
+        budget,
+        topology_before,
+        &policy,
+        &mut trace,
+    )?;
 
     let geometrically_eligible_candidate_count = trace
         .final_attempts
         .iter()
         .filter(|attempt| attempt.result == FinalVerificationResult::GeometricallyEligible)
-        .count();
+        .count()
+        + trace
+            .adaptive_exploration
+            .probes
+            .iter()
+            .filter(|probe| probe.result == AdaptiveProbeResult::GeometricallyEligible)
+            .count();
     already_print_scale(
         original,
         budget.probe,
@@ -1167,6 +1235,12 @@ fn new_budget_trace(
         protected_vertex_count,
         steps: Vec::with_capacity(policy.bisections + 1),
         final_attempts: Vec::with_capacity(policy.bisections),
+        adaptive_exploration: AdaptiveExplorationTrace {
+            probe_limit: policy.bisections,
+            probes: Vec::with_capacity(policy.bisections),
+            remaining_intervals: Vec::new(),
+            complete: true,
+        },
         reduction_refusals: Vec::new(),
     }
 }
@@ -1312,6 +1386,173 @@ fn sampled_step(
         reduced,
         passed,
     })
+}
+
+fn ratio_for_integer_target(input_faces: usize, target_faces: usize) -> Result<f64, String> {
+    if input_faces == 0 || target_faces == 0 || target_faces >= input_faces {
+        return Err(format!(
+            "integer target {target_faces} must be within 1..{input_faces}"
+        ));
+    }
+    let ratio = (target_faces as f64 + 0.25) / input_faces as f64;
+    if target_face_count(input_faces, ratio) != target_faces {
+        return Err(format!(
+            "ratio {ratio} did not round-trip to integer target {target_faces}"
+        ));
+    }
+    Ok(ratio)
+}
+
+fn run_adaptive_diagnostics(
+    original: &Mesh,
+    protected: &[bool],
+    budget: DecimationBudget,
+    topology_before: EdgeTopologyCounts,
+    policy: &SearchPolicy,
+    trace: &mut BudgetSearchTrace,
+) -> Result<(), BudgetSearchError> {
+    let input_faces = original.tris().len();
+    let Some(first_target_faces) = trace
+        .final_attempts
+        .iter()
+        .map(|attempt| attempt.output_face_count)
+        .max()
+        .and_then(|faces| faces.checked_add(1))
+    else {
+        return Ok(());
+    };
+    if first_target_faces >= input_faces {
+        return Ok(());
+    }
+
+    let mut intervals = vec![IntegerTargetInterval {
+        first_target_faces,
+        last_target_faces: input_faces - 1,
+    }];
+    let mut known_fingerprints = trace
+        .steps
+        .iter()
+        .map(|step| step.candidate_fingerprint.clone())
+        .chain(
+            trace
+                .final_attempts
+                .iter()
+                .map(|attempt| attempt.candidate_fingerprint.clone()),
+        )
+        .collect::<Vec<_>>();
+
+    while trace.adaptive_exploration.probes.len() < policy.bisections && !intervals.is_empty() {
+        let interval_index = intervals
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, interval)| interval.last_target_faces - interval.first_target_faces)
+            .map(|(index, _)| index)
+            .expect("non-empty interval list");
+        let interval = intervals.remove(interval_index);
+        let target_face_count = interval.first_target_faces
+            + (interval.last_target_faces - interval.first_target_faces) / 2;
+        if interval.first_target_faces < target_face_count {
+            intervals.push(IntegerTargetInterval {
+                first_target_faces: interval.first_target_faces,
+                last_target_faces: target_face_count - 1,
+            });
+        }
+        if target_face_count < interval.last_target_faces {
+            intervals.push(IntegerTargetInterval {
+                first_target_faces: target_face_count + 1,
+                last_target_faces: interval.last_target_faces,
+            });
+        }
+        intervals.sort_by_key(|item| (item.first_target_faces, item.last_target_faces));
+
+        let ratio =
+            ratio_for_integer_target(input_faces, target_face_count).map_err(|message| {
+                BudgetSearchError::SearchExecution {
+                    phase: "adaptive integer target",
+                    message,
+                }
+            })?;
+        let outcome = simplify_locked(
+            original,
+            &SimplifyRequest {
+                target_ratio: ratio,
+                vertex_locks: protected.to_vec(),
+            },
+        )
+        .map_err(|error| BudgetSearchError::SearchExecution {
+            phase: "adaptive simplification",
+            message: error.to_string(),
+        })?;
+        let sampled_probe = probe_two_sided(
+            original,
+            &outcome.mesh,
+            ProbePopulation::Sampled,
+            budget.probe,
+        )
+        .map_err(|error| BudgetSearchError::SearchExecution {
+            phase: "adaptive sampled probe",
+            message: error.to_string(),
+        })?;
+        let candidate_fingerprint = mesh_fingerprint(&outcome.mesh).map_err(|error| {
+            BudgetSearchError::SearchExecution {
+                phase: "adaptive candidate fingerprint",
+                message: error.to_string(),
+            }
+        })?;
+        let reduced = outcome.output_face_count < input_faces;
+        let passed = reduced && within_budget(&sampled_probe, trace.budget);
+        let plateau_of_fingerprint = known_fingerprints
+            .iter()
+            .find(|fingerprint| **fingerprint == candidate_fingerprint)
+            .cloned();
+        let mut adaptive = AdaptiveProbeStep {
+            target_face_count,
+            output_face_count: outcome.output_face_count,
+            candidate_fingerprint: candidate_fingerprint.clone(),
+            plateau_of_fingerprint,
+            sampled_probe,
+            topology_after: None,
+            full_probe: None,
+            result: AdaptiveProbeResult::NoActualReduction,
+        };
+        adaptive.result = if !reduced {
+            AdaptiveProbeResult::NoActualReduction
+        } else if adaptive.plateau_of_fingerprint.is_some() {
+            AdaptiveProbeResult::Plateau
+        } else if !passed {
+            AdaptiveProbeResult::SampledBudgetExceeded
+        } else {
+            let topology_after = build_face_topology(&outcome.mesh, WeldPolicy::ExactBits)
+                .map(|topology| topology.edge_counts())
+                .map_err(|error| BudgetSearchError::SearchExecution {
+                    phase: "adaptive topology audit",
+                    message: error.to_string(),
+                })?;
+            adaptive.topology_after = Some(topology_after);
+            if !topology_not_increased(topology_before, topology_after) {
+                AdaptiveProbeResult::TopologyIncreased
+            } else {
+                let full_probe =
+                    probe_two_sided(original, &outcome.mesh, ProbePopulation::Full, budget.probe)
+                        .map_err(|error| BudgetSearchError::SearchExecution {
+                        phase: "adaptive full probe",
+                        message: error.to_string(),
+                    })?;
+                let within = within_final_slack(&full_probe, trace.budget, policy.final_slack);
+                adaptive.full_probe = Some(full_probe);
+                if within {
+                    AdaptiveProbeResult::GeometricallyEligible
+                } else {
+                    AdaptiveProbeResult::FullBudgetExceeded
+                }
+            }
+        };
+        known_fingerprints.push(candidate_fingerprint);
+        trace.adaptive_exploration.probes.push(adaptive);
+    }
+    trace.adaptive_exploration.complete = intervals.is_empty();
+    trace.adaptive_exploration.remaining_intervals = intervals;
+    Ok(())
 }
 
 fn within_budget(probe: &TwoSidedProbe, budget: ErrorBudget) -> bool {
@@ -2551,6 +2792,12 @@ mod tests {
             protected_vertex_count: 0,
             steps: Vec::new(),
             final_attempts: Vec::new(),
+            adaptive_exploration: AdaptiveExplorationTrace {
+                probe_limit: 0,
+                probes: Vec::new(),
+                remaining_intervals: Vec::new(),
+                complete: true,
+            },
             reduction_refusals: Vec::new(),
         }
     }
@@ -2807,6 +3054,26 @@ mod tests {
         let first = run_budget_search(&mesh, &locks, d2_budget(1_000_000.0)).unwrap();
         let second = run_budget_search(&mesh, &locks, d2_budget(1_000_000.0)).unwrap();
         assert_eq!(first, second);
+        let trace = match first {
+            BudgetSearchOutcome::Verified(success)
+            | BudgetSearchOutcome::AlreadyPrintScale(success) => success.trace,
+            BudgetSearchOutcome::SkippedScaleSuspicious { .. } => panic!("box scale is valid"),
+        };
+        assert!(trace.adaptive_exploration.probes.len() <= search_policy().unwrap().bisections);
+        assert_eq!(
+            trace.adaptive_exploration.complete,
+            trace.adaptive_exploration.remaining_intervals.is_empty()
+        );
+    }
+
+    #[test]
+    fn adaptive_ratios_round_trip_to_every_integer_target() {
+        for input_faces in 2..=512 {
+            for target_faces in 1..input_faces {
+                let ratio = ratio_for_integer_target(input_faces, target_faces).unwrap();
+                assert_eq!(target_face_count(input_faces, ratio), target_faces);
+            }
+        }
     }
 
     #[test]

@@ -17,7 +17,7 @@ use plinth_mesh::{load_binary_stl, write_binary_stl, EdgeTopologyCounts, Mesh, W
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const REPORT_SCHEMA: &str = "plinth/m3-decimation-corpus-budget-report/v2";
+const REPORT_SCHEMA: &str = "plinth/m3-decimation-corpus-budget-report/v3";
 const DEFAULT_OUTPUT_DIR: &str = "target/plinth-decimate-corpus-budgets";
 const EXPECTED: [CorpusModel; 8] = [
     CorpusModel::already_print_scale(
@@ -129,6 +129,7 @@ struct ModelReport {
     topology_before: Option<TopologyReport>,
     topology_after: Option<TopologyReport>,
     final_attempts: Vec<FinalAttemptReport>,
+    adaptive_exploration: Option<AdaptiveExplorationReport>,
     reduction_refusals: Vec<String>,
     error: Option<String>,
 }
@@ -144,13 +145,35 @@ struct SearchStepReport {
 }
 
 #[derive(Serialize, Deserialize)]
+struct AdaptiveExplorationReport {
+    probe_limit: usize,
+    probes: Vec<AdaptiveProbeReport>,
+    remaining_intervals: Vec<[usize; 2]>,
+    complete: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct AdaptiveProbeReport {
+    target_faces: usize,
+    output_faces: usize,
+    candidate_fingerprint: String,
+    plateau_of_fingerprint: Option<String>,
+    sampled_p99_mm: String,
+    sampled_p99_9_mm: String,
+    topology_after: Option<TopologyReport>,
+    full_p99_mm: Option<String>,
+    full_p99_9_mm: Option<String>,
+    result: String,
+}
+
+#[derive(Serialize, Deserialize)]
 struct FinalAttemptReport {
     requested_ratio: String,
     achieved_ratio: String,
     output_faces: usize,
     candidate_fingerprint: String,
-    p99_mm: String,
-    p99_9_mm: String,
+    p99_mm: Option<String>,
+    p99_9_mm: Option<String>,
     topology_after: TopologyReport,
     result: String,
     downstream_utility: String,
@@ -250,6 +273,7 @@ fn report_writer_canonicalizes_arithmetic_floats_before_the_only_disk_write() {
                 nonmanifold_edges: 0,
             }),
             final_attempts: Vec::new(),
+            adaptive_exploration: None,
             reduction_refusals: Vec::new(),
             error: None,
         }],
@@ -358,6 +382,7 @@ fn run_one(
             topology_before: None,
             topology_after: None,
             final_attempts: Vec::new(),
+            adaptive_exploration: None,
             reduction_refusals: Vec::new(),
             error: Some(format!(
                 "ScaleSuspicious: longest axis {} mm is outside [10, 300] mm; no candidate exported",
@@ -395,6 +420,7 @@ fn run_one(
             topology_before: None,
             topology_after: None,
             final_attempts: Vec::new(),
+            adaptive_exploration: None,
             reduction_refusals: Vec::new(),
             error: Some(error.to_string()),
         }),
@@ -457,13 +483,49 @@ fn success_report(
                 achieved_ratio: ratio_text(attempt.achieved_ratio),
                 output_faces: attempt.output_face_count,
                 candidate_fingerprint: attempt.candidate_fingerprint.clone(),
-                p99_mm: ratio_text(attempt.probe.p99_mm),
-                p99_9_mm: ratio_text(attempt.probe.p99_9_mm),
+                p99_mm: attempt.probe.as_ref().map(|probe| ratio_text(probe.p99_mm)),
+                p99_9_mm: attempt
+                    .probe
+                    .as_ref()
+                    .map(|probe| ratio_text(probe.p99_9_mm)),
                 topology_after: attempt.topology_after.into(),
                 result: format!("{:?}", attempt.result),
                 downstream_utility: format!("{:?}", attempt.downstream_utility),
             })
             .collect(),
+        adaptive_exploration: Some(AdaptiveExplorationReport {
+            probe_limit: trace.adaptive_exploration.probe_limit,
+            probes: trace
+                .adaptive_exploration
+                .probes
+                .iter()
+                .map(|probe| AdaptiveProbeReport {
+                    target_faces: probe.target_face_count,
+                    output_faces: probe.output_face_count,
+                    candidate_fingerprint: probe.candidate_fingerprint.clone(),
+                    plateau_of_fingerprint: probe.plateau_of_fingerprint.clone(),
+                    sampled_p99_mm: ratio_text(probe.sampled_probe.p99_mm),
+                    sampled_p99_9_mm: ratio_text(probe.sampled_probe.p99_9_mm),
+                    topology_after: probe.topology_after.map(Into::into),
+                    full_p99_mm: probe
+                        .full_probe
+                        .as_ref()
+                        .map(|full| ratio_text(full.p99_mm)),
+                    full_p99_9_mm: probe
+                        .full_probe
+                        .as_ref()
+                        .map(|full| ratio_text(full.p99_9_mm)),
+                    result: format!("{:?}", probe.result),
+                })
+                .collect(),
+            remaining_intervals: trace
+                .adaptive_exploration
+                .remaining_intervals
+                .iter()
+                .map(|interval| [interval.first_target_faces, interval.last_target_faces])
+                .collect(),
+            complete: trace.adaptive_exploration.complete,
+        }),
         reduction_refusals: trace
             .reduction_refusals
             .iter()
