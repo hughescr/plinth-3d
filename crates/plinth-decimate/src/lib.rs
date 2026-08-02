@@ -2338,14 +2338,11 @@ mod tests {
     }
 
     #[test]
-    fn budget_search_is_deterministic_under_the_thread_count_gate() {
+    fn repeated_budget_searches_are_deterministic_within_one_process() {
         let (mesh, locks) = locked_box(10.0);
-        let mut outcomes = Vec::new();
-        for _threads in [1, 4, 16] {
-            outcomes.push(run_budget_search(&mesh, &locks, d2_budget(1_000_000.0)).unwrap());
-        }
-        assert_eq!(outcomes[0], outcomes[1]);
-        assert_eq!(outcomes[1], outcomes[2]);
+        let first = run_budget_search(&mesh, &locks, d2_budget(1_000_000.0)).unwrap();
+        let second = run_budget_search(&mesh, &locks, d2_budget(1_000_000.0)).unwrap();
+        assert_eq!(first, second);
     }
 
     #[test]
