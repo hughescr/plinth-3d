@@ -11,7 +11,11 @@ use plinth_core::{m0_constants, Finite, NonNegativeFinite, PositiveFinite};
 use plinth_mesh::{mesh_fingerprint, validate_face_topology, FaceTopology, Mesh};
 use thiserror::Error;
 
-use crate::{forest::MemberKey, SelectedContact};
+use crate::{
+    forest::MemberKey,
+    specialized::{PhysicalSeatProvenance, PrimaryRegularIdentity, SpecializedContactPlan},
+    SelectedContact,
+};
 
 const BELOW_LEVEL_EPS_MM: f64 = 1e-6;
 const LEAN_EPS_DEG: f64 = 1e-9;
@@ -25,10 +29,10 @@ pub(crate) const FOOT_BREACH_CONE_RAYS: usize = 8;
 
 /// One deterministic exterior-surface pool row.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SurfaceAnchorSample {
-    pub source_face_id: u32,
-    pub point_mm: [f64; 3],
-    pub delicacy: f64,
+pub(crate) struct SurfaceAnchorSample {
+    pub(crate) source_face_id: u32,
+    pub(crate) point_mm: [f64; 3],
+    pub(crate) delicacy: f64,
 }
 
 /// Exact CCO terminal identity and the already-created stub endpoint (`se`).
@@ -155,6 +159,7 @@ impl AnchorSearchConfig {
 pub(crate) struct GeometryFingerprint {
     mesh_sha256: String,
     topology_sha256: String,
+    native_grid_pitch_bits: u64,
 }
 
 /// One checked geometry authority shared by both phases. It binds the native
@@ -183,6 +188,7 @@ impl<'a> AnchorGeometryAuthority<'a> {
             fingerprint: GeometryFingerprint {
                 mesh_sha256: actual_mesh,
                 topology_sha256: topology.content_digest().to_owned(),
+                native_grid_pitch_bits: surface.grid_pitch_mm.to_bits(),
             },
         })
     }
@@ -195,6 +201,217 @@ impl<'a> AnchorGeometryAuthority<'a> {
     #[must_use]
     pub(crate) fn fingerprint(&self) -> GeometryFingerprint {
         self.fingerprint.clone()
+    }
+}
+
+/// Opaque, native-surface-bound exterior centroid authority. Production
+/// discovery can only draw samples from this pool; arbitrary sample rows are
+/// deliberately crate-private test/legacy compatibility data.
+#[allow(
+    dead_code,
+    reason = "the pending controller consumes this bounded authority seam"
+)]
+pub(crate) struct SurfaceAnchorPool<'a> {
+    surface: &'a NativeSurface,
+    geometry: GeometryFingerprint,
+    digest: u64,
+    rows: Vec<SurfaceAnchorSample>,
+    delicacy_by_face: Vec<f64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SurfaceAnchorPoolLimits {
+    pub(crate) max_rows: usize,
+    pub(crate) max_bytes: usize,
+}
+
+impl SurfaceAnchorPoolLimits {
+    const fn production() -> Self {
+        Self {
+            max_rows: 20_000_000,
+            max_bytes: 512 * 1024 * 1024,
+        }
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "the pending controller consumes this bounded authority seam"
+)]
+impl<'a> SurfaceAnchorPool<'a> {
+    pub(crate) fn from_geometry(
+        geometry: &'a AnchorGeometryAuthority<'a>,
+        delicacy_by_face: &[f64],
+    ) -> Result<Self, AnchorSearchError> {
+        Self::from_geometry_with_limits(
+            geometry,
+            delicacy_by_face,
+            SurfaceAnchorPoolLimits::production(),
+        )
+    }
+
+    pub(crate) fn from_geometry_with_limits(
+        geometry: &'a AnchorGeometryAuthority<'a>,
+        delicacy_by_face: &[f64],
+        limits: SurfaceAnchorPoolLimits,
+    ) -> Result<Self, AnchorSearchError> {
+        validate_sidecar(Some(delicacy_by_face), geometry.surface())?;
+        let exterior = geometry.surface().exterior_face_mask();
+        let row_count = exterior.iter().filter(|&&value| value).count();
+        if row_count > limits.max_rows {
+            return Err(AnchorSearchError::SurfaceAnchorPoolRowLimit {
+                required: row_count,
+                limit: limits.max_rows,
+            });
+        }
+        let required_bytes = row_count
+            .checked_mul(std::mem::size_of::<SurfaceAnchorSample>())
+            .ok_or(AnchorSearchError::SurfaceAnchorPoolResourceOverflow)?;
+        if required_bytes > limits.max_bytes {
+            return Err(AnchorSearchError::SurfaceAnchorPoolByteLimit {
+                required: required_bytes,
+                limit: limits.max_bytes,
+            });
+        }
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(row_count).map_err(|_| {
+            AnchorSearchError::SurfaceAnchorPoolAllocation {
+                required: row_count,
+            }
+        })?;
+        for (face_id, &is_exterior) in exterior.iter().enumerate() {
+            if is_exterior {
+                rows.push(SurfaceAnchorSample {
+                    source_face_id: u32::try_from(face_id)
+                        .map_err(|_| AnchorSearchError::FaceIdNotRepresentable)?,
+                    point_mm: geometry.surface().geometry().centroids()[face_id],
+                    delicacy: delicacy_by_face[face_id],
+                });
+            }
+        }
+        let digest = surface_anchor_pool_digest(&geometry.fingerprint, &rows);
+        Ok(Self {
+            surface: geometry.surface(),
+            geometry: geometry.fingerprint(),
+            digest,
+            rows,
+            delicacy_by_face: delicacy_by_face.to_vec(),
+        })
+    }
+
+    #[must_use]
+    pub(crate) const fn digest(&self) -> u64 {
+        self.digest
+    }
+
+    #[must_use]
+    pub(crate) fn rows(&self) -> &[SurfaceAnchorSample] {
+        &self.rows
+    }
+
+    fn validate_against(
+        &self,
+        geometry: &AnchorGeometryAuthority<'_>,
+    ) -> Result<(), AnchorSearchError> {
+        if !std::ptr::eq(self.surface, geometry.surface()) || self.geometry != geometry.fingerprint
+        {
+            return Err(AnchorSearchError::StaleSurfaceAnchorPool);
+        }
+        if self.digest != surface_anchor_pool_digest(&self.geometry, &self.rows) {
+            return Err(AnchorSearchError::StaleSurfaceAnchorPool);
+        }
+        Ok(())
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "the pending controller consumes this bounded authority seam"
+)]
+fn surface_anchor_pool_digest(geometry: &GeometryFingerprint, rows: &[SurfaceAnchorSample]) -> u64 {
+    let mut hash = AnchorFnv::new();
+    hash.bytes(geometry.mesh_sha256.as_bytes());
+    hash.bytes(geometry.topology_sha256.as_bytes());
+    hash.u64(geometry.native_grid_pitch_bits);
+    hash.usize(rows.len());
+    for row in rows {
+        hash.u32(row.source_face_id);
+        for value in row.point_mm {
+            hash.u64(value.to_bits());
+        }
+        hash.u64(row.delicacy.to_bits());
+    }
+    hash.finish()
+}
+
+#[allow(
+    dead_code,
+    reason = "the pending controller consumes this bounded authority seam"
+)]
+struct AnchorFnv(u64);
+
+impl AnchorFnv {
+    const fn new() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+    fn bytes(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.0 ^= u64::from(byte);
+            self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    fn u32(&mut self, value: u32) {
+        self.bytes(&value.to_le_bytes());
+    }
+    fn u64(&mut self, value: u64) {
+        self.bytes(&value.to_le_bytes());
+    }
+    fn usize(&mut self, value: usize) {
+        self.u64(value as u64);
+    }
+    const fn finish(self) -> u64 {
+        self.0
+    }
+}
+
+/// A finalized contact plus the carried-area seam supplied by the authoritative
+/// load stage. This type does not calculate load; it only binds it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "the pending controller consumes this finalized authority seam"
+)]
+pub(crate) struct BoundPhysicalAnchorContact {
+    fingerprint: FinalizedPhysicalContactFingerprint,
+    regular_identity: Option<PrimaryRegularIdentity>,
+}
+
+#[allow(
+    dead_code,
+    reason = "the pending controller consumes this finalized authority seam"
+)]
+impl BoundPhysicalAnchorContact {
+    pub(crate) fn new(
+        plan: &SpecializedContactPlan,
+        contact_id: u64,
+    ) -> Result<Self, AnchorSearchError> {
+        let contact = plan
+            .contacts()
+            .iter()
+            .find(|contact| contact.contact_id() == contact_id)
+            .ok_or(AnchorSearchError::FinalizedContactNotFound { contact_id })?;
+        let provenance = contact.seat_provenance();
+        Ok(Self {
+            fingerprint: FinalizedPhysicalContactFingerprint::from_physical(
+                plan.digest(),
+                contact_id,
+                provenance,
+                contact.position_mm(),
+                contact.normal(),
+                contact.carried_area_mm2(),
+            ),
+            regular_identity: provenance.regular_identity(),
+        })
     }
 }
 
@@ -213,6 +430,104 @@ struct ContactFingerprint {
     normal_bits: [u64; 3],
     delicacy_bits: u64,
     supported_area_bits: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "the pending controller consumes this finalized authority seam"
+)]
+struct FinalizedPhysicalContactFingerprint {
+    plan_digest: u64,
+    contact_id: u64,
+    provenance: PhysicalSeatFingerprint,
+    point_bits: [u64; 3],
+    normal_bits: [u64; 3],
+    carried_area_bits: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "the pending controller consumes this finalized authority seam"
+)]
+enum PhysicalSeatFingerprint {
+    Regular {
+        candidate_id: u64,
+        owner_island_id: u32,
+        face_id: u32,
+        component_id: u32,
+        position_bits: [u64; 3],
+        normal_bits: [u64; 3],
+    },
+    Specialized {
+        kind: u8,
+        owner_island_id: u32,
+        face_id: u32,
+        component_id: u32,
+        nominated_position_bits: [u64; 3],
+        nominated_normal_bits: [u64; 3],
+    },
+}
+
+#[allow(
+    dead_code,
+    reason = "the pending controller consumes this finalized authority seam"
+)]
+impl FinalizedPhysicalContactFingerprint {
+    fn from_physical(
+        plan_digest: u64,
+        contact_id: u64,
+        provenance: PhysicalSeatProvenance,
+        position_mm: [f64; 3],
+        normal: [f64; 3],
+        carried_area_mm2: f64,
+    ) -> Self {
+        let provenance = match provenance {
+            PhysicalSeatProvenance::Regular(primary) => {
+                let route = primary.route();
+                PhysicalSeatFingerprint::Regular {
+                    candidate_id: route.candidate_id(),
+                    owner_island_id: route.owner_island_id(),
+                    face_id: route.coverage_face_id(),
+                    component_id: route.component_id(),
+                    position_bits: bits3(primary.position_mm()),
+                    normal_bits: bits3(primary.normal()),
+                }
+            }
+            PhysicalSeatProvenance::Specialized(representative) => {
+                PhysicalSeatFingerprint::Specialized {
+                    kind: match representative.kind() {
+                        crate::specialized::SpecializedDemandKind::Minimum => 0,
+                        crate::specialized::SpecializedDemandKind::IslandBirth => 1,
+                    },
+                    owner_island_id: representative.owner_island_id(),
+                    face_id: representative.coverage_face_id(),
+                    component_id: representative.coverage_component_id(),
+                    nominated_position_bits: bits3(representative.nominated_position_mm()),
+                    nominated_normal_bits: bits3(representative.nominated_normal()),
+                }
+            }
+        };
+        Self {
+            plan_digest,
+            contact_id,
+            provenance,
+            point_bits: bits3(position_mm),
+            normal_bits: bits3(normal),
+            carried_area_bits: carried_area_mm2.to_bits(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(
+    dead_code,
+    reason = "the pending controller consumes this finalized authority seam"
+)]
+enum AnchorContactFingerprint {
+    Selected(ContactFingerprint),
+    Finalized(FinalizedPhysicalContactFingerprint),
 }
 
 impl ContactFingerprint {
@@ -272,22 +587,22 @@ impl TerminalFingerprint {
 }
 
 /// Stable identity retained by both successful and refused candidates.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AnchorCandidateProvenance {
-    contact_candidate_id: u64,
-    contact_face_id: u32,
+    regular_identity: Option<PrimaryRegularIdentity>,
+    physical_contact_id: Option<u64>,
     sample_index: usize,
     source_sample_face_id: u32,
 }
 
 impl AnchorCandidateProvenance {
     #[must_use]
-    pub const fn contact_candidate_id(self) -> u64 {
-        self.contact_candidate_id
+    pub const fn regular_identity(self) -> Option<PrimaryRegularIdentity> {
+        self.regular_identity
     }
     #[must_use]
-    pub const fn contact_face_id(self) -> u32 {
-        self.contact_face_id
+    pub const fn physical_contact_id(self) -> Option<u64> {
+        self.physical_contact_id
     }
     #[must_use]
     pub const fn sample_index(self) -> usize {
@@ -309,13 +624,15 @@ impl AnchorCandidateProvenance {
 pub struct QualifiedAnchorSeat {
     provenance: AnchorCandidateProvenance,
     #[cfg_attr(not(test), allow(dead_code))]
-    contact: Option<ContactFingerprint>,
+    contact: Option<AnchorContactFingerprint>,
     #[cfg_attr(not(test), allow(dead_code))]
     subject: AnchorSubjectFingerprint,
     #[cfg_attr(not(test), allow(dead_code))]
     geometry: GeometryFingerprint,
     #[cfg_attr(not(test), allow(dead_code))]
     config: ConfigFingerprint,
+    #[cfg_attr(not(test), allow(dead_code))]
+    pool_digest: Option<u64>,
     snapped_point_mm: [Finite; 3],
     snapped_normal: [Finite; 3],
     snapped_face_id: u32,
@@ -429,7 +746,8 @@ impl AnchorSeatDiscovery {
 }
 
 /// Direct port of frozen qualification plus one gathered first-hit ray batch.
-pub fn discover_anchor_seats(
+#[cfg(test)]
+pub(crate) fn discover_anchor_seats(
     contact: &SelectedContact,
     terminal: AnchorTerminalBinding,
     samples: &[SurfaceAnchorSample],
@@ -440,14 +758,17 @@ pub fn discover_anchor_seats(
     validate_contact_and_sidecar(contact, delicacy_by_face, geometry.surface)?;
     discover_anchor_seats_bound(
         terminal.stub_end_mm,
-        Some(ContactFingerprint::from_contact(contact)),
+        Some(AnchorContactFingerprint::Selected(
+            ContactFingerprint::from_contact(contact),
+        )),
         AnchorSubjectFingerprint::Terminal(TerminalFingerprint::from_binding(terminal)),
-        contact.candidate_id.0,
-        Some(contact.served_face_id),
+        None,
+        None,
         samples,
         delicacy_by_face,
         config,
         geometry,
+        None,
     )
 }
 
@@ -466,26 +787,57 @@ pub(crate) fn discover_rewire_anchor_seats(
         binding.attach_point_mm,
         None,
         AnchorSubjectFingerprint::Rewire(RewireFingerprint::from_binding(binding)),
-        u64::from(binding.root.slot()),
+        None,
         None,
         samples,
         delicacy_by_face,
         config,
         geometry,
+        None,
+    )
+}
+
+/// Production terminal discovery from a finalized physical contact and the
+/// canonical exterior-centroid pool. No caller-provided point collection can
+/// become model-anchor authority through this path.
+#[allow(
+    dead_code,
+    reason = "the pending controller consumes this finalized authority seam"
+)]
+pub(crate) fn discover_finalized_anchor_seats(
+    contact: BoundPhysicalAnchorContact,
+    terminal: AnchorTerminalBinding,
+    pool: &SurfaceAnchorPool<'_>,
+    config: AnchorSearchConfig,
+    geometry: &AnchorGeometryAuthority<'_>,
+) -> Result<AnchorSeatDiscovery, AnchorSearchError> {
+    pool.validate_against(geometry)?;
+    discover_anchor_seats_bound(
+        terminal.stub_end_mm,
+        Some(AnchorContactFingerprint::Finalized(contact.fingerprint)),
+        AnchorSubjectFingerprint::Terminal(TerminalFingerprint::from_binding(terminal)),
+        contact.regular_identity,
+        Some(contact.fingerprint.contact_id),
+        pool.rows(),
+        Some(&pool.delicacy_by_face),
+        config,
+        geometry,
+        Some(pool.digest()),
     )
 }
 
 #[allow(clippy::too_many_arguments)]
 fn discover_anchor_seats_bound(
     anchor_start_mm: [Finite; 3],
-    contact_fingerprint: Option<ContactFingerprint>,
+    contact_fingerprint: Option<AnchorContactFingerprint>,
     subject_fingerprint: AnchorSubjectFingerprint,
-    provenance_candidate_id: u64,
-    provenance_contact_face_id: Option<u32>,
+    provenance_regular_identity: Option<PrimaryRegularIdentity>,
+    provenance_physical_contact_id: Option<u64>,
     samples: &[SurfaceAnchorSample],
     delicacy_by_face: Option<&[f64]>,
     config: AnchorSearchConfig,
     geometry: &AnchorGeometryAuthority<'_>,
+    pool_digest: Option<u64>,
 ) -> Result<AnchorSeatDiscovery, AnchorSearchError> {
     let sidecar = delicacy_by_face.expect("validated above");
     let stub_end = finite3_to_f64(anchor_start_mm);
@@ -576,9 +928,8 @@ fn discover_anchor_seats_bound(
                 let face = face as usize;
                 seats.push(QualifiedAnchorSeat {
                     provenance: AnchorCandidateProvenance {
-                        contact_candidate_id: provenance_candidate_id,
-                        contact_face_id: provenance_contact_face_id
-                            .unwrap_or(candidate.sample.source_face_id),
+                        regular_identity: provenance_regular_identity,
+                        physical_contact_id: provenance_physical_contact_id,
                         sample_index: candidate.sample_index,
                         source_sample_face_id: candidate.sample.source_face_id,
                     },
@@ -586,6 +937,7 @@ fn discover_anchor_seats_bound(
                     subject: subject_fingerprint,
                     geometry: geometry.fingerprint.clone(),
                     config: config_fingerprint,
+                    pool_digest,
                     snapped_point_mm: finite3(point, "snapped anchor point")?,
                     snapped_normal: finite3(
                         geometry.surface.geometry().normals()[face],
@@ -654,10 +1006,11 @@ pub enum AnchorFootRefusalReason {
     ReboundRewireBinding,
     StaleConfig,
     StaleGeometry,
+    StalePool,
     FootBallBreached,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AnchorFootRefusal {
     provenance: AnchorCandidateProvenance,
     reason: AnchorFootRefusalReason,
@@ -779,10 +1132,13 @@ pub(crate) fn validate_anchor_feet(
 ) -> Result<AnchorFootValidation, AnchorSearchError> {
     validate_anchor_feet_bound(
         requests,
-        Some(ContactFingerprint::from_contact(contact)),
+        Some(AnchorContactFingerprint::Selected(
+            ContactFingerprint::from_contact(contact),
+        )),
         AnchorSubjectFingerprint::Terminal(TerminalFingerprint::from_binding(terminal)),
         config,
         geometry,
+        None,
     )
 }
 
@@ -798,15 +1154,43 @@ pub(crate) fn validate_rewire_anchor_feet(
         AnchorSubjectFingerprint::Rewire(RewireFingerprint::from_binding(binding)),
         config,
         geometry,
+        None,
+    )
+}
+
+/// Final-foot validation paired with `discover_finalized_anchor_seats`.
+/// Rebinding requires the exact plan/contact/provenance/area fingerprint and
+/// the exact pool digest that certified discovery.
+#[allow(
+    dead_code,
+    reason = "the pending controller consumes this finalized authority seam"
+)]
+pub(crate) fn validate_finalized_anchor_feet(
+    requests: Vec<AnchorFootRequest>,
+    contact: BoundPhysicalAnchorContact,
+    terminal: AnchorTerminalBinding,
+    pool: &SurfaceAnchorPool<'_>,
+    config: AnchorSearchConfig,
+    geometry: &AnchorGeometryAuthority<'_>,
+) -> Result<AnchorFootValidation, AnchorSearchError> {
+    pool.validate_against(geometry)?;
+    validate_anchor_feet_bound(
+        requests,
+        Some(AnchorContactFingerprint::Finalized(contact.fingerprint)),
+        AnchorSubjectFingerprint::Terminal(TerminalFingerprint::from_binding(terminal)),
+        config,
+        geometry,
+        Some(pool.digest()),
     )
 }
 
 fn validate_anchor_feet_bound(
     requests: Vec<AnchorFootRequest>,
-    contact_fingerprint: Option<ContactFingerprint>,
+    contact_fingerprint: Option<AnchorContactFingerprint>,
     subject_fingerprint: AnchorSubjectFingerprint,
     config: AnchorSearchConfig,
     geometry: &AnchorGeometryAuthority<'_>,
+    pool_digest: Option<u64>,
 ) -> Result<AnchorFootValidation, AnchorSearchError> {
     let config_fingerprint = config.fingerprint();
     let rebound_subject = match subject_fingerprint {
@@ -824,6 +1208,8 @@ fn validate_anchor_feet_bound(
             Some(AnchorFootRefusalReason::StaleConfig)
         } else if request.seat.geometry != geometry.fingerprint {
             Some(AnchorFootRefusalReason::StaleGeometry)
+        } else if request.seat.pool_digest != pool_digest {
+            Some(AnchorFootRefusalReason::StalePool)
         } else {
             None
         };
@@ -900,6 +1286,20 @@ pub enum AnchorSearchError {
     RegisteredConstantsUnavailable(String),
     #[error("registered model-anchor count cannot be represented")]
     CountNotRepresentable,
+    #[error("native face id cannot be represented as u32")]
+    FaceIdNotRepresentable,
+    #[error("finalized physical contact {contact_id} was not found in its plan")]
+    FinalizedContactNotFound { contact_id: u64 },
+    #[error("surface anchor pool belongs to a different native surface or has changed")]
+    StaleSurfaceAnchorPool,
+    #[error("surface anchor pool requires {required} rows; limit is {limit}")]
+    SurfaceAnchorPoolRowLimit { required: usize, limit: usize },
+    #[error("surface anchor pool requires {required} bytes; limit is {limit}")]
+    SurfaceAnchorPoolByteLimit { required: usize, limit: usize },
+    #[error("surface anchor pool resource arithmetic overflowed")]
+    SurfaceAnchorPoolResourceOverflow,
+    #[error("surface anchor pool could not allocate {required} rows")]
+    SurfaceAnchorPoolAllocation { required: usize },
     #[error("model-anchor search requires a face-order delicacy sidecar")]
     MissingDelicacySidecar,
     #[error("delicacy sidecar has {actual} rows; surface has {expected} faces")]
@@ -924,6 +1324,13 @@ pub enum AnchorSearchError {
     InvalidDerived { field: &'static str },
 }
 
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "selected-contact discovery is test-only compatibility"
+    )
+)]
 fn validate_contact_and_sidecar(
     contact: &SelectedContact,
     sidecar: Option<&[f64]>,
@@ -1210,6 +1617,86 @@ mod tests {
             point_mm: [5.0, 5.0, 0.0],
             delicacy: 0.25,
         }
+    }
+
+    #[test]
+    fn surface_anchor_pool_is_exterior_face_ordered_and_binds_sidecar_and_native_pitch() {
+        let (mesh, topology, surface) = box_parts(10.0);
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let delicacy = (0..surface.nfaces())
+            .map(|index| index as f64 + 0.25)
+            .collect::<Vec<_>>();
+        let pool = SurfaceAnchorPool::from_geometry(&geometry, &delicacy).unwrap();
+        let expected_faces = surface
+            .exterior_face_mask()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, exterior)| exterior.then_some(index as u32))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            pool.rows()
+                .iter()
+                .map(|row| row.source_face_id)
+                .collect::<Vec<_>>(),
+            expected_faces
+        );
+        for row in pool.rows() {
+            assert_eq!(
+                row.point_mm.map(f64::to_bits),
+                surface.geometry().centroids()[row.source_face_id as usize].map(f64::to_bits)
+            );
+            assert_eq!(
+                row.delicacy.to_bits(),
+                delicacy[row.source_face_id as usize].to_bits()
+            );
+        }
+
+        let mut changed_delicacy = delicacy.clone();
+        changed_delicacy[0] = 99.0;
+        assert_ne!(
+            pool.digest(),
+            SurfaceAnchorPool::from_geometry(&geometry, &changed_delicacy)
+                .unwrap()
+                .digest()
+        );
+
+        let other_surface = NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
+            NativeSurfaceConfig {
+                grid_pitch_mm: 0.5,
+                max_grid_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        let other_geometry =
+            AnchorGeometryAuthority::new(&mesh, &topology, &other_surface).unwrap();
+        assert_eq!(
+            pool.validate_against(&other_geometry),
+            Err(AnchorSearchError::StaleSurfaceAnchorPool)
+        );
+        assert!(matches!(
+            SurfaceAnchorPool::from_geometry_with_limits(
+                &geometry,
+                &delicacy,
+                SurfaceAnchorPoolLimits {
+                    max_rows: 0,
+                    max_bytes: usize::MAX
+                },
+            ),
+            Err(AnchorSearchError::SurfaceAnchorPoolRowLimit { .. })
+        ));
+        assert!(matches!(
+            SurfaceAnchorPool::from_geometry_with_limits(
+                &geometry,
+                &delicacy,
+                SurfaceAnchorPoolLimits {
+                    max_rows: usize::MAX,
+                    max_bytes: 0
+                },
+            ),
+            Err(AnchorSearchError::SurfaceAnchorPoolByteLimit { .. })
+        ));
     }
 
     fn discover_one(
