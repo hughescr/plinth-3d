@@ -132,7 +132,7 @@ impl HollowedModel {
         orientation: OrientationHistory,
         reason: SolidFallbackReason,
     ) -> Result<Self, HollowError> {
-        validate_closed_mesh(&mesh)?;
+        validate_oriented_solid(&mesh)?;
         let report = HollowReport {
             disposition: HollowDisposition::SolidFallback { reason },
             cavities: Vec::new(),
@@ -572,9 +572,7 @@ pub fn create_shell_with_admission_limits(
     let retained_raw_source_buffer_bytes = admission.retained_source_buffer_bytes();
     let triaged = admission.triage(WeldPolicy::ExactBits)?;
     let source = triaged.into_mesh();
-    validate_closed_mesh(&source)?;
-    validate_printable_bounds(&source)?;
-    let source_volume_mm3 = source_volume_mm3(&source)?;
+    let source_volume_mm3 = validate_oriented_solid(&source)?;
     let spec = grid_spec(&source, settings.voxel_pitch_mm.get())?;
     if spec.count > limits.max_voxel_cells {
         return Err(HollowError::VoxelCellLimitExceeded {
@@ -693,6 +691,12 @@ fn validate_closed_mesh(mesh: &Mesh) -> Result<(), HollowError> {
         return Err(HollowError::NotClosedOrOriented);
     }
     Ok(())
+}
+
+fn validate_oriented_solid(mesh: &Mesh) -> Result<f64, HollowError> {
+    validate_closed_mesh(mesh)?;
+    validate_printable_bounds(mesh)?;
+    source_volume_mm3(mesh)
 }
 
 fn triage_exact_with_measured_limits(mesh: &Mesh) -> Result<TriagedMesh, HollowError> {
@@ -1663,6 +1667,28 @@ mod tests {
         load_binary_stl(path, WeldPolicy::None).expect("committed frozen STL")
     }
 
+    fn orientation_history() -> OrientationHistory {
+        OrientationHistory::from_reports(
+            DecimationReport {
+                budget_id: ContentDigest(11),
+                input_faces: 1,
+                output_faces: 1,
+                chosen_ratio: UnitFraction::new(1.0).expect("unit fixture ratio"),
+                p99_mm: NonNegativeFinite::new(0.0).expect("nonnegative fixture error"),
+                p999_mm: NonNegativeFinite::new(0.0).expect("nonnegative fixture error"),
+                boundary_edges_before: 3,
+                boundary_edges_after: 3,
+                nonmanifold_edges_before: 0,
+                nonmanifold_edges_after: 0,
+            },
+            OrientationReport {
+                pinned_report: PathBuf::from("baseline/model.pipeline.json"),
+                selection: BaselineSelection::Identity,
+                transform: RigidTransform::identity(),
+            },
+        )
+    }
+
     #[derive(Debug)]
     struct Characterization {
         spec: GridSpec,
@@ -1809,28 +1835,9 @@ mod tests {
     fn solid_fallback_moves_one_mesh_and_is_visible_in_history() {
         let mesh = frozen_mesh("Sphere.prepped.oriented-solid.stl");
         let allocation = mesh.verts().as_ptr();
-        let orientation = OrientationHistory::from_reports(
-            DecimationReport {
-                budget_id: ContentDigest(11),
-                input_faces: 1,
-                output_faces: 1,
-                chosen_ratio: UnitFraction::new(1.0).expect("unit fixture ratio"),
-                p99_mm: NonNegativeFinite::new(0.0).expect("nonnegative fixture error"),
-                p999_mm: NonNegativeFinite::new(0.0).expect("nonnegative fixture error"),
-                boundary_edges_before: 3,
-                boundary_edges_after: 3,
-                nonmanifold_edges_before: 0,
-                nonmanifold_edges_after: 0,
-            },
-            OrientationReport {
-                pinned_report: PathBuf::from("baseline/model.pipeline.json"),
-                selection: BaselineSelection::Identity,
-                transform: RigidTransform::identity(),
-            },
-        );
         let model = HollowedModel::solid_fallback(
             mesh,
-            orientation,
+            orientation_history(),
             SolidFallbackReason::CavityNotDrainable,
         )
         .expect("closed oriented solid is an executable public fallback handoff");
@@ -1842,6 +1849,46 @@ mod tests {
                 reason: SolidFallbackReason::CavityNotDrainable
             }
         );
+    }
+
+    #[test]
+    fn solid_fallback_rejects_inverted_and_oversized_closed_meshes() {
+        let source = frozen_mesh("Sphere.prepped.oriented-solid.stl");
+        let inverted = Mesh::new(
+            source.verts().to_vec(),
+            source
+                .tris()
+                .iter()
+                .map(|triangle| [triangle[0], triangle[2], triangle[1]])
+                .collect(),
+        )
+        .unwrap();
+        assert!(matches!(
+            HollowedModel::solid_fallback(
+                inverted,
+                orientation_history(),
+                SolidFallbackReason::CavityNotDrainable
+            ),
+            Err(HollowError::NotClosedOrOriented)
+        ));
+
+        let oversized = Mesh::new(
+            source
+                .verts()
+                .iter()
+                .map(|point| point.map(|coordinate| coordinate * 20.0))
+                .collect(),
+            source.tris().to_vec(),
+        )
+        .unwrap();
+        assert!(matches!(
+            HollowedModel::solid_fallback(
+                oversized,
+                orientation_history(),
+                SolidFallbackReason::CavityNotDrainable
+            ),
+            Err(HollowError::OutsidePrintableEnvelope { .. })
+        ));
     }
 
     fn bounds(mesh: &Mesh) -> ([f64; 3], [f64; 3]) {

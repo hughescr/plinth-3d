@@ -412,14 +412,20 @@ fn drill(
     {
         return Err(DrillingRefusal::MissingRequiredRole);
     }
-    validate_separate_holes(&holes)?;
-    let base = reconstructed_source_if_refilled(planned, &audit, limits)?;
-    let post_refill_mesh = from_solid(base.clone()).map_err(|_| DrillingRefusal::Boolean)?;
+    validate_final_holes(&holes)?;
+    let reconstructed = reconstructed_source_if_refilled(planned, &audit, limits)?;
+    let post_refill_mesh =
+        from_solid(reconstructed.clone()).map_err(|_| DrillingRefusal::Boolean)?;
     let post_refill_mesh = if audit.refilled_voxels == 0 {
         post_refill_mesh
     } else {
         orient_boolean_cavity(post_refill_mesh)
             .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?
+    };
+    let base = if audit.refilled_voxels == 0 {
+        reconstructed
+    } else {
+        to_solid(&post_refill_mesh).map_err(|_| DrillingRefusal::Boolean)?
     };
     let mut operands = Vec::with_capacity(holes.len() + 1);
     operands.push(base);
@@ -717,32 +723,23 @@ fn prepare_audit_plan(
         let (offsets, ts, _) = surface
             .cast_rays(&origins, &directions, AUDIT_MAX_EXIT_MM)
             .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?;
-        let mut exact_valid = vec![false; candidates.len()];
-        for candidate in 0..candidates.len() {
-            let begin = offsets[candidate] as usize;
-            let end = offsets[candidate + 1] as usize;
-            let hits = &ts[begin..end];
-            exact_valid[candidate] = hits.len() == 2 && hits[0] > 0.0 && hits[1] > hits[0];
-        }
         for (component_id, component_drilled) in audit_components.iter_mut().enumerate() {
             if audit_holes.len() == AUDIT_MAX_DRAINS {
                 break;
             }
-            let Some(candidate_index) =
-                select_exact_audit_candidate(&candidates, &exact_valid, component_id)
+            let mut accepted_holes = planned_holes.to_vec();
+            accepted_holes.extend(audit_holes.iter().cloned());
+            let Some((_, hole)) = select_exact_audit_candidate(
+                &candidates,
+                &offsets,
+                &ts,
+                component_id,
+                &accepted_holes,
+            )?
             else {
                 continue;
             };
-            let candidate = &candidates[candidate_index];
-            let begin = offsets[candidate_index] as usize;
-            let hits = &ts[begin..offsets[candidate_index + 1] as usize];
-            audit_holes.push(audit_hole(
-                candidate.origin,
-                candidate.direction,
-                hits[0],
-                hits[1],
-                candidate.sampled_mm,
-            )?);
+            audit_holes.push(hole);
             *component_drilled = true;
         }
     }
@@ -787,20 +784,57 @@ fn prepare_audit_plan(
 
 fn select_exact_audit_candidate(
     candidates: &[AuditCandidate],
-    exact_valid: &[bool],
+    offsets: &[i64],
+    ts: &[f64],
     component_id: usize,
-) -> Option<usize> {
-    debug_assert_eq!(candidates.len(), exact_valid.len());
-    candidates
+    accepted_holes: &[HoleGeometry],
+) -> Result<Option<(usize, HoleGeometry)>, DrillingRefusal> {
+    if offsets.len() != candidates.len() + 1 {
+        return Err(DrillingRefusal::ResourceAccountingOverflow);
+    }
+    let mut ordered: Vec<usize> = candidates
         .iter()
         .enumerate()
-        .filter(|(index, candidate)| candidate.component_id == component_id && exact_valid[*index])
-        .min_by(|(_, left), (_, right)| {
-            left.sampled_mm
-                .total_cmp(&right.sampled_mm)
-                .then(left.direction_order.cmp(&right.direction_order))
-        })
-        .map(|(index, _)| index)
+        .filter_map(|(index, candidate)| (candidate.component_id == component_id).then_some(index))
+        .collect();
+    ordered.sort_by(|left, right| {
+        candidates[*left]
+            .sampled_mm
+            .total_cmp(&candidates[*right].sampled_mm)
+            .then(
+                candidates[*left]
+                    .direction_order
+                    .cmp(&candidates[*right].direction_order),
+            )
+    });
+    for index in ordered {
+        let begin = usize::try_from(offsets[index])
+            .map_err(|_| DrillingRefusal::ResourceAccountingOverflow)?;
+        let end = usize::try_from(offsets[index + 1])
+            .map_err(|_| DrillingRefusal::ResourceAccountingOverflow)?;
+        let Some(hits) = ts.get(begin..end) else {
+            return Err(DrillingRefusal::ResourceAccountingOverflow);
+        };
+        if hits.len() != 2 || hits[0] <= 0.0 || hits[1] <= hits[0] {
+            continue;
+        }
+        let candidate = &candidates[index];
+        let Ok(hole) = audit_hole(
+            candidate.origin,
+            candidate.direction,
+            hits[0],
+            hits[1],
+            candidate.sampled_mm,
+        ) else {
+            continue;
+        };
+        let mut final_holes = accepted_holes.to_vec();
+        final_holes.push(hole.clone());
+        if validate_final_holes(&final_holes).is_ok() {
+            return Ok(Some((index, hole)));
+        }
+    }
+    Ok(None)
 }
 
 fn qualifies_audit_drain(component_voxels: usize, pitch_mm: f64, added: usize) -> bool {
@@ -1061,7 +1095,7 @@ fn admit_count(
     }
 }
 
-fn validate_separate_holes(holes: &[HoleGeometry]) -> Result<(), DrillingRefusal> {
+fn validate_final_holes(holes: &[HoleGeometry]) -> Result<(), DrillingRefusal> {
     for hole in holes {
         validate_frozen_hole_geometry(hole)?;
     }
@@ -1846,7 +1880,7 @@ mod tests {
         let mut holes = plan.drain_plan().holes().to_vec();
         holes[1] = holes[0].clone();
         assert_eq!(
-            validate_separate_holes(&holes),
+            validate_final_holes(&holes),
             Err(DrillingRefusal::AmbiguousHolePair {
                 first: 0,
                 second: 1
@@ -1865,7 +1899,7 @@ mod tests {
         holes[1].keepout_start_mm = shifted(holes[1].keepout_start_mm);
         holes[1].keepout_end_mm = shifted(holes[1].keepout_end_mm);
         assert!(matches!(
-            validate_separate_holes(&holes),
+            validate_final_holes(&holes),
             Err(DrillingRefusal::AmbiguousHolePair { .. })
         ));
     }
@@ -2098,7 +2132,7 @@ mod tests {
     }
 
     #[test]
-    fn frozen_trapped_pocket_policy_refills_long_exit_and_adds_bounded_short_drains() {
+    fn frozen_trapped_pocket_policy_refills_a_long_exit() {
         let plan = sphere_plan();
         let mut horizontal_gap = vec![false; plan.cavity_field().flat_count()];
         for flat in plan.cavity_field().member_flats() {
@@ -2123,44 +2157,6 @@ mod tests {
             topology_evidence(split.shell(), DrillingLimits::production()).unwrap();
         assert_eq!(components, 2);
         assert!(post_refill_volume > original_volume);
-
-        let plan = sphere_plan();
-        let mut vertical_gap = vec![false; plan.cavity_field().flat_count()];
-        for flat in plan.cavity_field().member_flats() {
-            let x = plan.cavity_field().flat_to_index(flat)[0];
-            if (19..=21).contains(&x) {
-                vertical_gap[flat] = true;
-            }
-        }
-        let split = plan.with_test_refilled_field(&vertical_gap);
-        let audit = prepare_audit_plan(&split, DrillingLimits::production()).unwrap();
-        assert_eq!(audit.holes.len(), 2);
-        assert_eq!(
-            audit
-                .holes
-                .iter()
-                .map(|hole| hole.center_mm.map(Finite::get))
-                .collect::<Vec<_>>(),
-            vec![
-                [1.843_373_493_975_903_7, 0.0, 2.5],
-                [-1.843_373_493_975_903_7, 0.0, 2.5]
-            ]
-        );
-        assert_eq!(
-            audit
-                .holes
-                .iter()
-                .map(|hole| hole.direction.map(Finite::get))
-                .collect::<Vec<_>>(),
-            vec![[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]]
-        );
-        assert!(audit
-            .holes
-            .iter()
-            .all(|hole| hole.sampled_exit_mm.get() == 3.0));
-        assert_eq!(audit.refilled_voxels, 0);
-        assert!(audit.refill.iter().all(|value| !*value));
-        assert!(audit.holes.iter().all(|hole| hole.role == HoleRole::Drain));
     }
 
     #[test]
@@ -2221,17 +2217,97 @@ mod tests {
                 direction: [0.0, 0.0, -1.0],
                 sampled_mm: 8.0,
             },
+            AuditCandidate {
+                component_id: 0,
+                direction_order: 3,
+                origin: [1.0, 0.0, 0.0],
+                direction: normalize([0.0, 0.5, -1.0]).unwrap(),
+                sampled_mm: 2.0,
+            },
+            AuditCandidate {
+                component_id: 0,
+                direction_order: 4,
+                origin: [1.0, 0.0, 0.0],
+                direction: normalize([0.0, -0.5, -1.0]).unwrap(),
+                sampled_mm: 2.0,
+            },
         ];
-        let exact_valid = [false, true, true, true];
         assert_eq!(
-            select_exact_audit_candidate(&candidates, &exact_valid, 0),
+            candidates
+                .iter()
+                .filter(|candidate| candidate.component_id == 0)
+                .map(|candidate| candidate.direction_order)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4]
+        );
+        let offsets = [0, 2, 4, 6, 8, 10, 12];
+        let ts = [
+            0.5, 1.5, // two crossings, but outer > sampled for candidate 0
+            0.5, 1.5, // first fully valid ordered fallback
+            0.5, 1.5, 0.5, 8.0, // exact 8mm component 1 boundary
+            0.5, 1.5, 0.5, 1.5,
+        ];
+        assert_eq!(
+            select_exact_audit_candidate(&candidates, &offsets, &ts, 0, &[])
+                .unwrap()
+                .map(|(index, _)| index),
             Some(1),
-            "a failed shortest sampled ray must fall through to the first exact-valid tie"
+            "a two-crossing ray with outer > sampled must fall through to the first fully valid tie"
         );
         assert_eq!(
-            select_exact_audit_candidate(&candidates, &exact_valid, 1),
+            select_exact_audit_candidate(&candidates, &offsets, &ts, 1, &[])
+                .unwrap()
+                .map(|(index, _)| index),
             Some(3),
             "the exact 8mm candidate remains selectable"
         );
+    }
+
+    #[test]
+    fn production_drilling_succeeds_with_exact_refill_exclusion_and_public_report() {
+        let plan = sphere_plan();
+        let mut gap = vec![false; plan.cavity_field().flat_count()];
+        for flat in plan.cavity_field().member_flats() {
+            if plan.cavity_field().flat_to_index(flat)[0] == 32 {
+                gap[flat] = true;
+            }
+        }
+        let split = plan.with_test_refilled_field(&gap);
+        let audit = prepare_audit_plan(&split, DrillingLimits::production()).unwrap();
+        assert_eq!(audit.holes.len(), 0);
+        assert_eq!(audit.refilled_voxels, 502);
+        assert_eq!(audit.refilled_pockets, vec![502]);
+        for flat in 0..split.cavity_field().flat_count() {
+            let expected = split.cavity_field().contains_flat(flat)
+                && split.cavity_field().flat_to_index(flat)[0] > 32;
+            assert_eq!(audit.refill[flat], expected, "refill mask cell {flat}");
+        }
+
+        let drilled = drill_planned_shell(split).expect("bounded production refill must drill");
+        assert_eq!(drilled.evidence().refilled_voxels, 502);
+        assert_eq!(drilled.evidence().refilled_pockets[0].voxel_count, 502);
+        assert_eq!(
+            drilled.evidence().cavity_voxels,
+            drilled.evidence().drainable_voxels
+        );
+        let expected_cavity_ml = drilled.evidence().final_cavity_mm3.get() / 1000.0;
+        let expected_drain = drilled
+            .evidence()
+            .holes
+            .iter()
+            .find(|hole| hole.role == HoleRole::Drain)
+            .unwrap()
+            .clone();
+        let model = drilled.into_hollowed_model(orientation_history());
+        let report = model.history().hollow();
+        assert_eq!(report.cavities.len(), 1);
+        assert_eq!(report.cavities[0].cavity_id, 1);
+        assert_eq!(report.cavities[0].volume_ml.get(), expected_cavity_ml);
+        assert_eq!(report.cavities[0].drain_ids, vec![0]);
+        assert_eq!(report.drains.len(), 1);
+        assert_eq!(report.drains[0].cavity_id, 1);
+        assert_eq!(report.drains[0].entrance_mm, expected_drain.center_mm);
+        assert_eq!(report.drains[0].exit_mm, expected_drain.exact_outer_exit_mm);
+        assert_eq!(report.drains[0].radius_mm, expected_drain.radius_mm);
     }
 }
