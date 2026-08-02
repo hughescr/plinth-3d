@@ -24,8 +24,9 @@ pub use topology::{
     TOPOLOGY_CUT_NONMANIFOLD, TOPOLOGY_CUT_POINT_ONLY, TOPOLOGY_CUT_SAME_DIRECTION,
 };
 pub use triage::{
-    triage_components, triage_settings, ComponentDescription, PreHollowed, TriageError,
-    TriageSettings, TriageSummary, TriagedMesh,
+    triage_components, triage_settings, ComponentDescription, PreHollowed, TriageAdmissionError,
+    TriageError, TriageSettings, TriageSummary, TriageTopologyAdmission, TriageTopologyLimits,
+    TriagedMesh,
 };
 
 use thiserror::Error;

@@ -80,6 +80,249 @@ pub fn triage_settings() -> Result<TriageSettings, TriageError> {
     TriageSettings::load()
 }
 
+/// Resource limits for the allocation-free raw-mesh triage admission check.
+///
+/// These are limits on named inputs and bounded triage working slots, not a
+/// claim about process-wide heap consumption.  A caller selects the limits at
+/// its resource boundary before starting any topology or containment work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TriageTopologyLimits {
+    raw_vertices: usize,
+    raw_faces: usize,
+    retained_source_buffer_bytes: usize,
+    edge_occurrences: usize,
+    vertex_incidences: usize,
+    containment_probe_slots: usize,
+    containment_samples_per_component: usize,
+}
+
+impl TriageTopologyLimits {
+    #[must_use]
+    pub const fn new(
+        raw_vertices: usize,
+        raw_faces: usize,
+        retained_source_buffer_bytes: usize,
+        edge_occurrences: usize,
+        vertex_incidences: usize,
+        containment_probe_slots: usize,
+        containment_samples_per_component: usize,
+    ) -> Self {
+        Self {
+            raw_vertices,
+            raw_faces,
+            retained_source_buffer_bytes,
+            edge_occurrences,
+            vertex_incidences,
+            containment_probe_slots,
+            containment_samples_per_component,
+        }
+    }
+}
+
+/// Allocation-free evidence that a raw mesh is small enough to enter triage.
+///
+/// It deliberately records source buffer capacity exactly.  It does not turn
+/// that number into a whole-process heap claim: later topology structures and
+/// allocator overhead are owned and bounded at their respective boundaries.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TriageTopologyAdmission {
+    raw_vertices: usize,
+    raw_faces: usize,
+    retained_source_buffer_bytes: usize,
+    edge_occurrences: usize,
+    vertex_incidences: usize,
+    containment_probe_slots: usize,
+    raw_bounds: RawMeshBounds,
+}
+
+impl TriageTopologyAdmission {
+    /// Measures and admits raw source inputs without allocating.  The
+    /// containment bound uses the worst case of one component per face and
+    /// therefore reserves `faces * samples` slots for a single batched query.
+    pub fn from_raw_mesh(
+        mesh: &Mesh,
+        limits: TriageTopologyLimits,
+    ) -> Result<Self, TriageAdmissionError> {
+        let raw_vertices = mesh.verts().len();
+        let raw_faces = mesh.tris().len();
+        let retained_source_buffer_bytes =
+            mesh.retained_buffer_bytes()
+                .ok_or(TriageAdmissionError::ArithmeticOverflow {
+                    field: "retained source buffer bytes",
+                })?;
+        let edge_occurrences =
+            raw_faces
+                .checked_mul(3)
+                .ok_or(TriageAdmissionError::ArithmeticOverflow {
+                    field: "edge occurrences",
+                })?;
+        let vertex_incidences =
+            raw_faces
+                .checked_mul(3)
+                .ok_or(TriageAdmissionError::ArithmeticOverflow {
+                    field: "vertex incidences",
+                })?;
+        let containment_probe_slots = raw_faces
+            .checked_mul(limits.containment_samples_per_component)
+            .ok_or(TriageAdmissionError::ArithmeticOverflow {
+                field: "containment probe slots",
+            })?;
+
+        enforce_limit("raw vertices", raw_vertices, limits.raw_vertices)?;
+        enforce_limit("raw faces", raw_faces, limits.raw_faces)?;
+        enforce_limit(
+            "retained source buffer bytes",
+            retained_source_buffer_bytes,
+            limits.retained_source_buffer_bytes,
+        )?;
+        enforce_limit(
+            "edge occurrences",
+            edge_occurrences,
+            limits.edge_occurrences,
+        )?;
+        enforce_limit(
+            "vertex incidences",
+            vertex_incidences,
+            limits.vertex_incidences,
+        )?;
+        enforce_limit(
+            "containment probe slots",
+            containment_probe_slots,
+            limits.containment_probe_slots,
+        )?;
+
+        Ok(Self {
+            raw_vertices,
+            raw_faces,
+            retained_source_buffer_bytes,
+            edge_occurrences,
+            vertex_incidences,
+            containment_probe_slots,
+            raw_bounds: RawMeshBounds::from_mesh(mesh),
+        })
+    }
+
+    /// Proves the output fed to voxel-grid construction cannot enlarge the
+    /// raw mesh's vertex/face inputs or its axis-aligned bounds.  It is only
+    /// meaningful for the exact-bit triage path; epsilon welding is allowed
+    /// to move vertices and must establish a separate downstream invariant.
+    pub fn verify_exact_bit_triage_output(
+        self,
+        triaged: &TriagedMesh,
+    ) -> Result<(), TriageAdmissionError> {
+        if !matches!(triaged.mesh().weld_policy(), WeldPolicy::ExactBits) {
+            return Err(TriageAdmissionError::OutputNotExactBitWelded);
+        }
+        if triaged.mesh().verts().len() > self.raw_vertices {
+            return Err(TriageAdmissionError::TriagedCountIncreased {
+                field: "vertices",
+                raw: self.raw_vertices,
+                triaged: triaged.mesh().verts().len(),
+            });
+        }
+        if triaged.mesh().tris().len() > self.raw_faces {
+            return Err(TriageAdmissionError::TriagedCountIncreased {
+                field: "faces",
+                raw: self.raw_faces,
+                triaged: triaged.mesh().tris().len(),
+            });
+        }
+        if !self
+            .raw_bounds
+            .contains(RawMeshBounds::from_mesh(triaged.mesh()))
+        {
+            return Err(TriageAdmissionError::TriagedBoundsExpanded);
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub const fn raw_vertices(self) -> usize {
+        self.raw_vertices
+    }
+    #[must_use]
+    pub const fn raw_faces(self) -> usize {
+        self.raw_faces
+    }
+    #[must_use]
+    pub const fn retained_source_buffer_bytes(self) -> usize {
+        self.retained_source_buffer_bytes
+    }
+    #[must_use]
+    pub const fn edge_occurrences(self) -> usize {
+        self.edge_occurrences
+    }
+    #[must_use]
+    pub const fn vertex_incidences(self) -> usize {
+        self.vertex_incidences
+    }
+    #[must_use]
+    pub const fn containment_probe_slots(self) -> usize {
+        self.containment_probe_slots
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RawMeshBounds {
+    low: [f64; 3],
+    high: [f64; 3],
+}
+
+impl RawMeshBounds {
+    fn from_mesh(mesh: &Mesh) -> Self {
+        let mut low = [f64::INFINITY; 3];
+        let mut high = [f64::NEG_INFINITY; 3];
+        for vertex in mesh.verts() {
+            for axis in 0..3 {
+                low[axis] = low[axis].min(vertex[axis]);
+                high[axis] = high[axis].max(vertex[axis]);
+            }
+        }
+        Self { low, high }
+    }
+
+    fn contains(self, other: Self) -> bool {
+        (0..3).all(|axis| self.low[axis] <= other.low[axis] && other.high[axis] <= self.high[axis])
+    }
+}
+
+fn enforce_limit(
+    field: &'static str,
+    actual: usize,
+    limit: usize,
+) -> Result<(), TriageAdmissionError> {
+    if actual > limit {
+        return Err(TriageAdmissionError::LimitExceeded {
+            field,
+            actual,
+            limit,
+        });
+    }
+    Ok(())
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum TriageAdmissionError {
+    #[error("triage admission arithmetic overflowed while calculating {field}")]
+    ArithmeticOverflow { field: &'static str },
+    #[error("triage admission {field} {actual} exceeds limit {limit}")]
+    LimitExceeded {
+        field: &'static str,
+        actual: usize,
+        limit: usize,
+    },
+    #[error("triaged mesh was not exact-bit welded")]
+    OutputNotExactBitWelded,
+    #[error("triaged {field} count {triaged} exceeds raw count {raw}")]
+    TriagedCountIncreased {
+        field: &'static str,
+        raw: usize,
+        triaged: usize,
+    },
+    #[error("triaged mesh bounds exceed the raw voxel-grid input bounds")]
+    TriagedBoundsExpanded,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct PreHollowed {
     cavity_components: Vec<ComponentDescription>,
