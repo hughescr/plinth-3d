@@ -103,6 +103,7 @@ fn weighted_fermat_point(
 #[derive(Clone, Debug)]
 pub(crate) struct TerminalCcoRequest {
     terminal_id: u32,
+    physical_contact_id: u64,
     stub: MemberKey,
     stub_snapshot: Member,
     attach_point_mm: [Finite; 3],
@@ -131,21 +132,55 @@ impl TerminalCcoRequest {
             })?
             .clone();
         validate_terminal_stub(forest, terminal_id, stub, &stub_snapshot)?;
+        let ledger = forest
+            .terminal_ledger(terminal_id)
+            .filter(|entry| entry.original_key == stub && entry.state == TerminalLedgerState::Live)
+            .ok_or(CcoError::InvalidTerminalStub {
+                terminal_id,
+                reason: "terminal ledger does not bind the live stub",
+            })?;
+        let Owner::Contact(owner_contact_id) = stub_snapshot.owner() else {
+            return Err(CcoError::InvalidTerminalStub {
+                terminal_id,
+                reason: "stub owner is not a physical contact",
+            });
+        };
+        if ledger.contact != *owner_contact_id {
+            return Err(CcoError::InvalidTerminalStub {
+                terminal_id,
+                reason: "terminal ledger and stub owner disagree",
+            });
+        }
         Ok(Self {
             terminal_id,
+            physical_contact_id: u64::from(*owner_contact_id),
             stub,
             attach_point_mm: stub_snapshot.p1_mm(),
             // p0 is the terminalward embed. CCO joins the registered stub at
             // its rootward p1 end, so preserve that end's radius verbatim.
             attach_radius_mm: stub_snapshot.rootward_radius_mm().get(),
-            connector_owner: Owner::Contact(terminal_id),
+            connector_owner: stub_snapshot.owner().clone(),
             stub_snapshot,
             frame,
         })
     }
 
     fn validate(&self, forest: &Forest) -> Result<(), CcoError> {
-        if forest.terminal(self.terminal_id) != Some(self.stub)
+        let ledger_matches = forest
+            .terminal_ledger(self.terminal_id)
+            .is_some_and(|entry| {
+                entry.contact == self.terminal_id
+                    && entry.original_key == self.stub
+                    && entry.state == TerminalLedgerState::Live
+            });
+        let owner_matches = matches!(
+            self.stub_snapshot.owner(),
+            Owner::Contact(owner_contact_id)
+                if u64::from(*owner_contact_id) == self.physical_contact_id
+        );
+        if !ledger_matches
+            || !owner_matches
+            || forest.terminal(self.terminal_id) != Some(self.stub)
             || forest.member(self.stub) != Some(&self.stub_snapshot)
         {
             return Err(CcoError::StaleTerminal(self.terminal_id));
@@ -318,6 +353,7 @@ impl RewireCcoBinding {
         );
         let request = TerminalCcoRequest {
             terminal_id: root.slot(),
+            physical_contact_id: u64::from(root.slot()),
             stub: root,
             stub_snapshot: root_snapshot.clone(),
             attach_point_mm,
@@ -844,7 +880,8 @@ struct HostCache {
 }
 
 impl CcoController {
-    pub(crate) fn grow_terminal(
+    #[cfg(test)]
+    fn grow_terminal_for_test(
         &mut self,
         forest: &mut Forest,
         request: &TerminalCcoRequest,
@@ -877,7 +914,7 @@ impl CcoController {
         route: FinalizedAnchorTerminalRoute<'_, '_>,
     ) -> Result<TerminalCcoOutcome, CcoError> {
         self.require_unadvanced(request.terminal_id)?;
-        let context = FinalizedAnchorValidationContext::bind(request, route)?;
+        let context = FinalizedAnchorValidationContext::bind(forest, request, route)?;
         let discovery = discover_finalized_anchor_seats(
             context.bound_contact,
             context.terminal,
@@ -1182,9 +1219,11 @@ fn validate_anchor_route(
 
 impl<'a, 'surface> FinalizedAnchorValidationContext<'a, 'surface> {
     fn bind(
+        forest: &Forest,
         request: &TerminalCcoRequest,
         route: FinalizedAnchorTerminalRoute<'a, 'surface>,
     ) -> Result<Self, CcoError> {
+        request.validate(forest)?;
         let terminal =
             AnchorTerminalBinding::new(request.terminal_id, request.stub, request.stub_end_mm());
         let bound_contact = validate_finalized_anchor_route(request, &route, terminal)?;
@@ -1202,7 +1241,12 @@ impl<'a, 'surface> FinalizedAnchorValidationContext<'a, 'surface> {
     /// Recheck every non-native authority immediately before the serial
     /// winner replay.  This is deliberately query-free: the one ray batch,
     /// one final-foot batch, and one clearance batch have already happened.
-    fn validate_replay(&self, request: &TerminalCcoRequest) -> Result<(), CcoError> {
+    fn validate_replay(
+        &self,
+        forest: &Forest,
+        request: &TerminalCcoRequest,
+    ) -> Result<(), CcoError> {
+        request.validate(forest)?;
         if self.route.plan.digest() != self.plan_digest
             || self.route.loads.digest() != self.loads_digest
             || self.route.pool.digest() != self.pool_digest
@@ -1224,6 +1268,9 @@ fn validate_finalized_anchor_route(
     terminal: AnchorTerminalBinding,
 ) -> Result<BoundPhysicalAnchorContact, CcoError> {
     validate_anchor_route(request, terminal)?;
+    if route.contact_id != request.physical_contact_id {
+        return Err(CcoError::FinalizedContactMismatch);
+    }
     if route.config != AnchorSearchConfig::current()? {
         return Err(CcoError::StaleFinalizedAnchorConfig);
     }
@@ -1441,7 +1488,7 @@ fn grow_terminal_inner(
     };
     let winner_index = winner.generation_index;
     if let Some(context) = anchor_context.as_ref() {
-        context.validate_replay(request)?;
+        context.validate_replay(forest, request)?;
     }
     let checkpoint = forest.checkpoint();
     match apply_and_size(forest, request, &descriptors[winner_index], &config) {
@@ -2479,6 +2526,7 @@ mod tests {
             TerminalCcoRequest::bind(&forest, 9, BuildFrame::new(finite(0.0), positive(5.0)))
                 .unwrap();
 
+        assert_eq!(request.physical_contact_id, 9);
         assert_eq!(request.stub_end_mm(), forest.member(stub).unwrap().p1_mm());
         assert_eq!(request.tip_radius_mm(), positive(0.73));
         assert_ne!(request.tip_radius_mm(), positive(0.11));
@@ -2719,12 +2767,12 @@ mod tests {
         let (mut grown_forest, request, surface) = growth_fixture();
         let mut grown = CcoController::default();
         grown
-            .grow_terminal(&mut grown_forest, &request, &surface)
+            .grow_terminal_for_test(&mut grown_forest, &request, &surface)
             .unwrap();
         let grown_digest = grown.digest();
         let grown_forest_digest = grown_forest.digest();
         assert!(matches!(
-            grown.grow_terminal(&mut grown_forest, &request, &surface),
+            grown.grow_terminal_for_test(&mut grown_forest, &request, &surface),
             Err(CcoError::TerminalCadenceReplay(7))
         ));
         assert_eq!(grown.digest(), grown_digest);
@@ -2745,7 +2793,7 @@ mod tests {
             .unwrap();
         let skipped_digest = skipped_first.digest();
         assert!(matches!(
-            skipped_first.grow_terminal(&mut live_forest, &request, &surface),
+            skipped_first.grow_terminal_for_test(&mut live_forest, &request, &surface),
             Err(CcoError::TerminalCadenceReplay(7))
         ));
         assert_eq!(skipped_first.digest(), skipped_digest);
@@ -4046,7 +4094,7 @@ mod tests {
         let (mut forest, request, surface) = growth_fixture();
         let before = forest.digest();
         let outcome = CcoController::default()
-            .grow_terminal(&mut forest, &request, &surface)
+            .grow_terminal_for_test(&mut forest, &request, &surface)
             .unwrap();
         let winner = outcome.winner.expect("plate descent survives");
         assert_eq!(winner.family, CandidateFamily::PlateDescent);
@@ -4058,12 +4106,23 @@ mod tests {
     }
 
     #[test]
+    fn finalized_route_is_the_only_crate_visible_terminal_growth_entry() {
+        let source = include_str!("cco.rs");
+        let raw_entry = ["pub(crate) fn ", "grow_terminal("].concat();
+        let finalized_entry = ["pub(crate) fn ", "grow_terminal_with_finalized_anchor("].concat();
+        let raw_route = ["pub(crate) struct ", "AnchorTerminalRoute"].concat();
+        assert!(!source.contains(&raw_entry));
+        assert_eq!(source.matches(&finalized_entry).count(), 1);
+        assert!(!source.contains(&raw_route));
+    }
+
+    #[test]
     fn winner_commit_remains_visible_to_an_outer_forest_rollback() {
         let (mut forest, request, surface) = growth_fixture();
         let before = forest.digest();
         let outer = forest.checkpoint();
         CcoController::default()
-            .grow_terminal(&mut forest, &request, &surface)
+            .grow_terminal_for_test(&mut forest, &request, &surface)
             .unwrap();
         assert_ne!(forest.digest(), before);
         forest.rollback(outer).unwrap();
@@ -4077,7 +4136,7 @@ mod tests {
             let (mut forest, request, surface) = growth_fixture();
             let mut controller = CcoController::default();
             let outcome = controller
-                .grow_terminal(&mut forest, &request, &surface)
+                .grow_terminal_for_test(&mut forest, &request, &surface)
                 .unwrap();
             println!(
                 "CCO_SWEEP_DIGEST={:016x}:{:016x}:{}:{}",
