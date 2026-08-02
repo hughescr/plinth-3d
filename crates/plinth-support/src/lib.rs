@@ -2483,13 +2483,15 @@ mod tests {
                 face_ids: vec![0],
             })
             .collect();
+        dyadic::clear_generic_dyadic_test_observations();
         assert_eq!(
             plan_dyadic_coverage(&mesh, &islands, &config),
             Err(ContactSelectionError::CoverageVirtualCellLimit {
-                required: 3_200_000,
+                required: 50_000,
                 limit: 1_000,
             })
         );
+        assert_eq!(dyadic::preflight_face_hook_count(), 0);
         assert_eq!(
             std::mem::size_of::<CoverageBuildPlan>(),
             6 * std::mem::size_of::<usize>()
@@ -2567,27 +2569,38 @@ mod tests {
             id: 7,
             face_ids: vec![0],
         }];
-        let delicacy = vec![0.25; mesh.tris().len()];
-        let coverage_config = selection_config(&delicacy);
-        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).expect("topology");
-
-        dyadic::reset_generic_dyadic_build_calls();
-        dyadic::build_candidate_payload(
-            &mesh,
-            &islands,
-            &dyadic::CandidatePayloadConfig::current(
-                8,
-                1_000_000,
-                3_000_000,
-                192 * 1024 * 1024,
-                64,
+        let candidate_mesh = mesh.clone();
+        let candidate_islands = islands.clone();
+        let candidate = std::thread::spawn(move || {
+            dyadic::clear_generic_dyadic_test_observations();
+            dyadic::build_candidate_payload(
+                &candidate_mesh,
+                &candidate_islands,
+                &dyadic::CandidatePayloadConfig::current(
+                    8,
+                    1_000_000,
+                    3_000_000,
+                    192 * 1024 * 1024,
+                    64,
+                )
+                .expect("candidate config"),
             )
-            .expect("candidate config"),
-        )
-        .expect("candidate adapter");
-        build_dyadic_coverage_samples(&mesh, &islands, topology.component_ids(), &coverage_config)
-            .expect("coverage adapter");
-        assert_eq!(dyadic::generic_dyadic_build_calls(), 2);
+            .expect("candidate adapter");
+            dyadic::generic_dyadic_invocation_types()
+        });
+        let coverage = std::thread::spawn(move || {
+            dyadic::clear_generic_dyadic_test_observations();
+            let delicacy = vec![0.25; mesh.tris().len()];
+            let config = selection_config(&delicacy);
+            let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).expect("topology");
+            build_dyadic_coverage_samples(&mesh, &islands, topology.component_ids(), &config)
+                .expect("coverage adapter");
+            dyadic::generic_dyadic_invocation_types()
+        });
+        let candidate = candidate.join().expect("candidate thread");
+        let coverage = coverage.join().expect("coverage thread");
+        assert_eq!(candidate, vec![dyadic::candidate_policy_type_name()]);
+        assert_eq!(coverage, vec![coverage::coverage_policy_type_name()]);
     }
 
     #[test]

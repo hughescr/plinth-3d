@@ -3,8 +3,8 @@ use std::cmp::Ordering;
 
 use super::*;
 use crate::dyadic::{
-    self, DyadicBuildConfig, DyadicBuildError, DyadicLeaf, DyadicNominations, DyadicPlan,
-    DyadicRowPolicy,
+    self, DyadicBuildConfig, DyadicBuildError, DyadicFace, DyadicLeaf, DyadicNominations,
+    DyadicPlan, DyadicRowPolicy,
 };
 
 pub(super) fn build_dyadic_coverage_samples(
@@ -66,12 +66,22 @@ struct CoverageRowPolicy<'a, 'config> {
     island_count: usize,
 }
 
+#[cfg(test)]
+pub(super) fn coverage_policy_type_name() -> &'static str {
+    std::any::type_name::<CoverageRowPolicy<'static, 'static>>()
+}
+
 impl DyadicRowPolicy for CoverageRowPolicy<'_, '_> {
     type Row = CoverageSample;
     type Metadata = CoverageBuildPlan;
+    type FaceMetadata = ();
     type Error = ContactSelectionError;
 
-    fn preflight(&self, plan: DyadicPlan) -> Result<Self::Metadata, Self::Error> {
+    fn prepare_face(&self, _: DyadicFace) -> Result<Self::FaceMetadata, Self::Error> {
+        Ok(())
+    }
+
+    fn check_aggregate(&self, plan: DyadicPlan) -> Result<(), Self::Error> {
         let compact_bytes =
             coverage_compact_bytes(plan.total_cells, plan.source_faces, self.island_count)?;
         if compact_bytes > self.config.coverage_samples_max_compact_payload_bytes {
@@ -109,6 +119,27 @@ impl DyadicRowPolicy for CoverageRowPolicy<'_, '_> {
                 limit: self.config.coverage_samples_max_peak_bytes,
             });
         }
+        Ok(())
+    }
+
+    fn finish_preflight(&self, plan: DyadicPlan) -> Result<Self::Metadata, Self::Error> {
+        let compact_bytes =
+            coverage_compact_bytes(plan.total_cells, plan.source_faces, self.island_count)?;
+        let build_peak_bytes = coverage_build_peak_bytes(
+            plan.total_cells,
+            plan.source_faces,
+            plan.working_cells,
+            self.island_count,
+            plan.mesh_faces,
+            plan.mesh_vertices,
+        )?;
+        let validation_peak_bytes = coverage_validation_peak_bytes(
+            plan.total_cells,
+            plan.source_faces,
+            self.island_count,
+            plan.mesh_faces,
+            plan.mesh_vertices,
+        )?;
         Ok(CoverageBuildPlan {
             total_cells: plan.total_cells,
             source_faces: plan.source_faces,
@@ -123,11 +154,11 @@ impl DyadicRowPolicy for CoverageRowPolicy<'_, '_> {
         metadata.total_cells
     }
 
-    fn nominations(&self, _: &DyadicLeaf<'_>) -> DyadicNominations {
+    fn nominations(&self, _: &DyadicLeaf<'_, Self::FaceMetadata>) -> DyadicNominations {
         DyadicNominations::Centroid
     }
 
-    fn map_row(&self, leaf: &DyadicLeaf<'_>, point_mm: [f64; 3]) -> Self::Row {
+    fn map_row(&self, leaf: &DyadicLeaf<'_, Self::FaceMetadata>, point_mm: [f64; 3]) -> Self::Row {
         CoverageSample {
             island_id: leaf.island_id,
             face_id: leaf.face_id,
@@ -177,6 +208,21 @@ fn map_build_error(error: DyadicBuildError<ContactSelectionError>) -> ContactSel
 mod tests {
     use super::*;
 
+    fn two_triangles() -> Mesh {
+        Mesh::new(
+            vec![
+                [0.0, 0.0, 0.0],
+                [0.4, 0.0, 0.0],
+                [0.0, 0.4, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.4, 0.0, 0.0],
+                [1.0, 0.4, 0.0],
+            ],
+            vec![[0, 1, 2], [3, 4, 5]],
+        )
+        .expect("finite coverage fixture")
+    }
+
     #[test]
     fn depth_one_coverage_payload_matches_full_frozen_row_order() {
         let mesh = Mesh::new(
@@ -210,5 +256,154 @@ mod tests {
             && row.face_id == 0
             && row.component_id == 7
             && row.area_mm2 == 0.020_000_000_000_000_004));
+    }
+
+    #[test]
+    fn multi_face_coverage_vector_pins_order_and_retains_equal_rows() {
+        let rows = build_dyadic_coverage_samples(
+            &two_triangles(),
+            &[SupportIsland {
+                id: 11,
+                // Coverage has no dedup policy: both visits remain evidence.
+                face_ids: vec![1, 0, 0],
+            }],
+            &[7, 8],
+            &ContactSelectionConfig::current(None, 12, 1, 1024 * 1024)
+                .expect("registered coverage config"),
+        )
+        .expect("multi-face coverage payload");
+        let area = 0.020_000_000_000_000_004;
+        assert_eq!(
+            rows,
+            vec![
+                CoverageSample {
+                    island_id: 11,
+                    face_id: 0,
+                    component_id: 7,
+                    point_mm: [0.066_666_666_666_666_67, 0.066_666_666_666_666_67, 0.0],
+                    area_mm2: area
+                },
+                CoverageSample {
+                    island_id: 11,
+                    face_id: 0,
+                    component_id: 7,
+                    point_mm: [0.066_666_666_666_666_67, 0.066_666_666_666_666_67, 0.0],
+                    area_mm2: area
+                },
+                CoverageSample {
+                    island_id: 11,
+                    face_id: 0,
+                    component_id: 7,
+                    point_mm: [0.066_666_666_666_666_67, 0.266_666_666_666_666_66, 0.0],
+                    area_mm2: area
+                },
+                CoverageSample {
+                    island_id: 11,
+                    face_id: 0,
+                    component_id: 7,
+                    point_mm: [0.066_666_666_666_666_67, 0.266_666_666_666_666_66, 0.0],
+                    area_mm2: area
+                },
+                CoverageSample {
+                    island_id: 11,
+                    face_id: 0,
+                    component_id: 7,
+                    point_mm: [0.133_333_333_333_333_33, 0.133_333_333_333_333_33, 0.0],
+                    area_mm2: area
+                },
+                CoverageSample {
+                    island_id: 11,
+                    face_id: 0,
+                    component_id: 7,
+                    point_mm: [0.133_333_333_333_333_33, 0.133_333_333_333_333_33, 0.0],
+                    area_mm2: area
+                },
+                CoverageSample {
+                    island_id: 11,
+                    face_id: 0,
+                    component_id: 7,
+                    point_mm: [0.266_666_666_666_666_66, 0.066_666_666_666_666_67, 0.0],
+                    area_mm2: area
+                },
+                CoverageSample {
+                    island_id: 11,
+                    face_id: 0,
+                    component_id: 7,
+                    point_mm: [0.266_666_666_666_666_66, 0.066_666_666_666_666_67, 0.0],
+                    area_mm2: area
+                },
+                CoverageSample {
+                    island_id: 11,
+                    face_id: 1,
+                    component_id: 8,
+                    point_mm: [1.066_666_666_666_666_7, 0.066_666_666_666_666_67, 0.0],
+                    area_mm2: 0.019_999_999_999_999_997
+                },
+                CoverageSample {
+                    island_id: 11,
+                    face_id: 1,
+                    component_id: 8,
+                    point_mm: [1.066_666_666_666_666_7, 0.266_666_666_666_666_66, 0.0],
+                    area_mm2: 0.019_999_999_999_999_997
+                },
+                CoverageSample {
+                    island_id: 11,
+                    face_id: 1,
+                    component_id: 8,
+                    point_mm: [1.133_333_333_333_333_3, 0.133_333_333_333_333_33, 0.0],
+                    area_mm2: 0.019_999_999_999_999_997
+                },
+                CoverageSample {
+                    island_id: 11,
+                    face_id: 1,
+                    component_id: 8,
+                    point_mm: [1.266_666_666_666_666_6, 0.066_666_666_666_666_67, 0.0],
+                    area_mm2: 0.019_999_999_999_999_997
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn coverage_working_window_one_is_exact_and_zero_is_refused() {
+        let mesh = two_triangles();
+        let islands = [SupportIsland {
+            id: 11,
+            face_ids: vec![0],
+        }];
+        let mut config = ContactSelectionConfig::current(None, 4, 1, 1024 * 1024)
+            .expect("registered coverage config");
+        config.coverage_samples_max_working_cells = 1;
+        let (_, high_water) =
+            build_dyadic_coverage_samples_with_high_water(&mesh, &islands, &[7, 8], &config)
+                .expect("one-cell coverage window");
+        assert_eq!(high_water, 1);
+        config.coverage_samples_max_working_cells = 0;
+        assert_eq!(
+            build_dyadic_coverage_samples(&mesh, &islands, &[7, 8], &config),
+            Err(ContactSelectionError::InvalidResourceRequest)
+        );
+    }
+
+    #[test]
+    fn positive_edge_collinear_coverage_face_retains_zero_area_samples() {
+        let mesh = Mesh::new(
+            vec![[0.0, 0.0, 0.0], [0.4, 0.0, 0.0], [0.8, 0.0, 0.0]],
+            vec![[0, 1, 2]],
+        )
+        .expect("finite collinear fixture");
+        let rows = build_dyadic_coverage_samples(
+            &mesh,
+            &[SupportIsland {
+                id: 3,
+                face_ids: vec![0],
+            }],
+            &[4],
+            &ContactSelectionConfig::current(None, 16, 1, 1024 * 1024)
+                .expect("registered coverage config"),
+        )
+        .expect("coverage accepts positive-edge collinear source face");
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|row| row.area_mm2 == 0.0));
     }
 }

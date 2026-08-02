@@ -146,27 +146,25 @@ pub(crate) struct DyadicPlan {
     pub mesh_vertices: usize,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct PlannedFace {
-    island_id: u32,
-    face_id: u32,
-    cell: [[f64; 3]; 3],
-    normal: [f64; 3],
-    area_mm2: f64,
-    depth: u32,
-    cells: usize,
-}
-
 /// Immutable context for one leaf.  Policies only choose/map rows; they never
 /// own traversal or windowing.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct DyadicLeaf<'a> {
+pub(crate) struct DyadicLeaf<'a, M> {
     pub island_id: u32,
     pub face_id: u32,
-    pub normal: [f64; 3],
     pub leaf: [[f64; 3]; 3],
     pub leaf_area_mm2: f64,
-    _planned: &'a PlannedFace,
+    pub face_metadata: &'a M,
+}
+
+/// One source face as seen by the policy hook.  Candidate policy elects to
+/// derive a normal; coverage deliberately accepts positive-edge collinear
+/// faces and retains their zero-area samples.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DyadicFace {
+    pub island_id: u32,
+    pub face_id: u32,
+    pub cell: [[f64; 3]; 3],
 }
 
 /// The generic skeleton performs the nomination loop.  Candidate policy can
@@ -183,12 +181,15 @@ pub(crate) enum DyadicNominations {
 pub(crate) trait DyadicRowPolicy {
     type Row;
     type Metadata;
+    type FaceMetadata;
     type Error;
 
-    fn preflight(&self, plan: DyadicPlan) -> Result<Self::Metadata, Self::Error>;
+    fn prepare_face(&self, face: DyadicFace) -> Result<Self::FaceMetadata, Self::Error>;
+    fn check_aggregate(&self, plan: DyadicPlan) -> Result<(), Self::Error>;
+    fn finish_preflight(&self, plan: DyadicPlan) -> Result<Self::Metadata, Self::Error>;
     fn row_capacity(&self, metadata: &Self::Metadata) -> usize;
-    fn nominations(&self, leaf: &DyadicLeaf<'_>) -> DyadicNominations;
-    fn map_row(&self, leaf: &DyadicLeaf<'_>, point_mm: [f64; 3]) -> Self::Row;
+    fn nominations(&self, leaf: &DyadicLeaf<'_, Self::FaceMetadata>) -> DyadicNominations;
+    fn map_row(&self, leaf: &DyadicLeaf<'_, Self::FaceMetadata>, point_mm: [f64; 3]) -> Self::Row;
     fn dedup_order(&self, left: &Self::Row, right: &Self::Row) -> Ordering;
     fn same_row(&self, left: &mut Self::Row, right: &mut Self::Row) -> bool;
     fn output_order(&self, left: &Self::Row, right: &Self::Row) -> Ordering;
@@ -220,7 +221,6 @@ pub(crate) enum DyadicBuildError<E> {
 pub(crate) struct DyadicPreflight<M> {
     pub plan: DyadicPlan,
     pub metadata: M,
-    planned: Vec<PlannedFace>,
 }
 
 pub(crate) struct DyadicRows<Row, M> {
@@ -235,8 +235,75 @@ pub(crate) type DyadicRowsResult<P> = Result<
     DyadicBuildError<<P as DyadicRowPolicy>::Error>,
 >;
 
-/// First pass of the single generic dyadic builder.  It materializes only the
-/// checked depth plan, then invokes the adapter's aggregate resource policy.
+fn checked_aggregate<P: DyadicRowPolicy>(
+    plan: DyadicPlan,
+    config: DyadicBuildConfig,
+    policy: &P,
+) -> Result<(), DyadicBuildError<P::Error>> {
+    if plan.total_cells > config.limits.max_virtual_cells {
+        return Err(DyadicBuildError::VirtualCellLimit {
+            required: plan.total_cells,
+            limit: config.limits.max_virtual_cells,
+        });
+    }
+    policy
+        .check_aggregate(plan)
+        .map_err(DyadicBuildError::Policy)
+}
+
+fn aggregate_plan(
+    source_faces: usize,
+    total_cells: usize,
+    max_refine_depth: u32,
+    mesh: &Mesh,
+    config: DyadicBuildConfig,
+) -> DyadicPlan {
+    DyadicPlan {
+        total_cells,
+        source_faces,
+        working_cells: total_cells.min(config.limits.max_working_cells),
+        max_refine_depth,
+        mesh_faces: mesh.tris().len(),
+        mesh_vertices: mesh.verts().len(),
+    }
+}
+
+fn source_cell(
+    mesh: &Mesh,
+    island_id: u32,
+    face_id: u32,
+) -> Result<DyadicFace, DyadicBuildError<()>> {
+    let face_index = usize::try_from(face_id)
+        .map_err(|_| DyadicBuildError::FaceOutOfRange { island_id, face_id })?;
+    let triangle = mesh
+        .tris()
+        .get(face_index)
+        .ok_or(DyadicBuildError::FaceOutOfRange { island_id, face_id })?;
+    let cell = triangle.map(|vertex| {
+        mesh.verts()
+            .get(vertex as usize)
+            .copied()
+            .unwrap_or([f64::NAN; 3])
+    });
+    Ok(DyadicFace {
+        island_id,
+        face_id,
+        cell,
+    })
+}
+
+fn map_face_error<E>(error: DyadicBuildError<()>) -> DyadicBuildError<E> {
+    match error {
+        DyadicBuildError::FaceOutOfRange { island_id, face_id } => {
+            DyadicBuildError::FaceOutOfRange { island_id, face_id }
+        }
+        _ => DyadicBuildError::Overflow,
+    }
+}
+
+/// First pass of the single generic dyadic builder.  It checks a one-cell per
+/// face lower bound before allocating any plan storage (there is none), then
+/// invokes monotonic aggregate checks as each face contributes its true depth.
 pub(crate) fn preflight<P: DyadicRowPolicy>(
     mesh: &Mesh,
     islands: &[SupportIsland],
@@ -250,31 +317,22 @@ pub(crate) fn preflight<P: DyadicRowPolicy>(
         sum.checked_add(island.face_ids.len())
             .ok_or(DyadicBuildError::Overflow)
     })?;
-    let mut planned = Vec::with_capacity(source_faces);
+    checked_aggregate(
+        aggregate_plan(source_faces, source_faces, 0, mesh, config),
+        config,
+        policy,
+    )?;
     let mut total_cells = 0_usize;
     let mut max_refine_depth = 0_u32;
     for island in islands {
         for &face_id in &island.face_ids {
-            let face_index =
-                usize::try_from(face_id).map_err(|_| DyadicBuildError::FaceOutOfRange {
-                    island_id: island.id,
-                    face_id,
-                })?;
-            let triangle = mesh
-                .tris()
-                .get(face_index)
-                .ok_or(DyadicBuildError::FaceOutOfRange {
-                    island_id: island.id,
-                    face_id,
-                })?;
-            let cell = triangle.map(|vertex| {
-                mesh.verts()
-                    .get(vertex as usize)
-                    .copied()
-                    .unwrap_or([f64::NAN; 3])
-            });
-            let normal = face_normal(cell).ok_or(DyadicBuildError::DegenerateFace { face_id })?;
-            let edge = max_edge_mm(cell);
+            let face = source_cell(mesh, island.id, face_id).map_err(map_face_error)?;
+            #[cfg(test)]
+            PREFLIGHT_FACE_HOOKS.with(|hooks| hooks.set(hooks.get() + 1));
+            policy
+                .prepare_face(face)
+                .map_err(DyadicBuildError::Policy)?;
+            let edge = max_edge_mm(face.cell);
             if !edge.is_finite() || edge <= 0.0 {
                 return Err(DyadicBuildError::DegenerateFace { face_id });
             }
@@ -293,37 +351,18 @@ pub(crate) fn preflight<P: DyadicRowPolicy>(
                 .checked_add(cells)
                 .ok_or(DyadicBuildError::Overflow)?;
             max_refine_depth = max_refine_depth.max(depth);
-            planned.push(PlannedFace {
-                island_id: island.id,
-                face_id,
-                cell,
-                normal,
-                area_mm2: triangle_area_mm2(cell),
-                depth,
-                cells,
-            });
+            checked_aggregate(
+                aggregate_plan(source_faces, total_cells, max_refine_depth, mesh, config),
+                config,
+                policy,
+            )?;
         }
     }
-    if total_cells > config.limits.max_virtual_cells {
-        return Err(DyadicBuildError::VirtualCellLimit {
-            required: total_cells,
-            limit: config.limits.max_virtual_cells,
-        });
-    }
-    let plan = DyadicPlan {
-        total_cells,
-        source_faces,
-        working_cells: total_cells.min(config.limits.max_working_cells),
-        max_refine_depth,
-        mesh_faces: mesh.tris().len(),
-        mesh_vertices: mesh.verts().len(),
-    };
-    let metadata = policy.preflight(plan).map_err(DyadicBuildError::Policy)?;
-    Ok(DyadicPreflight {
-        plan,
-        metadata,
-        planned,
-    })
+    let plan = aggregate_plan(source_faces, total_cells, max_refine_depth, mesh, config);
+    let metadata = policy
+        .finish_preflight(plan)
+        .map_err(DyadicBuildError::Policy)?;
+    Ok(DyadicPreflight { plan, metadata })
 }
 
 /// Complete second pass of the one generic dyadic builder.  No adapter loops
@@ -335,52 +374,63 @@ pub(crate) fn build_rows<P: DyadicRowPolicy>(
     policy: &P,
 ) -> DyadicRowsResult<P> {
     #[cfg(test)]
-    GENERIC_DYADIC_BUILD_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    GENERIC_DYADIC_INVOCATIONS.with(|calls| calls.borrow_mut().push(std::any::type_name::<P>()));
 
     let preflight = preflight(mesh, islands, config, policy)?;
     let mut rows = Vec::with_capacity(policy.row_capacity(&preflight.metadata));
     let mut high_water = 0;
-    for planned in &preflight.planned {
-        let limits = DyadicLimits {
-            max_virtual_cells: planned.cells,
-            max_working_cells: config.limits.max_working_cells,
-        };
-        let seen = for_each_leaf(planned.cell, planned.depth, limits, |leaf| {
-            let context = DyadicLeaf {
-                island_id: planned.island_id,
-                face_id: planned.face_id,
-                normal: planned.normal,
-                leaf,
-                leaf_area_mm2: planned.area_mm2 / planned.cells as f64,
-                _planned: planned,
+    for island in islands {
+        for &face_id in &island.face_ids {
+            let face = source_cell(mesh, island.id, face_id).map_err(map_face_error)?;
+            let face_metadata = policy
+                .prepare_face(face)
+                .map_err(DyadicBuildError::Policy)?;
+            let edge = max_edge_mm(face.cell);
+            if !edge.is_finite() || edge <= 0.0 {
+                return Err(DyadicBuildError::DegenerateFace { face_id });
+            }
+            let depth = refine_depth(edge, config.cell_edge_limit_mm);
+            let cells = terminal_cells(depth).map_err(|_| DyadicBuildError::Overflow)?;
+            let limits = DyadicLimits {
+                max_virtual_cells: cells,
+                max_working_cells: config.limits.max_working_cells,
             };
-            match policy.nominations(&context) {
-                DyadicNominations::Vertices(mask) => {
-                    for (point_mm, nominated) in leaf.into_iter().zip(mask) {
-                        if nominated {
-                            rows.push(policy.map_row(&context, point_mm));
+            let seen = for_each_leaf(face.cell, depth, limits, |leaf| {
+                let context = DyadicLeaf {
+                    island_id: face.island_id,
+                    face_id: face.face_id,
+                    leaf,
+                    leaf_area_mm2: triangle_area_mm2(face.cell) / cells as f64,
+                    face_metadata: &face_metadata,
+                };
+                match policy.nominations(&context) {
+                    DyadicNominations::Vertices(mask) => {
+                        for (point_mm, nominated) in leaf.into_iter().zip(mask) {
+                            if nominated {
+                                rows.push(policy.map_row(&context, point_mm));
+                            }
                         }
                     }
+                    DyadicNominations::Centroid => {
+                        let point_mm = [
+                            (leaf[0][0] + leaf[1][0] + leaf[2][0]) / 3.0,
+                            (leaf[0][1] + leaf[1][1] + leaf[2][1]) / 3.0,
+                            (leaf[0][2] + leaf[1][2] + leaf[2][2]) / 3.0,
+                        ];
+                        rows.push(policy.map_row(&context, point_mm));
+                    }
                 }
-                DyadicNominations::Centroid => {
-                    let point_mm = [
-                        (leaf[0][0] + leaf[1][0] + leaf[2][0]) / 3.0,
-                        (leaf[0][1] + leaf[1][1] + leaf[2][1]) / 3.0,
-                        (leaf[0][2] + leaf[1][2] + leaf[2][2]) / 3.0,
-                    ];
-                    rows.push(policy.map_row(&context, point_mm));
+            })
+            .map_err(|error| match error {
+                DyadicError::InvalidLimits => DyadicBuildError::InvalidLimits,
+                DyadicError::Overflow => DyadicBuildError::Overflow,
+                DyadicError::VirtualCellLimit { required, limit } => {
+                    DyadicBuildError::VirtualCellLimit { required, limit }
                 }
-            }
-        })
-        .map_err(|error| match error {
-            DyadicError::InvalidLimits => DyadicBuildError::InvalidLimits,
-            DyadicError::Overflow => DyadicBuildError::Overflow,
-            DyadicError::VirtualCellLimit { required, limit } => {
-                DyadicBuildError::VirtualCellLimit { required, limit }
-            }
-            _ => DyadicBuildError::Overflow,
-        })?;
-        high_water = high_water.max(seen);
+                _ => DyadicBuildError::Overflow,
+            })?;
+            high_water = high_water.max(seen);
+        }
     }
     rows.sort_unstable_by(|left, right| policy.dedup_order(left, right));
     rows.dedup_by(|left, right| policy.same_row(left, right));
@@ -394,17 +444,25 @@ pub(crate) fn build_rows<P: DyadicRowPolicy>(
 }
 
 #[cfg(test)]
-static GENERIC_DYADIC_BUILD_CALLS: std::sync::atomic::AtomicUsize =
-    std::sync::atomic::AtomicUsize::new(0);
-
-#[cfg(test)]
-pub(crate) fn reset_generic_dyadic_build_calls() {
-    GENERIC_DYADIC_BUILD_CALLS.store(0, std::sync::atomic::Ordering::Relaxed);
+thread_local! {
+    static GENERIC_DYADIC_INVOCATIONS: std::cell::RefCell<Vec<&'static str>> = const { std::cell::RefCell::new(Vec::new()) };
+    static PREFLIGHT_FACE_HOOKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
-pub(crate) fn generic_dyadic_build_calls() -> usize {
-    GENERIC_DYADIC_BUILD_CALLS.load(std::sync::atomic::Ordering::Relaxed)
+pub(crate) fn clear_generic_dyadic_test_observations() {
+    GENERIC_DYADIC_INVOCATIONS.with(|calls| calls.borrow_mut().clear());
+    PREFLIGHT_FACE_HOOKS.with(|hooks| hooks.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn generic_dyadic_invocation_types() -> Vec<&'static str> {
+    GENERIC_DYADIC_INVOCATIONS.with(|calls| calls.borrow().clone())
+}
+
+#[cfg(test)]
+pub(crate) fn preflight_face_hook_count() -> usize {
+    PREFLIGHT_FACE_HOOKS.with(std::cell::Cell::get)
 }
 
 /// Frozen `placement._refine_depths` scalar rule, including the one-ULP edge
@@ -472,6 +530,32 @@ pub fn build_candidate_payload(
     islands: &[SupportIsland],
     config: &CandidatePayloadConfig,
 ) -> Result<CandidatePayload, DyadicError> {
+    build_candidate_payload_with_high_water(mesh, islands, config).map(|(payload, _)| payload)
+}
+
+#[cfg(test)]
+pub(crate) fn build_candidate_payload_with_high_water(
+    mesh: &Mesh,
+    islands: &[SupportIsland],
+    config: &CandidatePayloadConfig,
+) -> Result<(CandidatePayload, usize), DyadicError> {
+    build_candidate_payload_inner(mesh, islands, config)
+}
+
+#[cfg(not(test))]
+fn build_candidate_payload_with_high_water(
+    mesh: &Mesh,
+    islands: &[SupportIsland],
+    config: &CandidatePayloadConfig,
+) -> Result<(CandidatePayload, usize), DyadicError> {
+    build_candidate_payload_inner(mesh, islands, config)
+}
+
+fn build_candidate_payload_inner(
+    mesh: &Mesh,
+    islands: &[SupportIsland],
+    config: &CandidatePayloadConfig,
+) -> Result<(CandidatePayload, usize), DyadicError> {
     let policy = CandidateRowPolicy { config };
     let built = build_rows(
         mesh,
@@ -487,13 +571,16 @@ pub fn build_candidate_payload(
     let compact_payload_bytes = candidate_payload_bytes(built.rows.len())?;
     debug_assert!(built.rows.len() <= config.max_candidates);
     debug_assert!(compact_payload_bytes <= config.max_compact_payload_bytes);
-    Ok(CandidatePayload {
-        rows: built.rows,
-        virtual_cells: built.plan.total_cells,
-        nomination_upper_bound: built.metadata.nominations,
-        compact_payload_bytes,
-        max_refine_depth: built.plan.max_refine_depth,
-    })
+    Ok((
+        CandidatePayload {
+            rows: built.rows,
+            virtual_cells: built.plan.total_cells,
+            nomination_upper_bound: built.metadata.nominations,
+            compact_payload_bytes,
+            max_refine_depth: built.plan.max_refine_depth,
+        },
+        built.high_water,
+    ))
 }
 
 #[derive(Clone, Copy)]
@@ -505,12 +592,24 @@ struct CandidateRowPolicy<'a> {
     config: &'a CandidatePayloadConfig,
 }
 
+#[cfg(test)]
+pub(crate) fn candidate_policy_type_name() -> &'static str {
+    std::any::type_name::<CandidateRowPolicy<'static>>()
+}
+
 impl DyadicRowPolicy for CandidateRowPolicy<'_> {
     type Row = CandidatePayloadRow;
     type Metadata = CandidatePreflight;
+    type FaceMetadata = [f64; 3];
     type Error = DyadicError;
 
-    fn preflight(&self, plan: DyadicPlan) -> Result<Self::Metadata, Self::Error> {
+    fn prepare_face(&self, face: DyadicFace) -> Result<Self::FaceMetadata, Self::Error> {
+        face_normal(face.cell).ok_or(DyadicError::DegenerateFace {
+            face_id: face.face_id,
+        })
+    }
+
+    fn check_aggregate(&self, plan: DyadicPlan) -> Result<(), Self::Error> {
         let nominations = candidate_nominations(plan.total_cells)?;
         if nominations > self.config.max_candidates {
             return Err(DyadicError::CandidateLimit {
@@ -525,23 +624,29 @@ impl DyadicRowPolicy for CandidateRowPolicy<'_> {
                 limit: self.config.max_compact_payload_bytes,
             });
         }
-        Ok(CandidatePreflight { nominations })
+        Ok(())
+    }
+
+    fn finish_preflight(&self, plan: DyadicPlan) -> Result<Self::Metadata, Self::Error> {
+        Ok(CandidatePreflight {
+            nominations: candidate_nominations(plan.total_cells)?,
+        })
     }
 
     fn row_capacity(&self, metadata: &Self::Metadata) -> usize {
         metadata.nominations
     }
 
-    fn nominations(&self, leaf: &DyadicLeaf<'_>) -> DyadicNominations {
+    fn nominations(&self, leaf: &DyadicLeaf<'_, Self::FaceMetadata>) -> DyadicNominations {
         DyadicNominations::Vertices(co_lowest_mask(leaf.leaf))
     }
 
-    fn map_row(&self, leaf: &DyadicLeaf<'_>, point_mm: [f64; 3]) -> Self::Row {
+    fn map_row(&self, leaf: &DyadicLeaf<'_, Self::FaceMetadata>, point_mm: [f64; 3]) -> Self::Row {
         CandidatePayloadRow {
             island_id: leaf.island_id,
             face_id: leaf.face_id,
             point_mm,
-            normal: leaf.normal,
+            normal: *leaf.face_metadata,
         }
     }
 
@@ -684,6 +789,21 @@ mod tests {
         .expect("finite fixture")
     }
 
+    fn two_triangles() -> Mesh {
+        Mesh::new(
+            vec![
+                [0.0, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                [0.0, 2.0, 2.0],
+                [10.0, 0.0, 0.0],
+                [12.0, 0.0, 0.0],
+                [10.0, 2.0, 2.0],
+            ],
+            vec![[0, 1, 2], [3, 4, 5]],
+        )
+        .expect("finite fixture")
+    }
+
     fn config(
         depth: u32,
         cells: usize,
@@ -741,6 +861,110 @@ mod tests {
             [1.0e16, 2.0, 2.0e-12],
         ];
         assert_eq!(co_lowest_mask(leaf), [true, false, false]);
+    }
+
+    #[test]
+    fn co_lowest_tolerance_pins_exact_boundary_and_next_above() {
+        let exact = 8.0 * f64::EPSILON;
+        assert_eq!(
+            co_lowest_mask([[0.0, 0.0, 0.0], [0.0, 0.0, exact], [0.0, 0.0, exact]]),
+            [true, true, true]
+        );
+        assert_eq!(
+            co_lowest_mask([
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, exact],
+                [0.0, 0.0, exact.next_up()],
+            ]),
+            [true, true, false]
+        );
+    }
+
+    #[test]
+    fn multi_face_candidate_vector_pins_order_dedup_and_literal_64_byte_accounting() {
+        const FROZEN_ROW_BYTES: usize = 64;
+        assert_eq!(
+            2 * std::mem::size_of::<[f64; 3]>() + 2 * std::mem::size_of::<u64>(),
+            FROZEN_ROW_BYTES
+        );
+        let payload = build_candidate_payload(
+            &two_triangles(),
+            &[SupportIsland {
+                id: 9,
+                // Face zero repeats: generic dedup must retain its lower face
+                // identity while preserving the other face's complete rows.
+                face_ids: vec![1, 0, 0],
+            }],
+            &config(1, 12, 36, 36 * FROZEN_ROW_BYTES, 4),
+        )
+        .expect("multi-face candidate payload");
+        let normal = [0.0, -0.707_106_781_186_547_5, 0.707_106_781_186_547_5];
+        assert_eq!(
+            payload.rows(),
+            &[
+                CandidatePayloadRow {
+                    island_id: 9,
+                    face_id: 0,
+                    point_mm: [0.0, 0.0, 0.0],
+                    normal
+                },
+                CandidatePayloadRow {
+                    island_id: 9,
+                    face_id: 0,
+                    point_mm: [1.0, 0.0, 0.0],
+                    normal
+                },
+                CandidatePayloadRow {
+                    island_id: 9,
+                    face_id: 0,
+                    point_mm: [2.0, 0.0, 0.0],
+                    normal
+                },
+                CandidatePayloadRow {
+                    island_id: 9,
+                    face_id: 1,
+                    point_mm: [10.0, 0.0, 0.0],
+                    normal
+                },
+                CandidatePayloadRow {
+                    island_id: 9,
+                    face_id: 1,
+                    point_mm: [11.0, 0.0, 0.0],
+                    normal
+                },
+                CandidatePayloadRow {
+                    island_id: 9,
+                    face_id: 1,
+                    point_mm: [12.0, 0.0, 0.0],
+                    normal
+                },
+                CandidatePayloadRow {
+                    island_id: 9,
+                    face_id: 0,
+                    point_mm: [0.0, 1.0, 1.0],
+                    normal
+                },
+                CandidatePayloadRow {
+                    island_id: 9,
+                    face_id: 0,
+                    point_mm: [1.0, 1.0, 1.0],
+                    normal
+                },
+                CandidatePayloadRow {
+                    island_id: 9,
+                    face_id: 1,
+                    point_mm: [10.0, 1.0, 1.0],
+                    normal
+                },
+                CandidatePayloadRow {
+                    island_id: 9,
+                    face_id: 1,
+                    point_mm: [11.0, 1.0, 1.0],
+                    normal
+                },
+            ]
+        );
+        assert_eq!(payload.compact_payload_bytes, 10 * FROZEN_ROW_BYTES);
     }
 
     #[test]
@@ -805,6 +1029,25 @@ mod tests {
             .collect();
         assert_eq!(signatures[0], signatures[1]);
         assert_eq!(signatures[0], signatures[2]);
+    }
+
+    #[test]
+    fn candidate_working_window_one_is_exact_and_zero_is_refused() {
+        let island = [SupportIsland {
+            id: 9,
+            face_ids: vec![0],
+        }];
+        let (_, high_water) = build_candidate_payload_with_high_water(
+            &triangle(),
+            &island,
+            &config(1, 4, 12, 12 * 64, 1),
+        )
+        .expect("one-cell candidate window");
+        assert_eq!(high_water, 1);
+        assert!(matches!(
+            CandidatePayloadConfig::current(1, 4, 12, 12 * 64, 0),
+            Err(DyadicError::InvalidLimits)
+        ));
     }
 
     #[test]
