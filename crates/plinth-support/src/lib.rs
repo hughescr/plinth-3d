@@ -12,6 +12,11 @@
 #![forbid(unsafe_code)]
 
 pub mod anchor;
+#[allow(
+    dead_code,
+    reason = "crate-private CCO controller is consumed by the pending support runner integration"
+)]
+mod cco;
 mod coverage;
 pub mod dyadic;
 pub mod forest;
