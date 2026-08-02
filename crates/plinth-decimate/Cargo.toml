@@ -1,0 +1,12 @@
+[package]
+name = "plinth-decimate"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+publish = false
+
+[dependencies]
+plinth-core = { path = "../plinth-core" }
+plinth-mesh = { path = "../plinth-mesh" }
+serde = { workspace = true }
+thiserror = { workspace = true }

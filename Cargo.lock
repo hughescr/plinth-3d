@@ -506,6 +506,40 @@ dependencies = [
 ]
 
 [[package]]
+name = "plinth-decimate"
+version = "0.1.0"
+dependencies = [
+ "plinth-core",
+ "plinth-mesh",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "plinth-emit"
+version = "0.1.0"
+dependencies = [
+ "chitubox_io",
+ "plinth-core",
+ "plinth-support",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "plinth-hollow"
+version = "0.1.0"
+dependencies = [
+ "plinth-core",
+ "plinth-decimate",
+ "plinth-mesh",
+ "plinth-orient",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
 name = "plinth-mesh"
 version = "0.1.0"
 dependencies = [
@@ -530,11 +564,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "plinth-orient"
+version = "0.1.0"
+dependencies = [
+ "plinth-core",
+ "plinth-decimate",
+ "plinth-mesh",
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "plinth-pipeline"
+version = "0.1.0"
+dependencies = [
+ "plinth-core",
+ "plinth-decimate",
+ "plinth-emit",
+ "plinth-hollow",
+ "plinth-orient",
+ "plinth-support",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "plinth-solid"
 version = "0.1.0"
 dependencies = [
  "cxx",
  "cxx-build",
+ "thiserror",
+]
+
+[[package]]
+name = "plinth-support"
+version = "0.1.0"
+dependencies = [
+ "chitubox_io",
+ "plinth-core",
+ "plinth-decimate",
+ "plinth-hollow",
+ "plinth-mesh",
+ "plinth-orient",
+ "serde",
  "thiserror",
 ]
 

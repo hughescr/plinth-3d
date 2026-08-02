@@ -1,0 +1,19 @@
+[package]
+name = "plinth-pipeline"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+publish = false
+
+[dependencies]
+plinth-core = { path = "../plinth-core" }
+plinth-decimate = { path = "../plinth-decimate" }
+plinth-emit = { path = "../plinth-emit" }
+plinth-hollow = { path = "../plinth-hollow" }
+plinth-orient = { path = "../plinth-orient" }
+plinth-support = { path = "../plinth-support" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
