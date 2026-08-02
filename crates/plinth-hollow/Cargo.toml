@@ -8,7 +8,13 @@ publish = false
 [dependencies]
 plinth-core = { path = "../plinth-core" }
 plinth-mesh = { path = "../plinth-mesh" }
+plinth-metrics = { path = "../plinth-metrics" }
 plinth-orient = { path = "../plinth-orient" }
+plinth-solid = { path = "../plinth-solid" }
+geom_kernel = { path = "../../rust/geom_kernel" }
+fast-surface-nets = "=0.2.1"
+scirs2-core = "=0.6.5"
+scirs2-ndimage = "=0.6.5"
 serde = { workspace = true }
 thiserror = { workspace = true }
 
