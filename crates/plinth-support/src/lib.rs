@@ -5,14 +5,14 @@
 //!
 //! The implemented foundation is intentionally leaf-shaped: this module owns the typed scene
 //! boundary, perception, and dyadic contact selection; [`forest`] owns generational topology.
-//! Future work has named homes without a fake solver entrypoint: CCO growth, member sizing,
-//! model-anchor search, and raft construction extend this crate only when their real authority
-//! and evidence can land. There is no public `run` stub.
+//! Model-anchor discovery and final foot validation now live in [`anchor`]. Future CCO growth,
+//! member sizing, and raft construction extend this crate only when their real authority and
+//! evidence can land. There is no public `run` stub.
 #![forbid(unsafe_code)]
 
 mod coverage;
 pub mod dyadic;
-
+pub mod anchor;
 pub mod forest;
 pub mod legacy_compat;
 pub mod member_sizing;
