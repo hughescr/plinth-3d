@@ -17,10 +17,10 @@ use plinth_mesh::{load_binary_stl, write_binary_stl, EdgeTopologyCounts, Mesh, W
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const REPORT_SCHEMA: &str = "plinth/m3-decimation-corpus-budget-report/v1";
+const REPORT_SCHEMA: &str = "plinth/m3-decimation-corpus-budget-report/v2";
 const DEFAULT_OUTPUT_DIR: &str = "target/plinth-decimate-corpus-budgets";
 const EXPECTED: [CorpusModel; 8] = [
-    CorpusModel::verified(
+    CorpusModel::already_print_scale(
         "Sphere",
         "corpus/models/Sphere.stl",
         "48c27bb596a265900a614171d7ffe3a7a4ea80d95f1c620cf3ab00f67fe0a1d5",
@@ -40,7 +40,7 @@ const EXPECTED: [CorpusModel; 8] = [
         "corpus/models/make_overhang_table.stl",
         "a776132a2cc4a43298d9ca646a4265a7ba60ed7d37de7618147ac754dfe8c996",
     ),
-    CorpusModel::verified(
+    CorpusModel::already_print_scale(
         "make_toed_slab",
         "corpus/models/make_toed_slab.stl",
         "ceb70f2b549fb131b0f177033401c50879a8fbc6d575b27459c0f9574d9f1169",
@@ -55,7 +55,7 @@ const EXPECTED: [CorpusModel; 8] = [
         "corpus/models/make_thin_fin.stl",
         "09bec5c6ff8ff169f91438c209b12c3e6d9eb0dbb7e2fd7611e98d1884516c4c",
     ),
-    CorpusModel::verified(
+    CorpusModel::already_print_scale(
         "Weeping Treant v1.2",
         "corpus/models/Weeping Treant v1.2.stl",
         "4c027b7849019ab9598c85f285b9df7d480aacfd1733123a32a8a81239525552",
@@ -71,15 +71,6 @@ struct CorpusModel {
 }
 
 impl CorpusModel {
-    const fn verified(name: &'static str, stl: &'static str, sha256: &'static str) -> Self {
-        Self {
-            name,
-            stl,
-            sha256,
-            expected_status: ExpectedStatus::Verified,
-        }
-    }
-
     const fn already_print_scale(
         name: &'static str,
         stl: &'static str,
@@ -162,6 +153,7 @@ struct FinalAttemptReport {
     p99_9_mm: String,
     topology_after: TopologyReport,
     result: String,
+    downstream_utility: String,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -469,6 +461,7 @@ fn success_report(
                 p99_9_mm: ratio_text(attempt.probe.p99_9_mm),
                 topology_after: attempt.topology_after.into(),
                 result: format!("{:?}", attempt.result),
+                downstream_utility: format!("{:?}", attempt.downstream_utility),
             })
             .collect(),
         reduction_refusals: trace
@@ -504,6 +497,26 @@ fn independently_audit_already_print_scale(
     {
         return Err("AlreadyPrintScaleEvidence: topology or refusal evidence missing".to_owned());
     }
+    if success.trace().final_attempts.iter().any(|attempt| {
+        attempt.result == plinth_decimate::FinalVerificationResult::GeometricallyEligible
+            && attempt.downstream_utility
+                != plinth_decimate::DownstreamUtilityEvidence::NoDownstreamUtilityEvidence
+    }) {
+        return Err(
+            "AlreadyPrintScaleUtility: unregistered downstream evidence authorized reduction"
+                .to_owned(),
+        );
+    }
+    if !success.trace().reduction_refusals.iter().any(|reason| {
+        matches!(
+            reason,
+            plinth_decimate::ReductionRefusalReason::NoDownstreamUtilityEvidence { .. }
+        )
+    }) && success.trace().final_attempts.iter().any(|attempt| {
+        attempt.result == plinth_decimate::FinalVerificationResult::GeometricallyEligible
+    }) {
+        return Err("AlreadyPrintScaleUtility: missing named utility refusal".to_owned());
+    }
     success
         .mesh()
         .audit_strict()
@@ -533,9 +546,9 @@ fn independently_audit_verified(
             original.tris().len()
         ));
     }
-    if trace.steps.len() != 7 {
+    if trace.steps.len() != 6 {
         return Err(format!(
-            "M3SearchStepCount: expected identity, nearest-reduction endpoint, plus five bisections, found {}",
+            "M3SearchStepCount: expected identity plus five bisections, found {}",
             trace.steps.len()
         ));
     }

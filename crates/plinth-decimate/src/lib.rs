@@ -259,13 +259,37 @@ pub struct FinalVerificationAttempt {
     pub probe: TwoSidedProbe,
     pub topology_after: EdgeTopologyCounts,
     pub result: FinalVerificationResult,
+    pub downstream_utility: DownstreamUtilityEvidence,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FinalVerificationResult {
-    Verified,
+    GeometricallyEligible,
     BudgetExceeded,
     TopologyIncreased,
+}
+
+/// Opaque proof that a reduced mesh saves registered downstream work or a
+/// registered bounded resource. No such AcceptSafe witness is registered yet,
+/// so this type intentionally has no public constructor.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DownstreamUseful {
+    witness_id: &'static str,
+}
+
+impl DownstreamUseful {
+    #[must_use]
+    pub const fn witness_id(&self) -> &'static str {
+        self.witness_id
+    }
+}
+
+/// Independent production-acceptance authority. Geometric eligibility alone
+/// never creates `DownstreamUseful`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DownstreamUtilityEvidence {
+    DownstreamUseful(DownstreamUseful),
+    NoDownstreamUtilityEvidence,
 }
 
 /// Evidence that a requested simplification was correctly refused while the
@@ -296,6 +320,9 @@ pub enum ReductionRefusalReason {
         requested_ratio: f64,
         before: EdgeTopologyCounts,
         after: EdgeTopologyCounts,
+    },
+    NoDownstreamUtilityEvidence {
+        geometrically_eligible_candidate_count: usize,
     },
 }
 
@@ -896,32 +923,6 @@ fn run_budget_search(
         });
     }
 
-    // The canonical 1.0 identity endpoint cannot be a production reduction.
-    // Probe the nearest representable useful target separately so a topology
-    // refusal at a more aggressive bisection point cannot force identity when
-    // a one-face (or nearest meshopt-achievable) reduction is safe.
-    let nearest_reduced_ratio = 1.0
-        - 1.0
-            / f64::from(u32::try_from(original.tris().len()).map_err(|error| {
-                BudgetSearchError::SearchExecution {
-                    phase: "near-identity reduction endpoint",
-                    message: format!("input face count cannot form endpoint ratio: {error}"),
-                }
-            })?);
-    let endpoint = sampled_step(
-        original,
-        protected,
-        nearest_reduced_ratio,
-        budget.probe,
-        error_budget,
-    )
-    .map_err(|error| BudgetSearchError::SearchExecution {
-        phase: "near-identity reduction endpoint",
-        message: error,
-    })?;
-    record_sampled_refusal(&mut trace, &endpoint, original.tris().len(), error_budget);
-    trace.steps.push(endpoint);
-
     let mut low = policy.ratio_low;
     let mut high = policy.ratio_high;
     for _ in 0..policy.bisections {
@@ -1041,6 +1042,7 @@ fn run_budget_search(
             topology_before,
             topology_after,
         );
+        let downstream_utility = assess_downstream_utility(&final_outcome);
         trace.final_attempts.push(FinalVerificationAttempt {
             requested_ratio: candidate.ratio,
             achieved_ratio: final_outcome.achieved_ratio,
@@ -1049,19 +1051,22 @@ fn run_budget_search(
             probe: final_probe.clone(),
             topology_after,
             result: result.clone(),
+            downstream_utility: downstream_utility.clone(),
         });
         match result {
-            FinalVerificationResult::Verified => {
-                return Ok(BudgetSearchOutcome::Verified(Box::new(
-                    BudgetSearchSuccess {
-                        mesh: final_outcome.mesh,
-                        chosen_ratio: final_outcome.achieved_ratio,
-                        trace,
-                        final_probe,
-                        topology_before,
-                        topology_after,
-                    },
-                )));
+            FinalVerificationResult::GeometricallyEligible => {
+                if let DownstreamUtilityEvidence::DownstreamUseful(_) = downstream_utility {
+                    return Ok(BudgetSearchOutcome::Verified(Box::new(
+                        BudgetSearchSuccess {
+                            mesh: final_outcome.mesh,
+                            chosen_ratio: final_outcome.achieved_ratio,
+                            trace,
+                            final_probe,
+                            topology_before,
+                            topology_after,
+                        },
+                    )));
+                }
             }
             FinalVerificationResult::BudgetExceeded => {
                 trace
@@ -1085,16 +1090,25 @@ fn run_budget_search(
         }
     }
 
+    let geometrically_eligible_candidate_count = trace
+        .final_attempts
+        .iter()
+        .filter(|attempt| attempt.result == FinalVerificationResult::GeometricallyEligible)
+        .count();
     already_print_scale(
         original,
         budget.probe,
         trace,
-        ReductionRefusalReason::NoActualReduction {
-            requested_ratio: policy.ratio_high,
-            input_face_count: original.tris().len(),
-            output_face_count: original.tris().len(),
+        ReductionRefusalReason::NoDownstreamUtilityEvidence {
+            geometrically_eligible_candidate_count,
         },
     )
+}
+
+fn assess_downstream_utility(_candidate: &SimplifyOutcome) -> DownstreamUtilityEvidence {
+    // M3 has no registered AcceptSafe work/resource witness yet. Face removal
+    // alone is not downstream utility evidence.
+    DownstreamUtilityEvidence::NoDownstreamUtilityEvidence
 }
 
 fn record_sampled_refusal(
@@ -1134,7 +1148,7 @@ fn classify_final_attempt(
     } else if !topology_not_increased(topology_before, topology_after) {
         FinalVerificationResult::TopologyIncreased
     } else {
-        FinalVerificationResult::Verified
+        FinalVerificationResult::GeometricallyEligible
     }
 }
 
@@ -2605,7 +2619,7 @@ mod tests {
         assert_eq!(success.mesh().tris().len(), mesh.tris().len());
         assert_eq!(success.final_probe().p99_mm, 0.0);
         assert_eq!(success.final_probe().p99_9_mm, 0.0);
-        assert_eq!(success.trace().steps.len(), 7);
+        assert_eq!(success.trace().steps.len(), 6);
         assert!(success
             .trace()
             .reduction_refusals
@@ -2622,8 +2636,8 @@ mod tests {
         };
         assert_eq!(
             success.trace.steps.len(),
-            7,
-            "identity evidence, nearest-reduction endpoint, plus five bisections"
+            6,
+            "identity evidence plus five bisections"
         );
         assert!(!success.trace.steps[0].reduced);
         assert_eq!(success.chosen_ratio, 1.0);
@@ -2750,11 +2764,11 @@ mod tests {
             ),
         ];
         assert_eq!(attempts[0], FinalVerificationResult::TopologyIncreased);
-        assert_eq!(attempts[1], FinalVerificationResult::Verified);
+        assert_eq!(attempts[1], FinalVerificationResult::GeometricallyEligible);
         assert_eq!(
             attempts
                 .iter()
-                .position(|result| *result == FinalVerificationResult::Verified),
+                .position(|result| *result == FinalVerificationResult::GeometricallyEligible),
             Some(1),
             "the second, denser candidate is selected after the first refusal"
         );
@@ -2784,7 +2798,7 @@ mod tests {
             ),
         ];
         assert_eq!(attempts[0], FinalVerificationResult::BudgetExceeded);
-        assert_eq!(attempts[1], FinalVerificationResult::Verified);
+        assert_eq!(attempts[1], FinalVerificationResult::GeometricallyEligible);
     }
 
     #[test]
