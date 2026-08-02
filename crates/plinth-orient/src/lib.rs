@@ -7,7 +7,7 @@
 #![forbid(unsafe_code)]
 
 use plinth_core::Finite;
-use plinth_decimate::{DecimatedModel, DecimationReport};
+use plinth_decimate::{DecimatedModel, DecimationAudit};
 use plinth_mesh::Mesh;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -555,14 +555,14 @@ pub struct OrientationReport {
 /// Accumulated report state after orientation; it contains no historical mesh.
 #[derive(Clone, Debug, PartialEq)]
 pub struct OrientationHistory {
-    decimation: DecimationReport,
+    decimation: DecimationAudit,
     orientation: OrientationReport,
 }
 
 impl OrientationHistory {
     /// Builds passive accumulated report state; this does not construct an oriented model.
     #[must_use]
-    pub fn from_reports(decimation: DecimationReport, orientation: OrientationReport) -> Self {
+    pub fn from_reports(decimation: DecimationAudit, orientation: OrientationReport) -> Self {
         Self {
             decimation,
             orientation,
@@ -570,7 +570,7 @@ impl OrientationHistory {
     }
 
     #[must_use]
-    pub const fn decimation(&self) -> &DecimationReport {
+    pub const fn decimation(&self) -> &DecimationAudit {
         &self.decimation
     }
 
@@ -580,7 +580,7 @@ impl OrientationHistory {
     }
 
     #[must_use]
-    pub fn into_reports(self) -> (DecimationReport, OrientationReport) {
+    pub fn into_reports(self) -> (DecimationAudit, OrientationReport) {
         (self.decimation, self.orientation)
     }
 }
@@ -623,7 +623,10 @@ pub enum OrientError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plinth_decimate::DecimationDisposition;
+    use plinth_decimate::{
+        run as run_decimation, DecimationAudit, DecimationBudget, DecimationDisposition,
+        DownstreamUtilityEvidence, FinalVerificationResult, ProbeConfig, ReductionRefusalReason,
+    };
     use plinth_mesh::{load_binary_stl, WeldPolicy};
 
     fn baseline(name: &str) -> PathBuf {
@@ -647,6 +650,19 @@ mod tests {
         );
     }
 
+    fn fixture_decimation_audit() -> DecimationAudit {
+        let mesh = plinth_mesh::make_box([10.0; 3], [0.0; 3]).expect("closed audit fixture");
+        let budget =
+            DecimationBudget::ratified_default(ProbeConfig::new(1.0, usize::MAX, 10_000.0))
+                .expect("registered fixture budget");
+        let outcome = run_decimation(&mesh, budget).expect("fixture decimation succeeds");
+        let (_, audit) = outcome
+            .into_decimated_model()
+            .expect("fixture scale is in contract")
+            .into_parts();
+        audit
+    }
+
     #[test]
     fn sphere_baseline_selects_the_frozen_x_rotation_and_real_artifact_is_reframed() {
         let pinned = read_selection(&baseline("Sphere.pipeline.json"))
@@ -668,6 +684,86 @@ mod tests {
         assert!((min[0] + max[0]).abs() < 1e-6);
         assert!((min[1] + max[1]).abs() < 1e-6);
         assert!(min[2].abs() < 1e-6);
+    }
+
+    #[test]
+    fn complete_already_print_scale_audit_survives_orientation_handoff() {
+        let source = baseline("../models/Sphere.stl");
+        let mesh = load_binary_stl(&source, WeldPolicy::None)
+            .expect("required real Sphere source fixture must be provisioned");
+        let budget =
+            DecimationBudget::ratified_default(ProbeConfig::new(1.0, usize::MAX, 10_000.0))
+                .expect("registered corpus budget");
+        let outcome = run_decimation(&mesh, budget).expect("Sphere decimation succeeds");
+        let plinth_decimate::BudgetSearchOutcome::AlreadyPrintScale(success) = &outcome else {
+            panic!("no registered downstream utility may authorize the Sphere reduction");
+        };
+        let expected_trace = success.trace().clone();
+        let expected_final_probe = success.final_probe().clone();
+        let expected_topology_before = success.topology_before();
+        let expected_topology_after = success.topology_after();
+        let decimated = outcome
+            .into_decimated_model()
+            .expect("Sphere scale is in contract");
+        let oriented = run(
+            decimated,
+            &OrientRequest {
+                pinned: PinnedBaseline {
+                    pipeline_report: baseline("Sphere.pipeline.json"),
+                },
+            },
+        )
+        .expect("strict pinned orientation succeeds");
+        let audit = oriented.history().decimation();
+
+        assert_eq!(
+            audit.disposition(),
+            DecimationDisposition::AlreadyPrintScale
+        );
+        assert_eq!(audit.trace(), &expected_trace);
+        assert_eq!(audit.final_probe(), &expected_final_probe);
+        assert_eq!(audit.topology_before(), expected_topology_before);
+        assert_eq!(audit.topology_after(), expected_topology_after);
+        assert_eq!(audit.report().chosen_ratio(), 1.0);
+        assert_eq!(audit.report().input_faces(), mesh.tris().len());
+        assert_eq!(audit.report().output_faces(), mesh.tris().len());
+        assert_eq!(audit.report().p99_mm(), 0.0);
+        assert_eq!(audit.report().p99_9_mm(), 0.0);
+
+        let trace = audit.trace();
+        assert!(!trace.steps.is_empty());
+        assert!(trace
+            .steps
+            .iter()
+            .all(|step| !step.candidate_fingerprint.is_empty()));
+        assert!(trace
+            .final_attempts
+            .iter()
+            .all(|attempt| !attempt.candidate_fingerprint.is_empty()));
+        assert!(trace.final_attempts.iter().all(|attempt| {
+            attempt.result != FinalVerificationResult::GeometricallyEligible
+                || attempt.downstream_utility
+                    == DownstreamUtilityEvidence::NoDownstreamUtilityEvidence
+        }));
+        if trace
+            .final_attempts
+            .iter()
+            .any(|attempt| attempt.result == FinalVerificationResult::GeometricallyEligible)
+        {
+            assert!(trace.reduction_refusals.iter().any(|reason| matches!(
+                reason,
+                ReductionRefusalReason::NoDownstreamUtilityEvidence { .. }
+            )));
+        }
+        assert_eq!(
+            trace.adaptive_exploration.complete,
+            trace.adaptive_exploration.remaining_intervals.is_empty()
+        );
+        assert!(trace
+            .adaptive_exploration
+            .probes
+            .iter()
+            .all(|probe| !probe.candidate_fingerprint.is_empty()));
     }
 
     #[test]
@@ -778,18 +874,7 @@ mod tests {
         )
         .expect("the test triangle is a valid mesh");
         let allocation = mesh.verts().as_ptr();
-        let decimation = DecimationReport {
-            disposition: DecimationDisposition::AlreadyPrintScale,
-            input_faces: 1,
-            output_faces: 1,
-            chosen_ratio: 1.0,
-            p99_mm: 0.0,
-            p99_9_mm: 0.0,
-            boundary_edges_before: 3,
-            boundary_edges_after: 3,
-            nonmanifold_edges_before: 0,
-            nonmanifold_edges_after: 0,
-        };
+        let decimation = fixture_decimation_audit();
         let orientation = OrientationReport {
             pinned_report: PathBuf::from("baseline/model.pipeline.json"),
             selection: BaselineSelection::Identity,
@@ -802,7 +887,7 @@ mod tests {
         let (mesh, history) = model.into_parts();
         assert_eq!(mesh.verts().as_ptr(), allocation);
         assert_eq!(
-            history.decimation().disposition,
+            history.decimation().disposition(),
             DecimationDisposition::AlreadyPrintScale
         );
         assert_eq!(history.orientation().selection, BaselineSelection::Identity);

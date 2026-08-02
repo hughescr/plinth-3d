@@ -427,10 +427,23 @@ pub enum SupportError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plinth_decimate::{DecimationDisposition, DecimationReport};
+    use plinth_decimate::{run as run_decimation, DecimationAudit, DecimationBudget, ProbeConfig};
     use plinth_hollow::{HollowDisposition, HollowReport};
     use plinth_orient::{BaselineSelection, OrientationHistory, OrientationReport, RigidTransform};
     use std::path::PathBuf;
+
+    fn fixture_decimation_audit() -> DecimationAudit {
+        let mesh = plinth_mesh::make_box([10.0; 3], [0.0; 3]).expect("closed audit fixture");
+        let budget =
+            DecimationBudget::ratified_default(ProbeConfig::new(1.0, usize::MAX, 10_000.0))
+                .expect("registered fixture budget");
+        let outcome = run_decimation(&mesh, budget).expect("fixture decimation succeeds");
+        let (_, audit) = outcome
+            .into_decimated_model()
+            .expect("fixture scale is in contract")
+            .into_parts();
+        audit
+    }
 
     #[test]
     fn consuming_scene_transition_moves_model_and_primitives_together() {
@@ -440,18 +453,7 @@ mod tests {
         )
         .expect("the test triangle is a valid mesh");
         let allocation = mesh.verts().as_ptr();
-        let decimation = DecimationReport {
-            disposition: DecimationDisposition::AlreadyPrintScale,
-            input_faces: 1,
-            output_faces: 1,
-            chosen_ratio: 1.0,
-            p99_mm: 0.0,
-            p99_9_mm: 0.0,
-            boundary_edges_before: 3,
-            boundary_edges_after: 3,
-            nonmanifold_edges_before: 0,
-            nonmanifold_edges_after: 0,
-        };
+        let decimation = fixture_decimation_audit();
         let orientation = OrientationHistory::from_reports(
             decimation,
             OrientationReport {

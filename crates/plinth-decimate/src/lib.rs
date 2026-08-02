@@ -111,6 +111,25 @@ pub struct ProbeConfig {
     pub nearest_upper_bound_mm: f64,
 }
 
+impl ProbeConfig {
+    /// Constructs explicit probe limits without exposing downstream crates to
+    /// `geom_kernel` merely to pass this stage request through.
+    #[must_use]
+    pub const fn new(
+        grid_pitch_mm: f64,
+        max_grid_bytes: usize,
+        nearest_upper_bound_mm: f64,
+    ) -> Self {
+        Self {
+            surface: NativeSurfaceConfig {
+                grid_pitch_mm,
+                max_grid_bytes,
+            },
+            nearest_upper_bound_mm,
+        }
+    }
+}
+
 /// Select all points for final verification or capped deterministic samples for
 /// exploratory probes. Sampling uses ChaCha8 as Plinth's ratified replacement,
 /// not a claim of byte-identical numpy RNG output.
@@ -451,27 +470,112 @@ pub enum DecimationDisposition {
     AlreadyPrintScale,
 }
 
-/// Passive summary retained by later stage reports. The full search evidence
-/// remains authoritative until this one-shot stage transition is consumed.
+/// Complete immutable M3 evidence retained through every downstream history.
+/// Fields are private so callers cannot forge accepted evidence; read-only
+/// accessors expose the original trace without recomputation or lossy copying.
+///
+/// ```compile_fail,E0451
+/// use plinth_decimate::{DecimationAudit, DecimationDisposition};
+///
+/// let _ = DecimationAudit {
+///     disposition: DecimationDisposition::AlreadyPrintScale,
+///     input_faces: 1,
+///     output_faces: 1,
+///     chosen_ratio: 1.0,
+///     trace: todo!(),
+///     final_probe: todo!(),
+///     topology_before: todo!(),
+///     topology_after: todo!(),
+/// };
+/// ```
 #[derive(Clone, Debug, PartialEq)]
-pub struct DecimationReport {
-    pub disposition: DecimationDisposition,
-    pub input_faces: usize,
-    pub output_faces: usize,
-    pub chosen_ratio: f64,
-    pub p99_mm: f64,
-    pub p99_9_mm: f64,
-    pub boundary_edges_before: usize,
-    pub boundary_edges_after: usize,
-    pub nonmanifold_edges_before: usize,
-    pub nonmanifold_edges_after: usize,
+pub struct DecimationAudit {
+    disposition: DecimationDisposition,
+    input_faces: usize,
+    output_faces: usize,
+    chosen_ratio: f64,
+    trace: BudgetSearchTrace,
+    final_probe: TwoSidedProbe,
+    topology_before: EdgeTopologyCounts,
+    topology_after: EdgeTopologyCounts,
+}
+
+impl DecimationAudit {
+    #[must_use]
+    pub const fn disposition(&self) -> DecimationDisposition {
+        self.disposition
+    }
+
+    #[must_use]
+    pub const fn trace(&self) -> &BudgetSearchTrace {
+        &self.trace
+    }
+
+    #[must_use]
+    pub const fn final_probe(&self) -> &TwoSidedProbe {
+        &self.final_probe
+    }
+
+    #[must_use]
+    pub const fn topology_before(&self) -> EdgeTopologyCounts {
+        self.topology_before
+    }
+
+    #[must_use]
+    pub const fn topology_after(&self) -> EdgeTopologyCounts {
+        self.topology_after
+    }
+
+    /// Returns the stable summary projection without exposing writable fields.
+    #[must_use]
+    pub const fn report(&self) -> DecimationReport<'_> {
+        DecimationReport { audit: self }
+    }
+}
+
+/// Read-only summary projection over the complete retained audit.
+#[derive(Clone, Copy, Debug)]
+pub struct DecimationReport<'a> {
+    audit: &'a DecimationAudit,
+}
+
+impl DecimationReport<'_> {
+    #[must_use]
+    pub const fn disposition(self) -> DecimationDisposition {
+        self.audit.disposition
+    }
+
+    #[must_use]
+    pub const fn input_faces(self) -> usize {
+        self.audit.input_faces
+    }
+
+    #[must_use]
+    pub const fn output_faces(self) -> usize {
+        self.audit.output_faces
+    }
+
+    #[must_use]
+    pub const fn chosen_ratio(self) -> f64 {
+        self.audit.chosen_ratio
+    }
+
+    #[must_use]
+    pub const fn p99_mm(self) -> f64 {
+        self.audit.final_probe.p99_mm
+    }
+
+    #[must_use]
+    pub const fn p99_9_mm(self) -> f64 {
+        self.audit.final_probe.p99_9_mm
+    }
 }
 
 /// The sole move-only decimation value accepted by orientation.
 #[derive(Debug)]
 pub struct DecimatedModel {
     mesh: Mesh,
-    report: DecimationReport,
+    audit: DecimationAudit,
 }
 
 impl DecimatedModel {
@@ -481,14 +585,19 @@ impl DecimatedModel {
     }
 
     #[must_use]
-    pub const fn report(&self) -> &DecimationReport {
-        &self.report
+    pub const fn audit(&self) -> &DecimationAudit {
+        &self.audit
+    }
+
+    #[must_use]
+    pub const fn report(&self) -> DecimationReport<'_> {
+        self.audit.report()
     }
 
     /// Moves the only production mesh and its passive evidence into orientation.
     #[must_use]
-    pub fn into_parts(self) -> (Mesh, DecimationReport) {
-        (self.mesh, self.report)
+    pub fn into_parts(self) -> (Mesh, DecimationAudit) {
+        (self.mesh, self.audit)
     }
 }
 
@@ -516,17 +625,15 @@ impl BudgetSearchOutcome {
             .map_or(output_faces, |step| step.output_face_count);
         Ok(DecimatedModel {
             mesh,
-            report: DecimationReport {
+            audit: DecimationAudit {
                 disposition,
                 input_faces,
                 output_faces,
                 chosen_ratio,
-                p99_mm: final_probe.p99_mm,
-                p99_9_mm: final_probe.p99_9_mm,
-                boundary_edges_before: topology_before.boundary_edges,
-                boundary_edges_after: topology_after.boundary_edges,
-                nonmanifold_edges_before: topology_before.nonmanifold_edges,
-                nonmanifold_edges_after: topology_after.nonmanifold_edges,
+                trace,
+                final_probe,
+                topology_before,
+                topology_after,
             },
         })
     }
@@ -3052,12 +3159,12 @@ mod tests {
             .expect("a successful identity outcome crosses the stage boundary");
         assert_eq!(model.mesh().verts().as_ptr(), allocation);
         assert_eq!(
-            model.report().disposition,
+            model.report().disposition(),
             DecimationDisposition::AlreadyPrintScale
         );
-        assert_eq!(model.report().chosen_ratio, 1.0);
-        assert_eq!(model.report().input_faces, mesh.tris().len());
-        assert_eq!(model.report().output_faces, mesh.tris().len());
+        assert_eq!(model.report().chosen_ratio(), 1.0);
+        assert_eq!(model.report().input_faces(), mesh.tris().len());
+        assert_eq!(model.report().output_faces(), mesh.tris().len());
     }
 
     #[test]
