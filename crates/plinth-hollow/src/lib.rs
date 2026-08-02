@@ -13,6 +13,7 @@
 
 mod cavity_field;
 pub mod drains;
+pub mod drilling;
 
 pub use cavity_field::{CavityField, CavityFieldRetainedAllocations};
 
@@ -1468,7 +1469,7 @@ fn marching_cavity(mask: &Array3<bool>, origin: [f64; 3], pitch: f64) -> Result<
     Mesh::new(vertices, triangles).map_err(HollowError::OutputMesh)
 }
 
-fn bounds(mesh: &Mesh) -> Result<([f64; 3], [f64; 3]), HollowError> {
+pub(crate) fn bounds(mesh: &Mesh) -> Result<([f64; 3], [f64; 3]), HollowError> {
     let mut low = [f64::INFINITY; 3];
     let mut high = [f64::NEG_INFINITY; 3];
     for point in mesh.verts() {
@@ -1505,7 +1506,7 @@ fn validate_printable_bounds(mesh: &Mesh) -> Result<(), HollowError> {
     Ok(())
 }
 
-fn to_solid(mesh: &Mesh) -> Result<SolidMesh, HollowError> {
+pub(crate) fn to_solid(mesh: &Mesh) -> Result<SolidMesh, HollowError> {
     let triangles = mesh
         .tris()
         .iter()
@@ -1514,7 +1515,7 @@ fn to_solid(mesh: &Mesh) -> Result<SolidMesh, HollowError> {
     SolidMesh::new(mesh.verts().to_vec(), triangles).map_err(HollowError::SolidMesh)
 }
 
-fn from_solid(mesh: SolidMesh) -> Result<Mesh, HollowError> {
+pub(crate) fn from_solid(mesh: SolidMesh) -> Result<Mesh, HollowError> {
     let triangles = mesh
         .triangles()
         .iter()

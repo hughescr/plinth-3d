@@ -75,14 +75,28 @@ pub(crate) fn estimate_indexed_memory(
                 .get(indices[0] as usize)
                 .copied()
                 .ok_or_else(|| format!("indexed face {face} is out of bounds"))?;
-            let b = vertices
+            let source_b = vertices
                 .get(indices[1] as usize)
                 .copied()
                 .ok_or_else(|| format!("indexed face {face} is out of bounds"))?;
-            let c = vertices
+            let source_c = vertices
                 .get(indices[2] as usize)
                 .copied()
                 .ok_or_else(|| format!("indexed face {face} is out of bounds"))?;
+            // `Mesh::from_indexed` stores A plus edge vectors; AxisGrid later
+            // reconstructs B/C from those arrays. Mirror that exact floating-
+            // point path here so a cell-boundary rounding bit cannot make the
+            // supposedly conservative preflight undercount references.
+            let b = [
+                a[0] + (source_b[0] - a[0]),
+                a[1] + (source_b[1] - a[1]),
+                a[2] + (source_b[2] - a[2]),
+            ];
+            let c = [
+                a[0] + (source_c[0] - a[0]),
+                a[1] + (source_c[1] - a[1]),
+                a[2] + (source_c[2] - a[2]),
+            ];
             let (ix0, ix1, iy0, iy1) =
                 projected_cell_bounds(a, b, c, [p0, p1], [origin0, origin1], h);
             let nx = i128::from(ix1) - i128::from(ix0) + 1;
