@@ -4105,15 +4105,170 @@ mod tests {
         forest.validate().unwrap();
     }
 
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum AstVisibility {
+        Private,
+        Crate,
+        OtherPublic,
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ControllerMethodInventory {
+        name: String,
+        visibility: AstVisibility,
+        test_only: bool,
+        calls_raw_growth_core: bool,
+    }
+
+    #[derive(Default)]
+    struct RawGrowthCallVisitor {
+        found: bool,
+    }
+
+    impl<'ast> syn::visit::Visit<'ast> for RawGrowthCallVisitor {
+        fn visit_expr_call(&mut self, expression: &'ast syn::ExprCall) {
+            if let syn::Expr::Path(path) = expression.func.as_ref() {
+                self.found |= path
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "grow_terminal_inner");
+            }
+            syn::visit::visit_expr_call(self, expression);
+        }
+    }
+
+    fn ast_visibility(visibility: &syn::Visibility) -> AstVisibility {
+        match visibility {
+            syn::Visibility::Inherited => AstVisibility::Private,
+            syn::Visibility::Restricted(restricted) if restricted.path.is_ident("crate") => {
+                AstVisibility::Crate
+            }
+            syn::Visibility::Public(_) | syn::Visibility::Restricted(_) => {
+                AstVisibility::OtherPublic
+            }
+        }
+    }
+
+    fn cfg_predicate_enabled_without_test(predicate: &syn::Meta) -> bool {
+        use syn::parse::Parser as _;
+
+        match predicate {
+            syn::Meta::Path(path) => !path.is_ident("test"),
+            syn::Meta::NameValue(_) => true,
+            syn::Meta::List(list) => {
+                let nested =
+                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated
+                        .parse2(list.tokens.clone())
+                        .expect("controller cfg attribute must parse as Rust meta");
+                if list.path.is_ident("all") {
+                    nested.iter().all(cfg_predicate_enabled_without_test)
+                } else if list.path.is_ident("any") {
+                    nested.iter().any(cfg_predicate_enabled_without_test)
+                } else if list.path.is_ident("not") {
+                    nested
+                        .first()
+                        .is_none_or(|meta| !cfg_predicate_enabled_without_test(meta))
+                } else {
+                    true
+                }
+            }
+        }
+    }
+
+    fn is_test_only(attributes: &[syn::Attribute]) -> bool {
+        attributes.iter().any(|attribute| {
+            let syn::Meta::List(cfg) = &attribute.meta else {
+                return false;
+            };
+            if !cfg.path.is_ident("cfg") {
+                return false;
+            }
+            let predicate = syn::parse2::<syn::Meta>(cfg.tokens.clone())
+                .expect("controller cfg predicate must parse as Rust meta");
+            !cfg_predicate_enabled_without_test(&predicate)
+        })
+    }
+
+    fn assert_sealed_terminal_growth_inventory(source: &str) {
+        use syn::visit::Visit as _;
+
+        let file = syn::parse_file(source).expect("cco source must parse as Rust");
+        let mut methods = Vec::new();
+        let mut raw_core_visibility = None;
+        for item in &file.items {
+            match item {
+                syn::Item::Impl(implementation)
+                    if matches!(
+                        implementation.self_ty.as_ref(),
+                        syn::Type::Path(path)
+                            if path.path.segments.last().is_some_and(|segment| segment.ident == "CcoController")
+                    ) =>
+                {
+                    for item in &implementation.items {
+                        let syn::ImplItem::Fn(method) = item else {
+                            continue;
+                        };
+                        let mut calls = RawGrowthCallVisitor::default();
+                        calls.visit_block(&method.block);
+                        methods.push(ControllerMethodInventory {
+                            name: method.sig.ident.to_string(),
+                            visibility: ast_visibility(&method.vis),
+                            test_only: is_test_only(&method.attrs),
+                            calls_raw_growth_core: calls.found,
+                        });
+                    }
+                }
+                syn::Item::Fn(function) if function.sig.ident == "grow_terminal_inner" => {
+                    assert!(raw_core_visibility.is_none(), "raw growth core is unique");
+                    raw_core_visibility = Some(ast_visibility(&function.vis));
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(raw_core_visibility, Some(AstVisibility::Private));
+        let production_growth = methods
+            .iter()
+            .filter(|method| !method.test_only && method.name.contains("grow_terminal"))
+            .collect::<Vec<_>>();
+        assert_eq!(production_growth.len(), 1, "{production_growth:#?}");
+        assert_eq!(
+            production_growth[0],
+            &ControllerMethodInventory {
+                name: "grow_terminal_with_finalized_anchor".to_owned(),
+                visibility: AstVisibility::Crate,
+                test_only: false,
+                calls_raw_growth_core: true,
+            }
+        );
+        assert!(methods.iter().all(|method| {
+            method.test_only
+                || method.visibility == AstVisibility::Private
+                || !method.calls_raw_growth_core
+                || method.name == "grow_terminal_with_finalized_anchor"
+        }));
+    }
+
     #[test]
     fn finalized_route_is_the_only_crate_visible_terminal_growth_entry() {
-        let source = include_str!("cco.rs");
-        let raw_entry = ["pub(crate) fn ", "grow_terminal("].concat();
-        let finalized_entry = ["pub(crate) fn ", "grow_terminal_with_finalized_anchor("].concat();
-        let raw_route = ["pub(crate) struct ", "AnchorTerminalRoute"].concat();
-        assert!(!source.contains(&raw_entry));
-        assert_eq!(source.matches(&finalized_entry).count(), 1);
-        assert!(!source.contains(&raw_route));
+        assert_sealed_terminal_growth_inventory(include_str!("cco.rs"));
+
+        // Token spacing and attribute formatting are deliberately unlike the
+        // production source; the inventory is structural, not textual.
+        assert_sealed_terminal_growth_inventory(
+            r#"
+                struct CcoController;
+                impl CcoController {
+                    #[cfg ( test )]
+                    fn grow_terminal_for_test(&self) { grow_terminal_inner(); }
+                    pub ( crate ) fn grow_terminal_with_finalized_anchor(&self) {
+                        grow_terminal_inner();
+                    }
+                }
+                fn grow_terminal_inner() {}
+            "#,
+        );
     }
 
     #[test]

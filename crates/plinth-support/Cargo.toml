@@ -18,4 +18,5 @@ thiserror = { workspace = true }
 plinth-decimate = { path = "../plinth-decimate" }
 plinth-orient = { path = "../plinth-orient" }
 serde_json = { workspace = true }
+syn = { version = "2", features = ["full", "visit"] }
 trybuild = "1"
