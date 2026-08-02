@@ -872,6 +872,21 @@ pub enum ContactSelectionError {
     },
     #[error("S0 candidate {candidate_id:?} disagrees with required delicacy sidecar")]
     CandidateDelicacyMismatch { candidate_id: ContactCandidateId },
+    #[error("S0 candidate {candidate_id:?} is not finite in {field}")]
+    CandidateNonFinite {
+        candidate_id: ContactCandidateId,
+        field: &'static str,
+    },
+    #[error("S0 candidate {candidate_id:?} has an invalid supported area")]
+    CandidateSupportedArea { candidate_id: ContactCandidateId },
+    #[error("S0 candidate id {candidate_id:?} is duplicated")]
+    DuplicateCandidateId { candidate_id: ContactCandidateId },
+    #[error("S0 candidate {candidate_id:?} is not on its source face")]
+    CandidatePointOffSourceFace { candidate_id: ContactCandidateId },
+    #[error("S0 candidate {candidate_id:?} normal disagrees with its source face")]
+    CandidateNormalMismatch { candidate_id: ContactCandidateId },
+    #[error("contact selection could not construct the canonical surface: {0}")]
+    CandidateSurface(String),
     #[error("contact-selection resource request must be positive")]
     InvalidResourceRequest,
     #[error("dyadic coverage samples exceed requested limit {limit}")]
@@ -951,25 +966,7 @@ pub fn select_contacts(
             previous = Some(face_id);
         }
     }
-    for candidate in candidates.candidates() {
-        let face = usize::try_from(candidate.face_id).map_err(|_| {
-            ContactSelectionError::CandidateFaceOutOfRange {
-                candidate_id: candidate.id,
-                face_id: candidate.face_id,
-            }
-        })?;
-        if face >= mesh.tris().len() {
-            return Err(ContactSelectionError::CandidateFaceOutOfRange {
-                candidate_id: candidate.id,
-                face_id: candidate.face_id,
-            });
-        }
-        if candidate.delicacy.to_bits() != delicacy[face].to_bits() {
-            return Err(ContactSelectionError::CandidateDelicacyMismatch {
-                candidate_id: candidate.id,
-            });
-        }
-    }
+    validate_candidate_pool(mesh, candidates, delicacy, config)?;
 
     let topology = build_face_topology(mesh, WeldPolicy::ExactBits)
         .map_err(|error| ContactSelectionError::Topology(error.to_string()))?;
@@ -1005,12 +1002,7 @@ pub fn select_contacts(
                 selected.push(selected_contact(island.id, candidate));
             }
         }
-        // Frozen `_farthest_point_fallback`: first ordered seat, then the
-        // greatest minimum distance, ties preserving lower pool/source order.
         while selected.len() - start < config.min_contacts_per_island.min(eligible.len()) {
-            // The frozen helper accepts this authority but does not use it in
-            // its farthest-point arithmetic; preserving the read documents
-            // that S1 did not silently create a second spacing-floor owner.
             debug_assert!(config.spacing_floor_mm.get() > 0.0);
             let best = eligible
                 .iter()
@@ -1054,6 +1046,7 @@ pub fn select_contacts(
             &samples,
             &failing,
             &selected,
+            topology.component_ids(),
             config.coverage_radius_factor.get() * config.target_spacing_mm.get(),
             config.max_score_matrix_entries,
         )
@@ -1064,6 +1057,108 @@ pub fn select_contacts(
         selected.push(selected_contact(repair.0, repair.1));
     }
     unreachable!("bounded repair loop returns before exhaustion")
+}
+
+/// Validate caller-owned S0 evidence once, before selection can sort or score it.
+/// The projection is deliberately one gathered batch over the canonical surface.
+fn validate_candidate_pool(
+    mesh: &Mesh,
+    candidates: &ContactCandidatePool,
+    delicacy: &[f64],
+    config: &ContactSelectionConfig<'_>,
+) -> Result<(), ContactSelectionError> {
+    let mut ids = std::collections::BTreeSet::new();
+    for candidate in candidates.candidates() {
+        let face = usize::try_from(candidate.face_id).map_err(|_| {
+            ContactSelectionError::CandidateFaceOutOfRange {
+                candidate_id: candidate.id,
+                face_id: candidate.face_id,
+            }
+        })?;
+        if face >= mesh.tris().len() {
+            return Err(ContactSelectionError::CandidateFaceOutOfRange {
+                candidate_id: candidate.id,
+                face_id: candidate.face_id,
+            });
+        }
+        if candidate.delicacy.to_bits() != delicacy[face].to_bits() {
+            return Err(ContactSelectionError::CandidateDelicacyMismatch {
+                candidate_id: candidate.id,
+            });
+        }
+        if !ids.insert(candidate.id) {
+            return Err(ContactSelectionError::DuplicateCandidateId {
+                candidate_id: candidate.id,
+            });
+        }
+        if !candidate.point_mm.iter().all(|value| value.is_finite()) {
+            return Err(ContactSelectionError::CandidateNonFinite {
+                candidate_id: candidate.id,
+                field: "point_mm",
+            });
+        }
+        if !candidate.normal.iter().all(|value| value.is_finite()) {
+            return Err(ContactSelectionError::CandidateNonFinite {
+                candidate_id: candidate.id,
+                field: "normal",
+            });
+        }
+        for (field, value) in [
+            ("supported_area_mm2", candidate.supported_area_mm2),
+            ("overhang_excess", candidate.overhang_excess),
+            ("delicacy", candidate.delicacy),
+        ] {
+            if !value.is_finite() {
+                return Err(ContactSelectionError::CandidateNonFinite {
+                    candidate_id: candidate.id,
+                    field,
+                });
+            }
+        }
+        if candidate.supported_area_mm2 < 0.0 {
+            return Err(ContactSelectionError::CandidateSupportedArea {
+                candidate_id: candidate.id,
+            });
+        }
+    }
+    if candidates.candidates().is_empty() {
+        return Ok(());
+    }
+    let surface = NativeSurface::from_indexed(
+        mesh.verts(),
+        mesh.tris(),
+        NativeSurfaceConfig {
+            grid_pitch_mm: config.voxel_pitch_mm.get(),
+            max_grid_bytes: usize::MAX,
+        },
+    )
+    .map_err(|error| ContactSelectionError::CandidateSurface(error.to_string()))?;
+    let points: Vec<[f64; 3]> = candidates
+        .candidates()
+        .iter()
+        .map(|candidate| candidate.point_mm)
+        .collect();
+    let (distances, _, faces, _) = surface.project(&points);
+    let canonical_normals = surface.geometry().normals();
+    for (row, candidate) in candidates.candidates().iter().enumerate() {
+        let face = candidate.face_id as usize;
+        if distances[row] > 1.0e-6 || faces[row] != i64::from(candidate.face_id) {
+            return Err(ContactSelectionError::CandidatePointOffSourceFace {
+                candidate_id: candidate.id,
+            });
+        }
+        if candidate
+            .normal
+            .iter()
+            .zip(canonical_normals[face])
+            .any(|(actual, expected)| (actual - expected).abs() > 1.0e-6)
+        {
+            return Err(ContactSelectionError::CandidateNormalMismatch {
+                candidate_id: candidate.id,
+            });
+        }
+    }
+    Ok(())
 }
 
 fn selected_contact(island_id: u32, candidate: &ContactCandidate) -> SelectedContact {
@@ -1094,11 +1189,7 @@ fn build_dyadic_coverage_samples(
                 mesh.verts()[triangle[2] as usize],
             ];
             let max_edge = max_edge_mm(cell);
-            let depth = if max_edge <= config.voxel_pitch_mm.get() {
-                0
-            } else {
-                (max_edge / config.voxel_pitch_mm.get()).log2().ceil() as u32
-            };
+            let depth = dyadic_refine_depth(max_edge, config.voxel_pitch_mm.get());
             let count =
                 4_usize
                     .checked_pow(depth)
@@ -1142,6 +1233,27 @@ fn build_dyadic_coverage_samples(
         }
     }
     Ok(samples)
+}
+
+/// Frozen `placement._refine_depths` scalar rule, including its one-ULP
+/// boundary correction.  The builder applies this same generic rule to every
+/// source face before allocating any terminal cells.
+fn dyadic_refine_depth(max_edge_mm: f64, cell_edge_limit_mm: f64) -> u32 {
+    if max_edge_mm <= cell_edge_limit_mm {
+        return 0;
+    }
+    let mut depth = (max_edge_mm / cell_edge_limit_mm).log2().ceil() as u32;
+    if depth > 0 {
+        let parent_bound = cell_edge_limit_mm * 2_f64.powi((depth - 1) as i32);
+        if max_edge_mm <= parent_bound.next_up() {
+            depth -= 1;
+        }
+    }
+    let bound = cell_edge_limit_mm * 2_f64.powi(depth as i32);
+    if max_edge_mm > bound.next_up() {
+        depth += 1;
+    }
+    depth
 }
 
 fn failing_coverage_samples(
@@ -1204,66 +1316,69 @@ fn best_coverage_repair<'a>(
     samples: &[CoverageSample],
     failing: &[usize],
     selected: &[SelectedContact],
+    components: &[u32],
     radius_mm: f64,
     matrix_budget: usize,
 ) -> Option<(u32, &'a ContactCandidate)> {
     let radius_sq = radius_mm * radius_mm;
-    let mut best: Option<(f64, u32, &'a ContactCandidate)> = None;
-    for candidate in candidates {
-        let mut islands = std::collections::BTreeSet::new();
-        for &sample_index in failing {
-            let sample = &samples[sample_index];
-            if sample.face_id == candidate.face_id {
-                islands.insert(sample.island_id);
-            }
-        }
-        for island_id in islands {
-            if selected.iter().any(|contact| {
-                contact.island_id == island_id && contact.candidate_id == candidate.id
-            }) {
-                continue;
-            }
-            let mut score = 0.0;
-            // A4's score matrix is tiled.  Arithmetic is local over S0/A3
-            // evidence; S1 creates no scalar or extra native geometry query.
-            for rows in failing.chunks(matrix_budget) {
-                for &sample_index in rows {
-                    let sample = &samples[sample_index];
-                    if sample.island_id == island_id
-                        && sample.component_id == sample_component(candidate, samples, island_id)
-                        && squared_distance(candidate.point_mm, sample.point_mm) <= radius_sq
-                    {
-                        score += sample.area_mm2;
+    let mut best: Option<(f64, usize, u32)> = None;
+    let sample_tile = ((matrix_budget as f64).sqrt() as usize).max(1);
+    let candidate_tile = (matrix_budget / sample_tile).max(1);
+    let mut route_keys = std::collections::BTreeSet::new();
+    for &row in failing {
+        route_keys.insert((samples[row].island_id, samples[row].component_id));
+    }
+    for (island_id, component_id) in route_keys {
+        let candidate_rows: Vec<usize> = candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(row, candidate)| {
+                (components[candidate.face_id as usize] == component_id
+                    && samples.iter().any(|sample| {
+                        sample.island_id == island_id && sample.face_id == candidate.face_id
+                    })
+                    && !selected.iter().any(|contact| {
+                        contact.island_id == island_id && contact.candidate_id == candidate.id
+                    }))
+                .then_some(row)
+            })
+            .collect();
+        let sample_rows: Vec<usize> = failing
+            .iter()
+            .copied()
+            .filter(|&row| {
+                samples[row].island_id == island_id && samples[row].component_id == component_id
+            })
+            .collect();
+        for candidate_block in candidate_rows.chunks(candidate_tile) {
+            let mut scores = vec![0.0; candidate_block.len()];
+            for sample_block in sample_rows.chunks(sample_tile) {
+                debug_assert!(candidate_block.len() * sample_block.len() <= matrix_budget);
+                for (candidate_offset, &candidate_row) in candidate_block.iter().enumerate() {
+                    for &sample_row in sample_block {
+                        let sample = &samples[sample_row];
+                        if squared_distance(candidates[candidate_row].point_mm, sample.point_mm)
+                            <= radius_sq
+                        {
+                            scores[candidate_offset] += sample.area_mm2;
+                        }
                     }
                 }
             }
-            if score == 0.0 {
-                continue;
-            }
-            let replace = best.is_none_or(|(best_score, best_island, best_candidate)| {
-                score > best_score
-                    || (score == best_score
-                        && (candidate.delicacy < best_candidate.delicacy
-                            || (candidate.delicacy == best_candidate.delicacy
-                                && (island_id, candidate.id) < (best_island, best_candidate.id))))
-            });
-            if replace {
-                best = Some((score, island_id, candidate));
+            for (candidate_offset, &candidate_row) in candidate_block.iter().enumerate() {
+                let score = scores[candidate_offset];
+                if score == 0.0 {
+                    continue;
+                }
+                if best.is_none_or(|(best_score, best_row, _)| {
+                    score > best_score || (score == best_score && candidate_row < best_row)
+                }) {
+                    best = Some((score, candidate_row, island_id));
+                }
             }
         }
     }
-    best.map(|(_score, island_id, candidate)| (island_id, candidate))
-}
-
-fn sample_component(
-    candidate: &ContactCandidate,
-    samples: &[CoverageSample],
-    island_id: u32,
-) -> u32 {
-    samples
-        .iter()
-        .find(|sample| sample.island_id == island_id && sample.face_id == candidate.face_id)
-        .map_or(u32::MAX, |sample| sample.component_id)
+    best.map(|(_, candidate_row, island_id)| (island_id, &candidates[candidate_row]))
 }
 
 fn squared_distance(left: [f64; 3], right: [f64; 3]) -> f64 {
@@ -1819,7 +1934,7 @@ mod tests {
     }
 
     #[test]
-    fn unsatisfied_coverage_and_missing_sidecars_fail_named() {
+    fn malformed_candidate_pool_and_missing_sidecars_fail_named() {
         let mesh = plinth_mesh::make_box_default().expect("box fixture");
         let delicacy = vec![0.0; mesh.tris().len()];
         let pool = ContactCandidatePool {
@@ -1839,7 +1954,7 @@ mod tests {
         }];
         assert!(matches!(
             select_contacts(&mesh, &pool, &islands, &selection_config(&delicacy)),
-            Err(ContactSelectionError::UnsatisfiedCoverage { .. })
+            Err(ContactSelectionError::CandidatePointOffSourceFace { .. })
         ));
         let missing = ContactSelectionConfig::current(None, 1, 1).expect("constants");
         assert!(matches!(
@@ -1849,7 +1964,155 @@ mod tests {
     }
 
     #[test]
-    fn s1_selection_digest_is_thread_setting_invariant_and_adds_no_native_query() {
+    fn candidate_pool_boundary_rejects_each_named_malformed_input() {
+        let mesh = small_closed_tetra();
+        let delicacy = vec![0.25; mesh.tris().len()];
+        let good = perceive_fixture(&mesh);
+        let islands = pool_islands(&good);
+        let candidate = good.candidates()[0].clone();
+        let check = |pool: ContactCandidatePool| {
+            select_contacts(&mesh, &pool, &islands, &selection_config(&delicacy))
+        };
+
+        let mut pool = ContactCandidatePool {
+            candidates: vec![candidate.clone()],
+        };
+        pool.candidates[0].face_id = u32::MAX;
+        assert!(matches!(
+            check(pool),
+            Err(ContactSelectionError::CandidateFaceOutOfRange { .. })
+        ));
+        let mut pool = ContactCandidatePool {
+            candidates: vec![candidate.clone()],
+        };
+        pool.candidates[0].point_mm[0] = f64::NAN;
+        assert!(matches!(
+            check(pool),
+            Err(ContactSelectionError::CandidateNonFinite {
+                field: "point_mm",
+                ..
+            })
+        ));
+        let mut pool = ContactCandidatePool {
+            candidates: vec![candidate.clone()],
+        };
+        pool.candidates[0].normal[0] = f64::NAN;
+        assert!(matches!(
+            check(pool),
+            Err(ContactSelectionError::CandidateNonFinite {
+                field: "normal",
+                ..
+            })
+        ));
+        let mut pool = ContactCandidatePool {
+            candidates: vec![candidate.clone()],
+        };
+        pool.candidates[0].supported_area_mm2 = -1.0;
+        assert!(matches!(
+            check(pool),
+            Err(ContactSelectionError::CandidateSupportedArea { .. })
+        ));
+        let pool = ContactCandidatePool {
+            candidates: vec![candidate.clone(), candidate.clone()],
+        };
+        assert!(matches!(
+            check(pool),
+            Err(ContactSelectionError::DuplicateCandidateId { .. })
+        ));
+        let mut pool = ContactCandidatePool {
+            candidates: vec![candidate.clone()],
+        };
+        pool.candidates[0].point_mm[0] += 1.0;
+        assert!(matches!(
+            check(pool),
+            Err(ContactSelectionError::CandidatePointOffSourceFace { .. })
+        ));
+        let mut pool = ContactCandidatePool {
+            candidates: vec![candidate.clone()],
+        };
+        pool.candidates[0].normal = [1.0, 0.0, 0.0];
+        assert!(matches!(
+            check(pool),
+            Err(ContactSelectionError::CandidateNormalMismatch { .. })
+        ));
+        let mut pool = ContactCandidatePool {
+            candidates: vec![candidate],
+        };
+        pool.candidates[0].delicacy = 0.5;
+        assert!(matches!(
+            check(pool),
+            Err(ContactSelectionError::CandidateDelicacyMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn coverage_repair_selects_other_source_face_in_the_same_component_at_every_tile_boundary() {
+        // This is an independent A4 score vector: the failing patch belongs to
+        // face 0, while row 1 is the only unoccupied same-component seat that
+        // covers it.  The frozen Python ranker deliberately does not require
+        // candidate.face_id == sample.face_id.
+        let candidates = vec![
+            ContactCandidate {
+                id: ContactCandidateId(10),
+                face_id: 0,
+                point_mm: [0.0; 3],
+                normal: [0.0, 0.0, -1.0],
+                supported_area_mm2: 1.0,
+                overhang_excess: 1.0,
+                delicacy: 0.0,
+            },
+            ContactCandidate {
+                id: ContactCandidateId(20),
+                face_id: 1,
+                point_mm: [4.0, 0.0, 0.0],
+                normal: [0.0, 0.0, -1.0],
+                supported_area_mm2: 1.0,
+                overhang_excess: 1.0,
+                delicacy: 0.0,
+            },
+        ];
+        let samples = vec![
+            CoverageSample {
+                island_id: 9,
+                face_id: 0,
+                component_id: 3,
+                point_mm: [8.0, 0.0, 0.0],
+                area_mm2: 2.0,
+            },
+            CoverageSample {
+                island_id: 9,
+                face_id: 0,
+                component_id: 3,
+                point_mm: [8.5, 0.0, 0.0],
+                area_mm2: 3.0,
+            },
+            CoverageSample {
+                island_id: 9,
+                face_id: 1,
+                component_id: 3,
+                point_mm: [4.0, 0.0, 0.0],
+                area_mm2: 1.0,
+            },
+        ];
+        let occupied = vec![selected_contact(9, &candidates[0])];
+        for budget in [1, 2, 3, 4, 16] {
+            let (island, repair) = best_coverage_repair(
+                &candidates,
+                &samples,
+                &[0, 1],
+                &occupied,
+                &[3, 3],
+                5.0,
+                budget,
+            )
+            .expect("different-face candidate must repair the failing patch");
+            assert_eq!(island, 9);
+            assert_eq!(repair.id, ContactCandidateId(20));
+        }
+    }
+
+    #[test]
+    fn s1_selection_digest_is_thread_setting_invariant_with_batched_pool_validation() {
         static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         let _guard = ENV_LOCK
             .get_or_init(|| Mutex::new(()))
