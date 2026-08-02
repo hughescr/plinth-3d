@@ -9,7 +9,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use geom_kernel::{NativeSurface, NativeSurfaceConfig, PlaneSliceLimits, PointCloudIndex};
+use geom_kernel::{
+    NativeSurface, NativeSurfaceConfig, PlaneSliceLimits, PointCloudIndex, PointQueryError,
+    RadiusQueryLimits,
+};
 use plinth_core::LayerPlan;
 use plinth_mesh::{mesh_fingerprint, FaceTopology, Mesh, WeldPolicy, WeldedView};
 use thiserror::Error;
@@ -33,8 +36,12 @@ pub struct GenericPerceptionLimits {
     pub max_slice_output_bytes: usize,
     pub max_loop_vertices: usize,
     pub max_minima_vertices: usize,
+    pub max_island_neighbor_pairs: usize,
+    pub max_island_neighbor_bytes: usize,
     pub max_overlap_pairs: usize,
     pub max_overlap_bytes: usize,
+    pub max_overlap_vertex_tests: usize,
+    pub max_overlap_edge_tests: usize,
 }
 
 impl GenericPerceptionLimits {
@@ -47,8 +54,12 @@ impl GenericPerceptionLimits {
             max_slice_output_bytes: 2 * 1024 * 1024 * 1024,
             max_loop_vertices: 100_000_000,
             max_minima_vertices: 20_000_000,
+            max_island_neighbor_pairs: 100_000_000,
+            max_island_neighbor_bytes: 2 * 1024 * 1024 * 1024,
             max_overlap_pairs: 100_000_000,
             max_overlap_bytes: 2 * 1024 * 1024 * 1024,
+            max_overlap_vertex_tests: 100_000_000,
+            max_overlap_edge_tests: 100_000_000,
         }
     }
 }
@@ -379,10 +390,18 @@ pub enum GenericPerceptionError {
     LayerScheduleCoverage,
     #[error("support perception plate and build frame disagree")]
     FrameMismatch,
+    #[error("island-neighbor query requires {required} output pairs; limit is {limit}")]
+    IslandNeighborPairLimit { required: usize, limit: usize },
+    #[error("island-neighbor query requires {required} output bytes; limit is {limit}")]
+    IslandNeighborByteLimit { required: usize, limit: usize },
     #[error("slice overlap requires {required} candidate pairs; limit is {limit}")]
     OverlapPairLimit { required: usize, limit: usize },
     #[error("slice overlap requires {required} bytes; limit is {limit}")]
     OverlapByteLimit { required: usize, limit: usize },
+    #[error("slice overlap requires at least {required} sampled vertex tests; limit is {limit}")]
+    OverlapVertexTestLimit { required: usize, limit: usize },
+    #[error("slice overlap requires at least {required} sampled edge tests; limit is {limit}")]
+    OverlapEdgeTestLimit { required: usize, limit: usize },
     #[error("physical contact {contact_id} is non-finite")]
     NonFinitePhysicalContact { contact_id: u64 },
     #[error("physical contact id {contact_id} is duplicated")]
@@ -411,7 +430,7 @@ pub fn prepare_generic_contacts(
     let (topology, delicacy) = validate_perception_input(mesh, config)?;
     let surface = build_surface(mesh, config)?;
     let raw = perceive_contacts_on_surface(mesh, config, &topology, delicacy, &surface)?;
-    let islands = connected_islands(&raw, &topology, &surface)?;
+    let islands = connected_islands(&raw, &topology, &surface, limits)?;
     let payload = build_candidate_payload(mesh, &islands, candidate_config)?;
     let geometry = surface.geometry();
     let candidates = payload
@@ -482,13 +501,7 @@ pub fn prepare_generic_contacts(
         }
         slice_layers.push(loops);
     }
-    let island_births = find_births(
-        &layer_indices,
-        &planes,
-        &slice_layers,
-        limits.max_overlap_pairs,
-        limits.max_overlap_bytes,
-    )?;
+    let island_births = find_births(&layer_indices, &planes, &slice_layers, limits)?;
     let local_z_minima = find_local_minima(mesh, &surface, layers, &island_births, limits)?;
     let load_eligibility = build_load_eligibility(mesh, &surface, &islands, specialized)?;
     let authority = authority_fingerprint(
@@ -533,6 +546,7 @@ fn connected_islands(
     raw: &ContactCandidatePool,
     topology: &FaceTopology,
     surface: &NativeSurface,
+    limits: GenericPerceptionLimits,
 ) -> Result<Vec<SupportIsland>, GenericPerceptionError> {
     let mut unseen = raw
         .candidates()
@@ -559,8 +573,23 @@ fn connected_islands(
     // Gather every island-closing query, invoke the maintained spatial index
     // once, then scatter the CSR into source-face adjacency.
     let nearby = index
-        .radius_neighbors_batch(&points, radius)
-        .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?;
+        .radius_neighbors_batch(
+            &points,
+            radius,
+            RadiusQueryLimits {
+                max_output_pairs: limits.max_island_neighbor_pairs,
+                max_output_bytes: limits.max_island_neighbor_bytes,
+            },
+        )
+        .map_err(|error| match error {
+            PointQueryError::RadiusOutputPairLimit { required, limit } => {
+                GenericPerceptionError::IslandNeighborPairLimit { required, limit }
+            }
+            PointQueryError::RadiusOutputByteLimit { required, limit } => {
+                GenericPerceptionError::IslandNeighborByteLimit { required, limit }
+            }
+            other => GenericPerceptionError::PointIndex(other.to_string()),
+        })?;
     let mut spatial = BTreeMap::<usize, Vec<usize>>::new();
     for (row, &face) in face_ids.iter().enumerate() {
         let range = nearby
@@ -824,46 +853,38 @@ fn point_in_polygon(point: [f64; 2], polygon: &[[f64; 2]]) -> bool {
 }
 
 fn segments_intersect(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
-    fn orient(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
-        (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
-    }
-    let ab_c = orient(a, b, c);
-    let ab_d = orient(a, b, d);
-    let cd_a = orient(c, d, a);
-    let cd_b = orient(c, d, b);
-    let on_segment = |p: [f64; 2], q: [f64; 2], r: [f64; 2]| {
-        q[0] >= p[0].min(r[0]) - LOOP_MERGE_MM
-            && q[0] <= p[0].max(r[0]) + LOOP_MERGE_MM
-            && q[1] >= p[1].min(r[1]) - LOOP_MERGE_MM
-            && q[1] <= p[1].max(r[1]) + LOOP_MERGE_MM
+    let ccw = |p: [f64; 2], q: [f64; 2], r: [f64; 2]| {
+        (r[1] - p[1]) * (q[0] - p[0]) > (q[1] - p[1]) * (r[0] - p[0])
     };
-    if ab_c.abs() <= LOOP_MERGE_MM && on_segment(a, c, b)
-        || ab_d.abs() <= LOOP_MERGE_MM && on_segment(a, d, b)
-        || cd_a.abs() <= LOOP_MERGE_MM && on_segment(c, a, d)
-        || cd_b.abs() <= LOOP_MERGE_MM && on_segment(c, b, d)
-    {
-        return true;
-    }
-    (ab_c > 0.0) != (ab_d > 0.0) && (cd_a > 0.0) != (cd_b > 0.0)
+    ccw(a, c, d) != ccw(b, c, d) && ccw(a, b, c) != ccw(a, b, d)
 }
 
 fn find_births(
     layer_indices: &[usize],
     planes: &[f64],
     layers: &[Vec<SliceSolid>],
-    max_pairs: usize,
-    max_bytes: usize,
+    limits: GenericPerceptionLimits,
 ) -> Result<Vec<IslandBirth>, GenericPerceptionError> {
     let mut births = Vec::new();
     let mut previous: &[SliceSolid] = &[];
+    let mut operation_budget = OverlapOperationBudget::new(limits);
     for (layer_index, layer) in layers.iter().enumerate() {
-        let overlaps = overlap_candidates(layer, previous, max_pairs, max_bytes)?;
+        let overlaps = overlap_candidates(
+            layer,
+            previous,
+            limits.max_overlap_pairs,
+            limits.max_overlap_bytes,
+        )?;
         for (current_index, solid) in layer.iter().enumerate() {
-            let overlapped = overlaps.get(&current_index).is_some_and(|prior| {
-                prior
-                    .iter()
-                    .any(|index| solids_overlap(solid, &previous[*index]))
-            });
+            let mut overlapped = false;
+            if let Some(prior) = overlaps.get(&current_index) {
+                for index in prior {
+                    if solids_overlap(solid, &previous[*index], &mut operation_budget)? {
+                        overlapped = true;
+                        break;
+                    }
+                }
+            }
             if !overlapped {
                 let count = solid.outer.points_xy_mm.len() as f64;
                 let centroid = [
@@ -965,6 +986,19 @@ fn overlap_candidates(
                 .map(|(center, _)| *center)
                 .collect::<Vec<_>>(),
             radius,
+            RadiusQueryLimits {
+                max_output_pairs: upper,
+                max_output_bytes: current
+                    .len()
+                    .checked_add(1)
+                    .and_then(|rows| rows.checked_mul(std::mem::size_of::<usize>()))
+                    .and_then(|offsets| {
+                        upper
+                            .checked_mul(std::mem::size_of::<u64>() + std::mem::size_of::<f64>())
+                            .and_then(|pairs| offsets.checked_add(pairs))
+                    })
+                    .unwrap_or(usize::MAX),
+            },
         )
         .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?;
     if nearby.point_ids.len() > max_pairs {
@@ -995,36 +1029,105 @@ fn solid_contains(solid: &SliceSolid, point: [f64; 2]) -> bool {
             .any(|hole| point_in_polygon(point, hole.points_xy_mm()))
 }
 
-fn solids_overlap(a: &SliceSolid, b: &SliceSolid) -> bool {
-    if a.outer
-        .points_xy_mm
-        .iter()
-        .any(|point| solid_contains(b, *point))
-        || b.outer
-            .points_xy_mm
-            .iter()
-            .any(|point| solid_contains(a, *point))
-    {
-        return true;
+struct OverlapOperationBudget {
+    vertex_tests: usize,
+    edge_tests: usize,
+    max_vertex_tests: usize,
+    max_edge_tests: usize,
+}
+
+impl OverlapOperationBudget {
+    fn new(limits: GenericPerceptionLimits) -> Self {
+        Self {
+            vertex_tests: 0,
+            edge_tests: 0,
+            max_vertex_tests: limits.max_overlap_vertex_tests,
+            max_edge_tests: limits.max_overlap_edge_tests,
+        }
+    }
+
+    fn vertex(&mut self) -> Result<(), GenericPerceptionError> {
+        self.vertex_tests = self.vertex_tests.saturating_add(1);
+        if self.vertex_tests > self.max_vertex_tests {
+            return Err(GenericPerceptionError::OverlapVertexTestLimit {
+                required: self.vertex_tests,
+                limit: self.max_vertex_tests,
+            });
+        }
+        Ok(())
+    }
+
+    fn edge(&mut self) -> Result<(), GenericPerceptionError> {
+        self.edge_tests = self.edge_tests.saturating_add(1);
+        if self.edge_tests > self.max_edge_tests {
+            return Err(GenericPerceptionError::OverlapEdgeTestLimit {
+                required: self.edge_tests,
+                limit: self.max_edge_tests,
+            });
+        }
+        Ok(())
+    }
+}
+
+fn solid_bbox(solid: &SliceSolid) -> [f64; 4] {
+    let mut bbox = [
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+    ];
+    for point in &solid.outer.points_xy_mm {
+        bbox[0] = bbox[0].min(point[0]);
+        bbox[1] = bbox[1].max(point[0]);
+        bbox[2] = bbox[2].min(point[1]);
+        bbox[3] = bbox[3].max(point[1]);
+    }
+    bbox
+}
+
+fn solids_overlap(
+    a: &SliceSolid,
+    b: &SliceSolid,
+    budget: &mut OverlapOperationBudget,
+) -> Result<bool, GenericPerceptionError> {
+    let aa = solid_bbox(a);
+    let bb = solid_bbox(b);
+    if aa[1] < bb[0] || bb[1] < aa[0] || aa[3] < bb[2] || bb[3] < aa[2] {
+        return Ok(false);
+    }
+    for (source, target) in [(&a.outer, b), (&b.outer, a)] {
+        let step = (source.points_xy_mm.len() / 40).max(1);
+        for index in (0..source.points_xy_mm.len()).step_by(step) {
+            budget.vertex()?;
+            if solid_contains(target, source.points_xy_mm[index]) {
+                return Ok(true);
+            }
+        }
     }
     let boundaries_a = std::iter::once(&a.outer).chain(a.holes.iter());
     let boundaries_b = std::iter::once(&b.outer)
         .chain(b.holes.iter())
         .collect::<Vec<_>>();
-    boundaries_a.into_iter().any(|left| {
-        boundaries_b.iter().any(|right| {
-            (0..left.points_xy_mm.len()).any(|i| {
-                (0..right.points_xy_mm.len()).any(|j| {
-                    segments_intersect(
+    for left in boundaries_a {
+        let left_step = (left.points_xy_mm.len() / 60).max(1);
+        for right in &boundaries_b {
+            let right_step = (right.points_xy_mm.len() / 60).max(1);
+            for i in (0..left.points_xy_mm.len()).step_by(left_step) {
+                for j in (0..right.points_xy_mm.len()).step_by(right_step) {
+                    budget.edge()?;
+                    if segments_intersect(
                         left.points_xy_mm[i],
-                        left.points_xy_mm[(i + 1) % left.points_xy_mm.len()],
+                        left.points_xy_mm[(i + left_step) % left.points_xy_mm.len()],
                         right.points_xy_mm[j],
-                        right.points_xy_mm[(j + 1) % right.points_xy_mm.len()],
-                    )
-                })
-            })
-        })
-    })
+                        right.points_xy_mm[(j + right_step) % right.points_xy_mm.len()],
+                    ) {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+    }
+    Ok(false)
 }
 
 fn find_local_minima(
@@ -1149,55 +1252,11 @@ fn find_local_minima(
         });
     }
     // Independent filter A: nearest face, queried once for every minimum.
-    if !minima.is_empty() {
-        let exterior = surface.exterior_face_mask();
-        let exterior_points = surface
-            .geometry()
-            .centroids()
-            .iter()
-            .zip(exterior)
-            .filter_map(|(point, keep)| (*keep).then_some(*point))
-            .collect::<Vec<_>>();
-        let interior_points = surface
-            .geometry()
-            .centroids()
-            .iter()
-            .zip(exterior)
-            .filter_map(|(point, keep)| (!*keep).then_some(*point))
-            .collect::<Vec<_>>();
-        // Preserve the live fail-open rule for all-exterior/all-interior
-        // masks. Otherwise compare two gathered nearest batches. Exact ties
-        // remain exterior, matching the frozen table corner case.
-        if !exterior_points.is_empty() && !interior_points.is_empty() {
-            let queries = minima
-                .iter()
-                .map(|minimum| minimum.position_mm)
-                .collect::<Vec<_>>();
-            let exterior_nearest = PointCloudIndex::new(&exterior_points)
-                .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?
-                .knn_batch(&queries, 1)
-                .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?;
-            let interior_nearest = PointCloudIndex::new(&interior_points)
-                .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?
-                .knn_batch(&queries, 1)
-                .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?;
-            minima = minima
-                .into_iter()
-                .enumerate()
-                .filter(|(row, _)| {
-                    let exterior_range = exterior_nearest
-                        .row_range(*row)
-                        .expect("one exterior nearest-face row");
-                    let interior_range = interior_nearest
-                        .row_range(*row)
-                        .expect("one interior nearest-face row");
-                    exterior_nearest.squared_distances[exterior_range.start]
-                        <= interior_nearest.squared_distances[interior_range.start]
-                })
-                .map(|(_, minimum)| minimum)
-                .collect();
-        }
-    }
+    minima = filter_minima_to_exterior_faces(
+        surface.geometry().centroids(),
+        surface.exterior_face_mask(),
+        minima,
+    )?;
 
     // Independent filter B: keep a true birth, or an inadequately carried
     // non-birth. The adequacy probes are gathered and sliced in one batch.
@@ -1260,11 +1319,7 @@ fn find_local_minima(
     for (probe_row, (minimum_index, minimum)) in suspects.into_iter().enumerate() {
         let solids = stitch_layer(probe_row, adequacy_slices.plane(probe_row))?;
         let point = [minimum.position_mm[0], minimum.position_mm[1]];
-        let carried = solids
-            .iter()
-            .filter(|solid| solid_contains(solid, point))
-            .map(SliceSolid::area_mm2)
-            .fold(0.0, f64::max);
+        let carried = carried_outer_area(&solids, point);
         adequate[minimum_index] = carried >= threshold;
     }
     Ok(minima
@@ -1273,6 +1328,50 @@ fn find_local_minima(
         .filter(|(index, _)| is_birth[*index] || !adequate[*index])
         .map(|(_, minimum)| minimum)
         .collect())
+}
+
+fn filter_minima_to_exterior_faces(
+    face_centroids: &[[f64; 3]],
+    exterior: &[bool],
+    mut minima: Vec<LocalZMinimum>,
+) -> Result<Vec<LocalZMinimum>, GenericPerceptionError> {
+    if minima.is_empty()
+        || !exterior.iter().any(|value| *value)
+        || !exterior.iter().any(|value| !*value)
+    {
+        return Ok(minima);
+    }
+    let queries = minima
+        .iter()
+        .map(|minimum| minimum.position_mm)
+        .collect::<Vec<_>>();
+    let nearest = PointCloudIndex::new(face_centroids)
+        .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?
+        .knn_batch(&queries, 1)
+        .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?;
+    minima = minima
+        .into_iter()
+        .enumerate()
+        .filter(|(row, _)| {
+            let range = nearest
+                .row_range(*row)
+                .expect("one all-face nearest row per minimum");
+            exterior[nearest.point_ids[range.start] as usize]
+        })
+        .map(|(_, minimum)| minimum)
+        .collect();
+    Ok(minima)
+}
+
+fn carried_outer_area(solids: &[SliceSolid], point: [f64; 2]) -> f64 {
+    // Python Path2D.discrete tests each positive outer loop independently.
+    // A hollow cavity does not subtract from the load-bearing outer component
+    // for this one adequacy predicate.
+    solids
+        .iter()
+        .filter(|solid| point_in_polygon(point, solid.outer.points_xy_mm()))
+        .map(|solid| solid.outer.signed_area_mm2)
+        .fold(0.0, f64::max)
 }
 
 fn layer_tolerance(layers: &LayerPlan, z: f64, count: usize) -> f64 {
@@ -1549,8 +1648,12 @@ fn authority_fingerprint(
     result_config.usize(limits.max_slice_output_bytes);
     result_config.usize(limits.max_loop_vertices);
     result_config.usize(limits.max_minima_vertices);
+    result_config.usize(limits.max_island_neighbor_pairs);
+    result_config.usize(limits.max_island_neighbor_bytes);
     result_config.usize(limits.max_overlap_pairs);
     result_config.usize(limits.max_overlap_bytes);
+    result_config.usize(limits.max_overlap_vertex_tests);
+    result_config.usize(limits.max_overlap_edge_tests);
     let mut frame = Fnv::new();
     frame.f64(frame_value.plate_z_mm().get());
     frame.f64(frame_value.lift_mm().get());
@@ -1690,8 +1793,11 @@ mod tests {
                     },
                 ],
             ],
-            16,
-            4096,
+            GenericPerceptionLimits {
+                max_overlap_pairs: 16,
+                max_overlap_bytes: 4096,
+                ..GenericPerceptionLimits::production()
+            },
         )
         .unwrap();
         assert_eq!(births.len(), 2);
@@ -1699,6 +1805,160 @@ mod tests {
         // Boundary-point mean, matching frozen Path2D.discrete behavior;
         // deliberately asymmetric so an area centroid cannot pass.
         assert_eq!(births[1].centroid_xy_mm, [1.5, 1.325]);
+    }
+
+    #[test]
+    fn hollow_adequacy_uses_positive_outer_area_even_when_point_is_in_hole() {
+        let solid = SliceSolid {
+            outer: SliceLoop {
+                points_xy_mm: vec![[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]],
+                signed_area_mm2: 16.0,
+                hole: false,
+            },
+            holes: vec![SliceLoop {
+                points_xy_mm: vec![[1.0, 1.0], [1.0, 3.0], [3.0, 3.0], [3.0, 1.0]],
+                signed_area_mm2: -4.0,
+                hole: true,
+            }],
+        };
+        assert_eq!(carried_outer_area(&[solid], [2.0, 2.0]), 16.0);
+    }
+
+    #[test]
+    fn exterior_filter_uses_one_all_face_query_and_global_face_id_tie() {
+        let minimum = LocalZMinimum {
+            position_mm: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, -1.0],
+            region_points_mm: vec![[0.0, 0.0, 0.0]],
+        };
+        let centroids = [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        assert_eq!(
+            filter_minima_to_exterior_faces(&centroids, &[false, true], vec![minimum.clone()])
+                .unwrap(),
+            Vec::<LocalZMinimum>::new()
+        );
+        assert_eq!(
+            filter_minima_to_exterior_faces(&centroids, &[true, false], vec![minimum.clone()])
+                .unwrap(),
+            vec![minimum]
+        );
+    }
+
+    #[test]
+    fn island_neighbor_dense_output_accepts_exact_caps_and_rejects_cap_plus_one() {
+        let mesh = plinth_mesh::make_box([0.01, 0.01, 0.01], [0.0; 3]).unwrap();
+        let delicacy = vec![0.0; mesh.tris().len()];
+        let config = perception_config(&delicacy);
+        let surface = build_surface(&mesh, &config).unwrap();
+        let topology = plinth_mesh::build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let raw = ContactCandidatePool {
+            candidates: (0..mesh.tris().len())
+                .map(|face| ContactCandidate {
+                    id: ContactCandidateId(face as u64),
+                    face_id: face as u32,
+                    point_mm: surface.geometry().centroids()[face],
+                    normal: surface.geometry().normals()[face],
+                    supported_area_mm2: surface.geometry().areas()[face],
+                    overhang_excess: 1.0,
+                    delicacy: 0.0,
+                })
+                .collect(),
+        };
+        let count = mesh.tris().len();
+        let pairs = count * count;
+        let bytes = (count + 1) * std::mem::size_of::<usize>()
+            + pairs * (std::mem::size_of::<u64>() + std::mem::size_of::<f64>());
+        let exact = GenericPerceptionLimits {
+            max_island_neighbor_pairs: pairs,
+            max_island_neighbor_bytes: bytes,
+            ..GenericPerceptionLimits::production()
+        };
+        assert_eq!(
+            connected_islands(&raw, &topology, &surface, exact)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            connected_islands(
+                &raw,
+                &topology,
+                &surface,
+                GenericPerceptionLimits {
+                    max_island_neighbor_pairs: pairs - 1,
+                    ..exact
+                }
+            ),
+            Err(GenericPerceptionError::IslandNeighborPairLimit {
+                required: pairs,
+                limit: pairs - 1,
+            })
+        );
+        assert_eq!(
+            connected_islands(
+                &raw,
+                &topology,
+                &surface,
+                GenericPerceptionLimits {
+                    max_island_neighbor_bytes: bytes - 1,
+                    ..exact
+                }
+            ),
+            Err(GenericPerceptionError::IslandNeighborByteLimit {
+                required: bytes,
+                limit: bytes - 1,
+            })
+        );
+    }
+
+    #[test]
+    fn overlap_sampling_enforces_exact_vertex_and_edge_operation_caps() {
+        let solid = |points_xy_mm: Vec<[f64; 2]>| SliceSolid {
+            outer: SliceLoop {
+                signed_area_mm2: signed_area(&points_xy_mm),
+                points_xy_mm,
+                hole: false,
+            },
+            holes: vec![],
+        };
+        // Bboxes overlap, while the triangles have a deterministic gap.
+        let a = solid(vec![[0.0, 0.0], [2.0, 0.0], [0.0, 2.0]]);
+        let b = solid(vec![[2.0, 2.0], [2.0, 0.5], [0.5, 2.0]]);
+        let mut exact = OverlapOperationBudget {
+            vertex_tests: 0,
+            edge_tests: 0,
+            max_vertex_tests: 6,
+            max_edge_tests: 9,
+        };
+        assert!(!solids_overlap(&a, &b, &mut exact).unwrap());
+        assert_eq!((exact.vertex_tests, exact.edge_tests), (6, 9));
+
+        let mut vertex_short = OverlapOperationBudget {
+            max_vertex_tests: 5,
+            ..exact
+        };
+        vertex_short.vertex_tests = 0;
+        vertex_short.edge_tests = 0;
+        assert_eq!(
+            solids_overlap(&a, &b, &mut vertex_short),
+            Err(GenericPerceptionError::OverlapVertexTestLimit {
+                required: 6,
+                limit: 5,
+            })
+        );
+        let mut edge_short = OverlapOperationBudget {
+            vertex_tests: 0,
+            edge_tests: 0,
+            max_vertex_tests: 6,
+            max_edge_tests: 8,
+        };
+        assert_eq!(
+            solids_overlap(&a, &b, &mut edge_short),
+            Err(GenericPerceptionError::OverlapEdgeTestLimit {
+                required: 9,
+                limit: 8,
+            })
+        );
     }
 
     #[test]
@@ -2109,22 +2369,45 @@ mod tests {
             ),
             Err(GenericPerceptionError::StaleAuthority)
         );
-        let changed_limits = GenericPerceptionLimits {
-            max_overlap_pairs: limits.max_overlap_pairs - 1,
-            ..limits
-        };
-        assert_eq!(
-            plan.validate_binding(
-                &mesh,
-                &config,
-                frame(),
-                &layers,
-                &candidates,
-                &reservations,
-                changed_limits,
-            ),
-            Err(GenericPerceptionError::StaleAuthority)
-        );
+        for changed_limits in [
+            GenericPerceptionLimits {
+                max_island_neighbor_pairs: limits.max_island_neighbor_pairs - 1,
+                ..limits
+            },
+            GenericPerceptionLimits {
+                max_island_neighbor_bytes: limits.max_island_neighbor_bytes - 1,
+                ..limits
+            },
+            GenericPerceptionLimits {
+                max_overlap_pairs: limits.max_overlap_pairs - 1,
+                ..limits
+            },
+            GenericPerceptionLimits {
+                max_overlap_bytes: limits.max_overlap_bytes - 1,
+                ..limits
+            },
+            GenericPerceptionLimits {
+                max_overlap_vertex_tests: limits.max_overlap_vertex_tests - 1,
+                ..limits
+            },
+            GenericPerceptionLimits {
+                max_overlap_edge_tests: limits.max_overlap_edge_tests - 1,
+                ..limits
+            },
+        ] {
+            assert_eq!(
+                plan.validate_binding(
+                    &mesh,
+                    &config,
+                    frame(),
+                    &layers,
+                    &candidates,
+                    &reservations,
+                    changed_limits,
+                ),
+                Err(GenericPerceptionError::StaleAuthority)
+            );
+        }
         let wrong_plate = BuildFrame::new(
             Finite::new(-1.0).unwrap(),
             PositiveFinite::new(5.0).unwrap(),

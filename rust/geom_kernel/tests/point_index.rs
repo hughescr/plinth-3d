@@ -1,7 +1,16 @@
-use geom_kernel::{NeighborCsr, PointCloudIndex, PointIndexBuildError, PointQueryError};
+use geom_kernel::{
+    NeighborCsr, PointCloudIndex, PointIndexBuildError, PointQueryError, RadiusQueryLimits,
+};
 
 const THREAD_SWEEP_CHILD: &str = "GEOM_KERNEL_POINT_INDEX_THREAD_SWEEP_CHILD";
 const THREAD_SWEEP_SIGNATURE: &str = "GEOM_KERNEL_POINT_INDEX_THREAD_SWEEP_SIGNATURE=";
+
+fn radius_limits() -> RadiusQueryLimits {
+    RadiusQueryLimits {
+        max_output_pairs: usize::MAX,
+        max_output_bytes: usize::MAX,
+    }
+}
 
 fn sweep_threads(test_name: &str) -> Option<Vec<String>> {
     if std::env::var(THREAD_SWEEP_CHILD).as_deref() == Ok("1") {
@@ -78,14 +87,20 @@ fn radius_boundary_is_inclusive_at_and_distinguishes_adjacent_f64_values() {
     let index =
         PointCloudIndex::new(&[[below, 0.0, 0.0], [1.0, 0.0, 0.0], [above, 0.0, 0.0]]).unwrap();
 
-    let at = index.radius_neighbors_batch(&[[0.0; 3]], 1.0).unwrap();
+    let at = index
+        .radius_neighbors_batch(&[[0.0; 3]], 1.0, radius_limits())
+        .unwrap();
     assert_eq!(at.offsets, vec![0, 2]);
     assert_eq!(at.point_ids, vec![0, 1]);
 
-    let just_below = index.radius_neighbors_batch(&[[0.0; 3]], below).unwrap();
+    let just_below = index
+        .radius_neighbors_batch(&[[0.0; 3]], below, radius_limits())
+        .unwrap();
     assert_eq!(just_below.point_ids, vec![0]);
 
-    let just_above = index.radius_neighbors_batch(&[[0.0; 3]], above).unwrap();
+    let just_above = index
+        .radius_neighbors_batch(&[[0.0; 3]], above, radius_limits())
+        .unwrap();
     assert_eq!(just_above.point_ids, vec![0, 1, 2]);
 }
 
@@ -99,7 +114,11 @@ fn radius_rows_are_csr_with_duplicate_and_equal_distance_id_ties() {
     ])
     .unwrap();
     let result = index
-        .radius_neighbors_batch(&[[0.0; 3], [10.0, 0.0, 0.0], [0.0, 2.0, 0.0]], 1.0)
+        .radius_neighbors_batch(
+            &[[0.0; 3], [10.0, 0.0, 0.0], [0.0, 2.0, 0.0]],
+            1.0,
+            radius_limits(),
+        )
         .unwrap();
 
     assert_eq!(result.offsets, vec![0, 3, 3, 3]);
@@ -107,6 +126,53 @@ fn radius_rows_are_csr_with_duplicate_and_equal_distance_id_ties() {
     assert_eq!(result.squared_distances, vec![1.0, 1.0, 1.0]);
     assert_eq!(result.row_range(1), Some(3..3));
     assert_eq!(result.row_range(3), None);
+}
+
+#[test]
+fn radius_output_caps_accept_exact_and_reject_cap_plus_one_before_unbounded_output() {
+    let index = PointCloudIndex::new(&[[0.0; 3], [0.0; 3], [0.0; 3]]).unwrap();
+    let queries = [[0.0; 3], [0.0; 3]];
+    let exact = RadiusQueryLimits {
+        max_output_pairs: 6,
+        max_output_bytes: 3 * std::mem::size_of::<usize>()
+            + 6 * (std::mem::size_of::<u64>() + std::mem::size_of::<f64>()),
+    };
+    assert_eq!(
+        index
+            .radius_neighbors_batch(&queries, 0.0, exact)
+            .unwrap()
+            .point_ids
+            .len(),
+        6
+    );
+    assert_eq!(
+        index.radius_neighbors_batch(
+            &queries,
+            0.0,
+            RadiusQueryLimits {
+                max_output_pairs: 5,
+                ..exact
+            }
+        ),
+        Err(PointQueryError::RadiusOutputPairLimit {
+            required: 6,
+            limit: 5,
+        })
+    );
+    assert_eq!(
+        index.radius_neighbors_batch(
+            &queries,
+            0.0,
+            RadiusQueryLimits {
+                max_output_bytes: exact.max_output_bytes - 1,
+                ..exact
+            }
+        ),
+        Err(PointQueryError::RadiusOutputByteLimit {
+            required: exact.max_output_bytes,
+            limit: exact.max_output_bytes - 1,
+        })
+    );
 }
 
 #[test]
@@ -121,7 +187,7 @@ fn construction_and_batch_inputs_are_typed_and_reject_nonfinite_values() {
     ));
     let index = PointCloudIndex::new(&[[0.0; 3]]).unwrap();
     for radius in [f64::NAN, f64::INFINITY, -0.5] {
-        match index.radius_neighbors_batch(&[], radius) {
+        match index.radius_neighbors_batch(&[], radius, radius_limits()) {
             Err(PointQueryError::InvalidRadius { radius: got }) => {
                 assert_eq!(got.to_bits(), radius.to_bits());
             }
@@ -129,7 +195,7 @@ fn construction_and_batch_inputs_are_typed_and_reject_nonfinite_values() {
         }
     }
     assert_eq!(
-        index.radius_neighbors_batch(&[[0.0, f64::NEG_INFINITY, 0.0]], 1.0),
+        index.radius_neighbors_batch(&[[0.0, f64::NEG_INFINITY, 0.0]], 1.0, radius_limits()),
         Err(PointQueryError::NonFiniteQuery { query: 0, axis: 1 })
     );
 }
@@ -181,7 +247,9 @@ fn indexed_results_match_an_independent_brute_force_fixture() {
     ];
     let queries = [[0.0; 3], [1.0, 0.0, 1.0], [9.0, 9.0, 9.0]];
     let index = PointCloudIndex::new(&points).unwrap();
-    let actual_radius = index.radius_neighbors_batch(&queries, 2.0).unwrap();
+    let actual_radius = index
+        .radius_neighbors_batch(&queries, 2.0, radius_limits())
+        .unwrap();
     let actual_knn = index.knn_batch(&queries, 3).unwrap();
 
     let mut expected_radius = Vec::new();
@@ -223,7 +291,7 @@ fn public_api_is_batch_only_and_batch_results_are_thread_identical() {
     // This compile-time use intentionally reaches only the batch entry points;
     // PointCloudIndex's Kiddo tree is private and no scalar query is exported.
     fn consume_batch_api(index: &PointCloudIndex) -> Result<NeighborCsr, PointQueryError> {
-        index.radius_neighbors_batch(&[[0.0; 3], [1.0; 3]], 3.0)
+        index.radius_neighbors_batch(&[[0.0; 3], [1.0; 3]], 3.0, radius_limits())
     }
 
     if let Some(signatures) =
@@ -253,7 +321,11 @@ fn public_api_is_batch_only_and_batch_results_are_thread_identical() {
     let _ = consume_batch_api(&index).unwrap();
 
     let result = (
-        signature(&index.radius_neighbors_batch(&queries, 5.0).unwrap()),
+        signature(
+            &index
+                .radius_neighbors_batch(&queries, 5.0, radius_limits())
+                .unwrap(),
+        ),
         signature(&index.knn_batch(&queries, 8).unwrap()),
     );
     println!("\n{THREAD_SWEEP_SIGNATURE}{result:?}");

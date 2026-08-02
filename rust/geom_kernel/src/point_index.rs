@@ -33,6 +33,18 @@ pub struct NeighborCsr {
     pub squared_distances: Vec<f64>,
 }
 
+/// Caller-owned hard limits for one radius-neighbor batch.
+///
+/// The kernel never offers an unbounded radius query: the CSR offset storage
+/// is checked before searching, and each tree request is capped to the
+/// remaining pair/byte budget plus one item so cap overflow is detected
+/// before an unbounded result vector can be allocated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RadiusQueryLimits {
+    pub max_output_pairs: usize,
+    pub max_output_bytes: usize,
+}
+
 impl NeighborCsr {
     /// Number of query rows represented by this CSR payload.
     pub fn query_count(&self) -> usize {
@@ -99,6 +111,14 @@ pub enum PointQueryError {
         requested: usize,
         point_count: usize,
     },
+    RadiusOutputPairLimit {
+        required: usize,
+        limit: usize,
+    },
+    RadiusOutputByteLimit {
+        required: usize,
+        limit: usize,
+    },
 }
 
 impl std::fmt::Display for PointQueryError {
@@ -123,6 +143,14 @@ impl std::fmt::Display for PointQueryError {
             } => write!(
                 formatter,
                 "requested {requested} neighbors from a point cloud of {point_count} points"
+            ),
+            Self::RadiusOutputPairLimit { required, limit } => write!(
+                formatter,
+                "radius query requires at least {required} output pairs; limit is {limit}"
+            ),
+            Self::RadiusOutputByteLimit { required, limit } => write!(
+                formatter,
+                "radius query requires at least {required} output bytes; limit is {limit}"
             ),
         }
     }
@@ -181,30 +209,71 @@ impl PointCloudIndex {
         &self,
         queries: &[[f64; 3]],
         radius: f64,
+        limits: RadiusQueryLimits,
     ) -> Result<NeighborCsr, PointQueryError> {
         if !radius.is_finite() || radius < 0.0 {
             return Err(PointQueryError::InvalidRadius { radius });
         }
         validate_queries(queries)?;
+        let offsets_bytes = queries
+            .len()
+            .checked_add(1)
+            .and_then(|count| count.checked_mul(std::mem::size_of::<usize>()))
+            .ok_or(PointQueryError::RadiusOutputByteLimit {
+                required: usize::MAX,
+                limit: limits.max_output_bytes,
+            })?;
+        if offsets_bytes > limits.max_output_bytes {
+            return Err(PointQueryError::RadiusOutputByteLimit {
+                required: offsets_bytes,
+                limit: limits.max_output_bytes,
+            });
+        }
         let radius_squared = radius * radius;
-        let rows = par::run(|| {
-            queries
-                .par_iter()
-                .map(|query| {
-                    let mut row = self
-                        .tree
-                        .within_exclusive::<SquaredEuclidean>(query, radius_squared, true)
-                        .into_iter()
-                        .map(|neighbor| Neighbor {
-                            point_id: neighbor.item,
-                            squared_distance: neighbor.distance,
-                        })
-                        .collect::<Vec<_>>();
-                    sort_neighbors(&mut row);
-                    row
+        let pair_bytes = std::mem::size_of::<u64>() + std::mem::size_of::<f64>();
+        let byte_pair_limit = (limits.max_output_bytes - offsets_bytes) / pair_bytes;
+        let mut rows = Vec::with_capacity(queries.len());
+        let mut total = 0usize;
+        for query in queries {
+            let remaining = limits
+                .max_output_pairs
+                .min(byte_pair_limit)
+                .saturating_sub(total);
+            let request = remaining.saturating_add(1).min(self.point_count).max(1);
+            let mut row = self
+                .tree
+                .nearest_n_within_exclusive::<SquaredEuclidean>(
+                    query,
+                    radius_squared,
+                    NonZeroUsize::new(request).expect("request is at least one"),
+                    false,
+                    true,
+                )
+                .into_iter()
+                .map(|neighbor| Neighbor {
+                    point_id: neighbor.item,
+                    squared_distance: neighbor.distance,
                 })
-                .collect::<Vec<_>>()
-        });
+                .collect::<Vec<_>>();
+            let required_pairs = total.saturating_add(row.len());
+            if required_pairs > limits.max_output_pairs {
+                return Err(PointQueryError::RadiusOutputPairLimit {
+                    required: required_pairs,
+                    limit: limits.max_output_pairs,
+                });
+            }
+            let required_bytes =
+                offsets_bytes.saturating_add(required_pairs.saturating_mul(pair_bytes));
+            if required_bytes > limits.max_output_bytes {
+                return Err(PointQueryError::RadiusOutputByteLimit {
+                    required: required_bytes,
+                    limit: limits.max_output_bytes,
+                });
+            }
+            sort_neighbors(&mut row);
+            total = required_pairs;
+            rows.push(row);
+        }
         Ok(assemble(rows))
     }
 
