@@ -4,10 +4,10 @@
 //! kinds and f64 geometry; `plinth-emit` alone maps them to ChituBox record identities and f32.
 //!
 //! The implemented foundation is intentionally leaf-shaped: this module owns the typed scene
-//! boundary, perception, and dyadic contact selection; [`forest`] owns generational topology.
-//! Model-anchor discovery and final foot validation now live in [`anchor`]. Future CCO growth,
-//! member sizing, and raft construction extend this crate only when their real authority and
-//! evidence can land. There is no public `run` stub.
+//! boundary and perception; [`forest`] owns generational topology, [`dyadic`] supplies bounded
+//! candidate payloads, and [`member_sizing`] and [`raft`] retain current parity semantics.
+//! Model-anchor discovery and final foot validation live in [`anchor`]. A future CCO controller
+//! is the authority allowed to connect these leaves. There is no public `run` stub.
 #![forbid(unsafe_code)]
 
 pub mod anchor;

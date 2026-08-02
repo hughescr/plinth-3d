@@ -79,8 +79,8 @@ impl RaftPlan {
     }
 }
 
-/// Plans the current Python-compatible raft from *live*, non-brace forest
-/// members whose rootward endpoint falls in the registered plate band.
+/// Plans the current Python-compatible raft from live forest members whose
+/// rootward endpoint falls in the registered plate band.
 ///
 /// Candidate roots sort by exact `(x, y)` before the frozen tolerance dedup;
 /// consequently a tolerance cluster is represented by its lexically first
@@ -254,22 +254,26 @@ mod tests {
         PositiveFinite::new(value).expect("positive fixture")
     }
 
+    fn member_for(point: [f64; 3], ordinal: u32) -> Member {
+        Member::new(MemberSpec {
+            p0_mm: [number(point[0]), number(point[1]), number(point[2] + 2.0)],
+            p1_mm: point.map(number),
+            r0_mm: TerminalEndRadius::new(radius(0.4)),
+            r1_mm: RootwardEndRadius::new(radius(0.6 + point[0] * 0.01 + point[1] * 0.001)),
+            kind: MemberKind::Trunk,
+            owner: Owner::Generated {
+                family: "raft-test".into(),
+                ordinal,
+            },
+            embed_end: None,
+            carried_mm2: number(1.0),
+        })
+    }
+
     fn forest_for(points: &[[f64; 3]]) -> Forest {
         let mut forest = Forest::new();
         for (ordinal, point) in points.iter().enumerate() {
-            forest.add_member(Member::new(MemberSpec {
-                p0_mm: [number(point[0]), number(point[1]), number(point[2] + 2.0)],
-                p1_mm: point.map(number),
-                r0_mm: TerminalEndRadius::new(radius(0.4)),
-                r1_mm: RootwardEndRadius::new(radius(0.6 + point[0] * 0.01 + point[1] * 0.001)),
-                kind: MemberKind::Trunk,
-                owner: Owner::Generated {
-                    family: "raft-test".into(),
-                    ordinal: ordinal as u32,
-                },
-                embed_end: None,
-                carried_mm2: number(1.0),
-            }));
+            forest.add_member(member_for(*point, ordinal as u32));
         }
         forest
     }
@@ -304,6 +308,20 @@ mod tests {
             .primitives()
             .iter()
             .all(SupportPrimitive::is_semantically_valid));
+    }
+
+    #[test]
+    fn live_members_at_plate_include_braces() {
+        let mut forest = forest_for(&[[0.0, 0.0, 0.0]]);
+        forest.add_brace(member_for([2.0, 0.0, 0.0], 1));
+
+        let raft = plan_bottom_connected(&forest, number(0.0)).expect("valid raft plan");
+        assert_eq!(raft.roots().len(), 2);
+        assert_eq!(
+            raft.primitives().len(),
+            5,
+            "one bridge, two pads, two flares"
+        );
     }
 
     #[test]
