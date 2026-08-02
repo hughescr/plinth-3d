@@ -140,6 +140,8 @@ pub struct SpecializedPhysicalContact {
     contact_id: u64,
     position_mm: [f64; 3],
     normal: [f64; 3],
+    seat_provenance: PhysicalSeatProvenance,
+    carried_area_mm2: f64,
     primary_regular: Option<PrimaryRegularIdentity>,
     regular_routes: Vec<RegularContactRoute>,
     demands: Vec<SpecializedDemand>,
@@ -150,6 +152,28 @@ pub struct PrimaryRegularIdentity {
     route: RegularContactRoute,
     position_mm: [f64; 3],
     normal: [f64; 3],
+}
+
+/// The exact logical authority selected for a finalized physical seat.
+///
+/// A regular or shared seat retains the original regular identity. A
+/// pure-specialized seat retains one deterministic representative demand;
+/// it is deliberately not rewritten as a fabricated regular contact.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PhysicalSeatProvenance {
+    Regular(PrimaryRegularIdentity),
+    Specialized(SpecializedSeatRepresentative),
+}
+
+/// Exact specialized demand retained as a physical-seat representative.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpecializedSeatRepresentative {
+    kind: SpecializedDemandKind,
+    owner_island_id: u32,
+    coverage_face_id: u32,
+    coverage_component_id: u32,
+    nominated_position_mm: [f64; 3],
+    nominated_normal: [f64; 3],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -170,6 +194,18 @@ impl SpecializedPhysicalContact {
         self.position_mm
     }
     #[must_use]
+    pub const fn normal(&self) -> [f64; 3] {
+        self.normal
+    }
+    #[must_use]
+    pub const fn seat_provenance(&self) -> PhysicalSeatProvenance {
+        self.seat_provenance
+    }
+    #[must_use]
+    pub const fn carried_area_mm2(&self) -> f64 {
+        self.carried_area_mm2
+    }
+    #[must_use]
     pub fn demands(&self) -> &[SpecializedDemand] {
         &self.demands
     }
@@ -184,6 +220,43 @@ impl SpecializedPhysicalContact {
     #[must_use]
     pub const fn is_shared_regular(&self) -> bool {
         !self.regular_routes.is_empty() && !self.demands.is_empty()
+    }
+}
+
+impl PhysicalSeatProvenance {
+    #[must_use]
+    pub const fn regular_identity(self) -> Option<PrimaryRegularIdentity> {
+        match self {
+            Self::Regular(identity) => Some(identity),
+            Self::Specialized(_) => None,
+        }
+    }
+}
+
+impl SpecializedSeatRepresentative {
+    #[must_use]
+    pub const fn kind(self) -> SpecializedDemandKind {
+        self.kind
+    }
+    #[must_use]
+    pub const fn owner_island_id(self) -> u32 {
+        self.owner_island_id
+    }
+    #[must_use]
+    pub const fn coverage_face_id(self) -> u32 {
+        self.coverage_face_id
+    }
+    #[must_use]
+    pub const fn coverage_component_id(self) -> u32 {
+        self.coverage_component_id
+    }
+    #[must_use]
+    pub const fn nominated_position_mm(self) -> [f64; 3] {
+        self.nominated_position_mm
+    }
+    #[must_use]
+    pub const fn nominated_normal(self) -> [f64; 3] {
+        self.nominated_normal
     }
 }
 
@@ -316,6 +389,8 @@ impl SpecializedContactPlan {
             hash.u64(contact.contact_id);
             hash.point3(contact.position_mm);
             hash.point3(contact.normal);
+            hash_physical_seat_provenance(&mut hash, contact.seat_provenance);
+            hash.f64(contact.carried_area_mm2);
             if let Some(primary) = contact.primary_regular {
                 hash.u8(1);
                 hash.u64(primary.route.candidate_id);
@@ -484,6 +559,8 @@ pub enum SpecializedError {
     OwnerRouteMismatch { island_id: u32, face_id: u32 },
     #[error("specialized physical owner id overflowed u32")]
     OwnerIdOverflow,
+    #[error("specialized physical contact {contact_id} has no honest seat provenance")]
+    MissingSeatProvenance { contact_id: u64 },
     #[error("registered specialized constants are unavailable: {0}")]
     RegisteredConstantsUnavailable(String),
 }
@@ -719,7 +796,7 @@ pub fn prepare_specialized_contacts(
     canonicalize_and_validate(&mut physical, &islands, layers, attach_reach)?;
 
     let load_inputs = working_load_inputs(&physical, generic, &islands, reservations, limits)?;
-    let contacts = physical
+    let mut contacts = physical
         .into_iter()
         .enumerate()
         .map(|(index, mut contact)| {
@@ -729,6 +806,8 @@ pub fn prepare_specialized_contacts(
                 contact_id,
                 position_mm: contact.position_mm,
                 normal: contact.normal,
+                seat_provenance: contact.seat_provenance,
+                carried_area_mm2: 0.0,
                 primary_regular: contact.primary_regular,
                 regular_routes: contact.regular_routes,
                 demands: contact.demands,
@@ -746,6 +825,17 @@ pub fn prepare_specialized_contacts(
             max_operations: load_inputs.remaining_load_operations,
         },
     )?;
+    for row in load_partition.rows() {
+        let contact = contacts
+            .get_mut(
+                usize::try_from(row.contact_id).map_err(|_| SpecializedError::OwnerIdOverflow)?,
+            )
+            .filter(|contact| contact.contact_id == row.contact_id)
+            .ok_or(SpecializedError::MissingSeatProvenance {
+                contact_id: row.contact_id,
+            })?;
+        contact.carried_area_mm2 += row.carried_area_mm2;
+    }
     Ok(SpecializedContactPlan {
         authority_digest: bound_authority_digest(generic, regular, selection_config, limits),
         semantic_authority_digest: bound_semantic_authority_digest(
@@ -908,6 +998,7 @@ fn add_synthetic_islands(
 struct WorkingContact {
     position_mm: [f64; 3],
     normal: [f64; 3],
+    seat_provenance: PhysicalSeatProvenance,
     primary_regular: Option<PrimaryRegularIdentity>,
     regular_routes: Vec<RegularContactRoute>,
     demands: Vec<SpecializedDemand>,
@@ -921,26 +1012,43 @@ impl WorkingContact {
             coverage_face_id: contact.served_face_id,
             component_id: components[contact.served_face_id as usize],
         };
+        let primary = PrimaryRegularIdentity {
+            route,
+            position_mm: contact.point_mm,
+            normal: contact.normal,
+        };
         Self {
             position_mm: contact.point_mm,
             normal: contact.normal,
-            primary_regular: Some(PrimaryRegularIdentity {
-                route,
-                position_mm: contact.point_mm,
-                normal: contact.normal,
-            }),
+            seat_provenance: PhysicalSeatProvenance::Regular(primary),
+            primary_regular: Some(primary),
             regular_routes: vec![route],
             demands: Vec::new(),
         }
     }
     fn specialized(demand: SpecializedDemand) -> Self {
+        let seat_provenance = specialized_seat_representative(&demand);
         Self {
             position_mm: demand.nominated_position_mm,
             normal: demand.nominated_normal,
+            seat_provenance: PhysicalSeatProvenance::Specialized(seat_provenance),
             primary_regular: None,
             regular_routes: Vec::new(),
             demands: vec![demand],
         }
+    }
+}
+
+const fn specialized_seat_representative(
+    demand: &SpecializedDemand,
+) -> SpecializedSeatRepresentative {
+    SpecializedSeatRepresentative {
+        kind: demand.kind,
+        owner_island_id: demand.owner_island_id,
+        coverage_face_id: demand.coverage_face_id,
+        coverage_component_id: demand.coverage_component_id,
+        nominated_position_mm: demand.nominated_position_mm,
+        nominated_normal: demand.nominated_normal,
     }
 }
 
@@ -1258,6 +1366,7 @@ fn attach_exact_mixed_contacts(
                     representative_face_id: representative.face_id,
                     representative_normal: representative.normal,
                     primary_regular: Some(primary_regular),
+                    seat_provenance: PhysicalSeatProvenance::Regular(primary_regular),
                     position_mm: regular_position,
                     normal: contacts[regular_index].normal,
                 });
@@ -1481,6 +1590,7 @@ struct MergeProposal {
     representative_face_id: u32,
     representative_normal: [f64; 3],
     primary_regular: Option<PrimaryRegularIdentity>,
+    seat_provenance: PhysicalSeatProvenance,
     position_mm: [f64; 3],
     normal: [f64; 3],
 }
@@ -2542,6 +2652,7 @@ fn gather_pair_proposals(
     *descriptor_operations = required_work;
     let mut append = |representative: RepresentativeKey,
                       primary_regular: Option<PrimaryRegularIdentity>,
+                      seat_provenance: PhysicalSeatProvenance,
                       position_mm: [f64; 3],
                       normal: [f64; 3]|
      -> Result<(), SpecializedError> {
@@ -2575,6 +2686,7 @@ fn gather_pair_proposals(
             representative_face_id: representative.face_id,
             representative_normal: representative.normal,
             primary_regular,
+            seat_provenance,
             position_mm,
             normal,
         });
@@ -2594,12 +2706,26 @@ fn gather_pair_proposals(
         let Some(next) = next else {
             break;
         };
+        let selected_demand = demands()
+            .filter(|demand| {
+                compare_representative_keys(&demand_representative_key(demand), &next).is_eq()
+            })
+            .min_by(|left, right| compare_demands(left, right))
+            .expect("representative key is drawn from these demands");
         let physical = if shared_regular.0 {
             left
         } else if shared_regular.1 {
             right
         } else {
-            append(next, None, next.position_mm, next.normal)?;
+            append(
+                next,
+                None,
+                PhysicalSeatProvenance::Specialized(specialized_seat_representative(
+                    selected_demand,
+                )),
+                next.position_mm,
+                next.normal,
+            )?;
             last = Some(next);
             continue;
         };
@@ -2609,6 +2735,7 @@ fn gather_pair_proposals(
         append(
             next,
             Some(primary_regular),
+            PhysicalSeatProvenance::Regular(primary_regular),
             physical.position_mm,
             physical.normal,
         )?;
@@ -2738,6 +2865,7 @@ fn commit_merge(
         normal: proposal
             .primary_regular
             .map_or(proposal.normal, |primary| primary.normal),
+        seat_provenance: proposal.seat_provenance,
         primary_regular: proposal.primary_regular,
         regular_routes: routes,
         demands,
@@ -3097,6 +3225,33 @@ fn bound_authority_digest(
 
 struct Fnv(u64);
 
+fn hash_physical_seat_provenance(hash: &mut Fnv, provenance: PhysicalSeatProvenance) {
+    match provenance {
+        PhysicalSeatProvenance::Regular(primary) => {
+            hash.u8(0);
+            let route = primary.route();
+            hash.u64(route.candidate_id());
+            hash.u32(route.owner_island_id());
+            hash.u32(route.coverage_face_id());
+            hash.u32(route.component_id());
+            hash.point3(primary.position_mm());
+            hash.point3(primary.normal());
+        }
+        PhysicalSeatProvenance::Specialized(representative) => {
+            hash.u8(1);
+            hash.u8(match representative.kind() {
+                SpecializedDemandKind::Minimum => 0,
+                SpecializedDemandKind::IslandBirth => 1,
+            });
+            hash.u32(representative.owner_island_id());
+            hash.u32(representative.coverage_face_id());
+            hash.u32(representative.coverage_component_id());
+            hash.point3(representative.nominated_position_mm());
+            hash.point3(representative.nominated_normal());
+        }
+    }
+}
+
 impl Fnv {
     const fn new() -> Self {
         Self(0xcbf2_9ce4_8422_2325)
@@ -3169,6 +3324,11 @@ mod tests {
         WorkingContact {
             position_mm,
             normal,
+            seat_provenance: PhysicalSeatProvenance::Regular(PrimaryRegularIdentity {
+                route,
+                position_mm,
+                normal,
+            }),
             primary_regular: Some(PrimaryRegularIdentity {
                 route,
                 position_mm,
@@ -3521,6 +3681,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(combined.demands.len(), 2);
+        assert!(matches!(
+            combined.seat_provenance,
+            PhysicalSeatProvenance::Specialized(representative)
+                if representative.coverage_face_id() == 1
+                    && representative.owner_island_id() == 0
+                    && representative.nominated_position_mm() == locked
+        ));
 
         let shared_proposals = test_pair_proposals(
             &[
@@ -4314,9 +4481,9 @@ mod tests {
                 make_overhang_table().unwrap(),
                 // Updated for exact two-stage Python parity: the owner-independent
                 // mixed-class attach prepass precedes specialized-only gating, and
-                // the digest binds the retained primary regular identity explicitly.
+                // the digest binds finalized physical-seat provenance explicitly.
                 // This is not a corpus, baseline, physics, or reference re-freeze.
-                1_389_017_023_496_747_280_u64,
+                13_134_339_233_005_765_488_u64,
                 (95, 51_200, 14),
                 (6, 0, 4),
             ),
@@ -4325,9 +4492,9 @@ mod tests {
                 make_raking_blade().unwrap(),
                 // Updated for exact two-stage Python parity: the owner-independent
                 // mixed-class attach prepass precedes specialized-only gating, and
-                // the digest binds the retained primary regular identity explicitly.
+                // the digest binds finalized physical-seat provenance explicitly.
                 // This is not a corpus, baseline, physics, or reference re-freeze.
-                15_607_448_763_063_777_926_u64,
+                10_011_967_702_941_604_688_u64,
                 (40, 40_192, 13),
                 (3, 10, 8),
             ),
@@ -4336,15 +4503,43 @@ mod tests {
                 make_thin_fin().unwrap(),
                 // Updated for exact two-stage Python parity: the owner-independent
                 // mixed-class attach prepass precedes specialized-only gating, and
-                // the digest binds the retained primary regular identity explicitly.
+                // the digest binds finalized physical-seat provenance explicitly.
                 // This is not a corpus, baseline, physics, or reference re-freeze.
-                10_102_651_859_642_063_796_u64,
+                2_959_445_309_888_638_119_u64,
                 (19, 20_480, 2),
                 (2, 0, 1),
             ),
         ] {
             let plan = full_fixture(mesh, name).unwrap_or_else(|error| panic!("{error}"));
             let actual_digest = plan.digest();
+            for contact in plan.contacts() {
+                match contact.seat_provenance() {
+                    PhysicalSeatProvenance::Regular(primary) => {
+                        assert_eq!(contact.primary_regular(), Some(primary));
+                    }
+                    PhysicalSeatProvenance::Specialized(representative) => {
+                        assert_eq!(contact.primary_regular(), None);
+                        assert!(contact.regular_routes().is_empty());
+                        assert_eq!(
+                            contact.position_mm().map(f64::to_bits),
+                            representative.nominated_position_mm().map(f64::to_bits)
+                        );
+                        assert_eq!(
+                            contact.normal().map(f64::to_bits),
+                            representative.nominated_normal().map(f64::to_bits)
+                        );
+                        assert!(contact.demands().iter().any(|demand| {
+                            demand.kind() == representative.kind()
+                                && demand.owner_island_id() == representative.owner_island_id()
+                                && demand.coverage_face_id() == representative.coverage_face_id()
+                                && demand.coverage_component_id()
+                                    == representative.coverage_component_id()
+                                && demand.nominated_position_mm().map(f64::to_bits)
+                                    == representative.nominated_position_mm().map(f64::to_bits)
+                        }));
+                    }
+                }
+            }
             let actual_counts = (
                 plan.contacts().len(),
                 plan.coverage_samples().len(),
