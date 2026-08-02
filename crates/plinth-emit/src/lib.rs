@@ -12,7 +12,7 @@ use chitubox_io::{
 };
 use plinth_core::PrinterProfile;
 use plinth_mesh::Mesh;
-use plinth_support::{FrustumRingNormal, SphereGeometry, SupportPrimitive, SupportedModel};
+use plinth_support::{FrustumRingNormal, SupportPrimitive, SupportedModel};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -143,25 +143,27 @@ fn audit_disk(
     }
     let info = project.model(0).map_err(|_| EmitError::DiskAuditRejected)?;
     if info.name != MODEL_NAME
-        || info.placement
-            != (Placement {
+        || !same_placement_bits(
+            info.placement,
+            Placement {
                 x: 0.0,
                 y: 0.0,
                 z_lift: expected.lift,
-            })
+            },
+        )
     {
         return Err(EmitError::DiskAuditRejected);
     }
     let model_triangles = project
         .model_triangles(0)
         .map_err(|_| EmitError::DiskAuditRejected)?;
-    if model_triangles != expected.model.xyz {
+    if !same_f32_slice_bits(&model_triangles, &expected.model.xyz) {
         return Err(EmitError::DiskAuditRejected);
     }
     let records = project
         .supports(0)
         .map_err(|_| EmitError::DiskAuditRejected)?;
-    if records != expected.records {
+    if !same_support_records_bits(&records, expected.records) {
         return Err(EmitError::DiskAuditRejected);
     }
     if records.len() != expected.primitives.len() {
@@ -224,43 +226,75 @@ fn audit_sphere_record_fields(
         return Ok(());
     };
     let radius = primitive.start_radius_mm.get();
-    let (start, end) = match sphere {
-        SphereGeometry::Tip {
-            center_mm,
-            outward_axis_unit,
-        } => {
-            if primitive.segment_type != SegmentType::TIP {
-                return Err(EmitError::DiskAuditRejected);
-            }
-            let center = finite_point(*center_mm);
-            let axis = finite_point(*outward_axis_unit);
-            (
-                std::array::from_fn(|index| center[index] - radius * axis[index]),
-                std::array::from_fn(|index| center[index] + radius * axis[index]),
-            )
+    let (start, end) = if let Some((center_mm, outward_axis_unit)) = sphere.tip_authority() {
+        if primitive.segment_type != SegmentType::TIP {
+            return Err(EmitError::DiskAuditRejected);
         }
-        SphereGeometry::Joint { center_mm } => {
-            if primitive.segment_type != SegmentType::SHAFT {
-                return Err(EmitError::DiskAuditRejected);
-            }
-            let center = finite_point(*center_mm);
-            (
-                [center[0], center[1], center[2] + radius],
-                [center[0], center[1], center[2] - radius],
-            )
+        let center = finite_point(center_mm);
+        let axis = finite_point(outward_axis_unit);
+        (
+            std::array::from_fn(|index| center[index] - radius * axis[index]),
+            std::array::from_fn(|index| center[index] + radius * axis[index]),
+        )
+    } else if let Some(center_mm) = sphere.joint_center() {
+        if primitive.segment_type != SegmentType::SHAFT {
+            return Err(EmitError::DiskAuditRejected);
         }
+        let center = finite_point(center_mm);
+        (
+            [center[0], center[1], center[2] + radius],
+            [center[0], center[1], center[2] - radius],
+        )
+    } else {
+        return Err(EmitError::DiskAuditRejected);
     };
     let expected_start = point_f32(sub_center(start, model_center))?;
     let expected_end = point_f32(sub_center(end, model_center))?;
     let expected_radius = f32_of(radius)?;
-    if record.start != expected_start
-        || record.end != expected_end
-        || record.r_start != expected_radius
-        || record.r_end != expected_radius
+    if !same_f32_slice_bits(&record.start, &expected_start)
+        || !same_f32_slice_bits(&record.end, &expected_end)
+        || !same_f32_bits(record.r_start, expected_radius)
+        || !same_f32_bits(record.r_end, expected_radius)
     {
         return Err(EmitError::DiskAuditRejected);
     }
     Ok(())
+}
+
+/// Compare format fields, never numeric values: `PartialEq` treats +0.0 and
+/// -0.0 as identical and treats all NaN payloads as unequal.  The disk audit
+/// is a wire-fidelity check, so binary32 payloads are the authority.
+fn same_f32_bits(actual: f32, expected: f32) -> bool {
+    actual.to_bits() == expected.to_bits()
+}
+
+fn same_f32_slice_bits(actual: &[f32], expected: &[f32]) -> bool {
+    actual.len() == expected.len()
+        && actual
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| same_f32_bits(*actual, *expected))
+}
+
+fn same_placement_bits(actual: Placement, expected: Placement) -> bool {
+    same_f32_bits(actual.x, expected.x)
+        && same_f32_bits(actual.y, expected.y)
+        && same_f32_bits(actual.z_lift, expected.z_lift)
+}
+
+fn same_support_records_bits(actual: &[SupportRecord], expected: &[SupportRecord]) -> bool {
+    actual.len() == expected.len()
+        && actual.iter().zip(expected).all(|(actual, expected)| {
+            actual.segment_type == expected.segment_type
+                && same_f32_slice_bits(&actual.start, &expected.start)
+                && same_f32_slice_bits(&actual.end, &expected.end)
+                && same_f32_bits(actual.r_start, expected.r_start)
+                && same_f32_bits(actual.r_end, expected.r_end)
+                && same_f32_slice_bits(&actual.mesh.xyz, &expected.mesh.xyz)
+                // This covers type-1's depth and every other f32-bearing
+                // trailing field without assuming unwritten bytes are zero.
+                && actual.trailing == expected.trailing
+        })
 }
 
 #[derive(Clone, Copy)]
@@ -743,7 +777,9 @@ mod tests {
     use plinth_decimate::DecimationReport;
     use plinth_hollow::{HollowDisposition, HollowHistory, HollowReport};
     use plinth_orient::{BaselineSelection, OrientationHistory, OrientationReport, RigidTransform};
-    use plinth_support::{BuildFrame, FrustumRingNormal, SupportHistory, SupportReport};
+    use plinth_support::{
+        BuildFrame, FrustumRingNormal, SphereGeometry, SupportHistory, SupportReport,
+    };
     use std::sync::atomic::{AtomicU64, Ordering};
 
     fn fixture_path(name: &str) -> PathBuf {
@@ -1077,6 +1113,18 @@ mod tests {
     }
 
     #[test]
+    fn wire_audit_rejects_signed_zero_and_nan_payload_changes() {
+        // Both values can be represented by an f32 parser, but neither is the
+        // same serialized field.  This is intentionally a bit test rather
+        // than `assert_ne!`: normal f32 equality would miss the first case.
+        assert!(!same_f32_slice_bits(&[0.0], &[f32::from_bits(0x8000_0000)]));
+        assert!(!same_f32_slice_bits(
+            &[f32::from_bits(0x7fc0_0001)],
+            &[f32::from_bits(0x7fc0_0002)],
+        ));
+    }
+
+    #[test]
     fn malformed_prewrite_geometry_is_rejected() {
         assert_eq!(
             frustum_triangles(
@@ -1142,24 +1190,113 @@ mod tests {
             include_bytes!("../../../scripts/tests/fixtures/chitubox/two-supports.chitubox");
         let project = Project::from_bytes(TWO_SUPPORTS.to_vec()).expect("native two-support donor");
         let records = project.supports(0).expect("native donor supports");
-        assert!(records
+        // These are independently transcribed raw binary32 values from the
+        // authoritative UI-authored donor.  They deliberately do not call
+        // our emitter or sphere projection code: this fixture is the native
+        // semantic oracle for type 7/1/9/3/4 records.
+        type NativeRecord = (u32, [u32; 3], [u32; 3], [u32; 2], usize, Option<u32>);
+        const EXPECTED: &[NativeRecord] = &[
+            (
+                7,
+                [0x3fe6_ff88, 0xc0c0_b36b, 0xc104_2b50],
+                [0x3fef_1cf0, 0xc0c8_45aa, 0xc106_f0c3],
+                [0x3e19_9999, 0x3e19_9999],
+                4320,
+                None,
+            ),
+            (
+                1,
+                [0x3feb_0e3c, 0xc0c4_7c8a, 0xc105_8e0a],
+                [0x4010_93cf, 0xc0f6_f631, 0xc118_07b1],
+                [0x3dcc_cccd, 0x3e99_999a],
+                540,
+                Some(0x3dcc_cccd),
+            ),
+            (
+                9,
+                [0x4010_93cf, 0xc0f6_f631, 0xc113_09bd],
+                [0x4010_93cf, 0xc0f6_f631, 0xc11d_05a5],
+                [0x3e9f_be80, 0x3e9f_be80],
+                4320,
+                None,
+            ),
+            (
+                7,
+                [0x40e6_b696, 0xc08f_aaea, 0xc106_a1b7],
+                [0x40e6_b696, 0xc08f_aaea, 0xc126_a1b7],
+                [0x3f80_0000, 0x3f80_0000],
+                4320,
+                None,
+            ),
+            (
+                3,
+                [0x4010_93cf, 0xc0f6_f631, 0xc118_07b1],
+                [0x4010_93cf, 0xc0f6_f631, 0xc19c_fcf1],
+                [0x3e99_999a, 0x3e99_999a],
+                540,
+                None,
+            ),
+            (
+                4,
+                [0x4010_93cf, 0xc0f6_f631, 0xc19c_fae5],
+                [0x4010_93cf, 0xc0f6_f631, 0xc1a0_fae5],
+                [0x3e99_999a, 0x3f40_0000],
+                540,
+                None,
+            ),
+            (
+                3,
+                [0x40f8_add7, 0xc0d0_6c7d, 0xc12e_a643],
+                [0x40f8_add7, 0xc0d0_6c7d, 0xc198_fefe],
+                [0x3f40_0000, 0x3f40_0000],
+                540,
+                None,
+            ),
+            (
+                4,
+                [0x40f8_add7, 0xc0d0_6c7d, 0xc198_fae5],
+                [0x40f8_add7, 0xc0d0_6c7d, 0xc1a0_fae5],
+                [0x3f40_0000, 0x3f8c_cccd],
+                540,
+                None,
+            ),
+            (
+                9,
+                [0x40f8_add7, 0xc0d0_6c7d, 0xc122_2b62],
+                [0x40f8_add7, 0xc0d0_6c7d, 0xc13b_2124],
+                [0x3f47_ae10, 0x3f47_ae10],
+                4320,
+                None,
+            ),
+            (
+                1,
+                [0x40e6_b696, 0xc08f_aaea, 0xc116_a1b7],
+                [0x40f8_add7, 0xc0d0_6c7d, 0xc12e_a643],
+                [0x3e99_999a, 0x3f40_0000],
+                540,
+                Some(0x3f00_0000),
+            ),
+        ];
+        let semantic_records: Vec<_> = records
             .iter()
-            .any(|record| record.segment_type == SegmentType::TIP));
-        assert!(records
-            .iter()
-            .any(|record| record.segment_type == SegmentType::TAPER));
-        assert!(records.iter().any(|record| {
-            record.segment_type == SegmentType::JOINER && record.start != record.end
-        }));
-        assert!(records
-            .iter()
-            .filter(|record| record.segment_type == SegmentType::SHAFT)
-            .all(|record| {
-                record.r_start == record.r_end
-                    && record.start[0] == record.end[0]
-                    && record.start[1] == record.end[1]
-                    && record.start[2] > record.end[2]
-            }));
+            .filter(|record| record.segment_type != SegmentType::PAD_OR_BRIDGE)
+            .collect();
+        assert_eq!(semantic_records.len(), EXPECTED.len());
+        for (record, &(segment_type, start, end, radii, mesh_len, contact_depth)) in
+            semantic_records.into_iter().zip(EXPECTED)
+        {
+            assert_eq!(record.segment_type, SegmentType(segment_type));
+            assert_eq!(record.start.map(f32::to_bits), start);
+            assert_eq!(record.end.map(f32::to_bits), end);
+            assert_eq!([record.r_start.to_bits(), record.r_end.to_bits()], radii);
+            assert_eq!(record.mesh.xyz.len(), mesh_len);
+            assert_eq!(
+                contact_depth.map(
+                    |_| f32::from_le_bytes(record.trailing[..4].try_into().unwrap()).to_bits()
+                ),
+                contact_depth
+            );
+        }
     }
 
     #[test]

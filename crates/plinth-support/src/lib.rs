@@ -36,7 +36,13 @@ pub enum FrustumRingNormal {
 /// Canonical authority for native sphere records.  The serialized endpoints
 /// are a projection of this value, never an alternate geometric input.
 #[derive(Clone, Debug, PartialEq)]
-pub enum SphereGeometry {
+pub struct SphereGeometry(SphereGeometryKind);
+
+/// Private so that the only way to create a sphere authority is through its
+/// checked constructors.  In particular, safe external Rust cannot smuggle a
+/// zero or non-unit contact axis into the emit boundary.
+#[derive(Clone, Debug, PartialEq)]
+enum SphereGeometryKind {
     Tip {
         center_mm: [Finite; 3],
         outward_axis_unit: [Finite; 3],
@@ -62,22 +68,36 @@ impl SphereGeometry {
             .collect::<Result<Vec<_>, _>>()?
             .try_into()
             .map_err(|_| SupportError::InvalidPrimitive)?;
-        Ok(Self::Tip {
+        Ok(Self(SphereGeometryKind::Tip {
             center_mm,
             outward_axis_unit,
-        })
+        }))
+    }
+
+    /// Checked convenience constructor for callers that have not yet crossed
+    /// the finite-number boundary.  This deliberately rejects NaN and
+    /// infinity rather than allowing them to become geometric authority.
+    pub fn tip_from_f64(center_mm: [f64; 3], axis: [f64; 3]) -> Result<Self, SupportError> {
+        let center_mm = finite_array(center_mm)?;
+        let axis = finite_array(axis)?;
+        Self::tip(center_mm, axis)
     }
 
     #[must_use]
     pub const fn joint(center_mm: [Finite; 3]) -> Self {
-        Self::Joint { center_mm }
+        Self(SphereGeometryKind::Joint { center_mm })
+    }
+
+    /// Checked f64 convenience constructor matching [`Self::tip_from_f64`].
+    pub fn joint_from_f64(center_mm: [f64; 3]) -> Result<Self, SupportError> {
+        Ok(Self::joint(finite_array(center_mm)?))
     }
 
     #[must_use]
     pub fn canonical_poles(&self, radius: PositiveFinite) -> ([Finite; 3], [Finite; 3]) {
         let radius = radius.get();
-        match self {
-            Self::Tip {
+        match &self.0 {
+            SphereGeometryKind::Tip {
                 center_mm,
                 outward_axis_unit,
             } => {
@@ -93,7 +113,7 @@ impl SphereGeometry {
                 });
                 (start, end)
             }
-            Self::Joint { center_mm } => {
+            SphereGeometryKind::Joint { center_mm } => {
                 let center = center_mm.map(Finite::get);
                 let start = [
                     Finite::new(center[0]).expect("finite typed joint pole"),
@@ -109,6 +129,68 @@ impl SphereGeometry {
             }
         }
     }
+
+    #[must_use]
+    pub fn is_tip(&self) -> bool {
+        matches!(&self.0, SphereGeometryKind::Tip { .. })
+    }
+
+    #[must_use]
+    pub fn is_joint(&self) -> bool {
+        matches!(&self.0, SphereGeometryKind::Joint { .. })
+    }
+
+    /// Immutable, already-normalized semantic authority for independently
+    /// checking the type-7 projection.
+    #[must_use]
+    pub fn tip_authority(&self) -> Option<([Finite; 3], [Finite; 3])> {
+        match &self.0 {
+            SphereGeometryKind::Tip {
+                center_mm,
+                outward_axis_unit,
+            } => Some((*center_mm, *outward_axis_unit)),
+            SphereGeometryKind::Joint { .. } => None,
+        }
+    }
+
+    /// Immutable semantic authority for independently checking a type-9
+    /// vertical joint sphere.
+    #[must_use]
+    pub fn joint_center(&self) -> Option<[Finite; 3]> {
+        match &self.0 {
+            SphereGeometryKind::Tip { .. } => None,
+            SphereGeometryKind::Joint { center_mm } => Some(*center_mm),
+        }
+    }
+
+    fn has_finite_canonical_fields(&self) -> bool {
+        let finite = |values: &[Finite; 3]| values.iter().all(|value| value.get().is_finite());
+        match &self.0 {
+            SphereGeometryKind::Tip {
+                center_mm,
+                outward_axis_unit,
+            } => {
+                finite(center_mm)
+                    && finite(outward_axis_unit)
+                    && outward_axis_unit
+                        .map(Finite::get)
+                        .iter()
+                        .map(|value| value * value)
+                        .sum::<f64>()
+                        .is_finite()
+            }
+            SphereGeometryKind::Joint { center_mm } => finite(center_mm),
+        }
+    }
+}
+
+fn finite_array(values: [f64; 3]) -> Result<[Finite; 3], SupportError> {
+    values
+        .map(|value| Finite::new(value).map_err(|_| SupportError::InvalidPrimitive))
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?
+        .try_into()
+        .map_err(|_| SupportError::InvalidPrimitive)
 }
 
 /// The one physical frame selected while planning supports.  `plate_z_mm` is
@@ -297,13 +379,21 @@ impl SupportPrimitive {
             FrustumRingNormal::PlateZ => self.segment_type == SegmentType::JOINER,
         };
         let sphere_poles_match = match (self.segment_type, &self.sphere_geometry) {
-            (SegmentType::TIP, Some(SphereGeometry::Tip { .. }))
-            | (SegmentType::SHAFT, Some(SphereGeometry::Joint { .. })) => {
+            (SegmentType::TIP, Some(geometry)) if geometry.is_tip() => {
                 self.start_radius_mm == self.end_radius_mm
-                    && self.sphere_geometry.as_ref().is_some_and(|geometry| {
+                    && geometry.has_finite_canonical_fields()
+                    && {
                         let (start, end) = geometry.canonical_poles(self.start_radius_mm);
                         self.start_mm == start && self.end_mm == end
-                    })
+                    }
+            }
+            (SegmentType::SHAFT, Some(geometry)) if geometry.is_joint() => {
+                self.start_radius_mm == self.end_radius_mm
+                    && geometry.has_finite_canonical_fields()
+                    && {
+                        let (start, end) = geometry.canonical_poles(self.start_radius_mm);
+                        self.start_mm == start && self.end_mm == end
+                    }
             }
             (SegmentType::TIP | SegmentType::SHAFT, _) => false,
             (_, None) => true,
@@ -444,6 +534,14 @@ mod tests {
                 [Finite::new(0.0).unwrap(); 3],
                 [Finite::new(0.0).unwrap(); 3],
             ),
+            Err(SupportError::InvalidPrimitive)
+        ));
+        assert!(matches!(
+            SphereGeometry::tip_from_f64([0.0; 3], [f64::NAN, 0.0, 1.0]),
+            Err(SupportError::InvalidPrimitive)
+        ));
+        assert!(matches!(
+            SphereGeometry::tip_from_f64([0.0; 3], [f64::INFINITY, 0.0, 1.0]),
             Err(SupportError::InvalidPrimitive)
         ));
         let model = SupportedModel::from_parts(

@@ -513,6 +513,7 @@ dependencies = [
  "plinth-orient",
  "serde",
  "thiserror",
+ "trybuild",
 ]
 
 [[package]]

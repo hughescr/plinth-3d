@@ -1,0 +1,24 @@
+error[E0599]: no associated function or constant named `default` found for struct `SphereGeometry` in the current scope
+ --> tests/compile_fail/sphere_geometry_default_private.rs:4:29
+  |
+4 |     let _ = SphereGeometry::default();
+  |                             ^^^^^^^ associated function or constant not found in `SphereGeometry`
+  |
+note: if you're trying to build a new `SphereGeometry` consider using one of the following associated functions:
+      SphereGeometry::tip
+      SphereGeometry::tip_from_f64
+      SphereGeometry::joint
+      SphereGeometry::joint_from_f64
+ --> src/lib.rs
+  |
+  |     pub fn tip(center_mm: [Finite; 3], axis: [Finite; 3]) -> Result<Self, SupportError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |     pub fn tip_from_f64(center_mm: [f64; 3], axis: [f64; 3]) -> Result<Self, SupportError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |     pub const fn joint(center_mm: [Finite; 3]) -> Self {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+  |     pub fn joint_from_f64(center_mm: [f64; 3]) -> Result<Self, SupportError> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
