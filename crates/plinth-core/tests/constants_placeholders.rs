@@ -8,7 +8,7 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_PLACEHOLDER_IDS: [&str; 190] = [
+const EXPECTED_PLACEHOLDER_IDS: [&str; 192] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -104,6 +104,8 @@ const EXPECTED_PLACEHOLDER_IDS: [&str; 190] = [
     "HOLLOW_VENT_TOP_BAND_MM",
     "HOLLOW_VOLUME_BALANCE_REL_TOL",
     "HOLLOW_WALL_DEFAULT_MM",
+    "INITIAL_AXIS_MAJORITY_CAP",
+    "INITIAL_AXIS_MAJORITY_STEP_MM",
     "ISLAND_ATTACH_REACH_MM",
     "ISLAND_BIRTH_LINK_R_MM",
     "ISLAND_MERGE_RADIUS_MM",
@@ -214,7 +216,7 @@ macro_rules! rows {
     };
 }
 
-const EXPECTED_ROWS: [ExpectedRow; 190] = rows! {
+const EXPECTED_ROWS: [ExpectedRow; 192] = rows! {
     "A_ABS_MM2", "2.0", "mm²", "scalar";
     "BALL_BREACH_EPS_MM", "0.05", "mm", "scalar";
     "BALL_FACTOR_FOOT", "1.4", "1", "scalar";
@@ -310,6 +312,8 @@ const EXPECTED_ROWS: [ExpectedRow; 190] = rows! {
     "HOLLOW_VENT_TOP_BAND_MM", "2.0", "mm", "scalar";
     "HOLLOW_VOLUME_BALANCE_REL_TOL", "0.02", "1", "scalar";
     "HOLLOW_WALL_DEFAULT_MM", "2.5", "mm", "scalar";
+    "INITIAL_AXIS_MAJORITY_CAP", "80", "count", "scalar";
+    "INITIAL_AXIS_MAJORITY_STEP_MM", "0.12", "mm", "scalar";
     "ISLAND_ATTACH_REACH_MM", "0.2", "mm", "scalar";
     "ISLAND_BIRTH_LINK_R_MM", "0.6", "mm", "scalar";
     "ISLAND_MERGE_RADIUS_MM", "2.0", "mm", "scalar";
@@ -408,7 +412,7 @@ const EXPECTED_ROWS: [ExpectedRow; 190] = rows! {
 };
 
 fn component() -> M0PlaceholderConstants {
-    M0PlaceholderConstants::new().expect("all 190 placeholder declarations must construct")
+    M0PlaceholderConstants::new().expect("all 192 placeholder declarations must construct")
 }
 
 #[test]
@@ -419,7 +423,7 @@ fn exact_handwritten_membership_is_stable_sorted_and_all_placeholder() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, EXPECTED_PLACEHOLDER_IDS);
-    assert_eq!(descriptors.len(), 190);
+    assert_eq!(descriptors.len(), 192);
     assert!(descriptors
         .windows(2)
         .all(|pair| pair[0].id() < pair[1].id()));
@@ -510,7 +514,7 @@ const fn bound_key(bound: BoundKind) -> &'static str {
 }
 
 #[test]
-fn evidence_and_placeholder_fixture_builds_one_210_entry_structural_batch() {
+fn evidence_and_placeholder_fixture_builds_one_212_entry_structural_batch() {
     let mut descriptors = component()
         .descriptors()
         .unwrap()
@@ -518,14 +522,14 @@ fn evidence_and_placeholder_fixture_builds_one_210_entry_structural_batch() {
         .collect::<Vec<_>>();
     descriptors.extend(M0EvidenceConstants::new().unwrap().descriptors().unwrap());
     let registry = ConstantsRegistry::build_batch(descriptors).unwrap();
-    assert_eq!(registry.len(), 210);
+    assert_eq!(registry.len(), 212);
     assert_eq!(
         registry
             .iter()
             .map(|descriptor| descriptor.id().as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        210
+        212
     );
 }
 

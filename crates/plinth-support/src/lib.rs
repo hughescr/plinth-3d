@@ -27,6 +27,11 @@ pub mod dyadic;
 pub mod forest;
 #[allow(
     dead_code,
+    reason = "crate-private initial terminal construction is consumed by the pending support runner integration"
+)]
+pub(crate) mod initial;
+#[allow(
+    dead_code,
     reason = "crate-private current-parity joint planning is consumed by the pending support runner"
 )]
 mod joints;

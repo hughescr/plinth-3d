@@ -971,7 +971,7 @@ macro_rules! placeholder_declarations {
                 }
             )+
 
-            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 190], RegistryError> {
+            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 192], RegistryError> {
                 Ok([
                     $(ConstantDescriptor::from_placeholder(
                         ConstantId::from($id),
@@ -1187,6 +1187,10 @@ placeholder_declarations! {
     "HOLLOW_VOLUME_BALANCE_REL_TOL", "1", "scalar", "Final volume-balance tolerance relative to solid volume.";
     hollow_wall_default_mm: PositiveFinite = PositiveFinite::new(2.5)?;
     "HOLLOW_WALL_DEFAULT_MM", "mm", "scalar", "Hollow generation and tool wall default.";
+    initial_axis_majority_cap: NonZeroU64 = nonzero(80)?;
+    "INITIAL_AXIS_MAJORITY_CAP", "count", "scalar", "O-10 legacy compatibility interval majority cap; docs/rust-migration/04-migration-plan.md §O-10, not safety evidence.";
+    initial_axis_majority_step_mm: PositiveFinite = PositiveFinite::new(0.12)?;
+    "INITIAL_AXIS_MAJORITY_STEP_MM", "mm", "scalar", "O-10 legacy compatibility interval majority step; docs/rust-migration/04-migration-plan.md §O-10, not safety evidence.";
     island_attach_reach_mm: PositiveFinite = PositiveFinite::new(0.2)?;
     "ISLAND_ATTACH_REACH_MM", "mm", "scalar", "Tuning tied to the legacy Placeholder tip default.";
     island_birth_link_r_mm: PositiveFinite = PositiveFinite::new(0.6)?;
