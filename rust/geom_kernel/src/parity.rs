@@ -96,6 +96,46 @@ fn projection_axes(axis: usize) -> (usize, usize) {
     }
 }
 
+fn checked_grid_layout(
+    bounds: [[f64; 3]; 2],
+    axes: [usize; 2],
+    h: f64,
+) -> Result<([f64; 2], [i64; 2]), String> {
+    let mut origins = [0.0; 2];
+    let mut dimensions = [0i64; 2];
+    for (slot, &axis) in axes.iter().enumerate() {
+        let origin = bounds[0][axis] - 1.0;
+        let upper = bounds[1][axis] + 1.0;
+        let span = upper - origin;
+        let quotient = span / h;
+        if !origin.is_finite()
+            || !upper.is_finite()
+            || !span.is_finite()
+            || !quotient.is_finite()
+            || quotient < 0.0
+        {
+            return Err(format!(
+                "parity grid dimension is unrepresentable on projected axis {axis}"
+            ));
+        }
+        let cells = quotient.floor();
+        // `i64::MAX as f64` is exactly 2^63. Reject it and everything above;
+        // every finite f64 below it converts without saturating, and the next
+        // lower representable value leaves ample room for the three sentinels.
+        if cells >= i64::MAX as f64 {
+            return Err(format!(
+                "parity grid dimension is unrepresentable on projected axis {axis}"
+            ));
+        }
+        let dimension = (cells as i64).checked_add(3).ok_or_else(|| {
+            format!("parity grid dimension overflows i64 on projected axis {axis}")
+        })?;
+        origins[slot] = origin;
+        dimensions[slot] = dimension;
+    }
+    Ok((origins, dimensions))
+}
+
 fn projected_cell_bounds(
     a: [f64; 3],
     b: [f64; 3],
@@ -133,8 +173,7 @@ pub(crate) fn estimate_indexed_memory(
     let mut build_axes = [0_usize; 3];
     for ax in 0..3 {
         let (p0, p1) = projection_axes(ax);
-        let origin0 = bounds[0][p0] - 1.0;
-        let origin1 = bounds[0][p1] - 1.0;
+        let ([origin0, origin1], _) = checked_grid_layout(bounds, [p0, p1], h)?;
         let mut references = 0_usize;
         for (face, indices) in faces.iter().enumerate() {
             let a = vertices
@@ -269,9 +308,7 @@ impl AxisGrid {
 
         // origin = bounds[0, p] - 1.0 ; NY = floor((bounds[1,p1]+1 - origin1)/h)+3
         let bounds = mesh.bounds();
-        let origin0 = bounds[0][p0] - 1.0;
-        let origin1 = bounds[0][p1] - 1.0;
-        let ny = ((bounds[1][p1] + 1.0 - origin1) / h).floor() as i64 + 3;
+        let ([origin0, origin1], [_, ny]) = checked_grid_layout(bounds, [p0, p1], h)?;
 
         let reference_count = mesh_axis_reference_count(mesh, [p0, p1], [origin0, origin1], h)?;
         let (_, projected_peak) = axis_memory_bounds(n, reference_count)?;
@@ -579,7 +616,46 @@ impl ParityVote {
 #[cfg(test)]
 mod memory_tests {
     use super::*;
-    use crate::{NativeSurface, NativeSurfaceConfig};
+    use crate::{NativeSurface, NativeSurfaceConfig, SurfaceBuildError};
+
+    #[test]
+    fn grid_dimension_rejects_saturating_quotient_without_debug_release_divergence() {
+        let vertices = [[0.0, 0.0, 0.0]];
+        let faces = [[0, 0, 0]];
+        let bounds = [[0.0; 3], [0.0; 3]];
+
+        let direct = checked_grid_layout(bounds, [0, 1], f64::MIN_POSITIVE);
+        assert!(direct
+            .unwrap_err()
+            .contains("grid dimension is unrepresentable"));
+        assert!(matches!(
+            NativeSurface::estimate_index_memory_from_indexed(&vertices, &faces, f64::MIN_POSITIVE),
+            Err(SurfaceBuildError::MemoryEstimateOverflow {
+                section: "parity grid"
+            })
+        ));
+        assert!(matches!(
+            NativeSurface::from_indexed(
+                &vertices,
+                &faces,
+                NativeSurfaceConfig {
+                    grid_pitch_mm: f64::MIN_POSITIVE,
+                    max_grid_bytes: usize::MAX,
+                },
+            ),
+            Err(SurfaceBuildError::Kernel(reason))
+                if reason.contains("grid dimension is unrepresentable")
+        ));
+
+        let saturation_boundary = i64::MAX as f64;
+        let neighboring_representable =
+            f64::from_bits(saturation_boundary.to_bits().checked_sub(1).unwrap());
+        let safe_bounds = [[0.0; 3], [neighboring_representable; 3]];
+        let (_, dimensions) = checked_grid_layout(safe_bounds, [0, 1], 1.0).unwrap();
+        assert_eq!(dimensions, [neighboring_representable as i64 + 3; 2]);
+        let rejected_bounds = [[0.0; 3], [saturation_boundary; 3]];
+        assert!(checked_grid_layout(rejected_bounds, [0, 1], 1.0).is_err());
+    }
 
     #[test]
     fn unique_key_csr_peak_counts_pairs_keys_offsets_and_face_refs_together() {
