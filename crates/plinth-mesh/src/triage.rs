@@ -80,11 +80,12 @@ pub fn triage_settings() -> Result<TriageSettings, TriageError> {
     TriageSettings::load()
 }
 
-/// Resource limits for the allocation-free raw-mesh triage admission check.
+/// Resource limits for the raw-mesh triage admission check.
 ///
 /// These are limits on named inputs and bounded triage working slots, not a
 /// claim about process-wide heap consumption.  A caller selects the limits at
-/// its resource boundary before starting any topology or containment work.
+/// its resource boundary before starting input-proportional topology or
+/// containment work.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TriageTopologyLimits {
     raw_vertices: usize,
@@ -116,11 +117,14 @@ impl TriageTopologyLimits {
     }
 }
 
-/// Allocation-free evidence that a raw mesh is small enough to enter triage.
+/// Evidence that a raw mesh is small enough to enter triage.
 ///
 /// It deliberately records source buffer capacity exactly.  It does not turn
 /// that number into a whole-process heap claim: later topology structures and
 /// allocator overhead are owned and bounded at their respective boundaries.
+/// Loading the authoritative constants registry may perform one-time global
+/// initialization; admission guarantees only that refusal precedes any
+/// input-proportional per-model triage/topology allocation or welded-view work.
 #[derive(Debug, PartialEq)]
 pub struct TriageTopologyAdmission<'mesh> {
     mesh: &'mesh Mesh,
@@ -135,9 +139,11 @@ pub struct TriageTopologyAdmission<'mesh> {
 }
 
 impl<'mesh> TriageTopologyAdmission<'mesh> {
-    /// Measures and admits raw source inputs without allocating.  The
-    /// containment bound uses the worst case of one component per face and
-    /// therefore reserves `faces * samples` slots for a single batched query.
+    /// Measures and admits raw source inputs before input-proportional
+    /// triage/topology allocation. The containment bound uses the worst case
+    /// of one component per face and therefore reserves `faces * samples`
+    /// slots for a single batched query. Authoritative registry initialization
+    /// is allowed before this per-model boundary.
     pub fn from_raw_mesh(
         mesh: &'mesh Mesh,
         limits: TriageTopologyLimits,
@@ -154,10 +160,7 @@ impl<'mesh> TriageTopologyAdmission<'mesh> {
         let raw_vertices = mesh.verts().len();
         let raw_faces = mesh.tris().len();
         let retained_source_buffer_bytes =
-            mesh.retained_buffer_bytes()
-                .ok_or(TriageAdmissionError::ArithmeticOverflow {
-                    field: "retained source buffer bytes",
-                })?;
+            retained_source_buffer_bytes(mesh.verts.capacity(), mesh.tris.capacity())?;
         let (edge_occurrences, vertex_incidences, containment_probe_slots) =
             triage_work_counts(raw_faces, settings.containment_samples())?;
 
@@ -256,8 +259,8 @@ impl<'mesh> TriageTopologyAdmission<'mesh> {
         self.containment_probe_slots
     }
 
-    /// Consumes the admission capability and starts the allocation-bearing
-    /// triage operation with the exact settings used for its resource bound.
+    /// Consumes the admission capability and starts input-proportional triage
+    /// work with the exact settings used for its resource bound.
     pub fn triage(self, weld_policy: WeldPolicy) -> Result<TriagedMesh, TriageError> {
         triage_components(self, weld_policy)
     }
@@ -302,28 +305,40 @@ fn enforce_limit(
     Ok(())
 }
 
+fn retained_source_buffer_bytes(
+    vertex_capacity: usize,
+    face_capacity: usize,
+) -> Result<usize, TriageAdmissionError> {
+    vertex_capacity
+        .checked_mul(std::mem::size_of::<[f64; 3]>())
+        .and_then(|vertices| {
+            face_capacity
+                .checked_mul(std::mem::size_of::<[u32; 3]>())
+                .and_then(|faces| vertices.checked_add(faces))
+        })
+        .ok_or(TriageAdmissionError::ArithmeticOverflow {
+            field: "retained source buffer bytes",
+        })
+}
+
 fn triage_work_counts(
     raw_faces: usize,
     containment_samples: usize,
 ) -> Result<(usize, usize, usize), TriageAdmissionError> {
-    let edge_occurrences =
-        raw_faces
-            .checked_mul(3)
-            .ok_or(TriageAdmissionError::ArithmeticOverflow {
-                field: "edge occurrences",
-            })?;
-    let vertex_incidences =
-        raw_faces
-            .checked_mul(3)
-            .ok_or(TriageAdmissionError::ArithmeticOverflow {
-                field: "vertex incidences",
-            })?;
-    let containment_probe_slots = raw_faces.checked_mul(containment_samples).ok_or(
-        TriageAdmissionError::ArithmeticOverflow {
-            field: "containment probe slots",
-        },
-    )?;
+    let edge_occurrences = checked_product("edge occurrences", raw_faces, 3)?;
+    let vertex_incidences = checked_product("vertex incidences", raw_faces, 3)?;
+    let containment_probe_slots =
+        checked_product("containment probe slots", raw_faces, containment_samples)?;
     Ok((edge_occurrences, vertex_incidences, containment_probe_slots))
+}
+
+fn checked_product(
+    field: &'static str,
+    left: usize,
+    right: usize,
+) -> Result<usize, TriageAdmissionError> {
+    left.checked_mul(right)
+        .ok_or(TriageAdmissionError::ArithmeticOverflow { field })
 }
 
 #[derive(Clone, Debug, Error, PartialEq)]
@@ -452,7 +467,13 @@ pub enum TriageError {
 }
 
 /// Weld, classify, strip only measured shards, and refuse sealed cavities
-/// after consuming a successful allocation-free admission capability.
+/// after consuming a successful raw-input admission capability.
+///
+/// Acceptance-stage callers, including H0, must first derive
+/// [`TriageTopologyLimits`] from their resource envelope and call
+/// [`TriageTopologyAdmission::from_raw_mesh`]. There is no uncapped public
+/// triage entry point; downstream integration must carry this capability to
+/// this function before performing other input-proportional topology work.
 ///
 /// `WeldPolicy::ExactBits` mirrors the legacy `merge_vertices()` behavior;
 /// callers may deliberately select an epsilon weld instead.  `None` is
@@ -476,7 +497,7 @@ fn triage_components_admitted(
     if matches!(weld_policy, WeldPolicy::None) {
         return Err(TriageError::UnweldedInput);
     }
-    mark_triage_work_started();
+    mark_input_proportional_triage_work_started();
     let view = WeldedView::build(mesh, weld_policy)?;
     let faces = remap_faces(mesh, &view.map);
     let components = face_components(&faces);
@@ -601,12 +622,13 @@ fn triage_components_admitted(
 }
 
 #[cfg(test)]
-static TRIAGE_WORK_STARTED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static INPUT_PROPORTIONAL_TRIAGE_WORK_STARTED: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
 
 #[inline]
-fn mark_triage_work_started() {
+fn mark_input_proportional_triage_work_started() {
     #[cfg(test)]
-    TRIAGE_WORK_STARTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    INPUT_PROPORTIONAL_TRIAGE_WORK_STARTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
 
 fn remap_faces(mesh: &Mesh, map: &[u32]) -> Vec<[u32; 3]> {
@@ -1050,46 +1072,123 @@ mod tests {
     }
 
     #[test]
-    fn cap_minus_one_refuses_before_real_triage_work_starts() {
+    fn every_cap_minus_one_refuses_before_input_proportional_triage_work_starts() {
         use std::sync::atomic::Ordering;
 
         let closed = crate::fixtures::make_box_default().expect("box");
         let open = Mesh::new(closed.verts().to_vec(), closed.tris()[1..].to_vec()).expect("open");
         let exact = exact_limits(&open);
-        let rejected = TriageTopologyLimits::new(
-            open.verts().len() - 1,
-            exact.raw_faces,
-            exact.retained_source_buffer_bytes,
-            exact.edge_occurrences,
-            exact.vertex_incidences,
-            exact.containment_probe_slots,
-        );
-        let before = TRIAGE_WORK_STARTED.load(Ordering::Relaxed);
-        assert!(matches!(
-            TriageTopologyAdmission::from_raw_mesh(&open, rejected),
-            Err(TriageAdmissionError::LimitExceeded {
-                field: "raw vertices",
-                ..
-            })
-        ));
-        assert_eq!(
-            TRIAGE_WORK_STARTED.load(Ordering::Relaxed),
-            before,
-            "refusal must precede the first allocation-bearing topology operation"
-        );
+        let cases = [
+            (
+                "raw vertices",
+                TriageTopologyLimits::new(
+                    exact.raw_vertices - 1,
+                    usize::MAX,
+                    usize::MAX,
+                    usize::MAX,
+                    usize::MAX,
+                    usize::MAX,
+                ),
+            ),
+            (
+                "raw faces",
+                TriageTopologyLimits::new(
+                    usize::MAX,
+                    exact.raw_faces - 1,
+                    usize::MAX,
+                    usize::MAX,
+                    usize::MAX,
+                    usize::MAX,
+                ),
+            ),
+            (
+                "retained source buffer bytes",
+                TriageTopologyLimits::new(
+                    usize::MAX,
+                    usize::MAX,
+                    exact.retained_source_buffer_bytes - 1,
+                    usize::MAX,
+                    usize::MAX,
+                    usize::MAX,
+                ),
+            ),
+            (
+                "edge occurrences",
+                TriageTopologyLimits::new(
+                    usize::MAX,
+                    usize::MAX,
+                    usize::MAX,
+                    exact.edge_occurrences - 1,
+                    usize::MAX,
+                    usize::MAX,
+                ),
+            ),
+            (
+                "vertex incidences",
+                TriageTopologyLimits::new(
+                    usize::MAX,
+                    usize::MAX,
+                    usize::MAX,
+                    usize::MAX,
+                    exact.vertex_incidences - 1,
+                    usize::MAX,
+                ),
+            ),
+            (
+                "containment probe slots",
+                TriageTopologyLimits::new(
+                    usize::MAX,
+                    usize::MAX,
+                    usize::MAX,
+                    usize::MAX,
+                    usize::MAX,
+                    exact.containment_probe_slots - 1,
+                ),
+            ),
+        ];
+        let before = INPUT_PROPORTIONAL_TRIAGE_WORK_STARTED.load(Ordering::Relaxed);
+        for (field, rejected) in cases {
+            assert!(matches!(
+                TriageTopologyAdmission::from_raw_mesh(&open, rejected),
+                Err(TriageAdmissionError::LimitExceeded {
+                    field: actual,
+                    ..
+                }) if actual == field
+            ));
+            assert_eq!(
+                INPUT_PROPORTIONAL_TRIAGE_WORK_STARTED.load(Ordering::Relaxed),
+                before,
+                "{field} refusal must precede input-proportional topology work"
+            );
+        }
 
         let admission = TriageTopologyAdmission::from_raw_mesh(&open, exact)
             .expect("the exact cap admits the actual path");
         triage_components(admission, WeldPolicy::ExactBits).expect("open soup remains triageable");
-        assert_eq!(TRIAGE_WORK_STARTED.load(Ordering::Relaxed), before + 1);
+        assert_eq!(
+            INPUT_PROPORTIONAL_TRIAGE_WORK_STARTED.load(Ordering::Relaxed),
+            before + 1
+        );
     }
 
     #[test]
     fn raw_work_arithmetic_overflow_is_typed() {
         assert!(matches!(
-            triage_work_counts(usize::MAX / 3 + 1, 1),
+            retained_source_buffer_bytes(usize::MAX, 1),
+            Err(TriageAdmissionError::ArithmeticOverflow {
+                field: "retained source buffer bytes"
+            })
+        ));
+        assert!(matches!(
+            checked_product("edge occurrences", usize::MAX / 3 + 1, 3),
             Err(TriageAdmissionError::ArithmeticOverflow {
                 field: "edge occurrences"
+            })
+        ));
+        assert!(matches!(
+            checked_product("vertex incidences", usize::MAX / 3 + 1, 3),
+            Err(TriageAdmissionError::ArithmeticOverflow {
+                field: "vertex incidences"
             })
         ));
         assert!(matches!(
