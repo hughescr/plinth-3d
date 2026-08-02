@@ -17,6 +17,7 @@ pub mod dyadic;
 pub mod forest;
 pub mod legacy_compat;
 pub mod member_sizing;
+pub mod perception;
 pub mod raft;
 pub mod transient;
 
