@@ -853,10 +853,13 @@ pub fn prepare_specialized_contacts(
     })
 }
 
-/// Construct an empty-contact test authority only after the complete
-/// production authority matrix has validated and produced a genuine plan.
-/// This helper is absent from non-test builds and cannot bypass normal replay
-/// validation.
+/// Construct an empty-cardinality authority solely to exercise the initial
+/// builder's otherwise unreachable zero-contact branch. The production path
+/// first creates a genuine specialized plan from every supplied authority;
+/// only then does this cfg(test)-only adapter erase its physical contacts and
+/// recompute the empty load partition through the production finalizer. The
+/// resulting plan keeps the real authority digests and limits and must pass
+/// normal replay validation; callers cannot inject digest or resource bytes.
 #[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn authority_consistent_empty_plan_for_initial_test(
@@ -889,6 +892,13 @@ pub(crate) fn authority_consistent_empty_plan_for_initial_test(
     plan.load_partition =
         crate::perception::authority_consistent_empty_load_partition_for_test(generic, mesh)?;
     debug_assert!(plan.contacts.is_empty());
+    debug_assert_eq!(
+        plan.contacts
+            .iter()
+            .map(|contact| contact.demands.len())
+            .sum::<usize>(),
+        0
+    );
     debug_assert!(plan.load_partition.rows().is_empty());
     plan.validate_binding(
         mesh,

@@ -347,14 +347,17 @@ pub(crate) fn build_initial_contacts(
         .try_reserve_exact(contact_count)
         .map_err(|_| InitialContactError::Allocation("quarantine evidence"))?;
     // All recoverable validation, allocation, native work, and classification
-    // have succeeded. The fresh local forest is now materialized. Standard
-    // allocator abort while building Forest's private BTree nodes is outside
-    // the recoverable API; its modeled payload was capped above.
+    // have succeeded. The fresh local forest is now materialized. Allocations
+    // for all contiguous contact-sized payloads, including the
+    // forest arena vectors, are now attempted only after the logical payload
+    // cap passed. Private BTree node layout and allocator rounding are outside
+    // that portable cap and retain the process allocator's abort semantics.
     let mut keys = Vec::new();
     keys.try_reserve_exact(contact_count)
         .map_err(|_| InitialContactError::Allocation("terminal keys"))?;
     let initial_forest_digest = Forest::new().digest();
-    let mut forest = Forest::new();
+    let mut forest = Forest::try_new_for_initial_contacts(contact_count)
+        .map_err(|_| InitialContactError::Allocation("forest arena vectors"))?;
     for seed in &seeds {
         keys.push(forest.add_member(Member::new(MemberSpec {
             p0_mm: seed.p0,
@@ -375,7 +378,7 @@ pub(crate) fn build_initial_contacts(
         .all(|seed| forest.terminal(seed.terminal).is_some()));
     let cutoff = policy.min_illegal_len_mm().diagnostic().get();
     for ((seed, key), overlap) in seeds.iter().zip(&keys).zip(&overlaps) {
-        if *overlap > cutoff {
+        if initial_overlap_exceeds_cutoff(*overlap, cutoff, distance(seed.p0, seed.p1)) {
             forest.quarantine(*key)?;
             condemned.push(CondemnedInitialStub {
                 terminal: seed.terminal,
@@ -561,6 +564,16 @@ fn remaining_illegal_axis_overlap(
         .fold(0.0_f64, f64::max)
 }
 
+fn initial_overlap_exceeds_cutoff(overlap: f64, cutoff: f64, axis_length: f64) -> bool {
+    // `overlap` subtracts two independently rounded interval endpoints. A
+    // nominal cutoff can therefore land slightly above its policy f64 when
+    // the endpoints are at the full stub scale. Two machine epsilons at that
+    // scale are the narrow forward-error budget for those endpoint roundings;
+    // this is not a general-purpose fuzzy comparison.
+    let endpoint_rounding_budget = 2.0 * f64::EPSILON * axis_length.max(cutoff);
+    overlap > cutoff + endpoint_rounding_budget
+}
+
 fn axis_batch_input(seeds: &[StubSeed]) -> Result<AxisBatchInput, InitialContactError> {
     let mut p0 = Vec::new();
     let mut p1 = Vec::new();
@@ -721,10 +734,10 @@ mod tests {
         Mesh::new(vertices, faces).unwrap()
     }
 
-    fn stacked_obstruction(obstacle_top_z: f64) -> Mesh {
+    fn stacked_obstruction(obstacle_top_z: f64, overhang_bottom_z: f64) -> Mesh {
         combine_meshes(&[
             plinth_mesh::make_box([30.0, 30.0, 1.0], [0.0, 0.0, obstacle_top_z - 1.0]).unwrap(),
-            plinth_mesh::make_box([30.0, 30.0, 4.0], [0.0, 0.0, 20.0]).unwrap(),
+            plinth_mesh::make_box([30.0, 30.0, 4.0], [0.0, 0.0, overhang_bottom_z]).unwrap(),
         ])
     }
 
@@ -887,10 +900,10 @@ mod tests {
             max_depth: 0.1,
             ray: -1,
         };
-        assert_eq!(
-            remaining_illegal_axis_overlap(&[exact_cutoff], 2.8, 0.0),
-            0.05
-        );
+        let exact_overlap = remaining_illegal_axis_overlap(&[exact_cutoff], 2.8, 0.0);
+        assert_eq!(exact_overlap, 0.05);
+        assert!(!initial_overlap_exceeds_cutoff(exact_overlap, 0.05, 2.8,));
+        assert!(initial_overlap_exceeds_cutoff(0.06, 0.05, 2.8));
         let clean = geom_kernel::Interval {
             s_a: 0.3,
             s_b: 0.35,
@@ -899,7 +912,9 @@ mod tests {
             max_depth: 0.1,
             ray: -1,
         };
-        assert!(remaining_illegal_axis_overlap(std::slice::from_ref(&clean), 2.8, 0.3) <= 0.05);
+        let clean_overlap = remaining_illegal_axis_overlap(std::slice::from_ref(&clean), 2.8, 0.3);
+        assert!(clean_overlap <= 0.05);
+        assert!(!initial_overlap_exceeds_cutoff(clean_overlap, 0.05, 2.8));
         let transit = geom_kernel::Interval {
             s_a: 0.2,
             s_b: 0.6,
@@ -925,6 +940,7 @@ mod tests {
     #[test]
     fn zero_contact_builder_returns_a_fresh_empty_forest_without_a_native_query() {
         let fixture = Fixture::new(make_overhang_table().unwrap());
+        assert!(!fixture.plan.contacts().is_empty());
         let config = perception_config(&fixture.delicacy);
         let selection = ContactSelectionConfig::current_defaults(
             Some(&fixture.delicacy),
@@ -973,6 +989,13 @@ mod tests {
         )
         .unwrap();
         assert!(plan.contacts().is_empty());
+        assert_eq!(
+            plan.contacts()
+                .iter()
+                .map(|contact| contact.demands().len())
+                .sum::<usize>(),
+            0
+        );
         assert!(plan.load_partition().rows().is_empty());
         assert_eq!(build.queried_stubs(), 0);
         assert_eq!(build.interval_batch_count(), 0);
@@ -1132,18 +1155,81 @@ mod tests {
             .min_illegal_len_mm()
             .diagnostic()
             .get();
-        let boundary_top = f64::from_bits(17.55_f64.to_bits() - 1);
-        let boundary = Fixture::new(stacked_obstruction(boundary_top))
+        // The overhang underside is z=20 and its downward 2.5 mm stub ends at
+        // z=17.5. Construct the obstacle at that real free-end coordinate plus
+        // the exact policy cutoff; classification must absorb only the narrow
+        // endpoint-subtraction rounding budget, not move the geometry inward.
+        let free_end_z = 17.5;
+        let boundary_top = free_end_z + cutoff;
+        let boundary_fixture = Fixture::new(stacked_obstruction(boundary_top, 20.0));
+        assert!(boundary_fixture
+            .mesh
+            .verts()
+            .iter()
+            .any(|vertex| vertex[2] == boundary_top));
+        let boundary = boundary_fixture
             .build(ContactConstructionLimits::production())
             .unwrap();
-        assert!(cutoff - (boundary_top - 17.5) < 1e-12);
+        assert!(!boundary.terminals().is_empty());
         assert!(boundary.condemned().is_empty());
         assert!(boundary
             .terminals()
             .iter()
             .all(|terminal| terminal.state == TerminalLedgerState::Live));
 
-        let above = Fixture::new(stacked_obstruction(17.56))
+        let geometry = AnchorGeometryAuthority::new(
+            &boundary_fixture.mesh,
+            &boundary_fixture.topology,
+            &boundary_fixture.surface,
+        )
+        .unwrap();
+        let boundary_seeds = boundary
+            .terminals()
+            .iter()
+            .map(|terminal| {
+                let record = boundary
+                    .forest()
+                    .terminal_ledger_evidence(terminal.terminal)
+                    .unwrap();
+                StubSeed {
+                    terminal: terminal.terminal,
+                    p0: record.p0_mm,
+                    p1: record.p1_mm,
+                    r0: record.r0_mm.get(),
+                    r1: record.r1_mm.get(),
+                    carried_mm2: record.carried_mm2,
+                    specialized: false,
+                }
+            })
+            .collect::<Vec<_>>();
+        let (boundary_overlaps, batch_count) = classify_initial_overlaps(
+            &boundary_seeds,
+            &geometry,
+            m0_constants()
+                .unwrap()
+                .placeholders()
+                .initial_axis_majority_step_mm()
+                .diagnostic()
+                .get(),
+            80,
+            m0_constants()
+                .unwrap()
+                .placeholders()
+                .default_contact_depth_mm()
+                .diagnostic()
+                .get(),
+        )
+        .unwrap();
+        assert_eq!(batch_count, 1);
+        assert!(boundary_overlaps.iter().any(|overlap| *overlap > 0.0));
+        assert!(boundary_overlaps
+            .iter()
+            .any(|overlap| (*overlap - cutoff).abs() <= 2.0 * f64::EPSILON * 2.8));
+        assert!(boundary_overlaps
+            .iter()
+            .all(|overlap| !initial_overlap_exceeds_cutoff(*overlap, cutoff, 2.8)));
+
+        let above = Fixture::new(stacked_obstruction(free_end_z + 0.06, 20.0))
             .build(ContactConstructionLimits::production())
             .unwrap();
         assert!(!above.condemned().is_empty());
