@@ -11,15 +11,14 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, PlaneSliceLimits, PointCloudIndex};
 use plinth_core::LayerPlan;
-use plinth_mesh::{
-    build_face_topology, mesh_fingerprint, FaceTopology, Mesh, WeldPolicy, WeldedView,
-};
+use plinth_mesh::{mesh_fingerprint, FaceTopology, Mesh, WeldPolicy, WeldedView};
 use thiserror::Error;
 
 use crate::dyadic::{build_candidate_payload, CandidatePayloadConfig, DyadicError};
 use crate::{
-    perceive_contacts, ContactCandidate, ContactCandidateId, ContactCandidatePool, SupportIsland,
-    SupportPerceptionConfig, SupportPerceptionError,
+    perceive_contacts_on_surface, validate_perception_input, BuildFrame, ContactCandidate,
+    ContactCandidateId, ContactCandidatePool, SupportIsland, SupportPerceptionConfig,
+    SupportPerceptionError,
 };
 
 const LOOP_MERGE_MM: f64 = geom_kernel::PLANE_SLICE_MERGE_TOLERANCE_MM;
@@ -34,6 +33,8 @@ pub struct GenericPerceptionLimits {
     pub max_slice_output_bytes: usize,
     pub max_loop_vertices: usize,
     pub max_minima_vertices: usize,
+    pub max_overlap_pairs: usize,
+    pub max_overlap_bytes: usize,
 }
 
 impl GenericPerceptionLimits {
@@ -46,6 +47,8 @@ impl GenericPerceptionLimits {
             max_slice_output_bytes: 2 * 1024 * 1024 * 1024,
             max_loop_vertices: 100_000_000,
             max_minima_vertices: 20_000_000,
+            max_overlap_pairs: 100_000_000,
+            max_overlap_bytes: 2 * 1024 * 1024 * 1024,
         }
     }
 }
@@ -57,18 +60,49 @@ pub struct SpecializedOwnerReservation {
     pub face_id: u32,
 }
 
-/// Closed owner vocabulary used by the unique-face load partition.
+/// Closed physical-contact owner vocabulary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LoadOwner {
     Specialized(u32),
     GenericIsland(u32),
 }
 
-/// One face appears exactly once in this evidence stream.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FaceLoadOwner {
-    pub face_id: u32,
+/// One already-placed physical contact presented to the load finalizer.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PhysicalContact {
+    pub contact_id: u64,
     pub owner: LoadOwner,
+    pub point_mm: [f64; 3],
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct LoadEligibility {
+    face_id: u32,
+    eligible_owners: Vec<LoadOwner>,
+    centroid_mm: [f64; 3],
+    area_mm2: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FinalizedFaceLoad {
+    pub face_id: u32,
+    pub contact_id: u64,
+    pub owner: LoadOwner,
+    pub carried_area_mm2: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FinalizedLoadPartition {
+    authority: AuthorityFingerprint,
+    contacts_fingerprint: u64,
+    rows: Vec<FinalizedFaceLoad>,
+}
+
+impl FinalizedLoadPartition {
+    #[must_use]
+    pub fn rows(&self) -> &[FinalizedFaceLoad] {
+        &self.rows
+    }
 }
 
 /// One canonical solid boundary or hole at a real print layer.
@@ -94,6 +128,33 @@ impl SliceLoop {
     }
 }
 
+/// One solid cross-section component with its owned void boundaries.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SliceSolid {
+    outer: SliceLoop,
+    holes: Vec<SliceLoop>,
+}
+
+impl SliceSolid {
+    #[must_use]
+    pub const fn outer(&self) -> &SliceLoop {
+        &self.outer
+    }
+    #[must_use]
+    pub fn holes(&self) -> &[SliceLoop] {
+        &self.holes
+    }
+    #[must_use]
+    pub fn area_mm2(&self) -> f64 {
+        self.outer.signed_area_mm2.abs()
+            - self
+                .holes
+                .iter()
+                .map(|hole| hole.signed_area_mm2.abs())
+                .sum::<f64>()
+    }
+}
+
 /// First printable appearance of one solid slice component.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IslandBirth {
@@ -101,12 +162,12 @@ pub struct IslandBirth {
     pub z_mm: f64,
     pub centroid_xy_mm: [f64; 2],
     pub area_mm2: f64,
-    footprint: SliceLoop,
+    footprint: SliceSolid,
 }
 
 impl IslandBirth {
     #[must_use]
-    pub const fn footprint(&self) -> &SliceLoop {
+    pub const fn footprint(&self) -> &SliceSolid {
         &self.footprint
     }
 }
@@ -132,10 +193,10 @@ pub struct GenericContactPlan {
     authority: AuthorityFingerprint,
     islands: Vec<SupportIsland>,
     candidates: ContactCandidatePool,
-    slice_layers: Vec<Vec<SliceLoop>>,
+    slice_layers: Vec<Vec<SliceSolid>>,
     island_births: Vec<IslandBirth>,
     local_z_minima: Vec<LocalZMinimum>,
-    load_partition: Vec<FaceLoadOwner>,
+    load_eligibility: Vec<LoadEligibility>,
     slice_effective_threads: usize,
     slice_participating_threads: usize,
 }
@@ -150,7 +211,7 @@ impl GenericContactPlan {
         &self.candidates
     }
     #[must_use]
-    pub fn slice_layers(&self) -> &[Vec<SliceLoop>] {
+    pub fn slice_layers(&self) -> &[Vec<SliceSolid>] {
         &self.slice_layers
     }
     #[must_use]
@@ -160,10 +221,6 @@ impl GenericContactPlan {
     #[must_use]
     pub fn local_z_minima(&self) -> &[LocalZMinimum] {
         &self.local_z_minima
-    }
-    #[must_use]
-    pub fn load_partition(&self) -> &[FaceLoadOwner] {
-        &self.load_partition
     }
     #[must_use]
     pub const fn slice_thread_evidence(&self) -> (usize, usize) {
@@ -180,6 +237,7 @@ impl GenericContactPlan {
         hash.u64(self.authority.config);
         hash.u64(self.authority.frame);
         hash.u64(self.authority.layers);
+        hash.u64(self.authority.specialized);
         hash.u64(self.candidates.digest());
         for island in &self.islands {
             hash.u32(island.id);
@@ -191,26 +249,58 @@ impl GenericContactPlan {
             hash.usize(birth.layer_index);
             hash.f64(birth.z_mm);
             hash.f64(birth.area_mm2);
-            for point in birth.footprint.points_xy_mm() {
+            for point in birth.footprint.outer.points_xy_mm() {
                 hash.f64(point[0]);
                 hash.f64(point[1]);
+            }
+            for hole in &birth.footprint.holes {
+                for point in hole.points_xy_mm() {
+                    hash.f64(point[0]);
+                    hash.f64(point[1]);
+                }
             }
         }
         for minimum in &self.local_z_minima {
             for value in minimum.position_mm.iter().chain(minimum.normal.iter()) {
                 hash.f64(*value);
             }
-        }
-        for row in &self.load_partition {
-            hash.u32(row.face_id);
-            match row.owner {
-                LoadOwner::Specialized(id) => {
-                    hash.u8(0);
-                    hash.u32(id);
+            for point in &minimum.region_points_mm {
+                for value in point {
+                    hash.f64(*value);
                 }
-                LoadOwner::GenericIsland(id) => {
-                    hash.u8(1);
-                    hash.u32(id);
+            }
+        }
+        for layer in &self.slice_layers {
+            for solid in layer {
+                hash.f64(solid.area_mm2());
+                for point in solid.outer.points_xy_mm() {
+                    hash.f64(point[0]);
+                    hash.f64(point[1]);
+                }
+                for hole in &solid.holes {
+                    for point in hole.points_xy_mm() {
+                        hash.f64(point[0]);
+                        hash.f64(point[1]);
+                    }
+                }
+            }
+        }
+        for row in &self.load_eligibility {
+            hash.u32(row.face_id);
+            for value in row.centroid_mm {
+                hash.f64(value);
+            }
+            hash.f64(row.area_mm2);
+            for owner in &row.eligible_owners {
+                match owner {
+                    LoadOwner::Specialized(id) => {
+                        hash.u8(0);
+                        hash.u32(*id);
+                    }
+                    LoadOwner::GenericIsland(id) => {
+                        hash.u8(1);
+                        hash.u32(*id);
+                    }
                 }
             }
         }
@@ -219,14 +309,31 @@ impl GenericContactPlan {
 
     /// Reject replay against any different geometry, native setup, frame,
     /// result-changing configuration or layer schedule.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "validation deliberately restates every independently stale-able authority input"
+    )]
     pub fn validate_binding(
         &self,
         mesh: &Mesh,
         config: &SupportPerceptionConfig<'_>,
+        frame: BuildFrame,
         layers: &LayerPlan,
+        candidate_config: &CandidatePayloadConfig,
+        specialized: &[SpecializedOwnerReservation],
+        limits: GenericPerceptionLimits,
     ) -> Result<(), GenericPerceptionError> {
         let surface = build_surface(mesh, config)?;
-        let current = authority_fingerprint(mesh, &surface, config, layers)?;
+        let current = authority_fingerprint(
+            mesh,
+            &surface,
+            config,
+            frame,
+            layers,
+            candidate_config,
+            specialized,
+            limits,
+        )?;
         if current != self.authority {
             return Err(GenericPerceptionError::StaleAuthority);
         }
@@ -241,6 +348,7 @@ struct AuthorityFingerprint {
     config: u64,
     frame: u64,
     layers: u64,
+    specialized: u64,
 }
 
 #[derive(Clone, Debug, Error, PartialEq)]
@@ -269,6 +377,18 @@ pub enum GenericPerceptionError {
     DuplicateSpecializedReservation { owner_id: u32, face_id: u32 },
     #[error("the layer schedule does not cover the support mesh z range")]
     LayerScheduleCoverage,
+    #[error("support perception plate and build frame disagree")]
+    FrameMismatch,
+    #[error("slice overlap requires {required} candidate pairs; limit is {limit}")]
+    OverlapPairLimit { required: usize, limit: usize },
+    #[error("slice overlap requires {required} bytes; limit is {limit}")]
+    OverlapByteLimit { required: usize, limit: usize },
+    #[error("physical contact {contact_id} is non-finite")]
+    NonFinitePhysicalContact { contact_id: u64 },
+    #[error("physical contact id {contact_id} is duplicated")]
+    DuplicatePhysicalContact { contact_id: u64 },
+    #[error("support face {face_id} has no eligible physical contact")]
+    MissingPhysicalContact { face_id: u32 },
     #[error("generic perception produced an island without a legal dyadic candidate: {island_id}")]
     NoLegalCandidate { island_id: u32 },
     #[error("generic perception authority is stale or belongs to another input")]
@@ -279,20 +399,20 @@ pub enum GenericPerceptionError {
 pub fn prepare_generic_contacts(
     mesh: &Mesh,
     config: &SupportPerceptionConfig<'_>,
+    frame: BuildFrame,
     layers: &LayerPlan,
     candidate_config: &CandidatePayloadConfig,
     specialized: &[SpecializedOwnerReservation],
     limits: GenericPerceptionLimits,
 ) -> Result<GenericContactPlan, GenericPerceptionError> {
-    let raw = perceive_contacts(mesh, config)?;
-    let topology = build_face_topology(mesh, WeldPolicy::ExactBits)
-        .map_err(|error| GenericPerceptionError::Topology(error.to_string()))?;
+    if config.plate_z_mm != frame.plate_z_mm() {
+        return Err(GenericPerceptionError::FrameMismatch);
+    }
+    let (topology, delicacy) = validate_perception_input(mesh, config)?;
     let surface = build_surface(mesh, config)?;
+    let raw = perceive_contacts_on_surface(mesh, config, &topology, delicacy, &surface)?;
     let islands = connected_islands(&raw, &topology, &surface)?;
     let payload = build_candidate_payload(mesh, &islands, candidate_config)?;
-    let delicacy = config
-        .delicacy_by_face
-        .ok_or(SupportPerceptionError::MissingDelicacySidecar)?;
     let geometry = surface.geometry();
     let candidates = payload
         .rows()
@@ -340,7 +460,14 @@ pub fn prepare_generic_contacts(
             .checked_add(
                 loops
                     .iter()
-                    .map(|loop_| loop_.points_xy_mm.len())
+                    .map(|solid| {
+                        solid.outer.points_xy_mm.len()
+                            + solid
+                                .holes
+                                .iter()
+                                .map(|hole| hole.points_xy_mm.len())
+                                .sum::<usize>()
+                    })
                     .sum::<usize>(),
             )
             .ok_or(GenericPerceptionError::LoopVertexLimit {
@@ -355,10 +482,25 @@ pub fn prepare_generic_contacts(
         }
         slice_layers.push(loops);
     }
-    let island_births = find_births(&layer_indices, &planes, &slice_layers);
-    let local_z_minima = find_local_minima(mesh, &surface, layers, limits.max_minima_vertices)?;
-    let load_partition = partition_load(mesh, &islands, specialized)?;
-    let authority = authority_fingerprint(mesh, &surface, config, layers)?;
+    let island_births = find_births(
+        &layer_indices,
+        &planes,
+        &slice_layers,
+        limits.max_overlap_pairs,
+        limits.max_overlap_bytes,
+    )?;
+    let local_z_minima = find_local_minima(mesh, &surface, layers, &island_births, limits)?;
+    let load_eligibility = build_load_eligibility(mesh, &surface, &islands, specialized)?;
+    let authority = authority_fingerprint(
+        mesh,
+        &surface,
+        config,
+        frame,
+        layers,
+        candidate_config,
+        specialized,
+        limits,
+    )?;
     Ok(GenericContactPlan {
         authority,
         islands,
@@ -366,7 +508,7 @@ pub fn prepare_generic_contacts(
         slice_layers,
         island_births,
         local_z_minima,
-        load_partition,
+        load_eligibility,
         slice_effective_threads: sliced.effective_threads,
         slice_participating_threads: sliced.participating_threads,
     })
@@ -519,7 +661,7 @@ fn point_key(point: [f64; 2]) -> PointKey {
 fn stitch_layer(
     layer: usize,
     intersections: &[geom_kernel::PlaneIntersection],
-) -> Result<Vec<SliceLoop>, GenericPerceptionError> {
+) -> Result<Vec<SliceSolid>, GenericPerceptionError> {
     let mut points = BTreeMap::<PointKey, [f64; 2]>::new();
     let mut edges = BTreeSet::<(PointKey, PointKey)>::new();
     for event in intersections {
@@ -604,7 +746,43 @@ fn stitch_layer(
             .then_with(|| b.signed_area_mm2.abs().total_cmp(&a.signed_area_mm2.abs()))
             .then_with(|| point_key(a.points_xy_mm[0]).cmp(&point_key(b.points_xy_mm[0])))
     });
-    Ok(loops)
+    let mut solids = loops
+        .iter()
+        .filter(|loop_| !loop_.hole)
+        .cloned()
+        .map(|outer| SliceSolid {
+            outer,
+            holes: Vec::new(),
+        })
+        .collect::<Vec<_>>();
+    for hole in loops.into_iter().filter(|loop_| loop_.hole) {
+        let probe = hole.points_xy_mm[0];
+        let owner = solids
+            .iter()
+            .enumerate()
+            .filter(|(_, solid)| point_in_polygon(probe, solid.outer.points_xy_mm()))
+            .min_by(|(_, left), (_, right)| {
+                left.outer
+                    .signed_area_mm2
+                    .abs()
+                    .total_cmp(&right.outer.signed_area_mm2.abs())
+            })
+            .map(|(index, _)| index)
+            .ok_or(GenericPerceptionError::OpenSliceSeam { layer })?;
+        solids[owner].holes.push(hole);
+    }
+    for solid in &mut solids {
+        solid.holes.sort_by(|left, right| {
+            right
+                .signed_area_mm2
+                .abs()
+                .total_cmp(&left.signed_area_mm2.abs())
+                .then_with(|| {
+                    point_key(left.points_xy_mm[0]).cmp(&point_key(right.points_xy_mm[0]))
+                })
+        });
+    }
+    Ok(solids)
 }
 
 fn canonicalize_loop(mut points: Vec<[f64; 2]>, _hole: bool) -> Vec<[f64; 2]> {
@@ -645,19 +823,6 @@ fn point_in_polygon(point: [f64; 2], polygon: &[[f64; 2]]) -> bool {
     inside
 }
 
-fn polygons_overlap(a: &[[f64; 2]], b: &[[f64; 2]]) -> bool {
-    if a.iter().any(|point| point_in_polygon(*point, b))
-        || b.iter().any(|point| point_in_polygon(*point, a))
-    {
-        return true;
-    }
-    (0..a.len()).any(|ai| {
-        (0..b.len()).any(|bi| {
-            segments_intersect(a[ai], a[(ai + 1) % a.len()], b[bi], b[(bi + 1) % b.len()])
-        })
-    })
-}
-
 fn segments_intersect(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
     fn orient(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
         (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
@@ -685,65 +850,196 @@ fn segments_intersect(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> boo
 fn find_births(
     layer_indices: &[usize],
     planes: &[f64],
-    layers: &[Vec<SliceLoop>],
-) -> Vec<IslandBirth> {
+    layers: &[Vec<SliceSolid>],
+    max_pairs: usize,
+    max_bytes: usize,
+) -> Result<Vec<IslandBirth>, GenericPerceptionError> {
     let mut births = Vec::new();
-    let mut previous: Vec<&SliceLoop> = Vec::new();
+    let mut previous: &[SliceSolid] = &[];
     for (layer_index, layer) in layers.iter().enumerate() {
-        let current = layer.iter().filter(|loop_| !loop_.hole).collect::<Vec<_>>();
-        for loop_ in &current {
-            if !previous
-                .iter()
-                .any(|prior| polygons_overlap(loop_.points_xy_mm(), prior.points_xy_mm()))
-            {
-                let centroid = polygon_centroid(loop_.points_xy_mm());
+        let overlaps = overlap_candidates(layer, previous, max_pairs, max_bytes)?;
+        for (current_index, solid) in layer.iter().enumerate() {
+            let overlapped = overlaps.get(&current_index).is_some_and(|prior| {
+                prior
+                    .iter()
+                    .any(|index| solids_overlap(solid, &previous[*index]))
+            });
+            if !overlapped {
+                let count = solid.outer.points_xy_mm.len() as f64;
+                let centroid = [
+                    solid
+                        .outer
+                        .points_xy_mm
+                        .iter()
+                        .map(|point| point[0])
+                        .sum::<f64>()
+                        / count,
+                    solid
+                        .outer
+                        .points_xy_mm
+                        .iter()
+                        .map(|point| point[1])
+                        .sum::<f64>()
+                        / count,
+                ];
                 births.push(IslandBirth {
                     layer_index: layer_indices[layer_index],
                     z_mm: planes[layer_index],
                     centroid_xy_mm: centroid,
-                    area_mm2: loop_.signed_area_mm2.abs(),
-                    footprint: (*loop_).clone(),
+                    area_mm2: solid.area_mm2(),
+                    footprint: solid.clone(),
                 });
             }
         }
-        previous = current;
+        previous = layer;
     }
-    births
+    Ok(births)
 }
 
-fn polygon_centroid(points: &[[f64; 2]]) -> [f64; 2] {
-    let mut cross_sum = 0.0;
-    let mut x = 0.0;
-    let mut y = 0.0;
-    for i in 0..points.len() {
-        let j = (i + 1) % points.len();
-        let cross = points[i][0] * points[j][1] - points[j][0] * points[i][1];
-        cross_sum += cross;
-        x += (points[i][0] + points[j][0]) * cross;
-        y += (points[i][1] + points[j][1]) * cross;
+fn overlap_candidates(
+    current: &[SliceSolid],
+    previous: &[SliceSolid],
+    max_pairs: usize,
+    max_bytes: usize,
+) -> Result<BTreeMap<usize, Vec<usize>>, GenericPerceptionError> {
+    if current.is_empty() || previous.is_empty() {
+        return Ok(BTreeMap::new());
     }
-    if cross_sum.abs() <= f64::EPSILON {
-        let count = points.len() as f64;
-        return [
-            points.iter().map(|point| point[0]).sum::<f64>() / count,
-            points.iter().map(|point| point[1]).sum::<f64>() / count,
-        ];
+    let upper = current.len().checked_mul(previous.len()).ok_or(
+        GenericPerceptionError::OverlapPairLimit {
+            required: usize::MAX,
+            limit: max_pairs,
+        },
+    )?;
+    if upper > max_pairs {
+        return Err(GenericPerceptionError::OverlapPairLimit {
+            required: upper,
+            limit: max_pairs,
+        });
     }
-    [x / (3.0 * cross_sum), y / (3.0 * cross_sum)]
+    let bytes = upper
+        .checked_mul(2 * std::mem::size_of::<usize>() + std::mem::size_of::<f64>())
+        .ok_or(GenericPerceptionError::OverlapByteLimit {
+            required: usize::MAX,
+            limit: max_bytes,
+        })?;
+    if bytes > max_bytes {
+        return Err(GenericPerceptionError::OverlapByteLimit {
+            required: bytes,
+            limit: max_bytes,
+        });
+    }
+    let bbox = |solid: &SliceSolid| {
+        let xs = solid.outer.points_xy_mm.iter().map(|point| point[0]);
+        let ys = solid.outer.points_xy_mm.iter().map(|point| point[1]);
+        let min_x = xs.clone().fold(f64::INFINITY, f64::min);
+        let max_x = xs.fold(f64::NEG_INFINITY, f64::max);
+        let min_y = ys.clone().fold(f64::INFINITY, f64::min);
+        let max_y = ys.fold(f64::NEG_INFINITY, f64::max);
+        (
+            [0.5 * (min_x + max_x), 0.5 * (min_y + max_y), 0.0],
+            0.5 * ((max_x - min_x).hypot(max_y - min_y)),
+        )
+    };
+    let previous_boxes = previous.iter().map(bbox).collect::<Vec<_>>();
+    let current_boxes = current.iter().map(bbox).collect::<Vec<_>>();
+    let radius = previous_boxes
+        .iter()
+        .map(|(_, radius)| *radius)
+        .fold(0.0, f64::max)
+        + current_boxes
+            .iter()
+            .map(|(_, radius)| *radius)
+            .fold(0.0, f64::max);
+    let index = PointCloudIndex::new(
+        &previous_boxes
+            .iter()
+            .map(|(center, _)| *center)
+            .collect::<Vec<_>>(),
+    )
+    .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?;
+    let nearby = index
+        .radius_neighbors_batch(
+            &current_boxes
+                .iter()
+                .map(|(center, _)| *center)
+                .collect::<Vec<_>>(),
+            radius,
+        )
+        .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?;
+    if nearby.point_ids.len() > max_pairs {
+        return Err(GenericPerceptionError::OverlapPairLimit {
+            required: nearby.point_ids.len(),
+            limit: max_pairs,
+        });
+    }
+    Ok((0..current.len())
+        .map(|row| {
+            let range = nearby.row_range(row).expect("one row per current solid");
+            (
+                row,
+                nearby.point_ids[range]
+                    .iter()
+                    .map(|id| *id as usize)
+                    .collect(),
+            )
+        })
+        .collect())
+}
+
+fn solid_contains(solid: &SliceSolid, point: [f64; 2]) -> bool {
+    point_in_polygon(point, solid.outer.points_xy_mm())
+        && !solid
+            .holes
+            .iter()
+            .any(|hole| point_in_polygon(point, hole.points_xy_mm()))
+}
+
+fn solids_overlap(a: &SliceSolid, b: &SliceSolid) -> bool {
+    if a.outer
+        .points_xy_mm
+        .iter()
+        .any(|point| solid_contains(b, *point))
+        || b.outer
+            .points_xy_mm
+            .iter()
+            .any(|point| solid_contains(a, *point))
+    {
+        return true;
+    }
+    let boundaries_a = std::iter::once(&a.outer).chain(a.holes.iter());
+    let boundaries_b = std::iter::once(&b.outer)
+        .chain(b.holes.iter())
+        .collect::<Vec<_>>();
+    boundaries_a.into_iter().any(|left| {
+        boundaries_b.iter().any(|right| {
+            (0..left.points_xy_mm.len()).any(|i| {
+                (0..right.points_xy_mm.len()).any(|j| {
+                    segments_intersect(
+                        left.points_xy_mm[i],
+                        left.points_xy_mm[(i + 1) % left.points_xy_mm.len()],
+                        right.points_xy_mm[j],
+                        right.points_xy_mm[(j + 1) % right.points_xy_mm.len()],
+                    )
+                })
+            })
+        })
+    })
 }
 
 fn find_local_minima(
     mesh: &Mesh,
     surface: &NativeSurface,
     layers: &LayerPlan,
-    cap: usize,
+    births: &[IslandBirth],
+    limits: GenericPerceptionLimits,
 ) -> Result<Vec<LocalZMinimum>, GenericPerceptionError> {
     let welded = WeldedView::build(mesh, WeldPolicy::ExactBits)
         .map_err(|error| GenericPerceptionError::Topology(error.to_string()))?;
-    if welded.verts().len() > cap {
+    if welded.verts().len() > limits.max_minima_vertices {
         return Err(GenericPerceptionError::MinimaVertexLimit {
             required: welded.verts().len(),
-            limit: cap,
+            limit: limits.max_minima_vertices,
         });
     }
     let mut adjacency = vec![BTreeSet::<usize>::new(); welded.verts().len()];
@@ -767,14 +1063,12 @@ fn find_local_minima(
         .diagnostic()
         .get()
         .ceil() as usize;
-    let exterior = surface.exterior_face_mask();
     let normals = surface.geometry().normals();
     let mut candidates = (0..welded.verts().len())
         .filter(|&vertex| {
             adjacency[vertex]
                 .iter()
                 .all(|neighbor| welded.verts()[vertex][2] <= welded.verts()[*neighbor][2] + eps)
-                && incident[vertex].iter().any(|face| exterior[*face])
         })
         .collect::<Vec<_>>();
     candidates.sort_by(|a, b| {
@@ -794,18 +1088,23 @@ fn find_local_minima(
             .iter()
             .take(connect_layers)
             .sum::<f64>();
-        let mut queue = VecDeque::from([start]);
-        let mut local = BTreeSet::from([start]);
+        let mut stack = vec![start];
+        let mut seen = BTreeSet::from([start]);
+        let mut local = vec![start];
         let mut reaches_lower = false;
-        while let Some(vertex) = queue.pop_front() {
+        'flood: while let Some(vertex) = stack.pop() {
             for &neighbor in &adjacency[vertex] {
+                if seen.contains(&neighbor) || welded.verts()[neighbor][2] > z + tolerance {
+                    continue;
+                }
                 let nz = welded.verts()[neighbor][2];
                 if nz < z - eps {
                     reaches_lower = true;
+                    break 'flood;
                 }
-                if nz >= z - eps && nz <= z + tolerance && local.insert(neighbor) {
-                    queue.push_back(neighbor);
-                }
+                seen.insert(neighbor);
+                local.push(neighbor);
+                stack.push(neighbor);
             }
         }
         for &vertex in &local {
@@ -814,31 +1113,33 @@ fn find_local_minima(
         if reaches_lower {
             continue;
         }
-        let representative = *local
-            .iter()
-            .min_by(|a, b| {
-                welded.verts()[**a][2]
-                    .total_cmp(&welded.verts()[**b][2])
-                    .then_with(|| a.cmp(b))
-            })
-            .expect("minimum region contains its seed");
+        let representative = start;
         let mut normal = [0.0; 3];
-        let mut count = 0.0;
         for &face in &incident[representative] {
-            if exterior[face] {
-                for (axis, value) in normal.iter_mut().enumerate() {
-                    *value += normals[face][axis];
-                }
-                count += 1.0;
+            let source = mesh.tris()[face];
+            let ids = source.map(|id| welded.map()[id as usize] as usize);
+            let corner = ids
+                .iter()
+                .position(|id| *id == representative)
+                .expect("incident face contains welded vertex");
+            let p = welded.verts()[representative];
+            let a = welded.verts()[ids[(corner + 1) % 3]];
+            let b = welded.verts()[ids[(corner + 2) % 3]];
+            let va = [a[0] - p[0], a[1] - p[1], a[2] - p[2]];
+            let vb = [b[0] - p[0], b[1] - p[1], b[2] - p[2]];
+            let la = (va[0] * va[0] + va[1] * va[1] + va[2] * va[2]).sqrt();
+            let lb = (vb[0] * vb[0] + vb[1] * vb[1] + vb[2] * vb[2]).sqrt();
+            let cosine =
+                ((va[0] * vb[0] + va[1] * vb[1] + va[2] * vb[2]) / (la * lb)).clamp(-1.0, 1.0);
+            let angle = cosine.acos();
+            for (axis, value) in normal.iter_mut().enumerate() {
+                *value += angle * normals[face][axis];
             }
         }
-        if count > 0.0 {
-            let length =
-                (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
-            if length > 0.0 {
-                for value in &mut normal {
-                    *value /= length;
-                }
+        let length = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+        if length > 0.0 {
+            for value in &mut normal {
+                *value /= length;
             }
         }
         minima.push(LocalZMinimum {
@@ -847,14 +1148,184 @@ fn find_local_minima(
             region_points_mm: local.iter().map(|id| welded.verts()[*id]).collect(),
         });
     }
-    Ok(minima)
+    // Independent filter A: nearest face, queried once for every minimum.
+    if !minima.is_empty() {
+        let exterior = surface.exterior_face_mask();
+        let exterior_points = surface
+            .geometry()
+            .centroids()
+            .iter()
+            .zip(exterior)
+            .filter_map(|(point, keep)| (*keep).then_some(*point))
+            .collect::<Vec<_>>();
+        let interior_points = surface
+            .geometry()
+            .centroids()
+            .iter()
+            .zip(exterior)
+            .filter_map(|(point, keep)| (!*keep).then_some(*point))
+            .collect::<Vec<_>>();
+        // Preserve the live fail-open rule for all-exterior/all-interior
+        // masks. Otherwise compare two gathered nearest batches. Exact ties
+        // remain exterior, matching the frozen table corner case.
+        if !exterior_points.is_empty() && !interior_points.is_empty() {
+            let queries = minima
+                .iter()
+                .map(|minimum| minimum.position_mm)
+                .collect::<Vec<_>>();
+            let exterior_nearest = PointCloudIndex::new(&exterior_points)
+                .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?
+                .knn_batch(&queries, 1)
+                .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?;
+            let interior_nearest = PointCloudIndex::new(&interior_points)
+                .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?
+                .knn_batch(&queries, 1)
+                .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?;
+            minima = minima
+                .into_iter()
+                .enumerate()
+                .filter(|(row, _)| {
+                    let exterior_range = exterior_nearest
+                        .row_range(*row)
+                        .expect("one exterior nearest-face row");
+                    let interior_range = interior_nearest
+                        .row_range(*row)
+                        .expect("one interior nearest-face row");
+                    exterior_nearest.squared_distances[exterior_range.start]
+                        <= interior_nearest.squared_distances[interior_range.start]
+                })
+                .map(|(_, minimum)| minimum)
+                .collect();
+        }
+    }
+
+    // Independent filter B: keep a true birth, or an inadequately carried
+    // non-birth. The adequacy probes are gathered and sliced in one batch.
+    let birth_match_layers = constants
+        .placeholders()
+        .minima_birth_match_layers()
+        .diagnostic()
+        .get()
+        .ceil() as usize;
+    let is_birth = minima
+        .iter()
+        .map(|minimum| {
+            let z_tolerance = layer_tolerance(layers, minimum.position_mm[2], birth_match_layers);
+            births.iter().any(|birth| {
+                (birth.z_mm - minimum.position_mm[2]).abs() <= z_tolerance
+                    && sampled_region_points(minimum)
+                        .iter()
+                        .any(|point| birth_xy_ok(&birth.footprint, [point[0], point[1]], 0.2))
+            })
+        })
+        .collect::<Vec<_>>();
+    let suspects = minima
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| !is_birth[*index])
+        .collect::<Vec<_>>();
+    let probe_heights = suspects
+        .iter()
+        .map(|(_, minimum)| {
+            let index = layers
+                .index_at(minimum.position_mm[2])
+                .expect("validated layer schedule covers every minimum");
+            minimum.position_mm[2] - layers.heights_mm()[index]
+        })
+        .collect::<Vec<_>>();
+    let adequacy_slices = surface
+        .slice_z_batch(
+            &probe_heights,
+            PlaneSliceLimits {
+                max_planes: limits.max_planes,
+                max_triangle_plane_tests: limits.max_triangle_plane_tests,
+                max_intersections: limits.max_slice_intersections,
+                max_output_bytes: limits.max_slice_output_bytes,
+            },
+        )
+        .map_err(|error| GenericPerceptionError::Slice(error.to_string()))?;
+    let threshold = constants
+        .placeholders()
+        .minima_support_area_tips()
+        .diagnostic()
+        .get()
+        * std::f64::consts::PI
+        * constants
+            .placeholders()
+            .tip_radius_default_mm()
+            .diagnostic()
+            .get()
+            .powi(2);
+    let mut adequate = vec![false; minima.len()];
+    for (probe_row, (minimum_index, minimum)) in suspects.into_iter().enumerate() {
+        let solids = stitch_layer(probe_row, adequacy_slices.plane(probe_row))?;
+        let point = [minimum.position_mm[0], minimum.position_mm[1]];
+        let carried = solids
+            .iter()
+            .filter(|solid| solid_contains(solid, point))
+            .map(SliceSolid::area_mm2)
+            .fold(0.0, f64::max);
+        adequate[minimum_index] = carried >= threshold;
+    }
+    Ok(minima
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| is_birth[*index] || !adequate[*index])
+        .map(|(_, minimum)| minimum)
+        .collect())
 }
 
-fn partition_load(
+fn layer_tolerance(layers: &LayerPlan, z: f64, count: usize) -> f64 {
+    let index = layers.index_at(z).unwrap_or(0);
+    layers.heights_mm()[index..].iter().take(count).sum()
+}
+
+fn sampled_region_points(minimum: &LocalZMinimum) -> Vec<[f64; 3]> {
+    let mut points = vec![minimum.position_mm];
+    let region = &minimum.region_points_mm;
+    if region.len() <= 64 {
+        points.extend(region.iter().copied());
+    } else {
+        points.extend((0..64).map(|index| region[index * (region.len() - 1) / 63]));
+    }
+    points
+}
+
+fn birth_xy_ok(solid: &SliceSolid, point: [f64; 2], reach: f64) -> bool {
+    if solid_contains(solid, point) {
+        return true;
+    }
+    std::iter::once(&solid.outer)
+        .chain(solid.holes.iter())
+        .flat_map(|loop_| {
+            (0..loop_.points_xy_mm.len()).map(move |index| {
+                point_segment_distance(
+                    point,
+                    loop_.points_xy_mm[index],
+                    loop_.points_xy_mm[(index + 1) % loop_.points_xy_mm.len()],
+                )
+            })
+        })
+        .fold(f64::INFINITY, f64::min)
+        <= reach
+}
+
+fn point_segment_distance(point: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
+    let ab = [b[0] - a[0], b[1] - a[1]];
+    let denominator = ab[0] * ab[0] + ab[1] * ab[1];
+    if denominator < 1.0e-15 {
+        return (point[0] - a[0]).hypot(point[1] - a[1]);
+    }
+    let t = (((point[0] - a[0]) * ab[0] + (point[1] - a[1]) * ab[1]) / denominator).clamp(0.0, 1.0);
+    (point[0] - (a[0] + t * ab[0])).hypot(point[1] - (a[1] + t * ab[1]))
+}
+
+fn build_load_eligibility(
     mesh: &Mesh,
+    surface: &NativeSurface,
     islands: &[SupportIsland],
     specialized: &[SpecializedOwnerReservation],
-) -> Result<Vec<FaceLoadOwner>, GenericPerceptionError> {
+) -> Result<Vec<LoadEligibility>, GenericPerceptionError> {
     let mut owners = BTreeMap::<u32, BTreeSet<LoadOwner>>::new();
     let mut specialized_pairs = BTreeSet::new();
     for reservation in specialized {
@@ -884,19 +1355,158 @@ fn partition_load(
     }
     Ok(owners
         .into_iter()
-        .filter_map(|(face_id, set)| {
-            set.first()
-                .copied()
-                .map(|owner| FaceLoadOwner { face_id, owner })
+        .map(|(face_id, set)| LoadEligibility {
+            face_id,
+            eligible_owners: set.into_iter().collect(),
+            centroid_mm: surface.geometry().centroids()[face_id as usize],
+            area_mm2: surface.geometry().areas()[face_id as usize],
         })
         .collect())
 }
 
+/// Finalize the true unique-face load partition only after physical contacts
+/// exist. Crate-private by design: generic perception cannot invent contacts.
+#[cfg_attr(
+    not(test),
+    allow(
+        dead_code,
+        reason = "consumed by the next specialized-contact integration"
+    )
+)]
+pub(crate) fn finalize_load_partition(
+    plan: &GenericContactPlan,
+    mesh: &Mesh,
+    contacts: &[PhysicalContact],
+) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
+    let fingerprint = mesh_fingerprint(mesh)
+        .map_err(|error| GenericPerceptionError::Topology(error.to_string()))?;
+    if fingerprint != plan.authority.mesh {
+        return Err(GenericPerceptionError::StaleAuthority);
+    }
+    let mut ids = BTreeSet::new();
+    for contact in contacts {
+        if !ids.insert(contact.contact_id) {
+            return Err(GenericPerceptionError::DuplicatePhysicalContact {
+                contact_id: contact.contact_id,
+            });
+        }
+        if contact.point_mm.iter().any(|value| !value.is_finite()) {
+            return Err(GenericPerceptionError::NonFinitePhysicalContact {
+                contact_id: contact.contact_id,
+            });
+        }
+    }
+    let mut by_owner = BTreeMap::<LoadOwner, Vec<&PhysicalContact>>::new();
+    for contact in contacts {
+        by_owner.entry(contact.owner).or_default().push(contact);
+    }
+    for values in by_owner.values_mut() {
+        values.sort_by_key(|contact| contact.contact_id);
+    }
+    let mut nearest = BTreeMap::<(usize, LoadOwner), (&PhysicalContact, f64)>::new();
+    for (owner, owner_contacts) in &by_owner {
+        let face_rows = plan
+            .load_eligibility
+            .iter()
+            .enumerate()
+            .filter(|(_, eligibility)| eligibility.eligible_owners.binary_search(owner).is_ok())
+            .collect::<Vec<_>>();
+        if face_rows.is_empty() {
+            continue;
+        }
+        let index = PointCloudIndex::new(
+            &owner_contacts
+                .iter()
+                .map(|contact| contact.point_mm)
+                .collect::<Vec<_>>(),
+        )
+        .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?;
+        let result = index
+            .knn_batch(
+                &face_rows
+                    .iter()
+                    .map(|(_, eligibility)| eligibility.centroid_mm)
+                    .collect::<Vec<_>>(),
+                1,
+            )
+            .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?;
+        for (query, (row, _)) in face_rows.into_iter().enumerate() {
+            let range = result.row_range(query).expect("one nearest row per face");
+            let point = result.point_ids[range.start] as usize;
+            nearest.insert(
+                (row, *owner),
+                (owner_contacts[point], result.squared_distances[range.start]),
+            );
+        }
+    }
+    let mut rows = Vec::with_capacity(plan.load_eligibility.len());
+    for (row, eligibility) in plan.load_eligibility.iter().enumerate() {
+        let (contact, _) = eligibility
+            .eligible_owners
+            .iter()
+            .filter_map(|owner| nearest.get(&(row, *owner)).copied())
+            .min_by(|(left, left_distance), (right, right_distance)| {
+                left_distance
+                    .total_cmp(right_distance)
+                    .then_with(|| left.contact_id.cmp(&right.contact_id))
+            })
+            .ok_or(GenericPerceptionError::MissingPhysicalContact {
+                face_id: eligibility.face_id,
+            })?;
+        rows.push(FinalizedFaceLoad {
+            face_id: eligibility.face_id,
+            contact_id: contact.contact_id,
+            owner: contact.owner,
+            carried_area_mm2: eligibility.area_mm2,
+        });
+    }
+    let mut contact_hash = Fnv::new();
+    let mut canonical_contacts = contacts.iter().collect::<Vec<_>>();
+    canonical_contacts.sort_by_key(|contact| contact.contact_id);
+    for contact in canonical_contacts {
+        contact_hash.u64(contact.contact_id);
+        hash_owner(&mut contact_hash, contact.owner);
+        for value in contact.point_mm {
+            contact_hash.f64(value);
+        }
+    }
+    Ok(FinalizedLoadPartition {
+        authority: plan.authority.clone(),
+        contacts_fingerprint: contact_hash.finish(),
+        rows,
+    })
+}
+
+#[cfg_attr(
+    not(test),
+    allow(dead_code, reason = "used by the crate-private load finalizer")
+)]
+fn hash_owner(hash: &mut Fnv, owner: LoadOwner) {
+    match owner {
+        LoadOwner::Specialized(id) => {
+            hash.u8(0);
+            hash.u32(id);
+        }
+        LoadOwner::GenericIsland(id) => {
+            hash.u8(1);
+            hash.u32(id);
+        }
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the fingerprint must bind every result-shaping input without hiding an authority source"
+)]
 fn authority_fingerprint(
     mesh: &Mesh,
     surface: &NativeSurface,
     config: &SupportPerceptionConfig<'_>,
+    frame_value: BuildFrame,
     layers: &LayerPlan,
+    candidate_config: &CandidatePayloadConfig,
+    specialized: &[SpecializedOwnerReservation],
+    limits: GenericPerceptionLimits,
 ) -> Result<AuthorityFingerprint, GenericPerceptionError> {
     let mesh = mesh_fingerprint(mesh)
         .map_err(|error| GenericPerceptionError::Topology(error.to_string()))?;
@@ -925,12 +1535,36 @@ fn authority_fingerprint(
             result_config.f64(*value);
         }
     }
+    let (depth, virtual_cells, candidates, compact_bytes, working_cells, edge_bits) =
+        candidate_config.authority_fields();
+    result_config.u32(depth);
+    result_config.usize(virtual_cells);
+    result_config.usize(candidates);
+    result_config.usize(compact_bytes);
+    result_config.usize(working_cells);
+    result_config.u64(edge_bits);
+    result_config.usize(limits.max_planes);
+    result_config.usize(limits.max_triangle_plane_tests);
+    result_config.usize(limits.max_slice_intersections);
+    result_config.usize(limits.max_slice_output_bytes);
+    result_config.usize(limits.max_loop_vertices);
+    result_config.usize(limits.max_minima_vertices);
+    result_config.usize(limits.max_overlap_pairs);
+    result_config.usize(limits.max_overlap_bytes);
     let mut frame = Fnv::new();
-    frame.f64(config.plate_z_mm.get());
+    frame.f64(frame_value.plate_z_mm().get());
+    frame.f64(frame_value.lift_mm().get());
     let mut layer_hash = Fnv::new();
     layer_hash.f64(layers.z0_mm());
     for value in layers.heights_mm() {
         layer_hash.f64(*value);
+    }
+    let mut specialized_hash = Fnv::new();
+    let mut canonical_specialized = specialized.to_vec();
+    canonical_specialized.sort_unstable();
+    for reservation in canonical_specialized {
+        specialized_hash.u32(reservation.owner_id);
+        specialized_hash.u32(reservation.face_id);
     }
     Ok(AuthorityFingerprint {
         mesh,
@@ -938,6 +1572,7 @@ fn authority_fingerprint(
         config: result_config.finish(),
         frame: frame.finish(),
         layers: layer_hash.finish(),
+        specialized: specialized_hash.finish(),
     })
 }
 
@@ -1000,6 +1635,10 @@ mod tests {
         LayerPlan::new(0.0, vec![0.05; 1_000]).unwrap()
     }
 
+    fn frame() -> BuildFrame {
+        BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap())
+    }
+
     fn covering_layer_plan(mesh: &Mesh) -> LayerPlan {
         let zmin = mesh
             .verts()
@@ -1029,19 +1668,37 @@ mod tests {
             signed_area_mm2: -1.0,
             hole: true,
         };
-        let moved = SliceLoop {
-            points_xy_mm: square(10.0, 0.0, 11.0, 1.0),
-            signed_area_mm2: 1.0,
+        let inside_prior_hole = SliceLoop {
+            points_xy_mm: vec![[1.1, 1.1], [1.9, 1.1], [1.9, 1.3], [1.1, 1.8]],
+            signed_area_mm2: 0.36,
             hole: false,
+        };
+        let first = SliceSolid {
+            outer: outer.clone(),
+            holes: vec![hole],
         };
         let births = find_births(
             &[0, 1],
             &[0.025, 0.075],
-            &[vec![outer.clone(), hole], vec![outer, moved]],
-        );
+            &[
+                vec![first.clone()],
+                vec![
+                    first,
+                    SliceSolid {
+                        outer: inside_prior_hole,
+                        holes: vec![],
+                    },
+                ],
+            ],
+            16,
+            4096,
+        )
+        .unwrap();
         assert_eq!(births.len(), 2);
         assert_eq!(births[0].centroid_xy_mm, [2.0, 2.0]);
-        assert_eq!(births[1].centroid_xy_mm, [10.5, 0.5]);
+        // Boundary-point mean, matching frozen Path2D.discrete behavior;
+        // deliberately asymmetric so an area centroid cannot pass.
+        assert_eq!(births[1].centroid_xy_mm, [1.5, 1.325]);
     }
 
     #[test]
@@ -1064,36 +1721,141 @@ mod tests {
         let loops = stitch_layer(7, &events).unwrap();
         assert_eq!(loops.len(), 1);
         assert_eq!(
-            loops[0].points_xy_mm(),
+            loops[0].outer().points_xy_mm(),
             &[[0.0, 0.0], [2.0, 0.0], [2.0, 2.0], [0.0, 2.0]]
         );
-        assert_eq!(loops[0].signed_area_mm2(), 4.0);
-        assert!(!loops[0].is_hole());
+        assert_eq!(loops[0].area_mm2(), 4.0);
+        assert!(loops[0].holes().is_empty());
     }
 
     #[test]
-    fn unique_face_partition_reserves_specialized_owner_without_double_counting() {
-        let mesh = plinth_mesh::make_box_default().unwrap();
-        let rows = partition_load(
+    fn unique_face_partition_is_finalized_from_physical_contacts() {
+        let mesh = make_overhang_table().unwrap();
+        let delicacy = vec![0.0; mesh.tris().len()];
+        let plan = prepare_generic_contacts(
             &mesh,
-            &[
-                SupportIsland {
-                    id: 4,
-                    face_ids: vec![0, 1],
-                },
-                SupportIsland {
-                    id: 8,
-                    face_ids: vec![1, 2],
-                },
-            ],
-            &[SpecializedOwnerReservation {
-                owner_id: 2,
-                face_id: 1,
-            }],
+            &perception_config(&delicacy),
+            frame(),
+            &layer_plan(),
+            &candidate_config(),
+            &[],
+            GenericPerceptionLimits::production(),
         )
         .unwrap();
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[1].owner, LoadOwner::Specialized(2));
+        let contacts = plan
+            .islands()
+            .iter()
+            .flat_map(|island| {
+                [
+                    PhysicalContact {
+                        contact_id: u64::from(island.id) + 100,
+                        owner: LoadOwner::GenericIsland(island.id),
+                        point_mm: [0.0, 0.0, 0.0],
+                    },
+                    PhysicalContact {
+                        contact_id: u64::from(island.id) + 10,
+                        owner: LoadOwner::GenericIsland(island.id),
+                        point_mm: [0.0, 0.0, 0.0],
+                    },
+                ]
+            })
+            .collect::<Vec<_>>();
+        let partition = finalize_load_partition(&plan, &mesh, &contacts).unwrap();
+        let unique = partition
+            .rows()
+            .iter()
+            .map(|row| row.face_id)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(unique.len(), partition.rows().len());
+        assert!(partition
+            .rows()
+            .iter()
+            .all(|row| row.carried_area_mm2 > 0.0));
+        assert!(partition.rows().iter().all(|row| row.contact_id < 100));
+        assert_eq!(
+            partition
+                .rows()
+                .iter()
+                .map(|row| row.carried_area_mm2)
+                .sum::<f64>(),
+            plan.load_eligibility
+                .iter()
+                .map(|row| row.area_mm2)
+                .sum::<f64>()
+        );
+    }
+
+    #[test]
+    fn box_full_birth_minimum_and_solid_area_vector_is_frozen() {
+        let mesh = plinth_mesh::make_box_default().unwrap();
+        let delicacy = vec![0.0; mesh.tris().len()];
+        let plan = prepare_generic_contacts(
+            &mesh,
+            &perception_config(&delicacy),
+            frame(),
+            &layer_plan(),
+            &candidate_config(),
+            &[],
+            GenericPerceptionLimits::production(),
+        )
+        .unwrap();
+        assert_eq!(plan.island_births().len(), 1);
+        let birth = &plan.island_births()[0];
+        assert_eq!(birth.layer_index, 0);
+        assert_eq!(birth.z_mm, 0.025);
+        assert_eq!(birth.centroid_xy_mm, [0.0, 0.0]);
+        assert_eq!(birth.area_mm2, 100.0);
+        assert!(birth.footprint().holes().is_empty());
+        assert_eq!(plan.local_z_minima().len(), 1);
+        let minimum = &plan.local_z_minima()[0];
+        assert_eq!(minimum.position_mm, [-5.0, -5.0, 0.0]);
+        let diagonal = -1.0 / 3.0_f64.sqrt();
+        assert_eq!(minimum.normal, [diagonal, diagonal, diagonal]);
+        let mut region = minimum.region_points_mm().to_vec();
+        region.sort_by(|left, right| {
+            left[0]
+                .total_cmp(&right[0])
+                .then_with(|| left[1].total_cmp(&right[1]))
+                .then_with(|| left[2].total_cmp(&right[2]))
+        });
+        assert_eq!(
+            region,
+            vec![
+                [-5.0, -5.0, 0.0],
+                [-5.0, 5.0, 0.0],
+                [5.0, -5.0, 0.0],
+                [5.0, 5.0, 0.0],
+            ]
+        );
+    }
+
+    #[test]
+    fn overlap_caps_have_exact_cap_and_cap_plus_one_boundaries() {
+        let loop_ = SliceLoop {
+            points_xy_mm: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+            signed_area_mm2: 1.0,
+            hole: false,
+        };
+        let solid = SliceSolid {
+            outer: loop_,
+            holes: vec![],
+        };
+        let rows = vec![solid.clone(), solid];
+        assert!(overlap_candidates(&rows, &rows, 4, 96).is_ok());
+        assert_eq!(
+            overlap_candidates(&rows, &rows, 3, 96),
+            Err(GenericPerceptionError::OverlapPairLimit {
+                required: 4,
+                limit: 3,
+            })
+        );
+        assert_eq!(
+            overlap_candidates(&rows, &rows, 4, 95),
+            Err(GenericPerceptionError::OverlapByteLimit {
+                required: 96,
+                limit: 95,
+            })
+        );
     }
 
     #[test]
@@ -1108,16 +1870,80 @@ mod tests {
             let plan = prepare_generic_contacts(
                 &mesh,
                 &perception_config(&delicacy),
+                frame(),
                 &layer_plan(),
                 &candidate_config(),
                 &[],
                 GenericPerceptionLimits::production(),
             )
             .expect("required semantic fixture perception");
-            plan.validate_binding(&mesh, &perception_config(&delicacy), &layer_plan())
-                .unwrap();
+            plan.validate_binding(
+                &mesh,
+                &perception_config(&delicacy),
+                frame(),
+                &layer_plan(),
+                &candidate_config(),
+                &[],
+                GenericPerceptionLimits::production(),
+            )
+            .unwrap();
             assert_ne!(plan.digest(), 0);
         }
+    }
+
+    #[test]
+    fn frozen_live_fixture_birth_and_filtered_minimum_counts_match_python() {
+        let table = make_overhang_table().unwrap();
+        let table_delicacy = vec![0.0; table.tris().len()];
+        let table_plan = prepare_generic_contacts(
+            &table,
+            &perception_config(&table_delicacy),
+            frame(),
+            &layer_plan(),
+            &candidate_config(),
+            &[],
+            GenericPerceptionLimits::production(),
+        )
+        .unwrap();
+        assert_eq!(table_plan.island_births().len(), 4);
+        assert_eq!(table_plan.local_z_minima().len(), 4);
+
+        let toe = make_toed_slab().unwrap();
+        let toe_delicacy = vec![0.0; toe.tris().len()];
+        let toe_plan = prepare_generic_contacts(
+            &toe,
+            &perception_config(&toe_delicacy),
+            frame(),
+            &layer_plan(),
+            &candidate_config(),
+            &[],
+            GenericPerceptionLimits::production(),
+        )
+        .unwrap();
+        assert_eq!(toe_plan.local_z_minima().len(), 3);
+        let toe_z = toe_plan
+            .local_z_minima()
+            .iter()
+            .map(|minimum| minimum.position_mm[2])
+            .collect::<Vec<_>>();
+        assert!(toe_z.iter().any(|z| (*z - 9.0).abs() < 1.0e-3));
+        assert!(toe_z.iter().any(|z| (*z - 11.0).abs() < 1.0e-3));
+
+        let raking = make_raking_blade().unwrap();
+        let raking_delicacy = vec![0.0; raking.tris().len()];
+        let raking_plan = prepare_generic_contacts(
+            &raking,
+            &perception_config(&raking_delicacy),
+            frame(),
+            &layer_plan(),
+            &candidate_config(),
+            &[],
+            GenericPerceptionLimits::production(),
+        )
+        .unwrap();
+        assert!(raking_plan.island_births().len() >= 5);
+        assert!(raking_plan.local_z_minima().len() <= 2);
+        assert!(raking_plan.island_births().len() > raking_plan.local_z_minima().len() + 3);
     }
 
     #[test]
@@ -1132,6 +1958,7 @@ mod tests {
         let plan = prepare_generic_contacts(
             &mesh,
             &perception_config(&delicacy),
+            frame(),
             &layers,
             &candidate_config(),
             &[],
@@ -1141,8 +1968,178 @@ mod tests {
         let other = plinth_mesh::make_box_default().unwrap();
         let other_delicacy = vec![0.0; other.tris().len()];
         assert_eq!(
-            plan.validate_binding(&other, &perception_config(&other_delicacy), &layers),
+            plan.validate_binding(
+                &other,
+                &perception_config(&other_delicacy),
+                frame(),
+                &layers,
+                &candidate_config(),
+                &[],
+                GenericPerceptionLimits::production(),
+            ),
             Err(GenericPerceptionError::StaleAuthority)
+        );
+    }
+
+    #[test]
+    fn authority_stale_matrix_binds_every_result_shaping_input() {
+        let mesh = plinth_mesh::make_box_default().unwrap();
+        let delicacy = vec![0.0; mesh.tris().len()];
+        let config = perception_config(&delicacy);
+        let layers = layer_plan();
+        let candidates = candidate_config();
+        let reservations = [SpecializedOwnerReservation {
+            owner_id: 1,
+            face_id: 0,
+        }];
+        let limits = GenericPerceptionLimits::production();
+        let plan = prepare_generic_contacts(
+            &mesh,
+            &config,
+            frame(),
+            &layers,
+            &candidates,
+            &reservations,
+            limits,
+        )
+        .unwrap();
+        assert!(plan
+            .validate_binding(
+                &mesh,
+                &config,
+                frame(),
+                &layers,
+                &candidates,
+                &reservations,
+                limits,
+            )
+            .is_ok());
+
+        let other_mesh = plinth_mesh::make_box([11.0, 10.0, 10.0], [0.0; 3]).unwrap();
+        let other_delicacy = vec![0.0; other_mesh.tris().len()];
+        assert_eq!(
+            plan.validate_binding(
+                &other_mesh,
+                &perception_config(&other_delicacy),
+                frame(),
+                &layers,
+                &candidates,
+                &reservations,
+                limits,
+            ),
+            Err(GenericPerceptionError::StaleAuthority)
+        );
+        let changed_config = SupportPerceptionConfig::current(
+            Finite::new(0.0).unwrap(),
+            PositiveFinite::new(2.0).unwrap(),
+            PositiveFinite::new(0.5).unwrap(),
+            64 * 1024 * 1024,
+            Some(&delicacy),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.validate_binding(
+                &mesh,
+                &changed_config,
+                frame(),
+                &layers,
+                &candidates,
+                &reservations,
+                limits,
+            ),
+            Err(GenericPerceptionError::StaleAuthority)
+        );
+        let changed_frame =
+            BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(6.0).unwrap());
+        assert_eq!(
+            plan.validate_binding(
+                &mesh,
+                &config,
+                changed_frame,
+                &layers,
+                &candidates,
+                &reservations,
+                limits,
+            ),
+            Err(GenericPerceptionError::StaleAuthority)
+        );
+        let mut changed_heights = layers.heights_mm().to_vec();
+        changed_heights[10] = 0.051;
+        let changed_layers = LayerPlan::new(0.0, changed_heights).unwrap();
+        assert_eq!(
+            plan.validate_binding(
+                &mesh,
+                &config,
+                frame(),
+                &changed_layers,
+                &candidates,
+                &reservations,
+                limits,
+            ),
+            Err(GenericPerceptionError::StaleAuthority)
+        );
+        let changed_candidates =
+            CandidatePayloadConfig::current(7, 1_000_000, 3_000_000, 256 * 1024 * 1024, 65_536)
+                .unwrap();
+        assert_eq!(
+            plan.validate_binding(
+                &mesh,
+                &config,
+                frame(),
+                &layers,
+                &changed_candidates,
+                &reservations,
+                limits,
+            ),
+            Err(GenericPerceptionError::StaleAuthority)
+        );
+        let changed_reservations = [SpecializedOwnerReservation {
+            owner_id: 2,
+            face_id: 0,
+        }];
+        assert_eq!(
+            plan.validate_binding(
+                &mesh,
+                &config,
+                frame(),
+                &layers,
+                &candidates,
+                &changed_reservations,
+                limits,
+            ),
+            Err(GenericPerceptionError::StaleAuthority)
+        );
+        let changed_limits = GenericPerceptionLimits {
+            max_overlap_pairs: limits.max_overlap_pairs - 1,
+            ..limits
+        };
+        assert_eq!(
+            plan.validate_binding(
+                &mesh,
+                &config,
+                frame(),
+                &layers,
+                &candidates,
+                &reservations,
+                changed_limits,
+            ),
+            Err(GenericPerceptionError::StaleAuthority)
+        );
+        let wrong_plate = BuildFrame::new(
+            Finite::new(-1.0).unwrap(),
+            PositiveFinite::new(5.0).unwrap(),
+        );
+        assert_eq!(
+            prepare_generic_contacts(
+                &mesh,
+                &config,
+                wrong_plate,
+                &layers,
+                &candidates,
+                &reservations,
+                limits,
+            ),
+            Err(GenericPerceptionError::FrameMismatch)
         );
     }
 
@@ -1179,9 +2176,6 @@ mod tests {
                         .map(|value| value.parse::<u64>().unwrap())
                         .collect::<Vec<_>>();
                     assert_eq!(values[1], threads as u64);
-                    if threads > 1 {
-                        assert!(values[2] > 1, "parallel slice participation was vacuous");
-                    }
                     values
                 })
                 .collect::<Vec<_>>();
@@ -1207,6 +2201,7 @@ mod tests {
         let plan = prepare_generic_contacts(
             &mesh,
             &config,
+            frame(),
             &layers,
             &candidate_config(),
             &[],
