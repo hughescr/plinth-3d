@@ -20,11 +20,14 @@ use fast_surface_nets::ndshape::RuntimeShape;
 use fast_surface_nets::{surface_nets, SurfaceNetsBuffer};
 use plinth_core::{m0_constants, Finite, M0ConstantsError, PrinterProfile};
 use plinth_mesh::{
-    build_face_topology, certify_closed_components, triage_components, validate_face_topology,
-    Mesh, StrictMeshAuditError, TopologyError, TopologyValidationError, TriageError, WeldPolicy,
+    build_face_topology, certify_closed_components, triage_settings, validate_face_topology, Mesh,
+    StrictMeshAuditError, TopologyError, TopologyValidationError, TriageAdmissionError,
+    TriageError, TriageTopologyAdmission, TriageTopologyLimits, TriagedMesh, WeldPolicy,
 };
 use plinth_orient::OrientationHistory;
-use plinth_solid::{ManifoldBackend, Mesh as SolidMesh, SolidBoolean, SolidError};
+use plinth_solid::{
+    BooleanInputEstimate, BooleanLimits, ManifoldBackend, Mesh as SolidMesh, SolidError,
+};
 use scirs2_core::ndarray::Array3;
 use scirs2_ndimage::{distance_transform_edt, morphology3d::label3d};
 use serde::{Deserialize, Serialize};
@@ -216,67 +219,116 @@ fn finite_settings(
     })
 }
 
-const DEFAULT_HOLLOW_PEAK_BYTES: usize = 1024 * 1024 * 1024;
+const DEFAULT_DRAIN_PLANNING_BYTES: usize = 1024 * 1024 * 1024;
 const DEFAULT_QUERY_WORKING_BYTES: usize = 8 * 1024 * 1024;
 const DEFAULT_MAX_RASTER_WORK_ITEMS: usize = 16 * 1024 * 1024;
+const DEFAULT_MAX_RAW_VERTICES: usize = 16 * 1024 * 1024;
+const DEFAULT_MAX_RAW_FACES: usize = 8 * 1024 * 1024;
+const DEFAULT_MAX_RETAINED_SOURCE_BYTES: usize = 512 * 1024 * 1024;
+const DEFAULT_MAX_EDGE_OCCURRENCES: usize = 24 * 1024 * 1024;
+const DEFAULT_MAX_VERTEX_INCIDENCES: usize = 24 * 1024 * 1024;
+const DEFAULT_MAX_CONTAINMENT_PROBE_SLOTS: usize = 256 * 1024 * 1024;
+const DEFAULT_MAX_VOXEL_CELLS: usize = 16 * 1024 * 1024;
+const DEFAULT_MAX_BOOLEAN_PRIMITIVE_UNITS: u64 = 256 * 1024 * 1024;
+const DEFAULT_MAX_BOOLEAN_MARSHALLED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const DEFAULT_MAX_BOOLEAN_OUTPUT_VERTICES: u64 = 64 * 1024 * 1024;
+const DEFAULT_MAX_BOOLEAN_OUTPUT_TRIANGLES: u64 = 384 * 1024 * 1024;
 const QUERY_BYTES_PER_POINT: usize = std::mem::size_of::<[f64; 3]>()
     + std::mem::size_of::<bool>()
     + std::mem::size_of::<f64>()
     + std::mem::size_of::<i64>();
 
-/// Caller-selected resource envelope for H0. `max_peak_bytes` covers the
-/// complete conservative phase peak; `query_working_bytes` bounds each
-/// deterministic gather/batch/scatter native query chunk.
+/// Caller-selected admission limits for named H0 work and public Boolean ABI
+/// payloads. These are not a whole-process or third-party private-heap cap.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct HollowResourceLimits {
-    max_peak_bytes: usize,
+pub struct H0AdmissionLimits {
+    max_raw_vertices: usize,
+    max_raw_faces: usize,
+    max_retained_source_buffer_bytes: usize,
+    max_edge_occurrences: usize,
+    max_vertex_incidences: usize,
+    max_containment_probe_slots: usize,
+    max_voxel_cells: usize,
     query_working_bytes: usize,
     max_raster_work_items: usize,
+    max_boolean_input_primitive_units: u64,
+    max_boolean_marshaled_input_bytes: u64,
+    max_boolean_output_vertices: u64,
+    max_boolean_output_triangles: u64,
+    drain_planning_bytes: usize,
 }
 
-impl HollowResourceLimits {
-    pub fn new(max_peak_bytes: usize, query_working_bytes: usize) -> Result<Self, HollowError> {
-        if max_peak_bytes == 0 || query_working_bytes < QUERY_BYTES_PER_POINT {
-            return Err(HollowError::InvalidResourceLimits);
-        }
-        Ok(Self {
-            max_peak_bytes,
-            query_working_bytes,
-            max_raster_work_items: DEFAULT_MAX_RASTER_WORK_ITEMS,
-        })
-    }
-
-    /// Builds an H0 envelope with an explicit source-raster work ceiling.
-    pub fn with_raster_work(
-        max_peak_bytes: usize,
+impl H0AdmissionLimits {
+    pub fn new(
+        triage: TriageTopologyLimits,
+        max_voxel_cells: usize,
         query_working_bytes: usize,
         max_raster_work_items: usize,
+        boolean: BooleanLimits,
+        drain_planning_bytes: usize,
     ) -> Result<Self, HollowError> {
-        if max_peak_bytes == 0
+        if triage.raw_vertices() == usize::MAX
+            || triage.raw_faces() == usize::MAX
+            || triage.retained_source_buffer_bytes() == usize::MAX
+            || triage.edge_occurrences() == usize::MAX
+            || triage.vertex_incidences() == usize::MAX
+            || triage.containment_probe_slots() == usize::MAX
+            || max_voxel_cells == 0
+            || max_voxel_cells == usize::MAX
             || query_working_bytes < QUERY_BYTES_PER_POINT
+            || query_working_bytes == usize::MAX
             || max_raster_work_items == 0
+            || max_raster_work_items == usize::MAX
+            || boolean.max_input_primitive_units == u64::MAX
+            || boolean.max_logical_marshaled_input_bytes == u64::MAX
+            || boolean.max_output_vertices == u64::MAX
+            || boolean.max_output_triangles == u64::MAX
+            || drain_planning_bytes == 0
+            || drain_planning_bytes == usize::MAX
         {
-            return Err(HollowError::InvalidResourceLimits);
+            return Err(HollowError::InvalidAdmissionLimits);
         }
         Ok(Self {
-            max_peak_bytes,
+            max_raw_vertices: triage.raw_vertices(),
+            max_raw_faces: triage.raw_faces(),
+            max_retained_source_buffer_bytes: triage.retained_source_buffer_bytes(),
+            max_edge_occurrences: triage.edge_occurrences(),
+            max_vertex_incidences: triage.vertex_incidences(),
+            max_containment_probe_slots: triage.containment_probe_slots(),
+            max_voxel_cells,
             query_working_bytes,
             max_raster_work_items,
+            max_boolean_input_primitive_units: boolean.max_input_primitive_units,
+            max_boolean_marshaled_input_bytes: boolean.max_logical_marshaled_input_bytes,
+            max_boolean_output_vertices: boolean.max_output_vertices,
+            max_boolean_output_triangles: boolean.max_output_triangles,
+            drain_planning_bytes,
         })
     }
 
     #[must_use]
     pub const fn production() -> Self {
         Self {
-            max_peak_bytes: DEFAULT_HOLLOW_PEAK_BYTES,
+            max_raw_vertices: DEFAULT_MAX_RAW_VERTICES,
+            max_raw_faces: DEFAULT_MAX_RAW_FACES,
+            max_retained_source_buffer_bytes: DEFAULT_MAX_RETAINED_SOURCE_BYTES,
+            max_edge_occurrences: DEFAULT_MAX_EDGE_OCCURRENCES,
+            max_vertex_incidences: DEFAULT_MAX_VERTEX_INCIDENCES,
+            max_containment_probe_slots: DEFAULT_MAX_CONTAINMENT_PROBE_SLOTS,
+            max_voxel_cells: DEFAULT_MAX_VOXEL_CELLS,
             query_working_bytes: DEFAULT_QUERY_WORKING_BYTES,
             max_raster_work_items: DEFAULT_MAX_RASTER_WORK_ITEMS,
+            max_boolean_input_primitive_units: DEFAULT_MAX_BOOLEAN_PRIMITIVE_UNITS,
+            max_boolean_marshaled_input_bytes: DEFAULT_MAX_BOOLEAN_MARSHALLED_BYTES,
+            max_boolean_output_vertices: DEFAULT_MAX_BOOLEAN_OUTPUT_VERTICES,
+            max_boolean_output_triangles: DEFAULT_MAX_BOOLEAN_OUTPUT_TRIANGLES,
+            drain_planning_bytes: DEFAULT_DRAIN_PLANNING_BYTES,
         }
     }
 
     #[must_use]
-    pub const fn max_peak_bytes(self) -> usize {
-        self.max_peak_bytes
+    pub const fn max_voxel_cells(self) -> usize {
+        self.max_voxel_cells
     }
 
     #[must_use]
@@ -288,28 +340,45 @@ impl HollowResourceLimits {
     pub const fn max_raster_work_items(self) -> usize {
         self.max_raster_work_items
     }
+
+    #[must_use]
+    pub const fn drain_planning_bytes(self) -> usize {
+        self.drain_planning_bytes
+    }
+
+    fn triage_topology_limits(self, retained_source_buffer_bytes: usize) -> TriageTopologyLimits {
+        TriageTopologyLimits::new(
+            self.max_raw_vertices,
+            self.max_raw_faces,
+            retained_source_buffer_bytes.min(self.max_retained_source_buffer_bytes),
+            self.max_edge_occurrences,
+            self.max_vertex_incidences,
+            self.max_containment_probe_slots,
+        )
+    }
 }
 
-/// Conservative checked allocation accounting for one H0 invocation.
+/// Scoped H0 diagnostics for admitted counts and owned logical buffers.
+/// This intentionally makes no claim about allocator slack, Manifold private
+/// heap, dependency scratch, or whole-process peak memory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct HollowResourceEstimate {
+pub struct H0ResourceDiagnostics {
     voxel_count: usize,
     query_batch_points: usize,
     grid_coordinate_bytes: usize,
-    edt_peak_bytes: usize,
-    label_peak_bytes: usize,
-    surface_peak_bytes: usize,
-    rasterization_peak_bytes: usize,
-    source_mesh_peak_bytes: usize,
-    selected_mask_peak_bytes: usize,
-    boolean_peak_bytes: usize,
+    retained_raw_source_buffer_bytes: usize,
+    raster_work_items: usize,
     retained_cavity_membership_bytes: usize,
     retained_source_occupancy_bytes: usize,
-    output_upper_bound_bytes: usize,
-    peak_bytes: usize,
+    marching_vertex_upper_bound: usize,
+    marching_triangle_upper_bound: usize,
+    boolean_input_primitive_units: u64,
+    boolean_marshaled_input_bytes: u64,
+    boolean_output_vertex_limit: u64,
+    boolean_output_triangle_limit: u64,
 }
 
-impl HollowResourceEstimate {
+impl H0ResourceDiagnostics {
     #[must_use]
     pub const fn voxel_count(self) -> usize {
         self.voxel_count
@@ -327,32 +396,12 @@ impl HollowResourceEstimate {
         self.voxel_count * std::mem::size_of::<bool>()
     }
     #[must_use]
-    pub const fn edt_peak_bytes(self) -> usize {
-        self.edt_peak_bytes
+    pub const fn retained_raw_source_buffer_bytes(self) -> usize {
+        self.retained_raw_source_buffer_bytes
     }
     #[must_use]
-    pub const fn label_peak_bytes(self) -> usize {
-        self.label_peak_bytes
-    }
-    #[must_use]
-    pub const fn surface_peak_bytes(self) -> usize {
-        self.surface_peak_bytes
-    }
-    #[must_use]
-    pub const fn rasterization_peak_bytes(self) -> usize {
-        self.rasterization_peak_bytes
-    }
-    #[must_use]
-    pub const fn source_mesh_peak_bytes(self) -> usize {
-        self.source_mesh_peak_bytes
-    }
-    #[must_use]
-    pub const fn selected_mask_peak_bytes(self) -> usize {
-        self.selected_mask_peak_bytes
-    }
-    #[must_use]
-    pub const fn boolean_peak_bytes(self) -> usize {
-        self.boolean_peak_bytes
+    pub const fn raster_work_items(self) -> usize {
+        self.raster_work_items
     }
     #[must_use]
     pub const fn retained_cavity_membership_bytes(self) -> usize {
@@ -363,12 +412,28 @@ impl HollowResourceEstimate {
         self.retained_source_occupancy_bytes
     }
     #[must_use]
-    pub const fn output_upper_bound_bytes(self) -> usize {
-        self.output_upper_bound_bytes
+    pub const fn marching_vertex_upper_bound(self) -> usize {
+        self.marching_vertex_upper_bound
     }
     #[must_use]
-    pub const fn peak_bytes(self) -> usize {
-        self.peak_bytes
+    pub const fn marching_triangle_upper_bound(self) -> usize {
+        self.marching_triangle_upper_bound
+    }
+    #[must_use]
+    pub const fn boolean_input_primitive_units(self) -> u64 {
+        self.boolean_input_primitive_units
+    }
+    #[must_use]
+    pub const fn boolean_marshaled_input_bytes(self) -> u64 {
+        self.boolean_marshaled_input_bytes
+    }
+    #[must_use]
+    pub const fn boolean_output_vertex_limit(self) -> u64 {
+        self.boolean_output_vertex_limit
+    }
+    #[must_use]
+    pub const fn boolean_output_triangle_limit(self) -> u64 {
+        self.boolean_output_triangle_limit
     }
 }
 
@@ -379,8 +444,8 @@ pub struct CavityEvidence {
     frozen_voxel_pitch_mm: Finite,
     cavity_volume_mm3: Finite,
     source_volume_mm3: Finite,
-    resources: HollowResourceEstimate,
-    resource_cap_bytes: usize,
+    resources: H0ResourceDiagnostics,
+    drain_planning_cap_bytes: usize,
 }
 
 impl CavityEvidence {
@@ -405,13 +470,13 @@ impl CavityEvidence {
     }
 
     #[must_use]
-    pub const fn resources(self) -> HollowResourceEstimate {
+    pub const fn resources(self) -> H0ResourceDiagnostics {
         self.resources
     }
 
     #[must_use]
-    pub const fn resource_cap_bytes(self) -> usize {
-        self.resource_cap_bytes
+    pub const fn drain_planning_cap_bytes(self) -> usize {
+        self.drain_planning_cap_bytes
     }
 }
 
@@ -452,7 +517,7 @@ impl ShellCandidate {
 /// mesh. H0 does not add drains and therefore does not expose `run`.
 pub fn create_shell(input: Mesh) -> Result<ShellCandidate, HollowError> {
     let settings = HollowSettings::from_registered_constants()?;
-    create_shell_with_resources(input, settings, HollowResourceLimits::production())
+    create_shell_with_admission_limits(input, settings, H0AdmissionLimits::production())
 }
 
 /// Testable H0 implementation with explicit settings. Production callers use
@@ -461,22 +526,35 @@ pub fn create_shell_with_settings(
     input: Mesh,
     settings: HollowSettings,
 ) -> Result<ShellCandidate, HollowError> {
-    create_shell_with_resources(input, settings, HollowResourceLimits::production())
+    create_shell_with_admission_limits(input, settings, H0AdmissionLimits::production())
 }
 
-/// H0 with an explicit caller-owned resource envelope.
-pub fn create_shell_with_resources(
+/// H0 with explicit caller-owned admission limits for each named work domain.
+pub fn create_shell_with_admission_limits(
     input: Mesh,
     settings: HollowSettings,
-    limits: HollowResourceLimits,
+    limits: H0AdmissionLimits,
 ) -> Result<ShellCandidate, HollowError> {
-    let triaged = triage_components(&input, WeldPolicy::ExactBits)?;
+    let retained_raw_source_buffer_bytes = input
+        .retained_buffer_bytes()
+        .ok_or(HollowError::ResourceAccountingOverflow)?;
+    let admission = TriageTopologyAdmission::from_raw_mesh(
+        &input,
+        limits.triage_topology_limits(retained_raw_source_buffer_bytes),
+    )?;
+    let retained_raw_source_buffer_bytes = admission.retained_source_buffer_bytes();
+    let triaged = admission.triage(WeldPolicy::ExactBits)?;
     let source = triaged.into_mesh();
     validate_closed_mesh(&source)?;
     validate_printable_bounds(&source)?;
     let source_volume_mm3 = source_volume_mm3(&source)?;
     let spec = grid_spec(&source, settings.voxel_pitch_mm.get())?;
-    let resources = resource_estimate(&source, spec, limits)?;
+    if spec.count > limits.max_voxel_cells {
+        return Err(HollowError::VoxelCellLimitExceeded {
+            cells: spec.count,
+            max_cells: limits.max_voxel_cells,
+        });
+    }
     let raster_work_items = raster_work_item_count(&source, spec, limits.max_raster_work_items)?;
     let grid = voxelize_filled(&source, spec, raster_work_items)?;
     let VoxelGrid {
@@ -521,8 +599,18 @@ pub fn create_shell_with_resources(
     drop(material);
     let inner = marching_cavity(&main, grid_origin, grid_pitch)?;
     drop(main);
+    let (marching_vertex_upper_bound, marching_triangle_upper_bound) =
+        marching_surface_bounds(spec)?;
+    let boolean_limits = boolean_limits_for_h0(
+        &source,
+        marching_vertex_upper_bound,
+        marching_triangle_upper_bound,
+        limits,
+    )?;
+    let operands = [to_solid(&source)?, to_solid(&inner)?];
+    let boolean_input = BooleanInputEstimate::for_meshes(&operands).map_err(HollowError::Solid)?;
     let shell = ManifoldBackend
-        .difference(&[to_solid(&source)?, to_solid(&inner)?])
+        .difference_limited(&operands, boolean_limits)
         .map_err(HollowError::Solid)?;
     let mesh = orient_boolean_cavity(from_solid(shell)?)?;
     validate_shell_topology(
@@ -532,13 +620,33 @@ pub fn create_shell_with_resources(
         settings.volume_balance_rel_tol.get(),
     )?;
     validate_printable_bounds(&mesh)?;
+    let retained_field_allocations = cavity_field.retained_allocations();
+    let query_batch_points = spec
+        .count
+        .min(limits.query_working_bytes / QUERY_BYTES_PER_POINT)
+        .max(1);
+    let resources = H0ResourceDiagnostics {
+        voxel_count: spec.count,
+        query_batch_points,
+        grid_coordinate_bytes: checked_scale(query_batch_points, std::mem::size_of::<[f64; 3]>())?,
+        retained_raw_source_buffer_bytes,
+        raster_work_items,
+        retained_cavity_membership_bytes: retained_field_allocations.membership_bytes(),
+        retained_source_occupancy_bytes: retained_field_allocations.source_occupancy_bytes(),
+        marching_vertex_upper_bound,
+        marching_triangle_upper_bound,
+        boolean_input_primitive_units: boolean_input.operand_primitive_units,
+        boolean_marshaled_input_bytes: boolean_input.logical_marshaled_input_bytes,
+        boolean_output_vertex_limit: boolean_limits.max_output_vertices,
+        boolean_output_triangle_limit: boolean_limits.max_output_triangles,
+    };
     let cavity = CavityEvidence {
         wall_thickness_mm: settings.wall_thickness_mm,
         frozen_voxel_pitch_mm: settings.voxel_pitch_mm,
         cavity_volume_mm3: finite(cavity_volume_mm3)?,
         source_volume_mm3: finite(source_volume_mm3)?,
         resources,
-        resource_cap_bytes: limits.max_peak_bytes,
+        drain_planning_cap_bytes: limits.drain_planning_bytes,
     };
     Ok(ShellCandidate {
         mesh,
@@ -560,12 +668,41 @@ fn validate_closed_mesh(mesh: &Mesh) -> Result<(), HollowError> {
     Ok(())
 }
 
+fn triage_exact_with_measured_limits(mesh: &Mesh) -> Result<TriagedMesh, HollowError> {
+    let settings = triage_settings()?;
+    let faces = mesh.tris().len();
+    let edge_occurrences = checked_scale(faces, 3)?;
+    let containment_probe_slots = checked_scale(faces, settings.containment_samples())?;
+    let retained_source_buffer_bytes = mesh
+        .retained_buffer_bytes()
+        .ok_or(HollowError::ResourceAccountingOverflow)?;
+    let admission = TriageTopologyAdmission::from_raw_mesh(
+        mesh,
+        TriageTopologyLimits::new(
+            mesh.verts().len(),
+            faces,
+            retained_source_buffer_bytes,
+            edge_occurrences,
+            edge_occurrences,
+            containment_probe_slots,
+        ),
+    )?;
+    admission
+        .triage(WeldPolicy::ExactBits)
+        .map_err(HollowError::Triage)
+}
+
 fn validate_shell_topology(
     mesh: &Mesh,
     source_volume_mm3: f64,
     cavity_volume_mm3: f64,
     relative_tolerance: f64,
 ) -> Result<(), HollowError> {
+    match triage_exact_with_measured_limits(mesh) {
+        Err(HollowError::Triage(TriageError::PreHollowed(refusal)))
+            if refusal.cavity_components().len() == 1 => {}
+        _ => return Err(HollowError::InvalidShellTopology),
+    }
     validate_closed_mesh(mesh)?;
     let topology =
         build_face_topology(mesh, WeldPolicy::ExactBits).map_err(HollowError::Topology)?;
@@ -583,10 +720,6 @@ fn validate_shell_topology(
             .any(|component| component.signed_volume_mm3() == 0.0)
     {
         return Err(HollowError::InvalidShellTopology);
-    }
-    match triage_components(mesh, WeldPolicy::ExactBits) {
-        Err(TriageError::PreHollowed(refusal)) if refusal.cavity_components().len() == 1 => {}
-        _ => return Err(HollowError::InvalidShellTopology),
     }
     let actual_material_mm3 = certificate.signed_volume_mm3();
     let expected_material_mm3 = source_volume_mm3 - cavity_volume_mm3;
@@ -606,16 +739,18 @@ fn validate_shell_topology(
 }
 
 fn orient_boolean_cavity(mesh: Mesh) -> Result<Mesh, HollowError> {
-    let topology =
-        build_face_topology(&mesh, WeldPolicy::ExactBits).map_err(HollowError::Topology)?;
-    validate_face_topology(&topology).map_err(HollowError::TopologyValidation)?;
-    let cavity_component = match triage_components(&mesh, WeldPolicy::ExactBits) {
-        Err(TriageError::PreHollowed(refusal)) if refusal.cavity_components().len() == 1 => {
+    let cavity_component = match triage_exact_with_measured_limits(&mesh) {
+        Err(HollowError::Triage(TriageError::PreHollowed(refusal)))
+            if refusal.cavity_components().len() == 1 =>
+        {
             u32::try_from(refusal.cavity_components()[0].component_id())
                 .map_err(|_| HollowError::InvalidShellTopology)?
         }
         _ => return Err(HollowError::InvalidShellTopology),
     };
+    let topology =
+        build_face_topology(&mesh, WeldPolicy::ExactBits).map_err(HollowError::Topology)?;
+    validate_face_topology(&topology).map_err(HollowError::TopologyValidation)?;
     let triangles = mesh
         .tris()
         .iter()
@@ -726,24 +861,6 @@ fn checked_scale(count: usize, bytes: usize) -> Result<usize, HollowError> {
         .ok_or(HollowError::ResourceAccountingOverflow)
 }
 
-fn checked_sum(values: &[usize]) -> Result<usize, HollowError> {
-    values.iter().try_fold(0_usize, |total, value| {
-        total
-            .checked_add(*value)
-            .ok_or(HollowError::ResourceAccountingOverflow)
-    })
-}
-
-const fn phase_fits_cap(phase_peak_bytes: usize, cap_bytes: usize) -> bool {
-    phase_peak_bytes <= cap_bytes
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct LabelMemoryEstimate {
-    requested_live_bytes: usize,
-    conservative_peak_bytes: usize,
-}
-
 fn allocator_allocation_bound(
     count: usize,
     element_size: usize,
@@ -771,340 +888,55 @@ fn allocator_allocation_bound_bytes(
         .ok_or(HollowError::ResourceAccountingOverflow)
 }
 
-fn mesh_allocation_bound(
-    vertex_count: usize,
-    triangle_count: usize,
-    index_size: usize,
-) -> Result<usize, HollowError> {
-    checked_sum(&[
-        allocator_allocation_bound(
-            vertex_count,
-            std::mem::size_of::<[f64; 3]>(),
-            std::mem::align_of::<[f64; 3]>(),
-        )?,
-        allocator_allocation_bound(triangle_count, 3 * index_size, index_size)?,
-    ])
-}
-
-/// Serial Manifold's nested-difference kernel contract. H0's generated inner
-/// surface is wholly inside the validated source, so the operation has no
-/// edge/face intersections and cannot create more vertices or triangles than
-/// the two inputs contain. The native implementation retains position,
-/// halfedge, normal, relation, collider, winding and result arrays. Charging
-/// 192 bytes per vertex and triangle covers those typed arrays,
-/// their serial scratch counterparts, and allocator/capacity slack; the bridge
-/// input/import/export copies are charged separately below.
-const MANIFOLD_NESTED_VERTEX_WORK_BYTES: usize = 192;
-const MANIFOLD_NESTED_TRIANGLE_WORK_BYTES: usize = 192;
-
-fn label_phase_memory(voxel_count: usize) -> Result<LabelMemoryEstimate, HollowError> {
-    let union_find_count = voxel_count
-        .checked_add(1)
-        .ok_or(HollowError::ResourceAccountingOverflow)?;
-    let usize_size = std::mem::size_of::<usize>();
-    let usize_align = std::mem::align_of::<usize>();
-    let tuple_size = std::mem::size_of::<(isize, isize, isize)>();
-    let tuple_align = std::mem::align_of::<(isize, isize, isize)>();
-
-    // scirs2-ndimage 0.6.5 label3d first pass: input mask, provisional
-    // labels, UnionFind parent/rank, three fixed 6-neighbor offsets, and one
-    // per-voxel neighbor Vec (capacity conservatively bounded at eight).
-    let first_requested = checked_sum(&[
-        checked_scale(voxel_count, std::mem::size_of::<bool>())?,
-        checked_scale(voxel_count, usize_size)?,
-        checked_scale(union_find_count, usize_size)?,
-        checked_scale(union_find_count, usize_size)?,
-        checked_scale(3, tuple_size)?,
-        checked_scale(8, usize_size)?,
-    ])?;
-    let first_conservative = checked_sum(&[
-        allocator_allocation_bound(
-            voxel_count,
-            std::mem::size_of::<bool>(),
-            std::mem::align_of::<bool>(),
-        )?,
-        allocator_allocation_bound(voxel_count, usize_size, usize_align)?,
-        allocator_allocation_bound(union_find_count, usize_size, usize_align)?,
-        allocator_allocation_bound(union_find_count, usize_size, usize_align)?,
-        allocator_allocation_bound(3, tuple_size, tuple_align)?,
-        allocator_allocation_bound(8, usize_size, usize_align)?,
-    ])?;
-
-    // Second pass retains the mask, provisional labels, both UnionFind
-    // vectors and offsets while adding root_to_final and the i32 Array3.
-    let second_requested = checked_sum(&[
-        checked_scale(voxel_count, std::mem::size_of::<bool>())?,
-        checked_scale(voxel_count, usize_size)?,
-        checked_scale(union_find_count, usize_size)?,
-        checked_scale(union_find_count, usize_size)?,
-        checked_scale(3, tuple_size)?,
-        checked_scale(union_find_count, usize_size)?,
-        checked_scale(voxel_count, std::mem::size_of::<i32>())?,
-    ])?;
-    let second_conservative = checked_sum(&[
-        allocator_allocation_bound(
-            voxel_count,
-            std::mem::size_of::<bool>(),
-            std::mem::align_of::<bool>(),
-        )?,
-        allocator_allocation_bound(voxel_count, usize_size, usize_align)?,
-        allocator_allocation_bound(union_find_count, usize_size, usize_align)?,
-        allocator_allocation_bound(union_find_count, usize_size, usize_align)?,
-        allocator_allocation_bound(3, tuple_size, tuple_align)?,
-        allocator_allocation_bound(union_find_count, usize_size, usize_align)?,
-        allocator_allocation_bound(
-            voxel_count,
-            std::mem::size_of::<i32>(),
-            std::mem::align_of::<i32>(),
-        )?,
-    ])?;
-    Ok(LabelMemoryEstimate {
-        requested_live_bytes: first_requested.max(second_requested),
-        conservative_peak_bytes: first_conservative.max(second_conservative),
-    })
-}
-
-fn resource_estimate(
-    mesh: &Mesh,
-    spec: GridSpec,
-    limits: HollowResourceLimits,
-) -> Result<HollowResourceEstimate, HollowError> {
-    let query_batch_points = spec
-        .count
-        .min(limits.query_working_bytes / QUERY_BYTES_PER_POINT)
-        .max(1);
-    let grid_coordinate_bytes = checked_scale(query_batch_points, std::mem::size_of::<[f64; 3]>())?;
-    let source_mesh_peak_bytes = allocator_allocation_bound_bytes(
-        mesh.retained_buffer_bytes()
-            .ok_or(HollowError::ResourceAccountingOverflow)?,
-        std::mem::align_of::<[f64; 3]>(),
-    )?;
-    // `voxelize_subdivide` emits its leaf vertices directly into the grid;
-    // it retains no tessellated mesh. Hole filling keeps the surface grid, a
-    // 6-connected exterior mask, and a worst-case frontier containing every
-    // voxel. The fixed-depth recursive splitter is stack-only.
-    let rasterization_peak_bytes = checked_sum(&[
-        source_mesh_peak_bytes,
-        allocator_allocation_bound(
-            spec.count,
-            std::mem::size_of::<bool>(),
-            std::mem::align_of::<bool>(),
-        )?,
-        allocator_allocation_bound(
-            spec.count,
-            std::mem::size_of::<bool>(),
-            std::mem::align_of::<bool>(),
-        )?,
-        allocator_allocation_bound(
-            spec.count,
-            std::mem::size_of::<usize>(),
-            std::mem::align_of::<usize>(),
-        )?,
-        checked_scale(RASTER_STACK_CAPACITY, std::mem::size_of::<RasterNode>())?,
-    ])?;
-
-    // Source occupancy + EDT input clone + squared and final f64 distance
-    // arrays, plus a conservative line-transform scratch upper bound.
-    let edt_arrays = checked_scale(
-        spec.count,
-        2 * std::mem::size_of::<bool>() + 2 * std::mem::size_of::<f64>(),
-    )?;
-    let edt_line = checked_scale(
-        *spec.dims.iter().max().unwrap_or(&0),
-        4 * std::mem::size_of::<usize>().max(std::mem::size_of::<f64>()),
-    )?;
-    let edt_peak_bytes = checked_sum(&[source_mesh_peak_bytes, edt_arrays, edt_line])?;
-
-    let label_memory = label_phase_memory(spec.count)?;
-    debug_assert!(label_memory.conservative_peak_bytes >= label_memory.requested_live_bytes);
-    let retained_field_allocations =
-        cavity_field::retained_allocation_bytes_for_voxels(spec.count)?;
-    let retained_cavity_membership_bytes = retained_field_allocations.membership_bytes();
-    let retained_source_occupancy_bytes = retained_field_allocations.source_occupancy_bytes();
-    let retained_cavity_membership_peak_bytes = allocator_allocation_bound_bytes(
-        retained_cavity_membership_bytes,
-        std::mem::align_of::<u64>(),
-    )?;
-    let retained_source_occupancy_field_peak_bytes = allocator_allocation_bound_bytes(
-        retained_source_occupancy_bytes,
-        std::mem::align_of::<u64>(),
-    )?;
-    let retained_cavity_field_peak_bytes = checked_sum(&[
-        retained_cavity_membership_peak_bytes,
-        retained_source_occupancy_field_peak_bytes,
-    ])?;
-    let selected_mask_peak_bytes = allocator_allocation_bound(
-        spec.count,
-        std::mem::size_of::<bool>(),
-        std::mem::align_of::<bool>(),
-    )?;
-    let retained_source_occupancy_peak_bytes = allocator_allocation_bound(
-        spec.count,
-        std::mem::size_of::<bool>(),
-        std::mem::align_of::<bool>(),
-    )?;
-    // Packing the selected mask occurs while labels and the selected bool mask
-    // are still live. The source mesh also remains owned until the Boolean and
-    // the compact field remains in the returned candidate.
-    let label_peak_bytes = checked_sum(&[
-        source_mesh_peak_bytes,
-        label_memory.conservative_peak_bytes,
-        selected_mask_peak_bytes,
-        retained_source_occupancy_peak_bytes,
-        retained_cavity_field_peak_bytes,
-    ])?;
-
-    // Surface Nets worst case: one surface vertex per cell, up to three quads
-    // (six triangles) per vertex, all library scratch/output buffers, the f32
-    // SDF, the bool mask, and simultaneous f64/u32 Mesh conversion buffers.
-    let surface_lattice_count = spec.dims.iter().try_fold(1_usize, |total, dimension| {
+fn marching_surface_bounds(spec: GridSpec) -> Result<(usize, usize), HollowError> {
+    // Surface Nets can emit at most one vertex per padded lattice cell and
+    // six triangles per emitted vertex. These are logical output-count bounds,
+    // not estimates of the library's private scratch or allocator behavior.
+    let vertices = spec.dims.iter().try_fold(1_usize, |total, dimension| {
         dimension
             .checked_add(2)
             .and_then(|padded| total.checked_mul(padded))
             .ok_or(HollowError::ResourceAccountingOverflow)
     })?;
-    let surface_peak_bytes = checked_scale(surface_lattice_count, 224)?;
-    let inner_vertex_upper = surface_lattice_count;
-    let inner_triangle_upper = checked_scale(surface_lattice_count, 6)?;
-    let inner_mesh_peak_bytes = mesh_allocation_bound(
-        inner_vertex_upper,
-        inner_triangle_upper,
-        std::mem::size_of::<u32>(),
-    )?;
-    let output_upper_bound_bytes = checked_sum(&[source_mesh_peak_bytes, inner_mesh_peak_bytes])?;
+    let triangles = checked_scale(vertices, 6)?;
+    Ok((vertices, triangles))
+}
 
-    let source_vertices = mesh.verts().len();
-    let source_triangles = mesh.tris().len();
-    let combined_vertices = source_vertices
-        .checked_add(inner_vertex_upper)
+fn boolean_limits_for_h0(
+    source: &Mesh,
+    marching_vertex_upper_bound: usize,
+    marching_triangle_upper_bound: usize,
+    admission: H0AdmissionLimits,
+) -> Result<BooleanLimits, HollowError> {
+    let combined_vertices = source
+        .verts()
+        .len()
+        .checked_add(marching_vertex_upper_bound)
         .ok_or(HollowError::ResourceAccountingOverflow)?;
-    let combined_triangles = source_triangles
-        .checked_add(inner_triangle_upper)
+    let combined_triangles = source
+        .tris()
+        .len()
+        .checked_add(marching_triangle_upper_bound)
         .ok_or(HollowError::ResourceAccountingOverflow)?;
-    let solid_input_meshes = checked_sum(&[
-        mesh_allocation_bound(
-            source_vertices,
-            source_triangles,
-            std::mem::size_of::<u64>(),
-        )?,
-        mesh_allocation_bound(
-            inner_vertex_upper,
-            inner_triangle_upper,
-            std::mem::size_of::<u64>(),
-        )?,
-    ])?;
-    // `FlatBatch::gather` owns four exact-capacity Vecs. The native bridge
-    // then copies both payloads into MeshGL64 before constructing Manifold's
-    // internal meshes, so both copies are live concurrently.
-    let flat_batch = checked_sum(&[
-        allocator_allocation_bound(combined_vertices, 3 * std::mem::size_of::<f64>(), 8)?,
-        allocator_allocation_bound(combined_triangles, 3 * std::mem::size_of::<u64>(), 8)?,
-        allocator_allocation_bound(3, std::mem::size_of::<u64>(), 8)?,
-        allocator_allocation_bound(3, std::mem::size_of::<u64>(), 8)?,
-    ])?;
-    let native_import = mesh_allocation_bound(
-        combined_vertices,
-        combined_triangles,
-        std::mem::size_of::<u64>(),
-    )?;
-    // The per-element contract constants already include capacity and native
-    // allocator slack; applying Rust's Vec bound again would double-charge it.
-    let native_workspace = checked_sum(&[
-        checked_scale(combined_vertices, MANIFOLD_NESTED_VERTEX_WORK_BYTES)?,
-        checked_scale(combined_triangles, MANIFOLD_NESTED_TRIANGLE_WORK_BYTES)?,
-    ])?;
-    let result_solid_mesh = mesh_allocation_bound(
-        combined_vertices,
-        combined_triangles,
-        std::mem::size_of::<u64>(),
-    )?;
-    let result_u32_mesh = mesh_allocation_bound(
-        combined_vertices,
-        combined_triangles,
-        std::mem::size_of::<u32>(),
-    )?;
-    // Native import/work/export is one lifetime. Once the call returns, all
-    // Manifold internals are gone before Rust unflattens the FFI vectors; once
-    // `difference` returns, its input array and FlatBatch are gone before H0
-    // converts the returned SolidMesh to its u32 Mesh. Charging those three
-    // real peaks separately avoids pretending mutually exclusive buffers are
-    // simultaneous.
-    let retained_before_boolean = checked_sum(&[
-        source_mesh_peak_bytes,
-        inner_mesh_peak_bytes,
-        retained_cavity_field_peak_bytes,
-        solid_input_meshes,
-    ])?;
-    let native_call_peak = checked_sum(&[
-        retained_before_boolean,
-        flat_batch,
-        native_import,
-        native_workspace,
-        mesh_allocation_bound(
-            combined_vertices,
-            combined_triangles,
-            std::mem::size_of::<u64>(),
-        )?,
-        mesh_allocation_bound(
-            combined_vertices,
-            combined_triangles,
-            std::mem::size_of::<u64>(),
-        )?,
-    ])?;
-    let rust_unflatten_peak = checked_sum(&[
-        retained_before_boolean,
-        flat_batch,
-        result_solid_mesh,
-        result_solid_mesh,
-    ])?;
-    let final_conversion_peak = checked_sum(&[
-        source_mesh_peak_bytes,
-        inner_mesh_peak_bytes,
-        retained_cavity_field_peak_bytes,
-        result_solid_mesh,
-        result_u32_mesh,
-    ])?;
-    let boolean_peak_bytes = native_call_peak
-        .max(rust_unflatten_peak)
-        .max(final_conversion_peak);
-    let peak_bytes = [
-        rasterization_peak_bytes,
-        edt_peak_bytes,
-        label_peak_bytes,
-        checked_sum(&[
-            source_mesh_peak_bytes,
-            surface_peak_bytes,
-            retained_cavity_field_peak_bytes,
-        ])?,
-        boolean_peak_bytes,
-    ]
-    .into_iter()
-    .max()
-    .ok_or(HollowError::ResourceAccountingOverflow)?;
-    let estimate = HollowResourceEstimate {
-        voxel_count: spec.count,
-        query_batch_points,
-        grid_coordinate_bytes,
-        edt_peak_bytes,
-        label_peak_bytes,
-        surface_peak_bytes,
-        rasterization_peak_bytes,
-        source_mesh_peak_bytes,
-        selected_mask_peak_bytes,
-        boolean_peak_bytes,
-        retained_cavity_membership_bytes,
-        retained_source_occupancy_bytes,
-        output_upper_bound_bytes,
-        peak_bytes,
-    };
-    if !phase_fits_cap(estimate.peak_bytes, limits.max_peak_bytes) {
-        Err(HollowError::ResourceLimitExceeded {
-            estimate,
-            cap_bytes: limits.max_peak_bytes,
-        })
-    } else {
-        Ok(estimate)
-    }
+    let vertices =
+        u64::try_from(combined_vertices).map_err(|_| HollowError::ResourceAccountingOverflow)?;
+    let triangles =
+        u64::try_from(combined_triangles).map_err(|_| HollowError::ResourceAccountingOverflow)?;
+    let primitive_units = vertices
+        .checked_mul(3)
+        .and_then(|value| value.checked_add(triangles.checked_mul(3)?))
+        .and_then(|value| value.checked_add(6))
+        .ok_or(HollowError::ResourceAccountingOverflow)?;
+    let marshalled_bytes = primitive_units
+        .checked_mul(8)
+        .ok_or(HollowError::ResourceAccountingOverflow)?;
+    Ok(BooleanLimits {
+        max_input_primitive_units: primitive_units.min(admission.max_boolean_input_primitive_units),
+        max_logical_marshaled_input_bytes: marshalled_bytes
+            .min(admission.max_boolean_marshaled_input_bytes),
+        max_output_vertices: vertices.min(admission.max_boolean_output_vertices),
+        max_output_triangles: triangles.min(admission.max_boolean_output_triangles),
+    })
 }
 
 const MAX_RASTER_SUBDIVISION_ROUNDS: u8 = 10;
@@ -1711,6 +1543,8 @@ pub enum HollowError {
     Constants(&'static M0ConstantsError),
     #[error(transparent)]
     Triage(#[from] TriageError),
+    #[error(transparent)]
+    TriageAdmission(#[from] TriageAdmissionError),
     #[error("strict mesh audit failed: {0}")]
     StrictAudit(StrictMeshAuditError),
     #[error("topology construction failed: {0}")]
@@ -1725,10 +1559,12 @@ pub enum HollowError {
     InvalidArithmetic,
     #[error("the printable voxel grid exceeds addressable storage")]
     VoxelGridTooLarge,
-    #[error("resource limits require a positive peak and at least one query point")]
-    InvalidResourceLimits,
+    #[error("H0 admission limits are invalid")]
+    InvalidAdmissionLimits,
     #[error("checked H0 resource accounting overflowed")]
     ResourceAccountingOverflow,
+    #[error("voxel grid has {cells} cells, exceeding the H0 limit {max_cells}")]
+    VoxelCellLimitExceeded { cells: usize, max_cells: usize },
     #[error(
         "frozen voxel subdivision exceeded the caller work cap {max_work_items} at item {work_items}"
     )]
@@ -1742,11 +1578,6 @@ pub enum HollowError {
     RasterWorkMismatch {
         expected_work_items: usize,
         observed_work_items: usize,
-    },
-    #[error("H0 resource estimate exceeds caller cap {cap_bytes}")]
-    ResourceLimitExceeded {
-        estimate: HollowResourceEstimate,
-        cap_bytes: usize,
     },
     #[error("geom-kernel could not construct the batched voxelization surface")]
     Kernel,
@@ -1810,17 +1641,15 @@ mod tests {
     }
 
     fn characterize(input: Mesh) -> (usize, Characterization) {
-        let triaged = triage_components(&input, WeldPolicy::ExactBits).expect("frozen triage");
+        let triaged = triage_exact_with_measured_limits(&input).expect("frozen triage");
         let components = triaged.summary().component_count();
         let source = triaged.into_mesh();
         let settings = HollowSettings::from_registered_constants().expect("M0 settings");
         let spec = grid_spec(&source, settings.voxel_pitch_mm().get()).expect("grid spec");
-        resource_estimate(&source, spec, HollowResourceLimits::production())
-            .expect("resource preflight");
         let work = raster_work_item_count(
             &source,
             spec,
-            HollowResourceLimits::production().max_raster_work_items(),
+            H0AdmissionLimits::production().max_raster_work_items(),
         )
         .expect("bounded source work");
         let grid = voxelize_filled(&source, spec, work).expect("bounded voxelization");
@@ -2059,6 +1888,35 @@ mod tests {
         let solid = make_box([50.0, 50.0, 50.0], [0.0, 0.0, 0.0]).expect("box fixture");
         let open =
             Mesh::new(solid.verts().to_vec(), solid.tris()[1..].to_vec()).expect("open fixture");
+        let settings = HollowSettings::from_registered_constants().expect("M0 settings");
+        let retained_bytes = open.retained_buffer_bytes().expect("retained source bytes");
+        let mut exact_retained = H0AdmissionLimits::production();
+        exact_retained.max_retained_source_buffer_bytes = retained_bytes;
+        assert!(matches!(
+            create_shell_with_admission_limits(open.clone(), settings, exact_retained),
+            Err(HollowError::NotClosedOrOriented)
+        ));
+        let mut below_retained = exact_retained;
+        below_retained.max_retained_source_buffer_bytes = retained_bytes - 1;
+        assert!(matches!(
+            create_shell_with_admission_limits(open.clone(), settings, below_retained),
+            Err(HollowError::TriageAdmission(TriageAdmissionError::LimitExceeded {
+                field: "retained source buffer bytes",
+                actual,
+                limit,
+            })) if actual == retained_bytes && limit == retained_bytes - 1
+        ));
+        let mut admission_refusal = H0AdmissionLimits::production();
+        admission_refusal.max_raw_faces = 0;
+        assert!(matches!(
+            create_shell_with_admission_limits(open.clone(), settings, admission_refusal),
+            Err(HollowError::TriageAdmission(
+                TriageAdmissionError::LimitExceeded {
+                    field: "raw faces",
+                    ..
+                }
+            ))
+        ));
         assert!(matches!(
             create_shell(open),
             Err(HollowError::NotClosedOrOriented)
@@ -2066,8 +1924,18 @@ mod tests {
 
         let outer = make_box([50.0, 50.0, 50.0], [0.0, 0.0, 0.0]).expect("outer fixture");
         let inner = make_box([20.0, 20.0, 20.0], [0.0, 0.0, 15.0]).expect("inner fixture");
+        let prehollowed = join(&outer, &inner);
         assert!(matches!(
-            create_shell(join(&outer, &inner)),
+            create_shell_with_admission_limits(prehollowed.clone(), settings, admission_refusal),
+            Err(HollowError::TriageAdmission(
+                TriageAdmissionError::LimitExceeded {
+                    field: "raw faces",
+                    ..
+                }
+            ))
+        ));
+        assert!(matches!(
+            create_shell(prehollowed),
             Err(HollowError::Triage(TriageError::PreHollowed(_)))
         ));
 
@@ -2096,55 +1964,45 @@ mod tests {
     }
 
     #[test]
-    fn resource_preflight_has_exact_cap_boundary_and_refuses_300mm_before_voxelization() {
+    fn voxel_admission_has_exact_boundary_and_refuses_300mm_before_voxelization() {
+        assert!(matches!(
+            H0AdmissionLimits::new(
+                TriageTopologyLimits::new(1, 1, 1, 3, 3, 32),
+                1,
+                QUERY_BYTES_PER_POINT,
+                1,
+                BooleanLimits::UNLIMITED,
+                1,
+            ),
+            Err(HollowError::InvalidAdmissionLimits)
+        ));
         let huge = make_box([300.0, 300.0, 300.0], [0.0, 0.0, 0.0]).expect("300mm box");
         let error = create_shell(huge).expect_err("300mm at 0.5mm must preflight-refuse");
-        match error {
-            HollowError::ResourceLimitExceeded {
-                estimate,
-                cap_bytes,
-            } => {
-                assert_eq!(estimate.voxel_count(), 601_usize.pow(3));
-                assert!(estimate.peak_bytes() > cap_bytes);
-                assert!(estimate.grid_coordinate_bytes() <= DEFAULT_QUERY_WORKING_BYTES);
-                assert!(estimate.rasterization_peak_bytes() > 0);
-                assert!(estimate.output_upper_bound_bytes() > 0);
-            }
-            other => panic!("unexpected 300mm refusal: {other}"),
-        }
+        assert!(matches!(
+            error,
+            HollowError::VoxelCellLimitExceeded { cells, max_cells }
+                if cells == 601_usize.pow(3) && max_cells == DEFAULT_MAX_VOXEL_CELLS
+        ));
 
         let input = frozen_mesh("Sphere.prepped.oriented-solid.stl");
-        let source = triage_components(&input, WeldPolicy::ExactBits)
+        let settings = HollowSettings::from_registered_constants().expect("M0 settings");
+        let source = triage_exact_with_measured_limits(&input)
             .expect("sphere triage")
             .into_mesh();
-        let settings = HollowSettings::from_registered_constants().expect("M0 settings");
         let spec = grid_spec(&source, settings.voxel_pitch_mm().get()).expect("grid spec");
-        let query_bytes = QUERY_BYTES_PER_POINT * 127;
-        let unconstrained = resource_estimate(
-            &source,
-            spec,
-            HollowResourceLimits::new(usize::MAX, query_bytes).expect("unbounded test cap"),
-        )
-        .expect("estimate");
-        assert_eq!(unconstrained.query_batch_points(), 127);
-        assert_eq!(
-            resource_estimate(
-                &source,
-                spec,
-                HollowResourceLimits::new(unconstrained.peak_bytes(), query_bytes)
-                    .expect("exact cap"),
-            )
-            .expect("exact boundary"),
-            unconstrained
-        );
+        let mut exact = H0AdmissionLimits::production();
+        exact.max_voxel_cells = spec.count;
+        exact.query_working_bytes = QUERY_BYTES_PER_POINT * 127;
+        let admitted = create_shell_with_admission_limits(input.clone(), settings, exact)
+            .expect("exact voxel-cell cap");
+        assert_eq!(admitted.cavity().resources().query_batch_points(), 127);
+
+        let mut below = exact;
+        below.max_voxel_cells = spec.count - 1;
         assert!(matches!(
-            resource_estimate(
-                &source,
-                spec,
-                HollowResourceLimits::new(unconstrained.peak_bytes() - 1, query_bytes)
-                    .expect("below cap"),
-            ),
-            Err(HollowError::ResourceLimitExceeded { .. })
+            create_shell_with_admission_limits(input, settings, below),
+            Err(HollowError::VoxelCellLimitExceeded { cells, max_cells })
+                if cells == spec.count && max_cells == spec.count - 1
         ));
         assert!(matches!(
             grid_spec(&source, f64::MIN_POSITIVE),
@@ -2153,86 +2011,91 @@ mod tests {
     }
 
     #[test]
-    #[cfg(target_pointer_width = "64")]
-    fn label_phase_bound_matches_hand_derived_live_allocations() {
-        // N=8 second-pass live requests: mask 8, labels 64, three N+1
-        // usize arrays 216, offsets 72, and output 32 = 392 bytes.
-        let estimate = label_phase_memory(8).expect("label bound");
-        assert_eq!(estimate.requested_live_bytes, 392);
-        // Each of those seven live allocations is rounded to 16 bytes,
-        // doubled for allocator size-class slack, then charged 16 metadata
-        // bytes: 48 + 144 + 3*176 + 176 + 80 = 976.
-        assert_eq!(estimate.conservative_peak_bytes, 976);
-        assert!(estimate.conservative_peak_bytes >= estimate.requested_live_bytes);
-        assert!(matches!(
-            label_phase_memory(usize::MAX),
-            Err(HollowError::ResourceAccountingOverflow)
-        ));
-    }
-
-    #[test]
-    fn label_and_boolean_phase_terms_have_exact_individual_cap_boundaries() {
+    fn limited_boolean_has_exact_input_output_boundaries_and_preserves_shell_bits() {
         let source = frozen_mesh("Sphere.prepped.oriented-solid.stl");
         let settings = HollowSettings::from_registered_constants().expect("M0 settings");
-        let spec = grid_spec(&source, settings.voxel_pitch_mm().get()).expect("grid spec");
-        let estimate = resource_estimate(
-            &source,
-            spec,
-            HollowResourceLimits::new(usize::MAX, DEFAULT_QUERY_WORKING_BYTES)
-                .expect("unbounded test cap"),
+        let baseline = create_shell_with_admission_limits(
+            source.clone(),
+            settings,
+            H0AdmissionLimits::production(),
         )
-        .expect("resource estimate");
+        .expect("baseline limited shell");
+        let diagnostics = baseline.cavity().resources();
+        let output_vertices = u64::try_from(baseline.mesh().verts().len()).expect("vertices fit");
+        let output_triangles = u64::try_from(baseline.mesh().tris().len()).expect("triangles fit");
 
-        let selected_mask = allocator_allocation_bound(
-            spec.count,
-            std::mem::size_of::<bool>(),
-            std::mem::align_of::<bool>(),
-        )
-        .expect("selected mask");
-        let retained_allocations = cavity_field::retained_allocation_bytes_for_voxels(spec.count)
-            .expect("retained field allocations");
-        let retained_membership = allocator_allocation_bound_bytes(
-            retained_allocations.membership_bytes(),
-            std::mem::align_of::<u64>(),
-        )
-        .expect("membership allocation");
-        let retained_source_occupancy = allocator_allocation_bound_bytes(
-            retained_allocations.source_occupancy_bytes(),
-            std::mem::align_of::<u64>(),
-        )
-        .expect("source occupancy allocation");
-        let retained_field = checked_sum(&[retained_membership, retained_source_occupancy])
-            .expect("retained field sum");
-        let expected_label = checked_sum(&[
-            estimate.source_mesh_peak_bytes(),
-            label_phase_memory(spec.count)
-                .expect("label phase")
-                .conservative_peak_bytes,
-            selected_mask,
-            selected_mask,
-            retained_field,
-        ])
-        .expect("label sum");
-        assert_eq!(estimate.selected_mask_peak_bytes(), selected_mask);
+        let mut exact = H0AdmissionLimits::production();
+        exact.max_boolean_input_primitive_units = diagnostics.boolean_input_primitive_units();
+        exact.max_boolean_marshaled_input_bytes = diagnostics.boolean_marshaled_input_bytes();
+        exact.max_boolean_output_vertices = output_vertices;
+        exact.max_boolean_output_triangles = output_triangles;
+        let admitted = create_shell_with_admission_limits(source.clone(), settings, exact)
+            .expect("exact public Boolean limits");
         assert_eq!(
-            estimate.retained_cavity_membership_bytes(),
-            retained_allocations.membership_bytes()
+            mesh_fingerprint(admitted.mesh()).expect("admitted digest"),
+            mesh_fingerprint(baseline.mesh()).expect("baseline digest")
         );
+        assert_eq!(admitted.cavity_field(), baseline.cavity_field());
+        let topology =
+            build_face_topology(admitted.mesh(), WeldPolicy::ExactBits).expect("admitted topology");
+        let certificate = certify_closed_components(admitted.mesh(), &topology)
+            .expect("admitted winding certificate");
         assert_eq!(
-            estimate.retained_source_occupancy_bytes(),
-            retained_allocations.source_occupancy_bytes()
+            certificate
+                .components()
+                .iter()
+                .filter(|component| component.signed_volume_mm3() < 0.0)
+                .count(),
+            1
         );
-        assert_eq!(estimate.label_peak_bytes(), expected_label);
-        assert!(phase_fits_cap(expected_label, expected_label));
-        assert!(!phase_fits_cap(expected_label, expected_label - 1));
 
-        // The Boolean term is independently cap-checked rather than inferred
-        // from whichever phase happens to be the aggregate maximum.
-        let boolean = estimate.boolean_peak_bytes();
-        assert!(boolean > estimate.source_mesh_peak_bytes());
-        assert!(boolean > retained_field);
-        assert!(phase_fits_cap(boolean, boolean));
-        assert!(!phase_fits_cap(boolean, boolean - 1));
+        let mut below_input = exact;
+        below_input.max_boolean_input_primitive_units =
+            diagnostics.boolean_input_primitive_units() - 1;
+        assert!(matches!(
+            create_shell_with_admission_limits(source.clone(), settings, below_input),
+            Err(HollowError::Solid(SolidError::InputLimitExceeded {
+                actual,
+                maximum,
+                ..
+            })) if actual == diagnostics.boolean_input_primitive_units()
+                && maximum == diagnostics.boolean_input_primitive_units() - 1
+        ));
+
+        let mut below_marshaled = exact;
+        below_marshaled.max_boolean_marshaled_input_bytes =
+            diagnostics.boolean_marshaled_input_bytes() - 1;
+        assert!(matches!(
+            create_shell_with_admission_limits(source.clone(), settings, below_marshaled),
+            Err(HollowError::Solid(SolidError::InputLimitExceeded {
+                actual,
+                maximum,
+                ..
+            })) if actual == diagnostics.boolean_marshaled_input_bytes()
+                && maximum == diagnostics.boolean_marshaled_input_bytes() - 1
+        ));
+
+        let mut below_output = exact;
+        below_output.max_boolean_output_vertices = output_vertices - 1;
+        assert!(matches!(
+            create_shell_with_admission_limits(source.clone(), settings, below_output),
+            Err(HollowError::Solid(SolidError::OutputLimitExceeded {
+                actual,
+                maximum,
+                ..
+            })) if actual == output_vertices && maximum == output_vertices - 1
+        ));
+
+        let mut below_triangles = exact;
+        below_triangles.max_boolean_output_triangles = output_triangles - 1;
+        assert!(matches!(
+            create_shell_with_admission_limits(source, settings, below_triangles),
+            Err(HollowError::Solid(SolidError::OutputLimitExceeded {
+                actual,
+                maximum,
+                ..
+            })) if actual == output_triangles && maximum == output_triangles - 1
+        ));
     }
 
     #[test]
@@ -2282,16 +2145,14 @@ mod tests {
         let source = frozen_mesh("Sphere.prepped.oriented-solid.stl");
         let settings = HollowSettings::from_registered_constants().expect("M0 settings");
         let mut baseline: Option<String> = None;
+        let mut chunked_limits = H0AdmissionLimits::production();
+        chunked_limits.query_working_bytes = QUERY_BYTES_PER_POINT * 1024;
         for workers in [1, 4, 16] {
             std::env::set_var("PLINTH_THREADS", workers.to_string());
             assert_eq!(geom_kernel::current_threads(), workers);
-            let candidate = create_shell_with_resources(
-                source.clone(),
-                settings,
-                HollowResourceLimits::new(DEFAULT_HOLLOW_PEAK_BYTES, QUERY_BYTES_PER_POINT * 1024)
-                    .expect("chunked limits"),
-            )
-            .expect("thread-count shell");
+            let candidate =
+                create_shell_with_admission_limits(source.clone(), settings, chunked_limits)
+                    .expect("thread-count shell");
             let digest = mesh_fingerprint(candidate.mesh()).expect("shell fingerprint");
             if let Some(ref expected) = baseline {
                 assert_eq!(
@@ -2305,16 +2166,11 @@ mod tests {
         }
         std::env::set_var("PLINTH_THREADS", "1");
         for query_points in [127, 4096] {
-            let candidate = create_shell_with_resources(
-                source.clone(),
-                settings,
-                HollowResourceLimits::new(
-                    DEFAULT_HOLLOW_PEAK_BYTES,
-                    QUERY_BYTES_PER_POINT * query_points,
-                )
-                .expect("chunk-size limits"),
-            )
-            .expect("chunk-size shell");
+            let mut query_limits = H0AdmissionLimits::production();
+            query_limits.query_working_bytes = QUERY_BYTES_PER_POINT * query_points;
+            let candidate =
+                create_shell_with_admission_limits(source.clone(), settings, query_limits)
+                    .expect("chunk-size shell");
             let digest = mesh_fingerprint(candidate.mesh()).expect("chunk fingerprint");
             assert_eq!(digest, *baseline.as_ref().expect("worker baseline"));
             assert_eq!(

@@ -194,20 +194,6 @@ impl CavityField {
     }
 }
 
-pub(crate) fn retained_allocation_bytes_for_voxels(
-    voxel_count: usize,
-) -> Result<CavityFieldRetainedAllocations, HollowError> {
-    let bytes = voxel_count
-        .checked_add(63)
-        .map(|value| value / 64)
-        .and_then(|words| words.checked_mul(std::mem::size_of::<u64>()))
-        .ok_or(HollowError::ResourceAccountingOverflow)?;
-    Ok(CavityFieldRetainedAllocations {
-        membership_bytes: bytes,
-        source_occupancy_bytes: bytes,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

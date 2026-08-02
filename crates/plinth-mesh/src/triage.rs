@@ -115,6 +115,36 @@ impl TriageTopologyLimits {
             containment_probe_slots,
         }
     }
+
+    #[must_use]
+    pub const fn raw_vertices(self) -> usize {
+        self.raw_vertices
+    }
+
+    #[must_use]
+    pub const fn raw_faces(self) -> usize {
+        self.raw_faces
+    }
+
+    #[must_use]
+    pub const fn retained_source_buffer_bytes(self) -> usize {
+        self.retained_source_buffer_bytes
+    }
+
+    #[must_use]
+    pub const fn edge_occurrences(self) -> usize {
+        self.edge_occurrences
+    }
+
+    #[must_use]
+    pub const fn vertex_incidences(self) -> usize {
+        self.vertex_incidences
+    }
+
+    #[must_use]
+    pub const fn containment_probe_slots(self) -> usize {
+        self.containment_probe_slots
+    }
 }
 
 /// Evidence that a raw mesh is small enough to enter triage.

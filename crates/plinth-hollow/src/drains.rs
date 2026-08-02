@@ -9,7 +9,7 @@ use plinth_core::{m0_constants, Finite};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::{CavityEvidence, CavityField, HollowResourceEstimate, ShellCandidate};
+use crate::{CavityEvidence, CavityField, H0ResourceDiagnostics, ShellCandidate};
 
 const QUERY_CANDIDATE_BYTES: usize = 2 * std::mem::size_of::<V3>()
     + std::mem::size_of::<u64>()
@@ -282,13 +282,13 @@ fn plan(candidate: &ShellCandidate) -> Result<DrainPlan, DrainPlanningRefusal> {
             exit_ceiling_mm: policy.hollow_exit_ray_max_mm().diagnostic().get(),
         },
     )?;
-    debug_assert!(preflight.requested_bytes <= candidate.cavity().resource_cap_bytes());
+    debug_assert!(preflight.requested_bytes <= candidate.cavity().drain_planning_cap_bytes());
     debug_assert!(preflight.normalized_direction_bytes > 0);
     let lobes = low_lobes(
         field,
         policy.hollow_lobe_band_mm().diagnostic().get(),
         policy.hollow_lobe_min_ml().diagnostic().get(),
-        candidate.cavity().resource_cap_bytes(),
+        candidate.cavity().drain_planning_cap_bytes(),
     )?;
     let vent_sites = high_sites(
         field,
@@ -751,11 +751,11 @@ fn high_sites(
 fn planner_preflight(
     candidate: &ShellCandidate,
     field: &CavityField,
-    resources: HollowResourceEstimate,
+    resources: H0ResourceDiagnostics,
     native_peak_bytes: usize,
     policy: PlannerPolicy,
 ) -> Result<PlannerPreflight, DrainPlanningRefusal> {
-    let cap = candidate.cavity().resource_cap_bytes();
+    let cap = candidate.cavity().drain_planning_cap_bytes();
     let low_z = field
         .member_flats()
         .map(|flat| field.world_at_flat(flat)[2])
@@ -1471,21 +1471,20 @@ mod tests {
     #[test]
     fn no_exit_is_a_typed_refusal_and_candidate_is_returned() {
         let mesh = make_box([30.0, 30.0, 30.0], [0.0, 0.0, 0.0]).expect("box");
-        let resource = HollowResourceEstimate {
+        let resource = H0ResourceDiagnostics {
             voxel_count: 1,
             query_batch_points: 1_000,
             grid_coordinate_bytes: 0,
-            edt_peak_bytes: 0,
-            label_peak_bytes: 0,
-            surface_peak_bytes: 0,
-            rasterization_peak_bytes: 0,
-            source_mesh_peak_bytes: 0,
-            selected_mask_peak_bytes: 0,
-            boolean_peak_bytes: 0,
+            retained_raw_source_buffer_bytes: 0,
+            raster_work_items: 0,
             retained_cavity_membership_bytes: 8,
             retained_source_occupancy_bytes: 8,
-            output_upper_bound_bytes: 0,
-            peak_bytes: 0,
+            marching_vertex_upper_bound: 0,
+            marching_triangle_upper_bound: 0,
+            boolean_input_primitive_units: 0,
+            boolean_marshaled_input_bytes: 0,
+            boolean_output_vertex_limit: 0,
+            boolean_output_triangle_limit: 0,
         };
         let candidate = ShellCandidate {
             mesh,
@@ -1495,7 +1494,7 @@ mod tests {
                 cavity_volume_mm3: Finite::new(0.125).expect("finite"),
                 source_volume_mm3: Finite::new(27_000.0).expect("finite"),
                 resources: resource,
-                resource_cap_bytes: usize::MAX,
+                drain_planning_cap_bytes: usize::MAX,
             },
             cavity_field: field(Array3::from_elem((10, 20, 20), true)),
         };
@@ -1561,7 +1560,7 @@ mod tests {
         )
         .expect("shell");
         let (mesh, mut cavity, field) = candidate.into_parts();
-        cavity.resource_cap_bytes = 1;
+        cavity.drain_planning_cap_bytes = 1;
         let failure = plan_drains(ShellCandidate {
             mesh,
             cavity,
@@ -1578,7 +1577,7 @@ mod tests {
     fn planner_preflight_has_an_exact_cap_boundary_before_candidate_allocation() {
         let candidate = frozen_candidate();
         let (mesh, mut cavity, field) = candidate.into_parts();
-        cavity.resource_cap_bytes = usize::MAX;
+        cavity.drain_planning_cap_bytes = usize::MAX;
         let unlimited = ShellCandidate {
             mesh,
             cavity,
@@ -1624,7 +1623,7 @@ mod tests {
 
         let exact_candidate = frozen_candidate();
         let (mesh, mut cavity, field) = exact_candidate.into_parts();
-        cavity.resource_cap_bytes = exact;
+        cavity.drain_planning_cap_bytes = exact;
         plan_drains(ShellCandidate {
             mesh,
             cavity,
@@ -1634,7 +1633,7 @@ mod tests {
 
         let below = frozen_candidate();
         let (mesh, mut cavity, field) = below.into_parts();
-        cavity.resource_cap_bytes = exact - 1;
+        cavity.drain_planning_cap_bytes = exact - 1;
         let refusal = plan_drains(ShellCandidate {
             mesh,
             cavity,
@@ -1689,7 +1688,7 @@ mod tests {
         let exact = preflight.requested_bytes;
 
         let (mesh, mut cavity, field) = unlimited.into_parts();
-        cavity.resource_cap_bytes = exact;
+        cavity.drain_planning_cap_bytes = exact;
         plan_drains(ShellCandidate {
             mesh,
             cavity,
@@ -1699,7 +1698,7 @@ mod tests {
 
         let below = frozen_candidate_with_unequal_field_capacities();
         let (mesh, mut cavity, field) = below.into_parts();
-        cavity.resource_cap_bytes = exact - 1;
+        cavity.drain_planning_cap_bytes = exact - 1;
         let refusal = plan_drains(ShellCandidate {
             mesh,
             cavity,
