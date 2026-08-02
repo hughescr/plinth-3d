@@ -16,7 +16,8 @@ use geom_kernel::{
 use meshopt::{simplify_with_locks, typed_to_bytes, SimplifyOptions, VertexDataAdapter};
 use plinth_core::{m0_constants, PositiveFinite};
 use plinth_mesh::{
-    build_face_topology, EdgeTopologyCounts, Mesh, StrictMeshAuditError, WeldPolicy, WeldedView,
+    build_face_topology, mesh_fingerprint, EdgeTopologyCounts, Mesh, StrictMeshAuditError,
+    WeldPolicy, WeldedView,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -221,6 +222,9 @@ pub struct BudgetSearchStep {
     pub ratio: f64,
     pub output_face_count: usize,
     pub output_vertex_count: usize,
+    /// Canonical digest of the sampled candidate. A final re-build must match
+    /// this before its evidence can be accepted.
+    pub candidate_fingerprint: String,
     pub probe: TwoSidedProbe,
     /// A requested ratio below one is not success merely because meshoptimizer
     /// accepted it.  Production decimation must actually remove faces.
@@ -235,9 +239,33 @@ pub struct BudgetSearchTrace {
     pub budget: ErrorBudget,
     pub protected_vertex_count: usize,
     pub steps: Vec<BudgetSearchStep>,
+    /// Every full-population attempt, in deterministic most-aggressive-first
+    /// order. A failed attempt never suppresses denser sampled-safe candidates.
+    pub final_attempts: Vec<FinalVerificationAttempt>,
     /// Why no safely reduced mesh was authorized when this trace backs an
     /// [`BudgetSearchOutcome::AlreadyPrintScale`] result.
     pub reduction_refusals: Vec<ReductionRefusalReason>,
+}
+
+/// Full verification evidence for one sampled-safe, genuinely reduced QEM
+/// candidate.  The candidate is deterministically rebuilt to avoid retaining
+/// several production-scale meshes during the sampled search.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FinalVerificationAttempt {
+    pub requested_ratio: f64,
+    pub achieved_ratio: f64,
+    pub output_face_count: usize,
+    pub candidate_fingerprint: String,
+    pub probe: TwoSidedProbe,
+    pub topology_after: EdgeTopologyCounts,
+    pub result: FinalVerificationResult,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FinalVerificationResult {
+    Verified,
+    BudgetExceeded,
+    TopologyIncreased,
 }
 
 /// Evidence that a requested simplification was correctly refused while the
@@ -868,7 +896,32 @@ fn run_budget_search(
         });
     }
 
-    let mut lowest_passing_ratio = None;
+    // The canonical 1.0 identity endpoint cannot be a production reduction.
+    // Probe the nearest representable useful target separately so a topology
+    // refusal at a more aggressive bisection point cannot force identity when
+    // a one-face (or nearest meshopt-achievable) reduction is safe.
+    let nearest_reduced_ratio = 1.0
+        - 1.0
+            / f64::from(u32::try_from(original.tris().len()).map_err(|error| {
+                BudgetSearchError::SearchExecution {
+                    phase: "near-identity reduction endpoint",
+                    message: format!("input face count cannot form endpoint ratio: {error}"),
+                }
+            })?);
+    let endpoint = sampled_step(
+        original,
+        protected,
+        nearest_reduced_ratio,
+        budget.probe,
+        error_budget,
+    )
+    .map_err(|error| BudgetSearchError::SearchExecution {
+        phase: "near-identity reduction endpoint",
+        message: error,
+    })?;
+    record_sampled_refusal(&mut trace, &endpoint, original.tris().len(), error_budget);
+    trace.steps.push(endpoint);
+
     let mut low = policy.ratio_low;
     let mut high = policy.ratio_high;
     for _ in 0..policy.bisections {
@@ -888,29 +941,23 @@ fn run_budget_search(
             // is the only direction that could produce a real reduction.
             (false, _) => high = midpoint,
         }
-        if step.reduced && step.passed {
-            lowest_passing_ratio = Some(midpoint);
-        } else if !step.reduced {
-            trace
-                .reduction_refusals
-                .push(ReductionRefusalReason::NoActualReduction {
-                    requested_ratio: step.ratio,
-                    input_face_count: original.tris().len(),
-                    output_face_count: step.output_face_count,
-                });
-        } else {
-            trace
-                .reduction_refusals
-                .push(ReductionRefusalReason::SampledBudgetExceeded {
-                    requested_ratio: step.ratio,
-                    probe: step.probe.clone(),
-                    budget: error_budget,
-                });
-        }
+        record_sampled_refusal(&mut trace, &step, original.tris().len(), error_budget);
         trace.steps.push(step);
     }
 
-    let Some(lowest_passing_ratio) = lowest_passing_ratio else {
+    let mut candidates = trace
+        .steps
+        .iter()
+        .filter(|step| step.reduced && step.passed)
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        // Compare actual ratios without rounding, then requested target as a
+        // deterministic tie-breaker.
+        (left.output_face_count as u128 * original.tris().len() as u128)
+            .cmp(&(right.output_face_count as u128 * original.tris().len() as u128))
+            .then_with(|| left.ratio.total_cmp(&right.ratio))
+    });
+    if candidates.is_empty() {
         return already_print_scale(
             original,
             budget.probe,
@@ -921,94 +968,174 @@ fn run_budget_search(
                 output_face_count: original.tris().len(),
             },
         );
-    };
+    }
 
-    let final_outcome = simplify_locked(
-        original,
-        &SimplifyRequest {
-            target_ratio: lowest_passing_ratio,
-            vertex_locks: protected.to_vec(),
-        },
-    )
-    .map_err(|error| {
-        verification_failed(
-            trace.clone(),
-            topology_before,
-            None,
-            None,
-            VerificationFailureReason::FinalSimplify {
-                message: error.to_string(),
+    for candidate in candidates {
+        let final_outcome = simplify_locked(
+            original,
+            &SimplifyRequest {
+                target_ratio: candidate.ratio,
+                vertex_locks: protected.to_vec(),
             },
         )
-    })?;
-    let final_probe = probe_two_sided(
-        original,
-        &final_outcome.mesh,
-        ProbePopulation::Full,
-        budget.probe,
-    )
-    .map_err(|error| {
-        verification_failed(
-            trace.clone(),
-            topology_before,
-            None,
-            None,
-            VerificationFailureReason::FinalProbe {
-                message: error.to_string(),
-            },
-        )
-    })?;
-    let topology_after = build_face_topology(&final_outcome.mesh, WeldPolicy::ExactBits)
-        .map(|topology| topology.edge_counts())
         .map_err(|error| {
             verification_failed(
                 trace.clone(),
                 topology_before,
-                Some(final_probe.clone()),
                 None,
-                VerificationFailureReason::TopologyAudit {
+                None,
+                VerificationFailureReason::FinalSimplify {
                     message: error.to_string(),
                 },
             )
         })?;
-    if !within_final_slack(&final_probe, error_budget, policy.final_slack) {
-        return already_print_scale(
+        let rebuilt_fingerprint = mesh_fingerprint(&final_outcome.mesh).map_err(|error| {
+            BudgetSearchError::SearchExecution {
+                phase: "final candidate fingerprint",
+                message: error.to_string(),
+            }
+        })?;
+        if rebuilt_fingerprint != candidate.candidate_fingerprint {
+            return Err(BudgetSearchError::SearchExecution {
+                phase: "final candidate deterministic rebuild",
+                message: format!(
+                    "requested ratio {} sampled fingerprint {} rebuilt as {}",
+                    candidate.ratio, candidate.candidate_fingerprint, rebuilt_fingerprint
+                ),
+            });
+        }
+        let final_probe = probe_two_sided(
             original,
+            &final_outcome.mesh,
+            ProbePopulation::Full,
             budget.probe,
-            trace,
-            ReductionRefusalReason::FinalBudgetExceeded {
-                requested_ratio: lowest_passing_ratio,
-                probe: final_probe,
-                budget: error_budget,
-                slack: policy.final_slack,
-            },
-        );
-    }
-    if !topology_not_increased(topology_before, topology_after) {
-        return already_print_scale(
-            original,
-            budget.probe,
-            trace,
-            ReductionRefusalReason::TopologyIncreased {
-                requested_ratio: lowest_passing_ratio,
-                before: topology_before,
-                after: topology_after,
-            },
-        );
-    }
-
-    Ok(BudgetSearchOutcome::Verified(Box::new(
-        BudgetSearchSuccess {
-            mesh: final_outcome.mesh,
-            // The report names the actual mesh ratio, not merely meshopt's
-            // requested target (face counts are discrete).
-            chosen_ratio: final_outcome.achieved_ratio,
-            trace,
-            final_probe,
+        )
+        .map_err(|error| {
+            verification_failed(
+                trace.clone(),
+                topology_before,
+                None,
+                None,
+                VerificationFailureReason::FinalProbe {
+                    message: error.to_string(),
+                },
+            )
+        })?;
+        let topology_after = build_face_topology(&final_outcome.mesh, WeldPolicy::ExactBits)
+            .map(|topology| topology.edge_counts())
+            .map_err(|error| {
+                verification_failed(
+                    trace.clone(),
+                    topology_before,
+                    Some(final_probe.clone()),
+                    None,
+                    VerificationFailureReason::TopologyAudit {
+                        message: error.to_string(),
+                    },
+                )
+            })?;
+        let result = classify_final_attempt(
+            &final_probe,
+            error_budget,
+            policy.final_slack,
             topology_before,
             topology_after,
+        );
+        trace.final_attempts.push(FinalVerificationAttempt {
+            requested_ratio: candidate.ratio,
+            achieved_ratio: final_outcome.achieved_ratio,
+            output_face_count: final_outcome.output_face_count,
+            candidate_fingerprint: rebuilt_fingerprint,
+            probe: final_probe.clone(),
+            topology_after,
+            result: result.clone(),
+        });
+        match result {
+            FinalVerificationResult::Verified => {
+                return Ok(BudgetSearchOutcome::Verified(Box::new(
+                    BudgetSearchSuccess {
+                        mesh: final_outcome.mesh,
+                        chosen_ratio: final_outcome.achieved_ratio,
+                        trace,
+                        final_probe,
+                        topology_before,
+                        topology_after,
+                    },
+                )));
+            }
+            FinalVerificationResult::BudgetExceeded => {
+                trace
+                    .reduction_refusals
+                    .push(ReductionRefusalReason::FinalBudgetExceeded {
+                        requested_ratio: candidate.ratio,
+                        probe: final_probe,
+                        budget: error_budget,
+                        slack: policy.final_slack,
+                    });
+            }
+            FinalVerificationResult::TopologyIncreased => {
+                trace
+                    .reduction_refusals
+                    .push(ReductionRefusalReason::TopologyIncreased {
+                        requested_ratio: candidate.ratio,
+                        before: topology_before,
+                        after: topology_after,
+                    });
+            }
+        }
+    }
+
+    already_print_scale(
+        original,
+        budget.probe,
+        trace,
+        ReductionRefusalReason::NoActualReduction {
+            requested_ratio: policy.ratio_high,
+            input_face_count: original.tris().len(),
+            output_face_count: original.tris().len(),
         },
-    )))
+    )
+}
+
+fn record_sampled_refusal(
+    trace: &mut BudgetSearchTrace,
+    step: &BudgetSearchStep,
+    input_face_count: usize,
+    budget: ErrorBudget,
+) {
+    if !step.reduced {
+        trace
+            .reduction_refusals
+            .push(ReductionRefusalReason::NoActualReduction {
+                requested_ratio: step.ratio,
+                input_face_count,
+                output_face_count: step.output_face_count,
+            });
+    } else if !step.passed {
+        trace
+            .reduction_refusals
+            .push(ReductionRefusalReason::SampledBudgetExceeded {
+                requested_ratio: step.ratio,
+                probe: step.probe.clone(),
+                budget,
+            });
+    }
+}
+
+fn classify_final_attempt(
+    probe: &TwoSidedProbe,
+    budget: ErrorBudget,
+    slack: f64,
+    topology_before: EdgeTopologyCounts,
+    topology_after: EdgeTopologyCounts,
+) -> FinalVerificationResult {
+    if !within_final_slack(probe, budget, slack) {
+        FinalVerificationResult::BudgetExceeded
+    } else if !topology_not_increased(topology_before, topology_after) {
+        FinalVerificationResult::TopologyIncreased
+    } else {
+        FinalVerificationResult::Verified
+    }
 }
 
 fn new_budget_trace(
@@ -1025,6 +1152,7 @@ fn new_budget_trace(
         },
         protected_vertex_count,
         steps: Vec::with_capacity(policy.bisections + 1),
+        final_attempts: Vec::with_capacity(policy.bisections),
         reduction_refusals: Vec::new(),
     }
 }
@@ -1101,6 +1229,8 @@ fn canonical_identity_step(
         ratio: 1.0,
         output_face_count: outcome.output_face_count,
         output_vertex_count: outcome.output_vertex_count,
+        candidate_fingerprint: mesh_fingerprint(&outcome.mesh)
+            .map_err(|error| error.to_string())?,
         probe,
         reduced: false,
         passed: false,
@@ -1162,6 +1292,8 @@ fn sampled_step(
         ratio,
         output_face_count: outcome.output_face_count,
         output_vertex_count: outcome.output_vertex_count,
+        candidate_fingerprint: mesh_fingerprint(&outcome.mesh)
+            .map_err(|error| error.to_string())?,
         probe,
         reduced,
         passed,
@@ -2404,6 +2536,7 @@ mod tests {
             budget,
             protected_vertex_count: 0,
             steps: Vec::new(),
+            final_attempts: Vec::new(),
             reduction_refusals: Vec::new(),
         }
     }
@@ -2472,7 +2605,7 @@ mod tests {
         assert_eq!(success.mesh().tris().len(), mesh.tris().len());
         assert_eq!(success.final_probe().p99_mm, 0.0);
         assert_eq!(success.final_probe().p99_9_mm, 0.0);
-        assert_eq!(success.trace().steps.len(), 6);
+        assert_eq!(success.trace().steps.len(), 7);
         assert!(success
             .trace()
             .reduction_refusals
@@ -2489,8 +2622,8 @@ mod tests {
         };
         assert_eq!(
             success.trace.steps.len(),
-            6,
-            "one high probe plus five bisections"
+            7,
+            "identity evidence, nearest-reduction endpoint, plus five bisections"
         );
         assert!(!success.trace.steps[0].reduced);
         assert_eq!(success.chosen_ratio, 1.0);
@@ -2585,6 +2718,73 @@ mod tests {
                 nonmanifold_edges: 2,
             }
         ));
+    }
+
+    #[test]
+    fn final_topology_refusal_does_not_disqualify_a_denser_sampled_safe_candidate() {
+        let budget = ErrorBudget {
+            p99_mm: 1.0,
+            p99_9_mm: 1.0,
+        };
+        let before = EdgeTopologyCounts::default();
+        // Synthetic final evidence mirrors the Treant regression: the lower
+        // ratio is sampled-safe but opens non-manifold edges, while the denser
+        // sampled-safe candidate is topology-safe and must remain eligible.
+        let attempts = [
+            classify_final_attempt(
+                &probe_with_percentiles(0.0, 0.0),
+                budget,
+                1.1,
+                before,
+                EdgeTopologyCounts {
+                    boundary_edges: 0,
+                    nonmanifold_edges: 24,
+                },
+            ),
+            classify_final_attempt(
+                &probe_with_percentiles(0.0, 0.0),
+                budget,
+                1.1,
+                before,
+                before,
+            ),
+        ];
+        assert_eq!(attempts[0], FinalVerificationResult::TopologyIncreased);
+        assert_eq!(attempts[1], FinalVerificationResult::Verified);
+        assert_eq!(
+            attempts
+                .iter()
+                .position(|result| *result == FinalVerificationResult::Verified),
+            Some(1),
+            "the second, denser candidate is selected after the first refusal"
+        );
+    }
+
+    #[test]
+    fn final_error_refusal_does_not_disqualify_a_denser_sampled_safe_candidate() {
+        let budget = ErrorBudget {
+            p99_mm: 1.0,
+            p99_9_mm: 1.0,
+        };
+        let before = EdgeTopologyCounts::default();
+        let attempts = [
+            classify_final_attempt(
+                &probe_with_percentiles(1.101, 0.0),
+                budget,
+                1.1,
+                before,
+                before,
+            ),
+            classify_final_attempt(
+                &probe_with_percentiles(0.0, 0.0),
+                budget,
+                1.1,
+                before,
+                before,
+            ),
+        ];
+        assert_eq!(attempts[0], FinalVerificationResult::BudgetExceeded);
+        assert_eq!(attempts[1], FinalVerificationResult::Verified);
     }
 
     #[test]

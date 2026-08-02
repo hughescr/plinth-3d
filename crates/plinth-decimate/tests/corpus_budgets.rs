@@ -125,28 +125,43 @@ struct ModelReport {
     actual_status: String,
     input_faces: Option<usize>,
     output_faces: Option<usize>,
-    chosen_ratio: Option<f64>,
+    /// Decimal is presentation only; exact input/output face counts establish
+    /// the achieved ratio without a JSON f64 lexical round-trip.
+    chosen_ratio: Option<String>,
     search_steps: Vec<SearchStepReport>,
-    search_p99_mm: Option<f64>,
-    search_p99_9_mm: Option<f64>,
-    final_p99_mm: Option<f64>,
-    final_p99_9_mm: Option<f64>,
-    final_p99_limit_mm: Option<f64>,
-    final_p99_9_limit_mm: Option<f64>,
+    search_p99_mm: Option<String>,
+    search_p99_9_mm: Option<String>,
+    final_p99_mm: Option<String>,
+    final_p99_9_mm: Option<String>,
+    final_p99_limit_mm: Option<String>,
+    final_p99_9_limit_mm: Option<String>,
     topology_before: Option<TopologyReport>,
     topology_after: Option<TopologyReport>,
+    final_attempts: Vec<FinalAttemptReport>,
     reduction_refusals: Vec<String>,
     error: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct SearchStepReport {
-    ratio: f64,
+    ratio: String,
     output_faces: usize,
     reduced: bool,
-    p99_mm: f64,
-    p99_9_mm: f64,
+    p99_mm: String,
+    p99_9_mm: String,
     passed: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FinalAttemptReport {
+    requested_ratio: String,
+    achieved_ratio: String,
+    output_faces: usize,
+    candidate_fingerprint: String,
+    p99_mm: String,
+    p99_9_mm: String,
+    topology_after: TopologyReport,
+    result: String,
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
@@ -219,21 +234,21 @@ fn report_writer_canonicalizes_arithmetic_floats_before_the_only_disk_write() {
             actual_status: "verified".to_owned(),
             input_faces: Some(2),
             output_faces: Some(1),
-            chosen_ratio: Some(0.5),
+            chosen_ratio: Some("0.50000000000000000".to_owned()),
             search_steps: vec![SearchStepReport {
-                ratio: 0.5,
+                ratio: "0.50000000000000000".to_owned(),
                 output_faces: 1,
                 reduced: true,
-                p99_mm: 0.0,
-                p99_9_mm: 0.0,
+                p99_mm: ratio_text(0.0),
+                p99_9_mm: ratio_text(0.0),
                 passed: true,
             }],
-            search_p99_mm: Some(0.0),
-            search_p99_9_mm: Some(0.0),
-            final_p99_mm: Some(0.0),
-            final_p99_9_mm: Some(0.0),
-            final_p99_limit_mm: Some(0.0095 * 1.1),
-            final_p99_9_limit_mm: Some(0.019 * 1.1),
+            search_p99_mm: Some(ratio_text(0.0)),
+            search_p99_9_mm: Some(ratio_text(0.0)),
+            final_p99_mm: Some(ratio_text(0.0)),
+            final_p99_9_mm: Some(ratio_text(0.0)),
+            final_p99_limit_mm: Some(ratio_text(0.0095 * 1.1)),
+            final_p99_9_limit_mm: Some(ratio_text(0.019 * 1.1)),
             topology_before: Some(TopologyReport {
                 boundary_edges: 0,
                 nonmanifold_edges: 0,
@@ -242,6 +257,7 @@ fn report_writer_canonicalizes_arithmetic_floats_before_the_only_disk_write() {
                 boundary_edges: 0,
                 nonmanifold_edges: 0,
             }),
+            final_attempts: Vec::new(),
             reduction_refusals: Vec::new(),
             error: None,
         }],
@@ -349,6 +365,7 @@ fn run_one(
             final_p99_9_limit_mm: None,
             topology_before: None,
             topology_after: None,
+            final_attempts: Vec::new(),
             reduction_refusals: Vec::new(),
             error: Some(format!(
                 "ScaleSuspicious: longest axis {} mm is outside [10, 300] mm; no candidate exported",
@@ -385,6 +402,7 @@ fn run_one(
             final_p99_9_limit_mm: None,
             topology_before: None,
             topology_after: None,
+            final_attempts: Vec::new(),
             reduction_refusals: Vec::new(),
             error: Some(error.to_string()),
         }),
@@ -415,27 +433,44 @@ fn success_report(
         actual_status: expected_status_name(actual_status).to_owned(),
         input_faces: Some(original.tris().len()),
         output_faces: Some(success.mesh().tris().len()),
-        chosen_ratio: Some(success.chosen_ratio()),
+        chosen_ratio: Some(ratio_text(success.chosen_ratio())),
         search_steps: trace
             .steps
             .iter()
             .map(|step| SearchStepReport {
-                ratio: step.ratio,
+                ratio: ratio_text(step.ratio),
                 output_faces: step.output_face_count,
                 reduced: step.reduced,
-                p99_mm: step.probe.p99_mm,
-                p99_9_mm: step.probe.p99_9_mm,
+                p99_mm: ratio_text(step.probe.p99_mm),
+                p99_9_mm: ratio_text(step.probe.p99_9_mm),
                 passed: step.passed,
             })
             .collect(),
-        search_p99_mm: trace.steps.last().map(|step| step.probe.p99_mm),
-        search_p99_9_mm: trace.steps.last().map(|step| step.probe.p99_9_mm),
-        final_p99_mm: Some(final_probe.p99_mm),
-        final_p99_9_mm: Some(final_probe.p99_9_mm),
-        final_p99_limit_mm: Some(trace.budget.p99_mm * 1.1),
-        final_p99_9_limit_mm: Some(trace.budget.p99_9_mm * 1.1),
+        search_p99_mm: trace.steps.last().map(|step| ratio_text(step.probe.p99_mm)),
+        search_p99_9_mm: trace
+            .steps
+            .last()
+            .map(|step| ratio_text(step.probe.p99_9_mm)),
+        final_p99_mm: Some(ratio_text(final_probe.p99_mm)),
+        final_p99_9_mm: Some(ratio_text(final_probe.p99_9_mm)),
+        final_p99_limit_mm: Some(ratio_text(trace.budget.p99_mm * 1.1)),
+        final_p99_9_limit_mm: Some(ratio_text(trace.budget.p99_9_mm * 1.1)),
         topology_before: Some(success.topology_before().into()),
         topology_after: Some(success.topology_after().into()),
+        final_attempts: trace
+            .final_attempts
+            .iter()
+            .map(|attempt| FinalAttemptReport {
+                requested_ratio: ratio_text(attempt.requested_ratio),
+                achieved_ratio: ratio_text(attempt.achieved_ratio),
+                output_faces: attempt.output_face_count,
+                candidate_fingerprint: attempt.candidate_fingerprint.clone(),
+                p99_mm: ratio_text(attempt.probe.p99_mm),
+                p99_9_mm: ratio_text(attempt.probe.p99_9_mm),
+                topology_after: attempt.topology_after.into(),
+                result: format!("{:?}", attempt.result),
+            })
+            .collect(),
         reduction_refusals: trace
             .reduction_refusals
             .iter()
@@ -498,9 +533,9 @@ fn independently_audit_verified(
             original.tris().len()
         ));
     }
-    if trace.steps.len() != 6 {
+    if trace.steps.len() != 7 {
         return Err(format!(
-            "M3SearchStepCount: expected ratio-high plus five bisections, found {}",
+            "M3SearchStepCount: expected identity, nearest-reduction endpoint, plus five bisections, found {}",
             trace.steps.len()
         ));
     }
@@ -627,13 +662,14 @@ fn expected_status_name(status: ExpectedStatus) -> &'static str {
     }
 }
 
+fn ratio_text(value: f64) -> String {
+    format!("{value:.17}")
+}
+
 fn write_and_reopen_report(path: &Path, report: &GateReport) -> Result<(), String> {
-    // serde_json's formatter and parser do not always select the same lexical
-    // representative for an f64 produced by arithmetic (for example,
-    // 0.0095 * 1.1 formats as 0.010450000000000001 but parses to the adjacent
-    // value that formats as 0.01045). Canonicalize through the typed parser
-    // before the only disk write, then audit exact f64 bits after reopening.
-    // This is producer-side serialization, never a repair of the artifact.
+    // Report floats are fixed-decimal strings so their printed evidence is
+    // stable across JSON parser implementations. Canonicalize the typed report
+    // before the only disk write, then require byte-identical re-encoding.
     let provisional = serde_json::to_vec_pretty(report)
         .map_err(|error| format!("could not encode provisional typed report: {error}"))?;
     let canonical: GateReport = serde_json::from_slice(&provisional)
@@ -646,12 +682,6 @@ fn write_and_reopen_report(path: &Path, report: &GateReport) -> Result<(), Strin
         .map_err(|error| format!("could not reopen report {}: {error}", path.display()))?;
     let parsed: GateReport = serde_json::from_slice(&reread)
         .map_err(|error| format!("report {} is not valid typed JSON: {error}", path.display()))?;
-    if report_f64_bits(&canonical) != report_f64_bits(&parsed) {
-        return Err(format!(
-            "report {} changed canonical f64 bits after disk reopen",
-            path.display()
-        ));
-    }
     let recoded = serde_json::to_vec_pretty(&parsed)
         .map_err(|error| format!("could not re-encode reopened report: {error}"))?;
     if bytes != recoded {
@@ -661,29 +691,6 @@ fn write_and_reopen_report(path: &Path, report: &GateReport) -> Result<(), Strin
         ));
     }
     Ok(())
-}
-
-fn report_f64_bits(report: &GateReport) -> Vec<Option<u64>> {
-    let mut bits = Vec::new();
-    for model in &report.models {
-        bits.push(model.chosen_ratio.map(f64::to_bits));
-        for step in &model.search_steps {
-            bits.extend([
-                Some(step.ratio.to_bits()),
-                Some(step.p99_mm.to_bits()),
-                Some(step.p99_9_mm.to_bits()),
-            ]);
-        }
-        bits.extend([
-            model.search_p99_mm.map(f64::to_bits),
-            model.search_p99_9_mm.map(f64::to_bits),
-            model.final_p99_mm.map(f64::to_bits),
-            model.final_p99_9_mm.map(f64::to_bits),
-            model.final_p99_limit_mm.map(f64::to_bits),
-            model.final_p99_9_limit_mm.map(f64::to_bits),
-        ]);
-    }
-    bits
 }
 
 fn output_directory(root: &Path) -> PathBuf {
