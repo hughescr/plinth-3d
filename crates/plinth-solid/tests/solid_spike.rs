@@ -1,6 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use plinth_solid::{ManifoldBackend, ManifoldStatus, Mesh, SolidBoolean, SolidError};
+use plinth_solid::{
+    BooleanLimits, BooleanOutputLimit, ManifoldBackend, ManifoldStatus, Mesh, SolidBoolean,
+    SolidError,
+};
 
 fn cuboid(min: [f64; 3], max: [f64; 3]) -> Mesh {
     let vertices = vec![
@@ -236,4 +239,42 @@ fn valid_empty_difference_is_a_semantic_error_in_the_m0_policy() {
         .difference(&[cube.clone(), cube])
         .expect_err("A minus itself is a valid empty boolean result");
     assert_eq!(error, SolidError::EmptyResult);
+}
+
+#[test]
+fn limited_difference_enforces_exact_native_output_caps_without_changing_geometry() {
+    let inputs = [
+        cuboid([0.0, 0.0, 0.0], [3.0, 3.0, 3.0]),
+        cuboid([0.5, 0.5, -0.5], [1.0, 1.0, 3.5]),
+        cuboid([2.0, 2.0, -0.5], [2.5, 2.5, 3.5]),
+    ];
+    let backend = ManifoldBackend;
+    let ordinary = backend.difference(&inputs).expect("fixture must subtract");
+    let limits = BooleanLimits {
+        max_output_vertices: ordinary.vertices().len() as u64,
+        max_output_triangles: ordinary.triangles().len() as u64,
+        ..BooleanLimits::UNLIMITED
+    };
+    let limited = backend
+        .difference_limited(&inputs, limits)
+        .expect("exact output caps must accept");
+    assert_mesh_bits_equal(&ordinary, &limited);
+
+    let error = backend
+        .difference_limited(
+            &inputs,
+            BooleanLimits {
+                max_output_vertices: limits.max_output_vertices - 1,
+                ..limits
+            },
+        )
+        .expect_err("cap minus one must reject before Rust output allocation");
+    assert_eq!(
+        error,
+        SolidError::OutputLimitExceeded {
+            limit: BooleanOutputLimit::Vertices,
+            actual: limits.max_output_vertices,
+            maximum: limits.max_output_vertices - 1,
+        }
+    );
 }
