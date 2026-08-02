@@ -140,7 +140,7 @@ impl LiveViewLimits {
 }
 
 /// Opaque filtered view matching Python `live_member_lists`: creation order is retained while
-/// caller-declared honestly-unrouted terminal stubs are removed before any joint clustering.
+/// sealed retired/quarantined terminal provenance proves every unrouted contact is non-live.
 #[derive(Clone, Debug)]
 pub(crate) struct FilteredLiveView {
     forest_digest: u64,
@@ -182,6 +182,16 @@ impl FilteredLiveView {
             return Err(JointError::DuplicateUnroutedTerminal);
         }
         for entry in forest.terminal_ledger_iter() {
+            let evidence = forest
+                .terminal_ledger_evidence(entry.contact)
+                .ok_or(JointError::InvalidUnroutedTerminal(entry.contact))?;
+            if evidence.original_key != entry.original_key
+                || evidence.kind != MemberKind::Stub
+                || evidence.owner != Owner::Contact(entry.contact)
+                || evidence.terminal_contacts.as_slice() != [entry.contact]
+            {
+                return Err(JointError::InvalidUnroutedTerminal(entry.contact));
+            }
             if entry.state != TerminalLedgerState::Live
                 && terminal_ids.binary_search(&entry.contact).is_err()
             {
@@ -203,17 +213,31 @@ impl FilteredLiveView {
                     {
                         return Err(JointError::InvalidUnroutedTerminal(terminal));
                     }
-                    excluded.push(entry.original_key);
+                    // A caller cannot turn a still-live routed contact into an unrouted one by
+                    // assertion alone. Failed terminals must first become lifecycle evidence.
+                    return Err(JointError::InvalidUnroutedTerminal(terminal));
                 }
                 TerminalLedgerState::Quarantined => {
                     let record = forest
                         .quarantine_record(entry.original_key)
                         .ok_or(JointError::InvalidUnroutedTerminal(terminal))?;
-                    if record.kind != MemberKind::Stub || record.owner != Owner::Contact(terminal) {
+                    let evidence = forest
+                        .terminal_ledger_evidence(terminal)
+                        .ok_or(JointError::InvalidUnroutedTerminal(terminal))?;
+                    if record != evidence {
                         return Err(JointError::InvalidUnroutedTerminal(terminal));
                     }
                 }
-                TerminalLedgerState::Retired => {}
+                TerminalLedgerState::Retired => {
+                    let evidence = forest
+                        .terminal_ledger_evidence(terminal)
+                        .ok_or(JointError::InvalidUnroutedTerminal(terminal))?;
+                    if evidence.kind != MemberKind::Stub
+                        || evidence.owner != Owner::Contact(terminal)
+                    {
+                        return Err(JointError::InvalidUnroutedTerminal(terminal));
+                    }
+                }
             }
         }
         excluded.sort_unstable();
@@ -574,6 +598,7 @@ pub(crate) fn plan_joint_balls_filtered(
     let mut node_count = 0_usize;
     let mut axis_count = 0_usize;
     let mut owner_clone_bytes = 0_usize;
+    let mut kind_clone_bytes = 0_usize;
     let mut max_owner_clone_bytes = 0_usize;
     for key in view.keys() {
         let member = forest.member(*key).ok_or(JointError::StaleAuthority)?;
@@ -600,6 +625,11 @@ pub(crate) fn plan_joint_balls_filtered(
                 .ok_or(JointError::ScratchLimit)?;
             max_owner_clone_bytes = max_owner_clone_bytes.max(family.len());
         }
+        if let MemberKind::Other(label) = member.kind() {
+            kind_clone_bytes = kind_clone_bytes
+                .checked_add(label.len())
+                .ok_or(JointError::ScratchLimit)?;
+        }
     }
     if node_count > staging.max_nodes || axis_count > staging.max_axis_members {
         return Err(JointError::StagingCountLimit);
@@ -610,6 +640,7 @@ pub(crate) fn plan_joint_balls_filtered(
     let base_bytes = member_count
         .checked_mul(std::mem::size_of::<LiveMember>())
         .and_then(|bytes| bytes.checked_add(owner_clone_bytes))
+        .and_then(|bytes| bytes.checked_add(kind_clone_bytes))
         .and_then(|bytes| bytes.checked_add(node_bytes))
         .ok_or(JointError::ScratchLimit)?;
     if base_bytes > staging.max_bytes {
@@ -646,7 +677,7 @@ pub(crate) fn plan_joint_balls_filtered(
     if clusters.len() > staging.max_clusters {
         return Err(JointError::StagingCountLimit);
     }
-    preflight_post_cluster_staging(
+    let retained_staging_bytes = preflight_post_cluster_staging(
         base_bytes,
         node_count,
         axis_count,
@@ -767,10 +798,17 @@ pub(crate) fn plan_joint_balls_filtered(
         });
     }
 
+    let certificate_scratch = certificate_scratch_for_parallel(
+        retained_staging_bytes,
+        staging.max_bytes,
+        config.max_scratch_bytes,
+        candidates.len(),
+        geom_kernel::current_threads(),
+    )?;
     let decisions = geom_kernel::ordered_index_map(
         &candidates,
         geom_kernel::OrderedMapLimits::new(config.max_work_items, config.max_scratch_bytes),
-        |_, ball| ball_enclosed(ball, &members, config),
+        |_, ball| ball_enclosed(ball, &members, config, certificate_scratch),
     )?;
     debug_assert_eq!(
         decisions.effective_threads(),
@@ -973,6 +1011,9 @@ fn cluster_nodes(
         clusters.push(cluster);
         start = end;
     }
+    // Python emits components at the first source node which encounters them. A union-find
+    // representative is an implementation detail and is not record-order authority.
+    clusters.sort_unstable_by_key(|cluster| cluster[0]);
     Ok(clusters)
 }
 
@@ -994,7 +1035,7 @@ fn preflight_post_cluster_staging(
     cluster_count: usize,
     max_owner_clone_bytes: usize,
     limit: usize,
-) -> Result<(), JointError> {
+) -> Result<usize, JointError> {
     let pairs = cluster_count
         .checked_mul(axis_count)
         .ok_or(JointError::ScratchLimit)?;
@@ -1017,12 +1058,12 @@ fn preflight_post_cluster_staging(
     ];
     let additional = terms
         .into_iter()
-        .try_fold(0_usize, |total, term| total.checked_add(term?).or(None));
-    ensure_staging_bytes(
-        base_bytes,
-        additional.ok_or(JointError::ScratchLimit)?,
-        limit,
-    )
+        .try_fold(0_usize, |total, term| total.checked_add(term?));
+    let additional = additional.ok_or(JointError::ScratchLimit)?;
+    ensure_staging_bytes(base_bytes, additional, limit)?;
+    base_bytes
+        .checked_add(additional)
+        .ok_or(JointError::ScratchLimit)
 }
 
 fn point_cell(point: [f64; 3]) -> Result<[i64; 3], JointError> {
@@ -1109,22 +1150,53 @@ fn is_colinear_seam(cluster: &[usize], nodes: &[Node]) -> bool {
     cosine <= COLINEAR_COS_MAX && close
 }
 
-fn ball_enclosed(ball: &CandidateBall, members: &[LiveMember], config: JointConfig) -> bool {
+#[derive(Clone, Copy)]
+struct CertificateScratch {
+    max_bytes: usize,
+}
+
+fn certificate_scratch_for_parallel(
+    retained_bytes: usize,
+    staging_limit: usize,
+    per_certificate_limit: usize,
+    candidate_count: usize,
+    threads: usize,
+) -> Result<CertificateScratch, JointError> {
+    let workers = threads.max(1).min(candidate_count).max(1);
+    let per_worker = staging_limit
+        .checked_sub(retained_bytes)
+        .ok_or(JointError::ScratchLimit)?
+        / workers;
+    Ok(CertificateScratch {
+        max_bytes: per_worker.min(per_certificate_limit),
+    })
+}
+
+fn ball_enclosed(
+    ball: &CandidateBall,
+    members: &[LiveMember],
+    config: JointConfig,
+    scratch: CertificateScratch,
+) -> bool {
     if ball.radius <= 0.0 || ball.touching.is_empty() {
         return false;
     }
-    let credited: Vec<_> = ball
+    let credited_bytes = match ball
         .touching
-        .iter()
-        .copied()
-        .filter(|index| {
-            signed_distance_to_frustum(ball.center, &members[*index]) <= ENCLOSURE_PROOF_TOL_MM
-        })
-        .collect();
+        .len()
+        .checked_mul(std::mem::size_of::<usize>())
+    {
+        Some(bytes) if bytes <= scratch.max_bytes => bytes,
+        _ => return false,
+    };
+    let mut credited = Vec::with_capacity(ball.touching.len());
+    credited.extend(ball.touching.iter().copied().filter(|index| {
+        signed_distance_to_frustum(ball.center, &members[*index]) <= ENCLOSURE_PROOF_TOL_MM
+    }));
     if credited.is_empty() {
         return false;
     }
-    certify_sphere(ball, &credited, members, config)
+    certify_sphere(ball, &credited, credited_bytes, members, config, scratch)
 }
 
 #[derive(Clone, Copy)]
@@ -1138,9 +1210,18 @@ struct Patch {
 fn certify_sphere(
     ball: &CandidateBall,
     credited: &[usize],
+    credited_bytes: usize,
     members: &[LiveMember],
     config: JointConfig,
+    scratch: CertificateScratch,
 ) -> bool {
+    let initial_bytes = match 20_usize.checked_mul(std::mem::size_of::<Patch>()) {
+        Some(bytes) => bytes,
+        None => return false,
+    };
+    if !certificate_peak_fits(credited_bytes, initial_bytes, scratch) {
+        return false;
+    }
     let mut patches = icosahedron();
     let mut total = patches.len();
     if total > config.max_patches {
@@ -1148,10 +1229,24 @@ fn certify_sphere(
     }
     let mut work = 0_usize;
     while !patches.is_empty() {
-        work = match work.checked_add(patches.len().saturating_mul(credited.len())) {
+        work = match patches
+            .len()
+            .checked_mul(credited.len())
+            .and_then(|next| work.checked_add(next))
+        {
             Some(value) if value <= config.max_work_items => value,
             _ => return false,
         };
+        let frontier_count = patches.len();
+        let frontier_bytes = match frontier_count
+            .checked_mul(2 * std::mem::size_of::<Patch>() + 6 * std::mem::size_of::<f64>())
+        {
+            Some(bytes) => bytes,
+            None => return false,
+        };
+        if !certificate_peak_fits(credited_bytes, frontier_bytes, scratch) {
+            return false;
+        }
         let mut theta = Vec::with_capacity(patches.len());
         let mut points = Vec::with_capacity(patches.len());
         for patch in &patches {
@@ -1173,7 +1268,7 @@ fn certify_sphere(
                 *destination = destination.max(ENCLOSURE_PROOF_TOL_MM - *distance);
             }
         }
-        let mut unresolved = Vec::new();
+        let mut unresolved = Vec::with_capacity(frontier_count);
         for ((patch, best), theta) in patches.into_iter().zip(best).zip(theta) {
             if best < 0.0 {
                 return false;
@@ -1196,7 +1291,23 @@ fn certify_sphere(
         if total > config.max_patches {
             return false;
         }
-        let scratch = match unresolved
+        drop(points);
+        drop(signed);
+        let child_count = match unresolved.len().checked_mul(4) {
+            Some(value) => value,
+            None => return false,
+        };
+        let child_phase_bytes = match frontier_count
+            .checked_add(child_count)
+            .and_then(|count| count.checked_mul(std::mem::size_of::<Patch>()))
+        {
+            Some(value) => value,
+            None => return false,
+        };
+        if !certificate_peak_fits(credited_bytes, child_phase_bytes, scratch) {
+            return false;
+        }
+        let scratch_bytes = match unresolved
             .len()
             .checked_mul(4)
             .and_then(|count| count.checked_mul(std::mem::size_of::<Patch>()))
@@ -1204,10 +1315,10 @@ fn certify_sphere(
             Some(value) => value,
             None => return false,
         };
-        if scratch > config.max_scratch_bytes {
+        if scratch_bytes > config.max_scratch_bytes {
             return false;
         }
-        let mut children = Vec::with_capacity(unresolved.len() * 4);
+        let mut children = Vec::with_capacity(child_count);
         for patch in unresolved {
             let ab = normalize(add(patch.a, patch.b));
             let bc = normalize(add(patch.b, patch.c));
@@ -1243,6 +1354,12 @@ fn certify_sphere(
         patches = children;
     }
     true
+}
+
+fn certificate_peak_fits(retained: usize, transient: usize, scratch: CertificateScratch) -> bool {
+    retained
+        .checked_add(transient)
+        .is_some_and(|peak| peak <= scratch.max_bytes)
 }
 
 fn signed_distances_to_frustum(points: &[[f64; 3]], member: &LiveMember, output: &mut [f64]) {
@@ -1292,10 +1409,14 @@ fn segment_distance_2d(qx: f64, qy: f64, ax: f64, ay: f64, bx: f64, by: f64) -> 
 
 fn icosahedron() -> Vec<Patch> {
     let phi = (1.0 + 5.0_f64.sqrt()) / 2.0;
-    let mut vertices = Vec::new();
+    let mut vertices = [[0.0; 3]; 12];
+    let mut next = 0;
     for a in [-1.0, 1.0] {
         for b in [-1.0, 1.0] {
-            vertices.extend([[0.0, a, b * phi], [a, b * phi, 0.0], [b * phi, 0.0, a]]);
+            for vertex in [[0.0, a, b * phi], [a, b * phi, 0.0], [b * phi, 0.0, a]] {
+                vertices[next] = vertex;
+                next += 1;
+            }
         }
     }
     for vertex in &mut vertices {
@@ -1308,18 +1429,18 @@ fn icosahedron() -> Vec<Patch> {
         }
     }
     let adjacent = |i: usize, j: usize| norm(sub(vertices[i], vertices[j])) <= nearest * 1.01;
-    let mut faces = Vec::new();
+    let mut faces = Vec::with_capacity(20);
     for i in 0..vertices.len() {
-        let neighbors: Vec<_> = ((i + 1)..vertices.len())
-            .filter(|j| adjacent(i, *j))
-            .collect();
-        for a in 0..neighbors.len() {
-            for b in (a + 1)..neighbors.len() {
-                if adjacent(neighbors[a], neighbors[b]) {
+        for j in (i + 1)..vertices.len() {
+            if !adjacent(i, j) {
+                continue;
+            }
+            for k in (j + 1)..vertices.len() {
+                if adjacent(i, k) && adjacent(j, k) {
                     faces.push(Patch {
                         a: vertices[i],
-                        b: vertices[neighbors[a]],
-                        c: vertices[neighbors[b]],
+                        b: vertices[j],
+                        c: vertices[k],
                         depth: 0,
                     });
                 }
@@ -1419,16 +1540,16 @@ mod tests {
         );
         forest.register_terminal(0, routed).unwrap();
         forest.register_terminal(1, unrouted).unwrap();
-        let exact_bytes = 2 * std::mem::size_of::<MemberKey>()
+        forest.retire(unrouted).unwrap();
+        let exact_bytes = std::mem::size_of::<MemberKey>()
             + std::mem::size_of::<u32>()
             + std::mem::size_of::<MemberKey>();
         let view = FilteredLiveView::current(&forest, &[1], LiveViewLimits::new(2, 1, exact_bytes))
             .unwrap();
         assert_eq!(view.keys(), &[routed]);
-        assert_eq!(
+        assert!(
             FilteredLiveView::current(&forest, &[1], LiveViewLimits::new(1, 1, exact_bytes),)
-                .unwrap_err(),
-            JointError::LiveViewMemberLimit
+                .is_ok()
         );
         assert_eq!(
             FilteredLiveView::current(&forest, &[1], LiveViewLimits::new(2, 0, exact_bytes),)
@@ -1449,8 +1570,6 @@ mod tests {
             JointStagingLimits::from_joint_config(joint_config),
         )
         .unwrap();
-        let all = plan_joint_balls(&forest, config(-10.0)).unwrap();
-        assert!(all.balls.iter().any(|ball| ball.center_mm[0].get() == 9.0));
         assert!(filtered
             .balls
             .iter()
@@ -1834,6 +1953,67 @@ mod tests {
     }
 
     #[test]
+    fn spatial_components_follow_first_source_encounter_not_cell_or_representative_order() {
+        let node = |x| Node {
+            point: [x, 0.0, 1.0],
+            radius: 0.5,
+            embedded: false,
+            outward: [0.0, 0.0, 1.0],
+            member: 0,
+        };
+        let nodes = vec![node(10.0), node(-10.0), node(10.05), node(-9.95)];
+        assert_eq!(
+            cluster_nodes(
+                &nodes,
+                JointStagingLimits::new(4, 4, 2, 2, 2, 4, 100_000),
+                0,
+            )
+            .unwrap(),
+            vec![vec![0, 2], vec![1, 3]]
+        );
+    }
+
+    #[test]
+    fn staging_bills_cloned_other_kind_string_before_member_allocation() {
+        let mut forest = Forest::new();
+        add_member(
+            &mut forest,
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            0.2,
+            0.2,
+            MemberKind::Other("abc".into()),
+            Owner::Contact(99),
+            None,
+        );
+        let view = FilteredLiveView::current(
+            &forest,
+            &[],
+            LiveViewLimits::new(1, 1, std::mem::size_of::<MemberKey>()),
+        )
+        .unwrap();
+        let config = config(0.0);
+        let exact = std::mem::size_of::<LiveMember>() + 3;
+        assert!(plan_joint_balls_filtered(
+            &forest,
+            &view,
+            config,
+            JointStagingLimits::new(1, 1, 1, 1, 1, 1, exact),
+        )
+        .is_ok());
+        assert_eq!(
+            plan_joint_balls_filtered(
+                &forest,
+                &view,
+                config,
+                JointStagingLimits::new(1, 1, 1, 1, 1, 1, exact - 1),
+            )
+            .unwrap_err(),
+            JointError::ScratchLimit
+        );
+    }
+
+    #[test]
     fn retire_reuse_keeps_python_birth_order_for_center_owner_and_ball_order() {
         let mut forest = Forest::new();
         let first = add_member(
@@ -2059,14 +2239,49 @@ mod tests {
         assert!(!certify_sphere(
             &easy,
             &[0],
+            std::mem::size_of::<usize>(),
             std::slice::from_ref(&live),
-            config(-100.0).with_limits(22, 19)
+            config(-100.0).with_limits(22, 19),
+            CertificateScratch {
+                max_bytes: usize::MAX,
+            },
         ));
+        let exact_certificate_peak = std::mem::size_of::<usize>()
+            + 20 * (2 * std::mem::size_of::<Patch>() + 6 * std::mem::size_of::<f64>());
+        let retained = 137;
+        let exact_parallel = certificate_scratch_for_parallel(
+            retained,
+            retained + 2 * exact_certificate_peak,
+            usize::MAX,
+            2,
+            16,
+        )
+        .unwrap();
+        assert_eq!(exact_parallel.max_bytes, exact_certificate_peak);
+        let cap_minus_one = certificate_scratch_for_parallel(
+            retained,
+            retained + 2 * exact_certificate_peak - 1,
+            usize::MAX,
+            2,
+            16,
+        )
+        .unwrap();
+        assert_eq!(cap_minus_one.max_bytes, exact_certificate_peak - 1);
         assert!(certify_sphere(
             &easy,
             &[0],
+            std::mem::size_of::<usize>(),
             std::slice::from_ref(&live),
-            config(-100.0).with_limits(22, 20)
+            config(-100.0).with_limits(22, 20),
+            exact_parallel,
+        ));
+        assert!(!certify_sphere(
+            &easy,
+            &[0],
+            std::mem::size_of::<usize>(),
+            std::slice::from_ref(&live),
+            config(-100.0).with_limits(22, 20),
+            cap_minus_one,
         ));
         assert!(matches!(
             plan_joint_balls(&forest, config(-100.0).with_limits(23, 20)),

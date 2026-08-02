@@ -2425,10 +2425,9 @@ mod tests {
             embed_end: Some(EmbedEnd::Terminalward),
             carried_mm2: request.stub_snapshot.carried_mm2(),
         }));
-        wrong_owner.register_terminal(7, stub).unwrap();
         assert!(matches!(
-            TerminalCcoRequest::bind(&wrong_owner, 7, frame),
-            Err(CcoError::InvalidTerminalStub { .. })
+            wrong_owner.register_terminal(7, stub),
+            Err(ForestError::InvalidTerminalMember { terminal: 7 })
         ));
     }
 

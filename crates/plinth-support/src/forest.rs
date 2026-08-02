@@ -284,6 +284,9 @@ struct ForestState {
     children: BTreeMap<MemberKey, Vec<MemberKey>>,
     roots: BTreeSet<MemberKey>,
     terminal_of: BTreeMap<u32, MemberKey>,
+    /// Sealed member evidence for every registered terminal. Live entries are refreshed at
+    /// retirement and then remain available after the arena slot is cleared.
+    terminal_evidence: BTreeMap<u32, QuarantineRecord>,
     braces: BTreeSet<MemberKey>,
     quarantined: BTreeMap<MemberKey, QuarantineRecord>,
     dead: BTreeSet<MemberKey>,
@@ -343,6 +346,8 @@ pub enum ForestError {
     Cycle,
     #[error("terminal {terminal} is already registered to {existing:?}")]
     DuplicateTerminal { terminal: u32, existing: MemberKey },
+    #[error("terminal {terminal} must register its exact live contact stub")]
+    InvalidTerminalMember { terminal: u32 },
     #[error("only the innermost checkpoint may be committed or rolled back")]
     CheckpointOrder,
     #[error("a quarantined member must have no live tree children")]
@@ -539,6 +544,10 @@ impl Forest {
             .filter_map(|contact| self.terminal_ledger(contact))
     }
 
+    pub(crate) fn terminal_ledger_evidence(&self, terminal: u32) -> Option<&QuarantineRecord> {
+        self.state.terminal_evidence.get(&terminal)
+    }
+
     /// Read-only Q-REAL/regrade evidence for a terminal, never a live member.
     #[must_use]
     pub fn terminal_quarantine(&self, terminal: u32) -> Option<&QuarantineRecord> {
@@ -603,13 +612,20 @@ impl Forest {
                 existing: *existing,
             });
         }
+        let member = self.member(key).expect("checked active");
+        if member.kind() != &MemberKind::Stub || member.owner() != &Owner::Contact(terminal) {
+            return Err(ForestError::InvalidTerminalMember { terminal });
+        }
+        let evidence = QuarantineRecord::from_member(key, member, vec![terminal]);
         self.state.terminal_of.insert(terminal, key);
+        self.state.terminal_evidence.insert(terminal, evidence);
         Ok(())
     }
 
     /// Removes a terminal registration when later placement deliberately
     /// replaces the contact, rather than silently overwriting its provenance.
     pub fn unregister_terminal(&mut self, terminal: u32) -> Option<MemberKey> {
+        self.state.terminal_evidence.remove(&terminal);
         self.state.terminal_of.remove(&terminal)
     }
 
@@ -664,6 +680,21 @@ impl Forest {
     /// the old key is permanently stale, even if its slot is reused.
     pub fn retire(&mut self, key: MemberKey) -> Result<(), ForestError> {
         self.require_active(key)?;
+        let terminal_contacts: Vec<_> = self
+            .state
+            .terminal_of
+            .iter()
+            .filter_map(|(terminal, member_key)| (*member_key == key).then_some(*terminal))
+            .collect();
+        if !terminal_contacts.is_empty() {
+            let member = self.member(key).expect("checked active").clone();
+            for terminal in terminal_contacts {
+                self.state.terminal_evidence.insert(
+                    terminal,
+                    QuarantineRecord::from_member(key, &member, vec![terminal]),
+                );
+            }
+        }
         let children = self.children_of(key);
         for child in children {
             self.set_parent(child, None)?;
@@ -887,13 +918,34 @@ impl Forest {
                 }
             }
         }
-        for key in self.state.terminal_of.values() {
+        if self.state.terminal_of.len() != self.state.terminal_evidence.len() {
+            return Err(ForestError::Invariant(
+                "terminal registry and sealed evidence differ in membership",
+            ));
+        }
+        for (terminal, key) in &self.state.terminal_of {
             if self.member(*key).is_none()
                 && !self.state.dead.contains(key)
                 && !self.state.quarantined.contains_key(key)
             {
                 return Err(ForestError::Invariant(
                     "terminal registry references inactive member",
+                ));
+            }
+            let evidence =
+                self.state
+                    .terminal_evidence
+                    .get(terminal)
+                    .ok_or(ForestError::Invariant(
+                        "terminal registry lacks sealed evidence",
+                    ))?;
+            if evidence.original_key != *key
+                || evidence.kind != MemberKind::Stub
+                || evidence.owner != Owner::Contact(*terminal)
+                || evidence.terminal_contacts.as_slice() != [*terminal]
+            {
+                return Err(ForestError::Invariant(
+                    "terminal sealed evidence does not match its exact contact stub",
                 ));
             }
         }
@@ -950,6 +1002,12 @@ impl Forest {
         for (contact, key) in &self.state.terminal_of {
             digest.u32(*contact);
             digest.key(*key);
+            digest.quarantine(
+                self.state
+                    .terminal_evidence
+                    .get(contact)
+                    .expect("validated terminal evidence"),
+            );
         }
         digest.tag(5);
         digest.len(self.state.quarantined.len());
@@ -1134,7 +1192,9 @@ mod tests {
     fn tree_terminal_brace_and_postorder_are_deterministic() {
         let mut forest = Forest::new();
         let root = forest.add_member(member(MemberKind::Trunk));
-        let child = forest.add_member(member(MemberKind::Shoot));
+        let mut terminal = member(MemberKind::Stub);
+        terminal.owner = Owner::Contact(7);
+        let child = forest.add_member(terminal);
         let brace = forest.add_brace(member(MemberKind::Brace));
         forest.set_parent(child, Some(root)).unwrap();
         forest.register_terminal(7, child).unwrap();
@@ -1143,6 +1203,35 @@ mod tests {
         assert_eq!(forest.terminal(7), Some(child));
         assert_eq!(forest.postorder().unwrap(), vec![child, root]);
         forest.validate().unwrap();
+    }
+
+    #[test]
+    fn terminal_registration_requires_exact_contact_stub_and_seals_retirement_evidence() {
+        let mut forest = Forest::new();
+        let mut wrong_kind = member(MemberKind::Shoot);
+        wrong_kind.owner = Owner::Contact(5);
+        let wrong_kind = forest.add_member(wrong_kind);
+        assert_eq!(
+            forest.register_terminal(5, wrong_kind),
+            Err(ForestError::InvalidTerminalMember { terminal: 5 })
+        );
+        let mut terminal = member(MemberKind::Stub);
+        terminal.owner = Owner::Contact(6);
+        let terminal = forest.add_member(terminal);
+        forest.register_terminal(6, terminal).unwrap();
+        forest
+            .set_endpoints(
+                terminal,
+                [finite(2.0), finite(0.0), finite(0.0)],
+                [finite(3.0), finite(0.0), finite(0.0)],
+            )
+            .unwrap();
+        forest.retire(terminal).unwrap();
+        let evidence = forest.terminal_ledger_evidence(6).unwrap();
+        assert_eq!(evidence.original_key, terminal);
+        assert_eq!(evidence.owner, Owner::Contact(6));
+        assert_eq!(evidence.p0_mm[0], finite(2.0));
+        assert_eq!(evidence.terminal_contacts, vec![6]);
     }
 
     #[test]
@@ -1265,7 +1354,9 @@ mod tests {
     fn retirement_and_quarantine_cannot_leak_into_live_views() {
         let mut forest = Forest::new();
         let root = forest.add_member(member(MemberKind::Trunk));
-        let child = forest.add_member(member(MemberKind::Stub));
+        let mut terminal = member(MemberKind::Stub);
+        terminal.owner = Owner::Contact(4);
+        let child = forest.add_member(terminal);
         forest.set_parent(child, Some(root)).unwrap();
         forest.register_terminal(4, child).unwrap();
         forest.set_carried_mm2(child, finite(5.0)).unwrap();
@@ -1279,13 +1370,7 @@ mod tests {
         let record = forest.terminal_quarantine(4).unwrap();
         assert_eq!(record.original_key, child);
         assert_eq!(record.terminal_contacts, vec![4]);
-        assert_eq!(
-            record.owner,
-            Owner::Generated {
-                family: "test".into(),
-                ordinal: 0
-            }
-        );
+        assert_eq!(record.owner, Owner::Contact(4));
         assert_eq!(record.p0_mm, [finite(0.0); 3]);
         assert_eq!(record.r0_mm, TerminalEndRadius::new(radius(0.2)));
         assert_eq!(record.carried_mm2, finite(5.0));

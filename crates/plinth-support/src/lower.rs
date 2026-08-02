@@ -268,13 +268,18 @@ fn lower_member(
     if is_plate_root(member, config) {
         let boss_top = root_boss_top(key, member, config)?;
         if distance(member.p0_mm(), boss_top) > ZERO_LENGTH_MM {
+            let embedded_taper = is_embedded_taper(member);
             out.push(frustum(
-                SupportSegmentKind::Member,
+                if embedded_taper {
+                    SupportSegmentKind::ContactTaper
+                } else {
+                    SupportSegmentKind::Member
+                },
                 member.p0_mm(),
                 boss_top,
                 member.terminal_radius_mm().get(),
                 member.rootward_radius_mm().get(),
-                None,
+                embedded_taper.then_some(config.contact_depth_mm),
                 FrustumRingNormal::PlateZ,
             ));
         }
@@ -300,10 +305,7 @@ fn lower_member(
     if distance(member.p0_mm(), member.p1_mm()) <= ZERO_LENGTH_MM {
         return Err(LoweringError::ZeroLengthMember { member: key });
     }
-    let embedded_taper = member.embed_end().is_some()
-        && (member.terminal_radius_mm().get().get() - member.rootward_radius_mm().get().get())
-            .abs()
-            > ZERO_LENGTH_MM;
+    let embedded_taper = is_embedded_taper(member);
     out.push(frustum(
         if embedded_taper {
             SupportSegmentKind::ContactTaper
@@ -318,6 +320,12 @@ fn lower_member(
         FrustumRingNormal::SegmentAxis,
     ));
     Ok(())
+}
+
+fn is_embedded_taper(member: &Member) -> bool {
+    member.embed_end().is_some()
+        && (member.terminal_radius_mm().get().get() - member.rootward_radius_mm().get().get()).abs()
+            > ZERO_LENGTH_MM
 }
 
 fn lower_stub(
@@ -600,7 +608,7 @@ mod tests {
             3,
             None,
         ));
-        // A live registered stub explicitly listed as unrouted is excluded before joint planning.
+        // Failed contact provenance is retired before the shared filtered view is built.
         let unrouted = forest.add_member(member(
             [9.0, 0.0, 5.0],
             [9.0, 0.0, 3.0],
@@ -610,6 +618,7 @@ mod tests {
             Some(EmbedEnd::Terminalward),
         ));
         forest.register_terminal(4, unrouted).unwrap();
+        forest.retire(unrouted).unwrap();
         (
             forest,
             BuildFrame::new(f(0.0), r(5.0)),
@@ -765,6 +774,33 @@ mod tests {
                 expected_taper
             );
         }
+    }
+
+    #[test]
+    fn shortened_embedded_plate_root_keeps_python_taper_and_contact_depth_semantics() {
+        let frame = BuildFrame::new(f(0.0), r(5.0));
+        let layers = LayerPlan::new(0.0, vec![0.05; 200]).unwrap();
+        let config = LoweringConfig::current(frame, &layers, 10, 100_000).unwrap();
+        let member = member(
+            [0.0, 0.0, 3.0],
+            [0.0, 0.0, 0.0],
+            [0.4, 0.6],
+            MemberKind::Trunk,
+            12,
+            Some(EmbedEnd::Terminalward),
+        );
+        let mut forest = Forest::new();
+        let key = forest.add_member(member);
+        let mut primitives = Vec::new();
+        lower_member(key, forest.member(key).unwrap(), config, &mut primitives).unwrap();
+        assert_eq!(primitives.len(), 2);
+        assert_eq!(primitives[0].segment_kind, SupportSegmentKind::ContactTaper);
+        assert_eq!(
+            primitives[0].contact_depth_mm,
+            Some(config.contact_depth_mm)
+        );
+        assert_eq!(primitives[0].ring_normal, FrustumRingNormal::PlateZ);
+        assert_eq!(primitives[1].segment_kind, SupportSegmentKind::RootFlare);
     }
 
     #[test]
