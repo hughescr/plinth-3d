@@ -11,9 +11,12 @@
 //! travels with the candidate.
 #![forbid(unsafe_code)]
 
+mod cavity_field;
+
+pub use cavity_field::CavityField;
+
 use fast_surface_nets::ndshape::RuntimeShape;
 use fast_surface_nets::{surface_nets, SurfaceNetsBuffer};
-use geom_kernel::{NativeSurface, NativeSurfaceConfig, NativeSurfaceMemoryEstimate};
 use plinth_core::{m0_constants, Finite, M0ConstantsError, PrinterProfile};
 use plinth_mesh::{
     build_face_topology, certify_closed_components, triage_components, validate_face_topology,
@@ -268,7 +271,8 @@ pub struct HollowResourceEstimate {
     edt_peak_bytes: usize,
     label_peak_bytes: usize,
     surface_peak_bytes: usize,
-    native_kernel_peak_bytes: usize,
+    rasterization_peak_bytes: usize,
+    retained_cavity_field_bytes: usize,
     output_upper_bound_bytes: usize,
     peak_bytes: usize,
 }
@@ -303,8 +307,12 @@ impl HollowResourceEstimate {
         self.surface_peak_bytes
     }
     #[must_use]
-    pub const fn native_kernel_peak_bytes(self) -> usize {
-        self.native_kernel_peak_bytes
+    pub const fn rasterization_peak_bytes(self) -> usize {
+        self.rasterization_peak_bytes
+    }
+    #[must_use]
+    pub const fn retained_cavity_field_bytes(self) -> usize {
+        self.retained_cavity_field_bytes
     }
     #[must_use]
     pub const fn output_upper_bound_bytes(self) -> usize {
@@ -324,6 +332,7 @@ pub struct CavityEvidence {
     cavity_volume_mm3: Finite,
     source_volume_mm3: Finite,
     resources: HollowResourceEstimate,
+    resource_cap_bytes: usize,
 }
 
 impl CavityEvidence {
@@ -351,6 +360,11 @@ impl CavityEvidence {
     pub const fn resources(self) -> HollowResourceEstimate {
         self.resources
     }
+
+    #[must_use]
+    pub const fn resource_cap_bytes(self) -> usize {
+        self.resource_cap_bytes
+    }
 }
 
 /// The H0 hand-off to H1. It owns only the closed shell mesh and its one
@@ -359,6 +373,7 @@ impl CavityEvidence {
 pub struct ShellCandidate {
     mesh: Mesh,
     cavity: CavityEvidence,
+    cavity_field: CavityField,
 }
 
 impl ShellCandidate {
@@ -372,9 +387,16 @@ impl ShellCandidate {
         &self.cavity
     }
 
+    /// Opaque H0-selected voxel membership retained for H1 planning. It is
+    /// not reconstructed from the shell and admits no raw mutable buffer.
     #[must_use]
-    pub fn into_parts(self) -> (Mesh, CavityEvidence) {
-        (self.mesh, self.cavity)
+    pub const fn cavity_field(&self) -> &CavityField {
+        &self.cavity_field
+    }
+
+    #[must_use]
+    pub fn into_parts(self) -> (Mesh, CavityEvidence, CavityField) {
+        (self.mesh, self.cavity, self.cavity_field)
     }
 }
 
@@ -406,14 +428,8 @@ pub fn create_shell_with_resources(
     validate_printable_bounds(&source)?;
     let source_volume_mm3 = source_volume_mm3(&source)?;
     let spec = grid_spec(&source, settings.voxel_pitch_mm.get())?;
-    let native = NativeSurface::estimate_index_memory_from_indexed(
-        source.verts(),
-        source.tris(),
-        spec.pitch,
-    )
-    .map_err(|_| HollowError::Kernel)?;
-    let resources = resource_estimate(&source, spec, native, limits)?;
-    let grid = voxelize_filled(&source, spec, native, resources.query_batch_points)?;
+    let resources = resource_estimate(&source, spec, limits)?;
+    let grid = voxelize_filled(&source, spec)?;
     let VoxelGrid {
         origin: grid_origin,
         pitch: grid_pitch,
@@ -452,6 +468,7 @@ pub fn create_shell_with_resources(
         return Err(HollowError::IneligibleSavings);
     }
 
+    let cavity_field = CavityField::from_selected_mask(&main, grid_origin, grid_pitch)?;
     let inner = marching_cavity(&main, grid_origin, grid_pitch)?;
     drop(main);
     let shell = ManifoldBackend
@@ -471,8 +488,13 @@ pub fn create_shell_with_resources(
         cavity_volume_mm3: finite(cavity_volume_mm3)?,
         source_volume_mm3: finite(source_volume_mm3)?,
         resources,
+        resource_cap_bytes: limits.max_peak_bytes,
     };
-    Ok(ShellCandidate { mesh, cavity })
+    Ok(ShellCandidate {
+        mesh,
+        cavity,
+        cavity_field,
+    })
 }
 
 const PRINTABLE_MAX_EXTENT_MM: f64 = 300.0;
@@ -746,7 +768,6 @@ fn label_phase_memory(voxel_count: usize) -> Result<LabelMemoryEstimate, HollowE
 fn resource_estimate(
     mesh: &Mesh,
     spec: GridSpec,
-    native: NativeSurfaceMemoryEstimate,
     limits: HollowResourceLimits,
 ) -> Result<HollowResourceEstimate, HollowError> {
     let query_batch_points = spec
@@ -755,8 +776,15 @@ fn resource_estimate(
         .max(1);
     let grid_coordinate_bytes = checked_scale(query_batch_points, std::mem::size_of::<[f64; 3]>())?;
     let occupancy_bytes = checked_scale(spec.count, std::mem::size_of::<bool>())?;
-    let query_buffers = checked_scale(query_batch_points, QUERY_BYTES_PER_POINT)?;
-    let query_peak = checked_sum(&[native.retained_bytes(), occupancy_bytes, query_buffers])?;
+    // `voxelize_subdivide` emits its leaf vertices directly into the grid;
+    // it retains no tessellated mesh. Hole filling keeps the surface grid, a
+    // 6-connected exterior mask, and a worst-case frontier containing every
+    // voxel. The fixed-depth recursive splitter is stack-only.
+    let rasterization_peak_bytes = checked_sum(&[
+        occupancy_bytes,
+        occupancy_bytes,
+        checked_scale(spec.count, std::mem::size_of::<usize>())?,
+    ])?;
 
     // Source occupancy + EDT input clone + squared and final f64 distance
     // arrays, plus a conservative line-transform scratch upper bound.
@@ -772,7 +800,13 @@ fn resource_estimate(
 
     let label_memory = label_phase_memory(spec.count)?;
     debug_assert!(label_memory.conservative_peak_bytes >= label_memory.requested_live_bytes);
-    let label_peak_bytes = label_memory.conservative_peak_bytes;
+    let retained_cavity_field_bytes = cavity_field::packed_bytes_for_voxels(spec.count)?;
+    // Packing the selected mask occurs while labels and the selected bool mask
+    // are still live. The compact field remains in the returned candidate.
+    let label_peak_bytes = checked_sum(&[
+        label_memory.conservative_peak_bytes,
+        retained_cavity_field_bytes,
+    ])?;
 
     // Surface Nets worst case: one surface vertex per cell, up to three quads
     // (six triangles) per vertex, all library scratch/output buffers, the f32
@@ -795,13 +829,15 @@ fn resource_estimate(
     let output_upper_bound_bytes = checked_sum(&[source_mesh_bytes, inner_mesh_upper])?;
     // Rust source/inner meshes, FFI conversion, native Boolean result, and
     // returned Mesh can coexist at the boundary.
-    let boolean_peak = checked_scale(output_upper_bound_bytes, 3)?;
+    let boolean_peak = checked_sum(&[
+        checked_scale(output_upper_bound_bytes, 3)?,
+        retained_cavity_field_bytes,
+    ])?;
     let peak_bytes = [
-        native.peak_bytes(),
-        query_peak,
+        rasterization_peak_bytes,
         edt_peak_bytes,
         label_peak_bytes,
-        surface_peak_bytes,
+        checked_sum(&[surface_peak_bytes, retained_cavity_field_bytes])?,
         boolean_peak,
     ]
     .into_iter()
@@ -815,7 +851,8 @@ fn resource_estimate(
         edt_peak_bytes,
         label_peak_bytes,
         surface_peak_bytes,
-        native_kernel_peak_bytes: native.peak_bytes(),
+        rasterization_peak_bytes,
+        retained_cavity_field_bytes,
         output_upper_bound_bytes,
         peak_bytes,
     };
@@ -832,46 +869,32 @@ fn resource_estimate(
 fn voxelize_filled(
     mesh: &Mesh,
     spec: GridSpec,
-    native: NativeSurfaceMemoryEstimate,
-    query_batch_points: usize,
 ) -> Result<VoxelGrid, HollowError> {
-    let surface = NativeSurface::from_indexed(
-        mesh.verts(),
-        mesh.tris(),
-        NativeSurfaceConfig {
-            grid_pitch_mm: spec.pitch,
-            max_grid_bytes: native.max_axis_grid_bytes(),
-        },
-    )
-    .map_err(|_| HollowError::Kernel)?;
-    let boundary_radius = spec.pitch / 2.0_f64.sqrt();
-    let mut occupancy = Vec::with_capacity(spec.count);
-    let plane = spec.dims[0]
-        .checked_mul(spec.dims[1])
-        .ok_or(HollowError::VoxelGridTooLarge)?;
-    for start in (0..spec.count).step_by(query_batch_points) {
-        let end = start.saturating_add(query_batch_points).min(spec.count);
-        let mut points = Vec::with_capacity(end - start);
-        for flat in start..end {
-            let z = flat / plane;
-            let within = flat % plane;
-            let y = within / spec.dims[0];
-            let x = within % spec.dims[0];
-            points.push([
-                spec.origin[0] + x as f64 * spec.pitch,
-                spec.origin[1] + y as f64 * spec.pitch,
-                spec.origin[2] + z as f64 * spec.pitch,
-            ]);
-        }
-        let inside = surface.inside(&points);
-        let (distances, _triangles) = surface.query(&points, boundary_radius);
-        occupancy.extend(
-            inside
-                .into_iter()
-                .zip(distances)
-                .map(|(inside, distance)| inside || distance <= boundary_radius),
-        );
+    // Frozen source: `trimesh.voxelized(pitch).fill()`. Its default
+    // `subdivide` voxelizer recursively quarters each triangle until every
+    // edge is at most pitch/2, rounds each resulting vertex to a grid point,
+    // then `binary_fill_holes` fills the 6-connected exterior complement.
+    // Point-in-mesh and closest-surface tests are a different voxelizer: their
+    // boundary bands are not the source field and can put an H1 candidate
+    // outside the Boolean cavity.
+    let mut occupancy = vec![false; spec.count];
+    for triangle in mesh.tris() {
+        let [a, b, c] = *triangle;
+        let a = *mesh
+            .verts()
+            .get(usize::try_from(a).map_err(|_| HollowError::VoxelGridTooLarge)?)
+            .ok_or(HollowError::VoxelGridTooLarge)?;
+        let b = *mesh
+            .verts()
+            .get(usize::try_from(b).map_err(|_| HollowError::VoxelGridTooLarge)?)
+            .ok_or(HollowError::VoxelGridTooLarge)?;
+        let c = *mesh
+            .verts()
+            .get(usize::try_from(c).map_err(|_| HollowError::VoxelGridTooLarge)?)
+            .ok_or(HollowError::VoxelGridTooLarge)?;
+        rasterize_subdivided_triangle(a, b, c, spec, &mut occupancy, 0)?;
     }
+    fill_voxel_holes(&mut occupancy, spec.dims)?;
     let material = Array3::from_shape_vec((spec.dims[2], spec.dims[1], spec.dims[0]), occupancy)
         .map_err(|_| HollowError::VoxelGridTooLarge)?;
     Ok(VoxelGrid {
@@ -879,6 +902,161 @@ fn voxelize_filled(
         pitch: spec.pitch,
         material,
     })
+}
+
+fn rasterize_subdivided_triangle(
+    a: [f64; 3],
+    b: [f64; 3],
+    c: [f64; 3],
+    spec: GridSpec,
+    occupancy: &mut [bool],
+    iteration: u8,
+) -> Result<(), HollowError> {
+    let max_edge = spec.pitch / 2.0;
+    let edge_too_long = |left: [f64; 3], right: [f64; 3]| {
+        left.iter()
+            .zip(right)
+            .map(|(left, right)| (left - right).powi(2))
+            .sum::<f64>()
+            .sqrt()
+            > max_edge
+    };
+    if !edge_too_long(a, b) && !edge_too_long(b, c) && !edge_too_long(c, a) {
+        mark_voxel_vertex(a, spec, occupancy)?;
+        mark_voxel_vertex(b, spec, occupancy)?;
+        return mark_voxel_vertex(c, spec, occupancy);
+    }
+    if iteration >= 10 {
+        // Matches trimesh.remesh.subdivide_to_size(max_iter=10).
+        return Err(HollowError::VoxelGridTooLarge);
+    }
+    let midpoint = |left: [f64; 3], right: [f64; 3]| {
+        [
+            (left[0] + right[0]) / 2.0,
+            (left[1] + right[1]) / 2.0,
+            (left[2] + right[2]) / 2.0,
+        ]
+    };
+    let ab = midpoint(a, b);
+    let bc = midpoint(b, c);
+    let ca = midpoint(c, a);
+    let next = iteration + 1;
+    rasterize_subdivided_triangle(a, ab, ca, spec, occupancy, next)?;
+    rasterize_subdivided_triangle(ab, b, bc, spec, occupancy, next)?;
+    rasterize_subdivided_triangle(ca, bc, c, spec, occupancy, next)?;
+    rasterize_subdivided_triangle(ab, bc, ca, spec, occupancy, next)
+}
+
+fn mark_voxel_vertex(
+    point: [f64; 3],
+    spec: GridSpec,
+    occupancy: &mut [bool],
+) -> Result<(), HollowError> {
+    let mut index = [0_usize; 3];
+    for axis in 0..3 {
+        let grid = round_ties_even(point[axis] / spec.pitch);
+        let origin = round_ties_even(spec.origin[axis] / spec.pitch);
+        let relative = grid - origin;
+        if !relative.is_finite()
+            || relative < 0.0
+            || relative >= spec.dims[axis] as f64
+            || relative.fract() != 0.0
+        {
+            return Err(HollowError::VoxelGridTooLarge);
+        }
+        index[axis] = relative as usize;
+    }
+    let plane = spec.dims[0]
+        .checked_mul(spec.dims[1])
+        .ok_or(HollowError::VoxelGridTooLarge)?;
+    let flat = index[0]
+        .checked_add(index[1].checked_mul(spec.dims[0]).ok_or(HollowError::VoxelGridTooLarge)?)
+        .and_then(|value| value.checked_add(index[2].checked_mul(plane)?))
+        .ok_or(HollowError::VoxelGridTooLarge)?;
+    *occupancy
+        .get_mut(flat)
+        .ok_or(HollowError::VoxelGridTooLarge)? = true;
+    Ok(())
+}
+
+fn round_ties_even(value: f64) -> f64 {
+    let lower = value.floor();
+    let fractional = value - lower;
+    if fractional < 0.5 {
+        lower
+    } else if fractional > 0.5 {
+        lower + 1.0
+    } else if lower.rem_euclid(2.0) == 0.0 {
+        lower
+    } else {
+        lower + 1.0
+    }
+}
+
+fn fill_voxel_holes(occupancy: &mut [bool], dims: [usize; 3]) -> Result<(), HollowError> {
+    let [nx, ny, nz] = dims;
+    let plane = nx.checked_mul(ny).ok_or(HollowError::VoxelGridTooLarge)?;
+    let mut exterior = vec![false; occupancy.len()];
+    let mut queue = std::collections::VecDeque::new();
+    let mark_exterior = |x: usize,
+                         y: usize,
+                         z: usize,
+                         exterior: &mut [bool],
+                         queue: &mut std::collections::VecDeque<usize>| {
+        let flat = x + y * nx + z * plane;
+        if !occupancy[flat] && !exterior[flat] {
+            exterior[flat] = true;
+            queue.push_back(flat);
+        }
+    };
+    for z in 0..nz {
+        for y in 0..ny {
+            mark_exterior(0, y, z, &mut exterior, &mut queue);
+            mark_exterior(nx - 1, y, z, &mut exterior, &mut queue);
+        }
+    }
+    for z in 0..nz {
+        for x in 0..nx {
+            mark_exterior(x, 0, z, &mut exterior, &mut queue);
+            mark_exterior(x, ny - 1, z, &mut exterior, &mut queue);
+        }
+    }
+    for y in 0..ny {
+        for x in 0..nx {
+            mark_exterior(x, y, 0, &mut exterior, &mut queue);
+            mark_exterior(x, y, nz - 1, &mut exterior, &mut queue);
+        }
+    }
+    while let Some(flat) = queue.pop_front() {
+        let z = flat / plane;
+        let remaining = flat % plane;
+        let y = remaining / nx;
+        let x = remaining % nx;
+        if x > 0 {
+            mark_exterior(x - 1, y, z, &mut exterior, &mut queue);
+        }
+        if x + 1 < nx {
+            mark_exterior(x + 1, y, z, &mut exterior, &mut queue);
+        }
+        if y > 0 {
+            mark_exterior(x, y - 1, z, &mut exterior, &mut queue);
+        }
+        if y + 1 < ny {
+            mark_exterior(x, y + 1, z, &mut exterior, &mut queue);
+        }
+        if z > 0 {
+            mark_exterior(x, y, z - 1, &mut exterior, &mut queue);
+        }
+        if z + 1 < nz {
+            mark_exterior(x, y, z + 1, &mut exterior, &mut queue);
+        }
+    }
+    for (filled, exterior) in occupancy.iter_mut().zip(exterior) {
+        if !exterior {
+            *filled = true;
+        }
+    }
+    Ok(())
 }
 
 fn largest_label(labels: &Array3<i32>, label_count: usize) -> Result<i32, HollowError> {
@@ -1161,17 +1339,9 @@ mod tests {
         let source = triaged.into_mesh();
         let settings = HollowSettings::from_registered_constants().expect("M0 settings");
         let spec = grid_spec(&source, settings.voxel_pitch_mm().get()).expect("grid spec");
-        let native = NativeSurface::estimate_index_memory_from_indexed(
-            source.verts(),
-            source.tris(),
-            spec.pitch,
-        )
-        .expect("native estimate");
-        let resources =
-            resource_estimate(&source, spec, native, HollowResourceLimits::production())
-                .expect("resource preflight");
-        let grid = voxelize_filled(&source, spec, native, resources.query_batch_points())
-            .expect("bounded voxelization");
+        resource_estimate(&source, spec, HollowResourceLimits::production())
+            .expect("resource preflight");
+        let grid = voxelize_filled(&source, spec).expect("bounded voxelization");
         let edt = frozen_distance_transform(&grid.material, grid.pitch).expect("EDT");
         let bulk_mm = 2.0 * edt.iter().copied().fold(0.0_f64, f64::max);
         let cavity = edt.mapv(|distance| distance > settings.wall_thickness_mm().get());
@@ -1205,7 +1375,7 @@ mod tests {
         assert_eq!(sphere.spec.origin, [-10.0, -10.0, 0.0]);
         assert!((sphere.bulk_mm - 20.6).abs() <= 0.1);
         assert_eq!(sphere.label_count, 1);
-        assert!((sphere.cavity_voxels as f64 * 0.125 / 1000.0 - 2.1).abs() <= 0.05);
+        assert_eq!(sphere.cavity_voxels, 16_563);
 
         // Record of record: make_box is the frozen no-background boundary case.
         let (box_components, box_case) =
@@ -1218,13 +1388,56 @@ mod tests {
         assert!((box_case.cavity_voxels as f64 * 0.125 / 1000.0 - 1.1).abs() <= 0.1);
 
         // Record of record: make_overhang_table.pipeline.json preserves four
-        // authored extra bodies. The fixed Rust characterization remains well
-        // below the registered 10mm eligibility threshold.
+        // authored extra bodies. Its 6.1mm source raster bulk is well below
+        // the registered 10mm eligibility threshold.
         let (table_components, table) =
             characterize(frozen_mesh("make_overhang_table.prepped.stl"));
         assert_eq!(table_components, 5);
-        assert!((table.bulk_mm - 5.0).abs() <= f64::EPSILON);
+        assert!((table.bulk_mm - 6.1).abs() <= 0.1, "{table:?}");
         assert!(table.bulk_mm < 10.0);
+    }
+
+    #[test]
+    fn frozen_voxel_rounding_and_exterior_fill_rules_are_independently_pinned() {
+        // NumPy's `round` is nearest with half-to-even, including negatives.
+        assert_eq!(round_ties_even(-2.5), -2.0);
+        assert_eq!(round_ties_even(-1.5), -2.0);
+        assert_eq!(round_ties_even(-0.5), 0.0);
+        assert_eq!(round_ties_even(0.5), 0.0);
+        assert_eq!(round_ties_even(1.5), 2.0);
+        assert_eq!(round_ties_even(2.5), 2.0);
+
+        // The complement flood uses SciPy's default face connectivity. The
+        // central empty cell is only diagonally connected to the boundary,
+        // so it is filled; a 26-connected flood would leave it empty.
+        let mut material = vec![true; 27];
+        material[0] = false;
+        material[13] = false;
+        fill_voxel_holes(&mut material, [3, 3, 3]).expect("bounded 6-neighbor fill");
+        assert!(!material[0]);
+        assert!(material[13]);
+    }
+
+    #[test]
+    fn frozen_subdivision_work_is_capped_at_ten_rounds() {
+        let spec = GridSpec {
+            origin: [0.0, 0.0, 0.0],
+            dims: [3, 3, 3],
+            pitch: 0.5,
+            count: 27,
+        };
+        let mut material = vec![false; spec.count];
+        assert!(matches!(
+            rasterize_subdivided_triangle(
+                [0.0, 0.0, 0.0],
+                [300.0, 0.0, 0.0],
+                [0.0, 300.0, 0.0],
+                spec,
+                &mut material,
+                0,
+            ),
+            Err(HollowError::VoxelGridTooLarge)
+        ));
     }
 
     #[test]
@@ -1389,7 +1602,7 @@ mod tests {
                 assert_eq!(estimate.voxel_count(), 601_usize.pow(3));
                 assert!(estimate.peak_bytes() > cap_bytes);
                 assert!(estimate.grid_coordinate_bytes() <= DEFAULT_QUERY_WORKING_BYTES);
-                assert!(estimate.native_kernel_peak_bytes() > 0);
+                assert!(estimate.rasterization_peak_bytes() > 0);
                 assert!(estimate.output_upper_bound_bytes() > 0);
             }
             other => panic!("unexpected 300mm refusal: {other}"),
@@ -1401,17 +1614,10 @@ mod tests {
             .into_mesh();
         let settings = HollowSettings::from_registered_constants().expect("M0 settings");
         let spec = grid_spec(&source, settings.voxel_pitch_mm().get()).expect("grid spec");
-        let native = NativeSurface::estimate_index_memory_from_indexed(
-            source.verts(),
-            source.tris(),
-            spec.pitch,
-        )
-        .expect("native estimate");
         let query_bytes = QUERY_BYTES_PER_POINT * 127;
         let unconstrained = resource_estimate(
             &source,
             spec,
-            native,
             HollowResourceLimits::new(usize::MAX, query_bytes).expect("unbounded test cap"),
         )
         .expect("estimate");
@@ -1420,7 +1626,6 @@ mod tests {
             resource_estimate(
                 &source,
                 spec,
-                native,
                 HollowResourceLimits::new(unconstrained.peak_bytes(), query_bytes)
                     .expect("exact cap"),
             )
@@ -1431,7 +1636,6 @@ mod tests {
             resource_estimate(
                 &source,
                 spec,
-                native,
                 HollowResourceLimits::new(unconstrained.peak_bytes() - 1, query_bytes)
                     .expect("below cap"),
             ),
