@@ -29,8 +29,9 @@ pub(super) fn build_dyadic_coverage_samples_with_high_water(
                 mesh.verts()[face[1] as usize],
                 mesh.verts()[face[2] as usize],
             ];
-            let depth = dyadic::refine_depth(max_edge_mm(cell), config.voxel_pitch_mm.get());
-            let cells = dyadic::terminal_cells(depth).map_err(map_error)?;
+            let depth =
+                dyadic::refine_depth(dyadic::max_edge_mm(cell), config.voxel_pitch_mm.get());
+            let cells = dyadic::terminal_cells(depth).map_err(map_dyadic_error)?;
             let area = triangle_area_mm2(cell) / cells as f64;
             let limits = DyadicLimits {
                 max_virtual_cells: cells,
@@ -50,7 +51,7 @@ pub(super) fn build_dyadic_coverage_samples_with_high_water(
                     area_mm2: area,
                 });
             })
-            .map_err(map_error)?;
+            .map_err(map_dyadic_error)?;
             high_water = high_water.max(seen);
         }
     }
@@ -64,7 +65,7 @@ pub(super) fn build_dyadic_coverage_samples_with_high_water(
     });
     Ok((rows, high_water))
 }
-fn map_error(error: DyadicError) -> ContactSelectionError {
+pub(super) fn map_dyadic_error(error: DyadicError) -> ContactSelectionError {
     match error {
         DyadicError::Overflow => ContactSelectionError::CoverageResourceOverflow,
         DyadicError::VirtualCellLimit { required, limit } => {

@@ -179,8 +179,11 @@ pub(crate) fn for_each_leaf(
     Ok(total.min(limits.max_working_cells))
 }
 
-/// Candidate-pool-shaped wrapper from frozen `placement.candidate_pool`.
-/// Global upper bounds are checked before any nomination payload is built.
+/// Additive, non-authoritative candidate-pool-shaped wrapper from frozen
+/// `placement.candidate_pool`. Global upper bounds are checked before any
+/// nomination payload is built. [`crate::perceive_contacts`] does not consume
+/// this payload; it remains on its accepted centroid path until a later
+/// integration explicitly adopts this wrapper.
 pub fn build_candidate_payload(
     mesh: &Mesh,
     islands: &[SupportIsland],
@@ -214,7 +217,7 @@ pub fn build_candidate_payload(
                 mesh.verts()[face[2] as usize],
             ];
             face_normal(cell).ok_or(DyadicError::DegenerateFace { face_id })?;
-            let edge = max_edge(cell);
+            let edge = max_edge_mm(cell);
             if !edge.is_finite() || edge <= 0.0 {
                 return Err(DyadicError::DegenerateFace { face_id });
             }
@@ -359,7 +362,9 @@ fn midpoint(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     ]
 }
 
-fn max_edge([a, b, c]: [[f64; 3]; 3]) -> f64 {
+/// Shared exact edge-length reduction for all dyadic planning paths.
+#[must_use]
+pub(crate) fn max_edge_mm([a, b, c]: [[f64; 3]; 3]) -> f64 {
     dist_sq(a, b).max(dist_sq(b, c)).max(dist_sq(c, a)).sqrt()
 }
 

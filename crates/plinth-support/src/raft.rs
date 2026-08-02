@@ -79,8 +79,13 @@ impl RaftPlan {
     }
 }
 
-/// Plans the current Python-compatible raft from live forest members whose
+/// Plans the frozen semantic raft foundation from live forest members whose
 /// rootward endpoint falls in the registered plate band.
+///
+/// Python pad/bridge parity is separate from layer-height- and
+/// clearance-aware per-member root bosses. A future controller or emitter
+/// must not treat deduplicated [`SupportSegmentKind::RootFlare`] primitives as
+/// a complete `member_chain_specs` certificate.
 ///
 /// Candidate roots sort by exact `(x, y)` before the frozen tolerance dedup;
 /// consequently a tolerance cluster is represented by its lexically first

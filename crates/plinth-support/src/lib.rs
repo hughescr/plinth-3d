@@ -5,7 +5,8 @@
 //!
 //! The implemented foundation is intentionally leaf-shaped: this module owns the typed scene
 //! boundary and perception; [`forest`] owns generational topology, [`dyadic`] supplies bounded
-//! candidate payloads, and [`member_sizing`] and [`raft`] retain current parity semantics.
+//! candidate payloads, [`member_sizing`] retains diagnostic parity, and [`raft`] is a frozen
+//! semantic foundation rather than an end-to-end parity claim.
 //! Model-anchor discovery and final foot validation live in [`anchor`]. A future CCO controller
 //! is the authority allowed to connect these leaves. There is no public `run` stub.
 #![forbid(unsafe_code)]
@@ -1282,11 +1283,10 @@ fn plan_dyadic_coverage(
                 mesh.verts()[triangle[1] as usize],
                 mesh.verts()[triangle[2] as usize],
             ];
-            let max_edge = max_edge_mm(cell);
-            let depth = dyadic_refine_depth(max_edge, config.voxel_pitch_mm.get());
-            let terminal_cells = 4_usize
-                .checked_pow(depth)
-                .ok_or(ContactSelectionError::CoverageResourceOverflow)?;
+            let max_edge = dyadic::max_edge_mm(cell);
+            let depth = dyadic::refine_depth(max_edge, config.voxel_pitch_mm.get());
+            let terminal_cells =
+                dyadic::terminal_cells(depth).map_err(coverage::map_dyadic_error)?;
             total_cells = total_cells
                 .checked_add(terminal_cells)
                 .ok_or(ContactSelectionError::CoverageResourceOverflow)?;
@@ -1444,13 +1444,6 @@ fn coverage_validation_peak_bytes(
         .ok_or(ContactSelectionError::CoverageResourceOverflow)
 }
 
-/// Frozen `placement._refine_depths` scalar rule, including its one-ULP
-/// boundary correction.  The builder applies this same generic rule to every
-/// source face before allocating any terminal cells.
-fn dyadic_refine_depth(max_edge_mm: f64, cell_edge_limit_mm: f64) -> u32 {
-    dyadic::refine_depth(max_edge_mm, cell_edge_limit_mm)
-}
-
 fn failing_coverage_samples(
     samples: &[CoverageSample],
     contacts: &[SelectedContact],
@@ -1592,13 +1585,6 @@ fn minimum_distance_sq(contacts: &[SelectedContact], point: [f64; 3]) -> f64 {
         .map(|contact| squared_distance(contact.point_mm, point))
         .min_by(f64::total_cmp)
         .unwrap_or(f64::INFINITY)
-}
-
-fn max_edge_mm([a, b, c]: [[f64; 3]; 3]) -> f64 {
-    squared_distance(a, b)
-        .max(squared_distance(b, c))
-        .max(squared_distance(c, a))
-        .sqrt()
 }
 
 fn triangle_area_mm2([a, b, c]: [[f64; 3]; 3]) -> f64 {
