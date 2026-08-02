@@ -140,10 +140,16 @@ pub struct SpecializedPhysicalContact {
     contact_id: u64,
     position_mm: [f64; 3],
     normal: [f64; 3],
-    regular_candidate_id: Option<u64>,
-    regular_owner_island_id: Option<u32>,
+    primary_regular: Option<PrimaryRegularIdentity>,
     regular_routes: Vec<RegularContactRoute>,
     demands: Vec<SpecializedDemand>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PrimaryRegularIdentity {
+    route: RegularContactRoute,
+    position_mm: [f64; 3],
+    normal: [f64; 3],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -172,6 +178,10 @@ impl SpecializedPhysicalContact {
         &self.regular_routes
     }
     #[must_use]
+    pub const fn primary_regular(&self) -> Option<PrimaryRegularIdentity> {
+        self.primary_regular
+    }
+    #[must_use]
     pub const fn is_shared_regular(&self) -> bool {
         !self.regular_routes.is_empty() && !self.demands.is_empty()
     }
@@ -193,6 +203,21 @@ impl RegularContactRoute {
     #[must_use]
     pub const fn component_id(self) -> u32 {
         self.component_id
+    }
+}
+
+impl PrimaryRegularIdentity {
+    #[must_use]
+    pub const fn route(self) -> RegularContactRoute {
+        self.route
+    }
+    #[must_use]
+    pub const fn position_mm(self) -> [f64; 3] {
+        self.position_mm
+    }
+    #[must_use]
+    pub const fn normal(self) -> [f64; 3] {
+        self.normal
     }
 }
 
@@ -291,8 +316,17 @@ impl SpecializedContactPlan {
             hash.u64(contact.contact_id);
             hash.point3(contact.position_mm);
             hash.point3(contact.normal);
-            hash.u64(contact.regular_candidate_id.unwrap_or(u64::MAX));
-            hash.u32(contact.regular_owner_island_id.unwrap_or(u32::MAX));
+            if let Some(primary) = contact.primary_regular {
+                hash.u8(1);
+                hash.u64(primary.route.candidate_id);
+                hash.u32(primary.route.owner_island_id);
+                hash.u32(primary.route.coverage_face_id);
+                hash.u32(primary.route.component_id);
+                hash.point3(primary.position_mm);
+                hash.point3(primary.normal);
+            } else {
+                hash.u8(0);
+            }
             for route in &contact.regular_routes {
                 hash.u64(route.candidate_id);
                 hash.u32(route.owner_island_id);
@@ -394,6 +428,8 @@ pub enum SpecializedError {
     Surface(String),
     #[error("regular contact evidence is stale or does not belong to the generic plan")]
     StaleRegularContacts,
+    #[error("specialized contact primary regular identity is inconsistent")]
+    PrimaryRegularIdentityMismatch,
     #[error("specialized contact authority is stale or belongs to another input")]
     StaleAuthority,
     #[error("specialized projection returned an invalid face")]
@@ -693,14 +729,7 @@ pub fn prepare_specialized_contacts(
                 contact_id,
                 position_mm: contact.position_mm,
                 normal: contact.normal,
-                regular_candidate_id: contact
-                    .regular_routes
-                    .first()
-                    .map(|route| route.candidate_id),
-                regular_owner_island_id: contact
-                    .regular_routes
-                    .first()
-                    .map(|route| route.owner_island_id),
+                primary_regular: contact.primary_regular,
                 regular_routes: contact.regular_routes,
                 demands: contact.demands,
             })
@@ -879,21 +908,28 @@ fn add_synthetic_islands(
 struct WorkingContact {
     position_mm: [f64; 3],
     normal: [f64; 3],
+    primary_regular: Option<PrimaryRegularIdentity>,
     regular_routes: Vec<RegularContactRoute>,
     demands: Vec<SpecializedDemand>,
 }
 
 impl WorkingContact {
     fn regular(contact: &SelectedContact, components: &[u32]) -> Self {
+        let route = RegularContactRoute {
+            candidate_id: contact.candidate_id.0,
+            owner_island_id: contact.island_id,
+            coverage_face_id: contact.served_face_id,
+            component_id: components[contact.served_face_id as usize],
+        };
         Self {
             position_mm: contact.point_mm,
             normal: contact.normal,
-            regular_routes: vec![RegularContactRoute {
-                candidate_id: contact.candidate_id.0,
-                owner_island_id: contact.island_id,
-                coverage_face_id: contact.served_face_id,
-                component_id: components[contact.served_face_id as usize],
-            }],
+            primary_regular: Some(PrimaryRegularIdentity {
+                route,
+                position_mm: contact.point_mm,
+                normal: contact.normal,
+            }),
+            regular_routes: vec![route],
             demands: Vec::new(),
         }
     }
@@ -901,6 +937,7 @@ impl WorkingContact {
         Self {
             position_mm: demand.nominated_position_mm,
             normal: demand.nominated_normal,
+            primary_regular: None,
             regular_routes: Vec::new(),
             demands: vec![demand],
         }
@@ -1210,6 +1247,9 @@ fn attach_exact_mixed_contacts(
                     .map(demand_representative_key)
                     .min_by(compare_representative_keys)
                     .expect("specialized class carries a demand");
+                let primary_regular = contacts[regular_index]
+                    .primary_regular
+                    .ok_or(SpecializedError::PrimaryRegularIdentityMismatch)?;
                 chosen = Some(MergeProposal {
                     left,
                     right,
@@ -1217,6 +1257,7 @@ fn attach_exact_mixed_contacts(
                     representative_position_mm: representative.position_mm,
                     representative_face_id: representative.face_id,
                     representative_normal: representative.normal,
+                    primary_regular: Some(primary_regular),
                     position_mm: regular_position,
                     normal: contacts[regular_index].normal,
                 });
@@ -1439,6 +1480,7 @@ struct MergeProposal {
     representative_position_mm: [f64; 3],
     representative_face_id: u32,
     representative_normal: [f64; 3],
+    primary_regular: Option<PrimaryRegularIdentity>,
     position_mm: [f64; 3],
     normal: [f64; 3],
 }
@@ -2499,6 +2541,7 @@ fn gather_pair_proposals(
     }
     *descriptor_operations = required_work;
     let mut append = |representative: RepresentativeKey,
+                      primary_regular: Option<PrimaryRegularIdentity>,
                       position_mm: [f64; 3],
                       normal: [f64; 3]|
      -> Result<(), SpecializedError> {
@@ -2531,6 +2574,7 @@ fn gather_pair_proposals(
             representative_position_mm: representative.position_mm,
             representative_face_id: representative.face_id,
             representative_normal: representative.normal,
+            primary_regular,
             position_mm,
             normal,
         });
@@ -2555,11 +2599,19 @@ fn gather_pair_proposals(
         } else if shared_regular.1 {
             right
         } else {
-            append(next, next.position_mm, next.normal)?;
+            append(next, None, next.position_mm, next.normal)?;
             last = Some(next);
             continue;
         };
-        append(next, physical.position_mm, physical.normal)?;
+        let primary_regular = physical
+            .primary_regular
+            .ok_or(SpecializedError::PrimaryRegularIdentityMismatch)?;
+        append(
+            next,
+            Some(primary_regular),
+            physical.position_mm,
+            physical.normal,
+        )?;
         last = Some(next);
     }
     Ok(())
@@ -2680,8 +2732,13 @@ fn commit_merge(
     telemetry.deep_clone_count = telemetry.deep_clone_count.saturating_add(1);
     telemetry.max_commit_bytes = telemetry.max_commit_bytes.max(required);
     Ok(WorkingContact {
-        position_mm: proposal.position_mm,
-        normal: proposal.normal,
+        position_mm: proposal
+            .primary_regular
+            .map_or(proposal.position_mm, |primary| primary.position_mm),
+        normal: proposal
+            .primary_regular
+            .map_or(proposal.normal, |primary| primary.normal),
+        primary_regular: proposal.primary_regular,
         regular_routes: routes,
         demands,
     })
@@ -2695,6 +2752,14 @@ fn canonicalize_and_validate(
 ) -> Result<(), SpecializedError> {
     contacts.sort_by(compare_contacts);
     for contact in contacts.iter_mut() {
+        match contact.primary_regular {
+            Some(primary)
+                if contact.regular_routes.contains(&primary.route)
+                    && contact.position_mm == primary.position_mm
+                    && contact.normal == primary.normal => {}
+            None if contact.regular_routes.is_empty() => {}
+            _ => return Err(SpecializedError::PrimaryRegularIdentityMismatch),
+        }
         contact.demands.sort_by(compare_demands);
         for (demand_index, demand) in contact.demands.iter().enumerate() {
             if !satisfies(contact.position_mm, demand, layers, attach_reach) {
@@ -2815,7 +2880,6 @@ fn compare_demands(left: &SpecializedDemand, right: &SpecializedDemand) -> Order
         .cmp(&right.coverage_component_id)
         .then_with(|| compare_point3(left.nominated_position_mm, right.nominated_position_mm))
         .then_with(|| left.coverage_face_id.cmp(&right.coverage_face_id))
-        .then_with(|| compare_point3(left.nominated_normal, right.nominated_normal))
         .then_with(|| left.owner_island_id.cmp(&right.owner_island_id))
         .then_with(|| (left.kind as u8).cmp(&(right.kind as u8)))
         .then_with(|| compare_points3(&left.region_points_mm, &right.region_points_mm))
@@ -2857,9 +2921,26 @@ fn compare_points2(left: &[[f64; 2]], right: &[[f64; 2]]) -> Ordering {
 
 fn compare_contacts(left: &WorkingContact, right: &WorkingContact) -> Ordering {
     compare_point3(left.position_mm, right.position_mm)
+        .then_with(|| compare_primary_regular(left.primary_regular, right.primary_regular))
         .then_with(|| left.regular_routes.cmp(&right.regular_routes))
         .then_with(|| compare_point3(left.normal, right.normal))
         .then_with(|| compare_demand_slices(&left.demands, &right.demands))
+}
+
+fn compare_primary_regular(
+    left: Option<PrimaryRegularIdentity>,
+    right: Option<PrimaryRegularIdentity>,
+) -> Ordering {
+    match (left, right) {
+        (None, None) => Ordering::Equal,
+        (None, Some(_)) => Ordering::Less,
+        (Some(_), None) => Ordering::Greater,
+        (Some(left), Some(right)) => left
+            .route
+            .cmp(&right.route)
+            .then_with(|| compare_point3(left.position_mm, right.position_mm))
+            .then_with(|| compare_point3(left.normal, right.normal)),
+    }
 }
 
 fn compare_demand_slices(left: &[SpecializedDemand], right: &[SpecializedDemand]) -> Ordering {
@@ -3055,6 +3136,25 @@ mod tests {
         }
     }
 
+    fn test_regular_contact(
+        position_mm: [f64; 3],
+        normal: [f64; 3],
+        route: RegularContactRoute,
+        demands: Vec<SpecializedDemand>,
+    ) -> WorkingContact {
+        WorkingContact {
+            position_mm,
+            normal,
+            primary_regular: Some(PrimaryRegularIdentity {
+                route,
+                position_mm,
+                normal,
+            }),
+            regular_routes: vec![route],
+            demands,
+        }
+    }
+
     #[test]
     fn exact_near_and_cross_face_demands_emit_every_canonical_representative() {
         let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
@@ -3087,17 +3187,17 @@ mod tests {
         let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
         let demand = minimum_demand(0, 2, 7, [1.0, 2.0, 0.1]);
         let contacts = vec![
-            WorkingContact {
-                position_mm: [1.0, 2.0, 0.1],
-                normal: [0.0, 0.0, -1.0],
-                regular_routes: vec![RegularContactRoute {
+            test_regular_contact(
+                [1.0, 2.0, 0.1],
+                [0.0, 0.0, -1.0],
+                RegularContactRoute {
                     candidate_id: 44,
                     owner_island_id: 0,
                     coverage_face_id: 2,
                     component_id: 7,
-                }],
-                demands: Vec::new(),
-            },
+                },
+                Vec::new(),
+            ),
             WorkingContact::specialized(demand),
         ];
         let proposals = test_pair_proposals(&contacts, &layers, 0.2, 2.5);
@@ -3310,6 +3410,36 @@ mod tests {
     }
 
     #[test]
+    fn candidate_normals_enumerate_seats_but_do_not_split_one_logical_demand() {
+        let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
+        let position = [1.0, 2.0, 0.1];
+        let mut first = minimum_demand(0, 10, 7, position);
+        first.nominated_normal = [-1.0, 0.0, 0.0];
+        let mut second = first.clone();
+        second.nominated_normal = [1.0, 0.0, 0.0];
+        assert_eq!(compare_demands(&first, &second), Ordering::Equal);
+
+        let contacts = vec![
+            WorkingContact::specialized(first),
+            WorkingContact::specialized(second),
+        ];
+        let proposals = test_pair_proposals(&contacts, &layers, 0.2, 2.5);
+        assert_eq!(proposals.len(), 2);
+        assert_eq!(proposals[0].representative_normal, [-1.0, 0.0, 0.0]);
+        assert_eq!(proposals[1].representative_normal, [1.0, 0.0, 0.0]);
+
+        let merged = commit_merge(
+            &proposals[0],
+            &contacts,
+            usize::MAX,
+            &mut MergeAllocationTelemetry::default(),
+        )
+        .unwrap();
+        assert_eq!(merged.demands.len(), 1);
+        assert_eq!(merged.demands[0].nominated_normal, [-1.0, 0.0, 0.0]);
+    }
+
+    #[test]
     fn shared_regular_merge_enumerates_logical_keys_not_route_provenance() {
         let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
         let position = [1.0, 2.0, 0.1];
@@ -3318,17 +3448,17 @@ mod tests {
         let mut face_one = minimum_demand(0, 1, 7, position);
         face_one.nominated_normal = [1.0, 0.0, 0.0];
         let contacts = vec![
-            WorkingContact {
-                position_mm: position,
-                normal: [0.0, 0.0, -1.0],
-                regular_routes: vec![RegularContactRoute {
+            test_regular_contact(
+                position,
+                [0.0, 0.0, -1.0],
+                RegularContactRoute {
                     candidate_id: 44,
                     owner_island_id: 0,
                     coverage_face_id: 99,
                     component_id: 88,
-                }],
-                demands: vec![face_ten],
-            },
+                },
+                vec![face_ten],
+            ),
             WorkingContact::specialized(face_one),
         ];
         let proposals = test_pair_proposals(&contacts, &layers, 0.2, 2.5);
@@ -3370,19 +3500,19 @@ mod tests {
 
         let shared_proposals = test_pair_proposals(
             &[
-                WorkingContact {
-                    position_mm: locked,
-                    normal: [0.0, 0.0, -1.0],
-                    regular_routes: vec![RegularContactRoute {
+                test_regular_contact(
+                    locked,
+                    [0.0, 0.0, -1.0],
+                    RegularContactRoute {
                         candidate_id: 44,
                         owner_island_id: 0,
                         coverage_face_id: 99,
                         component_id: 7,
-                    }],
+                    },
                     // An exact regular disposition makes this contact
                     // specialized before consolidation begins.
-                    demands: vec![minimum_demand(2, 3, 7, locked)],
-                },
+                    vec![minimum_demand(2, 3, 7, locked)],
+                ),
                 combined,
             ],
             &layers,
@@ -3411,17 +3541,17 @@ mod tests {
         second.nominated_normal = [0.0, 1.0, 0.0];
         let mut third = minimum_demand(2, 12, 7, locked);
         third.nominated_normal = [-1.0, 0.0, 0.0];
-        let mut shared = WorkingContact {
-            position_mm: locked,
-            normal: regular_normal,
-            regular_routes: vec![RegularContactRoute {
+        let mut shared = test_regular_contact(
+            locked,
+            regular_normal,
+            RegularContactRoute {
                 candidate_id: 44,
                 owner_island_id: 0,
                 coverage_face_id: 99,
                 component_id: 7,
-            }],
-            demands: vec![first],
-        };
+            },
+            vec![first],
+        );
         for next in [second, third] {
             let contacts = vec![shared, WorkingContact::specialized(next)];
             let proposals = test_pair_proposals(&contacts, &layers, 0.2, 2.5);
@@ -3443,6 +3573,56 @@ mod tests {
             assert_eq!(shared.normal, regular_normal);
         }
         assert_eq!(shared.demands.len(), 3);
+    }
+
+    #[test]
+    fn route_union_sorting_does_not_replace_the_first_regular_primary_identity() {
+        let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
+        let position = [1.0, 2.0, 0.1];
+        let first_normal = [0.0, 0.0, -1.0];
+        let contacts = vec![
+            test_regular_contact(
+                position,
+                first_normal,
+                RegularContactRoute {
+                    candidate_id: 99,
+                    owner_island_id: 8,
+                    coverage_face_id: 80,
+                    component_id: 800,
+                },
+                vec![minimum_demand(0, 10, 7, position)],
+            ),
+            test_regular_contact(
+                position,
+                [1.0, 0.0, 0.0],
+                RegularContactRoute {
+                    candidate_id: 1,
+                    owner_island_id: 9,
+                    coverage_face_id: 90,
+                    component_id: 900,
+                },
+                vec![minimum_demand(1, 11, 7, position)],
+            ),
+        ];
+        let proposals = test_pair_proposals(&contacts, &layers, 0.2, 2.5);
+        let merged = commit_merge(
+            &proposals[0],
+            &contacts,
+            usize::MAX,
+            &mut MergeAllocationTelemetry::default(),
+        )
+        .unwrap();
+
+        assert_eq!(merged.regular_routes[0].candidate_id, 1);
+        let primary = merged.primary_regular.unwrap();
+        assert_eq!(primary.route.candidate_id, 99);
+        assert_eq!(primary.route.owner_island_id, 8);
+        assert_eq!(primary.route.coverage_face_id, 80);
+        assert_eq!(primary.route.component_id, 800);
+        assert_eq!(primary.position_mm, position);
+        assert_eq!(primary.normal, first_normal);
+        assert_eq!(merged.position_mm, primary.position_mm);
+        assert_eq!(merged.normal, primary.normal);
     }
 
     #[test]
@@ -3659,17 +3839,17 @@ mod tests {
 
     #[test]
     fn synthetic_only_route_contributes_its_claimed_face_to_load_eligibility() {
-        let contacts = vec![WorkingContact {
-            position_mm: [1.0, 2.0, 0.1],
-            normal: [0.0, 0.0, -1.0],
-            regular_routes: vec![RegularContactRoute {
+        let contacts = vec![test_regular_contact(
+            [1.0, 2.0, 0.1],
+            [0.0, 0.0, -1.0],
+            RegularContactRoute {
                 candidate_id: 44,
                 owner_island_id: 9,
                 coverage_face_id: 3,
                 component_id: 7,
-            }],
-            demands: Vec::new(),
-        }];
+            },
+            Vec::new(),
+        )];
         let islands = [SupportIsland {
             id: 9,
             face_ids: vec![3],
@@ -3821,17 +4001,17 @@ mod tests {
     #[test]
     fn already_covered_regular_is_owner_scoped_and_suppresses_a_new_seat() {
         let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
-        let regular = WorkingContact {
-            position_mm: [0.1, 0.0, 0.0],
-            normal: [0.0, 0.0, -1.0],
-            regular_routes: vec![RegularContactRoute {
+        let regular = test_regular_contact(
+            [0.1, 0.0, 0.0],
+            [0.0, 0.0, -1.0],
+            RegularContactRoute {
                 candidate_id: 7,
                 owner_island_id: 3,
                 coverage_face_id: 2,
                 component_id: 7,
-            }],
-            demands: Vec::new(),
-        };
+            },
+            Vec::new(),
+        );
         let matching = minimum_demand(3, 2, 7, [0.0, 0.0, 0.0]);
         let other_owner = minimum_demand(4, 2, 7, [0.0, 0.0, 0.0]);
         let exact_other_owner = minimum_demand(4, 2, 7, [0.1, 0.0, 0.0]);
@@ -3858,17 +4038,17 @@ mod tests {
         let mut demand = minimum_demand(4, 2, 7, position);
         demand.nominated_normal = [1.0, 0.0, 0.0];
         let mut physical = vec![
-            WorkingContact {
-                position_mm: position,
-                normal: regular_normal,
-                regular_routes: vec![RegularContactRoute {
+            test_regular_contact(
+                position,
+                regular_normal,
+                RegularContactRoute {
                     candidate_id: 7,
                     owner_island_id: 3,
                     coverage_face_id: 2,
                     component_id: 7,
-                }],
-                demands: Vec::new(),
-            },
+                },
+                Vec::new(),
+            ),
             WorkingContact::specialized(demand),
         ];
         let attached = attach_exact_mixed_contacts(
@@ -3892,8 +4072,89 @@ mod tests {
         .unwrap();
         assert_eq!(physical.len(), 1);
         assert_eq!(physical[0].normal, regular_normal);
+        let primary = physical[0].primary_regular.unwrap();
+        assert_eq!(primary.route.candidate_id, 7);
+        assert_eq!(primary.route.owner_island_id, 3);
+        assert_eq!(primary.route.coverage_face_id, 2);
+        assert_eq!(primary.route.component_id, 7);
+        assert_eq!(primary.position_mm, position);
+        assert_eq!(primary.normal, regular_normal);
         assert_eq!(physical[0].regular_routes[0].owner_island_id, 3);
         assert_eq!(physical[0].demands[0].owner_island_id, 4);
+    }
+
+    #[test]
+    fn exact_mixed_prepass_replaces_an_old_shared_primary_with_the_pure_regular() {
+        let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
+        let position = [0.1, 0.0, 0.0];
+        let pure_normal = [0.0, 1.0, 0.0];
+        let mut physical = vec![
+            test_regular_contact(
+                position,
+                [1.0, 0.0, 0.0],
+                RegularContactRoute {
+                    candidate_id: 1,
+                    owner_island_id: 1,
+                    coverage_face_id: 10,
+                    component_id: 7,
+                },
+                vec![minimum_demand(1, 10, 7, position)],
+            ),
+            test_regular_contact(
+                position,
+                pure_normal,
+                RegularContactRoute {
+                    candidate_id: 99,
+                    owner_island_id: 9,
+                    coverage_face_id: 90,
+                    component_id: 70,
+                },
+                Vec::new(),
+            ),
+        ];
+        assert_eq!(
+            attach_exact_mixed_contacts(
+                &mut physical,
+                &layers,
+                0.2,
+                SpecializedLimits::production(),
+                &mut MergeAllocationTelemetry::default(),
+            )
+            .unwrap(),
+            1
+        );
+
+        let primary = physical[0].primary_regular.unwrap();
+        assert_eq!(primary.route.candidate_id, 99);
+        assert_eq!(primary.route.owner_island_id, 9);
+        assert_eq!(primary.route.coverage_face_id, 90);
+        assert_eq!(primary.route.component_id, 70);
+        assert_eq!(primary.position_mm, position);
+        assert_eq!(primary.normal, pure_normal);
+        assert_eq!(physical[0].position_mm, position);
+        assert_eq!(physical[0].normal, pure_normal);
+        assert_eq!(physical[0].regular_routes.len(), 2);
+    }
+
+    #[test]
+    fn inconsistent_primary_regular_identity_fails_typed() {
+        let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
+        let mut contact = test_regular_contact(
+            [0.1, 0.0, 0.0],
+            [0.0, 0.0, -1.0],
+            RegularContactRoute {
+                candidate_id: 7,
+                owner_island_id: 3,
+                coverage_face_id: 2,
+                component_id: 7,
+            },
+            Vec::new(),
+        );
+        contact.regular_routes[0].candidate_id = 8;
+        assert_eq!(
+            canonicalize_and_validate(&mut [contact], &[], &layers, 0.2),
+            Err(SpecializedError::PrimaryRegularIdentityMismatch)
+        );
     }
 
     fn perception_config<'a>(delicacy: &'a [f64]) -> SupportPerceptionConfig<'a> {
@@ -3967,14 +4228,16 @@ mod tests {
 
     #[test]
     fn required_table_raking_and_thin_fin_fixtures_finalize_full_evidence() {
+        let mut failures = Vec::new();
         for (name, mesh, expected_digest, expected_counts, expected_gate) in [
             (
                 "overhang table",
                 make_overhang_table().unwrap(),
                 // Updated for exact two-stage Python parity: the owner-independent
-                // mixed-class attach prepass precedes specialized-only gating.
+                // mixed-class attach prepass precedes specialized-only gating, and
+                // the digest binds the retained primary regular identity explicitly.
                 // This is not a corpus, baseline, physics, or reference re-freeze.
-                7_715_902_557_646_144_526_u64,
+                1_389_017_023_496_747_280_u64,
                 (95, 51_200, 14),
                 (6, 0, 4),
             ),
@@ -3982,9 +4245,10 @@ mod tests {
                 "raking blade",
                 make_raking_blade().unwrap(),
                 // Updated for exact two-stage Python parity: the owner-independent
-                // mixed-class attach prepass precedes specialized-only gating.
+                // mixed-class attach prepass precedes specialized-only gating, and
+                // the digest binds the retained primary regular identity explicitly.
                 // This is not a corpus, baseline, physics, or reference re-freeze.
-                16_249_388_873_798_499_314_u64,
+                15_607_448_763_063_777_926_u64,
                 (40, 40_192, 13),
                 (3, 10, 8),
             ),
@@ -3992,41 +4256,26 @@ mod tests {
                 "thin fin",
                 make_thin_fin().unwrap(),
                 // Updated for exact two-stage Python parity: the owner-independent
-                // mixed-class attach prepass precedes specialized-only gating.
+                // mixed-class attach prepass precedes specialized-only gating, and
+                // the digest binds the retained primary regular identity explicitly.
                 // This is not a corpus, baseline, physics, or reference re-freeze.
-                4_087_941_529_862_264_113_u64,
+                10_102_651_859_642_063_796_u64,
                 (19, 20_480, 2),
                 (2, 0, 1),
             ),
         ] {
             let plan = full_fixture(mesh, name).unwrap_or_else(|error| panic!("{error}"));
-            assert_eq!(
-                plan.digest(),
-                expected_digest,
-                "required {name} exact vector"
-            );
-            assert_eq!(
-                (
-                    plan.contacts().len(),
-                    plan.coverage_samples().len(),
-                    plan.load_partition().rows().len(),
-                ),
-                expected_counts,
-                "required {name} exact row counts",
+            let actual_digest = plan.digest();
+            let actual_counts = (
+                plan.contacts().len(),
+                plan.coverage_samples().len(),
+                plan.load_partition().rows().len(),
             );
             let gate = plan.gate_evidence();
-            assert_eq!(
-                gate.baseline, gate.accepted,
-                "required {name} non-worsening gate"
-            );
-            assert_eq!(
-                (
-                    gate.accepted.load_violation_count,
-                    gate.evaluated_pair_count,
-                    gate.accepted_pair_count,
-                ),
-                expected_gate,
-                "required {name} exact load and consolidation gate",
+            let actual_gate = (
+                gate.accepted.load_violation_count,
+                gate.evaluated_pair_count,
+                gate.accepted_pair_count,
             );
             let carried_faces = plan
                 .load_partition()
@@ -4034,18 +4283,22 @@ mod tests {
                 .iter()
                 .map(|row| row.face_id)
                 .collect::<BTreeSet<_>>();
-            assert_eq!(
-                carried_faces.len(),
-                plan.load_partition().rows().len(),
-                "required {name} carries every face once"
-            );
-            if name == "thin fin" {
-                assert!(
-                    !plan.coverage_samples().is_empty(),
-                    "required thin-fin synthetic island must use the shared dyadic coverage builder"
-                );
+            let unique_faces = carried_faces.len() == plan.load_partition().rows().len();
+            let thin_fin_coverage = name != "thin fin" || !plan.coverage_samples().is_empty();
+            if actual_digest != expected_digest
+                || actual_counts != expected_counts
+                || gate.baseline != gate.accepted
+                || actual_gate != expected_gate
+                || !unique_faces
+                || !thin_fin_coverage
+            {
+                failures.push(format!(
+                    "{name}: digest actual={actual_digest} expected={expected_digest}; counts actual={actual_counts:?} expected={expected_counts:?}; gate actual={actual_gate:?} expected={expected_gate:?}; non_worsening={}; unique_faces={unique_faces}; thin_fin_coverage={thin_fin_coverage}",
+                    gate.baseline == gate.accepted,
+                ));
             }
         }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
     #[test]
