@@ -12,7 +12,7 @@ use chitubox_io::{
 };
 use plinth_core::PrinterProfile;
 use plinth_mesh::Mesh;
-use plinth_support::{SupportPrimitive, SupportedModel};
+use plinth_support::{FrustumRingNormal, SphereGeometry, SupportPrimitive, SupportedModel};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -103,10 +103,14 @@ pub fn write(model: &SupportedModel, request: &EmitRequest) -> Result<EmitReport
     audit_disk(
         &request.target_path,
         &request.printer,
-        lift,
-        f32_of(model.plate_z_mm().get() - center[2])?,
-        &geometry,
-        &records,
+        AuditExpected {
+            lift,
+            plate_z: f32_of(model.plate_z_mm().get() - center[2])?,
+            model: &geometry,
+            records: &records,
+            primitives: model.primitives(),
+            model_center: center,
+        },
     )
 }
 
@@ -119,13 +123,19 @@ fn validate_target(path: &Path) -> Result<(), EmitError> {
     Ok(())
 }
 
+struct AuditExpected<'a> {
+    lift: f32,
+    plate_z: f32,
+    model: &'a TriangleSoup,
+    records: &'a [SupportRecord],
+    primitives: &'a [SupportPrimitive],
+    model_center: [f64; 3],
+}
+
 fn audit_disk(
     path: &Path,
     printer: &PrinterProfile,
-    expected_lift: f32,
-    expected_plate_z: f32,
-    expected_model: &TriangleSoup,
-    expected_records: &[SupportRecord],
+    expected: AuditExpected<'_>,
 ) -> Result<EmitReport, EmitError> {
     let project = Project::open(path).map_err(|_| EmitError::DiskAuditRejected)?;
     if project.model_count() != 1 {
@@ -137,7 +147,7 @@ fn audit_disk(
             != (Placement {
                 x: 0.0,
                 y: 0.0,
-                z_lift: expected_lift,
+                z_lift: expected.lift,
             })
     {
         return Err(EmitError::DiskAuditRejected);
@@ -145,14 +155,20 @@ fn audit_disk(
     let model_triangles = project
         .model_triangles(0)
         .map_err(|_| EmitError::DiskAuditRejected)?;
-    if model_triangles != expected_model.xyz {
+    if model_triangles != expected.model.xyz {
         return Err(EmitError::DiskAuditRejected);
     }
     let records = project
         .supports(0)
         .map_err(|_| EmitError::DiskAuditRejected)?;
-    if records != expected_records {
+    if records != expected.records {
         return Err(EmitError::DiskAuditRejected);
+    }
+    if records.len() != expected.primitives.len() {
+        return Err(EmitError::DiskAuditRejected);
+    }
+    for (record, primitive) in records.iter().zip(expected.primitives) {
+        audit_sphere_record_fields(record, primitive, expected.model_center)?;
     }
 
     let model_local_min_z = min_z(&model_triangles)?;
@@ -160,7 +176,7 @@ fn audit_disk(
     // centring moves the model and the planned plate together, while the sole
     // placement lift separates their local Z values by exactly `lift_mm`.
     let reopened_plate_z = model_local_min_z - info.placement.z_lift;
-    if !same_f32_frame_value(reopened_plate_z, expected_plate_z)
+    if !same_f32_frame_value(reopened_plate_z, expected.plate_z)
         || !same_f32_frame_value(model_local_min_z - reopened_plate_z, info.placement.z_lift)
     {
         return Err(EmitError::DiskAuditRejected);
@@ -193,6 +209,58 @@ fn audit_disk(
         support_record_count: records.len(),
         artifact_bytes,
     })
+}
+
+/// Independent verifier for the native sphere-record field projection.  Keep
+/// this separate from the producer's `SphereGeometry::canonical_poles`: it
+/// derives the expected binary32 fields from immutable semantic authority
+/// after reopening the file.
+fn audit_sphere_record_fields(
+    record: &SupportRecord,
+    primitive: &SupportPrimitive,
+    model_center: [f64; 3],
+) -> Result<(), EmitError> {
+    let Some(sphere) = &primitive.sphere_geometry else {
+        return Ok(());
+    };
+    let radius = primitive.start_radius_mm.get();
+    let (start, end) = match sphere {
+        SphereGeometry::Tip {
+            center_mm,
+            outward_axis_unit,
+        } => {
+            if primitive.segment_type != SegmentType::TIP {
+                return Err(EmitError::DiskAuditRejected);
+            }
+            let center = finite_point(*center_mm);
+            let axis = finite_point(*outward_axis_unit);
+            (
+                std::array::from_fn(|index| center[index] - radius * axis[index]),
+                std::array::from_fn(|index| center[index] + radius * axis[index]),
+            )
+        }
+        SphereGeometry::Joint { center_mm } => {
+            if primitive.segment_type != SegmentType::SHAFT {
+                return Err(EmitError::DiskAuditRejected);
+            }
+            let center = finite_point(*center_mm);
+            (
+                [center[0], center[1], center[2] + radius],
+                [center[0], center[1], center[2] - radius],
+            )
+        }
+    };
+    let expected_start = point_f32(sub_center(start, model_center))?;
+    let expected_end = point_f32(sub_center(end, model_center))?;
+    let expected_radius = f32_of(radius)?;
+    if record.start != expected_start
+        || record.end != expected_end
+        || record.r_start != expected_radius
+        || record.r_end != expected_radius
+    {
+        return Err(EmitError::DiskAuditRejected);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]
@@ -354,17 +422,18 @@ fn build_record(
     primitive: &SupportPrimitive,
     center: [f64; 3],
 ) -> Result<SupportRecord, EmitError> {
-    let start = sub_center(finite_point(primitive.start_mm), center);
-    let end = sub_center(finite_point(primitive.end_mm), center);
     let r_start = primitive.start_radius_mm.get();
     let r_end = primitive.end_radius_mm.get();
-    if matches!(
-        primitive.segment_type,
-        SegmentType::TIP | SegmentType::SHAFT
-    ) && r_start != r_end
-    {
-        return Err(EmitError::RecordEncodingRejected);
-    }
+    let (source_start, source_end) = match primitive.segment_type {
+        SegmentType::TIP | SegmentType::SHAFT => primitive
+            .sphere_geometry
+            .as_ref()
+            .ok_or(EmitError::RecordEncodingRejected)?
+            .canonical_poles(primitive.start_radius_mm),
+        _ => (primitive.start_mm, primitive.end_mm),
+    };
+    let start = sub_center(finite_point(source_start), center);
+    let end = sub_center(finite_point(source_end), center);
     let mut triangles = match primitive.segment_type {
         // Frozen semantics: type 7 owns the contact sphere; type 9 owns a
         // standalone joint sphere; types 1 and 3 are frusta.
@@ -374,9 +443,14 @@ fn build_record(
             raft_pad_triangles(start, r_start, r_end)?
         }
         SegmentType::PAD_OR_BRIDGE => raft_bridge_triangles(start, end, r_start, r_end)?,
-        SegmentType::TAPER | SegmentType::JOINER | SegmentType::FLARE => {
-            frustum_triangles(start, end, r_start, r_end, FRUSTUM_SIDES)?
-        }
+        SegmentType::TAPER | SegmentType::JOINER | SegmentType::FLARE => frustum_triangles(
+            start,
+            end,
+            r_start,
+            r_end,
+            FRUSTUM_SIDES,
+            primitive.ring_normal,
+        )?,
         _ => return Err(EmitError::RecordEncodingRejected),
     };
     wind_outward(&mut triangles)?;
@@ -464,6 +538,7 @@ fn frustum_triangles(
     r_start: f64,
     r_end: f64,
     sides: usize,
+    ring_normal: FrustumRingNormal,
 ) -> Result<Vec<[[f64; 3]; 3]>, EmitError> {
     if sides < 3 || !r_start.is_finite() || !r_end.is_finite() {
         return Err(EmitError::RecordEncodingRejected);
@@ -473,7 +548,10 @@ fn frustum_triangles(
     if !axis_length.is_finite() || axis_length <= f64::EPSILON {
         return Err(EmitError::RecordEncodingRejected);
     }
-    let normal = scale(axis, 1.0 / axis_length);
+    let normal = match ring_normal {
+        FrustumRingNormal::SegmentAxis => scale(axis, 1.0 / axis_length),
+        FrustumRingNormal::PlateZ => [0.0, 0.0, 1.0],
+    };
     let (u, v) = perpendicular_basis(normal)?;
     let mut ring_start = Vec::with_capacity(sides);
     let mut ring_end = Vec::with_capacity(sides);
@@ -543,6 +621,7 @@ fn raft_pad_triangles(
         diameter * 0.5,
         diameter * 0.5,
         RAFT_SIDES,
+        FrustumRingNormal::SegmentAxis,
     )
 }
 
@@ -664,7 +743,7 @@ mod tests {
     use plinth_decimate::DecimationReport;
     use plinth_hollow::{HollowDisposition, HollowHistory, HollowReport};
     use plinth_orient::{BaselineSelection, OrientationHistory, OrientationReport, RigidTransform};
-    use plinth_support::{BuildFrame, SupportHistory, SupportReport};
+    use plinth_support::{BuildFrame, FrustumRingNormal, SupportHistory, SupportReport};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     fn fixture_path(name: &str) -> PathBuf {
@@ -751,11 +830,37 @@ mod tests {
     }
 
     fn primitive(segment_type: SegmentType, start: [f64; 3], end: [f64; 3]) -> SupportPrimitive {
+        let start_radius_mm = PositiveFinite::new(2.2).unwrap();
+        let sphere_geometry = match segment_type {
+            SegmentType::TIP => {
+                let midpoint = midpoint(start, end);
+                Some(
+                    SphereGeometry::tip(
+                        midpoint.map(|value| Finite::new(value).unwrap()),
+                        sub(end, start).map(|value| Finite::new(value).unwrap()),
+                    )
+                    .unwrap(),
+                )
+            }
+            SegmentType::SHAFT => Some(SphereGeometry::joint(
+                midpoint(start, end).map(|value| Finite::new(value).unwrap()),
+            )),
+            _ => None,
+        };
+        let (start_mm, end_mm) = sphere_geometry.as_ref().map_or_else(
+            || {
+                (
+                    start.map(|value| Finite::new(value).unwrap()),
+                    end.map(|value| Finite::new(value).unwrap()),
+                )
+            },
+            |geometry| geometry.canonical_poles(start_radius_mm),
+        );
         SupportPrimitive {
             segment_type,
-            start_mm: start.map(|value| Finite::new(value).unwrap()),
-            end_mm: end.map(|value| Finite::new(value).unwrap()),
-            start_radius_mm: PositiveFinite::new(2.2).unwrap(),
+            start_mm,
+            end_mm,
+            start_radius_mm,
             end_radius_mm: PositiveFinite::new(
                 if matches!(segment_type, SegmentType::TIP | SegmentType::SHAFT) {
                     2.2
@@ -772,6 +877,8 @@ mod tests {
                     .diagnostic()
                     .to_owned()
             }),
+            ring_normal: FrustumRingNormal::SegmentAxis,
+            sphere_geometry,
         }
     }
 
@@ -785,6 +892,10 @@ mod tests {
         let mut primitive = primitive(segment_type, start, end);
         primitive.start_radius_mm = PositiveFinite::new(start_radius).unwrap();
         primitive.end_radius_mm = PositiveFinite::new(end_radius).unwrap();
+        if let Some(geometry) = &primitive.sphere_geometry {
+            (primitive.start_mm, primitive.end_mm) =
+                geometry.canonical_poles(primitive.start_radius_mm);
+        }
         primitive
     }
 
@@ -856,10 +967,45 @@ mod tests {
         assert_eq!((joiner_bounds.min[2], joiner_bounds.max[2]), (8.0, 11.0));
 
         assert_eq!(records[3].segment_type, SegmentType::SHAFT);
-        assert_eq!(records[3].start, [1.0, 2.0, 14.0]);
-        assert_eq!(records[3].end, [1.0, 2.0, 10.0]);
+        assert_eq!(records[3].start, [1.0, 2.0, 12.75]);
+        assert_eq!(records[3].end, [1.0, 2.0, 11.25]);
         let shaft_bounds = record_bounds(&records[3]);
         assert_eq!((shaft_bounds.min[2], shaft_bounds.max[2]), (11.25, 12.75));
+    }
+
+    #[test]
+    fn plate_root_joiner_uses_frozen_horizontal_ring_normal() {
+        let mut root = primitive_with_radii(
+            SegmentType::JOINER,
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 2.0],
+            0.6,
+            0.4,
+        );
+        root.ring_normal = FrustumRingNormal::PlateZ;
+        let record = build_record(&root, [0.0; 3]).unwrap();
+        assert_eq!(record.start, [0.0, 0.0, 0.0]);
+        assert_eq!(record.end, [1.0, 0.0, 2.0]);
+        assert!(record.mesh.xyz.chunks_exact(3).all(|point| {
+            point[2].to_bits() == 0.0_f32.to_bits() || point[2].to_bits() == 2.0_f32.to_bits()
+        }));
+
+        let axis_record = build_record(
+            &primitive_with_radii(
+                SegmentType::JOINER,
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 2.0],
+                0.6,
+                0.4,
+            ),
+            [0.0; 3],
+        )
+        .unwrap();
+        assert!(axis_record
+            .mesh
+            .xyz
+            .chunks_exact(3)
+            .any(|point| point[2] != 0.0 && point[2] != 2.0));
     }
 
     #[test]
@@ -933,7 +1079,14 @@ mod tests {
     #[test]
     fn malformed_prewrite_geometry_is_rejected() {
         assert_eq!(
-            frustum_triangles([0.0; 3], [0.0; 3], 1.0, 1.0, FRUSTUM_SIDES),
+            frustum_triangles(
+                [0.0; 3],
+                [0.0; 3],
+                1.0,
+                1.0,
+                FRUSTUM_SIDES,
+                FrustumRingNormal::SegmentAxis,
+            ),
             Err(EmitError::RecordEncodingRejected)
         );
         assert_eq!(
@@ -970,7 +1123,7 @@ mod tests {
     }
 
     #[test]
-    fn native_raft_fixtures_are_required_and_contain_type_six_records() {
+    fn native_chitubox_fixture_pins_real_support_record_semantics() {
         const BASIC: &[u8] = include_bytes!(
             "../../../scripts/tests/fixtures/chitubox/basic-cube-supports-raft.chitubox"
         );
@@ -985,6 +1138,28 @@ mod tests {
                 .iter()
                 .any(|record| record.segment_type == SegmentType::PAD_OR_BRIDGE));
         }
+        const TWO_SUPPORTS: &[u8] =
+            include_bytes!("../../../scripts/tests/fixtures/chitubox/two-supports.chitubox");
+        let project = Project::from_bytes(TWO_SUPPORTS.to_vec()).expect("native two-support donor");
+        let records = project.supports(0).expect("native donor supports");
+        assert!(records
+            .iter()
+            .any(|record| record.segment_type == SegmentType::TIP));
+        assert!(records
+            .iter()
+            .any(|record| record.segment_type == SegmentType::TAPER));
+        assert!(records.iter().any(|record| {
+            record.segment_type == SegmentType::JOINER && record.start != record.end
+        }));
+        assert!(records
+            .iter()
+            .filter(|record| record.segment_type == SegmentType::SHAFT)
+            .all(|record| {
+                record.r_start == record.r_end
+                    && record.start[0] == record.end[0]
+                    && record.start[1] == record.end[1]
+                    && record.start[2] > record.end[2]
+            }));
     }
 
     #[test]
@@ -1121,7 +1296,18 @@ mod tests {
         let mesh = fixture_mesh();
         let expected_model = model_triangle_soup(&mesh, mesh_bbox_center(&mesh).unwrap()).unwrap();
         assert_eq!(
-            audit_disk(&target, &printer(), 3.0, -3.5, &expected_model, &[]),
+            audit_disk(
+                &target,
+                &printer(),
+                AuditExpected {
+                    lift: 3.0,
+                    plate_z: -3.5,
+                    model: &expected_model,
+                    records: &[],
+                    primitives: &[],
+                    model_center: [0.0; 3],
+                },
+            ),
             Err(EmitError::DiskAuditRejected)
         );
         assert_eq!(
@@ -1195,7 +1381,18 @@ mod tests {
         let mesh = fixture_mesh();
         let expected_model = model_triangle_soup(&mesh, mesh_bbox_center(&mesh).unwrap()).unwrap();
         assert_eq!(
-            audit_disk(&target, &printer(), 3.0, -3.4, &expected_model, &[]),
+            audit_disk(
+                &target,
+                &printer(),
+                AuditExpected {
+                    lift: 3.0,
+                    plate_z: -3.4,
+                    model: &expected_model,
+                    records: &[],
+                    primitives: &[],
+                    model_center: [0.0; 3],
+                },
+            ),
             Err(EmitError::DiskAuditRejected)
         );
         std::fs::remove_file(target).unwrap();
