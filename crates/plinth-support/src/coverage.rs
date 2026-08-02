@@ -71,5 +71,54 @@ fn map_error(error: DyadicError) -> ContactSelectionError {
             ContactSelectionError::CoverageVirtualCellLimit { required, limit }
         }
         DyadicError::InvalidLimits => ContactSelectionError::InvalidResourceRequest,
+        DyadicError::RegisteredConstantsUnavailable(message) => {
+            ContactSelectionError::RegisteredConstantsUnavailable(message)
+        }
+        DyadicError::InvalidRegisteredGeometry
+        | DyadicError::RefinementDepthLimit { .. }
+        | DyadicError::CandidateLimit { .. }
+        | DyadicError::CompactPayloadLimit { .. }
+        | DyadicError::FaceOutOfRange { .. }
+        | DyadicError::DegenerateFace { .. } => ContactSelectionError::InvalidResourceRequest,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn depth_one_coverage_payload_matches_full_frozen_row_order() {
+        let mesh = Mesh::new(
+            vec![[0.0, 0.0, 0.0], [0.4, 0.0, 0.0], [0.0, 0.4, 0.0]],
+            vec![[0, 1, 2]],
+        )
+        .expect("finite coverage triangle");
+        let config = ContactSelectionConfig::current(None, 4, 1, 1024 * 1024)
+            .expect("registered coverage config");
+        let rows = build_dyadic_coverage_samples(
+            &mesh,
+            &[SupportIsland {
+                id: 11,
+                face_ids: vec![0],
+            }],
+            &[7],
+            &config,
+        )
+        .expect("depth-one coverage");
+        assert_eq!(rows.len(), 4);
+        assert_eq!(
+            rows.iter().map(|row| row.point_mm).collect::<Vec<_>>(),
+            vec![
+                [0.066_666_666_666_666_67, 0.066_666_666_666_666_67, 0.0],
+                [0.066_666_666_666_666_67, 0.266_666_666_666_666_66, 0.0],
+                [0.133_333_333_333_333_33, 0.133_333_333_333_333_33, 0.0],
+                [0.266_666_666_666_666_66, 0.066_666_666_666_666_67, 0.0],
+            ]
+        );
+        assert!(rows.iter().all(|row| row.island_id == 11
+            && row.face_id == 0
+            && row.component_id == 7
+            && row.area_mm2 == 0.020_000_000_000_000_004));
     }
 }
