@@ -887,6 +887,7 @@ impl CcoController {
             });
         }
         if feasible.is_empty() {
+            sort_rewire_refusals(&mut refusals);
             return Ok(RewireCandidateBatch {
                 candidates: Vec::new(),
                 refusals,
@@ -924,7 +925,7 @@ impl CcoController {
                 });
             }
         }
-        refusals.sort_by_key(|refusal| refusal.generation_index);
+        sort_rewire_refusals(&mut refusals);
         Ok(RewireCandidateBatch {
             candidates,
             refusals,
@@ -945,6 +946,10 @@ impl CcoController {
             self.hosts.rebuild(forest);
         }
     }
+}
+
+fn sort_rewire_refusals(refusals: &mut [RewireCandidateRefusal]) {
+    refusals.sort_by_key(|refusal| refusal.generation_index);
 }
 
 fn validate_anchor_route(
@@ -2650,6 +2655,47 @@ mod tests {
             91,
         ));
         assert!(!has_rewire_degenerate_new_member(&before, &printable));
+    }
+
+    #[test]
+    fn all_refused_mixed_family_ledger_is_in_generation_order() {
+        let mut refusals = vec![
+            RewireCandidateRefusal {
+                generation_index: 0,
+                family: CandidateFamily::PlateDescent,
+                reason: RewireCandidateRefusalReason::InfeasibleGeometry,
+            },
+            RewireCandidateRefusal {
+                generation_index: 3,
+                family: CandidateFamily::Bifurcation,
+                reason: RewireCandidateRefusalReason::DegenerateNewMember,
+            },
+            RewireCandidateRefusal {
+                generation_index: 1,
+                family: CandidateFamily::ModelAnchor,
+                reason: RewireCandidateRefusalReason::AnchorFoot(
+                    AnchorFootRefusalReason::FootBallBreached,
+                ),
+            },
+            RewireCandidateRefusal {
+                generation_index: 2,
+                family: CandidateFamily::Bifurcation,
+                reason: RewireCandidateRefusalReason::InfeasibleGeometry,
+            },
+        ];
+        sort_rewire_refusals(&mut refusals);
+        assert_eq!(
+            refusals
+                .iter()
+                .map(|refusal| (refusal.generation_index, refusal.family))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, CandidateFamily::PlateDescent),
+                (1, CandidateFamily::ModelAnchor),
+                (2, CandidateFamily::Bifurcation),
+                (3, CandidateFamily::Bifurcation),
+            ]
+        );
     }
 
     #[test]
