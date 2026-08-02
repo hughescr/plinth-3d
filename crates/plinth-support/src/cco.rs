@@ -22,8 +22,8 @@ use crate::{
         discover_rewire_anchor_seats, validate_anchor_feet, validate_rewire_anchor_feet,
         AnchorFootOutcome, AnchorFootRefusal, AnchorFootRefusalReason, AnchorFootRequest,
         AnchorGeometryAuthority, AnchorSearchConfig, AnchorSearchError, AnchorSeatRefusal,
-        AnchorTerminalBinding, QualifiedAnchorSeat, RewireAnchorBinding, SurfaceAnchorSample,
-        ValidatedModelAnchor,
+        AnchorTerminalBinding, GeometryFingerprint, QualifiedAnchorSeat, RewireAnchorBinding,
+        SurfaceAnchorSample, ValidatedModelAnchor,
     },
     BuildFrame, SelectedContact,
 };
@@ -189,6 +189,20 @@ pub(crate) struct RewireCcoBinding {
     live_digest: u64,
     request: TerminalCcoRequest,
     root_snapshot: Member,
+    subtree: BTreeSet<MemberKey>,
+    excluded_hosts: BTreeSet<MemberKey>,
+    splice: RewireSpliceFacts,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct RewireBindingIdentity {
+    root: MemberKey,
+    root_snapshot: Member,
+    live_digest: u64,
+    snapshot_digest: u64,
+    attach_point_mm: [Finite; 3],
+    attach_radius_mm: PositiveFinite,
+    frame: BuildFrame,
     subtree: BTreeSet<MemberKey>,
     excluded_hosts: BTreeSet<MemberKey>,
     splice: RewireSpliceFacts,
@@ -368,6 +382,21 @@ impl RewireCcoBinding {
             self.request.attach_point_mm,
         )
     }
+
+    fn identity(&self) -> RewireBindingIdentity {
+        RewireBindingIdentity {
+            root: self.request.stub,
+            root_snapshot: self.root_snapshot.clone(),
+            live_digest: self.live_digest,
+            snapshot_digest: self.snapshot_digest,
+            attach_point_mm: self.request.attach_point_mm,
+            attach_radius_mm: self.request.attach_radius_mm,
+            frame: self.request.frame,
+            subtree: self.subtree.clone(),
+            excluded_hosts: self.excluded_hosts.clone(),
+            splice: self.splice.clone(),
+        }
+    }
 }
 
 /// Exact `rewire.py::_slim_ancestors` preparation of the immutable
@@ -542,6 +571,16 @@ pub(crate) enum CcoError {
     StaleRewireBinding(MemberKey),
     #[error("rewire splice binding for root {0:?} no longer matches its reanchor facts")]
     ReanchorBindingMismatch(MemberKey),
+    #[error("rewire candidate batch does not belong to this exact binding")]
+    RewireBatchBindingMismatch,
+    #[error("rewire candidate generation index {0} is not a survivor in this batch")]
+    RewireCandidateNotFound(usize),
+    #[error("rewire candidate evidence does not reproduce exactly")]
+    RewireCandidateEvidenceMismatch,
+    #[error("rewire replay geometry authority differs from the evaluated authority")]
+    RewireGeometryAuthorityMismatch,
+    #[error("rewire replay no longer satisfies its evaluated clearance proof")]
+    RewireClearanceReplayFailed,
     #[error("CCO input or derived geometry is not finite and positive where required")]
     InvalidGeometry,
     #[error(transparent)]
@@ -559,7 +598,7 @@ pub(crate) enum CcoError {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) enum Descriptor {
+enum Descriptor {
     Plate {
         xy: [f64; 2],
         top_z: f64,
@@ -610,24 +649,55 @@ pub(crate) struct RewireCandidateRefusal {
 
 #[derive(Debug)]
 pub(crate) struct RewireEvaluatedCandidate {
-    pub(crate) descriptor: Descriptor,
-    pub(crate) evidence: CcoCandidateEvidence,
-    pub(crate) evaluated_digest: u64,
-    pub(crate) validated_model_anchor: Option<Box<ValidatedModelAnchor>>,
+    descriptor: Descriptor,
+    evidence: CcoCandidateEvidence,
+    evaluated_digest: u64,
+    validated_model_anchor: Option<Box<ValidatedModelAnchor>>,
 }
 
 #[derive(Debug)]
 pub(crate) struct RewireCandidateBatch {
-    pub(crate) candidates: Vec<RewireEvaluatedCandidate>,
-    pub(crate) refusals: Vec<RewireCandidateRefusal>,
-    pub(crate) descriptors_generated: usize,
-    pub(crate) clearance_batches: usize,
-    pub(crate) anchor_ray_batches: usize,
-    pub(crate) anchor_foot_batches: usize,
-    pub(crate) anchor_seat_refusals: Vec<AnchorSeatRefusal>,
-    pub(crate) splice: RewireSpliceFacts,
-    pub(crate) excluded_hosts: BTreeSet<MemberKey>,
+    candidates: Vec<RewireEvaluatedCandidate>,
+    refusals: Vec<RewireCandidateRefusal>,
+    descriptors_generated: usize,
+    clearance_batches: usize,
+    anchor_ray_batches: usize,
+    anchor_foot_batches: usize,
+    anchor_seat_refusals: Vec<AnchorSeatRefusal>,
+    splice: RewireSpliceFacts,
+    excluded_hosts: BTreeSet<MemberKey>,
     snapshot_digest: u64,
+    binding_identity: RewireBindingIdentity,
+    geometry_fingerprint: GeometryFingerprint,
+}
+
+/// Move-only proof that one batch survivor was replayed exactly against its
+/// still-current live binding and original surface authority.
+#[derive(Debug)]
+pub(crate) struct RewireReplay {
+    forest: Forest,
+    splice: RewireSpliceFacts,
+    evidence: CcoCandidateEvidence,
+    validated_model_anchor: Option<Box<ValidatedModelAnchor>>,
+    binding_identity: RewireBindingIdentity,
+}
+
+impl RewireReplay {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        Forest,
+        RewireSpliceFacts,
+        CcoCandidateEvidence,
+        Option<Box<ValidatedModelAnchor>>,
+    ) {
+        (
+            self.forest,
+            self.splice,
+            self.evidence,
+            self.validated_model_anchor,
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -785,6 +855,8 @@ impl CcoController {
         anchor_route: RewireAnchorRoute<'_>,
     ) -> Result<RewireCandidateBatch, CcoError> {
         let config = Config::current()?;
+        let binding_identity = binding.identity();
+        let geometry_fingerprint = anchor_route.geometry.fingerprint();
         let anchor_binding = binding.anchor_binding();
         let discovery = discover_rewire_anchor_seats(
             anchor_binding,
@@ -899,6 +971,8 @@ impl CcoController {
                 splice: binding.splice.clone(),
                 excluded_hosts: binding.excluded_hosts.clone(),
                 snapshot_digest: binding.snapshot_digest,
+                binding_identity,
+                geometry_fingerprint,
             });
         }
         let survives = clearance_survival(anchor_route.geometry.surface(), &config, &feasible)?;
@@ -937,6 +1011,8 @@ impl CcoController {
             splice: binding.splice.clone(),
             excluded_hosts: binding.excluded_hosts.clone(),
             snapshot_digest: binding.snapshot_digest,
+            binding_identity,
+            geometry_fingerprint,
         })
     }
 
@@ -1228,6 +1304,122 @@ impl RewireCandidateBatch {
 
     pub(crate) fn snapshot_digest(&self) -> u64 {
         self.snapshot_digest
+    }
+
+    pub(crate) fn refusals(&self) -> &[RewireCandidateRefusal] {
+        &self.refusals
+    }
+
+    /// Replay one caller-selected surviving generation index. This consumes
+    /// the originating batch, so a candidate capability cannot be replayed
+    /// twice or detached from the evidence ledger that proved it.
+    pub(crate) fn replay_candidate(
+        mut self,
+        binding: &RewireCcoBinding,
+        live: &Forest,
+        generation_index: usize,
+        geometry: &AnchorGeometryAuthority<'_>,
+    ) -> Result<RewireReplay, CcoError> {
+        binding.validate_live(live)?;
+        let identity = binding.identity();
+        if self.binding_identity != identity
+            || self.snapshot_digest != binding.snapshot_digest
+            || self.splice != binding.splice
+            || self.excluded_hosts != binding.excluded_hosts
+        {
+            return Err(CcoError::RewireBatchBindingMismatch);
+        }
+        if self.geometry_fingerprint != geometry.fingerprint() {
+            return Err(CcoError::RewireGeometryAuthorityMismatch);
+        }
+        let matches = self
+            .candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(position, candidate)| {
+                (candidate.evidence.generation_index == generation_index).then_some(position)
+            })
+            .collect::<Vec<_>>();
+        let [position] = matches.as_slice() else {
+            return Err(CcoError::RewireCandidateNotFound(generation_index));
+        };
+        let candidate = self.candidates.swap_remove(*position);
+        if candidate.evidence.generation_index != generation_index
+            || candidate.descriptor.family() != candidate.evidence.family
+        {
+            return Err(CcoError::RewireCandidateEvidenceMismatch);
+        }
+
+        let config = Config::current()?;
+        let Some(mut replayed) = evaluate(
+            &binding.snapshot,
+            &binding.request,
+            &candidate.descriptor,
+            generation_index,
+            &config,
+        )?
+        else {
+            return Err(CcoError::RewireCandidateEvidenceMismatch);
+        };
+        if has_rewire_degenerate_new_member(&binding.snapshot, &replayed.forest) {
+            return Err(CcoError::RewireCandidateEvidenceMismatch);
+        }
+        replayed.price_ml = changed_forest_volume_delta(&binding.snapshot, &replayed.forest)?;
+        let replayed_digest = replayed.forest.digest();
+        if replayed_digest != candidate.evaluated_digest
+            || replayed.family != candidate.evidence.family
+            || replayed.generation_index != candidate.evidence.generation_index
+            || replayed.price_ml.to_bits() != candidate.evidence.price_ml.to_bits()
+            || replayed.rows.len() != candidate.evidence.clearance_rows
+        {
+            return Err(CcoError::RewireCandidateEvidenceMismatch);
+        }
+
+        match (&candidate.descriptor, replayed.anchor) {
+            (
+                Descriptor::ModelAnchor {
+                    seat_index,
+                    point_mm,
+                },
+                Some((replayed_seat, final_radius)),
+            ) => {
+                let Some(anchor) = candidate.validated_model_anchor.as_ref() else {
+                    return Err(CcoError::RewireCandidateEvidenceMismatch);
+                };
+                let proved_point = anchor.seat().point_mm().map(Finite::get);
+                if replayed_seat != *seat_index
+                    || proved_point.map(f64::to_bits) != point_mm.map(f64::to_bits)
+                    || anchor.foot().final_member_radius_mm() != final_radius
+                {
+                    return Err(CcoError::RewireCandidateEvidenceMismatch);
+                }
+            }
+            (Descriptor::ModelAnchor { .. }, None) | (_, Some(_)) => {
+                return Err(CcoError::RewireCandidateEvidenceMismatch);
+            }
+            (_, None) if candidate.validated_model_anchor.is_some() => {
+                return Err(CcoError::RewireCandidateEvidenceMismatch);
+            }
+            (_, None) => {}
+        }
+        if clearance_survival(geometry.surface(), &config, std::slice::from_ref(&replayed))?
+            != [true]
+        {
+            return Err(CcoError::RewireClearanceReplayFailed);
+        }
+        Ok(RewireReplay {
+            forest: replayed.forest,
+            splice: binding.splice.clone(),
+            evidence: candidate.evidence,
+            validated_model_anchor: candidate.validated_model_anchor,
+            binding_identity: identity,
+        })
+    }
+}
+
+impl RewireEvaluatedCandidate {
+    pub(crate) const fn evidence(&self) -> &CcoCandidateEvidence {
+        &self.evidence
     }
 }
 
@@ -2376,6 +2568,105 @@ mod tests {
         }
     }
 
+    fn empty_far_anchor_fixture() -> RewireAnchorFixture {
+        let vertices = vec![
+            [100.0, 100.0, 100.0],
+            [101.0, 100.0, 100.0],
+            [100.0, 101.0, 100.0],
+            [100.0, 100.0, 101.0],
+        ];
+        let triangles = vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]];
+        let mesh = Mesh::new(vertices, triangles).unwrap();
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let surface = NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
+            geom_kernel::NativeSurfaceConfig {
+                grid_pitch_mm: 0.4,
+                max_grid_bytes: 8 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        RewireAnchorFixture {
+            sidecar: vec![0.0; surface.nfaces()],
+            samples: Vec::new(),
+            mesh,
+            topology,
+            surface,
+        }
+    }
+
+    fn alias_triangle_fixture(vertices: [[f64; 3]; 3]) -> RewireAnchorFixture {
+        let mesh = Mesh::new(vertices.to_vec(), vec![[0, 1, 2]]).unwrap();
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let surface = NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
+            geom_kernel::NativeSurfaceConfig {
+                grid_pitch_mm: 0.4,
+                max_grid_bytes: 8 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        RewireAnchorFixture {
+            sidecar: vec![0.0; surface.nfaces()],
+            samples: Vec::new(),
+            mesh,
+            topology,
+            surface,
+        }
+    }
+
+    fn near_anchor_fixture(top_z: f64) -> RewireAnchorFixture {
+        let bottom_z = top_z - 10.0;
+        let vertices = vec![
+            [-20.0, -20.0, bottom_z],
+            [20.0, -20.0, bottom_z],
+            [20.0, 20.0, bottom_z],
+            [-20.0, 20.0, bottom_z],
+            [-20.0, -20.0, top_z],
+            [20.0, -20.0, top_z],
+            [20.0, 20.0, top_z],
+            [-20.0, 20.0, top_z],
+        ];
+        let triangles = vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        let mesh = Mesh::new(vertices, triangles).unwrap();
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let surface = NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
+            geom_kernel::NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        RewireAnchorFixture {
+            sidecar: vec![0.0; surface.nfaces()],
+            samples: vec![SurfaceAnchorSample {
+                source_face_id: 0,
+                point_mm: [0.0, 0.0, bottom_z],
+                delicacy: 0.0,
+            }],
+            mesh,
+            topology,
+            surface,
+        }
+    }
+
     fn rewire_fixture() -> (Forest, RewireFixtureKeys) {
         let mut forest = Forest::new();
         let old_parent = forest.add_member(rewire_member(
@@ -2616,6 +2907,10 @@ mod tests {
             evaluated_digest: before,
             validated_model_anchor: None,
         };
+        let anchors = empty_far_anchor_fixture();
+        let geometry =
+            AnchorGeometryAuthority::new(&anchors.mesh, &anchors.topology, &anchors.surface)
+                .unwrap();
         let tie_batch = RewireCandidateBatch {
             candidates: vec![tied(9), tied(3)],
             refusals: Vec::new(),
@@ -2627,6 +2922,8 @@ mod tests {
             splice: binding.splice().clone(),
             excluded_hosts: binding.excluded_hosts().clone(),
             snapshot_digest: before,
+            binding_identity: binding.identity(),
+            geometry_fingerprint: geometry.fingerprint(),
         };
         assert_eq!(
             tie_batch.ranked_candidates()[0].evidence.generation_index,
@@ -2696,6 +2993,350 @@ mod tests {
                 (3, CandidateFamily::Bifurcation),
             ]
         );
+    }
+
+    fn with_rewire_batch<T>(
+        binding: &RewireCcoBinding,
+        anchors: &RewireAnchorFixture,
+        use_batch: impl FnOnce(RewireCandidateBatch, &AnchorGeometryAuthority<'_>) -> T,
+    ) -> T {
+        anchors.with_route(|route| {
+            let geometry = route.geometry;
+            let batch = CcoController::default()
+                .evaluate_rewire_candidates(binding, route)
+                .unwrap();
+            use_batch(batch, geometry)
+        })
+    }
+
+    fn replay_family(
+        live: &Forest,
+        binding: &RewireCcoBinding,
+        anchors: &RewireAnchorFixture,
+        family: CandidateFamily,
+    ) -> RewireReplay {
+        with_rewire_batch(binding, anchors, |batch, geometry| {
+            let candidate = batch
+                .ranked_candidates()
+                .into_iter()
+                .find(|candidate| candidate.evidence().family == family)
+                .unwrap_or_else(|| panic!("{family:?} survivor exists"));
+            let generation_index = candidate.evidence().generation_index;
+            let evaluated_digest = candidate.evaluated_digest;
+            let replay = batch
+                .replay_candidate(binding, live, generation_index, geometry)
+                .unwrap();
+            assert_eq!(replay.forest.digest(), evaluated_digest);
+            replay
+        })
+    }
+
+    #[test]
+    fn detached_and_root_reanchor_replay_plate_and_bifurcation_bit_exactly() {
+        let anchors = empty_far_anchor_fixture();
+        let (forest, keys) = rewire_fixture();
+        let detached = RewireCcoBinding::bind_detached_subtree(
+            &forest,
+            keys.root,
+            BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
+        )
+        .unwrap();
+        let live_digest = forest.digest();
+        for family in [CandidateFamily::PlateDescent, CandidateFamily::Bifurcation] {
+            let replay = replay_family(&forest, &detached, &anchors, family);
+            assert!(matches!(
+                replay.splice,
+                RewireSpliceFacts::DetachedSubtree { root, old_parent, .. }
+                    if root == keys.root && old_parent == keys.old_parent
+            ));
+            assert_eq!(forest.digest(), live_digest);
+        }
+
+        let mut root_forest = forest.clone();
+        root_forest.set_parent(keys.root, None).unwrap();
+        let root_binding = RewireCcoBinding::bind_root_reanchor(
+            &root_forest,
+            keys.root,
+            BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
+        )
+        .unwrap();
+        let replay = replay_family(
+            &root_forest,
+            &root_binding,
+            &anchors,
+            CandidateFamily::PlateDescent,
+        );
+        assert!(matches!(
+            replay.splice,
+            RewireSpliceFacts::RootReanchor { retiring_root, .. }
+                if retiring_root == keys.root
+        ));
+    }
+
+    #[test]
+    fn detached_and_root_reanchor_model_anchor_replay_is_bit_exact() {
+        let (forest, keys) = rewire_fixture();
+        let detached = RewireCcoBinding::bind_detached_subtree(
+            &forest,
+            keys.root,
+            BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
+        )
+        .unwrap();
+        let detached_anchors = near_anchor_fixture(9.75);
+        let replay = replay_family(
+            &forest,
+            &detached,
+            &detached_anchors,
+            CandidateFamily::ModelAnchor,
+        );
+        assert!(matches!(
+            replay.splice,
+            RewireSpliceFacts::DetachedSubtree { root, old_parent, .. }
+                if root == keys.root && old_parent == keys.old_parent
+        ));
+        assert!(replay.validated_model_anchor.is_some());
+
+        let mut root_forest = forest.clone();
+        root_forest.set_parent(keys.root, None).unwrap();
+        let root_binding = RewireCcoBinding::bind_root_reanchor(
+            &root_forest,
+            keys.root,
+            BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
+        )
+        .unwrap();
+        let root_anchors = near_anchor_fixture(14.75);
+        let replay = replay_family(
+            &root_forest,
+            &root_binding,
+            &root_anchors,
+            CandidateFamily::ModelAnchor,
+        );
+        assert!(matches!(
+            replay.splice,
+            RewireSpliceFacts::RootReanchor { retiring_root, .. }
+                if retiring_root == keys.root
+        ));
+        assert!(replay.validated_model_anchor.is_some());
+    }
+
+    #[test]
+    fn replay_refuses_stale_cross_batch_geometry_alias_and_index_tampering() {
+        let anchors = empty_far_anchor_fixture();
+        let (forest, keys) = rewire_fixture();
+        let binding = RewireCcoBinding::bind_detached_subtree(
+            &forest,
+            keys.root,
+            BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
+        )
+        .unwrap();
+        let select = |batch: &RewireCandidateBatch| {
+            batch
+                .ranked_candidates()
+                .first()
+                .expect("survivor")
+                .evidence()
+                .generation_index
+        };
+        let before = forest.digest();
+
+        let mut stale = forest.clone();
+        stale
+            .set_carried_mm2(keys.root, Finite::new(2.25).unwrap())
+            .unwrap();
+        with_rewire_batch(&binding, &anchors, |batch, geometry| {
+            let generation_index = select(&batch);
+            assert!(matches!(
+                batch.replay_candidate(&binding, &stale, generation_index, geometry),
+                Err(CcoError::StaleRewireBinding(root)) if root == keys.root
+            ));
+        });
+
+        let cross_binding = RewireCcoBinding::bind_root_reanchor(
+            &forest,
+            keys.eligible,
+            BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
+        )
+        .unwrap();
+        with_rewire_batch(&binding, &anchors, |batch, geometry| {
+            let generation_index = select(&batch);
+            assert!(matches!(
+                batch.replay_candidate(&cross_binding, &forest, generation_index, geometry),
+                Err(CcoError::RewireBatchBindingMismatch)
+            ));
+        });
+
+        let alias_a = alias_triangle_fixture([[0.0, 0.0, 0.0], [1.0, 2.0, 0.0], [2.0, 1.0, 0.0]]);
+        let alias_b = alias_triangle_fixture([[0.0, 1.0, 0.0], [1.0, 2.0, 0.0], [2.0, 0.0, 0.0]]);
+        assert_eq!(
+            alias_a.surface.geometry().centroids(),
+            alias_b.surface.geometry().centroids()
+        );
+        assert_eq!(
+            alias_a.surface.geometry().normals(),
+            alias_b.surface.geometry().normals()
+        );
+        assert_eq!(
+            alias_a.surface.geometry().face_bounds(),
+            alias_b.surface.geometry().face_bounds()
+        );
+        assert_eq!(
+            alias_a.surface.geometry().areas(),
+            alias_b.surface.geometry().areas()
+        );
+        with_rewire_batch(&binding, &alias_a, |batch, geometry_a| {
+            let generation_index = select(&batch);
+            alias_b.with_route(|route_b| {
+                assert_ne!(geometry_a.fingerprint(), route_b.geometry.fingerprint());
+                assert!(matches!(
+                    batch.replay_candidate(&binding, &forest, generation_index, route_b.geometry,),
+                    Err(CcoError::RewireGeometryAuthorityMismatch)
+                ));
+            });
+        });
+
+        with_rewire_batch(&binding, &anchors, |mut batch, geometry| {
+            let generation_index = select(&batch);
+            batch
+                .candidates
+                .iter_mut()
+                .find(|candidate| candidate.evidence.generation_index == generation_index)
+                .unwrap()
+                .evaluated_digest ^= 1;
+            assert!(matches!(
+                batch.replay_candidate(&binding, &forest, generation_index, geometry),
+                Err(CcoError::RewireCandidateEvidenceMismatch)
+            ));
+        });
+
+        with_rewire_batch(&binding, &anchors, |mut batch, geometry| {
+            let generation_index = select(&batch);
+            batch
+                .candidates
+                .iter_mut()
+                .find(|candidate| candidate.evidence.generation_index == generation_index)
+                .unwrap()
+                .evidence
+                .generation_index += 100;
+            assert!(matches!(
+                batch.replay_candidate(&binding, &forest, generation_index, geometry),
+                Err(CcoError::RewireCandidateNotFound(index)) if index == generation_index
+            ));
+        });
+
+        with_rewire_batch(&binding, &anchors, |mut batch, geometry| {
+            let generation_index = select(&batch);
+            batch
+                .candidates
+                .iter_mut()
+                .find(|candidate| candidate.evidence.generation_index == generation_index)
+                .unwrap()
+                .evidence
+                .price_ml = f64::from_bits(1);
+            assert!(matches!(
+                batch.replay_candidate(&binding, &forest, generation_index, geometry),
+                Err(CcoError::RewireCandidateEvidenceMismatch)
+            ));
+        });
+        assert_eq!(forest.digest(), before);
+    }
+
+    #[test]
+    fn refused_model_anchor_has_no_replay_capability() {
+        let anchors = rewire_anchor_fixture();
+        let (forest, keys) = rewire_fixture();
+        let binding = RewireCcoBinding::bind_detached_subtree(
+            &forest,
+            keys.root,
+            BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
+        )
+        .unwrap();
+        with_rewire_batch(&binding, &anchors, |batch, geometry| {
+            let refusal = batch
+                .refusals()
+                .iter()
+                .find(|refusal| refusal.family == CandidateFamily::ModelAnchor)
+                .expect("model-anchor family evaluated");
+            let generation_index = refusal.generation_index;
+            assert!(matches!(
+                batch.replay_candidate(&binding, &forest, generation_index, geometry),
+                Err(CcoError::RewireCandidateNotFound(index)) if index == generation_index
+            ));
+        });
+    }
+
+    #[test]
+    fn replay_payload_supports_outer_transaction_rollback_without_touching_live() {
+        let anchors = empty_far_anchor_fixture();
+        let (forest, keys) = rewire_fixture();
+        let binding = RewireCcoBinding::bind_detached_subtree(
+            &forest,
+            keys.root,
+            BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
+        )
+        .unwrap();
+        let replay = replay_family(&forest, &binding, &anchors, CandidateFamily::PlateDescent);
+        let (mut prepared, _, evidence, _) = replay.into_parts();
+        let replayed_digest = prepared.digest();
+        let checkpoint = prepared.checkpoint();
+        prepared.add_member(rewire_member(
+            [50.0, 0.0, 1.0],
+            [50.0, 0.0, 0.0],
+            MemberKind::Trunk,
+            200,
+        ));
+        prepared.rollback(checkpoint).unwrap();
+        assert_eq!(prepared.digest(), replayed_digest);
+        assert_eq!(evidence.family, CandidateFamily::PlateDescent);
+        assert_eq!(forest.digest(), binding.live_digest);
+    }
+
+    #[test]
+    fn rewire_replay_thread_sweep_is_identical() {
+        const CHILD: &str = "PLINTH_REWIRE_REPLAY_SWEEP_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let anchors = empty_far_anchor_fixture();
+            let (forest, keys) = rewire_fixture();
+            let binding = RewireCcoBinding::bind_detached_subtree(
+                &forest,
+                keys.root,
+                BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
+            )
+            .unwrap();
+            let replay = replay_family(&forest, &binding, &anchors, CandidateFamily::Bifurcation);
+            println!(
+                "REWIRE_REPLAY_SWEEP={:016x}:{}:{:016x}",
+                replay.forest.digest(),
+                replay.evidence.generation_index,
+                replay.evidence.price_ml.to_bits()
+            );
+            return;
+        }
+        let executable = std::env::current_exe().unwrap();
+        let mut results = Vec::new();
+        for threads in [1, 4, 16] {
+            let output = std::process::Command::new(&executable)
+                .arg("--exact")
+                .arg("cco::tests::rewire_replay_thread_sweep_is_identical")
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .env("PLINTH_THREADS", threads.to_string())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            results.push(
+                stdout
+                    .lines()
+                    .find_map(|line| line.strip_prefix("REWIRE_REPLAY_SWEEP="))
+                    .expect("child emitted replay result")
+                    .to_owned(),
+            );
+        }
+        assert!(results.windows(2).all(|pair| pair[0] == pair[1]));
     }
 
     #[test]

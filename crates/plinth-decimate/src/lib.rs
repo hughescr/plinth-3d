@@ -12,6 +12,7 @@ use std::mem::size_of;
 
 use geom_kernel::{
     NativeSurface, NativeSurfaceConfig, PointCloudIndex, PointIndexBuildError, PointQueryError,
+    RadiusQueryLimits,
 };
 use meshopt::{simplify_with_locks, typed_to_bytes, SimplifyOptions, VertexDataAdapter};
 use plinth_core::{m0_constants, PositiveFinite};
@@ -928,12 +929,27 @@ fn select_feature_protection_from_errors(
             .collect::<Vec<_>>();
         let mut locks = vec![false; original.verts().len()];
         if !seed_points.is_empty() {
-            let neighbors =
-                index
-                    .radius_neighbors_batch(&seed_points, radius)
-                    .map_err(|error| FeatureProtectionError::HaloQuery {
-                        message: point_query_message(error),
-                    })?;
+            let max_output_pairs = seed_points.len().saturating_mul(original.verts().len());
+            let max_output_bytes = seed_points
+                .len()
+                .saturating_add(1)
+                .saturating_mul(std::mem::size_of::<usize>())
+                .saturating_add(
+                    max_output_pairs
+                        .saturating_mul(std::mem::size_of::<u64>() + std::mem::size_of::<f64>()),
+                );
+            let neighbors = index
+                .radius_neighbors_batch(
+                    &seed_points,
+                    radius,
+                    RadiusQueryLimits {
+                        max_output_pairs,
+                        max_output_bytes,
+                    },
+                )
+                .map_err(|error| FeatureProtectionError::HaloQuery {
+                    message: point_query_message(error),
+                })?;
             for point_id in neighbors.point_ids {
                 let vertex =
                     usize::try_from(point_id).expect("point index IDs originate from usize");
