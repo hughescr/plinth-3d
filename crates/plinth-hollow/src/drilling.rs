@@ -17,8 +17,9 @@ use thiserror::Error;
 
 use crate::drains::{DrainPlan, HoleGeometry, HoleRole, PlannedShell};
 use crate::{
-    bounds, from_solid, marching_cavity, to_solid, CavityEvidence, CavityField, CavityRecord,
-    DrainRecord, HollowDisposition, HollowHistory, HollowReport, HollowedModel,
+    bounds, from_solid, marching_cavity, orient_boolean_cavity, to_solid, CavityEvidence,
+    CavityField, CavityRecord, DrainRecord, HollowDisposition, HollowHistory, HollowReport,
+    HollowedModel,
 };
 
 const CYLINDER_SECTIONS: usize = 24;
@@ -26,6 +27,13 @@ const PROOF_EPSILON_MM: f64 = 1.0e-7;
 const AUDIT_MIN_ML: f64 = 0.5;
 const AUDIT_MAX_DRAINS: usize = 3;
 const AUDIT_MAX_EXIT_MM: f64 = 8.0;
+const AUDIT_DIRECTIONS: [V3; 5] = [
+    [0.0, 0.0, -1.0],
+    [0.5, 0.0, -1.0],
+    [-0.5, 0.0, -1.0],
+    [0.0, 0.5, -1.0],
+    [0.0, -0.5, -1.0],
+];
 const DEFAULT_MAX_BOOLEAN_PRIMITIVE_UNITS: u64 = 256 * 1024 * 1024;
 const DEFAULT_MAX_BOOLEAN_MARSHALLED_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DEFAULT_MAX_BOOLEAN_OUTPUT_VERTICES: u64 = 64 * 1024 * 1024;
@@ -173,7 +181,7 @@ pub struct DrillingEvidence {
     pub drilled_bounds_mm: [[Finite; 3]; 2],
     pub bounds_delta_mm: [[Finite; 3]; 2],
     pub expected_material_mm3: Finite,
-    pub volume_balance_error_mm3: Finite,
+    pub volume_balance_residual_mm3: Finite,
     pub volume_balance_tolerance_mm3: Finite,
     pub final_cavity_mm3: Finite,
     pub boolean_input_primitive_units: u64,
@@ -193,6 +201,15 @@ struct AuditPlan {
     retained_voxels: usize,
     refilled_voxels: usize,
     refilled_pockets: Vec<usize>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AuditCandidate {
+    component_id: usize,
+    direction_order: usize,
+    origin: V3,
+    direction: V3,
+    sampled_mm: f64,
 }
 
 #[derive(Debug)]
@@ -397,21 +414,15 @@ fn drill(
     }
     validate_separate_holes(&holes)?;
     let base = reconstructed_source_if_refilled(planned, &audit, limits)?;
-    let mut operands = Vec::with_capacity(holes.len() + 2);
+    let post_refill_mesh = from_solid(base.clone()).map_err(|_| DrillingRefusal::Boolean)?;
+    let post_refill_mesh = if audit.refilled_voxels == 0 {
+        post_refill_mesh
+    } else {
+        orient_boolean_cavity(post_refill_mesh)
+            .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?
+    };
+    let mut operands = Vec::with_capacity(holes.len() + 1);
     operands.push(base);
-    if audit.refilled_voxels != 0 {
-        let retained_mask = planned
-            .cavity_field()
-            .mask_excluding(&audit.refill)
-            .map_err(|_| DrillingRefusal::Boolean)?;
-        let retained_inner = marching_cavity(
-            &retained_mask,
-            planned.cavity_field().origin_mm().map(Finite::get),
-            planned.cavity_field().pitch_mm().get(),
-        )
-        .map_err(|_| DrillingRefusal::Boolean)?;
-        operands.push(to_solid(&retained_inner).map_err(|_| DrillingRefusal::Boolean)?);
-    }
     let predicted_input = preflight_boolean_with_cutters(&operands, holes.len(), limits)?;
     for hole in &holes {
         operands.push(cylinder(hole)?);
@@ -430,8 +441,8 @@ fn drill(
         .difference_limited(&operands, boolean_limits)
         .map_err(|_| DrillingRefusal::Boolean)?;
     let mesh = from_solid(drilled).map_err(|_| DrillingRefusal::Boolean)?;
-    let (_source_volume, source_components, source_chi) =
-        topology_evidence(planned.shell(), limits)?;
+    let (source_volume, source_components, source_chi) =
+        topology_evidence(&post_refill_mesh, limits)?;
     let (drilled_volume, drilled_components, drilled_chi) = topology_evidence(&mesh, limits)?;
     if source_components != 2 || drilled_components != 1 {
         return Err(DrillingRefusal::InvalidDrilledTopology);
@@ -445,7 +456,7 @@ fn drill(
     if drilled_chi != expected_chi {
         return Err(DrillingRefusal::OpeningCountMismatch);
     }
-    let source_bounds = bounds(planned.shell()).map_err(|_| DrillingRefusal::BoundsChanged)?;
+    let source_bounds = bounds(&post_refill_mesh).map_err(|_| DrillingRefusal::BoundsChanged)?;
     let drilled_bounds = bounds(&mesh).map_err(|_| DrillingRefusal::BoundsChanged)?;
     if !bounds_within_source(source_bounds, drilled_bounds) {
         return Err(DrillingRefusal::BoundsChanged);
@@ -453,13 +464,13 @@ fn drill(
     validate_bounds_shrinkage(source_bounds, drilled_bounds, &holes)?;
     let final_cavity_mm3 =
         audit.retained_voxels as f64 * planned.cavity_field().pitch_mm().get().powi(3);
-    let (expected_material, volume_balance_error, volume_balance_tolerance) =
+    let (expected_material, volume_balance_residual, volume_balance_tolerance) =
         validate_volume_balance(
             drilled_volume,
             planned.cavity().source_volume_mm3().get(),
             final_cavity_mm3,
         )?;
-    let removed = expected_material - drilled_volume;
+    let removed = source_volume - drilled_volume;
     if !removed.is_finite() || removed <= 0.0 {
         return Err(DrillingRefusal::InvalidVolumeDelta);
     }
@@ -469,11 +480,12 @@ fn drill(
         planned.cavity_field().pitch_mm().get(),
         limits,
     )?;
-    let (members, flags) = drainability_map(planned.cavity_field(), &holes, limits)?;
+    let (members, flags) =
+        drainability_map_excluding(planned.cavity_field(), &holes, limits, &audit.refill)?;
     let drainable = members
         .iter()
         .zip(flags)
-        .filter(|(flat, drains)| !audit.refill[**flat] && *drains)
+        .filter(|(_, drains)| *drains)
         .count();
     if drainable != audit.retained_voxels {
         return Err(DrillingRefusal::TrappedCavity {
@@ -523,7 +535,7 @@ fn drill(
                 })
             })
             .collect::<Result<Vec<_>, DrillingRefusal>>()?,
-        source_material_mm3: finite(expected_material)?,
+        source_material_mm3: finite(source_volume)?,
         drilled_material_mm3: finite(drilled_volume)?,
         removed_material_mm3: finite(removed)?,
         source_bounds_mm: finite_bounds(source_bounds)?,
@@ -533,7 +545,7 @@ fn drill(
             sub(drilled_bounds.1, source_bounds.1),
         ))?,
         expected_material_mm3: finite(expected_material)?,
-        volume_balance_error_mm3: finite(volume_balance_error)?,
+        volume_balance_residual_mm3: finite(volume_balance_residual)?,
         volume_balance_tolerance_mm3: finite(volume_balance_tolerance)?,
         final_cavity_mm3: finite(final_cavity_mm3)?,
         boolean_input_primitive_units: input.operand_primitive_units,
@@ -550,20 +562,24 @@ fn reconstructed_source_if_refilled(
     if audit.refilled_voxels == 0 {
         return to_solid(planned.shell()).map_err(|_| DrillingRefusal::Boolean);
     }
-    let none = vec![false; planned.cavity_field().flat_count()];
-    let full_mask = planned
+    admit_count(
+        "drainability cell",
+        planned.cavity_field().flat_count(),
+        limits.max_drainability_cells,
+    )?;
+    let retained_mask = planned
         .cavity_field()
-        .mask_excluding(&none)
+        .mask_excluding(&audit.refill)
         .map_err(|_| DrillingRefusal::Boolean)?;
-    let full_inner = marching_cavity(
-        &full_mask,
+    let retained_inner = marching_cavity(
+        &retained_mask,
         planned.cavity_field().origin_mm().map(Finite::get),
         planned.cavity_field().pitch_mm().get(),
     )
     .map_err(|_| DrillingRefusal::Boolean)?;
     let operands = [
-        to_solid(planned.shell()).map_err(|_| DrillingRefusal::Boolean)?,
-        to_solid(&full_inner).map_err(|_| DrillingRefusal::Boolean)?,
+        outer_solid(planned.shell(), limits)?,
+        to_solid(&retained_inner).map_err(|_| DrillingRefusal::Boolean)?,
     ];
     let input =
         BooleanInputEstimate::for_meshes(&operands).map_err(|_| DrillingRefusal::Boolean)?;
@@ -572,13 +588,49 @@ fn reconstructed_source_if_refilled(
     {
         return Err(DrillingRefusal::Boolean);
     }
-    // Refill changes the solid consumed by drilling, so this reconstruction
-    // is a dependent Boolean round. It gathers the shell and complete former
-    // cavity once; the following round gathers the retained cavity and every
-    // cutter once. No per-pocket or per-hole native call occurs.
+    // Rebuild the actual post-refill, pre-drill shell in one H0-shaped
+    // difference: the retained outer component minus the retained cavity.
+    // This object is retained for topology, bounds, and volume evidence.
     ManifoldBackend
-        .union_limited(&operands, limits.boolean())
+        .difference_limited(&operands, limits.boolean())
         .map_err(|_| DrillingRefusal::Boolean)
+}
+
+fn outer_solid(shell: &Mesh, limits: DrillingLimits) -> Result<SolidMesh, DrillingRefusal> {
+    let edge_occurrences = shell
+        .tris()
+        .len()
+        .checked_mul(3)
+        .ok_or(DrillingRefusal::ResourceAccountingOverflow)?;
+    admit_count(
+        "topology edge occurrence",
+        edge_occurrences,
+        limits.max_topology_edge_occurrences,
+    )?;
+    let topology = build_face_topology(shell, WeldPolicy::ExactBits)
+        .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?;
+    let certificate = certify_closed_components(shell, &topology)
+        .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?;
+    let mut positive = certificate
+        .components()
+        .iter()
+        .filter(|component| component.signed_volume_mm3() > 0.0);
+    let outer = positive
+        .next()
+        .ok_or(DrillingRefusal::InvalidDrilledTopology)?
+        .component_id();
+    if positive.next().is_some() {
+        return Err(DrillingRefusal::InvalidDrilledTopology);
+    }
+    let triangles = shell
+        .tris()
+        .iter()
+        .zip(topology.component_ids())
+        .filter_map(|(triangle, component)| {
+            (*component == outer).then_some(triangle.map(u64::from))
+        })
+        .collect();
+    SolidMesh::new(shell.verts().to_vec(), triangles).map_err(|_| DrillingRefusal::Boolean)
 }
 
 fn prepare_audit_plan(
@@ -597,34 +649,33 @@ fn prepare_audit_plan(
         .iter()
         .filter(|component| qualifies_audit_drain(component.len(), field.pitch_mm().get(), 0))
         .count();
+    let candidate_upper_bound = qualifying_count
+        .checked_mul(AUDIT_DIRECTIONS.len())
+        .ok_or(DrillingRefusal::ResourceAccountingOverflow)?;
     admit_count(
         "audit centerline query",
-        qualifying_count,
+        candidate_upper_bound,
         limits.max_centerline_queries,
     )?;
-    let mut candidates = Vec::with_capacity(qualifying_count);
+    let mut candidates = Vec::with_capacity(candidate_upper_bound);
     for (component_id, component) in components.iter().enumerate() {
         if qualifies_audit_drain(component.len(), field.pitch_mm().get(), 0) {
             let origin = component_low_origin(field, component)?;
-            let mut best = None;
-            for direction in [
-                [0.0, 0.0, -1.0],
-                [0.5, 0.0, -1.0],
-                [-0.5, 0.0, -1.0],
-                [0.0, 0.5, -1.0],
-                [0.0, -0.5, -1.0],
-            ] {
+            for (direction_order, direction) in AUDIT_DIRECTIONS.into_iter().enumerate() {
                 let direction = normalize(direction)?;
                 if let Some(sampled_mm) =
                     sampled_exit_along(field, origin, direction, AUDIT_MAX_EXIT_MM)
                 {
-                    if best.is_none_or(|(_, selected)| sampled_mm < selected) {
-                        best = Some((direction, sampled_mm));
+                    if sampled_mm <= AUDIT_MAX_EXIT_MM {
+                        candidates.push(AuditCandidate {
+                            component_id,
+                            direction_order,
+                            origin,
+                            direction,
+                            sampled_mm,
+                        });
                     }
                 }
-            }
-            if let Some((direction, sampled_mm)) = best {
-                candidates.push((component_id, origin, direction, sampled_mm));
             }
         }
     }
@@ -655,28 +706,44 @@ fn prepare_audit_plan(
             },
         )
         .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?;
-        let origins: Vec<V3> = candidates.iter().map(|(_, origin, _, _)| *origin).collect();
+        let origins: Vec<V3> = candidates
+            .iter()
+            .map(|candidate| candidate.origin)
+            .collect();
         let directions: Vec<V3> = candidates
             .iter()
-            .map(|(_, _, direction, _)| *direction)
+            .map(|candidate| candidate.direction)
             .collect();
         let (offsets, ts, _) = surface
             .cast_rays(&origins, &directions, AUDIT_MAX_EXIT_MM)
             .map_err(|_| DrillingRefusal::InvalidDrilledTopology)?;
-        for (candidate, (_, origin)) in candidates.iter().zip(origins).enumerate() {
-            if audit_holes.len() == AUDIT_MAX_DRAINS {
-                break;
-            }
+        let mut exact_valid = vec![false; candidates.len()];
+        for candidate in 0..candidates.len() {
             let begin = offsets[candidate] as usize;
             let end = offsets[candidate + 1] as usize;
             let hits = &ts[begin..end];
-            if hits.len() != 2 || hits[0] <= 0.0 || hits[1] <= hits[0] {
-                continue;
+            exact_valid[candidate] = hits.len() == 2 && hits[0] > 0.0 && hits[1] > hits[0];
+        }
+        for (component_id, component_drilled) in audit_components.iter_mut().enumerate() {
+            if audit_holes.len() == AUDIT_MAX_DRAINS {
+                break;
             }
-            let direction = candidates[candidate].2;
-            let sampled_mm = candidates[candidate].3;
-            audit_holes.push(audit_hole(origin, direction, hits[0], hits[1], sampled_mm)?);
-            audit_components[candidates[candidate].0] = true;
+            let Some(candidate_index) =
+                select_exact_audit_candidate(&candidates, &exact_valid, component_id)
+            else {
+                continue;
+            };
+            let candidate = &candidates[candidate_index];
+            let begin = offsets[candidate_index] as usize;
+            let hits = &ts[begin..offsets[candidate_index + 1] as usize];
+            audit_holes.push(audit_hole(
+                candidate.origin,
+                candidate.direction,
+                hits[0],
+                hits[1],
+                candidate.sampled_mm,
+            )?);
+            *component_drilled = true;
         }
     }
     let mut refill = vec![false; field.flat_count()];
@@ -716,6 +783,24 @@ fn prepare_audit_plan(
         refilled_voxels,
         refilled_pockets,
     })
+}
+
+fn select_exact_audit_candidate(
+    candidates: &[AuditCandidate],
+    exact_valid: &[bool],
+    component_id: usize,
+) -> Option<usize> {
+    debug_assert_eq!(candidates.len(), exact_valid.len());
+    candidates
+        .iter()
+        .enumerate()
+        .filter(|(index, candidate)| candidate.component_id == component_id && exact_valid[*index])
+        .min_by(|(_, left), (_, right)| {
+            left.sampled_mm
+                .total_cmp(&right.sampled_mm)
+                .then(left.direction_order.cmp(&right.direction_order))
+        })
+        .map(|(index, _)| index)
 }
 
 fn qualifies_audit_drain(component_voxels: usize, pitch_mm: f64, added: usize) -> bool {
@@ -1154,8 +1239,12 @@ fn drainability_map(
     holes: &[HoleGeometry],
     limits: DrillingLimits,
 ) -> Result<(Vec<usize>, Vec<bool>), DrillingRefusal> {
-    let excluded = vec![false; field.flat_count()];
-    drainability_map_excluding(field, holes, limits, &excluded)
+    admit_count(
+        "drainability cell",
+        field.flat_count(),
+        limits.max_drainability_cells,
+    )?;
+    drainability_map_admitted(field, holes, None)
 }
 
 fn drainability_map_excluding(
@@ -1172,9 +1261,17 @@ fn drainability_map_excluding(
     if excluded.len() != field.flat_count() {
         return Err(DrillingRefusal::ResourceAccountingOverflow);
     }
+    drainability_map_admitted(field, holes, Some(excluded))
+}
+
+fn drainability_map_admitted(
+    field: &CavityField,
+    holes: &[HoleGeometry],
+    excluded: Option<&[bool]>,
+) -> Result<(Vec<usize>, Vec<bool>), DrillingRefusal> {
     let mut members: Vec<usize> = field
         .member_flats()
-        .filter(|flat| !excluded[*flat])
+        .filter(|flat| excluded.is_none_or(|mask| !mask[*flat]))
         .collect();
     members.sort_by_key(|flat| field.flat_to_index(*flat)[2]);
     let count = members.len();
@@ -1321,19 +1418,19 @@ fn validate_volume_balance(
     cavity_mm3: f64,
 ) -> Result<(f64, f64, f64), DrillingRefusal> {
     let expected_material_mm3 = solid_mm3 - cavity_mm3;
-    let error_mm3 = (drilled_material_mm3 - expected_material_mm3).abs();
+    let residual_mm3 = drilled_material_mm3 - expected_material_mm3;
     let tolerance_mm3 = 0.02 * solid_mm3;
     if !expected_material_mm3.is_finite()
-        || !error_mm3.is_finite()
+        || !residual_mm3.is_finite()
         || !tolerance_mm3.is_finite()
-        || error_mm3 >= tolerance_mm3
+        || residual_mm3.abs() >= tolerance_mm3
     {
         Err(DrillingRefusal::VolumeBalance {
-            error_mm3,
+            error_mm3: residual_mm3,
             tolerance_mm3,
         })
     } else {
-        Ok((expected_material_mm3, error_mm3, tolerance_mm3))
+        Ok((expected_material_mm3, residual_mm3, tolerance_mm3))
     }
 }
 fn finite(value: f64) -> Result<Finite, DrillingRefusal> {
@@ -1429,7 +1526,12 @@ fn segment_distance(p1: V3, q1: V3, p2: V3, q2: V3) -> Result<f64, DrillingRefus
 mod tests {
     use super::*;
     use crate::{create_shell, drains::plan_drains};
+    use plinth_core::{ContentDigest, NonNegativeFinite, UnitFraction};
+    use plinth_decimate::DecimationReport;
     use plinth_mesh::{load_binary_stl, mesh_fingerprint};
+    use plinth_orient::{BaselineSelection, OrientationReport, RigidTransform};
+    use scirs2_core::ndarray::Array3;
+    use std::path::PathBuf;
 
     fn sphere_plan() -> PlannedShell {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1437,6 +1539,28 @@ mod tests {
         let mesh =
             load_binary_stl(&path, WeldPolicy::None).expect("committed analytic Sphere fixture");
         plan_drains(create_shell(mesh).expect("Sphere shell")).expect("Sphere drain plan")
+    }
+
+    fn orientation_history() -> OrientationHistory {
+        OrientationHistory::from_reports(
+            DecimationReport {
+                budget_id: ContentDigest(17),
+                input_faces: 1,
+                output_faces: 1,
+                chosen_ratio: UnitFraction::new(1.0).expect("unit fixture ratio"),
+                p99_mm: NonNegativeFinite::new(0.0).expect("nonnegative fixture error"),
+                p999_mm: NonNegativeFinite::new(0.0).expect("nonnegative fixture error"),
+                boundary_edges_before: 0,
+                boundary_edges_after: 0,
+                nonmanifold_edges_before: 0,
+                nonmanifold_edges_after: 0,
+            },
+            OrientationReport {
+                pinned_report: PathBuf::from("baseline/model.pipeline.json"),
+                selection: BaselineSelection::Identity,
+                transform: RigidTransform::identity(),
+            },
+        )
     }
 
     fn frozen_hollow_report() -> serde_json::Value {
@@ -1457,7 +1581,10 @@ mod tests {
 
     #[test]
     fn frozen_sphere_is_drilled_once_and_every_voxel_drains() {
-        let drilled = drill_planned_shell(sphere_plan()).expect("drilled Sphere");
+        let plan = sphere_plan();
+        let (source_material_mm3, _, _) =
+            topology_evidence(plan.shell(), DrillingLimits::production()).unwrap();
+        let drilled = drill_planned_shell(plan).expect("drilled Sphere");
         assert_eq!(drilled.evidence().holes.len(), 2);
         assert!(drilled
             .evidence()
@@ -1469,6 +1596,19 @@ mod tests {
             drilled.evidence().drainable_voxels
         );
         assert!(drilled.evidence().removed_material_mm3.get() > 0.0);
+        assert_eq!(
+            drilled.evidence().source_material_mm3.get(),
+            source_material_mm3
+        );
+        assert_eq!(
+            drilled.evidence().removed_material_mm3.get(),
+            source_material_mm3 - drilled.evidence().drilled_material_mm3.get()
+        );
+        assert_eq!(
+            drilled.evidence().volume_balance_residual_mm3.get(),
+            drilled.evidence().drilled_material_mm3.get()
+                - drilled.evidence().expected_material_mm3.get()
+        );
         // The committed stage report is authoritative for rounded stage
         // metrics even though no provenance proves its exported STL still
         // contains this drilled mesh.
@@ -1481,6 +1621,25 @@ mod tests {
         assert_eq!(report["watertight"], true);
         assert_eq!(report["winding"], true);
         assert_eq!(report["cavity_breathes"], true);
+    }
+
+    #[test]
+    fn proved_drilling_uses_the_public_hollowed_model_handoff() {
+        let model = drill_planned_shell(sphere_plan())
+            .expect("drilled Sphere")
+            .into_hollowed_model(orientation_history());
+        assert_eq!(
+            model.history().hollow().disposition,
+            HollowDisposition::HollowedAndDrilled
+        );
+        assert_eq!(model.history().hollow().cavities.len(), 1);
+        assert_eq!(model.history().hollow().drains.len(), 1);
+        let (mesh, history) = model.into_parts();
+        assert!(!mesh.tris().is_empty());
+        assert_eq!(
+            history.hollow().disposition,
+            HollowDisposition::HollowedAndDrilled
+        );
     }
 
     #[test]
@@ -1748,6 +1907,16 @@ mod tests {
         ));
         let just_inside = f64::from_bits((expected + 20.0).to_bits() - 1);
         assert!(validate_volume_balance(just_inside, solid, cavity).is_ok());
+        assert!(matches!(
+            validate_volume_balance(expected - 20.0, solid, cavity),
+            Err(DrillingRefusal::VolumeBalance {
+                error_mm3: -20.0,
+                tolerance_mm3: 20.0
+            })
+        ));
+        let (_, negative_residual, _) =
+            validate_volume_balance(expected - 19.0, solid, cavity).unwrap();
+        assert_eq!(negative_residual, -19.0);
 
         let holes = sphere_plan().drain_plan().holes().to_vec();
         assert!(matches!(
@@ -1939,11 +2108,21 @@ mod tests {
         }
         let split = plan.with_test_refilled_field(&horizontal_gap);
         let refill = prepare_audit_plan(&split, DrillingLimits::production()).unwrap();
-        assert!(
-            refill.refilled_voxels > 0,
-            "long downward pocket is refilled"
-        );
-        assert!(refill.holes.len() <= AUDIT_MAX_DRAINS);
+        assert_eq!(refill.holes.len(), 0);
+        assert_eq!(refill.refilled_voxels, 7_880);
+        assert_eq!(refill.refilled_pockets, vec![7_880]);
+        assert_eq!(refill.refill.iter().position(|value| *value), Some(35_484));
+        assert_eq!(refill.refill.iter().rposition(|value| *value), Some(66_399));
+        let reconstructed =
+            reconstructed_source_if_refilled(&split, &refill, DrillingLimits::production())
+                .unwrap();
+        let reconstructed = orient_boolean_cavity(from_solid(reconstructed).unwrap()).unwrap();
+        let (post_refill_volume, components, _) =
+            topology_evidence(&reconstructed, DrillingLimits::production()).unwrap();
+        let (original_volume, _, _) =
+            topology_evidence(split.shell(), DrillingLimits::production()).unwrap();
+        assert_eq!(components, 2);
+        assert!(post_refill_volume > original_volume);
 
         let plan = sphere_plan();
         let mut vertical_gap = vec![false; plan.cavity_field().flat_count()];
@@ -1955,11 +2134,104 @@ mod tests {
         }
         let split = plan.with_test_refilled_field(&vertical_gap);
         let audit = prepare_audit_plan(&split, DrillingLimits::production()).unwrap();
-        assert!(
-            !audit.holes.is_empty(),
-            "short discreet exits receive audit drains"
+        assert_eq!(audit.holes.len(), 2);
+        assert_eq!(
+            audit
+                .holes
+                .iter()
+                .map(|hole| hole.center_mm.map(Finite::get))
+                .collect::<Vec<_>>(),
+            vec![
+                [1.843_373_493_975_903_7, 0.0, 2.5],
+                [-1.843_373_493_975_903_7, 0.0, 2.5]
+            ]
         );
-        assert!(audit.holes.len() <= AUDIT_MAX_DRAINS);
+        assert_eq!(
+            audit
+                .holes
+                .iter()
+                .map(|hole| hole.direction.map(Finite::get))
+                .collect::<Vec<_>>(),
+            vec![[0.0, 0.0, -1.0], [0.0, 0.0, -1.0]]
+        );
+        assert!(audit
+            .holes
+            .iter()
+            .all(|hole| hole.sampled_exit_mm.get() == 3.0));
+        assert_eq!(audit.refilled_voxels, 0);
+        assert!(audit.refill.iter().all(|value| !*value));
         assert!(audit.holes.iter().all(|hole| hole.role == HoleRole::Drain));
+    }
+
+    #[test]
+    fn audit_sampling_includes_the_exact_eight_millimetre_boundary() {
+        let mut selected = Array3::from_elem((1, 1, 17), false);
+        let mut occupied = Array3::from_elem((1, 1, 17), false);
+        for x in 0..16 {
+            selected[(0, 0, x)] = true;
+            occupied[(0, 0, x)] = true;
+        }
+        let field = CavityField::from_selected_mask_and_occupancy(
+            &selected,
+            &occupied,
+            [0.0, 0.0, 0.0],
+            0.5,
+        )
+        .unwrap();
+        assert_eq!(
+            sampled_exit_along(&field, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0], 8.0),
+            Some(8.0)
+        );
+        assert_eq!(
+            sampled_exit_along(
+                &field,
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                f64::from_bits(8.0_f64.to_bits() - 1),
+            ),
+            None
+        );
+
+        let candidates = vec![
+            AuditCandidate {
+                component_id: 0,
+                direction_order: 0,
+                origin: [1.0, 0.0, 0.0],
+                direction: [0.0, 0.0, -1.0],
+                sampled_mm: 1.0,
+            },
+            AuditCandidate {
+                component_id: 0,
+                direction_order: 1,
+                origin: [1.0, 0.0, 0.0],
+                direction: normalize([0.5, 0.0, -1.0]).unwrap(),
+                sampled_mm: 2.0,
+            },
+            AuditCandidate {
+                component_id: 0,
+                direction_order: 2,
+                origin: [1.0, 0.0, 0.0],
+                direction: normalize([-0.5, 0.0, -1.0]).unwrap(),
+                sampled_mm: 2.0,
+            },
+            AuditCandidate {
+                component_id: 1,
+                direction_order: 0,
+                origin: [-1.0, 0.0, 0.0],
+                direction: [0.0, 0.0, -1.0],
+                sampled_mm: 8.0,
+            },
+        ];
+        let exact_valid = [false, true, true, true];
+        assert_eq!(
+            select_exact_audit_candidate(&candidates, &exact_valid, 0),
+            Some(1),
+            "a failed shortest sampled ray must fall through to the first exact-valid tie"
+        );
+        assert_eq!(
+            select_exact_audit_candidate(&candidates, &exact_valid, 1),
+            Some(3),
+            "the exact 8mm candidate remains selectable"
+        );
     }
 }

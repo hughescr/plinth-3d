@@ -765,7 +765,7 @@ fn validate_shell_topology(
     Ok(())
 }
 
-fn orient_boolean_cavity(mesh: Mesh) -> Result<Mesh, HollowError> {
+pub(crate) fn orient_boolean_cavity(mesh: Mesh) -> Result<Mesh, HollowError> {
     let cavity_component = match triage_exact_with_measured_limits(&mesh) {
         Err(HollowError::Triage(TriageError::PreHollowed(refusal)))
             if refusal.cavity_components().len() == 1 =>
@@ -1807,11 +1807,7 @@ mod tests {
 
     #[test]
     fn solid_fallback_moves_one_mesh_and_is_visible_in_history() {
-        let mesh = Mesh::new(
-            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-            vec![[0, 1, 2]],
-        )
-        .expect("the test triangle is a valid mesh");
+        let mesh = frozen_mesh("Sphere.prepped.oriented-solid.stl");
         let allocation = mesh.verts().as_ptr();
         let orientation = OrientationHistory::from_reports(
             DecimationReport {
@@ -1832,17 +1828,12 @@ mod tests {
                 transform: RigidTransform::identity(),
             },
         );
-        let report = HollowReport {
-            disposition: HollowDisposition::SolidFallback {
-                reason: SolidFallbackReason::CavityNotDrainable,
-            },
-            cavities: Vec::new(),
-            drains: Vec::new(),
-        };
-        let model = HollowedModel {
+        let model = HollowedModel::solid_fallback(
             mesh,
-            history: HollowHistory::from_reports(orientation, report),
-        };
+            orientation,
+            SolidFallbackReason::CavityNotDrainable,
+        )
+        .expect("closed oriented solid is an executable public fallback handoff");
         let (mesh, history) = model.into_parts();
         assert_eq!(mesh.verts().as_ptr(), allocation);
         assert_eq!(
