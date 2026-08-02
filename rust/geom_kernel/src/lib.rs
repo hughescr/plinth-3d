@@ -33,8 +33,9 @@ pub use point_index::{
 };
 pub use queries::{BatchInputError, CastRaysBatch, Interval, NativeSurface, SphereBreachBatch};
 pub use segment_batch::{
-    point_segment_distances_batch, PointSegmentBatchError, PointSegmentBatchLimits,
-    PointSegmentDistanceBatch,
+    point_segment_distances_batch, point_segment_taper_batch, FrozenJointTaperBatch,
+    PointSegmentBatchError, PointSegmentBatchLimits, PointSegmentDistanceBatch,
+    PointSegmentTaperBatch,
 };
 pub use slicing::{
     PlaneIntersection, PlaneIntersectionKind, PlaneSliceBatch, PlaneSliceError, PlaneSliceLimits,
@@ -540,6 +541,16 @@ impl NativeSurface {
 /// rebuilding the surface or process-global Rayon configuration.
 pub fn current_threads() -> usize {
     par::current_threads()
+}
+
+/// Run one index-parallel batch under the sole workspace thread authority.
+/// Callers must preserve result ordering and must not use floating reductions.
+pub fn with_workspace_threads<F, R>(operation: F) -> R
+where
+    F: FnOnce() -> R + Send,
+    R: Send,
+{
+    par::run(operation)
 }
 
 fn validate_finite(field: &'static str, values: &[f64]) -> Result<(), SurfaceBuildError> {

@@ -21,6 +21,16 @@ pub enum PointSegmentBatchError {
         item: usize,
         axis: usize,
     },
+    TaperRadiusCountMismatch {
+        starts: usize,
+        ends: usize,
+        radii_at_start: usize,
+        radii_at_end: usize,
+    },
+    NonFiniteRadius {
+        collection: &'static str,
+        item: usize,
+    },
     OutputSizeOverflow {
         points: usize,
         segments: usize,
@@ -54,6 +64,18 @@ impl std::fmt::Display for PointSegmentBatchError {
                 formatter,
                 "{collection} item {item} axis {axis} is non-finite"
             ),
+            Self::TaperRadiusCountMismatch {
+                starts,
+                ends,
+                radii_at_start,
+                radii_at_end,
+            } => write!(
+                formatter,
+                "taper batch lengths differ: {starts} starts, {ends} ends, {radii_at_start} start radii, {radii_at_end} end radii"
+            ),
+            Self::NonFiniteRadius { collection, item } => {
+                write!(formatter, "{collection} item {item} is non-finite")
+            }
             Self::OutputSizeOverflow { points, segments } => write!(
                 formatter,
                 "point/segment output size overflows: {points} by {segments}"
@@ -116,6 +138,63 @@ pub struct PointSegmentDistanceBatch {
     effective_threads: usize,
 }
 
+/// Sealed request for the frozen joint arithmetic.  Private fields prevent a
+/// caller from selecting an association order independently of this named
+/// compatibility contract.
+#[derive(Clone, Copy, Debug)]
+pub struct FrozenJointTaperBatch<'a> {
+    radii_at_start_mm: &'a [f64],
+    radii_at_end_mm: &'a [f64],
+}
+
+impl<'a> FrozenJointTaperBatch<'a> {
+    #[must_use]
+    pub const fn new(radii_at_start_mm: &'a [f64], radii_at_end_mm: &'a [f64]) -> Self {
+        Self {
+            radii_at_start_mm,
+            radii_at_end_mm,
+        }
+    }
+}
+
+/// Joint-mode output: the one shared distance batch plus the taper radius at
+/// the exact same clamped projection parameter.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PointSegmentTaperBatch {
+    distances: PointSegmentDistanceBatch,
+    local_radii_mm: Vec<f64>,
+}
+
+impl PointSegmentTaperBatch {
+    #[must_use]
+    pub const fn point_count(&self) -> usize {
+        self.distances.point_count
+    }
+
+    #[must_use]
+    pub const fn segment_count(&self) -> usize {
+        self.distances.segment_count
+    }
+
+    #[must_use]
+    pub const fn effective_threads(&self) -> usize {
+        self.distances.effective_threads
+    }
+
+    #[must_use]
+    pub fn distance_row(&self, point: usize) -> Option<&[f64]> {
+        self.distances.row(point)
+    }
+
+    #[must_use]
+    pub fn local_radius_row(&self, point: usize) -> Option<&[f64]> {
+        (point < self.point_count()).then(|| {
+            let start = point * self.segment_count();
+            &self.local_radii_mm[start..start + self.segment_count()]
+        })
+    }
+}
+
 impl PointSegmentDistanceBatch {
     #[must_use]
     pub const fn point_count(&self) -> usize {
@@ -149,6 +228,53 @@ pub fn point_segment_distances_batch(
     segment_ends: &[[f64; 3]],
     limits: PointSegmentBatchLimits,
 ) -> Result<PointSegmentDistanceBatch, PointSegmentBatchError> {
+    let evaluated = evaluate_batch(points, segment_starts, segment_ends, None, limits)?;
+    Ok(PointSegmentDistanceBatch {
+        point_count: evaluated.point_count,
+        segment_count: evaluated.segment_count,
+        distances_mm: evaluated.distances_mm,
+        effective_threads: evaluated.effective_threads,
+    })
+}
+
+/// Evaluate the frozen joint distance association and local taper radius in
+/// one shared, bounded Cartesian batch.
+pub fn point_segment_taper_batch(
+    points: &[[f64; 3]],
+    segment_starts: &[[f64; 3]],
+    segment_ends: &[[f64; 3]],
+    taper: FrozenJointTaperBatch<'_>,
+    limits: PointSegmentBatchLimits,
+) -> Result<PointSegmentTaperBatch, PointSegmentBatchError> {
+    let evaluated = evaluate_batch(points, segment_starts, segment_ends, Some(taper), limits)?;
+    Ok(PointSegmentTaperBatch {
+        distances: PointSegmentDistanceBatch {
+            point_count: evaluated.point_count,
+            segment_count: evaluated.segment_count,
+            distances_mm: evaluated.distances_mm,
+            effective_threads: evaluated.effective_threads,
+        },
+        local_radii_mm: evaluated
+            .local_radii_mm
+            .expect("joint taper mode always allocates local radii"),
+    })
+}
+
+struct EvaluatedBatch {
+    point_count: usize,
+    segment_count: usize,
+    distances_mm: Vec<f64>,
+    local_radii_mm: Option<Vec<f64>>,
+    effective_threads: usize,
+}
+
+fn evaluate_batch(
+    points: &[[f64; 3]],
+    segment_starts: &[[f64; 3]],
+    segment_ends: &[[f64; 3]],
+    taper: Option<FrozenJointTaperBatch<'_>>,
+    limits: PointSegmentBatchLimits,
+) -> Result<EvaluatedBatch, PointSegmentBatchError> {
     if segment_starts.len() != segment_ends.len() {
         return Err(PointSegmentBatchError::SegmentEndpointCountMismatch {
             starts: segment_starts.len(),
@@ -158,6 +284,20 @@ pub fn point_segment_distances_batch(
     validate("points", points)?;
     validate("segment_starts", segment_starts)?;
     validate("segment_ends", segment_ends)?;
+    if let Some(taper) = taper {
+        if taper.radii_at_start_mm.len() != segment_starts.len()
+            || taper.radii_at_end_mm.len() != segment_starts.len()
+        {
+            return Err(PointSegmentBatchError::TaperRadiusCountMismatch {
+                starts: segment_starts.len(),
+                ends: segment_ends.len(),
+                radii_at_start: taper.radii_at_start_mm.len(),
+                radii_at_end: taper.radii_at_end_mm.len(),
+            });
+        }
+        validate_radii("radii_at_start_mm", taper.radii_at_start_mm)?;
+        validate_radii("radii_at_end_mm", taper.radii_at_end_mm)?;
+    }
     let point_count = points.len();
     let segment_count = segment_starts.len();
     let output_pairs = point_count.checked_mul(segment_count).ok_or(
@@ -172,12 +312,14 @@ pub fn point_segment_distances_batch(
             maximum: limits.max_output_pairs,
         });
     }
-    let output_bytes = output_pairs.checked_mul(std::mem::size_of::<f64>()).ok_or(
-        PointSegmentBatchError::OutputSizeOverflow {
+    let output_channels = if taper.is_some() { 2 } else { 1 };
+    let output_bytes = output_pairs
+        .checked_mul(std::mem::size_of::<f64>())
+        .and_then(|bytes| bytes.checked_mul(output_channels))
+        .ok_or(PointSegmentBatchError::OutputSizeOverflow {
             points: point_count,
             segments: segment_count,
-        },
-    )?;
+        })?;
     if output_bytes > limits.max_output_bytes {
         return Err(PointSegmentBatchError::OutputByteLimitExceeded {
             required: output_bytes,
@@ -186,19 +328,54 @@ pub fn point_segment_distances_batch(
     }
 
     let mut distances_mm = vec![0.0; output_pairs];
+    let mut local_radii_mm = taper.map(|_| vec![0.0; output_pairs]);
     let effective_threads = par::run(|| {
         let effective_threads = rayon::current_num_threads();
         if segment_count != 0 {
-            distances_mm
-                .par_chunks_mut(segment_count)
-                .zip(points.par_iter())
-                .for_each(|(row, point)| {
-                    for (output, (start, end)) in
-                        row.iter_mut().zip(segment_starts.iter().zip(segment_ends))
-                    {
-                        *output = point_segment_distance(*point, *start, *end);
-                    }
-                });
+            match (taper, local_radii_mm.as_mut()) {
+                (Some(taper), Some(local_radii)) => distances_mm
+                    .par_chunks_mut(segment_count)
+                    .zip(local_radii.par_chunks_mut(segment_count))
+                    .zip(points.par_iter())
+                    .for_each(|((distance_row, radius_row), point)| {
+                        for (segment, (distance, radius)) in
+                            distance_row.iter_mut().zip(radius_row).enumerate()
+                        {
+                            let evaluation = point_segment_evaluation(
+                                *point,
+                                segment_starts[segment],
+                                segment_ends[segment],
+                                Association::FrozenJoint,
+                            );
+                            *distance = evaluation.distance;
+                            *radius = if evaluation.degenerate {
+                                taper.radii_at_start_mm[segment]
+                            } else {
+                                taper.radii_at_start_mm[segment]
+                                    + (taper.radii_at_end_mm[segment]
+                                        - taper.radii_at_start_mm[segment])
+                                        * evaluation.t
+                            };
+                        }
+                    }),
+                (None, None) => distances_mm
+                    .par_chunks_mut(segment_count)
+                    .zip(points.par_iter())
+                    .for_each(|(row, point)| {
+                        for (output, (start, end)) in
+                            row.iter_mut().zip(segment_starts.iter().zip(segment_ends))
+                        {
+                            *output = point_segment_evaluation(
+                                *point,
+                                *start,
+                                *end,
+                                Association::AcceptedDistance,
+                            )
+                            .distance;
+                        }
+                    }),
+                _ => unreachable!("mode and output allocation are inseparable"),
+            }
         }
         effective_threads
     });
@@ -212,12 +389,33 @@ pub fn point_segment_distances_batch(
             segment: flat_index % segment_count,
         });
     }
-    Ok(PointSegmentDistanceBatch {
+    if let Some((flat_index, _)) = local_radii_mm.as_ref().and_then(|values| {
+        values
+            .iter()
+            .enumerate()
+            .find(|(_, radius)| !radius.is_finite())
+    }) {
+        return Err(PointSegmentBatchError::NonFiniteOutput {
+            point: flat_index / segment_count,
+            segment: flat_index % segment_count,
+        });
+    }
+    Ok(EvaluatedBatch {
         point_count,
         segment_count,
         distances_mm,
+        local_radii_mm,
         effective_threads,
     })
+}
+
+fn validate_radii(collection: &'static str, values: &[f64]) -> Result<(), PointSegmentBatchError> {
+    for (item, value) in values.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(PointSegmentBatchError::NonFiniteRadius { collection, item });
+        }
+    }
+    Ok(())
 }
 
 fn validate(collection: &'static str, points: &[[f64; 3]]) -> Result<(), PointSegmentBatchError> {
@@ -235,7 +433,24 @@ fn validate(collection: &'static str, points: &[[f64; 3]]) -> Result<(), PointSe
     Ok(())
 }
 
-fn point_segment_distance(point: [f64; 3], start: [f64; 3], end: [f64; 3]) -> f64 {
+#[derive(Clone, Copy)]
+enum Association {
+    AcceptedDistance,
+    FrozenJoint,
+}
+
+struct SegmentEvaluation {
+    distance: f64,
+    t: f64,
+    degenerate: bool,
+}
+
+fn point_segment_evaluation(
+    point: [f64; 3],
+    start: [f64; 3],
+    end: [f64; 3],
+    association: Association,
+) -> SegmentEvaluation {
     let axis = [end[0] - start[0], end[1] - start[1], end[2] - start[2]];
     let relative = [
         point[0] - start[0],
@@ -244,15 +459,30 @@ fn point_segment_distance(point: [f64; 3], start: [f64; 3], end: [f64; 3]) -> f6
     ];
     let length_squared = dot(axis, axis);
     if length_squared < 1e-18 {
-        return norm(relative);
+        return SegmentEvaluation {
+            distance: norm(relative),
+            t: 0.0,
+            degenerate: true,
+        };
     }
     let t = (dot(relative, axis) / length_squared).clamp(0.0, 1.0);
-    let delta = [
-        relative[0] - t * axis[0],
-        relative[1] - t * axis[1],
-        relative[2] - t * axis[2],
-    ];
-    norm(delta)
+    let delta = match association {
+        Association::AcceptedDistance => [
+            relative[0] - t * axis[0],
+            relative[1] - t * axis[1],
+            relative[2] - t * axis[2],
+        ],
+        Association::FrozenJoint => [
+            point[0] - (start[0] + t * axis[0]),
+            point[1] - (start[1] + t * axis[1]),
+            point[2] - (start[2] + t * axis[2]),
+        ],
+    };
+    SegmentEvaluation {
+        distance: norm(delta),
+        t,
+        degenerate: false,
+    }
 }
 
 fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
@@ -260,7 +490,7 @@ fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
 }
 
 fn norm(value: [f64; 3]) -> f64 {
-    (value[0].powi(2) + value[1].powi(2) + value[2].powi(2)).sqrt()
+    (value[0] * value[0] + value[1] * value[1] + value[2] * value[2]).sqrt()
 }
 
 #[cfg(test)]
@@ -327,6 +557,114 @@ mod tests {
         assert!(matches!(
             PointSegmentBatchLimits::for_dimensions(usize::MAX, 2),
             Err(PointSegmentBatchError::OutputSizeOverflow { .. })
+        ));
+    }
+
+    #[test]
+    fn frozen_joint_mode_pins_association_and_local_taper_bits() {
+        let point = [[100_000_000.1, -199_999_999.8, 300_000_000.3]];
+        let start = [[100_000_000.0, -200_000_000.0, 300_000_000.0]];
+        let end = [[100_000_003.0, -199_999_996.0, 300_000_012.0]];
+        let accepted =
+            point_segment_distances_batch(&point, &start, &end, PointSegmentBatchLimits::new(1, 8))
+                .unwrap();
+        let joint = point_segment_taper_batch(
+            &point,
+            &start,
+            &end,
+            FrozenJointTaperBatch::new(&[0.25], &[1.25]),
+            PointSegmentBatchLimits::new(1, 16),
+        )
+        .unwrap();
+        assert_eq!(accepted.row(0).unwrap()[0].to_bits(), 0x3fb8_aca4_9aeb_5cf5);
+        assert_eq!(
+            joint.distance_row(0).unwrap()[0].to_bits(),
+            0x3fb8_aca4_e980_10d7
+        );
+        assert_ne!(
+            accepted.row(0).unwrap()[0].to_bits(),
+            joint.distance_row(0).unwrap()[0].to_bits()
+        );
+        assert!((accepted.row(0).unwrap()[0] - joint.distance_row(0).unwrap()[0]).abs() < 1.0e-7);
+
+        let endpoint_and_middle = point_segment_taper_batch(
+            &[
+                start[0],
+                [100_000_001.5, -199_999_998.0, 300_000_006.0],
+                end[0],
+            ],
+            &start,
+            &end,
+            FrozenJointTaperBatch::new(&[0.25], &[1.25]),
+            PointSegmentBatchLimits::new(3, 48),
+        )
+        .unwrap();
+        assert_eq!(
+            endpoint_and_middle.local_radius_row(0).unwrap()[0].to_bits(),
+            0x3fd0_0000_0000_0000
+        );
+        assert_eq!(
+            endpoint_and_middle.local_radius_row(1).unwrap()[0].to_bits(),
+            0x3fe8_0000_0000_0000
+        );
+        assert_eq!(
+            endpoint_and_middle.local_radius_row(2).unwrap()[0].to_bits(),
+            0x3ff4_0000_0000_0000
+        );
+
+        let degenerate = point_segment_taper_batch(
+            &[[2.0, 0.0, 0.0]],
+            &[[1.0, 0.0, 0.0]],
+            &[[1.0, 0.0, 0.0]],
+            FrozenJointTaperBatch::new(&[0.375], &[9.0]),
+            PointSegmentBatchLimits::new(1, 16),
+        )
+        .unwrap();
+        assert_eq!(
+            degenerate.local_radius_row(0).unwrap()[0].to_bits(),
+            0x3fd8_0000_0000_0000
+        );
+    }
+
+    #[test]
+    fn tapered_mode_caps_and_radius_validation_are_exact() {
+        let points = [[0.0, 1.0, 0.0], [3.0, 0.0, 0.0]];
+        let starts = [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
+        let ends = [[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
+        let taper = FrozenJointTaperBatch::new(&[0.25, 0.5], &[1.25, 0.75]);
+        assert!(point_segment_taper_batch(
+            &points,
+            &starts,
+            &ends,
+            taper,
+            PointSegmentBatchLimits::new(4, 64)
+        )
+        .is_ok());
+        assert_eq!(
+            point_segment_taper_batch(
+                &points,
+                &starts,
+                &ends,
+                taper,
+                PointSegmentBatchLimits::new(4, 63)
+            ),
+            Err(PointSegmentBatchError::OutputByteLimitExceeded {
+                required: 64,
+                maximum: 63,
+            })
+        );
+        assert!(matches!(
+            point_segment_taper_batch(
+                &points,
+                &starts,
+                &ends,
+                FrozenJointTaperBatch::new(&[f64::NAN, 0.5], &[1.25, 0.75]),
+                PointSegmentBatchLimits::new(4, 64)
+            ),
+            Err(PointSegmentBatchError::NonFiniteRadius {
+                collection: "radii_at_start_mm",
+                item: 0
+            })
         ));
     }
 
@@ -447,6 +785,33 @@ mod tests {
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>();
-        println!("{THREAD_SIGNATURE}{bits:?}");
+        let taper = point_segment_taper_batch(
+            &[[0.25, 1.0, 0.0], [3.0, 4.0, 5.0], [-2.0, 0.5, 7.0]],
+            &[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [-1.0, 2.0, 3.0]],
+            &[[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [4.0, 5.0, 6.0]],
+            FrozenJointTaperBatch::new(&[0.2, 0.4, 0.6], &[0.8, 1.0, 1.2]),
+            PointSegmentBatchLimits::new(9, 144),
+        )
+        .unwrap();
+        assert_eq!(taper.effective_threads(), expected_threads);
+        let taper_bits = (0..taper.point_count())
+            .map(|point| {
+                (
+                    taper
+                        .distance_row(point)
+                        .unwrap()
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                    taper
+                        .local_radius_row(point)
+                        .unwrap()
+                        .iter()
+                        .map(|value| value.to_bits())
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        println!("{THREAD_SIGNATURE}{bits:?}:{taper_bits:?}");
     }
 }

@@ -25,6 +25,11 @@ mod cco;
 mod coverage;
 pub mod dyadic;
 pub mod forest;
+#[allow(
+    dead_code,
+    reason = "crate-private current-parity joint planning is consumed by the pending support runner"
+)]
+mod joints;
 pub mod legacy_compat;
 pub mod member_sizing;
 pub mod perception;
