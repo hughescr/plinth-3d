@@ -227,14 +227,22 @@ pub fn derive_brace_attachments(
         .iter()
         .map(|(_, (_, end))| *end)
         .collect::<Vec<_>>();
+    let batch_limits = geom_kernel::PointSegmentBatchLimits::for_dimensions(
+        BRACE_ENDPOINT_BATCH_SIZE,
+        host_geometry.len(),
+    )?;
     let mut out = BTreeMap::<MemberKey, Vec<BraceAttachment>>::new();
     for endpoint_window in endpoints.chunks(BRACE_ENDPOINT_BATCH_SIZE) {
         let points = endpoint_window
             .iter()
             .map(|(_, point)| *point)
             .collect::<Vec<_>>();
-        let distances =
-            geom_kernel::point_segment_distances_batch(&points, &segment_starts, &segment_ends)?;
+        let distances = geom_kernel::point_segment_distances_batch(
+            &points,
+            &segment_starts,
+            &segment_ends,
+            batch_limits,
+        )?;
         debug_assert_eq!(
             distances.effective_threads(),
             geom_kernel::current_threads()
@@ -1086,6 +1094,7 @@ mod tests {
                 &[[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
                 &[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
                 &[[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+                geom_kernel::PointSegmentBatchLimits::new(4, 32),
             )
             .unwrap();
             assert_eq!(pool_probe.effective_threads(), expected_threads);

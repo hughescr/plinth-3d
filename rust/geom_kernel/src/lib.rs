@@ -30,7 +30,8 @@ use parity::ParityBuildError;
 pub use point_index::{NeighborCsr, PointCloudIndex, PointIndexBuildError, PointQueryError};
 pub use queries::{BatchInputError, CastRaysBatch, Interval, NativeSurface, SphereBreachBatch};
 pub use segment_batch::{
-    point_segment_distances_batch, PointSegmentBatchError, PointSegmentDistanceBatch,
+    point_segment_distances_batch, PointSegmentBatchError, PointSegmentBatchLimits,
+    PointSegmentDistanceBatch,
 };
 pub use vec3::V3;
 
