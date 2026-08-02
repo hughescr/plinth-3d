@@ -161,6 +161,8 @@ struct PenetrationRowBudget {
     samples_per_ray: usize,
     subsegments_per_ray: usize,
     intervals: usize,
+    traversal_stack: usize,
+    parity_crossings: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -397,54 +399,60 @@ impl NativeSurface {
     /// Exact nearest via branch-and-bound with lexicographic (dist, idx),
     /// strict `>` pruning, seed (upper_bound, global_nfaces) (Amendment A12).
     pub(crate) fn nearest_one(&self, p: V3, upper_bound: f64) -> (f64, usize, V3) {
+        STACK.with(|s| self.nearest_one_with_stack(p, upper_bound, &mut s.borrow_mut()))
+    }
+
+    fn nearest_one_with_stack(
+        &self,
+        p: V3,
+        upper_bound: f64,
+        stack: &mut Vec<i32>,
+    ) -> (f64, usize, V3) {
         // Keep the historical full-surface face count as the no-hit sentinel.
         // A selected global ID can never collide with this value.
         let nf = self.mesh.global_nfaces();
         let mut best_d = upper_bound;
         let mut best_i = nf;
         let mut best_cp: V3 = [0.0; 3];
-        STACK.with(|s| {
-            let mut stack = s.borrow_mut();
-            stack.clear();
-            stack.push(0);
-            while let Some(ni) = stack.pop() {
-                let node = &self.bvh.nodes[ni as usize];
-                // prune STRICTLY (> best_d): keep equal-distance lower-index tris
-                if point_box_dist(p, node.bmin, node.bmax) > best_d {
-                    continue;
+        stack.clear();
+        stack.push(0);
+        while let Some(ni) = stack.pop() {
+            let node = &self.bvh.nodes[ni as usize];
+            // prune STRICTLY (> best_d): keep equal-distance lower-index tris
+            if point_box_dist(p, node.bmin, node.bmax) > best_d {
+                continue;
+            }
+            if node.leaf {
+                let start = node.a as usize;
+                let cnt = node.b as usize;
+                for &tid in &self.bvh.order[start..start + cnt] {
+                    let t = tid as usize;
+                    let a = self.mesh.v0(t);
+                    let b = self.mesh.vertex_b(t);
+                    let cc = self.mesh.vertex_c(t);
+                    let cp = closest_on_tri(p, a, b, cc);
+                    let d = norm(sub(p, cp));
+                    if d < best_d || (d == best_d && t < best_i) {
+                        best_d = d;
+                        best_i = t;
+                        best_cp = cp;
+                    }
                 }
-                if node.leaf {
-                    let start = node.a as usize;
-                    let cnt = node.b as usize;
-                    for &tid in &self.bvh.order[start..start + cnt] {
-                        let t = tid as usize;
-                        let a = self.mesh.v0(t);
-                        let b = self.mesh.vertex_b(t);
-                        let cc = self.mesh.vertex_c(t);
-                        let cp = closest_on_tri(p, a, b, cc);
-                        let d = norm(sub(p, cp));
-                        if d < best_d || (d == best_d && t < best_i) {
-                            best_d = d;
-                            best_i = t;
-                            best_cp = cp;
-                        }
-                    }
+            } else {
+                // visit nearer child first => push farther first (LIFO)
+                let l = node.a as usize;
+                let r = node.b as usize;
+                let dl = point_box_dist(p, self.bvh.nodes[l].bmin, self.bvh.nodes[l].bmax);
+                let dr = point_box_dist(p, self.bvh.nodes[r].bmin, self.bvh.nodes[r].bmax);
+                if dl <= dr {
+                    stack.push(r as i32);
+                    stack.push(l as i32);
                 } else {
-                    // visit nearer child first => push farther first (LIFO)
-                    let l = node.a as usize;
-                    let r = node.b as usize;
-                    let dl = point_box_dist(p, self.bvh.nodes[l].bmin, self.bvh.nodes[l].bmax);
-                    let dr = point_box_dist(p, self.bvh.nodes[r].bmin, self.bvh.nodes[r].bmax);
-                    if dl <= dr {
-                        stack.push(r as i32);
-                        stack.push(l as i32);
-                    } else {
-                        stack.push(l as i32);
-                        stack.push(r as i32);
-                    }
+                    stack.push(l as i32);
+                    stack.push(r as i32);
                 }
             }
-        });
+        }
         (best_d, best_i, best_cp)
     }
 
@@ -527,41 +535,51 @@ impl NativeSurface {
     /// bounded penetration path. Callers which need a hard allocation ceiling
     /// reserve `out` before entering this routine.
     fn collect_hits_into(&self, o: V3, d: V3, t_max: f64, out: &mut Vec<(f64, u32)>) {
+        STACK.with(|s| {
+            self.collect_hits_with_stack(o, d, t_max, out, &mut s.borrow_mut());
+        });
+    }
+
+    fn collect_hits_with_stack(
+        &self,
+        o: V3,
+        d: V3,
+        t_max: f64,
+        out: &mut Vec<(f64, u32)>,
+        stack: &mut Vec<i32>,
+    ) {
         out.clear();
         let t0 = -EPS;
         let t1 = t_max + EPS;
-        STACK.with(|s| {
-            let mut stack = s.borrow_mut();
-            stack.clear();
-            stack.push(0);
-            while let Some(ni) = stack.pop() {
-                let node = &self.bvh.nodes[ni as usize];
-                if !ray_box(o, d, node.bmin, node.bmax, node.pad, t0, t1) {
-                    continue;
-                }
-                if node.leaf {
-                    let start = node.a as usize;
-                    let cnt = node.b as usize;
-                    for &tid in &self.bvh.order[start..start + cnt] {
-                        let t = tid as usize;
-                        let (hit, tv) = moller(
-                            o,
-                            d,
-                            self.mesh.v0(t),
-                            self.mesh.e1(t),
-                            self.mesh.e2(t),
-                            t_max,
-                        );
-                        if hit {
-                            out.push((tv, tid));
-                        }
-                    }
-                } else {
-                    stack.push(node.a);
-                    stack.push(node.b);
-                }
+        stack.clear();
+        stack.push(0);
+        while let Some(ni) = stack.pop() {
+            let node = &self.bvh.nodes[ni as usize];
+            if !ray_box(o, d, node.bmin, node.bmax, node.pad, t0, t1) {
+                continue;
             }
-        });
+            if node.leaf {
+                let start = node.a as usize;
+                let cnt = node.b as usize;
+                for &tid in &self.bvh.order[start..start + cnt] {
+                    let t = tid as usize;
+                    let (hit, tv) = moller(
+                        o,
+                        d,
+                        self.mesh.v0(t),
+                        self.mesh.e1(t),
+                        self.mesh.e2(t),
+                        t_max,
+                    );
+                    if hit {
+                        out.push((tv, tid));
+                    }
+                }
+            } else {
+                stack.push(node.a);
+                stack.push(node.b);
+            }
+        }
     }
 
     /// cast_rays for one ray: deduped by arc location; representative t = first
@@ -826,6 +844,10 @@ impl NativeSurface {
         if l < 1e-9 {
             return Ok(out);
         }
+        let mut traversal_stack =
+            reserve_penetration_vec(budget.traversal_stack, Some(row), "BVH traversal stack")?;
+        let mut parity_crossings =
+            reserve_penetration_vec(budget.parity_crossings, Some(row), "parity crossings")?;
         // build ray list: (ray_id, O, Dv, seg)
         let mut raylist = reserve_penetration_vec(budget.rays, Some(row), "ray list")?;
         if !rays_all {
@@ -851,7 +873,7 @@ impl NativeSurface {
             }
             // crossings along this ray
             let mut hits = reserve_penetration_vec(budget.hits_per_ray, Some(row), "hits")?;
-            self.collect_hits_into(o, dv, 1.0, &mut hits);
+            self.collect_hits_with_stack(o, dv, 1.0, &mut hits, &mut traversal_stack);
             let mut tvals =
                 reserve_penetration_vec(budget.hits_per_ray, Some(row), "crossing parameters")?;
             tvals.extend(hits.iter().map(|h| h.0));
@@ -904,10 +926,11 @@ impl NativeSurface {
                 reserve_penetration_vec(budget.samples_per_ray, Some(row), "sample depths")?;
             dist_all.resize(sample_pts.len(), 0.0f64);
             for (i, &sp) in sample_pts.iter().enumerate() {
-                let ins = self.inside_serial(sp);
+                let ins = self.pv.inside(sp, &mut parity_crossings);
                 ins_all[i] = ins;
                 if ins {
-                    let (di, _, _) = self.nearest_one(sp, f64::INFINITY);
+                    let (di, _, _) =
+                        self.nearest_one_with_stack(sp, f64::INFINITY, &mut traversal_stack);
                     dist_all[i] = di;
                 }
             }
@@ -1007,6 +1030,8 @@ impl NativeSurface {
                     samples_per_ray: 0,
                     subsegments_per_ray: 0,
                     intervals: 0,
+                    traversal_stack: 0,
+                    parity_crossings: 0,
                 },
             });
         }
@@ -1027,6 +1052,14 @@ impl NativeSurface {
             checked_penetration_mul(rays, subsegments_per_ray, "intervals per row")?;
         let work_per_row = checked_penetration_mul(rays, hits_per_ray, "work per row")?;
         let samples_per_row = checked_penetration_mul(rays, samples_per_ray, "samples per row")?;
+        let traversal_stack = checked_penetration_add(self.bvh.depth, 1, "BVH traversal stack")?;
+        let parity_crossings = self
+            .pv
+            .grids
+            .iter()
+            .map(|grid| grid.max_occ)
+            .max()
+            .unwrap_or(0);
 
         // All vectors which coexist for a ray are included. Interval output is
         // bounded separately by `max_total_intervals`; it is not scratch.
@@ -1052,6 +1085,10 @@ impl NativeSurface {
         let votes_bytes = checked_penetration_bytes::<bool>(subsegments_per_ray, "vote bytes")?;
         let subdepth_bytes =
             checked_penetration_bytes::<f64>(subsegments_per_ray, "subsegment depth bytes")?;
+        let traversal_bytes =
+            checked_penetration_bytes::<i32>(traversal_stack, "BVH traversal stack bytes")?;
+        let parity_bytes =
+            checked_penetration_bytes::<f64>(parity_crossings, "parity crossing bytes")?;
         let row_scratch = [
             raylist_bytes,
             hits_bytes,
@@ -1065,6 +1102,8 @@ impl NativeSurface {
             depths_bytes,
             votes_bytes,
             subdepth_bytes,
+            traversal_bytes,
+            parity_bytes,
         ]
         .into_iter()
         .try_fold(0usize, |total, bytes| {
@@ -1083,6 +1122,8 @@ impl NativeSurface {
                 samples_per_ray,
                 subsegments_per_ray,
                 intervals: intervals_per_row,
+                traversal_stack,
+                parity_crossings,
             },
         })
     }
@@ -1211,13 +1252,15 @@ impl NativeSurface {
         Ok(ordered)
     }
 
-    /// Compatibility entry point for callers that cannot yet select a budget.
-    /// Its limits are computed from the same checked worst-case preflight as
-    /// the bounded API; it never relies on an environment default or an
-    /// unbounded allocation path. Production callers should use
-    /// [`Self::penetration_intervals_batch_bounded`].
+    /// Crate-internal compatibility entry point retained solely for the inline
+    /// PyO3 frozen-oracle surface. Delete it with that Python surface in M9.
+    /// Rust production callers cannot bypass an explicit resource policy.
+    #[allow(
+        dead_code,
+        reason = "retained until the inline PyO3 frozen-oracle surface is deleted in M9"
+    )]
     #[allow(clippy::too_many_arguments)]
-    pub fn penetration_intervals_batch(
+    pub(crate) fn penetration_intervals_batch(
         &self,
         p0s: &[V3],
         p1s: &[V3],

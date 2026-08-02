@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use geom_kernel::NativeSurface;
+use geom_kernel::{NativeSurface, PenetrationBatchError, PenetrationBatchLimits};
 use plinth_core::{m0_constants, Finite, PositiveFinite};
 use serde::Serialize;
 use thiserror::Error;
@@ -152,6 +152,8 @@ pub(crate) enum BraceError {
     InvalidGeometry,
     #[error("native brace query failed: {0}")]
     NativeQuery(String),
+    #[error(transparent)]
+    Penetration(#[from] PenetrationBatchError),
     #[error("bracing fixed point ended with {0} exact-clearance violation(s)")]
     ClearanceViolation(usize),
     #[error(transparent)]
@@ -231,15 +233,23 @@ pub(crate) fn brace_pass_current_parity(
     surface: &NativeSurface,
     plate_z_mm: Finite,
     report: &TransientReport,
+    penetration_limits: PenetrationBatchLimits,
 ) -> Result<BracePassPlan, BraceError> {
     if &transient_report(forest, plate_z_mm)? != report {
         return Err(BraceError::StaleTransientReport);
     }
     let config = BraceConfig::current()?;
     let mut need_batch = compute_needs(forest, report, &config)?;
-    append_clearance_needs(forest, surface, report, &config, &mut need_batch)?;
+    append_clearance_needs(
+        forest,
+        surface,
+        report,
+        &config,
+        penetration_limits,
+        &mut need_batch,
+    )?;
     let candidates = gather_candidates(forest, surface, &need_batch.needs, &config)?;
-    let viable = evaluate_candidates(surface, &candidates, &config)?;
+    let viable = evaluate_candidates(surface, &candidates, &config, penetration_limits)?;
     let mut planned = forest.clone();
     let mut additions = Vec::new();
     let mut ordinals = BTreeMap::<BraceAdditionKind, u32>::new();
@@ -282,7 +292,13 @@ pub(crate) fn brace_pass_current_parity(
             }
             let fresh = transient_report(&planned, plate_z_mm)?;
             pending = pending_triggers_after_trial(
-                &planned, surface, plate_z_mm, &fresh, pending, &config,
+                &planned,
+                surface,
+                plate_z_mm,
+                &fresh,
+                pending,
+                &config,
+                penetration_limits,
             )?
             .pending;
             if pending.is_empty() {
@@ -313,6 +329,7 @@ pub(crate) fn brace_fixed_point_current_parity(
     forest: &Forest,
     surface: &NativeSurface,
     plate_z_mm: Finite,
+    penetration_limits: PenetrationBatchLimits,
 ) -> Result<BraceFixedPointPlan, BraceError> {
     const FROZEN_PASS_CAP: usize = 3;
     let mut working = forest.clone();
@@ -320,13 +337,19 @@ pub(crate) fn brace_fixed_point_current_parity(
     let mut saw_unplaceable = false;
     for iteration in 1..=FROZEN_PASS_CAP {
         let report = transient_report(&working, plate_z_mm)?;
-        let plan = brace_pass_current_parity(&working, surface, plate_z_mm, &report)?;
+        let plan =
+            brace_pass_current_parity(&working, surface, plate_z_mm, &report, penetration_limits)?;
         saw_unplaceable |= plan.rungs_unplaceable > 0;
         let changed = !plan.resize.changed.is_empty();
         working = apply_resize(plan.forest_with_braces, &plan.resize)?;
         let added = !plan.additions.is_empty();
         additions.extend(plan.additions);
-        let violations = exact_clearance_violations(&working, surface, &BraceConfig::current()?)?;
+        let violations = exact_clearance_violations(
+            &working,
+            surface,
+            &BraceConfig::current()?,
+            penetration_limits,
+        )?;
         if !added && !changed && violations == 0 {
             return Ok(BraceFixedPointPlan {
                 forest: working,
@@ -414,6 +437,7 @@ fn pending_triggers_after_trial(
     report: &TransientReport,
     pending: Vec<MemberKey>,
     config: &BraceConfig,
+    penetration_limits: PenetrationBatchLimits,
 ) -> Result<TriggerReliefResult, BraceError> {
     let compatibility = LegacyCompatibility::o10_live_current_support_and_raft();
     let mut threshold_relieved = BTreeSet::new();
@@ -450,7 +474,7 @@ fn pending_triggers_after_trial(
     // not change while their relief verdicts are scattered.
     let resize = resize_forest_current_parity(forest, plate_z_mm)?;
     let trial = apply_resize(forest.clone(), &resize)?;
-    let clearance = exact_clearance_rows(&trial, surface, config)?
+    let clearance = exact_clearance_rows(&trial, surface, config, penetration_limits)?
         .into_iter()
         .collect::<BTreeMap<_, _>>();
     Ok(TriggerReliefResult {
@@ -471,9 +495,10 @@ fn append_clearance_needs(
     surface: &NativeSurface,
     report: &TransientReport,
     config: &BraceConfig,
+    penetration_limits: PenetrationBatchLimits,
     batch: &mut NeedBatch,
 ) -> Result<(), BraceError> {
-    for member in exact_clearance_violated_members(forest, surface, config)? {
+    for member in exact_clearance_violated_members(forest, surface, config, penetration_limits)? {
         let Some(evidence) = report.member(member) else {
             continue;
         };
@@ -909,6 +934,7 @@ fn evaluate_candidates(
     surface: &NativeSurface,
     candidates: &[PlacementCandidate],
     config: &BraceConfig,
+    penetration_limits: PenetrationBatchLimits,
 ) -> Result<Vec<bool>, BraceError> {
     let mut p0 = Vec::new();
     let mut p1 = Vec::new();
@@ -937,7 +963,14 @@ fn evaluate_candidates(
             .map_err(|error| BraceError::NativeQuery(error.to_string()))?
             .0
     };
-    candidate_revalidation(surface, candidates, &ranges, &clearances, config)
+    candidate_revalidation(
+        surface,
+        candidates,
+        &ranges,
+        &clearances,
+        config,
+        penetration_limits,
+    )
 }
 
 fn candidate_revalidation(
@@ -946,6 +979,7 @@ fn candidate_revalidation(
     ranges: &[std::ops::Range<usize>],
     clearances: &[f64],
     config: &BraceConfig,
+    penetration_limits: PenetrationBatchLimits,
 ) -> Result<Vec<bool>, BraceError> {
     let rods = candidates
         .iter()
@@ -957,7 +991,16 @@ fn candidate_revalidation(
     let inset0 = rods.iter().map(|rod| rod.inset0).collect::<Vec<_>>();
     let inset1 = rods.iter().map(|rod| rod.inset1).collect::<Vec<_>>();
     let illegal_rods = axis_illegal_rows(
-        surface, &p0, &p1, &radii, &radii, &inset0, &inset1, clearances, config,
+        surface,
+        &p0,
+        &p1,
+        &radii,
+        &radii,
+        &inset0,
+        &inset1,
+        clearances,
+        config,
+        penetration_limits,
     )?;
     Ok(ranges
         .iter()
@@ -982,6 +1025,7 @@ fn axis_illegal_rows(
     inset1: &[f64],
     clearances: &[f64],
     config: &BraceConfig,
+    penetration_limits: PenetrationBatchLimits,
 ) -> Result<BTreeSet<usize>, BraceError> {
     let midpoint_rows = p0
         .iter()
@@ -1015,31 +1059,30 @@ fn axis_illegal_rows(
     if interval_indices.is_empty() {
         return Ok(BTreeSet::new());
     }
-    let intervals = surface
-        .penetration_intervals_batch(
-            &interval_indices
-                .iter()
-                .map(|index| p0[*index])
-                .collect::<Vec<_>>(),
-            &interval_indices
-                .iter()
-                .map(|index| p1[*index])
-                .collect::<Vec<_>>(),
-            &interval_indices
-                .iter()
-                .map(|index| r0[*index])
-                .collect::<Vec<_>>(),
-            &interval_indices
-                .iter()
-                .map(|index| r1[*index])
-                .collect::<Vec<_>>(),
-            8,
-            0.12,
-            80,
-            config.min_illegal_len_mm,
-            false,
-        )
-        .map_err(|error| BraceError::NativeQuery(error.to_string()))?;
+    let intervals = surface.penetration_intervals_batch_bounded(
+        &interval_indices
+            .iter()
+            .map(|index| p0[*index])
+            .collect::<Vec<_>>(),
+        &interval_indices
+            .iter()
+            .map(|index| p1[*index])
+            .collect::<Vec<_>>(),
+        &interval_indices
+            .iter()
+            .map(|index| r0[*index])
+            .collect::<Vec<_>>(),
+        &interval_indices
+            .iter()
+            .map(|index| r1[*index])
+            .collect::<Vec<_>>(),
+        8,
+        0.12,
+        80,
+        config.min_illegal_len_mm,
+        false,
+        penetration_limits,
+    )?;
     Ok(interval_indices
         .into_iter()
         .zip(intervals)
@@ -1235,29 +1278,36 @@ fn exact_clearance_violations(
     forest: &Forest,
     surface: &NativeSurface,
     config: &BraceConfig,
+    penetration_limits: PenetrationBatchLimits,
 ) -> Result<usize, BraceError> {
-    Ok(exact_clearance_rows(forest, surface, config)?
-        .into_iter()
-        .filter(|(_, clearance)| *clearance < 0.0)
-        .count())
+    Ok(
+        exact_clearance_rows(forest, surface, config, penetration_limits)?
+            .into_iter()
+            .filter(|(_, clearance)| *clearance < 0.0)
+            .count(),
+    )
 }
 
 fn exact_clearance_violated_members(
     forest: &Forest,
     surface: &NativeSurface,
     config: &BraceConfig,
+    penetration_limits: PenetrationBatchLimits,
 ) -> Result<Vec<MemberKey>, BraceError> {
     let braces = forest.braces().into_iter().collect::<BTreeSet<_>>();
-    Ok(exact_clearance_rows(forest, surface, config)?
-        .into_iter()
-        .filter_map(|(key, value)| (value < 0.0 && !braces.contains(&key)).then_some(key))
-        .collect())
+    Ok(
+        exact_clearance_rows(forest, surface, config, penetration_limits)?
+            .into_iter()
+            .filter_map(|(key, value)| (value < 0.0 && !braces.contains(&key)).then_some(key))
+            .collect(),
+    )
 }
 
 fn exact_clearance_rows(
     forest: &Forest,
     surface: &NativeSurface,
     config: &BraceConfig,
+    penetration_limits: PenetrationBatchLimits,
 ) -> Result<Vec<(MemberKey, f64)>, BraceError> {
     let rows = forest
         .live_members()
@@ -1327,7 +1377,16 @@ fn exact_clearance_rows(
         .map_err(|error| BraceError::NativeQuery(error.to_string()))?
         .0;
     for index in axis_illegal_rows(
-        surface, &p0, &p1, &r0, &r1, &inset0, &inset1, &clearance, config,
+        surface,
+        &p0,
+        &p1,
+        &r0,
+        &r1,
+        &inset0,
+        &inset1,
+        &clearance,
+        config,
+        penetration_limits,
     )? {
         // Exact-clearance consumers need a single sign verdict. Preserve any
         // harder distance violation and encode belt-only transit as negative.
@@ -1510,6 +1569,17 @@ mod tests {
     use super::*;
     use crate::forest::Owner;
     use geom_kernel::NativeSurfaceConfig;
+
+    fn test_penetration_limits() -> PenetrationBatchLimits {
+        PenetrationBatchLimits {
+            max_rows: usize::MAX,
+            max_total_work: usize::MAX,
+            max_total_hits: usize::MAX,
+            max_total_samples: usize::MAX,
+            max_total_intervals: usize::MAX,
+            max_scratch_bytes: usize::MAX,
+        }
+    }
 
     fn positive(value: f64) -> PositiveFinite {
         PositiveFinite::new(value).unwrap()
@@ -1764,6 +1834,7 @@ mod tests {
             &report,
             vec![first, second],
             &BraceConfig::current().unwrap(),
+            test_penetration_limits(),
         )
         .unwrap();
         assert!(result.pending.is_empty());
@@ -1842,8 +1913,27 @@ mod tests {
                 printable: true,
             },
         ];
-        let viable = evaluate_candidates(&surface, &candidates, &config).unwrap();
+        let viable =
+            evaluate_candidates(&surface, &candidates, &config, test_penetration_limits()).unwrap();
         assert_eq!(viable, vec![false, false]);
+        let refusal = evaluate_candidates(
+            &surface,
+            &candidates,
+            &config,
+            PenetrationBatchLimits {
+                max_rows: 0,
+                ..test_penetration_limits()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(
+            refusal,
+            BraceError::Penetration(PenetrationBatchError::ResourceLimitExceeded {
+                resource: "rows",
+                required: 2,
+                limit: 0,
+            })
+        ));
     }
 
     #[test]
@@ -1855,8 +1945,13 @@ mod tests {
             MemberKind::Trunk,
             0,
         ));
-        let plan =
-            brace_fixed_point_current_parity(&forest, &remote_box(), finite(0.0).unwrap()).unwrap();
+        let plan = brace_fixed_point_current_parity(
+            &forest,
+            &remote_box(),
+            finite(0.0).unwrap(),
+            test_penetration_limits(),
+        )
+        .unwrap();
         assert_eq!(plan.termination, BraceFixedPointTermination::Unplaceable);
     }
 
@@ -1879,7 +1974,14 @@ mod tests {
         let plate = finite(0.0).unwrap();
         let report = transient_report(&forest, plate).unwrap();
         assert!(report.member(a).unwrap().free_gaps_mm[0].hi_mm.get() >= 30.0);
-        let plan = brace_pass_current_parity(&forest, &remote_box(), plate, &report).unwrap();
+        let plan = brace_pass_current_parity(
+            &forest,
+            &remote_box(),
+            plate,
+            &report,
+            test_penetration_limits(),
+        )
+        .unwrap();
         assert_eq!(forest.digest(), before);
         assert!(plan.rungs_requested >= 1);
         assert!(plan.rungs_placed >= 1);
@@ -1989,7 +2091,14 @@ mod tests {
             ));
             let plate = finite(0.0).unwrap();
             let report = transient_report(&forest, plate).unwrap();
-            let plan = brace_pass_current_parity(&forest, &remote_box(), plate, &report).unwrap();
+            let plan = brace_pass_current_parity(
+                &forest,
+                &remote_box(),
+                plate,
+                &report,
+                test_penetration_limits(),
+            )
+            .unwrap();
             assert!(!plan.additions.is_empty());
             println!(
                 "BRACE_SWEEP={:016x}:{}",
