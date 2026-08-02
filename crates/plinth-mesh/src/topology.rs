@@ -487,14 +487,24 @@ pub fn validate_face_topology(topology: &FaceTopology) -> Result<(), TopologyVal
     Ok(())
 }
 
-pub(crate) struct WeldedView {
+/// A deterministic vertex-only projection of a mesh under an explicit weld
+/// policy.
+///
+/// This view never mutates or replaces the source [`Mesh`].  It exists for
+/// algorithms which require shared positional indexing but must retain the
+/// source triangle soup as their oracle representation.  `map()[source_id]`
+/// is the corresponding ID in `verts()`; welded IDs are assigned by the first
+/// source-order occurrence of each equivalence class.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WeldedView {
     pub(crate) verts: Vec<[f64; 3]>,
     pub(crate) map: Vec<u32>,
     pub(crate) vertex_count: u32,
 }
 
 impl WeldedView {
-    pub(crate) fn build(mesh: &Mesh, policy: WeldPolicy) -> Result<Self, TopologyError> {
+    /// Builds one explicit vertex-only weld view without changing `mesh`.
+    pub fn build(mesh: &Mesh, policy: WeldPolicy) -> Result<Self, TopologyError> {
         for (vertex, point) in mesh.verts().iter().enumerate() {
             for (axis, value) in point.iter().enumerate() {
                 if !value.is_finite() {
@@ -518,6 +528,24 @@ impl WeldedView {
             WeldPolicy::ExactBits => exact_weld(mesh.verts()),
             WeldPolicy::Epsilon(tolerance) => epsilon_weld(mesh.verts(), tolerance),
         }
+    }
+
+    /// Welded vertices in deterministic first-occurrence order.
+    #[must_use]
+    pub fn verts(&self) -> &[[f64; 3]] {
+        &self.verts
+    }
+
+    /// Source vertex ID to welded vertex ID.
+    #[must_use]
+    pub fn map(&self) -> &[u32] {
+        &self.map
+    }
+
+    /// Number of welded vertices.
+    #[must_use]
+    pub const fn vertex_count(&self) -> u32 {
+        self.vertex_count
     }
 }
 

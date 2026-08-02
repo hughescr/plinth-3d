@@ -19,7 +19,7 @@ pub use io::{load_binary_stl, load_binary_stls, write_binary_stl, write_binary_s
 pub use topology::{
     build_face_topology, mesh_fingerprint, validate_face_topology, EdgeTopologyCounts,
     FaceTopology, TopologyDigest, TopologyError, TopologySchema, TopologyValidationError,
-    FACE_TOPOLOGY_SCHEMA, FACE_TOPOLOGY_SCHEMA_VERSION, TOPOLOGY_CUT_BOUNDARY,
+    WeldedView, FACE_TOPOLOGY_SCHEMA, FACE_TOPOLOGY_SCHEMA_VERSION, TOPOLOGY_CUT_BOUNDARY,
     TOPOLOGY_CUT_DEGENERATE, TOPOLOGY_CUT_DUPLICATE, TOPOLOGY_CUT_NONMANIFOLD,
     TOPOLOGY_CUT_POINT_ONLY, TOPOLOGY_CUT_SAME_DIRECTION,
 };

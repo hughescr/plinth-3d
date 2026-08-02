@@ -16,7 +16,7 @@ use geom_kernel::{
 use meshopt::{simplify_with_locks, typed_to_bytes, SimplifyOptions, VertexDataAdapter};
 use plinth_core::{m0_constants, PositiveFinite};
 use plinth_mesh::{
-    build_face_topology, EdgeTopologyCounts, Mesh, StrictMeshAuditError, WeldPolicy,
+    build_face_topology, EdgeTopologyCounts, Mesh, StrictMeshAuditError, WeldPolicy, WeldedView,
 };
 use rand_chacha::ChaCha8Rng;
 use rand_core::{Rng, SeedableRng};
@@ -38,8 +38,11 @@ pub struct SimplifyRequest {
 pub struct SimplifyOutcome {
     /// Compact, source-f64 output mesh.
     pub mesh: Mesh,
-    /// Output vertex number -> original source vertex number, in ascending
-    /// source-ID order. This is the authoritative remapping for later stages.
+    /// Output vertex number -> deterministic representative original source
+    /// vertex number, in ascending representative-ID order.  Exact-coordinate
+    /// aliases share one output vertex; a locked alias is preferred as that
+    /// welded vertex's representative. This is the authoritative remapping for
+    /// later stages.
     pub retained_original_vertex_ids: Vec<u32>,
     pub input_face_count: usize,
     pub output_face_count: usize,
@@ -81,6 +84,8 @@ pub enum SimplifyError {
     },
     #[error("meshopt vertex adapter rejected the prepared f32 buffer: {message}")]
     VertexAdapter { message: String },
+    #[error("could not build exact-coordinate simplification topology: {message}")]
+    WeldView { message: String },
     #[error("meshopt returned malformed index count {index_count}")]
     MalformedResultIndexCount { index_count: usize },
     #[error("meshopt returned out-of-range index {index} at result position {position}; vertex count {vertex_count}")]
@@ -1195,9 +1200,8 @@ pub fn simplify_locked(
         .iter()
         .filter(|&&locked| locked)
         .count();
-    let (positions, max_input_quantization_delta) = quantize_positions(mesh.verts())?;
-
     if request.target_ratio == 1.0 {
+        let (_, max_input_quantization_delta) = quantize_positions(mesh.verts())?;
         return Ok(identity_outcome(
             mesh,
             request,
@@ -1207,7 +1211,14 @@ pub fn simplify_locked(
         ));
     }
 
-    let indices = flatten_indices(mesh.tris());
+    let welded = prepare_welded_input(mesh, &request.vertex_locks)?;
+    let position_source = if welded.is_identity {
+        mesh.verts()
+    } else {
+        welded.view.verts()
+    };
+    let (positions, max_input_quantization_delta) = quantize_positions(position_source)?;
+    let indices = flatten_mapped_indices(mesh.tris(), welded.view.map());
     let adapter = VertexDataAdapter::new(typed_to_bytes(&positions), size_of::<[f32; 3]>(), 0)
         .map_err(|error| SimplifyError::VertexAdapter {
             message: error.to_string(),
@@ -1218,7 +1229,7 @@ pub fn simplify_locked(
     let result = simplify_with_locks(
         &indices,
         &adapter,
-        &request.vertex_locks,
+        &welded.vertex_locks,
         target_faces * 3,
         f32::MAX,
         SimplifyOptions::ErrorAbsolute,
@@ -1227,6 +1238,7 @@ pub fn simplify_locked(
     compact_result(
         mesh,
         request,
+        &welded,
         result,
         ResultMetadata {
             input_faces,
@@ -1236,6 +1248,56 @@ pub fn simplify_locked(
             locked_vertex_count,
         },
     )
+}
+
+struct WeldedSimplificationInput {
+    view: WeldedView,
+    vertex_locks: Vec<bool>,
+    representative_original_ids: Vec<u32>,
+    is_identity: bool,
+}
+
+/// Builds the one explicit exact-coordinate indexing view required by QEM.
+/// Binary STL remains an untouched triangle soup in `mesh`; only this private
+/// simplifier input is welded.  Any locked source alias locks its entire
+/// equivalence class, and the first locked alias (otherwise first alias) is
+/// retained as deterministic f64 provenance.
+fn prepare_welded_input(
+    mesh: &Mesh,
+    source_locks: &[bool],
+) -> Result<WeldedSimplificationInput, SimplifyError> {
+    let view = WeldedView::build(mesh, WeldPolicy::ExactBits).map_err(|error| {
+        SimplifyError::WeldView {
+            message: error.to_string(),
+        }
+    })?;
+    let welded_count = view.vertex_count() as usize;
+    let mut vertex_locks = vec![false; welded_count];
+    let mut representative_original_ids = vec![u32::MAX; welded_count];
+    let mut representative_is_locked = vec![false; welded_count];
+    let mut is_identity = welded_count == mesh.verts().len();
+
+    for (source, (&welded, &locked)) in view.map().iter().zip(source_locks).enumerate() {
+        let welded = welded as usize;
+        is_identity &= welded == source;
+        if representative_original_ids[welded] == u32::MAX
+            || (locked && !representative_is_locked[welded])
+        {
+            representative_original_ids[welded] = source as u32;
+            representative_is_locked[welded] = locked;
+        }
+        vertex_locks[welded] |= locked;
+    }
+
+    debug_assert!(representative_original_ids
+        .iter()
+        .all(|&source| source != u32::MAX));
+    Ok(WeldedSimplificationInput {
+        view,
+        vertex_locks,
+        representative_original_ids,
+        is_identity,
+    })
 }
 
 fn target_face_count(input_faces: usize, ratio: f64) -> usize {
@@ -1264,10 +1326,10 @@ fn quantize_positions(vertices: &[[f64; 3]]) -> Result<(Vec<[f32; 3]>, f64), Sim
     Ok((positions, max_delta))
 }
 
-fn flatten_indices(triangles: &[[u32; 3]]) -> Vec<u32> {
+fn flatten_mapped_indices(triangles: &[[u32; 3]], source_to_welded: &[u32]) -> Vec<u32> {
     let mut indices = Vec::with_capacity(triangles.len() * 3);
     for triangle in triangles {
-        indices.extend_from_slice(triangle);
+        indices.extend(triangle.map(|source| source_to_welded[source as usize]));
     }
     indices
 }
@@ -1307,6 +1369,7 @@ struct ResultMetadata {
 fn compact_result(
     mesh: &Mesh,
     request: &SimplifyRequest,
+    welded: &WeldedSimplificationInput,
     result: Vec<u32>,
     metadata: ResultMetadata,
 ) -> Result<SimplifyOutcome, SimplifyError> {
@@ -1318,7 +1381,7 @@ fn compact_result(
             index_count: result.len(),
         });
     }
-    let mut retained = vec![false; mesh.verts().len()];
+    let mut retained = vec![false; welded.view.vertex_count() as usize];
     for (position, &index) in result.iter().enumerate() {
         let original = index as usize;
         if original >= retained.len() {
@@ -1330,22 +1393,33 @@ fn compact_result(
         }
         retained[original] = true;
     }
-    for (vertex, &locked) in request.vertex_locks.iter().enumerate() {
-        if locked && !retained[vertex] {
-            return Err(SimplifyError::LockedVertexRemoved { vertex });
+    for (source, &locked) in request.vertex_locks.iter().enumerate() {
+        let welded_vertex = welded.view.map()[source] as usize;
+        if locked && !retained[welded_vertex] {
+            return Err(SimplifyError::LockedVertexRemoved { vertex: source });
         }
     }
-    let retained_original_vertex_ids = retained
+    let mut retained_welded_and_original = retained
         .iter()
         .enumerate()
-        .filter_map(|(index, &used)| used.then_some(index as u32))
+        .filter_map(|(welded_vertex, &used)| {
+            used.then_some((
+                welded_vertex as u32,
+                welded.representative_original_ids[welded_vertex],
+            ))
+        })
         .collect::<Vec<_>>();
-    let mut original_to_output = vec![u32::MAX; retained.len()];
-    let compact_vertices = retained_original_vertex_ids
+    retained_welded_and_original.sort_unstable_by_key(|&(_, original)| original);
+    let retained_original_vertex_ids = retained_welded_and_original
+        .iter()
+        .map(|&(_, original)| original)
+        .collect::<Vec<_>>();
+    let mut welded_to_output = vec![u32::MAX; retained.len()];
+    let compact_vertices = retained_welded_and_original
         .iter()
         .enumerate()
-        .map(|(output, &original)| {
-            original_to_output[original as usize] = output as u32;
+        .map(|(output, &(welded_vertex, original))| {
+            welded_to_output[welded_vertex as usize] = output as u32;
             mesh.verts()[original as usize]
         })
         .collect::<Vec<_>>();
@@ -1353,9 +1427,9 @@ fn compact_result(
         .chunks_exact(3)
         .map(|face| {
             [
-                original_to_output[face[0] as usize],
-                original_to_output[face[1] as usize],
-                original_to_output[face[2] as usize],
+                welded_to_output[face[0] as usize],
+                welded_to_output[face[1] as usize],
+                welded_to_output[face[2] as usize],
             ]
         })
         .collect::<Vec<_>>();
@@ -1413,6 +1487,17 @@ mod tests {
         )
         .unwrap()
     }
+
+    fn triangle_soup(mesh: &Mesh) -> Mesh {
+        let mut vertices = Vec::with_capacity(mesh.tris().len() * 3);
+        let mut triangles = Vec::with_capacity(mesh.tris().len());
+        for triangle in mesh.tris() {
+            let base = vertices.len() as u32;
+            vertices.extend(triangle.map(|vertex| mesh.verts()[vertex as usize]));
+            triangles.push([base, base + 1, base + 2]);
+        }
+        Mesh::new(vertices, triangles).unwrap()
+    }
     fn request(ratio: f64, locks: Vec<bool>) -> SimplifyRequest {
         SimplifyRequest {
             target_ratio: ratio,
@@ -1452,6 +1537,62 @@ mod tests {
         assert!(outcome.output_face_count < outcome.input_face_count);
         outcome.mesh.audit_strict().unwrap();
     }
+
+    #[test]
+    fn exact_welded_triangle_soup_reduces_through_the_same_qem_path() {
+        let soup = triangle_soup(&octahedron());
+        assert_eq!(soup.verts().len(), soup.tris().len() * 3);
+        let outcome = simplify_locked(&soup, &request(0.5, vec![false; soup.verts().len()]))
+            .expect("triangle-soup simplification");
+        assert!(outcome.output_face_count < outcome.input_face_count);
+        outcome.mesh.audit_strict().unwrap();
+        let backward = backward_error_map(&soup, &outcome.mesh, probe_config(10.0)).unwrap();
+        assert_eq!(backward.len(), soup.verts().len());
+    }
+
+    #[test]
+    fn geometrically_distinct_one_ulp_seam_is_not_welded() {
+        let soup = triangle_soup(&octahedron());
+        assert_eq!(soup.verts()[1], soup.verts()[3]);
+        let mut vertices = soup.verts().to_vec();
+        vertices[3][1] = f64::from_bits(vertices[3][1].to_bits() + 1);
+        let distinct = Mesh::new(vertices, soup.tris().to_vec()).unwrap();
+        let locks = vec![false; distinct.verts().len()];
+        let welded = prepare_welded_input(&distinct, &locks).unwrap();
+        assert_ne!(welded.view.map()[1], welded.view.map()[3]);
+        assert_eq!(welded.view.vertex_count(), 7);
+    }
+
+    #[test]
+    fn lock_on_a_nonrepresentative_triangle_soup_alias_survives() {
+        let soup = triangle_soup(&octahedron());
+        // Soup IDs 1 and 3 are aliases of shared octahedron vertex 2. Lock
+        // the later alias so the test proves conservative lock aggregation,
+        // not accidental survival of the first-occurrence representative.
+        assert_eq!(soup.verts()[1], soup.verts()[3]);
+        let mut locks = vec![false; soup.verts().len()];
+        locks[3] = true;
+        let outcome = simplify_locked(&soup, &request(0.5, locks)).unwrap();
+        let output = outcome
+            .retained_original_vertex_ids
+            .iter()
+            .position(|&source| source == 3)
+            .expect("locked alias is retained as deterministic provenance");
+        assert_eq!(outcome.mesh.verts()[output], soup.verts()[3]);
+        assert!(outcome.output_face_count < outcome.input_face_count);
+    }
+
+    #[test]
+    fn shared_index_input_keeps_identity_weld_mapping_and_behavior() {
+        let mesh = octahedron();
+        let welded = prepare_welded_input(&mesh, &[false; 6]).unwrap();
+        assert!(welded.is_identity);
+        assert_eq!(welded.view.verts(), mesh.verts());
+        assert_eq!(welded.view.map(), &[0, 1, 2, 3, 4, 5]);
+        let outcome = simplify_locked(&mesh, &request(0.5, vec![false; 6])).unwrap();
+        assert_eq!(outcome.output_face_count, 4);
+    }
+
     #[test]
     fn all_locks_report_constrained_success() {
         let outcome = simplify_locked(&octahedron(), &request(0.25, vec![true; 6])).unwrap();
