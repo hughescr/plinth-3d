@@ -315,6 +315,11 @@ impl NativeSurface {
                     + std::mem::size_of::<f64>()
                     + std::mem::size_of::<mesh::FaceBounds>(),
             )
+            .and_then(|bytes| {
+                faces_len
+                    .checked_mul(std::mem::size_of::<u32>())
+                    .and_then(|face_ids| bytes.checked_add(face_ids))
+            })
             .ok_or(SurfaceBuildError::MemoryEstimateOverflow {
                 section: "face store",
             })?;
@@ -526,6 +531,39 @@ mod thread_tests {
                 std::env::remove_var("PLINTH_THREADS");
             }
         }
+    }
+
+    #[test]
+    fn indexed_memory_estimator_bills_mesh_face_ids_and_bvh_order_separately() {
+        let vertices = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ];
+        let faces = [[0, 1, 2], [0, 3, 1]];
+        let pitch = 0.5;
+        let bounds = Mesh::validate_indexed_bounds(&vertices, &faces).unwrap();
+        let parity = parity::estimate_indexed_memory(&vertices, &faces, bounds, pitch).unwrap();
+        let face_count = faces.len();
+        let geometry_arrays = face_count
+            * (7 * std::mem::size_of::<[f64; 3]>()
+                + std::mem::size_of::<f64>()
+                + std::mem::size_of::<mesh::FaceBounds>());
+        let mesh_face_ids = face_count * std::mem::size_of::<u32>();
+        let bvh_nodes = (2 * face_count + 1) * std::mem::size_of::<bvh::Node>();
+        let bvh_order = face_count * std::mem::size_of::<u32>();
+        let expected_retained =
+            geometry_arrays + mesh_face_ids + bvh_nodes + bvh_order + parity.retained_bytes;
+
+        let estimate =
+            NativeSurface::estimate_index_memory_from_indexed(&vertices, &faces, pitch).unwrap();
+        assert_eq!(estimate.retained_bytes(), expected_retained);
+        assert_eq!(mesh_face_ids, bvh_order);
+        assert_eq!(
+            mesh_face_ids + bvh_order,
+            2 * face_count * std::mem::size_of::<u32>()
+        );
     }
 
     #[test]
