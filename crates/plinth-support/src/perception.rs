@@ -156,7 +156,7 @@ pub(crate) struct FinalizedContactLoads {
     authority: AuthorityFingerprint,
     contacts_fingerprint: u64,
     rows_fingerprint: u64,
-    contact_count: usize,
+    contact_ids: Vec<u64>,
     tip_policy: FrozenTipLoadPolicy,
     carried_area_mm2: Vec<f64>,
     tip_radii_mm: Vec<PositiveFinite>,
@@ -164,11 +164,41 @@ pub(crate) struct FinalizedContactLoads {
 }
 
 impl FinalizedContactLoads {
-    /// Fold the stored rows in their frozen order into the contiguous physical
-    /// contact namespace `0..contact_count`.  All checks that can fail are
-    /// performed before allocating the contact-sized output.
+    /// Fold the stored rows in their frozen order into the caller's canonical
+    /// physical-contact order. Stable ids are opaque and need not be dense.
+    #[allow(
+        dead_code,
+        reason = "the sealed support runner consumes the specialized plan's canonical ids"
+    )]
     pub(crate) fn from_partition(
         partition: &FinalizedLoadPartition,
+        canonical_contact_ids: &[u64],
+        limits: FinalizedContactLoadLimits,
+    ) -> Result<Self, GenericPerceptionError> {
+        Self::from_contact_ids(
+            partition,
+            canonical_contact_ids.iter().copied(),
+            canonical_contact_ids.len(),
+            limits,
+        )
+    }
+
+    fn from_physical_contacts(
+        partition: &FinalizedLoadPartition,
+        contacts: &[PhysicalContact],
+        limits: FinalizedContactLoadLimits,
+    ) -> Result<Self, GenericPerceptionError> {
+        Self::from_contact_ids(
+            partition,
+            contacts.iter().map(|contact| contact.contact_id),
+            contacts.len(),
+            limits,
+        )
+    }
+
+    fn from_contact_ids(
+        partition: &FinalizedLoadPartition,
+        canonical_contact_ids: impl ExactSizeIterator<Item = u64>,
         contact_count: usize,
         limits: FinalizedContactLoadLimits,
     ) -> Result<Self, GenericPerceptionError> {
@@ -184,14 +214,7 @@ impl FinalizedContactLoads {
                 limit: limits.max_rows,
             });
         }
-        let required_bytes = contact_count
-            .checked_mul(std::mem::size_of::<f64>())
-            .and_then(|bytes| {
-                contact_count
-                    .checked_mul(std::mem::size_of::<PositiveFinite>())
-                    .and_then(|radii| bytes.checked_add(radii))
-            })
-            .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
+        let required_bytes = finalized_contact_load_required_bytes(contact_count)?;
         if required_bytes > limits.max_bytes {
             return Err(GenericPerceptionError::LoadScratchLimit {
                 required: required_bytes,
@@ -200,16 +223,6 @@ impl FinalizedContactLoads {
         }
 
         for row in &partition.rows {
-            if usize::try_from(row.contact_id)
-                .ok()
-                .filter(|index| *index < contact_count)
-                .is_none()
-            {
-                return Err(GenericPerceptionError::LoadContactOutOfRange {
-                    contact_id: row.contact_id,
-                    contact_count,
-                });
-            }
             if !row.carried_area_mm2.is_finite() {
                 return Err(GenericPerceptionError::NonFiniteFinalizedLoad {
                     contact_id: row.contact_id,
@@ -222,6 +235,21 @@ impl FinalizedContactLoads {
             }
         }
 
+        let contact_ids = canonical_contact_ids.collect::<Vec<_>>();
+        debug_assert_eq!(contact_ids.len(), contact_count);
+        let mut id_to_slot = contact_ids
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(slot, contact_id)| (contact_id, slot))
+            .collect::<Vec<_>>();
+        id_to_slot.sort_unstable_by_key(|&(contact_id, _)| contact_id);
+        if let Some(pair) = id_to_slot.windows(2).find(|pair| pair[0].0 == pair[1].0) {
+            return Err(GenericPerceptionError::DuplicateFinalizedContactId {
+                contact_id: pair[0].0,
+            });
+        }
+
         let policy = m0_constants()
             .map_err(|error| {
                 GenericPerceptionError::Perception(
@@ -232,8 +260,14 @@ impl FinalizedContactLoads {
         let tip_policy = FrozenTipLoadPolicy::from_placeholders(policy);
         let mut carried_area_mm2 = vec![0.0_f64; contact_count];
         for row in &partition.rows {
-            let index = row.contact_id as usize;
-            carried_area_mm2[index] += row.carried_area_mm2;
+            let slot = id_to_slot
+                .binary_search_by_key(&row.contact_id, |&(contact_id, _)| contact_id)
+                .ok()
+                .map(|index| id_to_slot[index].1)
+                .ok_or(GenericPerceptionError::UnknownFinalizedLoadContact {
+                    contact_id: row.contact_id,
+                })?;
+            carried_area_mm2[slot] += row.carried_area_mm2;
         }
         if carried_area_mm2.iter().any(|area| !area.is_finite()) {
             return Err(GenericPerceptionError::NonFiniteFinalizedLoadTotal);
@@ -249,6 +283,7 @@ impl FinalizedContactLoads {
             partition.contacts_fingerprint,
             rows_fingerprint,
             tip_policy,
+            &contact_ids,
             &carried_area_mm2,
             &tip_radii_mm,
         );
@@ -256,7 +291,7 @@ impl FinalizedContactLoads {
             authority: partition.authority.clone(),
             contacts_fingerprint: partition.contacts_fingerprint,
             rows_fingerprint,
-            contact_count,
+            contact_ids,
             tip_policy,
             carried_area_mm2,
             tip_radii_mm,
@@ -273,12 +308,12 @@ impl FinalizedContactLoads {
     pub(crate) fn validate_binding(
         &self,
         partition: &FinalizedLoadPartition,
-        contact_count: usize,
+        canonical_contact_ids: &[u64],
     ) -> Result<(), GenericPerceptionError> {
         if self.authority != partition.authority
             || self.contacts_fingerprint != partition.contacts_fingerprint
             || self.rows_fingerprint != finalized_load_rows_fingerprint(&partition.rows)
-            || self.contact_count != contact_count
+            || self.contact_ids != canonical_contact_ids
         {
             return Err(GenericPerceptionError::StaleAuthority);
         }
@@ -291,6 +326,14 @@ impl FinalizedContactLoads {
     )]
     pub(crate) fn carried_area_mm2(&self) -> &[f64] {
         &self.carried_area_mm2
+    }
+
+    #[allow(
+        dead_code,
+        reason = "the sealed support runner consumes exact stable contact identities"
+    )]
+    pub(crate) fn contact_ids(&self) -> &[u64] {
+        &self.contact_ids
     }
 
     #[allow(
@@ -376,6 +419,7 @@ fn finalized_contact_load_digest(
     contacts_fingerprint: u64,
     rows_fingerprint: u64,
     tip_policy: FrozenTipLoadPolicy,
+    contact_ids: &[u64],
     carried_area_mm2: &[f64],
     tip_radii_mm: &[PositiveFinite],
 ) -> u64 {
@@ -393,12 +437,36 @@ fn finalized_contact_load_digest(
     hash.f64(tip_policy.required_safety_factor);
     hash.f64(tip_policy.min_radius_mm);
     hash.f64(tip_policy.max_radius_mm);
-    hash.usize(carried_area_mm2.len());
-    for (area, radius) in carried_area_mm2.iter().zip(tip_radii_mm) {
+    hash.usize(contact_ids.len());
+    for ((contact_id, area), radius) in contact_ids.iter().zip(carried_area_mm2).zip(tip_radii_mm) {
+        hash.u64(*contact_id);
         hash.f64(*area);
         hash.f64(radius.get());
     }
     hash.finish()
+}
+
+fn finalized_contact_load_required_bytes(
+    contact_count: usize,
+) -> Result<usize, GenericPerceptionError> {
+    contact_count
+        .checked_mul(std::mem::size_of::<u64>())
+        .and_then(|bytes| {
+            contact_count
+                .checked_mul(std::mem::size_of::<(u64, usize)>())
+                .and_then(|mapping| bytes.checked_add(mapping))
+        })
+        .and_then(|bytes| {
+            contact_count
+                .checked_mul(std::mem::size_of::<f64>())
+                .and_then(|areas| bytes.checked_add(areas))
+        })
+        .and_then(|bytes| {
+            contact_count
+                .checked_mul(std::mem::size_of::<PositiveFinite>())
+                .and_then(|radii| bytes.checked_add(radii))
+        })
+        .ok_or(GenericPerceptionError::LoadResourceOverflow)
 }
 
 /// One canonical solid boundary or hole at a real print layer.
@@ -709,11 +777,10 @@ pub enum GenericPerceptionError {
     DuplicatePhysicalContact { contact_id: u64 },
     #[error("support face {face_id} has no eligible physical contact")]
     MissingPhysicalContact { face_id: u32 },
-    #[error("load partition names physical contact {contact_id} outside {contact_count} contacts")]
-    LoadContactOutOfRange {
-        contact_id: u64,
-        contact_count: usize,
-    },
+    #[error("canonical physical contact id {contact_id} is duplicated")]
+    DuplicateFinalizedContactId { contact_id: u64 },
+    #[error("load partition names unknown physical contact id {contact_id}")]
+    UnknownFinalizedLoadContact { contact_id: u64 },
     #[error("finalized contact-load fold requires {required} contacts; limit is {limit}")]
     FinalizedLoadContactLimit { required: usize, limit: usize },
     #[error("finalized contact-load fold requires {required} rows; limit is {limit}")]
@@ -2124,16 +2191,16 @@ pub(crate) fn finalize_specialized_load_partition(
 /// verification reuses this function rather than reconstructing capacity.
 pub(crate) fn load_violation_count(
     partition: &FinalizedLoadPartition,
-    contact_count: usize,
+    contacts: &[PhysicalContact],
 ) -> Result<usize, GenericPerceptionError> {
+    let contact_count = contacts.len();
     let limits = FinalizedContactLoadLimits::new(
         contact_count,
         partition.rows.len(),
-        contact_count
-            .checked_mul(std::mem::size_of::<f64>() + std::mem::size_of::<PositiveFinite>())
-            .ok_or(GenericPerceptionError::LoadResourceOverflow)?,
+        finalized_contact_load_required_bytes(contact_count)?,
     );
-    FinalizedContactLoads::from_partition(partition, contact_count, limits)?.load_violation_count()
+    FinalizedContactLoads::from_physical_contacts(partition, contacts, limits)?
+        .load_violation_count()
 }
 
 #[cfg_attr(
@@ -2308,15 +2375,29 @@ mod tests {
         FinalizedContactLoadLimits::new(
             contact_count,
             row_count,
-            contact_count * (std::mem::size_of::<f64>() + std::mem::size_of::<PositiveFinite>()),
+            finalized_contact_load_required_bytes(contact_count).unwrap(),
         )
+    }
+
+    fn test_contacts(ids: &[u64]) -> Vec<PhysicalContact> {
+        ids.iter()
+            .copied()
+            .map(|contact_id| PhysicalContact {
+                contact_id,
+                owner: LoadOwner::GenericIsland(0),
+                point_mm: [0.0; 3],
+            })
+            .collect()
     }
 
     #[test]
     fn finalized_contact_loads_preserve_zero_load_contacts_and_frozen_tip_clamps() {
         let empty = test_partition_rows(Vec::new());
+        let contact_ids = [100, 10, u64::MAX];
         let empty_loads =
-            FinalizedContactLoads::from_partition(&empty, 3, final_load_limits(3, 0)).unwrap();
+            FinalizedContactLoads::from_partition(&empty, &contact_ids, final_load_limits(3, 0))
+                .unwrap();
+        assert_eq!(empty_loads.contact_ids(), &contact_ids);
         assert_eq!(empty_loads.carried_area_mm2(), &[0.0, 0.0, 0.0]);
         assert_eq!(
             empty_loads
@@ -2337,12 +2418,12 @@ mod tests {
             * 1.0e6;
         let in_band = test_partition(in_band_area_mm2);
         let in_band_loads =
-            FinalizedContactLoads::from_partition(&in_band, 1, final_load_limits(1, 1)).unwrap();
+            FinalizedContactLoads::from_partition(&in_band, &[0], final_load_limits(1, 1)).unwrap();
         assert!((in_band_loads.tip_radii_mm()[0].get() - in_band_radius_mm).abs() < 1.0e-12);
 
         let capped = test_partition(in_band_area_mm2 * 16.0);
         let capped_loads =
-            FinalizedContactLoads::from_partition(&capped, 1, final_load_limits(1, 1)).unwrap();
+            FinalizedContactLoads::from_partition(&capped, &[0], final_load_limits(1, 1)).unwrap();
         assert_eq!(capped_loads.tip_radii_mm()[0].get(), 1.0);
         assert_eq!(capped_loads.load_violation_count(), Ok(1));
     }
@@ -2352,36 +2433,52 @@ mod tests {
         let partition = test_partition_rows(vec![
             FinalizedFaceLoad {
                 face_id: 8,
-                contact_id: 1,
+                contact_id: 10,
                 owner: LoadOwner::Specialized(4),
                 carried_area_mm2: 3.0,
             },
             FinalizedFaceLoad {
                 face_id: 2,
-                contact_id: 0,
+                contact_id: 100,
                 owner: LoadOwner::GenericIsland(1),
                 carried_area_mm2: 2.0,
             },
             FinalizedFaceLoad {
                 face_id: 9,
-                contact_id: 1,
+                contact_id: 10,
                 owner: LoadOwner::Specialized(4),
                 carried_area_mm2: 5.0,
             },
         ]);
-        let loads =
-            FinalizedContactLoads::from_partition(&partition, 3, final_load_limits(3, 3)).unwrap();
+        let contact_ids = [100, 10, u64::MAX];
+        let loads = FinalizedContactLoads::from_partition(
+            &partition,
+            &contact_ids,
+            final_load_limits(3, 3),
+        )
+        .unwrap();
+        assert_eq!(loads.contact_ids(), &contact_ids);
         assert_eq!(loads.carried_area_mm2(), &[2.0, 8.0, 0.0]);
-        assert!(loads.validate_binding(&partition, 3).is_ok());
+        assert!(loads.validate_binding(&partition, &contact_ids).is_ok());
 
         let mut stale = partition.clone();
         stale.rows[0].carried_area_mm2 = 4.0;
         assert_eq!(
-            loads.validate_binding(&stale, 3),
+            loads.validate_binding(&stale, &contact_ids),
             Err(GenericPerceptionError::StaleAuthority)
         );
+        let reordered_ids = [10, 100, u64::MAX];
+        let reordered = FinalizedContactLoads::from_partition(
+            &partition,
+            &reordered_ids,
+            final_load_limits(3, 3),
+        )
+        .unwrap();
+        assert_eq!(reordered.contact_ids(), &reordered_ids);
+        assert_eq!(reordered.carried_area_mm2(), &[8.0, 2.0, 0.0]);
+        assert_ne!(loads.digest(), reordered.digest());
         assert_eq!(
-            loads.validate_binding(&partition, 2),
+            loads.validate_binding(&partition, &reordered_ids),
             Err(GenericPerceptionError::StaleAuthority)
         );
     }
@@ -2395,16 +2492,21 @@ mod tests {
             carried_area_mm2: 1.0,
         }]);
         assert_eq!(
-            FinalizedContactLoads::from_partition(&unknown, 2, final_load_limits(2, 1)),
-            Err(GenericPerceptionError::LoadContactOutOfRange {
-                contact_id: 2,
-                contact_count: 2,
-            })
+            FinalizedContactLoads::from_partition(&unknown, &[100, 10], final_load_limits(2, 1)),
+            Err(GenericPerceptionError::UnknownFinalizedLoadContact { contact_id: 2 })
+        );
+        assert_eq!(
+            FinalizedContactLoads::from_partition(
+                &test_partition_rows(Vec::new()),
+                &[5, 5],
+                final_load_limits(2, 0),
+            ),
+            Err(GenericPerceptionError::DuplicateFinalizedContactId { contact_id: 5 })
         );
         assert_eq!(
             FinalizedContactLoads::from_partition(
                 &unknown,
-                3,
+                &[100, 10, 2],
                 FinalizedContactLoadLimits::new(2, 1, usize::MAX),
             ),
             Err(GenericPerceptionError::FinalizedLoadContactLimit {
@@ -2415,7 +2517,7 @@ mod tests {
         assert_eq!(
             FinalizedContactLoads::from_partition(
                 &unknown,
-                3,
+                &[100, 10, 2],
                 FinalizedContactLoadLimits::new(3, 0, usize::MAX),
             ),
             Err(GenericPerceptionError::FinalizedLoadRowLimit {
@@ -2436,22 +2538,22 @@ mod tests {
         ] {
             let invalid = test_partition(area_mm2);
             assert_eq!(
-                FinalizedContactLoads::from_partition(&invalid, 1, final_load_limits(1, 1)),
+                FinalizedContactLoads::from_partition(&invalid, &[0], final_load_limits(1, 1)),
                 Err(expected)
             );
         }
     }
 
     #[test]
-    fn finalized_contact_load_digest_is_thread_count_independent() {
+    fn finalized_contact_load_digest_is_serially_repeatable() {
         let partition = test_partition_rows(vec![FinalizedFaceLoad {
             face_id: 0,
             contact_id: 0,
             owner: LoadOwner::GenericIsland(0),
             carried_area_mm2: 4.0,
         }]);
-        let digests = [1, 4, 16].map(|_| {
-            FinalizedContactLoads::from_partition(&partition, 1, final_load_limits(1, 1))
+        let digests = std::array::from_fn::<_, 3, _>(|_| {
+            FinalizedContactLoads::from_partition(&partition, &[0], final_load_limits(1, 1))
                 .unwrap()
                 .digest()
         });
@@ -2468,9 +2570,16 @@ mod tests {
         let boundary = tensile_pa * std::f64::consts::PI * radius_m.powi(2)
             / ((required - 1.0e-6) * pressure)
             * 1.0e6;
-        assert_eq!(load_violation_count(&test_partition(boundary), 1), Ok(0));
+        let contacts = test_contacts(&[0]);
         assert_eq!(
-            load_violation_count(&test_partition(f64::from_bits(boundary.to_bits() + 1)), 1,),
+            load_violation_count(&test_partition(boundary), &contacts),
+            Ok(0)
+        );
+        assert_eq!(
+            load_violation_count(
+                &test_partition(f64::from_bits(boundary.to_bits() + 1)),
+                &contacts,
+            ),
             Ok(1)
         );
     }
@@ -2793,6 +2902,24 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let partition = finalize_load_partition(&plan, &mesh, &contacts).unwrap();
+        let loads = FinalizedContactLoads::from_physical_contacts(
+            &partition,
+            &contacts,
+            final_load_limits(contacts.len(), partition.rows().len()),
+        )
+        .unwrap();
+        assert_eq!(
+            loads.contact_ids(),
+            contacts
+                .iter()
+                .map(|contact| contact.contact_id)
+                .collect::<Vec<_>>()
+        );
+        assert!(partition
+            .rows()
+            .iter()
+            .all(|row| loads.contact_ids().contains(&row.contact_id)));
+        assert!(load_violation_count(&partition, &contacts).is_ok());
         let resource = load_resource_plan(&plan.load_eligibility, &contacts).unwrap();
         assert!(finalize_load_rows(
             &plan,
@@ -3268,12 +3395,14 @@ mod tests {
                         .split(',')
                         .map(|value| value.parse::<u64>().unwrap())
                         .collect::<Vec<_>>();
-                    assert_eq!(values[1], threads as u64);
+                    assert_eq!(values[2], threads as u64);
                     values
                 })
                 .collect::<Vec<_>>();
             assert_eq!(rows[0][0], rows[1][0]);
             assert_eq!(rows[0][0], rows[2][0]);
+            assert_eq!(rows[0][1], rows[1][1]);
+            assert_eq!(rows[0][1], rows[2][1]);
             return;
         }
 
@@ -3302,6 +3431,30 @@ mod tests {
         )
         .expect("Sphere perception");
         let (effective, participating) = plan.slice_thread_evidence();
-        println!("{SWEEP_LINE}{},{effective},{participating}", plan.digest());
+        let load_partition = test_partition_rows(vec![
+            FinalizedFaceLoad {
+                face_id: 0,
+                contact_id: 100,
+                owner: LoadOwner::GenericIsland(0),
+                carried_area_mm2: 3.0,
+            },
+            FinalizedFaceLoad {
+                face_id: 1,
+                contact_id: 10,
+                owner: LoadOwner::GenericIsland(0),
+                carried_area_mm2: 5.0,
+            },
+        ]);
+        let loads = FinalizedContactLoads::from_partition(
+            &load_partition,
+            &[10, 100, u64::MAX],
+            final_load_limits(3, 2),
+        )
+        .unwrap();
+        println!(
+            "{SWEEP_LINE}{},{},{effective},{participating}",
+            plan.digest(),
+            loads.digest()
+        );
     }
 }
