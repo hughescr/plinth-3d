@@ -11,10 +11,11 @@ use plinth_core::{m0_constants, Finite, NonNegativeFinite, PositiveFinite};
 use plinth_mesh::{mesh_fingerprint, validate_face_topology, FaceTopology, Mesh};
 use thiserror::Error;
 
+#[cfg(test)]
+use crate::SelectedContact;
 use crate::{
     forest::MemberKey,
     specialized::{PhysicalSeatProvenance, PrimaryRegularIdentity, SpecializedContactPlan},
-    SelectedContact,
 };
 
 const BELOW_LEVEL_EPS_MM: f64 = 1e-6;
@@ -321,7 +322,7 @@ impl<'a> SurfaceAnchorPool<'a> {
         &self.rows
     }
 
-    fn validate_against(
+    pub(crate) fn validate_against(
         &self,
         geometry: &AnchorGeometryAuthority<'_>,
     ) -> Result<(), AnchorSearchError> {
@@ -488,6 +489,7 @@ struct ConfigFingerprint {
     candidate_cap: usize,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ContactFingerprint {
     island_id: u32,
@@ -593,10 +595,12 @@ impl FinalizedPhysicalContactFingerprint {
     reason = "the pending controller consumes this finalized authority seam"
 )]
 enum AnchorContactFingerprint {
+    #[cfg(test)]
     Selected(ContactFingerprint),
     Finalized(FinalizedPhysicalContactFingerprint),
 }
 
+#[cfg(test)]
 impl ContactFingerprint {
     fn from_contact(contact: &SelectedContact) -> Self {
         Self {
@@ -1189,7 +1193,7 @@ impl AnchorFootValidation {
 /// Validate the exactly sized model feet in one gathered sphere-breach batch.
 /// Invalid/rebound seats are refused before the batch and scattered back into
 /// their original request positions.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn validate_anchor_feet(
     requests: Vec<AnchorFootRequest>,
     contact: &SelectedContact,
@@ -1391,13 +1395,7 @@ pub enum AnchorSearchError {
     InvalidDerived { field: &'static str },
 }
 
-#[cfg_attr(
-    not(test),
-    allow(
-        dead_code,
-        reason = "selected-contact discovery is test-only compatibility"
-    )
-)]
+#[cfg(test)]
 fn validate_contact_and_sidecar(
     contact: &SelectedContact,
     sidecar: Option<&[f64]>,

@@ -163,6 +163,33 @@ pub(crate) struct FinalizedContactLoads {
     digest: u64,
 }
 
+/// One immutable finalized-load leaf, looked up by the canonical physical
+/// contact id.  Contact ids are deliberately opaque: callers must not infer
+/// an array slot from a dense-builder implementation detail.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct FinalizedContactLoadLeaf {
+    contact_id: u64,
+    carried_area_mm2: f64,
+    tip_radius_mm: PositiveFinite,
+}
+
+impl FinalizedContactLoadLeaf {
+    #[must_use]
+    pub(crate) const fn contact_id(self) -> u64 {
+        self.contact_id
+    }
+
+    #[must_use]
+    pub(crate) const fn carried_area_mm2(self) -> f64 {
+        self.carried_area_mm2
+    }
+
+    #[must_use]
+    pub(crate) const fn tip_radius_mm(self) -> PositiveFinite {
+        self.tip_radius_mm
+    }
+}
+
 impl FinalizedContactLoads {
     /// Fold the stored rows in their frozen order into the caller's canonical
     /// physical-contact order. Stable ids are opaque and need not be dense.
@@ -334,6 +361,24 @@ impl FinalizedContactLoads {
     )]
     pub(crate) fn contact_ids(&self) -> &[u64] {
         &self.contact_ids
+    }
+
+    /// Return the exact finalized load leaf for one stable physical-contact
+    /// id.  This is intentionally an id lookup rather than an index API: the
+    /// finalized namespace is stable but not required to be dense.
+    #[allow(
+        dead_code,
+        reason = "the sealed support runner consumes physical-contact load leaves"
+    )]
+    pub(crate) fn leaf_for(&self, contact_id: u64) -> Option<FinalizedContactLoadLeaf> {
+        self.contact_ids
+            .iter()
+            .position(|&id| id == contact_id)
+            .map(|slot| FinalizedContactLoadLeaf {
+                contact_id,
+                carried_area_mm2: self.carried_area_mm2[slot],
+                tip_radius_mm: self.tip_radii_mm[slot],
+            })
     }
 
     #[allow(
