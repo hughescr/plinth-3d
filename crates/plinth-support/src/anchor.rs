@@ -266,21 +266,31 @@ impl<'a> SurfaceAnchorPool<'a> {
                 limit: limits.max_rows,
             });
         }
-        let required_bytes = row_count
-            .checked_mul(std::mem::size_of::<SurfaceAnchorSample>())
-            .ok_or(AnchorSearchError::SurfaceAnchorPoolResourceOverflow)?;
+        let required_bytes = surface_anchor_pool_required_bytes(
+            &geometry.fingerprint,
+            delicacy_by_face.len(),
+            row_count,
+        )?;
         if required_bytes > limits.max_bytes {
             return Err(AnchorSearchError::SurfaceAnchorPoolByteLimit {
                 required: required_bytes,
                 limit: limits.max_bytes,
             });
         }
+        let owned_geometry = try_clone_geometry_fingerprint(&geometry.fingerprint, required_bytes)?;
         let mut rows = Vec::new();
         rows.try_reserve_exact(row_count).map_err(|_| {
             AnchorSearchError::SurfaceAnchorPoolAllocation {
-                required: row_count,
+                required: required_bytes,
             }
         })?;
+        let mut owned_delicacy = Vec::new();
+        owned_delicacy
+            .try_reserve_exact(delicacy_by_face.len())
+            .map_err(|_| AnchorSearchError::SurfaceAnchorPoolAllocation {
+                required: required_bytes,
+            })?;
+        owned_delicacy.extend_from_slice(delicacy_by_face);
         for (face_id, &is_exterior) in exterior.iter().enumerate() {
             if is_exterior {
                 rows.push(SurfaceAnchorSample {
@@ -294,10 +304,10 @@ impl<'a> SurfaceAnchorPool<'a> {
         let digest = surface_anchor_pool_digest(&geometry.fingerprint, delicacy_by_face, &rows);
         Ok(Self {
             surface: geometry.surface(),
-            geometry: geometry.fingerprint(),
+            geometry: owned_geometry,
             digest,
             rows,
-            delicacy_by_face: delicacy_by_face.to_vec(),
+            delicacy_by_face: owned_delicacy,
         })
     }
 
@@ -326,6 +336,51 @@ impl<'a> SurfaceAnchorPool<'a> {
         }
         Ok(())
     }
+}
+
+fn surface_anchor_pool_required_bytes(
+    geometry: &GeometryFingerprint,
+    sidecar_len: usize,
+    row_count: usize,
+) -> Result<usize, AnchorSearchError> {
+    let sidecar_bytes = sidecar_len
+        .checked_mul(std::mem::size_of::<f64>())
+        .ok_or(AnchorSearchError::SurfaceAnchorPoolResourceOverflow)?;
+    let row_bytes = row_count
+        .checked_mul(std::mem::size_of::<SurfaceAnchorSample>())
+        .ok_or(AnchorSearchError::SurfaceAnchorPoolResourceOverflow)?;
+    geometry
+        .mesh_sha256
+        .len()
+        .checked_add(geometry.topology_sha256.len())
+        .and_then(|bytes| bytes.checked_add(sidecar_bytes))
+        .and_then(|bytes| bytes.checked_add(row_bytes))
+        .ok_or(AnchorSearchError::SurfaceAnchorPoolResourceOverflow)
+}
+
+fn try_clone_geometry_fingerprint(
+    geometry: &GeometryFingerprint,
+    required_bytes: usize,
+) -> Result<GeometryFingerprint, AnchorSearchError> {
+    let mut mesh_sha256 = String::new();
+    mesh_sha256
+        .try_reserve_exact(geometry.mesh_sha256.len())
+        .map_err(|_| AnchorSearchError::SurfaceAnchorPoolAllocation {
+            required: required_bytes,
+        })?;
+    mesh_sha256.push_str(&geometry.mesh_sha256);
+    let mut topology_sha256 = String::new();
+    topology_sha256
+        .try_reserve_exact(geometry.topology_sha256.len())
+        .map_err(|_| AnchorSearchError::SurfaceAnchorPoolAllocation {
+            required: required_bytes,
+        })?;
+    topology_sha256.push_str(&geometry.topology_sha256);
+    Ok(GeometryFingerprint {
+        mesh_sha256,
+        topology_sha256,
+        native_grid_pitch_bits: geometry.native_grid_pitch_bits,
+    })
 }
 
 #[allow(
@@ -1310,7 +1365,7 @@ pub enum AnchorSearchError {
     SurfaceAnchorPoolByteLimit { required: usize, limit: usize },
     #[error("surface anchor pool resource arithmetic overflowed")]
     SurfaceAnchorPoolResourceOverflow,
-    #[error("surface anchor pool could not allocate {required} rows")]
+    #[error("surface anchor pool could not allocate its {required}-byte payload")]
     SurfaceAnchorPoolAllocation { required: usize },
     #[error("model-anchor search requires a face-order delicacy sidecar")]
     MissingDelicacySidecar,
@@ -1681,6 +1736,44 @@ mod tests {
         let nested_delicacy = vec![0.25; nested_surface.nfaces()];
         let nested_pool =
             SurfaceAnchorPool::from_geometry(&nested_geometry, &nested_delicacy).unwrap();
+        let nested_required_bytes = surface_anchor_pool_required_bytes(
+            &nested_geometry.fingerprint,
+            nested_delicacy.len(),
+            nested_pool.rows().len(),
+        )
+        .unwrap();
+        let exact_cap_pool = SurfaceAnchorPool::from_geometry_with_limits(
+            &nested_geometry,
+            &nested_delicacy,
+            SurfaceAnchorPoolLimits {
+                max_rows: nested_pool.rows().len(),
+                max_bytes: nested_required_bytes,
+            },
+        )
+        .unwrap();
+        assert_eq!(exact_cap_pool.digest(), nested_pool.digest());
+        assert!(matches!(
+            SurfaceAnchorPool::from_geometry_with_limits(
+                &nested_geometry,
+                &nested_delicacy,
+                SurfaceAnchorPoolLimits {
+                    max_rows: nested_pool.rows().len(),
+                    max_bytes: nested_required_bytes - 1,
+                },
+            ),
+            Err(AnchorSearchError::SurfaceAnchorPoolByteLimit {
+                required,
+                limit,
+            }) if required == nested_required_bytes && limit == nested_required_bytes - 1
+        ));
+        assert_eq!(
+            surface_anchor_pool_required_bytes(
+                &nested_geometry.fingerprint,
+                usize::MAX,
+                nested_pool.rows().len(),
+            ),
+            Err(AnchorSearchError::SurfaceAnchorPoolResourceOverflow)
+        );
         let non_exterior_face = nested_surface
             .exterior_face_mask()
             .iter()
