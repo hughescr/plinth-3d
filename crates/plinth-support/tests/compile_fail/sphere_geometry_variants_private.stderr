@@ -1,0 +1,11 @@
+error[E0223]: ambiguous associated type
+ --> tests/compile_fail/sphere_geometry_variants_private.rs:7:13
+  |
+7 |     let _ = SphereGeometry::Tip {
+  |             ^^^^^^^^^^^^^^^^^^^
+  |
+help: if there were a trait named `Example` with associated type `Tip` implemented for `SphereGeometry`, you could use the fully-qualified path
+  |
+7 -     let _ = SphereGeometry::Tip {
+7 +     let _ = <SphereGeometry as Example>::Tip {
+  |
