@@ -102,6 +102,14 @@ impl PlannedShell {
     pub fn into_parts(self) -> (plinth_mesh::Mesh, CavityEvidence, CavityField, DrainPlan) {
         (self.shell, self.cavity, self.cavity_field, self.drain_plan)
     }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_refilled_field(mut self, excluded: &[bool]) -> Self {
+        self.cavity_field
+            .refill_excluded(excluded)
+            .expect("test exclusion matches field");
+        self
+    }
 }
 
 #[derive(Debug)]

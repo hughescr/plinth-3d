@@ -192,6 +192,39 @@ impl CavityField {
     pub(crate) fn member_flats(&self) -> impl Iterator<Item = usize> + '_ {
         (0..self.flat_count()).filter(|flat| self.contains_flat(*flat))
     }
+
+    pub(crate) fn mask_excluding(&self, excluded: &[bool]) -> Result<Array3<bool>, HollowError> {
+        if excluded.len() != self.flat_count() {
+            return Err(HollowError::VoxelStack);
+        }
+        let [nx, ny, nz] = self.dims;
+        let mut mask = Array3::from_elem((nz, ny, nx), false);
+        for flat in self.member_flats().filter(|flat| !excluded[*flat]) {
+            let [x, y, z] = self.flat_to_index(flat);
+            mask[(z, y, x)] = true;
+        }
+        Ok(mask)
+    }
+
+    pub(crate) fn refill_excluded(&mut self, excluded: &[bool]) -> Result<usize, HollowError> {
+        if excluded.len() != self.flat_count() {
+            return Err(HollowError::VoxelStack);
+        }
+        let mut removed = 0_usize;
+        for (flat, exclude) in excluded.iter().copied().enumerate() {
+            if exclude && self.contains_flat(flat) {
+                self.membership[flat / 64] &= !(1_u64 << (flat % 64));
+                removed = removed
+                    .checked_add(1)
+                    .ok_or(HollowError::ResourceAccountingOverflow)?;
+            }
+        }
+        self.member_count = self
+            .member_count
+            .checked_sub(removed)
+            .ok_or(HollowError::ResourceAccountingOverflow)?;
+        Ok(removed)
+    }
 }
 
 #[cfg(test)]

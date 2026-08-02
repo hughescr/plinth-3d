@@ -280,6 +280,18 @@ pub trait SolidBoolean {
 pub struct ManifoldBackend;
 
 impl ManifoldBackend {
+    /// Runs one batch-shaped union while enforcing explicit ABI limits.
+    pub fn union_limited(
+        &self,
+        meshes: &[Mesh],
+        limits: BooleanLimits,
+    ) -> Result<Mesh, SolidError> {
+        if meshes.is_empty() {
+            return Err(SolidError::EmptyUnion);
+        }
+        run_batch_limited(meshes, limits, ffi::manifold_union_batch)
+    }
+
     /// Runs one batch-shaped difference while enforcing explicit ABI limits.
     /// Input limits are checked before gathering or crossing the native boundary.
     pub fn difference_limited(

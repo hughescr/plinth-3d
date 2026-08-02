@@ -121,6 +121,28 @@ pub struct HollowedModel {
 }
 
 impl HollowedModel {
+    pub(crate) fn from_verified_hollow(mesh: Mesh, history: HollowHistory) -> Self {
+        Self { mesh, history }
+    }
+
+    /// Explicit non-hollow support handoff. The caller must name why the
+    /// oriented solid was retained; no shell candidate can use this path.
+    pub fn solid_fallback(
+        mesh: Mesh,
+        orientation: OrientationHistory,
+        reason: SolidFallbackReason,
+    ) -> Result<Self, HollowError> {
+        validate_closed_mesh(&mesh)?;
+        let report = HollowReport {
+            disposition: HollowDisposition::SolidFallback { reason },
+            cavities: Vec::new(),
+            drains: Vec::new(),
+        };
+        Ok(Self {
+            mesh,
+            history: HollowHistory::from_reports(orientation, report),
+        })
+    }
     #[must_use]
     pub fn mesh(&self) -> &Mesh {
         &self.mesh
@@ -450,6 +472,10 @@ pub struct CavityEvidence {
 }
 
 impl CavityEvidence {
+    pub(crate) fn with_cavity_volume_mm3(mut self, cavity_volume_mm3: Finite) -> Self {
+        self.cavity_volume_mm3 = cavity_volume_mm3;
+        self
+    }
     #[must_use]
     pub const fn wall_thickness_mm(self) -> Finite {
         self.wall_thickness_mm
@@ -1406,7 +1432,11 @@ fn frozen_distance_transform(
         .map_err(|_| HollowError::VoxelStack)
 }
 
-fn marching_cavity(mask: &Array3<bool>, origin: [f64; 3], pitch: f64) -> Result<Mesh, HollowError> {
+pub(crate) fn marching_cavity(
+    mask: &Array3<bool>,
+    origin: [f64; 3],
+    pitch: f64,
+) -> Result<Mesh, HollowError> {
     let [nz, ny, nx]: [usize; 3] = mask
         .shape()
         .try_into()

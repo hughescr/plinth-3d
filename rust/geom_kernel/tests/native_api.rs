@@ -54,6 +54,40 @@ fn indexed_memory_estimate_is_checked_and_is_the_exact_grid_cap_boundary() {
     ));
 }
 
+#[test]
+fn indexed_estimator_mirrors_edge_reconstruction_at_floating_cell_boundaries() {
+    // `a + (b - a)` lands just below the source bit-pattern at this scale.
+    // The indexed store intentionally retains edges, so its allocation
+    // preflight must bin the reconstructed vertex exactly like the builder.
+    let vertices = vec![
+        [1.0, 0.0, 0.0],
+        [0.1, 0.0, 0.0],
+        [0.0, 1.0, 1.0],
+        [0.0, 0.0, 2.0],
+    ];
+    let faces = vec![[0, 1, 2], [1, 3, 2]];
+    let estimate = NativeSurface::estimate_index_memory_from_indexed(&vertices, &faces, 0.1)
+        .expect("finite indexed estimate");
+    NativeSurface::from_indexed(
+        &vertices,
+        &faces,
+        NativeSurfaceConfig {
+            grid_pitch_mm: 0.1,
+            max_grid_bytes: estimate.max_axis_grid_bytes(),
+        },
+    )
+    .expect("exact reconstructed-coordinate cap");
+    assert!(NativeSurface::from_indexed(
+        &vertices,
+        &faces,
+        NativeSurfaceConfig {
+            grid_pitch_mm: 0.1,
+            max_grid_bytes: estimate.max_axis_grid_bytes() - 1,
+        },
+    )
+    .is_err());
+}
+
 fn assert_batch_error<T>(
     result: Result<T, BatchInputError>,
     operation: &'static str,
