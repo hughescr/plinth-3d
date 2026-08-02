@@ -33,7 +33,10 @@ use parity::ParityBuildError;
 pub use point_index::{
     NeighborCsr, PointCloudIndex, PointIndexBuildError, PointQueryError, RadiusQueryLimits,
 };
-pub use queries::{BatchInputError, CastRaysBatch, Interval, NativeSurface, SphereBreachBatch};
+pub use queries::{
+    BatchInputError, CastRaysBatch, Interval, NativeSurface, PenetrationBatchError,
+    PenetrationBatchLimits, SphereBreachBatch,
+};
 pub use segment_batch::{
     point_segment_distances_batch, point_segment_taper_batch, FrozenJointTaperBatch,
     PointSegmentBatchError, PointSegmentBatchLimits, PointSegmentDistanceBatch,
