@@ -976,6 +976,7 @@ dependencies = [
  "scirs2-core",
  "scirs2-ndimage",
  "serde",
+ "serde_json",
  "thiserror 1.0.69",
 ]
 

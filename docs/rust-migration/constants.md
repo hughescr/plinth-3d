@@ -92,7 +92,10 @@
 | HOLLOW&#95;SHARD&#95;MAX&#95;DIM&#95;MM | 1.0 | mm | scalar | placeholder(note="Placeholder; non-AcceptSafe. Component-triage dimension ceiling.") |
 | HOLLOW&#95;SHARD&#95;MAX&#95;FACES | 64 | count | scalar | placeholder(note="Placeholder; non-AcceptSafe. Component-triage face ceiling.") |
 | HOLLOW&#95;SHARD&#95;MAX&#95;VOLUME&#95;MM3 | 0.01 | mm³ | scalar | placeholder(note="Placeholder; non-AcceptSafe. Component-triage volume ceiling.") |
+| HOLLOW&#95;VENT&#95;DIRECTIONS | &#91;{"x":1.0,"y":0.0,"z":0.0},{"x":-1.0,"y":0.0,"z":0.0},{"x":0.0,"y":1.0,"z":0.0},{"x":0.0,"y":-1.0,"z":0.0}&#93; | 1 | list&#91;4&#93;&lt;record{x,y,z}&gt; | placeholder(note="Placeholder; non-AcceptSafe. Ordered horizontal vent-search directions.") |
 | HOLLOW&#95;VENT&#95;R&#95;MM | 1.25 | mm | scalar | placeholder(note="Placeholder; non-AcceptSafe. Vent-hole radius policy.") |
+| HOLLOW&#95;VENT&#95;SAMPLE&#95;DIVISOR | 40 | count | scalar | placeholder(note="Placeholder; non-AcceptSafe. Top-band vent-site deterministic sampling divisor.") |
+| HOLLOW&#95;VENT&#95;TOP&#95;BAND&#95;MM | 2.0 | mm | scalar | placeholder(note="Placeholder; non-AcceptSafe. Cavity-top band searched for a horizontal vent site.") |
 | HOLLOW&#95;VOLUME&#95;BALANCE&#95;REL&#95;TOL | 0.02 | 1 | scalar | placeholder(note="Placeholder; non-AcceptSafe. Final volume-balance tolerance relative to solid volume.") |
 | HOLLOW&#95;WALL&#95;DEFAULT&#95;MM | 2.5 | mm | scalar | placeholder(note="Placeholder; non-AcceptSafe. Hollow generation and tool wall default.") |
 | ISLAND&#95;ATTACH&#95;REACH&#95;MM | 0.2 | mm | scalar | placeholder(note="Placeholder; non-AcceptSafe. Tuning tied to the legacy Placeholder tip default.") |
