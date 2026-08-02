@@ -13,7 +13,7 @@ use geom_kernel::{
     NativeSurface, NativeSurfaceConfig, PlaneSliceLimits, PointCloudIndex, PointQueryError,
     RadiusQueryLimits,
 };
-use plinth_core::LayerPlan;
+use plinth_core::{m0_constants, LayerPlan};
 use plinth_mesh::{mesh_fingerprint, FaceTopology, Mesh, WeldPolicy, WeldedView};
 use thiserror::Error;
 
@@ -411,6 +411,11 @@ pub enum GenericPerceptionError {
     DuplicatePhysicalContact { contact_id: u64 },
     #[error("support face {face_id} has no eligible physical contact")]
     MissingPhysicalContact { face_id: u32 },
+    #[error("load partition names physical contact {contact_id} outside {contact_count} contacts")]
+    LoadContactOutOfRange {
+        contact_id: u64,
+        contact_count: usize,
+    },
     #[error("generic perception produced an island without a legal dyadic candidate: {island_id}")]
     NoLegalCandidate { island_id: u32 },
     #[error("generic perception authority is stale or belongs to another input")]
@@ -1474,6 +1479,15 @@ pub(crate) fn finalize_load_partition(
     mesh: &Mesh,
     contacts: &[PhysicalContact],
 ) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
+    finalize_load_rows(plan, mesh, &plan.load_eligibility, contacts)
+}
+
+fn finalize_load_rows(
+    plan: &GenericContactPlan,
+    mesh: &Mesh,
+    load_eligibility: &[LoadEligibility],
+    contacts: &[PhysicalContact],
+) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
     let fingerprint = mesh_fingerprint(mesh)
         .map_err(|error| GenericPerceptionError::Topology(error.to_string()))?;
     if fingerprint != plan.authority.mesh {
@@ -1501,8 +1515,7 @@ pub(crate) fn finalize_load_partition(
     }
     let mut nearest = BTreeMap::<(usize, LoadOwner), (&PhysicalContact, f64)>::new();
     for (owner, owner_contacts) in &by_owner {
-        let face_rows = plan
-            .load_eligibility
+        let face_rows = load_eligibility
             .iter()
             .enumerate()
             .filter(|(_, eligibility)| eligibility.eligible_owners.binary_search(owner).is_ok())
@@ -1535,8 +1548,8 @@ pub(crate) fn finalize_load_partition(
             );
         }
     }
-    let mut rows = Vec::with_capacity(plan.load_eligibility.len());
-    for (row, eligibility) in plan.load_eligibility.iter().enumerate() {
+    let mut rows = Vec::with_capacity(load_eligibility.len());
+    for (row, eligibility) in load_eligibility.iter().enumerate() {
         let (contact, _) = eligibility
             .eligible_owners
             .iter()
@@ -1589,24 +1602,20 @@ pub(crate) fn finalize_specialized_load_partition(
     if fingerprint != plan.authority.mesh {
         return Err(GenericPerceptionError::StaleAuthority);
     }
-    let mut extended = plan.clone();
+    let mut extended = plan.load_eligibility.clone();
     for (owner_id, faces) in specialized_owner_faces {
         let owner = LoadOwner::Specialized(*owner_id);
         for &face_id in faces {
             if face_id as usize >= mesh.tris().len() {
                 return Err(GenericPerceptionError::SpecializedFaceOutOfRange { face_id });
             }
-            if let Some(row) = extended
-                .load_eligibility
-                .iter_mut()
-                .find(|row| row.face_id == face_id)
-            {
+            if let Some(row) = extended.iter_mut().find(|row| row.face_id == face_id) {
                 match row.eligible_owners.binary_search(&owner) {
                     Ok(_) => {}
                     Err(index) => row.eligible_owners.insert(index, owner),
                 }
             } else {
-                extended.load_eligibility.push(LoadEligibility {
+                extended.push(LoadEligibility {
                     face_id,
                     eligible_owners: vec![owner],
                     centroid_mm: surface.geometry().centroids()[face_id as usize],
@@ -1615,10 +1624,52 @@ pub(crate) fn finalize_specialized_load_partition(
             }
         }
     }
-    extended
-        .load_eligibility
-        .sort_by_key(|eligibility| eligibility.face_id);
-    finalize_load_partition(&extended, mesh, contacts)
+    extended.sort_by_key(|eligibility| eligibility.face_id);
+    finalize_load_rows(plan, mesh, &extended, contacts)
+}
+
+/// Exact live `placement.tip_radius_mm` plus `verify.load_report` predicate.
+/// The partition is the sole unique-face load authority; later support
+/// verification reuses this function rather than reconstructing capacity.
+pub(crate) fn load_violation_count(
+    partition: &FinalizedLoadPartition,
+    contact_count: usize,
+) -> Result<usize, GenericPerceptionError> {
+    let mut carried = vec![0.0_f64; contact_count];
+    for row in partition.rows() {
+        let index = usize::try_from(row.contact_id)
+            .ok()
+            .filter(|index| *index < contact_count)
+            .ok_or(GenericPerceptionError::LoadContactOutOfRange {
+                contact_id: row.contact_id,
+                contact_count,
+            })?;
+        carried[index] += row.carried_area_mm2;
+    }
+    let policy = m0_constants()
+        .map_err(|error| {
+            GenericPerceptionError::Perception(
+                SupportPerceptionError::RegisteredConstantsUnavailable(error.to_string()),
+            )
+        })?
+        .placeholders();
+    let pressure = policy.peel_pressure_pa().diagnostic().get();
+    let tensile_pa = policy.tensile_green_mpa().diagnostic().get() * 1.0e6;
+    let required_sf = policy.tip_safety_factor().diagnostic().get();
+    let min_radius_mm = policy.tip_radius_default_mm().diagnostic().get();
+    let max_radius_mm = policy.tip_radius_max_legacy_mm().diagnostic().get();
+    Ok(carried
+        .into_iter()
+        .filter(|area_mm2| {
+            let force_n = *area_mm2 * 1.0e-6 * pressure;
+            let required_radius_mm =
+                (force_n * required_sf / (std::f64::consts::PI * tensile_pa)).sqrt() * 1.0e3;
+            let radius_m = required_radius_mm.clamp(min_radius_mm, max_radius_mm) / 1.0e3;
+            let stress_pa = force_n / (std::f64::consts::PI * radius_m.max(1.0e-9).powi(2));
+            let realized_sf = tensile_pa / stress_pa.max(1.0e-9);
+            realized_sf < required_sf - 1.0e-6
+        })
+        .count())
 }
 
 #[cfg_attr(
@@ -1764,6 +1815,43 @@ mod tests {
 
     const SWEEP_CHILD: &str = "PLINTH_PERCEPTION_SWEEP_CHILD";
     const SWEEP_LINE: &str = "PLINTH_PERCEPTION_SWEEP=";
+
+    fn test_partition(area_mm2: f64) -> FinalizedLoadPartition {
+        FinalizedLoadPartition {
+            authority: AuthorityFingerprint {
+                mesh: String::new(),
+                native: 0,
+                config: 0,
+                frame: 0,
+                layers: 0,
+                specialized: 0,
+            },
+            contacts_fingerprint: 0,
+            rows: vec![FinalizedFaceLoad {
+                face_id: 0,
+                contact_id: 0,
+                owner: LoadOwner::GenericIsland(0),
+                carried_area_mm2: area_mm2,
+            }],
+        }
+    }
+
+    #[test]
+    fn shared_load_gate_pins_the_live_one_e_minus_six_tolerance() {
+        let policy = m0_constants().unwrap().placeholders();
+        let pressure = policy.peel_pressure_pa().diagnostic().get();
+        let tensile_pa = policy.tensile_green_mpa().diagnostic().get() * 1.0e6;
+        let required = policy.tip_safety_factor().diagnostic().get();
+        let radius_m = policy.tip_radius_max_legacy_mm().diagnostic().get() / 1.0e3;
+        let boundary = tensile_pa * std::f64::consts::PI * radius_m.powi(2)
+            / ((required - 1.0e-6) * pressure)
+            * 1.0e6;
+        assert_eq!(load_violation_count(&test_partition(boundary), 1), Ok(0));
+        assert_eq!(
+            load_violation_count(&test_partition(f64::from_bits(boundary.to_bits() + 1)), 1,),
+            Ok(1)
+        );
+    }
 
     fn perception_config<'a>(delicacy: &'a [f64]) -> SupportPerceptionConfig<'a> {
         SupportPerceptionConfig::current(

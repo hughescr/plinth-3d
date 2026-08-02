@@ -974,6 +974,8 @@ pub enum ContactSelectionError {
     RegisteredConstantsUnavailable(String),
     #[error("registered count cannot be represented on this platform")]
     CountNotRepresentable,
+    #[error("coverage assessment has {actual} distances for {expected} samples")]
+    CoverageAssessmentLength { expected: usize, actual: usize },
 }
 
 /// Select current regular contacts from S0 candidates and prove A3 coverage.
@@ -1121,7 +1123,7 @@ fn select_contacts_with_work(
             &samples,
             &coverage_index,
             &topology,
-            config.voxel_pitch_mm.get(),
+            config.voxel_pitch_mm.get().powi(2),
             &mut work,
         );
         if failing.is_empty() {
@@ -1424,17 +1426,35 @@ fn coverage_validation_peak_bytes(
         .ok_or(ContactSelectionError::CoverageResourceOverflow)
 }
 
-fn failing_coverage_samples(
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct CoverageObjective {
+    pub(crate) failing_uncovered_area_mm2: f64,
+    pub(crate) max_patch_area_mm2: f64,
+    pub(crate) failing_patch_count: usize,
+    pub(crate) worst_gap_mm: f64,
+}
+
+pub(crate) struct CoverageAssessment {
+    pub(crate) objective: CoverageObjective,
+    pub(crate) failing_sample_indices: Vec<usize>,
+}
+
+pub(crate) fn assess_coverage(
     samples: &[CoverageSample],
-    contacts: &CoverageContactIndex,
     topology: &plinth_mesh::FaceTopology,
+    nearest_mm: &[f64],
+    radius_mm: f64,
     area_floor_mm2: f64,
-    work: &mut SelectionWork,
-) -> Vec<usize> {
+) -> Result<CoverageAssessment, ContactSelectionError> {
+    if nearest_mm.len() != samples.len() {
+        return Err(ContactSelectionError::CoverageAssessmentLength {
+            expected: samples.len(),
+            actual: nearest_mm.len(),
+        });
+    }
     let mut uncovered_by_face = std::collections::BTreeMap::<(u32, u32), (f64, Vec<usize>)>::new();
     for (sample_index, sample) in samples.iter().enumerate() {
-        let covered = contacts.covers(sample, work);
-        if !covered {
+        if nearest_mm[sample_index] > radius_mm {
             let row = uncovered_by_face
                 .entry((sample.island_id, sample.face_id))
                 .or_insert((0.0, Vec::new()));
@@ -1442,7 +1462,11 @@ fn failing_coverage_samples(
             row.1.push(sample_index);
         }
     }
-    let mut failing = Vec::new();
+    let mut assessment = CoverageAssessment {
+        objective: CoverageObjective::default(),
+        failing_sample_indices: Vec::new(),
+    };
+    let mut failing_islands = std::collections::BTreeSet::new();
     let mut visited = std::collections::BTreeSet::new();
     for &(island_id, face_id) in uncovered_by_face.keys() {
         if !visited.insert((island_id, face_id)) {
@@ -1468,11 +1492,54 @@ fn failing_coverage_samples(
             }
         }
         if patch_area > area_floor_mm2 || patch_ambiguous {
-            failing.extend(patch_samples);
+            assessment.objective.failing_uncovered_area_mm2 += patch_area;
+            assessment.objective.max_patch_area_mm2 =
+                assessment.objective.max_patch_area_mm2.max(patch_area);
+            assessment.objective.failing_patch_count =
+                assessment.objective.failing_patch_count.saturating_add(1);
+            assessment.failing_sample_indices.extend(patch_samples);
+            failing_islands.insert(island_id);
         }
     }
-    failing.sort_unstable();
-    failing
+    assessment.failing_sample_indices.sort_unstable();
+    assessment.objective.worst_gap_mm = samples
+        .iter()
+        .zip(nearest_mm)
+        .filter_map(|(sample, nearest)| {
+            failing_islands
+                .contains(&sample.island_id)
+                .then_some(*nearest)
+        })
+        .fold(0.0, f64::max);
+    Ok(assessment)
+}
+
+fn failing_coverage_samples(
+    samples: &[CoverageSample],
+    contacts: &CoverageContactIndex,
+    topology: &plinth_mesh::FaceTopology,
+    area_floor_mm2: f64,
+    work: &mut SelectionWork,
+) -> Vec<usize> {
+    let nearest = samples
+        .iter()
+        .map(|sample| {
+            if contacts.covers(sample, work) {
+                0.0
+            } else {
+                f64::INFINITY
+            }
+        })
+        .collect::<Vec<_>>();
+    assess_coverage(
+        samples,
+        topology,
+        &nearest,
+        contacts.radius_mm,
+        area_floor_mm2,
+    )
+    .expect("one coverage distance per shared sample")
+    .failing_sample_indices
 }
 
 fn best_coverage_repair<'a>(
@@ -2481,6 +2548,64 @@ mod tests {
             vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]],
         )
         .expect("closed tetrahedron")
+    }
+
+    #[test]
+    fn shared_coverage_assessment_aggregates_connected_faces_and_ambiguity_cuts() {
+        let mesh = small_closed_tetra();
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let samples = vec![
+            CoverageSample {
+                island_id: 0,
+                face_id: 0,
+                component_id: topology.component_ids()[0],
+                point_mm: [0.0, 0.0, 0.0],
+                area_mm2: 0.1,
+            },
+            CoverageSample {
+                island_id: 0,
+                face_id: 1,
+                component_id: topology.component_ids()[1],
+                point_mm: [0.0, 0.0, 0.0],
+                area_mm2: 0.1,
+            },
+        ];
+        let connected = assess_coverage(&samples, &topology, &[2.0, 3.0], 1.0, 0.16).unwrap();
+        assert_eq!(connected.failing_sample_indices, vec![0, 1]);
+        assert_eq!(
+            connected.objective,
+            CoverageObjective {
+                failing_uncovered_area_mm2: 0.2,
+                max_patch_area_mm2: 0.2,
+                failing_patch_count: 1,
+                worst_gap_mm: 3.0,
+            }
+        );
+        let below_floor = assess_coverage(&samples, &topology, &[2.0, 0.0], 1.0, 0.16).unwrap();
+        assert!(below_floor.failing_sample_indices.is_empty());
+
+        let open = Mesh::new(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[0, 1, 2]],
+        )
+        .unwrap();
+        let open_topology = build_face_topology(&open, WeldPolicy::ExactBits).unwrap();
+        let ambiguous = assess_coverage(
+            &[CoverageSample {
+                island_id: 0,
+                face_id: 0,
+                component_id: 0,
+                point_mm: [0.0, 0.0, 0.0],
+                area_mm2: 0.01,
+            }],
+            &open_topology,
+            &[2.0],
+            1.0,
+            0.16,
+        )
+        .unwrap();
+        assert_eq!(ambiguous.failing_sample_indices, vec![0]);
+        assert_eq!(ambiguous.objective.failing_patch_count, 1);
     }
 
     #[test]

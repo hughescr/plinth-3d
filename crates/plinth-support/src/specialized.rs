@@ -15,13 +15,14 @@ use thiserror::Error;
 
 use crate::dyadic::{build_candidate_payload, CandidatePayloadConfig, DyadicError};
 use crate::perception::{
-    finalize_specialized_load_partition, FinalizedLoadPartition, GenericContactPlan,
-    GenericPerceptionError, GenericPerceptionLimits, LoadOwner, PhysicalContact, SliceSolid,
-    SpecializedOwnerReservation,
+    finalize_specialized_load_partition, load_violation_count, FinalizedLoadPartition,
+    GenericContactPlan, GenericPerceptionError, GenericPerceptionLimits, LoadOwner,
+    PhysicalContact, SliceSolid, SpecializedOwnerReservation,
 };
 use crate::{
-    build_dyadic_coverage_samples, BuildFrame, ContactSelectionConfig, ContactSelectionError,
-    CoverageSample, SelectedContact, SelectedContacts, SupportIsland, SupportPerceptionConfig,
+    assess_coverage, build_dyadic_coverage_samples, BuildFrame, ContactSelectionConfig,
+    ContactSelectionError, CoverageObjective, CoverageSample, SelectedContact, SelectedContacts,
+    SupportIsland, SupportPerceptionConfig,
 };
 
 const SYNTHETIC_PATCH_RADIUS_MM: f64 = 1.5;
@@ -36,6 +37,12 @@ pub struct SpecializedLimits {
     pub max_satisfaction_neighbor_pairs: usize,
     pub max_satisfaction_neighbor_bytes: usize,
     pub max_merge_pairs: usize,
+    pub max_merge_proposals: usize,
+    pub max_gate_variants: usize,
+    pub max_gate_vector_bytes: usize,
+    pub max_gate_contact_matrix_bytes: usize,
+    pub max_gate_operations: usize,
+    pub max_gate_window_variants: usize,
 }
 
 impl SpecializedLimits {
@@ -48,6 +55,12 @@ impl SpecializedLimits {
             max_satisfaction_neighbor_pairs: 100_000_000,
             max_satisfaction_neighbor_bytes: 2 * 1024 * 1024 * 1024,
             max_merge_pairs: 20_000_000,
+            max_merge_proposals: 20_000_000,
+            max_gate_variants: 20_000_001,
+            max_gate_vector_bytes: 512 * 1024 * 1024,
+            max_gate_contact_matrix_bytes: 512 * 1024 * 1024,
+            max_gate_operations: 2_000_000_000,
+            max_gate_window_variants: 1_024,
         }
     }
 }
@@ -220,15 +233,7 @@ impl SpecializedContactPlan {
             reservations,
             perception_limits,
         )?;
-        let topology = build_face_topology(mesh, WeldPolicy::ExactBits)
-            .map_err(|error| SpecializedError::Topology(error.to_string()))?;
-        validate_regular(
-            mesh,
-            generic,
-            regular,
-            selection_config,
-            topology.component_ids(),
-        )?;
+        validate_regular(mesh, generic, regular, selection_config)?;
         if bound_authority_digest(generic, regular, selection_config, limits)
             != self.authority_digest
         {
@@ -293,8 +298,8 @@ impl SpecializedContactPlan {
         }
         for vector in [self.gate_evidence.baseline, self.gate_evidence.accepted] {
             hash.f64(vector.failing_uncovered_area_mm2);
-            hash.f64(vector.max_failing_sample_area_mm2);
-            hash.usize(vector.failing_sample_count);
+            hash.f64(vector.max_patch_area_mm2);
+            hash.usize(vector.failing_patch_count);
             hash.f64(vector.worst_gap_mm);
             hash.usize(vector.load_violation_count);
             hash.usize(vector.unsupported_specialized_count);
@@ -309,11 +314,28 @@ impl SpecializedContactPlan {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FrozenSpecializedGateVector {
     pub failing_uncovered_area_mm2: f64,
-    pub max_failing_sample_area_mm2: f64,
-    pub failing_sample_count: usize,
+    pub max_patch_area_mm2: f64,
+    pub failing_patch_count: usize,
     pub worst_gap_mm: f64,
     pub load_violation_count: usize,
     pub unsupported_specialized_count: usize,
+}
+
+impl FrozenSpecializedGateVector {
+    fn from_live(
+        coverage: CoverageObjective,
+        load_violation_count: usize,
+        unsupported_specialized_count: usize,
+    ) -> Self {
+        Self {
+            failing_uncovered_area_mm2: coverage.failing_uncovered_area_mm2,
+            max_patch_area_mm2: coverage.max_patch_area_mm2,
+            failing_patch_count: coverage.failing_patch_count,
+            worst_gap_mm: coverage.worst_gap_mm,
+            load_violation_count,
+            unsupported_specialized_count,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -348,6 +370,20 @@ pub enum SpecializedError {
     SatisfactionNeighbors(String),
     #[error("specialized merge work requires {required} pairs; limit is {limit}")]
     MergePairLimit { required: usize, limit: usize },
+    #[error("specialized merge produced {required} proposals; limit is {limit}")]
+    MergeProposalLimit { required: usize, limit: usize },
+    #[error("specialized gate requires {required} variants; limit is {limit}")]
+    GateVariantLimit { required: usize, limit: usize },
+    #[error("specialized gate vector requires {required} bytes; limit is {limit}")]
+    GateVectorByteLimit { required: usize, limit: usize },
+    #[error("specialized gate contact window requires {required} bytes; limit is {limit}")]
+    GateContactMatrixByteLimit { required: usize, limit: usize },
+    #[error("specialized gate requires {required} operations; limit is {limit}")]
+    GateOperationLimit { required: usize, limit: usize },
+    #[error("specialized gate window size must be positive")]
+    InvalidGateWindow,
+    #[error("specialized gate resource arithmetic overflowed")]
+    GateResourceOverflow,
     #[error("specialized synthetic neighbor query failed: {0}")]
     SyntheticNeighbors(String),
     #[error("specialized demand has no component-local synthetic face")]
@@ -396,13 +432,7 @@ pub fn prepare_specialized_contacts(
     )?;
     let topology = build_face_topology(mesh, WeldPolicy::ExactBits)
         .map_err(|error| SpecializedError::Topology(error.to_string()))?;
-    validate_regular(
-        mesh,
-        generic,
-        regular,
-        selection_config,
-        topology.component_ids(),
-    )?;
+    validate_regular(mesh, generic, regular, selection_config)?;
     let surface = NativeSurface::from_indexed(
         mesh.verts(),
         mesh.tris(),
@@ -588,8 +618,12 @@ pub fn prepare_specialized_contacts(
     }
     let gate_evidence = consolidate(
         &mut physical,
+        generic,
+        mesh,
         &surface,
+        &topology,
         &islands,
+        reservations,
         &coverage_samples,
         &authoritative_demands,
         layers,
@@ -600,59 +634,13 @@ pub fn prepare_specialized_contacts(
     )?;
     canonicalize_and_validate(&mut physical, &islands, layers, attach_reach)?;
 
-    let mut specialized_owner_faces = Vec::new();
-    let mut finalized_contacts = Vec::with_capacity(physical.len());
-    let first_specialized_owner = reservations
-        .iter()
-        .map(|reservation| reservation.owner_id)
-        .max()
-        .map_or(Ok(0), |owner| {
-            owner
-                .checked_add(1)
-                .ok_or(SpecializedError::OwnerIdOverflow)
-        })?;
+    let load_inputs = working_load_inputs(&physical, &islands, reservations)?;
     let contacts = physical
         .into_iter()
         .enumerate()
         .map(|(index, mut contact)| {
             contact.demands.sort_by(compare_demands);
             let contact_id = index as u64;
-            let owner = if contact.demands.is_empty() && contact.regular_routes.len() == 1 {
-                LoadOwner::GenericIsland(contact.regular_routes[0].owner_island_id)
-            } else {
-                let specialized_owner = first_specialized_owner
-                    .checked_add(
-                        u32::try_from(contact_id).map_err(|_| SpecializedError::OwnerIdOverflow)?,
-                    )
-                    .ok_or(SpecializedError::OwnerIdOverflow)?;
-                let mut owner_ids = contact
-                    .demands
-                    .iter()
-                    .map(|demand| demand.owner_island_id)
-                    .collect::<BTreeSet<_>>();
-                for route in &contact.regular_routes {
-                    owner_ids.insert(route.owner_island_id);
-                }
-                let faces = owner_ids
-                    .into_iter()
-                    .flat_map(|id| {
-                        islands
-                            .iter()
-                            .find(|island| island.id == id)
-                            .into_iter()
-                            .flat_map(|island| island.face_ids.iter().copied())
-                    })
-                    .collect::<BTreeSet<_>>()
-                    .into_iter()
-                    .collect::<Vec<_>>();
-                specialized_owner_faces.push((specialized_owner, faces));
-                LoadOwner::Specialized(specialized_owner)
-            };
-            finalized_contacts.push(PhysicalContact {
-                contact_id,
-                owner,
-                point_mm: contact.position_mm,
-            });
             Ok(SpecializedPhysicalContact {
                 contact_id,
                 position_mm: contact.position_mm,
@@ -674,8 +662,8 @@ pub fn prepare_specialized_contacts(
         generic,
         mesh,
         &surface,
-        &finalized_contacts,
-        &specialized_owner_faces,
+        &load_inputs.contacts,
+        &load_inputs.specialized_owner_faces,
     )?;
     Ok(SpecializedContactPlan {
         authority_digest: bound_authority_digest(generic, regular, selection_config, limits),
@@ -693,36 +681,19 @@ fn validate_regular(
     generic: &GenericContactPlan,
     regular: &SelectedContacts,
     config: &ContactSelectionConfig<'_>,
-    components: &[u32],
 ) -> Result<(), SpecializedError> {
-    let expected = build_dyadic_coverage_samples(mesh, generic.islands(), components, config)?;
-    if expected != regular.coverage_samples() {
-        return Err(SpecializedError::StaleRegularContacts);
-    }
-    for contact in regular.contacts() {
-        let candidate = generic
-            .candidates()
-            .candidates()
-            .iter()
-            .find(|candidate| candidate.id == contact.candidate_id)
-            .ok_or(SpecializedError::StaleRegularContacts)?;
-        let island = generic
-            .islands()
-            .iter()
-            .find(|island| island.id == contact.island_id)
-            .ok_or(SpecializedError::StaleRegularContacts)?;
-        if candidate.face_id != contact.served_face_id
-            || candidate.point_mm != contact.point_mm
-            || candidate.normal != contact.normal
-            || candidate.delicacy.to_bits() != contact.delicacy.to_bits()
-            || candidate.supported_area_mm2.to_bits() != contact.supported_area_mm2.to_bits()
-            || island
-                .face_ids
-                .binary_search(&contact.served_face_id)
-                .is_err()
-        {
+    if generic.islands().is_empty() {
+        if !regular.contacts().is_empty() || !regular.coverage_samples().is_empty() {
             return Err(SpecializedError::StaleRegularContacts);
         }
+        if config.surface_max_grid_bytes == 0 {
+            return Err(ContactSelectionError::InvalidResourceRequest.into());
+        }
+        return Ok(());
+    }
+    let replay = crate::select_contacts(mesh, generic.candidates(), generic.islands(), config)?;
+    if replay.digest() != regular.digest() || replay != *regular {
+        return Err(SpecializedError::StaleRegularContacts);
     }
     Ok(())
 }
@@ -878,6 +849,75 @@ impl WorkingContact {
     }
 }
 
+struct WorkingLoadInputs {
+    contacts: Vec<PhysicalContact>,
+    specialized_owner_faces: Vec<(u32, Vec<u32>)>,
+}
+
+fn working_load_inputs(
+    contacts: &[WorkingContact],
+    islands: &[SupportIsland],
+    reservations: &[SpecializedOwnerReservation],
+) -> Result<WorkingLoadInputs, SpecializedError> {
+    let first_specialized_owner = reservations
+        .iter()
+        .map(|reservation| reservation.owner_id)
+        .max()
+        .map_or(Ok(0), |owner| {
+            owner
+                .checked_add(1)
+                .ok_or(SpecializedError::OwnerIdOverflow)
+        })?;
+    let mut physical = Vec::with_capacity(contacts.len());
+    let mut specialized_owner_faces = Vec::new();
+    for (index, contact) in contacts.iter().enumerate() {
+        let contact_id = index as u64;
+        let owner = if contact.demands.is_empty() && contact.regular_routes.len() == 1 {
+            LoadOwner::GenericIsland(contact.regular_routes[0].owner_island_id)
+        } else {
+            let specialized_owner = first_specialized_owner
+                .checked_add(
+                    u32::try_from(contact_id).map_err(|_| SpecializedError::OwnerIdOverflow)?,
+                )
+                .ok_or(SpecializedError::OwnerIdOverflow)?;
+            let owner_ids = contact
+                .demands
+                .iter()
+                .map(|demand| demand.owner_island_id)
+                .chain(
+                    contact
+                        .regular_routes
+                        .iter()
+                        .map(|route| route.owner_island_id),
+                )
+                .collect::<BTreeSet<_>>();
+            let faces = owner_ids
+                .into_iter()
+                .flat_map(|id| {
+                    islands
+                        .iter()
+                        .find(|island| island.id == id)
+                        .into_iter()
+                        .flat_map(|island| island.face_ids.iter().copied())
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            specialized_owner_faces.push((specialized_owner, faces));
+            LoadOwner::Specialized(specialized_owner)
+        };
+        physical.push(PhysicalContact {
+            contact_id,
+            owner,
+            point_mm: contact.position_mm,
+        });
+    }
+    Ok(WorkingLoadInputs {
+        contacts: physical,
+        specialized_owner_faces,
+    })
+}
+
 fn check_satisfaction_limit(
     tests: usize,
     limits: SpecializedLimits,
@@ -999,8 +1039,12 @@ fn regular_dispositions(
 #[allow(clippy::too_many_arguments)]
 fn consolidate(
     contacts: &mut Vec<WorkingContact>,
+    generic: &GenericContactPlan,
+    mesh: &Mesh,
     surface: &NativeSurface,
+    topology: &plinth_mesh::FaceTopology,
     islands: &[SupportIsland],
+    reservations: &[SpecializedOwnerReservation],
     coverage_samples: &[CoverageSample],
     authoritative_demands: &[SpecializedDemand],
     layers: &LayerPlan,
@@ -1011,35 +1055,48 @@ fn consolidate(
 ) -> Result<SpecializedGateEvidence, SpecializedError> {
     check_merge_pair_limit(contacts.len(), limits.max_merge_pairs)?;
     contacts.sort_by(compare_contacts);
-    let proposals = (0..contacts.len())
-        .flat_map(|left| (left + 1..contacts.len()).map(move |right| (left, right)))
-        .filter_map(|(left, right)| {
-            accepted_merge(
+    let mut proposals = Vec::new();
+    for left in 0..contacts.len() {
+        for right in left + 1..contacts.len() {
+            let Some(merged) = accepted_merge(
                 &contacts[left],
                 &contacts[right],
                 layers,
                 attach_reach,
                 spacing_floor,
-            )
-            .map(|merged| MergeProposal {
+            ) else {
+                continue;
+            };
+            let required = proposals
+                .len()
+                .checked_add(1)
+                .ok_or(SpecializedError::GateResourceOverflow)?;
+            check_merge_proposal_limit(required, limits.max_merge_proposals)?;
+            proposals.push(MergeProposal {
                 left,
                 right,
                 merged,
-            })
-        })
-        .collect::<Vec<_>>();
+            });
+        }
+    }
     let coverage_radius =
         selection_config.coverage_radius_factor.get() * selection_config.target_spacing_mm.get();
     let vectors = evaluate_gate_batch(
         contacts,
         &proposals,
+        generic,
+        mesh,
         surface,
+        topology,
         islands,
+        reservations,
         coverage_samples,
         authoritative_demands,
         layers,
         attach_reach,
         coverage_radius,
+        selection_config.voxel_pitch_mm.get().powi(2),
+        limits,
     )?;
     let baseline = vectors[0];
     let mut used = BTreeSet::new();
@@ -1075,13 +1132,19 @@ fn consolidate(
     let accepted_vector = evaluate_gate_batch(
         &final_contacts,
         &[],
+        generic,
+        mesh,
         surface,
+        topology,
         islands,
+        reservations,
         coverage_samples,
         authoritative_demands,
         layers,
         attach_reach,
         coverage_radius,
+        selection_config.voxel_pitch_mm.get().powi(2),
+        limits,
     )?[0];
     if !gate_not_worse(accepted_vector, baseline) {
         return Err(SpecializedError::MergeGateRegression);
@@ -1129,6 +1192,13 @@ fn check_merge_pair_limit(contact_count: usize, limit: usize) -> Result<(), Spec
     Ok(())
 }
 
+fn check_merge_proposal_limit(required: usize, limit: usize) -> Result<(), SpecializedError> {
+    if required > limit {
+        return Err(SpecializedError::MergeProposalLimit { required, limit });
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 struct MergeProposal {
     left: usize,
@@ -1140,107 +1210,211 @@ fn gate_not_worse(
     candidate: FrozenSpecializedGateVector,
     baseline: FrozenSpecializedGateVector,
 ) -> bool {
-    candidate.failing_uncovered_area_mm2 <= baseline.failing_uncovered_area_mm2
-        && candidate.max_failing_sample_area_mm2 <= baseline.max_failing_sample_area_mm2
-        && candidate.failing_sample_count <= baseline.failing_sample_count
-        && candidate.worst_gap_mm <= baseline.worst_gap_mm
+    coverage_key(candidate) <= coverage_key(baseline)
         && candidate.load_violation_count <= baseline.load_violation_count
         && candidate.unsupported_specialized_count <= baseline.unsupported_specialized_count
+}
+
+fn coverage_key(
+    vector: FrozenSpecializedGateVector,
+) -> (OrderedF64, OrderedF64, usize, OrderedF64) {
+    (
+        OrderedF64(vector.failing_uncovered_area_mm2),
+        OrderedF64(vector.max_patch_area_mm2),
+        vector.failing_patch_count,
+        OrderedF64(vector.worst_gap_mm),
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct OrderedF64(f64);
+
+impl Eq for OrderedF64 {}
+impl PartialOrd for OrderedF64 {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for OrderedF64 {
+    fn cmp(&self, other: &Self) -> Ordering {
+        numeric_cmp(self.0, other.0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GateResourcePlan {
+    variants: usize,
+    vector_bytes: usize,
+    contact_window_bytes: usize,
+    operations: usize,
+}
+
+fn gate_resource_plan(
+    contact_count: usize,
+    proposal_count: usize,
+    sample_count: usize,
+    face_count: usize,
+    demand_count: usize,
+    limits: SpecializedLimits,
+) -> Result<GateResourcePlan, SpecializedError> {
+    if limits.max_gate_window_variants == 0 {
+        return Err(SpecializedError::InvalidGateWindow);
+    }
+    let variants = proposal_count
+        .checked_add(1)
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    if variants > limits.max_gate_variants {
+        return Err(SpecializedError::GateVariantLimit {
+            required: variants,
+            limit: limits.max_gate_variants,
+        });
+    }
+    let vector_bytes = variants
+        .checked_mul(std::mem::size_of::<FrozenSpecializedGateVector>())
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    if vector_bytes > limits.max_gate_vector_bytes {
+        return Err(SpecializedError::GateVectorByteLimit {
+            required: vector_bytes,
+            limit: limits.max_gate_vector_bytes,
+        });
+    }
+    let window = variants.min(limits.max_gate_window_variants);
+    let contact_window_bytes = window
+        .checked_mul(contact_count.saturating_add(1))
+        .and_then(|value| value.checked_mul(std::mem::size_of::<WorkingContact>()))
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    if contact_window_bytes > limits.max_gate_contact_matrix_bytes {
+        return Err(SpecializedError::GateContactMatrixByteLimit {
+            required: contact_window_bytes,
+            limit: limits.max_gate_contact_matrix_bytes,
+        });
+    }
+    let contact_visits = proposal_count
+        .checked_mul(contact_count.saturating_sub(1))
+        .and_then(|value| value.checked_add(contact_count))
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    let routed_rows = sample_count
+        .checked_add(demand_count)
+        .and_then(|value| value.checked_add(1))
+        .and_then(|value| value.checked_mul(contact_visits))
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    let face_rows = variants
+        .checked_mul(face_count)
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    let operations = routed_rows
+        .checked_add(face_rows)
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    if operations > limits.max_gate_operations {
+        return Err(SpecializedError::GateOperationLimit {
+            required: operations,
+            limit: limits.max_gate_operations,
+        });
+    }
+    Ok(GateResourcePlan {
+        variants,
+        vector_bytes,
+        contact_window_bytes,
+        operations,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
 fn evaluate_gate_batch(
     contacts: &[WorkingContact],
     proposals: &[MergeProposal],
+    generic: &GenericContactPlan,
+    mesh: &Mesh,
     surface: &NativeSurface,
+    topology: &plinth_mesh::FaceTopology,
     islands: &[SupportIsland],
+    reservations: &[SpecializedOwnerReservation],
     coverage_samples: &[CoverageSample],
     authoritative_demands: &[SpecializedDemand],
     layers: &LayerPlan,
     attach_reach: f64,
     coverage_radius: f64,
+    coverage_area_floor_mm2: f64,
+    limits: SpecializedLimits,
 ) -> Result<Vec<FrozenSpecializedGateVector>, SpecializedError> {
-    let variants = proposals.len() + 1;
-    let mut vectors = vec![
-        FrozenSpecializedGateVector {
-            failing_uncovered_area_mm2: 0.0,
-            max_failing_sample_area_mm2: 0.0,
-            failing_sample_count: 0,
-            worst_gap_mm: 0.0,
-            load_violation_count: 0,
-            unsupported_specialized_count: 0,
-        };
-        variants
-    ];
-    for sample in coverage_samples {
-        for (variant, vector) in vectors.iter_mut().enumerate() {
-            let nearest = nearest_variant_distance(
+    let plan = gate_resource_plan(
+        contacts.len(),
+        proposals.len(),
+        coverage_samples.len(),
+        owners_by_face(islands).len(),
+        authoritative_demands.len(),
+        limits,
+    )?;
+    let mut vectors = Vec::with_capacity(plan.variants);
+    for window_start in (0..plan.variants).step_by(limits.max_gate_window_variants) {
+        let window_end = (window_start + limits.max_gate_window_variants).min(plan.variants);
+        for variant in window_start..window_end {
+            let variant_contacts = contacts_for_variant(
                 contacts,
                 variant
                     .checked_sub(1)
                     .and_then(|index| proposals.get(index)),
-                |contact| contact_serves_sample(contact, sample),
-                sample.point_mm,
             );
-            if nearest > coverage_radius {
-                vector.failing_uncovered_area_mm2 += sample.area_mm2;
-                vector.max_failing_sample_area_mm2 =
-                    vector.max_failing_sample_area_mm2.max(sample.area_mm2);
-                vector.failing_sample_count = vector.failing_sample_count.saturating_add(1);
-                vector.worst_gap_mm = vector.worst_gap_mm.max(nearest);
-            }
-        }
-    }
-    let owners = owners_by_face(islands);
-    let mut carried = vec![vec![0.0; contacts.len() + 1]; variants];
-    for (&face_id, face_owners) in &owners {
-        let point = surface.geometry().centroids()[face_id as usize];
-        let area = surface.geometry().areas()[face_id as usize];
-        for (variant, row) in carried.iter_mut().enumerate() {
-            if let Some(slot) = nearest_variant_slot(
-                contacts,
-                variant
-                    .checked_sub(1)
-                    .and_then(|index| proposals.get(index)),
-                |contact| contact_serves_any_owner(contact, face_owners),
-                point,
-            ) {
-                row[slot] += area;
-            }
-        }
-    }
-    let policy = m0_constants()
-        .map_err(|error| SpecializedError::RegisteredConstantsUnavailable(error.to_string()))?
-        .placeholders();
-    let pressure = policy.peel_pressure_pa().diagnostic().get();
-    let tensile = policy.tensile_green_mpa().diagnostic().get() * 1.0e6;
-    let safety = policy.tip_safety_factor().diagnostic().get();
-    let max_radius_m = policy.tip_radius_max_legacy_mm().diagnostic().get() / 1.0e3;
-    let capacity_mm2 =
-        tensile * std::f64::consts::PI * max_radius_m * max_radius_m / (pressure * safety) * 1.0e6;
-    for (variant, rows) in carried.iter().enumerate() {
-        vectors[variant].load_violation_count =
-            rows.iter().filter(|area| **area > capacity_mm2).count();
-    }
-    for demand in authoritative_demands {
-        for (variant, vector) in vectors.iter_mut().enumerate() {
-            let supported = variant_contacts_any(
-                contacts,
-                variant
-                    .checked_sub(1)
-                    .and_then(|index| proposals.get(index)),
-                |contact| {
-                    contact_serves_owner(contact, demand.owner_island_id)
-                        && satisfies(contact.position_mm, demand, layers, attach_reach)
-                },
-            );
-            if !supported {
-                vector.unsupported_specialized_count =
-                    vector.unsupported_specialized_count.saturating_add(1);
-            }
+            let nearest = coverage_samples
+                .iter()
+                .map(|sample| {
+                    variant_contacts
+                        .iter()
+                        .filter(|contact| contact_serves_sample(contact, sample))
+                        .map(|contact| distance3(contact.position_mm, sample.point_mm))
+                        .fold(f64::INFINITY, f64::min)
+                })
+                .collect::<Vec<_>>();
+            let coverage = assess_coverage(
+                coverage_samples,
+                topology,
+                &nearest,
+                coverage_radius,
+                coverage_area_floor_mm2,
+            )?;
+            let load_inputs = working_load_inputs(&variant_contacts, islands, reservations)?;
+            let partition = finalize_specialized_load_partition(
+                generic,
+                mesh,
+                surface,
+                &load_inputs.contacts,
+                &load_inputs.specialized_owner_faces,
+            )?;
+            let unsupported_specialized_count = authoritative_demands
+                .iter()
+                .filter(|demand| {
+                    !variant_contacts.iter().any(|contact| {
+                        contact_serves_owner(contact, demand.owner_island_id)
+                            && satisfies(contact.position_mm, demand, layers, attach_reach)
+                    })
+                })
+                .count();
+            vectors.push(FrozenSpecializedGateVector::from_live(
+                coverage.objective,
+                load_violation_count(&partition, load_inputs.contacts.len())?,
+                unsupported_specialized_count,
+            ));
         }
     }
     Ok(vectors)
+}
+
+fn contacts_for_variant(
+    contacts: &[WorkingContact],
+    proposal: Option<&MergeProposal>,
+) -> Vec<WorkingContact> {
+    let mut variant = contacts
+        .iter()
+        .enumerate()
+        .filter(|(index, _)| {
+            proposal.is_none_or(|proposal| *index != proposal.left && *index != proposal.right)
+        })
+        .map(|(_, contact)| contact.clone())
+        .collect::<Vec<_>>();
+    if let Some(proposal) = proposal {
+        variant.push(proposal.merged.clone());
+    }
+    variant.sort_by(compare_contacts);
+    variant
 }
 
 fn contact_serves_owner(contact: &WorkingContact, owner: u32) -> bool {
@@ -1254,12 +1428,6 @@ fn contact_serves_owner(contact: &WorkingContact, owner: u32) -> bool {
             .any(|demand| demand.owner_island_id == owner)
 }
 
-fn contact_serves_any_owner(contact: &WorkingContact, owners: &[u32]) -> bool {
-    owners
-        .iter()
-        .any(|&owner| contact_serves_owner(contact, owner))
-}
-
 fn contact_serves_sample(contact: &WorkingContact, sample: &CoverageSample) -> bool {
     contact.regular_routes.iter().any(|route| {
         route.owner_island_id == sample.island_id && route.component_id == sample.component_id
@@ -1267,67 +1435,6 @@ fn contact_serves_sample(contact: &WorkingContact, sample: &CoverageSample) -> b
         demand.owner_island_id == sample.island_id
             && demand.coverage_component_id == sample.component_id
     })
-}
-
-fn variant_contacts_any(
-    contacts: &[WorkingContact],
-    proposal: Option<&MergeProposal>,
-    predicate: impl Fn(&WorkingContact) -> bool,
-) -> bool {
-    contacts.iter().enumerate().any(|(index, contact)| {
-        proposal.is_none_or(|proposal| index != proposal.left && index != proposal.right)
-            && predicate(contact)
-    }) || proposal.is_some_and(|proposal| predicate(&proposal.merged))
-}
-
-fn nearest_variant_distance(
-    contacts: &[WorkingContact],
-    proposal: Option<&MergeProposal>,
-    predicate: impl Fn(&WorkingContact) -> bool,
-    point: [f64; 3],
-) -> f64 {
-    let mut nearest = f64::MAX;
-    for (index, contact) in contacts.iter().enumerate() {
-        if proposal.is_some_and(|proposal| index == proposal.left || index == proposal.right)
-            || !predicate(contact)
-        {
-            continue;
-        }
-        nearest = nearest.min(distance3(contact.position_mm, point));
-    }
-    if let Some(proposal) = proposal.filter(|proposal| predicate(&proposal.merged)) {
-        nearest = nearest.min(distance3(proposal.merged.position_mm, point));
-    }
-    nearest
-}
-
-fn nearest_variant_slot(
-    contacts: &[WorkingContact],
-    proposal: Option<&MergeProposal>,
-    predicate: impl Fn(&WorkingContact) -> bool,
-    point: [f64; 3],
-) -> Option<usize> {
-    let mut winner = None;
-    let mut best = f64::MAX;
-    for (index, contact) in contacts.iter().enumerate() {
-        if proposal.is_some_and(|proposal| index == proposal.left || index == proposal.right)
-            || !predicate(contact)
-        {
-            continue;
-        }
-        let distance = distance3(contact.position_mm, point);
-        if distance < best {
-            best = distance;
-            winner = Some(index);
-        }
-    }
-    if let Some(proposal) = proposal.filter(|proposal| predicate(&proposal.merged)) {
-        let distance = distance3(proposal.merged.position_mm, point);
-        if distance < best || (distance == best && proposal.left < winner.unwrap_or(usize::MAX)) {
-            winner = Some(proposal.left);
-        }
-    }
-    winner
 }
 
 /// The sole acceptance predicate, used both by construction and the final
@@ -1683,6 +1790,12 @@ fn bound_authority_digest(
     hash.usize(limits.max_satisfaction_neighbor_pairs);
     hash.usize(limits.max_satisfaction_neighbor_bytes);
     hash.usize(limits.max_merge_pairs);
+    hash.usize(limits.max_merge_proposals);
+    hash.usize(limits.max_gate_variants);
+    hash.usize(limits.max_gate_vector_bytes);
+    hash.usize(limits.max_gate_contact_matrix_bytes);
+    hash.usize(limits.max_gate_operations);
+    hash.usize(limits.max_gate_window_variants);
     hash.finish()
 }
 
@@ -1803,6 +1916,73 @@ mod tests {
                 required: 1,
                 limit: 0,
             })
+        );
+    }
+
+    #[test]
+    fn merge_gate_resource_caps_are_exact_and_cap_minus_one_refuses() {
+        assert_eq!(check_merge_proposal_limit(1, 1), Ok(()));
+        assert_eq!(
+            check_merge_proposal_limit(1, 0),
+            Err(SpecializedError::MergeProposalLimit {
+                required: 1,
+                limit: 0,
+            })
+        );
+
+        let limits = SpecializedLimits::production();
+        let exact = gate_resource_plan(3, 2, 5, 7, 11, limits).unwrap();
+        assert_eq!(exact.variants, 3);
+        assert_eq!(exact.operations, 140);
+
+        let mut at_cap = limits;
+        at_cap.max_gate_variants = exact.variants;
+        at_cap.max_gate_vector_bytes = exact.vector_bytes;
+        at_cap.max_gate_contact_matrix_bytes = exact.contact_window_bytes;
+        at_cap.max_gate_operations = exact.operations;
+        assert_eq!(gate_resource_plan(3, 2, 5, 7, 11, at_cap), Ok(exact));
+
+        let mut below = at_cap;
+        below.max_gate_variants -= 1;
+        assert_eq!(
+            gate_resource_plan(3, 2, 5, 7, 11, below),
+            Err(SpecializedError::GateVariantLimit {
+                required: exact.variants,
+                limit: exact.variants - 1,
+            })
+        );
+        below = at_cap;
+        below.max_gate_vector_bytes -= 1;
+        assert_eq!(
+            gate_resource_plan(3, 2, 5, 7, 11, below),
+            Err(SpecializedError::GateVectorByteLimit {
+                required: exact.vector_bytes,
+                limit: exact.vector_bytes - 1,
+            })
+        );
+        below = at_cap;
+        below.max_gate_contact_matrix_bytes -= 1;
+        assert_eq!(
+            gate_resource_plan(3, 2, 5, 7, 11, below),
+            Err(SpecializedError::GateContactMatrixByteLimit {
+                required: exact.contact_window_bytes,
+                limit: exact.contact_window_bytes - 1,
+            })
+        );
+        below = at_cap;
+        below.max_gate_operations -= 1;
+        assert_eq!(
+            gate_resource_plan(3, 2, 5, 7, 11, below),
+            Err(SpecializedError::GateOperationLimit {
+                required: exact.operations,
+                limit: exact.operations - 1,
+            })
+        );
+        below = at_cap;
+        below.max_gate_window_variants = 0;
+        assert_eq!(
+            gate_resource_plan(3, 2, 5, 7, 11, below),
+            Err(SpecializedError::InvalidGateWindow)
         );
     }
 
@@ -1957,23 +2137,23 @@ mod tests {
             (
                 "overhang table",
                 make_overhang_table().unwrap(),
-                6_099_429_190_415_477_034,
+                235_815_625_331_698_807_u64,
                 (95, 51_200, 14),
                 (6, 4, 4),
             ),
             (
                 "raking blade",
                 make_raking_blade().unwrap(),
-                12_129_478_841_262_699_040,
+                7_045_142_157_469_471_297_u64,
                 (40, 40_192, 13),
                 (3, 10, 7),
             ),
             (
                 "thin fin",
                 make_thin_fin().unwrap(),
-                976_131_820_094_017_849,
+                5_608_466_463_112_362_638_u64,
                 (19, 20_480, 2),
-                (2, 1, 1),
+                (1, 1, 1),
             ),
         ] {
             let plan = full_fixture(mesh, name).unwrap_or_else(|error| panic!("{error}"));
@@ -2081,6 +2261,25 @@ mod tests {
             Ok(())
         );
 
+        let mut tampered_regular = regular.clone();
+        tampered_regular.contacts[0].point_mm[0] += 0.01;
+        assert_eq!(
+            plan.validate_binding(
+                &mesh,
+                &perception,
+                frame(),
+                &layers,
+                &candidate,
+                &[],
+                perception_limits,
+                &generic,
+                &tampered_regular,
+                &selection,
+                limits,
+            ),
+            Err(SpecializedError::StaleRegularContacts)
+        );
+
         let wrong_plate = SupportPerceptionConfig::current(
             Finite::new(0.1).unwrap(),
             PositiveFinite::new(1.0).unwrap(),
@@ -2128,7 +2327,32 @@ mod tests {
                 &changed_selection,
                 limits,
             ),
-            Err(SpecializedError::StaleAuthority)
+            Err(SpecializedError::Selection(
+                ContactSelectionError::CandidateDelicacyMismatch {
+                    candidate_id: crate::ContactCandidateId(0),
+                }
+            ))
+        );
+
+        let mut zero_grid = selection;
+        zero_grid.surface_max_grid_bytes = 0;
+        assert_eq!(
+            plan.validate_binding(
+                &mesh,
+                &perception,
+                frame(),
+                &layers,
+                &candidate,
+                &[],
+                perception_limits,
+                &generic,
+                &regular,
+                &zero_grid,
+                limits,
+            ),
+            Err(SpecializedError::Selection(
+                ContactSelectionError::InvalidResourceRequest
+            ))
         );
 
         let mut changed_limits = limits;
