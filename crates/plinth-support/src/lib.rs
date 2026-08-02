@@ -1085,13 +1085,18 @@ fn select_contacts_with_work(
         selected.extend(island_contacts);
     }
 
+    let coverage_radius_mm = config.coverage_radius_factor.get() * config.target_spacing_mm.get();
+    let mut coverage_index = CoverageContactIndex::new(coverage_radius_mm);
+    for contact in &selected {
+        coverage_index.insert(contact, &topology, &mut work);
+    }
     for attempt in 0..=config.coverage_repair_max_attempts {
         let failing = failing_coverage_samples(
             &samples,
-            &selected,
+            &coverage_index,
             &topology,
-            config.coverage_radius_factor.get() * config.target_spacing_mm.get(),
             config.voxel_pitch_mm.get(),
+            &mut work,
         );
         if failing.is_empty() {
             return Ok((
@@ -1114,14 +1119,16 @@ fn select_contacts_with_work(
             &failing,
             &selected,
             topology.component_ids(),
-            config.coverage_radius_factor.get() * config.target_spacing_mm.get(),
+            coverage_radius_mm,
             config.coverage_score_matrix_max_entries,
         )
         .ok_or(ContactSelectionError::UnsatisfiedCoverage {
             island_id: samples[failing[0]].island_id,
             attempts: attempt,
         })?;
-        selected.push(selected_contact(repair.0, repair.1));
+        let repair_contact = selected_contact(repair.0, repair.1);
+        coverage_index.insert(&repair_contact, &topology, &mut work);
+        selected.push(repair_contact);
     }
     unreachable!("bounded repair loop returns before exhaustion")
 }
@@ -1388,18 +1395,14 @@ fn coverage_validation_peak_bytes(
 
 fn failing_coverage_samples(
     samples: &[CoverageSample],
-    contacts: &[SelectedContact],
+    contacts: &CoverageContactIndex,
     topology: &plinth_mesh::FaceTopology,
-    radius_mm: f64,
     area_floor_mm2: f64,
+    work: &mut SelectionWork,
 ) -> Vec<usize> {
     let mut uncovered_by_face = std::collections::BTreeMap::<(u32, u32), (f64, Vec<usize>)>::new();
     for (sample_index, sample) in samples.iter().enumerate() {
-        let covered = contacts.iter().any(|contact| {
-            contact.island_id == sample.island_id
-                && topology.component_ids()[contact.served_face_id as usize] == sample.component_id
-                && squared_distance(contact.point_mm, sample.point_mm).sqrt() <= radius_mm
-        });
+        let covered = contacts.covers(sample, work);
         if !covered {
             let row = uncovered_by_face
                 .entry((sample.island_id, sample.face_id))
@@ -1525,6 +1528,72 @@ fn squared_distance(left: [f64; 3], right: [f64; 3]) -> f64 {
 struct SelectionWork {
     candidate_membership_evaluations: usize,
     distance_evaluations: usize,
+    coverage_index_rows: usize,
+    coverage_distance_evaluations: usize,
+}
+
+type SpatialCell = (i64, i64, i64);
+type CoverageCells = std::collections::BTreeMap<SpatialCell, Vec<[f64; 3]>>;
+
+struct CoverageContactIndex {
+    radius_mm: f64,
+    groups: std::collections::BTreeMap<(u32, u32), CoverageCells>,
+}
+
+impl CoverageContactIndex {
+    fn new(radius_mm: f64) -> Self {
+        Self {
+            radius_mm,
+            groups: std::collections::BTreeMap::new(),
+        }
+    }
+
+    fn key(&self, point: [f64; 3]) -> (i64, i64, i64) {
+        let cell = |coordinate: f64| (coordinate / self.radius_mm).floor() as i64;
+        (cell(point[0]), cell(point[1]), cell(point[2]))
+    }
+
+    fn insert(
+        &mut self,
+        contact: &SelectedContact,
+        topology: &plinth_mesh::FaceTopology,
+        work: &mut SelectionWork,
+    ) {
+        let component_id = topology.component_ids()[contact.served_face_id as usize];
+        let cell = self.key(contact.point_mm);
+        self.groups
+            .entry((contact.island_id, component_id))
+            .or_default()
+            .entry(cell)
+            .or_default()
+            .push(contact.point_mm);
+        work.coverage_index_rows = work.coverage_index_rows.saturating_add(1);
+    }
+
+    fn covers(&self, sample: &CoverageSample, work: &mut SelectionWork) -> bool {
+        let Some(cells) = self.groups.get(&(sample.island_id, sample.component_id)) else {
+            return false;
+        };
+        let (x, y, z) = self.key(sample.point_mm);
+        for nx in x.saturating_sub(1)..=x.saturating_add(1) {
+            for ny in y.saturating_sub(1)..=y.saturating_add(1) {
+                for nz in z.saturating_sub(1)..=z.saturating_add(1) {
+                    if let Some(points) = cells.get(&(nx, ny, nz)) {
+                        for &point in points {
+                            work.coverage_distance_evaluations =
+                                work.coverage_distance_evaluations.saturating_add(1);
+                            // Preserve the frozen closed radius and square-root
+                            // comparison exactly at the coverage boundary.
+                            if squared_distance(point, sample.point_mm).sqrt() <= self.radius_mm {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
 }
 
 /// Incremental fixed-radius index for the ordered Poisson pass. A point closer
@@ -2317,6 +2386,46 @@ mod tests {
             "membership work is one index row per candidate plus one gathered row per island"
         );
         assert_eq!(work.distance_evaluations, 0);
+        assert_eq!(work.coverage_index_rows, ISLANDS);
+        assert_eq!(
+            work.coverage_distance_evaluations,
+            selected.coverage_samples().len(),
+            "each sample queries only its one island/component-local contact"
+        );
+    }
+
+    #[test]
+    fn coverage_contact_index_preserves_closed_radius_and_route_ownership() {
+        let mesh = small_closed_tetra();
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).expect("topology");
+        let component_id = topology.component_ids()[0];
+        let contact = SelectedContact {
+            island_id: 7,
+            candidate_id: ContactCandidateId(1),
+            served_face_id: 0,
+            point_mm: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, -1.0],
+            delicacy: 0.0,
+            supported_area_mm2: 1.0,
+        };
+        let mut work = SelectionWork::default();
+        let mut index = CoverageContactIndex::new(1.0);
+        index.insert(&contact, &topology, &mut work);
+        let sample = |island_id, component_id, x| CoverageSample {
+            island_id,
+            face_id: 0,
+            component_id,
+            point_mm: [x, 0.0, 0.0],
+            area_mm2: 1.0,
+        };
+
+        assert!(index.covers(&sample(7, component_id, 1.0), &mut work));
+        assert!(!index.covers(
+            &sample(7, component_id, f64::from_bits(1.0_f64.to_bits() + 1)),
+            &mut work
+        ));
+        assert!(!index.covers(&sample(8, component_id, 0.0), &mut work));
+        assert!(!index.covers(&sample(7, component_id.wrapping_add(1), 0.0), &mut work));
     }
 
     fn pool_islands(pool: &ContactCandidatePool) -> Vec<SupportIsland> {
@@ -2372,12 +2481,17 @@ mod tests {
             assert_eq!(contact.supported_area_mm2, candidate.supported_area_mm2);
         }
         let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).expect("topology");
+        let mut work = SelectionWork::default();
+        let mut contact_index = CoverageContactIndex::new(4.0 * 1.5);
+        for contact in selected.contacts() {
+            contact_index.insert(contact, &topology, &mut work);
+        }
         assert!(failing_coverage_samples(
             selected.coverage_samples(),
-            selected.contacts(),
+            &contact_index,
             &topology,
-            4.0 * 1.5,
             0.4,
+            &mut work,
         )
         .is_empty());
     }
