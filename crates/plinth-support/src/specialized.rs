@@ -6,7 +6,7 @@
 //! contact plan.  Logical obligations remain distinct from physical seats.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, PointCloudIndex, RadiusQueryLimits};
 use plinth_core::{m0_constants, LayerPlan};
@@ -673,7 +673,7 @@ pub fn prepare_specialized_contacts(
     )?;
     canonicalize_and_validate(&mut physical, &islands, layers, attach_reach)?;
 
-    let load_inputs = working_load_inputs(&physical, generic.islands(), &islands, reservations)?;
+    let load_inputs = working_load_inputs(&physical, generic, &islands, reservations, limits)?;
     let contacts = physical
         .into_iter()
         .enumerate()
@@ -705,7 +705,7 @@ pub fn prepare_specialized_contacts(
         &load_inputs.specialized_owner_faces,
         LoadFinalizeLimits {
             max_scratch_bytes: limits.max_load_scratch_bytes,
-            max_operations: limits.max_load_operations,
+            max_operations: load_inputs.remaining_load_operations,
         },
     )?;
     Ok(SpecializedContactPlan {
@@ -901,28 +901,85 @@ impl WorkingContact {
 struct WorkingLoadInputs {
     contacts: Vec<PhysicalContact>,
     specialized_owner_faces: Vec<(u32, u32)>,
+    remaining_load_operations: usize,
 }
 
 fn working_load_inputs(
     contacts: &[WorkingContact],
-    generic_islands: &[SupportIsland],
+    generic: &GenericContactPlan,
     islands: &[SupportIsland],
     reservations: &[SpecializedOwnerReservation],
+    limits: SpecializedLimits,
 ) -> Result<WorkingLoadInputs, SpecializedError> {
+    let mut descriptor_work = 0usize;
+    let owner_face_count = variant_specialized_owner_face_count(
+        contacts,
+        None,
+        generic.islands(),
+        islands,
+        &mut descriptor_work,
+        limits.max_load_operations,
+    )?;
+    // The fill repeats the same allocation-free descriptor scans. Refuse on
+    // the full two-pass work before reserving either output buffer.
+    let mut second_pass_work = descriptor_work;
+    let _ = variant_specialized_owner_face_count(
+        contacts,
+        None,
+        generic.islands(),
+        islands,
+        &mut second_pass_work,
+        limits.max_load_operations,
+    )?;
+    let retained_bytes = contacts
+        .len()
+        .checked_mul(std::mem::size_of::<PhysicalContact>())
+        .and_then(|bytes| {
+            owner_face_count
+                .checked_mul(std::mem::size_of::<(u32, u32)>())
+                .and_then(|owner_bytes| bytes.checked_add(owner_bytes))
+        })
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    let finalizer = specialized_load_resource_plan(generic, contacts.len(), owner_face_count)?;
+    let required_operations = second_pass_work
+        .checked_add(finalizer.operations)
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    if required_operations > limits.max_load_operations {
+        return Err(GenericPerceptionError::LoadOperationLimit {
+            required: required_operations,
+            limit: limits.max_load_operations,
+        }
+        .into());
+    }
+    let remaining_load_operations = limits.max_load_operations - second_pass_work;
+    let required_peak = retained_bytes
+        .checked_add(finalizer.scratch_bytes)
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    if required_peak > limits.max_load_scratch_bytes {
+        return Err(GenericPerceptionError::LoadScratchLimit {
+            required: required_peak,
+            limit: limits.max_load_scratch_bytes,
+        }
+        .into());
+    }
     let mut physical = Vec::with_capacity(contacts.len());
-    let mut specialized_owner_faces = Vec::new();
+    let mut specialized_owner_faces = Vec::with_capacity(owner_face_count);
+    let mut fill_work = 0usize;
     append_variant_load_inputs(
         contacts,
         None,
-        generic_islands,
+        generic.islands(),
         islands,
         reservations,
         &mut physical,
         &mut specialized_owner_faces,
+        &mut fill_work,
+        usize::MAX,
     )?;
     Ok(WorkingLoadInputs {
         contacts: physical,
         specialized_owner_faces,
+        remaining_load_operations,
     })
 }
 
@@ -1067,6 +1124,7 @@ fn consolidate(
     let initial_baseline = evaluate_gate_batch(
         contacts,
         &[],
+        0,
         generic,
         mesh,
         surface,
@@ -1118,6 +1176,10 @@ fn consolidate(
         let vectors = evaluate_gate_batch(
             contacts,
             &proposals,
+            proposals
+                .capacity()
+                .checked_mul(std::mem::size_of::<MergeProposal>())
+                .ok_or(SpecializedError::GateResourceOverflow)?,
             generic,
             mesh,
             surface,
@@ -1167,6 +1229,7 @@ fn consolidate(
     let accepted_vector = evaluate_gate_batch(
         contacts,
         &[],
+        0,
         generic,
         mesh,
         surface,
@@ -1216,8 +1279,37 @@ fn check_merge_proposal_limit(required: usize, limit: usize) -> Result<(), Speci
 struct MergeProposal {
     left: usize,
     right: usize,
+    representative_component_id: u32,
+    representative_face_id: u32,
     position_mm: [f64; 3],
     normal: [f64; 3],
+}
+
+impl MergeProposal {
+    const fn representative_key(&self) -> RepresentativeKey {
+        RepresentativeKey {
+            component_id: self.representative_component_id,
+            position_mm: self.position_mm,
+            face_id: self.representative_face_id,
+            normal: self.normal,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RepresentativeKey {
+    component_id: u32,
+    position_mm: [f64; 3],
+    face_id: u32,
+    normal: [f64; 3],
+}
+
+fn compare_representative_keys(left: &RepresentativeKey, right: &RepresentativeKey) -> Ordering {
+    left.component_id
+        .cmp(&right.component_id)
+        .then_with(|| compare_point3(left.position_mm, right.position_mm))
+        .then_with(|| left.face_id.cmp(&right.face_id))
+        .then_with(|| compare_point3(left.normal, right.normal))
 }
 
 fn gate_not_worse(
@@ -1239,18 +1331,79 @@ fn first_safe_proposal(
         .position(|vector| gate_not_worse(*vector, baseline))
 }
 
-fn check_gate_peak(
-    working_bytes: usize,
-    assessor_scratch_bytes: usize,
-    limit: usize,
-) -> Result<usize, SpecializedError> {
-    let required = working_bytes
-        .checked_add(assessor_scratch_bytes)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GatePeakUsage {
+    proposal_bytes: usize,
+    result_bytes: usize,
+    matrix_bytes: usize,
+    coverage_scratch_bytes: usize,
+    coverage_retained_bytes: usize,
+    load_scratch_bytes: usize,
+}
+
+fn check_gate_peak(usage: GatePeakUsage, limit: usize) -> Result<usize, SpecializedError> {
+    let retained = usage
+        .proposal_bytes
+        .checked_add(usage.result_bytes)
+        .and_then(|bytes| bytes.checked_add(usage.matrix_bytes))
         .ok_or(SpecializedError::GateResourceOverflow)?;
+    let coverage_phase = retained
+        .checked_add(usage.coverage_scratch_bytes)
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    let load_phase = retained
+        .checked_add(usage.coverage_retained_bytes)
+        .and_then(|bytes| bytes.checked_add(usage.load_scratch_bytes))
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    let required = coverage_phase.max(load_phase);
     if required > limit {
         return Err(SpecializedError::GatePeakByteLimit { required, limit });
     }
     Ok(required)
+}
+
+#[derive(Default)]
+struct GatePreflightTelemetry {
+    payload_allocations: usize,
+    payload_operations: usize,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gate_header_preflight(
+    contact_count: usize,
+    proposal_count: usize,
+    proposal_storage_bytes: usize,
+    sample_count: usize,
+    demand_count: usize,
+    island_count: usize,
+    limits: SpecializedLimits,
+    _telemetry: &mut GatePreflightTelemetry,
+) -> Result<(), SpecializedError> {
+    if limits.max_gate_operations == 0
+        && (contact_count != 0
+            || proposal_count != 0
+            || sample_count != 0
+            || demand_count != 0
+            || island_count != 0)
+    {
+        return Err(SpecializedError::GateOperationLimit {
+            required: 1,
+            limit: 0,
+        });
+    }
+    let result_bytes = proposal_count
+        .checked_add(1)
+        .and_then(|count| count.checked_mul(std::mem::size_of::<FrozenSpecializedGateVector>()))
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    let required = proposal_storage_bytes
+        .checked_add(result_bytes)
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    if required > limits.max_gate_peak_bytes {
+        return Err(SpecializedError::GatePeakByteLimit {
+            required,
+            limit: limits.max_gate_peak_bytes,
+        });
+    }
+    Ok(())
 }
 
 fn coverage_key(
@@ -1356,11 +1509,40 @@ fn gate_resource_plan(
     })
 }
 
+fn unique_island_face_count(
+    islands: &[SupportIsland],
+    work: &mut usize,
+    limit: usize,
+) -> Result<usize, SpecializedError> {
+    let mut count = 0usize;
+    let mut last = None;
+    loop {
+        let mut next = None;
+        for island in islands {
+            for &face_id in &island.face_ids {
+                charge_load_descriptor_work(work, 1, limit)?;
+                if last.is_none_or(|last| face_id > last) && next.is_none_or(|next| face_id < next)
+                {
+                    next = Some(face_id);
+                }
+            }
+        }
+        let Some(face_id) = next else {
+            break;
+        };
+        count = count
+            .checked_add(1)
+            .ok_or(SpecializedError::GateResourceOverflow)?;
+        last = Some(face_id);
+    }
+    Ok(count)
+}
+
 fn variant_operation_count(
     contacts: &[WorkingContact],
     proposal: Option<&MergeProposal>,
     sample_count: usize,
-    demand_count: usize,
+    demands: &[SpecializedDemand],
     face_count: usize,
     owner_face_count: usize,
 ) -> Result<usize, SpecializedError> {
@@ -1391,8 +1573,13 @@ fn variant_operation_count(
             .checked_add(1)
             .ok_or(SpecializedError::GateResourceOverflow)?;
     }
+    let demand_satisfaction = demands.iter().try_fold(0usize, |total, demand| {
+        total
+            .checked_add(demand_satisfaction_work(demand)?)
+            .ok_or(SpecializedError::GateResourceOverflow)
+    })?;
     let routed_queries = sample_count
-        .checked_add(demand_count)
+        .checked_add(demands.len())
         .ok_or(SpecializedError::GateResourceOverflow)?;
     let routing_work = logical_contact_work
         .checked_mul(routed_queries)
@@ -1405,9 +1592,13 @@ fn variant_operation_count(
                 .and_then(|owners| work.checked_add(owners))
         })
         .ok_or(SpecializedError::GateResourceOverflow)?;
+    let satisfaction_work = physical_contacts
+        .checked_mul(demand_satisfaction)
+        .ok_or(SpecializedError::GateResourceOverflow)?;
     routing_work
         .checked_add(logical_contact_work)
         .and_then(|work| work.checked_add(unique_face_finalizer_work))
+        .and_then(|work| work.checked_add(satisfaction_work))
         .ok_or(SpecializedError::GateResourceOverflow)
 }
 
@@ -1415,6 +1606,7 @@ fn variant_operation_count(
 fn evaluate_gate_batch(
     contacts: &[WorkingContact],
     proposals: &[MergeProposal],
+    proposal_storage_bytes: usize,
     generic: &GenericContactPlan,
     mesh: &Mesh,
     surface: &NativeSurface,
@@ -1429,32 +1621,67 @@ fn evaluate_gate_batch(
     coverage_area_floor_mm2: f64,
     limits: SpecializedLimits,
 ) -> Result<Vec<FrozenSpecializedGateVector>, SpecializedError> {
+    let mut preflight_telemetry = GatePreflightTelemetry::default();
+    gate_header_preflight(
+        contacts.len(),
+        proposals.len(),
+        proposal_storage_bytes,
+        coverage_samples.len(),
+        authoritative_demands.len(),
+        islands.len(),
+        limits,
+        &mut preflight_telemetry,
+    )?;
+    debug_assert_eq!(preflight_telemetry.payload_allocations, 0);
+    debug_assert_eq!(preflight_telemetry.payload_operations, 0);
+    let mut face_count_operations = 0usize;
+    let face_count = unique_island_face_count(
+        islands,
+        &mut face_count_operations,
+        limits.max_gate_operations,
+    )?;
     let plan = gate_resource_plan(
         contacts.len(),
         proposals.len(),
         coverage_samples.len(),
-        owners_by_face(islands).len(),
+        face_count,
         authoritative_demands.len(),
         limits,
     )?;
-    let face_count = owners_by_face(islands).len();
+    let mut descriptor_operations = 0usize;
     let exact_operations = (0..plan.variants).try_fold(0usize, |total, variant| {
         let proposal = variant
             .checked_sub(1)
             .and_then(|index| proposals.get(index));
-        let owner_face_count =
-            variant_specialized_owner_face_count(contacts, proposal, generic.islands(), islands)?;
+        let owner_face_count = variant_specialized_owner_face_count(
+            contacts,
+            proposal,
+            generic.islands(),
+            islands,
+            &mut descriptor_operations,
+            limits.max_gate_operations,
+        )?;
         total
             .checked_add(variant_operation_count(
                 contacts,
                 proposal,
                 coverage_samples.len(),
-                authoritative_demands.len(),
+                authoritative_demands,
                 face_count,
                 owner_face_count,
             )?)
             .ok_or(SpecializedError::GateResourceOverflow)
     })?;
+    // Each variant descriptor is scanned once for the global operation plan,
+    // once for the window matrix size, once for the load scratch plan, and
+    // once while filling the preallocated matrix.
+    let descriptor_operations = descriptor_operations
+        .checked_mul(4)
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    let exact_operations = exact_operations
+        .checked_add(face_count_operations)
+        .and_then(|work| work.checked_add(descriptor_operations))
+        .ok_or(SpecializedError::GateResourceOverflow)?;
     if exact_operations > limits.max_gate_operations {
         return Err(SpecializedError::GateOperationLimit {
             required: exact_operations,
@@ -1477,12 +1704,15 @@ fn evaluate_gate_batch(
             let proposal = variant
                 .checked_sub(1)
                 .and_then(|index| proposals.get(index));
+            let mut work = 0usize;
             total
                 .checked_add(variant_specialized_owner_face_count(
                     contacts,
                     proposal,
                     generic.islands(),
                     islands,
+                    &mut work,
+                    usize::MAX,
                 )?)
                 .ok_or(SpecializedError::GateResourceOverflow)
         })?;
@@ -1517,11 +1747,14 @@ fn evaluate_gate_batch(
                 let proposal = variant
                     .checked_sub(1)
                     .and_then(|index| proposals.get(index));
+                let mut work = 0usize;
                 let owner_faces = variant_specialized_owner_face_count(
                     contacts,
                     proposal,
                     generic.islands(),
                     islands,
+                    &mut work,
+                    usize::MAX,
                 )?;
                 let resource = specialized_load_resource_plan(
                     generic,
@@ -1530,9 +1763,19 @@ fn evaluate_gate_batch(
                 )?;
                 Ok::<_, SpecializedError>(maximum.max(resource.scratch_bytes))
             })?;
+        let coverage_retained_bytes = coverage_samples
+            .len()
+            .checked_mul(std::mem::size_of::<usize>())
+            .ok_or(SpecializedError::GateResourceOverflow)?;
         check_gate_peak(
-            working_bytes,
-            coverage_scratch.scratch_bytes.max(max_load_scratch),
+            GatePeakUsage {
+                proposal_bytes: proposal_storage_bytes,
+                result_bytes: plan.vector_bytes,
+                matrix_bytes: working_bytes,
+                coverage_scratch_bytes: coverage_scratch.scratch_bytes,
+                coverage_retained_bytes,
+                load_scratch_bytes: max_load_scratch,
+            },
             limits.max_gate_peak_bytes,
         )?;
         let mut nearest_matrix = vec![f64::INFINITY; nearest_len];
@@ -1542,6 +1785,7 @@ fn evaluate_gate_batch(
         let mut owner_face_offsets = Vec::with_capacity(window_variants + 1);
         physical_offsets.push(0);
         owner_face_offsets.push(0);
+        let mut append_work = 0usize;
         for (window_row, variant) in (window_start..window_end).enumerate() {
             let proposal = variant
                 .checked_sub(1)
@@ -1557,6 +1801,8 @@ fn evaluate_gate_batch(
                 reservations,
                 &mut physical_matrix,
                 &mut owner_face_matrix,
+                &mut append_work,
+                usize::MAX,
             )?;
             physical_offsets.push(physical_matrix.len());
             owner_face_offsets.push(owner_face_matrix.len());
@@ -1673,50 +1919,164 @@ fn variant_satisfies_demand(
     })
 }
 
-fn contact_load_descriptor(
-    left: &WorkingContact,
-    right: Option<&WorkingContact>,
-    generic_owner_ids: &BTreeSet<u32>,
-    islands: &[SupportIsland],
-) -> (Option<u32>, Vec<u32>) {
-    let mut routes = left.regular_routes.iter().copied().collect::<BTreeSet<_>>();
-    let mut owner_ids = left
-        .regular_routes
-        .iter()
-        .map(|route| route.owner_island_id)
-        .chain(left.demands.iter().map(|demand| demand.owner_island_id))
-        .collect::<BTreeSet<_>>();
-    let mut has_demands = !left.demands.is_empty();
-    if let Some(right) = right {
-        routes.extend(right.regular_routes.iter().copied());
-        owner_ids.extend(
-            right
-                .regular_routes
-                .iter()
-                .map(|route| route.owner_island_id)
-                .chain(right.demands.iter().map(|demand| demand.owner_island_id)),
-        );
-        has_demands |= !right.demands.is_empty();
+#[derive(Clone, Copy)]
+struct ContactParts<'a> {
+    left: &'a WorkingContact,
+    right: Option<&'a WorkingContact>,
+}
+
+impl<'a> ContactParts<'a> {
+    const fn new(left: &'a WorkingContact, right: Option<&'a WorkingContact>) -> Self {
+        Self { left, right }
     }
-    if !has_demands && routes.len() == 1 {
-        let owner = routes.first().expect("one route").owner_island_id;
-        if generic_owner_ids.contains(&owner) {
-            return (Some(owner), Vec::new());
+
+    fn route_count(self) -> usize {
+        self.left.regular_routes.len() + self.right.map_or(0, |right| right.regular_routes.len())
+    }
+
+    fn route(self, index: usize) -> RegularContactRoute {
+        if index < self.left.regular_routes.len() {
+            self.left.regular_routes[index]
+        } else {
+            self.right
+                .expect("route index belongs to right contact")
+                .regular_routes[index - self.left.regular_routes.len()]
         }
     }
-    let faces = owner_ids
-        .into_iter()
-        .flat_map(|id| {
-            islands
-                .iter()
-                .find(|island| island.id == id)
-                .into_iter()
-                .flat_map(|island| island.face_ids.iter().copied())
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    (None, faces)
+
+    fn has_demands(self) -> bool {
+        !self.left.demands.is_empty() || self.right.is_some_and(|right| !right.demands.is_empty())
+    }
+}
+
+fn charge_load_descriptor_work(
+    work: &mut usize,
+    amount: usize,
+    limit: usize,
+) -> Result<(), SpecializedError> {
+    let required = work
+        .checked_add(amount)
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    if required > limit {
+        return Err(SpecializedError::GateOperationLimit { required, limit });
+    }
+    *work = required;
+    Ok(())
+}
+
+fn parts_serves_owner(
+    parts: ContactParts<'_>,
+    owner: u32,
+    work: &mut usize,
+    limit: usize,
+) -> Result<bool, SpecializedError> {
+    for route_index in 0..parts.route_count() {
+        charge_load_descriptor_work(work, 1, limit)?;
+        if parts.route(route_index).owner_island_id == owner {
+            return Ok(true);
+        }
+    }
+    for demand in parts
+        .left
+        .demands
+        .iter()
+        .chain(parts.right.into_iter().flat_map(|right| &right.demands))
+    {
+        charge_load_descriptor_work(work, 1, limit)?;
+        if demand.owner_island_id == owner {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn generic_owner_for_parts(
+    parts: ContactParts<'_>,
+    generic_islands: &[SupportIsland],
+    work: &mut usize,
+    limit: usize,
+) -> Result<Option<u32>, SpecializedError> {
+    if parts.has_demands() {
+        return Ok(None);
+    }
+    let mut unique_route = None;
+    for route_index in 0..parts.route_count() {
+        let route = parts.route(route_index);
+        let mut seen = false;
+        for prior_index in 0..route_index {
+            charge_load_descriptor_work(work, 1, limit)?;
+            if parts.route(prior_index) == route {
+                seen = true;
+                break;
+            }
+        }
+        if seen {
+            continue;
+        }
+        if unique_route.is_some() {
+            return Ok(None);
+        }
+        unique_route = Some(route);
+    }
+    let Some(route) = unique_route else {
+        return Ok(None);
+    };
+    for island in generic_islands {
+        charge_load_descriptor_work(work, 1, limit)?;
+        if island.id == route.owner_island_id {
+            return Ok(Some(route.owner_island_id));
+        }
+    }
+    Ok(None)
+}
+
+fn visit_specialized_owner_faces(
+    parts: ContactParts<'_>,
+    generic_islands: &[SupportIsland],
+    islands: &[SupportIsland],
+    work: &mut usize,
+    limit: usize,
+    visit: impl FnMut(u32) -> Result<(), SpecializedError>,
+) -> Result<Option<u32>, SpecializedError> {
+    if let Some(owner) = generic_owner_for_parts(parts, generic_islands, work, limit)? {
+        return Ok(Some(owner));
+    }
+    visit_served_owner_faces(parts, islands, work, limit, visit)?;
+    Ok(None)
+}
+
+fn visit_served_owner_faces(
+    parts: ContactParts<'_>,
+    islands: &[SupportIsland],
+    work: &mut usize,
+    limit: usize,
+    mut visit: impl FnMut(u32) -> Result<(), SpecializedError>,
+) -> Result<(), SpecializedError> {
+    // Match BTreeSet iteration without allocating it: repeatedly select the
+    // smallest served face greater than the last emitted face. This keeps the
+    // load rows canonical even when island face ranges interleave.
+    let mut last = None;
+    loop {
+        let mut next = None;
+        for island in islands {
+            if !parts_serves_owner(parts, island.id, work, limit)? {
+                continue;
+            }
+            for &face_id in &island.face_ids {
+                charge_load_descriptor_work(work, 1, limit)?;
+                if last.is_none_or(|last| face_id > last) && next.is_none_or(|next| face_id < next)
+                {
+                    next = Some(face_id);
+                }
+            }
+        }
+        let Some(face_id) = next else {
+            break;
+        };
+        visit(face_id)?;
+        last = Some(face_id);
+    }
+    Ok(())
 }
 
 fn variant_specialized_owner_face_count(
@@ -1724,37 +2084,42 @@ fn variant_specialized_owner_face_count(
     proposal: Option<&MergeProposal>,
     generic_islands: &[SupportIsland],
     islands: &[SupportIsland],
+    work: &mut usize,
+    limit: usize,
 ) -> Result<usize, SpecializedError> {
-    let generic_owner_ids = generic_islands
-        .iter()
-        .map(|island| island.id)
-        .collect::<BTreeSet<_>>();
     let mut count = 0usize;
     for (index, contact) in contacts.iter().enumerate() {
         if proposal.is_some_and(|p| index == p.left || index == p.right) {
             continue;
         }
-        count = count
-            .checked_add(
-                contact_load_descriptor(contact, None, &generic_owner_ids, islands)
-                    .1
-                    .len(),
-            )
-            .ok_or(SpecializedError::GateResourceOverflow)?;
+        visit_specialized_owner_faces(
+            ContactParts::new(contact, None),
+            generic_islands,
+            islands,
+            work,
+            limit,
+            |_| {
+                count = count
+                    .checked_add(1)
+                    .ok_or(SpecializedError::GateResourceOverflow)?;
+                Ok(())
+            },
+        )?;
     }
     if let Some(proposal) = proposal {
-        count = count
-            .checked_add(
-                contact_load_descriptor(
-                    &contacts[proposal.left],
-                    Some(&contacts[proposal.right]),
-                    &generic_owner_ids,
-                    islands,
-                )
-                .1
-                .len(),
-            )
-            .ok_or(SpecializedError::GateResourceOverflow)?;
+        visit_specialized_owner_faces(
+            ContactParts::new(&contacts[proposal.left], Some(&contacts[proposal.right])),
+            generic_islands,
+            islands,
+            work,
+            limit,
+            |_| {
+                count = count
+                    .checked_add(1)
+                    .ok_or(SpecializedError::GateResourceOverflow)?;
+                Ok(())
+            },
+        )?;
     }
     Ok(count)
 }
@@ -1768,6 +2133,8 @@ fn append_variant_load_inputs(
     reservations: &[SpecializedOwnerReservation],
     physical: &mut Vec<PhysicalContact>,
     specialized_owner_faces: &mut Vec<(u32, u32)>,
+    work: &mut usize,
+    limit: usize,
 ) -> Result<(), SpecializedError> {
     let first_specialized_owner = reservations
         .iter()
@@ -1778,57 +2145,44 @@ fn append_variant_load_inputs(
                 .checked_add(1)
                 .ok_or(SpecializedError::OwnerIdOverflow)
         })?;
-    let generic_owner_ids = generic_islands
-        .iter()
-        .map(|island| island.id)
-        .collect::<BTreeSet<_>>();
     let start = physical.len();
-    let mut append = |position_mm: [f64; 3],
-                      descriptor: (Option<u32>, Vec<u32>)|
-     -> Result<(), SpecializedError> {
-        let contact_id =
-            u64::try_from(physical.len() - start).map_err(|_| SpecializedError::OwnerIdOverflow)?;
-        let owner = if let Some(generic_owner) = descriptor.0 {
-            LoadOwner::GenericIsland(generic_owner)
-        } else {
-            let specialized_owner = first_specialized_owner
-                .checked_add(
-                    u32::try_from(contact_id).map_err(|_| SpecializedError::OwnerIdOverflow)?,
-                )
-                .ok_or(SpecializedError::OwnerIdOverflow)?;
-            specialized_owner_faces.extend(
-                descriptor
-                    .1
-                    .into_iter()
-                    .map(|face_id| (specialized_owner, face_id)),
-            );
-            LoadOwner::Specialized(specialized_owner)
+    let mut append =
+        |position_mm: [f64; 3], parts: ContactParts<'_>| -> Result<(), SpecializedError> {
+            let contact_id = u64::try_from(physical.len() - start)
+                .map_err(|_| SpecializedError::OwnerIdOverflow)?;
+            let owner = if let Some(generic_owner) =
+                generic_owner_for_parts(parts, generic_islands, work, limit)?
+            {
+                LoadOwner::GenericIsland(generic_owner)
+            } else {
+                let specialized_owner = first_specialized_owner
+                    .checked_add(
+                        u32::try_from(contact_id).map_err(|_| SpecializedError::OwnerIdOverflow)?,
+                    )
+                    .ok_or(SpecializedError::OwnerIdOverflow)?;
+                visit_served_owner_faces(parts, islands, work, limit, |face_id| {
+                    specialized_owner_faces.push((specialized_owner, face_id));
+                    Ok(())
+                })?;
+                LoadOwner::Specialized(specialized_owner)
+            };
+            physical.push(PhysicalContact {
+                contact_id,
+                owner,
+                point_mm: position_mm,
+            });
+            Ok(())
         };
-        physical.push(PhysicalContact {
-            contact_id,
-            owner,
-            point_mm: position_mm,
-        });
-        Ok(())
-    };
     for (index, contact) in contacts.iter().enumerate() {
         if proposal.is_some_and(|p| index == p.left || index == p.right) {
             continue;
         }
-        append(
-            contact.position_mm,
-            contact_load_descriptor(contact, None, &generic_owner_ids, islands),
-        )?;
+        append(contact.position_mm, ContactParts::new(contact, None))?;
     }
     if let Some(proposal) = proposal {
         append(
             proposal.position_mm,
-            contact_load_descriptor(
-                &contacts[proposal.left],
-                Some(&contacts[proposal.right]),
-                &generic_owner_ids,
-                islands,
-            ),
+            ContactParts::new(&contacts[proposal.left], Some(&contacts[proposal.right])),
         )?;
     }
     Ok(())
@@ -1887,6 +2241,12 @@ fn gather_pair_proposals(
     descriptor_operations: &mut usize,
     proposals: &mut Vec<MergeProposal>,
 ) -> Result<(), SpecializedError> {
+    if limits.max_merge_descriptor_operations == 0 {
+        return Err(SpecializedError::MergeDescriptorOperationLimit {
+            required: 1,
+            limit: 0,
+        });
+    }
     let left = &contacts[left_index];
     let right = &contacts[right_index];
     let classes = (
@@ -1942,8 +2302,10 @@ fn gather_pair_proposals(
         });
     }
     *descriptor_operations = required_work;
-    let mut append = |representative: ([f64; 3], [f64; 3])| -> Result<(), SpecializedError> {
-        if !demands().all(|demand| satisfies(representative.0, demand, layers, attach_reach)) {
+    let mut append = |representative: RepresentativeKey| -> Result<(), SpecializedError> {
+        if !demands()
+            .all(|demand| satisfies(representative.position_mm, demand, layers, attach_reach))
+        {
             return Ok(());
         }
         let required = proposals
@@ -1968,22 +2330,49 @@ fn gather_pair_proposals(
         proposals.push(MergeProposal {
             left: left_index,
             right: right_index,
-            position_mm: representative.0,
-            normal: representative.1,
+            representative_component_id: representative.component_id,
+            representative_face_id: representative.face_id,
+            position_mm: representative.position_mm,
+            normal: representative.normal,
         });
         Ok(())
     };
     if classes.0 {
-        append((left.position_mm, left.normal))?;
+        let route = left
+            .regular_routes
+            .first()
+            .expect("regular-class contact has a route");
+        append(RepresentativeKey {
+            component_id: route.component_id,
+            position_mm: left.position_mm,
+            face_id: route.coverage_face_id,
+            normal: left.normal,
+        })?;
     } else if classes.1 {
-        append((right.position_mm, right.normal))?;
+        let route = right
+            .regular_routes
+            .first()
+            .expect("regular-class contact has a route");
+        append(RepresentativeKey {
+            component_id: route.component_id,
+            position_mm: right.position_mm,
+            face_id: route.coverage_face_id,
+            normal: right.normal,
+        })?;
     } else {
         let mut last = None;
         loop {
             let next = demands()
-                .map(|demand| (demand.nominated_position_mm, demand.nominated_normal))
-                .filter(|seat| last.is_none_or(|last| compare_seats(seat, &last).is_gt()))
-                .min_by(compare_seats);
+                .map(|demand| RepresentativeKey {
+                    component_id: demand.coverage_component_id,
+                    position_mm: demand.nominated_position_mm,
+                    face_id: demand.coverage_face_id,
+                    normal: demand.nominated_normal,
+                })
+                .filter(|key| {
+                    last.is_none_or(|last| compare_representative_keys(key, &last).is_gt())
+                })
+                .min_by(compare_representative_keys);
             let Some(next) = next else {
                 break;
             };
@@ -2068,6 +2457,13 @@ fn commit_merge(
     byte_limit: usize,
     telemetry: &mut MergeAllocationTelemetry,
 ) -> Result<WorkingContact, SpecializedError> {
+    debug_assert_eq!(
+        compare_representative_keys(
+            &proposal.representative_key(),
+            &proposal.representative_key()
+        ),
+        Ordering::Equal
+    );
     let left = &contacts[proposal.left];
     let right = &contacts[proposal.right];
     let route_bytes = left
@@ -2288,10 +2684,6 @@ fn compare_contacts(left: &WorkingContact, right: &WorkingContact) -> Ordering {
         .then_with(|| compare_demand_slices(&left.demands, &right.demands))
 }
 
-fn compare_seats(left: &([f64; 3], [f64; 3]), right: &([f64; 3], [f64; 3])) -> Ordering {
-    compare_point3(left.0, right.0).then_with(|| compare_point3(left.1, right.1))
-}
-
 fn compare_demand_slices(left: &[SpecializedDemand], right: &[SpecializedDemand]) -> Ordering {
     left.iter()
         .zip(right)
@@ -2459,6 +2851,8 @@ impl Fnv {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
     use plinth_core::{Finite, PositiveFinite};
     use plinth_mesh::{make_overhang_table, make_raking_blade, make_thin_fin};
@@ -2692,10 +3086,148 @@ mod tests {
     }
 
     #[test]
-    fn combined_gate_peak_accepts_the_cap_and_refuses_cap_plus_one() {
-        assert_eq!(check_gate_peak(40, 60, 100), Ok(100));
+    fn zero_descriptor_cap_refuses_before_payload_work_or_proposal_allocation() {
+        let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
+        let mut demand = minimum_demand(0, 2, 7, [0.0, 0.0, 0.1]);
+        demand.region_points_mm = vec![[0.0, 0.0, 0.1]; 10_000];
+        let contacts = vec![
+            WorkingContact::specialized(demand.clone()),
+            WorkingContact::specialized(demand),
+        ];
+        let mut limits = SpecializedLimits::production();
+        limits.max_merge_descriptor_operations = 0;
+        let mut operations = 0;
+        let mut proposals = Vec::new();
         assert_eq!(
-            check_gate_peak(40, 61, 100),
+            gather_pair_proposals(
+                &contacts,
+                0,
+                1,
+                &layers,
+                0.2,
+                2.5,
+                limits,
+                &mut operations,
+                &mut proposals,
+            ),
+            Err(SpecializedError::MergeDescriptorOperationLimit {
+                required: 1,
+                limit: 0,
+            })
+        );
+        assert_eq!(operations, 0);
+        assert_eq!(proposals.capacity(), 0);
+    }
+
+    #[test]
+    fn same_seat_representatives_keep_face_identity_and_python_key_order() {
+        let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
+        let position = [1.0, 2.0, 0.1];
+        let mut face_ten = minimum_demand(0, 10, 7, position);
+        face_ten.nominated_normal = [-1.0, 0.0, 0.0];
+        let mut face_one = minimum_demand(1, 1, 7, position);
+        face_one.nominated_normal = [1.0, 0.0, 0.0];
+        let proposals = test_pair_proposals(
+            &[
+                WorkingContact::specialized(face_ten),
+                WorkingContact::specialized(face_one),
+            ],
+            &layers,
+            0.2,
+            2.5,
+        );
+        assert_eq!(proposals.len(), 2);
+        assert_eq!(proposals[0].representative_face_id, 1);
+        assert_eq!(proposals[1].representative_face_id, 10);
+    }
+
+    #[test]
+    fn zero_gate_caps_refuse_without_payload_allocation_or_work() {
+        let mut telemetry = GatePreflightTelemetry::default();
+        let mut operation_limits = SpecializedLimits::production();
+        operation_limits.max_gate_operations = 0;
+        assert_eq!(
+            gate_header_preflight(
+                2,
+                1,
+                std::mem::size_of::<MergeProposal>(),
+                3,
+                4,
+                5,
+                operation_limits,
+                &mut telemetry,
+            ),
+            Err(SpecializedError::GateOperationLimit {
+                required: 1,
+                limit: 0,
+            })
+        );
+        assert_eq!(telemetry.payload_allocations, 0);
+        assert_eq!(telemetry.payload_operations, 0);
+
+        let mut peak_limits = SpecializedLimits::production();
+        peak_limits.max_gate_peak_bytes = 0;
+        let expected = std::mem::size_of::<MergeProposal>()
+            + 2 * std::mem::size_of::<FrozenSpecializedGateVector>();
+        assert_eq!(
+            gate_header_preflight(
+                2,
+                1,
+                std::mem::size_of::<MergeProposal>(),
+                3,
+                4,
+                5,
+                peak_limits,
+                &mut telemetry,
+            ),
+            Err(SpecializedError::GatePeakByteLimit {
+                required: expected,
+                limit: 0,
+            })
+        );
+        assert_eq!(telemetry.payload_allocations, 0);
+        assert_eq!(telemetry.payload_operations, 0);
+    }
+
+    #[test]
+    fn huge_owner_face_payload_refuses_during_allocation_free_count() {
+        let contacts = vec![WorkingContact::specialized(minimum_demand(
+            0,
+            2,
+            7,
+            [0.0, 0.0, 0.1],
+        ))];
+        let islands = [SupportIsland {
+            id: 0,
+            face_ids: (0..10_000).collect(),
+        }];
+        let mut work = 0usize;
+        assert_eq!(
+            variant_specialized_owner_face_count(&contacts, None, &[], &islands, &mut work, 10,),
+            Err(SpecializedError::GateOperationLimit {
+                required: 11,
+                limit: 10,
+            })
+        );
+    }
+
+    #[test]
+    fn combined_gate_peak_accepts_the_cap_and_refuses_cap_plus_one() {
+        let exact = GatePeakUsage {
+            proposal_bytes: 10,
+            result_bytes: 20,
+            matrix_bytes: 30,
+            coverage_scratch_bytes: 40,
+            coverage_retained_bytes: 8,
+            load_scratch_bytes: 32,
+        };
+        assert_eq!(check_gate_peak(exact, 100), Ok(100));
+        let below = GatePeakUsage {
+            load_scratch_bytes: 33,
+            ..exact
+        };
+        assert_eq!(
+            check_gate_peak(below, 100),
             Err(SpecializedError::GatePeakByteLimit {
                 required: 101,
                 limit: 100,
@@ -2754,19 +3286,38 @@ mod tests {
             }],
             demands: Vec::new(),
         }];
-        let inputs = working_load_inputs(
+        let islands = [SupportIsland {
+            id: 9,
+            face_ids: vec![3],
+        }];
+        let mut work = 0usize;
+        let owner_faces = variant_specialized_owner_face_count(
             &contacts,
+            None,
             &[],
-            &[SupportIsland {
-                id: 9,
-                face_ids: vec![3],
-            }],
-            &[],
+            &islands,
+            &mut work,
+            usize::MAX,
         )
         .unwrap();
-        assert_eq!(inputs.contacts.len(), 1);
-        assert_eq!(inputs.contacts[0].owner, LoadOwner::Specialized(0));
-        assert_eq!(inputs.specialized_owner_faces, vec![(0, 3)]);
+        let mut physical = Vec::with_capacity(1);
+        let mut specialized_owner_faces = Vec::with_capacity(owner_faces);
+        let mut fill_work = 0usize;
+        append_variant_load_inputs(
+            &contacts,
+            None,
+            &[],
+            &islands,
+            &[],
+            &mut physical,
+            &mut specialized_owner_faces,
+            &mut fill_work,
+            usize::MAX,
+        )
+        .unwrap();
+        assert_eq!(physical.len(), 1);
+        assert_eq!(physical[0].owner, LoadOwner::Specialized(0));
+        assert_eq!(specialized_owner_faces, vec![(0, 3)]);
     }
 
     #[test]
