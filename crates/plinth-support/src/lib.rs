@@ -11,6 +11,8 @@
 #![forbid(unsafe_code)]
 
 pub mod forest;
+pub mod legacy_compat;
+pub mod member_sizing;
 
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, SurfaceBuildError};
 use plinth_core::{m0_constants, Finite, PositiveFinite};
