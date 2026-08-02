@@ -15,12 +15,23 @@ pub struct CavityField {
     origin_mm: [Finite; 3],
     pitch_mm: Finite,
     membership: Vec<u64>,
+    source_occupancy: Vec<u64>,
     member_count: usize,
 }
 
 impl CavityField {
+    #[cfg(test)]
     pub(crate) fn from_selected_mask(
         mask: &Array3<bool>,
+        origin_mm: [f64; 3],
+        pitch_mm: f64,
+    ) -> Result<Self, HollowError> {
+        Self::from_selected_mask_and_occupancy(mask, mask, origin_mm, pitch_mm)
+    }
+
+    pub(crate) fn from_selected_mask_and_occupancy(
+        mask: &Array3<bool>,
+        occupancy: &Array3<bool>,
         origin_mm: [f64; 3],
         pitch_mm: f64,
     ) -> Result<Self, HollowError> {
@@ -37,6 +48,10 @@ impl CavityField {
             .ok_or(HollowError::ResourceAccountingOverflow)?
             / 64;
         let mut membership = vec![0_u64; words];
+        if occupancy.shape() != mask.shape() {
+            return Err(HollowError::VoxelStack);
+        }
+        let mut source_occupancy = vec![0_u64; words];
         let mut member_count = 0_usize;
         // Do not rely on ndarray's physical stride iteration here. H0's
         // coordinate contract is explicit: mask indexes are (z,y,x), while
@@ -51,6 +66,10 @@ impl CavityField {
                             .checked_add(1)
                             .ok_or(HollowError::VoxelGridTooLarge)?;
                     }
+                    if occupancy[(z, y, x)] {
+                        let flat = x + y * nx + z * nx * ny;
+                        source_occupancy[flat / 64] |= 1_u64 << (flat % 64);
+                    }
                 }
             }
         }
@@ -64,6 +83,7 @@ impl CavityField {
             ],
             pitch_mm: finite(pitch_mm)?,
             membership,
+            source_occupancy,
             member_count,
         })
     }
@@ -90,12 +110,19 @@ impl CavityField {
 
     #[must_use]
     pub const fn retained_bytes(&self) -> usize {
-        self.membership.len() * std::mem::size_of::<u64>()
+        (self.membership.len() + self.source_occupancy.len()) * std::mem::size_of::<u64>()
     }
 
     #[must_use]
     pub(crate) fn contains_flat(&self, flat: usize) -> bool {
         self.membership
+            .get(flat / 64)
+            .is_some_and(|word| word & (1_u64 << (flat % 64)) != 0)
+    }
+
+    #[must_use]
+    pub(crate) fn source_contains_flat(&self, flat: usize) -> bool {
+        self.source_occupancy
             .get(flat / 64)
             .is_some_and(|word| word & (1_u64 << (flat % 64)) != 0)
     }
@@ -154,6 +181,6 @@ mod tests {
         assert_eq!(field.flat_to_index(8), [2, 0, 1]);
         assert_eq!(field.world_at_flat(8), [0.0, 2.0, 3.5]);
         assert_eq!(field.member_flats().collect::<Vec<_>>(), vec![8]);
-        assert_eq!(field.retained_bytes(), 8);
+        assert_eq!(field.retained_bytes(), 16);
     }
 }

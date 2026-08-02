@@ -137,7 +137,10 @@ pub enum DrainPlanningRefusal {
     #[error("native surface construction or batch ray query failed")]
     Kernel,
     #[error("cavity lobe {lobe_id} has no legal outward exit within 45mm")]
-    NoExit { lobe_id: u32 },
+    NoExit {
+        lobe_id: u32,
+        diagnostics: Vec<CandidateDiagnostic>,
+    },
     #[error("cavity lobe {lobe_id} exit exceeded the 45mm ceiling")]
     ExitTooLong { lobe_id: u32 },
     #[error("{role:?} candidate has {crossings} deduplicated crossings; exactly two are required")]
@@ -154,7 +157,9 @@ pub enum DrainPlanningRefusal {
     #[error("non-finite geometry occurred while planning {role:?}")]
     NonFinite { role: HoleRole },
     #[error("no vent site escaped through a horizontal wall within 45mm")]
-    NoVentSite,
+    NoVentSite {
+        diagnostics: Vec<CandidateDiagnostic>,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -188,6 +193,7 @@ struct PlannerPreflight {
     high_site_capacity: usize,
     candidate_capacity: usize,
     requested_bytes: usize,
+    normalized_direction_bytes: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -198,6 +204,7 @@ struct PlannerPolicy {
     lobe_min_ml: f64,
     vent_top_band_mm: f64,
     vent_sample_divisor: usize,
+    exit_ceiling_mm: f64,
 }
 
 /// Plans the exact frozen H1a candidates through one canonical batched native
@@ -272,9 +279,11 @@ fn plan(candidate: &ShellCandidate) -> Result<DrainPlan, DrainPlanningRefusal> {
             lobe_min_ml: policy.hollow_lobe_min_ml().diagnostic().get(),
             vent_top_band_mm,
             vent_sample_divisor,
+            exit_ceiling_mm: policy.hollow_exit_ray_max_mm().diagnostic().get(),
         },
     )?;
     debug_assert!(preflight.requested_bytes <= candidate.cavity().resource_cap_bytes());
+    debug_assert!(preflight.normalized_direction_bytes > 0);
     let lobes = low_lobes(
         field,
         policy.hollow_lobe_band_mm().diagnostic().get(),
@@ -339,6 +348,8 @@ fn plan(candidate: &ShellCandidate) -> Result<DrainPlan, DrainPlanningRefusal> {
         }
     }
     debug_assert_eq!(candidates.len(), candidate_count);
+    let ceiling = policy.hollow_exit_ray_max_mm().diagnostic().get();
+    let sampled_exits = sampled_exit_distances(field, &candidates, ceiling)?;
 
     let surface = NativeSurface::from_indexed(
         candidate.mesh().verts(),
@@ -357,7 +368,6 @@ fn plan(candidate: &ShellCandidate) -> Result<DrainPlan, DrainPlanningRefusal> {
         .iter()
         .map(|candidate| candidate.direction)
         .collect();
-    let ceiling = policy.hollow_exit_ray_max_mm().diagnostic().get();
     // One gathered batch covers every drain and vent candidate. Results are
     // scattered solely by the stable candidate ID below.
     let (offsets, ts, _faces) = surface
@@ -376,7 +386,7 @@ fn plan(candidate: &ShellCandidate) -> Result<DrainPlan, DrainPlanningRefusal> {
             exit_length(
                 &ts[begin..end],
                 ceiling,
-                field.pitch_mm().get(),
+                sampled_exits[candidate.id],
                 candidate.role,
                 candidate.lobe_id,
             ),
@@ -386,8 +396,12 @@ fn plan(candidate: &ShellCandidate) -> Result<DrainPlan, DrainPlanningRefusal> {
 
     let mut holes = Vec::with_capacity(lobes.len() + 1);
     for (site, lobe) in lobes.iter().enumerate() {
-        let best = best_site(&candidates, &paths, HoleRole::Drain, site)
-            .ok_or(DrainPlanningRefusal::NoExit { lobe_id: lobe.id })?;
+        let best = best_site(&candidates, &paths, HoleRole::Drain, site).ok_or_else(|| {
+            DrainPlanningRefusal::NoExit {
+                lobe_id: lobe.id,
+                diagnostics: std::mem::take(&mut unavailable_candidates),
+            }
+        })?;
         holes.push(hole(
             best.0,
             best.1,
@@ -396,8 +410,11 @@ fn plan(candidate: &ShellCandidate) -> Result<DrainPlan, DrainPlanningRefusal> {
             drain_keepout_after_mm,
         )?);
     }
-    let vent =
-        best_role(&candidates, &paths, HoleRole::Vent).ok_or(DrainPlanningRefusal::NoVentSite)?;
+    let vent = best_role(&candidates, &paths, HoleRole::Vent).ok_or_else(|| {
+        DrainPlanningRefusal::NoVentSite {
+            diagnostics: std::mem::take(&mut unavailable_candidates),
+        }
+    })?;
     holes.push(hole(
         vent.0,
         vent.1,
@@ -439,7 +456,7 @@ fn retain_candidate_path(
 fn exit_length(
     hits: &[f64],
     ceiling: f64,
-    pitch_mm: f64,
+    sampled_mm: Option<f64>,
     role: HoleRole,
     lobe_id: Option<u32>,
 ) -> Result<Option<RayPath>, DrainPlanningRefusal> {
@@ -459,19 +476,64 @@ fn exit_length(
         return Err(DrainPlanningRefusal::ShellBreach { role, lobe_id });
     }
     if outer > ceiling {
-        return Err(lobe_id.map_or(DrainPlanningRefusal::NoVentSite, |lobe_id| {
-            DrainPlanningRefusal::ExitTooLong { lobe_id }
-        }));
+        return Err(lobe_id.map_or(
+            DrainPlanningRefusal::NoVentSite {
+                diagnostics: Vec::new(),
+            },
+            |lobe_id| DrainPlanningRefusal::ExitTooLong { lobe_id },
+        ));
     }
-    // Python probes voxel centers at multiples of pitch and treats the final
-    // occupied boundary voxel as material. Its `wall_mm` is therefore one
-    // pitch beyond the first pitch ceiling of the exact outer intersection.
-    let sampled_mm = (outer / pitch_mm).ceil() * pitch_mm + pitch_mm;
+    let Some(sampled_mm) = sampled_mm else {
+        return Ok(None);
+    };
     Ok(Some(RayPath {
         inner_mm: inner,
         outer_mm: outer,
         sampled_mm,
     }))
+}
+
+fn sampled_exit_distances(
+    field: &CavityField,
+    candidates: &[Candidate],
+    ceiling_mm: f64,
+) -> Result<Vec<Option<f64>>, DrainPlanningRefusal> {
+    let pitch = field.pitch_mm().get();
+    let sample_count = (ceiling_mm / pitch).floor() as usize + 1;
+    let gathered_count = candidates
+        .len()
+        .checked_mul(sample_count)
+        .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    let mut gathered = Vec::with_capacity(gathered_count);
+    let origin = field.origin_mm().map(Finite::get);
+    let dims = field.dimensions();
+    for candidate in candidates {
+        for sample in 0..sample_count {
+            let distance = sample as f64 * pitch;
+            let point = add(candidate.origin, scale(candidate.direction, distance));
+            let mut index = [0_usize; 3];
+            let mut in_bounds = true;
+            for axis in 0..3 {
+                let coordinate = ((point[axis] - origin[axis]) / pitch).round_ties_even();
+                if coordinate < 0.0 || coordinate >= dims[axis] as f64 {
+                    in_bounds = false;
+                    break;
+                }
+                index[axis] = coordinate as usize;
+            }
+            gathered.push(
+                in_bounds.then(|| index[0] + index[1] * dims[0] + index[2] * dims[0] * dims[1]),
+            );
+        }
+    }
+    let mut exits = vec![None; candidates.len()];
+    for (candidate_id, samples) in gathered.chunks_exact(sample_count).enumerate() {
+        exits[candidate_id] = samples.iter().enumerate().find_map(|(sample, flat)| {
+            let occupied = flat.is_some_and(|flat| field.source_contains_flat(flat));
+            (!occupied).then_some(sample as f64 * pitch)
+        });
+    }
+    Ok(exits)
 }
 
 fn best_site<'a>(
@@ -555,7 +617,9 @@ fn low_lobes(
         .member_flats()
         .map(|flat| field.world_at_flat(flat)[2])
         .min_by(|left, right| left.partial_cmp(right).unwrap())
-        .ok_or(DrainPlanningRefusal::NoVentSite)?;
+        .ok_or(DrainPlanningRefusal::NoVentSite {
+            diagnostics: Vec::new(),
+        })?;
     let label_bytes = field
         .flat_count()
         .checked_mul(std::mem::size_of::<i32>())
@@ -660,7 +724,9 @@ fn high_sites(
         .member_flats()
         .map(|flat| field.world_at_flat(flat)[2])
         .max_by(|left, right| left.partial_cmp(right).unwrap())
-        .ok_or(DrainPlanningRefusal::NoVentSite)?;
+        .ok_or(DrainPlanningRefusal::NoVentSite {
+            diagnostics: Vec::new(),
+        })?;
     let high_count = field
         .member_flats()
         .filter(|flat| field.world_at_flat(*flat)[2] > high_z - top_band_mm)
@@ -694,7 +760,9 @@ fn planner_preflight(
         .member_flats()
         .map(|flat| field.world_at_flat(flat)[2])
         .min_by(|left, right| left.partial_cmp(right).unwrap())
-        .ok_or(DrainPlanningRefusal::NoVentSite)?;
+        .ok_or(DrainPlanningRefusal::NoVentSite {
+            diagnostics: Vec::new(),
+        })?;
     let low_members = field
         .member_flats()
         .filter(|flat| field.world_at_flat(*flat)[2] < low_z + policy.lobe_band_mm)
@@ -709,7 +777,9 @@ fn planner_preflight(
         .member_flats()
         .map(|flat| field.world_at_flat(flat)[2])
         .max_by(|left, right| left.partial_cmp(right).unwrap())
-        .ok_or(DrainPlanningRefusal::NoVentSite)?;
+        .ok_or(DrainPlanningRefusal::NoVentSite {
+            diagnostics: Vec::new(),
+        })?;
     let high_members = field
         .member_flats()
         .filter(|flat| field.world_at_flat(*flat)[2] > high_z - policy.vent_top_band_mm)
@@ -781,6 +851,17 @@ fn planner_preflight(
     .into_iter()
     .try_fold(0_usize, |total, value| total.checked_add(value))
     .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    let normalized_direction_bytes = allocator(
+        policy.drain_direction_count,
+        std::mem::size_of::<V3>(),
+        std::mem::align_of::<V3>(),
+    )?
+    .checked_add(allocator(
+        policy.vent_direction_count,
+        std::mem::size_of::<V3>(),
+        std::mem::align_of::<V3>(),
+    )?)
+    .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
     let candidate_buffers = [
         allocator(
             candidate_capacity,
@@ -807,14 +888,7 @@ fn planner_preflight(
             std::mem::size_of::<CandidateDiagnostic>(),
             std::mem::align_of::<CandidateDiagnostic>(),
         )?,
-        allocator(
-            policy
-                .drain_direction_count
-                .checked_add(policy.vent_direction_count)
-                .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?,
-            std::mem::size_of::<V3>(),
-            std::mem::align_of::<V3>(),
-        )?,
+        normalized_direction_bytes,
         allocator(
             high_site_capacity,
             std::mem::size_of::<V3>(),
@@ -837,6 +911,21 @@ fn planner_preflight(
     ]
     .into_iter()
     .try_fold(0_usize, |total, value| total.checked_add(value))
+    .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    let sample_count = (policy.exit_ceiling_mm / field.pitch_mm().get()).floor() as usize + 1;
+    let gathered_samples = candidate_capacity
+        .checked_mul(sample_count)
+        .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    let sampled_wall_buffers = allocator(
+        gathered_samples,
+        std::mem::size_of::<Option<usize>>(),
+        std::mem::align_of::<Option<usize>>(),
+    )?
+    .checked_add(allocator(
+        candidate_capacity,
+        std::mem::size_of::<Option<f64>>(),
+        std::mem::align_of::<Option<f64>>(),
+    )?)
     .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
     // `cast_rays` retains one `(Vec<f64>, Vec<i64>)` header pair per ray while
     // serially building both flattened arrays. During the parallel gather,
@@ -886,6 +975,7 @@ fn planner_preflight(
         retained_field,
         lobe_workspace,
         candidate_buffers,
+        sampled_wall_buffers,
         native_peak_bytes,
         ray_buffers,
     ]
@@ -903,6 +993,7 @@ fn planner_preflight(
         high_site_capacity,
         candidate_capacity,
         requested_bytes: requested,
+        normalized_direction_bytes,
     })
 }
 
@@ -1036,7 +1127,8 @@ mod tests {
     #[test]
     fn ray_pair_uses_outer_exit_and_ordered_tie_keeps_first_direction() {
         assert_eq!(
-            exit_length(&[0.25, 3.5], 45.0, 0.5, HoleRole::Drain, Some(1)).expect("valid pair"),
+            exit_length(&[0.25, 3.5], 45.0, Some(4.0), HoleRole::Drain, Some(1),)
+                .expect("valid pair"),
             Some(RayPath {
                 inner_mm: 0.25,
                 outer_mm: 3.5,
@@ -1087,20 +1179,20 @@ mod tests {
             (&[0.25, 1.0, 2.0][..], 3),
         ] {
             assert!(matches!(
-                exit_length(hits, 45.0, 0.5, HoleRole::Drain, Some(1)),
+                exit_length(hits, 45.0, Some(4.0), HoleRole::Drain, Some(1)),
                 Err(DrainPlanningRefusal::CrossingCount { crossings: actual, .. }) if actual == crossings
             ));
         }
         assert!(matches!(
-            exit_length(&[-0.1, 3.5], 45.0, 0.5, HoleRole::Drain, Some(1)),
+            exit_length(&[-0.1, 3.5], 45.0, Some(4.0), HoleRole::Drain, Some(1),),
             Err(DrainPlanningRefusal::ShellBreach { .. })
         ));
         assert!(matches!(
-            exit_length(&[0.25, 45.1], 45.0, 0.5, HoleRole::Drain, Some(1)),
+            exit_length(&[0.25, 45.1], 45.0, Some(45.0), HoleRole::Drain, Some(1),),
             Err(DrainPlanningRefusal::ExitTooLong { lobe_id: 1 })
         ));
         assert!(
-            exit_length(&[0.25, 45.0], 45.0, 0.5, HoleRole::Drain, Some(1))
+            exit_length(&[0.25, 45.0], 45.0, Some(45.0), HoleRole::Drain, Some(1),)
                 .expect("inclusive guide ceiling")
                 .is_some()
         );
@@ -1164,7 +1256,7 @@ mod tests {
         {
             paths[candidate.id] = retain_candidate_path(
                 candidate,
-                exit_length(hits, 45.0, 0.5, candidate.role, candidate.lobe_id),
+                exit_length(hits, 45.0, Some(2.5), candidate.role, candidate.lobe_id),
                 &mut diagnostics,
             )
             .expect("crossing-count mismatch is candidate-local");
@@ -1178,6 +1270,79 @@ mod tests {
                 .0
                 .id,
             1
+        );
+    }
+
+    #[test]
+    fn sampled_wall_batch_pins_diagonal_ties_even_and_inclusive_ceiling() {
+        let mut selected = Array3::from_elem((5, 5, 5), false);
+        selected[(2, 2, 2)] = true;
+        let mut occupancy = Array3::from_elem((5, 5, 5), false);
+        occupancy[(2, 2, 2)] = true;
+        occupancy[(1, 2, 3)] = true;
+        let diagonal_field = CavityField::from_selected_mask_and_occupancy(
+            &selected,
+            &occupancy,
+            [0.0, 0.0, 0.0],
+            0.5,
+        )
+        .expect("diagonal field");
+        let diagonal = Candidate {
+            id: 0,
+            role: HoleRole::Drain,
+            lobe_id: Some(1),
+            site: 0,
+            origin: [1.0, 1.0, 1.0],
+            direction: normalize([1.0, 0.0, -1.0]).expect("diagonal"),
+        };
+        assert_eq!(
+            sampled_exit_distances(&diagonal_field, &[diagonal], 2.0).expect("diagonal batch"),
+            vec![Some(1.5)]
+        );
+
+        let mut boundary_selected = Array3::from_elem((1, 1, 91), false);
+        boundary_selected[(0, 0, 0)] = true;
+        let mut boundary_occupancy = Array3::from_elem((1, 1, 91), false);
+        for x in 0..90 {
+            boundary_occupancy[(0, 0, x)] = true;
+        }
+        let boundary_field = CavityField::from_selected_mask_and_occupancy(
+            &boundary_selected,
+            &boundary_occupancy,
+            [0.0, 0.0, 0.0],
+            0.5,
+        )
+        .expect("boundary field");
+        let boundary = Candidate {
+            id: 0,
+            role: HoleRole::Vent,
+            lobe_id: None,
+            site: 0,
+            origin: [0.0, 0.0, 0.0],
+            direction: [1.0, 0.0, 0.0],
+        };
+        assert_eq!(
+            sampled_exit_distances(&boundary_field, &[boundary], 45.0)
+                .expect("inclusive boundary batch"),
+            vec![Some(45.0)]
+        );
+
+        let mut tie_selected = Array3::from_elem((1, 1, 3), false);
+        tie_selected[(0, 0, 0)] = true;
+        let tie_field = CavityField::from_selected_mask_and_occupancy(
+            &tie_selected,
+            &tie_selected,
+            [0.0, 0.0, 0.0],
+            0.5,
+        )
+        .expect("tie field");
+        let tie = Candidate {
+            origin: [0.25, 0.0, 0.0],
+            ..boundary
+        };
+        assert_eq!(
+            sampled_exit_distances(&tie_field, &[tie], 0.5).expect("ties-even batch"),
+            vec![Some(0.5)]
         );
     }
 
@@ -1287,10 +1452,11 @@ mod tests {
         };
         let failure =
             plan_drains(candidate).expect_err("no ray can leave from an invented remote cavity");
-        assert_eq!(
+        assert!(matches!(
             failure.reason(),
-            &DrainPlanningRefusal::NoExit { lobe_id: 1 }
-        );
+            DrainPlanningRefusal::NoExit { lobe_id: 1, diagnostics }
+                if !diagnostics.is_empty() && diagnostics.iter().all(|item| item.crossings == 0)
+        ));
         assert_eq!(
             failure.into_candidate().cavity_field().member_count(),
             4_000
@@ -1366,7 +1532,7 @@ mod tests {
             unlimited.cavity_field().pitch_mm().get(),
         )
         .expect("native preflight");
-        let exact = planner_preflight(
+        let preflight = planner_preflight(
             &unlimited,
             unlimited.cavity_field(),
             unlimited.cavity().resources(),
@@ -1389,10 +1555,12 @@ mod tests {
                     policy.hollow_vent_sample_divisor().diagnostic().get(),
                 )
                 .expect("sample divisor fits usize"),
+                exit_ceiling_mm: policy.hollow_exit_ray_max_mm().diagnostic().get(),
             },
         )
-        .expect("unlimited preflight")
-        .requested_bytes;
+        .expect("unlimited preflight");
+        assert_eq!(preflight.normalized_direction_bytes, 480);
+        let exact = preflight.requested_bytes;
 
         let exact_candidate = frozen_candidate();
         let (mesh, mut cavity, field) = exact_candidate.into_parts();

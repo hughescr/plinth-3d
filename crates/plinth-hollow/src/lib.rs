@@ -481,7 +481,6 @@ pub fn create_shell_with_resources(
         material,
     } = grid;
     let edt = frozen_distance_transform(&material, grid_pitch)?;
-    drop(material);
     let bulk_mm = 2.0 * edt.iter().copied().fold(0.0_f64, f64::max);
     if !bulk_mm.is_finite() {
         return Err(HollowError::InvalidArithmetic);
@@ -513,7 +512,9 @@ pub fn create_shell_with_resources(
         return Err(HollowError::IneligibleSavings);
     }
 
-    let cavity_field = CavityField::from_selected_mask(&main, grid_origin, grid_pitch)?;
+    let cavity_field =
+        CavityField::from_selected_mask_and_occupancy(&main, &material, grid_origin, grid_pitch)?;
+    drop(material);
     let inner = marching_cavity(&main, grid_origin, grid_pitch)?;
     drop(main);
     let shell = ManifoldBackend
@@ -913,10 +914,16 @@ fn resource_estimate(
 
     let label_memory = label_phase_memory(spec.count)?;
     debug_assert!(label_memory.conservative_peak_bytes >= label_memory.requested_live_bytes);
-    let retained_cavity_field_bytes = cavity_field::packed_bytes_for_voxels(spec.count)?;
+    let packed_field_bytes = cavity_field::packed_bytes_for_voxels(spec.count)?;
+    let retained_cavity_field_bytes = checked_scale(packed_field_bytes, 2)?;
     let retained_cavity_field_peak_bytes =
         allocator_allocation_bound_bytes(retained_cavity_field_bytes, std::mem::align_of::<u64>())?;
     let selected_mask_peak_bytes = allocator_allocation_bound(
+        spec.count,
+        std::mem::size_of::<bool>(),
+        std::mem::align_of::<bool>(),
+    )?;
+    let retained_source_occupancy_peak_bytes = allocator_allocation_bound(
         spec.count,
         std::mem::size_of::<bool>(),
         std::mem::align_of::<bool>(),
@@ -928,6 +935,7 @@ fn resource_estimate(
         source_mesh_peak_bytes,
         label_memory.conservative_peak_bytes,
         selected_mask_peak_bytes,
+        retained_source_occupancy_peak_bytes,
         retained_cavity_field_peak_bytes,
     ])?;
 
@@ -2167,7 +2175,7 @@ mod tests {
         )
         .expect("selected mask");
         let retained_field = allocator_allocation_bound_bytes(
-            cavity_field::packed_bytes_for_voxels(spec.count).expect("packed field"),
+            cavity_field::packed_bytes_for_voxels(spec.count).expect("packed field") * 2,
             std::mem::align_of::<u64>(),
         )
         .expect("field allocation");
@@ -2176,6 +2184,7 @@ mod tests {
             label_phase_memory(spec.count)
                 .expect("label phase")
                 .conservative_peak_bytes,
+            selected_mask,
             selected_mask,
             retained_field,
         ])

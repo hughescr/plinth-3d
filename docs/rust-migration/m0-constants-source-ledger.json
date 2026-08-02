@@ -919,6 +919,16 @@
       "provenance_detail": "triage volume ceiling"
     },
     {
+      "id": "HOLLOW_VENT_DIRECTIONS",
+      "classification": "runtime_hollowing",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:run horiz directions"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.3 = four ordered horizontal directions",
+      "provenance_detail": "structured direction set"
+    },
+    {
       "id": "HOLLOW_VENT_R_MM",
       "classification": "runtime_hollowing",
       "normative": "03-physics-and-constants.md §3.10.1 = 1.25 mm",
@@ -927,6 +937,26 @@
       ],
       "provenance_wrapper": "Placeholder",
       "provenance_detail": "Placeholder"
+    },
+    {
+      "id": "HOLLOW_VENT_SAMPLE_DIVISOR",
+      "classification": "runtime_hollowing",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:run high sampling len(high) // 40"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.3 = 40",
+      "provenance_detail": "deterministic top-band sampling divisor"
+    },
+    {
+      "id": "HOLLOW_VENT_TOP_BAND_MM",
+      "classification": "runtime_hollowing",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "scripts/support_placement/hollow.py:run high cavity-top band"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.3 = 2.0 mm",
+      "provenance_detail": "vent-site cavity-top band"
     },
     {
       "id": "HOLLOW_VOLUME_BALANCE_REL_TOL",
