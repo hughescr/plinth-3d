@@ -36,24 +36,12 @@ pub enum BaselineAxis {
     Y,
 }
 
-/// The pinned baseline may explicitly select a rotation or implicitly select identity.
+/// The orientation explicitly encoded by the pinned baseline.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum BaselineSelection {
     Identity,
     AxisDegrees { axis: BaselineAxis, degrees: Finite },
-}
-
-/// A non-blocking explanation for identity selected without a usable baseline orientation.
-///
-/// This is deliberately separate from malformed pinned-report failures: a baseline that did not
-/// run hollowing has no orientation to replay, while an existing malformed record is unsafe to
-/// interpret and remains an [`OrientError::PinnedBaselineInvalid`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OrientationNote {
-    HollowMissing,
-    HollowSkipped,
 }
 
 /// The chosen rigid transform, including the required post-rotation re-centering translation.
@@ -77,33 +65,38 @@ impl RigidTransform {
 
 /// Applies the frozen legacy orientation choice and frame restoration.
 ///
-/// The pinned report is required. A valid report whose hollow stage was absent or skipped, or
-/// whose hollow log has no `orientation` entry, intentionally selects the identity rotation.
-/// Identity still receives frame restoration, matching the legacy implementation.
+/// The pinned report must contain exactly one successful hollow stage and its authoritative
+/// `report.orientation` record. Identity must be explicitly encoded as a valid zero-degree
+/// orientation; missing or skipped stages never silently choose it. Identity still receives frame
+/// restoration, matching the legacy implementation.
 pub fn run(model: DecimatedModel, request: &OrientRequest) -> Result<OrientedModel, OrientError> {
     let pinned_report = request.pinned.pipeline_report.clone();
-    let pinned = read_selection(&pinned_report)?;
-    let transform = transform_for(pinned.selection)?;
+    let selection = read_selection(&pinned_report)?;
+    let transform = transform_for(selection)?;
     let (mesh, decimation) = model.into_parts();
     let (mesh, transform) = transform_mesh(mesh, transform)?;
     let orientation = OrientationReport {
         pinned_report,
-        selection: pinned.selection,
+        selection,
         transform,
     };
 
     Ok(OrientedModel {
         mesh,
-        history: OrientationHistory::from_reports_with_note(decimation, orientation, pinned.note),
+        history: OrientationHistory::from_reports(decimation, orientation),
     })
 }
 
-fn read_selection(path: &Path) -> Result<PinnedOrientation, OrientError> {
+fn read_selection(path: &Path) -> Result<BaselineSelection, OrientError> {
     let bytes = fs::read(path).map_err(|_| OrientError::PinnedBaselineUnreadable {
         path: path.to_path_buf(),
     })?;
+    decode_selection(&bytes, path)
+}
+
+fn decode_selection(bytes: &[u8], path: &Path) -> Result<BaselineSelection, OrientError> {
     let report =
-        JsonParser::new(&bytes)
+        JsonParser::new(bytes)
             .parse()
             .map_err(|_| OrientError::PinnedBaselineInvalid {
                 path: path.to_path_buf(),
@@ -114,13 +107,7 @@ fn read_selection(path: &Path) -> Result<PinnedOrientation, OrientError> {
 }
 
 /// Returns `None` for any malformed required pipeline/stage/orientation record.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct PinnedOrientation {
-    selection: BaselineSelection,
-    note: Option<OrientationNote>,
-}
-
-fn selection_from_report(report: &JsonValue) -> Option<PinnedOrientation> {
+fn selection_from_report(report: &JsonValue) -> Option<BaselineSelection> {
     let stages = report.object_field("stages")?.as_array()?;
     let mut hollow = None;
     for stage in stages {
@@ -131,26 +118,16 @@ fn selection_from_report(report: &JsonValue) -> Option<PinnedOrientation> {
         }
     }
 
-    let Some(hollow) = hollow else {
-        return Some(PinnedOrientation {
-            selection: BaselineSelection::Identity,
-            note: Some(OrientationNote::HollowMissing),
-        });
-    };
+    let hollow = hollow?;
     let status = object_field(hollow, "status")?.as_str()?;
-    if status.eq_ignore_ascii_case("skipped") {
-        return Some(PinnedOrientation {
-            selection: BaselineSelection::Identity,
-            note: Some(OrientationNote::HollowSkipped),
-        });
+    if status != "ok" {
+        return None;
     }
-    let log = stage_log(hollow)?;
-    let Some(orientation) = object_field(log, "orientation") else {
-        return Some(PinnedOrientation {
-            selection: BaselineSelection::Identity,
-            note: None,
-        });
-    };
+    if hollow.iter().any(|(key, _)| key == "log") {
+        return None;
+    }
+    let stage_report = object_field(hollow, "report")?.as_object()?;
+    let orientation = object_field(stage_report, "orientation")?;
     let orientation = orientation.as_object()?;
     let axis = object_field(orientation, "axis")?.as_array()?;
     let axis = match axis {
@@ -167,19 +144,10 @@ fn selection_from_report(report: &JsonValue) -> Option<PinnedOrientation> {
         _ => return None,
     };
     let degrees = Finite::new(*object_field(orientation, "deg")?.as_number()?).ok()?;
-    Some(PinnedOrientation {
-        selection: BaselineSelection::AxisDegrees { axis, degrees },
-        note: None,
-    })
-}
-
-/// The migration contract calls this data `log`; committed pipeline reports serialize the same
-/// stage payload under `report`. Accept exactly one spelling so an ambiguous or malformed stage
-/// remains a typed invalid-baseline failure rather than silently selecting a transform.
-fn stage_log(hollow: &[(String, JsonValue)]) -> Option<&[(String, JsonValue)]> {
-    match (object_field(hollow, "log"), object_field(hollow, "report")) {
-        (Some(log), None) | (None, Some(log)) => log.as_object(),
-        (None, None) | (Some(_), Some(_)) => None,
+    if degrees.get() == 0.0 {
+        Some(BaselineSelection::Identity)
+    } else {
+        Some(BaselineSelection::AxisDegrees { axis, degrees })
     }
 }
 
@@ -589,27 +557,15 @@ pub struct OrientationReport {
 pub struct OrientationHistory {
     decimation: DecimationReport,
     orientation: OrientationReport,
-    note: Option<OrientationNote>,
 }
 
 impl OrientationHistory {
     /// Builds passive accumulated report state; this does not construct an oriented model.
     #[must_use]
     pub fn from_reports(decimation: DecimationReport, orientation: OrientationReport) -> Self {
-        Self::from_reports_with_note(decimation, orientation, None)
-    }
-
-    /// Builds accumulated report state with a non-blocking baseline-provenance note.
-    #[must_use]
-    pub fn from_reports_with_note(
-        decimation: DecimationReport,
-        orientation: OrientationReport,
-        note: Option<OrientationNote>,
-    ) -> Self {
         Self {
             decimation,
             orientation,
-            note,
         }
     }
 
@@ -621,12 +577,6 @@ impl OrientationHistory {
     #[must_use]
     pub const fn orientation(&self) -> &OrientationReport {
         &self.orientation
-    }
-
-    /// A non-blocking reason why identity could not be replayed from a hollow stage.
-    #[must_use]
-    pub const fn note(&self) -> Option<OrientationNote> {
-        self.note
     }
 
     #[must_use]
@@ -682,7 +632,7 @@ mod tests {
             .join(name)
     }
 
-    fn parse(input: &str) -> Option<PinnedOrientation> {
+    fn parse(input: &str) -> Option<BaselineSelection> {
         selection_from_report(
             &JsonParser::new(input.as_bytes())
                 .parse()
@@ -703,12 +653,9 @@ mod tests {
             .expect("the committed Sphere pipeline report is valid");
         assert_eq!(
             pinned,
-            PinnedOrientation {
-                selection: BaselineSelection::AxisDegrees {
-                    axis: BaselineAxis::X,
-                    degrees: Finite::new(-20.0).expect("fixture degree is finite"),
-                },
-                note: None,
+            BaselineSelection::AxisDegrees {
+                axis: BaselineAxis::X,
+                degrees: Finite::new(-20.0).expect("fixture degree is finite"),
             }
         );
 
@@ -724,43 +671,34 @@ mod tests {
     }
 
     #[test]
-    fn absent_or_skipped_hollow_orientation_selects_identity() {
-        assert_eq!(
-            parse(r#"{"stages":[]}"#),
-            Some(PinnedOrientation {
-                selection: BaselineSelection::Identity,
-                note: Some(OrientationNote::HollowMissing),
-            })
-        );
+    fn missing_skipped_or_orientationless_hollow_stages_are_invalid() {
+        assert_eq!(parse(r#"{"stages":[]}"#), None);
         assert_eq!(
             parse(r#"{"stages":[{"name":"hollow","status":"skipped","report":{}}]}"#),
-            Some(PinnedOrientation {
-                selection: BaselineSelection::Identity,
-                note: Some(OrientationNote::HollowSkipped),
-            })
+            None
         );
         assert_eq!(
             parse(r#"{"stages":[{"name":"hollow","status":"ok","report":{}}]}"#),
-            Some(PinnedOrientation {
-                selection: BaselineSelection::Identity,
-                note: None,
-            })
+            None
         );
     }
 
     #[test]
-    fn normative_log_shape_and_fixture_report_shape_both_select_the_pinned_rotation() {
+    fn only_the_frozen_report_location_selects_the_pinned_rotation() {
         let log = r#"{"stages":[{"name":"hollow","status":"ok","log":{"orientation":{"axis":[0,1,0],"deg":-45}}}]}"#;
         let report = r#"{"stages":[{"name":"hollow","status":"ok","report":{"orientation":{"axis":[0,1,0],"deg":-45}}}]}"#;
-        let expected = Some(PinnedOrientation {
-            selection: BaselineSelection::AxisDegrees {
-                axis: BaselineAxis::Y,
-                degrees: Finite::new(-45.0).expect("fixture degree is finite"),
-            },
-            note: None,
+        let expected = Some(BaselineSelection::AxisDegrees {
+            axis: BaselineAxis::Y,
+            degrees: Finite::new(-45.0).expect("fixture degree is finite"),
         });
-        assert_eq!(parse(log), expected);
+        assert_eq!(parse(log), None);
         assert_eq!(parse(report), expected);
+    }
+
+    #[test]
+    fn explicit_valid_zero_rotation_selects_identity() {
+        let report = r#"{"stages":[{"name":"hollow","status":"ok","report":{"orientation":{"axis":[1,0,0],"deg":0,"score":1.0}}}]}"#;
+        assert_eq!(parse(report), Some(BaselineSelection::Identity));
     }
 
     #[test]
@@ -784,8 +722,28 @@ mod tests {
             read_selection(&missing),
             Err(OrientError::PinnedBaselineUnreadable { path: missing })
         );
-        assert!(JsonParser::new(br#"{"stages":[}"#).parse().is_err());
-        assert_eq!(parse(r#"{"stages":{"name":"hollow"}}"#), None);
+
+        let path = Path::new("baseline/invalid.pipeline.json");
+        let invalid_reports: &[&[u8]] = &[
+            br#"{"stages":[}"#,
+            br#"{"stages":{"name":"hollow"}}"#,
+            br#"{"stages":[]}"#,
+            br#"{"stages":[{"name":"hollow","status":"skipped","report":{}}]}"#,
+            br#"{"stages":[{"name":"hollow","status":"ok","report":{}}]}"#,
+            br#"{"stages":[{"name":"hollow","status":"ok","log":{"orientation":{"axis":[1,0,0],"deg":0}}}]}"#,
+            br#"{"stages":[{"name":"hollow","status":"ok","log":{},"report":{"orientation":{"axis":[1,0,0],"deg":0}}}]}"#,
+            br#"{"stages":[{"name":"hollow","status":"ok","report":{"orientation":{"axis":[0,0,1],"deg":0}}}]}"#,
+            br#"{"stages":[{"name":"hollow","status":"ok","report":{"orientation":{"axis":[1,0,0],"deg":"0"}}}]}"#,
+            br#"{"stages":[{"name":"hollow","status":"ok","report":{"orientation":{"axis":[1,0,0],"deg":0}}},{"name":"hollow","status":"ok","report":{"orientation":{"axis":[1,0,0],"deg":0}}}]}"#,
+        ];
+        for report in invalid_reports {
+            assert_eq!(
+                decode_selection(report, path),
+                Err(OrientError::PinnedBaselineInvalid {
+                    path: path.to_path_buf(),
+                })
+            );
+        }
     }
 
     #[test]
@@ -839,16 +797,11 @@ mod tests {
         };
         let model = OrientedModel {
             mesh,
-            history: OrientationHistory::from_reports_with_note(
-                decimation,
-                orientation,
-                Some(OrientationNote::HollowSkipped),
-            ),
+            history: OrientationHistory::from_reports(decimation, orientation),
         };
         let (mesh, history) = model.into_parts();
         assert_eq!(mesh.verts().as_ptr(), allocation);
         assert_eq!(history.decimation().budget_id, ContentDigest(9));
         assert_eq!(history.orientation().selection, BaselineSelection::Identity);
-        assert_eq!(history.note(), Some(OrientationNote::HollowSkipped));
     }
 }

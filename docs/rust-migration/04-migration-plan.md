@@ -913,20 +913,18 @@ resin / high quality); it does not define a competing report vocabulary.
   through M7 compare like with like and orientation is not a confound. **This mechanism is
   load-bearing for three milestones' gates, so its contract is specified here exactly:**
 
-  1. Read `<baseline-dir>/<stem>.pipeline.json`. Walk `stages[]` to the entry named
-     `hollow` and take `log.orientation.{axis, deg}`.
-  2. **Absence of the `orientation` key means the identity rotation won.**
-     `hollow.orient_search` writes the key **only inside** its `if s < best[0]` branch
-     (`hollow.py:470`), so a model whose identity orientation was already best has no key
-     at all. Absent ⇒ identity. Do not treat it as an error.
+  1. Read `<baseline-dir>/<stem>.pipeline.json`. Require exactly one `stages[]` entry named
+     `hollow`, require its status to be `ok`, and take the frozen report field
+     `report.orientation.{axis, deg}`. A competing `log` field is ambiguous and invalid.
+  2. **Identity must be explicit.** A valid X/Y-axis orientation record with `deg: 0`
+     selects identity. A missing stage, missing orientation, skipped/non-`ok` status, or malformed
+     record is an invalid pinned baseline and must not silently select identity.
   3. Apply the rotation, then **reproduce the Python re-centering**, which the
      `{axis, deg}` pair does not capture: XY-center the bounding box and translate `zmin`
      to 0 (`hollow.py:472-474`). Skip this and every support lands offset.
-  4. A model whose baseline `hollow` stage is missing or `SKIPPED` has no pinned
-     orientation — `pipeline.py:379` records
-     `reason='hollow=False (orientation search skipped too)'` for that case. Treat it as
-     identity and record a non-blocking note in the `DefectReport`; do not emit a `Defect`
-     and do not guess.
+  4. A model whose required baseline fixture or valid orientation record is absent cannot
+     participate in pinned comparison. Fail with the named unreadable/invalid-baseline reason;
+     do not guess.
 - A coarse sweep driver over the `FaceTable`, including the legacy 13 candidates
   (identity + `±10/20/30°` about X and Y, exactly as `hollow.orient_search` enumerates them)
   so the old objective remains reproducible for comparison.
