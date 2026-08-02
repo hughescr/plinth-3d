@@ -53,21 +53,6 @@ impl LegacyCompatibility {
         O10_POLICY_ID
     }
 
-    /// The uncalibrated, Placeholder-tainted frozen shaft-drag value.  This
-    /// remains crate-private so callers cannot extract and promote it around
-    /// the scoped bridge.
-    #[must_use]
-    pub(crate) const fn shaft_drag_force_n(&self) -> &Placeholder<NonNegativeFinite> {
-        &self.shaft_drag_force_n
-    }
-
-    /// The uncalibrated, Placeholder-tainted frozen brace-free span.  This
-    /// remains crate-private so callers cannot turn it into a general policy.
-    #[must_use]
-    pub(crate) const fn brace_free_span_mm(&self) -> &Placeholder<PositiveFinite> {
-        &self.brace_free_span_mm
-    }
-
     /// Sizes one live tree member and evaluates that member's frozen brace
     /// trigger. Retired members and braces are excluded through `Forest`'s
     /// official live-tree APIs; this never invents or places a brace.
@@ -81,7 +66,8 @@ impl LegacyCompatibility {
         forest: &Forest,
         key: MemberKey,
     ) -> Result<LiveCurrentSupportRaftSizing, LegacyCompatibilityError> {
-        if !forest.live_tree_members().contains(&key) {
+        let live_tree_members = forest.live_tree_members();
+        if !live_tree_members.contains(&key) {
             return Err(LegacyCompatibilityError::NotLiveTreeMember(key));
         }
 
@@ -92,6 +78,10 @@ impl LegacyCompatibility {
         let child_rootward_radii = forest
             .children_of(key)
             .into_iter()
+            // `children_of` presently removes retired slots, but retain this
+            // explicit boundary filter: only live, non-brace children may
+            // contribute Murray fan-in to O-10 parity sizing.
+            .filter(|child| live_tree_members.contains(child))
             .map(|child| {
                 forest
                     .member(child)
@@ -178,10 +168,14 @@ mod tests {
     }
 
     fn member(p1_mm: [f64; 3]) -> Member {
+        member_with_terminal(p1_mm, 0.2)
+    }
+
+    fn member_with_terminal(p1_mm: [f64; 3], terminal_radius_mm: f64) -> Member {
         Member::new(MemberSpec {
             p0_mm: [finite(0.0); 3],
             p1_mm: p1_mm.map(finite),
-            r0_mm: TerminalEndRadius::new(positive(0.2)),
+            r0_mm: TerminalEndRadius::new(positive(terminal_radius_mm)),
             r1_mm: RootwardEndRadius::new(positive(0.2)),
             kind: MemberKind::Shoot,
             owner: Owner::Generated {
@@ -203,10 +197,18 @@ mod tests {
             .expect("live compatibility sizing");
 
         assert_eq!(policy.policy_id(), O10_POLICY_ID);
-        assert_eq!(policy.shaft_drag_force_n().diagnostic().get(), 0.01);
-        assert_eq!(policy.brace_free_span_mm().diagnostic().get(), 18.0);
+        assert_eq!(policy.shaft_drag_force_n.diagnostic().get(), 0.01);
+        assert_eq!(policy.brace_free_span_mm.diagnostic().get(), 18.0);
         assert_eq!(result.terminal_continuity().get().get(), 0.2);
         assert!((result.rootward_radius().get().get() - 4.422_534_369_337_705).abs() < 1e-12);
+        assert_eq!(
+            result.terminal_continuity().get().get().to_bits(),
+            0x3fc9_9999_9999_999a
+        );
+        assert_eq!(
+            result.rootward_radius().get().get().to_bits(),
+            0x4011_b0ac_d986_f739
+        );
     }
 
     #[test]
@@ -236,6 +238,44 @@ mod tests {
             LegacyCompatibility::o10_live_current_support_and_raft()
                 .size_live_current_support_member(&forest, brace),
             Err(LegacyCompatibilityError::NotLiveTreeMember(brace))
+        );
+    }
+
+    #[test]
+    fn terminal_continuity_dominates_a_smaller_diagnostic_requirement() {
+        let mut forest = Forest::new();
+        let key = forest.add_member(member_with_terminal([0.0, 0.0, 10.0], 2.0));
+        let result = LegacyCompatibility::o10_live_current_support_and_raft()
+            .size_live_current_support_member(&forest, key)
+            .expect("live compatibility sizing");
+
+        assert_eq!(
+            result.terminal_continuity().get().get().to_bits(),
+            2.0_f64.to_bits()
+        );
+        assert_eq!(
+            result.rootward_radius().get().get().to_bits(),
+            2.0_f64.to_bits()
+        );
+    }
+
+    #[test]
+    fn refuses_a_retired_subject_and_never_counts_a_retired_child() {
+        let mut forest = Forest::new();
+        let parent = forest.add_member(member([0.0, 0.0, 10.0]));
+        let child = forest.add_member(member([0.0, 0.0, 10.0]));
+        forest
+            .set_parent(child, Some(parent))
+            .expect("live tree link");
+        forest.retire(child).expect("retire child");
+
+        let policy = LegacyCompatibility::o10_live_current_support_and_raft();
+        assert!(policy
+            .size_live_current_support_member(&forest, parent)
+            .is_ok());
+        assert_eq!(
+            policy.size_live_current_support_member(&forest, child),
+            Err(LegacyCompatibilityError::NotLiveTreeMember(child))
         );
     }
 }

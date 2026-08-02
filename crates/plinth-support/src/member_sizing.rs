@@ -179,11 +179,7 @@ impl MemberSpan {
         }
         let length_mm =
             PositiveFinite::new(length_mm).map_err(|_| MemberSizingError::DegenerateSpan)?;
-        let lean = if length_mm.get() < FROZEN_LEAN_BRANCH_DEG {
-            0.0
-        } else {
-            horizontal_mm.atan2(dz.abs()).to_degrees()
-        };
+        let lean = horizontal_mm.atan2(dz.abs()).to_degrees();
         let lean = Finite::new(lean).map_err(|_| MemberSizingError::NonFiniteResult)?;
         Ok(Self {
             start_mm,
@@ -420,7 +416,10 @@ fn diagnostic_deflection_radius_for_geometry(
     lateral_load: &ActualLateralLoad,
     policy: &DiagnosticMemberSizingPolicy,
 ) -> Result<DiagnosticDeflectionRadiusMm, MemberSizingError> {
-    let length_m = length_3d_mm.get() / MILLIMETRES_PER_METRE;
+    // Preserve the frozen Python formula's dimensional 1e-6 mm lower bound
+    // before converting to SI.  This is a numerical guard only: `MemberSpan`
+    // still rejects a truly degenerate member and retains the actual endpoints.
+    let length_m = length_3d_mm.get().max(1e-6) / MILLIMETRES_PER_METRE;
     let modulus_pa = policy.modulus_green_gpa.diagnostic().get() * PASCALS_PER_GIGAPASCAL;
     let max_deflection_m = policy.max_deflection_mm.diagnostic().get() / MILLIMETRES_PER_METRE;
     let geometry =
@@ -791,6 +790,31 @@ mod tests {
             MemberSpan::new([finite(0.0); 3], [finite(0.0); 3]),
             Err(MemberSizingError::DegenerateSpan)
         );
+    }
+
+    #[test]
+    fn tiny_nonzero_horizontal_span_retains_its_frozen_lean() {
+        let tiny = span([5e-10, 0.0, 0.0]);
+        assert_eq!(
+            tiny.lean_angle_deg().get().get().to_bits(),
+            0x4056_8000_0000_0000
+        );
+    }
+
+    #[test]
+    fn frozen_deflection_formula_uses_its_dimensional_micro_span_clamp() {
+        let policy = policy();
+        let tiny = span([0.0, 0.0, f64::from_bits(1)]);
+        let clamped = diagnostic_deflection_radius_mm(tiny, &legacy_load(), &policy)
+            .unwrap()
+            .diagnostic()
+            .get();
+        let at_floor =
+            diagnostic_deflection_radius_mm(span([0.0, 0.0, 1e-6]), &legacy_load(), &policy)
+                .unwrap()
+                .diagnostic()
+                .get();
+        assert_eq!(clamped.to_bits(), at_floor.to_bits());
     }
 
     #[test]
