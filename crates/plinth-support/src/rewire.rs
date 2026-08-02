@@ -11,7 +11,6 @@
 use std::collections::{BTreeSet, VecDeque};
 
 use plinth_core::{m0_constants, Finite, PositiveFinite};
-use rayon::prelude::*;
 use serde::Serialize;
 use thiserror::Error;
 
@@ -311,7 +310,7 @@ fn try_reattach(
     key: MemberKey,
     request: &RewireRequest<'_>,
     cco: &CcoController,
-    _config: &Config,
+    config: &Config,
     report: &mut RewireReport,
 ) -> Result<Option<f64>, RewireError> {
     let Some(member) = forest.member(key) else {
@@ -373,6 +372,13 @@ fn try_reattach(
         reconcile_ancestors(&mut candidate, Some(new_parent))?;
     }
     candidate.validate()?;
+    // Root-reanchor's splice and Murray reconciliation occur after CCO's
+    // proof-bound replay. They can enlarge the connector or its ancestor
+    // path, so the final geometry must be proved as written, in one batch,
+    // before volume comparison and publication.
+    if !validate_changed_geometry(forest, &candidate, request.geometry, config)? {
+        return Ok(None);
+    }
     let after = total_volume_ml(&candidate)?;
     if after >= before - VOLUME_EPS_ML {
         return Ok(None);
@@ -407,70 +413,26 @@ fn try_slide(
                 .ok_or(ForestError::InactiveKey(*child))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let start = member.p0_mm().map(Finite::get);
-    let Some((_, original_local)) = junction_geometry(start, &member, &child_members, config)?
-    else {
+    let Some(search) = ordered_slide_search(&member, &child_members, config)? else {
         return Ok(None);
     };
-    let directions = [
-        [1.0, 0.0, 0.0],
-        [-1.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0],
-        [0.0, -1.0, 0.0],
-        [0.0, 0.0, 1.0],
-        [0.0, 0.0, -1.0],
-    ];
-    let mut best = start;
-    let mut best_volume = original_local;
-    let mut step = 1.0;
-    let mut evals = 0;
-    while evals < config.max_slide_evals && step > SLIDE_MIN_STEP_MM {
-        let count = directions.len().min(config.max_slide_evals - evals);
-        let candidates = directions[..count]
-            .iter()
-            .map(|direction| add(best, scale(*direction, step)))
-            .collect::<Vec<_>>();
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(geom_kernel::current_threads())
-            .build()
-            .map_err(|_| RewireError::InvalidGeometry)?;
-        let evaluated = pool.install(|| {
-            candidates
-                .par_iter()
-                .map(|point| junction_geometry(*point, &member, &child_members, config))
-                .collect::<Vec<_>>()
-        });
-        evals += count;
-        let mut improved = false;
-        for (point, result) in candidates.into_iter().zip(evaluated) {
-            if let Some((_, volume)) = result? {
-                if volume < best_volume - VOLUME_EPS_ML {
-                    best = point;
-                    best_volume = volume;
-                    improved = true;
-                }
-            }
-        }
-        if !improved {
-            step *= 0.5;
-        }
-    }
-    if best_volume >= original_local - VOLUME_EPS_ML {
+    if search.best_volume_ml >= search.original_volume_ml - VOLUME_EPS_ML {
         return Ok(None);
     }
-    let Some((radii, _)) = junction_geometry(best, &member, &child_members, config)? else {
-        return Ok(None);
-    };
     let before = total_volume_ml(forest)?;
     let mut candidate = forest.clone();
-    let point = finite3(best)?;
+    let point = finite3(search.point_mm)?;
     candidate.set_endpoints(key, point, member.p1_mm())?;
     candidate.set_radii(
         key,
-        TerminalEndRadius::new(radii.member),
-        RootwardEndRadius::new(radii.member),
+        TerminalEndRadius::new(search.radii.member),
+        RootwardEndRadius::new(search.radii.member),
     )?;
-    for ((child, old), radius) in children.iter().zip(&child_members).zip(radii.children) {
+    for ((child, old), radius) in children
+        .iter()
+        .zip(&child_members)
+        .zip(search.radii.children)
+    {
         candidate.set_endpoints(*child, old.p0_mm(), point)?;
         candidate.set_radii(
             *child,
@@ -489,6 +451,71 @@ fn try_slide(
     }
     *forest = candidate;
     Ok(Some(before - after))
+}
+
+struct SlideSearch {
+    point_mm: [f64; 3],
+    radii: JunctionRadii,
+    original_volume_ml: f64,
+    best_volume_ml: f64,
+}
+
+fn ordered_slide_search(
+    member: &Member,
+    child_members: &[Member],
+    config: &Config,
+) -> Result<Option<SlideSearch>, RewireError> {
+    let start = member.p0_mm().map(Finite::get);
+    let Some((_, original_local)) = junction_geometry(start, member, child_members, config)? else {
+        return Ok(None);
+    };
+    let directions = [
+        [1.0, 0.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [0.0, 0.0, -1.0],
+    ];
+    let mut best = start;
+    let mut best_volume = original_local;
+    let mut step = 1.0;
+    let mut evals = 0;
+    while evals < config.max_slide_evals && step > SLIDE_MIN_STEP_MM {
+        let mut improved = false;
+        // Frozen Python semantics are an ordered coordinate walk, not a six-
+        // point stencil: an accepted +X move changes the base point used by
+        // the immediately following -X evaluation. This dependency is pure
+        // arithmetic and intentionally serial. Native clearance remains one
+        // batch after the final point is chosen.
+        for direction in directions {
+            if evals >= config.max_slide_evals {
+                break;
+            }
+            let point = add(best, scale(direction, step));
+            let result = junction_geometry(point, member, child_members, config)?;
+            evals += 1;
+            if let Some((_, volume)) = result {
+                if volume < best_volume - VOLUME_EPS_ML {
+                    best = point;
+                    best_volume = volume;
+                    improved = true;
+                }
+            }
+        }
+        if !improved {
+            step *= 0.5;
+        }
+    }
+    let Some((radii, _)) = junction_geometry(best, member, child_members, config)? else {
+        return Ok(None);
+    };
+    Ok(Some(SlideSearch {
+        point_mm: best,
+        radii,
+        original_volume_ml: original_local,
+        best_volume_ml: best_volume,
+    }))
 }
 
 struct JunctionRadii {
@@ -924,6 +951,8 @@ mod tests {
     use geom_kernel::{NativeSurface, NativeSurfaceConfig};
     use plinth_mesh::{build_face_topology, Mesh, WeldPolicy};
 
+    static FAR_DELICACY: [f64; 1] = [0.0];
+
     fn f(v: f64) -> Finite {
         Finite::new(v).unwrap()
     }
@@ -944,6 +973,40 @@ mod tests {
             embed_end: None,
             carried_mm2: f(1.0),
         })
+    }
+
+    fn with_far_authority<T>(run: impl FnOnce(&AnchorGeometryAuthority<'_>) -> T) -> T {
+        let mesh = Mesh::new(
+            vec![
+                [100.0, 100.0, 100.0],
+                [101.0, 100.0, 100.0],
+                [100.0, 101.0, 100.0],
+            ],
+            vec![[0, 1, 2]],
+        )
+        .unwrap();
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let surface = NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
+            NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 8 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        let authority = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        run(&authority)
+    }
+
+    fn rewire_request<'a>(geometry: &'a AnchorGeometryAuthority<'a>) -> RewireRequest<'a> {
+        RewireRequest {
+            frame: BuildFrame::new(f(0.0), p(5.0)),
+            anchor_samples: &[],
+            delicacy_by_face: Some(&FAR_DELICACY),
+            anchor_config: AnchorSearchConfig::current().unwrap(),
+            geometry,
+        }
     }
 
     #[test]
@@ -1011,13 +1074,14 @@ mod tests {
         forest.set_parent(a, Some(deg)).unwrap();
         forest.set_parent(b, Some(deg)).unwrap();
         let before = forest.live_tree_members().len();
-        // The geometry query is deliberately bypassed here: retirement changes no endpoints.
         let mut candidate = forest.clone();
-        let pkey = candidate.parent_of(deg);
-        for child in candidate.children_of(deg) {
-            candidate.set_parent(child, pkey).unwrap()
-        }
-        candidate.retire(deg).unwrap();
+        with_far_authority(|authority| {
+            assert!(
+                try_retire(&mut candidate, deg, authority, &BTreeSet::new(), &cfg,)
+                    .unwrap()
+                    .is_some()
+            );
+        });
         assert_eq!(candidate.live_tree_members().len(), before - 1);
         assert_eq!(candidate.parent_of(a), Some(parent));
         assert_eq!(candidate.parent_of(b), Some(parent));
@@ -1051,8 +1115,204 @@ mod tests {
     }
 
     #[test]
-    fn slide_batch_is_nonvacuously_identical_at_one_four_and_sixteen_threads() {
-        const CHILD: &str = "PLINTH_REWIRE_SLIDE_SWEEP_CHILD";
+    fn post_splice_radius_growth_rechecks_clearance_before_publication() {
+        let mesh = Mesh::new(
+            vec![[1.0, -10.0, 0.0], [1.0, 10.0, 0.0], [1.0, 0.0, 10.0]],
+            vec![[0, 1, 2]],
+        )
+        .unwrap();
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let surface = NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
+            NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 8 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        let authority = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let mut before = Forest::new();
+        let key = before.add_member(member(
+            [0.0, 0.0, 9.0],
+            [0.0, 0.0, 1.0],
+            MemberKind::Trunk,
+            40,
+        ));
+        before
+            .set_radii(
+                key,
+                TerminalEndRadius::new(p(0.1)),
+                RootwardEndRadius::new(p(0.1)),
+            )
+            .unwrap();
+        let mut grown = before.clone();
+        grown
+            .set_radii(
+                key,
+                TerminalEndRadius::new(p(0.5)),
+                RootwardEndRadius::new(p(0.5)),
+            )
+            .unwrap();
+        assert!(!validate_changed_geometry(
+            &before,
+            &grown,
+            &authority,
+            &Config::current().unwrap(),
+        )
+        .unwrap());
+        assert_eq!(
+            before.member(key).unwrap().rootward_radius_mm().get(),
+            p(0.1)
+        );
+    }
+
+    #[test]
+    fn live_prune_root_reanchor_and_optimizer_paths_are_transactional() {
+        with_far_authority(|authority| {
+            let cfg = Config::current().unwrap();
+
+            let mut prune = Forest::new();
+            let short = prune.add_member(member(
+                [0.3, 0.0, 1.3],
+                [0.0, 0.0, 1.0],
+                MemberKind::Trunk,
+                0,
+            ));
+            let child = prune.add_member(member(
+                [0.0, 0.0, 2.0],
+                [0.3, 0.0, 1.3],
+                MemberKind::Shoot,
+                1,
+            ));
+            prune
+                .set_radii(
+                    short,
+                    TerminalEndRadius::new(p(5.0)),
+                    RootwardEndRadius::new(p(5.0)),
+                )
+                .unwrap();
+            prune
+                .set_radii(
+                    child,
+                    TerminalEndRadius::new(p(5.0)),
+                    RootwardEndRadius::new(p(5.0)),
+                )
+                .unwrap();
+            prune.set_parent(child, Some(short)).unwrap();
+            assert!(
+                try_prune(&mut prune, short, authority, &BTreeSet::new(), &cfg)
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(prune.member(short).is_none());
+
+            let mut roots = Forest::new();
+            let moving = roots.add_member(member(
+                [0.0, 0.0, 10.0],
+                [0.0, 0.0, 0.0],
+                MemberKind::Trunk,
+                10,
+            ));
+            let host = roots.add_member(member(
+                [1.0, 0.0, 10.0],
+                [1.0, 0.0, 0.0],
+                MemberKind::Trunk,
+                11,
+            ));
+            let mut evidence = RewireReport {
+                initial_volume_ml: total_volume_ml(&roots).unwrap(),
+                final_volume_ml: total_volume_ml(&roots).unwrap(),
+                curve: Vec::new(),
+                accepted: 0,
+                rejected: 0,
+                sweeps: 0,
+                move_evaluations: 0,
+                cco_candidate_batches: 0,
+                termination: RewireTermination::FullSweepNoAcceptance,
+            };
+            let roots_before = roots.digest();
+            assert!(try_reattach(
+                &mut roots,
+                moving,
+                &rewire_request(authority),
+                &CcoController::default(),
+                &cfg,
+                &mut evidence,
+            )
+            .unwrap()
+            .is_none());
+            assert_eq!(roots.digest(), roots_before);
+            assert!(roots.member(moving).is_some());
+            assert!(roots.member(host).is_some());
+            assert_eq!(evidence.cco_candidate_batches, 1);
+
+            let mut detached = Forest::new();
+            let old_parent = detached.add_member(member(
+                [5.0, 0.0, 5.0],
+                [5.0, 0.0, 0.0],
+                MemberKind::Trunk,
+                12,
+            ));
+            let subtree = detached.add_member(member(
+                [5.0, 0.0, 10.0],
+                [5.0, 0.0, 5.0],
+                MemberKind::Shoot,
+                13,
+            ));
+            let sibling = detached.add_member(member(
+                [6.0, 0.0, 10.0],
+                [5.0, 0.0, 5.0],
+                MemberKind::Shoot,
+                14,
+            ));
+            detached.set_parent(subtree, Some(old_parent)).unwrap();
+            detached.set_parent(sibling, Some(old_parent)).unwrap();
+            let detached_before = detached.digest();
+            let mut detached_evidence = evidence.clone();
+            detached_evidence.cco_candidate_batches = 0;
+            let detached_result = try_reattach(
+                &mut detached,
+                subtree,
+                &rewire_request(authority),
+                &CcoController::default(),
+                &cfg,
+                &mut detached_evidence,
+            )
+            .unwrap();
+            assert_eq!(detached_evidence.cco_candidate_batches, 1);
+            if detached_result.is_none() {
+                assert_eq!(detached.digest(), detached_before);
+            } else {
+                assert_ne!(detached.digest(), detached_before);
+            }
+
+            let mut optimize_forest = Forest::new();
+            let parent = optimize_forest.add_member(member(
+                [20.0, 0.0, 5.0],
+                [20.0, 0.0, 0.0],
+                MemberKind::Trunk,
+                20,
+            ));
+            let degenerate = optimize_forest.add_member(member(
+                [20.0, 0.0, 6.0],
+                [20.0, 0.0, 6.0 + 5e-5],
+                MemberKind::Shoot,
+                21,
+            ));
+            optimize_forest
+                .set_parent(degenerate, Some(parent))
+                .unwrap();
+            let report = optimize(&mut optimize_forest, rewire_request(authority)).unwrap();
+            assert!(report.accepted >= 1);
+            assert!(optimize_forest.member(degenerate).is_none());
+            assert_eq!(report.termination, RewireTermination::FullSweepNoAcceptance);
+        });
+    }
+
+    #[test]
+    fn ordered_slide_walk_pins_frozen_path_and_is_thread_setting_independent() {
+        const CHILD: &str = "PLINTH_REWIRE_SLIDE_WALK_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let mesh = Mesh::new(
                 vec![
@@ -1076,25 +1336,38 @@ mod tests {
             let authority = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
             let mut forest = Forest::new();
             let junction = forest.add_member(member(
-                [2.0, 0.0, 5.0],
+                [5.0, 0.0, 5.0],
                 [0.0, 0.0, 0.0],
                 MemberKind::Trunk,
                 0,
             ));
             let left = forest.add_member(member(
                 [-1.0, 0.0, 10.0],
-                [2.0, 0.0, 5.0],
+                [5.0, 0.0, 5.0],
                 MemberKind::Shoot,
                 1,
             ));
             let right = forest.add_member(member(
                 [1.0, 0.0, 10.0],
-                [2.0, 0.0, 5.0],
+                [5.0, 0.0, 5.0],
                 MemberKind::Shoot,
                 2,
             ));
             forest.set_parent(left, Some(junction)).unwrap();
             forest.set_parent(right, Some(junction)).unwrap();
+            let junction_member = forest.member(junction).unwrap().clone();
+            let child_members = vec![
+                forest.member(left).unwrap().clone(),
+                forest.member(right).unwrap().clone(),
+            ];
+            let walk = ordered_slide_search(
+                &junction_member,
+                &child_members,
+                &Config::current().unwrap(),
+            )
+            .unwrap()
+            .unwrap();
+            assert!(walk.best_volume_ml < walk.original_volume_ml);
             let saved = try_slide(
                 &mut forest,
                 junction,
@@ -1104,11 +1377,13 @@ mod tests {
             )
             .unwrap();
             println!(
-                "REWIRE_SLIDE_SWEEP={}:{}:{:016x}:{}",
+                "REWIRE_SLIDE_WALK={}:{}:{:016x}:{:016x}:{:016x}:{:016x}",
                 geom_kernel::current_threads(),
                 forest.digest(),
                 saved.unwrap_or_default().to_bits(),
-                forest.member(junction).unwrap().p0_mm()[0].get().to_bits()
+                walk.point_mm[0].to_bits(),
+                walk.point_mm[1].to_bits(),
+                walk.point_mm[2].to_bits()
             );
             return;
         }
@@ -1117,7 +1392,7 @@ mod tests {
         for threads in [1, 4, 16] {
             let output = std::process::Command::new(&executable)
                 .arg("--exact")
-                .arg("rewire::tests::slide_batch_is_nonvacuously_identical_at_one_four_and_sixteen_threads")
+                .arg("rewire::tests::ordered_slide_walk_pins_frozen_path_and_is_thread_setting_independent")
                 .arg("--nocapture")
                 .env(CHILD, "1")
                 .env("PLINTH_THREADS", threads.to_string())
@@ -1127,12 +1402,16 @@ mod tests {
             let stdout = String::from_utf8(output.stdout).unwrap();
             let row = stdout
                 .lines()
-                .find_map(|line| line.strip_prefix("REWIRE_SLIDE_SWEEP="))
+                .find_map(|line| line.strip_prefix("REWIRE_SLIDE_WALK="))
                 .unwrap();
             let (observed, payload) = row.split_once(':').unwrap();
             assert_eq!(observed, threads.to_string());
             stable_payload.push(payload.to_owned());
         }
         assert!(stable_payload.windows(2).all(|pair| pair[0] == pair[1]));
+        assert_eq!(
+            stable_payload[0],
+            "11380926935917229287:0000000000000000:0000000000000000:0000000000000000:3ff8000000000000"
+        );
     }
 }
