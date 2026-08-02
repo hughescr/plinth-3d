@@ -784,10 +784,8 @@ fn length(a: [f64; 3]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plinth_core::{
-        m0_constants, ContentDigest, Finite, NonNegativeFinite, PositiveFinite, UnitFraction,
-    };
-    use plinth_decimate::DecimationReport;
+    use plinth_core::{m0_constants, Finite, PositiveFinite};
+    use plinth_decimate::{DecimationDisposition, DecimationReport};
     use plinth_hollow::{HollowDisposition, HollowHistory, HollowReport};
     use plinth_orient::{BaselineSelection, OrientationHistory, OrientationReport, RigidTransform};
     use plinth_support::{
@@ -826,12 +824,12 @@ mod tests {
 
     fn fixture_history(primitives: &[SupportPrimitive], lift_mm: f64) -> SupportHistory {
         let decimation = DecimationReport {
-            budget_id: ContentDigest(13),
+            disposition: DecimationDisposition::AlreadyPrintScale,
             input_faces: 4,
             output_faces: 4,
-            chosen_ratio: UnitFraction::new(1.0).unwrap(),
-            p99_mm: NonNegativeFinite::new(0.0).unwrap(),
-            p999_mm: NonNegativeFinite::new(0.0).unwrap(),
+            chosen_ratio: 1.0,
+            p99_mm: 0.0,
+            p99_9_mm: 0.0,
             boundary_edges_before: 0,
             boundary_edges_after: 0,
             nonmanifold_edges_before: 0,

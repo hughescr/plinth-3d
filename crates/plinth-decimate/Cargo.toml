@@ -6,7 +6,15 @@ rust-version = "1.97"
 publish = false
 
 [dependencies]
+meshopt = { workspace = true }
+geom_kernel = { path = "../../rust/geom_kernel" }
 plinth-core = { path = "../plinth-core" }
 plinth-mesh = { path = "../plinth-mesh" }
-serde = { workspace = true }
+rand_chacha = { workspace = true }
+rand_core = { workspace = true }
 thiserror = { workspace = true }
+
+[dev-dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"

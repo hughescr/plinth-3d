@@ -17,11 +17,11 @@ pub use fixtures::{
 };
 pub use io::{load_binary_stl, load_binary_stls, write_binary_stl, write_binary_stls, MeshIoError};
 pub use topology::{
-    build_face_topology, mesh_fingerprint, validate_face_topology, FaceTopology, TopologyDigest,
-    TopologyError, TopologySchema, TopologyValidationError, FACE_TOPOLOGY_SCHEMA,
-    FACE_TOPOLOGY_SCHEMA_VERSION, TOPOLOGY_CUT_BOUNDARY, TOPOLOGY_CUT_DEGENERATE,
-    TOPOLOGY_CUT_DUPLICATE, TOPOLOGY_CUT_NONMANIFOLD, TOPOLOGY_CUT_POINT_ONLY,
-    TOPOLOGY_CUT_SAME_DIRECTION,
+    build_face_topology, mesh_fingerprint, validate_face_topology, EdgeTopologyCounts,
+    FaceTopology, TopologyDigest, TopologyError, TopologySchema, TopologyValidationError,
+    WeldedView, FACE_TOPOLOGY_SCHEMA, FACE_TOPOLOGY_SCHEMA_VERSION, TOPOLOGY_CUT_BOUNDARY,
+    TOPOLOGY_CUT_DEGENERATE, TOPOLOGY_CUT_DUPLICATE, TOPOLOGY_CUT_NONMANIFOLD,
+    TOPOLOGY_CUT_POINT_ONLY, TOPOLOGY_CUT_SAME_DIRECTION,
 };
 pub use triage::{
     triage_components, triage_settings, ComponentDescription, PreHollowed, TriageError,
@@ -235,7 +235,11 @@ impl Mesh {
 pub enum WeldPolicy {
     /// Preserve the source triangle soup exactly (the STL default).
     None,
-    /// Weld only coordinates with identical IEEE f64 bit patterns.
+    /// Weld only numerically identical coordinates. Distinct finite values,
+    /// including adjacent one-ULP values, remain separate; `+0.0` and `-0.0`
+    /// weld because they are the same physical coordinate despite their
+    /// different IEEE sign bits. The historical variant name refers to the
+    /// nonzero finite-value comparison.
     ExactBits,
     /// Weld coordinates within this positive, finite distance.
     Epsilon(f64),

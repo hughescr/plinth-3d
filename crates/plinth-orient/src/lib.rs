@@ -623,7 +623,7 @@ pub enum OrientError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plinth_core::{ContentDigest, NonNegativeFinite, UnitFraction};
+    use plinth_decimate::DecimationDisposition;
     use plinth_mesh::{load_binary_stl, WeldPolicy};
 
     fn baseline(name: &str) -> PathBuf {
@@ -779,12 +779,12 @@ mod tests {
         .expect("the test triangle is a valid mesh");
         let allocation = mesh.verts().as_ptr();
         let decimation = DecimationReport {
-            budget_id: ContentDigest(9),
+            disposition: DecimationDisposition::AlreadyPrintScale,
             input_faces: 1,
             output_faces: 1,
-            chosen_ratio: UnitFraction::new(1.0).expect("unit fixture ratio"),
-            p99_mm: NonNegativeFinite::new(0.0).expect("nonnegative fixture error"),
-            p999_mm: NonNegativeFinite::new(0.0).expect("nonnegative fixture error"),
+            chosen_ratio: 1.0,
+            p99_mm: 0.0,
+            p99_9_mm: 0.0,
             boundary_edges_before: 3,
             boundary_edges_after: 3,
             nonmanifold_edges_before: 0,
@@ -801,7 +801,10 @@ mod tests {
         };
         let (mesh, history) = model.into_parts();
         assert_eq!(mesh.verts().as_ptr(), allocation);
-        assert_eq!(history.decimation().budget_id, ContentDigest(9));
+        assert_eq!(
+            history.decimation().disposition,
+            DecimationDisposition::AlreadyPrintScale
+        );
         assert_eq!(history.orientation().selection, BaselineSelection::Identity);
     }
 }

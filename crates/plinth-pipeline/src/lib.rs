@@ -11,7 +11,7 @@
 #![forbid(unsafe_code)]
 
 use plinth_core::ModelId;
-use plinth_decimate::{Budget, DecimateError};
+use plinth_decimate::{DecimationBudget, DecimationError};
 use plinth_emit::{EmitError, EmitReport};
 use plinth_hollow::{HollowError, HollowRequest};
 use plinth_orient::OrientError;
@@ -35,7 +35,7 @@ pub struct PrepareRequest {
     pub input_models_dir: PathBuf,
     pub output_dir: PathBuf,
     pub pinned_baseline_dir: PathBuf,
-    pub decimation_budget: Budget,
+    pub decimation_budget: DecimationBudget,
     pub hollow: HollowRequest,
     pub support: SupportRequest,
     /// The sole cache-bypass control, corresponding only to CLI `--no-cache`.
@@ -87,7 +87,7 @@ pub enum PipelineError {
     Decimate {
         model: ModelId,
         #[source]
-        source: DecimateError,
+        source: DecimationError,
     },
     #[error("model {model} failed pinned orientation")]
     Orient {

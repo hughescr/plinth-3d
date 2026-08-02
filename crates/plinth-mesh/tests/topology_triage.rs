@@ -1,6 +1,6 @@
 use plinth_mesh::{
     build_face_topology, make_box, mesh_fingerprint, triage_components, triage_settings,
-    validate_face_topology, Mesh, TopologyError, TriageError, WeldPolicy,
+    validate_face_topology, EdgeTopologyCounts, Mesh, TopologyError, TriageError, WeldPolicy,
     FACE_TOPOLOGY_SCHEMA_VERSION, TOPOLOGY_CUT_BOUNDARY, TOPOLOGY_CUT_DEGENERATE,
     TOPOLOGY_CUT_DUPLICATE, TOPOLOGY_CUT_NONMANIFOLD, TOPOLOGY_CUT_POINT_ONLY,
     TOPOLOGY_CUT_SAME_DIRECTION,
@@ -31,6 +31,13 @@ fn topology_builds_canonical_adjacency_components_and_v4_digest_once() {
     );
     assert_eq!(topology.neighbors(0), Some(&[1][..]));
     assert_eq!(topology.welded_vertex_count(), 4);
+    assert_eq!(
+        topology.edge_counts(),
+        EdgeTopologyCounts {
+            boundary_edges: 4,
+            nonmanifold_edges: 0,
+        }
+    );
     assert_eq!(topology.weld_policy(), WeldPolicy::ExactBits);
     assert_eq!(topology.content_digest().len(), 64);
     assert_eq!(
@@ -39,6 +46,30 @@ fn topology_builds_canonical_adjacency_components_and_v4_digest_once() {
         "schema-v4 preimage pins domain, version, field order, lengths, and little-endian arrays"
     );
     validate_face_topology(&topology).expect("optional diagnostic validates immutable sidecar");
+}
+
+#[test]
+fn canonical_edge_counts_distinguish_edge_incidence_from_face_flags() {
+    let mesh = Mesh::new(
+        vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, -1.0, 0.0],
+        ],
+        vec![[0, 1, 2], [1, 0, 3], [0, 1, 4]],
+    )
+    .expect("finite soup");
+    let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).expect("topology");
+    assert_eq!(
+        topology.edge_counts(),
+        EdgeTopologyCounts {
+            boundary_edges: 6,
+            nonmanifold_edges: 1,
+        },
+        "three faces share one undirected edge; cut flags are per face and cannot stand in for this count"
+    );
 }
 
 #[test]

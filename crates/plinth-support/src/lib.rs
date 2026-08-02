@@ -427,8 +427,7 @@ pub enum SupportError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plinth_core::{ContentDigest, NonNegativeFinite, UnitFraction};
-    use plinth_decimate::DecimationReport;
+    use plinth_decimate::{DecimationDisposition, DecimationReport};
     use plinth_hollow::{HollowDisposition, HollowReport};
     use plinth_orient::{BaselineSelection, OrientationHistory, OrientationReport, RigidTransform};
     use std::path::PathBuf;
@@ -442,12 +441,12 @@ mod tests {
         .expect("the test triangle is a valid mesh");
         let allocation = mesh.verts().as_ptr();
         let decimation = DecimationReport {
-            budget_id: ContentDigest(13),
+            disposition: DecimationDisposition::AlreadyPrintScale,
             input_faces: 1,
             output_faces: 1,
-            chosen_ratio: UnitFraction::new(1.0).expect("unit fixture ratio"),
-            p99_mm: NonNegativeFinite::new(0.0).expect("nonnegative fixture error"),
-            p999_mm: NonNegativeFinite::new(0.0).expect("nonnegative fixture error"),
+            chosen_ratio: 1.0,
+            p99_mm: 0.0,
+            p99_9_mm: 0.0,
             boundary_edges_before: 3,
             boundary_edges_after: 3,
             nonmanifold_edges_before: 0,

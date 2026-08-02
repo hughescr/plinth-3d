@@ -714,7 +714,7 @@ claim that 25 is physics.
 | `DECIMATION_FEATURE_PROBE_RATIO` / `DECIMATION_SEED_ERROR_MM` / `DECIMATION_FEATURE_HALO_MM` / `DECIMATION_PROTECTED_CAP_FRACTION` | 0.2 / 0.050 mm / 0.4 mm / 0.12 | feature-protection controls |
 | `DECIMATION_ADAPTATION_POLICY` | 3 adaptations; feature multiplier 2.0; error multiplier 0.6 | one structured adaptive policy |
 | `DECIMATION_VERTEX_GROUP_FACTOR` | 10 | protected vertex-group sizing |
-| `DECIMATION_RATIO_SEARCH` | [0.05, 0.50], 5 bisections | one structured ratio-search policy |
+| `DECIMATION_RATIO_SEARCH` | [0.05, 1.00], 5 bisections; only a genuinely reduced candidate may win | **Placeholder** search policy. The owner corrected the former 0.50 ceiling on 2026-08-01: it was unmeasured and must not force damage or rejection of already-print-scale geometry. |
 | `DECIMATION_P99_SAMPLE_POLICY` / `DECIMATION_P999_SAMPLE_POLICY` | seed/cap 42/120000 and 1/150000 | independent error-sampling policies |
 | `DECIMATION_SCALE_ACCEPTANCE_MM` | [10, 300] mm | scale sanity interval |
 | `GEOMETRY_SWEEP_MAX_PASSES` / `GEOMETRY_SWEEP_ZERO_THRESHOLD` | 8 / 1e-4 | Blender repair-loop defaults; retained only until the tool is retired |

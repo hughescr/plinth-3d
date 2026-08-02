@@ -36,6 +36,15 @@ pub struct TopologyDigest {
     hex: String,
 }
 
+/// Counts of undirected edge incidences as classified by Plinth's canonical
+/// face-topology construction.  These are edge counts, not counts of faces
+/// bearing a cut flag.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EdgeTopologyCounts {
+    pub boundary_edges: usize,
+    pub nonmanifold_edges: usize,
+}
+
 impl TopologyDigest {
     #[must_use]
     pub const fn schema(&self) -> TopologySchema {
@@ -138,6 +147,7 @@ pub struct FaceTopology {
     indices: Vec<u32>,
     component_ids: Vec<u32>,
     cut_flags: Vec<u8>,
+    edge_counts: EdgeTopologyCounts,
     source_vertex_to_welded: Vec<u32>,
     welded_vertex_count: u32,
     weld_policy: WeldPolicy,
@@ -161,6 +171,13 @@ impl FaceTopology {
     #[must_use]
     pub fn cut_flags(&self) -> &[u8] {
         &self.cut_flags
+    }
+    /// Edge-incidence counts established by this topology view's one canonical
+    /// construction pass.  Consumers must use these rather than re-auditing
+    /// raw triangle indices locally.
+    #[must_use]
+    pub const fn edge_counts(&self) -> EdgeTopologyCounts {
+        self.edge_counts
     }
     #[must_use]
     pub fn source_vertex_to_welded(&self) -> &[u32] {
@@ -259,11 +276,21 @@ pub fn build_face_topology(
 
     let mut adjacency = vec![Vec::<u32>::new(); n_faces];
     let mut accepted_edges = Vec::<(usize, usize)>::new();
+    let mut edge_counts = EdgeTopologyCounts::default();
     for occurrences in edges.values() {
         let degenerate = occurrences.iter().any(|occurrence| occurrence.degenerate);
         let duplicate = occurrences
             .iter()
             .any(|occurrence| cut_flags[occurrence.face] & TOPOLOGY_CUT_DUPLICATE != 0);
+        if occurrences.len() == 1 {
+            edge_counts.boundary_edges += 1;
+        }
+        // Keep the existing classification's exclusions: a degenerate edge
+        // or duplicate face is surfaced under its own canonical cut reason,
+        // not silently relabelled as a non-manifold edge.
+        if occurrences.len() > 2 && !degenerate && !duplicate {
+            edge_counts.nonmanifold_edges += 1;
+        }
         let valid_pair = occurrences.len() == 2
             && occurrences[0].face != occurrences[1].face
             && occurrences[0].forward != occurrences[1].forward
@@ -366,6 +393,7 @@ pub fn build_face_topology(
         indices,
         component_ids,
         cut_flags,
+        edge_counts,
         source_vertex_to_welded: welded.map,
         welded_vertex_count: welded.vertex_count,
         weld_policy,
@@ -459,14 +487,24 @@ pub fn validate_face_topology(topology: &FaceTopology) -> Result<(), TopologyVal
     Ok(())
 }
 
-pub(crate) struct WeldedView {
+/// A deterministic vertex-only projection of a mesh under an explicit weld
+/// policy.
+///
+/// This view never mutates or replaces the source [`Mesh`].  It exists for
+/// algorithms which require shared positional indexing but must retain the
+/// source triangle soup as their oracle representation.  `map()[source_id]`
+/// is the corresponding ID in `verts()`; welded IDs are assigned by the first
+/// source-order occurrence of each equivalence class.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WeldedView {
     pub(crate) verts: Vec<[f64; 3]>,
     pub(crate) map: Vec<u32>,
     pub(crate) vertex_count: u32,
 }
 
 impl WeldedView {
-    pub(crate) fn build(mesh: &Mesh, policy: WeldPolicy) -> Result<Self, TopologyError> {
+    /// Builds one explicit vertex-only weld view without changing `mesh`.
+    pub fn build(mesh: &Mesh, policy: WeldPolicy) -> Result<Self, TopologyError> {
         for (vertex, point) in mesh.verts().iter().enumerate() {
             for (axis, value) in point.iter().enumerate() {
                 if !value.is_finite() {
@@ -490,6 +528,24 @@ impl WeldedView {
             WeldPolicy::ExactBits => exact_weld(mesh.verts()),
             WeldPolicy::Epsilon(tolerance) => epsilon_weld(mesh.verts(), tolerance),
         }
+    }
+
+    /// Welded vertices in deterministic first-occurrence order.
+    #[must_use]
+    pub fn verts(&self) -> &[[f64; 3]] {
+        &self.verts
+    }
+
+    /// Source vertex ID to welded vertex ID.
+    #[must_use]
+    pub fn map(&self) -> &[u32] {
+        &self.map
+    }
+
+    /// Number of welded vertices.
+    #[must_use]
+    pub const fn vertex_count(&self) -> u32 {
+        self.vertex_count
     }
 }
 

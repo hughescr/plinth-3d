@@ -520,8 +520,8 @@
         "scripts/tools/decimate_pipeline.py:RATIO_HI",
         "scripts/tools/decimate_pipeline.py:ratio bisection loop"
       ],
-      "normative": "03-physics-and-constants.md §3.10.5 = [0.05,0.50], 5 bisections",
-      "provenance_detail": "structured ratio search"
+      "normative": "03-physics-and-constants.md §3.10.5 = [0.05,1.00], 5 bisections; owner-corrected 2026-08-01",
+      "provenance_detail": "Placeholder structured ratio search; the former 0.50 upper ceiling was an unmeasured legacy control, corrected by owner decision"
     },
     {
       "id": "DECIMATION_RECHECK_SLACK",
