@@ -29,20 +29,17 @@ pub fn moller(o: V3, dv: V3, v0: V3, e1: V3, e2: V3, t_max: f64) -> (bool, f64) 
     (hit, t)
 }
 
-/// Merge crossings closer than `tol_mm` in arc length, keep-first
-/// (geometry_exact.py:134-144 `dedup_loc`). `ts` MUST be ascending.
-/// Returns the kept parameter values in order.
-pub fn dedup_loc(ts: &[f64], seg_len: f64, tol_mm: f64) -> Vec<f64> {
-    if ts.is_empty() {
-        return Vec::new();
-    }
-    let dt = tol_mm / seg_len.max(1e-9);
-    let mut keep = Vec::with_capacity(ts.len());
-    keep.push(ts[0]);
-    for &x in &ts[1..] {
-        if x - *keep.last().unwrap() > dt {
-            keep.push(x);
+/// Merge ascending crossings closer than `dt` in arc length, keeping first.
+/// `keep` is cleared before the stable pass and must be pre-reserved by the
+/// caller when a hard allocation ceiling is required.
+pub fn dedup_loc_into(ts: &[f64], dt: f64, keep: &mut Vec<f64>) {
+    keep.clear();
+    if let Some(&first) = ts.first() {
+        keep.push(first);
+        for &x in &ts[1..] {
+            if x - *keep.last().unwrap() > dt {
+                keep.push(x);
+            }
         }
     }
-    keep
 }

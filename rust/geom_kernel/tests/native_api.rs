@@ -1,7 +1,7 @@
 use geom_kernel::{
     indexed_triangle_soup_digest, triangle_soup_digest, BatchInputError, Interval, NativeSurface,
-    NativeSurfaceConfig, PlaneIntersectionKind, PlaneSliceError, PlaneSliceLimits,
-    SurfaceBuildError, SurfaceSubsetError, TriangleSoup,
+    NativeSurfaceConfig, PenetrationBatchError, PenetrationBatchLimits, PlaneIntersectionKind,
+    PlaneSliceError, PlaneSliceLimits, SurfaceBuildError, SurfaceSubsetError, TriangleSoup,
 };
 use std::process::Command;
 
@@ -474,6 +474,383 @@ fn assert_intervals_equal(left: &[Vec<Interval>], right: &[Vec<Interval>]) {
     }
 }
 
+fn bounded_penetration(
+    surface: &NativeSurface,
+    p0s: &[[f64; 3]],
+    p1s: &[[f64; 3]],
+    limits: PenetrationBatchLimits,
+) -> Result<Vec<Vec<Interval>>, PenetrationBatchError> {
+    surface.penetration_intervals_batch_bounded(
+        p0s,
+        p1s,
+        &vec![0.0; p0s.len()],
+        &vec![0.0; p0s.len()],
+        0,
+        0.12,
+        8,
+        0.05,
+        false,
+        limits,
+    )
+}
+
+fn generous_penetration_limits() -> PenetrationBatchLimits {
+    PenetrationBatchLimits {
+        max_rows: usize::MAX,
+        max_total_work: usize::MAX,
+        max_total_hits: usize::MAX,
+        max_total_samples: usize::MAX,
+        max_total_intervals: usize::MAX,
+        max_scratch_bytes: usize::MAX,
+    }
+}
+
+const HETEROGENEOUS_P0: [[f64; 3]; 3] = [[-1.0, 0.5, 0.5], [0.25, 0.25, -1.0], [1.25, 2.0, 0.5]];
+const HETEROGENEOUS_P1: [[f64; 3]; 3] = [[4.0, 0.5, 0.5], [0.25, 0.25, 2.0], [3.75, 2.0, 0.5]];
+const HETEROGENEOUS_RADII: [f64; 3] = [0.1, 0.05, 0.2];
+
+fn heterogeneous_penetration(
+    surface: &NativeSurface,
+    limits: PenetrationBatchLimits,
+) -> Result<Vec<Vec<Interval>>, PenetrationBatchError> {
+    surface.penetration_intervals_batch_bounded(
+        &HETEROGENEOUS_P0,
+        &HETEROGENEOUS_P1,
+        &HETEROGENEOUS_RADII,
+        &HETEROGENEOUS_RADII,
+        2,
+        0.12,
+        8,
+        0.05,
+        true,
+        limits,
+    )
+}
+
+#[test]
+fn bounded_penetration_frozen_heterogeneous_rows_are_bit_exact_and_ordered() {
+    let surface = cubes_surface(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+    let rows = heterogeneous_penetration(&surface, generous_penetration_limits()).unwrap();
+    type FrozenInterval = (i32, u64, u64, u64, bool, bool);
+    let expected: [&[FrozenInterval]; 3] = [
+        &[
+            (
+                -1,
+                4_607_182_418_800_017_408,
+                4_611_686_018_427_387_904,
+                4_601_678_019_255_453_472,
+                true,
+                true,
+            ),
+            (
+                -1,
+                4_613_937_818_241_073_153,
+                4_616_189_618_054_758_400,
+                4_601_678_019_255_453_480,
+                true,
+                true,
+            ),
+            (
+                0,
+                4_607_182_418_800_017_408,
+                4_611_686_018_427_387_904,
+                4_600_877_379_321_698_714,
+                true,
+                true,
+            ),
+            (
+                0,
+                4_613_937_818_241_073_153,
+                4_616_189_618_054_758_400,
+                4_600_877_379_321_698_714,
+                true,
+                true,
+            ),
+            (
+                1,
+                4_607_182_418_800_017_408,
+                4_611_686_018_427_387_904,
+                4_600_877_379_321_698_714,
+                true,
+                true,
+            ),
+            (
+                1,
+                4_613_937_818_241_073_153,
+                4_616_189_618_054_758_400,
+                4_600_877_379_321_698_714,
+                true,
+                true,
+            ),
+        ],
+        &[
+            (
+                -1,
+                4_607_182_418_800_017_408,
+                4_611_686_018_427_387_904,
+                4_598_175_219_545_276_416,
+                true,
+                true,
+            ),
+            (
+                0,
+                4_607_182_418_800_017_408,
+                4_611_686_018_427_387_904,
+                4_598_175_219_545_276_416,
+                true,
+                true,
+            ),
+            (
+                1,
+                4_607_182_418_800_017_408,
+                4_611_686_018_427_387_904,
+                4_596_373_779_694_328_218,
+                true,
+                true,
+            ),
+        ],
+        &[],
+    ];
+    assert_eq!(rows.len(), expected.len());
+    for (row, expected_row) in rows.iter().zip(expected) {
+        let actual = row
+            .iter()
+            .map(|interval| {
+                (
+                    interval.ray,
+                    interval.s_a.to_bits(),
+                    interval.s_b.to_bits(),
+                    interval.max_depth.to_bits(),
+                    interval.entered,
+                    interval.exited,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected_row);
+    }
+}
+
+#[test]
+fn bounded_penetration_preflights_every_resource_at_exact_cap() {
+    let surface = cube_surface();
+    let p0s = [[-1.0, 0.5, 0.5]];
+    let p1s = [[2.0, 0.5, 0.5]];
+    let limits = surface
+        .penetration_intervals_batch_worst_case_limits(1, 0, 8, false)
+        .unwrap();
+    let bounded = bounded_penetration(&surface, &p0s, &p1s, limits).unwrap();
+    assert_eq!(bounded.len(), 1);
+    assert_eq!(bounded[0].len(), 1);
+    let interval = &bounded[0][0];
+    assert_eq!(interval.s_a.to_bits(), 1.0f64.to_bits());
+    assert_eq!(interval.s_b.to_bits(), 2.0f64.to_bits());
+    assert_eq!(interval.max_depth.to_bits(), 4_601_678_019_255_453_472);
+    assert!(interval.entered);
+    assert!(interval.exited);
+    assert_eq!(interval.ray, -1);
+
+    for (resource, reduced) in [
+        (
+            "rows",
+            geom_kernel::PenetrationBatchLimits {
+                max_rows: limits.max_rows - 1,
+                ..limits
+            },
+        ),
+        (
+            "work",
+            geom_kernel::PenetrationBatchLimits {
+                max_total_work: limits.max_total_work - 1,
+                ..limits
+            },
+        ),
+        (
+            "hits",
+            geom_kernel::PenetrationBatchLimits {
+                max_total_hits: limits.max_total_hits - 1,
+                ..limits
+            },
+        ),
+        (
+            "samples",
+            geom_kernel::PenetrationBatchLimits {
+                max_total_samples: limits.max_total_samples - 1,
+                ..limits
+            },
+        ),
+        (
+            "intervals",
+            geom_kernel::PenetrationBatchLimits {
+                max_total_intervals: limits.max_total_intervals - 1,
+                ..limits
+            },
+        ),
+        (
+            "scratch bytes",
+            geom_kernel::PenetrationBatchLimits {
+                max_scratch_bytes: limits.max_scratch_bytes - 1,
+                ..limits
+            },
+        ),
+    ] {
+        assert!(matches!(
+            bounded_penetration(&surface, &p0s, &p1s, reduced),
+            Err(PenetrationBatchError::ResourceLimitExceeded { resource: actual, .. }) if actual == resource
+        ));
+    }
+}
+
+#[test]
+fn bounded_penetration_handles_zero_rows_and_checked_overflow() {
+    let surface = cube_surface();
+    let zero = geom_kernel::PenetrationBatchLimits {
+        max_rows: 0,
+        max_total_work: 0,
+        max_total_hits: 0,
+        max_total_samples: 0,
+        max_total_intervals: 0,
+        max_scratch_bytes: 0,
+    };
+    assert_eq!(
+        surface
+            .penetration_intervals_batch_bounded(&[], &[], &[], &[], 0, 0.12, 8, 0.05, false, zero,)
+            .unwrap()
+            .len(),
+        0
+    );
+    assert!(matches!(
+        surface.penetration_intervals_batch_worst_case_limits(1, usize::MAX, 8, true),
+        Err(PenetrationBatchError::ArithmeticOverflow { .. })
+    ));
+}
+
+#[test]
+fn bounded_penetration_high_crossing_mesh_has_one_ordered_refusal() {
+    let surface = cubes_surface(&[
+        [0.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0],
+        [4.0, 0.0, 0.0],
+        [6.0, 0.0, 0.0],
+    ]);
+    let p0s = [[-1.0, 0.5, 0.5], [-1.0, 0.5, 0.5]];
+    let p1s = [[8.0, 0.5, 0.5], [8.0, 0.5, 0.5]];
+    let limits = surface
+        .penetration_intervals_batch_worst_case_limits(2, 0, 8, false)
+        .unwrap();
+    let intervals = bounded_penetration(&surface, &p0s, &p1s, limits).unwrap();
+    assert_eq!(intervals.len(), 2);
+    assert!(intervals[0].len() >= 4, "all four cubes are crossed");
+    let below = geom_kernel::PenetrationBatchLimits {
+        max_total_hits: limits.max_total_hits - 1,
+        ..limits
+    };
+    assert!(matches!(
+        bounded_penetration(&surface, &p0s, &p1s, below),
+        Err(PenetrationBatchError::ResourceLimitExceeded {
+            resource: "hits",
+            required,
+            limit,
+        }) if required == limits.max_total_hits && limit == limits.max_total_hits - 1
+    ));
+}
+
+#[test]
+fn bounded_penetration_deep_bvh_and_parity_scratch_obey_exact_cap() {
+    let origins = (0..128)
+        .map(|index| [2.0 * index as f64, 0.0, 0.0])
+        .collect::<Vec<_>>();
+    let surface = cubes_surface(&origins);
+    assert!(surface.bvh.depth > 4);
+    assert!(surface.pv.grids.iter().any(|grid| grid.max_occ > 0));
+    let p0s = [[-1.0, 0.5, 0.5]];
+    let p1s = [[256.0, 0.5, 0.5]];
+    let limits = surface
+        .penetration_intervals_batch_worst_case_limits(1, 0, 8, false)
+        .unwrap();
+    assert!(bounded_penetration(&surface, &p0s, &p1s, limits).is_ok());
+    let below = PenetrationBatchLimits {
+        max_scratch_bytes: limits.max_scratch_bytes - 1,
+        ..limits
+    };
+    assert!(matches!(
+        bounded_penetration(&surface, &p0s, &p1s, below),
+        Err(PenetrationBatchError::ResourceLimitExceeded {
+            resource: "scratch bytes",
+            required,
+            limit,
+        }) if required == limits.max_scratch_bytes && limit == limits.max_scratch_bytes - 1
+    ));
+}
+
+fn update_penetration_hash(hash: &mut u64, value: u64) {
+    *hash ^= value;
+    *hash = hash.wrapping_mul(1_099_511_628_211);
+}
+
+#[test]
+fn bounded_penetration_thread_identity_child() {
+    let surface = cubes_surface(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+    let limits = surface
+        .penetration_intervals_batch_worst_case_limits(HETEROGENEOUS_P0.len(), 2, 8, true)
+        .unwrap();
+    let rows = heterogeneous_penetration(&surface, limits).unwrap();
+    let mut hash = 1_469_598_103_934_665_603u64;
+    for (row_index, row) in rows.into_iter().enumerate() {
+        update_penetration_hash(&mut hash, 0x524f_575f_4245_4749 ^ row_index as u64);
+        update_penetration_hash(&mut hash, row.len() as u64);
+        for interval in row {
+            update_penetration_hash(&mut hash, interval.s_a.to_bits());
+            update_penetration_hash(&mut hash, interval.s_b.to_bits());
+            update_penetration_hash(&mut hash, interval.max_depth.to_bits());
+            update_penetration_hash(&mut hash, interval.entered as u64);
+            update_penetration_hash(&mut hash, interval.exited as u64);
+            update_penetration_hash(&mut hash, interval.ray as u64);
+        }
+        update_penetration_hash(&mut hash, 0x524f_575f_454e_4421 ^ row_index as u64);
+    }
+    let configured = geom_kernel::current_threads();
+    let effective = geom_kernel::ordered_index_map(
+        &[0u8],
+        geom_kernel::OrderedMapLimits::new(1, std::mem::size_of::<u8>()),
+        |_, value| *value,
+    )
+    .unwrap()
+    .effective_threads();
+    println!("PENETRATION_FINGERPRINT:{configured}:{effective}:{hash}");
+}
+
+#[test]
+fn bounded_penetration_thread_identity_is_subprocess_invariant() {
+    let executable = std::env::current_exe().unwrap();
+    let mut fingerprints = Vec::new();
+    for threads in ["1", "4", "16"] {
+        let output = Command::new(&executable)
+            .args([
+                "--exact",
+                "bounded_penetration_thread_identity_child",
+                "--nocapture",
+            ])
+            .env("PLINTH_THREADS", threads)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child thread count {threads} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let line = stdout
+            .lines()
+            .find(|line| line.starts_with("PENETRATION_FINGERPRINT:"))
+            .unwrap();
+        let fields: Vec<&str> = line.split(':').collect();
+        assert_eq!(fields[1], threads, "configured count mismatch: {line}");
+        assert_eq!(fields[2], threads, "effective pool mismatch: {line}");
+        fingerprints.push(fields[3].to_owned());
+    }
+    assert!(fingerprints.windows(2).all(|pair| pair[0] == pair[1]));
+}
+
 #[test]
 fn indexed_memory_estimate_is_checked_and_is_the_exact_grid_cap_boundary() {
     let vertices = [[0.0, 0.0, 0.0], [8.0, 0.0, 0.0], [0.0, 8.0, 0.0]];
@@ -569,6 +946,27 @@ fn assert_batch_error<T>(
                 expected,
                 actual,
             }
+        ),
+        Ok(_) => panic!("{operation} accepted mismatched {field}"),
+    }
+}
+
+fn assert_penetration_input_error<T>(
+    result: Result<T, PenetrationBatchError>,
+    operation: &'static str,
+    field: &'static str,
+    expected: usize,
+    actual: usize,
+) {
+    match result {
+        Err(error) => assert_eq!(
+            error,
+            PenetrationBatchError::Input(BatchInputError {
+                operation,
+                field,
+                expected,
+                actual,
+            })
         ),
         Ok(_) => panic!("{operation} accepted mismatched {field}"),
     }
@@ -808,10 +1206,32 @@ fn identity_subset_matches_every_native_query_family() {
             .unwrap()
     );
     let full_intervals = full
-        .penetration_intervals_batch(&p0s, &p1s, &radii, &radii, 4, 0.12, 80, 0.05, true)
+        .penetration_intervals_batch_bounded(
+            &p0s,
+            &p1s,
+            &radii,
+            &radii,
+            4,
+            0.12,
+            80,
+            0.05,
+            true,
+            generous_penetration_limits(),
+        )
         .unwrap();
     let subset_intervals = subset
-        .penetration_intervals_batch(&p0s, &p1s, &radii, &radii, 4, 0.12, 80, 0.05, true)
+        .penetration_intervals_batch_bounded(
+            &p0s,
+            &p1s,
+            &radii,
+            &radii,
+            4,
+            0.12,
+            80,
+            0.05,
+            true,
+            generous_penetration_limits(),
+        )
         .unwrap();
     assert_intervals_equal(&full_intervals, &subset_intervals);
     assert_eq!(
@@ -870,10 +1290,32 @@ fn sparse_nested_subset_matches_every_native_query_family_and_owns_its_cache() {
             .unwrap()
     );
     let parent_intervals = parent
-        .penetration_intervals_batch(&p0s, &p1s, &radii, &radii, 4, 0.12, 80, 0.05, true)
+        .penetration_intervals_batch_bounded(
+            &p0s,
+            &p1s,
+            &radii,
+            &radii,
+            4,
+            0.12,
+            80,
+            0.05,
+            true,
+            generous_penetration_limits(),
+        )
         .unwrap();
     let child_intervals = child
-        .penetration_intervals_batch(&p0s, &p1s, &radii, &radii, 4, 0.12, 80, 0.05, true)
+        .penetration_intervals_batch_bounded(
+            &p0s,
+            &p1s,
+            &radii,
+            &radii,
+            4,
+            0.12,
+            80,
+            0.05,
+            true,
+            generous_penetration_limits(),
+        )
         .unwrap();
     assert_intervals_equal(&parent_intervals, &child_intervals);
     assert_eq!(
@@ -1014,8 +1456,8 @@ fn every_multi_slice_batch_rejects_each_mismatched_companion() {
         0,
     );
 
-    assert_batch_error(
-        surface.penetration_intervals_batch(
+    assert_penetration_input_error(
+        surface.penetration_intervals_batch_bounded(
             &points,
             &[],
             &scalars,
@@ -1025,14 +1467,15 @@ fn every_multi_slice_batch_rejects_each_mismatched_companion() {
             80,
             0.05,
             false,
+            generous_penetration_limits(),
         ),
         "penetration_intervals_batch",
         "p1s",
         1,
         0,
     );
-    assert_batch_error(
-        surface.penetration_intervals_batch(
+    assert_penetration_input_error(
+        surface.penetration_intervals_batch_bounded(
             &points,
             &points,
             &[],
@@ -1042,14 +1485,15 @@ fn every_multi_slice_batch_rejects_each_mismatched_companion() {
             80,
             0.05,
             false,
+            generous_penetration_limits(),
         ),
         "penetration_intervals_batch",
         "r0s",
         1,
         0,
     );
-    assert_batch_error(
-        surface.penetration_intervals_batch(
+    assert_penetration_input_error(
+        surface.penetration_intervals_batch_bounded(
             &points,
             &points,
             &scalars,
@@ -1059,6 +1503,7 @@ fn every_multi_slice_batch_rejects_each_mismatched_companion() {
             80,
             0.05,
             false,
+            generous_penetration_limits(),
         ),
         "penetration_intervals_batch",
         "r1s",
