@@ -853,6 +853,69 @@ pub fn prepare_specialized_contacts(
     })
 }
 
+/// Construct an empty-cardinality authority solely to exercise the initial
+/// builder's otherwise unreachable zero-contact branch. The production path
+/// first creates a genuine specialized plan from every supplied authority;
+/// only then does this cfg(test)-only adapter erase its physical contacts and
+/// recompute the empty load partition through the production finalizer. The
+/// resulting plan keeps the real authority digests and limits and must pass
+/// normal replay validation; callers cannot inject digest or resource bytes.
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn authority_consistent_empty_plan_for_initial_test(
+    mesh: &Mesh,
+    perception_config: &SupportPerceptionConfig<'_>,
+    frame: BuildFrame,
+    layers: &LayerPlan,
+    candidate_config: &CandidatePayloadConfig,
+    reservations: &[SpecializedOwnerReservation],
+    perception_limits: GenericPerceptionLimits,
+    generic: &GenericContactPlan,
+    regular: &SelectedContacts,
+    selection_config: &ContactSelectionConfig<'_>,
+    limits: SpecializedLimits,
+) -> Result<SpecializedContactPlan, SpecializedError> {
+    let mut plan = prepare_specialized_contacts(
+        mesh,
+        perception_config,
+        frame,
+        layers,
+        candidate_config,
+        reservations,
+        perception_limits,
+        generic,
+        regular,
+        selection_config,
+        limits,
+    )?;
+    plan.contacts.clear();
+    plan.load_partition =
+        crate::perception::authority_consistent_empty_load_partition_for_test(generic, mesh)?;
+    debug_assert!(plan.contacts.is_empty());
+    debug_assert_eq!(
+        plan.contacts
+            .iter()
+            .map(|contact| contact.demands.len())
+            .sum::<usize>(),
+        0
+    );
+    debug_assert!(plan.load_partition.rows().is_empty());
+    plan.validate_binding(
+        mesh,
+        perception_config,
+        frame,
+        layers,
+        candidate_config,
+        reservations,
+        perception_limits,
+        generic,
+        regular,
+        selection_config,
+        limits,
+    )?;
+    Ok(plan)
+}
+
 fn validate_regular(
     mesh: &Mesh,
     generic: &GenericContactPlan,

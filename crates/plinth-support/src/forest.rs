@@ -394,6 +394,23 @@ impl Forest {
         Self::default()
     }
 
+    /// Creates the fresh forest used by initial-contact construction with the
+    /// two contiguous arena payloads reserved for the known contact count.
+    /// The resource model bills the requested element payload; allocator
+    /// rounding and private BTree node layout are intentionally outside that
+    /// portable logical-payload contract.
+    pub(crate) fn try_new_for_initial_contacts(
+        contact_count: usize,
+    ) -> Result<Self, std::collections::TryReserveError> {
+        let mut forest = Self::new();
+        forest.state.slots.try_reserve_exact(contact_count)?;
+        forest
+            .state
+            .creation_order
+            .try_reserve_exact(contact_count)?;
+        Ok(forest)
+    }
+
     fn active_slot(&self, key: MemberKey) -> Option<&Slot> {
         let slot = self.state.slots.get(key.slot as usize)?;
         (slot.generation == key.generation
@@ -643,7 +660,8 @@ impl Forest {
         if member.kind() != &MemberKind::Stub || member.owner() != &Owner::Contact(terminal) {
             return Err(ForestError::InvalidTerminalMember { terminal });
         }
-        let evidence = QuarantineRecord::from_member(key, member, vec![terminal]);
+        let terminal_contacts = Vec::from([terminal]);
+        let evidence = QuarantineRecord::from_member(key, member, terminal_contacts);
         self.state.terminal_of.insert(terminal, key);
         self.state.terminal_evidence.insert(terminal, evidence);
         Ok(())
@@ -792,12 +810,19 @@ impl Forest {
             return Err(ForestError::QuarantineHasChildren);
         }
         let member = self.member(key).expect("checked active").clone();
-        let terminal_contacts = self
+        let terminal_contact_count = self
             .state
             .terminal_of
             .iter()
-            .filter_map(|(terminal, member_key)| (*member_key == key).then_some(*terminal))
-            .collect();
+            .filter(|(_, member_key)| **member_key == key)
+            .count();
+        let mut terminal_contacts = Vec::with_capacity(terminal_contact_count);
+        terminal_contacts.extend(
+            self.state
+                .terminal_of
+                .iter()
+                .filter_map(|(terminal, member_key)| (*member_key == key).then_some(*terminal)),
+        );
         let record = QuarantineRecord::from_member(key, &member, terminal_contacts);
         self.retire(key)?;
         self.state.dead.remove(&key);
@@ -1128,6 +1153,31 @@ impl Forest {
     }
 }
 
+/// Exact billed logical-payload inventory for the fresh all-contact forest
+/// construction path through quarantine. Initial construction explicitly
+/// reserves `slots` and `creation_order` for this cardinality, so their billed
+/// element payload does not omit geometric `Vec` growth. The inventory also
+/// bills every key/value payload inserted into a BTree during the stage and
+/// both one-element `terminal_contacts` payloads.
+///
+/// This is deliberately not allocator-byte accounting: `Vec` allocator
+/// rounding plus BTree node headers, occupancy, pointers, and padding are not
+/// exposed portably by `std` and remain outside the recoverable resource API.
+pub(crate) fn modeled_initial_contact_bytes(contact_count: usize) -> Option<usize> {
+    let retained_terminal_ids = 2usize.checked_mul(std::mem::size_of::<u32>())?;
+    let per_contact = std::mem::size_of::<Slot>()
+        .checked_add(std::mem::size_of::<MemberKey>())?
+        .checked_add(std::mem::size_of::<(MemberKey, Vec<MemberKey>)>())?
+        .checked_add(std::mem::size_of::<MemberKey>())?
+        .checked_add(std::mem::size_of::<(u32, MemberKey)>())?
+        .checked_add(std::mem::size_of::<(u32, QuarantineRecord)>())?
+        .checked_add(std::mem::size_of::<(MemberKey, QuarantineRecord)>())?
+        // Registration seals one QuarantineRecord and quarantine clones a
+        // second. Each owns its own one-terminal Vec payload.
+        .checked_add(retained_terminal_ids)?;
+    std::mem::size_of::<ForestState>().checked_add(contact_count.checked_mul(per_contact)?)
+}
+
 struct DigestWriter(u64);
 
 impl DigestWriter {
@@ -1285,6 +1335,73 @@ mod tests {
             embed_end: None,
             carried_mm2: finite(1.0),
         })
+    }
+
+    #[test]
+    fn initial_contact_model_bills_both_owned_terminal_id_payloads() {
+        let base = modeled_initial_contact_bytes(0).unwrap();
+        let one = modeled_initial_contact_bytes(1).unwrap();
+        let expected_per_contact = std::mem::size_of::<Slot>()
+            + std::mem::size_of::<MemberKey>()
+            + std::mem::size_of::<(MemberKey, Vec<MemberKey>)>()
+            + std::mem::size_of::<MemberKey>()
+            + std::mem::size_of::<(u32, MemberKey)>()
+            + std::mem::size_of::<(u32, QuarantineRecord)>()
+            + std::mem::size_of::<(MemberKey, QuarantineRecord)>()
+            + 2 * std::mem::size_of::<u32>();
+        assert_eq!(one - base, expected_per_contact);
+
+        let mut forest = Forest::try_new_for_initial_contacts(1).unwrap();
+        let mut stub = member(MemberKind::Stub);
+        stub.owner = Owner::Contact(0);
+        let key = forest.add_member(stub);
+        forest.register_terminal(0, key).unwrap();
+        assert_eq!(
+            forest
+                .terminal_ledger_evidence(0)
+                .unwrap()
+                .terminal_contacts,
+            [0]
+        );
+        assert!(
+            forest
+                .terminal_ledger_evidence(0)
+                .unwrap()
+                .terminal_contacts
+                .capacity()
+                >= 1
+        );
+        forest.quarantine(key).unwrap();
+        assert_eq!(
+            forest.terminal_quarantine(0).unwrap().terminal_contacts,
+            [0]
+        );
+        assert!(
+            forest
+                .terminal_quarantine(0)
+                .unwrap()
+                .terminal_contacts
+                .capacity()
+                >= 1
+        );
+    }
+
+    #[test]
+    fn initial_contact_reservation_prevents_vec_growth_through_modeled_count() {
+        let contact_count = 17;
+        let mut forest = Forest::try_new_for_initial_contacts(contact_count).unwrap();
+        let slot_capacity = forest.state.slots.capacity();
+        let creation_capacity = forest.state.creation_order.capacity();
+        assert!(slot_capacity >= contact_count);
+        assert!(creation_capacity >= contact_count);
+
+        for terminal in 0..u32::try_from(contact_count).unwrap() {
+            let mut stub = member(MemberKind::Stub);
+            stub.owner = Owner::Contact(terminal);
+            forest.add_member(stub);
+        }
+        assert_eq!(forest.state.slots.capacity(), slot_capacity);
+        assert_eq!(forest.state.creation_order.capacity(), creation_capacity);
     }
 
     #[test]

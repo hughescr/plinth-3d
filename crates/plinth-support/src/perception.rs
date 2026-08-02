@@ -1921,6 +1921,19 @@ pub(crate) fn finalize_load_partition(
     )
 }
 
+/// Test-only empty-contact load authority for exercising a downstream zero
+/// branch that normal fixtures do not currently reach. It still traverses the
+/// production finalizer with the genuine generic plan, mesh, and plan-owned
+/// limits, so binding, retained-byte accounting, and the canonical empty
+/// fingerprint are computed rather than copied or forged by the caller.
+#[cfg(test)]
+pub(crate) fn authority_consistent_empty_load_partition_for_test(
+    plan: &GenericContactPlan,
+    mesh: &Mesh,
+) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
+    finalize_load_rows(plan, mesh, &[], &[], plan.load_limits)
+}
+
 fn load_resource_plan_from_counts(
     face_count: usize,
     eligible_owner_count: usize,
