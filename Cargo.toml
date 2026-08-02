@@ -8,6 +8,7 @@ edition = "2021"
 [workspace.dependencies]
 cxx = "=1.0.198"
 cxx-build = "=1.0.198"
+kiddo = { version = "=5.3.3", default-features = false }
 rayon = "1.10"
 robust = "1.2"
 serde = { version = "1.0", features = ["derive"] }

@@ -15,6 +15,7 @@ mod mesh;
 mod moller;
 mod par;
 mod parity;
+mod point_index;
 mod queries;
 mod vec3;
 
@@ -24,6 +25,7 @@ use std::borrow::Cow;
 
 use mesh::Mesh;
 pub use mesh::{FaceBounds, FaceGeometry};
+pub use point_index::{NeighborCsr, PointCloudIndex, PointIndexBuildError, PointQueryError};
 pub use queries::{BatchInputError, CastRaysBatch, Interval, NativeSurface, SphereBreachBatch};
 pub use vec3::V3;
 
