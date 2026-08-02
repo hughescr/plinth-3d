@@ -36,6 +36,8 @@ pub struct HoleGeometry {
     pub direction: [Finite; 3],
     pub outer_exit_mm: [Finite; 3],
     pub radius_mm: Finite,
+    /// First deduplicated crossing: cavity void into its enclosing inner wall.
+    pub inner_crossing_mm: Finite,
     /// Cavity-origin to outside exit distance, before the H1b drill extension.
     pub length_mm: Finite,
     pub keepout_start_mm: [Finite; 3],
@@ -116,12 +118,20 @@ pub enum DrainPlanningRefusal {
     },
     #[error("checked H1a planning resource accounting overflowed")]
     ResourceAccountingOverflow,
+    #[error("H1a allocation preflight underestimated a bounded planner buffer")]
+    PreflightUnderestimated,
     #[error("native surface construction or batch ray query failed")]
     Kernel,
     #[error("cavity lobe {lobe_id} has no legal outward exit within 45mm")]
     NoExit { lobe_id: u32 },
     #[error("cavity lobe {lobe_id} exit exceeded the 45mm ceiling")]
     ExitTooLong { lobe_id: u32 },
+    #[error("{role:?} candidate has {crossings} deduplicated crossings; exactly two are required")]
+    CrossingCount {
+        role: HoleRole,
+        lobe_id: Option<u32>,
+        crossings: usize,
+    },
     #[error("{role:?} ray did not cross cavity wall then outer shell")]
     ShellBreach {
         role: HoleRole,
@@ -151,6 +161,20 @@ struct Lobe {
     origin: V3,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RayPath {
+    inner_mm: f64,
+    outer_mm: f64,
+}
+
+#[derive(Clone, Copy)]
+struct PlannerPreflight {
+    lobe_capacity: usize,
+    high_site_capacity: usize,
+    candidate_capacity: usize,
+    requested_bytes: usize,
+}
+
 /// Plans the exact frozen H1a candidates through one canonical batched native
 /// ray query. On refusal it returns the untouched move-only candidate.
 pub fn plan_drains(candidate: ShellCandidate) -> Result<PlannedShell, DrainPlanningFailure> {
@@ -176,13 +200,34 @@ fn plan(candidate: &ShellCandidate) -> Result<DrainPlan, DrainPlanningRefusal> {
     let policy = constants.placeholders();
     let field = candidate.cavity_field();
     let resources = candidate.cavity().resources();
+    let drain_direction_count = policy
+        .hollow_drain_directions()
+        .diagnostic()
+        .directions()
+        .len();
+    let native = NativeSurface::estimate_index_memory_from_indexed(
+        candidate.mesh().verts(),
+        candidate.mesh().tris(),
+        field.pitch_mm().get(),
+    )
+    .map_err(|_| DrainPlanningRefusal::Kernel)?;
+    let preflight = planner_preflight(
+        candidate,
+        field,
+        resources,
+        native.peak_bytes(),
+        drain_direction_count,
+        policy.hollow_lobe_band_mm().diagnostic().get(),
+        policy.hollow_lobe_min_ml().diagnostic().get(),
+    )?;
+    debug_assert!(preflight.requested_bytes <= candidate.cavity().resource_cap_bytes());
     let lobes = low_lobes(
         field,
         policy.hollow_lobe_band_mm().diagnostic().get(),
         policy.hollow_lobe_min_ml().diagnostic().get(),
         candidate.cavity().resource_cap_bytes(),
     )?;
-    let vent_sites = high_sites(field)?;
+    let vent_sites = high_sites(field, preflight.high_site_capacity)?;
 
     let mut candidates = Vec::new();
     let drain_directions: Vec<V3> = policy
@@ -203,19 +248,9 @@ fn plan(candidate: &ShellCandidate) -> Result<DrainPlan, DrainPlanningRefusal> {
         .checked_mul(drain_directions.len())
         .and_then(|value| value.checked_add(vent_sites.len().checked_mul(horizontal.len())?))
         .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
-    let native = NativeSurface::estimate_index_memory_from_indexed(
-        candidate.mesh().verts(),
-        candidate.mesh().tris(),
-        field.pitch_mm().get(),
-    )
-    .map_err(|_| DrainPlanningRefusal::Kernel)?;
-    ensure_query_bound(
-        candidate_count,
-        candidate.mesh().tris().len(),
-        resources,
-        candidate.cavity().resource_cap_bytes(),
-        native.peak_bytes(),
-    )?;
+    if lobes.len() > preflight.lobe_capacity || candidate_count > preflight.candidate_capacity {
+        return Err(DrainPlanningRefusal::PreflightUnderestimated);
+    }
     candidates.reserve_exact(candidate_count);
     for (site, lobe) in lobes.iter().enumerate() {
         for &direction in &drain_directions {
@@ -269,19 +304,25 @@ fn plan(candidate: &ShellCandidate) -> Result<DrainPlan, DrainPlanningRefusal> {
         .cast_rays(&origins, &directions, ceiling)
         .map_err(|_| DrainPlanningRefusal::Kernel)?;
 
-    let mut lengths = vec![None; candidates.len()];
+    let mut paths = vec![None; candidates.len()];
     for candidate in &candidates {
         let begin =
             usize::try_from(offsets[candidate.id]).map_err(|_| DrainPlanningRefusal::Kernel)?;
         let end =
             usize::try_from(offsets[candidate.id + 1]).map_err(|_| DrainPlanningRefusal::Kernel)?;
-        lengths[candidate.id] =
-            exit_length(&ts[begin..end], ceiling, candidate.role, candidate.lobe_id)?;
+        paths[candidate.id] =
+            match exit_length(&ts[begin..end], ceiling, candidate.role, candidate.lobe_id) {
+                // A direction with no crossing cannot be a drain/vent site; it is
+                // recorded as unavailable and becomes the named no-exit refusal
+                // only if every direction at that site is unavailable.
+                Err(DrainPlanningRefusal::CrossingCount { crossings: 0, .. }) => None,
+                result => result?,
+            };
     }
 
     let mut holes = Vec::with_capacity(lobes.len() + 1);
     for (site, lobe) in lobes.iter().enumerate() {
-        let best = best_site(&candidates, &lengths, HoleRole::Drain, site)
+        let best = best_site(&candidates, &paths, HoleRole::Drain, site)
             .ok_or(DrainPlanningRefusal::NoExit { lobe_id: lobe.id })?;
         holes.push(hole(
             best.0,
@@ -290,7 +331,7 @@ fn plan(candidate: &ShellCandidate) -> Result<DrainPlan, DrainPlanningRefusal> {
         )?);
     }
     let vent =
-        best_role(&candidates, &lengths, HoleRole::Vent).ok_or(DrainPlanningRefusal::NoVentSite)?;
+        best_role(&candidates, &paths, HoleRole::Vent).ok_or(DrainPlanningRefusal::NoVentSite)?;
     holes.push(hole(
         vent.0,
         vent.1,
@@ -304,17 +345,20 @@ fn exit_length(
     ceiling: f64,
     role: HoleRole,
     lobe_id: Option<u32>,
-) -> Result<Option<f64>, DrainPlanningRefusal> {
+) -> Result<Option<RayPath>, DrainPlanningRefusal> {
     if hits.iter().any(|value| !value.is_finite()) {
         return Err(DrainPlanningRefusal::NonFinite { role });
     }
-    let Some(&inner) = hits.first() else {
-        return Ok(None);
-    };
-    let Some(&outer) = hits.get(1) else {
-        return Ok(None);
-    };
-    if inner < 0.0 || outer <= inner {
+    if hits.len() != 2 {
+        return Err(DrainPlanningRefusal::CrossingCount {
+            role,
+            lobe_id,
+            crossings: hits.len(),
+        });
+    }
+    let inner = hits[0];
+    let outer = hits[1];
+    if inner <= 0.0 || outer <= inner {
         return Err(DrainPlanningRefusal::ShellBreach { role, lobe_id });
     }
     if outer > ceiling {
@@ -322,27 +366,30 @@ fn exit_length(
             DrainPlanningRefusal::ExitTooLong { lobe_id }
         }));
     }
-    Ok(Some(outer))
+    Ok(Some(RayPath {
+        inner_mm: inner,
+        outer_mm: outer,
+    }))
 }
 
 fn best_site<'a>(
     candidates: &'a [Candidate],
-    lengths: &[Option<f64>],
+    paths: &[Option<RayPath>],
     role: HoleRole,
     site: usize,
-) -> Option<(&'a Candidate, f64)> {
-    let mut best = None;
+) -> Option<(&'a Candidate, RayPath)> {
+    let mut best: Option<(&Candidate, RayPath)> = None;
     for candidate in candidates
         .iter()
         .filter(|candidate| candidate.role == role && candidate.site == site)
     {
-        let Some(length) = lengths[candidate.id] else {
+        let Some(path) = paths[candidate.id] else {
             continue;
         };
-        if best.is_none_or(|(_, selected)| length < selected) {
+        if best.is_none_or(|(_, selected)| path.outer_mm < selected.outer_mm) {
             // Strictly smaller only: equal values keep the earlier canonical
             // direction/site ordering just like Python's `if r < best`.
-            best = Some((candidate, length));
+            best = Some((candidate, path));
         }
     }
     best
@@ -350,16 +397,16 @@ fn best_site<'a>(
 
 fn best_role<'a>(
     candidates: &'a [Candidate],
-    lengths: &[Option<f64>],
+    paths: &[Option<RayPath>],
     role: HoleRole,
-) -> Option<(&'a Candidate, f64)> {
-    let mut best = None;
+) -> Option<(&'a Candidate, RayPath)> {
+    let mut best: Option<(&Candidate, RayPath)> = None;
     for candidate in candidates.iter().filter(|candidate| candidate.role == role) {
-        let Some(length) = lengths[candidate.id] else {
+        let Some(path) = paths[candidate.id] else {
             continue;
         };
-        if best.is_none_or(|(_, selected)| length < selected) {
-            best = Some((candidate, length));
+        if best.is_none_or(|(_, selected)| path.outer_mm < selected.outer_mm) {
+            best = Some((candidate, path));
         }
     }
     best
@@ -367,7 +414,7 @@ fn best_role<'a>(
 
 fn hole(
     candidate: &Candidate,
-    length: f64,
+    path: RayPath,
     radius: f64,
 ) -> Result<HoleGeometry, DrainPlanningRefusal> {
     let point = |distance: f64| add(candidate.origin, scale(candidate.direction, distance));
@@ -384,11 +431,12 @@ fn hole(
         lobe_id: candidate.lobe_id,
         center_mm: array(candidate.origin)?,
         direction: array(candidate.direction)?,
-        outer_exit_mm: array(point(length))?,
+        outer_exit_mm: array(point(path.outer_mm))?,
         radius_mm: finite(radius)?,
-        length_mm: finite(length)?,
+        inner_crossing_mm: finite(path.inner_mm)?,
+        length_mm: finite(path.outer_mm)?,
         keepout_start_mm: array(point(-KEEPOUT_BEFORE_MM))?,
-        keepout_end_mm: array(point(length + KEEPOUT_AFTER_MM))?,
+        keepout_end_mm: array(point(path.outer_mm + KEEPOUT_AFTER_MM))?,
     })
 }
 
@@ -497,7 +545,7 @@ fn low_lobes(
     Ok(lobes)
 }
 
-fn high_sites(field: &CavityField) -> Result<Vec<V3>, DrainPlanningRefusal> {
+fn high_sites(field: &CavityField, capacity: usize) -> Result<Vec<V3>, DrainPlanningRefusal> {
     let high_z = field
         .member_flats()
         .map(|flat| field.world_at_flat(flat)[2])
@@ -508,48 +556,226 @@ fn high_sites(field: &CavityField) -> Result<Vec<V3>, DrainPlanningRefusal> {
         .filter(|flat| field.world_at_flat(*flat)[2] > high_z - VENT_TOP_BAND_MM)
         .count();
     let step = (high_count / VENT_SAMPLE_DIVISOR).max(1);
-    Ok(field
+    let mut sites = Vec::with_capacity(capacity);
+    for (index, flat) in field
         .member_flats()
         .filter(|flat| field.world_at_flat(*flat)[2] > high_z - VENT_TOP_BAND_MM)
         .enumerate()
-        .filter(|(index, _)| index % step == 0)
-        .map(|(_, flat)| field.world_at_flat(flat))
-        .collect())
+    {
+        if index % step == 0 {
+            sites.push(field.world_at_flat(flat));
+        }
+    }
+    if sites.len() > capacity {
+        return Err(DrainPlanningRefusal::PreflightUnderestimated);
+    }
+    Ok(sites)
 }
 
-fn ensure_query_bound(
-    candidates: usize,
-    faces: usize,
+fn planner_preflight(
+    candidate: &ShellCandidate,
+    field: &CavityField,
     resources: HollowResourceEstimate,
-    cap: usize,
     native_peak_bytes: usize,
-) -> Result<(), DrainPlanningRefusal> {
-    if candidates > resources.query_batch_points() {
+    drain_direction_count: usize,
+    lobe_band_mm: f64,
+    lobe_min_ml: f64,
+) -> Result<PlannerPreflight, DrainPlanningRefusal> {
+    let cap = candidate.cavity().resource_cap_bytes();
+    let low_z = field
+        .member_flats()
+        .map(|flat| field.world_at_flat(flat)[2])
+        .min_by(|left, right| left.partial_cmp(right).unwrap())
+        .ok_or(DrainPlanningRefusal::NoVentSite)?;
+    let low_members = field
+        .member_flats()
+        .filter(|flat| field.world_at_flat(*flat)[2] < low_z + lobe_band_mm)
+        .count();
+    let minimum_lobe_voxels =
+        (lobe_min_ml * 1000.0 / field.pitch_mm().get().powi(3)).ceil() as usize;
+    if minimum_lobe_voxels == 0 {
+        return Err(DrainPlanningRefusal::ResourceAccountingOverflow);
+    }
+    let lobe_capacity = low_members / minimum_lobe_voxels;
+    let high_z = field
+        .member_flats()
+        .map(|flat| field.world_at_flat(flat)[2])
+        .max_by(|left, right| left.partial_cmp(right).unwrap())
+        .ok_or(DrainPlanningRefusal::NoVentSite)?;
+    let high_members = field
+        .member_flats()
+        .filter(|flat| field.world_at_flat(*flat)[2] > high_z - VENT_TOP_BAND_MM)
+        .count();
+    let high_step = (high_members / VENT_SAMPLE_DIVISOR).max(1);
+    let high_site_capacity = high_members
+        .checked_add(high_step - 1)
+        .map(|value| value / high_step)
+        .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    let candidate_capacity = lobe_capacity
+        .checked_mul(drain_direction_count)
+        .and_then(|value| value.checked_add(high_site_capacity.checked_mul(4)?))
+        .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    if candidate_capacity > resources.query_batch_points() {
         return Err(DrainPlanningRefusal::ResourceLimitExceeded {
-            requested_bytes: candidates
+            requested_bytes: candidate_capacity
                 .checked_mul(QUERY_CANDIDATE_BYTES)
                 .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?,
             cap_bytes: cap,
         });
     }
-    let worst_hits = candidates
-        .checked_mul(faces)
-        .and_then(|value| {
-            value.checked_mul(std::mem::size_of::<f64>() + std::mem::size_of::<i64>())
-        })
+    let allocator = |count: usize, size: usize, align: usize| {
+        crate::allocator_allocation_bound(count, size, align)
+            .map_err(|_| DrainPlanningRefusal::ResourceAccountingOverflow)
+    };
+    let retained_shell = crate::allocator_allocation_bound_bytes(
+        candidate
+            .mesh()
+            .retained_buffer_bytes()
+            .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?,
+        std::mem::align_of::<V3>(),
+    )
+    .map_err(|_| DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    let retained_field = crate::allocator_allocation_bound_bytes(
+        field.retained_bytes(),
+        std::mem::align_of::<u64>(),
+    )
+    .map_err(|_| DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    let field_cells = field.flat_count();
+    let lobe_workspace = [
+        allocator(
+            field_cells,
+            std::mem::size_of::<i32>(),
+            std::mem::align_of::<i32>(),
+        )?,
+        allocator(
+            field_cells,
+            std::mem::size_of::<usize>(),
+            std::mem::align_of::<usize>(),
+        )?,
+        allocator(
+            field_cells,
+            std::mem::size_of::<usize>(),
+            std::mem::align_of::<usize>(),
+        )?,
+        allocator(
+            field_cells,
+            std::mem::size_of::<V3>(),
+            std::mem::align_of::<V3>(),
+        )?,
+        allocator(
+            lobe_capacity,
+            std::mem::size_of::<Lobe>(),
+            std::mem::align_of::<Lobe>(),
+        )?,
+    ]
+    .into_iter()
+    .try_fold(0_usize, |total, value| total.checked_add(value))
+    .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    let candidate_buffers = [
+        allocator(
+            candidate_capacity,
+            std::mem::size_of::<Candidate>(),
+            std::mem::align_of::<Candidate>(),
+        )?,
+        allocator(
+            candidate_capacity,
+            std::mem::size_of::<V3>(),
+            std::mem::align_of::<V3>(),
+        )?,
+        allocator(
+            candidate_capacity,
+            std::mem::size_of::<V3>(),
+            std::mem::align_of::<V3>(),
+        )?,
+        allocator(
+            candidate_capacity,
+            std::mem::size_of::<Option<f64>>(),
+            std::mem::align_of::<Option<f64>>(),
+        )?,
+        allocator(
+            high_site_capacity,
+            std::mem::size_of::<V3>(),
+            std::mem::align_of::<V3>(),
+        )?,
+        allocator(
+            lobe_capacity
+                .checked_add(1)
+                .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?,
+            std::mem::size_of::<HoleGeometry>(),
+            std::mem::align_of::<HoleGeometry>(),
+        )?,
+        allocator(
+            candidate_capacity
+                .checked_add(1)
+                .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?,
+            std::mem::size_of::<i64>(),
+            std::mem::align_of::<i64>(),
+        )?,
+    ]
+    .into_iter()
+    .try_fold(0_usize, |total, value| total.checked_add(value))
+    .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    // cast_rays keeps per-ray f64/i64 vectors while serially building both
+    // flattened arrays. Every deduplicated crossing could originate on a
+    // distinct face, so the checked bound is faces per candidate for all four
+    // live hit arrays.
+    let hit_values = candidate_capacity
+        .checked_mul(candidate.mesh().tris().len())
         .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
-    let requested = candidates
-        .checked_mul(QUERY_CANDIDATE_BYTES)
-        .and_then(|value| value.checked_add(worst_hits))
-        .and_then(|value| value.checked_add(native_peak_bytes))
-        .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    let ray_buffers = allocator(
+        hit_values,
+        std::mem::size_of::<f64>(),
+        std::mem::align_of::<f64>(),
+    )?
+    .checked_add(allocator(
+        hit_values,
+        std::mem::size_of::<i64>(),
+        std::mem::align_of::<i64>(),
+    )?)
+    .and_then(|value| {
+        value.checked_add(
+            allocator(
+                hit_values,
+                std::mem::size_of::<f64>(),
+                std::mem::align_of::<f64>(),
+            )
+            .ok()?,
+        )
+    })
+    .and_then(|value| {
+        value.checked_add(
+            allocator(
+                hit_values,
+                std::mem::size_of::<i64>(),
+                std::mem::align_of::<i64>(),
+            )
+            .ok()?,
+        )
+    })
+    .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
+    let requested = [
+        retained_shell,
+        retained_field,
+        lobe_workspace,
+        candidate_buffers,
+        native_peak_bytes,
+        ray_buffers,
+    ]
+    .into_iter()
+    .try_fold(0_usize, |total, value| total.checked_add(value))
+    .ok_or(DrainPlanningRefusal::ResourceAccountingOverflow)?;
     if requested > cap {
         return Err(DrainPlanningRefusal::ResourceLimitExceeded {
             requested_bytes: requested,
             cap_bytes: cap,
         });
     }
-    Ok(())
+    Ok(PlannerPreflight {
+        lobe_capacity,
+        high_site_capacity,
+        candidate_capacity,
+        requested_bytes: requested,
+    })
 }
 
 fn neighbors(field: &CavityField, flat: usize) -> impl Iterator<Item = usize> {
@@ -597,11 +823,50 @@ mod tests {
         CavityField::from_selected_mask(&mask, [0.0, 0.0, 0.0], 0.5).expect("finite field")
     }
 
+    fn cast_counts(mesh: &plinth_mesh::Mesh, rays: &[(V3, V3)]) -> Vec<usize> {
+        let estimate =
+            NativeSurface::estimate_index_memory_from_indexed(mesh.verts(), mesh.tris(), 0.5)
+                .expect("native estimate");
+        let surface = NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
+            NativeSurfaceConfig {
+                grid_pitch_mm: 0.5,
+                max_grid_bytes: estimate.max_axis_grid_bytes(),
+            },
+        )
+        .expect("native surface");
+        let origins: Vec<_> = rays.iter().map(|(origin, _)| *origin).collect();
+        let directions: Vec<_> = rays.iter().map(|(_, direction)| *direction).collect();
+        let (offsets, _, _) = surface
+            .cast_rays(&origins, &directions, 45.0)
+            .expect("ray batch");
+        offsets
+            .windows(2)
+            .map(|window| usize::try_from(window[1] - window[0]).expect("nonnegative offsets"))
+            .collect()
+    }
+
     fn frozen_candidate() -> ShellCandidate {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../corpus/baseline/Sphere.prepped.oriented-solid.stl");
+        let baseline =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/baseline");
+        let json = baseline.join("Sphere.pipeline.json");
+        assert!(
+            json.is_file(),
+            "required frozen baseline JSON is missing: {json:?}"
+        );
+        let path = baseline.join("Sphere.prepped.oriented-solid.stl");
+        assert!(
+            path.is_file(),
+            "required frozen baseline STL is missing: {path:?}"
+        );
         create_shell(load_binary_stl(path, WeldPolicy::None).expect("frozen input"))
             .expect("frozen eligible shell")
+    }
+
+    #[test]
+    fn required_frozen_baseline_artifacts_are_present() {
+        drop(frozen_candidate());
     }
 
     #[test]
@@ -625,7 +890,10 @@ mod tests {
     fn ray_pair_uses_outer_exit_and_ordered_tie_keeps_first_direction() {
         assert_eq!(
             exit_length(&[0.25, 3.5], 45.0, HoleRole::Drain, Some(1)).expect("valid pair"),
-            Some(3.5)
+            Some(RayPath {
+                inner_mm: 0.25,
+                outer_mm: 3.5,
+            })
         );
         let candidates = [
             Candidate {
@@ -645,9 +913,63 @@ mod tests {
                 direction: [0.5, 0.0, -1.0],
             },
         ];
-        let selected = best_site(&candidates, &[Some(3.5), Some(3.5)], HoleRole::Drain, 0)
-            .expect("both exact rays exit");
+        let selected = best_site(
+            &candidates,
+            &[
+                Some(RayPath {
+                    inner_mm: 0.25,
+                    outer_mm: 3.5,
+                }),
+                Some(RayPath {
+                    inner_mm: 0.25,
+                    outer_mm: 3.5,
+                }),
+            ],
+            HoleRole::Drain,
+            0,
+        )
+        .expect("both exact rays exit");
         assert_eq!(selected.0.id, 0, "the frozen direction order wins ties");
+
+        for (hits, crossings) in [
+            (&[][..], 0_usize),
+            (&[0.25][..], 1),
+            (&[0.25, 1.0, 2.0][..], 3),
+        ] {
+            assert!(matches!(
+                exit_length(hits, 45.0, HoleRole::Drain, Some(1)),
+                Err(DrainPlanningRefusal::CrossingCount { crossings: actual, .. }) if actual == crossings
+            ));
+        }
+        assert!(matches!(
+            exit_length(&[-0.1, 3.5], 45.0, HoleRole::Drain, Some(1)),
+            Err(DrainPlanningRefusal::ShellBreach { .. })
+        ));
+        assert!(matches!(
+            exit_length(&[0.25, 45.1], 45.0, HoleRole::Drain, Some(1)),
+            Err(DrainPlanningRefusal::ExitTooLong { lobe_id: 1 })
+        ));
+    }
+
+    #[test]
+    fn native_canonical_rays_pin_zero_one_two_and_three_plus_crossing_refusals() {
+        let box_mesh = make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0]).expect("box");
+        assert_eq!(
+            cast_counts(
+                &box_mesh,
+                &[
+                    ([20.0, 0.0, 5.0], [1.0, 0.0, 0.0]),
+                    ([0.0, 0.0, 5.0], [1.0, 0.0, 0.0]),
+                    ([-20.0, 0.0, 5.0], [1.0, 0.0, 0.0]),
+                ],
+            ),
+            vec![0, 1, 2]
+        );
+        let shell = frozen_candidate();
+        assert_eq!(
+            cast_counts(shell.mesh(), &[([-20.0, 0.0, 10.0], [1.0, 0.0, 0.0])],),
+            vec![4]
+        );
     }
 
     #[test]
@@ -674,6 +996,37 @@ mod tests {
                 Finite::new(19.5).expect("finite"),
             ]
         );
+        // The baseline JSON contains Python's stepping-wall summary, not the
+        // native two-crossing ray values. These are separately hard-coded
+        // native Sphere expectations, never produced by a helper in this test.
+        assert_eq!(
+            holes[0].direction,
+            [
+                Finite::new(0.0).expect("finite"),
+                Finite::new(0.0).expect("finite"),
+                Finite::new(-1.0).expect("finite"),
+            ]
+        );
+        assert_eq!(holes[0].radius_mm.get().to_bits(), 1.5_f64.to_bits());
+        assert_eq!(
+            holes[0].inner_crossing_mm.get().to_bits(),
+            0x3fb5_5556_0000_0000
+        );
+        assert_eq!(holes[0].length_mm.get().to_bits(), 0x3fdf_c94f_11b3_7955);
+        assert_eq!(
+            holes[1].direction,
+            [
+                Finite::new(0.0).expect("finite"),
+                Finite::new(-1.0).expect("finite"),
+                Finite::new(0.0).expect("finite"),
+            ]
+        );
+        assert_eq!(holes[1].radius_mm.get().to_bits(), 1.25_f64.to_bits());
+        assert_eq!(
+            holes[1].inner_crossing_mm.get().to_bits(),
+            0x3fb7_fffd_0000_6000
+        );
+        assert_eq!(holes[1].length_mm.get().to_bits(), 0x4008_984c_c4ae_d75d);
         assert!(holes.iter().all(|hole| hole.length_mm.get() > 0.0));
     }
 
@@ -722,11 +1075,14 @@ mod tests {
             failure.reason(),
             &DrainPlanningRefusal::NoExit { lobe_id: 1 }
         );
-        assert_eq!(failure.into_candidate().cavity_field().member_count(), 4_000);
+        assert_eq!(
+            failure.into_candidate().cavity_field().member_count(),
+            4_000
+        );
     }
 
     #[test]
-    fn planning_is_bit_identical_at_one_four_and_sixteen_threads() {
+    fn native_cast_rays_plan_is_bit_identical_across_one_four_and_sixteen_threads() {
         static ENV: OnceLock<Mutex<()>> = OnceLock::new();
         let _guard = ENV
             .get_or_init(|| Mutex::new(()))
@@ -773,6 +1129,66 @@ mod tests {
         assert!(matches!(
             failure.reason(),
             DrainPlanningRefusal::ResourceLimitExceeded { .. }
+        ));
+    }
+
+    #[test]
+    fn planner_preflight_has_an_exact_cap_boundary_before_candidate_allocation() {
+        let candidate = frozen_candidate();
+        let (mesh, mut cavity, field) = candidate.into_parts();
+        cavity.resource_cap_bytes = usize::MAX;
+        let unlimited = ShellCandidate {
+            mesh,
+            cavity,
+            cavity_field: field,
+        };
+        let constants = m0_constants().expect("M0 constants");
+        let policy = constants.placeholders();
+        let native = NativeSurface::estimate_index_memory_from_indexed(
+            unlimited.mesh().verts(),
+            unlimited.mesh().tris(),
+            unlimited.cavity_field().pitch_mm().get(),
+        )
+        .expect("native preflight");
+        let exact = planner_preflight(
+            &unlimited,
+            unlimited.cavity_field(),
+            unlimited.cavity().resources(),
+            native.peak_bytes(),
+            policy
+                .hollow_drain_directions()
+                .diagnostic()
+                .directions()
+                .len(),
+            policy.hollow_lobe_band_mm().diagnostic().get(),
+            policy.hollow_lobe_min_ml().diagnostic().get(),
+        )
+        .expect("unlimited preflight")
+        .requested_bytes;
+
+        let exact_candidate = frozen_candidate();
+        let (mesh, mut cavity, field) = exact_candidate.into_parts();
+        cavity.resource_cap_bytes = exact;
+        plan_drains(ShellCandidate {
+            mesh,
+            cavity,
+            cavity_field: field,
+        })
+        .expect("exact H1a cap");
+
+        let below = frozen_candidate();
+        let (mesh, mut cavity, field) = below.into_parts();
+        cavity.resource_cap_bytes = exact - 1;
+        let refusal = plan_drains(ShellCandidate {
+            mesh,
+            cavity,
+            cavity_field: field,
+        })
+        .expect_err("cap minus one must refuse before planner allocations");
+        assert!(matches!(
+            refusal.reason(),
+            DrainPlanningRefusal::ResourceLimitExceeded { requested_bytes, cap_bytes }
+                if *requested_bytes == exact && *cap_bytes == exact - 1
         ));
     }
 }
