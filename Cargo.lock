@@ -1176,6 +1176,7 @@ dependencies = [
  "plinth-hollow",
  "plinth-mesh",
  "plinth-orient",
+ "rayon",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

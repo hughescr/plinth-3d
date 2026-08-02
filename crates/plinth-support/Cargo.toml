@@ -10,6 +10,7 @@ geom_kernel = { path = "../../rust/geom_kernel" }
 plinth-core = { path = "../plinth-core" }
 plinth-hollow = { path = "../plinth-hollow" }
 plinth-mesh = { path = "../plinth-mesh" }
+rayon = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 
