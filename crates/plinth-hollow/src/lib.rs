@@ -218,6 +218,7 @@ fn finite_settings(
 
 const DEFAULT_HOLLOW_PEAK_BYTES: usize = 1024 * 1024 * 1024;
 const DEFAULT_QUERY_WORKING_BYTES: usize = 8 * 1024 * 1024;
+const DEFAULT_MAX_RASTER_WORK_ITEMS: usize = 16 * 1024 * 1024;
 const QUERY_BYTES_PER_POINT: usize = std::mem::size_of::<[f64; 3]>()
     + std::mem::size_of::<bool>()
     + std::mem::size_of::<f64>()
@@ -230,6 +231,7 @@ const QUERY_BYTES_PER_POINT: usize = std::mem::size_of::<[f64; 3]>()
 pub struct HollowResourceLimits {
     max_peak_bytes: usize,
     query_working_bytes: usize,
+    max_raster_work_items: usize,
 }
 
 impl HollowResourceLimits {
@@ -240,6 +242,26 @@ impl HollowResourceLimits {
         Ok(Self {
             max_peak_bytes,
             query_working_bytes,
+            max_raster_work_items: DEFAULT_MAX_RASTER_WORK_ITEMS,
+        })
+    }
+
+    /// Builds an H0 envelope with an explicit source-raster work ceiling.
+    pub fn with_raster_work(
+        max_peak_bytes: usize,
+        query_working_bytes: usize,
+        max_raster_work_items: usize,
+    ) -> Result<Self, HollowError> {
+        if max_peak_bytes == 0
+            || query_working_bytes < QUERY_BYTES_PER_POINT
+            || max_raster_work_items == 0
+        {
+            return Err(HollowError::InvalidResourceLimits);
+        }
+        Ok(Self {
+            max_peak_bytes,
+            query_working_bytes,
+            max_raster_work_items,
         })
     }
 
@@ -248,6 +270,7 @@ impl HollowResourceLimits {
         Self {
             max_peak_bytes: DEFAULT_HOLLOW_PEAK_BYTES,
             query_working_bytes: DEFAULT_QUERY_WORKING_BYTES,
+            max_raster_work_items: DEFAULT_MAX_RASTER_WORK_ITEMS,
         }
     }
 
@@ -259,6 +282,11 @@ impl HollowResourceLimits {
     #[must_use]
     pub const fn query_working_bytes(self) -> usize {
         self.query_working_bytes
+    }
+
+    #[must_use]
+    pub const fn max_raster_work_items(self) -> usize {
+        self.max_raster_work_items
     }
 }
 
@@ -430,7 +458,8 @@ pub fn create_shell_with_resources(
     let source_volume_mm3 = source_volume_mm3(&source)?;
     let spec = grid_spec(&source, settings.voxel_pitch_mm.get())?;
     let resources = resource_estimate(&source, spec, limits)?;
-    let grid = voxelize_filled(&source, spec)?;
+    let raster_work_items = raster_work_item_count(&source, spec, limits.max_raster_work_items)?;
+    let grid = voxelize_filled(&source, spec, raster_work_items)?;
     let VoxelGrid {
         origin: grid_origin,
         pitch: grid_pitch,
@@ -618,6 +647,17 @@ fn grid_spec(mesh: &Mesh, pitch: f64) -> Result<GridSpec, HollowError> {
         return Err(HollowError::InvalidArithmetic);
     }
     let (low, high) = bounds(mesh)?;
+    grid_spec_from_bounds(low, high, pitch)
+}
+
+fn grid_spec_from_bounds(
+    low: [f64; 3],
+    high: [f64; 3],
+    pitch: f64,
+) -> Result<GridSpec, HollowError> {
+    if !pitch.is_finite() || pitch <= 0.0 {
+        return Err(HollowError::InvalidArithmetic);
+    }
     let mut origin = [0.0; 3];
     let mut dims = [0_usize; 3];
     for axis in 0..3 {
@@ -626,20 +666,21 @@ fn grid_spec(mesh: &Mesh, pitch: f64) -> Result<GridSpec, HollowError> {
         if !low_index.is_finite() || !high_index.is_finite() {
             return Err(HollowError::VoxelGridTooLarge);
         }
-        origin[axis] = low_index.round() * pitch;
-        let end = high_index.round() * pitch;
-        let span = end - origin[axis];
-        if !origin[axis].is_finite() || !end.is_finite() || !span.is_finite() || span < 0.0 {
+        let origin_index = round_ties_even(low_index);
+        let end_index = round_ties_even(high_index);
+        let span_index = end_index - origin_index;
+        origin[axis] = origin_index * pitch;
+        if !origin[axis].is_finite()
+            || !end_index.is_finite()
+            || !span_index.is_finite()
+            || span_index < 0.0
+        {
             return Err(HollowError::InvalidArithmetic);
         }
-        let axis_samples_f64 = (span / pitch).round();
-        if !axis_samples_f64.is_finite()
-            || axis_samples_f64 < 0.0
-            || axis_samples_f64 > (u32::MAX - 1) as f64
-        {
+        if span_index > (u32::MAX - 1) as f64 {
             return Err(HollowError::VoxelGridTooLarge);
         }
-        let axis_samples = axis_samples_f64 as usize;
+        let axis_samples = span_index as usize;
         dims[axis] = axis_samples
             .checked_add(1)
             .ok_or(HollowError::VoxelGridTooLarge)?;
@@ -685,6 +726,13 @@ fn allocator_allocation_bound(
     element_align: usize,
 ) -> Result<usize, HollowError> {
     let requested = checked_scale(count, element_size)?;
+    allocator_allocation_bound_bytes(requested, element_align)
+}
+
+fn allocator_allocation_bound_bytes(
+    requested: usize,
+    element_align: usize,
+) -> Result<usize, HollowError> {
     let allocation_align = element_align.max(2 * std::mem::size_of::<usize>());
     let rounded = requested
         .checked_add(allocation_align - 1)
@@ -777,14 +825,33 @@ fn resource_estimate(
         .max(1);
     let grid_coordinate_bytes = checked_scale(query_batch_points, std::mem::size_of::<[f64; 3]>())?;
     let occupancy_bytes = checked_scale(spec.count, std::mem::size_of::<bool>())?;
+    let source_mesh_peak_bytes = allocator_allocation_bound_bytes(
+        mesh.retained_buffer_bytes()
+            .ok_or(HollowError::ResourceAccountingOverflow)?,
+        std::mem::align_of::<[f64; 3]>(),
+    )?;
     // `voxelize_subdivide` emits its leaf vertices directly into the grid;
     // it retains no tessellated mesh. Hole filling keeps the surface grid, a
     // 6-connected exterior mask, and a worst-case frontier containing every
     // voxel. The fixed-depth recursive splitter is stack-only.
     let rasterization_peak_bytes = checked_sum(&[
-        occupancy_bytes,
-        occupancy_bytes,
-        checked_scale(spec.count, std::mem::size_of::<usize>())?,
+        source_mesh_peak_bytes,
+        allocator_allocation_bound(
+            spec.count,
+            std::mem::size_of::<bool>(),
+            std::mem::align_of::<bool>(),
+        )?,
+        allocator_allocation_bound(
+            spec.count,
+            std::mem::size_of::<bool>(),
+            std::mem::align_of::<bool>(),
+        )?,
+        allocator_allocation_bound(
+            spec.count,
+            std::mem::size_of::<usize>(),
+            std::mem::align_of::<usize>(),
+        )?,
+        checked_scale(RASTER_STACK_CAPACITY, std::mem::size_of::<RasterNode>())?,
     ])?;
 
     // Source occupancy + EDT input clone + squared and final f64 distance
@@ -797,16 +864,18 @@ fn resource_estimate(
         *spec.dims.iter().max().unwrap_or(&0),
         4 * std::mem::size_of::<usize>().max(std::mem::size_of::<f64>()),
     )?;
-    let edt_peak_bytes = checked_sum(&[edt_arrays, edt_line])?;
+    let edt_peak_bytes = checked_sum(&[source_mesh_peak_bytes, edt_arrays, edt_line])?;
 
     let label_memory = label_phase_memory(spec.count)?;
     debug_assert!(label_memory.conservative_peak_bytes >= label_memory.requested_live_bytes);
     let retained_cavity_field_bytes = cavity_field::packed_bytes_for_voxels(spec.count)?;
+    let retained_cavity_field_peak_bytes =
+        allocator_allocation_bound_bytes(retained_cavity_field_bytes, std::mem::align_of::<u64>())?;
     // Packing the selected mask occurs while labels and the selected bool mask
     // are still live. The compact field remains in the returned candidate.
     let label_peak_bytes = checked_sum(&[
         label_memory.conservative_peak_bytes,
-        retained_cavity_field_bytes,
+        retained_cavity_field_peak_bytes,
     ])?;
 
     // Surface Nets worst case: one surface vertex per cell, up to three quads
@@ -819,26 +888,26 @@ fn resource_estimate(
             .ok_or(HollowError::ResourceAccountingOverflow)
     })?;
     let surface_peak_bytes = checked_scale(surface_lattice_count, 224)?;
-    let source_mesh_bytes = checked_sum(&[
-        checked_scale(mesh.verts().len(), std::mem::size_of::<[f64; 3]>())?,
-        checked_scale(mesh.tris().len(), std::mem::size_of::<[u32; 3]>())?,
-    ])?;
     let inner_mesh_upper = checked_scale(
         surface_lattice_count,
         std::mem::size_of::<[f64; 3]>() + 6 * std::mem::size_of::<[u32; 3]>(),
     )?;
-    let output_upper_bound_bytes = checked_sum(&[source_mesh_bytes, inner_mesh_upper])?;
+    let output_upper_bound_bytes = checked_sum(&[source_mesh_peak_bytes, inner_mesh_upper])?;
     // Rust source/inner meshes, FFI conversion, native Boolean result, and
     // returned Mesh can coexist at the boundary.
     let boolean_peak = checked_sum(&[
         checked_scale(output_upper_bound_bytes, 3)?,
-        retained_cavity_field_bytes,
+        retained_cavity_field_peak_bytes,
     ])?;
     let peak_bytes = [
         rasterization_peak_bytes,
         edt_peak_bytes,
         label_peak_bytes,
-        checked_sum(&[surface_peak_bytes, retained_cavity_field_bytes])?,
+        checked_sum(&[
+            source_mesh_peak_bytes,
+            surface_peak_bytes,
+            retained_cavity_field_peak_bytes,
+        ])?,
         boolean_peak,
     ]
     .into_iter()
@@ -867,9 +936,42 @@ fn resource_estimate(
     }
 }
 
+const MAX_RASTER_SUBDIVISION_ROUNDS: u8 = 10;
+const RASTER_STACK_CAPACITY: usize = 1 + 3 * MAX_RASTER_SUBDIVISION_ROUNDS as usize;
+
+#[derive(Clone, Copy)]
+struct RasterNode {
+    a: [f64; 3],
+    b: [f64; 3],
+    c: [f64; 3],
+    depth: u8,
+}
+
+fn raster_work_item_count(
+    mesh: &Mesh,
+    spec: GridSpec,
+    max_work_items: usize,
+) -> Result<usize, HollowError> {
+    let mut count = 0_usize;
+    walk_raster_leaves(mesh, spec, |_, _, _| {
+        count = count
+            .checked_add(1)
+            .ok_or(HollowError::ResourceAccountingOverflow)?;
+        if count > max_work_items {
+            return Err(HollowError::RasterWorkLimitExceeded {
+                work_items: count,
+                max_work_items,
+            });
+        }
+        Ok(())
+    })?;
+    Ok(count)
+}
+
 fn voxelize_filled(
     mesh: &Mesh,
     spec: GridSpec,
+    expected_work_items: usize,
 ) -> Result<VoxelGrid, HollowError> {
     // Frozen source: `trimesh.voxelized(pitch).fill()`. Its default
     // `subdivide` voxelizer recursively quarters each triangle until every
@@ -879,23 +981,23 @@ fn voxelize_filled(
     // boundary bands are not the source field and can put an H1 candidate
     // outside the Boolean cavity.
     let mut occupancy = vec![false; spec.count];
-    for triangle in mesh.tris() {
-        let [a, b, c] = *triangle;
-        let a = *mesh
-            .verts()
-            .get(usize::try_from(a).map_err(|_| HollowError::VoxelGridTooLarge)?)
-            .ok_or(HollowError::VoxelGridTooLarge)?;
-        let b = *mesh
-            .verts()
-            .get(usize::try_from(b).map_err(|_| HollowError::VoxelGridTooLarge)?)
-            .ok_or(HollowError::VoxelGridTooLarge)?;
-        let c = *mesh
-            .verts()
-            .get(usize::try_from(c).map_err(|_| HollowError::VoxelGridTooLarge)?)
-            .ok_or(HollowError::VoxelGridTooLarge)?;
-        rasterize_subdivided_triangle(a, b, c, spec, &mut occupancy, 0)?;
+    let mut observed_work_items = 0_usize;
+    walk_raster_leaves(mesh, spec, |a, b, c| {
+        observed_work_items = observed_work_items
+            .checked_add(1)
+            .ok_or(HollowError::ResourceAccountingOverflow)?;
+        mark_voxel_vertex(a, spec, &mut occupancy)?;
+        mark_voxel_vertex(b, spec, &mut occupancy)?;
+        mark_voxel_vertex(c, spec, &mut occupancy)
+    })?;
+    if observed_work_items != expected_work_items {
+        return Err(HollowError::RasterWorkMismatch {
+            expected_work_items,
+            observed_work_items,
+        });
     }
-    fill_voxel_holes(&mut occupancy, spec.dims)?;
+    let high_water = fill_voxel_holes(&mut occupancy, spec.dims)?;
+    debug_assert!(high_water <= spec.count);
     let material = Array3::from_shape_vec((spec.dims[2], spec.dims[1], spec.dims[0]), occupancy)
         .map_err(|_| HollowError::VoxelGridTooLarge)?;
     Ok(VoxelGrid {
@@ -905,47 +1007,106 @@ fn voxelize_filled(
     })
 }
 
-fn rasterize_subdivided_triangle(
-    a: [f64; 3],
-    b: [f64; 3],
-    c: [f64; 3],
+fn walk_raster_leaves(
+    mesh: &Mesh,
     spec: GridSpec,
-    occupancy: &mut [bool],
-    iteration: u8,
+    mut visit: impl FnMut([f64; 3], [f64; 3], [f64; 3]) -> Result<(), HollowError>,
 ) -> Result<(), HollowError> {
-    let max_edge = spec.pitch / 2.0;
-    let edge_too_long = |left: [f64; 3], right: [f64; 3]| {
-        left.iter()
-            .zip(right)
-            .map(|(left, right)| (left - right).powi(2))
-            .sum::<f64>()
-            .sqrt()
-            > max_edge
-    };
-    if !edge_too_long(a, b) && !edge_too_long(b, c) && !edge_too_long(c, a) {
-        mark_voxel_vertex(a, spec, occupancy)?;
-        mark_voxel_vertex(b, spec, occupancy)?;
-        return mark_voxel_vertex(c, spec, occupancy);
+    for triangle in mesh.tris() {
+        let [a, b, c] = *triangle;
+        let point = |index| {
+            mesh.verts()
+                .get(usize::try_from(index).map_err(|_| HollowError::VoxelGridTooLarge)?)
+                .copied()
+                .ok_or(HollowError::VoxelGridTooLarge)
+        };
+        let mut stack = [None; RASTER_STACK_CAPACITY];
+        stack[0] = Some(RasterNode {
+            a: point(a)?,
+            b: point(b)?,
+            c: point(c)?,
+            depth: 0,
+        });
+        let mut stack_len = 1_usize;
+        while stack_len > 0 {
+            stack_len -= 1;
+            let node = stack[stack_len]
+                .take()
+                .ok_or(HollowError::ResourceAccountingOverflow)?;
+            if raster_leaf(node, spec.pitch) {
+                visit(node.a, node.b, node.c)?;
+                continue;
+            }
+            if node.depth >= MAX_RASTER_SUBDIVISION_ROUNDS {
+                return Err(HollowError::RasterSubdivisionLimitExceeded);
+            }
+            let ab = midpoint(node.a, node.b);
+            let bc = midpoint(node.b, node.c);
+            let ca = midpoint(node.c, node.a);
+            let next = node.depth + 1;
+            let children = [
+                RasterNode {
+                    a: ab,
+                    b: bc,
+                    c: ca,
+                    depth: next,
+                },
+                RasterNode {
+                    a: ca,
+                    b: bc,
+                    c: node.c,
+                    depth: next,
+                },
+                RasterNode {
+                    a: ab,
+                    b: node.b,
+                    c: bc,
+                    depth: next,
+                },
+                RasterNode {
+                    a: node.a,
+                    b: ab,
+                    c: ca,
+                    depth: next,
+                },
+            ];
+            let next_len = stack_len
+                .checked_add(children.len())
+                .ok_or(HollowError::ResourceAccountingOverflow)?;
+            if next_len > RASTER_STACK_CAPACITY {
+                return Err(HollowError::ResourceAccountingOverflow);
+            }
+            for child in children {
+                stack[stack_len] = Some(child);
+                stack_len += 1;
+            }
+        }
     }
-    if iteration >= 10 {
-        // Matches trimesh.remesh.subdivide_to_size(max_iter=10).
-        return Err(HollowError::VoxelGridTooLarge);
-    }
-    let midpoint = |left: [f64; 3], right: [f64; 3]| {
-        [
-            (left[0] + right[0]) / 2.0,
-            (left[1] + right[1]) / 2.0,
-            (left[2] + right[2]) / 2.0,
-        ]
-    };
-    let ab = midpoint(a, b);
-    let bc = midpoint(b, c);
-    let ca = midpoint(c, a);
-    let next = iteration + 1;
-    rasterize_subdivided_triangle(a, ab, ca, spec, occupancy, next)?;
-    rasterize_subdivided_triangle(ab, b, bc, spec, occupancy, next)?;
-    rasterize_subdivided_triangle(ca, bc, c, spec, occupancy, next)?;
-    rasterize_subdivided_triangle(ab, bc, ca, spec, occupancy, next)
+    Ok(())
+}
+
+fn raster_leaf(node: RasterNode, pitch: f64) -> bool {
+    let max_edge = pitch / 2.0;
+    !edge_too_long(node.a, node.b, max_edge)
+        && !edge_too_long(node.b, node.c, max_edge)
+        && !edge_too_long(node.c, node.a, max_edge)
+}
+
+fn edge_too_long(left: [f64; 3], right: [f64; 3], max_edge: f64) -> bool {
+    left.iter()
+        .zip(right)
+        .map(|(left, right)| (left - right).powi(2))
+        .sum::<f64>()
+        .sqrt()
+        > max_edge
+}
+
+fn midpoint(left: [f64; 3], right: [f64; 3]) -> [f64; 3] {
+    [
+        (left[0] + right[0]) / 2.0,
+        (left[1] + right[1]) / 2.0,
+        (left[2] + right[2]) / 2.0,
+    ]
 }
 
 fn mark_voxel_vertex(
@@ -971,7 +1132,11 @@ fn mark_voxel_vertex(
         .checked_mul(spec.dims[1])
         .ok_or(HollowError::VoxelGridTooLarge)?;
     let flat = index[0]
-        .checked_add(index[1].checked_mul(spec.dims[0]).ok_or(HollowError::VoxelGridTooLarge)?)
+        .checked_add(
+            index[1]
+                .checked_mul(spec.dims[0])
+                .ok_or(HollowError::VoxelGridTooLarge)?,
+        )
         .and_then(|value| value.checked_add(index[2].checked_mul(plane)?))
         .ok_or(HollowError::VoxelGridTooLarge)?;
     *occupancy
@@ -994,62 +1159,186 @@ fn round_ties_even(value: f64) -> f64 {
     }
 }
 
-fn fill_voxel_holes(occupancy: &mut [bool], dims: [usize; 3]) -> Result<(), HollowError> {
+fn fill_voxel_holes(occupancy: &mut [bool], dims: [usize; 3]) -> Result<usize, HollowError> {
     let [nx, ny, nz] = dims;
     let plane = nx.checked_mul(ny).ok_or(HollowError::VoxelGridTooLarge)?;
     let mut exterior = vec![false; occupancy.len()];
-    let mut queue = std::collections::VecDeque::new();
+    let mut queue = vec![0_usize; occupancy.len()];
+    let mut head = 0_usize;
+    let mut tail = 0_usize;
+    let mut high_water = 0_usize;
     let mark_exterior = |x: usize,
                          y: usize,
                          z: usize,
                          exterior: &mut [bool],
-                         queue: &mut std::collections::VecDeque<usize>| {
+                         queue: &mut [usize],
+                         head: usize,
+                         tail: &mut usize,
+                         high_water: &mut usize|
+     -> Result<(), HollowError> {
         let flat = x + y * nx + z * plane;
         if !occupancy[flat] && !exterior[flat] {
             exterior[flat] = true;
-            queue.push_back(flat);
+            *queue
+                .get_mut(*tail)
+                .ok_or(HollowError::ResourceAccountingOverflow)? = flat;
+            *tail = tail
+                .checked_add(1)
+                .ok_or(HollowError::ResourceAccountingOverflow)?;
+            *high_water = (*high_water).max(*tail - head);
         }
+        Ok(())
     };
     for z in 0..nz {
         for y in 0..ny {
-            mark_exterior(0, y, z, &mut exterior, &mut queue);
-            mark_exterior(nx - 1, y, z, &mut exterior, &mut queue);
+            mark_exterior(
+                0,
+                y,
+                z,
+                &mut exterior,
+                &mut queue,
+                head,
+                &mut tail,
+                &mut high_water,
+            )?;
+            mark_exterior(
+                nx - 1,
+                y,
+                z,
+                &mut exterior,
+                &mut queue,
+                head,
+                &mut tail,
+                &mut high_water,
+            )?;
         }
     }
     for z in 0..nz {
         for x in 0..nx {
-            mark_exterior(x, 0, z, &mut exterior, &mut queue);
-            mark_exterior(x, ny - 1, z, &mut exterior, &mut queue);
+            mark_exterior(
+                x,
+                0,
+                z,
+                &mut exterior,
+                &mut queue,
+                head,
+                &mut tail,
+                &mut high_water,
+            )?;
+            mark_exterior(
+                x,
+                ny - 1,
+                z,
+                &mut exterior,
+                &mut queue,
+                head,
+                &mut tail,
+                &mut high_water,
+            )?;
         }
     }
     for y in 0..ny {
         for x in 0..nx {
-            mark_exterior(x, y, 0, &mut exterior, &mut queue);
-            mark_exterior(x, y, nz - 1, &mut exterior, &mut queue);
+            mark_exterior(
+                x,
+                y,
+                0,
+                &mut exterior,
+                &mut queue,
+                head,
+                &mut tail,
+                &mut high_water,
+            )?;
+            mark_exterior(
+                x,
+                y,
+                nz - 1,
+                &mut exterior,
+                &mut queue,
+                head,
+                &mut tail,
+                &mut high_water,
+            )?;
         }
     }
-    while let Some(flat) = queue.pop_front() {
+    while head < tail {
+        let flat = queue[head];
+        head += 1;
         let z = flat / plane;
         let remaining = flat % plane;
         let y = remaining / nx;
         let x = remaining % nx;
         if x > 0 {
-            mark_exterior(x - 1, y, z, &mut exterior, &mut queue);
+            mark_exterior(
+                x - 1,
+                y,
+                z,
+                &mut exterior,
+                &mut queue,
+                head,
+                &mut tail,
+                &mut high_water,
+            )?;
         }
         if x + 1 < nx {
-            mark_exterior(x + 1, y, z, &mut exterior, &mut queue);
+            mark_exterior(
+                x + 1,
+                y,
+                z,
+                &mut exterior,
+                &mut queue,
+                head,
+                &mut tail,
+                &mut high_water,
+            )?;
         }
         if y > 0 {
-            mark_exterior(x, y - 1, z, &mut exterior, &mut queue);
+            mark_exterior(
+                x,
+                y - 1,
+                z,
+                &mut exterior,
+                &mut queue,
+                head,
+                &mut tail,
+                &mut high_water,
+            )?;
         }
         if y + 1 < ny {
-            mark_exterior(x, y + 1, z, &mut exterior, &mut queue);
+            mark_exterior(
+                x,
+                y + 1,
+                z,
+                &mut exterior,
+                &mut queue,
+                head,
+                &mut tail,
+                &mut high_water,
+            )?;
         }
         if z > 0 {
-            mark_exterior(x, y, z - 1, &mut exterior, &mut queue);
+            mark_exterior(
+                x,
+                y,
+                z - 1,
+                &mut exterior,
+                &mut queue,
+                head,
+                &mut tail,
+                &mut high_water,
+            )?;
         }
         if z + 1 < nz {
-            mark_exterior(x, y, z + 1, &mut exterior, &mut queue);
+            mark_exterior(
+                x,
+                y,
+                z + 1,
+                &mut exterior,
+                &mut queue,
+                head,
+                &mut tail,
+                &mut high_water,
+            )?;
         }
     }
     for (filled, exterior) in occupancy.iter_mut().zip(exterior) {
@@ -1057,7 +1346,8 @@ fn fill_voxel_holes(occupancy: &mut [bool], dims: [usize; 3]) -> Result<(), Holl
             *filled = true;
         }
     }
-    Ok(())
+    debug_assert!(tail <= occupancy.len());
+    Ok(high_water)
 }
 
 fn largest_label(labels: &Array3<i32>, label_count: usize) -> Result<i32, HollowError> {
@@ -1268,6 +1558,20 @@ pub enum HollowError {
     InvalidResourceLimits,
     #[error("checked H0 resource accounting overflowed")]
     ResourceAccountingOverflow,
+    #[error(
+        "frozen voxel subdivision exceeded the caller work cap {max_work_items} at item {work_items}"
+    )]
+    RasterWorkLimitExceeded {
+        work_items: usize,
+        max_work_items: usize,
+    },
+    #[error("frozen voxel subdivision exceeded trimesh's exact ten-round limit")]
+    RasterSubdivisionLimitExceeded,
+    #[error("the second frozen raster pass disagreed with its preflight work count")]
+    RasterWorkMismatch {
+        expected_work_items: usize,
+        observed_work_items: usize,
+    },
     #[error("H0 resource estimate exceeds caller cap {cap_bytes}")]
     ResourceLimitExceeded {
         estimate: HollowResourceEstimate,
@@ -1342,7 +1646,13 @@ mod tests {
         let spec = grid_spec(&source, settings.voxel_pitch_mm().get()).expect("grid spec");
         resource_estimate(&source, spec, HollowResourceLimits::production())
             .expect("resource preflight");
-        let grid = voxelize_filled(&source, spec).expect("bounded voxelization");
+        let work = raster_work_item_count(
+            &source,
+            spec,
+            HollowResourceLimits::production().max_raster_work_items(),
+        )
+        .expect("bounded source work");
+        let grid = voxelize_filled(&source, spec, work).expect("bounded voxelization");
         let edt = frozen_distance_transform(&grid.material, grid.pitch).expect("EDT");
         let bulk_mm = 2.0 * edt.iter().copied().fold(0.0_f64, f64::max);
         let cavity = edt.mapv(|distance| distance > settings.wall_thickness_mm().get());
@@ -1414,30 +1724,53 @@ mod tests {
         let mut material = vec![true; 27];
         material[0] = false;
         material[13] = false;
-        fill_voxel_holes(&mut material, [3, 3, 3]).expect("bounded 6-neighbor fill");
+        let high_water =
+            fill_voxel_holes(&mut material, [3, 3, 3]).expect("bounded 6-neighbor fill");
         assert!(!material[0]);
         assert!(material[13]);
+        assert!(high_water <= material.len());
     }
 
     #[test]
-    fn frozen_subdivision_work_is_capped_at_ten_rounds() {
+    fn grid_spec_uses_numpy_ties_to_even_at_both_transform_ends() {
+        let spec = grid_spec_from_bounds([0.5, -1.5, -0.5], [1.5, -0.5, 1.5], 1.0)
+            .expect("all rounded endpoints span three samples");
+        assert_eq!(spec.origin, [0.0, -2.0, 0.0]);
+        assert_eq!(spec.dims, [3, 3, 3]);
+    }
+
+    #[test]
+    fn frozen_subdivision_preflight_has_exact_cap_and_stops_before_raster_allocation() {
         let spec = GridSpec {
             origin: [0.0, 0.0, 0.0],
-            dims: [3, 3, 3],
+            dims: [5, 5, 5],
             pitch: 0.5,
-            count: 27,
+            count: 125,
         };
-        let mut material = vec![false; spec.count];
+        let mesh = Mesh::new(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[0, 1, 2]],
+        )
+        .expect("finite triangle");
+        let exact = raster_work_item_count(&mesh, spec, usize::MAX).expect("bounded work");
+        assert!(exact > 1);
+        assert_eq!(
+            raster_work_item_count(&mesh, spec, exact).expect("exact cap"),
+            exact
+        );
         assert!(matches!(
-            rasterize_subdivided_triangle(
-                [0.0, 0.0, 0.0],
-                [300.0, 0.0, 0.0],
-                [0.0, 300.0, 0.0],
-                spec,
-                &mut material,
-                0,
-            ),
-            Err(HollowError::VoxelGridTooLarge)
+            raster_work_item_count(&mesh, spec, exact - 1),
+            Err(HollowError::RasterWorkLimitExceeded { .. })
+        ));
+
+        let malicious = Mesh::new(
+            vec![[0.0, 0.0, 0.0], [300.0, 0.0, 0.0], [0.0, 300.0, 0.0]],
+            vec![[0, 1, 2]],
+        )
+        .expect("finite triangle");
+        assert!(matches!(
+            raster_work_item_count(&malicious, spec, usize::MAX),
+            Err(HollowError::RasterSubdivisionLimitExceeded)
         ));
     }
 

@@ -85,6 +85,23 @@ impl Mesh {
         &self.tris
     }
 
+    /// Bytes reserved by this mesh's two owned buffers, measured from their
+    /// actual capacities rather than their logical lengths. Consumers that
+    /// enforce a process memory envelope must account for this retained
+    /// storage while they build additional working fields.
+    #[must_use]
+    pub fn retained_buffer_bytes(&self) -> Option<usize> {
+        self.verts
+            .capacity()
+            .checked_mul(std::mem::size_of::<[f64; 3]>())
+            .and_then(|vertices| {
+                self.tris
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<[u32; 3]>())
+                    .and_then(|triangles| vertices.checked_add(triangles))
+            })
+    }
+
     /// Audits geometry required by semantic consumers without changing this
     /// source-preserving triangle soup.
     ///
