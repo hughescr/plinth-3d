@@ -971,7 +971,6 @@ dependencies = [
  "plinth-core",
  "plinth-decimate",
  "plinth-mesh",
- "plinth-metrics",
  "plinth-orient",
  "plinth-solid",
  "scirs2-core",

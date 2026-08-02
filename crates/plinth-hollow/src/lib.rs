@@ -13,17 +13,16 @@
 
 use fast_surface_nets::ndshape::RuntimeShape;
 use fast_surface_nets::{surface_nets, SurfaceNetsBuffer};
-use geom_kernel::{NativeSurface, NativeSurfaceConfig};
+use geom_kernel::{NativeSurface, NativeSurfaceConfig, NativeSurfaceMemoryEstimate};
 use plinth_core::{m0_constants, Finite, M0ConstantsError, PrinterProfile};
 use plinth_mesh::{
-    build_face_topology, triage_components, validate_face_topology, Mesh, StrictMeshAuditError,
-    TopologyError, TopologyValidationError, TriageError, WeldPolicy,
+    build_face_topology, certify_closed_components, triage_components, validate_face_topology,
+    Mesh, StrictMeshAuditError, TopologyError, TopologyValidationError, TriageError, WeldPolicy,
 };
-use plinth_metrics::{analyze_topology, Mesh as AuditMesh, ShellWinding};
 use plinth_orient::OrientationHistory;
 use plinth_solid::{ManifoldBackend, Mesh as SolidMesh, SolidBoolean, SolidError};
 use scirs2_core::ndarray::Array3;
-use scirs2_ndimage::{distance_transform_edt, label, Connectivity};
+use scirs2_ndimage::{distance_transform_edt, morphology3d::label3d};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -143,6 +142,7 @@ pub struct HollowSettings {
     bulk_min_mm: Finite,
     save_min_mm3: Finite,
     save_min_fraction: Finite,
+    volume_balance_rel_tol: Finite,
 }
 
 impl HollowSettings {
@@ -155,6 +155,10 @@ impl HollowSettings {
             placeholders.hollow_bulk_min_mm().diagnostic().get(),
             placeholders.hollow_save_min_ml().diagnostic().get() * 1000.0,
             placeholders.hollow_save_min_frac().diagnostic().get(),
+            placeholders
+                .hollow_volume_balance_rel_tol()
+                .diagnostic()
+                .get(),
         )
     }
 
@@ -182,6 +186,11 @@ impl HollowSettings {
     pub const fn save_min_fraction(self) -> Finite {
         self.save_min_fraction
     }
+
+    #[must_use]
+    pub const fn volume_balance_rel_tol(self) -> Finite {
+        self.volume_balance_rel_tol
+    }
 }
 
 fn finite_settings(
@@ -190,6 +199,7 @@ fn finite_settings(
     bulk_min_mm: f64,
     save_min_mm3: f64,
     save_min_fraction: f64,
+    volume_balance_rel_tol: f64,
 ) -> Result<HollowSettings, HollowError> {
     let finite = |value| Finite::new(value).map_err(|_| HollowError::InvalidArithmetic);
     Ok(HollowSettings {
@@ -198,7 +208,112 @@ fn finite_settings(
         bulk_min_mm: finite(bulk_min_mm)?,
         save_min_mm3: finite(save_min_mm3)?,
         save_min_fraction: finite(save_min_fraction)?,
+        volume_balance_rel_tol: finite(volume_balance_rel_tol)?,
     })
+}
+
+const DEFAULT_HOLLOW_PEAK_BYTES: usize = 1024 * 1024 * 1024;
+const DEFAULT_QUERY_WORKING_BYTES: usize = 8 * 1024 * 1024;
+const QUERY_BYTES_PER_POINT: usize = std::mem::size_of::<[f64; 3]>()
+    + std::mem::size_of::<bool>()
+    + std::mem::size_of::<f64>()
+    + std::mem::size_of::<i64>();
+
+/// Caller-selected resource envelope for H0. `max_peak_bytes` covers the
+/// complete conservative phase peak; `query_working_bytes` bounds each
+/// deterministic gather/batch/scatter native query chunk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HollowResourceLimits {
+    max_peak_bytes: usize,
+    query_working_bytes: usize,
+}
+
+impl HollowResourceLimits {
+    pub fn new(max_peak_bytes: usize, query_working_bytes: usize) -> Result<Self, HollowError> {
+        if max_peak_bytes == 0 || query_working_bytes < QUERY_BYTES_PER_POINT {
+            return Err(HollowError::InvalidResourceLimits);
+        }
+        Ok(Self {
+            max_peak_bytes,
+            query_working_bytes,
+        })
+    }
+
+    #[must_use]
+    pub const fn production() -> Self {
+        Self {
+            max_peak_bytes: DEFAULT_HOLLOW_PEAK_BYTES,
+            query_working_bytes: DEFAULT_QUERY_WORKING_BYTES,
+        }
+    }
+
+    #[must_use]
+    pub const fn max_peak_bytes(self) -> usize {
+        self.max_peak_bytes
+    }
+
+    #[must_use]
+    pub const fn query_working_bytes(self) -> usize {
+        self.query_working_bytes
+    }
+}
+
+/// Conservative checked allocation accounting for one H0 invocation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HollowResourceEstimate {
+    voxel_count: usize,
+    query_batch_points: usize,
+    grid_coordinate_bytes: usize,
+    occupancy_bytes: usize,
+    edt_peak_bytes: usize,
+    label_peak_bytes: usize,
+    surface_peak_bytes: usize,
+    native_kernel_peak_bytes: usize,
+    output_upper_bound_bytes: usize,
+    peak_bytes: usize,
+}
+
+impl HollowResourceEstimate {
+    #[must_use]
+    pub const fn voxel_count(self) -> usize {
+        self.voxel_count
+    }
+    #[must_use]
+    pub const fn query_batch_points(self) -> usize {
+        self.query_batch_points
+    }
+    #[must_use]
+    pub const fn grid_coordinate_bytes(self) -> usize {
+        self.grid_coordinate_bytes
+    }
+    #[must_use]
+    pub const fn occupancy_bytes(self) -> usize {
+        self.occupancy_bytes
+    }
+    #[must_use]
+    pub const fn edt_peak_bytes(self) -> usize {
+        self.edt_peak_bytes
+    }
+    #[must_use]
+    pub const fn label_peak_bytes(self) -> usize {
+        self.label_peak_bytes
+    }
+    #[must_use]
+    pub const fn surface_peak_bytes(self) -> usize {
+        self.surface_peak_bytes
+    }
+    #[must_use]
+    pub const fn native_kernel_peak_bytes(self) -> usize {
+        self.native_kernel_peak_bytes
+    }
+    #[must_use]
+    pub const fn output_upper_bound_bytes(self) -> usize {
+        self.output_upper_bound_bytes
+    }
+    #[must_use]
+    pub const fn peak_bytes(self) -> usize {
+        self.peak_bytes
+    }
 }
 
 /// Evidence that describes the sole inner cavity retained by H0.
@@ -208,6 +323,7 @@ pub struct CavityEvidence {
     frozen_voxel_pitch_mm: Finite,
     cavity_volume_mm3: Finite,
     source_volume_mm3: Finite,
+    resources: HollowResourceEstimate,
 }
 
 impl CavityEvidence {
@@ -229,6 +345,11 @@ impl CavityEvidence {
     #[must_use]
     pub const fn source_volume_mm3(self) -> Finite {
         self.source_volume_mm3
+    }
+
+    #[must_use]
+    pub const fn resources(self) -> HollowResourceEstimate {
+        self.resources
     }
 }
 
@@ -261,7 +382,7 @@ impl ShellCandidate {
 /// mesh. H0 does not add drains and therefore does not expose `run`.
 pub fn create_shell(input: Mesh) -> Result<ShellCandidate, HollowError> {
     let settings = HollowSettings::from_registered_constants()?;
-    create_shell_with_settings(input, settings)
+    create_shell_with_resources(input, settings, HollowResourceLimits::production())
 }
 
 /// Testable H0 implementation with explicit settings. Production callers use
@@ -270,23 +391,30 @@ pub fn create_shell_with_settings(
     input: Mesh,
     settings: HollowSettings,
 ) -> Result<ShellCandidate, HollowError> {
+    create_shell_with_resources(input, settings, HollowResourceLimits::production())
+}
+
+/// H0 with an explicit caller-owned resource envelope.
+pub fn create_shell_with_resources(
+    input: Mesh,
+    settings: HollowSettings,
+    limits: HollowResourceLimits,
+) -> Result<ShellCandidate, HollowError> {
     let triaged = triage_components(&input, WeldPolicy::ExactBits)?;
     let source = triaged.into_mesh();
     validate_closed_mesh(&source)?;
     validate_printable_bounds(&source)?;
     let source_volume_mm3 = source_volume_mm3(&source)?;
-    let grid = voxelize_filled(&source, settings.voxel_pitch_mm.get())?;
-    let (edt, _) = distance_transform_edt(
-        &grid.material.clone().into_dyn(),
-        Some(&[grid.pitch; 3]),
-        true,
-        false,
+    let spec = grid_spec(&source, settings.voxel_pitch_mm.get())?;
+    let native = NativeSurface::estimate_index_memory_from_indexed(
+        source.verts(),
+        source.tris(),
+        spec.pitch,
     )
-    .map_err(|_| HollowError::VoxelStack)?;
-    let edt: Array3<f64> = edt
-        .ok_or(HollowError::VoxelStack)?
-        .into_dimensionality()
-        .map_err(|_| HollowError::VoxelStack)?;
+    .map_err(|_| HollowError::Kernel)?;
+    let resources = resource_estimate(&source, spec, native, limits)?;
+    let grid = voxelize_filled(&source, spec, native, resources.query_batch_points)?;
+    let edt = frozen_distance_transform(&grid.material, grid.pitch)?;
     let bulk_mm = 2.0 * edt.iter().copied().fold(0.0_f64, f64::max);
     if !bulk_mm.is_finite() {
         return Err(HollowError::InvalidArithmetic);
@@ -295,8 +423,10 @@ pub fn create_shell_with_settings(
         return Err(HollowError::IneligibleBelowBulk);
     }
     let cavity_mask = edt.mapv(|distance_mm| distance_mm > settings.wall_thickness_mm.get());
-    let (labels, label_count) = label(&cavity_mask, None, Some(Connectivity::Face), None)
-        .map_err(|_| HollowError::VoxelStack)?;
+    drop(edt);
+    let (labels, label_count) =
+        label3d(cavity_mask.view(), 6).map_err(|_| HollowError::VoxelStack)?;
+    drop(cavity_mask);
     if label_count == 0 {
         return Err(HollowError::IneligibleNoCavity);
     }
@@ -317,17 +447,24 @@ pub fn create_shell_with_settings(
     }
 
     let inner = marching_cavity(&main, grid.origin, grid.pitch)?;
+    drop(main);
     let shell = ManifoldBackend
         .difference(&[to_solid(&source)?, to_solid(&inner)?])
         .map_err(HollowError::Solid)?;
-    let mesh = from_solid(shell)?;
-    validate_shell_topology(&mesh)?;
+    let mesh = orient_boolean_cavity(from_solid(shell)?)?;
+    validate_shell_topology(
+        &mesh,
+        source_volume_mm3,
+        cavity_volume_mm3,
+        settings.volume_balance_rel_tol.get(),
+    )?;
     validate_printable_bounds(&mesh)?;
     let cavity = CavityEvidence {
         wall_thickness_mm: settings.wall_thickness_mm,
         frozen_voxel_pitch_mm: settings.voxel_pitch_mm,
         cavity_volume_mm3: finite(cavity_volume_mm3)?,
         source_volume_mm3: finite(source_volume_mm3)?,
+        resources,
     };
     Ok(ShellCandidate { mesh, cavity })
 }
@@ -345,53 +482,92 @@ fn validate_closed_mesh(mesh: &Mesh) -> Result<(), HollowError> {
     Ok(())
 }
 
-fn validate_shell_topology(mesh: &Mesh) -> Result<(), HollowError> {
+fn validate_shell_topology(
+    mesh: &Mesh,
+    source_volume_mm3: f64,
+    cavity_volume_mm3: f64,
+    relative_tolerance: f64,
+) -> Result<(), HollowError> {
     validate_closed_mesh(mesh)?;
-    let audit = audit_mesh(mesh)?;
-    let analysis = analyze_topology(&audit).map_err(|_| HollowError::InvalidShellTopology)?;
-    let negative = analysis
-        .shells
+    let topology =
+        build_face_topology(mesh, WeldPolicy::ExactBits).map_err(HollowError::Topology)?;
+    let certificate = certify_closed_components(mesh, &topology).map_err(HollowError::Topology)?;
+    let negative = certificate
+        .components()
         .iter()
-        .filter(|shell| shell.signed_volume < 0.0)
+        .filter(|component| component.signed_volume_mm3() < 0.0)
         .count();
-    if !analysis.boundary_edges.is_empty()
-        || !analysis.nonmanifold_edges.is_empty()
-        || !analysis.inconsistent_winding_faces.is_empty()
-        || analysis.cavities != 1
-        || negative != 1
-        || analysis.shells.len() < 2
+    if negative != 1
+        || certificate.components().len() < 2
+        || certificate
+            .components()
+            .iter()
+            .any(|component| component.signed_volume_mm3() == 0.0)
     {
         return Err(HollowError::InvalidShellTopology);
+    }
+    match triage_components(mesh, WeldPolicy::ExactBits) {
+        Err(TriageError::PreHollowed(refusal)) if refusal.cavity_components().len() == 1 => {}
+        _ => return Err(HollowError::InvalidShellTopology),
+    }
+    let actual_material_mm3 = certificate.signed_volume_mm3();
+    let expected_material_mm3 = source_volume_mm3 - cavity_volume_mm3;
+    let tolerance_mm3 = source_volume_mm3 * relative_tolerance;
+    if !actual_material_mm3.is_finite()
+        || !expected_material_mm3.is_finite()
+        || !tolerance_mm3.is_finite()
+        || (actual_material_mm3 - expected_material_mm3).abs() > tolerance_mm3
+    {
+        return Err(HollowError::BooleanVolumeMismatch {
+            actual_material_mm3,
+            expected_material_mm3,
+            tolerance_mm3,
+        });
     }
     Ok(())
 }
 
-fn source_volume_mm3(mesh: &Mesh) -> Result<f64, HollowError> {
-    let analysis =
-        analyze_topology(&audit_mesh(mesh)?).map_err(|_| HollowError::NotClosedOrOriented)?;
-    if analysis.boundary_edges.is_empty()
-        && analysis.nonmanifold_edges.is_empty()
-        && analysis.inconsistent_winding_faces.is_empty()
-        && analysis.shells.iter().all(|shell| {
-            shell.signed_volume > 0.0
-                && matches!(shell.winding, ShellWinding::Outward { ref faces_requiring_flip } if faces_requiring_flip.is_empty())
+fn orient_boolean_cavity(mesh: Mesh) -> Result<Mesh, HollowError> {
+    let topology =
+        build_face_topology(&mesh, WeldPolicy::ExactBits).map_err(HollowError::Topology)?;
+    validate_face_topology(&topology).map_err(HollowError::TopologyValidation)?;
+    let cavity_component = match triage_components(&mesh, WeldPolicy::ExactBits) {
+        Err(TriageError::PreHollowed(refusal)) if refusal.cavity_components().len() == 1 => {
+            u32::try_from(refusal.cavity_components()[0].component_id())
+                .map_err(|_| HollowError::InvalidShellTopology)?
+        }
+        _ => return Err(HollowError::InvalidShellTopology),
+    };
+    let triangles = mesh
+        .tris()
+        .iter()
+        .zip(topology.component_ids())
+        .map(|(triangle, component)| {
+            if *component == cavity_component {
+                [triangle[0], triangle[2], triangle[1]]
+            } else {
+                *triangle
+            }
         })
+        .collect();
+    Mesh::new(mesh.verts().to_vec(), triangles).map_err(HollowError::OutputMesh)
+}
+
+fn source_volume_mm3(mesh: &Mesh) -> Result<f64, HollowError> {
+    let topology =
+        build_face_topology(mesh, WeldPolicy::ExactBits).map_err(HollowError::Topology)?;
+    let certificate = certify_closed_components(mesh, &topology).map_err(HollowError::Topology)?;
+    if certificate
+        .components()
+        .iter()
+        .all(|component| component.signed_volume_mm3() > 0.0)
     {
-        let volume = analysis.shells.iter().map(|shell| shell.signed_volume).sum::<f64>();
+        let volume = certificate.signed_volume_mm3();
         if volume.is_finite() && volume > 0.0 {
             return Ok(volume);
         }
     }
     Err(HollowError::NotClosedOrOriented)
-}
-
-fn audit_mesh(mesh: &Mesh) -> Result<AuditMesh, HollowError> {
-    let triangles = mesh
-        .tris()
-        .iter()
-        .map(|triangle| triangle.map(|index| index as usize))
-        .collect();
-    AuditMesh::new(mesh.verts().to_vec(), triangles).map_err(|_| HollowError::InvalidShellTopology)
 }
 
 struct VoxelGrid {
@@ -400,7 +576,15 @@ struct VoxelGrid {
     material: Array3<bool>,
 }
 
-fn voxelize_filled(mesh: &Mesh, pitch: f64) -> Result<VoxelGrid, HollowError> {
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct GridSpec {
+    origin: [f64; 3],
+    dims: [usize; 3],
+    pitch: f64,
+    count: usize,
+}
+
+fn grid_spec(mesh: &Mesh, pitch: f64) -> Result<GridSpec, HollowError> {
     if !pitch.is_finite() || pitch <= 0.0 {
         return Err(HollowError::InvalidArithmetic);
     }
@@ -408,12 +592,25 @@ fn voxelize_filled(mesh: &Mesh, pitch: f64) -> Result<VoxelGrid, HollowError> {
     let mut origin = [0.0; 3];
     let mut dims = [0_usize; 3];
     for axis in 0..3 {
-        origin[axis] = (low[axis] / pitch).floor() * pitch - pitch;
-        let span = high[axis] - origin[axis] + pitch;
-        if !origin[axis].is_finite() || !span.is_finite() || span <= 0.0 {
+        let low_index = low[axis] / pitch;
+        let high_index = high[axis] / pitch;
+        if !low_index.is_finite() || !high_index.is_finite() {
+            return Err(HollowError::VoxelGridTooLarge);
+        }
+        origin[axis] = low_index.round() * pitch;
+        let end = high_index.round() * pitch;
+        let span = end - origin[axis];
+        if !origin[axis].is_finite() || !end.is_finite() || !span.is_finite() || span < 0.0 {
             return Err(HollowError::InvalidArithmetic);
         }
-        let axis_samples = (span / pitch).ceil() as usize;
+        let axis_samples_f64 = (span / pitch).round();
+        if !axis_samples_f64.is_finite()
+            || axis_samples_f64 < 0.0
+            || axis_samples_f64 > (u32::MAX - 1) as f64
+        {
+            return Err(HollowError::VoxelGridTooLarge);
+        }
+        let axis_samples = axis_samples_f64 as usize;
         dims[axis] = axis_samples
             .checked_add(1)
             .ok_or(HollowError::VoxelGridTooLarge)?;
@@ -425,38 +622,171 @@ fn voxelize_filled(mesh: &Mesh, pitch: f64) -> Result<VoxelGrid, HollowError> {
         .checked_mul(dims[1])
         .and_then(|value| value.checked_mul(dims[2]))
         .ok_or(HollowError::VoxelGridTooLarge)?;
-    let mut points = Vec::with_capacity(count);
-    for z in 0..dims[2] {
-        for y in 0..dims[1] {
-            for x in 0..dims[0] {
-                points.push([
-                    origin[0] + x as f64 * pitch,
-                    origin[1] + y as f64 * pitch,
-                    origin[2] + z as f64 * pitch,
-                ]);
-            }
-        }
+    Ok(GridSpec {
+        origin,
+        dims,
+        pitch,
+        count,
+    })
+}
+
+fn checked_scale(count: usize, bytes: usize) -> Result<usize, HollowError> {
+    count
+        .checked_mul(bytes)
+        .ok_or(HollowError::ResourceAccountingOverflow)
+}
+
+fn checked_sum(values: &[usize]) -> Result<usize, HollowError> {
+    values.iter().try_fold(0_usize, |total, value| {
+        total
+            .checked_add(*value)
+            .ok_or(HollowError::ResourceAccountingOverflow)
+    })
+}
+
+fn resource_estimate(
+    mesh: &Mesh,
+    spec: GridSpec,
+    native: NativeSurfaceMemoryEstimate,
+    limits: HollowResourceLimits,
+) -> Result<HollowResourceEstimate, HollowError> {
+    let query_batch_points = spec
+        .count
+        .min(limits.query_working_bytes / QUERY_BYTES_PER_POINT)
+        .max(1);
+    let grid_coordinate_bytes = checked_scale(query_batch_points, std::mem::size_of::<[f64; 3]>())?;
+    let occupancy_bytes = checked_scale(spec.count, std::mem::size_of::<bool>())?;
+    let query_buffers = checked_scale(query_batch_points, QUERY_BYTES_PER_POINT)?;
+    let query_peak = checked_sum(&[native.retained_bytes(), occupancy_bytes, query_buffers])?;
+
+    // Source occupancy + EDT input clone + squared and final f64 distance
+    // arrays, plus a conservative line-transform scratch upper bound.
+    let edt_arrays = checked_scale(
+        spec.count,
+        2 * std::mem::size_of::<bool>() + 2 * std::mem::size_of::<f64>(),
+    )?;
+    let edt_line = checked_scale(
+        *spec.dims.iter().max().unwrap_or(&0),
+        4 * std::mem::size_of::<usize>().max(std::mem::size_of::<f64>()),
+    )?;
+    let edt_peak_bytes = checked_sum(&[edt_arrays, edt_line])?;
+
+    // label3d's mask, provisional labels, union-find parent/rank, root map,
+    // and final i32 labels. This intentionally assumes one provisional label
+    // per voxel.
+    let label_peak_bytes = checked_scale(
+        spec.count,
+        std::mem::size_of::<bool>() + 3 * std::mem::size_of::<usize>() + std::mem::size_of::<i32>(),
+    )?;
+
+    // Surface Nets worst case: one surface vertex per cell, up to three quads
+    // (six triangles) per vertex, all library scratch/output buffers, the f32
+    // SDF, the bool mask, and simultaneous f64/u32 Mesh conversion buffers.
+    let surface_lattice_count = spec.dims.iter().try_fold(1_usize, |total, dimension| {
+        dimension
+            .checked_add(2)
+            .and_then(|padded| total.checked_mul(padded))
+            .ok_or(HollowError::ResourceAccountingOverflow)
+    })?;
+    let surface_peak_bytes = checked_scale(surface_lattice_count, 224)?;
+    let source_mesh_bytes = checked_sum(&[
+        checked_scale(mesh.verts().len(), std::mem::size_of::<[f64; 3]>())?,
+        checked_scale(mesh.tris().len(), std::mem::size_of::<[u32; 3]>())?,
+    ])?;
+    let inner_mesh_upper = checked_scale(
+        surface_lattice_count,
+        std::mem::size_of::<[f64; 3]>() + 6 * std::mem::size_of::<[u32; 3]>(),
+    )?;
+    let output_upper_bound_bytes = checked_sum(&[source_mesh_bytes, inner_mesh_upper])?;
+    // Rust source/inner meshes, FFI conversion, native Boolean result, and
+    // returned Mesh can coexist at the boundary.
+    let boolean_peak = checked_scale(output_upper_bound_bytes, 3)?;
+    let peak_bytes = [
+        native.peak_bytes(),
+        query_peak,
+        edt_peak_bytes,
+        label_peak_bytes,
+        surface_peak_bytes,
+        boolean_peak,
+    ]
+    .into_iter()
+    .max()
+    .ok_or(HollowError::ResourceAccountingOverflow)?;
+    let estimate = HollowResourceEstimate {
+        voxel_count: spec.count,
+        query_batch_points,
+        grid_coordinate_bytes,
+        occupancy_bytes,
+        edt_peak_bytes,
+        label_peak_bytes,
+        surface_peak_bytes,
+        native_kernel_peak_bytes: native.peak_bytes(),
+        output_upper_bound_bytes,
+        peak_bytes,
+    };
+    if estimate.peak_bytes > limits.max_peak_bytes {
+        Err(HollowError::ResourceLimitExceeded {
+            estimate,
+            cap_bytes: limits.max_peak_bytes,
+        })
+    } else {
+        Ok(estimate)
     }
+}
+
+fn voxelize_filled(
+    mesh: &Mesh,
+    spec: GridSpec,
+    native: NativeSurfaceMemoryEstimate,
+    query_batch_points: usize,
+) -> Result<VoxelGrid, HollowError> {
     let surface = NativeSurface::from_indexed(
         mesh.verts(),
         mesh.tris(),
         NativeSurfaceConfig {
-            grid_pitch_mm: pitch,
-            max_grid_bytes: usize::MAX,
+            grid_pitch_mm: spec.pitch,
+            max_grid_bytes: native.max_axis_grid_bytes(),
         },
     )
     .map_err(|_| HollowError::Kernel)?;
-    let inside = surface.inside(&points);
-    let material = Array3::from_shape_vec((dims[2], dims[1], dims[0]), inside)
+    let boundary_radius = spec.pitch / 2.0_f64.sqrt();
+    let mut occupancy = Vec::with_capacity(spec.count);
+    let plane = spec.dims[0]
+        .checked_mul(spec.dims[1])
+        .ok_or(HollowError::VoxelGridTooLarge)?;
+    for start in (0..spec.count).step_by(query_batch_points) {
+        let end = start.saturating_add(query_batch_points).min(spec.count);
+        let mut points = Vec::with_capacity(end - start);
+        for flat in start..end {
+            let z = flat / plane;
+            let within = flat % plane;
+            let y = within / spec.dims[0];
+            let x = within % spec.dims[0];
+            points.push([
+                spec.origin[0] + x as f64 * spec.pitch,
+                spec.origin[1] + y as f64 * spec.pitch,
+                spec.origin[2] + z as f64 * spec.pitch,
+            ]);
+        }
+        let inside = surface.inside(&points);
+        let (distances, _triangles) = surface.query(&points, boundary_radius);
+        occupancy.extend(
+            inside
+                .into_iter()
+                .zip(distances)
+                .map(|(inside, distance)| inside || distance <= boundary_radius),
+        );
+    }
+    let material = Array3::from_shape_vec((spec.dims[2], spec.dims[1], spec.dims[0]), occupancy)
         .map_err(|_| HollowError::VoxelGridTooLarge)?;
     Ok(VoxelGrid {
-        origin,
-        pitch,
+        origin: spec.origin,
+        pitch: spec.pitch,
         material,
     })
 }
 
-fn largest_label(labels: &Array3<usize>, label_count: usize) -> Result<usize, HollowError> {
+fn largest_label(labels: &Array3<i32>, label_count: usize) -> Result<i32, HollowError> {
     let mut counts = vec![
         0_usize;
         label_count
@@ -464,10 +794,11 @@ fn largest_label(labels: &Array3<usize>, label_count: usize) -> Result<usize, Ho
             .ok_or(HollowError::VoxelGridTooLarge)?
     ];
     for label in labels {
-        if *label > label_count {
+        let label = usize::try_from(*label).map_err(|_| HollowError::VoxelStack)?;
+        if label > label_count {
             return Err(HollowError::VoxelStack);
         }
-        counts[*label] = counts[*label]
+        counts[label] = counts[label]
             .checked_add(1)
             .ok_or(HollowError::VoxelGridTooLarge)?;
     }
@@ -480,8 +811,31 @@ fn largest_label(labels: &Array3<usize>, label_count: usize) -> Result<usize, Ho
     if *count == 0 {
         Err(HollowError::VoxelStack)
     } else {
-        Ok(label)
+        i32::try_from(label).map_err(|_| HollowError::VoxelGridTooLarge)
     }
+}
+
+fn frozen_distance_transform(
+    material: &Array3<bool>,
+    pitch: f64,
+) -> Result<Array3<f64>, HollowError> {
+    if material.iter().all(|filled| *filled) {
+        // SciPy's frozen all-foreground behavior measures from the implicit
+        // background sample at (-1, 0, 0); scirs2 otherwise returns infinity.
+        return Ok(Array3::from_shape_fn(material.raw_dim(), |(z, y, x)| {
+            let dz = z as f64 + 1.0;
+            let dy = y as f64;
+            let dx = x as f64;
+            pitch * dz.hypot(dy).hypot(dx)
+        }));
+    }
+    let (distances, _) =
+        distance_transform_edt(&material.clone().into_dyn(), Some(&[pitch; 3]), true, false)
+            .map_err(|_| HollowError::VoxelStack)?;
+    distances
+        .ok_or(HollowError::VoxelStack)?
+        .into_dimensionality()
+        .map_err(|_| HollowError::VoxelStack)
 }
 
 fn marching_cavity(mask: &Array3<bool>, origin: [f64; 3], pitch: f64) -> Result<Mesh, HollowError> {
@@ -489,17 +843,33 @@ fn marching_cavity(mask: &Array3<bool>, origin: [f64; 3], pitch: f64) -> Result<
         .shape()
         .try_into()
         .map_err(|_| HollowError::VoxelStack)?;
+    let padded = [
+        nx.checked_add(2).ok_or(HollowError::VoxelGridTooLarge)?,
+        ny.checked_add(2).ok_or(HollowError::VoxelGridTooLarge)?,
+        nz.checked_add(2).ok_or(HollowError::VoxelGridTooLarge)?,
+    ];
     let dimensions = [
-        u32::try_from(nx).map_err(|_| HollowError::VoxelGridTooLarge)?,
-        u32::try_from(ny).map_err(|_| HollowError::VoxelGridTooLarge)?,
-        u32::try_from(nz).map_err(|_| HollowError::VoxelGridTooLarge)?,
+        u32::try_from(padded[0]).map_err(|_| HollowError::VoxelGridTooLarge)?,
+        u32::try_from(padded[1]).map_err(|_| HollowError::VoxelGridTooLarge)?,
+        u32::try_from(padded[2]).map_err(|_| HollowError::VoxelGridTooLarge)?,
     ];
     let shape = RuntimeShape::<u32, 3>::new(dimensions);
     let max = dimensions.map(|value| value - 1);
-    let sdf = mask
-        .iter()
-        .map(|inside| if *inside { -1.0_f32 } else { 1.0_f32 })
-        .collect::<Vec<_>>();
+    let padded_count = padded[0]
+        .checked_mul(padded[1])
+        .and_then(|value| value.checked_mul(padded[2]))
+        .ok_or(HollowError::VoxelGridTooLarge)?;
+    let mut sdf = vec![1.0_f32; padded_count];
+    for z in 0..nz {
+        for y in 0..ny {
+            for x in 0..nx {
+                if mask[[z, y, x]] {
+                    let index = (z + 1) * padded[1] * padded[0] + (y + 1) * padded[0] + x + 1;
+                    sdf[index] = -1.0;
+                }
+            }
+        }
+    }
     let mut surface = SurfaceNetsBuffer::default();
     surface_nets(&sdf, &shape, [0; 3], max, &mut surface);
     let vertices = surface
@@ -507,9 +877,9 @@ fn marching_cavity(mask: &Array3<bool>, origin: [f64; 3], pitch: f64) -> Result<
         .into_iter()
         .map(|[x, y, z]| {
             [
-                origin[0] + f64::from(x) * pitch,
-                origin[1] + f64::from(y) * pitch,
-                origin[2] + f64::from(z) * pitch,
+                origin[0] + (f64::from(x) - 1.0) * pitch,
+                origin[1] + (f64::from(y) - 1.0) * pitch,
+                origin[2] + (f64::from(z) - 1.0) * pitch,
             ]
         })
         .collect();
@@ -523,7 +893,9 @@ fn marching_cavity(mask: &Array3<bool>, origin: [f64; 3], pitch: f64) -> Result<
             let a = indices[0];
             let b = indices[1];
             let c = indices[2];
-            Ok::<[u32; 3], HollowError>([a, b, c])
+            // `fast_surface_nets` orients this negative-inside level set toward
+            // the filled cavity. Manifold operands must use outward winding.
+            Ok::<[u32; 3], HollowError>([a, c, b])
         })
         .collect::<Result<Vec<_>, _>>()?;
     Mesh::new(vertices, triangles).map_err(HollowError::OutputMesh)
@@ -618,6 +990,15 @@ pub enum HollowError {
     InvalidArithmetic,
     #[error("the printable voxel grid exceeds addressable storage")]
     VoxelGridTooLarge,
+    #[error("resource limits require a positive peak and at least one query point")]
+    InvalidResourceLimits,
+    #[error("checked H0 resource accounting overflowed")]
+    ResourceAccountingOverflow,
+    #[error("H0 resource estimate exceeds caller cap {cap_bytes}")]
+    ResourceLimitExceeded {
+        estimate: HollowResourceEstimate,
+        cap_bytes: usize,
+    },
     #[error("geom-kernel could not construct the batched voxelization surface")]
     Kernel,
     #[error("the established EDT/label/marching-surface adapter rejected the voxel field")]
@@ -640,6 +1021,12 @@ pub enum HollowError {
         "native shell did not contain one negative cavity enclosed by positive outer material"
     )]
     InvalidShellTopology,
+    #[error("Boolean material volume {actual_material_mm3} differs from expected {expected_material_mm3} beyond {tolerance_mm3} mm3")]
+    BooleanVolumeMismatch {
+        actual_material_mm3: f64,
+        expected_material_mm3: f64,
+        tolerance_mm3: f64,
+    },
     #[error("cavity extraction failed")]
     CavityExtractionFailed,
     #[error("drain geometry could not be constructed")]
@@ -653,10 +1040,97 @@ mod tests {
     use super::*;
     use plinth_core::{ContentDigest, NonNegativeFinite, UnitFraction};
     use plinth_decimate::DecimationReport;
-    use plinth_mesh::{make_box, mesh_fingerprint};
+    use plinth_mesh::{load_binary_stl, make_box, mesh_fingerprint};
     use plinth_orient::{BaselineSelection, OrientationReport, RigidTransform};
     use std::path::PathBuf;
     use std::sync::{Mutex, OnceLock};
+
+    fn frozen_mesh(file: &str) -> Mesh {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/baseline")
+            .join(file);
+        load_binary_stl(path, WeldPolicy::None).expect("committed frozen STL")
+    }
+
+    #[derive(Debug)]
+    struct Characterization {
+        spec: GridSpec,
+        bulk_mm: f64,
+        label_count: usize,
+        cavity_voxels: usize,
+    }
+
+    fn characterize(input: Mesh) -> (usize, Characterization) {
+        let triaged = triage_components(&input, WeldPolicy::ExactBits).expect("frozen triage");
+        let components = triaged.summary().component_count();
+        let source = triaged.into_mesh();
+        let settings = HollowSettings::from_registered_constants().expect("M0 settings");
+        let spec = grid_spec(&source, settings.voxel_pitch_mm().get()).expect("grid spec");
+        let native = NativeSurface::estimate_index_memory_from_indexed(
+            source.verts(),
+            source.tris(),
+            spec.pitch,
+        )
+        .expect("native estimate");
+        let resources =
+            resource_estimate(&source, spec, native, HollowResourceLimits::production())
+                .expect("resource preflight");
+        let grid = voxelize_filled(&source, spec, native, resources.query_batch_points())
+            .expect("bounded voxelization");
+        let edt = frozen_distance_transform(&grid.material, grid.pitch).expect("EDT");
+        let bulk_mm = 2.0 * edt.iter().copied().fold(0.0_f64, f64::max);
+        let cavity = edt.mapv(|distance| distance > settings.wall_thickness_mm().get());
+        let (labels, label_count) = label3d(cavity.view(), 6).expect("6-connected labels");
+        let largest =
+            (label_count > 0).then(|| largest_label(&labels, label_count).expect("largest label"));
+        let cavity_voxels = largest.map_or(0, |label| {
+            labels
+                .iter()
+                .filter(|candidate| **candidate == label)
+                .count()
+        });
+        (
+            components,
+            Characterization {
+                spec,
+                bulk_mm,
+                label_count,
+                cavity_voxels,
+            },
+        )
+    }
+
+    #[test]
+    fn frozen_oracle_characterizes_transforms_boundaries_eligibility_and_extra_body() {
+        // Record of record: corpus/baseline/Sphere.pipeline.json.
+        let (sphere_components, sphere) =
+            characterize(frozen_mesh("Sphere.prepped.oriented-solid.stl"));
+        assert_eq!(sphere_components, 1);
+        assert_eq!(sphere.spec.dims, [41, 41, 41]);
+        assert_eq!(sphere.spec.origin, [-10.0, -10.0, 0.0]);
+        assert!((sphere.bulk_mm - 20.6).abs() <= 0.1);
+        assert_eq!(sphere.label_count, 1);
+        assert!((sphere.cavity_voxels as f64 * 0.125 / 1000.0 - 2.1).abs() <= 0.05);
+
+        // Record of record: make_box is the frozen no-background boundary case.
+        let (box_components, box_case) =
+            characterize(frozen_mesh("make_box.prepped.oriented-solid.stl"));
+        assert_eq!(box_components, 1);
+        assert_eq!(box_case.spec.dims, [21, 21, 21]);
+        assert_eq!(box_case.spec.origin, [-5.0, -5.0, 0.0]);
+        assert!((box_case.bulk_mm - 35.2).abs() <= 0.1, "{box_case:?}");
+        assert_eq!(box_case.label_count, 1);
+        assert!((box_case.cavity_voxels as f64 * 0.125 / 1000.0 - 1.1).abs() <= 0.1);
+
+        // Record of record: make_overhang_table.pipeline.json preserves four
+        // authored extra bodies. The fixed Rust characterization remains well
+        // below the registered 10mm eligibility threshold.
+        let (table_components, table) =
+            characterize(frozen_mesh("make_overhang_table.prepped.stl"));
+        assert_eq!(table_components, 5);
+        assert!((table.bulk_mm - 5.0).abs() <= f64::EPSILON);
+        assert!(table.bulk_mm < 10.0);
+    }
 
     #[test]
     fn solid_fallback_moves_one_mesh_and_is_visible_in_history() {
@@ -735,24 +1209,22 @@ mod tests {
 
     #[test]
     fn registered_shell_is_closed_with_one_retained_2_5mm_cavity() {
-        let source = make_box([50.0, 50.0, 50.0], [0.0, 0.0, 0.0]).expect("box fixture");
+        let source = frozen_mesh("Sphere.prepped.oriented-solid.stl");
         let source_bounds = bounds(&source);
-        let candidate = create_shell(source).expect("50mm solid is hollow-eligible");
+        let candidate = create_shell(source).expect("frozen sphere is hollow-eligible");
         let output = candidate.mesh();
         assert_eq!(
             bounds(output),
             source_bounds,
             "outer surface must not drift"
         );
-        validate_shell_topology(output).expect("closed, signed, enclosed cavity");
-        let analysis =
-            analyze_topology(&audit_mesh(output).expect("audit mesh")).expect("topology analysis");
-        assert_eq!(analysis.cavities, 1);
+        let topology = build_face_topology(output, WeldPolicy::ExactBits).expect("topology");
+        let certificate = certify_closed_components(output, &topology).expect("certificate");
         assert_eq!(
-            analysis
-                .shells
+            certificate
+                .components()
                 .iter()
-                .filter(|shell| shell.signed_volume < 0.0)
+                .filter(|component| component.signed_volume_mm3() < 0.0)
                 .count(),
             1,
             "the inner surface must be a negative, contained cavity"
@@ -760,7 +1232,7 @@ mod tests {
         assert_eq!(candidate.cavity().wall_thickness_mm().get(), 2.5);
         assert_eq!(candidate.cavity().frozen_voxel_pitch_mm().get(), 0.5);
         assert!(
-            (80_000.0..=100_000.0).contains(&candidate.cavity().cavity_volume_mm3().get()),
+            (1_900.0..=2_300.0).contains(&candidate.cavity().cavity_volume_mm3().get()),
             "the frozen 0.5mm EDT shell has the expected 2.5mm-wall cavity range"
         );
         assert!(
@@ -786,7 +1258,7 @@ mod tests {
             Err(HollowError::Triage(TriageError::PreHollowed(_)))
         ));
 
-        let thin = make_box([8.0, 8.0, 8.0], [0.0, 0.0, 0.0]).expect("thin fixture");
+        let thin = frozen_mesh("make_overhang_table.prepped.stl");
         assert!(matches!(
             create_shell(thin),
             Err(HollowError::IneligibleBelowBulk)
@@ -795,21 +1267,108 @@ mod tests {
 
     #[test]
     fn preserves_authored_extra_bodies_while_hollowing_only_the_largest_cavity() {
-        let main = make_box([50.0, 50.0, 50.0], [0.0, 0.0, 0.0]).expect("main fixture");
-        let detail = make_box([5.0, 5.0, 5.0], [35.0, 0.0, 0.0]).expect("detail fixture");
+        let main = frozen_mesh("Sphere.prepped.oriented-solid.stl");
+        let detail = make_box([2.0, 2.0, 2.0], [14.0, 0.0, 1.0]).expect("detail fixture");
         let candidate =
             create_shell(join(&main, &detail)).expect("extra authored body is retained");
-        let analysis = analyze_topology(&audit_mesh(candidate.mesh()).expect("audit mesh"))
-            .expect("topology analysis");
+        let topology =
+            build_face_topology(candidate.mesh(), WeldPolicy::ExactBits).expect("output topology");
+        let certificate =
+            certify_closed_components(candidate.mesh(), &topology).expect("output certificate");
         assert_eq!(
-            analysis.cavities, 1,
-            "only H0's largest eligible cavity is hollowed"
-        );
-        assert_eq!(
-            analysis.shells.len(),
+            certificate.components().len(),
             3,
             "outer body, authored detail, and one cavity remain"
         );
+    }
+
+    #[test]
+    fn resource_preflight_has_exact_cap_boundary_and_refuses_300mm_before_voxelization() {
+        let huge = make_box([300.0, 300.0, 300.0], [0.0, 0.0, 0.0]).expect("300mm box");
+        let error = create_shell(huge).expect_err("300mm at 0.5mm must preflight-refuse");
+        match error {
+            HollowError::ResourceLimitExceeded {
+                estimate,
+                cap_bytes,
+            } => {
+                assert_eq!(estimate.voxel_count(), 601_usize.pow(3));
+                assert!(estimate.peak_bytes() > cap_bytes);
+                assert!(estimate.grid_coordinate_bytes() <= DEFAULT_QUERY_WORKING_BYTES);
+                assert!(estimate.native_kernel_peak_bytes() > 0);
+                assert!(estimate.output_upper_bound_bytes() > 0);
+            }
+            other => panic!("unexpected 300mm refusal: {other}"),
+        }
+
+        let input = frozen_mesh("Sphere.prepped.oriented-solid.stl");
+        let source = triage_components(&input, WeldPolicy::ExactBits)
+            .expect("sphere triage")
+            .into_mesh();
+        let settings = HollowSettings::from_registered_constants().expect("M0 settings");
+        let spec = grid_spec(&source, settings.voxel_pitch_mm().get()).expect("grid spec");
+        let native = NativeSurface::estimate_index_memory_from_indexed(
+            source.verts(),
+            source.tris(),
+            spec.pitch,
+        )
+        .expect("native estimate");
+        let query_bytes = QUERY_BYTES_PER_POINT * 127;
+        let unconstrained = resource_estimate(
+            &source,
+            spec,
+            native,
+            HollowResourceLimits::new(usize::MAX, query_bytes).expect("unbounded test cap"),
+        )
+        .expect("estimate");
+        assert_eq!(unconstrained.query_batch_points(), 127);
+        assert_eq!(
+            resource_estimate(
+                &source,
+                spec,
+                native,
+                HollowResourceLimits::new(unconstrained.peak_bytes(), query_bytes)
+                    .expect("exact cap"),
+            )
+            .expect("exact boundary"),
+            unconstrained
+        );
+        assert!(matches!(
+            resource_estimate(
+                &source,
+                spec,
+                native,
+                HollowResourceLimits::new(unconstrained.peak_bytes() - 1, query_bytes)
+                    .expect("below cap"),
+            ),
+            Err(HollowError::ResourceLimitExceeded { .. })
+        ));
+        assert!(matches!(
+            grid_spec(&source, f64::MIN_POSITIVE),
+            Err(HollowError::VoxelGridTooLarge)
+        ));
+    }
+
+    #[test]
+    fn boolean_volume_invariant_accepts_shell_and_rejects_wrong_cavity_evidence() {
+        let candidate = create_shell(frozen_mesh("Sphere.prepped.oriented-solid.stl"))
+            .expect("frozen sphere shell");
+        let evidence = *candidate.cavity();
+        validate_shell_topology(
+            candidate.mesh(),
+            evidence.source_volume_mm3().get(),
+            evidence.cavity_volume_mm3().get(),
+            0.02,
+        )
+        .expect("measured Boolean balance");
+        assert!(matches!(
+            validate_shell_topology(
+                candidate.mesh(),
+                evidence.source_volume_mm3().get(),
+                0.0,
+                0.02,
+            ),
+            Err(HollowError::BooleanVolumeMismatch { .. })
+        ));
     }
 
     fn thread_guard() -> &'static Mutex<()> {
@@ -833,12 +1392,19 @@ mod tests {
     fn shell_digest_is_bit_identical_across_one_four_and_sixteen_kernel_workers() {
         let _guard = thread_guard().lock().expect("thread environment lock");
         let _restore = RestoreThreads(std::env::var_os("PLINTH_THREADS"));
-        let source = make_box([50.0, 50.0, 50.0], [0.0, 0.0, 0.0]).expect("box fixture");
+        let source = frozen_mesh("Sphere.prepped.oriented-solid.stl");
+        let settings = HollowSettings::from_registered_constants().expect("M0 settings");
         let mut baseline: Option<String> = None;
         for workers in [1, 4, 16] {
             std::env::set_var("PLINTH_THREADS", workers.to_string());
             assert_eq!(geom_kernel::current_threads(), workers);
-            let candidate = create_shell(source.clone()).expect("thread-count shell");
+            let candidate = create_shell_with_resources(
+                source.clone(),
+                settings,
+                HollowResourceLimits::new(DEFAULT_HOLLOW_PEAK_BYTES, QUERY_BYTES_PER_POINT * 1024)
+                    .expect("chunked limits"),
+            )
+            .expect("thread-count shell");
             let digest = mesh_fingerprint(candidate.mesh()).expect("shell fingerprint");
             if let Some(ref expected) = baseline {
                 assert_eq!(
@@ -849,6 +1415,25 @@ mod tests {
             } else {
                 baseline = Some(digest);
             }
+        }
+        std::env::set_var("PLINTH_THREADS", "1");
+        for query_points in [127, 4096] {
+            let candidate = create_shell_with_resources(
+                source.clone(),
+                settings,
+                HollowResourceLimits::new(
+                    DEFAULT_HOLLOW_PEAK_BYTES,
+                    QUERY_BYTES_PER_POINT * query_points,
+                )
+                .expect("chunk-size limits"),
+            )
+            .expect("chunk-size shell");
+            let digest = mesh_fingerprint(candidate.mesh()).expect("chunk fingerprint");
+            assert_eq!(digest, *baseline.as_ref().expect("worker baseline"));
+            assert_eq!(
+                candidate.cavity().resources().query_batch_points(),
+                query_points
+            );
         }
     }
 }

@@ -16,6 +16,44 @@ fn surface() -> NativeSurface {
     .unwrap()
 }
 
+#[test]
+fn indexed_memory_estimate_is_checked_and_is_the_exact_grid_cap_boundary() {
+    let vertices = [[0.0, 0.0, 0.0], [8.0, 0.0, 0.0], [0.0, 8.0, 0.0]];
+    let faces = [[0, 1, 2]];
+    let estimate = NativeSurface::estimate_index_memory_from_indexed(&vertices, &faces, 0.5)
+        .expect("allocation-free estimate");
+    assert!(estimate.peak_bytes() >= estimate.retained_bytes());
+    assert!(estimate.max_axis_grid_bytes() > 0);
+    assert!(estimate
+        .axis_references()
+        .iter()
+        .all(|references| *references > 0));
+
+    NativeSurface::from_indexed(
+        &vertices,
+        &faces,
+        NativeSurfaceConfig {
+            grid_pitch_mm: 0.5,
+            max_grid_bytes: estimate.max_axis_grid_bytes(),
+        },
+    )
+    .expect("the estimated cap accepts the indexed surface");
+    let below = NativeSurface::from_indexed(
+        &vertices,
+        &faces,
+        NativeSurfaceConfig {
+            grid_pitch_mm: 0.5,
+            max_grid_bytes: estimate.max_axis_grid_bytes() - 1,
+        },
+    );
+    assert!(matches!(below, Err(SurfaceBuildError::Kernel(_))));
+
+    assert!(matches!(
+        NativeSurface::estimate_index_memory_from_indexed(&vertices, &faces, 0.0),
+        Err(SurfaceBuildError::InvalidGridPitch(0.0))
+    ));
+}
+
 fn assert_batch_error<T>(
     result: Result<T, BatchInputError>,
     operation: &'static str,

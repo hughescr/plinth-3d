@@ -1,10 +1,41 @@
 use plinth_mesh::{
-    build_face_topology, make_box, mesh_fingerprint, triage_components, triage_settings,
-    validate_face_topology, Mesh, TopologyError, TriageError, WeldPolicy,
+    build_face_topology, certify_closed_components, make_box, mesh_fingerprint, triage_components,
+    triage_settings, validate_face_topology, Mesh, TopologyError, TriageError, WeldPolicy,
     FACE_TOPOLOGY_SCHEMA_VERSION, TOPOLOGY_CUT_BOUNDARY, TOPOLOGY_CUT_DEGENERATE,
     TOPOLOGY_CUT_DUPLICATE, TOPOLOGY_CUT_NONMANIFOLD, TOPOLOGY_CUT_POINT_ONLY,
     TOPOLOGY_CUT_SAME_DIRECTION,
 };
+
+#[test]
+fn closed_component_certificate_preserves_translated_signs_and_rejects_open_meshes() {
+    let outer = make_box([10.0, 10.0, 10.0], [1_000_000.0, -2_000_000.0, 3_000_000.0])
+        .expect("translated outer");
+    let inner = make_box([4.0, 4.0, 4.0], [1_000_000.0, -2_000_000.0, 3_000_003.0])
+        .expect("translated inner");
+    let inward = Mesh::new(
+        inner.verts().to_vec(),
+        inner
+            .tris()
+            .iter()
+            .map(|triangle| [triangle[0], triangle[2], triangle[1]])
+            .collect(),
+    )
+    .expect("inward shell");
+    let shell = join(&outer, &inward);
+    let topology = build_face_topology(&shell, WeldPolicy::ExactBits).expect("topology");
+    let certificate = certify_closed_components(&shell, &topology).expect("certificate");
+    assert_eq!(certificate.components().len(), 2);
+    assert!((certificate.components()[0].signed_volume_mm3() - 1000.0).abs() < 1e-9);
+    assert!((certificate.components()[1].signed_volume_mm3() + 64.0).abs() < 1e-9);
+    assert!((certificate.signed_volume_mm3() - 936.0).abs() < 1e-9);
+
+    let open = Mesh::new(outer.verts().to_vec(), outer.tris()[1..].to_vec()).expect("open");
+    let open_topology = build_face_topology(&open, WeldPolicy::ExactBits).expect("open topology");
+    assert!(matches!(
+        certify_closed_components(&open, &open_topology),
+        Err(TopologyError::CertificateNotClosedOrOriented)
+    ));
+}
 
 #[test]
 fn topology_builds_canonical_adjacency_components_and_v4_digest_once() {

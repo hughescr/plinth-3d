@@ -37,6 +37,41 @@ pub struct NativeSurfaceConfig {
     pub max_grid_bytes: usize,
 }
 
+/// Allocation-free conservative memory bound for an indexed native surface.
+/// It includes the immutable face store, BVH construction/retention, and all
+/// three parity-grid transient and retained buffers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NativeSurfaceMemoryEstimate {
+    peak_bytes: usize,
+    retained_bytes: usize,
+    max_axis_grid_bytes: usize,
+    axis_references: [usize; 3],
+}
+
+impl NativeSurfaceMemoryEstimate {
+    #[must_use]
+    pub const fn peak_bytes(self) -> usize {
+        self.peak_bytes
+    }
+
+    #[must_use]
+    pub const fn retained_bytes(self) -> usize {
+        self.retained_bytes
+    }
+
+    /// The exact conservative cap to pass as
+    /// [`NativeSurfaceConfig::max_grid_bytes`] for this mesh and pitch.
+    #[must_use]
+    pub const fn max_axis_grid_bytes(self) -> usize {
+        self.max_axis_grid_bytes
+    }
+
+    #[must_use]
+    pub const fn axis_references(self) -> [usize; 3] {
+        self.axis_references
+    }
+}
+
 /// Typed triangle-soup inputs accepted by the native construction boundary.
 ///
 /// `borrowed` avoids copying at the API boundary; `owned` lets callers transfer
@@ -118,6 +153,9 @@ pub enum SurfaceBuildError {
         face: usize,
         operation: &'static str,
     },
+    MemoryEstimateOverflow {
+        section: &'static str,
+    },
     LengthMismatch {
         field: &'static str,
         expected: usize,
@@ -163,6 +201,9 @@ impl std::fmt::Display for SurfaceBuildError {
                 formatter,
                 "indexed face {face} produced non-finite {operation}"
             ),
+            Self::MemoryEstimateOverflow { section } => {
+                write!(formatter, "native memory estimate overflow in {section}")
+            }
             Self::LengthMismatch {
                 field,
                 expected,
@@ -187,6 +228,90 @@ impl std::fmt::Display for SurfaceBuildError {
 impl std::error::Error for SurfaceBuildError {}
 
 impl NativeSurface {
+    /// Compute a checked conservative peak before constructing any native
+    /// face, BVH, or parity-grid allocation. The estimate deliberately uses
+    /// upper bounds for BVH nodes, recursive partition scratch, and unique CSR
+    /// keys; it may reject early but never understates those native buffers.
+    pub fn estimate_index_memory_from_indexed(
+        vertices: &[[f64; 3]],
+        faces: &[[u32; 3]],
+        grid_pitch_mm: f64,
+    ) -> Result<NativeSurfaceMemoryEstimate, SurfaceBuildError> {
+        if !grid_pitch_mm.is_finite() || grid_pitch_mm <= 0.0 {
+            return Err(SurfaceBuildError::InvalidGridPitch(grid_pitch_mm));
+        }
+        let bounds = Mesh::validate_indexed_bounds(vertices, faces)?;
+        let parity = parity::estimate_indexed_memory(vertices, faces, bounds, grid_pitch_mm)
+            .map_err(|_| SurfaceBuildError::MemoryEstimateOverflow {
+                section: "parity grid",
+            })?;
+        let faces_len = faces.len();
+        let face_store_bytes = faces_len
+            .checked_mul(
+                5 * std::mem::size_of::<[f64; 3]>()
+                    + std::mem::size_of::<f64>()
+                    + std::mem::size_of::<mesh::FaceBounds>(),
+            )
+            .ok_or(SurfaceBuildError::MemoryEstimateOverflow {
+                section: "face store",
+            })?;
+        let bvh_node_count = faces_len
+            .checked_mul(2)
+            .and_then(|value| value.checked_add(1))
+            .ok_or(SurfaceBuildError::MemoryEstimateOverflow {
+                section: "BVH nodes",
+            })?;
+        let bvh_retained_bytes = bvh_node_count
+            .checked_mul(std::mem::size_of::<bvh::Node>())
+            .and_then(|bytes| {
+                faces_len
+                    .checked_mul(std::mem::size_of::<u32>())
+                    .and_then(|order| bytes.checked_add(order))
+            })
+            .ok_or(SurfaceBuildError::MemoryEstimateOverflow {
+                section: "BVH retained",
+            })?;
+        // `tri_pad` is one f64 per face. Recursive `bin_of` vectors can remain
+        // live down a branch; twice the root length is a geometric-series
+        // upper bound for their total usize capacity.
+        let bvh_build_scratch = faces_len
+            .checked_mul(std::mem::size_of::<f64>())
+            .and_then(|bytes| {
+                faces_len
+                    .checked_mul(2 * std::mem::size_of::<usize>())
+                    .and_then(|bins| bytes.checked_add(bins))
+            })
+            .ok_or(SurfaceBuildError::MemoryEstimateOverflow {
+                section: "BVH build scratch",
+            })?;
+        let retained_without_parity = face_store_bytes.checked_add(bvh_retained_bytes).ok_or(
+            SurfaceBuildError::MemoryEstimateOverflow {
+                section: "native retained",
+            },
+        )?;
+        let bvh_peak = retained_without_parity
+            .checked_add(bvh_build_scratch)
+            .ok_or(SurfaceBuildError::MemoryEstimateOverflow {
+                section: "BVH peak",
+            })?;
+        let parity_peak = retained_without_parity
+            .checked_add(parity.peak_bytes)
+            .ok_or(SurfaceBuildError::MemoryEstimateOverflow {
+                section: "parity peak",
+            })?;
+        let retained_bytes = retained_without_parity
+            .checked_add(parity.retained_bytes)
+            .ok_or(SurfaceBuildError::MemoryEstimateOverflow {
+                section: "native retained",
+            })?;
+        Ok(NativeSurfaceMemoryEstimate {
+            peak_bytes: bvh_peak.max(parity_peak).max(retained_bytes),
+            retained_bytes,
+            max_axis_grid_bytes: parity.max_axis_build_bytes,
+            axis_references: parity.axis_references,
+        })
+    }
+
     /// Construct the existing query engine from typed owned or borrowed data.
     ///
     /// This validates then constructs one immutable face store before building
