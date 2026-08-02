@@ -1,6 +1,7 @@
 use plinth_mesh::{
     build_face_topology, certify_closed_components, make_box, mesh_fingerprint, triage_components,
-    triage_settings, validate_face_topology, Mesh, TopologyError, TriageError, WeldPolicy,
+    triage_settings, validate_face_topology, Mesh, TopologyError, TriageError,
+    TriageTopologyAdmission, TriageTopologyLimits, TriagedMesh, WeldPolicy,
     FACE_TOPOLOGY_SCHEMA_VERSION, TOPOLOGY_CUT_BOUNDARY, TOPOLOGY_CUT_DEGENERATE,
     TOPOLOGY_CUT_DUPLICATE, TOPOLOGY_CUT_NONMANIFOLD, TOPOLOGY_CUT_POINT_ONLY,
     TOPOLOGY_CUT_SAME_DIRECTION,
@@ -131,7 +132,7 @@ fn fingerprint_canonicalizes_signed_zero_but_welding_remains_an_explicit_choice(
     )
     .expect("finite tetra");
     for policy in [WeldPolicy::ExactBits, WeldPolicy::Epsilon(1e-9)] {
-        let triaged = triage_components(&signed_zero_tetra, policy).expect("triaged tetra");
+        let triaged = run_triage(&signed_zero_tetra, policy).expect("triaged tetra");
         let representative = triaged
             .mesh()
             .verts()
@@ -308,15 +309,14 @@ fn triage_strips_only_a_qualified_pinched_shard_and_keeps_detached_body() {
     let main = make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0]).expect("main box");
     let shard = tetra_at([5.0, 5.0, 0.0], 0.05, true);
     let joined = join(&main, &shard);
-    let triaged =
-        triage_components(&joined, WeldPolicy::ExactBits).expect("qualified shard strips");
+    let triaged = run_triage(&joined, WeldPolicy::ExactBits).expect("qualified shard strips");
     assert_eq!(triaged.summary().stripped_components().len(), 1);
     assert_eq!(triaged.mesh().tris().len(), main.tris().len());
     assert_eq!(triaged.mesh().weld_policy(), WeldPolicy::ExactBits);
 
     let detached = make_box([0.1, 0.1, 0.1], [30.0, 0.0, 0.0]).expect("detached part");
-    let kept = triage_components(&join(&main, &detached), WeldPolicy::ExactBits)
-        .expect("detached authored body stays");
+    let joined = join(&main, &detached);
+    let kept = run_triage(&joined, WeldPolicy::ExactBits).expect("detached authored body stays");
     assert!(kept.summary().stripped_components().is_empty());
     assert_eq!(
         kept.mesh().tris().len(),
@@ -329,13 +329,14 @@ fn triage_batches_bounded_samples_and_refuses_a_pre_hollowed_shell() {
     let outer = make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0]).expect("outer shell");
     let inner = make_box([4.0, 4.0, 4.0], [0.0, 0.0, 2.0]).expect("inner shell");
     assert!(inner.verts().len() <= triage_settings().expect("settings").containment_samples());
-    let error = triage_components(&join(&outer, &inner), WeldPolicy::ExactBits)
-        .expect_err("sealed interior must refuse");
+    let joined = join(&outer, &inner);
+    let error =
+        run_triage(&joined, WeldPolicy::ExactBits).expect_err("sealed interior must refuse");
     assert!(
         matches!(error, TriageError::PreHollowed(refusal) if refusal.cavity_components().len() == 1)
     );
     assert!(matches!(
-        triage_components(&outer, WeldPolicy::None),
+        run_triage(&outer, WeldPolicy::None),
         Err(TriageError::UnweldedInput)
     ));
 }
@@ -345,7 +346,7 @@ fn triage_refuses_an_inner_shell_in_a_genuinely_concave_container() {
     let outer = concave_l_prism();
     let inner = make_box([0.25, 0.25, 0.25], [0.5, 0.5, 0.5]).expect("inner cube");
     assert!(matches!(
-        triage_components(&join(&outer, &inner), WeldPolicy::ExactBits),
+        run_triage(&join(&outer, &inner), WeldPolicy::ExactBits),
         Err(TriageError::PreHollowed(_))
     ));
 }
@@ -354,7 +355,21 @@ fn triage_refuses_an_inner_shell_in_a_genuinely_concave_container() {
 fn triage_treats_a_shell_touching_its_container_boundary_as_ambiguous_not_inside() {
     let outer = make_box([10.0, 10.0, 10.0], [0.0, 0.0, 0.0]).expect("outer");
     let touching = make_box([4.0, 4.0, 4.0], [0.0, 0.0, 0.0]).expect("touching");
-    assert!(triage_components(&join(&outer, &touching), WeldPolicy::ExactBits).is_ok());
+    assert!(run_triage(&join(&outer, &touching), WeldPolicy::ExactBits).is_ok());
+}
+
+fn run_triage(mesh: &Mesh, policy: WeldPolicy) -> Result<TriagedMesh, TriageError> {
+    let limits = TriageTopologyLimits::new(
+        usize::MAX,
+        usize::MAX,
+        usize::MAX,
+        usize::MAX,
+        usize::MAX,
+        usize::MAX,
+    );
+    let admission = TriageTopologyAdmission::from_raw_mesh(mesh, limits)
+        .expect("small fixture admits topology work");
+    triage_components(admission, policy)
 }
 
 fn mesh(tris: &[[u32; 3]]) -> Mesh {
