@@ -10,9 +10,9 @@
 //! evidence can land. There is no public `run` stub.
 #![forbid(unsafe_code)]
 
+pub mod anchor;
 mod coverage;
 pub mod dyadic;
-pub mod anchor;
 pub mod forest;
 pub mod legacy_compat;
 pub mod member_sizing;
