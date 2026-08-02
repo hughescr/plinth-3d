@@ -16,4 +16,5 @@ thiserror = { workspace = true }
 [dev-dependencies]
 plinth-decimate = { path = "../plinth-decimate" }
 plinth-orient = { path = "../plinth-orient" }
+serde_json = { workspace = true }
 trybuild = "1"

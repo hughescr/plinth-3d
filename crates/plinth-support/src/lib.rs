@@ -9,6 +9,8 @@
 //! kinds and f64 geometry; `plinth-emit` alone maps them to ChituBox record identities and f32.
 #![forbid(unsafe_code)]
 
+pub mod forest;
+
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, SurfaceBuildError};
 use plinth_core::{m0_constants, Finite, PositiveFinite};
 use plinth_hollow::HollowHistory;
