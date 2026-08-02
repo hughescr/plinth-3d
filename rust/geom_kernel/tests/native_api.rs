@@ -1,7 +1,10 @@
 use geom_kernel::{
-    BatchInputError, Interval, NativeSurface, NativeSurfaceConfig, SurfaceBuildError,
-    SurfaceSubsetError, TriangleSoup,
+    BatchInputError, Interval, NativeSurface, NativeSurfaceConfig, PlaneIntersectionKind,
+    PlaneSliceError, PlaneSliceLimits, SurfaceBuildError, SurfaceSubsetError, TriangleSoup,
 };
+use std::process::Command;
+
+type SliceFingerprint = (u32, u8, Option<([u64; 3], [u64; 3])>);
 
 const TRIANGLES: [[[f64; 3]; 3]; 1] = [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]];
 const NORMALS: [[f64; 3]; 1] = [[0.0, 0.0, 1.0]];
@@ -68,6 +71,222 @@ fn cubes_surface(origins: &[[f64; 3]]) -> NativeSurface {
 
 fn cube_surface() -> NativeSurface {
     cubes_surface(&[[0.0; 3]])
+}
+
+fn slice_limits(surface: &NativeSurface, planes: usize) -> PlaneSliceLimits {
+    let work = surface.nfaces() * planes;
+    PlaneSliceLimits {
+        max_planes: planes,
+        max_triangle_plane_tests: work,
+        max_intersections: work,
+        max_output_bytes: (planes + 1) * std::mem::size_of::<usize>()
+            + work * std::mem::size_of::<geom_kernel::PlaneIntersection>(),
+    }
+}
+
+#[test]
+fn slice_z_batch_box_has_ordered_face_local_segments_and_offsets() {
+    let surface = cube_surface();
+    let batch = surface
+        .slice_z_batch(&[0.25, 0.75], slice_limits(&surface, 2))
+        .unwrap();
+    assert_eq!(batch.plane_offsets, vec![0, 8, 16]);
+    for plane in 0..2 {
+        let z: f64 = [0.25, 0.75][plane];
+        let events = batch.plane(plane);
+        assert_eq!(
+            events.iter().map(|event| event.face_id).collect::<Vec<_>>(),
+            (4..12).collect::<Vec<_>>()
+        );
+        assert!(events
+            .iter()
+            .all(|event| event.kind == PlaneIntersectionKind::Transverse));
+        for event in events {
+            let [a, b] = event.segment.expect("side face crosses plane");
+            assert_eq!(a[2].to_bits(), z.to_bits());
+            assert_eq!(b[2].to_bits(), z.to_bits());
+        }
+    }
+}
+
+#[test]
+fn slice_z_batch_tetrahedron_has_three_exact_midplane_segments() {
+    let triangles = [
+        [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]],
+        [[0.0, 0.0, 0.0], [0.0, 0.0, 2.0], [2.0, 0.0, 0.0]],
+        [[2.0, 0.0, 0.0], [0.0, 0.0, 2.0], [0.0, 2.0, 0.0]],
+        [[0.0, 2.0, 0.0], [0.0, 0.0, 2.0], [0.0, 0.0, 0.0]],
+    ];
+    let surface = NativeSurface::from_triangle_soup(
+        TriangleSoup::borrowed(
+            &triangles,
+            &[[0.0, 0.0, 1.0]; 4],
+            &[1.0; 4],
+            [[0.0; 3], [2.0; 3]],
+        ),
+        2.0,
+        usize::MAX,
+    )
+    .unwrap();
+    let batch = surface
+        .slice_z_batch(&[1.0], slice_limits(&surface, 1))
+        .unwrap();
+    assert_eq!(batch.plane_offsets, vec![0, 3]);
+    assert_eq!(
+        batch
+            .plane(0)
+            .iter()
+            .map(|event| event.face_id)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert!(batch
+        .plane(0)
+        .iter()
+        .all(|event| event.kind == PlaneIntersectionKind::Transverse));
+    assert_eq!(
+        batch.plane(0)[0].segment.unwrap(),
+        [[0.0, 0.0, 1.0], [1.0, 0.0, 1.0]]
+    );
+}
+
+#[test]
+fn slice_z_batch_classifies_coplanar_edge_vertex_and_tangent_without_hidden_dedup() {
+    let triangles = [
+        [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]],
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 1.0]],
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 1.0], [0.0, 1.0, -1.0]],
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 1.0], [0.0, 1.0, 1.0]],
+    ];
+    let surface = NativeSurface::from_triangle_soup(
+        TriangleSoup::borrowed(
+            &triangles,
+            &[[0.0, 0.0, 1.0]; 4],
+            &[1.0; 4],
+            [[0.0; 3], [2.0; 3]],
+        ),
+        2.0,
+        usize::MAX,
+    )
+    .unwrap();
+    let batch = surface
+        .slice_z_batch(&[0.0], slice_limits(&surface, 1))
+        .unwrap();
+    assert_eq!(batch.plane_offsets, vec![0, 4]);
+    let events = batch.plane(0);
+    assert_eq!(events[0].kind, PlaneIntersectionKind::Coplanar);
+    assert_eq!(events[0].segment, None);
+    assert_eq!(events[1].kind, PlaneIntersectionKind::Edge);
+    assert_eq!(
+        events[1].segment.unwrap(),
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+    );
+    assert_eq!(events[2].kind, PlaneIntersectionKind::Vertex);
+    assert_eq!(events[2].segment.unwrap()[0], [0.0, 0.0, 0.0]);
+    assert_eq!(events[3].kind, PlaneIntersectionKind::Vertex);
+    assert_eq!(events[3].segment, None);
+}
+
+#[test]
+fn slice_z_batch_limits_are_checked_at_exact_cap_and_one_below() {
+    let surface = cube_surface();
+    let planes = [0.5];
+    let limits = slice_limits(&surface, 1);
+    surface
+        .slice_z_batch(&planes, limits)
+        .expect("exact worst-case cap accepted");
+    assert!(matches!(
+        surface.slice_z_batch(
+            &planes,
+            PlaneSliceLimits {
+                max_planes: 0,
+                ..limits
+            }
+        ),
+        Err(PlaneSliceError::PlaneCountCap { .. })
+    ));
+    assert!(matches!(
+        surface.slice_z_batch(
+            &planes,
+            PlaneSliceLimits {
+                max_triangle_plane_tests: limits.max_triangle_plane_tests - 1,
+                ..limits
+            }
+        ),
+        Err(PlaneSliceError::TrianglePlaneWorkCap { .. })
+    ));
+    assert!(matches!(
+        surface.slice_z_batch(
+            &planes,
+            PlaneSliceLimits {
+                max_intersections: limits.max_intersections - 1,
+                ..limits
+            }
+        ),
+        Err(PlaneSliceError::IntersectionCap { .. })
+    ));
+    assert!(matches!(
+        surface.slice_z_batch(
+            &planes,
+            PlaneSliceLimits {
+                max_output_bytes: limits.max_output_bytes - 1,
+                ..limits
+            }
+        ),
+        Err(PlaneSliceError::OutputBytesCap { .. })
+    ));
+}
+
+#[test]
+fn slicing_thread_identity_child() {
+    let surface = cube_surface();
+    let batch = surface
+        .slice_z_batch(&[0.25, 0.5, 0.75], slice_limits(&surface, 3))
+        .unwrap();
+    let fingerprint: Vec<SliceFingerprint> = batch
+        .intersections
+        .iter()
+        .map(|event| {
+            (
+                event.face_id,
+                event.kind as u8,
+                event
+                    .segment
+                    .map(|[a, b]| (a.map(f64::to_bits), b.map(f64::to_bits))),
+            )
+        })
+        .collect();
+    println!("SLICE_FINGERPRINT:{fingerprint:?}");
+}
+
+#[test]
+fn slicing_thread_identity_is_subprocess_invariant() {
+    let executable = std::env::current_exe().unwrap();
+    let mut outputs = Vec::new();
+    for threads in ["1", "4", "16"] {
+        let output = Command::new(&executable)
+            .args(["--exact", "slicing_thread_identity_child", "--nocapture"])
+            .env("PLINTH_THREADS", threads)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child thread count {threads} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        outputs.push(
+            stdout
+                .lines()
+                .find(|line| line.starts_with("SLICE_FINGERPRINT:"))
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    assert!(
+        outputs.windows(2).all(|pair| pair[0] == pair[1]),
+        "{outputs:?}"
+    );
 }
 
 fn assert_intervals_equal(left: &[Vec<Interval>], right: &[Vec<Interval>]) {

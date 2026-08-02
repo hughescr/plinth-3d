@@ -17,6 +17,7 @@ mod par;
 mod parity;
 mod point_index;
 mod queries;
+mod slicing;
 mod vec3;
 
 pub mod testkit;
@@ -27,6 +28,9 @@ use mesh::Mesh;
 pub use mesh::{FaceBounds, FaceGeometry};
 pub use point_index::{NeighborCsr, PointCloudIndex, PointIndexBuildError, PointQueryError};
 pub use queries::{BatchInputError, CastRaysBatch, Interval, NativeSurface, SphereBreachBatch};
+pub use slicing::{
+    PlaneIntersection, PlaneIntersectionKind, PlaneSliceBatch, PlaneSliceError, PlaneSliceLimits,
+};
 pub use vec3::V3;
 
 pub const KERNEL_API_VERSION: u32 = 1;
