@@ -334,6 +334,9 @@ impl GenericContactPlan {
         specialized: &[SpecializedOwnerReservation],
         limits: GenericPerceptionLimits,
     ) -> Result<(), GenericPerceptionError> {
+        if config.plate_z_mm != frame.plate_z_mm() {
+            return Err(GenericPerceptionError::FrameMismatch);
+        }
         let surface = build_surface(mesh, config)?;
         let current = authority_fingerprint(
             mesh,
@@ -1684,6 +1687,7 @@ fn authority_fingerprint(
     result_config.usize(compact_bytes);
     result_config.usize(working_cells);
     result_config.u64(edge_bits);
+    result_config.f64(config.plate_z_mm.get());
     result_config.usize(limits.max_planes);
     result_config.usize(limits.max_triangle_plane_tests);
     result_config.usize(limits.max_slice_intersections);
