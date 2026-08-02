@@ -7,8 +7,34 @@ use plinth_core::{m0_constants, ContentDigest, Finite, PositiveFinite};
 
 use crate::{
     forest::{Forest, MemberKind, Owner},
+    joints::FilteredLiveView,
     FrustumRingNormal, SupportError, SupportPrimitive, SupportSegmentKind,
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RaftLimits {
+    max_candidates: usize,
+    max_roots: usize,
+    max_primitives: usize,
+    max_bytes: usize,
+}
+
+impl RaftLimits {
+    #[allow(dead_code, reason = "consumed by pending crate-private support runner")]
+    pub(crate) const fn new(
+        max_candidates: usize,
+        max_roots: usize,
+        max_primitives: usize,
+        max_bytes: usize,
+    ) -> Self {
+        Self {
+            max_candidates,
+            max_roots,
+            max_primitives,
+            max_bytes,
+        }
+    }
+}
 
 /// A canonical plate-root location and its rootward column radius.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -33,16 +59,26 @@ impl PlateRoot {
 #[derive(Clone, Debug, PartialEq)]
 pub struct RaftPlan {
     forest_digest: u64,
+    live_view_digest: u64,
     plate_z_bits: u64,
     roots: Vec<PlateRoot>,
     primitives: Vec<SupportPrimitive>,
 }
 
 impl RaftPlan {
-    pub(crate) fn validate(&self, forest: &Forest, plate_z_mm: Finite) -> Result<(), SupportError> {
-        if self.forest_digest != forest.digest() || self.plate_z_bits != plate_z_mm.get().to_bits()
+    pub(crate) fn validate(
+        &self,
+        forest: &Forest,
+        view: &FilteredLiveView,
+        plate_z_mm: Finite,
+    ) -> Result<(), SupportError> {
+        view.validate(forest)
+            .map_err(|_| SupportError::StaleSupportAuthority)?;
+        if self.forest_digest != forest.digest()
+            || self.live_view_digest != view.digest()
+            || self.plate_z_bits != plate_z_mm.get().to_bits()
         {
-            return Err(SupportError::NoLegalSupportPlan);
+            return Err(SupportError::StaleSupportAuthority);
         }
         Ok(())
     }
@@ -70,6 +106,7 @@ impl RaftPlan {
             }
         };
         write(f64::from_bits(self.forest_digest));
+        write(f64::from_bits(self.live_view_digest));
         write(f64::from_bits(self.plate_z_bits));
         write(self.roots.len() as f64);
         for root in &self.roots {
@@ -103,10 +140,21 @@ impl RaftPlan {
 /// Candidate roots sort by exact `(x, y)` before the frozen tolerance dedup;
 /// consequently a tolerance cluster is represented by its lexically first
 /// point.  Bridges appear before pads, matching the current native order.
-pub fn plan_bottom_connected(
+pub(crate) fn plan_bottom_connected(
     forest: &Forest,
+    view: &FilteredLiveView,
     plate_z_mm: Finite,
+    limits: RaftLimits,
 ) -> Result<RaftPlan, SupportError> {
+    view.validate(forest)
+        .map_err(|_| SupportError::StaleSupportAuthority)?;
+    if limits.max_candidates == 0
+        || limits.max_roots == 0
+        || limits.max_primitives == 0
+        || limits.max_bytes == 0
+    {
+        return Err(SupportError::InvalidResourceLimits);
+    }
     let constants = m0_constants().map_err(|_| SupportError::NoLegalSupportPlan)?;
     let policy = constants.placeholders();
     let plate_band = policy.plate_band_mm().diagnostic().get();
@@ -114,9 +162,35 @@ pub fn plan_bottom_connected(
     let pad_diameter = *policy.chitubox_pad_diameter_mm().diagnostic();
     let raft_height = *policy.chitubox_raft_height_mm().diagnostic();
 
-    let mut candidates: Vec<PlateRoot> = forest
-        .live_members()
-        .into_iter()
+    let candidate_count = view
+        .keys()
+        .iter()
+        .copied()
+        .filter_map(|key| forest.member(key).map(|member| (key, member)))
+        .filter(|(key, member)| match (member.kind(), member.owner()) {
+            (MemberKind::Stub, Owner::Contact(contact)) => forest.terminal(*contact) == Some(*key),
+            (MemberKind::Stub, _) => false,
+            _ => true,
+        })
+        .filter(|(_, member)| {
+            let point = member.p1_mm();
+            (point[2].get() - plate_z_mm.get()).abs() <= plate_band
+        })
+        .count();
+    if candidate_count > limits.max_candidates {
+        return Err(SupportError::SupportInputLimit);
+    }
+    let candidate_bytes = candidate_count
+        .checked_mul(std::mem::size_of::<PlateRoot>())
+        .ok_or(SupportError::SupportScratchLimit)?;
+    if candidate_bytes > limits.max_bytes {
+        return Err(SupportError::SupportScratchLimit);
+    }
+
+    let mut candidates: Vec<PlateRoot> = view
+        .keys()
+        .iter()
+        .copied()
         .filter_map(|key| forest.member(key).map(|member| (key, member)))
         .filter(|(key, member)| match (member.kind(), member.owner()) {
             (MemberKind::Stub, Owner::Contact(contact)) => forest.terminal(*contact) == Some(*key),
@@ -139,19 +213,39 @@ pub fn plan_bottom_connected(
             .then_with(|| a.root_radius_mm.get().total_cmp(&b.root_radius_mm.get()))
     });
 
-    let mut roots = Vec::with_capacity(candidates.len());
-    for candidate in candidates {
-        let duplicate = roots.iter().any(|prior: &PlateRoot| {
+    let mut accepted = 0;
+    for read in 0..candidates.len() {
+        let candidate = candidates[read];
+        let duplicate = candidates[..accepted].iter().any(|prior| {
             let dx = candidate.xy_mm[0].get() - prior.xy_mm[0].get();
             let dy = candidate.xy_mm[1].get() - prior.xy_mm[1].get();
             (dx * dx + dy * dy).sqrt() <= tolerance
         });
         if !duplicate {
-            roots.push(candidate);
+            candidates.swap(accepted, read);
+            accepted += 1;
         }
     }
+    candidates.truncate(accepted);
+    let roots = candidates;
+    if roots.len() > limits.max_roots {
+        return Err(SupportError::SupportInputLimit);
+    }
+    let primitive_count = roots.len().saturating_mul(2).saturating_sub(1);
+    if primitive_count > limits.max_primitives {
+        return Err(SupportError::SupportPrimitiveLimit);
+    }
+    let primitive_bytes = primitive_count
+        .checked_mul(std::mem::size_of::<SupportPrimitive>())
+        .ok_or(SupportError::SupportScratchLimit)?;
+    let scratch = candidate_bytes
+        .checked_add(primitive_bytes)
+        .ok_or(SupportError::SupportScratchLimit)?;
+    if scratch > limits.max_bytes {
+        return Err(SupportError::SupportScratchLimit);
+    }
 
-    let mut primitives = Vec::with_capacity(roots.len().saturating_mul(2).saturating_sub(1));
+    let mut primitives = Vec::with_capacity(primitive_count);
     for (i, j) in euclidean_mst_edges(&roots) {
         primitives.push(raft_primitive(
             roots[i].xy_mm,
@@ -178,6 +272,7 @@ pub fn plan_bottom_connected(
     }
     Ok(RaftPlan {
         forest_digest: forest.digest(),
+        live_view_digest: view.digest(),
         plate_z_bits: plate_z_mm.get().to_bits(),
         roots,
         primitives,
@@ -251,6 +346,7 @@ mod tests {
     use crate::forest::{
         Member, MemberKind, MemberSpec, Owner, RootwardEndRadius, TerminalEndRadius,
     };
+    use crate::joints::{FilteredLiveView, LiveViewLimits};
 
     fn number(value: f64) -> Finite {
         Finite::new(value).expect("finite fixture")
@@ -285,7 +381,16 @@ mod tests {
     }
 
     fn plan(points: &[[f64; 3]]) -> RaftPlan {
-        plan_bottom_connected(&forest_for(points), number(0.0)).expect("valid raft plan")
+        let forest = forest_for(points);
+        let view = FilteredLiveView::current(&forest, &[], LiveViewLimits::new(100, 100, 100_000))
+            .unwrap();
+        plan_bottom_connected(
+            &forest,
+            &view,
+            number(0.0),
+            RaftLimits::new(100, 100, 200, 100_000),
+        )
+        .expect("valid raft plan")
     }
 
     #[test]
@@ -317,7 +422,15 @@ mod tests {
         let mut forest = forest_for(&[[0.0, 0.0, 0.0]]);
         forest.add_brace(member_for([2.0, 0.0, 0.0], 1));
 
-        let raft = plan_bottom_connected(&forest, number(0.0)).expect("valid raft plan");
+        let view = FilteredLiveView::current(&forest, &[], LiveViewLimits::new(100, 100, 100_000))
+            .unwrap();
+        let raft = plan_bottom_connected(
+            &forest,
+            &view,
+            number(0.0),
+            RaftLimits::new(100, 100, 200, 100_000),
+        )
+        .expect("valid raft plan");
         assert_eq!(raft.roots().len(), 2);
         assert_eq!(raft.primitives().len(), 3, "one bridge and two pads");
     }
@@ -359,12 +472,83 @@ mod tests {
     #[test]
     fn plan_authority_rejects_a_changed_forest_or_plate() {
         let mut forest = forest_for(&[[0.0, 0.0, 0.0]]);
-        let plan = plan_bottom_connected(&forest, number(0.0)).unwrap();
-        assert!(plan.validate(&forest, number(0.0)).is_ok());
+        let view = FilteredLiveView::current(&forest, &[], LiveViewLimits::new(100, 100, 100_000))
+            .unwrap();
+        let plan = plan_bottom_connected(
+            &forest,
+            &view,
+            number(0.0),
+            RaftLimits::new(100, 100, 200, 100_000),
+        )
+        .unwrap();
+        assert!(plan.validate(&forest, &view, number(0.0)).is_ok());
         forest.add_member(member_for([2.0, 0.0, 0.0], 2));
-        assert!(plan.validate(&forest, number(0.0)).is_err());
+        assert!(plan.validate(&forest, &view, number(0.0)).is_err());
+        let original = forest_for(&[[0.0, 0.0, 0.0]]);
+        let original_view =
+            FilteredLiveView::current(&original, &[], LiveViewLimits::new(100, 100, 100_000))
+                .unwrap();
         assert!(plan
-            .validate(&forest_for(&[[0.0, 0.0, 0.0]]), number(0.1))
+            .validate(&original, &original_view, number(0.1))
             .is_err());
+    }
+
+    #[test]
+    fn caller_owned_candidate_root_primitive_and_byte_caps_are_exact() {
+        let forest = forest_for(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+        let view =
+            FilteredLiveView::current(&forest, &[], LiveViewLimits::new(2, 1, 10_000)).unwrap();
+        let exact_bytes =
+            2 * std::mem::size_of::<PlateRoot>() + 3 * std::mem::size_of::<SupportPrimitive>();
+        assert!(plan_bottom_connected(
+            &forest,
+            &view,
+            number(0.0),
+            RaftLimits::new(2, 2, 3, exact_bytes),
+        )
+        .is_ok());
+        for limits in [
+            RaftLimits::new(1, 2, 3, exact_bytes),
+            RaftLimits::new(2, 1, 3, exact_bytes),
+        ] {
+            assert_eq!(
+                plan_bottom_connected(&forest, &view, number(0.0), limits).unwrap_err(),
+                SupportError::SupportInputLimit
+            );
+        }
+        assert_eq!(
+            plan_bottom_connected(
+                &forest,
+                &view,
+                number(0.0),
+                RaftLimits::new(2, 2, 2, exact_bytes),
+            )
+            .unwrap_err(),
+            SupportError::SupportPrimitiveLimit
+        );
+        assert_eq!(
+            plan_bottom_connected(
+                &forest,
+                &view,
+                number(0.0),
+                RaftLimits::new(2, 2, 3, exact_bytes - 1),
+            )
+            .unwrap_err(),
+            SupportError::SupportScratchLimit
+        );
+
+        let dedup_forest = forest_for(&[[0.0, 0.0, 0.0], [0.000_009, 0.0, 0.0]]);
+        let dedup_view =
+            FilteredLiveView::current(&dedup_forest, &[], LiveViewLimits::new(2, 1, 10_000))
+                .unwrap();
+        let dedup_bytes =
+            2 * std::mem::size_of::<PlateRoot>() + std::mem::size_of::<SupportPrimitive>();
+        assert!(plan_bottom_connected(
+            &dedup_forest,
+            &dedup_view,
+            number(0.0),
+            RaftLimits::new(2, 1, 1, dedup_bytes),
+        )
+        .is_ok());
     }
 }

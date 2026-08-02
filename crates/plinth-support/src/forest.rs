@@ -532,12 +532,19 @@ impl Forest {
     /// moves a later-born member ahead of an older live member.
     #[must_use]
     pub fn live_members_in_creation_order(&self) -> Vec<MemberKey> {
+        self.live_members_in_creation_order_iter().collect()
+    }
+
+    /// Allocation-free source for bounded downstream preflight. Consumers must still bind any
+    /// derived view to [`Self::digest`] before treating it as authority.
+    pub(crate) fn live_members_in_creation_order_iter(
+        &self,
+    ) -> impl Iterator<Item = MemberKey> + '_ {
         self.state
             .creation_order
             .iter()
             .copied()
             .filter(|key| self.member(*key).is_some())
-            .collect()
     }
 
     /// Registers the member which owns a terminal contact.

@@ -73,6 +73,144 @@ struct ConfigFingerprint {
     max_scratch_bytes: usize,
 }
 
+/// Caller-owned preflight bounds for the one filtered live-member view shared by joint
+/// planning, primitive lowering, and raft planning.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct LiveViewLimits {
+    max_members: usize,
+    max_unrouted_terminals: usize,
+    max_bytes: usize,
+}
+
+impl LiveViewLimits {
+    pub(crate) const fn new(
+        max_members: usize,
+        max_unrouted_terminals: usize,
+        max_bytes: usize,
+    ) -> Self {
+        Self {
+            max_members,
+            max_unrouted_terminals,
+            max_bytes,
+        }
+    }
+}
+
+/// Opaque filtered view matching Python `live_member_lists`: creation order is retained while
+/// caller-declared honestly-unrouted terminal stubs are removed before any joint clustering.
+#[derive(Clone, Debug)]
+pub(crate) struct FilteredLiveView {
+    forest_digest: u64,
+    keys: Vec<MemberKey>,
+    digest: u64,
+}
+
+impl FilteredLiveView {
+    pub(crate) fn current(
+        forest: &Forest,
+        unrouted_terminals: &[u32],
+        limits: LiveViewLimits,
+    ) -> Result<Self, JointError> {
+        if limits.max_members == 0 || limits.max_bytes == 0 {
+            return Err(JointError::InvalidLiveViewLimits);
+        }
+        let live_count = forest.live_members_in_creation_order_iter().count();
+        if live_count > limits.max_members
+            || unrouted_terminals.len() > limits.max_unrouted_terminals
+        {
+            return Err(JointError::LiveViewMemberLimit);
+        }
+        let bytes = live_count
+            .checked_mul(std::mem::size_of::<MemberKey>())
+            .and_then(|bytes| {
+                unrouted_terminals
+                    .len()
+                    .checked_mul(std::mem::size_of::<u32>() + std::mem::size_of::<MemberKey>())
+                    .and_then(|unrouted_bytes| bytes.checked_add(unrouted_bytes))
+            })
+            .ok_or(JointError::LiveViewBytesLimit)?;
+        if bytes > limits.max_bytes {
+            return Err(JointError::LiveViewBytesLimit);
+        }
+
+        let mut terminal_ids = unrouted_terminals.to_vec();
+        terminal_ids.sort_unstable();
+        if terminal_ids.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(JointError::DuplicateUnroutedTerminal);
+        }
+        let mut excluded = Vec::with_capacity(terminal_ids.len());
+        for terminal in terminal_ids {
+            let key = forest
+                .terminal(terminal)
+                .ok_or(JointError::InvalidUnroutedTerminal(terminal))?;
+            let member = forest
+                .member(key)
+                .ok_or(JointError::InvalidUnroutedTerminal(terminal))?;
+            if member.kind() != &MemberKind::Stub || member.owner() != &Owner::Contact(terminal) {
+                return Err(JointError::InvalidUnroutedTerminal(terminal));
+            }
+            excluded.push(key);
+        }
+        excluded.sort_unstable();
+        let keys = forest
+            .live_members_in_creation_order_iter()
+            .filter(|key| excluded.binary_search(key).is_err())
+            .collect::<Vec<_>>();
+        let forest_digest = forest.digest();
+        let digest = live_view_digest(forest_digest, &keys);
+        Ok(Self {
+            forest_digest,
+            keys,
+            digest,
+        })
+    }
+
+    pub(crate) fn validate(&self, forest: &Forest) -> Result<(), JointError> {
+        if self.forest_digest != forest.digest()
+            || self.digest != live_view_digest(self.forest_digest, &self.keys)
+            || self.keys.iter().any(|key| forest.member(*key).is_none())
+        {
+            return Err(JointError::StaleAuthority);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn keys(&self) -> &[MemberKey] {
+        &self.keys
+    }
+
+    pub(crate) const fn digest(&self) -> u64 {
+        self.digest
+    }
+}
+
+fn live_view_digest(forest_digest: u64, keys: &[MemberKey]) -> u64 {
+    live_view_digest_iter(forest_digest, keys.len(), keys.iter().copied())
+}
+
+fn live_view_digest_iter(
+    forest_digest: u64,
+    count: usize,
+    keys: impl Iterator<Item = MemberKey>,
+) -> u64 {
+    let mut state = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in forest_digest
+        .to_le_bytes()
+        .into_iter()
+        .chain((count as u64).to_le_bytes())
+        .chain(keys.flat_map(|key| {
+            key.slot()
+                .to_le_bytes()
+                .into_iter()
+                .chain(key.generation().to_le_bytes())
+        }))
+    {
+        state ^= u64::from(byte);
+        state = state.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    state
+}
+
 /// A retained ball.  There is no public constructor: output geometry remains
 /// inseparable from the proof-bound plan which authorized it.
 #[derive(Clone, Debug, PartialEq)]
@@ -102,6 +240,7 @@ impl JointBall {
 #[derive(Clone, Debug)]
 pub struct JointPlan {
     forest_digest: u64,
+    live_view_digest: u64,
     config: ConfigFingerprint,
     balls: Vec<JointBall>,
     certified_dropped: usize,
@@ -113,7 +252,32 @@ impl JointPlan {
         forest: &Forest,
         config: JointConfig,
     ) -> Result<&'a [JointBall], JointError> {
-        if self.forest_digest != forest.digest() || self.config != config.fingerprint() {
+        let live_count = forest.live_members_in_creation_order_iter().count();
+        let all_live_digest = live_view_digest_iter(
+            forest.digest(),
+            live_count,
+            forest.live_members_in_creation_order_iter(),
+        );
+        if self.forest_digest != forest.digest()
+            || self.live_view_digest != all_live_digest
+            || self.config != config.fingerprint()
+        {
+            return Err(JointError::StaleAuthority);
+        }
+        Ok(&self.balls)
+    }
+
+    pub(crate) fn validate_filtered<'a>(
+        &'a self,
+        forest: &Forest,
+        view: &FilteredLiveView,
+        config: JointConfig,
+    ) -> Result<&'a [JointBall], JointError> {
+        view.validate(forest)?;
+        if self.forest_digest != forest.digest()
+            || self.live_view_digest != view.digest()
+            || self.config != config.fingerprint()
+        {
             return Err(JointError::StaleAuthority);
         }
         Ok(&self.balls)
@@ -132,6 +296,9 @@ impl JointPlan {
             digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
         };
         for value in self.forest_digest.to_le_bytes() {
+            byte(value);
+        }
+        for value in self.live_view_digest.to_le_bytes() {
             byte(value);
         }
         for value in self.config.plate_z.to_le_bytes() {
@@ -224,6 +391,16 @@ impl JointPlan {
 pub enum JointError {
     #[error("joint policy has a zero bound or exceeds the frozen certificate depth")]
     InvalidLimits,
+    #[error("filtered live-view limits must be nonzero")]
+    InvalidLiveViewLimits,
+    #[error("filtered live view exceeds its member/unrouted-terminal limit")]
+    LiveViewMemberLimit,
+    #[error("filtered live view exceeds its byte limit")]
+    LiveViewBytesLimit,
+    #[error("unrouted terminal list contains a duplicate")]
+    DuplicateUnroutedTerminal,
+    #[error("terminal {0} is not a live registered contact stub")]
+    InvalidUnroutedTerminal(u32),
     #[error("joint planning would exceed its typed work limit")]
     WorkLimit,
     #[error("joint planning would exceed its typed scratch-memory limit")]
@@ -288,9 +465,31 @@ struct CandidateBall {
 /// Retired and quarantined members are unreachable through `live_members`.
 pub fn plan_joint_balls(forest: &Forest, config: JointConfig) -> Result<JointPlan, JointError> {
     validate_limits(config)?;
-    let keys = forest.live_members_in_creation_order();
-    let members: Vec<_> = keys
-        .into_iter()
+    let view = FilteredLiveView::current(
+        forest,
+        &[],
+        LiveViewLimits::new(
+            config.max_work_items,
+            config.max_work_items,
+            config.max_scratch_bytes,
+        ),
+    )?;
+    plan_joint_balls_filtered(forest, &view, config)
+}
+
+/// The production entry: joint clustering and enclosure certification consume the exact same
+/// preflighted filtered live view later lowered and raft-planned.
+pub(crate) fn plan_joint_balls_filtered(
+    forest: &Forest,
+    view: &FilteredLiveView,
+    config: JointConfig,
+) -> Result<JointPlan, JointError> {
+    validate_limits(config)?;
+    view.validate(forest)?;
+    let members: Vec<_> = view
+        .keys()
+        .iter()
+        .copied()
         .filter_map(|key| {
             forest
                 .member(key)
@@ -302,6 +501,7 @@ pub fn plan_joint_balls(forest: &Forest, config: JointConfig) -> Result<JointPla
     if members.is_empty() {
         return Ok(JointPlan {
             forest_digest,
+            live_view_digest: view.digest(),
             config: config_fingerprint,
             balls: Vec::new(),
             certified_dropped: 0,
@@ -312,6 +512,7 @@ pub fn plan_joint_balls(forest: &Forest, config: JointConfig) -> Result<JointPla
     if nodes.is_empty() {
         return Ok(JointPlan {
             forest_digest,
+            live_view_digest: view.digest(),
             config: config_fingerprint,
             balls: Vec::new(),
             certified_dropped: 0,
@@ -458,6 +659,7 @@ pub fn plan_joint_balls(forest: &Forest, config: JointConfig) -> Result<JointPla
     }
     Ok(JointPlan {
         forest_digest,
+        live_view_digest: view.digest(),
         config: config_fingerprint,
         balls,
         certified_dropped,
@@ -851,6 +1053,65 @@ mod tests {
     }
 
     #[test]
+    fn filtered_live_view_preflights_exact_caps_and_excludes_unrouted_before_joint_clustering() {
+        let mut forest = Forest::new();
+        let routed = add_member(
+            &mut forest,
+            [0.0, 0.0, 5.0],
+            [0.0, 0.0, 3.0],
+            0.2,
+            0.4,
+            MemberKind::Stub,
+            Owner::Contact(0),
+            Some(EmbedEnd::Terminalward),
+        );
+        let unrouted = add_member(
+            &mut forest,
+            [9.0, 0.0, 5.0],
+            [9.0, 0.0, 3.0],
+            0.2,
+            0.4,
+            MemberKind::Stub,
+            Owner::Contact(1),
+            Some(EmbedEnd::Terminalward),
+        );
+        forest.register_terminal(0, routed).unwrap();
+        forest.register_terminal(1, unrouted).unwrap();
+        let exact_bytes = 2 * std::mem::size_of::<MemberKey>()
+            + std::mem::size_of::<u32>()
+            + std::mem::size_of::<MemberKey>();
+        let view = FilteredLiveView::current(&forest, &[1], LiveViewLimits::new(2, 1, exact_bytes))
+            .unwrap();
+        assert_eq!(view.keys(), &[routed]);
+        assert_eq!(
+            FilteredLiveView::current(&forest, &[1], LiveViewLimits::new(1, 1, exact_bytes),)
+                .unwrap_err(),
+            JointError::LiveViewMemberLimit
+        );
+        assert_eq!(
+            FilteredLiveView::current(&forest, &[1], LiveViewLimits::new(2, 0, exact_bytes),)
+                .unwrap_err(),
+            JointError::LiveViewMemberLimit
+        );
+        assert_eq!(
+            FilteredLiveView::current(&forest, &[1], LiveViewLimits::new(2, 1, exact_bytes - 1),)
+                .unwrap_err(),
+            JointError::LiveViewBytesLimit
+        );
+
+        let filtered = plan_joint_balls_filtered(&forest, &view, config(-10.0)).unwrap();
+        let all = plan_joint_balls(&forest, config(-10.0)).unwrap();
+        assert!(all.balls.iter().any(|ball| ball.center_mm[0].get() == 9.0));
+        assert!(filtered
+            .balls
+            .iter()
+            .all(|ball| ball.center_mm[0].get() != 9.0));
+        assert!(filtered
+            .validate_filtered(&forest, &view, config(-10.0))
+            .is_ok());
+    }
+
+    #[test]
     fn mid_column_enclosure_drops_but_elbow_direct_witness_keeps() {
         let mut forest = Forest::new();
         add_member(
@@ -1220,6 +1481,7 @@ mod tests {
         };
         let base = JointPlan {
             forest_digest: 5,
+            live_view_digest: 6,
             config: config(-100.0).fingerprint(),
             balls: vec![ball],
             certified_dropped: 2,
@@ -1228,6 +1490,9 @@ mod tests {
         let mut variants = Vec::new();
         let mut changed = base.clone();
         changed.forest_digest += 1;
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.live_view_digest += 1;
         variants.push(changed);
         let mut changed = base.clone();
         changed.config.plate_z ^= 1;

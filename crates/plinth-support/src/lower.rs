@@ -11,7 +11,7 @@ use thiserror::Error;
 
 use crate::{
     forest::{Forest, Member, MemberKey, MemberKind},
-    joints::{JointConfig, JointError, JointPlan},
+    joints::{FilteredLiveView, JointConfig, JointError, JointPlan},
     raft::RaftPlan,
     BuildFrame, FrustumRingNormal, SphereGeometry, SupportPrimitive, SupportSegmentKind,
 };
@@ -159,32 +159,16 @@ pub(crate) enum LoweringError {
 /// terminal contact. This prevents an abandoned/unrouted stub from leaking into physical output.
 pub(crate) fn lower_current(
     forest: &Forest,
+    view: &FilteredLiveView,
     joints: &JointPlan,
     raft: &RaftPlan,
     config: LoweringConfig,
 ) -> Result<LoweredSupportPlan, LoweringError> {
-    let balls = joints.validate(forest, config.joint)?;
-    raft.validate(forest, config.frame.plate_z_mm())
+    let balls = joints.validate_filtered(forest, view, config.joint)?;
+    raft.validate(forest, view, config.frame.plate_z_mm())
         .map_err(|_| LoweringError::StaleAuthority)?;
 
-    let live = forest
-        .live_members_in_creation_order()
-        .into_iter()
-        .filter_map(|key| forest.member(key).map(|member| (key, member)))
-        .filter(|(key, member)| {
-            member.kind() != &MemberKind::Stub || is_routed_stub(forest, *key, member)
-        })
-        .collect::<Vec<_>>();
-    let live_keys = live
-        .iter()
-        .map(|(key, _)| *key)
-        .collect::<std::collections::BTreeSet<_>>();
-    let authorized_ball_count = balls
-        .iter()
-        .filter(|ball| live_keys.contains(&ball.owner_key()))
-        .count();
-
-    let support_count = checked_support_count(&live, authorized_ball_count, config)?;
+    let support_count = checked_support_count(forest, view, balls.len(), config)?;
     let raft_count = raft.primitives().len();
     let total = support_count
         .checked_add(raft_count)
@@ -200,13 +184,11 @@ pub(crate) fn lower_current(
     }
 
     let mut primitives = Vec::with_capacity(total);
-    for (key, member) in live {
-        lower_member(key, member, config, &mut primitives)?;
+    for key in view.keys() {
+        let member = forest.member(*key).ok_or(LoweringError::StaleAuthority)?;
+        lower_member(*key, member, config, &mut primitives)?;
     }
-    for ball in balls
-        .iter()
-        .filter(|ball| live_keys.contains(&ball.owner_key()))
-    {
+    for ball in balls {
         let geometry = SphereGeometry::joint(ball.center_mm());
         let (start_mm, end_mm) = geometry
             .canonical_poles(ball.radius_mm())
@@ -244,20 +226,15 @@ pub(crate) fn lower_current(
     })
 }
 
-fn is_routed_stub(forest: &Forest, key: MemberKey, member: &Member) -> bool {
-    match member.owner() {
-        crate::forest::Owner::Contact(contact) => forest.terminal(*contact) == Some(key),
-        crate::forest::Owner::ModelAnchor(_) | crate::forest::Owner::Generated { .. } => false,
-    }
-}
-
 fn checked_support_count(
-    live: &[(MemberKey, &Member)],
+    forest: &Forest,
+    view: &FilteredLiveView,
     ball_count: usize,
     config: LoweringConfig,
 ) -> Result<usize, LoweringError> {
     let mut count = ball_count;
-    for (key, member) in live {
+    for key in view.keys() {
+        let member = forest.member(*key).ok_or(LoweringError::StaleAuthority)?;
         count = count
             .checked_add(if member.kind() == &MemberKind::Stub {
                 2
@@ -324,7 +301,9 @@ fn lower_member(
         return Err(LoweringError::ZeroLengthMember { member: key });
     }
     let embedded_taper = member.embed_end().is_some()
-        && member.terminal_radius_mm().get() != member.rootward_radius_mm().get();
+        && (member.terminal_radius_mm().get().get() - member.rootward_radius_mm().get().get())
+            .abs()
+            > ZERO_LENGTH_MM;
     out.push(frustum(
         if embedded_taper {
             SupportSegmentKind::ContactTaper
@@ -349,7 +328,7 @@ fn lower_stub(
 ) -> Result<(), LoweringError> {
     let p0 = member.p0_mm().map(Finite::get);
     let p1 = member.p1_mm().map(Finite::get);
-    let axis = std::array::from_fn(|i| p1[i] - p0[i]);
+    let axis: [f64; 3] = std::array::from_fn(|i| p1[i] - p0[i]);
     let length = axis.iter().map(|value| value * value).sum::<f64>().sqrt();
     if length <= ZERO_LENGTH_MM {
         return Err(LoweringError::ZeroLengthMember { member: key });
@@ -357,12 +336,18 @@ fn lower_stub(
     let unit = axis.map(|value| value / length);
     let ball_radius =
         positive(config.tip_ball_factor.get() * member.terminal_radius_mm().get().get())?;
-    let center = std::array::from_fn(|i| p0[i] + ball_radius.get() * unit[i]);
-    let geometry =
-        SphereGeometry::tip_from_f64(center, unit).map_err(|_| LoweringError::InvalidGeometry)?;
-    let (start_mm, end_mm) = geometry
-        .canonical_poles(ball_radius)
-        .map_err(|_| LoweringError::InvalidGeometry)?;
+    let center: [f64; 3] = std::array::from_fn(|i| p0[i] + ball_radius.get() * unit[i]);
+    let start_mm = member.p0_mm();
+    let end_raw: [f64; 3] = std::array::from_fn(|i| p0[i] + 2.0 * ball_radius.get() * unit[i]);
+    let end_mm = finite3(end_raw)?;
+    let geometry = SphereGeometry::tip_with_exact_record_poles(
+        finite3(center)?,
+        finite3(unit)?,
+        ball_radius,
+        start_mm,
+        end_mm,
+    )
+    .map_err(|_| LoweringError::InvalidGeometry)?;
     out.push(SupportPrimitive {
         segment_kind: SupportSegmentKind::ContactSphere,
         start_mm,
@@ -375,12 +360,7 @@ fn lower_stub(
     });
     out.push(frustum(
         SupportSegmentKind::ContactTaper,
-        center
-            .map(finite)
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?
-            .try_into()
-            .map_err(|_| LoweringError::InvalidGeometry)?,
+        finite3(center)?,
         member.p1_mm(),
         member.terminal_radius_mm().get(),
         member.rootward_radius_mm().get(),
@@ -451,6 +431,10 @@ fn finite(value: f64) -> Result<Finite, LoweringError> {
     Finite::new(value).map_err(|_| LoweringError::InvalidGeometry)
 }
 
+fn finite3(values: [f64; 3]) -> Result<[Finite; 3], LoweringError> {
+    Ok([finite(values[0])?, finite(values[1])?, finite(values[2])?])
+}
+
 fn positive(value: f64) -> Result<PositiveFinite, LoweringError> {
     PositiveFinite::new(value).map_err(|_| LoweringError::InvalidGeometry)
 }
@@ -482,7 +466,24 @@ fn primitive_digest(
             FrustumRingNormal::SegmentAxis => 0,
             FrustumRingNormal::PlateZ => 1,
         });
-        digest.byte(u8::from(primitive.sphere_geometry.is_some()));
+        match primitive.sphere_geometry.as_ref() {
+            Some(geometry) => {
+                if let Some((center, axis)) = geometry.tip_authority() {
+                    digest.byte(1);
+                    for value in center.into_iter().chain(axis) {
+                        digest.u64(value.get().to_bits());
+                    }
+                } else if let Some(center) = geometry.joint_center() {
+                    digest.byte(2);
+                    for value in center {
+                        digest.u64(value.get().to_bits());
+                    }
+                } else {
+                    unreachable!("closed sphere geometry kind has one authority")
+                }
+            }
+            None => digest.byte(0),
+        }
     }
     ContentDigest(digest.finish())
 }
@@ -521,8 +522,8 @@ mod tests {
     use super::*;
     use crate::{
         forest::{EmbedEnd, MemberSpec, Owner, RootwardEndRadius, TerminalEndRadius},
-        joints::plan_joint_balls,
-        raft::plan_bottom_connected,
+        joints::{plan_joint_balls_filtered, LiveViewLimits},
+        raft::{plan_bottom_connected, RaftLimits},
     };
 
     const THREAD_SIGNATURE: &str = "LOWERING_DIGEST=";
@@ -599,8 +600,8 @@ mod tests {
             3,
             None,
         ));
-        // A live but unregistered stub is an abandoned route, not physical output.
-        forest.add_member(member(
+        // A live registered stub explicitly listed as unrouted is excluded before joint planning.
+        let unrouted = forest.add_member(member(
             [9.0, 0.0, 5.0],
             [9.0, 0.0, 3.0],
             [0.2, 0.4],
@@ -608,6 +609,7 @@ mod tests {
             4,
             Some(EmbedEnd::Terminalward),
         ));
+        forest.register_terminal(4, unrouted).unwrap();
         (
             forest,
             BuildFrame::new(f(0.0), r(5.0)),
@@ -618,9 +620,17 @@ mod tests {
     fn lower_fixture(max_primitives: usize, max_bytes: usize) -> LoweredSupportPlan {
         let (forest, frame, layers) = fixture();
         let cfg = LoweringConfig::current(frame, &layers, max_primitives, max_bytes).unwrap();
-        let joints = plan_joint_balls(&forest, cfg.joint).unwrap();
-        let raft = plan_bottom_connected(&forest, frame.plate_z_mm()).unwrap();
-        lower_current(&forest, &joints, &raft, cfg).unwrap()
+        let view = FilteredLiveView::current(&forest, &[4], LiveViewLimits::new(100, 10, 100_000))
+            .unwrap();
+        let joints = plan_joint_balls_filtered(&forest, &view, cfg.joint).unwrap();
+        let raft = plan_bottom_connected(
+            &forest,
+            &view,
+            frame.plate_z_mm(),
+            RaftLimits::new(100, 100, 200, 100_000),
+        )
+        .unwrap();
+        lower_current(&forest, &view, &joints, &raft, cfg).unwrap()
     }
 
     #[test]
@@ -682,6 +692,70 @@ mod tests {
     }
 
     #[test]
+    fn angled_contact_poles_and_embedded_taper_boundary_match_python_float_arithmetic() {
+        let mut forest = Forest::new();
+        let p0 = [0.1, -0.2, 3.0];
+        let p1 = [1.7, 2.3, 4.1];
+        let stub = forest.add_member(member(
+            p0,
+            p1,
+            [0.2, 0.4],
+            MemberKind::Stub,
+            11,
+            Some(EmbedEnd::Terminalward),
+        ));
+        forest.register_terminal(11, stub).unwrap();
+        for (ordinal, delta) in [(20, 0.5e-9), (21, 1.0e-9), (22, 2.0e-9)] {
+            forest.add_member(member(
+                [ordinal as f64, 0.3, 4.0],
+                [ordinal as f64 + 1.0, 1.7, 5.2],
+                [0.5, 0.5 + delta],
+                MemberKind::Shoot,
+                ordinal,
+                Some(EmbedEnd::Terminalward),
+            ));
+        }
+        let frame = BuildFrame::new(f(-10.0), r(5.0));
+        let layers = LayerPlan::new(0.0, vec![0.05; 400]).unwrap();
+        let cfg = LoweringConfig::current(frame, &layers, 100, 100_000).unwrap();
+        let view =
+            FilteredLiveView::current(&forest, &[], LiveViewLimits::new(10, 1, 10_000)).unwrap();
+        let joints = plan_joint_balls_filtered(&forest, &view, cfg.joint).unwrap();
+        let raft = plan_bottom_connected(
+            &forest,
+            &view,
+            frame.plate_z_mm(),
+            RaftLimits::new(10, 10, 20, 20_000),
+        )
+        .unwrap();
+        let plan = lower_current(&forest, &view, &joints, &raft, cfg).unwrap();
+        let sphere = &plan.primitives[0];
+        assert_eq!(
+            sphere.start_mm.map(Finite::get).map(f64::to_bits),
+            p0.map(f64::to_bits)
+        );
+        let axis = std::array::from_fn::<_, 3, _>(|i| p1[i] - p0[i]);
+        let length = axis.iter().map(|value| value * value).sum::<f64>().sqrt();
+        let unit = axis.map(|value| value / length);
+        let radius = 1.5 * 0.2;
+        let expected_end = std::array::from_fn::<_, 3, _>(|i| p0[i] + 2.0 * radius * unit[i]);
+        assert_eq!(
+            sphere.end_mm.map(Finite::get).map(f64::to_bits),
+            expected_end.map(f64::to_bits),
+            "record poles must be authored directly, not reconstructed from rounded center"
+        );
+
+        let kinds = &plan.primitives[2..5];
+        for (primitive, delta) in kinds.iter().zip([0.5e-9, 1.0e-9, 2.0e-9]) {
+            let expected_taper = ((0.5_f64 + delta) - 0.5).abs() > 1e-9;
+            assert_eq!(
+                primitive.segment_kind == SupportSegmentKind::ContactTaper,
+                expected_taper
+            );
+        }
+    }
+
+    #[test]
     fn nonconstant_layers_stale_authority_and_caps_fail_by_name() {
         let (mut forest, frame, layers) = fixture();
         let variable = LayerPlan::new(0.0, vec![0.05, 0.04]).unwrap();
@@ -691,9 +765,17 @@ mod tests {
         );
 
         let cfg = LoweringConfig::current(frame, &layers, 100, 100_000).unwrap();
-        let joints = plan_joint_balls(&forest, cfg.joint).unwrap();
-        let raft = plan_bottom_connected(&forest, frame.plate_z_mm()).unwrap();
-        let plan = lower_current(&forest, &joints, &raft, cfg).unwrap();
+        let view = FilteredLiveView::current(&forest, &[4], LiveViewLimits::new(100, 10, 100_000))
+            .unwrap();
+        let joints = plan_joint_balls_filtered(&forest, &view, cfg.joint).unwrap();
+        let raft = plan_bottom_connected(
+            &forest,
+            &view,
+            frame.plate_z_mm(),
+            RaftLimits::new(100, 100, 200, 100_000),
+        )
+        .unwrap();
+        let plan = lower_current(&forest, &view, &joints, &raft, cfg).unwrap();
         forest.add_member(member(
             [4.0, 0.0, 3.0],
             [4.0, 0.0, 0.0],
@@ -711,21 +793,29 @@ mod tests {
         let total = exact.primitives.len();
         let (forest, frame, layers) = fixture();
         let joints_cfg = LoweringConfig::current(frame, &layers, 100, 100_000).unwrap();
-        let joints = plan_joint_balls(&forest, joints_cfg.joint).unwrap();
-        let raft = plan_bottom_connected(&forest, frame.plate_z_mm()).unwrap();
+        let view = FilteredLiveView::current(&forest, &[4], LiveViewLimits::new(100, 10, 100_000))
+            .unwrap();
+        let joints = plan_joint_balls_filtered(&forest, &view, joints_cfg.joint).unwrap();
+        let raft = plan_bottom_connected(
+            &forest,
+            &view,
+            frame.plate_z_mm(),
+            RaftLimits::new(100, 100, 200, 100_000),
+        )
+        .unwrap();
         let capped = LoweringConfig::current(frame, &layers, total - 1, 100_000).unwrap();
         assert_eq!(
-            lower_current(&forest, &joints, &raft, capped).unwrap_err(),
+            lower_current(&forest, &view, &joints, &raft, capped).unwrap_err(),
             LoweringError::PrimitiveLimit
         );
         let byte_cap = total * size_of::<SupportPrimitive>();
         let capped = LoweringConfig::current(frame, &layers, total, byte_cap - 1).unwrap();
         assert_eq!(
-            lower_current(&forest, &joints, &raft, capped).unwrap_err(),
+            lower_current(&forest, &view, &joints, &raft, capped).unwrap_err(),
             LoweringError::PrimitiveBytesLimit
         );
         let exact = LoweringConfig::current(frame, &layers, total, byte_cap).unwrap();
-        assert!(lower_current(&forest, &joints, &raft, exact).is_ok());
+        assert!(lower_current(&forest, &view, &joints, &raft, exact).is_ok());
     }
 
     #[test]
