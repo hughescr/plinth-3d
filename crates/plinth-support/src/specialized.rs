@@ -121,8 +121,16 @@ impl SpecializedDemand {
         self.coverage_face_id
     }
     #[must_use]
+    pub const fn coverage_component_id(&self) -> u32 {
+        self.coverage_component_id
+    }
+    #[must_use]
     pub const fn nominated_position_mm(&self) -> [f64; 3] {
         self.nominated_position_mm
+    }
+    #[must_use]
+    pub const fn nominated_normal(&self) -> [f64; 3] {
+        self.nominated_normal
     }
 }
 
@@ -300,6 +308,7 @@ impl SpecializedContactPlan {
                 hash.u32(demand.coverage_face_id);
                 hash.u32(demand.coverage_component_id);
                 hash.point3(demand.nominated_position_mm);
+                hash.point3(demand.nominated_normal);
             }
         }
         for row in self.load_partition.rows() {
@@ -1095,10 +1104,9 @@ fn regular_dispositions(
                 .expect("one satisfaction row per gathered region point");
             for &point_id in &neighbors.point_ids[range] {
                 let (contact_index, owner, point) = regular[point_id as usize];
-                if owner != demand.owner_island_id {
-                    continue;
-                }
-                out[demand_index].covered = true;
+                // Python's exact mixed-class prepass is owner-independent:
+                // one physical axis retains the regular seat while carrying
+                // every specialized obligation it exactly satisfies.
                 if same_point(point, demand.nominated_position_mm) {
                     out[demand_index].exact_regular = Some(
                         out[demand_index]
@@ -1106,6 +1114,10 @@ fn regular_dispositions(
                             .map_or(contact_index, |old| old.min(contact_index)),
                     );
                 }
+                if owner != demand.owner_island_id {
+                    continue;
+                }
+                out[demand_index].covered = true;
             }
         }
     }
@@ -1115,6 +1127,13 @@ fn regular_dispositions(
             continue;
         }
         for &(contact_index, owner, point) in &regular {
+            if same_point(point, demand.nominated_position_mm) {
+                out[demand_index].exact_regular = Some(
+                    out[demand_index]
+                        .exact_regular
+                        .map_or(contact_index, |old| old.min(contact_index)),
+                );
+            }
             if owner != demand.owner_island_id {
                 continue;
             }
@@ -1122,17 +1141,119 @@ fn regular_dispositions(
             check_satisfaction_limit(local_tests, limits)?;
             if satisfies(point, demand, layers, attach_reach) {
                 out[demand_index].covered = true;
-                if same_point(point, demand.nominated_position_mm) {
-                    out[demand_index].exact_regular = Some(
-                        out[demand_index]
-                            .exact_regular
-                            .map_or(contact_index, |old| old.min(contact_index)),
-                    );
-                }
             }
         }
     }
     Ok(out)
+}
+
+fn attach_exact_mixed_contacts(
+    contacts: &mut Vec<WorkingContact>,
+    layers: &LayerPlan,
+    attach_reach: f64,
+    limits: SpecializedLimits,
+    telemetry: &mut MergeAllocationTelemetry,
+) -> Result<usize, SpecializedError> {
+    let mut attached = 0usize;
+    let mut descriptor_operations = 0usize;
+    loop {
+        check_merge_pair_limit(contacts.len(), limits.max_merge_pairs)?;
+        let mut chosen = None;
+        'pairs: for left in 0..contacts.len() {
+            for right in left + 1..contacts.len() {
+                if !same_point(contacts[left].position_mm, contacts[right].position_mm) {
+                    continue;
+                }
+                let specialized = (
+                    !contacts[left].demands.is_empty(),
+                    !contacts[right].demands.is_empty(),
+                );
+                if specialized.0 == specialized.1 {
+                    continue;
+                }
+                let (regular_index, specialized_index) = if specialized.0 {
+                    (right, left)
+                } else {
+                    (left, right)
+                };
+                let specialized_contact = &contacts[specialized_index];
+                let satisfaction_work =
+                    specialized_contact
+                        .demands
+                        .iter()
+                        .try_fold(0usize, |total, demand| {
+                            total
+                                .checked_add(demand_satisfaction_work(demand)?)
+                                .ok_or(SpecializedError::GateResourceOverflow)
+                        })?;
+                let required = descriptor_operations
+                    .checked_add(satisfaction_work)
+                    .ok_or(SpecializedError::GateResourceOverflow)?;
+                if required > limits.max_merge_descriptor_operations {
+                    return Err(SpecializedError::MergeDescriptorOperationLimit {
+                        required,
+                        limit: limits.max_merge_descriptor_operations,
+                    });
+                }
+                descriptor_operations = required;
+                let regular_position = contacts[regular_index].position_mm;
+                if !specialized_contact
+                    .demands
+                    .iter()
+                    .all(|demand| satisfies(regular_position, demand, layers, attach_reach))
+                {
+                    continue;
+                }
+                let representative = specialized_contact
+                    .demands
+                    .iter()
+                    .map(demand_representative_key)
+                    .min_by(compare_representative_keys)
+                    .expect("specialized class carries a demand");
+                chosen = Some(MergeProposal {
+                    left,
+                    right,
+                    representative_component_id: representative.component_id,
+                    representative_position_mm: representative.position_mm,
+                    representative_face_id: representative.face_id,
+                    representative_normal: representative.normal,
+                    position_mm: regular_position,
+                    normal: contacts[regular_index].normal,
+                });
+                break 'pairs;
+            }
+        }
+        let Some(proposal) = chosen else {
+            break;
+        };
+        let required_iterations = attached
+            .checked_add(1)
+            .ok_or(SpecializedError::GateResourceOverflow)?;
+        if required_iterations > limits.max_merge_iterations {
+            return Err(SpecializedError::MergeIterationLimit {
+                required: required_iterations,
+                limit: limits.max_merge_iterations,
+            });
+        }
+        let mut merged = Some(commit_merge(
+            &proposal,
+            contacts,
+            limits.max_merge_commit_bytes,
+            telemetry,
+        )?);
+        let mut next = Vec::with_capacity(contacts.len().saturating_sub(1));
+        for (index, contact) in contacts.drain(..).enumerate() {
+            if index == proposal.left {
+                next.push(merged.take().expect("left index is visited once"));
+            } else if index != proposal.right {
+                next.push(contact);
+            }
+        }
+        next.sort_by(compare_contacts);
+        *contacts = next;
+        attached = required_iterations;
+    }
+    Ok(attached)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1153,6 +1274,9 @@ fn consolidate(
     limits: SpecializedLimits,
 ) -> Result<SpecializedGateEvidence, SpecializedError> {
     contacts.sort_by(compare_contacts);
+    let mut telemetry = MergeAllocationTelemetry::default();
+    let mut iterations =
+        attach_exact_mixed_contacts(contacts, layers, attach_reach, limits, &mut telemetry)?;
     let coverage_radius =
         selection_config.coverage_radius_factor.get() * selection_config.target_spacing_mm.get();
     let initial_baseline = evaluate_gate_batch(
@@ -1174,8 +1298,6 @@ fn consolidate(
         limits,
     )?[0];
     let mut total_proposals = 0usize;
-    let mut iterations = 0usize;
-    let mut telemetry = MergeAllocationTelemetry::default();
     loop {
         check_merge_pair_limit(contacts.len(), limits.max_merge_pairs)?;
         let mut proposals = Vec::new();
@@ -1313,30 +1435,22 @@ fn check_merge_proposal_limit(required: usize, limit: usize) -> Result<(), Speci
 struct MergeProposal {
     left: usize,
     right: usize,
-    representative_component_id: Option<u32>,
-    representative_position_mm: Option<[f64; 3]>,
-    representative_face_id: Option<u32>,
+    representative_component_id: u32,
+    representative_position_mm: [f64; 3],
+    representative_face_id: u32,
+    representative_normal: [f64; 3],
     position_mm: [f64; 3],
     normal: [f64; 3],
 }
 
 impl MergeProposal {
-    const fn representative_key(&self) -> Option<RepresentativeKey> {
-        let Some(component_id) = self.representative_component_id else {
-            return None;
-        };
-        let Some(face_id) = self.representative_face_id else {
-            return None;
-        };
-        let Some(position_mm) = self.representative_position_mm else {
-            return None;
-        };
-        Some(RepresentativeKey {
-            component_id,
-            position_mm,
-            face_id,
-            normal: self.normal,
-        })
+    const fn representative_key(&self) -> RepresentativeKey {
+        RepresentativeKey {
+            component_id: self.representative_component_id,
+            position_mm: self.representative_position_mm,
+            face_id: self.representative_face_id,
+            normal: self.representative_normal,
+        }
     }
 }
 
@@ -1354,6 +1468,15 @@ fn compare_representative_keys(left: &RepresentativeKey, right: &RepresentativeK
         .then_with(|| compare_point3(left.position_mm, right.position_mm))
         .then_with(|| left.face_id.cmp(&right.face_id))
         .then_with(|| compare_point3(left.normal, right.normal))
+}
+
+const fn demand_representative_key(demand: &SpecializedDemand) -> RepresentativeKey {
+    RepresentativeKey {
+        component_id: demand.coverage_component_id,
+        position_mm: demand.nominated_position_mm,
+        face_id: demand.coverage_face_id,
+        normal: demand.nominated_normal,
+    }
 }
 
 fn gate_not_worse(
@@ -2318,6 +2441,9 @@ fn gather_pair_proposals(
     }
     let left = &contacts[left_index];
     let right = &contacts[right_index];
+    if left.demands.is_empty() || right.demands.is_empty() {
+        return Ok(());
+    }
     let classes = (
         !left.regular_routes.is_empty(),
         !right.regular_routes.is_empty(),
@@ -2340,15 +2466,15 @@ fn gather_pair_proposals(
     {
         return Ok(());
     }
-    if let Some(component) = demands().next().map(|demand| demand.coverage_component_id) {
-        if demands().any(|demand| demand.coverage_component_id != component) {
-            return Ok(());
-        }
-    } else if !(classes.0 && classes.1) {
+    let component = demands()
+        .next()
+        .expect("both specialized contacts carry a demand")
+        .coverage_component_id;
+    if demands().any(|demand| demand.coverage_component_id != component) {
         return Ok(());
     }
     let demand_count = left.demands.len().saturating_add(right.demands.len());
-    let candidate_count = demand_count.max(1);
+    let candidate_count = demand_count;
     let satisfaction_work = demands().try_fold(0usize, |total, demand| {
         total
             .checked_add(demand_satisfaction_work(demand)?)
@@ -2372,7 +2498,7 @@ fn gather_pair_proposals(
         });
     }
     *descriptor_operations = required_work;
-    let mut append = |representative: Option<RepresentativeKey>,
+    let mut append = |representative: RepresentativeKey,
                       position_mm: [f64; 3],
                       normal: [f64; 3]|
      -> Result<(), SpecializedError> {
@@ -2401,54 +2527,40 @@ fn gather_pair_proposals(
         proposals.push(MergeProposal {
             left: left_index,
             right: right_index,
-            representative_component_id: representative.map(|key| key.component_id),
-            representative_position_mm: representative.map(|key| key.position_mm),
-            representative_face_id: representative.map(|key| key.face_id),
+            representative_component_id: representative.component_id,
+            representative_position_mm: representative.position_mm,
+            representative_face_id: representative.face_id,
+            representative_normal: representative.normal,
             position_mm,
             normal,
         });
         Ok(())
     };
-    if demand_count == 0 {
-        let locked = if classes.0 { left } else { right };
-        append(None, locked.position_mm, locked.normal)?;
-    } else {
-        let mut last = None;
-        loop {
-            let next = demands()
-                .map(|demand| RepresentativeKey {
-                    component_id: demand.coverage_component_id,
-                    position_mm: demand.nominated_position_mm,
-                    face_id: demand.coverage_face_id,
-                    normal: demand.nominated_normal,
-                })
-                .filter(|key| {
-                    (!shared_regular.0 || same_point(key.position_mm, left.position_mm))
-                        && (!shared_regular.1 || same_point(key.position_mm, right.position_mm))
-                })
-                .filter(|key| {
-                    last.is_none_or(|last| compare_representative_keys(key, &last).is_gt())
-                })
-                .min_by(compare_representative_keys);
-            let Some(next) = next else {
-                break;
-            };
-            let physical = if shared_regular.0 {
-                left
-            } else if shared_regular.1 {
-                right
-            } else if classes.0 {
-                left
-            } else if classes.1 {
-                right
-            } else {
-                append(Some(next), next.position_mm, next.normal)?;
-                last = Some(next);
-                continue;
-            };
-            append(Some(next), physical.position_mm, physical.normal)?;
+    let mut last = None;
+    loop {
+        let next = demands()
+            .map(demand_representative_key)
+            .filter(|key| {
+                !(shared_regular.0 || shared_regular.1)
+                    || (shared_regular.0 && same_point(key.position_mm, left.position_mm))
+                    || (shared_regular.1 && same_point(key.position_mm, right.position_mm))
+            })
+            .filter(|key| last.is_none_or(|last| compare_representative_keys(key, &last).is_gt()))
+            .min_by(compare_representative_keys);
+        let Some(next) = next else {
+            break;
+        };
+        let physical = if shared_regular.0 {
+            left
+        } else if shared_regular.1 {
+            right
+        } else {
+            append(next, next.position_mm, next.normal)?;
             last = Some(next);
-        }
+            continue;
+        };
+        append(next, physical.position_mm, physical.normal)?;
+        last = Some(next);
     }
     Ok(())
 }
@@ -2527,9 +2639,8 @@ fn commit_merge(
     byte_limit: usize,
     telemetry: &mut MergeAllocationTelemetry,
 ) -> Result<WorkingContact, SpecializedError> {
-    if let Some(key) = proposal.representative_key() {
-        debug_assert_eq!(compare_representative_keys(&key, &key), Ordering::Equal);
-    }
+    let key = proposal.representative_key();
+    debug_assert_eq!(compare_representative_keys(&key, &key), Ordering::Equal);
     let left = &contacts[proposal.left];
     let right = &contacts[proposal.right];
     let route_bytes = left
@@ -2704,6 +2815,7 @@ fn compare_demands(left: &SpecializedDemand, right: &SpecializedDemand) -> Order
         .cmp(&right.coverage_component_id)
         .then_with(|| compare_point3(left.nominated_position_mm, right.nominated_position_mm))
         .then_with(|| left.coverage_face_id.cmp(&right.coverage_face_id))
+        .then_with(|| compare_point3(left.nominated_normal, right.nominated_normal))
         .then_with(|| left.owner_island_id.cmp(&right.owner_island_id))
         .then_with(|| (left.kind as u8).cmp(&(right.kind as u8)))
         .then_with(|| compare_points3(&left.region_points_mm, &right.region_points_mm))
@@ -2971,7 +3083,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_regular_seat_is_locked_and_carries_the_specialized_demand() {
+    fn pure_regular_and_specialized_contacts_are_never_merge_candidates() {
         let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
         let demand = minimum_demand(0, 2, 7, [1.0, 2.0, 0.1]);
         let contacts = vec![
@@ -2989,17 +3101,7 @@ mod tests {
             WorkingContact::specialized(demand),
         ];
         let proposals = test_pair_proposals(&contacts, &layers, 0.2, 2.5);
-        assert_eq!(proposals.len(), 1);
-        let proposal = &proposals[0];
-        let merged = commit_merge(
-            proposal,
-            &contacts,
-            usize::MAX,
-            &mut MergeAllocationTelemetry::default(),
-        )
-        .unwrap();
-        assert_eq!(merged.regular_routes[0].candidate_id, 44);
-        assert_eq!(merged.demands.len(), 1);
+        assert!(proposals.is_empty());
     }
 
     #[test]
@@ -3203,8 +3305,8 @@ mod tests {
             2.5,
         );
         assert_eq!(proposals.len(), 2);
-        assert_eq!(proposals[0].representative_face_id, Some(1));
-        assert_eq!(proposals[1].representative_face_id, Some(10));
+        assert_eq!(proposals[0].representative_face_id, 1);
+        assert_eq!(proposals[1].representative_face_id, 10);
     }
 
     #[test]
@@ -3225,33 +3327,25 @@ mod tests {
                     coverage_face_id: 99,
                     component_id: 88,
                 }],
-                demands: vec![face_ten, face_one],
+                demands: vec![face_ten],
             },
-            WorkingContact {
-                position_mm: position,
-                normal: [0.0, 0.0, -1.0],
-                regular_routes: vec![RegularContactRoute {
-                    candidate_id: 45,
-                    owner_island_id: 0,
-                    coverage_face_id: 98,
-                    component_id: 88,
-                }],
-                demands: Vec::new(),
-            },
+            WorkingContact::specialized(face_one),
         ];
         let proposals = test_pair_proposals(&contacts, &layers, 0.2, 2.5);
         assert_eq!(proposals.len(), 2);
-        assert_eq!(proposals[0].representative_component_id, Some(7));
-        assert_eq!(proposals[0].representative_face_id, Some(1));
-        // Logical keys still enumerate the demands, while the committed physical
-        // fields retain the first shared regular contact exactly.
+        assert_eq!(proposals[0].representative_component_id, 7);
+        assert_eq!(proposals[0].representative_face_id, 1);
+        assert_eq!(proposals[0].representative_normal, [1.0, 0.0, 0.0]);
+        // Logical keys still enumerate demand provenance while physical fields
+        // retain the shared regular contact exactly.
         assert_eq!(proposals[0].normal, contacts[0].normal);
-        assert_eq!(proposals[1].representative_component_id, Some(7));
-        assert_eq!(proposals[1].representative_face_id, Some(10));
+        assert_eq!(proposals[1].representative_component_id, 7);
+        assert_eq!(proposals[1].representative_face_id, 10);
+        assert_eq!(proposals[1].representative_normal, [-1.0, 0.0, 0.0]);
         assert_eq!(proposals[1].normal, contacts[0].normal);
         assert!(proposals
             .iter()
-            .all(|proposal| proposal.representative_face_id != Some(99)));
+            .all(|proposal| proposal.representative_face_id != 99));
     }
 
     #[test]
@@ -3274,43 +3368,36 @@ mod tests {
         .unwrap();
         assert_eq!(combined.demands.len(), 2);
 
-        let attach_contacts = vec![
-            WorkingContact {
-                position_mm: locked,
-                normal: [0.0, 0.0, -1.0],
-                regular_routes: vec![RegularContactRoute {
-                    candidate_id: 44,
-                    owner_island_id: 0,
-                    coverage_face_id: 99,
-                    component_id: 7,
-                }],
-                demands: Vec::new(),
-            },
-            combined,
-        ];
-        let attach_proposals = test_pair_proposals(&attach_contacts, &layers, 0.2, 2.5);
-        let shared = commit_merge(
-            &attach_proposals[0],
-            &attach_contacts,
-            usize::MAX,
-            &mut MergeAllocationTelemetry::default(),
-        )
-        .unwrap();
         let shared_proposals = test_pair_proposals(
             &[
-                shared,
-                WorkingContact::specialized(minimum_demand(2, 3, 7, locked)),
+                WorkingContact {
+                    position_mm: locked,
+                    normal: [0.0, 0.0, -1.0],
+                    regular_routes: vec![RegularContactRoute {
+                        candidate_id: 44,
+                        owner_island_id: 0,
+                        coverage_face_id: 99,
+                        component_id: 7,
+                    }],
+                    // An exact regular disposition makes this contact
+                    // specialized before consolidation begins.
+                    demands: vec![minimum_demand(2, 3, 7, locked)],
+                },
+                combined,
             ],
             &layers,
             0.2,
             2.5,
         );
         assert_eq!(shared_proposals.len(), 2);
-        assert_eq!(shared_proposals[0].representative_face_id, Some(1));
-        assert_eq!(shared_proposals[1].representative_face_id, Some(3));
+        assert_eq!(shared_proposals[0].representative_face_id, 1);
+        assert_eq!(shared_proposals[1].representative_face_id, 3);
         assert!(shared_proposals
             .iter()
-            .all(|proposal| proposal.representative_position_mm == Some(locked)));
+            .all(|proposal| proposal.representative_face_id != 2));
+        assert!(shared_proposals
+            .iter()
+            .all(|proposal| proposal.representative_position_mm == locked));
     }
 
     #[test]
@@ -3340,6 +3427,11 @@ mod tests {
             let proposals = test_pair_proposals(&contacts, &layers, 0.2, 2.5);
             assert!(!proposals.is_empty());
             assert_eq!(proposals[0].normal, regular_normal);
+            assert_ne!(proposals[0].representative_normal, regular_normal);
+            assert_eq!(
+                proposals[0].representative_key().normal,
+                proposals[0].representative_normal
+            );
             shared = commit_merge(
                 &proposals[0],
                 &contacts,
@@ -3742,9 +3834,10 @@ mod tests {
         };
         let matching = minimum_demand(3, 2, 7, [0.0, 0.0, 0.0]);
         let other_owner = minimum_demand(4, 2, 7, [0.0, 0.0, 0.0]);
+        let exact_other_owner = minimum_demand(4, 2, 7, [0.1, 0.0, 0.0]);
         let dispositions = regular_dispositions(
             &[regular],
-            &[matching, other_owner],
+            &[matching, other_owner, exact_other_owner],
             &layers,
             0.2,
             SpecializedLimits::production(),
@@ -3753,6 +3846,54 @@ mod tests {
         assert!(dispositions[0].covered);
         assert_eq!(dispositions[0].exact_regular, None);
         assert!(!dispositions[1].covered);
+        assert_eq!(dispositions[2].exact_regular, Some(0));
+        assert!(!dispositions[2].covered);
+    }
+
+    #[test]
+    fn different_owner_exact_prepass_makes_duplicate_invariant_unreachable() {
+        let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
+        let position = [0.1, 0.0, 0.0];
+        let regular_normal = [0.0, 0.0, -1.0];
+        let mut demand = minimum_demand(4, 2, 7, position);
+        demand.nominated_normal = [1.0, 0.0, 0.0];
+        let mut physical = vec![
+            WorkingContact {
+                position_mm: position,
+                normal: regular_normal,
+                regular_routes: vec![RegularContactRoute {
+                    candidate_id: 7,
+                    owner_island_id: 3,
+                    coverage_face_id: 2,
+                    component_id: 7,
+                }],
+                demands: Vec::new(),
+            },
+            WorkingContact::specialized(demand),
+        ];
+        let attached = attach_exact_mixed_contacts(
+            &mut physical,
+            &layers,
+            0.2,
+            SpecializedLimits::production(),
+            &mut MergeAllocationTelemetry::default(),
+        )
+        .unwrap();
+        assert_eq!(attached, 1);
+        canonicalize_and_validate(
+            &mut physical,
+            &[SupportIsland {
+                id: 4,
+                face_ids: vec![2],
+            }],
+            &layers,
+            0.2,
+        )
+        .unwrap();
+        assert_eq!(physical.len(), 1);
+        assert_eq!(physical[0].normal, regular_normal);
+        assert_eq!(physical[0].regular_routes[0].owner_island_id, 3);
+        assert_eq!(physical[0].demands[0].owner_island_id, 4);
     }
 
     fn perception_config<'a>(delicacy: &'a [f64]) -> SupportPerceptionConfig<'a> {
@@ -3830,32 +3971,32 @@ mod tests {
             (
                 "overhang table",
                 make_overhang_table().unwrap(),
-                // Updated after preserving the committed physical regular normal;
-                // the intermediate value encoded the incorrect demand normal.
+                // Updated for exact two-stage Python parity: the owner-independent
+                // mixed-class attach prepass precedes specialized-only gating.
                 // This is not a corpus, baseline, physics, or reference re-freeze.
-                2_380_499_546_943_577_664_u64,
+                7_715_902_557_646_144_526_u64,
                 (95, 51_200, 14),
-                (6, 10, 4),
+                (6, 0, 4),
             ),
             (
                 "raking blade",
                 make_raking_blade().unwrap(),
-                // Updated after preserving the committed physical regular fields;
-                // the intermediate value encoded incomplete shared-regular parity.
+                // Updated for exact two-stage Python parity: the owner-independent
+                // mixed-class attach prepass precedes specialized-only gating.
                 // This is not a corpus, baseline, physics, or reference re-freeze.
-                12_391_582_424_958_741_190_u64,
+                16_249_388_873_798_499_314_u64,
                 (40, 40_192, 13),
-                (3, 43, 8),
+                (3, 10, 8),
             ),
             (
                 "thin fin",
                 make_thin_fin().unwrap(),
-                // Updated after preserving the committed physical regular fields;
-                // the intermediate value encoded incomplete shared-regular parity.
+                // Updated for exact two-stage Python parity: the owner-independent
+                // mixed-class attach prepass precedes specialized-only gating.
                 // This is not a corpus, baseline, physics, or reference re-freeze.
-                1_794_713_636_406_357_628_u64,
+                4_087_941_529_862_264_113_u64,
                 (19, 20_480, 2),
-                (2, 1, 1),
+                (2, 0, 1),
             ),
         ] {
             let plan = full_fixture(mesh, name).unwrap_or_else(|error| panic!("{error}"));
