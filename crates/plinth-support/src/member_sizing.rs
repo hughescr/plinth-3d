@@ -97,6 +97,10 @@ enum ActualLateralLoadEvidence {
     TipLoadPathAndMomentArm,
     /// O-10's sole compatibility exception.  This is intentionally
     /// crate-private so the frozen value cannot become a general load input.
+    #[allow(
+        dead_code,
+        reason = "the future current-support controller is the sole O-10 caller"
+    )]
     LegacyCompatibilityO10,
     #[cfg(test)]
     LegacyFrozenCompatibilityVector,
@@ -120,6 +124,10 @@ impl ActualLateralLoad {
     /// compatibility boundary.  It is not an actual measured lateral load,
     /// and this crate-private constructor prevents new algorithms or
     /// downstream callers from selecting it as a general-purpose input.
+    #[allow(
+        dead_code,
+        reason = "the future current-support controller is the sole O-10 caller"
+    )]
     pub(crate) fn legacy_compatibility_o10_frozen_shaft_drag(
         shaft_drag_force_n: &Placeholder<NonNegativeFinite>,
     ) -> Self {
@@ -179,7 +187,14 @@ impl MemberSpan {
         }
         let length_mm =
             PositiveFinite::new(length_mm).map_err(|_| MemberSizingError::DegenerateSpan)?;
-        let lean = horizontal_mm.atan2(dz.abs()).to_degrees();
+        // This caller-side dimensional guard is distinct from `_peel_tan`'s
+        // strict angular `> 1e-9` degree branch below.  Preserve the frozen
+        // legacy ordering and units exactly.
+        let lean = if length_mm.get() < FROZEN_LEAN_BRANCH_DEG {
+            0.0
+        } else {
+            horizontal_mm.atan2(dz.abs()).to_degrees()
+        };
         let lean = Finite::new(lean).map_err(|_| MemberSizingError::NonFiniteResult)?;
         Ok(Self {
             start_mm,
@@ -793,11 +808,31 @@ mod tests {
     }
 
     #[test]
-    fn tiny_nonzero_horizontal_span_retains_its_frozen_lean() {
-        let tiny = span([5e-10, 0.0, 0.0]);
+    fn frozen_caller_lean_guard_pins_below_equal_and_above_one_nanometre() {
+        let below = span([5e-10, 0.0, 0.0]);
+        let equal = span([1e-9, 0.0, 0.0]);
+        let above = span([f64::from_bits(1e-9_f64.to_bits() + 1), 0.0, 0.0]);
         assert_eq!(
-            tiny.lean_angle_deg().get().get().to_bits(),
+            below.lean_angle_deg().get().get().to_bits(),
+            0.0_f64.to_bits()
+        );
+        assert_eq!(
+            equal.lean_angle_deg().get().get().to_bits(),
             0x4056_8000_0000_0000
+        );
+        assert_eq!(
+            above.lean_angle_deg().get().get().to_bits(),
+            0x4056_8000_0000_0000
+        );
+
+        let policy = policy();
+        assert_eq!(
+            diagnostic_deflection_radius_mm(below, &legacy_load(), &policy)
+                .unwrap()
+                .diagnostic()
+                .get()
+                .to_bits(),
+            0x3fd3_3333_3333_3333
         );
     }
 

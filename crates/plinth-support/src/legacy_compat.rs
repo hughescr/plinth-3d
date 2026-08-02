@@ -34,7 +34,11 @@ pub struct LegacyCompatibility {
 impl LegacyCompatibility {
     /// Returns the only live current-support/raft compatibility policy.
     #[must_use]
-    pub fn o10_live_current_support_and_raft() -> Self {
+    #[allow(
+        dead_code,
+        reason = "the future current-support controller is the sole O-10 caller"
+    )]
+    pub(crate) fn o10_live_current_support_and_raft() -> Self {
         Self {
             shaft_drag_force_n: Placeholder::new(
                 NonNegativeFinite::new(0.01).expect("finite O-10 shaft-drag vector"),
@@ -61,7 +65,11 @@ impl LegacyCompatibility {
     /// into current production parity geometry.  Its terminal end is returned
     /// exactly from the member, so a one-sided taper cannot be accidentally
     /// replaced by uniform sizing.
-    pub fn size_live_current_support_member(
+    #[allow(
+        dead_code,
+        reason = "the future current-support controller is the sole O-10 caller"
+    )]
+    pub(crate) fn size_live_current_support_member(
         &self,
         forest: &Forest,
         key: MemberKey,
