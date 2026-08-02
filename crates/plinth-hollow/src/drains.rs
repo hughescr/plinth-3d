@@ -59,6 +59,22 @@ impl DrainPlan {
     pub fn unavailable_candidates(&self) -> &[CandidateDiagnostic] {
         &self.unavailable_candidates
     }
+
+    #[cfg(test)]
+    pub(crate) fn append_test_diagnostics(&mut self, count: usize) {
+        self.unavailable_candidates
+            .extend((0..count).map(|site| CandidateDiagnostic {
+                role: HoleRole::Vent,
+                lobe_id: None,
+                site,
+                direction: [
+                    Finite::new(1.0).expect("finite test direction"),
+                    Finite::new(0.0).expect("finite test direction"),
+                    Finite::new(0.0).expect("finite test direction"),
+                ],
+                crossings: 3,
+            }));
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

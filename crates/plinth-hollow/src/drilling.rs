@@ -371,6 +371,11 @@ impl HollowedAndDrilled {
     pub const fn evidence(&self) -> &DrillingEvidence {
         &self.evidence
     }
+    #[cfg(test)]
+    fn with_test_diagnostics(mut self, count: usize) -> Self {
+        self.drain_plan.append_test_diagnostics(count);
+        self
+    }
     #[must_use]
     pub fn into_parts(
         self,
@@ -395,8 +400,13 @@ impl HollowedAndDrilled {
     /// an undrilled `PlannedShell` has no corresponding conversion.
     #[must_use]
     pub fn into_hollowed_model(self, orientation: OrientationHistory) -> HollowedModel {
-        let evidence = self.evidence;
-        let drain_plan_report = self.drain_plan.clone();
+        let Self {
+            mesh,
+            cavity,
+            cavity_field,
+            drain_plan,
+            evidence,
+        } = self;
         let drains: Vec<DrainRecord> = evidence
             .holes
             .iter()
@@ -419,13 +429,13 @@ impl HollowedAndDrilled {
             }],
             drains,
             drilling_evidence: Some(evidence),
-            drain_plan: Some(drain_plan_report),
+            drain_plan: Some(drain_plan),
         };
         HollowedModel::from_verified_hollow(
-            self.mesh,
+            mesh,
             HollowHistory::from_reports(orientation, report),
-            self.cavity,
-            self.cavity_field,
+            cavity,
+            cavity_field,
         )
     }
 }
@@ -1795,9 +1805,14 @@ mod tests {
 
     #[test]
     fn proved_drilling_uses_the_public_hollowed_model_handoff() {
-        let drilled = drill_planned_shell(sphere_plan()).expect("drilled Sphere");
+        let drilled = drill_planned_shell(sphere_plan())
+            .expect("drilled Sphere")
+            .with_test_diagnostics(8_192);
         let expected = drilled.evidence().clone();
         let expected_plan = drilled.drain_plan().clone();
+        let holes_allocation = drilled.evidence().holes().as_ptr();
+        let diagnostic_allocation = drilled.drain_plan().unavailable_candidates().as_ptr();
+        assert_eq!(drilled.drain_plan().unavailable_candidates().len(), 8_192);
         assert!(expected
             .holes
             .iter()
@@ -1814,6 +1829,26 @@ mod tests {
             Some(&expected)
         );
         assert_eq!(model.history().hollow().drain_plan(), Some(&expected_plan));
+        assert_eq!(
+            model
+                .history()
+                .hollow()
+                .drilling_evidence()
+                .expect("retained drilling proof")
+                .holes()
+                .as_ptr(),
+            holes_allocation
+        );
+        assert_eq!(
+            model
+                .history()
+                .hollow()
+                .drain_plan()
+                .expect("retained drain plan")
+                .unavailable_candidates()
+                .as_ptr(),
+            diagnostic_allocation
+        );
         assert!(model.cavity_evidence().is_some());
         assert!(model.cavity_field().is_some());
         let (mesh, history) = model.into_parts();
