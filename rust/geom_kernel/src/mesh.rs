@@ -11,6 +11,10 @@ pub type FaceBounds = [V3; 2];
 /// live here: a future subset can share this store but own independent indexes.
 pub struct FaceGeometry {
     v0: Vec<V3>,
+    /// Exact source coordinates retained independently of edge arithmetic.
+    /// Plane slicing needs these bits at tolerance boundaries.
+    v1: Vec<V3>,
+    v2: Vec<V3>,
     e1: Vec<V3>,
     e2: Vec<V3>,
     normals: Vec<V3>,
@@ -91,6 +95,8 @@ impl Mesh {
     #[allow(clippy::too_many_arguments)] // exact parallel face arrays are the immutable storage layout
     fn from_parts(
         v0: Vec<V3>,
+        v1: Vec<V3>,
+        v2: Vec<V3>,
         e1: Vec<V3>,
         e2: Vec<V3>,
         normals: Vec<V3>,
@@ -101,6 +107,8 @@ impl Mesh {
     ) -> Self {
         let n = v0.len();
         debug_assert!(n > 0);
+        debug_assert_eq!(v1.len(), n);
+        debug_assert_eq!(v2.len(), n);
         debug_assert_eq!(e1.len(), n);
         debug_assert_eq!(e2.len(), n);
         debug_assert_eq!(normals.len(), n);
@@ -109,6 +117,8 @@ impl Mesh {
         debug_assert_eq!(centroid.len(), n);
         let geometry = Arc::new(FaceGeometry {
             v0,
+            v1,
+            v2,
             e1,
             e2,
             normals,
@@ -135,6 +145,8 @@ impl Mesh {
     ) -> Self {
         let n = triangles.len();
         let mut v0 = Vec::with_capacity(n);
+        let mut v1 = Vec::with_capacity(n);
+        let mut v2 = Vec::with_capacity(n);
         let mut e1 = Vec::with_capacity(n);
         let mut e2 = Vec::with_capacity(n);
         let mut face_bounds = Vec::with_capacity(n);
@@ -142,6 +154,8 @@ impl Mesh {
         for triangle in triangles {
             let [a, b, c] = *triangle;
             v0.push(a);
+            v1.push(b);
+            v2.push(c);
             e1.push([b[0] - a[0], b[1] - a[1], b[2] - a[2]]);
             e2.push([c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
             face_bounds.push([
@@ -164,6 +178,8 @@ impl Mesh {
         }
         Self::from_parts(
             v0,
+            v1,
+            v2,
             e1,
             e2,
             normals.to_vec(),
@@ -183,6 +199,8 @@ impl Mesh {
         let bounds = Self::validate_indexed_bounds(vertices, faces)?;
         let n = faces.len();
         let mut v0 = Vec::with_capacity(n);
+        let mut v1 = Vec::with_capacity(n);
+        let mut v2 = Vec::with_capacity(n);
         let mut e1s = Vec::with_capacity(n);
         let mut e2s = Vec::with_capacity(n);
         let mut normals = Vec::with_capacity(n);
@@ -252,6 +270,8 @@ impl Mesh {
                 });
             }
             v0.push(a);
+            v1.push(b);
+            v2.push(c);
             e1s.push(e1);
             e2s.push(e2);
             normals.push(normal);
@@ -272,6 +292,8 @@ impl Mesh {
         }
         Ok(Self::from_parts(
             v0,
+            v1,
+            v2,
             e1s,
             e2s,
             normals,
@@ -410,5 +432,13 @@ impl Mesh {
     #[inline]
     pub(crate) fn vertex_c(&self, i: usize) -> V3 {
         add(self.v0(i), self.e2(i))
+    }
+    #[inline]
+    pub(crate) fn source_vertex_b(&self, i: usize) -> V3 {
+        self.geometry.v1[i]
+    }
+    #[inline]
+    pub(crate) fn source_vertex_c(&self, i: usize) -> V3 {
+        self.geometry.v2[i]
     }
 }
