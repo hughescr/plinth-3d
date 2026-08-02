@@ -12,7 +12,7 @@ use chitubox_io::{
 };
 use plinth_core::PrinterProfile;
 use plinth_mesh::Mesh;
-use plinth_support::{FrustumRingNormal, SupportPrimitive, SupportedModel};
+use plinth_support::{FrustumRingNormal, SupportPrimitive, SupportSegmentKind, SupportedModel};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -227,7 +227,7 @@ fn audit_sphere_record_fields(
     };
     let radius = primitive.start_radius_mm.get();
     let (start, end) = if let Some((center_mm, outward_axis_unit)) = sphere.tip_authority() {
-        if primitive.segment_type != SegmentType::TIP {
+        if primitive.segment_kind != SupportSegmentKind::ContactSphere {
             return Err(EmitError::DiskAuditRejected);
         }
         let center = finite_point(center_mm);
@@ -237,7 +237,7 @@ fn audit_sphere_record_fields(
             std::array::from_fn(|index| center[index] + radius * axis[index]),
         )
     } else if let Some(center_mm) = sphere.joint_center() {
-        if primitive.segment_type != SegmentType::SHAFT {
+        if primitive.segment_kind != SupportSegmentKind::JointSphere {
             return Err(EmitError::DiskAuditRejected);
         }
         let center = finite_point(center_mm);
@@ -458,8 +458,8 @@ fn build_record(
 ) -> Result<SupportRecord, EmitError> {
     let r_start = primitive.start_radius_mm.get();
     let r_end = primitive.end_radius_mm.get();
-    let (source_start, source_end) = match primitive.segment_type {
-        SegmentType::TIP | SegmentType::SHAFT => primitive
+    let (source_start, source_end) = match primitive.segment_kind {
+        SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere => primitive
             .sphere_geometry
             .as_ref()
             .ok_or(EmitError::RecordEncodingRejected)?
@@ -468,16 +468,18 @@ fn build_record(
     };
     let start = sub_center(finite_point(source_start), center);
     let end = sub_center(finite_point(source_end), center);
-    let mut triangles = match primitive.segment_type {
+    let mut triangles = match primitive.segment_kind {
         // Frozen semantics: type 7 owns the contact sphere; type 9 owns a
         // standalone joint sphere; types 1 and 3 are frusta.
-        SegmentType::TIP => sphere_triangles(midpoint(start, end), r_start)?,
-        SegmentType::SHAFT => sphere_triangles(midpoint(start, end), r_start)?,
-        SegmentType::PAD_OR_BRIDGE if same_point(start, end) => {
+        SupportSegmentKind::ContactSphere => sphere_triangles(midpoint(start, end), r_start)?,
+        SupportSegmentKind::JointSphere => sphere_triangles(midpoint(start, end), r_start)?,
+        SupportSegmentKind::RaftPadOrBridge if same_point(start, end) => {
             raft_pad_triangles(start, r_start, r_end)?
         }
-        SegmentType::PAD_OR_BRIDGE => raft_bridge_triangles(start, end, r_start, r_end)?,
-        SegmentType::TAPER | SegmentType::JOINER | SegmentType::FLARE => frustum_triangles(
+        SupportSegmentKind::RaftPadOrBridge => raft_bridge_triangles(start, end, r_start, r_end)?,
+        SupportSegmentKind::ContactTaper
+        | SupportSegmentKind::Member
+        | SupportSegmentKind::RootFlare => frustum_triangles(
             start,
             end,
             r_start,
@@ -485,31 +487,42 @@ fn build_record(
             FRUSTUM_SIDES,
             primitive.ring_normal,
         )?,
-        _ => return Err(EmitError::RecordEncodingRejected),
     };
     wind_outward(&mut triangles)?;
     let mut record = SupportRecord::new(
-        primitive.segment_type,
+        segment_type(primitive.segment_kind),
         point_f32(start)?,
         point_f32(end)?,
         f32_of(r_start)?,
         f32_of(r_end)?,
         soup_from_triangles(&triangles)?,
     );
-    if primitive.segment_type == SegmentType::TAPER {
+    if primitive.segment_kind == SupportSegmentKind::ContactTaper {
         let depth = primitive
             .contact_depth_mm
             .ok_or(EmitError::RecordEncodingRejected)?
             .get();
         record = record.with_contact_depth(f32_of(depth)?);
     }
-    if primitive.segment_type == SegmentType::PAD_OR_BRIDGE {
+    if primitive.segment_kind == SupportSegmentKind::RaftPadOrBridge {
         let is_bridge = !same_point(start, end);
         record.trailing[0..4]
             .copy_from_slice(&(if is_bridge { 1.0_f32 } else { 0.0_f32 }).to_le_bytes());
         record.trailing[4..8].copy_from_slice(&4.0_f32.to_le_bytes());
     }
     Ok(record)
+}
+
+/// The sole exhaustive semantic-to-wire mapping.
+const fn segment_type(kind: SupportSegmentKind) -> SegmentType {
+    match kind {
+        SupportSegmentKind::ContactSphere => SegmentType::TIP,
+        SupportSegmentKind::ContactTaper => SegmentType::TAPER,
+        SupportSegmentKind::JointSphere => SegmentType::SHAFT,
+        SupportSegmentKind::Member => SegmentType::JOINER,
+        SupportSegmentKind::RootFlare => SegmentType::FLARE,
+        SupportSegmentKind::RaftPadOrBridge => SegmentType::PAD_OR_BRIDGE,
+    }
 }
 
 fn finite_point(point: [plinth_core::Finite; 3]) -> [f64; 3] {
@@ -842,7 +855,7 @@ mod tests {
         );
         let raft_count = primitives
             .iter()
-            .filter(|primitive| primitive.segment_type == SegmentType::PAD_OR_BRIDGE)
+            .filter(|primitive| primitive.segment_kind == SupportSegmentKind::RaftPadOrBridge)
             .count();
         let frame = BuildFrame::new(
             // Fixture model minimum is 0: its sole lift establishes the
@@ -865,10 +878,14 @@ mod tests {
         SupportedModel::from_parts(fixture_mesh(), primitives, history).expect("fixture scene")
     }
 
-    fn primitive(segment_type: SegmentType, start: [f64; 3], end: [f64; 3]) -> SupportPrimitive {
+    fn primitive(
+        segment_kind: SupportSegmentKind,
+        start: [f64; 3],
+        end: [f64; 3],
+    ) -> SupportPrimitive {
         let start_radius_mm = PositiveFinite::new(2.2).unwrap();
-        let sphere_geometry = match segment_type {
-            SegmentType::TIP => {
+        let sphere_geometry = match segment_kind {
+            SupportSegmentKind::ContactSphere => {
                 let midpoint = midpoint(start, end);
                 Some(
                     SphereGeometry::tip(
@@ -878,7 +895,7 @@ mod tests {
                     .unwrap(),
                 )
             }
-            SegmentType::SHAFT => Some(SphereGeometry::joint(
+            SupportSegmentKind::JointSphere => Some(SphereGeometry::joint(
                 midpoint(start, end).map(|value| Finite::new(value).unwrap()),
             )),
             _ => None,
@@ -893,19 +910,22 @@ mod tests {
             |geometry| geometry.canonical_poles(start_radius_mm),
         );
         SupportPrimitive {
-            segment_type,
+            segment_kind,
             start_mm,
             end_mm,
             start_radius_mm,
             end_radius_mm: PositiveFinite::new(
-                if matches!(segment_type, SegmentType::TIP | SegmentType::SHAFT) {
+                if matches!(
+                    segment_kind,
+                    SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere
+                ) {
                     2.2
                 } else {
                     0.2
                 },
             )
             .unwrap(),
-            contact_depth_mm: (segment_type == SegmentType::TAPER).then(|| {
+            contact_depth_mm: (segment_kind == SupportSegmentKind::ContactTaper).then(|| {
                 m0_constants()
                     .unwrap()
                     .placeholders()
@@ -919,13 +939,13 @@ mod tests {
     }
 
     fn primitive_with_radii(
-        segment_type: SegmentType,
+        segment_kind: SupportSegmentKind,
         start: [f64; 3],
         end: [f64; 3],
         start_radius: f64,
         end_radius: f64,
     ) -> SupportPrimitive {
-        let mut primitive = primitive(segment_type, start, end);
+        let mut primitive = primitive(segment_kind, start, end);
         primitive.start_radius_mm = PositiveFinite::new(start_radius).unwrap();
         primitive.end_radius_mm = PositiveFinite::new(end_radius).unwrap();
         if let Some(geometry) = &primitive.sphere_geometry {
@@ -954,23 +974,29 @@ mod tests {
             .get();
         let records = build_records(
             &[
-                primitive_with_radii(SegmentType::TIP, [1.0, 2.0, 3.0], [1.0, 2.0, 5.0], 1.0, 1.0),
                 primitive_with_radii(
-                    SegmentType::TAPER,
+                    SupportSegmentKind::ContactSphere,
+                    [1.0, 2.0, 3.0],
+                    [1.0, 2.0, 5.0],
+                    1.0,
+                    1.0,
+                ),
+                primitive_with_radii(
+                    SupportSegmentKind::ContactTaper,
                     [1.0, 2.0, 4.0],
                     [1.0, 2.0, 8.0],
                     0.8,
                     0.3,
                 ),
                 primitive_with_radii(
-                    SegmentType::JOINER,
+                    SupportSegmentKind::Member,
                     [1.0, 2.0, 8.0],
                     [1.0, 2.0, 11.0],
                     0.6,
                     0.4,
                 ),
                 primitive_with_radii(
-                    SegmentType::SHAFT,
+                    SupportSegmentKind::JointSphere,
                     [1.0, 2.0, 14.0],
                     [1.0, 2.0, 10.0],
                     0.75,
@@ -1012,7 +1038,7 @@ mod tests {
     #[test]
     fn plate_root_joiner_uses_frozen_horizontal_ring_normal() {
         let mut root = primitive_with_radii(
-            SegmentType::JOINER,
+            SupportSegmentKind::Member,
             [0.0, 0.0, 0.0],
             [1.0, 0.0, 2.0],
             0.6,
@@ -1028,7 +1054,7 @@ mod tests {
 
         let axis_record = build_record(
             &primitive_with_radii(
-                SegmentType::JOINER,
+                SupportSegmentKind::Member,
                 [0.0, 0.0, 0.0],
                 [1.0, 0.0, 2.0],
                 0.6,
@@ -1074,13 +1100,41 @@ mod tests {
     #[test]
     fn record_builder_covers_current_segment_vocabulary_in_order() {
         let primitives = vec![
-            primitive(SegmentType::TIP, [0.0, 0.0, 0.0], [0.0, 0.0, 3.0]),
-            primitive(SegmentType::TAPER, [0.0, 0.0, 3.0], [0.0, 0.0, 6.0]),
-            primitive(SegmentType::SHAFT, [0.0, 0.0, 6.0], [0.0, 0.0, 9.0]),
-            primitive(SegmentType::JOINER, [0.0, 0.0, 9.0], [0.0, 0.0, 11.0]),
-            primitive(SegmentType::FLARE, [0.0, 0.0, 11.0], [0.0, 0.0, 12.0]),
-            primitive(SegmentType::PAD_OR_BRIDGE, [0.0, 0.0, 0.0], [3.0, 0.0, 0.0]),
-            primitive(SegmentType::PAD_OR_BRIDGE, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            primitive(
+                SupportSegmentKind::ContactSphere,
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 3.0],
+            ),
+            primitive(
+                SupportSegmentKind::ContactTaper,
+                [0.0, 0.0, 3.0],
+                [0.0, 0.0, 6.0],
+            ),
+            primitive(
+                SupportSegmentKind::JointSphere,
+                [0.0, 0.0, 6.0],
+                [0.0, 0.0, 9.0],
+            ),
+            primitive(
+                SupportSegmentKind::Member,
+                [0.0, 0.0, 9.0],
+                [0.0, 0.0, 11.0],
+            ),
+            primitive(
+                SupportSegmentKind::RootFlare,
+                [0.0, 0.0, 11.0],
+                [0.0, 0.0, 12.0],
+            ),
+            primitive(
+                SupportSegmentKind::RaftPadOrBridge,
+                [0.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+            ),
+            primitive(
+                SupportSegmentKind::RaftPadOrBridge,
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+            ),
         ];
         let records = build_records(&primitives, [0.0; 3]).unwrap();
         assert_eq!(
@@ -1090,7 +1144,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             primitives
                 .iter()
-                .map(|primitive| primitive.segment_type)
+                .map(|primitive| segment_type(primitive.segment_kind))
                 .collect::<Vec<_>>()
         );
         for record in records {
@@ -1144,30 +1198,18 @@ mod tests {
     }
 
     #[test]
-    fn malformed_supported_primitive_is_rejected_before_target_creation() {
-        let model = fixture_model(
-            vec![primitive(
-                SegmentType(999),
-                [0.0, 0.0, 1.0],
-                [0.0, 0.0, 4.0],
-            )],
-            3.0,
-        );
-        let target = fixture_path("malformed-prewrite.chitubox");
-        assert_eq!(
-            write(
-                &model,
-                &EmitRequest {
-                    target_path: target.clone(),
-                    printer: printer(),
-                },
-            ),
-            Err(EmitError::RecordEncodingRejected)
-        );
-        assert!(
-            !target.exists(),
-            "pre-write rejection must not create an artifact"
-        );
+    fn semantic_segment_mapping_is_exhaustive_and_pins_native_ids() {
+        let expected = [
+            (SupportSegmentKind::ContactSphere, 7),
+            (SupportSegmentKind::ContactTaper, 1),
+            (SupportSegmentKind::JointSphere, 9),
+            (SupportSegmentKind::Member, 3),
+            (SupportSegmentKind::RootFlare, 4),
+            (SupportSegmentKind::RaftPadOrBridge, 6),
+        ];
+        for (kind, id) in expected {
+            assert_eq!(segment_type(kind), SegmentType(id));
+        }
     }
 
     #[test]
@@ -1302,17 +1344,41 @@ mod tests {
     #[test]
     fn writes_and_reopens_one_fresh_supported_artifact_in_exact_record_order() {
         let primitives = vec![
-            primitive(SegmentType::TIP, [0.0, 0.0, 1.0], [0.0, 0.0, 3.0]),
-            primitive(SegmentType::TAPER, [0.0, 0.0, 3.0], [0.0, 0.0, 5.0]),
-            primitive(SegmentType::SHAFT, [0.0, 0.0, 5.0], [0.0, 0.0, 8.0]),
-            primitive(SegmentType::JOINER, [0.0, 0.0, 8.0], [0.0, 0.0, 9.0]),
-            primitive(SegmentType::FLARE, [0.0, 0.0, 9.0], [0.0, 0.0, 10.0]),
-            primitive(SegmentType::PAD_OR_BRIDGE, [0.0, 0.0, 0.0], [3.0, 0.0, 0.0]),
-            primitive(SegmentType::PAD_OR_BRIDGE, [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]),
+            primitive(
+                SupportSegmentKind::ContactSphere,
+                [0.0, 0.0, 1.0],
+                [0.0, 0.0, 3.0],
+            ),
+            primitive(
+                SupportSegmentKind::ContactTaper,
+                [0.0, 0.0, 3.0],
+                [0.0, 0.0, 5.0],
+            ),
+            primitive(
+                SupportSegmentKind::JointSphere,
+                [0.0, 0.0, 5.0],
+                [0.0, 0.0, 8.0],
+            ),
+            primitive(SupportSegmentKind::Member, [0.0, 0.0, 8.0], [0.0, 0.0, 9.0]),
+            primitive(
+                SupportSegmentKind::RootFlare,
+                [0.0, 0.0, 9.0],
+                [0.0, 0.0, 10.0],
+            ),
+            primitive(
+                SupportSegmentKind::RaftPadOrBridge,
+                [0.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+            ),
+            primitive(
+                SupportSegmentKind::RaftPadOrBridge,
+                [0.0, 0.0, 0.0],
+                [0.0, 0.0, 0.0],
+            ),
         ];
         let expected_types: Vec<_> = primitives
             .iter()
-            .map(|primitive| primitive.segment_type)
+            .map(|primitive| segment_type(primitive.segment_kind))
             .collect();
         let model = fixture_model(primitives, 3.0);
         let target = fixture_path("all-types.chitubox");
@@ -1369,7 +1435,7 @@ mod tests {
     fn deterministic_emission_is_byte_identical() {
         let model = fixture_model(
             vec![primitive(
-                SegmentType::SHAFT,
+                SupportSegmentKind::JointSphere,
                 [0.0, 0.0, 1.0],
                 [0.0, 0.0, 4.0],
             )],
@@ -1459,7 +1525,7 @@ mod tests {
     fn disk_audit_rejects_support_geometry_below_the_planned_plate() {
         let model = fixture_model(
             vec![primitive(
-                SegmentType::JOINER,
+                SupportSegmentKind::Member,
                 [0.0, 0.0, -4.0],
                 [0.0, 0.0, -3.1],
             )],
@@ -1483,7 +1549,7 @@ mod tests {
     fn disk_audit_rejects_support_geometry_above_printer_height() {
         let model = fixture_model(
             vec![primitive(
-                SegmentType::JOINER,
+                SupportSegmentKind::Member,
                 [0.0, 0.0, 221.0],
                 [0.0, 0.0, 222.0],
             )],

@@ -5,12 +5,10 @@
 //!
 //! `plinth_support::run(HollowedModel, &SupportRequest) -> Result<SupportedModel, SupportError>`
 //!
-//! Support planning depends on hollowing, never on emission. The scene reuses
-//! `chitubox_io::SegmentType` as the canonical segment identity while retaining f64 geometry;
-//! `plinth-emit` performs the sole f32 wire conversion later.
+//! Support planning depends on hollowing, never on emission. The scene retains semantic support
+//! kinds and f64 geometry; `plinth-emit` alone maps them to ChituBox record identities and f32.
 #![forbid(unsafe_code)]
 
-use chitubox_io::SegmentType;
 use plinth_core::{Finite, PositiveFinite};
 use plinth_hollow::HollowHistory;
 use plinth_mesh::Mesh;
@@ -31,6 +29,17 @@ pub struct SupportRequest {
 pub enum FrustumRingNormal {
     SegmentAxis,
     PlateZ,
+}
+
+/// Closed support-domain vocabulary. Wire-format identities belong to `plinth-emit`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SupportSegmentKind {
+    ContactSphere,
+    ContactTaper,
+    JointSphere,
+    Member,
+    RootFlare,
+    RaftPadOrBridge,
 }
 
 /// Canonical authority for native sphere records.  The serialized endpoints
@@ -222,10 +231,10 @@ impl BuildFrame {
     }
 }
 
-/// One f64 support/raft primitive. `segment_type` is the canonical ChituBox record identity.
+/// One semantic f64 support/raft primitive.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SupportPrimitive {
-    pub segment_type: SegmentType,
+    pub segment_kind: SupportSegmentKind,
     pub start_mm: [Finite; 3],
     pub end_mm: [Finite; 3],
     pub start_radius_mm: PositiveFinite,
@@ -372,14 +381,14 @@ impl SupportedModel {
 
 impl SupportPrimitive {
     fn is_semantically_valid(&self) -> bool {
-        let taper_depth_matches =
-            (self.segment_type == SegmentType::TAPER) == self.contact_depth_mm.is_some();
+        let taper_depth_matches = (self.segment_kind == SupportSegmentKind::ContactTaper)
+            == self.contact_depth_mm.is_some();
         let ring_provenance_matches = match self.ring_normal {
             FrustumRingNormal::SegmentAxis => true,
-            FrustumRingNormal::PlateZ => self.segment_type == SegmentType::JOINER,
+            FrustumRingNormal::PlateZ => self.segment_kind == SupportSegmentKind::Member,
         };
-        let sphere_poles_match = match (self.segment_type, &self.sphere_geometry) {
-            (SegmentType::TIP, Some(geometry)) if geometry.is_tip() => {
+        let sphere_poles_match = match (self.segment_kind, &self.sphere_geometry) {
+            (SupportSegmentKind::ContactSphere, Some(geometry)) if geometry.is_tip() => {
                 self.start_radius_mm == self.end_radius_mm
                     && geometry.has_finite_canonical_fields()
                     && {
@@ -387,7 +396,7 @@ impl SupportPrimitive {
                         self.start_mm == start && self.end_mm == end
                     }
             }
-            (SegmentType::SHAFT, Some(geometry)) if geometry.is_joint() => {
+            (SupportSegmentKind::JointSphere, Some(geometry)) if geometry.is_joint() => {
                 self.start_radius_mm == self.end_radius_mm
                     && geometry.has_finite_canonical_fields()
                     && {
@@ -395,7 +404,7 @@ impl SupportPrimitive {
                         self.start_mm == start && self.end_mm == end
                     }
             }
-            (SegmentType::TIP | SegmentType::SHAFT, _) => false,
+            (SupportSegmentKind::ContactSphere | SupportSegmentKind::JointSphere, _) => false,
             (_, None) => true,
             _ => false,
         };
@@ -461,7 +470,7 @@ mod tests {
             },
         );
         let primitives = vec![SupportPrimitive {
-            segment_type: SegmentType::SHAFT,
+            segment_kind: SupportSegmentKind::JointSphere,
             start_mm: [
                 Finite::new(0.0).expect("finite fixture coordinate"),
                 Finite::new(0.0).expect("finite fixture coordinate"),

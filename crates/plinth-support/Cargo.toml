@@ -6,7 +6,6 @@ rust-version = "1.97"
 publish = false
 
 [dependencies]
-chitubox_io = { path = "../../rust/chitubox_io" }
 plinth-core = { path = "../plinth-core" }
 plinth-hollow = { path = "../plinth-hollow" }
 plinth-mesh = { path = "../plinth-mesh" }
