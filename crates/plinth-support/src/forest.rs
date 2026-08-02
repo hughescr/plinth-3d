@@ -23,6 +23,11 @@ impl MemberKey {
     pub const fn slot(self) -> u32 {
         self.slot
     }
+
+    #[must_use]
+    pub const fn generation(self) -> u32 {
+        self.generation
+    }
 }
 
 /// Radius at `p0`, the terminal-ward end of a support member.
@@ -272,6 +277,9 @@ impl QuarantineRecord {
 #[derive(Clone, Debug, PartialEq, Default)]
 struct ForestState {
     slots: Vec<Slot>,
+    /// Append-only birth sequence. Retired keys remain as lifecycle evidence;
+    /// live views filter them without falling back to recyclable slot order.
+    creation_order: Vec<MemberKey>,
     parent: BTreeMap<MemberKey, MemberKey>,
     children: BTreeMap<MemberKey, Vec<MemberKey>>,
     roots: BTreeSet<MemberKey>,
@@ -393,6 +401,7 @@ impl Forest {
         };
         self.state.roots.insert(key);
         self.state.children.insert(key, Vec::new());
+        self.state.creation_order.push(key);
         key
     }
 
@@ -515,6 +524,18 @@ impl Forest {
                     generation: slot.generation,
                 })
             })
+            .filter(|key| self.member(*key).is_some())
+            .collect()
+    }
+
+    /// All live members in original append/birth order. Slot reuse never
+    /// moves a later-born member ahead of an older live member.
+    #[must_use]
+    pub fn live_members_in_creation_order(&self) -> Vec<MemberKey> {
+        self.state
+            .creation_order
+            .iter()
+            .copied()
             .filter(|key| self.member(*key).is_some())
             .collect()
     }
@@ -776,7 +797,20 @@ impl Forest {
 
     /// Audits the complete arena graph and lifecycle registries.
     pub fn validate(&self) -> Result<(), ForestError> {
+        let mut births = BTreeSet::new();
+        for key in &self.state.creation_order {
+            if !births.insert(*key) {
+                return Err(ForestError::Invariant(
+                    "member creation sequence contains a duplicate key",
+                ));
+            }
+        }
         for key in self.live_members() {
+            if !births.contains(&key) {
+                return Err(ForestError::Invariant(
+                    "live member is absent from the creation sequence",
+                ));
+            }
             if self.state.braces.contains(&key) {
                 if self.state.parent.contains_key(&key) || self.state.roots.contains(&key) {
                     return Err(ForestError::Invariant(
@@ -875,6 +909,11 @@ impl Forest {
         digest.tag(6);
         digest.len(self.state.dead.len());
         for key in &self.state.dead {
+            digest.key(*key);
+        }
+        digest.tag(7);
+        digest.len(self.state.creation_order.len());
+        for key in &self.state.creation_order {
             digest.key(*key);
         }
         digest.finish()
@@ -1066,6 +1105,39 @@ mod tests {
         assert_eq!(
             forest.set_carried_mm2(old, finite(2.0)),
             Err(ForestError::InactiveKey(old))
+        );
+    }
+
+    #[test]
+    fn creation_order_survives_slot_reuse_and_checkpoint_rollback() {
+        let mut forest = Forest::new();
+        let first = forest.add_member(member(MemberKind::Trunk));
+        let retired = forest.add_member(member(MemberKind::Shoot));
+        let third = forest.add_member(member(MemberKind::Strut));
+        forest.retire(retired).unwrap();
+        let reused = forest.add_member(member(MemberKind::Brace));
+        assert_eq!(reused.slot(), retired.slot());
+        assert_eq!(
+            forest.live_members_in_creation_order(),
+            vec![first, third, reused]
+        );
+        assert_ne!(
+            forest.live_members(),
+            forest.live_members_in_creation_order()
+        );
+
+        let before = forest.digest();
+        let checkpoint = forest.checkpoint();
+        let later = forest.add_member(member(MemberKind::Other("later".into())));
+        assert_eq!(
+            forest.live_members_in_creation_order(),
+            vec![first, third, reused, later]
+        );
+        forest.rollback(checkpoint).unwrap();
+        assert_eq!(forest.digest(), before);
+        assert_eq!(
+            forest.live_members_in_creation_order(),
+            vec![first, third, reused]
         );
     }
 

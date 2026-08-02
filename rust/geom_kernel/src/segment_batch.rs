@@ -460,7 +460,10 @@ fn point_segment_evaluation(
     let length_squared = dot(axis, axis);
     if length_squared < 1e-18 {
         return SegmentEvaluation {
-            distance: norm(relative),
+            distance: match association {
+                Association::AcceptedDistance => accepted_norm(relative),
+                Association::FrozenJoint => joint_norm(relative),
+            },
             t: 0.0,
             degenerate: true,
         };
@@ -479,7 +482,10 @@ fn point_segment_evaluation(
         ],
     };
     SegmentEvaluation {
-        distance: norm(delta),
+        distance: match association {
+            Association::AcceptedDistance => accepted_norm(delta),
+            Association::FrozenJoint => joint_norm(delta),
+        },
         t,
         degenerate: false,
     }
@@ -489,7 +495,11 @@ fn dot(left: [f64; 3], right: [f64; 3]) -> f64 {
     left[0] * right[0] + left[1] * right[1] + left[2] * right[2]
 }
 
-fn norm(value: [f64; 3]) -> f64 {
+fn accepted_norm(value: [f64; 3]) -> f64 {
+    (value[0].powi(2) + value[1].powi(2) + value[2].powi(2)).sqrt()
+}
+
+fn joint_norm(value: [f64; 3]) -> f64 {
     (value[0] * value[0] + value[1] * value[1] + value[2] * value[2]).sqrt()
 }
 
@@ -516,6 +526,50 @@ mod tests {
         assert_eq!(result.row(0), Some([1.0, 5.0f64.sqrt()].as_slice()));
         assert_eq!(result.row(1), Some([2.0, 1.0].as_slice()));
         assert!(result.row(2).is_none());
+    }
+
+    #[test]
+    fn accepted_distance_pre_joint_vectors_remain_bit_exact() {
+        // Captured from the accepted implementation at parent eabd594 before
+        // the joint policy existed. This pins its `powi(2)` norm and
+        // `(point-start)-t*axis` association independently of joint mode.
+        let result = point_segment_distances_batch(
+            &[[0.25, 1.0, 0.0], [3.0, 4.0, 5.0], [-2.0, 0.5, 7.0]],
+            &[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [-1.0, 2.0, 3.0]],
+            &[[1.0, 0.0, 0.0], [2.0, 0.0, 0.0], [4.0, 5.0, 6.0]],
+            PointSegmentBatchLimits::new(9, 72),
+        )
+        .unwrap();
+        let bits: Vec<Vec<u64>> = (0..result.point_count())
+            .map(|point| {
+                result
+                    .row(point)
+                    .unwrap()
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(
+            bits,
+            [
+                [
+                    0x3ff0_0000_0000_0000,
+                    0x4000_1fe0_3f61_bad0,
+                    0x400b_33f3_f149_0def
+                ],
+                [
+                    0x401a_d533_6963_eefc,
+                    0x4019_ec47_4a26_1264,
+                    0x3fdb_9aed_ba58_8347
+                ],
+                [
+                    0x401d_3064_dcc8_ae67,
+                    0x4020_27ce_7b7e_a376,
+                    0x4011_7bc9_bddb_b490
+                ],
+            ]
+        );
     }
 
     #[test]

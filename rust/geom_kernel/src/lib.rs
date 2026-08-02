@@ -25,6 +25,8 @@ pub mod testkit;
 
 use std::borrow::Cow;
 
+use rayon::prelude::*;
+
 use mesh::Mesh;
 pub use mesh::{FaceBounds, FaceGeometry};
 use parity::ParityBuildError;
@@ -543,14 +545,125 @@ pub fn current_threads() -> usize {
     par::current_threads()
 }
 
-/// Run one index-parallel batch under the sole workspace thread authority.
-/// Callers must preserve result ordering and must not use floating reductions.
-pub fn with_workspace_threads<F, R>(operation: F) -> R
+/// Preflight limits for the only generic workspace-parallel operation:
+/// ordered, independent index mapping.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OrderedMapLimits {
+    max_items: usize,
+    max_output_bytes: usize,
+}
+
+impl OrderedMapLimits {
+    #[must_use]
+    pub const fn new(max_items: usize, max_output_bytes: usize) -> Self {
+        Self {
+            max_items,
+            max_output_bytes,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OrderedMapError {
+    ItemLimitExceeded { required: usize, maximum: usize },
+    OutputSizeOverflow { items: usize, item_bytes: usize },
+    OutputByteLimitExceeded { required: usize, maximum: usize },
+}
+
+impl std::fmt::Display for OrderedMapError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ItemLimitExceeded { required, maximum } => {
+                write!(
+                    formatter,
+                    "ordered map needs {required} items, limit is {maximum}"
+                )
+            }
+            Self::OutputSizeOverflow { items, item_bytes } => write!(
+                formatter,
+                "ordered map output size overflows: {items} items of {item_bytes} bytes"
+            ),
+            Self::OutputByteLimitExceeded { required, maximum } => write!(
+                formatter,
+                "ordered map needs {required} output bytes, limit is {maximum}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for OrderedMapError {}
+
+/// Result of one bounded ordered map. Values retain exact input-index order.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OrderedMap<T> {
+    values: Vec<T>,
+    effective_threads: usize,
+}
+
+impl<T> OrderedMap<T> {
+    #[must_use]
+    pub const fn effective_threads(&self) -> usize {
+        self.effective_threads
+    }
+
+    #[must_use]
+    pub fn values(&self) -> &[T] {
+        &self.values
+    }
+
+    #[must_use]
+    pub fn into_values(self) -> Vec<T> {
+        self.values
+    }
+}
+
+/// Bounded index-parallel map/collect under the sole workspace thread pool.
+/// There is deliberately no reduce/fold API: every result occupies its input
+/// index and collection preserves that order.
+pub fn ordered_index_map<I, O, F>(
+    inputs: &[I],
+    limits: OrderedMapLimits,
+    operation: F,
+) -> Result<OrderedMap<O>, OrderedMapError>
 where
-    F: FnOnce() -> R + Send,
-    R: Send,
+    I: Sync,
+    O: Send,
+    F: Fn(usize, &I) -> O + Sync + Send,
 {
-    par::run(operation)
+    if inputs.len() > limits.max_items {
+        return Err(OrderedMapError::ItemLimitExceeded {
+            required: inputs.len(),
+            maximum: limits.max_items,
+        });
+    }
+    let item_bytes = std::mem::size_of::<O>();
+    let required =
+        inputs
+            .len()
+            .checked_mul(item_bytes)
+            .ok_or(OrderedMapError::OutputSizeOverflow {
+                items: inputs.len(),
+                item_bytes,
+            })?;
+    if required > limits.max_output_bytes {
+        return Err(OrderedMapError::OutputByteLimitExceeded {
+            required,
+            maximum: limits.max_output_bytes,
+        });
+    }
+    let (values, effective_threads) = par::run(|| {
+        let effective_threads = rayon::current_num_threads();
+        let values = inputs
+            .par_iter()
+            .enumerate()
+            .map(|(index, input)| operation(index, input))
+            .collect();
+        (values, effective_threads)
+    });
+    Ok(OrderedMap {
+        values,
+        effective_threads,
+    })
 }
 
 fn validate_finite(field: &'static str, values: &[f64]) -> Result<(), SurfaceBuildError> {
@@ -642,6 +755,74 @@ mod thread_tests {
             mesh_face_ids + bvh_order,
             2 * face_count * std::mem::size_of::<u32>()
         );
+    }
+
+    #[test]
+    fn ordered_index_map_preflights_caps_and_preserves_input_order() {
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let rejected = ordered_index_map(
+            &[3_u32, 1, 2],
+            OrderedMapLimits::new(2, 3 * std::mem::size_of::<u64>()),
+            |index, value| {
+                calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                (index as u64) << 32 | u64::from(*value)
+            },
+        );
+        assert_eq!(
+            rejected,
+            Err(OrderedMapError::ItemLimitExceeded {
+                required: 3,
+                maximum: 2,
+            })
+        );
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+
+        let mapped = ordered_index_map(
+            &[3_u32, 1, 2],
+            OrderedMapLimits::new(3, 3 * std::mem::size_of::<u64>()),
+            |index, value| (index as u64) << 32 | u64::from(*value),
+        )
+        .unwrap();
+        assert_eq!(mapped.values(), &[3, (1_u64 << 32) | 1, (2_u64 << 32) | 2]);
+        assert_eq!(
+            ordered_index_map(
+                &[3_u32, 1, 2],
+                OrderedMapLimits::new(3, 3 * std::mem::size_of::<u64>() - 1),
+                |_, value| u64::from(*value),
+            ),
+            Err(OrderedMapError::OutputByteLimitExceeded {
+                required: 3 * std::mem::size_of::<u64>(),
+                maximum: 3 * std::mem::size_of::<u64>() - 1,
+            })
+        );
+    }
+
+    #[test]
+    fn ordered_index_map_is_identical_at_one_four_and_sixteen_threads() {
+        if let Some(signatures) = sweep_threads(
+            "thread_tests::ordered_index_map_is_identical_at_one_four_and_sixteen_threads",
+        ) {
+            assert!(signatures.windows(2).all(|pair| pair[0] == pair[1]));
+            return;
+        }
+        let expected = std::env::var("PLINTH_THREADS")
+            .unwrap()
+            .parse::<usize>()
+            .unwrap();
+        let inputs: Vec<_> = (0_u64..4096).collect();
+        let mapped = ordered_index_map(
+            &inputs,
+            OrderedMapLimits::new(inputs.len(), inputs.len() * std::mem::size_of::<u64>()),
+            |index, value| value.rotate_left((index % 63) as u32),
+        )
+        .unwrap();
+        assert_eq!(mapped.effective_threads(), expected);
+        assert_eq!(mapped.values()[0], 0);
+        assert_eq!(
+            mapped.values()[4095],
+            4095_u64.rotate_left((4095 % 63) as u32)
+        );
+        println!("{THREAD_SWEEP_SIGNATURE}{:?}", mapped.values());
     }
 
     #[test]

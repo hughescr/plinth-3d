@@ -8,10 +8,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use plinth_core::{Finite, PositiveFinite};
-use rayon::prelude::*;
 use thiserror::Error;
 
-use crate::forest::{EmbedEnd, Forest, Member, MemberKind, Owner};
+use crate::forest::{EmbedEnd, Forest, Member, MemberKey, MemberKind, Owner};
 
 const MODEL_FOOT_FACTOR: f64 = 1.4;
 const COINCIDE_TOL_MM: f64 = 0.15;
@@ -80,6 +79,7 @@ struct ConfigFingerprint {
 pub struct JointBall {
     center_mm: [Finite; 3],
     radius_mm: PositiveFinite,
+    owner_key: MemberKey,
     owner: Owner,
 }
 
@@ -92,6 +92,9 @@ impl JointBall {
     }
     pub fn owner(&self) -> &Owner {
         &self.owner
+    }
+    pub const fn owner_key(&self) -> MemberKey {
+        self.owner_key
     }
 }
 
@@ -131,6 +134,37 @@ impl JointPlan {
         for value in self.forest_digest.to_le_bytes() {
             byte(value);
         }
+        for value in self.config.plate_z.to_le_bytes() {
+            byte(value);
+        }
+        for value in self.config.factor.to_le_bytes() {
+            byte(value);
+        }
+        byte(self.config.max_depth);
+        for value in u64::try_from(self.config.max_patches)
+            .expect("platform usize fits u64")
+            .to_le_bytes()
+        {
+            byte(value);
+        }
+        for value in u64::try_from(self.config.max_work_items)
+            .expect("platform usize fits u64")
+            .to_le_bytes()
+        {
+            byte(value);
+        }
+        for value in u64::try_from(self.config.max_scratch_bytes)
+            .expect("platform usize fits u64")
+            .to_le_bytes()
+        {
+            byte(value);
+        }
+        for value in u64::try_from(self.balls.len())
+            .expect("platform usize fits u64")
+            .to_le_bytes()
+        {
+            byte(value);
+        }
         for ball in &self.balls {
             for coordinate in ball.center_mm {
                 for value in coordinate.get().to_bits().to_le_bytes() {
@@ -140,10 +174,46 @@ impl JointPlan {
             for value in ball.radius_mm.get().to_bits().to_le_bytes() {
                 byte(value);
             }
-            // Owner is already bound by the forest digest; its ordering is
-            // represented by each ball's position in this canonical vector.
+            for value in ball.owner_key.slot().to_le_bytes() {
+                byte(value);
+            }
+            for value in ball.owner_key.generation().to_le_bytes() {
+                byte(value);
+            }
+            match &ball.owner {
+                Owner::Contact(contact) => {
+                    byte(0);
+                    for value in contact.to_le_bytes() {
+                        byte(value);
+                    }
+                }
+                Owner::ModelAnchor(anchor) => {
+                    byte(1);
+                    for value in anchor.to_le_bytes() {
+                        byte(value);
+                    }
+                }
+                Owner::Generated { family, ordinal } => {
+                    byte(2);
+                    for value in u64::try_from(family.len())
+                        .expect("platform usize fits u64")
+                        .to_le_bytes()
+                    {
+                        byte(value);
+                    }
+                    for value in family.bytes() {
+                        byte(value);
+                    }
+                    for value in ordinal.to_le_bytes() {
+                        byte(value);
+                    }
+                }
+            }
         }
-        for value in self.certified_dropped.to_le_bytes() {
+        for value in u64::try_from(self.certified_dropped)
+            .expect("platform usize fits u64")
+            .to_le_bytes()
+        {
             byte(value);
         }
         digest
@@ -164,10 +234,13 @@ pub enum JointError {
     StaleAuthority,
     #[error(transparent)]
     NativeBatch(#[from] geom_kernel::PointSegmentBatchError),
+    #[error(transparent)]
+    OrderedMap(#[from] geom_kernel::OrderedMapError),
 }
 
 #[derive(Clone)]
 struct LiveMember {
+    key: MemberKey,
     p0: [f64; 3],
     p1: [f64; 3],
     r0: f64,
@@ -178,8 +251,9 @@ struct LiveMember {
 }
 
 impl LiveMember {
-    fn from_forest(member: &Member) -> Self {
+    fn from_forest(key: MemberKey, member: &Member) -> Self {
         Self {
+            key,
             p0: member.p0_mm().map(Finite::get),
             p1: member.p1_mm().map(Finite::get),
             r0: member.terminal_radius_mm().get().get(),
@@ -205,6 +279,7 @@ struct Node {
 struct CandidateBall {
     center: [f64; 3],
     radius: f64,
+    owner_key: MemberKey,
     owner: Owner,
     touching: Vec<usize>,
 }
@@ -213,10 +288,14 @@ struct CandidateBall {
 /// Retired and quarantined members are unreachable through `live_members`.
 pub fn plan_joint_balls(forest: &Forest, config: JointConfig) -> Result<JointPlan, JointError> {
     validate_limits(config)?;
-    let keys = forest.live_members();
+    let keys = forest.live_members_in_creation_order();
     let members: Vec<_> = keys
         .into_iter()
-        .filter_map(|key| forest.member(key).map(LiveMember::from_forest))
+        .filter_map(|key| {
+            forest
+                .member(key)
+                .map(|member| LiveMember::from_forest(key, member))
+        })
         .collect();
     let forest_digest = forest.digest();
     let config_fingerprint = config.fingerprint();
@@ -319,7 +398,10 @@ pub fn plan_joint_balls(forest: &Forest, config: JointConfig) -> Result<JointPla
                 let local = radius_row[axis_col];
                 if local >= radius {
                     radius = local;
-                    owner = Some(members[member_index].owner.clone());
+                    owner = Some((
+                        members[member_index].key,
+                        members[member_index].owner.clone(),
+                    ));
                 }
             }
         }
@@ -334,20 +416,28 @@ pub fn plan_joint_balls(forest: &Forest, config: JointConfig) -> Result<JointPla
         candidates.push(CandidateBall {
             center,
             radius: ball_radius,
-            owner: owner.unwrap_or_else(|| nodes[fattest_node].owner.clone()),
+            owner_key: owner
+                .as_ref()
+                .map_or(members[nodes[fattest_node].member].key, |(key, _)| *key),
+            owner: owner
+                .map(|(_, owner)| owner)
+                .unwrap_or_else(|| nodes[fattest_node].owner.clone()),
             touching: touching.into_iter().collect(),
         });
     }
 
-    let decisions: Vec<_> = geom_kernel::with_workspace_threads(|| {
-        candidates
-            .par_iter()
-            .map(|ball| ball_enclosed(ball, &members, config))
-            .collect()
-    });
+    let decisions = geom_kernel::ordered_index_map(
+        &candidates,
+        geom_kernel::OrderedMapLimits::new(config.max_work_items, config.max_scratch_bytes),
+        |_, ball| ball_enclosed(ball, &members, config),
+    )?;
+    debug_assert_eq!(
+        decisions.effective_threads(),
+        geom_kernel::current_threads()
+    );
     let mut balls = Vec::new();
     let mut certified_dropped = 0;
-    for (candidate, enclosed) in candidates.into_iter().zip(decisions) {
+    for (candidate, enclosed) in candidates.into_iter().zip(decisions.into_values()) {
         if enclosed {
             certified_dropped += 1;
             continue;
@@ -362,6 +452,7 @@ pub fn plan_joint_balls(forest: &Forest, config: JointConfig) -> Result<JointPla
                 .map_err(|_| JointError::InvalidGeometry)?,
             radius_mm: PositiveFinite::new(candidate.radius)
                 .map_err(|_| JointError::InvalidGeometry)?,
+            owner_key: candidate.owner_key,
             owner: candidate.owner,
         });
     }
@@ -964,7 +1055,7 @@ mod tests {
             Owner::Contact(0),
             None,
         );
-        let member = LiveMember::from_forest(forest.member(key).unwrap());
+        let member = LiveMember::from_forest(key, forest.member(key).unwrap());
         let centers = [[1.5, 2.0, 6.0], [10.0, -2.0, 1.0]];
         let batch = geom_kernel::point_segment_taper_batch(
             &centers,
@@ -1019,6 +1110,166 @@ mod tests {
         assert_eq!(cluster_nodes(&outside), vec![vec![0], vec![1]]);
     }
 
+    #[test]
+    fn retire_reuse_keeps_python_birth_order_for_center_owner_and_ball_order() {
+        let mut forest = Forest::new();
+        let first = add_member(
+            &mut forest,
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 10.0],
+            0.6,
+            0.6,
+            MemberKind::Trunk,
+            Owner::Contact(10),
+            None,
+        );
+        let filler = add_member(
+            &mut forest,
+            [100.0, 0.0, 0.0],
+            [100.0, 0.0, 1.0],
+            0.2,
+            0.2,
+            MemberKind::Shoot,
+            Owner::Contact(99),
+            None,
+        );
+        let older_at_joint = add_member(
+            &mut forest,
+            [0.0, 0.0, 10.0],
+            [10.0, 0.0, 10.0],
+            0.6,
+            0.6,
+            MemberKind::Shoot,
+            Owner::Contact(11),
+            None,
+        );
+        forest.retire(filler).unwrap();
+        let later_reused = add_member(
+            &mut forest,
+            [0.0, 0.0, 10.0],
+            [0.0, 10.0, 10.0],
+            0.6,
+            0.6,
+            MemberKind::Strut,
+            Owner::Contact(12),
+            None,
+        );
+        assert_eq!(later_reused.slot(), filler.slot());
+        assert_eq!(
+            forest.live_members_in_creation_order(),
+            vec![first, older_at_joint, later_reused]
+        );
+        assert_eq!(
+            forest.live_members(),
+            vec![first, later_reused, older_at_joint]
+        );
+
+        let cfg = config(-100.0);
+        let plan = plan_joint_balls(&forest, cfg).unwrap();
+        let joint = plan
+            .validate(&forest, cfg)
+            .unwrap()
+            .iter()
+            .find(|ball| ball.center_mm().map(Finite::get) == [0.0, 0.0, 10.0])
+            .unwrap();
+        assert_eq!(joint.owner_key(), later_reused);
+        assert_eq!(joint.owner(), &Owner::Contact(12));
+    }
+
+    #[test]
+    fn plan_digest_covers_config_ball_owner_key_generation_and_every_result_field() {
+        let mut forest = Forest::new();
+        let first = add_member(
+            &mut forest,
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            0.2,
+            0.2,
+            MemberKind::Trunk,
+            Owner::Contact(1),
+            None,
+        );
+        let old = add_member(
+            &mut forest,
+            [2.0, 0.0, 0.0],
+            [2.0, 0.0, 1.0],
+            0.2,
+            0.2,
+            MemberKind::Trunk,
+            Owner::Contact(1),
+            None,
+        );
+        forest.retire(old).unwrap();
+        let reused = add_member(
+            &mut forest,
+            [3.0, 0.0, 0.0],
+            [3.0, 0.0, 1.0],
+            0.2,
+            0.2,
+            MemberKind::Trunk,
+            Owner::Contact(1),
+            None,
+        );
+        assert_eq!(old.slot(), reused.slot());
+        assert_ne!(old.generation(), reused.generation());
+        let ball = JointBall {
+            center_mm: finite3([1.0, 2.0, 3.0]),
+            radius_mm: radius(0.5),
+            owner_key: old,
+            owner: Owner::Contact(7),
+        };
+        let base = JointPlan {
+            forest_digest: 5,
+            config: config(-100.0).fingerprint(),
+            balls: vec![ball],
+            certified_dropped: 2,
+        };
+        let base_digest = base.digest();
+        let mut variants = Vec::new();
+        let mut changed = base.clone();
+        changed.forest_digest += 1;
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.config.plate_z ^= 1;
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.config.factor ^= 1;
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.config.max_depth -= 1;
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.config.max_patches -= 1;
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.config.max_work_items -= 1;
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.config.max_scratch_bytes -= 1;
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.balls[0].center_mm[0] = Finite::new(1.5).unwrap();
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.balls[0].radius_mm = radius(0.6);
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.balls[0].owner_key = first;
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.balls[0].owner_key = reused;
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.balls[0].owner = Owner::Contact(8);
+        variants.push(changed);
+        let mut changed = base.clone();
+        changed.certified_dropped += 1;
+        variants.push(changed);
+        assert!(variants
+            .iter()
+            .all(|variant| variant.digest() != base_digest));
+    }
+
     fn dist_and_radius_scalar(center: [f64; 3], member: &LiveMember) -> (f64, f64) {
         let d = sub(member.p1, member.p0);
         let l2 = d[0] * d[0] + d[1] * d[1] + d[2] * d[2];
@@ -1069,10 +1320,12 @@ mod tests {
             .iter()
             .any(|b| b.center_mm().map(Finite::get) == [0.0, 0.0, 10.0]));
 
-        let live = LiveMember::from_forest(forest.member(forest.live_members()[0]).unwrap());
+        let live_key = forest.live_members_in_creation_order()[0];
+        let live = LiveMember::from_forest(live_key, forest.member(live_key).unwrap());
         let easy = CandidateBall {
             center: [0.0, 0.0, 5.0],
             radius: 0.01,
+            owner_key: live_key,
             owner: Owner::Contact(0),
             touching: vec![0],
         };
