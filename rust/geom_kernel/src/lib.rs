@@ -30,6 +30,7 @@ pub use point_index::{NeighborCsr, PointCloudIndex, PointIndexBuildError, PointQ
 pub use queries::{BatchInputError, CastRaysBatch, Interval, NativeSurface, SphereBreachBatch};
 pub use slicing::{
     PlaneIntersection, PlaneIntersectionKind, PlaneSliceBatch, PlaneSliceError, PlaneSliceLimits,
+    PLANE_SLICE_MERGE_TOLERANCE_MM,
 };
 pub use vec3::V3;
 
