@@ -17,15 +17,17 @@ pub use fixtures::{
 };
 pub use io::{load_binary_stl, load_binary_stls, write_binary_stl, write_binary_stls, MeshIoError};
 pub use topology::{
-    build_face_topology, mesh_fingerprint, validate_face_topology, EdgeTopologyCounts,
-    FaceTopology, TopologyDigest, TopologyError, TopologySchema, TopologyValidationError,
-    WeldedView, FACE_TOPOLOGY_SCHEMA, FACE_TOPOLOGY_SCHEMA_VERSION, TOPOLOGY_CUT_BOUNDARY,
-    TOPOLOGY_CUT_DEGENERATE, TOPOLOGY_CUT_DUPLICATE, TOPOLOGY_CUT_NONMANIFOLD,
-    TOPOLOGY_CUT_POINT_ONLY, TOPOLOGY_CUT_SAME_DIRECTION,
+    build_face_topology, certify_closed_components, mesh_fingerprint, validate_face_topology,
+    ClosedComponent, ClosedComponentCertificate, EdgeTopologyCounts, FaceTopology, TopologyDigest,
+    TopologyError, TopologySchema, TopologyValidationError, WeldedView, FACE_TOPOLOGY_SCHEMA,
+    FACE_TOPOLOGY_SCHEMA_VERSION, TOPOLOGY_CUT_BOUNDARY, TOPOLOGY_CUT_DEGENERATE,
+    TOPOLOGY_CUT_DUPLICATE, TOPOLOGY_CUT_NONMANIFOLD, TOPOLOGY_CUT_POINT_ONLY,
+    TOPOLOGY_CUT_SAME_DIRECTION,
 };
 pub use triage::{
-    triage_components, triage_settings, ComponentDescription, PreHollowed, TriageError,
-    TriageSettings, TriageSummary, TriagedMesh,
+    triage_components, triage_settings, ComponentDescription, PreHollowed, TriageAdmissionError,
+    TriageError, TriageSettings, TriageSummary, TriageTopologyAdmission, TriageTopologyLimits,
+    TriagedMesh,
 };
 
 use thiserror::Error;
@@ -83,6 +85,23 @@ impl Mesh {
     #[must_use]
     pub fn tris(&self) -> &[[u32; 3]] {
         &self.tris
+    }
+
+    /// Bytes reserved by this mesh's two owned buffers, measured from their
+    /// actual capacities rather than their logical lengths. Consumers that
+    /// enforce a process memory envelope must account for this retained
+    /// storage while they build additional working fields.
+    #[must_use]
+    pub fn retained_buffer_bytes(&self) -> Option<usize> {
+        self.verts
+            .capacity()
+            .checked_mul(std::mem::size_of::<[f64; 3]>())
+            .and_then(|vertices| {
+                self.tris
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<[u32; 3]>())
+                    .and_then(|triangles| vertices.checked_add(triangles))
+            })
     }
 
     /// Audits geometry required by semantic consumers without changing this

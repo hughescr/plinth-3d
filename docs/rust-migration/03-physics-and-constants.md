@@ -660,6 +660,9 @@ remain `Placeholder` unless another wrapper is stated explicitly.
 | `HOLLOW_VOLUME_BALANCE_REL_TOL` | 0.02 | final volume-balance tolerance relative to the solid-model volume |
 | `HOLLOW_EXIT_RAY_MAX_MM` | 45 mm | drain/vent exit search ceiling |
 | `HOLLOW_DRAIN_DIRECTIONS` | `(0,0,-1)`, `(0.5,0,-1)`, `(-0.5,0,-1)`, `(0,0.5,-1)`, `(0,-0.5,-1)` | one structured downward-direction policy |
+| `HOLLOW_VENT_DIRECTIONS` | `(1,0,0)`, `(-1,0,0)`, `(0,1,0)`, `(0,-1,0)` | one ordered structured horizontal-direction policy |
+| `HOLLOW_VENT_TOP_BAND_MM` | 2.0 mm | cavity-top band searched for a horizontal vent site |
+| `HOLLOW_VENT_SAMPLE_DIVISOR` | 40 | deterministic top-band sampling divisor |
 | `HOLLOW_EXTRA_DRAIN_POLICY` | min 0.5 mL; max 3; exit <= 8 mm; extensions 4/8/9 mm; 24 cylinder sides | one structured trapped-pocket repair policy |
 
 The frozen orientation heuristic is **retired/no-port as a policy**, not silently

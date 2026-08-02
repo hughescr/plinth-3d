@@ -51,6 +51,43 @@ pub struct Mesh {
 }
 
 impl Mesh {
+    pub(crate) fn validate_indexed_bounds(
+        vertices: &[[f64; 3]],
+        faces: &[[u32; 3]],
+    ) -> Result<FaceBounds, SurfaceBuildError> {
+        if vertices.is_empty() {
+            return Err(SurfaceBuildError::EmptyVertices);
+        }
+        if faces.is_empty() {
+            return Err(SurfaceBuildError::EmptyFaces);
+        }
+        for (vertex, point) in vertices.iter().enumerate() {
+            for (axis, value) in point.iter().enumerate() {
+                if !value.is_finite() {
+                    return Err(SurfaceBuildError::NonFiniteVertex { vertex, axis });
+                }
+            }
+        }
+        let mut bounds = [[f64::INFINITY; 3], [f64::NEG_INFINITY; 3]];
+        for (face, indices) in faces.iter().enumerate() {
+            for (corner, &index) in indices.iter().enumerate() {
+                let Some(point) = vertices.get(index as usize) else {
+                    return Err(SurfaceBuildError::FaceIndexOutOfBounds {
+                        face,
+                        corner,
+                        index,
+                        vertex_count: vertices.len(),
+                    });
+                };
+                for axis in 0..3 {
+                    bounds[0][axis] = bounds[0][axis].min(point[axis]);
+                    bounds[1][axis] = bounds[1][axis].max(point[axis]);
+                }
+            }
+        }
+        Ok(bounds)
+    }
+
     #[allow(clippy::too_many_arguments)] // exact parallel face arrays are the immutable storage layout
     fn from_parts(
         v0: Vec<V3>,
@@ -143,19 +180,7 @@ impl Mesh {
         vertices: &[[f64; 3]],
         faces: &[[u32; 3]],
     ) -> Result<Self, SurfaceBuildError> {
-        if vertices.is_empty() {
-            return Err(SurfaceBuildError::EmptyVertices);
-        }
-        if faces.is_empty() {
-            return Err(SurfaceBuildError::EmptyFaces);
-        }
-        for (vertex, point) in vertices.iter().enumerate() {
-            for (axis, value) in point.iter().enumerate() {
-                if !value.is_finite() {
-                    return Err(SurfaceBuildError::NonFiniteVertex { vertex, axis });
-                }
-            }
-        }
+        let bounds = Self::validate_indexed_bounds(vertices, faces)?;
         let n = faces.len();
         let mut v0 = Vec::with_capacity(n);
         let mut e1s = Vec::with_capacity(n);
@@ -164,23 +189,11 @@ impl Mesh {
         let mut areas = Vec::with_capacity(n);
         let mut face_bounds = Vec::with_capacity(n);
         let mut centroids = Vec::with_capacity(n);
-        let mut bounds = [[f64::INFINITY; 3], [f64::NEG_INFINITY; 3]];
         for (face, indices) in faces.iter().enumerate() {
             let mut points = [[0.0; 3]; 3];
             for (corner, &index) in indices.iter().enumerate() {
-                let Some(point) = vertices.get(index as usize) else {
-                    return Err(SurfaceBuildError::FaceIndexOutOfBounds {
-                        face,
-                        corner,
-                        index,
-                        vertex_count: vertices.len(),
-                    });
-                };
+                let point = &vertices[index as usize];
                 points[corner] = *point;
-                for axis in 0..3 {
-                    bounds[0][axis] = bounds[0][axis].min(point[axis]);
-                    bounds[1][axis] = bounds[1][axis].max(point[axis]);
-                }
             }
             let [a, b, c] = points;
             let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];

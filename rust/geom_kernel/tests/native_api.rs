@@ -85,6 +85,77 @@ fn assert_intervals_equal(left: &[Vec<Interval>], right: &[Vec<Interval>]) {
     }
 }
 
+#[test]
+fn indexed_memory_estimate_is_checked_and_is_the_exact_grid_cap_boundary() {
+    let vertices = [[0.0, 0.0, 0.0], [8.0, 0.0, 0.0], [0.0, 8.0, 0.0]];
+    let faces = [[0, 1, 2]];
+    let estimate = NativeSurface::estimate_index_memory_from_indexed(&vertices, &faces, 0.5)
+        .expect("allocation-free estimate");
+    assert!(estimate.peak_bytes() >= estimate.retained_bytes());
+    assert!(estimate.max_axis_grid_bytes() > 0);
+    assert!(estimate
+        .axis_references()
+        .iter()
+        .all(|references| *references > 0));
+    NativeSurface::from_indexed(
+        &vertices,
+        &faces,
+        NativeSurfaceConfig {
+            grid_pitch_mm: 0.5,
+            max_grid_bytes: estimate.max_axis_grid_bytes(),
+        },
+    )
+    .expect("the estimated cap accepts the indexed surface");
+    let below = NativeSurface::from_indexed(
+        &vertices,
+        &faces,
+        NativeSurfaceConfig {
+            grid_pitch_mm: 0.5,
+            max_grid_bytes: estimate.max_axis_grid_bytes() - 1,
+        },
+    );
+    assert!(matches!(below, Err(SurfaceBuildError::Kernel(_))));
+
+    assert!(matches!(
+        NativeSurface::estimate_index_memory_from_indexed(&vertices, &faces, 0.0),
+        Err(SurfaceBuildError::InvalidGridPitch(0.0))
+    ));
+}
+
+#[test]
+fn indexed_estimator_mirrors_edge_reconstruction_at_floating_cell_boundaries() {
+    // `a + (b - a)` lands just below the source bit-pattern at this scale.
+    // The indexed store intentionally retains edges, so its allocation
+    // preflight must bin the reconstructed vertex exactly like the builder.
+    let vertices = vec![
+        [1.0, 0.0, 0.0],
+        [0.1, 0.0, 0.0],
+        [0.0, 1.0, 1.0],
+        [0.0, 0.0, 2.0],
+    ];
+    let faces = vec![[0, 1, 2], [1, 3, 2]];
+    let estimate = NativeSurface::estimate_index_memory_from_indexed(&vertices, &faces, 0.1)
+        .expect("finite indexed estimate");
+    NativeSurface::from_indexed(
+        &vertices,
+        &faces,
+        NativeSurfaceConfig {
+            grid_pitch_mm: 0.1,
+            max_grid_bytes: estimate.max_axis_grid_bytes(),
+        },
+    )
+    .expect("exact reconstructed-coordinate cap");
+    assert!(NativeSurface::from_indexed(
+        &vertices,
+        &faces,
+        NativeSurfaceConfig {
+            grid_pitch_mm: 0.1,
+            max_grid_bytes: estimate.max_axis_grid_bytes() - 1,
+        },
+    )
+    .is_err());
+}
+
 fn assert_batch_error<T>(
     result: Result<T, BatchInputError>,
     operation: &'static str,

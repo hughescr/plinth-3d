@@ -9,8 +9,14 @@ publish = false
 plinth-core = { path = "../plinth-core" }
 plinth-mesh = { path = "../plinth-mesh" }
 plinth-orient = { path = "../plinth-orient" }
+plinth-solid = { path = "../plinth-solid" }
+geom_kernel = { path = "../../rust/geom_kernel" }
+fast-surface-nets = { version = "=0.2.1", features = ["eval-max-plane"] }
+scirs2-core = "=0.6.5"
+scirs2-ndimage = "=0.6.5"
 serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
 plinth-decimate = { path = "../plinth-decimate" }
+serde_json = { workspace = true }

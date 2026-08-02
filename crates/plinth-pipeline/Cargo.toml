@@ -16,4 +16,5 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+plinth-mesh = { path = "../plinth-mesh" }
 serde_json = { workspace = true }

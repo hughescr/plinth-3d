@@ -13,12 +13,25 @@
 use plinth_core::ModelId;
 use plinth_decimate::{DecimationBudget, DecimationError};
 use plinth_emit::{EmitError, EmitReport};
-use plinth_hollow::{HollowError, HollowRequest};
-use plinth_orient::OrientError;
+use plinth_hollow::{HollowError, HollowRequest, HollowedModel};
+use plinth_orient::{OrientError, OrientedModel};
 use plinth_support::{SupportError, SupportRequest};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+
+/// Runs the complete hollow boundary for one already-oriented model.
+///
+/// The returned typestate is the only value support planning can consume: it
+/// contains either a proved drilled hollow or the preserved oriented solid
+/// with an explicit fallback disposition. Planned but undrilled shells have
+/// no conversion through this boundary.
+pub fn hollow_stage(
+    model: OrientedModel,
+    request: &HollowRequest,
+) -> Result<HollowedModel, HollowError> {
+    plinth_hollow::run(model, request)
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -118,6 +131,87 @@ pub enum PipelineError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use plinth_core::m0_constants;
+    use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
+    use plinth_hollow::{HollowDisposition, SolidFallbackReason};
+    use plinth_mesh::{load_binary_stl, make_box, Mesh, WeldPolicy};
+    use plinth_orient::{run as run_orientation, OrientRequest, PinnedBaseline};
+
+    fn baseline(name: &str) -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/baseline")
+            .join(name)
+    }
+
+    fn oriented(mesh: Mesh) -> OrientedModel {
+        let budget =
+            DecimationBudget::ratified_default(ProbeConfig::new(1.0, usize::MAX, 10_000.0))
+                .expect("registered transition-test budget");
+        let decimated = run_decimation(&mesh, budget)
+            .expect("transition-test decimation")
+            .into_decimated_model()
+            .expect("transition-test mesh is in contract");
+        run_orientation(
+            decimated,
+            &OrientRequest {
+                pinned: PinnedBaseline {
+                    pipeline_report: baseline("Sphere.pipeline.json"),
+                },
+            },
+        )
+        .expect("strict pinned orientation")
+    }
+
+    fn hollow_request() -> HollowRequest {
+        HollowRequest {
+            printer: m0_constants()
+                .expect("registered constants")
+                .saturn4_ultra()
+                .clone(),
+        }
+    }
+
+    #[test]
+    fn hollow_stage_preserves_history_and_only_hands_off_proved_drilled_mesh() {
+        let sphere = load_binary_stl(baseline("Sphere.prepped.stl"), WeldPolicy::None)
+            .expect("committed Sphere fixture");
+        let oriented = oriented(sphere);
+        let expected_history = oriented.history().clone();
+        let model = hollow_stage(oriented, &hollow_request()).expect("Sphere hollow transition");
+
+        assert_eq!(
+            model.history().hollow().disposition,
+            HollowDisposition::HollowedAndDrilled
+        );
+        assert!(!model.history().hollow().cavities.is_empty());
+        assert!(!model.history().hollow().drains.is_empty());
+        assert_eq!(model.history().orientation(), &expected_history);
+        assert_eq!(
+            model.history().orientation().decimation().trace(),
+            expected_history.decimation().trace()
+        );
+    }
+
+    #[test]
+    fn hollow_stage_retains_original_oriented_solid_for_explicit_fallback() {
+        let oriented = oriented(make_box([20.0, 8.0, 8.0], [0.0; 3]).expect("thin closed box"));
+        let allocation = oriented.mesh().verts().as_ptr();
+        let expected_mesh = oriented.mesh().clone();
+        let expected_history = oriented.history().clone();
+        let model = hollow_stage(oriented, &hollow_request()).expect("explicit solid fallback");
+
+        assert_eq!(model.mesh().verts().as_ptr(), allocation);
+        assert_eq!(model.mesh(), &expected_mesh);
+        assert_eq!(model.history().orientation(), &expected_history);
+        assert_eq!(
+            model.history().hollow().disposition,
+            HollowDisposition::SolidFallback {
+                reason: SolidFallbackReason::IneligibleForHollowing,
+            }
+        );
+        assert!(model.history().hollow().cavities.is_empty());
+        assert!(model.history().hollow().drains.is_empty());
+    }
 
     #[test]
     fn report_distinguishes_one_artifact_from_an_explicit_stage_stop() {

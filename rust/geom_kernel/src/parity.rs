@@ -15,6 +15,151 @@ struct FaceRef {
     slot: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ParityMemoryEstimate {
+    pub retained_bytes: usize,
+    pub peak_bytes: usize,
+    pub max_axis_build_bytes: usize,
+    pub axis_references: [usize; 3],
+}
+
+fn projection_axes(axis: usize) -> (usize, usize) {
+    match axis {
+        0 => (1, 2),
+        1 => (0, 2),
+        2 => (0, 1),
+        _ => unreachable!("parity has exactly three axes"),
+    }
+}
+
+fn projected_cell_bounds(
+    a: [f64; 3],
+    b: [f64; 3],
+    c: [f64; 3],
+    axes: [usize; 2],
+    origin: [f64; 2],
+    h: f64,
+) -> (i64, i64, i64, i64) {
+    let [p0, p1] = axes;
+    let [origin0, origin1] = origin;
+    let xmin = a[p0].min(b[p0]).min(c[p0]);
+    let xmax = a[p0].max(b[p0]).max(c[p0]);
+    let ymin = a[p1].min(b[p1]).min(c[p1]);
+    let ymax = a[p1].max(b[p1]).max(c[p1]);
+    (
+        ((xmin - origin0) / h).floor() as i64,
+        ((xmax - origin0) / h).floor() as i64,
+        ((ymin - origin1) / h).floor() as i64,
+        ((ymax - origin1) / h).floor() as i64,
+    )
+}
+
+/// Allocation-free upper bound for all three parity indexes. The retained
+/// estimate assumes every triangle reference has a distinct CSR key; the peak
+/// additionally includes the transient `(cell, triangle)` vector while each
+/// axis is built. Every add/multiply is checked and returns a named error.
+pub(crate) fn estimate_indexed_memory(
+    vertices: &[[f64; 3]],
+    faces: &[[u32; 3]],
+    bounds: [[f64; 3]; 2],
+    h: f64,
+) -> Result<ParityMemoryEstimate, String> {
+    let per_axis_triangle_bytes = faces
+        .len()
+        .checked_mul(11 * std::mem::size_of::<f64>() + std::mem::size_of::<bool>())
+        .ok_or_else(|| "parity triangle memory estimate overflow".to_string())?;
+    let mut axis_references = [0_usize; 3];
+    let mut retained_axes = [0_usize; 3];
+    let mut build_axes = [0_usize; 3];
+    for ax in 0..3 {
+        let (p0, p1) = projection_axes(ax);
+        let origin0 = bounds[0][p0] - 1.0;
+        let origin1 = bounds[0][p1] - 1.0;
+        let mut references = 0_usize;
+        for (face, indices) in faces.iter().enumerate() {
+            let a = vertices
+                .get(indices[0] as usize)
+                .copied()
+                .ok_or_else(|| format!("indexed face {face} is out of bounds"))?;
+            let source_b = vertices
+                .get(indices[1] as usize)
+                .copied()
+                .ok_or_else(|| format!("indexed face {face} is out of bounds"))?;
+            let source_c = vertices
+                .get(indices[2] as usize)
+                .copied()
+                .ok_or_else(|| format!("indexed face {face} is out of bounds"))?;
+            // `Mesh::from_indexed` stores A plus edge vectors; AxisGrid later
+            // reconstructs B/C from those arrays. Mirror that exact floating-
+            // point path here so a cell-boundary rounding bit cannot make the
+            // supposedly conservative preflight undercount references.
+            let b = [
+                a[0] + (source_b[0] - a[0]),
+                a[1] + (source_b[1] - a[1]),
+                a[2] + (source_b[2] - a[2]),
+            ];
+            let c = [
+                a[0] + (source_c[0] - a[0]),
+                a[1] + (source_c[1] - a[1]),
+                a[2] + (source_c[2] - a[2]),
+            ];
+            let (ix0, ix1, iy0, iy1) =
+                projected_cell_bounds(a, b, c, [p0, p1], [origin0, origin1], h);
+            let nx = i128::from(ix1) - i128::from(ix0) + 1;
+            let ny = i128::from(iy1) - i128::from(iy0) + 1;
+            if nx <= 0 || ny <= 0 {
+                return Err(format!("parity projected range is invalid at face {face}"));
+            }
+            let refs = usize::try_from(
+                nx.checked_mul(ny)
+                    .ok_or_else(|| format!("parity reference estimate overflow at face {face}"))?,
+            )
+            .map_err(|_| format!("parity reference estimate exceeds usize at face {face}"))?;
+            references = references
+                .checked_add(refs)
+                .ok_or_else(|| format!("parity reference total overflows usize at face {face}"))?;
+        }
+        if references > u32::MAX as usize {
+            return Err("parity grid exceeds 2^32 triangle references".into());
+        }
+        axis_references[ax] = references;
+        let transient = references
+            .checked_mul(std::mem::size_of::<(i64, u32)>())
+            .and_then(|bytes| bytes.checked_add(per_axis_triangle_bytes))
+            .ok_or_else(|| "parity transient memory estimate overflow".to_string())?;
+        let retained = references
+            .checked_mul(
+                std::mem::size_of::<i64>()
+                    + std::mem::size_of::<u32>()
+                    + std::mem::size_of::<u32>(),
+            )
+            .and_then(|bytes| bytes.checked_add(std::mem::size_of::<u32>()))
+            .and_then(|bytes| bytes.checked_add(per_axis_triangle_bytes))
+            .ok_or_else(|| "parity retained memory estimate overflow".to_string())?;
+        build_axes[ax] = transient;
+        retained_axes[ax] = retained;
+    }
+    let mut retained_before = 0_usize;
+    let mut peak_bytes = 0_usize;
+    for axis in 0..3 {
+        peak_bytes = peak_bytes.max(
+            retained_before
+                .checked_add(build_axes[axis])
+                .ok_or_else(|| "parity peak memory estimate overflow".to_string())?,
+        );
+        retained_before = retained_before
+            .checked_add(retained_axes[axis])
+            .ok_or_else(|| "parity retained memory estimate overflow".to_string())?;
+        peak_bytes = peak_bytes.max(retained_before);
+    }
+    Ok(ParityMemoryEstimate {
+        retained_bytes: retained_before,
+        peak_bytes,
+        max_axis_build_bytes: *build_axes.iter().max().unwrap_or(&0),
+        axis_references,
+    })
+}
+
 /// One axis' projected triangle data + CSR grid.
 pub struct AxisGrid {
     pub ax: usize,
@@ -65,8 +210,7 @@ impl AxisGrid {
         // the growing term we bound as it accumulates.
         let per_tri_bytes = n.saturating_mul(11 * 8 + 1);
         let pair_bytes = std::mem::size_of::<(i64, FaceRef)>();
-        let pp: Vec<usize> = (0..3).filter(|&i| i != ax).collect();
-        let (p0, p1) = (pp[0], pp[1]);
+        let (p0, p1) = projection_axes(ax);
 
         // origin = bounds[0, p] - 1.0 ; NY = floor((bounds[1,p1]+1 - origin1)/h)+3
         let bounds = mesh.bounds();
@@ -120,15 +264,10 @@ impl AxisGrid {
             bz[slot] = b[ax];
             cz[slot] = cc[ax];
 
-            // cell range of the 2D AABB
-            let xmin = ax0.min(bx).min(cx);
-            let xmax = ax0.max(bx).max(cx);
-            let ymin = ay0.min(by).min(cy);
-            let ymax = ay0.max(by).max(cy);
-            let ix0 = ((xmin - origin0) / h).floor() as i64;
-            let ix1 = ((xmax - origin0) / h).floor() as i64;
-            let iy0 = ((ymin - origin1) / h).floor() as i64;
-            let iy1 = ((ymax - origin1) / h).floor() as i64;
+            // cell range of the 2D AABB; shared with the allocation-free
+            // estimator so the preflight and builder cannot drift.
+            let (ix0, ix1, iy0, iy1) =
+                projected_cell_bounds(a, b, cc, [p0, p1], [origin0, origin1], h);
             for ix in ix0..=ix1 {
                 for iy in iy0..=iy1 {
                     let flat = ix

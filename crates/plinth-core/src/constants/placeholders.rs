@@ -29,6 +29,8 @@ pub enum PlaceholderValueError {
     SphereTriangleCount,
     #[error("drain directions must contain exactly five downward nonzero vectors")]
     InvalidDrainDirections,
+    #[error("vent directions must contain exactly four horizontal axis vectors")]
+    InvalidVentDirections,
     #[error("extension ladder must be nonempty and strictly increasing")]
     InvalidExtensionLadder,
 }
@@ -516,6 +518,37 @@ impl<'de> Deserialize<'de> for DrainDirections {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(transparent)]
+pub struct VentDirections([DrainDirection; 4]);
+
+impl VentDirections {
+    pub fn new(directions: [DrainDirection; 4]) -> Result<Self, PlaceholderValueError> {
+        let expected = [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)];
+        if directions.iter().zip(expected).all(|(direction, (x, y))| {
+            direction.x() == x && direction.y() == y && direction.z() == 0.0
+        }) {
+            Ok(Self(directions))
+        } else {
+            Err(PlaceholderValueError::InvalidVentDirections)
+        }
+    }
+
+    #[must_use]
+    pub const fn directions(&self) -> &[DrainDirection; 4] {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for VentDirections {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Self::new(<[DrainDirection; 4]>::deserialize(deserializer)?).map_err(de::Error::custom)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct HollowExtraDrainPolicy {
     min_pocket_ml: PositiveFinite,
     max_extra_drains: NonZeroU64,
@@ -869,6 +902,13 @@ impl ToConstantValue for DrainDirections {
     }
 }
 
+impl sealed::ConstantValueSource for VentDirections {}
+impl ToConstantValue for VentDirections {
+    fn to_constant_value(&self) -> Result<ConstantValue, RegistryError> {
+        ConstantValue::list(self.0.iter())
+    }
+}
+
 impl sealed::ConstantValueSource for HollowExtraDrainPolicy {}
 impl ToConstantValue for HollowExtraDrainPolicy {
     fn to_constant_value(&self) -> Result<ConstantValue, RegistryError> {
@@ -931,7 +971,7 @@ macro_rules! placeholder_declarations {
                 }
             )+
 
-            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 187], RegistryError> {
+            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 190], RegistryError> {
                 Ok([
                     $(ConstantDescriptor::from_placeholder(
                         ConstantId::from($id),
@@ -1130,8 +1170,19 @@ placeholder_declarations! {
     "HOLLOW_SHARD_MAX_FACES", "count", "scalar", "Component-triage face ceiling.";
     hollow_shard_max_volume_mm3: PositiveFinite = PositiveFinite::new(0.01)?;
     "HOLLOW_SHARD_MAX_VOLUME_MM3", "mm³", "scalar", "Component-triage volume ceiling.";
+    hollow_vent_directions: VentDirections = VentDirections::new([
+        DrainDirection::new(1.0, 0.0, 0.0)?,
+        DrainDirection::new(-1.0, 0.0, 0.0)?,
+        DrainDirection::new(0.0, 1.0, 0.0)?,
+        DrainDirection::new(0.0, -1.0, 0.0)?,
+    ])?;
+    "HOLLOW_VENT_DIRECTIONS", "1", "list[4]<record{x,y,z}>", "Ordered horizontal vent-search directions.";
     hollow_vent_r_mm: PositiveFinite = PositiveFinite::new(1.25)?;
     "HOLLOW_VENT_R_MM", "mm", "scalar", "Vent-hole radius policy.";
+    hollow_vent_sample_divisor: NonZeroU64 = nonzero(40)?;
+    "HOLLOW_VENT_SAMPLE_DIVISOR", "count", "scalar", "Top-band vent-site deterministic sampling divisor.";
+    hollow_vent_top_band_mm: PositiveFinite = PositiveFinite::new(2.0)?;
+    "HOLLOW_VENT_TOP_BAND_MM", "mm", "scalar", "Cavity-top band searched for a horizontal vent site.";
     hollow_volume_balance_rel_tol: UnitFraction = UnitFraction::new(0.02)?;
     "HOLLOW_VOLUME_BALANCE_REL_TOL", "1", "scalar", "Final volume-balance tolerance relative to solid volume.";
     hollow_wall_default_mm: PositiveFinite = PositiveFinite::new(2.5)?;

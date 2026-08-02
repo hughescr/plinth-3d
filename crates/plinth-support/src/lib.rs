@@ -428,7 +428,7 @@ pub enum SupportError {
 mod tests {
     use super::*;
     use plinth_decimate::{run as run_decimation, DecimationAudit, DecimationBudget, ProbeConfig};
-    use plinth_hollow::{HollowDisposition, HollowReport};
+    use plinth_hollow::{HollowDisposition, HollowedModel, SolidFallbackReason};
     use plinth_orient::{BaselineSelection, OrientationHistory, OrientationReport, RigidTransform};
     use std::path::PathBuf;
 
@@ -448,10 +448,15 @@ mod tests {
     #[test]
     fn consuming_scene_transition_moves_model_and_primitives_together() {
         let mesh = Mesh::new(
-            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-            vec![[0, 1, 2]],
+            vec![
+                [0.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ],
+            vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
         )
-        .expect("the test triangle is a valid mesh");
+        .expect("the test tetrahedron is a valid mesh");
         let allocation = mesh.verts().as_ptr();
         let decimation = fixture_decimation_audit();
         let orientation = OrientationHistory::from_reports(
@@ -462,14 +467,13 @@ mod tests {
                 transform: RigidTransform::identity(),
             },
         );
-        let hollow = HollowHistory::from_reports(
+        let hollowed = HollowedModel::solid_fallback(
+            mesh,
             orientation,
-            HollowReport {
-                disposition: HollowDisposition::HollowedAndDrilled,
-                cavities: Vec::new(),
-                drains: Vec::new(),
-            },
-        );
+            SolidFallbackReason::CavityNotDrainable,
+        )
+        .expect("public solid fallback must enter the support type path");
+        let (mesh, hollow) = hollowed.into_parts();
         let primitives = vec![SupportPrimitive {
             segment_kind: SupportSegmentKind::JointSphere,
             start_mm: [
@@ -573,5 +577,11 @@ mod tests {
         assert_eq!(history.support().support_primitive_count, 1);
         assert_eq!(history.lift_mm(), lift_mm);
         assert_eq!(history.plate_z_mm().get(), -5.0);
+        assert_eq!(
+            history.hollow().hollow().disposition,
+            HollowDisposition::SolidFallback {
+                reason: SolidFallbackReason::CavityNotDrainable
+            }
+        );
     }
 }

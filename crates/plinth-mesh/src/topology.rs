@@ -86,6 +86,14 @@ pub enum TopologyError {
     VertexCountOverflow,
     #[error("topology face count exceeds u32")]
     FaceCountOverflow,
+    #[error("closed-component certificate requires a validated topology")]
+    InvalidCertificateTopology,
+    #[error("closed-component certificate topology does not describe this mesh")]
+    CertificateMeshMismatch,
+    #[error("closed-component certificate requires every component to be closed and oriented")]
+    CertificateNotClosedOrOriented,
+    #[error("closed-component {component} volume arithmetic is not finite")]
+    CertificateVolumeArithmetic { component: u32 },
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -153,6 +161,55 @@ pub struct FaceTopology {
     weld_policy: WeldPolicy,
     mesh_fingerprint: String,
     content_digest: TopologyDigest,
+}
+
+/// One closed, consistently oriented face component certified from the
+/// canonical topology arrays.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ClosedComponent {
+    component_id: u32,
+    face_count: usize,
+    signed_volume_mm3: f64,
+}
+
+impl ClosedComponent {
+    #[must_use]
+    pub const fn component_id(self) -> u32 {
+        self.component_id
+    }
+
+    #[must_use]
+    pub const fn face_count(self) -> usize {
+        self.face_count
+    }
+
+    #[must_use]
+    pub const fn signed_volume_mm3(self) -> f64 {
+        self.signed_volume_mm3
+    }
+}
+
+/// Canonical closed-component signs and volumes for one exact mesh/topology
+/// pair. Containment is deliberately not inferred here; callers use the
+/// existing triage containment authority when they need that evidence.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClosedComponentCertificate {
+    components: Vec<ClosedComponent>,
+}
+
+impl ClosedComponentCertificate {
+    #[must_use]
+    pub fn components(&self) -> &[ClosedComponent] {
+        &self.components
+    }
+
+    #[must_use]
+    pub fn signed_volume_mm3(&self) -> f64 {
+        self.components
+            .iter()
+            .map(|component| component.signed_volume_mm3)
+            .sum()
+    }
 }
 
 impl FaceTopology {
@@ -487,12 +544,95 @@ pub fn validate_face_topology(topology: &FaceTopology) -> Result<(), TopologyVal
     Ok(())
 }
 
+/// Certify the signed volume of every closed, consistently oriented face
+/// component described by `topology`.
+///
+/// Each component uses one of its own vertices as the tetrahedral reference
+/// origin, so translating the complete mesh does not inject a large global
+/// coordinate into every volume term. This function never repairs, rewinds,
+/// welds, or performs containment classification.
+pub fn certify_closed_components(
+    mesh: &Mesh,
+    topology: &FaceTopology,
+) -> Result<ClosedComponentCertificate, TopologyError> {
+    validate_face_topology(topology).map_err(|_| TopologyError::InvalidCertificateTopology)?;
+    if topology.mesh_fingerprint != mesh_fingerprint(mesh)?
+        || topology.component_ids.len() != mesh.tris().len()
+    {
+        return Err(TopologyError::CertificateMeshMismatch);
+    }
+    if topology.cut_flags.iter().any(|flags| *flags != 0) {
+        return Err(TopologyError::CertificateNotClosedOrOriented);
+    }
+    let component_count = topology
+        .component_ids
+        .iter()
+        .copied()
+        .max()
+        .map_or(0_usize, |component| component as usize + 1);
+    let mut origins = vec![None; component_count];
+    let mut face_counts = vec![0_usize; component_count];
+    for (face, triangle) in mesh.tris().iter().enumerate() {
+        let component = topology.component_ids[face] as usize;
+        origins[component].get_or_insert(mesh.verts()[triangle[0] as usize]);
+        face_counts[component] = face_counts[component]
+            .checked_add(1)
+            .ok_or(TopologyError::FaceCountOverflow)?;
+    }
+    let mut volumes = vec![0.0_f64; component_count];
+    for (face, triangle) in mesh.tris().iter().enumerate() {
+        let component = topology.component_ids[face] as usize;
+        let origin = origins[component].expect("every component labels at least one face");
+        let a_point = mesh.verts()[triangle[0] as usize];
+        let b_point = mesh.verts()[triangle[1] as usize];
+        let c_point = mesh.verts()[triangle[2] as usize];
+        let a = [
+            a_point[0] - origin[0],
+            a_point[1] - origin[1],
+            a_point[2] - origin[2],
+        ];
+        let b = [
+            b_point[0] - origin[0],
+            b_point[1] - origin[1],
+            b_point[2] - origin[2],
+        ];
+        let c = [
+            c_point[0] - origin[0],
+            c_point[1] - origin[1],
+            c_point[2] - origin[2],
+        ];
+        let cross = [
+            b[1] * c[2] - b[2] * c[1],
+            b[2] * c[0] - b[0] * c[2],
+            b[0] * c[1] - b[1] * c[0],
+        ];
+        let term = (a[0] * cross[0] + a[1] * cross[1] + a[2] * cross[2]) / 6.0;
+        let next = volumes[component] + term;
+        if !term.is_finite() || !next.is_finite() {
+            return Err(TopologyError::CertificateVolumeArithmetic {
+                component: component as u32,
+            });
+        }
+        volumes[component] = next;
+    }
+    let components = volumes
+        .into_iter()
+        .enumerate()
+        .map(|(component, signed_volume_mm3)| ClosedComponent {
+            component_id: component as u32,
+            face_count: face_counts[component],
+            signed_volume_mm3,
+        })
+        .collect();
+    Ok(ClosedComponentCertificate { components })
+}
+
 /// A deterministic vertex-only projection of a mesh under an explicit weld
 /// policy.
 ///
-/// This view never mutates or replaces the source [`Mesh`].  It exists for
+/// This view never mutates or replaces the source [`Mesh`]. It exists for
 /// algorithms which require shared positional indexing but must retain the
-/// source triangle soup as their oracle representation.  `map()[source_id]`
+/// source triangle soup as their oracle representation. `map()[source_id]`
 /// is the corresponding ID in `verts()`; welded IDs are assigned by the first
 /// source-order occurrence of each equivalence class.
 #[derive(Clone, Debug, PartialEq)]
