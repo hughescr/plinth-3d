@@ -58,6 +58,28 @@ The following former requirements are explicitly superseded:
 | Python/PyO3 survives until M9 | O-7 removes each compatibility surface at its native handoff; the final gate proves zero Python after essential parity, loadability, determinism, and owner-print gates pass |
 | M2 requires a premature `SurfaceOracle` abstraction | Add an abstraction only when a second real backend is implemented after Python deletion |
 
+### O-10 — support compatibility is explicitly uncalibrated legacy behavior
+
+**Owner clarification, 2026-08-01.** The frozen Python support pipeline is a
+compatibility target only: it is known not to crash, but it does **not** produce
+viable models. The elimination-step support port therefore reproduces its current
+observable behavior as **explicitly uncalibrated legacy compatibility**. This is
+not a claim that the behavior is print-safe, mechanically adequate, or measured
+for lateral load, deflection, or brace performance.
+
+This bounded compatibility policy does not retain the Python runtime, change a
+retired/no-runtime declaration into `Measured`, or waive any metric. The emitted
+Rust artifact remains subject to every ordinary executable essential-parity,
+as-good-or-better, loadability, determinism, and ported verifier gate. In
+particular, `corpus/manifest.json` waivers remain empty. The frozen artifacts and
+source behavior are the legacy comparison target; they are not safety evidence.
+
+Support-physics redesign and calibration remain post-Python work under O-6. The
+concrete next task is
+[`07-post-python-support-calibration-plate.md`](07-post-python-support-calibration-plate.md):
+its preregistered plate must be challenged before fabrication, and it is roadmap
+work rather than a Python-deletion blocker.
+
 No numeric point estimate is normative here. The detailed material below continues to
 define useful metrics, fixtures, hazards, and desired end-state behavior wherever it does
 not conflict with this override.
