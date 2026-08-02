@@ -52,7 +52,7 @@
 | DECIMATION&#95;P99&#95;FACTOR | 0.0005 | 1 | scalar | placeholder(note="Placeholder; non-AcceptSafe. Selected pixel-pitch divisor fraction; arithmetic does not establish authority.") |
 | DECIMATION&#95;P99&#95;SAMPLE&#95;POLICY | {"cap":120000,"seed":42} | count | record{cap,seed} | placeholder(note="Placeholder; non-AcceptSafe. Backward percentile sampling seed and cap.") |
 | DECIMATION&#95;PROTECTED&#95;CAP&#95;FRACTION | 0.12 | 1 | scalar | placeholder(note="Placeholder; non-AcceptSafe. Protected-vertex fraction cap.") |
-| DECIMATION&#95;RATIO&#95;SEARCH | {"bisections":5,"lower":0.05,"upper":0.5} | 1 | record{bisections,lower,upper} | placeholder(note="Placeholder; non-AcceptSafe. Structured bounded ratio-search policy.") |
+| DECIMATION&#95;RATIO&#95;SEARCH | {"bisections":5,"lower":0.05,"upper":1.0} | 1 | record{bisections,lower,upper} | placeholder(note="Placeholder; non-AcceptSafe. Structured bounded ratio-search policy.") |
 | DECIMATION&#95;RECHECK&#95;SLACK | 1.1 | 1 | scalar | placeholder(note="Placeholder; non-AcceptSafe. Selected full-population recheck slack, not measured authority.") |
 | DECIMATION&#95;SCALE&#95;ACCEPTANCE&#95;MM | interval(lower=10.0,lower&#95;bound=inclusive,upper=300.0,upper&#95;bound=inclusive) | mm | interval | placeholder(note="Placeholder; non-AcceptSafe. Inclusive scale-sanity acceptance interval.") |
 | DECIMATION&#95;SEED&#95;ERROR&#95;MM | 0.05 | mm | scalar | placeholder(note="Placeholder; non-AcceptSafe. Feature seed error threshold.") |

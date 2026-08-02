@@ -261,7 +261,7 @@ const EXPECTED_ROWS: [ExpectedRow; 187] = rows! {
     "DECIMATION_P99_FACTOR", "0.0005", "1", "scalar";
     "DECIMATION_P99_SAMPLE_POLICY", "{cap:120000,seed:42}", "count", "record{cap,seed}";
     "DECIMATION_PROTECTED_CAP_FRACTION", "0.12", "1", "scalar";
-    "DECIMATION_RATIO_SEARCH", "{bisections:5,lower:0.05,upper:0.5}", "1", "record{bisections,lower,upper}";
+    "DECIMATION_RATIO_SEARCH", "{bisections:5,lower:0.05,upper:1.0}", "1", "record{bisections,lower,upper}";
     "DECIMATION_RECHECK_SLACK", "1.1", "1", "scalar";
     "DECIMATION_SCALE_ACCEPTANCE_MM", "interval(10.0,inclusive,300.0,inclusive)", "mm", "interval";
     "DECIMATION_SEED_ERROR_MM", "0.05", "mm", "scalar";
@@ -626,14 +626,14 @@ fn coupled_structures_validate_domains_accessors_and_strict_wire_shapes() {
     assert!(DecimationSamplingPolicy::new(42, 0).is_err());
     assert_strict_roundtrip(&sample, r#"{"seed":42,"cap":120000}"#);
 
-    let ratio = DecimationRatioSearchPolicy::new(0.05, 0.5, 5).unwrap();
+    let ratio = DecimationRatioSearchPolicy::new(0.05, 1.0, 5).unwrap();
     assert_eq!(
         (ratio.lower(), ratio.upper(), ratio.bisections().get()),
-        (0.05, 0.5, 5)
+        (0.05, 1.0, 5)
     );
-    assert!(DecimationRatioSearchPolicy::new(0.5, 0.05, 5).is_err());
-    assert!(DecimationRatioSearchPolicy::new(0.05, 0.5, 0).is_err());
-    assert_strict_roundtrip(&ratio, r#"{"lower":0.05,"upper":0.5,"bisections":5}"#);
+    assert!(DecimationRatioSearchPolicy::new(1.0, 0.05, 5).is_err());
+    assert!(DecimationRatioSearchPolicy::new(0.05, 1.0, 0).is_err());
+    assert_strict_roundtrip(&ratio, r#"{"lower":0.05,"upper":1.0,"bisections":5}"#);
 }
 
 #[test]

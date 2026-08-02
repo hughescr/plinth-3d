@@ -101,12 +101,19 @@ fn canonical_production_report() -> String {
     })
     .expect("construct ratified M3 budget");
     let outcome = run(&mesh, budget).expect("protected M3 production run must succeed");
-    let BudgetSearchOutcome::Verified(success) = outcome else {
-        panic!("ThreadSweepFixtureUnexpectedScaleSkip");
+    let (status, success) = match outcome {
+        BudgetSearchOutcome::Verified(success) => ("verified", success),
+        BudgetSearchOutcome::AlreadyPrintScale(success) => ("already_print_scale", success),
+        BudgetSearchOutcome::SkippedScaleSuspicious { .. } => {
+            panic!("ThreadSweepFixtureUnexpectedScaleSkip")
+        }
     };
 
     let mut report = String::new();
     report.push_str("plinth/m3-thread-sweep-report/v1\n");
+    report.push_str("status=");
+    report.push_str(status);
+    report.push('\n');
     push_usize(&mut report, "input_faces", mesh.tris().len());
     push_usize(&mut report, "output_faces", success.mesh().tris().len());
     push_f64(&mut report, "chosen_ratio", success.chosen_ratio());

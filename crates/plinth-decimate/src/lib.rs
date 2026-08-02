@@ -222,6 +222,9 @@ pub struct BudgetSearchStep {
     pub output_face_count: usize,
     pub output_vertex_count: usize,
     pub probe: TwoSidedProbe,
+    /// A requested ratio below one is not success merely because meshoptimizer
+    /// accepted it.  Production decimation must actually remove faces.
+    pub reduced: bool,
     pub passed: bool,
 }
 
@@ -232,6 +235,40 @@ pub struct BudgetSearchTrace {
     pub budget: ErrorBudget,
     pub protected_vertex_count: usize,
     pub steps: Vec<BudgetSearchStep>,
+    /// Why no safely reduced mesh was authorized when this trace backs an
+    /// [`BudgetSearchOutcome::AlreadyPrintScale`] result.
+    pub reduction_refusals: Vec<ReductionRefusalReason>,
+}
+
+/// Evidence that a requested simplification was correctly refused while the
+/// canonical original remained safe to print.  These are successful policy
+/// outcomes, not errors hidden behind an identity mesh.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ReductionRefusalReason {
+    ProtectionCap {
+        trace: Box<FeatureProtectionTrace>,
+    },
+    NoActualReduction {
+        requested_ratio: f64,
+        input_face_count: usize,
+        output_face_count: usize,
+    },
+    SampledBudgetExceeded {
+        requested_ratio: f64,
+        probe: TwoSidedProbe,
+        budget: ErrorBudget,
+    },
+    FinalBudgetExceeded {
+        requested_ratio: f64,
+        probe: TwoSidedProbe,
+        budget: ErrorBudget,
+        slack: f64,
+    },
+    TopologyIncreased {
+        requested_ratio: f64,
+        before: EdgeTopologyCounts,
+        after: EdgeTopologyCounts,
+    },
 }
 
 /// An opaque verified production candidate. Only this crate can construct one;
@@ -293,8 +330,14 @@ impl BudgetSearchSuccess {
 /// candidate-free scale skip.
 #[derive(Debug, PartialEq)]
 pub enum BudgetSearchOutcome {
-    SkippedScaleSuspicious { scale: ScaleSanity },
+    SkippedScaleSuspicious {
+        scale: ScaleSanity,
+    },
     Verified(Box<BudgetSearchSuccess>),
+    /// The original passed a strict canonical identity audit, but no genuinely
+    /// reduced candidate met the printer-resolution, topology, and protection
+    /// contract.  It owns the same one-shot verified capability as `Verified`.
+    AlreadyPrintScale(Box<BudgetSearchSuccess>),
 }
 
 #[derive(Clone, Debug, Error, PartialEq)]
@@ -338,8 +381,8 @@ pub struct VerificationFailure {
     pub reason: VerificationFailureReason,
 }
 
-/// Typed M3 budget-search failures.  In particular, an unreachable loose
-/// ratio is distinct from a scale skip and from final verification refusal.
+/// Typed M3 budget-search failures.  An exhausted safe-reduction search is
+/// deliberately not an error: it returns `AlreadyPrintScale` instead.
 #[derive(Clone, Debug, Error, PartialEq)]
 pub enum BudgetSearchError {
     #[error("registered M0 constants are unavailable: {message}")]
@@ -349,8 +392,6 @@ pub enum BudgetSearchError {
         phase: &'static str,
         message: String,
     },
-    #[error("DecimationBudgetUnreachable: ratio 0.50 exceeds the sampled error budget")]
-    DecimationBudgetUnreachable { trace: Box<BudgetSearchTrace> },
     #[error("VerificationFailed: final full-population verification refused the candidate")]
     VerificationFailed { failure: Box<VerificationFailure> },
 }
@@ -470,8 +511,34 @@ pub fn run(
     original: &Mesh,
     budget: DecimationBudget,
 ) -> Result<BudgetSearchOutcome, DecimationError> {
-    let (protected, _) = select_feature_protection(original, budget.probe)?;
-    Ok(run_budget_search(original, &protected, budget)?)
+    // Scale is a named pre-search SKIP.  Do this before the feature probe so a
+    // deliberately out-of-scale mesh cannot turn into an unrelated cap error.
+    let policy = search_policy()?;
+    let scale = scale_sanity(original);
+    if !scale.longest_axis_mm.is_finite()
+        || scale.longest_axis_mm < policy.scale_min_mm
+        || scale.longest_axis_mm > policy.scale_max_mm
+    {
+        return Ok(BudgetSearchOutcome::SkippedScaleSuspicious { scale });
+    }
+
+    match select_feature_protection(original, budget.probe) {
+        Ok((protected, _)) => Ok(run_budget_search(original, &protected, budget)?),
+        Err(FeatureProtectionError::CapExceeded {
+            trace: protection_trace,
+        }) => {
+            let trace = new_budget_trace(scale, budget, &policy, 0);
+            Ok(already_print_scale(
+                original,
+                budget.probe,
+                trace,
+                ReductionRefusalReason::ProtectionCap {
+                    trace: protection_trace,
+                },
+            )?)
+        }
+        Err(error) => Err(error.into()),
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -742,7 +809,9 @@ fn feature_protection_policy() -> Result<FeatureProtectionPolicy, FeatureProtect
     })
 }
 
-/// Runs M3 stages 1, 4b, 5, 6, and 7 over the accepted D0/D1 primitives.
+/// Runs M3's quality-first reduction search over the accepted D0/D1
+/// primitives. Ratio 1.0 is an identity audit/evidence endpoint, never a
+/// purported reduction.
 ///
 /// The returned [`BudgetSearchOutcome`] makes a scale skip explicit and keeps
 /// it candidate-free.  Every non-skip success owns exactly one final mesh;
@@ -772,34 +841,34 @@ fn run_budget_search(
         p99_mm: budget.pixel_um.get() * policy.p99_factor,
         p99_9_mm: budget.pixel_um.get() * policy.p99_9_factor,
     };
-    let protected_vertex_count = protected.iter().filter(|&&locked| locked).count();
-    let mut trace = BudgetSearchTrace {
+    let mut trace = new_budget_trace(
         scale,
-        budget: error_budget,
-        protected_vertex_count,
-        steps: Vec::with_capacity(policy.bisections + 1),
-    };
+        budget,
+        &policy,
+        protected.iter().filter(|&&locked| locked).count(),
+    );
 
-    let initial = sampled_step(
-        original,
-        protected,
-        policy.ratio_high,
-        budget.probe,
-        error_budget,
-    )
-    .map_err(|error| BudgetSearchError::SearchExecution {
-        phase: "ratio-high precondition",
-        message: error,
+    // This canonical identity probe establishes that the original itself is
+    // auditable and exactly within budget. It is intentionally not eligible to
+    // win the reduction search.
+    let initial = canonical_identity_step(original, protected, budget.probe).map_err(|error| {
+        BudgetSearchError::SearchExecution {
+            phase: "ratio-high precondition",
+            message: error,
+        }
     })?;
-    let initial_passed = initial.passed;
+    let initial_passed = within_budget(&initial.probe, error_budget)
+        && !initial.reduced
+        && initial.output_face_count == original.tris().len();
     trace.steps.push(initial);
     if !initial_passed {
-        return Err(BudgetSearchError::DecimationBudgetUnreachable {
-            trace: Box::new(trace),
+        return Err(BudgetSearchError::SearchExecution {
+            phase: "ratio-1 canonical identity audit",
+            message: "identity candidate exceeded a zero-error safety expectation".to_owned(),
         });
     }
 
-    let mut lowest_passing_ratio = policy.ratio_high;
+    let mut lowest_passing_ratio = None;
     let mut low = policy.ratio_low;
     let mut high = policy.ratio_high;
     for _ in 0..policy.bisections {
@@ -809,16 +878,50 @@ fn run_budget_search(
                 phase: "ratio bisection",
                 message: error,
             })?;
-        if step.passed {
-            high = midpoint;
-            if midpoint < lowest_passing_ratio {
-                lowest_passing_ratio = midpoint;
-            }
+        match (step.reduced, step.passed) {
+            // A real, budget-safe candidate lets us try for still fewer faces.
+            (true, true) => high = midpoint,
+            // A real candidate that exceeds a measured limit needs less
+            // simplification (a higher requested ratio).
+            (true, false) => low = midpoint,
+            // A meshoptimizer no-op must never win.  A lower requested ratio
+            // is the only direction that could produce a real reduction.
+            (false, _) => high = midpoint,
+        }
+        if step.reduced && step.passed {
+            lowest_passing_ratio = Some(midpoint);
+        } else if !step.reduced {
+            trace
+                .reduction_refusals
+                .push(ReductionRefusalReason::NoActualReduction {
+                    requested_ratio: step.ratio,
+                    input_face_count: original.tris().len(),
+                    output_face_count: step.output_face_count,
+                });
         } else {
-            low = midpoint;
+            trace
+                .reduction_refusals
+                .push(ReductionRefusalReason::SampledBudgetExceeded {
+                    requested_ratio: step.ratio,
+                    probe: step.probe.clone(),
+                    budget: error_budget,
+                });
         }
         trace.steps.push(step);
     }
+
+    let Some(lowest_passing_ratio) = lowest_passing_ratio else {
+        return already_print_scale(
+            original,
+            budget.probe,
+            trace,
+            ReductionRefusalReason::NoActualReduction {
+                requested_ratio: policy.ratio_high,
+                input_face_count: original.tris().len(),
+                output_face_count: original.tris().len(),
+            },
+        );
+    };
 
     let final_outcome = simplify_locked(
         original,
@@ -868,25 +971,167 @@ fn run_budget_search(
                 },
             )
         })?;
-    verify_final_evidence(
-        &trace,
-        topology_before,
-        final_probe.clone(),
-        topology_after,
-        error_budget,
-        policy.final_slack,
-    )?;
+    if !within_final_slack(&final_probe, error_budget, policy.final_slack) {
+        return already_print_scale(
+            original,
+            budget.probe,
+            trace,
+            ReductionRefusalReason::FinalBudgetExceeded {
+                requested_ratio: lowest_passing_ratio,
+                probe: final_probe,
+                budget: error_budget,
+                slack: policy.final_slack,
+            },
+        );
+    }
+    if !topology_not_increased(topology_before, topology_after) {
+        return already_print_scale(
+            original,
+            budget.probe,
+            trace,
+            ReductionRefusalReason::TopologyIncreased {
+                requested_ratio: lowest_passing_ratio,
+                before: topology_before,
+                after: topology_after,
+            },
+        );
+    }
 
     Ok(BudgetSearchOutcome::Verified(Box::new(
         BudgetSearchSuccess {
             mesh: final_outcome.mesh,
-            chosen_ratio: lowest_passing_ratio,
+            // The report names the actual mesh ratio, not merely meshopt's
+            // requested target (face counts are discrete).
+            chosen_ratio: final_outcome.achieved_ratio,
             trace,
             final_probe,
             topology_before,
             topology_after,
         },
     )))
+}
+
+fn new_budget_trace(
+    scale: ScaleSanity,
+    budget: DecimationBudget,
+    policy: &SearchPolicy,
+    protected_vertex_count: usize,
+) -> BudgetSearchTrace {
+    BudgetSearchTrace {
+        scale,
+        budget: ErrorBudget {
+            p99_mm: budget.pixel_um.get() * policy.p99_factor,
+            p99_9_mm: budget.pixel_um.get() * policy.p99_9_factor,
+        },
+        protected_vertex_count,
+        steps: Vec::with_capacity(policy.bisections + 1),
+        reduction_refusals: Vec::new(),
+    }
+}
+
+/// Authorize the canonical input only after a strict audit and full, two-sided
+/// zero-error identity probe.  This is the sole identity success path; callers
+/// cannot use a lower-ratio meshoptimizer no-op as a substitute.
+fn already_print_scale(
+    original: &Mesh,
+    probe_config: ProbeConfig,
+    mut trace: BudgetSearchTrace,
+    reason: ReductionRefusalReason,
+) -> Result<BudgetSearchOutcome, BudgetSearchError> {
+    original
+        .audit_strict()
+        .map_err(|error| BudgetSearchError::SearchExecution {
+            phase: "canonical identity strict audit",
+            message: error.to_string(),
+        })?;
+    let topology = build_face_topology(original, WeldPolicy::ExactBits)
+        .map(|topology| topology.edge_counts())
+        .map_err(|error| BudgetSearchError::SearchExecution {
+            phase: "canonical identity topology audit",
+            message: error.to_string(),
+        })?;
+    let final_probe =
+        exact_identity_probe(original, ProbePopulation::Full, probe_config).map_err(|error| {
+            BudgetSearchError::SearchExecution {
+                phase: "canonical identity full probe",
+                message: error.to_string(),
+            }
+        })?;
+    if final_probe.p99_mm != 0.0 || final_probe.p99_9_mm != 0.0 || final_probe.max_mm != Some(0.0) {
+        return Err(BudgetSearchError::SearchExecution {
+            phase: "canonical identity full probe",
+            message: "identity probe was not exactly zero".to_owned(),
+        });
+    }
+    trace.reduction_refusals.push(reason);
+    Ok(BudgetSearchOutcome::AlreadyPrintScale(Box::new(
+        BudgetSearchSuccess {
+            mesh: original.clone(),
+            chosen_ratio: 1.0,
+            trace,
+            final_probe,
+            topology_before: topology,
+            topology_after: topology,
+        },
+    )))
+}
+
+fn canonical_identity_step(
+    original: &Mesh,
+    protected: &[bool],
+    probe_config: ProbeConfig,
+) -> Result<BudgetSearchStep, String> {
+    let outcome = simplify_locked(
+        original,
+        &SimplifyRequest {
+            target_ratio: 1.0,
+            vertex_locks: protected.to_vec(),
+        },
+    )
+    .map_err(|error| error.to_string())?;
+    if !outcome.identity_bypass
+        || outcome.output_face_count != original.tris().len()
+        || outcome.mesh != *original
+    {
+        return Err("ratio-1 simplification did not preserve canonical source identity".to_owned());
+    }
+    let probe = exact_identity_probe(original, ProbePopulation::Sampled, probe_config)
+        .map_err(|error| error.to_string())?;
+    Ok(BudgetSearchStep {
+        ratio: 1.0,
+        output_face_count: outcome.output_face_count,
+        output_vertex_count: outcome.output_vertex_count,
+        probe,
+        reduced: false,
+        passed: false,
+    })
+}
+
+fn exact_identity_probe(
+    mesh: &Mesh,
+    population: ProbePopulation,
+    config: ProbeConfig,
+) -> Result<TwoSidedProbe, ProbeError> {
+    // The candidate is the very same canonical mesh, established above by
+    // exact bitwise identity.  Its two directed surface distances are therefore
+    // exactly zero; routing the fact through a floating nearest-query kernel
+    // would manufacture numerical noise into an identity proof.
+    audit_probe_inputs(mesh, mesh, config)?;
+    let (_, forward) = select_points(mesh.tris().len(), population, FORWARD_CAP, FORWARD_SEED);
+    let (_, backward) = select_points(mesh.verts().len(), population, BACKWARD_CAP, BACKWARD_SEED);
+    let zero_count = forward.selected_count + backward.selected_count;
+    if zero_count == 0 {
+        return Err(ProbeError::EmptyPopulation);
+    }
+    Ok(TwoSidedProbe {
+        candidate_face_count: mesh.tris().len(),
+        forward,
+        backward,
+        p99_mm: 0.0,
+        p99_9_mm: 0.0,
+        max_mm: Some(0.0),
+        distance_digest: digest_f64_bits(&vec![0.0; zero_count]),
+    })
 }
 
 fn sampled_step(
@@ -911,12 +1156,14 @@ fn sampled_step(
         probe_config,
     )
     .map_err(|error| error.to_string())?;
-    let passed = within_budget(&probe, budget);
+    let reduced = outcome.output_face_count < original.tris().len();
+    let passed = reduced && within_budget(&probe, budget);
     Ok(BudgetSearchStep {
         ratio,
         output_face_count: outcome.output_face_count,
         output_vertex_count: outcome.output_vertex_count,
         probe,
+        reduced,
         passed,
     })
 }
@@ -934,6 +1181,7 @@ fn topology_not_increased(before: EdgeTopologyCounts, after: EdgeTopologyCounts)
         && after.nonmanifold_edges <= before.nonmanifold_edges
 }
 
+#[cfg(test)]
 fn verify_final_evidence(
     trace: &BudgetSearchTrace,
     topology_before: EdgeTopologyCounts,
@@ -2156,6 +2404,7 @@ mod tests {
             budget,
             protected_vertex_count: 0,
             steps: Vec::new(),
+            reduction_refusals: Vec::new(),
         }
     }
 
@@ -2175,7 +2424,10 @@ mod tests {
             let (mesh, locks) = locked_box(size);
             let outcome = run_budget_search(&mesh, &locks, d2_budget(1_000_000.0)).unwrap();
             assert!(
-                matches!(outcome, BudgetSearchOutcome::Verified(_)),
+                matches!(
+                    outcome,
+                    BudgetSearchOutcome::Verified(_) | BudgetSearchOutcome::AlreadyPrintScale(_)
+                ),
                 "{size}"
             );
         }
@@ -2190,7 +2442,7 @@ mod tests {
     }
 
     #[test]
-    fn ratio_high_unreachable_stops_before_bisection_and_returns_no_candidate() {
+    fn exhausted_reduction_search_returns_audited_already_print_scale() {
         let mesh = Mesh::new(
             vec![
                 [5.0, 0.0, 0.0],
@@ -2212,38 +2464,36 @@ mod tests {
             ],
         )
         .unwrap();
-        let error = run_budget_search(&mesh, &[false; 6], d2_budget(1e-100)).unwrap_err();
-        match error {
-            BudgetSearchError::DecimationBudgetUnreachable { trace } => {
-                assert_eq!(trace.steps.len(), 1);
-                assert_eq!(trace.steps[0].ratio, 0.5);
-                assert!(!trace.steps[0].passed);
-            }
-            other => panic!("expected named unreachable error, got {other:?}"),
-        }
+        let outcome = run_budget_search(&mesh, &[false; 6], d2_budget(1e-100)).unwrap();
+        let BudgetSearchOutcome::AlreadyPrintScale(success) = outcome else {
+            panic!("unaffordable reductions must retain audited print-scale input");
+        };
+        assert_eq!(success.chosen_ratio(), 1.0);
+        assert_eq!(success.mesh().tris().len(), mesh.tris().len());
+        assert_eq!(success.final_probe().p99_mm, 0.0);
+        assert_eq!(success.final_probe().p99_9_mm, 0.0);
+        assert_eq!(success.trace().steps.len(), 6);
+        assert!(success
+            .trace()
+            .reduction_refusals
+            .iter()
+            .any(|reason| matches!(reason, ReductionRefusalReason::SampledBudgetExceeded { .. })));
     }
 
     #[test]
     fn five_bisections_select_the_lowest_observed_passing_ratio_with_honest_locks() {
         let (mesh, locks) = locked_box(10.0);
         let outcome = run_budget_search(&mesh, &locks, d2_budget(1_000_000.0)).unwrap();
-        let BudgetSearchOutcome::Verified(success) = outcome else {
-            panic!("locked printable mesh must verify");
+        let BudgetSearchOutcome::AlreadyPrintScale(success) = outcome else {
+            panic!("a fully protected simple mesh must be explicit print-scale identity");
         };
         assert_eq!(
             success.trace.steps.len(),
             6,
             "one high probe plus five bisections"
         );
-        assert!(success.trace.steps.iter().all(|step| step.passed));
-        let expected = success
-            .trace
-            .steps
-            .iter()
-            .map(|step| step.ratio)
-            .min_by(f64::total_cmp)
-            .unwrap();
-        assert_eq!(success.chosen_ratio, expected);
+        assert!(!success.trace.steps[0].reduced);
+        assert_eq!(success.chosen_ratio, 1.0);
         assert!(success.mesh.audit_strict().is_ok());
         assert_eq!(success.mesh.tris().len(), mesh.tris().len());
         assert_eq!(success.trace.protected_vertex_count, mesh.verts().len());

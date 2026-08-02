@@ -11,8 +11,7 @@ use std::path::{Path, PathBuf};
 
 use geom_kernel::NativeSurfaceConfig;
 use plinth_decimate::{
-    run, BudgetSearchError, BudgetSearchOutcome, BudgetSearchSuccess, DecimationBudget,
-    DecimationError, ProbeConfig,
+    run, BudgetSearchOutcome, BudgetSearchSuccess, DecimationBudget, ProbeConfig,
 };
 use plinth_mesh::{load_binary_stl, write_binary_stl, EdgeTopologyCounts, Mesh, WeldPolicy};
 use serde::{Deserialize, Serialize};
@@ -26,17 +25,17 @@ const EXPECTED: [CorpusModel; 8] = [
         "corpus/models/Sphere.stl",
         "48c27bb596a265900a614171d7ffe3a7a4ea80d95f1c620cf3ab00f67fe0a1d5",
     ),
-    CorpusModel::verified(
+    CorpusModel::already_print_scale(
         "Cylinder",
         "corpus/models/Cylinder.stl",
         "7bd60bd7fb83882f2bdc9c977e4f15e55f5cf0342c05c31584c586782505f741",
     ),
-    CorpusModel::verified(
+    CorpusModel::already_print_scale(
         "make_box",
         "corpus/models/make_box.stl",
         "aada5b79e87461c6f74afe4e16a5f651aed47fd6638a50a225e35760a8010c3b",
     ),
-    CorpusModel::verified(
+    CorpusModel::already_print_scale(
         "make_overhang_table",
         "corpus/models/make_overhang_table.stl",
         "a776132a2cc4a43298d9ca646a4265a7ba60ed7d37de7618147ac754dfe8c996",
@@ -46,12 +45,12 @@ const EXPECTED: [CorpusModel; 8] = [
         "corpus/models/make_toed_slab.stl",
         "ceb70f2b549fb131b0f177033401c50879a8fbc6d575b27459c0f9574d9f1169",
     ),
-    CorpusModel::verified(
+    CorpusModel::already_print_scale(
         "make_raking_blade",
         "corpus/models/make_raking_blade.stl",
         "0979f5812c26b3bd88f6e36bb792573fbdc9c023656c46544f2bffdecddefb97",
     ),
-    CorpusModel::verified(
+    CorpusModel::already_print_scale(
         "make_thin_fin",
         "corpus/models/make_thin_fin.stl",
         "09bec5c6ff8ff169f91438c209b12c3e6d9eb0dbb7e2fd7611e98d1884516c4c",
@@ -80,14 +79,27 @@ impl CorpusModel {
             expected_status: ExpectedStatus::Verified,
         }
     }
+
+    const fn already_print_scale(
+        name: &'static str,
+        stl: &'static str,
+        sha256: &'static str,
+    ) -> Self {
+        Self {
+            name,
+            stl,
+            sha256,
+            expected_status: ExpectedStatus::AlreadyPrintScale,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ExpectedStatus {
     Verified,
+    AlreadyPrintScale,
     SkippedScaleSuspicious,
-    DecimationBudgetUnreachable,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -123,12 +135,15 @@ struct ModelReport {
     final_p99_9_limit_mm: Option<f64>,
     topology_before: Option<TopologyReport>,
     topology_after: Option<TopologyReport>,
+    reduction_refusals: Vec<String>,
     error: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
 struct SearchStepReport {
     ratio: f64,
+    output_faces: usize,
+    reduced: bool,
     p99_mm: f64,
     p99_9_mm: f64,
     passed: bool,
@@ -207,6 +222,8 @@ fn report_writer_canonicalizes_arithmetic_floats_before_the_only_disk_write() {
             chosen_ratio: Some(0.5),
             search_steps: vec![SearchStepReport {
                 ratio: 0.5,
+                output_faces: 1,
+                reduced: true,
                 p99_mm: 0.0,
                 p99_9_mm: 0.0,
                 passed: true,
@@ -225,6 +242,7 @@ fn report_writer_canonicalizes_arithmetic_floats_before_the_only_disk_write() {
                 boundary_edges: 0,
                 nonmanifold_edges: 0,
             }),
+            reduction_refusals: Vec::new(),
             error: None,
         }],
     };
@@ -331,81 +349,26 @@ fn run_one(
             final_p99_9_limit_mm: None,
             topology_before: None,
             topology_after: None,
+            reduction_refusals: Vec::new(),
             error: Some(format!(
                 "ScaleSuspicious: longest axis {} mm is outside [10, 300] mm; no candidate exported",
                 scale.longest_axis_mm
             )),
         }),
-        Ok(BudgetSearchOutcome::Verified(success)) => {
-            let trace = success.trace();
-            let final_probe = success.final_probe();
-            let budget_limits = trace.budget;
-            let search_steps = trace
-                .steps
-                .iter()
-                .map(|step| SearchStepReport {
-                    ratio: step.ratio,
-                    p99_mm: step.probe.p99_mm,
-                    p99_9_mm: step.probe.p99_9_mm,
-                    passed: step.passed,
-                })
-                .collect::<Vec<_>>();
-            let contract_error = independently_audit_verified(
-                expected,
-                original,
-                success.as_ref(),
-                output_dir,
-            )
-            .err();
-            Ok(ModelReport {
-                name: expected.name.to_owned(),
-                expected_status: expected.expected_status,
-                actual_status: expected_status_name(ExpectedStatus::Verified).to_owned(),
-                input_faces: Some(original.tris().len()),
-                output_faces: Some(success.mesh().tris().len()),
-                chosen_ratio: Some(success.chosen_ratio()),
-                search_steps,
-                search_p99_mm: trace.steps.last().map(|step| step.probe.p99_mm),
-                search_p99_9_mm: trace.steps.last().map(|step| step.probe.p99_9_mm),
-                final_p99_mm: Some(final_probe.p99_mm),
-                final_p99_9_mm: Some(final_probe.p99_9_mm),
-                final_p99_limit_mm: Some(budget_limits.p99_mm * 1.1),
-                final_p99_9_limit_mm: Some(budget_limits.p99_9_mm * 1.1),
-                topology_before: Some(success.topology_before().into()),
-                topology_after: Some(success.topology_after().into()),
-                error: contract_error,
-            })
-        }
-        Err(DecimationError::Budget(BudgetSearchError::DecimationBudgetUnreachable { trace })) => {
-            let first = trace.steps.first();
-            Ok(ModelReport {
-                name: expected.name.to_owned(),
-                expected_status: expected.expected_status,
-                actual_status: expected_status_name(ExpectedStatus::DecimationBudgetUnreachable).to_owned(),
-                input_faces: Some(original.tris().len()),
-                output_faces: None,
-                chosen_ratio: None,
-                search_steps: first
-                    .map(|step| {
-                        vec![SearchStepReport {
-                            ratio: step.ratio,
-                            p99_mm: step.probe.p99_mm,
-                            p99_9_mm: step.probe.p99_9_mm,
-                            passed: step.passed,
-                        }]
-                    })
-                    .unwrap_or_default(),
-                search_p99_mm: first.map(|step| step.probe.p99_mm),
-                search_p99_9_mm: first.map(|step| step.probe.p99_9_mm),
-                final_p99_mm: None,
-                final_p99_9_mm: None,
-                final_p99_limit_mm: Some(trace.budget.p99_mm * 1.1),
-                final_p99_9_limit_mm: Some(trace.budget.p99_9_mm * 1.1),
-                topology_before: None,
-                topology_after: None,
-                error: Some("DecimationBudgetUnreachable at RATIO_HI=0.50; no candidate exported".to_owned()),
-            })
-        }
+        Ok(BudgetSearchOutcome::Verified(success)) => Ok(success_report(
+            expected,
+            original,
+            success.as_ref(),
+            ExpectedStatus::Verified,
+            output_dir,
+        )),
+        Ok(BudgetSearchOutcome::AlreadyPrintScale(success)) => Ok(success_report(
+            expected,
+            original,
+            success.as_ref(),
+            ExpectedStatus::AlreadyPrintScale,
+            output_dir,
+        )),
         Err(error) => Ok(ModelReport {
             name: expected.name.to_owned(),
             expected_status: expected.expected_status,
@@ -422,9 +385,98 @@ fn run_one(
             final_p99_9_limit_mm: None,
             topology_before: None,
             topology_after: None,
+            reduction_refusals: Vec::new(),
             error: Some(error.to_string()),
         }),
     }
+}
+
+fn success_report(
+    expected: CorpusModel,
+    original: &Mesh,
+    success: &BudgetSearchSuccess,
+    actual_status: ExpectedStatus,
+    output_dir: &Path,
+) -> ModelReport {
+    let trace = success.trace();
+    let final_probe = success.final_probe();
+    let contract_error = match actual_status {
+        ExpectedStatus::Verified => {
+            independently_audit_verified(expected, original, success, output_dir).err()
+        }
+        ExpectedStatus::AlreadyPrintScale => {
+            independently_audit_already_print_scale(expected, original, success, output_dir).err()
+        }
+        ExpectedStatus::SkippedScaleSuspicious => unreachable!("success cannot be a scale skip"),
+    };
+    ModelReport {
+        name: expected.name.to_owned(),
+        expected_status: expected.expected_status,
+        actual_status: expected_status_name(actual_status).to_owned(),
+        input_faces: Some(original.tris().len()),
+        output_faces: Some(success.mesh().tris().len()),
+        chosen_ratio: Some(success.chosen_ratio()),
+        search_steps: trace
+            .steps
+            .iter()
+            .map(|step| SearchStepReport {
+                ratio: step.ratio,
+                output_faces: step.output_face_count,
+                reduced: step.reduced,
+                p99_mm: step.probe.p99_mm,
+                p99_9_mm: step.probe.p99_9_mm,
+                passed: step.passed,
+            })
+            .collect(),
+        search_p99_mm: trace.steps.last().map(|step| step.probe.p99_mm),
+        search_p99_9_mm: trace.steps.last().map(|step| step.probe.p99_9_mm),
+        final_p99_mm: Some(final_probe.p99_mm),
+        final_p99_9_mm: Some(final_probe.p99_9_mm),
+        final_p99_limit_mm: Some(trace.budget.p99_mm * 1.1),
+        final_p99_9_limit_mm: Some(trace.budget.p99_9_mm * 1.1),
+        topology_before: Some(success.topology_before().into()),
+        topology_after: Some(success.topology_after().into()),
+        reduction_refusals: trace
+            .reduction_refusals
+            .iter()
+            .map(|reason| format!("{reason:?}"))
+            .collect(),
+        error: contract_error,
+    }
+}
+
+fn independently_audit_already_print_scale(
+    expected: CorpusModel,
+    original: &Mesh,
+    success: &BudgetSearchSuccess,
+    output_dir: &Path,
+) -> Result<(), String> {
+    if success.chosen_ratio() != 1.0 || success.mesh() != original {
+        return Err(
+            "AlreadyPrintScaleIdentity: expected unchanged canonical mesh at ratio 1.0".to_owned(),
+        );
+    }
+    if success.final_probe().p99_mm != 0.0
+        || success.final_probe().p99_9_mm != 0.0
+        || success.final_probe().max_mm != Some(0.0)
+    {
+        return Err(
+            "AlreadyPrintScaleIdentityError: identity evidence was not exactly zero".to_owned(),
+        );
+    }
+    if success.topology_before() != success.topology_after()
+        || success.trace().reduction_refusals.is_empty()
+    {
+        return Err("AlreadyPrintScaleEvidence: topology or refusal evidence missing".to_owned());
+    }
+    success
+        .mesh()
+        .audit_strict()
+        .map_err(|error| error.to_string())?;
+    if expected.name == "Weeping Treant v1.2" {
+        write_and_reopen_treant_artifacts(output_dir, original, success.mesh())?;
+    }
+    Ok(())
 }
 
 fn independently_audit_verified(
@@ -570,8 +622,8 @@ fn assert_stl_surface_bits_equal(
 fn expected_status_name(status: ExpectedStatus) -> &'static str {
     match status {
         ExpectedStatus::Verified => "verified",
+        ExpectedStatus::AlreadyPrintScale => "already_print_scale",
         ExpectedStatus::SkippedScaleSuspicious => "skipped_scale_suspicious",
-        ExpectedStatus::DecimationBudgetUnreachable => "decimation_budget_unreachable",
     }
 }
 

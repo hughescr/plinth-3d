@@ -801,8 +801,8 @@ These numbers are the contract, not suggestions.
 | 2. Probe | One aggressive decimation at **ratio 0.2** to build a per-vertex backward-error map. |
 | 3. Feature seeds | Vertices with probe error **> 0.05 mm** are seeds. |
 | 4. Protection halo | **0.4 mm** radius around each seed, capped at **12 %** of vertices, with **3 backoff iterations** (`seed_thr ×= 2`, `halo ×= 0.6`) if the cap is exceeded. **Protection is a hard constraint — a protected vertex never collapses.** Blender expresses it as the vertex group `decimate_freedom` with `vertex_group_factor = 10.0`, where **weight 1 = decimated MORE and weight 0 = protected** (counterintuitive, verified empirically, `decimate_pipeline.py:164-170`). In Rust, express it directly: protected vertices are excluded from the collapse candidate set, not merely down-weighted. |
-| 4b. Budget precondition | **One probe at `RATIO_HI = 0.50` before any bisection.** If p99 or p99.9 already exceeds the budget at the loosest ratio, the model **FAILS** with a named `DecimationBudgetUnreachable` defect (Python: `status="FAIL_even_at_0.50"`, `decimate_pipeline.py:175-179`) — do not bisect, do not apply, do not export. This is a hard FAIL, distinct from stage 1's SKIP. |
-| 5. Bisect | **5 iterations** in **[0.05, 0.50]** for the *lowest* ratio whose two-sided sampled **p99** error ≤ `pixel_um/2000` mm and **p99.9** ≤ `pixel_um/1000` mm. `pixel_um` defaults to **19.0** (Saturn 4 Ultra 16K, 14 × 19 µm — the coarser axis). |
+| 4b. Canonical identity precheck | One strict, bit-identical audit at `RATIO_HI = 1.00` establishes zero two-sided geometric error and unchanged topology for the original. It is evidence, not a decimation win. The previous 0.50 hard-fail ceiling was a Placeholder mistakenly promoted into a requirement and was corrected by the owner on 2026-08-01. |
+| 5. Search | **5 iterations** in **[0.05, 1.00]** for the lowest requested ratio whose candidate genuinely removes faces and whose two-sided sampled **p99** error ≤ `pixel_um/2000` mm and **p99.9** ≤ `pixel_um/1000` mm. `pixel_um` defaults to **19.0** (Saturn 4 Ultra 16K, 14 × 19 µm — the coarser axis). A lower-ratio meshoptimizer no-op is `M3NoReduction`, never success. If no reduced candidate survives measured error, topology, or protection, return named verified `AlreadyPrintScale` at explicit ratio 1.00, carrying the unchanged production mesh plus exact refusal evidence; it is the same move-only production capability, not a bypass. |
 | 6. Re-verify | **Full population**, both directions, with **1.1× slack** on both tolerances. The slack is a **final check only** — intentional, absorbing sample-vs-population drift. It is not a loosened spec and must not be applied to the bisection probes. |
 | 7. Topology guard | Non-manifold and boundary edge counts **must not increase**. |
 
@@ -839,9 +839,9 @@ cargo test -p plinth-decimate --test corpus_budgets
 # reads corpus/models/ DIRECTLY (no CLI). Every model: decimation report passes the
 # p99 / p99.9 budgets; non-manifold and boundary edge counts not increased; any model
 # outside [10,300] mm is SKIPPED with a named reason, not silently passed; any model that
-# blows the budget even at RATIO_HI = 0.50 FAILS with DecimationBudgetUnreachable and
-# exports nothing (stage 4b) -- a SKIP and a FAIL are different outcomes and the test
-# asserts which one each model gets.
+# cannot safely reduce retains a strict-audited `AlreadyPrintScale` production mesh at
+# explicit ratio 1.00, with exact zero identity error and recorded refusal reason; a SKIP,
+# a native failure, and AlreadyPrintScale are distinct outcomes and the test asserts each.
 ```
 
 The CLI wiring (`plinth prepare --stop-after decimate`) is verified at **M4**, which owns

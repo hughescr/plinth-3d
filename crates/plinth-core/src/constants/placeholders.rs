@@ -1044,7 +1044,7 @@ placeholder_declarations! {
     "DECIMATION_P99_SAMPLE_POLICY", "count", "record{cap,seed}", "Backward percentile sampling seed and cap.";
     decimation_protected_cap_fraction: UnitFraction = UnitFraction::new(0.12)?;
     "DECIMATION_PROTECTED_CAP_FRACTION", "1", "scalar", "Protected-vertex fraction cap.";
-    decimation_ratio_search: DecimationRatioSearchPolicy = DecimationRatioSearchPolicy::new(0.05, 0.50, 5)?;
+    decimation_ratio_search: DecimationRatioSearchPolicy = DecimationRatioSearchPolicy::new(0.05, 1.0, 5)?;
     "DECIMATION_RATIO_SEARCH", "1", "record{bisections,lower,upper}", "Structured bounded ratio-search policy.";
     decimation_recheck_slack: PositiveFinite = PositiveFinite::new(1.1)?;
     "DECIMATION_RECHECK_SLACK", "1", "scalar", "Selected full-population recheck slack, not measured authority.";
