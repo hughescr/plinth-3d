@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::forest::{
     EmbedEnd, Forest, ForestError, Member, MemberKey, MemberKind, MemberSpec, Owner,
-    RootwardEndRadius, TerminalEndRadius,
+    RootwardEndRadius, TerminalEndRadius, TerminalLedgerEntry, TerminalLedgerState,
 };
 use crate::legacy_compat::{LegacyCompatibility, LegacyCompatibilityError};
 use crate::transient::{derive_brace_attachments, TransientError};
@@ -132,7 +132,9 @@ impl TerminalCcoRequest {
             terminal_id,
             stub,
             attach_point_mm: stub_snapshot.p1_mm(),
-            attach_radius_mm: stub_snapshot.terminal_radius_mm().get(),
+            // p0 is the terminalward embed. CCO joins the registered stub at
+            // its rootward p1 end, so preserve that end's radius verbatim.
+            attach_radius_mm: stub_snapshot.rootward_radius_mm().get(),
             connector_owner: Owner::Contact(terminal_id),
             stub_snapshot,
             frame,
@@ -581,6 +583,10 @@ pub(crate) enum CcoError {
     RewireGeometryAuthorityMismatch,
     #[error("rewire replay no longer satisfies its evaluated clearance proof")]
     RewireClearanceReplayFailed,
+    #[error("terminal {0} is not current quarantined skipped evidence")]
+    InvalidSkippedTerminal(u32),
+    #[error("terminal {0} already advanced the CCO terminal cadence")]
+    TerminalCadenceReplay(u32),
     #[error("CCO input or derived geometry is not finite and positive where required")]
     InvalidGeometry,
     #[error(transparent)]
@@ -790,6 +796,19 @@ pub(crate) struct AnchorTerminalRoute<'a> {
 pub(crate) struct CcoController {
     hosts: HostCache,
     inserted: usize,
+    terminals: BTreeMap<u32, TerminalCadenceRecord>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TerminalCadenceOutcome {
+    Grown,
+    SkippedQuarantined,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TerminalCadenceRecord {
+    original_key: MemberKey,
+    outcome: TerminalCadenceOutcome,
 }
 
 #[derive(Default)]
@@ -805,6 +824,7 @@ impl CcoController {
         request: &TerminalCcoRequest,
         surface: &NativeSurface,
     ) -> Result<TerminalCcoOutcome, CcoError> {
+        self.require_unadvanced(request.terminal_id)?;
         let config = Config::current()?;
         let hosts = self.hosts.nearest(
             request.stub_end_mm().map(Finite::get),
@@ -812,7 +832,14 @@ impl CcoController {
             forest,
         );
         let outcome = grow_terminal_inner(forest, request, surface, Vec::new(), None, Some(hosts))?;
-        self.finish_insertion(forest);
+        self.finish_terminal(
+            forest,
+            request.terminal_id,
+            TerminalCadenceRecord {
+                original_key: request.stub,
+                outcome: TerminalCadenceOutcome::Grown,
+            },
+        );
         Ok(outcome)
     }
 
@@ -822,6 +849,7 @@ impl CcoController {
         request: &TerminalCcoRequest,
         route: AnchorTerminalRoute<'_>,
     ) -> Result<TerminalCcoOutcome, CcoError> {
+        self.require_unadvanced(request.terminal_id)?;
         validate_anchor_route(request, route.terminal)?;
         let config = Config::current()?;
         let hosts = self.hosts.nearest(
@@ -842,8 +870,40 @@ impl CcoController {
             }),
             Some(hosts),
         )?;
-        self.finish_insertion(forest);
+        self.finish_terminal(
+            forest,
+            request.terminal_id,
+            TerminalCadenceRecord {
+                original_key: request.stub,
+                outcome: TerminalCadenceOutcome::Grown,
+            },
+        );
         Ok(outcome)
+    }
+
+    /// Advance the same Python terminal cadence after a terminal has been
+    /// explicitly quarantined. The ledger entry is the skipped-contact
+    /// evidence; this method never attempts CCO growth or mutates the forest.
+    pub(crate) fn advance_skipped_terminal(
+        &mut self,
+        forest: &Forest,
+        skipped: TerminalLedgerEntry,
+    ) -> Result<(), CcoError> {
+        self.require_unadvanced(skipped.contact)?;
+        if skipped.state != TerminalLedgerState::Quarantined
+            || forest.terminal_ledger(skipped.contact) != Some(skipped)
+        {
+            return Err(CcoError::InvalidSkippedTerminal(skipped.contact));
+        }
+        self.finish_terminal(
+            forest,
+            skipped.contact,
+            TerminalCadenceRecord {
+                original_key: skipped.original_key,
+                outcome: TerminalCadenceOutcome::SkippedQuarantined,
+            },
+        );
+        Ok(())
     }
 
     /// Evaluate the frozen rewire candidate batch against its immutable
@@ -1016,11 +1076,59 @@ impl CcoController {
         })
     }
 
-    fn finish_insertion(&mut self, forest: &Forest) {
+    fn require_unadvanced(&self, terminal: u32) -> Result<(), CcoError> {
+        if self.terminals.contains_key(&terminal) {
+            Err(CcoError::TerminalCadenceReplay(terminal))
+        } else {
+            Ok(())
+        }
+    }
+
+    fn finish_terminal(&mut self, forest: &Forest, terminal: u32, record: TerminalCadenceRecord) {
+        let previous = self.terminals.insert(terminal, record);
+        assert!(previous.is_none(), "terminal cadence was preflighted");
         self.inserted += 1;
+        assert_eq!(self.inserted, self.terminals.len());
         if self.inserted.is_multiple_of(KDTREE_REBUILD_EVERY) {
             self.hosts.rebuild(forest);
         }
+    }
+
+    /// Stable evidence for terminal dispositions and the exact host-cache
+    /// scheduling state they produced.
+    pub(crate) fn digest(&self) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        let mut word = |value: u64| {
+            for byte in value.to_le_bytes() {
+                hash ^= u64::from(byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        word(self.inserted as u64);
+        word(self.terminals.len() as u64);
+        for (&terminal, record) in &self.terminals {
+            word(u64::from(terminal));
+            word(u64::from(record.original_key.slot()));
+            word(u64::from(record.original_key.generation()));
+            word(match record.outcome {
+                TerminalCadenceOutcome::Grown => 0,
+                TerminalCadenceOutcome::SkippedQuarantined => 1,
+            });
+        }
+        word(self.hosts.indexed_members.len() as u64);
+        for key in &self.hosts.indexed_members {
+            word(u64::from(key.slot()));
+            word(u64::from(key.generation()));
+        }
+        word(self.hosts.samples.len() as u64);
+        for (point, key) in &self.hosts.samples {
+            for coordinate in point {
+                word(coordinate.to_bits());
+            }
+            word(u64::from(key.slot()));
+            word(u64::from(key.generation()));
+        }
+        hash
     }
 }
 
@@ -2214,6 +2322,32 @@ mod tests {
     }
 
     #[test]
+    fn terminal_request_binds_the_rootward_attachment_radius() {
+        let finite = |value| Finite::new(value).unwrap();
+        let positive = |value| PositiveFinite::new(value).unwrap();
+        let mut forest = Forest::new();
+        let stub = forest.add_member(Member::new(MemberSpec {
+            p0_mm: [finite(0.0), finite(0.0), finite(10.0)],
+            p1_mm: [finite(0.0), finite(0.0), finite(12.0)],
+            r0_mm: TerminalEndRadius::new(positive(0.11)),
+            r1_mm: RootwardEndRadius::new(positive(0.73)),
+            kind: MemberKind::Stub,
+            owner: Owner::Contact(9),
+            embed_end: Some(EmbedEnd::Terminalward),
+            carried_mm2: finite(1.0),
+        }));
+        forest.register_terminal(9, stub).unwrap();
+
+        let request =
+            TerminalCcoRequest::bind(&forest, 9, BuildFrame::new(finite(0.0), positive(5.0)))
+                .unwrap();
+
+        assert_eq!(request.stub_end_mm(), forest.member(stub).unwrap().p1_mm());
+        assert_eq!(request.tip_radius_mm(), positive(0.73));
+        assert_ne!(request.tip_radius_mm(), positive(0.11));
+    }
+
+    #[test]
     fn murray_propagation_uses_entry_radius_and_ignores_dead_children() {
         let finite = |value| Finite::new(value).unwrap();
         let positive = |value| PositiveFinite::new(value).unwrap();
@@ -2301,6 +2435,231 @@ mod tests {
             cache.nearest([0.0, 0.0, 5.0], 1, &forest),
             vec![replacement]
         );
+    }
+
+    fn quarantined_cadence_fixture(
+        count: u32,
+        first_terminal: u32,
+    ) -> (Forest, Vec<TerminalLedgerEntry>, MemberKey) {
+        let finite = |value| Finite::new(value).unwrap();
+        let positive = |value| PositiveFinite::new(value).unwrap();
+        let mut forest = Forest::new();
+        let host = forest.add_member(Member::new(MemberSpec {
+            p0_mm: [finite(4.0), finite(0.0), finite(0.0)],
+            p1_mm: [finite(4.0), finite(0.0), finite(10.0)],
+            r0_mm: TerminalEndRadius::new(positive(0.4)),
+            r1_mm: RootwardEndRadius::new(positive(0.8)),
+            kind: MemberKind::Trunk,
+            owner: Owner::Generated {
+                family: "cadence-host".to_owned(),
+                ordinal: 0,
+            },
+            embed_end: None,
+            carried_mm2: finite(1.0),
+        }));
+        let skipped = (first_terminal..first_terminal + count)
+            .map(|terminal| {
+                let stub = forest.add_member(Member::new(MemberSpec {
+                    p0_mm: [finite(0.0), finite(0.0), finite(10.0)],
+                    p1_mm: [finite(0.0), finite(0.0), finite(12.0)],
+                    r0_mm: TerminalEndRadius::new(positive(0.2)),
+                    r1_mm: RootwardEndRadius::new(positive(0.35)),
+                    kind: MemberKind::Stub,
+                    owner: Owner::Contact(terminal),
+                    embed_end: Some(EmbedEnd::Terminalward),
+                    carried_mm2: finite(1.0),
+                }));
+                forest.register_terminal(terminal, stub).unwrap();
+                forest.quarantine(stub).unwrap();
+                forest.terminal_ledger(terminal).unwrap()
+            })
+            .collect::<Vec<_>>();
+        (forest, skipped, host)
+    }
+
+    #[test]
+    fn quarantined_terminal_advances_the_25_terminal_host_cache_cadence() {
+        let (forest, skipped, host) = quarantined_cadence_fixture(26, 0);
+        let before = forest.digest();
+        let mut processed = CcoController::default();
+        let mut quarantined = CcoController::default();
+
+        for (index, skipped) in skipped.into_iter().enumerate() {
+            processed.finish_terminal(
+                &forest,
+                skipped.contact,
+                TerminalCadenceRecord {
+                    original_key: skipped.original_key,
+                    outcome: TerminalCadenceOutcome::Grown,
+                },
+            );
+            quarantined
+                .advance_skipped_terminal(&forest, skipped)
+                .unwrap();
+
+            if matches!(index + 1, 24..=26) {
+                assert_eq!(quarantined.inserted, processed.inserted);
+                assert_eq!(
+                    quarantined.hosts.indexed_members,
+                    processed.hosts.indexed_members
+                );
+                assert_eq!(quarantined.hosts.samples, processed.hosts.samples);
+                assert_eq!(
+                    quarantined.hosts.nearest([4.0, 0.0, 5.0], 1, &forest),
+                    processed.hosts.nearest([4.0, 0.0, 5.0], 1, &forest),
+                );
+                assert_eq!(
+                    quarantined.hosts.nearest([4.0, 0.0, 5.0], 1, &forest),
+                    vec![host],
+                );
+                assert_eq!(forest.digest(), before);
+                assert_ne!(quarantined.digest(), processed.digest());
+                match index + 1 {
+                    24 => assert!(quarantined.hosts.samples.is_empty()),
+                    25 | 26 => assert_eq!(quarantined.hosts.samples.len(), 3),
+                    _ => unreachable!("boundary filter above is exact"),
+                }
+            }
+        }
+        assert!(!processed.hosts.samples.is_empty());
+        assert_eq!(processed.hosts.samples.len(), 3);
+    }
+
+    #[test]
+    fn skipped_terminal_evidence_is_one_shot_and_replay_is_inert() {
+        let (forest, skipped, _) = quarantined_cadence_fixture(1, 40);
+        let mut controller = CcoController::default();
+        controller
+            .advance_skipped_terminal(&forest, skipped[0])
+            .unwrap();
+        let digest = controller.digest();
+        let forest_digest = forest.digest();
+
+        assert!(matches!(
+            controller.advance_skipped_terminal(&forest, skipped[0]),
+            Err(CcoError::TerminalCadenceReplay(40))
+        ));
+        assert_eq!(controller.inserted, 1);
+        assert_eq!(controller.digest(), digest);
+        assert_eq!(forest.digest(), forest_digest);
+    }
+
+    #[test]
+    fn skipped_terminal_rejects_live_retired_and_stale_ledger_evidence() {
+        let (live_forest, request, _) = growth_fixture();
+        let live = live_forest.terminal_ledger(request.terminal_id).unwrap();
+        let mut controller = CcoController::default();
+        let initial = controller.digest();
+        assert!(matches!(
+            controller.advance_skipped_terminal(&live_forest, live),
+            Err(CcoError::InvalidSkippedTerminal(7))
+        ));
+
+        let mut retired_forest = live_forest.clone();
+        retired_forest.retire(request.stub).unwrap();
+        let retired = retired_forest.terminal_ledger(request.terminal_id).unwrap();
+        assert_eq!(retired.state, TerminalLedgerState::Retired);
+        assert!(matches!(
+            controller.advance_skipped_terminal(&retired_forest, retired),
+            Err(CcoError::InvalidSkippedTerminal(7))
+        ));
+
+        let (quarantined_forest, skipped, host) = quarantined_cadence_fixture(1, 7);
+        let stale = TerminalLedgerEntry {
+            original_key: host,
+            ..skipped[0]
+        };
+        assert!(matches!(
+            controller.advance_skipped_terminal(&quarantined_forest, stale),
+            Err(CcoError::InvalidSkippedTerminal(7))
+        ));
+        assert_eq!(controller.inserted, 0);
+        assert_eq!(controller.digest(), initial);
+    }
+
+    #[test]
+    fn terminal_cadence_cannot_cross_or_repeat_grown_and_skipped_dispositions() {
+        let (mut grown_forest, request, surface) = growth_fixture();
+        let mut grown = CcoController::default();
+        grown
+            .grow_terminal(&mut grown_forest, &request, &surface)
+            .unwrap();
+        let grown_digest = grown.digest();
+        let grown_forest_digest = grown_forest.digest();
+        assert!(matches!(
+            grown.grow_terminal(&mut grown_forest, &request, &surface),
+            Err(CcoError::TerminalCadenceReplay(7))
+        ));
+        assert_eq!(grown.digest(), grown_digest);
+        assert_eq!(grown_forest.digest(), grown_forest_digest);
+
+        let (quarantined_forest, skipped, _) = quarantined_cadence_fixture(1, 7);
+        assert!(matches!(
+            grown.advance_skipped_terminal(&quarantined_forest, skipped[0]),
+            Err(CcoError::TerminalCadenceReplay(7))
+        ));
+        assert_eq!(grown.digest(), grown_digest);
+
+        let (mut live_forest, request, surface) = growth_fixture();
+        let live_digest = live_forest.digest();
+        let mut skipped_first = CcoController::default();
+        skipped_first
+            .advance_skipped_terminal(&quarantined_forest, skipped[0])
+            .unwrap();
+        let skipped_digest = skipped_first.digest();
+        assert!(matches!(
+            skipped_first.grow_terminal(&mut live_forest, &request, &surface),
+            Err(CcoError::TerminalCadenceReplay(7))
+        ));
+        assert_eq!(skipped_first.digest(), skipped_digest);
+        assert_eq!(live_forest.digest(), live_digest);
+    }
+
+    #[test]
+    fn skipped_terminal_thread_sweep_is_digest_identical() {
+        const CHILD: &str = "PLINTH_CCO_SKIPPED_SWEEP_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let (forest, skipped, _) = quarantined_cadence_fixture(26, 0);
+            let mut controller = CcoController::default();
+            for skipped in skipped {
+                controller
+                    .advance_skipped_terminal(&forest, skipped)
+                    .unwrap();
+            }
+            println!(
+                "CCO_SKIPPED_SWEEP={:016x}:{:016x}:{:?}",
+                forest.digest(),
+                controller.digest(),
+                controller.hosts.nearest([4.0, 0.0, 5.0], 1, &forest),
+            );
+            return;
+        }
+        let executable = std::env::current_exe().unwrap();
+        let mut digests = Vec::new();
+        for threads in [1, 4, 16] {
+            let output = std::process::Command::new(&executable)
+                .arg("--exact")
+                .arg("cco::tests::skipped_terminal_thread_sweep_is_digest_identical")
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .env("PLINTH_THREADS", threads.to_string())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            digests.push(
+                stdout
+                    .lines()
+                    .find_map(|line| line.strip_prefix("CCO_SKIPPED_SWEEP="))
+                    .expect("child emitted skipped cadence digest")
+                    .to_owned(),
+            );
+        }
+        assert!(digests.windows(2).all(|pair| pair[0] == pair[1]));
     }
 
     #[test]
@@ -3579,12 +3938,14 @@ mod tests {
         const CHILD: &str = "PLINTH_CCO_SWEEP_CHILD";
         if std::env::var_os(CHILD).is_some() {
             let (mut forest, request, surface) = growth_fixture();
-            let outcome = CcoController::default()
+            let mut controller = CcoController::default();
+            let outcome = controller
                 .grow_terminal(&mut forest, &request, &surface)
                 .unwrap();
             println!(
-                "CCO_SWEEP_DIGEST={:016x}:{}:{}",
+                "CCO_SWEEP_DIGEST={:016x}:{:016x}:{}:{}",
                 forest.digest(),
+                controller.digest(),
                 outcome.winner.unwrap().generation_index,
                 outcome.candidates_generated
             );
