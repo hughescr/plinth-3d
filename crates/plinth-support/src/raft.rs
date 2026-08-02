@@ -6,7 +6,8 @@
 use plinth_core::{m0_constants, ContentDigest, Finite, PositiveFinite};
 
 use crate::{
-    forest::Forest, FrustumRingNormal, SupportError, SupportPrimitive, SupportSegmentKind,
+    forest::{Forest, MemberKind, Owner},
+    FrustumRingNormal, SupportError, SupportPrimitive, SupportSegmentKind,
 };
 
 /// A canonical plate-root location and its rootward column radius.
@@ -31,11 +32,21 @@ impl PlateRoot {
 /// Deterministic semantic output of the current bottom-connected raft pass.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RaftPlan {
+    forest_digest: u64,
+    plate_z_bits: u64,
     roots: Vec<PlateRoot>,
     primitives: Vec<SupportPrimitive>,
 }
 
 impl RaftPlan {
+    pub(crate) fn validate(&self, forest: &Forest, plate_z_mm: Finite) -> Result<(), SupportError> {
+        if self.forest_digest != forest.digest() || self.plate_z_bits != plate_z_mm.get().to_bits()
+        {
+            return Err(SupportError::NoLegalSupportPlan);
+        }
+        Ok(())
+    }
+
     #[must_use]
     pub fn roots(&self) -> &[PlateRoot] {
         &self.roots
@@ -58,6 +69,8 @@ impl RaftPlan {
                 state = state.wrapping_mul(PRIME);
             }
         };
+        write(f64::from_bits(self.forest_digest));
+        write(f64::from_bits(self.plate_z_bits));
         write(self.roots.len() as f64);
         for root in &self.roots {
             write(root.xy_mm[0].get());
@@ -100,14 +113,17 @@ pub fn plan_bottom_connected(
     let tolerance = policy.chitubox_plate_mesh_tol_mm().diagnostic().get();
     let pad_diameter = *policy.chitubox_pad_diameter_mm().diagnostic();
     let raft_height = *policy.chitubox_raft_height_mm().diagnostic();
-    let flare_length = *policy.flare_len_mm().diagnostic();
-    let flare_factor = policy.flare_r_factor().diagnostic().get();
 
     let mut candidates: Vec<PlateRoot> = forest
         .live_members()
         .into_iter()
-        .filter_map(|key| forest.member(key))
-        .filter_map(|member| {
+        .filter_map(|key| forest.member(key).map(|member| (key, member)))
+        .filter(|(key, member)| match (member.kind(), member.owner()) {
+            (MemberKind::Stub, Owner::Contact(contact)) => forest.terminal(*contact) == Some(*key),
+            (MemberKind::Stub, _) => false,
+            _ => true,
+        })
+        .filter_map(|(_, member)| {
             let point = member.p1_mm();
             ((point[2].get() - plate_z_mm.get()).abs() <= plate_band).then_some(PlateRoot {
                 xy_mm: [point[0], point[1]],
@@ -135,7 +151,7 @@ pub fn plan_bottom_connected(
         }
     }
 
-    let mut primitives = Vec::with_capacity(roots.len().saturating_mul(3).saturating_sub(1));
+    let mut primitives = Vec::with_capacity(roots.len().saturating_mul(2).saturating_sub(1));
     for (i, j) in euclidean_mst_edges(&roots) {
         primitives.push(raft_primitive(
             roots[i].xy_mm,
@@ -154,33 +170,18 @@ pub fn plan_bottom_connected(
             raft_height,
         ));
     }
-    for root in &roots {
-        let bottom_z = finite(plate_z_mm.get() + raft_height.get())?;
-        let top_z = finite(bottom_z.get() + flare_length.get())?;
-        let flare_radius = PositiveFinite::new(root.root_radius_mm.get() * flare_factor)
-            .map_err(|_| SupportError::InvalidPrimitive)?;
-        primitives.push(SupportPrimitive {
-            segment_kind: SupportSegmentKind::RootFlare,
-            start_mm: [root.xy_mm[0], root.xy_mm[1], top_z],
-            end_mm: [root.xy_mm[0], root.xy_mm[1], bottom_z],
-            start_radius_mm: root.root_radius_mm,
-            end_radius_mm: flare_radius,
-            contact_depth_mm: None,
-            ring_normal: FrustumRingNormal::SegmentAxis,
-            sphere_geometry: None,
-        });
-    }
     if primitives
         .iter()
         .any(|primitive| !primitive.is_semantically_valid())
     {
         return Err(SupportError::InvalidPrimitive);
     }
-    Ok(RaftPlan { roots, primitives })
-}
-
-fn finite(value: f64) -> Result<Finite, SupportError> {
-    Finite::new(value).map_err(|_| SupportError::InvalidPrimitive)
+    Ok(RaftPlan {
+        forest_digest: forest.digest(),
+        plate_z_bits: plate_z_mm.get().to_bits(),
+        roots,
+        primitives,
+    })
 }
 
 fn raft_primitive(
@@ -292,14 +293,10 @@ mod tests {
         assert!(plan(&[]).primitives().is_empty());
 
         let one = plan(&[[3.0, -2.0, 0.0]]);
-        assert_eq!(one.primitives().len(), 2, "one pad plus one flare");
+        assert_eq!(one.primitives().len(), 1, "one pad");
         assert_eq!(
             one.primitives()[0].segment_kind,
             SupportSegmentKind::RaftPadOrBridge
-        );
-        assert_eq!(
-            one.primitives()[1].segment_kind,
-            SupportSegmentKind::RootFlare
         );
 
         let four = plan(&[
@@ -308,7 +305,7 @@ mod tests {
             [0.0, 2.0, 0.0],
             [2.0, 2.0, 0.0],
         ]);
-        assert_eq!(four.primitives().len(), 11, "3 bridges + 4 pads + 4 flares");
+        assert_eq!(four.primitives().len(), 7, "3 bridges + 4 pads");
         assert!(four
             .primitives()
             .iter()
@@ -322,11 +319,7 @@ mod tests {
 
         let raft = plan_bottom_connected(&forest, number(0.0)).expect("valid raft plan");
         assert_eq!(raft.roots().len(), 2);
-        assert_eq!(
-            raft.primitives().len(),
-            5,
-            "one bridge, two pads, two flares"
-        );
+        assert_eq!(raft.primitives().len(), 3, "one bridge and two pads");
     }
 
     #[test]
@@ -352,18 +345,26 @@ mod tests {
     }
 
     #[test]
-    fn digest_is_invariant_to_live_member_insertion_order_for_1_4_and_16_live_members() {
+    fn semantic_primitives_are_invariant_to_live_member_insertion_order() {
         for count in [1_usize, 4, 16] {
             let points = (0..count)
                 .map(|index| [(index % 4) as f64, (index / 4) as f64, 0.0])
                 .collect::<Vec<_>>();
             let mut reversed = points.clone();
             reversed.reverse();
-            assert_eq!(
-                plan(&points).digest(),
-                plan(&reversed).digest(),
-                "{count} roots"
-            );
+            assert_eq!(plan(&points).primitives(), plan(&reversed).primitives());
         }
+    }
+
+    #[test]
+    fn plan_authority_rejects_a_changed_forest_or_plate() {
+        let mut forest = forest_for(&[[0.0, 0.0, 0.0]]);
+        let plan = plan_bottom_connected(&forest, number(0.0)).unwrap();
+        assert!(plan.validate(&forest, number(0.0)).is_ok());
+        forest.add_member(member_for([2.0, 0.0, 0.0], 2));
+        assert!(plan.validate(&forest, number(0.0)).is_err());
+        assert!(plan
+            .validate(&forest_for(&[[0.0, 0.0, 0.0]]), number(0.1))
+            .is_err());
     }
 }

@@ -31,6 +31,11 @@ pub mod forest;
 )]
 mod joints;
 pub mod legacy_compat;
+#[allow(
+    dead_code,
+    reason = "crate-private current-parity lowering is consumed by the pending support runner"
+)]
+mod lower;
 pub mod member_sizing;
 pub mod perception;
 pub mod raft;
