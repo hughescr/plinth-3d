@@ -152,7 +152,7 @@ impl AnchorSearchConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct GeometryFingerprint {
+pub(crate) struct GeometryFingerprint {
     mesh_sha256: String,
     topology_sha256: String,
 }
@@ -190,6 +190,11 @@ impl<'a> AnchorGeometryAuthority<'a> {
     #[must_use]
     pub const fn surface(&self) -> &NativeSurface {
         self.surface
+    }
+
+    #[must_use]
+    pub(crate) fn fingerprint(&self) -> GeometryFingerprint {
+        self.fingerprint.clone()
     }
 }
 
