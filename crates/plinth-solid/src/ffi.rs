@@ -1,3 +1,4 @@
+#[allow(dead_code)]
 #[cxx::bridge(namespace = "plinth::solid")]
 mod bridge {
     struct FfiMesh {
@@ -15,6 +16,7 @@ mod bridge {
         OutputPropertyStride,
         OutputOverflow,
         OutputLimitExceeded,
+        OutputCountMismatch,
         InputManifoldStatus,
         ResultManifoldStatus,
         EmptyResult,
@@ -61,6 +63,10 @@ mod bridge {
             max_output_vertices: u64,
             max_output_triangles: u64,
         ) -> FfiResponse;
+
+        fn reset_export_mesh_calls();
+
+        fn export_mesh_calls() -> u64;
     }
 }
 
@@ -68,6 +74,9 @@ pub(crate) use bridge::{
     manifold_difference_batch, manifold_union_batch, FfiErrorCode, FfiMesh, FfiOutputLimit,
     FfiResponse,
 };
+
+#[cfg(test)]
+pub(crate) use bridge::{export_mesh_calls, reset_export_mesh_calls};
 
 #[cfg(test)]
 mod tests {

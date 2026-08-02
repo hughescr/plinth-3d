@@ -24,4 +24,7 @@ FfiResponse manifold_difference_batch(
     std::uint64_t max_output_vertices,
     std::uint64_t max_output_triangles) noexcept;
 
+void reset_export_mesh_calls() noexcept;
+std::uint64_t export_mesh_calls() noexcept;
+
 }  // namespace plinth::solid

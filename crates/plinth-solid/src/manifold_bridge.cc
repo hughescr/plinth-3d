@@ -2,6 +2,7 @@
 
 #include "manifold/manifold.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -65,6 +66,8 @@ static_assert(static_cast<int>(manifold::Manifold::Error::Cancelled) == 14);
 
 namespace plinth::solid {
 namespace {
+
+std::atomic<std::uint64_t> get_mesh_gl64_calls{0};
 
 struct ExpectedError {
   FfiErrorCode code;
@@ -149,14 +152,8 @@ FfiMesh export_result(manifold::Manifold result,
   if (result.IsEmpty()) {
     throw ExpectedError{FfiErrorCode::EmptyResult};
   }
-
-  const manifold::MeshGL64 mesh = result.GetMeshGL64();
-  if (mesh.numProp < 3) {
-    throw ExpectedError{FfiErrorCode::OutputPropertyStride};
-  }
-
-  const std::size_t num_vertices = mesh.NumVert();
-  const std::size_t num_triangles = mesh.triVerts.size() / 3;
+  const std::size_t num_vertices = result.NumVert();
+  const std::size_t num_triangles = result.NumTri();
   if (num_vertices > max_output_vertices) {
     throw ExpectedError{FfiErrorCode::OutputLimitExceeded, 0, false, 0,
                         FfiOutputLimit::Vertices,
@@ -166,6 +163,16 @@ FfiMesh export_result(manifold::Manifold result,
     throw ExpectedError{FfiErrorCode::OutputLimitExceeded, 0, false, 0,
                         FfiOutputLimit::Triangles,
                         static_cast<std::uint64_t>(num_triangles)};
+  }
+
+  get_mesh_gl64_calls.fetch_add(1, std::memory_order_relaxed);
+  const manifold::MeshGL64 mesh = result.GetMeshGL64();
+  if (mesh.numProp < 3) {
+    throw ExpectedError{FfiErrorCode::OutputPropertyStride};
+  }
+  if (mesh.NumVert() != num_vertices || mesh.NumTri() != num_triangles ||
+      mesh.triVerts.size() % 3 != 0) {
+    throw ExpectedError{FfiErrorCode::OutputCountMismatch};
   }
   FfiMesh out;
   if (num_vertices > std::numeric_limits<std::size_t>::max() / 3) {
@@ -207,6 +214,14 @@ FfiResponse execute(Operation&& operation) noexcept {
 }
 
 }  // namespace
+
+void reset_export_mesh_calls() noexcept {
+  get_mesh_gl64_calls.store(0, std::memory_order_relaxed);
+}
+
+std::uint64_t export_mesh_calls() noexcept {
+  return get_mesh_gl64_calls.load(std::memory_order_relaxed);
+}
 
 FfiResponse manifold_union_batch(rust::Slice<const double> vertices,
                                  rust::Slice<const std::uint64_t> triangles,
