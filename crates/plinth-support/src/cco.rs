@@ -667,17 +667,41 @@ pub(crate) enum FinalizedDispositionKind {
     UnroutedNoWinner,
 }
 
+/// Preserved quarantine cadence evidence.  Unlike an unrouted terminal, a
+/// quarantined terminal never had a route request; these two frozen digests
+/// are therefore the only truthful record of the exact forest/controller
+/// state at its cadence advancement.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct FinalizedSkippedEvidence {
+    forest_digest: u64,
+    controller_digest_before: u64,
+}
+
+impl FinalizedSkippedEvidence {
+    #[must_use]
+    pub(crate) const fn forest_digest(&self) -> u64 {
+        self.forest_digest
+    }
+
+    #[must_use]
+    pub(crate) const fn controller_digest_before(&self) -> u64 {
+        self.controller_digest_before
+    }
+}
+
 /// One immutable, ordered initial-terminal disposition.  There is no
 /// constructor outside this module: rows are only copied from a controller
 /// cadence after their terminal lifecycle has been checked against the live
 /// forest and the original initial-contact build.
 #[derive(Clone, Debug)]
 pub(crate) struct FinalizedCcoTranscriptRow {
+    cadence_index: usize,
     physical_contact_id: u64,
     terminal_id: u32,
     original_key: MemberKey,
     kind: FinalizedDispositionKind,
     route: Option<TerminalRouteEvidence>,
+    skipped: Option<FinalizedSkippedEvidence>,
     no_winner_reason: Option<NoWinnerEvidence>,
 }
 
@@ -685,6 +709,11 @@ impl FinalizedCcoTranscriptRow {
     #[must_use]
     pub(crate) const fn physical_contact_id(&self) -> u64 {
         self.physical_contact_id
+    }
+
+    #[must_use]
+    pub(crate) const fn cadence_index(&self) -> usize {
+        self.cadence_index
     }
 
     #[must_use]
@@ -711,6 +740,11 @@ impl FinalizedCcoTranscriptRow {
     }
 
     #[must_use]
+    pub(crate) const fn skipped_evidence(&self) -> Option<FinalizedSkippedEvidence> {
+        self.skipped
+    }
+
+    #[must_use]
     pub(crate) fn no_winner_reason(&self) -> Option<&NoWinnerEvidence> {
         self.no_winner_reason.as_ref()
     }
@@ -731,6 +765,7 @@ pub(crate) struct FinalizedCcoTranscript {
     final_forest_digest: u64,
     final_controller_digest: u64,
     ordered_disposition_digest: u64,
+    transcript_digest: u64,
     rows: Vec<FinalizedCcoTranscriptRow>,
 }
 
@@ -778,6 +813,23 @@ impl FinalizedCcoTranscript {
     #[must_use]
     pub(crate) const fn ordered_disposition_digest(&self) -> u64 {
         self.ordered_disposition_digest
+    }
+
+    /// Stable digest over every immutable header and row.  Consumers that
+    /// retain this authority across a normalization boundary can cheaply
+    /// reject an internally corrupted copy before treating it as evidence.
+    #[must_use]
+    pub(crate) const fn digest(&self) -> u64 {
+        self.transcript_digest
+    }
+
+    pub(crate) fn validate_integrity(&self) -> Result<(), CcoError> {
+        if self.ordered_disposition_digest != transcript_rows_digest(&self.rows)
+            || self.transcript_digest != finalized_transcript_digest(self)
+        {
+            return Err(CcoError::TranscriptDigestMismatch);
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -846,6 +898,8 @@ pub(crate) enum CcoError {
     TranscriptCadenceMismatch,
     #[error("terminal {0} has a disposition inconsistent with its initial or final forest state")]
     TranscriptDispositionMismatch(u32),
+    #[error("finalized CCO transcript headers or rows do not reproduce its sealed digest")]
+    TranscriptDigestMismatch,
     #[error("CCO input or derived geometry is not finite and positive where required")]
     InvalidGeometry,
     #[error(transparent)]
@@ -1135,7 +1189,7 @@ impl CcoController {
         build.forest().validate()?;
 
         let mut rows = Vec::with_capacity(expected_cadence.len());
-        for &terminal in &expected_cadence {
+        for (cadence_index, &terminal) in expected_cadence.iter().enumerate() {
             let evidence = build
                 .terminals()
                 .iter()
@@ -1149,6 +1203,7 @@ impl CcoController {
                 build.forest(),
                 evidence,
                 &record.disposition,
+                cadence_index,
                 plan_digest,
                 loads.digest(),
                 geometry_digest,
@@ -1161,7 +1216,7 @@ impl CcoController {
         // controller become unable to route another terminal.
         self.sealed = true;
         let final_controller_digest = self.digest();
-        Ok(FinalizedCcoTranscript {
+        let mut transcript = FinalizedCcoTranscript {
             plan_digest,
             finalized_load_digest: loads.digest(),
             load_partition_digest: finalized_load_partition_digest(plan),
@@ -1171,8 +1226,11 @@ impl CcoController {
             final_forest_digest,
             final_controller_digest,
             ordered_disposition_digest,
+            transcript_digest: 0,
             rows,
-        })
+        };
+        transcript.transcript_digest = finalized_transcript_digest(&transcript);
+        Ok(transcript)
     }
 
     #[cfg(test)]
@@ -1649,6 +1707,7 @@ fn finalize_transcript_row(
     forest: &Forest,
     initial: &InitialTerminalEvidence,
     disposition: &TerminalDisposition,
+    cadence_index: usize,
     plan_digest: u64,
     loads_digest: u64,
     geometry_digest: u64,
@@ -1688,17 +1747,21 @@ fn finalize_transcript_row(
                 return Err(CcoError::TranscriptDispositionMismatch(terminal));
             }
             Ok(FinalizedCcoTranscriptRow {
+                cadence_index,
                 physical_contact_id,
                 terminal_id: terminal,
                 original_key: initial.key,
                 kind: FinalizedDispositionKind::Routed,
                 route: Some(route.clone()),
+                skipped: None,
                 no_winner_reason: None,
             })
         }
         TerminalDisposition::SkippedQuarantined {
             terminal_id,
             original_key,
+            forest_digest,
+            controller_digest_before,
             ..
         } => {
             if *terminal_id != terminal
@@ -1711,11 +1774,16 @@ fn finalize_transcript_row(
                 return Err(CcoError::TranscriptDispositionMismatch(terminal));
             }
             Ok(FinalizedCcoTranscriptRow {
+                cadence_index,
                 physical_contact_id,
                 terminal_id: terminal,
                 original_key: initial.key,
                 kind: FinalizedDispositionKind::SkippedQuarantined,
                 route: None,
+                skipped: Some(FinalizedSkippedEvidence {
+                    forest_digest: *forest_digest,
+                    controller_digest_before: *controller_digest_before,
+                }),
                 no_winner_reason: None,
             })
         }
@@ -1730,11 +1798,13 @@ fn finalize_transcript_row(
                 return Err(CcoError::TranscriptDispositionMismatch(terminal));
             }
             Ok(FinalizedCcoTranscriptRow {
+                cadence_index,
                 physical_contact_id,
                 terminal_id: terminal,
                 original_key: initial.key,
                 kind: FinalizedDispositionKind::UnroutedNoWinner,
                 route: Some(route.clone()),
+                skipped: None,
                 no_winner_reason: Some(reason.clone()),
             })
         }
@@ -1751,6 +1821,7 @@ fn transcript_rows_digest(rows: &[FinalizedCcoTranscriptRow]) -> u64 {
     };
     word(rows.len() as u64);
     for row in rows {
+        word(row.cadence_index as u64);
         word(row.physical_contact_id);
         word(u64::from(row.terminal_id));
         word(u64::from(row.original_key.slot()));
@@ -1764,6 +1835,14 @@ fn transcript_rows_digest(rows: &[FinalizedCcoTranscriptRow]) -> u64 {
             Some(route) => {
                 word(1);
                 digest_route_evidence(&mut word, route);
+            }
+            None => word(0),
+        }
+        match row.skipped {
+            Some(skipped) => {
+                word(1);
+                word(skipped.forest_digest);
+                word(skipped.controller_digest_before);
             }
             None => word(0),
         }
@@ -1790,6 +1869,27 @@ fn transcript_rows_digest(rows: &[FinalizedCcoTranscriptRow]) -> u64 {
             }
         }
     }
+    hash
+}
+
+fn finalized_transcript_digest(transcript: &FinalizedCcoTranscript) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    let mut word = |value: u64| {
+        for byte in value.to_le_bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    };
+    word(transcript.plan_digest);
+    word(transcript.finalized_load_digest);
+    word(transcript.load_partition_digest);
+    word(transcript.geometry_digest);
+    word(transcript.initial_forest_digest);
+    word(transcript.initial_post_quarantine_forest_digest);
+    word(transcript.final_forest_digest);
+    word(transcript.final_controller_digest);
+    word(transcript.ordered_disposition_digest);
+    word(transcript_rows_digest(&transcript.rows));
     hash
 }
 
@@ -3115,7 +3215,10 @@ mod tests {
     use super::*;
     use geom_kernel::{NativeSurface, NativeSurfaceConfig};
     use plinth_core::LayerPlan;
-    use plinth_mesh::{build_face_topology, make_overhang_table, FaceTopology, Mesh, WeldPolicy};
+    use plinth_mesh::{
+        build_face_topology, make_box, make_overhang_table, make_toed_slab, FaceTopology, Mesh,
+        WeldPolicy,
+    };
 
     use crate::{
         dyadic::CandidatePayloadConfig,
@@ -3144,7 +3247,9 @@ mod tests {
     /// Build a real initial-contact authority, including the frozen plan and
     /// native geometry it is required to retain.  Tests route it only through
     /// `grow_terminal_with_finalized_anchor` / `advance_skipped_terminal`.
-    fn real_initial_transcript_fixture() -> (
+    fn real_initial_transcript_fixture_for(
+        mesh: Mesh,
+    ) -> (
         InitialContactBuild,
         SpecializedContactPlan,
         FinalizedContactLoads,
@@ -3153,7 +3258,6 @@ mod tests {
         Mesh,
         Vec<f64>,
     ) {
-        let mesh = make_overhang_table().unwrap();
         let delicacy = vec![0.0; mesh.tris().len()];
         let layers = LayerPlan::new(0.0, vec![0.05; 1_000]).unwrap();
         let candidate =
@@ -3228,19 +3332,84 @@ mod tests {
         (build, plan, loads, surface, topology, mesh, delicacy)
     }
 
-    #[test]
-    fn finalized_transcript_requires_real_initial_authority_and_seals_replay() {
-        let (mut build, plan, loads, surface, topology, mesh, delicacy) =
-            real_initial_transcript_fixture();
-        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
-        let pool = SurfaceAnchorPool::from_geometry(&geometry, &delicacy).unwrap();
+    fn real_initial_transcript_fixture() -> (
+        InitialContactBuild,
+        SpecializedContactPlan,
+        FinalizedContactLoads,
+        NativeSurface,
+        FaceTopology,
+        Mesh,
+        Vec<f64>,
+    ) {
+        real_initial_transcript_fixture_for(make_overhang_table().unwrap())
+    }
+
+    fn translated_mesh(mesh: Mesh, offset: [f64; 3]) -> Mesh {
+        Mesh::new(
+            mesh.verts()
+                .iter()
+                .map(|point| std::array::from_fn(|axis| point[axis] + offset[axis]))
+                .collect(),
+            mesh.tris().to_vec(),
+        )
+        .unwrap()
+    }
+
+    fn merge_meshes(parts: &[Mesh]) -> Mesh {
+        let mut vertices = Vec::new();
+        let mut triangles = Vec::new();
+        for part in parts {
+            let offset = u32::try_from(vertices.len()).unwrap();
+            vertices.extend_from_slice(part.verts());
+            triangles.extend(
+                part.tris()
+                    .iter()
+                    .map(|triangle| triangle.map(|vertex| vertex + offset)),
+            );
+        }
+        Mesh::new(vertices, triangles).unwrap()
+    }
+
+    /// One table's underside is genuinely buried by the blocker while an
+    /// identical translated table remains live.  This is a real mixed initial
+    /// build, not a manually assembled lifecycle fixture.
+    fn real_mixed_initial_transcript_fixture() -> (
+        InitialContactBuild,
+        SpecializedContactPlan,
+        FinalizedContactLoads,
+        NativeSurface,
+        FaceTopology,
+        Mesh,
+        Vec<f64>,
+    ) {
+        let buried = make_overhang_table().unwrap();
+        let blocker = make_box([30.0, 30.0, 1.0], [0.0, 0.0, 16.56]).unwrap();
+        let live = translated_mesh(make_overhang_table().unwrap(), [100.0, 0.0, 0.0]);
+        real_initial_transcript_fixture_for(merge_meshes(&[buried, blocker, live]))
+    }
+
+    fn route_initial_build(
+        build: &mut InitialContactBuild,
+        plan: &SpecializedContactPlan,
+        loads: &FinalizedContactLoads,
+        geometry: &AnchorGeometryAuthority<'_>,
+        delicacy: &[f64],
+    ) -> (
+        CcoController,
+        Vec<u32>,
+        Option<TerminalCcoRequest>,
+        Option<TerminalLedgerEntry>,
+    ) {
+        let pool = SurfaceAnchorPool::from_geometry(geometry, delicacy).unwrap();
         let mut controller = CcoController::default();
         let mut expected = build.routing_order().specialized_terminals().to_vec();
         expected.extend_from_slice(build.routing_order().regular_terminals());
-
+        let mut routed_request = None;
+        let mut skipped_ledger = None;
         for terminal in &expected {
             let ledger = build.forest().terminal_ledger(*terminal).unwrap();
             if ledger.state == TerminalLedgerState::Quarantined {
+                skipped_ledger.get_or_insert(ledger);
                 controller
                     .advance_skipped_terminal(build.forest(), ledger)
                     .unwrap();
@@ -3248,6 +3417,7 @@ mod tests {
             }
             let request =
                 TerminalCcoRequest::bind(build.forest(), *terminal, transcript_frame()).unwrap();
+            routed_request.get_or_insert_with(|| request.clone());
             let contact = plan
                 .contacts()
                 .iter()
@@ -3258,17 +3428,29 @@ mod tests {
                     build.forest_mut(),
                     &request,
                     FinalizedAnchorTerminalRoute {
-                        plan: &plan,
+                        plan,
                         contact,
                         contact_id: u64::from(*terminal),
-                        loads: &loads,
+                        loads,
                         pool: &pool,
                         config: AnchorSearchConfig::current().unwrap(),
-                        geometry: &geometry,
+                        geometry,
                     },
                 )
                 .unwrap();
         }
+        (controller, expected, routed_request, skipped_ledger)
+    }
+
+    #[test]
+    fn finalized_transcript_requires_real_initial_authority_and_seals_replay() {
+        let (mut build, plan, loads, surface, topology, mesh, delicacy) =
+            real_mixed_initial_transcript_fixture();
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let (mut controller, expected, routed_request, skipped_ledger) =
+            route_initial_build(&mut build, &plan, &loads, &geometry, &delicacy);
+        assert!(routed_request.is_some());
+        assert!(skipped_ledger.is_some());
 
         let transcript = controller
             .finalize_transcript(&build, &plan, &loads, &geometry)
@@ -3288,6 +3470,15 @@ mod tests {
         assert_eq!(transcript.final_forest_digest(), build.forest().digest());
         assert_eq!(transcript.final_controller_digest(), controller.digest());
         assert_ne!(transcript.ordered_disposition_digest(), 0);
+        assert!(transcript.validate_integrity().is_ok());
+        assert!(transcript
+            .rows()
+            .iter()
+            .any(|row| row.kind() == FinalizedDispositionKind::Routed));
+        assert!(transcript.rows().iter().any(|row| {
+            row.kind() == FinalizedDispositionKind::SkippedQuarantined
+                && row.skipped_evidence().is_some()
+        }));
         println!(
             "CCO_FINALIZED_TRANSCRIPT={:016x}:{:016x}:{:016x}",
             transcript.final_forest_digest(),
@@ -3298,6 +3489,260 @@ mod tests {
             controller.finalize_transcript(&build, &plan, &loads, &geometry),
             Err(CcoError::TranscriptSealed)
         ));
+        let replay = routed_request.unwrap();
+        let replay_contact = plan
+            .contacts()
+            .iter()
+            .find(|contact| contact.contact_id() == replay.physical_contact_id)
+            .unwrap();
+        let replay_pool = SurfaceAnchorPool::from_geometry(&geometry, &delicacy).unwrap();
+        assert!(matches!(
+            controller.grow_terminal_with_finalized_anchor(
+                build.forest_mut(),
+                &replay,
+                FinalizedAnchorTerminalRoute {
+                    plan: &plan,
+                    contact: replay_contact,
+                    contact_id: replay.physical_contact_id,
+                    loads: &loads,
+                    pool: &replay_pool,
+                    config: AnchorSearchConfig::current().unwrap(),
+                    geometry: &geometry,
+                },
+            ),
+            Err(CcoError::TranscriptSealed)
+        ));
+        assert!(matches!(
+            controller.advance_skipped_terminal(build.forest(), skipped_ledger.unwrap()),
+            Err(CcoError::TranscriptSealed)
+        ));
+    }
+
+    #[test]
+    fn finalized_transcript_rejects_each_real_authority_mismatch_before_cadence() {
+        let (build, plan, loads, surface, topology, mesh, _) = real_initial_transcript_fixture();
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let (_, alien_plan, alien_loads, _, _, _, _) =
+            real_initial_transcript_fixture_for(make_toed_slab().unwrap());
+
+        assert!(matches!(
+            CcoController::default().finalize_transcript(&build, &alien_plan, &loads, &geometry),
+            Err(CcoError::TranscriptPlanMismatch)
+        ));
+        assert!(matches!(
+            CcoController::default().finalize_transcript(&build, &plan, &alien_loads, &geometry),
+            Err(CcoError::TranscriptLoadMismatch)
+        ));
+
+        let rebound_surface = NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
+            NativeSurfaceConfig {
+                grid_pitch_mm: 0.4,
+                max_grid_bytes: 64 * 1024 * 1024,
+            },
+        )
+        .unwrap();
+        let rebound_geometry =
+            AnchorGeometryAuthority::new(&mesh, &topology, &rebound_surface).unwrap();
+        assert!(matches!(
+            CcoController::default().finalize_transcript(&build, &plan, &loads, &rebound_geometry,),
+            Err(CcoError::TranscriptGeometryMismatch)
+        ));
+
+        let (
+            mut corrupt_build,
+            corrupt_plan,
+            corrupt_loads,
+            corrupt_surface,
+            corrupt_topology,
+            corrupt_mesh,
+            _,
+        ) = real_initial_transcript_fixture();
+        let corrupt_geometry =
+            AnchorGeometryAuthority::new(&corrupt_mesh, &corrupt_topology, &corrupt_surface)
+                .unwrap();
+        corrupt_build.test_corrupt_initial_forest_digest();
+        assert!(matches!(
+            CcoController::default().finalize_transcript(
+                &corrupt_build,
+                &corrupt_plan,
+                &corrupt_loads,
+                &corrupt_geometry,
+            ),
+            Err(CcoError::TranscriptInitialForestMismatch)
+        ));
+    }
+
+    #[test]
+    fn finalized_transcript_rejects_pending_duplicate_extra_and_inconsistent_disposition() {
+        let (build, plan, loads, surface, topology, mesh, _) = real_initial_transcript_fixture();
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        assert!(matches!(
+            CcoController::default().finalize_transcript(&build, &plan, &loads, &geometry),
+            Err(CcoError::TranscriptCadenceMismatch)
+        ));
+
+        let (mut build, plan, loads, surface, topology, mesh, delicacy) =
+            real_mixed_initial_transcript_fixture();
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let (mut controller, expected, _, _) =
+            route_initial_build(&mut build, &plan, &loads, &geometry, &delicacy);
+
+        let missing = controller.terminal_cadence.pop().unwrap();
+        assert!(matches!(
+            controller.finalize_transcript(&build, &plan, &loads, &geometry),
+            Err(CcoError::TranscriptCadenceMismatch)
+        ));
+        controller.terminal_cadence.push(missing);
+
+        let duplicate = expected[0];
+        controller.terminal_cadence.push(duplicate);
+        assert!(matches!(
+            controller.finalize_transcript(&build, &plan, &loads, &geometry),
+            Err(CcoError::TranscriptCadenceMismatch)
+        ));
+        controller.terminal_cadence.pop();
+
+        controller.terminal_cadence.push(u32::MAX);
+        assert!(matches!(
+            controller.finalize_transcript(&build, &plan, &loads, &geometry),
+            Err(CcoError::TranscriptCadenceMismatch)
+        ));
+        controller.terminal_cadence.pop();
+
+        let routed = expected
+            .iter()
+            .copied()
+            .find(|terminal| {
+                matches!(
+                    controller.terminal_disposition(*terminal),
+                    Some(TerminalDisposition::Routed { .. })
+                )
+            })
+            .unwrap();
+        let original_key = build.forest().terminal_key(routed).unwrap();
+        controller.terminals.get_mut(&routed).unwrap().disposition =
+            TerminalDisposition::SkippedQuarantined {
+                terminal_id: routed,
+                original_key,
+                forest_digest: build.forest().digest(),
+                controller_digest_before: controller.digest(),
+            };
+        assert!(matches!(
+            controller.finalize_transcript(&build, &plan, &loads, &geometry),
+            Err(CcoError::TranscriptDispositionMismatch(terminal)) if terminal == routed
+        ));
+    }
+
+    #[test]
+    fn finalized_transcript_detects_internal_row_and_header_tampering() {
+        let (mut build, plan, loads, surface, topology, mesh, delicacy) =
+            real_mixed_initial_transcript_fixture();
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let (mut controller, _, _, _) =
+            route_initial_build(&mut build, &plan, &loads, &geometry, &delicacy);
+        let transcript = controller
+            .finalize_transcript(&build, &plan, &loads, &geometry)
+            .unwrap();
+        let mut tampered_row = transcript.clone();
+        tampered_row.rows[0].cadence_index = tampered_row.rows[0].cadence_index.wrapping_add(1);
+        assert!(matches!(
+            tampered_row.validate_integrity(),
+            Err(CcoError::TranscriptDigestMismatch)
+        ));
+        let mut tampered_header = transcript;
+        tampered_header.final_forest_digest = tampered_header.final_forest_digest.wrapping_add(1);
+        assert!(matches!(
+            tampered_header.validate_integrity(),
+            Err(CcoError::TranscriptDigestMismatch)
+        ));
+    }
+
+    #[test]
+    fn finalized_transcript_thread_sweep_is_exactly_identical() {
+        const CHILD: &str = "PLINTH_FINALIZED_CCO_TRANSCRIPT_SWEEP_CHILD";
+        const LINE: &str = "CCO_FINALIZED_TRANSCRIPT_SWEEP=";
+        if std::env::var_os(CHILD).is_some() {
+            let (mut build, plan, loads, surface, topology, mesh, delicacy) =
+                real_mixed_initial_transcript_fixture();
+            let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+            let (mut controller, _, _, _) =
+                route_initial_build(&mut build, &plan, &loads, &geometry, &delicacy);
+            let transcript = controller
+                .finalize_transcript(&build, &plan, &loads, &geometry)
+                .unwrap();
+            let mut rows = String::new();
+            for row in transcript.rows() {
+                rows.push_str(&format!(
+                    ";{}:{}:{}:{}:{}",
+                    row.cadence_index(),
+                    row.physical_contact_id(),
+                    row.terminal_id(),
+                    row.original_key().slot(),
+                    match row.kind() {
+                        FinalizedDispositionKind::Routed => 0,
+                        FinalizedDispositionKind::SkippedQuarantined => 1,
+                        FinalizedDispositionKind::UnroutedNoWinner => 2,
+                    },
+                ));
+                match row.route() {
+                    Some(route) => rows.push_str(&format!(
+                        ":r{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                        route.physical_contact_id,
+                        route.terminal_id,
+                        route.original_key.slot(),
+                        route.original_key.generation(),
+                        route.plan_digest,
+                        route.loads_digest,
+                        route.geometry_digest,
+                        route.forest_digest_before,
+                        route.controller_digest_before,
+                    )),
+                    None => rows.push_str(":-"),
+                }
+                match row.skipped_evidence() {
+                    Some(skipped) => rows.push_str(&format!(
+                        ":s{}:{}",
+                        skipped.forest_digest(),
+                        skipped.controller_digest_before(),
+                    )),
+                    None => rows.push_str(":-"),
+                }
+            }
+            println!(
+                "{LINE}{:016x}:{:016x}:{rows}",
+                transcript.digest(),
+                transcript.ordered_disposition_digest(),
+            );
+            return;
+        }
+        let executable = std::env::current_exe().unwrap();
+        let mut results = Vec::new();
+        for threads in [1, 4, 16] {
+            let output = std::process::Command::new(&executable)
+                .arg("--exact")
+                .arg("cco::tests::finalized_transcript_thread_sweep_is_exactly_identical")
+                .arg("--nocapture")
+                .env(CHILD, "1")
+                .env("PLINTH_THREADS", threads.to_string())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            results.push(
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .lines()
+                    .find_map(|line| line.strip_prefix(LINE))
+                    .expect("child emitted finalized transcript evidence")
+                    .to_owned(),
+            );
+        }
+        assert!(results.windows(2).all(|pair| pair[0] == pair[1]));
     }
 
     #[test]

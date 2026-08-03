@@ -160,6 +160,13 @@ impl InitialContactBuild {
     pub(crate) const fn all_terminals_registered_before_quarantine(&self) -> bool {
         self.all_terminals_registered_before_quarantine
     }
+
+    #[cfg(test)]
+    /// Test-only corruption seam for downstream transcript rejection tests.
+    /// Production construction has no mutation path for this binding.
+    pub(crate) fn test_corrupt_initial_forest_digest(&mut self) {
+        self.initial_forest_digest = self.initial_forest_digest.wrapping_add(1);
+    }
 }
 
 #[derive(Clone, Debug, Error, PartialEq)]
