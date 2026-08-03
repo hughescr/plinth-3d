@@ -15,8 +15,9 @@ type FrozenPatchEvidence = (u32, u32, u32, &'static [u32], u64, bool, bool, u64)
 
 fn hollowed_overhang_table() -> HollowedModel {
     let mesh = make_overhang_table().expect("procedural overhang table");
-    let budget = DecimationBudget::ratified_default(ProbeConfig::new(1.0, usize::MAX, 10_000.0))
-        .expect("ratified decimation budget");
+    let budget =
+        DecimationBudget::ratified_default(ProbeConfig::new(1.0, 64 * 1024 * 1024, 10_000.0))
+            .expect("ratified decimation budget");
     let decimated = run_decimation(&mesh, budget)
         .expect("decimate procedural overhang table")
         .into_decimated_model()

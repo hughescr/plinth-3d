@@ -405,9 +405,9 @@ mod tests {
 
         let layers = plinth_core::LayerPlan::new(0.0, vec![0.05]).expect("layer plan");
         let input = policy.support_input(&layers, &[], &[]);
-        assert_eq!(input.max_grid_bytes, 64 * 1024 * 1024);
-        assert_eq!(input.max_primitives, 200_000);
-        assert_eq!(input.max_primitive_bytes, 128 * 1024 * 1024);
+        assert_eq!(input.max_grid_bytes(), 64 * 1024 * 1024);
+        assert_eq!(input.max_primitives(), 200_000);
+        assert_eq!(input.max_primitive_bytes(), 128 * 1024 * 1024);
     }
 
     #[test]
@@ -443,7 +443,7 @@ mod tests {
 
     fn oriented(mesh: Mesh) -> OrientedModel {
         let budget =
-            DecimationBudget::ratified_default(ProbeConfig::new(1.0, usize::MAX, 10_000.0))
+            DecimationBudget::ratified_default(ProbeConfig::new(1.0, 64 * 1024 * 1024, 10_000.0))
                 .expect("registered transition-test budget");
         let decimated = run_decimation(&mesh, budget)
             .expect("transition-test decimation")

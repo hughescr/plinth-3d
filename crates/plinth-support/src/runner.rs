@@ -110,22 +110,22 @@ use crate::{
 /// are selected here; all limits are supplied by the caller.
 #[derive(Clone, Copy, Debug)]
 pub struct SupportPreparationInput<'a> {
-    pub layers: &'a LayerPlan,
-    pub delicacy_by_face: &'a [f64],
-    pub column_pitch_mm: PositiveFinite,
-    pub surface_grid_pitch_mm: PositiveFinite,
-    pub max_grid_bytes: usize,
-    pub candidate_config: CandidatePayloadConfig,
-    pub reservations: &'a [SpecializedOwnerReservation],
-    pub perception_limits: GenericPerceptionLimits,
-    pub coverage_samples_max_virtual_cells: usize,
-    pub coverage_score_matrix_max_entries: usize,
-    pub specialized_limits: SpecializedLimits,
-    pub construction_limits: ContactConstructionLimits,
-    pub brace_penetration_limits: PenetrationBatchLimits,
-    pub raft_limits: RaftLimits,
-    pub max_primitives: usize,
-    pub max_primitive_bytes: usize,
+    layers: &'a LayerPlan,
+    delicacy_by_face: &'a [f64],
+    column_pitch_mm: PositiveFinite,
+    surface_grid_pitch_mm: PositiveFinite,
+    max_grid_bytes: usize,
+    candidate_config: CandidatePayloadConfig,
+    reservations: &'a [SpecializedOwnerReservation],
+    perception_limits: GenericPerceptionLimits,
+    coverage_samples_max_virtual_cells: usize,
+    coverage_score_matrix_max_entries: usize,
+    specialized_limits: SpecializedLimits,
+    construction_limits: ContactConstructionLimits,
+    brace_penetration_limits: PenetrationBatchLimits,
+    raft_limits: RaftLimits,
+    max_primitives: usize,
+    max_primitive_bytes: usize,
 }
 
 /// Production-owned, result-inert resource authority for support preparation.
@@ -229,6 +229,39 @@ impl SupportPreparationLimits {
     }
 }
 
+impl SupportPreparationInput<'_> {
+    #[must_use]
+    pub const fn max_grid_bytes(&self) -> usize {
+        self.max_grid_bytes
+    }
+    #[must_use]
+    pub const fn max_primitives(&self) -> usize {
+        self.max_primitives
+    }
+    #[must_use]
+    pub const fn max_primitive_bytes(&self) -> usize {
+        self.max_primitive_bytes
+    }
+
+    fn validate(&self) -> bool {
+        [
+            self.max_grid_bytes,
+            self.coverage_samples_max_virtual_cells,
+            self.coverage_score_matrix_max_entries,
+            self.max_primitives,
+            self.max_primitive_bytes,
+            self.brace_penetration_limits.max_rows,
+            self.brace_penetration_limits.max_total_work,
+            self.brace_penetration_limits.max_total_hits,
+            self.brace_penetration_limits.max_total_samples,
+            self.brace_penetration_limits.max_total_intervals,
+            self.brace_penetration_limits.max_scratch_bytes,
+        ]
+        .iter()
+        .all(|value| *value != 0 && *value != usize::MAX)
+    }
+}
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum SupportPreparationLimitsError {
     #[error("support production pitch is invalid: {0}")]
@@ -288,12 +321,7 @@ pub fn run_support<'a>(
     request: SupportRequest,
     input: SupportPreparationInput<'a>,
 ) -> Result<FinalSupportAuthority<'a>, SupportRunError> {
-    if input.max_grid_bytes == 0
-        || input.coverage_samples_max_virtual_cells == 0
-        || input.coverage_score_matrix_max_entries == 0
-        || input.max_primitives == 0
-        || input.max_primitive_bytes == 0
-    {
+    if !input.validate() {
         return Err(SupportRunError::InvalidResourceCaps);
     }
     let min_z = hollowed
@@ -3383,7 +3411,7 @@ mod tests {
 
     fn hollowed_fixture(mesh: Mesh) -> HollowedModel {
         let budget =
-            DecimationBudget::ratified_default(ProbeConfig::new(1.0, usize::MAX, 10_000.0))
+            DecimationBudget::ratified_default(ProbeConfig::new(1.0, 64 * 1024 * 1024, 10_000.0))
                 .expect("registered decimation budget");
         let decimated = run_decimation(&mesh, budget)
             .expect("required fixture decimation")

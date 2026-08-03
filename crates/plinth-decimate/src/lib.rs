@@ -787,6 +787,8 @@ pub enum FeatureProtectionError {
 #[derive(Clone, Debug, Error, PartialEq)]
 pub enum DecimationError {
     #[error(transparent)]
+    Config(#[from] BudgetConfigError),
+    #[error(transparent)]
     FeatureProtection(#[from] FeatureProtectionError),
     #[error(transparent)]
     Budget(#[from] BudgetSearchError),
@@ -843,6 +845,7 @@ pub fn run(
     original: &Mesh,
     budget: DecimationBudget,
 ) -> Result<BudgetSearchOutcome, DecimationError> {
+    budget.validate_for_execution()?;
     // Scale is a named pre-search SKIP.  Do this before the feature probe so a
     // deliberately out-of-scale mesh cannot turn into an unrelated cap error.
     let policy = search_policy()?;
