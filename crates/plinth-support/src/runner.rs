@@ -46,8 +46,8 @@ use crate::{
     },
     transient::{transient_report, TransientError, TransientReport},
     validate_perception_input, BuildFrame, ContactSelectionConfig, ContactSelectionError,
-    SelectedContacts, SupportError, SupportPerceptionConfig, SupportPerceptionError,
-    SupportHistory, SupportReport, SupportRequest, SupportedModel,
+    SelectedContacts, SupportError, SupportHistory, SupportPerceptionConfig,
+    SupportPerceptionError, SupportReport, SupportRequest, SupportedModel,
 };
 
 /// Complete typed caller authority for the sealed preparation stage.
@@ -676,6 +676,29 @@ struct BracedPlanState {
     post_brace_report_digest: u64,
 }
 
+impl BracedPlanState {
+    /// Rebind and validate all retained provenance without another native mutation.
+    fn validate_integrity(&self, context: &SupportRunContext<'_>) -> Result<(), SupportBraceError> {
+        let geometry = context.geometry()?;
+        let loads = self.rewired.routed.plan.finalized_loads()?;
+        context.validate_brace_preflight(&self.rewired, &geometry, loads)?;
+        self.plan.forest.validate().map_err(BraceError::from)?;
+        if self.brace_plan_digest != brace_fixed_point_plan_digest(&self.plan) {
+            return Err(SupportBraceError::BracePlanDigestMismatch);
+        }
+        if self.post_brace_forest_digest != self.plan.forest.digest() {
+            return Err(SupportBraceError::FinalForestDigestMismatch);
+        }
+        let fresh = transient_report(&self.plan.forest, context.frame.plate_z_mm())?;
+        if fresh != self.report
+            || self.post_brace_report_digest != transient_report_digest(&self.report)
+        {
+            return Err(SupportBraceError::TransientReportDigestMismatch);
+        }
+        Ok(())
+    }
+}
+
 pub(crate) struct BracedSupportRun<'a> {
     context: SupportRunContext<'a>,
     state: BracedPlanState,
@@ -766,32 +789,8 @@ impl BracedSupportRun<'_> {
         self.state.rewired.post_rewire_forest_digest
     }
 
-    /// Rebind and validate all retained provenance without another native
-    /// mutation.  This is also the post-stage proof that the plan's stored
-    /// report describes its exact final forest.
     pub(crate) fn validate_integrity(&self) -> Result<(), SupportBraceError> {
-        let geometry = self.context.geometry()?;
-        let loads = self.state.rewired.routed.plan.finalized_loads()?;
-        self.context
-            .validate_brace_preflight(&self.state.rewired, &geometry, loads)?;
-        self.state
-            .plan
-            .forest
-            .validate()
-            .map_err(BraceError::from)?;
-        if self.state.brace_plan_digest != brace_fixed_point_plan_digest(&self.state.plan) {
-            return Err(SupportBraceError::BracePlanDigestMismatch);
-        }
-        if self.state.post_brace_forest_digest != self.state.plan.forest.digest() {
-            return Err(SupportBraceError::FinalForestDigestMismatch);
-        }
-        let fresh = transient_report(&self.state.plan.forest, self.context.frame.plate_z_mm())?;
-        if fresh != self.state.report
-            || self.state.post_brace_report_digest != transient_report_digest(&self.state.report)
-        {
-            return Err(SupportBraceError::TransientReportDigestMismatch);
-        }
-        Ok(())
+        self.state.validate_integrity(&self.context)
     }
 
     #[cfg(test)]
@@ -931,7 +930,7 @@ impl<'a> StructuredSupportRun<'a> {
     }
 
     pub(crate) fn validate_integrity(&self) -> Result<(), SupportStructureError> {
-        self.braced.validate_integrity()?;
+        self.braced.validate_integrity(&self.context)?;
         self.braced
             .plan
             .forest
@@ -1034,13 +1033,11 @@ fn validate_lowered_output(
     lowered: &LoweredSupportPlan,
     config: LoweringConfig,
 ) -> Result<(), SupportLoweringError> {
-    let balls = structured
-        .joints
-        .validate_filtered(
-            &structured.braced.plan.forest,
-            &structured.live_view,
-            config.joint_config(),
-        )?;
+    let balls = structured.joints.validate_filtered(
+        &structured.braced.plan.forest,
+        &structured.live_view,
+        config.joint_config(),
+    )?;
     structured.raft.validate(
         &structured.braced.plan.forest,
         &structured.live_view,
@@ -2916,13 +2913,17 @@ mod tests {
         with_structured_limits(count - 1, bytes, |structured| {
             assert!(matches!(
                 structured.lower(),
-                Err(SupportLoweringError::Lowering(LoweringError::PrimitiveLimit))
+                Err(SupportLoweringError::Lowering(
+                    LoweringError::PrimitiveLimit
+                ))
             ));
         });
         with_structured_limits(count, bytes - 1, |structured| {
             assert!(matches!(
                 structured.lower(),
-                Err(SupportLoweringError::Lowering(LoweringError::PrimitiveBytesLimit))
+                Err(SupportLoweringError::Lowering(
+                    LoweringError::PrimitiveBytesLimit
+                ))
             ));
         });
     }
@@ -2950,7 +2951,7 @@ mod tests {
                 .brace()
                 .expect("thread sweep braces the required corpus");
             let structured = braced
-        .structure()
+                .structure()
                 .expect("thread sweep structures required corpus");
             let lineage = format!(
                 "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
