@@ -12,22 +12,22 @@ use geom_kernel::{
     KnnBatchLimits, KnnBatchPlan, NativeSurface, NativeSurfaceConfig, PointCloudIndex,
     RadiusQueryLimits,
 };
-use plinth_core::{LayerPlan, m0_constants};
-use plinth_mesh::{Mesh, WeldPolicy, build_face_topology, mesh_fingerprint};
+use plinth_core::{m0_constants, LayerPlan};
+use plinth_mesh::{build_face_topology, mesh_fingerprint, Mesh, WeldPolicy};
 use thiserror::Error;
 
-use crate::dyadic::{CandidatePayloadConfig, DyadicError, build_candidate_payload};
+use crate::dyadic::{build_candidate_payload, CandidatePayloadConfig, DyadicError};
 use crate::perception::{
+    finalize_specialized_load_partition, load_violation_count, specialized_load_resource_plan,
     FinalizedContactLoads, FinalizedLoadPartition, GenericContactPlan, GenericPerceptionError,
     GenericPerceptionLimits, LoadFinalizeLimits, LoadOwner, PhysicalContact, SliceSolid,
-    SpecializedOwnerReservation, finalize_specialized_load_partition, load_violation_count,
-    specialized_load_resource_plan,
+    SpecializedOwnerReservation,
 };
 use crate::{
-    BuildFrame, ContactCandidateId, ContactCandidatePool, ContactSelectionConfig,
-    ContactSelectionError, CoverageAssessmentLimits, CoverageObjective, CoverageSample,
-    SelectedContact, SelectedContacts, SupportIsland, SupportPerceptionConfig, assess_coverage,
-    build_dyadic_coverage_samples, coverage_assessment_resource_plan,
+    assess_coverage, build_dyadic_coverage_samples, coverage_assessment_resource_plan, BuildFrame,
+    ContactCandidateId, ContactCandidatePool, ContactSelectionConfig, ContactSelectionError,
+    CoverageAssessmentLimits, CoverageObjective, CoverageSample, SelectedContact, SelectedContacts,
+    SupportIsland, SupportPerceptionConfig,
 };
 
 const SYNTHETIC_PATCH_RADIUS_MM: f64 = 1.5;
@@ -1311,7 +1311,9 @@ pub enum SpecializedError {
     UnknownPhysicalContact { contact_id: u64 },
     #[error("specialized plan edit may not remove demand-bearing contact {contact_id}")]
     DemandBearingContactEdit { contact_id: u64 },
-    #[error("specialized plan edit may only remove a regular contact; {contact_id} is not regular")]
+    #[error(
+        "specialized plan edit may only remove a regular contact; {contact_id} is not regular"
+    )]
     NonRegularContactEdit { contact_id: u64 },
     #[error("specialized plan edit names unknown repair row {row_id:?}")]
     UnknownRepairRow { row_id: RepairRowId },
@@ -2930,7 +2932,7 @@ fn evaluate_gate_batch(
     // Each preflight window temporarily builds bounded `Vec`/`BTree*` route
     // payloads, then retains only its arithmetic summary. It therefore does
     // not retain data for the full gate payload.
-    let whole_gate_route_plan = whole_gate_route_preflight(
+    whole_gate_route_preflight_then_execute(
         contacts,
         proposals,
         proposal_storage_bytes,
@@ -2940,217 +2942,233 @@ fn evaluate_gate_batch(
         coverage_samples,
         limits,
         &plan,
-    )?;
-    let mut vectors = Vec::with_capacity(plan.variants);
-    let mut append_work = 0usize;
-    let mut executed_whole_gate_route_plan = GateWholeRoutePlan::default();
-    for window_start in (0..plan.variants).step_by(limits.max_gate_window_variants) {
-        let window_end = (window_start + limits.max_gate_window_variants).min(plan.variants);
-        let window_variants = window_end - window_start;
-        let nearest_len = window_variants
-            .checked_mul(coverage_samples.len())
-            .ok_or(SpecializedError::GateResourceOverflow)?;
-        let physical_len = (window_start..window_end).try_fold(0usize, |total, variant| {
-            total
-                .checked_add(variant_contact_count(contacts.len(), variant))
-                .ok_or(SpecializedError::GateResourceOverflow)
-        })?;
-        let owner_face_len = (window_start..window_end).try_fold(0usize, |total, variant| {
-            let proposal = variant
-                .checked_sub(1)
-                .and_then(|index| proposals.get(index));
-            let mut work = 0usize;
-            total
-                .checked_add(variant_specialized_owner_face_count(
-                    contacts,
-                    proposal,
-                    generic.islands(),
-                    islands,
-                    &mut work,
-                    usize::MAX,
-                )?)
-                .ok_or(SpecializedError::GateResourceOverflow)
-        })?;
-        let working_bytes = nearest_len
-            .checked_mul(std::mem::size_of::<f64>())
-            .and_then(|bytes| {
-                physical_len
-                    .checked_mul(std::mem::size_of::<PhysicalContact>())
-                    .and_then(|physical| bytes.checked_add(physical))
-            })
-            .and_then(|bytes| {
-                owner_face_len
-                    .checked_mul(std::mem::size_of::<(u32, u32)>())
-                    .and_then(|owners| bytes.checked_add(owners))
-            })
-            .and_then(|bytes| {
-                window_variants
-                    .checked_add(1)
-                    .and_then(|offsets| offsets.checked_mul(2 * std::mem::size_of::<usize>()))
-                    .and_then(|offsets| bytes.checked_add(offsets))
-            })
-            .ok_or(SpecializedError::GateResourceOverflow)?;
-        if working_bytes > limits.max_gate_contact_matrix_bytes {
-            return Err(SpecializedError::GateContactMatrixByteLimit {
-                required: working_bytes,
-                limit: limits.max_gate_contact_matrix_bytes,
-            });
-        }
-        let coverage_scratch = coverage_assessment_resource_plan(coverage_samples, topology)?;
-        let max_load_scratch =
-            (window_start..window_end).try_fold(0usize, |maximum, variant| {
-                let proposal = variant
-                    .checked_sub(1)
-                    .and_then(|index| proposals.get(index));
-                let mut work = 0usize;
-                let owner_faces = variant_specialized_owner_face_count(
-                    contacts,
-                    proposal,
-                    generic.islands(),
-                    islands,
-                    &mut work,
-                    usize::MAX,
+        |whole_gate_route_plan| {
+            let mut vectors = Vec::with_capacity(plan.variants);
+            let mut append_work = 0usize;
+            let mut executed_whole_gate_route_plan = GateWholeRoutePlan::default();
+            for window_start in (0..plan.variants).step_by(limits.max_gate_window_variants) {
+                let window_end =
+                    (window_start + limits.max_gate_window_variants).min(plan.variants);
+                let window_variants = window_end - window_start;
+                let nearest_len = window_variants
+                    .checked_mul(coverage_samples.len())
+                    .ok_or(SpecializedError::GateResourceOverflow)?;
+                let physical_len =
+                    (window_start..window_end).try_fold(0usize, |total, variant| {
+                        total
+                            .checked_add(variant_contact_count(contacts.len(), variant))
+                            .ok_or(SpecializedError::GateResourceOverflow)
+                    })?;
+                let owner_face_len =
+                    (window_start..window_end).try_fold(0usize, |total, variant| {
+                        let proposal = variant
+                            .checked_sub(1)
+                            .and_then(|index| proposals.get(index));
+                        let mut work = 0usize;
+                        total
+                            .checked_add(variant_specialized_owner_face_count(
+                                contacts,
+                                proposal,
+                                generic.islands(),
+                                islands,
+                                &mut work,
+                                usize::MAX,
+                            )?)
+                            .ok_or(SpecializedError::GateResourceOverflow)
+                    })?;
+                let working_bytes = nearest_len
+                    .checked_mul(std::mem::size_of::<f64>())
+                    .and_then(|bytes| {
+                        physical_len
+                            .checked_mul(std::mem::size_of::<PhysicalContact>())
+                            .and_then(|physical| bytes.checked_add(physical))
+                    })
+                    .and_then(|bytes| {
+                        owner_face_len
+                            .checked_mul(std::mem::size_of::<(u32, u32)>())
+                            .and_then(|owners| bytes.checked_add(owners))
+                    })
+                    .and_then(|bytes| {
+                        window_variants
+                            .checked_add(1)
+                            .and_then(|offsets| {
+                                offsets.checked_mul(2 * std::mem::size_of::<usize>())
+                            })
+                            .and_then(|offsets| bytes.checked_add(offsets))
+                    })
+                    .ok_or(SpecializedError::GateResourceOverflow)?;
+                if working_bytes > limits.max_gate_contact_matrix_bytes {
+                    return Err(SpecializedError::GateContactMatrixByteLimit {
+                        required: working_bytes,
+                        limit: limits.max_gate_contact_matrix_bytes,
+                    });
+                }
+                let coverage_scratch =
+                    coverage_assessment_resource_plan(coverage_samples, topology)?;
+                let max_load_scratch =
+                    (window_start..window_end).try_fold(0usize, |maximum, variant| {
+                        let proposal = variant
+                            .checked_sub(1)
+                            .and_then(|index| proposals.get(index));
+                        let mut work = 0usize;
+                        let owner_faces = variant_specialized_owner_face_count(
+                            contacts,
+                            proposal,
+                            generic.islands(),
+                            islands,
+                            &mut work,
+                            usize::MAX,
+                        )?;
+                        let resource = specialized_load_resource_plan(
+                            generic,
+                            variant_contact_count(contacts.len(), variant),
+                            owner_faces,
+                        )?;
+                        Ok::<_, SpecializedError>(maximum.max(resource.scratch_bytes))
+                    })?;
+                let coverage_retained_bytes = coverage_samples
+                    .len()
+                    .checked_mul(std::mem::size_of::<usize>())
+                    .ok_or(SpecializedError::GateResourceOverflow)?;
+                let mut nearest_route_plans = Vec::with_capacity(window_variants);
+                let mut retained_nearest_route_bytes =
+                    checked_route_bytes::<CoverageRouteNearestPlan>(
+                        nearest_route_plans.capacity(),
+                    )?;
+                let mut max_nearest_route_knn_bytes = 0usize;
+                for variant in window_start..window_end {
+                    let proposal = variant
+                        .checked_sub(1)
+                        .and_then(|index| proposals.get(index));
+                    let route_plan = plan_variant_nearest_routes(
+                        contacts,
+                        proposal,
+                        coverage_samples,
+                        limits.coverage_route_knn,
+                    )?;
+                    retained_nearest_route_bytes = retained_nearest_route_bytes
+                        .checked_add(route_plan.retained_base_logical_bytes)
+                        .ok_or(SpecializedError::GateResourceOverflow)?;
+                    max_nearest_route_knn_bytes = max_nearest_route_knn_bytes
+                        .max(route_plan.max_route_knn_logical_peak_bytes);
+                    nearest_route_plans.push(route_plan);
+                }
+                let executed_route_plan =
+                    GateRouteWindowPlan::from_route_plans(&nearest_route_plans, window_variants)?;
+                let coverage_nearest_bytes = coverage_route_nearest_peak_bytes(
+                    retained_nearest_route_bytes,
+                    max_nearest_route_knn_bytes,
                 )?;
-                let resource = specialized_load_resource_plan(
-                    generic,
-                    variant_contact_count(contacts.len(), variant),
-                    owner_faces,
+                let executed_peak_bytes = check_gate_peak(
+                    GatePeakUsage {
+                        proposal_bytes: proposal_storage_bytes,
+                        result_bytes: plan.vector_bytes,
+                        matrix_bytes: working_bytes,
+                        coverage_scratch_bytes: coverage_scratch.scratch_bytes,
+                        coverage_nearest_bytes,
+                        coverage_retained_bytes,
+                        load_scratch_bytes: max_load_scratch,
+                    },
+                    limits.max_gate_peak_bytes,
                 )?;
-                Ok::<_, SpecializedError>(maximum.max(resource.scratch_bytes))
-            })?;
-        let coverage_retained_bytes = coverage_samples
-            .len()
-            .checked_mul(std::mem::size_of::<usize>())
-            .ok_or(SpecializedError::GateResourceOverflow)?;
-        let mut nearest_route_plans = Vec::with_capacity(window_variants);
-        let mut retained_nearest_route_bytes =
-            checked_route_bytes::<CoverageRouteNearestPlan>(nearest_route_plans.capacity())?;
-        let mut max_nearest_route_knn_bytes = 0usize;
-        for variant in window_start..window_end {
-            let proposal = variant
-                .checked_sub(1)
-                .and_then(|index| proposals.get(index));
-            let route_plan = plan_variant_nearest_routes(
-                contacts,
-                proposal,
-                coverage_samples,
-                limits.coverage_route_knn,
-            )?;
-            retained_nearest_route_bytes = retained_nearest_route_bytes
-                .checked_add(route_plan.retained_base_logical_bytes)
-                .ok_or(SpecializedError::GateResourceOverflow)?;
-            max_nearest_route_knn_bytes =
-                max_nearest_route_knn_bytes.max(route_plan.max_route_knn_logical_peak_bytes);
-            nearest_route_plans.push(route_plan);
-        }
-        let executed_route_plan =
-            GateRouteWindowPlan::from_route_plans(&nearest_route_plans, window_variants)?;
-        let coverage_nearest_bytes = coverage_route_nearest_peak_bytes(
-            retained_nearest_route_bytes,
-            max_nearest_route_knn_bytes,
-        )?;
-        let executed_peak_bytes = check_gate_peak(
-            GatePeakUsage {
-                proposal_bytes: proposal_storage_bytes,
-                result_bytes: plan.vector_bytes,
-                matrix_bytes: working_bytes,
-                coverage_scratch_bytes: coverage_scratch.scratch_bytes,
-                coverage_nearest_bytes,
-                coverage_retained_bytes,
-                load_scratch_bytes: max_load_scratch,
-            },
-            limits.max_gate_peak_bytes,
-        )?;
-        executed_whole_gate_route_plan.record(executed_route_plan, executed_peak_bytes)?;
-        let mut nearest_matrix = vec![f64::INFINITY; nearest_len];
-        let mut physical_matrix = Vec::with_capacity(physical_len);
-        let mut physical_offsets = Vec::with_capacity(window_variants + 1);
-        let mut owner_face_matrix = Vec::with_capacity(owner_face_len);
-        let mut owner_face_offsets = Vec::with_capacity(window_variants + 1);
-        physical_offsets.push(0);
-        owner_face_offsets.push(0);
-        for ((window_row, variant), nearest_route_plan) in (window_start..window_end)
-            .enumerate()
-            .zip(nearest_route_plans)
-        {
-            let proposal = variant
-                .checked_sub(1)
-                .and_then(|index| proposals.get(index));
-            let nearest = &mut nearest_matrix
-                [window_row * coverage_samples.len()..(window_row + 1) * coverage_samples.len()];
-            fill_variant_nearest(
-                contacts,
-                proposal,
-                coverage_samples,
-                nearest,
-                nearest_route_plan,
-            )?;
-            append_variant_load_inputs(
-                contacts,
-                proposal,
-                generic.islands(),
-                islands,
-                reservations,
-                &mut physical_matrix,
-                &mut owner_face_matrix,
-                &mut append_work,
-                fill_operation_limit,
-            )?;
-            physical_offsets.push(physical_matrix.len());
-            owner_face_offsets.push(owner_face_matrix.len());
-        }
-        debug_assert_eq!(physical_matrix.len(), physical_len);
-        debug_assert_eq!(owner_face_matrix.len(), owner_face_len);
-        for (window_row, variant) in (window_start..window_end).enumerate() {
-            let proposal = variant
-                .checked_sub(1)
-                .and_then(|index| proposals.get(index));
-            let nearest = &nearest_matrix
-                [window_row * coverage_samples.len()..(window_row + 1) * coverage_samples.len()];
-            let coverage = assess_coverage(
-                coverage_samples,
-                topology,
-                nearest,
-                coverage_radius,
-                coverage_area_floor_mm2,
-                CoverageAssessmentLimits {
-                    max_scratch_bytes: limits.max_coverage_scratch_bytes,
-                    max_operations: limits.max_coverage_operations,
-                },
-            )?;
-            let physical =
-                &physical_matrix[physical_offsets[window_row]..physical_offsets[window_row + 1]];
-            let owner_faces = &owner_face_matrix
-                [owner_face_offsets[window_row]..owner_face_offsets[window_row + 1]];
-            let partition = finalize_specialized_load_partition(
-                generic,
-                mesh,
-                surface,
-                physical,
-                owner_faces,
-                LoadFinalizeLimits {
-                    max_scratch_bytes: limits.max_load_scratch_bytes,
-                    max_operations: limits.max_load_operations,
-                },
-            )?;
-            let unsupported_specialized_count = authoritative_demands
-                .iter()
-                .filter(|demand| {
-                    !variant_satisfies_demand(contacts, proposal, demand, layers, attach_reach)
-                })
-                .count();
-            vectors.push(FrozenSpecializedGateVector::from_live(
-                coverage.objective,
-                load_violation_count(&partition, physical)?,
-                unsupported_specialized_count,
-            ));
-        }
-    }
-    if whole_gate_route_plan != executed_whole_gate_route_plan {
-        return Err(SpecializedError::GateRoutePlanMismatch);
-    }
-    debug_assert_eq!(append_work, expected_fill_operations);
-    Ok(vectors)
+                executed_whole_gate_route_plan.record(executed_route_plan, executed_peak_bytes)?;
+                let mut nearest_matrix = vec![f64::INFINITY; nearest_len];
+                let mut physical_matrix = Vec::with_capacity(physical_len);
+                let mut physical_offsets = Vec::with_capacity(window_variants + 1);
+                let mut owner_face_matrix = Vec::with_capacity(owner_face_len);
+                let mut owner_face_offsets = Vec::with_capacity(window_variants + 1);
+                physical_offsets.push(0);
+                owner_face_offsets.push(0);
+                for ((window_row, variant), nearest_route_plan) in (window_start..window_end)
+                    .enumerate()
+                    .zip(nearest_route_plans)
+                {
+                    let proposal = variant
+                        .checked_sub(1)
+                        .and_then(|index| proposals.get(index));
+                    let nearest = &mut nearest_matrix[window_row * coverage_samples.len()
+                        ..(window_row + 1) * coverage_samples.len()];
+                    fill_variant_nearest(
+                        contacts,
+                        proposal,
+                        coverage_samples,
+                        nearest,
+                        nearest_route_plan,
+                    )?;
+                    append_variant_load_inputs(
+                        contacts,
+                        proposal,
+                        generic.islands(),
+                        islands,
+                        reservations,
+                        &mut physical_matrix,
+                        &mut owner_face_matrix,
+                        &mut append_work,
+                        fill_operation_limit,
+                    )?;
+                    physical_offsets.push(physical_matrix.len());
+                    owner_face_offsets.push(owner_face_matrix.len());
+                }
+                debug_assert_eq!(physical_matrix.len(), physical_len);
+                debug_assert_eq!(owner_face_matrix.len(), owner_face_len);
+                for (window_row, variant) in (window_start..window_end).enumerate() {
+                    let proposal = variant
+                        .checked_sub(1)
+                        .and_then(|index| proposals.get(index));
+                    let nearest = &nearest_matrix[window_row * coverage_samples.len()
+                        ..(window_row + 1) * coverage_samples.len()];
+                    let coverage = assess_coverage(
+                        coverage_samples,
+                        topology,
+                        nearest,
+                        coverage_radius,
+                        coverage_area_floor_mm2,
+                        CoverageAssessmentLimits {
+                            max_scratch_bytes: limits.max_coverage_scratch_bytes,
+                            max_operations: limits.max_coverage_operations,
+                        },
+                    )?;
+                    let physical = &physical_matrix
+                        [physical_offsets[window_row]..physical_offsets[window_row + 1]];
+                    let owner_faces = &owner_face_matrix
+                        [owner_face_offsets[window_row]..owner_face_offsets[window_row + 1]];
+                    let partition = finalize_specialized_load_partition(
+                        generic,
+                        mesh,
+                        surface,
+                        physical,
+                        owner_faces,
+                        LoadFinalizeLimits {
+                            max_scratch_bytes: limits.max_load_scratch_bytes,
+                            max_operations: limits.max_load_operations,
+                        },
+                    )?;
+                    let unsupported_specialized_count = authoritative_demands
+                        .iter()
+                        .filter(|demand| {
+                            !variant_satisfies_demand(
+                                contacts,
+                                proposal,
+                                demand,
+                                layers,
+                                attach_reach,
+                            )
+                        })
+                        .count();
+                    vectors.push(FrozenSpecializedGateVector::from_live(
+                        coverage.objective,
+                        load_violation_count(&partition, physical)?,
+                        unsupported_specialized_count,
+                    ));
+                }
+            }
+            if whole_gate_route_plan != executed_whole_gate_route_plan {
+                return Err(SpecializedError::GateRoutePlanMismatch);
+            }
+            debug_assert_eq!(append_work, expected_fill_operations);
+            Ok(vectors)
+        },
+    )
 }
 
 fn variant_contact_count(contact_count: usize, variant: usize) -> usize {
@@ -3304,11 +3322,12 @@ impl GateWholeRoutePlan {
 }
 
 /// Traverse every gate window and retain only checked summaries.
-fn traverse_whole_gate_windows(
+fn traverse_whole_gate_windows<T>(
     variants: usize,
     max_window_variants: usize,
     mut plan_window: impl FnMut(usize, usize) -> Result<GateWindowPreflightSummary, SpecializedError>,
-) -> Result<GateWholeRoutePlan, SpecializedError> {
+    execute: impl FnOnce(GateWholeRoutePlan) -> Result<T, SpecializedError>,
+) -> Result<T, SpecializedError> {
     let mut preflight = GateWholeRoutePlan::default();
     for window_start in (0..variants).step_by(max_window_variants) {
         let window_end = (window_start + max_window_variants).min(variants);
@@ -3319,7 +3338,7 @@ fn traverse_whole_gate_windows(
         .total_work
         .checked_add(preflight.total_routes)
         .ok_or(SpecializedError::GateResourceOverflow)?;
-    Ok(preflight)
+    execute(preflight)
 }
 
 /// Route-plan all windows before execution. Each window uses bounded temporary
@@ -3346,109 +3365,137 @@ fn whole_gate_route_preflight(
         gate_plan.variants,
         limits.max_gate_window_variants,
         |window_start, window_end| {
-        let window_variants = window_end - window_start;
-        let nearest_len = window_variants
-            .checked_mul(coverage_samples.len())
-            .ok_or(SpecializedError::GateResourceOverflow)?;
-        let physical_len = (window_start..window_end).try_fold(0usize, |total, variant| {
-            total
-                .checked_add(variant_contact_count(contacts.len(), variant))
-                .ok_or(SpecializedError::GateResourceOverflow)
-        })?;
-        let owner_face_len = (window_start..window_end).try_fold(0usize, |total, variant| {
-            let proposal = variant
-                .checked_sub(1)
-                .and_then(|index| proposals.get(index));
-            let mut work = 0usize;
-            total
-                .checked_add(variant_specialized_owner_face_count(
-                    contacts,
-                    proposal,
-                    generic.islands(),
-                    islands,
-                    &mut work,
-                    usize::MAX,
-                )?)
-                .ok_or(SpecializedError::GateResourceOverflow)
-        })?;
-        let working_bytes = nearest_len
-            .checked_mul(std::mem::size_of::<f64>())
-            .and_then(|bytes| {
-                physical_len
-                    .checked_mul(std::mem::size_of::<PhysicalContact>())
-                    .and_then(|physical| bytes.checked_add(physical))
-            })
-            .and_then(|bytes| {
-                owner_face_len
-                    .checked_mul(std::mem::size_of::<(u32, u32)>())
-                    .and_then(|owners| bytes.checked_add(owners))
-            })
-            .and_then(|bytes| {
-                window_variants
-                    .checked_add(1)
-                    .and_then(|offsets| offsets.checked_mul(2 * std::mem::size_of::<usize>()))
-                    .and_then(|offsets| bytes.checked_add(offsets))
-            })
-            .ok_or(SpecializedError::GateResourceOverflow)?;
-        if working_bytes > limits.max_gate_contact_matrix_bytes {
-            return Err(SpecializedError::GateContactMatrixByteLimit {
-                required: working_bytes,
-                limit: limits.max_gate_contact_matrix_bytes,
-            });
-        }
-        let max_load_scratch =
-            (window_start..window_end).try_fold(0usize, |maximum, variant| {
+            let window_variants = window_end - window_start;
+            let nearest_len = window_variants
+                .checked_mul(coverage_samples.len())
+                .ok_or(SpecializedError::GateResourceOverflow)?;
+            let physical_len = (window_start..window_end).try_fold(0usize, |total, variant| {
+                total
+                    .checked_add(variant_contact_count(contacts.len(), variant))
+                    .ok_or(SpecializedError::GateResourceOverflow)
+            })?;
+            let owner_face_len =
+                (window_start..window_end).try_fold(0usize, |total, variant| {
+                    let proposal = variant
+                        .checked_sub(1)
+                        .and_then(|index| proposals.get(index));
+                    let mut work = 0usize;
+                    total
+                        .checked_add(variant_specialized_owner_face_count(
+                            contacts,
+                            proposal,
+                            generic.islands(),
+                            islands,
+                            &mut work,
+                            usize::MAX,
+                        )?)
+                        .ok_or(SpecializedError::GateResourceOverflow)
+                })?;
+            let working_bytes = nearest_len
+                .checked_mul(std::mem::size_of::<f64>())
+                .and_then(|bytes| {
+                    physical_len
+                        .checked_mul(std::mem::size_of::<PhysicalContact>())
+                        .and_then(|physical| bytes.checked_add(physical))
+                })
+                .and_then(|bytes| {
+                    owner_face_len
+                        .checked_mul(std::mem::size_of::<(u32, u32)>())
+                        .and_then(|owners| bytes.checked_add(owners))
+                })
+                .and_then(|bytes| {
+                    window_variants
+                        .checked_add(1)
+                        .and_then(|offsets| offsets.checked_mul(2 * std::mem::size_of::<usize>()))
+                        .and_then(|offsets| bytes.checked_add(offsets))
+                })
+                .ok_or(SpecializedError::GateResourceOverflow)?;
+            if working_bytes > limits.max_gate_contact_matrix_bytes {
+                return Err(SpecializedError::GateContactMatrixByteLimit {
+                    required: working_bytes,
+                    limit: limits.max_gate_contact_matrix_bytes,
+                });
+            }
+            let max_load_scratch =
+                (window_start..window_end).try_fold(0usize, |maximum, variant| {
+                    let proposal = variant
+                        .checked_sub(1)
+                        .and_then(|index| proposals.get(index));
+                    let mut work = 0usize;
+                    let owner_faces = variant_specialized_owner_face_count(
+                        contacts,
+                        proposal,
+                        generic.islands(),
+                        islands,
+                        &mut work,
+                        usize::MAX,
+                    )?;
+                    let resource = specialized_load_resource_plan(
+                        generic,
+                        variant_contact_count(contacts.len(), variant),
+                        owner_faces,
+                    )?;
+                    Ok::<_, SpecializedError>(maximum.max(resource.scratch_bytes))
+                })?;
+            let mut route_plans = Vec::with_capacity(window_variants);
+            for variant in window_start..window_end {
                 let proposal = variant
                     .checked_sub(1)
                     .and_then(|index| proposals.get(index));
-                let mut work = 0usize;
-                let owner_faces = variant_specialized_owner_face_count(
+                route_plans.push(plan_variant_nearest_routes(
                     contacts,
                     proposal,
-                    generic.islands(),
-                    islands,
-                    &mut work,
-                    usize::MAX,
-                )?;
-                let resource = specialized_load_resource_plan(
-                    generic,
-                    variant_contact_count(contacts.len(), variant),
-                    owner_faces,
-                )?;
-                Ok::<_, SpecializedError>(maximum.max(resource.scratch_bytes))
-            })?;
-        let mut route_plans = Vec::with_capacity(window_variants);
-        for variant in window_start..window_end {
-            let proposal = variant
-                .checked_sub(1)
-                .and_then(|index| proposals.get(index));
-            route_plans.push(plan_variant_nearest_routes(
-                contacts,
-                proposal,
-                coverage_samples,
-                limits.coverage_route_knn,
-            )?);
-        }
-        let routes = GateRouteWindowPlan::from_route_plans(&route_plans, window_variants)?;
-        let coverage_nearest_bytes = coverage_route_nearest_peak_bytes(
-            routes.retained_base_logical_bytes,
-            routes.max_route_knn_logical_peak_bytes,
-        )?;
-        let peak_bytes = check_gate_peak(
-            GatePeakUsage {
-                proposal_bytes: proposal_storage_bytes,
-                result_bytes: gate_plan.vector_bytes,
-                matrix_bytes: working_bytes,
-                coverage_scratch_bytes: coverage_scratch.scratch_bytes,
-                coverage_nearest_bytes,
-                coverage_retained_bytes,
-                load_scratch_bytes: max_load_scratch,
-            },
-            limits.max_gate_peak_bytes,
-        )?;
+                    coverage_samples,
+                    limits.coverage_route_knn,
+                )?);
+            }
+            let routes = GateRouteWindowPlan::from_route_plans(&route_plans, window_variants)?;
+            let coverage_nearest_bytes = coverage_route_nearest_peak_bytes(
+                routes.retained_base_logical_bytes,
+                routes.max_route_knn_logical_peak_bytes,
+            )?;
+            let peak_bytes = check_gate_peak(
+                GatePeakUsage {
+                    proposal_bytes: proposal_storage_bytes,
+                    result_bytes: gate_plan.vector_bytes,
+                    matrix_bytes: working_bytes,
+                    coverage_scratch_bytes: coverage_scratch.scratch_bytes,
+                    coverage_nearest_bytes,
+                    coverage_retained_bytes,
+                    load_scratch_bytes: max_load_scratch,
+                },
+                limits.max_gate_peak_bytes,
+            )?;
             Ok(GateWindowPreflightSummary { routes, peak_bytes })
         },
+        Ok,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn whole_gate_route_preflight_then_execute<T>(
+    contacts: &[WorkingContact],
+    proposals: &[MergeProposal],
+    proposal_storage_bytes: usize,
+    generic: &GenericContactPlan,
+    topology: &plinth_mesh::FaceTopology,
+    islands: &[SupportIsland],
+    coverage_samples: &[CoverageSample],
+    limits: SpecializedLimits,
+    gate_plan: &GateResourcePlan,
+    execute: impl FnOnce(GateWholeRoutePlan) -> Result<T, SpecializedError>,
+) -> Result<T, SpecializedError> {
+    execute(whole_gate_route_preflight(
+        contacts,
+        proposals,
+        proposal_storage_bytes,
+        generic,
+        topology,
+        islands,
+        coverage_samples,
+        limits,
+        gate_plan,
+    )?)
 }
 
 fn plan_variant_nearest_routes(
@@ -4777,20 +4824,27 @@ mod tests {
     fn whole_gate_window_traversal_stops_before_execution_after_later_window_failure() {
         let planned_windows = RefCell::new(Vec::new());
         let execution_calls = Cell::new(0usize);
-        let result = traverse_whole_gate_windows(5, 2, |window_start, window_end| {
-            planned_windows
-                .borrow_mut()
-                .push((window_start, window_end));
-            if window_start == 0 {
-                Ok(gate_window_summary(2, 3, 7, 11))
-            } else {
-                Err(SpecializedError::GateOperationLimit {
-                    required: 5,
-                    limit: 4,
-                })
-            }
-        })
-        .map(|_| execution_calls.set(execution_calls.get() + 1));
+        let result = traverse_whole_gate_windows(
+            5,
+            2,
+            |window_start, window_end| {
+                planned_windows
+                    .borrow_mut()
+                    .push((window_start, window_end));
+                if window_start == 0 {
+                    Ok(gate_window_summary(2, 3, 7, 11))
+                } else {
+                    Err(SpecializedError::GateOperationLimit {
+                        required: 5,
+                        limit: 4,
+                    })
+                }
+            },
+            |_| {
+                execution_calls.set(execution_calls.get() + 1);
+                Ok(())
+            },
+        );
 
         assert_eq!(planned_windows.into_inner(), vec![(0, 2), (2, 4)]);
         assert_eq!(
@@ -4806,20 +4860,42 @@ mod tests {
     #[test]
     fn whole_gate_window_traversal_accumulates_peak_at_cap_minus_one() {
         const CAP: usize = 32;
-        let summary = traverse_whole_gate_windows(5, 2, |window_start, window_end| {
-            Ok(gate_window_summary(
-                window_end - window_start,
-                window_start + 1,
-                window_start as u64,
-                if window_start == 2 { CAP - 1 } else { 9 },
-            ))
-        })
+        let summary = traverse_whole_gate_windows(
+            5,
+            2,
+            |window_start, window_end| {
+                Ok(gate_window_summary(
+                    window_end - window_start,
+                    window_start + 1,
+                    window_start as u64,
+                    if window_start == 2 { CAP - 1 } else { 9 },
+                ))
+            },
+            Ok,
+        )
         .expect("all windows must plan");
 
         assert_eq!(summary.window_count, 3);
         assert_eq!(summary.total_routes, 5);
-        assert_eq!(summary.total_work, 7);
+        assert_eq!(summary.total_work, 9);
         assert_eq!(summary.max_peak_bytes, CAP - 1);
+        let usage = GatePeakUsage {
+            proposal_bytes: 0,
+            result_bytes: 0,
+            matrix_bytes: summary.max_peak_bytes,
+            coverage_scratch_bytes: 0,
+            coverage_nearest_bytes: 0,
+            coverage_retained_bytes: 0,
+            load_scratch_bytes: 0,
+        };
+        assert_eq!(check_gate_peak(usage, CAP - 1), Ok(CAP - 1));
+        assert_eq!(
+            check_gate_peak(usage, CAP - 2),
+            Err(SpecializedError::GatePeakByteLimit {
+                required: CAP - 1,
+                limit: CAP - 2,
+            })
+        );
     }
 
     fn minimum_demand(
@@ -5754,11 +5830,9 @@ mod tests {
         assert_eq!(proposals[1].representative_face_id, 10);
         assert_eq!(proposals[1].representative_normal, [-1.0, 0.0, 0.0]);
         assert_eq!(proposals[1].normal, contacts[0].normal);
-        assert!(
-            proposals
-                .iter()
-                .all(|proposal| proposal.representative_face_id != 99)
-        );
+        assert!(proposals
+            .iter()
+            .all(|proposal| proposal.representative_face_id != 99));
     }
 
     #[test]
@@ -5813,16 +5887,12 @@ mod tests {
         assert_eq!(shared_proposals.len(), 2);
         assert_eq!(shared_proposals[0].representative_face_id, 1);
         assert_eq!(shared_proposals[1].representative_face_id, 3);
-        assert!(
-            shared_proposals
-                .iter()
-                .all(|proposal| proposal.representative_face_id != 2)
-        );
-        assert!(
-            shared_proposals
-                .iter()
-                .all(|proposal| proposal.representative_position_mm == locked)
-        );
+        assert!(shared_proposals
+            .iter()
+            .all(|proposal| proposal.representative_face_id != 2));
+        assert!(shared_proposals
+            .iter()
+            .all(|proposal| proposal.representative_position_mm == locked));
     }
 
     #[test]
@@ -6668,12 +6738,10 @@ mod tests {
             .unwrap()
             .remove_demand_free_regular(removable.contact_id())
             .unwrap();
-        assert!(
-            child
-                .contacts()
-                .iter()
-                .all(|contact| contact.contact_id() != removable.contact_id())
-        );
+        assert!(child
+            .contacts()
+            .iter()
+            .all(|contact| contact.contact_id() != removable.contact_id()));
         let child_survivor = child
             .contacts()
             .iter()
@@ -6723,13 +6791,11 @@ mod tests {
             .unwrap()
             .remove_demand_free_regular(second)
             .unwrap();
-        assert!(
-            grandchild
-                .contacts()
-                .iter()
-                .all(|contact| contact.contact_id() != removable.contact_id()
-                    && contact.contact_id() != second)
-        );
+        assert!(grandchild
+            .contacts()
+            .iter()
+            .all(|contact| contact.contact_id() != removable.contact_id()
+                && contact.contact_id() != second));
 
         let route_seed = plan
             .contacts()
