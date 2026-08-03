@@ -1,0 +1,5 @@
+error[E0599]: no method named `clone` found for struct `FinalSupportAuthority<'a>` in the current scope
+ --> tests/compile_fail/final_support_authority_not_clone.rs:4:23
+  |
+4 |     let _ = authority.clone();
+  |                       ^^^^^ method not found in `FinalSupportAuthority<'_>`

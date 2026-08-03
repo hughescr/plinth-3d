@@ -1,0 +1,8 @@
+error: lifetime may not live long enough
+ --> tests/compile_fail/support_verification_snapshot_lifetime_bound.rs:6:5
+  |
+4 |     snapshot: SupportVerificationSnapshot<'_>,
+  |     -------- has type `SupportVerificationSnapshot<'1>`
+5 | ) -> SupportVerificationSnapshot<'static> {
+6 |     snapshot
+  |     ^^^^^^^^ returning this value requires that `'1` must outlive `'static`

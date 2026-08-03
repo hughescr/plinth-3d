@@ -1,0 +1,5 @@
+error[E0614]: type `FinalSupportAuthority<'_>` cannot be dereferenced
+ --> tests/compile_fail/final_support_authority_not_deref.rs:4:13
+  |
+4 |     let _ = *authority;
+  |             ^^^^^^^^^^ can't be dereferenced
