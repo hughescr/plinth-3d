@@ -1778,11 +1778,11 @@ pub(crate) fn assess_coverage(
         face_ids.sort_unstable();
         face_ids.dedup();
         let representative_face_id = *face_ids.first().expect("uncovered patch has a face");
-        let component_id = samples[*patch_samples.first().expect("uncovered patch has a sample")]
-            .component_id;
-        let worst_gap_mm = patch_samples.iter().fold(0.0_f64, |worst, &index| {
-            worst.max(nearest_mm[index])
-        });
+        let component_id =
+            samples[*patch_samples.first().expect("uncovered patch has a sample")].component_id;
+        let worst_gap_mm = patch_samples
+            .iter()
+            .fold(0.0_f64, |worst, &index| worst.max(nearest_mm[index]));
         assessment.patches.push(CoverageAssessmentPatch {
             island_id: groups[group_index].island_id,
             component_id,

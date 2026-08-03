@@ -287,6 +287,19 @@ pub struct CoverageMeasurementResourcePlan {
     assessment_work: usize,
 }
 
+/// Verifier-private realized resources supplied as one typed summary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CoverageMeasurementResourceSummary {
+    pub(crate) route_membership_sum: usize,
+    pub(crate) sequential_route_membership_peak: usize,
+    pub(crate) indexed_point_count: usize,
+    pub(crate) sequential_indexed_point_peak: usize,
+    pub(crate) query_row_count: usize,
+    pub(crate) distance_work: usize,
+    pub(crate) logical_peak_bytes: usize,
+    pub(crate) assessment_work: usize,
+}
+
 impl CoverageMeasurementResourcePlan {
     #[must_use]
     pub const fn route_membership_sum(self) -> usize {
@@ -321,26 +334,16 @@ impl CoverageMeasurementResourcePlan {
         self.assessment_work
     }
 
-    #[allow(dead_code, reason = "reserved for the future verifier implementation")]
-    pub(crate) const fn new(
-        route_membership_sum: usize,
-        sequential_route_membership_peak: usize,
-        indexed_point_count: usize,
-        sequential_indexed_point_peak: usize,
-        query_row_count: usize,
-        distance_work: usize,
-        logical_peak_bytes: usize,
-        assessment_work: usize,
-    ) -> Self {
+    pub(crate) const fn from_summary(summary: CoverageMeasurementResourceSummary) -> Self {
         Self {
-            route_membership_sum,
-            sequential_route_membership_peak,
-            indexed_point_count,
-            sequential_indexed_point_peak,
-            query_row_count,
-            distance_work,
-            logical_peak_bytes,
-            assessment_work,
+            route_membership_sum: summary.route_membership_sum,
+            sequential_route_membership_peak: summary.sequential_route_membership_peak,
+            indexed_point_count: summary.indexed_point_count,
+            sequential_indexed_point_peak: summary.sequential_indexed_point_peak,
+            query_row_count: summary.query_row_count,
+            distance_work: summary.distance_work,
+            logical_peak_bytes: summary.logical_peak_bytes,
+            assessment_work: summary.assessment_work,
         }
     }
 }

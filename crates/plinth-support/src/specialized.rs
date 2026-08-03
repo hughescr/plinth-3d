@@ -3570,7 +3570,10 @@ pub(crate) fn plan_route_points_nearest(
             .checked_add(1)
             .ok_or(SpecializedError::GateResourceOverflow)?;
         sequential_route_membership_peak = sequential_route_membership_peak.max(*memberships);
-        source_counts.entry(route).or_default().insert(point.physical_id);
+        source_counts
+            .entry(route)
+            .or_default()
+            .insert(point.physical_id);
     }
     for sample in samples {
         let route = CoverageRoute {
@@ -3665,12 +3668,17 @@ fn plan_variant_nearest_routes(
 ) -> Result<CoverageRouteNearestPlan, SpecializedError> {
     let mut points = Vec::new();
     let mut add_contact = |physical_id: u64, position_mm: [f64; 3], contact: &WorkingContact| {
-        points.extend(contact.regular_routes.iter().map(|route| CoverageRoutePoint {
-            physical_id,
-            island_id: route.owner_island_id,
-            component_id: route.component_id,
-            position_mm,
-        }));
+        points.extend(
+            contact
+                .regular_routes
+                .iter()
+                .map(|route| CoverageRoutePoint {
+                    physical_id,
+                    island_id: route.owner_island_id,
+                    component_id: route.component_id,
+                    position_mm,
+                }),
+        );
         points.extend(contact.demands.iter().map(|demand| CoverageRoutePoint {
             physical_id,
             island_id: demand.owner_island_id,
@@ -3680,11 +3688,16 @@ fn plan_variant_nearest_routes(
     };
     for (physical_id, contact) in contacts.iter().enumerate() {
         if !proposal.is_some_and(|p| physical_id == p.left || physical_id == p.right) {
-            add_contact(u64::try_from(physical_id).map_err(|_| SpecializedError::GateResourceOverflow)?, contact.position_mm, contact);
+            add_contact(
+                u64::try_from(physical_id).map_err(|_| SpecializedError::GateResourceOverflow)?,
+                contact.position_mm,
+                contact,
+            );
         }
     }
     if let Some(proposal) = proposal {
-        let physical_id = u64::try_from(proposal.left).map_err(|_| SpecializedError::GateResourceOverflow)?;
+        let physical_id =
+            u64::try_from(proposal.left).map_err(|_| SpecializedError::GateResourceOverflow)?;
         add_contact(physical_id, proposal.position_mm, &contacts[proposal.left]);
         add_contact(physical_id, proposal.position_mm, &contacts[proposal.right]);
     }
@@ -3700,16 +3713,31 @@ fn fill_variant_nearest(
 ) -> Result<(), SpecializedError> {
     let mut points = Vec::new();
     let mut add = |physical_id: u64, position_mm: [f64; 3], contact: &WorkingContact| {
-        points.extend(contact.regular_routes.iter().map(|candidate| CoverageRoutePoint {
-            physical_id, island_id: candidate.owner_island_id, component_id: candidate.component_id, position_mm,
-        }));
+        points.extend(
+            contact
+                .regular_routes
+                .iter()
+                .map(|candidate| CoverageRoutePoint {
+                    physical_id,
+                    island_id: candidate.owner_island_id,
+                    component_id: candidate.component_id,
+                    position_mm,
+                }),
+        );
         points.extend(contact.demands.iter().map(|demand| CoverageRoutePoint {
-            physical_id, island_id: demand.owner_island_id, component_id: demand.coverage_component_id, position_mm,
+            physical_id,
+            island_id: demand.owner_island_id,
+            component_id: demand.coverage_component_id,
+            position_mm,
         }));
     };
     for (physical_id, contact) in contacts.iter().enumerate() {
         if !proposal.is_some_and(|p| physical_id == p.left || physical_id == p.right) {
-            add(u64::try_from(physical_id).expect("usize fits u64"), contact.position_mm, contact);
+            add(
+                u64::try_from(physical_id).expect("usize fits u64"),
+                contact.position_mm,
+                contact,
+            );
         }
     }
     if let Some(proposal) = proposal {
@@ -3765,15 +3793,6 @@ pub(crate) fn fill_route_points_nearest(
         }
     }
     Ok(())
-}
-
-fn contact_serves_route(contact: &WorkingContact, route: CoverageRoute) -> bool {
-    contact.regular_routes.iter().any(|candidate| {
-        candidate.owner_island_id == route.island_id && candidate.component_id == route.component_id
-    }) || contact.demands.iter().any(|demand| {
-        demand.owner_island_id == route.island_id
-            && demand.coverage_component_id == route.component_id
-    })
 }
 
 fn variant_satisfies_demand(
