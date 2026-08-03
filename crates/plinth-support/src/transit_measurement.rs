@@ -116,17 +116,29 @@ impl TransitPolicySnapshot {
     }
 }
 
-/// Checked scalar evidence for a single, already-anchored transit sample.
-#[derive(Clone, Debug, PartialEq)]
+/// Native-independent scalar state prepared once before resource admission.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PreparedScarDiagnostic {
+    exceeds_tol: bool,
+    r_x_mm: f64,
+    ball_radius_mm: f64,
+    ball_squared: f64,
+    shaft_area_numerator: f64,
+    shaft_linear_cap: f64,
+    scar_numerator: f64,
+    scar_linear_cap: f64,
+    area_design_mm2: f64,
+    area_max_mm2: f64,
+    anchor_shaft_area_mm2: f64,
+    neck_disc_area_mm2: f64,
+}
+
+/// Real native geometry paired with one admitted prepared scalar.
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct ScarDiagnosticInput {
-    t_mm: f64,
+    prepared: PreparedScarDiagnostic,
     d_mm: f64,
     cosang: Option<f64>,
-    raw_anchor_radius_mm: f64,
-    tip_r_min_mm: f64,
-    root_radius_mm: f64,
-    member_length_mm: f64,
-    is_stub: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
@@ -143,12 +155,11 @@ enum ScarDiagnosticError {
     Arithmetic { operation: &'static str },
 }
 
-impl ScarDiagnosticInput {
+impl PreparedScarDiagnostic {
     #[allow(clippy::too_many_arguments)]
     fn new(
+        policy: &TransitPolicySnapshot,
         t_mm: f64,
-        d_mm: f64,
-        cosang: Option<f64>,
         raw_anchor_radius_mm: f64,
         tip_r_min_mm: f64,
         root_radius_mm: f64,
@@ -157,7 +168,6 @@ impl ScarDiagnosticInput {
     ) -> Result<Self, ScarDiagnosticError> {
         for (field, value) in [
             ("T", t_mm),
-            ("d", d_mm),
             ("raw anchor radius", raw_anchor_radius_mm),
             ("tip_r_min", tip_r_min_mm),
             ("root radius", root_radius_mm),
@@ -168,19 +178,90 @@ impl ScarDiagnosticInput {
         if member_length_mm == 0.0 {
             return Err(ScarDiagnosticError::CollapsedLength);
         }
+        let r_end = raw_anchor_radius_mm.max(tip_r_min_mm);
+        let taper = finite(t_mm / member_length_mm, "taper fraction")?.clamp(0.0, 1.0);
+        let unconstrained_radius = finite(
+            r_end + finite((root_radius_mm - r_end) * taper, "taper delta")?,
+            "taper radius",
+        )?;
+        let r_x_mm =
+            unconstrained_radius.clamp(r_end.min(root_radius_mm), r_end.max(root_radius_mm));
+        let ball_factor = if is_stub {
+            policy.tip_ball_factor
+        } else {
+            policy.foot_ball_factor
+        };
+        let ball_radius_mm = finite(r_end * ball_factor, "ball radius")?;
+        let radius_squared = finite(r_x_mm * r_x_mm, "radius squared")?;
+        let ball_squared = finite(ball_radius_mm * ball_radius_mm, "ball radius squared")?;
+        let shaft_area_numerator = finite(
+            std::f64::consts::PI * radius_squared,
+            "shaft area numerator",
+        )?;
+        let shaft_linear_cap = finite(2.0 * r_x_mm * t_mm, "shaft linear cap")?;
+        let scar_numerator = finite(2.0 * r_x_mm, "scar numerator")?;
+        let scar_linear_cap = finite(t_mm + 2.0 * r_x_mm, "scar linear cap")?;
+        let area_design_mm2 = finite(std::f64::consts::PI * ball_squared, "design area")?;
+        let area_max_mm2 = policy
+            .a_abs_mm2
+            .max(finite(policy.kappa * area_design_mm2, "area cap")?);
+        let neck_disc_area_mm2 = finite(std::f64::consts::PI * r_end * r_end, "neck disc area")?;
+        Ok(Self {
+            exceeds_tol: t_mm > policy.interval_tol_mm,
+            r_x_mm,
+            ball_radius_mm,
+            ball_squared,
+            shaft_area_numerator,
+            shaft_linear_cap,
+            scar_numerator,
+            scar_linear_cap,
+            area_design_mm2,
+            area_max_mm2,
+            anchor_shaft_area_mm2: shaft_area_numerator,
+            neck_disc_area_mm2,
+        })
+    }
+
+    fn with_native_geometry(
+        self,
+        d_mm: f64,
+        cosang: Option<f64>,
+    ) -> Result<ScarDiagnosticInput, ScarDiagnosticError> {
+        scalar_input("d", d_mm)?;
         if let Some(cosang) = cosang {
             scalar_input("cosang", cosang)?;
         }
-        Ok(Self {
-            t_mm,
+        Ok(ScarDiagnosticInput {
+            prepared: self,
             d_mm,
             cosang,
+        })
+    }
+}
+
+impl ScarDiagnosticInput {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        policy: &TransitPolicySnapshot,
+        t_mm: f64,
+        d_mm: f64,
+        cosang: Option<f64>,
+        raw_anchor_radius_mm: f64,
+        tip_r_min_mm: f64,
+        root_radius_mm: f64,
+        member_length_mm: f64,
+        is_stub: bool,
+    ) -> Result<Self, ScarDiagnosticError> {
+        PreparedScarDiagnostic::new(
+            policy,
+            t_mm,
             raw_anchor_radius_mm,
             tip_r_min_mm,
             root_radius_mm,
             member_length_mm,
             is_stub,
-        })
+        )?
+        .with_native_geometry(d_mm, cosang)
     }
 }
 
@@ -223,52 +304,31 @@ fn calculate_scar_diagnostic(
     policy: &TransitPolicySnapshot,
     input: &ScarDiagnosticInput,
 ) -> Result<ScarDiagnostic, ScarDiagnosticError> {
-    let r_end = input.raw_anchor_radius_mm.max(input.tip_r_min_mm);
-    let taper = finite(input.t_mm / input.member_length_mm, "taper fraction")?.clamp(0.0, 1.0);
-    let unconstrained_radius = finite(
-        r_end + finite((input.root_radius_mm - r_end) * taper, "taper delta")?,
-        "taper radius",
-    )?;
-    let r_x_mm = unconstrained_radius.clamp(
-        r_end.min(input.root_radius_mm),
-        r_end.max(input.root_radius_mm),
-    );
-    let ball_factor = if input.is_stub {
-        policy.tip_ball_factor
-    } else {
-        policy.foot_ball_factor
-    };
-    let ball_radius_mm = finite(r_end * ball_factor, "ball radius")?;
-    let exceeds_tol = input.t_mm > policy.interval_tol_mm;
-    let cosine = if exceeds_tol {
+    #[cfg(test)]
+    record_live_call(|calls| calls.scar_scalar_calls += 1);
+    let prepared = input.prepared;
+    let cosine = if prepared.exceeds_tol {
         input.cosang.ok_or(ScarDiagnosticError::MissingCosine)?
     } else {
         0.0
     };
     let cosine_denominator = cosine.max(policy.eps_cos);
-    let radius_squared = finite(r_x_mm * r_x_mm, "radius squared")?;
-    let area_shaft_mm2 = if exceeds_tol {
+    let area_shaft_mm2 = if prepared.exceeds_tol {
         finite(
-            (std::f64::consts::PI * radius_squared / cosine_denominator)
-                .min(2.0 * r_x_mm * input.t_mm),
+            (prepared.shaft_area_numerator / cosine_denominator).min(prepared.shaft_linear_cap),
             "shaft area",
         )?
     } else {
         0.0
     };
-    let ball_squared = finite(ball_radius_mm * ball_radius_mm, "ball radius squared")?;
     let area_ball_mm2 = finite(
-        std::f64::consts::PI * (ball_squared - input.d_mm * input.d_mm).max(0.0),
+        std::f64::consts::PI * (prepared.ball_squared - input.d_mm * input.d_mm).max(0.0),
         "ball area",
     )?;
     let area_patch_mm2 = finite(area_shaft_mm2 + area_ball_mm2, "patch area")?;
-    let area_design_mm2 = finite(std::f64::consts::PI * ball_squared, "design area")?;
-    let area_max_mm2 = policy
-        .a_abs_mm2
-        .max(finite(policy.kappa * area_design_mm2, "area cap")?);
-    let scar_length_mm = if exceeds_tol {
+    let scar_length_mm = if prepared.exceeds_tol {
         finite(
-            (2.0 * r_x_mm / cosine_denominator).min(input.t_mm + 2.0 * r_x_mm),
+            (prepared.scar_numerator / cosine_denominator).min(prepared.scar_linear_cap),
             "scar length",
         )?
     } else {
@@ -276,34 +336,33 @@ fn calculate_scar_diagnostic(
     };
     let anchor_area_mm2 = finite(
         area_ball_mm2
-            + if exceeds_tol {
-                std::f64::consts::PI * radius_squared
+            + if prepared.exceeds_tol {
+                prepared.anchor_shaft_area_mm2
             } else {
                 0.0
             },
         "anchor area",
     )?;
-    let neck_disc_area_mm2 = finite(std::f64::consts::PI * r_end * r_end, "neck disc area")?;
     let (area_within_recorded_policy, length_within_recorded_policy, anchor_meets_recorded_policy) =
         recorded_constraints(
             policy,
             area_patch_mm2,
             scar_length_mm,
             anchor_area_mm2,
-            area_design_mm2,
-            neck_disc_area_mm2,
+            prepared.area_design_mm2,
+            prepared.neck_disc_area_mm2,
         );
     Ok(ScarDiagnostic {
-        r_x_mm,
-        ball_radius_mm,
+        r_x_mm: prepared.r_x_mm,
+        ball_radius_mm: prepared.ball_radius_mm,
         area_shaft_mm2,
         area_ball_mm2,
         area_patch_mm2,
-        area_design_mm2,
-        area_max_mm2,
+        area_design_mm2: prepared.area_design_mm2,
+        area_max_mm2: prepared.area_max_mm2,
         scar_length_mm,
         anchor_area_mm2,
-        neck_disc_area_mm2,
+        neck_disc_area_mm2: prepared.neck_disc_area_mm2,
         area_within_recorded_policy,
         length_within_recorded_policy,
         anchor_meets_recorded_policy,
@@ -349,6 +408,7 @@ pub(crate) struct LiveCalls {
     pub(crate) scar_exit_projection_calls: usize,
     pub(crate) scar_row_allocations: usize,
     pub(crate) scar_evidence_allocations: usize,
+    pub(crate) scar_scalar_calls: usize,
 }
 
 #[cfg(test)]
@@ -364,6 +424,7 @@ impl LiveCalls {
         scar_exit_projection_calls: 0,
         scar_row_allocations: 0,
         scar_evidence_allocations: 0,
+        scar_scalar_calls: 0,
     };
 }
 
@@ -807,6 +868,7 @@ struct ScarMemberRow<'a> {
     chord_mm: f64,
     member_length_mm: f64,
     exit_input_mm: Option<V3>,
+    prepared_scar: PreparedScarDiagnostic,
 }
 
 /// Per-designed-end, geometry-enriched SCAR diagnostic evidence.
@@ -1080,21 +1142,12 @@ pub(crate) fn measure_scar<'a>(
         } else {
             (None, None, None, None)
         };
-        let diagnostic = calculate_scar_diagnostic(
-            &request.policy,
-            &ScarDiagnosticInput::new(
-                row.chord_mm,
-                d,
-                cosine,
-                normalized.r0,
-                request.tip_r_min_mm,
-                normalized.r1,
-                length,
-                matches!(normalized.source.kind(), MemberKind::Stub),
-            )
-            .map_err(|_| TransitScarMeasurementError::Scalar)?,
-        )
-        .map_err(|_| TransitScarMeasurementError::Scalar)?;
+        let scalar_input = row
+            .prepared_scar
+            .with_native_geometry(d, cosine)
+            .map_err(|_| TransitScarMeasurementError::Scalar)?;
+        let diagnostic = calculate_scar_diagnostic(&request.policy, &scalar_input)
+            .map_err(|_| TransitScarMeasurementError::Scalar)?;
         evidence.push(ScarEndEvidence {
             member: normalized.source.key(),
             designed_end: row.designed_end,
@@ -1212,27 +1265,25 @@ fn validate_scar_member<'a>(
         }
         None
     };
-    let scalar_probe = ScarDiagnosticInput::new(
+    let prepared_scar = PreparedScarDiagnostic::new(
+        &request.policy,
         chord_mm,
-        0.0,
-        exit_input_mm.map(|_| 0.0),
         normalized.r0,
         request.tip_r_min_mm,
         normalized.r1,
         member_length_mm,
         matches!(member.kind(), MemberKind::Stub),
     )
-    .and_then(|input| calculate_scar_diagnostic(&request.policy, &input).map(|_| ()))
     .map_err(|_| TransitScarMeasurementError::ScalarPreflight {
         reason: "known scalar arithmetic",
-    });
-    scalar_probe?;
+    })?;
     Ok(Some(ScarMemberRow {
         normalized,
         designed_end,
         chord_mm,
         member_length_mm,
         exit_input_mm,
+        prepared_scar,
     }))
 }
 
@@ -2219,6 +2270,7 @@ mod tests {
         member_kind: MemberKind,
     ) -> ScarDiagnosticInput {
         ScarDiagnosticInput::new(
+            &scar_policy(),
             t_mm,
             d_mm,
             cosang,
@@ -2438,15 +2490,25 @@ mod tests {
     #[test]
     fn scar_checked_inputs_reject_nonfinite_negative_and_collapsed_lengths() {
         assert!(matches!(
-            ScarDiagnosticInput::new(f64::NAN, 0.0, None, 1.0, 1.0, 1.0, 1.0, true),
+            ScarDiagnosticInput::new(
+                &scar_policy(),
+                f64::NAN,
+                0.0,
+                None,
+                1.0,
+                1.0,
+                1.0,
+                1.0,
+                true,
+            ),
             Err(ScarDiagnosticError::NonFinite { field: "T" })
         ));
         assert!(matches!(
-            ScarDiagnosticInput::new(0.0, -1.0, None, 1.0, 1.0, 1.0, 1.0, true),
+            ScarDiagnosticInput::new(&scar_policy(), 0.0, -1.0, None, 1.0, 1.0, 1.0, 1.0, true,),
             Err(ScarDiagnosticError::Negative { field: "d" })
         ));
         assert!(matches!(
-            ScarDiagnosticInput::new(0.0, 0.0, None, 1.0, 1.0, 1.0, 0.0, true),
+            ScarDiagnosticInput::new(&scar_policy(), 0.0, 0.0, None, 1.0, 1.0, 1.0, 0.0, true,),
             Err(ScarDiagnosticError::CollapsedLength)
         ));
     }
@@ -2707,6 +2769,7 @@ mod tests {
                     scar_exit_projection_calls: 1,
                     scar_row_allocations: 1,
                     scar_evidence_allocations: 1,
+                    scar_scalar_calls: 3,
                     ..LiveCalls::ZERO
                 },
                 "three members still use one gathered anchor query and one gathered exit projection"
