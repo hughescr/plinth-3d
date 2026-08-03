@@ -385,6 +385,7 @@ fn collect_rows(
             offsets,
         );
         let mut prior_label = -1;
+        let mut prior_s_b = None;
         let mut current = rays.next();
         for interval in row {
             while current.is_some_and(|ray| ray.label() < interval.ray) {
@@ -393,13 +394,19 @@ fn collect_rows(
             let Some(ray) = current else {
                 return Err(TransitIntervalError::CorruptKernelResult);
             };
+            let same_ray = interval.ray == prior_label;
             if interval.ray < prior_label
                 || interval.ray != ray.label()
                 || !valid_interval(&interval, ray.length_mm())
+                // The kernel emits each ray's merged intervals in ascending,
+                // disjoint arc order. Exact adjacency is valid; overlap or a
+                // backward row would otherwise be hidden by final sorting.
+                || (same_ray && prior_s_b.is_some_and(|s_b| interval.s_a < s_b))
             {
                 return Err(TransitIntervalError::CorruptKernelResult);
             }
             prior_label = interval.ray;
+            prior_s_b = Some(interval.s_b);
             evidence.push(TransitRayInterval {
                 member: member.source.key(),
                 designed_end: member.source.embed_end(),
@@ -826,6 +833,14 @@ mod tests {
         .expect("kernel min filter is zero, so short evidence remains raw");
         assert_eq!(evidence[0].s_b_mm(), 0.01);
 
+        collect_rows(
+            &mut Vec::new(),
+            &members,
+            true,
+            vec![vec![interval(-1, 1.0, 2.0), interval(-1, 2.0, 3.0)]],
+        )
+        .expect("adjacent same-ray intervals retain the kernel's valid ordering");
+
         for rows in [
             vec![],
             vec![vec![interval(-1, f64::NAN, 1.0)]],
@@ -833,6 +848,8 @@ mod tests {
             vec![vec![interval(8, 0.0, 1.0)]],
             vec![vec![interval(-1, 0.0, 10.01)]],
             vec![vec![interval(1, 0.0, 1.0), interval(0, 0.0, 1.0)]],
+            vec![vec![interval(-1, 5.0, 6.0), interval(-1, 1.0, 2.0)]],
+            vec![vec![interval(-1, 1.0, 3.0), interval(-1, 2.0, 4.0)]],
         ] {
             assert_eq!(
                 collect_rows(&mut Vec::new(), &members, true, rows),
