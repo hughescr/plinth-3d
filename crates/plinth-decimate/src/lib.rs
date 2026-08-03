@@ -218,6 +218,32 @@ impl DecimationBudget {
         })?;
         Ok(Self::new(pixel_um, probe))
     }
+
+    /// Refuses incomplete or impossible execution inputs before any probe
+    /// surface allocation or native call. There is intentionally no default
+    /// probe configuration: the load-to-decimate integration owns supplying a
+    /// finite profile-derived request.
+    pub fn validate_for_execution(self) -> Result<(), BudgetConfigError> {
+        if !self.probe.surface.grid_pitch_mm.is_finite() || self.probe.surface.grid_pitch_mm <= 0.0
+        {
+            return Err(BudgetConfigError::InvalidGridPitch {
+                value: self.probe.surface.grid_pitch_mm,
+            });
+        }
+        if self.probe.surface.max_grid_bytes == 0 || self.probe.surface.max_grid_bytes == usize::MAX
+        {
+            return Err(BudgetConfigError::InvalidGridBytes {
+                value: self.probe.surface.max_grid_bytes,
+            });
+        }
+        if !self.probe.nearest_upper_bound_mm.is_finite() || self.probe.nearest_upper_bound_mm < 0.0
+        {
+            return Err(BudgetConfigError::InvalidNearestUpperBound {
+                value: self.probe.nearest_upper_bound_mm,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// The two error limits derived from the explicitly supplied pixel pitch.
@@ -646,6 +672,12 @@ pub enum BudgetConfigError {
     Constants { message: String },
     #[error("registered pixel pitch cannot form a positive finite budget: {message}")]
     PixelPitch { message: String },
+    #[error("probe grid pitch must be positive and finite, got {value}")]
+    InvalidGridPitch { value: f64 },
+    #[error("probe grid byte cap must be finite and nonzero, got {value}")]
+    InvalidGridBytes { value: usize },
+    #[error("probe nearest upper bound must be finite and nonnegative, got {value}")]
+    InvalidNearestUpperBound { value: f64 },
 }
 
 #[derive(Clone, Debug, PartialEq)]

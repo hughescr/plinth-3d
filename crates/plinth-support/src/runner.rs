@@ -128,6 +128,119 @@ pub struct SupportPreparationInput<'a> {
     pub max_primitive_bytes: usize,
 }
 
+/// Production-owned, result-inert resource authority for support preparation.
+///
+/// This is deliberately separate from the borrowed model evidence accepted by
+/// [`SupportPreparationInput`]. The pipeline can select this one authority
+/// without copying support caps, then bind the current model's batches only
+/// when it is ready to execute the stage.
+#[derive(Clone, Copy, Debug)]
+pub struct SupportPreparationLimits {
+    column_pitch_mm: PositiveFinite,
+    surface_grid_pitch_mm: PositiveFinite,
+    max_grid_bytes: usize,
+    candidate_config: CandidatePayloadConfig,
+    perception_limits: GenericPerceptionLimits,
+    coverage_samples_max_virtual_cells: usize,
+    coverage_score_matrix_max_entries: usize,
+    specialized_limits: SpecializedLimits,
+    construction_limits: ContactConstructionLimits,
+    brace_penetration_limits: PenetrationBatchLimits,
+    raft_limits: RaftLimits,
+    max_primitives: usize,
+    max_primitive_bytes: usize,
+}
+
+impl SupportPreparationLimits {
+    /// The single established production cap set for support preparation.
+    pub fn production() -> Result<Self, SupportPreparationLimitsError> {
+        let pitch = PositiveFinite::new(1.0)
+            .map_err(|error| SupportPreparationLimitsError::Pitch(error.to_string()))?;
+        let knn = KnnBatchLimits {
+            max_source_points: 20_000_000,
+            max_query_points: 20_000_000,
+            max_neighbors: 1,
+            max_logical_peak_bytes: 2 * 1024 * 1024 * 1024,
+            max_work: 100_000_000,
+        };
+        Ok(Self {
+            column_pitch_mm: pitch,
+            surface_grid_pitch_mm: pitch,
+            max_grid_bytes: 64 * 1024 * 1024,
+            candidate_config: CandidatePayloadConfig::current(
+                8,
+                1_000_000,
+                3_000_000,
+                256 * 1024 * 1024,
+                65_536,
+            )
+            .map_err(|error| SupportPreparationLimitsError::Candidate(error.to_string()))?,
+            perception_limits: GenericPerceptionLimits::production(knn),
+            coverage_samples_max_virtual_cells: 2_000_000,
+            coverage_score_matrix_max_entries: 65_536,
+            specialized_limits: SpecializedLimits::production(knn),
+            construction_limits: ContactConstructionLimits::new(
+                1_000_000,
+                10_000_000,
+                4_000_000,
+                512 * 1024 * 1024,
+            )
+            .ok_or(SupportPreparationLimitsError::Construction)?,
+            brace_penetration_limits: PenetrationBatchLimits {
+                max_rows: 100_000,
+                max_total_work: 1_000_000_000,
+                max_total_hits: 1_000_000_000,
+                max_total_samples: 10_000_000_000,
+                max_total_intervals: 1_000_000_000,
+                max_scratch_bytes: 100_000_000_000,
+            },
+            raft_limits: RaftLimits::try_new(100_000, 100_000, 200_000, 128 * 1024 * 1024)
+                .ok_or(SupportPreparationLimitsError::Raft)?,
+            max_primitives: 200_000,
+            max_primitive_bytes: 128 * 1024 * 1024,
+        })
+    }
+
+    #[must_use]
+    pub const fn input<'a>(
+        self,
+        layers: &'a LayerPlan,
+        delicacy_by_face: &'a [f64],
+        reservations: &'a [SpecializedOwnerReservation],
+    ) -> SupportPreparationInput<'a> {
+        SupportPreparationInput {
+            layers,
+            delicacy_by_face,
+            column_pitch_mm: self.column_pitch_mm,
+            surface_grid_pitch_mm: self.surface_grid_pitch_mm,
+            max_grid_bytes: self.max_grid_bytes,
+            candidate_config: self.candidate_config,
+            reservations,
+            perception_limits: self.perception_limits,
+            coverage_samples_max_virtual_cells: self.coverage_samples_max_virtual_cells,
+            coverage_score_matrix_max_entries: self.coverage_score_matrix_max_entries,
+            specialized_limits: self.specialized_limits,
+            construction_limits: self.construction_limits,
+            brace_penetration_limits: self.brace_penetration_limits,
+            raft_limits: self.raft_limits,
+            max_primitives: self.max_primitives,
+            max_primitive_bytes: self.max_primitive_bytes,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum SupportPreparationLimitsError {
+    #[error("support production pitch is invalid: {0}")]
+    Pitch(String),
+    #[error("support production candidate limits are invalid: {0}")]
+    Candidate(String),
+    #[error("support production construction limits are invalid")]
+    Construction,
+    #[error("support production raft limits are invalid")]
+    Raft,
+}
+
 /// Public phase result without exposing private runner typestates.
 #[derive(Debug, Error)]
 pub enum SupportRunError {

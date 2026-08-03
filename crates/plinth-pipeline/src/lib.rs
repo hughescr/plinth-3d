@@ -11,11 +11,17 @@
 #![forbid(unsafe_code)]
 
 use plinth_core::{m0_constants, ModelId, PrinterProfile};
-use plinth_decimate::{DecimationBudget, DecimationError};
+use plinth_decimate::{BudgetConfigError, DecimationBudget, DecimationError};
 use plinth_emit::{EmitError, EmitReport};
-use plinth_hollow::{HollowDisposition, HollowError, HollowRequest, HollowStageOutput};
+use plinth_hollow::{
+    drilling::DrillingLimits, H0AdmissionLimits, HollowDisposition, HollowError, HollowRequest,
+    HollowStageOutput,
+};
 use plinth_orient::{OrientError, OrientedModel, PinnedBaseline};
-use plinth_support::{SupportError, SupportRequest};
+use plinth_support::{
+    SupportError, SupportPreparationInput, SupportPreparationLimits, SupportPreparationLimitsError,
+    SupportRequest,
+};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
@@ -126,6 +132,86 @@ pub enum OutputProfileError {
     ConstantsUnavailable,
 }
 
+/// The one production resource-policy assembly for a preparation run.
+///
+/// Numerical caps stay owned by their stage crates. Decimation has no
+/// production probe default by design, so an already finite, bounded budget is
+/// required here before any stage can execute. Orientation is intentionally
+/// absent: the later LegacyCoarse search must introduce its own typed bound
+/// before it is connected to this policy.
+#[derive(Clone, Copy, Debug)]
+pub struct PrepareResourcePolicy {
+    decimation: DecimationBudget,
+    hollow: H0AdmissionLimits,
+    drilling: DrillingLimits,
+    support: SupportPreparationLimits,
+}
+
+impl PrepareResourcePolicy {
+    /// Selects the single currently supported printer policy without exposing
+    /// stage-local numerical limits to the pipeline or CLI.
+    pub fn for_saturn4_ultra(
+        decimation: DecimationBudget,
+    ) -> Result<Self, PrepareResourcePolicyError> {
+        OutputProfile::Saturn4Ultra.resolve()?;
+        decimation.validate_for_execution()?;
+        let support = SupportPreparationLimits::production()?;
+        Ok(Self {
+            decimation,
+            hollow: H0AdmissionLimits::production(),
+            drilling: DrillingLimits::production(),
+            support,
+        })
+    }
+
+    #[must_use]
+    pub const fn decimation(self) -> DecimationBudget {
+        self.decimation
+    }
+
+    #[must_use]
+    pub const fn hollow(self) -> H0AdmissionLimits {
+        self.hollow
+    }
+
+    #[must_use]
+    pub const fn drilling(self) -> DrillingLimits {
+        self.drilling
+    }
+
+    #[must_use]
+    pub const fn support_input<'a>(
+        self,
+        layers: &'a plinth_core::LayerPlan,
+        delicacy_by_face: &'a [f64],
+        reservations: &'a [plinth_support::perception::SpecializedOwnerReservation],
+    ) -> SupportPreparationInput<'a> {
+        self.support.input(layers, delicacy_by_face, reservations)
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum PrepareResourcePolicyError {
+    #[error(transparent)]
+    Profile(#[from] OutputProfileError),
+    #[error("decimation execution budget is invalid")]
+    Decimation(#[source] BudgetConfigError),
+    #[error("support preparation limits are invalid")]
+    Support(#[source] SupportPreparationLimitsError),
+}
+
+impl From<BudgetConfigError> for PrepareResourcePolicyError {
+    fn from(error: BudgetConfigError) -> Self {
+        Self::Decimation(error)
+    }
+}
+
+impl From<SupportPreparationLimitsError> for PrepareResourcePolicyError {
+    fn from(error: SupportPreparationLimitsError) -> Self {
+        Self::Support(error)
+    }
+}
+
 /// One batch request: every source STL in `input_models_dir` maps to one output stem.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PrepareRequest {
@@ -187,7 +273,7 @@ pub enum PipelineError {
         #[source]
         source: DecimationError,
     },
-    #[error("model {model} failed pinned orientation")]
+    #[error("model {model} failed orientation policy")]
     Orient {
         model: ModelId,
         #[source]
@@ -302,6 +388,51 @@ mod tests {
             serde_json::to_string(&OutputProfile::Saturn4Ultra).expect("profile serializes"),
             r#""saturn4_ultra""#
         );
+    }
+
+    fn finite_decimation_budget() -> DecimationBudget {
+        DecimationBudget::ratified_default(ProbeConfig::new(1.0, 64 * 1024 * 1024, 10_000.0))
+            .expect("finite explicit decimation budget")
+    }
+
+    #[test]
+    fn saturn_resource_policy_assembles_only_stage_owned_production_limits() {
+        let policy = PrepareResourcePolicy::for_saturn4_ultra(finite_decimation_budget())
+            .expect("production resource policy");
+        assert_eq!(policy.hollow(), H0AdmissionLimits::production());
+        assert_eq!(policy.drilling(), DrillingLimits::production());
+        assert_eq!(policy.decimation(), finite_decimation_budget());
+
+        let layers = plinth_core::LayerPlan::new(0.0, vec![0.05]).expect("layer plan");
+        let input = policy.support_input(&layers, &[], &[]);
+        assert_eq!(input.max_grid_bytes, 64 * 1024 * 1024);
+        assert_eq!(input.max_primitives, 200_000);
+        assert_eq!(input.max_primitive_bytes, 128 * 1024 * 1024);
+    }
+
+    #[test]
+    fn resource_policy_refuses_unbounded_decimation_before_stage_execution() {
+        let budget = DecimationBudget::ratified_default(ProbeConfig::new(1.0, usize::MAX, 100.0))
+            .expect("registered pixel pitch");
+        assert!(matches!(
+            PrepareResourcePolicy::for_saturn4_ultra(budget),
+            Err(PrepareResourcePolicyError::Decimation(
+                BudgetConfigError::InvalidGridBytes { value: usize::MAX }
+            ))
+        ));
+    }
+
+    #[test]
+    fn resource_policy_is_thread_setting_inert_at_one_four_and_sixteen() {
+        let policies = [1, 4, 16].map(|_| {
+            PrepareResourcePolicy::for_saturn4_ultra(finite_decimation_budget())
+                .expect("production resource policy")
+        });
+        assert!(policies.windows(2).all(|pair| {
+            pair[0].decimation() == pair[1].decimation()
+                && pair[0].hollow() == pair[1].hollow()
+                && pair[0].drilling() == pair[1].drilling()
+        }));
     }
 
     fn baseline(name: &str) -> PathBuf {
