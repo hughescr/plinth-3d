@@ -9,7 +9,7 @@
 use std::collections::BTreeSet;
 
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, PenetrationBatchLimits, SurfaceBuildError};
-use plinth_core::LayerPlan;
+use plinth_core::{m0_constants, LayerPlan};
 use plinth_hollow::{HollowHistory, HollowedModel};
 use plinth_mesh::{mesh_fingerprint, FaceTopology, Mesh};
 use thiserror::Error;
@@ -22,17 +22,22 @@ use crate::{
     },
     cco::{
         CcoController, CcoError, FinalizedAnchorTerminalRoute, FinalizedCcoTranscript,
-        TerminalCcoRequest,
+        FinalizedDispositionKind, TerminalCcoRequest,
     },
     dyadic::CandidatePayloadConfig,
     forest::{EmbedEnd, Forest, MemberKind, MemberSpec, Owner, TerminalLedgerState},
     initial::{
         build_initial_contacts, ContactConstructionLimits, InitialContactBuild, InitialContactError,
     },
+    joints::{
+        plan_joint_balls_filtered, runner_planning_limits, FilteredLiveView, JointConfig,
+        JointError, JointPlan,
+    },
     perception::{
         prepare_generic_contacts, FinalizedContactLoads, GenericContactPlan,
         GenericPerceptionError, GenericPerceptionLimits, SpecializedOwnerReservation,
     },
+    raft::{plan_bottom_connected, RaftLimits, RaftPlan},
     rewire::{optimize as optimize_rewire, RewireError, RewireReport, RewireRequest},
     select_contacts_baseline,
     specialized::{
@@ -40,7 +45,8 @@ use crate::{
     },
     transient::{transient_report, TransientError, TransientReport},
     validate_perception_input, BuildFrame, ContactSelectionConfig, ContactSelectionError,
-    SelectedContacts, SupportPerceptionConfig, SupportPerceptionError, SupportRequest,
+    SelectedContacts, SupportError, SupportPerceptionConfig, SupportPerceptionError,
+    SupportRequest,
 };
 
 /// Complete typed caller authority for the sealed preparation stage.
@@ -58,6 +64,7 @@ pub(crate) struct SupportPreparationAuthority<'a> {
     specialized_limits: SpecializedLimits,
     construction_limits: ContactConstructionLimits,
     brace_penetration_limits: PenetrationBatchLimits,
+    raft_limits: RaftLimits,
 }
 
 impl<'a> SupportPreparationAuthority<'a> {
@@ -72,6 +79,7 @@ impl<'a> SupportPreparationAuthority<'a> {
         specialized_limits: SpecializedLimits,
         construction_limits: ContactConstructionLimits,
         brace_penetration_limits: PenetrationBatchLimits,
+        raft_limits: RaftLimits,
     ) -> Self {
         Self {
             layers,
@@ -83,6 +91,7 @@ impl<'a> SupportPreparationAuthority<'a> {
             specialized_limits,
             construction_limits,
             brace_penetration_limits,
+            raft_limits,
         }
     }
 }
@@ -148,6 +157,7 @@ struct SupportRunContext<'a> {
     generic: GenericContactPlan,
     regular: SelectedContacts,
     brace_penetration_limits: PenetrationBatchLimits,
+    raft_limits: RaftLimits,
     digests: PreparedSupportDigests,
 }
 
@@ -179,6 +189,10 @@ impl<'a> SupportRunContext<'a> {
 
     pub(crate) const fn brace_penetration_limits(&self) -> PenetrationBatchLimits {
         self.brace_penetration_limits
+    }
+
+    pub(crate) const fn raft_limits(&self) -> RaftLimits {
+        self.raft_limits
     }
 
     /// Rebind the retained immutable geometry without cloning or replacing either component.
@@ -810,6 +824,159 @@ impl BracedSupportRun<'_> {
     }
 }
 
+/// Complete post-brace semantic planning authority.  It owns the one final
+/// forest plus the one filtered live view consumed by both independent
+/// planning leaves; it deliberately performs no lowering or emission.
+pub(crate) struct StructuredSupportRun<'a> {
+    context: SupportRunContext<'a>,
+    braced: BracedPlanState,
+    live_view: FilteredLiveView,
+    joints: JointPlan,
+    raft: RaftPlan,
+}
+
+impl<'a> BracedSupportRun<'a> {
+    /// Consume the braced forest exactly once into the joint and raft semantic
+    /// planners.  All predecessor bindings are preflighted before gathering
+    /// the view, and both outputs are rebound to that exact view afterward.
+    pub(crate) fn structure(self) -> Result<StructuredSupportRun<'a>, SupportStructureError> {
+        self.validate_integrity()?;
+        let BracedSupportRun {
+            context,
+            state: braced,
+        } = self;
+        braced.plan.forest.validate().map_err(BraceError::from)?;
+        let unrouted = finalized_unrouted_terminal_ids(
+            &braced.rewired.routed.transcript,
+            &braced.plan.forest,
+        )?;
+        let constants = m0_constants()
+            .map_err(|error| SupportStructureError::RegisteredConstants(error.to_string()))?;
+        let joint = JointConfig::current(
+            context.frame.plate_z_mm(),
+            *constants.placeholders().joint_ball_factor().diagnostic(),
+        );
+        let (view_limits, staging) = runner_planning_limits(joint);
+        let live_view = FilteredLiveView::current(&braced.plan.forest, &unrouted, view_limits)?;
+        live_view.validate(&braced.plan.forest)?;
+        let joints = plan_joint_balls_filtered(&braced.plan.forest, &live_view, joint, staging)?;
+        let raft = plan_bottom_connected(
+            &braced.plan.forest,
+            &live_view,
+            context.frame.plate_z_mm(),
+            context.raft_limits(),
+        )?;
+        joints.validate_filtered(&braced.plan.forest, &live_view, joint)?;
+        raft.validate(&braced.plan.forest, &live_view, context.frame.plate_z_mm())?;
+        Ok(StructuredSupportRun {
+            context,
+            braced,
+            live_view,
+            joints,
+            raft,
+        })
+    }
+}
+
+impl StructuredSupportRun<'_> {
+    #[must_use]
+    pub(crate) const fn forest(&self) -> &Forest {
+        &self.braced.plan.forest
+    }
+
+    #[must_use]
+    pub(crate) const fn live_view(&self) -> &FilteredLiveView {
+        &self.live_view
+    }
+
+    #[must_use]
+    pub(crate) const fn joints(&self) -> &JointPlan {
+        &self.joints
+    }
+
+    #[must_use]
+    pub(crate) const fn raft(&self) -> &RaftPlan {
+        &self.raft
+    }
+
+    #[must_use]
+    pub(crate) const fn frame(&self) -> BuildFrame {
+        self.context.frame()
+    }
+
+    #[must_use]
+    pub(crate) const fn brace_termination(&self) -> BraceFixedPointTermination {
+        self.braced.plan.termination
+    }
+
+    pub(crate) fn validate_integrity(&self) -> Result<(), SupportStructureError> {
+        self.braced
+            .plan
+            .forest
+            .validate()
+            .map_err(BraceError::from)?;
+        self.live_view.validate(&self.braced.plan.forest)?;
+        let joint = JointConfig::current(
+            self.context.frame.plate_z_mm(),
+            *m0_constants()
+                .map_err(|error| SupportStructureError::RegisteredConstants(error.to_string()))?
+                .placeholders()
+                .joint_ball_factor()
+                .diagnostic(),
+        );
+        self.joints
+            .validate_filtered(&self.braced.plan.forest, &self.live_view, joint)?;
+        self.raft.validate(
+            &self.braced.plan.forest,
+            &self.live_view,
+            self.context.frame.plate_z_mm(),
+        )?;
+        Ok(())
+    }
+}
+
+fn finalized_unrouted_terminal_ids(
+    transcript: &FinalizedCcoTranscript,
+    forest: &Forest,
+) -> Result<Vec<u32>, SupportStructureError> {
+    transcript.validate_integrity()?;
+    let mut transcript_terminals = BTreeSet::new();
+    let mut unrouted = Vec::new();
+    for row in transcript.rows() {
+        let terminal = row.terminal_id();
+        let ledger = forest
+            .terminal_ledger(terminal)
+            .ok_or(SupportStructureError::TerminalEvidenceMismatch { terminal })?;
+        if !transcript_terminals.insert(terminal)
+            || ledger.original_key != row.original_key()
+            || row.physical_contact_id() != u64::from(terminal)
+        {
+            return Err(SupportStructureError::TerminalEvidenceMismatch { terminal });
+        }
+        match row.kind() {
+            FinalizedDispositionKind::Routed if ledger.state == TerminalLedgerState::Consumed => {}
+            FinalizedDispositionKind::SkippedQuarantined
+                if ledger.state == TerminalLedgerState::Quarantined =>
+            {
+                unrouted.push(terminal);
+            }
+            FinalizedDispositionKind::UnroutedNoWinner
+                if ledger.state == TerminalLedgerState::Retired =>
+            {
+                unrouted.push(terminal);
+            }
+            _ => return Err(SupportStructureError::TerminalEvidenceMismatch { terminal }),
+        }
+    }
+    if forest
+        .terminal_ledger_iter()
+        .any(|entry| !transcript_terminals.contains(&entry.contact))
+    {
+        return Err(SupportStructureError::TerminalLedgerCardinalityMismatch);
+    }
+    Ok(unrouted)
+}
+
 impl SupportRunContext<'_> {
     fn validate_brace_preflight(
         &self,
@@ -971,6 +1138,8 @@ pub(crate) enum SupportPreparationError {
     InvalidSelectionResources,
     #[error("support preparation brace penetration resource authority is invalid")]
     InvalidBracePenetrationResources,
+    #[error("support preparation raft resource authority is invalid")]
+    InvalidRaftResources,
     #[error("support preparation layer schedule does not cover the model z range")]
     LayerScheduleCoverage,
     #[error("support preparation reservation names face {face_id} outside the model")]
@@ -1061,6 +1230,28 @@ pub(crate) enum SupportBraceError {
     BracePlanDigestMismatch,
     #[error("sealed brace plan's transient report or report digest is stale")]
     TransientReportDigestMismatch,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum SupportStructureError {
+    #[error(transparent)]
+    Brace(#[from] SupportBraceError),
+    #[error(transparent)]
+    BraceLeaf(#[from] BraceError),
+    #[error(transparent)]
+    Cco(#[from] CcoError),
+    #[error(transparent)]
+    Joint(#[from] JointError),
+    #[error(transparent)]
+    Raft(#[from] SupportError),
+    #[error("registered joint-ball factor is unavailable: {0}")]
+    RegisteredConstants(String),
+    #[error(
+        "finalized transcript terminal {terminal} does not match final forest lifecycle evidence"
+    )]
+    TerminalEvidenceMismatch { terminal: u32 },
+    #[error("finalized transcript and final forest have different terminal namespaces")]
+    TerminalLedgerCardinalityMismatch,
 }
 
 /// Execute the sealed preparation pipeline through the one batched initial-contact build.
@@ -1169,6 +1360,7 @@ pub(crate) fn prepare_support_run<'a>(
             generic,
             regular,
             brace_penetration_limits: authority.brace_penetration_limits,
+            raft_limits: authority.raft_limits,
             digests,
         },
         plan,
@@ -1190,6 +1382,9 @@ fn validate_authority_pre_query(
         || penetration.max_scratch_bytes == 0
     {
         return Err(SupportPreparationError::InvalidBracePenetrationResources);
+    }
+    if !authority.raft_limits.is_valid() {
+        return Err(SupportPreparationError::InvalidRaftResources);
     }
     if authority.selection_config.delicacy_by_face != Some(perception_delicacy) {
         return Err(SupportPreparationError::DelicacyAuthorityMismatch);
@@ -1273,6 +1468,9 @@ fn prepared_digest(
     hash.usize(penetration.max_total_samples);
     hash.usize(penetration.max_total_intervals);
     hash.usize(penetration.max_scratch_bytes);
+    for value in authority.raft_limits.authority_fingerprint() {
+        hash.usize(value);
+    }
     for reservation in authority.reservations {
         hash.u32(reservation.owner_id);
         hash.u32(reservation.face_id);
@@ -1594,6 +1792,7 @@ mod tests {
             SpecializedLimits::production(),
             ContactConstructionLimits::production(),
             brace_penetration_limits(),
+            RaftLimits::new(100_000, 100_000, 200_000, 128 * 1024 * 1024),
         )
     }
 
@@ -2399,6 +2598,7 @@ mod tests {
                 SpecializedLimits::production(),
                 ContactConstructionLimits::production(),
                 brace_penetration_limits(),
+                RaftLimits::new(100_000, 100_000, 200_000, 128 * 1024 * 1024),
             ),
         );
         assert!(matches!(
@@ -2447,6 +2647,37 @@ mod tests {
     }
 
     #[test]
+    fn braced_run_creates_one_shared_view_for_joint_and_raft_semantics() {
+        with_braced_table(|braced| {
+            let structured = braced.structure().expect("required corpus structures");
+            structured
+                .validate_integrity()
+                .expect("structured plans retain the exact shared authority");
+            assert_eq!(
+                structured.joints().digest(),
+                structured.joints().digest(),
+                "joint semantic digest is stable"
+            );
+            assert_eq!(
+                structured.raft().digest(),
+                structured.raft().digest(),
+                "raft semantic digest is stable"
+            );
+            assert!(matches!(
+                structured.brace_termination(),
+                BraceFixedPointTermination::Converged
+                    | BraceFixedPointTermination::IterationLimit
+                    | BraceFixedPointTermination::Unplaceable
+            ));
+            assert_eq!(
+                structured.live_view().digest(),
+                structured.live_view().digest(),
+                "the opaque view remains one sealed identity"
+            );
+        });
+    }
+
+    #[test]
     fn runner_thread_sweep_child() {
         if std::env::var_os(SWEEP_CHILD).is_none() {
             return;
@@ -2468,27 +2699,43 @@ mod tests {
             let braced = rewired
                 .brace()
                 .expect("thread sweep braces the required corpus");
-            braced
+            let structured = braced
+                .structure()
+                .expect("thread sweep structures required corpus");
+            structured
                 .validate_integrity()
-                .expect("thread sweep retains final brace evidence");
+                .expect("thread sweep retains structured authority");
             println!(
-                "{SWEEP_LINE}{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
-                braced.digests().prepared(),
-                braced.digests().plan(),
-                braced.digests().loads(),
-                braced.digests().initial_forest(),
-                braced.initial().queried_stubs(),
-                braced.initial().condemned().len(),
-                braced.transcript().final_forest_digest(),
-                braced.transcript().final_controller_digest(),
-                braced.transcript().digest(),
-                rewire_report_digest(braced.rewire_report()),
-                braced.post_rewire_forest_digest(),
-                braced.post_brace_forest_digest(),
-                braced.post_brace_report_digest(),
-                braced.brace_plan().iterations,
-                braced.brace_plan().additions.len(),
-                match braced.brace_plan().termination {
+                "{SWEEP_LINE}{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                structured.context.digests().prepared(),
+                structured.context.digests().plan(),
+                structured.context.digests().loads(),
+                structured.context.digests().initial_forest(),
+                structured.braced.rewired.routed.initial.queried_stubs(),
+                structured.braced.rewired.routed.initial.condemned().len(),
+                structured
+                    .braced
+                    .rewired
+                    .routed
+                    .transcript
+                    .final_forest_digest(),
+                structured
+                    .braced
+                    .rewired
+                    .routed
+                    .transcript
+                    .final_controller_digest(),
+                structured.braced.rewired.routed.transcript.digest(),
+                rewire_report_digest(&structured.braced.rewired.report),
+                structured.braced.rewired.post_rewire_forest_digest,
+                structured.braced.post_brace_forest_digest,
+                structured.braced.post_brace_report_digest,
+                structured.braced.plan.iterations,
+                structured.braced.plan.additions.len(),
+                structured.live_view.digest(),
+                structured.joints.digest(),
+                structured.raft.digest().0,
+                match structured.braced.plan.termination {
                     crate::brace::BraceFixedPointTermination::Converged => 0,
                     crate::brace::BraceFixedPointTermination::IterationLimit => 1,
                     crate::brace::BraceFixedPointTermination::Unplaceable => 2,
@@ -2498,7 +2745,7 @@ mod tests {
     }
 
     #[test]
-    fn actual_one_four_sixteen_thread_brace_state_and_report_are_digest_identical() {
+    fn actual_one_four_sixteen_thread_complete_structured_state_is_digest_identical() {
         if std::env::var_os(SWEEP_CHILD).is_some() {
             return;
         }
