@@ -15,7 +15,27 @@ const OFFSET_RAYS: usize = 8;
 
 #[cfg(test)]
 thread_local! {
-    static LIVE_KERNEL_BATCH_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LIVE_CALLS: std::cell::Cell<LiveCalls> = const { std::cell::Cell::new(LiveCalls::ZERO) };
+}
+
+/// Test-only, thread-local witnesses for the allocations and kernel entries
+/// owned by this module.  They deliberately do not observe Rayon workers or
+/// participate in production control flow.
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct LiveCalls {
+    local_row_allocations: usize,
+    stub_kernel_calls: usize,
+    nonstub_kernel_calls: usize,
+}
+
+#[cfg(test)]
+impl LiveCalls {
+    const ZERO: Self = Self {
+        local_row_allocations: 0,
+        stub_kernel_calls: 0,
+        nonstub_kernel_calls: 0,
+    };
 }
 
 /// Explicit caller-owned limits and sampling parameters for one raw transit
@@ -319,6 +339,12 @@ fn collect_batch(
     if members.is_empty() {
         return Ok(());
     }
+    #[cfg(test)]
+    LIVE_CALLS.with(|calls| {
+        let mut value = calls.get();
+        value.local_row_allocations += 1;
+        calls.set(value);
+    });
     let mut p0 = Vec::new();
     let mut p1 = Vec::new();
     let mut r0 = Vec::new();
@@ -344,7 +370,15 @@ fn collect_batch(
         r1.push(member.r1);
     }
     #[cfg(test)]
-    LIVE_KERNEL_BATCH_CALLS.with(|calls| calls.set(calls.get() + 1));
+    LIVE_CALLS.with(|calls| {
+        let mut value = calls.get();
+        if offsets {
+            value.nonstub_kernel_calls += 1;
+        } else {
+            value.stub_kernel_calls += 1;
+        }
+        calls.set(value);
+    });
     let rows = surface
         .penetration_intervals_batch_bounded(
             &p0,
@@ -429,12 +463,12 @@ fn valid_interval(interval: &Interval, max_s: f64) -> bool {
 
 #[cfg(test)]
 fn reset_live_kernel_batch_calls() {
-    LIVE_KERNEL_BATCH_CALLS.with(|calls| calls.set(0));
+    LIVE_CALLS.with(|calls| calls.set(LiveCalls::ZERO));
 }
 
 #[cfg(test)]
-fn live_kernel_batch_calls() -> usize {
-    LIVE_KERNEL_BATCH_CALLS.with(std::cell::Cell::get)
+fn live_calls() -> LiveCalls {
+    LIVE_CALLS.with(std::cell::Cell::get)
 }
 
 fn preflight(
@@ -795,20 +829,431 @@ mod tests {
         reset_live_kernel_batch_calls();
         collect_batch(&mut evidence, &surface, &[], false, limits).expect("empty stub partition");
         collect_batch(&mut evidence, &surface, &[], true, limits).expect("empty nonstub partition");
-        assert_eq!(live_kernel_batch_calls(), 0);
+        assert_eq!(live_calls(), LiveCalls::ZERO);
 
         collect_batch(&mut evidence, &surface, &stub_rows, false, limits)
             .expect("stub-only partition");
         collect_batch(&mut evidence, &surface, &[], true, limits)
             .expect("stub-only empty partition");
-        assert_eq!(live_kernel_batch_calls(), 1);
+        assert_eq!(
+            live_calls(),
+            LiveCalls {
+                local_row_allocations: 1,
+                stub_kernel_calls: 1,
+                nonstub_kernel_calls: 0,
+            }
+        );
 
         reset_live_kernel_batch_calls();
         collect_batch(&mut evidence, &surface, &[], false, limits)
             .expect("nonstub-only empty partition");
         collect_batch(&mut evidence, &surface, &nonstub_rows, true, limits)
             .expect("nonstub-only partition");
-        assert_eq!(live_kernel_batch_calls(), 1);
+        assert_eq!(
+            live_calls(),
+            LiveCalls {
+                local_row_allocations: 1,
+                stub_kernel_calls: 0,
+                nonstub_kernel_calls: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn preflight_admits_each_exact_scalar_cap_and_refuses_one_less_before_local_work() {
+        let surface = surface();
+        let stub = surface
+            .penetration_intervals_batch_worst_case_limits(1, 0, 8, false)
+            .expect("stub requirements");
+        let nonstub = surface
+            .penetration_intervals_batch_worst_case_limits(1, OFFSET_RAYS, 8, true)
+            .expect("nonstub requirements");
+        let base = TransitIntervalLimits::new(
+            2,
+            1,
+            1,
+            stub.max_total_intervals + nonstub.max_total_intervals,
+            usize::MAX,
+            1.0,
+            8,
+            stub,
+            nonstub,
+        )
+        .expect("base limits");
+        let plan = preflight(2, 1, base).expect("exact caller caps pass");
+        assert_eq!(plan.members(), 2);
+        assert_eq!((plan.stub_rows(), plan.nonstub_rows()), (1, 1));
+        assert_eq!(
+            plan.retained_interval_capacity(),
+            base.max_retained_intervals
+        );
+        assert_eq!(
+            plan.retained_evidence_bytes(),
+            plan.retained_interval_capacity() * std::mem::size_of::<TransitRayInterval>()
+        );
+
+        for (resource, member_count, stub_count, limits) in [
+            (
+                "members",
+                2,
+                1,
+                TransitIntervalLimits {
+                    max_members: 1,
+                    ..base
+                },
+            ),
+            (
+                "stub rows",
+                2,
+                1,
+                TransitIntervalLimits {
+                    max_stub_rows: 0,
+                    ..base
+                },
+            ),
+            (
+                "nonstub rows",
+                2,
+                1,
+                TransitIntervalLimits {
+                    max_nonstub_rows: 0,
+                    ..base
+                },
+            ),
+            (
+                "retained intervals",
+                2,
+                1,
+                TransitIntervalLimits {
+                    max_retained_intervals: base.max_retained_intervals - 1,
+                    ..base
+                },
+            ),
+        ] {
+            reset_live_kernel_batch_calls();
+            assert_eq!(
+                preflight(member_count, stub_count, limits),
+                Err(TransitIntervalError::ResourceLimit { resource })
+            );
+            assert_eq!(
+                live_calls(),
+                LiveCalls::ZERO,
+                "{resource} refuses before local rows or kernel"
+            );
+        }
+
+        let exact_peak = plan.logical_peak_bytes();
+        assert_eq!(
+            preflight(
+                2,
+                1,
+                TransitIntervalLimits {
+                    max_logical_peak_bytes: exact_peak,
+                    ..base
+                }
+            )
+            .expect("exact logical peak cap passes")
+            .logical_peak_bytes(),
+            exact_peak
+        );
+        assert_eq!(
+            preflight(
+                2,
+                1,
+                TransitIntervalLimits {
+                    max_logical_peak_bytes: exact_peak - 1,
+                    ..base
+                }
+            ),
+            Err(TransitIntervalError::ResourceLimit {
+                resource: "logical peak bytes"
+            })
+        );
+    }
+
+    #[test]
+    fn each_kernel_limit_is_exact_and_one_less_refuses_with_transit_kernel_type() {
+        let surface = surface();
+        let member = fixture_member(
+            1,
+            MemberKind::Trunk,
+            None,
+            [-1.0, 0.5, 0.5],
+            [2.0, 0.5, 0.5],
+            0.05,
+            0.05,
+        );
+        let members = [normalize(&member)];
+        let base = limits(&surface, 0, 1);
+        let required = base.nonstub_penetration;
+        for (name, lowered) in [
+            (
+                "rows",
+                PenetrationBatchLimits {
+                    max_rows: required.max_rows - 1,
+                    ..required
+                },
+            ),
+            (
+                "work",
+                PenetrationBatchLimits {
+                    max_total_work: required.max_total_work - 1,
+                    ..required
+                },
+            ),
+            (
+                "hits",
+                PenetrationBatchLimits {
+                    max_total_hits: required.max_total_hits - 1,
+                    ..required
+                },
+            ),
+            (
+                "samples",
+                PenetrationBatchLimits {
+                    max_total_samples: required.max_total_samples - 1,
+                    ..required
+                },
+            ),
+            (
+                "intervals",
+                PenetrationBatchLimits {
+                    max_total_intervals: required.max_total_intervals - 1,
+                    ..required
+                },
+            ),
+            (
+                "scratch bytes",
+                PenetrationBatchLimits {
+                    max_scratch_bytes: required.max_scratch_bytes - 1,
+                    ..required
+                },
+            ),
+        ] {
+            let exact = TransitIntervalLimits {
+                nonstub_penetration: required,
+                ..base
+            };
+            collect_batch(&mut Vec::new(), &surface, &members, true, exact)
+                .unwrap_or_else(|error| panic!("exact {name} limit must pass: {error:?}"));
+            reset_live_kernel_batch_calls();
+            let refused = TransitIntervalLimits {
+                nonstub_penetration: lowered,
+                ..base
+            };
+            assert_eq!(
+                collect_batch(&mut Vec::new(), &surface, &members, true, refused),
+                Err(TransitIntervalError::KernelRefusal),
+                "{name} must preserve the transit kernel refusal"
+            );
+            assert_eq!(
+                live_calls(),
+                LiveCalls {
+                    local_row_allocations: 1,
+                    stub_kernel_calls: 0,
+                    nonstub_kernel_calls: 1
+                },
+                "{name} refusal enters only the nonstub kernel once"
+            );
+        }
+    }
+
+    #[test]
+    fn each_stub_kernel_limit_is_exact_and_one_less_refuses_with_transit_kernel_type() {
+        let surface = surface();
+        let member = fixture_member(
+            1,
+            MemberKind::Stub,
+            None,
+            [-1.0, 0.5, 0.5],
+            [2.0, 0.5, 0.5],
+            0.05,
+            0.05,
+        );
+        let members = [normalize(&member)];
+        let base = limits(&surface, 1, 0);
+        let required = base.stub_penetration;
+        for (name, lowered) in [
+            (
+                "rows",
+                PenetrationBatchLimits {
+                    max_rows: required.max_rows - 1,
+                    ..required
+                },
+            ),
+            (
+                "work",
+                PenetrationBatchLimits {
+                    max_total_work: required.max_total_work - 1,
+                    ..required
+                },
+            ),
+            (
+                "hits",
+                PenetrationBatchLimits {
+                    max_total_hits: required.max_total_hits - 1,
+                    ..required
+                },
+            ),
+            (
+                "samples",
+                PenetrationBatchLimits {
+                    max_total_samples: required.max_total_samples - 1,
+                    ..required
+                },
+            ),
+            (
+                "intervals",
+                PenetrationBatchLimits {
+                    max_total_intervals: required.max_total_intervals - 1,
+                    ..required
+                },
+            ),
+            (
+                "scratch bytes",
+                PenetrationBatchLimits {
+                    max_scratch_bytes: required.max_scratch_bytes - 1,
+                    ..required
+                },
+            ),
+        ] {
+            collect_batch(
+                &mut Vec::new(),
+                &surface,
+                &members,
+                false,
+                TransitIntervalLimits {
+                    stub_penetration: required,
+                    ..base
+                },
+            )
+            .unwrap_or_else(|error| panic!("exact stub {name} limit must pass: {error:?}"));
+            reset_live_kernel_batch_calls();
+            assert_eq!(
+                collect_batch(
+                    &mut Vec::new(),
+                    &surface,
+                    &members,
+                    false,
+                    TransitIntervalLimits {
+                        stub_penetration: lowered,
+                        ..base
+                    },
+                ),
+                Err(TransitIntervalError::KernelRefusal),
+                "stub {name} must preserve the transit kernel refusal"
+            );
+            assert_eq!(
+                live_calls(),
+                LiveCalls {
+                    local_row_allocations: 1,
+                    stub_kernel_calls: 1,
+                    nonstub_kernel_calls: 0
+                },
+                "stub {name} refusal enters only the stub kernel once"
+            );
+        }
+    }
+
+    #[test]
+    fn preflight_checked_arithmetic_refuses_overflow() {
+        let surface = surface();
+        let base = limits(&surface, 1, 1);
+        assert_eq!(
+            preflight(
+                1,
+                0,
+                TransitIntervalLimits {
+                    stub_penetration: PenetrationBatchLimits {
+                        max_total_intervals: usize::MAX,
+                        ..base.stub_penetration
+                    },
+                    nonstub_penetration: PenetrationBatchLimits {
+                        max_total_intervals: 1,
+                        ..base.nonstub_penetration
+                    },
+                    ..base
+                }
+            ),
+            Err(TransitIntervalError::ArithmeticOverflow {
+                resource: "interval capacity"
+            })
+        );
+    }
+
+    #[test]
+    fn complete_batch_is_identical_at_one_four_and_sixteen_threads() {
+        const TEST: &str = "transit_measurement::tests::complete_batch_is_identical_at_one_four_and_sixteen_threads";
+        if std::env::var_os("TRANSIT_THREAD_CHILD").is_some() {
+            let surface = surface();
+            let stub = fixture_member(
+                1,
+                MemberKind::Stub,
+                None,
+                [-1.0, 0.5, 0.5],
+                [2.0, 0.5, 0.5],
+                0.05,
+                0.05,
+            );
+            let nonstub = fixture_member(
+                2,
+                MemberKind::Trunk,
+                Some(EmbedEnd::Rootward),
+                [-1.0, 0.25, 0.5],
+                [2.0, 0.25, 0.5],
+                0.05,
+                0.15,
+            );
+            let limits = limits(&surface, 1, 1);
+            let plan = preflight(2, 1, limits).expect("fixture plan");
+            let mut evidence = Vec::new();
+            collect_batch(&mut evidence, &surface, &[normalize(&stub)], false, limits)
+                .expect("stub batch");
+            collect_batch(
+                &mut evidence,
+                &surface,
+                &[normalize(&nonstub)],
+                true,
+                limits,
+            )
+            .expect("nonstub batch");
+            evidence.sort_unstable_by(|left, right| {
+                (left.member, left.designed_end, left.ray)
+                    .cmp(&(right.member, right.designed_end, right.ray))
+                    .then_with(|| left.s_a_mm.total_cmp(&right.s_a_mm))
+                    .then_with(|| left.s_b_mm.total_cmp(&right.s_b_mm))
+            });
+            let batch = TransitIntervalBatch {
+                snapshot_digest: 0xA11C_E001,
+                member_digest: member_digest([&stub, &nonstub].into_iter()),
+                surface_digest: surface.source_triangle_soup_digest(),
+                resource_plan: plan,
+                intervals: evidence.into_boxed_slice(),
+            };
+            assert_eq!(
+                geom_kernel::current_threads().to_string(),
+                std::env::var("PLINTH_THREADS").expect("child thread authority")
+            );
+            println!("TRANSIT_SIGNATURE:{batch:?}");
+            return;
+        }
+        let signatures = ["1", "4", "16"].map(|threads| {
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .arg(TEST)
+                .arg("--exact")
+                .arg("--nocapture")
+                .env("PLINTH_THREADS", threads)
+                .env("TRANSIT_THREAD_CHILD", "1")
+                .output()
+                .expect("isolated thread child");
+            assert!(
+                output.status.success(),
+                "thread child {threads} failed: {output:?}"
+            );
+            String::from_utf8(output.stdout).expect("test output utf-8")
+        });
+        assert_eq!(signatures[0], signatures[1]);
+        assert_eq!(signatures[0], signatures[2]);
     }
 
     #[test]
