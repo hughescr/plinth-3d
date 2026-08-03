@@ -10,11 +10,11 @@
 //! `no_cache`, which is wired only from the future CLI spelling `--no-cache`.
 #![forbid(unsafe_code)]
 
-use plinth_core::ModelId;
+use plinth_core::{m0_constants, ModelId, PrinterProfile};
 use plinth_decimate::{DecimationBudget, DecimationError};
 use plinth_emit::{EmitError, EmitReport};
 use plinth_hollow::{HollowDisposition, HollowError, HollowRequest, HollowStageOutput};
-use plinth_orient::{OrientError, OrientedModel};
+use plinth_orient::{OrientError, OrientedModel, PinnedBaseline};
 use plinth_support::{SupportError, SupportRequest};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -71,12 +71,68 @@ pub enum StageStop {
     Support,
 }
 
+/// The orientation authority selected for a preparation run.
+///
+/// Arbitrary input has no frozen baseline report, so the public preparation
+/// default is the legacy coarse policy. Its search implementation lands later;
+/// this boundary only makes that future work explicit rather than silently
+/// requiring a baseline artifact for every input.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "baseline", rename_all = "snake_case")]
+pub enum OrientationPolicy {
+    #[default]
+    LegacyCoarse,
+    Pinned(PinnedBaseline),
+}
+
+/// The output printer profiles currently admitted by preparation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OutputProfile {
+    Saturn4Ultra,
+}
+
+impl OutputProfile {
+    /// The sole CLI spelling accepted by the future `prepare --output` parser.
+    pub const SATURN4_ULTRA_CLI_VALUE: &'static str = "saturn4-ultra";
+
+    /// Resolves this typed selection through the ratified M0 printer authority.
+    pub fn resolve(self) -> Result<&'static PrinterProfile, OutputProfileError> {
+        let constants = m0_constants().map_err(|_| OutputProfileError::ConstantsUnavailable)?;
+        match self {
+            Self::Saturn4Ultra => Ok(constants.saturn4_ultra()),
+        }
+    }
+}
+
+impl TryFrom<&str> for OutputProfile {
+    type Error = OutputProfileError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value {
+            Self::SATURN4_ULTRA_CLI_VALUE => Ok(Self::Saturn4Ultra),
+            _ => Err(OutputProfileError::Unknown {
+                value: value.into(),
+            }),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Error)]
+pub enum OutputProfileError {
+    #[error("unknown output profile {value}")]
+    Unknown { value: String },
+    #[error("the ratified M0 printer authority is unavailable")]
+    ConstantsUnavailable,
+}
+
 /// One batch request: every source STL in `input_models_dir` maps to one output stem.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PrepareRequest {
     pub input_models_dir: PathBuf,
     pub output_dir: PathBuf,
-    pub pinned_baseline_dir: PathBuf,
+    pub orientation: OrientationPolicy,
+    pub output_profile: OutputProfile,
     pub decimation_budget: DecimationBudget,
     pub hollow: HollowRequest,
     pub support: SupportRequest,
@@ -184,6 +240,69 @@ mod tests {
     };
     use plinth_mesh::{load_binary_stl, make_box, Mesh, WeldPolicy};
     use plinth_orient::{run as run_orientation, OrientRequest, PinnedBaseline};
+
+    #[test]
+    fn arbitrary_input_orientation_defaults_to_legacy_coarse() {
+        assert_eq!(
+            OrientationPolicy::default(),
+            OrientationPolicy::LegacyCoarse
+        );
+        assert_eq!(
+            serde_json::to_string(&OrientationPolicy::default()).expect("policy serializes"),
+            r#"{"kind":"legacy_coarse"}"#
+        );
+    }
+
+    #[test]
+    fn pinned_orientation_retains_the_existing_typed_baseline_authority() {
+        let policy = OrientationPolicy::Pinned(PinnedBaseline {
+            pipeline_report: PathBuf::from("baseline/Sphere.pipeline.json"),
+        });
+        let wire = serde_json::to_string(&policy).expect("policy serializes");
+        assert_eq!(
+            wire,
+            r#"{"kind":"pinned","baseline":{"pipeline_report":"baseline/Sphere.pipeline.json"}}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<OrientationPolicy>(&wire).expect("policy deserializes"),
+            policy
+        );
+    }
+
+    #[test]
+    fn output_profile_accepts_only_the_exact_saturn_cli_spelling() {
+        assert_eq!(
+            OutputProfile::try_from("saturn4-ultra").expect("ratified profile"),
+            OutputProfile::Saturn4Ultra
+        );
+        for value in ["Saturn4-Ultra", "saturn4_ultra", "saturn4-ultra "] {
+            assert_eq!(
+                OutputProfile::try_from(value),
+                Err(OutputProfileError::Unknown {
+                    value: value.to_owned(),
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn output_profile_resolves_the_ratified_build_volume_authority() {
+        let profile = OutputProfile::Saturn4Ultra
+            .resolve()
+            .expect("M0 profile authority");
+        assert_eq!(profile.id().as_str(), "saturn4-ultra");
+        assert_eq!(
+            profile.build_volume_mm(),
+            m0_constants()
+                .expect("M0 constants")
+                .saturn4_ultra()
+                .build_volume_mm()
+        );
+        assert_eq!(
+            serde_json::to_string(&OutputProfile::Saturn4Ultra).expect("profile serializes"),
+            r#""saturn4_ultra""#
+        );
+    }
 
     fn baseline(name: &str) -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
