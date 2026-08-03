@@ -3,7 +3,7 @@
 //! This is intentionally a measurement boundary only.  It neither classifies
 //! an interval nor assigns a clearance, gate, report, certificate, or defect.
 
-use geom_kernel::{Interval, PenetrationBatchLimits, SurfaceTriangleSoupDigest};
+use geom_kernel::{capsule_rays, Interval, PenetrationBatchLimits, SurfaceTriangleSoupDigest};
 use thiserror::Error;
 
 use crate::{
@@ -12,6 +12,11 @@ use crate::{
 };
 
 const OFFSET_RAYS: usize = 8;
+
+#[cfg(test)]
+thread_local! {
+    static LIVE_KERNEL_BATCH_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 /// Explicit caller-owned limits and sampling parameters for one raw transit
 /// extraction.  No production defaults are supplied by this module.
@@ -250,8 +255,20 @@ pub(crate) fn measure(
         .map_err(|_| TransitIntervalError::ResourceLimit {
             resource: "retained intervals allocation",
         })?;
-    collect_batch(&mut evidence, snapshot, &stubs, false, limits)?;
-    collect_batch(&mut evidence, snapshot, &nonstubs, true, limits)?;
+    collect_batch(
+        &mut evidence,
+        snapshot.native_surface(),
+        &stubs,
+        false,
+        limits,
+    )?;
+    collect_batch(
+        &mut evidence,
+        snapshot.native_surface(),
+        &nonstubs,
+        true,
+        limits,
+    )?;
     if evidence.len() > limits.max_retained_intervals {
         return Err(TransitIntervalError::ResourceLimit {
             resource: "retained intervals",
@@ -294,7 +311,7 @@ fn normalize(member: &FinalLiveMemberEvidence) -> NormalizedMember<'_> {
 
 fn collect_batch(
     evidence: &mut Vec<TransitRayInterval>,
-    snapshot: &SupportVerificationSnapshot<'_>,
+    surface: &geom_kernel::NativeSurface,
     members: &[NormalizedMember<'_>],
     offsets: bool,
     limits: TransitIntervalLimits,
@@ -326,8 +343,9 @@ fn collect_batch(
         r0.push(member.r0);
         r1.push(member.r1);
     }
-    let rows = snapshot
-        .native_surface()
+    #[cfg(test)]
+    LIVE_KERNEL_BATCH_CALLS.with(|calls| calls.set(calls.get() + 1));
+    let rows = surface
         .penetration_intervals_batch_bounded(
             &p0,
             &p1,
@@ -345,15 +363,43 @@ fn collect_batch(
             },
         )
         .map_err(|_| TransitIntervalError::KernelRefusal)?;
+    collect_rows(evidence, members, offsets, rows)
+}
+
+fn collect_rows(
+    evidence: &mut Vec<TransitRayInterval>,
+    members: &[NormalizedMember<'_>],
+    offsets: bool,
+    rows: Vec<Vec<Interval>>,
+) -> Result<(), TransitIntervalError> {
     if rows.len() != members.len() {
         return Err(TransitIntervalError::CorruptKernelResult);
     }
     for (member, row) in members.iter().zip(rows) {
-        let max_s = ray_arc_length(member.p0, member.p1, member.r0, member.r1);
+        let mut rays = capsule_rays(
+            member.p0,
+            member.p1,
+            member.r0,
+            member.r1,
+            OFFSET_RAYS,
+            offsets,
+        );
+        let mut prior_label = -1;
+        let mut current = rays.next();
         for interval in row {
-            if !valid_interval(&interval, offsets, max_s) {
+            while current.is_some_and(|ray| ray.label() < interval.ray) {
+                current = rays.next();
+            }
+            let Some(ray) = current else {
+                return Err(TransitIntervalError::CorruptKernelResult);
+            };
+            if interval.ray < prior_label
+                || interval.ray != ray.label()
+                || !valid_interval(&interval, ray.length_mm())
+            {
                 return Err(TransitIntervalError::CorruptKernelResult);
             }
+            prior_label = interval.ray;
             evidence.push(TransitRayInterval {
                 member: member.source.key(),
                 designed_end: member.source.embed_end(),
@@ -366,26 +412,22 @@ fn collect_batch(
     Ok(())
 }
 
-fn valid_interval(interval: &Interval, offsets: bool, max_s: f64) -> bool {
+fn valid_interval(interval: &Interval, max_s: f64) -> bool {
     interval.s_a.is_finite()
         && interval.s_b.is_finite()
         && interval.s_a >= 0.0
         && interval.s_a <= interval.s_b
         && interval.s_b <= max_s
-        && if offsets {
-            (-1..=7).contains(&interval.ray)
-        } else {
-            interval.ray == -1
-        }
 }
 
-fn ray_arc_length(p0: [f64; 3], p1: [f64; 3], r0: f64, r1: f64) -> f64 {
-    let axis_sq = p0
-        .into_iter()
-        .zip(p1)
-        .map(|(a, b)| (a - b) * (a - b))
-        .sum::<f64>();
-    (axis_sq + (r1 - r0) * (r1 - r0)).sqrt()
+#[cfg(test)]
+fn reset_live_kernel_batch_calls() {
+    LIVE_KERNEL_BATCH_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+fn live_kernel_batch_calls() -> usize {
+    LIVE_KERNEL_BATCH_CALLS.with(std::cell::Cell::get)
 }
 
 fn preflight(
@@ -540,4 +582,274 @@ fn member_digest<'a>(members: impl Iterator<Item = &'a FinalLiveMemberEvidence>)
         }
     }
     state
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use geom_kernel::{NativeSurface, NativeSurfaceConfig};
+
+    fn fixture_member(
+        slot: u32,
+        kind: MemberKind,
+        embed_end: Option<EmbedEnd>,
+        p0: [f64; 3],
+        p1: [f64; 3],
+        r0: f64,
+        r1: f64,
+    ) -> FinalLiveMemberEvidence {
+        FinalLiveMemberEvidence::transit_test_fixture(
+            [slot, 0],
+            [p0, p1],
+            [r0, r1],
+            kind,
+            embed_end,
+        )
+    }
+
+    fn surface() -> NativeSurface {
+        let vertices = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ];
+        let faces = [
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        NativeSurface::from_indexed(
+            &vertices,
+            &faces,
+            NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 4 * 1024 * 1024,
+            },
+        )
+        .expect("sealed transit fixture surface")
+    }
+
+    fn limits(
+        surface: &NativeSurface,
+        stub_rows: usize,
+        nonstub_rows: usize,
+    ) -> TransitIntervalLimits {
+        let stub = surface
+            .penetration_intervals_batch_worst_case_limits(stub_rows.max(1), 0, 8, false)
+            .expect("stub fixture limits");
+        let nonstub = surface
+            .penetration_intervals_batch_worst_case_limits(
+                nonstub_rows.max(1),
+                OFFSET_RAYS,
+                8,
+                true,
+            )
+            .expect("nonstub fixture limits");
+        TransitIntervalLimits::new(
+            stub_rows + nonstub_rows + 1,
+            stub_rows.max(1),
+            nonstub_rows.max(1),
+            stub.max_total_intervals + nonstub.max_total_intervals,
+            usize::MAX,
+            1.0,
+            8,
+            stub,
+            nonstub,
+        )
+        .expect("fixture limits")
+    }
+
+    fn interval(ray: i32, s_a: f64, s_b: f64) -> Interval {
+        Interval {
+            s_a,
+            s_b,
+            entered: false,
+            exited: false,
+            max_depth: 0.0,
+            ray,
+        }
+    }
+
+    #[test]
+    fn stub_uses_axis_only_and_tapered_nonstub_uses_canonical_capsule_rays() {
+        let surface = surface();
+        let stub = fixture_member(
+            1,
+            MemberKind::Stub,
+            None,
+            [-1.0, 0.5, 0.5],
+            [2.0, 0.5, 0.5],
+            0.05,
+            0.05,
+        );
+        let nonstub = fixture_member(
+            2,
+            MemberKind::Trunk,
+            None,
+            [-1.0, 0.25, 0.5],
+            [2.0, 0.25, 0.5],
+            0.05,
+            0.15,
+        );
+        let stubs = [normalize(&stub)];
+        let nonstubs = [normalize(&nonstub)];
+        let mut evidence = Vec::new();
+        let limits = limits(&surface, 1, 1);
+
+        collect_batch(&mut evidence, &surface, &stubs, false, limits).expect("stub batch");
+        collect_batch(&mut evidence, &surface, &nonstubs, true, limits).expect("nonstub batch");
+
+        let stub_labels = evidence
+            .iter()
+            .filter(|row| row.member() == stub.key())
+            .map(|row| row.ray())
+            .collect::<Vec<_>>();
+        assert_eq!(stub_labels, vec![-1]);
+        let nonstub_labels = evidence
+            .iter()
+            .filter(|row| row.member() == nonstub.key())
+            .map(|row| row.ray())
+            .collect::<Vec<_>>();
+        assert_eq!(nonstub_labels, (-1..=7).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn embedded_taper_normalization_places_the_designed_end_at_zero() {
+        let terminal = fixture_member(
+            1,
+            MemberKind::Trunk,
+            Some(EmbedEnd::Terminalward),
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            1.0,
+            3.0,
+        );
+        let root = fixture_member(
+            2,
+            MemberKind::Trunk,
+            Some(EmbedEnd::Rootward),
+            [1.0, 2.0, 3.0],
+            [4.0, 5.0, 6.0],
+            1.0,
+            3.0,
+        );
+        let terminal = normalize(&terminal);
+        let root = normalize(&root);
+        assert_eq!(
+            (terminal.p0, terminal.p1, terminal.r0, terminal.r1),
+            ([1.0, 2.0, 3.0], [4.0, 5.0, 6.0], 1.0, 3.0)
+        );
+        assert_eq!(
+            (root.p0, root.p1, root.r0, root.r1),
+            ([4.0, 5.0, 6.0], [1.0, 2.0, 3.0], 3.0, 1.0)
+        );
+    }
+
+    #[test]
+    fn empty_partitions_skip_live_kernel_calls() {
+        let surface = surface();
+        let stub = fixture_member(
+            1,
+            MemberKind::Stub,
+            None,
+            [0.0; 3],
+            [0.0, 0.0, 10.0],
+            1.0,
+            1.0,
+        );
+        let nonstub = fixture_member(
+            2,
+            MemberKind::Trunk,
+            None,
+            [5.0, 0.0, 0.0],
+            [5.0, 0.0, 10.0],
+            1.0,
+            3.0,
+        );
+        let stub_rows = [normalize(&stub)];
+        let nonstub_rows = [normalize(&nonstub)];
+        let mut evidence = Vec::new();
+        let limits = limits(&surface, 1, 1);
+
+        reset_live_kernel_batch_calls();
+        collect_batch(&mut evidence, &surface, &[], false, limits).expect("empty stub partition");
+        collect_batch(&mut evidence, &surface, &[], true, limits).expect("empty nonstub partition");
+        assert_eq!(live_kernel_batch_calls(), 0);
+
+        collect_batch(&mut evidence, &surface, &stub_rows, false, limits)
+            .expect("stub-only partition");
+        collect_batch(&mut evidence, &surface, &[], true, limits)
+            .expect("stub-only empty partition");
+        assert_eq!(live_kernel_batch_calls(), 1);
+
+        reset_live_kernel_batch_calls();
+        collect_batch(&mut evidence, &surface, &[], false, limits)
+            .expect("nonstub-only empty partition");
+        collect_batch(&mut evidence, &surface, &nonstub_rows, true, limits)
+            .expect("nonstub-only partition");
+        assert_eq!(live_kernel_batch_calls(), 1);
+    }
+
+    #[test]
+    fn validation_retains_short_intervals_and_rejects_corrupt_rows_per_exact_ray() {
+        let member = fixture_member(
+            1,
+            MemberKind::Trunk,
+            None,
+            [0.0; 3],
+            [0.0, 0.0, 10.0],
+            1.0,
+            3.0,
+        );
+        let members = [normalize(&member)];
+        let mut evidence = Vec::new();
+        collect_rows(
+            &mut evidence,
+            &members,
+            true,
+            vec![vec![interval(-1, 0.0, 0.01)]],
+        )
+        .expect("kernel min filter is zero, so short evidence remains raw");
+        assert_eq!(evidence[0].s_b_mm(), 0.01);
+
+        for rows in [
+            vec![],
+            vec![vec![interval(-1, f64::NAN, 1.0)]],
+            vec![vec![interval(-1, 2.0, 1.0)]],
+            vec![vec![interval(8, 0.0, 1.0)]],
+            vec![vec![interval(-1, 0.0, 10.01)]],
+            vec![vec![interval(1, 0.0, 1.0), interval(0, 0.0, 1.0)]],
+        ] {
+            assert_eq!(
+                collect_rows(&mut Vec::new(), &members, true, rows),
+                Err(TransitIntervalError::CorruptKernelResult)
+            );
+        }
+
+        let offset_length = capsule_rays([0.0; 3], [0.0, 0.0, 10.0], 1.0, 3.0, OFFSET_RAYS, true)
+            .nth(1)
+            .expect("canonical offset ray")
+            .length_mm();
+        collect_rows(
+            &mut Vec::new(),
+            &members,
+            true,
+            vec![vec![interval(0, 10.0, offset_length)]],
+        )
+        .expect("valid tapered offset may extend past the shorter axis");
+    }
 }

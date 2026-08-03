@@ -28,6 +28,11 @@ impl MemberKey {
     pub const fn generation(self) -> u32 {
         self.generation
     }
+
+    #[cfg(test)]
+    pub(crate) const fn transit_test_fixture(slot: u32, generation: u32) -> Self {
+        Self { slot, generation }
+    }
 }
 
 /// Radius at `p0`, the terminal-ward end of a support member.

@@ -34,6 +34,135 @@ pub struct Interval {
     pub ray: i32,
 }
 
+/// One centerline or capsule-offset ray used by penetration interval queries.
+///
+/// `label == -1` identifies the centerline; non-negative labels identify
+/// offset rays in their canonical angular order.  The segment length is the
+/// exact norm of this ray's own direction, which differs from the centerline
+/// length for a tapered member.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CapsuleRay {
+    label: i32,
+    origin: V3,
+    direction: V3,
+    length_mm: f64,
+}
+
+impl CapsuleRay {
+    #[must_use]
+    pub const fn label(self) -> i32 {
+        self.label
+    }
+
+    #[must_use]
+    pub const fn origin(self) -> V3 {
+        self.origin
+    }
+
+    #[must_use]
+    pub const fn direction(self) -> V3 {
+        self.direction
+    }
+
+    #[must_use]
+    pub const fn length_mm(self) -> f64 {
+        self.length_mm
+    }
+}
+
+/// Construct the canonical centerline and, when requested, capsule-offset
+/// rays for one tapered member.
+///
+/// This is shared with consumers that validate interval arc-length bounds, so
+/// the query and validation paths cannot drift in basis, offset, label, or
+/// tapered-ray length.
+#[must_use]
+pub fn capsule_rays(
+    p0: V3,
+    p1: V3,
+    r0: f64,
+    r1: f64,
+    n_offset_rays: usize,
+    rays_all: bool,
+) -> CapsuleRays {
+    let axis = sub(p1, p0);
+    let axis_length = norm(axis);
+    let offset_count = usize::from(rays_all && axis_length >= 1e-9) * n_offset_rays;
+    let (e1, e2) = if offset_count == 0 {
+        ([0.0; 3], [0.0; 3])
+    } else {
+        perp_basis(scale(axis, 1.0 / axis_length))
+    };
+    CapsuleRays {
+        p0,
+        p1,
+        r0,
+        r1,
+        axis,
+        axis_length,
+        e1,
+        e2,
+        offset_count,
+        next: 0,
+    }
+}
+
+/// Allocation-free iterator over the canonical rays of one tapered member.
+#[derive(Clone, Copy, Debug)]
+pub struct CapsuleRays {
+    p0: V3,
+    p1: V3,
+    r0: f64,
+    r1: f64,
+    axis: V3,
+    axis_length: f64,
+    e1: V3,
+    e2: V3,
+    offset_count: usize,
+    next: usize,
+}
+
+impl Iterator for CapsuleRays {
+    type Item = CapsuleRay;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next == 0 {
+            self.next = 1;
+            return Some(CapsuleRay {
+                label: -1,
+                origin: self.p0,
+                direction: self.axis,
+                length_mm: self.axis_length,
+            });
+        }
+        let offset = self.next - 1;
+        if offset >= self.offset_count {
+            return None;
+        }
+        self.next += 1;
+        let th = 2.0 * std::f64::consts::PI * (offset as f64) / (self.offset_count as f64);
+        let unit = add(scale(self.e1, th.cos()), scale(self.e2, th.sin()));
+        let origin = add(self.p0, scale(unit, self.r0));
+        let direction = sub(add(self.p1, scale(unit, self.r1)), origin);
+        Some(CapsuleRay {
+            label: offset as i32,
+            origin,
+            direction,
+            length_mm: norm(direction),
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self
+            .offset_count
+            .saturating_add(1)
+            .saturating_sub(self.next);
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for CapsuleRays {}
+
 /// A companion input slice did not match its batch's authoritative length.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BatchInputError {
@@ -1418,26 +1547,16 @@ impl NativeSurface {
             reserve_penetration_vec(budget.traversal_stack, Some(row), "BVH traversal stack")?;
         let mut parity_crossings =
             reserve_penetration_vec(budget.parity_crossings, Some(row), "parity crossings")?;
-        // build ray list: (ray_id, O, Dv, seg)
+        // Shared construction keeps query geometry identical to consumers'
+        // interval-bound validation.
         let mut raylist = reserve_penetration_vec(budget.rays, Some(row), "ray list")?;
-        if !rays_all {
-            raylist.push((-1, p0, sub(p1, p0), l));
-        } else {
-            // member_rays: axis + n offset rays
-            raylist.push((-1, p0, sub(p1, p0), l));
-            let du = scale(sub(p1, p0), 1.0 / l);
-            let (e1, e2) = perp_basis(du);
-            for k in 0..n_offset_rays {
-                let th = 2.0 * std::f64::consts::PI * (k as f64) / (n_offset_rays as f64);
-                let uu = add(scale(e1, th.cos()), scale(e2, th.sin()));
-                let a = add(p0, scale(uu, r0));
-                let b = add(p1, scale(uu, r1));
-                let dv = sub(b, a);
-                raylist.push((k as i32, a, dv, norm(dv)));
-            }
-        }
+        raylist.extend(capsule_rays(p0, p1, r0, r1, n_offset_rays, rays_all));
 
-        for (label, o, dv, seg) in raylist {
+        for ray in raylist {
+            let label = ray.label();
+            let o = ray.origin();
+            let dv = ray.direction();
+            let seg = ray.length_mm();
             if seg < 1e-9 {
                 continue;
             }

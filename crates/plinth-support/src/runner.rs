@@ -305,6 +305,25 @@ impl FinalLiveMemberEvidence {
     pub const fn embed_end(&self) -> Option<EmbedEnd> {
         self.embed_end
     }
+
+    #[cfg(test)]
+    pub(crate) fn transit_test_fixture(
+        key: [u32; 2],
+        endpoints_mm: [[f64; 3]; 2],
+        radii_mm: [f64; 2],
+        kind: MemberKind,
+        embed_end: Option<EmbedEnd>,
+    ) -> Self {
+        Self {
+            key: MemberKey::transit_test_fixture(key[0], key[1]),
+            p0_mm: endpoints_mm[0],
+            p1_mm: endpoints_mm[1],
+            r0_mm: radii_mm[0],
+            r1_mm: radii_mm[1],
+            kind,
+            embed_end,
+        }
+    }
 }
 
 impl RoutedPhysicalContactEvidence<'_> {

@@ -35,11 +35,12 @@ pub use point_index::{
     KnnBatchLimits, KnnBatchPlan, KnnBatchPlanError, NeighborCsr, PointCloudIndex,
     PointIndexBuildError, PointQueryError, RadiusQueryLimits,
 };
+pub use queries::capsule_rays;
 pub use queries::{
     AllowedFaceProjection, AllowedFaceProjectionError, AllowedFaceProjectionLimits,
     AllowedFaceProjectionNoWinner, AllowedFaceProjectionOutcome, AllowedFaceProjectionPolicy,
-    BatchInputError, CastRaysBatch, Interval, NativeSurface, PenetrationBatchError,
-    PenetrationBatchLimits, SphereBreachBatch,
+    BatchInputError, CapsuleRay, CapsuleRays, CastRaysBatch, Interval, NativeSurface,
+    PenetrationBatchError, PenetrationBatchLimits, SphereBreachBatch,
 };
 pub use segment_batch::{
     point_segment_distances_batch, point_segment_taper_batch, FrozenJointTaperBatch,
