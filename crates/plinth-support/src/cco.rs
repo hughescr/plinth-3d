@@ -3233,9 +3233,12 @@ mod tests {
         BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap())
     }
 
-    fn transcript_perception_config(delicacy: &[f64]) -> SupportPerceptionConfig<'_> {
+    fn transcript_perception_config(
+        delicacy: &[f64],
+        plate_z_mm: Finite,
+    ) -> SupportPerceptionConfig<'_> {
         SupportPerceptionConfig::current(
-            Finite::new(0.0).unwrap(),
+            plate_z_mm,
             PositiveFinite::new(1.0).unwrap(),
             PositiveFinite::new(1.0).unwrap(),
             64 * 1024 * 1024,
@@ -3258,16 +3261,47 @@ mod tests {
         Mesh,
         Vec<f64>,
     ) {
-        let delicacy = vec![0.0; mesh.tris().len()];
-        let layers = LayerPlan::new(0.0, vec![0.05; 1_000]).unwrap();
+        real_initial_transcript_fixture_for_frame(mesh, transcript_frame())
+    }
+
+    fn real_initial_transcript_fixture_for_frame(
+        mesh: Mesh,
+        frame: BuildFrame,
+    ) -> (
+        InitialContactBuild,
+        SpecializedContactPlan,
+        FinalizedContactLoads,
+        NativeSurface,
+        FaceTopology,
+        Mesh,
+        Vec<f64>,
+    ) {
+        real_initial_transcript_fixture_for_frame_with_delicacy(mesh, frame, 0.0)
+    }
+
+    fn real_initial_transcript_fixture_for_frame_with_delicacy(
+        mesh: Mesh,
+        frame: BuildFrame,
+        delicacy_value: f64,
+    ) -> (
+        InitialContactBuild,
+        SpecializedContactPlan,
+        FinalizedContactLoads,
+        NativeSurface,
+        FaceTopology,
+        Mesh,
+        Vec<f64>,
+    ) {
+        let delicacy = vec![delicacy_value; mesh.tris().len()];
+        let layers = LayerPlan::new(frame.plate_z_mm().get(), vec![0.05; 1_000]).unwrap();
         let candidate =
             CandidatePayloadConfig::current(8, 1_000_000, 3_000_000, 256 * 1024 * 1024, 65_536)
                 .unwrap();
-        let config = transcript_perception_config(&delicacy);
+        let config = transcript_perception_config(&delicacy, frame.plate_z_mm());
         let generic = prepare_generic_contacts(
             &mesh,
             &config,
-            transcript_frame(),
+            frame,
             &layers,
             &candidate,
             &[],
@@ -3288,7 +3322,7 @@ mod tests {
         let plan = prepare_specialized_contacts(
             &mesh,
             &config,
-            transcript_frame(),
+            frame,
             &layers,
             &candidate,
             &[],
@@ -3316,7 +3350,7 @@ mod tests {
             &loads,
             &mesh,
             &config,
-            transcript_frame(),
+            frame,
             &layers,
             &candidate,
             &[],
@@ -3388,12 +3422,39 @@ mod tests {
         real_initial_transcript_fixture_for(merge_meshes(&[buried, blocker, live]))
     }
 
+    fn no_winner_frame() -> BuildFrame {
+        transcript_frame()
+    }
+
+    /// The legal-boundary blocker keeps the actual initial stub live. Its
+    /// perception sidecar truthfully marks every exterior face above the
+    /// registered model-anchor delicacy ceiling, so a real finalized route
+    /// completes as `UnroutedNoWinner` rather than minting an anchor.
+    fn real_no_winner_initial_transcript_fixture() -> (
+        InitialContactBuild,
+        SpecializedContactPlan,
+        FinalizedContactLoads,
+        NativeSurface,
+        FaceTopology,
+        Mesh,
+        Vec<f64>,
+    ) {
+        let table = make_overhang_table().unwrap();
+        let boundary_blocker = make_box([30.0, 30.0, 1.0], [0.0, 0.0, 16.55]).unwrap();
+        real_initial_transcript_fixture_for_frame_with_delicacy(
+            merge_meshes(&[table, boundary_blocker]),
+            no_winner_frame(),
+            0.6,
+        )
+    }
+
     fn route_initial_build(
         build: &mut InitialContactBuild,
         plan: &SpecializedContactPlan,
         loads: &FinalizedContactLoads,
         geometry: &AnchorGeometryAuthority<'_>,
         delicacy: &[f64],
+        frame: BuildFrame,
     ) -> (
         CcoController,
         Vec<u32>,
@@ -3415,8 +3476,7 @@ mod tests {
                     .unwrap();
                 continue;
             }
-            let request =
-                TerminalCcoRequest::bind(build.forest(), *terminal, transcript_frame()).unwrap();
+            let request = TerminalCcoRequest::bind(build.forest(), *terminal, frame).unwrap();
             routed_request.get_or_insert_with(|| request.clone());
             let contact = plan
                 .contacts()
@@ -3447,8 +3507,14 @@ mod tests {
         let (mut build, plan, loads, surface, topology, mesh, delicacy) =
             real_mixed_initial_transcript_fixture();
         let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
-        let (mut controller, expected, routed_request, skipped_ledger) =
-            route_initial_build(&mut build, &plan, &loads, &geometry, &delicacy);
+        let (mut controller, expected, routed_request, skipped_ledger) = route_initial_build(
+            &mut build,
+            &plan,
+            &loads,
+            &geometry,
+            &delicacy,
+            transcript_frame(),
+        );
         assert!(routed_request.is_some());
         assert!(skipped_ledger.is_some());
 
@@ -3519,6 +3585,58 @@ mod tests {
     }
 
     #[test]
+    fn finalized_transcript_retains_real_unrouted_no_winner_evidence() {
+        let (mut build, plan, loads, surface, topology, mesh, delicacy) =
+            real_no_winner_initial_transcript_fixture();
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let (mut controller, expected, _, _) = route_initial_build(
+            &mut build,
+            &plan,
+            &loads,
+            &geometry,
+            &delicacy,
+            no_winner_frame(),
+        );
+        let transcript = controller
+            .finalize_transcript(&build, &plan, &loads, &geometry)
+            .unwrap();
+        assert_eq!(transcript.rows().len(), expected.len());
+        let row = transcript
+            .rows()
+            .iter()
+            .find(|row| row.kind() == FinalizedDispositionKind::UnroutedNoWinner)
+            .expect("real routed initial build produced no-winner evidence");
+        let route = row.route().expect("no-winner keeps exact route evidence");
+        let reason = row
+            .no_winner_reason()
+            .expect("no-winner keeps its exact terminal reason");
+        assert_eq!(route.physical_contact_id, row.physical_contact_id());
+        assert_eq!(route.terminal_id, row.terminal_id());
+        assert_eq!(route.original_key, row.original_key());
+        assert!(matches!(
+            reason,
+            NoWinnerEvidence::NoCandidatesGenerated
+                | NoWinnerEvidence::NoFeasibleCandidate { .. }
+                | NoWinnerEvidence::AllFeasibleCandidatesRefusedByClearance { .. }
+        ));
+        assert_eq!(
+            build
+                .forest()
+                .terminal_ledger(row.terminal_id())
+                .unwrap()
+                .state,
+            TerminalLedgerState::Retired
+        );
+        assert!(build.forest().terminal(row.terminal_id()).is_none());
+        assert!(build.forest().member(row.original_key()).is_none());
+        assert!(build
+            .forest()
+            .quarantine_record(row.original_key())
+            .is_none());
+        assert!(transcript.validate_integrity().is_ok());
+    }
+
+    #[test]
     fn finalized_transcript_rejects_each_real_authority_mismatch_before_cadence() {
         let (build, plan, loads, surface, topology, mesh, _) = real_initial_transcript_fixture();
         let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
@@ -3586,8 +3704,14 @@ mod tests {
         let (mut build, plan, loads, surface, topology, mesh, delicacy) =
             real_mixed_initial_transcript_fixture();
         let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
-        let (mut controller, expected, _, _) =
-            route_initial_build(&mut build, &plan, &loads, &geometry, &delicacy);
+        let (mut controller, expected, _, _) = route_initial_build(
+            &mut build,
+            &plan,
+            &loads,
+            &geometry,
+            &delicacy,
+            transcript_frame(),
+        );
 
         let missing = controller.terminal_cadence.pop().unwrap();
         assert!(matches!(
@@ -3640,8 +3764,14 @@ mod tests {
         let (mut build, plan, loads, surface, topology, mesh, delicacy) =
             real_mixed_initial_transcript_fixture();
         let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
-        let (mut controller, _, _, _) =
-            route_initial_build(&mut build, &plan, &loads, &geometry, &delicacy);
+        let (mut controller, _, _, _) = route_initial_build(
+            &mut build,
+            &plan,
+            &loads,
+            &geometry,
+            &delicacy,
+            transcript_frame(),
+        );
         let transcript = controller
             .finalize_transcript(&build, &plan, &loads, &geometry)
             .unwrap();
@@ -3667,8 +3797,14 @@ mod tests {
             let (mut build, plan, loads, surface, topology, mesh, delicacy) =
                 real_mixed_initial_transcript_fixture();
             let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
-            let (mut controller, _, _, _) =
-                route_initial_build(&mut build, &plan, &loads, &geometry, &delicacy);
+            let (mut controller, _, _, _) = route_initial_build(
+                &mut build,
+                &plan,
+                &loads,
+                &geometry,
+                &delicacy,
+                transcript_frame(),
+            );
             let transcript = controller
                 .finalize_transcript(&build, &plan, &loads, &geometry)
                 .unwrap();
@@ -3710,10 +3846,38 @@ mod tests {
                     None => rows.push_str(":-"),
                 }
             }
+            let (mut no_build, no_plan, no_loads, no_surface, no_topology, no_mesh, no_delicacy) =
+                real_no_winner_initial_transcript_fixture();
+            let no_geometry =
+                AnchorGeometryAuthority::new(&no_mesh, &no_topology, &no_surface).unwrap();
+            let (mut no_controller, _, _, _) = route_initial_build(
+                &mut no_build,
+                &no_plan,
+                &no_loads,
+                &no_geometry,
+                &no_delicacy,
+                no_winner_frame(),
+            );
+            let no_transcript = no_controller
+                .finalize_transcript(&no_build, &no_plan, &no_loads, &no_geometry)
+                .unwrap();
+            let no_row = no_transcript
+                .rows()
+                .iter()
+                .find(|row| row.kind() == FinalizedDispositionKind::UnroutedNoWinner)
+                .unwrap();
+            let no_route = no_row.route().unwrap();
+            let no_reason = no_row.no_winner_reason().unwrap();
             println!(
-                "{LINE}{:016x}:{:016x}:{rows}",
+                "{LINE}{:016x}:{:016x}:{rows}|no={:016x}:{}:{}:{}:{}:{:?}",
                 transcript.digest(),
                 transcript.ordered_disposition_digest(),
+                no_transcript.digest(),
+                no_row.cadence_index(),
+                no_row.physical_contact_id(),
+                no_route.forest_digest_before,
+                no_route.controller_digest_before,
+                no_reason,
             );
             return;
         }
