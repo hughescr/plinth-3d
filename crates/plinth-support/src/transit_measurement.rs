@@ -23,16 +23,22 @@ thread_local! {
 /// participate in production control flow.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct LiveCalls {
-    local_row_allocations: usize,
-    stub_kernel_calls: usize,
-    nonstub_kernel_calls: usize,
+pub(crate) struct LiveCalls {
+    pub(crate) member_allocations: usize,
+    pub(crate) partition_allocations: usize,
+    pub(crate) evidence_allocations: usize,
+    pub(crate) local_row_allocations: usize,
+    pub(crate) stub_kernel_calls: usize,
+    pub(crate) nonstub_kernel_calls: usize,
 }
 
 #[cfg(test)]
 impl LiveCalls {
     const ZERO: Self = Self {
         local_row_allocations: 0,
+        member_allocations: 0,
+        partition_allocations: 0,
+        evidence_allocations: 0,
         stub_kernel_calls: 0,
         nonstub_kernel_calls: 0,
     };
@@ -89,6 +95,33 @@ impl TransitIntervalLimits {
             return Err(TransitIntervalError::InvalidLimits);
         }
         Ok(limits)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_scalar_cap(self, resource: &'static str, cap: usize) -> Self {
+        match resource {
+            "members" => Self {
+                max_members: cap,
+                ..self
+            },
+            "stub rows" => Self {
+                max_stub_rows: cap,
+                ..self
+            },
+            "nonstub rows" => Self {
+                max_nonstub_rows: cap,
+                ..self
+            },
+            "retained intervals" => Self {
+                max_retained_intervals: cap,
+                ..self
+            },
+            "logical peak bytes" => Self {
+                max_logical_peak_bytes: cap,
+                ..self
+            },
+            _ => panic!("unknown transit scalar cap: {resource}"),
+        }
     }
 }
 
@@ -245,6 +278,8 @@ pub(crate) fn measure(
         .map_err(|_| TransitIntervalError::ResourceLimit {
             resource: "member rows allocation",
         })?;
+    #[cfg(test)]
+    record_live_call(|calls| calls.member_allocations += 1);
     members.extend(snapshot.final_live_members());
     members.sort_unstable_by_key(|member| (member.key(), member.embed_end()));
 
@@ -255,11 +290,15 @@ pub(crate) fn measure(
         .map_err(|_| TransitIntervalError::ResourceLimit {
             resource: "stub rows allocation",
         })?;
+    #[cfg(test)]
+    record_live_call(|calls| calls.partition_allocations += 1);
     nonstubs.try_reserve_exact(plan.nonstub_rows).map_err(|_| {
         TransitIntervalError::ResourceLimit {
             resource: "nonstub rows allocation",
         }
     })?;
+    #[cfg(test)]
+    record_live_call(|calls| calls.partition_allocations += 1);
     for member in members {
         let normalized = normalize(member);
         if matches!(member.kind(), MemberKind::Stub) {
@@ -275,6 +314,8 @@ pub(crate) fn measure(
         .map_err(|_| TransitIntervalError::ResourceLimit {
             resource: "retained intervals allocation",
         })?;
+    #[cfg(test)]
+    record_live_call(|calls| calls.evidence_allocations += 1);
     collect_batch(
         &mut evidence,
         snapshot.native_surface(),
@@ -339,12 +380,6 @@ fn collect_batch(
     if members.is_empty() {
         return Ok(());
     }
-    #[cfg(test)]
-    LIVE_CALLS.with(|calls| {
-        let mut value = calls.get();
-        value.local_row_allocations += 1;
-        calls.set(value);
-    });
     let mut p0 = Vec::new();
     let mut p1 = Vec::new();
     let mut r0 = Vec::new();
@@ -355,6 +390,8 @@ fn collect_batch(
                 resource: "endpoint rows allocation",
             }
         })?;
+        #[cfg(test)]
+        record_live_call(|calls| calls.local_row_allocations += 1);
     }
     for buffer in [&mut r0, &mut r1] {
         buffer.try_reserve_exact(members.len()).map_err(|_| {
@@ -362,6 +399,8 @@ fn collect_batch(
                 resource: "radius rows allocation",
             }
         })?;
+        #[cfg(test)]
+        record_live_call(|calls| calls.local_row_allocations += 1);
     }
     for member in members {
         p0.push(member.p0);
@@ -370,14 +409,12 @@ fn collect_batch(
         r1.push(member.r1);
     }
     #[cfg(test)]
-    LIVE_CALLS.with(|calls| {
-        let mut value = calls.get();
+    record_live_call(|calls| {
         if offsets {
-            value.nonstub_kernel_calls += 1;
+            calls.nonstub_kernel_calls += 1;
         } else {
-            value.stub_kernel_calls += 1;
+            calls.stub_kernel_calls += 1;
         }
-        calls.set(value);
     });
     let rows = surface
         .penetration_intervals_batch_bounded(
@@ -462,13 +499,22 @@ fn valid_interval(interval: &Interval, max_s: f64) -> bool {
 }
 
 #[cfg(test)]
-fn reset_live_kernel_batch_calls() {
+pub(crate) fn reset_live_kernel_batch_calls() {
     LIVE_CALLS.with(|calls| calls.set(LiveCalls::ZERO));
 }
 
 #[cfg(test)]
-fn live_calls() -> LiveCalls {
+pub(crate) fn live_calls() -> LiveCalls {
     LIVE_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+fn record_live_call(update: impl FnOnce(&mut LiveCalls)) {
+    LIVE_CALLS.with(|calls| {
+        let mut value = calls.get();
+        update(&mut value);
+        calls.set(value);
+    });
 }
 
 fn preflight(
@@ -838,9 +884,10 @@ mod tests {
         assert_eq!(
             live_calls(),
             LiveCalls {
-                local_row_allocations: 1,
+                local_row_allocations: 4,
                 stub_kernel_calls: 1,
                 nonstub_kernel_calls: 0,
+                ..LiveCalls::ZERO
             }
         );
 
@@ -852,9 +899,10 @@ mod tests {
         assert_eq!(
             live_calls(),
             LiveCalls {
-                local_row_allocations: 1,
+                local_row_allocations: 4,
                 stub_kernel_calls: 0,
                 nonstub_kernel_calls: 1,
+                ..LiveCalls::ZERO
             }
         );
     }
@@ -1049,9 +1097,10 @@ mod tests {
             assert_eq!(
                 live_calls(),
                 LiveCalls {
-                    local_row_allocations: 1,
+                    local_row_allocations: 4,
                     stub_kernel_calls: 0,
-                    nonstub_kernel_calls: 1
+                    nonstub_kernel_calls: 1,
+                    ..LiveCalls::ZERO
                 },
                 "{name} refusal enters only the nonstub kernel once"
             );
@@ -1146,9 +1195,10 @@ mod tests {
             assert_eq!(
                 live_calls(),
                 LiveCalls {
-                    local_row_allocations: 1,
+                    local_row_allocations: 4,
                     stub_kernel_calls: 1,
-                    nonstub_kernel_calls: 0
+                    nonstub_kernel_calls: 0,
+                    ..LiveCalls::ZERO
                 },
                 "stub {name} refusal enters only the stub kernel once"
             );

@@ -3108,6 +3108,10 @@ fn hash_member_spec(hash: &mut Fnv, spec: &MemberSpec) {
 mod tests {
     use std::{mem::size_of, path::PathBuf, process::Command};
 
+    use crate::transit_measurement::{
+        live_calls, reset_live_kernel_batch_calls, LiveCalls, TransitIntervalError,
+        TransitIntervalLimits,
+    };
     use crate::CoverageMeasurementLimits;
     use plinth_core::{Finite, PositiveFinite};
     use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
@@ -3117,6 +3121,38 @@ mod tests {
 
     use super::*;
     use geom_kernel::KnnBatchLimits;
+
+    fn transit_limits(snapshot: &SupportVerificationSnapshot<'_>) -> TransitIntervalLimits {
+        let (members, stubs) =
+            snapshot
+                .final_live_members()
+                .fold((0usize, 0usize), |counts, row| {
+                    (
+                        counts.0 + 1,
+                        counts.1 + usize::from(matches!(row.kind(), MemberKind::Stub)),
+                    )
+                });
+        let nonstubs = members - stubs;
+        let surface = snapshot.native_surface();
+        let stub = surface
+            .penetration_intervals_batch_worst_case_limits(stubs.max(1), 0, 8, false)
+            .expect("sealed stub kernel requirements");
+        let nonstub = surface
+            .penetration_intervals_batch_worst_case_limits(nonstubs.max(1), 8, 8, true)
+            .expect("sealed nonstub kernel requirements");
+        TransitIntervalLimits::new(
+            members,
+            stubs.max(1),
+            nonstubs.max(1),
+            stub.max_total_intervals + nonstub.max_total_intervals,
+            usize::MAX,
+            1.0,
+            8,
+            stub,
+            nonstub,
+        )
+        .expect("explicit transit fixture limits")
+    }
 
     const GRID_BYTES: usize = 64 * 1024 * 1024;
     const TEST_KNN_LIMITS: KnnBatchLimits = KnnBatchLimits {
@@ -4477,6 +4513,153 @@ mod tests {
                 Err(SupportVerificationError::SnapshotDigestMismatch)
             );
         });
+    }
+
+    #[test]
+    fn transit_snapshot_binding_refuses_tampering_before_any_allocation_or_kernel() {
+        with_braced_table(|braced| {
+            let lowered = braced
+                .structure()
+                .expect("structures")
+                .lower()
+                .expect("lowers");
+            let mut snapshot = lowered.verification_snapshot().expect("snapshot");
+            let limits = transit_limits(&snapshot);
+            snapshot.final_live_members[0].p0_mm[0] += 1.0;
+            reset_live_kernel_batch_calls();
+            assert_eq!(
+                snapshot.transit_intervals(limits),
+                Err(TransitIntervalError::SnapshotBinding)
+            );
+            assert_eq!(live_calls(), LiveCalls::default());
+        });
+    }
+
+    #[test]
+    fn transit_rebound_surface_refuses_before_any_allocation_or_kernel() {
+        with_braced_table(|braced| {
+            let lowered = braced
+                .structure()
+                .expect("structures")
+                .lower()
+                .expect("lowers");
+            let mut snapshot = lowered.verification_snapshot().expect("snapshot");
+            let limits = transit_limits(&snapshot);
+            let rebound = NativeSurface::from_indexed(
+                snapshot.mesh.verts(),
+                snapshot.mesh.tris(),
+                NativeSurfaceConfig {
+                    grid_pitch_mm: 0.25,
+                    max_grid_bytes: usize::MAX,
+                },
+            )
+            .expect("rebound surface");
+            snapshot.surface = &rebound;
+            reset_live_kernel_batch_calls();
+            assert_eq!(
+                snapshot.transit_intervals(limits),
+                Err(TransitIntervalError::SnapshotBinding)
+            );
+            assert_eq!(live_calls(), LiveCalls::default());
+        });
+    }
+
+    #[test]
+    fn transit_scalar_caps_use_the_sealed_snapshot_entrypoint_before_allocation() {
+        with_braced_table(|braced| {
+            let lowered = braced
+                .structure()
+                .expect("structures")
+                .lower()
+                .expect("lowers");
+            let snapshot = lowered.verification_snapshot().expect("snapshot");
+            let base = transit_limits(&snapshot);
+            let exact = snapshot
+                .transit_intervals(base)
+                .expect("generous explicit limits");
+            let plan = exact.resource_plan();
+            assert_eq!(plan.members(), snapshot.final_live_members().len());
+            let exact_limits = TransitIntervalLimits::new(
+                plan.members(),
+                plan.stub_rows(),
+                plan.nonstub_rows(),
+                plan.retained_interval_capacity(),
+                plan.logical_peak_bytes(),
+                1.0,
+                8,
+                plan.stub_penetration(),
+                plan.nonstub_penetration(),
+            )
+            .expect("independent exact plan caps");
+            reset_live_kernel_batch_calls();
+            let exact_again = snapshot
+                .transit_intervals(exact_limits)
+                .expect("exact caps pass");
+            assert_eq!(exact, exact_again);
+            assert!(live_calls().member_allocations > 0);
+
+            for (resource, cap) in [
+                ("members", plan.members() - 1),
+                ("stub rows", plan.stub_rows() - 1),
+                ("nonstub rows", plan.nonstub_rows() - 1),
+                ("retained intervals", plan.retained_interval_capacity() - 1),
+                ("logical peak bytes", plan.logical_peak_bytes() - 1),
+            ] {
+                reset_live_kernel_batch_calls();
+                assert_eq!(
+                    snapshot.transit_intervals(exact_limits.with_test_scalar_cap(resource, cap)),
+                    Err(TransitIntervalError::ResourceLimit { resource })
+                );
+                assert_eq!(live_calls(), LiveCalls::default(), "{resource}");
+            }
+        });
+    }
+
+    #[test]
+    fn transit_snapshot_batch_is_identical_at_one_four_and_sixteen_threads() {
+        const TEST: &str =
+            "runner::tests::transit_snapshot_batch_is_identical_at_one_four_and_sixteen_threads";
+        if std::env::var_os("TRANSIT_SNAPSHOT_THREAD_CHILD").is_some() {
+            with_braced_table(|braced| {
+                let lowered = braced
+                    .structure()
+                    .expect("structures")
+                    .lower()
+                    .expect("lowers");
+                let snapshot = lowered.verification_snapshot().expect("snapshot");
+                let batch = snapshot
+                    .transit_intervals(transit_limits(&snapshot))
+                    .expect("sealed snapshot transit measurement");
+                assert_eq!(
+                    geom_kernel::current_threads().to_string(),
+                    std::env::var("PLINTH_THREADS").expect("thread authority")
+                );
+                println!("TRANSIT_SNAPSHOT_SIGNATURE:{batch:?}");
+            });
+            return;
+        }
+        let signatures = ["1", "4", "16"].map(|threads| {
+            let output = Command::new(std::env::current_exe().expect("test binary"))
+                .arg(TEST)
+                .arg("--exact")
+                .arg("--nocapture")
+                .env("PLINTH_THREADS", threads)
+                .env("TRANSIT_SNAPSHOT_THREAD_CHILD", "1")
+                .output()
+                .expect("thread child");
+            assert!(
+                output.status.success(),
+                "thread child {threads} failed: {output:?}"
+            );
+            String::from_utf8(output.stdout)
+                .expect("child output")
+                .lines()
+                .find(|line| line.starts_with("TRANSIT_SNAPSHOT_SIGNATURE:"))
+                .expect("one transit snapshot signature")
+                .to_owned()
+        });
+        assert_eq!(signatures[0], signatures[1]);
+        assert_eq!(signatures[0], signatures[2]);
     }
 
     #[test]
