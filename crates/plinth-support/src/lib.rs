@@ -57,6 +57,11 @@ pub(crate) mod rewire;
 pub(crate) mod runner;
 pub mod specialized;
 pub mod transient;
+#[allow(
+    dead_code,
+    reason = "crate-private raw transit evidence is reserved for the later verifier"
+)]
+pub(crate) mod transit_measurement;
 
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, SurfaceBuildError};
 use plinth_core::{m0_constants, Finite, PositiveFinite};

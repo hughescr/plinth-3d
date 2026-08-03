@@ -446,6 +446,19 @@ struct CoverageMeasurementPreflight {
 }
 
 impl<'a> SupportVerificationSnapshot<'a> {
+    /// Extract raw, bounded model-transit intervals from the sealed final
+    /// member and native-surface authorities.  This deliberately exposes no
+    /// clearance or acceptance policy.
+    pub(crate) fn transit_intervals(
+        &self,
+        limits: crate::transit_measurement::TransitIntervalLimits,
+    ) -> Result<
+        crate::transit_measurement::TransitIntervalBatch,
+        crate::transit_measurement::TransitIntervalError,
+    > {
+        crate::transit_measurement::measure(self, limits)
+    }
+
     fn measurement_preflight(
         &self,
         limits: crate::CoverageMeasurementLimits,
