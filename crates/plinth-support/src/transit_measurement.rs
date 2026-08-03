@@ -4,7 +4,7 @@
 //! an interval nor assigns a clearance, gate, report, certificate, or defect.
 
 use geom_kernel::{capsule_rays, Interval, PenetrationBatchLimits, SurfaceTriangleSoupDigest};
-use plinth_core::{ConstantDescriptor, ConstantId, DecisionId, M0Constants};
+use plinth_core::{m0_constants, ConstantDescriptor, ConstantId, DecisionId, M0Constants};
 use thiserror::Error;
 
 use crate::{
@@ -597,12 +597,24 @@ pub(crate) struct AnchoredTransitCrossing {
 }
 
 impl AnchoredTransitCrossing {
-    pub(crate) const fn raw_index(&self) -> usize { self.raw_index }
-    pub(crate) const fn s_a_mm(&self) -> f64 { self.s_a_mm }
-    pub(crate) const fn s_b_mm(&self) -> f64 { self.s_b_mm }
-    pub(crate) const fn chord_mm(&self) -> f64 { self.chord_mm }
-    pub(crate) const fn is_tip_candidate(&self) -> bool { self.is_tip_candidate }
-    pub(crate) const fn below_minimum_length(&self) -> bool { self.below_minimum_length }
+    pub(crate) const fn raw_index(&self) -> usize {
+        self.raw_index
+    }
+    pub(crate) const fn s_a_mm(&self) -> f64 {
+        self.s_a_mm
+    }
+    pub(crate) const fn s_b_mm(&self) -> f64 {
+        self.s_b_mm
+    }
+    pub(crate) const fn chord_mm(&self) -> f64 {
+        self.chord_mm
+    }
+    pub(crate) const fn is_tip_candidate(&self) -> bool {
+        self.is_tip_candidate
+    }
+    pub(crate) const fn below_minimum_length(&self) -> bool {
+        self.below_minimum_length
+    }
 }
 
 /// Immutable, full-resolution anchoring of one exact raw interval batch.
@@ -616,10 +628,18 @@ pub(crate) struct AnchoredTransitBatch {
 }
 
 impl AnchoredTransitBatch {
-    pub(crate) const fn snapshot_digest(&self) -> u64 { self.snapshot_digest }
-    pub(crate) const fn member_digest(&self) -> u64 { self.member_digest }
-    pub(crate) const fn surface_digest(&self) -> SurfaceTriangleSoupDigest { self.surface_digest }
-    pub(crate) fn members(&self) -> &[AnchoredTransitMember] { &self.members }
+    pub(crate) const fn snapshot_digest(&self) -> u64 {
+        self.snapshot_digest
+    }
+    pub(crate) const fn member_digest(&self) -> u64 {
+        self.member_digest
+    }
+    pub(crate) const fn surface_digest(&self) -> SurfaceTriangleSoupDigest {
+        self.surface_digest
+    }
+    pub(crate) fn members(&self) -> &[AnchoredTransitMember] {
+        &self.members
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
@@ -789,11 +809,14 @@ pub(crate) fn anchor(
         return Err(TransitIntervalError::AnchorBatchBinding);
     }
     let policy = TransitAnchorPolicySnapshot::from_constants(
-        &m0_constants().map_err(|_| TransitIntervalError::PolicyBinding { id: "M0" })?,
+        m0_constants().map_err(|_| TransitIntervalError::PolicyBinding { id: "M0" })?,
     )?;
     let mut members = snapshot.final_live_members().collect::<Vec<_>>();
     members.sort_unstable_by_key(|member| (member.key(), member.embed_end()));
-    if members.windows(2).any(|pair| pair[0].key() == pair[1].key()) {
+    if members
+        .windows(2)
+        .any(|pair| pair[0].key() == pair[1].key())
+    {
         return Err(TransitIntervalError::AnchorEvidence);
     }
 
@@ -802,7 +825,7 @@ pub(crate) fn anchor(
     for member in members {
         let normalized = normalize(member);
         let offsets = !matches!(member.kind(), MemberKind::Stub);
-        let rays = capsule_rays(
+        let mut rays = capsule_rays(
             normalized.p0,
             normalized.p1,
             normalized.r0,
@@ -831,8 +854,11 @@ pub(crate) fn anchor(
                 }
                 interval_index += 1;
             }
-            let crossings =
-                anchor_crossings(member.embed_end(), &policy, &batch.intervals[begin..interval_index]);
+            let crossings = anchor_crossings(
+                member.embed_end(),
+                &policy,
+                &batch.intervals[begin..interval_index],
+            );
             anchored_rays.push(AnchoredTransitRay {
                 ray: ray.label(),
                 length_mm: ray.length_mm(),
@@ -1249,9 +1275,15 @@ mod tests {
                 &policy,
                 &[raw_interval(0.0, chord_mm), raw_interval(0.2, 0.4)],
             );
-            assert!(rows[0].is_tip_candidate(), "{chord_mm} mm first sliver anchors");
+            assert!(
+                rows[0].is_tip_candidate(),
+                "{chord_mm} mm first sliver anchors"
+            );
             assert!(rows[0].below_minimum_length());
-            assert!(!rows[1].is_tip_candidate(), "later transit is never promoted");
+            assert!(
+                !rows[1].is_tip_candidate(),
+                "later transit is never promoted"
+            );
             assert!(!rows[1].below_minimum_length());
         }
     }
@@ -1271,14 +1303,16 @@ mod tests {
         );
         assert!(rows[0].is_tip_candidate());
         assert!(!rows[1].is_tip_candidate());
-        assert!(rows[0].below_minimum_length(), "the <= boundary is excluded from the count");
-        let one_ulp_over = f64::from_bits(boundary.to_bits() + 1);
-        let rows = anchor_crossings(
-            None,
-            &policy,
-            &[raw_interval(0.2, 0.2 + one_ulp_over)],
+        assert!(
+            rows[0].below_minimum_length(),
+            "the <= boundary is excluded from the count"
         );
-        assert!(!rows[0].is_tip_candidate(), "an undesigned end has no tip slot");
+        let one_ulp_over = f64::from_bits(boundary.to_bits() + 1);
+        let rows = anchor_crossings(None, &policy, &[raw_interval(0.0, one_ulp_over)]);
+        assert!(
+            !rows[0].is_tip_candidate(),
+            "an undesigned end has no tip slot"
+        );
         assert!(!rows[0].below_minimum_length());
     }
 
