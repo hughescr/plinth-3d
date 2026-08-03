@@ -504,6 +504,124 @@ impl TransitIntervalBatch {
     }
 }
 
+/// Recorded policy material used solely to anchor and census raw intervals.
+///
+/// These remain separate descriptors even though the present diagnostic values
+/// happen to agree: anchoring is governed by `TOL_MM`, while the post-anchor
+/// population cutoff is governed by `MIN_ILLEGAL_LEN_MM`.
+#[derive(Clone, Debug, PartialEq)]
+struct TransitAnchorPolicySnapshot {
+    interval_tol_descriptor: ConstantDescriptor,
+    min_illegal_descriptor: ConstantDescriptor,
+    interval_tol_mm: f64,
+    min_illegal_len_mm: f64,
+}
+
+impl TransitAnchorPolicySnapshot {
+    fn from_constants(constants: &M0Constants) -> Result<Self, TransitIntervalError> {
+        let descriptor = |id| {
+            constants
+                .registry()
+                .get(&ConstantId::from(id))
+                .cloned()
+                .ok_or(TransitIntervalError::PolicyBinding { id })
+        };
+        let interval_tol_descriptor = descriptor("TOL_MM")?;
+        let min_illegal_descriptor = descriptor("MIN_ILLEGAL_LEN_MM")?;
+        Ok(Self {
+            interval_tol_mm: constants
+                .scar_area_cap_policy()
+                .interval_tol_mm()
+                .diagnostic()
+                .get(),
+            min_illegal_len_mm: constants
+                .placeholders()
+                .min_illegal_len_mm()
+                .diagnostic()
+                .get(),
+            interval_tol_descriptor,
+            min_illegal_descriptor,
+        })
+    }
+}
+
+/// One immutable normalized member retained by the post-measurement anchor.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AnchoredTransitMember {
+    member: MemberKey,
+    designed_end: Option<EmbedEnd>,
+    rays: Box<[AnchoredTransitRay]>,
+}
+
+impl AnchoredTransitMember {
+    pub(crate) const fn member(&self) -> MemberKey {
+        self.member
+    }
+    pub(crate) const fn designed_end(&self) -> Option<EmbedEnd> {
+        self.designed_end
+    }
+    pub(crate) fn rays(&self) -> &[AnchoredTransitRay] {
+        &self.rays
+    }
+}
+
+/// One canonical ray and its complete raw crossing population.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AnchoredTransitRay {
+    ray: i32,
+    length_mm: f64,
+    crossings: Box<[AnchoredTransitCrossing]>,
+}
+
+impl AnchoredTransitRay {
+    pub(crate) const fn ray(&self) -> i32 {
+        self.ray
+    }
+    pub(crate) const fn length_mm(&self) -> f64 {
+        self.length_mm
+    }
+    pub(crate) fn crossings(&self) -> &[AnchoredTransitCrossing] {
+        &self.crossings
+    }
+}
+
+/// One raw interval, with only its local anchor and minimum-length disposition.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct AnchoredTransitCrossing {
+    raw_index: usize,
+    s_a_mm: f64,
+    s_b_mm: f64,
+    chord_mm: f64,
+    is_tip_candidate: bool,
+    below_minimum_length: bool,
+}
+
+impl AnchoredTransitCrossing {
+    pub(crate) const fn raw_index(&self) -> usize { self.raw_index }
+    pub(crate) const fn s_a_mm(&self) -> f64 { self.s_a_mm }
+    pub(crate) const fn s_b_mm(&self) -> f64 { self.s_b_mm }
+    pub(crate) const fn chord_mm(&self) -> f64 { self.chord_mm }
+    pub(crate) const fn is_tip_candidate(&self) -> bool { self.is_tip_candidate }
+    pub(crate) const fn below_minimum_length(&self) -> bool { self.below_minimum_length }
+}
+
+/// Immutable, full-resolution anchoring of one exact raw interval batch.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AnchoredTransitBatch {
+    snapshot_digest: u64,
+    member_digest: u64,
+    surface_digest: SurfaceTriangleSoupDigest,
+    policy: TransitAnchorPolicySnapshot,
+    members: Box<[AnchoredTransitMember]>,
+}
+
+impl AnchoredTransitBatch {
+    pub(crate) const fn snapshot_digest(&self) -> u64 { self.snapshot_digest }
+    pub(crate) const fn member_digest(&self) -> u64 { self.member_digest }
+    pub(crate) const fn surface_digest(&self) -> SurfaceTriangleSoupDigest { self.surface_digest }
+    pub(crate) fn members(&self) -> &[AnchoredTransitMember] { &self.members }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub(crate) enum TransitIntervalError {
     #[error("transit interval limits are invalid")]
@@ -518,6 +636,12 @@ pub(crate) enum TransitIntervalError {
     KernelRefusal,
     #[error("geometry kernel returned corrupt transit intervals")]
     CorruptKernelResult,
+    #[error("transit anchor policy registry descriptor is absent: {id}")]
+    PolicyBinding { id: &'static str },
+    #[error("transit anchor batch is not bound to this snapshot")]
+    AnchorBatchBinding,
+    #[error("transit anchor member or ray evidence is corrupt")]
+    AnchorEvidence,
 }
 
 #[derive(Clone, Copy)]
@@ -631,6 +755,142 @@ pub(crate) fn measure(
         resource_plan: plan,
         intervals: evidence.into_boxed_slice(),
     })
+}
+
+/// Anchor and census an already-measured batch without issuing any surface
+/// query.  The batch must be bound to this exact sealed snapshot, its final
+/// members, its native surface, and its recorded resource plan.
+pub(crate) fn anchor(
+    snapshot: &SupportVerificationSnapshot<'_>,
+    batch: &TransitIntervalBatch,
+) -> Result<AnchoredTransitBatch, TransitIntervalError> {
+    snapshot
+        .validate_integrity()
+        .map_err(|_| TransitIntervalError::AnchorBatchBinding)?;
+    let member_count = snapshot.final_live_members().len();
+    let stub_count = snapshot
+        .final_live_members()
+        .filter(|member| matches!(member.kind(), MemberKind::Stub))
+        .count();
+    if batch.snapshot_digest != snapshot.digest()
+        || batch.member_digest != member_digest(snapshot.final_live_members())
+        || batch.surface_digest != snapshot.native_surface().source_triangle_soup_digest()
+        || batch.resource_plan.members != member_count
+        || batch.resource_plan.stub_rows != stub_count
+        || batch.resource_plan.nonstub_rows != member_count - stub_count
+        || batch
+            .resource_plan
+            .stub_penetration
+            .max_total_intervals
+            .checked_add(batch.resource_plan.nonstub_penetration.max_total_intervals)
+            != Some(batch.resource_plan.retained_interval_capacity)
+        || batch.intervals.len() > batch.resource_plan.retained_interval_capacity()
+    {
+        return Err(TransitIntervalError::AnchorBatchBinding);
+    }
+    let policy = TransitAnchorPolicySnapshot::from_constants(
+        &m0_constants().map_err(|_| TransitIntervalError::PolicyBinding { id: "M0" })?,
+    )?;
+    let mut members = snapshot.final_live_members().collect::<Vec<_>>();
+    members.sort_unstable_by_key(|member| (member.key(), member.embed_end()));
+    if members.windows(2).any(|pair| pair[0].key() == pair[1].key()) {
+        return Err(TransitIntervalError::AnchorEvidence);
+    }
+
+    let mut interval_index = 0usize;
+    let mut anchored_members = Vec::with_capacity(members.len());
+    for member in members {
+        let normalized = normalize(member);
+        let offsets = !matches!(member.kind(), MemberKind::Stub);
+        let rays = capsule_rays(
+            normalized.p0,
+            normalized.p1,
+            normalized.r0,
+            normalized.r1,
+            OFFSET_RAYS,
+            offsets,
+        );
+        let mut anchored_rays = Vec::with_capacity(usize::from(offsets) * OFFSET_RAYS + 1);
+        while let Some(ray) = rays.next() {
+            let begin = interval_index;
+            while let Some(interval) = batch.intervals.get(interval_index) {
+                let key = (interval.member, interval.designed_end, interval.ray);
+                let expected = (member.key(), member.embed_end(), ray.label());
+                if key < expected {
+                    return Err(TransitIntervalError::AnchorEvidence);
+                }
+                if key > expected {
+                    break;
+                }
+                if !valid_transit_batch_interval(interval, ray.length_mm())
+                    || (interval_index > begin
+                        && (batch.intervals[interval_index - 1].s_b_mm > interval.s_a_mm
+                            || batch.intervals[interval_index - 1] == *interval))
+                {
+                    return Err(TransitIntervalError::AnchorEvidence);
+                }
+                interval_index += 1;
+            }
+            let crossings =
+                anchor_crossings(member.embed_end(), &policy, &batch.intervals[begin..interval_index]);
+            anchored_rays.push(AnchoredTransitRay {
+                ray: ray.label(),
+                length_mm: ray.length_mm(),
+                crossings,
+            });
+        }
+        anchored_members.push(AnchoredTransitMember {
+            member: member.key(),
+            designed_end: member.embed_end(),
+            rays: anchored_rays.into_boxed_slice(),
+        });
+    }
+    if interval_index != batch.intervals.len() {
+        return Err(TransitIntervalError::AnchorEvidence);
+    }
+    Ok(AnchoredTransitBatch {
+        snapshot_digest: batch.snapshot_digest,
+        member_digest: batch.member_digest,
+        surface_digest: batch.surface_digest,
+        policy,
+        members: anchored_members.into_boxed_slice(),
+    })
+}
+
+fn anchor_crossings(
+    designed_end: Option<EmbedEnd>,
+    policy: &TransitAnchorPolicySnapshot,
+    intervals: &[TransitRayInterval],
+) -> Box<[AnchoredTransitCrossing]> {
+    intervals
+        .iter()
+        .enumerate()
+        .map(|(raw_index, interval)| {
+            let chord_mm = interval.s_b_mm - interval.s_a_mm;
+            // This test intentionally precedes the length cutoff. A short
+            // first interval consumes the only tip slot; a later interval can
+            // never be promoted into it.
+            AnchoredTransitCrossing {
+                raw_index,
+                s_a_mm: interval.s_a_mm,
+                s_b_mm: interval.s_b_mm,
+                chord_mm,
+                is_tip_candidate: designed_end.is_some()
+                    && raw_index == 0
+                    && interval.s_a_mm <= policy.interval_tol_mm,
+                below_minimum_length: chord_mm <= policy.min_illegal_len_mm,
+            }
+        })
+        .collect::<Vec<_>>()
+        .into_boxed_slice()
+}
+
+fn valid_transit_batch_interval(interval: &TransitRayInterval, ray_length_mm: f64) -> bool {
+    interval.s_a_mm.is_finite()
+        && interval.s_b_mm.is_finite()
+        && interval.s_a_mm >= 0.0
+        && interval.s_a_mm <= interval.s_b_mm
+        && interval.s_b_mm <= ray_length_mm
 }
 
 fn normalize(member: &FinalLiveMemberEvidence) -> NormalizedMember<'_> {
@@ -963,6 +1223,63 @@ mod tests {
     fn scar_policy() -> TransitPolicySnapshot {
         TransitPolicySnapshot::from_constants(m0_constants().expect("M0 constants"))
             .expect("SCAR registry descriptors")
+    }
+
+    fn anchor_policy() -> TransitAnchorPolicySnapshot {
+        TransitAnchorPolicySnapshot::from_constants(m0_constants().expect("M0 constants"))
+            .expect("anchor registry descriptors")
+    }
+
+    fn raw_interval(s_a_mm: f64, s_b_mm: f64) -> TransitRayInterval {
+        TransitRayInterval {
+            member: MemberKey::transit_test_fixture(1, 0),
+            designed_end: Some(EmbedEnd::Terminalward),
+            ray: -1,
+            s_a_mm,
+            s_b_mm,
+        }
+    }
+
+    #[test]
+    fn anchor_keeps_the_first_tip_slot_before_the_post_anchor_length_cutoff() {
+        let policy = anchor_policy();
+        for chord_mm in [0.005, 0.031] {
+            let rows = anchor_crossings(
+                Some(EmbedEnd::Terminalward),
+                &policy,
+                &[raw_interval(0.0, chord_mm), raw_interval(0.2, 0.4)],
+            );
+            assert!(rows[0].is_tip_candidate(), "{chord_mm} mm first sliver anchors");
+            assert!(rows[0].below_minimum_length());
+            assert!(!rows[1].is_tip_candidate(), "later transit is never promoted");
+            assert!(!rows[1].below_minimum_length());
+        }
+    }
+
+    #[test]
+    fn anchor_is_first_only_and_uses_the_recorded_inclusive_minimum_boundary() {
+        let policy = anchor_policy();
+        let boundary = policy.min_illegal_len_mm;
+        let rows = anchor_crossings(
+            Some(EmbedEnd::Rootward),
+            &policy,
+            &[
+                raw_interval(policy.interval_tol_mm, policy.interval_tol_mm + boundary),
+                raw_interval(policy.interval_tol_mm, policy.interval_tol_mm + 0.2),
+                raw_interval(0.4, 0.6),
+            ],
+        );
+        assert!(rows[0].is_tip_candidate());
+        assert!(!rows[1].is_tip_candidate());
+        assert!(rows[0].below_minimum_length(), "the <= boundary is excluded from the count");
+        let one_ulp_over = f64::from_bits(boundary.to_bits() + 1);
+        let rows = anchor_crossings(
+            None,
+            &policy,
+            &[raw_interval(0.2, 0.2 + one_ulp_over)],
+        );
+        assert!(!rows[0].is_tip_candidate(), "an undesigned end has no tip slot");
+        assert!(!rows[0].below_minimum_length());
     }
 
     #[allow(clippy::too_many_arguments)]

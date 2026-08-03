@@ -478,6 +478,18 @@ impl<'a> SupportVerificationSnapshot<'a> {
         crate::transit_measurement::measure(self, limits)
     }
 
+    /// Anchors a previously extracted raw interval batch to the same sealed
+    /// snapshot. This performs no native-surface query and makes no verdict.
+    pub(crate) fn anchor_transit_intervals(
+        &self,
+        batch: &crate::transit_measurement::TransitIntervalBatch,
+    ) -> Result<
+        crate::transit_measurement::AnchoredTransitBatch,
+        crate::transit_measurement::TransitIntervalError,
+    > {
+        crate::transit_measurement::anchor(self, batch)
+    }
+
     fn measurement_preflight(
         &self,
         limits: crate::CoverageMeasurementLimits,
