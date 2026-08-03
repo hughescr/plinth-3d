@@ -95,6 +95,7 @@ pub(crate) struct LoweredSupportPlan {
     live_view_digest: u64,
     frame_bits: [u64; 2],
     primitives: Vec<SupportPrimitive>,
+    member_keys: Vec<MemberKey>,
     support_primitive_count: usize,
     raft_primitive_count: usize,
     digest: ContentDigest,
@@ -129,6 +130,9 @@ impl LoweredSupportPlan {
         {
             return Err(LoweringError::StaleAuthority);
         }
+        if self.member_keys != view.keys() {
+            return Err(LoweringError::StaleAuthority);
+        }
         Ok(&self.primitives)
     }
 
@@ -142,6 +146,10 @@ impl LoweredSupportPlan {
 
     pub(crate) const fn digest(&self) -> ContentDigest {
         self.digest
+    }
+
+    pub(crate) fn member_keys(&self) -> &[MemberKey] {
+        &self.member_keys
     }
 }
 
@@ -203,9 +211,11 @@ pub(crate) fn lower_current(
     }
 
     let mut primitives = Vec::with_capacity(total);
+    let mut member_keys = Vec::with_capacity(view.keys().len());
     for key in view.keys() {
         let member = forest.member(*key).ok_or(LoweringError::StaleAuthority)?;
         lower_member(*key, member, config, &mut primitives)?;
+        member_keys.push(*key);
     }
     for ball in balls {
         let geometry = SphereGeometry::joint(ball.center_mm());
@@ -240,6 +250,7 @@ pub(crate) fn lower_current(
             config.frame.lift_mm().get().to_bits(),
         ],
         primitives,
+        member_keys,
         support_primitive_count: support_count,
         raft_primitive_count: raft_count,
         digest,

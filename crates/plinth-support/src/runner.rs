@@ -75,7 +75,9 @@ use crate::{
     },
     coverage_measurement_assessment_resource_plan,
     dyadic::CandidatePayloadConfig,
-    forest::{EmbedEnd, Forest, MemberKind, MemberSpec, Owner, TerminalLedgerState},
+    forest::{
+        EmbedEnd, Forest, Member, MemberKey, MemberKind, MemberSpec, Owner, TerminalLedgerState,
+    },
     initial::{
         build_initial_contacts, ContactConstructionLimits, InitialContactBuild, InitialContactError,
     },
@@ -245,6 +247,66 @@ pub struct RoutedPhysicalContactEvidence<'a> {
     contact: &'a crate::specialized::SpecializedPhysicalContact,
 }
 
+/// Immutable geometry of one member in the exact final live support view.
+///
+/// This is verification evidence, not a planning input: it has no public
+/// constructor and deliberately exposes neither a forest nor any mutation
+/// seam.  `p0` is terminalward, `p1` is rootward, and their radii retain that
+/// same orientation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FinalLiveMemberEvidence {
+    key: MemberKey,
+    p0_mm: [f64; 3],
+    p1_mm: [f64; 3],
+    r0_mm: f64,
+    r1_mm: f64,
+    kind: MemberKind,
+    embed_end: Option<EmbedEnd>,
+}
+
+impl FinalLiveMemberEvidence {
+    fn from_member(key: MemberKey, member: &Member) -> Self {
+        Self {
+            key,
+            p0_mm: member.p0_mm().map(Finite::get),
+            p1_mm: member.p1_mm().map(Finite::get),
+            r0_mm: member.terminal_radius_mm().get().get(),
+            r1_mm: member.rootward_radius_mm().get().get(),
+            kind: member.kind().clone(),
+            embed_end: member.embed_end(),
+        }
+    }
+
+    #[must_use]
+    pub const fn key(&self) -> MemberKey {
+        self.key
+    }
+    #[must_use]
+    pub const fn p0_mm(&self) -> [f64; 3] {
+        self.p0_mm
+    }
+    #[must_use]
+    pub const fn p1_mm(&self) -> [f64; 3] {
+        self.p1_mm
+    }
+    #[must_use]
+    pub const fn terminal_radius_mm(&self) -> f64 {
+        self.r0_mm
+    }
+    #[must_use]
+    pub const fn rootward_radius_mm(&self) -> f64 {
+        self.r1_mm
+    }
+    #[must_use]
+    pub const fn kind(&self) -> &MemberKind {
+        &self.kind
+    }
+    #[must_use]
+    pub const fn embed_end(&self) -> Option<EmbedEnd> {
+        self.embed_end
+    }
+}
+
 impl RoutedPhysicalContactEvidence<'_> {
     #[must_use]
     pub const fn physical_contact_id(&self) -> u64 {
@@ -311,16 +373,19 @@ pub enum SupportVerificationError {
 /// This exposes neither planning state nor mutable routing state. Its contact
 /// iterator contains exactly the contacts whose terminal disposition is
 /// `Routed`; quarantined and no-winner terminals are intentionally absent.
-#[derive(Debug)]
 pub struct SupportVerificationSnapshot<'a> {
     mesh: &'a Mesh,
     topology: &'a FaceTopology,
+    // The final snapshot borrows the single native surface retained by the
+    // support context.  It never reconstructs an index from mesh arrays.
+    surface: &'a NativeSurface,
     coverage_samples: &'a [CoverageSample],
     // The canonical planner-owned registry is retained separately from
     // samples. A source face can be a member of several named islands.
     named_islands: &'a [SupportIsland],
     routed_contacts: Vec<RoutedPhysicalContactEvidence<'a>>,
     routed_route_memberships: Vec<RoutedRouteMembership<'a>>,
+    final_live_members: Vec<FinalLiveMemberEvidence>,
     mesh_digest: &'a str,
     topology_digest: &'a str,
     plan_digest: u64,
@@ -333,7 +398,29 @@ pub struct SupportVerificationSnapshot<'a> {
     named_islands_digest: u64,
     lowered_primitives_digest: u64,
     routed_projection_digest: u64,
+    final_live_members_digest: u64,
     snapshot_digest: u64,
+}
+
+impl std::fmt::Debug for SupportVerificationSnapshot<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SupportVerificationSnapshot")
+            .field("mesh_digest", &self.mesh_digest)
+            .field("topology_digest", &self.topology_digest)
+            .field("routed_contacts", &self.routed_contacts)
+            .field("final_live_members", &self.final_live_members)
+            .field("plan_digest", &self.plan_digest)
+            .field("load_digest", &self.load_digest)
+            .field("geometry_digest", &self.geometry_digest)
+            .field("forest_digest", &self.forest_digest)
+            .field("transcript_digest", &self.transcript_digest)
+            .field("lowered_primitives_digest", &self.lowered_primitives_digest)
+            .field("routed_projection_digest", &self.routed_projection_digest)
+            .field("final_live_members_digest", &self.final_live_members_digest)
+            .field("snapshot_digest", &self.snapshot_digest)
+            .finish()
+    }
 }
 
 /// Scalar accounting gathered from sealed evidence before measurement creates
@@ -809,6 +896,19 @@ impl<'a> SupportVerificationSnapshot<'a> {
         self.coverage_samples
     }
 
+    /// The exact retained native query surface bound to this snapshot.
+    #[must_use]
+    pub const fn native_surface(&self) -> &'a NativeSurface {
+        self.surface
+    }
+
+    #[must_use]
+    pub fn final_live_members(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &FinalLiveMemberEvidence> + '_ {
+        self.final_live_members.iter()
+    }
+
     pub fn routed_contacts(
         &self,
     ) -> impl ExactSizeIterator<Item = RoutedPhysicalContactEvidence<'a>> + '_ {
@@ -825,9 +925,12 @@ impl<'a> SupportVerificationSnapshot<'a> {
     pub fn validate_integrity(&self) -> Result<(), SupportVerificationError> {
         let mesh_digest = mesh_fingerprint(self.mesh)
             .map_err(|_| SupportVerificationError::TopologyMeshMismatch)?;
+        let geometry = AnchorGeometryAuthority::new(self.mesh, self.topology, self.surface)
+            .map_err(|_| SupportVerificationError::TopologyMeshMismatch)?;
         if mesh_digest != self.mesh_digest
             || self.topology.mesh_fingerprint() != self.mesh_digest
             || self.topology.content_digest() != self.topology_digest
+            || geometry.digest() != self.geometry_digest
             || plinth_mesh::validate_face_topology(self.topology).is_err()
             || coverage_samples_digest(self.coverage_samples) != self.coverage_digest
             || named_islands_digest(self.named_islands) != self.named_islands_digest
@@ -846,6 +949,7 @@ impl<'a> SupportVerificationSnapshot<'a> {
             )
             || routed_projection_digest(&self.routed_route_memberships)
                 != self.routed_projection_digest
+            || final_live_members_digest(&self.final_live_members) != self.final_live_members_digest
             || verification_snapshot_digest(self) != self.snapshot_digest
         {
             return Err(SupportVerificationError::SnapshotDigestMismatch);
@@ -1911,13 +2015,41 @@ impl LoweredSupportRun<'_> {
             });
         }
         let routed_projection_digest = routed_projection_digest(&routed_route_memberships);
+        // This is the sole member gather for verification.  The filtered view
+        // was already used to validate joints, raft, and lowering; retired,
+        // quarantined, and otherwise excluded slots cannot enter this slice.
+        let final_live_members = self
+            .structured
+            .live_view
+            .keys()
+            .iter()
+            .map(|key| {
+                self.structured
+                    .braced
+                    .plan
+                    .forest
+                    .member(*key)
+                    .map(|member| FinalLiveMemberEvidence::from_member(*key, member))
+                    .ok_or(SupportVerificationError::AuthorityMismatch)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if final_live_members
+            .iter()
+            .map(FinalLiveMemberEvidence::key)
+            .ne(self.lowered.member_keys().iter().copied())
+        {
+            return Err(SupportVerificationError::AuthorityMismatch.into());
+        }
+        let final_live_members_digest = final_live_members_digest(&final_live_members);
         let snapshot = SupportVerificationSnapshot {
             mesh: context.mesh(),
             topology: &context.topology,
+            surface: &context.surface,
             coverage_samples: plan.coverage_samples(),
             named_islands: plan.islands(),
             routed_contacts,
             routed_route_memberships,
+            final_live_members,
             mesh_digest: context.digests.mesh(),
             topology_digest: context.topology.content_digest(),
             plan_digest: plan.digest(),
@@ -1930,6 +2062,7 @@ impl LoweredSupportRun<'_> {
             named_islands_digest: named_islands_digest(plan.islands()),
             lowered_primitives_digest: self.lowered.digest().0,
             routed_projection_digest,
+            final_live_members_digest,
             snapshot_digest: 0,
         };
         let snapshot_digest = verification_snapshot_digest(&snapshot);
@@ -2767,6 +2900,40 @@ fn routed_projection_digest(memberships: &[RoutedRouteMembership<'_>]) -> u64 {
     hash.finish()
 }
 
+fn final_live_members_digest(members: &[FinalLiveMemberEvidence]) -> u64 {
+    let mut hash = Fnv::new();
+    hash.usize(members.len());
+    for member in members {
+        hash.u32(member.key.slot());
+        hash.u32(member.key.generation());
+        for value in member.p0_mm {
+            hash.f64(value);
+        }
+        for value in member.p1_mm {
+            hash.f64(value);
+        }
+        hash.f64(member.r0_mm);
+        hash.f64(member.r1_mm);
+        match &member.kind {
+            MemberKind::Stub => hash.byte(0),
+            MemberKind::Shoot => hash.byte(1),
+            MemberKind::Trunk => hash.byte(2),
+            MemberKind::Strut => hash.byte(3),
+            MemberKind::Brace => hash.byte(4),
+            MemberKind::Other(label) => {
+                hash.byte(5);
+                hash.bytes(label.as_bytes());
+            }
+        }
+        hash.byte(match member.embed_end {
+            None => 0,
+            Some(EmbedEnd::Terminalward) => 1,
+            Some(EmbedEnd::Rootward) => 2,
+        });
+    }
+    hash.finish()
+}
+
 fn verification_snapshot_digest(snapshot: &SupportVerificationSnapshot<'_>) -> u64 {
     let mut hash = Fnv::new();
     hash.bytes(snapshot.mesh_digest.as_bytes());
@@ -2781,9 +2948,11 @@ fn verification_snapshot_digest(snapshot: &SupportVerificationSnapshot<'_>) -> u
     hash.u64(snapshot.named_islands_digest);
     hash.u64(snapshot.lowered_primitives_digest);
     hash.u64(snapshot.routed_projection_digest);
+    hash.u64(snapshot.final_live_members_digest);
     hash.usize(snapshot.coverage_samples.len());
     hash.usize(snapshot.named_islands.len());
     hash.usize(snapshot.routed_contacts.len());
+    hash.usize(snapshot.final_live_members.len());
     hash.finish()
 }
 
@@ -4136,6 +4305,53 @@ mod tests {
                 snapshot.named_islands,
                 snapshot.topology,
             ));
+            let expected_members = lowered
+                .structured
+                .live_view
+                .keys()
+                .iter()
+                .map(|key| {
+                    let member = lowered
+                        .structured
+                        .braced
+                        .plan
+                        .forest
+                        .member(*key)
+                        .expect("final live view never contains a tombstoned key");
+                    (
+                        *key,
+                        member.p0_mm().map(Finite::get),
+                        member.p1_mm().map(Finite::get),
+                        member.terminal_radius_mm().get().get(),
+                        member.rootward_radius_mm().get().get(),
+                        member.kind().clone(),
+                        member.embed_end(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let actual_members = snapshot
+                .final_live_members()
+                .map(|member| {
+                    (
+                        member.key(),
+                        member.p0_mm(),
+                        member.p1_mm(),
+                        member.terminal_radius_mm(),
+                        member.rootward_radius_mm(),
+                        member.kind().clone(),
+                        member.embed_end(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(actual_members, expected_members);
+            assert_eq!(
+                actual_members
+                    .iter()
+                    .map(|member| member.0)
+                    .collect::<Vec<_>>(),
+                lowered.lowered.member_keys(),
+                "the sealed member order is exactly the lowered member order"
+            );
             snapshot
                 .validate_integrity()
                 .expect("borrowed snapshot remains bound to retained authority");
@@ -4176,6 +4392,57 @@ mod tests {
                     .expect("finite measurement request"),
                 ),
                 Err(CoverageMeasurementError::SnapshotBinding)
+            );
+        });
+    }
+
+    #[test]
+    fn verification_snapshot_member_evidence_corruption_fails_closed() {
+        with_braced_table(|braced| {
+            let lowered = braced
+                .structure()
+                .expect("required corpus structures")
+                .lower()
+                .expect("required corpus lowers");
+            let mut snapshot = lowered
+                .verification_snapshot()
+                .expect("validated final authority snapshots");
+            let member = snapshot
+                .final_live_members
+                .first_mut()
+                .expect("corpus emits final live members");
+            member.p0_mm[0] += 1.0;
+            assert_eq!(
+                snapshot.validate_integrity(),
+                Err(SupportVerificationError::SnapshotDigestMismatch)
+            );
+        });
+    }
+
+    #[test]
+    fn verification_snapshot_rejects_rebound_native_surface() {
+        with_braced_table(|braced| {
+            let lowered = braced
+                .structure()
+                .expect("required corpus structures")
+                .lower()
+                .expect("required corpus lowers");
+            let mut snapshot = lowered
+                .verification_snapshot()
+                .expect("validated final authority snapshots");
+            let rebound = NativeSurface::from_indexed(
+                snapshot.mesh.verts(),
+                snapshot.mesh.tris(),
+                NativeSurfaceConfig {
+                    grid_pitch_mm: 0.25,
+                    max_grid_bytes: usize::MAX,
+                },
+            )
+            .expect("test surface with a distinct query configuration");
+            snapshot.surface = &rebound;
+            assert_eq!(
+                snapshot.validate_integrity(),
+                Err(SupportVerificationError::SnapshotDigestMismatch)
             );
         });
     }

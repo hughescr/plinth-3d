@@ -72,8 +72,9 @@ pub use coverage_measurement::{
 };
 pub use initial::ContactConstructionLimits;
 pub use runner::{
-    run_support, FinalSupportAuthority, RoutedPhysicalContactEvidence, SupportPreparationInput,
-    SupportRunError, SupportRunPhase, SupportVerificationError, SupportVerificationSnapshot,
+    run_support, FinalLiveMemberEvidence, FinalSupportAuthority, RoutedPhysicalContactEvidence,
+    SupportPreparationInput, SupportRunError, SupportRunPhase, SupportVerificationError,
+    SupportVerificationSnapshot,
 };
 
 /// Request data shared by the support and raft pass.
