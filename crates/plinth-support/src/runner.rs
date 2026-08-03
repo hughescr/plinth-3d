@@ -619,10 +619,19 @@ impl SupportRunContext<'_> {
         {
             return Err(SupportRewireError::GeometryDigestMismatch);
         }
+        if state.initial.initial_forest_digest() != Forest::new().digest()
+            || state.initial.post_quarantine_forest_digest() != self.digests.initial_forest
+            || !state.initial.all_terminals_registered_before_quarantine()
+        {
+            return Err(SupportRewireError::InitialAuthorityMismatch);
+        }
         state.transcript.validate_integrity()?;
         if state.transcript.plan_digest() != state.plan.digest()
             || state.transcript.finalized_load_digest() != loads.digest()
             || state.transcript.geometry_digest() != geometry.digest()
+            || state.transcript.initial_forest_digest() != state.initial.initial_forest_digest()
+            || state.transcript.initial_post_quarantine_forest_digest()
+                != state.initial.post_quarantine_forest_digest()
             || state.transcript.final_forest_digest() != state.initial.forest().digest()
             || state.transcript.final_controller_digest() != state.controller.digest()
         {
@@ -711,6 +720,8 @@ pub(crate) enum SupportRewireError {
     PlanOrLoadDigestMismatch,
     #[error("sealed rewire found stale mesh, topology, or native-surface digest authority")]
     GeometryDigestMismatch,
+    #[error("sealed rewire found stale initial-contact construction authority")]
+    InitialAuthorityMismatch,
     #[error("sealed rewire found stale finalized CCO transcript authority")]
     TranscriptDigestMismatch,
 }
@@ -1087,6 +1098,25 @@ mod tests {
         hash.finish()
     }
 
+    fn rejected_rewire_preflight(routed: &RoutedSupportRun<'_>) -> SupportRewireError {
+        let forest_digest = routed.forest().digest();
+        let geometry = routed
+            .context
+            .geometry()
+            .expect("retained geometry rebinds");
+        let loads = routed
+            .state
+            .plan
+            .finalized_loads()
+            .expect("retained plan owns finalized loads");
+        let error = routed
+            .context
+            .validate_rewire_preflight(&routed.state, &geometry, loads)
+            .expect_err("corrupt route evidence must fail before rewire mutation");
+        assert_eq!(routed.forest().digest(), forest_digest);
+        error
+    }
+
     fn translated_mesh(mesh: Mesh, offset: [f64; 3]) -> Mesh {
         Mesh::new(
             mesh.verts()
@@ -1309,6 +1339,105 @@ mod tests {
             assert!(matches!(
                 routed.rewire(),
                 Err(SupportRewireError::PlanOrLoadDigestMismatch)
+            ));
+        });
+    }
+
+    #[test]
+    fn stale_initial_forest_digest_fails_closed_before_rewire_mutation() {
+        with_prepared_table(|prepared| {
+            let mut routed = prepared
+                .route_initial_cco()
+                .expect("required corpus routes");
+            routed.state.initial.test_corrupt_initial_forest_digest();
+            assert!(matches!(
+                rejected_rewire_preflight(&routed),
+                SupportRewireError::InitialAuthorityMismatch
+            ));
+            assert!(matches!(
+                routed.rewire(),
+                Err(SupportRewireError::InitialAuthorityMismatch)
+            ));
+        });
+    }
+
+    #[test]
+    fn stale_post_quarantine_digest_fails_closed_before_rewire_mutation() {
+        with_prepared_table(|prepared| {
+            let mut routed = prepared
+                .route_initial_cco()
+                .expect("required corpus routes");
+            routed
+                .state
+                .initial
+                .test_corrupt_post_quarantine_forest_digest();
+            assert!(matches!(
+                rejected_rewire_preflight(&routed),
+                SupportRewireError::InitialAuthorityMismatch
+            ));
+            assert!(matches!(
+                routed.rewire(),
+                Err(SupportRewireError::InitialAuthorityMismatch)
+            ));
+        });
+    }
+
+    #[test]
+    fn missing_initial_registration_evidence_fails_closed_before_rewire_mutation() {
+        with_prepared_table(|prepared| {
+            let mut routed = prepared
+                .route_initial_cco()
+                .expect("required corpus routes");
+            routed
+                .state
+                .initial
+                .test_clear_terminal_registration_evidence();
+            assert!(matches!(
+                rejected_rewire_preflight(&routed),
+                SupportRewireError::InitialAuthorityMismatch
+            ));
+            assert!(matches!(
+                routed.rewire(),
+                Err(SupportRewireError::InitialAuthorityMismatch)
+            ));
+        });
+    }
+
+    #[test]
+    fn transcript_initial_forest_binding_fails_closed_before_rewire_mutation() {
+        with_prepared_table(|prepared| {
+            let mut routed = prepared
+                .route_initial_cco()
+                .expect("required corpus routes");
+            routed.state.transcript.test_rebind_initial_forest_digest();
+            assert!(matches!(
+                rejected_rewire_preflight(&routed),
+                SupportRewireError::TranscriptDigestMismatch
+            ));
+            assert!(matches!(
+                routed.rewire(),
+                Err(SupportRewireError::TranscriptDigestMismatch)
+            ));
+        });
+    }
+
+    #[test]
+    fn transcript_post_quarantine_binding_fails_closed_before_rewire_mutation() {
+        with_prepared_table(|prepared| {
+            let mut routed = prepared
+                .route_initial_cco()
+                .expect("required corpus routes");
+            routed
+                .state
+                .transcript
+                .test_rebind_initial_post_quarantine_forest_digest();
+            assert!(matches!(
+                rejected_rewire_preflight(&routed),
+                SupportRewireError::TranscriptDigestMismatch
+            ));
+            assert!(matches!(
+                routed.rewire(),
+                Err(SupportRewireError::TranscriptDigestMismatch)
             ));
         });
     }

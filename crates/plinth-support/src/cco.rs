@@ -859,6 +859,23 @@ impl FinalizedCcoTranscript {
         Ok(())
     }
 
+    #[cfg(test)]
+    /// Test-only seam that preserves the transcript's self-digest while
+    /// breaking its binding to retained initial-build evidence.
+    pub(crate) fn test_rebind_initial_forest_digest(&mut self) {
+        self.initial_forest_digest = self.initial_forest_digest.wrapping_add(1);
+        self.transcript_digest = finalized_transcript_digest(self);
+    }
+
+    #[cfg(test)]
+    /// Test-only seam that preserves the transcript's self-digest while
+    /// breaking its binding to retained initial-build evidence.
+    pub(crate) fn test_rebind_initial_post_quarantine_forest_digest(&mut self) {
+        self.initial_post_quarantine_forest_digest =
+            self.initial_post_quarantine_forest_digest.wrapping_add(1);
+        self.transcript_digest = finalized_transcript_digest(self);
+    }
+
     #[must_use]
     pub(crate) fn rows(&self) -> &[FinalizedCcoTranscriptRow] {
         &self.rows

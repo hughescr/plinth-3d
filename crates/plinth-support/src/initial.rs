@@ -167,6 +167,18 @@ impl InitialContactBuild {
     pub(crate) fn test_corrupt_initial_forest_digest(&mut self) {
         self.initial_forest_digest = self.initial_forest_digest.wrapping_add(1);
     }
+
+    #[cfg(test)]
+    /// Test-only seam for downstream stage preflight rejection.
+    pub(crate) fn test_corrupt_post_quarantine_forest_digest(&mut self) {
+        self.post_quarantine_forest_digest = self.post_quarantine_forest_digest.wrapping_add(1);
+    }
+
+    #[cfg(test)]
+    /// Test-only seam for downstream stage preflight rejection.
+    pub(crate) fn test_clear_terminal_registration_evidence(&mut self) {
+        self.all_terminals_registered_before_quarantine = false;
+    }
 }
 
 #[derive(Clone, Debug, Error, PartialEq)]
