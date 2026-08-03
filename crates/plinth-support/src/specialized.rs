@@ -3110,6 +3110,13 @@ struct CoverageRoute {
     component_id: u32,
 }
 
+struct CoverageRouteKnnPlan {
+    route: CoverageRoute,
+    source_count: usize,
+    query_count: usize,
+    knn: KnnBatchPlan,
+}
+
 fn fill_variant_nearest(
     contacts: &[WorkingContact],
     proposal: Option<&MergeProposal>,
@@ -3160,30 +3167,56 @@ fn fill_variant_nearest(
             .checked_add(1)
             .ok_or(SpecializedError::GateResourceOverflow)?;
     }
-    let total_work = source_counts
-        .iter()
-        .try_fold(0usize, |total, (route, source_ids)| {
-            let query_count = query_counts.get(route).copied().unwrap_or(0);
-            source_ids
-                .len()
-                .checked_mul(query_count)
-                .and_then(|work| total.checked_add(work))
-                .ok_or(SpecializedError::GateResourceOverflow)
-        })?;
+    let mut route_plans = Vec::with_capacity(source_counts.len());
+    let mut total_work = 0usize;
+    let mut total_memberships = 0usize;
+    let mut total_queries = 0usize;
+    let mut max_route_peak = 0usize;
+    for (route, source_ids) in &source_counts {
+        let query_count = query_counts.get(route).copied().unwrap_or(0);
+        total_memberships = total_memberships
+            .checked_add(source_ids.len())
+            .ok_or(SpecializedError::GateResourceOverflow)?;
+        let work = source_ids
+            .len()
+            .checked_mul(query_count)
+            .ok_or(SpecializedError::GateResourceOverflow)?;
+        total_work = total_work
+            .checked_add(work)
+            .ok_or(SpecializedError::GateResourceOverflow)?;
+        if source_ids.is_empty() || query_count == 0 {
+            continue;
+        }
+        total_queries = total_queries
+            .checked_add(query_count)
+            .ok_or(SpecializedError::GateResourceOverflow)?;
+        let knn = KnnBatchPlan::new(source_ids.len(), query_count, 1, limits)
+            .map_err(|error| SpecializedError::CoverageNearest(error.to_string()))?;
+        max_route_peak = max_route_peak.max(knn.logical_peak_bytes());
+        route_plans.push(CoverageRouteKnnPlan {
+            route: *route,
+            source_count: source_ids.len(),
+            query_count,
+            knn,
+        });
+    }
+    debug_assert_eq!(
+        total_memberships,
+        source_counts.values().map(BTreeSet::len).sum::<usize>()
+    );
+    debug_assert!(max_route_peak <= limits.max_logical_peak_bytes);
+    /* All route plans are now checked before any geometric gather or query. */
     if total_work > limits.max_work {
         return Err(SpecializedError::GateOperationLimit {
             required: total_work,
             limit: limits.max_work,
         });
     }
-    for (route, source_ids) in source_counts {
-        let query_count = query_counts.get(&route).copied().unwrap_or(0);
-        if source_ids.is_empty() || query_count == 0 {
-            continue;
-        }
-        let plan = KnnBatchPlan::new(source_ids.len(), query_count, 1, limits)
-            .map_err(|error| SpecializedError::CoverageNearest(error.to_string()))?;
-        let mut source_points = Vec::with_capacity(source_ids.len());
+    for route_plan in route_plans {
+        let route = route_plan.route;
+        let query_count = route_plan.query_count;
+        let plan = route_plan.knn;
+        let mut source_points = Vec::with_capacity(route_plan.source_count);
         let mut seen = BTreeSet::new();
         let mut gather = |physical_id: u64, position_mm: [f64; 3], contact: &WorkingContact| {
             if contact_serves_route(contact, route) && seen.insert(physical_id) {
