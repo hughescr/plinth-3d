@@ -6,7 +6,9 @@
 //! ordering prevents an undersized provisional radius from certifying geometry
 //! that the actually emitted support would breach.
 
-use geom_kernel::{indexed_triangle_soup_digest, NativeSurface, SurfaceTriangleSoupDigest};
+use geom_kernel::{
+    indexed_triangle_soup_digest, NativeSurface, SurfaceTriangleSoupDigest, MOLLER_PARAMETER_SLACK,
+};
 use plinth_core::{m0_constants, Finite, NonNegativeFinite, PositiveFinite};
 use plinth_mesh::{mesh_fingerprint, validate_face_topology, FaceTopology, Mesh};
 use thiserror::Error;
@@ -800,14 +802,20 @@ pub enum AnchorSeatRefusalReason {
     TooDelicate,
     TooLean,
     NoFirstHit,
+    /// The first ray hit is at the terminal's own endpoint.  This is a
+    /// candidate-local self-hit, not a malformed global anchor authority.
+    ZeroLengthSnappedAnchor,
     NearerNonExteriorObstruction,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AnchorSeatRefusal {
     pub sample_index: usize,
     pub source_sample_face_id: u32,
     pub reason: AnchorSeatRefusalReason,
+    /// Native first-hit evidence is retained when discovery reached the ray
+    /// result. Pre-query qualification refusals have no such measurement.
+    pub first_hit_t: Option<Finite>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -988,6 +996,7 @@ fn discover_anchor_seats_bound(
                 sample_index,
                 source_sample_face_id: sample.source_face_id,
                 reason,
+                first_hit_t: None,
             });
         }
     }
@@ -1021,43 +1030,61 @@ fn discover_anchor_seats_bound(
     for (ordinal, candidate) in qualified.into_iter().enumerate() {
         let start = offsets[ordinal] as usize;
         let end = offsets[ordinal + 1] as usize;
+        let mut observed_first_hit_t = None;
         let refusal = if start >= end {
             Some(AnchorSeatRefusalReason::NoFirstHit)
         } else {
             let face = faces[start];
-            if face < 0 || !exterior.get(face as usize).copied().unwrap_or(false) {
-                Some(AnchorSeatRefusalReason::NearerNonExteriorObstruction)
-            } else {
-                let t = ts[start];
-                let point = add(stub_end, scale(directions[ordinal], t));
-                let length = norm(sub(point, stub_end));
-                let lean = lean_deg(sub(point, stub_end), length);
-                let face = face as usize;
-                seats.push(QualifiedAnchorSeat {
-                    provenance: AnchorCandidateProvenance {
-                        regular_identity: provenance_regular_identity,
-                        physical_contact_id: provenance_physical_contact_id,
-                        sample_index: candidate.sample_index,
-                        source_sample_face_id: candidate.sample.source_face_id,
-                    },
-                    contact: contact_fingerprint,
-                    subject: subject_fingerprint,
-                    geometry: geometry.fingerprint.clone(),
-                    config: config_fingerprint,
-                    pool_digest,
-                    snapped_point_mm: finite3(point, "snapped anchor point")?,
-                    snapped_normal: finite3(
-                        geometry.surface.geometry().normals()[face],
-                        "snapped face normal",
-                    )?,
-                    snapped_face_id: face as u32,
-                    delicacy: finite(candidate.sample.delicacy, "anchor delicacy")?,
-                    length_mm: positive(length, "snapped anchor length")?,
-                    lean_deg: nonnegative(lean, "snapped anchor lean")?,
-                    first_hit_t: finite(t, "first-hit ray parameter")?,
-                    rootward_clearance_inset_mm: config.rootward_clearance_inset_mm,
-                });
-                None
+            match classify_snapped_ray_parameter(ts[start])? {
+                SnappedRayParameter::NumericalZero(t) => {
+                    observed_first_hit_t = Some(t);
+                    Some(AnchorSeatRefusalReason::ZeroLengthSnappedAnchor)
+                }
+                SnappedRayParameter::Forward(first_hit_t) => {
+                    if face < 0 || !exterior.get(face as usize).copied().unwrap_or(false) {
+                        Some(AnchorSeatRefusalReason::NearerNonExteriorObstruction)
+                    } else {
+                        let point = add(stub_end, scale(directions[ordinal], first_hit_t.get()));
+                        let length = norm(sub(point, stub_end));
+                        if !length.is_finite() {
+                            return Err(AnchorSearchError::InvalidDerived {
+                                field: "snapped anchor length",
+                            });
+                        }
+                        if length <= BELOW_LEVEL_EPS_MM {
+                            observed_first_hit_t = Some(first_hit_t);
+                            Some(AnchorSeatRefusalReason::ZeroLengthSnappedAnchor)
+                        } else {
+                            let lean = lean_deg(sub(point, stub_end), length);
+                            let face = face as usize;
+                            seats.push(QualifiedAnchorSeat {
+                                provenance: AnchorCandidateProvenance {
+                                    regular_identity: provenance_regular_identity,
+                                    physical_contact_id: provenance_physical_contact_id,
+                                    sample_index: candidate.sample_index,
+                                    source_sample_face_id: candidate.sample.source_face_id,
+                                },
+                                contact: contact_fingerprint,
+                                subject: subject_fingerprint,
+                                geometry: geometry.fingerprint.clone(),
+                                config: config_fingerprint,
+                                pool_digest,
+                                snapped_point_mm: finite3(point, "snapped anchor point")?,
+                                snapped_normal: finite3(
+                                    geometry.surface.geometry().normals()[face],
+                                    "snapped face normal",
+                                )?,
+                                snapped_face_id: face as u32,
+                                delicacy: finite(candidate.sample.delicacy, "anchor delicacy")?,
+                                length_mm: positive(length, "snapped anchor length")?,
+                                lean_deg: nonnegative(lean, "snapped anchor lean")?,
+                                first_hit_t,
+                                rootward_clearance_inset_mm: config.rootward_clearance_inset_mm,
+                            });
+                            None
+                        }
+                    }
+                }
             }
         };
         if let Some(reason) = refusal {
@@ -1065,6 +1092,9 @@ fn discover_anchor_seats_bound(
                 sample_index: candidate.sample_index,
                 source_sample_face_id: candidate.sample.source_face_id,
                 reason,
+                first_hit_t: (reason == AnchorSeatRefusalReason::ZeroLengthSnappedAnchor)
+                    .then_some(observed_first_hit_t)
+                    .flatten(),
             });
         }
     }
@@ -1427,6 +1457,8 @@ pub enum AnchorSearchError {
     SurfaceMeshMismatch { face: usize },
     #[error("native model-anchor query failed: {0}")]
     NativeQuery(String),
+    #[error("native first-hit parameter {raw_t} is below the kernel Moller acceptance slack")]
+    RayParameterBelowMollerSlack { raw_t: f64 },
     #[error("model-anchor derived non-finite or non-positive {field}")]
     InvalidDerived { field: &'static str },
 }
@@ -1537,6 +1569,27 @@ fn validate_surface_matches_mesh(
         }
     }
     Ok(digest)
+}
+
+/// Classification of a first ray hit under the native Möller acceptance
+/// contract. A negative hit inside the kernel's accepted slack is a boundary
+/// self-hit, never a point on the opposite extension of the ray.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SnappedRayParameter {
+    NumericalZero(Finite),
+    Forward(Finite),
+}
+
+fn classify_snapped_ray_parameter(raw_t: f64) -> Result<SnappedRayParameter, AnchorSearchError> {
+    let t = finite(raw_t, "first-hit ray parameter")?;
+    if raw_t < -MOLLER_PARAMETER_SLACK {
+        return Err(AnchorSearchError::RayParameterBelowMollerSlack { raw_t });
+    }
+    if raw_t <= 0.0 {
+        Ok(SnappedRayParameter::NumericalZero(t))
+    } else {
+        Ok(SnappedRayParameter::Forward(t))
+    }
 }
 
 fn finite(value: f64, field: &'static str) -> Result<Finite, AnchorSearchError> {
@@ -2094,6 +2147,85 @@ mod tests {
             result.refusals()[0].reason,
             AnchorSeatRefusalReason::NearerNonExteriorObstruction
         );
+    }
+
+    #[test]
+    fn zero_length_first_hit_is_a_measured_candidate_refusal() {
+        let (mesh, topology, surface) = box_parts(10.0);
+        let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
+        let (_, terminal, _) = bindings();
+        let terminal = AnchorTerminalBinding::new(
+            terminal.terminal_id(),
+            terminal.stub(),
+            [f(5.0), f(5.0), f(0.0)],
+        );
+        let sidecar = vec![0.25; surface.nfaces()];
+        let result = discover_anchor_seats(
+            &contact(0.0),
+            terminal,
+            &[SurfaceAnchorSample {
+                source_face_id: 0,
+                point_mm: [5.0, 5.0, -10.0],
+                delicacy: 0.25,
+            }],
+            Some(&sidecar),
+            AnchorSearchConfig::current().unwrap(),
+            &geometry,
+        )
+        .unwrap();
+        assert!(result.seats().is_empty());
+        assert_eq!(
+            result.query_counts(),
+            AnchorSeatQueryCounts { ray_batches: 1 }
+        );
+        assert_eq!(result.refusals().len(), 1);
+        assert_eq!(
+            result.refusals()[0].reason,
+            AnchorSeatRefusalReason::ZeroLengthSnappedAnchor
+        );
+        assert_eq!(result.refusals()[0].first_hit_t.unwrap().get(), 0.0);
+    }
+
+    #[test]
+    fn kernel_moller_boundary_hits_never_create_opposite_ray_anchor_seats() {
+        for raw_t in [
+            -MOLLER_PARAMETER_SLACK / 2.0,
+            -MOLLER_PARAMETER_SLACK,
+            -0.0,
+            0.0,
+        ] {
+            let SnappedRayParameter::NumericalZero(observed) =
+                classify_snapped_ray_parameter(raw_t).expect("accepted kernel boundary hit")
+            else {
+                panic!("negative or zero Moller boundary hit must not create a forward seat");
+            };
+            assert_eq!(observed.get().to_bits(), raw_t.to_bits());
+        }
+        assert!(matches!(
+            classify_snapped_ray_parameter(-MOLLER_PARAMETER_SLACK * 1.000_001),
+            Err(AnchorSearchError::RayParameterBelowMollerSlack { .. })
+        ));
+        assert!(matches!(
+            classify_snapped_ray_parameter(f64::NAN),
+            Err(AnchorSearchError::InvalidDerived {
+                field: "first-hit ray parameter"
+            })
+        ));
+        assert!(matches!(
+            classify_snapped_ray_parameter(MOLLER_PARAMETER_SLACK / 2.0),
+            Ok(SnappedRayParameter::Forward(_))
+        ));
+    }
+
+    #[test]
+    fn numerical_zero_does_not_abort_a_later_forward_candidate_in_the_same_batch() {
+        let batch = [-MOLLER_PARAMETER_SLACK / 2.0, MOLLER_PARAMETER_SLACK / 2.0]
+            .into_iter()
+            .map(classify_snapped_ray_parameter)
+            .collect::<Result<Vec<_>, _>>()
+            .expect("one numerical-zero hit cannot abort the gathered batch");
+        assert!(matches!(batch[0], SnappedRayParameter::NumericalZero(_)));
+        assert!(matches!(batch[1], SnappedRayParameter::Forward(_)));
     }
 
     #[test]

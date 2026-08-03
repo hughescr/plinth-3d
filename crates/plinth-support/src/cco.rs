@@ -601,6 +601,7 @@ pub(crate) struct TerminalCcoOutcome {
     pub(crate) anchor_foot_batches: usize,
     pub(crate) clearance_batches: usize,
     pub(crate) validated_model_anchor: Option<Box<ValidatedModelAnchor>>,
+    pub(crate) anchor_seat_refusals: Vec<AnchorSeatRefusal>,
     pub(crate) anchor_refusals: Vec<AnchorFootRefusal>,
 }
 
@@ -625,16 +626,42 @@ pub(crate) struct TerminalRouteEvidence {
 /// mistaking a refusal for a successful route.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum NoWinnerEvidence {
-    NoCandidatesGenerated,
+    NoCandidatesGenerated {
+        anchor_seat_refusals: Vec<AnchorSeatRefusal>,
+    },
     NoFeasibleCandidate {
         candidates_generated: usize,
+        anchor_seat_refusals: Vec<AnchorSeatRefusal>,
         anchor_refusals: Vec<AnchorFootRefusal>,
     },
     AllFeasibleCandidatesRefusedByClearance {
         candidates_generated: usize,
         candidates_feasible: usize,
+        anchor_seat_refusals: Vec<AnchorSeatRefusal>,
         anchor_refusals: Vec<AnchorFootRefusal>,
     },
+}
+
+impl NoWinnerEvidence {
+    /// Read-only seat-refusal evidence retained when no route survives. This
+    /// distinguishes a genuine empty model-anchor batch from later foot or
+    /// clearance rejection without exposing a mutable candidate capability.
+    #[must_use]
+    pub(crate) fn anchor_seat_refusals(&self) -> &[AnchorSeatRefusal] {
+        match self {
+            Self::NoCandidatesGenerated {
+                anchor_seat_refusals,
+            }
+            | Self::NoFeasibleCandidate {
+                anchor_seat_refusals,
+                ..
+            }
+            | Self::AllFeasibleCandidatesRefusedByClearance {
+                anchor_seat_refusals,
+                ..
+            } => anchor_seat_refusals,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1140,6 +1167,15 @@ struct HostCache {
 }
 
 impl CcoController {
+    /// Refuse stale or unavailable registered CCO policy before a runner
+    /// starts staging terminal work.  The actual value remains private to
+    /// this controller; this is only the preflight boundary needed to ensure
+    /// that policy failure cannot follow a native anchor query.
+    pub(crate) fn validate_initial_route_config() -> Result<(), CcoError> {
+        let _ = Config::current()?;
+        Ok(())
+    }
+
     /// Seal the complete initial-terminal route transaction.  The returned
     /// transcript is the sole authority a later normalizer may use for
     /// retained, quarantined, and no-winner contact disposition.
@@ -1249,8 +1285,16 @@ impl CcoController {
             config.bifurcation_hosts,
             forest,
         );
-        let mut outcome =
-            grow_terminal_inner(forest, request, surface, Vec::new(), None, 0, Some(hosts))?;
+        let mut outcome = grow_terminal_inner(
+            forest,
+            request,
+            surface,
+            Vec::new(),
+            Vec::new(),
+            None,
+            0,
+            Some(hosts),
+        )?;
         let route = TerminalRouteEvidence {
             physical_contact_id: request.physical_contact_id,
             terminal_id: request.terminal_id,
@@ -1304,6 +1348,7 @@ impl CcoController {
             context.route.geometry,
         )?;
         let anchor_ray_batches = discovery.query_counts().ray_batches;
+        let anchor_seat_refusals = discovery.refusals().to_vec();
         let config = Config::current()?;
         let hosts = self.hosts.nearest(
             request.stub_end_mm().map(Finite::get),
@@ -1315,6 +1360,7 @@ impl CcoController {
             request,
             context.route.geometry.surface(),
             discovery.into_seats(),
+            anchor_seat_refusals,
             Some(&context),
             anchor_ray_batches,
             Some(hosts),
@@ -1631,23 +1677,32 @@ impl CcoController {
                     word(2);
                     digest_route_evidence(&mut word, route);
                     match reason {
-                        NoWinnerEvidence::NoCandidatesGenerated => word(0),
+                        NoWinnerEvidence::NoCandidatesGenerated {
+                            anchor_seat_refusals,
+                        } => {
+                            word(0);
+                            digest_anchor_seat_refusals(&mut word, anchor_seat_refusals);
+                        }
                         NoWinnerEvidence::NoFeasibleCandidate {
                             candidates_generated,
+                            anchor_seat_refusals,
                             anchor_refusals,
                         } => {
                             word(1);
                             word(*candidates_generated as u64);
+                            digest_anchor_seat_refusals(&mut word, anchor_seat_refusals);
                             digest_anchor_refusals(&mut word, anchor_refusals);
                         }
                         NoWinnerEvidence::AllFeasibleCandidatesRefusedByClearance {
                             candidates_generated,
                             candidates_feasible,
+                            anchor_seat_refusals,
                             anchor_refusals,
                         } => {
                             word(2);
                             word(*candidates_generated as u64);
                             word(*candidates_feasible as u64);
+                            digest_anchor_seat_refusals(&mut word, anchor_seat_refusals);
                             digest_anchor_refusals(&mut word, anchor_refusals);
                         }
                     }
@@ -1848,23 +1903,32 @@ fn transcript_rows_digest(rows: &[FinalizedCcoTranscriptRow]) -> u64 {
         }
         match &row.no_winner_reason {
             None => word(0),
-            Some(NoWinnerEvidence::NoCandidatesGenerated) => word(1),
+            Some(NoWinnerEvidence::NoCandidatesGenerated {
+                anchor_seat_refusals,
+            }) => {
+                word(1);
+                digest_anchor_seat_refusals(&mut word, anchor_seat_refusals);
+            }
             Some(NoWinnerEvidence::NoFeasibleCandidate {
                 candidates_generated,
+                anchor_seat_refusals,
                 anchor_refusals,
             }) => {
                 word(2);
                 word(*candidates_generated as u64);
+                digest_anchor_seat_refusals(&mut word, anchor_seat_refusals);
                 digest_anchor_refusals(&mut word, anchor_refusals);
             }
             Some(NoWinnerEvidence::AllFeasibleCandidatesRefusedByClearance {
                 candidates_generated,
                 candidates_feasible,
+                anchor_seat_refusals,
                 anchor_refusals,
             }) => {
                 word(3);
                 word(*candidates_generated as u64);
                 word(*candidates_feasible as u64);
+                digest_anchor_seat_refusals(&mut word, anchor_seat_refusals);
                 digest_anchor_refusals(&mut word, anchor_refusals);
             }
         }
@@ -1920,6 +1984,29 @@ fn candidate_family_digest(family: CandidateFamily) -> u64 {
         CandidateFamily::PlateDescent => 0,
         CandidateFamily::ModelAnchor => 1,
         CandidateFamily::Bifurcation => 2,
+    }
+}
+
+fn digest_anchor_seat_refusals(word: &mut impl FnMut(u64), refusals: &[AnchorSeatRefusal]) {
+    word(refusals.len() as u64);
+    for refusal in refusals {
+        word(refusal.sample_index as u64);
+        word(u64::from(refusal.source_sample_face_id));
+        word(match refusal.reason {
+            crate::anchor::AnchorSeatRefusalReason::SampleNonFinite => 0,
+            crate::anchor::AnchorSeatRefusalReason::SampleFaceOutOfRange => 1,
+            crate::anchor::AnchorSeatRefusalReason::SampleDelicacyMismatch => 2,
+            crate::anchor::AnchorSeatRefusalReason::AboveContact => 3,
+            crate::anchor::AnchorSeatRefusalReason::TooShort => 4,
+            crate::anchor::AnchorSeatRefusalReason::TooLong => 5,
+            crate::anchor::AnchorSeatRefusalReason::TooDelicate => 6,
+            crate::anchor::AnchorSeatRefusalReason::TooLean => 7,
+            crate::anchor::AnchorSeatRefusalReason::NoFirstHit => 8,
+            crate::anchor::AnchorSeatRefusalReason::ZeroLengthSnappedAnchor => 9,
+            crate::anchor::AnchorSeatRefusalReason::NearerNonExteriorObstruction => 10,
+        });
+        word(refusal.first_hit_t.map_or(0, |value| value.get().to_bits()));
+        word(u64::from(refusal.first_hit_t.is_some()));
     }
 }
 
@@ -2025,16 +2112,20 @@ impl<'a, 'surface> FinalizedAnchorValidationContext<'a, 'surface> {
 fn no_winner_evidence(outcome: &TerminalCcoOutcome) -> NoWinnerEvidence {
     debug_assert!(outcome.winner.is_none());
     if outcome.candidates_generated == 0 {
-        NoWinnerEvidence::NoCandidatesGenerated
+        NoWinnerEvidence::NoCandidatesGenerated {
+            anchor_seat_refusals: outcome.anchor_seat_refusals.clone(),
+        }
     } else if outcome.candidates_feasible == 0 {
         NoWinnerEvidence::NoFeasibleCandidate {
             candidates_generated: outcome.candidates_generated,
+            anchor_seat_refusals: outcome.anchor_seat_refusals.clone(),
             anchor_refusals: outcome.anchor_refusals.clone(),
         }
     } else {
         NoWinnerEvidence::AllFeasibleCandidatesRefusedByClearance {
             candidates_generated: outcome.candidates_generated,
             candidates_feasible: outcome.candidates_feasible,
+            anchor_seat_refusals: outcome.anchor_seat_refusals.clone(),
             anchor_refusals: outcome.anchor_refusals.clone(),
         }
     }
@@ -2169,11 +2260,13 @@ impl HostCache {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn grow_terminal_inner(
     forest: &mut Forest,
     request: &TerminalCcoRequest,
     surface: &NativeSurface,
     mut seats: Vec<QualifiedAnchorSeat>,
+    anchor_seat_refusals: Vec<AnchorSeatRefusal>,
     anchor_context: Option<&FinalizedAnchorValidationContext<'_, '_>>,
     anchor_ray_batches: usize,
     cached_hosts: Option<Vec<MemberKey>>,
@@ -2242,6 +2335,7 @@ fn grow_terminal_inner(
             anchor_foot_batches,
             clearance_batches: 0,
             validated_model_anchor: None,
+            anchor_seat_refusals,
             anchor_refusals,
         });
     }
@@ -2263,6 +2357,7 @@ fn grow_terminal_inner(
             anchor_foot_batches,
             clearance_batches: 1,
             validated_model_anchor: None,
+            anchor_seat_refusals,
             anchor_refusals,
         });
     };
@@ -2296,6 +2391,7 @@ fn grow_terminal_inner(
         anchor_foot_batches,
         clearance_batches: 1,
         validated_model_anchor: validated_anchors.remove(&winner_index),
+        anchor_seat_refusals,
         anchor_refusals,
     })
 }
@@ -3537,15 +3633,17 @@ mod tests {
             signature
         };
         match reason {
-            NoWinnerEvidence::NoCandidatesGenerated => "0:0:0".to_owned(),
+            NoWinnerEvidence::NoCandidatesGenerated { .. } => "0:0:0".to_owned(),
             NoWinnerEvidence::NoFeasibleCandidate {
                 candidates_generated,
                 anchor_refusals,
+                ..
             } => format!("1:{candidates_generated}:0:{}", refusals(anchor_refusals)),
             NoWinnerEvidence::AllFeasibleCandidatesRefusedByClearance {
                 candidates_generated,
                 candidates_feasible,
                 anchor_refusals,
+                ..
             } => format!(
                 "2:{candidates_generated}:{candidates_feasible}:{}",
                 refusals(anchor_refusals)
@@ -3674,6 +3772,7 @@ mod tests {
             NoWinnerEvidence::NoFeasibleCandidate {
                 candidates_generated: 1,
                 anchor_refusals,
+                ..
             } if anchor_refusals.is_empty()
         ));
         assert!(outcome.winner.is_none());
@@ -3683,6 +3782,7 @@ mod tests {
                 reason: NoWinnerEvidence::NoFeasibleCandidate {
                     candidates_generated: 1,
                     ref anchor_refusals,
+                    ..
                 },
                 ..
             }) if anchor_refusals.is_empty()
@@ -3709,6 +3809,36 @@ mod tests {
             .quarantine_record(row.original_key())
             .is_none());
         assert!(transcript.validate_integrity().is_ok());
+    }
+
+    #[test]
+    fn all_numerical_zero_seat_refusals_survive_no_winner_evidence() {
+        let t = Finite::new(-geom_kernel::MOLLER_PARAMETER_SLACK).unwrap();
+        let zero = AnchorSeatRefusal {
+            sample_index: 3,
+            source_sample_face_id: 7,
+            reason: crate::anchor::AnchorSeatRefusalReason::ZeroLengthSnappedAnchor,
+            first_hit_t: Some(t),
+        };
+        let outcome = TerminalCcoOutcome {
+            winner: None,
+            disposition: None,
+            candidates_generated: 0,
+            candidates_feasible: 0,
+            anchor_ray_batches: 1,
+            anchor_foot_batches: 0,
+            clearance_batches: 0,
+            validated_model_anchor: None,
+            anchor_seat_refusals: vec![zero],
+            anchor_refusals: Vec::new(),
+        };
+        let NoWinnerEvidence::NoCandidatesGenerated {
+            anchor_seat_refusals,
+        } = no_winner_evidence(&outcome)
+        else {
+            panic!("all numerical-zero candidates must remain a no-winner result");
+        };
+        assert_eq!(anchor_seat_refusals, vec![zero]);
     }
 
     #[test]

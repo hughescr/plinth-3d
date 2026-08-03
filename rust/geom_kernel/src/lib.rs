@@ -53,6 +53,11 @@ pub use vec3::V3;
 
 pub const KERNEL_API_VERSION: u32 = 1;
 
+/// Möller barycentric and ray-parameter acceptance slack used by the native
+/// kernel. This is specifically the `t in [-slack, t_max + slack]` boundary;
+/// consumers must not treat it as a general geometry tolerance.
+pub const MOLLER_PARAMETER_SLACK: f64 = consts::EPS;
+
 /// Collision-resistant content identity for an exact, ordered triangle soup.
 ///
 /// This is an opaque value, not an unforgeable capability. It has no unchecked

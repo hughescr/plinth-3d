@@ -3,6 +3,7 @@
 //! the crate's testkit API.
 
 use geom_kernel::testkit::*;
+use geom_kernel::MOLLER_PARAMETER_SLACK;
 
 const TEST_UNBOUNDED_GRID_BYTES: usize = usize::MAX;
 
@@ -37,6 +38,29 @@ fn moller_hits_and_misses() {
     // ray missing the triangle
     let (hit, _) = kern_moller([2.0, 2.0, 1.0], [0.0, 0.0, -1.0], v0, e1, e2, 2.0);
     assert!(!hit);
+}
+
+#[test]
+fn public_moller_parameter_slack_matches_the_native_acceptance_boundary() {
+    let v0 = [0.0, 0.0, 0.0];
+    let e1 = [1.0, 0.0, 0.0];
+    let e2 = [0.0, 1.0, 0.0];
+    for t in [-MOLLER_PARAMETER_SLACK / 2.0, -MOLLER_PARAMETER_SLACK] {
+        let (hit, observed_t) = kern_moller([0.25, 0.25, t], [0.0, 0.0, -1.0], v0, e1, e2, 1.0);
+        assert!(hit);
+        assert_eq!(observed_t.to_bits(), t.to_bits());
+    }
+    assert!(
+        !kern_moller(
+            [0.25, 0.25, -MOLLER_PARAMETER_SLACK * 1.000_001],
+            [0.0, 0.0, -1.0],
+            v0,
+            e1,
+            e2,
+            1.0
+        )
+        .0
+    );
 }
 
 #[test]

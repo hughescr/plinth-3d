@@ -15,8 +15,13 @@ use plinth_mesh::{mesh_fingerprint, FaceTopology, Mesh};
 use thiserror::Error;
 
 use crate::{
-    anchor::{AnchorGeometryAuthority, AnchorSearchError},
+    anchor::{AnchorGeometryAuthority, AnchorSearchConfig, AnchorSearchError, SurfaceAnchorPool},
+    cco::{
+        CcoController, CcoError, FinalizedAnchorTerminalRoute, FinalizedCcoTranscript,
+        TerminalCcoRequest,
+    },
     dyadic::CandidatePayloadConfig,
+    forest::{Forest, TerminalLedgerState},
     initial::{
         build_initial_contacts, ContactConstructionLimits, InitialContactBuild, InitialContactError,
     },
@@ -133,7 +138,7 @@ pub(crate) struct PreparedSupportRun<'a> {
     digests: PreparedSupportDigests,
 }
 
-impl PreparedSupportRun<'_> {
+impl<'a> PreparedSupportRun<'a> {
     pub(crate) const fn mesh(&self) -> &Mesh {
         &self.mesh
     }
@@ -176,6 +181,191 @@ impl PreparedSupportRun<'_> {
         }
         Ok(geometry)
     }
+
+    /// Consume the prepared authority in the one sealed initial-terminal CCO
+    /// transaction.  The frozen initial routing order is the only cadence;
+    /// all route-shaped authority is rechecked before the first native query
+    /// or forest transition.
+    pub(crate) fn route_initial_cco(mut self) -> Result<RoutedSupportRun<'a>, SupportRoutingError> {
+        // Bind these three retained fields directly so the independent
+        // initial forest remains available for the serial transaction below.
+        let geometry = AnchorGeometryAuthority::new(&self.mesh, &self.topology, &self.surface)?;
+        if geometry.digest() != self.digests.geometry {
+            return Err(SupportRoutingError::GeometryDigestMismatch);
+        }
+        let loads = self.plan.finalized_loads()?;
+        self.validate_initial_cco_preflight(&geometry, loads)?;
+
+        // Constructing the exterior pool is a bounded, fail-closed resource
+        // staging step. It uses the same required S0 sidecar that produced
+        // the contact plan; no runner-local anchor policy exists.
+        let delicacy = self
+            .authority
+            .perception_config
+            .delicacy_by_face
+            .ok_or(SupportRoutingError::MissingAnchorDelicacy)?;
+        let anchor_config = AnchorSearchConfig::current()?;
+        CcoController::validate_initial_route_config()?;
+        let pool = SurfaceAnchorPool::from_geometry(&geometry, delicacy)?;
+
+        let mut controller = CcoController::default();
+        let mut cadence = self
+            .initial
+            .routing_order()
+            .specialized_terminals()
+            .to_vec();
+        cadence.extend_from_slice(self.initial.routing_order().regular_terminals());
+        for terminal in cadence {
+            let ledger = self
+                .initial
+                .forest()
+                .terminal_ledger(terminal)
+                .ok_or(SupportRoutingError::MissingTerminalLedger { terminal })?;
+            if ledger.state == TerminalLedgerState::Quarantined {
+                controller.advance_skipped_terminal(self.initial.forest(), ledger)?;
+                continue;
+            }
+
+            let request = TerminalCcoRequest::bind(self.initial.forest(), terminal, self.frame)?;
+            let contact = self
+                .plan
+                .contacts()
+                .iter()
+                .find(|contact| contact.contact_id() == u64::from(terminal))
+                .ok_or(SupportRoutingError::MissingPhysicalContact { terminal })?;
+            controller.grow_terminal_with_finalized_anchor(
+                self.initial.forest_mut(),
+                &request,
+                FinalizedAnchorTerminalRoute {
+                    plan: &self.plan,
+                    contact,
+                    contact_id: u64::from(terminal),
+                    loads,
+                    pool: &pool,
+                    config: anchor_config,
+                    geometry: &geometry,
+                },
+            )?;
+        }
+
+        let transcript =
+            controller.finalize_transcript(&self.initial, &self.plan, loads, &geometry)?;
+        transcript.validate_integrity()?;
+        Ok(RoutedSupportRun {
+            prepared: self,
+            controller,
+            transcript,
+        })
+    }
+
+    fn validate_initial_cco_preflight(
+        &self,
+        geometry: &AnchorGeometryAuthority<'_>,
+        loads: &FinalizedContactLoads,
+    ) -> Result<(), SupportRoutingError> {
+        // This repeats the planner's complete immutable binding before CCO
+        // can make any query or forest mutation.  In particular it covers
+        // candidate/refusal limits, specialized resource limits, and the
+        // plan-owned finalized load artifact rather than accepting digests as
+        // a substitute for the real authority.
+        self.plan.validate_binding(
+            &self.mesh,
+            &self.authority.perception_config,
+            self.frame,
+            self.authority.layers,
+            &self.authority.candidate_config,
+            self.authority.reservations,
+            self.authority.perception_limits,
+            &self.generic,
+            &self.regular,
+            &self.authority.selection_config,
+            self.authority.specialized_limits,
+        )?;
+        if self.plan.digest() != self.digests.plan
+            || self.plan.finalized_load_plan_digest() != self.plan.digest()
+            || loads.digest() != self.digests.loads
+        {
+            return Err(SupportRoutingError::PlanOrLoadDigestMismatch);
+        }
+        geometry.validate_mesh(&self.mesh)?;
+        if geometry.digest() != self.digests.geometry {
+            return Err(SupportRoutingError::GeometryDigestMismatch);
+        }
+        if self.initial.plan_digest() != self.plan.digest()
+            || self.initial.load_digest() != loads.digest()
+            || self.initial.native_digest() != geometry.digest()
+            || self.initial.initial_forest_digest() != Forest::new().digest()
+            || self.initial.post_quarantine_forest_digest() != self.digests.initial_forest
+            || self.initial.forest().digest() != self.digests.initial_forest
+            || !self.initial.all_terminals_registered_before_quarantine()
+        {
+            return Err(SupportRoutingError::InitialAuthorityMismatch);
+        }
+
+        let routing = self.initial.routing_order();
+        let mut expected = BTreeSet::new();
+        for terminal in routing
+            .specialized_terminals()
+            .iter()
+            .chain(routing.regular_terminals())
+            .copied()
+        {
+            if !expected.insert(terminal)
+                || !self
+                    .initial
+                    .terminals()
+                    .iter()
+                    .any(|evidence| evidence.terminal == terminal)
+                || self
+                    .plan
+                    .contacts()
+                    .iter()
+                    .filter(|contact| contact.contact_id() == u64::from(terminal))
+                    .count()
+                    != 1
+                || self.initial.forest().terminal_ledger(terminal).is_none()
+            {
+                return Err(SupportRoutingError::TerminalNamespaceMismatch { terminal });
+            }
+        }
+        if expected.len() != self.initial.terminals().len()
+            || expected.len() != self.plan.contacts().len()
+        {
+            return Err(SupportRoutingError::TerminalNamespaceCardinalityMismatch);
+        }
+        Ok(())
+    }
+}
+
+/// Opaque route-stage authority for the normalizer.  It retains the exact
+/// prepared hand-off and the sealed CCO artifacts; no caller can replay an
+/// initial terminal after this value exists.
+pub(crate) struct RoutedSupportRun<'a> {
+    prepared: PreparedSupportRun<'a>,
+    controller: CcoController,
+    transcript: FinalizedCcoTranscript,
+}
+
+impl RoutedSupportRun<'_> {
+    #[must_use]
+    pub(crate) const fn prepared(&self) -> &PreparedSupportRun<'_> {
+        &self.prepared
+    }
+
+    #[must_use]
+    pub(crate) const fn forest(&self) -> &Forest {
+        self.prepared.initial.forest()
+    }
+
+    #[must_use]
+    pub(crate) const fn controller(&self) -> &CcoController {
+        &self.controller
+    }
+
+    #[must_use]
+    pub(crate) const fn transcript(&self) -> &FinalizedCcoTranscript {
+        &self.transcript
+    }
 }
 
 #[derive(Debug, Error)]
@@ -206,6 +396,32 @@ pub(crate) enum SupportPreparationError {
     DuplicateReservation { owner_id: u32, face_id: u32 },
     #[error("support preparation mesh fingerprint failed: {0}")]
     MeshFingerprint(String),
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum SupportRoutingError {
+    #[error(transparent)]
+    Specialized(#[from] SpecializedError),
+    #[error(transparent)]
+    Anchor(#[from] AnchorSearchError),
+    #[error(transparent)]
+    Cco(#[from] CcoError),
+    #[error("sealed CCO routing requires the prepared face-order delicacy authority")]
+    MissingAnchorDelicacy,
+    #[error("sealed CCO routing found stale plan or finalized-load digest authority")]
+    PlanOrLoadDigestMismatch,
+    #[error("sealed CCO routing found stale mesh, topology, or native-surface digest authority")]
+    GeometryDigestMismatch,
+    #[error("sealed CCO routing found stale initial-forest authority")]
+    InitialAuthorityMismatch,
+    #[error("sealed CCO routing terminal {terminal} is absent or mismatched across the physical namespace")]
+    TerminalNamespaceMismatch { terminal: u32 },
+    #[error("sealed CCO routing physical/terminal namespaces have unequal cardinality")]
+    TerminalNamespaceCardinalityMismatch,
+    #[error("sealed CCO routing terminal {terminal} lacks a ledger entry")]
+    MissingTerminalLedger { terminal: u32 },
+    #[error("sealed CCO routing terminal {terminal} lacks its exact physical contact")]
+    MissingPhysicalContact { terminal: u32 },
 }
 
 /// Execute the sealed preparation pipeline through the one batched initial-contact build.
@@ -536,15 +752,50 @@ mod tests {
         let hollowed = hollowed_fixture(load_required_runner_corpus());
         let delicacy = vec![0.0; hollowed.mesh().tris().len()];
         let layers = layers();
+        prepare_fixture(hollowed, &delicacy, &layers, use_prepared)
+    }
+
+    fn prepare_fixture<T>(
+        hollowed: HollowedModel,
+        delicacy: &[f64],
+        layers: &LayerPlan,
+        use_prepared: impl FnOnce(PreparedSupportRun<'_>) -> T,
+    ) -> T {
         let prepared = prepare_support_run(
             hollowed,
             SupportRequest {
                 lift_mm: PositiveFinite::new(5.0).unwrap(),
             },
-            authority(&delicacy, &layers),
+            authority(delicacy, layers),
         )
-        .expect("required table preparation");
+        .expect("required fixture preparation");
         use_prepared(prepared)
+    }
+
+    fn translated_mesh(mesh: Mesh, offset: [f64; 3]) -> Mesh {
+        Mesh::new(
+            mesh.verts()
+                .iter()
+                .map(|point| std::array::from_fn(|axis| point[axis] + offset[axis]))
+                .collect(),
+            mesh.tris().to_vec(),
+        )
+        .expect("translated test mesh remains valid")
+    }
+
+    fn merge_meshes(parts: &[Mesh]) -> Mesh {
+        let mut vertices = Vec::new();
+        let mut triangles = Vec::new();
+        for part in parts {
+            let offset = u32::try_from(vertices.len()).expect("test mesh vertex namespace");
+            vertices.extend_from_slice(part.verts());
+            triangles.extend(
+                part.tris()
+                    .iter()
+                    .map(|triangle| triangle.map(|vertex| vertex + offset)),
+            );
+        }
+        Mesh::new(vertices, triangles).expect("merged test mesh remains valid")
     }
 
     fn prepared_digest_for_mesh(mesh: Mesh) -> u64 {
@@ -617,6 +868,111 @@ mod tests {
                     .report()
                     .output_faces()
             );
+        });
+    }
+
+    #[test]
+    fn routes_required_corpus_in_frozen_specialized_then_regular_cadence() {
+        with_prepared_table(|prepared| {
+            let expected = prepared
+                .initial()
+                .routing_order()
+                .specialized_terminals()
+                .iter()
+                .chain(prepared.initial().routing_order().regular_terminals())
+                .copied()
+                .collect::<Vec<_>>();
+            let plan_digest = prepared.digests().plan();
+            let loads_digest = prepared.digests().loads();
+            let geometry_digest = prepared.digests().geometry();
+            let routed = prepared
+                .route_initial_cco()
+                .expect("required corpus routes through sealed CCO transaction");
+            let transcript = routed.transcript();
+            transcript
+                .validate_integrity()
+                .expect("runner retains an internally sealed transcript");
+            assert_eq!(transcript.plan_digest(), plan_digest);
+            assert_eq!(transcript.finalized_load_digest(), loads_digest);
+            assert_eq!(transcript.geometry_digest(), geometry_digest);
+            assert_eq!(transcript.rows().len(), expected.len());
+            assert_eq!(
+                transcript
+                    .rows()
+                    .iter()
+                    .map(|row| row.terminal_id())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(transcript.final_forest_digest(), routed.forest().digest());
+            assert_eq!(
+                transcript.final_controller_digest(),
+                routed.controller().digest()
+            );
+        });
+    }
+
+    #[test]
+    fn stale_initial_authority_is_refused_before_cco_routing() {
+        with_prepared_table(|mut prepared| {
+            prepared.initial.test_corrupt_initial_forest_digest();
+            assert!(matches!(
+                prepared.route_initial_cco(),
+                Err(SupportRoutingError::InitialAuthorityMismatch)
+            ));
+        });
+    }
+
+    #[test]
+    fn routes_real_mixed_quarantine_and_retained_terminals() {
+        let buried = make_overhang_table().expect("buried table fixture");
+        let blocker =
+            make_box([30.0, 30.0, 1.0], [0.0, 0.0, 16.56]).expect("burial blocker fixture");
+        let live = translated_mesh(
+            make_overhang_table().expect("live table fixture"),
+            [100.0, 0.0, 0.0],
+        );
+        let hollowed = hollowed_fixture(merge_meshes(&[buried, blocker, live]));
+        let delicacy = vec![0.0; hollowed.mesh().tris().len()];
+        let layers = layers();
+        prepare_fixture(hollowed, &delicacy, &layers, |prepared| {
+            let routed = prepared
+                .route_initial_cco()
+                .expect("mixed fixture seals through CCO");
+            assert!(routed
+                .transcript()
+                .rows()
+                .iter()
+                .any(|row| row.kind() == crate::cco::FinalizedDispositionKind::Routed));
+            assert!(routed.transcript().rows().iter().any(|row| {
+                row.kind() == crate::cco::FinalizedDispositionKind::SkippedQuarantined
+            }));
+        });
+    }
+
+    #[test]
+    fn routes_real_no_winner_terminal_with_sealed_evidence() {
+        let table = load_required_runner_corpus();
+        let boundary_blocker =
+            make_box([30.0, 30.0, 1.0], [0.0, 0.0, 16.55]).expect("no-winner blocker fixture");
+        let hollowed = hollowed_fixture(merge_meshes(&[table, boundary_blocker]));
+        let delicacy = vec![0.0; hollowed.mesh().tris().len()];
+        let layers = layers();
+        prepare_fixture(hollowed, &delicacy, &layers, |prepared| {
+            let routed = prepared
+                .route_initial_cco()
+                .expect("no-winner fixture seals through CCO");
+            let row = routed
+                .transcript()
+                .rows()
+                .iter()
+                .find(|row| row.kind() == crate::cco::FinalizedDispositionKind::UnroutedNoWinner)
+                .expect("fixture retains a real no-winner terminal");
+            assert!(row.route().is_some());
+            let reason = row
+                .no_winner_reason()
+                .expect("no-winner transcript row retains a reason");
+            assert!(!reason.anchor_seat_refusals().is_empty());
         });
     }
 
@@ -788,14 +1144,20 @@ mod tests {
             let thread_evidence = prepared.plan().generic_slice_thread_evidence();
             assert_eq!(thread_evidence.0, requested);
             assert!((1..=requested).contains(&thread_evidence.1));
+            let routed = prepared
+                .route_initial_cco()
+                .expect("thread sweep routes the required corpus");
             println!(
-                "{SWEEP_LINE}{}:{}:{}:{}:{}:{}",
-                prepared.digests().prepared(),
-                prepared.digests().plan(),
-                prepared.digests().loads(),
-                prepared.digests().initial_forest(),
-                prepared.initial().queried_stubs(),
-                prepared.initial().condemned().len(),
+                "{SWEEP_LINE}{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                routed.prepared().digests().prepared(),
+                routed.prepared().digests().plan(),
+                routed.prepared().digests().loads(),
+                routed.prepared().digests().initial_forest(),
+                routed.prepared().initial().queried_stubs(),
+                routed.prepared().initial().condemned().len(),
+                routed.transcript().final_forest_digest(),
+                routed.transcript().final_controller_digest(),
+                routed.transcript().digest(),
             );
         });
     }
