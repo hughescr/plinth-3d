@@ -363,22 +363,40 @@ pub(crate) fn brace_fixed_point_current_parity(
             });
         }
         if iteration == FROZEN_PASS_CAP {
-            if violations > 0 {
-                return Err(BraceError::ClearanceViolation(violations));
-            }
+            let termination = pass_three_termination(saw_unplaceable, added, changed, violations)?
+                .expect("the prior convergence return handles a stable clean third pass");
             return Ok(BraceFixedPointPlan {
                 forest: working,
                 additions,
                 iterations: iteration,
-                termination: if saw_unplaceable {
-                    BraceFixedPointTermination::Unplaceable
-                } else {
-                    BraceFixedPointTermination::IterationLimit
-                },
+                termination,
             });
         }
     }
     unreachable!("the frozen positive pass cap always returns")
+}
+
+/// Exact frozen decision at the third-pass cap.  A stable clean state has
+/// already returned as converged above; this helper names the remaining
+/// outcomes so tests can pin the bounded-controller truth table without
+/// manufacturing an otherwise unreachable production geometry.
+fn pass_three_termination(
+    saw_unplaceable: bool,
+    added: bool,
+    changed: bool,
+    violations: usize,
+) -> Result<Option<BraceFixedPointTermination>, BraceError> {
+    if violations > 0 {
+        return Err(BraceError::ClearanceViolation(violations));
+    }
+    if !added && !changed {
+        return Ok(None);
+    }
+    Ok(Some(if saw_unplaceable {
+        BraceFixedPointTermination::Unplaceable
+    } else {
+        BraceFixedPointTermination::IterationLimit
+    }))
 }
 
 fn apply_resize(mut forest: Forest, plan: &TransientResizePlan) -> Result<Forest, BraceError> {
@@ -1953,6 +1971,28 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.termination, BraceFixedPointTermination::Unplaceable);
+    }
+
+    #[test]
+    fn third_pass_termination_truth_table_preserves_frozen_outcomes() {
+        for (added, changed) in [(true, false), (false, true), (true, true)] {
+            assert_eq!(
+                pass_three_termination(false, added, changed, 0).unwrap(),
+                Some(BraceFixedPointTermination::IterationLimit)
+            );
+            assert_eq!(
+                pass_three_termination(true, added, changed, 0).unwrap(),
+                Some(BraceFixedPointTermination::Unplaceable)
+            );
+        }
+        assert_eq!(
+            pass_three_termination(false, false, false, 0).unwrap(),
+            None
+        );
+        assert!(matches!(
+            pass_three_termination(false, true, false, 1),
+            Err(BraceError::ClearanceViolation(1))
+        ));
     }
 
     #[test]
