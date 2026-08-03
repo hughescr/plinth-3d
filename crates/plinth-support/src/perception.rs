@@ -191,6 +191,25 @@ impl FinalizedContactLoadLeaf {
 }
 
 impl FinalizedContactLoads {
+    /// Construct the one tip-sized load artifact retained by a specialized
+    /// plan. The bounds are exact cardinality/byte bounds derived internally,
+    /// so a caller cannot widen them or pair arbitrary contact ids with a
+    /// partition while bypassing finalization.
+    pub(crate) fn for_specialized_plan(
+        partition: &FinalizedLoadPartition,
+        canonical_contact_ids: &[u64],
+    ) -> Result<Self, GenericPerceptionError> {
+        Self::from_partition(
+            partition,
+            canonical_contact_ids,
+            FinalizedContactLoadLimits::new(
+                canonical_contact_ids.len(),
+                partition.rows.len(),
+                finalized_contact_load_required_bytes(canonical_contact_ids.len())?,
+            ),
+        )
+    }
+
     /// Fold the stored rows in their frozen order into the caller's canonical
     /// physical-contact order. Stable ids are opaque and need not be dense.
     #[allow(
@@ -2167,6 +2186,14 @@ pub(crate) fn finalize_specialized_load_partition(
         .map_err(|error| GenericPerceptionError::Topology(error.to_string()))?;
     if fingerprint != plan.authority.mesh {
         return Err(GenericPerceptionError::StaleAuthority);
+    }
+    // A child specialized-plan edit may intentionally remove every
+    // demand-free regular contact.  There is then no physical namespace to
+    // which generic faces may be assigned.  Canonicalize that real zero case
+    // through the same finalizer, with an empty eligibility set, rather than
+    // fabricating rows or silently retaining the parent's load artifact.
+    if contacts.is_empty() {
+        return finalize_load_rows(plan, mesh, &[], contacts, limits);
     }
     let resource =
         specialized_load_resource_plan(plan, contacts.len(), specialized_owner_faces.len())?;
