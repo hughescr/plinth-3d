@@ -46,8 +46,8 @@ use crate::{
     },
     transient::{transient_report, TransientError, TransientReport},
     validate_perception_input, BuildFrame, ContactSelectionConfig, ContactSelectionError,
-    CoverageSample, SelectedContacts, SupportError, SupportHistory, SupportPerceptionConfig,
-    SupportPerceptionError, SupportReport, SupportRequest, SupportedModel,
+    CoverageSample, SelectedContacts, SupportError, SupportHistory, SupportIsland,
+    SupportPerceptionConfig, SupportPerceptionError, SupportReport, SupportRequest, SupportedModel,
 };
 
 /// Explicit caller-owned inputs for one sealed support run. No policy defaults
@@ -213,6 +213,34 @@ impl RoutedPhysicalContactEvidence<'_> {
     }
 }
 
+/// Source-qualified logical route carried by one finalized physical seat.
+/// It is deliberately private to the verification boundary: callers may not
+/// forge route membership or turn this evidence back into a planning input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct RoutedLogicalRoute {
+    island_id: u32,
+    face_id: u32,
+    component_id: u32,
+    provenance: RoutedRouteProvenance,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum RoutedRouteProvenance {
+    RegularGeneric,
+    RegularSyntheticIsland,
+    SpecializedMinimum,
+    SpecializedIslandBirth,
+}
+
+/// Private, normalized route projection parallel to the routed-contact
+/// cadence. This keeps public physical evidence copyable while retaining the
+/// exact logical authority needed by a later batched measurement pass.
+#[derive(Debug)]
+struct RoutedRouteMembership<'a> {
+    contact: RoutedPhysicalContactEvidence<'a>,
+    logical_routes: Vec<RoutedLogicalRoute>,
+}
+
 /// Rejection from the sealed verification boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
 pub enum SupportVerificationError {
@@ -234,7 +262,11 @@ pub struct SupportVerificationSnapshot<'a> {
     mesh: &'a Mesh,
     topology: &'a FaceTopology,
     coverage_samples: &'a [CoverageSample],
+    // The canonical planner-owned registry is retained separately from
+    // samples. A source face can be a member of several named islands.
+    named_islands: &'a [SupportIsland],
     routed_contacts: Vec<RoutedPhysicalContactEvidence<'a>>,
+    routed_route_memberships: Vec<RoutedRouteMembership<'a>>,
     mesh_digest: &'a str,
     topology_digest: &'a str,
     plan_digest: u64,
@@ -244,6 +276,7 @@ pub struct SupportVerificationSnapshot<'a> {
     transcript_digest: u64,
     regular_digest: u64,
     coverage_digest: u64,
+    named_islands_digest: u64,
     lowered_primitives_digest: u64,
     routed_projection_digest: u64,
     snapshot_digest: u64,
@@ -286,7 +319,22 @@ impl<'a> SupportVerificationSnapshot<'a> {
             || self.topology.content_digest() != self.topology_digest
             || plinth_mesh::validate_face_topology(self.topology).is_err()
             || coverage_samples_digest(self.coverage_samples) != self.coverage_digest
-            || routed_projection_digest(&self.routed_contacts) != self.routed_projection_digest
+            || named_islands_digest(self.named_islands) != self.named_islands_digest
+            || !validate_named_islands(self.named_islands, self.topology)
+            || self.routed_contacts.len() != self.routed_route_memberships.len()
+            || self.routed_contacts.iter().any(|contact| {
+                !self
+                    .routed_route_memberships
+                    .iter()
+                    .any(|membership| membership.contact.contact == contact.contact)
+            })
+            || !validate_routed_memberships(
+                &self.routed_route_memberships,
+                self.named_islands,
+                self.topology,
+            )
+            || routed_projection_digest(&self.routed_route_memberships)
+                != self.routed_projection_digest
             || verification_snapshot_digest(self) != self.snapshot_digest
         {
             return Err(SupportVerificationError::SnapshotDigestMismatch);
@@ -1282,6 +1330,7 @@ impl LoweredSupportRun<'_> {
             return Err(SupportVerificationError::AuthorityMismatch.into());
         }
         let mut routed_contacts = Vec::new();
+        let mut routed_route_memberships = Vec::new();
         let mut routed_ids = BTreeSet::new();
         for row in transcript.rows() {
             if row.kind() != FinalizedDispositionKind::Routed {
@@ -1306,14 +1355,23 @@ impl LoweredSupportRun<'_> {
             {
                 return Err(SupportVerificationError::AuthorityMismatch.into());
             }
-            routed_contacts.push(RoutedPhysicalContactEvidence { contact });
+            let logical_routes = routed_logical_routes(contact, plan.islands(), &context.topology)
+                .map_err(|_| SupportVerificationError::AuthorityMismatch)?;
+            let evidence = RoutedPhysicalContactEvidence { contact };
+            routed_contacts.push(evidence);
+            routed_route_memberships.push(RoutedRouteMembership {
+                contact: evidence,
+                logical_routes,
+            });
         }
-        let routed_projection_digest = routed_projection_digest(&routed_contacts);
+        let routed_projection_digest = routed_projection_digest(&routed_route_memberships);
         let snapshot = SupportVerificationSnapshot {
             mesh: context.mesh(),
             topology: &context.topology,
             coverage_samples: plan.coverage_samples(),
+            named_islands: plan.islands(),
             routed_contacts,
+            routed_route_memberships,
             mesh_digest: context.digests.mesh(),
             topology_digest: context.topology.content_digest(),
             plan_digest: plan.digest(),
@@ -1323,6 +1381,7 @@ impl LoweredSupportRun<'_> {
             transcript_digest: transcript.digest(),
             regular_digest: context.digests.regular(),
             coverage_digest: coverage_samples_digest(plan.coverage_samples()),
+            named_islands_digest: named_islands_digest(plan.islands()),
             lowered_primitives_digest: self.lowered.digest().0,
             routed_projection_digest,
             snapshot_digest: 0,
@@ -2038,10 +2097,106 @@ fn coverage_samples_digest(samples: &[CoverageSample]) -> u64 {
     hash.finish()
 }
 
-fn routed_projection_digest(contacts: &[RoutedPhysicalContactEvidence<'_>]) -> u64 {
+fn named_islands_digest(islands: &[SupportIsland]) -> u64 {
     let mut hash = Fnv::new();
-    hash.usize(contacts.len());
-    for contact in contacts {
+    hash.usize(islands.len());
+    for island in islands {
+        hash.u32(island.id);
+        hash.usize(island.face_ids.len());
+        for &face_id in &island.face_ids {
+            hash.u32(face_id);
+        }
+    }
+    hash.finish()
+}
+
+fn validate_named_islands(islands: &[SupportIsland], topology: &FaceTopology) -> bool {
+    let face_count = topology.component_ids().len();
+    let mut ids = BTreeSet::new();
+    islands.iter().all(|island| {
+        !island.face_ids.is_empty()
+            && ids.insert(island.id)
+            && island.face_ids.windows(2).all(|faces| faces[0] < faces[1])
+            && island
+                .face_ids
+                .iter()
+                .all(|&face_id| (face_id as usize) < face_count)
+    })
+}
+
+fn routed_logical_routes(
+    contact: &crate::specialized::SpecializedPhysicalContact,
+    islands: &[SupportIsland],
+    topology: &FaceTopology,
+) -> Result<Vec<RoutedLogicalRoute>, SupportVerificationError> {
+    if !validate_named_islands(islands, topology) {
+        return Err(SupportVerificationError::AuthorityMismatch);
+    }
+    let mut routes = BTreeSet::new();
+    for route in contact.regular_routes() {
+        routes.insert(RoutedLogicalRoute {
+            island_id: route.owner_island_id(),
+            face_id: route.coverage_face_id(),
+            component_id: route.component_id(),
+            provenance: match route.source_kind() {
+                crate::specialized::RepairRowSourceKind::Generic => {
+                    RoutedRouteProvenance::RegularGeneric
+                }
+                crate::specialized::RepairRowSourceKind::SyntheticIsland => {
+                    RoutedRouteProvenance::RegularSyntheticIsland
+                }
+            },
+        });
+    }
+    for demand in contact.demands() {
+        routes.insert(RoutedLogicalRoute {
+            island_id: demand.owner_island_id(),
+            face_id: demand.coverage_face_id(),
+            component_id: demand.coverage_component_id(),
+            provenance: match demand.kind() {
+                crate::specialized::SpecializedDemandKind::Minimum => {
+                    RoutedRouteProvenance::SpecializedMinimum
+                }
+                crate::specialized::SpecializedDemandKind::IslandBirth => {
+                    RoutedRouteProvenance::SpecializedIslandBirth
+                }
+            },
+        });
+    }
+    if routes.is_empty() {
+        return Err(SupportVerificationError::AuthorityMismatch);
+    }
+    let routes = routes.into_iter().collect::<Vec<_>>();
+    if routes.iter().any(|route| {
+        topology.component_ids().get(route.face_id as usize) != Some(&route.component_id)
+            || !islands.iter().any(|island| {
+                island.id == route.island_id
+                    && island.face_ids.binary_search(&route.face_id).is_ok()
+            })
+    }) {
+        return Err(SupportVerificationError::AuthorityMismatch);
+    }
+    Ok(routes)
+}
+
+fn validate_routed_memberships(
+    memberships: &[RoutedRouteMembership<'_>],
+    islands: &[SupportIsland],
+    topology: &FaceTopology,
+) -> bool {
+    let mut contact_ids = BTreeSet::new();
+    memberships.iter().all(|membership| {
+        contact_ids.insert(membership.contact.physical_contact_id())
+            && routed_logical_routes(membership.contact.contact, islands, topology)
+                .is_ok_and(|routes| routes == membership.logical_routes)
+    })
+}
+
+fn routed_projection_digest(memberships: &[RoutedRouteMembership<'_>]) -> u64 {
+    let mut hash = Fnv::new();
+    hash.usize(memberships.len());
+    for membership in memberships {
+        let contact = membership.contact;
         hash.u64(contact.physical_contact_id());
         for value in contact.position_mm() {
             hash.f64(value);
@@ -2050,6 +2205,18 @@ fn routed_projection_digest(contacts: &[RoutedPhysicalContactEvidence<'_>]) -> u
             hash.f64(value);
         }
         hash.f64(contact.carried_area_mm2());
+        hash.usize(membership.logical_routes.len());
+        for route in &membership.logical_routes {
+            hash.u32(route.island_id);
+            hash.u32(route.face_id);
+            hash.u32(route.component_id);
+            hash.byte(match route.provenance {
+                RoutedRouteProvenance::RegularGeneric => 0,
+                RoutedRouteProvenance::RegularSyntheticIsland => 1,
+                RoutedRouteProvenance::SpecializedMinimum => 2,
+                RoutedRouteProvenance::SpecializedIslandBirth => 3,
+            });
+        }
     }
     hash.finish()
 }
@@ -2065,9 +2232,11 @@ fn verification_snapshot_digest(snapshot: &SupportVerificationSnapshot<'_>) -> u
     hash.u64(snapshot.transcript_digest);
     hash.u64(snapshot.regular_digest);
     hash.u64(snapshot.coverage_digest);
+    hash.u64(snapshot.named_islands_digest);
     hash.u64(snapshot.lowered_primitives_digest);
     hash.u64(snapshot.routed_projection_digest);
     hash.usize(snapshot.coverage_samples.len());
+    hash.usize(snapshot.named_islands.len());
     hash.usize(snapshot.routed_contacts.len());
     hash.finish()
 }
@@ -3395,6 +3564,23 @@ mod tests {
                     .plan
                     .coverage_samples()
             );
+            assert_eq!(
+                snapshot.routed_route_memberships.len(),
+                snapshot.routed_contacts.len(),
+                "each physical seat retains one private logical-route projection"
+            );
+            assert!(
+                snapshot
+                    .routed_route_memberships
+                    .iter()
+                    .all(|membership| !membership.logical_routes.is_empty()),
+                "routed seats cannot be measured from pose alone"
+            );
+            assert!(validate_routed_memberships(
+                &snapshot.routed_route_memberships,
+                snapshot.named_islands,
+                snapshot.topology,
+            ));
             snapshot
                 .validate_integrity()
                 .expect("borrowed snapshot remains bound to retained authority");
@@ -3415,6 +3601,47 @@ mod tests {
             snapshot.plan_digest = snapshot.plan_digest.wrapping_add(1);
             assert_eq!(
                 snapshot.validate_integrity(),
+                Err(SupportVerificationError::SnapshotDigestMismatch)
+            );
+        });
+    }
+
+    #[test]
+    fn verification_snapshot_rejects_wrong_missing_and_duplicate_route_projections() {
+        with_braced_table(|braced| {
+            let lowered = braced
+                .structure()
+                .expect("required corpus structures")
+                .lower()
+                .expect("required corpus lowers");
+
+            let mut wrong = lowered
+                .verification_snapshot()
+                .expect("validated final authority snapshots");
+            wrong.routed_route_memberships[0].logical_routes[0].face_id = u32::MAX;
+            assert_eq!(
+                wrong.validate_integrity(),
+                Err(SupportVerificationError::SnapshotDigestMismatch)
+            );
+
+            let mut missing = lowered
+                .verification_snapshot()
+                .expect("validated final authority snapshots");
+            missing.routed_route_memberships[0].logical_routes.clear();
+            assert_eq!(
+                missing.validate_integrity(),
+                Err(SupportVerificationError::SnapshotDigestMismatch)
+            );
+
+            let mut duplicate = lowered
+                .verification_snapshot()
+                .expect("validated final authority snapshots");
+            let route = duplicate.routed_route_memberships[0].logical_routes[0];
+            duplicate.routed_route_memberships[0]
+                .logical_routes
+                .push(route);
+            assert_eq!(
+                duplicate.validate_integrity(),
                 Err(SupportVerificationError::SnapshotDigestMismatch)
             );
         });
