@@ -20,20 +20,16 @@ The integration authority is the clean worktree
 `/private/tmp/plinth-3d-pipeline-integration` on branch
 `codex/rust-pipeline-integration`.
 
-The handoff worktree was cut from clean integration commit
-`6d7a046d79a9d407e680697b07bfad0417be9e78` (`Preflight SCAR scalar geometry and
-native scratch`). During preparation of this handoff, the integration branch advanced
-cleanly by one remediation commit to
-`b5a329093a656638990246c2d2c6be3f6f72181a` (`Evaluate SCAR scalar once per evidence
-row`). Independent review then **ACCEPTED** `b5a3290` after focused SCAR tests (9/9),
-strict Clippy, format, and diff checks passed. Thus `b5a3290` is the current reviewed
-integration head, while this documentation branch intentionally remains based on
-`6d7a046`. Re-read the live head before resuming; never infer acceptance merely from
-presence on the integration branch.
+The current reviewed implementation integration HEAD is
+`2b933c5526760b5123d55005ecf596e66d8ed162` (`feat(cli): parse stable prepare
+command`). It includes the independently accepted SCAR remediation `b5a3290`, the
+preparation interface integration `92fa26a`, and the stable CLI parser integration
+`2b933c`; the latter two are integrated, not branch-only. Re-read the live head before
+resuming; never infer acceptance merely from presence on the integration branch.
 
-Verified integrated M7 evidence in the ancestry of the current reviewed head `b5a3290`
-(the format, coverage, and pre-remediation SCAR commits are also in the `6d7a046`
-handoff base):
+Verified integrated M7 evidence in the ancestry of the current reviewed head `2b933c`
+(the format, coverage, and pre-remediation SCAR commits are also in the earlier handoff
+base):
 
 | Gate slice | Integrated evidence | State |
 | --- | --- | --- |
@@ -93,12 +89,10 @@ their generating commits are integrated.
 
 ## Reviewed branch-only work
 
-None of the commits in this table is an ancestor of the `6d7a046` handoff snapshot.
+None of the commits in this table is integrated at the current reviewed HEAD `2b933c`.
 
 | Work | Branch/worktree | Commit(s) | Review state | Integration constraint |
 | --- | --- | --- | --- | --- |
-| prepare interface | `codex/prepare-interface` at `/private/tmp/plinth-prepare-interface` | `4809e367c723faedc2aa3b4393a906c38d2e69c5` | **ACCEPT** | Cherry-pick this commit alone after reviewing it against the then-current integration head. The branch head also contains blocked work. |
-| prepare CLI grammar | `codex/prepare-cli` at `/private/tmp/plinth-prepare-cli` | `b07d44559445110838fcd8fdf542b3873bf96c86` | **ACCEPT** | Its parent is blocked `e4db5d08`, but its patch is a separate CLI commit. Apply only after `4809e367`, then build and test in the clean integration worktree. Do not merge the branch. |
 | canonical delicacy authority | `codex/canonical-delicacy` at `/private/tmp/plinth-canonical-delicacy` | `b5d2397e3b36c1469d46d37edc60d9749dd4609c` then `aae61ee5327b45244836466df7f428aeb2c7195a` | **ACCEPT** for the coherent final state | `aae61ee` directly depends on the canonical field contract introduced by `b5d2397`; its remediation acceptance covers that required predecessor content, not a standalone `aae61ee` patch. Either create and independently review a squashed final delicacy patch against current integration, or independently review and integrate the coherent two-commit series. Non-blocking follow-up: explicit M0-value and signed-zero equality/digest regressions. |
 | grounded calibration artifacts | `codex/home-calibration-plate` at `/private/tmp/plinth-home-calibration-plate` | `634abdb`, `1541379` | **ACCEPT** and owner GUI-checked | Branch-only; independently review the two-commit series and its base before cherry-picking. |
 | preparation resource policy and entry validation | `codex/prepare-interface` | `e4db5d08fca8b4739e137f13bbf7694c0b94ca57`, `7b35c49ababa867d8fa93a1d13454ee26e6afa7a` | **BLOCKED / incomplete** | Do not cherry-pick. Add no-work tests for invalid decimation configuration; malformed support zero/MAX/nested-cap refusal; and external compile-fail tests proving `SupportPreparationInput` fields cannot be constructed directly. Re-run the frozen coverage test without changing its golden. |
@@ -113,21 +107,19 @@ on integration; it must be rerun after remediation.
 
 | Worktree/branch | Observed head | State at handoff |
 | --- | --- | --- |
-| `/private/tmp/plinth-3d-pipeline-integration`, `codex/rust-pipeline-integration` | `b5a3290` | clean; SCAR one-final-evaluation remediation independently accepted |
-| `/private/tmp/plinth-prepare-interface`, `codex/prepare-interface` | `7b35c49` | clean; contains accepted interface plus blocked resource commits |
-| `/private/tmp/plinth-prepare-cli`, `codex/prepare-cli` | `b07d445` | clean; accepted branch-only CLI commit |
+| `/private/tmp/plinth-3d-pipeline-integration`, `codex/rust-pipeline-integration` | `2b933c` | clean; includes integrated preparation interface `92fa26a` and CLI parser `2b933c` |
 | `/private/tmp/plinth-canonical-delicacy`, `codex/canonical-delicacy` | `aae61ee` | clean; accepted branch-only |
-| `/private/tmp/plinth-home-calibration-plate`, `codex/home-calibration-plate` | `1541379` | **untracked `--list/` directory present**, approximately 160 MiB; committed calibration work remains accepted branch-only |
-| `/private/tmp/plinth-migration-handoff`, `codex/migration-handoff-2026-08-03` | based at `6d7a046` | this documentation-only handoff |
+| protocol PDF/source | integrated at `0ac30f1` | home calibration protocol Markdown, Typst source, and PDF are integrated; the reviewed Typst 0.13.1 artifact is recorded separately from a byte-different Typst 0.15.1 reproduction |
 
 There are additional retained specialist worktrees. Use `git worktree list --porcelain`
 as the authoritative inventory before assigning or removing any of them. Do not delete or
 move a worktree merely because it is not listed in the focused table above.
 
-The `--list/` directory is generated/untracked output and is about 160 MiB. Never commit
-generated `--list/` or generated `crates/` trees. Do not delete it without an explicit,
-target-specific owner instruction. Do not use Python for migration implementation or
-ad-hoc verification.
+Cleanup reduced worktrees from 26 to 12 after adding the protocol worktree and removing
+merged and superseded work. Branches reduced from 66 to 52. Both exact stale `--list/`
+directories were removed, approximately 278,241,280 bytes of generated-only output; they
+are regeneration-only and must never be committed. Do not use Python for migration
+implementation or ad-hoc verification.
 
 ## Ordered resumption checklist
 
@@ -139,27 +131,13 @@ ad-hoc verification.
    git -C /private/tmp/plinth-3d-pipeline-integration diff --check
    ```
 
-   The independent ACCEPT for `b5a3290` is recorded above. If the live head has advanced,
+   The independent ACCEPT for `b5a3290` and its integrated successors are recorded above. If the live head has advanced,
    inspect its ancestry and require independent review for each new change before extending
    that acceptance.
 
-2. Integrate only accepted preparation patches, after inspecting them against the live
-   integration head:
-
-   ```sh
-   git -C /private/tmp/plinth-migration-handoff show --stat 4809e367
-   git -C /private/tmp/plinth-migration-handoff show --stat b07d445
-   git -C /private/tmp/plinth-3d-pipeline-integration cherry-pick 4809e367
-   git -C /private/tmp/plinth-3d-pipeline-integration cherry-pick b07d445
-   cargo test -p plinth-pipeline -p plinth-cli
-   cargo clippy --workspace --all-targets --all-features -- -D warnings
-   cargo fmt --all -- --check
-   git diff --check
-   ```
-
-   Run the Cargo commands from `/private/tmp/plinth-3d-pipeline-integration`. Stop on a
-   conflict or behavioral mismatch; do not blind-merge either branch. Commit/cherry-pick
-   only after the worktree is clean and the diff has been reviewed.
+2. The accepted preparation interface and stable CLI parser are already integrated as
+   `92fa26a` and `2b933c`, respectively. Retain execution-runner and resource-admission
+   work as separate follow-up work; the blocked resource-policy commits remain excluded.
 
    Handle canonical delicacy separately. Do **not** cherry-pick `aae61ee` alone: it is the
    direct child of `b5d2397` and relies on that predecessor's canonical field contract.
@@ -198,10 +176,10 @@ ad-hoc verification.
    -> remaining typed-registry conversion
    ```
 
-   The preparation pipeline scaffold is authorized in parallel once its reviewed interface
-   and CLI patches are integrated: resolve a complete `PrepareRequest`, load/cache inputs,
-   run the move-only stage chain, emit the artifact/report once, and keep resource admission
-   at stage boundaries. The blocked resource patch is not authorization to bypass its tests.
+   The preparation interface and CLI parser are integrated. Continue the execution runner:
+   resolve a complete `PrepareRequest`, load/cache inputs, run the move-only stage chain,
+   emit the artifact/report once, and keep resource admission at stage boundaries. The
+   blocked resource patch is not authorization to bypass its tests.
 
 6. Run the M7 acceptance commands in `04-migration-plan.md` only after every slice above is
    integrated. Record full-corpus score evidence and owner ChituBox review separately; the
