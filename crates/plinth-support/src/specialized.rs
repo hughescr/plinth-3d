@@ -3032,9 +3032,7 @@ fn evaluate_gate_batch(
                     .ok_or(SpecializedError::GateResourceOverflow)?;
                 let mut nearest_route_plans = Vec::with_capacity(window_variants);
                 let mut retained_nearest_route_bytes =
-                    checked_route_bytes::<CoverageRouteNearestPlan>(
-                        nearest_route_plans.capacity(),
-                    )?;
+                    checked_route_bytes::<CoverageRouteNearestPlan>(window_variants)?;
                 let mut max_nearest_route_knn_bytes = 0usize;
                 for variant in window_start..window_end {
                     let proposal = variant
@@ -3248,6 +3246,10 @@ impl CoverageRouteNearestPlan {
 
     pub(crate) const fn max_knn_peak_bytes(&self) -> usize {
         self.max_route_knn_logical_peak_bytes
+    }
+
+    pub(crate) fn route_plan_count(&self) -> usize {
+        self.route_plans.len()
     }
 }
 
@@ -3634,7 +3636,7 @@ pub(crate) fn plan_route_points_nearest(
         checked_route_bytes::<(CoverageRoute, usize)>(route_membership_counts.len())?,
         checked_route_bytes::<u64>(total_indexed_points)?,
         checked_route_bytes::<(CoverageRoute, usize)>(query_counts.len())?,
-        checked_route_bytes::<CoverageRouteKnnPlan>(route_plans.capacity())?,
+        checked_route_bytes::<CoverageRouteKnnPlan>(route_plans.len())?,
         checked_route_bytes::<u64>(max_source_count)?,
         checked_route_bytes::<usize>(max_query_count)?,
     ]
