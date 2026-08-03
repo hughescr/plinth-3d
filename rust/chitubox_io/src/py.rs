@@ -64,8 +64,10 @@ fn kind_of(e: &ChituboxError) -> &'static str {
         ChituboxError::FileTooLarge { .. } => "FileTooLarge",
         ChituboxError::OpaqueLengthMismatch { .. } => "OpaqueLengthMismatch",
         ChituboxError::VerifyFailed { .. } => "VerifyFailed",
+        ChituboxError::CleanRoundtripDrift => "CleanRoundtripDrift",
         ChituboxError::FormatDrift { .. } => "FormatDrift",
         ChituboxError::UnknownOpaqueRegion(_) => "UnknownOpaqueRegion",
+        ChituboxError::UnsupportedOpaqueLayoutMutation { .. } => "UnsupportedOpaqueLayoutMutation",
     }
 }
 
@@ -85,6 +87,26 @@ fn to_pyerr(e: ChituboxError) -> PyErr {
 /// Shorthand for an input-shape complaint (a caller bug, not a format error).
 fn bad_input(msg: impl Into<String>) -> PyErr {
     PyValueError::new_err(msg.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::kind_of;
+    use crate::error::ChituboxError;
+
+    #[test]
+    fn every_format_gate_error_has_a_stable_python_kind() {
+        assert_eq!(
+            kind_of(&ChituboxError::CleanRoundtripDrift),
+            "CleanRoundtripDrift"
+        );
+        assert_eq!(
+            kind_of(&ChituboxError::UnsupportedOpaqueLayoutMutation {
+                operation: "test operation",
+            }),
+            "UnsupportedOpaqueLayoutMutation"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

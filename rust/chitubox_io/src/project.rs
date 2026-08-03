@@ -570,9 +570,7 @@ impl Project {
         if !self.doc.dirty {
             if let Some(orig) = &self.doc.original {
                 if &bytes != orig {
-                    return Err(ChituboxError::VerifyFailed {
-                        detail: "clean structural rebuild differs from opened bytes".into(),
-                    });
+                    return Err(ChituboxError::CleanRoundtripDrift);
                 }
             }
         }

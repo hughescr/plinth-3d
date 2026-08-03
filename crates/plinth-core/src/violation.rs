@@ -24,6 +24,16 @@ pub enum ViolationKind {
     EmitBoundaryEdge,
     EmitNegativeShell,
     EmitInconsistentWinding,
+    /// The artifact could not be read from the requested path. Its measure is
+    /// an artifact failure count: exactly +1.0 for the failing artifact.
+    ArtifactUnreadable,
+    /// The on-disk artifact failed ChituBox container parsing, its independent
+    /// structural audit, or exact clean round-trip. Its measure is an artifact
+    /// failure count: exactly +1.0 for the failing artifact. This does not
+    /// assert GUI/native ChituBox acceptance.
+    ChituboxStructuralFormat,
+    /// Reserved solely for actual GUI/native ChituBox acceptance evidence;
+    /// structural verification must never emit this kind.
     ChituboxLoadability,
     RepairCapExhausted,
 }
