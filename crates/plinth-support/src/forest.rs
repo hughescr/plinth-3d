@@ -119,23 +119,30 @@ impl PositiveFiniteMm {
     }
 }
 
-#[allow(dead_code, reason = "E1a seals this private staging authority; E1b mints it")]
+#[allow(
+    dead_code,
+    reason = "staged for E1b endpoint validator; branch not mergeable alone"
+)]
 mod embed_validation {
-    #[derive(Clone, Copy, Debug)]
+    #[derive(Clone, Copy)]
     pub(super) struct ValidatorAuthority {
         witness: u64,
     }
 
-    #[derive(Clone, Copy, Debug)]
+    #[derive(Clone, Copy)]
     pub(super) struct SurfaceIdentity {
         identity: u64,
     }
 
     impl ValidatorAuthority {
-        pub(super) const fn witness(self) -> u64 { self.witness }
+        pub(super) const fn witness(self) -> u64 {
+            self.witness
+        }
     }
     impl SurfaceIdentity {
-        pub(super) const fn identity(self) -> u64 { self.identity }
+        pub(super) const fn identity(self) -> u64 {
+            self.identity
+        }
     }
 
     #[cfg(test)]
@@ -150,7 +157,7 @@ mod embed_validation {
 
 /// Opaque, immutable result of a later endpoint-connected construction check.
 /// E1a seals the binding format; E1b owns the kernel validator and witness minting.
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, PartialEq)]
 pub struct DesignedEndMask {
     requested_extent_mm: PositiveFiniteMm,
     witness: u64,
@@ -158,21 +165,28 @@ pub struct DesignedEndMask {
 }
 
 impl DesignedEndMask {
-    pub(crate) fn validated_extent_for(
+    #[allow(
+        dead_code,
+        reason = "staged for E1b endpoint validator; branch not mergeable alone"
+    )]
+    fn validated_extent_for(
         &self,
         member: &Member,
         end: EmbedEnd,
         surface: embed_validation::SurfaceIdentity,
     ) -> Result<PositiveFiniteMm, DesignedMaskError> {
         (self.validation_binding
-            == mask_binding(member, end, self.requested_extent_mm, self.witness, surface.identity()))
-            .then_some(self.requested_extent_mm)
-            .ok_or(DesignedMaskError::StaleBinding)
+            == mask_binding(
+                member,
+                end,
+                self.requested_extent_mm,
+                self.witness,
+                surface.identity(),
+            ))
+        .then_some(self.requested_extent_mm)
+        .ok_or(DesignedMaskError::StaleBinding)
     }
 
-    #[cfg(test)]
-    #[must_use]
-    pub(crate) const fn test_requested_extent_mm(&self) -> PositiveFiniteMm { self.requested_extent_mm }
     #[cfg(test)]
     #[must_use]
     pub(crate) const fn validation_binding(&self) -> u64 {
@@ -182,7 +196,7 @@ impl DesignedEndMask {
 
 /// Independent end masks. Construction is crate-private so callers cannot inject
 /// an unvalidated clearance claim into a member or verifier.
-#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+#[derive(Clone, Default, PartialEq)]
 pub struct DesignedClearanceMasks {
     terminalward: Option<DesignedEndMask>,
     rootward: Option<DesignedEndMask>,
@@ -212,7 +226,11 @@ impl DesignedClearanceMasks {
 
     /// Sealed E1a boundary for the future kernel-backed validator. `witness` and
     /// `surface_identity` are opaque digest inputs, never inferred from geometry.
-    pub(crate) fn bind_for_member(
+    #[allow(
+        dead_code,
+        reason = "staged for E1b endpoint validator; branch not mergeable alone"
+    )]
+    fn bind_for_member(
         member: &Member,
         terminalward: Option<PositiveFiniteMm>,
         rootward: Option<PositiveFiniteMm>,
@@ -220,9 +238,14 @@ impl DesignedClearanceMasks {
         surface_identity: embed_validation::SurfaceIdentity,
     ) -> Result<Self, DesignedMaskError> {
         let length = member_length_mm(member)?;
-        let terminal = terminalward.map(|extent| validate_extent(extent, length)).transpose()?;
-        let root = rootward.map(|extent| validate_extent(extent, length)).transpose()?;
-        if terminal.is_some_and(|value| root.is_some_and(|other| value.get() >= length - other.get()))
+        let terminal = terminalward
+            .map(|extent| validate_extent(extent, length))
+            .transpose()?;
+        let root = rootward
+            .map(|extent| validate_extent(extent, length))
+            .transpose()?;
+        if terminal
+            .is_some_and(|value| root.is_some_and(|other| value.get() >= length - other.get()))
         {
             return Err(DesignedMaskError::OverlappingExtents);
         }
@@ -267,6 +290,10 @@ pub enum DesignedMaskError {
     StaleBinding,
 }
 
+#[allow(
+    dead_code,
+    reason = "staged for E1b endpoint validator; branch not mergeable alone"
+)]
 fn validate_extent(
     extent: PositiveFiniteMm,
     length: f64,
@@ -278,6 +305,10 @@ fn validate_extent(
     }
 }
 
+#[allow(
+    dead_code,
+    reason = "staged for E1b endpoint validator; branch not mergeable alone"
+)]
 fn member_length_mm(member: &Member) -> Result<f64, DesignedMaskError> {
     let [x0, y0, z0] = member.p0_mm;
     let [x1, y1, z1] = member.p1_mm;
@@ -289,6 +320,10 @@ fn member_length_mm(member: &Member) -> Result<f64, DesignedMaskError> {
         .ok_or(DesignedMaskError::InvalidMemberSpan)
 }
 
+#[allow(
+    dead_code,
+    reason = "staged for E1b endpoint validator; branch not mergeable alone"
+)]
 fn mask_binding(
     member: &Member,
     end: EmbedEnd,
@@ -1978,24 +2013,70 @@ mod tests {
         let none = bind(&member, None, None, 7, 9).unwrap();
         assert_eq!(none.iter().count(), 0);
         let terminal = bind(&member, Some(extent(0.2)), None, 7, 9).unwrap();
-        assert_eq!(terminal.iter().map(|(end, _)| end).collect::<Vec<_>>(), vec![EmbedEnd::Terminalward]);
+        assert_eq!(
+            terminal.iter().map(|(end, _)| end).collect::<Vec<_>>(),
+            vec![EmbedEnd::Terminalward]
+        );
         let both = bind(&member, Some(extent(0.2)), Some(extent(0.3)), 7, 9).unwrap();
-        assert_eq!(both.iter().map(|(end, _)| end).collect::<Vec<_>>(), vec![EmbedEnd::Terminalward, EmbedEnd::Rootward]);
+        assert_eq!(
+            both.iter().map(|(end, _)| end).collect::<Vec<_>>(),
+            vec![EmbedEnd::Terminalward, EmbedEnd::Rootward]
+        );
     }
 
     #[test]
     fn designed_mask_extents_reject_invalid_out_of_span_and_overlap() {
         for value in [0.0, -0.0, -1.0, f64::NAN, f64::INFINITY] {
-            assert_eq!(PositiveFiniteMm::new(value), Err(DesignedMaskError::InvalidExtent));
+            assert_eq!(
+                PositiveFiniteMm::new(value),
+                Err(DesignedMaskError::InvalidExtent)
+            );
         }
         let member = Member::new(member_spec(MemberKind::Shoot));
-        assert_eq!(bind(&member, Some(extent(1.0)), None, 1, 1), Err(DesignedMaskError::ExtentOutOfSpan));
-        assert_eq!(bind(&member, Some(extent(0.5)), Some(extent(0.5)), 1, 1), Err(DesignedMaskError::OverlappingExtents));
-        for value in [1e200, 1e300] {
-            let mut spec = member_spec(MemberKind::Shoot);
-            spec.p1_mm = [finite(value), finite(value), finite(value)];
-            assert!(bind(&Member::new(spec), Some(extent(1.0)), Some(extent(1.0)), 1, 1).is_ok());
-        }
+        assert!(matches!(
+            bind(&member, Some(extent(1.0)), None, 1, 1),
+            Err(DesignedMaskError::ExtentOutOfSpan)
+        ));
+        assert!(matches!(
+            bind(&member, Some(extent(0.5)), Some(extent(0.5)), 1, 1),
+            Err(DesignedMaskError::OverlappingExtents)
+        ));
+    }
+
+    #[test]
+    fn designed_mask_extents_fail_closed_at_extreme_finite_scales() {
+        let mut huge_span = member_spec(MemberKind::Shoot);
+        huge_span.p1_mm = [finite(1e200), finite(0.0), finite(0.0)];
+        let huge_span = Member::new(huge_span);
+        assert!(matches!(
+            bind(&huge_span, Some(extent(1e300)), None, 1, 1),
+            Err(DesignedMaskError::ExtentOutOfSpan)
+        ));
+        assert!(matches!(
+            bind(&huge_span, Some(extent(6e199)), Some(extent(6e199)), 1, 1,),
+            Err(DesignedMaskError::OverlappingExtents)
+        ));
+
+        let mut overflowing_span = member_spec(MemberKind::Shoot);
+        overflowing_span.p0_mm = [finite(-1e308), finite(0.0), finite(0.0)];
+        overflowing_span.p1_mm = [finite(1e308), finite(0.0), finite(0.0)];
+        assert!(matches!(
+            bind(
+                &Member::new(overflowing_span),
+                Some(extent(1.0)),
+                None,
+                1,
+                1,
+            ),
+            Err(DesignedMaskError::InvalidMemberSpan)
+        ));
+
+        let mut zero_span = member_spec(MemberKind::Shoot);
+        zero_span.p1_mm = zero_span.p0_mm;
+        assert!(matches!(
+            bind(&Member::new(zero_span), Some(extent(1.0)), None, 1, 1,),
+            Err(DesignedMaskError::InvalidMemberSpan)
+        ));
     }
 
     #[test]
@@ -2012,10 +2093,22 @@ mod tests {
         let geometry = bind(&changed_geometry, Some(extent(0.2)), None, 1, 2).unwrap();
         let binding = terminal.terminalward().unwrap().validation_binding();
         assert_ne!(binding, root.rootward().unwrap().validation_binding());
-        assert_ne!(binding, changed_extent.terminalward().unwrap().validation_binding());
-        assert_ne!(binding, changed_witness.terminalward().unwrap().validation_binding());
-        assert_ne!(binding, changed_surface.terminalward().unwrap().validation_binding());
-        assert_ne!(binding, geometry.terminalward().unwrap().validation_binding());
+        assert_ne!(
+            binding,
+            changed_extent.terminalward().unwrap().validation_binding()
+        );
+        assert_ne!(
+            binding,
+            changed_witness.terminalward().unwrap().validation_binding()
+        );
+        assert_ne!(
+            binding,
+            changed_surface.terminalward().unwrap().validation_binding()
+        );
+        assert_ne!(
+            binding,
+            geometry.terminalward().unwrap().validation_binding()
+        );
         assert_eq!(
             terminal.terminalward().unwrap().validated_extent_for(
                 &member,
@@ -2032,8 +2125,16 @@ mod tests {
             ),
             Err(DesignedMaskError::StaleBinding)
         );
-        let build = || bind(&member, Some(extent(0.2)), Some(extent(0.3)), 1, 2).unwrap().iter().map(|(_, mask)| mask.validation_binding()).collect::<Vec<_>>();
+        let build = || {
+            bind(&member, Some(extent(0.2)), Some(extent(0.3)), 1, 2)
+                .unwrap()
+                .iter()
+                .map(|(_, mask)| mask.validation_binding())
+                .collect::<Vec<_>>()
+        };
         let baseline = build();
-        for _ in [1, 4, 16] { assert_eq!(build(), baseline); }
+        for _ in [1, 4, 16] {
+            assert_eq!(build(), baseline);
+        }
     }
 }
