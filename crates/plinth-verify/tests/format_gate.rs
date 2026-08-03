@@ -103,10 +103,10 @@ fn u32_at(bytes: &[u8], offset: usize) -> usize {
 #[test]
 fn authoritative_native_fixtures_pass_structural_gate_without_claiming_gui_acceptance() {
     for name in [
-        "empty.chitubox",
-        "sphere-cylinder.chitubox",
-        "sphere-cylinder-supported.chitubox",
-        "morel.chitubox",
+        "morel_mudskipper_supports.chitubox",
+        "two-supports.chitubox",
+        "basic-cube-supports-raft.chitubox",
+        "cylinder-supported-bottom-connected.chitubox",
     ] {
         let report = verify_artifact(artifact_id(), &fixture_path(name));
         assert!(report.accepted(), "{name}: {report:?}");
@@ -144,8 +144,8 @@ fn corrupt_truncated_pointer_and_underlength_descriptor_cases_fail_by_named_reas
         FormatFailureReason::Structural(StructuralFormatFailure::Truncated),
     );
 
-    let mut pointer_bytes = std::fs::read(fixture_path("sphere-cylinder-supported.chitubox"))
-        .expect("read supported fixture");
+    let mut pointer_bytes =
+        std::fs::read(fixture_path("two-supports.chitubox")).expect("read supported fixture");
     let table = u32_at(&pointer_bytes, 8);
     let support_index = u32_at(&pointer_bytes, table + 268);
     pointer_bytes[support_index + 4..support_index + 8]
