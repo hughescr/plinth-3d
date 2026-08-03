@@ -8,6 +8,12 @@
 
 use crate::consts::{PARITY_DEN_EPS, PARITY_SLACK, ZDEDUP};
 use crate::mesh::Mesh;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// Result-inert instrumentation at the lowest parity-index construction
+// boundary. `build_with_reserved_peak` is used both through ParityVote and by
+// direct/transient tests, so attempts cannot bypass this audit seam.
+static PARITY_AXIS_BUILD_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum ParityBuildError {
@@ -334,6 +340,7 @@ impl AxisGrid {
         h: f64,
         max_grid_bytes: usize,
     ) -> Result<(AxisGrid, usize), ParityBuildError> {
+        PARITY_AXIS_BUILD_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
         let n = mesh.nfaces();
         // Peak-memory accounting (Amendment A17 / spec sec 3.5): a large
         // projected triangle bins into every overlapped cell, so the CSR ref
@@ -625,6 +632,10 @@ impl AxisGrid {
     }
 }
 
+pub(crate) fn axis_build_attempt_count() -> u64 {
+    PARITY_AXIS_BUILD_ATTEMPTS.load(Ordering::Relaxed)
+}
+
 /// 3-axis majority vote (ParityVote): inside iff >= 2 of 3 axes report inside.
 pub struct ParityVote {
     pub grids: [AxisGrid; 3],
@@ -754,8 +765,10 @@ mod memory_tests {
         assert_eq!(peak - per_triangle, 10_408);
         assert_eq!(estimate.max_axis_build_bytes, peak);
 
+        let direct_builds_before = axis_build_attempt_count();
         let (grid, reserved_peak) =
             AxisGrid::build_with_reserved_peak(&mesh, 2, 1.0, peak).expect("exact peak cap");
+        assert!(axis_build_attempt_count() > direct_builds_before);
         assert_eq!(reserved_peak, peak);
         assert_eq!(grid.n_refs, 289);
         assert_eq!(grid.n_cells, 289);
