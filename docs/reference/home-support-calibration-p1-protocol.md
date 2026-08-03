@@ -8,7 +8,7 @@ recorded production workflow and limited, cured-state tabletop handling. It is
 not a material-characterisation test: it does not establish wet-green modulus,
 printer peel force, universal resin strength, or a safe support policy by itself.
 
-The plate geometry authority is the generated package at
+The generated plate geometry authority is the package at
 `/private/tmp/plinth-home-calibration-plate`, commit
 `1541379c1063ca9a41ca2761a189779a8f715a2e`, specifically its generated
 `home-support-calibration-manifest.json` and CSV. The loading-fixture authority
@@ -20,6 +20,13 @@ also at commit `1541379c1063ca9a41ca2761a189779a8f715a2e`, SHA-256
 the fixture only nominally; this separate artifact is the real fixture project.
 The printed fixture is nevertheless uncalibrated until the cured, individual
 fixture has been inspected and its arms measured as specified below.
+
+The actual plate being printed is the reviewed field-patched artifact
+`/private/tmp/plinth-chitubox-diagnosis/H2-exact-grounded-full-plate.chitubox`,
+SHA-256 `a33b2e10c1293b322f89fe2910c79055fa59b2d8b7bf3b2d4df64c804a53a679`,
+26,101,476 bytes. It is distinct from the generator commits `634abdb` and
+`1541379`; neither commit is claimed to have produced H2. Record H2's digest,
+size, and reviewed field-patched status in the run record.
 
 The plate is six self-rafted, contiguous carrier strips (76 specimens total),
 within a 200.5 x 115.25 x 26.75 mm envelope. X and Y mean project axes only;
@@ -124,10 +131,12 @@ completed for that individual fixture:
    horizontal: an 18 mm coupon uses the receiver marked `18` at x=58 mm and a
    24 mm coupon uses the receiver marked `24` at x=64 mm. Both put the terminal
    at x=40 mm. Record the lateral load direction and ensure the stand is stable.
-3. Use a closed loop around the straight mass peg and let it settle against the
-   peg's rooted base on the lever beam. Use eye protection and place a clear
-   shield or clear bag around the hanging mass and coupon. Never place hands
-   under the hanging mass.
+3. Confirm the free lever moves without preload, binding, or unintended contact.
+   Use a closed loop around the straight mass peg and let it settle against the
+   peg's rooted base on the lever beam. At x=-10 mm, the mass pulls down and the
+   paddle applies the intended vertical load at the terminal crossbar. Use eye
+   protection and place a clear shield or clear bag around the hanging mass and
+   coupon. Never place hands under the hanging mass.
 4. Measure and record the pivot-to-mass arm `a_m` and pivot-to-contact arm
    `a_s` with the caliper. The nominal geometry is `a_m = 10.0 mm` and
    `a_s = 40.0 mm`, i.e. a 1:4 arm ratio / 4:1 force reduction. If the measured
@@ -137,10 +146,10 @@ completed for that individual fixture:
    unseats, contacts an unintended surface, or the load path is unclear, stop:
    record `fixture_unseated`/`fixture_invalid` and do not load the coupon.
 
-Use a kitchen scale and a dense object or closed screw-top container. Record the
-exact displayed mass in grams for every application; do not use coins or assume
-the marked mass of any object. The conservative preregistered ascending schedule
-is:
+Use a kitchen scale and a dense object or closed screw-top container. Weigh and
+record the complete hanging assembly: object/container plus loop/string. Do not
+use coins or assume the marked mass of any component. The conservative
+preregistered ascending schedule is:
 
 | Exact target input mass | Nominal direct-load equivalent at 10:40 | Nominal force at specimen |
 |---:|---:|---:|
@@ -154,7 +163,7 @@ For the actual weighed mass `m_g`, calculate rather than round:
 
 ```text
 F_specimen_N = m_g / 1000 x 9.80665 x (a_m / a_s)
-M_base_Nmm  = F_specimen_N x measured_load_height_mm
+M_base_Nmm  = F_specimen_N x measured_base_to_contact_span_mm
 ```
 
 Apply each surviving level for a 10 s dwell. Use fixed, perpendicular phone
@@ -170,6 +179,15 @@ Stop immediately at the first audible crack, visible whitening, brace
 separation, lever unseating, snap, or permanent set greater than 1.0 mm. Do not
 continue a damaged coupon to obtain a higher failure number. Record the first
 stop level and failure mode; later levels are `not_attempted`, not passes.
+
+## Practical loading order
+
+Validate the fixture first with one deliberately marginal/strong control pair:
+`CM1`, then `CS1`. Record both outcomes even if the marginal control fails. Only
+then test the remaining controls and braced coupons in geometry-matched pairs
+(same nominal span/radius/orientation where available), recording the chosen
+pairing. Never reuse a damaged coupon, and never change the source-defined mass
+schedule to make a comparison appear cleaner.
 
 ## Validity, results package, and limitations
 
@@ -210,7 +228,8 @@ Print or copy these sheets unchanged for each run. A blank is not a pass. Use
 |---|---|
 | Run ID / date / operator | |
 | Plate source commit | `1541379c1063ca9a41ca2761a189779a8f715a2e` |
-| Plate `.chitubox` SHA-256 / bytes | |
+| Actual printed plate | `H2-exact-grounded-full-plate.chitubox`; reviewed field-patched artifact, not generator output |
+| Plate `.chitubox` SHA-256 / bytes | `a33b2e10c1293b322f89fe2910c79055fa59b2d8b7bf3b2d4df64c804a53a679` / `26101476` |
 | Manifest JSON SHA-256 / bytes | |
 | Manifest CSV SHA-256 / bytes | |
 | Printer / slicer version | Saturn 4 Ultra 16K / |
@@ -275,7 +294,8 @@ Enter one outcome and one photo/file reference for every ID.
 | `a_s` range / selected mm | |
 | Actual ratio `a_m / a_s` | |
 | Nominal 10.0 / 40.0 verified? If no, actual ratio used | |
-| `measured_load_height_mm` | |
+| Free lever movement/no preload verified | |
+| Measured base-to-contact specimen span mm (18/24 nominal) | |
 | Fixture disposition | `ready`, `fixture_unseated`, or `fixture_invalid` |
 
 ### D. Per-coupon load sheet
@@ -287,7 +307,7 @@ __________  Range: __________  Selected baseline: __________
 
 Zero-load perpendicular photo with comb in specimen plane: ____________________
 
-| Nominal target g | Exact scale g | Calculated force N | 10 s dwell photo | Peak photo deflection | 30 s recovery readings mm (3) | Residual / recovery result | Ten cycles complete? | Outcome / stop mode |
+| Nominal target g | Complete assembly scale g | Calculated force N | 10 s dwell photo | Peak photo deflection | 30 s recovery readings mm (3) | Residual / recovery result | Ten cycles complete? | Outcome / stop mode |
 |---:|---:|---:|---|---|---|---|---|---|
 | 20 | | | | | | | | |
 | 40 | | | | | | | | |
