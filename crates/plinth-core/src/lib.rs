@@ -32,8 +32,8 @@ pub use constants::{
     M0ConstantsError, M0EvidenceConstants, M0EvidenceConstantsError, M0PlaceholderConstants,
     M0PlaceholderConstantsError, NonNegativeFinite, PlaceholderValueError, PlacementXyMm,
     PositiveFinite, RegistryError, RegistryProvenance, RegistryProvenanceClass,
-    RegistryProvenanceView, SeedSpacingFactor, SphereTessellationPolicy, ToConstantValue,
-    TrialSetting, UnitFraction, VentDirections,
+    RegistryProvenanceView, ScarAreaCapPolicy, SeedSpacingFactor, SphereTessellationPolicy,
+    ToConstantValue, TrialSetting, UnitFraction, VentDirections,
 };
 pub use cost::{
     CostError, CostVector, Fidelity, OptimizationError, OptimizationSummary, OrientationCost,

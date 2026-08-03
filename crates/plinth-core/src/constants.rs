@@ -42,8 +42,99 @@ pub enum M0ConstantsError {
 #[derive(Clone, Debug, PartialEq)]
 pub struct M0Constants {
     registry: ConstantsRegistry,
+    evidence: M0EvidenceConstants,
     placeholders: M0PlaceholderConstants,
     saturn4_ultra: PrinterProfile,
+}
+
+/// Immutable typed authority for the SCAR-AREA-CAP and PRINT-FLOOR inputs.
+///
+/// This is deliberately a view over the one M0 registry, rather than a second
+/// declaration set. The policy literals remain owned by their canonical
+/// registry entries: seven are `Placeholder` policy values and
+/// `PRINT_FLOOR_CHORD_MM` is an owner-decision `Measured` value. See
+/// `docs/specs/SPEC-EMBED-POLICY.md` "Normative constants" and
+/// "PRINT-FLOOR amendment", and
+/// `docs/rust-migration/03-physics-and-constants.md` §3.6.
+///
+/// The later measurement/gate implementation must preserve the specification's
+/// strict boundaries: a scar limit is legal at equality (`<=`), while an
+/// unanchored transit is moot only when its chord is strictly below the print
+/// floor (`<`); equality is a firm transit. This type supplies no geometry,
+/// predicate, request limit, or report behavior.
+#[derive(Clone, Copy, Debug)]
+pub struct ScarAreaCapPolicy<'a> {
+    a_abs_mm2: &'a Placeholder<PositiveFinite>,
+    kappa: &'a Placeholder<PositiveFinite>,
+    l_scar_max_mm: &'a Placeholder<PositiveFinite>,
+    eps_cos: &'a Placeholder<PositiveFinite>,
+    interval_tol_mm: &'a Placeholder<PositiveFinite>,
+    print_floor_chord_mm: &'a Measured<f64>,
+    tip_ball_factor: &'a Placeholder<PositiveFinite>,
+    foot_ball_factor: &'a Placeholder<PositiveFinite>,
+}
+
+impl<'a> ScarAreaCapPolicy<'a> {
+    /// Stable decision identity for provenance recording once the gate exists.
+    #[must_use]
+    pub fn decision_id(&self) -> crate::DecisionId {
+        crate::DecisionId::from("SCAR-AREA-CAP")
+    }
+
+    /// Canonical registry IDs, in the policy specification's order.
+    #[must_use]
+    pub const fn constant_ids(&self) -> [&'static str; 8] {
+        [
+            "A_ABS_MM2",
+            "KAPPA",
+            "L_SCAR_MAX_MM",
+            "EPS_COS",
+            "TOL_MM",
+            "PRINT_FLOOR_CHORD_MM",
+            "BALL_FACTOR_STUB",
+            "BALL_FACTOR_FOOT",
+        ]
+    }
+
+    #[must_use]
+    pub const fn a_abs_mm2(&self) -> &'a Placeholder<PositiveFinite> {
+        self.a_abs_mm2
+    }
+
+    #[must_use]
+    pub const fn kappa(&self) -> &'a Placeholder<PositiveFinite> {
+        self.kappa
+    }
+
+    #[must_use]
+    pub const fn l_scar_max_mm(&self) -> &'a Placeholder<PositiveFinite> {
+        self.l_scar_max_mm
+    }
+
+    #[must_use]
+    pub const fn eps_cos(&self) -> &'a Placeholder<PositiveFinite> {
+        self.eps_cos
+    }
+
+    #[must_use]
+    pub const fn interval_tol_mm(&self) -> &'a Placeholder<PositiveFinite> {
+        self.interval_tol_mm
+    }
+
+    #[must_use]
+    pub const fn print_floor_chord_mm(&self) -> &'a Measured<f64> {
+        self.print_floor_chord_mm
+    }
+
+    #[must_use]
+    pub const fn tip_ball_factor(&self) -> &'a Placeholder<PositiveFinite> {
+        self.tip_ball_factor
+    }
+
+    #[must_use]
+    pub const fn foot_ball_factor(&self) -> &'a Placeholder<PositiveFinite> {
+        self.foot_ball_factor
+    }
 }
 
 impl M0Constants {
@@ -75,6 +166,7 @@ impl M0Constants {
 
         Ok(Self {
             registry,
+            evidence,
             placeholders,
             saturn4_ultra,
         })
@@ -96,6 +188,22 @@ impl M0Constants {
     #[must_use]
     pub const fn saturn4_ultra(&self) -> &PrinterProfile {
         &self.saturn4_ultra
+    }
+
+    /// Returns the SCAR-AREA-CAP / PRINT-FLOOR authority without copying its
+    /// registry entries or inventing defaults for caller-supplied geometry.
+    #[must_use]
+    pub const fn scar_area_cap_policy(&self) -> ScarAreaCapPolicy<'_> {
+        ScarAreaCapPolicy {
+            a_abs_mm2: self.placeholders.a_abs_mm2(),
+            kappa: self.placeholders.kappa(),
+            l_scar_max_mm: self.placeholders.l_scar_max_mm(),
+            eps_cos: self.placeholders.eps_cos(),
+            interval_tol_mm: self.placeholders.tol_mm(),
+            print_floor_chord_mm: self.evidence.print_floor_chord_mm(),
+            tip_ball_factor: self.placeholders.ball_factor_stub(),
+            foot_ball_factor: self.placeholders.ball_factor_foot(),
+        }
     }
 }
 
