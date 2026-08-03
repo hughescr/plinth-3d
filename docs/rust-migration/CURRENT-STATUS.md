@@ -99,7 +99,7 @@ None of the commits in this table is an ancestor of the `6d7a046` handoff snapsh
 | --- | --- | --- | --- | --- |
 | prepare interface | `codex/prepare-interface` at `/private/tmp/plinth-prepare-interface` | `4809e367c723faedc2aa3b4393a906c38d2e69c5` | **ACCEPT** | Cherry-pick this commit alone after reviewing it against the then-current integration head. The branch head also contains blocked work. |
 | prepare CLI grammar | `codex/prepare-cli` at `/private/tmp/plinth-prepare-cli` | `b07d44559445110838fcd8fdf542b3873bf96c86` | **ACCEPT** | Its parent is blocked `e4db5d08`, but its patch is a separate CLI commit. Apply only after `4809e367`, then build and test in the clean integration worktree. Do not merge the branch. |
-| canonical delicacy authority | `codex/canonical-delicacy` at `/private/tmp/plinth-canonical-delicacy` | `aae61ee5327b45244836466df7f428aeb2c7195a` | **ACCEPT** | Review/cherry-pick the named commit, not the branch ancestry. Non-blocking follow-up: explicit M0-value and signed-zero equality/digest regressions. |
+| canonical delicacy authority | `codex/canonical-delicacy` at `/private/tmp/plinth-canonical-delicacy` | `b5d2397e3b36c1469d46d37edc60d9749dd4609c` then `aae61ee5327b45244836466df7f428aeb2c7195a` | **ACCEPT** for the coherent final state | `aae61ee` directly depends on the canonical field contract introduced by `b5d2397`; its remediation acceptance covers that required predecessor content, not a standalone `aae61ee` patch. Either create and independently review a squashed final delicacy patch against current integration, or independently review and integrate the coherent two-commit series. Non-blocking follow-up: explicit M0-value and signed-zero equality/digest regressions. |
 | grounded calibration artifacts | `codex/home-calibration-plate` at `/private/tmp/plinth-home-calibration-plate` | `634abdb`, `1541379` | **ACCEPT** and owner GUI-checked | Branch-only; independently review the two-commit series and its base before cherry-picking. |
 | preparation resource policy and entry validation | `codex/prepare-interface` | `e4db5d08fca8b4739e137f13bbf7694c0b94ca57`, `7b35c49ababa867d8fa93a1d13454ee26e6afa7a` | **BLOCKED / incomplete** | Do not cherry-pick. Add no-work tests for invalid decimation configuration; malformed support zero/MAX/nested-cap refusal; and external compile-fail tests proving `SupportPreparationInput` fields cannot be constructed directly. Re-run the frozen coverage test without changing its golden. |
 
@@ -160,6 +160,13 @@ ad-hoc verification.
    Run the Cargo commands from `/private/tmp/plinth-3d-pipeline-integration`. Stop on a
    conflict or behavioral mismatch; do not blind-merge either branch. Commit/cherry-pick
    only after the worktree is clean and the diff has been reviewed.
+
+   Handle canonical delicacy separately. Do **not** cherry-pick `aae61ee` alone: it is the
+   direct child of `b5d2397` and relies on that predecessor's canonical field contract.
+   The recorded remediation ACCEPT covers the required predecessor content in the coherent
+   final state. A successor must either create and independently review one squashed final
+   delicacy patch against the current integration head, or independently review and
+   integrate the ordered `b5d2397` then `aae61ee` two-commit series.
 
 3. Repair the blocked resource-policy commits in their existing worktree. Add all three
    missing refusal/no-work/compile-fail test classes listed above. Re-run the focused tests,
