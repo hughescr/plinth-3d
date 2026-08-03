@@ -3979,28 +3979,68 @@ mod tests {
 
     #[test]
     fn synthetic_selection_is_baseline_only_not_the_legacy_repair_adapter() {
-        let mesh = make_overhang_table().unwrap();
+        let initial_delicacy = [0.0; 4];
+        let mut selection =
+            ContactSelectionConfig::current(Some(&initial_delicacy), 65_536, 65_536, 1 << 20)
+                .expect("registered selection policy");
+        // Keep one initial S1 seat. The second legal seat is close enough to
+        // be rejected by Poisson spacing, but shifted far enough to repair
+        // uncovered dyadic samples on this deliberately large underside.
+        selection.min_contacts_per_island = 1;
+        selection.coverage_repair_max_attempts = 1;
+        let spacing = selection.target_spacing_mm.get();
+        let side = selection.coverage_radius_factor.get() * spacing + spacing * 0.5;
+        let height = spacing * 0.5;
+        let mesh = Mesh::new(
+            vec![
+                [0.0, 0.0, 0.0],
+                [side, 0.0, 0.0],
+                [0.0, height, 0.0],
+                [0.0, 0.0, side],
+            ],
+            vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]],
+        )
+        .expect("closed synthetic selection fixture");
         let delicacy = vec![0.0; mesh.tris().len()];
-        let perception = perception_config(&delicacy);
-        let candidates = crate::perceive_contacts(&mesh, &perception).unwrap();
+        selection.delicacy_by_face = Some(&delicacy);
+        let first = [spacing * 0.2, spacing * 0.1, 0.0];
+        let candidates = ContactCandidatePool {
+            candidates: vec![
+                crate::ContactCandidate {
+                    id: ContactCandidateId(1),
+                    face_id: 0,
+                    point_mm: first,
+                    normal: [0.0, 0.0, -1.0],
+                    supported_area_mm2: side * height * 0.5,
+                    overhang_excess: 1.0,
+                    delicacy: 0.0,
+                },
+                crate::ContactCandidate {
+                    id: ContactCandidateId(2),
+                    face_id: 0,
+                    point_mm: [first[0] + spacing * 0.75, first[1], 0.0],
+                    normal: [0.0, 0.0, -1.0],
+                    supported_area_mm2: side * height * 0.5,
+                    overhang_excess: 1.0,
+                    delicacy: 0.0,
+                },
+            ],
+        };
         let islands = vec![SupportIsland {
             id: 91,
-            face_ids: candidates
-                .candidates()
-                .iter()
-                .map(|candidate| candidate.face_id)
-                .collect(),
+            face_ids: vec![0],
         }];
-        let selection =
-            ContactSelectionConfig::current_defaults(Some(&delicacy), perception.max_grid_bytes)
-                .unwrap();
+        let baseline = crate::select_contacts_baseline(&mesh, &candidates, &islands, &selection)
+            .expect("baseline selection");
+        let legacy = crate::select_contacts(&mesh, &candidates, &islands, &selection)
+            .expect("legacy repair selection");
+        assert_eq!(baseline.contacts().len(), 1);
+        assert_eq!(legacy.contacts().len(), 2);
+        assert_eq!(legacy.contacts()[1].candidate_id, ContactCandidateId(2));
         let selected = select_synthetic_baseline(&mesh, &candidates, &islands, &selection)
             .expect("synthetic baseline selection");
-        assert_eq!(
-            selected,
-            crate::select_contacts_baseline(&mesh, &candidates, &islands, &selection)
-                .expect("direct baseline selection")
-        );
+        assert_eq!(selected, baseline);
+        assert_ne!(selected, legacy);
     }
 
     #[test]
