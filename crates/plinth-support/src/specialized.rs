@@ -4424,6 +4424,85 @@ mod tests {
             regular_routes: vec![synthetic_route],
             demands: Vec::new(),
         };
+
+        // Occupancy and failure are exact opaque identities: occupying the
+        // generic candidate 7 must not alias the synthetic candidate 7.
+        let generic_only_occupied = pool
+            .occupied_for_contacts(std::slice::from_ref(&generic_contact))
+            .unwrap();
+        let generic_only_ids = generic_only_occupied
+            .iter()
+            .map(RepairRowOccupancy::row_id)
+            .collect::<BTreeSet<_>>();
+        let synthetic_twin = pool.resolve_route(synthetic_route).unwrap();
+        let generic_twin = pool.resolve_route(generic_route).unwrap();
+        assert_eq!(
+            pool.row(synthetic_twin).unwrap().candidate().id,
+            ContactCandidateId(7)
+        );
+        assert_eq!(
+            pool.row(generic_twin).unwrap().candidate().id,
+            ContactCandidateId(7)
+        );
+        let no_occupied_rows = BTreeSet::new();
+        let failed_generic_twin = BTreeSet::from([generic_twin]);
+        let generic_failed_only = no_occupied_rows
+            .union(&failed_generic_twin)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            pool.eligible_rows(3, 11, &generic_failed_only)
+                .iter()
+                .map(|row| row.order())
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3],
+            "failing generic candidate 7 must leave synthetic candidate 7 eligible"
+        );
+        let failed_synthetic_twin = BTreeSet::from([synthetic_twin]);
+        let synthetic_failed_only = no_occupied_rows
+            .union(&failed_synthetic_twin)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            pool.eligible_rows(3, 11, &synthetic_failed_only)
+                .iter()
+                .map(|row| row.order())
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "failing synthetic candidate 7 must leave generic candidate 7 eligible"
+        );
+        assert_eq!(
+            pool.eligible_rows(3, 11, &generic_only_ids)
+                .iter()
+                .map(|row| row.order())
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        let failed_generic_eight = BTreeSet::from([pool.rows[1].id()]);
+        let occupied_and_failed = generic_only_ids
+            .union(&failed_generic_eight)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            pool.eligible_rows(3, 11, &occupied_and_failed)
+                .iter()
+                .map(|row| row.order())
+                .collect::<Vec<_>>(),
+            vec![2, 3],
+            "the unoccupied synthetic candidate-7 twin remains eligible"
+        );
+        let occupied_and_both_failed = occupied_and_failed
+            .union(&BTreeSet::from([synthetic_twin]))
+            .copied()
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            pool.eligible_rows(3, 11, &occupied_and_both_failed)
+                .iter()
+                .map(|row| row.order())
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+
         let occupied = pool
             .occupied_for_contacts(&[generic_contact.clone(), synthetic_contact])
             .unwrap();
@@ -5871,6 +5950,19 @@ mod tests {
             })
             .expect("required child-edit fixture has an unoccupied repair row")
             .id();
+        let frozen_row = grandchild.repair_row(row).unwrap().clone();
+        let frozen_route = RegularContactRoute {
+            candidate_id: row.candidate_id.0,
+            owner_island_id: row.owner_island_id,
+            coverage_face_id: row.face_id,
+            component_id: row.component_id,
+            source_kind: row.source_kind,
+        };
+        let frozen_primary = PrimaryRegularIdentity {
+            route: frozen_route,
+            position_mm: frozen_row.candidate().point_mm,
+            normal: frozen_row.candidate().normal,
+        };
         let appended = grandchild
             .begin_regular_edit()
             .unwrap()
@@ -5891,7 +5983,76 @@ mod tests {
         assert!(appended_id > removable.contact_id());
         assert!(appended_id > second);
         assert!(appended_id > parent_max_id);
+        assert_eq!(appended.contacts().len(), grandchild.contacts().len() + 1);
+        assert_eq!(
+            appended.contacts()[..grandchild.contacts().len()]
+                .iter()
+                .map(SpecializedPhysicalContact::contact_id)
+                .collect::<Vec<_>>(),
+            grandchild
+                .contacts()
+                .iter()
+                .map(SpecializedPhysicalContact::contact_id)
+                .collect::<Vec<_>>(),
+            "addition preserves every existing contact's stable placement"
+        );
+        assert_eq!(
+            appended
+                .contacts()
+                .last()
+                .map(SpecializedPhysicalContact::contact_id),
+            Some(appended_id),
+            "addition appends in stable plan order"
+        );
+        let appended_contact = appended.contacts().last().unwrap();
+        assert_eq!(
+            appended_contact.position_mm(),
+            frozen_row.candidate().point_mm
+        );
+        assert_eq!(appended_contact.normal(), frozen_row.candidate().normal);
+        assert_eq!(appended_contact.regular_routes(), &[frozen_route]);
+        assert_eq!(appended_contact.primary_regular(), Some(frozen_primary));
+        assert_eq!(
+            appended_contact.seat_provenance(),
+            PhysicalSeatProvenance::Regular(frozen_primary)
+        );
+        assert!(appended_contact.demands().is_empty());
         assert_eq!(appended.finalized_load_plan_digest(), appended.digest());
+    }
+
+    #[test]
+    fn regular_child_edit_rejects_unknown_occupied_and_stale_row_authority() {
+        let (_mesh, _generic, plan) = edit_fixture(make_overhang_table().unwrap(), "row errors")
+            .unwrap_or_else(|error| panic!("{error}"));
+        let occupied = plan
+            .occupied_repair_rows()
+            .unwrap()
+            .first()
+            .expect("required row-error fixture has an occupied row")
+            .row_id();
+        assert_eq!(
+            plan.begin_regular_edit()
+                .unwrap()
+                .append_regular_repair_row(occupied),
+            Err(SpecializedError::OccupiedRepairRow { row_id: occupied })
+        );
+
+        let mut unknown = occupied;
+        unknown.owner_island_id = u32::MAX;
+        assert!(plan.repair_row(unknown).is_none());
+        assert_eq!(
+            plan.begin_regular_edit()
+                .unwrap()
+                .append_regular_repair_row(unknown),
+            Err(SpecializedError::UnknownRepairRow { row_id: unknown })
+        );
+
+        let mut stale = plan.clone();
+        stale.repair_pool.rows[0].candidate.point_mm[0] += 1.0;
+        assert!(matches!(
+            stale.begin_regular_edit(),
+            Err(SpecializedError::StaleRepairPool)
+        ));
     }
 
     #[test]
