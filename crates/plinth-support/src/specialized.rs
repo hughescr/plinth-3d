@@ -7,8 +7,6 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
-#[cfg(test)]
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 use geom_kernel::{
     KnnBatchLimits, KnnBatchPlan, NativeSurface, NativeSurfaceConfig, PointCloudIndex,
@@ -34,9 +32,6 @@ use crate::{
 
 const SYNTHETIC_PATCH_RADIUS_MM: f64 = 1.5;
 const BIRTH_LINK_RADIUS_MM: f64 = 0.6;
-
-#[cfg(test)]
-static GATE_KNN_QUERY_COUNT: AtomicUsize = AtomicUsize::new(0);
 
 /// Result-inert refusal limits for specialized orchestration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2932,8 +2927,9 @@ fn evaluate_gate_batch(
     // Plan every route in every gate window before allocating the first
     // nearest matrix.  A window-local plan alone would permit a cap failure in
     // a later window after earlier windows had already gathered/queryed data.
-    // The summaries deliberately retain only arithmetic, not route maps or
-    // kNN plans, so this preflight does not grow with the full gate payload.
+    // Each preflight window temporarily builds bounded `Vec`/`BTree*` route
+    // payloads, then retains only its arithmetic summary. It therefore does
+    // not retain data for the full gate payload.
     let whole_gate_route_plan = whole_gate_route_preflight(
         contacts,
         proposals,
@@ -3276,6 +3272,12 @@ struct GateWholeRoutePlan {
     max_peak_bytes: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct GateWindowPreflightSummary {
+    routes: GateRouteWindowPlan,
+    peak_bytes: usize,
+}
+
 impl GateWholeRoutePlan {
     fn record(
         &mut self,
@@ -3301,8 +3303,28 @@ impl GateWholeRoutePlan {
     }
 }
 
-/// Route-plan all windows before execution. This invokes only counting and
-/// `KnnBatchPlan` arithmetic; it does not gather points or construct an index.
+/// Traverse every gate window and retain only checked summaries.
+fn traverse_whole_gate_windows(
+    variants: usize,
+    max_window_variants: usize,
+    mut plan_window: impl FnMut(usize, usize) -> Result<GateWindowPreflightSummary, SpecializedError>,
+) -> Result<GateWholeRoutePlan, SpecializedError> {
+    let mut preflight = GateWholeRoutePlan::default();
+    for window_start in (0..variants).step_by(max_window_variants) {
+        let window_end = (window_start + max_window_variants).min(variants);
+        let summary = plan_window(window_start, window_end)?;
+        preflight.record(summary.routes, summary.peak_bytes)?;
+    }
+    preflight
+        .total_work
+        .checked_add(preflight.total_routes)
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    Ok(preflight)
+}
+
+/// Route-plan all windows before execution. Each window uses bounded temporary
+/// `Vec`/`BTree*` payloads for counting and `KnnBatchPlan` arithmetic; it does
+/// not gather points or construct an index.
 #[allow(clippy::too_many_arguments)]
 fn whole_gate_route_preflight(
     contacts: &[WorkingContact],
@@ -3320,9 +3342,10 @@ fn whole_gate_route_preflight(
         .len()
         .checked_mul(std::mem::size_of::<usize>())
         .ok_or(SpecializedError::GateResourceOverflow)?;
-    let mut preflight = GateWholeRoutePlan::default();
-    for window_start in (0..gate_plan.variants).step_by(limits.max_gate_window_variants) {
-        let window_end = (window_start + limits.max_gate_window_variants).min(gate_plan.variants);
+    traverse_whole_gate_windows(
+        gate_plan.variants,
+        limits.max_gate_window_variants,
+        |window_start, window_end| {
         let window_variants = window_end - window_start;
         let nearest_len = window_variants
             .checked_mul(coverage_samples.len())
@@ -3423,13 +3446,9 @@ fn whole_gate_route_preflight(
             },
             limits.max_gate_peak_bytes,
         )?;
-        preflight.record(routes, peak_bytes)?;
-    }
-    let _ = preflight
-        .total_work
-        .checked_add(preflight.total_routes)
-        .ok_or(SpecializedError::GateResourceOverflow)?;
-    Ok(preflight)
+            Ok(GateWindowPreflightSummary { routes, peak_bytes })
+        },
+    )
 }
 
 fn plan_variant_nearest_routes(
@@ -3606,8 +3625,6 @@ fn fill_variant_nearest(
                 query_points.push(sample.point_mm);
             }
         }
-        #[cfg(test)]
-        GATE_KNN_QUERY_COUNT.fetch_add(1, AtomicOrdering::Relaxed);
         let index = PointCloudIndex::new_for_knn_batch(&source_points, &plan)
             .map_err(|error| SpecializedError::CoverageNearest(error.to_string()))?;
         let rows = index
@@ -4722,6 +4739,7 @@ impl Fnv {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::{Cell, RefCell};
     use std::collections::BTreeSet;
 
     use super::*;
@@ -4736,6 +4754,73 @@ mod tests {
         max_logical_peak_bytes: 2 * 1024 * 1024 * 1024,
         max_work: 100_000_000,
     };
+
+    fn gate_window_summary(
+        route_count: usize,
+        total_work: usize,
+        fingerprint: u64,
+        peak_bytes: usize,
+    ) -> GateWindowPreflightSummary {
+        GateWindowPreflightSummary {
+            routes: GateRouteWindowPlan {
+                route_count,
+                total_work,
+                retained_base_logical_bytes: 0,
+                max_route_knn_logical_peak_bytes: 0,
+                fingerprint,
+            },
+            peak_bytes,
+        }
+    }
+
+    #[test]
+    fn whole_gate_window_traversal_stops_before_execution_after_later_window_failure() {
+        let planned_windows = RefCell::new(Vec::new());
+        let execution_calls = Cell::new(0usize);
+        let result = traverse_whole_gate_windows(5, 2, |window_start, window_end| {
+            planned_windows
+                .borrow_mut()
+                .push((window_start, window_end));
+            if window_start == 0 {
+                Ok(gate_window_summary(2, 3, 7, 11))
+            } else {
+                Err(SpecializedError::GateOperationLimit {
+                    required: 5,
+                    limit: 4,
+                })
+            }
+        })
+        .map(|_| execution_calls.set(execution_calls.get() + 1));
+
+        assert_eq!(planned_windows.into_inner(), vec![(0, 2), (2, 4)]);
+        assert_eq!(
+            result,
+            Err(SpecializedError::GateOperationLimit {
+                required: 5,
+                limit: 4,
+            })
+        );
+        assert_eq!(execution_calls.get(), 0);
+    }
+
+    #[test]
+    fn whole_gate_window_traversal_accumulates_peak_at_cap_minus_one() {
+        const CAP: usize = 32;
+        let summary = traverse_whole_gate_windows(5, 2, |window_start, window_end| {
+            Ok(gate_window_summary(
+                window_end - window_start,
+                window_start + 1,
+                window_start as u64,
+                if window_start == 2 { CAP - 1 } else { 9 },
+            ))
+        })
+        .expect("all windows must plan");
+
+        assert_eq!(summary.window_count, 3);
+        assert_eq!(summary.total_routes, 5);
+        assert_eq!(summary.total_work, 7);
+        assert_eq!(summary.max_peak_bytes, CAP - 1);
+    }
 
     fn minimum_demand(
         owner: u32,
