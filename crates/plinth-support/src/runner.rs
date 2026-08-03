@@ -452,6 +452,30 @@ mod tests {
     const SWEEP_CHILD: &str = "PLINTH_RUNNER_PREPARE_SWEEP_CHILD";
     const SWEEP_LINE: &str = "RUNNER_PREPARE_SWEEP=";
 
+    fn required_runner_corpus_path() -> PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../corpus/baseline/make_overhang_table.prepped.stl")
+    }
+
+    fn load_required_runner_corpus() -> Mesh {
+        let path = required_runner_corpus_path();
+        assert!(
+            path.is_file(),
+            "RequiredRunnerCorpusMissing: {}",
+            path.display()
+        );
+        plinth_mesh::load_binary_stl(&path, plinth_mesh::WeldPolicy::None).unwrap_or_else(|error| {
+            panic!(
+                "RequiredRunnerCorpusUnreadable: {}: {error}",
+                path.display()
+            )
+        })
+    }
+
+    fn procedural_overhang_for_error_case() -> Mesh {
+        make_overhang_table().expect("procedural overhang error-case fixture")
+    }
+
     fn hollowed_fixture(mesh: Mesh) -> HollowedModel {
         let budget =
             DecimationBudget::ratified_default(ProbeConfig::new(1.0, usize::MAX, 10_000.0))
@@ -509,7 +533,7 @@ mod tests {
     }
 
     fn with_prepared_table<T>(use_prepared: impl FnOnce(PreparedSupportRun<'_>) -> T) -> T {
-        let hollowed = hollowed_fixture(make_overhang_table().expect("required table fixture"));
+        let hollowed = hollowed_fixture(load_required_runner_corpus());
         let delicacy = vec![0.0; hollowed.mesh().tris().len()];
         let layers = layers();
         let prepared = prepare_support_run(
@@ -523,16 +547,42 @@ mod tests {
         use_prepared(prepared)
     }
 
+    fn prepared_digest_for_mesh(mesh: Mesh) -> u64 {
+        let hollowed = hollowed_fixture(mesh);
+        let delicacy = vec![0.0; hollowed.mesh().tris().len()];
+        let layers = layers();
+        prepare_support_run(
+            hollowed,
+            SupportRequest {
+                lift_mm: PositiveFinite::new(5.0).unwrap(),
+            },
+            authority(&delicacy, &layers),
+        )
+        .expect("mesh preparation")
+        .digests()
+        .prepared()
+    }
+
     #[test]
-    fn required_named_corpus_fixture_is_present_and_parseable() {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../corpus/baseline/make_overhang_table.prepped.stl");
-        assert!(
-            path.is_file(),
-            "required make_overhang_table corpus fixture is missing"
-        );
-        plinth_mesh::load_binary_stl(&path, plinth_mesh::WeldPolicy::None)
-            .expect("required make_overhang_table corpus fixture parses");
+    fn required_named_corpus_fixture_is_loaded_from_disk() {
+        let mesh = load_required_runner_corpus();
+        assert!(!mesh.verts().is_empty());
+        assert!(!mesh.tris().is_empty());
+    }
+
+    #[test]
+    fn changed_corpus_geometry_changes_prepared_digest() {
+        let corpus = load_required_runner_corpus();
+        let original_digest = prepared_digest_for_mesh(corpus.clone());
+        let translated_vertices = corpus
+            .verts()
+            .iter()
+            .map(|vertex| [vertex[0] + 0.125, vertex[1], vertex[2]])
+            .collect();
+        let changed = Mesh::new(translated_vertices, corpus.tris().to_vec())
+            .expect("translated corpus remains a valid mesh");
+        let changed_digest = prepared_digest_for_mesh(changed);
+        assert_ne!(original_digest, changed_digest);
     }
 
     #[test]
@@ -648,7 +698,7 @@ mod tests {
 
     #[test]
     fn mismatched_authority_is_rejected_before_native_preparation() {
-        let hollowed = hollowed_fixture(make_overhang_table().unwrap());
+        let hollowed = hollowed_fixture(procedural_overhang_for_error_case());
         let perception_delicacy = vec![0.0; hollowed.mesh().tris().len()];
         let mut selection_delicacy = perception_delicacy.clone();
         selection_delicacy[0] = 0.25;
@@ -688,7 +738,7 @@ mod tests {
 
     #[test]
     fn uncovered_layers_and_stale_reservations_fail_typed() {
-        let hollowed = hollowed_fixture(make_overhang_table().unwrap());
+        let hollowed = hollowed_fixture(procedural_overhang_for_error_case());
         let delicacy = vec![0.0; hollowed.mesh().tris().len()];
         let short_layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
         let result = prepare_support_run(
@@ -703,7 +753,7 @@ mod tests {
             Err(SupportPreparationError::LayerScheduleCoverage)
         ));
 
-        let hollowed = hollowed_fixture(make_overhang_table().unwrap());
+        let hollowed = hollowed_fixture(procedural_overhang_for_error_case());
         let delicacy = vec![0.0; hollowed.mesh().tris().len()];
         let layers = layers();
         let mut authority = authority(&delicacy, &layers);
