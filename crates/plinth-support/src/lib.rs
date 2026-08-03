@@ -23,6 +23,7 @@ mod brace;
 )]
 mod cco;
 mod coverage;
+mod coverage_measurement;
 pub mod dyadic;
 pub mod forest;
 #[allow(
@@ -64,6 +65,11 @@ use plinth_mesh::{build_face_topology, Mesh, WeldPolicy};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use coverage_measurement::{
+    CoverageGap, CoverageMeasurement, CoverageMeasurementError, CoverageMeasurementEvidence,
+    CoverageMeasurementIslandEvidence, CoverageMeasurementLimits, CoverageMeasurementPatchEvidence,
+    CoverageMeasurementRequest, CoverageMeasurementResourcePlan,
+};
 pub use initial::ContactConstructionLimits;
 pub use runner::{
     run_support, FinalSupportAuthority, RoutedPhysicalContactEvidence, SupportPreparationInput,
