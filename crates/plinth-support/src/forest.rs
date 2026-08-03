@@ -6,6 +6,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use geom_kernel::{
+    capsule_rays, NativeSurface, PenetrationBatchLimits, SurfaceTriangleSoupDigest, V3,
+};
 use plinth_core::{Finite, PositiveFinite};
 use serde::Serialize;
 use thiserror::Error;
@@ -119,70 +122,62 @@ impl PositiveFiniteMm {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "staged for E1b endpoint validator; branch not mergeable alone"
-)]
-mod embed_validation {
-    #[derive(Clone, Copy)]
-    pub(super) struct ValidatorAuthority {
-        witness: u64,
-    }
+/// Explicit sampling and resource admission for an endpoint-mask construction
+/// check. There is deliberately no production default: this is the precise
+/// native query budget selected by the construction caller.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EndpointMaskValidationLimits {
+    majority_step_mm: PositiveFiniteMm,
+    samples_per_subsegment: usize,
+    penetration: PenetrationBatchLimits,
+}
 
-    #[derive(Clone, Copy)]
-    pub(super) struct SurfaceIdentity {
-        identity: u64,
-    }
-
-    impl ValidatorAuthority {
-        pub(super) const fn witness(self) -> u64 {
-            self.witness
+impl EndpointMaskValidationLimits {
+    pub fn new(
+        majority_step_mm: PositiveFiniteMm,
+        samples_per_subsegment: usize,
+        penetration: PenetrationBatchLimits,
+    ) -> Result<Self, DesignedMaskError> {
+        if samples_per_subsegment == 0 {
+            return Err(DesignedMaskError::InvalidValidationLimits);
         }
-    }
-    impl SurfaceIdentity {
-        pub(super) const fn identity(self) -> u64 {
-            self.identity
-        }
-    }
-
-    #[cfg(test)]
-    pub(super) const fn test_authority(witness: u64) -> ValidatorAuthority {
-        ValidatorAuthority { witness }
-    }
-    #[cfg(test)]
-    pub(super) const fn test_surface(identity: u64) -> SurfaceIdentity {
-        SurfaceIdentity { identity }
+        Ok(Self {
+            majority_step_mm,
+            samples_per_subsegment,
+            penetration,
+        })
     }
 }
 
-/// Opaque, immutable result of a later endpoint-connected construction check.
-/// E1a seals the binding format; E1b owns the kernel validator and witness minting.
+/// Opaque, immutable evidence that one endpoint's exact intended member
+/// geometry was connected to that endpoint in the native surface.
 #[derive(Clone, PartialEq)]
 pub struct DesignedEndMask {
     requested_extent_mm: PositiveFiniteMm,
     witness: u64,
     validation_binding: u64,
+    surface_identity: SurfaceTriangleSoupDigest,
 }
 
 impl DesignedEndMask {
-    #[allow(
-        dead_code,
-        reason = "staged for E1b endpoint validator; branch not mergeable alone"
-    )]
-    fn validated_extent_for(
+    /// Return the extent only when this exact member, end, and immutable
+    /// native surface are still the geometry that construction validated.
+    pub fn validated_extent_for(
         &self,
         member: &Member,
         end: EmbedEnd,
-        surface: embed_validation::SurfaceIdentity,
+        surface: &NativeSurface,
     ) -> Result<PositiveFiniteMm, DesignedMaskError> {
-        (self.validation_binding
-            == mask_binding(
-                member,
-                end,
-                self.requested_extent_mm,
-                self.witness,
-                surface.identity(),
-            ))
+        let surface_identity = surface.source_triangle_soup_digest();
+        (self.surface_identity == surface_identity
+            && self.validation_binding
+                == mask_binding(
+                    member,
+                    end,
+                    self.requested_extent_mm,
+                    self.witness,
+                    surface_identity,
+                ))
         .then_some(self.requested_extent_mm)
         .ok_or(DesignedMaskError::StaleBinding)
     }
@@ -224,18 +219,17 @@ impl DesignedClearanceMasks {
         .filter_map(|(end, mask)| mask.map(|mask| (end, mask)))
     }
 
-    /// Sealed E1a boundary for the future kernel-backed validator. `witness` and
-    /// `surface_identity` are opaque digest inputs, never inferred from geometry.
-    #[allow(
-        dead_code,
-        reason = "staged for E1b endpoint validator; branch not mergeable alone"
-    )]
-    fn bind_for_member(
+    /// The sole production mint for designed clearance masks.
+    ///
+    /// Each supplied extent is checked against its endpoint-connected portion
+    /// of the actual tapered member. A later disconnected collision is never
+    /// folded into or used to grow a requested extent.
+    pub fn validate_endpoint_connected(
         member: &Member,
+        surface: &NativeSurface,
         terminalward: Option<PositiveFiniteMm>,
         rootward: Option<PositiveFiniteMm>,
-        authority: embed_validation::ValidatorAuthority,
-        surface_identity: embed_validation::SurfaceIdentity,
+        limits: EndpointMaskValidationLimits,
     ) -> Result<Self, DesignedMaskError> {
         let length = member_length_mm(member)?;
         let terminal = terminalward
@@ -249,31 +243,216 @@ impl DesignedClearanceMasks {
         {
             return Err(DesignedMaskError::OverlappingExtents);
         }
+
+        match member.embed_end {
+            Some(EmbedEnd::Terminalward) if terminal.is_none() => {
+                return Err(DesignedMaskError::MissingRequiredExtent {
+                    end: EmbedEnd::Terminalward,
+                });
+            }
+            Some(EmbedEnd::Rootward) if root.is_none() => {
+                return Err(DesignedMaskError::MissingRequiredExtent {
+                    end: EmbedEnd::Rootward,
+                });
+            }
+            _ => {}
+        }
+
+        let surface_identity = surface.source_triangle_soup_digest();
+        let mut validation_rows =
+            Vec::with_capacity(usize::from(terminal.is_some()) + usize::from(root.is_some()));
+        if let Some(extent) = terminal {
+            validation_rows.push(EndpointValidationRow::terminalward(member, extent, length));
+        }
+        if let Some(extent) = root {
+            validation_rows.push(EndpointValidationRow::rootward(member, extent, length));
+        }
+        if validation_rows.is_empty() {
+            return Ok(Self::default());
+        }
+        if validation_rows.len() > limits.penetration.max_rows {
+            return Err(DesignedMaskError::ResourceLimit);
+        }
+
+        let mut p0s = Vec::with_capacity(validation_rows.len());
+        let mut p1s = Vec::with_capacity(validation_rows.len());
+        let mut r0s = Vec::with_capacity(validation_rows.len());
+        let mut r1s = Vec::with_capacity(validation_rows.len());
+        for row in &validation_rows {
+            p0s.push(row.p0);
+            p1s.push(row.p1);
+            r0s.push(row.r0);
+            r1s.push(row.r1);
+        }
+        #[cfg(test)]
+        record_endpoint_validation_kernel_call();
+        let interval_rows = surface
+            .penetration_intervals_batch_bounded(
+                &p0s,
+                &p1s,
+                &r0s,
+                &r1s,
+                ENDPOINT_VALIDATION_OFFSET_RAYS,
+                limits.majority_step_mm.get(),
+                limits.samples_per_subsegment,
+                0.0,
+                true,
+                limits.penetration,
+            )
+            .map_err(|_| DesignedMaskError::KernelRefusal)?;
+        if interval_rows.len() != validation_rows.len() {
+            return Err(DesignedMaskError::CorruptKernelResult);
+        }
+
+        let mut terminal_mask = None;
+        let mut root_mask = None;
+        for (row, intervals) in validation_rows.into_iter().zip(interval_rows) {
+            let witness = endpoint_connected_witness(&row, &intervals)?;
+            let mask = DesignedEndMask {
+                requested_extent_mm: row.extent,
+                witness,
+                validation_binding: mask_binding(
+                    member,
+                    row.end,
+                    row.extent,
+                    witness,
+                    surface_identity,
+                ),
+                surface_identity,
+            };
+            match row.end {
+                EmbedEnd::Terminalward => terminal_mask = Some(mask),
+                EmbedEnd::Rootward => root_mask = Some(mask),
+            }
+        }
         Ok(Self {
-            terminalward: terminal.map(|requested_extent_mm| DesignedEndMask {
-                requested_extent_mm,
-                witness: authority.witness(),
-                validation_binding: mask_binding(
-                    member,
-                    EmbedEnd::Terminalward,
-                    requested_extent_mm,
-                    authority.witness(),
-                    surface_identity.identity(),
-                ),
-            }),
-            rootward: root.map(|requested_extent_mm| DesignedEndMask {
-                requested_extent_mm,
-                witness: authority.witness(),
-                validation_binding: mask_binding(
-                    member,
-                    EmbedEnd::Rootward,
-                    requested_extent_mm,
-                    authority.witness(),
-                    surface_identity.identity(),
-                ),
-            }),
+            terminalward: terminal_mask,
+            rootward: root_mask,
         })
     }
+}
+
+const ENDPOINT_VALIDATION_OFFSET_RAYS: usize = 8;
+
+#[cfg(test)]
+thread_local! {
+    static ENDPOINT_VALIDATION_KERNEL_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+fn record_endpoint_validation_kernel_call() {
+    ENDPOINT_VALIDATION_KERNEL_CALLS.with(|calls| calls.set(calls.get() + 1));
+}
+
+#[cfg(test)]
+fn reset_endpoint_validation_kernel_calls() {
+    ENDPOINT_VALIDATION_KERNEL_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+fn endpoint_validation_kernel_calls() -> usize {
+    ENDPOINT_VALIDATION_KERNEL_CALLS.with(std::cell::Cell::get)
+}
+
+#[derive(Clone, Copy)]
+struct EndpointValidationRow {
+    end: EmbedEnd,
+    extent: PositiveFiniteMm,
+    fraction: f64,
+    p0: V3,
+    p1: V3,
+    r0: f64,
+    r1: f64,
+}
+
+impl EndpointValidationRow {
+    fn terminalward(member: &Member, extent: PositiveFiniteMm, length: f64) -> Self {
+        Self {
+            end: EmbedEnd::Terminalward,
+            extent,
+            fraction: extent.get() / length,
+            p0: member.p0_mm.map(Finite::get),
+            p1: member.p1_mm.map(Finite::get),
+            r0: member.r0_mm.get().get(),
+            r1: member.r1_mm.get().get(),
+        }
+    }
+
+    fn rootward(member: &Member, extent: PositiveFiniteMm, length: f64) -> Self {
+        Self {
+            end: EmbedEnd::Rootward,
+            extent,
+            fraction: extent.get() / length,
+            p0: member.p1_mm.map(Finite::get),
+            p1: member.p0_mm.map(Finite::get),
+            r0: member.r1_mm.get().get(),
+            r1: member.r0_mm.get().get(),
+        }
+    }
+}
+
+fn endpoint_connected_witness(
+    row: &EndpointValidationRow,
+    intervals: &[geom_kernel::Interval],
+) -> Result<u64, DesignedMaskError> {
+    let mut rays = capsule_rays(
+        row.p0,
+        row.p1,
+        row.r0,
+        row.r1,
+        ENDPOINT_VALIDATION_OFFSET_RAYS,
+        true,
+    );
+    let mut interval_index = 0usize;
+    let mut digest = DigestWriter::new();
+    digest.tag(0x46);
+    digest.embed(Some(row.end));
+    digest.f64(row.extent.get());
+    for ray in rays.by_ref() {
+        let target = ray.length_mm() * row.fraction;
+        if !target.is_finite() || target <= 0.0 {
+            return Err(DesignedMaskError::CorruptKernelResult);
+        }
+        let first = intervals.get(interval_index);
+        let Some(first) = first else {
+            return Err(DesignedMaskError::DisconnectedGeometry { end: row.end });
+        };
+        if first.ray != ray.label()
+            || !valid_endpoint_interval(first, ray.length_mm())
+            || first.s_a != 0.0
+            || first.s_b < target
+        {
+            return Err(DesignedMaskError::DisconnectedGeometry { end: row.end });
+        }
+        let mut prior_s_b = None;
+        while let Some(interval) = intervals.get(interval_index) {
+            if interval.ray != ray.label() {
+                break;
+            }
+            if !valid_endpoint_interval(interval, ray.length_mm())
+                || prior_s_b.is_some_and(|s_b| interval.s_a < s_b)
+            {
+                return Err(DesignedMaskError::CorruptKernelResult);
+            }
+            digest.u64(u64::from_ne_bytes(i64::from(interval.ray).to_ne_bytes()));
+            digest.f64(interval.s_a);
+            digest.f64(interval.s_b);
+            prior_s_b = Some(interval.s_b);
+            interval_index += 1;
+        }
+    }
+    if interval_index != intervals.len() {
+        return Err(DesignedMaskError::CorruptKernelResult);
+    }
+    Ok(digest.finish())
+}
+
+fn valid_endpoint_interval(interval: &geom_kernel::Interval, length: f64) -> bool {
+    interval.s_a.is_finite()
+        && interval.s_b.is_finite()
+        && interval.s_a >= 0.0
+        && interval.s_a <= interval.s_b
+        && interval.s_b <= length
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
@@ -288,12 +467,20 @@ pub enum DesignedMaskError {
     OverlappingExtents,
     #[error("designed mask binding is stale for this member, end, or surface")]
     StaleBinding,
+    #[error("an embedded member end needs its designed clearance extent")]
+    MissingRequiredExtent { end: EmbedEnd },
+    #[error("endpoint mask validation limits are invalid")]
+    InvalidValidationLimits,
+    #[error("endpoint mask validation exceeded its admitted resource limit")]
+    ResourceLimit,
+    #[error("geometry kernel refused endpoint mask validation")]
+    KernelRefusal,
+    #[error("geometry kernel returned corrupt endpoint mask evidence")]
+    CorruptKernelResult,
+    #[error("designed embed geometry is not connected to its endpoint: {end:?}")]
+    DisconnectedGeometry { end: EmbedEnd },
 }
 
-#[allow(
-    dead_code,
-    reason = "staged for E1b endpoint validator; branch not mergeable alone"
-)]
 fn validate_extent(
     extent: PositiveFiniteMm,
     length: f64,
@@ -305,38 +492,36 @@ fn validate_extent(
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "staged for E1b endpoint validator; branch not mergeable alone"
-)]
 fn member_length_mm(member: &Member) -> Result<f64, DesignedMaskError> {
-    let [x0, y0, z0] = member.p0_mm;
-    let [x1, y1, z1] = member.p1_mm;
-    let length = (x1.get() - x0.get())
-        .hypot(y1.get() - y0.get())
-        .hypot(z1.get() - z0.get());
+    let length = capsule_rays(
+        member.p0_mm.map(Finite::get),
+        member.p1_mm.map(Finite::get),
+        member.r0_mm.get().get(),
+        member.r1_mm.get().get(),
+        0,
+        false,
+    )
+    .next()
+    .expect("the centerline ray is always present")
+    .length_mm();
     (length.is_finite() && length > 0.0)
         .then_some(length)
         .ok_or(DesignedMaskError::InvalidMemberSpan)
 }
 
-#[allow(
-    dead_code,
-    reason = "staged for E1b endpoint validator; branch not mergeable alone"
-)]
 fn mask_binding(
     member: &Member,
     end: EmbedEnd,
     extent: PositiveFiniteMm,
     witness: u64,
-    surface_identity: u64,
+    surface_identity: SurfaceTriangleSoupDigest,
 ) -> u64 {
     let mut digest = DigestWriter::new();
     digest.tag(0x45);
     digest.embed(Some(end));
     digest.f64(extent.get());
     digest.u64(witness);
-    digest.u64(surface_identity);
+    digest.bytes(surface_identity.as_bytes());
     digest.member(member);
     digest.finish()
 }
@@ -1480,6 +1665,12 @@ impl DigestWriter {
             self.byte(byte);
         }
     }
+    fn bytes(&mut self, value: &[u8]) {
+        self.len(value.len());
+        for byte in value {
+            self.byte(*byte);
+        }
+    }
     fn f64(&mut self, value: f64) {
         self.u64(value.to_bits());
     }
@@ -1991,82 +2182,198 @@ mod tests {
         PositiveFiniteMm::new(value).unwrap()
     }
 
-    fn bind(
-        member: &Member,
-        terminal: Option<PositiveFiniteMm>,
-        root: Option<PositiveFiniteMm>,
-        witness: u64,
-        surface: u64,
-    ) -> Result<DesignedClearanceMasks, DesignedMaskError> {
-        DesignedClearanceMasks::bind_for_member(
-            member,
-            terminal,
-            root,
-            embed_validation::test_authority(witness),
-            embed_validation::test_surface(surface),
+    fn append_cube(vertices: &mut Vec<[f64; 3]>, faces: &mut Vec<[u32; 3]>, x0: f64, x1: f64) {
+        let base = u32::try_from(vertices.len()).unwrap();
+        vertices.extend([
+            [x0, 0.0, 0.0],
+            [x1, 0.0, 0.0],
+            [x1, 1.0, 0.0],
+            [x0, 1.0, 0.0],
+            [x0, 0.0, 1.0],
+            [x1, 0.0, 1.0],
+            [x1, 1.0, 1.0],
+            [x0, 1.0, 1.0],
+        ]);
+        for [a, b, c] in [
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ] {
+            faces.push([base + a, base + b, base + c]);
+        }
+    }
+
+    fn surface_with_cubes(cubes: &[(f64, f64)]) -> NativeSurface {
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+        for &(x0, x1) in cubes {
+            append_cube(&mut vertices, &mut faces, x0, x1);
+        }
+        NativeSurface::from_indexed(
+            &vertices,
+            &faces,
+            geom_kernel::NativeSurfaceConfig {
+                grid_pitch_mm: 0.25,
+                max_grid_bytes: 4 * 1024 * 1024,
+            },
         )
+        .unwrap()
+    }
+
+    fn validation_limits(surface: &NativeSurface, rows: usize) -> EndpointMaskValidationLimits {
+        let penetration = surface
+            .penetration_intervals_batch_worst_case_limits(
+                rows,
+                ENDPOINT_VALIDATION_OFFSET_RAYS,
+                8,
+                true,
+            )
+            .unwrap();
+        EndpointMaskValidationLimits::new(extent(0.01), 8, penetration).unwrap()
+    }
+
+    fn embedded_member(p0: f64, p1: f64, embed_end: Option<EmbedEnd>) -> Member {
+        Member::new(MemberSpec {
+            p0_mm: [finite(p0), finite(0.5), finite(0.5)],
+            p1_mm: [finite(p1), finite(0.5), finite(0.5)],
+            r0_mm: TerminalEndRadius::new(radius(0.05)),
+            r1_mm: RootwardEndRadius::new(radius(0.05)),
+            kind: MemberKind::Shoot,
+            owner: Owner::Generated {
+                family: "endpoint-mask".into(),
+                ordinal: 0,
+            },
+            embed_end,
+            carried_mm2: finite(1.0),
+        })
     }
 
     #[test]
-    fn designed_masks_support_none_each_and_terminal_first_both_order() {
-        let member = Member::new(member_spec(MemberKind::Shoot));
-        let none = bind(&member, None, None, 7, 9).unwrap();
+    fn endpoint_validator_mints_none_each_and_terminal_first_both_order_in_one_batch() {
+        let surface = surface_with_cubes(&[(0.0, 1.0)]);
+        let member = embedded_member(0.2, 0.8, None);
+        reset_endpoint_validation_kernel_calls();
+        let none = DesignedClearanceMasks::validate_endpoint_connected(
+            &member,
+            &surface,
+            None,
+            None,
+            validation_limits(&surface, 1),
+        )
+        .unwrap();
         assert_eq!(none.iter().count(), 0);
-        let terminal = bind(&member, Some(extent(0.2)), None, 7, 9).unwrap();
+        assert_eq!(endpoint_validation_kernel_calls(), 0);
+        let terminal = DesignedClearanceMasks::validate_endpoint_connected(
+            &member,
+            &surface,
+            Some(extent(0.1)),
+            None,
+            validation_limits(&surface, 1),
+        )
+        .unwrap();
         assert_eq!(
             terminal.iter().map(|(end, _)| end).collect::<Vec<_>>(),
             vec![EmbedEnd::Terminalward]
         );
-        let both = bind(&member, Some(extent(0.2)), Some(extent(0.3)), 7, 9).unwrap();
+        assert_eq!(endpoint_validation_kernel_calls(), 1);
+        let both = DesignedClearanceMasks::validate_endpoint_connected(
+            &member,
+            &surface,
+            Some(extent(0.1)),
+            Some(extent(0.1)),
+            validation_limits(&surface, 2),
+        )
+        .unwrap();
         assert_eq!(
             both.iter().map(|(end, _)| end).collect::<Vec<_>>(),
             vec![EmbedEnd::Terminalward, EmbedEnd::Rootward]
         );
+        assert_eq!(endpoint_validation_kernel_calls(), 2);
     }
 
     #[test]
-    fn designed_mask_extents_reject_invalid_out_of_span_and_overlap() {
+    fn endpoint_validator_refuses_invalid_extent_span_overlap_and_missing_required_before_kernel() {
         for value in [0.0, -0.0, -1.0, f64::NAN, f64::INFINITY] {
             assert_eq!(
                 PositiveFiniteMm::new(value),
                 Err(DesignedMaskError::InvalidExtent)
             );
         }
-        let member = Member::new(member_spec(MemberKind::Shoot));
+        let surface = surface_with_cubes(&[(0.0, 1.0)]);
+        let member = embedded_member(0.2, 0.8, Some(EmbedEnd::Terminalward));
+        reset_endpoint_validation_kernel_calls();
         assert!(matches!(
-            bind(&member, Some(extent(1.0)), None, 1, 1),
+            DesignedClearanceMasks::validate_endpoint_connected(
+                &member,
+                &surface,
+                Some(extent(0.61)),
+                None,
+                validation_limits(&surface, 1),
+            ),
             Err(DesignedMaskError::ExtentOutOfSpan)
         ));
         assert!(matches!(
-            bind(&member, Some(extent(0.5)), Some(extent(0.5)), 1, 1),
+            DesignedClearanceMasks::validate_endpoint_connected(
+                &member,
+                &surface,
+                Some(extent(0.31)),
+                Some(extent(0.31)),
+                validation_limits(&surface, 2),
+            ),
             Err(DesignedMaskError::OverlappingExtents)
         ));
+        assert!(matches!(
+            DesignedClearanceMasks::validate_endpoint_connected(
+                &member,
+                &surface,
+                None,
+                Some(extent(0.1)),
+                validation_limits(&surface, 1),
+            ),
+            Err(DesignedMaskError::MissingRequiredExtent {
+                end: EmbedEnd::Terminalward,
+            })
+        ));
+        assert_eq!(endpoint_validation_kernel_calls(), 0);
     }
 
     #[test]
-    fn designed_mask_extents_fail_closed_at_extreme_finite_scales() {
+    fn endpoint_validator_refuses_overflow_zero_span_and_unadmitted_batch_before_kernel() {
         let mut huge_span = member_spec(MemberKind::Shoot);
         huge_span.p1_mm = [finite(1e200), finite(0.0), finite(0.0)];
         let huge_span = Member::new(huge_span);
+        let surface = surface_with_cubes(&[(0.0, 1.0)]);
+        reset_endpoint_validation_kernel_calls();
         assert!(matches!(
-            bind(&huge_span, Some(extent(1e300)), None, 1, 1),
-            Err(DesignedMaskError::ExtentOutOfSpan)
-        ));
-        assert!(matches!(
-            bind(&huge_span, Some(extent(6e199)), Some(extent(6e199)), 1, 1,),
-            Err(DesignedMaskError::OverlappingExtents)
+            DesignedClearanceMasks::validate_endpoint_connected(
+                &huge_span,
+                &surface,
+                Some(extent(1e300)),
+                None,
+                validation_limits(&surface, 1),
+            ),
+            Err(DesignedMaskError::InvalidMemberSpan)
         ));
 
         let mut overflowing_span = member_spec(MemberKind::Shoot);
         overflowing_span.p0_mm = [finite(-1e308), finite(0.0), finite(0.0)];
         overflowing_span.p1_mm = [finite(1e308), finite(0.0), finite(0.0)];
         assert!(matches!(
-            bind(
+            DesignedClearanceMasks::validate_endpoint_connected(
                 &Member::new(overflowing_span),
+                &surface,
                 Some(extent(1.0)),
                 None,
-                1,
-                1,
+                validation_limits(&surface, 1),
             ),
             Err(DesignedMaskError::InvalidMemberSpan)
         ));
@@ -2074,63 +2381,118 @@ mod tests {
         let mut zero_span = member_spec(MemberKind::Shoot);
         zero_span.p1_mm = zero_span.p0_mm;
         assert!(matches!(
-            bind(&Member::new(zero_span), Some(extent(1.0)), None, 1, 1,),
+            DesignedClearanceMasks::validate_endpoint_connected(
+                &Member::new(zero_span),
+                &surface,
+                Some(extent(1.0)),
+                None,
+                validation_limits(&surface, 1),
+            ),
             Err(DesignedMaskError::InvalidMemberSpan)
         ));
+
+        let member = embedded_member(0.2, 0.8, None);
+        let full = validation_limits(&surface, 2);
+        let refused = EndpointMaskValidationLimits::new(
+            extent(0.01),
+            8,
+            PenetrationBatchLimits {
+                max_rows: 1,
+                ..full.penetration
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            DesignedClearanceMasks::validate_endpoint_connected(
+                &member,
+                &surface,
+                Some(extent(0.1)),
+                Some(extent(0.1)),
+                refused,
+            ),
+            Err(DesignedMaskError::ResourceLimit)
+        ));
+        assert_eq!(endpoint_validation_kernel_calls(), 0);
     }
 
     #[test]
-    fn designed_mask_binding_changes_for_end_extent_witness_and_geometry() {
-        let member = Member::new(member_spec(MemberKind::Shoot));
-        let terminal = bind(&member, Some(extent(0.2)), None, 1, 2).unwrap();
-        let root = bind(&member, None, Some(extent(0.2)), 1, 2).unwrap();
-        let changed_extent = bind(&member, Some(extent(0.3)), None, 1, 2).unwrap();
-        let changed_witness = bind(&member, Some(extent(0.2)), None, 3, 2).unwrap();
-        let changed_surface = bind(&member, Some(extent(0.2)), None, 1, 4).unwrap();
-        let mut changed_geometry = member_spec(MemberKind::Trunk);
-        changed_geometry.r0_mm = TerminalEndRadius::new(radius(0.3));
-        let changed_geometry = Member::new(changed_geometry);
-        let geometry = bind(&changed_geometry, Some(extent(0.2)), None, 1, 2).unwrap();
-        let binding = terminal.terminalward().unwrap().validation_binding();
-        assert_ne!(binding, root.rootward().unwrap().validation_binding());
-        assert_ne!(
-            binding,
-            changed_extent.terminalward().unwrap().validation_binding()
-        );
-        assert_ne!(
-            binding,
-            changed_witness.terminalward().unwrap().validation_binding()
-        );
-        assert_ne!(
-            binding,
-            changed_surface.terminalward().unwrap().validation_binding()
-        );
-        assert_ne!(
-            binding,
-            geometry.terminalward().unwrap().validation_binding()
-        );
-        assert_eq!(
-            terminal.terminalward().unwrap().validated_extent_for(
+    fn endpoint_validator_rejects_disconnected_geometry_and_binds_member_end_and_surface() {
+        let disconnected = surface_with_cubes(&[(0.0, 0.35), (0.55, 1.0)]);
+        let member = embedded_member(0.1, 0.9, None);
+        assert!(matches!(
+            DesignedClearanceMasks::validate_endpoint_connected(
                 &member,
-                EmbedEnd::Terminalward,
-                embed_validation::test_surface(2),
+                &disconnected,
+                Some(extent(0.45)),
+                None,
+                validation_limits(&disconnected, 1),
             ),
-            Ok(extent(0.2))
-        );
+            Err(DesignedMaskError::DisconnectedGeometry {
+                end: EmbedEnd::Terminalward,
+            })
+        ));
+
+        let surface = surface_with_cubes(&[(0.0, 1.0)]);
+        let mut forest = Forest::new();
+        let key = forest.add_member(embedded_member(0.2, 0.8, None));
+        let masks = DesignedClearanceMasks::validate_endpoint_connected(
+            forest.member(key).unwrap(),
+            &surface,
+            Some(extent(0.1)),
+            Some(extent(0.1)),
+            validation_limits(&surface, 2),
+        )
+        .unwrap();
         assert_eq!(
-            terminal.terminalward().unwrap().validated_extent_for(
-                &changed_geometry,
+            masks.terminalward().unwrap().validated_extent_for(
+                forest.member(key).unwrap(),
                 EmbedEnd::Terminalward,
-                embed_validation::test_surface(2),
+                &surface,
+            ),
+            Ok(extent(0.1))
+        );
+        forest
+            .set_endpoints(
+                key,
+                [finite(0.25), finite(0.5), finite(0.5)],
+                [finite(0.8), finite(0.5), finite(0.5)],
+            )
+            .unwrap();
+        assert_eq!(
+            masks.terminalward().unwrap().validated_extent_for(
+                forest.member(key).unwrap(),
+                EmbedEnd::Terminalward,
+                &surface,
             ),
             Err(DesignedMaskError::StaleBinding)
         );
+        let rebound = surface_with_cubes(&[(0.0, 1.1)]);
+        assert_eq!(
+            masks.rootward().unwrap().validated_extent_for(
+                forest.member(key).unwrap(),
+                EmbedEnd::Rootward,
+                &rebound,
+            ),
+            Err(DesignedMaskError::StaleBinding)
+        );
+    }
+
+    #[test]
+    fn endpoint_validator_handles_reversed_root_coordinates_and_is_deterministic() {
+        let surface = surface_with_cubes(&[(0.0, 1.0)]);
+        let member = embedded_member(-0.2, 0.8, Some(EmbedEnd::Rootward));
         let build = || {
-            bind(&member, Some(extent(0.2)), Some(extent(0.3)), 1, 2)
-                .unwrap()
-                .iter()
-                .map(|(_, mask)| mask.validation_binding())
-                .collect::<Vec<_>>()
+            DesignedClearanceMasks::validate_endpoint_connected(
+                &member,
+                &surface,
+                None,
+                Some(extent(0.1)),
+                validation_limits(&surface, 1),
+            )
+            .unwrap()
+            .iter()
+            .map(|(end, mask)| (end, mask.validation_binding()))
+            .collect::<Vec<_>>()
         };
         let baseline = build();
         for _ in [1, 4, 16] {
