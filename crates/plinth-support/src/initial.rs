@@ -26,14 +26,32 @@ use crate::{
 /// Caller-owned refusal bounds for the contact-sized staging work.  They are
 /// intentionally result-inert and are checked before the forest is changed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct ContactConstructionLimits {
-    pub(crate) max_contacts: usize,
-    pub(crate) max_load_rows: usize,
-    pub(crate) max_work_items: usize,
-    pub(crate) max_scratch_bytes: usize,
+pub struct ContactConstructionLimits {
+    max_contacts: usize,
+    max_load_rows: usize,
+    max_work_items: usize,
+    max_scratch_bytes: usize,
 }
 
 impl ContactConstructionLimits {
+    #[must_use]
+    pub const fn new(
+        max_contacts: usize,
+        max_load_rows: usize,
+        max_work_items: usize,
+        max_scratch_bytes: usize,
+    ) -> Option<Self> {
+        if max_contacts == 0 || max_load_rows == 0 || max_work_items == 0 || max_scratch_bytes == 0
+        {
+            return None;
+        }
+        Some(Self {
+            max_contacts,
+            max_load_rows,
+            max_work_items,
+            max_scratch_bytes,
+        })
+    }
     #[must_use]
     pub(crate) const fn production() -> Self {
         Self {

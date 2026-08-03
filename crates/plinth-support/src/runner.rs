@@ -9,7 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, PenetrationBatchLimits, SurfaceBuildError};
-use plinth_core::{m0_constants, LayerPlan};
+use plinth_core::{m0_constants, Finite, LayerPlan, PositiveFinite};
 use plinth_hollow::{HollowHistory, HollowedModel};
 use plinth_mesh::{mesh_fingerprint, FaceTopology, Mesh};
 use thiserror::Error;
@@ -49,6 +49,140 @@ use crate::{
     CoverageSample, SelectedContacts, SupportError, SupportHistory, SupportPerceptionConfig,
     SupportPerceptionError, SupportReport, SupportRequest, SupportedModel,
 };
+
+/// Explicit caller-owned inputs for one sealed support run. No policy defaults
+/// are selected here; all limits are supplied by the caller.
+#[derive(Clone, Copy, Debug)]
+pub struct SupportPreparationInput<'a> {
+    pub layers: &'a LayerPlan,
+    pub delicacy_by_face: &'a [f64],
+    pub column_pitch_mm: PositiveFinite,
+    pub surface_grid_pitch_mm: PositiveFinite,
+    pub max_grid_bytes: usize,
+    pub candidate_config: CandidatePayloadConfig,
+    pub reservations: &'a [SpecializedOwnerReservation],
+    pub perception_limits: GenericPerceptionLimits,
+    pub coverage_samples_max_virtual_cells: usize,
+    pub coverage_score_matrix_max_entries: usize,
+    pub specialized_limits: SpecializedLimits,
+    pub construction_limits: ContactConstructionLimits,
+    pub brace_penetration_limits: PenetrationBatchLimits,
+    pub raft_limits: RaftLimits,
+    pub max_primitives: usize,
+    pub max_primitive_bytes: usize,
+}
+
+/// Public phase result without exposing private runner typestates.
+#[derive(Debug, Error)]
+pub enum SupportRunError {
+    #[error("support run derived a non-finite plate frame")]
+    InvalidDerivedFrame,
+    #[error("support run requires non-zero explicit resource caps")]
+    InvalidResourceCaps,
+    #[error("sealed support run failed during {0:?}")]
+    Failed(SupportRunPhase),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SupportRunPhase {
+    Preparation,
+    Routing,
+    Rewire,
+    Brace,
+    Structure,
+    Lowering,
+}
+
+/// Opaque, move-only final support authority. It admits only borrowed
+/// verification evidence or final consuming scene conversion.
+pub struct FinalSupportAuthority<'a>(LoweredSupportRun<'a>);
+
+impl FinalSupportAuthority<'_> {
+    pub fn verification_snapshot(
+        &self,
+    ) -> Result<SupportVerificationSnapshot<'_>, SupportVerificationError> {
+        self.0
+            .verification_snapshot()
+            .map_err(|_| SupportVerificationError::AuthorityMismatch)
+    }
+
+    pub fn into_supported_model(self) -> Result<SupportedModel, SupportRunError> {
+        self.0
+            .into_supported_model()
+            .map_err(|_| SupportRunError::Failed(SupportRunPhase::Lowering))
+    }
+}
+
+/// Run the existing sealed preparation pipeline once and return only its final authority.
+pub fn run_support<'a>(
+    hollowed: HollowedModel,
+    request: SupportRequest,
+    input: SupportPreparationInput<'a>,
+) -> Result<FinalSupportAuthority<'a>, SupportRunError> {
+    if input.max_grid_bytes == 0
+        || input.coverage_samples_max_virtual_cells == 0
+        || input.coverage_score_matrix_max_entries == 0
+        || input.max_primitives == 0
+        || input.max_primitive_bytes == 0
+    {
+        return Err(SupportRunError::InvalidResourceCaps);
+    }
+    let min_z = hollowed
+        .mesh()
+        .verts()
+        .iter()
+        .map(|point| point[2])
+        .reduce(f64::min)
+        .ok_or(SupportRunError::InvalidDerivedFrame)?;
+    let plate_z_mm = Finite::new(min_z - request.lift_mm.get())
+        .map_err(|_| SupportRunError::InvalidDerivedFrame)?;
+    let perception_config = SupportPerceptionConfig::current(
+        plate_z_mm,
+        input.column_pitch_mm,
+        input.surface_grid_pitch_mm,
+        input.max_grid_bytes,
+        Some(input.delicacy_by_face),
+    )
+    .map_err(|_| SupportRunError::Failed(SupportRunPhase::Preparation))?;
+    let selection_config = ContactSelectionConfig::current(
+        Some(input.delicacy_by_face),
+        input.coverage_samples_max_virtual_cells,
+        input.coverage_score_matrix_max_entries,
+        input.max_grid_bytes,
+    )
+    .map_err(|_| SupportRunError::Failed(SupportRunPhase::Preparation))?;
+    let authority = SupportPreparationAuthority::new(
+        input.layers,
+        perception_config,
+        input.candidate_config,
+        input.reservations,
+        input.perception_limits,
+        selection_config,
+        input.specialized_limits,
+        input.construction_limits,
+        input.brace_penetration_limits,
+        input.raft_limits,
+        input.max_primitives,
+        input.max_primitive_bytes,
+    );
+    let prepared = prepare_support_run(hollowed, request, authority)
+        .map_err(|_| SupportRunError::Failed(SupportRunPhase::Preparation))?;
+    let routed = prepared
+        .route_initial_cco()
+        .map_err(|_| SupportRunError::Failed(SupportRunPhase::Routing))?;
+    let rewired = routed
+        .rewire()
+        .map_err(|_| SupportRunError::Failed(SupportRunPhase::Rewire))?;
+    let braced = rewired
+        .brace()
+        .map_err(|_| SupportRunError::Failed(SupportRunPhase::Brace))?;
+    let structured = braced
+        .structure()
+        .map_err(|_| SupportRunError::Failed(SupportRunPhase::Structure))?;
+    Ok(FinalSupportAuthority(structured.lower().map_err(|_| {
+        SupportRunError::Failed(SupportRunPhase::Lowering)
+    })?))
+}
 
 /// One physical contact admitted by the finalized CCO transcript for future
 /// coverage verification. It is a borrowed view, never a new planning input.

@@ -12,7 +12,7 @@ use crate::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct RaftLimits {
+pub struct RaftLimits {
     max_candidates: usize,
     max_roots: usize,
     max_primitives: usize,
@@ -32,6 +32,24 @@ impl RaftLimits {
             max_primitives,
             max_bytes,
         }
+    }
+
+    #[must_use]
+    pub const fn try_new(
+        max_candidates: usize,
+        max_roots: usize,
+        max_primitives: usize,
+        max_bytes: usize,
+    ) -> Option<Self> {
+        if max_candidates == 0 || max_roots == 0 || max_primitives == 0 || max_bytes == 0 {
+            return None;
+        }
+        Some(Self {
+            max_candidates,
+            max_roots,
+            max_primitives,
+            max_bytes,
+        })
     }
 
     pub(crate) const fn is_valid(self) -> bool {

@@ -64,8 +64,10 @@ use plinth_mesh::{build_face_topology, Mesh, WeldPolicy};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use initial::ContactConstructionLimits;
 pub use runner::{
-    RoutedPhysicalContactEvidence, SupportVerificationError, SupportVerificationSnapshot,
+    run_support, FinalSupportAuthority, RoutedPhysicalContactEvidence, SupportPreparationInput,
+    SupportRunError, SupportRunPhase, SupportVerificationError, SupportVerificationSnapshot,
 };
 
 /// Request data shared by the support and raft pass.
