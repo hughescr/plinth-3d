@@ -3212,6 +3212,127 @@ mod tests {
     }
 
     #[test]
+    fn measurement_evidence_preserves_boundary_and_repair_contracts() {
+        let mesh = small_closed_tetra();
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let component = topology.component_ids()[0];
+        let samples = [CoverageSample {
+            island_id: 9,
+            face_id: 0,
+            component_id: component,
+            point_mm: [0.0, 0.0, 0.0],
+            area_mm2: 0.1,
+        }];
+
+        let at_radius = assess_coverage_with_mode(
+            &samples,
+            &topology,
+            &[1.0],
+            1.0,
+            0.1,
+            CoverageAssessmentLimits::UNBOUNDED,
+            CoverageAssessmentMode::MeasurementEvidence,
+        )
+        .unwrap();
+        assert!(at_radius.patches.is_empty(), "radius equality is covered");
+
+        let next = f64::from_bits(1.0_f64.to_bits() + 1);
+        let measurement = assess_coverage_with_mode(
+            &samples,
+            &topology,
+            &[next],
+            1.0,
+            0.1,
+            CoverageAssessmentLimits::UNBOUNDED,
+            CoverageAssessmentMode::MeasurementEvidence,
+        )
+        .unwrap();
+        assert_eq!(measurement.patches.len(), 1);
+        let patch = &measurement.patches[0];
+        assert_eq!(
+            (
+                patch.island_id,
+                patch.component_id,
+                patch.representative_face_id
+            ),
+            (9, component, 0)
+        );
+        assert_eq!(patch.sorted_face_ids, vec![0]);
+        assert_eq!(patch.uncovered_area_mm2, 0.1);
+        assert_eq!(patch.worst_gap_mm, next);
+        assert!(!patch.cut_ambiguous);
+        assert!(!patch.assessment_failed, "area equality does not fail");
+
+        let above_floor = assess_coverage_with_mode(
+            &samples,
+            &topology,
+            &[next],
+            1.0,
+            f64::from_bits(0.1_f64.to_bits() - 1),
+            CoverageAssessmentLimits::UNBOUNDED,
+            CoverageAssessmentMode::MeasurementEvidence,
+        )
+        .unwrap();
+        assert!(
+            above_floor.patches[0].assessment_failed,
+            "strictly above floor fails"
+        );
+
+        let no_contact = assess_coverage_with_mode(
+            &samples,
+            &topology,
+            &[f64::INFINITY],
+            1.0,
+            0.1,
+            CoverageAssessmentLimits::UNBOUNDED,
+            CoverageAssessmentMode::MeasurementEvidence,
+        )
+        .unwrap();
+        assert!(no_contact.patches[0].worst_gap_mm.is_infinite());
+
+        let repair = assess_coverage(
+            &samples,
+            &topology,
+            &[next],
+            1.0,
+            f64::from_bits(0.1_f64.to_bits() - 1),
+            CoverageAssessmentLimits::UNBOUNDED,
+        )
+        .unwrap();
+        assert_eq!(repair.objective, above_floor.objective);
+        assert_eq!(
+            repair.failing_sample_indices,
+            above_floor.failing_sample_indices
+        );
+        assert!(repair.patches.is_empty(), "repair mode retains no evidence");
+
+        let open = Mesh::new(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[0, 1, 2]],
+        )
+        .unwrap();
+        let open_topology = build_face_topology(&open, WeldPolicy::ExactBits).unwrap();
+        let ambiguous = assess_coverage_with_mode(
+            &[CoverageSample {
+                island_id: 3,
+                face_id: 0,
+                component_id: 0,
+                point_mm: [0.0, 0.0, 0.0],
+                area_mm2: 0.01,
+            }],
+            &open_topology,
+            &[next],
+            1.0,
+            1.0,
+            CoverageAssessmentLimits::UNBOUNDED,
+            CoverageAssessmentMode::MeasurementEvidence,
+        )
+        .unwrap();
+        assert!(ambiguous.patches[0].cut_ambiguous);
+        assert!(ambiguous.patches[0].assessment_failed);
+    }
+
+    #[test]
     fn s1_consumes_s0_fixture_and_retains_face_specific_evidence() {
         let mesh = small_closed_tetra();
         let pool = perceive_fixture(&mesh);

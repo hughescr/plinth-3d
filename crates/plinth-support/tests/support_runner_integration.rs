@@ -1,4 +1,7 @@
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+};
 
 use geom_kernel::{KnnBatchLimits, PenetrationBatchLimits};
 use plinth_core::{LayerPlan, PositiveFinite};
@@ -12,7 +15,8 @@ use plinth_support::{
     raft::RaftLimits,
     run_support,
     specialized::SpecializedLimits,
-    ContactConstructionLimits, SupportPreparationInput, SupportRequest,
+    ContactConstructionLimits, CoverageGap, CoverageMeasurementLimits, CoverageMeasurementRequest,
+    SupportPreparationInput, SupportRequest,
 };
 
 const GRID_BYTES: usize = 64 * 1024 * 1024;
@@ -125,4 +129,131 @@ fn public_runner_seals_and_verifies_overhang_table() {
     authority
         .into_supported_model()
         .expect("consume final support authority after verification");
+}
+
+#[test]
+fn public_runner_measures_sealed_coverage_with_frozen_resources_and_evidence() {
+    let hollowed = hollowed_overhang_table();
+    let delicacy = vec![0.0; hollowed.mesh().tris().len()];
+    let layers = LayerPlan::new(0.0, vec![0.05; 1_000]).expect("layer plan");
+    let authority = run_support(
+        hollowed,
+        SupportRequest {
+            lift_mm: PositiveFinite::new(5.0).expect("positive lift"),
+        },
+        support_input(&delicacy, &layers),
+    )
+    .expect("public support runner");
+    // Hand-counted from the checked-in overhang-table fixture, not by the
+    // verifier's private preflight: 81 logical route rows across nine
+    // islands, 77 physical seats, and 50,176 coverage rows.  The remaining
+    // values are the frozen allocation arithmetic for that fixed fixture.
+    let request = CoverageMeasurementRequest::from_f64(
+        1.0,
+        1.0,
+        CoverageMeasurementLimits::new(81, 77, 50_176, 1_574_912, 12_497_064, 5_820_416)
+            .expect("explicit frozen test ceilings"),
+    )
+    .expect("explicit finite coverage request");
+    let snapshot = authority
+        .verification_snapshot()
+        .expect("borrow sealed verification snapshot");
+    let measurement = snapshot
+        .measure_coverage(request)
+        .expect("public measurement");
+    assert_eq!(measurement.snapshot_digest(), snapshot.digest());
+    assert_eq!(measurement.request(), request);
+    let plan = measurement.resource_plan();
+    assert_eq!(
+        (
+            plan.route_membership_sum(),
+            plan.sequential_route_membership_peak(),
+            plan.indexed_point_count(),
+            plan.sequential_indexed_point_peak(),
+            plan.query_row_count(),
+            plan.distance_work(),
+            plan.logical_peak_bytes(),
+            plan.assessment_work(),
+            plan.assessment_scratch_bytes(),
+            plan.assessment_evidence_bytes(),
+            plan.assessment_phase_peak_bytes(),
+        ),
+        (
+            81, 45, 77, 45, 50_176, 1_574_912, 12_497_064, 5_820_416, 3_863_552, 8_228_864,
+            12_092_416
+        )
+    );
+    let expected_islands = snapshot.coverage_samples().iter().fold(
+        BTreeMap::<(u32, u32), BTreeSet<u32>>::new(),
+        |mut islands, sample| {
+            islands
+                .entry((sample.island_id, sample.component_id))
+                .or_default()
+                .insert(sample.face_id);
+            islands
+        },
+    );
+    assert_eq!(
+        measurement.evidence().islands().len(),
+        expected_islands.len()
+    );
+    for (island, ((island_id, component_id), faces)) in measurement
+        .evidence()
+        .islands()
+        .iter()
+        .zip(expected_islands)
+    {
+        assert_eq!(
+            (island.island_id(), island.component_id()),
+            (island_id, component_id)
+        );
+        assert_eq!(
+            island.representative_face_id(),
+            *faces.first().expect("fixture face")
+        );
+        assert_eq!(
+            island.sorted_face_ids(),
+            faces.into_iter().collect::<Vec<_>>()
+        );
+    }
+    let expected_patch_areas = [
+        788.049_316_406_25,
+        30.312_5,
+        30.312_5,
+        30.312_5,
+        30.312_5,
+        6.843_749_999_999_999,
+        6.843_749_999_999_999,
+        6.843_749_999_999_999,
+        6.843_749_999_999_999,
+    ];
+    assert_eq!(
+        measurement.evidence().patches().len(),
+        expected_patch_areas.len()
+    );
+    for ((patch, island), expected_area) in measurement
+        .evidence()
+        .patches()
+        .iter()
+        .zip(measurement.evidence().islands())
+        .zip(expected_patch_areas)
+    {
+        assert_eq!(
+            (
+                patch.island_id(),
+                patch.component_id(),
+                patch.representative_face_id()
+            ),
+            (
+                island.island_id(),
+                island.component_id(),
+                island.representative_face_id()
+            )
+        );
+        assert_eq!(patch.sorted_face_ids(), island.sorted_face_ids());
+        assert_eq!(patch.uncovered_area_mm2().get(), expected_area);
+        assert!(!patch.cut_ambiguous());
+        assert!(patch.assessment_failed());
+        assert!(matches!(patch.worst_gap(), CoverageGap::Finite(gap) if gap.get().is_finite()));
+    }
 }

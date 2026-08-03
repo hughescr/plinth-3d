@@ -4158,6 +4158,25 @@ mod tests {
                 snapshot.validate_integrity(),
                 Err(SupportVerificationError::SnapshotDigestMismatch)
             );
+            assert_eq!(
+                snapshot.measure_coverage(
+                    CoverageMeasurementRequest::from_f64(
+                        1.0,
+                        1.0,
+                        CoverageMeasurementLimits::new(
+                            usize::MAX,
+                            usize::MAX,
+                            usize::MAX,
+                            usize::MAX,
+                            usize::MAX,
+                            usize::MAX,
+                        )
+                        .expect("nonzero measurement limits"),
+                    )
+                    .expect("finite measurement request"),
+                ),
+                Err(CoverageMeasurementError::SnapshotBinding)
+            );
         });
     }
 
@@ -4715,6 +4734,27 @@ mod tests {
                 .verification_snapshot()
                 .expect("thread sweep snapshots validated final authority");
             let snapshot_digest = snapshot.digest();
+            let coverage = format!(
+                "{:?}",
+                snapshot.measure_coverage(
+                    CoverageMeasurementRequest::from_f64(
+                        1.0,
+                        1.0,
+                        CoverageMeasurementLimits::new(
+                            usize::MAX,
+                            usize::MAX,
+                            usize::MAX,
+                            usize::MAX,
+                            usize::MAX,
+                            usize::MAX,
+                        )
+                        .expect("nonzero thread-sweep measurement limits"),
+                    )
+                    .expect("thread sweep measures sealed snapshot"),
+                ) // `Debug` contains every private request, resource, evidence,
+                  // and binding field; comparing it across child processes keeps
+                  // this process boundary from reducing the check to a digest.
+            );
             let routed_contact_count = snapshot.routed_contacts().len();
             snapshot
                 .validate_integrity()
@@ -4724,7 +4764,7 @@ mod tests {
                 .into_supported_model()
                 .expect("thread sweep constructs supported model");
             println!(
-                "{SWEEP_LINE}{lineage}:{}:{}:{}:{}:{}:{}:{}:{}",
+                "{SWEEP_LINE}{lineage}:{}:{}:{}:{}:{}:{}:{}:{}:{coverage}",
                 model.primitives().len(),
                 model.history().support().support_primitive_count,
                 model.history().support().raft_primitive_count,
