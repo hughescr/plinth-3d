@@ -69,7 +69,7 @@ fn support_input<'a>(
         perception_limits: GenericPerceptionLimits::production(TEST_KNN_LIMITS),
         coverage_samples_max_virtual_cells: 2_000_000,
         coverage_score_matrix_max_entries: 65_536,
-        specialized_limits: SpecializedLimits::production(),
+        specialized_limits: SpecializedLimits::production(TEST_KNN_LIMITS),
         construction_limits: ContactConstructionLimits::new(
             1_000_000,
             10_000_000,

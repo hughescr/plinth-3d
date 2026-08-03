@@ -8,7 +8,10 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
-use geom_kernel::{NativeSurface, NativeSurfaceConfig, PointCloudIndex, RadiusQueryLimits};
+use geom_kernel::{
+    KnnBatchLimits, KnnBatchPlan, NativeSurface, NativeSurfaceConfig, PointCloudIndex,
+    RadiusQueryLimits,
+};
 use plinth_core::{m0_constants, LayerPlan};
 use plinth_mesh::{build_face_topology, mesh_fingerprint, Mesh, WeldPolicy};
 use thiserror::Error;
@@ -33,6 +36,11 @@ const BIRTH_LINK_RADIUS_MM: f64 = 0.6;
 /// Result-inert refusal limits for specialized orchestration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SpecializedLimits {
+    /// Caller-owned cap for the route-keyed coverage kNN batches.
+    ///
+    /// This is execution-only refusal authority, deliberately excluded from
+    /// semantic and result digests.
+    pub coverage_route_knn: KnnBatchLimits,
     pub max_synthetic_neighbor_pairs: usize,
     pub max_synthetic_neighbor_bytes: usize,
     pub max_satisfaction_tests: usize,
@@ -59,8 +67,9 @@ pub struct SpecializedLimits {
 
 impl SpecializedLimits {
     #[must_use]
-    pub const fn production() -> Self {
+    pub const fn production(coverage_route_knn: KnnBatchLimits) -> Self {
         Self {
+            coverage_route_knn,
             max_synthetic_neighbor_pairs: 20_000_000,
             max_synthetic_neighbor_bytes: 512 * 1024 * 1024,
             max_satisfaction_tests: 100_000_000,
@@ -1276,6 +1285,8 @@ pub enum SpecializedError {
     InvalidGateWindow,
     #[error("specialized gate resource arithmetic overflowed")]
     GateResourceOverflow,
+    #[error("specialized route-keyed coverage nearest query failed: {0}")]
+    CoverageNearest(String),
     #[error("specialized synthetic neighbor query failed: {0}")]
     SyntheticNeighbors(String),
     #[error("specialized demand has no component-local synthetic face")]
@@ -3013,7 +3024,13 @@ fn evaluate_gate_batch(
                 .and_then(|index| proposals.get(index));
             let nearest = &mut nearest_matrix
                 [window_row * coverage_samples.len()..(window_row + 1) * coverage_samples.len()];
-            fill_variant_nearest(contacts, proposal, coverage_samples, nearest);
+            fill_variant_nearest(
+                contacts,
+                proposal,
+                coverage_samples,
+                nearest,
+                limits.coverage_route_knn,
+            )?;
             append_variant_load_inputs(
                 contacts,
                 proposal,
@@ -3087,13 +3104,10 @@ fn variant_contact_count(contact_count: usize, variant: usize) -> usize {
     }
 }
 
-fn proposal_serves_sample(
-    proposal: &MergeProposal,
-    contacts: &[WorkingContact],
-    sample: &CoverageSample,
-) -> bool {
-    contact_serves_sample(&contacts[proposal.left], sample)
-        || contact_serves_sample(&contacts[proposal.right], sample)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct CoverageRoute {
+    island_id: u32,
+    component_id: u32,
 }
 
 fn fill_variant_nearest(
@@ -3101,26 +3115,128 @@ fn fill_variant_nearest(
     proposal: Option<&MergeProposal>,
     samples: &[CoverageSample],
     nearest: &mut [f64],
-) {
-    for (contact_index, contact) in contacts.iter().enumerate() {
-        if proposal.is_some_and(|p| contact_index == p.left || contact_index == p.right) {
-            continue;
+    limits: KnnBatchLimits,
+) -> Result<(), SpecializedError> {
+    debug_assert_eq!(nearest.len(), samples.len());
+    let mut source_counts = BTreeMap::<CoverageRoute, BTreeSet<u64>>::new();
+    let mut query_counts = BTreeMap::<CoverageRoute, usize>::new();
+    let mut add_contact = |physical_id: u64, contact: &WorkingContact| {
+        for route in contact
+            .regular_routes
+            .iter()
+            .map(|route| CoverageRoute {
+                island_id: route.owner_island_id,
+                component_id: route.component_id,
+            })
+            .chain(contact.demands.iter().map(|demand| CoverageRoute {
+                island_id: demand.owner_island_id,
+                component_id: demand.coverage_component_id,
+            }))
+        {
+            source_counts.entry(route).or_default().insert(physical_id);
         }
-        for (sample_index, sample) in samples.iter().enumerate() {
-            if contact_serves_sample(contact, sample) {
-                nearest[sample_index] =
-                    nearest[sample_index].min(distance3(contact.position_mm, sample.point_mm));
-            }
+    };
+    for (physical_id, contact) in contacts.iter().enumerate() {
+        if !proposal.is_some_and(|p| physical_id == p.left || physical_id == p.right) {
+            add_contact(
+                u64::try_from(physical_id).map_err(|_| SpecializedError::GateResourceOverflow)?,
+                contact,
+            );
         }
     }
     if let Some(proposal) = proposal {
-        for (sample_index, sample) in samples.iter().enumerate() {
-            if proposal_serves_sample(proposal, contacts, sample) {
-                nearest[sample_index] =
-                    nearest[sample_index].min(distance3(proposal.position_mm, sample.point_mm));
+        let physical_id =
+            u64::try_from(proposal.left).map_err(|_| SpecializedError::GateResourceOverflow)?;
+        add_contact(physical_id, &contacts[proposal.left]);
+        add_contact(physical_id, &contacts[proposal.right]);
+    }
+    for sample in samples {
+        let route = CoverageRoute {
+            island_id: sample.island_id,
+            component_id: sample.component_id,
+        };
+        let count = query_counts.entry(route).or_default();
+        *count = count
+            .checked_add(1)
+            .ok_or(SpecializedError::GateResourceOverflow)?;
+    }
+    let total_work = source_counts
+        .iter()
+        .try_fold(0usize, |total, (route, source_ids)| {
+            let query_count = query_counts.get(route).copied().unwrap_or(0);
+            source_ids
+                .len()
+                .checked_mul(query_count)
+                .and_then(|work| total.checked_add(work))
+                .ok_or(SpecializedError::GateResourceOverflow)
+        })?;
+    if total_work > limits.max_work {
+        return Err(SpecializedError::GateOperationLimit {
+            required: total_work,
+            limit: limits.max_work,
+        });
+    }
+    for (route, source_ids) in source_counts {
+        let query_count = query_counts.get(&route).copied().unwrap_or(0);
+        if source_ids.is_empty() || query_count == 0 {
+            continue;
+        }
+        let plan = KnnBatchPlan::new(source_ids.len(), query_count, 1, limits)
+            .map_err(|error| SpecializedError::CoverageNearest(error.to_string()))?;
+        let mut source_points = Vec::with_capacity(source_ids.len());
+        let mut seen = BTreeSet::new();
+        let mut gather = |physical_id: u64, position_mm: [f64; 3], contact: &WorkingContact| {
+            if contact_serves_route(contact, route) && seen.insert(physical_id) {
+                source_points.push(position_mm);
+            }
+        };
+        for (physical_id, contact) in contacts.iter().enumerate() {
+            if !proposal.is_some_and(|p| physical_id == p.left || physical_id == p.right) {
+                gather(
+                    u64::try_from(physical_id).expect("usize fits u64"),
+                    contact.position_mm,
+                    contact,
+                );
             }
         }
+        if let Some(proposal) = proposal {
+            let physical_id = u64::try_from(proposal.left).expect("usize fits u64");
+            gather(physical_id, proposal.position_mm, &contacts[proposal.left]);
+            gather(physical_id, proposal.position_mm, &contacts[proposal.right]);
+        }
+        debug_assert_eq!(source_points.len(), plan.source_count());
+        let mut query_indices = Vec::with_capacity(query_count);
+        let mut query_points = Vec::with_capacity(query_count);
+        for (sample_index, sample) in samples.iter().enumerate() {
+            if (CoverageRoute {
+                island_id: sample.island_id,
+                component_id: sample.component_id,
+            }) == route
+            {
+                query_indices.push(sample_index);
+                query_points.push(sample.point_mm);
+            }
+        }
+        let index = PointCloudIndex::new_for_knn_batch(&source_points, &plan)
+            .map_err(|error| SpecializedError::CoverageNearest(error.to_string()))?;
+        let rows = index
+            .knn_batch_planned(&query_points, &plan)
+            .map_err(|error| SpecializedError::CoverageNearest(error.to_string()))?;
+        for (query_row, &sample_index) in query_indices.iter().enumerate() {
+            let row = rows.row_range(query_row).expect("planned row exists");
+            nearest[sample_index] = rows.squared_distances[row.start].sqrt();
+        }
     }
+    Ok(())
+}
+
+fn contact_serves_route(contact: &WorkingContact, route: CoverageRoute) -> bool {
+    contact.regular_routes.iter().any(|candidate| {
+        candidate.owner_island_id == route.island_id && candidate.component_id == route.component_id
+    }) || contact.demands.iter().any(|demand| {
+        demand.owner_island_id == route.island_id
+            && demand.coverage_component_id == route.component_id
+    })
 }
 
 fn variant_satisfies_demand(
@@ -3426,15 +3542,6 @@ fn contact_serves_owner(contact: &WorkingContact, owner: u32) -> bool {
             .any(|demand| demand.owner_island_id == owner)
 }
 
-fn contact_serves_sample(contact: &WorkingContact, sample: &CoverageSample) -> bool {
-    contact.regular_routes.iter().any(|route| {
-        route.owner_island_id == sample.island_id && route.component_id == sample.component_id
-    }) || contact.demands.iter().any(|demand| {
-        demand.owner_island_id == sample.island_id
-            && demand.coverage_component_id == sample.component_id
-    })
-}
-
 fn demand_satisfaction_work(demand: &SpecializedDemand) -> Result<usize, SpecializedError> {
     match demand.kind {
         SpecializedDemandKind::Minimum => Ok(demand.region_points_mm.len().max(1)),
@@ -3628,6 +3735,15 @@ fn gather_pair_proposals(
 }
 
 #[cfg(test)]
+const TEST_PAIR_KNN_LIMITS: KnnBatchLimits = KnnBatchLimits {
+    max_source_points: 20_000_000,
+    max_query_points: 20_000_000,
+    max_neighbors: 1,
+    max_logical_peak_bytes: 2 * 1024 * 1024 * 1024,
+    max_work: 100_000_000,
+};
+
+#[cfg(test)]
 fn test_pair_proposals(
     contacts: &[WorkingContact],
     layers: &LayerPlan,
@@ -3643,7 +3759,7 @@ fn test_pair_proposals(
         layers,
         attach_reach,
         spacing_floor,
-        SpecializedLimits::production(),
+        SpecializedLimits::production(TEST_PAIR_KNN_LIMITS),
         &mut operations,
         &mut proposals,
     )
@@ -4274,6 +4390,91 @@ mod tests {
         }
     }
 
+    #[test]
+    fn route_keyed_nearest_is_exact_deduplicated_and_leaves_unrouted_rows_infinite() {
+        let first_route = RegularContactRoute {
+            candidate_id: 7,
+            owner_island_id: 3,
+            coverage_face_id: 0,
+            component_id: 11,
+            source_kind: RepairRowSourceKind::Generic,
+        };
+        let second_route = RegularContactRoute {
+            candidate_id: 8,
+            owner_island_id: 3,
+            coverage_face_id: 1,
+            component_id: 12,
+            source_kind: RepairRowSourceKind::Generic,
+        };
+        let mut first =
+            test_regular_contact([0.0, 0.0, 0.0], [0.0, 0.0, -1.0], first_route, Vec::new());
+        first.regular_routes.push(first_route); // Same seat and key must remain one source.
+        first.regular_routes.push(second_route); // A second key on the same seat remains distinct.
+        let contacts = vec![first];
+        let samples = vec![
+            CoverageSample {
+                island_id: 3,
+                face_id: 0,
+                component_id: 11,
+                point_mm: [3.0, 4.0, 0.0],
+                area_mm2: 1.0,
+            },
+            CoverageSample {
+                island_id: 3,
+                face_id: 1,
+                component_id: 12,
+                point_mm: [0.0, 0.0, 2.0],
+                area_mm2: 1.0,
+            },
+            CoverageSample {
+                island_id: 4,
+                face_id: 2,
+                component_id: 11,
+                point_mm: [0.0, 0.0, 0.0],
+                area_mm2: 1.0,
+            },
+        ];
+        let mut nearest = vec![f64::INFINITY; samples.len()];
+        fill_variant_nearest(&contacts, None, &samples, &mut nearest, TEST_KNN_LIMITS).unwrap();
+        assert_eq!(nearest[0], 5.0);
+        assert_eq!(nearest[1], 2.0);
+        assert!(nearest[2].is_infinite());
+    }
+
+    #[test]
+    fn route_keyed_nearest_refuses_knn_caps_before_build_or_query() {
+        let route = RegularContactRoute {
+            candidate_id: 7,
+            owner_island_id: 3,
+            coverage_face_id: 0,
+            component_id: 11,
+            source_kind: RepairRowSourceKind::Generic,
+        };
+        let contacts = vec![test_regular_contact(
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, -1.0],
+            route,
+            Vec::new(),
+        )];
+        let samples = vec![CoverageSample {
+            island_id: 3,
+            face_id: 0,
+            component_id: 11,
+            point_mm: [0.0, 0.0, 0.0],
+            area_mm2: 1.0,
+        }];
+        let mut nearest = vec![f64::INFINITY];
+        let refused = KnnBatchLimits {
+            max_source_points: 0,
+            ..TEST_KNN_LIMITS
+        };
+        assert!(matches!(
+            fill_variant_nearest(&contacts, None, &samples, &mut nearest, refused),
+            Err(SpecializedError::CoverageNearest(_))
+        ));
+        assert!(nearest[0].is_infinite());
+    }
+
     fn repair_candidate(id: u64, face_id: u32, point_mm: [f64; 3]) -> crate::ContactCandidate {
         crate::ContactCandidate {
             id: ContactCandidateId(id),
@@ -4723,7 +4924,7 @@ mod tests {
         ];
         let mut proposals = Vec::new();
         let mut operations = 0;
-        let mut limits = SpecializedLimits::production();
+        let mut limits = SpecializedLimits::production(TEST_KNN_LIMITS);
         limits.max_merge_proposals = 1;
         assert_eq!(
             gather_pair_proposals(
@@ -4827,7 +5028,7 @@ mod tests {
             })
             .unwrap();
         let exact = 4 + 2 * satisfaction;
-        let mut limits = SpecializedLimits::production();
+        let mut limits = SpecializedLimits::production(TEST_KNN_LIMITS);
         limits.max_merge_descriptor_operations = exact - 1;
         let mut operations = 0;
         let mut proposals = Vec::new();
@@ -4860,7 +5061,7 @@ mod tests {
             WorkingContact::specialized(demand.clone()),
             WorkingContact::specialized(demand),
         ];
-        let mut limits = SpecializedLimits::production();
+        let mut limits = SpecializedLimits::production(TEST_KNN_LIMITS);
         limits.max_merge_descriptor_operations = 0;
         let mut operations = 0;
         let mut proposals = Vec::new();
@@ -5138,7 +5339,7 @@ mod tests {
     #[test]
     fn zero_gate_caps_refuse_without_payload_allocation_or_work() {
         let mut telemetry = GatePreflightTelemetry::default();
-        let mut operation_limits = SpecializedLimits::production();
+        let mut operation_limits = SpecializedLimits::production(TEST_KNN_LIMITS);
         operation_limits.max_gate_operations = 0;
         assert_eq!(
             gate_header_preflight(
@@ -5160,7 +5361,7 @@ mod tests {
         assert_eq!(telemetry.payload_allocations, 0);
         assert_eq!(telemetry.payload_operations, 0);
 
-        let mut peak_limits = SpecializedLimits::production();
+        let mut peak_limits = SpecializedLimits::production(TEST_KNN_LIMITS);
         peak_limits.max_gate_peak_bytes = 0;
         let expected = std::mem::size_of::<MergeProposal>()
             + 2 * std::mem::size_of::<FrozenSpecializedGateVector>();
@@ -5406,7 +5607,7 @@ mod tests {
             })
         );
 
-        let limits = SpecializedLimits::production();
+        let limits = SpecializedLimits::production(TEST_KNN_LIMITS);
         let exact = gate_resource_plan(3, 2, 5, 7, 11, limits).unwrap();
         assert_eq!(exact.variants, 3);
         assert_eq!(exact.operations, 140);
@@ -5587,7 +5788,7 @@ mod tests {
             &[matching, other_owner, exact_other_owner],
             &layers,
             0.2,
-            SpecializedLimits::production(),
+            SpecializedLimits::production(TEST_KNN_LIMITS),
         )
         .unwrap();
         assert!(dispositions[0].covered);
@@ -5623,7 +5824,7 @@ mod tests {
             &mut physical,
             &layers,
             0.2,
-            SpecializedLimits::production(),
+            SpecializedLimits::production(TEST_KNN_LIMITS),
             &mut MergeAllocationTelemetry::default(),
         )
         .unwrap();
@@ -5687,7 +5888,7 @@ mod tests {
                 &mut physical,
                 &layers,
                 0.2,
-                SpecializedLimits::production(),
+                SpecializedLimits::production(TEST_KNN_LIMITS),
                 &mut MergeAllocationTelemetry::default(),
             )
             .unwrap(),
@@ -5792,7 +5993,7 @@ mod tests {
             &generic,
             &regular,
             &selection_config,
-            SpecializedLimits::production(),
+            SpecializedLimits::production(TEST_KNN_LIMITS),
         )
         .map_err(|error| format!("required {name} specialized fixture failed: {error}"))
     }
@@ -5845,7 +6046,7 @@ mod tests {
             &generic,
             &regular,
             &selection_config,
-            SpecializedLimits::production(),
+            SpecializedLimits::production(TEST_KNN_LIMITS),
         )
         .map_err(|error| format!("required {name} specialized fixture failed: {error}"))?;
         Ok((mesh, generic, plan))
@@ -6168,7 +6369,7 @@ mod tests {
             &generic,
             &regular_only.islands,
             &[],
-            SpecializedLimits::production(),
+            SpecializedLimits::production(TEST_KNN_LIMITS),
         )
         .expect("required zero-child fixture can form a regular load input");
         regular_only.load_partition = finalize_specialized_load_partition(
@@ -6178,7 +6379,8 @@ mod tests {
             &inputs.contacts,
             &inputs.specialized_owner_faces,
             LoadFinalizeLimits {
-                max_scratch_bytes: SpecializedLimits::production().max_load_scratch_bytes,
+                max_scratch_bytes: SpecializedLimits::production(TEST_KNN_LIMITS)
+                    .max_load_scratch_bytes,
                 max_operations: inputs.remaining_load_operations,
             },
         )
@@ -6451,7 +6653,7 @@ mod tests {
         let regular =
             crate::select_contacts(&mesh, generic.candidates(), generic.islands(), &selection)
                 .unwrap();
-        let limits = SpecializedLimits::production();
+        let limits = SpecializedLimits::production(TEST_KNN_LIMITS);
         let plan = prepare_specialized_contacts(
             &mesh,
             &perception,

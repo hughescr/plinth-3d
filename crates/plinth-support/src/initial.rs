@@ -852,7 +852,7 @@ mod tests {
                 &generic,
                 &regular,
                 &selection,
-                SpecializedLimits::production(),
+                SpecializedLimits::production(TEST_KNN_LIMITS),
             )
             .unwrap();
             let ids = plan
@@ -919,7 +919,7 @@ mod tests {
                 &self.generic,
                 &self.regular,
                 &selection,
-                SpecializedLimits::production(),
+                SpecializedLimits::production(TEST_KNN_LIMITS),
                 &geometry,
                 limits,
             )
@@ -1029,7 +1029,7 @@ mod tests {
             &fixture.generic,
             &fixture.regular,
             &selection,
-            SpecializedLimits::production(),
+            SpecializedLimits::production(TEST_KNN_LIMITS),
         )
         .unwrap();
         let loads = FinalizedContactLoads::from_partition(
@@ -1054,7 +1054,7 @@ mod tests {
             &fixture.generic,
             &fixture.regular,
             &selection,
-            SpecializedLimits::production(),
+            SpecializedLimits::production(TEST_KNN_LIMITS),
             &geometry,
             ContactConstructionLimits::production(),
         )
@@ -1159,7 +1159,7 @@ mod tests {
                 &table.generic,
                 &table.regular,
                 &selection,
-                SpecializedLimits::production(),
+                SpecializedLimits::production(TEST_KNN_LIMITS),
                 &alien,
                 ContactConstructionLimits::production(),
             ),
