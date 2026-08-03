@@ -214,6 +214,8 @@ Zero-load perpendicular photo with comb: #blank
 
 First stop level: #blank  Later levels: `not_attempted` if stopped.
 
+#pagebreak()
+
 == E. T01-T08 removal and scar sheet
 
 Tool order and removal direction fixed before first tile: #blank
