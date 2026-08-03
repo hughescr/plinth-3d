@@ -3812,6 +3812,36 @@ mod tests {
     }
 
     #[test]
+    fn all_numerical_zero_seat_refusals_survive_no_winner_evidence() {
+        let t = Finite::new(-geom_kernel::MOLLER_PARAMETER_SLACK).unwrap();
+        let zero = AnchorSeatRefusal {
+            sample_index: 3,
+            source_sample_face_id: 7,
+            reason: crate::anchor::AnchorSeatRefusalReason::ZeroLengthSnappedAnchor,
+            first_hit_t: Some(t),
+        };
+        let outcome = TerminalCcoOutcome {
+            winner: None,
+            disposition: None,
+            candidates_generated: 0,
+            candidates_feasible: 0,
+            anchor_ray_batches: 1,
+            anchor_foot_batches: 0,
+            clearance_batches: 0,
+            validated_model_anchor: None,
+            anchor_seat_refusals: vec![zero],
+            anchor_refusals: Vec::new(),
+        };
+        let NoWinnerEvidence::NoCandidatesGenerated {
+            anchor_seat_refusals,
+        } = no_winner_evidence(&outcome)
+        else {
+            panic!("all numerical-zero candidates must remain a no-winner result");
+        };
+        assert_eq!(anchor_seat_refusals, vec![zero]);
+    }
+
+    #[test]
     fn finalized_transcript_rejects_each_real_authority_mismatch_before_cadence() {
         let (build, plan, loads, surface, topology, mesh, _) = real_initial_transcript_fixture();
         let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
