@@ -9,7 +9,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use geom_kernel::{
-    KnnBatchLimits, NativeSurface, NativeSurfaceConfig, PenetrationBatchLimits, SurfaceBuildError,
+    KnnBatchLimits, KnnBatchPlan, NativeSurface, NativeSurfaceConfig, PenetrationBatchLimits,
+    SurfaceBuildError,
 };
 use plinth_core::{m0_constants, Finite, LayerPlan, PositiveFinite};
 use plinth_hollow::{HollowHistory, HollowedModel};
@@ -24,6 +25,14 @@ static NORMALIZED_ROUTE_PROJECTION_RESERVES: std::sync::atomic::AtomicUsize =
 
 #[cfg(test)]
 static COVERAGE_ROUTE_QUERIES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+static COVERAGE_ROUTE_PLANNER_ALLOCATIONS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+static COVERAGE_ASSESSMENT_TRAVERSALS: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
 use crate::{
@@ -300,7 +309,254 @@ pub struct SupportVerificationSnapshot<'a> {
     snapshot_digest: u64,
 }
 
+/// Scalar accounting gathered from sealed evidence before measurement creates
+/// its normalized projection or route planner maps.  The physical-seat count
+/// intentionally uses bounded comparison scans: route membership is canonical
+/// within a contact, but transcript cadence does not promise adjacent equal
+/// route keys.  The scan is at most quadratic in the caller-capped logical
+/// membership count and short-circuits on every cap.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CoverageMeasurementPreflight {
+    memberships: usize,
+    sequential_membership_peak: usize,
+    indexed_points: usize,
+    sequential_indexed_peak: usize,
+    query_rows: usize,
+    distance_work: usize,
+    route_retained_base_bytes: usize,
+    route_knn_peak_bytes: usize,
+    island_row_count: usize,
+    assessment: CoverageMeasurementResourcePlan,
+    logical_peak_bytes: usize,
+}
+
 impl<'a> SupportVerificationSnapshot<'a> {
+    fn measurement_preflight(
+        &self,
+        limits: crate::CoverageMeasurementLimits,
+        knn_limits: KnnBatchLimits,
+    ) -> Result<CoverageMeasurementPreflight, CoverageMeasurementError> {
+        let mut memberships = 0usize;
+        let mut sequential_membership_peak = 0usize;
+        let mut indexed_points = 0usize;
+        let mut sequential_indexed_peak = 0usize;
+        let mut query_rows = 0usize;
+        let mut distance_work = 0usize;
+        let mut source_route_count = 0usize;
+        let mut max_knn_peak = 0usize;
+        let mut max_query_count = 0usize;
+        for (membership_index, membership) in self.routed_route_memberships.iter().enumerate() {
+            for (route_index, route) in membership.logical_routes.iter().enumerate() {
+            memberships = memberships.checked_add(1).ok_or(
+                CoverageMeasurementError::ArithmeticOverflow {
+                    operation: "route memberships",
+                },
+            )?;
+            if memberships > limits.max_route_memberships() {
+                return Err(CoverageMeasurementError::ResourceLimit {
+                    resource: "route memberships",
+                });
+            }
+
+            // Process a route key only once.  Canonical per-contact routes do
+            // not make transcript-wide equal keys adjacent, hence the bounded
+            // sealed-slice scan instead of retained deduplication state.
+            if self
+                .routed_route_memberships
+                .iter()
+                .enumerate()
+                .take(membership_index + 1)
+                .any(|(prior_membership_index, prior_membership)| {
+                    prior_membership.logical_routes.iter().enumerate().any(
+                        |(prior_route_index, prior)| {
+                            (prior_membership_index < membership_index
+                                || prior_route_index < route_index)
+                                && prior.island_id == route.island_id
+                                && prior.component_id == route.component_id
+                        },
+                    )
+                })
+            {
+                continue;
+            }
+            let route_memberships = self
+                .routed_route_memberships
+                .iter()
+                .flat_map(|membership| membership.logical_routes.iter())
+                .filter(|candidate| {
+                    candidate.island_id == route.island_id
+                        && candidate.component_id == route.component_id
+                })
+                .count();
+            sequential_membership_peak = sequential_membership_peak.max(route_memberships);
+            let source_count = self
+                .routed_route_memberships
+                .iter()
+                .filter(|membership| {
+                    membership.logical_routes.iter().any(|candidate| {
+                        candidate.island_id == route.island_id
+                            && candidate.component_id == route.component_id
+                    })
+                })
+                .count();
+            indexed_points = indexed_points.checked_add(source_count).ok_or(
+                CoverageMeasurementError::ArithmeticOverflow {
+                    operation: "indexed points",
+                },
+            )?;
+            if indexed_points > limits.max_indexed_points() {
+                return Err(CoverageMeasurementError::ResourceLimit {
+                    resource: "indexed points",
+                });
+            }
+            sequential_indexed_peak = sequential_indexed_peak.max(source_count);
+            source_route_count = source_route_count.checked_add(1).ok_or(
+                CoverageMeasurementError::ArithmeticOverflow {
+                    operation: "route keys",
+                },
+            )?;
+            let queries = self
+                .coverage_samples
+                .iter()
+                .filter(|sample| {
+                    sample.island_id == route.island_id
+                        && sample.component_id == route.component_id
+                })
+                .count();
+            let work = source_count.checked_mul(queries).ok_or(
+                CoverageMeasurementError::ArithmeticOverflow {
+                    operation: "distance work",
+                },
+            )?;
+            distance_work = distance_work.checked_add(work).ok_or(
+                CoverageMeasurementError::ArithmeticOverflow {
+                    operation: "distance work",
+                },
+            )?;
+            if distance_work > limits.max_distance_work() {
+                return Err(CoverageMeasurementError::ResourceLimit {
+                    resource: "distance work",
+                });
+            }
+            if queries != 0 {
+                query_rows = query_rows.checked_add(queries).ok_or(
+                    CoverageMeasurementError::ArithmeticOverflow {
+                        operation: "query rows",
+                    },
+                )?;
+                if query_rows > limits.max_query_rows() {
+                    return Err(CoverageMeasurementError::ResourceLimit {
+                        resource: "query rows",
+                    });
+                }
+                max_query_count = max_query_count.max(queries);
+                let knn = KnnBatchPlan::new(source_count, queries, 1, knn_limits).map_err(|_| {
+                    CoverageMeasurementError::ResourceLimit {
+                        resource: "route kNN preflight",
+                    }
+                })?;
+                max_knn_peak = max_knn_peak.max(knn.logical_peak_bytes());
+            }
+            }
+        }
+
+        let query_route_count = self
+            .coverage_samples
+            .iter()
+            .enumerate()
+            .filter(|(sample_index, sample)| {
+                !self.coverage_samples[..*sample_index].iter().any(|prior| {
+                    prior.island_id == sample.island_id && prior.component_id == sample.component_id
+                })
+            })
+            .count();
+        let island_row_count = self.coverage_samples.iter().try_fold(0usize, |total, sample| {
+            if self.named_islands.iter().any(|island| {
+                island.id == sample.island_id && island.face_ids.contains(&sample.face_id)
+            }) {
+                total.checked_add(1).ok_or(CoverageMeasurementError::ArithmeticOverflow {
+                    operation: "island evidence rows",
+                })
+            } else {
+                Ok(total)
+            }
+        })?;
+        let assessment = coverage_measurement_assessment_resource_plan(
+            self.coverage_samples,
+            self.topology,
+            island_row_count,
+        )
+        .map_err(|_| CoverageMeasurementError::AssessmentRefusal {
+            reason: "assessment preflight",
+        })?;
+        if assessment.operations > limits.max_assessment_work() {
+            return Err(CoverageMeasurementError::ResourceLimit {
+                resource: "assessment work",
+            });
+        }
+        let route_plans = source_route_count
+            .checked_mul(std::mem::size_of::<crate::specialized::CoverageRouteKnnPlan>())
+            .ok_or(CoverageMeasurementError::ArithmeticOverflow {
+                operation: "route plan bytes",
+            })?;
+        let route_retained_base_bytes = [
+            source_route_count.checked_mul(std::mem::size_of::<crate::specialized::CoverageRoute>()),
+            source_route_count.checked_mul(std::mem::size_of::<(crate::specialized::CoverageRoute, usize)>()),
+            indexed_points.checked_mul(std::mem::size_of::<u64>()),
+            query_route_count.checked_mul(std::mem::size_of::<(crate::specialized::CoverageRoute, usize)>()),
+            Some(route_plans),
+            sequential_indexed_peak.checked_mul(std::mem::size_of::<u64>()),
+            max_query_count.checked_mul(std::mem::size_of::<usize>()),
+        ]
+        .into_iter()
+        .try_fold(0usize, |total, bytes| {
+            total.checked_add(bytes.ok_or(CoverageMeasurementError::ArithmeticOverflow {
+                operation: "route retained bytes",
+            })?)
+        })?;
+        let nearest_bytes = self
+            .coverage_samples
+            .len()
+            .checked_mul(std::mem::size_of::<f64>())
+            .ok_or(CoverageMeasurementError::ArithmeticOverflow {
+                operation: "nearest vector bytes",
+            })?;
+        let normalized_route_bytes = memberships
+            .checked_mul(std::mem::size_of::<CoverageRoutePoint>())
+            .ok_or(CoverageMeasurementError::ArithmeticOverflow {
+                operation: "normalized route bytes",
+            })?;
+        let route_peak = route_retained_base_bytes
+            .checked_add(max_knn_peak)
+            .ok_or(CoverageMeasurementError::ArithmeticOverflow {
+                operation: "route peak bytes",
+            })?;
+        let logical_peak_bytes = nearest_bytes
+            .checked_add(normalized_route_bytes)
+            .and_then(|base| base.checked_add(route_peak.max(assessment.phase_peak_bytes)))
+            .ok_or(CoverageMeasurementError::ArithmeticOverflow {
+                operation: "logical peak bytes",
+            })?;
+        if logical_peak_bytes > limits.max_logical_peak_bytes() {
+            return Err(CoverageMeasurementError::ResourceLimit {
+                resource: "logical peak bytes",
+            });
+        }
+        Ok(CoverageMeasurementPreflight {
+            memberships,
+            sequential_membership_peak,
+            indexed_points,
+            sequential_indexed_peak,
+            query_rows,
+            distance_work,
+            route_retained_base_bytes,
+            route_knn_peak_bytes: max_knn_peak,
+            island_row_count,
+            assessment,
+            logical_peak_bytes,
+        })
+    }
+
     /// Measures the sealed routed-contact projection without making an
     /// acceptance decision or exposing route authority.
     pub fn measure_coverage(
@@ -317,28 +573,15 @@ impl<'a> SupportVerificationSnapshot<'a> {
             max_logical_peak_bytes: limits.max_logical_peak_bytes(),
             max_work: limits.max_distance_work(),
         };
-        // Do not construct the normalized projection until the sealed logical
-        // evidence has passed the membership ceiling.  Physical-seat
-        // deduplication is deliberately later and must not weaken this cap.
-        let membership_count =
-            self.routed_route_memberships
-                .iter()
-                .try_fold(0usize, |total, membership| {
-                    total.checked_add(membership.logical_routes.len()).ok_or(
-                        CoverageMeasurementError::ArithmeticOverflow {
-                            operation: "route memberships",
-                        },
-                    )
-                })?;
-        if membership_count > limits.max_route_memberships() {
-            return Err(CoverageMeasurementError::ResourceLimit {
-                resource: "route memberships",
-            });
-        }
+        // This complete scalar pass must precede every measurement allocation.
+        // In particular, it counts exact physical seats per route rather than
+        // using a worst-case membership bound, so a request at an exact cap is
+        // accepted when the later allocating planner agrees.
+        let preflight = self.measurement_preflight(limits, knn_limits)?;
         let mut points = Vec::new();
         #[cfg(test)]
         NORMALIZED_ROUTE_PROJECTION_RESERVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        points.try_reserve_exact(membership_count).map_err(|_| {
+        points.try_reserve_exact(preflight.memberships).map_err(|_| {
             CoverageMeasurementError::ResourceLimit {
                 resource: "normalized route projection",
             }
@@ -353,94 +596,40 @@ impl<'a> SupportVerificationSnapshot<'a> {
                 });
             }
         }
+        #[cfg(test)]
+        COVERAGE_ROUTE_PLANNER_ALLOCATIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let planned = plan_route_points_nearest(&points, self.coverage_samples, knn_limits)
             .map_err(|_| CoverageMeasurementError::ResourceLimit {
                 resource: "route kNN preflight",
             })?;
-        debug_assert_eq!(points.len(), membership_count);
+        debug_assert_eq!(points.len(), preflight.memberships);
         let (
             memberships,
             sequential_membership_peak,
-            indexed,
+            indexed_points,
             indexed_point_peak,
             query_rows,
             distance_work,
         ) = planned.measurement_counts();
-        for (actual, maximum, resource) in [
-            (
-                memberships,
-                limits.max_route_memberships(),
-                "route memberships",
-            ),
-            (indexed, limits.max_indexed_points(), "indexed points"),
-            (query_rows, limits.max_query_rows(), "query rows"),
-            (distance_work, limits.max_distance_work(), "distance work"),
-        ] {
-            if actual > maximum {
-                return Err(CoverageMeasurementError::ResourceLimit { resource });
-            }
-        }
-        let island_row_count = self
-            .coverage_samples
-            .iter()
-            .try_fold(0usize, |total, sample| {
-                if self.named_islands.iter().any(|island| {
-                    island.id == sample.island_id && island.face_ids.contains(&sample.face_id)
-                }) {
-                    total
-                        .checked_add(1)
-                        .ok_or(CoverageMeasurementError::ArithmeticOverflow {
-                            operation: "island evidence rows",
-                        })
-                } else {
-                    Ok(total)
-                }
-            })?;
-        let assessment_plan = coverage_measurement_assessment_resource_plan(
-            self.coverage_samples,
-            self.topology,
-            island_row_count,
-        )
-        .map_err(|_| CoverageMeasurementError::AssessmentRefusal {
-            reason: "assessment preflight",
-        })?;
-        if assessment_plan.operations > limits.max_assessment_work() {
-            return Err(CoverageMeasurementError::ResourceLimit {
-                resource: "assessment work",
-            });
-        }
-        let nearest_bytes = self
-            .coverage_samples
-            .len()
-            .checked_mul(std::mem::size_of::<f64>())
-            .ok_or(CoverageMeasurementError::ArithmeticOverflow {
-                operation: "nearest vector bytes",
-            })?;
-        let normalized_route_bytes = points
-            .len()
-            .checked_mul(std::mem::size_of::<CoverageRoutePoint>())
-            .ok_or(CoverageMeasurementError::ArithmeticOverflow {
-                operation: "normalized route bytes",
-            })?;
-        let route_peak = planned
-            .retained_base_bytes()
-            .checked_add(planned.max_knn_peak_bytes())
-            .ok_or(CoverageMeasurementError::ArithmeticOverflow {
-                operation: "route peak bytes",
-            })?;
-        let measurement_base_bytes = nearest_bytes.checked_add(normalized_route_bytes).ok_or(
-            CoverageMeasurementError::ArithmeticOverflow {
-                operation: "measurement base bytes",
-            },
-        )?;
-        let logical_peak_bytes = measurement_base_bytes
-            .checked_add(route_peak.max(assessment_plan.phase_peak_bytes))
-            .ok_or(CoverageMeasurementError::ArithmeticOverflow {
-                operation: "logical peak bytes",
-            })?;
-        if logical_peak_bytes > limits.max_logical_peak_bytes() {
-            return Err(CoverageMeasurementError::ResourceLimit {
-                resource: "logical peak bytes",
+        if (memberships,
+            sequential_membership_peak,
+            indexed_points,
+            indexed_point_peak,
+            query_rows,
+            distance_work,
+            planned.retained_base_bytes(),
+            planned.max_knn_peak_bytes())
+            != (preflight.memberships,
+                preflight.sequential_membership_peak,
+                preflight.indexed_points,
+                preflight.sequential_indexed_peak,
+                preflight.query_rows,
+                preflight.distance_work,
+                preflight.route_retained_base_bytes,
+                preflight.route_knn_peak_bytes)
+        {
+            return Err(CoverageMeasurementError::AssessmentRefusal {
+                reason: "route preflight mismatch",
             });
         }
         let mut nearest = vec![f64::INFINITY; self.coverage_samples.len()];
@@ -451,6 +640,8 @@ impl<'a> SupportVerificationSnapshot<'a> {
                 operation: "route kNN query",
             },
         )?;
+        #[cfg(test)]
+        COVERAGE_ASSESSMENT_TRAVERSALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let assessment = assess_coverage_with_mode(
             self.coverage_samples,
             self.topology,
@@ -466,7 +657,7 @@ impl<'a> SupportVerificationSnapshot<'a> {
         .map_err(|_| CoverageMeasurementError::AssessmentRefusal {
             reason: "coverage traversal",
         })?;
-        let mut island_rows = Vec::with_capacity(island_row_count);
+        let mut island_rows = Vec::with_capacity(preflight.island_row_count);
         for sample in self.coverage_samples {
             if self.named_islands.iter().any(|island| {
                 island.id == sample.island_id && island.face_ids.contains(&sample.face_id)
@@ -551,11 +742,11 @@ impl<'a> SupportVerificationSnapshot<'a> {
                 sequential_indexed_point_peak: indexed_point_peak,
                 query_row_count: query_rows,
                 distance_work,
-                logical_peak_bytes,
-                assessment_work: assessment_plan.operations,
-                assessment_scratch_bytes: assessment_plan.scratch_bytes,
-                assessment_evidence_bytes: assessment_plan.evidence_bytes,
-                assessment_phase_peak_bytes: assessment_plan.phase_peak_bytes,
+                logical_peak_bytes: preflight.logical_peak_bytes,
+                assessment_work: preflight.assessment.operations,
+                assessment_scratch_bytes: preflight.assessment.scratch_bytes,
+                assessment_evidence_bytes: preflight.assessment.evidence_bytes,
+                assessment_phase_peak_bytes: preflight.assessment.phase_peak_bytes,
             }),
             CoverageMeasurementEvidence::new(
                 islands.into_boxed_slice(),
@@ -4017,6 +4208,103 @@ mod tests {
                 0,
                 "the capped request must not reserve the normalized projection"
             );
+        });
+    }
+
+    #[test]
+    fn coverage_every_cap_preflights_before_all_measurement_allocations() {
+        with_braced_table(|braced| {
+            let lowered = braced
+                .structure()
+                .expect("required corpus structures")
+                .lower()
+                .expect("required corpus lowers");
+            let snapshot = lowered
+                .verification_snapshot()
+                .expect("validated final authority snapshots");
+            let unlimited = CoverageMeasurementLimits::new(
+                usize::MAX,
+                usize::MAX,
+                usize::MAX,
+                usize::MAX,
+                usize::MAX,
+                usize::MAX,
+            )
+            .expect("nonzero limits");
+            let summary = snapshot
+                .measurement_preflight(
+                    unlimited,
+                    KnnBatchLimits {
+                        max_source_points: usize::MAX,
+                        max_query_points: usize::MAX,
+                        max_neighbors: 1,
+                        max_logical_peak_bytes: usize::MAX,
+                        max_work: usize::MAX,
+                    },
+                )
+                .expect("fixture preflight");
+            let exact = CoverageMeasurementLimits::new(
+                summary.memberships,
+                summary.indexed_points,
+                summary.query_rows,
+                summary.distance_work,
+                summary.logical_peak_bytes,
+                summary.assessment.operations,
+            )
+            .expect("fixture resources are nonzero");
+            assert!(
+                [
+                    summary.memberships,
+                    summary.indexed_points,
+                    summary.query_rows,
+                    summary.distance_work,
+                    summary.logical_peak_bytes,
+                    summary.assessment.operations,
+                ]
+                .into_iter()
+                .all(|value| value > 1),
+                "fixture must exercise valid cap-minus-one requests"
+            );
+            assert!(snapshot
+                .measure_coverage(
+                    CoverageMeasurementRequest::from_f64(1.0, 1.0, exact)
+                        .expect("valid exact request"),
+                )
+                .is_ok());
+
+            for (resource, membership_cap, indexed_cap, query_cap, work_cap, peak_cap, assessment_cap) in [
+                ("route memberships", summary.memberships - 1, summary.indexed_points, summary.query_rows, summary.distance_work, summary.logical_peak_bytes, summary.assessment.operations),
+                ("indexed points", summary.memberships, summary.indexed_points - 1, summary.query_rows, summary.distance_work, summary.logical_peak_bytes, summary.assessment.operations),
+                ("query rows", summary.memberships, summary.indexed_points, summary.query_rows - 1, summary.distance_work, summary.logical_peak_bytes, summary.assessment.operations),
+                ("distance work", summary.memberships, summary.indexed_points, summary.query_rows, summary.distance_work - 1, summary.logical_peak_bytes, summary.assessment.operations),
+                ("logical peak bytes", summary.memberships, summary.indexed_points, summary.query_rows, summary.distance_work, summary.logical_peak_bytes - 1, summary.assessment.operations),
+                ("assessment work", summary.memberships, summary.indexed_points, summary.query_rows, summary.distance_work, summary.logical_peak_bytes, summary.assessment.operations - 1),
+            ] {
+                NORMALIZED_ROUTE_PROJECTION_RESERVES.store(0, std::sync::atomic::Ordering::Relaxed);
+                COVERAGE_ROUTE_PLANNER_ALLOCATIONS.store(0, std::sync::atomic::Ordering::Relaxed);
+                COVERAGE_ROUTE_QUERIES.store(0, std::sync::atomic::Ordering::Relaxed);
+                COVERAGE_ASSESSMENT_TRAVERSALS.store(0, std::sync::atomic::Ordering::Relaxed);
+                let limits = CoverageMeasurementLimits::new(
+                    membership_cap,
+                    indexed_cap,
+                    query_cap,
+                    work_cap,
+                    peak_cap,
+                    assessment_cap,
+                )
+                .expect("cap-minus-one remains nonzero");
+                assert_eq!(
+                    snapshot.measure_coverage(
+                        CoverageMeasurementRequest::from_f64(1.0, 1.0, limits)
+                            .expect("valid capped request"),
+                    ),
+                    Err(CoverageMeasurementError::ResourceLimit { resource })
+                );
+                assert_eq!(NORMALIZED_ROUTE_PROJECTION_RESERVES.load(std::sync::atomic::Ordering::Relaxed), 0);
+                assert_eq!(COVERAGE_ROUTE_PLANNER_ALLOCATIONS.load(std::sync::atomic::Ordering::Relaxed), 0);
+                assert_eq!(COVERAGE_ROUTE_QUERIES.load(std::sync::atomic::Ordering::Relaxed), 0);
+                assert_eq!(COVERAGE_ASSESSMENT_TRAVERSALS.load(std::sync::atomic::Ordering::Relaxed), 0);
+            }
         });
     }
 

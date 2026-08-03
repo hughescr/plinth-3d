@@ -3180,7 +3180,7 @@ fn variant_contact_count(contact_count: usize, variant: usize) -> usize {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct CoverageRoute {
+pub(crate) struct CoverageRoute {
     island_id: u32,
     component_id: u32,
 }
@@ -3195,7 +3195,7 @@ pub(crate) struct CoverageRoutePoint {
     pub(crate) position_mm: [f64; 3],
 }
 
-struct CoverageRouteKnnPlan {
+pub(crate) struct CoverageRouteKnnPlan {
     route: CoverageRoute,
     source_count: usize,
     query_count: usize,
