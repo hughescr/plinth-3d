@@ -3,7 +3,7 @@
 //! This is intentionally a measurement boundary only.  It neither classifies
 //! an interval nor assigns a clearance, gate, report, certificate, or defect.
 
-use geom_kernel::{capsule_rays, Interval, PenetrationBatchLimits, SurfaceTriangleSoupDigest};
+use geom_kernel::{capsule_rays, Interval, PenetrationBatchLimits, SurfaceTriangleSoupDigest, V3};
 use plinth_core::{m0_constants, ConstantDescriptor, ConstantId, DecisionId, M0Constants};
 use thiserror::Error;
 
@@ -20,7 +20,7 @@ const OFFSET_RAYS: usize = 8;
 /// descriptors so a later owner can inspect exactly which unresolved policy
 /// values and measured print floor informed this diagnostic calculation.
 #[derive(Clone, Debug, PartialEq)]
-struct TransitPolicySnapshot {
+pub(crate) struct TransitPolicySnapshot {
     decision_id: DecisionId,
     policy_descriptors: [ConstantDescriptor; 8],
     min_illegal_descriptor: ConstantDescriptor,
@@ -35,12 +35,18 @@ struct TransitPolicySnapshot {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
-enum TransitPolicySnapshotError {
+pub(crate) enum TransitPolicySnapshotError {
     #[error("SCAR policy registry descriptor is absent: {id}")]
     MissingDescriptor { id: &'static str },
 }
 
 impl TransitPolicySnapshot {
+    pub(crate) fn current() -> Result<Self, TransitPolicySnapshotError> {
+        Self::from_constants(
+            m0_constants()
+                .map_err(|_| TransitPolicySnapshotError::MissingDescriptor { id: "M0" })?,
+        )
+    }
     fn from_constants(constants: &M0Constants) -> Result<Self, TransitPolicySnapshotError> {
         let policy = constants.scar_area_cap_policy();
         let ids = policy.constant_ids();
@@ -313,6 +319,10 @@ pub(crate) struct LiveCalls {
     pub(crate) local_row_allocations: usize,
     pub(crate) stub_kernel_calls: usize,
     pub(crate) nonstub_kernel_calls: usize,
+    pub(crate) scar_anchor_query_calls: usize,
+    pub(crate) scar_exit_projection_calls: usize,
+    pub(crate) scar_row_allocations: usize,
+    pub(crate) scar_evidence_allocations: usize,
 }
 
 #[cfg(test)]
@@ -324,6 +334,10 @@ impl LiveCalls {
         evidence_allocations: 0,
         stub_kernel_calls: 0,
         nonstub_kernel_calls: 0,
+        scar_anchor_query_calls: 0,
+        scar_exit_projection_calls: 0,
+        scar_row_allocations: 0,
+        scar_evidence_allocations: 0,
     };
 }
 
@@ -640,6 +654,520 @@ impl AnchoredTransitBatch {
     pub(crate) fn members(&self) -> &[AnchoredTransitMember] {
         &self.members
     }
+}
+
+/// Explicit caller-owned controls for the private SCAR geometry enrichment.
+/// It deliberately contains no production defaults and remains a diagnostic
+/// boundary: neither its measurements nor its recorded constraints are a
+/// clearance, gate, or acceptance decision.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TransitScarMeasurementRequest {
+    tip_r_min_mm: f64,
+    policy: TransitPolicySnapshot,
+    raw_interval_limits: TransitIntervalLimits,
+    max_anchor_query_rows: usize,
+    max_exit_projection_rows: usize,
+    max_retained_anchor_evidence: usize,
+    max_logical_peak_bytes: usize,
+}
+
+impl TransitScarMeasurementRequest {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        tip_r_min_mm: f64,
+        policy: TransitPolicySnapshot,
+        raw_interval_limits: TransitIntervalLimits,
+        max_anchor_query_rows: usize,
+        max_exit_projection_rows: usize,
+        max_retained_anchor_evidence: usize,
+        max_logical_peak_bytes: usize,
+    ) -> Result<Self, TransitScarMeasurementError> {
+        if !tip_r_min_mm.is_finite() || tip_r_min_mm < 0.0 {
+            return Err(TransitScarMeasurementError::InvalidRequest);
+        }
+        if max_anchor_query_rows == 0
+            || max_exit_projection_rows == 0
+            || max_retained_anchor_evidence == 0
+            || max_logical_peak_bytes == 0
+        {
+            return Err(TransitScarMeasurementError::InvalidRequest);
+        }
+        Ok(Self {
+            tip_r_min_mm,
+            policy,
+            raw_interval_limits,
+            max_anchor_query_rows,
+            max_exit_projection_rows,
+            max_retained_anchor_evidence,
+            max_logical_peak_bytes,
+        })
+    }
+}
+
+/// Exact resource accounting admitted before this diagnostic allocates or
+/// enters either native batch operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TransitScarMeasurementResourcePlan {
+    members: usize,
+    anchor_query_rows: usize,
+    exit_projection_rows: usize,
+    retained_evidence: usize,
+    output_bytes: usize,
+    query_result_bytes: usize,
+    projection_result_bytes: usize,
+    logical_peak_bytes: usize,
+}
+
+impl TransitScarMeasurementResourcePlan {
+    pub(crate) const fn anchor_query_rows(self) -> usize {
+        self.anchor_query_rows
+    }
+    pub(crate) const fn exit_projection_rows(self) -> usize {
+        self.exit_projection_rows
+    }
+    pub(crate) const fn retained_evidence(self) -> usize {
+        self.retained_evidence
+    }
+    pub(crate) const fn logical_peak_bytes(self) -> usize {
+        self.logical_peak_bytes
+    }
+}
+
+/// Per-designed-end, geometry-enriched SCAR diagnostic evidence.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ScarEndEvidence {
+    member: MemberKey,
+    designed_end: EmbedEnd,
+    anchor_point_mm: [f64; 3],
+    anchor_distance_mm: f64,
+    anchor_face: i64,
+    interval_chord_mm: f64,
+    exit_point_mm: Option<[f64; 3]>,
+    exit_face: Option<i64>,
+    exit_normal: Option<[f64; 3]>,
+    cosine: Option<f64>,
+    diagnostic: ScarDiagnostic,
+}
+
+impl ScarEndEvidence {
+    pub(crate) const fn member(&self) -> MemberKey {
+        self.member
+    }
+    pub(crate) const fn designed_end(&self) -> EmbedEnd {
+        self.designed_end
+    }
+    pub(crate) const fn cosine(&self) -> Option<f64> {
+        self.cosine
+    }
+    pub(crate) const fn diagnostic_constraints_hold_under_recorded_policy(&self) -> bool {
+        self.diagnostic
+            .diagnostic_constraints_hold_under_recorded_policy
+    }
+}
+
+/// Immutable private result bound to the exact snapshot, raw batch, anchored
+/// census, policy descriptors, and native triangle soup that produced it.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct TransitScarMeasurement {
+    snapshot_digest: u64,
+    member_digest: u64,
+    surface_digest: SurfaceTriangleSoupDigest,
+    policy: TransitPolicySnapshot,
+    resource_plan: TransitScarMeasurementResourcePlan,
+    evidence: Box<[ScarEndEvidence]>,
+}
+
+impl TransitScarMeasurement {
+    pub(crate) const fn resource_plan(&self) -> TransitScarMeasurementResourcePlan {
+        self.resource_plan
+    }
+    pub(crate) fn evidence(&self) -> &[ScarEndEvidence] {
+        &self.evidence
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub(crate) enum TransitScarMeasurementError {
+    #[error("transit SCAR measurement request is invalid")]
+    InvalidRequest,
+    #[error("transit SCAR measurement snapshot or raw batch binding is invalid")]
+    RawBinding,
+    #[error("transit SCAR measurement anchored census binding is invalid")]
+    AnchorBinding,
+    #[error("transit SCAR measurement policy descriptors do not match")]
+    PolicyBinding,
+    #[error("transit SCAR measurement resource limit exceeded: {resource}")]
+    ResourceLimit { resource: &'static str },
+    #[error("transit SCAR measurement resource arithmetic overflow: {resource}")]
+    ArithmeticOverflow { resource: &'static str },
+    #[error("transit SCAR measurement axis anchor is missing or duplicate")]
+    AxisAnchor,
+    #[error("transit SCAR measurement native result is non-finite or invalid")]
+    GeometryResult,
+    #[error("transit SCAR measurement scalar input is invalid")]
+    Scalar,
+}
+
+/// Compose an accepted raw interval batch, its anchored census, and the pure
+/// scalar once per designed end. All anchor distances are gathered in one
+/// native query; all required exits are gathered in one native projection.
+pub(crate) fn measure_scar(
+    snapshot: &SupportVerificationSnapshot<'_>,
+    raw: &TransitIntervalBatch,
+    anchored: &AnchoredTransitBatch,
+    request: &TransitScarMeasurementRequest,
+) -> Result<TransitScarMeasurement, TransitScarMeasurementError> {
+    snapshot
+        .validate_integrity()
+        .map_err(|_| TransitScarMeasurementError::RawBinding)?;
+    let current_policy = TransitPolicySnapshot::from_constants(
+        m0_constants().map_err(|_| TransitScarMeasurementError::PolicyBinding)?,
+    )
+    .map_err(|_| TransitScarMeasurementError::PolicyBinding)?;
+    if current_policy != request.policy {
+        return Err(TransitScarMeasurementError::PolicyBinding);
+    }
+    let raw_plan = preflight(
+        snapshot.final_live_members().count(),
+        snapshot
+            .final_live_members()
+            .filter(|m| matches!(m.kind(), MemberKind::Stub))
+            .count(),
+        request.raw_interval_limits,
+    )
+    .map_err(|_| TransitScarMeasurementError::RawBinding)?;
+    let digest = member_digest(snapshot.final_live_members());
+    let surface_digest = snapshot.native_surface().source_triangle_soup_digest();
+    if raw.snapshot_digest != snapshot.digest()
+        || raw.member_digest != digest
+        || raw.surface_digest != surface_digest
+        || raw.resource_plan != raw_plan
+        || anchored.snapshot_digest != raw.snapshot_digest
+        || anchored.member_digest != raw.member_digest
+        || anchored.surface_digest != raw.surface_digest
+    {
+        return Err(TransitScarMeasurementError::RawBinding);
+    }
+    let anchor_policy = TransitAnchorPolicySnapshot::from_constants(
+        m0_constants().map_err(|_| TransitScarMeasurementError::PolicyBinding)?,
+    )
+    .map_err(|_| TransitScarMeasurementError::PolicyBinding)?;
+    if anchored.policy != anchor_policy {
+        return Err(TransitScarMeasurementError::PolicyBinding);
+    }
+
+    let member_count = snapshot.final_live_members().count();
+    let designed_count = snapshot
+        .final_live_members()
+        .filter(|member| member.embed_end().is_some())
+        .count();
+    if anchored.members.len() != member_count {
+        return Err(TransitScarMeasurementError::AnchorBinding);
+    }
+    let mut projection_rows = 0usize;
+    for member in &anchored.members {
+        if member.designed_end.is_none() {
+            continue;
+        }
+        let mut axes = member.rays.iter().filter(|ray| ray.ray == -1);
+        let axis = axes.next().ok_or(TransitScarMeasurementError::AxisAnchor)?;
+        if axes.next().is_some() {
+            return Err(TransitScarMeasurementError::AxisAnchor);
+        }
+        let mut tips = axis
+            .crossings
+            .iter()
+            .filter(|crossing| crossing.is_tip_candidate);
+        let chord = tips.next().map_or(0.0, |crossing| crossing.chord_mm);
+        if tips.next().is_some() {
+            return Err(TransitScarMeasurementError::AxisAnchor);
+        }
+        if !chord.is_finite() || chord < 0.0 {
+            return Err(TransitScarMeasurementError::GeometryResult);
+        }
+        projection_rows = projection_rows
+            .checked_add(usize::from(chord > request.policy.interval_tol_mm))
+            .ok_or(TransitScarMeasurementError::ArithmeticOverflow {
+                resource: "exit projection rows",
+            })?;
+    }
+    let plan = scar_preflight(designed_count, projection_rows, request)?;
+
+    let mut members = snapshot
+        .final_live_members()
+        .filter(|m| m.embed_end().is_some())
+        .collect::<Vec<_>>();
+    members.sort_unstable_by_key(|m| (m.key(), m.embed_end()));
+    if members
+        .windows(2)
+        .any(|w| (w[0].key(), w[0].embed_end()) == (w[1].key(), w[1].embed_end()))
+    {
+        return Err(TransitScarMeasurementError::AnchorBinding);
+    }
+    let mut rows = Vec::new();
+    rows.try_reserve_exact(plan.members).map_err(|_| {
+        TransitScarMeasurementError::ResourceLimit {
+            resource: "member rows allocation",
+        }
+    })?;
+    #[cfg(test)]
+    record_live_call(|calls| calls.scar_row_allocations += 1);
+    for member in members {
+        let normalized = normalize(member);
+        let anchored_member = anchored
+            .members
+            .iter()
+            .find(|a| a.member == member.key() && a.designed_end == member.embed_end())
+            .ok_or(TransitScarMeasurementError::AnchorBinding)?;
+        let axis = anchored_member
+            .rays
+            .iter()
+            .filter(|r| r.ray == -1)
+            .collect::<Vec<_>>();
+        if axis.len() != 1 {
+            return Err(TransitScarMeasurementError::AxisAnchor);
+        }
+        let tip = axis[0]
+            .crossings
+            .iter()
+            .filter(|c| c.is_tip_candidate)
+            .collect::<Vec<_>>();
+        if tip.len() > 1 {
+            return Err(TransitScarMeasurementError::AxisAnchor);
+        }
+        let chord = tip.first().map_or(0.0, |c| c.chord_mm);
+        if !chord.is_finite() || chord < 0.0 {
+            return Err(TransitScarMeasurementError::GeometryResult);
+        }
+        rows.push((
+            normalized,
+            member.embed_end().expect("filtered"),
+            chord,
+            tip.first().map(|c| c.s_b_mm),
+        ));
+    }
+    if rows.len() != plan.members {
+        return Err(TransitScarMeasurementError::AnchorBinding);
+    }
+    let mut anchors = Vec::new();
+    anchors
+        .try_reserve_exact(plan.anchor_query_rows)
+        .map_err(|_| TransitScarMeasurementError::ResourceLimit {
+            resource: "anchor rows allocation",
+        })?;
+    for (normalized, _, _, _) in &rows {
+        anchors.push(normalized.p0);
+    }
+    let (distances, faces) = if anchors.is_empty() {
+        (Vec::new(), Vec::new())
+    } else {
+        #[cfg(test)]
+        record_live_call(|calls| calls.scar_anchor_query_calls += 1);
+        snapshot.native_surface().query(&anchors, f64::INFINITY)
+    };
+    if distances.len() != rows.len() || faces.len() != rows.len() {
+        return Err(TransitScarMeasurementError::GeometryResult);
+    }
+    let mut exits = Vec::new();
+    exits
+        .try_reserve_exact(plan.exit_projection_rows)
+        .map_err(|_| TransitScarMeasurementError::ResourceLimit {
+            resource: "exit rows allocation",
+        })?;
+    for (normalized, _, chord, s_b) in &rows {
+        if *chord > request.policy.interval_tol_mm {
+            let length = axis_length(normalized.p0, normalized.p1)?;
+            let s_b = s_b.ok_or(TransitScarMeasurementError::AxisAnchor)?;
+            exits.push(axis_point(normalized.p0, normalized.p1, s_b / length)?);
+        }
+    }
+    let (exit_distances, exit_points, exit_faces, exit_normals) = if exits.is_empty() {
+        (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+    } else {
+        #[cfg(test)]
+        record_live_call(|calls| calls.scar_exit_projection_calls += 1);
+        snapshot.native_surface().project(&exits)
+    };
+    if [
+        exit_distances.len(),
+        exit_points.len(),
+        exit_faces.len(),
+        exit_normals.len(),
+    ]
+    .iter()
+    .any(|&n| n != exits.len())
+    {
+        return Err(TransitScarMeasurementError::GeometryResult);
+    }
+    let mut projection_index = 0usize;
+    let mut evidence = Vec::new();
+    evidence
+        .try_reserve_exact(plan.retained_evidence)
+        .map_err(|_| TransitScarMeasurementError::ResourceLimit {
+            resource: "evidence allocation",
+        })?;
+    #[cfg(test)]
+    record_live_call(|calls| calls.scar_evidence_allocations += 1);
+    for ((normalized, end, chord, _), (distance_squared, face)) in
+        rows.into_iter().zip(distances.into_iter().zip(faces))
+    {
+        if !distance_squared.is_finite() || distance_squared < 0.0 || face < 0 {
+            return Err(TransitScarMeasurementError::GeometryResult);
+        }
+        let d = distance_squared.sqrt();
+        let length = axis_length(normalized.p0, normalized.p1)?;
+        let (exit_point_mm, exit_face, exit_normal, cosine) = if chord
+            > request.policy.interval_tol_mm
+        {
+            let point = exit_points[projection_index];
+            let face = exit_faces[projection_index];
+            let normal = exit_normals[projection_index];
+            let projection_d = exit_distances[projection_index];
+            projection_index += 1;
+            if !projection_d.is_finite()
+                || projection_d < 0.0
+                || face < 0
+                || !finite_point(point)
+                || !finite_point(normal)
+            {
+                return Err(TransitScarMeasurementError::GeometryResult);
+            }
+            let axis = [
+                (normalized.p0[0] - normalized.p1[0]) / length,
+                (normalized.p0[1] - normalized.p1[1]) / length,
+                (normalized.p0[2] - normalized.p1[2]) / length,
+            ];
+            let cosine = (axis[0] * normal[0] + axis[1] * normal[1] + axis[2] * normal[2]).abs();
+            if !cosine.is_finite() {
+                return Err(TransitScarMeasurementError::GeometryResult);
+            }
+            (Some(point), Some(face), Some(normal), Some(cosine))
+        } else {
+            (None, None, None, None)
+        };
+        let diagnostic = calculate_scar_diagnostic(
+            &request.policy,
+            &ScarDiagnosticInput::new(
+                chord,
+                d,
+                cosine,
+                normalized.r0,
+                request.tip_r_min_mm,
+                normalized.r1,
+                length,
+                normalized.source.kind().clone(),
+            )
+            .map_err(|_| TransitScarMeasurementError::Scalar)?,
+        )
+        .map_err(|_| TransitScarMeasurementError::Scalar)?;
+        evidence.push(ScarEndEvidence {
+            member: normalized.source.key(),
+            designed_end: end,
+            anchor_point_mm: normalized.p0,
+            anchor_distance_mm: d,
+            anchor_face: face,
+            interval_chord_mm: chord,
+            exit_point_mm,
+            exit_face,
+            exit_normal,
+            cosine,
+            diagnostic,
+        });
+    }
+    Ok(TransitScarMeasurement {
+        snapshot_digest: snapshot.digest(),
+        member_digest: digest,
+        surface_digest,
+        policy: request.policy.clone(),
+        resource_plan: plan,
+        evidence: evidence.into_boxed_slice(),
+    })
+}
+
+fn axis_length(p0: V3, p1: V3) -> Result<f64, TransitScarMeasurementError> {
+    let length =
+        ((p1[0] - p0[0]).powi(2) + (p1[1] - p0[1]).powi(2) + (p1[2] - p0[2]).powi(2)).sqrt();
+    if !length.is_finite() || length == 0.0 {
+        Err(TransitScarMeasurementError::GeometryResult)
+    } else {
+        Ok(length)
+    }
+}
+fn axis_point(p0: V3, p1: V3, ratio: f64) -> Result<V3, TransitScarMeasurementError> {
+    let point = [
+        p0[0] + (p1[0] - p0[0]) * ratio,
+        p0[1] + (p1[1] - p0[1]) * ratio,
+        p0[2] + (p1[2] - p0[2]) * ratio,
+    ];
+    if finite_point(point) {
+        Ok(point)
+    } else {
+        Err(TransitScarMeasurementError::GeometryResult)
+    }
+}
+fn finite_point(point: V3) -> bool {
+    point.into_iter().all(f64::is_finite)
+}
+fn scar_preflight(
+    members: usize,
+    projections: usize,
+    request: &TransitScarMeasurementRequest,
+) -> Result<TransitScarMeasurementResourcePlan, TransitScarMeasurementError> {
+    if members > request.max_anchor_query_rows {
+        return Err(TransitScarMeasurementError::ResourceLimit {
+            resource: "anchor query rows",
+        });
+    }
+    if projections > request.max_exit_projection_rows {
+        return Err(TransitScarMeasurementError::ResourceLimit {
+            resource: "exit projection rows",
+        });
+    }
+    if members > request.max_retained_anchor_evidence {
+        return Err(TransitScarMeasurementError::ResourceLimit {
+            resource: "retained anchor evidence",
+        });
+    }
+    let output_bytes = members
+        .checked_mul(std::mem::size_of::<ScarEndEvidence>())
+        .ok_or(TransitScarMeasurementError::ArithmeticOverflow {
+            resource: "output bytes",
+        })?;
+    let query_result_bytes = members
+        .checked_mul(std::mem::size_of::<f64>() + std::mem::size_of::<i64>())
+        .ok_or(TransitScarMeasurementError::ArithmeticOverflow {
+            resource: "query result bytes",
+        })?;
+    let projection_result_bytes = projections
+        .checked_mul(
+            std::mem::size_of::<f64>() + 2 * std::mem::size_of::<V3>() + std::mem::size_of::<i64>(),
+        )
+        .ok_or(TransitScarMeasurementError::ArithmeticOverflow {
+            resource: "projection result bytes",
+        })?;
+    let logical_peak_bytes = output_bytes
+        .checked_add(query_result_bytes)
+        .and_then(|v| v.checked_add(projection_result_bytes))
+        .and_then(|v| v.checked_add(members.checked_mul(std::mem::size_of::<V3>())?))
+        .and_then(|v| v.checked_add(projections.checked_mul(std::mem::size_of::<V3>())?))
+        .ok_or(TransitScarMeasurementError::ArithmeticOverflow {
+            resource: "logical peak bytes",
+        })?;
+    if logical_peak_bytes > request.max_logical_peak_bytes {
+        return Err(TransitScarMeasurementError::ResourceLimit {
+            resource: "logical peak bytes",
+        });
+    }
+    Ok(TransitScarMeasurementResourcePlan {
+        members,
+        anchor_query_rows: members,
+        exit_projection_rows: projections,
+        retained_evidence: members,
+        output_bytes,
+        query_result_bytes,
+        projection_result_bytes,
+        logical_peak_bytes,
+    })
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]

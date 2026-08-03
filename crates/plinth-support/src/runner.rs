@@ -490,6 +490,21 @@ impl<'a> SupportVerificationSnapshot<'a> {
         crate::transit_measurement::anchor(self, batch)
     }
 
+    /// Privately enriches an accepted raw transit batch and its anchored
+    /// census with batch-native SCAR diagnostic geometry. It is intentionally
+    /// not an acceptance, clearance, or defect boundary.
+    pub(crate) fn transit_scar_measurement(
+        &self,
+        raw: &crate::transit_measurement::TransitIntervalBatch,
+        anchored: &crate::transit_measurement::AnchoredTransitBatch,
+        request: &crate::transit_measurement::TransitScarMeasurementRequest,
+    ) -> Result<
+        crate::transit_measurement::TransitScarMeasurement,
+        crate::transit_measurement::TransitScarMeasurementError,
+    > {
+        crate::transit_measurement::measure_scar(self, raw, anchored, request)
+    }
+
     fn measurement_preflight(
         &self,
         limits: crate::CoverageMeasurementLimits,
