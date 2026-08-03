@@ -162,6 +162,52 @@ pub fn surfaces_share_geometry(a: &NativeSurface, b: &NativeSurface) -> bool {
     a.mesh.shares_geometry(&b.mesh)
 }
 
+/// Process-local successful native surface/index construction count.
+///
+/// This is a result-inert test seam for proving that a query path reused an
+/// existing surface instead of constructing a subset or replacement index.
+pub fn surface_index_construction_count() -> u64 {
+    crate::queries::surface_index_construction_count()
+}
+
+/// Brute-force allowed-face projection oracle for bounded generated tests.
+/// Production callers must use `project_allowed_faces_batch`.
+pub fn brute_allowed_projection(
+    surface: &NativeSurface,
+    allowed_face_ids: &[u32],
+    point: V3,
+    upper_bound: f64,
+) -> Option<(f64, u32, V3)> {
+    let mut best_distance = upper_bound;
+    let mut best_face = surface.mesh.global_nfaces();
+    let mut best_point = [0.0; 3];
+    for &face_id in allowed_face_ids {
+        let face = face_id as usize;
+        let closest = _closest(
+            point,
+            surface.mesh.v0(face),
+            surface.mesh.vertex_b(face),
+            surface.mesh.vertex_c(face),
+        );
+        let delta = [
+            point[0] - closest[0],
+            point[1] - closest[1],
+            point[2] - closest[2],
+        ];
+        let distance = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+        if distance < best_distance || (distance == best_distance && face < best_face) {
+            best_distance = distance;
+            best_face = face;
+            best_point = closest;
+        }
+    }
+    (best_face < surface.mesh.global_nfaces()).then_some((
+        best_distance,
+        best_face as u32,
+        best_point,
+    ))
+}
+
 pub fn surf_bvh_face_ids(s: &NativeSurface) -> Vec<u32> {
     let mut face_ids = s.bvh.order.clone();
     face_ids.sort_unstable();

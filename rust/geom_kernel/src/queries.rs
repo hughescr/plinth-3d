@@ -19,6 +19,8 @@ use crate::parity::{ParityBuildError, ParityVote};
 use crate::vec3::{add, cross, dot, norm, scale, sub, V3};
 use crate::{SurfaceIndexKind, SurfaceSubsetError, SurfaceTriangleSoupDigest};
 
+static SURFACE_INDEX_CONSTRUCTION_COUNT: AtomicU64 = AtomicU64::new(0);
+
 thread_local! {
     static STACK: RefCell<Vec<i32>> = RefCell::new(Vec::with_capacity(128));
     static ZSCRATCH: RefCell<Vec<f64>> = RefCell::new(Vec::with_capacity(64));
@@ -91,6 +93,220 @@ pub struct PenetrationBatchLimits {
     pub max_total_samples: usize,
     pub max_total_intervals: usize,
     pub max_scratch_bytes: usize,
+}
+
+/// Caller-owned policy for projection onto a restricted set of global faces.
+///
+/// `None` means the exact nearest allowed face at any distance. A finite cap
+/// returns a per-point [`AllowedFaceProjectionOutcome::NoWinner`] when every
+/// allowed face is farther away. Equality is admitted: a projection exactly
+/// at the cap is a winner.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AllowedFaceProjectionPolicy {
+    pub max_distance_mm: Option<f64>,
+}
+
+/// Whole-batch limits for [`NativeSurface::project_allowed_faces_batch`].
+///
+/// The node-visit and triangle-test limits are deterministic conservative
+/// totals over all rows. `max_memory_bytes` covers every kernel-owned retained
+/// buffer used by the call: gathered allowed IDs, face/subtree masks, leaf
+/// ranges, fixed traversal stacks, parallel row results, and serially
+/// scattered outcomes. Allocator metadata and Rayon's executor-internal
+/// storage are not included.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AllowedFaceProjectionLimits {
+    pub max_points: usize,
+    pub max_allowed_faces: usize,
+    pub max_total_node_visits: usize,
+    pub max_total_triangle_tests: usize,
+    pub max_memory_bytes: usize,
+}
+
+/// Exact winner for one allowed-face projection row.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AllowedFaceProjection {
+    pub distance_mm: f64,
+    pub point: V3,
+    /// Stable global face ID from the source surface.
+    pub face_id: u32,
+}
+
+/// Why a valid point has no winner under an explicit projection policy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AllowedFaceProjectionNoWinner {
+    BeyondMaxDistance { max_distance_mm: f64 },
+}
+
+/// One output row. Input and resource failures are reported by the outer
+/// `Result`; `NoWinner` is therefore never overloaded with an error state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AllowedFaceProjectionOutcome {
+    Projected(AllowedFaceProjection),
+    NoWinner(AllowedFaceProjectionNoWinner),
+}
+
+/// Named preflight or allocation refusal from an allowed-face batch.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AllowedFaceProjectionError {
+    EmptyAllowedFaces,
+    PointLimitExceeded {
+        required: usize,
+        limit: usize,
+    },
+    AllowedFaceLimitExceeded {
+        required: usize,
+        limit: usize,
+    },
+    DuplicateFaceId {
+        face_id: u32,
+    },
+    FaceIdOutOfBounds {
+        position: usize,
+        face_id: u32,
+        global_face_count: usize,
+    },
+    FaceIdNotSelected {
+        position: usize,
+        face_id: u32,
+    },
+    NonFinitePoint {
+        point: usize,
+        axis: usize,
+    },
+    InvalidMaxDistance {
+        max_distance_mm: f64,
+    },
+    ResourceArithmeticOverflow {
+        resource: &'static str,
+    },
+    ResourceLimitExceeded {
+        resource: &'static str,
+        required: usize,
+        limit: usize,
+    },
+    AllocationFailure {
+        buffer: &'static str,
+        requested_bytes: usize,
+    },
+}
+
+impl std::fmt::Display for AllowedFaceProjectionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyAllowedFaces => {
+                write!(formatter, "allowed-face projection requires at least one face")
+            }
+            Self::PointLimitExceeded { required, limit } => write!(
+                formatter,
+                "allowed-face projection needs {required} points; limit is {limit}"
+            ),
+            Self::AllowedFaceLimitExceeded { required, limit } => write!(
+                formatter,
+                "allowed-face projection needs {required} allowed faces; limit is {limit}"
+            ),
+            Self::DuplicateFaceId { face_id } => write!(
+                formatter,
+                "allowed-face projection repeats global face ID {face_id}"
+            ),
+            Self::FaceIdOutOfBounds {
+                position,
+                face_id,
+                global_face_count,
+            } => write!(
+                formatter,
+                "allowed_face_ids[{position}] is {face_id}, outside {global_face_count} global faces"
+            ),
+            Self::FaceIdNotSelected {
+                position,
+                face_id,
+            } => write!(
+                formatter,
+                "allowed_face_ids[{position}] global face ID {face_id} is not selected by this surface"
+            ),
+            Self::NonFinitePoint { point, axis } => write!(
+                formatter,
+                "allowed-face projection point {point} axis {axis} is non-finite"
+            ),
+            Self::InvalidMaxDistance { max_distance_mm } => write!(
+                formatter,
+                "allowed-face projection max_distance_mm must be finite and non-negative, got {max_distance_mm}"
+            ),
+            Self::ResourceArithmeticOverflow { resource } => write!(
+                formatter,
+                "allowed-face projection resource arithmetic overflow in {resource}"
+            ),
+            Self::ResourceLimitExceeded {
+                resource,
+                required,
+                limit,
+            } => write!(
+                formatter,
+                "allowed-face projection {resource} requires {required}; limit is {limit}"
+            ),
+            Self::AllocationFailure {
+                buffer,
+                requested_bytes,
+            } => write!(
+                formatter,
+                "allowed-face projection could not reserve {requested_bytes} bytes for {buffer}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AllowedFaceProjectionError {}
+
+#[derive(Clone, Copy)]
+struct AllowedFaceProjectionRequirements {
+    stack_capacity: usize,
+    memory_bytes: usize,
+}
+
+#[derive(Clone, Copy, Default)]
+struct AllowedLeafRange {
+    start: usize,
+    count: usize,
+}
+
+fn checked_allowed_projection_mul(
+    left: usize,
+    right: usize,
+    resource: &'static str,
+) -> Result<usize, AllowedFaceProjectionError> {
+    left.checked_mul(right)
+        .ok_or(AllowedFaceProjectionError::ResourceArithmeticOverflow { resource })
+}
+
+fn checked_allowed_projection_add(
+    left: usize,
+    right: usize,
+    resource: &'static str,
+) -> Result<usize, AllowedFaceProjectionError> {
+    left.checked_add(right)
+        .ok_or(AllowedFaceProjectionError::ResourceArithmeticOverflow { resource })
+}
+
+fn allowed_projection_bytes<T>(
+    count: usize,
+    resource: &'static str,
+) -> Result<usize, AllowedFaceProjectionError> {
+    checked_allowed_projection_mul(count, std::mem::size_of::<T>(), resource)
+}
+
+fn reserve_allowed_projection_vec<T>(
+    capacity: usize,
+    buffer: &'static str,
+) -> Result<Vec<T>, AllowedFaceProjectionError> {
+    let requested_bytes = allowed_projection_bytes::<T>(capacity, buffer)?;
+    let mut values = Vec::new();
+    values.try_reserve_exact(capacity).map_err(|_| {
+        AllowedFaceProjectionError::AllocationFailure {
+            buffer,
+            requested_bytes,
+        }
+    })?;
+    Ok(values)
 }
 
 /// Refusal from the bounded penetration batch. Resource values are always the
@@ -226,7 +442,7 @@ pub struct NativeSurface {
     pub bvh: Bvh,
     pub pv: ParityVote,
     pub grid_pitch_mm: f64,
-    max_grid_bytes: usize,
+    pub(crate) max_grid_bytes: usize,
     pub(crate) source_triangle_soup_digest: SurfaceTriangleSoupDigest,
     exterior_mask: OnceLock<Vec<bool>>,
     // result-inert telemetry (spec sec 4.2): decisions within 1e-6 of a
@@ -316,7 +532,12 @@ fn build_indexes(
     let bvh = Bvh::build(mesh).map_err(|reason| (SurfaceIndexKind::Bvh, reason))?;
     let pv = ParityVote::build(mesh, grid_pitch_mm, max_grid_bytes)
         .map_err(|reason| (SurfaceIndexKind::Parity, reason.to_string()))?;
+    SURFACE_INDEX_CONSTRUCTION_COUNT.fetch_add(1, Ordering::Relaxed);
     Ok((bvh, pv))
+}
+
+pub(crate) fn surface_index_construction_count() -> u64 {
+    SURFACE_INDEX_CONSTRUCTION_COUNT.load(Ordering::Relaxed)
 }
 
 impl NativeSurface {
@@ -328,6 +549,7 @@ impl NativeSurface {
         let source_triangle_soup_digest = mesh.triangle_soup_digest();
         let bvh = Bvh::build(&mesh).map_err(ParityBuildError::Other)?;
         let pv = ParityVote::build(&mesh, grid_pitch_mm, max_grid_bytes)?;
+        SURFACE_INDEX_CONSTRUCTION_COUNT.fetch_add(1, Ordering::Relaxed);
         Ok(NativeSurface {
             mesh,
             bvh,
@@ -511,6 +733,334 @@ impl NativeSurface {
             nrm.push(n);
         }
         (dist, cp, idx, nrm)
+    }
+
+    fn allowed_projection_requirements(
+        &self,
+        points: usize,
+        allowed_faces: usize,
+    ) -> Result<AllowedFaceProjectionRequirements, AllowedFaceProjectionError> {
+        let stack_capacity = self.bvh.depth.checked_add(1).ok_or(
+            AllowedFaceProjectionError::ResourceArithmeticOverflow {
+                resource: "traversal stack depth",
+            },
+        )?;
+        let stack_slots =
+            checked_allowed_projection_mul(points, stack_capacity, "traversal stack slots")?;
+
+        let mut memory_bytes =
+            allowed_projection_bytes::<u32>(allowed_faces, "gathered allowed IDs")?;
+        memory_bytes = checked_allowed_projection_add(
+            memory_bytes,
+            allowed_projection_bytes::<u8>(self.mesh.global_nfaces(), "allowed-face mask")?,
+            "batch memory",
+        )?;
+        memory_bytes = checked_allowed_projection_add(
+            memory_bytes,
+            allowed_projection_bytes::<u8>(self.bvh.nodes.len(), "allowed-subtree mask")?,
+            "batch memory",
+        )?;
+        memory_bytes = checked_allowed_projection_add(
+            memory_bytes,
+            allowed_projection_bytes::<AllowedLeafRange>(
+                self.bvh.nodes.len(),
+                "allowed leaf ranges",
+            )?,
+            "batch memory",
+        )?;
+        memory_bytes = checked_allowed_projection_add(
+            memory_bytes,
+            allowed_projection_bytes::<i32>(stack_slots, "traversal stacks")?,
+            "batch memory",
+        )?;
+        let result_bytes = allowed_projection_bytes::<AllowedFaceProjectionOutcome>(
+            points,
+            "projection outcomes",
+        )?;
+        memory_bytes = checked_allowed_projection_add(memory_bytes, result_bytes, "batch memory")?;
+        memory_bytes = checked_allowed_projection_add(memory_bytes, result_bytes, "batch memory")?;
+
+        Ok(AllowedFaceProjectionRequirements {
+            stack_capacity,
+            memory_bytes,
+        })
+    }
+
+    fn nearest_allowed_one_with_stack(
+        &self,
+        point: V3,
+        upper_bound: f64,
+        allowed_leaf_faces: &[u32],
+        allowed_leaf_ranges: &[AllowedLeafRange],
+        allowed_subtrees: &[u8],
+        stack: &mut [i32],
+    ) -> (f64, usize, V3) {
+        let no_face = self.mesh.global_nfaces();
+        let mut best_distance = upper_bound;
+        let mut best_face = no_face;
+        let mut best_point = [0.0; 3];
+        let mut stack_len = 1usize;
+        stack[0] = 0;
+
+        while stack_len > 0 {
+            stack_len -= 1;
+            let node_index = stack[stack_len] as usize;
+            debug_assert_ne!(allowed_subtrees[node_index], 0);
+            let node = &self.bvh.nodes[node_index];
+            // Strict pruning preserves equal-distance candidates for the
+            // stable global-face-ID tie break.
+            if point_box_dist(point, node.bmin, node.bmax) > best_distance {
+                continue;
+            }
+            if node.leaf {
+                let range = allowed_leaf_ranges[node_index];
+                for &face_id in &allowed_leaf_faces[range.start..range.start + range.count] {
+                    let face = face_id as usize;
+                    let closest = closest_on_tri(
+                        point,
+                        self.mesh.v0(face),
+                        self.mesh.vertex_b(face),
+                        self.mesh.vertex_c(face),
+                    );
+                    let distance = norm(sub(point, closest));
+                    if distance < best_distance || (distance == best_distance && face < best_face) {
+                        best_distance = distance;
+                        best_face = face;
+                        best_point = closest;
+                    }
+                }
+                continue;
+            }
+
+            let left = node.a as usize;
+            let right = node.b as usize;
+            let left_allowed = allowed_subtrees[left] != 0;
+            let right_allowed = allowed_subtrees[right] != 0;
+            match (left_allowed, right_allowed) {
+                (true, true) => {
+                    let left_distance =
+                        point_box_dist(point, self.bvh.nodes[left].bmin, self.bvh.nodes[left].bmax);
+                    let right_distance = point_box_dist(
+                        point,
+                        self.bvh.nodes[right].bmin,
+                        self.bvh.nodes[right].bmax,
+                    );
+                    debug_assert!(stack_len + 2 <= stack.len());
+                    if left_distance <= right_distance {
+                        stack[stack_len] = right as i32;
+                        stack[stack_len + 1] = left as i32;
+                    } else {
+                        stack[stack_len] = left as i32;
+                        stack[stack_len + 1] = right as i32;
+                    }
+                    stack_len += 2;
+                }
+                (true, false) => {
+                    debug_assert!(stack_len < stack.len());
+                    stack[stack_len] = left as i32;
+                    stack_len += 1;
+                }
+                (false, true) => {
+                    debug_assert!(stack_len < stack.len());
+                    stack[stack_len] = right as i32;
+                    stack_len += 1;
+                }
+                (false, false) => unreachable!("allowed subtree mask must be closed upward"),
+            }
+        }
+        (best_distance, best_face, best_point)
+    }
+
+    /// Project a batch onto an exact allowed subset while reusing this
+    /// surface's immutable BVH and face store.
+    ///
+    /// The allowed set is gathered once into a global-face mask and one compact
+    /// vector grouped by existing BVH leaf. A bottom-up mask marks only BVH
+    /// nodes containing an allowed face, so each row skips wholly disallowed
+    /// subtrees and never scans disallowed leaf faces. It then applies the
+    /// kernel's exact `(distance, global face ID)` rule. For `P` points, `A`
+    /// allowed faces, and `K` marked BVH nodes, worst-case query work is `P*K`
+    /// node visits and `P*A` triangle tests; both totals are preflight-capped.
+    /// The one-time gather is `O(N + A)` for `N` existing BVH faces/nodes;
+    /// `N` is bounded by the admitted surface and by this call's face/node mask
+    /// memory charge.
+    /// No geometry, BVH, parity grid, or per-point subset is constructed.
+    pub fn project_allowed_faces_batch(
+        &self,
+        allowed_face_ids: &[u32],
+        points: &[V3],
+        policy: AllowedFaceProjectionPolicy,
+        limits: AllowedFaceProjectionLimits,
+    ) -> Result<Vec<AllowedFaceProjectionOutcome>, AllowedFaceProjectionError> {
+        if allowed_face_ids.is_empty() {
+            return Err(AllowedFaceProjectionError::EmptyAllowedFaces);
+        }
+        if points.len() > limits.max_points {
+            return Err(AllowedFaceProjectionError::PointLimitExceeded {
+                required: points.len(),
+                limit: limits.max_points,
+            });
+        }
+        if allowed_face_ids.len() > limits.max_allowed_faces {
+            return Err(AllowedFaceProjectionError::AllowedFaceLimitExceeded {
+                required: allowed_face_ids.len(),
+                limit: limits.max_allowed_faces,
+            });
+        }
+        if let Some(max_distance_mm) = policy.max_distance_mm {
+            if !max_distance_mm.is_finite() || max_distance_mm < 0.0 {
+                return Err(AllowedFaceProjectionError::InvalidMaxDistance { max_distance_mm });
+            }
+        }
+
+        let global_face_count = self.mesh.global_nfaces();
+        for (position, &face_id) in allowed_face_ids.iter().enumerate() {
+            if face_id as usize >= global_face_count {
+                return Err(AllowedFaceProjectionError::FaceIdOutOfBounds {
+                    position,
+                    face_id,
+                    global_face_count,
+                });
+            }
+            if !self.mesh.contains_face(face_id) {
+                return Err(AllowedFaceProjectionError::FaceIdNotSelected { position, face_id });
+            }
+        }
+        for (point, value) in points.iter().enumerate() {
+            for (axis, component) in value.iter().enumerate() {
+                if !component.is_finite() {
+                    return Err(AllowedFaceProjectionError::NonFinitePoint { point, axis });
+                }
+            }
+        }
+
+        let requirements =
+            self.allowed_projection_requirements(points.len(), allowed_face_ids.len())?;
+        if requirements.memory_bytes > limits.max_memory_bytes {
+            return Err(AllowedFaceProjectionError::ResourceLimitExceeded {
+                resource: "memory bytes",
+                required: requirements.memory_bytes,
+                limit: limits.max_memory_bytes,
+            });
+        }
+
+        let mut allowed_faces =
+            reserve_allowed_projection_vec(global_face_count, "allowed-face mask")?;
+        allowed_faces.resize(global_face_count, 0u8);
+        for &face_id in allowed_face_ids {
+            let mark = &mut allowed_faces[face_id as usize];
+            if *mark != 0 {
+                return Err(AllowedFaceProjectionError::DuplicateFaceId { face_id });
+            }
+            *mark = 1;
+        }
+
+        let mut allowed_leaf_faces = reserve_allowed_projection_vec(
+            allowed_face_ids.len(),
+            "allowed IDs in BVH leaf order",
+        )?;
+        let mut allowed_leaf_ranges =
+            reserve_allowed_projection_vec(self.bvh.nodes.len(), "allowed leaf ranges")?;
+        allowed_leaf_ranges.resize(self.bvh.nodes.len(), AllowedLeafRange::default());
+        let mut allowed_subtrees =
+            reserve_allowed_projection_vec(self.bvh.nodes.len(), "allowed-subtree mask")?;
+        allowed_subtrees.resize(self.bvh.nodes.len(), 0u8);
+        for node_index in (0..self.bvh.nodes.len()).rev() {
+            let node = &self.bvh.nodes[node_index];
+            allowed_subtrees[node_index] = if node.leaf {
+                let start = node.a as usize;
+                let count = node.b as usize;
+                let allowed_start = allowed_leaf_faces.len();
+                allowed_leaf_faces.extend(
+                    self.bvh.order[start..start + count]
+                        .iter()
+                        .copied()
+                        .filter(|&face_id| allowed_faces[face_id as usize] != 0),
+                );
+                let allowed_count = allowed_leaf_faces.len() - allowed_start;
+                allowed_leaf_ranges[node_index] = AllowedLeafRange {
+                    start: allowed_start,
+                    count: allowed_count,
+                };
+                u8::from(allowed_count != 0)
+            } else {
+                u8::from(
+                    allowed_subtrees[node.a as usize] != 0
+                        || allowed_subtrees[node.b as usize] != 0,
+                )
+            };
+        }
+        debug_assert_ne!(allowed_subtrees[0], 0);
+        debug_assert_eq!(allowed_leaf_faces.len(), allowed_face_ids.len());
+        let marked_nodes = allowed_subtrees.iter().filter(|&&mark| mark != 0).count();
+        let total_node_visits =
+            checked_allowed_projection_mul(points.len(), marked_nodes, "total node visits")?;
+        if total_node_visits > limits.max_total_node_visits {
+            return Err(AllowedFaceProjectionError::ResourceLimitExceeded {
+                resource: "total node visits",
+                required: total_node_visits,
+                limit: limits.max_total_node_visits,
+            });
+        }
+        let total_triangle_tests = checked_allowed_projection_mul(
+            points.len(),
+            allowed_face_ids.len(),
+            "total triangle tests",
+        )?;
+        if total_triangle_tests > limits.max_total_triangle_tests {
+            return Err(AllowedFaceProjectionError::ResourceLimitExceeded {
+                resource: "total triangle tests",
+                required: total_triangle_tests,
+                limit: limits.max_total_triangle_tests,
+            });
+        }
+
+        let stack_slots = checked_allowed_projection_mul(
+            points.len(),
+            requirements.stack_capacity,
+            "traversal stack slots",
+        )?;
+        let mut traversal_stacks = reserve_allowed_projection_vec(stack_slots, "traversal stacks")?;
+        traversal_stacks.resize(stack_slots, 0i32);
+        let mut rows = reserve_allowed_projection_vec(points.len(), "parallel row results")?;
+        let mut outcomes = reserve_allowed_projection_vec(points.len(), "ordered outcomes")?;
+        let upper_bound = policy.max_distance_mm.unwrap_or(f64::INFINITY);
+        par::run(|| {
+            points
+                .par_iter()
+                .copied()
+                .zip(traversal_stacks.par_chunks_mut(requirements.stack_capacity))
+                .map(|(point, stack)| {
+                    let (distance_mm, face, closest) = self.nearest_allowed_one_with_stack(
+                        point,
+                        upper_bound,
+                        &allowed_leaf_faces,
+                        &allowed_leaf_ranges,
+                        &allowed_subtrees,
+                        stack,
+                    );
+                    if face < global_face_count {
+                        AllowedFaceProjectionOutcome::Projected(AllowedFaceProjection {
+                            distance_mm,
+                            point: closest,
+                            face_id: face as u32,
+                        })
+                    } else {
+                        let max_distance_mm = policy.max_distance_mm.expect(
+                            "uncapped projection over a nonempty valid allowed set must win",
+                        );
+                        AllowedFaceProjectionOutcome::NoWinner(
+                            AllowedFaceProjectionNoWinner::BeyondMaxDistance { max_distance_mm },
+                        )
+                    }
+                })
+                .collect_into_vec(&mut rows);
+        });
+
+        // Keep scatter ordered and serial. This is deliberately separate from
+        // the parallel query stage so scheduling can never affect row order.
+        outcomes.extend(rows);
+        Ok(outcomes)
     }
 
     // ---- inside -----------------------------------------------------------

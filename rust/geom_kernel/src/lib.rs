@@ -35,6 +35,8 @@ pub use point_index::{
     NeighborCsr, PointCloudIndex, PointIndexBuildError, PointQueryError, RadiusQueryLimits,
 };
 pub use queries::{
+    AllowedFaceProjection, AllowedFaceProjectionError, AllowedFaceProjectionLimits,
+    AllowedFaceProjectionNoWinner, AllowedFaceProjectionOutcome, AllowedFaceProjectionPolicy,
     BatchInputError, CastRaysBatch, Interval, NativeSurface, PenetrationBatchError,
     PenetrationBatchLimits, SphereBreachBatch,
 };
@@ -613,6 +615,15 @@ impl NativeSurface {
     /// enclose only their selected faces.
     pub fn bounds(&self) -> FaceBounds {
         self.mesh.bounds()
+    }
+
+    /// Exact immutable construction settings retained by this surface.
+    #[must_use]
+    pub const fn config(&self) -> NativeSurfaceConfig {
+        NativeSurfaceConfig {
+            grid_pitch_mm: self.grid_pitch_mm,
+            max_grid_bytes: self.max_grid_bytes,
+        }
     }
 
     /// Immutable global face metadata shared with every subset. Selected IDs
