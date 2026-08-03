@@ -490,16 +490,16 @@ impl<'a> SupportVerificationSnapshot<'a> {
         crate::transit_measurement::anchor(self, batch)
     }
 
-    /// Privately enriches an accepted raw transit batch and its anchored
+    /// Privately enriches a bound raw transit batch and its anchored
     /// census with batch-native SCAR diagnostic geometry. It is intentionally
     /// not an acceptance, clearance, or defect boundary.
-    pub(crate) fn transit_scar_measurement(
+    pub(crate) fn transit_scar_measurement<'b>(
         &self,
         raw: &crate::transit_measurement::TransitIntervalBatch,
         anchored: &crate::transit_measurement::AnchoredTransitBatch,
-        request: &crate::transit_measurement::TransitScarMeasurementRequest,
+        request: &'b crate::transit_measurement::TransitScarMeasurementRequest,
     ) -> Result<
-        crate::transit_measurement::TransitScarMeasurement,
+        crate::transit_measurement::TransitScarMeasurement<'b>,
         crate::transit_measurement::TransitScarMeasurementError,
     > {
         crate::transit_measurement::measure_scar(self, raw, anchored, request)
@@ -977,6 +977,58 @@ impl<'a> SupportVerificationSnapshot<'a> {
     #[must_use]
     pub const fn digest(&self) -> u64 {
         self.snapshot_digest
+    }
+
+    /// Minimal, fully integrity-valid snapshot for bounded transit/SCAR unit
+    /// tests. Production construction remains exclusively on the lowering
+    /// path above.
+    #[cfg(test)]
+    pub(crate) fn transit_test_fixture(
+        mesh: &'a Mesh,
+        topology: &'a FaceTopology,
+        surface: &'a NativeSurface,
+        mesh_digest: &'a str,
+        final_live_members: Vec<FinalLiveMemberEvidence>,
+    ) -> Self {
+        let routed_contacts = Vec::new();
+        let routed_route_memberships = Vec::new();
+        let coverage_samples: &'a [CoverageSample] = &[];
+        let named_islands: &'a [SupportIsland] = &[];
+        let final_live_members_digest = final_live_members_digest(&final_live_members);
+        let geometry_digest = AnchorGeometryAuthority::new(mesh, topology, surface)
+            .expect("transit test geometry authority")
+            .digest();
+        let mut snapshot = Self {
+            mesh,
+            topology,
+            surface,
+            coverage_samples,
+            named_islands,
+            routed_contacts,
+            routed_route_memberships,
+            final_live_members,
+            mesh_digest,
+            topology_digest: topology.content_digest(),
+            plan_digest: 0,
+            load_digest: 0,
+            geometry_digest,
+            forest_digest: 0,
+            transcript_digest: 0,
+            regular_digest: 0,
+            coverage_digest: coverage_samples_digest(coverage_samples),
+            named_islands_digest: named_islands_digest(named_islands),
+            lowered_primitives_digest: 0,
+            routed_projection_digest: routed_projection_digest(&[]),
+            final_live_members_digest,
+            snapshot_digest: 0,
+        };
+        snapshot.snapshot_digest = verification_snapshot_digest(&snapshot);
+        snapshot
+    }
+
+    #[cfg(test)]
+    pub(crate) fn transit_test_stale_digest(&mut self) {
+        self.snapshot_digest ^= 1;
     }
 
     /// Rechecks the immutable bindings without reconstructing any geometry,

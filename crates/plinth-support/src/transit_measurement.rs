@@ -57,12 +57,8 @@ impl TransitPolicySnapshot {
                 .cloned()
                 .ok_or(TransitPolicySnapshotError::MissingDescriptor { id })
         });
-        let policy_descriptors = policy_descriptors
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()?;
-        let policy_descriptors: [ConstantDescriptor; 8] = policy_descriptors
-            .try_into()
-            .expect("the fixed SCAR policy ID list always has eight entries");
+        let [d0, d1, d2, d3, d4, d5, d6, d7] = policy_descriptors;
+        let policy_descriptors = [d0?, d1?, d2?, d3?, d4?, d5?, d6?, d7?];
         let min_id = "MIN_ILLEGAL_LEN_MM";
         let min_illegal_descriptor = constants
             .registry()
@@ -87,6 +83,36 @@ impl TransitPolicySnapshot {
                 .diagnostic()
                 .get(),
         })
+    }
+
+    fn matches_constants(&self, constants: &M0Constants) -> bool {
+        let policy = constants.scar_area_cap_policy();
+        let descriptor = |id: &str| {
+            constants
+                .registry()
+                .iter()
+                .find(|candidate| candidate.id().as_str() == id)
+        };
+        self.decision_id == policy.decision_id()
+            && policy
+                .constant_ids()
+                .iter()
+                .zip(&self.policy_descriptors)
+                .all(|(id, expected)| descriptor(id) == Some(expected))
+            && descriptor("MIN_ILLEGAL_LEN_MM") == Some(&self.min_illegal_descriptor)
+            && self.a_abs_mm2 == policy.a_abs_mm2().diagnostic().get()
+            && self.kappa == policy.kappa().diagnostic().get()
+            && self.l_scar_max_mm == policy.l_scar_max_mm().diagnostic().get()
+            && self.eps_cos == policy.eps_cos().diagnostic().get()
+            && self.interval_tol_mm == policy.interval_tol_mm().diagnostic().get()
+            && self.tip_ball_factor == policy.tip_ball_factor().diagnostic().get()
+            && self.foot_ball_factor == policy.foot_ball_factor().diagnostic().get()
+            && self.min_illegal_len_mm
+                == constants
+                    .placeholders()
+                    .min_illegal_len_mm()
+                    .diagnostic()
+                    .get()
     }
 }
 
@@ -496,6 +522,7 @@ pub(crate) struct TransitIntervalBatch {
     snapshot_digest: u64,
     member_digest: u64,
     surface_digest: SurfaceTriangleSoupDigest,
+    raw_evidence_digest: u64,
     resource_plan: TransitIntervalResourcePlan,
     intervals: Box<[TransitRayInterval]>,
 }
@@ -509,6 +536,9 @@ impl TransitIntervalBatch {
     }
     pub(crate) const fn surface_digest(&self) -> SurfaceTriangleSoupDigest {
         self.surface_digest
+    }
+    pub(crate) const fn raw_evidence_digest(&self) -> u64 {
+        self.raw_evidence_digest
     }
     pub(crate) const fn resource_plan(&self) -> TransitIntervalResourcePlan {
         self.resource_plan
@@ -556,6 +586,29 @@ impl TransitAnchorPolicySnapshot {
             interval_tol_descriptor,
             min_illegal_descriptor,
         })
+    }
+
+    fn matches_constants(&self, constants: &M0Constants) -> bool {
+        let descriptor = |id: &str| {
+            constants
+                .registry()
+                .iter()
+                .find(|candidate| candidate.id().as_str() == id)
+        };
+        descriptor("TOL_MM") == Some(&self.interval_tol_descriptor)
+            && descriptor("MIN_ILLEGAL_LEN_MM") == Some(&self.min_illegal_descriptor)
+            && self.interval_tol_mm
+                == constants
+                    .scar_area_cap_policy()
+                    .interval_tol_mm()
+                    .diagnostic()
+                    .get()
+            && self.min_illegal_len_mm
+                == constants
+                    .placeholders()
+                    .min_illegal_len_mm()
+                    .diagnostic()
+                    .get()
     }
 }
 
@@ -637,6 +690,7 @@ pub(crate) struct AnchoredTransitBatch {
     snapshot_digest: u64,
     member_digest: u64,
     surface_digest: SurfaceTriangleSoupDigest,
+    raw_evidence_digest: u64,
     policy: TransitAnchorPolicySnapshot,
     members: Box<[AnchoredTransitMember]>,
 }
@@ -650,6 +704,9 @@ impl AnchoredTransitBatch {
     }
     pub(crate) const fn surface_digest(&self) -> SurfaceTriangleSoupDigest {
         self.surface_digest
+    }
+    pub(crate) const fn raw_evidence_digest(&self) -> u64 {
+        self.raw_evidence_digest
     }
     pub(crate) fn members(&self) -> &[AnchoredTransitMember] {
         &self.members
@@ -704,17 +761,21 @@ impl TransitScarMeasurementRequest {
     }
 }
 
-/// Exact resource accounting admitted before this diagnostic allocates or
-/// enters either native batch operation.
+/// Conservative logical resource accounting admitted before this diagnostic
+/// allocates or enters either native batch operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct TransitScarMeasurementResourcePlan {
     members: usize,
     anchor_query_rows: usize,
     exit_projection_rows: usize,
     retained_evidence: usize,
+    member_row_bytes: usize,
+    anchor_input_bytes: usize,
     output_bytes: usize,
     query_result_bytes: usize,
+    exit_input_bytes: usize,
     projection_result_bytes: usize,
+    boxed_conversion_bytes: usize,
     logical_peak_bytes: usize,
 }
 
@@ -731,6 +792,14 @@ impl TransitScarMeasurementResourcePlan {
     pub(crate) const fn logical_peak_bytes(self) -> usize {
         self.logical_peak_bytes
     }
+}
+
+#[derive(Clone, Copy)]
+struct ScarMemberRow<'a> {
+    normalized: NormalizedMember<'a>,
+    designed_end: EmbedEnd,
+    chord_mm: f64,
+    s_b_mm: Option<f64>,
 }
 
 /// Per-designed-end, geometry-enriched SCAR diagnostic evidence.
@@ -768,16 +837,20 @@ impl ScarEndEvidence {
 /// Immutable private result bound to the exact snapshot, raw batch, anchored
 /// census, policy descriptors, and native triangle soup that produced it.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct TransitScarMeasurement {
+pub(crate) struct TransitScarMeasurement<'a> {
     snapshot_digest: u64,
     member_digest: u64,
     surface_digest: SurfaceTriangleSoupDigest,
-    policy: TransitPolicySnapshot,
+    raw_evidence_digest: u64,
+    policy: &'a TransitPolicySnapshot,
     resource_plan: TransitScarMeasurementResourcePlan,
     evidence: Box<[ScarEndEvidence]>,
 }
 
-impl TransitScarMeasurement {
+impl TransitScarMeasurement<'_> {
+    pub(crate) const fn raw_evidence_digest(&self) -> u64 {
+        self.raw_evidence_digest
+    }
     pub(crate) const fn resource_plan(&self) -> TransitScarMeasurementResourcePlan {
         self.resource_plan
     }
@@ -808,23 +881,20 @@ pub(crate) enum TransitScarMeasurementError {
     Scalar,
 }
 
-/// Compose an accepted raw interval batch, its anchored census, and the pure
+/// Compose a bound raw interval batch, its anchored census, and the pure
 /// scalar once per designed end. All anchor distances are gathered in one
 /// native query; all required exits are gathered in one native projection.
-pub(crate) fn measure_scar(
+pub(crate) fn measure_scar<'a>(
     snapshot: &SupportVerificationSnapshot<'_>,
     raw: &TransitIntervalBatch,
     anchored: &AnchoredTransitBatch,
-    request: &TransitScarMeasurementRequest,
-) -> Result<TransitScarMeasurement, TransitScarMeasurementError> {
+    request: &'a TransitScarMeasurementRequest,
+) -> Result<TransitScarMeasurement<'a>, TransitScarMeasurementError> {
     snapshot
         .validate_integrity()
         .map_err(|_| TransitScarMeasurementError::RawBinding)?;
-    let current_policy = TransitPolicySnapshot::from_constants(
-        m0_constants().map_err(|_| TransitScarMeasurementError::PolicyBinding)?,
-    )
-    .map_err(|_| TransitScarMeasurementError::PolicyBinding)?;
-    if current_policy != request.policy {
+    let constants = m0_constants().map_err(|_| TransitScarMeasurementError::PolicyBinding)?;
+    if !request.policy.matches_constants(constants) {
         return Err(TransitScarMeasurementError::PolicyBinding);
     }
     let raw_plan = preflight(
@@ -838,21 +908,20 @@ pub(crate) fn measure_scar(
     .map_err(|_| TransitScarMeasurementError::RawBinding)?;
     let digest = member_digest(snapshot.final_live_members());
     let surface_digest = snapshot.native_surface().source_triangle_soup_digest();
+    let raw_evidence_digest = raw_interval_digest(&raw.intervals);
     if raw.snapshot_digest != snapshot.digest()
         || raw.member_digest != digest
         || raw.surface_digest != surface_digest
+        || raw.raw_evidence_digest != raw_evidence_digest
         || raw.resource_plan != raw_plan
         || anchored.snapshot_digest != raw.snapshot_digest
         || anchored.member_digest != raw.member_digest
         || anchored.surface_digest != raw.surface_digest
+        || anchored.raw_evidence_digest != raw.raw_evidence_digest
     {
         return Err(TransitScarMeasurementError::RawBinding);
     }
-    let anchor_policy = TransitAnchorPolicySnapshot::from_constants(
-        m0_constants().map_err(|_| TransitScarMeasurementError::PolicyBinding)?,
-    )
-    .map_err(|_| TransitScarMeasurementError::PolicyBinding)?;
-    if anchored.policy != anchor_policy {
+    if !anchored.policy.matches_constants(constants) {
         return Err(TransitScarMeasurementError::PolicyBinding);
     }
 
@@ -861,7 +930,9 @@ pub(crate) fn measure_scar(
         .final_live_members()
         .filter(|member| member.embed_end().is_some())
         .count();
-    if anchored.members.len() != member_count {
+    if anchored.members.len() != member_count
+        || !anchored_binding_matches(snapshot, raw, anchored, &anchored.policy)
+    {
         return Err(TransitScarMeasurementError::AnchorBinding);
     }
     let mut projection_rows = 0usize;
@@ -869,22 +940,7 @@ pub(crate) fn measure_scar(
         if member.designed_end.is_none() {
             continue;
         }
-        let mut axes = member.rays.iter().filter(|ray| ray.ray == -1);
-        let axis = axes.next().ok_or(TransitScarMeasurementError::AxisAnchor)?;
-        if axes.next().is_some() {
-            return Err(TransitScarMeasurementError::AxisAnchor);
-        }
-        let mut tips = axis
-            .crossings
-            .iter()
-            .filter(|crossing| crossing.is_tip_candidate);
-        let chord = tips.next().map_or(0.0, |crossing| crossing.chord_mm);
-        if tips.next().is_some() {
-            return Err(TransitScarMeasurementError::AxisAnchor);
-        }
-        if !chord.is_finite() || chord < 0.0 {
-            return Err(TransitScarMeasurementError::GeometryResult);
-        }
+        let (chord, _) = axis_tip(member)?;
         projection_rows = projection_rows
             .checked_add(usize::from(chord > request.policy.interval_tol_mm))
             .ok_or(TransitScarMeasurementError::ArithmeticOverflow {
@@ -893,17 +949,6 @@ pub(crate) fn measure_scar(
     }
     let plan = scar_preflight(designed_count, projection_rows, request)?;
 
-    let mut members = snapshot
-        .final_live_members()
-        .filter(|m| m.embed_end().is_some())
-        .collect::<Vec<_>>();
-    members.sort_unstable_by_key(|m| (m.key(), m.embed_end()));
-    if members
-        .windows(2)
-        .any(|w| (w[0].key(), w[0].embed_end()) == (w[1].key(), w[1].embed_end()))
-    {
-        return Err(TransitScarMeasurementError::AnchorBinding);
-    }
     let mut rows = Vec::new();
     rows.try_reserve_exact(plan.members).map_err(|_| {
         TransitScarMeasurementError::ResourceLimit {
@@ -912,39 +957,24 @@ pub(crate) fn measure_scar(
     })?;
     #[cfg(test)]
     record_live_call(|calls| calls.scar_row_allocations += 1);
-    for member in members {
-        let normalized = normalize(member);
-        let anchored_member = anchored
-            .members
-            .iter()
-            .find(|a| a.member == member.key() && a.designed_end == member.embed_end())
+    for anchored_member in &anchored.members {
+        let member = snapshot
+            .final_live_members()
+            .find(|member| {
+                member.key() == anchored_member.member
+                    && member.embed_end() == anchored_member.designed_end
+            })
             .ok_or(TransitScarMeasurementError::AnchorBinding)?;
-        let axis = anchored_member
-            .rays
-            .iter()
-            .filter(|r| r.ray == -1)
-            .collect::<Vec<_>>();
-        if axis.len() != 1 {
-            return Err(TransitScarMeasurementError::AxisAnchor);
-        }
-        let tip = axis[0]
-            .crossings
-            .iter()
-            .filter(|c| c.is_tip_candidate)
-            .collect::<Vec<_>>();
-        if tip.len() > 1 {
-            return Err(TransitScarMeasurementError::AxisAnchor);
-        }
-        let chord = tip.first().map_or(0.0, |c| c.chord_mm);
-        if !chord.is_finite() || chord < 0.0 {
-            return Err(TransitScarMeasurementError::GeometryResult);
-        }
-        rows.push((
-            normalized,
-            member.embed_end().expect("filtered"),
-            chord,
-            tip.first().map(|c| c.s_b_mm),
-        ));
+        let Some(designed_end) = member.embed_end() else {
+            continue;
+        };
+        let (chord_mm, s_b_mm) = axis_tip(anchored_member)?;
+        rows.push(ScarMemberRow {
+            normalized: normalize(member),
+            designed_end,
+            chord_mm,
+            s_b_mm,
+        });
     }
     if rows.len() != plan.members {
         return Err(TransitScarMeasurementError::AnchorBinding);
@@ -955,8 +985,8 @@ pub(crate) fn measure_scar(
         .map_err(|_| TransitScarMeasurementError::ResourceLimit {
             resource: "anchor rows allocation",
         })?;
-    for (normalized, _, _, _) in &rows {
-        anchors.push(normalized.p0);
+    for row in &rows {
+        anchors.push(row.normalized.p0);
     }
     let (distances, faces) = if anchors.is_empty() {
         (Vec::new(), Vec::new())
@@ -974,11 +1004,15 @@ pub(crate) fn measure_scar(
         .map_err(|_| TransitScarMeasurementError::ResourceLimit {
             resource: "exit rows allocation",
         })?;
-    for (normalized, _, chord, s_b) in &rows {
-        if *chord > request.policy.interval_tol_mm {
-            let length = axis_length(normalized.p0, normalized.p1)?;
-            let s_b = s_b.ok_or(TransitScarMeasurementError::AxisAnchor)?;
-            exits.push(axis_point(normalized.p0, normalized.p1, s_b / length)?);
+    for row in &rows {
+        if row.chord_mm > request.policy.interval_tol_mm {
+            let length = axis_length(row.normalized.p0, row.normalized.p1)?;
+            let s_b = row.s_b_mm.ok_or(TransitScarMeasurementError::AxisAnchor)?;
+            exits.push(axis_point(
+                row.normalized.p0,
+                row.normalized.p1,
+                s_b / length,
+            )?);
         }
     }
     let (exit_distances, exit_points, exit_faces, exit_normals) = if exits.is_empty() {
@@ -1008,15 +1042,14 @@ pub(crate) fn measure_scar(
         })?;
     #[cfg(test)]
     record_live_call(|calls| calls.scar_evidence_allocations += 1);
-    for ((normalized, end, chord, _), (distance_squared, face)) in
-        rows.into_iter().zip(distances.into_iter().zip(faces))
-    {
+    for (row, (distance_squared, face)) in rows.into_iter().zip(distances.into_iter().zip(faces)) {
         if !distance_squared.is_finite() || distance_squared < 0.0 || face < 0 {
             return Err(TransitScarMeasurementError::GeometryResult);
         }
         let d = distance_squared.sqrt();
+        let normalized = row.normalized;
         let length = axis_length(normalized.p0, normalized.p1)?;
-        let (exit_point_mm, exit_face, exit_normal, cosine) = if chord
+        let (exit_point_mm, exit_face, exit_normal, cosine) = if row.chord_mm
             > request.policy.interval_tol_mm
         {
             let point = exit_points[projection_index];
@@ -1048,7 +1081,7 @@ pub(crate) fn measure_scar(
         let diagnostic = calculate_scar_diagnostic(
             &request.policy,
             &ScarDiagnosticInput::new(
-                chord,
+                row.chord_mm,
                 d,
                 cosine,
                 normalized.r0,
@@ -1062,11 +1095,11 @@ pub(crate) fn measure_scar(
         .map_err(|_| TransitScarMeasurementError::Scalar)?;
         evidence.push(ScarEndEvidence {
             member: normalized.source.key(),
-            designed_end: end,
+            designed_end: row.designed_end,
             anchor_point_mm: normalized.p0,
             anchor_distance_mm: d,
             anchor_face: face,
-            interval_chord_mm: chord,
+            interval_chord_mm: row.chord_mm,
             exit_point_mm,
             exit_face,
             exit_normal,
@@ -1078,10 +1111,128 @@ pub(crate) fn measure_scar(
         snapshot_digest: snapshot.digest(),
         member_digest: digest,
         surface_digest,
-        policy: request.policy.clone(),
+        raw_evidence_digest,
+        policy: &request.policy,
         resource_plan: plan,
         evidence: evidence.into_boxed_slice(),
     })
+}
+
+fn axis_tip(
+    member: &AnchoredTransitMember,
+) -> Result<(f64, Option<f64>), TransitScarMeasurementError> {
+    let mut axes = member.rays.iter().filter(|ray| ray.ray == -1);
+    let axis = axes.next().ok_or(TransitScarMeasurementError::AxisAnchor)?;
+    if axes.next().is_some() {
+        return Err(TransitScarMeasurementError::AxisAnchor);
+    }
+    let mut tips = axis
+        .crossings
+        .iter()
+        .filter(|crossing| crossing.is_tip_candidate);
+    let tip = tips.next();
+    if tips.next().is_some() {
+        return Err(TransitScarMeasurementError::AxisAnchor);
+    }
+    let chord = tip.map_or(0.0, |crossing| crossing.chord_mm);
+    if !chord.is_finite() || chord < 0.0 {
+        return Err(TransitScarMeasurementError::GeometryResult);
+    }
+    Ok((chord, tip.map(|crossing| crossing.s_b_mm)))
+}
+
+/// Re-derive the anchored view without allocating.  This prevents a stale or
+/// modified derived census from retaining a valid raw-payload digest and then
+/// reaching either native batch operation.
+fn anchored_binding_matches(
+    snapshot: &SupportVerificationSnapshot<'_>,
+    raw: &TransitIntervalBatch,
+    anchored: &AnchoredTransitBatch,
+    policy: &TransitAnchorPolicySnapshot,
+) -> bool {
+    if anchored.members.len() != snapshot.final_live_members().len() {
+        return false;
+    }
+    let mut raw_index = 0usize;
+    let mut prior_member = None;
+    for actual_member in &anchored.members {
+        let Some(member) = snapshot.final_live_members().find(|member| {
+            member.key() == actual_member.member && member.embed_end() == actual_member.designed_end
+        }) else {
+            return false;
+        };
+        if prior_member.is_some_and(|prior| prior >= member.key()) {
+            return false;
+        }
+        prior_member = Some(member.key());
+        let normalized = normalize(member);
+        let offsets = !matches!(member.kind(), MemberKind::Stub);
+        let mut actual_rays = actual_member.rays.iter();
+        for expected_ray in capsule_rays(
+            normalized.p0,
+            normalized.p1,
+            normalized.r0,
+            normalized.r1,
+            OFFSET_RAYS,
+            offsets,
+        ) {
+            let Some(actual_ray) = actual_rays.next() else {
+                return false;
+            };
+            if actual_ray.ray != expected_ray.label()
+                || actual_ray.length_mm.to_bits() != expected_ray.length_mm().to_bits()
+            {
+                return false;
+            }
+            let begin = raw_index;
+            while let Some(interval) = raw.intervals.get(raw_index) {
+                let key = (interval.member, interval.designed_end, interval.ray);
+                let expected = (member.key(), member.embed_end(), expected_ray.label());
+                if key < expected {
+                    return false;
+                }
+                if key > expected {
+                    break;
+                }
+                if !valid_transit_batch_interval(interval, expected_ray.length_mm())
+                    || (raw_index > begin
+                        && (raw.intervals[raw_index - 1].s_b_mm > interval.s_a_mm
+                            || raw.intervals[raw_index - 1] == *interval))
+                {
+                    return false;
+                }
+                raw_index += 1;
+            }
+            let expected_intervals = &raw.intervals[begin..raw_index];
+            if actual_ray.crossings.len() != expected_intervals.len() {
+                return false;
+            }
+            for (local_index, (actual, interval)) in actual_ray
+                .crossings
+                .iter()
+                .zip(expected_intervals)
+                .enumerate()
+            {
+                let chord_mm = interval.s_b_mm - interval.s_a_mm;
+                if actual.raw_index != local_index
+                    || actual.s_a_mm.to_bits() != interval.s_a_mm.to_bits()
+                    || actual.s_b_mm.to_bits() != interval.s_b_mm.to_bits()
+                    || actual.chord_mm.to_bits() != chord_mm.to_bits()
+                    || actual.is_tip_candidate
+                        != (member.embed_end().is_some()
+                            && local_index == 0
+                            && interval.s_a_mm <= policy.interval_tol_mm)
+                    || actual.below_minimum_length != (chord_mm <= policy.min_illegal_len_mm)
+                {
+                    return false;
+                }
+            }
+        }
+        if actual_rays.next().is_some() {
+            return false;
+        }
+    }
+    raw_index == raw.intervals.len()
 }
 
 fn axis_length(p0: V3, p1: V3) -> Result<f64, TransitScarMeasurementError> {
@@ -1128,6 +1279,16 @@ fn scar_preflight(
             resource: "retained anchor evidence",
         });
     }
+    let member_row_bytes = members
+        .checked_mul(std::mem::size_of::<ScarMemberRow<'static>>())
+        .ok_or(TransitScarMeasurementError::ArithmeticOverflow {
+            resource: "member row bytes",
+        })?;
+    let anchor_input_bytes = members.checked_mul(std::mem::size_of::<V3>()).ok_or(
+        TransitScarMeasurementError::ArithmeticOverflow {
+            resource: "anchor input bytes",
+        },
+    )?;
     let output_bytes = members
         .checked_mul(std::mem::size_of::<ScarEndEvidence>())
         .ok_or(TransitScarMeasurementError::ArithmeticOverflow {
@@ -1138,6 +1299,11 @@ fn scar_preflight(
         .ok_or(TransitScarMeasurementError::ArithmeticOverflow {
             resource: "query result bytes",
         })?;
+    let exit_input_bytes = projections.checked_mul(std::mem::size_of::<V3>()).ok_or(
+        TransitScarMeasurementError::ArithmeticOverflow {
+            resource: "exit input bytes",
+        },
+    )?;
     let projection_result_bytes = projections
         .checked_mul(
             std::mem::size_of::<f64>() + 2 * std::mem::size_of::<V3>() + std::mem::size_of::<i64>(),
@@ -1145,11 +1311,17 @@ fn scar_preflight(
         .ok_or(TransitScarMeasurementError::ArithmeticOverflow {
             resource: "projection result bytes",
         })?;
-    let logical_peak_bytes = output_bytes
-        .checked_add(query_result_bytes)
+    // `Vec::into_boxed_slice` is permitted to reallocate when capacity and
+    // length differ. Account a complete second output buffer at that boundary
+    // rather than relying on allocator-specific in-place shrinking.
+    let boxed_conversion_bytes = output_bytes;
+    let logical_peak_bytes = member_row_bytes
+        .checked_add(anchor_input_bytes)
+        .and_then(|v| v.checked_add(query_result_bytes))
+        .and_then(|v| v.checked_add(exit_input_bytes))
         .and_then(|v| v.checked_add(projection_result_bytes))
-        .and_then(|v| v.checked_add(members.checked_mul(std::mem::size_of::<V3>())?))
-        .and_then(|v| v.checked_add(projections.checked_mul(std::mem::size_of::<V3>())?))
+        .and_then(|v| v.checked_add(output_bytes))
+        .and_then(|v| v.checked_add(boxed_conversion_bytes))
         .ok_or(TransitScarMeasurementError::ArithmeticOverflow {
             resource: "logical peak bytes",
         })?;
@@ -1163,9 +1335,13 @@ fn scar_preflight(
         anchor_query_rows: members,
         exit_projection_rows: projections,
         retained_evidence: members,
+        member_row_bytes,
+        anchor_input_bytes,
         output_bytes,
         query_result_bytes,
+        exit_input_bytes,
         projection_result_bytes,
+        boxed_conversion_bytes,
         logical_peak_bytes,
     })
 }
@@ -1301,6 +1477,7 @@ pub(crate) fn measure(
         member_digest: member_digest(snapshot.final_live_members()),
         surface_digest: snapshot.native_surface().source_triangle_soup_digest(),
         resource_plan: plan,
+        raw_evidence_digest: raw_interval_digest(&evidence),
         intervals: evidence.into_boxed_slice(),
     })
 }
@@ -1323,6 +1500,7 @@ pub(crate) fn anchor(
     if batch.snapshot_digest != snapshot.digest()
         || batch.member_digest != member_digest(snapshot.final_live_members())
         || batch.surface_digest != snapshot.native_surface().source_triangle_soup_digest()
+        || batch.raw_evidence_digest != raw_interval_digest(&batch.intervals)
         || batch.resource_plan.members != member_count
         || batch.resource_plan.stub_rows != stub_count
         || batch.resource_plan.nonstub_rows != member_count - stub_count
@@ -1353,7 +1531,7 @@ pub(crate) fn anchor(
     for member in members {
         let normalized = normalize(member);
         let offsets = !matches!(member.kind(), MemberKind::Stub);
-        let mut rays = capsule_rays(
+        let rays = capsule_rays(
             normalized.p0,
             normalized.p1,
             normalized.r0,
@@ -1362,7 +1540,7 @@ pub(crate) fn anchor(
             offsets,
         );
         let mut anchored_rays = Vec::with_capacity(usize::from(offsets) * OFFSET_RAYS + 1);
-        while let Some(ray) = rays.next() {
+        for ray in rays {
             let begin = interval_index;
             while let Some(interval) = batch.intervals.get(interval_index) {
                 let key = (interval.member, interval.designed_end, interval.ray);
@@ -1406,6 +1584,7 @@ pub(crate) fn anchor(
         snapshot_digest: batch.snapshot_digest,
         member_digest: batch.member_digest,
         surface_digest: batch.surface_digest,
+        raw_evidence_digest: batch.raw_evidence_digest,
         policy,
         members: anchored_members.into_boxed_slice(),
     })
@@ -1768,11 +1947,40 @@ fn member_digest<'a>(members: impl Iterator<Item = &'a FinalLiveMemberEvidence>)
     state
 }
 
+/// Canonical binding for the complete ordered raw interval payload.  Float
+/// bits are retained verbatim: this boundary must distinguish even a one-ULP
+/// payload change rather than merely proving that the surrounding snapshot
+/// headers still match.
+fn raw_interval_digest(intervals: &[TransitRayInterval]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut state = OFFSET;
+    let mut word = |value: u64| {
+        state ^= value;
+        state = state.wrapping_mul(PRIME);
+    };
+    word(intervals.len() as u64);
+    for interval in intervals {
+        word(u64::from(interval.member.slot()));
+        word(u64::from(interval.member.generation()));
+        word(match interval.designed_end {
+            None => 0,
+            Some(EmbedEnd::Terminalward) => 1,
+            Some(EmbedEnd::Rootward) => 2,
+        });
+        word(u64::from_ne_bytes(i64::from(interval.ray).to_ne_bytes()));
+        word(interval.s_a_mm.to_bits());
+        word(interval.s_b_mm.to_bits());
+    }
+    state
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use geom_kernel::{NativeSurface, NativeSurfaceConfig};
     use plinth_core::{m0_constants, RegistryProvenanceClass};
+    use plinth_mesh::{build_face_topology, mesh_fingerprint, FaceTopology, Mesh, WeldPolicy};
 
     fn scar_policy() -> TransitPolicySnapshot {
         TransitPolicySnapshot::from_constants(m0_constants().expect("M0 constants"))
@@ -2106,8 +2314,8 @@ mod tests {
         )
     }
 
-    fn surface() -> NativeSurface {
-        let vertices = [
+    fn cube_parts() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+        let vertices = vec![
             [0.0, 0.0, 0.0],
             [1.0, 0.0, 0.0],
             [1.0, 1.0, 0.0],
@@ -2117,7 +2325,7 @@ mod tests {
             [1.0, 1.0, 1.0],
             [0.0, 1.0, 1.0],
         ];
-        let faces = [
+        let faces = vec![
             [0, 2, 1],
             [0, 3, 2],
             [4, 5, 6],
@@ -2131,6 +2339,11 @@ mod tests {
             [3, 0, 4],
             [3, 4, 7],
         ];
+        (vertices, faces)
+    }
+
+    fn surface() -> NativeSurface {
+        let (vertices, faces) = cube_parts();
         NativeSurface::from_indexed(
             &vertices,
             &faces,
@@ -2140,6 +2353,23 @@ mod tests {
             },
         )
         .expect("sealed transit fixture surface")
+    }
+
+    fn scar_authorities() -> (Mesh, FaceTopology, NativeSurface, String) {
+        let (vertices, faces) = cube_parts();
+        let mesh = Mesh::new(vertices.clone(), faces.clone()).expect("SCAR fixture mesh");
+        let topology = build_face_topology(&mesh, WeldPolicy::None).expect("SCAR fixture topology");
+        let surface = NativeSurface::from_indexed(
+            &vertices,
+            &faces,
+            NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 4 * 1024 * 1024,
+            },
+        )
+        .expect("SCAR fixture native surface");
+        let digest = mesh_fingerprint(&mesh).expect("SCAR fixture fingerprint");
+        (mesh, topology, surface, digest)
     }
 
     fn limits(
@@ -2170,6 +2400,394 @@ mod tests {
             nonstub,
         )
         .expect("fixture limits")
+    }
+
+    fn with_scar_fixture<T>(
+        use_fixture: impl FnOnce(
+            SupportVerificationSnapshot<'_>,
+            TransitIntervalBatch,
+            AnchoredTransitBatch,
+            TransitScarMeasurementRequest,
+        ) -> T,
+    ) -> T {
+        let (mesh, topology, surface, mesh_digest) = scar_authorities();
+        let members = vec![
+            fixture_member(
+                1,
+                MemberKind::Stub,
+                Some(EmbedEnd::Terminalward),
+                [0.2, 0.5, 0.5],
+                [-1.0, 0.5, 0.5],
+                0.1,
+                0.2,
+            ),
+            fixture_member(
+                2,
+                MemberKind::Shoot,
+                Some(EmbedEnd::Rootward),
+                [2.0, 0.5, 0.5],
+                [0.8, 0.5, 0.5],
+                0.1,
+                0.3,
+            ),
+            fixture_member(
+                3,
+                MemberKind::Brace,
+                Some(EmbedEnd::Terminalward),
+                [0.5, 0.2, 0.5],
+                [0.5, 2.0, 0.5],
+                0.2,
+                0.1,
+            ),
+        ];
+        let snapshot = SupportVerificationSnapshot::transit_test_fixture(
+            &mesh,
+            &topology,
+            &surface,
+            &mesh_digest,
+            members,
+        );
+        snapshot
+            .validate_integrity()
+            .expect("bounded SCAR snapshot integrity");
+        let raw_limits = limits(&surface, 1, 2);
+        let resource_plan = preflight(3, 1, raw_limits).expect("bounded raw resource plan");
+        let intervals = snapshot
+            .final_live_members()
+            .zip([0.05, 0.2, 0.1])
+            .map(|(member, chord)| TransitRayInterval {
+                member: member.key(),
+                designed_end: member.embed_end(),
+                ray: -1,
+                s_a_mm: 0.0,
+                s_b_mm: chord,
+            })
+            .collect::<Vec<_>>();
+        let raw = TransitIntervalBatch {
+            snapshot_digest: snapshot.digest(),
+            member_digest: member_digest(snapshot.final_live_members()),
+            surface_digest: surface.source_triangle_soup_digest(),
+            raw_evidence_digest: raw_interval_digest(&intervals),
+            resource_plan,
+            intervals: intervals.into_boxed_slice(),
+        };
+        let anchored = anchor(&snapshot, &raw).expect("bounded raw intervals anchor");
+        let request = TransitScarMeasurementRequest::new(
+            0.15,
+            scar_policy(),
+            raw_limits,
+            3,
+            2,
+            3,
+            usize::MAX,
+        )
+        .expect("bounded SCAR request");
+        use_fixture(snapshot, raw, anchored, request)
+    }
+
+    #[test]
+    fn scar_measurement_is_one_anchor_batch_one_projection_batch_and_keeps_ordered_geometry() {
+        with_scar_fixture(|snapshot, raw, anchored, request| {
+            reset_live_kernel_batch_calls();
+            let measured = measure_scar(&snapshot, &raw, &anchored, &request)
+                .expect("bounded SCAR geometry measurement");
+            assert_eq!(
+                live_calls(),
+                LiveCalls {
+                    scar_anchor_query_calls: 1,
+                    scar_exit_projection_calls: 1,
+                    scar_row_allocations: 1,
+                    scar_evidence_allocations: 1,
+                    ..LiveCalls::ZERO
+                },
+                "three members still use one gathered anchor query and one gathered exit projection"
+            );
+            assert_eq!(measured.raw_evidence_digest(), raw.raw_evidence_digest());
+            assert_eq!(
+                measured
+                    .evidence()
+                    .iter()
+                    .map(|row| (row.member, row.designed_end))
+                    .collect::<Vec<_>>(),
+                [
+                    (
+                        MemberKey::transit_test_fixture(1, 0),
+                        EmbedEnd::Terminalward
+                    ),
+                    (MemberKey::transit_test_fixture(2, 0), EmbedEnd::Rootward),
+                    (
+                        MemberKey::transit_test_fixture(3, 0),
+                        EmbedEnd::Terminalward
+                    ),
+                ]
+            );
+
+            let evidence = measured.evidence();
+            assert_eq!(evidence[0].anchor_point_mm, [0.2, 0.5, 0.5]);
+            assert_eq!(evidence[1].anchor_point_mm, [0.8, 0.5, 0.5]);
+            assert_eq!(evidence[2].anchor_point_mm, [0.5, 0.2, 0.5]);
+            assert_eq!(evidence[0].interval_chord_mm, 0.05);
+            assert!(evidence[0].exit_point_mm.is_none());
+            assert!(evidence[0].cosine.is_none());
+            assert!(evidence[1].exit_point_mm.is_some());
+            assert!(evidence[2].exit_point_mm.is_some());
+
+            let exit_inputs = [[1.0, 0.5, 0.5], [0.5, 0.3, 0.5]];
+            let (exit_distances, exit_points, exit_faces, exit_normals) =
+                snapshot.native_surface().project(&exit_inputs);
+            for (output_index, evidence_index) in [1usize, 2].into_iter().enumerate() {
+                let row = &evidence[evidence_index];
+                assert_eq!(row.exit_point_mm, Some(exit_points[output_index]));
+                assert_eq!(row.exit_face, Some(exit_faces[output_index]));
+                assert_eq!(row.exit_normal, Some(exit_normals[output_index]));
+                assert!(exit_distances[output_index].is_finite());
+            }
+            let rootward_axis = [-1.0, 0.0, 0.0];
+            let rootward_normal = exit_normals[0];
+            let signed_dot = rootward_axis[0] * rootward_normal[0]
+                + rootward_axis[1] * rootward_normal[1]
+                + rootward_axis[2] * rootward_normal[2];
+            assert_eq!(evidence[1].cosine, Some(signed_dot.abs()));
+            assert!(evidence[1].cosine.unwrap() >= 0.0, "cosine uses abs(dot)");
+
+            let (anchor_distances, anchor_faces) = snapshot.native_surface().query(
+                &evidence
+                    .iter()
+                    .map(|row| row.anchor_point_mm)
+                    .collect::<Vec<_>>(),
+                f64::INFINITY,
+            );
+            for (index, row) in evidence.iter().enumerate() {
+                assert_eq!(row.anchor_face, anchor_faces[index]);
+                assert_eq!(row.anchor_distance_mm, anchor_distances[index].sqrt());
+            }
+
+            let expected_terminal_radius = 0.15 + (0.2 - 0.15) * (0.05 / 1.2);
+            assert_eq!(evidence[0].diagnostic.r_x_mm, expected_terminal_radius);
+            assert_eq!(evidence[0].diagnostic.ball_radius_mm, 0.15 * 1.5);
+            let expected_rootward_radius = 0.3 + (0.1 - 0.3) * (0.2 / 1.2);
+            assert_eq!(evidence[1].diagnostic.r_x_mm, expected_rootward_radius);
+            assert_eq!(evidence[1].diagnostic.ball_radius_mm, 0.3 * 1.4);
+
+            reset_live_kernel_batch_calls();
+            let repeated = measure_scar(&snapshot, &raw, &anchored, &request)
+                .expect("repeated bounded SCAR measurement");
+            assert_eq!(measured, repeated, "ordered evidence is deterministic");
+            assert_eq!(
+                live_calls().scar_anchor_query_calls,
+                1,
+                "there is no per-member anchor query"
+            );
+            assert_eq!(
+                live_calls().scar_exit_projection_calls,
+                1,
+                "there is no per-member exit projection"
+            );
+        });
+    }
+
+    #[test]
+    fn scar_measurement_rejects_every_stale_binding_and_malformed_anchor_before_work() {
+        with_scar_fixture(|mut snapshot, raw, anchored, request| {
+            let assert_no_work = |result: Result<TransitScarMeasurement, _>, expected| {
+                assert_eq!(result.unwrap_err(), expected);
+                assert_eq!(live_calls(), LiveCalls::ZERO);
+            };
+
+            let mut changed_payload = raw.clone();
+            changed_payload.intervals[0].s_b_mm =
+                f64::from_bits(changed_payload.intervals[0].s_b_mm.to_bits() + 1);
+            reset_live_kernel_batch_calls();
+            assert_no_work(
+                measure_scar(&snapshot, &changed_payload, &anchored, &request),
+                TransitScarMeasurementError::RawBinding,
+            );
+
+            let mut stale_raw = raw.clone();
+            stale_raw.snapshot_digest ^= 1;
+            reset_live_kernel_batch_calls();
+            assert_no_work(
+                measure_scar(&snapshot, &stale_raw, &anchored, &request),
+                TransitScarMeasurementError::RawBinding,
+            );
+
+            let mut stale_anchor = anchored.clone();
+            stale_anchor.raw_evidence_digest ^= 1;
+            reset_live_kernel_batch_calls();
+            assert_no_work(
+                measure_scar(&snapshot, &raw, &stale_anchor, &request),
+                TransitScarMeasurementError::RawBinding,
+            );
+
+            let mut changed_anchor = anchored.clone();
+            changed_anchor.members[0].rays[0].crossings[0].chord_mm = 0.04;
+            reset_live_kernel_batch_calls();
+            assert_no_work(
+                measure_scar(&snapshot, &raw, &changed_anchor, &request),
+                TransitScarMeasurementError::AnchorBinding,
+            );
+
+            let mut missing_axis = anchored.clone();
+            missing_axis.members[0].rays = Box::new([]);
+            reset_live_kernel_batch_calls();
+            assert_no_work(
+                measure_scar(&snapshot, &raw, &missing_axis, &request),
+                TransitScarMeasurementError::AnchorBinding,
+            );
+
+            let mut duplicate_axis = anchored.clone();
+            let axis = duplicate_axis.members[0].rays[0].clone();
+            duplicate_axis.members[0].rays = vec![axis.clone(), axis].into_boxed_slice();
+            reset_live_kernel_batch_calls();
+            assert_no_work(
+                measure_scar(&snapshot, &raw, &duplicate_axis, &request),
+                TransitScarMeasurementError::AnchorBinding,
+            );
+
+            let mut stale_policy = request.clone();
+            stale_policy.policy.a_abs_mm2 =
+                f64::from_bits(stale_policy.policy.a_abs_mm2.to_bits() + 1);
+            reset_live_kernel_batch_calls();
+            assert_no_work(
+                measure_scar(&snapshot, &raw, &anchored, &stale_policy),
+                TransitScarMeasurementError::PolicyBinding,
+            );
+
+            snapshot.transit_test_stale_digest();
+            reset_live_kernel_batch_calls();
+            assert_no_work(
+                measure_scar(&snapshot, &raw, &anchored, &request),
+                TransitScarMeasurementError::RawBinding,
+            );
+        });
+    }
+
+    #[test]
+    fn scar_resource_caps_are_exact_and_one_less_refuses_before_allocation_or_query() {
+        with_scar_fixture(|snapshot, raw, anchored, request| {
+            let unconstrained = scar_preflight(3, 2, &request).expect("fixture SCAR plan");
+            assert_eq!(
+                unconstrained.logical_peak_bytes,
+                unconstrained.member_row_bytes
+                    + unconstrained.anchor_input_bytes
+                    + unconstrained.query_result_bytes
+                    + unconstrained.exit_input_bytes
+                    + unconstrained.projection_result_bytes
+                    + unconstrained.output_bytes
+                    + unconstrained.boxed_conversion_bytes
+            );
+            let exact = TransitScarMeasurementRequest::new(
+                request.tip_r_min_mm,
+                request.policy.clone(),
+                request.raw_interval_limits,
+                3,
+                2,
+                3,
+                unconstrained.logical_peak_bytes,
+            )
+            .expect("all exact SCAR caps");
+            reset_live_kernel_batch_calls();
+            let exact_result = measure_scar(&snapshot, &raw, &anchored, &exact)
+                .expect("all exact caps admit one batch");
+            assert_eq!(exact_result.resource_plan(), unconstrained);
+
+            for (resource, refused) in [
+                (
+                    "anchor query rows",
+                    TransitScarMeasurementRequest {
+                        max_anchor_query_rows: 2,
+                        ..exact.clone()
+                    },
+                ),
+                (
+                    "exit projection rows",
+                    TransitScarMeasurementRequest {
+                        max_exit_projection_rows: 1,
+                        ..exact.clone()
+                    },
+                ),
+                (
+                    "retained anchor evidence",
+                    TransitScarMeasurementRequest {
+                        max_retained_anchor_evidence: 2,
+                        ..exact.clone()
+                    },
+                ),
+                (
+                    "logical peak bytes",
+                    TransitScarMeasurementRequest {
+                        max_logical_peak_bytes: unconstrained.logical_peak_bytes - 1,
+                        ..exact.clone()
+                    },
+                ),
+            ] {
+                reset_live_kernel_batch_calls();
+                assert_eq!(
+                    measure_scar(&snapshot, &raw, &anchored, &refused),
+                    Err(TransitScarMeasurementError::ResourceLimit { resource })
+                );
+                assert_eq!(
+                    live_calls(),
+                    LiveCalls::ZERO,
+                    "{resource} refuses before retained allocation or native call"
+                );
+            }
+
+            let overflow_request = TransitScarMeasurementRequest {
+                max_anchor_query_rows: usize::MAX,
+                max_exit_projection_rows: usize::MAX,
+                max_retained_anchor_evidence: usize::MAX,
+                max_logical_peak_bytes: usize::MAX,
+                ..request
+            };
+            reset_live_kernel_batch_calls();
+            assert!(matches!(
+                scar_preflight(usize::MAX, 0, &overflow_request),
+                Err(TransitScarMeasurementError::ArithmeticOverflow { .. })
+            ));
+            assert_eq!(live_calls(), LiveCalls::ZERO);
+        });
+    }
+
+    #[test]
+    fn raw_evidence_digest_covers_order_and_every_interval_field() {
+        let first = raw_interval(0.0, 0.1);
+        let base = raw_interval_digest(&[first]);
+        let mut changed_member = first;
+        changed_member.member = MemberKey::transit_test_fixture(2, 0);
+        let mut changed_generation = first;
+        changed_generation.member = MemberKey::transit_test_fixture(1, 1);
+        let mut changed_end = first;
+        changed_end.designed_end = Some(EmbedEnd::Rootward);
+        let mut changed_ray = first;
+        changed_ray.ray = 0;
+        let mut changed_start = first;
+        changed_start.s_a_mm = f64::from_bits(changed_start.s_a_mm.to_bits() + 1);
+        let mut changed_end_s = first;
+        changed_end_s.s_b_mm = f64::from_bits(changed_end_s.s_b_mm.to_bits() + 1);
+        for changed in [
+            changed_member,
+            changed_generation,
+            changed_end,
+            changed_ray,
+            changed_start,
+            changed_end_s,
+        ] {
+            assert_ne!(base, raw_interval_digest(&[changed]));
+        }
+        assert_ne!(base, raw_interval_digest(&[]), "length is in the digest");
+
+        let mut second = raw_interval(0.2, 0.4);
+        second.ray = 0;
+        assert_ne!(
+            raw_interval_digest(&[first, second]),
+            raw_interval_digest(&[second, first])
+        );
+        second.designed_end = Some(EmbedEnd::Rootward);
+        assert_ne!(
+            raw_interval_digest(&[first, raw_interval(0.2, 0.4)]),
+            raw_interval_digest(&[first, second])
+        );
     }
 
     fn interval(ray: i32, s_a: f64, s_b: f64) -> Interval {
@@ -2690,6 +3308,7 @@ mod tests {
                 member_digest: member_digest([&stub, &nonstub].into_iter()),
                 surface_digest: surface.source_triangle_soup_digest(),
                 resource_plan: plan,
+                raw_evidence_digest: raw_interval_digest(&evidence),
                 intervals: evidence.into_boxed_slice(),
             };
             assert_eq!(
