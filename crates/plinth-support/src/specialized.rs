@@ -6,7 +6,7 @@
 //! contact plan.  Logical obligations remain distinct from physical seats.
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, PointCloudIndex, RadiusQueryLimits};
 use plinth_core::{m0_constants, LayerPlan};
@@ -21,8 +21,9 @@ use crate::perception::{
 };
 use crate::{
     assess_coverage, build_dyadic_coverage_samples, coverage_assessment_resource_plan, BuildFrame,
-    ContactSelectionConfig, ContactSelectionError, CoverageAssessmentLimits, CoverageObjective,
-    CoverageSample, SelectedContact, SelectedContacts, SupportIsland, SupportPerceptionConfig,
+    ContactCandidateId, ContactCandidatePool, ContactSelectionConfig, ContactSelectionError,
+    CoverageAssessmentLimits, CoverageObjective, CoverageSample, SelectedContact, SelectedContacts,
+    SupportIsland, SupportPerceptionConfig,
 };
 
 const SYNTHETIC_PATCH_RADIUS_MM: f64 = 1.5;
@@ -184,6 +185,282 @@ pub struct RegularContactRoute {
     component_id: u32,
 }
 
+/// Which immutable candidate authority supplied a repair row.  This remains
+/// part of the id even though synthetic ids are allocated disjointly: a raw
+/// candidate number is not enough to name a route-expanded repair seat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum RepairRowSourceKind {
+    Generic,
+    SyntheticIsland,
+}
+
+/// Stable identity of one route-expanded repair row.  The owner and topology
+/// component deliberately remain in the key because one source candidate can
+/// legally be available to more than one logical island.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct RepairRowId {
+    owner_island_id: u32,
+    candidate_id: ContactCandidateId,
+    face_id: u32,
+    component_id: u32,
+    source_kind: RepairRowSourceKind,
+}
+
+/// One frozen candidate seat retained verbatim for a later regular-only
+/// physical contact.  No later stage may recreate this geometry from ids.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RepairRow {
+    id: RepairRowId,
+    order: usize,
+    candidate: crate::ContactCandidate,
+}
+
+impl RepairRow {
+    pub(crate) const fn id(&self) -> RepairRowId {
+        self.id
+    }
+
+    pub(crate) const fn order(&self) -> usize {
+        self.order
+    }
+
+    pub(crate) fn candidate(&self) -> &crate::ContactCandidate {
+        &self.candidate
+    }
+}
+
+/// Occupancy evidence for a frozen row.  A shared demanded regular route is
+/// occupied but explicitly non-removable for the future repair controller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RepairRowOccupancy {
+    pub(crate) row_id: RepairRowId,
+    pub(crate) shared_demanded: bool,
+}
+
+/// One immutable, route-expanded repair authority spanning generic and
+/// synthetic-island candidates produced by the single specialized pass.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RepairPool {
+    lineage_root: u64,
+    rows: Vec<RepairRow>,
+    digest: u64,
+}
+
+impl RepairPool {
+    fn build(
+        lineage_root: u64,
+        generic: &ContactCandidatePool,
+        generic_islands: &[SupportIsland],
+        synthetic: Option<&ContactCandidatePool>,
+        synthetic_islands: &[SupportIsland],
+        components: &[u32],
+    ) -> Result<Self, SpecializedError> {
+        let mut candidate_ids = BTreeSet::new();
+        for candidate in generic.candidates().iter().chain(
+            synthetic
+                .into_iter()
+                .flat_map(ContactCandidatePool::candidates),
+        ) {
+            if !candidate_ids.insert(candidate.id) {
+                return Err(SpecializedError::RepairCandidateIdCollision {
+                    candidate_id: candidate.id,
+                });
+            }
+        }
+        let mut rows = Vec::new();
+        Self::append_rows(
+            &mut rows,
+            generic.candidates(),
+            generic_islands,
+            components,
+            RepairRowSourceKind::Generic,
+        )?;
+        if let Some(synthetic) = synthetic {
+            Self::append_rows(
+                &mut rows,
+                synthetic.candidates(),
+                synthetic_islands,
+                components,
+                RepairRowSourceKind::SyntheticIsland,
+            )?;
+        }
+        let mut pool = Self {
+            lineage_root,
+            rows,
+            digest: 0,
+        };
+        pool.digest = pool.compute_digest();
+        Ok(pool)
+    }
+
+    fn append_rows(
+        rows: &mut Vec<RepairRow>,
+        candidates: &[crate::ContactCandidate],
+        islands: &[SupportIsland],
+        components: &[u32],
+        source_kind: RepairRowSourceKind,
+    ) -> Result<(), SpecializedError> {
+        for island in islands {
+            for candidate in candidates {
+                if island.face_ids.binary_search(&candidate.face_id).is_err() {
+                    continue;
+                }
+                let component_id = *components
+                    .get(candidate.face_id as usize)
+                    .ok_or(SpecializedError::InvalidRepairRow)?;
+                let id = RepairRowId {
+                    owner_island_id: island.id,
+                    candidate_id: candidate.id,
+                    face_id: candidate.face_id,
+                    component_id,
+                    source_kind,
+                };
+                if rows.iter().any(|row| row.id == id) {
+                    return Err(SpecializedError::DuplicateRepairRow { id });
+                }
+                let order = rows.len();
+                rows.push(RepairRow {
+                    id,
+                    order,
+                    candidate: candidate.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn row(&self, id: RepairRowId) -> Option<&RepairRow> {
+        self.rows.get(id_index(&self.rows, id)?)
+    }
+
+    fn resolve_route(&self, route: RegularContactRoute) -> Result<RepairRowId, SpecializedError> {
+        let mut matching = None;
+        for row in &self.rows {
+            if row.id.owner_island_id == route.owner_island_id
+                && row.id.candidate_id.0 == route.candidate_id
+                && row.id.face_id == route.coverage_face_id
+                && row.id.component_id == route.component_id
+            {
+                if matching.replace(row.id).is_some() {
+                    return Err(SpecializedError::AmbiguousRepairRoute { route });
+                }
+            }
+        }
+        matching.ok_or(SpecializedError::MissingRepairRoute { route })
+    }
+
+    fn validate_contacts(
+        &self,
+        contacts: &[SpecializedPhysicalContact],
+    ) -> Result<(), SpecializedError> {
+        if self.compute_digest() != self.digest {
+            return Err(SpecializedError::StaleRepairPool);
+        }
+        let mut occupied = BTreeSet::new();
+        for contact in contacts {
+            for &route in contact.regular_routes() {
+                let id = self.resolve_route(route)?;
+                if !occupied.insert(id) {
+                    return Err(SpecializedError::DuplicateRepairRoute { id });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn occupied_for_contacts(
+        &self,
+        contacts: &[SpecializedPhysicalContact],
+    ) -> Result<Vec<RepairRowOccupancy>, SpecializedError> {
+        self.validate_contacts(contacts)?;
+        let mut rows = Vec::new();
+        for contact in contacts {
+            for &route in contact.regular_routes() {
+                rows.push(RepairRowOccupancy {
+                    row_id: self.resolve_route(route)?,
+                    shared_demanded: !contact.demands().is_empty(),
+                });
+            }
+        }
+        rows.sort_unstable_by_key(|row| self.row(row.row_id).map_or(usize::MAX, RepairRow::order));
+        Ok(rows)
+    }
+
+    fn failing_eligible_rows(
+        &self,
+        island_id: u32,
+        component_id: u32,
+        failed: &BTreeSet<RepairRowId>,
+    ) -> Vec<&RepairRow> {
+        self.rows
+            .iter()
+            .filter(|row| {
+                row.id.owner_island_id == island_id
+                    && row.id.component_id == component_id
+                    && !failed.contains(&row.id)
+            })
+            .collect()
+    }
+
+    fn validate_lineage(&self, lineage_root: u64) -> Result<(), SpecializedError> {
+        if self.lineage_root != lineage_root || self.compute_digest() != self.digest {
+            return Err(SpecializedError::StaleRepairPool);
+        }
+        Ok(())
+    }
+
+    fn compute_digest(&self) -> u64 {
+        let mut hash = Fnv::new();
+        hash.u64(self.lineage_root);
+        for row in &self.rows {
+            hash.usize(row.order);
+            hash.u32(row.id.owner_island_id);
+            hash.u64(row.id.candidate_id.0);
+            hash.u32(row.id.face_id);
+            hash.u32(row.id.component_id);
+            hash.u8(match row.id.source_kind {
+                RepairRowSourceKind::Generic => 0,
+                RepairRowSourceKind::SyntheticIsland => 1,
+            });
+            hash.u64(row.candidate.id.0);
+            hash.u32(row.candidate.face_id);
+            hash.point3(row.candidate.point_mm);
+            hash.point3(row.candidate.normal);
+            hash.f64(row.candidate.supported_area_mm2);
+            hash.f64(row.candidate.overhang_excess);
+            hash.f64(row.candidate.delicacy);
+        }
+        hash.finish()
+    }
+
+    fn hash_into(&self, hash: &mut Fnv) {
+        hash.u64(self.lineage_root);
+        hash.u64(self.digest);
+        for row in &self.rows {
+            hash.usize(row.order);
+            hash.u32(row.id.owner_island_id);
+            hash.u64(row.id.candidate_id.0);
+            hash.u32(row.id.face_id);
+            hash.u32(row.id.component_id);
+            hash.u8(match row.id.source_kind {
+                RepairRowSourceKind::Generic => 0,
+                RepairRowSourceKind::SyntheticIsland => 1,
+            });
+            hash.u64(row.candidate.id.0);
+            hash.u32(row.candidate.face_id);
+            hash.point3(row.candidate.point_mm);
+            hash.point3(row.candidate.normal);
+            hash.f64(row.candidate.supported_area_mm2);
+            hash.f64(row.candidate.overhang_excess);
+            hash.f64(row.candidate.delicacy);
+        }
+    }
+}
+
+fn id_index(rows: &[RepairRow], id: RepairRowId) -> Option<usize> {
+    rows.iter().position(|row| row.id == id)
+}
+
 impl SpecializedPhysicalContact {
     #[must_use]
     pub const fn contact_id(&self) -> u64 {
@@ -303,6 +580,7 @@ pub struct SpecializedContactPlan {
     generic_slice_thread_evidence: (usize, usize),
     islands: Vec<SupportIsland>,
     coverage_samples: Vec<CoverageSample>,
+    repair_pool: RepairPool,
     contacts: Vec<SpecializedPhysicalContact>,
     load_partition: FinalizedLoadPartition,
     gate_evidence: SpecializedGateEvidence,
@@ -316,6 +594,33 @@ impl SpecializedContactPlan {
     #[must_use]
     pub fn coverage_samples(&self) -> &[CoverageSample] {
         &self.coverage_samples
+    }
+
+    /// Crate-private controller authority.  The future repair loop can read a
+    /// verbatim row, but cannot fabricate or reorder one.
+    pub(crate) fn repair_row(&self, id: RepairRowId) -> Option<&RepairRow> {
+        self.repair_pool.row(id)
+    }
+
+    pub(crate) fn occupied_repair_rows(&self) -> Result<Vec<RepairRowOccupancy>, SpecializedError> {
+        self.repair_pool.occupied_for_contacts(&self.contacts)
+    }
+
+    pub(crate) fn failing_repair_rows(
+        &self,
+        island_id: u32,
+        component_id: u32,
+        failed: &BTreeSet<RepairRowId>,
+    ) -> Result<Vec<&RepairRow>, SpecializedError> {
+        let mut excluded = failed.clone();
+        excluded.extend(
+            self.occupied_repair_rows()?
+                .into_iter()
+                .map(|occupancy| occupancy.row_id),
+        );
+        Ok(self
+            .repair_pool
+            .failing_eligible_rows(island_id, component_id, &excluded))
     }
     #[must_use]
     pub fn contacts(&self) -> &[SpecializedPhysicalContact] {
@@ -361,6 +666,9 @@ impl SpecializedContactPlan {
             perception_limits,
         )?;
         validate_regular(mesh, generic, regular, selection_config)?;
+        self.repair_pool
+            .validate_lineage(repair_pool_lineage_root(generic))?;
+        self.repair_pool.validate_contacts(&self.contacts)?;
         if bound_authority_digest(generic, regular, selection_config, limits)
             != self.authority_digest
         {
@@ -372,6 +680,7 @@ impl SpecializedContactPlan {
     pub fn digest(&self) -> u64 {
         let mut hash = Fnv::new();
         hash.u64(self.semantic_authority_digest);
+        self.repair_pool.hash_into(&mut hash);
         for island in &self.islands {
             hash.u32(island.id);
             for &face in &island.face_ids {
@@ -507,6 +816,24 @@ pub enum SpecializedError {
     PrimaryRegularIdentityMismatch,
     #[error("specialized contact authority is stale or belongs to another input")]
     StaleAuthority,
+    #[error("the immutable repair pool is stale or its lineage does not match this plan")]
+    StaleRepairPool,
+    #[error("repair candidate id {candidate_id:?} occurs in more than one source")]
+    RepairCandidateIdCollision { candidate_id: ContactCandidateId },
+    #[error(
+        "synthetic candidate identity cannot be allocated without colliding with generic rows"
+    )]
+    SyntheticCandidateIdOverflow,
+    #[error("repair pool contains an invalid source row")]
+    InvalidRepairRow,
+    #[error("repair pool contains a duplicate route-expanded row {id:?}")]
+    DuplicateRepairRow { id: RepairRowId },
+    #[error("regular route {route:?} does not map to an immutable repair row")]
+    MissingRepairRoute { route: RegularContactRoute },
+    #[error("regular route {route:?} maps to more than one immutable repair row")]
+    AmbiguousRepairRoute { route: RegularContactRoute },
+    #[error("more than one physical contact occupies immutable repair row {id:?}")]
+    DuplicateRepairRoute { id: RepairRowId },
     #[error("specialized projection returned an invalid face")]
     InvalidProjection,
     #[error("specialized satisfaction work requires {required} tests; limit is {limit}")]
@@ -688,11 +1015,6 @@ pub fn prepare_specialized_contacts(
         .diagnostic()
         .get();
 
-    let mut physical = regular
-        .contacts()
-        .iter()
-        .map(|contact| WorkingContact::regular(contact, topology.component_ids()))
-        .collect::<Vec<_>>();
     let first_synthetic_id = generic
         .islands()
         .iter()
@@ -704,46 +1026,50 @@ pub fn prepare_specialized_contacts(
         .filter(|island| island.id >= first_synthetic_id)
         .cloned()
         .collect::<Vec<_>>();
+    let mut synthetic_candidates = None;
+    let mut synthetic_selected = None;
     if !synthetic_islands.is_empty() {
         let payload = build_candidate_payload(mesh, &synthetic_islands, candidate_config)?;
         let delicacy = selection_config
             .delicacy_by_face
             .ok_or(ContactSelectionError::MissingDelicacySidecar)?;
-        let candidate_offset = generic
+        let candidate_offset = match generic
             .candidates()
             .candidates()
             .iter()
             .map(|candidate| candidate.id.0)
             .max()
-            .map_or(0, |id| id.saturating_add(1));
-        let synthetic_candidates = crate::ContactCandidatePool {
+        {
+            Some(id) => id
+                .checked_add(1)
+                .ok_or(SpecializedError::SyntheticCandidateIdOverflow)?,
+            None => 0,
+        };
+        let candidates = crate::ContactCandidatePool {
             candidates: payload
                 .rows()
                 .iter()
                 .enumerate()
-                .map(|(row, candidate)| crate::ContactCandidate {
-                    id: crate::ContactCandidateId(candidate_offset.saturating_add(row as u64)),
-                    face_id: candidate.face_id,
-                    point_mm: candidate.point_mm,
-                    normal: candidate.normal,
-                    supported_area_mm2: surface.geometry().areas()[candidate.face_id as usize],
-                    overhang_excess: -candidate.normal[2],
-                    delicacy: delicacy[candidate.face_id as usize],
+                .map(|(row, candidate)| {
+                    let row = u64::try_from(row)
+                        .map_err(|_| SpecializedError::SyntheticCandidateIdOverflow)?;
+                    let id = candidate_offset
+                        .checked_add(row)
+                        .ok_or(SpecializedError::SyntheticCandidateIdOverflow)?;
+                    Ok(crate::ContactCandidate {
+                        id: crate::ContactCandidateId(id),
+                        face_id: candidate.face_id,
+                        point_mm: candidate.point_mm,
+                        normal: candidate.normal,
+                        supported_area_mm2: surface.geometry().areas()[candidate.face_id as usize],
+                        overhang_excess: -candidate.normal[2],
+                        delicacy: delicacy[candidate.face_id as usize],
+                    })
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, SpecializedError>>()?,
         };
-        let selected = crate::select_contacts(
-            mesh,
-            &synthetic_candidates,
-            &synthetic_islands,
-            selection_config,
-        )?;
-        physical.extend(
-            selected
-                .contacts()
-                .iter()
-                .map(|contact| WorkingContact::regular(contact, topology.component_ids())),
-        );
+        let selected =
+            crate::select_contacts(mesh, &candidates, &synthetic_islands, selection_config)?;
         let expected_synthetic_samples = coverage_samples
             .iter()
             .filter(|sample| sample.island_id >= first_synthetic_id)
@@ -752,6 +1078,32 @@ pub fn prepare_specialized_contacts(
         if selected.coverage_samples() != expected_synthetic_samples {
             return Err(SpecializedError::StaleRegularContacts);
         }
+        synthetic_candidates = Some(candidates);
+        synthetic_selected = Some(selected);
+    }
+    let repair_pool = RepairPool::build(
+        repair_pool_lineage_root(generic),
+        generic.candidates(),
+        generic.islands(),
+        synthetic_candidates.as_ref(),
+        &synthetic_islands,
+        topology.component_ids(),
+    )?;
+    let mut physical = regular
+        .contacts()
+        .iter()
+        .map(|contact| WorkingContact::regular(contact, topology.component_ids(), &repair_pool))
+        .collect::<Result<Vec<_>, _>>()?;
+    if let Some(selected) = synthetic_selected.as_ref() {
+        physical.extend(
+            selected
+                .contacts()
+                .iter()
+                .map(|contact| {
+                    WorkingContact::regular(contact, topology.component_ids(), &repair_pool)
+                })
+                .collect::<Result<Vec<_>, _>>()?,
+        );
     }
     let mut demands = Vec::new();
     for seed in seeds {
@@ -836,6 +1188,7 @@ pub fn prepare_specialized_contacts(
             })?;
         contact.carried_area_mm2 += row.carried_area_mm2;
     }
+    repair_pool.validate_contacts(&contacts)?;
     Ok(SpecializedContactPlan {
         authority_digest: bound_authority_digest(generic, regular, selection_config, limits),
         semantic_authority_digest: bound_semantic_authority_digest(
@@ -847,6 +1200,7 @@ pub fn prepare_specialized_contacts(
         generic_slice_thread_evidence: generic.slice_thread_evidence(),
         islands,
         coverage_samples,
+        repair_pool,
         contacts,
         load_partition,
         gate_evidence,
@@ -1017,7 +1371,9 @@ fn add_synthetic_islands(
         .iter()
         .map(|island| island.id)
         .max()
-        .map_or(0, |id| id.saturating_add(1));
+        .map_or(Ok(0), |id| {
+            id.checked_add(1).ok_or(SpecializedError::OwnerIdOverflow)
+        })?;
     for (row, seed) in unowned.into_iter().enumerate() {
         if owners.contains_key(&seed.face_id) {
             continue;
@@ -1050,7 +1406,9 @@ fn add_synthetic_islands(
             owners.get_mut(&face).expect("inserted").dedup();
         }
         islands.push(island);
-        next_id = next_id.saturating_add(1);
+        next_id = next_id
+            .checked_add(1)
+            .ok_or(SpecializedError::OwnerIdOverflow)?;
     }
     islands.sort_by_key(|island| island.id);
     let _ = mesh;
@@ -1068,26 +1426,31 @@ struct WorkingContact {
 }
 
 impl WorkingContact {
-    fn regular(contact: &SelectedContact, components: &[u32]) -> Self {
+    fn regular(
+        contact: &SelectedContact,
+        components: &[u32],
+        repair_pool: &RepairPool,
+    ) -> Result<Self, SpecializedError> {
         let route = RegularContactRoute {
             candidate_id: contact.candidate_id.0,
             owner_island_id: contact.island_id,
             coverage_face_id: contact.served_face_id,
             component_id: components[contact.served_face_id as usize],
         };
+        repair_pool.resolve_route(route)?;
         let primary = PrimaryRegularIdentity {
             route,
             position_mm: contact.point_mm,
             normal: contact.normal,
         };
-        Self {
+        Ok(Self {
             position_mm: contact.point_mm,
             normal: contact.normal,
             seat_provenance: PhysicalSeatProvenance::Regular(primary),
             primary_regular: Some(primary),
             regular_routes: vec![route],
             demands: Vec::new(),
-        }
+        })
     }
     fn specialized(demand: SpecializedDemand) -> Self {
         let seat_provenance = specialized_seat_representative(&demand);
@@ -3260,6 +3623,16 @@ fn bound_authority_base(
     hash
 }
 
+/// The pool is rooted in the complete generic observation plan, including the
+/// synthetic-demand seeds from which its second source is deterministically
+/// derived.  Selection policy is separately bound by the plan authority.
+fn repair_pool_lineage_root(generic: &GenericContactPlan) -> u64 {
+    let mut hash = Fnv::new();
+    hash.u64(generic.digest());
+    hash.u64(generic.candidates().digest());
+    hash.finish()
+}
+
 fn bound_semantic_authority_digest(
     generic: &GenericContactPlan,
     regular: &SelectedContacts,
@@ -3400,6 +3773,185 @@ mod tests {
             regular_routes: vec![route],
             demands,
         }
+    }
+
+    fn repair_candidate(id: u64, face_id: u32, point_mm: [f64; 3]) -> crate::ContactCandidate {
+        crate::ContactCandidate {
+            id: ContactCandidateId(id),
+            face_id,
+            point_mm,
+            normal: [0.0, 0.0, -1.0],
+            supported_area_mm2: 1.0,
+            overhang_excess: 1.0,
+            delicacy: 0.0,
+        }
+    }
+
+    #[test]
+    fn repair_pool_binds_generic_and_synthetic_rows_in_exact_route_order() {
+        let generic = ContactCandidatePool {
+            candidates: vec![repair_candidate(7, 0, [1.0, 0.0, 0.0])],
+        };
+        let synthetic = ContactCandidatePool {
+            candidates: vec![repair_candidate(8, 1, [2.0, 0.0, 0.0])],
+        };
+        let pool = RepairPool::build(
+            41,
+            &generic,
+            &[
+                SupportIsland {
+                    id: 3,
+                    face_ids: vec![0],
+                },
+                SupportIsland {
+                    id: 4,
+                    face_ids: vec![0],
+                },
+            ],
+            Some(&synthetic),
+            &[SupportIsland {
+                id: 5,
+                face_ids: vec![1],
+            }],
+            &[11, 12],
+        )
+        .unwrap();
+        assert_eq!(pool.lineage_root, 41);
+        assert_eq!(pool.rows.len(), 3);
+        assert_eq!(
+            pool.rows.iter().map(RepairRow::order).collect::<Vec<_>>(),
+            vec![0, 1, 2]
+        );
+        assert_eq!(pool.rows[0].candidate().point_mm, [1.0, 0.0, 0.0]);
+        assert_eq!(pool.rows[2].candidate().point_mm, [2.0, 0.0, 0.0]);
+        assert_eq!(pool.rows[0].id.source_kind, RepairRowSourceKind::Generic);
+        assert_eq!(
+            pool.rows[2].id.source_kind,
+            RepairRowSourceKind::SyntheticIsland
+        );
+        assert_eq!(
+            pool.compute_digest(),
+            RepairPool::build(
+                41,
+                &generic,
+                &[
+                    SupportIsland {
+                        id: 3,
+                        face_ids: vec![0],
+                    },
+                    SupportIsland {
+                        id: 4,
+                        face_ids: vec![0],
+                    },
+                ],
+                Some(&synthetic),
+                &[SupportIsland {
+                    id: 5,
+                    face_ids: vec![1],
+                }],
+                &[11, 12],
+            )
+            .unwrap()
+            .digest
+        );
+    }
+
+    #[test]
+    fn repair_pool_rejects_collisions_and_validates_unique_shared_occupancy() {
+        let generic = ContactCandidatePool {
+            candidates: vec![repair_candidate(7, 0, [1.0, 0.0, 0.0])],
+        };
+        let collision = ContactCandidatePool {
+            candidates: vec![repair_candidate(7, 1, [2.0, 0.0, 0.0])],
+        };
+        assert!(matches!(
+            RepairPool::build(
+                1,
+                &generic,
+                &[SupportIsland {
+                    id: 3,
+                    face_ids: vec![0]
+                }],
+                Some(&collision),
+                &[SupportIsland {
+                    id: 4,
+                    face_ids: vec![1]
+                }],
+                &[11, 12],
+            ),
+            Err(SpecializedError::RepairCandidateIdCollision { .. })
+        ));
+
+        let pool = RepairPool::build(
+            1,
+            &generic,
+            &[SupportIsland {
+                id: 3,
+                face_ids: vec![0],
+            }],
+            None,
+            &[],
+            &[11],
+        )
+        .unwrap();
+        let route = RegularContactRoute {
+            candidate_id: 7,
+            owner_island_id: 3,
+            coverage_face_id: 0,
+            component_id: 11,
+        };
+        let contact = SpecializedPhysicalContact {
+            contact_id: 0,
+            position_mm: [1.0, 0.0, 0.0],
+            normal: [0.0, 0.0, -1.0],
+            seat_provenance: PhysicalSeatProvenance::Regular(PrimaryRegularIdentity {
+                route,
+                position_mm: [1.0, 0.0, 0.0],
+                normal: [0.0, 0.0, -1.0],
+            }),
+            carried_area_mm2: 0.0,
+            primary_regular: None,
+            regular_routes: vec![route],
+            demands: vec![minimum_demand(3, 0, 11, [1.0, 0.0, 0.0])],
+        };
+        let occupied = pool.occupied_for_contacts(&[contact.clone()]).unwrap();
+        assert_eq!(occupied.len(), 1);
+        assert!(occupied[0].shared_demanded);
+        assert!(matches!(
+            pool.validate_contacts(&[contact.clone(), contact]),
+            Err(SpecializedError::DuplicateRepairRoute { .. })
+        ));
+    }
+
+    #[test]
+    fn repair_pool_excludes_typed_failed_rows_and_rejects_stale_geometry() {
+        let generic = ContactCandidatePool {
+            candidates: vec![
+                repair_candidate(7, 0, [1.0, 0.0, 0.0]),
+                repair_candidate(8, 0, [2.0, 0.0, 0.0]),
+            ],
+        };
+        let mut pool = RepairPool::build(
+            9,
+            &generic,
+            &[SupportIsland {
+                id: 3,
+                face_ids: vec![0],
+            }],
+            None,
+            &[],
+            &[11],
+        )
+        .unwrap();
+        let failed = BTreeSet::from([pool.rows[0].id()]);
+        let eligible = pool.failing_eligible_rows(3, 11, &failed);
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].candidate().id, ContactCandidateId(8));
+        pool.rows[0].candidate.point_mm[0] = 99.0;
+        assert!(matches!(
+            pool.validate_lineage(9),
+            Err(SpecializedError::StaleRepairPool)
+        ));
     }
 
     #[test]

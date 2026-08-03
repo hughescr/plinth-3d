@@ -1077,7 +1077,23 @@ pub fn select_contacts(
     islands: &[SupportIsland],
     config: &ContactSelectionConfig<'_>,
 ) -> Result<SelectedContacts, ContactSelectionError> {
+    // The pre-routing repair loop is retained only as an explicit compatibility
+    // adapter while the specialized runner is wired.  New production routing
+    // consumes `select_contacts_baseline` plus the immutable repair pool.
     select_contacts_with_work(mesh, candidates, islands, config).map(|(selected, _)| selected)
+}
+
+/// Obtain the frozen baseline placement and A3 samples without invoking the
+/// legacy pre-routing coverage repair loop.  This reuses the one selection
+/// implementation so baseline and compatibility paths cannot drift.
+pub(crate) fn select_contacts_baseline(
+    mesh: &Mesh,
+    candidates: &ContactCandidatePool,
+    islands: &[SupportIsland],
+    config: &ContactSelectionConfig<'_>,
+) -> Result<SelectedContacts, ContactSelectionError> {
+    select_contacts_with_mode(mesh, candidates, islands, config, false)
+        .map(|(selected, _)| selected)
 }
 
 fn select_contacts_with_work(
@@ -1085,6 +1101,16 @@ fn select_contacts_with_work(
     candidates: &ContactCandidatePool,
     islands: &[SupportIsland],
     config: &ContactSelectionConfig<'_>,
+) -> Result<(SelectedContacts, SelectionWork), ContactSelectionError> {
+    select_contacts_with_mode(mesh, candidates, islands, config, true)
+}
+
+fn select_contacts_with_mode(
+    mesh: &Mesh,
+    candidates: &ContactCandidatePool,
+    islands: &[SupportIsland],
+    config: &ContactSelectionConfig<'_>,
+    legacy_pre_routing_repair: bool,
 ) -> Result<(SelectedContacts, SelectionWork), ContactSelectionError> {
     let delicacy = config
         .delicacy_by_face
@@ -1202,6 +1228,15 @@ fn select_contacts_with_work(
     for contact in &selected {
         coverage_index.insert(contact, &topology, &mut work);
     }
+    if !legacy_pre_routing_repair {
+        return Ok((
+            SelectedContacts {
+                contacts: selected,
+                coverage_samples: samples,
+            },
+            work,
+        ));
+    }
     for attempt in 0..=config.coverage_repair_max_attempts {
         let failing = failing_coverage_samples(
             &samples,
@@ -1232,7 +1267,7 @@ fn select_contacts_with_work(
                 attempts: attempt,
             });
         }
-        let repair = best_coverage_repair(
+        let repair = rank_coverage_repair_rows(
             candidates.candidates(),
             &samples,
             &failing,
@@ -1749,7 +1784,7 @@ fn failing_coverage_samples(
     .failing_sample_indices)
 }
 
-fn best_coverage_repair<'a>(
+pub(crate) fn rank_coverage_repair_rows<'a>(
     candidates: &'a [ContactCandidate],
     samples: &[CoverageSample],
     failing: &[usize],
@@ -1760,6 +1795,10 @@ fn best_coverage_repair<'a>(
 ) -> Option<(u32, &'a ContactCandidate)> {
     let radius_sq = radius_mm * radius_mm;
     let mut best: Option<(f64, usize, u32)> = None;
+    // The score matrix remains tiled in both axes; 65,536 is the registered
+    // production work bound even when a caller supplied a larger diagnostic
+    // cap.
+    let matrix_budget = matrix_budget.min(65_536).max(1);
     let sample_tile = ((matrix_budget as f64).sqrt() as usize).max(1);
     let candidate_tile = (matrix_budget / sample_tile).max(1);
     let mut route_keys = std::collections::BTreeSet::new();
@@ -1805,9 +1844,6 @@ fn best_coverage_repair<'a>(
             }
             for (candidate_offset, &candidate_row) in candidate_block.iter().enumerate() {
                 let score = scores[candidate_offset];
-                if score == 0.0 {
-                    continue;
-                }
                 if best.is_none_or(|(best_score, best_row, _)| {
                     score > best_score || (score == best_score && candidate_row < best_row)
                 }) {
@@ -3200,7 +3236,7 @@ mod tests {
         ];
         let occupied = vec![selected_contact(9, &candidates[0])];
         for budget in [1, 2, 3, 4, 16] {
-            let (island, repair) = best_coverage_repair(
+            let (island, repair) = rank_coverage_repair_rows(
                 &candidates,
                 &samples,
                 &[0, 1],
@@ -3213,6 +3249,42 @@ mod tests {
             assert_eq!(island, 9);
             assert_eq!(repair.id, ContactCandidateId(20));
         }
+    }
+
+    #[test]
+    fn repair_ranking_keeps_zero_score_rows_and_breaks_ties_by_source_order() {
+        let candidates = vec![
+            ContactCandidate {
+                id: ContactCandidateId(10),
+                face_id: 0,
+                point_mm: [100.0, 0.0, 0.0],
+                normal: [0.0, 0.0, -1.0],
+                supported_area_mm2: 1.0,
+                overhang_excess: 1.0,
+                delicacy: 0.0,
+            },
+            ContactCandidate {
+                id: ContactCandidateId(20),
+                face_id: 0,
+                point_mm: [101.0, 0.0, 0.0],
+                normal: [0.0, 0.0, -1.0],
+                supported_area_mm2: 1.0,
+                overhang_excess: 1.0,
+                delicacy: 0.0,
+            },
+        ];
+        let samples = vec![CoverageSample {
+            island_id: 9,
+            face_id: 0,
+            component_id: 3,
+            point_mm: [0.0, 0.0, 0.0],
+            area_mm2: 1.0,
+        }];
+        let (island, repair) =
+            rank_coverage_repair_rows(&candidates, &samples, &[0], &[], &[3], 1.0, 65_536)
+                .expect("zero-score rows remain eligible");
+        assert_eq!(island, 9);
+        assert_eq!(repair.id, ContactCandidateId(10));
     }
 
     #[test]
