@@ -303,6 +303,34 @@ fn planned_knn_refuses_each_preflight_cap_and_overflow_at_the_boundary() {
 }
 
 #[test]
+fn planned_knn_explicitly_rejects_empty_sources_and_preserves_empty_query_noop() {
+    let limits = KnnBatchLimits {
+        max_source_points: 1,
+        max_query_points: 0,
+        max_neighbors: 1,
+        max_logical_peak_bytes: usize::MAX,
+        max_work: usize::MAX,
+    };
+    assert_eq!(
+        KnnBatchPlan::new(0, 0, 1, limits),
+        Err(KnnBatchPlanError::RequestedNeighborsExceedPointCount {
+            requested: 1,
+            point_count: 0,
+        })
+    );
+    let plan = KnnBatchPlan::new(1, 0, 1, limits).unwrap();
+    let index = PointCloudIndex::new_for_knn_batch(&[[0.0; 3]], &plan).unwrap();
+    assert_eq!(
+        index.knn_batch_planned(&[], &plan).unwrap(),
+        NeighborCsr {
+            offsets: vec![0],
+            point_ids: vec![],
+            squared_distances: vec![],
+        }
+    );
+}
+
+#[test]
 fn planned_knn_all_equal_points_k_one_is_bounded_and_uses_lowest_id() {
     let points = vec![[0.0; 3]; 97];
     let plan = knn_plan(points.len(), 2, 1);

@@ -79,6 +79,11 @@ pub struct KnnBatchPlan {
 impl KnnBatchPlan {
     /// Check all dimensions and logical capacities before source/query gather,
     /// immutable-tree construction, or query execution.
+    ///
+    /// A zero-query plan is valid and executes as a CSR no-op (`offsets ==
+    /// [0]`) once built, matching the radius batch convention.  A zero-source
+    /// plan is rejected because kNN requires `k >= 1` and therefore cannot
+    /// name a neighbour before any build arithmetic occurs.
     pub fn new(
         source_count: usize,
         query_count: usize,

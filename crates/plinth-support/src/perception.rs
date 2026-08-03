@@ -36,6 +36,11 @@ pub struct GenericPerceptionLimits {
     pub max_slice_output_bytes: usize,
     pub max_loop_vertices: usize,
     pub max_minima_vertices: usize,
+    pub max_minima_knn_source_points: usize,
+    pub max_minima_knn_query_points: usize,
+    pub max_minima_knn_neighbors: usize,
+    pub max_minima_knn_logical_peak_bytes: usize,
+    pub max_minima_knn_work: usize,
     pub max_island_neighbor_pairs: usize,
     pub max_island_neighbor_bytes: usize,
     pub max_overlap_pairs: usize,
@@ -54,6 +59,11 @@ impl GenericPerceptionLimits {
             max_slice_output_bytes: 2 * 1024 * 1024 * 1024,
             max_loop_vertices: 100_000_000,
             max_minima_vertices: 20_000_000,
+            max_minima_knn_source_points: 20_000_000,
+            max_minima_knn_query_points: 20_000_000,
+            max_minima_knn_neighbors: 1,
+            max_minima_knn_logical_peak_bytes: 2 * 1024 * 1024 * 1024,
+            max_minima_knn_work: 100_000_000,
             max_island_neighbor_pairs: 100_000_000,
             max_island_neighbor_bytes: 2 * 1024 * 1024 * 1024,
             max_overlap_pairs: 100_000_000,
@@ -1710,6 +1720,7 @@ fn find_local_minima(
         surface.geometry().centroids(),
         surface.exterior_face_mask(),
         minima,
+        limits,
     )?;
 
     // Independent filter B: keep a true birth, or an inadequately carried
@@ -1788,30 +1799,36 @@ fn filter_minima_to_exterior_faces(
     face_centroids: &[[f64; 3]],
     exterior: &[bool],
     mut minima: Vec<LocalZMinimum>,
+    limits: GenericPerceptionLimits,
 ) -> Result<Vec<LocalZMinimum>, GenericPerceptionError> {
+    // An empty query batch is the established batch no-op: avoid both query
+    // gathering and index construction.  Empty sources with nonempty minima
+    // instead reach the typed kNN plan rejection below.
     if minima.is_empty()
         || !exterior.iter().any(|value| *value)
         || !exterior.iter().any(|value| !*value)
     {
         return Ok(minima);
     }
+    // Count before gathering positions or constructing Kiddo: this is the
+    // KNN authority carried by the public perception input.
+    let plan = KnnBatchPlan::new(
+        face_centroids.len(),
+        minima.len(),
+        1,
+        KnnBatchLimits {
+            max_source_points: limits.max_minima_knn_source_points,
+            max_query_points: limits.max_minima_knn_query_points,
+            max_neighbors: limits.max_minima_knn_neighbors,
+            max_logical_peak_bytes: limits.max_minima_knn_logical_peak_bytes,
+            max_work: limits.max_minima_knn_work,
+        },
+    )
+    .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?;
     let queries = minima
         .iter()
         .map(|minimum| minimum.position_mm)
         .collect::<Vec<_>>();
-    let plan = KnnBatchPlan::new(
-        face_centroids.len(),
-        queries.len(),
-        1,
-        KnnBatchLimits {
-            max_source_points: face_centroids.len(),
-            max_query_points: queries.len(),
-            max_neighbors: 1,
-            max_logical_peak_bytes: usize::MAX,
-            max_work: usize::MAX,
-        },
-    )
-    .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?;
     let nearest = PointCloudIndex::new_for_knn_batch(face_centroids, &plan)
         .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?
         .knn_batch_planned(&queries, &plan)
@@ -2374,6 +2391,11 @@ fn authority_fingerprint(
     result_config.usize(limits.max_slice_output_bytes);
     result_config.usize(limits.max_loop_vertices);
     result_config.usize(limits.max_minima_vertices);
+    result_config.usize(limits.max_minima_knn_source_points);
+    result_config.usize(limits.max_minima_knn_query_points);
+    result_config.usize(limits.max_minima_knn_neighbors);
+    result_config.usize(limits.max_minima_knn_logical_peak_bytes);
+    result_config.usize(limits.max_minima_knn_work);
     result_config.usize(limits.max_island_neighbor_pairs);
     result_config.usize(limits.max_island_neighbor_bytes);
     result_config.usize(limits.max_overlap_pairs);
@@ -2812,14 +2834,80 @@ mod tests {
         };
         let centroids = [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
         assert_eq!(
-            filter_minima_to_exterior_faces(&centroids, &[false, true], vec![minimum.clone()])
-                .unwrap(),
+            filter_minima_to_exterior_faces(
+                &centroids,
+                &[false, true],
+                vec![minimum.clone()],
+                GenericPerceptionLimits::production(),
+            )
+            .unwrap(),
             Vec::<LocalZMinimum>::new()
         );
         assert_eq!(
-            filter_minima_to_exterior_faces(&centroids, &[true, false], vec![minimum.clone()])
-                .unwrap(),
+            filter_minima_to_exterior_faces(
+                &centroids,
+                &[true, false],
+                vec![minimum.clone()],
+                GenericPerceptionLimits::production(),
+            )
+            .unwrap(),
             vec![minimum]
+        );
+    }
+
+    #[test]
+    fn exterior_filter_knn_caps_refuse_before_query_gather_and_larger_caps_preserve_rows() {
+        let minimum = LocalZMinimum {
+            position_mm: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, -1.0],
+            region_points_mm: vec![[0.0, 0.0, 0.0]],
+        };
+        let centroids = [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
+        let exact = GenericPerceptionLimits {
+            max_minima_knn_source_points: 2,
+            max_minima_knn_query_points: 1,
+            max_minima_knn_neighbors: 1,
+            max_minima_knn_logical_peak_bytes: 1024,
+            max_minima_knn_work: 2,
+            ..GenericPerceptionLimits::production()
+        };
+        let expected = filter_minima_to_exterior_faces(
+            &centroids,
+            &[true, false],
+            vec![minimum.clone()],
+            exact,
+        )
+        .unwrap();
+        assert_eq!(
+            filter_minima_to_exterior_faces(
+                &centroids,
+                &[true, false],
+                vec![minimum.clone()],
+                GenericPerceptionLimits {
+                    max_minima_knn_query_points: 0,
+                    ..exact
+                },
+            ),
+            Err(GenericPerceptionError::PointIndex(
+                "kNN query count 1 exceeds limit 0".to_owned()
+            ))
+        );
+        assert_eq!(
+            filter_minima_to_exterior_faces(
+                &centroids,
+                &[true, false],
+                vec![minimum],
+                GenericPerceptionLimits {
+                    max_minima_knn_source_points: 3,
+                    max_minima_knn_query_points: 2,
+                    max_minima_knn_neighbors: 2,
+                    max_minima_knn_logical_peak_bytes: 2048,
+                    max_minima_knn_work: 4,
+                    ..exact
+                },
+            )
+            .unwrap(),
+            expected
         );
     }
 
