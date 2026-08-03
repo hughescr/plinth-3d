@@ -49,6 +49,11 @@ pub mod perception;
 )]
 pub mod raft;
 pub(crate) mod rewire;
+#[allow(
+    dead_code,
+    reason = "crate-private sealed preparation is consumed by the pending support controller"
+)]
+pub(crate) mod runner;
 pub mod specialized;
 pub mod transient;
 
