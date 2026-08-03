@@ -174,6 +174,15 @@ payload; `planned_peak_build_bytes` and `planned_peak_validation_bytes` are
 separate conservative phase maxima. The 512 MiB peak cap applies independently
 to each phase.
 
+The native point-cloud kNN batch is separately planned before gathering,
+tree construction, or query execution. Its cap is logical element capacity
+only (not allocator metadata, alignment, or RSS): gathered source/query
+coordinates; the pinned Kiddo immutable-tree leaf coordinates/items/extents
+and stems; build sort indices; direct CSR offsets/IDs/distances; and one
+sequential inclusive-tie scratch row. The formula is tied to the pinned Kiddo
+layout/features (currently leaf size 32); any Kiddo pin or feature change must
+review that accounting before it is accepted.
+
 ### 8.1 Topology
 
 Let `F` be source faces, `V` exact vertices, and `E` retained directed CSR

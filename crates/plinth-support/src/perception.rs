@@ -10,8 +10,8 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use geom_kernel::{
-    NativeSurface, NativeSurfaceConfig, PlaneSliceLimits, PointCloudIndex, PointQueryError,
-    RadiusQueryLimits,
+    KnnBatchLimits, KnnBatchPlan, NativeSurface, NativeSurfaceConfig, PlaneSliceLimits,
+    PointCloudIndex, PointQueryError, RadiusQueryLimits,
 };
 use plinth_core::{m0_constants, LayerPlan, M0PlaceholderConstants, PositiveFinite};
 use plinth_mesh::{mesh_fingerprint, FaceTopology, Mesh, WeldPolicy, WeldedView};
@@ -1799,9 +1799,22 @@ fn filter_minima_to_exterior_faces(
         .iter()
         .map(|minimum| minimum.position_mm)
         .collect::<Vec<_>>();
-    let nearest = PointCloudIndex::new(face_centroids)
+    let plan = KnnBatchPlan::new(
+        face_centroids.len(),
+        queries.len(),
+        1,
+        KnnBatchLimits {
+            max_source_points: face_centroids.len(),
+            max_query_points: queries.len(),
+            max_neighbors: 1,
+            max_logical_peak_bytes: usize::MAX,
+            max_work: usize::MAX,
+        },
+    )
+    .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?;
+    let nearest = PointCloudIndex::new_for_knn_batch(face_centroids, &plan)
         .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?
-        .knn_batch(&queries, 1)
+        .knn_batch_planned(&queries, &plan)
         .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?;
     minima = minima
         .into_iter()

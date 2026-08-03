@@ -32,7 +32,8 @@ use mesh::Mesh;
 pub use mesh::{FaceBounds, FaceGeometry};
 use parity::ParityBuildError;
 pub use point_index::{
-    NeighborCsr, PointCloudIndex, PointIndexBuildError, PointQueryError, RadiusQueryLimits,
+    KnnBatchLimits, KnnBatchPlan, KnnBatchPlanError, NeighborCsr, PointCloudIndex,
+    PointIndexBuildError, PointQueryError, RadiusQueryLimits,
 };
 pub use queries::{
     AllowedFaceProjection, AllowedFaceProjectionError, AllowedFaceProjectionLimits,
