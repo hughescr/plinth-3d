@@ -123,7 +123,12 @@ impl PreparedSupportDigests {
 /// The surface and topology are retained rather than reconstructed from raw arrays. The anchor
 /// authority itself borrows those values, so safe Rust cannot store it self-referentially; the
 /// sealed geometry digest proves that the retained pair is the one used for initial construction.
-pub(crate) struct PreparedSupportRun<'a> {
+/// Immutable authority prepared once for a support run.
+///
+/// This intentionally owns the one retained mesh/topology/native-surface trio and all generic
+/// and regular planning authority.  Later route state borrows nothing from a replacement geometry
+/// or a rerun preparation pass.
+struct SupportRunContext<'a> {
     mesh: Mesh,
     hollow_history: HollowHistory,
     request: SupportRequest,
@@ -133,12 +138,10 @@ pub(crate) struct PreparedSupportRun<'a> {
     surface: NativeSurface,
     generic: GenericContactPlan,
     regular: SelectedContacts,
-    plan: SpecializedContactPlan,
-    initial: InitialContactBuild,
     digests: PreparedSupportDigests,
 }
 
-impl<'a> PreparedSupportRun<'a> {
+impl<'a> SupportRunContext<'a> {
     pub(crate) const fn mesh(&self) -> &Mesh {
         &self.mesh
     }
@@ -160,15 +163,6 @@ impl<'a> PreparedSupportRun<'a> {
     pub(crate) const fn regular(&self) -> &SelectedContacts {
         &self.regular
     }
-    pub(crate) const fn plan(&self) -> &SpecializedContactPlan {
-        &self.plan
-    }
-    pub(crate) fn loads(&self) -> Result<&FinalizedContactLoads, SpecializedError> {
-        self.plan.finalized_loads()
-    }
-    pub(crate) const fn initial(&self) -> &InitialContactBuild {
-        &self.initial
-    }
     pub(crate) const fn digests(&self) -> &PreparedSupportDigests {
         &self.digests
     }
@@ -181,25 +175,81 @@ impl<'a> PreparedSupportRun<'a> {
         }
         Ok(geometry)
     }
+}
+
+/// Opaque, move-only hand-off to the later support controller.
+///
+/// Its context is immutable and its two prepared plan artifacts are transferred exactly once into
+/// the routed state. This preserves the established preparation API without retaining a second
+/// geometry/index authority.
+pub(crate) struct PreparedSupportRun<'a> {
+    context: SupportRunContext<'a>,
+    plan: SpecializedContactPlan,
+    initial: InitialContactBuild,
+}
+
+impl<'a> PreparedSupportRun<'a> {
+    pub(crate) const fn mesh(&self) -> &Mesh {
+        self.context.mesh()
+    }
+    pub(crate) const fn hollow_history(&self) -> &HollowHistory {
+        self.context.hollow_history()
+    }
+    pub(crate) const fn request(&self) -> &SupportRequest {
+        self.context.request()
+    }
+    pub(crate) const fn frame(&self) -> BuildFrame {
+        self.context.frame()
+    }
+    pub(crate) const fn layers(&self) -> &LayerPlan {
+        self.context.layers()
+    }
+    pub(crate) const fn generic(&self) -> &GenericContactPlan {
+        self.context.generic()
+    }
+    pub(crate) const fn regular(&self) -> &SelectedContacts {
+        self.context.regular()
+    }
+    pub(crate) const fn plan(&self) -> &SpecializedContactPlan {
+        &self.plan
+    }
+    pub(crate) fn loads(&self) -> Result<&FinalizedContactLoads, SpecializedError> {
+        self.plan.finalized_loads()
+    }
+    pub(crate) const fn initial(&self) -> &InitialContactBuild {
+        &self.initial
+    }
+    pub(crate) const fn digests(&self) -> &PreparedSupportDigests {
+        self.context.digests()
+    }
+    pub(crate) fn geometry(&self) -> Result<AnchorGeometryAuthority<'_>, AnchorSearchError> {
+        self.context.geometry()
+    }
 
     /// Consume the prepared authority in the one sealed initial-terminal CCO
     /// transaction.  The frozen initial routing order is the only cadence;
     /// all route-shaped authority is rechecked before the first native query
     /// or forest transition.
-    pub(crate) fn route_initial_cco(mut self) -> Result<RoutedSupportRun<'a>, SupportRoutingError> {
+    pub(crate) fn route_initial_cco(self) -> Result<RoutedSupportRun<'a>, SupportRoutingError> {
+        let PreparedSupportRun {
+            context,
+            plan,
+            mut initial,
+        } = self;
         // Bind these three retained fields directly so the independent
         // initial forest remains available for the serial transaction below.
-        let geometry = AnchorGeometryAuthority::new(&self.mesh, &self.topology, &self.surface)?;
-        if geometry.digest() != self.digests.geometry {
+        let geometry =
+            AnchorGeometryAuthority::new(&context.mesh, &context.topology, &context.surface)?;
+        if geometry.digest() != context.digests.geometry {
             return Err(SupportRoutingError::GeometryDigestMismatch);
         }
-        let loads = self.plan.finalized_loads()?;
-        self.validate_initial_cco_preflight(&geometry, loads)?;
+        let loads = plan.finalized_loads()?;
+        context.validate_initial_cco_preflight(&plan, &initial, &geometry, loads)?;
 
         // Constructing the exterior pool is a bounded, fail-closed resource
         // staging step. It uses the same required S0 sidecar that produced
         // the contact plan; no runner-local anchor policy exists.
-        let delicacy = self
+        let delicacy = context
             .authority
             .perception_config
             .delicacy_by_face
@@ -209,35 +259,29 @@ impl<'a> PreparedSupportRun<'a> {
         let pool = SurfaceAnchorPool::from_geometry(&geometry, delicacy)?;
 
         let mut controller = CcoController::default();
-        let mut cadence = self
-            .initial
-            .routing_order()
-            .specialized_terminals()
-            .to_vec();
-        cadence.extend_from_slice(self.initial.routing_order().regular_terminals());
+        let mut cadence = initial.routing_order().specialized_terminals().to_vec();
+        cadence.extend_from_slice(initial.routing_order().regular_terminals());
         for terminal in cadence {
-            let ledger = self
-                .initial
+            let ledger = initial
                 .forest()
                 .terminal_ledger(terminal)
                 .ok_or(SupportRoutingError::MissingTerminalLedger { terminal })?;
             if ledger.state == TerminalLedgerState::Quarantined {
-                controller.advance_skipped_terminal(self.initial.forest(), ledger)?;
+                controller.advance_skipped_terminal(initial.forest(), ledger)?;
                 continue;
             }
 
-            let request = TerminalCcoRequest::bind(self.initial.forest(), terminal, self.frame)?;
-            let contact = self
-                .plan
+            let request = TerminalCcoRequest::bind(initial.forest(), terminal, context.frame)?;
+            let contact = plan
                 .contacts()
                 .iter()
                 .find(|contact| contact.contact_id() == u64::from(terminal))
                 .ok_or(SupportRoutingError::MissingPhysicalContact { terminal })?;
             controller.grow_terminal_with_finalized_anchor(
-                self.initial.forest_mut(),
+                initial.forest_mut(),
                 &request,
                 FinalizedAnchorTerminalRoute {
-                    plan: &self.plan,
+                    plan: &plan,
                     contact,
                     contact_id: u64::from(terminal),
                     loads,
@@ -248,18 +292,25 @@ impl<'a> PreparedSupportRun<'a> {
             )?;
         }
 
-        let transcript =
-            controller.finalize_transcript(&self.initial, &self.plan, loads, &geometry)?;
+        let transcript = controller.finalize_transcript(&initial, &plan, loads, &geometry)?;
         transcript.validate_integrity()?;
         Ok(RoutedSupportRun {
-            prepared: self,
-            controller,
-            transcript,
+            context,
+            state: RoutedPlanState {
+                plan,
+                initial,
+                controller,
+                transcript,
+            },
         })
     }
+}
 
+impl SupportRunContext<'_> {
     fn validate_initial_cco_preflight(
         &self,
+        plan: &SpecializedContactPlan,
+        initial: &InitialContactBuild,
         geometry: &AnchorGeometryAuthority<'_>,
         loads: &FinalizedContactLoads,
     ) -> Result<(), SupportRoutingError> {
@@ -268,7 +319,7 @@ impl<'a> PreparedSupportRun<'a> {
         // candidate/refusal limits, specialized resource limits, and the
         // plan-owned finalized load artifact rather than accepting digests as
         // a substitute for the real authority.
-        self.plan.validate_binding(
+        plan.validate_binding(
             &self.mesh,
             &self.authority.perception_config,
             self.frame,
@@ -281,8 +332,8 @@ impl<'a> PreparedSupportRun<'a> {
             &self.authority.selection_config,
             self.authority.specialized_limits,
         )?;
-        if self.plan.digest() != self.digests.plan
-            || self.plan.finalized_load_plan_digest() != self.plan.digest()
+        if plan.digest() != self.digests.plan
+            || plan.finalized_load_plan_digest() != plan.digest()
             || loads.digest() != self.digests.loads
         {
             return Err(SupportRoutingError::PlanOrLoadDigestMismatch);
@@ -291,18 +342,18 @@ impl<'a> PreparedSupportRun<'a> {
         if geometry.digest() != self.digests.geometry {
             return Err(SupportRoutingError::GeometryDigestMismatch);
         }
-        if self.initial.plan_digest() != self.plan.digest()
-            || self.initial.load_digest() != loads.digest()
-            || self.initial.native_digest() != geometry.digest()
-            || self.initial.initial_forest_digest() != Forest::new().digest()
-            || self.initial.post_quarantine_forest_digest() != self.digests.initial_forest
-            || self.initial.forest().digest() != self.digests.initial_forest
-            || !self.initial.all_terminals_registered_before_quarantine()
+        if initial.plan_digest() != plan.digest()
+            || initial.load_digest() != loads.digest()
+            || initial.native_digest() != geometry.digest()
+            || initial.initial_forest_digest() != Forest::new().digest()
+            || initial.post_quarantine_forest_digest() != self.digests.initial_forest
+            || initial.forest().digest() != self.digests.initial_forest
+            || !initial.all_terminals_registered_before_quarantine()
         {
             return Err(SupportRoutingError::InitialAuthorityMismatch);
         }
 
-        let routing = self.initial.routing_order();
+        let routing = initial.routing_order();
         let mut expected = BTreeSet::new();
         for terminal in routing
             .specialized_terminals()
@@ -311,60 +362,96 @@ impl<'a> PreparedSupportRun<'a> {
             .copied()
         {
             if !expected.insert(terminal)
-                || !self
-                    .initial
+                || !initial
                     .terminals()
                     .iter()
                     .any(|evidence| evidence.terminal == terminal)
-                || self
-                    .plan
+                || plan
                     .contacts()
                     .iter()
                     .filter(|contact| contact.contact_id() == u64::from(terminal))
                     .count()
                     != 1
-                || self.initial.forest().terminal_ledger(terminal).is_none()
+                || initial.forest().terminal_ledger(terminal).is_none()
             {
                 return Err(SupportRoutingError::TerminalNamespaceMismatch { terminal });
             }
         }
-        if expected.len() != self.initial.terminals().len()
-            || expected.len() != self.plan.contacts().len()
-        {
+        if expected.len() != initial.terminals().len() || expected.len() != plan.contacts().len() {
             return Err(SupportRoutingError::TerminalNamespaceCardinalityMismatch);
         }
         Ok(())
     }
 }
 
-/// Opaque route-stage authority for the normalizer.  It retains the exact
-/// prepared hand-off and the sealed CCO artifacts; no caller can replay an
-/// initial terminal after this value exists.
-pub(crate) struct RoutedSupportRun<'a> {
-    prepared: PreparedSupportRun<'a>,
+/// Route-only state, formed by consuming prepared plan state once.
+///
+/// Keeping every mutable/terminal artifact together makes the one-way transition explicit:
+/// generic preparation and retained native geometry stay in `SupportRunContext`, while routing
+/// owns the specialized plan, initial forest, controller, and finalized transcript.
+struct RoutedPlanState {
+    plan: SpecializedContactPlan,
+    initial: InitialContactBuild,
     controller: CcoController,
     transcript: FinalizedCcoTranscript,
 }
 
+/// Opaque route-stage authority for the normalizer. It retains the exact prepared context and
+/// sealed CCO state; no caller can replay an initial terminal after this value exists.
+pub(crate) struct RoutedSupportRun<'a> {
+    context: SupportRunContext<'a>,
+    state: RoutedPlanState,
+}
+
 impl RoutedSupportRun<'_> {
     #[must_use]
-    pub(crate) const fn prepared(&self) -> &PreparedSupportRun<'_> {
-        &self.prepared
+    pub(crate) const fn mesh(&self) -> &Mesh {
+        self.context.mesh()
+    }
+
+    #[must_use]
+    pub(crate) const fn hollow_history(&self) -> &HollowHistory {
+        self.context.hollow_history()
+    }
+
+    #[must_use]
+    pub(crate) const fn request(&self) -> &SupportRequest {
+        self.context.request()
+    }
+
+    #[must_use]
+    pub(crate) const fn frame(&self) -> BuildFrame {
+        self.context.frame()
+    }
+
+    #[must_use]
+    pub(crate) const fn plan(&self) -> &SpecializedContactPlan {
+        &self.state.plan
+    }
+
+    #[must_use]
+    pub(crate) const fn initial(&self) -> &InitialContactBuild {
+        &self.state.initial
+    }
+
+    #[must_use]
+    pub(crate) const fn digests(&self) -> &PreparedSupportDigests {
+        self.context.digests()
     }
 
     #[must_use]
     pub(crate) const fn forest(&self) -> &Forest {
-        self.prepared.initial.forest()
+        self.state.initial.forest()
     }
 
     #[must_use]
     pub(crate) const fn controller(&self) -> &CcoController {
-        &self.controller
+        &self.state.controller
     }
 
     #[must_use]
     pub(crate) const fn transcript(&self) -> &FinalizedCcoTranscript {
-        &self.transcript
+        &self.state.transcript
     }
 }
 
@@ -519,18 +606,20 @@ pub(crate) fn prepare_support_run<'a>(
     digests.prepared = prepared_digest(&digests, frame, authority);
 
     Ok(PreparedSupportRun {
-        mesh,
-        hollow_history,
-        request,
-        frame,
-        authority,
-        topology,
-        surface,
-        generic,
-        regular,
+        context: SupportRunContext {
+            mesh,
+            hollow_history,
+            request,
+            frame,
+            authority,
+            topology,
+            surface,
+            generic,
+            regular,
+            digests,
+        },
         plan,
         initial,
-        digests,
     })
 }
 
@@ -913,6 +1002,41 @@ mod tests {
     }
 
     #[test]
+    fn route_consumes_prepared_state_once_and_retains_split_authority_digests() {
+        with_prepared_table(|prepared| {
+            let expected_prepared = prepared.digests().prepared();
+            let expected_plan = prepared.plan().digest();
+            let expected_loads = prepared.loads().unwrap().digest();
+            let expected_initial_forest = prepared.initial().forest().digest();
+
+            // `route_initial_cco` takes `self`; retaining this one resulting handle is the only
+            // available route transition and proves the plan/initial pair moved intact.
+            let routed = prepared
+                .route_initial_cco()
+                .expect("prepared state is consumed by exactly one CCO route");
+
+            assert_eq!(routed.digests().prepared(), expected_prepared);
+            assert_eq!(routed.plan().digest(), expected_plan);
+            assert_eq!(routed.initial().forest().digest(), routed.forest().digest());
+            assert_eq!(
+                routed.transcript().plan_digest(),
+                routed.plan().digest(),
+                "specialized plan moved into routed plan state"
+            );
+            assert_eq!(routed.transcript().finalized_load_digest(), expected_loads);
+            assert_eq!(
+                routed.transcript().final_forest_digest(),
+                routed.forest().digest()
+            );
+            assert_eq!(
+                routed.transcript().final_controller_digest(),
+                routed.controller().digest()
+            );
+            assert_ne!(expected_initial_forest, routed.forest().digest());
+        });
+    }
+
+    #[test]
     fn stale_initial_authority_is_refused_before_cco_routing() {
         with_prepared_table(|mut prepared| {
             prepared.initial.test_corrupt_initial_forest_digest();
@@ -1149,12 +1273,12 @@ mod tests {
                 .expect("thread sweep routes the required corpus");
             println!(
                 "{SWEEP_LINE}{}:{}:{}:{}:{}:{}:{}:{}:{}",
-                routed.prepared().digests().prepared(),
-                routed.prepared().digests().plan(),
-                routed.prepared().digests().loads(),
-                routed.prepared().digests().initial_forest(),
-                routed.prepared().initial().queried_stubs(),
-                routed.prepared().initial().condemned().len(),
+                routed.digests().prepared(),
+                routed.digests().plan(),
+                routed.digests().loads(),
+                routed.digests().initial_forest(),
+                routed.initial().queried_stubs(),
+                routed.initial().condemned().len(),
                 routed.transcript().final_forest_digest(),
                 routed.transcript().final_controller_digest(),
                 routed.transcript().digest(),
