@@ -10,8 +10,329 @@
 use std::path::Path;
 
 use chitubox_io::{ChituboxError, Project};
-use plinth_core::{ArtifactId, Defect, Severity, SiteId, ViolationKind};
-use serde::Serialize;
+use plinth_core::{ArtifactId, Defect, Finite, Severity, SiteId, ViolationKind};
+use plinth_support::{
+    CoverageGap, CoverageMeasurementError, CoverageMeasurementRequest, SupportVerificationError,
+    SupportVerificationSnapshot,
+};
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+/// A fail-closed coverage-verification result, bound to one sealed support
+/// snapshot and one explicit measurement request.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CoverageReport {
+    artifact: ArtifactId,
+    snapshot_digest: u64,
+    request: CoverageRequestRecord,
+    resources: CoverageResourceRecord,
+    evidence: CoverageEvidenceRecord,
+    defects: Vec<Defect>,
+}
+
+impl CoverageReport {
+    #[must_use]
+    pub fn artifact(&self) -> &ArtifactId {
+        &self.artifact
+    }
+
+    #[must_use]
+    pub const fn snapshot_digest(&self) -> u64 {
+        self.snapshot_digest
+    }
+
+    #[must_use]
+    pub fn defects(&self) -> &[Defect] {
+        &self.defects
+    }
+
+    /// Coverage acceptance has no waiver, score, or producer-side override.
+    #[must_use]
+    pub fn accepted(&self) -> bool {
+        self.defects.is_empty()
+    }
+}
+
+/// A measurement failure prevents construction of any coverage report.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Error)]
+#[serde(tag = "kind", content = "detail", rename_all = "snake_case")]
+pub enum CoverageVerificationError {
+    #[error("sealed support snapshot integrity refused coverage verification")]
+    SnapshotIntegrity,
+    #[error("coverage measurement refused due to invalid snapshot binding")]
+    SnapshotBinding,
+    #[error("coverage measurement exceeded resource limit: {resource}")]
+    ResourceLimit { resource: String },
+    #[error("coverage measurement arithmetic overflow: {operation}")]
+    ArithmeticOverflow { operation: String },
+    #[error("coverage measurement kernel refusal: {operation}")]
+    KernelRefusal { operation: String },
+    #[error("coverage measurement assessment refusal: {reason}")]
+    AssessmentRefusal { reason: String },
+    #[error("coverage verifier arithmetic overflow while summing island area")]
+    DefectMeasureOverflow,
+    #[error("coverage verifier produced a non-finite island defect measure")]
+    NonFiniteDefectMeasure,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct CoverageRequestRecord {
+    radius_mm: Finite,
+    patch_area_floor_mm2: Finite,
+    max_route_memberships: usize,
+    max_indexed_points: usize,
+    max_query_rows: usize,
+    max_distance_work: usize,
+    max_logical_peak_bytes: usize,
+    max_assessment_work: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct CoverageResourceRecord {
+    route_membership_sum: usize,
+    sequential_route_membership_peak: usize,
+    indexed_point_count: usize,
+    sequential_indexed_point_peak: usize,
+    query_row_count: usize,
+    distance_work: usize,
+    logical_peak_bytes: usize,
+    assessment_work: usize,
+    assessment_scratch_bytes: usize,
+    assessment_evidence_bytes: usize,
+    assessment_phase_peak_bytes: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct CoverageEvidenceRecord {
+    islands: Vec<CoverageIslandEvidenceRecord>,
+    patches: Vec<CoveragePatchEvidenceRecord>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct CoverageIslandEvidenceRecord {
+    island_id: u32,
+    component_id: u32,
+    representative_face_id: u32,
+    sorted_face_ids: Vec<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct CoveragePatchEvidenceRecord {
+    island_id: u32,
+    component_id: u32,
+    representative_face_id: u32,
+    sorted_face_ids: Vec<u32>,
+    uncovered_area_mm2: Finite,
+    cut_ambiguous: bool,
+    assessment_failed: bool,
+    worst_gap: CoverageGapRecord,
+}
+
+/// The no-route condition remains evidence; it is never used as a defect
+/// measure, which is always a finite uncovered-area sum.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "state", content = "gap_mm", rename_all = "snake_case")]
+enum CoverageGapRecord {
+    Finite(Finite),
+    NoRoutedContact,
+}
+
+/// Measure sealed support coverage once, then make the verifier-owned verdict.
+///
+/// The report contains a value projection of the realized measurement only;
+/// it never exposes snapshot route authority or provides a mutation path.
+pub fn verify_coverage(
+    artifact: ArtifactId,
+    snapshot: &SupportVerificationSnapshot<'_>,
+    request: CoverageMeasurementRequest,
+) -> Result<CoverageReport, CoverageVerificationError> {
+    snapshot.validate_integrity().map_err(map_snapshot_error)?;
+    let measurement = snapshot
+        .measure_coverage(request)
+        .map_err(map_measurement_error)?;
+    if measurement.snapshot_digest() != snapshot.digest() || measurement.request() != request {
+        return Err(CoverageVerificationError::SnapshotBinding);
+    }
+
+    let request = request_record(request);
+    let plan = measurement.resource_plan();
+    let resources = CoverageResourceRecord {
+        route_membership_sum: plan.route_membership_sum(),
+        sequential_route_membership_peak: plan.sequential_route_membership_peak(),
+        indexed_point_count: plan.indexed_point_count(),
+        sequential_indexed_point_peak: plan.sequential_indexed_point_peak(),
+        query_row_count: plan.query_row_count(),
+        distance_work: plan.distance_work(),
+        logical_peak_bytes: plan.logical_peak_bytes(),
+        assessment_work: plan.assessment_work(),
+        assessment_scratch_bytes: plan.assessment_scratch_bytes(),
+        assessment_evidence_bytes: plan.assessment_evidence_bytes(),
+        assessment_phase_peak_bytes: plan.assessment_phase_peak_bytes(),
+    };
+    let mut islands = measurement
+        .evidence()
+        .islands()
+        .iter()
+        .map(|island| CoverageIslandEvidenceRecord {
+            island_id: island.island_id(),
+            component_id: island.component_id(),
+            representative_face_id: island.representative_face_id(),
+            sorted_face_ids: island.sorted_face_ids().to_vec(),
+        })
+        .collect::<Vec<_>>();
+    islands.sort_unstable_by(|left, right| {
+        (
+            left.island_id,
+            left.component_id,
+            left.representative_face_id,
+            &left.sorted_face_ids,
+        )
+            .cmp(&(
+                right.island_id,
+                right.component_id,
+                right.representative_face_id,
+                &right.sorted_face_ids,
+            ))
+    });
+    let mut patches = measurement
+        .evidence()
+        .patches()
+        .iter()
+        .map(|patch| CoveragePatchEvidenceRecord {
+            island_id: patch.island_id(),
+            component_id: patch.component_id(),
+            representative_face_id: patch.representative_face_id(),
+            sorted_face_ids: patch.sorted_face_ids().to_vec(),
+            uncovered_area_mm2: patch.uncovered_area_mm2(),
+            cut_ambiguous: patch.cut_ambiguous(),
+            assessment_failed: patch.assessment_failed(),
+            worst_gap: match patch.worst_gap() {
+                CoverageGap::Finite(value) => CoverageGapRecord::Finite(value),
+                CoverageGap::NoRoutedContact => CoverageGapRecord::NoRoutedContact,
+            },
+        })
+        .collect::<Vec<_>>();
+    patches.sort_unstable_by(|left, right| {
+        (
+            left.island_id,
+            left.component_id,
+            left.representative_face_id,
+            &left.sorted_face_ids,
+        )
+            .cmp(&(
+                right.island_id,
+                right.component_id,
+                right.representative_face_id,
+                &right.sorted_face_ids,
+            ))
+    });
+    let defects = defects_for_patches(&patches)?;
+    Ok(CoverageReport {
+        artifact,
+        snapshot_digest: measurement.snapshot_digest(),
+        request,
+        resources,
+        evidence: CoverageEvidenceRecord { islands, patches },
+        defects,
+    })
+}
+
+fn request_record(request: CoverageMeasurementRequest) -> CoverageRequestRecord {
+    let limits = request.limits();
+    CoverageRequestRecord {
+        radius_mm: Finite::new(request.radius_mm().get())
+            .expect("positive finite radius is finite"),
+        patch_area_floor_mm2: Finite::new(request.patch_area_floor_mm2().get())
+            .expect("positive finite patch floor is finite"),
+        max_route_memberships: limits.max_route_memberships(),
+        max_indexed_points: limits.max_indexed_points(),
+        max_query_rows: limits.max_query_rows(),
+        max_distance_work: limits.max_distance_work(),
+        max_logical_peak_bytes: limits.max_logical_peak_bytes(),
+        max_assessment_work: limits.max_assessment_work(),
+    }
+}
+
+fn defects_for_patches(
+    patches: &[CoveragePatchEvidenceRecord],
+) -> Result<Vec<Defect>, CoverageVerificationError> {
+    let mut defects = Vec::new();
+    let mut start = 0;
+    while start < patches.len() {
+        let island_id = patches[start].island_id;
+        let mut end = start;
+        let mut area = 0.0_f64;
+        while end < patches.len() && patches[end].island_id == island_id {
+            let patch = &patches[end];
+            if patch.assessment_failed
+                || patch.cut_ambiguous
+                || patch.uncovered_area_mm2.get() > 0.0
+            {
+                let next = area + patch.uncovered_area_mm2.get();
+                if !next.is_finite() {
+                    return Err(CoverageVerificationError::DefectMeasureOverflow);
+                }
+                area = next;
+            }
+            end += 1;
+        }
+        if area != 0.0
+            || patches[start..end]
+                .iter()
+                .any(|patch| patch.assessment_failed || patch.cut_ambiguous)
+        {
+            if !area.is_finite() {
+                return Err(CoverageVerificationError::NonFiniteDefectMeasure);
+            }
+            let detail = format!("coverage verification failed for island {island_id}; uncovered patch area sum = {area}");
+            defects.push(
+                Defect::new(
+                    ViolationKind::UncoveredIsland,
+                    SiteId::Island(island_id),
+                    Severity::Blocking,
+                    area,
+                    detail,
+                )
+                .map_err(|_| CoverageVerificationError::NonFiniteDefectMeasure)?,
+            );
+        }
+        start = end;
+    }
+    Ok(defects)
+}
+
+fn map_snapshot_error(_error: SupportVerificationError) -> CoverageVerificationError {
+    CoverageVerificationError::SnapshotIntegrity
+}
+
+fn map_measurement_error(error: CoverageMeasurementError) -> CoverageVerificationError {
+    match error {
+        CoverageMeasurementError::SnapshotBinding => CoverageVerificationError::SnapshotBinding,
+        CoverageMeasurementError::ResourceLimit { resource } => {
+            CoverageVerificationError::ResourceLimit {
+                resource: resource.to_owned(),
+            }
+        }
+        CoverageMeasurementError::ArithmeticOverflow { operation } => {
+            CoverageVerificationError::ArithmeticOverflow {
+                operation: operation.to_owned(),
+            }
+        }
+        CoverageMeasurementError::KernelRefusal { operation } => {
+            CoverageVerificationError::KernelRefusal {
+                operation: operation.to_owned(),
+            }
+        }
+        CoverageMeasurementError::AssessmentRefusal { reason } => {
+            CoverageVerificationError::AssessmentRefusal {
+                reason: reason.to_owned(),
+            }
+        }
+        CoverageMeasurementError::InvalidLimits | CoverageMeasurementError::InvalidRequest => {
+            CoverageVerificationError::SnapshotBinding
+        }
+    }
+}
 
 /// The status of the format checks this crate actually performed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -239,6 +560,28 @@ fn serialization_failure(error: &ChituboxError) -> StructuralFormatFailure {
 mod tests {
     use super::*;
 
+    fn patch(
+        island_id: u32,
+        area: f64,
+        cut_ambiguous: bool,
+        no_route: bool,
+    ) -> CoveragePatchEvidenceRecord {
+        CoveragePatchEvidenceRecord {
+            island_id,
+            component_id: 0,
+            representative_face_id: island_id,
+            sorted_face_ids: vec![island_id],
+            uncovered_area_mm2: Finite::new(area).expect("finite fixture area"),
+            cut_ambiguous,
+            assessment_failed: area > 0.0 || cut_ambiguous,
+            worst_gap: if no_route {
+                CoverageGapRecord::NoRoutedContact
+            } else {
+                CoverageGapRecord::Finite(Finite::new(0.5).expect("finite fixture gap"))
+            },
+        }
+    }
+
     #[test]
     fn exact_roundtrip_drift_is_a_named_structural_failure() {
         let report = report_for_roundtrip(ArtifactId::from("test-artifact"), &[1, 2], vec![1, 3]);
@@ -253,5 +596,66 @@ mod tests {
             ViolationKind::ChituboxStructuralFormat
         );
         assert_eq!(report.defects()[0].measure.get(), 1.0);
+    }
+
+    #[test]
+    fn coverage_defects_are_one_finite_area_sum_per_island_and_keep_gap_as_evidence() {
+        let patches = vec![
+            patch(2, 1.5, false, true),
+            patch(2, 2.25, false, false),
+            patch(7, 0.0, true, false),
+        ];
+        let defects = defects_for_patches(&patches).expect("finite checked area sums");
+        assert_eq!(defects.len(), 2);
+        assert_eq!(defects[0].site, SiteId::Island(2));
+        assert_eq!(defects[0].measure.get(), 3.75);
+        assert_eq!(defects[1].site, SiteId::Island(7));
+        assert_eq!(defects[1].measure.get(), 0.0);
+        assert!(matches!(
+            patches[0].worst_gap,
+            CoverageGapRecord::NoRoutedContact
+        ));
+    }
+
+    #[test]
+    fn coverage_report_json_roundtrips_exactly() {
+        let report = CoverageReport {
+            artifact: ArtifactId::from("coverage-fixture"),
+            snapshot_digest: 42,
+            request: CoverageRequestRecord {
+                radius_mm: Finite::new(1.0).expect("finite"),
+                patch_area_floor_mm2: Finite::new(0.25).expect("finite"),
+                max_route_memberships: 1,
+                max_indexed_points: 2,
+                max_query_rows: 3,
+                max_distance_work: 4,
+                max_logical_peak_bytes: 5,
+                max_assessment_work: 6,
+            },
+            resources: CoverageResourceRecord {
+                route_membership_sum: 1,
+                sequential_route_membership_peak: 1,
+                indexed_point_count: 1,
+                sequential_indexed_point_peak: 1,
+                query_row_count: 1,
+                distance_work: 1,
+                logical_peak_bytes: 1,
+                assessment_work: 1,
+                assessment_scratch_bytes: 1,
+                assessment_evidence_bytes: 1,
+                assessment_phase_peak_bytes: 1,
+            },
+            evidence: CoverageEvidenceRecord {
+                islands: Vec::new(),
+                patches: Vec::new(),
+            },
+            defects: Vec::new(),
+        };
+        let json = serde_json::to_string(&report).expect("serialize report");
+        assert_eq!(
+            serde_json::from_str::<CoverageReport>(&json).expect("deserialize report"),
+            report
+        );
+        assert!(report.accepted());
     }
 }

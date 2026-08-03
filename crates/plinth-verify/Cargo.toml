@@ -8,7 +8,9 @@ publish = false
 [dependencies]
 chitubox_io = { path = "../../rust/chitubox_io" }
 plinth-core = { path = "../plinth-core" }
+plinth-support = { path = "../plinth-support" }
 serde = { workspace = true }
+thiserror = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }

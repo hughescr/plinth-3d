@@ -1190,8 +1190,10 @@ version = "0.1.0"
 dependencies = [
  "chitubox_io",
  "plinth-core",
+ "plinth-support",
  "serde",
  "serde_json",
+ "thiserror 1.0.69",
 ]
 
 [[package]]
