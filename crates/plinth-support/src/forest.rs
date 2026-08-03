@@ -101,6 +101,163 @@ pub enum EmbedEnd {
     Rootward,
 }
 
+/// A requested designed clearance extent in millimetres. This is deliberately
+/// distinct from observed penetration evidence and cannot be zero or non-finite.
+#[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Serialize)]
+pub struct PositiveFiniteMm(PositiveFinite);
+
+impl PositiveFiniteMm {
+    pub fn new(mm: f64) -> Result<Self, DesignedMaskError> {
+        PositiveFinite::new(mm)
+            .map(Self)
+            .map_err(|_| DesignedMaskError::InvalidExtent)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> f64 {
+        self.0.get()
+    }
+}
+
+/// Opaque, immutable result of a later endpoint-connected construction check.
+/// E1a seals the binding format; E1b owns the kernel validator and witness minting.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct DesignedEndMask {
+    requested_extent_mm: PositiveFiniteMm,
+    validation_binding: u64,
+}
+
+impl DesignedEndMask {
+    #[must_use]
+    pub const fn requested_extent_mm(&self) -> PositiveFiniteMm {
+        self.requested_extent_mm
+    }
+
+    #[must_use]
+    pub(crate) const fn validation_binding(&self) -> u64 {
+        self.validation_binding
+    }
+}
+
+/// Independent end masks. Construction is crate-private so callers cannot inject
+/// an unvalidated clearance claim into a member or verifier.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct DesignedClearanceMasks {
+    terminalward: Option<DesignedEndMask>,
+    rootward: Option<DesignedEndMask>,
+}
+
+impl DesignedClearanceMasks {
+    #[must_use]
+    pub const fn terminalward(&self) -> Option<&DesignedEndMask> {
+        self.terminalward.as_ref()
+    }
+
+    #[must_use]
+    pub const fn rootward(&self) -> Option<&DesignedEndMask> {
+        self.rootward.as_ref()
+    }
+
+    /// The order is a contract: terminalward before rootward, independent of
+    /// construction order or thread count.
+    pub fn iter(&self) -> impl Iterator<Item = (EmbedEnd, &DesignedEndMask)> {
+        [
+            (EmbedEnd::Terminalward, self.terminalward.as_ref()),
+            (EmbedEnd::Rootward, self.rootward.as_ref()),
+        ]
+        .into_iter()
+        .filter_map(|(end, mask)| mask.map(|mask| (end, mask)))
+    }
+
+    /// Sealed E1a boundary for the future kernel-backed validator. `witness` and
+    /// `surface_identity` are opaque digest inputs, never inferred from geometry.
+    pub(crate) fn bind_for_member(
+        member: &Member,
+        terminalward: Option<PositiveFiniteMm>,
+        rootward: Option<PositiveFiniteMm>,
+        witness: u64,
+        surface_identity: u64,
+    ) -> Result<Self, DesignedMaskError> {
+        let length = member_length_mm(member);
+        let terminal = terminalward.map(|extent| validate_extent(extent, length)).transpose()?;
+        let root = rootward.map(|extent| validate_extent(extent, length)).transpose()?;
+        if terminal.is_some_and(|value| root.is_some_and(|other| value.get() + other.get() >= length))
+        {
+            return Err(DesignedMaskError::OverlappingExtents);
+        }
+        Ok(Self {
+            terminalward: terminal.map(|requested_extent_mm| DesignedEndMask {
+                requested_extent_mm,
+                validation_binding: mask_binding(
+                    member,
+                    EmbedEnd::Terminalward,
+                    requested_extent_mm,
+                    witness,
+                    surface_identity,
+                ),
+            }),
+            rootward: root.map(|requested_extent_mm| DesignedEndMask {
+                requested_extent_mm,
+                validation_binding: mask_binding(
+                    member,
+                    EmbedEnd::Rootward,
+                    requested_extent_mm,
+                    witness,
+                    surface_identity,
+                ),
+            }),
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub enum DesignedMaskError {
+    #[error("designed extent must be positive and finite millimetres")]
+    InvalidExtent,
+    #[error("designed extent must be shorter than its member")]
+    ExtentOutOfSpan,
+    #[error("terminalward and rootward extents must not overlap or consume a member")]
+    OverlappingExtents,
+}
+
+fn validate_extent(
+    extent: PositiveFiniteMm,
+    length: f64,
+) -> Result<PositiveFiniteMm, DesignedMaskError> {
+    if extent.get() >= length {
+        Err(DesignedMaskError::ExtentOutOfSpan)
+    } else {
+        Ok(extent)
+    }
+}
+
+fn member_length_mm(member: &Member) -> f64 {
+    member
+        .p0_mm
+        .iter()
+        .zip(member.p1_mm)
+        .map(|(a, b)| (b.get() - a.get()).powi(2))
+        .sum::<f64>()
+        .sqrt()
+}
+
+fn mask_binding(
+    member: &Member,
+    end: EmbedEnd,
+    extent: PositiveFiniteMm,
+    witness: u64,
+    surface_identity: u64,
+) -> u64 {
+    let mut digest = DigestWriter::new();
+    digest.tag(0x45);
+    digest.embed(Some(end));
+    digest.f64(extent.get());
+    digest.u64(witness);
+    digest.u64(surface_identity);
+    digest.member(member);
+    digest.finish()
+}
+
 /// Clearance proof carried with each member.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct ClearanceCertificate {
@@ -1745,5 +1902,53 @@ mod tests {
             embed_end: None,
             carried_mm2: finite(1.0),
         }
+    }
+
+    fn extent(value: f64) -> PositiveFiniteMm {
+        PositiveFiniteMm::new(value).unwrap()
+    }
+
+    #[test]
+    fn designed_masks_support_none_each_and_terminal_first_both_order() {
+        let member = Member::new(member_spec(MemberKind::Shoot));
+        let none = DesignedClearanceMasks::bind_for_member(&member, None, None, 7, 9).unwrap();
+        assert_eq!(none.iter().count(), 0);
+        let terminal = DesignedClearanceMasks::bind_for_member(&member, Some(extent(0.2)), None, 7, 9).unwrap();
+        assert_eq!(terminal.iter().map(|(end, _)| end).collect::<Vec<_>>(), vec![EmbedEnd::Terminalward]);
+        let both = DesignedClearanceMasks::bind_for_member(&member, Some(extent(0.2)), Some(extent(0.3)), 7, 9).unwrap();
+        assert_eq!(both.iter().map(|(end, _)| end).collect::<Vec<_>>(), vec![EmbedEnd::Terminalward, EmbedEnd::Rootward]);
+    }
+
+    #[test]
+    fn designed_mask_extents_reject_invalid_out_of_span_and_overlap() {
+        for value in [0.0, -0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(PositiveFiniteMm::new(value), Err(DesignedMaskError::InvalidExtent));
+        }
+        let member = Member::new(member_spec(MemberKind::Shoot));
+        assert_eq!(DesignedClearanceMasks::bind_for_member(&member, Some(extent(1.0)), None, 1, 1), Err(DesignedMaskError::ExtentOutOfSpan));
+        assert_eq!(DesignedClearanceMasks::bind_for_member(&member, Some(extent(0.5)), Some(extent(0.5)), 1, 1), Err(DesignedMaskError::OverlappingExtents));
+    }
+
+    #[test]
+    fn designed_mask_binding_changes_for_end_extent_witness_and_geometry() {
+        let member = Member::new(member_spec(MemberKind::Shoot));
+        let terminal = DesignedClearanceMasks::bind_for_member(&member, Some(extent(0.2)), None, 1, 2).unwrap();
+        let root = DesignedClearanceMasks::bind_for_member(&member, None, Some(extent(0.2)), 1, 2).unwrap();
+        let changed_extent = DesignedClearanceMasks::bind_for_member(&member, Some(extent(0.3)), None, 1, 2).unwrap();
+        let changed_witness = DesignedClearanceMasks::bind_for_member(&member, Some(extent(0.2)), None, 3, 2).unwrap();
+        let changed_surface = DesignedClearanceMasks::bind_for_member(&member, Some(extent(0.2)), None, 1, 4).unwrap();
+        let mut changed_geometry = member_spec(MemberKind::Trunk);
+        changed_geometry.r0_mm = TerminalEndRadius::new(radius(0.3));
+        let changed_geometry = Member::new(changed_geometry);
+        let geometry = DesignedClearanceMasks::bind_for_member(&changed_geometry, Some(extent(0.2)), None, 1, 2).unwrap();
+        let binding = terminal.terminalward().unwrap().validation_binding();
+        assert_ne!(binding, root.rootward().unwrap().validation_binding());
+        assert_ne!(binding, changed_extent.terminalward().unwrap().validation_binding());
+        assert_ne!(binding, changed_witness.terminalward().unwrap().validation_binding());
+        assert_ne!(binding, changed_surface.terminalward().unwrap().validation_binding());
+        assert_ne!(binding, geometry.terminalward().unwrap().validation_binding());
+        let build = || DesignedClearanceMasks::bind_for_member(&member, Some(extent(0.2)), Some(extent(0.3)), 1, 2).unwrap().iter().map(|(_, mask)| mask.validation_binding()).collect::<Vec<_>>();
+        let baseline = build();
+        for _ in [1, 4, 16] { assert_eq!(build(), baseline); }
     }
 }
