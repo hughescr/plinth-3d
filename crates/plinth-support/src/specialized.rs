@@ -4218,8 +4218,17 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
+    use geom_kernel::KnnBatchLimits;
     use plinth_core::{Finite, PositiveFinite};
     use plinth_mesh::{make_overhang_table, make_raking_blade, make_thin_fin};
+
+    const TEST_KNN_LIMITS: KnnBatchLimits = KnnBatchLimits {
+        max_source_points: 20_000_000,
+        max_query_points: 20_000_000,
+        max_neighbors: 1,
+        max_logical_peak_bytes: 2 * 1024 * 1024 * 1024,
+        max_work: 100_000_000,
+    };
 
     fn minimum_demand(
         owner: u32,
@@ -5750,7 +5759,7 @@ mod tests {
             &layers,
             &candidate_config,
             &[],
-            GenericPerceptionLimits::production(),
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
         )
         .map_err(|error| format!("required {name} generic fixture failed: {error}"))?;
         let selection_config = ContactSelectionConfig::current_defaults(
@@ -5779,7 +5788,7 @@ mod tests {
             &layers,
             &candidate_config,
             &[],
-            GenericPerceptionLimits::production(),
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
             &generic,
             &regular,
             &selection_config,
@@ -5803,7 +5812,7 @@ mod tests {
             &layers,
             &candidate_config,
             &[],
-            GenericPerceptionLimits::production(),
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
         )
         .map_err(|error| format!("required {name} generic fixture failed: {error}"))?;
         let selection_config = ContactSelectionConfig::current_defaults(
@@ -5832,7 +5841,7 @@ mod tests {
             &layers,
             &candidate_config,
             &[],
-            GenericPerceptionLimits::production(),
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
             &generic,
             &regular,
             &selection_config,
@@ -6425,7 +6434,7 @@ mod tests {
         let layers = LayerPlan::new(0.0, vec![0.05; 1_000]).unwrap();
         let perception = perception_config(&delicacy);
         let candidate = candidate_config();
-        let perception_limits = GenericPerceptionLimits::production();
+        let perception_limits = GenericPerceptionLimits::production(TEST_KNN_LIMITS);
         let generic = crate::perception::prepare_generic_contacts(
             &mesh,
             &perception,

@@ -227,28 +227,52 @@ fn planned_knn_has_typed_bounds_and_global_id_tie_order() {
     ])
     .unwrap();
     assert_eq!(
-        KnnBatchPlan::new(4, 1, 0, KnnBatchLimits {
-            max_source_points: 4, max_query_points: 1, max_neighbors: 4,
-            max_logical_peak_bytes: usize::MAX, max_work: usize::MAX,
-        }),
+        KnnBatchPlan::new(
+            4,
+            1,
+            0,
+            KnnBatchLimits {
+                max_source_points: 4,
+                max_query_points: 1,
+                max_neighbors: 4,
+                max_logical_peak_bytes: usize::MAX,
+                max_work: usize::MAX,
+            }
+        ),
         Err(KnnBatchPlanError::ZeroNeighborsRequested)
     );
     assert_eq!(
-        KnnBatchPlan::new(4, 1, 5, KnnBatchLimits {
-            max_source_points: 4, max_query_points: 1, max_neighbors: 5,
-            max_logical_peak_bytes: usize::MAX, max_work: usize::MAX,
-        }),
+        KnnBatchPlan::new(
+            4,
+            1,
+            5,
+            KnnBatchLimits {
+                max_source_points: 4,
+                max_query_points: 1,
+                max_neighbors: 5,
+                max_logical_peak_bytes: usize::MAX,
+                max_work: usize::MAX,
+            }
+        ),
         Err(KnnBatchPlanError::RequestedNeighborsExceedPointCount {
             requested: 5,
             point_count: 4,
         })
     );
     assert_eq!(
-        rows(&index.knn_batch_planned(&[[0.0; 3]], &knn_plan(4, 1, 2)).unwrap()),
+        rows(
+            &index
+                .knn_batch_planned(&[[0.0; 3]], &knn_plan(4, 1, 2))
+                .unwrap()
+        ),
         vec![vec![(0, 1.0f64.to_bits()), (1, 1.0f64.to_bits())]]
     );
     assert_eq!(
-        rows(&index.knn_batch_planned(&[[0.0; 3]], &knn_plan(4, 1, 4)).unwrap()),
+        rows(
+            &index
+                .knn_batch_planned(&[[0.0; 3]], &knn_plan(4, 1, 4))
+                .unwrap()
+        ),
         vec![vec![
             (0, 1.0f64.to_bits()),
             (1, 1.0f64.to_bits()),
@@ -275,30 +299,81 @@ fn planned_knn_refuses_each_preflight_cap_and_overflow_at_the_boundary() {
             if required == exact.max_logical_peak_bytes && limit + 1 == required
     ));
     assert!(matches!(
-        KnnBatchPlan::new(4, 3, 2, KnnBatchLimits { max_work: exact.max_work - 1, ..exact }),
-        Err(KnnBatchPlanError::WorkLimit { required: 12, limit: 11 })
+        KnnBatchPlan::new(
+            4,
+            3,
+            2,
+            KnnBatchLimits {
+                max_work: exact.max_work - 1,
+                ..exact
+            }
+        ),
+        Err(KnnBatchPlanError::WorkLimit {
+            required: 12,
+            limit: 11
+        })
     ));
     assert!(matches!(
-        KnnBatchPlan::new(4, 3, 2, KnnBatchLimits { max_source_points: 3, ..exact }),
-        Err(KnnBatchPlanError::SourceCountLimit { required: 4, limit: 3 })
+        KnnBatchPlan::new(
+            4,
+            3,
+            2,
+            KnnBatchLimits {
+                max_source_points: 3,
+                ..exact
+            }
+        ),
+        Err(KnnBatchPlanError::SourceCountLimit {
+            required: 4,
+            limit: 3
+        })
     ));
     assert!(matches!(
-        KnnBatchPlan::new(4, 3, 2, KnnBatchLimits { max_query_points: 2, ..exact }),
-        Err(KnnBatchPlanError::QueryCountLimit { required: 3, limit: 2 })
+        KnnBatchPlan::new(
+            4,
+            3,
+            2,
+            KnnBatchLimits {
+                max_query_points: 2,
+                ..exact
+            }
+        ),
+        Err(KnnBatchPlanError::QueryCountLimit {
+            required: 3,
+            limit: 2
+        })
     ));
     assert!(matches!(
-        KnnBatchPlan::new(4, 3, 2, KnnBatchLimits { max_neighbors: 1, ..exact }),
-        Err(KnnBatchPlanError::NeighborCountLimit { required: 2, limit: 1 })
+        KnnBatchPlan::new(
+            4,
+            3,
+            2,
+            KnnBatchLimits {
+                max_neighbors: 1,
+                ..exact
+            }
+        ),
+        Err(KnnBatchPlanError::NeighborCountLimit {
+            required: 2,
+            limit: 1
+        })
     ));
     assert_eq!(
         KnnBatchPlan::new(
-            usize::MAX, 2, 1,
+            usize::MAX,
+            2,
+            1,
             KnnBatchLimits {
-                max_source_points: usize::MAX, max_query_points: 2, max_neighbors: 1,
-                max_logical_peak_bytes: usize::MAX, max_work: usize::MAX,
+                max_source_points: usize::MAX,
+                max_query_points: 2,
+                max_neighbors: 1,
+                max_logical_peak_bytes: usize::MAX,
+                max_work: usize::MAX,
             },
         ),
-        Err(KnnBatchPlanError::ArithmeticOverflow { term: "source_count * query_count" })
+        Err(KnnBatchPlanError::ArithmeticOverflow {
+            term: "source_count * query_count"
+        })
     );
 }
 
@@ -313,10 +388,7 @@ fn planned_knn_explicitly_rejects_empty_sources_and_preserves_empty_query_noop()
     };
     assert_eq!(
         KnnBatchPlan::new(0, 0, 1, limits),
-        Err(KnnBatchPlanError::RequestedNeighborsExceedPointCount {
-            requested: 1,
-            point_count: 0,
-        })
+        Err(KnnBatchPlanError::ZeroSourcePoints)
     );
     let plan = KnnBatchPlan::new(1, 0, 1, limits).unwrap();
     let index = PointCloudIndex::new_for_knn_batch(&[[0.0; 3]], &plan).unwrap();
@@ -335,7 +407,9 @@ fn planned_knn_all_equal_points_k_one_is_bounded_and_uses_lowest_id() {
     let points = vec![[0.0; 3]; 97];
     let plan = knn_plan(points.len(), 2, 1);
     let index = PointCloudIndex::new_for_knn_batch(&points, &plan).unwrap();
-    let result = index.knn_batch_planned(&[[0.0; 3], [0.0; 3]], &plan).unwrap();
+    let result = index
+        .knn_batch_planned(&[[0.0; 3], [0.0; 3]], &plan)
+        .unwrap();
     assert_eq!(result.offsets, vec![0, 1, 2]);
     assert_eq!(result.point_ids, vec![0, 0]);
     assert_eq!(result.squared_distances, vec![0.0, 0.0]);
@@ -346,19 +420,36 @@ fn planned_knn_rejects_plan_count_mismatches_before_build_or_query() {
     let plan = knn_plan(2, 2, 1);
     assert!(matches!(
         PointCloudIndex::new_for_knn_batch(&[[0.0; 3]], &plan),
-        Err(PointIndexBuildError::KnnPlanSourceCountMismatch { planned: 2, actual: 1 })
+        Err(PointIndexBuildError::KnnPlanSourceCountMismatch {
+            planned: 2,
+            actual: 1
+        })
     ));
     let index = PointCloudIndex::new_for_knn_batch(&[[0.0; 3], [1.0; 3]], &plan).unwrap();
     assert_eq!(
         index.knn_batch_planned(&[[0.0; 3]], &plan),
-        Err(PointQueryError::KnnPlanQueryCountMismatch { planned: 2, actual: 1 })
+        Err(PointQueryError::KnnPlanQueryCountMismatch {
+            planned: 2,
+            actual: 1
+        })
     );
     assert!(matches!(
-        KnnBatchPlan::new(10, 1_000_000, 1, KnnBatchLimits {
-            max_source_points: 10, max_query_points: 1_000_000, max_neighbors: 1,
-            max_logical_peak_bytes: usize::MAX, max_work: 9_999_999,
-        }),
-        Err(KnnBatchPlanError::WorkLimit { required: 10_000_000, limit: 9_999_999 })
+        KnnBatchPlan::new(
+            10,
+            1_000_000,
+            1,
+            KnnBatchLimits {
+                max_source_points: 10,
+                max_query_points: 1_000_000,
+                max_neighbors: 1,
+                max_logical_peak_bytes: usize::MAX,
+                max_work: 9_999_999,
+            }
+        ),
+        Err(KnnBatchPlanError::WorkLimit {
+            required: 10_000_000,
+            limit: 9_999_999
+        })
     ));
 }
 
@@ -377,7 +468,9 @@ fn indexed_results_match_an_independent_brute_force_fixture() {
     let actual_radius = index
         .radius_neighbors_batch(&queries, 2.0, radius_limits())
         .unwrap();
-    let actual_knn = index.knn_batch_planned(&queries, &knn_plan(points.len(), queries.len(), 3)).unwrap();
+    let actual_knn = index
+        .knn_batch_planned(&queries, &knn_plan(points.len(), queries.len(), 3))
+        .unwrap();
 
     let mut expected_radius = Vec::new();
     let mut expected_knn = Vec::new();
@@ -453,7 +546,11 @@ fn public_api_is_batch_only_and_batch_results_are_thread_identical() {
                 .radius_neighbors_batch(&queries, 5.0, radius_limits())
                 .unwrap(),
         ),
-        signature(&index.knn_batch_planned(&queries, &knn_plan(points.len(), queries.len(), 8)).unwrap()),
+        signature(
+            &index
+                .knn_batch_planned(&queries, &knn_plan(points.len(), queries.len(), 8))
+                .unwrap(),
+        ),
     );
     println!("\n{THREAD_SWEEP_SIGNATURE}{result:?}");
 }

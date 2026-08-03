@@ -9,9 +9,6 @@
 use std::num::NonZeroUsize;
 
 use kiddo::{ImmutableKdTree, NearestNeighbour, SquaredEuclidean};
-use rayon::prelude::*;
-
-use crate::par;
 
 /// A point stored in a [`NeighborCsr`] row.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -90,6 +87,9 @@ impl KnnBatchPlan {
         neighbors: usize,
         limits: KnnBatchLimits,
     ) -> Result<Self, KnnBatchPlanError> {
+        if source_count == 0 {
+            return Err(KnnBatchPlanError::ZeroSourcePoints);
+        }
         if source_count > limits.max_source_points {
             return Err(KnnBatchPlanError::SourceCountLimit {
                 required: source_count,
@@ -117,11 +117,12 @@ impl KnnBatchPlan {
                 point_count: source_count,
             });
         }
-        let work = source_count.checked_mul(query_count).ok_or(
-            KnnBatchPlanError::ArithmeticOverflow {
-                term: "source_count * query_count",
-            },
-        )?;
+        let work =
+            source_count
+                .checked_mul(query_count)
+                .ok_or(KnnBatchPlanError::ArithmeticOverflow {
+                    term: "source_count * query_count",
+                })?;
         if work > limits.max_work {
             return Err(KnnBatchPlanError::WorkLimit {
                 required: work,
@@ -169,27 +170,68 @@ impl KnnBatchPlan {
 /// A kNN batch plan could not be represented within its caller-provided caps.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum KnnBatchPlanError {
-    SourceCountLimit { required: usize, limit: usize },
-    QueryCountLimit { required: usize, limit: usize },
+    ZeroSourcePoints,
+    SourceCountLimit {
+        required: usize,
+        limit: usize,
+    },
+    QueryCountLimit {
+        required: usize,
+        limit: usize,
+    },
     ZeroNeighborsRequested,
-    NeighborCountLimit { required: usize, limit: usize },
-    RequestedNeighborsExceedPointCount { requested: usize, point_count: usize },
-    LogicalPeakByteLimit { required: usize, limit: usize },
-    WorkLimit { required: usize, limit: usize },
-    ArithmeticOverflow { term: &'static str },
+    NeighborCountLimit {
+        required: usize,
+        limit: usize,
+    },
+    RequestedNeighborsExceedPointCount {
+        requested: usize,
+        point_count: usize,
+    },
+    LogicalPeakByteLimit {
+        required: usize,
+        limit: usize,
+    },
+    WorkLimit {
+        required: usize,
+        limit: usize,
+    },
+    ArithmeticOverflow {
+        term: &'static str,
+    },
 }
 
 impl std::fmt::Display for KnnBatchPlanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::SourceCountLimit { required, limit } => write!(f, "kNN source count {required} exceeds limit {limit}"),
-            Self::QueryCountLimit { required, limit } => write!(f, "kNN query count {required} exceeds limit {limit}"),
+            Self::ZeroSourcePoints => write!(f, "kNN source count must be greater than zero"),
+            Self::SourceCountLimit { required, limit } => {
+                write!(f, "kNN source count {required} exceeds limit {limit}")
+            }
+            Self::QueryCountLimit { required, limit } => {
+                write!(f, "kNN query count {required} exceeds limit {limit}")
+            }
             Self::ZeroNeighborsRequested => write!(f, "kNN k must be greater than zero"),
-            Self::NeighborCountLimit { required, limit } => write!(f, "kNN k {required} exceeds limit {limit}"),
-            Self::RequestedNeighborsExceedPointCount { requested, point_count } => write!(f, "requested {requested} neighbors from a point cloud of {point_count} points"),
-            Self::LogicalPeakByteLimit { required, limit } => write!(f, "kNN logical peak requires {required} bytes; limit is {limit}"),
-            Self::WorkLimit { required, limit } => write!(f, "kNN work requires {required}; limit is {limit}"),
-            Self::ArithmeticOverflow { term } => write!(f, "kNN resource arithmetic overflow in {term}"),
+            Self::NeighborCountLimit { required, limit } => {
+                write!(f, "kNN k {required} exceeds limit {limit}")
+            }
+            Self::RequestedNeighborsExceedPointCount {
+                requested,
+                point_count,
+            } => write!(
+                f,
+                "requested {requested} neighbors from a point cloud of {point_count} points"
+            ),
+            Self::LogicalPeakByteLimit { required, limit } => write!(
+                f,
+                "kNN logical peak requires {required} bytes; limit is {limit}"
+            ),
+            Self::WorkLimit { required, limit } => {
+                write!(f, "kNN work requires {required}; limit is {limit}")
+            }
+            Self::ArithmeticOverflow { term } => {
+                write!(f, "kNN resource arithmetic overflow in {term}")
+            }
         }
     }
 }
@@ -492,7 +534,10 @@ impl PointCloudIndex {
             });
         }
         validate_queries(queries)?;
-        let pair_count = plan.query_count.checked_mul(plan.neighbors).expect("checked by KnnBatchPlan");
+        let pair_count = plan
+            .query_count
+            .checked_mul(plan.neighbors)
+            .expect("checked by KnnBatchPlan");
         let mut offsets = Vec::with_capacity(plan.query_count + 1);
         let mut point_ids = Vec::with_capacity(pair_count);
         let mut squared_distances = Vec::with_capacity(pair_count);
@@ -512,7 +557,9 @@ impl PointCloudIndex {
                 query, boundary, tie_cap, false, true,
             );
             ties.sort_by(|left, right| {
-                left.distance.total_cmp(&right.distance).then(left.item.cmp(&right.item))
+                left.distance
+                    .total_cmp(&right.distance)
+                    .then(left.item.cmp(&right.item))
             });
             for neighbor in ties.into_iter().take(plan.neighbors) {
                 point_ids.push(neighbor.item);
@@ -520,7 +567,11 @@ impl PointCloudIndex {
             }
             offsets.push(point_ids.len());
         }
-        Ok(NeighborCsr { offsets, point_ids, squared_distances })
+        Ok(NeighborCsr {
+            offsets,
+            point_ids,
+            squared_distances,
+        })
     }
 }
 
@@ -530,27 +581,105 @@ fn knn_logical_peak_bytes(
     neighbors: usize,
 ) -> Result<usize, KnnBatchPlanError> {
     // Kiddo 5.3.3 ImmutableKdTree<f64, u64, 3, 32> retained capacities.
-    let leaf_count = source_count.checked_add(31).ok_or(KnnBatchPlanError::ArithmeticOverflow { term: "ceil(source_count / 32)" })? / 32;
-    let stem_count = if leaf_count < 2 { 0 } else { leaf_count.checked_next_power_of_two().ok_or(KnnBatchPlanError::ArithmeticOverflow { term: "next_power_of_two(leaf_count)" })? };
-    let source_coordinates = checked_bytes(source_count, std::mem::size_of::<[f64; 3]>(), "gathered source coordinates")?;
-    let leaf_coordinates = checked_bytes(source_count, 3 * std::mem::size_of::<f64>(), "Kiddo leaf coordinates")?;
+    let leaf_count = source_count
+        .checked_add(31)
+        .ok_or(KnnBatchPlanError::ArithmeticOverflow {
+            term: "ceil(source_count / 32)",
+        })?
+        / 32;
+    let stem_count = if leaf_count < 2 {
+        0
+    } else {
+        leaf_count
+            .checked_next_power_of_two()
+            .ok_or(KnnBatchPlanError::ArithmeticOverflow {
+                term: "next_power_of_two(leaf_count)",
+            })?
+    };
+    let source_coordinates = checked_bytes(
+        source_count,
+        std::mem::size_of::<[f64; 3]>(),
+        "gathered source coordinates",
+    )?;
+    let leaf_coordinates = checked_bytes(
+        source_count,
+        3 * std::mem::size_of::<f64>(),
+        "Kiddo leaf coordinates",
+    )?;
     let leaf_items = checked_bytes(source_count, std::mem::size_of::<u64>(), "Kiddo leaf items")?;
-    let leaf_extents = checked_bytes(leaf_count, std::mem::size_of::<(u32, u32)>(), "Kiddo leaf extents")?;
+    let leaf_extents = checked_bytes(
+        leaf_count,
+        std::mem::size_of::<(u32, u32)>(),
+        "Kiddo leaf extents",
+    )?;
     let stems = checked_bytes(stem_count, std::mem::size_of::<f64>(), "Kiddo stems")?;
-    let sort_indices = checked_bytes(source_count, std::mem::size_of::<usize>(), "Kiddo build sort indices")?;
-    let query_coordinates = checked_bytes(query_count, std::mem::size_of::<[f64; 3]>(), "gathered query coordinates")?;
-    let output_pairs = query_count.checked_mul(neighbors).ok_or(KnnBatchPlanError::ArithmeticOverflow { term: "query_count * neighbors" })?;
-    let offsets = checked_bytes(query_count.checked_add(1).ok_or(KnnBatchPlanError::ArithmeticOverflow { term: "query_count + 1" })?, std::mem::size_of::<usize>(), "CSR offsets")?;
+    let sort_indices = checked_bytes(
+        source_count,
+        std::mem::size_of::<usize>(),
+        "Kiddo build sort indices",
+    )?;
+    let query_coordinates = checked_bytes(
+        query_count,
+        std::mem::size_of::<[f64; 3]>(),
+        "gathered query coordinates",
+    )?;
+    let output_pairs =
+        query_count
+            .checked_mul(neighbors)
+            .ok_or(KnnBatchPlanError::ArithmeticOverflow {
+                term: "query_count * neighbors",
+            })?;
+    let offsets = checked_bytes(
+        query_count
+            .checked_add(1)
+            .ok_or(KnnBatchPlanError::ArithmeticOverflow {
+                term: "query_count + 1",
+            })?,
+        std::mem::size_of::<usize>(),
+        "CSR offsets",
+    )?;
     let ids = checked_bytes(output_pairs, std::mem::size_of::<u64>(), "CSR point IDs")?;
-    let distances = checked_bytes(output_pairs, std::mem::size_of::<f64>(), "CSR squared distances")?;
-    let tie_scratch = checked_bytes(source_count, std::mem::size_of::<NearestNeighbour<f64, u64>>(), "inclusive tie scratch")?;
-    [source_coordinates, leaf_coordinates, leaf_items, leaf_extents, stems, sort_indices, query_coordinates, offsets, ids, distances, tie_scratch]
-        .into_iter()
-        .try_fold(0usize, |total, term| total.checked_add(term).ok_or(KnnBatchPlanError::ArithmeticOverflow { term: "logical peak byte sum" }))
+    let distances = checked_bytes(
+        output_pairs,
+        std::mem::size_of::<f64>(),
+        "CSR squared distances",
+    )?;
+    let tie_scratch = checked_bytes(
+        source_count,
+        std::mem::size_of::<NearestNeighbour<f64, u64>>(),
+        "inclusive tie scratch",
+    )?;
+    [
+        source_coordinates,
+        leaf_coordinates,
+        leaf_items,
+        leaf_extents,
+        stems,
+        sort_indices,
+        query_coordinates,
+        offsets,
+        ids,
+        distances,
+        tie_scratch,
+    ]
+    .into_iter()
+    .try_fold(0usize, |total, term| {
+        total
+            .checked_add(term)
+            .ok_or(KnnBatchPlanError::ArithmeticOverflow {
+                term: "logical peak byte sum",
+            })
+    })
 }
 
-fn checked_bytes(count: usize, element_bytes: usize, term: &'static str) -> Result<usize, KnnBatchPlanError> {
-    count.checked_mul(element_bytes).ok_or(KnnBatchPlanError::ArithmeticOverflow { term })
+fn checked_bytes(
+    count: usize,
+    element_bytes: usize,
+    term: &'static str,
+) -> Result<usize, KnnBatchPlanError> {
+    count
+        .checked_mul(element_bytes)
+        .ok_or(KnnBatchPlanError::ArithmeticOverflow { term })
 }
 
 fn validate_queries(queries: &[[f64; 3]]) -> Result<(), PointQueryError> {

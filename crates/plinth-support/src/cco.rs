@@ -3326,7 +3326,7 @@ fn norm(a: [f64; 3]) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use geom_kernel::{NativeSurface, NativeSurfaceConfig};
+    use geom_kernel::{KnnBatchLimits, NativeSurface, NativeSurfaceConfig};
     use plinth_core::LayerPlan;
     use plinth_mesh::{
         build_face_topology, make_box, make_overhang_table, make_toed_slab, FaceTopology, Mesh,
@@ -3340,6 +3340,14 @@ mod tests {
         select_contacts,
         specialized::{prepare_specialized_contacts, SpecializedLimits},
         ContactSelectionConfig, SupportPerceptionConfig,
+    };
+
+    const TEST_KNN_LIMITS: KnnBatchLimits = KnnBatchLimits {
+        max_source_points: 20_000_000,
+        max_query_points: 20_000_000,
+        max_neighbors: 1,
+        max_logical_peak_bytes: 2 * 1024 * 1024 * 1024,
+        max_work: 100_000_000,
     };
 
     fn transcript_frame() -> BuildFrame {
@@ -3418,7 +3426,7 @@ mod tests {
             &layers,
             &candidate,
             &[],
-            GenericPerceptionLimits::production(),
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
         )
         .unwrap();
         let selection =
@@ -3439,7 +3447,7 @@ mod tests {
             &layers,
             &candidate,
             &[],
-            GenericPerceptionLimits::production(),
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
             &generic,
             &regular,
             &selection,
@@ -3467,7 +3475,7 @@ mod tests {
             &layers,
             &candidate,
             &[],
-            GenericPerceptionLimits::production(),
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
             &generic,
             &regular,
             &selection,

@@ -2368,8 +2368,16 @@ mod tests {
     use plinth_orient::{BaselineSelection, OrientationHistory, OrientationReport, RigidTransform};
 
     use super::*;
+    use geom_kernel::KnnBatchLimits;
 
     const GRID_BYTES: usize = 64 * 1024 * 1024;
+    const TEST_KNN_LIMITS: KnnBatchLimits = KnnBatchLimits {
+        max_source_points: 20_000_000,
+        max_query_points: 20_000_000,
+        max_neighbors: 1,
+        max_logical_peak_bytes: 2 * 1024 * 1024 * 1024,
+        max_work: 100_000_000,
+    };
     const SWEEP_CHILD: &str = "PLINTH_RUNNER_PREPARE_SWEEP_CHILD";
     const SWEEP_LINE: &str = "RUNNER_PREPARE_SWEEP=";
 
@@ -2519,7 +2527,7 @@ mod tests {
             perception,
             candidate_config(),
             &[],
-            GenericPerceptionLimits::production(),
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
             selection,
             SpecializedLimits::production(),
             ContactConstructionLimits::production(),
@@ -3417,7 +3425,7 @@ mod tests {
                 perception,
                 candidate_config(),
                 &[],
-                GenericPerceptionLimits::production(),
+                GenericPerceptionLimits::production(TEST_KNN_LIMITS),
                 selection,
                 SpecializedLimits::production(),
                 ContactConstructionLimits::production(),

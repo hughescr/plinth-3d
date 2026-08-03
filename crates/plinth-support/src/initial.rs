@@ -726,7 +726,7 @@ fn fnv(bytes: impl IntoIterator<Item = u8>) -> u64 {
 mod tests {
     use std::process::Command;
 
-    use geom_kernel::{NativeSurface, NativeSurfaceConfig};
+    use geom_kernel::{KnnBatchLimits, NativeSurface, NativeSurfaceConfig};
     use plinth_core::LayerPlan;
     use plinth_mesh::{
         build_face_topology, make_overhang_table, make_raking_blade, make_thin_fin, make_toed_slab,
@@ -743,6 +743,13 @@ mod tests {
     };
 
     const SWEEP_CHILD: &str = "PLINTH_INITIAL_SWEEP_CHILD";
+    const TEST_KNN_LIMITS: KnnBatchLimits = KnnBatchLimits {
+        max_source_points: 20_000_000,
+        max_query_points: 20_000_000,
+        max_neighbors: 1,
+        max_logical_peak_bytes: 2 * 1024 * 1024 * 1024,
+        max_work: 100_000_000,
+    };
     const SWEEP_LINE: &str = "INITIAL_SWEEP=";
 
     struct Fixture {
@@ -820,7 +827,7 @@ mod tests {
                 &layers,
                 &candidate,
                 &[],
-                GenericPerceptionLimits::production(),
+                GenericPerceptionLimits::production(TEST_KNN_LIMITS),
             )
             .unwrap();
             let selection =
@@ -841,7 +848,7 @@ mod tests {
                 &layers,
                 &candidate,
                 &[],
-                GenericPerceptionLimits::production(),
+                GenericPerceptionLimits::production(TEST_KNN_LIMITS),
                 &generic,
                 &regular,
                 &selection,
@@ -908,7 +915,7 @@ mod tests {
                 &self.layers,
                 &self.candidate,
                 &[],
-                GenericPerceptionLimits::production(),
+                GenericPerceptionLimits::production(TEST_KNN_LIMITS),
                 &self.generic,
                 &self.regular,
                 &selection,
@@ -1018,7 +1025,7 @@ mod tests {
             &fixture.layers,
             &fixture.candidate,
             &[],
-            GenericPerceptionLimits::production(),
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
             &fixture.generic,
             &fixture.regular,
             &selection,
@@ -1043,7 +1050,7 @@ mod tests {
             &fixture.layers,
             &fixture.candidate,
             &[],
-            GenericPerceptionLimits::production(),
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
             &fixture.generic,
             &fixture.regular,
             &selection,
@@ -1148,7 +1155,7 @@ mod tests {
                 &table.layers,
                 &table.candidate,
                 &[],
-                GenericPerceptionLimits::production(),
+                GenericPerceptionLimits::production(TEST_KNN_LIMITS),
                 &table.generic,
                 &table.regular,
                 &selection,

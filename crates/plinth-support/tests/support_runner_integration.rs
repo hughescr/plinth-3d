@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, path::PathBuf};
 
-use geom_kernel::PenetrationBatchLimits;
+use geom_kernel::{KnnBatchLimits, PenetrationBatchLimits};
 use plinth_core::{LayerPlan, PositiveFinite};
 use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
 use plinth_hollow::{HollowedModel, SolidDecisionReason};
@@ -16,6 +16,13 @@ use plinth_support::{
 };
 
 const GRID_BYTES: usize = 64 * 1024 * 1024;
+const TEST_KNN_LIMITS: KnnBatchLimits = KnnBatchLimits {
+    max_source_points: 20_000_000,
+    max_query_points: 20_000_000,
+    max_neighbors: 1,
+    max_logical_peak_bytes: 2 * 1024 * 1024 * 1024,
+    max_work: 100_000_000,
+};
 
 fn hollowed_overhang_table() -> HollowedModel {
     let mesh = make_overhang_table().expect("procedural overhang table");
@@ -59,7 +66,7 @@ fn support_input<'a>(
         )
         .expect("candidate payload configuration"),
         reservations: &[] as &[SpecializedOwnerReservation],
-        perception_limits: GenericPerceptionLimits::production(),
+        perception_limits: GenericPerceptionLimits::production(TEST_KNN_LIMITS),
         coverage_samples_max_virtual_cells: 2_000_000,
         coverage_score_matrix_max_entries: 65_536,
         specialized_limits: SpecializedLimits::production(),

@@ -36,11 +36,9 @@ pub struct GenericPerceptionLimits {
     pub max_slice_output_bytes: usize,
     pub max_loop_vertices: usize,
     pub max_minima_vertices: usize,
-    pub max_minima_knn_source_points: usize,
-    pub max_minima_knn_query_points: usize,
-    pub max_minima_knn_neighbors: usize,
-    pub max_minima_knn_logical_peak_bytes: usize,
-    pub max_minima_knn_work: usize,
+    /// Caller-owned execution authority for the minima-to-face kNN batch.
+    /// This guard refuses oversized work but never changes a successful plan.
+    pub minima_knn: KnnBatchLimits,
     pub max_island_neighbor_pairs: usize,
     pub max_island_neighbor_bytes: usize,
     pub max_overlap_pairs: usize,
@@ -51,7 +49,7 @@ pub struct GenericPerceptionLimits {
 
 impl GenericPerceptionLimits {
     #[must_use]
-    pub const fn production() -> Self {
+    pub const fn production(minima_knn: KnnBatchLimits) -> Self {
         Self {
             max_planes: 20_000,
             max_triangle_plane_tests: 100_000_000,
@@ -59,11 +57,7 @@ impl GenericPerceptionLimits {
             max_slice_output_bytes: 2 * 1024 * 1024 * 1024,
             max_loop_vertices: 100_000_000,
             max_minima_vertices: 20_000_000,
-            max_minima_knn_source_points: 20_000_000,
-            max_minima_knn_query_points: 20_000_000,
-            max_minima_knn_neighbors: 1,
-            max_minima_knn_logical_peak_bytes: 2 * 1024 * 1024 * 1024,
-            max_minima_knn_work: 100_000_000,
+            minima_knn,
             max_island_neighbor_pairs: 100_000_000,
             max_island_neighbor_bytes: 2 * 1024 * 1024 * 1024,
             max_overlap_pairs: 100_000_000,
@@ -1801,9 +1795,10 @@ fn filter_minima_to_exterior_faces(
     mut minima: Vec<LocalZMinimum>,
     limits: GenericPerceptionLimits,
 ) -> Result<Vec<LocalZMinimum>, GenericPerceptionError> {
-    // An empty query batch is the established batch no-op: avoid both query
-    // gathering and index construction.  Empty sources with nonempty minima
-    // instead reach the typed kNN plan rejection below.
+    // This higher-level no-work fast path avoids gathering or index
+    // construction when no exterior/interior comparison can change minima.
+    // It is distinct from `KnnBatchPlan`, which explicitly rejects N = 0;
+    // Q = 0 is the plan-level CSR no-op.
     if minima.is_empty()
         || !exterior.iter().any(|value| *value)
         || !exterior.iter().any(|value| !*value)
@@ -1812,19 +1807,8 @@ fn filter_minima_to_exterior_faces(
     }
     // Count before gathering positions or constructing Kiddo: this is the
     // KNN authority carried by the public perception input.
-    let plan = KnnBatchPlan::new(
-        face_centroids.len(),
-        minima.len(),
-        1,
-        KnnBatchLimits {
-            max_source_points: limits.max_minima_knn_source_points,
-            max_query_points: limits.max_minima_knn_query_points,
-            max_neighbors: limits.max_minima_knn_neighbors,
-            max_logical_peak_bytes: limits.max_minima_knn_logical_peak_bytes,
-            max_work: limits.max_minima_knn_work,
-        },
-    )
-    .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?;
+    let plan = KnnBatchPlan::new(face_centroids.len(), minima.len(), 1, limits.minima_knn)
+        .map_err(|error| GenericPerceptionError::PointIndex(error.to_string()))?;
     let queries = minima
         .iter()
         .map(|minimum| minimum.position_mm)
@@ -2391,11 +2375,6 @@ fn authority_fingerprint(
     result_config.usize(limits.max_slice_output_bytes);
     result_config.usize(limits.max_loop_vertices);
     result_config.usize(limits.max_minima_vertices);
-    result_config.usize(limits.max_minima_knn_source_points);
-    result_config.usize(limits.max_minima_knn_query_points);
-    result_config.usize(limits.max_minima_knn_neighbors);
-    result_config.usize(limits.max_minima_knn_logical_peak_bytes);
-    result_config.usize(limits.max_minima_knn_work);
     result_config.usize(limits.max_island_neighbor_pairs);
     result_config.usize(limits.max_island_neighbor_bytes);
     result_config.usize(limits.max_overlap_pairs);
@@ -2461,11 +2440,20 @@ impl Fnv {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use geom_kernel::KnnBatchLimits;
     use plinth_core::{Finite, PositiveFinite};
     use plinth_mesh::{make_overhang_table, make_raking_blade, make_thin_fin, make_toed_slab};
 
     const SWEEP_CHILD: &str = "PLINTH_PERCEPTION_SWEEP_CHILD";
     const SWEEP_LINE: &str = "PLINTH_PERCEPTION_SWEEP=";
+
+    const TEST_KNN_LIMITS: KnnBatchLimits = KnnBatchLimits {
+        max_source_points: 20_000_000,
+        max_query_points: 20_000_000,
+        max_neighbors: 1,
+        max_logical_peak_bytes: 2 * 1024 * 1024 * 1024,
+        max_work: 100_000_000,
+    };
 
     fn test_partition(area_mm2: f64) -> FinalizedLoadPartition {
         test_partition_rows(vec![FinalizedFaceLoad {
@@ -2791,7 +2779,7 @@ mod tests {
             GenericPerceptionLimits {
                 max_overlap_pairs: 16,
                 max_overlap_bytes: 4096,
-                ..GenericPerceptionLimits::production()
+                ..GenericPerceptionLimits::production(TEST_KNN_LIMITS)
             },
         )
         .unwrap();
@@ -2838,7 +2826,7 @@ mod tests {
                 &centroids,
                 &[false, true],
                 vec![minimum.clone()],
-                GenericPerceptionLimits::production(),
+                GenericPerceptionLimits::production(TEST_KNN_LIMITS),
             )
             .unwrap(),
             Vec::<LocalZMinimum>::new()
@@ -2848,7 +2836,7 @@ mod tests {
                 &centroids,
                 &[true, false],
                 vec![minimum.clone()],
-                GenericPerceptionLimits::production(),
+                GenericPerceptionLimits::production(TEST_KNN_LIMITS),
             )
             .unwrap(),
             vec![minimum]
@@ -2864,12 +2852,14 @@ mod tests {
         };
         let centroids = [[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0]];
         let exact = GenericPerceptionLimits {
-            max_minima_knn_source_points: 2,
-            max_minima_knn_query_points: 1,
-            max_minima_knn_neighbors: 1,
-            max_minima_knn_logical_peak_bytes: 1024,
-            max_minima_knn_work: 2,
-            ..GenericPerceptionLimits::production()
+            minima_knn: KnnBatchLimits {
+                max_source_points: 2,
+                max_query_points: 1,
+                max_neighbors: 1,
+                max_logical_peak_bytes: 1024,
+                max_work: 2,
+            },
+            ..GenericPerceptionLimits::production(TEST_KNN_LIMITS)
         };
         let expected = filter_minima_to_exterior_faces(
             &centroids,
@@ -2884,7 +2874,10 @@ mod tests {
                 &[true, false],
                 vec![minimum.clone()],
                 GenericPerceptionLimits {
-                    max_minima_knn_query_points: 0,
+                    minima_knn: KnnBatchLimits {
+                        max_query_points: 0,
+                        ..exact.minima_knn
+                    },
                     ..exact
                 },
             ),
@@ -2898,11 +2891,13 @@ mod tests {
                 &[true, false],
                 vec![minimum],
                 GenericPerceptionLimits {
-                    max_minima_knn_source_points: 3,
-                    max_minima_knn_query_points: 2,
-                    max_minima_knn_neighbors: 2,
-                    max_minima_knn_logical_peak_bytes: 2048,
-                    max_minima_knn_work: 4,
+                    minima_knn: KnnBatchLimits {
+                        max_source_points: 3,
+                        max_query_points: 2,
+                        max_neighbors: 2,
+                        max_logical_peak_bytes: 2048,
+                        max_work: 4,
+                    },
                     ..exact
                 },
             )
@@ -2938,7 +2933,7 @@ mod tests {
         let exact = GenericPerceptionLimits {
             max_island_neighbor_pairs: pairs,
             max_island_neighbor_bytes: bytes,
-            ..GenericPerceptionLimits::production()
+            ..GenericPerceptionLimits::production(TEST_KNN_LIMITS)
         };
         assert_eq!(
             connected_islands(&raw, &topology, &surface, exact)
@@ -3066,7 +3061,7 @@ mod tests {
             &layer_plan(),
             &candidate_config(),
             &[],
-            GenericPerceptionLimits::production(),
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
         )
         .unwrap();
         let contacts = plan
@@ -3179,7 +3174,7 @@ mod tests {
             &layer_plan(),
             &candidate_config(),
             &[],
-            GenericPerceptionLimits::production(),
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
         )
         .unwrap();
         assert_eq!(plan.island_births().len(), 1);
@@ -3257,7 +3252,7 @@ mod tests {
                 &layer_plan(),
                 &candidate_config(),
                 &[],
-                GenericPerceptionLimits::production(),
+                GenericPerceptionLimits::production(TEST_KNN_LIMITS),
             )
             .expect("required semantic fixture perception");
             plan.validate_binding(
@@ -3267,7 +3262,7 @@ mod tests {
                 &layer_plan(),
                 &candidate_config(),
                 &[],
-                GenericPerceptionLimits::production(),
+                GenericPerceptionLimits::production(TEST_KNN_LIMITS),
             )
             .unwrap();
             assert_ne!(plan.digest(), 0);
@@ -3285,7 +3280,7 @@ mod tests {
             &layer_plan(),
             &candidate_config(),
             &[],
-            GenericPerceptionLimits::production(),
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
         )
         .unwrap();
         assert_eq!(table_plan.island_births().len(), 4);
@@ -3300,7 +3295,7 @@ mod tests {
             &layer_plan(),
             &candidate_config(),
             &[],
-            GenericPerceptionLimits::production(),
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
         )
         .unwrap();
         assert_eq!(toe_plan.local_z_minima().len(), 3);
@@ -3321,7 +3316,7 @@ mod tests {
             &layer_plan(),
             &candidate_config(),
             &[],
-            GenericPerceptionLimits::production(),
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
         )
         .unwrap();
         assert!(raking_plan.island_births().len() >= 5);
@@ -3345,7 +3340,7 @@ mod tests {
             &layers,
             &candidate_config(),
             &[],
-            GenericPerceptionLimits::production(),
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
         )
         .expect("Sphere perception");
         let other = plinth_mesh::make_box_default().unwrap();
@@ -3358,7 +3353,7 @@ mod tests {
                 &layers,
                 &candidate_config(),
                 &[],
-                GenericPerceptionLimits::production(),
+                GenericPerceptionLimits::production(TEST_KNN_LIMITS),
             ),
             Err(GenericPerceptionError::StaleAuthority)
         );
@@ -3375,7 +3370,7 @@ mod tests {
             owner_id: 1,
             face_id: 0,
         }];
-        let limits = GenericPerceptionLimits::production();
+        let limits = GenericPerceptionLimits::production(TEST_KNN_LIMITS);
         let plan = prepare_generic_contacts(
             &mesh,
             &config,
@@ -3395,6 +3390,38 @@ mod tests {
                 &candidates,
                 &reservations,
                 limits,
+            )
+            .is_ok());
+        let relaxed_knn_limits = GenericPerceptionLimits {
+            minima_knn: KnnBatchLimits {
+                max_source_points: TEST_KNN_LIMITS.max_source_points + 1,
+                max_query_points: TEST_KNN_LIMITS.max_query_points + 1,
+                max_neighbors: TEST_KNN_LIMITS.max_neighbors + 1,
+                max_logical_peak_bytes: TEST_KNN_LIMITS.max_logical_peak_bytes + 1,
+                max_work: TEST_KNN_LIMITS.max_work + 1,
+            },
+            ..limits
+        };
+        let relaxed_plan = prepare_generic_contacts(
+            &mesh,
+            &config,
+            frame(),
+            &layers,
+            &candidates,
+            &reservations,
+            relaxed_knn_limits,
+        )
+        .unwrap();
+        assert_eq!(relaxed_plan.digest(), plan.digest());
+        assert!(plan
+            .validate_binding(
+                &mesh,
+                &config,
+                frame(),
+                &layers,
+                &candidates,
+                &reservations,
+                relaxed_knn_limits,
             )
             .is_ok());
 
@@ -3613,7 +3640,7 @@ mod tests {
             &layers,
             &candidate_config(),
             &[],
-            GenericPerceptionLimits::production(),
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
         )
         .expect("Sphere perception");
         let (effective, participating) = plan.slice_thread_evidence();
