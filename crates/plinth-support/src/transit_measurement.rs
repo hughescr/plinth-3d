@@ -4,6 +4,7 @@
 //! an interval nor assigns a clearance, gate, report, certificate, or defect.
 
 use geom_kernel::{capsule_rays, Interval, PenetrationBatchLimits, SurfaceTriangleSoupDigest};
+use plinth_core::{ConstantDescriptor, ConstantId, DecisionId, M0Constants};
 use thiserror::Error;
 
 use crate::{
@@ -12,6 +13,283 @@ use crate::{
 };
 
 const OFFSET_RAYS: usize = 8;
+
+/// Immutable policy material recorded by the scalar SCAR diagnostic.
+///
+/// This is deliberately not a gate policy: it copies the canonical registry
+/// descriptors so a later owner can inspect exactly which unresolved policy
+/// values and measured print floor informed this diagnostic calculation.
+#[derive(Clone, Debug, PartialEq)]
+struct TransitPolicySnapshot {
+    decision_id: DecisionId,
+    policy_descriptors: [ConstantDescriptor; 8],
+    min_illegal_descriptor: ConstantDescriptor,
+    a_abs_mm2: f64,
+    kappa: f64,
+    l_scar_max_mm: f64,
+    eps_cos: f64,
+    interval_tol_mm: f64,
+    tip_ball_factor: f64,
+    foot_ball_factor: f64,
+    min_illegal_len_mm: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+enum TransitPolicySnapshotError {
+    #[error("SCAR policy registry descriptor is absent: {id}")]
+    MissingDescriptor { id: &'static str },
+}
+
+impl TransitPolicySnapshot {
+    fn from_constants(constants: &M0Constants) -> Result<Self, TransitPolicySnapshotError> {
+        let policy = constants.scar_area_cap_policy();
+        let ids = policy.constant_ids();
+        let policy_descriptors = ids.map(|id| {
+            constants
+                .registry()
+                .get(&ConstantId::from(id))
+                .cloned()
+                .ok_or(TransitPolicySnapshotError::MissingDescriptor { id })
+        });
+        let policy_descriptors = policy_descriptors
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        let policy_descriptors: [ConstantDescriptor; 8] = policy_descriptors
+            .try_into()
+            .expect("the fixed SCAR policy ID list always has eight entries");
+        let min_id = "MIN_ILLEGAL_LEN_MM";
+        let min_illegal_descriptor = constants
+            .registry()
+            .get(&ConstantId::from(min_id))
+            .cloned()
+            .ok_or(TransitPolicySnapshotError::MissingDescriptor { id: min_id })?;
+
+        Ok(Self {
+            decision_id: policy.decision_id(),
+            policy_descriptors,
+            min_illegal_descriptor,
+            a_abs_mm2: policy.a_abs_mm2().diagnostic().get(),
+            kappa: policy.kappa().diagnostic().get(),
+            l_scar_max_mm: policy.l_scar_max_mm().diagnostic().get(),
+            eps_cos: policy.eps_cos().diagnostic().get(),
+            interval_tol_mm: policy.interval_tol_mm().diagnostic().get(),
+            tip_ball_factor: policy.tip_ball_factor().diagnostic().get(),
+            foot_ball_factor: policy.foot_ball_factor().diagnostic().get(),
+            min_illegal_len_mm: constants
+                .placeholders()
+                .min_illegal_len_mm()
+                .diagnostic()
+                .get(),
+        })
+    }
+}
+
+/// Checked scalar evidence for a single, already-anchored transit sample.
+#[derive(Clone, Debug, PartialEq)]
+struct ScarDiagnosticInput {
+    t_mm: f64,
+    d_mm: f64,
+    cosang: Option<f64>,
+    raw_anchor_radius_mm: f64,
+    tip_r_min_mm: f64,
+    root_radius_mm: f64,
+    member_length_mm: f64,
+    member_kind: MemberKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+enum ScarDiagnosticError {
+    #[error("SCAR diagnostic input is non-finite: {field}")]
+    NonFinite { field: &'static str },
+    #[error("SCAR diagnostic input is negative: {field}")]
+    Negative { field: &'static str },
+    #[error("SCAR diagnostic member length is collapsed")]
+    CollapsedLength,
+    #[error("SCAR diagnostic needs cosine evidence when T exceeds tolerance")]
+    MissingCosine,
+    #[error("SCAR diagnostic arithmetic became non-finite: {operation}")]
+    Arithmetic { operation: &'static str },
+}
+
+impl ScarDiagnosticInput {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        t_mm: f64,
+        d_mm: f64,
+        cosang: Option<f64>,
+        raw_anchor_radius_mm: f64,
+        tip_r_min_mm: f64,
+        root_radius_mm: f64,
+        member_length_mm: f64,
+        member_kind: MemberKind,
+    ) -> Result<Self, ScarDiagnosticError> {
+        for (field, value) in [
+            ("T", t_mm),
+            ("d", d_mm),
+            ("raw anchor radius", raw_anchor_radius_mm),
+            ("tip_r_min", tip_r_min_mm),
+            ("root radius", root_radius_mm),
+            ("member length", member_length_mm),
+        ] {
+            scalar_input(field, value)?;
+        }
+        if member_length_mm == 0.0 {
+            return Err(ScarDiagnosticError::CollapsedLength);
+        }
+        if let Some(cosang) = cosang {
+            scalar_input("cosang", cosang)?;
+        }
+        Ok(Self {
+            t_mm,
+            d_mm,
+            cosang,
+            raw_anchor_radius_mm,
+            tip_r_min_mm,
+            root_radius_mm,
+            member_length_mm,
+            member_kind,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ScarDiagnostic {
+    r_x_mm: f64,
+    ball_radius_mm: f64,
+    area_shaft_mm2: f64,
+    area_ball_mm2: f64,
+    area_patch_mm2: f64,
+    area_design_mm2: f64,
+    area_max_mm2: f64,
+    scar_length_mm: f64,
+    anchor_area_mm2: f64,
+    area_within_recorded_policy: bool,
+    length_within_recorded_policy: bool,
+    anchor_meets_recorded_policy: bool,
+    diagnostic_constraints_hold_under_recorded_policy: bool,
+}
+
+fn scalar_input(field: &'static str, value: f64) -> Result<(), ScarDiagnosticError> {
+    if !value.is_finite() {
+        Err(ScarDiagnosticError::NonFinite { field })
+    } else if value < 0.0 {
+        Err(ScarDiagnosticError::Negative { field })
+    } else {
+        Ok(())
+    }
+}
+
+fn finite(value: f64, operation: &'static str) -> Result<f64, ScarDiagnosticError> {
+    value
+        .is_finite()
+        .then_some(value)
+        .ok_or(ScarDiagnosticError::Arithmetic { operation })
+}
+
+fn calculate_scar_diagnostic(
+    policy: &TransitPolicySnapshot,
+    input: &ScarDiagnosticInput,
+) -> Result<ScarDiagnostic, ScarDiagnosticError> {
+    let r_end = input.raw_anchor_radius_mm.max(input.tip_r_min_mm);
+    let taper = finite(input.d_mm / input.member_length_mm, "taper fraction")?;
+    let unconstrained_radius = finite(
+        r_end + finite((input.root_radius_mm - r_end) * taper, "taper delta")?,
+        "taper radius",
+    )?;
+    let r_x_mm = unconstrained_radius.clamp(
+        r_end.min(input.root_radius_mm),
+        r_end.max(input.root_radius_mm),
+    );
+    let ball_factor = if matches!(&input.member_kind, MemberKind::Stub) {
+        policy.tip_ball_factor
+    } else {
+        policy.foot_ball_factor
+    };
+    let ball_radius_mm = finite(r_x_mm * ball_factor, "ball radius")?;
+    let exceeds_tol = input.t_mm > policy.interval_tol_mm;
+    let cosine = if exceeds_tol {
+        input.cosang.ok_or(ScarDiagnosticError::MissingCosine)?
+    } else {
+        0.0
+    };
+    let cosine_denominator = cosine.max(policy.eps_cos);
+    let radius_squared = finite(r_x_mm * r_x_mm, "radius squared")?;
+    let area_shaft_mm2 = if exceeds_tol {
+        finite(
+            (std::f64::consts::PI * radius_squared / cosine_denominator)
+                .min(2.0 * r_x_mm * input.t_mm),
+            "shaft area",
+        )?
+    } else {
+        0.0
+    };
+    let ball_squared = finite(ball_radius_mm * ball_radius_mm, "ball radius squared")?;
+    let area_ball_mm2 = finite(
+        std::f64::consts::PI * (ball_squared - input.d_mm * input.d_mm).max(0.0),
+        "ball area",
+    )?;
+    let area_patch_mm2 = finite(area_shaft_mm2 + area_ball_mm2, "patch area")?;
+    let area_design_mm2 = finite(std::f64::consts::PI * ball_squared, "design area")?;
+    let area_max_mm2 = policy
+        .a_abs_mm2
+        .max(finite(policy.kappa * area_design_mm2, "area cap")?);
+    let scar_length_mm = if exceeds_tol {
+        finite(
+            (2.0 * r_x_mm / cosine_denominator).min(input.t_mm + 2.0 * r_x_mm),
+            "scar length",
+        )?
+    } else {
+        0.0
+    };
+    let anchor_area_mm2 = finite(
+        area_ball_mm2
+            + if exceeds_tol {
+                std::f64::consts::PI * radius_squared
+            } else {
+                0.0
+            },
+        "anchor area",
+    )?;
+    let (area_within_recorded_policy, length_within_recorded_policy, anchor_meets_recorded_policy) =
+        recorded_constraints(
+            policy,
+            area_patch_mm2,
+            scar_length_mm,
+            anchor_area_mm2,
+            area_design_mm2,
+        );
+    Ok(ScarDiagnostic {
+        r_x_mm,
+        ball_radius_mm,
+        area_shaft_mm2,
+        area_ball_mm2,
+        area_patch_mm2,
+        area_design_mm2,
+        area_max_mm2,
+        scar_length_mm,
+        anchor_area_mm2,
+        area_within_recorded_policy,
+        length_within_recorded_policy,
+        anchor_meets_recorded_policy,
+        diagnostic_constraints_hold_under_recorded_policy: area_within_recorded_policy
+            && length_within_recorded_policy
+            && anchor_meets_recorded_policy,
+    })
+}
+
+fn recorded_constraints(
+    policy: &TransitPolicySnapshot,
+    area_patch_mm2: f64,
+    scar_length_mm: f64,
+    anchor_area_mm2: f64,
+    area_design_mm2: f64,
+) -> (bool, bool, bool) {
+    (
+        area_patch_mm2 <= policy.a_abs_mm2.max(policy.kappa * area_design_mm2),
+        scar_length_mm <= policy.l_scar_max_mm,
+        anchor_area_mm2 >= area_design_mm2,
+    )
+}
 
 #[cfg(test)]
 thread_local! {
@@ -675,6 +953,215 @@ fn member_digest<'a>(members: impl Iterator<Item = &'a FinalLiveMemberEvidence>)
 mod tests {
     use super::*;
     use geom_kernel::{NativeSurface, NativeSurfaceConfig};
+    use plinth_core::{m0_constants, RegistryProvenanceClass};
+
+    fn scar_policy() -> TransitPolicySnapshot {
+        TransitPolicySnapshot::from_constants(m0_constants().expect("M0 constants"))
+            .expect("SCAR registry descriptors")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn scar_input(
+        t_mm: f64,
+        d_mm: f64,
+        cosang: Option<f64>,
+        raw_anchor_radius_mm: f64,
+        tip_r_min_mm: f64,
+        root_radius_mm: f64,
+        member_length_mm: f64,
+        member_kind: MemberKind,
+    ) -> ScarDiagnosticInput {
+        ScarDiagnosticInput::new(
+            t_mm,
+            d_mm,
+            cosang,
+            raw_anchor_radius_mm,
+            tip_r_min_mm,
+            root_radius_mm,
+            member_length_mm,
+            member_kind,
+        )
+        .expect("checked scalar fixture")
+    }
+
+    #[test]
+    fn scar_policy_snapshot_retains_canonical_order_and_provenance() {
+        let policy = scar_policy();
+        assert_eq!(policy.decision_id.as_str(), "SCAR-AREA-CAP");
+        assert_eq!(
+            policy
+                .policy_descriptors
+                .iter()
+                .map(|descriptor| descriptor.id().as_str())
+                .collect::<Vec<_>>(),
+            [
+                "A_ABS_MM2",
+                "KAPPA",
+                "L_SCAR_MAX_MM",
+                "EPS_COS",
+                "TOL_MM",
+                "PRINT_FLOOR_CHORD_MM",
+                "BALL_FACTOR_STUB",
+                "BALL_FACTOR_FOOT",
+            ]
+        );
+        assert!(policy
+            .policy_descriptors
+            .iter()
+            .enumerate()
+            .all(|(index, descriptor)| {
+                descriptor.provenance().class()
+                    == if index == 5 {
+                        RegistryProvenanceClass::Measured
+                    } else {
+                        RegistryProvenanceClass::Placeholder
+                    }
+            }));
+        assert_eq!(
+            policy.min_illegal_descriptor.id().as_str(),
+            "MIN_ILLEGAL_LEN_MM"
+        );
+        assert_eq!(
+            policy.min_illegal_descriptor.provenance().class(),
+            RegistryProvenanceClass::Placeholder
+        );
+        assert_eq!(policy.min_illegal_len_mm, 0.05);
+    }
+
+    #[test]
+    fn scar_constraint_equalities_pass_and_one_ulp_excesses_fail() {
+        let policy = scar_policy();
+        let anchor_limit = 3.0;
+        let area_limit = policy.a_abs_mm2.max(policy.kappa * anchor_limit);
+        let length_limit = policy.l_scar_max_mm;
+        assert_eq!(
+            recorded_constraints(
+                &policy,
+                area_limit,
+                length_limit,
+                anchor_limit,
+                anchor_limit
+            ),
+            (true, true, true)
+        );
+        let next = |value: f64| f64::from_bits(value.to_bits() + 1);
+        assert_eq!(
+            recorded_constraints(
+                &policy,
+                next(area_limit),
+                length_limit,
+                anchor_limit,
+                anchor_limit
+            ),
+            (false, true, true)
+        );
+        assert_eq!(
+            recorded_constraints(
+                &policy,
+                area_limit,
+                next(length_limit),
+                anchor_limit,
+                anchor_limit
+            ),
+            (true, false, true)
+        );
+        assert_eq!(
+            recorded_constraints(
+                &policy,
+                area_limit,
+                length_limit,
+                anchor_limit,
+                next(anchor_limit)
+            ),
+            (true, true, false)
+        );
+    }
+
+    #[test]
+    fn scar_tolerance_and_eps_cosine_are_exactly_recorded() {
+        let policy = scar_policy();
+        let at_tolerance = calculate_scar_diagnostic(
+            &policy,
+            &scar_input(0.05, 0.0, None, 1.0, 0.5, 1.0, 5.0, MemberKind::Shoot),
+        )
+        .expect("T equals tolerance needs no cosine");
+        assert_eq!(at_tolerance.area_shaft_mm2, 0.0);
+        assert_eq!(at_tolerance.scar_length_mm, 0.0);
+        assert!(matches!(
+            calculate_scar_diagnostic(
+                &policy,
+                &scar_input(
+                    0.050_000_000_1,
+                    0.0,
+                    None,
+                    1.0,
+                    0.5,
+                    1.0,
+                    5.0,
+                    MemberKind::Shoot
+                ),
+            ),
+            Err(ScarDiagnosticError::MissingCosine)
+        ));
+        let clamped = calculate_scar_diagnostic(
+            &policy,
+            &scar_input(0.06, 0.0, Some(0.0), 1.0, 0.5, 1.0, 5.0, MemberKind::Shoot),
+        )
+        .expect("zero cosine is clamped only by EPS_COS");
+        assert_eq!(clamped.area_shaft_mm2, 0.12);
+        assert_eq!(clamped.scar_length_mm, 2.06);
+    }
+
+    #[test]
+    fn scar_uses_taper_ball_kind_and_detached_anchor_formula() {
+        let policy = scar_policy();
+        let stub = calculate_scar_diagnostic(
+            &policy,
+            &scar_input(0.06, 10.0, Some(1.0), 2.0, 0.5, 1.0, 1.0, MemberKind::Stub),
+        )
+        .unwrap();
+        assert_eq!(stub.r_x_mm, 1.0, "taper clamps at the root radius");
+        assert_eq!(stub.ball_radius_mm, 1.5);
+        let nonstub = calculate_scar_diagnostic(
+            &policy,
+            &scar_input(0.06, 0.0, Some(1.0), 0.5, 1.0, 1.0, 5.0, MemberKind::Brace),
+        )
+        .unwrap();
+        assert_eq!(
+            nonstub.r_x_mm, 1.0,
+            "explicit tip radius floors the raw anchor radius"
+        );
+        assert_eq!(nonstub.ball_radius_mm, 1.4);
+        assert!(nonstub.area_within_recorded_policy);
+        assert!(nonstub.anchor_meets_recorded_policy);
+        assert!(
+            nonstub.area_max_mm2 > policy.a_abs_mm2,
+            "KAPPA controls this foot case"
+        );
+        let detached = calculate_scar_diagnostic(
+            &policy,
+            &scar_input(0.06, 1.4, Some(1.0), 1.0, 0.5, 1.0, 5.0, MemberKind::Shoot),
+        )
+        .unwrap();
+        assert_eq!(detached.area_ball_mm2, 0.0);
+        assert!(!detached.anchor_meets_recorded_policy);
+    }
+
+    #[test]
+    fn scar_checked_inputs_reject_nonfinite_negative_and_collapsed_lengths() {
+        assert!(matches!(
+            ScarDiagnosticInput::new(f64::NAN, 0.0, None, 1.0, 1.0, 1.0, 1.0, MemberKind::Stub),
+            Err(ScarDiagnosticError::NonFinite { field: "T" })
+        ));
+        assert!(matches!(
+            ScarDiagnosticInput::new(0.0, -1.0, None, 1.0, 1.0, 1.0, 1.0, MemberKind::Stub),
+            Err(ScarDiagnosticError::Negative { field: "d" })
+        ));
+        assert!(matches!(
+            ScarDiagnosticInput::new(0.0, 0.0, None, 1.0, 1.0, 1.0, 0.0, MemberKind::Stub),
+            Err(ScarDiagnosticError::CollapsedLength)
+        ));
+    }
 
     fn fixture_member(
         slot: u32,
