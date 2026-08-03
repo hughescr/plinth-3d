@@ -3321,13 +3321,20 @@ impl GateWholeRoutePlan {
     }
 }
 
+/// Run execution only after the preflight result has succeeded.
+fn preflight_then_execute<T, U>(
+    preflight: Result<T, SpecializedError>,
+    execute: impl FnOnce(T) -> Result<U, SpecializedError>,
+) -> Result<U, SpecializedError> {
+    execute(preflight?)
+}
+
 /// Traverse every gate window and retain only checked summaries.
-fn traverse_whole_gate_windows<T>(
+fn traverse_whole_gate_windows(
     variants: usize,
     max_window_variants: usize,
     mut plan_window: impl FnMut(usize, usize) -> Result<GateWindowPreflightSummary, SpecializedError>,
-    execute: impl FnOnce(GateWholeRoutePlan) -> Result<T, SpecializedError>,
-) -> Result<T, SpecializedError> {
+) -> Result<GateWholeRoutePlan, SpecializedError> {
     let mut preflight = GateWholeRoutePlan::default();
     for window_start in (0..variants).step_by(max_window_variants) {
         let window_end = (window_start + max_window_variants).min(variants);
@@ -3338,7 +3345,7 @@ fn traverse_whole_gate_windows<T>(
         .total_work
         .checked_add(preflight.total_routes)
         .ok_or(SpecializedError::GateResourceOverflow)?;
-    execute(preflight)
+    Ok(preflight)
 }
 
 /// Route-plan all windows before execution. Each window uses bounded temporary
@@ -3468,7 +3475,6 @@ fn whole_gate_route_preflight(
             )?;
             Ok(GateWindowPreflightSummary { routes, peak_bytes })
         },
-        Ok,
     )
 }
 
@@ -3485,17 +3491,20 @@ fn whole_gate_route_preflight_then_execute<T>(
     gate_plan: &GateResourcePlan,
     execute: impl FnOnce(GateWholeRoutePlan) -> Result<T, SpecializedError>,
 ) -> Result<T, SpecializedError> {
-    execute(whole_gate_route_preflight(
-        contacts,
-        proposals,
-        proposal_storage_bytes,
-        generic,
-        topology,
-        islands,
-        coverage_samples,
-        limits,
-        gate_plan,
-    )?)
+    preflight_then_execute(
+        whole_gate_route_preflight(
+            contacts,
+            proposals,
+            proposal_storage_bytes,
+            generic,
+            topology,
+            islands,
+            coverage_samples,
+            limits,
+            gate_plan,
+        ),
+        execute,
+    )
 }
 
 fn plan_variant_nearest_routes(
@@ -4824,10 +4833,8 @@ mod tests {
     fn whole_gate_window_traversal_stops_before_execution_after_later_window_failure() {
         let planned_windows = RefCell::new(Vec::new());
         let execution_calls = Cell::new(0usize);
-        let result = traverse_whole_gate_windows(
-            5,
-            2,
-            |window_start, window_end| {
+        let result = preflight_then_execute(
+            traverse_whole_gate_windows(5, 2, |window_start, window_end| {
                 planned_windows
                     .borrow_mut()
                     .push((window_start, window_end));
@@ -4839,7 +4846,7 @@ mod tests {
                         limit: 4,
                     })
                 }
-            },
+            }),
             |_| {
                 execution_calls.set(execution_calls.get() + 1);
                 Ok(())
@@ -4860,19 +4867,14 @@ mod tests {
     #[test]
     fn whole_gate_window_traversal_accumulates_peak_at_cap_minus_one() {
         const CAP: usize = 32;
-        let summary = traverse_whole_gate_windows(
-            5,
-            2,
-            |window_start, window_end| {
-                Ok(gate_window_summary(
-                    window_end - window_start,
-                    window_start + 1,
-                    window_start as u64,
-                    if window_start == 2 { CAP - 1 } else { 9 },
-                ))
-            },
-            Ok,
-        )
+        let summary = traverse_whole_gate_windows(5, 2, |window_start, window_end| {
+            Ok(gate_window_summary(
+                window_end - window_start,
+                window_start + 1,
+                window_start as u64,
+                if window_start == 2 { CAP - 1 } else { 9 },
+            ))
+        })
         .expect("all windows must plan");
 
         assert_eq!(summary.window_count, 3);
