@@ -1580,6 +1580,21 @@ pub(crate) struct CoverageObjective {
 pub(crate) struct CoverageAssessment {
     pub(crate) objective: CoverageObjective,
     pub(crate) failing_sample_indices: Vec<usize>,
+    pub(crate) patches: Vec<CoverageAssessmentPatch>,
+}
+
+/// Projection of the existing uncovered-patch traversal.  It is retained
+/// alongside (not instead of) the repair objective so repair semantics stay
+/// byte-for-byte unchanged.
+pub(crate) struct CoverageAssessmentPatch {
+    pub(crate) island_id: u32,
+    pub(crate) component_id: u32,
+    pub(crate) representative_face_id: u32,
+    pub(crate) sorted_face_ids: Vec<u32>,
+    pub(crate) uncovered_area_mm2: f64,
+    pub(crate) cut_ambiguous: bool,
+    pub(crate) assessment_failed: bool,
+    pub(crate) worst_gap_mm: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -1710,6 +1725,7 @@ pub(crate) fn assess_coverage(
     let mut assessment = CoverageAssessment {
         objective: CoverageObjective::default(),
         failing_sample_indices: Vec::with_capacity(samples.len()),
+        patches: Vec::with_capacity(samples.len()),
     };
     let mut failing_islands = Vec::with_capacity(samples.len());
     let mut visited = vec![false; groups.len()];
@@ -1755,6 +1771,28 @@ pub(crate) fn assess_coverage(
                 .extend_from_slice(&patch_samples);
             failing_islands.push(groups[group_index].island_id);
         }
+        let mut face_ids = patch_samples
+            .iter()
+            .map(|&index| samples[index].face_id)
+            .collect::<Vec<_>>();
+        face_ids.sort_unstable();
+        face_ids.dedup();
+        let representative_face_id = *face_ids.first().expect("uncovered patch has a face");
+        let component_id = samples[*patch_samples.first().expect("uncovered patch has a sample")]
+            .component_id;
+        let worst_gap_mm = patch_samples.iter().fold(0.0_f64, |worst, &index| {
+            worst.max(nearest_mm[index])
+        });
+        assessment.patches.push(CoverageAssessmentPatch {
+            island_id: groups[group_index].island_id,
+            component_id,
+            representative_face_id,
+            sorted_face_ids: face_ids,
+            uncovered_area_mm2: patch_area,
+            cut_ambiguous: patch_ambiguous,
+            assessment_failed: patch_area > area_floor_mm2 || patch_ambiguous,
+            worst_gap_mm,
+        });
     }
     assessment.failing_sample_indices.sort_unstable();
     failing_islands.sort_unstable();

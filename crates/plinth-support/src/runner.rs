@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use geom_kernel::{NativeSurface, NativeSurfaceConfig, PenetrationBatchLimits, SurfaceBuildError};
+use geom_kernel::{KnnBatchLimits, NativeSurface, NativeSurfaceConfig, PenetrationBatchLimits, SurfaceBuildError};
 use plinth_core::{m0_constants, Finite, LayerPlan, PositiveFinite};
 use plinth_hollow::{HollowHistory, HollowedModel};
 use plinth_mesh::{mesh_fingerprint, FaceTopology, Mesh};
@@ -42,11 +42,14 @@ use crate::{
     rewire::{optimize as optimize_rewire, RewireError, RewireReport, RewireRequest},
     select_contacts_baseline,
     specialized::{
-        prepare_specialized_contacts, SpecializedContactPlan, SpecializedError, SpecializedLimits,
+        fill_route_points_nearest, plan_route_points_nearest, prepare_specialized_contacts,
+        CoverageRoutePoint, SpecializedContactPlan, SpecializedError, SpecializedLimits,
     },
     transient::{transient_report, TransientError, TransientReport},
     validate_perception_input, BuildFrame, ContactSelectionConfig, ContactSelectionError,
-    CoverageSample, SelectedContacts, SupportError, SupportHistory, SupportIsland,
+    CoverageAssessmentLimits, CoverageGap, CoverageMeasurement, CoverageMeasurementError,
+    CoverageMeasurementEvidence, CoverageMeasurementIslandEvidence, CoverageMeasurementPatchEvidence, CoverageMeasurementRequest,
+    CoverageMeasurementResourcePlan, CoverageSample, SelectedContacts, SupportError, SupportHistory, SupportIsland,
     SupportPerceptionConfig, SupportPerceptionError, SupportReport, SupportRequest, SupportedModel,
 };
 
@@ -283,6 +286,102 @@ pub struct SupportVerificationSnapshot<'a> {
 }
 
 impl<'a> SupportVerificationSnapshot<'a> {
+    /// Measures the sealed routed-contact projection without making an
+    /// acceptance decision or exposing route authority.
+    pub fn measure_coverage(
+        &self,
+        request: CoverageMeasurementRequest,
+    ) -> Result<CoverageMeasurement, CoverageMeasurementError> {
+        self.validate_integrity()
+            .map_err(|_| CoverageMeasurementError::SnapshotBinding)?;
+        let limits = request.limits();
+        let knn_limits = KnnBatchLimits {
+            max_source_points: limits.max_indexed_points(),
+            max_query_points: limits.max_query_rows(),
+            max_neighbors: 1,
+            max_logical_peak_bytes: limits.max_logical_peak_bytes(),
+            max_work: limits.max_distance_work(),
+        };
+        let mut points = Vec::new();
+        for membership in &self.routed_route_memberships {
+            for route in &membership.logical_routes {
+                points.push(CoverageRoutePoint {
+                    physical_id: membership.contact.physical_contact_id(),
+                    island_id: route.island_id,
+                    component_id: route.component_id,
+                    position_mm: membership.contact.position_mm(),
+                });
+            }
+        }
+        let planned = plan_route_points_nearest(&points, self.coverage_samples, knn_limits)
+            .map_err(|_| CoverageMeasurementError::ResourceLimit { resource: "route kNN preflight" })?;
+        let (memberships, indexed, query_rows, distance_work) = planned.measurement_counts();
+        for (actual, maximum, resource) in [
+            (memberships, limits.max_route_memberships(), "route memberships"),
+            (indexed, limits.max_indexed_points(), "indexed points"),
+            (query_rows, limits.max_query_rows(), "query rows"),
+            (distance_work, limits.max_distance_work(), "distance work"),
+        ] {
+            if actual > maximum {
+                return Err(CoverageMeasurementError::ResourceLimit { resource });
+            }
+        }
+        let assessment_plan = crate::coverage_assessment_resource_plan(self.coverage_samples, self.topology)
+            .map_err(|_| CoverageMeasurementError::AssessmentRefusal { reason: "assessment preflight" })?;
+        if assessment_plan.operations > limits.max_assessment_work() {
+            return Err(CoverageMeasurementError::ResourceLimit { resource: "assessment work" });
+        }
+        let nearest_bytes = self.coverage_samples.len().checked_mul(std::mem::size_of::<f64>())
+            .ok_or(CoverageMeasurementError::ArithmeticOverflow { operation: "nearest vector bytes" })?;
+        let normalized_route_bytes = points.len().checked_mul(std::mem::size_of::<CoverageRoutePoint>())
+            .ok_or(CoverageMeasurementError::ArithmeticOverflow { operation: "normalized route bytes" })?;
+        let route_peak = planned.retained_base_bytes().checked_add(planned.max_knn_peak_bytes())
+            .ok_or(CoverageMeasurementError::ArithmeticOverflow { operation: "route peak bytes" })?;
+        let measurement_base_bytes = nearest_bytes.checked_add(normalized_route_bytes)
+            .ok_or(CoverageMeasurementError::ArithmeticOverflow { operation: "measurement base bytes" })?;
+        let logical_peak_bytes = measurement_base_bytes.checked_add(route_peak.max(assessment_plan.scratch_bytes))
+            .ok_or(CoverageMeasurementError::ArithmeticOverflow { operation: "logical peak bytes" })?;
+        if logical_peak_bytes > limits.max_logical_peak_bytes() {
+            return Err(CoverageMeasurementError::ResourceLimit { resource: "logical peak bytes" });
+        }
+        let mut nearest = vec![f64::INFINITY; self.coverage_samples.len()];
+        fill_route_points_nearest(&points, self.coverage_samples, &mut nearest, planned)
+            .map_err(|_| CoverageMeasurementError::KernelRefusal { operation: "route kNN query" })?;
+        let assessment = crate::assess_coverage(
+            self.coverage_samples, self.topology, &nearest, request.radius_mm().get(),
+            request.patch_area_floor_mm2().get(), CoverageAssessmentLimits {
+                max_scratch_bytes: limits.max_logical_peak_bytes(), max_operations: limits.max_assessment_work(),
+            },
+        ).map_err(|_| CoverageMeasurementError::AssessmentRefusal { reason: "coverage traversal" })?;
+        let mut islands = BTreeMap::<(u32, u32), Vec<u32>>::new();
+        for sample in self.coverage_samples {
+            if self.named_islands.iter().any(|island| island.id == sample.island_id && island.face_ids.contains(&sample.face_id)) {
+                islands.entry((sample.island_id, sample.component_id)).or_default().push(sample.face_id);
+            }
+        }
+        let mut islands = islands.into_iter().map(|((island_id, component_id), mut faces)| {
+            faces.sort_unstable(); faces.dedup();
+            CoverageMeasurementIslandEvidence::new(island_id, component_id, faces[0], faces.into_boxed_slice())
+        }).collect::<Vec<_>>();
+        islands.sort_unstable_by_key(|island| (island.island_id(), island.component_id(), island.representative_face_id()));
+        let mut patches = assessment.patches.into_iter().map(|patch| {
+            let gap = if patch.worst_gap_mm.is_infinite() {
+                CoverageGap::NoRoutedContact
+            } else {
+                CoverageGap::Finite(Finite::new(patch.worst_gap_mm).map_err(|_| CoverageMeasurementError::AssessmentRefusal { reason: "non-finite patch gap" })?)
+            };
+            Ok(CoverageMeasurementPatchEvidence::new(
+                patch.island_id, patch.component_id, patch.representative_face_id,
+                patch.sorted_face_ids.into_boxed_slice(),
+                Finite::new(patch.uncovered_area_mm2).map_err(|_| CoverageMeasurementError::AssessmentRefusal { reason: "non-finite patch area" })?,
+                patch.cut_ambiguous, patch.assessment_failed, gap,
+            ))
+        }).collect::<Result<Vec<_>, CoverageMeasurementError>>()?;
+        patches.sort_unstable_by_key(|patch| (patch.island_id(), patch.component_id(), patch.representative_face_id()));
+        Ok(CoverageMeasurement::new(self.snapshot_digest, request,
+            CoverageMeasurementResourcePlan::new(memberships, memberships, indexed, query_rows, distance_work, logical_peak_bytes, assessment_plan.operations),
+            CoverageMeasurementEvidence::new(islands.into_boxed_slice(), patches.into_boxed_slice())))
+    }
     #[must_use]
     pub const fn mesh(&self) -> &'a Mesh {
         self.mesh

@@ -3185,6 +3185,16 @@ struct CoverageRoute {
     component_id: u32,
 }
 
+/// Crate-private normalized authority for the shared route-batched nearest
+/// pass.  The public verification boundary never exposes this representation.
+#[derive(Clone, Copy)]
+pub(crate) struct CoverageRoutePoint {
+    pub(crate) physical_id: u64,
+    pub(crate) island_id: u32,
+    pub(crate) component_id: u32,
+    pub(crate) position_mm: [f64; 3],
+}
+
 struct CoverageRouteKnnPlan {
     route: CoverageRoute,
     source_count: usize,
@@ -3200,7 +3210,7 @@ struct CoverageRouteKnnPlan {
 /// grouping state outside that plan. BTree node/allocation metadata is excluded
 /// by the logical-capacity convention; its route keys and element payloads are
 /// counted explicitly.
-struct CoverageRouteNearestPlan {
+pub(crate) struct CoverageRouteNearestPlan {
     // These remain live through the serial route queries, so their logical
     // payload is part of the peak even though only `route_plans` is read.
     _source_counts: BTreeMap<CoverageRoute, BTreeSet<u64>>,
@@ -3209,6 +3219,23 @@ struct CoverageRouteNearestPlan {
     retained_base_logical_bytes: usize,
     max_route_knn_logical_peak_bytes: usize,
     total_work: usize,
+}
+
+impl CoverageRouteNearestPlan {
+    pub(crate) fn measurement_counts(&self) -> (usize, usize, usize, usize) {
+        let memberships = self._source_counts.values().map(BTreeSet::len).sum();
+        let indexed = self._source_counts.values().map(BTreeSet::len).sum();
+        let query_rows = self.route_plans.iter().map(|plan| plan.query_count).sum();
+        (memberships, indexed, query_rows, self.total_work)
+    }
+
+    pub(crate) const fn retained_base_bytes(&self) -> usize {
+        self.retained_base_logical_bytes
+    }
+
+    pub(crate) const fn max_knn_peak_bytes(&self) -> usize {
+        self.max_route_knn_logical_peak_bytes
+    }
 }
 
 fn checked_route_bytes<T>(count: usize) -> Result<usize, SpecializedError> {
@@ -3507,43 +3534,21 @@ fn whole_gate_route_preflight_then_execute<T>(
     )
 }
 
-fn plan_variant_nearest_routes(
-    contacts: &[WorkingContact],
-    proposal: Option<&MergeProposal>,
+pub(crate) fn plan_route_points_nearest(
+    points: &[CoverageRoutePoint],
     samples: &[CoverageSample],
     limits: KnnBatchLimits,
 ) -> Result<CoverageRouteNearestPlan, SpecializedError> {
     let mut source_counts = BTreeMap::<CoverageRoute, BTreeSet<u64>>::new();
     let mut query_counts = BTreeMap::<CoverageRoute, usize>::new();
-    let mut add_contact = |physical_id: u64, contact: &WorkingContact| {
-        for route in contact
-            .regular_routes
-            .iter()
-            .map(|route| CoverageRoute {
-                island_id: route.owner_island_id,
-                component_id: route.component_id,
+    for point in points {
+        source_counts
+            .entry(CoverageRoute {
+                island_id: point.island_id,
+                component_id: point.component_id,
             })
-            .chain(contact.demands.iter().map(|demand| CoverageRoute {
-                island_id: demand.owner_island_id,
-                component_id: demand.coverage_component_id,
-            }))
-        {
-            source_counts.entry(route).or_default().insert(physical_id);
-        }
-    };
-    for (physical_id, contact) in contacts.iter().enumerate() {
-        if !proposal.is_some_and(|p| physical_id == p.left || physical_id == p.right) {
-            add_contact(
-                u64::try_from(physical_id).map_err(|_| SpecializedError::GateResourceOverflow)?,
-                contact,
-            );
-        }
-    }
-    if let Some(proposal) = proposal {
-        let physical_id =
-            u64::try_from(proposal.left).map_err(|_| SpecializedError::GateResourceOverflow)?;
-        add_contact(physical_id, &contacts[proposal.left]);
-        add_contact(physical_id, &contacts[proposal.right]);
+            .or_default()
+            .insert(point.physical_id);
     }
     for sample in samples {
         let route = CoverageRoute {
@@ -3634,9 +3639,71 @@ fn plan_variant_nearest_routes(
     })
 }
 
+fn plan_variant_nearest_routes(
+    contacts: &[WorkingContact],
+    proposal: Option<&MergeProposal>,
+    samples: &[CoverageSample],
+    limits: KnnBatchLimits,
+) -> Result<CoverageRouteNearestPlan, SpecializedError> {
+    let mut points = Vec::new();
+    let mut add_contact = |physical_id: u64, position_mm: [f64; 3], contact: &WorkingContact| {
+        points.extend(contact.regular_routes.iter().map(|route| CoverageRoutePoint {
+            physical_id,
+            island_id: route.owner_island_id,
+            component_id: route.component_id,
+            position_mm,
+        }));
+        points.extend(contact.demands.iter().map(|demand| CoverageRoutePoint {
+            physical_id,
+            island_id: demand.owner_island_id,
+            component_id: demand.coverage_component_id,
+            position_mm,
+        }));
+    };
+    for (physical_id, contact) in contacts.iter().enumerate() {
+        if !proposal.is_some_and(|p| physical_id == p.left || physical_id == p.right) {
+            add_contact(u64::try_from(physical_id).map_err(|_| SpecializedError::GateResourceOverflow)?, contact.position_mm, contact);
+        }
+    }
+    if let Some(proposal) = proposal {
+        let physical_id = u64::try_from(proposal.left).map_err(|_| SpecializedError::GateResourceOverflow)?;
+        add_contact(physical_id, proposal.position_mm, &contacts[proposal.left]);
+        add_contact(physical_id, proposal.position_mm, &contacts[proposal.right]);
+    }
+    plan_route_points_nearest(&points, samples, limits)
+}
+
 fn fill_variant_nearest(
     contacts: &[WorkingContact],
     proposal: Option<&MergeProposal>,
+    samples: &[CoverageSample],
+    nearest: &mut [f64],
+    planned: CoverageRouteNearestPlan,
+) -> Result<(), SpecializedError> {
+    let mut points = Vec::new();
+    let mut add = |physical_id: u64, position_mm: [f64; 3], contact: &WorkingContact| {
+        points.extend(contact.regular_routes.iter().map(|candidate| CoverageRoutePoint {
+            physical_id, island_id: candidate.owner_island_id, component_id: candidate.component_id, position_mm,
+        }));
+        points.extend(contact.demands.iter().map(|demand| CoverageRoutePoint {
+            physical_id, island_id: demand.owner_island_id, component_id: demand.coverage_component_id, position_mm,
+        }));
+    };
+    for (physical_id, contact) in contacts.iter().enumerate() {
+        if !proposal.is_some_and(|p| physical_id == p.left || physical_id == p.right) {
+            add(u64::try_from(physical_id).expect("usize fits u64"), contact.position_mm, contact);
+        }
+    }
+    if let Some(proposal) = proposal {
+        let physical_id = u64::try_from(proposal.left).expect("usize fits u64");
+        add(physical_id, proposal.position_mm, &contacts[proposal.left]);
+        add(physical_id, proposal.position_mm, &contacts[proposal.right]);
+    }
+    fill_route_points_nearest(&points, samples, nearest, planned)
+}
+
+pub(crate) fn fill_route_points_nearest(
+    points: &[CoverageRoutePoint],
     samples: &[CoverageSample],
     nearest: &mut [f64],
     planned: CoverageRouteNearestPlan,
@@ -3649,24 +3716,12 @@ fn fill_variant_nearest(
         let plan = route_plan.knn;
         let mut source_points = Vec::with_capacity(route_plan.source_count);
         let mut seen = BTreeSet::new();
-        let mut gather = |physical_id: u64, position_mm: [f64; 3], contact: &WorkingContact| {
-            if contact_serves_route(contact, route) && seen.insert(physical_id) {
-                source_points.push(position_mm);
+        for point in points.iter().copied().filter(|point| {
+            point.island_id == route.island_id && point.component_id == route.component_id
+        }) {
+            if seen.insert(point.physical_id) {
+                source_points.push(point.position_mm);
             }
-        };
-        for (physical_id, contact) in contacts.iter().enumerate() {
-            if !proposal.is_some_and(|p| physical_id == p.left || physical_id == p.right) {
-                gather(
-                    u64::try_from(physical_id).expect("usize fits u64"),
-                    contact.position_mm,
-                    contact,
-                );
-            }
-        }
-        if let Some(proposal) = proposal {
-            let physical_id = u64::try_from(proposal.left).expect("usize fits u64");
-            gather(physical_id, proposal.position_mm, &contacts[proposal.left]);
-            gather(physical_id, proposal.position_mm, &contacts[proposal.right]);
         }
         debug_assert_eq!(source_points.len(), plan.source_count());
         let mut query_indices = Vec::with_capacity(query_count);
