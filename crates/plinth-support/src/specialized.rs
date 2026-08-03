@@ -197,8 +197,11 @@ pub(crate) enum RepairRowSourceKind {
 /// Stable identity of one route-expanded repair row.  The owner and topology
 /// component deliberately remain in the key because one source candidate can
 /// legally be available to more than one logical island.
+/// Opaque, stable identity of a route-expanded repair row carried in public
+/// error evidence. It can be compared, hashed, and rendered for diagnostics,
+/// but only the specialized planner may construct one.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub(crate) struct RepairRowId {
+pub struct RepairRowId {
     owner_island_id: u32,
     candidate_id: ContactCandidateId,
     face_id: u32,
@@ -213,28 +216,6 @@ pub(crate) struct RepairRow {
     id: RepairRowId,
     order: usize,
     candidate: crate::ContactCandidate,
-}
-
-impl RepairRow {
-    pub(crate) const fn id(&self) -> RepairRowId {
-        self.id
-    }
-
-    pub(crate) const fn order(&self) -> usize {
-        self.order
-    }
-
-    pub(crate) fn candidate(&self) -> &crate::ContactCandidate {
-        &self.candidate
-    }
-}
-
-/// Occupancy evidence for a frozen row.  A shared demanded regular route is
-/// occupied but explicitly non-removable for the future repair controller.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct RepairRowOccupancy {
-    pub(crate) row_id: RepairRowId,
-    pub(crate) shared_demanded: bool,
 }
 
 /// One immutable, route-expanded repair authority spanning generic and
@@ -317,10 +298,6 @@ impl RepairPool {
         Ok(())
     }
 
-    pub(crate) fn row(&self, id: RepairRowId) -> Option<&RepairRow> {
-        self.rows.get(id_index(&self.rows, id)?)
-    }
-
     fn resolve_route(&self, route: RegularContactRoute) -> Result<RepairRowId, SpecializedError> {
         let mut matching = None;
         for row in &self.rows {
@@ -329,10 +306,9 @@ impl RepairPool {
                 && row.id.face_id == route.coverage_face_id
                 && row.id.component_id == route.component_id
                 && row.id.source_kind == route.source_kind
+                && matching.replace(row.id).is_some()
             {
-                if matching.replace(row.id).is_some() {
-                    return Err(SpecializedError::AmbiguousRepairRoute { route });
-                }
+                return Err(SpecializedError::AmbiguousRepairRoute { route });
             }
         }
         matching.ok_or(SpecializedError::MissingRepairRoute { route })
@@ -355,40 +331,6 @@ impl RepairPool {
             }
         }
         Ok(())
-    }
-
-    fn occupied_for_contacts(
-        &self,
-        contacts: &[SpecializedPhysicalContact],
-    ) -> Result<Vec<RepairRowOccupancy>, SpecializedError> {
-        self.validate_contacts(contacts)?;
-        let mut rows = Vec::new();
-        for contact in contacts {
-            for &route in contact.regular_routes() {
-                rows.push(RepairRowOccupancy {
-                    row_id: self.resolve_route(route)?,
-                    shared_demanded: !contact.demands().is_empty(),
-                });
-            }
-        }
-        rows.sort_unstable_by_key(|row| self.row(row.row_id).map_or(usize::MAX, RepairRow::order));
-        Ok(rows)
-    }
-
-    fn failing_eligible_rows(
-        &self,
-        island_id: u32,
-        component_id: u32,
-        failed: &BTreeSet<RepairRowId>,
-    ) -> Vec<&RepairRow> {
-        self.rows
-            .iter()
-            .filter(|row| {
-                row.id.owner_island_id == island_id
-                    && row.id.component_id == component_id
-                    && !failed.contains(&row.id)
-            })
-            .collect()
     }
 
     fn validate_lineage(&self, lineage_root: u64) -> Result<(), SpecializedError> {
@@ -444,10 +386,6 @@ impl RepairPool {
             hash.f64(row.candidate.delicacy);
         }
     }
-}
-
-fn id_index(rows: &[RepairRow], id: RepairRowId) -> Option<usize> {
-    rows.iter().position(|row| row.id == id)
 }
 
 impl SpecializedPhysicalContact {
@@ -589,32 +527,6 @@ impl SpecializedContactPlan {
         &self.coverage_samples
     }
 
-    /// Crate-private controller authority.  The future repair loop can read a
-    /// verbatim row, but cannot fabricate or reorder one.
-    pub(crate) fn repair_row(&self, id: RepairRowId) -> Option<&RepairRow> {
-        self.repair_pool.row(id)
-    }
-
-    pub(crate) fn occupied_repair_rows(&self) -> Result<Vec<RepairRowOccupancy>, SpecializedError> {
-        self.repair_pool.occupied_for_contacts(&self.contacts)
-    }
-
-    pub(crate) fn failing_repair_rows(
-        &self,
-        island_id: u32,
-        component_id: u32,
-        failed: &BTreeSet<RepairRowId>,
-    ) -> Result<Vec<&RepairRow>, SpecializedError> {
-        let mut excluded = failed.clone();
-        excluded.extend(
-            self.occupied_repair_rows()?
-                .into_iter()
-                .map(|occupancy| occupancy.row_id),
-        );
-        Ok(self
-            .repair_pool
-            .failing_eligible_rows(island_id, component_id, &excluded))
-    }
     #[must_use]
     pub fn contacts(&self) -> &[SpecializedPhysicalContact] {
         &self.contacts
@@ -3831,11 +3743,11 @@ mod tests {
         assert_eq!(pool.lineage_root, 41);
         assert_eq!(pool.rows.len(), 3);
         assert_eq!(
-            pool.rows.iter().map(RepairRow::order).collect::<Vec<_>>(),
+            pool.rows.iter().map(|row| row.order).collect::<Vec<_>>(),
             vec![0, 1, 2]
         );
-        assert_eq!(pool.rows[0].candidate().point_mm, [1.0, 0.0, 0.0]);
-        assert_eq!(pool.rows[2].candidate().point_mm, [2.0, 0.0, 0.0]);
+        assert_eq!(pool.rows[0].candidate.point_mm, [1.0, 0.0, 0.0]);
+        assert_eq!(pool.rows[2].candidate.point_mm, [2.0, 0.0, 0.0]);
         assert_eq!(pool.rows[0].id.source_kind, RepairRowSourceKind::Generic);
         assert_eq!(
             pool.rows[2].id.source_kind,
@@ -3934,12 +3846,8 @@ mod tests {
             regular_routes: vec![synthetic_route],
             demands: Vec::new(),
         };
-        let occupied = pool
-            .occupied_for_contacts(&[generic_contact.clone(), synthetic_contact])
+        pool.validate_contacts(&[generic_contact.clone(), synthetic_contact])
             .unwrap();
-        assert_eq!(occupied.len(), 2);
-        assert!(occupied[0].shared_demanded);
-        assert!(!occupied[1].shared_demanded);
         assert!(matches!(
             pool.validate_contacts(&[generic_contact.clone(), generic_contact]),
             Err(SpecializedError::DuplicateRepairRoute { .. })
@@ -3947,7 +3855,7 @@ mod tests {
     }
 
     #[test]
-    fn repair_pool_excludes_typed_failed_rows_and_rejects_stale_geometry() {
+    fn repair_pool_rejects_stale_geometry() {
         let generic = ContactCandidatePool {
             candidates: vec![
                 repair_candidate(7, 0, [1.0, 0.0, 0.0]),
@@ -3966,10 +3874,6 @@ mod tests {
             &[11],
         )
         .unwrap();
-        let failed = BTreeSet::from([pool.rows[0].id()]);
-        let eligible = pool.failing_eligible_rows(3, 11, &failed);
-        assert_eq!(eligible.len(), 1);
-        assert_eq!(eligible[0].candidate().id, ContactCandidateId(8));
         pool.rows[0].candidate.point_mm[0] = 99.0;
         assert!(matches!(
             pool.validate_lineage(9),
@@ -4363,11 +4267,9 @@ mod tests {
         assert_eq!(proposals[1].representative_face_id, 10);
         assert_eq!(proposals[1].representative_normal, [-1.0, 0.0, 0.0]);
         assert_eq!(proposals[1].normal, contacts[0].normal);
-        assert!(
-            proposals
-                .iter()
-                .all(|proposal| proposal.representative_face_id != 99)
-        );
+        assert!(proposals
+            .iter()
+            .all(|proposal| proposal.representative_face_id != 99));
     }
 
     #[test]
@@ -4422,16 +4324,12 @@ mod tests {
         assert_eq!(shared_proposals.len(), 2);
         assert_eq!(shared_proposals[0].representative_face_id, 1);
         assert_eq!(shared_proposals[1].representative_face_id, 3);
-        assert!(
-            shared_proposals
-                .iter()
-                .all(|proposal| proposal.representative_face_id != 2)
-        );
-        assert!(
-            shared_proposals
-                .iter()
-                .all(|proposal| proposal.representative_position_mm == locked)
-        );
+        assert!(shared_proposals
+            .iter()
+            .all(|proposal| proposal.representative_face_id != 2));
+        assert!(shared_proposals
+            .iter()
+            .all(|proposal| proposal.representative_position_mm == locked));
     }
 
     #[test]

@@ -1798,7 +1798,7 @@ pub(crate) fn rank_coverage_repair_rows<'a>(
     // The score matrix remains tiled in both axes; 65,536 is the registered
     // production work bound even when a caller supplied a larger diagnostic
     // cap.
-    let matrix_budget = matrix_budget.min(65_536).max(1);
+    let matrix_budget = matrix_budget.clamp(1, 65_536);
     let sample_tile = ((matrix_budget as f64).sqrt() as usize).max(1);
     let candidate_tile = (matrix_budget / sample_tile).max(1);
     let mut route_keys = std::collections::BTreeSet::new();
