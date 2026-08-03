@@ -33,6 +33,7 @@ use crate::{
         plan_joint_balls_filtered, runner_planning_limits, FilteredLiveView, JointConfig,
         JointError, JointPlan,
     },
+    lower::{lower_current, LoweredSupportPlan, LoweringConfig, LoweringError},
     perception::{
         prepare_generic_contacts, FinalizedContactLoads, GenericContactPlan,
         GenericPerceptionError, GenericPerceptionLimits, SpecializedOwnerReservation,
@@ -46,7 +47,7 @@ use crate::{
     transient::{transient_report, TransientError, TransientReport},
     validate_perception_input, BuildFrame, ContactSelectionConfig, ContactSelectionError,
     SelectedContacts, SupportError, SupportPerceptionConfig, SupportPerceptionError,
-    SupportRequest,
+    SupportHistory, SupportReport, SupportRequest, SupportedModel,
 };
 
 /// Complete typed caller authority for the sealed preparation stage.
@@ -65,6 +66,8 @@ pub(crate) struct SupportPreparationAuthority<'a> {
     construction_limits: ContactConstructionLimits,
     brace_penetration_limits: PenetrationBatchLimits,
     raft_limits: RaftLimits,
+    max_primitives: usize,
+    max_primitive_bytes: usize,
 }
 
 impl<'a> SupportPreparationAuthority<'a> {
@@ -80,6 +83,8 @@ impl<'a> SupportPreparationAuthority<'a> {
         construction_limits: ContactConstructionLimits,
         brace_penetration_limits: PenetrationBatchLimits,
         raft_limits: RaftLimits,
+        max_primitives: usize,
+        max_primitive_bytes: usize,
     ) -> Self {
         Self {
             layers,
@@ -92,6 +97,8 @@ impl<'a> SupportPreparationAuthority<'a> {
             construction_limits,
             brace_penetration_limits,
             raft_limits,
+            max_primitives,
+            max_primitive_bytes,
         }
     }
 }
@@ -193,6 +200,13 @@ impl<'a> SupportRunContext<'a> {
 
     pub(crate) const fn raft_limits(&self) -> RaftLimits {
         self.raft_limits
+    }
+
+    pub(crate) const fn lowering_limits(&self) -> (usize, usize) {
+        (
+            self.authority.max_primitives,
+            self.authority.max_primitive_bytes,
+        )
     }
 
     /// Rebind the retained immutable geometry without cloning or replacing either component.
@@ -835,6 +849,13 @@ pub(crate) struct StructuredSupportRun<'a> {
     raft: RaftPlan,
 }
 
+/// Opaque final lowering hand-off. It retains the exact structured authority until the sole
+/// supported-scene constructor has accepted the primitive stream and its report.
+pub(crate) struct LoweredSupportRun<'a> {
+    structured: StructuredSupportRun<'a>,
+    lowered: LoweredSupportPlan,
+}
+
 impl<'a> BracedSupportRun<'a> {
     /// Consume the braced forest exactly once into the joint and raft semantic
     /// planners.  All predecessor bindings are preflighted before gathering
@@ -878,7 +899,7 @@ impl<'a> BracedSupportRun<'a> {
     }
 }
 
-impl StructuredSupportRun<'_> {
+impl<'a> StructuredSupportRun<'a> {
     #[must_use]
     pub(crate) const fn forest(&self) -> &Forest {
         &self.braced.plan.forest
@@ -910,6 +931,7 @@ impl StructuredSupportRun<'_> {
     }
 
     pub(crate) fn validate_integrity(&self) -> Result<(), SupportStructureError> {
+        self.braced.validate_integrity()?;
         self.braced
             .plan
             .forest
@@ -933,6 +955,127 @@ impl StructuredSupportRun<'_> {
         )?;
         Ok(())
     }
+
+    /// Lower the one final structured authority. No semantic planning stage is repeated.
+    pub(crate) fn lower(self) -> Result<LoweredSupportRun<'a>, SupportLoweringError> {
+        self.validate_integrity()?;
+        let (max_primitives, max_primitive_bytes) = self.context.lowering_limits();
+        let config = LoweringConfig::current(
+            self.context.frame(),
+            self.context.layers(),
+            max_primitives,
+            max_primitive_bytes,
+        )?;
+        let lowered = lower_current(
+            &self.braced.plan.forest,
+            &self.live_view,
+            &self.joints,
+            &self.raft,
+            config,
+        )?;
+        validate_lowered_output(&self, &lowered, config)?;
+        Ok(LoweredSupportRun {
+            structured: self,
+            lowered,
+        })
+    }
+}
+
+impl LoweredSupportRun<'_> {
+    #[must_use]
+    pub(crate) const fn digest(&self) -> plinth_core::ContentDigest {
+        self.lowered.digest()
+    }
+
+    /// Consume the final opaque lowering result into the public supported scene.
+    pub(crate) fn into_supported_model(self) -> Result<SupportedModel, SupportLoweringError> {
+        let LoweredSupportRun {
+            structured,
+            lowered,
+        } = self;
+        structured.validate_integrity()?;
+        let (max_primitives, max_primitive_bytes) = structured.context.lowering_limits();
+        let config = LoweringConfig::current(
+            structured.context.frame(),
+            structured.context.layers(),
+            max_primitives,
+            max_primitive_bytes,
+        )?;
+        validate_lowered_output(&structured, &lowered, config)?;
+        let primitives = lowered
+            .validate(
+                &structured.braced.plan.forest,
+                &structured.live_view,
+                structured.context.frame(),
+            )?
+            .to_vec();
+        let support = SupportReport {
+            support_primitive_count: lowered.support_primitive_count(),
+            raft_primitive_count: lowered.raft_primitive_count(),
+        };
+        let StructuredSupportRun { context, .. } = structured;
+        let SupportRunContext {
+            mesh,
+            hollow_history,
+            frame,
+            ..
+        } = context;
+        SupportedModel::from_parts(
+            mesh,
+            primitives,
+            SupportHistory::from_reports(hollow_history, support, frame),
+        )
+        .map_err(SupportLoweringError::Scene)
+    }
+}
+
+fn validate_lowered_output(
+    structured: &StructuredSupportRun<'_>,
+    lowered: &LoweredSupportPlan,
+    config: LoweringConfig,
+) -> Result<(), SupportLoweringError> {
+    let balls = structured
+        .joints
+        .validate_filtered(
+            &structured.braced.plan.forest,
+            &structured.live_view,
+            config.joint_config(),
+        )?;
+    structured.raft.validate(
+        &structured.braced.plan.forest,
+        &structured.live_view,
+        structured.context.frame().plate_z_mm(),
+    )?;
+    let primitives = lowered.validate(
+        &structured.braced.plan.forest,
+        &structured.live_view,
+        structured.context.frame(),
+    )?;
+    let support_count = lowered.support_primitive_count();
+    let raft_count = lowered.raft_primitive_count();
+    let member_count = support_count
+        .checked_sub(balls.len())
+        .ok_or(SupportLoweringError::PrimitiveCountMismatch)?;
+    if raft_count != structured.raft.primitives().len()
+        || primitives.len().checked_sub(support_count) != Some(raft_count)
+    {
+        return Err(SupportLoweringError::PrimitiveCountMismatch);
+    }
+    if primitives[..member_count].iter().any(|primitive| {
+        matches!(
+            primitive.segment_kind,
+            crate::SupportSegmentKind::JointSphere | crate::SupportSegmentKind::RaftPadOrBridge
+        )
+    }) || primitives[member_count..support_count]
+        .iter()
+        .any(|primitive| primitive.segment_kind != crate::SupportSegmentKind::JointSphere)
+        || primitives[support_count..]
+            .iter()
+            .any(|primitive| primitive.segment_kind != crate::SupportSegmentKind::RaftPadOrBridge)
+    {
+        return Err(SupportLoweringError::PrimitiveOrderMismatch);
+    }
+    Ok(())
 }
 
 fn finalized_unrouted_terminal_ids(
@@ -1140,6 +1283,8 @@ pub(crate) enum SupportPreparationError {
     InvalidBracePenetrationResources,
     #[error("support preparation raft resource authority is invalid")]
     InvalidRaftResources,
+    #[error("support preparation lowering resource authority is invalid")]
+    InvalidLoweringResources,
     #[error("support preparation layer schedule does not cover the model z range")]
     LayerScheduleCoverage,
     #[error("support preparation reservation names face {face_id} outside the model")]
@@ -1252,6 +1397,24 @@ pub(crate) enum SupportStructureError {
     TerminalEvidenceMismatch { terminal: u32 },
     #[error("finalized transcript and final forest have different terminal namespaces")]
     TerminalLedgerCardinalityMismatch,
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum SupportLoweringError {
+    #[error(transparent)]
+    Structure(#[from] SupportStructureError),
+    #[error(transparent)]
+    Lowering(#[from] LoweringError),
+    #[error(transparent)]
+    Joint(#[from] JointError),
+    #[error(transparent)]
+    Raft(#[from] SupportError),
+    #[error(transparent)]
+    Scene(SupportError),
+    #[error("sealed lowering primitive counts do not match semantic authority")]
+    PrimitiveCountMismatch,
+    #[error("sealed lowering primitive order is not member, joint balls, then raft")]
+    PrimitiveOrderMismatch,
 }
 
 /// Execute the sealed preparation pipeline through the one batched initial-contact build.
@@ -1386,6 +1549,9 @@ fn validate_authority_pre_query(
     if !authority.raft_limits.is_valid() {
         return Err(SupportPreparationError::InvalidRaftResources);
     }
+    if authority.max_primitives == 0 || authority.max_primitive_bytes == 0 {
+        return Err(SupportPreparationError::InvalidLoweringResources);
+    }
     if authority.selection_config.delicacy_by_face != Some(perception_delicacy) {
         return Err(SupportPreparationError::DelicacyAuthorityMismatch);
     }
@@ -1471,6 +1637,8 @@ fn prepared_digest(
     for value in authority.raft_limits.authority_fingerprint() {
         hash.usize(value);
     }
+    hash.usize(authority.max_primitives);
+    hash.usize(authority.max_primitive_bytes);
     for reservation in authority.reservations {
         hash.u32(reservation.owner_id);
         hash.u32(reservation.face_id);
@@ -1627,7 +1795,7 @@ fn hash_member_spec(hash: &mut Fnv, spec: &MemberSpec) {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::PathBuf, process::Command};
+    use std::{mem::size_of, path::PathBuf, process::Command};
 
     use plinth_core::{Finite, PositiveFinite};
     use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
@@ -1793,6 +1961,8 @@ mod tests {
             ContactConstructionLimits::production(),
             brace_penetration_limits(),
             RaftLimits::new(100_000, 100_000, 200_000, 128 * 1024 * 1024),
+            200_000,
+            128 * 1024 * 1024,
         )
     }
 
@@ -1814,6 +1984,37 @@ mod tests {
                 .expect("required corpus braces");
             use_braced(braced)
         })
+    }
+
+    fn with_structured_limits<T>(
+        max_primitives: usize,
+        max_primitive_bytes: usize,
+        use_structured: impl FnOnce(StructuredSupportRun<'_>) -> T,
+    ) -> T {
+        let hollowed = hollowed_fixture(load_required_runner_corpus());
+        let delicacy = vec![0.0; hollowed.mesh().tris().len()];
+        let layers = layers();
+        let mut authority = authority(&delicacy, &layers);
+        authority.max_primitives = max_primitives;
+        authority.max_primitive_bytes = max_primitive_bytes;
+        let prepared = prepare_support_run(
+            hollowed,
+            SupportRequest {
+                lift_mm: PositiveFinite::new(5.0).unwrap(),
+            },
+            authority,
+        )
+        .expect("required fixture preparation");
+        let structured = prepared
+            .route_initial_cco()
+            .expect("required corpus routes")
+            .rewire()
+            .expect("required corpus rewires")
+            .brace()
+            .expect("required corpus braces")
+            .structure()
+            .expect("required corpus structures");
+        use_structured(structured)
     }
 
     fn prepare_fixture<T>(
@@ -2599,6 +2800,8 @@ mod tests {
                 ContactConstructionLimits::production(),
                 brace_penetration_limits(),
                 RaftLimits::new(100_000, 100_000, 200_000, 128 * 1024 * 1024),
+                200_000,
+                128 * 1024 * 1024,
             ),
         );
         assert!(matches!(
@@ -2678,6 +2881,53 @@ mod tests {
     }
 
     #[test]
+    fn structured_run_lowers_the_required_corpus_into_a_supported_model() {
+        with_braced_table(|braced| {
+            let lowered = braced
+                .structure()
+                .expect("required corpus structures")
+                .lower()
+                .expect("required corpus lowers");
+            let digest = lowered.digest();
+            let model = lowered
+                .into_supported_model()
+                .expect("lowered corpus constructs the public scene");
+            assert_eq!(
+                model.primitives().len(),
+                model.history().support().support_primitive_count
+                    + model.history().support().raft_primitive_count
+            );
+            assert_ne!(digest.0, 0, "lowered primitive evidence is retained");
+        });
+    }
+
+    #[test]
+    fn lowering_cap_minus_one_fails_before_any_supported_model_is_constructed() {
+        let (count, bytes) = with_structured_limits(200_000, 128 * 1024 * 1024, |structured| {
+            let lowered = structured.lower().expect("uncapped corpus lowers");
+            let count = lowered
+                .lowered
+                .support_primitive_count()
+                .checked_add(lowered.lowered.raft_primitive_count())
+                .expect("fixture count fits usize");
+            (count, count * size_of::<crate::SupportPrimitive>())
+        });
+        assert!(count > 1, "required corpus has more than one primitive");
+        with_structured_limits(count - 1, bytes, |structured| {
+            assert!(matches!(
+                structured.lower(),
+                Err(SupportLoweringError::Lowering(LoweringError::PrimitiveLimit))
+            ));
+        });
+        with_structured_limits(count, bytes - 1, |structured| {
+            assert!(matches!(
+                structured.lower(),
+                Err(SupportLoweringError::Lowering(LoweringError::PrimitiveBytesLimit))
+            ));
+        });
+    }
+
+    #[test]
     fn runner_thread_sweep_child() {
         if std::env::var_os(SWEEP_CHILD).is_none() {
             return;
@@ -2700,13 +2950,10 @@ mod tests {
                 .brace()
                 .expect("thread sweep braces the required corpus");
             let structured = braced
-                .structure()
+        .structure()
                 .expect("thread sweep structures required corpus");
-            structured
-                .validate_integrity()
-                .expect("thread sweep retains structured authority");
-            println!(
-                "{SWEEP_LINE}{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+            let lineage = format!(
+                "{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
                 structured.context.digests().prepared(),
                 structured.context.digests().plan(),
                 structured.context.digests().loads(),
@@ -2741,11 +2988,27 @@ mod tests {
                     crate::brace::BraceFixedPointTermination::Unplaceable => 2,
                 },
             );
+            let lowered = structured
+                .lower()
+                .expect("thread sweep lowers required corpus");
+            let lower_digest = lowered.digest();
+            let model = lowered
+                .into_supported_model()
+                .expect("thread sweep constructs supported model");
+            println!(
+                "{SWEEP_LINE}{lineage}:{}:{}:{}:{}:{}:{}",
+                model.primitives().len(),
+                model.history().support().support_primitive_count,
+                model.history().support().raft_primitive_count,
+                lower_digest.0,
+                model.lift_mm().get().to_bits(),
+                model.plate_z_mm().get().to_bits(),
+            );
         });
     }
 
     #[test]
-    fn actual_one_four_sixteen_thread_complete_structured_state_is_digest_identical() {
+    fn actual_one_four_sixteen_thread_complete_lowered_lineage_is_digest_identical() {
         if std::env::var_os(SWEEP_CHILD).is_some() {
             return;
         }
