@@ -1583,6 +1583,16 @@ pub(crate) struct CoverageAssessment {
     pub(crate) patches: Vec<CoverageAssessmentPatch>,
 }
 
+/// The repair controller needs only the objective and failing rows.  The
+/// verifier additionally retains a deterministic projection of the same
+/// traversal; keeping that choice private prevents evidence allocation from
+/// leaking into the repair hot path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CoverageAssessmentMode {
+    RepairNoEvidence,
+    MeasurementEvidence,
+}
+
 /// Projection of the existing uncovered-patch traversal.  It is retained
 /// alongside (not instead of) the repair objective so repair semantics stay
 /// byte-for-byte unchanged.
@@ -1613,7 +1623,12 @@ impl CoverageAssessmentLimits {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct CoverageAssessmentResourcePlan {
+    /// Traversal-owned vectors.  This remains the repair accounting contract.
     pub(crate) scratch_bytes: usize,
+    /// Retained traversal evidence which is live after the scratch phase.
+    pub(crate) evidence_bytes: usize,
+    /// The assessment phase high-water mark, including evidence conversion.
+    pub(crate) phase_peak_bytes: usize,
     pub(crate) operations: usize,
 }
 
@@ -1629,6 +1644,62 @@ struct UncoveredFaceGroup {
 pub(crate) fn coverage_assessment_resource_plan(
     samples: &[CoverageSample],
     topology: &plinth_mesh::FaceTopology,
+) -> Result<CoverageAssessmentResourcePlan, ContactSelectionError> {
+    coverage_assessment_resource_plan_for(
+        samples,
+        topology,
+        CoverageAssessmentMode::RepairNoEvidence,
+    )
+}
+
+pub(crate) fn coverage_measurement_assessment_resource_plan(
+    samples: &[CoverageSample],
+    topology: &plinth_mesh::FaceTopology,
+    island_row_count: usize,
+) -> Result<CoverageAssessmentResourcePlan, ContactSelectionError> {
+    coverage_assessment_resource_plan_for(
+        samples,
+        topology,
+        CoverageAssessmentMode::MeasurementEvidence,
+    )
+    .and_then(|plan| {
+        // A flat `(island, component, face)` row is sorted/deduplicated before
+        // its face storage is transferred into final island evidence.  The
+        // caller supplies the exact preflighted row count because membership
+        // belongs to the sealed snapshot, not this shared traversal.
+        let island_rows = island_row_count
+            .checked_mul(std::mem::size_of::<(u32, u32, u32)>())
+            .ok_or(ContactSelectionError::CoverageResourceOverflow)?;
+        let island_faces = island_row_count
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or(ContactSelectionError::CoverageResourceOverflow)?;
+        let island_evidence = island_row_count
+            .checked_mul(std::mem::size_of::<
+                crate::coverage_measurement::CoverageMeasurementIslandEvidence,
+            >())
+            .ok_or(ContactSelectionError::CoverageResourceOverflow)?;
+        let evidence_bytes = plan
+            .evidence_bytes
+            .checked_add(island_rows)
+            .and_then(|bytes| bytes.checked_add(island_faces))
+            .and_then(|bytes| bytes.checked_add(island_evidence))
+            .ok_or(ContactSelectionError::CoverageResourceOverflow)?;
+        let phase_peak_bytes = plan
+            .scratch_bytes
+            .checked_add(evidence_bytes)
+            .ok_or(ContactSelectionError::CoverageResourceOverflow)?;
+        Ok(CoverageAssessmentResourcePlan {
+            evidence_bytes,
+            phase_peak_bytes,
+            ..plan
+        })
+    })
+}
+
+fn coverage_assessment_resource_plan_for(
+    samples: &[CoverageSample],
+    topology: &plinth_mesh::FaceTopology,
+    mode: CoverageAssessmentMode,
 ) -> Result<CoverageAssessmentResourcePlan, ContactSelectionError> {
     let count = samples.len();
     let scratch_bytes = count
@@ -1658,8 +1729,33 @@ pub(crate) fn coverage_assessment_resource_plan(
                 .and_then(|neighbors| work.checked_add(neighbors))
         })
         .ok_or(ContactSelectionError::CoverageResourceOverflow)?;
+    let evidence_bytes = match mode {
+        CoverageAssessmentMode::RepairNoEvidence => 0,
+        CoverageAssessmentMode::MeasurementEvidence => count
+            .checked_mul(std::mem::size_of::<CoverageAssessmentPatch>())
+            .and_then(|bytes| {
+                count
+                    .checked_mul(std::mem::size_of::<u32>())
+                    .and_then(|faces| bytes.checked_add(faces))
+            })
+            // Final patch rows coexist with the traversal rows while the face
+            // buffers are moved, rather than copied, into immutable evidence.
+            .and_then(|bytes| {
+                count
+                    .checked_mul(std::mem::size_of::<
+                        crate::coverage_measurement::CoverageMeasurementPatchEvidence,
+                    >())
+                    .and_then(|rows| bytes.checked_add(rows))
+            })
+            .ok_or(ContactSelectionError::CoverageResourceOverflow)?,
+    };
+    let phase_peak_bytes = scratch_bytes
+        .checked_add(evidence_bytes)
+        .ok_or(ContactSelectionError::CoverageResourceOverflow)?;
     Ok(CoverageAssessmentResourcePlan {
         scratch_bytes,
+        evidence_bytes,
+        phase_peak_bytes,
         operations,
     })
 }
@@ -1672,16 +1768,37 @@ pub(crate) fn assess_coverage(
     area_floor_mm2: f64,
     limits: CoverageAssessmentLimits,
 ) -> Result<CoverageAssessment, ContactSelectionError> {
+    assess_coverage_with_mode(
+        samples,
+        topology,
+        nearest_mm,
+        radius_mm,
+        area_floor_mm2,
+        limits,
+        CoverageAssessmentMode::RepairNoEvidence,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn assess_coverage_with_mode(
+    samples: &[CoverageSample],
+    topology: &plinth_mesh::FaceTopology,
+    nearest_mm: &[f64],
+    radius_mm: f64,
+    area_floor_mm2: f64,
+    limits: CoverageAssessmentLimits,
+    mode: CoverageAssessmentMode,
+) -> Result<CoverageAssessment, ContactSelectionError> {
     if nearest_mm.len() != samples.len() {
         return Err(ContactSelectionError::CoverageAssessmentLength {
             expected: samples.len(),
             actual: nearest_mm.len(),
         });
     }
-    let plan = coverage_assessment_resource_plan(samples, topology)?;
-    if plan.scratch_bytes > limits.max_scratch_bytes {
+    let plan = coverage_assessment_resource_plan_for(samples, topology, mode)?;
+    if plan.phase_peak_bytes > limits.max_scratch_bytes {
         return Err(ContactSelectionError::CoverageAssessmentScratchLimit {
-            required: plan.scratch_bytes,
+            required: plan.phase_peak_bytes,
             limit: limits.max_scratch_bytes,
         });
     }
@@ -1725,7 +1842,10 @@ pub(crate) fn assess_coverage(
     let mut assessment = CoverageAssessment {
         objective: CoverageObjective::default(),
         failing_sample_indices: Vec::with_capacity(samples.len()),
-        patches: Vec::with_capacity(samples.len()),
+        patches: match mode {
+            CoverageAssessmentMode::RepairNoEvidence => Vec::new(),
+            CoverageAssessmentMode::MeasurementEvidence => Vec::with_capacity(samples.len()),
+        },
     };
     let mut failing_islands = Vec::with_capacity(samples.len());
     let mut visited = vec![false; groups.len()];
@@ -1771,28 +1891,30 @@ pub(crate) fn assess_coverage(
                 .extend_from_slice(&patch_samples);
             failing_islands.push(groups[group_index].island_id);
         }
-        let mut face_ids = patch_samples
-            .iter()
-            .map(|&index| samples[index].face_id)
-            .collect::<Vec<_>>();
-        face_ids.sort_unstable();
-        face_ids.dedup();
-        let representative_face_id = *face_ids.first().expect("uncovered patch has a face");
-        let component_id =
-            samples[*patch_samples.first().expect("uncovered patch has a sample")].component_id;
-        let worst_gap_mm = patch_samples
-            .iter()
-            .fold(0.0_f64, |worst, &index| worst.max(nearest_mm[index]));
-        assessment.patches.push(CoverageAssessmentPatch {
-            island_id: groups[group_index].island_id,
-            component_id,
-            representative_face_id,
-            sorted_face_ids: face_ids,
-            uncovered_area_mm2: patch_area,
-            cut_ambiguous: patch_ambiguous,
-            assessment_failed: patch_area > area_floor_mm2 || patch_ambiguous,
-            worst_gap_mm,
-        });
+        if mode == CoverageAssessmentMode::MeasurementEvidence {
+            let mut face_ids = patch_samples
+                .iter()
+                .map(|&index| samples[index].face_id)
+                .collect::<Vec<_>>();
+            face_ids.sort_unstable();
+            face_ids.dedup();
+            let representative_face_id = *face_ids.first().expect("uncovered patch has a face");
+            let component_id =
+                samples[*patch_samples.first().expect("uncovered patch has a sample")].component_id;
+            let worst_gap_mm = patch_samples
+                .iter()
+                .fold(0.0_f64, |worst, &index| worst.max(nearest_mm[index]));
+            assessment.patches.push(CoverageAssessmentPatch {
+                island_id: groups[group_index].island_id,
+                component_id,
+                representative_face_id,
+                sorted_face_ids: face_ids,
+                uncovered_area_mm2: patch_area,
+                cut_ambiguous: patch_ambiguous,
+                assessment_failed: patch_area > area_floor_mm2 || patch_ambiguous,
+                worst_gap_mm,
+            });
+        }
     }
     assessment.failing_sample_indices.sort_unstable();
     failing_islands.sort_unstable();
@@ -2975,6 +3097,101 @@ mod tests {
             ),
             Err(ContactSelectionError::CoverageAssessmentOperationLimit { .. })
         ));
+    }
+
+    #[test]
+    fn repair_assessment_keeps_its_original_plan_and_omits_measurement_evidence() {
+        let mesh = small_closed_tetra();
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let samples = vec![CoverageSample {
+            island_id: 0,
+            face_id: 0,
+            component_id: topology.component_ids()[0],
+            point_mm: [0.0, 0.0, 0.0],
+            area_mm2: 0.1,
+        }];
+        let plan = coverage_assessment_resource_plan(&samples, &topology).unwrap();
+        assert_eq!(plan.evidence_bytes, 0);
+        assert_eq!(plan.phase_peak_bytes, plan.scratch_bytes);
+        let assessment = assess_coverage(
+            &samples,
+            &topology,
+            &[2.0],
+            1.0,
+            0.0,
+            CoverageAssessmentLimits::UNBOUNDED,
+        )
+        .unwrap();
+        assert_eq!(assessment.failing_sample_indices, vec![0]);
+        assert!(assessment.patches.is_empty());
+    }
+
+    #[test]
+    fn measurement_assessment_plan_checks_island_evidence_arithmetic() {
+        let mesh = small_closed_tetra();
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        assert!(matches!(
+            coverage_measurement_assessment_resource_plan(&[], &topology, usize::MAX),
+            Err(ContactSelectionError::CoverageResourceOverflow)
+        ));
+    }
+
+    #[test]
+    fn measurement_assessment_preflights_evidence_and_sorts_patch_faces() {
+        let mesh = small_closed_tetra();
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let samples = vec![
+            CoverageSample {
+                island_id: 0,
+                face_id: 1,
+                component_id: topology.component_ids()[1],
+                point_mm: [0.0, 0.0, 0.0],
+                area_mm2: 0.1,
+            },
+            CoverageSample {
+                island_id: 0,
+                face_id: 0,
+                component_id: topology.component_ids()[0],
+                point_mm: [0.0, 0.0, 0.0],
+                area_mm2: 0.1,
+            },
+        ];
+        let plan = coverage_assessment_resource_plan_for(
+            &samples,
+            &topology,
+            CoverageAssessmentMode::MeasurementEvidence,
+        )
+        .unwrap();
+        assert!(matches!(
+            assess_coverage_with_mode(
+                &samples,
+                &topology,
+                &[2.0, 2.0],
+                1.0,
+                0.0,
+                CoverageAssessmentLimits {
+                    max_scratch_bytes: plan.phase_peak_bytes - 1,
+                    max_operations: plan.operations,
+                },
+                CoverageAssessmentMode::MeasurementEvidence,
+            ),
+            Err(ContactSelectionError::CoverageAssessmentScratchLimit { .. })
+        ));
+        let assessment = assess_coverage_with_mode(
+            &samples,
+            &topology,
+            &[2.0, 2.0],
+            1.0,
+            0.0,
+            CoverageAssessmentLimits {
+                max_scratch_bytes: plan.phase_peak_bytes,
+                max_operations: plan.operations,
+            },
+            CoverageAssessmentMode::MeasurementEvidence,
+        )
+        .unwrap();
+        assert_eq!(assessment.patches.len(), 1);
+        assert_eq!(assessment.patches[0].sorted_face_ids, vec![0, 1]);
     }
 
     #[test]

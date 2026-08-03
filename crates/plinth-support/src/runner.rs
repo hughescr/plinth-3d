@@ -24,6 +24,7 @@ static NORMALIZED_ROUTE_PROJECTION_RESERVES: std::sync::atomic::AtomicUsize =
 
 use crate::{
     anchor::{AnchorGeometryAuthority, AnchorSearchConfig, AnchorSearchError, SurfaceAnchorPool},
+    assess_coverage_with_mode,
     brace::{
         brace_fixed_point_current_parity, BraceAdditionKind, BraceError, BraceFixedPointPlan,
         BraceFixedPointTermination,
@@ -32,6 +33,7 @@ use crate::{
         CcoController, CcoError, FinalizedAnchorTerminalRoute, FinalizedCcoTranscript,
         FinalizedDispositionKind, TerminalCcoRequest,
     },
+    coverage_measurement_assessment_resource_plan,
     dyadic::CandidatePayloadConfig,
     forest::{EmbedEnd, Forest, MemberKind, MemberSpec, Owner, TerminalLedgerState},
     initial::{
@@ -55,8 +57,8 @@ use crate::{
     },
     transient::{transient_report, TransientError, TransientReport},
     validate_perception_input, BuildFrame, ContactSelectionConfig, ContactSelectionError,
-    CoverageAssessmentLimits, CoverageGap, CoverageMeasurement, CoverageMeasurementError,
-    CoverageMeasurementEvidence, CoverageMeasurementIslandEvidence,
+    CoverageAssessmentLimits, CoverageAssessmentMode, CoverageGap, CoverageMeasurement,
+    CoverageMeasurementError, CoverageMeasurementEvidence, CoverageMeasurementIslandEvidence,
     CoverageMeasurementPatchEvidence, CoverageMeasurementRequest, CoverageMeasurementResourcePlan,
     CoverageSample, SelectedContacts, SupportError, SupportHistory, SupportIsland,
     SupportPerceptionConfig, SupportPerceptionError, SupportReport, SupportRequest, SupportedModel,
@@ -374,11 +376,30 @@ impl<'a> SupportVerificationSnapshot<'a> {
                 return Err(CoverageMeasurementError::ResourceLimit { resource });
             }
         }
-        let assessment_plan =
-            crate::coverage_assessment_resource_plan(self.coverage_samples, self.topology)
-                .map_err(|_| CoverageMeasurementError::AssessmentRefusal {
-                    reason: "assessment preflight",
-                })?;
+        let island_row_count = self
+            .coverage_samples
+            .iter()
+            .try_fold(0usize, |total, sample| {
+                if self.named_islands.iter().any(|island| {
+                    island.id == sample.island_id && island.face_ids.contains(&sample.face_id)
+                }) {
+                    total
+                        .checked_add(1)
+                        .ok_or(CoverageMeasurementError::ArithmeticOverflow {
+                            operation: "island evidence rows",
+                        })
+                } else {
+                    Ok(total)
+                }
+            })?;
+        let assessment_plan = coverage_measurement_assessment_resource_plan(
+            self.coverage_samples,
+            self.topology,
+            island_row_count,
+        )
+        .map_err(|_| CoverageMeasurementError::AssessmentRefusal {
+            reason: "assessment preflight",
+        })?;
         if assessment_plan.operations > limits.max_assessment_work() {
             return Err(CoverageMeasurementError::ResourceLimit {
                 resource: "assessment work",
@@ -409,7 +430,7 @@ impl<'a> SupportVerificationSnapshot<'a> {
             },
         )?;
         let logical_peak_bytes = measurement_base_bytes
-            .checked_add(route_peak.max(assessment_plan.scratch_bytes))
+            .checked_add(route_peak.max(assessment_plan.phase_peak_bytes))
             .ok_or(CoverageMeasurementError::ArithmeticOverflow {
                 operation: "logical peak bytes",
             })?;
@@ -424,7 +445,7 @@ impl<'a> SupportVerificationSnapshot<'a> {
                 operation: "route kNN query",
             },
         )?;
-        let assessment = crate::assess_coverage(
+        let assessment = assess_coverage_with_mode(
             self.coverage_samples,
             self.topology,
             &nearest,
@@ -434,34 +455,43 @@ impl<'a> SupportVerificationSnapshot<'a> {
                 max_scratch_bytes: limits.max_logical_peak_bytes(),
                 max_operations: limits.max_assessment_work(),
             },
+            CoverageAssessmentMode::MeasurementEvidence,
         )
         .map_err(|_| CoverageMeasurementError::AssessmentRefusal {
             reason: "coverage traversal",
         })?;
-        let mut islands = BTreeMap::<(u32, u32), Vec<u32>>::new();
+        let mut island_rows = Vec::with_capacity(island_row_count);
         for sample in self.coverage_samples {
             if self.named_islands.iter().any(|island| {
                 island.id == sample.island_id && island.face_ids.contains(&sample.face_id)
             }) {
-                islands
-                    .entry((sample.island_id, sample.component_id))
-                    .or_default()
-                    .push(sample.face_id);
+                island_rows.push((sample.island_id, sample.component_id, sample.face_id));
             }
         }
-        let mut islands = islands
-            .into_iter()
-            .map(|((island_id, component_id), mut faces)| {
-                faces.sort_unstable();
-                faces.dedup();
-                CoverageMeasurementIslandEvidence::new(
-                    island_id,
-                    component_id,
-                    faces[0],
-                    faces.into_boxed_slice(),
-                )
-            })
-            .collect::<Vec<_>>();
+        island_rows.sort_unstable();
+        island_rows.dedup();
+        let mut islands = Vec::with_capacity(island_rows.len());
+        let mut start = 0;
+        while start < island_rows.len() {
+            let (island_id, component_id, representative_face_id) = island_rows[start];
+            let mut end = start + 1;
+            while end < island_rows.len()
+                && (island_rows[end].0, island_rows[end].1) == (island_id, component_id)
+            {
+                end += 1;
+            }
+            let faces = island_rows[start..end]
+                .iter()
+                .map(|row| row.2)
+                .collect::<Vec<_>>();
+            islands.push(CoverageMeasurementIslandEvidence::new(
+                island_id,
+                component_id,
+                representative_face_id,
+                faces.into_boxed_slice(),
+            ));
+            start = end;
+        }
         islands.sort_unstable_by_key(|island| {
             (
                 island.island_id(),
@@ -517,6 +547,9 @@ impl<'a> SupportVerificationSnapshot<'a> {
                 distance_work,
                 logical_peak_bytes,
                 assessment_work: assessment_plan.operations,
+                assessment_scratch_bytes: assessment_plan.scratch_bytes,
+                assessment_evidence_bytes: assessment_plan.evidence_bytes,
+                assessment_phase_peak_bytes: assessment_plan.phase_peak_bytes,
             }),
             CoverageMeasurementEvidence::new(
                 islands.into_boxed_slice(),

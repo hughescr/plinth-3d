@@ -285,6 +285,9 @@ pub struct CoverageMeasurementResourcePlan {
     distance_work: usize,
     logical_peak_bytes: usize,
     assessment_work: usize,
+    assessment_scratch_bytes: usize,
+    assessment_evidence_bytes: usize,
+    assessment_phase_peak_bytes: usize,
 }
 
 /// Verifier-private realized resources supplied as one typed summary.
@@ -298,6 +301,9 @@ pub(crate) struct CoverageMeasurementResourceSummary {
     pub(crate) distance_work: usize,
     pub(crate) logical_peak_bytes: usize,
     pub(crate) assessment_work: usize,
+    pub(crate) assessment_scratch_bytes: usize,
+    pub(crate) assessment_evidence_bytes: usize,
+    pub(crate) assessment_phase_peak_bytes: usize,
 }
 
 impl CoverageMeasurementResourcePlan {
@@ -333,6 +339,18 @@ impl CoverageMeasurementResourcePlan {
     pub const fn assessment_work(self) -> usize {
         self.assessment_work
     }
+    #[must_use]
+    pub const fn assessment_scratch_bytes(self) -> usize {
+        self.assessment_scratch_bytes
+    }
+    #[must_use]
+    pub const fn assessment_evidence_bytes(self) -> usize {
+        self.assessment_evidence_bytes
+    }
+    #[must_use]
+    pub const fn assessment_phase_peak_bytes(self) -> usize {
+        self.assessment_phase_peak_bytes
+    }
 
     pub(crate) const fn from_summary(summary: CoverageMeasurementResourceSummary) -> Self {
         Self {
@@ -344,6 +362,9 @@ impl CoverageMeasurementResourcePlan {
             distance_work: summary.distance_work,
             logical_peak_bytes: summary.logical_peak_bytes,
             assessment_work: summary.assessment_work,
+            assessment_scratch_bytes: summary.assessment_scratch_bytes,
+            assessment_evidence_bytes: summary.assessment_evidence_bytes,
+            assessment_phase_peak_bytes: summary.assessment_phase_peak_bytes,
         }
     }
 }
