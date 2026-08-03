@@ -41,6 +41,10 @@ pub(crate) struct LoweringConfig {
 }
 
 impl LoweringConfig {
+    pub(crate) const fn joint_config(self) -> JointConfig {
+        self.joint
+    }
+
     pub(crate) fn current(
         frame: BuildFrame,
         layers: &LayerPlan,
@@ -112,6 +116,16 @@ impl LoweredSupportPlan {
                     frame.plate_z_mm().get().to_bits(),
                     frame.lift_mm().get().to_bits(),
                 ]
+        {
+            return Err(LoweringError::StaleAuthority);
+        }
+        if self.digest
+            != primitive_digest(
+                self.live_view_digest,
+                &self.primitives,
+                self.support_primitive_count,
+                self.raft_primitive_count,
+            )
         {
             return Err(LoweringError::StaleAuthority);
         }
