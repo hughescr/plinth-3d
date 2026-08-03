@@ -2648,7 +2648,7 @@ mod tests {
                 vec![
                     0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
                 ],
-                15_173_343_221_617_296_168_u64,
+                13_392_890_591_201_070_820_u64,
                 DelicacyIndexStats {
                     triangle_nodes_visited: 696,
                     triangle_faces_tested: 2_232,
@@ -2664,7 +2664,7 @@ mod tests {
                     0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21, 24, 25, 26, 27,
                     28, 29, 30, 31, 32, 33,
                 ],
-                2_952_192_030_863_958_219_u64,
+                4_623_175_013_055_909_216_u64,
                 DelicacyIndexStats {
                     triangle_nodes_visited: 1_860,
                     triangle_faces_tested: 5_922,
@@ -3252,12 +3252,22 @@ mod tests {
         for face in field.selected_face_indices() {
             feed(&(*face as u64).to_le_bytes());
         }
-        for (sample, weight) in field.samples().iter().zip(field.weights()) {
+        feed(&(field.samples().len() as u64).to_le_bytes());
+        for sample in field.samples() {
             for value in sample.point.into_iter().chain(sample.normal) {
                 feed(&value.to_bits().to_le_bytes());
             }
             feed(&(sample.face_index as u64).to_le_bytes());
-            feed(&weight.to_bits().to_le_bytes());
+        }
+        for values in [
+            field.curvature_scores(),
+            field.thinness_scores(),
+            field.weights(),
+        ] {
+            feed(&(values.len() as u64).to_le_bytes());
+            for value in values {
+                feed(&value.to_bits().to_le_bytes());
+            }
         }
         digest
     }
