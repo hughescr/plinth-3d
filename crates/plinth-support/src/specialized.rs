@@ -10,14 +10,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, PointCloudIndex, RadiusQueryLimits};
 use plinth_core::{m0_constants, LayerPlan};
-use plinth_mesh::{build_face_topology, Mesh, WeldPolicy};
+use plinth_mesh::{build_face_topology, mesh_fingerprint, Mesh, WeldPolicy};
 use thiserror::Error;
 
 use crate::dyadic::{build_candidate_payload, CandidatePayloadConfig, DyadicError};
 use crate::perception::{
     finalize_specialized_load_partition, load_violation_count, specialized_load_resource_plan,
-    FinalizedLoadPartition, GenericContactPlan, GenericPerceptionError, GenericPerceptionLimits,
-    LoadFinalizeLimits, LoadOwner, PhysicalContact, SliceSolid, SpecializedOwnerReservation,
+    FinalizedContactLoads, FinalizedLoadPartition, GenericContactPlan, GenericPerceptionError,
+    GenericPerceptionLimits, LoadFinalizeLimits, LoadOwner, PhysicalContact, SliceSolid,
+    SpecializedOwnerReservation,
 };
 use crate::{
     assess_coverage, build_dyadic_coverage_samples, coverage_assessment_resource_plan, BuildFrame,
@@ -589,15 +590,42 @@ impl PrimaryRegularIdentity {
 /// authority.  It includes the one finalized unique-face load partition.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpecializedContactPlan {
-    authority_digest: u64,
+    // The original selected-contact authority is retained separately from the
+    // child plan's own digest. A child may change physical contacts but may
+    // never exchange the generic/load-finalizer inputs that certify them.
+    source_authority_digest: u64,
     semantic_authority_digest: u64,
     generic_slice_thread_evidence: (usize, usize),
     islands: Vec<SupportIsland>,
     coverage_samples: Vec<CoverageSample>,
     repair_pool: RepairPool,
+    generic_authority: GenericContactPlan,
+    mesh_authority: Mesh,
+    mesh_authority_fingerprint: String,
+    reservations_authority: Vec<SpecializedOwnerReservation>,
+    limits_authority: SpecializedLimits,
+    surface_config_authority: NativeSurfaceConfig,
     contacts: Vec<SpecializedPhysicalContact>,
+    // Allocation history is append-only even when the current geometry has
+    // holes. `None` means the u64 namespace is exhausted.
+    next_contact_id: Option<u64>,
     load_partition: FinalizedLoadPartition,
+    finalized_loads: FinalizedContactLoads,
+    // This is intentionally separate from `digest()`: including it in the
+    // digest would be circular.  It seals the finalized load artifact to the
+    // complete plan authority which produced it.
+    finalized_load_plan_digest: u64,
     gate_evidence: SpecializedGateEvidence,
+}
+
+/// A checked, immutable edit session for a specialized plan.
+///
+/// The session owns the one native surface required by the authoritative load
+/// finalizer.  It deliberately exposes only regular-contact removal/addition:
+/// demand-bearing geometry is not normalization authority.
+pub struct SpecializedContactPlanEdit<'a> {
+    plan: &'a SpecializedContactPlan,
+    surface: NativeSurface,
 }
 
 impl SpecializedContactPlan {
@@ -651,6 +679,24 @@ impl SpecializedContactPlan {
     pub const fn load_partition(&self) -> &FinalizedLoadPartition {
         &self.load_partition
     }
+
+    /// The exact plan-owned, tip-sized fold of [`Self::load_partition`].
+    /// Crate-private integration may borrow it only after the plan digest has
+    /// been checked; public callers cannot manufacture an alternate pairing.
+    pub(crate) fn finalized_loads(&self) -> Result<&FinalizedContactLoads, SpecializedError> {
+        let contact_ids = self
+            .contacts
+            .iter()
+            .map(SpecializedPhysicalContact::contact_id)
+            .collect::<Vec<_>>();
+        self.finalized_loads
+            .validate_binding(&self.load_partition, &contact_ids)
+            .map_err(SpecializedError::Generic)?;
+        if self.finalized_load_plan_digest != self.digest() {
+            return Err(SpecializedError::StaleFinalizedLoadArtifact);
+        }
+        Ok(&self.finalized_loads)
+    }
     #[must_use]
     pub const fn gate_evidence(&self) -> SpecializedGateEvidence {
         self.gate_evidence
@@ -658,6 +704,30 @@ impl SpecializedContactPlan {
     #[must_use]
     pub const fn generic_slice_thread_evidence(&self) -> (usize, usize) {
         self.generic_slice_thread_evidence
+    }
+
+    /// Start a checked child-plan edit using only the authority frozen in this
+    /// parent. No caller can substitute reservations, limits, mesh, generic
+    /// evidence, or native surface configuration beneath a child plan.
+    pub fn begin_regular_edit(&self) -> Result<SpecializedContactPlanEdit<'_>, SpecializedError> {
+        self.validate_edit_binding()?;
+        let surface = NativeSurface::from_indexed(
+            self.mesh_authority.verts(),
+            self.mesh_authority.tris(),
+            self.surface_config_authority,
+        )
+        .map_err(|error| SpecializedError::Surface(error.to_string()))?;
+        Ok(SpecializedContactPlanEdit {
+            plan: self,
+            surface,
+        })
+    }
+
+    /// The digest of the plan to which the current finalized load partition is
+    /// sealed.  Consumers must treat a mismatch as stale load authority.
+    #[must_use]
+    pub const fn finalized_load_plan_digest(&self) -> u64 {
+        self.finalized_load_plan_digest
     }
 
     /// Reject replay against any changed generic, selected-contact, selection
@@ -677,6 +747,16 @@ impl SpecializedContactPlan {
         selection_config: &ContactSelectionConfig<'_>,
         limits: SpecializedLimits,
     ) -> Result<(), SpecializedError> {
+        if mesh != &self.mesh_authority
+            || generic != &self.generic_authority
+            || reservations != self.reservations_authority
+            || limits != self.limits_authority
+            || perception_config.surface_grid_pitch_mm.get()
+                != self.surface_config_authority.grid_pitch_mm
+            || perception_config.max_grid_bytes != self.surface_config_authority.max_grid_bytes
+        {
+            return Err(SpecializedError::StaleAuthority);
+        }
         generic.validate_binding(
             mesh,
             perception_config,
@@ -690,17 +770,61 @@ impl SpecializedContactPlan {
         self.repair_pool
             .validate_lineage(repair_pool_lineage_root(generic))?;
         self.repair_pool.validate_contacts(&self.contacts)?;
+        self.finalized_loads()?;
+        if self.finalized_load_plan_digest != self.digest() {
+            return Err(SpecializedError::StaleFinalizedLoadArtifact);
+        }
         if bound_authority_digest(generic, regular, selection_config, limits)
-            != self.authority_digest
+            != self.source_authority_digest
         {
             return Err(SpecializedError::StaleAuthority);
         }
         Ok(())
     }
+
+    fn validate_edit_binding(&self) -> Result<(), SpecializedError> {
+        let live_mesh_fingerprint = mesh_fingerprint(&self.mesh_authority)
+            .map_err(|error| SpecializedError::Topology(error.to_string()))?;
+        if live_mesh_fingerprint != self.mesh_authority_fingerprint {
+            return Err(SpecializedError::FrozenMeshAuthorityMismatch);
+        }
+        self.repair_pool
+            .validate_lineage(repair_pool_lineage_root(&self.generic_authority))?;
+        self.repair_pool.validate_contacts(&self.contacts)?;
+        self.finalized_loads()?;
+        if self.finalized_load_plan_digest != self.digest() {
+            return Err(SpecializedError::StaleFinalizedLoadArtifact);
+        }
+        Ok(())
+    }
+
+    fn seal_finalized_load_digest(mut self) -> Self {
+        self.finalized_load_plan_digest = self.digest();
+        self
+    }
     #[must_use]
     pub fn digest(&self) -> u64 {
         let mut hash = Fnv::new();
         hash.u64(self.semantic_authority_digest);
+        // Bind the complete frozen child-finalization input bundle. The
+        // original source authority remains auditable above, while this plan
+        // digest changes whenever a child-relevant input changes.
+        hash.u64(self.generic_authority.digest());
+        hash.bytes(self.mesh_authority_fingerprint.as_bytes());
+        for reservation in &self.reservations_authority {
+            hash.u32(reservation.owner_id);
+            hash.u32(reservation.face_id);
+        }
+        hash_specialized_limits(&mut hash, self.limits_authority);
+        hash.f64(self.surface_config_authority.grid_pitch_mm);
+        hash.usize(self.surface_config_authority.max_grid_bytes);
+        match self.next_contact_id {
+            Some(next) => {
+                hash.u8(1);
+                hash.u64(next);
+            }
+            None => hash.u8(0),
+        }
         self.repair_pool.hash_into(&mut hash);
         for island in &self.islands {
             hash.u32(island.id);
@@ -781,6 +905,269 @@ impl SpecializedContactPlan {
         hash.usize(self.gate_evidence.max_commit_bytes);
         hash.finish()
     }
+}
+
+impl<'a> SpecializedContactPlanEdit<'a> {
+    /// Derive a child that omits exactly one demand-free regular physical
+    /// contact.  The original contact vector is cloned and filtered; surviving
+    /// records are never reconsolidated, re-numbered, or rebuilt from a
+    /// candidate.  Consequently removed ids leave observable holes.
+    pub fn remove_demand_free_regular(
+        &self,
+        contact_id: u64,
+    ) -> Result<SpecializedContactPlan, SpecializedError> {
+        let contact = self
+            .plan
+            .contacts
+            .iter()
+            .find(|contact| contact.contact_id == contact_id)
+            .ok_or(SpecializedError::UnknownPhysicalContact { contact_id })?;
+        if !contact.demands.is_empty() {
+            return Err(SpecializedError::DemandBearingContactEdit { contact_id });
+        }
+        if contact.primary_regular.is_none() || contact.regular_routes.is_empty() {
+            return Err(SpecializedError::NonRegularContactEdit { contact_id });
+        }
+        let contacts = self
+            .plan
+            .contacts
+            .iter()
+            .filter(|contact| contact.contact_id != contact_id)
+            .cloned()
+            .collect();
+        self.derive_child(contacts, self.plan.next_contact_id)
+    }
+
+    /// Derive a child that appends one previously unoccupied repair row.  A
+    /// fresh id is allocated strictly above every id that has ever appeared in
+    /// this lineage, including holes left by removal.  This method is the only
+    /// regular-contact addition seam; its geometry and route are copied from
+    /// the immutable repair pool rather than caller data.
+    pub fn append_regular_repair_row(
+        &self,
+        row_id: RepairRowId,
+    ) -> Result<SpecializedContactPlan, SpecializedError> {
+        let row = self
+            .plan
+            .repair_pool
+            .row(row_id)
+            .ok_or(SpecializedError::UnknownRepairRow { row_id })?;
+        if self
+            .plan
+            .occupied_repair_rows()?
+            .iter()
+            .any(|occupancy| occupancy.row_id == row_id)
+        {
+            return Err(SpecializedError::OccupiedRepairRow { row_id });
+        }
+        if self
+            .plan
+            .contacts
+            .iter()
+            .any(|contact| contact.position_mm == row.candidate.point_mm)
+        {
+            return Err(SpecializedError::DuplicateChildPhysicalSeat {
+                contact_id: row.candidate.id.0,
+            });
+        }
+        let contact_id = self
+            .plan
+            .next_contact_id
+            .ok_or(SpecializedError::PhysicalContactIdOverflow)?;
+        let route = RegularContactRoute {
+            candidate_id: row.id.candidate_id.0,
+            owner_island_id: row.id.owner_island_id,
+            coverage_face_id: row.id.face_id,
+            component_id: row.id.component_id,
+            source_kind: row.id.source_kind,
+        };
+        let primary = PrimaryRegularIdentity {
+            route,
+            position_mm: row.candidate.point_mm,
+            normal: row.candidate.normal,
+        };
+        let mut contacts = self.plan.contacts.clone();
+        contacts.push(SpecializedPhysicalContact {
+            contact_id,
+            position_mm: row.candidate.point_mm,
+            normal: row.candidate.normal,
+            seat_provenance: PhysicalSeatProvenance::Regular(primary),
+            carried_area_mm2: 0.0,
+            primary_regular: Some(primary),
+            regular_routes: vec![route],
+            demands: Vec::new(),
+        });
+        self.derive_child(contacts, contact_id.checked_add(1))
+    }
+
+    fn derive_child(
+        &self,
+        mut contacts: Vec<SpecializedPhysicalContact>,
+        next_contact_id: Option<u64>,
+    ) -> Result<SpecializedContactPlan, SpecializedError> {
+        // An edit never runs selected-to-specialized consolidation.  It only
+        // proves the retained records and replays the one authoritative load
+        // finalizer over them.
+        validate_child_contacts(&contacts, &self.plan.repair_pool)?;
+        for contact in &mut contacts {
+            contact.carried_area_mm2 = 0.0;
+        }
+        let load_inputs = stable_load_inputs(
+            &contacts,
+            &self.plan.generic_authority,
+            &self.plan.islands,
+            &self.plan.reservations_authority,
+            self.plan.limits_authority,
+        )?;
+        let load_partition = finalize_specialized_load_partition(
+            &self.plan.generic_authority,
+            &self.plan.mesh_authority,
+            &self.surface,
+            &load_inputs.contacts,
+            &load_inputs.specialized_owner_faces,
+            LoadFinalizeLimits {
+                max_scratch_bytes: self.plan.limits_authority.max_load_scratch_bytes,
+                max_operations: load_inputs.remaining_load_operations,
+            },
+        )?;
+        for row in load_partition.rows() {
+            let contact = contacts
+                .iter_mut()
+                .find(|contact| contact.contact_id == row.contact_id)
+                .ok_or(SpecializedError::MissingSeatProvenance {
+                    contact_id: row.contact_id,
+                })?;
+            contact.carried_area_mm2 += row.carried_area_mm2;
+        }
+        self.plan.repair_pool.validate_contacts(&contacts)?;
+        let contact_ids = contacts
+            .iter()
+            .map(SpecializedPhysicalContact::contact_id)
+            .collect::<Vec<_>>();
+        let finalized_loads =
+            FinalizedContactLoads::for_specialized_plan(&load_partition, &contact_ids)?;
+        Ok(SpecializedContactPlan {
+            source_authority_digest: self.plan.source_authority_digest,
+            semantic_authority_digest: self.plan.semantic_authority_digest,
+            generic_slice_thread_evidence: self.plan.generic_slice_thread_evidence,
+            islands: self.plan.islands.clone(),
+            coverage_samples: self.plan.coverage_samples.clone(),
+            repair_pool: self.plan.repair_pool.clone(),
+            generic_authority: self.plan.generic_authority.clone(),
+            mesh_authority: self.plan.mesh_authority.clone(),
+            mesh_authority_fingerprint: self.plan.mesh_authority_fingerprint.clone(),
+            reservations_authority: self.plan.reservations_authority.clone(),
+            limits_authority: self.plan.limits_authority,
+            surface_config_authority: self.plan.surface_config_authority,
+            contacts,
+            next_contact_id,
+            load_partition,
+            finalized_loads,
+            finalized_load_plan_digest: 0,
+            gate_evidence: self.plan.gate_evidence,
+        }
+        .seal_finalized_load_digest())
+    }
+}
+
+fn next_contact_id(contacts: &[SpecializedPhysicalContact]) -> Option<u64> {
+    contacts
+        .iter()
+        .map(SpecializedPhysicalContact::contact_id)
+        .max()
+        .map_or(Some(0), |id| id.checked_add(1))
+}
+
+fn validate_child_contacts(
+    contacts: &[SpecializedPhysicalContact],
+    repair_pool: &RepairPool,
+) -> Result<(), SpecializedError> {
+    let mut ids = BTreeSet::new();
+    for contact in contacts {
+        if !ids.insert(contact.contact_id) {
+            return Err(SpecializedError::DuplicateChildContactId {
+                contact_id: contact.contact_id,
+            });
+        }
+        match contact.primary_regular {
+            Some(primary)
+                if contact.regular_routes.contains(&primary.route)
+                    && contact.position_mm == primary.position_mm
+                    && contact.normal == primary.normal => {}
+            None if contact.regular_routes.is_empty() => {}
+            _ => return Err(SpecializedError::PrimaryRegularIdentityMismatch),
+        }
+    }
+    for right in 0..contacts.len() {
+        if contacts[..right]
+            .iter()
+            .any(|left| left.position_mm == contacts[right].position_mm)
+        {
+            return Err(SpecializedError::DuplicateChildPhysicalSeat {
+                contact_id: contacts[right].contact_id,
+            });
+        }
+    }
+    repair_pool.validate_contacts(contacts)
+}
+
+fn stable_load_inputs(
+    contacts: &[SpecializedPhysicalContact],
+    generic: &GenericContactPlan,
+    islands: &[SupportIsland],
+    reservations: &[SpecializedOwnerReservation],
+    limits: SpecializedLimits,
+) -> Result<WorkingLoadInputs, SpecializedError> {
+    let working = contacts
+        .iter()
+        .map(|contact| WorkingContact {
+            position_mm: contact.position_mm,
+            normal: contact.normal,
+            seat_provenance: contact.seat_provenance,
+            primary_regular: contact.primary_regular,
+            regular_routes: contact.regular_routes.clone(),
+            demands: contact.demands.clone(),
+        })
+        .collect::<Vec<_>>();
+    let mut inputs = working_load_inputs(&working, generic, islands, reservations, limits)?;
+    let first_specialized_owner =
+        reservations
+            .iter()
+            .map(|row| row.owner_id)
+            .max()
+            .map_or(Ok(0), |owner| {
+                owner
+                    .checked_add(1)
+                    .ok_or(SpecializedError::OwnerIdOverflow)
+            })?;
+    let stable_id_for_dense = |dense: u32| -> Result<u64, SpecializedError> {
+        contacts
+            .get(dense as usize)
+            .map(SpecializedPhysicalContact::contact_id)
+            .ok_or(SpecializedError::OwnerIdOverflow)
+    };
+    let stable_specialized_owner = |owner: u32| -> Result<u32, SpecializedError> {
+        let dense = owner
+            .checked_sub(first_specialized_owner)
+            .ok_or(SpecializedError::OwnerIdOverflow)?;
+        let stable = u32::try_from(stable_id_for_dense(dense)?)
+            .map_err(|_| SpecializedError::OwnerIdOverflow)?;
+        first_specialized_owner
+            .checked_add(stable)
+            .ok_or(SpecializedError::OwnerIdOverflow)
+    };
+    for physical in &mut inputs.contacts {
+        let dense =
+            u32::try_from(physical.contact_id).map_err(|_| SpecializedError::OwnerIdOverflow)?;
+        physical.contact_id = stable_id_for_dense(dense)?;
+        if let LoadOwner::Specialized(owner) = physical.owner {
+            physical.owner = LoadOwner::Specialized(stable_specialized_owner(owner)?);
+        }
+    }
+    for (owner, _) in &mut inputs.specialized_owner_faces {
+        *owner = stable_specialized_owner(*owner)?;
+    }
+    Ok(inputs)
 }
 
 /// Frozen gate vector used by the one batched merge verdict.
@@ -907,6 +1294,28 @@ pub enum SpecializedError {
     OwnerIdOverflow,
     #[error("specialized physical contact {contact_id} has no honest seat provenance")]
     MissingSeatProvenance { contact_id: u64 },
+    #[error("specialized plan edit names unknown physical contact {contact_id}")]
+    UnknownPhysicalContact { contact_id: u64 },
+    #[error("specialized plan edit may not remove demand-bearing contact {contact_id}")]
+    DemandBearingContactEdit { contact_id: u64 },
+    #[error(
+        "specialized plan edit may only remove a regular contact; {contact_id} is not regular"
+    )]
+    NonRegularContactEdit { contact_id: u64 },
+    #[error("specialized plan edit names unknown repair row {row_id:?}")]
+    UnknownRepairRow { row_id: RepairRowId },
+    #[error("specialized plan edit may not reuse occupied repair row {row_id:?}")]
+    OccupiedRepairRow { row_id: RepairRowId },
+    #[error("specialized plan edit would duplicate the physical seat for contact {contact_id}")]
+    DuplicateChildPhysicalSeat { contact_id: u64 },
+    #[error("specialized child plan duplicates physical contact id {contact_id}")]
+    DuplicateChildContactId { contact_id: u64 },
+    #[error("specialized child plan cannot allocate another physical contact id")]
+    PhysicalContactIdOverflow,
+    #[error("specialized plan's frozen mesh no longer matches its stored fingerprint")]
+    FrozenMeshAuthorityMismatch,
+    #[error("specialized finalized load artifact is stale or belongs to another child plan")]
+    StaleFinalizedLoadArtifact,
     #[error("registered specialized constants are unavailable: {0}")]
     RegisteredConstantsUnavailable(String),
 }
@@ -940,15 +1349,12 @@ pub fn prepare_specialized_contacts(
     let topology = build_face_topology(mesh, WeldPolicy::ExactBits)
         .map_err(|error| SpecializedError::Topology(error.to_string()))?;
     validate_regular(mesh, generic, regular, selection_config)?;
-    let surface = NativeSurface::from_indexed(
-        mesh.verts(),
-        mesh.tris(),
-        NativeSurfaceConfig {
-            grid_pitch_mm: perception_config.surface_grid_pitch_mm.get(),
-            max_grid_bytes: perception_config.max_grid_bytes,
-        },
-    )
-    .map_err(|error| SpecializedError::Surface(error.to_string()))?;
+    let surface_config_authority = NativeSurfaceConfig {
+        grid_pitch_mm: perception_config.surface_grid_pitch_mm.get(),
+        max_grid_bytes: perception_config.max_grid_bytes,
+    };
+    let surface = NativeSurface::from_indexed(mesh.verts(), mesh.tris(), surface_config_authority)
+        .map_err(|error| SpecializedError::Surface(error.to_string()))?;
     let exterior_face_ids = surface
         .exterior_face_mask()
         .iter()
@@ -1208,8 +1614,15 @@ pub fn prepare_specialized_contacts(
         contact.carried_area_mm2 += row.carried_area_mm2;
     }
     repair_pool.validate_contacts(&contacts)?;
+    let next_contact_id = next_contact_id(&contacts);
+    let contact_ids = contacts
+        .iter()
+        .map(SpecializedPhysicalContact::contact_id)
+        .collect::<Vec<_>>();
+    let finalized_loads =
+        FinalizedContactLoads::for_specialized_plan(&load_partition, &contact_ids)?;
     Ok(SpecializedContactPlan {
-        authority_digest: bound_authority_digest(generic, regular, selection_config, limits),
+        source_authority_digest: bound_authority_digest(generic, regular, selection_config, limits),
         semantic_authority_digest: bound_semantic_authority_digest(
             generic,
             regular,
@@ -1220,10 +1633,20 @@ pub fn prepare_specialized_contacts(
         islands,
         coverage_samples,
         repair_pool,
+        generic_authority: generic.clone(),
+        mesh_authority: mesh.clone(),
+        mesh_authority_fingerprint: topology.mesh_fingerprint().to_owned(),
+        reservations_authority: reservations.to_vec(),
+        limits_authority: limits,
+        surface_config_authority,
         contacts,
+        next_contact_id,
         load_partition,
+        finalized_loads,
+        finalized_load_plan_digest: 0,
         gate_evidence,
-    })
+    }
+    .seal_finalized_load_digest())
 }
 
 /// The synthetic source has no historical public handoff, so it must never
@@ -1275,6 +1698,8 @@ pub(crate) fn authority_consistent_empty_plan_for_initial_test(
     plan.contacts.clear();
     plan.load_partition =
         crate::perception::authority_consistent_empty_load_partition_for_test(generic, mesh)?;
+    plan.finalized_loads = FinalizedContactLoads::for_specialized_plan(&plan.load_partition, &[])?;
+    plan.finalized_load_plan_digest = plan.digest();
     debug_assert!(plan.contacts.is_empty());
     debug_assert_eq!(
         plan.contacts
@@ -3655,6 +4080,31 @@ fn bound_authority_base(
     hash
 }
 
+fn hash_specialized_limits(hash: &mut Fnv, limits: SpecializedLimits) {
+    hash.usize(limits.max_synthetic_neighbor_pairs);
+    hash.usize(limits.max_synthetic_neighbor_bytes);
+    hash.usize(limits.max_satisfaction_tests);
+    hash.usize(limits.max_satisfaction_neighbor_pairs);
+    hash.usize(limits.max_satisfaction_neighbor_bytes);
+    hash.usize(limits.max_merge_pairs);
+    hash.usize(limits.max_merge_proposals);
+    hash.usize(limits.max_merge_proposal_bytes);
+    hash.usize(limits.max_merge_descriptor_operations);
+    hash.usize(limits.max_merge_total_proposals);
+    hash.usize(limits.max_merge_iterations);
+    hash.usize(limits.max_merge_commit_bytes);
+    hash.usize(limits.max_gate_variants);
+    hash.usize(limits.max_gate_vector_bytes);
+    hash.usize(limits.max_gate_contact_matrix_bytes);
+    hash.usize(limits.max_gate_operations);
+    hash.usize(limits.max_gate_window_variants);
+    hash.usize(limits.max_coverage_scratch_bytes);
+    hash.usize(limits.max_coverage_operations);
+    hash.usize(limits.max_load_scratch_bytes);
+    hash.usize(limits.max_load_operations);
+    hash.usize(limits.max_gate_peak_bytes);
+}
+
 /// The pool is rooted in the complete generic observation plan, including the
 /// synthetic-demand seeds from which its second source is deterministically
 /// derived.  Selection policy is separately bound by the plan authority.
@@ -5259,6 +5709,348 @@ mod tests {
         .map_err(|error| format!("required {name} specialized fixture failed: {error}"))
     }
 
+    fn edit_fixture(
+        mesh: Mesh,
+        name: &str,
+    ) -> Result<(Mesh, GenericContactPlan, SpecializedContactPlan), String> {
+        let delicacy = vec![0.0; mesh.tris().len()];
+        let layers = LayerPlan::new(0.0, vec![0.05; 1_000]).unwrap();
+        let perception_config = perception_config(&delicacy);
+        let candidate_config = candidate_config();
+        let generic = crate::perception::prepare_generic_contacts(
+            &mesh,
+            &perception_config,
+            frame(),
+            &layers,
+            &candidate_config,
+            &[],
+            GenericPerceptionLimits::production(),
+        )
+        .map_err(|error| format!("required {name} generic fixture failed: {error}"))?;
+        let selection_config = ContactSelectionConfig::current_defaults(
+            Some(&delicacy),
+            perception_config.max_grid_bytes,
+        )
+        .map_err(|error| format!("required {name} selection config failed: {error}"))?;
+        let regular = if generic.islands().is_empty() {
+            SelectedContacts {
+                contacts: Vec::new(),
+                coverage_samples: Vec::new(),
+            }
+        } else {
+            crate::select_contacts(
+                &mesh,
+                generic.candidates(),
+                generic.islands(),
+                &selection_config,
+            )
+            .map_err(|error| format!("required {name} regular fixture failed: {error}"))?
+        };
+        let plan = prepare_specialized_contacts(
+            &mesh,
+            &perception_config,
+            frame(),
+            &layers,
+            &candidate_config,
+            &[],
+            GenericPerceptionLimits::production(),
+            &generic,
+            &regular,
+            &selection_config,
+            SpecializedLimits::production(),
+        )
+        .map_err(|error| format!("required {name} specialized fixture failed: {error}"))?;
+        Ok((mesh, generic, plan))
+    }
+
+    fn edit_surface_config() -> NativeSurfaceConfig {
+        NativeSurfaceConfig {
+            grid_pitch_mm: 1.0,
+            max_grid_bytes: 64 * 1024 * 1024,
+        }
+    }
+
+    #[test]
+    fn regular_child_edit_preserves_sparse_survivors_and_rebinds_loads() {
+        let (_mesh, _generic, plan) = edit_fixture(make_overhang_table().unwrap(), "child edit")
+            .unwrap_or_else(|error| panic!("{error}"));
+        let removable = plan
+            .contacts()
+            .iter()
+            .find(|contact| contact.demands().is_empty() && contact.primary_regular().is_some())
+            .cloned()
+            .expect("required child-edit fixture has a demand-free regular contact");
+        let survivor = plan
+            .contacts()
+            .iter()
+            .find(|contact| contact.contact_id() != removable.contact_id())
+            .cloned()
+            .expect("required child-edit fixture has a surviving contact");
+        let child = plan
+            .begin_regular_edit()
+            .unwrap()
+            .remove_demand_free_regular(removable.contact_id())
+            .unwrap();
+        assert!(child
+            .contacts()
+            .iter()
+            .all(|contact| contact.contact_id() != removable.contact_id()));
+        let child_survivor = child
+            .contacts()
+            .iter()
+            .find(|contact| contact.contact_id() == survivor.contact_id())
+            .expect("surviving stable id must remain present");
+        assert_eq!(child_survivor.position_mm(), survivor.position_mm());
+        assert_eq!(child_survivor.normal(), survivor.normal());
+        assert_eq!(child_survivor.seat_provenance(), survivor.seat_provenance());
+        assert_eq!(child_survivor.primary_regular(), survivor.primary_regular());
+        assert_eq!(child_survivor.regular_routes(), survivor.regular_routes());
+        assert_eq!(child_survivor.demands(), survivor.demands());
+        assert_eq!(child.finalized_load_plan_digest(), child.digest());
+        assert_ne!(child.digest(), plan.digest());
+        let parent_ids = plan
+            .contacts()
+            .iter()
+            .map(SpecializedPhysicalContact::contact_id)
+            .collect::<Vec<_>>();
+        let parent_loads = crate::perception::FinalizedContactLoads::from_partition(
+            plan.load_partition(),
+            &parent_ids,
+            crate::perception::FinalizedContactLoadLimits::new(
+                parent_ids.len(),
+                plan.load_partition().rows().len(),
+                usize::MAX,
+            ),
+        )
+        .unwrap();
+        let child_ids = child
+            .contacts()
+            .iter()
+            .map(SpecializedPhysicalContact::contact_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            parent_loads.validate_binding(child.load_partition(), &child_ids),
+            Err(GenericPerceptionError::StaleAuthority)
+        );
+
+        let second = child
+            .contacts()
+            .iter()
+            .find(|contact| contact.demands().is_empty() && contact.primary_regular().is_some())
+            .expect("required child-edit fixture retains a second regular contact")
+            .contact_id();
+        let grandchild = child
+            .begin_regular_edit()
+            .unwrap()
+            .remove_demand_free_regular(second)
+            .unwrap();
+        assert!(grandchild
+            .contacts()
+            .iter()
+            .all(|contact| contact.contact_id() != removable.contact_id()
+                && contact.contact_id() != second));
+
+        let route_seed = plan
+            .contacts()
+            .iter()
+            .find_map(|contact| contact.regular_routes().first().copied())
+            .expect("required child-edit fixture has a regular route");
+        let row = grandchild
+            .eligible_repair_rows(
+                route_seed.owner_island_id(),
+                route_seed.component_id(),
+                &BTreeSet::new(),
+            )
+            .unwrap()
+            .into_iter()
+            .find(|row| {
+                grandchild
+                    .contacts()
+                    .iter()
+                    .all(|contact| contact.position_mm() != row.candidate().point_mm)
+            })
+            .expect("required child-edit fixture has an unoccupied repair row")
+            .id();
+        let appended = grandchild
+            .begin_regular_edit()
+            .unwrap()
+            .append_regular_repair_row(row)
+            .unwrap();
+        let appended_id = appended
+            .contacts()
+            .iter()
+            .map(SpecializedPhysicalContact::contact_id)
+            .max()
+            .expect("appended child has a contact");
+        let parent_max_id = plan
+            .contacts()
+            .iter()
+            .map(SpecializedPhysicalContact::contact_id)
+            .max()
+            .expect("required child-edit fixture has contacts");
+        assert!(appended_id > removable.contact_id());
+        assert!(appended_id > second);
+        assert!(appended_id > parent_max_id);
+        assert_eq!(appended.finalized_load_plan_digest(), appended.digest());
+    }
+
+    #[test]
+    fn demanded_child_edit_is_a_typed_hard_failure() {
+        let (_mesh, _generic, plan) = edit_fixture(make_overhang_table().unwrap(), "demanded edit")
+            .unwrap_or_else(|error| panic!("{error}"));
+        let demanded = plan
+            .contacts()
+            .iter()
+            .find(|contact| !contact.demands().is_empty())
+            .expect("required demanded-edit fixture has a demanded contact")
+            .contact_id();
+        let result = plan
+            .begin_regular_edit()
+            .unwrap()
+            .remove_demand_free_regular(demanded);
+        assert_eq!(
+            result,
+            Err(SpecializedError::DemandBearingContactEdit {
+                contact_id: demanded
+            })
+        );
+    }
+
+    #[test]
+    fn child_edit_freezes_parent_finalizer_inputs_and_rejects_tampering() {
+        let (_mesh, _generic, plan) = edit_fixture(make_overhang_table().unwrap(), "frozen edit")
+            .unwrap_or_else(|error| panic!("{error}"));
+        let digest = plan.digest();
+        let mut changed_limits = plan.clone();
+        changed_limits.limits_authority.max_load_operations += 1;
+        assert_ne!(changed_limits.digest(), digest);
+        assert!(matches!(
+            changed_limits.begin_regular_edit(),
+            Err(SpecializedError::StaleFinalizedLoadArtifact)
+        ));
+        let mut changed_reservations = plan.clone();
+        changed_reservations
+            .reservations_authority
+            .push(SpecializedOwnerReservation {
+                owner_id: 9_999,
+                face_id: 0,
+            });
+        assert_ne!(changed_reservations.digest(), digest);
+        assert!(matches!(
+            changed_reservations.begin_regular_edit(),
+            Err(SpecializedError::StaleFinalizedLoadArtifact)
+        ));
+        let mut changed_surface = plan.clone();
+        changed_surface.surface_config_authority.grid_pitch_mm = 2.0;
+        assert_ne!(changed_surface.digest(), digest);
+        assert!(matches!(
+            changed_surface.begin_regular_edit(),
+            Err(SpecializedError::StaleFinalizedLoadArtifact)
+        ));
+        let mut changed_mesh = plan.clone();
+        changed_mesh.mesh_authority = make_thin_fin().unwrap();
+        assert_ne!(
+            mesh_fingerprint(&changed_mesh.mesh_authority).unwrap(),
+            changed_mesh.mesh_authority_fingerprint
+        );
+        // A zero native budget would fail surface construction if the frozen
+        // mesh check did not run first.
+        changed_mesh.surface_config_authority.max_grid_bytes = 0;
+        assert!(matches!(
+            changed_mesh.begin_regular_edit(),
+            Err(SpecializedError::FrozenMeshAuthorityMismatch)
+        ));
+        let mut coherently_substituted_mesh = plan.clone();
+        coherently_substituted_mesh.mesh_authority = make_thin_fin().unwrap();
+        coherently_substituted_mesh.mesh_authority_fingerprint =
+            mesh_fingerprint(&coherently_substituted_mesh.mesh_authority).unwrap();
+        assert_ne!(coherently_substituted_mesh.digest(), digest);
+        assert!(matches!(
+            coherently_substituted_mesh.begin_regular_edit(),
+            Err(SpecializedError::StaleFinalizedLoadArtifact)
+        ));
+        // The public edit start has no parameters: these parent-owned values
+        // are the only possible finalizer inputs.
+        assert!(plan.begin_regular_edit().is_ok());
+    }
+
+    #[test]
+    fn removing_all_regular_contacts_yields_canonical_zero_load_geometry() {
+        let (mesh, generic, source) = edit_fixture(make_overhang_table().unwrap(), "zero child")
+            .unwrap_or_else(|error| panic!("{error}"));
+        let mut regular_only = source.clone();
+        regular_only.contacts = source
+            .contacts()
+            .iter()
+            .filter(|contact| contact.primary_regular().is_some())
+            .cloned()
+            .map(|mut contact| {
+                contact.demands.clear();
+                contact
+            })
+            .collect();
+        assert!(
+            !regular_only.contacts.is_empty(),
+            "required zero-child fixture has regular contacts"
+        );
+        let inputs = stable_load_inputs(
+            &regular_only.contacts,
+            &generic,
+            &regular_only.islands,
+            &[],
+            SpecializedLimits::production(),
+        )
+        .expect("required zero-child fixture can form a regular load input");
+        regular_only.load_partition = finalize_specialized_load_partition(
+            &generic,
+            &mesh,
+            &NativeSurface::from_indexed(mesh.verts(), mesh.tris(), edit_surface_config()).unwrap(),
+            &inputs.contacts,
+            &inputs.specialized_owner_faces,
+            LoadFinalizeLimits {
+                max_scratch_bytes: SpecializedLimits::production().max_load_scratch_bytes,
+                max_operations: inputs.remaining_load_operations,
+            },
+        )
+        .expect("required zero-child fixture can finalize a regular-only load partition");
+        for contact in &mut regular_only.contacts {
+            contact.carried_area_mm2 = regular_only
+                .load_partition
+                .rows()
+                .iter()
+                .filter(|row| row.contact_id == contact.contact_id)
+                .map(|row| row.carried_area_mm2)
+                .sum();
+        }
+        let regular_only_ids = regular_only
+            .contacts()
+            .iter()
+            .map(SpecializedPhysicalContact::contact_id)
+            .collect::<Vec<_>>();
+        regular_only.finalized_loads = FinalizedContactLoads::for_specialized_plan(
+            &regular_only.load_partition,
+            &regular_only_ids,
+        )
+        .expect("required zero-child fixture can tip-size the regular-only partition");
+        regular_only = regular_only.seal_finalized_load_digest();
+        let ids = regular_only
+            .contacts()
+            .iter()
+            .map(SpecializedPhysicalContact::contact_id)
+            .collect::<Vec<_>>();
+        let mut child = regular_only;
+        for contact_id in ids {
+            child = child
+                .begin_regular_edit()
+                .unwrap()
+                .remove_demand_free_regular(contact_id)
+                .unwrap();
+        }
+        assert!(child.contacts().is_empty());
+        assert!(child.load_partition().rows().is_empty());
+        assert_eq!(child.finalized_load_plan_digest(), child.digest());
+    }
+
     #[test]
     fn finalized_cco_rejects_equal_load_contact_swap_before_mutation() {
         use crate::{
@@ -5368,9 +6160,10 @@ mod tests {
                 make_overhang_table().unwrap(),
                 // Updated for exact two-stage Python parity: the owner-independent
                 // mixed-class attach prepass precedes specialized-only gating, and
-                // the digest binds finalized physical-seat provenance explicitly.
+                // the digest binds finalized physical-seat provenance and
+                // append-only child-allocation history explicitly.
                 // This is not a corpus, baseline, physics, or reference re-freeze.
-                13_134_339_233_005_765_488_u64,
+                8_928_188_536_911_449_669_u64,
                 (95, 51_200, 14),
                 (6, 0, 4),
             ),
@@ -5379,9 +6172,10 @@ mod tests {
                 make_raking_blade().unwrap(),
                 // Updated for exact two-stage Python parity: the owner-independent
                 // mixed-class attach prepass precedes specialized-only gating, and
-                // the digest binds finalized physical-seat provenance explicitly.
+                // the digest binds finalized physical-seat provenance and
+                // append-only child-allocation history explicitly.
                 // This is not a corpus, baseline, physics, or reference re-freeze.
-                10_011_967_702_941_604_688_u64,
+                12_073_756_428_966_718_576_u64,
                 (40, 40_192, 13),
                 (3, 10, 8),
             ),
@@ -5390,9 +6184,10 @@ mod tests {
                 make_thin_fin().unwrap(),
                 // Updated for exact two-stage Python parity: the owner-independent
                 // mixed-class attach prepass precedes specialized-only gating, and
-                // the digest binds finalized physical-seat provenance explicitly.
+                // the digest binds finalized physical-seat provenance and
+                // append-only child-allocation history explicitly.
                 // This is not a corpus, baseline, physics, or reference re-freeze.
-                2_959_445_309_888_638_119_u64,
+                16_790_786_111_947_059_800_u64,
                 (19, 20_480, 2),
                 (2, 0, 1),
             ),
@@ -5502,7 +6297,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            plan.authority_digest, 9_893_034_867_712_234_337_u64,
+            plan.source_authority_digest, 9_893_034_867_712_234_337_u64,
             "bound resource authority"
         );
         assert_eq!(
@@ -5635,6 +6430,51 @@ mod tests {
             Err(SpecializedError::StaleAuthority)
         );
 
+        let substituted_reservations = [SpecializedOwnerReservation {
+            owner_id: 99,
+            face_id: 0,
+        }];
+        assert_eq!(
+            plan.validate_binding(
+                &mesh,
+                &perception,
+                frame(),
+                &layers,
+                &candidate,
+                &substituted_reservations,
+                perception_limits,
+                &generic,
+                &regular,
+                &selection,
+                limits,
+            ),
+            Err(SpecializedError::StaleAuthority)
+        );
+        let substituted_surface = SupportPerceptionConfig::current(
+            Finite::new(0.0).unwrap(),
+            PositiveFinite::new(1.0).unwrap(),
+            PositiveFinite::new(2.0).unwrap(),
+            perception.max_grid_bytes,
+            Some(&delicacy),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.validate_binding(
+                &mesh,
+                &substituted_surface,
+                frame(),
+                &layers,
+                &candidate,
+                &[],
+                perception_limits,
+                &generic,
+                &regular,
+                &selection,
+                limits,
+            ),
+            Err(SpecializedError::StaleAuthority)
+        );
+
         let mut new_limit_mutations = Vec::new();
         let mut changed = limits;
         changed.max_merge_proposal_bytes += 1;
@@ -5751,6 +6591,69 @@ mod tests {
                     .and_then(|(_, signature)| signature.lines().next())
                     .map(str::to_owned)
                     .expect("specialized child must emit its evidence signature")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(signatures[0], signatures[1]);
+        assert_eq!(signatures[0], signatures[2]);
+    }
+
+    const CHILD_EDIT_SWEEP_CHILD: &str = "PLINTH_SPECIALIZED_CHILD_EDIT_SWEEP_CHILD";
+    const CHILD_EDIT_SWEEP_LINE: &str = "PLINTH_SPECIALIZED_CHILD_EDIT_SWEEP=";
+
+    #[test]
+    fn regular_child_edit_thread_sweep_child() {
+        if std::env::var_os(CHILD_EDIT_SWEEP_CHILD).is_none() {
+            return;
+        }
+        let (_mesh, _generic, plan) = edit_fixture(make_overhang_table().unwrap(), "edit sweep")
+            .unwrap_or_else(|error| panic!("{error}"));
+        let removable = plan
+            .contacts()
+            .iter()
+            .find(|contact| contact.demands().is_empty() && contact.primary_regular().is_some())
+            .expect("required edit-sweep fixture has a demand-free regular contact")
+            .contact_id();
+        let child = plan
+            .begin_regular_edit()
+            .unwrap()
+            .remove_demand_free_regular(removable)
+            .unwrap();
+        println!(
+            "{CHILD_EDIT_SWEEP_LINE}{}:{}:{}",
+            child.digest(),
+            child.finalized_load_plan_digest(),
+            child.load_partition().rows().len(),
+        );
+    }
+
+    #[test]
+    fn regular_child_edit_is_identical_at_one_four_and_sixteen_threads() {
+        if std::env::var_os(CHILD_EDIT_SWEEP_CHILD).is_some() {
+            return;
+        }
+        let executable = std::env::current_exe().expect("current plinth-support test binary");
+        let signatures = [1, 4, 16]
+            .into_iter()
+            .map(|threads| {
+                let output = std::process::Command::new(&executable)
+                    .arg("--exact")
+                    .arg("specialized::tests::regular_child_edit_thread_sweep_child")
+                    .arg("--nocapture")
+                    .env(CHILD_EDIT_SWEEP_CHILD, "1")
+                    .env("PLINTH_THREADS", threads.to_string())
+                    .output()
+                    .expect("child edit thread-sweep child must start");
+                assert!(
+                    output.status.success(),
+                    "child edit {threads}-thread child failed:\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                String::from_utf8(output.stdout)
+                    .expect("child edit output is UTF-8")
+                    .split_once(CHILD_EDIT_SWEEP_LINE)
+                    .and_then(|(_, signature)| signature.lines().next())
+                    .map(str::to_owned)
+                    .expect("child edit sweep must emit a signature")
             })
             .collect::<Vec<_>>();
         assert_eq!(signatures[0], signatures[1]);
