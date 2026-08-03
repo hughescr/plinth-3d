@@ -358,7 +358,7 @@ order and recomputes only counters and absolute offsets.**
 Document
   header:      [u8; 24]                       // fields patched on write
   settings:    Vec<u8>   (396 B, opaque)
-  preview:     Vec<u8>   (opaque; empty for from-scratch builds — risk R1)
+  preview:     Vec<u8>   (opaque; empty for from-scratch builds — R1 pending)
   models:      Vec<ModelEntry>
      raw_record: [u8; 680]   // verbatim; name/translate/mesh-ptr live here,
                              // unmapped bytes ride along untouched
@@ -378,8 +378,8 @@ Document
                                         // mesh + support geometry taken before
                                         // the FIRST rotation, plus cumulative
                                         // session angle — rebake source (§6.4)
-  gap_regions: Vec<(SlotId, Vec<u8>)>  // zero-filler between table and mesh,
-                                       // any unclassified bytes, trailer/footer
+  gap_regions: Vec<(SlotId, Vec<u8>)>  // front descriptor region then opaque
+                                       // remainder, any unclassified bytes, trailer/footer
   original:    Option<Vec<u8>>         // the exact opened bytes; kept while
                                        // dirty == false as a belt-and-braces
                                        // guard (see §6.2), dropped on first
@@ -401,7 +401,8 @@ the input file must land in exactly one region; parse fails
 identical re-serialization provable rather than hoped-for.
 
 Serialization order (mirrors observed layout): header, settings, preview,
-model table, gap, then per model in index order: mesh, support mesh
+model table, per-model 24-byte descriptor prefix plus opaque front remainder,
+then per model in index order: mesh, support mesh
 region, index, group header (verbatim), records; trailing regions last.
 All u32 offsets (header off8/off20, model off268/off272, record mesh_off
 at +40, index quad) recomputed from the layout being emitted.
@@ -432,7 +433,8 @@ caller's placement is authoritative, matching ChituBox import semantics).
   input buffer. Enforced by `tests/roundtrip.rs` over the whole corpus.
 - **(b) Re-parse-after-write**: `to_bytes()` runs `parse()` on its own
   output, then `verify.rs` checks: magic; model_count vs table; header
-  invariant `off20 == off8 + 680*n` (0 when empty); every mesh ptr/size
+  invariant `off20 == off8 + 680*n` (0 when empty); a nonempty file's first
+  mesh follows at least `24*n` front-descriptor bytes; every mesh ptr/size
   in bounds and `size % 36 == 0`; each support section's record magics,
   72-byte stride, index quad consistency (`mesh_off + mesh_size ==
   index_off`, `n == records.len()`), record off268 == index offset;
@@ -458,9 +460,12 @@ caller's placement is authoritative, matching ChituBox import semantics).
   comparison is a tripwire, not a shortcut that silently returns the
   original).
 - **(c) Opaque preservation**: settings, preview, group headers, unmapped
-  model-record bytes, gaps/footer are `Vec<u8>` copied verbatim — there
-  is no code path that zeroes or drops them. The only sanctioned mutation
-  is `overwrite_opaque_region_unchecked` (same length, explicit).
+  model-record bytes, descriptor prefixes, gaps/footer are `Vec<u8>` copied
+  verbatim — there is no code path that zeroes or drops parsed bytes. Only the
+  explicit `new_empty()` scaffold may synthesize its zero descriptor prefix;
+  parsed-project model addition fails closed rather than resize unknown opaque
+  bytes. The only sanctioned opaque overwrite is
+  `overwrite_opaque_region_unchecked` (same length, explicit).
 
 ### 6.3 attach_supports
 
@@ -603,7 +608,7 @@ being documented as production-safe; until then the docs label them
 | Group header (400 B) | all-zero in 6/6 specimens; semantics unknown | preserved verbatim on read; synthesized as zeros on create; census exposes `nonzero_bytes` |
 | Record trailing 24 B | medium (per-type evidence) | pass-through `[u8;24]`, helper for TAPER contact depth |
 | Settings blob (396 B) | none (all-zero corpus) | opaque, read-only |
-| Preview blob | low | opaque; omitted on from-scratch (R1) |
+| Preview blob | low | opaque; omitted from from-scratch builds pending R1 fallback; existing previews remain verbatim |
 | Model-record unmapped bytes (post-name-NUL..256, 280..680) | assumed-zero | ride along verbatim; parser flags non-zero bytes via `Project::parse_warnings()`, never an error |
 | z_lift free-field status (off264) | low (confounded with support presence in corpus) | writable with documented caveat; probe pending (format map §8.5b) |
 | Baked-rotation convention | high for the probe (`Ry·Rz` vertex-set match 0.0049 mm) | no API depends on it (we bake our own Z-rot); recorded for future full-transform work |
@@ -622,7 +627,8 @@ opaque bytes, mutable only via `overwrite_opaque_region_unchecked`.
 - Support **generation** (placement, routing, radii) — the engine
   (`scripts/support_placement/`) owns that; this crate only encodes what
   it is given.
-- Thumbnail/preview regeneration (unless R1 forces a minimal clone).
+- Thumbnail/preview regeneration (unless the pending R1 fallback copies one
+  native opaque asset; it will not regenerate or interpret a thumbnail).
 - Arbitrary-axis re-orientation and scaling APIs (pre-supporting
   decisions; scale/rotation arrive already baked in the input triangles).
 - ASCII STL import (explicit error; corpus STLs are binary).
@@ -636,7 +642,7 @@ opaque bytes, mutable only via `overwrite_opaque_region_unchecked`.
 
 | id | risk | likelihood | mitigation |
 |---|---|---|---|
-| R1 | ChituBox may refuse/misrender a populated project with an empty preview region (from-scratch builds emit none; only empty.chitubox lacks one in the corpus) | medium | Acceptance test 7.6 first; fallback: clone the smallest observed preview blob into the scaffold assets, verbatim |
+| R1 | ChituBox refused a populated project with an empty preview region during the 2026-08-03 GUI attempt (`open file fail, path CTTestProDir/collision_0.png`) | observed | The exact native-preview fallback remains pending in a separate checkpoint; GUI re-test remains required after it lands. |
 | R2 | Model-record unmapped bytes are non-zero in richer real projects (colors, per-model settings) and carry offsets we don't recompute | medium | Verbatim preservation + parse warnings; total-coverage parse catches structural surprises; add specimens before enabling any write path that touches them |
 | R3 | Interleaved multi-model offset recompute bug corrupts a region silently | low | Gold b re-parse + total-coverage + byte-identity corpus tests make silent corruption structurally hard |
 | R4 | Group header carries meaning we can't see (the earlier note claimed per-support 260/7680 tables gating pad rendering — **not reproduced**: header is 0/400 nonzero in all six supported specimens, incl. ChituBox-native saves; claim downgraded to "unverified, possibly another ChituBox version") | low | Header preserved verbatim on read, zeros on create (= native layout); §7.6 native edit-save-reopen check watches for pad quirks |
@@ -652,22 +658,52 @@ opaque bytes, mutable only via `overwrite_opaque_region_unchecked`.
 1. consts + error + parse + write + verify (incl. independent interval
    audit); corpus round-trip green (gold a/b/c proven before any
    mutation exists).
-2. STL reader + add_models; synth-compare test green. **GATE
-   (reconciliation): owner loads a from-scratch two-model file in
-   ChituBox before milestone 3 starts** — this is the earliest point the
-   preview-less/R1 question is answerable, and no amount of self-verify
-   substitutes for it.
+2. STL reader + add_models; synth-compare test green. **R1 fallback remains
+   pending after a failed 2026-08-03 GUI load**. The failure named
+   `CTTestProDir/collision_0.png`; it is not an acceptance result. Owner GUI
+   re-test of a from-scratch populated file remains required before any
+   ChituBox-load claim, and no amount of self-verify substitutes for it.
 3. Placement fields + Z-rot rigid rebake (`rotate_models_z`); transform
    tests green.
 4. Support codec + attach_supports (replace/append, synthesized
    sections); parity tests green, incl. the asymmetric multi-model case.
 5. Owner acceptance matrix in ChituBox (7.6: supports editable, native
    edit-save-reopen, slice); until it passes, the unsupported→supported
-   path stays labeled "pending ChituBox acceptance". Resolve R1.
+   path stays labeled "pending ChituBox acceptance". Re-test R1 in the GUI.
 
 ---
 
 ## Appendix A — Reconciliation record (2026-07-23)
+
+### A.0 R1 failure evidence (2026-08-03)
+
+ChituBox Basic failed to open a
+from-scratch generated project during the 2026-08-03 GUI attempt, logging
+`open file fail, path CTTestProDir/collision_0.png`. This is direct failure
+evidence, but it does **not** establish why ChituBox rejected the project and
+does not establish GUI acceptance after this change.
+
+The response is intentionally split: first correct the independently observed
+per-model front-descriptor layout; then add a separately reviewable opaque
+preview fallback. Neither checkpoint is GUI acceptance. The writer must not
+infer or change parsed front descriptors, settings, support metadata, or
+nonempty previews; the GUI acceptance matrix remains pending an owner re-test.
+
+### A.0b Front-descriptor correction (2026-08-03)
+
+The region after the model table is not a fixed 48-byte filler. Native layout
+has one contiguous 24-byte descriptor per model (`u64 count`, `u64 table_abs_ptr`,
+`u64 aux_abs_ptr`); an all-zero descriptor is valid for an unsupported model.
+The prior 48-byte inference came from circular regenerated two-model fixtures
+and made six-model output overlay descriptor slots with model-0 triangles.
+
+`Project::new_empty()` now carries explicit scaffold origin and emits exactly
+`24 * model_count` all-zero descriptor bytes, with checked arithmetic: zero for
+zero models, 24 for one, 48 for two, and 144 for six. Parsed projects preserve
+their full opaque front region byte-for-byte and fail closed on model-count
+mutation, rather than guessing how to extend native descriptors. The parser
+and independent write audit require the first mesh to follow at least this
+descriptor prefix, catching the former underlength/overlap condition.
 
 Two independent adversarial critiques (Codex; Opus) were adjudicated
 against the corpus bytes. Every load-bearing factual claim was re-verified
