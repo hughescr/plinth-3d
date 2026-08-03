@@ -16,13 +16,16 @@ use thiserror::Error;
 
 use crate::{
     anchor::{AnchorGeometryAuthority, AnchorSearchConfig, AnchorSearchError, SurfaceAnchorPool},
-    brace::{brace_fixed_point_current_parity, BraceError, BraceFixedPointPlan},
+    brace::{
+        brace_fixed_point_current_parity, BraceAdditionKind, BraceError, BraceFixedPointPlan,
+        BraceFixedPointTermination,
+    },
     cco::{
         CcoController, CcoError, FinalizedAnchorTerminalRoute, FinalizedCcoTranscript,
         TerminalCcoRequest,
     },
     dyadic::CandidatePayloadConfig,
-    forest::{Forest, TerminalLedgerState},
+    forest::{EmbedEnd, Forest, MemberKind, MemberSpec, Owner, TerminalLedgerState},
     initial::{
         build_initial_contacts, ContactConstructionLimits, InitialContactBuild, InitialContactError,
     },
@@ -617,6 +620,7 @@ impl<'a> RewiredSupportRun<'a> {
         let report = transient_report(&plan.forest, context.frame.plate_z_mm())?;
         let post_brace_forest_digest = plan.forest.digest();
         let post_brace_report_digest = transient_report_digest(&report);
+        let brace_plan_digest = brace_fixed_point_plan_digest(&plan);
 
         Ok(BracedSupportRun {
             context,
@@ -624,6 +628,7 @@ impl<'a> RewiredSupportRun<'a> {
                 rewired: state,
                 plan,
                 report,
+                brace_plan_digest,
                 post_brace_forest_digest,
                 post_brace_report_digest,
             },
@@ -638,6 +643,7 @@ struct BracedPlanState {
     rewired: RewiredPlanState,
     plan: BraceFixedPointPlan,
     report: TransientReport,
+    brace_plan_digest: u64,
     post_brace_forest_digest: u64,
     post_brace_report_digest: u64,
 }
@@ -703,6 +709,11 @@ impl BracedSupportRun<'_> {
     }
 
     #[must_use]
+    pub(crate) const fn brace_plan_digest(&self) -> u64 {
+        self.state.brace_plan_digest
+    }
+
+    #[must_use]
     pub(crate) const fn post_brace_forest_digest(&self) -> u64 {
         self.state.post_brace_forest_digest
     }
@@ -740,6 +751,9 @@ impl BracedSupportRun<'_> {
             .forest
             .validate()
             .map_err(BraceError::from)?;
+        if self.state.brace_plan_digest != brace_fixed_point_plan_digest(&self.state.plan) {
+            return Err(SupportBraceError::BracePlanDigestMismatch);
+        }
         if self.state.post_brace_forest_digest != self.state.plan.forest.digest() {
             return Err(SupportBraceError::FinalForestDigestMismatch);
         }
@@ -750,6 +764,49 @@ impl BracedSupportRun<'_> {
             return Err(SupportBraceError::TransientReportDigestMismatch);
         }
         Ok(())
+    }
+
+    #[cfg(test)]
+    fn test_corrupt_brace_plan_additions(&mut self) {
+        let key = self
+            .state
+            .plan
+            .forest
+            .live_members()
+            .into_iter()
+            .next()
+            .expect("required corpus has a live member");
+        let member = self
+            .state
+            .plan
+            .forest
+            .member(key)
+            .expect("live key resolves")
+            .clone();
+        self.state.plan.additions.push(crate::brace::BraceAddition {
+            key,
+            kind: BraceAdditionKind::CrossLink,
+            member: MemberSpec {
+                p0_mm: member.p0_mm(),
+                p1_mm: member.p1_mm(),
+                r0_mm: member.terminal_radius_mm(),
+                r1_mm: member.rootward_radius_mm(),
+                kind: member.kind().clone(),
+                owner: member.owner().clone(),
+                embed_end: member.embed_end(),
+                carried_mm2: member.carried_mm2(),
+            },
+        });
+    }
+
+    #[cfg(test)]
+    fn test_corrupt_brace_plan_iterations(&mut self) {
+        self.state.plan.iterations = self.state.plan.iterations.wrapping_add(1);
+    }
+
+    #[cfg(test)]
+    fn test_corrupt_brace_plan_termination(&mut self, termination: BraceFixedPointTermination) {
+        self.state.plan.termination = termination;
     }
 }
 
@@ -1000,6 +1057,8 @@ pub(crate) enum SupportBraceError {
     RewireDigestMismatch,
     #[error("sealed brace plan's final forest digest is stale")]
     FinalForestDigestMismatch,
+    #[error("sealed brace fixed-point plan digest is stale")]
+    BracePlanDigestMismatch,
     #[error("sealed brace plan's transient report or report digest is stale")]
     TransientReportDigestMismatch,
 }
@@ -1302,6 +1361,72 @@ fn transient_report_digest(report: &TransientReport) -> u64 {
     hash.finish()
 }
 
+fn brace_fixed_point_plan_digest(plan: &BraceFixedPointPlan) -> u64 {
+    let mut hash = Fnv::new();
+    hash.u64(plan.forest.digest());
+    hash.usize(plan.additions.len());
+    for addition in &plan.additions {
+        hash.u32(addition.key.slot());
+        hash.u32(addition.key.generation());
+        hash.u64(match addition.kind {
+            BraceAdditionKind::CrossLink => 0,
+            BraceAdditionKind::ModelRung => 1,
+        });
+        hash_member_spec(&mut hash, &addition.member);
+    }
+    hash.usize(plan.iterations);
+    hash.u64(match plan.termination {
+        BraceFixedPointTermination::Converged => 0,
+        BraceFixedPointTermination::IterationLimit => 1,
+        BraceFixedPointTermination::Unplaceable => 2,
+    });
+    hash.finish()
+}
+
+fn hash_member_spec(hash: &mut Fnv, spec: &MemberSpec) {
+    for point in [spec.p0_mm, spec.p1_mm] {
+        for coordinate in point {
+            hash.f64(coordinate.get());
+        }
+    }
+    hash.f64(spec.r0_mm.get().get());
+    hash.f64(spec.r1_mm.get().get());
+    match &spec.kind {
+        MemberKind::Stub => hash.u64(0),
+        MemberKind::Shoot => hash.u64(1),
+        MemberKind::Trunk => hash.u64(2),
+        MemberKind::Strut => hash.u64(3),
+        MemberKind::Brace => hash.u64(4),
+        MemberKind::Other(name) => {
+            hash.u64(5);
+            hash.usize(name.len());
+            hash.bytes(name.as_bytes());
+        }
+    }
+    match &spec.owner {
+        Owner::Contact(id) => {
+            hash.u64(0);
+            hash.u32(*id);
+        }
+        Owner::ModelAnchor(id) => {
+            hash.u64(1);
+            hash.u32(*id);
+        }
+        Owner::Generated { family, ordinal } => {
+            hash.u64(2);
+            hash.usize(family.len());
+            hash.bytes(family.as_bytes());
+            hash.u32(*ordinal);
+        }
+    }
+    hash.u64(match spec.embed_end {
+        None => 0,
+        Some(EmbedEnd::Terminalward) => 1,
+        Some(EmbedEnd::Rootward) => 2,
+    });
+    hash.f64(spec.carried_mm2.get());
+}
+
 #[cfg(test)]
 mod tests {
     use std::{path::PathBuf, process::Command};
@@ -1385,6 +1510,66 @@ mod tests {
         }
     }
 
+    fn remote_brace_surface() -> NativeSurface {
+        let vertices = vec![
+            [100.0, 100.0, 100.0],
+            [110.0, 100.0, 100.0],
+            [110.0, 110.0, 100.0],
+            [100.0, 110.0, 100.0],
+            [100.0, 100.0, 110.0],
+            [110.0, 100.0, 110.0],
+            [110.0, 110.0, 110.0],
+            [100.0, 110.0, 110.0],
+        ];
+        let faces = vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        NativeSurface::from_indexed(
+            &vertices,
+            &faces,
+            NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 4 * 1024 * 1024,
+            },
+        )
+        .expect("remote brace fixture builds")
+    }
+
+    fn brace_fixture_member(height_mm: f64, ordinal: u32) -> crate::forest::Member {
+        crate::forest::Member::new(MemberSpec {
+            p0_mm: [
+                Finite::new(ordinal as f64 * 2.0).unwrap(),
+                Finite::new(0.0).unwrap(),
+                Finite::new(height_mm).unwrap(),
+            ],
+            p1_mm: [
+                Finite::new(ordinal as f64 * 2.0).unwrap(),
+                Finite::new(0.0).unwrap(),
+                Finite::new(0.0).unwrap(),
+            ],
+            r0_mm: crate::forest::TerminalEndRadius::new(PositiveFinite::new(0.5).unwrap()),
+            r1_mm: crate::forest::RootwardEndRadius::new(PositiveFinite::new(0.5).unwrap()),
+            kind: MemberKind::Trunk,
+            owner: Owner::Generated {
+                family: "runner-brace-test".to_owned(),
+                ordinal,
+            },
+            embed_end: None,
+            carried_mm2: Finite::new(0.0).unwrap(),
+        })
+    }
+
     fn authority<'a>(
         delicacy: &'a [f64],
         layers: &'a LayerPlan,
@@ -1417,6 +1602,19 @@ mod tests {
         let delicacy = vec![0.0; hollowed.mesh().tris().len()];
         let layers = layers();
         prepare_fixture(hollowed, &delicacy, &layers, use_prepared)
+    }
+
+    fn with_braced_table<T>(use_braced: impl FnOnce(BracedSupportRun<'_>) -> T) -> T {
+        with_prepared_table(|prepared| {
+            let braced = prepared
+                .route_initial_cco()
+                .expect("required corpus routes")
+                .rewire()
+                .expect("required corpus rewires")
+                .brace()
+                .expect("required corpus braces");
+            use_braced(braced)
+        })
     }
 
     fn prepare_fixture<T>(
@@ -1718,13 +1916,57 @@ mod tests {
                 braced.post_brace_report_digest(),
                 transient_report_digest(braced.transient_report())
             );
-            assert!(matches!(
+            assert_eq!(
                 braced.brace_plan().termination,
-                crate::brace::BraceFixedPointTermination::Converged
-                    | crate::brace::BraceFixedPointTermination::IterationLimit
-                    | crate::brace::BraceFixedPointTermination::Unplaceable
-            ));
+                // The required runner corpus currently exercises the
+                // production Unplaceable path; it does not reach the frozen
+                // third-pass IterationLimit branch.
+                crate::brace::BraceFixedPointTermination::Unplaceable
+            );
         });
+    }
+
+    #[test]
+    fn production_brace_leaf_reaches_converged_and_unplaceable_named_outcomes() {
+        let plate = Finite::new(0.0).unwrap();
+        let converged = brace_fixed_point_current_parity(
+            &Forest::new(),
+            &remote_brace_surface(),
+            plate,
+            brace_penetration_limits(),
+        )
+        .expect("empty forest is a valid production brace input");
+        assert_eq!(converged.termination, BraceFixedPointTermination::Converged);
+
+        let mut forest = Forest::new();
+        forest.add_member(brace_fixture_member(30.0, 0));
+        let unplaceable = brace_fixed_point_current_parity(
+            &forest,
+            &remote_brace_surface(),
+            plate,
+            brace_penetration_limits(),
+        )
+        .expect("isolated long trunk remains a valid production brace input");
+        assert_eq!(
+            unplaceable.termination,
+            BraceFixedPointTermination::Unplaceable
+        );
+
+        let mut linked = Forest::new();
+        linked.add_member(brace_fixture_member(30.0, 0));
+        linked.add_member(brace_fixture_member(30.0, 1));
+        let linked_plan = brace_fixed_point_current_parity(
+            &linked,
+            &remote_brace_surface(),
+            plate,
+            brace_penetration_limits(),
+        )
+        .expect("paired long trunks remain a valid production brace input");
+        assert_eq!(
+            linked_plan.termination,
+            BraceFixedPointTermination::Converged
+        );
+        assert!(!linked_plan.additions.is_empty());
     }
 
     #[test]
@@ -1764,6 +2006,75 @@ mod tests {
                 Err(SupportBraceError::TransientReportDigestMismatch)
             ));
         });
+    }
+
+    #[test]
+    fn brace_plan_digest_fails_closed_for_addition_and_iteration_corruption() {
+        with_braced_table(|mut braced| {
+            braced.test_corrupt_brace_plan_additions();
+            assert!(matches!(
+                braced.validate_integrity(),
+                Err(SupportBraceError::BracePlanDigestMismatch)
+            ));
+        });
+        with_braced_table(|mut braced| {
+            braced.test_corrupt_brace_plan_iterations();
+            assert!(matches!(
+                braced.validate_integrity(),
+                Err(SupportBraceError::BracePlanDigestMismatch)
+            ));
+        });
+    }
+
+    #[test]
+    fn brace_plan_digest_covers_each_named_termination_variant() {
+        let base = BraceFixedPointPlan {
+            forest: Forest::new(),
+            additions: Vec::new(),
+            iterations: 1,
+            termination: BraceFixedPointTermination::Converged,
+        };
+        let digest = brace_fixed_point_plan_digest(&base);
+        for termination in [
+            BraceFixedPointTermination::Converged,
+            BraceFixedPointTermination::IterationLimit,
+            BraceFixedPointTermination::Unplaceable,
+        ] {
+            let mut plan = base.clone();
+            plan.termination = termination;
+            if termination == BraceFixedPointTermination::Converged {
+                assert_eq!(brace_fixed_point_plan_digest(&plan), digest);
+            } else {
+                assert_ne!(brace_fixed_point_plan_digest(&plan), digest);
+            }
+        }
+        for (seeded, corrupted) in [
+            (
+                BraceFixedPointTermination::IterationLimit,
+                BraceFixedPointTermination::Converged,
+            ),
+            (
+                BraceFixedPointTermination::Converged,
+                BraceFixedPointTermination::IterationLimit,
+            ),
+            (
+                BraceFixedPointTermination::Converged,
+                BraceFixedPointTermination::Unplaceable,
+            ),
+        ] {
+            with_braced_table(|mut braced| {
+                // Seed a complete, internally coherent test-only plan record
+                // for the alternate variant, then prove changing to each
+                // named outcome is detected by the sealed plan digest.
+                braced.state.plan.termination = seeded;
+                braced.state.brace_plan_digest = brace_fixed_point_plan_digest(&braced.state.plan);
+                braced.test_corrupt_brace_plan_termination(corrupted);
+                assert!(matches!(
+                    braced.validate_integrity(),
+                    Err(SupportBraceError::BracePlanDigestMismatch)
+                ));
+            });
+        }
     }
 
     #[test]
