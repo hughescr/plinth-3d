@@ -24,6 +24,7 @@ pub enum SiteId {
     Ball(u32),
     Contact(u32),
     Face(u32),
+    Island(u32),
     Cavity(u32),
     Model(ModelId),
 }
