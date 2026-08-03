@@ -20,7 +20,6 @@ pub(crate) struct RaftLimits {
 }
 
 impl RaftLimits {
-    #[allow(dead_code, reason = "consumed by pending crate-private support runner")]
     pub(crate) const fn new(
         max_candidates: usize,
         max_roots: usize,
@@ -33,6 +32,22 @@ impl RaftLimits {
             max_primitives,
             max_bytes,
         }
+    }
+
+    pub(crate) const fn is_valid(self) -> bool {
+        self.max_candidates != 0
+            && self.max_roots != 0
+            && self.max_primitives != 0
+            && self.max_bytes != 0
+    }
+
+    pub(crate) const fn authority_fingerprint(self) -> [usize; 4] {
+        [
+            self.max_candidates,
+            self.max_roots,
+            self.max_primitives,
+            self.max_bytes,
+        ]
     }
 }
 
@@ -148,11 +163,7 @@ pub(crate) fn plan_bottom_connected(
 ) -> Result<RaftPlan, SupportError> {
     view.validate(forest)
         .map_err(|_| SupportError::StaleSupportAuthority)?;
-    if limits.max_candidates == 0
-        || limits.max_roots == 0
-        || limits.max_primitives == 0
-        || limits.max_bytes == 0
-    {
+    if !limits.is_valid() {
         return Err(SupportError::InvalidResourceLimits);
     }
     let constants = m0_constants().map_err(|_| SupportError::NoLegalSupportPlan)?;

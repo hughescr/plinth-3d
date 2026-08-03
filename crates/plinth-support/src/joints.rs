@@ -76,6 +76,20 @@ impl JointStagingLimits {
     }
 }
 
+/// Derive all runner-facing staging limits from one already-validated joint
+/// configuration.  The runner must not duplicate the private current-parity
+/// resource values merely to construct the one shared live view.
+pub(crate) fn runner_planning_limits(config: JointConfig) -> (LiveViewLimits, JointStagingLimits) {
+    (
+        LiveViewLimits::new(
+            config.max_work_items,
+            config.max_work_items,
+            config.max_scratch_bytes,
+        ),
+        JointStagingLimits::from_joint_config(config),
+    )
+}
+
 impl JointConfig {
     pub fn current(plate_z_mm: Finite, joint_ball_factor: PositiveFinite) -> Self {
         Self {
