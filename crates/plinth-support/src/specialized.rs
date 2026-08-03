@@ -590,12 +590,20 @@ impl PrimaryRegularIdentity {
 /// authority.  It includes the one finalized unique-face load partition.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpecializedContactPlan {
-    authority_digest: u64,
+    // The original selected-contact authority is retained separately from the
+    // child plan's own digest. A child may change physical contacts but may
+    // never exchange the generic/load-finalizer inputs that certify them.
+    source_authority_digest: u64,
     semantic_authority_digest: u64,
     generic_slice_thread_evidence: (usize, usize),
     islands: Vec<SupportIsland>,
     coverage_samples: Vec<CoverageSample>,
     repair_pool: RepairPool,
+    generic_authority: GenericContactPlan,
+    mesh_authority: Mesh,
+    reservations_authority: Vec<SpecializedOwnerReservation>,
+    limits_authority: SpecializedLimits,
+    surface_config_authority: NativeSurfaceConfig,
     contacts: Vec<SpecializedPhysicalContact>,
     // Allocation history is append-only even when the current geometry has
     // holes. `None` means the u64 namespace is exhausted.
@@ -616,10 +624,6 @@ pub struct SpecializedContactPlan {
 /// demand-bearing geometry is not normalization authority.
 pub struct SpecializedContactPlanEdit<'a> {
     plan: &'a SpecializedContactPlan,
-    generic: &'a GenericContactPlan,
-    reservations: &'a [SpecializedOwnerReservation],
-    limits: SpecializedLimits,
-    mesh: &'a Mesh,
     surface: NativeSurface,
 }
 
@@ -701,27 +705,19 @@ impl SpecializedContactPlan {
         self.generic_slice_thread_evidence
     }
 
-    /// Start a checked child-plan edit.  The supplied mesh is re-bound through
-    /// the generic authority and the surface is built once for the eventual
-    /// batched load recomputation; no selected-to-specialized consolidation is
-    /// available from this API.
-    pub fn begin_regular_edit<'a>(
-        &'a self,
-        mesh: &'a Mesh,
-        generic: &'a GenericContactPlan,
-        reservations: &'a [SpecializedOwnerReservation],
-        limits: SpecializedLimits,
-        surface_config: NativeSurfaceConfig,
-    ) -> Result<SpecializedContactPlanEdit<'a>, SpecializedError> {
-        self.validate_edit_binding(generic)?;
-        let surface = NativeSurface::from_indexed(mesh.verts(), mesh.tris(), surface_config)
-            .map_err(|error| SpecializedError::Surface(error.to_string()))?;
+    /// Start a checked child-plan edit using only the authority frozen in this
+    /// parent. No caller can substitute reservations, limits, mesh, generic
+    /// evidence, or native surface configuration beneath a child plan.
+    pub fn begin_regular_edit(&self) -> Result<SpecializedContactPlanEdit<'_>, SpecializedError> {
+        self.validate_edit_binding()?;
+        let surface = NativeSurface::from_indexed(
+            self.mesh_authority.verts(),
+            self.mesh_authority.tris(),
+            self.surface_config_authority,
+        )
+        .map_err(|error| SpecializedError::Surface(error.to_string()))?;
         Ok(SpecializedContactPlanEdit {
             plan: self,
-            generic,
-            reservations,
-            limits,
-            mesh,
             surface,
         })
     }
@@ -750,6 +746,16 @@ impl SpecializedContactPlan {
         selection_config: &ContactSelectionConfig<'_>,
         limits: SpecializedLimits,
     ) -> Result<(), SpecializedError> {
+        if mesh != &self.mesh_authority
+            || generic != &self.generic_authority
+            || reservations != self.reservations_authority
+            || limits != self.limits_authority
+            || perception_config.surface_grid_pitch_mm.get()
+                != self.surface_config_authority.grid_pitch_mm
+            || perception_config.max_grid_bytes != self.surface_config_authority.max_grid_bytes
+        {
+            return Err(SpecializedError::StaleAuthority);
+        }
         generic.validate_binding(
             mesh,
             perception_config,
@@ -768,16 +774,16 @@ impl SpecializedContactPlan {
             return Err(SpecializedError::StaleFinalizedLoadArtifact);
         }
         if bound_authority_digest(generic, regular, selection_config, limits)
-            != self.authority_digest
+            != self.source_authority_digest
         {
             return Err(SpecializedError::StaleAuthority);
         }
         Ok(())
     }
 
-    fn validate_edit_binding(&self, generic: &GenericContactPlan) -> Result<(), SpecializedError> {
+    fn validate_edit_binding(&self) -> Result<(), SpecializedError> {
         self.repair_pool
-            .validate_lineage(repair_pool_lineage_root(generic))?;
+            .validate_lineage(repair_pool_lineage_root(&self.generic_authority))?;
         self.repair_pool.validate_contacts(&self.contacts)?;
         self.finalized_loads()?;
         if self.finalized_load_plan_digest != self.digest() {
@@ -794,6 +800,17 @@ impl SpecializedContactPlan {
     pub fn digest(&self) -> u64 {
         let mut hash = Fnv::new();
         hash.u64(self.semantic_authority_digest);
+        // Bind the complete frozen child-finalization input bundle. The
+        // original source authority remains auditable above, while this plan
+        // digest changes whenever a child-relevant input changes.
+        hash.u64(self.generic_authority.digest());
+        for reservation in &self.reservations_authority {
+            hash.u32(reservation.owner_id);
+            hash.u32(reservation.face_id);
+        }
+        hash_specialized_limits(&mut hash, self.limits_authority);
+        hash.f64(self.surface_config_authority.grid_pitch_mm);
+        hash.usize(self.surface_config_authority.max_grid_bytes);
         match self.next_contact_id {
             Some(next) => {
                 hash.u8(1);
@@ -990,19 +1007,19 @@ impl<'a> SpecializedContactPlanEdit<'a> {
         }
         let load_inputs = stable_load_inputs(
             &contacts,
-            self.generic,
+            &self.plan.generic_authority,
             &self.plan.islands,
-            self.reservations,
-            self.limits,
+            &self.plan.reservations_authority,
+            self.plan.limits_authority,
         )?;
         let load_partition = finalize_specialized_load_partition(
-            self.generic,
-            self.mesh,
+            &self.plan.generic_authority,
+            &self.plan.mesh_authority,
             &self.surface,
             &load_inputs.contacts,
             &load_inputs.specialized_owner_faces,
             LoadFinalizeLimits {
-                max_scratch_bytes: self.limits.max_load_scratch_bytes,
+                max_scratch_bytes: self.plan.limits_authority.max_load_scratch_bytes,
                 max_operations: load_inputs.remaining_load_operations,
             },
         )?;
@@ -1023,12 +1040,17 @@ impl<'a> SpecializedContactPlanEdit<'a> {
         let finalized_loads =
             FinalizedContactLoads::for_specialized_plan(&load_partition, &contact_ids)?;
         Ok(SpecializedContactPlan {
-            authority_digest: self.plan.authority_digest,
+            source_authority_digest: self.plan.source_authority_digest,
             semantic_authority_digest: self.plan.semantic_authority_digest,
             generic_slice_thread_evidence: self.plan.generic_slice_thread_evidence,
             islands: self.plan.islands.clone(),
             coverage_samples: self.plan.coverage_samples.clone(),
             repair_pool: self.plan.repair_pool.clone(),
+            generic_authority: self.plan.generic_authority.clone(),
+            mesh_authority: self.plan.mesh_authority.clone(),
+            reservations_authority: self.plan.reservations_authority.clone(),
+            limits_authority: self.plan.limits_authority,
+            surface_config_authority: self.plan.surface_config_authority,
             contacts,
             next_contact_id,
             load_partition,
@@ -1317,15 +1339,12 @@ pub fn prepare_specialized_contacts(
     let topology = build_face_topology(mesh, WeldPolicy::ExactBits)
         .map_err(|error| SpecializedError::Topology(error.to_string()))?;
     validate_regular(mesh, generic, regular, selection_config)?;
-    let surface = NativeSurface::from_indexed(
-        mesh.verts(),
-        mesh.tris(),
-        NativeSurfaceConfig {
-            grid_pitch_mm: perception_config.surface_grid_pitch_mm.get(),
-            max_grid_bytes: perception_config.max_grid_bytes,
-        },
-    )
-    .map_err(|error| SpecializedError::Surface(error.to_string()))?;
+    let surface_config_authority = NativeSurfaceConfig {
+        grid_pitch_mm: perception_config.surface_grid_pitch_mm.get(),
+        max_grid_bytes: perception_config.max_grid_bytes,
+    };
+    let surface = NativeSurface::from_indexed(mesh.verts(), mesh.tris(), surface_config_authority)
+        .map_err(|error| SpecializedError::Surface(error.to_string()))?;
     let exterior_face_ids = surface
         .exterior_face_mask()
         .iter()
@@ -1593,7 +1612,7 @@ pub fn prepare_specialized_contacts(
     let finalized_loads =
         FinalizedContactLoads::for_specialized_plan(&load_partition, &contact_ids)?;
     Ok(SpecializedContactPlan {
-        authority_digest: bound_authority_digest(generic, regular, selection_config, limits),
+        source_authority_digest: bound_authority_digest(generic, regular, selection_config, limits),
         semantic_authority_digest: bound_semantic_authority_digest(
             generic,
             regular,
@@ -1604,6 +1623,11 @@ pub fn prepare_specialized_contacts(
         islands,
         coverage_samples,
         repair_pool,
+        generic_authority: generic.clone(),
+        mesh_authority: mesh.clone(),
+        reservations_authority: reservations.to_vec(),
+        limits_authority: limits,
+        surface_config_authority,
         contacts,
         next_contact_id,
         load_partition,
@@ -4045,6 +4069,31 @@ fn bound_authority_base(
     hash
 }
 
+fn hash_specialized_limits(hash: &mut Fnv, limits: SpecializedLimits) {
+    hash.usize(limits.max_synthetic_neighbor_pairs);
+    hash.usize(limits.max_synthetic_neighbor_bytes);
+    hash.usize(limits.max_satisfaction_tests);
+    hash.usize(limits.max_satisfaction_neighbor_pairs);
+    hash.usize(limits.max_satisfaction_neighbor_bytes);
+    hash.usize(limits.max_merge_pairs);
+    hash.usize(limits.max_merge_proposals);
+    hash.usize(limits.max_merge_proposal_bytes);
+    hash.usize(limits.max_merge_descriptor_operations);
+    hash.usize(limits.max_merge_total_proposals);
+    hash.usize(limits.max_merge_iterations);
+    hash.usize(limits.max_merge_commit_bytes);
+    hash.usize(limits.max_gate_variants);
+    hash.usize(limits.max_gate_vector_bytes);
+    hash.usize(limits.max_gate_contact_matrix_bytes);
+    hash.usize(limits.max_gate_operations);
+    hash.usize(limits.max_gate_window_variants);
+    hash.usize(limits.max_coverage_scratch_bytes);
+    hash.usize(limits.max_coverage_operations);
+    hash.usize(limits.max_load_scratch_bytes);
+    hash.usize(limits.max_load_operations);
+    hash.usize(limits.max_gate_peak_bytes);
+}
+
 /// The pool is rooted in the complete generic observation plan, including the
 /// synthetic-demand seeds from which its second source is deterministically
 /// derived.  Selection policy is separately bound by the plan authority.
@@ -5712,7 +5761,7 @@ mod tests {
 
     #[test]
     fn regular_child_edit_preserves_sparse_survivors_and_rebinds_loads() {
-        let (mesh, generic, plan) = edit_fixture(make_overhang_table().unwrap(), "child edit")
+        let (_mesh, _generic, plan) = edit_fixture(make_overhang_table().unwrap(), "child edit")
             .unwrap_or_else(|error| panic!("{error}"));
         let removable = plan
             .contacts()
@@ -5727,13 +5776,7 @@ mod tests {
             .cloned()
             .expect("required child-edit fixture has a surviving contact");
         let child = plan
-            .begin_regular_edit(
-                &mesh,
-                &generic,
-                &[],
-                SpecializedLimits::production(),
-                edit_surface_config(),
-            )
+            .begin_regular_edit()
             .unwrap()
             .remove_demand_free_regular(removable.contact_id())
             .unwrap();
@@ -5786,13 +5829,7 @@ mod tests {
             .expect("required child-edit fixture retains a second regular contact")
             .contact_id();
         let grandchild = child
-            .begin_regular_edit(
-                &mesh,
-                &generic,
-                &[],
-                SpecializedLimits::production(),
-                edit_surface_config(),
-            )
+            .begin_regular_edit()
             .unwrap()
             .remove_demand_free_regular(second)
             .unwrap();
@@ -5824,13 +5861,7 @@ mod tests {
             .expect("required child-edit fixture has an unoccupied repair row")
             .id();
         let appended = grandchild
-            .begin_regular_edit(
-                &mesh,
-                &generic,
-                &[],
-                SpecializedLimits::production(),
-                edit_surface_config(),
-            )
+            .begin_regular_edit()
             .unwrap()
             .append_regular_repair_row(row)
             .unwrap();
@@ -5854,7 +5885,7 @@ mod tests {
 
     #[test]
     fn demanded_child_edit_is_a_typed_hard_failure() {
-        let (mesh, generic, plan) = edit_fixture(make_overhang_table().unwrap(), "demanded edit")
+        let (_mesh, _generic, plan) = edit_fixture(make_overhang_table().unwrap(), "demanded edit")
             .unwrap_or_else(|error| panic!("{error}"));
         let demanded = plan
             .contacts()
@@ -5863,13 +5894,7 @@ mod tests {
             .expect("required demanded-edit fixture has a demanded contact")
             .contact_id();
         let result = plan
-            .begin_regular_edit(
-                &mesh,
-                &generic,
-                &[],
-                SpecializedLimits::production(),
-                edit_surface_config(),
-            )
+            .begin_regular_edit()
             .unwrap()
             .remove_demand_free_regular(demanded);
         assert_eq!(
@@ -5878,6 +5903,42 @@ mod tests {
                 contact_id: demanded
             })
         );
+    }
+
+    #[test]
+    fn child_edit_freezes_parent_finalizer_inputs_and_rejects_tampering() {
+        let (_mesh, _generic, plan) = edit_fixture(make_overhang_table().unwrap(), "frozen edit")
+            .unwrap_or_else(|error| panic!("{error}"));
+        let digest = plan.digest();
+        let mut changed_limits = plan.clone();
+        changed_limits.limits_authority.max_load_operations += 1;
+        assert_ne!(changed_limits.digest(), digest);
+        assert!(matches!(
+            changed_limits.begin_regular_edit(),
+            Err(SpecializedError::StaleFinalizedLoadArtifact)
+        ));
+        let mut changed_reservations = plan.clone();
+        changed_reservations
+            .reservations_authority
+            .push(SpecializedOwnerReservation {
+                owner_id: 9_999,
+                face_id: 0,
+            });
+        assert_ne!(changed_reservations.digest(), digest);
+        assert!(matches!(
+            changed_reservations.begin_regular_edit(),
+            Err(SpecializedError::StaleFinalizedLoadArtifact)
+        ));
+        let mut changed_surface = plan.clone();
+        changed_surface.surface_config_authority.grid_pitch_mm = 2.0;
+        assert_ne!(changed_surface.digest(), digest);
+        assert!(matches!(
+            changed_surface.begin_regular_edit(),
+            Err(SpecializedError::StaleFinalizedLoadArtifact)
+        ));
+        // The public edit start has no parameters: these parent-owned values
+        // are the only possible finalizer inputs.
+        assert!(plan.begin_regular_edit().is_ok());
     }
 
     #[test]
@@ -5947,13 +6008,7 @@ mod tests {
         let mut child = regular_only;
         for contact_id in ids {
             child = child
-                .begin_regular_edit(
-                    &mesh,
-                    &generic,
-                    &[],
-                    SpecializedLimits::production(),
-                    edit_surface_config(),
-                )
+                .begin_regular_edit()
                 .unwrap()
                 .remove_demand_free_regular(contact_id)
                 .unwrap();
@@ -6075,7 +6130,7 @@ mod tests {
                 // the digest binds finalized physical-seat provenance and
                 // append-only child-allocation history explicitly.
                 // This is not a corpus, baseline, physics, or reference re-freeze.
-                13_420_184_577_364_008_627_u64,
+                10_147_760_234_672_878_153_u64,
                 (95, 51_200, 14),
                 (6, 0, 4),
             ),
@@ -6087,7 +6142,7 @@ mod tests {
                 // the digest binds finalized physical-seat provenance and
                 // append-only child-allocation history explicitly.
                 // This is not a corpus, baseline, physics, or reference re-freeze.
-                13_538_683_780_323_537_868_u64,
+                10_674_242_434_249_151_966_u64,
                 (40, 40_192, 13),
                 (3, 10, 8),
             ),
@@ -6099,7 +6154,7 @@ mod tests {
                 // the digest binds finalized physical-seat provenance and
                 // append-only child-allocation history explicitly.
                 // This is not a corpus, baseline, physics, or reference re-freeze.
-                18_099_940_466_965_119_165_u64,
+                3_584_672_466_358_389_146_u64,
                 (19, 20_480, 2),
                 (2, 0, 1),
             ),
@@ -6209,7 +6264,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            plan.authority_digest, 9_893_034_867_712_234_337_u64,
+            plan.source_authority_digest, 9_893_034_867_712_234_337_u64,
             "bound resource authority"
         );
         assert_eq!(
@@ -6338,6 +6393,51 @@ mod tests {
                 &regular,
                 &selection,
                 changed_limits,
+            ),
+            Err(SpecializedError::StaleAuthority)
+        );
+
+        let substituted_reservations = [SpecializedOwnerReservation {
+            owner_id: 99,
+            face_id: 0,
+        }];
+        assert_eq!(
+            plan.validate_binding(
+                &mesh,
+                &perception,
+                frame(),
+                &layers,
+                &candidate,
+                &substituted_reservations,
+                perception_limits,
+                &generic,
+                &regular,
+                &selection,
+                limits,
+            ),
+            Err(SpecializedError::StaleAuthority)
+        );
+        let substituted_surface = SupportPerceptionConfig::current(
+            Finite::new(0.0).unwrap(),
+            PositiveFinite::new(1.0).unwrap(),
+            PositiveFinite::new(2.0).unwrap(),
+            perception.max_grid_bytes,
+            Some(&delicacy),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.validate_binding(
+                &mesh,
+                &substituted_surface,
+                frame(),
+                &layers,
+                &candidate,
+                &[],
+                perception_limits,
+                &generic,
+                &regular,
+                &selection,
+                limits,
             ),
             Err(SpecializedError::StaleAuthority)
         );
@@ -6472,7 +6572,7 @@ mod tests {
         if std::env::var_os(CHILD_EDIT_SWEEP_CHILD).is_none() {
             return;
         }
-        let (mesh, generic, plan) = edit_fixture(make_overhang_table().unwrap(), "edit sweep")
+        let (_mesh, _generic, plan) = edit_fixture(make_overhang_table().unwrap(), "edit sweep")
             .unwrap_or_else(|error| panic!("{error}"));
         let removable = plan
             .contacts()
@@ -6481,13 +6581,7 @@ mod tests {
             .expect("required edit-sweep fixture has a demand-free regular contact")
             .contact_id();
         let child = plan
-            .begin_regular_edit(
-                &mesh,
-                &generic,
-                &[],
-                SpecializedLimits::production(),
-                edit_surface_config(),
-            )
+            .begin_regular_edit()
             .unwrap()
             .remove_demand_free_regular(removable)
             .unwrap();
