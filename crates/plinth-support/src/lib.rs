@@ -64,6 +64,10 @@ use plinth_mesh::{build_face_topology, Mesh, WeldPolicy};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+pub use runner::{
+    RoutedPhysicalContactEvidence, SupportVerificationError, SupportVerificationSnapshot,
+};
+
 /// Request data shared by the support and raft pass.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SupportRequest {

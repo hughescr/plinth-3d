@@ -6,7 +6,7 @@
 //! gathers its rays and slices, specialized planning batches projections and gates, and initial
 //! construction makes one axis-interval batch.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, PenetrationBatchLimits, SurfaceBuildError};
 use plinth_core::{m0_constants, LayerPlan};
@@ -46,9 +46,120 @@ use crate::{
     },
     transient::{transient_report, TransientError, TransientReport},
     validate_perception_input, BuildFrame, ContactSelectionConfig, ContactSelectionError,
-    SelectedContacts, SupportError, SupportHistory, SupportPerceptionConfig,
+    CoverageSample, SelectedContacts, SupportError, SupportHistory, SupportPerceptionConfig,
     SupportPerceptionError, SupportReport, SupportRequest, SupportedModel,
 };
+
+/// One physical contact admitted by the finalized CCO transcript for future
+/// coverage verification. It is a borrowed view, never a new planning input.
+#[derive(Clone, Copy, Debug)]
+pub struct RoutedPhysicalContactEvidence<'a> {
+    contact: &'a crate::specialized::SpecializedPhysicalContact,
+}
+
+impl RoutedPhysicalContactEvidence<'_> {
+    #[must_use]
+    pub const fn physical_contact_id(&self) -> u64 {
+        self.contact.contact_id()
+    }
+
+    #[must_use]
+    pub const fn position_mm(&self) -> [f64; 3] {
+        self.contact.position_mm()
+    }
+
+    #[must_use]
+    pub const fn normal(&self) -> [f64; 3] {
+        self.contact.normal()
+    }
+
+    #[must_use]
+    pub const fn carried_area_mm2(&self) -> f64 {
+        self.contact.carried_area_mm2()
+    }
+}
+
+/// Rejection from the sealed verification boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub enum SupportVerificationError {
+    #[error("sealed verification snapshot integrity digest is stale")]
+    SnapshotDigestMismatch,
+    #[error("sealed verification snapshot no longer matches its mesh or topology authority")]
+    TopologyMeshMismatch,
+    #[error("sealed verification snapshot no longer matches final support authority")]
+    AuthorityMismatch,
+}
+
+/// Borrow-only verification evidence from one validated final lowering run.
+///
+/// This exposes neither planning state nor mutable routing state. Its contact
+/// iterator contains exactly the contacts whose terminal disposition is
+/// `Routed`; quarantined and no-winner terminals are intentionally absent.
+#[derive(Debug)]
+pub struct SupportVerificationSnapshot<'a> {
+    mesh: &'a Mesh,
+    topology: &'a FaceTopology,
+    coverage_samples: &'a [CoverageSample],
+    routed_contacts: Vec<RoutedPhysicalContactEvidence<'a>>,
+    mesh_digest: &'a str,
+    topology_digest: &'a str,
+    plan_digest: u64,
+    load_digest: u64,
+    geometry_digest: u64,
+    forest_digest: u64,
+    transcript_digest: u64,
+    regular_digest: u64,
+    coverage_digest: u64,
+    lowered_primitives_digest: u64,
+    routed_projection_digest: u64,
+    snapshot_digest: u64,
+}
+
+impl<'a> SupportVerificationSnapshot<'a> {
+    #[must_use]
+    pub const fn mesh(&self) -> &'a Mesh {
+        self.mesh
+    }
+
+    #[must_use]
+    pub const fn topology(&self) -> &'a FaceTopology {
+        self.topology
+    }
+
+    #[must_use]
+    pub fn coverage_samples(&self) -> &'a [CoverageSample] {
+        self.coverage_samples
+    }
+
+    pub fn routed_contacts(
+        &self,
+    ) -> impl ExactSizeIterator<Item = RoutedPhysicalContactEvidence<'a>> + '_ {
+        self.routed_contacts.iter().copied()
+    }
+
+    #[must_use]
+    pub const fn digest(&self) -> u64 {
+        self.snapshot_digest
+    }
+
+    /// Rechecks the immutable bindings without reconstructing any geometry,
+    /// route, or coverage decision.
+    pub fn validate_integrity(&self) -> Result<(), SupportVerificationError> {
+        let mesh_digest = mesh_fingerprint(self.mesh)
+            .map_err(|_| SupportVerificationError::TopologyMeshMismatch)?;
+        if mesh_digest != self.mesh_digest
+            || self.topology.mesh_fingerprint() != self.mesh_digest
+            || self.topology.content_digest() != self.topology_digest
+            || plinth_mesh::validate_face_topology(self.topology).is_err()
+            || coverage_samples_digest(self.coverage_samples) != self.coverage_digest
+            || routed_projection_digest(&self.routed_contacts) != self.routed_projection_digest
+            || verification_snapshot_digest(self) != self.snapshot_digest
+        {
+            return Err(SupportVerificationError::SnapshotDigestMismatch);
+        }
+        Ok(())
+    }
+}
 
 /// Complete typed caller authority for the sealed preparation stage.
 ///
@@ -986,6 +1097,109 @@ impl LoweredSupportRun<'_> {
         self.lowered.digest()
     }
 
+    /// Borrow the final, validated run as narrow coverage-verification evidence.
+    /// No coverage judgment is performed here.
+    pub(crate) fn verification_snapshot(
+        &self,
+    ) -> Result<SupportVerificationSnapshot<'_>, SupportLoweringError> {
+        self.structured.validate_integrity()?;
+        let (max_primitives, max_primitive_bytes) = self.structured.context.lowering_limits();
+        let config = LoweringConfig::current(
+            self.structured.context.frame(),
+            self.structured.context.layers(),
+            max_primitives,
+            max_primitive_bytes,
+        )?;
+        validate_lowered_output(&self.structured, &self.lowered, config)?;
+
+        let context = &self.structured.context;
+        let plan = &self.structured.braced.rewired.routed.plan;
+        let transcript = &self.structured.braced.rewired.routed.transcript;
+        let loads = plan
+            .finalized_loads()
+            .map_err(|_| SupportVerificationError::AuthorityMismatch)?;
+        let geometry = context
+            .geometry()
+            .map_err(|_| SupportVerificationError::TopologyMeshMismatch)?;
+        transcript
+            .validate_integrity()
+            .map_err(|_| SupportVerificationError::AuthorityMismatch)?;
+        if plan.digest() != context.digests.plan()
+            || loads.digest() != context.digests.loads()
+            || geometry.digest() != context.digests.geometry()
+            || transcript.plan_digest() != plan.digest()
+            || transcript.finalized_load_digest() != loads.digest()
+            || transcript.geometry_digest() != geometry.digest()
+        {
+            return Err(SupportLoweringError::Verification(
+                SupportVerificationError::AuthorityMismatch,
+            ));
+        }
+
+        // Gather the immutable plan rows once, then scatter the transcript's
+        // stable cadence order into the sealed projection. This intentionally
+        // never retries or reclassifies a terminal.
+        let contacts_by_id = plan
+            .contacts()
+            .iter()
+            .map(|contact| (contact.contact_id(), contact))
+            .collect::<BTreeMap<_, _>>();
+        if contacts_by_id.len() != plan.contacts().len() {
+            return Err(SupportVerificationError::AuthorityMismatch.into());
+        }
+        let mut routed_contacts = Vec::new();
+        let mut routed_ids = BTreeSet::new();
+        for row in transcript.rows() {
+            if row.kind() != FinalizedDispositionKind::Routed {
+                continue;
+            }
+            let physical_contact_id = row.physical_contact_id();
+            let terminal_id = row.terminal_id();
+            let contact = contacts_by_id
+                .get(&physical_contact_id)
+                .copied()
+                .ok_or(SupportVerificationError::AuthorityMismatch)?;
+            let ledger = self
+                .structured
+                .braced
+                .plan
+                .forest
+                .terminal_ledger(terminal_id)
+                .ok_or(SupportVerificationError::AuthorityMismatch)?;
+            if physical_contact_id != u64::from(terminal_id)
+                || !routed_ids.insert(physical_contact_id)
+                || ledger.state != TerminalLedgerState::Consumed
+            {
+                return Err(SupportVerificationError::AuthorityMismatch.into());
+            }
+            routed_contacts.push(RoutedPhysicalContactEvidence { contact });
+        }
+        let routed_projection_digest = routed_projection_digest(&routed_contacts);
+        let snapshot = SupportVerificationSnapshot {
+            mesh: context.mesh(),
+            topology: &context.topology,
+            coverage_samples: plan.coverage_samples(),
+            routed_contacts,
+            mesh_digest: context.digests.mesh(),
+            topology_digest: context.topology.content_digest(),
+            plan_digest: plan.digest(),
+            load_digest: loads.digest(),
+            geometry_digest: geometry.digest(),
+            forest_digest: self.structured.braced.plan.forest.digest(),
+            transcript_digest: transcript.digest(),
+            regular_digest: context.digests.regular(),
+            coverage_digest: coverage_samples_digest(plan.coverage_samples()),
+            lowered_primitives_digest: self.lowered.digest().0,
+            routed_projection_digest,
+            snapshot_digest: 0,
+        };
+        let snapshot_digest = verification_snapshot_digest(&snapshot);
+        Ok(SupportVerificationSnapshot {
+            snapshot_digest,
+            ..snapshot
+        })
+    }
+
     /// Consume the final opaque lowering result into the public supported scene.
     pub(crate) fn into_supported_model(self) -> Result<SupportedModel, SupportLoweringError> {
         let LoweredSupportRun {
@@ -1407,6 +1621,8 @@ pub(crate) enum SupportLoweringError {
     #[error(transparent)]
     Raft(#[from] SupportError),
     #[error(transparent)]
+    Verification(#[from] SupportVerificationError),
+    #[error(transparent)]
     Scene(SupportError),
     #[error("sealed lowering primitive counts do not match semantic authority")]
     PrimitiveCountMismatch,
@@ -1672,6 +1888,54 @@ impl Fnv {
     const fn finish(self) -> u64 {
         self.0
     }
+}
+
+fn coverage_samples_digest(samples: &[CoverageSample]) -> u64 {
+    let mut hash = Fnv::new();
+    for sample in samples {
+        hash.u32(sample.island_id);
+        hash.u32(sample.face_id);
+        hash.u32(sample.component_id);
+        for value in sample.point_mm {
+            hash.f64(value);
+        }
+        hash.f64(sample.area_mm2);
+    }
+    hash.finish()
+}
+
+fn routed_projection_digest(contacts: &[RoutedPhysicalContactEvidence<'_>]) -> u64 {
+    let mut hash = Fnv::new();
+    hash.usize(contacts.len());
+    for contact in contacts {
+        hash.u64(contact.physical_contact_id());
+        for value in contact.position_mm() {
+            hash.f64(value);
+        }
+        for value in contact.normal() {
+            hash.f64(value);
+        }
+        hash.f64(contact.carried_area_mm2());
+    }
+    hash.finish()
+}
+
+fn verification_snapshot_digest(snapshot: &SupportVerificationSnapshot<'_>) -> u64 {
+    let mut hash = Fnv::new();
+    hash.bytes(snapshot.mesh_digest.as_bytes());
+    hash.bytes(snapshot.topology_digest.as_bytes());
+    hash.u64(snapshot.plan_digest);
+    hash.u64(snapshot.load_digest);
+    hash.u64(snapshot.geometry_digest);
+    hash.u64(snapshot.forest_digest);
+    hash.u64(snapshot.transcript_digest);
+    hash.u64(snapshot.regular_digest);
+    hash.u64(snapshot.coverage_digest);
+    hash.u64(snapshot.lowered_primitives_digest);
+    hash.u64(snapshot.routed_projection_digest);
+    hash.usize(snapshot.coverage_samples.len());
+    hash.usize(snapshot.routed_contacts.len());
+    hash.finish()
 }
 
 fn rewire_report_digest(report: &RewireReport) -> u64 {
@@ -2899,6 +3163,71 @@ mod tests {
     }
 
     #[test]
+    fn lowered_run_snapshot_exposes_only_transcript_routed_contacts_in_cadence_order() {
+        with_braced_table(|braced| {
+            let lowered = braced
+                .structure()
+                .expect("required corpus structures")
+                .lower()
+                .expect("required corpus lowers");
+            let expected = lowered
+                .structured
+                .braced
+                .rewired
+                .routed
+                .transcript
+                .rows()
+                .iter()
+                .filter(|row| row.kind() == FinalizedDispositionKind::Routed)
+                .map(|row| row.physical_contact_id())
+                .collect::<Vec<_>>();
+            let snapshot = lowered
+                .verification_snapshot()
+                .expect("validated final authority snapshots");
+            assert_eq!(
+                snapshot
+                    .routed_contacts()
+                    .map(|contact| contact.physical_contact_id())
+                    .collect::<Vec<_>>(),
+                expected,
+                "quarantined and no-winner transcript rows are absent"
+            );
+            assert_eq!(
+                snapshot.coverage_samples(),
+                lowered
+                    .structured
+                    .braced
+                    .rewired
+                    .routed
+                    .plan
+                    .coverage_samples()
+            );
+            snapshot
+                .validate_integrity()
+                .expect("borrowed snapshot remains bound to retained authority");
+        });
+    }
+
+    #[test]
+    fn verification_snapshot_digest_corruption_fails_closed() {
+        with_braced_table(|braced| {
+            let lowered = braced
+                .structure()
+                .expect("required corpus structures")
+                .lower()
+                .expect("required corpus lowers");
+            let mut snapshot = lowered
+                .verification_snapshot()
+                .expect("validated final authority snapshots");
+            snapshot.plan_digest = snapshot.plan_digest.wrapping_add(1);
+            assert_eq!(
+                snapshot.validate_integrity(),
+                Err(SupportVerificationError::SnapshotDigestMismatch)
+            );
+        });
+    }
+
+    #[test]
     fn lowering_cap_minus_one_fails_before_any_supported_model_is_constructed() {
         let (count, bytes) = with_structured_limits(200_000, 128 * 1024 * 1024, |structured| {
             let lowered = structured.lower().expect("uncapped corpus lowers");
@@ -2993,15 +3322,26 @@ mod tests {
                 .lower()
                 .expect("thread sweep lowers required corpus");
             let lower_digest = lowered.digest();
+            let snapshot = lowered
+                .verification_snapshot()
+                .expect("thread sweep snapshots validated final authority");
+            let snapshot_digest = snapshot.digest();
+            let routed_contact_count = snapshot.routed_contacts().len();
+            snapshot
+                .validate_integrity()
+                .expect("thread sweep snapshot remains sealed");
+            drop(snapshot);
             let model = lowered
                 .into_supported_model()
                 .expect("thread sweep constructs supported model");
             println!(
-                "{SWEEP_LINE}{lineage}:{}:{}:{}:{}:{}:{}",
+                "{SWEEP_LINE}{lineage}:{}:{}:{}:{}:{}:{}:{}:{}",
                 model.primitives().len(),
                 model.history().support().support_primitive_count,
                 model.history().support().raft_primitive_count,
                 lower_digest.0,
+                snapshot_digest,
+                routed_contact_count,
                 model.lift_mm().get().to_bits(),
                 model.plate_z_mm().get().to_bits(),
             );
