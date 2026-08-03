@@ -194,12 +194,11 @@ pub(crate) enum RepairRowSourceKind {
     SyntheticIsland,
 }
 
-/// Stable identity of one route-expanded repair row.  The owner and topology
-/// component deliberately remain in the key because one source candidate can
-/// legally be available to more than one logical island.
-/// Opaque, stable identity of a route-expanded repair row carried in public
+/// Opaque, stable identity of one route-expanded repair row carried in public
 /// error evidence. It can be compared, hashed, and rendered for diagnostics,
-/// but only the specialized planner may construct one.
+/// but only the specialized planner may construct one. The owner, topology
+/// component, and source remain part of the identity because one source
+/// candidate can legally be available to more than one logical island.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct RepairRowId {
     owner_island_id: u32,
@@ -212,10 +211,52 @@ pub struct RepairRowId {
 /// One frozen candidate seat retained verbatim for a later regular-only
 /// physical contact.  No later stage may recreate this geometry from ids.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct RepairRow {
+pub struct RepairRow {
     id: RepairRowId,
     order: usize,
     candidate: crate::ContactCandidate,
+}
+
+impl RepairRow {
+    /// The planner-issued, source-qualified identity of this frozen row.
+    #[must_use]
+    pub const fn id(&self) -> RepairRowId {
+        self.id
+    }
+
+    /// The stable repair-pool order established by the specialized pass.
+    #[must_use]
+    pub const fn order(&self) -> usize {
+        self.order
+    }
+
+    /// Frozen source-seat geometry and score evidence.
+    #[must_use]
+    pub const fn candidate(&self) -> &crate::ContactCandidate {
+        &self.candidate
+    }
+}
+
+/// Read-only occupancy evidence for one frozen repair row. A demanded route is
+/// occupied but must not be removed by a later repair controller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RepairRowOccupancy {
+    row_id: RepairRowId,
+    shared_demanded: bool,
+}
+
+impl RepairRowOccupancy {
+    /// The exact source-qualified occupied row.
+    #[must_use]
+    pub const fn row_id(&self) -> RepairRowId {
+        self.row_id
+    }
+
+    /// Whether the row also serves a logical demanded region.
+    #[must_use]
+    pub const fn shared_demanded(&self) -> bool {
+        self.shared_demanded
+    }
 }
 
 /// One immutable, route-expanded repair authority spanning generic and
@@ -298,6 +339,10 @@ impl RepairPool {
         Ok(())
     }
 
+    fn row(&self, id: RepairRowId) -> Option<&RepairRow> {
+        self.rows.get(id_index(&self.rows, id)?)
+    }
+
     fn resolve_route(&self, route: RegularContactRoute) -> Result<RepairRowId, SpecializedError> {
         let mut matching = None;
         for row in &self.rows {
@@ -331,6 +376,40 @@ impl RepairPool {
             }
         }
         Ok(())
+    }
+
+    fn occupied_for_contacts(
+        &self,
+        contacts: &[SpecializedPhysicalContact],
+    ) -> Result<Vec<RepairRowOccupancy>, SpecializedError> {
+        self.validate_contacts(contacts)?;
+        let mut rows = Vec::new();
+        for contact in contacts {
+            for &route in contact.regular_routes() {
+                rows.push(RepairRowOccupancy {
+                    row_id: self.resolve_route(route)?,
+                    shared_demanded: !contact.demands().is_empty(),
+                });
+            }
+        }
+        rows.sort_unstable_by_key(|row| self.row(row.row_id).map_or(usize::MAX, RepairRow::order));
+        Ok(rows)
+    }
+
+    fn eligible_rows(
+        &self,
+        island_id: u32,
+        component_id: u32,
+        excluded: &BTreeSet<RepairRowId>,
+    ) -> Vec<&RepairRow> {
+        self.rows
+            .iter()
+            .filter(|row| {
+                row.id.owner_island_id == island_id
+                    && row.id.component_id == component_id
+                    && !excluded.contains(&row.id)
+            })
+            .collect()
     }
 
     fn validate_lineage(&self, lineage_root: u64) -> Result<(), SpecializedError> {
@@ -386,6 +465,10 @@ impl RepairPool {
             hash.f64(row.candidate.delicacy);
         }
     }
+}
+
+fn id_index(rows: &[RepairRow], id: RepairRowId) -> Option<usize> {
+    rows.iter().position(|row| row.id == id)
 }
 
 impl SpecializedPhysicalContact {
@@ -525,6 +608,39 @@ impl SpecializedContactPlan {
     #[must_use]
     pub fn coverage_samples(&self) -> &[CoverageSample] {
         &self.coverage_samples
+    }
+
+    /// Retrieves a verbatim planner-frozen repair row by its opaque,
+    /// source-qualified identity. The returned row is read-only.
+    #[must_use]
+    pub fn repair_row(&self, id: RepairRowId) -> Option<&RepairRow> {
+        self.repair_pool.row(id)
+    }
+
+    /// Enumerates occupied immutable rows in stable pool order, including
+    /// whether each row is also shared with a demanded logical region.
+    pub fn occupied_repair_rows(&self) -> Result<Vec<RepairRowOccupancy>, SpecializedError> {
+        self.repair_pool.occupied_for_contacts(&self.contacts)
+    }
+
+    /// Returns stable-order rows eligible for a repair controller. Exact
+    /// source-qualified occupied and caller-recorded failed identities are
+    /// excluded; zero-score candidates remain eligible.
+    pub fn eligible_repair_rows(
+        &self,
+        island_id: u32,
+        component_id: u32,
+        failed: &BTreeSet<RepairRowId>,
+    ) -> Result<Vec<&RepairRow>, SpecializedError> {
+        let mut excluded = failed.clone();
+        excluded.extend(
+            self.occupied_repair_rows()?
+                .into_iter()
+                .map(|occupancy| occupancy.row_id),
+        );
+        Ok(self
+            .repair_pool
+            .eligible_rows(island_id, component_id, &excluded))
     }
 
     #[must_use]
@@ -3783,7 +3899,19 @@ mod tests {
     #[test]
     fn repair_pool_qualifies_equal_numeric_ids_by_source_and_validates_occupancy() {
         let generic = ContactCandidatePool {
-            candidates: vec![repair_candidate(7, 0, [1.0, 0.0, 0.0])],
+            candidates: vec![
+                repair_candidate(7, 0, [1.0, 0.0, 0.0]),
+                repair_candidate(8, 0, [3.0, 0.0, 0.0]),
+                crate::ContactCandidate {
+                    id: ContactCandidateId(0),
+                    face_id: 0,
+                    point_mm: [4.0, 0.0, 0.0],
+                    normal: [0.0, 0.0, -1.0],
+                    supported_area_mm2: 0.0,
+                    overhang_excess: 0.0,
+                    delicacy: 0.0,
+                },
+            ],
         };
         let synthetic = ContactCandidatePool {
             candidates: vec![repair_candidate(7, 0, [2.0, 0.0, 0.0])],
@@ -3846,8 +3974,47 @@ mod tests {
             regular_routes: vec![synthetic_route],
             demands: Vec::new(),
         };
-        pool.validate_contacts(&[generic_contact.clone(), synthetic_contact])
+        let occupied = pool
+            .occupied_for_contacts(&[generic_contact.clone(), synthetic_contact])
             .unwrap();
+        assert_eq!(occupied.len(), 2);
+        assert_eq!(occupied[0].row_id(), pool.rows[0].id());
+        assert!(occupied[0].shared_demanded());
+        assert_eq!(occupied[1].row_id(), pool.rows[3].id());
+        assert!(!occupied[1].shared_demanded());
+        assert_eq!(
+            pool.row(occupied[0].row_id()).unwrap().candidate().id,
+            ContactCandidateId(7)
+        );
+
+        let occupied_ids = occupied
+            .iter()
+            .map(RepairRowOccupancy::row_id)
+            .collect::<BTreeSet<_>>();
+        let eligible = pool.eligible_rows(3, 11, &occupied_ids);
+        assert_eq!(
+            eligible.iter().map(|row| row.order()).collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(eligible[1].candidate().id, ContactCandidateId(0));
+        let failed = BTreeSet::from([eligible[0].id()]);
+        assert_eq!(
+            pool.eligible_rows(3, 11, &failed)
+                .iter()
+                .map(|row| row.order())
+                .collect::<Vec<_>>(),
+            vec![0, 2, 3]
+        );
+        let excluded = occupied_ids
+            .union(&failed)
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let eligible_after_failure = pool.eligible_rows(3, 11, &excluded);
+        assert_eq!(eligible_after_failure.len(), 1);
+        assert_eq!(
+            eligible_after_failure[0].candidate().id,
+            ContactCandidateId(0)
+        );
         assert!(matches!(
             pool.validate_contacts(&[generic_contact.clone(), generic_contact]),
             Err(SpecializedError::DuplicateRepairRoute { .. })
