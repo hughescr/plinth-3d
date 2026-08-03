@@ -583,6 +583,9 @@ pub(crate) struct CcoCandidateEvidence {
 #[derive(Debug)]
 pub(crate) struct TerminalCcoOutcome {
     pub(crate) winner: Option<CcoCandidateEvidence>,
+    /// Assigned only by the controller after the live terminal has either
+    /// committed its exact replay or been retired as an unrouted terminal.
+    pub(crate) disposition: Option<TerminalDisposition>,
     pub(crate) candidates_generated: usize,
     pub(crate) candidates_feasible: usize,
     pub(crate) anchor_ray_batches: usize,
@@ -590,6 +593,57 @@ pub(crate) struct TerminalCcoOutcome {
     pub(crate) clearance_batches: usize,
     pub(crate) validated_model_anchor: Option<Box<ValidatedModelAnchor>>,
     pub(crate) anchor_refusals: Vec<AnchorFootRefusal>,
+}
+
+/// Exact finalized-authority identity retained for a terminal disposition.
+/// `physical_contact_id` is intentionally distinct from the u32 terminal namespace so
+/// later routing normalization can partition demand without reconstructing a
+/// contact from an equal-load stub.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TerminalRouteEvidence {
+    pub(crate) physical_contact_id: u64,
+    pub(crate) terminal_id: u32,
+    pub(crate) original_key: MemberKey,
+    pub(crate) plan_digest: u64,
+    pub(crate) loads_digest: u64,
+    pub(crate) geometry_digest: u64,
+    pub(crate) forest_digest_before: u64,
+    pub(crate) controller_digest_before: u64,
+}
+
+/// A named, sealed explanation for an evaluated route with no committed
+/// winner.  It records the point at which candidates disappeared without
+/// mistaking a refusal for a successful route.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum NoWinnerEvidence {
+    NoCandidatesGenerated,
+    NoFeasibleCandidate {
+        candidates_generated: usize,
+        anchor_refusals: Vec<AnchorFootRefusal>,
+    },
+    AllFeasibleCandidatesRefusedByClearance {
+        candidates_generated: usize,
+        candidates_feasible: usize,
+        anchor_refusals: Vec<AnchorFootRefusal>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum TerminalDisposition {
+    Routed {
+        route: TerminalRouteEvidence,
+        winner: CcoCandidateEvidence,
+    },
+    SkippedQuarantined {
+        terminal_id: u32,
+        original_key: MemberKey,
+        forest_digest: u64,
+        controller_digest_before: u64,
+    },
+    UnroutedNoWinner {
+        route: TerminalRouteEvidence,
+        reason: NoWinnerEvidence,
+    },
 }
 
 #[derive(Debug, Error)]
@@ -861,16 +915,9 @@ pub(crate) struct CcoController {
     terminals: BTreeMap<u32, TerminalCadenceRecord>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TerminalCadenceOutcome {
-    Grown,
-    SkippedQuarantined,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 struct TerminalCadenceRecord {
-    original_key: MemberKey,
-    outcome: TerminalCadenceOutcome,
+    disposition: TerminalDisposition,
 }
 
 #[derive(Default)]
@@ -888,22 +935,44 @@ impl CcoController {
         surface: &NativeSurface,
     ) -> Result<TerminalCcoOutcome, CcoError> {
         self.require_unadvanced(request.terminal_id)?;
+        let controller_digest_before = self.digest();
+        let forest_digest_before = forest.digest();
         let config = Config::current()?;
         let hosts = self.hosts.nearest(
             request.stub_end_mm().map(Finite::get),
             config.bifurcation_hosts,
             forest,
         );
-        let outcome =
+        let mut outcome =
             grow_terminal_inner(forest, request, surface, Vec::new(), None, 0, Some(hosts))?;
+        let route = TerminalRouteEvidence {
+            physical_contact_id: request.physical_contact_id,
+            terminal_id: request.terminal_id,
+            original_key: request.stub,
+            plan_digest: 0,
+            loads_digest: 0,
+            geometry_digest: 0,
+            forest_digest_before,
+            controller_digest_before,
+        };
+        let disposition = match outcome.winner.clone() {
+            Some(winner) => TerminalDisposition::Routed { route, winner },
+            None => {
+                forest.retire_unrouted_terminal(request.terminal_id, request.stub)?;
+                TerminalDisposition::UnroutedNoWinner {
+                    route,
+                    reason: no_winner_evidence(&outcome),
+                }
+            }
+        };
         self.finish_terminal(
             forest,
             request.terminal_id,
             TerminalCadenceRecord {
-                original_key: request.stub,
-                outcome: TerminalCadenceOutcome::Grown,
+                disposition: disposition.clone(),
             },
         );
+        outcome.disposition = Some(disposition);
         Ok(outcome)
     }
 
@@ -918,6 +987,8 @@ impl CcoController {
         route: FinalizedAnchorTerminalRoute<'_, '_>,
     ) -> Result<TerminalCcoOutcome, CcoError> {
         self.require_unadvanced(request.terminal_id)?;
+        let controller_digest_before = self.digest();
+        let forest_digest_before = forest.digest();
         let context = FinalizedAnchorValidationContext::bind(forest, request, route)?;
         let discovery = discover_finalized_anchor_seats(
             context.bound_contact,
@@ -933,23 +1004,49 @@ impl CcoController {
             config.bifurcation_hosts,
             forest,
         );
-        let outcome = grow_terminal_inner(
+        let mut outcome = grow_terminal_inner(
             forest,
             request,
             context.route.geometry.surface(),
             discovery.into_seats(),
-            Some(context),
+            Some(&context),
             anchor_ray_batches,
             Some(hosts),
         )?;
+        let disposition = match outcome.winner.clone() {
+            Some(winner) => TerminalDisposition::Routed {
+                // `grow_terminal_inner` validated this authority immediately
+                // before committing the replayed winner.
+                route: context.route_evidence(
+                    request,
+                    forest_digest_before,
+                    controller_digest_before,
+                ),
+                winner,
+            },
+            None => {
+                // A no-winner path still mutates by retiring the stub, so it
+                // needs the same stale-authority gate before that transition.
+                context.validate_replay(forest, request)?;
+                forest.retire_unrouted_terminal(request.terminal_id, request.stub)?;
+                TerminalDisposition::UnroutedNoWinner {
+                    route: context.route_evidence(
+                        request,
+                        forest_digest_before,
+                        controller_digest_before,
+                    ),
+                    reason: no_winner_evidence(&outcome),
+                }
+            }
+        };
         self.finish_terminal(
             forest,
             request.terminal_id,
             TerminalCadenceRecord {
-                original_key: request.stub,
-                outcome: TerminalCadenceOutcome::Grown,
+                disposition: disposition.clone(),
             },
         );
+        outcome.disposition = Some(disposition);
         Ok(outcome)
     }
 
@@ -971,11 +1068,24 @@ impl CcoController {
             forest,
             skipped.contact,
             TerminalCadenceRecord {
-                original_key: skipped.original_key,
-                outcome: TerminalCadenceOutcome::SkippedQuarantined,
+                disposition: TerminalDisposition::SkippedQuarantined {
+                    terminal_id: skipped.contact,
+                    original_key: skipped.original_key,
+                    forest_digest: forest.digest(),
+                    controller_digest_before: self.digest(),
+                },
             },
         );
         Ok(())
+    }
+
+    /// Stable sealed outcome for a terminal.  In particular, a normalizer can
+    /// select `UnroutedNoWinner` by its exact finalized physical contact id
+    /// without treating a retired member as a live stub.
+    pub(crate) fn terminal_disposition(&self, terminal: u32) -> Option<&TerminalDisposition> {
+        self.terminals
+            .get(&terminal)
+            .map(|record| &record.disposition)
     }
 
     /// Evaluate the frozen rewire candidate batch against its immutable
@@ -1180,12 +1290,54 @@ impl CcoController {
         word(self.terminals.len() as u64);
         for (&terminal, record) in &self.terminals {
             word(u64::from(terminal));
-            word(u64::from(record.original_key.slot()));
-            word(u64::from(record.original_key.generation()));
-            word(match record.outcome {
-                TerminalCadenceOutcome::Grown => 0,
-                TerminalCadenceOutcome::SkippedQuarantined => 1,
-            });
+            match &record.disposition {
+                TerminalDisposition::Routed { route, winner } => {
+                    word(0);
+                    digest_route_evidence(&mut word, route);
+                    word(candidate_family_digest(winner.family));
+                    word(winner.generation_index as u64);
+                    word(winner.price_ml.to_bits());
+                    word(winner.clearance_rows as u64);
+                }
+                TerminalDisposition::SkippedQuarantined {
+                    terminal_id,
+                    original_key,
+                    forest_digest,
+                    controller_digest_before,
+                } => {
+                    word(1);
+                    word(u64::from(*terminal_id));
+                    word(u64::from(original_key.slot()));
+                    word(u64::from(original_key.generation()));
+                    word(*forest_digest);
+                    word(*controller_digest_before);
+                }
+                TerminalDisposition::UnroutedNoWinner { route, reason } => {
+                    word(2);
+                    digest_route_evidence(&mut word, route);
+                    match reason {
+                        NoWinnerEvidence::NoCandidatesGenerated => word(0),
+                        NoWinnerEvidence::NoFeasibleCandidate {
+                            candidates_generated,
+                            anchor_refusals,
+                        } => {
+                            word(1);
+                            word(*candidates_generated as u64);
+                            digest_anchor_refusals(&mut word, anchor_refusals);
+                        }
+                        NoWinnerEvidence::AllFeasibleCandidatesRefusedByClearance {
+                            candidates_generated,
+                            candidates_feasible,
+                            anchor_refusals,
+                        } => {
+                            word(2);
+                            word(*candidates_generated as u64);
+                            word(*candidates_feasible as u64);
+                            digest_anchor_refusals(&mut word, anchor_refusals);
+                        }
+                    }
+                }
+            }
         }
         word(self.hosts.indexed_members.len() as u64);
         for key in &self.hosts.indexed_members {
@@ -1201,6 +1353,45 @@ impl CcoController {
             word(u64::from(key.generation()));
         }
         hash
+    }
+}
+
+fn digest_route_evidence(word: &mut impl FnMut(u64), route: &TerminalRouteEvidence) {
+    word(route.physical_contact_id);
+    word(u64::from(route.terminal_id));
+    word(u64::from(route.original_key.slot()));
+    word(u64::from(route.original_key.generation()));
+    word(route.plan_digest);
+    word(route.loads_digest);
+    word(route.geometry_digest);
+    word(route.forest_digest_before);
+    word(route.controller_digest_before);
+}
+
+fn candidate_family_digest(family: CandidateFamily) -> u64 {
+    match family {
+        CandidateFamily::PlateDescent => 0,
+        CandidateFamily::ModelAnchor => 1,
+        CandidateFamily::Bifurcation => 2,
+    }
+}
+
+fn digest_anchor_refusals(word: &mut impl FnMut(u64), refusals: &[AnchorFootRefusal]) {
+    word(refusals.len() as u64);
+    for refusal in refusals {
+        let provenance = refusal.provenance();
+        word(match refusal.reason() {
+            AnchorFootRefusalReason::ReboundContact => 0,
+            AnchorFootRefusalReason::ReboundTerminal => 1,
+            AnchorFootRefusalReason::ReboundRewireBinding => 2,
+            AnchorFootRefusalReason::StaleConfig => 3,
+            AnchorFootRefusalReason::StaleGeometry => 4,
+            AnchorFootRefusalReason::StalePool => 5,
+            AnchorFootRefusalReason::FootBallBreached => 6,
+        });
+        word(provenance.physical_contact_id().unwrap_or(u64::MAX));
+        word(provenance.sample_index() as u64);
+        word(u64::from(provenance.source_sample_face_id()));
     }
 }
 
@@ -1263,6 +1454,42 @@ impl<'a, 'surface> FinalizedAnchorValidationContext<'a, 'surface> {
             return Err(CcoError::StaleFinalizedAnchorAuthority);
         }
         Ok(())
+    }
+
+    fn route_evidence(
+        &self,
+        request: &TerminalCcoRequest,
+        forest_digest_before: u64,
+        controller_digest_before: u64,
+    ) -> TerminalRouteEvidence {
+        TerminalRouteEvidence {
+            physical_contact_id: request.physical_contact_id,
+            terminal_id: request.terminal_id,
+            original_key: request.stub,
+            plan_digest: self.plan_digest,
+            loads_digest: self.loads_digest,
+            geometry_digest: self.route.geometry.digest(),
+            forest_digest_before,
+            controller_digest_before,
+        }
+    }
+}
+
+fn no_winner_evidence(outcome: &TerminalCcoOutcome) -> NoWinnerEvidence {
+    debug_assert!(outcome.winner.is_none());
+    if outcome.candidates_generated == 0 {
+        NoWinnerEvidence::NoCandidatesGenerated
+    } else if outcome.candidates_feasible == 0 {
+        NoWinnerEvidence::NoFeasibleCandidate {
+            candidates_generated: outcome.candidates_generated,
+            anchor_refusals: outcome.anchor_refusals.clone(),
+        }
+    } else {
+        NoWinnerEvidence::AllFeasibleCandidatesRefusedByClearance {
+            candidates_generated: outcome.candidates_generated,
+            candidates_feasible: outcome.candidates_feasible,
+            anchor_refusals: outcome.anchor_refusals.clone(),
+        }
     }
 }
 
@@ -1400,7 +1627,7 @@ fn grow_terminal_inner(
     request: &TerminalCcoRequest,
     surface: &NativeSurface,
     mut seats: Vec<QualifiedAnchorSeat>,
-    anchor_context: Option<FinalizedAnchorValidationContext<'_, '_>>,
+    anchor_context: Option<&FinalizedAnchorValidationContext<'_, '_>>,
     anchor_ray_batches: usize,
     cached_hosts: Option<Vec<MemberKey>>,
 ) -> Result<TerminalCcoOutcome, CcoError> {
@@ -1417,7 +1644,7 @@ fn grow_terminal_inner(
     let mut anchor_refusals = Vec::new();
     let mut anchor_foot_batches = 0;
     if !seats.is_empty() {
-        let context = anchor_context.as_ref().ok_or(CcoError::InvalidGeometry)?;
+        let context = anchor_context.ok_or(CcoError::InvalidGeometry)?;
         let mut seats: Vec<Option<QualifiedAnchorSeat>> = seats.drain(..).map(Some).collect();
         let mut generation_indices = Vec::new();
         let mut foot_requests = Vec::new();
@@ -1461,6 +1688,7 @@ fn grow_terminal_inner(
     if evaluated.is_empty() {
         return Ok(TerminalCcoOutcome {
             winner: None,
+            disposition: None,
             candidates_generated,
             candidates_feasible,
             anchor_ray_batches,
@@ -1481,6 +1709,7 @@ fn grow_terminal_inner(
     let Some(winner) = survivors.first() else {
         return Ok(TerminalCcoOutcome {
             winner: None,
+            disposition: None,
             candidates_generated,
             candidates_feasible,
             anchor_ray_batches,
@@ -1491,7 +1720,7 @@ fn grow_terminal_inner(
         });
     };
     let winner_index = winner.generation_index;
-    if let Some(context) = anchor_context.as_ref() {
+    if let Some(context) = anchor_context {
         context.validate_replay(forest, request)?;
     }
     let checkpoint = forest.checkpoint();
@@ -1513,6 +1742,7 @@ fn grow_terminal_inner(
             price_ml: winner.price_ml,
             clearance_rows: winner.rows.len(),
         }),
+        disposition: None,
         candidates_generated,
         candidates_feasible,
         anchor_ray_batches,
@@ -2678,8 +2908,24 @@ mod tests {
                 &forest,
                 skipped.contact,
                 TerminalCadenceRecord {
-                    original_key: skipped.original_key,
-                    outcome: TerminalCadenceOutcome::Grown,
+                    disposition: TerminalDisposition::Routed {
+                        route: TerminalRouteEvidence {
+                            physical_contact_id: u64::from(skipped.contact),
+                            terminal_id: skipped.contact,
+                            original_key: skipped.original_key,
+                            plan_digest: 0,
+                            loads_digest: 0,
+                            geometry_digest: 0,
+                            forest_digest_before: before,
+                            controller_digest_before: 0,
+                        },
+                        winner: CcoCandidateEvidence {
+                            family: CandidateFamily::PlateDescent,
+                            generation_index: 0,
+                            price_ml: 0.0,
+                            clearance_rows: 0,
+                        },
+                    },
                 },
             );
             quarantined
@@ -3040,6 +3286,76 @@ mod tests {
         )
         .unwrap();
         (forest, request, surface)
+    }
+
+    fn no_winner_fixture() -> (Forest, TerminalCcoRequest, NativeSurface) {
+        let (forest, request, surface) = growth_fixture();
+        let request = TerminalCcoRequest::bind(
+            &forest,
+            request.terminal_id,
+            // The base plate descriptor is below this plate and every spiral
+            // descriptor is lower still, so all generated descriptors refuse
+            // before a clearance query or forest mutation.
+            BuildFrame::new(
+                Finite::new(20.0).unwrap(),
+                PositiveFinite::new(5.0).unwrap(),
+            ),
+        )
+        .unwrap();
+        (forest, request, surface)
+    }
+
+    #[test]
+    fn no_winner_retires_the_exact_stub_and_seals_unrouted_evidence() {
+        let (mut forest, request, surface) = no_winner_fixture();
+        let before = forest.digest();
+        let mut controller = CcoController::default();
+        let outcome = controller
+            .grow_terminal_for_test(&mut forest, &request, &surface)
+            .unwrap();
+
+        assert!(outcome.winner.is_none());
+        assert_eq!(outcome.candidates_generated, 1);
+        assert_eq!(outcome.candidates_feasible, 0);
+        assert_eq!(outcome.clearance_batches, 0);
+        assert_ne!(forest.digest(), before);
+        assert_eq!(forest.terminal(request.terminal_id), None);
+        assert_eq!(forest.terminal_key(request.terminal_id), Some(request.stub));
+        assert_eq!(
+            forest.terminal_ledger(request.terminal_id).unwrap().state,
+            TerminalLedgerState::Retired
+        );
+        assert!(forest.quarantine_record(request.stub).is_none());
+        assert_eq!(
+            forest
+                .terminal_ledger_evidence(request.terminal_id)
+                .unwrap()
+                .original_key,
+            request.stub
+        );
+        assert!(matches!(
+            outcome.disposition,
+            Some(TerminalDisposition::UnroutedNoWinner {
+                reason: NoWinnerEvidence::NoFeasibleCandidate { .. },
+                ..
+            })
+        ));
+        assert!(matches!(
+            controller.terminal_disposition(request.terminal_id),
+            Some(TerminalDisposition::UnroutedNoWinner { .. })
+        ));
+
+        let view = crate::joints::FilteredLiveView::current(
+            &forest,
+            &[request.terminal_id],
+            crate::joints::LiveViewLimits::new(8, 1, 4096),
+        )
+        .unwrap();
+        assert!(!view.keys().contains(&request.stub));
+        assert!(matches!(
+            controller.grow_terminal_for_test(&mut forest, &request, &surface),
+            Err(CcoError::TerminalCadenceReplay(7))
+        ));
     }
 
     #[derive(Clone, Copy)]

@@ -709,6 +709,37 @@ impl Forest {
         Ok(())
     }
 
+    /// Atomically removes the still-current, unconsumed contact stub after a
+    /// terminal route has been evaluated but no candidate won.  The original
+    /// registration and its sealed evidence deliberately remain in the
+    /// terminal ledger as `Retired`; this is not a quarantine transition.
+    pub(crate) fn retire_unrouted_terminal(
+        &mut self,
+        terminal: u32,
+        key: MemberKey,
+    ) -> Result<(), ForestError> {
+        if self.state.terminal_of.get(&terminal).copied() != Some(key)
+            || self.state.terminal_consumed.contains(&terminal)
+        {
+            return Err(ForestError::InvalidTerminalMember { terminal });
+        }
+        let member = self
+            .member(key)
+            .ok_or(ForestError::InvalidTerminalMember { terminal })?;
+        let evidence = self
+            .state
+            .terminal_evidence
+            .get(&terminal)
+            .ok_or(ForestError::InvalidTerminalMember { terminal })?;
+        if !terminal_member_matches_evidence(member, key, terminal, evidence)
+            || !self.children_of(key).is_empty()
+            || self.parent_of(key).is_some()
+        {
+            return Err(ForestError::InvalidTerminalMember { terminal });
+        }
+        self.retire(key)
+    }
+
     fn require_terminal_mutation_allowed(&self, key: MemberKey) -> Result<(), ForestError> {
         if let Some((&terminal, _)) = self.state.terminal_of.iter().find(|(terminal, member)| {
             **member == key && !self.state.terminal_consumed.contains(terminal)
