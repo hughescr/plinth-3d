@@ -183,10 +183,10 @@ pub struct RegularContactRoute {
     owner_island_id: u32,
     coverage_face_id: u32,
     component_id: u32,
+    source_kind: RepairRowSourceKind,
 }
 
-/// Which immutable candidate authority supplied a repair row.  This remains
-/// part of the id even though synthetic ids are allocated disjointly: a raw
+/// Which immutable candidate authority supplied a repair row.  A raw
 /// candidate number is not enough to name a route-expanded repair seat.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum RepairRowSourceKind {
@@ -255,18 +255,6 @@ impl RepairPool {
         synthetic_islands: &[SupportIsland],
         components: &[u32],
     ) -> Result<Self, SpecializedError> {
-        let mut candidate_ids = BTreeSet::new();
-        for candidate in generic.candidates().iter().chain(
-            synthetic
-                .into_iter()
-                .flat_map(ContactCandidatePool::candidates),
-        ) {
-            if !candidate_ids.insert(candidate.id) {
-                return Err(SpecializedError::RepairCandidateIdCollision {
-                    candidate_id: candidate.id,
-                });
-            }
-        }
         let mut rows = Vec::new();
         Self::append_rows(
             &mut rows,
@@ -340,6 +328,7 @@ impl RepairPool {
                 && row.id.candidate_id.0 == route.candidate_id
                 && row.id.face_id == route.coverage_face_id
                 && row.id.component_id == route.component_id
+                && row.id.source_kind == route.source_kind
             {
                 if matching.replace(row.id).is_some() {
                     return Err(SpecializedError::AmbiguousRepairRoute { route });
@@ -554,6 +543,10 @@ impl RegularContactRoute {
     pub const fn component_id(self) -> u32 {
         self.component_id
     }
+    #[must_use]
+    pub(crate) const fn source_kind(self) -> RepairRowSourceKind {
+        self.source_kind
+    }
 }
 
 impl PrimaryRegularIdentity {
@@ -706,6 +699,7 @@ impl SpecializedContactPlan {
                 hash.u32(primary.route.owner_island_id);
                 hash.u32(primary.route.coverage_face_id);
                 hash.u32(primary.route.component_id);
+                hash_repair_row_source_kind(&mut hash, primary.route.source_kind);
                 hash.point3(primary.position_mm);
                 hash.point3(primary.normal);
             } else {
@@ -716,6 +710,7 @@ impl SpecializedContactPlan {
                 hash.u32(route.owner_island_id);
                 hash.u32(route.coverage_face_id);
                 hash.u32(route.component_id);
+                hash_repair_row_source_kind(&mut hash, route.source_kind);
             }
             for demand in &contact.demands {
                 hash.u8(match demand.kind {
@@ -818,11 +813,7 @@ pub enum SpecializedError {
     StaleAuthority,
     #[error("the immutable repair pool is stale or its lineage does not match this plan")]
     StaleRepairPool,
-    #[error("repair candidate id {candidate_id:?} occurs in more than one source")]
-    RepairCandidateIdCollision { candidate_id: ContactCandidateId },
-    #[error(
-        "synthetic candidate identity cannot be allocated without colliding with generic rows"
-    )]
+    #[error("synthetic candidate row cannot be represented as an identity")]
     SyntheticCandidateIdOverflow,
     #[error("repair pool contains an invalid source row")]
     InvalidRepairRow,
@@ -1033,18 +1024,6 @@ pub fn prepare_specialized_contacts(
         let delicacy = selection_config
             .delicacy_by_face
             .ok_or(ContactSelectionError::MissingDelicacySidecar)?;
-        let candidate_offset = match generic
-            .candidates()
-            .candidates()
-            .iter()
-            .map(|candidate| candidate.id.0)
-            .max()
-        {
-            Some(id) => id
-                .checked_add(1)
-                .ok_or(SpecializedError::SyntheticCandidateIdOverflow)?,
-            None => 0,
-        };
         let candidates = crate::ContactCandidatePool {
             candidates: payload
                 .rows()
@@ -1053,11 +1032,8 @@ pub fn prepare_specialized_contacts(
                 .map(|(row, candidate)| {
                     let row = u64::try_from(row)
                         .map_err(|_| SpecializedError::SyntheticCandidateIdOverflow)?;
-                    let id = candidate_offset
-                        .checked_add(row)
-                        .ok_or(SpecializedError::SyntheticCandidateIdOverflow)?;
                     Ok(crate::ContactCandidate {
-                        id: crate::ContactCandidateId(id),
+                        id: crate::ContactCandidateId(row),
                         face_id: candidate.face_id,
                         point_mm: candidate.point_mm,
                         normal: candidate.normal,
@@ -1068,8 +1044,11 @@ pub fn prepare_specialized_contacts(
                 })
                 .collect::<Result<Vec<_>, SpecializedError>>()?,
         };
+        // Synthetic rows enter the one immutable repair pool before any
+        // repair controller exists.  They therefore take only the shared S1
+        // baseline, never the legacy pre-routing A4 adapter.
         let selected =
-            crate::select_contacts(mesh, &candidates, &synthetic_islands, selection_config)?;
+            select_synthetic_baseline(mesh, &candidates, &synthetic_islands, selection_config)?;
         let expected_synthetic_samples = coverage_samples
             .iter()
             .filter(|sample| sample.island_id >= first_synthetic_id)
@@ -1092,7 +1071,14 @@ pub fn prepare_specialized_contacts(
     let mut physical = regular
         .contacts()
         .iter()
-        .map(|contact| WorkingContact::regular(contact, topology.component_ids(), &repair_pool))
+        .map(|contact| {
+            WorkingContact::regular(
+                contact,
+                topology.component_ids(),
+                RepairRowSourceKind::Generic,
+                &repair_pool,
+            )
+        })
         .collect::<Result<Vec<_>, _>>()?;
     if let Some(selected) = synthetic_selected.as_ref() {
         physical.extend(
@@ -1100,7 +1086,12 @@ pub fn prepare_specialized_contacts(
                 .contacts()
                 .iter()
                 .map(|contact| {
-                    WorkingContact::regular(contact, topology.component_ids(), &repair_pool)
+                    WorkingContact::regular(
+                        contact,
+                        topology.component_ids(),
+                        RepairRowSourceKind::SyntheticIsland,
+                        &repair_pool,
+                    )
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         );
@@ -1205,6 +1196,17 @@ pub fn prepare_specialized_contacts(
         load_partition,
         gate_evidence,
     })
+}
+
+/// The synthetic source has no historical public handoff, so it must never
+/// enter the compatibility-only pre-routing repair adapter.
+fn select_synthetic_baseline(
+    mesh: &Mesh,
+    candidates: &ContactCandidatePool,
+    islands: &[SupportIsland],
+    config: &ContactSelectionConfig<'_>,
+) -> Result<SelectedContacts, ContactSelectionError> {
+    crate::select_contacts_baseline(mesh, candidates, islands, config)
 }
 
 /// Construct an empty-cardinality authority solely to exercise the initial
@@ -1429,6 +1431,7 @@ impl WorkingContact {
     fn regular(
         contact: &SelectedContact,
         components: &[u32],
+        source_kind: RepairRowSourceKind,
         repair_pool: &RepairPool,
     ) -> Result<Self, SpecializedError> {
         let route = RegularContactRoute {
@@ -1436,6 +1439,7 @@ impl WorkingContact {
             owner_island_id: contact.island_id,
             coverage_face_id: contact.served_face_id,
             component_id: components[contact.served_face_id as usize],
+            source_kind,
         };
         repair_pool.resolve_route(route)?;
         let primary = PrimaryRegularIdentity {
@@ -3670,6 +3674,7 @@ fn hash_physical_seat_provenance(hash: &mut Fnv, provenance: PhysicalSeatProvena
             hash.u32(route.owner_island_id());
             hash.u32(route.coverage_face_id());
             hash.u32(route.component_id());
+            hash_repair_row_source_kind(hash, route.source_kind());
             hash.point3(primary.position_mm());
             hash.point3(primary.normal());
         }
@@ -3686,6 +3691,13 @@ fn hash_physical_seat_provenance(hash: &mut Fnv, provenance: PhysicalSeatProvena
             hash.point3(representative.nominated_normal());
         }
     }
+}
+
+fn hash_repair_row_source_kind(hash: &mut Fnv, source_kind: RepairRowSourceKind) {
+    hash.u8(match source_kind {
+        RepairRowSourceKind::Generic => 0,
+        RepairRowSourceKind::SyntheticIsland => 1,
+    });
 }
 
 impl Fnv {
@@ -3857,31 +3869,13 @@ mod tests {
     }
 
     #[test]
-    fn repair_pool_rejects_collisions_and_validates_unique_shared_occupancy() {
+    fn repair_pool_qualifies_equal_numeric_ids_by_source_and_validates_occupancy() {
         let generic = ContactCandidatePool {
             candidates: vec![repair_candidate(7, 0, [1.0, 0.0, 0.0])],
         };
-        let collision = ContactCandidatePool {
-            candidates: vec![repair_candidate(7, 1, [2.0, 0.0, 0.0])],
+        let synthetic = ContactCandidatePool {
+            candidates: vec![repair_candidate(7, 0, [2.0, 0.0, 0.0])],
         };
-        assert!(matches!(
-            RepairPool::build(
-                1,
-                &generic,
-                &[SupportIsland {
-                    id: 3,
-                    face_ids: vec![0]
-                }],
-                Some(&collision),
-                &[SupportIsland {
-                    id: 4,
-                    face_ids: vec![1]
-                }],
-                &[11, 12],
-            ),
-            Err(SpecializedError::RepairCandidateIdCollision { .. })
-        ));
-
         let pool = RepairPool::build(
             1,
             &generic,
@@ -3889,36 +3883,65 @@ mod tests {
                 id: 3,
                 face_ids: vec![0],
             }],
-            None,
-            &[],
+            Some(&synthetic),
+            &[SupportIsland {
+                id: 3,
+                face_ids: vec![0],
+            }],
             &[11],
         )
         .unwrap();
-        let route = RegularContactRoute {
+        let generic_route = RegularContactRoute {
             candidate_id: 7,
             owner_island_id: 3,
             coverage_face_id: 0,
             component_id: 11,
+            source_kind: RepairRowSourceKind::Generic,
         };
-        let contact = SpecializedPhysicalContact {
+        let synthetic_route = RegularContactRoute {
+            source_kind: RepairRowSourceKind::SyntheticIsland,
+            ..generic_route
+        };
+        assert_ne!(
+            pool.resolve_route(generic_route).unwrap(),
+            pool.resolve_route(synthetic_route).unwrap()
+        );
+        let generic_contact = SpecializedPhysicalContact {
             contact_id: 0,
             position_mm: [1.0, 0.0, 0.0],
             normal: [0.0, 0.0, -1.0],
             seat_provenance: PhysicalSeatProvenance::Regular(PrimaryRegularIdentity {
-                route,
+                route: generic_route,
                 position_mm: [1.0, 0.0, 0.0],
                 normal: [0.0, 0.0, -1.0],
             }),
             carried_area_mm2: 0.0,
             primary_regular: None,
-            regular_routes: vec![route],
+            regular_routes: vec![generic_route],
             demands: vec![minimum_demand(3, 0, 11, [1.0, 0.0, 0.0])],
         };
-        let occupied = pool.occupied_for_contacts(&[contact.clone()]).unwrap();
-        assert_eq!(occupied.len(), 1);
+        let synthetic_contact = SpecializedPhysicalContact {
+            contact_id: 1,
+            position_mm: [2.0, 0.0, 0.0],
+            normal: [0.0, 0.0, -1.0],
+            seat_provenance: PhysicalSeatProvenance::Regular(PrimaryRegularIdentity {
+                route: synthetic_route,
+                position_mm: [2.0, 0.0, 0.0],
+                normal: [0.0, 0.0, -1.0],
+            }),
+            carried_area_mm2: 0.0,
+            primary_regular: None,
+            regular_routes: vec![synthetic_route],
+            demands: Vec::new(),
+        };
+        let occupied = pool
+            .occupied_for_contacts(&[generic_contact.clone(), synthetic_contact])
+            .unwrap();
+        assert_eq!(occupied.len(), 2);
         assert!(occupied[0].shared_demanded);
+        assert!(!occupied[1].shared_demanded);
         assert!(matches!(
-            pool.validate_contacts(&[contact.clone(), contact]),
+            pool.validate_contacts(&[generic_contact.clone(), generic_contact]),
             Err(SpecializedError::DuplicateRepairRoute { .. })
         ));
     }
@@ -3952,6 +3975,32 @@ mod tests {
             pool.validate_lineage(9),
             Err(SpecializedError::StaleRepairPool)
         ));
+    }
+
+    #[test]
+    fn synthetic_selection_is_baseline_only_not_the_legacy_repair_adapter() {
+        let mesh = make_overhang_table().unwrap();
+        let delicacy = vec![0.0; mesh.tris().len()];
+        let perception = perception_config(&delicacy);
+        let candidates = crate::perceive_contacts(&mesh, &perception).unwrap();
+        let islands = vec![SupportIsland {
+            id: 91,
+            face_ids: candidates
+                .candidates()
+                .iter()
+                .map(|candidate| candidate.face_id)
+                .collect(),
+        }];
+        let selection =
+            ContactSelectionConfig::current_defaults(Some(&delicacy), perception.max_grid_bytes)
+                .unwrap();
+        let selected = select_synthetic_baseline(&mesh, &candidates, &islands, &selection)
+            .expect("synthetic baseline selection");
+        assert_eq!(
+            selected,
+            crate::select_contacts_baseline(&mesh, &candidates, &islands, &selection)
+                .expect("direct baseline selection")
+        );
     }
 
     #[test]
@@ -3994,6 +4043,7 @@ mod tests {
                     owner_island_id: 0,
                     coverage_face_id: 2,
                     component_id: 7,
+                    source_kind: RepairRowSourceKind::Generic,
                 },
                 Vec::new(),
             ),
@@ -4255,6 +4305,7 @@ mod tests {
                     owner_island_id: 0,
                     coverage_face_id: 99,
                     component_id: 88,
+                    source_kind: RepairRowSourceKind::Generic,
                 },
                 vec![face_ten],
             ),
@@ -4272,9 +4323,11 @@ mod tests {
         assert_eq!(proposals[1].representative_face_id, 10);
         assert_eq!(proposals[1].representative_normal, [-1.0, 0.0, 0.0]);
         assert_eq!(proposals[1].normal, contacts[0].normal);
-        assert!(proposals
-            .iter()
-            .all(|proposal| proposal.representative_face_id != 99));
+        assert!(
+            proposals
+                .iter()
+                .all(|proposal| proposal.representative_face_id != 99)
+        );
     }
 
     #[test]
@@ -4314,6 +4367,7 @@ mod tests {
                         owner_island_id: 0,
                         coverage_face_id: 99,
                         component_id: 7,
+                        source_kind: RepairRowSourceKind::Generic,
                     },
                     // An exact regular disposition makes this contact
                     // specialized before consolidation begins.
@@ -4328,12 +4382,16 @@ mod tests {
         assert_eq!(shared_proposals.len(), 2);
         assert_eq!(shared_proposals[0].representative_face_id, 1);
         assert_eq!(shared_proposals[1].representative_face_id, 3);
-        assert!(shared_proposals
-            .iter()
-            .all(|proposal| proposal.representative_face_id != 2));
-        assert!(shared_proposals
-            .iter()
-            .all(|proposal| proposal.representative_position_mm == locked));
+        assert!(
+            shared_proposals
+                .iter()
+                .all(|proposal| proposal.representative_face_id != 2)
+        );
+        assert!(
+            shared_proposals
+                .iter()
+                .all(|proposal| proposal.representative_position_mm == locked)
+        );
     }
 
     #[test]
@@ -4355,6 +4413,7 @@ mod tests {
                 owner_island_id: 0,
                 coverage_face_id: 99,
                 component_id: 7,
+                source_kind: RepairRowSourceKind::Generic,
             },
             vec![first],
         );
@@ -4395,6 +4454,7 @@ mod tests {
                     owner_island_id: 8,
                     coverage_face_id: 80,
                     component_id: 800,
+                    source_kind: RepairRowSourceKind::Generic,
                 },
                 vec![minimum_demand(0, 10, 7, position)],
             ),
@@ -4406,6 +4466,7 @@ mod tests {
                     owner_island_id: 9,
                     coverage_face_id: 90,
                     component_id: 900,
+                    source_kind: RepairRowSourceKind::Generic,
                 },
                 vec![minimum_demand(1, 11, 7, position)],
             ),
@@ -4653,6 +4714,7 @@ mod tests {
                 owner_island_id: 9,
                 coverage_face_id: 3,
                 component_id: 7,
+                source_kind: RepairRowSourceKind::Generic,
             },
             Vec::new(),
         )];
@@ -4870,6 +4932,7 @@ mod tests {
                 owner_island_id: 3,
                 coverage_face_id: 2,
                 component_id: 7,
+                source_kind: RepairRowSourceKind::Generic,
             },
             Vec::new(),
         );
@@ -4907,6 +4970,7 @@ mod tests {
                     owner_island_id: 3,
                     coverage_face_id: 2,
                     component_id: 7,
+                    source_kind: RepairRowSourceKind::Generic,
                 },
                 Vec::new(),
             ),
@@ -4958,6 +5022,7 @@ mod tests {
                     owner_island_id: 1,
                     coverage_face_id: 10,
                     component_id: 7,
+                    source_kind: RepairRowSourceKind::Generic,
                 },
                 vec![minimum_demand(1, 10, 7, position)],
             ),
@@ -4969,6 +5034,7 @@ mod tests {
                     owner_island_id: 9,
                     coverage_face_id: 90,
                     component_id: 70,
+                    source_kind: RepairRowSourceKind::Generic,
                 },
                 Vec::new(),
             ),
@@ -5008,6 +5074,7 @@ mod tests {
                 owner_island_id: 3,
                 coverage_face_id: 2,
                 component_id: 7,
+                source_kind: RepairRowSourceKind::Generic,
             },
             Vec::new(),
         );
