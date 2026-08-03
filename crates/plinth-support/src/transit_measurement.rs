@@ -163,6 +163,7 @@ struct ScarDiagnostic {
     area_max_mm2: f64,
     scar_length_mm: f64,
     anchor_area_mm2: f64,
+    neck_disc_area_mm2: f64,
     area_within_recorded_policy: bool,
     length_within_recorded_policy: bool,
     anchor_meets_recorded_policy: bool,
@@ -191,7 +192,7 @@ fn calculate_scar_diagnostic(
     input: &ScarDiagnosticInput,
 ) -> Result<ScarDiagnostic, ScarDiagnosticError> {
     let r_end = input.raw_anchor_radius_mm.max(input.tip_r_min_mm);
-    let taper = finite(input.d_mm / input.member_length_mm, "taper fraction")?;
+    let taper = finite(input.t_mm / input.member_length_mm, "taper fraction")?.clamp(0.0, 1.0);
     let unconstrained_radius = finite(
         r_end + finite((input.root_radius_mm - r_end) * taper, "taper delta")?,
         "taper radius",
@@ -205,7 +206,7 @@ fn calculate_scar_diagnostic(
     } else {
         policy.foot_ball_factor
     };
-    let ball_radius_mm = finite(r_x_mm * ball_factor, "ball radius")?;
+    let ball_radius_mm = finite(r_end * ball_factor, "ball radius")?;
     let exceeds_tol = input.t_mm > policy.interval_tol_mm;
     let cosine = if exceeds_tol {
         input.cosang.ok_or(ScarDiagnosticError::MissingCosine)?
@@ -250,6 +251,7 @@ fn calculate_scar_diagnostic(
             },
         "anchor area",
     )?;
+    let neck_disc_area_mm2 = finite(std::f64::consts::PI * r_end * r_end, "neck disc area")?;
     let (area_within_recorded_policy, length_within_recorded_policy, anchor_meets_recorded_policy) =
         recorded_constraints(
             policy,
@@ -257,6 +259,7 @@ fn calculate_scar_diagnostic(
             scar_length_mm,
             anchor_area_mm2,
             area_design_mm2,
+            neck_disc_area_mm2,
         );
     Ok(ScarDiagnostic {
         r_x_mm,
@@ -268,6 +271,7 @@ fn calculate_scar_diagnostic(
         area_max_mm2,
         scar_length_mm,
         anchor_area_mm2,
+        neck_disc_area_mm2,
         area_within_recorded_policy,
         length_within_recorded_policy,
         anchor_meets_recorded_policy,
@@ -283,11 +287,12 @@ fn recorded_constraints(
     scar_length_mm: f64,
     anchor_area_mm2: f64,
     area_design_mm2: f64,
+    neck_disc_area_mm2: f64,
 ) -> (bool, bool, bool) {
     (
         area_patch_mm2 <= policy.a_abs_mm2.max(policy.kappa * area_design_mm2),
         scar_length_mm <= policy.l_scar_max_mm,
-        anchor_area_mm2 >= area_design_mm2,
+        anchor_area_mm2 >= neck_disc_area_mm2,
     )
 }
 
@@ -1031,50 +1036,78 @@ mod tests {
     #[test]
     fn scar_constraint_equalities_pass_and_one_ulp_excesses_fail() {
         let policy = scar_policy();
-        let anchor_limit = 3.0;
-        let area_limit = policy.a_abs_mm2.max(policy.kappa * anchor_limit);
-        let length_limit = policy.l_scar_max_mm;
-        assert_eq!(
-            recorded_constraints(
-                &policy,
-                area_limit,
-                length_limit,
-                anchor_limit,
-                anchor_limit
-            ),
-            (true, true, true)
-        );
         let next = |value: f64| f64::from_bits(value.to_bits() + 1);
-        assert_eq!(
-            recorded_constraints(
-                &policy,
-                next(area_limit),
-                length_limit,
-                anchor_limit,
-                anchor_limit
+        let d_for_area = 0.5_f64;
+        let ball_area = std::f64::consts::PI * (1.4_f64.powi(2) - d_for_area.powi(2));
+        let design_area = std::f64::consts::PI * 1.4_f64.powi(2);
+        let t_for_area = (policy.kappa * design_area - ball_area) / 2.0;
+        let area_equal = calculate_scar_diagnostic(
+            &policy,
+            &scar_input(
+                t_for_area,
+                d_for_area,
+                Some(1.0),
+                1.0,
+                0.5,
+                1.0,
+                5.0,
+                MemberKind::Shoot,
             ),
-            (false, true, true)
-        );
-        assert_eq!(
-            recorded_constraints(
+        )
+        .unwrap();
+        assert_eq!(area_equal.area_patch_mm2, area_equal.area_max_mm2);
+        assert!(area_equal.area_within_recorded_policy);
+        let one_ulp_over_area = next(area_equal.area_patch_mm2);
+        assert!(one_ulp_over_area > area_equal.area_max_mm2);
+        assert!(
+            !recorded_constraints(
                 &policy,
-                area_limit,
-                next(length_limit),
-                anchor_limit,
-                anchor_limit
-            ),
-            (true, false, true)
+                one_ulp_over_area,
+                0.0,
+                0.0,
+                area_equal.area_design_mm2,
+                0.0,
+            )
+            .0
         );
+
+        let length_equal = calculate_scar_diagnostic(
+            &policy,
+            &scar_input(0.5, 0.0, Some(0.5), 1.0, 0.5, 1.0, 5.0, MemberKind::Shoot),
+        )
+        .unwrap();
+        assert_eq!(length_equal.scar_length_mm, policy.l_scar_max_mm);
+        assert!(length_equal.length_within_recorded_policy);
+        let one_ulp_over_length = next(length_equal.scar_length_mm);
+        assert!(one_ulp_over_length > policy.l_scar_max_mm);
+        assert!(!recorded_constraints(&policy, 0.0, one_ulp_over_length, 0.0, 0.0, 0.0,).1);
+
+        let anchor_equal = calculate_scar_diagnostic(
+            &policy,
+            &scar_input(1.0, 1.4, Some(1.0), 1.0, 0.5, 1.0, 1.0, MemberKind::Shoot),
+        )
+        .unwrap();
         assert_eq!(
-            recorded_constraints(
-                &policy,
-                area_limit,
-                length_limit,
-                anchor_limit,
-                next(anchor_limit)
-            ),
-            (true, true, false)
+            anchor_equal.anchor_area_mm2,
+            anchor_equal.neck_disc_area_mm2
         );
+        assert!(anchor_equal.anchor_meets_recorded_policy);
+        let anchor_under = calculate_scar_diagnostic(
+            &policy,
+            &scar_input(
+                1.0,
+                1.4,
+                Some(1.0),
+                1.0,
+                0.5,
+                f64::from_bits(1.0_f64.to_bits() - 1),
+                1.0,
+                MemberKind::Shoot,
+            ),
+        )
+        .unwrap();
+        assert!(anchor_under.anchor_area_mm2 < anchor_under.neck_disc_area_mm2);
+        assert!(!anchor_under.anchor_meets_recorded_policy);
     }
 
     #[test]
@@ -1113,15 +1146,28 @@ mod tests {
     }
 
     #[test]
-    fn scar_uses_taper_ball_kind_and_detached_anchor_formula() {
+    fn scar_uses_t_based_taper_end_based_balls_and_detached_anchor_formula() {
         let policy = scar_policy();
         let stub = calculate_scar_diagnostic(
             &policy,
-            &scar_input(0.06, 10.0, Some(1.0), 2.0, 0.5, 1.0, 1.0, MemberKind::Stub),
+            &scar_input(0.0, 10.0, None, 2.0, 0.5, 1.0, 1.0, MemberKind::Stub),
         )
         .unwrap();
-        assert_eq!(stub.r_x_mm, 1.0, "taper clamps at the root radius");
-        assert_eq!(stub.ball_radius_mm, 1.5);
+        assert_eq!(stub.r_x_mm, 2.0, "fixed d does not control taper");
+        assert_eq!(stub.ball_radius_mm, 3.0);
+        let taper_clamped = calculate_scar_diagnostic(
+            &policy,
+            &scar_input(2.0, 10.0, Some(1.0), 2.0, 0.5, 1.0, 1.0, MemberKind::Stub),
+        )
+        .unwrap();
+        assert_eq!(
+            taper_clamped.r_x_mm, 1.0,
+            "T/member length clamps at the root radius"
+        );
+        assert_eq!(
+            taper_clamped.ball_radius_mm, 3.0,
+            "ball remains tied to r_end"
+        );
         let nonstub = calculate_scar_diagnostic(
             &policy,
             &scar_input(0.06, 0.0, Some(1.0), 0.5, 1.0, 1.0, 5.0, MemberKind::Brace),
@@ -1140,7 +1186,7 @@ mod tests {
         );
         let detached = calculate_scar_diagnostic(
             &policy,
-            &scar_input(0.06, 1.4, Some(1.0), 1.0, 0.5, 1.0, 5.0, MemberKind::Shoot),
+            &scar_input(0.5, 1.4, Some(1.0), 1.0, 0.5, 0.5, 1.0, MemberKind::Shoot),
         )
         .unwrap();
         assert_eq!(detached.area_ball_mm2, 0.0);
