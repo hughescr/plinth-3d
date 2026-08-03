@@ -339,19 +339,6 @@ impl CoverageMeasurementResourcePlan {
     pub const fn assessment_work(self) -> usize {
         self.assessment_work
     }
-    #[must_use]
-    pub const fn assessment_scratch_bytes(self) -> usize {
-        self.assessment_scratch_bytes
-    }
-    #[must_use]
-    pub const fn assessment_evidence_bytes(self) -> usize {
-        self.assessment_evidence_bytes
-    }
-    #[must_use]
-    pub const fn assessment_phase_peak_bytes(self) -> usize {
-        self.assessment_phase_peak_bytes
-    }
-
     pub(crate) const fn from_summary(summary: CoverageMeasurementResourceSummary) -> Self {
         Self {
             route_membership_sum: summary.route_membership_sum,

@@ -1702,7 +1702,7 @@ fn coverage_assessment_resource_plan_for(
     mode: CoverageAssessmentMode,
 ) -> Result<CoverageAssessmentResourcePlan, ContactSelectionError> {
     let count = samples.len();
-    let scratch_bytes = count
+    let traversal_scratch_bytes = count
         .checked_mul(
             std::mem::size_of::<usize>() * 4
                 + std::mem::size_of::<u32>()
@@ -1729,25 +1729,34 @@ fn coverage_assessment_resource_plan_for(
                 .and_then(|neighbors| work.checked_add(neighbors))
         })
         .ok_or(ContactSelectionError::CoverageResourceOverflow)?;
-    let evidence_bytes = match mode {
-        CoverageAssessmentMode::RepairNoEvidence => 0,
-        CoverageAssessmentMode::MeasurementEvidence => count
-            .checked_mul(std::mem::size_of::<CoverageAssessmentPatch>())
-            .and_then(|bytes| {
-                count
-                    .checked_mul(std::mem::size_of::<u32>())
-                    .and_then(|faces| bytes.checked_add(faces))
-            })
-            // Final patch rows coexist with the traversal rows while the face
-            // buffers are moved, rather than copied, into immutable evidence.
-            .and_then(|bytes| {
-                count
-                    .checked_mul(std::mem::size_of::<
-                        crate::coverage_measurement::CoverageMeasurementPatchEvidence,
-                    >())
-                    .and_then(|rows| bytes.checked_add(rows))
-            })
-            .ok_or(ContactSelectionError::CoverageResourceOverflow)?,
+    let (scratch_bytes, evidence_bytes) = match mode {
+        CoverageAssessmentMode::RepairNoEvidence => (traversal_scratch_bytes, 0),
+        CoverageAssessmentMode::MeasurementEvidence => (
+            traversal_scratch_bytes
+                .checked_add(
+                    count
+                        .checked_mul(std::mem::size_of::<usize>())
+                        .ok_or(ContactSelectionError::CoverageResourceOverflow)?,
+                )
+                .ok_or(ContactSelectionError::CoverageResourceOverflow)?,
+            count
+                .checked_mul(std::mem::size_of::<CoverageAssessmentPatch>())
+                .and_then(|bytes| {
+                    count
+                        .checked_mul(std::mem::size_of::<u32>())
+                        .and_then(|faces| bytes.checked_add(faces))
+                })
+                // Final patch rows coexist with the traversal rows while the face
+                // buffers are moved, rather than copied, into immutable evidence.
+                .and_then(|bytes| {
+                    count
+                        .checked_mul(std::mem::size_of::<
+                            crate::coverage_measurement::CoverageMeasurementPatchEvidence,
+                        >())
+                        .and_then(|rows| bytes.checked_add(rows))
+                })
+                .ok_or(ContactSelectionError::CoverageResourceOverflow)?,
+        ),
     };
     let phase_peak_bytes = scratch_bytes
         .checked_add(evidence_bytes)
@@ -1851,6 +1860,10 @@ pub(crate) fn assess_coverage_with_mode(
     let mut visited = vec![false; groups.len()];
     let mut stack = Vec::with_capacity(samples.len());
     let mut patch_samples = Vec::with_capacity(samples.len());
+    let mut patch_groups = match mode {
+        CoverageAssessmentMode::RepairNoEvidence => Vec::new(),
+        CoverageAssessmentMode::MeasurementEvidence => Vec::with_capacity(samples.len()),
+    };
     for group_index in 0..groups.len() {
         if visited[group_index] {
             continue;
@@ -1861,12 +1874,16 @@ pub(crate) fn assess_coverage_with_mode(
         let mut patch_area = 0.0;
         let mut patch_ambiguous = false;
         patch_samples.clear();
+        patch_groups.clear();
         while let Some(current_index) = stack.pop() {
             let current = groups[current_index];
             patch_area += current.area_mm2;
             patch_ambiguous |= topology.cut_flags()[current.face_id as usize] != 0;
             patch_samples
                 .extend_from_slice(&uncovered_indices[current.sample_start..current.sample_end]);
+            if mode == CoverageAssessmentMode::MeasurementEvidence {
+                patch_groups.push(current_index);
+            }
             for &neighbor in topology.neighbors(current.face_id as usize).unwrap_or(&[]) {
                 if let Ok(neighbor_index) = groups
                     .binary_search_by_key(&(current.island_id, neighbor), |group| {
@@ -1892,12 +1909,12 @@ pub(crate) fn assess_coverage_with_mode(
             failing_islands.push(groups[group_index].island_id);
         }
         if mode == CoverageAssessmentMode::MeasurementEvidence {
-            let mut face_ids = patch_samples
-                .iter()
-                .map(|&index| samples[index].face_id)
-                .collect::<Vec<_>>();
+            // Groups are unique `(island, face)` rows and a patch is confined
+            // to one island, so this produces one face ID per group without a
+            // duplicate buffer or a dedup/shrink pass.
+            let mut face_ids = Vec::with_capacity(patch_groups.len());
+            face_ids.extend(patch_groups.iter().map(|&index| groups[index].face_id));
             face_ids.sort_unstable();
-            face_ids.dedup();
             let representative_face_id = *face_ids.first().expect("uncovered patch has a face");
             let component_id =
                 samples[*patch_samples.first().expect("uncovered patch has a sample")].component_id;

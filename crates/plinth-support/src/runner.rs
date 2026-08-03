@@ -22,6 +22,10 @@ use crate::coverage_measurement::CoverageMeasurementResourceSummary;
 static NORMALIZED_ROUTE_PROJECTION_RESERVES: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
 
+#[cfg(test)]
+static COVERAGE_ROUTE_QUERIES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 use crate::{
     anchor::{AnchorGeometryAuthority, AnchorSearchConfig, AnchorSearchError, SurfaceAnchorPool},
     assess_coverage_with_mode,
@@ -440,6 +444,8 @@ impl<'a> SupportVerificationSnapshot<'a> {
             });
         }
         let mut nearest = vec![f64::INFINITY; self.coverage_samples.len()];
+        #[cfg(test)]
+        COVERAGE_ROUTE_QUERIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         fill_route_points_nearest(&points, self.coverage_samples, &mut nearest, planned).map_err(
             |_| CoverageMeasurementError::KernelRefusal {
                 operation: "route kNN query",
@@ -4010,6 +4016,112 @@ mod tests {
                 NORMALIZED_ROUTE_PROJECTION_RESERVES.load(std::sync::atomic::Ordering::Relaxed),
                 0,
                 "the capped request must not reserve the normalized projection"
+            );
+        });
+    }
+
+    #[test]
+    fn coverage_logical_peak_cap_preflights_duplicate_face_evidence_before_query() {
+        with_braced_table(|braced| {
+            let lowered = braced
+                .structure()
+                .expect("required corpus structures")
+                .lower()
+                .expect("required corpus lowers");
+            let snapshot = lowered
+                .verification_snapshot()
+                .expect("validated final authority snapshots");
+            assert!(
+                snapshot
+                    .coverage_samples
+                    .windows(2)
+                    .any(|rows| rows[0].face_id == rows[1].face_id),
+                "fixture retains multiple samples for one source face"
+            );
+            let points = snapshot
+                .routed_route_memberships
+                .iter()
+                .flat_map(|membership| {
+                    membership
+                        .logical_routes
+                        .iter()
+                        .map(move |route| CoverageRoutePoint {
+                            physical_id: membership.contact.physical_contact_id(),
+                            island_id: route.island_id,
+                            component_id: route.component_id,
+                            position_mm: membership.contact.position_mm(),
+                        })
+                })
+                .collect::<Vec<_>>();
+            let planned =
+                plan_route_points_nearest(&points, snapshot.coverage_samples, TEST_KNN_LIMITS)
+                    .expect("fixture route preflight");
+            let island_rows = snapshot
+                .coverage_samples
+                .iter()
+                .filter(|sample| {
+                    snapshot.named_islands.iter().any(|island| {
+                        island.id == sample.island_id && island.face_ids.contains(&sample.face_id)
+                    })
+                })
+                .count();
+            let assessment = coverage_measurement_assessment_resource_plan(
+                snapshot.coverage_samples,
+                snapshot.topology,
+                island_rows,
+            )
+            .expect("assessment preflight");
+            let logical_peak = snapshot
+                .coverage_samples
+                .len()
+                .checked_mul(size_of::<f64>())
+                .and_then(|bytes| bytes.checked_add(points.len() * size_of::<CoverageRoutePoint>()))
+                .and_then(|base| {
+                    planned
+                        .retained_base_bytes()
+                        .checked_add(planned.max_knn_peak_bytes())
+                        .and_then(|route_peak| {
+                            base.checked_add(route_peak.max(assessment.phase_peak_bytes))
+                        })
+                })
+                .expect("fixture logical peak fits usize");
+            let (memberships, _, indexed, _, rows, distance_work) = planned.measurement_counts();
+            let request_for = |max_logical_peak_bytes| {
+                CoverageMeasurementRequest::from_f64(
+                    0.000_001,
+                    0.000_001,
+                    CoverageMeasurementLimits::new(
+                        memberships.max(1),
+                        indexed.max(1),
+                        rows.max(1),
+                        distance_work.max(1),
+                        max_logical_peak_bytes,
+                        assessment.operations.max(1),
+                    )
+                    .expect("nonzero fixture limits"),
+                )
+                .expect("finite measurement request")
+            };
+            let measurement = snapshot
+                .measure_coverage(request_for(logical_peak))
+                .expect("exact logical peak passes");
+            for patch in measurement.evidence().patches() {
+                assert!(patch
+                    .sorted_face_ids()
+                    .windows(2)
+                    .all(|faces| faces[0] < faces[1]));
+            }
+            COVERAGE_ROUTE_QUERIES.store(0, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(
+                snapshot.measure_coverage(request_for(logical_peak - 1)),
+                Err(CoverageMeasurementError::ResourceLimit {
+                    resource: "logical peak bytes",
+                })
+            );
+            assert_eq!(
+                COVERAGE_ROUTE_QUERIES.load(std::sync::atomic::Ordering::Relaxed),
+                0,
+                "the cap-minus-one request must not query or traverse coverage"
             );
         });
     }
