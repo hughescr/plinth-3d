@@ -13,4 +13,9 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
+geom_kernel = { path = "../../rust/geom_kernel" }
+plinth-decimate = { path = "../plinth-decimate" }
+plinth-hollow = { path = "../plinth-hollow" }
+plinth-mesh = { path = "../plinth-mesh" }
+plinth-orient = { path = "../plinth-orient" }
 serde_json = { workspace = true }

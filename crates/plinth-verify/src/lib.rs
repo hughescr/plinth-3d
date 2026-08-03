@@ -154,8 +154,27 @@ pub fn verify_coverage(
         return Err(CoverageVerificationError::SnapshotBinding);
     }
 
-    let request = request_record(request);
-    let plan = measurement.resource_plan();
+    coverage_report_from_measurement_inputs(
+        artifact,
+        measurement.snapshot_digest(),
+        request_record(request),
+        measurement.resource_plan(),
+        measurement.evidence().islands(),
+        measurement.evidence().patches(),
+    )
+}
+
+/// Projects immutable support-measurement evidence into the verifier-owned
+/// report and verdict.  This remains private: callers may only supply live
+/// sealed measurement output through [`verify_coverage`].
+fn coverage_report_from_measurement_inputs(
+    artifact: ArtifactId,
+    snapshot_digest: u64,
+    request: CoverageRequestRecord,
+    plan: plinth_support::CoverageMeasurementResourcePlan,
+    measured_islands: &[plinth_support::CoverageMeasurementIslandEvidence],
+    measured_patches: &[plinth_support::CoverageMeasurementPatchEvidence],
+) -> Result<CoverageReport, CoverageVerificationError> {
     let resources = CoverageResourceRecord {
         route_membership_sum: plan.route_membership_sum(),
         sequential_route_membership_peak: plan.sequential_route_membership_peak(),
@@ -169,9 +188,7 @@ pub fn verify_coverage(
         assessment_evidence_bytes: plan.assessment_evidence_bytes(),
         assessment_phase_peak_bytes: plan.assessment_phase_peak_bytes(),
     };
-    let mut islands = measurement
-        .evidence()
-        .islands()
+    let mut islands = measured_islands
         .iter()
         .map(|island| CoverageIslandEvidenceRecord {
             island_id: island.island_id(),
@@ -194,9 +211,7 @@ pub fn verify_coverage(
                 &right.sorted_face_ids,
             ))
     });
-    let mut patches = measurement
-        .evidence()
-        .patches()
+    let mut patches = measured_patches
         .iter()
         .map(|patch| CoveragePatchEvidenceRecord {
             island_id: patch.island_id(),
@@ -226,13 +241,32 @@ pub fn verify_coverage(
                 &right.sorted_face_ids,
             ))
     });
-    let defects = defects_for_patches(&patches)?;
-    Ok(CoverageReport {
+    coverage_report_from_projection(
         artifact,
-        snapshot_digest: measurement.snapshot_digest(),
+        snapshot_digest,
         request,
         resources,
-        evidence: CoverageEvidenceRecord { islands, patches },
+        CoverageEvidenceRecord { islands, patches },
+    )
+}
+
+/// Final verifier-owned projection.  Unit tests exercise this with immutable
+/// evidence records, while production reaches it only after one live
+/// measurement and the projection above.
+fn coverage_report_from_projection(
+    artifact: ArtifactId,
+    snapshot_digest: u64,
+    request: CoverageRequestRecord,
+    resources: CoverageResourceRecord,
+    evidence: CoverageEvidenceRecord,
+) -> Result<CoverageReport, CoverageVerificationError> {
+    let defects = defects_for_patches(&evidence.patches)?;
+    Ok(CoverageReport {
+        artifact,
+        snapshot_digest,
+        request,
+        resources,
+        evidence,
         defects,
     })
 }
@@ -618,21 +652,26 @@ mod tests {
     }
 
     #[test]
-    fn coverage_report_json_roundtrips_exactly() {
-        let report = CoverageReport {
-            artifact: ArtifactId::from("coverage-fixture"),
-            snapshot_digest: 42,
-            request: CoverageRequestRecord {
-                radius_mm: Finite::new(1.0).expect("finite"),
-                patch_area_floor_mm2: Finite::new(0.25).expect("finite"),
+    fn immutable_projection_keeps_same_island_aggregation_order_and_gap_evidence() {
+        let patches = vec![
+            patch(2, 1.5, false, true),
+            patch(2, 2.25, false, false),
+            patch(7, 0.0, true, false),
+        ];
+        let report = coverage_report_from_projection(
+            ArtifactId::from("projection-fixture"),
+            99,
+            CoverageRequestRecord {
+                radius_mm: Finite::new(1.0).unwrap(),
+                patch_area_floor_mm2: Finite::new(1.0).unwrap(),
                 max_route_memberships: 1,
-                max_indexed_points: 2,
-                max_query_rows: 3,
-                max_distance_work: 4,
-                max_logical_peak_bytes: 5,
-                max_assessment_work: 6,
+                max_indexed_points: 1,
+                max_query_rows: 1,
+                max_distance_work: 1,
+                max_logical_peak_bytes: 1,
+                max_assessment_work: 1,
             },
-            resources: CoverageResourceRecord {
+            CoverageResourceRecord {
                 route_membership_sum: 1,
                 sequential_route_membership_peak: 1,
                 indexed_point_count: 1,
@@ -645,12 +684,75 @@ mod tests {
                 assessment_evidence_bytes: 1,
                 assessment_phase_peak_bytes: 1,
             },
-            evidence: CoverageEvidenceRecord {
+            CoverageEvidenceRecord {
+                islands: vec![
+                    CoverageIslandEvidenceRecord {
+                        island_id: 2,
+                        component_id: 0,
+                        representative_face_id: 2,
+                        sorted_face_ids: vec![2],
+                    },
+                    CoverageIslandEvidenceRecord {
+                        island_id: 7,
+                        component_id: 0,
+                        representative_face_id: 7,
+                        sorted_face_ids: vec![7],
+                    },
+                ],
+                patches,
+            },
+        )
+        .expect("finite immutable projection");
+        assert!(!report.accepted());
+        assert_eq!(
+            report
+                .defects()
+                .iter()
+                .map(|defect| defect.site.clone())
+                .collect::<Vec<_>>(),
+            vec![SiteId::Island(2), SiteId::Island(7)]
+        );
+        assert_eq!(report.defects()[0].measure.get(), 3.75);
+        assert_eq!(report.defects()[1].measure.get(), 0.0);
+        let json = serde_json::to_string(&report).expect("exact projection json");
+        assert!(json.contains("\"state\":\"no_routed_contact\""));
+        assert!(json.find("\"island_id\":2").unwrap() < json.find("\"island_id\":7").unwrap());
+    }
+
+    #[test]
+    fn coverage_report_json_roundtrips_exactly() {
+        let report = coverage_report_from_projection(
+            ArtifactId::from("coverage-fixture"),
+            42,
+            CoverageRequestRecord {
+                radius_mm: Finite::new(1.0).expect("finite"),
+                patch_area_floor_mm2: Finite::new(0.25).expect("finite"),
+                max_route_memberships: 1,
+                max_indexed_points: 2,
+                max_query_rows: 3,
+                max_distance_work: 4,
+                max_logical_peak_bytes: 5,
+                max_assessment_work: 6,
+            },
+            CoverageResourceRecord {
+                route_membership_sum: 1,
+                sequential_route_membership_peak: 1,
+                indexed_point_count: 1,
+                sequential_indexed_point_peak: 1,
+                query_row_count: 1,
+                distance_work: 1,
+                logical_peak_bytes: 1,
+                assessment_work: 1,
+                assessment_scratch_bytes: 1,
+                assessment_evidence_bytes: 1,
+                assessment_phase_peak_bytes: 1,
+            },
+            CoverageEvidenceRecord {
                 islands: Vec::new(),
                 patches: Vec::new(),
             },
-            defects: Vec::new(),
-        };
+        )
+        .expect("immutable verifier projection");
         let json = serde_json::to_string(&report).expect("serialize report");
         assert_eq!(
             serde_json::from_str::<CoverageReport>(&json).expect("deserialize report"),

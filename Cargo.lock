@@ -1189,7 +1189,12 @@ name = "plinth-verify"
 version = "0.1.0"
 dependencies = [
  "chitubox_io",
+ "geom_kernel",
  "plinth-core",
+ "plinth-decimate",
+ "plinth-hollow",
+ "plinth-mesh",
+ "plinth-orient",
  "plinth-support",
  "serde",
  "serde_json",
