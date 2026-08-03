@@ -3448,6 +3448,14 @@ mod tests {
         )
     }
 
+    type CompletedInitialRoutes = (
+        CcoController,
+        Vec<u32>,
+        Option<TerminalCcoRequest>,
+        Option<TerminalLedgerEntry>,
+        Vec<(u32, TerminalCcoOutcome)>,
+    );
+
     fn route_initial_build(
         build: &mut InitialContactBuild,
         plan: &SpecializedContactPlan,
@@ -3455,18 +3463,14 @@ mod tests {
         geometry: &AnchorGeometryAuthority<'_>,
         delicacy: &[f64],
         frame: BuildFrame,
-    ) -> (
-        CcoController,
-        Vec<u32>,
-        Option<TerminalCcoRequest>,
-        Option<TerminalLedgerEntry>,
-    ) {
+    ) -> CompletedInitialRoutes {
         let pool = SurfaceAnchorPool::from_geometry(geometry, delicacy).unwrap();
         let mut controller = CcoController::default();
         let mut expected = build.routing_order().specialized_terminals().to_vec();
         expected.extend_from_slice(build.routing_order().regular_terminals());
         let mut routed_request = None;
         let mut skipped_ledger = None;
+        let mut outcomes = Vec::new();
         for terminal in &expected {
             let ledger = build.forest().terminal_ledger(*terminal).unwrap();
             if ledger.state == TerminalLedgerState::Quarantined {
@@ -3483,7 +3487,7 @@ mod tests {
                 .iter()
                 .find(|contact| contact.contact_id() == u64::from(*terminal))
                 .unwrap();
-            controller
+            let outcome = controller
                 .grow_terminal_with_finalized_anchor(
                     build.forest_mut(),
                     &request,
@@ -3498,8 +3502,55 @@ mod tests {
                     },
                 )
                 .unwrap();
+            outcomes.push((*terminal, outcome));
         }
-        (controller, expected, routed_request, skipped_ledger)
+        (
+            controller,
+            expected,
+            routed_request,
+            skipped_ledger,
+            outcomes,
+        )
+    }
+
+    fn no_winner_reason_signature(reason: &NoWinnerEvidence) -> String {
+        let refusals = |refusals: &[AnchorFootRefusal]| {
+            let mut signature = String::new();
+            for refusal in refusals {
+                let provenance = refusal.provenance();
+                signature.push_str(&format!(
+                    ";{}:{}:{}:{}",
+                    match refusal.reason() {
+                        AnchorFootRefusalReason::ReboundContact => 0,
+                        AnchorFootRefusalReason::ReboundTerminal => 1,
+                        AnchorFootRefusalReason::ReboundRewireBinding => 2,
+                        AnchorFootRefusalReason::StaleConfig => 3,
+                        AnchorFootRefusalReason::StaleGeometry => 4,
+                        AnchorFootRefusalReason::StalePool => 5,
+                        AnchorFootRefusalReason::FootBallBreached => 6,
+                    },
+                    provenance.physical_contact_id().unwrap_or(u64::MAX),
+                    provenance.sample_index(),
+                    provenance.source_sample_face_id(),
+                ));
+            }
+            signature
+        };
+        match reason {
+            NoWinnerEvidence::NoCandidatesGenerated => "0:0:0".to_owned(),
+            NoWinnerEvidence::NoFeasibleCandidate {
+                candidates_generated,
+                anchor_refusals,
+            } => format!("1:{candidates_generated}:0:{}", refusals(anchor_refusals)),
+            NoWinnerEvidence::AllFeasibleCandidatesRefusedByClearance {
+                candidates_generated,
+                candidates_feasible,
+                anchor_refusals,
+            } => format!(
+                "2:{candidates_generated}:{candidates_feasible}:{}",
+                refusals(anchor_refusals)
+            ),
+        }
     }
 
     #[test]
@@ -3507,7 +3558,7 @@ mod tests {
         let (mut build, plan, loads, surface, topology, mesh, delicacy) =
             real_mixed_initial_transcript_fixture();
         let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
-        let (mut controller, expected, routed_request, skipped_ledger) = route_initial_build(
+        let (mut controller, expected, routed_request, skipped_ledger, _) = route_initial_build(
             &mut build,
             &plan,
             &loads,
@@ -3589,7 +3640,7 @@ mod tests {
         let (mut build, plan, loads, surface, topology, mesh, delicacy) =
             real_no_winner_initial_transcript_fixture();
         let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
-        let (mut controller, expected, _, _) = route_initial_build(
+        let (mut controller, expected, _, _, outcomes) = route_initial_build(
             &mut build,
             &plan,
             &loads,
@@ -3610,15 +3661,39 @@ mod tests {
         let reason = row
             .no_winner_reason()
             .expect("no-winner keeps its exact terminal reason");
+        let outcome = outcomes
+            .iter()
+            .find(|(terminal, _)| *terminal == row.terminal_id())
+            .map(|(_, outcome)| outcome)
+            .unwrap();
         assert_eq!(route.physical_contact_id, row.physical_contact_id());
         assert_eq!(route.terminal_id, row.terminal_id());
         assert_eq!(route.original_key, row.original_key());
         assert!(matches!(
             reason,
-            NoWinnerEvidence::NoCandidatesGenerated
-                | NoWinnerEvidence::NoFeasibleCandidate { .. }
-                | NoWinnerEvidence::AllFeasibleCandidatesRefusedByClearance { .. }
+            NoWinnerEvidence::NoFeasibleCandidate {
+                candidates_generated: 1,
+                anchor_refusals,
+            } if anchor_refusals.is_empty()
         ));
+        assert!(outcome.winner.is_none());
+        assert!(matches!(
+            outcome.disposition,
+            Some(TerminalDisposition::UnroutedNoWinner {
+                reason: NoWinnerEvidence::NoFeasibleCandidate {
+                    candidates_generated: 1,
+                    ref anchor_refusals,
+                },
+                ..
+            }) if anchor_refusals.is_empty()
+        ));
+        assert_eq!(outcome.candidates_generated, 1);
+        assert_eq!(outcome.candidates_feasible, 0);
+        assert_eq!(outcome.anchor_ray_batches, 0);
+        assert_eq!(outcome.anchor_foot_batches, 0);
+        assert_eq!(outcome.clearance_batches, 0);
+        assert!(outcome.validated_model_anchor.is_none());
+        assert!(outcome.anchor_refusals.is_empty());
         assert_eq!(
             build
                 .forest()
@@ -3704,7 +3779,7 @@ mod tests {
         let (mut build, plan, loads, surface, topology, mesh, delicacy) =
             real_mixed_initial_transcript_fixture();
         let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
-        let (mut controller, expected, _, _) = route_initial_build(
+        let (mut controller, expected, _, _, _) = route_initial_build(
             &mut build,
             &plan,
             &loads,
@@ -3764,7 +3839,7 @@ mod tests {
         let (mut build, plan, loads, surface, topology, mesh, delicacy) =
             real_mixed_initial_transcript_fixture();
         let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
-        let (mut controller, _, _, _) = route_initial_build(
+        let (mut controller, _, _, _, _) = route_initial_build(
             &mut build,
             &plan,
             &loads,
@@ -3797,7 +3872,7 @@ mod tests {
             let (mut build, plan, loads, surface, topology, mesh, delicacy) =
                 real_mixed_initial_transcript_fixture();
             let geometry = AnchorGeometryAuthority::new(&mesh, &topology, &surface).unwrap();
-            let (mut controller, _, _, _) = route_initial_build(
+            let (mut controller, _, _, _, _) = route_initial_build(
                 &mut build,
                 &plan,
                 &loads,
@@ -3850,7 +3925,7 @@ mod tests {
                 real_no_winner_initial_transcript_fixture();
             let no_geometry =
                 AnchorGeometryAuthority::new(&no_mesh, &no_topology, &no_surface).unwrap();
-            let (mut no_controller, _, _, _) = route_initial_build(
+            let (mut no_controller, _, _, _, no_outcomes) = route_initial_build(
                 &mut no_build,
                 &no_plan,
                 &no_loads,
@@ -3868,8 +3943,13 @@ mod tests {
                 .unwrap();
             let no_route = no_row.route().unwrap();
             let no_reason = no_row.no_winner_reason().unwrap();
+            let no_outcome = no_outcomes
+                .iter()
+                .find(|(terminal, _)| *terminal == no_row.terminal_id())
+                .map(|(_, outcome)| outcome)
+                .unwrap();
             println!(
-                "{LINE}{:016x}:{:016x}:{rows}|no={:016x}:{}:{}:{}:{}:{:?}",
+                "{LINE}{:016x}:{:016x}:{rows}|no={:016x}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
                 transcript.digest(),
                 transcript.ordered_disposition_digest(),
                 no_transcript.digest(),
@@ -3877,7 +3957,13 @@ mod tests {
                 no_row.physical_contact_id(),
                 no_route.forest_digest_before,
                 no_route.controller_digest_before,
-                no_reason,
+                no_winner_reason_signature(no_reason),
+                no_outcome.candidates_generated,
+                no_outcome.candidates_feasible,
+                no_outcome.anchor_ray_batches,
+                no_outcome.anchor_foot_batches,
+                no_outcome.clearance_batches,
+                no_outcome.anchor_refusals.len(),
             );
             return;
         }
