@@ -29,6 +29,7 @@ use crate::{
         prepare_generic_contacts, FinalizedContactLoads, GenericContactPlan,
         GenericPerceptionError, GenericPerceptionLimits, SpecializedOwnerReservation,
     },
+    rewire::{optimize as optimize_rewire, RewireError, RewireReport, RewireRequest},
     select_contacts_baseline,
     specialized::{
         prepare_specialized_contacts, SpecializedContactPlan, SpecializedError, SpecializedLimits,
@@ -403,7 +404,7 @@ pub(crate) struct RoutedSupportRun<'a> {
     state: RoutedPlanState,
 }
 
-impl RoutedSupportRun<'_> {
+impl<'a> RoutedSupportRun<'a> {
     #[must_use]
     pub(crate) const fn mesh(&self) -> &Mesh {
         self.context.mesh()
@@ -452,6 +453,187 @@ impl RoutedSupportRun<'_> {
     #[must_use]
     pub(crate) const fn transcript(&self) -> &FinalizedCcoTranscript {
         &self.state.transcript
+    }
+
+    /// Consume the sealed CCO route state in the one deterministic rewire
+    /// transaction.  This rebinds the retained native surface and gathers the
+    /// exterior anchor rows once; it never reconstructs mesh, topology, or a
+    /// native index.
+    pub(crate) fn rewire(self) -> Result<RewiredSupportRun<'a>, SupportRewireError> {
+        let RoutedSupportRun { context, mut state } = self;
+        let geometry = context.geometry()?;
+        let loads = state.plan.finalized_loads()?;
+        context.validate_rewire_preflight(&state, &geometry, loads)?;
+
+        let delicacy = context
+            .authority
+            .perception_config
+            .delicacy_by_face
+            .ok_or(SupportRewireError::MissingAnchorDelicacy)?;
+        let anchor_config = AnchorSearchConfig::current()?;
+        // The pool is the sole gather pass for rewire. `optimize` receives
+        // its immutable contiguous rows and performs its own batched native
+        // candidate/foot checks; there is no per-member runner query.
+        let pool = SurfaceAnchorPool::from_geometry(&geometry, delicacy)?;
+        pool.validate_against(&geometry)?;
+        let report = optimize_rewire(
+            state.initial.forest_mut(),
+            RewireRequest {
+                frame: context.frame,
+                anchor_samples: pool.rows(),
+                delicacy_by_face: Some(delicacy),
+                anchor_config,
+                geometry: &geometry,
+            },
+        )?;
+        state
+            .initial
+            .forest()
+            .validate()
+            .map_err(RewireError::from)?;
+        let post_rewire_forest_digest = state.initial.forest().digest();
+
+        Ok(RewiredSupportRun {
+            context,
+            state: RewiredPlanState {
+                routed: state,
+                report,
+                post_rewire_forest_digest,
+            },
+        })
+    }
+}
+
+/// Route state after deterministic topology rewire. The prior plan, initial
+/// construction, controller, and finalized CCO transcript remain sealed in
+/// place; this state adds only the rewire evidence and exact final digest.
+struct RewiredPlanState {
+    routed: RoutedPlanState,
+    report: RewireReport,
+    post_rewire_forest_digest: u64,
+}
+
+/// Opaque hand-off after the rewire stage. Later stages can inspect evidence,
+/// but cannot replay CCO or rewire the same routed state twice.
+pub(crate) struct RewiredSupportRun<'a> {
+    context: SupportRunContext<'a>,
+    state: RewiredPlanState,
+}
+
+impl RewiredSupportRun<'_> {
+    #[must_use]
+    pub(crate) const fn mesh(&self) -> &Mesh {
+        self.context.mesh()
+    }
+
+    #[must_use]
+    pub(crate) const fn hollow_history(&self) -> &HollowHistory {
+        self.context.hollow_history()
+    }
+
+    #[must_use]
+    pub(crate) const fn request(&self) -> &SupportRequest {
+        self.context.request()
+    }
+
+    #[must_use]
+    pub(crate) const fn frame(&self) -> BuildFrame {
+        self.context.frame()
+    }
+
+    #[must_use]
+    pub(crate) const fn plan(&self) -> &SpecializedContactPlan {
+        &self.state.routed.plan
+    }
+
+    #[must_use]
+    pub(crate) const fn initial(&self) -> &InitialContactBuild {
+        &self.state.routed.initial
+    }
+
+    #[must_use]
+    pub(crate) const fn digests(&self) -> &PreparedSupportDigests {
+        self.context.digests()
+    }
+
+    #[must_use]
+    pub(crate) const fn forest(&self) -> &Forest {
+        self.state.routed.initial.forest()
+    }
+
+    #[must_use]
+    pub(crate) const fn controller(&self) -> &CcoController {
+        &self.state.routed.controller
+    }
+
+    #[must_use]
+    pub(crate) const fn transcript(&self) -> &FinalizedCcoTranscript {
+        &self.state.routed.transcript
+    }
+
+    #[must_use]
+    pub(crate) const fn rewire_report(&self) -> &RewireReport {
+        &self.state.report
+    }
+
+    #[must_use]
+    pub(crate) const fn post_rewire_forest_digest(&self) -> u64 {
+        self.state.post_rewire_forest_digest
+    }
+}
+
+impl SupportRunContext<'_> {
+    fn validate_rewire_preflight(
+        &self,
+        state: &RoutedPlanState,
+        geometry: &AnchorGeometryAuthority<'_>,
+        loads: &FinalizedContactLoads,
+    ) -> Result<(), SupportRewireError> {
+        state.plan.validate_binding(
+            &self.mesh,
+            &self.authority.perception_config,
+            self.frame,
+            self.authority.layers,
+            &self.authority.candidate_config,
+            self.authority.reservations,
+            self.authority.perception_limits,
+            &self.generic,
+            &self.regular,
+            &self.authority.selection_config,
+            self.authority.specialized_limits,
+        )?;
+        if self.generic.digest() != self.digests.generic
+            || self.regular.digest() != self.digests.regular
+            || state.plan.digest() != self.digests.plan
+            || state.plan.finalized_load_plan_digest() != state.plan.digest()
+            || loads.digest() != self.digests.loads
+            || prepared_digest(&self.digests, self.frame, self.authority) != self.digests.prepared
+        {
+            return Err(SupportRewireError::PlanOrLoadDigestMismatch);
+        }
+        geometry.validate_mesh(&self.mesh)?;
+        if geometry.digest() != self.digests.geometry
+            || state.initial.plan_digest() != state.plan.digest()
+            || state.initial.load_digest() != loads.digest()
+            || state.initial.native_digest() != geometry.digest()
+        {
+            return Err(SupportRewireError::GeometryDigestMismatch);
+        }
+        state.transcript.validate_integrity()?;
+        if state.transcript.plan_digest() != state.plan.digest()
+            || state.transcript.finalized_load_digest() != loads.digest()
+            || state.transcript.geometry_digest() != geometry.digest()
+            || state.transcript.final_forest_digest() != state.initial.forest().digest()
+            || state.transcript.final_controller_digest() != state.controller.digest()
+        {
+            return Err(SupportRewireError::TranscriptDigestMismatch);
+        }
+        state
+            .initial
+            .forest()
+            .validate()
+            .map_err(RewireError::from)?;
+        Ok(())
     }
 }
 
@@ -509,6 +691,28 @@ pub(crate) enum SupportRoutingError {
     MissingTerminalLedger { terminal: u32 },
     #[error("sealed CCO routing terminal {terminal} lacks its exact physical contact")]
     MissingPhysicalContact { terminal: u32 },
+}
+
+#[derive(Debug, Error)]
+pub(crate) enum SupportRewireError {
+    #[error(transparent)]
+    Specialized(#[from] SpecializedError),
+    #[error(transparent)]
+    Anchor(#[from] AnchorSearchError),
+    #[error(transparent)]
+    Cco(#[from] CcoError),
+    #[error(transparent)]
+    Rewire(#[from] RewireError),
+    #[error("sealed rewire requires the prepared face-order delicacy authority")]
+    MissingAnchorDelicacy,
+    #[error(
+        "sealed rewire found stale generic, regular, plan, or finalized-load digest authority"
+    )]
+    PlanOrLoadDigestMismatch,
+    #[error("sealed rewire found stale mesh, topology, or native-surface digest authority")]
+    GeometryDigestMismatch,
+    #[error("sealed rewire found stale finalized CCO transcript authority")]
+    TranscriptDigestMismatch,
 }
 
 /// Execute the sealed preparation pipeline through the one batched initial-contact build.
@@ -861,6 +1065,28 @@ mod tests {
         use_prepared(prepared)
     }
 
+    fn rewire_report_digest(report: &crate::rewire::RewireReport) -> u64 {
+        let mut hash = Fnv::new();
+        hash.u64(report.initial_volume_ml.to_bits());
+        hash.u64(report.final_volume_ml.to_bits());
+        hash.u64(report.curve.len() as u64);
+        for (accepted, volume_ml) in &report.curve {
+            hash.u64(*accepted);
+            hash.u64(volume_ml.to_bits());
+        }
+        hash.u64(report.accepted);
+        hash.u64(report.rejected);
+        hash.u64(report.sweeps);
+        hash.u64(report.move_evaluations);
+        hash.u64(report.cco_candidate_batches);
+        hash.u64(match report.termination {
+            crate::rewire::RewireTermination::FullSweepNoAcceptance => 0,
+            crate::rewire::RewireTermination::RollingSavingsConverged => 1,
+            crate::rewire::RewireTermination::DeterministicWorkBudget => 2,
+        });
+        hash.finish()
+    }
+
     fn translated_mesh(mesh: Mesh, offset: [f64; 3]) -> Mesh {
         Mesh::new(
             mesh.verts()
@@ -1033,6 +1259,57 @@ mod tests {
                 routed.controller().digest()
             );
             assert_ne!(expected_initial_forest, routed.forest().digest());
+        });
+    }
+
+    #[test]
+    fn rewires_required_corpus_with_sealed_route_evidence_and_named_termination() {
+        with_prepared_table(|prepared| {
+            let routed = prepared
+                .route_initial_cco()
+                .expect("required corpus routes before rewire");
+            let plan_digest = routed.plan().digest();
+            let loads_digest = routed.transcript().finalized_load_digest();
+            let geometry_digest = routed.transcript().geometry_digest();
+            let transcript_digest = routed.transcript().digest();
+            let rewired = routed
+                .rewire()
+                .expect("required corpus rewires through retained authority");
+
+            rewired
+                .forest()
+                .validate()
+                .expect("rewire leaves a valid final forest");
+            assert_eq!(rewired.plan().digest(), plan_digest);
+            assert_eq!(rewired.transcript().digest(), transcript_digest);
+            assert_eq!(rewired.transcript().plan_digest(), plan_digest);
+            assert_eq!(rewired.transcript().finalized_load_digest(), loads_digest);
+            assert_eq!(rewired.transcript().geometry_digest(), geometry_digest);
+            assert_eq!(
+                rewired.post_rewire_forest_digest(),
+                rewired.forest().digest(),
+                "rewired state retains the exact post-rewire forest digest"
+            );
+            assert!(matches!(
+                rewired.rewire_report().termination,
+                crate::rewire::RewireTermination::FullSweepNoAcceptance
+                    | crate::rewire::RewireTermination::RollingSavingsConverged
+                    | crate::rewire::RewireTermination::DeterministicWorkBudget
+            ));
+        });
+    }
+
+    #[test]
+    fn stale_routed_digest_fails_closed_before_rewire_mutation() {
+        with_prepared_table(|prepared| {
+            let mut routed = prepared
+                .route_initial_cco()
+                .expect("required corpus routes before stale authority check");
+            routed.context.digests.plan = routed.context.digests.plan.wrapping_add(1);
+            assert!(matches!(
+                routed.rewire(),
+                Err(SupportRewireError::PlanOrLoadDigestMismatch)
+            ));
         });
     }
 
@@ -1271,23 +1548,29 @@ mod tests {
             let routed = prepared
                 .route_initial_cco()
                 .expect("thread sweep routes the required corpus");
+            let rewired = routed
+                .rewire()
+                .expect("thread sweep rewires the required corpus");
+            let report = rewired.rewire_report();
             println!(
-                "{SWEEP_LINE}{}:{}:{}:{}:{}:{}:{}:{}:{}",
-                routed.digests().prepared(),
-                routed.digests().plan(),
-                routed.digests().loads(),
-                routed.digests().initial_forest(),
-                routed.initial().queried_stubs(),
-                routed.initial().condemned().len(),
-                routed.transcript().final_forest_digest(),
-                routed.transcript().final_controller_digest(),
-                routed.transcript().digest(),
+                "{SWEEP_LINE}{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}",
+                rewired.digests().prepared(),
+                rewired.digests().plan(),
+                rewired.digests().loads(),
+                rewired.digests().initial_forest(),
+                rewired.initial().queried_stubs(),
+                rewired.initial().condemned().len(),
+                rewired.transcript().final_forest_digest(),
+                rewired.transcript().final_controller_digest(),
+                rewired.transcript().digest(),
+                rewire_report_digest(report),
+                rewired.post_rewire_forest_digest(),
             );
         });
     }
 
     #[test]
-    fn actual_one_four_sixteen_thread_preparation_is_digest_identical() {
+    fn actual_one_four_sixteen_thread_rewire_report_is_digest_identical() {
         if std::env::var_os(SWEEP_CHILD).is_some() {
             return;
         }
