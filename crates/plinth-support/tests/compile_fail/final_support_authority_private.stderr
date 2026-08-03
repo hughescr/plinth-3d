@@ -1,0 +1,5 @@
+error[E0616]: field `0` of struct `FinalSupportAuthority` is private
+ --> tests/compile_fail/final_support_authority_private.rs:4:23
+  |
+4 |     let _ = authority.0;
+  |                       ^ private field
