@@ -280,6 +280,7 @@ pub struct CoverageMeasurementResourcePlan {
     route_membership_sum: usize,
     sequential_route_membership_peak: usize,
     indexed_point_count: usize,
+    sequential_indexed_point_peak: usize,
     query_row_count: usize,
     distance_work: usize,
     logical_peak_bytes: usize,
@@ -298,6 +299,10 @@ impl CoverageMeasurementResourcePlan {
     #[must_use]
     pub const fn indexed_point_count(self) -> usize {
         self.indexed_point_count
+    }
+    #[must_use]
+    pub const fn sequential_indexed_point_peak(self) -> usize {
+        self.sequential_indexed_point_peak
     }
     #[must_use]
     pub const fn query_row_count(self) -> usize {
@@ -321,6 +326,7 @@ impl CoverageMeasurementResourcePlan {
         route_membership_sum: usize,
         sequential_route_membership_peak: usize,
         indexed_point_count: usize,
+        sequential_indexed_point_peak: usize,
         query_row_count: usize,
         distance_work: usize,
         logical_peak_bytes: usize,
@@ -330,6 +336,7 @@ impl CoverageMeasurementResourcePlan {
             route_membership_sum,
             sequential_route_membership_peak,
             indexed_point_count,
+            sequential_indexed_point_peak,
             query_row_count,
             distance_work,
             logical_peak_bytes,

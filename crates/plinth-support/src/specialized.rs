@@ -3214,19 +3214,32 @@ pub(crate) struct CoverageRouteNearestPlan {
     // These remain live through the serial route queries, so their logical
     // payload is part of the peak even though only `route_plans` is read.
     _source_counts: BTreeMap<CoverageRoute, BTreeSet<u64>>,
+    // Logical rows remain distinct from the physical seats used to build each
+    // route index.  In particular, two source-qualified rows may name the
+    // same seat and route key without becoming one membership.
+    _route_membership_counts: BTreeMap<CoverageRoute, usize>,
     _query_counts: BTreeMap<CoverageRoute, usize>,
     route_plans: Vec<CoverageRouteKnnPlan>,
     retained_base_logical_bytes: usize,
     max_route_knn_logical_peak_bytes: usize,
+    route_membership_sum: usize,
+    sequential_route_membership_peak: usize,
+    indexed_point_count: usize,
+    sequential_indexed_point_peak: usize,
+    query_row_count: usize,
     total_work: usize,
 }
 
 impl CoverageRouteNearestPlan {
-    pub(crate) fn measurement_counts(&self) -> (usize, usize, usize, usize) {
-        let memberships = self._source_counts.values().map(BTreeSet::len).sum();
-        let indexed = self._source_counts.values().map(BTreeSet::len).sum();
-        let query_rows = self.route_plans.iter().map(|plan| plan.query_count).sum();
-        (memberships, indexed, query_rows, self.total_work)
+    pub(crate) fn measurement_counts(&self) -> (usize, usize, usize, usize, usize, usize) {
+        (
+            self.route_membership_sum,
+            self.sequential_route_membership_peak,
+            self.indexed_point_count,
+            self.sequential_indexed_point_peak,
+            self.query_row_count,
+            self.total_work,
+        )
     }
 
     pub(crate) const fn retained_base_bytes(&self) -> usize {
@@ -3540,15 +3553,24 @@ pub(crate) fn plan_route_points_nearest(
     limits: KnnBatchLimits,
 ) -> Result<CoverageRouteNearestPlan, SpecializedError> {
     let mut source_counts = BTreeMap::<CoverageRoute, BTreeSet<u64>>::new();
+    let mut route_membership_counts = BTreeMap::<CoverageRoute, usize>::new();
     let mut query_counts = BTreeMap::<CoverageRoute, usize>::new();
+    let mut route_membership_sum = 0usize;
+    let mut sequential_route_membership_peak = 0usize;
     for point in points {
-        source_counts
-            .entry(CoverageRoute {
-                island_id: point.island_id,
-                component_id: point.component_id,
-            })
-            .or_default()
-            .insert(point.physical_id);
+        let route = CoverageRoute {
+            island_id: point.island_id,
+            component_id: point.component_id,
+        };
+        let memberships = route_membership_counts.entry(route).or_default();
+        *memberships = memberships
+            .checked_add(1)
+            .ok_or(SpecializedError::GateResourceOverflow)?;
+        route_membership_sum = route_membership_sum
+            .checked_add(1)
+            .ok_or(SpecializedError::GateResourceOverflow)?;
+        sequential_route_membership_peak = sequential_route_membership_peak.max(*memberships);
+        source_counts.entry(route).or_default().insert(point.physical_id);
     }
     for sample in samples {
         let route = CoverageRoute {
@@ -3562,14 +3584,14 @@ pub(crate) fn plan_route_points_nearest(
     }
     let mut route_plans = Vec::with_capacity(source_counts.len());
     let mut total_work = 0usize;
-    let mut total_memberships = 0usize;
+    let mut total_indexed_points = 0usize;
     let mut total_queries = 0usize;
     let mut max_route_peak = 0usize;
     let mut max_source_count = 0usize;
     let mut max_query_count = 0usize;
     for (route, source_ids) in &source_counts {
         let query_count = query_counts.get(route).copied().unwrap_or(0);
-        total_memberships = total_memberships
+        total_indexed_points = total_indexed_points
             .checked_add(source_ids.len())
             .ok_or(SpecializedError::GateResourceOverflow)?;
         let work = source_ids
@@ -3597,17 +3619,6 @@ pub(crate) fn plan_route_points_nearest(
             knn,
         });
     }
-    debug_assert_eq!(
-        total_memberships,
-        source_counts.values().map(BTreeSet::len).sum::<usize>()
-    );
-    debug_assert_eq!(
-        total_queries,
-        route_plans
-            .iter()
-            .map(|route_plan| route_plan.query_count)
-            .sum::<usize>()
-    );
     debug_assert!(max_route_peak <= limits.max_logical_peak_bytes);
     if total_work > limits.max_work {
         return Err(SpecializedError::GateOperationLimit {
@@ -3617,7 +3628,8 @@ pub(crate) fn plan_route_points_nearest(
     }
     let retained_base_logical_bytes = [
         checked_route_bytes::<CoverageRoute>(source_counts.len())?,
-        checked_route_bytes::<u64>(total_memberships)?,
+        checked_route_bytes::<(CoverageRoute, usize)>(route_membership_counts.len())?,
+        checked_route_bytes::<u64>(total_indexed_points)?,
         checked_route_bytes::<(CoverageRoute, usize)>(query_counts.len())?,
         checked_route_bytes::<CoverageRouteKnnPlan>(route_plans.capacity())?,
         checked_route_bytes::<u64>(max_source_count)?,
@@ -3631,10 +3643,16 @@ pub(crate) fn plan_route_points_nearest(
     })?;
     Ok(CoverageRouteNearestPlan {
         _source_counts: source_counts,
+        _route_membership_counts: route_membership_counts,
         _query_counts: query_counts,
         route_plans,
         retained_base_logical_bytes,
         max_route_knn_logical_peak_bytes: max_route_peak,
+        route_membership_sum,
+        sequential_route_membership_peak,
+        indexed_point_count: total_indexed_points,
+        sequential_indexed_point_peak: max_source_count,
+        query_row_count: total_queries,
         total_work,
     })
 }
@@ -5046,10 +5064,48 @@ mod tests {
         let mut nearest = vec![f64::INFINITY; samples.len()];
         let planned =
             plan_variant_nearest_routes(&contacts, None, &samples, TEST_KNN_LIMITS).unwrap();
+        assert_eq!(
+            planned.measurement_counts(),
+            (3, 2, 2, 1, 2, 2),
+            "duplicate logical rows remain memberships while each route index deduplicates physical seats"
+        );
         fill_variant_nearest(&contacts, None, &samples, &mut nearest, planned).unwrap();
         assert_eq!(nearest[0], 5.0);
         assert_eq!(nearest[1], 2.0);
         assert!(nearest[2].is_infinite());
+    }
+
+    #[test]
+    fn route_membership_count_preserves_duplicate_logical_rows_before_index_deduplication() {
+        let points = vec![
+            CoverageRoutePoint {
+                physical_id: 9,
+                island_id: 3,
+                component_id: 11,
+                position_mm: [0.0, 0.0, 0.0],
+            },
+            CoverageRoutePoint {
+                physical_id: 9,
+                island_id: 3,
+                component_id: 11,
+                position_mm: [0.0, 0.0, 0.0],
+            },
+        ];
+        let samples = vec![CoverageSample {
+            island_id: 3,
+            face_id: 0,
+            component_id: 11,
+            point_mm: [0.0, 0.0, 0.0],
+            area_mm2: 1.0,
+        }];
+
+        let planned = plan_route_points_nearest(&points, &samples, TEST_KNN_LIMITS)
+            .expect("duplicate logical rows are one indexed seat");
+        assert_eq!(planned.measurement_counts(), (2, 2, 1, 1, 1, 1));
+        let mut nearest = vec![f64::INFINITY; samples.len()];
+        fill_route_points_nearest(&points, &samples, &mut nearest, planned)
+            .expect("the deduplicated index remains valid");
+        assert_eq!(nearest, vec![0.0]);
     }
 
     #[test]
@@ -5134,6 +5190,7 @@ mod tests {
             .map(|route| route.knn.logical_peak_bytes())
             .sum::<usize>();
         let expected_retained_base = 2 * std::mem::size_of::<CoverageRoute>()
+            + 2 * std::mem::size_of::<(CoverageRoute, usize)>()
             + 2 * std::mem::size_of::<u64>()
             + 2 * std::mem::size_of::<(CoverageRoute, usize)>()
             + 2 * std::mem::size_of::<CoverageRouteKnnPlan>()

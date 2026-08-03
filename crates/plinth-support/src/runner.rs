@@ -14,6 +14,10 @@ use plinth_hollow::{HollowHistory, HollowedModel};
 use plinth_mesh::{mesh_fingerprint, FaceTopology, Mesh};
 use thiserror::Error;
 
+#[cfg(test)]
+static NORMALIZED_ROUTE_PROJECTION_RESERVES: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
 use crate::{
     anchor::{AnchorGeometryAuthority, AnchorSearchConfig, AnchorSearchError, SurfaceAnchorPool},
     brace::{
@@ -48,9 +52,11 @@ use crate::{
     transient::{transient_report, TransientError, TransientReport},
     validate_perception_input, BuildFrame, ContactSelectionConfig, ContactSelectionError,
     CoverageAssessmentLimits, CoverageGap, CoverageMeasurement, CoverageMeasurementError,
-    CoverageMeasurementEvidence, CoverageMeasurementIslandEvidence, CoverageMeasurementPatchEvidence, CoverageMeasurementRequest,
-    CoverageMeasurementResourcePlan, CoverageSample, SelectedContacts, SupportError, SupportHistory, SupportIsland,
-    SupportPerceptionConfig, SupportPerceptionError, SupportReport, SupportRequest, SupportedModel,
+    CoverageMeasurementEvidence, CoverageMeasurementIslandEvidence, CoverageMeasurementPatchEvidence,
+    CoverageMeasurementRequest, CoverageMeasurementResourcePlan,
+    CoverageSample, SelectedContacts, SupportError, SupportHistory, SupportIsland,
+    SupportPerceptionConfig, SupportPerceptionError, SupportReport, SupportRequest,
+    SupportedModel,
 };
 
 /// Explicit caller-owned inputs for one sealed support run. No policy defaults
@@ -302,7 +308,33 @@ impl<'a> SupportVerificationSnapshot<'a> {
             max_logical_peak_bytes: limits.max_logical_peak_bytes(),
             max_work: limits.max_distance_work(),
         };
+        // Do not construct the normalized projection until the sealed logical
+        // evidence has passed the membership ceiling.  Physical-seat
+        // deduplication is deliberately later and must not weaken this cap.
+        let membership_count = self
+            .routed_route_memberships
+            .iter()
+            .try_fold(0usize, |total, membership| {
+                total
+                    .checked_add(membership.logical_routes.len())
+                    .ok_or(CoverageMeasurementError::ArithmeticOverflow {
+                        operation: "route memberships",
+                    })
+            })?;
+        if membership_count > limits.max_route_memberships() {
+            return Err(CoverageMeasurementError::ResourceLimit {
+                resource: "route memberships",
+            });
+        }
         let mut points = Vec::new();
+        #[cfg(test)]
+        NORMALIZED_ROUTE_PROJECTION_RESERVES
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        points
+            .try_reserve_exact(membership_count)
+            .map_err(|_| CoverageMeasurementError::ResourceLimit {
+                resource: "normalized route projection",
+            })?;
         for membership in &self.routed_route_memberships {
             for route in &membership.logical_routes {
                 points.push(CoverageRoutePoint {
@@ -315,7 +347,15 @@ impl<'a> SupportVerificationSnapshot<'a> {
         }
         let planned = plan_route_points_nearest(&points, self.coverage_samples, knn_limits)
             .map_err(|_| CoverageMeasurementError::ResourceLimit { resource: "route kNN preflight" })?;
-        let (memberships, indexed, query_rows, distance_work) = planned.measurement_counts();
+        debug_assert_eq!(points.len(), membership_count);
+        let (
+            memberships,
+            sequential_membership_peak,
+            indexed,
+            indexed_point_peak,
+            query_rows,
+            distance_work,
+        ) = planned.measurement_counts();
         for (actual, maximum, resource) in [
             (memberships, limits.max_route_memberships(), "route memberships"),
             (indexed, limits.max_indexed_points(), "indexed points"),
@@ -379,7 +419,16 @@ impl<'a> SupportVerificationSnapshot<'a> {
         }).collect::<Result<Vec<_>, CoverageMeasurementError>>()?;
         patches.sort_unstable_by_key(|patch| (patch.island_id(), patch.component_id(), patch.representative_face_id()));
         Ok(CoverageMeasurement::new(self.snapshot_digest, request,
-            CoverageMeasurementResourcePlan::new(memberships, memberships, indexed, query_rows, distance_work, logical_peak_bytes, assessment_plan.operations),
+            CoverageMeasurementResourcePlan::new(
+                memberships,
+                sequential_membership_peak,
+                indexed,
+                indexed_point_peak,
+                query_rows,
+                distance_work,
+                logical_peak_bytes,
+                assessment_plan.operations,
+            ),
             CoverageMeasurementEvidence::new(islands.into_boxed_slice(), patches.into_boxed_slice())))
     }
     #[must_use]
@@ -2460,6 +2509,7 @@ fn hash_member_spec(hash: &mut Fnv, spec: &MemberSpec) {
 mod tests {
     use std::{mem::size_of, path::PathBuf, process::Command};
 
+    use crate::CoverageMeasurementLimits;
     use plinth_core::{Finite, PositiveFinite};
     use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
     use plinth_hollow::{HollowedModel, SolidDecisionReason};
@@ -3750,6 +3800,91 @@ mod tests {
             assert_eq!(
                 duplicate.validate_integrity(),
                 Err(SupportVerificationError::SnapshotDigestMismatch)
+            );
+        });
+    }
+
+    #[test]
+    fn distinct_provenance_rows_remain_two_memberships_and_one_indexed_seat() {
+        let regular = RoutedLogicalRoute {
+            island_id: 3,
+            face_id: 7,
+            component_id: 11,
+            provenance: RoutedRouteProvenance::RegularGeneric,
+        };
+        let specialized = RoutedLogicalRoute {
+            provenance: RoutedRouteProvenance::SpecializedMinimum,
+            ..regular
+        };
+        assert_ne!(regular, specialized);
+        assert_eq!(BTreeSet::from([regular, specialized]).len(), 2);
+
+        let points = [regular, specialized]
+            .into_iter()
+            .map(|route| CoverageRoutePoint {
+                physical_id: 9,
+                island_id: route.island_id,
+                component_id: route.component_id,
+                position_mm: [0.0, 0.0, 0.0],
+            })
+            .collect::<Vec<_>>();
+        let samples = [CoverageSample {
+            island_id: 3,
+            face_id: 7,
+            component_id: 11,
+            point_mm: [0.0, 0.0, 0.0],
+            area_mm2: 1.0,
+        }];
+        let planned = plan_route_points_nearest(&points, &samples, TEST_KNN_LIMITS)
+            .expect("distinct provenance rows share one indexed seat");
+        assert_eq!(planned.measurement_counts(), (2, 2, 1, 1, 1, 1));
+    }
+
+    #[test]
+    fn coverage_membership_cap_minus_one_refuses_before_projection_reserve() {
+        with_braced_table(|braced| {
+            let lowered = braced
+                .structure()
+                .expect("required corpus structures")
+                .lower()
+                .expect("required corpus lowers");
+            let snapshot = lowered
+                .verification_snapshot()
+                .expect("validated final authority snapshots");
+            let membership_count = snapshot
+                .routed_route_memberships
+                .iter()
+                .try_fold(0usize, |total, membership| {
+                    total.checked_add(membership.logical_routes.len())
+                })
+                .expect("fixture membership count fits usize");
+            assert!(
+                membership_count > 1,
+                "fixture has multiple logical memberships"
+            );
+            let limits = CoverageMeasurementLimits::new(
+                membership_count - 1,
+                usize::MAX,
+                usize::MAX,
+                usize::MAX,
+                usize::MAX,
+                usize::MAX,
+            )
+            .expect("all ceilings are nonzero");
+            let request = CoverageMeasurementRequest::from_f64(1.0, 1.0, limits)
+                .expect("finite measurement request");
+            NORMALIZED_ROUTE_PROJECTION_RESERVES
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(
+                snapshot.measure_coverage(request),
+                Err(CoverageMeasurementError::ResourceLimit {
+                    resource: "route memberships",
+                })
+            );
+            assert_eq!(
+                NORMALIZED_ROUTE_PROJECTION_RESERVES.load(std::sync::atomic::Ordering::Relaxed),
+                0,
+                "the capped request must not reserve the normalized projection"
             );
         });
     }
