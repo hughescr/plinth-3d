@@ -61,6 +61,9 @@ pub enum ChituboxError {
     #[error("write verification failed (structural re-parse rejected output): {detail}")]
     VerifyFailed { detail: String },
 
+    #[error("clean structural rebuild differs from the opened bytes")]
+    CleanRoundtripDrift,
+
     #[error("format drift: {detail}")]
     FormatDrift { detail: String },
 

@@ -1185,6 +1185,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "plinth-verify"
+version = "0.1.0"
+dependencies = [
+ "chitubox_io",
+ "plinth-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "portable-atomic"
 version = "1.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
