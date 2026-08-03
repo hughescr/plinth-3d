@@ -111,8 +111,14 @@ pub(crate) struct Document {
     pub settings: Vec<u8>,
     pub preview: Vec<u8>,
     pub models: Vec<ModelEntry>,
-    /// filler between model table end (off20) and first mesh
+    /// Opaque region between model table end (off20) and first mesh. Native
+    /// layout begins with one 24-byte descriptor per model; parsed bytes stay
+    /// opaque and verbatim.
     pub front_filler: Vec<u8>,
+    /// True only for `Project::new_empty()`'s known scaffold. This origin flag
+    /// lets the writer synthesize zero descriptors without resizing opaque
+    /// regions from parsed projects.
+    pub from_scratch: bool,
     /// exact opened bytes, kept while clean as a belt-and-braces guard
     pub original: Option<Vec<u8>>,
     pub dirty: bool,

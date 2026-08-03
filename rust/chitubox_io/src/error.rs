@@ -66,6 +66,9 @@ pub enum ChituboxError {
 
     #[error("unknown opaque region id: {0}")]
     UnknownOpaqueRegion(u32),
+
+    #[error("unsupported opaque-layout mutation: {operation}")]
+    UnsupportedOpaqueLayoutMutation { operation: &'static str },
 }
 
 pub(crate) type Result<T> = std::result::Result<T, ChituboxError>;
