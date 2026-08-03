@@ -2429,6 +2429,55 @@ mod tests {
         use_prepared(prepared)
     }
 
+    fn assert_mixed_snapshot_projects_only_routed(
+        braced: BracedSupportRun<'_>,
+        expected_non_routed_kind: FinalizedDispositionKind,
+    ) {
+        let expected_routed_ids = braced
+            .transcript()
+            .rows()
+            .iter()
+            .filter(|row| row.kind() == FinalizedDispositionKind::Routed)
+            .map(|row| row.physical_contact_id())
+            .collect::<Vec<_>>();
+        let non_routed_ids = braced
+            .transcript()
+            .rows()
+            .iter()
+            .filter(|row| row.kind() == expected_non_routed_kind)
+            .map(|row| row.physical_contact_id())
+            .collect::<Vec<_>>();
+        assert!(
+            !expected_routed_ids.is_empty(),
+            "mixed fixture must retain at least one routed terminal"
+        );
+        assert!(
+            !non_routed_ids.is_empty(),
+            "mixed fixture must retain the requested non-routed disposition"
+        );
+
+        let lowered = braced
+            .structure()
+            .expect("mixed fixture structures")
+            .lower()
+            .expect("mixed fixture lowers");
+        let snapshot = lowered
+            .verification_snapshot()
+            .expect("mixed fixture snapshots");
+        let snapshot_routed_ids = snapshot
+            .routed_contacts()
+            .map(|contact| contact.physical_contact_id())
+            .collect::<Vec<_>>();
+        assert_eq!(snapshot_routed_ids, expected_routed_ids);
+
+        let snapshot_routed_id_set = snapshot_routed_ids.into_iter().collect::<BTreeSet<_>>();
+        let non_routed_id_set = non_routed_ids.into_iter().collect::<BTreeSet<_>>();
+        assert!(
+            snapshot_routed_id_set.is_disjoint(&non_routed_id_set),
+            "snapshot must exclude the requested non-routed contacts"
+        );
+    }
+
     fn rejected_rewire_preflight(routed: &RoutedSupportRun<'_>) -> SupportRewireError {
         let forest_digest = routed.forest().digest();
         let geometry = routed
@@ -3048,14 +3097,15 @@ mod tests {
             let routed = prepared
                 .route_initial_cco()
                 .expect("mixed fixture seals through CCO");
-            assert!(routed
-                .transcript()
-                .rows()
-                .iter()
-                .any(|row| row.kind() == crate::cco::FinalizedDispositionKind::Routed));
-            assert!(routed.transcript().rows().iter().any(|row| {
-                row.kind() == crate::cco::FinalizedDispositionKind::SkippedQuarantined
-            }));
+            let braced = routed
+                .rewire()
+                .expect("mixed fixture rewires")
+                .brace()
+                .expect("mixed fixture braces");
+            assert_mixed_snapshot_projects_only_routed(
+                braced,
+                FinalizedDispositionKind::SkippedQuarantined,
+            );
         });
     }
 
@@ -3082,6 +3132,15 @@ mod tests {
                 .no_winner_reason()
                 .expect("no-winner transcript row retains a reason");
             assert!(!reason.anchor_seat_refusals().is_empty());
+            let braced = routed
+                .rewire()
+                .expect("no-winner fixture rewires")
+                .brace()
+                .expect("no-winner fixture braces");
+            assert_mixed_snapshot_projects_only_routed(
+                braced,
+                FinalizedDispositionKind::UnroutedNoWinner,
+            );
         });
     }
 
