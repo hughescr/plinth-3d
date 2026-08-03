@@ -2550,6 +2550,7 @@ struct GatePeakUsage {
     result_bytes: usize,
     matrix_bytes: usize,
     coverage_scratch_bytes: usize,
+    coverage_nearest_bytes: usize,
     coverage_retained_bytes: usize,
     load_scratch_bytes: usize,
 }
@@ -2563,11 +2564,14 @@ fn check_gate_peak(usage: GatePeakUsage, limit: usize) -> Result<usize, Speciali
     let coverage_phase = retained
         .checked_add(usage.coverage_scratch_bytes)
         .ok_or(SpecializedError::GateResourceOverflow)?;
+    let coverage_nearest_phase = retained
+        .checked_add(usage.coverage_nearest_bytes)
+        .ok_or(SpecializedError::GateResourceOverflow)?;
     let load_phase = retained
         .checked_add(usage.coverage_retained_bytes)
         .and_then(|bytes| bytes.checked_add(usage.load_scratch_bytes))
         .ok_or(SpecializedError::GateResourceOverflow)?;
-    let required = coverage_phase.max(load_phase);
+    let required = coverage_phase.max(coverage_nearest_phase).max(load_phase);
     if required > limit {
         return Err(SpecializedError::GatePeakByteLimit { required, limit });
     }
@@ -3000,12 +3004,38 @@ fn evaluate_gate_batch(
             .len()
             .checked_mul(std::mem::size_of::<usize>())
             .ok_or(SpecializedError::GateResourceOverflow)?;
+        let mut nearest_route_plans = Vec::with_capacity(window_variants);
+        let mut retained_nearest_route_bytes =
+            checked_route_bytes::<CoverageRouteNearestPlan>(nearest_route_plans.capacity())?;
+        let mut max_nearest_route_knn_bytes = 0usize;
+        for variant in window_start..window_end {
+            let proposal = variant
+                .checked_sub(1)
+                .and_then(|index| proposals.get(index));
+            let route_plan = plan_variant_nearest_routes(
+                contacts,
+                proposal,
+                coverage_samples,
+                limits.coverage_route_knn,
+            )?;
+            retained_nearest_route_bytes = retained_nearest_route_bytes
+                .checked_add(route_plan.retained_base_logical_bytes)
+                .ok_or(SpecializedError::GateResourceOverflow)?;
+            max_nearest_route_knn_bytes =
+                max_nearest_route_knn_bytes.max(route_plan.max_route_knn_logical_peak_bytes);
+            nearest_route_plans.push(route_plan);
+        }
+        let coverage_nearest_bytes = coverage_route_nearest_peak_bytes(
+            retained_nearest_route_bytes,
+            max_nearest_route_knn_bytes,
+        )?;
         check_gate_peak(
             GatePeakUsage {
                 proposal_bytes: proposal_storage_bytes,
                 result_bytes: plan.vector_bytes,
                 matrix_bytes: working_bytes,
                 coverage_scratch_bytes: coverage_scratch.scratch_bytes,
+                coverage_nearest_bytes,
                 coverage_retained_bytes,
                 load_scratch_bytes: max_load_scratch,
             },
@@ -3018,7 +3048,10 @@ fn evaluate_gate_batch(
         let mut owner_face_offsets = Vec::with_capacity(window_variants + 1);
         physical_offsets.push(0);
         owner_face_offsets.push(0);
-        for (window_row, variant) in (window_start..window_end).enumerate() {
+        for ((window_row, variant), nearest_route_plan) in (window_start..window_end)
+            .enumerate()
+            .zip(nearest_route_plans)
+        {
             let proposal = variant
                 .checked_sub(1)
                 .and_then(|index| proposals.get(index));
@@ -3029,7 +3062,7 @@ fn evaluate_gate_batch(
                 proposal,
                 coverage_samples,
                 nearest,
-                limits.coverage_route_knn,
+                nearest_route_plan,
             )?;
             append_variant_load_inputs(
                 contacts,
@@ -3117,14 +3150,45 @@ struct CoverageRouteKnnPlan {
     knn: KnnBatchPlan,
 }
 
-fn fill_variant_nearest(
+/// The route-local state retained while one variant's nearest matrix is filled.
+///
+/// `KnnBatchPlan::logical_peak_bytes` already includes the gathered source and
+/// query points, immutable index build, CSR output, and tie scratch.  The
+/// retained base below deliberately adds only the route normalization and
+/// grouping state outside that plan. BTree node/allocation metadata is excluded
+/// by the logical-capacity convention; its route keys and element payloads are
+/// counted explicitly.
+struct CoverageRouteNearestPlan {
+    // These remain live through the serial route queries, so their logical
+    // payload is part of the peak even though only `route_plans` is read.
+    _source_counts: BTreeMap<CoverageRoute, BTreeSet<u64>>,
+    _query_counts: BTreeMap<CoverageRoute, usize>,
+    route_plans: Vec<CoverageRouteKnnPlan>,
+    retained_base_logical_bytes: usize,
+    max_route_knn_logical_peak_bytes: usize,
+}
+
+fn checked_route_bytes<T>(count: usize) -> Result<usize, SpecializedError> {
+    count
+        .checked_mul(std::mem::size_of::<T>())
+        .ok_or(SpecializedError::GateResourceOverflow)
+}
+
+fn coverage_route_nearest_peak_bytes(
+    retained_base_logical_bytes: usize,
+    max_route_knn_logical_peak_bytes: usize,
+) -> Result<usize, SpecializedError> {
+    retained_base_logical_bytes
+        .checked_add(max_route_knn_logical_peak_bytes)
+        .ok_or(SpecializedError::GateResourceOverflow)
+}
+
+fn plan_variant_nearest_routes(
     contacts: &[WorkingContact],
     proposal: Option<&MergeProposal>,
     samples: &[CoverageSample],
-    nearest: &mut [f64],
     limits: KnnBatchLimits,
-) -> Result<(), SpecializedError> {
-    debug_assert_eq!(nearest.len(), samples.len());
+) -> Result<CoverageRouteNearestPlan, SpecializedError> {
     let mut source_counts = BTreeMap::<CoverageRoute, BTreeSet<u64>>::new();
     let mut query_counts = BTreeMap::<CoverageRoute, usize>::new();
     let mut add_contact = |physical_id: u64, contact: &WorkingContact| {
@@ -3172,6 +3236,8 @@ fn fill_variant_nearest(
     let mut total_memberships = 0usize;
     let mut total_queries = 0usize;
     let mut max_route_peak = 0usize;
+    let mut max_source_count = 0usize;
+    let mut max_query_count = 0usize;
     for (route, source_ids) in &source_counts {
         let query_count = query_counts.get(route).copied().unwrap_or(0);
         total_memberships = total_memberships
@@ -3193,6 +3259,8 @@ fn fill_variant_nearest(
         let knn = KnnBatchPlan::new(source_ids.len(), query_count, 1, limits)
             .map_err(|error| SpecializedError::CoverageNearest(error.to_string()))?;
         max_route_peak = max_route_peak.max(knn.logical_peak_bytes());
+        max_source_count = max_source_count.max(source_ids.len());
+        max_query_count = max_query_count.max(query_count);
         route_plans.push(CoverageRouteKnnPlan {
             route: *route,
             source_count: source_ids.len(),
@@ -3204,15 +3272,53 @@ fn fill_variant_nearest(
         total_memberships,
         source_counts.values().map(BTreeSet::len).sum::<usize>()
     );
+    debug_assert_eq!(
+        total_queries,
+        route_plans
+            .iter()
+            .map(|route_plan| route_plan.query_count)
+            .sum::<usize>()
+    );
     debug_assert!(max_route_peak <= limits.max_logical_peak_bytes);
-    /* All route plans are now checked before any geometric gather or query. */
     if total_work > limits.max_work {
         return Err(SpecializedError::GateOperationLimit {
             required: total_work,
             limit: limits.max_work,
         });
     }
-    for route_plan in route_plans {
+    let retained_base_logical_bytes = [
+        checked_route_bytes::<CoverageRoute>(source_counts.len())?,
+        checked_route_bytes::<u64>(total_memberships)?,
+        checked_route_bytes::<(CoverageRoute, usize)>(query_counts.len())?,
+        checked_route_bytes::<CoverageRouteKnnPlan>(route_plans.capacity())?,
+        checked_route_bytes::<u64>(max_source_count)?,
+        checked_route_bytes::<usize>(max_query_count)?,
+    ]
+    .into_iter()
+    .try_fold(0usize, |total, bytes| {
+        total
+            .checked_add(bytes)
+            .ok_or(SpecializedError::GateResourceOverflow)
+    })?;
+    Ok(CoverageRouteNearestPlan {
+        _source_counts: source_counts,
+        _query_counts: query_counts,
+        route_plans,
+        retained_base_logical_bytes,
+        max_route_knn_logical_peak_bytes: max_route_peak,
+    })
+}
+
+fn fill_variant_nearest(
+    contacts: &[WorkingContact],
+    proposal: Option<&MergeProposal>,
+    samples: &[CoverageSample],
+    nearest: &mut [f64],
+    planned: CoverageRouteNearestPlan,
+) -> Result<(), SpecializedError> {
+    debug_assert_eq!(nearest.len(), samples.len());
+    /* All route plans are checked before any geometric gather or query. */
+    for route_plan in planned.route_plans {
         let route = route_plan.route;
         let query_count = route_plan.query_count;
         let plan = route_plan.knn;
@@ -4468,7 +4574,9 @@ mod tests {
             },
         ];
         let mut nearest = vec![f64::INFINITY; samples.len()];
-        fill_variant_nearest(&contacts, None, &samples, &mut nearest, TEST_KNN_LIMITS).unwrap();
+        let planned =
+            plan_variant_nearest_routes(&contacts, None, &samples, TEST_KNN_LIMITS).unwrap();
+        fill_variant_nearest(&contacts, None, &samples, &mut nearest, planned).unwrap();
         assert_eq!(nearest[0], 5.0);
         assert_eq!(nearest[1], 2.0);
         assert!(nearest[2].is_infinite());
@@ -4496,16 +4604,119 @@ mod tests {
             point_mm: [0.0, 0.0, 0.0],
             area_mm2: 1.0,
         }];
-        let mut nearest = vec![f64::INFINITY];
         let refused = KnnBatchLimits {
             max_source_points: 0,
             ..TEST_KNN_LIMITS
         };
         assert!(matches!(
-            fill_variant_nearest(&contacts, None, &samples, &mut nearest, refused),
+            plan_variant_nearest_routes(&contacts, None, &samples, refused),
             Err(SpecializedError::CoverageNearest(_))
         ));
-        assert!(nearest[0].is_infinite());
+    }
+
+    #[test]
+    fn route_nearest_peak_counts_retained_metadata_and_serial_knn_maximum() {
+        let first_route = RegularContactRoute {
+            candidate_id: 7,
+            owner_island_id: 3,
+            coverage_face_id: 0,
+            component_id: 11,
+            source_kind: RepairRowSourceKind::Generic,
+        };
+        let second_route = RegularContactRoute {
+            candidate_id: 8,
+            owner_island_id: 4,
+            coverage_face_id: 1,
+            component_id: 12,
+            source_kind: RepairRowSourceKind::Generic,
+        };
+        let contacts = vec![
+            test_regular_contact([0.0, 0.0, 0.0], [0.0, 0.0, -1.0], first_route, Vec::new()),
+            test_regular_contact([1.0, 0.0, 0.0], [0.0, 0.0, -1.0], second_route, Vec::new()),
+        ];
+        let samples = vec![
+            CoverageSample {
+                island_id: 3,
+                face_id: 0,
+                component_id: 11,
+                point_mm: [0.0, 0.0, 0.0],
+                area_mm2: 1.0,
+            },
+            CoverageSample {
+                island_id: 4,
+                face_id: 1,
+                component_id: 12,
+                point_mm: [1.0, 0.0, 0.0],
+                area_mm2: 1.0,
+            },
+        ];
+        let planned = plan_variant_nearest_routes(&contacts, None, &samples, TEST_KNN_LIMITS)
+            .expect("two independent route batches plan");
+        let max_route_peak = planned
+            .route_plans
+            .iter()
+            .map(|route| route.knn.logical_peak_bytes())
+            .max()
+            .expect("two planned routes");
+        let summed_route_peaks = planned
+            .route_plans
+            .iter()
+            .map(|route| route.knn.logical_peak_bytes())
+            .sum::<usize>();
+        let expected_retained_base = 2 * std::mem::size_of::<CoverageRoute>()
+            + 2 * std::mem::size_of::<u64>()
+            + 2 * std::mem::size_of::<(CoverageRoute, usize)>()
+            + 2 * std::mem::size_of::<CoverageRouteKnnPlan>()
+            + std::mem::size_of::<u64>()
+            + std::mem::size_of::<usize>();
+        assert_eq!(
+            planned.retained_base_logical_bytes, expected_retained_base,
+            "route keys, deduplicated source ids, grouped row keys/indices, planned-route metadata, and serial gather dedup/index vectors are all counted"
+        );
+        let logical_peak_bytes = coverage_route_nearest_peak_bytes(
+            planned.retained_base_logical_bytes,
+            planned.max_route_knn_logical_peak_bytes,
+        )
+        .expect("checked route peak");
+        assert_eq!(
+            logical_peak_bytes,
+            planned.retained_base_logical_bytes + max_route_peak,
+            "serial route batches retain one maximum, not their sum"
+        );
+        assert_ne!(
+            logical_peak_bytes,
+            planned.retained_base_logical_bytes + summed_route_peaks,
+            "two route batches must not be charged as simultaneous kNN work"
+        );
+
+        let usage = GatePeakUsage {
+            proposal_bytes: 0,
+            result_bytes: 0,
+            matrix_bytes: 0,
+            coverage_scratch_bytes: 0,
+            coverage_nearest_bytes: logical_peak_bytes,
+            coverage_retained_bytes: 0,
+            load_scratch_bytes: 0,
+        };
+        assert_eq!(
+            check_gate_peak(usage, logical_peak_bytes),
+            Ok(logical_peak_bytes)
+        );
+        assert_eq!(
+            check_gate_peak(usage, logical_peak_bytes - 1),
+            Err(SpecializedError::GatePeakByteLimit {
+                required: logical_peak_bytes,
+                limit: logical_peak_bytes - 1,
+            })
+        );
+    }
+
+    #[test]
+    fn route_nearest_peak_overflow_is_refused() {
+        assert_eq!(
+            coverage_route_nearest_peak_bytes(usize::MAX, 1),
+            Err(SpecializedError::GateResourceOverflow)
+        );
     }
 
     fn repair_candidate(id: u64, face_id: u32, point_mm: [f64; 3]) -> crate::ContactCandidate {
@@ -5526,6 +5737,7 @@ mod tests {
             result_bytes: 20,
             matrix_bytes: 30,
             coverage_scratch_bytes: 40,
+            coverage_nearest_bytes: 0,
             coverage_retained_bytes: 8,
             load_scratch_bytes: 32,
         };
