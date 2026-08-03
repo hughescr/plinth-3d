@@ -162,12 +162,16 @@ pub fn surfaces_share_geometry(a: &NativeSurface, b: &NativeSurface) -> bool {
     a.mesh.shares_geometry(&b.mesh)
 }
 
-/// Process-local successful native surface/index construction count.
+/// Process-local construction-attempt counts at the actual BVH and parity-axis
+/// index build boundaries.
 ///
-/// This is a result-inert test seam for proving that a query path reused an
-/// existing surface instead of constructing a subset or replacement index.
-pub fn surface_index_construction_count() -> u64 {
-    crate::queries::surface_index_construction_count()
+/// These result-inert seams include successful, failed, transient, and direct
+/// builds. A projection reuse test must assert that neither value changes.
+pub fn index_construction_attempt_counts() -> (u64, u64) {
+    (
+        crate::bvh::build_attempt_count(),
+        crate::parity::axis_build_attempt_count(),
+    )
 }
 
 /// Brute-force allowed-face projection oracle for bounded generated tests.

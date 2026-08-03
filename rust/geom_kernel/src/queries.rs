@@ -19,8 +19,6 @@ use crate::parity::{ParityBuildError, ParityVote};
 use crate::vec3::{add, cross, dot, norm, scale, sub, V3};
 use crate::{SurfaceIndexKind, SurfaceSubsetError, SurfaceTriangleSoupDigest};
 
-static SURFACE_INDEX_CONSTRUCTION_COUNT: AtomicU64 = AtomicU64::new(0);
-
 thread_local! {
     static STACK: RefCell<Vec<i32>> = RefCell::new(Vec::with_capacity(128));
     static ZSCRATCH: RefCell<Vec<f64>> = RefCell::new(Vec::with_capacity(64));
@@ -108,8 +106,11 @@ pub struct AllowedFaceProjectionPolicy {
 
 /// Whole-batch limits for [`NativeSurface::project_allowed_faces_batch`].
 ///
-/// The node-visit and triangle-test limits are deterministic conservative
-/// totals over all rows. `max_memory_bytes` covers every kernel-owned retained
+/// The node-visit limit includes one visit per existing BVH node to build the
+/// allowed-subtree mask plus a deterministic conservative total over all query
+/// rows. Since each leaf has at most `LEAF_MAX` faces, this setup-node charge
+/// also bounds one-time face-filter checks. The triangle-test limit is the
+/// conservative total over all rows. `max_memory_bytes` covers every retained
 /// buffer used by the call: gathered allowed IDs, face/subtree masks, leaf
 /// ranges, fixed traversal stacks, parallel row results, and serially
 /// scattered outcomes. Allocator metadata and Rayon's executor-internal
@@ -532,12 +533,7 @@ fn build_indexes(
     let bvh = Bvh::build(mesh).map_err(|reason| (SurfaceIndexKind::Bvh, reason))?;
     let pv = ParityVote::build(mesh, grid_pitch_mm, max_grid_bytes)
         .map_err(|reason| (SurfaceIndexKind::Parity, reason.to_string()))?;
-    SURFACE_INDEX_CONSTRUCTION_COUNT.fetch_add(1, Ordering::Relaxed);
     Ok((bvh, pv))
-}
-
-pub(crate) fn surface_index_construction_count() -> u64 {
-    SURFACE_INDEX_CONSTRUCTION_COUNT.load(Ordering::Relaxed)
 }
 
 impl NativeSurface {
@@ -549,7 +545,6 @@ impl NativeSurface {
         let source_triangle_soup_digest = mesh.triangle_soup_digest();
         let bvh = Bvh::build(&mesh).map_err(ParityBuildError::Other)?;
         let pv = ParityVote::build(&mesh, grid_pitch_mm, max_grid_bytes)?;
-        SURFACE_INDEX_CONSTRUCTION_COUNT.fetch_add(1, Ordering::Relaxed);
         Ok(NativeSurface {
             mesh,
             bvh,
@@ -879,8 +874,9 @@ impl NativeSurface {
     /// nodes containing an allowed face, so each row skips wholly disallowed
     /// subtrees and never scans disallowed leaf faces. It then applies the
     /// kernel's exact `(distance, global face ID)` rule. For `P` points, `A`
-    /// allowed faces, and `K` marked BVH nodes, worst-case query work is `P*K`
-    /// node visits and `P*A` triangle tests; both totals are preflight-capped.
+    /// allowed faces, `K` marked BVH nodes, and `N` existing BVH nodes,
+    /// worst-case query work is `N + P*K` node visits and `P*A` triangle tests;
+    /// both totals are preflight-capped.
     /// The one-time gather is `O(N + A)` for `N` existing BVH faces/nodes;
     /// `N` is bounded by the admitted surface and by this call's face/node mask
     /// memory charge.
@@ -932,6 +928,32 @@ impl NativeSurface {
                     return Err(AllowedFaceProjectionError::NonFinitePoint { point, axis });
                 }
             }
+        }
+
+        // This exact shape-only total is known before any masks, leaf scans,
+        // or allocations. Refuse doomed batches at the earliest boundary.
+        let total_triangle_tests = checked_allowed_projection_mul(
+            points.len(),
+            allowed_face_ids.len(),
+            "total triangle tests",
+        )?;
+        if total_triangle_tests > limits.max_total_triangle_tests {
+            return Err(AllowedFaceProjectionError::ResourceLimitExceeded {
+                resource: "total triangle tests",
+                required: total_triangle_tests,
+                limit: limits.max_total_triangle_tests,
+            });
+        }
+
+        // Building the allowed-subtree mask visits every existing node once.
+        // Charge that exact setup work before allocating or scanning the BVH.
+        let setup_node_visits = self.bvh.nodes.len();
+        if setup_node_visits > limits.max_total_node_visits {
+            return Err(AllowedFaceProjectionError::ResourceLimitExceeded {
+                resource: "setup node visits",
+                required: setup_node_visits,
+                limit: limits.max_total_node_visits,
+            });
         }
 
         let requirements =
@@ -993,25 +1015,18 @@ impl NativeSurface {
         debug_assert_ne!(allowed_subtrees[0], 0);
         debug_assert_eq!(allowed_leaf_faces.len(), allowed_face_ids.len());
         let marked_nodes = allowed_subtrees.iter().filter(|&&mark| mark != 0).count();
-        let total_node_visits =
+        let query_node_visits =
             checked_allowed_projection_mul(points.len(), marked_nodes, "total node visits")?;
+        let total_node_visits = checked_allowed_projection_add(
+            setup_node_visits,
+            query_node_visits,
+            "total node visits",
+        )?;
         if total_node_visits > limits.max_total_node_visits {
             return Err(AllowedFaceProjectionError::ResourceLimitExceeded {
                 resource: "total node visits",
                 required: total_node_visits,
                 limit: limits.max_total_node_visits,
-            });
-        }
-        let total_triangle_tests = checked_allowed_projection_mul(
-            points.len(),
-            allowed_face_ids.len(),
-            "total triangle tests",
-        )?;
-        if total_triangle_tests > limits.max_total_triangle_tests {
-            return Err(AllowedFaceProjectionError::ResourceLimitExceeded {
-                resource: "total triangle tests",
-                required: total_triangle_tests,
-                limit: limits.max_total_triangle_tests,
             });
         }
 

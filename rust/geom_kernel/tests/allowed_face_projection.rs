@@ -217,7 +217,24 @@ fn budget_refusal_happens_before_any_projection_result() {
 
     let mut node_limited = limits();
     node_limited.max_total_node_visits = 0;
+    node_limited.max_memory_bytes = 0;
     let required_nodes = match surface.project_allowed_faces_batch(
+        &[0, 2],
+        &[[0.0; 3], [1.0; 3]],
+        uncapped(),
+        node_limited,
+    ) {
+        Err(AllowedFaceProjectionError::ResourceLimitExceeded {
+            resource: "setup node visits",
+            required,
+            limit: 0,
+        }) => required,
+        other => panic!("unexpected setup-node refusal: {other:?}"),
+    };
+    assert!(required_nodes > 0);
+    node_limited.max_total_node_visits = required_nodes;
+    node_limited.max_memory_bytes = usize::MAX;
+    let required_total_nodes = match surface.project_allowed_faces_batch(
         &[0, 2],
         &[[0.0; 3], [1.0; 3]],
         uncapped(),
@@ -226,18 +243,20 @@ fn budget_refusal_happens_before_any_projection_result() {
         Err(AllowedFaceProjectionError::ResourceLimitExceeded {
             resource: "total node visits",
             required,
-            limit: 0,
-        }) => required,
-        other => panic!("unexpected node refusal: {other:?}"),
+            limit,
+        }) if limit == required_nodes => required,
+        other => panic!("unexpected total-node refusal: {other:?}"),
     };
-    assert!(required_nodes > 0);
-    node_limited.max_total_node_visits = required_nodes;
+    assert!(required_total_nodes > required_nodes);
+    node_limited.max_total_node_visits = required_total_nodes;
     assert!(surface
         .project_allowed_faces_batch(&[0, 2], &[[0.0; 3], [1.0; 3]], uncapped(), node_limited,)
         .is_ok());
 
     let mut work_limited = limits();
     work_limited.max_total_triangle_tests = 1;
+    work_limited.max_total_node_visits = 0;
+    work_limited.max_memory_bytes = 0;
     assert_eq!(
         surface.project_allowed_faces_batch(
             &[0, 2],
@@ -251,6 +270,8 @@ fn budget_refusal_happens_before_any_projection_result() {
             limit: 1,
         })
     );
+    work_limited.max_total_node_visits = usize::MAX;
+    work_limited.max_memory_bytes = usize::MAX;
     work_limited.max_total_triangle_tests = 4;
     assert!(surface
         .project_allowed_faces_batch(&[0, 2], &[[0.0; 3], [1.0; 3]], uncapped(), work_limited,)
@@ -303,6 +324,108 @@ fn filtered_bvh_matches_bounded_brute_force_generated_oracle_exactly() {
 fn update_hash(hash: &mut u64, value: u64) {
     *hash ^= value;
     *hash = hash.wrapping_mul(1_099_511_628_211);
+}
+
+fn tight_budget_fingerprint() -> String {
+    let (surface, allowed, points) = generated_surface();
+
+    let mut memory_limits = limits();
+    memory_limits.max_memory_bytes = 0;
+    let memory_required =
+        match surface.project_allowed_faces_batch(&allowed, &points, uncapped(), memory_limits) {
+            Err(AllowedFaceProjectionError::ResourceLimitExceeded {
+                resource: "memory bytes",
+                required,
+                limit: 0,
+            }) => required,
+            other => panic!("unexpected tight memory result: {other:?}"),
+        };
+
+    let mut setup_limits = limits();
+    setup_limits.max_total_node_visits = 0;
+    let setup_required =
+        match surface.project_allowed_faces_batch(&allowed, &points, uncapped(), setup_limits) {
+            Err(AllowedFaceProjectionError::ResourceLimitExceeded {
+                resource: "setup node visits",
+                required,
+                limit: 0,
+            }) => required,
+            other => panic!("unexpected tight setup result: {other:?}"),
+        };
+
+    let mut node_limits = limits();
+    node_limits.max_total_node_visits = setup_required;
+    let node_required =
+        match surface.project_allowed_faces_batch(&allowed, &points, uncapped(), node_limits) {
+            Err(AllowedFaceProjectionError::ResourceLimitExceeded {
+                resource: "total node visits",
+                required,
+                limit,
+            }) if limit == setup_required => required,
+            other => panic!("unexpected tight node result: {other:?}"),
+        };
+
+    let mut triangle_limits = limits();
+    triangle_limits.max_total_triangle_tests = 0;
+    let triangle_required =
+        match surface.project_allowed_faces_batch(&allowed, &points, uncapped(), triangle_limits) {
+            Err(AllowedFaceProjectionError::ResourceLimitExceeded {
+                resource: "total triangle tests",
+                required,
+                limit: 0,
+            }) => required,
+            other => panic!("unexpected tight triangle result: {other:?}"),
+        };
+
+    // Pin the exact requirement values, not only cross-thread equality. This
+    // fixture has 48 faces, 17 BVH nodes (all marked), depth 8, 32 allowed
+    // faces, and 96 points under the public buffer layouts.
+    assert_eq!(memory_required, 11_601);
+    assert_eq!(setup_required, 17);
+    assert_eq!(node_required, 1_649);
+    assert_eq!(triangle_required, 3_072);
+    assert_eq!(triangle_required, points.len() * allowed.len());
+    format!(
+        "memory:{memory_required}:0:setup:{setup_required}:0:node:{node_required}:{setup_required}:triangle:{triangle_required}:0"
+    )
+}
+
+#[test]
+fn allowed_projection_tight_budget_thread_identity_child() {
+    println!(
+        "ALLOWED_PROJECTION_BUDGET_FINGERPRINT:{}:{}",
+        geom_kernel::current_threads(),
+        tight_budget_fingerprint()
+    );
+}
+
+#[test]
+fn tight_budget_errors_are_exact_at_1_4_16_threads() {
+    let expected = tight_budget_fingerprint();
+    let executable = std::env::current_exe().unwrap();
+    for threads in ["1", "4", "16"] {
+        let output = Command::new(&executable)
+            .args([
+                "--exact",
+                "allowed_projection_tight_budget_thread_identity_child",
+                "--nocapture",
+            ])
+            .env("PLINTH_THREADS", threads)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "tight-budget child thread count {threads} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let line = stdout
+            .lines()
+            .find(|line| line.starts_with("ALLOWED_PROJECTION_BUDGET_FINGERPRINT:"))
+            .unwrap();
+        let expected_line = format!("ALLOWED_PROJECTION_BUDGET_FINGERPRINT:{threads}:{expected}");
+        assert_eq!(line, expected_line);
+    }
 }
 
 #[test]
