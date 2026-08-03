@@ -4,6 +4,7 @@
 //! evaluator is deliberately introduced separately: A1 must not manufacture
 //! spatial results before its geometry contract is implemented.
 
+use plinth_core::m0_constants;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -20,7 +21,33 @@ pub struct DelicacySettings {
 }
 
 impl DelicacySettings {
-    pub fn new(
+    pub fn production() -> Result<Self, DelicacyError> {
+        let values = m0_constants()
+            .map_err(|e| DelicacyError::Constants(e.to_string()))?
+            .placeholders();
+        Self::new(
+            values.delicacy_curvature_weight().diagnostic().get(),
+            values.delicacy_thinness_weight().diagnostic().get(),
+            values.thin_feature_mm().diagnostic().get(),
+        )
+    }
+    #[cfg(not(test))]
+    fn new(
+        curvature_weight: f64,
+        thinness_weight: f64,
+        thin_feature_mm: f64,
+    ) -> Result<Self, DelicacyError> {
+        Self::checked(curvature_weight, thinness_weight, thin_feature_mm)
+    }
+    #[cfg(test)]
+    pub(crate) fn new(
+        curvature_weight: f64,
+        thinness_weight: f64,
+        thin_feature_mm: f64,
+    ) -> Result<Self, DelicacyError> {
+        Self::checked(curvature_weight, thinness_weight, thin_feature_mm)
+    }
+    fn checked(
         curvature_weight: f64,
         thinness_weight: f64,
         thin_feature_mm: f64,
@@ -40,9 +67,9 @@ impl DelicacySettings {
             });
         }
         Ok(Self {
-            curvature_weight,
-            thinness_weight,
-            thin_feature_mm,
+            curvature_weight: canonical_zero(curvature_weight),
+            thinness_weight: canonical_zero(thinness_weight),
+            thin_feature_mm: canonical_zero(thin_feature_mm),
         })
     }
     #[must_use]
@@ -148,7 +175,8 @@ pub struct DelicacyFaceValue {
     weight: f64,
 }
 impl DelicacyFaceValue {
-    pub fn new(curvature: f64, thinness: f64, weight: f64) -> Result<Self, DelicacyError> {
+    #[allow(dead_code)]
+    pub(crate) fn new(curvature: f64, thinness: f64, weight: f64) -> Result<Self, DelicacyError> {
         for (field, value) in [
             ("curvature", curvature),
             ("thinness", thinness),
@@ -159,9 +187,9 @@ impl DelicacyFaceValue {
             }
         }
         Ok(Self {
-            curvature,
-            thinness,
-            weight,
+            curvature: canonical_zero(curvature),
+            thinness: canonical_zero(thinness),
+            weight: canonical_zero(weight),
         })
     }
     #[must_use]
@@ -186,8 +214,10 @@ pub struct DelicacyField {
     digest: String,
 }
 impl DelicacyField {
-    /// Evaluator boundary: accepts one canonical value per source face, in source order.
-    pub fn from_face_values(
+    /// Sole A2/A3 evaluator boundary: batch geometry emits one source-order
+    /// face value; support only reads the resulting weights.
+    #[allow(dead_code)]
+    pub(crate) fn from_face_values(
         table: FaceTable,
         settings: DelicacySettings,
         values: Vec<DelicacyFaceValue>,
@@ -227,6 +257,7 @@ impl DelicacyField {
     }
 }
 
+#[allow(dead_code)]
 fn digest(table: &FaceTable, settings: DelicacySettings, values: &[DelicacyFaceValue]) -> String {
     let mut hash = Sha256::new();
     hash.update(DELICACY_FIELD_SCHEMA.as_bytes());
@@ -248,9 +279,18 @@ fn digest(table: &FaceTable, settings: DelicacySettings, values: &[DelicacyFaceV
     }
     format!("{:x}", hash.finalize())
 }
+const fn canonical_zero(value: f64) -> f64 {
+    if value == 0.0 {
+        0.0
+    } else {
+        value
+    }
+}
 
 #[derive(Debug, Error, PartialEq)]
 pub enum DelicacyError {
+    #[error("registered delicacy constants are unavailable: {0}")]
+    Constants(String),
     #[error("delicacy setting {name} must be finite and in range, got {value}")]
     InvalidSetting { name: &'static str, value: f64 },
     #[error("delicacy sample request {requested} exceeds valid maximum {maximum}")]
@@ -274,7 +314,7 @@ pub enum DelicacyError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::make_box;
+    use crate::make_box_default;
 
     fn field(mesh: &Mesh) -> DelicacyField {
         let table = FaceTable::bind(mesh, "source-lod").unwrap();
@@ -312,7 +352,7 @@ mod tests {
 
     #[test]
     fn field_is_fingerprint_bound_face_ordered_and_digest_stable() {
-        let mesh = make_box().unwrap();
+        let mesh = make_box_default().unwrap();
         let first = field(&mesh);
         let second = field(&mesh);
         assert_eq!(first.digest(), second.digest());
