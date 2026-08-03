@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use geom_kernel::{NativeSurface, NativeSurfaceConfig, PointCloudIndex, RadiusQueryLimits};
 use plinth_core::{m0_constants, LayerPlan};
-use plinth_mesh::{build_face_topology, Mesh, WeldPolicy};
+use plinth_mesh::{build_face_topology, mesh_fingerprint, Mesh, WeldPolicy};
 use thiserror::Error;
 
 use crate::dyadic::{build_candidate_payload, CandidatePayloadConfig, DyadicError};
@@ -601,6 +601,7 @@ pub struct SpecializedContactPlan {
     repair_pool: RepairPool,
     generic_authority: GenericContactPlan,
     mesh_authority: Mesh,
+    mesh_authority_fingerprint: String,
     reservations_authority: Vec<SpecializedOwnerReservation>,
     limits_authority: SpecializedLimits,
     surface_config_authority: NativeSurfaceConfig,
@@ -782,6 +783,11 @@ impl SpecializedContactPlan {
     }
 
     fn validate_edit_binding(&self) -> Result<(), SpecializedError> {
+        let live_mesh_fingerprint = mesh_fingerprint(&self.mesh_authority)
+            .map_err(|error| SpecializedError::Topology(error.to_string()))?;
+        if live_mesh_fingerprint != self.mesh_authority_fingerprint {
+            return Err(SpecializedError::FrozenMeshAuthorityMismatch);
+        }
         self.repair_pool
             .validate_lineage(repair_pool_lineage_root(&self.generic_authority))?;
         self.repair_pool.validate_contacts(&self.contacts)?;
@@ -804,6 +810,7 @@ impl SpecializedContactPlan {
         // original source authority remains auditable above, while this plan
         // digest changes whenever a child-relevant input changes.
         hash.u64(self.generic_authority.digest());
+        hash.bytes(self.mesh_authority_fingerprint.as_bytes());
         for reservation in &self.reservations_authority {
             hash.u32(reservation.owner_id);
             hash.u32(reservation.face_id);
@@ -1048,6 +1055,7 @@ impl<'a> SpecializedContactPlanEdit<'a> {
             repair_pool: self.plan.repair_pool.clone(),
             generic_authority: self.plan.generic_authority.clone(),
             mesh_authority: self.plan.mesh_authority.clone(),
+            mesh_authority_fingerprint: self.plan.mesh_authority_fingerprint.clone(),
             reservations_authority: self.plan.reservations_authority.clone(),
             limits_authority: self.plan.limits_authority,
             surface_config_authority: self.plan.surface_config_authority,
@@ -1304,6 +1312,8 @@ pub enum SpecializedError {
     DuplicateChildContactId { contact_id: u64 },
     #[error("specialized child plan cannot allocate another physical contact id")]
     PhysicalContactIdOverflow,
+    #[error("specialized plan's frozen mesh no longer matches its stored fingerprint")]
+    FrozenMeshAuthorityMismatch,
     #[error("specialized finalized load artifact is stale or belongs to another child plan")]
     StaleFinalizedLoadArtifact,
     #[error("registered specialized constants are unavailable: {0}")]
@@ -1625,6 +1635,7 @@ pub fn prepare_specialized_contacts(
         repair_pool,
         generic_authority: generic.clone(),
         mesh_authority: mesh.clone(),
+        mesh_authority_fingerprint: topology.mesh_fingerprint().to_owned(),
         reservations_authority: reservations.to_vec(),
         limits_authority: limits,
         surface_config_authority,
@@ -5936,6 +5947,28 @@ mod tests {
             changed_surface.begin_regular_edit(),
             Err(SpecializedError::StaleFinalizedLoadArtifact)
         ));
+        let mut changed_mesh = plan.clone();
+        changed_mesh.mesh_authority = make_thin_fin().unwrap();
+        assert_ne!(
+            mesh_fingerprint(&changed_mesh.mesh_authority).unwrap(),
+            changed_mesh.mesh_authority_fingerprint
+        );
+        // A zero native budget would fail surface construction if the frozen
+        // mesh check did not run first.
+        changed_mesh.surface_config_authority.max_grid_bytes = 0;
+        assert!(matches!(
+            changed_mesh.begin_regular_edit(),
+            Err(SpecializedError::FrozenMeshAuthorityMismatch)
+        ));
+        let mut coherently_substituted_mesh = plan.clone();
+        coherently_substituted_mesh.mesh_authority = make_thin_fin().unwrap();
+        coherently_substituted_mesh.mesh_authority_fingerprint =
+            mesh_fingerprint(&coherently_substituted_mesh.mesh_authority).unwrap();
+        assert_ne!(coherently_substituted_mesh.digest(), digest);
+        assert!(matches!(
+            coherently_substituted_mesh.begin_regular_edit(),
+            Err(SpecializedError::StaleFinalizedLoadArtifact)
+        ));
         // The public edit start has no parameters: these parent-owned values
         // are the only possible finalizer inputs.
         assert!(plan.begin_regular_edit().is_ok());
@@ -6130,7 +6163,7 @@ mod tests {
                 // the digest binds finalized physical-seat provenance and
                 // append-only child-allocation history explicitly.
                 // This is not a corpus, baseline, physics, or reference re-freeze.
-                10_147_760_234_672_878_153_u64,
+                8_928_188_536_911_449_669_u64,
                 (95, 51_200, 14),
                 (6, 0, 4),
             ),
@@ -6142,7 +6175,7 @@ mod tests {
                 // the digest binds finalized physical-seat provenance and
                 // append-only child-allocation history explicitly.
                 // This is not a corpus, baseline, physics, or reference re-freeze.
-                10_674_242_434_249_151_966_u64,
+                12_073_756_428_966_718_576_u64,
                 (40, 40_192, 13),
                 (3, 10, 8),
             ),
@@ -6154,7 +6187,7 @@ mod tests {
                 // the digest binds finalized physical-seat provenance and
                 // append-only child-allocation history explicitly.
                 // This is not a corpus, baseline, physics, or reference re-freeze.
-                3_584_672_466_358_389_146_u64,
+                16_790_786_111_947_059_800_u64,
                 (19, 20_480, 2),
                 (2, 0, 1),
             ),
