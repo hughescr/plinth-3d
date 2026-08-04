@@ -1,6 +1,10 @@
 # Worktree & Branch Dispositions — 2026-08-04
 
-> **Execution status (2026-08-04):** WIP rescue commit (`0384925` on `codex/shared-surface-authority`), all 39 archive tags, and the artifact backup to `plinth-3d-artifacts/2026-08-04-plate07/` are **done**. The 5 worktree removals and 39 branch deletions listed below are **pending owner approval** — every DELETE verdict below is proven and its branch already tagged, so executing them later is `git worktree remove <path>` for the 5 paths marked REMOVE, then `for b in $(git tag -l 'archive/2026-08-04/*' | sed 's|^archive/2026-08-04/||'); do git branch -D "$b"; done`.
+> **Execution status (final, 2026-08-04):** fully executed. WIP rescue commit `0384925`, all 39 archive tags, artifact backup to `plinth-3d-artifacts/2026-08-04-plate07/`, the 39 tagged branch deletions, and 6 worktree removals are done.
+>
+> **Owner decisions (2026-08-04, post-audit):** the five *RETAINED (unproven)* draft branches (`codex/support-perception`, `-specialized`, `-contact-pool`, `-anchor-search`, `-member-sizing`), the ASK item `codex/m3-decimate-proxy`, and `codex/shared-surface-authority` (including its rescued WIP `0384925`) were judged superseded/abandoned experiments and deleted **untagged** at the owner's direction — git gc reaps them; do not attempt to resurrect. `codex/normalization-controller` is **parked for independent review** as candidate coverage-repair machinery.
+>
+> **End state: 8 branches, 8 worktrees, each with a stated purpose** — master; integration; delicacy copy B (integrate first); embed-zones (review); prepare-interface (repair); home-calibration-plate (plate/fixture generator); chitubox-native-preview (one unlanded fix to cherry-pick); normalization-controller (parked for review).
 
 Reference point for every verdict: **`codex/rust-pipeline-integration` @ `a3887a3`** (master `5e37d8c` is a strict ancestor of it).
 
