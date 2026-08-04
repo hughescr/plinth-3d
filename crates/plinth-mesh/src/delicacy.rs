@@ -357,9 +357,10 @@ mod tests {
             .placeholders();
         let settings = DelicacySettings::production().expect("production delicacy settings");
 
-        // The production path is the sole reader of these three registry
-        // entries; pin both the plumbing (field-for-field) and the registry
-        // values themselves so either drifting fails here.
+        // The production path is the sole reader in this crate of these three
+        // registry entries (`plinth-metrics`'s scar.rs reads them too); pin
+        // both the plumbing (field-for-field) and the registry values
+        // themselves so either drifting fails here.
         assert_eq!(
             settings.curvature_weight(),
             registry.delicacy_curvature_weight().diagnostic().get()
