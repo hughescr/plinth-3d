@@ -640,3 +640,741 @@ fn member_length_mm(member: &Member) -> Result<f64, DesignedMaskError> {
         .then_some(length)
         .ok_or(DesignedMaskError::InvalidMemberSpan)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::forest::{MemberKind, MemberSpec, Owner, RootwardEndRadius, TerminalEndRadius};
+
+    fn finite(value: f64) -> Finite {
+        Finite::new(value).unwrap()
+    }
+
+    fn radius(value: f64) -> PositiveFinite {
+        PositiveFinite::new(value).unwrap()
+    }
+
+    fn extent(value: f64) -> PositiveFiniteMm {
+        PositiveFiniteMm::new(value).unwrap()
+    }
+
+    fn append_cube(vertices: &mut Vec<[f64; 3]>, faces: &mut Vec<[u32; 3]>, x0: f64, x1: f64) {
+        let base = u32::try_from(vertices.len()).unwrap();
+        vertices.extend([
+            [x0, 0.0, 0.0],
+            [x1, 0.0, 0.0],
+            [x1, 1.0, 0.0],
+            [x0, 1.0, 0.0],
+            [x0, 0.0, 1.0],
+            [x1, 0.0, 1.0],
+            [x1, 1.0, 1.0],
+            [x0, 1.0, 1.0],
+        ]);
+        for [a, b, c] in [
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ] {
+            faces.push([base + a, base + b, base + c]);
+        }
+    }
+
+    fn surface_from(vertices: &[[f64; 3]], faces: &[[u32; 3]], pitch: f64) -> NativeSurface {
+        NativeSurface::from_indexed(
+            vertices,
+            faces,
+            geom_kernel::NativeSurfaceConfig {
+                grid_pitch_mm: pitch,
+                max_grid_bytes: 32 * 1024 * 1024,
+            },
+        )
+        .unwrap()
+    }
+
+    fn surface_with_cubes(cubes: &[(f64, f64)]) -> NativeSurface {
+        let mut vertices = Vec::new();
+        let mut faces = Vec::new();
+        for &(x0, x1) in cubes {
+            append_cube(&mut vertices, &mut faces, x0, x1);
+        }
+        surface_from(&vertices, &faces, 0.25)
+    }
+
+    /// A tessellated sphere: the fixture the suite lacked. Every existing
+    /// fixture is a flat-faced box, so nothing measured what convex curvature
+    /// does to a rim ray that starts inside the solid.
+    fn sphere_surface(radius_mm: f64, segments: usize, rings: usize) -> NativeSurface {
+        let mut vertices = vec![[0.0, 0.0, radius_mm]];
+        for ring in 1..rings {
+            let phi = std::f64::consts::PI * (ring as f64) / (rings as f64);
+            for segment in 0..segments {
+                let theta = 2.0 * std::f64::consts::PI * (segment as f64) / (segments as f64);
+                vertices.push([
+                    radius_mm * phi.sin() * theta.cos(),
+                    radius_mm * phi.sin() * theta.sin(),
+                    radius_mm * phi.cos(),
+                ]);
+            }
+        }
+        vertices.push([0.0, 0.0, -radius_mm]);
+        let south = u32::try_from(vertices.len() - 1).unwrap();
+        let ring_base = |ring: usize| u32::try_from(1 + (ring - 1) * segments).unwrap();
+        let mut faces = Vec::new();
+        for segment in 0..segments {
+            let a = ring_base(1) + u32::try_from(segment).unwrap();
+            let b = ring_base(1) + u32::try_from((segment + 1) % segments).unwrap();
+            faces.push([0, a, b]);
+        }
+        for ring in 1..rings - 1 {
+            for segment in 0..segments {
+                let next = (segment + 1) % segments;
+                let a = ring_base(ring) + u32::try_from(segment).unwrap();
+                let b = ring_base(ring) + u32::try_from(next).unwrap();
+                let c = ring_base(ring + 1) + u32::try_from(next).unwrap();
+                let d = ring_base(ring + 1) + u32::try_from(segment).unwrap();
+                faces.push([a, d, c]);
+                faces.push([a, c, b]);
+            }
+        }
+        for segment in 0..segments {
+            let a = ring_base(rings - 1) + u32::try_from(segment).unwrap();
+            let b = ring_base(rings - 1) + u32::try_from((segment + 1) % segments).unwrap();
+            faces.push([a, south, b]);
+        }
+        surface_from(&vertices, &faces, 0.5)
+    }
+
+    fn validation_limits(surface: &NativeSurface, rows: usize) -> EndpointMaskValidationLimits {
+        EndpointMaskValidationLimits::for_batch(surface, rows, extent(0.01), 8).unwrap()
+    }
+
+    fn spec(
+        p0: [f64; 3],
+        p1: [f64; 3],
+        r: f64,
+        embed_end: Option<EmbedEnd>,
+        ordinal: u32,
+    ) -> MemberSpec {
+        MemberSpec {
+            p0_mm: p0.map(finite),
+            p1_mm: p1.map(finite),
+            r0_mm: TerminalEndRadius::new(radius(r)),
+            r1_mm: RootwardEndRadius::new(radius(r)),
+            kind: MemberKind::Shoot,
+            owner: Owner::Generated {
+                family: "endpoint-mask".into(),
+                ordinal,
+            },
+            embed_end,
+            carried_mm2: finite(1.0),
+        }
+    }
+
+    fn embedded_member(p0: f64, p1: f64, embed_end: Option<EmbedEnd>) -> Member {
+        Member::new(spec([p0, 0.5, 0.5], [p1, 0.5, 0.5], 0.05, embed_end, 0))
+    }
+
+    /// Members are spread along y so each one is a distinct row, and the ends
+    /// alternate so the batch exercises both row shapes at once.
+    fn spread_forest(count: usize) -> (Forest, Vec<MemberKey>) {
+        let mut forest = Forest::new();
+        let keys = (0..count)
+            .map(|index| {
+                let y = 0.2 + 0.15 * (index as f64);
+                let end = if index % 2 == 0 {
+                    EmbedEnd::Terminalward
+                } else {
+                    EmbedEnd::Rootward
+                };
+                let (p0, p1) = match end {
+                    EmbedEnd::Terminalward => ([0.2, y, 0.5], [0.8, y, 0.5]),
+                    EmbedEnd::Rootward => ([0.8, y, 0.5], [0.2, y, 0.5]),
+                };
+                forest.add_member(Member::new(spec(
+                    p0,
+                    p1,
+                    0.05,
+                    Some(end),
+                    u32::try_from(index).unwrap(),
+                )))
+            })
+            .collect::<Vec<_>>();
+        (forest, keys)
+    }
+
+    fn spread_requests(forest: &Forest, keys: &[MemberKey]) -> Vec<DesignedMaskRequest> {
+        keys.iter()
+            .map(|key| DesignedMaskRequest {
+                member: *key,
+                end: forest.member(*key).unwrap().embed_end().unwrap(),
+                extent: extent(0.1),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn whole_forest_validation_issues_exactly_one_kernel_call() {
+        let surface = surface_with_cubes(&[(0.0, 1.0)]);
+        let (forest, keys) = spread_forest(5);
+        let requests = spread_requests(&forest, &keys);
+        assert_eq!(requests.len(), 5);
+        reset_endpoint_validation_kernel_calls();
+        assert_eq!(endpoint_validation_kernel_calls(), 0);
+        let table = DesignedMaskTable::validate_forest(
+            &forest,
+            &surface,
+            &requests,
+            validation_limits(&surface, requests.len()),
+        )
+        .unwrap();
+        // N members must cost one native call, not N.
+        assert_eq!(endpoint_validation_kernel_calls(), 1);
+        assert_eq!(table.len(), keys.len());
+        for key in &keys {
+            let member = forest.member(*key).unwrap();
+            let end = member.embed_end().unwrap();
+            assert_eq!(
+                table.required_extent(*key, member, end, &surface),
+                Ok(extent(0.1))
+            );
+        }
+        assert_eq!(
+            table
+                .iter()
+                .flat_map(|(_, masks)| masks.iter().map(|(end, _)| end))
+                .count(),
+            5
+        );
+    }
+
+    #[test]
+    fn a_single_bad_row_refuses_the_whole_batch_before_any_kernel_call() {
+        for value in [0.0, -0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                PositiveFiniteMm::new(value),
+                Err(DesignedMaskError::InvalidExtent)
+            );
+        }
+        let surface = surface_with_cubes(&[(0.0, 1.0)]);
+        let (forest, keys) = spread_forest(4);
+        let good = spread_requests(&forest, &keys);
+        let limits = validation_limits(&surface, 8);
+
+        let refuse = |mutate: &dyn Fn(&mut Vec<DesignedMaskRequest>)| {
+            let mut requests = good.clone();
+            mutate(&mut requests);
+            reset_endpoint_validation_kernel_calls();
+            let outcome = DesignedMaskTable::validate_forest(&forest, &surface, &requests, limits);
+            assert_eq!(endpoint_validation_kernel_calls(), 0);
+            outcome.expect_err("a single bad row refuses the batch")
+        };
+
+        assert_eq!(
+            refuse(&|requests| requests[2].extent = extent(0.61)),
+            DesignedMaskError::ExtentOutOfSpan
+        );
+        assert_eq!(
+            refuse(&|requests| {
+                let mut both = requests[1];
+                both.end = EmbedEnd::Terminalward;
+                both.extent = extent(0.31);
+                requests[1].extent = extent(0.31);
+                requests.push(both);
+            }),
+            DesignedMaskError::OverlappingExtents
+        );
+        assert_eq!(
+            refuse(&|requests| {
+                requests.remove(3);
+            }),
+            DesignedMaskError::MissingRequiredExtent {
+                end: EmbedEnd::Rootward,
+            }
+        );
+        assert_eq!(
+            refuse(&|requests| requests[0].end = EmbedEnd::Rootward),
+            DesignedMaskError::EndNotDesigned {
+                end: EmbedEnd::Rootward,
+            }
+        );
+        assert_eq!(
+            refuse(&|requests| {
+                let duplicate = requests[2];
+                requests.push(duplicate);
+            }),
+            DesignedMaskError::DuplicateRequest {
+                end: EmbedEnd::Terminalward,
+            }
+        );
+        assert_eq!(
+            refuse(&|requests| {
+                requests[0].member = MemberKey::transit_test_fixture(999, 0);
+            }),
+            DesignedMaskError::UnknownMember
+        );
+
+        reset_endpoint_validation_kernel_calls();
+        let starved = EndpointMaskValidationLimits::new(
+            extent(0.01),
+            8,
+            PenetrationBatchLimits {
+                max_rows: 3,
+                ..limits.penetration
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            DesignedMaskTable::validate_forest(&forest, &surface, &good, starved),
+            Err(DesignedMaskError::ResourceLimit)
+        );
+        assert_eq!(endpoint_validation_kernel_calls(), 0);
+    }
+
+    #[test]
+    fn degenerate_member_spans_refuse_before_any_kernel_call() {
+        let surface = surface_with_cubes(&[(0.0, 1.0)]);
+        reset_endpoint_validation_kernel_calls();
+        let limits = validation_limits(&surface, 2);
+        for (p0, p1, extent_mm) in [
+            ([0.0, 0.0, 0.0], [1e200, 0.0, 0.0], 1e300),
+            ([-1e308, 0.0, 0.0], [1e308, 0.0, 0.0], 1.0),
+            ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 1.0),
+        ] {
+            let member = Member::new(spec(p0, p1, 0.2, Some(EmbedEnd::Terminalward), 0));
+            assert_eq!(
+                validate_members_batch(
+                    &surface,
+                    &[&member],
+                    &[(0, EmbedEnd::Terminalward, extent(extent_mm))],
+                    limits,
+                ),
+                Err(DesignedMaskError::InvalidMemberSpan)
+            );
+        }
+        assert_eq!(endpoint_validation_kernel_calls(), 0);
+    }
+
+    #[test]
+    fn row_order_is_member_then_terminal_then_root_regardless_of_request_order() {
+        let surface = surface_with_cubes(&[(0.0, 1.0)]);
+        let (forest, keys) = spread_forest(4);
+        let requests = spread_requests(&forest, &keys);
+        let bindings = |requests: &[DesignedMaskRequest]| {
+            DesignedMaskTable::validate_forest(
+                &forest,
+                &surface,
+                requests,
+                validation_limits(&surface, requests.len()),
+            )
+            .unwrap()
+            .iter()
+            .map(|(key, masks)| {
+                (
+                    key,
+                    masks
+                        .iter()
+                        .map(|(end, mask)| (end, mask.validation_binding()))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>()
+        };
+        let baseline = bindings(&requests);
+        assert_eq!(baseline.len(), 4);
+        let mut reversed = requests.clone();
+        reversed.reverse();
+        assert_eq!(bindings(&reversed), baseline);
+        let mut rotated = requests.clone();
+        rotated.rotate_left(3);
+        assert_eq!(bindings(&rotated), baseline);
+
+        // The terminal-before-root iteration contract holds even when a single
+        // member carries both ends.
+        let mut forest = Forest::new();
+        let key = forest.add_member(embedded_member(0.2, 0.8, None));
+        let member = forest.member(key).unwrap();
+        let masks = validate_members_batch(
+            &surface,
+            &[member],
+            &[
+                (0, EmbedEnd::Rootward, extent(0.1)),
+                (0, EmbedEnd::Terminalward, extent(0.1)),
+            ],
+            validation_limits(&surface, 2),
+        );
+        assert_eq!(
+            masks.unwrap_err(),
+            DesignedMaskError::EndNotDesigned {
+                end: EmbedEnd::Terminalward,
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_a_request_for_an_end_the_member_does_not_declare() {
+        let surface = surface_with_cubes(&[(0.0, 1.0)]);
+        let member = embedded_member(0.2, 0.8, Some(EmbedEnd::Terminalward));
+        assert_eq!(
+            validate_members_batch(
+                &surface,
+                &[&member],
+                &[(0, EmbedEnd::Rootward, extent(0.1))],
+                validation_limits(&surface, 1),
+            ),
+            Err(DesignedMaskError::EndNotDesigned {
+                end: EmbedEnd::Rootward,
+            })
+        );
+        let unembedded = embedded_member(0.2, 0.8, None);
+        assert_eq!(
+            validate_members_batch(
+                &surface,
+                &[&unembedded],
+                &[(0, EmbedEnd::Terminalward, extent(0.1))],
+                validation_limits(&surface, 1),
+            ),
+            Err(DesignedMaskError::EndNotDesigned {
+                end: EmbedEnd::Terminalward,
+            })
+        );
+    }
+
+    #[test]
+    fn a_member_without_a_declared_embed_end_needs_no_designed_extent() {
+        let surface = surface_with_cubes(&[(0.0, 1.0)]);
+        let mut forest = Forest::new();
+        let key = forest.add_member(embedded_member(0.2, 0.8, None));
+        reset_endpoint_validation_kernel_calls();
+        let table = DesignedMaskTable::validate_forest(
+            &forest,
+            &surface,
+            &[],
+            validation_limits(&surface, 1),
+        )
+        .unwrap();
+        assert!(table.is_empty());
+        assert_eq!(endpoint_validation_kernel_calls(), 0);
+        assert_eq!(
+            table.required_extent(
+                key,
+                forest.member(key).unwrap(),
+                EmbedEnd::Terminalward,
+                &surface,
+            ),
+            Err(DesignedMaskError::MissingRequiredExtent {
+                end: EmbedEnd::Terminalward,
+            })
+        );
+    }
+
+    #[test]
+    fn disconnected_geometry_is_rejected_and_the_binding_covers_member_end_and_surface() {
+        let disconnected = surface_with_cubes(&[(0.0, 0.35), (0.55, 1.0)]);
+        let member = embedded_member(0.1, 0.9, Some(EmbedEnd::Terminalward));
+        assert_eq!(
+            validate_members_batch(
+                &disconnected,
+                &[&member],
+                &[(0, EmbedEnd::Terminalward, extent(0.45))],
+                validation_limits(&disconnected, 1),
+            ),
+            Err(DesignedMaskError::DisconnectedGeometry {
+                end: EmbedEnd::Terminalward,
+            })
+        );
+
+        let surface = surface_with_cubes(&[(0.0, 1.0)]);
+        let mut forest = Forest::new();
+        let key = forest.add_member(embedded_member(0.2, 0.8, Some(EmbedEnd::Terminalward)));
+        let requests = [DesignedMaskRequest {
+            member: key,
+            end: EmbedEnd::Terminalward,
+            extent: extent(0.1),
+        }];
+        let table = DesignedMaskTable::validate_forest(
+            &forest,
+            &surface,
+            &requests,
+            validation_limits(&surface, 1),
+        )
+        .unwrap();
+        assert_eq!(
+            table.required_extent(
+                key,
+                forest.member(key).unwrap(),
+                EmbedEnd::Terminalward,
+                &surface,
+            ),
+            Ok(extent(0.1))
+        );
+        let rebound = surface_with_cubes(&[(0.0, 1.1)]);
+        assert_eq!(
+            table.required_extent(
+                key,
+                forest.member(key).unwrap(),
+                EmbedEnd::Terminalward,
+                &rebound,
+            ),
+            Err(DesignedMaskError::StaleBinding)
+        );
+    }
+
+    /// Any mutation that could change the member invalidates prior validation.
+    /// One case per mutator, so a future mutator that forgets to bump
+    /// `geom_version` fails here rather than silently reusing stale evidence.
+    #[test]
+    fn every_member_mutation_invalidates_a_prior_validation() {
+        let surface = surface_with_cubes(&[(0.0, 1.0)]);
+        type Mutator = &'static dyn Fn(&mut Forest, MemberKey);
+        let mutators: [(&str, Mutator); 4] = [
+            ("set_endpoints", &|forest: &mut Forest, key: MemberKey| {
+                forest
+                    .set_endpoints(
+                        key,
+                        [finite(0.25), finite(0.5), finite(0.5)],
+                        [finite(0.8), finite(0.5), finite(0.5)],
+                    )
+                    .unwrap();
+            }),
+            ("set_radii", &|forest: &mut Forest, key: MemberKey| {
+                forest
+                    .set_radii(
+                        key,
+                        TerminalEndRadius::new(radius(0.06)),
+                        RootwardEndRadius::new(radius(0.06)),
+                    )
+                    .unwrap();
+            }),
+            ("set_kind", &|forest: &mut Forest, key: MemberKey| {
+                forest.set_kind(key, MemberKind::Trunk).unwrap();
+            }),
+            ("set_embed_end", &|forest: &mut Forest, key: MemberKey| {
+                forest.set_embed_end(key, Some(EmbedEnd::Rootward)).unwrap();
+            }),
+        ];
+        for (name, mutate) in mutators {
+            let mut forest = Forest::new();
+            let key = forest.add_member(embedded_member(0.2, 0.8, Some(EmbedEnd::Terminalward)));
+            let table = DesignedMaskTable::validate_forest(
+                &forest,
+                &surface,
+                &[DesignedMaskRequest {
+                    member: key,
+                    end: EmbedEnd::Terminalward,
+                    extent: extent(0.1),
+                }],
+                validation_limits(&surface, 1),
+            )
+            .unwrap();
+            assert_eq!(
+                table.required_extent(
+                    key,
+                    forest.member(key).unwrap(),
+                    EmbedEnd::Terminalward,
+                    &surface,
+                ),
+                Ok(extent(0.1)),
+                "{name} baseline"
+            );
+            mutate(&mut forest, key);
+            assert_eq!(
+                table.required_extent(
+                    key,
+                    forest.member(key).unwrap(),
+                    EmbedEnd::Terminalward,
+                    &surface,
+                ),
+                Err(DesignedMaskError::StaleBinding),
+                "{name} must invalidate prior validation"
+            );
+        }
+    }
+
+    /// The connectivity proof caps a requested extent at the true embedded
+    /// depth: it can never justify an inset that reaches outside the solid.
+    #[test]
+    fn validation_refuses_an_extent_deeper_than_the_solid() {
+        let surface = surface_with_cubes(&[(0.0, 1.0)]);
+        // p0 sits 0.15 mm inside the x = 1.0 face and the body leaves the solid.
+        let member = Member::new(spec(
+            [0.85, 0.5, 0.5],
+            [2.0, 0.5, 0.5],
+            0.05,
+            Some(EmbedEnd::Terminalward),
+            0,
+        ));
+        let limits = validation_limits(&surface, 1);
+        assert!(validate_members_batch(
+            &surface,
+            &[&member],
+            &[(0, EmbedEnd::Terminalward, extent(0.09))],
+            limits,
+        )
+        .is_ok());
+        assert_eq!(
+            validate_members_batch(
+                &surface,
+                &[&member],
+                &[(0, EmbedEnd::Terminalward, extent(0.225))],
+                limits,
+            ),
+            Err(DesignedMaskError::DisconnectedGeometry {
+                end: EmbedEnd::Terminalward,
+            })
+        );
+    }
+
+    /// Quantifies the margin question a contact stub faces on a real model: the
+    /// rim rays start at `p0 + unit * r0`, so on a convex surface they leave the
+    /// solid *before* the centerline does. Requesting exactly the placement
+    /// depth is therefore refused on any curved model, and the margin needed
+    /// scales as `r0^2 / (2 R)`.
+    #[test]
+    fn a_convex_surface_refuses_an_extent_equal_to_the_placement_depth() {
+        let sphere_radius_mm = 5.0;
+        let surface = sphere_surface(sphere_radius_mm, 96, 48);
+        let depth_mm = 0.3;
+        let stub_radius_mm = 0.35;
+        // A contact stub placed exactly the way `initial.rs` places one: the
+        // axis is the contact normal, so there is no incidence angle at all.
+        let member = Member::new(spec(
+            [sphere_radius_mm - depth_mm, 0.0, 0.0],
+            [sphere_radius_mm + 3.0, 0.0, 0.0],
+            stub_radius_mm,
+            Some(EmbedEnd::Terminalward),
+            0,
+        ));
+        let limits =
+            EndpointMaskValidationLimits::for_batch(&surface, 1, extent(0.002), 8).unwrap();
+        assert_eq!(
+            validate_members_batch(
+                &surface,
+                &[&member],
+                &[(0, EmbedEnd::Terminalward, extent(depth_mm))],
+                limits,
+            ),
+            Err(DesignedMaskError::DisconnectedGeometry {
+                end: EmbedEnd::Terminalward,
+            }),
+            "an extent equal to the placement depth must be refused on a convex surface"
+        );
+        // r0^2 / (2 R) = 0.35^2 / 10 = 0.01225 mm, so a 0.02 mm margin clears it.
+        assert!(
+            validate_members_batch(
+                &surface,
+                &[&member],
+                &[(0, EmbedEnd::Terminalward, extent(depth_mm - 0.02))],
+                limits,
+            )
+            .is_ok(),
+            "a margin larger than r0^2 / (2 R) must validate"
+        );
+    }
+
+    #[test]
+    fn endpoint_validator_handles_reversed_root_coordinates() {
+        let surface = surface_with_cubes(&[(0.0, 1.0)]);
+        let member = embedded_member(-0.2, 0.8, Some(EmbedEnd::Rootward));
+        let masks = validate_members_batch(
+            &surface,
+            &[&member],
+            &[(0, EmbedEnd::Rootward, extent(0.1))],
+            validation_limits(&surface, 1),
+        )
+        .unwrap();
+        assert_eq!(
+            masks[0].iter().map(|(end, _)| end).collect::<Vec<_>>(),
+            vec![EmbedEnd::Rootward]
+        );
+        assert_eq!(
+            masks[0].rootward().unwrap().validated_extent_for(
+                &member,
+                EmbedEnd::Rootward,
+                &surface
+            ),
+            Ok(extent(0.1))
+        );
+        // The rootward row swaps p0/p1 and r0/r1, so the proof walks outward
+        // from p1 even though the member's stored p0 lies outside the solid.
+        assert_eq!(
+            masks[0].terminalward().map(|_| ()),
+            None,
+            "only the declared end is minted"
+        );
+    }
+
+    /// A real 1/4/16 thread sweep: the kernel re-reads `PLINTH_THREADS` on every
+    /// batch call, so the sweep only means anything if the child process
+    /// actually runs under the requested count.
+    #[test]
+    fn endpoint_validation_is_thread_setting_independent() {
+        const CHILD: &str = "PLINTH_EMBED_MASK_SWEEP_CHILD";
+        const LINE: &str = "EMBED_MASK_SWEEP=";
+        if std::env::var(CHILD).is_ok() {
+            let surface = surface_with_cubes(&[(0.0, 1.0)]);
+            let (forest, keys) = spread_forest(4);
+            let requests = spread_requests(&forest, &keys);
+            let table = DesignedMaskTable::validate_forest(
+                &forest,
+                &surface,
+                &requests,
+                validation_limits(&surface, requests.len()),
+            )
+            .unwrap();
+            let payload = table
+                .iter()
+                .flat_map(|(_, masks)| {
+                    masks
+                        .iter()
+                        .map(|(_, mask)| format!("{:016x}", mask.validation_binding()))
+                })
+                .collect::<Vec<_>>();
+            println!(
+                "{LINE}{}:{}:{}",
+                geom_kernel::current_threads(),
+                payload.len(),
+                payload.join(":")
+            );
+            return;
+        }
+        let test_name = "designed_embed::tests::endpoint_validation_is_thread_setting_independent";
+        let mut payloads = Vec::new();
+        for threads in [1, 4, 16] {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test_name, "--nocapture"])
+                .env(CHILD, "1")
+                .env("PLINTH_THREADS", threads.to_string())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let row = stdout
+                .lines()
+                .find_map(|line| line.strip_prefix(LINE))
+                .expect("child emitted a sweep payload");
+            let mut fields = row.splitn(3, ':');
+            let effective = fields.next().unwrap();
+            let count = fields.next().unwrap();
+            let payload = fields.next().unwrap();
+            // Non-vacuity: the env var reached the kernel, and the payload is
+            // not an empty table.
+            assert_eq!(effective.parse::<usize>().unwrap(), threads);
+            assert!(count.parse::<usize>().unwrap() >= 2);
+            payloads.push(payload.to_owned());
+        }
+        assert!(payloads.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+}
