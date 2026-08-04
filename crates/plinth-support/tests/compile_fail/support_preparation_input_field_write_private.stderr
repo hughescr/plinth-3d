@@ -1,0 +1,5 @@
+error[E0616]: field `max_grid_bytes` of struct `SupportPreparationInput` is private
+ --> tests/compile_fail/support_preparation_input_field_write_private.rs:4:11
+  |
+4 |     input.max_grid_bytes = 0;
+  |           ^^^^^^^^^^^^^^ private field
