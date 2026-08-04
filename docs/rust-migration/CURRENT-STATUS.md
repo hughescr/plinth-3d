@@ -20,14 +20,26 @@ The integration authority is the clean worktree
 `/private/tmp/plinth-3d-pipeline-integration` on branch
 `codex/rust-pipeline-integration`.
 
-The current integration HEAD is `a4aefe68c41a9644464d2175a63c6d8faddc51e4`
-(`docs(corpus): record model provisioning sources and digests`). The last reviewed
-*implementation* change in its ancestry is the canonical-delicacy merge
-`240d144e264cbe9ba27d45f6ff0194eb83a36ced`; `a4aefe6` and the CURRENT-STATUS commit that
-follows it are docs-only. The head also includes the independently accepted SCAR
-remediation `b5a3290`, the preparation interface integration `92fa26a`, and the stable CLI
-parser integration `2b933c`. Re-read the live head before resuming; never infer acceptance
-merely from presence on the integration branch.
+The current reviewed integration HEAD is `c6a0884a19c591f010d073b38e48e60495a469c9`
+(`merge: integrate preparation resource policy with sealed-input test classes`), reached by
+the **second 2026-08-04 integration pass** from `1673a1628b1af04ec180fc204db84675eec8fc10`:
+
+| Commit | What |
+| --- | --- |
+| `1eb538c72b957606e48ba665df609a0e657d1485` | merge of `codex/delicacy-regressions` — M0-value and signed-zero delicacy regressions (test-only, +69/-0 inside `delicacy.rs`'s `mod tests`) |
+| `4c8881eaf4186b55a9f05254dde80769daad69bc` | comment correction on that test's sole-reader claim |
+| `c6a0884a19c591f010d073b38e48e60495a469c9` | merge of `codex/prepare-interface-v2` — preparation resource policy plus three sealed-input test classes |
+
+The full gate is **green** at `c6a0884`: `cargo test --workspace --offline` 877 passed /
+0 failed; clippy `-D warnings` clean; `cargo fmt --all -- --check` clean; `git diff --check`
+clean. This is the first pass in which the workspace gate was fully green — the frozen
+coverage golden was regenerated in the `1673a16` lineage, so it no longer masks regressions.
+
+Earlier ancestry still holds: the canonical-delicacy merge
+`240d144e264cbe9ba27d45f6ff0194eb83a36ced`, the independently accepted SCAR remediation
+`b5a3290`, the preparation interface integration `92fa26a`, and the stable CLI parser
+integration `2b933c`. Re-read the live head before resuming; never infer acceptance merely
+from presence on the integration branch.
 
 ### 2026-08-04 integration pass {#integration-pass-2026-08-04}
 
@@ -37,8 +49,8 @@ Four backlog items were processed in order by a single writer on
 | Item | Outcome | Evidence |
 | --- | --- | --- |
 | canonical delicacy authority | **Integrated** as merge `240d144e264cbe9ba27d45f6ff0194eb83a36ced` (`merge: integrate canonical delicacy authority`), second parent `5f281d7e28f7761cca052f202a887e09bff05afb` | Independent re-review 2026-08-04 returned ACCEPT. `git diff 027a9ef 240d144 --stat` = 4 files, +474/-5: `crates/plinth-mesh/src/delicacy.rs` +372, `crates/plinth-mesh/src/lib.rs` +5, `crates/plinth-metrics/src/scar.rs` 100, `crates/plinth-metrics/tests/scar_metrics.rs` 2. Nothing else moved. |
-| endpoint-connected embed zones | **Not integrated — BLOCKED** | Independent review 2026-08-04 returned BLOCKED on owner conditions 5 and 6; see below. `codex/embed-zones` @ `68c3097` and `/private/tmp/plinth-embed-zones` are untouched. |
-| preparation resource policy | **Not integrated — still blocked** | The diagnosis chain never produced a review verdict, so the cherry-pick precondition was not met. No commit from `codex/prepare-interface` was picked. |
+| endpoint-connected embed zones | **Not integrated — Phase A landed on branch; re-review still BLOCKED** | Branch head is now `4b1d4b3` (batching fixed, real `PLINTH_THREADS` sweep, module sealed `pub(crate)`). **Phase B is now authorized** under *Owner embed-zones rulings 2026-08-04*. Re-review remains BLOCKED until Phase B completes. |
+| preparation resource policy | **INTEGRATED** (second pass, same day) as merge `c6a0884a19c591f010d073b38e48e60495a469c9` via `codex/prepare-interface-v2` | See *Second 2026-08-04 integration pass* below. The first pass left it blocked because the diagnosis chain produced no verdict; the v2 branch supplied the missing test classes and earned an independent review ACCEPT. |
 | corpus provisioning | **Recorded** as `a4aefe6` (docs only) | Reviewed ACCEPT: all 8 model digests re-hashed and matched `corpus/manifest.json`; `cargo test -p plinth-decimate --offline` green. See `corpus-provisioning.md`. The `.stl` models themselves stay gitignored and uncommitted. |
 
 Gate run at `240d144` (before the docs commits), in
@@ -65,10 +77,92 @@ verification snapshot*), which added `final_live_members_digest` and
 delicacy branch and worktree were **left in place** rather than deleted — see *Active and
 pending work*.
 
-The stale golden is now the top blocker for every downstream item: it makes
-`cargo test --workspace` red for reasons unrelated to whatever is being merged, so it
-masks real regressions. Regenerate it deliberately, with the digest change attributed to
-`908d6df` in the commit message, before the next integration pass.
+That stale golden was the top blocker for every downstream item. It has since been
+regenerated in the `1673a16` lineage, and the workspace gate is green as of `c6a0884`; the
+paragraph above is retained as the historical diagnosis, not a live condition.
+
+### Second 2026-08-04 integration pass {#integration-pass-2-2026-08-04}
+
+A second single-writer pass on `codex/rust-pipeline-integration` ran from `1673a16` to
+`c6a0884`. Outcomes:
+
+| Item | Outcome | Evidence |
+| --- | --- | --- |
+| canonical delicacy follow-up (M0-value + signed-zero regressions) | **CLOSED** | Merged as `1eb538c` from `codex/delicacy-regressions`. Diff is test-only: +69/-0 in `crates/plinth-mesh/src/delicacy.rs`, entirely inside the `#[cfg(test)] mod tests` that begins at line 315 (new hunk `@@ -352,0 +353,69 @@`). Mutation-verified by independent review 2026-08-04. One reviewer-mandated comment correction landed as `4c8881e`: the test claimed the production path was "the sole reader of these three registry entries", which is false — `crates/plinth-metrics/src/scar.rs:183-186` and `:889-891` read the same three entries — so the claim was softened to *sole reader in this crate*. Branch and worktree deleted after the green gate. |
+| preparation resource policy | **INTEGRATED** as merge `c6a0884` via `codex/prepare-interface-v2` | Independent review ACCEPT 2026-08-04. The policy commits `e4db5d0`/`7b35c49` were replayed on the regenerated-golden base as `73e7c13`/`0b0f27a`; three test classes were added (execution-budget refusal, malformed-cap refusal, sealed-input compile-fail) and three latent `usize::MAX` fixture defects fixed. The 64 MiB grid cap at the fallout sites was confirmed by the orchestrator. One reviewer-mandated test correction landed as `457c106` before the merge (see below). Merge diff: 23 files, +985/-152. |
+
+**Reviewer-mandated correction in `457c106`.** The test formerly named
+`refusal_precedes_any_probe_surface_construction`
+(`crates/plinth-decimate/tests/execution_budget_refusal.rs`) asserted a false mechanism: its
+degenerate collinear fixture never reaches surface construction at all. It dies in
+`Mesh::audit_strict` inside `simplify_locked`
+(`StrictMeshAuditError::ZeroAreaOrCollinear`, surfaced as
+`FeatureProtectionError::ProbeSimplify`) **before** any `NativeSurface` is built. The test
+was renamed `refusal_precedes_the_feature_probe`, its comment reworded to the true
+mechanism, and its baseline `matches!` pinned from the blanket
+`Err(DecimationError::FeatureProtection(_))` to the exact
+`FeatureProtectionError::ProbeSimplify { .. }` variant.
+
+**Old-branch retirement with containment proof.** `codex/prepare-interface` @ `7b35c49` was
+deleted as superseded. `git cherry HEAD codex/prepare-interface` reported:
+
+```text
+- 4809e367c723faedc2aa3b4393a906c38d2e69c5
+- e4db5d08fca8b4739e137f13bbf7694c0b94ca57
++ 7b35c49ababa867d8fa93a1d13454ee26e6afa7a
+```
+
+`4809e36` is base content already integrated and `e4db5d0` is patch-identical to its replay
+`73e7c13`. The `+` on `7b35c49` is a patch-id artifact, not missing content: comparing only
+the changed lines of `7b35c49` against its replay `0b0f27a` shows them **byte-identical**
+(same 10 files, same +74/-91). Only blob hashes, hunk offsets, and context lines differ,
+because the replay sits on the regenerated-golden base where `coverage_gate.rs` carries
+extra explanatory comment lines. The same comparison for `e4db5d0` vs `73e7c13` is likewise
+identical. Content containment is therefore complete.
+
+### Owner embed-zones rulings {#owner-embed-rulings-2026-08-04}
+
+The following are **binding owner decisions of 2026-08-04**, constituting the approved
+remediation package for `codex/embed-zones`. They supersede the corresponding parts of the
+earlier blocking findings.
+
+- **OD-1 — touching-foot families are not embeds.** The touching-foot families (brace model
+  rungs, CCO model-anchor struts, CCO upper inheritance) are **not** embeds. They stop
+  declaring `embed_end` and keep today's geometry unchanged.
+- **OD-2 — clearance cushion becomes a named design allowance.** The clearance cushion those
+  families relied on becomes an explicitly named, **separately tested** design allowance for
+  the distance check, preserving `axis_illegal_rows` semantics. The retired formula's
+  grazing-incidence rejection becomes an **explicit angle limit at the same `|cos| >= 0.5`
+  threshold** rather than an emergent side effect.
+- **OD-3 — designed extents are recomputed, never stored.** Designed extents are recomputed
+  per stage from the design family (kind/owner) plus policy. They are **never** stored on
+  `Member`, so there is no digest or golden churn.
+- **OD-4 — requested embed extents carry a margin.** Requested embed extents carry a margin
+  below placement depth, with the numbers fixed in design and covered by convex-fixture
+  tests; the connectivity sampling step must be able to resolve that margin. A refused
+  genuine-contact stub routes to the existing `initial.rs` quarantine — **never** a hard
+  pipeline failure.
+- **OD-5 — single-declared-end is an accepted temporary limitation.** The `EndNotDesigned`
+  refusal tests are **temporary pins**, to be revisited if `Member::embed_end` widens.
+- **OD-7 — CCO inheritance bug is fixed.** The cco upper/host embed-end inheritance bug is
+  fixed so the declaration follows the end that owns the embedded geometry.
+
+**Owner's binding clarification, verbatim:**
+
+> Well, the tip is never "embedded" as such - when the mesh gets unioned it's all just
+> continuous surface! I guess if you track it during the build as embedded, that's what we
+> want - but the important element to track is the surface where the support tip actually
+> contacts the pre-existing mesh. The volume inside the mini will "disappear" because the
+> mini already had voxels there! So it's important for any geometry which is *not* embedded
+> in the mini mesh that we do actually get the proper adhesion/contact all along the area of
+> the mesh that requires the contact. [...] we can go with your recommendation, but be sure
+> that the new code properly attaches the tips to the mini for all cases!
+
+**Normative reading.** Post-union there is no interior "embed volume" — it is absorbed into
+the mini's own voxels. The tracked and verified quantity is therefore the **contact
+surface**. Every support tip, embedded or merely touching, must be **affirmatively verified
+to attach across its required contact area, in all cases**. Design and tests must measure
+contact area, not embedded volume.
 
 ### Embed-zones blocking findings {#embed-zones-blocked-2026-08-04}
 
@@ -174,14 +268,17 @@ via merge `240d144`; see the *2026-08-04 integration pass* table above.
 | Work | Branch/worktree | Commit(s) | Review state | Integration constraint |
 | --- | --- | --- | --- | --- |
 | grounded calibration artifacts | `codex/home-calibration-plate` at `/private/tmp/plinth-home-calibration-plate` | `634abdb`, `1541379` | **ACCEPT** and owner GUI-checked | Branch-only; independently review the two-commit series and its base before cherry-picking. |
-| preparation resource policy and entry validation | `codex/prepare-interface` at `/private/tmp/plinth-prepare-interface` | `e4db5d08fca8b4739e137f13bbf7694c0b94ca57`, `7b35c49ababa867d8fa93a1d13454ee26e6afa7a` | **BLOCKED / incomplete** | Do not cherry-pick. Add no-work tests for invalid decimation configuration; malformed support zero/MAX/nested-cap refusal; and external compile-fail tests proving `SupportPreparationInput` fields cannot be constructed directly. Note the 2026-08-04 diagnosis: the frozen-coverage failure this branch was blamed for is **branch-independent** pre-existing drift from ancestor `908d6df`, and the branch's own two commits are result-inert (`SupportPreparationLimits::production()` reproduces the former inline test caps value-for-value; the forced `max_grid_bytes` change is a construction-refusal cap only). Fix the golden on integration first, then re-review. Also note the branch is based on `5260679` and is missing the three SCAR-hardening commits `b692678`, `6d7a046`, `b5a3290`. |
-| endpoint-connected embed zones | `codex/embed-zones` at `/private/tmp/plinth-embed-zones` | `68c3097` (4 commits, 1 file, +753/-0) | **BLOCKED** (2026-08-04) | Do not integrate. Owner conditions 5 and 6 are unmet and the new module is unreferenced dead code; full findings under *Embed-zones blocking findings*. |
+| endpoint-connected embed zones | `codex/embed-zones` at `/private/tmp/plinth-embed-zones` | `4b1d4b3` | **Phase A landed; re-review BLOCKED pending Phase B** (2026-08-04) | Do not integrate yet. Phase A fixed batching, made the 1/4/16 determinism test a real thread sweep, and sealed the module `pub(crate)`. Phase B is authorized under *Owner embed-zones rulings 2026-08-04* (OD-1 through OD-7) and must be completed and independently re-reviewed before integration. |
 
-Delicacy follow-up still open after the merge: the requested explicit **M0-value and
-signed-zero** equality/digest regressions were *not* added by `c2927a8`/`5f281d7` — those
-commits touch `plinth-metrics` only. `DelicacySettings::production()` has zero callers
-workspace-wide and `crates/plinth-mesh/src/delicacy.rs` contains no `-0.0` anywhere, so
-`canonical_zero()` is untested for the case it exists to handle. Non-blocking, still open.
+The preparation-resource-policy row was **removed** on 2026-08-04: that work is now
+**INTEGRATED** as merge `c6a0884` via `codex/prepare-interface-v2`, and the superseded
+branch `codex/prepare-interface` @ `7b35c49` was deleted with the containment proof recorded
+under *Second 2026-08-04 integration pass*.
+
+The canonical-delicacy follow-up is **CLOSED**. The requested explicit **M0-value and
+signed-zero** equality/digest regressions — absent from `c2927a8`/`5f281d7`, which touch
+`plinth-metrics` only — were added on `codex/delicacy-regressions` and merged as `1eb538c`,
+mutation-verified by independent review.
 
 The `move_characterization_` prefix introduced by those commits marks move oracles that
 must stay bit-exact across the planned `plinth-metrics` -> `plinth-mesh` delicacy move.
@@ -191,8 +288,10 @@ regression.
 
 ## Active and pending work
 
-This table is the live inventory as of the 2026-08-04 integration pass: **8 branches, 8
-worktrees**. The rows for `codex/canonical-delicacy`, `codex/home-test-protocol`,
+This table is the live inventory as of the **second** 2026-08-04 integration pass: **6
+branches, 6 worktrees**. Since the first pass, `codex/integrate-canonical-delicacy-o5`,
+`codex/delicacy-regressions`, `codex/prepare-interface-v2`, and `codex/prepare-interface`
+and their worktrees were deleted after their content was verified integrated. The rows for `codex/canonical-delicacy`, `codex/home-test-protocol`,
 `codex/migration-handoff-2026-08-03`, `codex/prepare-cli`, `codex/chitubox-diagnosis`,
 `codex/shared-surface-authority`, `codex/m3-decimate-proxy`, and the five
 `codex/support-*` drafts were **removed** because those branches and their worktrees no
@@ -202,10 +301,8 @@ the owner's untagged-deletion decision.
 | Worktree/branch | Observed head | State |
 | --- | --- | --- |
 | `/Users/craig/code/hughescr/dnd-campaigns/plinth-3d`, `master` | `5e37d8c` | main checkout and ref store; strict ancestor of integration |
-| `/private/tmp/plinth-3d-pipeline-integration`, `codex/rust-pipeline-integration` | `a4aefe6` | clean; integration authority. Adds the delicacy merge `240d144` and the corpus docs commit on top of the prior `2b933c` lineage |
-| `/private/tmp/plinth-canonical-delicacy-integration`, `codex/integrate-canonical-delicacy-o5` | `5f281d7` | **merged into integration** at `240d144`; branch and worktree retained only because the workspace gate is red on the pre-existing frozen golden. Delete both once that gate is green |
-| `/private/tmp/plinth-embed-zones`, `codex/embed-zones` | `68c3097` | **BLOCKED**; retained for repair |
-| `/private/tmp/plinth-prepare-interface`, `codex/prepare-interface` | `7b35c49` | **BLOCKED**; sole carrier of `e4db5d0` and `4809e36` |
+| `/private/tmp/plinth-3d-pipeline-integration`, `codex/rust-pipeline-integration` | `c6a0884` | clean; integration authority. Full gate green (877 tests, clippy/fmt/diff clean) |
+| `/private/tmp/plinth-embed-zones`, `codex/embed-zones` | `4b1d4b3` | Phase A landed; Phase B authorized under the owner rulings; re-review BLOCKED until Phase B completes |
 | `/private/tmp/plinth-home-calibration-plate`, `codex/home-calibration-plate` | `1541379` | accepted branch-only; plate and loading-fixture generator authority |
 | `/private/tmp/plinth-chitubox-preview`, `codex/chitubox-native-preview` | `9ffc829` | only live carrier of the unlanded embed-native-preview fallback; cherry-pick onto integration |
 | `/private/tmp/plinth-normalization-controller`, `codex/normalization-controller` | `fc5a60d` | parked for independent review as candidate coverage-repair machinery |
@@ -228,6 +325,20 @@ Corpus models are provisioned but deliberately uncommitted: all 8 files live in
 records their sources and SHA-256 values so a clean checkout can re-provision them. Do not
 use Python for migration implementation or ad-hoc verification.
 
+## Follow-ups ledger {#follow-ups-2026-08-04}
+
+Non-blocking items raised by the 2026-08-04 reviews. None gates the current head; each
+should be scheduled deliberately.
+
+| # | Follow-up | Note |
+| --- | --- | --- |
+| FU-1 | Mechanize the class-(b) cap-table tie to `SupportPreparationInput::validate` | Currently the cap table and the validating boundary agree by inspection only. Needs a small production affordance to make the tie mechanical. |
+| FU-2 | Decide `validate()` width vs per-type constructor contracts | Defer until the execution runner lands, when the real call sites exist to judge against. |
+| FU-3 | Six sites still construct `NativeSurfaceConfig`/`ProbeConfig` with `usize::MAX` outside the validating boundary | The three latent fixture defects on the merged path were fixed; these six remain outside it. |
+| FU-4 | Commit a corpus provisioning script, or make the corpus-dependent targets loud-skip | Today a bare checkout hard-fails two test targets with no explanation. See `corpus-provisioning.md`. |
+| FU-5 | Pin the `scar.rs` duplicate registry-reader (`crates/plinth-metrics/src/scar.rs:183-186`) the way the new delicacy M0 test pins the `plinth-mesh` reader | The duplication is now documented in the delicacy test comment but is still unpinned on the `plinth-metrics` side. |
+| FU-6 | `chitubox-native-preview` fix `9ffc829` still awaits review and cherry-pick | Sole live carrier of the unlanded embed-native-preview fallback. |
+
 ## Ordered resumption checklist
 
 1. Reconcile the live integration head and preserve the recorded SCAR acceptance:
@@ -242,42 +353,27 @@ use Python for migration implementation or ad-hoc verification.
    inspect its ancestry and require independent review for each new change before extending
    that acceptance.
 
-2. **Regenerate the frozen coverage golden first.** `cargo test --workspace` is red on
-   `public_coverage_report_is_frozen_without_evidence_loss` for reasons unrelated to any
-   pending branch, which masks real regressions in every later step. Regenerate
-   `crates/plinth-verify/tests/coverage_gate_overhang_table.json` to `snapshot_digest`
-   `5304257786453935365`, verify by inspection that only that one integer moves and all
-   island/patch/defect evidence is byte-identical, and attribute the change to `908d6df` in
-   the commit message. Obtain independent review of that one-line diff. Once the workspace
-   gate is green, delete `codex/integrate-canonical-delicacy-o5` and its worktree
-   `/private/tmp/plinth-canonical-delicacy-integration`, which are retained only for that
-   reason.
+2. **Done — do not repeat.** The frozen coverage golden was regenerated in the `1673a16`
+   lineage and `cargo test --workspace --offline` is green (877 passed) at `c6a0884`.
+   `codex/integrate-canonical-delicacy-o5` and its worktree were deleted. The accepted
+   preparation interface and stable CLI parser are integrated as `92fa26a` and `2b933c`;
+   canonical delicacy as merge `240d144`; the preparation resource policy as merge
+   `c6a0884`; and the M0-value/signed-zero delicacy regressions as merge `1eb538c`.
 
-   The accepted preparation interface and stable CLI parser are already integrated as
-   `92fa26a` and `2b933c`. Canonical delicacy is integrated as merge `240d144`; the
-   M0-value and signed-zero regressions in `crates/plinth-mesh/src/delicacy.rs` remain an
-   open non-blocking follow-up.
+3. **Done — do not repeat.** The blocked resource-policy commits were replayed on the
+   regenerated-golden base as `73e7c13`/`0b0f27a`, the three missing test classes were
+   added (execution-budget refusal, malformed-cap refusal, sealed-input compile-fail),
+   independent review returned ACCEPT, and the work merged as `c6a0884`. The superseded
+   `codex/prepare-interface` was retired with a recorded containment proof.
 
-3. Re-review the blocked resource-policy commits once step 2 is done. The 2026-08-04
-   diagnosis cleared them of causing the golden failure, so the surviving objection is the
-   missing test coverage: no-work tests for invalid decimation configuration; malformed
-   support zero/MAX/nested-cap refusal; and external compile-fail tests proving
-   `SupportPreparationInput` fields cannot be constructed directly. Rebase the branch onto
-   current integration (it is missing `b692678`, `6d7a046`, `b5a3290`), re-run the full
-   gate, obtain a fresh independent review, and only then cherry-pick the commits
-   individually.
-
-4. Repair `codex/embed-zones`. Conditions 1-4 of the O-11 decision hold and the sealing
-   work is sound; the required work is to (a) delete `embed_inset_mm` and both
-   `.max(0.5)` cosine sites in `crates/plinth-support/src/brace.rs` and route the embed
-   self-mask through a validated `DesignedEndMask`, (b) make `exact_clearance_rows` refuse
-   when a designed extent is absent instead of projecting one from the surface normal,
-   (c) wire `validate_endpoint_connected` into a real consumer so the module stops being
-   dead code, and prove consumption with a test, (d) add a whole-forest entry point that
-   gathers up to 2N rows into one native call, with a call-census test asserting 1 call for
-   N > 1 members, and (e) make the 1/4/16 determinism test a real `PLINTH_THREADS` sweep in
-   the style already used in `brace.rs` and `rewire.rs`. Obtain independent review before
-   integration.
+4. **Complete Phase B of `codex/embed-zones`** (branch head `4b1d4b3`). Phase A is landed:
+   batching fixed, the 1/4/16 determinism test is a real `PLINTH_THREADS` sweep, and the
+   module is sealed `pub(crate)`. Phase B is authorized and must implement the owner
+   rulings OD-1 through OD-7 recorded under *Owner embed-zones rulings 2026-08-04*,
+   including the normative reading that the verified quantity is the **contact surface**,
+   not an embed volume: every support tip must be affirmatively verified to attach across
+   its required contact area, in all cases. Obtain independent re-review before
+   integration; re-review remains BLOCKED until Phase B completes.
 
 5. Complete former M7 in its documented gate order:
 

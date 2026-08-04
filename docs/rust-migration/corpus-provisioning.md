@@ -102,3 +102,33 @@ unrelated test file — `report_writer_canonicalizes_arithmetic_floats_...`
 — which ran regardless as part of the same binary). No file was created or
 edited inside the repo/worktree; this document lives only in the scratchpad
 per instructions. No git commit was made anywhere.
+
+## Fresh-worktree recipe {#fresh-worktree-2026-08-04}
+
+A worktree created with `git worktree add` starts with an **empty**
+`corpus/models/`, because `.gitignore` line 44 (`corpus/models/*.stl`) keeps the
+eight STLs out of git. The cheapest correct fix is to symlink them from the main
+checkout rather than re-copying the whole corpus per worktree:
+
+```sh
+NEW_WT=/private/tmp/<your-new-worktree>
+MAIN=/Users/craig/code/hughescr/dnd-campaigns/plinth-3d
+mkdir -p "$NEW_WT/corpus/models"
+ln -sf "$MAIN"/corpus/models/*.stl "$NEW_WT/corpus/models/"
+```
+
+Then re-verify the digests against `corpus/manifest.json` with `shasum -a 256 -c`
+as described above. The symlinks are themselves matched by the same gitignore
+rule, so they are **invisible to `git status`** — a worktree can look perfectly
+clean and still be unable to run the gate.
+
+**Warning: two test targets hard-fail without the corpus.**
+
+- `plinth-decimate` `corpus_budgets`
+- the `plinth-orient` scale-audit test
+
+Neither skips gracefully; both fail with a missing-file error that does not name
+the corpus as the cause. If `cargo test --workspace` is red in a fresh worktree
+and these two are the only failures, provision the corpus before investigating
+anything else. Making them loud-skip instead — or committing a provisioning
+script — is recorded as follow-up **FU-4** in `CURRENT-STATUS.md`.
