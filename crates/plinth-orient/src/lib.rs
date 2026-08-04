@@ -692,7 +692,7 @@ mod tests {
         let mesh = load_binary_stl(&source, WeldPolicy::None)
             .expect("required real Sphere source fixture must be provisioned");
         let budget =
-            DecimationBudget::ratified_default(ProbeConfig::new(1.0, usize::MAX, 10_000.0))
+            DecimationBudget::ratified_default(ProbeConfig::new(1.0, 64 * 1024 * 1024, 10_000.0))
                 .expect("registered corpus budget");
         let outcome = run_decimation(&mesh, budget).expect("Sphere decimation succeeds");
         let plinth_decimate::BudgetSearchOutcome::AlreadyPrintScale(success) = &outcome else {
