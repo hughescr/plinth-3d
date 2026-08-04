@@ -351,6 +351,75 @@ mod tests {
     }
 
     #[test]
+    fn move_characterization_production_settings_pin_m0_registry_values() {
+        let registry = m0_constants()
+            .expect("m0 constants registry")
+            .placeholders();
+        let settings = DelicacySettings::production().expect("production delicacy settings");
+
+        // The production path is the sole reader of these three registry
+        // entries; pin both the plumbing (field-for-field) and the registry
+        // values themselves so either drifting fails here.
+        assert_eq!(
+            settings.curvature_weight(),
+            registry.delicacy_curvature_weight().diagnostic().get()
+        );
+        assert_eq!(
+            settings.thinness_weight(),
+            registry.delicacy_thinness_weight().diagnostic().get()
+        );
+        assert_eq!(
+            settings.thin_feature_mm(),
+            registry.thin_feature_mm().diagnostic().get()
+        );
+        assert_eq!(settings.curvature_weight(), 0.6);
+        assert_eq!(settings.thinness_weight(), 0.4);
+        assert_eq!(settings.thin_feature_mm(), 1.5);
+    }
+
+    #[test]
+    fn move_characterization_production_settings_pin_field_digest() {
+        let mesh = make_box_default().unwrap();
+        let table = FaceTable::bind(&mesh, "source-lod").unwrap();
+        let settings = DelicacySettings::production().expect("production delicacy settings");
+        let values = vec![DelicacyFaceValue::new(0.25, 0.5, 0.75).unwrap(); table.face_count()];
+        let field = DelicacyField::from_face_values(table, settings, values).unwrap();
+        assert_eq!(
+            field.digest(),
+            "17db02b045d06eb71c340ae641bdef819645a087399d013056a3a295fff13c2b"
+        );
+    }
+
+    #[test]
+    fn move_characterization_signed_zero_inputs_digest_as_positive_zero() {
+        let mesh = make_box_default().unwrap();
+
+        // `-0.0` clears both validators (`-0.0 < 0.0` is false and
+        // `(0.0..=1.0).contains(&-0.0)` is true), so it can reach the digest,
+        // which hashes raw `f64::to_bits` and would otherwise diverge.
+        let negative = DelicacySettings::new(-0.0, -0.0, 1.5).unwrap();
+        let positive = DelicacySettings::new(0.0, 0.0, 1.5).unwrap();
+        assert_eq!(negative.curvature_weight().to_bits(), 0.0_f64.to_bits());
+        assert_eq!(negative.thinness_weight().to_bits(), 0.0_f64.to_bits());
+
+        let negative_value = DelicacyFaceValue::new(-0.0, -0.0, -0.0).unwrap();
+        let positive_value = DelicacyFaceValue::new(0.0, 0.0, 0.0).unwrap();
+        assert_eq!(negative_value.curvature().to_bits(), 0.0_f64.to_bits());
+        assert_eq!(negative_value.thinness().to_bits(), 0.0_f64.to_bits());
+        assert_eq!(negative_value.weight().to_bits(), 0.0_f64.to_bits());
+
+        let build = |settings, value| {
+            let table = FaceTable::bind(&mesh, "source-lod").unwrap();
+            let values = vec![value; table.face_count()];
+            DelicacyField::from_face_values(table, settings, values).unwrap()
+        };
+        assert_eq!(
+            build(negative, negative_value).digest(),
+            build(positive, positive_value).digest()
+        );
+    }
+
+    #[test]
     fn field_is_fingerprint_bound_face_ordered_and_digest_stable() {
         let mesh = make_box_default().unwrap();
         let first = field(&mesh);
