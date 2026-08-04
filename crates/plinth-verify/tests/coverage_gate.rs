@@ -1,23 +1,16 @@
 use std::{path::PathBuf, process::Command};
 
-use geom_kernel::{KnnBatchLimits, PenetrationBatchLimits};
 use plinth_core::{ArtifactId, LayerPlan, PositiveFinite};
 use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
 use plinth_hollow::{HollowedModel, SolidDecisionReason};
 use plinth_mesh::make_overhang_table;
 use plinth_orient::{run as run_orientation, OrientRequest, PinnedBaseline};
 use plinth_support::{
-    dyadic::CandidatePayloadConfig,
-    perception::{GenericPerceptionLimits, SpecializedOwnerReservation},
-    raft::RaftLimits,
-    run_support,
-    specialized::SpecializedLimits,
-    ContactConstructionLimits, CoverageMeasurementLimits, CoverageMeasurementRequest,
-    SupportPreparationInput, SupportRequest,
+    run_support, CoverageMeasurementLimits, CoverageMeasurementRequest, SupportPreparationLimits,
+    SupportRequest,
 };
 use plinth_verify::{verify_coverage, CoverageVerificationError};
 
-const GRID_BYTES: usize = 64 * 1024 * 1024;
 const THREAD_CHILD: &str = "PLINTH_VERIFY_COVERAGE_THREAD_CHILD";
 const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // The golden's `snapshot_digest` was refreshed (8022575652269967193 ->
@@ -28,18 +21,12 @@ const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
 // input-list test `verification_snapshot_digest_input_list_is_pinned` in
 // plinth-support's runner tests, forcing a deliberate refresh here.
 const FROZEN_REPORT_JSON: &str = include_str!("coverage_gate_overhang_table.json");
-const TEST_KNN_LIMITS: KnnBatchLimits = KnnBatchLimits {
-    max_source_points: 20_000_000,
-    max_query_points: 20_000_000,
-    max_neighbors: 1,
-    max_logical_peak_bytes: 2 * 1024 * 1024 * 1024,
-    max_work: 100_000_000,
-};
 
 fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationError> {
     let mesh = make_overhang_table().expect("procedural overhang table");
-    let budget = DecimationBudget::ratified_default(ProbeConfig::new(1.0, usize::MAX, 10_000.0))
-        .expect("ratified decimation budget");
+    let budget =
+        DecimationBudget::ratified_default(ProbeConfig::new(1.0, 64 * 1024 * 1024, 10_000.0))
+            .expect("ratified decimation budget");
     let decimated = run_decimation(&mesh, budget)
         .expect("decimate procedural table")
         .into_decimated_model()
@@ -65,45 +52,9 @@ fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationE
         SupportRequest {
             lift_mm: PositiveFinite::new(5.0).expect("positive lift"),
         },
-        SupportPreparationInput {
-            layers: &layers,
-            delicacy_by_face: &delicacy,
-            column_pitch_mm: PositiveFinite::new(1.0).expect("positive pitch"),
-            surface_grid_pitch_mm: PositiveFinite::new(1.0).expect("positive grid pitch"),
-            max_grid_bytes: GRID_BYTES,
-            candidate_config: CandidatePayloadConfig::current(
-                8,
-                1_000_000,
-                3_000_000,
-                256 * 1024 * 1024,
-                65_536,
-            )
-            .expect("candidate configuration"),
-            reservations: &[] as &[SpecializedOwnerReservation],
-            perception_limits: GenericPerceptionLimits::production(TEST_KNN_LIMITS),
-            coverage_samples_max_virtual_cells: 2_000_000,
-            coverage_score_matrix_max_entries: 65_536,
-            specialized_limits: SpecializedLimits::production(TEST_KNN_LIMITS),
-            construction_limits: ContactConstructionLimits::new(
-                1_000_000,
-                10_000_000,
-                4_000_000,
-                512 * 1024 * 1024,
-            )
-            .expect("contact limits"),
-            brace_penetration_limits: PenetrationBatchLimits {
-                max_rows: 100_000,
-                max_total_work: 1_000_000_000,
-                max_total_hits: 1_000_000_000,
-                max_total_samples: 10_000_000_000,
-                max_total_intervals: 1_000_000_000,
-                max_scratch_bytes: 100_000_000_000,
-            },
-            raft_limits: RaftLimits::try_new(100_000, 100_000, 200_000, 128 * 1024 * 1024)
-                .expect("raft limits"),
-            max_primitives: 200_000,
-            max_primitive_bytes: 128 * 1024 * 1024,
-        },
+        SupportPreparationLimits::production()
+            .expect("production support preparation limits")
+            .input(&layers, &delicacy, &[]),
     )
     .expect("explicit support run");
     let snapshot = authority.verification_snapshot().expect("sealed snapshot");

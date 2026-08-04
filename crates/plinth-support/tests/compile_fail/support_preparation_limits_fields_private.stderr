@@ -1,0 +1,9 @@
+error[E0451]: fields `column_pitch_mm`, `surface_grid_pitch_mm`, `max_grid_bytes`, `candidate_config`, `perception_limits`, `coverage_samples_max_virtual_cells`, `coverage_score_matrix_max_entries`, `specialized_limits`, `construction_limits`, `brace_penetration_limits`, `raft_limits`, `max_primitives` and `max_primitive_bytes` of struct `SupportPreparationLimits` are private
+ --> tests/compile_fail/support_preparation_limits_fields_private.rs:5:9
+  |
+4 |     let _ = SupportPreparationLimits {
+  |             ------------------------ in this type
+5 |         max_grid_bytes: 0,
+  |         ^^^^^^^^^^^^^^^^^ private field
+6 |         ..SupportPreparationLimits::production().unwrap()
+  |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ fields `column_pitch_mm`, `surface_grid_pitch_mm`, `candidate_config`, `perception_limits`, `coverage_samples_max_virtual_cells`, `coverage_score_matrix_max_entries`, `specialized_limits`, `construction_limits`, `brace_penetration_limits`, `raft_limits`, `max_primitives` and `max_primitive_bytes` are private

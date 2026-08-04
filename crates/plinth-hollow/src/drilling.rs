@@ -1726,7 +1726,7 @@ mod tests {
     fn orientation_history() -> OrientationHistory {
         let mesh = plinth_mesh::make_box([10.0; 3], [0.0; 3]).expect("closed audit fixture");
         let budget =
-            DecimationBudget::ratified_default(ProbeConfig::new(1.0, usize::MAX, 10_000.0))
+            DecimationBudget::ratified_default(ProbeConfig::new(1.0, 64 * 1024 * 1024, 10_000.0))
                 .expect("registered fixture budget");
         let outcome = run_decimation(&mesh, budget).expect("fixture decimation succeeds");
         let (_, audit) = outcome

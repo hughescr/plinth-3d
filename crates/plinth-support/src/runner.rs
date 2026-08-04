@@ -110,22 +110,168 @@ use crate::{
 /// are selected here; all limits are supplied by the caller.
 #[derive(Clone, Copy, Debug)]
 pub struct SupportPreparationInput<'a> {
-    pub layers: &'a LayerPlan,
-    pub delicacy_by_face: &'a [f64],
-    pub column_pitch_mm: PositiveFinite,
-    pub surface_grid_pitch_mm: PositiveFinite,
-    pub max_grid_bytes: usize,
-    pub candidate_config: CandidatePayloadConfig,
-    pub reservations: &'a [SpecializedOwnerReservation],
-    pub perception_limits: GenericPerceptionLimits,
-    pub coverage_samples_max_virtual_cells: usize,
-    pub coverage_score_matrix_max_entries: usize,
-    pub specialized_limits: SpecializedLimits,
-    pub construction_limits: ContactConstructionLimits,
-    pub brace_penetration_limits: PenetrationBatchLimits,
-    pub raft_limits: RaftLimits,
-    pub max_primitives: usize,
-    pub max_primitive_bytes: usize,
+    layers: &'a LayerPlan,
+    delicacy_by_face: &'a [f64],
+    column_pitch_mm: PositiveFinite,
+    surface_grid_pitch_mm: PositiveFinite,
+    max_grid_bytes: usize,
+    candidate_config: CandidatePayloadConfig,
+    reservations: &'a [SpecializedOwnerReservation],
+    perception_limits: GenericPerceptionLimits,
+    coverage_samples_max_virtual_cells: usize,
+    coverage_score_matrix_max_entries: usize,
+    specialized_limits: SpecializedLimits,
+    construction_limits: ContactConstructionLimits,
+    brace_penetration_limits: PenetrationBatchLimits,
+    raft_limits: RaftLimits,
+    max_primitives: usize,
+    max_primitive_bytes: usize,
+}
+
+/// Production-owned, result-inert resource authority for support preparation.
+///
+/// This is deliberately separate from the borrowed model evidence accepted by
+/// [`SupportPreparationInput`]. The pipeline can select this one authority
+/// without copying support caps, then bind the current model's batches only
+/// when it is ready to execute the stage.
+#[derive(Clone, Copy, Debug)]
+pub struct SupportPreparationLimits {
+    column_pitch_mm: PositiveFinite,
+    surface_grid_pitch_mm: PositiveFinite,
+    max_grid_bytes: usize,
+    candidate_config: CandidatePayloadConfig,
+    perception_limits: GenericPerceptionLimits,
+    coverage_samples_max_virtual_cells: usize,
+    coverage_score_matrix_max_entries: usize,
+    specialized_limits: SpecializedLimits,
+    construction_limits: ContactConstructionLimits,
+    brace_penetration_limits: PenetrationBatchLimits,
+    raft_limits: RaftLimits,
+    max_primitives: usize,
+    max_primitive_bytes: usize,
+}
+
+impl SupportPreparationLimits {
+    /// The single established production cap set for support preparation.
+    pub fn production() -> Result<Self, SupportPreparationLimitsError> {
+        let pitch = PositiveFinite::new(1.0)
+            .map_err(|error| SupportPreparationLimitsError::Pitch(error.to_string()))?;
+        let knn = KnnBatchLimits {
+            max_source_points: 20_000_000,
+            max_query_points: 20_000_000,
+            max_neighbors: 1,
+            max_logical_peak_bytes: 2 * 1024 * 1024 * 1024,
+            max_work: 100_000_000,
+        };
+        Ok(Self {
+            column_pitch_mm: pitch,
+            surface_grid_pitch_mm: pitch,
+            max_grid_bytes: 64 * 1024 * 1024,
+            candidate_config: CandidatePayloadConfig::current(
+                8,
+                1_000_000,
+                3_000_000,
+                256 * 1024 * 1024,
+                65_536,
+            )
+            .map_err(|error| SupportPreparationLimitsError::Candidate(error.to_string()))?,
+            perception_limits: GenericPerceptionLimits::production(knn),
+            coverage_samples_max_virtual_cells: 2_000_000,
+            coverage_score_matrix_max_entries: 65_536,
+            specialized_limits: SpecializedLimits::production(knn),
+            construction_limits: ContactConstructionLimits::new(
+                1_000_000,
+                10_000_000,
+                4_000_000,
+                512 * 1024 * 1024,
+            )
+            .ok_or(SupportPreparationLimitsError::Construction)?,
+            brace_penetration_limits: PenetrationBatchLimits {
+                max_rows: 100_000,
+                max_total_work: 1_000_000_000,
+                max_total_hits: 1_000_000_000,
+                max_total_samples: 10_000_000_000,
+                max_total_intervals: 1_000_000_000,
+                max_scratch_bytes: 100_000_000_000,
+            },
+            raft_limits: RaftLimits::try_new(100_000, 100_000, 200_000, 128 * 1024 * 1024)
+                .ok_or(SupportPreparationLimitsError::Raft)?,
+            max_primitives: 200_000,
+            max_primitive_bytes: 128 * 1024 * 1024,
+        })
+    }
+
+    #[must_use]
+    pub const fn input<'a>(
+        self,
+        layers: &'a LayerPlan,
+        delicacy_by_face: &'a [f64],
+        reservations: &'a [SpecializedOwnerReservation],
+    ) -> SupportPreparationInput<'a> {
+        SupportPreparationInput {
+            layers,
+            delicacy_by_face,
+            column_pitch_mm: self.column_pitch_mm,
+            surface_grid_pitch_mm: self.surface_grid_pitch_mm,
+            max_grid_bytes: self.max_grid_bytes,
+            candidate_config: self.candidate_config,
+            reservations,
+            perception_limits: self.perception_limits,
+            coverage_samples_max_virtual_cells: self.coverage_samples_max_virtual_cells,
+            coverage_score_matrix_max_entries: self.coverage_score_matrix_max_entries,
+            specialized_limits: self.specialized_limits,
+            construction_limits: self.construction_limits,
+            brace_penetration_limits: self.brace_penetration_limits,
+            raft_limits: self.raft_limits,
+            max_primitives: self.max_primitives,
+            max_primitive_bytes: self.max_primitive_bytes,
+        }
+    }
+}
+
+impl SupportPreparationInput<'_> {
+    #[must_use]
+    pub const fn max_grid_bytes(&self) -> usize {
+        self.max_grid_bytes
+    }
+    #[must_use]
+    pub const fn max_primitives(&self) -> usize {
+        self.max_primitives
+    }
+    #[must_use]
+    pub const fn max_primitive_bytes(&self) -> usize {
+        self.max_primitive_bytes
+    }
+
+    fn validate(&self) -> bool {
+        [
+            self.max_grid_bytes,
+            self.coverage_samples_max_virtual_cells,
+            self.coverage_score_matrix_max_entries,
+            self.max_primitives,
+            self.max_primitive_bytes,
+            self.brace_penetration_limits.max_rows,
+            self.brace_penetration_limits.max_total_work,
+            self.brace_penetration_limits.max_total_hits,
+            self.brace_penetration_limits.max_total_samples,
+            self.brace_penetration_limits.max_total_intervals,
+            self.brace_penetration_limits.max_scratch_bytes,
+        ]
+        .iter()
+        .all(|value| *value != 0 && *value != usize::MAX)
+    }
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum SupportPreparationLimitsError {
+    #[error("support production pitch is invalid: {0}")]
+    Pitch(String),
+    #[error("support production candidate limits are invalid: {0}")]
+    Candidate(String),
+    #[error("support production construction limits are invalid")]
+    Construction,
+    #[error("support production raft limits are invalid")]
+    Raft,
 }
 
 /// Public phase result without exposing private runner typestates.
@@ -175,12 +321,7 @@ pub fn run_support<'a>(
     request: SupportRequest,
     input: SupportPreparationInput<'a>,
 ) -> Result<FinalSupportAuthority<'a>, SupportRunError> {
-    if input.max_grid_bytes == 0
-        || input.coverage_samples_max_virtual_cells == 0
-        || input.coverage_score_matrix_max_entries == 0
-        || input.max_primitives == 0
-        || input.max_primitive_bytes == 0
-    {
+    if !input.validate() {
         return Err(SupportRunError::InvalidResourceCaps);
     }
     let min_z = hollowed
@@ -3270,7 +3411,7 @@ mod tests {
 
     fn hollowed_fixture(mesh: Mesh) -> HollowedModel {
         let budget =
-            DecimationBudget::ratified_default(ProbeConfig::new(1.0, usize::MAX, 10_000.0))
+            DecimationBudget::ratified_default(ProbeConfig::new(1.0, 64 * 1024 * 1024, 10_000.0))
                 .expect("registered decimation budget");
         let decimated = run_decimation(&mesh, budget)
             .expect("required fixture decimation")
@@ -5411,5 +5552,288 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(signatures[0], signatures[1]);
         assert_eq!(signatures[0], signatures[2]);
+    }
+
+    // ------------------------------------------------------------------
+    // Malformed preparation resource caps.
+    //
+    // These live in-crate by necessity, not by preference.
+    // `SupportPreparationInput`'s fields are private and its only public
+    // constructor is `SupportPreparationLimits::production().input(..)`, which
+    // by construction always yields valid caps. There is therefore no public
+    // way to build a malformed input, so an external test cannot reach
+    // `SupportRunError::InvalidResourceCaps` at all — see
+    // `tests/compile_fail/support_preparation_input_*.rs`, which prove exactly
+    // that. In-crate struct-update syntax off a production input is the only
+    // way to exercise the refusal; adding a public malformed-input constructor
+    // would reopen the hole those compile-fail cases seal.
+    //
+    // Known boundary, recorded rather than widened here: `validate()` guards
+    // the eleven values below only. `candidate_config`, `perception_limits`,
+    // `specialized_limits`, `construction_limits` and `raft_limits` carry their
+    // own caps and are validated by their own constructors, not re-checked at
+    // this boundary.
+    // ------------------------------------------------------------------
+
+    type CapMutator = for<'a> fn(SupportPreparationInput<'a>, usize) -> SupportPreparationInput<'a>;
+
+    /// The two probes every guarded cap must refuse. `usize::MAX` is refused as
+    /// firmly as zero: unbounded is not a budget.
+    const CAP_PROBES: [usize; 2] = [0, usize::MAX];
+
+    fn production_input<'a>(
+        layers: &'a LayerPlan,
+        delicacy_by_face: &'a [f64],
+    ) -> SupportPreparationInput<'a> {
+        SupportPreparationLimits::production()
+            .expect("production support preparation limits")
+            .input(layers, delicacy_by_face, &[])
+    }
+
+    fn top_level_cap_mutators() -> [(&'static str, CapMutator); 5] {
+        [
+            ("max_grid_bytes", |base, probe| SupportPreparationInput {
+                max_grid_bytes: probe,
+                ..base
+            }),
+            ("coverage_samples_max_virtual_cells", |base, probe| {
+                SupportPreparationInput {
+                    coverage_samples_max_virtual_cells: probe,
+                    ..base
+                }
+            }),
+            ("coverage_score_matrix_max_entries", |base, probe| {
+                SupportPreparationInput {
+                    coverage_score_matrix_max_entries: probe,
+                    ..base
+                }
+            }),
+            ("max_primitives", |base, probe| SupportPreparationInput {
+                max_primitives: probe,
+                ..base
+            }),
+            ("max_primitive_bytes", |base, probe| {
+                SupportPreparationInput {
+                    max_primitive_bytes: probe,
+                    ..base
+                }
+            }),
+        ]
+    }
+
+    fn nested_penetration_cap_mutators() -> [(&'static str, CapMutator); 6] {
+        [
+            ("brace_penetration_limits.max_rows", |base, probe| {
+                SupportPreparationInput {
+                    brace_penetration_limits: PenetrationBatchLimits {
+                        max_rows: probe,
+                        ..base.brace_penetration_limits
+                    },
+                    ..base
+                }
+            }),
+            ("brace_penetration_limits.max_total_work", |base, probe| {
+                SupportPreparationInput {
+                    brace_penetration_limits: PenetrationBatchLimits {
+                        max_total_work: probe,
+                        ..base.brace_penetration_limits
+                    },
+                    ..base
+                }
+            }),
+            ("brace_penetration_limits.max_total_hits", |base, probe| {
+                SupportPreparationInput {
+                    brace_penetration_limits: PenetrationBatchLimits {
+                        max_total_hits: probe,
+                        ..base.brace_penetration_limits
+                    },
+                    ..base
+                }
+            }),
+            (
+                "brace_penetration_limits.max_total_samples",
+                |base, probe| SupportPreparationInput {
+                    brace_penetration_limits: PenetrationBatchLimits {
+                        max_total_samples: probe,
+                        ..base.brace_penetration_limits
+                    },
+                    ..base
+                },
+            ),
+            (
+                "brace_penetration_limits.max_total_intervals",
+                |base, probe| SupportPreparationInput {
+                    brace_penetration_limits: PenetrationBatchLimits {
+                        max_total_intervals: probe,
+                        ..base.brace_penetration_limits
+                    },
+                    ..base
+                },
+            ),
+            (
+                "brace_penetration_limits.max_scratch_bytes",
+                |base, probe| SupportPreparationInput {
+                    brace_penetration_limits: PenetrationBatchLimits {
+                        max_scratch_bytes: probe,
+                        ..base.brace_penetration_limits
+                    },
+                    ..base
+                },
+            ),
+        ]
+    }
+
+    fn support_request() -> SupportRequest {
+        SupportRequest {
+            lift_mm: PositiveFinite::new(5.0).expect("positive lift"),
+        }
+    }
+
+    /// One full `run_support` call with the given cap mutation applied, used
+    /// sparingly: the pure `validate()` assertions carry the per-cap table and
+    /// this proves only the wiring from that predicate to the typed refusal.
+    fn run_support_with_mutated_cap(mutate: CapMutator, probe: usize) -> SupportRunError {
+        let hollowed = hollowed_fixture(procedural_overhang_for_error_case());
+        let delicacy = vec![0.0; hollowed.mesh().tris().len()];
+        let layers = layers();
+        let input = mutate(production_input(&layers, &delicacy), probe);
+        run_support(hollowed, support_request(), input)
+            .err()
+            .expect("malformed caps must refuse the run")
+    }
+
+    #[test]
+    fn every_top_level_cap_is_refused_at_zero_and_at_usize_max() {
+        let layers = layers();
+        let base = production_input(&layers, &[]);
+        assert!(
+            base.validate(),
+            "positive control: unmutated production caps must validate"
+        );
+
+        for (name, mutate) in top_level_cap_mutators() {
+            for probe in CAP_PROBES {
+                assert!(
+                    !mutate(base, probe).validate(),
+                    "{name} = {probe} must be refused"
+                );
+            }
+        }
+
+        // Two representative cases prove the predicate is actually wired to the
+        // typed error at the public run boundary.
+        let (_, zero_grid_bytes) = top_level_cap_mutators()[0];
+        assert!(matches!(
+            run_support_with_mutated_cap(zero_grid_bytes, 0),
+            SupportRunError::InvalidResourceCaps
+        ));
+        let (_, unbounded_primitives) = top_level_cap_mutators()[3];
+        assert!(matches!(
+            run_support_with_mutated_cap(unbounded_primitives, usize::MAX),
+            SupportRunError::InvalidResourceCaps
+        ));
+    }
+
+    #[test]
+    fn every_nested_penetration_cap_is_refused_at_zero_and_at_usize_max() {
+        let layers = layers();
+        let base = production_input(&layers, &[]);
+
+        for (name, mutate) in nested_penetration_cap_mutators() {
+            for probe in CAP_PROBES {
+                assert!(
+                    !mutate(base, probe).validate(),
+                    "{name} = {probe} must be refused"
+                );
+            }
+        }
+
+        // The nested caps are the newly guarded surface: the previous inline
+        // check never descended into `brace_penetration_limits`.
+        let (_, zero_scratch_bytes) = nested_penetration_cap_mutators()[5];
+        assert!(matches!(
+            run_support_with_mutated_cap(zero_scratch_bytes, 0),
+            SupportRunError::InvalidResourceCaps
+        ));
+    }
+
+    #[test]
+    fn usize_max_is_refused_as_firmly_as_zero() {
+        let layers = layers();
+        let base = production_input(&layers, &[]);
+
+        let unbounded = top_level_cap_mutators()
+            .into_iter()
+            .chain(nested_penetration_cap_mutators())
+            .filter(|(_, mutate)| mutate(base, usize::MAX).validate())
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>();
+        assert!(
+            unbounded.is_empty(),
+            "these caps accepted an unbounded budget: {unbounded:?}"
+        );
+        assert_eq!(
+            top_level_cap_mutators().len() + nested_penetration_cap_mutators().len(),
+            11,
+            "the guarded cap table must stay in step with SupportPreparationInput::validate"
+        );
+    }
+
+    #[test]
+    fn production_limits_pass_validation_and_are_thread_setting_inert() {
+        let layers = layers();
+        assert!(production_input(&layers, &[]).validate());
+
+        let caps = [1, 4, 16].map(|_| {
+            let limits = SupportPreparationLimits::production().expect("production limits");
+            (
+                [
+                    limits.max_grid_bytes,
+                    limits.coverage_samples_max_virtual_cells,
+                    limits.coverage_score_matrix_max_entries,
+                    limits.max_primitives,
+                    limits.max_primitive_bytes,
+                    limits.brace_penetration_limits.max_rows,
+                    limits.brace_penetration_limits.max_total_work,
+                    limits.brace_penetration_limits.max_total_hits,
+                    limits.brace_penetration_limits.max_total_samples,
+                    limits.brace_penetration_limits.max_total_intervals,
+                    limits.brace_penetration_limits.max_scratch_bytes,
+                ],
+                [
+                    limits.column_pitch_mm.get().to_bits(),
+                    limits.surface_grid_pitch_mm.get().to_bits(),
+                ],
+            )
+        });
+        assert!(caps.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    #[test]
+    fn refusal_precedes_any_geometry_work() {
+        // Baseline: with valid caps this short layer plan fails later, during
+        // preparation, with a distinguishable typed error.
+        let hollowed = hollowed_fixture(procedural_overhang_for_error_case());
+        let delicacy = vec![0.0; hollowed.mesh().tris().len()];
+        let short_layers = LayerPlan::new(0.0, vec![0.05; 10]).expect("short layer plan");
+        assert!(matches!(
+            run_support(
+                hollowed,
+                support_request(),
+                production_input(&short_layers, &delicacy),
+            ),
+            Err(SupportRunError::Failed(SupportRunPhase::Preparation))
+        ));
+
+        // Same model and same doomed layer plan, malformed caps: the cap
+        // refusal wins, so it must have happened before any of that work.
+        let hollowed = hollowed_fixture(procedural_overhang_for_error_case());
+        let delicacy = vec![0.0; hollowed.mesh().tris().len()];
+        let (_, zero_grid_bytes) = top_level_cap_mutators()[0];
+        let input = zero_grid_bytes(production_input(&short_layers, &delicacy), 0);
+        assert!(matches!(
+            run_support(hollowed, support_request(), input),
+            Err(SupportRunError::InvalidResourceCaps)
+        ));
     }
 }

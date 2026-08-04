@@ -92,10 +92,15 @@ fn canonical_production_report() -> String {
     // point through feature protection, QEM/budget search, and final
     // verification without immediately exhausting the 12% protection cap.
     let mesh = smooth_print_scale_sphere();
+    // An explicit finite construction cap, not a default: `usize::MAX` is now
+    // refused by `DecimationBudget::validate_for_execution` as no budget at
+    // all.  Only `grid_pitch_mm` is fingerprinted into the native surface, so
+    // this cap cannot move the report this sweep compares across thread
+    // counts; it can only refuse construction outright.
     let budget = DecimationBudget::ratified_default(ProbeConfig {
         surface: NativeSurfaceConfig {
             grid_pitch_mm: 1.0,
-            max_grid_bytes: usize::MAX,
+            max_grid_bytes: 64 * 1024 * 1024,
         },
         nearest_upper_bound_mm: 100.0,
     })
