@@ -4506,6 +4506,47 @@ mod tests {
     }
 
     #[test]
+    fn verification_snapshot_digest_input_list_is_pinned() {
+        // Pins the exact FNV input list of `verification_snapshot_digest`
+        // over a minimal deterministic fixture. Widening the input set (as
+        // commit 908d6df did by adding `final_live_members_digest` and the
+        // final live member count) must flip this pinned value first,
+        // forcing a deliberate refresh of downstream frozen goldens such as
+        // plinth-verify's `coverage_gate_overhang_table.json`.
+        let mesh = make_box([1.0, 1.0, 1.0], [0.0, 0.0, 0.0]).expect("pinned fixture mesh");
+        let topology = plinth_mesh::build_face_topology(&mesh, plinth_mesh::WeldPolicy::None)
+            .expect("pinned fixture topology");
+        let surface = NativeSurface::from_indexed(
+            mesh.verts(),
+            mesh.tris(),
+            NativeSurfaceConfig {
+                grid_pitch_mm: 1.0,
+                max_grid_bytes: 4 * 1024 * 1024,
+            },
+        )
+        .expect("pinned fixture native surface");
+        let mesh_digest = mesh_fingerprint(&mesh).expect("pinned fixture fingerprint");
+        let members = vec![FinalLiveMemberEvidence::transit_test_fixture(
+            [1, 0],
+            [[0.25, 0.5, 0.5], [0.25, 0.5, -1.0]],
+            [0.1, 0.2],
+            MemberKind::Stub,
+            Some(EmbedEnd::Terminalward),
+        )];
+        let snapshot = SupportVerificationSnapshot::transit_test_fixture(
+            &mesh,
+            &topology,
+            &surface,
+            &mesh_digest,
+            members,
+        );
+        snapshot
+            .validate_integrity()
+            .expect("pinned fixture snapshot integrity");
+        assert_eq!(snapshot.digest(), 11_833_545_896_309_364_349);
+    }
+
+    #[test]
     fn verification_snapshot_digest_corruption_fails_closed() {
         with_braced_table(|braced| {
             let lowered = braced

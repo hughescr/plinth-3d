@@ -20,6 +20,13 @@ use plinth_verify::{verify_coverage, CoverageVerificationError};
 const GRID_BYTES: usize = 64 * 1024 * 1024;
 const THREAD_CHILD: &str = "PLINTH_VERIFY_COVERAGE_THREAD_CHILD";
 const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
+// The golden's `snapshot_digest` was refreshed (8022575652269967193 ->
+// 5304257786453935365) after ancestor commit 908d6df widened the
+// `verification_snapshot_digest` input set with `final_live_members_digest`
+// and the final live member count; every other field of the frozen report was
+// verified byte-identical. Any future widening must first flip the pinned
+// input-list test `verification_snapshot_digest_input_list_is_pinned` in
+// plinth-support's runner tests, forcing a deliberate refresh here.
 const FROZEN_REPORT_JSON: &str = include_str!("coverage_gate_overhang_table.json");
 const TEST_KNN_LIMITS: KnnBatchLimits = KnnBatchLimits {
     max_source_points: 20_000_000,
