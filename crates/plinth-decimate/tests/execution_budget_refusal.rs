@@ -9,7 +9,8 @@
 //! otherwise perform.
 
 use plinth_decimate::{
-    run, BudgetConfigError, BudgetSearchOutcome, DecimationBudget, DecimationError, ProbeConfig,
+    run, BudgetConfigError, BudgetSearchOutcome, DecimationBudget, DecimationError,
+    FeatureProtectionError, ProbeConfig,
 };
 use plinth_mesh::Mesh;
 
@@ -193,17 +194,23 @@ fn ordering_precedence_is_config_then_scale() {
 }
 
 #[test]
-fn refusal_precedes_any_probe_surface_construction() {
+fn refusal_precedes_the_feature_probe() {
     let mesh = degenerate_in_scale_mesh();
 
-    // Baseline: this mesh clears the scale gate and then fails in the feature
-    // probe, so it is a live witness that surface construction was attempted.
+    // Baseline: this mesh clears the scale gate and then dies inside the
+    // feature probe's `simplify_locked` call, where `Mesh::audit_strict`
+    // rejects the collinear soup (`StrictMeshAuditError::ZeroAreaOrCollinear`,
+    // surfaced as `FeatureProtectionError::ProbeSimplify`). That happens
+    // before any `NativeSurface` is built, so this fixture witnesses that the
+    // feature probe was entered at all — not that a surface was constructed.
     assert!(
         matches!(
             run(&mesh, well_formed_budget()),
-            Err(DecimationError::FeatureProtection(_))
+            Err(DecimationError::FeatureProtection(
+                FeatureProtectionError::ProbeSimplify { .. }
+            ))
         ),
-        "the degenerate fixture must fail during probe surface construction"
+        "the degenerate fixture must fail in the feature probe's locked simplify"
     );
 
     // With a malformed budget the same mesh never reaches that failure.
