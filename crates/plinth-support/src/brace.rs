@@ -534,6 +534,14 @@ fn append_candidate(
             },
             model_contact_end: (candidate.kind == BraceAdditionKind::ModelRung)
                 .then_some(ContactEnd::Rootward),
+            // MAJOR-7 / F2. Zero is the CORRECT routed load for both brace
+            // kinds, not an unwired input: `add_brace` below puts this member
+            // in the forest's `braces` set, and `set_parent` refuses a brace as
+            // either child or parent (`ForestError::BraceInTree`), so no load
+            // path can traverse it. The full argument, including the contrast
+            // with `cco::apply_model_anchor`'s real
+            // `carried_mm2: request.carried_mm2()`, is at the
+            // `contact::admit` call site in `gather_candidates`.
             carried_mm2: finite(0.0)?,
         };
         *ordinal = ordinal
@@ -1016,11 +1024,50 @@ fn gather_candidates(
         // actually see. Exactly one pass: the PR-1 monotonicity lemma proves
         // seating raises both |cos| and length, so the seat computed at the
         // unseated incidence remains valid at the seated one. Nothing iterates.
+        // MAJOR-7 / F2 -- WHY `carried_mm2` IS ZERO HERE, AND WHY THAT IS THE
+        // CORRECT VALUE RATHER THAN AN UNWIRED ONE.
+        //
+        // `carried_mm2` is ROUTED DEMAND: the model area whose peel force this
+        // member must hold. It has exactly one authority,
+        // `perception::FinalizedContactLoads`, which partitions every eligible
+        // model face's area over the PHYSICAL CONTACT ids -- each face's
+        // `area_mm2` is charged to its one nearest eligible contact and summed
+        // per contact slot. That partition is complete and exclusive, and its
+        // only consumer that mints geometry is `initial.rs`, which copies
+        // `loads.carried_area_mm2()[slot]` into each contact stub. Every unit
+        // of demand on the corpus is therefore already charged to a stub before
+        // brace ever runs.
+        //
+        // A brace model rung is a BRACING member, not a demand route, and the
+        // forest enforces that structurally rather than by convention:
+        // `append_candidate` mints it through `Forest::add_brace`, which removes
+        // the key from `roots` and inserts it into `braces`; `set_parent` then
+        // returns `ForestError::BraceInTree` if a brace is offered as either
+        // child or parent, and `live_tree_members` filters braces out of the
+        // load tree entirely. A brace cannot appear on any path from a contact
+        // to the plate, so no load can route through one -- charging it a
+        // nonzero `carried_mm2` would DOUBLE-COUNT area already charged to the
+        // stub that owns that face.
+        //
+        // The contrast inside this same package is the proof that zero is a
+        // decision and not an omission: `cco::apply_model_anchor` mints its
+        // strut with `carried_mm2: request.carried_mm2()`, a real routed load,
+        // because a CCO model anchor IS the terminal's route to ground. Demand
+        // route -> real load; bracing member -> zero. Both are attested; only
+        // the route is graded by PR-4's area law, because only the route has an
+        // area demand to grade.
+        //
+        // Consequence for PR-4 here: with `carried_mm2 = 0.0` the area law is
+        // satisfied by any interface, which is correct -- a member carrying no
+        // routed load has no area requirement. PR-8's attachment proof and
+        // OD-9's exterior screen still apply in full, and they are what this
+        // family is actually gated on.
         let site = contact::ContactSite {
             end: ContactEnd::Rootward,
             end_radius_mm: radius.get(),
             member_r_max_mm: radius.get(),
             abs_cos_incidence: abs_cos_raw,
+            // Zero routed load, by the argument above -- not an unwired input.
             carried_mm2: 0.0,
             member_length_mm: length,
         };

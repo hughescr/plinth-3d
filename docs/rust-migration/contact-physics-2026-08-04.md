@@ -353,6 +353,41 @@ differs from `abs_cos_raw` because SEATING raises the incidence. Reporting that
 as "floored" would have made the OD-8 delta instrument lie about the very
 change it measures.
 
+### Record-integrity audit against the committed census (F1)
+
+Every census-derived figure in this record was re-checked against a live
+`--features census` run at the finisher tip. One did not reproduce and is
+CORRECTED here:
+
+| figure | was | is | source |
+| --- | ---: | ---: | --- |
+| `T2_cco_anchor_attempted` on `make_overhang_table` (PR-7 section) | 2060 | **1741** | `CENSUS T2_cco_anchor_attempted make_overhang_table total=1741`; `census-embed-incidence-2026-08-04.md` measurement 2 and headline (b) both read 1741 |
+
+Everything else reproduces exactly:
+
+* the placed-geometry table (7/15, 8/19, 73/261, 17/41 and all four
+  `snapshot_digest`s) — `MODEL` rows;
+* the candidate-set table (8 → 2 rungs, 7 → 0 floored rows, 3 → 2 viable,
+  0.191090 → 0.339004 min and 0.472499 → 0.621539 median checked fraction) —
+  `T1a_rung_outcome`, `T3m_embed_margin`;
+* both surviving rung rows to 6 dp — `T1r_rung_row`;
+* `brace_append_model_rung` firing zero times — `T6_commits` records only
+  `brace_append_crosslink=21` on `make_overhang_table`;
+* the attestation transcript (7/7, 8/3, 84/50, 18/11 fully engaged; 117 total,
+  0 refused, 4 area deficits, all `r_eff = 0.282095` = `0.460659 * sqrt(3/8)`)
+  — `T7_attestation`, `T7r_attestation_row`;
+* the CCO tournament totals (51 plate, 54 bifurcate, 0 model anchor) —
+  `T6_commits` summed over the four reachable models.
+
+**One figure in this record is NOT census-derived and cannot be checked against
+it**: the "refused 22 of 32 reachable corpus contacts" measurement in PR-8
+design call 1. That number was produced by an implementation variant that was
+measured and then DISCARDED (the placement-depth-less-a-margin extent), so the
+committed census — which instruments only the landed rule — has no
+corresponding counter. It is retained as a narrative record of why the extent is
+one process resolution, not as a reproducible measurement. See the finisher's
+open question OQ-11.
+
 ---
 
 ## Repair pass (2026-08-04, stage 1 of 2)
@@ -376,6 +411,16 @@ changed line — `T1a_rung_outcome make_overhang_table admitted_viable 1 -> 2` o
 `make_overhang_table`. Every `snapshot_digest`, `routed_contacts` and
 `final_live_members` on all four reachable models is unchanged, so no placed
 geometry moves.
+
+**BLOCKER-3's endpoint is CONFIRMED at `admitted_viable = 2`.** The owner
+confirms that 2 is the correct measured outcome and that 3 is UNREACHABLE with
+PR-3 in place, by design. The pre-package baseline of 3 belonged to a world with
+no incidence gate: PR-3 refuses six of the eight rung candidates before
+revalidation, so the reachable maximum is 2, and both survivors are viable. A
+future run that reports 3 would mean PR-3 had stopped refusing, not that the
+repair had improved. The census reads
+`T1a_rung_outcome make_overhang_table rows=2 admitted_viable=2` at the finisher
+tip, unchanged since the repair pass.
 
 **MAJOR-7 is deliberately NOT in this pass.** `contact::admit` has one
 production call site and it passes `carried_mm2 = 0.0`, so PR-4's area law gates
@@ -482,6 +527,48 @@ exactly why the law gated nothing before.
 
 `contact::admit`'s signature is unchanged; the stub family reaches PR-4 through
 `contact::area_sufficient`, the same predicate `admit` delegates to.
+
+#### Which families legitimately carry zero routed load (F2)
+
+The repair pass deferred "documenting which families legitimately carry zero
+load" to this stage. Determined from the load-routing code, not assumed:
+
+**`carried_mm2` is ROUTED DEMAND with exactly one authority.**
+`perception::FinalizedContactLoads::fold` partitions every eligible model face's
+`area_mm2` over the PHYSICAL CONTACT ids — each face is charged to its one
+nearest eligible contact (`FinalizedFaceLoad`), then summed per contact slot
+into `carried_area_mm2`. The partition is complete and exclusive. Its only
+geometry-minting consumer is `initial.rs::build_initial_contacts`, which copies
+`loads.carried_area_mm2()[slot]` into each stub's `carried_mm2`. **Every unit of
+demand on the corpus is already charged to a contact stub before brace or CCO
+runs.** Downstream, `carried_mm2` feeds
+`member_sizing::diagnostic_peel_tension_radius_mm` (peel force → tip tension
+radius) and `rewire::required_radius` — it is a demand quantity throughout.
+
+| family | `carried_mm2` | why |
+| --- | --- | --- |
+| initial contact stub (`initial.rs`) | the real per-contact load | it IS the routed demand, by construction of the partition |
+| CCO model anchor (`cco::apply_model_anchor`) | `request.carried_mm2()` | a demand ROUTE: the strut is the terminal's path to ground, so the stub's load passes through it |
+| brace model rung / cross-link (`brace.rs::append_candidate`) | **0.0, legitimately** | a BRACING member, structurally incapable of being on a load path |
+
+**The brace zero is enforced by the forest, not by convention.**
+`append_candidate` mints through `Forest::add_brace`, which removes the key from
+`roots` and inserts it into `braces`. `Forest::set_parent` then returns
+`ForestError::BraceInTree` if a brace is offered as either child or parent, and
+`live_tree_members` filters braces out of the load tree entirely (the
+`legacy_compat` fan-in explicitly notes "only live, non-brace children may
+contribute Murray fan-in"). A brace therefore cannot appear on any path from a
+contact to the plate. Charging a rung a nonzero `carried_mm2` would DOUBLE-COUNT
+area already charged to the stub that owns that model face.
+
+**So `contact::admit`'s brace call site passing `carried_mm2 = 0.0` is correct,
+not unwired.** With zero routed load PR-4's area law is satisfied by any
+interface — which is the right answer for a member with no area demand. The
+family is not thereby ungated: PR-8's attachment proof and OD-9's exterior
+screen apply to it in full, and as of the finisher stage below they are actually
+executed at its seat. The reasoning is repeated at the call site itself
+(`brace.rs`, `gather_candidates`) and at the mint site (`append_candidate`), so
+a future reader does not have to reconstruct it from the design record.
 
 ### OD-9 — LANDED
 
@@ -600,7 +687,7 @@ turning the deficit into a silent support deletion.
   what would revive it. This record already reserved that revival to the owner
   because it carries a genuine print-consequence tradeoff: scarring the mini
   with a family that has never once fired. The census confirms the stake —
-  `T2_cco_anchor_attempted` reaches 2060 on `make_overhang_table` against
+  `T2_cco_anchor_attempted` reaches 1741 on `make_overhang_table` against
   `T2_cco_anchor_surviving = 0` on every model, so reviving the family is not a
   marginal change but the introduction of a support class the corpus has never
   printed. Landing it inside this stage would have been exactly the silent
