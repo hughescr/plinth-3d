@@ -271,6 +271,47 @@ being run to answer OQ-1/OQ-2 empirically and inform OQ-3; results will be recor
    census (branch `census/embed-incidence-2026-08-04`) reports; census numbers feed the
    design as its empirical baseline.
 
+### Owner requirement OD-9 (2026-08-04, evening) — no attachment to buried surface {#owner-requirement-od9}
+
+1. The owner's verbatim statement, delivered 2026-08-04 evening:
+
+   > "If we don't smoosh before slicing then we also need to be sure that we're never
+   > trying to attach a support to something inside the model"
+
+2. Binding interpretation:
+
+   - **Context.** Input meshes for real minis are watertight and manifold but
+     SELF-INTERPENETRATING (established by the 2026-08-04 Weeping Treant diagnosis: 23,220
+     non-adjacent intersecting triangle pairs in one 2.5x1.8x0.8 mm region of a
+     topologically perfect mesh). The decision of record is per-layer polygon union under a
+     fill rule (owner-endorsed, filed as its own work item), NOT a 3D mesh boolean.
+     Consequence: the 3D triangle mesh retains BURIED surface — surface patches lying
+     inside the printed solid.
+   - **Requirement.** No support may attach to buried surface, for any contact kind. Note
+     the trap explicitly: buried surface passes naive verification — a touching foot seated
+     on a buried patch is genuinely "on the surface", and an embedded tip there passes an
+     endpoint-connectivity embed proof TRIVIALLY (its whole neighborhood is interior). The
+     distinction between "designed embed" and "attachment to surface that does not exist in
+     the print" therefore requires an explicit exterior-ness test; no existing check
+     subsumes it.
+   - **Two mandated defense layers.** (a) STRUCTURAL — support-candidate nomination must
+     consume union-normalized layer data, in which buried contours never appear (delivered
+     by the per-layer union work item); (b) AFFIRMATIVE — the contact-verification
+     machinery (embed Phase B-2 package) must include a batched exterior-ness screen: for
+     every proposed attachment point, offset epsilon outward along the surface normal and
+     test inside/outside (parity/winding query against the model); exterior surface tests
+     outside, buried surface tests inside. Refusals route to quarantine per OD-4, never a
+     hard pipeline failure. One batched native query per stage, per the batch-first rule.
+   - **Applicability note.** No currently-reachable corpus model self-intersects, so this
+     requirement is not yet exercisable in tests against real geometry; it MUST be verified
+     against the Weeping Treant when it reaches the support stages (after the resource-caps
+     follow-up). Until then, a synthetic self-interpenetrating fixture (two overlapping
+     primitives) is the acceptance vehicle.
+   - **Adjudication hook.** When the in-flight Phase B-2 package is reviewed for
+     integration, its contact_surface machinery is to be audited against OD-9; if the
+     exterior-ness screen is absent (expected — OD-9 postdates the B-2 design), it is
+     landed as an immediate follow-up on the same branch before the branch retires.
+
 ### Embed-zones blocking findings {#embed-zones-blocked-2026-08-04}
 
 `codex/embed-zones` @ `68c3097` (1 file, `crates/plinth-support/src/forest.rs`, +753/-0)
