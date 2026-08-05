@@ -254,6 +254,17 @@ impl InitialContactBuild {
     }
 
     #[cfg(test)]
+    /// PR-8 test-only seam for downstream stage preflight rejection.
+    ///
+    /// The point of this one is that it moves NO geometry: it is exactly the
+    /// shape of a regression in which the attestation quietly stops being
+    /// performed while every forest digest stays put, which is the failure the
+    /// separate transcript exists to catch.
+    pub(crate) fn test_corrupt_contact_attestation_digest(&mut self) {
+        self.contact_attestation_digest = self.contact_attestation_digest.wrapping_add(1);
+    }
+
+    #[cfg(test)]
     /// Test-only seam for downstream stage preflight rejection.
     pub(crate) fn test_clear_terminal_registration_evidence(&mut self) {
         self.all_terminals_registered_before_quarantine = false;

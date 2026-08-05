@@ -1328,6 +1328,15 @@ pub(crate) struct PreparedSupportDigests {
     loads: u64,
     geometry: u64,
     initial_forest: u64,
+    /// PR-8 — the contact-attestation transcript.
+    ///
+    /// This is retained ALONGSIDE `initial_forest` rather than folded into it
+    /// because the forest digest structurally cannot see an attestation
+    /// regression: an attested contact and an unattested-but-still-live one
+    /// are the same geometry, and a refusal that silently stopped firing
+    /// leaves no geometric trace at all. Without a separate digest, deleting
+    /// the owner's governing requirement would move nothing.
+    contact_attestation: u64,
     prepared: u64,
 }
 
@@ -1352,6 +1361,9 @@ impl PreparedSupportDigests {
     }
     pub(crate) const fn initial_forest(&self) -> u64 {
         self.initial_forest
+    }
+    pub(crate) const fn contact_attestation(&self) -> u64 {
+        self.contact_attestation
     }
     pub(crate) const fn prepared(&self) -> u64 {
         self.prepared
@@ -1605,6 +1617,10 @@ impl SupportRunContext<'_> {
             || initial.initial_forest_digest() != Forest::new().digest()
             || initial.post_quarantine_forest_digest() != self.digests.initial_forest
             || initial.forest().digest() != self.digests.initial_forest
+            // PR-8. The attestation transcript is checked here for the same
+            // reason it is retained separately: the two forest-digest clauses
+            // above cannot detect an attestation that stopped happening.
+            || initial.contact_attestation_digest() != self.digests.contact_attestation
             || !initial.all_terminals_registered_before_quarantine()
         {
             return Err(SupportRoutingError::InitialAuthorityMismatch);
@@ -2519,6 +2535,7 @@ impl SupportRunContext<'_> {
         }
         if state.routed.initial.initial_forest_digest() != Forest::new().digest()
             || state.routed.initial.post_quarantine_forest_digest() != self.digests.initial_forest
+            || state.routed.initial.contact_attestation_digest() != self.digests.contact_attestation
             || !state
                 .routed
                 .initial
@@ -2593,6 +2610,7 @@ impl SupportRunContext<'_> {
         }
         if state.initial.initial_forest_digest() != Forest::new().digest()
             || state.initial.post_quarantine_forest_digest() != self.digests.initial_forest
+            || state.initial.contact_attestation_digest() != self.digests.contact_attestation
             || !state.initial.all_terminals_registered_before_quarantine()
         {
             return Err(SupportRewireError::InitialAuthorityMismatch);
@@ -2868,6 +2886,7 @@ pub(crate) fn prepare_support_run<'a>(
         loads: loads_digest,
         geometry: geometry_digest,
         initial_forest: initial.post_quarantine_forest_digest(),
+        contact_attestation: initial.contact_attestation_digest(),
         prepared: 0,
     };
     digests.prepared = prepared_digest(&digests, frame, authority);
@@ -2974,6 +2993,7 @@ fn prepared_digest(
     hash.u64(digests.loads);
     hash.u64(digests.geometry);
     hash.u64(digests.initial_forest);
+    hash.u64(digests.contact_attestation);
     hash.f64(frame.plate_z_mm().get());
     hash.f64(frame.lift_mm().get());
     hash.f64(authority.layers.z0_mm());
@@ -4197,6 +4217,39 @@ mod tests {
                 .route_initial_cco()
                 .expect("required corpus routes");
             routed.state.initial.test_corrupt_initial_forest_digest();
+            assert!(matches!(
+                rejected_rewire_preflight(&routed),
+                SupportRewireError::InitialAuthorityMismatch
+            ));
+            assert!(matches!(
+                routed.rewire(),
+                Err(SupportRewireError::InitialAuthorityMismatch)
+            ));
+        });
+    }
+
+    /// PR-8. The attestation transcript is checked independently of every
+    /// forest digest, because a regression in which the attestation stops
+    /// happening moves NO geometry and every forest digest would stay put.
+    #[test]
+    fn stale_contact_attestation_digest_fails_closed_before_rewire_mutation() {
+        with_prepared_table(|prepared| {
+            let mut routed = prepared
+                .route_initial_cco()
+                .expect("required corpus routes");
+            // Non-vacuity: the forest digests are untouched by this seam, so
+            // the rejection below can only have come from the attestation
+            // clause.
+            let before = routed.state.initial.post_quarantine_forest_digest();
+            routed
+                .state
+                .initial
+                .test_corrupt_contact_attestation_digest();
+            assert_eq!(
+                routed.state.initial.post_quarantine_forest_digest(),
+                before,
+                "the seam must move no geometry"
+            );
             assert!(matches!(
                 rejected_rewire_preflight(&routed),
                 SupportRewireError::InitialAuthorityMismatch
