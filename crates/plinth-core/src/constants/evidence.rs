@@ -43,6 +43,10 @@ pub struct M0EvidenceConstants {
     saturn_leading_release_edge: Measured<YDirection>,
     saturn_release_film_thickness_mm: Measured<f64>,
     saturn_release_front_sweep_direction: Measured<YDirection>,
+    support_knn_max_work_per_face: Derived<u64>,
+    support_knn_work_per_face_observed: Measured<u64>,
+    support_parity_grid_max_bytes_per_face: Derived<u64>,
+    support_parity_grid_refs_per_face_observed: Measured<f64>,
     tip_diameter_min_allowed_mm: Measured<f64>,
     tip_radius_min_allowed_mm: Derived<f64>,
     x_allowed: Derived<f64>,
@@ -116,6 +120,15 @@ impl M0EvidenceConstants {
             "Plate 5 conical-arm bracket with one boundary inversion at 25.00; retain the interval rather than a midpoint.",
         )?;
         let x_allowed_value = (x_star_cone.value().lower() / 2.0).floor();
+
+        // The one instrumented Weeping Treant run that measured what the
+        // support pipeline's execution-authority caps actually have to admit.
+        let treant_cap_source = EvidenceSource::corpus_study(
+            EvidenceId::new("support-resource-caps-weeping-treant-2026-08-05")?,
+            "docs/rust-migration/support-resource-caps-2026-08-05.md",
+            "§2 Measured requirement",
+            exact_date("2026-08-05")?,
+        )?;
 
         Ok(Self {
             cco_x_pair_load_discount: Derived::new(
@@ -226,6 +239,28 @@ impl M0EvidenceConstants {
                 None,
                 "Project release-front sweep direction is PositiveY: the front moves -Y → +Y.",
             )?,
+            support_knn_max_work_per_face: Derived::new(
+                2_048,
+                ["SUPPORT_KNN_WORK_PER_FACE_OBSERVED"],
+                "Cap coefficient by the single support resource-cap rule: next_power_of_two(2 × observed) = next_power_of_two(2 × 696) = next_power_of_two(1392) = 2048. It bounds kNN work at a constant multiple of the support mesh's own face count, so an all-pairs (face²) batch is still refused for any mesh above 2048 faces.",
+            ),
+            support_knn_work_per_face_observed: Measured::new(
+                696,
+                treant_cap_source.clone(),
+                None,
+                "Weeping Treant v1.2, 429,120 support faces: the minima-to-face kNN batch planned source_count × query_count = 298,667,520 work units, exactly 429,120 × 696, so the batch costs 696 work units per face.",
+            )?,
+            support_parity_grid_max_bytes_per_face: Derived::new(
+                512,
+                ["SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED"],
+                "Cap coefficient by the single support resource-cap rule applied to the exact parity-grid projection 81·faces + 36·references + 4 bytes (rust/geom_kernel/src/parity.rs axis_memory_bounds): observed bytes per face = 81 + 36 × 2.8303132 = 182.8913, and next_power_of_two(2 × 182.8913) = next_power_of_two(366) = 512.",
+            ),
+            support_parity_grid_refs_per_face_observed: Measured::new(
+                1_214_544.0 / 429_120.0,
+                treant_cap_source,
+                None,
+                "Weeping Treant v1.2, 429,120 support faces: the axis parity grid projected a peak of 78,482,308 bytes, which inverts through 81·faces + 36·references + 4 to exactly 1,214,544 (cell, face) references. References, not faces, dominate that projection, and their ratio to faces falls as a mesh refines — 526 per face on the 244-face Cylinder against 2.83 here — so the treant is the tight case and the byte floor governs every coarse model.",
+            )?,
             tip_diameter_min_allowed_mm,
             tip_radius_min_allowed_mm: Derived::new(
                 tip_radius_value,
@@ -328,6 +363,26 @@ impl M0EvidenceConstants {
     }
 
     #[must_use]
+    pub const fn support_knn_max_work_per_face(&self) -> &Derived<u64> {
+        &self.support_knn_max_work_per_face
+    }
+
+    #[must_use]
+    pub const fn support_knn_work_per_face_observed(&self) -> &Measured<u64> {
+        &self.support_knn_work_per_face_observed
+    }
+
+    #[must_use]
+    pub const fn support_parity_grid_max_bytes_per_face(&self) -> &Derived<u64> {
+        &self.support_parity_grid_max_bytes_per_face
+    }
+
+    #[must_use]
+    pub const fn support_parity_grid_refs_per_face_observed(&self) -> &Measured<f64> {
+        &self.support_parity_grid_refs_per_face_observed
+    }
+
+    #[must_use]
     pub const fn tip_diameter_min_allowed_mm(&self) -> &Measured<f64> {
         &self.tip_diameter_min_allowed_mm
     }
@@ -353,7 +408,7 @@ impl M0EvidenceConstants {
     }
 
     /// Returns the complete declaration batch in stable ID order.
-    pub fn descriptors(&self) -> Result<[ConstantDescriptor; 20], RegistryError> {
+    pub fn descriptors(&self) -> Result<[ConstantDescriptor; 24], RegistryError> {
         Ok([
             ConstantDescriptor::from_derived(
                 ConstantId::from("CCO_X_PAIR_LOAD_DISCOUNT"),
@@ -444,6 +499,30 @@ impl M0EvidenceConstants {
                 "enum",
                 "y_direction",
                 &self.saturn_release_front_sweep_direction,
+            )?,
+            ConstantDescriptor::from_derived(
+                ConstantId::from("SUPPORT_KNN_MAX_WORK_PER_FACE"),
+                "count/face",
+                SCALAR,
+                &self.support_knn_max_work_per_face,
+            )?,
+            ConstantDescriptor::from_measured(
+                ConstantId::from("SUPPORT_KNN_WORK_PER_FACE_OBSERVED"),
+                "count/face",
+                SCALAR,
+                &self.support_knn_work_per_face_observed,
+            )?,
+            ConstantDescriptor::from_derived(
+                ConstantId::from("SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE"),
+                "B/face",
+                SCALAR,
+                &self.support_parity_grid_max_bytes_per_face,
+            )?,
+            ConstantDescriptor::from_measured(
+                ConstantId::from("SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED"),
+                "count/face",
+                SCALAR,
+                &self.support_parity_grid_refs_per_face_observed,
             )?,
             ConstantDescriptor::from_measured(
                 ConstantId::from("TIP_DIAMETER_MIN_ALLOWED_MM"),

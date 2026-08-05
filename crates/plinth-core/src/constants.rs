@@ -137,6 +137,67 @@ impl<'a> ScarAreaCapPolicy<'a> {
     }
 }
 
+/// Immutable typed authority for the support pipeline's two scaled execution
+/// caps.
+///
+/// Like [`ScarAreaCapPolicy`] this is a view over the one M0 registry, not a
+/// second declaration set. Both caps take the same shape —
+/// `max(floor, per_face × support_mesh_face_count)` — so that a cap refuses
+/// work that is *superlinear in model size* rather than refusing large models.
+/// The floors are the inherited unmeasured constants and are `Placeholder`; the
+/// per-face coefficients are `Derived` from one instrumented Weeping Treant run
+/// by one stated rule, `next_power_of_two(2 × observed_per_face)`.
+///
+/// These are execution-authority bounds only. They admit or refuse; they never
+/// alter a plan that is admitted, so they are result-inert and excluded from
+/// every semantic and result digest.
+#[derive(Clone, Copy, Debug)]
+pub struct SupportResourceCapPolicy<'a> {
+    knn_max_work_floor: &'a Placeholder<std::num::NonZeroU64>,
+    knn_max_work_per_face: &'a Derived<u64>,
+    parity_grid_max_bytes_floor: &'a Placeholder<std::num::NonZeroU64>,
+    parity_grid_max_bytes_per_face: &'a Derived<u64>,
+}
+
+impl<'a> SupportResourceCapPolicy<'a> {
+    /// Stable decision identity for provenance recording.
+    #[must_use]
+    pub fn decision_id(&self) -> crate::DecisionId {
+        crate::DecisionId::from("SUPPORT-RESOURCE-CAP")
+    }
+
+    /// Canonical registry IDs, floor then coefficient, kNN then parity grid.
+    #[must_use]
+    pub const fn constant_ids(&self) -> [&'static str; 4] {
+        [
+            "SUPPORT_KNN_MAX_WORK_FLOOR",
+            "SUPPORT_KNN_MAX_WORK_PER_FACE",
+            "SUPPORT_PARITY_GRID_MAX_BYTES_FLOOR",
+            "SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE",
+        ]
+    }
+
+    #[must_use]
+    pub const fn knn_max_work_floor(&self) -> &'a Placeholder<std::num::NonZeroU64> {
+        self.knn_max_work_floor
+    }
+
+    #[must_use]
+    pub const fn knn_max_work_per_face(&self) -> &'a Derived<u64> {
+        self.knn_max_work_per_face
+    }
+
+    #[must_use]
+    pub const fn parity_grid_max_bytes_floor(&self) -> &'a Placeholder<std::num::NonZeroU64> {
+        self.parity_grid_max_bytes_floor
+    }
+
+    #[must_use]
+    pub const fn parity_grid_max_bytes_per_face(&self) -> &'a Derived<u64> {
+        self.parity_grid_max_bytes_per_face
+    }
+}
+
 impl M0Constants {
     fn build() -> Result<Self, M0ConstantsError> {
         let evidence = M0EvidenceConstants::new()?;
@@ -144,7 +205,7 @@ impl M0Constants {
 
         // Gather every declaration before one structural batch validation and
         // publication. Do not register constants incrementally.
-        let mut declarations = Vec::with_capacity(212);
+        let mut declarations = Vec::with_capacity(218);
         declarations.extend(evidence.descriptors()?);
         declarations.extend(placeholders.descriptors()?);
         let registry = ConstantsRegistry::build_batch(declarations)?;
@@ -205,12 +266,24 @@ impl M0Constants {
             foot_ball_factor: self.placeholders.ball_factor_foot(),
         }
     }
+
+    /// Returns the SUPPORT-RESOURCE-CAP authority without copying its registry
+    /// entries or inventing a second numeric owner in the support crate.
+    #[must_use]
+    pub const fn support_resource_cap_policy(&self) -> SupportResourceCapPolicy<'_> {
+        SupportResourceCapPolicy {
+            knn_max_work_floor: self.placeholders.support_knn_max_work_floor(),
+            knn_max_work_per_face: self.evidence.support_knn_max_work_per_face(),
+            parity_grid_max_bytes_floor: self.placeholders.support_parity_grid_max_bytes_floor(),
+            parity_grid_max_bytes_per_face: self.evidence.support_parity_grid_max_bytes_per_face(),
+        }
+    }
 }
 
 /// The sole workspace-wide global constants initialization point.
 ///
 /// Its fallible result is itself published atomically: callers observe either
-/// the complete 212-entry registry and profile or the same construction error.
+/// the complete 218-entry registry and profile or the same construction error.
 static M0_CONSTANTS: LazyLock<Result<M0Constants, M0ConstantsError>> =
     LazyLock::new(M0Constants::build);
 

@@ -6,7 +6,7 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_EVIDENCE_IDS: [&str; 20] = [
+const EXPECTED_EVIDENCE_IDS: [&str; 24] = [
     "CCO_X_PAIR_LOAD_DISCOUNT",
     "LAYER_HEIGHT_DEFAULT_MM",
     "LOAD_SHARING",
@@ -22,6 +22,10 @@ const EXPECTED_EVIDENCE_IDS: [&str; 20] = [
     "SATURN_LEADING_RELEASE_EDGE",
     "SATURN_RELEASE_FILM_THICKNESS_MM",
     "SATURN_RELEASE_FRONT_SWEEP_DIRECTION",
+    "SUPPORT_KNN_MAX_WORK_PER_FACE",
+    "SUPPORT_KNN_WORK_PER_FACE_OBSERVED",
+    "SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE",
+    "SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED",
     "TIP_DIAMETER_MIN_ALLOWED_MM",
     "TIP_RADIUS_MIN_ALLOWED_MM",
     "X_ALLOWED",
@@ -29,7 +33,7 @@ const EXPECTED_EVIDENCE_IDS: [&str; 20] = [
     "X_STAR_CYLINDER",
 ];
 
-const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 20] = [
+const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 24] = [
     ("CCO_X_PAIR_LOAD_DISCOUNT", "1", "scalar"),
     ("LAYER_HEIGHT_DEFAULT_MM", "mm", "scalar"),
     ("LOAD_SHARING", "1", "load_sharing"),
@@ -49,6 +53,14 @@ const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 20] = [
         "enum",
         "y_direction",
     ),
+    ("SUPPORT_KNN_MAX_WORK_PER_FACE", "count/face", "scalar"),
+    ("SUPPORT_KNN_WORK_PER_FACE_OBSERVED", "count/face", "scalar"),
+    ("SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE", "B/face", "scalar"),
+    (
+        "SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED",
+        "count/face",
+        "scalar",
+    ),
     ("TIP_DIAMETER_MIN_ALLOWED_MM", "mm", "scalar"),
     ("TIP_RADIUS_MIN_ALLOWED_MM", "mm", "scalar"),
     ("X_ALLOWED", "1", "scalar"),
@@ -66,7 +78,7 @@ struct ExpectedSource {
     date: &'static str,
 }
 
-const EXPECTED_SOURCES: [ExpectedSource; 16] = [
+const EXPECTED_SOURCES: [ExpectedSource; 18] = [
     ExpectedSource {
         constant: "LAYER_HEIGHT_DEFAULT_MM",
         kind: "project_record",
@@ -185,6 +197,24 @@ const EXPECTED_SOURCES: [ExpectedSource; 16] = [
         date: "2026-07-31",
     },
     ExpectedSource {
+        constant: "SUPPORT_KNN_WORK_PER_FACE_OBSERVED",
+        kind: "corpus_study",
+        identity: "support-resource-caps-weeping-treant-2026-08-05",
+        record: "docs/rust-migration/support-resource-caps-2026-08-05.md",
+        locator: "§2 Measured requirement",
+        precision: "exact",
+        date: "2026-08-05",
+    },
+    ExpectedSource {
+        constant: "SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED",
+        kind: "corpus_study",
+        identity: "support-resource-caps-weeping-treant-2026-08-05",
+        record: "docs/rust-migration/support-resource-caps-2026-08-05.md",
+        locator: "§2 Measured requirement",
+        precision: "exact",
+        date: "2026-08-05",
+    },
+    ExpectedSource {
         constant: "TIP_DIAMETER_MIN_ALLOWED_MM",
         kind: "owner_decision",
         identity: "tip-diameter-floor-owner-decision",
@@ -239,7 +269,7 @@ fn declaration_batch_has_exact_membership_order_shapes_and_provenance_counts() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(actual_ids, EXPECTED_EVIDENCE_IDS);
-    assert_eq!(descriptors.len(), 20);
+    assert_eq!(descriptors.len(), 24);
 
     for (descriptor, (id, unit, shape)) in descriptors.iter().zip(EXPECTED_DESCRIPTOR_CONTRACT) {
         assert_eq!(descriptor.id().as_str(), id, "ID contract drift for {id}");
@@ -255,7 +285,7 @@ fn declaration_batch_has_exact_membership_order_shapes_and_provenance_counts() {
         .iter()
         .filter(|descriptor| descriptor.provenance().class() == RegistryProvenanceClass::Derived)
         .count();
-    assert_eq!((measured, derived), (16, 4));
+    assert_eq!((measured, derived), (18, 6));
     assert!(descriptors.iter().all(|descriptor| !matches!(
         descriptor.provenance().class(),
         RegistryProvenanceClass::Placeholder | RegistryProvenanceClass::Pending
@@ -294,6 +324,35 @@ fn descriptor_values_preserve_exact_scalar_record_direction_and_interval_types()
             .value()
             .view(),
         ConstantValueView::UnsignedInteger(1)
+    );
+    // The support resource-cap rule, stated as arithmetic the test can check:
+    // the coefficient is next_power_of_two(2 x observed_per_face), and the
+    // parity-grid observation reaches bytes through parity.rs's own exact
+    // projection term 81*faces + 36*references + 4.
+    assert_eq!(
+        descriptor(&descriptors, "SUPPORT_KNN_WORK_PER_FACE_OBSERVED")
+            .value()
+            .view(),
+        ConstantValueView::UnsignedInteger(696)
+    );
+    assert_eq!(298_667_520_u64 / 429_120, 696);
+    assert_eq!(
+        descriptor(&descriptors, "SUPPORT_KNN_MAX_WORK_PER_FACE")
+            .value()
+            .view(),
+        ConstantValueView::UnsignedInteger((2 * 696_u64).next_power_of_two())
+    );
+    let refs_per_face = scalar(&descriptors, "SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED");
+    assert_eq!(refs_per_face, 1_214_544.0 / 429_120.0);
+    assert_eq!(81 * 429_120_u64 + 36 * 1_214_544 + 4, 78_482_308);
+    let observed_bytes_per_face = 81.0 + 36.0 * refs_per_face;
+    assert_eq!(
+        descriptor(&descriptors, "SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE")
+            .value()
+            .view(),
+        ConstantValueView::UnsignedInteger(
+            ((2.0 * observed_bytes_per_face) as u64).next_power_of_two()
+        )
     );
     assert_eq!(
         descriptor(&descriptors, "SATURN_LEADING_RELEASE_EDGE")

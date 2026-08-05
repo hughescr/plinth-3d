@@ -766,16 +766,20 @@ listed payload has `err: null`.
 | `P8_CHORD_CANON_MICRON` | `corpus_study(id=phase8-micron-chord-canonicalization-2026-07-24, record=docs/specs/SPEC-P8-RELOCATE.md, locator=§5.3 Layer 3/amendment G)` | `Exact(2026-07-24)`, f64/integer-micron `err: null` |
 | `P8_POCKET_VOXEL_MM` | `owner_decision(id=p8-pocket-voxel-owner-decision, record=docs/specs/SPEC-P8-RELOCATE.md, locator=§4.1)` | `Exact(2026-07-25)`, `err: null` |
 | `PRINT_FLOOR_CHORD_MM` | `owner_decision(id=print-floor-owner-decision-2026-07-24, record=docs/specs/SPEC-EMBED-POLICY.md, locator=PRINT-FLOOR amendment and Normative constants)` | `Exact(2026-07-24)`, `err: null` |
+| `SUPPORT_KNN_WORK_PER_FACE_OBSERVED` | `corpus_study(id=support-resource-caps-weeping-treant-2026-08-05, record=docs/rust-migration/support-resource-caps-2026-08-05.md, locator=§2 Measured requirement)` | `Exact(2026-08-05)`, integer-count `err: null` |
+| `SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED` | same corpus study and locator | `Exact(2026-08-05)`, `err: null` |
 
 The vendor document's retrieval date, 2026-07-31, remains metadata; its evidence
 date is the checked-in document's 2025-01-22 publication date.
 
-Exactly four declarations remain `Derived`:
+Exactly six declarations remain `Derived`:
 
 | Stable ID | `from` | Exact relation / proof |
 |---|---|---|
 | `CCO_X_PAIR_LOAD_DISCOUNT` | `[]` | `(F/2)^0.25 / F^0.25 = 0.5^0.25`; proof-only relation in `docs/reference/physics_transient_peel.md`, implemented in both `cco.py` and `bracing.py` |
 | `N_EFF_CAP` | `[LOAD_SHARING]` | reads the measured `Additive` payload's largest tested group size, `6.0`; not a separate measurement |
+| `SUPPORT_KNN_MAX_WORK_PER_FACE` | `[SUPPORT_KNN_WORK_PER_FACE_OBSERVED]` | `next_power_of_two(2 × 696) = next_power_of_two(1392) = 2048` |
+| `SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE` | `[SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED]` | `next_power_of_two(2 × (81 + 36 × 2.8303132)) = next_power_of_two(366) = 512`, through the exact parity projection `81·faces + 36·references + 4` |
 | `TIP_RADIUS_MIN_ALLOWED_MM` | `[TIP_DIAMETER_MIN_ALLOWED_MM]` | `TIP_DIAMETER_MIN_ALLOWED_MM / 2 = 0.075 mm` |
 | `X_ALLOWED` | `[X_STAR_CONE]` | binding commitment/precedence: `floor(lower(X_STAR_CONE)/2) = floor(25.00/2) = 12`; `X_STAR_CYLINDER` only supplies the `19.91/12 = 1.66×` margin check |
 
@@ -794,6 +798,60 @@ selected in a flat sensitivity region, not a measurement.
 
 `SURFACE_PITCH_BOUND_PERCENTILE` is retired/no-port: `SPEC-V5-GEOM` §2.1 and
 §2.6 make sampled-cloud pitch uncertainty identically zero on exact triangle paths.
+
+### 3.10.8 Support execution-authority caps — the model-scaled pair
+
+These are the first support-pipeline **execution-authority** caps to enter the
+registry, under the new `runtime_resource_cap` classification. They are Rust-era
+and have **no legacy Python source**, so §3.11's "not constants" ruling — which
+is about numpy/CPython memory-accounting artifacts — does not cover them: these
+are ratified numeric authority with a stated rule and a measurement of record.
+The full measurement is `support-resource-caps-2026-08-05.md`.
+
+Both caps take one shape, materialized per model by
+`SupportPreparationLimits::input` against that model's own support-mesh face
+count:
+
+```
+cap = max(floor, per_face × support_mesh_face_count)
+```
+
+and both coefficients come from one rule over the 2026-08-05 Weeping Treant
+measurement: `per_face = next_power_of_two(2 × observed_per_face)`.
+
+| Stable ID | Value | Unit | Wrapper | Source meaning |
+|---|---|---|---|---|
+| `SUPPORT_KNN_WORK_PER_FACE_OBSERVED` | 696 | count/face | **Measured** | `298,667,520 / 429,120`, exact; the treant's minima-kNN batch cost per face |
+| `SUPPORT_KNN_MAX_WORK_PER_FACE` | 2048 | count/face | **Derived** | `next_power_of_two(2 × 696)` |
+| `SUPPORT_KNN_MAX_WORK_FLOOR` | 100,000,000 | count | **Placeholder** | inherited unmeasured Codex-era floor (73e7c13 / a8acfb9), unchanged |
+| `SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED` | 1,214,544 / 429,120 | count/face | **Measured** | the treant's parity `(cell, face)` references per face; inverts the exact projection `81·faces + 36·references + 4 = 78,482,308` |
+| `SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE` | 512 | B/face | **Derived** | `next_power_of_two(2 × (81 + 36 × 2.8303132))` |
+| `SUPPORT_PARITY_GRID_MAX_BYTES_FLOOR` | 67,108,864 | B | **Placeholder** | inherited unmeasured Codex-era floor (73e7c13), unchanged |
+
+**Why scaled and not simply larger.** A cap's job is to refuse work that is
+superlinear in model size, not to refuse a large model, and a flat constant
+cannot tell those apart: at 429,120 faces the old constants fired on honest
+linear work, while at 24 faces `make_raking_blade` was already burning 31% of an
+unrelated 2 × 10⁹ gate cap on a genuine quadratic. `k·N` is still a bound — it
+refuses anything worse than linear in `N`. An all-pairs kNN over the treant is
+`429,120² = 1.84 × 10¹¹` and is refused 209× over; 512 B/face admits at most
+`(512 − 81)/36 = 11.97` grid references per face against the treant's measured
+2.83.
+
+**These caps are result-inert.** They admit or refuse; they never alter an
+admitted plan, and they enter no semantic or result digest. The floor governs
+for every model the corpus can currently run — Sphere, the largest at 4,760
+faces, needs 2,437,120 grid bytes and 9,748,480 kNN work — so introducing the
+rule moved no corpus digest, which the 2026-08-05 before/after census confirms
+line by line.
+
+**Not raised, deliberately.** `max_gate_operations`, `max_load_operations`,
+`max_load_scratch_bytes` and `max_gate_peak_bytes` stay at their inherited
+values. Measurement showed they are refusing algorithm defects — a selection
+sort charging ~1.7 × 10¹⁰ operations where a set charges 142,646, and an
+8.0 M-row load-eligibility explosion on a 429,120-face mesh — not a large
+model's honest requirement. They remain unregistered pending that algorithm
+work; their constants must be set on post-fix dimensions.
 
 ### 3.11 NOT constants — resource guards
 

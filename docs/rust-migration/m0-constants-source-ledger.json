@@ -2171,6 +2171,70 @@
       ],
       "provenance_wrapper": "Measured",
       "provenance_detail": "Measured EvidenceSource kind=CalibrationPlate plate=COUPON-PLATE-6-support-arm-capacity record=docs/reference/plate-06-results.md locator=§5 Finding 2 date=Exact(2026-07-31) err=null interval"
+    },
+    {
+      "id": "SUPPORT_KNN_MAX_WORK_FLOOR",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production knn max_work floor",
+        "rust/geom_kernel/src/point_index.rs:KnnBatchLimits::max_work"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.8 = 100000000",
+      "provenance_detail": "Rust-era execution authority with no legacy Python source. Codex-era 73e7c13 / a8acfb9, no measurement of record; carried forward unchanged as the constant term of the measured per-face rule."
+    },
+    {
+      "id": "SUPPORT_KNN_MAX_WORK_PER_FACE",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Derived",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::input knn_max_work_per_face",
+        "rust/geom_kernel/src/point_index.rs:KnnBatchPlan::new work check"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.8 = 2048",
+      "provenance_detail": "next_power_of_two(2 x SUPPORT_KNN_WORK_PER_FACE_OBSERVED) = next_power_of_two(1392) = 2048. Rust-era; no legacy Python source."
+    },
+    {
+      "id": "SUPPORT_KNN_WORK_PER_FACE_OBSERVED",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Measured",
+      "source_locators": [
+        "docs/rust-migration/support-resource-caps-2026-08-05.md:§2 Measured requirement"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.8 = 696",
+      "provenance_detail": "Weeping Treant v1.2 corpus study 2026-08-05: 298667520 planned kNN work / 429120 support faces = 696 exactly. Rust-era; no legacy Python source."
+    },
+    {
+      "id": "SUPPORT_PARITY_GRID_MAX_BYTES_FLOOR",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production max_grid_bytes floor",
+        "rust/geom_kernel/src/parity.rs:build_with_reserved_peak grid budget"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.8 = 67108864",
+      "provenance_detail": "Rust-era execution authority with no legacy Python source. Codex-era 73e7c13, no measurement of record; carried forward unchanged and it governs every corpus model coarse enough that references dominate the projection."
+    },
+    {
+      "id": "SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Derived",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::input grid_bytes_per_face",
+        "rust/geom_kernel/src/parity.rs:axis_memory_bounds"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.8 = 512",
+      "provenance_detail": "next_power_of_two(2 x (81 + 36 x SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED)) = next_power_of_two(366) = 512, through parity axis_memory_bounds 81*faces + 36*references + 4. Rust-era; no legacy Python source."
+    },
+    {
+      "id": "SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Measured",
+      "source_locators": [
+        "docs/rust-migration/support-resource-caps-2026-08-05.md:§2 Measured requirement"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.8 = 1214544/429120",
+      "provenance_detail": "Weeping Treant v1.2 corpus study 2026-08-05: projected peak 78482308 B inverts through 81*429120 + 36*R + 4 to exactly R = 1214544 (cell, face) references, i.e. 2.8303132 per face. Rust-era; no legacy Python source."
     }
   ],
   "aliases": [

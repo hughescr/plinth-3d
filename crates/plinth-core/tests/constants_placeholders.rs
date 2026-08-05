@@ -8,7 +8,7 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_PLACEHOLDER_IDS: [&str; 192] = [
+const EXPECTED_PLACEHOLDER_IDS: [&str; 194] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -186,6 +186,8 @@ const EXPECTED_PLACEHOLDER_IDS: [&str; 192] = [
     "STRUT_MODEL_ANCHOR_MAX_DELICACY",
     "STRUT_MODEL_ANCHOR_MIN_LEN_MM",
     "STUB_LENGTH_MM",
+    "SUPPORT_KNN_MAX_WORK_FLOOR",
+    "SUPPORT_PARITY_GRID_MAX_BYTES_FLOOR",
     "SURFACE_TREE_MAX_POINTS",
     "SURFACE_TREE_PITCH_MM",
     "SURFACE_TREE_SEED",
@@ -216,7 +218,7 @@ macro_rules! rows {
     };
 }
 
-const EXPECTED_ROWS: [ExpectedRow; 192] = rows! {
+const EXPECTED_ROWS: [ExpectedRow; 194] = rows! {
     "A_ABS_MM2", "2.0", "mm²", "scalar";
     "BALL_BREACH_EPS_MM", "0.05", "mm", "scalar";
     "BALL_FACTOR_FOOT", "1.4", "1", "scalar";
@@ -394,6 +396,8 @@ const EXPECTED_ROWS: [ExpectedRow; 192] = rows! {
     "STRUT_MODEL_ANCHOR_MAX_DELICACY", "0.5", "1", "scalar";
     "STRUT_MODEL_ANCHOR_MIN_LEN_MM", "5.0", "mm", "scalar";
     "STUB_LENGTH_MM", "2.5", "mm", "scalar";
+    "SUPPORT_KNN_MAX_WORK_FLOOR", "100000000", "count", "scalar";
+    "SUPPORT_PARITY_GRID_MAX_BYTES_FLOOR", "67108864", "B", "scalar";
     "SURFACE_TREE_MAX_POINTS", "150000", "count", "scalar";
     "SURFACE_TREE_PITCH_MM", "0.4", "mm", "scalar";
     "SURFACE_TREE_SEED", "0", "count", "scalar";
@@ -412,7 +416,7 @@ const EXPECTED_ROWS: [ExpectedRow; 192] = rows! {
 };
 
 fn component() -> M0PlaceholderConstants {
-    M0PlaceholderConstants::new().expect("all 192 placeholder declarations must construct")
+    M0PlaceholderConstants::new().expect("all 194 placeholder declarations must construct")
 }
 
 #[test]
@@ -423,7 +427,7 @@ fn exact_handwritten_membership_is_stable_sorted_and_all_placeholder() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, EXPECTED_PLACEHOLDER_IDS);
-    assert_eq!(descriptors.len(), 192);
+    assert_eq!(descriptors.len(), 194);
     assert!(descriptors
         .windows(2)
         .all(|pair| pair[0].id() < pair[1].id()));
@@ -514,7 +518,7 @@ const fn bound_key(bound: BoundKind) -> &'static str {
 }
 
 #[test]
-fn evidence_and_placeholder_fixture_builds_one_212_entry_structural_batch() {
+fn evidence_and_placeholder_fixture_builds_one_218_entry_structural_batch() {
     let mut descriptors = component()
         .descriptors()
         .unwrap()
@@ -522,14 +526,14 @@ fn evidence_and_placeholder_fixture_builds_one_212_entry_structural_batch() {
         .collect::<Vec<_>>();
     descriptors.extend(M0EvidenceConstants::new().unwrap().descriptors().unwrap());
     let registry = ConstantsRegistry::build_batch(descriptors).unwrap();
-    assert_eq!(registry.len(), 212);
+    assert_eq!(registry.len(), 218);
     assert_eq!(
         registry
             .iter()
             .map(|descriptor| descriptor.id().as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        212
+        218
     );
 }
 

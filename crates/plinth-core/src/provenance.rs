@@ -1009,8 +1009,12 @@ macro_rules! categorical_payload {
         )+
     };
 }
+// `u64` is categorical here on purpose: the only `Measured<u64>` declarations
+// are exact integer counts read off one instrumented run (no dispersion to
+// report), so an error bar on them would be a fiction, not a missing field.
 categorical_payload!(
     bool,
+    u64,
     BuildVolumeMm,
     YDirection,
     LoadSharing,

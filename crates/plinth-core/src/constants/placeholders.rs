@@ -971,7 +971,7 @@ macro_rules! placeholder_declarations {
                 }
             )+
 
-            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 192], RegistryError> {
+            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 194], RegistryError> {
                 Ok([
                     $(ConstantDescriptor::from_placeholder(
                         ConstantId::from($id),
@@ -1351,6 +1351,10 @@ placeholder_declarations! {
     "STRUT_MODEL_ANCHOR_MIN_LEN_MM", "mm", "scalar", "Model-anchor candidate length floor.";
     stub_length_mm: PositiveFinite = PositiveFinite::new(2.5)?;
     "STUB_LENGTH_MM", "mm", "scalar", "Support stub length.";
+    support_knn_max_work_floor: NonZeroU64 = nonzero(100_000_000)?;
+    "SUPPORT_KNN_MAX_WORK_FLOOR", "count", "scalar", "Inherited unmeasured kNN work floor, Codex-era 73e7c13/a8acfb9 with no measurement of record; it is only the constant term under the measured per-face rule and is never the whole cap.";
+    support_parity_grid_max_bytes_floor: NonZeroU64 = nonzero(67_108_864)?;
+    "SUPPORT_PARITY_GRID_MAX_BYTES_FLOOR", "B", "scalar", "Inherited unmeasured parity-grid byte floor, Codex-era 73e7c13 with no measurement of record; it governs every corpus model coarse enough that references, not faces, dominate the projection.";
     surface_tree_max_points: NonZeroU64 = nonzero(150_000)?;
     "SURFACE_TREE_MAX_POINTS", "count", "scalar", "Result-changing sampled-surface cap, not a resource exclusion.";
     surface_tree_pitch_mm: PositiveFinite = PositiveFinite::new(0.4)?;
