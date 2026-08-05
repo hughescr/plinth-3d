@@ -122,16 +122,26 @@ fn run_model(root: &Path, name: &str) -> Result<String, String> {
     let delicacy = vec![0.0; hollowed.mesh().tris().len()];
     let faces = hollowed.mesh().tris().len();
 
+    let input = SupportPreparationLimits::production()
+        .map_err(|error| format!("limits: {error}"))?
+        .input(&layers, &delicacy, &[]);
+    // Report the model-scaled caps this model actually got, and its face count,
+    // on the failure path too: a refusal without the bound it was measured
+    // against is not a measurement.
+    let scaled_caps = format!(
+        "faces={faces}\tmax_grid_bytes={}\tknn_max_work={}",
+        input.max_grid_bytes(),
+        input.minima_knn_max_work(),
+    );
+
     let authority = run_support(
         hollowed,
         SupportRequest {
             lift_mm: PositiveFinite::new(5.0).map_err(|_| "lift".to_owned())?,
         },
-        SupportPreparationLimits::production()
-            .map_err(|error| format!("limits: {error}"))?
-            .input(&layers, &delicacy, &[]),
+        input,
     )
-    .map_err(|error| format!("support: {error}"))?;
+    .map_err(|error| format!("{scaled_caps}\tsupport: {error}"))?;
     let snapshot = authority
         .verification_snapshot()
         .map_err(|error| format!("snapshot: {error}"))?;
@@ -144,6 +154,6 @@ fn run_model(root: &Path, name: &str) -> Result<String, String> {
     // Every corpus member now orients from its own repaired baseline; there is
     // no donor-substitution path left.
     Ok(format!(
-        "faces={faces}\torientation=own_pinned\tpitch_mm={pitch_mm}\tlayers={layer_count}\trouted_contacts={routed}\tfinal_live_members={live}\tsnapshot_digest={digest}"
+        "{scaled_caps}\torientation=own_pinned\tpitch_mm={pitch_mm}\tlayers={layer_count}\trouted_contacts={routed}\tfinal_live_members={live}\tsnapshot_digest={digest}"
     ))
 }

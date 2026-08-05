@@ -404,10 +404,20 @@ mod tests {
         assert_eq!(policy.decimation(), finite_decimation_budget());
 
         let layers = plinth_core::LayerPlan::new(0.0, vec![0.05]).expect("layer plan");
+        // An empty delicacy sidecar is a zero-face model, so the two
+        // model-scaled support caps come out at exactly their floors.
         let input = policy.support_input(&layers, &[], &[]);
         assert_eq!(input.max_grid_bytes(), 64 * 1024 * 1024);
+        assert_eq!(input.minima_knn_max_work(), 100_000_000);
         assert_eq!(input.max_primitives(), 200_000);
         assert_eq!(input.max_primitive_bytes(), 128 * 1024 * 1024);
+
+        // The pipeline must carry the scaling through, not flatten it: the same
+        // policy bound to a 429,120-face model yields the scaled caps.
+        let delicacy = vec![0.0_f64; 429_120];
+        let scaled = policy.support_input(&layers, &delicacy, &[]);
+        assert_eq!(scaled.max_grid_bytes(), 512 * 429_120);
+        assert_eq!(scaled.minima_knn_max_work(), 2_048 * 429_120);
     }
 
     #[test]

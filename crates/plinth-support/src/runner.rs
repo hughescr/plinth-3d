@@ -134,11 +134,27 @@ pub struct SupportPreparationInput<'a> {
 /// [`SupportPreparationInput`]. The pipeline can select this one authority
 /// without copying support caps, then bind the current model's batches only
 /// when it is ready to execute the stage.
+///
+/// Two of these caps are **model-scaled**, and this type therefore carries the
+/// *rule* rather than one finished number: `knn_max_work` and `max_grid_bytes`
+/// are `max(floor, per_face × support_mesh_face_count)`, materialized by
+/// [`Self::input`] once the face count is known. A cap's job is to refuse work
+/// that is superlinear in model size, not to refuse a large model, and a flat
+/// constant cannot tell those apart — it fires on honest linear work at 429k
+/// faces while admitting a real quadratic at 24. All four registry constants
+/// behind the rule are read here from the one M0 publication
+/// (`SupportResourceCapPolicy`); this crate invents no second numeric owner.
 #[derive(Clone, Copy, Debug)]
 pub struct SupportPreparationLimits {
     column_pitch_mm: PositiveFinite,
     surface_grid_pitch_mm: PositiveFinite,
+    /// `SUPPORT_PARITY_GRID_MAX_BYTES_FLOOR`; never the whole cap on its own.
     max_grid_bytes: usize,
+    /// `SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE`.
+    grid_bytes_per_face: usize,
+    /// `SUPPORT_KNN_MAX_WORK_PER_FACE`. The matching floor is already carried
+    /// inside both `KnnBatchLimits::max_work` fields below.
+    knn_max_work_per_face: usize,
     candidate_config: CandidatePayloadConfig,
     perception_limits: GenericPerceptionLimits,
     coverage_samples_max_virtual_cells: usize,
@@ -151,22 +167,51 @@ pub struct SupportPreparationLimits {
     max_primitive_bytes: usize,
 }
 
+/// Materializes one model-scaled cap: `max(floor, per_face × face_count)`.
+///
+/// Saturating, so an absurd face count yields `usize::MAX` rather than a
+/// wrapped-around tiny cap; the caller's own `validate` refuses `usize::MAX`,
+/// which keeps "unbounded" unreachable through this path.
+#[must_use]
+const fn model_scaled_cap(floor: usize, per_face: usize, face_count: usize) -> usize {
+    let scaled = per_face.saturating_mul(face_count);
+    if scaled > floor {
+        scaled
+    } else {
+        floor
+    }
+}
+
 impl SupportPreparationLimits {
     /// The single established production cap set for support preparation.
     pub fn production() -> Result<Self, SupportPreparationLimitsError> {
         let pitch = PositiveFinite::new(1.0)
             .map_err(|error| SupportPreparationLimitsError::Pitch(error.to_string()))?;
+        let caps = plinth_core::m0_constants()
+            .map_err(|error| {
+                SupportPreparationLimitsError::RegisteredConstantsUnavailable(error.to_string())
+            })?
+            .support_resource_cap_policy();
+        // `diagnostic()` on the floors is the sanctioned Placeholder read: a
+        // resource cap admits or refuses, it never contributes to an accepted
+        // result, so it is not on the accept path the wrapper guards.
+        let knn_max_work_floor = cap_usize(caps.knn_max_work_floor().diagnostic().get())?;
+        let knn_max_work_per_face = cap_usize(*caps.knn_max_work_per_face().value())?;
+        let grid_bytes_floor = cap_usize(caps.parity_grid_max_bytes_floor().diagnostic().get())?;
+        let grid_bytes_per_face = cap_usize(*caps.parity_grid_max_bytes_per_face().value())?;
         let knn = KnnBatchLimits {
             max_source_points: 20_000_000,
             max_query_points: 20_000_000,
             max_neighbors: 1,
             max_logical_peak_bytes: 2 * 1024 * 1024 * 1024,
-            max_work: 100_000_000,
+            max_work: knn_max_work_floor,
         };
         Ok(Self {
             column_pitch_mm: pitch,
             surface_grid_pitch_mm: pitch,
-            max_grid_bytes: 64 * 1024 * 1024,
+            max_grid_bytes: grid_bytes_floor,
+            grid_bytes_per_face,
+            knn_max_work_per_face,
             candidate_config: CandidatePayloadConfig::current(
                 8,
                 1_000_000,
@@ -201,6 +246,15 @@ impl SupportPreparationLimits {
         })
     }
 
+    /// Binds this authority to one model, materializing the two model-scaled
+    /// caps against that model's own face count.
+    ///
+    /// The face count is `delicacy_by_face.len()`: the sidecar is required and
+    /// is length-checked against the support mesh at the perception boundary
+    /// (`SupportPerceptionError::DelicacyLength`), so it is the face count by
+    /// contract rather than by convention. A zero-length sidecar therefore
+    /// yields exactly the two floors, which are the caps as they stood before
+    /// this rule existed.
     #[must_use]
     pub const fn input<'a>(
         self,
@@ -208,18 +262,36 @@ impl SupportPreparationLimits {
         delicacy_by_face: &'a [f64],
         reservations: &'a [SpecializedOwnerReservation],
     ) -> SupportPreparationInput<'a> {
+        let face_count = delicacy_by_face.len();
+        let knn_max_work = model_scaled_cap(
+            self.perception_limits.minima_knn.max_work,
+            self.knn_max_work_per_face,
+            face_count,
+        );
+        let mut perception_limits = self.perception_limits;
+        perception_limits.minima_knn.max_work = knn_max_work;
+        let mut specialized_limits = self.specialized_limits;
+        specialized_limits.coverage_route_knn.max_work = model_scaled_cap(
+            specialized_limits.coverage_route_knn.max_work,
+            self.knn_max_work_per_face,
+            face_count,
+        );
         SupportPreparationInput {
             layers,
             delicacy_by_face,
             column_pitch_mm: self.column_pitch_mm,
             surface_grid_pitch_mm: self.surface_grid_pitch_mm,
-            max_grid_bytes: self.max_grid_bytes,
+            max_grid_bytes: model_scaled_cap(
+                self.max_grid_bytes,
+                self.grid_bytes_per_face,
+                face_count,
+            ),
             candidate_config: self.candidate_config,
             reservations,
-            perception_limits: self.perception_limits,
+            perception_limits,
             coverage_samples_max_virtual_cells: self.coverage_samples_max_virtual_cells,
             coverage_score_matrix_max_entries: self.coverage_score_matrix_max_entries,
-            specialized_limits: self.specialized_limits,
+            specialized_limits,
             construction_limits: self.construction_limits,
             brace_penetration_limits: self.brace_penetration_limits,
             raft_limits: self.raft_limits,
@@ -233,6 +305,13 @@ impl SupportPreparationInput<'_> {
     #[must_use]
     pub const fn max_grid_bytes(&self) -> usize {
         self.max_grid_bytes
+    }
+    /// The materialized minima-kNN work cap for this model. Read-only: it is
+    /// execution authority, so it is observable for measurement but never
+    /// writable, and it never enters a semantic or result digest.
+    #[must_use]
+    pub const fn minima_knn_max_work(&self) -> usize {
+        self.perception_limits.minima_knn.max_work
     }
     #[must_use]
     pub const fn max_primitives(&self) -> usize {
@@ -262,10 +341,19 @@ impl SupportPreparationInput<'_> {
     }
 }
 
+/// Narrows one registered `u64` cap constant to this platform's `usize`.
+fn cap_usize(value: u64) -> Result<usize, SupportPreparationLimitsError> {
+    usize::try_from(value).map_err(|_| SupportPreparationLimitsError::CapUnrepresentable { value })
+}
+
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum SupportPreparationLimitsError {
     #[error("support production pitch is invalid: {0}")]
     Pitch(String),
+    #[error("registered M0 constants are unavailable: {0}")]
+    RegisteredConstantsUnavailable(String),
+    #[error("registered support resource cap {value} is unrepresentable as usize")]
+    CapUnrepresentable { value: u64 },
     #[error("support production candidate limits are invalid: {0}")]
     Candidate(String),
     #[error("support production construction limits are invalid")]
