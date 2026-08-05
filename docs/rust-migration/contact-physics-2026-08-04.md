@@ -872,6 +872,18 @@ Gates at the finisher tip, default AND `--all-features`: **924 / 925 tests
 green** (921 / 922 before; +3 are the new F3 fixtures),
 `cargo clippy --workspace --all-targets` clean both ways.
 
+**The tripwire stage re-measured the same way, and its delta is also ZERO.** A
+full `--features census` run at `1f048ed` and at the tripwire tip is
+**byte-identical in every byte** — not merely outside the attestation lines —
+`md5 = e90f0f1d43942bd893e64bc4254bfa9b` for both. The reason is structural
+rather than lucky: `T6_commits` records `cco_winner_plate` and
+`cco_winner_bifurcate` only (51 and 54 across the four reachable models),
+`cco_winner_model_anchor` never appears, and `T2_cco_anchor_surviving = 0` on
+every model, so neither winner-commit gate is ever reached. Gates at the
+tripwire tip, default AND `--all-features`: **926 / 927 tests green** (+2 are the
+tripwire acceptance fixtures), `cargo clippy --workspace --all-targets` clean
+both ways.
+
 ---
 
 ## What is not done
