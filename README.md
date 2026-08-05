@@ -1,29 +1,62 @@
 # plinth-3d
 
-An end-to-end resin-print preparation pipeline, in Rust: a raw mini STL goes in, a
-print-ready `.chitubox` project comes out, with supports that are sized from measured
-failure physics and then machine-verified rather than eyeballed.
+An end-to-end resin-print preparation pipeline, in Rust: raw mini STLs go in, and supports
+come out that are sized from measured failure physics and then machine-verified rather than
+eyeballed. Today the output is a print-ready `.chitubox` project per model; the destination
+is a sliced job delivered to the printer over the network, with `.chitubox` kept as the
+output you reach for when you want to look before you print.
 
 ## The goal
 
-One command, for a folder of D&D minis, on a home resin printer:
+Point it at a folder of mini STLs. Get sliced files on the printer, over the network,
+without a slicer GUI anywhere in the loop.
 
 ```sh
-plinth prepare <folder> --output <printer>
+plinth prepare <folder> --output <printer>     # illustrative, not a settled spelling
 ```
 
-**This is the destination, not the current state.** The typed CLI surface exists today
-(`crates/plinth-cli`), and its stable spelling is:
+End to end, that means: **STLs in → physics-verified supports → several models packed onto
+one build plate by that printer's plate geometry → sliced natively into whatever the
+printer eats (`.goo`, or whatever the machine takes) → sent to the printer over the
+network.**
 
-```sh
-plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--no-cache]
-```
+Today the pipeline stops at a `.chitubox` project per model, which you open and slice by
+hand. **That is a feature as well as a stepping stone.** Right now it is the visual
+inspection checkpoint — how you see the generated model and its supports and confirm the
+algorithm got it right. Long term it stays a first-class output for anyone who wants a
+manual review, or a manual confirmation, before slicing and printing. What the stages below
+remove is the *requirement* to go through ChituBox on the automated path, not the ability
+to.
 
-What does not exist yet is the runner behind it: `plinth-pipeline` currently defines the
+### The ladder
+
+Four stages, each independently shippable and useful on its own. Everything past stage 0 is
+roadmap.
+
+| stage | what | state |
+| --- | --- | --- |
+| **0** | Working support generation: one `.chitubox` per model, opened and sliced by hand — and inspected, which is the point of this stage. | **In progress** — the physics and the support engine work (see [What works today](#what-works-today)); the folder-level runner that chains the stages to a written artifact is not wired yet. |
+| **1** | Multiple models per build plate, packed against the printer's real build-plate geometry. | Roadmap |
+| **2** | Native slicing, so the automated path no longer depends on ChituBox. `.chitubox` output remains supported for manual inspection and confirmation. | Roadmap |
+| **3** | Send the sliced job to the printer over the network. | Roadmap |
+
+**Someday/maybe, not planned stages:** other slicer project formats such as Lychee — gated
+on whether the format can keep the model separable from its supports, which is the property
+inspection and re-editing depend on — and a plain STL export.
+
+Stage 0's remaining work is the runner: `plinth-pipeline` currently defines the
 folder-in/one-artifact-per-model data boundary and its `prepare(PrepareRequest) ->
 Result<PrepareReport, PipelineError>` signature, but carries no loader, cache, stage
-runner, or emit loop. Wiring that chain is the top roadmap item — see
+runner, or emit loop. That is the top item in
 [`docs/rust-migration/CURRENT-STATUS.md`](docs/rust-migration/CURRENT-STATUS.md).
+
+**Stage 3 rests on four assumptions that are genuinely open** — none of them is designed,
+and naming them is not the same as having answered them:
+
+- how a printer *name* maps to a printer *type*;
+- what network protocol the printer speaks;
+- how the printer's address is discovered or configured;
+- which file formats a given printer actually accepts.
 
 ## Why it exists
 
@@ -127,6 +160,13 @@ The Cargo workspace (`crates/*`, `rust/chitubox_io`, `rust/geom_kernel`):
 | `rust/geom_kernel` | Native, batch-first triangle-soup geometry kernel: BVH, closest point, ray and segment batches, slicing, parity grids. Every public query takes a slice and returns a slice. |
 | `rust/chitubox_io` | Read and write ChituBox Basic 1.3.0 `.chitubox` projects starting from an *empty* project — no pre-saved template containing a model. Every write is verified by structural re-parse. |
 
+**The model and its supports stay separable all the way to the emit boundary.** The support
+scene carries semantic support kinds and f64 geometry; `plinth-emit` alone maps them onto
+ChituBox record identities and f32, attaching supports as per-model records rather than
+welding them into one mesh. That separability is what makes the `.chitubox` inspection step
+meaningful — you can look at the supports as supports, and edit them — and it is the
+property any future output format has to preserve to be worth supporting.
+
 Three conventions bind all of it, and each exists because a specific bug shipped:
 
 - **Batch-first is law.** Gather → one batched call → scatter. A per-item call in a hot path
@@ -143,6 +183,17 @@ The full set is [`docs/rust-migration/06-conventions.md`](docs/rust-migration/06
 
 **Branching.** Git flow. `develop` is the integration base; work lands on `feature/*`
 branches cut from it. Releases are the maintainer's, from `develop` to `main`.
+
+**The CLI surface as it stands.** `crates/plinth-cli` is a typed parser, and the spelling it
+accepts today is:
+
+```sh
+plinth prepare --input-models-dir DIR --output saturn4-ultra --out-dir DIR [--no-cache]
+```
+
+Parsing deliberately stops before execution policy is assembled, and nothing runs behind it
+yet — so this is the current shape of the flags, not a working command. The flags are not
+settled; they will follow the ladder above rather than constrain it.
 
 **The gate — five commands, all of them, every time.** A four-command gate is how four
 formatting violations reached the integration branch; `--no-fail-fast` is how a single red
