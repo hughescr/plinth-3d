@@ -4,6 +4,56 @@ Empirical measurement only. No design decisions, no production behavior change.
 Branch `census/embed-incidence-2026-08-04`, forked from `codex/embed-zones` at
 `029ced3`. The instrumentation in this commit is throwaway and must never merge.
 
+## ERRATUM (2026-08-05) — read this before any number below {#erratum-2026-08-05}
+
+Everything from *What was measured and why* down to *Caveats the ruling should
+carry* is **superseded**. It is retained verbatim as the historical record of
+what the engine looked like on 2026-08-04; it must not be cited as current.
+The replacement numbers are in
+[Unified census — 2026-08-05](#unified-census-2026-08-05) at the bottom of this
+file, taken at integration merge `81ec3d4` (corpus fixes + contact physics
+together, the first time both have ever been measured in one run).
+
+Four independent reasons the original body is invalid:
+
+1. **The measured formula no longer exists.** `ef081a2`
+   (`feat(support)!: delete embed_inset_mm and both cosine floors; seat model
+   rungs`) deleted `fn embed_inset_mm` and *both* `.abs().max(0.5)` cosine
+   floors, and a source-text guard now enforces their absence. Measurements 1
+   and 3 and headline numbers (a) and (c) characterise a code path that has
+   been removed from production. The floor was also found to have had the
+   opposite of its believed effect — it made the mask *smaller* and the check
+   *stricter* — so the original framing of the risk was wrong as well as stale.
+2. **The Reachability table is superseded.** It reported 4 of 8 models reaching
+   brace/CCO, 1 of them on a borrowed pose. All three of its blocking causes
+   have since been fixed: the `Cylinder`/`make_box` baselines were repaired to
+   carry explicit identity orientation (and `plinth-orient` no longer discards a
+   ratified orientation behind a failed hollow stage), exactly-coincident
+   demand-free regular seats are now coalesced so `DuplicatePhysicalSeat` no
+   longer blocks `make_toed_slab`/`make_raking_blade`/`Cylinder`, and an
+   unclaimable slice hole is now survivable rather than a fatal `OpenSliceSeam`.
+   **7 of 8 models now complete a sealed support run on their own pinned
+   orientation.**
+3. **Every `make_box` measurement row in the original body is invalid, not
+   merely stale.** Those rows were computed under a pose *borrowed from*
+   `make_overhang_table` (a -30 degree rotation that is not `make_box`'s
+   orientation) via `PLINTH_CENSUS_SUBSTITUTE_ORIENT=1`. They describe a
+   geometry that the pipeline never produces for that model. They are not
+   comparable to the 2026-08-05 `make_box` rows, which are native. Any
+   `make_box` row below marked `(subst.)` should be struck, not reconciled.
+4. **The substitution mechanism itself is gone.** `PLINTH_CENSUS_SUBSTITUTE_ORIENT`
+   and its `SUBSTITUTE_ORIENT` donor table were deleted from the harness in
+   `6fe750b` as dead code, since every corpus member now orients natively. The
+   *Harness* run command below, which passes that variable, will no longer work
+   as written; use the command in the 2026-08-05 section.
+
+What *does* survive from the original: the three digests in *Instrumentation is
+result-inert* (`Sphere` / `make_overhang_table` / `make_thin_fin`) still
+reproduce byte-identically at `81ec3d4`, so the instrumentation remains
+result-inert and the contact-physics package moved no committed geometry on the
+models that were reachable before it. See the delta discussion in the
+2026-08-05 section.
+
 ## What was measured and why
 
 `embed_inset_mm(contact_depth, radius, standoff, cosine) = contact_depth + (radius + standoff) / cosine`
@@ -76,6 +126,12 @@ patched into the kernel: `l = norm(p1 - p0)`, `degenerate = l < 1e-9`,
 `dot(a,a).sqrt()` norm, therefore bit-identical to the kernel's branch.
 
 ## Reachability — which models reached which stage
+
+> **SUPERSEDED (2026-08-05).** All three blocking causes below are fixed; 7 of 8
+> models now complete natively. See [ERRATUM](#erratum-2026-08-05) and
+> [Unified census — 2026-08-05](#unified-census-2026-08-05). Every `make_box`
+> row in this document is invalid — it was computed under a borrowed -30 degree
+> pose.
 
 | model | decimate | orient | perception/specialized | initial+CCO | rewire | brace | verdict |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -322,3 +378,244 @@ exact-clearance embed site by its `MemberKind::Stub` filter.
 4. Everything above measures the engine as it stands today; the fact that model
    rungs and CCO model anchors never survive means the floored-cosine formula
    currently has no committed geometry downstream of it on this corpus.
+
+---
+
+## Unified census — 2026-08-05 {#unified-census-2026-08-05}
+
+First run of the census with the corpus fixes and the contact-physics package
+**both** in the tree: integration merge `81ec3d4`
+(`merge: contact-physics package complete`), harness at `6fe750b`. Every prior
+census measured one half or the other.
+
+```
+PLINTH_CENSUS=1 cargo run --release --offline --features census \
+  --example embed_incidence_census -p plinth-support
+```
+
+No `PLINTH_CENSUS_SUBSTITUTE_ORIENT` — the mechanism is deleted. Every model
+below oriented from its own repaired baseline (`orientation=own_pinned` on every
+`MODEL` row).
+
+### Reachability — 7 of 8 native
+
+| model | faces | verdict | routed_contacts | final_live_members | snapshot_digest |
+| --- | ---: | --- | ---: | ---: | ---: |
+| Sphere | 4760 | **OK** | 7 | 15 | 17667468971446251870 |
+| Cylinder | 244 | **OK** | 54 | 119 | 13310185350867878190 |
+| make_box | 12 | **OK** | 11 | 25 | 9657051231007502658 |
+| make_overhang_table | 60 | **OK** | 73 | 261 | 6686599816688114065 |
+| make_toed_slab | 140 | **OK** | 64 | 179 | 11199296506741562956 |
+| make_raking_blade | 24 | **OK** | 32 | 89 | 13278215294653054002 |
+| make_thin_fin | 24 | **OK** | 17 | 41 | 7016743535301716631 |
+| Weeping Treant v1.2 | — | UNREACHABLE | — | — | — |
+
+This is exactly the reachability the corpus-fixes section of `CURRENT-STATUS.md`
+predicts. **No model that was expected to pass failed.**
+
+The single stop, verbatim from the stage-error capture:
+
+```
+Preparation: Perception(PointIndex("kNN work requires 298667520; limit is 100000000"))
+```
+
+That is the `KnnBatchLimits.max_work` cap (FU-8), reproduced to the digit. It is
+a **resource cap, not a geometry defect** — the treant's seam is fixed and it now
+clears perception's slicing; production caps simply do not admit a real mini.
+
+**Digest continuity — five of seven, and two real movements.** `Sphere`,
+`make_overhang_table` and `make_thin_fin` reproduce the digests recorded
+pre-contact-physics in *Instrumentation is result-inert*, byte for byte.
+`Cylinder` (`13310185350867878190`) and `make_box` (`9657051231007502658`) match
+the digests recorded under FU-15.
+
+**`make_toed_slab` and `make_raking_blade` moved.** The
+`support_runner_integration` goldens, last pinned at `414e13f` (corpus-fixes
+era, i.e. before contact physics), disagree with this run:
+
+| model | pinned (pre-contact-physics) | now | delta |
+| --- | --- | --- | --- |
+| make_toed_slab | 65 routed, 184 live, digest `15554091706332339621` | 64 routed, 179 live, digest `4826202191472851835` | -1 routed, -5 live |
+| make_raking_blade | 35 routed, 93 live, digest `6761406004527881770` | 32 routed, 89 live, digest `1709218010932846012` | -3 routed, -4 live |
+
+These are exactly the two models that carry PR-9 contact refusals in the T7
+table below (`make_toed_slab` 6, `make_raking_blade` 5) and the only two with
+`min_rim = 0/8`. The movement is the intended OD-8 consequence — contacts that
+cannot prove an interface are refused, and rewiring redistributes what is left —
+not an unexplained drift. Both models were newly reachable from the corpus
+fixes, so their goldens were pinned in the window between the two packages and
+have never described the contact-physics engine.
+
+`cargo test --workspace --offline` is therefore **RED** at this head: 939 passed,
+1 failed, the failure being
+`public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing`. Re-pinning
+those two goldens is a known, deliberately deferred item — it is a digest-moving
+change and needed this census as its evidence. Do not re-pin them without
+recording the delta above.
+
+The narrower claim that does hold: the contact-physics package moved **no
+geometry on any model that was already reachable before it**.
+
+### T7 — embedded-stub terminal attestation
+
+Per-terminal contact attestation at the initial contact stubs. `min_rim` is the
+worst rim engagement observed on that model, out of 8 sampled rim points.
+
+| model | total | fully_engaged | centreline_outside | min_rim | refused | area_deficit |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Sphere | 7 | 7 | 0 | 8/8 | 0 | 0 |
+| Cylinder | 54 | 34 | 5 | 3/8 | 0 | 6 |
+| make_box | 11 | 5 | 0 | 3/8 | 0 | 0 |
+| make_overhang_table | 84 | 50 | 8 | 3/8 | 0 | 4 |
+| make_toed_slab | 72 | 54 | 2 | 0/8 | 6 | 1 |
+| make_raking_blade | 40 | 24 | 6 | 0/8 | 5 | 1 |
+| make_thin_fin | 18 | 11 | 0 | 3/8 | 0 | 0 |
+| **aggregate** | **286** | **185** | **21** | **0/8** | **11** | **12** |
+
+11 stub terminals are **refused** outright (`make_toed_slab` 6,
+`make_raking_blade` 5) — PR-9 refusals, i.e. ordinary candidate rejections, not
+pipeline failures. Those same two models are the only ones with `min_rim = 0/8`.
+
+### T8 — seat attestation, brace model rungs and CCO model anchors
+
+| model | family | total | fully_engaged | centreline_outside | min_rim | refused | area_deficit |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Cylinder | cco_model_anchor | 1681 | 0 | 1681 | 3/8 | 0 | 533 |
+| make_box | cco_model_anchor | 7 | 0 | 7 | 2/8 | 0 | 2 |
+| make_overhang_table | brace_model_rung | 2 | 2 | 0 | 8/8 | 0 | 0 |
+| make_overhang_table | cco_model_anchor | 1498 | 0 | 1498 | 1/8 | 0 | 19 |
+| **aggregate** | — | **3188** | **2** | **3186** | **1/8** | **0** | **554** |
+
+Attestation is **live for all three contact families** (stub terminal, brace
+model rung, CCO model anchor), and these row counts prove it executes on real
+corpus geometry rather than only on fixtures.
+
+The striking column is `centreline_outside`: **every one of the 3186 CCO
+model-anchor seats has its centreline off the surface patch.** Combined with the
+tournament result below (0 of 3429 anchors ever wins), this is the empirical
+shape of the PR-7 deferral — CCO model-anchor seating is measurably wrong, and
+the only reason it is not a live defect is that no such anchor is ever
+committed. The commit-time tripwire (`6a35d45`) refuses an unattested CCO model
+anchor, so on the day one does win it cannot land silently.
+
+### Area deficits — the print-quality data, RECORDED not adjudicated
+
+**12 stub + 554 CCO model-anchor** contacts carry a contact-area deficit (seated
+area below the ratio the load wants). These are recorded as data for the
+print-quality follow-up; nothing in this package acts on them.
+
+| family | area deficits | of total |
+| --- | ---: | ---: |
+| stub terminal (T7) | 12 | of 286 |
+| CCO model anchor (T8) | 554 | of 3186 |
+| brace model rung (T8) | 0 | of 2 |
+
+> **Correction to an in-flight figure.** The number quoted while this package was
+> being assembled — *"4 stub + 19 CCO area deficits"* — is `make_overhang_table`
+> **alone**, which was the only model reaching CCO when it was taken. The unified
+> corpus figures are `12` and `554`. The growth is entirely reachability:
+> `Cylinder` (533 CCO deficits of 1681 seats) and `make_box` (2 of 7) had never
+> reached the CCO stage natively before this merge. No rule changed; the
+> denominator did.
+
+### Tournament counters — CCO model anchors still never win
+
+| model | anchors attempted | surviving | cco_winner_plate | cco_winner_bifurcate | brace_append_crosslink |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Sphere | 0 | 0 | 6 | 1 | 0 |
+| Cylinder | 1681 | **0** | 48 | 6 | 0 |
+| make_box | 7 | **0** | 8 | 3 | 0 |
+| make_overhang_table | 1741 | **0** | 30 | 43 | 21 |
+| make_toed_slab | 0 | 0 | 23 | 41 | 1 |
+| make_raking_blade | 0 | 0 | 12 | 20 | 0 |
+| make_thin_fin | 0 | 0 | 10 | 7 | 0 |
+| **aggregate** | **3429** | **0** | **137** | **121** | **22** |
+
+**0 of 3429 attempted model anchors survives, on any model.** The original
+census saw this on one model with 1741 attempts; it now holds across three
+models and roughly twice the attempts, so it is a property of the tournament,
+not of `make_overhang_table`. Every committed CCO winner corpus-wide is a plate
+or a bifurcate. This is the tournament-bias question the model-anchor bundle has
+to answer: organic minis (the treant, the PC mini) are precisely the geometry
+that *should* anchor to the model rather than run struts to the plate.
+
+### T1 — brace model-rung candidates
+
+Only `make_overhang_table` generates model rungs at all, and it now generates
+**2** candidate rows where the 2026-08-04 census recorded 8. The populations are
+not comparable: the rung site was rewritten by `ef081a2` (rungs are now *seated*
+— PR-1 — rather than kissing the projected surface point) and by `69ffc43`
+(printability evaluated at the UNSEATED projection point, BLOCKER-3), so what
+counts as a candidate changed.
+
+| i | raw \|cos\| | cos used | raw grazing | L (mm) | radius (mm) | inset1 (mm) | usable (mm) |
+| ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| 0 | 0.431225 | 0.513166 | yes | 4.867688 | 0.500000 | 3.217523 | 1.650165 |
+| 1 | 0.862506 | 0.879755 | no | 4.364047 | 0.500000 | 1.651622 | 2.712425 |
+
+Both are admitted viable, both have `L > 2.50 mm`, neither is over-masked. Note
+that `cos_used > |cos|_raw` on both rows *without* being pinned to `0.5`: the
+effective cosine is now derived from the seat, which is what replaced the floor.
+
+### T3 — over-mask admissions (`seg_clear_one` INFINITY path)
+
+**0 over-mask admissions corpus-wide, out of 53,622 clearance rows** across all
+four `segment_clearance` call sites (up from 25,715 rows in the original
+census). 0 floored-cos rows — the floor is gone — 0 rows with `|cos| >= 0.5`
+over-masked, 0 degenerate-length rows.
+
+3,188 rows are embed-inset rows, matching the T8 seat count exactly: every
+seated contact is also clearance-checked. Tightest margins observed:
+
+| site | embed-inset rows | min usable (mm) | min usable fraction |
+| --- | ---: | ---: | ---: |
+| cco_candidate_clearance (make_overhang_table) | 1498 | 0.082556 | 0.120952 |
+| brace_candidate_clearance (make_overhang_table) | 2 | 1.650165 | 0.339004 |
+| cco_candidate_clearance (make_box) | 7 | 2.393403 | 0.799559 |
+| cco_candidate_clearance (Cylinder) | 1681 | 2.754595 | 0.821141 |
+
+The 12.1% worst case is tighter than the original census's 19.1%, and it is a
+CCO seat — but it still retains usable segment, so the INFINITY path remains
+untaken.
+
+### T4 — tip radii and local surface curvature
+
+286 contacts. Radii remain bimodal at the two ratified endpoints: `0.2 mm`
+dominates, `1.0 mm` accounts for most of the rest, with load-derived
+intermediates in between.
+
+| model | contacts | flat | convex | concave | saddle |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Sphere | 7 | 0 | 7 | 0 | 0 |
+| Cylinder | 54 | 51 | 3 | 0 | 0 |
+| make_box | 11 | 11 | 0 | 0 | 0 |
+| make_overhang_table | 84 | 84 | 0 | 0 | 0 |
+| make_toed_slab | 72 | 64 | 8 | 0 | 0 |
+| make_raking_blade | 40 | 30 | 1 | 8 | 1 |
+| make_thin_fin | 18 | 18 | 0 | 0 | 0 |
+| **aggregate** | **286** | **258** | **19** | **8** | **1** |
+
+The corpus is still overwhelmingly planar (258/286 flat), but it is no longer
+*only* planar: `make_raking_blade` contributes the corpus's only concave (8) and
+saddle (1) seats, and `Sphere`/`make_toed_slab` contribute convex ones. Some
+curvature coverage exists now where the original census had none — but 9
+non-flat-non-convex seats on one procedural fixture is thin, and the real
+curvature evidence still waits on the treant.
+
+### Caveats this census carries
+
+1. **The treant still contributes nothing.** The most representative model — and
+   the one whose organic geometry most needs model anchors and curved seats — is
+   stopped by a resource cap. Until it runs, every conclusion here rests on
+   procedural fixtures plus two primitives.
+2. **CCO model-anchor seating is unvalidated at scale.** 3186 seats, 3186
+   centreline-outside, 0 committed. The numbers are large enough to look like
+   evidence and are not: nothing downstream consumes them.
+3. **`make_toed_slab`'s freeze is provisional** pending the vertex-probe vs
+   interior-probe parity investigation; its 179 members and its digest here
+   inherit that provisional status. Its `support_runner_integration` golden is
+   also stale (see *Digest continuity* above), so it is doubly unpinned right
+   now — re-pin it only after the parity investigation settles, or the re-pin
+   will have to be redone.
+4. **Area deficits are recorded, not ruled on.** 566 deficits across two families
+   is a print-quality question this package deliberately does not answer.
