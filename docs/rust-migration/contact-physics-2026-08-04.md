@@ -3,13 +3,18 @@
 Status: **PR-1, PR-2, PR-3, PR-4, PR-6, PR-8, PR-9, OD-9 and MAJOR-7 landed.
 PR-5 and PR-7 are NOT landed and are reserved — see *What is not done*.**
 
-**The owner's contact-attestation requirement is MET for the initial-contact
-stub family** — every routed support tip in the engine — and the OD-9
-exterior-ness screen is live. See *Attestation stage* below.
+**The owner's contact-attestation requirement is MET for ALL THREE families
+that mint a model contact** — the initial-contact stub (every routed support
+tip), the brace model rung, and the CCO model anchor — and the OD-9
+exterior-ness screen is live at every one of their seats. See *Attestation
+stage* and *Finisher stage* below.
 
-Repair pass (2026-08-04, stage 1 of 2) resolved re-review findings BLOCKER-2,
+Repair pass (2026-08-04, stage 1 of 3) resolved re-review findings BLOCKER-2,
 BLOCKER-3, MAJOR-4, MAJOR-5, MAJOR-6 and MAJOR-8; see *Repair pass*.
-Attestation stage (stage 2 of 2) landed PR-8, PR-9, OD-9 and MAJOR-7.
+Attestation stage (stage 2 of 3) landed PR-8, PR-9, OD-9 and MAJOR-7 for the
+stub family. Finisher stage (stage 3 of 3) extended the attestation, the OD-9
+screen and the digest chain to the two touching families, and resolved the
+final review's F1, F2 and F3.
 
 Authority: owner ruling **OD-8** (2026-08-04) — behaviour preservation is
 lifted, correctness and measured physics govern, and every behavioural
@@ -390,7 +395,7 @@ open question OQ-11.
 
 ---
 
-## Repair pass (2026-08-04, stage 1 of 2)
+## Repair pass (2026-08-04, stage 1 of 3)
 
 Six findings from the independent Phase B-2 re-review, resolved on the same
 branch. Every behavioural item was measured with the same census harness before
@@ -431,7 +436,7 @@ left stable so that stage can extend it compatibly.
 
 ---
 
-## Attestation stage (2026-08-04, stage 2 of 2)
+## Attestation stage (2026-08-04, stage 2 of 3)
 
 ### PR-8 `AFFIRMATIVE_CONTACT_ATTESTATION` — LANDED
 
@@ -672,6 +677,141 @@ turning the deficit into a silent support deletion.
 
 ---
 
+## Finisher stage (2026-08-04, stage 3 of 3) — all three families attested
+
+The attestation stage covered the initial-contact stub family only, and
+recorded the other two as "attested only where they exist". The owner RULED
+that the package delivers OD-9 and an attestation for **all three** families
+that mint a model contact before merge — both kinds met literally. This stage
+is that ruling.
+
+### The shared entry point
+
+`designed_embed::attest_seats_batch` attests a family that proposes CANDIDATE
+geometry rather than a minted forest member. It delegates to
+`attest_members_batch` — literally the same two batched native calls, one
+`inside` for every OD-9 probe and one `penetration_intervals_batch_bounded` for
+every connectivity row — over provisional members built from the candidate.
+That was already possible by construction: `attest_members_batch` is
+member-INDEXED rather than key-indexed precisely so provisional geometry can be
+validated without minting forgeable forest keys.
+
+Cost stays a fixed pair of native calls per stage, never per candidate, and the
+structural gate now counts the call sites per family.
+
+### (a) The brace model rung — attested and DROPPED on refusal
+
+`gather_candidates` gathers one seat row per surviving rung candidate and
+attests the whole pass in one batch, riding the same stage boundary as the
+`project` and `sphere_breach` batches already there. Both verdicts drop the
+candidate. That is this family's form of quarantine: the rung never entered the
+forest, so there is nothing to quarantine and nothing to fail (OD-4/PR-9), and
+it is exactly what the PR-3 refusal above it already does.
+
+Dropping on `NotAttached` is correct HERE because PR-1 genuinely seats this
+family, so an unattached rung is a real defect rather than a missing rule. The
+corpus agrees: both surviving rungs attest at **8/8 rim rays plus centreline**,
+`r_eff` = the full 0.5 mm radius, zero refusals, zero area deficits. PR-1
+seating is now measured rather than argued.
+
+### (b) The CCO model anchor — attested, and the two verdicts DIFFER
+
+`grow_terminal_inner` and `evaluate_rewire_candidates` each attest, in one batch
+per terminal (or per rewire batch), exactly the seats that survived the foot
+ball — the same per-terminal granularity this family's `cast_rays` and
+`sphere_breach` batches already use. The provisional member is the strut
+`apply_model_anchor` would mint, carrying the terminal's **real routed
+`carried_mm2`**, so MAJOR-7's area law is live for this family too.
+
+**The two verdicts are dispositioned differently, and the asymmetry is the
+decision this stage makes:**
+
+| verdict | disposition | why |
+| --- | --- | --- |
+| OD-9 `BuriedSurface` | **REFUSE** → the existing `AnchorFootOutcome::Refused` channel | burial is a statement about the SURFACE and is true whatever the seating rule is |
+| PR-8 `NotAttached` | **RECORD**, digested, not refused | it is a statement about the SEATING RULE, and this family is deliberately unseated because PR-7 is not landed |
+
+Refusing an unseated anchor for failing a connectivity witness would land PR-7's
+family-killing consequence **without landing PR-7** — a family-killing
+restriction arriving as an ACCIDENT of a verification change rather than as a
+designed, measured physics rule. That is what OD-8 forbids, it is the same
+mistake BLOCKER-3 was raised for one rule earlier, and PR-7's revival is
+explicitly reserved to the owner under OQ-10. It is also the same disposition,
+for the same reason, that PR-8 already gives an area deficit: measured,
+digested, referred to the owner.
+
+**That call is now evidence rather than a hedge.** The measurement is the answer
+OQ-10 was missing:
+
+| family | seats attested | fully engaged | centreline outside | min rim engaged | refused | area deficits |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| brace model rung | 2 | **2** | 0 | 8/8 | 0 | 0 |
+| CCO model anchor | 1498 | **0** | **1498** | 1/8 | 0 | 19 |
+
+All 1498 attested anchor seats on `make_overhang_table` report
+`centreline = false` with 1–3 of 8 rim rays engaged. **That is the unseated-kiss
+signature, quantified**: the anchor's rootward end sits exactly on the boundary
+plane, so parity classifies its centreline as outside and only grazing rim rays
+reach the solid. The engine now produces the evidence for OQ-10 instead of the
+record arguing it. The 19 area deficits are PR-4 grading a family that had never
+been graded, now that it carries real load.
+
+Two synthetic CCO unit fixtures approach their face perpendicularly and would be
+refused under the naive reading — which is how the disposition question was
+discovered rather than assumed.
+
+### The digest chain
+
+`PreparedSupportDigests::contact_attestation` remains the stub family's sealed
+head. The run now EXTENDS it once per stage that mints a model contact:
+
+```
+contact_attestation  (stub, sealed at preparation)
+  -> routing CCO model anchors      (tag 0x10)
+  -> rewire CCO model anchors       (tag 0x11)
+  -> brace model rungs              (tag 0x12)
+```
+
+The head is carried on the run state and **recomputed from its own links** at
+the brace integrity check, so a state assembled with a stale or missing family
+transcript fails closed (`ContactAttestationChainMismatch`).
+
+It is chained rather than folded into the sealed CCO transcript deliberately.
+The transcript records what the attestation **did** — a refusal shows up as an
+`anchor_refusals` row. The chain records that it **ran** and **what it
+measured**. Those regress independently, which is the same argument that keeps
+the stub family's transcript out of the forest digest, and it matters more here:
+on this corpus neither touching family wins a tournament, so deleting either
+attestation entirely would move no member, no digest and no census cell.
+
+### Acceptance
+
+The interpenetrating pair is now all three families' fixture.
+`f3_a_buried_seat_is_refused_and_an_exterior_seat_attests_for_both_touching_families`
+drives one batch carrying a rung on `A`'s buried `+x` face at `x = 4` and an
+anchor on `B`'s exterior face at `x = 6`; both rows come from one helper,
+because the families are geometrically indistinguishable at the seat. It asserts
+the parity facts FIRST, asserts that the buried seat's connectivity witness is
+TOTAL (the trap OD-9 exists for), and then SWAPS the families across the two
+seats, so a screen that only worked for whichever family happened to be buried
+cannot pass. Two siblings pin that the transcript can see a refusal and that six
+seats cost one kernel call.
+
+### MEASURED CORPUS DELTA — ZERO, outside the new instrument
+
+A full `--features census` run before and after this stage is **byte-identical
+apart from the new T8 seat-attestation table**. Every `snapshot_digest`,
+`routed_contacts`, `final_live_members`, `T1a_rung_outcome admitted_viable = 2`
+and `T2_cco_anchor_surviving = 0` is unchanged. **Zero attestation refusals of
+any existing corpus contact**, in any of the three families. Neither touching
+family wins a tournament, and that stayed true.
+
+Gates at the finisher tip, default AND `--all-features`: **924 / 925 tests
+green** (921 / 922 before; +3 are the new F3 fixtures),
+`cargo clippy --workspace --all-targets` clean both ways.
+
+---
+
 ## What is not done
 
 * **PR-5 `MASK_INTERIOR_SINGLE_CONTACT`** — NOT landed. `designed_embed` still
@@ -692,15 +832,6 @@ turning the deficit into a silent support deletion.
   marginal change but the introduction of a support class the corpus has never
   printed. Landing it inside this stage would have been exactly the silent
   geometry change OD-8 forbids. See *Open question OQ-10*.
-
-* **The touching-foot families are attested only where they exist.** PR-8
-  covers the initial-contact stub family, which is every routed support tip.
-  The brace model rung is the only other family that mints a model contact on
-  the reachable corpus, and the census records `brace_append_model_rung` firing
-  **zero** times there, so there is no touching-foot contact on the corpus to
-  attest. The rung path is governed by PR-1/PR-2/PR-3 and now by PR-9; extending
-  the batched attestation to it becomes exercisable when a corpus model actually
-  places one.
 
 Consequently `initial.rs` still seats stubs at a flat depth (PR-1 seating for
 the stub family was not in scope and would move geometry), `rewire.rs` and the
@@ -728,6 +859,25 @@ stamps a global contact depth.
 * **OQ-10 — revive the CCO model-anchor family?** Reviving it would introduce a
   support class that has fired zero times on the whole corpus, directly scarring
   the mini. It is a print-consequence tradeoff, not a physics question.
+
+  **The finisher stage supplies the measurement this question was missing.** All
+  **1498** attested anchor seats on `make_overhang_table` report
+  `centreline = false` with 1–3 of 8 rim rays engaged, and 19 of them fail PR-4's
+  area law on the interface they actually have. So the family is not merely
+  unproven, it is measurably a KISS: without PR-7 its struts would fuse to the
+  mini by voxel rounding, which is the exact failure the owner named. The
+  question is therefore sharper than before — revive the family WITH PR-7
+  seating (scar the mini deliberately, with a proven interface), or leave it
+  dead. What is no longer available is reviving it unseated.
+
+* **OQ-11 — one narrative figure in this record is unreproducible.** PR-8's
+  first design call cites "refused 22 of 32 reachable corpus contacts" for the
+  DISCARDED placement-depth-less-a-margin extent. That variant was never
+  instrumented, so the committed census has no counter for it and the figure
+  cannot be checked (see *Record-integrity audit*). Should the next pass
+  re-measure it — the variant is a two-line change to the claimed extent — or
+  strike the number and keep only the geometric argument, which stands on its
+  own (`r^2 / 2R` rim shallowing on a convex seat)?
 
 **Follow-ups recorded:** FU-CONTACT-1 (the `tip_radius_max_legacy_mm` clamp is
 the real limit on the largest-tip contacts, not a contact defect — now
