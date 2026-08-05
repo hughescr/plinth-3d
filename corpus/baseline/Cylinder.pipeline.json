@@ -27,6 +27,15 @@
       "seconds": 8.1,
       "report": {
         "components": 1,
+        "orientation": {
+          "axis": [
+            1,
+            0,
+            0
+          ],
+          "deg": 0
+        },
+        "orientation_provenance": "recovered-from-oriented-solid-artifact",
         "oriented": true,
         "hollow_attempted": true,
         "solid_ml": 21.2,
