@@ -2812,6 +2812,39 @@ fn apply_plate(
     Ok(true)
 }
 
+/// OD-7 / PR-6 — which model-contact declaration the UPPER half of a
+/// bifurcated host inherits.
+///
+/// `apply_bifurcation` splits a host at `junction` into a lower half
+/// (`p0..junction`, which keeps the TERMINALWARD end) and an `upper` half
+/// (`junction..p1`, which keeps the ROOTWARD end). The contact declaration
+/// follows the end that PHYSICALLY owns the contact, so `upper` inherits only
+/// a `Rootward` declaration.
+///
+/// `upper.p0` is the junction: a mid-air point on the host's own axis. It is
+/// not on the model surface and carries no contact. Inheriting the host's
+/// declaration verbatim -- as this did before Phase B-2 -- asserted a
+/// Terminalward contact on BOTH halves, and `upper`'s claim was simply false.
+///
+/// Every downstream consumer then acts on that falsehood: `exact_clearance_rows`
+/// projects `upper.p0` onto the surface and synthesises a mask from a normal at
+/// a point the member never touches; `lower::is_embedded_taper` classifies
+/// `upper` as a ContactTaper and stamps a contact depth into its wire record;
+/// and the endpoint witness demands a connectivity proof for an endpoint
+/// nowhere near the solid, turning a silent falsehood into the refusal of a
+/// legitimate member.
+///
+/// The bug is latent rather than live on today's corpus: the only members
+/// carrying `Terminalward` are initial contact stubs, and stubs are excluded
+/// from bifurcation hosts by `HostCache::rebuild`.
+const fn inherited_upper_contact_end(host: Option<ContactEnd>) -> Option<ContactEnd> {
+    match host {
+        Some(ContactEnd::Rootward) => Some(ContactEnd::Rootward),
+        // The lower half keeps a Terminalward contact; the upper half has none.
+        Some(ContactEnd::Terminalward) | None => None,
+    }
+}
+
 fn apply_bifurcation(
     forest: &mut Forest,
     request: &TerminalCcoRequest,
@@ -2867,7 +2900,7 @@ fn apply_bifurcation(
         r1_mm: host.rootward_radius_mm(),
         kind: host.kind().clone(),
         owner: host.owner().clone(),
-        model_contact_end: host.model_contact_end(),
+        model_contact_end: inherited_upper_contact_end(host.model_contact_end()),
         carried_mm2: host.carried_mm2(),
     }));
     forest.set_parent(upper, old_parent)?;
@@ -2880,6 +2913,18 @@ fn apply_bifurcation(
     if host.model_contact_end() == Some(ContactEnd::Rootward) {
         forest.set_model_contact_end(host_key, None)?;
     }
+    // The split partitions the declaration; it never duplicates it. `host_key`
+    // keeps a Terminalward contact (it still owns p0), `upper` keeps a
+    // Rootward one (it still owns p1), and neither keeps the other's.
+    debug_assert!(
+        !(forest
+            .member(host_key)
+            .is_some_and(|lower| lower.model_contact_end().is_some())
+            && forest
+                .member(upper)
+                .is_some_and(|member| member.model_contact_end().is_some())),
+        "a bifurcation must not leave both halves declaring a model contact"
+    );
     forest.set_parent(host_key, Some(upper))?;
     let child = forest.add_member(member(
         se,
@@ -4192,6 +4237,60 @@ mod tests {
         assert!((result[0] - 1.002_486_160_390_787_5).abs() < 1e-15);
         assert!((result[1] - 8.259_149_868_747_48).abs() < 1e-15);
         assert_eq!(result[2], 0.0);
+    }
+
+    /// OD-7 / PR-6: a bifurcation PARTITIONS the model-contact declaration
+    /// between the two halves; it must never duplicate it.
+    ///
+    /// This pins `inherited_upper_contact_end`, which IS the production
+    /// decision `apply_bifurcation` makes rather than a restatement of it. The
+    /// rule is pinned here rather than through a full `apply_bifurcation` run
+    /// because driving that path needs a host that is simultaneously
+    /// bifurcation-feasible AND carrying a Terminalward declaration, and the
+    /// engine's own invariants exclude that combination today: the only
+    /// Terminalward members are initial contact stubs, and stubs are barred
+    /// from being bifurcation hosts. That exclusion is exactly why the bug was
+    /// latent, and it is equally why an end-to-end fixture cannot reach it.
+    #[test]
+    fn bifurcation_partitions_the_model_contact_declaration() {
+        // The upper half owns junction..p1, i.e. the ROOTWARD end.
+        assert_eq!(
+            inherited_upper_contact_end(Some(ContactEnd::Rootward)),
+            Some(ContactEnd::Rootward)
+        );
+        // The lower half owns p0..junction and keeps a Terminalward contact;
+        // the upper half's p0 is mid-air and carries none.
+        assert_eq!(
+            inherited_upper_contact_end(Some(ContactEnd::Terminalward)),
+            None
+        );
+        assert_eq!(inherited_upper_contact_end(None), None);
+
+        // Partitioned, never duplicated: for every possible host declaration at
+        // most one half ends up declaring a contact, and a contactless host
+        // never gains one.
+        for host in [
+            None,
+            Some(ContactEnd::Terminalward),
+            Some(ContactEnd::Rootward),
+        ] {
+            let upper = inherited_upper_contact_end(host);
+            let lower = match host {
+                // Mirrors `set_model_contact_end(host_key, None)` in
+                // `apply_bifurcation`, which clears Rootward from the lower
+                // half because the lower half no longer owns p1.
+                Some(ContactEnd::Rootward) => None,
+                other => other,
+            };
+            assert!(
+                !(upper.is_some() && lower.is_some()),
+                "host {host:?} left both halves declaring a contact"
+            );
+            assert!(
+                host.is_some() || (upper.is_none() && lower.is_none()),
+                "a contactless host must not gain a declaration"
+            );
+        }
     }
 
     #[test]
