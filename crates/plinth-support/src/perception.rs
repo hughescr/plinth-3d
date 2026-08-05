@@ -815,6 +815,8 @@ pub enum GenericPerceptionError {
     Slice(String),
     #[error("slice layer {layer} contains an open or branched segment seam")]
     OpenSliceSeam { layer: usize },
+    #[error("adequacy probe row {probe_row} contains an open or branched segment seam")]
+    OpenAdequacyProbeSeam { probe_row: usize },
     #[error("slice loop vertex count {required} exceeds cap {limit}")]
     LoopVertexLimit { required: usize, limit: usize },
     #[error("welded minimum vertex count {required} exceeds cap {limit}")]
@@ -931,7 +933,7 @@ pub fn prepare_generic_contacts(
     let mut loop_vertices = 0usize;
     let mut slice_layers = Vec::with_capacity(planes.len());
     for layer in 0..planes.len() {
-        let loops = stitch_layer(layer, sliced.plane(layer))?;
+        let loops = stitch_layer(SliceStitchSite::PrintLayer(layer), sliced.plane(layer))?;
         loop_vertices = loop_vertices
             .checked_add(
                 loops
@@ -1151,8 +1153,30 @@ fn point_key(point: [f64; 2]) -> PointKey {
     )
 }
 
+/// Which caller a `stitch_layer` invocation belongs to.
+///
+/// The two call sites hand `stitch_layer` indices from different spaces: a
+/// print-layer index and an adequacy-probe row. Carrying the space with the
+/// index keeps a raised seam error from claiming a probe row is a layer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SliceStitchSite {
+    PrintLayer(usize),
+    AdequacyProbe(usize),
+}
+
+impl SliceStitchSite {
+    fn open_seam(self) -> GenericPerceptionError {
+        match self {
+            Self::PrintLayer(layer) => GenericPerceptionError::OpenSliceSeam { layer },
+            Self::AdequacyProbe(probe_row) => {
+                GenericPerceptionError::OpenAdequacyProbeSeam { probe_row }
+            }
+        }
+    }
+}
+
 fn stitch_layer(
-    layer: usize,
+    site: SliceStitchSite,
     intersections: &[geom_kernel::PlaneIntersection],
 ) -> Result<Vec<SliceSolid>, GenericPerceptionError> {
     let mut points = BTreeMap::<PointKey, [f64; 2]>::new();
@@ -1175,7 +1199,7 @@ fn stitch_layer(
         adjacency.entry(b).or_default().push(a);
     }
     if adjacency.values().any(|neighbors| neighbors.len() != 2) {
-        return Err(GenericPerceptionError::OpenSliceSeam { layer });
+        return Err(site.open_seam());
     }
     for neighbors in adjacency.values_mut() {
         neighbors.sort_unstable();
@@ -1201,17 +1225,33 @@ fn stitch_layer(
                 (following, current)
             };
             if !unused.remove(&edge) {
-                return Err(GenericPerceptionError::OpenSliceSeam { layer });
+                return Err(site.open_seam());
             }
             previous = current;
             current = following;
         }
         raw.push(keys.into_iter().map(|key| points[&key]).collect());
     }
-    let mut loops = Vec::new();
-    for (index, points_xy) in raw.iter().enumerate() {
+    // Sub-threshold loops are dropped BEFORE the parity count, not after it.
+    // Filtering afterwards let a loop contribute to every other loop's nesting
+    // depth and then vanish from the set hole ownership searches, so depth and
+    // ownership were decided against two different loop sets - a second way to
+    // manufacture a hole no solid can claim.
+    let kept = raw
+        .into_iter()
+        .filter(|points_xy| signed_area(points_xy).abs() >= BIRTH_MIN_AREA_MM2)
+        .collect::<Vec<_>>();
+    let mut loops = Vec::with_capacity(kept.len());
+    for (index, points_xy) in kept.iter().enumerate() {
+        // Still the loop's first vertex, and deliberately so: a strictly
+        // interior probe is the better containment query (see
+        // `interior_probe`), but swapping it in here re-classifies loops on
+        // clean models too and moves frozen digests. Widening the query is
+        // therefore confined to hole ownership, where it can only rescue a
+        // hole the old code refused outright. Normalizing parity itself waits
+        // on the fill-rule work.
         let probe = points_xy[0];
-        let depth = raw
+        let depth = kept
             .iter()
             .enumerate()
             .filter(|(other, polygon)| *other != index && point_in_polygon(probe, polygon))
@@ -1219,9 +1259,6 @@ fn stitch_layer(
         let hole = depth % 2 == 1;
         let mut canonical = canonicalize_loop(points_xy.clone(), hole);
         let area = signed_area(&canonical);
-        if area.abs() < BIRTH_MIN_AREA_MM2 {
-            continue;
-        }
         let desired_positive = !hole;
         if (area > 0.0) != desired_positive {
             canonical.reverse();
@@ -1249,19 +1286,14 @@ fn stitch_layer(
         })
         .collect::<Vec<_>>();
     for hole in loops.into_iter().filter(|loop_| loop_.hole) {
-        let probe = hole.points_xy_mm[0];
-        let owner = solids
-            .iter()
-            .enumerate()
-            .filter(|(_, solid)| point_in_polygon(probe, solid.outer.points_xy_mm()))
-            .min_by(|(_, left), (_, right)| {
-                left.outer
-                    .signed_area_mm2
-                    .abs()
-                    .total_cmp(&right.outer.signed_area_mm2.abs())
-            })
-            .map(|(index, _)| index)
-            .ok_or(GenericPerceptionError::OpenSliceSeam { layer })?;
+        let Some(owner) = hole_owner(&solids, &hole) else {
+            // A hole nothing can claim sits inside another void: every loop
+            // containing it was itself classified a hole. Dropping it leaves
+            // the region void, which is exactly what even-odd parity already
+            // says it is, so the only cost is a bounded, local over-report of
+            // solid area. That is not worth aborting a whole support run for.
+            continue;
+        };
         solids[owner].holes.push(hole);
     }
     for solid in &mut solids {
@@ -1276,6 +1308,169 @@ fn stitch_layer(
         });
     }
     Ok(solids)
+}
+
+/// Assign `hole` to the smallest solid that can claim it.
+///
+/// A sculpt whose sub-objects interpenetrate slices into contours that cross
+/// themselves, and "inside" is undefined for a self-crossing polygon. Even-odd
+/// containment stops being transitive there: a loop can be inside a hole that
+/// is inside a solid, yet test outside that solid. So widen the question
+/// instead of aborting, and let the caller drop what still has no owner.
+///
+/// The first step is the query this function has always run, so a hole the old
+/// code could place is placed identically. Every later step only ever runs
+/// where the old code raised `OpenSliceSeam` and gave up, which is what makes
+/// the whole chain inert on any model that already sliced.
+fn hole_owner(solids: &[SliceSolid], hole: &SliceLoop) -> Option<usize> {
+    let &vertex = hole.points_xy_mm.first()?;
+    if let Some(index) = smallest_solid(solids, |solid| {
+        point_in_polygon(vertex, solid.outer.points_xy_mm())
+    }) {
+        return Some(index);
+    }
+    let probe = interior_probe(&hole.points_xy_mm);
+    if let Some(index) = smallest_solid(solids, |solid| {
+        point_in_polygon(probe, solid.outer.points_xy_mm())
+    }) {
+        return Some(index);
+    }
+    if let Some(index) = smallest_solid(solids, |solid| {
+        hole.points_xy_mm
+            .iter()
+            .any(|point| point_in_polygon(*point, solid.outer.points_xy_mm()))
+    }) {
+        return Some(index);
+    }
+    let bounds = bounding_box(&hole.points_xy_mm)?;
+    smallest_solid(solids, |solid| {
+        bounding_box(solid.outer.points_xy_mm()).is_some_and(|outer| box_contains(outer, bounds))
+    })
+}
+
+/// The smallest-area solid satisfying `claims`, ties broken by slice order.
+fn smallest_solid(
+    solids: &[SliceSolid],
+    mut claims: impl FnMut(&SliceSolid) -> bool,
+) -> Option<usize> {
+    solids
+        .iter()
+        .enumerate()
+        .filter(|(_, solid)| claims(solid))
+        .min_by(|(_, left), (_, right)| {
+            left.outer
+                .signed_area_mm2
+                .abs()
+                .total_cmp(&right.outer.signed_area_mm2.abs())
+        })
+        .map(|(index, _)| index)
+}
+
+/// `[min_x, min_y, max_x, max_y]` over `points`.
+fn bounding_box(points: &[[f64; 2]]) -> Option<[f64; 4]> {
+    let first = points.first()?;
+    Some(
+        points
+            .iter()
+            .fold([first[0], first[1], first[0], first[1]], |bounds, point| {
+                [
+                    bounds[0].min(point[0]),
+                    bounds[1].min(point[1]),
+                    bounds[2].max(point[0]),
+                    bounds[3].max(point[1]),
+                ]
+            }),
+    )
+}
+
+const fn box_contains(outer: [f64; 4], inner: [f64; 4]) -> bool {
+    outer[0] <= inner[0] && outer[1] <= inner[1] && outer[2] >= inner[2] && outer[3] >= inner[3]
+}
+
+/// How many of a loop's longest edges may seed an interior probe.
+const INTERIOR_PROBE_EDGES: usize = 8;
+/// Inward offsets, as a fraction of the seeding edge's length, tried in order.
+const INTERIOR_PROBE_OFFSETS: [f64; 5] = [0.5, 0.125, 0.031_25, 1.0e-3, 1.0e-5];
+
+/// A point strictly inside `polygon` under the even-odd rule.
+///
+/// Anchoring a containment query on a contour vertex is boundary-degenerate:
+/// the vertex lies exactly ON its own loop, and in a tangle it can sit under a
+/// micron from a neighbouring loop's boundary, where `point_in_polygon` has no
+/// defined answer. Prefer the area centroid, fall back to inward offsets from
+/// the longest edges, and only then to the vertex the query used to use.
+///
+/// Only `hole_owner` calls this, and only after the legacy vertex query has
+/// already failed. Nesting parity still runs on the vertex: promoting this
+/// probe there re-decides hole-versus-solid on clean models as well and is
+/// gated behind the fill-rule normalization work.
+fn interior_probe(polygon: &[[f64; 2]]) -> [f64; 2] {
+    let fallback = polygon.first().copied().unwrap_or([0.0, 0.0]);
+    if polygon.len() < 3 {
+        return fallback;
+    }
+    let area = signed_area(polygon);
+    if let Some(centroid) = area_centroid(polygon, area) {
+        if point_in_polygon(centroid, polygon) {
+            return centroid;
+        }
+    }
+    // Interior lies to the left of `a -> b` exactly when the loop winds
+    // counter-clockwise, i.e. when its signed area is positive.
+    let inward = if area < 0.0 { -1.0 } else { 1.0 };
+    let mut edges = (0..polygon.len())
+        .map(|index| {
+            let a = polygon[index];
+            let b = polygon[(index + 1) % polygon.len()];
+            (index, (b[0] - a[0]).hypot(b[1] - a[1]))
+        })
+        .collect::<Vec<_>>();
+    edges.sort_by(|(left_index, left_length), (right_index, right_length)| {
+        right_length
+            .total_cmp(left_length)
+            .then(left_index.cmp(right_index))
+    });
+    for &(index, length) in edges.iter().take(INTERIOR_PROBE_EDGES) {
+        if !(length.is_finite() && length > 0.0) {
+            break;
+        }
+        let a = polygon[index];
+        let b = polygon[(index + 1) % polygon.len()];
+        let midpoint = [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5];
+        let normal = [
+            -inward * (b[1] - a[1]) / length,
+            inward * (b[0] - a[0]) / length,
+        ];
+        for offset in INTERIOR_PROBE_OFFSETS {
+            let step = offset * length;
+            let candidate = [
+                midpoint[0] + normal[0] * step,
+                midpoint[1] + normal[1] * step,
+            ];
+            if point_in_polygon(candidate, polygon) {
+                return candidate;
+            }
+        }
+    }
+    fallback
+}
+
+/// The area centroid of `polygon`, or `None` when it is degenerate.
+fn area_centroid(polygon: &[[f64; 2]], area: f64) -> Option<[f64; 2]> {
+    if area == 0.0 || !area.is_finite() {
+        return None;
+    }
+    let mut moment = [0.0f64; 2];
+    for index in 0..polygon.len() {
+        let a = polygon[index];
+        let b = polygon[(index + 1) % polygon.len()];
+        let cross = a[0] * b[1] - b[0] * a[1];
+        moment[0] += (a[0] + b[0]) * cross;
+        moment[1] += (a[1] + b[1]) * cross;
+    }
+    let scale = 1.0 / (6.0 * area);
+    let centroid = [moment[0] * scale, moment[1] * scale];
+    (centroid[0].is_finite() && centroid[1].is_finite()).then_some(centroid)
 }
 
 fn canonicalize_loop(mut points: Vec<[f64; 2]>, _hole: bool) -> Vec<[f64; 2]> {
@@ -1776,7 +1971,10 @@ fn find_local_minima(
             .powi(2);
     let mut adequate = vec![false; minima.len()];
     for (probe_row, (minimum_index, minimum)) in suspects.into_iter().enumerate() {
-        let solids = stitch_layer(probe_row, adequacy_slices.plane(probe_row))?;
+        let solids = stitch_layer(
+            SliceStitchSite::AdequacyProbe(probe_row),
+            adequacy_slices.plane(probe_row),
+        )?;
         let point = [minimum.position_mm[0], minimum.position_mm[1]];
         let carried = carried_outer_area(&solids, point);
         adequate[minimum_index] = carried >= threshold;
@@ -3040,7 +3238,7 @@ mod tests {
             // edge owners. Loop assembly owns this deterministic dedup.
             edge(4, [2.0, 0.0], [0.0, 0.0]),
         ];
-        let loops = stitch_layer(7, &events).unwrap();
+        let loops = stitch_layer(SliceStitchSite::PrintLayer(7), &events).unwrap();
         assert_eq!(loops.len(), 1);
         assert_eq!(
             loops[0].outer().points_xy_mm(),
@@ -3048,6 +3246,128 @@ mod tests {
         );
         assert_eq!(loops[0].area_mm2(), 4.0);
         assert!(loops[0].holes().is_empty());
+    }
+
+    /// A self-crossing outer contour makes even-odd containment intransitive:
+    /// the island is inside the middle loop, the middle loop is inside the
+    /// outer loop, and yet the island tests OUTSIDE the outer loop because it
+    /// lands in the outer loop's doubly-covered lobe. Parity therefore calls
+    /// the island a hole that no solid contains. That used to abort the entire
+    /// support run with `OpenSliceSeam`; the stitcher must now hand back
+    /// solids.
+    #[test]
+    fn self_crossing_outer_contour_still_yields_solids_not_a_seam_error() {
+        use geom_kernel::{PlaneIntersection, PlaneIntersectionKind};
+        let mut face_id = 0u32;
+        let mut ring = |points: &[[f64; 2]]| {
+            (0..points.len())
+                .map(|index| {
+                    let a = points[index];
+                    let b = points[(index + 1) % points.len()];
+                    let event = PlaneIntersection {
+                        face_id,
+                        kind: PlaneIntersectionKind::Basic,
+                        segment: [[a[0], a[1], 0.5], [b[0], b[1], 0.5]],
+                    };
+                    face_id += 1;
+                    event
+                })
+                .collect::<Vec<_>>()
+        };
+        // Outer: one stroke that folds back over itself, so edge (6,0)-(6,4)
+        // crosses edge (2,2)-(8,2) at (6,2) and the block x in [2,6],
+        // y in [2,4] is covered twice - even-odd "outside".
+        let mut events = ring(&[
+            [0.0, 0.0],
+            [6.0, 0.0],
+            [6.0, 4.0],
+            [2.0, 4.0],
+            [2.0, 2.0],
+            [8.0, 2.0],
+            [8.0, 6.0],
+            [0.0, 6.0],
+        ]);
+        // Middle: straddles the fold. Its interior probe lands below y = 2, so
+        // parity puts it inside the outer loop - depth 1, a hole.
+        events.extend(ring(&[[3.0, 0.2], [5.0, 0.2], [5.0, 2.4], [3.0, 2.4]]));
+        // Island: wholly inside the middle loop, but inside the doubly-covered
+        // block, so it tests outside the outer loop - depth 1, also a hole,
+        // and no solid contains any of its points.
+        events.extend(ring(&[[3.4, 2.05], [4.6, 2.05], [4.6, 2.35], [3.4, 2.35]]));
+
+        let solids = stitch_layer(SliceStitchSite::PrintLayer(419), &events)
+            .expect("a self-crossing contour is survivable, not a seam violation");
+        assert_eq!(solids.len(), 1);
+        assert_eq!(solids[0].outer().signed_area_mm2(), 52.0);
+        // Both holes are claimed: the middle one by direct containment, the
+        // island by the bounding-box fallback.
+        assert_eq!(solids[0].holes().len(), 2);
+        let areas = solids[0]
+            .holes()
+            .iter()
+            .map(|hole| (hole.signed_area_mm2() * 1.0e6).round() / 1.0e6)
+            .collect::<Vec<_>>();
+        assert_eq!(areas, vec![-4.4, -0.36]);
+    }
+
+    #[test]
+    fn a_hole_no_solid_can_reach_is_discarded_rather_than_raised() {
+        let square = |x: f64, y: f64, size: f64| {
+            vec![[x, y], [x + size, y], [x + size, y + size], [x, y + size]]
+        };
+        let solid = SliceSolid {
+            outer: SliceLoop {
+                points_xy_mm: square(0.0, 0.0, 1.0),
+                signed_area_mm2: 1.0,
+                hole: false,
+            },
+            holes: Vec::new(),
+        };
+        let reachable = SliceLoop {
+            points_xy_mm: square(0.2, 0.2, 0.4),
+            signed_area_mm2: -0.16,
+            hole: true,
+        };
+        let unreachable = SliceLoop {
+            points_xy_mm: square(10.0, 10.0, 0.4),
+            signed_area_mm2: -0.16,
+            hole: true,
+        };
+        let solids = std::slice::from_ref(&solid);
+        assert_eq!(hole_owner(solids, &reachable), Some(0));
+        assert_eq!(hole_owner(solids, &unreachable), None);
+    }
+
+    #[test]
+    fn interior_probe_leaves_the_boundary_even_when_the_centroid_does_not_land_inside() {
+        // A C-shape: the area centroid falls in the notch, outside the loop.
+        let c_shape = [
+            [0.0, 0.0],
+            [3.0, 0.0],
+            [3.0, 1.0],
+            [1.0, 1.0],
+            [1.0, 2.0],
+            [3.0, 2.0],
+            [3.0, 3.0],
+            [0.0, 3.0],
+        ];
+        let centroid = area_centroid(&c_shape, signed_area(&c_shape)).expect("non-degenerate");
+        assert!(!point_in_polygon(centroid, &c_shape));
+        let probe = interior_probe(&c_shape);
+        assert!(point_in_polygon(probe, &c_shape));
+        assert!(c_shape.iter().all(|vertex| *vertex != probe));
+    }
+
+    #[test]
+    fn an_adequacy_probe_seam_no_longer_masquerades_as_a_print_layer() {
+        assert_eq!(
+            SliceStitchSite::PrintLayer(9).open_seam(),
+            GenericPerceptionError::OpenSliceSeam { layer: 9 }
+        );
+        assert_eq!(
+            SliceStitchSite::AdequacyProbe(9).open_seam(),
+            GenericPerceptionError::OpenAdequacyProbeSeam { probe_row: 9 }
+        );
     }
 
     #[test]
