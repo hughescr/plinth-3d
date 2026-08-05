@@ -3,7 +3,7 @@ use std::{collections::BTreeSet, path::PathBuf};
 use plinth_core::{LayerPlan, PositiveFinite};
 use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
 use plinth_hollow::{HollowedModel, SolidDecisionReason};
-use plinth_mesh::make_overhang_table;
+use plinth_mesh::{make_overhang_table, make_raking_blade, make_toed_slab, Mesh};
 use plinth_orient::{run as run_orientation, OrientRequest, PinnedBaseline};
 use plinth_support::{
     run_support, CoverageGap, CoverageMeasurementLimits, CoverageMeasurementRequest,
@@ -35,6 +35,99 @@ fn hollowed_overhang_table() -> HollowedModel {
     let (mesh, orientation) = oriented.into_parts();
     HollowedModel::solid_decision(mesh, orientation, SolidDecisionReason::BelowThreshold)
         .expect("solid decision handoff")
+}
+
+fn hollowed_corpus_model(mesh: Mesh, baseline: &str) -> HollowedModel {
+    let budget =
+        DecimationBudget::ratified_default(ProbeConfig::new(1.0, 64 * 1024 * 1024, 10_000.0))
+            .expect("ratified decimation budget");
+    let decimated = run_decimation(&mesh, budget)
+        .expect("decimate procedural corpus model")
+        .into_decimated_model()
+        .expect("print-scale procedural corpus model");
+    let oriented = run_orientation(
+        decimated,
+        &OrientRequest {
+            pinned: PinnedBaseline {
+                pipeline_report: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../corpus/baseline")
+                    .join(format!("{baseline}.pipeline.json")),
+            },
+        },
+    )
+    .expect("orient from checked-in corpus baseline");
+    let (mesh, orientation) = oriented.into_parts();
+    HollowedModel::solid_decision(mesh, orientation, SolidDecisionReason::BelowThreshold)
+        .expect("solid decision handoff")
+}
+
+/// Both models nominate one dyadic cell vertex from two different islands
+/// under their own ratified corpus orientation. Before the terminal
+/// exactly-coincident regular seat coalescing pass, that co-located pair
+/// survived to canonicalization and failed the whole sealed run closed with
+/// `DuplicatePhysicalSeat`, so neither model could reach brace, CCO, or
+/// rewiring at all.
+#[test]
+fn public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing() {
+    let mut failures = Vec::new();
+    for (name, mesh, expected_routed, expected_live, expected_digest) in [
+        (
+            "make_toed_slab",
+            make_toed_slab().expect("procedural toed slab"),
+            65_usize,
+            184_usize,
+            15_554_091_706_332_339_621_u64,
+        ),
+        (
+            "make_raking_blade",
+            make_raking_blade().expect("procedural raking blade"),
+            35,
+            93,
+            6_761_406_004_527_881_770,
+        ),
+    ] {
+        let hollowed = hollowed_corpus_model(mesh, name);
+        let delicacy = vec![0.0; hollowed.mesh().tris().len()];
+        let layers = LayerPlan::new(0.0, vec![0.05; 1_000]).expect("layer plan");
+        let authority = run_support(
+            hollowed,
+            SupportRequest {
+                lift_mm: PositiveFinite::new(5.0).expect("positive lift"),
+            },
+            support_input(&delicacy, &layers),
+        )
+        .unwrap_or_else(|error| panic!("{name} must reach a sealed support run: {error}"));
+        let snapshot = authority
+            .verification_snapshot()
+            .expect("borrow sealed verification snapshot");
+        snapshot.validate_integrity().expect("snapshot integrity");
+
+        let mut identities = BTreeSet::new();
+        let mut seats = BTreeSet::new();
+        for contact in snapshot.routed_contacts() {
+            assert!(identities.insert(contact.physical_contact_id()));
+            seats.insert(contact.position_mm().map(f64::to_bits));
+        }
+        let actual = (
+            identities.len(),
+            snapshot.final_live_members().count(),
+            snapshot.digest(),
+        );
+        if actual != (expected_routed, expected_live, expected_digest)
+            || seats.len() != identities.len()
+        {
+            failures.push(format!(
+                "{name}: actual={actual:?} expected={:?}; distinct_seats={} of {}",
+                (expected_routed, expected_live, expected_digest),
+                seats.len(),
+                identities.len(),
+            ));
+        }
+        authority
+            .into_supported_model()
+            .expect("consume final support authority after verification");
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 fn support_input<'a>(

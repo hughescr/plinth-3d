@@ -1213,6 +1213,13 @@ pub struct SpecializedGateEvidence {
     pub accepted: FrozenSpecializedGateVector,
     pub evaluated_pair_count: usize,
     pub accepted_pair_count: usize,
+    /// Seats removed by the terminal exactly-coincident regular coalescing
+    /// pass.  That pass is canonicalization, not the gated merge tournament,
+    /// so its count is reported separately and never folded into
+    /// `accepted_pair_count`.  Every coalesced seat still commits through
+    /// `commit_merge`, so the sealed digest binds the work through
+    /// `deep_clone_count` and `max_commit_bytes`.
+    pub coalesced_seat_count: usize,
     pub deep_clone_count: usize,
     pub max_commit_bytes: usize,
 }
@@ -2302,6 +2309,106 @@ fn attach_exact_mixed_contacts(
     Ok(attached)
 }
 
+/// Union exactly-coincident demand-free regular seats into one physical seat.
+///
+/// Candidate points are nominated at dyadic cell vertices, and a vertex that
+/// falls on an edge shared by two triangles is produced bit-identically by
+/// both faces' subdivisions.  Candidate dedup is island-scoped by design (each
+/// island keeps its own coverage route), so two islands can legitimately elect
+/// the *same physical tip*.  Neither existing merge machine unions that pair:
+/// `attach_exact_mixed_contacts` handles only regular x specialized, and the
+/// gated tournament refuses demand-free pairs outright.  Without this pass the
+/// duplicate survives to `canonicalize_and_validate` and trips
+/// `DuplicatePhysicalSeat`.
+///
+/// One tip serving several islands is the ratified data model: `WorkingContact`
+/// carries `regular_routes: Vec<RegularContactRoute>` and `commit_merge`
+/// already unions and dedups them.  So this is *canonicalization*, not a
+/// discretionary relocation: it is deliberately not screened through
+/// `evaluate_gate_batch`, because a gate that could refuse it would leave the
+/// duplicate in place and re-trip the error.  It runs immediately before the
+/// terminal gate evaluation, so `gate_not_worse` still audits the result.
+///
+/// The surviving seat is elected deterministically as the smaller
+/// `primary_regular` under `compare_primary_regular`, independent of the two
+/// seats' positions in the working vector.
+fn coalesce_exact_regular_seats(
+    contacts: &mut Vec<WorkingContact>,
+    limits: SpecializedLimits,
+    telemetry: &mut MergeAllocationTelemetry,
+) -> Result<usize, SpecializedError> {
+    let mut coalesced = 0usize;
+    loop {
+        check_merge_pair_limit(contacts.len(), limits.max_merge_pairs)?;
+        let mut chosen = None;
+        'pairs: for left in 0..contacts.len() {
+            for right in left + 1..contacts.len() {
+                if !same_point(contacts[left].position_mm, contacts[right].position_mm) {
+                    continue;
+                }
+                if !contacts[left].demands.is_empty() || !contacts[right].demands.is_empty() {
+                    continue;
+                }
+                let elected = if compare_primary_regular(
+                    contacts[left].primary_regular,
+                    contacts[right].primary_regular,
+                ) == Ordering::Greater
+                {
+                    right
+                } else {
+                    left
+                };
+                let primary = contacts[elected]
+                    .primary_regular
+                    .ok_or(SpecializedError::PrimaryRegularIdentityMismatch)?;
+                chosen = Some(MergeProposal {
+                    left,
+                    right,
+                    representative_component_id: primary.route.component_id,
+                    representative_position_mm: primary.position_mm,
+                    representative_face_id: primary.route.coverage_face_id,
+                    representative_normal: primary.normal,
+                    primary_regular: Some(primary),
+                    seat_provenance: PhysicalSeatProvenance::Regular(primary),
+                    position_mm: primary.position_mm,
+                    normal: primary.normal,
+                });
+                break 'pairs;
+            }
+        }
+        let Some(proposal) = chosen else {
+            break;
+        };
+        let required_iterations = coalesced
+            .checked_add(1)
+            .ok_or(SpecializedError::GateResourceOverflow)?;
+        if required_iterations > limits.max_merge_iterations {
+            return Err(SpecializedError::MergeIterationLimit {
+                required: required_iterations,
+                limit: limits.max_merge_iterations,
+            });
+        }
+        let mut merged = Some(commit_merge(
+            &proposal,
+            contacts,
+            limits.max_merge_commit_bytes,
+            telemetry,
+        )?);
+        let mut next = Vec::with_capacity(contacts.len().saturating_sub(1));
+        for (index, contact) in contacts.drain(..).enumerate() {
+            if index == proposal.left {
+                next.push(merged.take().expect("left index is visited once"));
+            } else if index != proposal.right {
+                next.push(contact);
+            }
+        }
+        next.sort_by(compare_contacts);
+        *contacts = next;
+        coalesced = required_iterations;
+    }
+    Ok(coalesced)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn consolidate(
     contacts: &mut Vec<WorkingContact>,
@@ -2428,6 +2535,12 @@ fn consolidate(
         *contacts = next;
         iterations = required_iterations;
     }
+    // Terminal canonicalization. Placement is load-bearing: running the union
+    // earlier also unblocks the affected models but perturbs the gated
+    // tournament's own ledger and every frozen fixture digest. Running it here
+    // leaves already-covered fixtures byte-identical and still lets the
+    // terminal `gate_not_worse` audit below observe the coalesced result.
+    let coalesced_seat_count = coalesce_exact_regular_seats(contacts, limits, &mut telemetry)?;
     let accepted_vector = evaluate_gate_batch(
         contacts,
         &[],
@@ -2454,6 +2567,7 @@ fn consolidate(
         accepted: accepted_vector,
         evaluated_pair_count: total_proposals,
         accepted_pair_count: iterations,
+        coalesced_seat_count,
         deep_clone_count: telemetry.deep_clone_count,
         max_commit_bytes: telemetry.max_commit_bytes,
     })
@@ -4895,7 +5009,7 @@ mod tests {
     use super::*;
     use geom_kernel::KnnBatchLimits;
     use plinth_core::{Finite, PositiveFinite};
-    use plinth_mesh::{make_overhang_table, make_raking_blade, make_thin_fin};
+    use plinth_mesh::{make_overhang_table, make_raking_blade, make_thin_fin, make_toed_slab};
 
     const TEST_KNN_LIMITS: KnnBatchLimits = KnnBatchLimits {
         max_source_points: 20_000_000,
@@ -7316,6 +7430,257 @@ mod tests {
         assert_eq!(forest.digest(), before);
     }
 
+    fn oriented_corpus_mesh(mesh: Mesh, baseline: &str) -> Mesh {
+        let budget = plinth_decimate::DecimationBudget::ratified_default(
+            plinth_decimate::ProbeConfig::new(1.0, 64 * 1024 * 1024, 10_000.0),
+        )
+        .expect("ratified decimation budget");
+        let decimated = plinth_decimate::run(&mesh, budget)
+            .expect("decimate procedural corpus model")
+            .into_decimated_model()
+            .expect("print-scale procedural corpus model");
+        let oriented = plinth_orient::run(
+            decimated,
+            &plinth_orient::OrientRequest {
+                pinned: plinth_orient::PinnedBaseline {
+                    pipeline_report: std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../corpus/baseline")
+                        .join(format!("{baseline}.pipeline.json")),
+                },
+            },
+        )
+        .expect("orient from the checked-in corpus baseline");
+        oriented.into_parts().0
+    }
+
+    /// `WorkingContact` is deliberately not `PartialEq` (demands carry
+    /// footprints), so structural comparison goes through the canonical
+    /// ordering plus the finalized provenance.
+    fn same_working_contacts(left: &[WorkingContact], right: &[WorkingContact]) -> bool {
+        left.len() == right.len()
+            && left.iter().zip(right).all(|(left, right)| {
+                compare_contacts(left, right) == Ordering::Equal
+                    && left.seat_provenance == right.seat_provenance
+            })
+    }
+
+    /// The two routes of the observed raking-blade collision: one generic and
+    /// one synthetic-island route that nominate the bit-identical dyadic cell
+    /// vertex on an edge shared by two triangles.
+    fn coincident_collision_routes() -> (RegularContactRoute, RegularContactRoute) {
+        (
+            RegularContactRoute {
+                candidate_id: 156,
+                owner_island_id: 4,
+                coverage_face_id: 23,
+                component_id: 0,
+                source_kind: RepairRowSourceKind::SyntheticIsland,
+            },
+            RegularContactRoute {
+                candidate_id: 161,
+                owner_island_id: 1,
+                coverage_face_id: 22,
+                component_id: 0,
+                source_kind: RepairRowSourceKind::Generic,
+            },
+        )
+    }
+
+    #[test]
+    fn terminal_coalescing_unions_exactly_coincident_demand_free_regular_seats() {
+        let (elected_route, other_route) = coincident_collision_routes();
+        assert_eq!(elected_route.cmp(&other_route), Ordering::Less);
+        let position = [
+            0.001_307_336_147_874_593_7,
+            -1.873_496_965_216_322_3,
+            5.487_058_875_988_102,
+        ];
+        // The observed pair's normals differ by exactly one ULP, so the elected
+        // seat's normal is observable in the union's output.
+        let elected_normal: [f64; 3] = [0.5, 0.0, -0.866_025_403_784_438_7];
+        let other_normal: [f64; 3] = [
+            0.5,
+            0.0,
+            f64::from_bits((-0.866_025_403_784_438_7_f64).to_bits() - 1),
+        ];
+        assert_ne!(elected_normal[2].to_bits(), other_normal[2].to_bits());
+
+        // The elected seat is deliberately *second* in the working vector: the
+        // election is by identity, never by position in the vector.
+        let mut contacts = vec![
+            test_regular_contact(position, other_normal, other_route, Vec::new()),
+            test_regular_contact(position, elected_normal, elected_route, Vec::new()),
+        ];
+        let mut telemetry = MergeAllocationTelemetry::default();
+        let coalesced = coalesce_exact_regular_seats(
+            &mut contacts,
+            SpecializedLimits::production(TEST_KNN_LIMITS),
+            &mut telemetry,
+        )
+        .expect("coalesce the exactly coincident demand-free regular pair");
+
+        assert_eq!(coalesced, 1);
+        assert_eq!(contacts.len(), 1);
+        let seat = &contacts[0];
+        assert_eq!(seat.regular_routes, vec![elected_route, other_route]);
+        assert_eq!(
+            seat.primary_regular.map(|primary| primary.route),
+            Some(elected_route)
+        );
+        assert_eq!(
+            seat.normal.map(f64::to_bits),
+            elected_normal.map(f64::to_bits)
+        );
+        assert_eq!(
+            seat.position_mm.map(f64::to_bits),
+            position.map(f64::to_bits)
+        );
+        assert_eq!(
+            seat.seat_provenance,
+            PhysicalSeatProvenance::Regular(
+                seat.primary_regular
+                    .expect("coalesced seat keeps a primary")
+            )
+        );
+        assert!(seat.demands.is_empty());
+        assert_eq!(telemetry.deep_clone_count, 1);
+
+        // Idempotent: a second pass over the canonical vector finds nothing.
+        let before = contacts.clone();
+        let again = coalesce_exact_regular_seats(
+            &mut contacts,
+            SpecializedLimits::production(TEST_KNN_LIMITS),
+            &mut telemetry,
+        )
+        .expect("second coalescing pass");
+        assert_eq!(again, 0);
+        assert!(same_working_contacts(&contacts, &before));
+    }
+
+    #[test]
+    fn terminal_coalescing_election_is_independent_of_input_order() {
+        let (elected_route, other_route) = coincident_collision_routes();
+        let position = [3.0, -4.0, 5.5];
+        let elected_normal = [0.0, 0.0, -1.0];
+        let other_normal = [0.0, f64::from_bits(1), -1.0];
+        let coalesce_once = |ordered: Vec<WorkingContact>| {
+            let mut contacts = ordered;
+            let mut telemetry = MergeAllocationTelemetry::default();
+            let count = coalesce_exact_regular_seats(
+                &mut contacts,
+                SpecializedLimits::production(TEST_KNN_LIMITS),
+                &mut telemetry,
+            )
+            .expect("coalesce");
+            (count, contacts)
+        };
+        let forward = coalesce_once(vec![
+            test_regular_contact(position, elected_normal, elected_route, Vec::new()),
+            test_regular_contact(position, other_normal, other_route, Vec::new()),
+        ]);
+        let reversed = coalesce_once(vec![
+            test_regular_contact(position, other_normal, other_route, Vec::new()),
+            test_regular_contact(position, elected_normal, elected_route, Vec::new()),
+        ]);
+        assert_eq!(forward.0, 1);
+        assert_eq!(reversed.0, 1);
+        assert!(same_working_contacts(&forward.1, &reversed.1));
+        assert_eq!(
+            forward.1[0].primary_regular.map(|primary| primary.route),
+            Some(elected_route)
+        );
+    }
+
+    #[test]
+    fn terminal_coalescing_leaves_demanded_and_separated_seats_alone() {
+        let (first_route, second_route) = coincident_collision_routes();
+        let position = [1.0, 2.0, 3.0];
+        let normal = [0.0, 0.0, -1.0];
+        let demand = minimum_demand(0, 0, 0, position);
+        let mut contacts = vec![
+            // Coincident, but one side carries a demand: that is the mixed
+            // attach prepass's business, never this canonicalization's.
+            test_regular_contact(position, normal, first_route, vec![demand]),
+            test_regular_contact(position, normal, second_route, Vec::new()),
+            // Demand-free regular, but a different physical point.
+            test_regular_contact([1.0, 2.0, 3.5], normal, second_route, Vec::new()),
+        ];
+        let before = contacts.clone();
+        let mut telemetry = MergeAllocationTelemetry::default();
+        let coalesced = coalesce_exact_regular_seats(
+            &mut contacts,
+            SpecializedLimits::production(TEST_KNN_LIMITS),
+            &mut telemetry,
+        )
+        .expect("coalesce");
+        assert_eq!(coalesced, 0);
+        assert!(same_working_contacts(&contacts, &before));
+        assert_eq!(telemetry.deep_clone_count, 0);
+    }
+
+    /// Both models nominate one dyadic cell vertex from two islands under
+    /// their own ratified corpus orientation, which used to fail closed with
+    /// `DuplicatePhysicalSeat` before consolidation could finish.
+    #[test]
+    fn oriented_toed_slab_and_raking_blade_finalize_after_terminal_seat_coalescing() {
+        let mut failures = Vec::new();
+        for (name, baseline, mesh, expected_digest, expected_counts, expected_shared_seats) in [
+            (
+                "toed slab",
+                "make_toed_slab",
+                make_toed_slab().unwrap(),
+                18_042_644_323_102_122_916_u64,
+                (72, 50_688, 9),
+                4_usize,
+            ),
+            (
+                "raking blade",
+                "make_raking_blade",
+                make_raking_blade().unwrap(),
+                208_221_774_708_787_011_u64,
+                (40, 35_008, 11),
+                3,
+            ),
+        ] {
+            let plan = full_fixture(oriented_corpus_mesh(mesh, baseline), name)
+                .unwrap_or_else(|error| panic!("{error}"));
+            let gate = plan.gate_evidence();
+            let actual_counts = (
+                plan.contacts().len(),
+                plan.coverage_samples().len(),
+                plan.load_partition().rows().len(),
+            );
+            let positions = plan
+                .contacts()
+                .iter()
+                .map(|contact| contact.position_mm().map(f64::to_bits))
+                .collect::<BTreeSet<_>>();
+            let shared_seats = plan
+                .contacts()
+                .iter()
+                .filter(|contact| contact.regular_routes().len() > 1)
+                .count();
+            if plan.digest() != expected_digest
+                || actual_counts != expected_counts
+                || gate.coalesced_seat_count != 1
+                || gate.baseline != gate.accepted
+                || positions.len() != plan.contacts().len()
+                || shared_seats != expected_shared_seats
+            {
+                failures.push(format!(
+                    "{name}: digest actual={} expected={expected_digest}; counts actual={actual_counts:?} expected={expected_counts:?}; coalesced={} accepted_pairs={} non_worsening={}; distinct_positions={} of {}; shared_seats actual={shared_seats} expected={expected_shared_seats}",
+                    plan.digest(),
+                    gate.coalesced_seat_count,
+                    gate.accepted_pair_count,
+                    gate.baseline == gate.accepted,
+                    positions.len(),
+                    plan.contacts().len(),
+                ));
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
     #[test]
     fn required_table_raking_and_thin_fin_fixtures_finalize_full_evidence() {
         let mut failures = Vec::new();
@@ -7330,7 +7695,18 @@ mod tests {
                 // This is not a corpus, baseline, physics, or reference re-freeze.
                 8_928_188_536_911_449_669_u64,
                 (95, 51_200, 14),
-                (6, 0, 4),
+                (6, 0, 4, 0),
+            ),
+            (
+                // Added with the terminal exactly-coincident regular seat
+                // coalescing pass. In this build frame the toed slab nominates
+                // no coincident pair, so its evidence is a fresh freeze rather
+                // than a regeneration of an older one.
+                "toed slab",
+                make_toed_slab().unwrap(),
+                11_859_964_443_161_510_103_u64,
+                (73, 50_176, 7),
+                (3, 0, 3, 0),
             ),
             (
                 "raking blade",
@@ -7342,7 +7718,7 @@ mod tests {
                 // This is not a corpus, baseline, physics, or reference re-freeze.
                 12_073_756_428_966_718_576_u64,
                 (40, 40_192, 13),
-                (3, 10, 8),
+                (3, 10, 8, 0),
             ),
             (
                 "thin fin",
@@ -7354,7 +7730,7 @@ mod tests {
                 // This is not a corpus, baseline, physics, or reference re-freeze.
                 16_790_786_111_947_059_800_u64,
                 (19, 20_480, 2),
-                (2, 0, 1),
+                (2, 0, 1, 0),
             ),
         ] {
             let plan = full_fixture(mesh, name).unwrap_or_else(|error| panic!("{error}"));
@@ -7397,6 +7773,7 @@ mod tests {
                 gate.accepted.load_violation_count,
                 gate.evaluated_pair_count,
                 gate.accepted_pair_count,
+                gate.coalesced_seat_count,
             );
             let carried_faces = plan
                 .load_partition()
