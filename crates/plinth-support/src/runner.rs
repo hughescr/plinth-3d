@@ -362,23 +362,32 @@ pub fn run_support<'a>(
         input.max_primitives,
         input.max_primitive_bytes,
     );
-    let prepared = prepare_support_run(hollowed, request, authority)
-        .map_err(|_| SupportRunError::Failed(SupportRunPhase::Preparation))?;
-    let routed = prepared
-        .route_initial_cco()
-        .map_err(|_| SupportRunError::Failed(SupportRunPhase::Routing))?;
-    let rewired = routed
-        .rewire()
-        .map_err(|_| SupportRunError::Failed(SupportRunPhase::Rewire))?;
-    let braced = rewired
-        .brace()
-        .map_err(|_| SupportRunError::Failed(SupportRunPhase::Brace))?;
-    let structured = braced
-        .structure()
-        .map_err(|_| SupportRunError::Failed(SupportRunPhase::Structure))?;
-    Ok(FinalSupportAuthority(structured.lower().map_err(|_| {
-        SupportRunError::Failed(SupportRunPhase::Lowering)
-    })?))
+    let prepared = prepare_support_run(hollowed, request, authority).map_err(|error| {
+        crate::census::note_stage_error("Preparation", &error);
+        SupportRunError::Failed(SupportRunPhase::Preparation)
+    })?;
+    let routed = prepared.route_initial_cco().map_err(|error| {
+        crate::census::note_stage_error("Routing", &error);
+        SupportRunError::Failed(SupportRunPhase::Routing)
+    })?;
+    let rewired = routed.rewire().map_err(|error| {
+        crate::census::note_stage_error("Rewire", &error);
+        SupportRunError::Failed(SupportRunPhase::Rewire)
+    })?;
+    let braced = rewired.brace().map_err(|error| {
+        crate::census::note_stage_error("Brace", &error);
+        SupportRunError::Failed(SupportRunPhase::Brace)
+    })?;
+    let structured = braced.structure().map_err(|error| {
+        crate::census::note_stage_error("Structure", &error);
+        SupportRunError::Failed(SupportRunPhase::Structure)
+    })?;
+    Ok(FinalSupportAuthority(structured.lower().map_err(
+        |error| {
+            crate::census::note_stage_error("Lowering", &error);
+            SupportRunError::Failed(SupportRunPhase::Lowering)
+        },
+    )?))
 }
 
 /// One physical contact admitted by the finalized CCO transcript for future

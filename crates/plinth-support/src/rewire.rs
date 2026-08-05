@@ -820,6 +820,7 @@ fn validate_changed_geometry(
     if p0.is_empty() {
         return Ok(true);
     }
+    crate::census::record_segment_batch("rewire_clearance", &p0, &p1, &i0, &i1, &[]);
     let (clearances, _) = geometry
         .surface()
         .segment_clearance(&p0, &p1, &r0, &r1, config.standoff_mm, &i0, &i1)

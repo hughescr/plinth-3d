@@ -22,6 +22,8 @@ mod brace;
     reason = "crate-private CCO controller is consumed by the pending support runner integration"
 )]
 mod cco;
+/// THROWAWAY INSTRUMENTATION -- 2026-08-04 embed-incidence census, never merges.
+pub mod census;
 mod coverage;
 mod coverage_measurement;
 // Crate-private on purpose: a `pub` mask domain is exactly why dead-code lints

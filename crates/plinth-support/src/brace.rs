@@ -413,6 +413,10 @@ fn append_candidate(
     additions: &mut Vec<BraceAddition>,
 ) -> Result<(), BraceError> {
     let ordinal = ordinals.entry(candidate.kind).or_default();
+    crate::census::record_append(match candidate.kind {
+        BraceAdditionKind::CrossLink => "brace_append_crosslink",
+        BraceAdditionKind::ModelRung => "brace_append_model_rung",
+    });
     for rod in &candidate.rods {
         let spec = MemberSpec {
             p0_mm: finite3(rod.p0)?,
@@ -899,7 +903,15 @@ fn gather_candidates(
         }
         let radius = config.brace_radius_mm;
         let axis = scale(sub(projected.point, p0), 1.0 / length);
-        let cosine = dot(axis, projected.normal).abs().max(0.5);
+        let abs_cos_raw = dot(axis, projected.normal).abs();
+        let cosine = abs_cos_raw.max(0.5);
+        let rung_inset1 = embed_inset_mm(
+            config.contact_depth_mm,
+            radius.get(),
+            config.standoff_mm,
+            cosine,
+        );
+        crate::census::record_rung(abs_cos_raw, cosine, length, radius.get(), rung_inset1);
         candidates.push(PlacementCandidate {
             need_index: projected.raw.need_index,
             site_index: projected.raw.site_index,
@@ -910,12 +922,7 @@ fn gather_candidates(
                 p1: projected.point,
                 radius,
                 inset0: 0.0,
-                inset1: embed_inset_mm(
-                    config.contact_depth_mm,
-                    radius.get(),
-                    config.standoff_mm,
-                    cosine,
-                ),
+                inset1: rung_inset1,
             }],
             printable: (p0[2] - projected.point[2]).abs() <= HEIGHT_TOLERANCE_MM,
         });
@@ -961,6 +968,7 @@ fn evaluate_candidates(
     let mut inset0 = Vec::new();
     let mut inset1 = Vec::new();
     let mut ranges = Vec::with_capacity(candidates.len());
+    let mut census_cos_class = Vec::new();
     for candidate in candidates {
         let start = p0.len();
         for rod in &candidate.rods {
@@ -970,9 +978,30 @@ fn evaluate_candidates(
             r1.push(rod.radius.get());
             inset0.push(rod.inset0);
             inset1.push(rod.inset1);
+            // Model rungs are the only candidate kind carrying a
+            // cosine-derived embed inset; recover the cosine that built it.
+            census_cos_class.push(if candidate.kind == BraceAdditionKind::ModelRung {
+                let cosine = (rod.radius.get() + config.standoff_mm)
+                    / (rod.inset1 - config.contact_depth_mm);
+                if cosine <= 0.5 + 1e-9 {
+                    1
+                } else {
+                    2
+                }
+            } else {
+                0
+            });
         }
         ranges.push(start..p0.len());
     }
+    crate::census::record_segment_batch(
+        "brace_candidate_clearance",
+        &p0,
+        &p1,
+        &inset0,
+        &inset1,
+        &census_cos_class,
+    );
     let clearances = if p0.is_empty() {
         Vec::new()
     } else {
@@ -981,14 +1010,37 @@ fn evaluate_candidates(
             .map_err(|error| BraceError::NativeQuery(error.to_string()))?
             .0
     };
-    candidate_revalidation(
+    let viable = candidate_revalidation(
         surface,
         candidates,
         &ranges,
         &clearances,
         config,
         penetration_limits,
-    )
+    )?;
+    if crate::census::enabled() {
+        let mut outcomes = Vec::new();
+        for ((candidate, range), is_viable) in candidates.iter().zip(&ranges).zip(&viable) {
+            if candidate.kind != BraceAdditionKind::ModelRung {
+                continue;
+            }
+            for (rod, index) in candidate.rods.iter().zip(range.clone()) {
+                let length = norm(sub(rod.p1, rod.p0));
+                let cosine = (rod.radius.get() + config.standoff_mm)
+                    / (rod.inset1 - config.contact_depth_mm);
+                outcomes.push(crate::census::RungOutcome {
+                    cos_used: cosine,
+                    length_mm: length,
+                    inset1_mm: rod.inset1,
+                    clearance_mm: clearances.get(index).copied().unwrap_or(f64::NAN),
+                    over_masked: length >= 1e-9 && (length - rod.inset1) - rod.inset0 <= 1e-9,
+                    viable: *is_viable,
+                });
+            }
+        }
+        crate::census::record_rung_outcomes(outcomes.into_iter());
+    }
+    Ok(viable)
 }
 
 fn candidate_revalidation(
@@ -1351,6 +1403,7 @@ fn exact_clearance_rows(
         .collect::<Vec<_>>();
     let mut inset0 = vec![0.0; rows.len()];
     let mut inset1 = vec![0.0; rows.len()];
+    let mut census_cos_class = vec![0u8; rows.len()];
     let embedded = rows
         .iter()
         .enumerate()
@@ -1378,18 +1431,37 @@ fn exact_clearance_rows(
                 member.p0_mm().map(Finite::get),
             );
             let axis = scale(axis_raw, 1.0 / norm(axis_raw));
-            let cosine = dot(axis, normal).abs().max(0.5);
+            let abs_cos_raw = dot(axis, normal).abs();
+            let cosine = abs_cos_raw.max(0.5);
             let radius = match end {
                 ContactEnd::Terminalward => member.terminal_radius_mm().get().get(),
                 ContactEnd::Rootward => member.rootward_radius_mm().get().get(),
             };
             let inset = embed_inset_mm(config.contact_depth_mm, radius, config.standoff_mm, cosine);
+            crate::census::record_embed(
+                abs_cos_raw,
+                cosine,
+                radius,
+                inset,
+                norm(axis_raw),
+                member.kind(),
+                end,
+            );
+            census_cos_class[index] = if abs_cos_raw < 0.5 { 1 } else { 2 };
             match end {
                 ContactEnd::Terminalward => inset0[index] = inset,
                 ContactEnd::Rootward => inset1[index] = inset,
             }
         }
     }
+    crate::census::record_segment_batch(
+        "brace_exact_member_clearance",
+        &p0,
+        &p1,
+        &inset0,
+        &inset1,
+        &census_cos_class,
+    );
     let mut clearance = surface
         .segment_clearance(&p0, &p1, &r0, &r1, config.standoff_mm, &inset0, &inset1)
         .map_err(|error| BraceError::NativeQuery(error.to_string()))?

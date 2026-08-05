@@ -1,0 +1,706 @@
+//! THROWAWAY INSTRUMENTATION -- embed-incidence census, never to merge.
+//!
+//! Passive, result-inert counters for the 2026-08-04 embed-incidence census.
+//! Nothing here is read by production code: every entry point only appends to a
+//! process-global buffer, and every buffer is drained by the census example
+//! binary. Recording is additionally gated on `PLINTH_CENSUS=1` so an
+//! un-instrumented baseline can be produced from the same build.
+
+use std::sync::{Mutex, OnceLock};
+
+use crate::forest::{ContactEnd, MemberKind};
+use crate::runner::SupportVerificationSnapshot;
+
+/// Legal model-rung length band, quoted from `brace.rs` config for reporting.
+const RUNG_BAND_MM: (f64, f64) = (1.0, 5.0);
+/// The floored-cos model-rung inset: 0.3 + (0.5 + 0.6) / 0.5.
+const FLOORED_RUNG_INSET_MM: f64 = 2.5;
+
+#[must_use]
+pub fn enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("PLINTH_CENSUS").as_deref() == Ok("1"))
+}
+
+/// One brace model-rung candidate row at the incidence computation
+/// (`brace.rs` model-rung construction).
+#[derive(Clone, Copy, Debug)]
+pub struct RungRow {
+    pub abs_cos_raw: f64,
+    pub cos_used: f64,
+    pub length_mm: f64,
+    pub radius_mm: f64,
+    pub inset1_mm: f64,
+}
+
+/// One member-level embed inset row at the exact-clearance incidence
+/// computation (`brace.rs` exact member clearance).
+#[derive(Clone, Debug)]
+pub struct EmbedRow {
+    pub abs_cos_raw: f64,
+    pub cos_used: f64,
+    pub radius_mm: f64,
+    pub inset_mm: f64,
+    pub segment_len_mm: f64,
+    pub kind: String,
+    pub end: &'static str,
+}
+
+/// One `cco::apply_model_anchor` strut construction, recorded raw. The normal
+/// at the model seat is resolved later in one batched projection.
+#[derive(Clone, Copy, Debug)]
+pub struct AnchorRow {
+    pub stub_end: [f64; 3],
+    pub seat: [f64; 3],
+}
+
+/// One row handed to `NativeSurface::segment_clearance`, with the
+/// `seg_clear_one` INFINITY predicate evaluated locally (identical arithmetic,
+/// no kernel change).
+#[derive(Clone, Copy, Debug)]
+pub struct SegRow {
+    pub site: &'static str,
+    pub segment_len_mm: f64,
+    pub inset0_mm: f64,
+    pub inset1_mm: f64,
+    /// 0 = no cosine-derived embed inset on this row, 1 = inset built from a
+    /// floored cosine (raw |cos| < 0.5), 2 = inset built from raw |cos| >= 0.5.
+    pub cos_class: u8,
+    /// `true` when this row carries any embed inset at all.
+    pub has_embed_inset: bool,
+    pub degenerate: bool,
+    pub over_masked: bool,
+}
+
+/// One embedded contact stub as seeded in `initial.rs`.
+#[derive(Clone, Copy, Debug)]
+pub struct ContactRow {
+    pub position: [f64; 3],
+    pub normal: [f64; 3],
+    pub tip_radius_mm: f64,
+}
+
+/// The disposition of one brace model-rung candidate after the clearance
+/// batch and revalidation.
+#[derive(Clone, Copy, Debug)]
+pub struct RungOutcome {
+    /// The cosine the inset was actually built from, recovered exactly from
+    /// `inset1`. A value at the 0.5 floor means the raw incidence was grazing.
+    pub cos_used: f64,
+    pub length_mm: f64,
+    pub inset1_mm: f64,
+    pub clearance_mm: f64,
+    pub over_masked: bool,
+    pub viable: bool,
+}
+
+#[derive(Default)]
+pub struct CensusData {
+    pub rung_outcomes: Vec<RungOutcome>,
+    pub rungs: Vec<RungRow>,
+    pub embeds: Vec<EmbedRow>,
+    pub anchors: Vec<AnchorRow>,
+    pub segs: Vec<SegRow>,
+    pub contacts: Vec<ContactRow>,
+    pub appends: std::collections::BTreeMap<&'static str, usize>,
+    pub stage_errors: Vec<String>,
+}
+
+fn data() -> &'static Mutex<CensusData> {
+    static DATA: OnceLock<Mutex<CensusData>> = OnceLock::new();
+    DATA.get_or_init(|| Mutex::new(CensusData::default()))
+}
+
+fn with<R>(body: impl FnOnce(&mut CensusData) -> R) -> Option<R> {
+    if !enabled() {
+        return None;
+    }
+    let mut guard = data().lock().ok()?;
+    Some(body(&mut guard))
+}
+
+pub fn reset() {
+    with(|census| {
+        census.rung_outcomes.clear();
+        census.rungs.clear();
+        census.embeds.clear();
+        census.anchors.clear();
+        census.segs.clear();
+        census.contacts.clear();
+        census.appends.clear();
+        census.stage_errors.clear();
+    });
+}
+
+pub(crate) fn note_stage_error<E: std::fmt::Debug>(stage: &str, error: &E) {
+    with(|census| census.stage_errors.push(format!("{stage}: {error:?}")));
+}
+
+pub(crate) fn record_rung(
+    abs_cos_raw: f64,
+    cos_used: f64,
+    length_mm: f64,
+    radius_mm: f64,
+    inset1_mm: f64,
+) {
+    with(|census| {
+        census.rungs.push(RungRow {
+            abs_cos_raw,
+            cos_used,
+            length_mm,
+            radius_mm,
+            inset1_mm,
+        });
+    });
+}
+
+pub(crate) fn record_embed(
+    abs_cos_raw: f64,
+    cos_used: f64,
+    radius_mm: f64,
+    inset_mm: f64,
+    segment_len_mm: f64,
+    kind: &MemberKind,
+    end: ContactEnd,
+) {
+    with(|census| {
+        census.embeds.push(EmbedRow {
+            abs_cos_raw,
+            cos_used,
+            radius_mm,
+            inset_mm,
+            segment_len_mm,
+            kind: format!("{kind:?}"),
+            end: match end {
+                ContactEnd::Terminalward => "terminalward",
+                ContactEnd::Rootward => "rootward",
+            },
+        });
+    });
+}
+
+/// Batched: one call per brace candidate-clearance batch.
+pub(crate) fn record_rung_outcomes(rows: impl Iterator<Item = RungOutcome>) {
+    with(|census| census.rung_outcomes.extend(rows));
+}
+
+pub(crate) fn record_append(label: &'static str) {
+    with(|census| *census.appends.entry(label).or_default() += 1);
+}
+
+pub(crate) fn record_model_anchor(stub_end: [f64; 3], seat: [f64; 3]) {
+    with(|census| census.anchors.push(AnchorRow { stub_end, seat }));
+}
+
+/// Batched: one call per `segment_clearance` batch, never per row.
+pub(crate) fn record_segment_batch(
+    site: &'static str,
+    p0s: &[[f64; 3]],
+    p1s: &[[f64; 3]],
+    inset0s: &[f64],
+    inset1s: &[f64],
+    cos_class: &[u8],
+) {
+    with(|census| {
+        for index in 0..p0s.len() {
+            let delta = [
+                p1s[index][0] - p0s[index][0],
+                p1s[index][1] - p0s[index][1],
+                p1s[index][2] - p0s[index][2],
+            ];
+            let length = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+            // Exactly `seg_clear_one`'s two INFINITY predicates.
+            let degenerate = length < 1e-9;
+            let usable = (length - inset1s[index]) - inset0s[index];
+            census.segs.push(SegRow {
+                site,
+                segment_len_mm: length,
+                inset0_mm: inset0s[index],
+                inset1_mm: inset1s[index],
+                cos_class: cos_class.get(index).copied().unwrap_or(0),
+                has_embed_inset: inset0s[index] != 0.0 || inset1s[index] != 0.0,
+                degenerate,
+                over_masked: !degenerate && usable <= 1e-9,
+            });
+        }
+    });
+}
+
+/// Batched: one call per initial-contact seeding pass.
+pub(crate) fn record_contacts(rows: impl Iterator<Item = ([f64; 3], [f64; 3], f64)>) {
+    with(|census| {
+        for (position, normal, tip_radius_mm) in rows {
+            census.contacts.push(ContactRow {
+                position,
+                normal,
+                tip_radius_mm,
+            });
+        }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Reporting
+// ---------------------------------------------------------------------------
+
+const COS_EDGES: [f64; 4] = [0.3, 0.5, 0.7, 0.9];
+const COS_LABELS: [&str; 5] = ["<0.3", "0.3-0.5", "0.5-0.7", "0.7-0.9", ">=0.9"];
+
+fn bucket(abs_cos: f64) -> usize {
+    COS_EDGES.iter().filter(|edge| abs_cos >= **edge).count()
+}
+
+fn histogram(values: impl Iterator<Item = f64>) -> [usize; 5] {
+    let mut counts = [0usize; 5];
+    for value in values {
+        counts[bucket(value)] += 1;
+    }
+    counts
+}
+
+fn row(model: &str, table: &str, cells: &[String]) {
+    println!("CENSUS\t{table}\t{model}\t{}", cells.join("\t"));
+}
+
+fn stat(values: &mut [f64]) -> (f64, f64, f64, f64) {
+    values.sort_by(f64::total_cmp);
+    let count = values.len();
+    if count == 0 {
+        return (f64::NAN, f64::NAN, f64::NAN, f64::NAN);
+    }
+    let sum: f64 = values.iter().sum();
+    (
+        values[0],
+        values[count / 2],
+        values[count - 1],
+        sum / count as f64,
+    )
+}
+
+/// Drain the census for one model, resolve every deferred normal in single
+/// batched native calls, and print the per-model tables.
+pub fn finish(model: &str, snapshot: &SupportVerificationSnapshot<'_>) {
+    if !enabled() {
+        return;
+    }
+    let Ok(census) = data().lock() else {
+        return;
+    };
+    let surface = snapshot.native_surface();
+
+    // --- Table 1: brace model-rung incidence ------------------------------
+    let counts = histogram(census.rungs.iter().map(|entry| entry.abs_cos_raw));
+    let grazing = census
+        .rungs
+        .iter()
+        .filter(|entry| entry.abs_cos_raw < 0.5)
+        .collect::<Vec<_>>();
+    let short_band = grazing
+        .iter()
+        .filter(|entry| entry.length_mm <= FLOORED_RUNG_INSET_MM)
+        .count();
+    row(
+        model,
+        "T1_rung_cos",
+        &[
+            format!("total={}", census.rungs.len()),
+            format!("{}={}", COS_LABELS[0], counts[0]),
+            format!("{}={}", COS_LABELS[1], counts[1]),
+            format!("{}={}", COS_LABELS[2], counts[2]),
+            format!("{}={}", COS_LABELS[3], counts[3]),
+            format!("{}={}", COS_LABELS[4], counts[4]),
+            format!("grazing_lt_0.5={}", grazing.len()),
+            format!("grazing_L_le_2.50mm={short_band}"),
+            format!("grazing_L_gt_2.50mm={}", grazing.len() - short_band),
+            format!("legal_band_mm={:?}", RUNG_BAND_MM),
+        ],
+    );
+
+    // --- Table 1a: what happened to those rung candidates -----------------
+    {
+        let total = census.rung_outcomes.len();
+        let grazing = census
+            .rung_outcomes
+            .iter()
+            .filter(|entry| entry.cos_used <= 0.5 + 1e-9)
+            .collect::<Vec<_>>();
+        let admitted = census
+            .rung_outcomes
+            .iter()
+            .filter(|entry| entry.viable)
+            .count();
+        let grazing_admitted = grazing.iter().filter(|entry| entry.viable).count();
+        let over_masked = census
+            .rung_outcomes
+            .iter()
+            .filter(|entry| entry.over_masked)
+            .count();
+        let grazing_over_masked = grazing.iter().filter(|entry| entry.over_masked).count();
+        let infinite_clearance = census
+            .rung_outcomes
+            .iter()
+            .filter(|entry| entry.clearance_mm.is_infinite())
+            .count();
+        row(
+            model,
+            "T1a_rung_outcome",
+            &[
+                format!("rows={total}"),
+                format!("floored_cos={}", grazing.len()),
+                format!("admitted_viable={admitted}"),
+                format!("floored_admitted={grazing_admitted}"),
+                format!("over_masked={over_masked}"),
+                format!("floored_over_masked={grazing_over_masked}"),
+                format!("clearance_infinite={infinite_clearance}"),
+            ],
+        );
+    }
+
+    // --- Table 1r: every model-rung row, verbatim -------------------------
+    for (index, entry) in census.rungs.iter().enumerate() {
+        row(
+            model,
+            "T1r_rung_row",
+            &[
+                format!("i={index}"),
+                format!("abs_cos_raw={:.6}", entry.abs_cos_raw),
+                format!("cos_used={:.6}", entry.cos_used),
+                format!("floored={}", entry.abs_cos_raw < 0.5),
+                format!("L_mm={:.6}", entry.length_mm),
+                format!("radius_mm={:.6}", entry.radius_mm),
+                format!("inset1_mm={:.6}", entry.inset1_mm),
+                format!("usable_mm={:.6}", entry.length_mm - entry.inset1_mm),
+            ],
+        );
+    }
+
+    // --- Table 1b: member-level embed incidence (exact clearance) ---------
+    let mut by_kind = std::collections::BTreeMap::<(String, &'static str), Vec<f64>>::new();
+    for entry in &census.embeds {
+        by_kind
+            .entry((entry.kind.clone(), entry.end))
+            .or_default()
+            .push(entry.abs_cos_raw);
+    }
+    for ((kind, end), values) in &by_kind {
+        let counts = histogram(values.iter().copied());
+        let grazing = values.iter().filter(|value| **value < 0.5).count();
+        row(
+            model,
+            "T1b_embed_cos",
+            &[
+                format!("kind={kind}"),
+                format!("end={end}"),
+                format!("total={}", values.len()),
+                format!("{}={}", COS_LABELS[0], counts[0]),
+                format!("{}={}", COS_LABELS[1], counts[1]),
+                format!("{}={}", COS_LABELS[2], counts[2]),
+                format!("{}={}", COS_LABELS[3], counts[3]),
+                format!("{}={}", COS_LABELS[4], counts[4]),
+                format!("grazing_lt_0.5={grazing}"),
+            ],
+        );
+    }
+
+    // --- Table 2: CCO model-anchor struts ---------------------------------
+    // Attempted population: every strut `apply_model_anchor` constructed
+    // (candidate evaluation included). One batched projection resolves all
+    // seat normals.
+    let seats = census
+        .anchors
+        .iter()
+        .map(|entry| entry.seat)
+        .collect::<Vec<_>>();
+    if !seats.is_empty() {
+        let (_, _, _, normals) = surface.project(&seats);
+        let mut cosines = Vec::with_capacity(seats.len());
+        for (entry, normal) in census.anchors.iter().zip(normals) {
+            let axis = [
+                entry.seat[0] - entry.stub_end[0],
+                entry.seat[1] - entry.stub_end[1],
+                entry.seat[2] - entry.stub_end[2],
+            ];
+            let length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+            if length <= 0.0 {
+                continue;
+            }
+            let dot = (axis[0] * normal[0] + axis[1] * normal[1] + axis[2] * normal[2]) / length;
+            cosines.push(dot.abs());
+        }
+        let counts = histogram(cosines.iter().copied());
+        let grazing = cosines.iter().filter(|value| **value < 0.5).count();
+        row(
+            model,
+            "T2_cco_anchor_attempted",
+            &[
+                format!("total={}", cosines.len()),
+                format!("{}={}", COS_LABELS[0], counts[0]),
+                format!("{}={}", COS_LABELS[1], counts[1]),
+                format!("{}={}", COS_LABELS[2], counts[2]),
+                format!("{}={}", COS_LABELS[3], counts[3]),
+                format!("{}={}", COS_LABELS[4], counts[4]),
+                format!("grazing_lt_0.5={grazing}"),
+            ],
+        );
+    } else {
+        row(model, "T2_cco_anchor_attempted", &["total=0".to_owned()]);
+    }
+
+    // Surviving population: struts seated on the model in the sealed snapshot.
+    let surviving = snapshot
+        .final_live_members()
+        .filter(|member| {
+            *member.kind() == MemberKind::Strut
+                && member.model_contact_end() == Some(ContactEnd::Rootward)
+        })
+        .map(|member| (member.p0_mm(), member.p1_mm()))
+        .collect::<Vec<_>>();
+    if surviving.is_empty() {
+        row(model, "T2_cco_anchor_surviving", &["total=0".to_owned()]);
+    } else {
+        let seats = surviving.iter().map(|(_, p1)| *p1).collect::<Vec<_>>();
+        let (_, _, _, normals) = surface.project(&seats);
+        let mut cosines = Vec::with_capacity(seats.len());
+        for ((p0, p1), normal) in surviving.iter().zip(normals) {
+            let axis = [p1[0] - p0[0], p1[1] - p0[1], p1[2] - p0[2]];
+            let length = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+            if length <= 0.0 {
+                continue;
+            }
+            let dot = (axis[0] * normal[0] + axis[1] * normal[1] + axis[2] * normal[2]) / length;
+            cosines.push(dot.abs());
+        }
+        let counts = histogram(cosines.iter().copied());
+        let grazing = cosines.iter().filter(|value| **value < 0.5).count();
+        row(
+            model,
+            "T2_cco_anchor_surviving",
+            &[
+                format!("total={}", cosines.len()),
+                format!("{}={}", COS_LABELS[0], counts[0]),
+                format!("{}={}", COS_LABELS[1], counts[1]),
+                format!("{}={}", COS_LABELS[2], counts[2]),
+                format!("{}={}", COS_LABELS[3], counts[3]),
+                format!("{}={}", COS_LABELS[4], counts[4]),
+                format!("grazing_lt_0.5={grazing}"),
+            ],
+        );
+    }
+
+    // --- Table 3: over-mask admissions ------------------------------------
+    let mut sites = std::collections::BTreeMap::<&'static str, [usize; 9]>::new();
+    for entry in &census.segs {
+        // [rows, embed_rows, cos_rows, floored_rows, over_masked,
+        //  over_masked_floored, over_masked_cos_ge, over_masked_no_cos,
+        //  degenerate]
+        let slot = sites.entry(entry.site).or_default();
+        slot[0] += 1;
+        if entry.has_embed_inset {
+            slot[1] += 1;
+        }
+        if entry.cos_class != 0 {
+            slot[2] += 1;
+        }
+        if entry.cos_class == 1 {
+            slot[3] += 1;
+        }
+        if entry.over_masked {
+            slot[4] += 1;
+            match entry.cos_class {
+                1 => slot[5] += 1,
+                2 => slot[6] += 1,
+                _ => slot[7] += 1,
+            }
+        }
+        if entry.degenerate {
+            slot[8] += 1;
+        }
+    }
+    for (site, slot) in &sites {
+        row(
+            model,
+            "T3_over_mask",
+            &[
+                format!("site={site}"),
+                format!("rows={}", slot[0]),
+                format!("embed_inset_rows={}", slot[1]),
+                format!("cos_derived_rows={}", slot[2]),
+                format!("floored_cos_rows={}", slot[3]),
+                format!("over_masked={}", slot[4]),
+                format!("over_masked_floored_cos={}", slot[5]),
+                format!("over_masked_cos_ge_0.5={}", slot[6]),
+                format!("over_masked_no_cos_inset={}", slot[7]),
+                format!("degenerate_len={}", slot[8]),
+            ],
+        );
+    }
+
+    // --- Table 3m: how close the embed-inset rows come to over-masking ----
+    let mut margins = std::collections::BTreeMap::<&'static str, Vec<(f64, f64)>>::new();
+    for entry in &census.segs {
+        if !entry.has_embed_inset || entry.degenerate {
+            continue;
+        }
+        let usable = (entry.segment_len_mm - entry.inset1_mm) - entry.inset0_mm;
+        margins
+            .entry(entry.site)
+            .or_default()
+            .push((usable, usable / entry.segment_len_mm));
+    }
+    for (site, values) in &margins {
+        let mut absolute = values.iter().map(|(value, _)| *value).collect::<Vec<_>>();
+        let mut ratio = values.iter().map(|(_, value)| *value).collect::<Vec<_>>();
+        let (min_abs, median_abs, max_abs, _) = stat(&mut absolute);
+        let (min_ratio, median_ratio, _, _) = stat(&mut ratio);
+        row(
+            model,
+            "T3m_embed_margin",
+            &[
+                format!("site={site}"),
+                format!("embed_inset_rows={}", values.len()),
+                format!("min_usable_mm={min_abs:.6}"),
+                format!("median_usable_mm={median_abs:.6}"),
+                format!("max_usable_mm={max_abs:.6}"),
+                format!("min_usable_fraction={min_ratio:.6}"),
+                format!("median_usable_fraction={median_ratio:.6}"),
+            ],
+        );
+    }
+
+    // --- Table 4: embedded-stub tip radii + local curvature ---------------
+    let mut radii = census
+        .contacts
+        .iter()
+        .map(|entry| entry.tip_radius_mm)
+        .collect::<Vec<_>>();
+    let mut distinct = std::collections::BTreeMap::<u64, usize>::new();
+    for value in &radii {
+        *distinct.entry(value.to_bits()).or_default() += 1;
+    }
+    let (min, median, max, mean) = stat(&mut radii);
+    let mut cells = vec![
+        format!("total={}", census.contacts.len()),
+        format!("min={min:.6}"),
+        format!("median={median:.6}"),
+        format!("max={max:.6}"),
+        format!("mean={mean:.6}"),
+    ];
+    for (bits, count) in &distinct {
+        cells.push(format!("r={:.6}:{count}", f64::from_bits(*bits)));
+    }
+    row(model, "T4_tip_radii", &cells);
+
+    // Curvature probe: four tangent samples per contact at the tip radius,
+    // resolved in ONE batched projection for the whole model.
+    if !census.contacts.is_empty() {
+        let mut probes = Vec::with_capacity(census.contacts.len() * 4);
+        for entry in &census.contacts {
+            let normal = entry.normal;
+            let helper = if normal[2].abs() < 0.9 {
+                [0.0, 0.0, 1.0]
+            } else {
+                [1.0, 0.0, 0.0]
+            };
+            let mut u = [
+                normal[1] * helper[2] - normal[2] * helper[1],
+                normal[2] * helper[0] - normal[0] * helper[2],
+                normal[0] * helper[1] - normal[1] * helper[0],
+            ];
+            let un = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
+            for axis in &mut u {
+                *axis /= un;
+            }
+            let v = [
+                normal[1] * u[2] - normal[2] * u[1],
+                normal[2] * u[0] - normal[0] * u[2],
+                normal[0] * u[1] - normal[1] * u[0],
+            ];
+            let step = entry.tip_radius_mm.max(0.05);
+            for (sign_u, sign_v) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                probes.push(std::array::from_fn(|axis| {
+                    entry.position[axis] + step * (sign_u * u[axis] + sign_v * v[axis])
+                }));
+            }
+        }
+        let (_, projected, _, _) = surface.project(&probes);
+        let mut flat = 0usize;
+        let mut convex = 0usize;
+        let mut concave = 0usize;
+        let mut saddle = 0usize;
+        for (index, entry) in census.contacts.iter().enumerate() {
+            let tolerance = 0.02 * entry.tip_radius_mm.max(0.05);
+            let mut positive = 0usize;
+            let mut negative = 0usize;
+            for probe in 0..4 {
+                let point = projected[index * 4 + probe];
+                let height = (0..3)
+                    .map(|axis| (point[axis] - entry.position[axis]) * entry.normal[axis])
+                    .sum::<f64>();
+                if height > tolerance {
+                    positive += 1;
+                } else if height < -tolerance {
+                    negative += 1;
+                }
+            }
+            match (positive, negative) {
+                (0, 0) => flat += 1,
+                (0, _) => convex += 1,
+                (_, 0) => concave += 1,
+                _ => saddle += 1,
+            }
+        }
+        row(
+            model,
+            "T4_curvature",
+            &[
+                format!("total={}", census.contacts.len()),
+                format!("flat={flat}"),
+                format!("convex={convex}"),
+                format!("concave={concave}"),
+                format!("saddle={saddle}"),
+            ],
+        );
+    }
+
+    // --- Table 5: final live member composition ---------------------------
+    let mut composition = std::collections::BTreeMap::<(String, &'static str), usize>::new();
+    for member in snapshot.final_live_members() {
+        let end = match member.model_contact_end() {
+            None => "none",
+            Some(ContactEnd::Terminalward) => "terminalward",
+            Some(ContactEnd::Rootward) => "rootward",
+        };
+        *composition
+            .entry((format!("{:?}", member.kind()), end))
+            .or_default() += 1;
+    }
+    let cells = composition
+        .iter()
+        .map(|((kind, end), count)| format!("{kind}/{end}={count}"))
+        .collect::<Vec<_>>();
+    row(model, "T5_final_members", &cells);
+
+    let cells = census
+        .appends
+        .iter()
+        .map(|(label, count)| format!("{label}={count}"))
+        .collect::<Vec<_>>();
+    row(model, "T6_commits", &cells);
+
+    for error in &census.stage_errors {
+        row(model, "T0_stage_error", std::slice::from_ref(error));
+    }
+}
+
+/// Print any stage errors recorded for a model that never reached `finish`.
+pub fn report_failure(model: &str) {
+    if !enabled() {
+        return;
+    }
+    let Ok(census) = data().lock() else {
+        return;
+    };
+    for error in &census.stage_errors {
+        row(model, "T0_stage_error", std::slice::from_ref(error));
+    }
+}
