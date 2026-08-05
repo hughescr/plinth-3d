@@ -85,7 +85,7 @@ fn production_code_of(file: &str) -> String {
 /// evidence that it is still wired.
 ///
 /// Each row is `(file, needle, what its absence would mean)`.
-const REQUIRED: [(&str, &str, &str); 15] = [
+const REQUIRED: [(&str, &str, &str); 17] = [
     (
         "initial.rs",
         "attest_initial_contacts(",
@@ -163,6 +163,27 @@ const REQUIRED: [(&str, &str, &str); 15] = [
         "AnchorFootRefusal::seat_buried(",
         "OD-9 burial no longer refuses a model anchor; a buried seat would \
          re-enter the tournament",
+    ),
+    // --- TRIPWIRE: recorded during candidacy, ENFORCED at commit -------
+    //
+    // The CCO model anchor's `NotAttached` verdict is deliberately not a
+    // candidacy refusal (the family is unseated until PR-7), so the ONLY thing
+    // standing between an unattested anchor and printed geometry is the gate at
+    // each winner-commit point. Both are unreachable on today's corpus -- the
+    // family never wins -- so nothing behavioural would notice their removal.
+    (
+        "cco.rs",
+        "AnchorFootRefusal::seat_not_attached(",
+        "the terminal-growth commit gate is gone: a model anchor that WON its \
+         tournament with a seat that attested NotAttached would be committed \
+         into the forest instead of refused",
+    ),
+    (
+        "rewire.rs",
+        "winning_generation_index(",
+        "the rewire winner is no longer elected through the commit gate, so an \
+         unattested model anchor would be replayed and spliced into the live \
+         forest",
     ),
     (
         "runner.rs",

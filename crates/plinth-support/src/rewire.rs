@@ -358,7 +358,7 @@ fn try_reattach(
         }
     };
     let before = total_volume_ml(forest)?;
-    let batch = cco.evaluate_rewire_candidates(
+    let mut batch = cco.evaluate_rewire_candidates(
         &binding,
         RewireAnchorRoute {
             samples: request.anchor_samples,
@@ -377,11 +377,10 @@ fn try_reattach(
         report.cco_candidate_batches,
         batch.seat_attestation_digest(),
     );
-    let Some(generation_index) = batch
-        .ranked_candidates()
-        .first()
-        .map(|candidate| candidate.evidence().generation_index)
-    else {
+    // TRIPWIRE -- the winner is elected through the batch's own commit gate, so
+    // a model anchor whose seat witness said `NotAttached` is refused here
+    // rather than replayed and spliced into the live forest.
+    let Some(generation_index) = batch.winning_generation_index() else {
         return Ok(None);
     };
     let replay = batch.replay_candidate(&binding, forest, generation_index, request.geometry)?;

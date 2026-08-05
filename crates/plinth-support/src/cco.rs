@@ -1030,6 +1030,12 @@ pub(crate) struct RewireEvaluatedCandidate {
     evidence: CcoCandidateEvidence,
     evaluated_digest: u64,
     validated_model_anchor: Option<Box<ValidatedModelAnchor>>,
+    /// TRIPWIRE — this candidate's model-anchor seat returned PR-8
+    /// `NotAttached`. Carried per-candidate rather than acted on in
+    /// `evaluate_rewire_candidates`, because the verdict is RECORDED during
+    /// candidacy and ENFORCED at commit; see
+    /// [`RewireCandidateBatch::winning_generation_index`].
+    seat_unattested: bool,
 }
 
 #[derive(Debug)]
@@ -1566,6 +1572,10 @@ impl CcoController {
         }
         let mut validated_anchors = BTreeMap::new();
         let mut anchor_foot_batches = 0;
+        // TRIPWIRE -- generation indices whose seat attestation returned PR-8
+        // `NotAttached`, carried onto each surviving candidate below so the
+        // verdict is available at the moment one of them WINS.
+        let mut unattested_seats = BTreeSet::<usize>::new();
         // F3 -- this batch's model-anchor seat-attestation transcript. The
         // empty-batch digest rather than zero, so "no anchor was proposed" and
         // "the attestation stopped running" are different values.
@@ -1638,7 +1648,15 @@ impl CcoController {
             contact_attestation_digest = attestation.digest;
             for (generation_index, refusal) in attested_indices.iter().zip(&attestation.refusals) {
                 // Same asymmetry as the terminal-growth path: OD-9 burial
-                // refuses, a `NotAttached` connectivity verdict is recorded.
+                // refuses, a `NotAttached` connectivity verdict is recorded
+                // here and enforced at commit by
+                // `RewireCandidateBatch::winning_generation_index`.
+                if matches!(
+                    refusal,
+                    Some(crate::designed_embed::ContactAttestationRefusal::NotAttached { .. })
+                ) {
+                    unattested_seats.insert(*generation_index);
+                }
                 if !matches!(
                     refusal,
                     Some(crate::designed_embed::ContactAttestationRefusal::BuriedSurface { .. })
@@ -1694,6 +1712,7 @@ impl CcoController {
                     },
                     evaluated_digest: candidate.forest.digest(),
                     validated_model_anchor: validated_anchors.remove(&generation_index),
+                    seat_unattested: unattested_seats.contains(&generation_index),
                 });
             } else {
                 refusals.push(RewireCandidateRefusal {
@@ -2149,6 +2168,7 @@ fn digest_anchor_refusals(word: &mut impl FnMut(u64), refusals: &[AnchorFootRefu
             // and reordering them would move every model's digest without any
             // geometry changing.
             AnchorFootRefusalReason::SeatBuriedSurface => 7,
+            AnchorFootRefusalReason::SeatNotAttached => 8,
         });
         word(provenance.physical_contact_id().unwrap_or(u64::MAX));
         word(provenance.sample_index() as u64);
@@ -2410,6 +2430,11 @@ fn grow_terminal_inner(
     let mut validated_anchors = BTreeMap::<usize, Box<ValidatedModelAnchor>>::new();
     let mut anchor_refusals = Vec::new();
     let mut anchor_foot_batches = 0;
+    // TRIPWIRE -- generation indices whose seat attestation returned PR-8
+    // `NotAttached`. Carried per-candidate out of the attestation batch below,
+    // because this verdict is RECORDED during candidacy and ENFORCED at commit;
+    // see the winner gate at the bottom of this function.
+    let mut unattested_seats = BTreeSet::<usize>::new();
     // F3 -- this terminal's model-anchor seat-attestation transcript. A terminal
     // with no seats still produces the empty-batch digest rather than zero, so
     // "no anchor was proposed" and "the attestation stopped running" are
@@ -2473,8 +2498,16 @@ fn grow_terminal_inner(
         for (index, refusal) in attested_indices.iter().zip(&attestation.refusals) {
             // OD-9 burial refuses; a `NotAttached` connectivity verdict is
             // RECORDED in the transcript digest above and left in the
-            // tournament. The disposition argument is on
+            // tournament -- and then ENFORCED at commit by the winner gate
+            // below, which is the only place a merely-measured seat could
+            // become printed geometry. The disposition argument is on
             // `attest_model_anchor_seats`.
+            if matches!(
+                refusal,
+                Some(crate::designed_embed::ContactAttestationRefusal::NotAttached { .. })
+            ) {
+                unattested_seats.insert(*index);
+            }
             if !matches!(
                 refusal,
                 Some(crate::designed_embed::ContactAttestationRefusal::BuriedSurface { .. })
@@ -2517,7 +2550,15 @@ fn grow_terminal_inner(
         .filter_map(|(candidate, survives)| survives.then_some(candidate))
         .collect();
     survivors.sort_by(|left, right| compare_candidates(left, right));
-    let Some(winner) = survivors.first() else {
+    // TRIPWIRE — the commit gate. This is the last statement before the
+    // `cco_winner_model_anchor` census counter and `apply_and_size`.
+    let Some(winner) = elect_committable_winner(
+        survivors,
+        &unattested_seats,
+        &mut validated_anchors,
+        &mut anchor_refusals,
+    )?
+    else {
         return Ok(TerminalCcoOutcome {
             winner: None,
             disposition: None,
@@ -2642,6 +2683,56 @@ fn compare_candidates(left: &EvaluatedCandidate, right: &EvaluatedCandidate) -> 
         .then(left.generation_index.cmp(&right.generation_index))
 }
 
+/// **TRIPWIRE — the terminal-growth commit gate for the PR-8 seat witness.**
+///
+/// Elects the cheapest survivor that may actually be committed, given
+/// `unattested_seats`: the generation indices whose model-anchor seat
+/// attestation returned PR-8 `NotAttached`.
+///
+/// **Recorded during candidacy, enforced at commit.** `NotAttached` is
+/// deliberately NOT a candidacy refusal for the CCO model anchor — see the
+/// disposition argument on [`attest_model_anchor_seats`]. The family is
+/// deliberately unseated until PR-7 `CCO_ANCHOR_MASK_AT_THE_SEAT` lands, so
+/// refusing every unseated anchor while it is still competing would land PR-7's
+/// family-killing consequence WITHOUT landing PR-7, which is exactly the
+/// accidental physics change OD-8 forbids. Measuring is honest there, because a
+/// candidate that loses never becomes geometry.
+///
+/// A WINNER is different in kind. It is one statement away from being a printed
+/// strut whose model end reached nothing at all, and its caller is the last
+/// place that can be observed: the next statements are the
+/// `cco_winner_model_anchor` census counter and the `apply_and_size` commit. So
+/// the winner, and only the winner, is held to the witness — through the same
+/// [`AnchorFootOutcome::Refused`] channel a breached foot ball uses, so the
+/// candidate simply leaves the tournament, the next survivor is considered, the
+/// terminal routes some other way, and nothing hard-fails (OD-4/PR-9).
+///
+/// When PR-7 seats this family, the witness refuses at candidacy like the other
+/// two contact families and this guard becomes unreachable.
+///
+/// Removing the refused anchor from `validated_anchors` is what makes the
+/// refusal total: the outcome's `validated_model_anchor` capability is drawn
+/// from that map, so a refused seat cannot leave with a capability.
+fn elect_committable_winner<'a>(
+    survivors: impl IntoIterator<Item = &'a EvaluatedCandidate>,
+    unattested_seats: &BTreeSet<usize>,
+    validated_anchors: &mut BTreeMap<usize, Box<ValidatedModelAnchor>>,
+    anchor_refusals: &mut Vec<AnchorFootRefusal>,
+) -> Result<Option<&'a EvaluatedCandidate>, CcoError> {
+    for candidate in survivors {
+        if !unattested_seats.contains(&candidate.generation_index) {
+            return Ok(Some(candidate));
+        }
+        let anchor = validated_anchors
+            .remove(&candidate.generation_index)
+            .ok_or(CcoError::InvalidGeometry)?;
+        anchor_refusals.push(AnchorFootRefusal::seat_not_attached(
+            anchor.seat().provenance(),
+        ));
+    }
+    Ok(None)
+}
+
 impl RewireCandidateBatch {
     pub(crate) fn ranked_candidates(&self) -> Vec<&RewireEvaluatedCandidate> {
         let mut ranked = self.candidates.iter().collect::<Vec<_>>();
@@ -2656,6 +2747,56 @@ impl RewireCandidateBatch {
                 )
         });
         ranked
+    }
+
+    /// The candidate this batch's tournament elects, with the TRIPWIRE applied.
+    ///
+    /// **Recorded during candidacy, enforced at commit.** This is the rewire
+    /// stage's winner-commit point: `rewire::try_reattach` replays exactly the
+    /// index returned here and splices the result into the live forest. A
+    /// model-anchor candidate whose PR-8 seat witness returned `NotAttached` is
+    /// therefore refused HERE rather than committed — through this stage's own
+    /// quarantine vocabulary, [`RewireCandidateRefusalReason::AnchorFoot`]
+    /// carrying [`AnchorFootRefusalReason::SeatNotAttached`], exactly as a
+    /// buried seat or a breached foot ball is — and the next-ranked candidate
+    /// is elected instead. Nothing hard-fails (OD-4/PR-9).
+    ///
+    /// The verdict is deliberately NOT a candidacy refusal for this family
+    /// (see the disposition argument on `attest_model_anchor_seats`): the
+    /// family is unseated until PR-7, and refusing an unseated anchor while it
+    /// is still competing would land PR-7's family-killing consequence without
+    /// landing PR-7. A candidate that WINS is no longer a measurement, so it
+    /// alone is held to the witness.
+    ///
+    /// When PR-7 seats this family, the witness refuses at candidacy like the
+    /// other two contact families and this guard becomes unreachable.
+    pub(crate) fn winning_generation_index(&mut self) -> Option<usize> {
+        loop {
+            let elected = self.ranked_candidates().first().map(|candidate| {
+                (
+                    candidate.evidence.generation_index,
+                    candidate.evidence.family,
+                    candidate.seat_unattested,
+                )
+            })?;
+            let (generation_index, family, seat_unattested) = elected;
+            if !seat_unattested {
+                return Some(generation_index);
+            }
+            let position = self
+                .candidates
+                .iter()
+                .position(|candidate| candidate.evidence.generation_index == generation_index)?;
+            self.candidates.swap_remove(position);
+            self.refusals.push(RewireCandidateRefusal {
+                generation_index,
+                family,
+                reason: RewireCandidateRefusalReason::AnchorFoot(
+                    crate::anchor::AnchorFootRefusalReason::SeatNotAttached,
+                ),
+            });
+            sort_rewire_refusals(&mut self.refusals);
+        }
     }
 
     pub(crate) fn snapshot_digest(&self) -> u64 {
@@ -2944,7 +3085,8 @@ fn apply_and_size(
 ///   (OD-4/PR-9). Burial is a statement about the SURFACE, and it is true
 ///   whatever the seating rule is.
 ///
-/// * **PR-8 `NotAttached` is RECORDED, not refused.** It is a statement about
+/// * **PR-8 `NotAttached` is RECORDED during candidacy and ENFORCED at
+///   commit.** It is a statement about
 ///   the SEATING RULE, and this family is deliberately unseated: PR-7
 ///   `CCO_ANCHOR_MASK_AT_THE_SEAT` is NOT landed, by an explicit decision the
 ///   design record reserves to the owner (OQ-10), so `apply_model_anchor` sets
@@ -2963,6 +3105,22 @@ fn apply_and_size(
 ///   deficits now that MAJOR-7 gives this family its real routed load. That is
 ///   the evidence OQ-10 was missing, and the engine now produces it instead of
 ///   the record arguing it.
+///
+///   **TRIPWIRE — recorded during candidacy, enforced at commit.** Recording is
+///   honest for a CANDIDATE, because a candidate that loses never becomes
+///   geometry. A candidate that WINS is a different object: it is one statement
+///   away from being a printed strut whose model end reached nothing at all. So
+///   a winner whose seat attested `NotAttached` is refused at the commit point
+///   instead — [`elect_committable_winner`] on the terminal-growth path and
+///   [`RewireCandidateBatch::winning_generation_index`] on the rewire path —
+///   through this same refusal channel, so the tournament simply elects the next
+///   survivor and nothing hard-fails. The guard is unreachable on today's
+///   corpus, where this family never wins; it is reached synthetically by
+///   `a_winning_but_unattested_model_anchor_is_refused_rather_than_committed`
+///   and its rewire sibling.
+///
+///   When PR-7 seats this family, the witness refuses at candidacy like the
+///   other two contact families and this guard becomes unreachable.
 ///
 /// The brace model rung is dispositioned the OTHER way — both verdicts drop the
 /// candidate — because PR-1 DOES seat it, so `NotAttached` there is a real
@@ -4041,6 +4199,7 @@ mod tests {
                         AnchorFootRefusalReason::StalePool => 5,
                         AnchorFootRefusalReason::FootBallBreached => 6,
                         AnchorFootRefusalReason::SeatBuriedSurface => 7,
+                        AnchorFootRefusalReason::SeatNotAttached => 8,
                     },
                     provenance.physical_contact_id().unwrap_or(u64::MAX),
                     provenance.sample_index(),
@@ -5726,6 +5885,7 @@ mod tests {
             },
             evaluated_digest: before,
             validated_model_anchor: None,
+            seat_unattested: false,
         };
         let anchors = empty_far_anchor_fixture();
         let geometry =
@@ -5938,6 +6098,223 @@ mod tests {
                 if retiring_root == keys.root
         ));
         assert!(replay.validated_model_anchor.is_some());
+    }
+
+    /// A genuine [`ValidatedModelAnchor`] — minted by the real foot-ball
+    /// validation, never assembled by the test, because its fields are private
+    /// to `anchor.rs` precisely so a capability cannot be forged.
+    fn genuine_validated_model_anchor() -> Box<ValidatedModelAnchor> {
+        let anchors = near_anchor_fixture(9.75);
+        let (forest, keys) = rewire_fixture();
+        let binding = RewireCcoBinding::bind_detached_subtree(
+            &forest,
+            keys.root,
+            BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
+        )
+        .unwrap();
+        replay_family(&forest, &binding, &anchors, CandidateFamily::ModelAnchor)
+            .validated_model_anchor
+            .expect("a replayed model anchor carries its validated capability")
+    }
+
+    /// **TRIPWIRE acceptance — terminal-growth winner-commit path.**
+    ///
+    /// The ruling is that the PR-8 seat witness is RECORDED during candidacy for
+    /// the CCO model-anchor family and ENFORCED at commit. This forges the case
+    /// today's corpus cannot reach — a model anchor that WINS its tournament
+    /// while its seat attested `NotAttached` — and asserts that
+    /// [`elect_committable_winner`], the last statement before the
+    /// `cco_winner_model_anchor` census counter and `apply_and_size`, refuses it
+    /// through the family's own refusal channel instead of committing it.
+    ///
+    /// The candidates are the frozen three of `candidate_source_ledger_vectors`,
+    /// where the model anchor is genuinely the cheapest and therefore genuinely
+    /// wins, and the capability withdrawn from it is a genuine
+    /// `ValidatedModelAnchor`. The ONLY forged input is the witness verdict.
+    #[test]
+    fn a_winning_but_unattested_model_anchor_is_refused_rather_than_committed() {
+        let (mut forest, request, _) = growth_fixture();
+        let finite = |value| Finite::new(value).unwrap();
+        let positive = |value| PositiveFinite::new(value).unwrap();
+        let host = forest.add_member(Member::new(MemberSpec {
+            p0_mm: [finite(1.0), finite(0.0), finite(20.0)],
+            p1_mm: [finite(1.0), finite(0.0), finite(0.0)],
+            r0_mm: TerminalEndRadius::new(positive(0.45)),
+            r1_mm: RootwardEndRadius::new(positive(0.65)),
+            kind: MemberKind::Trunk,
+            owner: Owner::Generated {
+                family: "tripwire-host".to_owned(),
+                ordinal: 0,
+            },
+            model_contact_end: None,
+            carried_mm2: finite(0.0),
+        }));
+        let config = Config::current().unwrap();
+        let descriptors = [
+            Descriptor::Plate {
+                xy: [0.0, 0.0],
+                top_z: 12.5,
+            },
+            Descriptor::ModelAnchor {
+                seat_index: 0,
+                point_mm: [3.0, 0.0, 5.0],
+            },
+            Descriptor::Bifurcate { host },
+        ];
+        let candidates = descriptors
+            .iter()
+            .enumerate()
+            .map(|(index, descriptor)| {
+                evaluate(&forest, &request, descriptor, index, &config)
+                    .unwrap()
+                    .expect("every frozen candidate is feasible")
+            })
+            .collect::<Vec<_>>();
+        let mut survivors = candidates.iter().collect::<Vec<_>>();
+        survivors.sort_by(|left, right| compare_candidates(left, right));
+
+        // NON-VACUITY, stated first: the model anchor really is this
+        // tournament's winner. If it ever stops being, this test would be
+        // asserting the gate on a candidate that was never going to commit.
+        assert_eq!(survivors[0].family, CandidateFamily::ModelAnchor);
+        assert_eq!(survivors[1].family, CandidateFamily::Bifurcation);
+        let anchor_index = survivors[0].generation_index;
+
+        // ...and with an ATTESTED seat it IS elected. The witness verdict is the
+        // only difference between the two halves of this test.
+        let mut attested_anchors = BTreeMap::new();
+        attested_anchors.insert(anchor_index, genuine_validated_model_anchor());
+        let mut attested_refusals = Vec::new();
+        let elected = elect_committable_winner(
+            survivors.iter().copied(),
+            &BTreeSet::new(),
+            &mut attested_anchors,
+            &mut attested_refusals,
+        )
+        .unwrap()
+        .expect("an attested winner is committable");
+        assert_eq!(elected.generation_index, anchor_index);
+        assert!(attested_refusals.is_empty());
+        assert!(attested_anchors.contains_key(&anchor_index));
+
+        // THE TRIPWIRE. Same tournament, same candidates, same capability —
+        // only the seat witness differs.
+        let anchor = genuine_validated_model_anchor();
+        let provenance = anchor.seat().provenance();
+        let mut validated_anchors = BTreeMap::new();
+        validated_anchors.insert(anchor_index, anchor);
+        let mut anchor_refusals = Vec::new();
+        let elected = elect_committable_winner(
+            survivors.iter().copied(),
+            &BTreeSet::from([anchor_index]),
+            &mut validated_anchors,
+            &mut anchor_refusals,
+        )
+        .unwrap()
+        .expect("the tournament still elects the next survivor");
+
+        // Refused, not committed — and the terminal routes some other way
+        // rather than the run failing (OD-4/PR-9).
+        assert_eq!(elected.family, CandidateFamily::Bifurcation);
+        assert_ne!(elected.generation_index, anchor_index);
+        // Through the family's EXISTING refusal channel, carrying the
+        // provenance the seat was discovered at, exactly as a breached foot
+        // ball reports.
+        assert_eq!(
+            anchor_refusals,
+            vec![AnchorFootRefusal::seat_not_attached(provenance)]
+        );
+        assert_eq!(
+            anchor_refusals[0].reason(),
+            AnchorFootRefusalReason::SeatNotAttached
+        );
+        // The refusal is TOTAL: the outcome's `validated_model_anchor` is drawn
+        // from this map, so a refused seat cannot leave still holding one.
+        assert!(!validated_anchors.contains_key(&anchor_index));
+
+        // And a tournament whose ONLY survivor is the unattested anchor elects
+        // nobody, rather than falling back to committing it.
+        let mut lone_anchors = BTreeMap::new();
+        lone_anchors.insert(anchor_index, genuine_validated_model_anchor());
+        let mut lone_refusals = Vec::new();
+        assert!(elect_committable_winner(
+            [survivors[0]],
+            &BTreeSet::from([anchor_index]),
+            &mut lone_anchors,
+            &mut lone_refusals,
+        )
+        .unwrap()
+        .is_none());
+        assert_eq!(lone_refusals.len(), 1);
+    }
+
+    /// **TRIPWIRE acceptance — rewire winner-commit path.**
+    ///
+    /// The same ruling at the other point a model anchor can enter the forest.
+    /// `near_anchor_fixture` is one of the two synthetic CCO fixtures that
+    /// approach their face perpendicularly, so its anchor's seat genuinely
+    /// attests `NotAttached` — nothing is forged here at all. It clears the foot
+    /// ball and the OD-9 burial screen, it is the batch's ranked winner, and
+    /// `rewire::try_reattach` replays and splices exactly the index elected
+    /// here.
+    #[test]
+    fn a_winning_but_unattested_rewire_model_anchor_is_refused_rather_than_replayed() {
+        let anchors = near_anchor_fixture(9.75);
+        let (forest, keys) = rewire_fixture();
+        let binding = RewireCcoBinding::bind_detached_subtree(
+            &forest,
+            keys.root,
+            BuildFrame::new(Finite::new(0.0).unwrap(), PositiveFinite::new(5.0).unwrap()),
+        )
+        .unwrap();
+
+        // NON-VACUITY: this candidate is committable in every other respect —
+        // it replays bit-exactly and carries a validated foot capability.
+        assert!(
+            replay_family(&forest, &binding, &anchors, CandidateFamily::ModelAnchor)
+                .validated_model_anchor
+                .is_some()
+        );
+
+        with_rewire_batch(&binding, &anchors, |mut batch, geometry| {
+            let (anchor_index, seat_unattested, family) = {
+                let ranked = batch.ranked_candidates();
+                let winner = ranked.first().expect("the tournament has a winner");
+                (
+                    winner.evidence.generation_index,
+                    winner.seat_unattested,
+                    winner.evidence.family,
+                )
+            };
+            assert_eq!(family, CandidateFamily::ModelAnchor);
+            assert!(
+                seat_unattested,
+                "the fixture must keep this seat's PR-8 witness at NotAttached, \
+                 or the tripwire is never reached"
+            );
+
+            // THE TRIPWIRE: the winner-commit gate elects nobody instead.
+            assert_eq!(batch.winning_generation_index(), None);
+            // The refusal joins this stage's own quarantine ledger, in the
+            // generation order that ledger is kept in.
+            assert!(batch.refusals().contains(&RewireCandidateRefusal {
+                generation_index: anchor_index,
+                family: CandidateFamily::ModelAnchor,
+                reason: RewireCandidateRefusalReason::AnchorFoot(
+                    AnchorFootRefusalReason::SeatNotAttached
+                ),
+            }));
+            assert!(batch
+                .refusals()
+                .windows(2)
+                .all(|pair| pair[0].generation_index <= pair[1].generation_index));
+            // Refused TOTALLY: the candidate is gone from the batch, so no later
+            // caller can replay the refused winner either.
+            assert!(matches!(
+                batch.replay_candidate(&binding, &forest, anchor_index, geometry),
+                Err(CcoError::RewireCandidateNotFound(index)) if index == anchor_index
+            ));
+        });
     }
 
     #[test]
