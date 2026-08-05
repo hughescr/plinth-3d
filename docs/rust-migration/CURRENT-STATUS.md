@@ -515,6 +515,14 @@ natively**, exactly as the reachability table above predicts. Nothing that was e
 pass failed. The Weeping Treant stops at the `KnnBatchLimits.max_work` cap
 (`298667520` required against `100000000`), a resource cap and not a geometry defect (FU-8).
 
+> **Superseded later on 2026-08-05 by the support resource-cap policy.** The kNN
+> work and candidate-grid caps are now model-scaled — `max(floor, per_face × faces)`
+> — on the treant's own measurement, so the treant clears both walls and now stops
+> at the Specialized `GateOperationLimit`. Every digest recorded in this section is
+> unchanged by that change: the floors govern for all seven reachable models. See
+> `docs/rust-migration/support-resource-caps-2026-08-05.md` and §3.10.8 of
+> `03-physics-and-constants.md`.
+
 All five previously recorded snapshot digests reproduce byte-identically, so **the
 contact-physics package moved no geometry on any model that was already reachable before
 it**. Two models *did* move — see the next subsection. Full numbers:
@@ -858,7 +866,8 @@ Everything else here is non-blocking.
 | FU-5 | Pin the `scar.rs` duplicate registry-reader (`crates/plinth-metrics/src/scar.rs:183-186`) the way the new delicacy M0 test pins the `plinth-mesh` reader | The duplication is now documented in the delicacy test comment but is still unpinned on the `plinth-metrics` side. |
 | FU-6 | `chitubox-native-preview` fix `9ffc829` still awaits review and cherry-pick | Sole live carrier of the unlanded embed-native-preview fallback. |
 | FU-7 | `make_toed_slab` parity investigation (vertex vs. interior containment probe) | The digest-moving containment-probe hardening was deferred; the current `make_toed_slab` required-table freeze (digest `11_859_964_443_161_510_103`) is **still PROVISIONAL** until this lands, and so is the 2026-08-05 seal re-pin (`4826202191472851835`) — the freeze is now provisional **on the new baseline**. See *Corpus defect fixes landed (2026-08-04, late)* and the cross-reference in *Post-merge interaction delta*. |
-| FU-8 | Treant resource caps defect — "production caps do not admit a real mini" | `KnnBatchLimits.max_work` (`100_000_000` vs. required `298_667_520`), `CandidateSurfaceGridLimit` (`67_108_864`), and Specialized `GateOperationLimit` (`2_000_000_000`) all need measurement-based raises before the Weeping Treant can clear the support stages behind perception. |
+| FU-8 | ~~Treant resource caps defect — "production caps do not admit a real mini"~~ | **PARTLY RESOLVED 2026-08-05, and the brief's framing was corrected by measurement.** Two of the three named caps were genuinely too small and are now model-scaled on the treant's own measurement: `KnnBatchLimits.max_work` → `max(100_000_000, 2048 × faces)` = 878,837,760, and `CandidateSurfaceGridLimit` → `max(67_108_864, 512 × faces)` = 219,709,440. The treant clears both. The third, Specialized `GateOperationLimit` (`2_000_000_000`), **was falsely accused and is deliberately NOT raised**: its reported `required: 2000000001` is `limit + 1`, a charge counter tripping on a selection sort in `unique_island_face_count` that a `BTreeSet` reduces ~117,000×. Three further caps nobody had seen (`max_load_operations`, `max_load_scratch_bytes`, `max_gate_peak_bytes`) are correctly refusing an 8.0 M-row load-eligibility explosion on a 429k-face mesh. Remaining work is algorithmic, tracked as FU-8b. See `docs/rust-migration/support-resource-caps-2026-08-05.md`. |
+| FU-8b | Treant support gate/load stage is quadratic | Three defects behind the now-cleared caps: (a) `unique_island_face_count` / `visit_served_owner_faces` in `specialized.rs` find distinct face ids by repeated-minimum selection sort, charging ~1.7e10 gate operations where a set charges 142,646; (b) `build_load_eligibility` appends `specialized_owner_faces` pairs without grouping, producing 7,988,078 rows for 429,120 faces (18.6 rows/face); (c) the extended-eligibility builder in `perception.rs` rescans `specialized_owner_faces` linearly per row, ~6e13 uncharged scalar comparisons single-threaded — `sample(1)` put 4,127/4,127 stack samples in that frame. All three are batch-first violations: group once by `face_id`, gather/scatter. Fix these, re-measure, and only then set constants for a scaled gate/load bound — and not on face count, since 24-face `make_raking_blade` already burns 31% of the gate cap. |
 | FU-9 | Hollow EDT margin defect | `grid_spec_from_bounds`'s no-padding path plus its all-foreground special case fabricate a distance ramp; the committed Sphere hollow goldens are wrong today. Est 8/16 pts; regenerates four `plinth-hollow` oracles. |
 | FU-10 | Per-layer polygon union under a fill rule | Owner-endorsed; supersedes the Tier-1 fallback. Candidate nomination must consume normalized layers per OD-9. |
 | FU-11 | Opt-in SDF/remesh repair mode | Roadmap item. |
@@ -914,14 +923,18 @@ Everything else here is non-blocking.
 
 ### Critical path (2026-08-05) — the next five items, in order
 
-5. **Treant resource caps (FU-8) — "production caps do not admit a real mini."** This is
-   first because it is the single largest blind spot in the whole engine: the corpus's only
-   real mini contributes nothing, so every physics conclusion currently rests on procedural
-   fixtures plus two primitives. The 2026-08-05 census reproduces the wall exactly —
-   `Perception(PointIndex("kNN work requires 298667520; limit is 100000000"))`. Raise
-   `KnnBatchLimits.max_work` on measurement, not by guess, then expect
-   `CandidateSurfaceGridLimit` (`67_108_864`) and the Specialized `GateOperationLimit`
-   (`2_000_000_000`) sitting behind it. Re-run the census after each lift; the treant's
+5. **Treant support gate/load quadratics (FU-8b)** — successor to FU-8, which is now
+   partly resolved. This stays first because it is still the single largest blind spot in
+   the whole engine: the corpus's only real mini contributes nothing, so every physics
+   conclusion currently rests on procedural fixtures plus two primitives. The two caps
+   that were genuinely too small are now model-scaled on measurement and the treant clears
+   both; it stops at `Specialized(GateOperationLimit { required: 2000000001, limit:
+   2000000000 })`, which is **not a cap to raise** — `required` is `limit + 1`, the charge
+   counter tripping on a selection sort. The work is the three quadratics listed under
+   FU-8b: remove them, re-measure, and only then decide whether the gate/load family needs
+   a scaled bound and what its constants are. Do **not** raise those caps first: with them
+   raised, the treant does not finish slowly, it hangs for hours in
+   `finalize_specialized_load_partition`. Re-run the census after each fix; the treant's
    curvature and self-intersection are what OD-9 and PR-4 were written for.
 
 6. **Model-anchor bundle — PR-7 seating + tournament-bias investigation + tripwire
