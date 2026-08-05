@@ -625,6 +625,12 @@ because CCO re-solves its tournament over the smaller contact set: on `make_toed
 Stub 65→64, Shoot 61→55, Trunk 57→58, Brace 0→1. **Zero contacts are ADDED** on either
 model, so the movement is a re-solve, not a substitution.
 
+> **CORRECTED (2026-08-05):** two cells above are wrong. The true `make_toed_slab` per-kind
+> movement is Stub 65→64, Shoot 62→55, Trunk 57→58, Brace 0→2 (sums: 184 → 179, matching the
+> pinned tuple `64 / 179 / 4826202191472851835`). Commit `f77dfe1`'s commit message carries
+> the superseded figures (Shoot 61→55, Brace 0→1); commit messages are immutable, so this
+> note is the correction of record.
+
 Re-pinned at `f77dfe1`; the attribution above is reproduced in that commit message and in
 the test's own doc comment, so a future reader does not have to come here for it.
 
@@ -661,6 +667,20 @@ digest from one against the other and conclude a regression.
    target and under-reports the total, which is how a single red integration test can be
    mistaken for a smaller or larger problem than it is. Every count quoted in this file is a
    `--no-fail-fast` count.
+
+### Gate counts
+
+The five-command gate set referenced above (**Gate GREEN**) as run at head `65c132a`:
+
+| command | result |
+| --- | --- |
+| `cargo test --workspace --offline --no-fail-fast` | 940 passed / 0 failed |
+| `cargo test --workspace --offline --no-fail-fast --all-features` | 941 passed / 0 failed |
+| `cargo clippy --workspace --all-targets --all-features --offline -- -D warnings` | clean |
+| `cargo fmt --all -- --check` | clean |
+| `git diff --check` | clean |
+
+This correction commit is the new integration head as of this write.
 
 ### Task-tracker cross-reference: the `make_toed_slab` freeze is still PROVISIONAL
 
@@ -777,9 +797,10 @@ regression.
 
 ## Active and pending work
 
-This table is the live inventory as of the 2026-08-05 pass: **7 branches, 6 worktrees**, of
-which `codex/embed-zones` and `census/embed-incidence-2026-08-04` are retired-in-substance
-(content fully contained in integration) and awaiting only ref/worktree deletion. Since the
+This table is the live inventory as of the 2026-08-05 pass: **5 branches, 5 worktrees**.
+`codex/embed-zones` and `census/embed-incidence-2026-08-04` were retired-in-substance
+(content fully contained in integration); both refs and the one worktree between them are
+now deleted — containment was proven before deletion, recorded in the rows beneath. Since the
 first 2026-08-04 pass, `codex/integrate-canonical-delicacy-o5`,
 `codex/delicacy-regressions`, `codex/prepare-interface-v2`, and `codex/prepare-interface`
 and their worktrees were deleted after their content was verified integrated. The rows for `codex/canonical-delicacy`, `codex/home-test-protocol`,
@@ -804,10 +825,14 @@ Use `git worktree list --porcelain` and `git branch --list` as the authoritative
 before assigning or removing anything. Do not delete or move a worktree merely because it
 is not listed above.
 
-The 2026-08-04 hygiene pass took branches from 54 to 8 and worktrees from 14 to 8; 39
-deletions are recoverable via `archive/2026-08-04/<branch>` tags, while the five vetoed
-`codex/support-*` drafts, `codex/m3-decimate-proxy`, and `codex/shared-surface-authority`
-were deleted **untagged** at the owner's direction and must not be resurrected. Earlier
+The 2026-08-04 hygiene pass took branches from 54 to 8 and worktrees from 14 to 8; the 39
+deletions were originally archive-tagged via `archive/2026-08-04/<branch>` tags, but those
+tags were removed at owner instruction on 2026-08-04 ("let git gc clear it out"). No
+`archive/2026-08-04/*` tags exist; the deleted branches' commits are unreferenced and
+unrecoverable once `git gc` runs, by deliberate owner ruling — same disposition as the five
+vetoed `codex/support-*` drafts, `codex/m3-decimate-proxy`, and `codex/shared-surface-authority`,
+which were deleted **untagged** at the owner's direction from the start and must not be
+resurrected. Earlier
 cleanup removed both stale `--list/` directories, approximately 278,241,280 bytes of
 generated-only output; they are regeneration-only and must never be committed.
 

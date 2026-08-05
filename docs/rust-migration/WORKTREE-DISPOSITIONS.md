@@ -12,6 +12,11 @@ Goal filter: keep only what serves *"Rust pipeline preps mini STLs, generates su
 
 Every DELETE is archive-tagged as `archive/2026-08-04/<branch>` **before** deletion, so all 39 removals are recoverable with `git branch <name> archive/2026-08-04/<name>`.
 
+> **CORRECTED (2026-08-05):** this described the tagging step as executed on 2026-08-04, but
+> the archive tags were removed at owner instruction that same day ("let git gc clear it
+> out"). No `archive/2026-08-04/*` tags exist. The deleted branches' commits are unreferenced
+> and unrecoverable once `git gc` runs, by deliberate owner ruling.
+
 Result: 54 branches -> 15; 14 worktrees -> 9.
 
 ## Standard of proof
