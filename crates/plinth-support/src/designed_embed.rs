@@ -788,9 +788,8 @@ impl SeatAttestationRow {
             }
             Ok(out)
         };
-        let radius = |value: f64| {
-            PositiveFinite::new(value).map_err(|_| DesignedMaskError::InvalidExtent)
-        };
+        let radius =
+            |value: f64| PositiveFinite::new(value).map_err(|_| DesignedMaskError::InvalidExtent);
         Ok(Member::new(crate::forest::MemberSpec {
             p0_mm: finite3(self.p0_mm)?,
             p1_mm: finite3(self.p1_mm)?,

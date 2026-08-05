@@ -1425,10 +1425,7 @@ impl CcoController {
         // F3 -- chain this terminal's seat-attestation transcript before any
         // disposition is recorded, so a terminal that hard-fails later still
         // cannot silently drop its attestation evidence.
-        self.extend_contact_attestation(
-            request.terminal_id,
-            outcome.contact_attestation_digest,
-        );
+        self.extend_contact_attestation(request.terminal_id, outcome.contact_attestation_digest);
         let disposition = match outcome.winner.clone() {
             Some(winner) => TerminalDisposition::Routed {
                 // `grow_terminal_inner` validated this authority immediately
@@ -2485,7 +2482,10 @@ fn grow_terminal_inner(
         // F3 -- PR-8/OD-9 at the seat, over exactly the anchors that survived
         // the foot ball, in ONE batch for this terminal.
         let attested_indices = validated_anchors.keys().copied().collect::<Vec<_>>();
-        let attested = validated_anchors.values().map(Box::as_ref).collect::<Vec<_>>();
+        let attested = validated_anchors
+            .values()
+            .map(Box::as_ref)
+            .collect::<Vec<_>>();
         let attestation = attest_model_anchor_seats(
             surface,
             request.stub_end_mm().map(Finite::get),

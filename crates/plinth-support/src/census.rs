@@ -852,11 +852,7 @@ pub fn finish(model: &str, snapshot: &SupportVerificationSnapshot<'_>) {
             .filter(|seat| seat.centreline && seat.rim_engaged == seat.rim_total)
             .count();
         let no_centre = rows.iter().filter(|seat| !seat.centreline).count();
-        let min_engaged = rows
-            .iter()
-            .map(|seat| seat.rim_engaged)
-            .min()
-            .unwrap_or(0);
+        let min_engaged = rows.iter().map(|seat| seat.rim_engaged).min().unwrap_or(0);
         row(
             model,
             "T8_seat_attestation",
