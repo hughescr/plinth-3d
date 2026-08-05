@@ -431,8 +431,15 @@ impl FinalizedContactLoads {
     }
 }
 
+/// The frozen tip-load policy.
+///
+/// `pub(crate)` so `crate::contact` can DELEGATE PR-4's area-sufficiency check
+/// to [`FrozenTipLoadPolicy::violates_safety_factor`] rather than duplicate the
+/// inequality.  Delegation inherits the 1e-6 safety-factor tolerance and makes
+/// the contact check agree with the tip-sizing check at the `[0.2, 1.0]` clamp
+/// boundaries by construction instead of by inspection.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct FrozenTipLoadPolicy {
+pub(crate) struct FrozenTipLoadPolicy {
     pressure_pa: f64,
     tensile_pa: f64,
     required_safety_factor: f64,
@@ -441,7 +448,35 @@ struct FrozenTipLoadPolicy {
 }
 
 impl FrozenTipLoadPolicy {
-    fn from_placeholders(policy: &M0PlaceholderConstants) -> Self {
+    /// The area ratio this policy implies:
+    /// `X = tensile_pa / (pressure_pa * safety_factor)`.
+    ///
+    /// This is an internal CONSISTENCY identity — a function of the
+    /// Python-era `tip_safety_factor` = 8 — and NOT an independent measurement
+    /// of the H2 plate's `X_ALLOWED` = 12.  Had the safety factor been 6 this
+    /// would read 16.  What is notable is only that it does not EXCEED the
+    /// measured allowance; that one-sided relationship is what the constants
+    /// gate asserts.
+    pub(crate) fn implied_area_ratio(self) -> f64 {
+        if self.pressure_pa > 0.0 && self.required_safety_factor > 0.0 {
+            self.tensile_pa / (self.pressure_pa * self.required_safety_factor)
+        } else {
+            0.0
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_contact_tests() -> Self {
+        Self {
+            pressure_pa: 3000.0,
+            tensile_pa: 0.288 * 1.0e6,
+            required_safety_factor: 8.0,
+            min_radius_mm: 0.200,
+            max_radius_mm: 1.0,
+        }
+    }
+
+    pub(crate) fn from_placeholders(policy: &M0PlaceholderConstants) -> Self {
         Self {
             pressure_pa: policy.peel_pressure_pa().diagnostic().get(),
             tensile_pa: policy.tensile_green_mpa().diagnostic().get() * 1.0e6,
@@ -461,7 +496,7 @@ impl FrozenTipLoadPolicy {
             .map_err(|_| GenericPerceptionError::NonFiniteFinalizedLoadTotal)
     }
 
-    fn violates_safety_factor(self, area_mm2: f64, radius_mm: PositiveFinite) -> bool {
+    pub(crate) fn violates_safety_factor(self, area_mm2: f64, radius_mm: PositiveFinite) -> bool {
         let force_n = area_mm2 * 1.0e-6 * self.pressure_pa;
         let radius_m = radius_mm.get() / 1.0e3;
         let stress_pa = force_n / (std::f64::consts::PI * radius_m.max(1.0e-9).powi(2));

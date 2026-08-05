@@ -315,6 +315,17 @@ impl FinalSupportAuthority<'_> {
     }
 }
 
+/// Record a stage failure for the census, when the census is compiled in.
+///
+/// A free function rather than an inline `census_record!` at each call site so
+/// the `error` binding is consumed in BOTH feature configurations — otherwise
+/// the ordinary (census-off) build warns on six unused closure parameters.
+fn note_stage_failure<E: std::fmt::Debug>(stage: &'static str, error: &E) {
+    crate::census_record!(crate::census::note_stage_error(stage, error));
+    #[cfg(not(feature = "census"))]
+    let _ = (stage, error);
+}
+
 /// Run the existing sealed preparation pipeline once and return only its final authority.
 pub fn run_support<'a>(
     hollowed: HollowedModel,
@@ -362,23 +373,32 @@ pub fn run_support<'a>(
         input.max_primitives,
         input.max_primitive_bytes,
     );
-    let prepared = prepare_support_run(hollowed, request, authority)
-        .map_err(|_| SupportRunError::Failed(SupportRunPhase::Preparation))?;
-    let routed = prepared
-        .route_initial_cco()
-        .map_err(|_| SupportRunError::Failed(SupportRunPhase::Routing))?;
-    let rewired = routed
-        .rewire()
-        .map_err(|_| SupportRunError::Failed(SupportRunPhase::Rewire))?;
-    let braced = rewired
-        .brace()
-        .map_err(|_| SupportRunError::Failed(SupportRunPhase::Brace))?;
-    let structured = braced
-        .structure()
-        .map_err(|_| SupportRunError::Failed(SupportRunPhase::Structure))?;
-    Ok(FinalSupportAuthority(structured.lower().map_err(|_| {
-        SupportRunError::Failed(SupportRunPhase::Lowering)
-    })?))
+    let prepared = prepare_support_run(hollowed, request, authority).map_err(|error| {
+        note_stage_failure("Preparation", &error);
+        SupportRunError::Failed(SupportRunPhase::Preparation)
+    })?;
+    let routed = prepared.route_initial_cco().map_err(|error| {
+        note_stage_failure("Routing", &error);
+        SupportRunError::Failed(SupportRunPhase::Routing)
+    })?;
+    let rewired = routed.rewire().map_err(|error| {
+        note_stage_failure("Rewire", &error);
+        SupportRunError::Failed(SupportRunPhase::Rewire)
+    })?;
+    let braced = rewired.brace().map_err(|error| {
+        note_stage_failure("Brace", &error);
+        SupportRunError::Failed(SupportRunPhase::Brace)
+    })?;
+    let structured = braced.structure().map_err(|error| {
+        note_stage_failure("Structure", &error);
+        SupportRunError::Failed(SupportRunPhase::Structure)
+    })?;
+    Ok(FinalSupportAuthority(structured.lower().map_err(
+        |error| {
+            note_stage_failure("Lowering", &error);
+            SupportRunError::Failed(SupportRunPhase::Lowering)
+        },
+    )?))
 }
 
 /// One physical contact admitted by the finalized CCO transcript for future
@@ -1308,6 +1328,15 @@ pub(crate) struct PreparedSupportDigests {
     loads: u64,
     geometry: u64,
     initial_forest: u64,
+    /// PR-8 — the contact-attestation transcript.
+    ///
+    /// This is retained ALONGSIDE `initial_forest` rather than folded into it
+    /// because the forest digest structurally cannot see an attestation
+    /// regression: an attested contact and an unattested-but-still-live one
+    /// are the same geometry, and a refusal that silently stopped firing
+    /// leaves no geometric trace at all. Without a separate digest, deleting
+    /// the owner's governing requirement would move nothing.
+    contact_attestation: u64,
     prepared: u64,
 }
 
@@ -1332,6 +1361,9 @@ impl PreparedSupportDigests {
     }
     pub(crate) const fn initial_forest(&self) -> u64 {
         self.initial_forest
+    }
+    pub(crate) const fn contact_attestation(&self) -> u64 {
+        self.contact_attestation
     }
     pub(crate) const fn prepared(&self) -> u64 {
         self.prepared
@@ -1525,12 +1557,28 @@ impl<'a> PreparedSupportRun<'a> {
                     pool: &pool,
                     config: anchor_config,
                     geometry: &geometry,
+                    // PR-8/OD-9 (F3). The seat attestation claims ONE PROCESS
+                    // RESOLUTION, and a layer height is a property of this run
+                    // rather than of the registry, so it travels on the route.
+                    process_resolution_mm: crate::contact::ContactPolicy::process_resolution_of(
+                        context.layers(),
+                    ),
                 },
             )?;
         }
 
         let transcript = controller.finalize_transcript(&initial, &plan, loads, &geometry)?;
         transcript.validate_integrity()?;
+        // PR-8/OD-9 (F3). The CCO model-anchor family's seat-attestation chain,
+        // extending the stub family's sealed head. Held on the route state, not
+        // in the CCO transcript: the transcript records what the attestation
+        // DID (a refusal appears as an `anchor_refusals` row) while this records
+        // that it RAN and what it measured, and those regress independently.
+        let contact_attestation_chain = extend_contact_attestation_chain(
+            context.digests.contact_attestation,
+            CONTACT_ATTESTATION_STAGE_ROUTE_CCO,
+            controller.contact_attestation_digest(),
+        );
         Ok(RoutedSupportRun {
             context,
             state: RoutedPlanState {
@@ -1538,9 +1586,35 @@ impl<'a> PreparedSupportRun<'a> {
                 initial,
                 controller,
                 transcript,
+                contact_attestation_chain,
             },
         })
     }
+}
+
+/// F3 — the stage tags of the contact-attestation chain, in run order.
+///
+/// The chain starts at `PreparedSupportDigests::contact_attestation`, the stub
+/// family's sealed head, and is extended once per stage that mints a model
+/// contact. Tags are distinct so two stages producing the same transcript are
+/// not the same link.
+const CONTACT_ATTESTATION_STAGE_ROUTE_CCO: u8 = 0x10;
+const CONTACT_ATTESTATION_STAGE_REWIRE_CCO: u8 = 0x11;
+const CONTACT_ATTESTATION_STAGE_BRACE_RUNG: u8 = 0x12;
+
+/// F3 — extend the run's contact-attestation chain by one stage.
+///
+/// The chain is what makes "all three families are attested" checkable at
+/// runtime. A forest digest cannot see an attestation regression in ANY of the
+/// three families, for the same reason in each case: an attested contact and an
+/// unattested one are the same geometry, and a refused CANDIDATE leaves no
+/// geometric trace at all.
+fn extend_contact_attestation_chain(head: u64, stage: u8, transcript: u64) -> u64 {
+    let mut hash = Fnv::new();
+    hash.u64(head);
+    hash.u64(u64::from(stage));
+    hash.u64(transcript);
+    hash.finish()
 }
 
 impl SupportRunContext<'_> {
@@ -1585,6 +1659,10 @@ impl SupportRunContext<'_> {
             || initial.initial_forest_digest() != Forest::new().digest()
             || initial.post_quarantine_forest_digest() != self.digests.initial_forest
             || initial.forest().digest() != self.digests.initial_forest
+            // PR-8. The attestation transcript is checked here for the same
+            // reason it is retained separately: the two forest-digest clauses
+            // above cannot detect an attestation that stopped happening.
+            || initial.contact_attestation_digest() != self.digests.contact_attestation
             || !initial.all_terminals_registered_before_quarantine()
         {
             return Err(SupportRoutingError::InitialAuthorityMismatch);
@@ -1631,6 +1709,10 @@ struct RoutedPlanState {
     initial: InitialContactBuild,
     controller: CcoController,
     transcript: FinalizedCcoTranscript,
+    /// PR-8/OD-9 (F3) — the run's contact-attestation chain after the routing
+    /// stage: the stub family's sealed head extended by the CCO model-anchor
+    /// seat transcript.
+    contact_attestation_chain: u64,
 }
 
 /// Opaque route-stage authority for the normalizer. It retains the exact prepared context and
@@ -1720,6 +1802,11 @@ impl<'a> RoutedSupportRun<'a> {
                 delicacy_by_face: Some(delicacy),
                 anchor_config,
                 geometry: &geometry,
+                // PR-8/OD-9 (F3). See the routing stage: the seat attestation
+                // claims one process resolution, a property of this run.
+                process_resolution_mm: crate::contact::ContactPolicy::process_resolution_of(
+                    context.layers(),
+                ),
             },
         )?;
         state
@@ -1728,6 +1815,13 @@ impl<'a> RoutedSupportRun<'a> {
             .validate()
             .map_err(RewireError::from)?;
         let post_rewire_forest_digest = state.initial.forest().digest();
+        // PR-8/OD-9 (F3). Rewire is the SECOND place the model-anchor family
+        // proposes a seat, so the chain gains a link here too.
+        let contact_attestation_chain = extend_contact_attestation_chain(
+            state.contact_attestation_chain,
+            CONTACT_ATTESTATION_STAGE_REWIRE_CCO,
+            report.contact_attestation_digest,
+        );
 
         Ok(RewiredSupportRun {
             context,
@@ -1736,6 +1830,7 @@ impl<'a> RoutedSupportRun<'a> {
                 rewire_report_digest: rewire_report_digest(&report),
                 report,
                 post_rewire_forest_digest,
+                contact_attestation_chain,
             },
         })
     }
@@ -1749,6 +1844,8 @@ struct RewiredPlanState {
     report: RewireReport,
     rewire_report_digest: u64,
     post_rewire_forest_digest: u64,
+    /// PR-8/OD-9 (F3) — the contact-attestation chain after the rewire stage.
+    contact_attestation_chain: u64,
 }
 
 /// Opaque hand-off after the rewire stage. Later stages can inspect evidence,
@@ -1838,12 +1935,26 @@ impl<'a> RewiredSupportRun<'a> {
             geometry.surface(),
             context.frame.plate_z_mm(),
             context.brace_penetration_limits(),
+            // PR-1/PR-2 need the run's OWN process resolution: the seat floor
+            // and the clearance margin are both one layer, and a layer is a
+            // property of this run's plan rather than of the registry.
+            crate::contact::ContactPolicy::process_resolution_of(context.layers()),
         )?;
         plan.forest.validate().map_err(BraceError::from)?;
         let report = transient_report(&plan.forest, context.frame.plate_z_mm())?;
         let post_brace_forest_digest = plan.forest.digest();
         let post_brace_report_digest = transient_report_digest(&report);
         let brace_plan_digest = brace_fixed_point_plan_digest(&plan);
+        // PR-8/OD-9 (F3). The third and last family: the brace model rung. With
+        // this link the chain covers all three families that mint a model
+        // contact -- stub, CCO model anchor, brace model rung -- which is what
+        // "the contact attestation is still running" has to mean to be
+        // checkable at all.
+        let contact_attestation_chain = extend_contact_attestation_chain(
+            state.contact_attestation_chain,
+            CONTACT_ATTESTATION_STAGE_BRACE_RUNG,
+            plan.contact_attestation_digest,
+        );
 
         Ok(BracedSupportRun {
             context,
@@ -1854,6 +1965,7 @@ impl<'a> RewiredSupportRun<'a> {
                 brace_plan_digest,
                 post_brace_forest_digest,
                 post_brace_report_digest,
+                contact_attestation_chain,
             },
         })
     }
@@ -1869,6 +1981,11 @@ struct BracedPlanState {
     brace_plan_digest: u64,
     post_brace_forest_digest: u64,
     post_brace_report_digest: u64,
+    /// PR-8/OD-9 (F3) — the run's complete contact-attestation chain: the stub
+    /// family's sealed head, then the CCO model anchor at routing, then at
+    /// rewire, then the brace model rung. All three families that mint a model
+    /// contact are links in it.
+    contact_attestation_chain: u64,
 }
 
 impl BracedPlanState {
@@ -1880,6 +1997,18 @@ impl BracedPlanState {
         self.plan.forest.validate().map_err(BraceError::from)?;
         if self.brace_plan_digest != brace_fixed_point_plan_digest(&self.plan) {
             return Err(SupportBraceError::BracePlanDigestMismatch);
+        }
+        // PR-8/OD-9 (F3). The chain is recomputed from its own links rather
+        // than trusted, so a state that was assembled with a stale or missing
+        // family transcript fails closed here rather than shipping.
+        if self.contact_attestation_chain
+            != extend_contact_attestation_chain(
+                self.rewired.contact_attestation_chain,
+                CONTACT_ATTESTATION_STAGE_BRACE_RUNG,
+                self.plan.contact_attestation_digest,
+            )
+        {
+            return Err(SupportBraceError::ContactAttestationChainMismatch);
         }
         if self.post_brace_forest_digest != self.plan.forest.digest() {
             return Err(SupportBraceError::FinalForestDigestMismatch);
@@ -2495,6 +2624,7 @@ impl SupportRunContext<'_> {
         }
         if state.routed.initial.initial_forest_digest() != Forest::new().digest()
             || state.routed.initial.post_quarantine_forest_digest() != self.digests.initial_forest
+            || state.routed.initial.contact_attestation_digest() != self.digests.contact_attestation
             || !state
                 .routed
                 .initial
@@ -2569,6 +2699,7 @@ impl SupportRunContext<'_> {
         }
         if state.initial.initial_forest_digest() != Forest::new().digest()
             || state.initial.post_quarantine_forest_digest() != self.digests.initial_forest
+            || state.initial.contact_attestation_digest() != self.digests.contact_attestation
             || !state.initial.all_terminals_registered_before_quarantine()
         {
             return Err(SupportRewireError::InitialAuthorityMismatch);
@@ -2706,6 +2837,10 @@ pub(crate) enum SupportBraceError {
     RewireDigestMismatch,
     #[error("sealed brace plan's final forest digest is stale")]
     FinalForestDigestMismatch,
+    #[error(
+        "the contact-attestation chain does not reproduce from its own per-family transcripts"
+    )]
+    ContactAttestationChainMismatch,
     #[error("sealed brace fixed-point plan digest is stale")]
     BracePlanDigestMismatch,
     #[error("sealed brace plan's transient report or report digest is stale")]
@@ -2844,6 +2979,7 @@ pub(crate) fn prepare_support_run<'a>(
         loads: loads_digest,
         geometry: geometry_digest,
         initial_forest: initial.post_quarantine_forest_digest(),
+        contact_attestation: initial.contact_attestation_digest(),
         prepared: 0,
     };
     digests.prepared = prepared_digest(&digests, frame, authority);
@@ -2950,6 +3086,7 @@ fn prepared_digest(
     hash.u64(digests.loads);
     hash.u64(digests.geometry);
     hash.u64(digests.initial_forest);
+    hash.u64(digests.contact_attestation);
     hash.f64(frame.plate_z_mm().get());
     hash.f64(frame.lift_mm().get());
     hash.f64(authority.layers.z0_mm());
@@ -3276,7 +3413,23 @@ fn brace_fixed_point_plan_digest(plan: &BraceFixedPointPlan) -> u64 {
         BraceFixedPointTermination::Converged => 0,
         BraceFixedPointTermination::IterationLimit => 1,
         BraceFixedPointTermination::Unplaceable => 2,
+        BraceFixedPointTermination::ContactRefused => 3,
     });
+    // PR-9. The refused keys are digested, not just the variant: two runs that
+    // both end in `ContactRefused` having refused DIFFERENT contacts are not
+    // the same run, and the forest digest cannot tell them apart either, since
+    // a quarantined member is absent from both.
+    hash.usize(plan.contact_refusals.len());
+    for key in &plan.contact_refusals {
+        hash.u32(key.slot());
+        hash.u32(key.generation());
+    }
+    // PR-8/OD-9 (F3). The model-rung seat-attestation transcript, for the same
+    // reason: a rung the attestation REFUSED never entered the forest, so its
+    // absence there is indistinguishable from a rung that merely lost its
+    // tournament. Only the transcript separates them, and only if it is
+    // digested.
+    hash.u64(plan.contact_attestation_digest);
     hash.finish()
 }
 
@@ -3959,6 +4112,7 @@ mod tests {
             &remote_brace_surface(),
             plate,
             brace_penetration_limits(),
+            0.05,
         )
         .expect("empty forest is a valid production brace input");
         assert_eq!(converged.termination, BraceFixedPointTermination::Converged);
@@ -3970,6 +4124,7 @@ mod tests {
             &remote_brace_surface(),
             plate,
             brace_penetration_limits(),
+            0.05,
         )
         .expect("isolated long trunk remains a valid production brace input");
         assert_eq!(
@@ -3985,6 +4140,7 @@ mod tests {
             &remote_brace_surface(),
             plate,
             brace_penetration_limits(),
+            0.05,
         )
         .expect("paired long trunks remain a valid production brace input");
         assert_eq!(
@@ -4058,6 +4214,8 @@ mod tests {
             additions: Vec::new(),
             iterations: 1,
             termination: BraceFixedPointTermination::Converged,
+            contact_refusals: Vec::new(),
+            contact_attestation_digest: 0,
         };
         let digest = brace_fixed_point_plan_digest(&base);
         for termination in [
@@ -4159,6 +4317,39 @@ mod tests {
                 .route_initial_cco()
                 .expect("required corpus routes");
             routed.state.initial.test_corrupt_initial_forest_digest();
+            assert!(matches!(
+                rejected_rewire_preflight(&routed),
+                SupportRewireError::InitialAuthorityMismatch
+            ));
+            assert!(matches!(
+                routed.rewire(),
+                Err(SupportRewireError::InitialAuthorityMismatch)
+            ));
+        });
+    }
+
+    /// PR-8. The attestation transcript is checked independently of every
+    /// forest digest, because a regression in which the attestation stops
+    /// happening moves NO geometry and every forest digest would stay put.
+    #[test]
+    fn stale_contact_attestation_digest_fails_closed_before_rewire_mutation() {
+        with_prepared_table(|prepared| {
+            let mut routed = prepared
+                .route_initial_cco()
+                .expect("required corpus routes");
+            // Non-vacuity: the forest digests are untouched by this seam, so
+            // the rejection below can only have come from the attestation
+            // clause.
+            let before = routed.state.initial.post_quarantine_forest_digest();
+            routed
+                .state
+                .initial
+                .test_corrupt_contact_attestation_digest();
+            assert_eq!(
+                routed.state.initial.post_quarantine_forest_digest(),
+                before,
+                "the seam must move no geometry"
+            );
             assert!(matches!(
                 rejected_rewire_preflight(&routed),
                 SupportRewireError::InitialAuthorityMismatch
@@ -5467,6 +5658,7 @@ mod tests {
                     crate::brace::BraceFixedPointTermination::Converged => 0,
                     crate::brace::BraceFixedPointTermination::IterationLimit => 1,
                     crate::brace::BraceFixedPointTermination::Unplaceable => 2,
+                    crate::brace::BraceFixedPointTermination::ContactRefused => 3,
                 },
             );
             let lowered = structured

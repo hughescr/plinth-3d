@@ -7435,6 +7435,7 @@ mod tests {
                 pool: &pool,
                 config: AnchorSearchConfig::current().unwrap(),
                 geometry: &geometry,
+                process_resolution_mm: 0.05,
             },
         );
         assert!(matches!(result, Err(CcoError::FinalizedContactMismatch)));

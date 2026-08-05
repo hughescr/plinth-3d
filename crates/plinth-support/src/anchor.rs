@@ -1145,6 +1145,39 @@ pub enum AnchorFootRefusalReason {
     StaleGeometry,
     StalePool,
     FootBallBreached,
+    /// OD-9 (F3) — the probe one process resolution OUTWARD of this seat tested
+    /// INSIDE the model, so the surface this anchor proposes to attach to is
+    /// buried: it lies within the printed solid and will not exist after the
+    /// per-layer union.
+    ///
+    /// This is NOT subsumed by `NearerNonExteriorObstruction` at discovery.
+    /// That screen reads `NativeSurface::exterior_face_mask`, which classifies
+    /// a whole FACE by sampling it; a buried PATCH of an otherwise exterior
+    /// face passes it, and the anchor then seats on geometry that will not
+    /// exist in the print.
+    ///
+    /// **This is the only seat-attestation verdict that refuses a model anchor
+    /// AT CANDIDACY.** The connectivity verdict is measured and recorded there
+    /// — see the disposition argument at `cco::attest_model_anchor_seats` — and
+    /// enforced later, at commit, by [`Self::SeatNotAttached`].
+    SeatBuriedSurface,
+    /// PR-8 (TRIPWIRE) — the winner of a CCO tournament proposed to attach at a
+    /// seat whose connectivity witness returned `NotAttached`: no sampled part
+    /// of its rootward end reached the solid over even one process resolution.
+    ///
+    /// **Recorded during candidacy, enforced at commit.** The `NotAttached`
+    /// verdict is deliberately NOT a candidacy refusal for this family, because
+    /// the family is deliberately unseated until PR-7
+    /// (`CCO_ANCHOR_MASK_AT_THE_SEAT`) lands; refusing it there would land PR-7's
+    /// family-killing consequence without landing PR-7. But a candidate that
+    /// WINS is no longer a measurement — it is about to become printed geometry
+    /// attached to nothing. This reason is that last gate, and it is a
+    /// commit-time-only reason: no candidate is ever refused with it while it is
+    /// still competing.
+    ///
+    /// When PR-7 seats this family, the witness refuses at candidacy like the
+    /// other two contact families and this reason becomes unreachable.
+    SeatNotAttached,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1161,6 +1194,31 @@ impl AnchorFootRefusal {
     #[must_use]
     pub const fn reason(self) -> AnchorFootRefusalReason {
         self.reason
+    }
+
+    /// F3 — the OD-9 seat-burial refusal channel.
+    ///
+    /// Crate-private and deliberately narrow: only the CCO stage may mint one,
+    /// and it can carry only [`AnchorFootRefusalReason::SeatBuriedSurface`]. A
+    /// public caller cannot forge a refusal, and no other reason can arrive
+    /// through it.
+    pub(crate) const fn seat_buried(provenance: AnchorCandidateProvenance) -> Self {
+        Self {
+            provenance,
+            reason: AnchorFootRefusalReason::SeatBuriedSurface,
+        }
+    }
+
+    /// TRIPWIRE — the commit-time PR-8 refusal channel.
+    ///
+    /// Same narrowness as [`Self::seat_buried`]: crate-private, mintable only by
+    /// the CCO stage, and able to carry only
+    /// [`AnchorFootRefusalReason::SeatNotAttached`].
+    pub(crate) const fn seat_not_attached(provenance: AnchorCandidateProvenance) -> Self {
+        Self {
+            provenance,
+            reason: AnchorFootRefusalReason::SeatNotAttached,
+        }
     }
 }
 

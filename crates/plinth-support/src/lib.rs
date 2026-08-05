@@ -11,6 +11,23 @@
 //! is the authority allowed to connect these leaves. There is no public `run` stub.
 #![forbid(unsafe_code)]
 
+/// Compile a census instrumentation site only when the `census` feature is on.
+///
+/// Wrapping the CALL SITE rather than making the recorder a no-op is the point
+/// (MAJOR-8): some sites build real per-row classification vectors to hand the
+/// census, and with the feature off none of that work is emitted at all.
+/// Invoke by path — `crate::census_record!(...)` — so module declaration order
+/// is irrelevant.
+macro_rules! census_record {
+    ($($body:tt)*) => {
+        #[cfg(feature = "census")]
+        {
+            $($body)*
+        }
+    };
+}
+pub(crate) use census_record;
+
 pub mod anchor;
 #[allow(
     dead_code,
@@ -22,6 +39,30 @@ mod brace;
     reason = "crate-private CCO controller is consumed by the pending support runner integration"
 )]
 mod cco;
+/// THROWAWAY INSTRUMENTATION -- 2026-08-04 embed-incidence census.
+///
+/// QUARANTINED behind the `census` cargo feature (MAJOR-8).  With the feature
+/// off — which is every ordinary build, including `cargo test --workspace` —
+/// this module does not exist and `census_record!` expands to nothing, so no
+/// instrumentation reaches a production code path.  The census example declares
+/// `required-features = ["census"]`, so `cargo run --features census --example
+/// embed_incidence_census` still produces the OD-8 delta measurement.
+#[cfg(feature = "census")]
+pub mod census;
+/// Contact physics (PR-1..PR-4): seat depth, mask extent, emergence
+/// admissibility and area sufficiency.  Pure and kernel-free by design, so the
+/// candidate-gather and clearance loops can call it per member without turning
+/// a batched stage into a per-item native call.  Crate-private and never
+/// re-exported, matching the sealing `designed_embed` was credited for.
+// The allow is scoped and temporary, exactly as for `designed_embed` above: this
+// commit lands the physics core and its unit tests as one reviewable unit, and
+// the production callers (brace/cco/anchor/initial/rewire/runner) land in the
+// commits that follow. The allow comes off with the last of them.
+#[allow(
+    dead_code,
+    reason = "contact physics core lands before its production callers; allow removed as they wire in"
+)]
+pub(crate) mod contact;
 mod coverage;
 mod coverage_measurement;
 // Crate-private on purpose: a `pub` mask domain is exactly why dead-code lints

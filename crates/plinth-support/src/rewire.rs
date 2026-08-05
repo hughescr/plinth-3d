@@ -36,6 +36,9 @@ pub(crate) struct RewireRequest<'a> {
     pub(crate) delicacy_by_face: Option<&'a [f64]>,
     pub(crate) anchor_config: AnchorSearchConfig,
     pub(crate) geometry: &'a AnchorGeometryAuthority<'a>,
+    /// F3 — the run's own process resolution, forwarded to the CCO
+    /// model-anchor seat attestation.
+    pub(crate) process_resolution_mm: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -57,6 +60,25 @@ pub(crate) struct RewireReport {
     pub(crate) move_evaluations: u64,
     pub(crate) cco_candidate_batches: u64,
     pub(crate) termination: RewireTermination,
+    /// PR-8/OD-9 (F3) — the model-anchor seat-attestation CHAIN over every CCO
+    /// candidate batch this optimization evaluated.
+    ///
+    /// Rewire is the second place the model-anchor family proposes a seat, and
+    /// it is the one that runs on EVERY sweep, so the transcript has to be
+    /// chained here rather than only at the initial routing pass.
+    pub(crate) contact_attestation_digest: u64,
+}
+
+/// F3 — fold one rewire CCO batch's transcript into the running chain, keyed by
+/// the batch ordinal so two sweeps producing identical transcripts in a
+/// different order are not the same chain.
+fn extend_rewire_contact_attestation(head: u64, batch: u64, stage: u64) -> u64 {
+    let mut digest = crate::forest::DigestWriter::new();
+    digest.tag(0x8f);
+    digest.u64(head);
+    digest.u64(batch);
+    digest.u64(stage);
+    digest.finish()
 }
 
 #[derive(Debug, Error)]
@@ -170,6 +192,9 @@ pub(crate) fn optimize(
         move_evaluations: 0,
         cco_candidate_batches: 0,
         termination: RewireTermination::FullSweepNoAcceptance,
+        // F3 -- a distinguished non-zero seed, so "no CCO batch ran" and "a
+        // batch ran and attested nothing" are different heads.
+        contact_attestation_digest: 0x8f00_0000_0000_0001,
     };
     let mut recent = VecDeque::with_capacity(config.roll_window);
     let cco = CcoController::default();
@@ -333,21 +358,29 @@ fn try_reattach(
         }
     };
     let before = total_volume_ml(forest)?;
-    let batch = cco.evaluate_rewire_candidates(
+    let mut batch = cco.evaluate_rewire_candidates(
         &binding,
         RewireAnchorRoute {
             samples: request.anchor_samples,
             delicacy_by_face: request.delicacy_by_face,
             config: request.anchor_config,
             geometry: request.geometry,
+            process_resolution_mm: request.process_resolution_mm,
         },
     )?;
     report.cco_candidate_batches += 1;
-    let Some(generation_index) = batch
-        .ranked_candidates()
-        .first()
-        .map(|candidate| candidate.evidence().generation_index)
-    else {
+    // F3 -- chain this batch's model-anchor seat-attestation transcript. It is
+    // chained BEFORE the early returns below, so a batch that produced no
+    // ranked candidate still cannot drop its attestation evidence.
+    report.contact_attestation_digest = extend_rewire_contact_attestation(
+        report.contact_attestation_digest,
+        report.cco_candidate_batches,
+        batch.seat_attestation_digest(),
+    );
+    // TRIPWIRE -- the winner is elected through the batch's own commit gate, so
+    // a model anchor whose seat witness said `NotAttached` is refused here
+    // rather than replayed and spliced into the live forest.
+    let Some(generation_index) = batch.winning_generation_index() else {
         return Ok(None);
     };
     let replay = batch.replay_candidate(&binding, forest, generation_index, request.geometry)?;
@@ -820,6 +853,14 @@ fn validate_changed_geometry(
     if p0.is_empty() {
         return Ok(true);
     }
+    crate::census_record!(crate::census::record_segment_batch(
+        "rewire_clearance",
+        &p0,
+        &p1,
+        &i0,
+        &i1,
+        &[]
+    ));
     let (clearances, _) = geometry
         .surface()
         .segment_clearance(&p0, &p1, &r0, &r1, config.standoff_mm, &i0, &i1)
@@ -1006,6 +1047,7 @@ mod tests {
             delicacy_by_face: Some(&FAR_DELICACY),
             anchor_config: AnchorSearchConfig::current().unwrap(),
             geometry,
+            process_resolution_mm: 0.05,
         }
     }
 
@@ -1230,6 +1272,7 @@ mod tests {
                 move_evaluations: 0,
                 cco_candidate_batches: 0,
                 termination: RewireTermination::FullSweepNoAcceptance,
+                contact_attestation_digest: 0x8f00_0000_0000_0001,
             };
             let roots_before = roots.digest();
             assert!(try_reattach(

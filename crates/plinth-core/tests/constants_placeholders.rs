@@ -533,6 +533,67 @@ fn evidence_and_placeholder_fixture_builds_one_212_entry_structural_batch() {
     );
 }
 
+/// The engine's implied tip area ratio must not EXCEED the H2 allowance.
+///
+/// `FrozenTipLoadPolicy::tip_radius_mm` sizes tips so that
+/// `pi*r^2 = A * peel_pressure_pa * tip_safety_factor / tensile_green_pa`,
+/// i.e. it already IS an area-ratio law with ratio
+/// `X_engine = tensile_green_pa / (peel_pressure_pa * tip_safety_factor)`.
+///
+/// THE ALLOWANCE ANCHOR IS `X_ALLOWED`.  There is exactly one registered
+/// area-ratio allowance in this engine and it is the Derived evidence constant
+/// `X_ALLOWED = floor(lower(X_STAR_CONE)/2) = 12`, chained from the measured
+/// plate interval.  Contact physics PR-4 reads THAT entry — it does not
+/// re-declare the number as a hand-typed placeholder, because a duplicate would
+/// let a plate recalibration move `X_STAR_CONE` while the contact threshold
+/// silently stayed at the stale hand-typed 12.  Reading the chained constant is
+/// what makes a recalibration flow through.
+///
+/// This is deliberately a ONE-SIDED bound and not an exact-equality coupling.
+/// `X_engine` = 12 is an internal CONSISTENCY identity that is a function of
+/// the arbitrary Python-era `tip_safety_factor` = 8 — had that been 6 the
+/// identity would read 16 — so it is NOT an independent measurement of
+/// `X_ALLOWED`.  Hard-coupling the two would let a future recalibration of
+/// `peel_pressure_pa` or `tensile_green_mpa` silently move the contact-area
+/// threshold, or break this unrelated gate.  What matters physically is only
+/// the safety direction: a LARGER implied ratio means less section per unit
+/// load than the calibration plate allows.
+#[test]
+fn engine_implied_tip_area_ratio_does_not_exceed_the_h2_allowance() {
+    let constants = M0PlaceholderConstants::new().expect("placeholder constants");
+    let peel_pressure_pa = constants.peel_pressure_pa().diagnostic().get();
+    let tensile_pa = constants.tensile_green_mpa().diagnostic().get() * 1.0e6;
+    let safety_factor = constants.tip_safety_factor().diagnostic().get();
+    // The allowance comes from the EVIDENCE registry's `X_ALLOWED`, the sole
+    // registered anchor, so a plate recalibration reaches this gate.
+    let evidence = M0EvidenceConstants::new().expect("evidence constants");
+    let allowance = *evidence.x_allowed().value();
+    assert!(
+        (allowance - 12.0).abs() < 1.0e-12,
+        "X_ALLOWED is the anchor and currently reads {allowance}"
+    );
+
+    let implied = tensile_pa / (peel_pressure_pa * safety_factor);
+    assert!(
+        implied <= allowance * (1.0 + 1.0e-12),
+        "engine implied area ratio {implied} exceeds the H2 allowance {allowance}: \
+         the tip policy would provision LESS section per unit load than the \
+         calibration plate permits"
+    );
+
+    // SOFT review trigger — records rather than fails.  A strictly smaller
+    // implied ratio is safe, but means the engine and the measured allowance
+    // have drifted apart and the pairing should be re-examined.
+    if implied < allowance * (1.0 - 1.0e-12) {
+        println!(
+            "REVIEW TRIGGER: engine implied tip area ratio {implied} is now strictly \
+             more conservative than the H2 allowance {allowance}. This is safe, but the \
+             pairing in contact-physics PR-4 should be re-examined against the current \
+             calibration evidence."
+        );
+    }
+}
+
 #[test]
 fn named_authority_paths_exist_without_runtime_ledger_parsing() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");

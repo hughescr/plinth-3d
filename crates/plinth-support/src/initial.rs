@@ -10,10 +10,17 @@ use thiserror::Error;
 
 use crate::{
     anchor::{AnchorGeometryAuthority, AnchorSearchError},
+    contact::ContactPolicy,
+    designed_embed::{
+        attest_members_batch, ContactAreaDeficit, ContactAttestationRefusal,
+        ContactAttestationRequest, DesignedMaskError, EndpointMaskValidationLimits,
+        PositiveFiniteMm,
+    },
     dyadic::CandidatePayloadConfig,
     forest::{
-        modeled_initial_contact_bytes, ContactEnd, Forest, ForestError, Member, MemberKey,
-        MemberKind, MemberSpec, Owner, RootwardEndRadius, TerminalEndRadius, TerminalLedgerState,
+        modeled_initial_contact_bytes, ContactEnd, DigestWriter, Forest, ForestError, Member,
+        MemberKey, MemberKind, MemberSpec, Owner, RootwardEndRadius, TerminalEndRadius,
+        TerminalLedgerState,
     },
     perception::{
         FinalizedContactLoads, GenericContactPlan, GenericPerceptionError, GenericPerceptionLimits,
@@ -99,6 +106,31 @@ pub(crate) struct CondemnedInitialStub {
     pub(crate) remaining_inside_axis_mm: f64,
 }
 
+/// PR-8 evidence for one stub whose model contact could NOT be affirmatively
+/// attested.
+///
+/// This is a candidate refusal routed to the same quarantine the overlap cutoff
+/// uses, exactly as OD-4 requires — never a hard pipeline failure. The stub, its
+/// terminal ledger record and its carried load all survive quarantine, so a
+/// refusal is visible and accountable rather than a support that silently
+/// vanished.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct UnattestedInitialStub {
+    pub(crate) terminal: u32,
+    pub(crate) key: MemberKey,
+    pub(crate) refusal: ContactAttestationRefusal,
+}
+
+/// PR-4 evidence for one stub that IS attached but over less area than its tip
+/// radius claims. Recorded, never quarantined — see
+/// [`crate::designed_embed::ContactAreaDeficit`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct DeficientInitialContact {
+    pub(crate) terminal: u32,
+    pub(crate) key: MemberKey,
+    pub(crate) deficit: ContactAreaDeficit,
+}
+
 /// Opaque binding for the completed all-stub construction/quarantine leaf.
 #[derive(Clone, Debug)]
 pub(crate) struct InitialContactBuild {
@@ -112,6 +144,10 @@ pub(crate) struct InitialContactBuild {
     routing_order: InitialRoutingOrder,
     terminals: Vec<InitialTerminalEvidence>,
     condemned: Vec<CondemnedInitialStub>,
+    unattested: Vec<UnattestedInitialStub>,
+    area_deficient: Vec<DeficientInitialContact>,
+    contact_attestation_digest: u64,
+    attested_contacts: usize,
     interval_batch_count: usize,
     queried_stubs: usize,
     scratch_bytes: usize,
@@ -162,6 +198,31 @@ impl InitialContactBuild {
     pub(crate) fn condemned(&self) -> &[CondemnedInitialStub] {
         &self.condemned
     }
+    /// PR-8 — every stub whose model contact was refused, with its reason.
+    #[must_use]
+    pub(crate) fn unattested(&self) -> &[UnattestedInitialStub] {
+        &self.unattested
+    }
+    /// PR-4 — every stub that is attached but over an interface too small for
+    /// its routed load. Live, not quarantined; see [`ContactAreaDeficit`].
+    #[must_use]
+    pub(crate) fn area_deficient(&self) -> &[DeficientInitialContact] {
+        &self.area_deficient
+    }
+    /// PR-8 — the attestation transcript digest.
+    ///
+    /// It covers EVERY contact's verdict, attested and refused alike, so a
+    /// contact that silently stopped being attested moves this number even
+    /// though the forest digest cannot see it (an attested contact and an
+    /// unattested-but-still-live one are the same geometry).
+    #[must_use]
+    pub(crate) const fn contact_attestation_digest(&self) -> u64 {
+        self.contact_attestation_digest
+    }
+    #[must_use]
+    pub(crate) const fn attested_contacts(&self) -> usize {
+        self.attested_contacts
+    }
     #[must_use]
     pub(crate) const fn interval_batch_count(&self) -> usize {
         self.interval_batch_count
@@ -190,6 +251,17 @@ impl InitialContactBuild {
     /// Test-only seam for downstream stage preflight rejection.
     pub(crate) fn test_corrupt_post_quarantine_forest_digest(&mut self) {
         self.post_quarantine_forest_digest = self.post_quarantine_forest_digest.wrapping_add(1);
+    }
+
+    #[cfg(test)]
+    /// PR-8 test-only seam for downstream stage preflight rejection.
+    ///
+    /// The point of this one is that it moves NO geometry: it is exactly the
+    /// shape of a regression in which the attestation quietly stops being
+    /// performed while every forest digest stays put, which is the failure the
+    /// separate transcript exists to catch.
+    pub(crate) fn test_corrupt_contact_attestation_digest(&mut self) {
+        self.contact_attestation_digest = self.contact_attestation_digest.wrapping_add(1);
     }
 
     #[cfg(test)]
@@ -231,6 +303,22 @@ pub(crate) enum InitialContactError {
     NativeQuery(String),
     #[error("initial stub arithmetic crossed the finite boundary for contact {contact_id}")]
     NonFiniteStub { contact_id: u64 },
+    /// PR-8. NOT a refused contact — a refused CONFIGURATION. The attestation
+    /// asks the kernel to prove the stub is fused to the model over
+    /// `default_contact_depth_mm` less one process resolution of margin (OD-4).
+    /// If the run's own layer height is at least the contact depth there is no
+    /// positive extent left to attest, so no contact in the run could be
+    /// attested and the correct answer is to refuse the run rather than to
+    /// quietly attest nothing. OD-4's "never a hard pipeline failure" governs a
+    /// refused genuine-contact STUB; it does not license silently disabling the
+    /// owner's governing requirement for every stub at once.
+    #[error(
+        "contact attestation needs a positive extent: contact depth {depth_mm} mm leaves nothing \
+         above the {margin_mm} mm process-resolution margin"
+    )]
+    UnattestableContactDepth { depth_mm: f64, margin_mm: f64 },
+    #[error("contact attestation batch failed: {0}")]
+    Attestation(DesignedMaskError),
 }
 
 struct StubSeed {
@@ -241,6 +329,14 @@ struct StubSeed {
     r1: PositiveFinite,
     carried_mm2: Finite,
     specialized: bool,
+    /// OD-9 — the attachment point displaced OUTWARD along the contact normal
+    /// by one process resolution. Computed here, at the only site that knows
+    /// the outward sense of `normal`, rather than re-derived downstream where
+    /// a sign slip would silently invert the screen.
+    exterior_probe: [f64; 3],
+    /// PR-4 non-regression (FU-CONTACT-1): the sizing policy was denied a
+    /// larger tip by the registered `tip_radius_max_legacy_mm` clamp.
+    tip_clamped_at_max: bool,
 }
 
 struct AxisBatchInput {
@@ -322,6 +418,54 @@ pub(crate) fn build_initial_contacts(
     }
     loads.validate_binding(plan.load_partition(), &contact_ids)?;
 
+    // PR-8/OD-9 sizing, fixed once for the whole run.
+    //
+    // Both numbers are the run's own process resolution — `max(LayerPlan
+    // heights)`, a datum the run already carries — and neither is invented.
+    //
+    // **As the attested extent.** The attestation asks whether an interface
+    // EXISTS and is renderable, and the resolvability floor is exactly one
+    // layer: a fused region thinner than one layer cannot be rendered by the
+    // slicer, so it cannot become a bond (PR-1(a)'s own argument, applied to
+    // the depth the kernel is asked to confirm rather than to the depth the
+    // stub is placed at).
+    //
+    // It is deliberately NOT the placement depth less a margin. That variant was
+    // implemented, measured and DISCARDED because it refused reachable corpus
+    // contacts that print today, and the refusals were geometry, not defects: a
+    // disc of radius `r` pressed into a convex surface of radius `R` has its RIM
+    // sitting `r^2/(2R)` shallower than its centre, so on a convex seat the outer
+    // rays fall short of a demand set at the placement depth while the contact is
+    // perfectly sound. (The refusal COUNT that used to stand here is struck under
+    // OQ-11: the discarded variant was never instrumented, so the committed
+    // census cannot reproduce the number. The geometric argument, which is what
+    // this call rests on, is unaffected.) Demanding placement depth of every rim
+    // ray conflates
+    // attestation with the mask-validity proof, which is a different question
+    // and legitimately does demand totality (see `validate_members_batch`).
+    // What the shallow rim actually costs is AREA, and that is measured and
+    // charged to PR-4 below rather than paid for by deleting the support.
+    //
+    // **As the OD-9 probe offset.** This reproduces the engine's own
+    // established exterior-ness idiom: `NativeSurface::exterior_face_mask`
+    // classifies a face by displacing sample points along its normal by 0.05 mm
+    // — one layer at the corpus pitch — and asking `inside`. The screen this
+    // stage runs is the per-attachment-point form of exactly that test, so the
+    // offset is inherited rather than chosen. It is deliberately the SMALLEST
+    // rung and not a ladder: a larger offset would walk further from the
+    // surface and could leave a buried patch's covering solid entirely,
+    // reporting "exterior" for the very case OD-9 exists to catch.
+    let attestation_margin_mm = ContactPolicy::process_resolution_of(layers);
+    let contact_depth_mm = policy.default_contact_depth_mm().diagnostic().get();
+    let attested_extent = PositiveFiniteMm::new(attestation_margin_mm).map_err(|_| {
+        InitialContactError::UnattestableContactDepth {
+            depth_mm: contact_depth_mm,
+            margin_mm: attestation_margin_mm,
+        }
+    })?;
+
+    let tip_radius_max_mm = policy.tip_radius_max_legacy_mm().diagnostic().get();
+
     let native_digest = geometry.digest();
     let mut seeds = Vec::new();
     seeds
@@ -348,10 +492,17 @@ pub(crate) fn build_initial_contacts(
             return Err(InitialContactError::InvalidContact { contact_id });
         }
         let unit = normal.map(|value| value / normal_length);
-        let depth = policy.default_contact_depth_mm().diagnostic().get();
+        let depth = contact_depth_mm;
         let span = policy.stub_length_mm().diagnostic().get();
         let p0 = std::array::from_fn(|axis| position[axis] - unit[axis] * depth);
         let p1 = std::array::from_fn(|axis| position[axis] + unit[axis] * span);
+        // `p1` is `position + unit * span`, so `unit` is the OUTWARD sense by
+        // construction and the probe steps away from the solid.
+        let exterior_probe: [f64; 3] =
+            std::array::from_fn(|axis| position[axis] + unit[axis] * attestation_margin_mm);
+        if !exterior_probe.iter().all(|value| value.is_finite()) {
+            return Err(InitialContactError::NonFiniteStub { contact_id });
+        }
         let r0 = loads.tip_radii_mm()[slot];
         let r1 = PositiveFinite::new(r0.get().max(policy.min_shoot_r_mm().diagnostic().get()))
             .map_err(|_| InitialContactError::NonFiniteStub { contact_id })?;
@@ -364,8 +515,24 @@ pub(crate) fn build_initial_contacts(
             carried_mm2: Finite::new(carried)
                 .map_err(|_| InitialContactError::InvalidContact { contact_id })?,
             specialized: !contact.demands().is_empty(),
+            exterior_probe,
+            // The sizing policy clamps at `tip_radius_max_legacy_mm`; a tip
+            // sitting exactly there is one the policy wanted bigger.
+            tip_clamped_at_max: r0.get() >= tip_radius_max_mm,
         });
     }
+
+    crate::census_record!(if crate::census::enabled() {
+        crate::census::record_contacts(contacts.iter().enumerate().map(|(slot, contact)| {
+            let normal = contact.normal();
+            let length = normal.iter().map(|value| value * value).sum::<f64>().sqrt();
+            (
+                contact.position_mm(),
+                normal.map(|value| value / length),
+                loads.tip_radii_mm()[slot].get(),
+            )
+        }));
+    });
 
     let routing_order = routing_order(&seeds)?;
     let (overlaps, interval_batch_count) = classify_initial_overlaps(
@@ -415,15 +582,79 @@ pub(crate) fn build_initial_contacts(
     debug_assert!(seeds
         .iter()
         .all(|seed| forest.terminal(seed.terminal).is_some()));
+
+    // PR-8 — AFFIRMATIVE CONTACT ATTESTATION.
+    //
+    // This is the owner's governing requirement: "be sure that the new code
+    // properly attaches the tips to the mini for all cases". Every stub the
+    // engine is about to hand to the routing stages has its model contact
+    // affirmatively verified here, before anything is built on top of it, at a
+    // cost of two batched native calls for the whole run.
+    // MAJOR-7 — PR-4's area law finally has real load. The policy is assembled
+    // from the same M0 placeholders every other contact-physics site reads, and
+    // `tip_load` is the engine's own `FrozenTipLoadPolicy`, so the H2 allowance
+    // is the registered `X_ALLOWED` chain rather than a second hand-typed
+    // threshold.
+    let contact_policy = ContactPolicy {
+        floor_depth_mm: contact_depth_mm,
+        process_resolution_mm: attestation_margin_mm,
+        standoff_mm: policy.standoff_mm().diagnostic().get(),
+        min_free_span_mm: policy.min_illegal_len_mm().diagnostic().get(),
+        ball_factor_stub: policy.ball_factor_stub().diagnostic().get(),
+        tip_load: crate::perception::FrozenTipLoadPolicy::from_placeholders(policy),
+    };
+    let attestation = attest_initial_contacts(
+        &seeds,
+        &forest,
+        &keys,
+        geometry,
+        attested_extent,
+        &contact_policy,
+    )?;
+    let mut unattested = Vec::new();
+    unattested
+        .try_reserve_exact(contact_count)
+        .map_err(|_| InitialContactError::Allocation("attestation evidence"))?;
+    let mut area_deficient = Vec::new();
+    area_deficient
+        .try_reserve_exact(contact_count)
+        .map_err(|_| InitialContactError::Allocation("area deficit evidence"))?;
+
     let cutoff = policy.min_illegal_len_mm().diagnostic().get();
-    for ((seed, key), overlap) in seeds.iter().zip(&keys).zip(&overlaps) {
-        if initial_overlap_exceeds_cutoff(*overlap, cutoff, distance(seed.p0, seed.p1)) {
-            forest.quarantine(*key)?;
+    for ((((seed, key), overlap), refusal), deficit) in seeds
+        .iter()
+        .zip(&keys)
+        .zip(&overlaps)
+        .zip(&attestation.refusals)
+        .zip(&attestation.deficits)
+    {
+        // Both quarantine reasons are recorded even when both fire, so the
+        // evidence never claims one cause for a stub that had two.
+        if let Some(refusal) = refusal {
+            unattested.push(UnattestedInitialStub {
+                terminal: seed.terminal,
+                key: *key,
+                refusal: *refusal,
+            });
+        }
+        if let Some(deficit) = deficit {
+            area_deficient.push(DeficientInitialContact {
+                terminal: seed.terminal,
+                key: *key,
+                deficit: *deficit,
+            });
+        }
+        let condemned_by_overlap =
+            initial_overlap_exceeds_cutoff(*overlap, cutoff, distance(seed.p0, seed.p1));
+        if condemned_by_overlap {
             condemned.push(CondemnedInitialStub {
                 terminal: seed.terminal,
                 key: *key,
                 remaining_inside_axis_mm: *overlap,
             });
+        }
+        if condemned_by_overlap || refusal.is_some() {
+            forest.quarantine(*key)?;
         }
     }
 
@@ -449,11 +680,197 @@ pub(crate) fn build_initial_contacts(
         routing_order,
         terminals,
         condemned,
+        contact_attestation_digest: attestation.digest,
+        attested_contacts: contact_count - unattested.len(),
+        unattested,
+        area_deficient,
         interval_batch_count,
         queried_stubs: contact_count,
         scratch_bytes,
         all_terminals_registered_before_quarantine: true,
     })
+}
+
+/// The verdicts of one PR-8 attestation stage, index-aligned with the seeds.
+struct InitialAttestation {
+    refusals: Vec<Option<ContactAttestationRefusal>>,
+    deficits: Vec<Option<ContactAreaDeficit>>,
+    digest: u64,
+}
+
+/// PR-8 — attest every initial contact stub in ONE pass.
+///
+/// Cost is two batched native calls for the whole run, independent of the
+/// contact count: one `inside` batch carrying the OD-9 exterior-ness probes and
+/// one `penetration_intervals_batch_bounded` carrying the endpoint-connectivity
+/// rows. A per-stub call here would be the batch-first defect, and it is the
+/// reason the verifier was written whole-forest in the first place.
+///
+/// What is proven, per contact:
+///
+/// * **OD-9** — the attachment point is on EXTERIOR surface. The probe one
+///   process resolution outward along the contact normal must test outside the
+///   model. Buried surface — a patch lying inside the printed solid because the
+///   input mesh self-interpenetrates — tests inside and is refused. No other
+///   check subsumes this one: a foot on a buried patch is genuinely on the
+///   surface, and an embedded tip there satisfies the connectivity proof below
+///   TRIVIALLY, because its whole neighbourhood is interior.
+/// * **PR-8** — the stub's own tapered cross-section is connected to its
+///   endpoint through the solid, and over HOW MUCH of that cross-section. The
+///   eight rim rays plus the centreline are sampled independently, so an
+///   interface that exists but is smaller than the tip disc is measured rather
+///   than either ignored or mistaken for absence.
+/// * **PR-4 (MAJOR-7)** — the H2 area-ratio allowance, applied to the ATTESTED
+///   interface and the REAL routed load. Until now `contact::admit`'s only
+///   production caller passed `carried_mm2 = 0.0`, so the law gated nothing.
+///
+/// Both refusals route to the caller's quarantine (OD-4); an area deficit is
+/// recorded rather than refused, for the reason given on
+/// [`ContactAreaDeficit`]. Only a BATCH-level integrity failure — a starved
+/// resource admission or a malformed request set — is an error, and none of
+/// those is a statement about any contact.
+fn attest_initial_contacts(
+    seeds: &[StubSeed],
+    forest: &Forest,
+    keys: &[MemberKey],
+    geometry: &AnchorGeometryAuthority<'_>,
+    extent: PositiveFiniteMm,
+    policy: &ContactPolicy,
+) -> Result<InitialAttestation, InitialContactError> {
+    let mut refusals = Vec::new();
+    refusals
+        .try_reserve_exact(seeds.len())
+        .map_err(|_| InitialContactError::Allocation("attestation verdicts"))?;
+    refusals.resize(seeds.len(), None);
+    let mut deficits = Vec::new();
+    deficits
+        .try_reserve_exact(seeds.len())
+        .map_err(|_| InitialContactError::Allocation("attestation area deficits"))?;
+    deficits.resize(seeds.len(), None);
+    if seeds.is_empty() {
+        let digest = attestation_digest(seeds, &refusals, &deficits, extent);
+        return Ok(InitialAttestation {
+            refusals,
+            deficits,
+            digest,
+        });
+    }
+
+    let members = keys
+        .iter()
+        .map(|key| forest.member(*key).expect("stub was just added"))
+        .collect::<Vec<_>>();
+    let requests = seeds
+        .iter()
+        .enumerate()
+        .map(|(index, seed)| ContactAttestationRequest {
+            member: index,
+            // Every stub declares its model contact at the terminalward end,
+            // which is the end the mint site seats into the model.
+            end: ContactEnd::Terminalward,
+            extent,
+            exterior_probe: seed.exterior_probe,
+            end_radius_mm: seed.r0.get(),
+            carried_mm2: seed.carried_mm2.get(),
+            tip_clamped_at_max: seed.tip_clamped_at_max,
+        })
+        .collect::<Vec<_>>();
+
+    // The sampling resolution is the attestation's own sensitivity knob, and it
+    // is deliberately tied to the extent being proven rather than left at a
+    // default: the majority step must be able to RESOLVE the OD-4 margin
+    // (OD-4's own words), so it is one tenth of the claimed extent.
+    let majority_step =
+        PositiveFiniteMm::new(extent.get() / 10.0).map_err(InitialContactError::Attestation)?;
+    let limits = EndpointMaskValidationLimits::for_batch(
+        geometry.surface(),
+        requests.len(),
+        majority_step,
+        ENDPOINT_ATTESTATION_SAMPLES_PER_SUBSEGMENT,
+    )
+    .map_err(InitialContactError::Attestation)?;
+
+    let outcomes = attest_members_batch(geometry.surface(), &members, &requests, limits, policy)
+        .map_err(InitialContactError::Attestation)?;
+    if outcomes.len() != seeds.len() {
+        return Err(InitialContactError::Attestation(
+            DesignedMaskError::CorruptKernelResult,
+        ));
+    }
+    for outcome in &outcomes {
+        // `member` is the request index, which is the seed index.
+        if outcome.member >= seeds.len() {
+            return Err(InitialContactError::Attestation(
+                DesignedMaskError::CorruptKernelResult,
+            ));
+        }
+        crate::census_record!(if crate::census::enabled() {
+            crate::census::record_contact_attestation(
+                seeds[outcome.member].terminal,
+                outcome.engagement.centreline,
+                outcome.engagement.rim_engaged,
+                outcome.engagement.rim_total,
+                outcome.attested_radius_mm,
+                outcome.verdict.is_err(),
+                outcome.area_deficit.is_some(),
+            );
+        });
+        refusals[outcome.member] = outcome.verdict.as_ref().err().copied();
+        deficits[outcome.member] = outcome.area_deficit;
+    }
+    let digest = attestation_digest(seeds, &refusals, &deficits, extent);
+    Ok(InitialAttestation {
+        refusals,
+        deficits,
+        digest,
+    })
+}
+
+/// Per-subsegment sampling for the attestation batch.
+///
+/// This matches [`crate::designed_embed::ENDPOINT_VALIDATION_OFFSET_RAYS`]: the
+/// witness needs the eight rim rays plus the centreline resolved at the same
+/// density it samples them, and using one number for both keeps the sampling
+/// isotropic around the stub.
+const ENDPOINT_ATTESTATION_SAMPLES_PER_SUBSEGMENT: usize = 8;
+
+/// The attestation transcript digest.
+///
+/// It covers every contact's verdict, ATTESTED ROWS INCLUDED, and the extent
+/// that was claimed. That totality is the point: a forest digest cannot see an
+/// attestation regression, because an attested contact and an unattested one
+/// are the same geometry until the refusal quarantines it, and a refusal that
+/// stopped firing leaves no geometric trace at all.
+fn attestation_digest(
+    seeds: &[StubSeed],
+    refusals: &[Option<ContactAttestationRefusal>],
+    deficits: &[Option<ContactAreaDeficit>],
+    extent: PositiveFiniteMm,
+) -> u64 {
+    let mut digest = DigestWriter::new();
+    digest.tag(0x8b);
+    digest.f64(extent.get());
+    digest.u64(seeds.len() as u64);
+    for ((seed, refusal), deficit) in seeds.iter().zip(refusals).zip(deficits) {
+        digest.u64(u64::from(seed.terminal));
+        digest.tag(match refusal {
+            None => 0,
+            Some(ContactAttestationRefusal::BuriedSurface { .. }) => 1,
+            Some(ContactAttestationRefusal::NotAttached { .. }) => 2,
+        });
+        // The deficit's measured radius is digested, not just its presence, so
+        // an interface that quietly shrinks is visible even while it stays on
+        // the same side of the allowance.
+        match deficit {
+            None => digest.tag(0),
+            Some(deficit) => {
+                digest.tag(1);
+                digest.f64(deficit.attested_radius_mm);
+                digest.f64(deficit.carried_mm2);
+            }
+        }
+    }
+    digest.finish()
 }
 
 fn classify_initial_overlaps(
@@ -935,6 +1352,8 @@ mod tests {
             r1: PositiveFinite::new(0.35).unwrap(),
             carried_mm2: Finite::new(carried_mm2).unwrap(),
             specialized,
+            exterior_probe: [0.0, 0.0, z],
+            tip_clamped_at_max: false,
         }
     }
 
@@ -1212,15 +1631,45 @@ mod tests {
                 .terminals()
                 .iter()
                 .all(|terminal| { build.forest().terminal_ledger(terminal.terminal).is_some() }));
-            assert_eq!(
-                build
-                    .terminals()
-                    .iter()
-                    .filter(|terminal| terminal.state == TerminalLedgerState::Quarantined)
-                    .count(),
-                build.condemned().len()
-            );
+            // Quarantine has TWO causes since PR-8: the post-mask overlap
+            // cutoff and a refused contact attestation, and a stub can carry
+            // both. The invariant is that the quarantined set is exactly the
+            // UNION of the two evidence lists — no quarantine without a
+            // recorded reason, and no recorded reason without a quarantine.
+            let quarantined = build
+                .terminals()
+                .iter()
+                .filter(|terminal| terminal.state == TerminalLedgerState::Quarantined)
+                .map(|terminal| terminal.terminal)
+                .collect::<std::collections::BTreeSet<_>>();
+            let explained = build
+                .condemned()
+                .iter()
+                .map(|stub| stub.terminal)
+                .chain(build.unattested().iter().map(|stub| stub.terminal))
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(quarantined, explained);
+            // An area deficit is evidence, NOT a quarantine: the contact stays
+            // live. Pinning that here is what stops a future edit from turning
+            // the deficit into a silent support deletion.
+            for deficient in build.area_deficient() {
+                assert!(
+                    !quarantined.contains(&deficient.terminal),
+                    "terminal {} carries an area deficit and must remain live",
+                    deficient.terminal
+                );
+            }
         }
+        // Non-vacuity: `make_toed_slab` really does exercise the refusal path,
+        // so the union assertion above is not comparing two empty sets.
+        assert!(
+            !toe.unattested().is_empty(),
+            "the toed slab is the fixture that carries a real attestation refusal"
+        );
+        assert_eq!(
+            table.attested_contacts() + table.unattested().len(),
+            table.queried_stubs()
+        );
     }
 
     #[test]
@@ -1275,6 +1724,8 @@ mod tests {
                     r1: record.r1_mm.get(),
                     carried_mm2: record.carried_mm2,
                     specialized: false,
+                    exterior_probe: record.p0_mm.map(Finite::get),
+                    tip_clamped_at_max: false,
                 }
             })
             .collect::<Vec<_>>();
