@@ -20,20 +20,27 @@ The integration authority is the clean worktree
 `/private/tmp/plinth-3d-pipeline-integration` on branch
 `codex/rust-pipeline-integration`.
 
-The current reviewed integration HEAD is `c6a0884a19c591f010d073b38e48e60495a469c9`
-(`merge: integrate preparation resource policy with sealed-input test classes`), reached by
-the **second 2026-08-04 integration pass** from `1673a1628b1af04ec180fc204db84675eec8fc10`:
+The current reviewed integration HEAD is `a3c7f6464dd219da7b7628183e96c740d5e194d6`
+(`merge: embed-zones Phase B safe groundwork (EmbedEnd->ContactEnd rename; package BLOCKED
+pending owner rulings)`), reached by the **second 2026-08-04 integration pass** from
+`1673a1628b1af04ec180fc204db84675eec8fc10`, plus the embed-zones Phase B safe-groundwork
+merge described below:
 
 | Commit | What |
 | --- | --- |
 | `1eb538c72b957606e48ba665df609a0e657d1485` | merge of `codex/delicacy-regressions` — M0-value and signed-zero delicacy regressions (test-only, +69/-0 inside `delicacy.rs`'s `mod tests`) |
 | `4c8881eaf4186b55a9f05254dde80769daad69bc` | comment correction on that test's sole-reader claim |
 | `c6a0884a19c591f010d073b38e48e60495a469c9` | merge of `codex/prepare-interface-v2` — preparation resource policy plus three sealed-input test classes |
+| `029ced3f97ccebb8ba6593efba2d732493c3c625` | `refactor(support): rename EmbedEnd to ContactEnd` from `codex/embed-zones` — safe groundwork only; see *Embed-zones Phase B outcome (2026-08-04)* |
+| `a3c7f6464dd219da7b7628183e96c740d5e194d6` | merge of the rename above — `merge: embed-zones Phase B safe groundwork` |
 
-The full gate is **green** at `c6a0884`: `cargo test --workspace --offline` 877 passed /
-0 failed; clippy `-D warnings` clean; `cargo fmt --all -- --check` clean; `git diff --check`
-clean. This is the first pass in which the workspace gate was fully green — the frozen
-coverage golden was regenerated in the `1673a16` lineage, so it no longer masks regressions.
+The full gate is **green** at `a3c7f64`: `cargo test --workspace --offline` **889 passed /
+0 failed**; clippy `-D warnings` clean; `cargo fmt --all -- --check` clean; `git diff --check`
+clean. (Full gate was previously green at `c6a0884` with 877 passed; the higher count is
+the embed-zones Phase A test surface — including `designed_embed.rs`'s own suite — entering
+the workspace via the `e64f0ba` merge, not new tests from the rename itself.) This is the
+first pass in which the workspace gate was fully green — the frozen coverage golden was
+regenerated in the `1673a16` lineage, so it no longer masks regressions.
 
 Earlier ancestry still holds: the canonical-delicacy merge
 `240d144e264cbe9ba27d45f6ff0194eb83a36ced`, the independently accepted SCAR remediation
@@ -164,6 +171,73 @@ surface**. Every support tip, embedded or merely touching, must be **affirmative
 to attach across its required contact area, in all cases**. Design and tests must measure
 contact area, not embedded volume.
 
+## Embed-zones Phase B outcome (2026-08-04) {#embed-phase-b-outcome-2026-08-04}
+
+Phase B ran as the authorized four-Opus-agent workflow — design, adversarial challenge,
+implement, independent re-review — against the *Owner embed-zones rulings* above. It
+**stopped by design**: only safe groundwork landed on `codex/embed-zones`, because the
+redesign itself surfaced a falsified premise that blocks further implementation until the
+owner rules on it.
+
+Two commits landed and are now merged to `codex/rust-pipeline-integration` as recorded
+under *Integration authority and verified snapshot* above: merge `e64f0ba` (bringing
+`codex/embed-zones` current with integration `5f006d4`, zero conflicts) and rename
+`029ced3` (`EmbedEnd` -> `ContactEnd`, `Member::embed_end` -> `model_contact_end`;
+`DigestWriter` tag bytes 0/1/2 unchanged, so every digest and golden is bit-identical). The
+independent re-reviewer verified the diff residue is identifier substitution plus doc
+comments only, and independently re-ran all four gates green at `029ced3` — **889 passed /
+0 failed**. `029ced3` is now merged to integration as `a3c7f64` by this commit.
+
+### The falsified premise
+
+OD-2 assumed the retired `.max(0.5)` cosine floor in `embed_inset_mm` (`brace.rs:1420-1422`,
+floors at `brace.rs:1381` and `:902`) was a grazing-incidence **rejector**. It is the
+opposite — the **conservative branch**. `seg_clear_one` returns `INFINITY` (candidate
+trivially **admitted**) when insets over-mask the segment
+(`rust/geom_kernel/src/queries.rs:1462-1466`), and `axis_illegal_rows` cannot flag an
+over-masked row (`brace.rs:1110` gate). Flooring cosine **up** at 0.5 makes the inset
+**smaller**, the mask smaller, the check **stricter**. At `|cos| < 0.5` the floored
+model-rung inset is a constant `0.3 + (0.5+0.6)/0.5 = 2.50 mm` against the legal rung range
+`[1.0, 5.0] mm` (`brace.rs:895-898`), so every grazing rung with `L <= 2.50 mm` is admitted
+unconditionally today.
+
+Consequences: an explicit `|cos| >= 0.5` rejection is strictly **more restrictive** than
+shipping behavior — it deletes candidates admitted today; the brief's fallback (true
+cosine, no floor) is **more permissive** — larger insets, more over-mask `INFINITY` admits,
+fewer `exact_clearance_violations` at `brace.rs:1295-1307`, fewer `pass_three_termination`
+hard errors at `brace.rs:385-391`. **Neither replacement is behavior-preserving**; every
+existing fixture stays green either way.
+
+Found by the implement agent, independently re-derived from source by the re-reviewer,
+constants confirmed at `placeholders.rs:1097`/`:1003`/`:1338`/`:1014`/`:1241`.
+
+### Re-review verdict: BLOCKED
+
+Contact-surface requirement (owner ruling 2026-08-04): **UNMET**. The Phase A
+endpoint-connectivity proof exists (`designed_embed.rs:519-590`) but has no production
+caller, and no touching-foot contact verification of any kind exists yet. Nothing was
+built beyond the safe groundwork above — the redesign correctly stopped rather than build
+on a falsified premise.
+
+### Open owner questions (OQ-1..OQ-7) — Phase B blocked on these
+
+- **OQ-1.** BLOCKING, carried forward and independently confirmed — OD-2 needs owner RE-APPROVAL, not revision. The retired `.max(0.5)` floor was never a grazing rejector. `seg_clear_one` returns INFINITY, i.e. trivially clear and candidate ADMITTED, whenever the insets over-mask the segment (rust/geom_kernel/src/queries.rs:1462-1466), and `axis_illegal_rows` cannot flag such a row either (brace.rs:1110). At |cos| < 0.5 the floored model-rung inset1 is a constant 0.3 + (0.5+0.6)/0.5 = 2.50 mm, so every grazing rung with L <= 2.50 mm inside the legal [1.0, 5.0] mm range (brace.rs:895-898) is admitted unconditionally today. Clamping cos UP made the mask SMALLER and the check STRICTER — the floor was the conservative branch. An explicit |cos| >= 0.5 rejection is therefore a NEW, strictly more restrictive rule that deletes candidates today's code admits. Does the owner want (a) the honest allowance with NO incidence rule, replacing the floor's real job with an explicit MASK BOUND (refuse or clamp the row when inset0+inset1 >= length) rather than an angle limit; (b) the angle limit anyway, with the corpus delta measured and owner-reviewed before it lands; or (c) the angle limit installed only where a corpus census first proves it inert?
+
+- **OQ-2.** BLOCKING, and mine to add — the brief's own fallback is not preserving either, so option (a) above does not escape the problem. The brief permits the allowance to 'reproduce the old arithmetic with the explicit true cosine, no floor'. Below |cos| = 0.5 that is arithmetically different in the OPPOSITE direction: the true cosine is smaller, so inset is LARGER, so MORE rows over-mask into INFINITY, so `exact_clearance_violations` (brace.rs:1295-1307) counts FEWER violations and `pass_three_termination` (brace.rs:385-391) hard-errors LESS often. That is a permissive change to a hard-error count. Does the owner accept a measured net delta in the surviving set (loosened by the allowance, tightened by any incidence rule), or must the replacement be arithmetically identical to the floored formula wherever the floor was active — which would mean keeping the clamp under a new name and honest documentation rather than deleting the arithmetic?
+
+- **OQ-3.** BLOCKING, carried forward and confirmed — MODEL_CONTACT_MIN_CONVEX_R_MM needs an owner number, and the design's 0.02 mm margin is calibrated at the wrong radius. The embedded tip radius is `loads.tip_radii_mm()[slot]` (initial.rs:355), clamped to [0.200, 1.0] mm by `FrozenTipLoadPolicy::tip_radius_mm` (perception.rs:455-462, placeholders.rs:1367/:1369), not min_shoot_r_mm = 0.35. Rim rays start at p0 + unit*r_tip (queries.rs:144-146) and exit a convex feature early by ~r_tip^2/(2R), so the coverage boundary R >= r_tip^2/(2*margin) runs from 1.0 mm at r = 0.2 to 25 mm at r = 1.0. No single value works: a conservative R_min quarantines fingers and blade edges (supports vanish, a printed-geometry change the contract forbids), while R_min = 0.5 forces a 1.0 mm allowance at the largest tip, exceeding the 0.30 mm placement depth entirely. Does the owner want (a) one conservative R_min with large tips refused on tight features, (b) a per-tip cap so an unprovable stub is placed but classified Touching rather than Embedded, or (c) placement depth increased for large tips?
+
+- **OQ-4.** BLOCKING, carried forward and confirmed — does the incidence limit govern CCO model-anchor struts? `cco::apply_model_anchor` (cco.rs:2745-2750) screens only `within_cone`, a lean check against vertical, never incidence against the surface normal, so a grazing strut is reachable and lands in `exact_clearance_rows` where the only consequence available is the violation count that `pass_three_termination` (brace.rs:385-391) converts into `Err(BraceError::ClearanceViolation)` at the third pass. That makes the limit enforceable only where enforcing it hard-fails the pipeline, contradicting OD-4's 'never a hard pipeline failure'. Does OD-2 authorize an incidence screen at the CCO model-anchor seat, a site that has never carried a screening rule and where refusal would be an ordinary candidate rejection, or are struts exempt?
+
+- **OQ-5.** OD-1 confirmation needed before the rename can be credited. The landed change keeps ONE field, renamed `model_contact_end`, with the embed-vs-touch split deferred to a recomputed OD-3 property that does not exist. Literal deletion is genuinely not implementable without changing printed geometry — `lower::is_embedded_taper` (lower.rs:356-359) gates `SupportSegmentKind::ContactTaper` and its `contact_depth` extension on this field, and the CCO strut is genuinely tapered (cco.rs:2755-2756) — but a single field means `validate_members_batch` still reads the contact declaration to decide who owes an embed extent (designed_embed.rs:335, :359), which is the conflation OD-1 orders removed. Does the owner want a SECOND field carrying the touching contact so the embed claim can be recomputed independently, or does the rename plus a classifier-gated totality predicate satisfy OD-1?
+
+- **OQ-6.** The contact-surface standard needs a definition before it can be built. A touching foot seated at the incidence limit passes any seating-plus-overhang test, since the tangential threshold r_T*sqrt(1-cos^2) tends to r_T as cos -> 0. If 'attach across its required contact area' means a measured mm^2 threshold, that is a physics number no ruling fixes and it needs its own calibration evidence. Confirm that seating-plus-non-overhang is the intended Phase B standard with a measured area threshold deferred, or supply the threshold.
+
+- **OQ-7.** Process question for the next pass. The corpus is provisioned (all 8 models including Sphere.stl and the Weeping Treant, symlinked into corpus/models/), so the census that would answer question 1 empirically — how many model-rung rows on the corpus actually have |cos| < 0.5, and how many of those are in the L <= 2.50 mm unconditional-admit band — is available today and requires no design decision. Should the next agent be directed to produce that census FIRST, as a standalone measurement commit, before any design revision is written?
+
+A corpus incidence census (branch `census/embed-incidence-2026-08-04` off `029ced3`) is
+being run to answer OQ-1/OQ-2 empirically and inform OQ-3; results will be recorded here.
+
 ### Embed-zones blocking findings {#embed-zones-blocked-2026-08-04}
 
 `codex/embed-zones` @ `68c3097` (1 file, `crates/plinth-support/src/forest.rs`, +753/-0)
@@ -268,7 +342,7 @@ via merge `240d144`; see the *2026-08-04 integration pass* table above.
 | Work | Branch/worktree | Commit(s) | Review state | Integration constraint |
 | --- | --- | --- | --- | --- |
 | grounded calibration artifacts | `codex/home-calibration-plate` at `/private/tmp/plinth-home-calibration-plate` | `634abdb`, `1541379` | **ACCEPT** and owner GUI-checked | Branch-only; independently review the two-commit series and its base before cherry-picking. |
-| endpoint-connected embed zones | `codex/embed-zones` at `/private/tmp/plinth-embed-zones` | `4b1d4b3` | **Phase A landed; re-review BLOCKED pending Phase B** (2026-08-04) | Do not integrate yet. Phase A fixed batching, made the 1/4/16 determinism test a real thread sweep, and sealed the module `pub(crate)`. Phase B is authorized under *Owner embed-zones rulings 2026-08-04* (OD-1 through OD-7) and must be completed and independently re-reviewed before integration. |
+| endpoint-connected embed zones | `codex/embed-zones` at `/private/tmp/plinth-embed-zones` | `029ced3` (rename groundwork also integrated as `a3c7f64`) | **Phase B stopped by design; package BLOCKED on OQ-1..OQ-7** (2026-08-04) | Do not integrate the package. The safe groundwork (`029ced3`, `EmbedEnd`->`ContactEnd` rename) is already integrated. Further implementation is blocked until the owner rules on OQ-1 through OQ-7 — see *Embed-zones Phase B outcome (2026-08-04)*. A corpus incidence census on `census/embed-incidence-2026-08-04` (off `029ced3`) is running to inform OQ-1/OQ-2/OQ-3. |
 
 The preparation-resource-policy row was **removed** on 2026-08-04: that work is now
 **INTEGRATED** as merge `c6a0884` via `codex/prepare-interface-v2`, and the superseded
@@ -301,8 +375,8 @@ the owner's untagged-deletion decision.
 | Worktree/branch | Observed head | State |
 | --- | --- | --- |
 | `/Users/craig/code/hughescr/dnd-campaigns/plinth-3d`, `master` | `5e37d8c` | main checkout and ref store; strict ancestor of integration |
-| `/private/tmp/plinth-3d-pipeline-integration`, `codex/rust-pipeline-integration` | `c6a0884` | clean; integration authority. Full gate green (877 tests, clippy/fmt/diff clean) |
-| `/private/tmp/plinth-embed-zones`, `codex/embed-zones` | `4b1d4b3` | Phase A landed; Phase B authorized under the owner rulings; re-review BLOCKED until Phase B completes |
+| `/private/tmp/plinth-3d-pipeline-integration`, `codex/rust-pipeline-integration` | `a3c7f64` | clean; integration authority. Full gate green (889 tests, clippy/fmt/diff clean) |
+| `/private/tmp/plinth-embed-zones`, `codex/embed-zones` (worktree now on `census/embed-incidence-2026-08-04`) | `029ced3` | Phase B stopped by design; safe groundwork (rename) merged to integration as `a3c7f64`; package BLOCKED on OQ-1..OQ-7; incidence census running — see *Embed-zones Phase B outcome (2026-08-04)* |
 | `/private/tmp/plinth-home-calibration-plate`, `codex/home-calibration-plate` | `1541379` | accepted branch-only; plate and loading-fixture generator authority |
 | `/private/tmp/plinth-chitubox-preview`, `codex/chitubox-native-preview` | `9ffc829` | only live carrier of the unlanded embed-native-preview fallback; cherry-pick onto integration |
 | `/private/tmp/plinth-normalization-controller`, `codex/normalization-controller` | `fc5a60d` | parked for independent review as candidate coverage-repair machinery |
@@ -366,14 +440,15 @@ should be scheduled deliberately.
    independent review returned ACCEPT, and the work merged as `c6a0884`. The superseded
    `codex/prepare-interface` was retired with a recorded containment proof.
 
-4. **Complete Phase B of `codex/embed-zones`** (branch head `4b1d4b3`). Phase A is landed:
-   batching fixed, the 1/4/16 determinism test is a real `PLINTH_THREADS` sweep, and the
-   module is sealed `pub(crate)`. Phase B is authorized and must implement the owner
-   rulings OD-1 through OD-7 recorded under *Owner embed-zones rulings 2026-08-04*,
-   including the normative reading that the verified quantity is the **contact surface**,
-   not an embed volume: every support tip must be affirmatively verified to attach across
-   its required contact area, in all cases. Obtain independent re-review before
-   integration; re-review remains BLOCKED until Phase B completes.
+4. **Phase B of `codex/embed-zones` stopped by design (2026-08-04) — do not resume it as an
+   implementation task.** Safe groundwork (the `EmbedEnd`->`ContactEnd` rename, `029ced3`)
+   is integrated as merge `a3c7f64`. The redesign correctly halted when it found OD-2's
+   premise falsified rather than build on it — see *Embed-zones Phase B outcome
+   (2026-08-04)*. The next actionable step is an **owner ruling on OQ-1 through OQ-7**, not
+   further Rust implementation. A corpus incidence census on
+   `census/embed-incidence-2026-08-04` (off `029ced3`) is running to give OQ-1/OQ-2/OQ-3
+   empirical grounding first. Re-review remains BLOCKED until the owner rules and a
+   subsequent Phase B pass implements the ruling.
 
 5. Complete former M7 in its documented gate order:
 
