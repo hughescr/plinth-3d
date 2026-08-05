@@ -12,7 +12,7 @@ use crate::{
     anchor::{AnchorGeometryAuthority, AnchorSearchError},
     dyadic::CandidatePayloadConfig,
     forest::{
-        modeled_initial_contact_bytes, EmbedEnd, Forest, ForestError, Member, MemberKey,
+        modeled_initial_contact_bytes, ContactEnd, Forest, ForestError, Member, MemberKey,
         MemberKind, MemberSpec, Owner, RootwardEndRadius, TerminalEndRadius, TerminalLedgerState,
     },
     perception::{
@@ -405,7 +405,7 @@ pub(crate) fn build_initial_contacts(
             r1_mm: RootwardEndRadius::new(seed.r1),
             kind: MemberKind::Stub,
             owner: Owner::Contact(seed.terminal),
-            embed_end: Some(EmbedEnd::Terminalward),
+            model_contact_end: Some(ContactEnd::Terminalward),
             carried_mm2: seed.carried_mm2,
         })));
     }
@@ -1123,7 +1123,7 @@ mod tests {
             );
             assert_eq!(record.kind, MemberKind::Stub);
             assert_eq!(record.owner, Owner::Contact(evidence.terminal));
-            assert_eq!(record.embed_end, Some(EmbedEnd::Terminalward));
+            assert_eq!(record.model_contact_end, Some(ContactEnd::Terminalward));
             assert_eq!(
                 record.carried_mm2.get(),
                 fixture.loads.carried_area_mm2()[slot]

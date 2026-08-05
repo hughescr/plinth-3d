@@ -6,9 +6,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use geom_kernel::SurfaceTriangleSoupDigest;
 use plinth_core::{Finite, PositiveFinite};
 use serde::Serialize;
 use thiserror::Error;
+
+use crate::designed_embed::PositiveFiniteMm;
 
 /// A stable reference while the member is live.  A retired slot increments
 /// its generation, so a reference cannot accidentally identify a reused slot.
@@ -94,11 +97,64 @@ pub enum Owner {
     Generated { family: String, ordinal: u32 },
 }
 
-/// The endpoint deliberately embedded in the model, if any.
+/// The endpoint at which this member meets the model surface, if any.
+///
+/// This was named `EmbedEnd`, which conflated three separate jobs:
+///
+/// 1. *this end meets the model* — read by SCAR/transit selection
+///    (`transit_measurement`), the joints `embedded` ball flag, the transient
+///    brace-endpoint exclusion, `lower::is_embedded_taper`, and the
+///    clearance-certificate fast path in [`Member::certificate_valid`];
+/// 2. *this end carries a designed clearance extent* — the `designed_embed`
+///    mask domain;
+/// 3. *this end gets a clearance cushion* — the retired `_embed_inset_arc_exact`
+///    inset.
+///
+/// Owner ruling OD-1 removes the *embed* claim (job 2) from the touching-foot
+/// families (brace model rungs, CCO model-anchor struts, and the CCO upper
+/// inheritance). It does **not** remove their *contact*. Deleting the field for
+/// those families would silently drop them out of every job-1 reader — most
+/// seriously `lower::is_embedded_taper`, where a CCO model-anchor strut is
+/// tapered (`r0 = cco_terminal_radius`, `r1 = MIN_SHOOT_R_MM`) and therefore
+/// does emit `SupportSegmentKind::ContactTaper` with a `contact_depth`
+/// extension today. That is printed geometry, which the approved package
+/// forbids changing.
+///
+/// So the field is renamed to what it always meant. The embed-vs-touch
+/// distinction becomes a recomputed family property (OD-3), never stored.
+///
+/// The [`DigestWriter`] tag bytes (0 = `None`, 1 = `Terminalward`,
+/// 2 = `Rootward`) are deliberately unchanged, so `Forest::digest`,
+/// [`mask_binding`], `QuarantineRecord` digests, the runner spec/snapshot
+/// hashes and every downstream golden are bit-identical across this rename.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
-pub enum EmbedEnd {
+pub enum ContactEnd {
     Terminalward,
     Rootward,
+}
+
+/// The immutable identity a validated designed clearance mask is bound to.
+///
+/// This deliberately stays beside [`DigestWriter`] and the private `Member`
+/// fields rather than moving with the mask domain, so the binding bytes are
+/// literally unchanged by that move: any member mutation bumps the clearance
+/// certificate's `geom_version`, which is part of `DigestWriter::member`, so a
+/// stale mask can never re-validate.
+pub(crate) fn mask_binding(
+    member: &Member,
+    end: ContactEnd,
+    extent: PositiveFiniteMm,
+    witness: u64,
+    surface_identity: SurfaceTriangleSoupDigest,
+) -> u64 {
+    let mut digest = DigestWriter::new();
+    digest.tag(0x45);
+    digest.contact_end(Some(end));
+    digest.f64(extent.get());
+    digest.u64(witness);
+    digest.bytes(surface_identity.as_bytes());
+    digest.member(member);
+    digest.finish()
 }
 
 /// Clearance proof carried with each member.
@@ -128,7 +184,7 @@ pub struct Member {
     r1_mm: RootwardEndRadius,
     kind: MemberKind,
     owner: Owner,
-    embed_end: Option<EmbedEnd>,
+    model_contact_end: Option<ContactEnd>,
     carried_mm2: Finite,
     certificate: ClearanceCertificate,
 }
@@ -143,7 +199,7 @@ pub struct MemberSpec {
     pub r1_mm: RootwardEndRadius,
     pub kind: MemberKind,
     pub owner: Owner,
-    pub embed_end: Option<EmbedEnd>,
+    pub model_contact_end: Option<ContactEnd>,
     pub carried_mm2: Finite,
 }
 
@@ -157,7 +213,7 @@ impl Member {
             r1_mm: spec.r1_mm,
             kind: spec.kind,
             owner: spec.owner,
-            embed_end: spec.embed_end,
+            model_contact_end: spec.model_contact_end,
             carried_mm2: spec.carried_mm2,
             certificate: ClearanceCertificate::fresh(),
         }
@@ -188,8 +244,8 @@ impl Member {
         &self.owner
     }
     #[must_use]
-    pub const fn embed_end(&self) -> Option<EmbedEnd> {
-        self.embed_end
+    pub const fn model_contact_end(&self) -> Option<ContactEnd> {
+        self.model_contact_end
     }
     #[must_use]
     pub const fn carried_mm2(&self) -> Finite {
@@ -215,7 +271,7 @@ impl Member {
         // An embed's checked interval changes when its radius changes, so the
         // Python fast path is unsound there.  Geometry/kind changes always
         // clear cert_radius below.
-        self.embed_end.is_none()
+        self.model_contact_end.is_none()
             && self
                 .certificate
                 .cert_radius_mm
@@ -231,7 +287,7 @@ impl Member {
     fn invalidate_radius(&mut self) {
         self.certificate.geom_version = self.certificate.geom_version.saturating_add(1);
         self.certificate.cert_version = None;
-        if self.embed_end.is_some() {
+        if self.model_contact_end.is_some() {
             self.certificate.cert_radius_mm = None;
         }
     }
@@ -255,7 +311,7 @@ pub struct QuarantineRecord {
     pub r1_mm: RootwardEndRadius,
     pub kind: MemberKind,
     pub owner: Owner,
-    pub embed_end: Option<EmbedEnd>,
+    pub model_contact_end: Option<ContactEnd>,
     pub carried_mm2: Finite,
     pub certificate: ClearanceCertificate,
     pub terminal_contacts: Vec<u32>,
@@ -271,7 +327,7 @@ impl QuarantineRecord {
             r1_mm: member.r1_mm,
             kind: member.kind.clone(),
             owner: member.owner.clone(),
-            embed_end: member.embed_end,
+            model_contact_end: member.model_contact_end,
             carried_mm2: member.carried_mm2,
             certificate: member.certificate,
             terminal_contacts,
@@ -292,7 +348,7 @@ pub(crate) fn terminal_member_matches_evidence(
         && evidence.r1_mm == member.r1_mm
         && evidence.kind == member.kind
         && evidence.owner == member.owner
-        && evidence.embed_end == member.embed_end
+        && evidence.model_contact_end == member.model_contact_end
         && evidence.carried_mm2 == member.carried_mm2
         && evidence.certificate == member.certificate
         && evidence.terminal_contacts.as_slice() == [terminal]
@@ -902,14 +958,14 @@ impl Forest {
         Ok(())
     }
 
-    pub fn set_embed_end(
+    pub fn set_model_contact_end(
         &mut self,
         key: MemberKey,
-        end: Option<EmbedEnd>,
+        end: Option<ContactEnd>,
     ) -> Result<(), ForestError> {
         self.require_terminal_mutation_allowed(key)?;
         let member = self.member_mut(key)?;
-        member.embed_end = end;
+        member.model_contact_end = end;
         member.invalidate_geometry();
         Ok(())
     }
@@ -1214,17 +1270,17 @@ pub(crate) fn modeled_initial_contact_bytes(contact_count: usize) -> Option<usiz
     std::mem::size_of::<ForestState>().checked_add(contact_count.checked_mul(per_contact)?)
 }
 
-struct DigestWriter(u64);
+pub(crate) struct DigestWriter(u64);
 
 impl DigestWriter {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self(0xcbf2_9ce4_8422_2325)
     }
     fn byte(&mut self, value: u8) {
         self.0 ^= u64::from(value);
         self.0 = self.0.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    fn tag(&mut self, value: u8) {
+    pub(crate) fn tag(&mut self, value: u8) {
         self.byte(value);
     }
     fn bool(&mut self, value: bool) {
@@ -1235,12 +1291,18 @@ impl DigestWriter {
             self.byte(byte);
         }
     }
-    fn u64(&mut self, value: u64) {
+    pub(crate) fn u64(&mut self, value: u64) {
         for byte in value.to_le_bytes() {
             self.byte(byte);
         }
     }
-    fn f64(&mut self, value: f64) {
+    fn bytes(&mut self, value: &[u8]) {
+        self.len(value.len());
+        for byte in value {
+            self.byte(*byte);
+        }
+    }
+    pub(crate) fn f64(&mut self, value: f64) {
         self.u64(value.to_bits());
     }
     fn len(&mut self, value: usize) {
@@ -1298,11 +1360,11 @@ impl DigestWriter {
             }
         }
     }
-    fn embed(&mut self, embed: Option<EmbedEnd>) {
+    pub(crate) fn contact_end(&mut self, embed: Option<ContactEnd>) {
         match embed {
             None => self.tag(0),
-            Some(EmbedEnd::Terminalward) => self.tag(1),
-            Some(EmbedEnd::Rootward) => self.tag(2),
+            Some(ContactEnd::Terminalward) => self.tag(1),
+            Some(ContactEnd::Rootward) => self.tag(2),
         }
     }
     fn certificate(&mut self, certificate: ClearanceCertificate) {
@@ -1321,7 +1383,7 @@ impl DigestWriter {
         self.f64(member.r1_mm.get().get());
         self.kind(&member.kind);
         self.owner(&member.owner);
-        self.embed(member.embed_end);
+        self.contact_end(member.model_contact_end);
         self.f64(member.carried_mm2.get());
         self.certificate(member.certificate);
     }
@@ -1334,7 +1396,7 @@ impl DigestWriter {
         self.f64(record.r1_mm.get().get());
         self.kind(&record.kind);
         self.owner(&record.owner);
-        self.embed(record.embed_end);
+        self.contact_end(record.model_contact_end);
         self.f64(record.carried_mm2.get());
         self.certificate(record.certificate);
         self.len(record.terminal_contacts.len());
@@ -1342,7 +1404,7 @@ impl DigestWriter {
             self.u32(*contact);
         }
     }
-    fn finish(self) -> u64 {
+    pub(crate) fn finish(self) -> u64 {
         self.0
     }
 }
@@ -1368,7 +1430,7 @@ mod tests {
                 family: "test".into(),
                 ordinal: 0,
             },
-            embed_end: None,
+            model_contact_end: None,
             carried_mm2: finite(1.0),
         })
     }
@@ -1589,7 +1651,7 @@ mod tests {
             r1_mm: RootwardEndRadius::new(radius(0.4)),
             kind: MemberKind::Stub,
             owner: Owner::Contact(1),
-            embed_end: Some(EmbedEnd::Terminalward),
+            model_contact_end: Some(ContactEnd::Terminalward),
             carried_mm2: finite(1.0),
         }));
         forest.issue_certificate(embed).unwrap();
@@ -1742,7 +1804,7 @@ mod tests {
                 family: "test".into(),
                 ordinal: 0,
             },
-            embed_end: None,
+            model_contact_end: None,
             carried_mm2: finite(1.0),
         }
     }

@@ -12,7 +12,7 @@ use rayon::prelude::*;
 use thiserror::Error;
 
 use crate::forest::{
-    EmbedEnd, Forest, ForestError, Member, MemberKey, MemberKind, MemberSpec, Owner,
+    ContactEnd, Forest, ForestError, Member, MemberKey, MemberKind, MemberSpec, Owner,
     RootwardEndRadius, TerminalEndRadius, TerminalLedgerEntry, TerminalLedgerState,
 };
 use crate::legacy_compat::{LegacyCompatibility, LegacyCompatibilityError};
@@ -555,7 +555,7 @@ fn validate_terminal_stub(
     if member.owner() != &Owner::Contact(terminal_id) {
         return Err(invalid("stub owner does not match terminal"));
     }
-    if member.embed_end() != Some(EmbedEnd::Terminalward) {
+    if member.model_contact_end() != Some(ContactEnd::Terminalward) {
         return Err(invalid("stub is not terminalward-embedded"));
     }
     if forest.parent_of(stub).is_some() {
@@ -2756,7 +2756,7 @@ fn apply_model_anchor(
         r1_mm: RootwardEndRadius::new(config.min_shoot_radius_mm),
         kind: MemberKind::Strut,
         owner: request.connector_owner.clone(),
-        embed_end: Some(EmbedEnd::Rootward),
+        model_contact_end: Some(ContactEnd::Rootward),
         carried_mm2: request.carried_mm2(),
     }));
     forest.set_parent(request.stub, Some(strut))?;
@@ -2860,7 +2860,7 @@ fn apply_bifurcation(
         r1_mm: host.rootward_radius_mm(),
         kind: host.kind().clone(),
         owner: host.owner().clone(),
-        embed_end: host.embed_end(),
+        model_contact_end: host.model_contact_end(),
         carried_mm2: host.carried_mm2(),
     }));
     forest.set_parent(upper, old_parent)?;
@@ -2870,8 +2870,8 @@ fn apply_bifurcation(
         host.terminal_radius_mm(),
         RootwardEndRadius::new(interpolated),
     )?;
-    if host.embed_end() == Some(EmbedEnd::Rootward) {
-        forest.set_embed_end(host_key, None)?;
+    if host.model_contact_end() == Some(ContactEnd::Rootward) {
+        forest.set_model_contact_end(host_key, None)?;
     }
     forest.set_parent(host_key, Some(upper))?;
     let child = forest.add_member(member(
@@ -3054,7 +3054,7 @@ fn member(
         r1_mm: RootwardEndRadius::new(r1),
         kind,
         owner: request.connector_owner.clone(),
-        embed_end: None,
+        model_contact_end: None,
         carried_mm2: request.carried_mm2(),
     }))
 }
@@ -3085,12 +3085,12 @@ fn clearance_rows(forest: &Forest, snapshot: &Forest, config: &Config) -> Vec<Cl
             p1: member.p1_mm().map(Finite::get),
             r0: member.terminal_radius_mm().get().get(),
             r1: member.rootward_radius_mm().get().get(),
-            inset0: if member.embed_end() == Some(EmbedEnd::Terminalward) {
+            inset0: if member.model_contact_end() == Some(ContactEnd::Terminalward) {
                 config.contact_depth_mm
             } else {
                 0.0
             },
-            inset1: if member.embed_end() == Some(EmbedEnd::Rootward) {
+            inset1: if member.model_contact_end() == Some(ContactEnd::Rootward) {
                 config.standoff_mm
             } else {
                 0.0
@@ -3212,7 +3212,7 @@ fn o10_uniform_radius_for_span(
             family: "cco-price".to_owned(),
             ordinal: 0,
         },
-        embed_end: None,
+        model_contact_end: None,
         carried_mm2,
     }));
     let compatibility = LegacyCompatibility::o10_live_current_support_and_raft();
@@ -4197,7 +4197,7 @@ mod tests {
             r1_mm: RootwardEndRadius::new(PositiveFinite::new(0.2).unwrap()),
             kind: MemberKind::Stub,
             owner: Owner::Contact(0),
-            embed_end: Some(EmbedEnd::Terminalward),
+            model_contact_end: Some(ContactEnd::Terminalward),
             carried_mm2: Finite::new(1.0).unwrap(),
         });
         let key = key_source.add_member(temporary);
@@ -4233,7 +4233,7 @@ mod tests {
             r1_mm: RootwardEndRadius::new(positive(0.73)),
             kind: MemberKind::Stub,
             owner: Owner::Contact(9),
-            embed_end: Some(EmbedEnd::Terminalward),
+            model_contact_end: Some(ContactEnd::Terminalward),
             carried_mm2: finite(1.0),
         }));
         forest.register_terminal(9, stub).unwrap();
@@ -4263,7 +4263,7 @@ mod tests {
                     family: "murray-vector".to_owned(),
                     ordinal: 0,
                 },
-                embed_end: None,
+                model_contact_end: None,
                 carried_mm2: finite(0.0),
             })
         };
@@ -4318,7 +4318,7 @@ mod tests {
                     family: "cache-generation-vector".to_owned(),
                     ordinal: 0,
                 },
-                embed_end: None,
+                model_contact_end: None,
                 carried_mm2: finite(1.0),
             })
         };
@@ -4355,7 +4355,7 @@ mod tests {
                 family: "cadence-host".to_owned(),
                 ordinal: 0,
             },
-            embed_end: None,
+            model_contact_end: None,
             carried_mm2: finite(1.0),
         }));
         let skipped = (first_terminal..first_terminal + count)
@@ -4367,7 +4367,7 @@ mod tests {
                     r1_mm: RootwardEndRadius::new(positive(0.35)),
                     kind: MemberKind::Stub,
                     owner: Owner::Contact(terminal),
-                    embed_end: Some(EmbedEnd::Terminalward),
+                    model_contact_end: Some(ContactEnd::Terminalward),
                     carried_mm2: finite(1.0),
                 }));
                 forest.register_terminal(terminal, stub).unwrap();
@@ -4700,7 +4700,7 @@ mod tests {
                 family: "binding-vector".to_owned(),
                 ordinal: 0,
             },
-            embed_end: None,
+            model_contact_end: None,
             carried_mm2: Finite::new(2.0).unwrap(),
         }));
         assert_eq!(
@@ -4724,7 +4724,7 @@ mod tests {
             r1_mm: request.stub_snapshot.rootward_radius_mm(),
             kind: MemberKind::Stub,
             owner: Owner::Contact(8),
-            embed_end: Some(EmbedEnd::Terminalward),
+            model_contact_end: Some(ContactEnd::Terminalward),
             carried_mm2: request.stub_snapshot.carried_mm2(),
         }));
         assert!(matches!(
@@ -4744,7 +4744,7 @@ mod tests {
             r1_mm: RootwardEndRadius::new(positive(0.35)),
             kind: MemberKind::Stub,
             owner: Owner::Contact(7),
-            embed_end: Some(EmbedEnd::Terminalward),
+            model_contact_end: Some(ContactEnd::Terminalward),
             carried_mm2: finite(2.0),
         }));
         forest.register_terminal(7, stub).unwrap();
@@ -4864,7 +4864,7 @@ mod tests {
                 family: "rewire-vector".to_owned(),
                 ordinal,
             },
-            embed_end: None,
+            model_contact_end: None,
             carried_mm2: finite(2.0),
         })
     }
@@ -5788,7 +5788,7 @@ mod tests {
                 family: "source-ledger-host".to_owned(),
                 ordinal: 0,
             },
-            embed_end: None,
+            model_contact_end: None,
             carried_mm2: finite(4.0),
         }));
         let unrelated = forest.add_member(Member::new(MemberSpec {
@@ -5801,7 +5801,7 @@ mod tests {
                 family: "unrelated-undersized-parity-guard".to_owned(),
                 ordinal: 0,
             },
-            embed_end: None,
+            model_contact_end: None,
             carried_mm2: finite(0.0),
         }));
         let unrelated_before = forest.member(unrelated).unwrap().clone();

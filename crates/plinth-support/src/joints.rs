@@ -8,7 +8,9 @@
 use plinth_core::{Finite, PositiveFinite};
 use thiserror::Error;
 
-use crate::forest::{EmbedEnd, Forest, Member, MemberKey, MemberKind, Owner, TerminalLedgerState};
+use crate::forest::{
+    ContactEnd, Forest, Member, MemberKey, MemberKind, Owner, TerminalLedgerState,
+};
 
 const MODEL_FOOT_FACTOR: f64 = 1.4;
 const COINCIDE_TOL_MM: f64 = 0.15;
@@ -608,7 +610,7 @@ struct LiveMember {
     r1: f64,
     kind: MemberKind,
     owner: Owner,
-    embed_end: Option<EmbedEnd>,
+    model_contact_end: Option<ContactEnd>,
 }
 
 impl LiveMember {
@@ -621,7 +623,7 @@ impl LiveMember {
             r1: member.rootward_radius_mm().get().get(),
             kind: member.kind().clone(),
             owner: member.owner().clone(),
-            embed_end: member.embed_end(),
+            model_contact_end: member.model_contact_end(),
         }
     }
 }
@@ -985,7 +987,7 @@ fn gather_nodes(members: &[LiveMember], plate_z: f64, node_count: usize) -> Vec<
             nodes.push(Node {
                 point: member.p0,
                 radius: member.r0,
-                embedded: member.embed_end == Some(EmbedEnd::Terminalward),
+                embedded: member.model_contact_end == Some(ContactEnd::Terminalward),
                 outward: unit,
                 member: index,
             });
@@ -994,7 +996,7 @@ fn gather_nodes(members: &[LiveMember], plate_z: f64, node_count: usize) -> Vec<
             nodes.push(Node {
                 point: member.p1,
                 radius: member.r1,
-                embedded: member.embed_end == Some(EmbedEnd::Rootward),
+                embedded: member.model_contact_end == Some(ContactEnd::Rootward),
                 outward: scale(unit, -1.0),
                 member: index,
             });
@@ -1595,7 +1597,7 @@ mod tests {
         r1: f64,
         kind: MemberKind,
         owner: Owner,
-        embed_end: Option<EmbedEnd>,
+        model_contact_end: Option<ContactEnd>,
     ) -> MemberKey {
         forest.add_member(Member::new(MemberSpec {
             p0_mm: finite3(p0),
@@ -1604,7 +1606,7 @@ mod tests {
             r1_mm: RootwardEndRadius::new(radius(r1)),
             kind,
             owner,
-            embed_end,
+            model_contact_end,
             carried_mm2: Finite::new(0.0).unwrap(),
         }))
     }
@@ -1623,7 +1625,7 @@ mod tests {
             0.4,
             MemberKind::Stub,
             Owner::Contact(0),
-            Some(EmbedEnd::Terminalward),
+            Some(ContactEnd::Terminalward),
         );
         let unrouted = add_member(
             &mut forest,
@@ -1633,7 +1635,7 @@ mod tests {
             0.4,
             MemberKind::Stub,
             Owner::Contact(1),
-            Some(EmbedEnd::Terminalward),
+            Some(ContactEnd::Terminalward),
         );
         forest.register_terminal(0, routed).unwrap();
         forest.register_terminal(1, unrouted).unwrap();
@@ -1690,7 +1692,7 @@ mod tests {
                 0.4,
                 MemberKind::Stub,
                 Owner::Contact(contact),
-                Some(EmbedEnd::Terminalward),
+                Some(ContactEnd::Terminalward),
             );
             forest.register_terminal(contact, key).unwrap();
             keys.push(key);

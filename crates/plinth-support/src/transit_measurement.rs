@@ -8,7 +8,7 @@ use plinth_core::{m0_constants, ConstantDescriptor, ConstantId, DecisionId, M0Co
 use thiserror::Error;
 
 use crate::{
-    forest::{EmbedEnd, MemberKey, MemberKind},
+    forest::{ContactEnd, MemberKey, MemberKind},
     runner::{FinalLiveMemberEvidence, SupportVerificationSnapshot},
 };
 
@@ -553,7 +553,7 @@ impl TransitIntervalResourcePlan {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct TransitRayInterval {
     member: MemberKey,
-    designed_end: Option<EmbedEnd>,
+    designed_end: Option<ContactEnd>,
     ray: i32,
     s_a_mm: f64,
     s_b_mm: f64,
@@ -563,7 +563,7 @@ impl TransitRayInterval {
     pub(crate) const fn member(self) -> MemberKey {
         self.member
     }
-    pub(crate) const fn designed_end(self) -> Option<EmbedEnd> {
+    pub(crate) const fn designed_end(self) -> Option<ContactEnd> {
         self.designed_end
     }
     pub(crate) const fn ray(self) -> i32 {
@@ -677,7 +677,7 @@ impl TransitAnchorPolicySnapshot {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct AnchoredTransitMember {
     member: MemberKey,
-    designed_end: Option<EmbedEnd>,
+    designed_end: Option<ContactEnd>,
     rays: Box<[AnchoredTransitRay]>,
 }
 
@@ -685,7 +685,7 @@ impl AnchoredTransitMember {
     pub(crate) const fn member(&self) -> MemberKey {
         self.member
     }
-    pub(crate) const fn designed_end(&self) -> Option<EmbedEnd> {
+    pub(crate) const fn designed_end(&self) -> Option<ContactEnd> {
         self.designed_end
     }
     pub(crate) fn rays(&self) -> &[AnchoredTransitRay] {
@@ -864,7 +864,7 @@ impl TransitScarMeasurementResourcePlan {
 #[derive(Clone, Copy)]
 struct ScarMemberRow<'a> {
     normalized: NormalizedMember<'a>,
-    designed_end: EmbedEnd,
+    designed_end: ContactEnd,
     chord_mm: f64,
     member_length_mm: f64,
     exit_input_mm: Option<V3>,
@@ -875,7 +875,7 @@ struct ScarMemberRow<'a> {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ScarEndEvidence {
     member: MemberKey,
-    designed_end: EmbedEnd,
+    designed_end: ContactEnd,
     anchor_point_mm: [f64; 3],
     anchor_distance_mm: f64,
     anchor_face: i64,
@@ -891,7 +891,7 @@ impl ScarEndEvidence {
     pub(crate) const fn member(&self) -> MemberKey {
         self.member
     }
-    pub(crate) const fn designed_end(&self) -> EmbedEnd {
+    pub(crate) const fn designed_end(&self) -> ContactEnd {
         self.designed_end
     }
     pub(crate) const fn cosine(&self) -> Option<f64> {
@@ -999,7 +999,7 @@ pub(crate) fn measure_scar<'a>(
     let member_count = snapshot.final_live_members().count();
     let designed_count = snapshot
         .final_live_members()
-        .filter(|member| member.embed_end().is_some())
+        .filter(|member| member.model_contact_end().is_some())
         .count();
     if anchored.members.len() != member_count
         || !anchored_binding_matches(snapshot, raw, anchored, &anchored.policy)
@@ -1012,7 +1012,7 @@ pub(crate) fn measure_scar<'a>(
             .final_live_members()
             .find(|member| {
                 member.key() == anchored_member.member
-                    && member.embed_end() == anchored_member.designed_end
+                    && member.model_contact_end() == anchored_member.designed_end
             })
             .ok_or(TransitScarMeasurementError::AnchorBinding)?;
         let Some(validated) = validate_scar_member(member, anchored_member, request)? else {
@@ -1039,7 +1039,7 @@ pub(crate) fn measure_scar<'a>(
             .final_live_members()
             .find(|member| {
                 member.key() == anchored_member.member
-                    && member.embed_end() == anchored_member.designed_end
+                    && member.model_contact_end() == anchored_member.designed_end
             })
             .ok_or(TransitScarMeasurementError::AnchorBinding)?;
         if let Some(validated) = validate_scar_member(member, anchored_member, request)? {
@@ -1205,7 +1205,7 @@ fn validate_scar_member<'a>(
     anchored: &AnchoredTransitMember,
     request: &TransitScarMeasurementRequest,
 ) -> Result<Option<ScarMemberRow<'a>>, TransitScarMeasurementError> {
-    let Some(designed_end) = member.embed_end() else {
+    let Some(designed_end) = member.model_contact_end() else {
         return Ok(None);
     };
     let normalized = normalize(member);
@@ -1303,7 +1303,8 @@ fn anchored_binding_matches(
     let mut prior_member = None;
     for actual_member in &anchored.members {
         let Some(member) = snapshot.final_live_members().find(|member| {
-            member.key() == actual_member.member && member.embed_end() == actual_member.designed_end
+            member.key() == actual_member.member
+                && member.model_contact_end() == actual_member.designed_end
         }) else {
             return false;
         };
@@ -1333,7 +1334,11 @@ fn anchored_binding_matches(
             let begin = raw_index;
             while let Some(interval) = raw.intervals.get(raw_index) {
                 let key = (interval.member, interval.designed_end, interval.ray);
-                let expected = (member.key(), member.embed_end(), expected_ray.label());
+                let expected = (
+                    member.key(),
+                    member.model_contact_end(),
+                    expected_ray.label(),
+                );
                 if key < expected {
                     return false;
                 }
@@ -1365,7 +1370,7 @@ fn anchored_binding_matches(
                     || actual.s_b_mm.to_bits() != interval.s_b_mm.to_bits()
                     || actual.chord_mm.to_bits() != chord_mm.to_bits()
                     || actual.is_tip_candidate
-                        != (member.embed_end().is_some()
+                        != (member.model_contact_end().is_some()
                             && local_index == 0
                             && interval.s_a_mm <= policy.interval_tol_mm)
                     || actual.below_minimum_length != (chord_mm <= policy.min_illegal_len_mm)
@@ -1618,7 +1623,7 @@ pub(crate) fn measure(
     #[cfg(test)]
     record_live_call(|calls| calls.member_allocations += 1);
     members.extend(snapshot.final_live_members());
-    members.sort_unstable_by_key(|member| (member.key(), member.embed_end()));
+    members.sort_unstable_by_key(|member| (member.key(), member.model_contact_end()));
 
     let mut stubs = Vec::new();
     let mut nonstubs = Vec::new();
@@ -1724,7 +1729,7 @@ pub(crate) fn anchor(
         m0_constants().map_err(|_| TransitIntervalError::PolicyBinding { id: "M0" })?,
     )?;
     let mut members = snapshot.final_live_members().collect::<Vec<_>>();
-    members.sort_unstable_by_key(|member| (member.key(), member.embed_end()));
+    members.sort_unstable_by_key(|member| (member.key(), member.model_contact_end()));
     if members
         .windows(2)
         .any(|pair| pair[0].key() == pair[1].key())
@@ -1750,7 +1755,7 @@ pub(crate) fn anchor(
             let begin = interval_index;
             while let Some(interval) = batch.intervals.get(interval_index) {
                 let key = (interval.member, interval.designed_end, interval.ray);
-                let expected = (member.key(), member.embed_end(), ray.label());
+                let expected = (member.key(), member.model_contact_end(), ray.label());
                 if key < expected {
                     return Err(TransitIntervalError::AnchorEvidence);
                 }
@@ -1767,7 +1772,7 @@ pub(crate) fn anchor(
                 interval_index += 1;
             }
             let crossings = anchor_crossings(
-                member.embed_end(),
+                member.model_contact_end(),
                 &policy,
                 &batch.intervals[begin..interval_index],
             );
@@ -1779,7 +1784,7 @@ pub(crate) fn anchor(
         }
         anchored_members.push(AnchoredTransitMember {
             member: member.key(),
-            designed_end: member.embed_end(),
+            designed_end: member.model_contact_end(),
             rays: anchored_rays.into_boxed_slice(),
         });
     }
@@ -1797,7 +1802,7 @@ pub(crate) fn anchor(
 }
 
 fn anchor_crossings(
-    designed_end: Option<EmbedEnd>,
+    designed_end: Option<ContactEnd>,
     policy: &TransitAnchorPolicySnapshot,
     intervals: &[TransitRayInterval],
 ) -> Box<[AnchoredTransitCrossing]> {
@@ -1833,7 +1838,7 @@ fn valid_transit_batch_interval(interval: &TransitRayInterval, ray_length_mm: f6
 }
 
 fn normalize(member: &FinalLiveMemberEvidence) -> NormalizedMember<'_> {
-    if member.embed_end() == Some(EmbedEnd::Rootward) {
+    if member.model_contact_end() == Some(ContactEnd::Rootward) {
         NormalizedMember {
             source: member,
             p0: member.p1_mm(),
@@ -1962,7 +1967,7 @@ fn collect_rows(
             prior_s_b = Some(interval.s_b);
             evidence.push(TransitRayInterval {
                 member: member.source.key(),
-                designed_end: member.source.embed_end(),
+                designed_end: member.source.model_contact_end(),
                 ray: interval.ray,
                 s_a_mm: interval.s_a,
                 s_b_mm: interval.s_b,
@@ -2120,10 +2125,10 @@ fn member_digest<'a>(members: impl Iterator<Item = &'a FinalLiveMemberEvidence>)
             u64::from(member.key().generation()),
             member.terminal_radius_mm().to_bits(),
             member.rootward_radius_mm().to_bits(),
-            match member.embed_end() {
+            match member.model_contact_end() {
                 None => 0,
-                Some(EmbedEnd::Terminalward) => 1,
-                Some(EmbedEnd::Rootward) => 2,
+                Some(ContactEnd::Terminalward) => 1,
+                Some(ContactEnd::Rootward) => 2,
             },
         ] {
             state ^= word;
@@ -2171,8 +2176,8 @@ fn raw_interval_digest(intervals: &[TransitRayInterval]) -> u64 {
         word(u64::from(interval.member.generation()));
         word(match interval.designed_end {
             None => 0,
-            Some(EmbedEnd::Terminalward) => 1,
-            Some(EmbedEnd::Rootward) => 2,
+            Some(ContactEnd::Terminalward) => 1,
+            Some(ContactEnd::Rootward) => 2,
         });
         word(u64::from_ne_bytes(i64::from(interval.ray).to_ne_bytes()));
         word(interval.s_a_mm.to_bits());
@@ -2201,7 +2206,7 @@ mod tests {
     fn raw_interval(s_a_mm: f64, s_b_mm: f64) -> TransitRayInterval {
         TransitRayInterval {
             member: MemberKey::transit_test_fixture(1, 0),
-            designed_end: Some(EmbedEnd::Terminalward),
+            designed_end: Some(ContactEnd::Terminalward),
             ray: -1,
             s_a_mm,
             s_b_mm,
@@ -2213,7 +2218,7 @@ mod tests {
         let policy = anchor_policy();
         for chord_mm in [0.005, 0.031] {
             let rows = anchor_crossings(
-                Some(EmbedEnd::Terminalward),
+                Some(ContactEnd::Terminalward),
                 &policy,
                 &[raw_interval(0.0, chord_mm), raw_interval(0.2, 0.4)],
             );
@@ -2235,7 +2240,7 @@ mod tests {
         let policy = anchor_policy();
         let boundary = policy.min_illegal_len_mm;
         let rows = anchor_crossings(
-            Some(EmbedEnd::Rootward),
+            Some(ContactEnd::Rootward),
             &policy,
             &[
                 raw_interval(policy.interval_tol_mm, policy.interval_tol_mm + boundary),
@@ -2516,7 +2521,7 @@ mod tests {
     fn fixture_member(
         slot: u32,
         kind: MemberKind,
-        embed_end: Option<EmbedEnd>,
+        model_contact_end: Option<ContactEnd>,
         p0: [f64; 3],
         p1: [f64; 3],
         r0: f64,
@@ -2527,7 +2532,7 @@ mod tests {
             [p0, p1],
             [r0, r1],
             kind,
-            embed_end,
+            model_contact_end,
         )
     }
 
@@ -2632,7 +2637,7 @@ mod tests {
             fixture_member(
                 1,
                 MemberKind::Stub,
-                Some(EmbedEnd::Terminalward),
+                Some(ContactEnd::Terminalward),
                 [0.2, 0.5, 0.5],
                 [-1.0, 0.5, 0.5],
                 0.1,
@@ -2641,7 +2646,7 @@ mod tests {
             fixture_member(
                 2,
                 MemberKind::Shoot,
-                Some(EmbedEnd::Rootward),
+                Some(ContactEnd::Rootward),
                 [2.0, 0.5, 0.5],
                 [0.8, 0.5, 0.5],
                 0.1,
@@ -2650,7 +2655,7 @@ mod tests {
             fixture_member(
                 3,
                 MemberKind::Brace,
-                Some(EmbedEnd::Terminalward),
+                Some(ContactEnd::Terminalward),
                 [0.5, 0.2, 0.5],
                 [0.5, 2.0, 0.5],
                 0.2,
@@ -2674,7 +2679,7 @@ mod tests {
             .zip([0.05, 0.2, 0.1])
             .map(|(member, chord)| TransitRayInterval {
                 member: member.key(),
-                designed_end: member.embed_end(),
+                designed_end: member.model_contact_end(),
                 ray: -1,
                 s_a_mm: 0.0,
                 s_b_mm: chord,
@@ -2721,7 +2726,7 @@ mod tests {
             vec![fixture_member(
                 1,
                 MemberKind::Stub,
-                Some(EmbedEnd::Terminalward),
+                Some(ContactEnd::Terminalward),
                 p0,
                 p1,
                 0.1,
@@ -2784,12 +2789,12 @@ mod tests {
                 [
                     (
                         MemberKey::transit_test_fixture(1, 0),
-                        EmbedEnd::Terminalward
+                        ContactEnd::Terminalward
                     ),
-                    (MemberKey::transit_test_fixture(2, 0), EmbedEnd::Rootward),
+                    (MemberKey::transit_test_fixture(2, 0), ContactEnd::Rootward),
                     (
                         MemberKey::transit_test_fixture(3, 0),
-                        EmbedEnd::Terminalward
+                        ContactEnd::Terminalward
                     ),
                 ]
             );
@@ -3098,7 +3103,7 @@ mod tests {
         let mut changed_generation = first;
         changed_generation.member = MemberKey::transit_test_fixture(1, 1);
         let mut changed_end = first;
-        changed_end.designed_end = Some(EmbedEnd::Rootward);
+        changed_end.designed_end = Some(ContactEnd::Rootward);
         let mut changed_ray = first;
         changed_ray.ray = 0;
         let mut changed_start = first;
@@ -3123,7 +3128,7 @@ mod tests {
             raw_interval_digest(&[first, second]),
             raw_interval_digest(&[second, first])
         );
-        second.designed_end = Some(EmbedEnd::Rootward);
+        second.designed_end = Some(ContactEnd::Rootward);
         assert_ne!(
             raw_interval_digest(&[first, raw_interval(0.2, 0.4)]),
             raw_interval_digest(&[first, second])
@@ -3189,7 +3194,7 @@ mod tests {
         let terminal = fixture_member(
             1,
             MemberKind::Trunk,
-            Some(EmbedEnd::Terminalward),
+            Some(ContactEnd::Terminalward),
             [1.0, 2.0, 3.0],
             [4.0, 5.0, 6.0],
             1.0,
@@ -3198,7 +3203,7 @@ mod tests {
         let root = fixture_member(
             2,
             MemberKind::Trunk,
-            Some(EmbedEnd::Rootward),
+            Some(ContactEnd::Rootward),
             [1.0, 2.0, 3.0],
             [4.0, 5.0, 6.0],
             1.0,
@@ -3618,7 +3623,7 @@ mod tests {
             let nonstub = fixture_member(
                 2,
                 MemberKind::Trunk,
-                Some(EmbedEnd::Rootward),
+                Some(ContactEnd::Rootward),
                 [-1.0, 0.25, 0.5],
                 [2.0, 0.25, 0.5],
                 0.05,

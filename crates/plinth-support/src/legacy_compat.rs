@@ -247,7 +247,7 @@ mod tests {
                 family: "o10-test".to_owned(),
                 ordinal: 0,
             },
-            embed_end: None,
+            model_contact_end: None,
             carried_mm2: finite(0.0),
         })
     }

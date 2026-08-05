@@ -16,7 +16,7 @@ use thiserror::Error;
 use crate::{
     anchor::{FOOT_BREACH_CONE_RAYS, FOOT_BREACH_HALF_DEG},
     forest::{
-        EmbedEnd, Forest, ForestError, Member, MemberKey, MemberKind, MemberSpec,
+        ContactEnd, Forest, ForestError, Member, MemberKey, MemberKind, MemberSpec,
         RootwardEndRadius, TerminalEndRadius,
     },
     legacy_compat::{LegacyCompatibility, LegacyCompatibilityError},
@@ -431,8 +431,8 @@ fn append_candidate(
                 .to_owned(),
                 ordinal: *ordinal,
             },
-            embed_end: (candidate.kind == BraceAdditionKind::ModelRung)
-                .then_some(EmbedEnd::Rootward),
+            model_contact_end: (candidate.kind == BraceAdditionKind::ModelRung)
+                .then_some(ContactEnd::Rootward),
             carried_mm2: finite(0.0)?,
         };
         *ordinal = ordinal
@@ -1355,10 +1355,10 @@ fn exact_clearance_rows(
         .iter()
         .enumerate()
         .filter_map(|(index, (_, member))| {
-            member.embed_end().map(|end| {
+            member.model_contact_end().map(|end| {
                 let point = match end {
-                    EmbedEnd::Terminalward => member.p0_mm(),
-                    EmbedEnd::Rootward => member.p1_mm(),
+                    ContactEnd::Terminalward => member.p0_mm(),
+                    ContactEnd::Rootward => member.p1_mm(),
                 }
                 .map(Finite::get);
                 (index, end, point)
@@ -1380,13 +1380,13 @@ fn exact_clearance_rows(
             let axis = scale(axis_raw, 1.0 / norm(axis_raw));
             let cosine = dot(axis, normal).abs().max(0.5);
             let radius = match end {
-                EmbedEnd::Terminalward => member.terminal_radius_mm().get().get(),
-                EmbedEnd::Rootward => member.rootward_radius_mm().get().get(),
+                ContactEnd::Terminalward => member.terminal_radius_mm().get().get(),
+                ContactEnd::Rootward => member.rootward_radius_mm().get().get(),
             };
             let inset = embed_inset_mm(config.contact_depth_mm, radius, config.standoff_mm, cosine);
             match end {
-                EmbedEnd::Terminalward => inset0[index] = inset,
-                EmbedEnd::Rootward => inset1[index] = inset,
+                ContactEnd::Terminalward => inset0[index] = inset,
+                ContactEnd::Rootward => inset1[index] = inset,
             }
         }
     }
@@ -1614,7 +1614,7 @@ mod tests {
                 family: "brace-test".into(),
                 ordinal,
             },
-            embed_end: None,
+            model_contact_end: None,
             carried_mm2: finite(0.0).unwrap(),
         })
     }

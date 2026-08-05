@@ -803,14 +803,14 @@ fn validate_changed_geometry(
         r0.push(member.terminal_radius_mm().get().get());
         r1.push(member.rootward_radius_mm().get().get());
         i0.push(
-            if member.embed_end() == Some(crate::forest::EmbedEnd::Terminalward) {
+            if member.model_contact_end() == Some(crate::forest::ContactEnd::Terminalward) {
                 config.contact_depth_mm
             } else {
                 0.0
             },
         );
         i1.push(
-            if member.embed_end() == Some(crate::forest::EmbedEnd::Rootward) {
+            if member.model_contact_end() == Some(crate::forest::ContactEnd::Rootward) {
                 config.standoff_mm
             } else {
                 0.0
@@ -846,10 +846,10 @@ fn assert_no_stale_braces(forest: &Forest) -> Result<(), RewireError> {
             .member(brace_key)
             .ok_or(ForestError::InactiveKey(brace_key))?;
         for (end, point) in [
-            (crate::forest::EmbedEnd::Terminalward, brace.p0_mm()),
-            (crate::forest::EmbedEnd::Rootward, brace.p1_mm()),
+            (crate::forest::ContactEnd::Terminalward, brace.p0_mm()),
+            (crate::forest::ContactEnd::Rootward, brace.p1_mm()),
         ] {
-            if brace.embed_end() == Some(end) {
+            if brace.model_contact_end() == Some(end) {
                 continue;
             }
             let point = point.map(Finite::get);
@@ -970,7 +970,7 @@ mod tests {
                 family: "rewire-test".into(),
                 ordinal: n,
             },
-            embed_end: None,
+            model_contact_end: None,
             carried_mm2: f(1.0),
         })
     }
