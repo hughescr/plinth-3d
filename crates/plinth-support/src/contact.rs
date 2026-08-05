@@ -232,7 +232,11 @@ pub(crate) fn seat_endpoint(
 /// `u*|cos| - h >= r_max + standoff + MARGIN` gives the formula.
 ///
 /// GUARANTEE: on a locally planar seat the kernel returns `clearance == MARGIN`
-/// exactly, by construction.  That round trip is pinned by regression test.
+/// exactly, by construction.  That round trip is pinned against the REAL kernel
+/// by `tests::planar_seat_round_trip_returns_exactly_margin_from_the_kernel`
+/// below — a `NativeSurface` half-space, a member seated at the PR-1 depth, the
+/// PR-2 mask handed to `segment_clearance` as `inset1`, and the returned
+/// clearance asserted equal to `MARGIN`.
 ///
 /// There is no cosine floor, no clamp, and no arbitrary maximum.  As
 /// `|cos| -> 0` the mask genuinely diverges, because a nearly tangential member
@@ -379,6 +383,8 @@ pub(crate) fn admit(
 mod tests {
     use super::*;
 
+    use geom_kernel::{NativeSurface, NativeSurfaceConfig};
+
     const BALL_FACTOR: f64 = 1.5;
 
     fn policy() -> ContactPolicy {
@@ -454,6 +460,185 @@ mod tests {
             assert!((mask - (0.3 + 0.5 + 0.6 + 0.05) / c).abs() < 1e-12);
         }
         assert_eq!(mask_extent_mm(0.3, 0.5, 0.0, &p), None);
+    }
+
+    /// A slab whose top face is the plane `z = 0`, large enough in `xy` that the
+    /// nearest surface point to anything above the origin is that face.
+    fn planar_seat_slab() -> NativeSurface {
+        const H: f64 = 20.0;
+        let vertices = vec![
+            [-H, -H, -10.0],
+            [H, -H, -10.0],
+            [H, H, -10.0],
+            [-H, H, -10.0],
+            [-H, -H, 0.0],
+            [H, -H, 0.0],
+            [H, H, 0.0],
+            [-H, H, 0.0],
+        ];
+        let faces = vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        NativeSurface::from_indexed(
+            &vertices,
+            &faces,
+            NativeSurfaceConfig {
+                grid_pitch_mm: 0.5,
+                max_grid_bytes: 16 * 1024 * 1024,
+            },
+        )
+        .expect("planar seat slab")
+    }
+
+    /// MAJOR-4.  PR-2's headline guarantee, pinned against the REAL kernel.
+    ///
+    /// This module is deliberately kernel-free, but the guarantee it advertises
+    /// is a statement ABOUT the kernel: "on a locally planar seat the kernel
+    /// returns `clearance == MARGIN` exactly, by construction".  A kernel-free
+    /// arithmetic restatement would prove nothing — it would only re-derive the
+    /// formula this module already contains.  So this test builds a real
+    /// `NativeSurface` half-space, seats a member at the PR-1 depth, hands the
+    /// PR-2 mask to `segment_clearance` as `inset1` exactly as `brace.rs` does,
+    /// and asserts the number the kernel hands back.
+    ///
+    /// Mechanism being pinned: `seg_clear_one` walks `inset0` in from `p0` and
+    /// `inset1` in from `p1`, evaluates `seg_surface_min` on the surviving axis
+    /// segment, and subtracts `r_lo.max(r_hi) + standoff`.  The axis station at
+    /// arc distance `u*` from an endpoint seated `h` below the tangent plane
+    /// stands `u*|cos| - h = r_max + standoff + MARGIN` above it, and on a
+    /// planar seat that height IS its distance to the surface.  So the kernel
+    /// must return exactly `MARGIN`, at every incidence, with no free
+    /// parameters left over.
+    #[test]
+    fn planar_seat_round_trip_returns_exactly_margin_from_the_kernel() {
+        let p = policy();
+        let surface = planar_seat_slab();
+        const R: f64 = 0.5;
+
+        // The contact end is seated below z = 0; the member runs up and away at
+        // incidence theta.  Lengths are chosen long enough that the member
+        // genuinely emerges (PR-3), which is what makes the mask station -- not
+        // the far endpoint -- the closest point on the checked segment.
+        let mut p0s = Vec::new();
+        let mut p1s = Vec::new();
+        let mut inset1s = Vec::new();
+        let cases = [(1.0_f64, 6.0_f64), (0.9, 6.0), (0.75, 8.0), (0.6, 12.0)];
+        for &(abs_cos, length) in &cases {
+            let h = seat_depth_mm(abs_cos, R, &p, false);
+            let seated = [0.0, 0.0, -h];
+            let sin = sin_from_cos(abs_cos);
+            let other = [length * sin, 0.0, -h + length * abs_cos];
+            // Seating raises the incidence (PR-1 monotonicity), and the mask is
+            // evaluated on the SEATED geometry -- so recover the seated values
+            // from the constructed points rather than assuming the raw ones.
+            let axis = [
+                seated[0] - other[0],
+                seated[1] - other[1],
+                seated[2] - other[2],
+            ];
+            let len = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+            let seated_cos = (axis[2] / len).abs();
+            let mask = mask_extent_mm(h, R, seated_cos, &p).expect("finite mask");
+            assert!(
+                mask + p.min_free_span_mm < len,
+                "case |cos| = {abs_cos} must be admissible under PR-3"
+            );
+            p0s.push(other);
+            p1s.push(seated);
+            inset1s.push(mask);
+        }
+
+        // One batched kernel call for the whole case set -- the same shape the
+        // production caller uses.
+        let n = p0s.len();
+        let (clearances, _) = surface
+            .segment_clearance(
+                &p0s,
+                &p1s,
+                &vec![R; n],
+                &vec![R; n],
+                p.standoff_mm,
+                &vec![0.0; n],
+                &inset1s,
+            )
+            .expect("batched segment clearance");
+
+        for (index, clearance) in clearances.iter().enumerate() {
+            println!(
+                "case {index} |cos|={} clearance={clearance:.20} delta={:+.3e}",
+                cases[index].0,
+                clearance - p.process_resolution_mm
+            );
+            assert!(
+                (clearance - p.process_resolution_mm).abs() < 1.0e-12,
+                "case {index} (|cos| = {}): kernel returned clearance {clearance}, \
+                 expected exactly MARGIN = {}",
+                cases[index].0,
+                p.process_resolution_mm
+            );
+        }
+
+        // NEGATIVE CONTROL — the assertion above is not vacuous.  The legacy
+        // form failed to divide the depth term by |cos|, under-masking by
+        // h*(1/|cos| - 1).  Re-running the same batch with that shortfall must
+        // move the kernel's answer BELOW margin by exactly the shortfall's
+        // normal-direction projection, proving the round trip is sensitive to
+        // the mask at the precision asserted above.
+        let legacy_insets = cases
+            .iter()
+            .zip(&inset1s)
+            .zip(&p0s)
+            .zip(&p1s)
+            .map(|(((&(abs_cos, _), mask), other), seated)| {
+                let h = seat_depth_mm(abs_cos, R, &p, false);
+                let axis = [
+                    seated[0] - other[0],
+                    seated[1] - other[1],
+                    seated[2] - other[2],
+                ];
+                let len = (axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2]).sqrt();
+                let seated_cos = (axis[2] / len).abs();
+                (mask - h * (1.0 / seated_cos - 1.0), seated_cos)
+            })
+            .collect::<Vec<_>>();
+        let (legacy_clearances, _) = surface
+            .segment_clearance(
+                &p0s,
+                &p1s,
+                &vec![R; n],
+                &vec![R; n],
+                p.standoff_mm,
+                &vec![0.0; n],
+                &legacy_insets
+                    .iter()
+                    .map(|(mask, _)| *mask)
+                    .collect::<Vec<_>>(),
+            )
+            .expect("batched segment clearance");
+        for (index, clearance) in legacy_clearances.iter().enumerate() {
+            let (_, seated_cos) = legacy_insets[index];
+            let h = seat_depth_mm(cases[index].0, R, &p, false);
+            let expected = p.process_resolution_mm - h * (1.0 / seated_cos - 1.0) * seated_cos;
+            assert!(
+                (clearance - expected).abs() < 1.0e-12,
+                "case {index}: the under-masked control must read {expected}, got {clearance}"
+            );
+        }
+        // At normal incidence the legacy shortfall vanishes, which is exactly
+        // why the defect was invisible to every flat fixture.
+        assert!((legacy_clearances[0] - p.process_resolution_mm).abs() < 1.0e-12);
+        assert!(legacy_clearances[3] < p.process_resolution_mm - 0.1);
     }
 
     #[test]

@@ -101,6 +101,19 @@ mask is SHORT by `r_max`, leaving the first unmasked axis point standing only
 (`r_max` in `[0.35, 1.0]`). It would have broken every contact in the package
 while every fixture stayed green.
 
+**The planar-seat round trip is pinned against the real kernel.** On a locally
+planar seat the kernel must return `clearance == MARGIN` exactly. That is a
+statement ABOUT the kernel, so a kernel-free arithmetic restatement would prove
+nothing. `contact::tests::planar_seat_round_trip_returns_exactly_margin_from_the_kernel`
+builds a real `NativeSurface` half-space, seats a member at the PR-1 depth over
+four incidences, hands the PR-2 mask to `segment_clearance` as `inset1` exactly
+as `brace.rs` does, and asserts the returned clearance to within 1e-12 mm
+(measured agreement: **|delta| <= 6.3e-16 mm**, i.e. a few ULP). A negative
+control re-runs the same batch with the legacy under-mask `h*(1/|cos| - 1)`
+removed from `inset1` and pins the kernel's degraded answer, so the assertion is
+demonstrably not vacuous — and shows why the defect was invisible to flat
+fixtures, since the shortfall vanishes at normal incidence.
+
 **`r_max` is a sound, non-circular bound.** `r_lo.max(r_hi)` depends on the
 mask, which would be circular; both are convex interpolations between `r0` and
 `r1`, so `max(r0, r1) >= r_lo.max(r_hi)` always.
