@@ -1,13 +1,15 @@
 # Contact physics — Phase B-2 design record (2026-08-04)
 
-Status: **PARTIAL — PR-1/PR-2/PR-3/PR-4 (brace path) and PR-6 landed; PR-5,
-PR-7, PR-8, PR-9 NOT yet implemented.** See *What is not done* at the end. The
-owner's contact-attestation requirement is still **UNMET**.
+Status: **PR-1, PR-2, PR-3, PR-4, PR-6, PR-8, PR-9, OD-9 and MAJOR-7 landed.
+PR-5 and PR-7 are NOT landed and are reserved — see *What is not done*.**
+
+**The owner's contact-attestation requirement is MET for the initial-contact
+stub family** — every routed support tip in the engine — and the OD-9
+exterior-ness screen is live. See *Attestation stage* below.
 
 Repair pass (2026-08-04, stage 1 of 2) resolved re-review findings BLOCKER-2,
-BLOCKER-3, MAJOR-4, MAJOR-5, MAJOR-6 and MAJOR-8; see *Repair pass* near the
-end. MAJOR-7 (PR-4 is inert — `contact::admit` is called with
-`carried_mm2 = 0.0`) is stage 2 and remains OPEN.
+BLOCKER-3, MAJOR-4, MAJOR-5, MAJOR-6 and MAJOR-8; see *Repair pass*.
+Attestation stage (stage 2 of 2) landed PR-8, PR-9, OD-9 and MAJOR-7.
 
 Authority: owner ruling **OD-8** (2026-08-04) — behaviour preservation is
 lifted, correctness and measured physics govern, and every behavioural
@@ -384,48 +386,264 @@ left stable so that stage can extend it compatibly.
 
 ---
 
+## Attestation stage (2026-08-04, stage 2 of 2)
+
+### PR-8 `AFFIRMATIVE_CONTACT_ATTESTATION` — LANDED
+
+`initial.rs::build_initial_contacts` now attests every stub it mints, before
+anything is routed or grown on top of it. `designed_embed`'s batched verifier
+finally has a production caller.
+
+**Cost: two batched native calls for the WHOLE RUN, independent of contact
+count** — one `NativeSurface::inside` carrying every OD-9 probe, one
+`penetration_intervals_batch_bounded` carrying every connectivity row. They
+cannot be one call (a parity query and a capsule-ray penetration sweep are
+different kernels), but neither scales with the row count, which is what the
+batch-first rule actually requires. A per-contact call would be the defect.
+
+Three findings per contact:
+
+| finding | rule | disposition |
+| --- | --- | --- |
+| the attachment point is on EXTERIOR surface | OD-9 | REFUSE → quarantine |
+| the tip is fused to the model, and over how much of its cross-section | PR-8 | refuse only if NOTHING is engaged |
+| the engaged interface carries the routed load | PR-4 / MAJOR-7 | RECORD a deficit; see below |
+
+**Two design calls the measurement forced.** Both were arrived at by
+implementing the obvious rule first, measuring it against the corpus, and
+finding it deleted supports that print.
+
+1. **The attested extent is ONE PROCESS RESOLUTION, not the placement depth
+   less a margin.** The latter (`0.3 - 0.05 = 0.25` mm) was implemented and
+   measured: it refused **22 of 32** reachable corpus contacts. Those refusals
+   were geometry, not defects — a disc of radius `r` pressed into a convex
+   surface of radius `R` has its RIM sitting `r^2/(2R)` shallower than its
+   centre, so on the Sphere the outer rays reached 0.2308–0.2497 mm against a
+   0.25 mm demand. Demanding placement depth of every rim ray conflates
+   attestation with the MASK-VALIDITY proof. Those are different questions:
+   a mask tells the distance check to ignore an extent, so any ray leaving the
+   solid inside it is geometry that then goes unchecked, and
+   `validate_members_batch` therefore still demands TOTALITY. Attestation asks
+   whether an interface exists and is renderable, and the resolvability floor
+   is one layer — PR-1(a)'s own argument, applied to the depth the kernel is
+   asked to confirm rather than the depth the stub is placed at. The two entry
+   points giving different answers on the same geometry is pinned by
+   `a_partly_engaged_tip_is_measured_rather_than_deleted`.
+
+2. **Engagement is GRADED, and an area deficit is EVIDENCE, not a refusal.**
+   A contact placed within a tip radius of a model silhouette edge has its tip
+   CENTRE exactly on the boundary plane, which parity classifies as outside,
+   while three or four rim rays are genuinely inside. Eight such contacts exist
+   on `make_overhang_table` and all eight print. So the eight rim rays and the
+   centreline are sampled independently and
+
+   ```
+   r_eff = r_end * sqrt(rim_engaged / rim_total)
+   ```
+
+   is handed to PR-4. `r_eff` is the radius of the concentric disc with the
+   sampled engaged area — a SAMPLING BOUND at eight rim samples, exact at
+   `k = 0` and `k = rim_total`, and for the dominant partial case (a straight
+   edge cutting the disc) exact when the cut passes through the centre and
+   UNDER-crediting otherwise, which is the conservative direction for a load
+   check. This is the same epistemic status this record already assigns
+   `A_contact` under PR-4; the difference is that it is now MEASURED rather
+   than assumed.
+
+   A contact whose engaged interface cannot carry its load is **recorded, not
+   quarantined**. The measurement is real and it is the owner's requirement
+   made quantitative, but the remedy is to move or shrink the contact in the
+   perception/sizing stages, and deleting it leaves ZERO support where a
+   partial one stood. **This disposition is a print-consequence tradeoff with
+   no physics-preferred answer and is referred to the owner under OD-8's own
+   carve-out.** See *Open question OQ-8*.
+
+**FU-CONTACT-1's clamp clause is load-bearing, not decorative.** On `make_box`
+two tips already at the registered `tip_radius_max_legacy_mm` carry 50 mm^2
+each against a `pi r^2 = 3.14 mm^2` interface. Without the clamp suppression a
+fully engaged, today-printing contact would be charged for a deficiency the
+clamp caused.
+
+**The one new hard error is a refused CONFIGURATION, not a refused contact.**
+`InitialContactError::UnattestableContactDepth` fires when the run's layer
+height is at or above the contact depth, leaving no positive extent for ANY
+contact in the run. OD-4's "never a hard pipeline failure" governs a refused
+genuine-contact stub; it does not license silently disabling the owner's
+governing requirement for every stub at once.
+
+### MAJOR-7 — LANDED
+
+PR-4's area law has real load. The attestation passes each stub's actual
+`carried_mm2` and its `tip_clamped_at_max` state; the H2 allowance is still the
+registered `X_ALLOWED` chain, read through `FrozenTipLoadPolicy`, never a second
+hand-typed threshold. `the_area_law_grades_the_attested_interface_and_the_clamp_suppresses_it`
+pins that the same row with `carried_mm2 = 0.0` records no deficit — which is
+exactly why the law gated nothing before.
+
+`contact::admit`'s signature is unchanged; the stub family reaches PR-4 through
+`contact::area_sufficient`, the same predicate `admit` delegates to.
+
+### OD-9 — LANDED
+
+For every proposed attachment point, the point displaced one process resolution
+OUTWARD along the contact normal must test outside the model.
+
+**The offset is inherited, not chosen.** `NativeSurface::exterior_face_mask`
+already classifies a face by displacing sample points along its normal by
+0.05 mm — one layer at the corpus pitch — and asking `inside`. This screen is
+the per-attachment-point form of exactly that test. It is deliberately the
+SMALLEST rung and not a ladder: a larger offset would walk further from the
+surface and could leave a buried patch's covering solid entirely, reporting
+"exterior" for the very case OD-9 exists to catch.
+
+**Acceptance vehicle** (no reachable corpus model self-intersects, and the
+Weeping Treant does not yet reach the support stages):
+`od9_a_buried_face_is_refused_while_the_exterior_face_attests`. Two overlapping
+boxes, each individually closed and correctly wound. `A` spans `x in [0,4]`,
+`B` spans `x in [2,6]`; the plane `x = 4` is `A`'s `+x` face and over
+`x in [2,4]` it is BURIED — inside `B`, absent from the print after the
+per-layer union. `B`'s face at `x = 6` is exterior. The test asserts the parity
+facts first, so a fixture that stopped self-intersecting fails rather than
+passing for the wrong reason; then it pins **the trap OD-9 names**: the buried
+tip's connectivity evidence is not merely adequate but PERFECT (8/8 rim rays
+plus centreline), because its whole neighbourhood is interior. The two contacts
+are asserted indistinguishable to every pre-OD-9 check.
+`od9_the_screen_is_the_only_thing_that_separates_them` is the complement: give
+the buried member an exterior probe and it attests, proving the refusal came
+from the parity screen and not from some incidental property of its geometry.
+
+Per OD-9 this MUST still be verified against the Weeping Treant when it reaches
+the support stages.
+
+### PR-9 `CONTACT_CLEARANCE_REFUSAL_IS_NOT_A_PIPELINE_VIOLATION` — LANDED
+
+`exact_clearance_negatives` splits the negative-clearance rows at the
+third-pass cap by the one property that decides whether there is anything to
+reject:
+
+* **no model contact** — the controller placed geometry inside the mini and
+  there is no candidate to refuse. Still `BraceError::ClearanceViolation`, and
+  it still WINS when both kinds are present, because an unrefusable violation
+  cannot be fixed by refusing something else.
+* **declares a model contact** — an ordinary candidate rejection. Quarantined
+  in the returned forest; the controller terminates `ContactRefused`.
+
+Quarantining at the CAP rather than pass 1 or 2 is deliberate: the earlier
+passes are still iterating, and a member inside the model at pass 1 may be
+resized out of it at pass 2, so refusing early would delete a support the
+controller was about to repair.
+
+`ContactRefused` is a termination, not a silent pass, and the refused keys are
+digested individually — two runs that both end in `ContactRefused` having
+refused DIFFERENT contacts are not the same run, and the forest digest cannot
+tell them apart because a quarantined member is absent from both.
+
+### The attestation transcript
+
+`InitialContactBuild::contact_attestation_digest` covers EVERY verdict,
+attested rows included, plus each deficit's measured radius. It is sealed into
+`PreparedSupportDigests` alongside `initial_forest` and checked at all three
+downstream preflights.
+
+**It is separate from the forest digest on purpose.** A forest digest
+structurally cannot see an attestation regression: an attested contact and an
+unattested-but-still-live one are the same geometry, and a refusal that stopped
+firing leaves no geometric trace at all. Without an independent transcript,
+deleting the owner's governing requirement would move nothing and every
+existing gate would stay green.
+`stale_contact_attestation_digest_fails_closed_before_rewire_mutation` asserts
+the post-quarantine forest digest is UNCHANGED by the corruption seam before
+asserting the rejection, so it proves the new clause fired rather than an old
+one.
+
+### MEASURED CORPUS DELTA — ZERO PLACED GEOMETRY
+
+Every `snapshot_digest`, `routed_contacts` and `final_live_members` on all four
+reachable models is byte-identical to the pre-attestation census. The full
+instrumented census diff across all three attestation-stage commits is empty
+apart from the new T7 table.
+
+| model | contacts attested | fully engaged (9/9) | refused | area deficits |
+| --- | ---: | ---: | ---: | ---: |
+| Sphere | 7 | 7 | 0 | 0 |
+| make_box | 8 | 3 | 0 | 0 |
+| make_overhang_table | 84 | 50 | 0 | 4 |
+| make_thin_fin | 18 | 11 | 0 | 0 |
+
+117 contacts attested, **0 refused**, 4 area deficits recorded (all on
+`make_overhang_table`, `r_end = 0.4607` mm tips at 3/8 rim engagement carrying
+8.0 mm^2). The refusal path is not untested: `make_toed_slab`, which reaches
+`initial.rs` as a unit fixture even though it is blocked upstream in the full
+pipeline, carries a real refusal, and
+`table_and_toed_slab_real_plans_return_complete_fresh_forests` asserts on it.
+
+That test's invariant was STRENGTHENED rather than relaxed: the quarantined set
+must equal the UNION of the overlap-cutoff and attestation evidence lists — no
+quarantine without a recorded reason and none the other way — and area-deficient
+contacts are asserted to remain LIVE, which is what stops a future edit from
+turning the deficit into a silent support deletion.
+
+---
+
 ## What is not done
 
-**The owner's contact-attestation requirement remains UNMET.** These rules are
-designed (full text in the Phase B-2 design record) but NOT implemented:
+* **PR-5 `MASK_INTERIOR_SINGLE_CONTACT`** — NOT landed. `designed_embed` still
+  carries one extent per end rather than two, and the witness lacks the design's
+  clauses (c) and (d). **The full normative text of PR-5 is not recoverable from
+  this branch**: this file is the only surviving design record and it states
+  PR-5 only by name and gap, so implementing "clauses (c) and (d)" would be
+  reconstruction rather than implementation. See *Open question OQ-9*.
 
-* **PR-5 `MASK_INTERIOR_SINGLE_CONTACT`** — the masked interval is currently
-  still an unchecked blind spot. `designed_embed` does not yet carry two
-  extents, and the witness lacks clauses (c) and (d).
-* **PR-7 `CCO_ANCHOR_MASK_AT_THE_SEAT`** — the CCO model-anchor family remains
-  arithmetically dead (`clr <= 0.6 - 0.95 = -0.35` unconditionally). The
-  corrected PR-2 mask is what would revive it; that revival is **not** landed,
-  and it carries a genuine print-consequence tradeoff (scarring the mini with a
-  family that has never once fired) that is reserved to the owner.
-* **PR-8 `AFFIRMATIVE_CONTACT_ATTESTATION`** — **the headline gap.**
-  `designed_embed`'s batched verifier still has no production caller, and there
-  is still no touching-foot contact verification of any kind. This was the
-  Phase B re-review's UNMET finding and it is still UNMET.
-* **PR-9 `CONTACT_CLEARANCE_REFUSAL_IS_NOT_A_PIPELINE_VIOLATION`** — a seated
-  contact reading negative clearance still flows into `exact_clearance_violations`
-  and can hard-error via `pass_three_termination`, which OD-4 forbids.
-* **MAJOR-7 — PR-4 IS INERT.** `contact::admit` has exactly one production call
-  site (`brace.rs` model-rung gather) and it passes `carried_mm2 = 0.0`,
-  `ball_tipped = false`, `tip_clamped_at_max = false`. The H2 area law therefore
-  gates nothing today: with zero carried load every candidate is sufficient. The
-  Attestation stage must wire the real per-tip loads (`FrozenTipLoadPolicy` is
-  the load authority) into that call and document which families legitimately
-  carry zero. `admit`'s signature is deliberately left stable so that wiring can
-  extend it compatibly.
+* **PR-7 `CCO_ANCHOR_MASK_AT_THE_SEAT`** — NOT landed, **deliberately**. The
+  CCO model-anchor family remains arithmetically dead
+  (`clr <= 0.6 - 0.95 = -0.35` unconditionally) and the corrected PR-2 mask is
+  what would revive it. This record already reserved that revival to the owner
+  because it carries a genuine print-consequence tradeoff: scarring the mini
+  with a family that has never once fired. The census confirms the stake —
+  `T2_cco_anchor_attempted` reaches 2060 on `make_overhang_table` against
+  `T2_cco_anchor_surviving = 0` on every model, so reviving the family is not a
+  marginal change but the introduction of a support class the corpus has never
+  printed. Landing it inside this stage would have been exactly the silent
+  geometry change OD-8 forbids. See *Open question OQ-10*.
 
-Also still absent, and named by **OD-9**: the batched EXTERIOR-NESS screen (no
-attachment to buried surface). OD-9 postdates this design, and its adjudication
-hook says the screen lands on this branch before it retires. Nothing in this
-package subsumes it — a touching foot on a buried patch is genuinely "on the
-surface" and an embedded tip there passes an endpoint-connectivity proof
-trivially.
+* **The touching-foot families are attested only where they exist.** PR-8
+  covers the initial-contact stub family, which is every routed support tip.
+  The brace model rung is the only other family that mints a model contact on
+  the reachable corpus, and the census records `brace_append_model_rung` firing
+  **zero** times there, so there is no touching-foot contact on the corpus to
+  attest. The rung path is governed by PR-1/PR-2/PR-3 and now by PR-9; extending
+  the batched attestation to it becomes exercisable when a corpus model actually
+  places one.
 
-Consequently `initial.rs` still seats stubs at a flat depth, `rewire.rs` and
-the CCO clearance rows still use flat cosine-free insets, `lower.rs` still
-stamps a global contact depth, and no verification gate guards against a
-contact refusal silently deleting a support.
+Consequently `initial.rs` still seats stubs at a flat depth (PR-1 seating for
+the stub family was not in scope and would move geometry), `rewire.rs` and the
+CCO clearance rows still use flat cosine-free insets, and `lower.rs` still
+stamps a global contact depth.
+
+## Open questions for the owner
+
+* **OQ-8 — refuse or resize a partially engaged contact?** Four contacts on
+  `make_overhang_table` are attached over measurably less interface than their
+  tip radius claims, and the H2 area-ratio allowance does not cover their routed
+  load on what is actually there. They print today. This stage RECORDS the
+  deficit and keeps the support, because deleting it leaves nothing at all and
+  the physically correct remedy — moving or shrinking the contact so it does not
+  straddle a silhouette edge — belongs to the perception/sizing stages. Does the
+  owner want (a) the current record-and-keep, (b) a perception-stage rule that
+  keeps contacts a tip radius clear of silhouette edges, or (c) refusal once (b)
+  exists to absorb it?
+
+* **OQ-9 — PR-5's normative text is lost.** Should the next pass reconstruct
+  `MASK_INTERIOR_SINGLE_CONTACT` from first principles and have it adjudicated
+  as a new rule, or is the masked-interval blind spot now adequately covered by
+  the totality requirement `validate_members_batch` already enforces?
+
+* **OQ-10 — revive the CCO model-anchor family?** Reviving it would introduce a
+  support class that has fired zero times on the whole corpus, directly scarring
+  the mini. It is a print-consequence tradeoff, not a physics question.
 
 **Follow-ups recorded:** FU-CONTACT-1 (the `tip_radius_max_legacy_mm` clamp is
-the real limit on the 10 largest-tip contacts, not a contact defect);
-FU-CONTACT-2 (`is_embedded_taper`'s `r0 != r1` clause is no longer a proxy for
-anything under PR-1).
+the real limit on the largest-tip contacts, not a contact defect — now
+load-bearing in the attestation, see above); FU-CONTACT-2
+(`is_embedded_taper`'s `r0 != r1` clause is no longer a proxy for anything
+under PR-1).
