@@ -20,8 +20,15 @@ The integration authority is the clean worktree
 `/private/tmp/plinth-3d-pipeline-integration` on branch
 `codex/rust-pipeline-integration`.
 
-The current reviewed integration HEAD is `1b6f2e47270de4373763d41b1d3f423078b50eee`
-(`fix(support): coalescing continues the shared merge-iteration budget`). It was reached
+The current reviewed integration HEAD is the **contact-physics package merge**
+`81ec3d446f9429a5ca5cade6b957164f386134e5` (`merge: contact-physics package complete -
+PR-1..9 (PR-7 deferred w/ tripwire), OD-1..9 discharged, attestation for all three
+families`), plus the 2026-08-05 commits that follow it: `6fe750b` (delete the census
+substitute-orient mechanism), `41f1801` (census erratum + first unified corpus census),
+and this docs update. See *Embed/contact package COMPLETE (2026-08-05)* below.
+
+`81ec3d4` was reached from `1b6f2e47270de4373763d41b1d3f423078b50eee`
+(`fix(support): coalescing continues the shared merge-iteration budget`), which was reached
 from `a3c7f6464dd219da7b7628183e96c740d5e194d6` (embed-zones Phase B safe groundwork,
 itself reached by the second 2026-08-04 integration pass described below) via three
 docs-only commits recording the embed-zones stop-by-design outcome and owner rulings
@@ -424,6 +431,136 @@ rule took priority over the ship-it instruction. Consequently the `make_toed_sla
 required-table freeze (digest `11_859_964_443_161_510_103`) is **PROVISIONAL**, pending the
 parity investigation (vertex vs. interior probe) recorded as a follow-up below.
 
+## Embed/contact package COMPLETE (2026-08-05) {#contact-package-complete-2026-08-05}
+
+**STATE: COMPLETE.** The embed-zones/contact-physics package that was BLOCKED on
+2026-08-04 (OQ-1..OQ-7) is closed. It merged to integration as
+`81ec3d446f9429a5ca5cade6b957164f386134e5`. Its full design record is
+`docs/rust-migration/contact-physics-2026-08-04.md`; that file, not this section, is the
+normative account of the physics.
+
+This section supersedes the BLOCKED verdict in *Embed-zones Phase B outcome (2026-08-04)*
+and *Embed-zones blocking findings*. Those sections are retained as the historical record
+of why the package stopped; do not read them as current state.
+
+### Owner decisions OD-1..OD-9: all discharged
+
+OD-8 (correctness supersedes behavior preservation) and OD-9 (no attachment to buried
+surface) were the two that unblocked the package, and both are now implemented rather than
+merely ruled. OD-9 in particular is enforced by an exterior screen at the contact sites and
+has an acceptance fixture — a synthetic self-interpenetrating mesh — proving the screen
+fires. OQ-1..OQ-7 were delegated to the orchestrator under OD-8 and resolved as physics;
+OQ-11 was ruled and closed by striking an unreproducible figure. **OQ-8, OQ-9 and OQ-10
+remain open owner questions** and are carried into the follow-ups below — they are design
+questions the package deliberately did not answer, not unfinished implementation.
+
+### PR-1..PR-9: landed, with PR-7 deferred behind a tripwire
+
+PR-1, PR-2, PR-3, PR-4, PR-6, PR-8 and PR-9 are landed. The headline change is `ef081a2`
+(`feat(support)!: delete embed_inset_mm and both cosine floors; seat model rungs`), which
+deleted `fn embed_inset_mm` and *both* `.abs().max(0.5)` cosine floors — a source-text
+guard now enforces their absence — and replaced them with seated geometry and derived
+physics from `crate::contact`. The floor was found to have had the opposite of its believed
+effect: it made the mask *smaller* and the check *stricter*, hiding the real divergence
+behind a constant 2.50 mm inset.
+
+**PR-5 `MASK_INTERIOR_SINGLE_CONTACT` is not landed** and its normative text is not
+recoverable from the branch (OQ-9).
+
+**PR-7 `CCO_ANCHOR_MASK_AT_THE_SEAT` is DEFERRED, deliberately, with a commit-time
+tripwire.** The rationale is a print-consequence tradeoff reserved to the owner, not an
+implementation gap:
+
+- The CCO model-anchor family is arithmetically dead today
+  (`clr <= 0.6 - 0.95 = -0.35` unconditionally). The corrected PR-2 mask is exactly what
+  would revive it.
+- Reviving it is not a marginal change: it introduces a support class that has **fired zero
+  times on the entire corpus**, and that class attaches to — scars — the mini itself. The
+  2026-08-05 unified census puts the stake at **0 surviving anchors out of 3429 attempted**
+  across three models. Landing that inside this stage would have been precisely the silent
+  geometry change OD-8 forbids.
+- The measurement now says the family is not merely unproven but measurably a *kiss*: all
+  **3186** attested anchor seats corpus-wide report `centreline = false` with 1–3 of 8 rim
+  rays engaged. Without PR-7 those struts would fuse to the mini by voxel rounding, which is
+  the exact failure the owner named.
+- **The tripwire (`6a35d45`) is what makes deferral safe.** `NotAttached` is RECORDED during
+  candidacy (and digested) but ENFORCED at commit: both CCO winner-commit paths refuse an
+  unattested model anchor. Refusing during candidacy would have landed PR-7's
+  family-killing consequence without landing PR-7. So the family stays dead by arithmetic,
+  and on the day it stops being dead it cannot land silently — it hard-refuses instead.
+  Measured cost of the tripwire: **zero**, a byte-identical census (`dd505aa`), because
+  neither winner-commit gate is ever reached.
+
+Retiring the tripwire is part of the model-anchor bundle, not a separate errand: it comes
+out when PR-7 lands and the seating is real.
+
+### Attestation is live for all three contact families
+
+Contact attestation executes on real corpus geometry, not only on fixtures, for **stub
+terminals**, **brace model rungs**, and **CCO model anchors**. The 2026-08-05 unified census
+records 286 stub-terminal attestations, 2 brace model-rung seats, and 3186 CCO model-anchor
+seats. Each family also has interpenetration-fixture coverage.
+
+### Reachability and digest continuity
+
+The 2026-08-05 unified census — the first run with the corpus fixes and the contact-physics
+package both in the tree — confirms **7 of 8 corpus models complete a sealed support run
+natively**, exactly as the reachability table above predicts. Nothing that was expected to
+pass failed. The Weeping Treant stops at the `KnnBatchLimits.max_work` cap
+(`298667520` required against `100000000`), a resource cap and not a geometry defect (FU-8).
+
+All five previously recorded snapshot digests reproduce byte-identically, so **the
+contact-physics package moved no geometry on any model that was already reachable before
+it**. Two models *did* move — see the next subsection. Full numbers:
+`docs/rust-migration/census-embed-incidence-2026-08-04.md`, section
+*Unified census — 2026-08-05*.
+
+### GATE IS RED at this head: two stale goldens {#stale-goldens-2026-08-05}
+
+`cargo test --workspace --offline --no-fail-fast` at this head is **939 passed / 1 failed**.
+The failure is `public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing`
+(`crates/plinth-support/tests/support_runner_integration.rs:130`):
+
+| model | pinned (pre-contact-physics) | now | delta |
+| --- | --- | --- | --- |
+| `make_toed_slab` | 65 routed, 184 live, digest `15554091706332339621` | 64 routed, 179 live, digest `4826202191472851835` | -1 routed, -5 live |
+| `make_raking_blade` | 35 routed, 93 live, digest `6761406004527881770` | 32 routed, 89 live, digest `1709218010932846012` | -3 routed, -4 live |
+
+This is **not a regression and not a surprise** — it is the known deferred re-pin. Those
+goldens were last written at `414e13f` (corpus-fixes era), i.e. in the window after those
+two models first became reachable but before contact physics existed, so they have never
+described the current engine. The two models are exactly the two carrying PR-9 contact
+refusals (`make_toed_slab` 6, `make_raking_blade` 5) and the only two with `min_rim = 0/8`;
+refusing contacts that cannot prove an interface, and rewiring what remains, is the intended
+OD-8 consequence.
+
+Re-pinning is a digest-moving change and needed this census as its evidence, so it was left
+for a deliberate pass (FU-19). **Do not re-pin without recording the delta above**, and
+prefer to settle the `make_toed_slab` parity investigation (FU-7) first, or that model's pin
+will have to be redone.
+
+Until FU-19 lands, "COMPLETE" for this package means *scope complete with a recorded,
+explained red gate* — it does not mean the workspace gate is green. Treat FU-19 and FU-18
+as the conditions for a clean gate.
+
+### Area deficits: RECORDED as data, not adjudicated
+
+**12 stub-terminal + 554 CCO model-anchor** contacts carry a contact-area deficit — attached
+over measurably less interface than their tip radius claims. These are **recorded as data
+for the print-quality follow-up** (FU-17) and nothing in this package acts on them. The
+in-flight figure of "4 stub + 19 CCO" was `make_overhang_table` alone, which was the only
+model reaching CCO when it was taken; the corpus figures are larger purely because
+`Cylinder` and `make_box` now reach the CCO stage natively. No rule changed, the denominator
+did. OQ-8 is the owner question these numbers feed.
+
+### Known hygiene debt at this head
+
+Four `rustfmt` violations inherited from the embed tip remain in `plinth-support`
+(`cco.rs:1425`, `cco.rs:2485`, `census.rs:852`, `designed_embed.rs:788`). They are
+formatting-only and were not introduced by the 2026-08-05 census work, but
+`cargo fmt --all -- --check` is **red** at this head until they are fixed. Recorded as
+FU-18.
+
 ## Owner architecture decision {#owner-architecture-2026-08-03}
 
 The owner approved this binding clearance-mask architecture on 2026-08-03:
@@ -473,14 +610,20 @@ their generating commits are integrated.
 
 ## Reviewed branch-only work
 
-None of the commits in this table is integrated at the current HEAD `a4aefe6`. The
+None of the commits in this table is integrated at the current 2026-08-05 head. The
 canonical delicacy row was removed on 2026-08-04 because that work is now **Integrated**
 via merge `240d144`; see the *2026-08-04 integration pass* table above.
 
 | Work | Branch/worktree | Commit(s) | Review state | Integration constraint |
 | --- | --- | --- | --- | --- |
 | grounded calibration artifacts | `codex/home-calibration-plate` at `/private/tmp/plinth-home-calibration-plate` | `634abdb`, `1541379` | **ACCEPT** and owner GUI-checked | Branch-only; independently review the two-commit series and its base before cherry-picking. |
-| endpoint-connected embed zones | `codex/embed-zones` at `/private/tmp/plinth-embed-zones` | `029ced3` (rename groundwork also integrated as `a3c7f64`) | **Phase B stopped by design; package BLOCKED on OQ-1..OQ-7** (2026-08-04) | Do not integrate the package. The safe groundwork (`029ced3`, `EmbedEnd`->`ContactEnd` rename) is already integrated. Further implementation is blocked until the owner rules on OQ-1 through OQ-7 — see *Embed-zones Phase B outcome (2026-08-04)*. A corpus incidence census on `census/embed-incidence-2026-08-04` (off `029ced3`) is running to inform OQ-1/OQ-2/OQ-3. |
+The endpoint-connected-embed-zones row was **removed** on 2026-08-05: that package is now
+**INTEGRATED and COMPLETE** as merge `81ec3d4`, and the census work it spawned is
+integrated with it. See *Embed/contact package COMPLETE (2026-08-05)*. Both
+`codex/embed-zones` (`dd505aa`) and `census/embed-incidence-2026-08-04` (`50b325c`) are
+**fully contained** in the integration head — verified with
+`git merge-base --is-ancestor <branch> HEAD` for each — so both are cleared for retirement.
+See the inventory below for the retirement's execution state.
 
 The preparation-resource-policy row was **removed** on 2026-08-04: that work is now
 **INTEGRATED** as merge `c6a0884` via `codex/prepare-interface-v2`, and the superseded
@@ -500,8 +643,10 @@ regression.
 
 ## Active and pending work
 
-This table is the live inventory as of the **second** 2026-08-04 integration pass: **6
-branches, 6 worktrees**. Since the first pass, `codex/integrate-canonical-delicacy-o5`,
+This table is the live inventory as of the 2026-08-05 pass: **7 branches, 6 worktrees**, of
+which `codex/embed-zones` and `census/embed-incidence-2026-08-04` are retired-in-substance
+(content fully contained in integration) and awaiting only ref/worktree deletion. Since the
+first 2026-08-04 pass, `codex/integrate-canonical-delicacy-o5`,
 `codex/delicacy-regressions`, `codex/prepare-interface-v2`, and `codex/prepare-interface`
 and their worktrees were deleted after their content was verified integrated. The rows for `codex/canonical-delicacy`, `codex/home-test-protocol`,
 `codex/migration-handoff-2026-08-03`, `codex/prepare-cli`, `codex/chitubox-diagnosis`,
@@ -513,8 +658,9 @@ the owner's untagged-deletion decision.
 | Worktree/branch | Observed head | State |
 | --- | --- | --- |
 | `/Users/craig/code/hughescr/dnd-campaigns/plinth-3d`, `master` | `5e37d8c` | main checkout and ref store; strict ancestor of integration |
-| `/private/tmp/plinth-3d-pipeline-integration`, `codex/rust-pipeline-integration` | `1b6f2e4` | clean; integration authority. Full gate green (903 tests, clippy/fmt/diff clean) |
-| `/private/tmp/plinth-embed-zones`, `codex/embed-zones` (worktree now on `census/embed-incidence-2026-08-04`) | `029ced3` | Phase B stopped by design; safe groundwork (rename) merged to integration as `a3c7f64`; package BLOCKED on OQ-1..OQ-7; incidence census running — see *Embed-zones Phase B outcome (2026-08-04)* |
+| `/private/tmp/plinth-3d-pipeline-integration`, `codex/rust-pipeline-integration` | 2026-08-05 docs head | clean; integration authority. **Gate RED**: 939 tests passed / 1 failed (two stale goldens, FU-19), `cargo fmt --all -- --check` red (4 violations, FU-18). Clippy clean. See *GATE IS RED at this head* |
+| `/private/tmp/plinth-embed-zones`, `codex/embed-zones` | `dd505aa` | **RETIRED IN SUBSTANCE.** Package COMPLETE and merged as `81ec3d4`; `git merge-base --is-ancestor codex/embed-zones HEAD` passes, so nothing is carried here alone. Branch ref and worktree still exist and are cleared for deletion — see FU-20. Do not resume work here |
+| `census/embed-incidence-2026-08-04` (branch only, no worktree) | `50b325c` | **RETIRED IN SUBSTANCE.** Fully contained in integration (`--is-ancestor` passes); the census is now maintained in-tree at `crates/plinth-support/examples/embed_incidence_census.rs` behind the `census` cargo feature. Ref cleared for deletion — see FU-20 |
 | `/private/tmp/plinth-home-calibration-plate`, `codex/home-calibration-plate` | `1541379` | accepted branch-only; plate and loading-fixture generator authority |
 | `/private/tmp/plinth-chitubox-preview`, `codex/chitubox-native-preview` | `9ffc829` | only live carrier of the unlanded embed-native-preview fallback; cherry-pick onto integration |
 | `/private/tmp/plinth-normalization-controller`, `codex/normalization-controller` | `fc5a60d` | parked for independent review as candidate coverage-repair machinery |
@@ -539,8 +685,10 @@ use Python for migration implementation or ad-hoc verification.
 
 ## Follow-ups ledger {#follow-ups-2026-08-04}
 
-Non-blocking items raised by the 2026-08-04 reviews. None gates the current head; each
-should be scheduled deliberately.
+Items raised by the 2026-08-04 and 2026-08-05 reviews. Each should be scheduled
+deliberately. **Exception to "non-blocking": FU-18 and FU-19 are what make the workspace
+gate red at the current head** — see *GATE IS RED at this head*. Everything else here is
+non-blocking.
 
 | # | Follow-up | Note |
 | --- | --- | --- |
@@ -555,11 +703,16 @@ should be scheduled deliberately.
 | FU-9 | Hollow EDT margin defect | `grid_spec_from_bounds`'s no-padding path plus its all-foreground special case fabricate a distance ramp; the committed Sphere hollow goldens are wrong today. Est 8/16 pts; regenerates four `plinth-hollow` oracles. |
 | FU-10 | Per-layer polygon union under a fill rule | Owner-endorsed; supersedes the Tier-1 fallback. Candidate nomination must consume normalized layers per OD-9. |
 | FU-11 | Opt-in SDF/remesh repair mode | Roadmap item. |
-| FU-12 | Census doc erratum | The Reachability table is stale: the `make_box` measurement rows were computed under a borrowed -30deg pose and are invalid. Revise after the census branch reunites at the Phase B-2 merge. |
+| FU-12 | ~~Census doc erratum~~ | **RESOLVED 2026-08-05** (`893dac3`). The erratum is written at the top of `census-embed-incidence-2026-08-04.md`: the Reachability table is marked superseded, the `make_box` rows are struck as invalid (borrowed -30deg pose), the deleted `embed_inset_mm`/cosine-floor formula is called out, and the replacement numbers are appended as *Unified census — 2026-08-05*. |
+| FU-12b | ~~`PLINTH_CENSUS_SUBSTITUTE_ORIENT` is dead code~~ | **RESOLVED 2026-08-05** (`6fe750b`). The env var and its `SUBSTITUTE_ORIENT` donor table are deleted from the census example. `make_box` and `Cylinder` now orient natively from their repaired baselines, so no donor-substitution path is reachable; the `MODEL` row still prints `orientation=own_pinned` so the transcript states on its face that no pose was borrowed. |
 | FU-13 | `DuplicatePhysicalSeat` error payload should carry position+routes instead of post-sort indices | Fold into any future `SpecializedError` change. |
 | FU-14 | `coalesced_seat_count` is deliberately NOT in the plan digest | Kept fixtures byte-identical. Fold it in at the next authorized digest-moving change. |
 | FU-15 | Corpus-gated end-to-end test tier, with loud skip for gitignored STLs | So the Cylinder and `make_box` sealed runs (digests `13310185350867878190` / `9657051231007502658`), currently test-uncovered, get pinned. |
 | FU-16 | Measure the bbox-claimed vs. discarded unowned-hole split on the treant once caps lift | bbox claiming can under-report a solid's area; the Tier 2 union supersedes it. |
+| FU-17 | Contact-area deficits: 12 stub + 554 CCO model-anchor | RECORDED as data by the 2026-08-05 unified census, not adjudicated. These contacts attach over measurably less interface than their tip radius claims. This is the print-quality question OQ-8 asks the owner; the 554 CCO figure is moot unless PR-7 revives that family. |
+| FU-18 | 4 `rustfmt` violations inherited from the embed tip | `cco.rs:1425`, `cco.rs:2485`, `census.rs:852`, `designed_embed.rs:788`. Formatting-only, but `cargo fmt --all -- --check` is red until fixed. |
+| FU-19 | Re-pin the two stale `support_runner_integration` goldens | `make_toed_slab` and `make_raking_blade` moved under contact physics; the goldens date from `414e13f` and the workspace test gate is RED (939/1). Deltas are recorded under *GATE IS RED at this head*. Digest-moving, so do it deliberately — and settle FU-7 first or `make_toed_slab` will need re-pinning twice. |
+| FU-20 | Delete the retired `codex/embed-zones` branch + worktree and the `census/embed-incidence-2026-08-04` ref | Both are proven contained in integration (`git merge-base --is-ancestor` passes for each). Mechanical cleanup only; tag per the 2026-08-04 archive convention before deleting. |
 
 ## Ordered resumption checklist
 
@@ -576,30 +729,77 @@ should be scheduled deliberately.
    that acceptance.
 
 2. **Done — do not repeat.** The frozen coverage golden was regenerated in the `1673a16`
-   lineage and `cargo test --workspace --offline` is green (877 passed) at `c6a0884`.
-   `codex/integrate-canonical-delicacy-o5` and its worktree were deleted. The accepted
-   preparation interface and stable CLI parser are integrated as `92fa26a` and `2b933c`;
-   canonical delicacy as merge `240d144`; the preparation resource policy as merge
-   `c6a0884`; and the M0-value/signed-zero delicacy regressions as merge `1eb538c`.
+   lineage. `codex/integrate-canonical-delicacy-o5` and its worktree were deleted. The
+   accepted preparation interface and stable CLI parser are integrated as `92fa26a` and
+   `2b933c`; canonical delicacy as merge `240d144`; the preparation resource policy as merge
+   `c6a0884`; the M0-value/signed-zero delicacy regressions as merge `1eb538c`; the corpus
+   defect fixes as merge `6558255`; and **the embed/contact-physics package as merge
+   `81ec3d4`**. The blocked resource-policy commits were replayed as `73e7c13`/`0b0f27a`
+   with their three missing test classes and merged; `codex/prepare-interface` was retired
+   with a recorded containment proof.
 
-3. **Done — do not repeat.** The blocked resource-policy commits were replayed on the
-   regenerated-golden base as `73e7c13`/`0b0f27a`, the three missing test classes were
-   added (execution-budget refusal, malformed-cap refusal, sealed-input compile-fail),
-   independent review returned ACCEPT, and the work merged as `c6a0884`. The superseded
-   `codex/prepare-interface` was retired with a recorded containment proof.
+3. **Do not re-ask for rulings that have landed.** OD-1..OD-9 are all discharged and
+   OQ-1..OQ-7 and OQ-11 are closed — see *Embed/contact package COMPLETE (2026-08-05)*.
+   The still-open owner questions are **OQ-8** (refuse or resize a partially engaged
+   contact), **OQ-9** (PR-5's normative text is lost — reconstruct or drop), and **OQ-10**
+   (revive the CCO model-anchor family, WITH PR-7 seating, or leave it dead). OQ-10 is a
+   print-consequence tradeoff, not a physics question; do not resolve it by inference.
 
-4. **Owner ruling OD-8 landed (2026-08-04, evening) — do not re-ask for a ruling.** Safe
-   groundwork from Phase B of `codex/embed-zones` (the `EmbedEnd`->`ContactEnd` rename,
-   `029ced3`) is integrated as merge `a3c7f64`. Phase B correctly halted when it found
-   OD-2's premise falsified rather than build on it — see *Embed-zones Phase B outcome
-   (2026-08-04)*. The owner has now ruled (OD-8): behavior-preservation is lifted for this
-   package, correctness/physics governs, and OQ-1 through OQ-7 are DELEGATED to the
-   orchestrator for physics/geometry resolution — see *Owner ruling OD-8 (2026-08-04,
-   evening)*. The next actionable step is **Phase B-2 (physics-first redesign)**, launching
-   once the corpus incidence census on `census/embed-incidence-2026-08-04` (off `029ced3`)
-   reports; its numbers feed the design as its empirical baseline.
+4. **Clear the red gate before starting new work.** FU-19 (re-pin the two stale
+   `support_runner_integration` goldens) and FU-18 (4 `rustfmt` violations). FU-19 is
+   digest-moving: record the delta from *GATE IS RED at this head*, and prefer to settle
+   FU-7 first so `make_toed_slab` is not pinned twice. Also FU-20, the mechanical retirement
+   of `codex/embed-zones` and `census/embed-incidence-2026-08-04`.
 
-5. Complete former M7 in its documented gate order:
+### Critical path (2026-08-05) — the next five items, in order
+
+5. **Treant resource caps (FU-8) — "production caps do not admit a real mini."** This is
+   first because it is the single largest blind spot in the whole engine: the corpus's only
+   real mini contributes nothing, so every physics conclusion currently rests on procedural
+   fixtures plus two primitives. The 2026-08-05 census reproduces the wall exactly —
+   `Perception(PointIndex("kNN work requires 298667520; limit is 100000000"))`. Raise
+   `KnnBatchLimits.max_work` on measurement, not by guess, then expect
+   `CandidateSurfaceGridLimit` (`67_108_864`) and the Specialized `GateOperationLimit`
+   (`2_000_000_000`) sitting behind it. Re-run the census after each lift; the treant's
+   curvature and self-intersection are what OD-9 and PR-4 were written for.
+
+6. **Model-anchor bundle — PR-7 seating + tournament-bias investigation + tripwire
+   retirement.** Treat these three as one unit; landing any alone is incoherent. **Organic
+   minis need this family**: a treant or a PC mini wants to anchor to the model, and today
+   *every* CCO winner corpus-wide is a plate or a bifurcate — **0 of 3429 attempted model
+   anchors survives, on any model**, and all 3186 attested anchor seats are
+   `centreline = false`. So the bundle is: (a) find out whether the tournament is *biased*
+   against model anchors or whether they are correctly losing, (b) land PR-7
+   `CCO_ANCHOR_MASK_AT_THE_SEAT` so a revived anchor has a proven interface rather than a
+   voxel-rounding kiss, and (c) retire the commit-time `NotAttached` tripwire (`6a35d45`),
+   which exists precisely to hold the line until (b). Gated on owner ruling **OQ-10** —
+   reviving this family deliberately scars the mini. Do the tournament-bias measurement
+   first; it is evidence the owner needs to answer OQ-10, and it requires no ruling.
+
+7. **`make_toed_slab` parity investigation (FU-7) — freeze is PROVISIONAL.** Vertex-probe
+   vs. interior-probe containment. It moves the member count (`72 -> 42` when last
+   attempted), so the required-table freeze `11_859_964_443_161_510_103` cannot be trusted
+   and the `support_runner_integration` re-pin (FU-19) should wait on it. Sequence this
+   before FU-19, not after.
+
+8. **Per-layer polygon union under a fill rule (FU-10) — owner-endorsed.** Supersedes the
+   Tier-1 unowned-hole fallback that currently lets the treant past perception. Candidate
+   nomination must consume normalized layers per OD-9. Pairs naturally with item 5: the
+   treant is the model whose slices motivate it, and FU-16 (bbox-claimed vs. discarded
+   unowned-hole split) is the measurement that closes it out.
+
+9. **Prepare execution runner -> CLI -> `.chitubox` output for the minis.** This is the item
+   that turns the engine into the thing the project exists for. Resolve a complete
+   `PrepareRequest`, load/cache inputs, run the move-only stage chain, emit the
+   artifact/report once, keep resource admission at stage boundaries, then wire the stable
+   CLI parser through to a `.chitubox` file the owner can open. Items 5–8 are what make the
+   output trustworthy; this is what makes it exist. Note FU-2 (`validate()` width vs
+   per-type constructor contracts) was explicitly deferred until this lands, because only
+   here do the real call sites exist to judge against.
+
+### Longer-horizon milestones
+
+10. Complete former M7 in its documented gate order:
 
    ```text
    format [integrated]
@@ -617,27 +817,25 @@ should be scheduled deliberately.
    -> remaining typed-registry conversion
    ```
 
-   The preparation interface and CLI parser are integrated. Continue the execution runner:
-   resolve a complete `PrepareRequest`, load/cache inputs, run the move-only stage chain,
-   emit the artifact/report once, and keep resource admission at stage boundaries. The
-   blocked resource patch is not authorization to bypass its tests.
+   The preparation interface and CLI parser are integrated; the execution runner itself is
+   item 9 above. The blocked resource patch is not authorization to bypass its tests.
 
-6. Run the M7 acceptance commands in `04-migration-plan.md` only after every slice above is
+11. Run the M7 acceptance commands in `04-migration-plan.md` only after every slice above is
    integrated. Record full-corpus score evidence and owner ChituBox review separately; the
    two GUI checkpoints in this file do not by themselves satisfy all M7 acceptance.
 
-7. Continue M8: dense L2/L1/exact orientation, Pareto records, `plinth calibrate`,
+12. Continue M8: dense L2/L1/exact orientation, Pareto records, `plinth calibrate`,
    LoadSharing A/B, exact-byte 1/4/16-thread determinism, cache-on/off equality, and kernel
    benchmarks. O-6 makes redesign/calibration post-Python backlog, while determinism of the
    minimally ported pipeline remains a deletion gate.
 
-8. Complete M9/native-handoff deletion under O-6/O-7: eliminate every remaining Python,
+13. Complete M9/native-handoff deletion under O-6/O-7: eliminate every remaining Python,
    PyO3, maturin, shim, and Python-only control; update docs/skills; run workspace test,
    Clippy, format, zero-Python searches, prepare/score, and the documented clean-checkout
    re-fire. The owner-print checkpoint remains binding. Never claim M9 from an existing
    dirty or artifact-bearing worktree.
 
-9. Before any final merge, re-run:
+14. Before any final merge, re-run:
 
    ```sh
    git status --short --branch
