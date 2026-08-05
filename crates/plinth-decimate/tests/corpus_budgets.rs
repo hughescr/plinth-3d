@@ -305,10 +305,15 @@ fn execute_gate(root: &Path, output_dir: &Path) -> Result<GateReport, String> {
         )
     })?;
 
+    // An explicit finite construction cap, not a default: `usize::MAX` is now
+    // refused by `DecimationBudget::validate_for_execution` as no budget at
+    // all.  Only `grid_pitch_mm` is fingerprinted into the native surface, so
+    // this cap is result-inert once a surface exists; it can only refuse
+    // construction, which the expected per-model statuses below would catch.
     let budget = DecimationBudget::ratified_default(ProbeConfig {
         surface: NativeSurfaceConfig {
             grid_pitch_mm: 1.0,
-            max_grid_bytes: usize::MAX,
+            max_grid_bytes: 64 * 1024 * 1024,
         },
         nearest_upper_bound_mm: 10_000.0,
     })

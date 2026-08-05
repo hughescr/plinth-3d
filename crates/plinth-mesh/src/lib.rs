@@ -6,11 +6,16 @@
 //! reorder, repair, or f32 in-memory conversion.
 #![forbid(unsafe_code)]
 
+mod delicacy;
 mod fixtures;
 mod io;
 mod topology;
 mod triage;
 
+pub use delicacy::{
+    DelicacyBuildConfig, DelicacyError, DelicacyFaceValue, DelicacyField, DelicacySettings,
+    FaceTable, DELICACY_FIELD_SCHEMA, DELICACY_FIELD_SCHEMA_VERSION,
+};
 pub use fixtures::{
     make_box, make_box_default, make_overhang_table, make_overhang_table_with, make_raking_blade,
     make_raking_blade_with, make_thin_fin, make_thin_fin_with, make_toed_slab, make_toed_slab_with,

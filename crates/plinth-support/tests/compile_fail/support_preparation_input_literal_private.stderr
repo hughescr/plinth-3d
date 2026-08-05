@@ -1,0 +1,11 @@
+error: cannot construct `SupportPreparationInput<'_>` with struct literal syntax due to private fields
+ --> tests/compile_fail/support_preparation_input_literal_private.rs:6:13
+  |
+6 |     let _ = SupportPreparationInput {
+  |             ^^^^^^^^^^^^^^^^^^^^^^^
+7 |         layers: &layers,
+  |         --------------- private field
+8 |         delicacy_by_face: &[],
+  |         --------------------- private field
+  |
+  = note: ...and other private fields that were not provided

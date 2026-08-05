@@ -1,0 +1,9 @@
+error[E0451]: fields `layers`, `delicacy_by_face`, `column_pitch_mm`, `surface_grid_pitch_mm`, `max_grid_bytes`, `candidate_config`, `reservations`, `perception_limits`, `coverage_samples_max_virtual_cells`, `coverage_score_matrix_max_entries`, `specialized_limits`, `construction_limits`, `brace_penetration_limits`, `raft_limits`, `max_primitives` and `max_primitive_bytes` of struct `SupportPreparationInput` are private
+  --> tests/compile_fail/support_preparation_input_functional_update_private.rs:10:9
+   |
+ 9 |     let _ = SupportPreparationInput {
+   |             ----------------------- in this type
+10 |         max_grid_bytes: 0,
+   |         ^^^^^^^^^^^^^^^^^ private field
+11 |         ..base
+   |           ^^^^ fields `layers`, `delicacy_by_face`, `column_pitch_mm`, `surface_grid_pitch_mm`, `candidate_config`, `reservations`, `perception_limits`, `coverage_samples_max_virtual_cells`, `coverage_score_matrix_max_entries`, `specialized_limits`, `construction_limits`, `brace_penetration_limits`, `raft_limits`, `max_primitives` and `max_primitive_bytes` are private

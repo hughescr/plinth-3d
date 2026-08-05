@@ -2359,7 +2359,7 @@ mod tests {
     }
 
     #[test]
-    fn sampling_consumes_all_face_uniforms_before_barycentric_uniforms() {
+    fn move_characterization_sampling_consumes_all_face_uniforms_before_barycentric_uniforms() {
         let mesh = Mesh::new(
             vec![
                 [0.0, 0.0, 0.0],
@@ -2389,7 +2389,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_welding_signed_zero_and_signed_defects_are_preserved() {
+    fn move_characterization_kernel_boundary_preserves_signed_zero_identity() {
         let faces = [
             [[0.0, -0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
             [[0.0, 0.0, 0.0], [0.0, 0.0, 1.0], [1.0, 0.0, 0.0]],
@@ -2578,7 +2578,7 @@ mod tests {
     }
 
     #[test]
-    fn frozen_exterior_keeps_odd_coverage_for_overlap_and_triple_overlap() {
+    fn move_characterization_exterior_keeps_odd_coverage_for_overlap_and_triple_overlap() {
         for centres in [
             vec![[0.0, 0.0, 0.0], [0.75, 0.0, 0.0]],
             vec![[-0.75, 0.0, 0.0], [0.0, 0.0, 0.0], [0.75, 0.0, 0.0]],
@@ -2608,7 +2608,7 @@ mod tests {
     }
 
     #[test]
-    fn batch_contact_lookup_uses_nearest_sample_index_ties() {
+    fn move_characterization_batch_contact_lookup_uses_nearest_sample_index_ties() {
         let field = DelicacyField {
             exterior_mask: vec![true, true],
             selected_faces: vec![9, 4],
@@ -2637,6 +2637,62 @@ mod tests {
                 .weights,
             [0.25]
         );
+    }
+
+    #[test]
+    fn move_characterization_pins_compact_field_order_values_and_work() {
+        let cases = [
+            (
+                "overlap",
+                vec![[0.0, 0.0, 0.0], [0.75, 0.0, 0.0]],
+                vec![
+                    0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21,
+                ],
+                13_392_890_591_201_070_820_u64,
+                DelicacyIndexStats {
+                    triangle_nodes_visited: 696,
+                    triangle_faces_tested: 2_232,
+                    vertex_grid_candidates: 848,
+                    sample_kd_nodes_visited: 654,
+                    centre_kd_nodes_visited: 1_536,
+                },
+            ),
+            (
+                "triple-overlap",
+                vec![[-0.75, 0.0, 0.0], [0.0, 0.0, 0.0], [0.75, 0.0, 0.0]],
+                vec![
+                    0, 1, 2, 3, 4, 5, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 20, 21, 24, 25, 26, 27,
+                    28, 29, 30, 31, 32, 33,
+                ],
+                4_623_175_013_055_909_216_u64,
+                DelicacyIndexStats {
+                    triangle_nodes_visited: 1_860,
+                    triangle_faces_tested: 5_922,
+                    vertex_grid_candidates: 1_168,
+                    sample_kd_nodes_visited: 654,
+                    centre_kd_nodes_visited: 2_304,
+                },
+            ),
+        ];
+        for (name, centres, selected, digest, stats) in cases {
+            let mesh = cubes_mesh(&centres);
+            let first =
+                DelicacyField::build(0, &mesh, test_settings(), 23, 64).expect("compact field");
+            let second = DelicacyField::build(0, &mesh, test_settings(), 23, 64)
+                .expect("repeat compact field");
+            assert_eq!(
+                first.selected_face_indices(),
+                selected,
+                "{name} source face order"
+            );
+            assert_eq!(field_digest(&first), digest, "{name} sample/value bits");
+            assert_eq!(first.build_stats(), stats, "{name} observable work census");
+            assert_eq!(
+                field_digest(&first),
+                field_digest(&second),
+                "{name} determinism"
+            );
+        }
     }
 
     #[test]
@@ -3178,6 +3234,42 @@ mod tests {
                 "index {index}: {left} != {right}"
             );
         }
+    }
+
+    fn field_digest(field: &DelicacyField) -> u64 {
+        let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+        let mut feed = |bytes: &[u8]| {
+            for byte in bytes {
+                digest ^= u64::from(*byte);
+                digest = digest.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        feed(&(field.exterior_mask().len() as u64).to_le_bytes());
+        for exterior in field.exterior_mask() {
+            feed(&[u8::from(*exterior)]);
+        }
+        feed(&(field.selected_face_indices().len() as u64).to_le_bytes());
+        for face in field.selected_face_indices() {
+            feed(&(*face as u64).to_le_bytes());
+        }
+        feed(&(field.samples().len() as u64).to_le_bytes());
+        for sample in field.samples() {
+            for value in sample.point.into_iter().chain(sample.normal) {
+                feed(&value.to_bits().to_le_bytes());
+            }
+            feed(&(sample.face_index as u64).to_le_bytes());
+        }
+        for values in [
+            field.curvature_scores(),
+            field.thinness_scores(),
+            field.weights(),
+        ] {
+            feed(&(values.len() as u64).to_le_bytes());
+            for value in values {
+                feed(&value.to_bits().to_le_bytes());
+            }
+        }
+        digest
     }
 
     fn cube_soup(side: f64, centre: Vec3) -> Vec<Vec3> {
