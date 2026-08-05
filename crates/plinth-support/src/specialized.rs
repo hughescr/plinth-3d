@@ -2332,12 +2332,21 @@ fn attach_exact_mixed_contacts(
 /// The surviving seat is elected deterministically as the smaller
 /// `primary_regular` under `compare_primary_regular`, independent of the two
 /// seats' positions in the working vector.
+///
+/// `iterations` is the running total already spent by
+/// `attach_exact_mixed_contacts` and the gated tournament; this pass folds
+/// its own merges into that same count for the `max_merge_iterations` cap
+/// check, so one `consolidate` call cannot spend the budget twice over. The
+/// returned `usize` is still this pass's own coalesce count (for
+/// `coalesced_seat_count`), not the cumulative total.
 fn coalesce_exact_regular_seats(
     contacts: &mut Vec<WorkingContact>,
     limits: SpecializedLimits,
     telemetry: &mut MergeAllocationTelemetry,
+    iterations: usize,
 ) -> Result<usize, SpecializedError> {
     let mut coalesced = 0usize;
+    let mut iterations = iterations;
     loop {
         check_merge_pair_limit(contacts.len(), limits.max_merge_pairs)?;
         let mut chosen = None;
@@ -2379,7 +2388,7 @@ fn coalesce_exact_regular_seats(
         let Some(proposal) = chosen else {
             break;
         };
-        let required_iterations = coalesced
+        let required_iterations = iterations
             .checked_add(1)
             .ok_or(SpecializedError::GateResourceOverflow)?;
         if required_iterations > limits.max_merge_iterations {
@@ -2404,7 +2413,8 @@ fn coalesce_exact_regular_seats(
         }
         next.sort_by(compare_contacts);
         *contacts = next;
-        coalesced = required_iterations;
+        iterations = required_iterations;
+        coalesced += 1;
     }
     Ok(coalesced)
 }
@@ -2540,7 +2550,8 @@ fn consolidate(
     // tournament's own ledger and every frozen fixture digest. Running it here
     // leaves already-covered fixtures byte-identical and still lets the
     // terminal `gate_not_worse` audit below observe the coalesced result.
-    let coalesced_seat_count = coalesce_exact_regular_seats(contacts, limits, &mut telemetry)?;
+    let coalesced_seat_count =
+        coalesce_exact_regular_seats(contacts, limits, &mut telemetry, iterations)?;
     let accepted_vector = evaluate_gate_batch(
         contacts,
         &[],
@@ -7516,6 +7527,7 @@ mod tests {
             &mut contacts,
             SpecializedLimits::production(TEST_KNN_LIMITS),
             &mut telemetry,
+            0,
         )
         .expect("coalesce the exactly coincident demand-free regular pair");
 
@@ -7551,6 +7563,7 @@ mod tests {
             &mut contacts,
             SpecializedLimits::production(TEST_KNN_LIMITS),
             &mut telemetry,
+            0,
         )
         .expect("second coalescing pass");
         assert_eq!(again, 0);
@@ -7570,6 +7583,7 @@ mod tests {
                 &mut contacts,
                 SpecializedLimits::production(TEST_KNN_LIMITS),
                 &mut telemetry,
+                0,
             )
             .expect("coalesce");
             (count, contacts)
@@ -7611,11 +7625,50 @@ mod tests {
             &mut contacts,
             SpecializedLimits::production(TEST_KNN_LIMITS),
             &mut telemetry,
+            0,
         )
         .expect("coalesce");
         assert_eq!(coalesced, 0);
         assert!(same_working_contacts(&contacts, &before));
         assert_eq!(telemetry.deep_clone_count, 0);
+    }
+
+    /// The cap check inside `coalesce_exact_regular_seats` must bound the
+    /// *whole-consolidate* iteration count, not restart from zero: a caller
+    /// that has already spent its budget in `attach_exact_mixed_contacts`
+    /// and the gated tournament passes that spend in as `iterations`, and
+    /// one more coalesce here must trip `max_merge_iterations` rather than
+    /// get its own fresh allowance.
+    #[test]
+    fn terminal_coalescing_shares_the_whole_consolidate_iteration_budget() {
+        let (elected_route, other_route) = coincident_collision_routes();
+        let position = [3.0, -4.0, 5.5];
+        let elected_normal = [0.0, 0.0, -1.0];
+        let other_normal = [0.0, f64::from_bits(1), -1.0];
+        let mut contacts = vec![
+            test_regular_contact(position, elected_normal, elected_route, Vec::new()),
+            test_regular_contact(position, other_normal, other_route, Vec::new()),
+        ];
+        let mut telemetry = MergeAllocationTelemetry::default();
+        let mut limits = SpecializedLimits::production(TEST_KNN_LIMITS);
+        limits.max_merge_iterations = 1;
+
+        // A caller that already spent the entire budget upstream (attach
+        // prepass + tournament) leaves no room for even a single coalesce.
+        assert_eq!(
+            coalesce_exact_regular_seats(&mut contacts, limits, &mut telemetry, 1),
+            Err(SpecializedError::MergeIterationLimit {
+                required: 2,
+                limit: 1,
+            })
+        );
+        assert_eq!(contacts.len(), 2, "the refused merge must not commit");
+
+        // The same pass starting from zero spend fits inside the cap.
+        let coalesced = coalesce_exact_regular_seats(&mut contacts, limits, &mut telemetry, 0)
+            .expect("one coalesce fits the whole-consolidate cap when nothing else spent it");
+        assert_eq!(coalesced, 1);
+        assert_eq!(contacts.len(), 1);
     }
 
     /// Both models nominate one dyadic cell vertex from two islands under
