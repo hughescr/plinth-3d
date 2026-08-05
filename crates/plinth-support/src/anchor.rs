@@ -1759,7 +1759,7 @@ mod tests {
             r1_mm: RootwardEndRadius::new(p(0.35)),
             kind: MemberKind::Stub,
             owner: Owner::Contact(2),
-            embed_end: None,
+            model_contact_end: None,
             carried_mm2: f(1.0),
         })
     }

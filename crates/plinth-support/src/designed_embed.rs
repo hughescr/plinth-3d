@@ -32,7 +32,7 @@ use plinth_core::{Finite, PositiveFinite};
 use serde::Serialize;
 use thiserror::Error;
 
-use crate::forest::{mask_binding, EmbedEnd, Forest, Member, MemberKey};
+use crate::forest::{mask_binding, ContactEnd, Forest, Member, MemberKey};
 
 /// A requested designed clearance extent in millimetres. This is deliberately
 /// distinct from observed penetration evidence and cannot be zero or non-finite.
@@ -117,7 +117,7 @@ impl DesignedEndMask {
     pub(crate) fn validated_extent_for(
         &self,
         member: &Member,
-        end: EmbedEnd,
+        end: ContactEnd,
         surface: &NativeSurface,
     ) -> Result<PositiveFiniteMm, DesignedMaskError> {
         let surface_identity = surface.source_triangle_soup_digest();
@@ -172,19 +172,19 @@ impl DesignedClearanceMasks {
     }
 
     #[must_use]
-    pub(crate) const fn end(&self, end: EmbedEnd) -> Option<&DesignedEndMask> {
+    pub(crate) const fn end(&self, end: ContactEnd) -> Option<&DesignedEndMask> {
         match end {
-            EmbedEnd::Terminalward => self.terminalward(),
-            EmbedEnd::Rootward => self.rootward(),
+            ContactEnd::Terminalward => self.terminalward(),
+            ContactEnd::Rootward => self.rootward(),
         }
     }
 
     /// The order is a contract: terminalward before rootward, independent of
     /// construction order or thread count.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (EmbedEnd, &DesignedEndMask)> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (ContactEnd, &DesignedEndMask)> {
         [
-            (EmbedEnd::Terminalward, self.terminalward.as_ref()),
-            (EmbedEnd::Rootward, self.rootward.as_ref()),
+            (ContactEnd::Terminalward, self.terminalward.as_ref()),
+            (ContactEnd::Rootward, self.rootward.as_ref()),
         ]
         .into_iter()
         .filter_map(|(end, mask)| mask.map(|mask| (end, mask)))
@@ -199,7 +199,7 @@ impl DesignedClearanceMasks {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct DesignedMaskRequest {
     pub(crate) member: MemberKey,
-    pub(crate) end: EmbedEnd,
+    pub(crate) end: ContactEnd,
     pub(crate) extent: PositiveFiniteMm,
 }
 
@@ -243,7 +243,7 @@ impl DesignedMaskTable {
         &self,
         key: MemberKey,
         member: &Member,
-        end: EmbedEnd,
+        end: ContactEnd,
         surface: &NativeSurface,
     ) -> Result<PositiveFiniteMm, DesignedMaskError> {
         self.masks_for(key)
@@ -305,7 +305,7 @@ impl DesignedMaskTable {
 pub(crate) fn validate_members_batch(
     surface: &NativeSurface,
     members: &[&Member],
-    requests: &[(usize, EmbedEnd, PositiveFiniteMm)],
+    requests: &[(usize, ContactEnd, PositiveFiniteMm)],
     limits: EndpointMaskValidationLimits,
 ) -> Result<Vec<DesignedClearanceMasks>, DesignedMaskError> {
     // Row order is a contract: member index, then terminalward before rootward.
@@ -333,7 +333,7 @@ pub(crate) fn validate_members_batch(
         }
         let requested = &ordered[start..cursor];
         if requested.is_empty() {
-            if let Some(end) = member.embed_end() {
+            if let Some(end) = member.model_contact_end() {
                 return Err(DesignedMaskError::MissingRequiredExtent { end });
             }
             continue;
@@ -344,8 +344,8 @@ pub(crate) fn validate_members_batch(
         for (_, end, extent) in requested {
             let extent = validate_extent(*extent, length)?;
             match end {
-                EmbedEnd::Terminalward => terminal = Some(extent),
-                EmbedEnd::Rootward => root = Some(extent),
+                ContactEnd::Terminalward => terminal = Some(extent),
+                ContactEnd::Rootward => root = Some(extent),
             }
         }
         if terminal
@@ -356,7 +356,7 @@ pub(crate) fn validate_members_batch(
         // A mask on an end the member does not declare would be silently
         // ignored by every consumer, which is exactly how designed-mask code
         // went dead before. Refuse it instead.
-        let declared = member.embed_end();
+        let declared = member.model_contact_end();
         for (_, end, _) in requested {
             if declared != Some(*end) {
                 return Err(DesignedMaskError::EndNotDesigned { end: *end });
@@ -364,8 +364,8 @@ pub(crate) fn validate_members_batch(
         }
         if let Some(end) = declared {
             let present = match end {
-                EmbedEnd::Terminalward => terminal.is_some(),
-                EmbedEnd::Rootward => root.is_some(),
+                ContactEnd::Terminalward => terminal.is_some(),
+                ContactEnd::Rootward => root.is_some(),
             };
             if !present {
                 return Err(DesignedMaskError::MissingRequiredExtent { end });
@@ -438,8 +438,8 @@ pub(crate) fn validate_members_batch(
             surface_identity,
         };
         match row.end {
-            EmbedEnd::Terminalward => minted[row.member].terminalward = Some(mask),
-            EmbedEnd::Rootward => minted[row.member].rootward = Some(mask),
+            ContactEnd::Terminalward => minted[row.member].terminalward = Some(mask),
+            ContactEnd::Rootward => minted[row.member].rootward = Some(mask),
         }
     }
     Ok(minted)
@@ -470,7 +470,7 @@ fn endpoint_validation_kernel_calls() -> usize {
 #[derive(Clone, Copy)]
 struct EndpointValidationRow {
     member: usize,
-    end: EmbedEnd,
+    end: ContactEnd,
     extent: PositiveFiniteMm,
     fraction: f64,
     p0: V3,
@@ -488,7 +488,7 @@ impl EndpointValidationRow {
     ) -> Self {
         Self {
             member: member_index,
-            end: EmbedEnd::Terminalward,
+            end: ContactEnd::Terminalward,
             extent,
             fraction: extent.get() / length,
             p0: member.p0_mm().map(Finite::get),
@@ -506,7 +506,7 @@ impl EndpointValidationRow {
     ) -> Self {
         Self {
             member: member_index,
-            end: EmbedEnd::Rootward,
+            end: ContactEnd::Rootward,
             extent,
             fraction: extent.get() / length,
             p0: member.p1_mm().map(Finite::get),
@@ -532,7 +532,7 @@ fn endpoint_connected_witness(
     let mut interval_index = 0usize;
     let mut digest = crate::forest::DigestWriter::new();
     digest.tag(0x46);
-    digest.embed(Some(row.end));
+    digest.contact_end(Some(row.end));
     digest.f64(row.extent.get());
     for ray in rays.by_ref() {
         let target = ray.length_mm() * row.fraction;
@@ -594,11 +594,11 @@ pub(crate) enum DesignedMaskError {
     #[error("designed mask binding is stale for this member, end, or surface")]
     StaleBinding,
     #[error("an embedded member end needs its designed clearance extent")]
-    MissingRequiredExtent { end: EmbedEnd },
+    MissingRequiredExtent { end: ContactEnd },
     #[error("a designed extent was requested for an end the member does not declare: {end:?}")]
-    EndNotDesigned { end: EmbedEnd },
+    EndNotDesigned { end: ContactEnd },
     #[error("a designed extent was requested twice for the same member end: {end:?}")]
-    DuplicateRequest { end: EmbedEnd },
+    DuplicateRequest { end: ContactEnd },
     #[error("a designed extent was requested for a member that is not in this forest")]
     UnknownMember,
     #[error("endpoint mask validation limits are invalid")]
@@ -610,7 +610,7 @@ pub(crate) enum DesignedMaskError {
     #[error("geometry kernel returned corrupt endpoint mask evidence")]
     CorruptKernelResult,
     #[error("designed embed geometry is not connected to its endpoint: {end:?}")]
-    DisconnectedGeometry { end: EmbedEnd },
+    DisconnectedGeometry { end: ContactEnd },
 }
 
 fn validate_extent(
@@ -761,7 +761,7 @@ mod tests {
         p0: [f64; 3],
         p1: [f64; 3],
         r: f64,
-        embed_end: Option<EmbedEnd>,
+        model_contact_end: Option<ContactEnd>,
         ordinal: u32,
     ) -> MemberSpec {
         MemberSpec {
@@ -774,13 +774,19 @@ mod tests {
                 family: "endpoint-mask".into(),
                 ordinal,
             },
-            embed_end,
+            model_contact_end,
             carried_mm2: finite(1.0),
         }
     }
 
-    fn embedded_member(p0: f64, p1: f64, embed_end: Option<EmbedEnd>) -> Member {
-        Member::new(spec([p0, 0.5, 0.5], [p1, 0.5, 0.5], 0.05, embed_end, 0))
+    fn embedded_member(p0: f64, p1: f64, model_contact_end: Option<ContactEnd>) -> Member {
+        Member::new(spec(
+            [p0, 0.5, 0.5],
+            [p1, 0.5, 0.5],
+            0.05,
+            model_contact_end,
+            0,
+        ))
     }
 
     /// Members are spread along y so each one is a distinct row, and the ends
@@ -791,13 +797,13 @@ mod tests {
             .map(|index| {
                 let y = 0.2 + 0.15 * (index as f64);
                 let end = if index % 2 == 0 {
-                    EmbedEnd::Terminalward
+                    ContactEnd::Terminalward
                 } else {
-                    EmbedEnd::Rootward
+                    ContactEnd::Rootward
                 };
                 let (p0, p1) = match end {
-                    EmbedEnd::Terminalward => ([0.2, y, 0.5], [0.8, y, 0.5]),
-                    EmbedEnd::Rootward => ([0.8, y, 0.5], [0.2, y, 0.5]),
+                    ContactEnd::Terminalward => ([0.2, y, 0.5], [0.8, y, 0.5]),
+                    ContactEnd::Rootward => ([0.8, y, 0.5], [0.2, y, 0.5]),
                 };
                 forest.add_member(Member::new(spec(
                     p0,
@@ -815,7 +821,7 @@ mod tests {
         keys.iter()
             .map(|key| DesignedMaskRequest {
                 member: *key,
-                end: forest.member(*key).unwrap().embed_end().unwrap(),
+                end: forest.member(*key).unwrap().model_contact_end().unwrap(),
                 extent: extent(0.1),
             })
             .collect()
@@ -841,7 +847,7 @@ mod tests {
         assert_eq!(table.len(), keys.len());
         for key in &keys {
             let member = forest.member(*key).unwrap();
-            let end = member.embed_end().unwrap();
+            let end = member.model_contact_end().unwrap();
             assert_eq!(
                 table.required_extent(*key, member, end, &surface),
                 Ok(extent(0.1))
@@ -885,7 +891,7 @@ mod tests {
         assert_eq!(
             refuse(&|requests| {
                 let mut both = requests[1];
-                both.end = EmbedEnd::Terminalward;
+                both.end = ContactEnd::Terminalward;
                 both.extent = extent(0.31);
                 requests[1].extent = extent(0.31);
                 requests.push(both);
@@ -897,13 +903,13 @@ mod tests {
                 requests.remove(3);
             }),
             DesignedMaskError::MissingRequiredExtent {
-                end: EmbedEnd::Rootward,
+                end: ContactEnd::Rootward,
             }
         );
         assert_eq!(
-            refuse(&|requests| requests[0].end = EmbedEnd::Rootward),
+            refuse(&|requests| requests[0].end = ContactEnd::Rootward),
             DesignedMaskError::EndNotDesigned {
-                end: EmbedEnd::Rootward,
+                end: ContactEnd::Rootward,
             }
         );
         assert_eq!(
@@ -912,7 +918,7 @@ mod tests {
                 requests.push(duplicate);
             }),
             DesignedMaskError::DuplicateRequest {
-                end: EmbedEnd::Terminalward,
+                end: ContactEnd::Terminalward,
             }
         );
         assert_eq!(
@@ -949,12 +955,12 @@ mod tests {
             ([-1e308, 0.0, 0.0], [1e308, 0.0, 0.0], 1.0),
             ([0.0, 0.0, 0.0], [0.0, 0.0, 0.0], 1.0),
         ] {
-            let member = Member::new(spec(p0, p1, 0.2, Some(EmbedEnd::Terminalward), 0));
+            let member = Member::new(spec(p0, p1, 0.2, Some(ContactEnd::Terminalward), 0));
             assert_eq!(
                 validate_members_batch(
                     &surface,
                     &[&member],
-                    &[(0, EmbedEnd::Terminalward, extent(extent_mm))],
+                    &[(0, ContactEnd::Terminalward, extent(extent_mm))],
                     limits,
                 ),
                 Err(DesignedMaskError::InvalidMemberSpan)
@@ -1006,15 +1012,15 @@ mod tests {
             &surface,
             &[member],
             &[
-                (0, EmbedEnd::Rootward, extent(0.1)),
-                (0, EmbedEnd::Terminalward, extent(0.1)),
+                (0, ContactEnd::Rootward, extent(0.1)),
+                (0, ContactEnd::Terminalward, extent(0.1)),
             ],
             validation_limits(&surface, 2),
         );
         assert_eq!(
             masks.unwrap_err(),
             DesignedMaskError::EndNotDesigned {
-                end: EmbedEnd::Terminalward,
+                end: ContactEnd::Terminalward,
             }
         );
     }
@@ -1022,16 +1028,16 @@ mod tests {
     #[test]
     fn rejects_a_request_for_an_end_the_member_does_not_declare() {
         let surface = surface_with_cubes(&[(0.0, 1.0)]);
-        let member = embedded_member(0.2, 0.8, Some(EmbedEnd::Terminalward));
+        let member = embedded_member(0.2, 0.8, Some(ContactEnd::Terminalward));
         assert_eq!(
             validate_members_batch(
                 &surface,
                 &[&member],
-                &[(0, EmbedEnd::Rootward, extent(0.1))],
+                &[(0, ContactEnd::Rootward, extent(0.1))],
                 validation_limits(&surface, 1),
             ),
             Err(DesignedMaskError::EndNotDesigned {
-                end: EmbedEnd::Rootward,
+                end: ContactEnd::Rootward,
             })
         );
         let unembedded = embedded_member(0.2, 0.8, None);
@@ -1039,17 +1045,17 @@ mod tests {
             validate_members_batch(
                 &surface,
                 &[&unembedded],
-                &[(0, EmbedEnd::Terminalward, extent(0.1))],
+                &[(0, ContactEnd::Terminalward, extent(0.1))],
                 validation_limits(&surface, 1),
             ),
             Err(DesignedMaskError::EndNotDesigned {
-                end: EmbedEnd::Terminalward,
+                end: ContactEnd::Terminalward,
             })
         );
     }
 
     #[test]
-    fn a_member_without_a_declared_embed_end_needs_no_designed_extent() {
+    fn a_member_without_a_declared_contact_end_needs_no_designed_extent() {
         let surface = surface_with_cubes(&[(0.0, 1.0)]);
         let mut forest = Forest::new();
         let key = forest.add_member(embedded_member(0.2, 0.8, None));
@@ -1067,11 +1073,11 @@ mod tests {
             table.required_extent(
                 key,
                 forest.member(key).unwrap(),
-                EmbedEnd::Terminalward,
+                ContactEnd::Terminalward,
                 &surface,
             ),
             Err(DesignedMaskError::MissingRequiredExtent {
-                end: EmbedEnd::Terminalward,
+                end: ContactEnd::Terminalward,
             })
         );
     }
@@ -1079,25 +1085,25 @@ mod tests {
     #[test]
     fn disconnected_geometry_is_rejected_and_the_binding_covers_member_end_and_surface() {
         let disconnected = surface_with_cubes(&[(0.0, 0.35), (0.55, 1.0)]);
-        let member = embedded_member(0.1, 0.9, Some(EmbedEnd::Terminalward));
+        let member = embedded_member(0.1, 0.9, Some(ContactEnd::Terminalward));
         assert_eq!(
             validate_members_batch(
                 &disconnected,
                 &[&member],
-                &[(0, EmbedEnd::Terminalward, extent(0.45))],
+                &[(0, ContactEnd::Terminalward, extent(0.45))],
                 validation_limits(&disconnected, 1),
             ),
             Err(DesignedMaskError::DisconnectedGeometry {
-                end: EmbedEnd::Terminalward,
+                end: ContactEnd::Terminalward,
             })
         );
 
         let surface = surface_with_cubes(&[(0.0, 1.0)]);
         let mut forest = Forest::new();
-        let key = forest.add_member(embedded_member(0.2, 0.8, Some(EmbedEnd::Terminalward)));
+        let key = forest.add_member(embedded_member(0.2, 0.8, Some(ContactEnd::Terminalward)));
         let requests = [DesignedMaskRequest {
             member: key,
-            end: EmbedEnd::Terminalward,
+            end: ContactEnd::Terminalward,
             extent: extent(0.1),
         }];
         let table = DesignedMaskTable::validate_forest(
@@ -1111,7 +1117,7 @@ mod tests {
             table.required_extent(
                 key,
                 forest.member(key).unwrap(),
-                EmbedEnd::Terminalward,
+                ContactEnd::Terminalward,
                 &surface,
             ),
             Ok(extent(0.1))
@@ -1121,7 +1127,7 @@ mod tests {
             table.required_extent(
                 key,
                 forest.member(key).unwrap(),
-                EmbedEnd::Terminalward,
+                ContactEnd::Terminalward,
                 &rebound,
             ),
             Err(DesignedMaskError::StaleBinding)
@@ -1157,19 +1163,24 @@ mod tests {
             ("set_kind", &|forest: &mut Forest, key: MemberKey| {
                 forest.set_kind(key, MemberKind::Trunk).unwrap();
             }),
-            ("set_embed_end", &|forest: &mut Forest, key: MemberKey| {
-                forest.set_embed_end(key, Some(EmbedEnd::Rootward)).unwrap();
-            }),
+            (
+                "set_model_contact_end",
+                &|forest: &mut Forest, key: MemberKey| {
+                    forest
+                        .set_model_contact_end(key, Some(ContactEnd::Rootward))
+                        .unwrap();
+                },
+            ),
         ];
         for (name, mutate) in mutators {
             let mut forest = Forest::new();
-            let key = forest.add_member(embedded_member(0.2, 0.8, Some(EmbedEnd::Terminalward)));
+            let key = forest.add_member(embedded_member(0.2, 0.8, Some(ContactEnd::Terminalward)));
             let table = DesignedMaskTable::validate_forest(
                 &forest,
                 &surface,
                 &[DesignedMaskRequest {
                     member: key,
-                    end: EmbedEnd::Terminalward,
+                    end: ContactEnd::Terminalward,
                     extent: extent(0.1),
                 }],
                 validation_limits(&surface, 1),
@@ -1179,7 +1190,7 @@ mod tests {
                 table.required_extent(
                     key,
                     forest.member(key).unwrap(),
-                    EmbedEnd::Terminalward,
+                    ContactEnd::Terminalward,
                     &surface,
                 ),
                 Ok(extent(0.1)),
@@ -1190,7 +1201,7 @@ mod tests {
                 table.required_extent(
                     key,
                     forest.member(key).unwrap(),
-                    EmbedEnd::Terminalward,
+                    ContactEnd::Terminalward,
                     &surface,
                 ),
                 Err(DesignedMaskError::StaleBinding),
@@ -1209,14 +1220,14 @@ mod tests {
             [0.85, 0.5, 0.5],
             [2.0, 0.5, 0.5],
             0.05,
-            Some(EmbedEnd::Terminalward),
+            Some(ContactEnd::Terminalward),
             0,
         ));
         let limits = validation_limits(&surface, 1);
         assert!(validate_members_batch(
             &surface,
             &[&member],
-            &[(0, EmbedEnd::Terminalward, extent(0.09))],
+            &[(0, ContactEnd::Terminalward, extent(0.09))],
             limits,
         )
         .is_ok());
@@ -1224,11 +1235,11 @@ mod tests {
             validate_members_batch(
                 &surface,
                 &[&member],
-                &[(0, EmbedEnd::Terminalward, extent(0.225))],
+                &[(0, ContactEnd::Terminalward, extent(0.225))],
                 limits,
             ),
             Err(DesignedMaskError::DisconnectedGeometry {
-                end: EmbedEnd::Terminalward,
+                end: ContactEnd::Terminalward,
             })
         );
     }
@@ -1250,7 +1261,7 @@ mod tests {
             [sphere_radius_mm - depth_mm, 0.0, 0.0],
             [sphere_radius_mm + 3.0, 0.0, 0.0],
             stub_radius_mm,
-            Some(EmbedEnd::Terminalward),
+            Some(ContactEnd::Terminalward),
             0,
         ));
         let limits =
@@ -1259,11 +1270,11 @@ mod tests {
             validate_members_batch(
                 &surface,
                 &[&member],
-                &[(0, EmbedEnd::Terminalward, extent(depth_mm))],
+                &[(0, ContactEnd::Terminalward, extent(depth_mm))],
                 limits,
             ),
             Err(DesignedMaskError::DisconnectedGeometry {
-                end: EmbedEnd::Terminalward,
+                end: ContactEnd::Terminalward,
             }),
             "an extent equal to the placement depth must be refused on a convex surface"
         );
@@ -1272,7 +1283,7 @@ mod tests {
             validate_members_batch(
                 &surface,
                 &[&member],
-                &[(0, EmbedEnd::Terminalward, extent(depth_mm - 0.02))],
+                &[(0, ContactEnd::Terminalward, extent(depth_mm - 0.02))],
                 limits,
             )
             .is_ok(),
@@ -1283,22 +1294,22 @@ mod tests {
     #[test]
     fn endpoint_validator_handles_reversed_root_coordinates() {
         let surface = surface_with_cubes(&[(0.0, 1.0)]);
-        let member = embedded_member(-0.2, 0.8, Some(EmbedEnd::Rootward));
+        let member = embedded_member(-0.2, 0.8, Some(ContactEnd::Rootward));
         let masks = validate_members_batch(
             &surface,
             &[&member],
-            &[(0, EmbedEnd::Rootward, extent(0.1))],
+            &[(0, ContactEnd::Rootward, extent(0.1))],
             validation_limits(&surface, 1),
         )
         .unwrap();
         assert_eq!(
             masks[0].iter().map(|(end, _)| end).collect::<Vec<_>>(),
-            vec![EmbedEnd::Rootward]
+            vec![ContactEnd::Rootward]
         );
         assert_eq!(
             masks[0].rootward().unwrap().validated_extent_for(
                 &member,
-                EmbedEnd::Rootward,
+                ContactEnd::Rootward,
                 &surface
             ),
             Ok(extent(0.1))

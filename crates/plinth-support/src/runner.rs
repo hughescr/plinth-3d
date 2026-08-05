@@ -76,7 +76,7 @@ use crate::{
     coverage_measurement_assessment_resource_plan,
     dyadic::CandidatePayloadConfig,
     forest::{
-        EmbedEnd, Forest, Member, MemberKey, MemberKind, MemberSpec, Owner, TerminalLedgerState,
+        ContactEnd, Forest, Member, MemberKey, MemberKind, MemberSpec, Owner, TerminalLedgerState,
     },
     initial::{
         build_initial_contacts, ContactConstructionLimits, InitialContactBuild, InitialContactError,
@@ -402,7 +402,7 @@ pub struct FinalLiveMemberEvidence {
     r0_mm: f64,
     r1_mm: f64,
     kind: MemberKind,
-    embed_end: Option<EmbedEnd>,
+    model_contact_end: Option<ContactEnd>,
 }
 
 impl FinalLiveMemberEvidence {
@@ -414,7 +414,7 @@ impl FinalLiveMemberEvidence {
             r0_mm: member.terminal_radius_mm().get().get(),
             r1_mm: member.rootward_radius_mm().get().get(),
             kind: member.kind().clone(),
-            embed_end: member.embed_end(),
+            model_contact_end: member.model_contact_end(),
         }
     }
 
@@ -443,8 +443,8 @@ impl FinalLiveMemberEvidence {
         &self.kind
     }
     #[must_use]
-    pub const fn embed_end(&self) -> Option<EmbedEnd> {
-        self.embed_end
+    pub const fn model_contact_end(&self) -> Option<ContactEnd> {
+        self.model_contact_end
     }
 
     #[cfg(test)]
@@ -453,7 +453,7 @@ impl FinalLiveMemberEvidence {
         endpoints_mm: [[f64; 3]; 2],
         radii_mm: [f64; 2],
         kind: MemberKind,
-        embed_end: Option<EmbedEnd>,
+        model_contact_end: Option<ContactEnd>,
     ) -> Self {
         Self {
             key: MemberKey::transit_test_fixture(key[0], key[1]),
@@ -462,7 +462,7 @@ impl FinalLiveMemberEvidence {
             r0_mm: radii_mm[0],
             r1_mm: radii_mm[1],
             kind,
-            embed_end,
+            model_contact_end,
         }
     }
 }
@@ -2015,7 +2015,7 @@ impl BracedSupportRun<'_> {
                 r1_mm: member.rootward_radius_mm(),
                 kind: member.kind().clone(),
                 owner: member.owner().clone(),
-                embed_end: member.embed_end(),
+                model_contact_end: member.model_contact_end(),
                 carried_mm2: member.carried_mm2(),
             },
         });
@@ -3177,10 +3177,10 @@ fn final_live_members_digest(members: &[FinalLiveMemberEvidence]) -> u64 {
                 hash.bytes(label.as_bytes());
             }
         }
-        hash.byte(match member.embed_end {
+        hash.byte(match member.model_contact_end {
             None => 0,
-            Some(EmbedEnd::Terminalward) => 1,
-            Some(EmbedEnd::Rootward) => 2,
+            Some(ContactEnd::Terminalward) => 1,
+            Some(ContactEnd::Rootward) => 2,
         });
     }
     hash.finish()
@@ -3316,10 +3316,10 @@ fn hash_member_spec(hash: &mut Fnv, spec: &MemberSpec) {
             hash.u32(*ordinal);
         }
     }
-    hash.u64(match spec.embed_end {
+    hash.u64(match spec.model_contact_end {
         None => 0,
-        Some(EmbedEnd::Terminalward) => 1,
-        Some(EmbedEnd::Rootward) => 2,
+        Some(ContactEnd::Terminalward) => 1,
+        Some(ContactEnd::Rootward) => 2,
     });
     hash.f64(spec.carried_mm2.get());
 }
@@ -3507,7 +3507,7 @@ mod tests {
                 family: "runner-brace-test".to_owned(),
                 ordinal,
             },
-            embed_end: None,
+            model_contact_end: None,
             carried_mm2: Finite::new(0.0).unwrap(),
         })
     }
@@ -4613,7 +4613,7 @@ mod tests {
                         member.terminal_radius_mm().get().get(),
                         member.rootward_radius_mm().get().get(),
                         member.kind().clone(),
-                        member.embed_end(),
+                        member.model_contact_end(),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -4627,7 +4627,7 @@ mod tests {
                         member.terminal_radius_mm(),
                         member.rootward_radius_mm(),
                         member.kind().clone(),
-                        member.embed_end(),
+                        member.model_contact_end(),
                     )
                 })
                 .collect::<Vec<_>>();
@@ -4672,7 +4672,7 @@ mod tests {
             [[0.25, 0.5, 0.5], [0.25, 0.5, -1.0]],
             [0.1, 0.2],
             MemberKind::Stub,
-            Some(EmbedEnd::Terminalward),
+            Some(ContactEnd::Terminalward),
         )];
         let snapshot = SupportVerificationSnapshot::transit_test_fixture(
             &mesh,

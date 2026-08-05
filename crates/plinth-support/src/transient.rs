@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use crate::{
     forest::{
-        EmbedEnd, Forest, Member, MemberKey, MemberKind, RootwardEndRadius, TerminalEndRadius,
+        ContactEnd, Forest, Member, MemberKey, MemberKind, RootwardEndRadius, TerminalEndRadius,
     },
     legacy_compat::{LegacyCompatibility, LegacyCompatibilityError},
     member_sizing::{MemberSizingError, MemberSpan},
@@ -211,10 +211,10 @@ pub fn derive_brace_attachments(
             .member(brace)
             .ok_or(TransientError::MissingLiveMember(brace))?;
         let (p0, p1) = points(member);
-        if member.embed_end() != Some(EmbedEnd::Terminalward) {
+        if member.model_contact_end() != Some(ContactEnd::Terminalward) {
             endpoints.push((brace, p0));
         }
-        if member.embed_end() != Some(EmbedEnd::Rootward) {
+        if member.model_contact_end() != Some(ContactEnd::Rootward) {
             endpoints.push((brace, p1));
         }
     }
@@ -809,7 +809,7 @@ mod tests {
                 family: "transient-test".to_owned(),
                 ordinal,
             },
-            embed_end: None,
+            model_contact_end: None,
             carried_mm2: f(0.0),
         })
     }
@@ -1010,7 +1010,7 @@ mod tests {
         );
 
         forest
-            .set_embed_end(brace, Some(EmbedEnd::Terminalward))
+            .set_model_contact_end(brace, Some(ContactEnd::Terminalward))
             .unwrap();
         assert!(!derive_brace_attachments(&forest)
             .unwrap()

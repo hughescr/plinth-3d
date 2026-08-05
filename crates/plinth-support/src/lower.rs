@@ -354,7 +354,7 @@ fn lower_member(
 }
 
 fn is_embedded_taper(member: &Member) -> bool {
-    member.embed_end().is_some()
+    member.model_contact_end().is_some()
         && (member.terminal_radius_mm().get().get() - member.rootward_radius_mm().get().get()).abs()
             > ZERO_LENGTH_MM
 }
@@ -563,7 +563,8 @@ mod tests {
     use super::*;
     use crate::{
         forest::{
-            EmbedEnd, MemberSpec, Owner, RootwardEndRadius, TerminalEndRadius, TerminalLedgerState,
+            ContactEnd, MemberSpec, Owner, RootwardEndRadius, TerminalEndRadius,
+            TerminalLedgerState,
         },
         joints::{plan_joint_balls_filtered, JointStagingLimits, LiveViewLimits},
         raft::{plan_bottom_connected, RaftLimits},
@@ -585,7 +586,7 @@ mod tests {
         radii: [f64; 2],
         kind: MemberKind,
         ordinal: u32,
-        embed_end: Option<EmbedEnd>,
+        model_contact_end: Option<ContactEnd>,
     ) -> Member {
         let owner = if kind == MemberKind::Stub {
             Owner::Contact(ordinal)
@@ -602,7 +603,7 @@ mod tests {
             r1_mm: RootwardEndRadius::new(r(radii[1])),
             kind,
             owner,
-            embed_end,
+            model_contact_end,
             carried_mm2: f(1.0),
         })
     }
@@ -615,7 +616,7 @@ mod tests {
             [0.2, 0.4],
             MemberKind::Stub,
             0,
-            Some(EmbedEnd::Terminalward),
+            Some(ContactEnd::Terminalward),
         ));
         let root = forest.add_member(member(
             [0.0, 0.0, 3.0],
@@ -650,7 +651,7 @@ mod tests {
             [0.2, 0.4],
             MemberKind::Stub,
             4,
-            Some(EmbedEnd::Terminalward),
+            Some(ContactEnd::Terminalward),
         ));
         forest.register_terminal(4, unrouted).unwrap();
         forest.retire(unrouted).unwrap();
@@ -752,7 +753,7 @@ mod tests {
             [0.2, 0.4],
             MemberKind::Stub,
             11,
-            Some(EmbedEnd::Terminalward),
+            Some(ContactEnd::Terminalward),
         ));
         forest.register_terminal(11, stub).unwrap();
         for (ordinal, delta) in [(20, 0.5e-9), (21, 1.0e-9), (22, 2.0e-9)] {
@@ -762,7 +763,7 @@ mod tests {
                 [0.5, 0.5 + delta],
                 MemberKind::Shoot,
                 ordinal,
-                Some(EmbedEnd::Terminalward),
+                Some(ContactEnd::Terminalward),
             ));
         }
         let frame = BuildFrame::new(f(-10.0), r(5.0));
@@ -822,7 +823,7 @@ mod tests {
             [0.4, 0.6],
             MemberKind::Trunk,
             12,
-            Some(EmbedEnd::Terminalward),
+            Some(ContactEnd::Terminalward),
         );
         let mut forest = Forest::new();
         forest.add_member(member);

@@ -7222,7 +7222,7 @@ mod tests {
             anchor::{AnchorGeometryAuthority, AnchorSearchConfig, SurfaceAnchorPool},
             cco::{CcoController, CcoError, FinalizedAnchorTerminalRoute, TerminalCcoRequest},
             forest::{
-                EmbedEnd, Forest, Member, MemberKind, MemberSpec, Owner, RootwardEndRadius,
+                ContactEnd, Forest, Member, MemberKind, MemberSpec, Owner, RootwardEndRadius,
                 TerminalEndRadius,
             },
             perception::{FinalizedContactLoadLimits, FinalizedContactLoads},
@@ -7293,7 +7293,7 @@ mod tests {
             r1_mm: RootwardEndRadius::new(bound_load.tip_radius_mm()),
             kind: MemberKind::Stub,
             owner: Owner::Contact(terminal_id),
-            embed_end: Some(EmbedEnd::Terminalward),
+            model_contact_end: Some(ContactEnd::Terminalward),
             carried_mm2: Finite::new(bound_load.carried_area_mm2()).unwrap(),
         }));
         forest.register_terminal(terminal_id, stub).unwrap();

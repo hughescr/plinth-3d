@@ -409,7 +409,7 @@ mod tests {
                 family: "raft-test".into(),
                 ordinal,
             },
-            embed_end: None,
+            model_contact_end: None,
             carried_mm2: number(1.0),
         })
     }
