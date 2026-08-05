@@ -315,6 +315,17 @@ impl FinalSupportAuthority<'_> {
     }
 }
 
+/// Record a stage failure for the census, when the census is compiled in.
+///
+/// A free function rather than an inline `census_record!` at each call site so
+/// the `error` binding is consumed in BOTH feature configurations — otherwise
+/// the ordinary (census-off) build warns on six unused closure parameters.
+fn note_stage_failure<E: std::fmt::Debug>(stage: &'static str, error: &E) {
+    crate::census_record!(crate::census::note_stage_error(stage, error));
+    #[cfg(not(feature = "census"))]
+    let _ = (stage, error);
+}
+
 /// Run the existing sealed preparation pipeline once and return only its final authority.
 pub fn run_support<'a>(
     hollowed: HollowedModel,
@@ -363,28 +374,28 @@ pub fn run_support<'a>(
         input.max_primitive_bytes,
     );
     let prepared = prepare_support_run(hollowed, request, authority).map_err(|error| {
-        crate::census::note_stage_error("Preparation", &error);
+        note_stage_failure("Preparation", &error);
         SupportRunError::Failed(SupportRunPhase::Preparation)
     })?;
     let routed = prepared.route_initial_cco().map_err(|error| {
-        crate::census::note_stage_error("Routing", &error);
+        note_stage_failure("Routing", &error);
         SupportRunError::Failed(SupportRunPhase::Routing)
     })?;
     let rewired = routed.rewire().map_err(|error| {
-        crate::census::note_stage_error("Rewire", &error);
+        note_stage_failure("Rewire", &error);
         SupportRunError::Failed(SupportRunPhase::Rewire)
     })?;
     let braced = rewired.brace().map_err(|error| {
-        crate::census::note_stage_error("Brace", &error);
+        note_stage_failure("Brace", &error);
         SupportRunError::Failed(SupportRunPhase::Brace)
     })?;
     let structured = braced.structure().map_err(|error| {
-        crate::census::note_stage_error("Structure", &error);
+        note_stage_failure("Structure", &error);
         SupportRunError::Failed(SupportRunPhase::Structure)
     })?;
     Ok(FinalSupportAuthority(structured.lower().map_err(
         |error| {
-            crate::census::note_stage_error("Lowering", &error);
+            note_stage_failure("Lowering", &error);
             SupportRunError::Failed(SupportRunPhase::Lowering)
         },
     )?))

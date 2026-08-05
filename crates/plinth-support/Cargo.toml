@@ -5,6 +5,12 @@ edition = "2021"
 rust-version = "1.97"
 publish = false
 
+[features]
+# Throwaway 2026-08-04 embed-incidence census instrumentation, quarantined so it
+# cannot reach a production build (MAJOR-8). Off by default; the census example
+# below requires it. Enable with `--features census`.
+census = []
+
 [dependencies]
 geom_kernel = { path = "../../rust/geom_kernel" }
 plinth-core = { path = "../plinth-core" }
@@ -19,3 +25,7 @@ plinth-decimate = { path = "../plinth-decimate" }
 plinth-orient = { path = "../plinth-orient" }
 serde_json = { workspace = true }
 trybuild = "1"
+
+[[example]]
+name = "embed_incidence_census"
+required-features = ["census"]

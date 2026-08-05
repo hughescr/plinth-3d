@@ -2383,11 +2383,13 @@ fn grow_terminal_inner(
         context.validate_replay(forest, request)?;
     }
     let checkpoint = forest.checkpoint();
-    crate::census::record_append(match &descriptors[winner_index] {
-        Descriptor::Plate { .. } => "cco_winner_plate",
-        Descriptor::Bifurcate { .. } => "cco_winner_bifurcate",
-        Descriptor::ModelAnchor { .. } => "cco_winner_model_anchor",
-    });
+    crate::census_record!(crate::census::record_append(
+        match &descriptors[winner_index] {
+            Descriptor::Plate { .. } => "cco_winner_plate",
+            Descriptor::Bifurcate { .. } => "cco_winner_bifurcate",
+            Descriptor::ModelAnchor { .. } => "cco_winner_model_anchor",
+        }
+    ));
     match apply_and_size(forest, request, &descriptors[winner_index], &config) {
         Ok(true) if forest.digest() == winner.forest.digest() => forest.commit(checkpoint)?,
         Ok(_) => {
@@ -2462,7 +2464,14 @@ fn clearance_survival(
         }
         ranges.push(start..p0.len());
     }
-    crate::census::record_segment_batch("cco_candidate_clearance", &p0, &p1, &inset0, &inset1, &[]);
+    crate::census_record!(crate::census::record_segment_batch(
+        "cco_candidate_clearance",
+        &p0,
+        &p1,
+        &inset0,
+        &inset1,
+        &[]
+    ));
     let (clearances, _) = surface
         .segment_clearance(&p0, &p1, &r0, &r1, config.standoff_mm, &inset0, &inset1)
         .map_err(|error| CcoError::Native(error.to_string()))?;
@@ -2755,7 +2764,7 @@ fn apply_model_anchor(
     {
         return Ok(false);
     }
-    crate::census::record_model_anchor(stub_end, point_mm);
+    crate::census_record!(crate::census::record_model_anchor(stub_end, point_mm));
     let strut = forest.add_member(Member::new(MemberSpec {
         p0_mm: request.stub_end_mm(),
         p1_mm: finite3(point_mm)?,

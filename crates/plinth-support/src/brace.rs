@@ -214,17 +214,19 @@ struct TriggerReliefResult {
 
 /// The seated contact geometry carried alongside a rod that touches the model.
 ///
+/// CENSUS-ONLY, and gated on the `census` feature accordingly (MAJOR-8): the
+/// production clearance path reads `inset1` directly and never needs this.
+///
 /// Carried EXPLICITLY rather than reconstructed.  Two census consumers used to
 /// invert the retired `embed_inset_mm` to recover the incidence
 /// (`(r + standoff) / (inset1 - contact_depth)`); under the PR-2 mask that
 /// inverse is meaningless, and since the census is the OD-8 delta instrument,
 /// a meaningless inverse would invalidate the measurement itself.
+#[cfg(feature = "census")]
 #[derive(Clone, Copy, Debug)]
 struct RodContact {
     /// `|cos|` between the member axis and the surface normal, AFTER seating.
     abs_cos_incidence: f64,
-    /// The PR-1 seat depth the rod endpoint was pushed in by.
-    seat_depth_mm: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -235,6 +237,8 @@ struct Rod {
     inset0: f64,
     inset1: f64,
     /// `Some` exactly when this rod's `p1` end is a seated model contact.
+    /// Census-only; see [`RodContact`].
+    #[cfg(feature = "census")]
     contact: Option<RodContact>,
 }
 
@@ -461,10 +465,10 @@ fn append_candidate(
     additions: &mut Vec<BraceAddition>,
 ) -> Result<(), BraceError> {
     let ordinal = ordinals.entry(candidate.kind).or_default();
-    crate::census::record_append(match candidate.kind {
+    crate::census_record!(crate::census::record_append(match candidate.kind {
         BraceAdditionKind::CrossLink => "brace_append_crosslink",
         BraceAdditionKind::ModelRung => "brace_append_model_rung",
-    });
+    }));
     for rod in &candidate.rods {
         let spec = MemberSpec {
             p0_mm: finite3(rod.p0)?,
@@ -989,13 +993,13 @@ fn gather_candidates(
                 // trivially-clear branch.
                 Err(_) => continue,
             };
-        crate::census::record_rung(
+        crate::census_record!(crate::census::record_rung(
             abs_cos_raw,
             extents.seated_abs_cos,
             extents.seated_length_mm,
             radius.get(),
             extents.mask_extent_mm,
-        );
+        ));
         candidates.push(PlacementCandidate {
             need_index: projected.raw.need_index,
             site_index: projected.raw.site_index,
@@ -1007,9 +1011,9 @@ fn gather_candidates(
                 radius,
                 inset0: 0.0,
                 inset1: extents.mask_extent_mm,
+                #[cfg(feature = "census")]
                 contact: Some(RodContact {
                     abs_cos_incidence: extents.seated_abs_cos,
-                    seat_depth_mm: extents.seat_depth_mm,
                 }),
             }],
             // BLOCKER-3.  Printability is evaluated at the UNSEATED projection
@@ -1074,6 +1078,7 @@ fn evaluate_candidates(
     let mut inset0 = Vec::new();
     let mut inset1 = Vec::new();
     let mut ranges = Vec::with_capacity(candidates.len());
+    #[cfg(feature = "census")]
     let mut census_cos_class = Vec::new();
     for candidate in candidates {
         let start = p0.len();
@@ -1089,27 +1094,26 @@ fn evaluate_candidates(
             // not exist for the PR-2 mask, and since this census is the OD-8
             // delta instrument, inverting a retired formula would have
             // invalidated the very measurement the ruling requires.
-            census_cos_class.push(match rod.contact {
-                Some(contact) => {
+            crate::census_record!(census_cos_class.push(match rod.contact {
+                Some(contact) =>
                     if contact.abs_cos_incidence <= 0.5 + 1e-9 {
                         1
                     } else {
                         2
-                    }
-                }
+                    },
                 None => 0,
-            });
+            }));
         }
         ranges.push(start..p0.len());
     }
-    crate::census::record_segment_batch(
+    crate::census_record!(crate::census::record_segment_batch(
         "brace_candidate_clearance",
         &p0,
         &p1,
         &inset0,
         &inset1,
         &census_cos_class,
-    );
+    ));
     let clearances = if p0.is_empty() {
         Vec::new()
     } else {
@@ -1126,7 +1130,7 @@ fn evaluate_candidates(
         config,
         penetration_limits,
     )?;
-    if crate::census::enabled() {
+    crate::census_record!(if crate::census::enabled() {
         let mut outcomes = Vec::new();
         for ((candidate, range), is_viable) in candidates.iter().zip(&ranges).zip(&viable) {
             if candidate.kind != BraceAdditionKind::ModelRung {
@@ -1147,7 +1151,7 @@ fn evaluate_candidates(
             }
         }
         crate::census::record_rung_outcomes(outcomes.into_iter());
-    }
+    });
     Ok(viable)
 }
 
@@ -1392,6 +1396,7 @@ fn cross_link_rods(
             inset0: 0.0,
             inset1: 0.0,
             // Cross-links join two supports; neither end touches the model.
+            #[cfg(feature = "census")]
             contact: None,
         })
     };
@@ -1513,6 +1518,7 @@ fn exact_clearance_rows(
         .collect::<Vec<_>>();
     let mut inset0 = vec![0.0; rows.len()];
     let mut inset1 = vec![0.0; rows.len()];
+    #[cfg(feature = "census")]
     let mut census_cos_class = vec![0u8; rows.len()];
     let embedded = rows
         .iter()
@@ -1575,30 +1581,32 @@ fn exact_clearance_rows(
             // checked rather than exempted, and PR-3/PR-9 refuse it upstream.
             let inset =
                 contact::mask_extent_mm(mask_seat, r_max, abs_cos_raw, &policy).unwrap_or(0.0);
-            crate::census::record_embed(
-                abs_cos_raw,
-                abs_cos_raw,
-                radius,
-                inset,
-                norm(axis_raw),
-                member.kind(),
-                end,
-            );
-            census_cos_class[index] = if abs_cos_raw < 0.5 { 1 } else { 2 };
+            crate::census_record!({
+                crate::census::record_embed(
+                    abs_cos_raw,
+                    abs_cos_raw,
+                    radius,
+                    inset,
+                    norm(axis_raw),
+                    member.kind(),
+                    end,
+                );
+                census_cos_class[index] = if abs_cos_raw < 0.5 { 1 } else { 2 };
+            });
             match end {
                 ContactEnd::Terminalward => inset0[index] = inset,
                 ContactEnd::Rootward => inset1[index] = inset,
             }
         }
     }
-    crate::census::record_segment_batch(
+    crate::census_record!(crate::census::record_segment_batch(
         "brace_exact_member_clearance",
         &p0,
         &p1,
         &inset0,
         &inset1,
         &census_cos_class,
-    );
+    ));
     let mut clearance = surface
         .segment_clearance(&p0, &p1, &r0, &r1, config.standoff_mm, &inset0, &inset1)
         .map_err(|error| BraceError::NativeQuery(error.to_string()))?
@@ -2264,6 +2272,7 @@ mod tests {
                     radius: positive(0.1),
                     inset0: 0.0,
                     inset1: 0.0,
+                    #[cfg(feature = "census")]
                     contact: None,
                 }],
                 printable: true,
@@ -2279,6 +2288,7 @@ mod tests {
                     radius: positive(0.1),
                     inset0: 0.0,
                     inset1: 0.0,
+                    #[cfg(feature = "census")]
                     contact: None,
                 }],
                 printable: true,

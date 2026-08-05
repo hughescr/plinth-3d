@@ -1,10 +1,16 @@
-//! THROWAWAY INSTRUMENTATION -- embed-incidence census, never to merge.
+//! THROWAWAY INSTRUMENTATION -- embed-incidence census.
+//!
+//! QUARANTINED behind the `census` cargo feature (MAJOR-8). This whole module,
+//! and every call site that feeds it, is `#[cfg]`-gated, so an ordinary build --
+//! including `cargo test --workspace` -- contains none of it. Build it with
+//! `--features census`; the census example declares that feature as required.
 //!
 //! Passive, result-inert counters for the 2026-08-04 embed-incidence census.
 //! Nothing here is read by production code: every entry point only appends to a
 //! process-global buffer, and every buffer is drained by the census example
-//! binary. Recording is additionally gated on `PLINTH_CENSUS=1` so an
-//! un-instrumented baseline can be produced from the same build.
+//! binary. Recording is additionally gated at RUNTIME on `PLINTH_CENSUS=1`, so
+//! an un-instrumented baseline can be produced from the same instrumented
+//! build.
 
 use std::sync::{Mutex, OnceLock};
 

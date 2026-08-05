@@ -1,4 +1,9 @@
-//! THROWAWAY INSTRUMENTATION -- census harness, never to merge.
+//! THROWAWAY INSTRUMENTATION -- census harness.
+//!
+//! Requires the `census` cargo feature (declared as `required-features` in this
+//! crate's manifest), so it is invisible to an ordinary build:
+//! `cargo run --release --offline --features census --example
+//! embed_incidence_census`.
 //!
 //! Runs the exact public support-preparation path (`run_support`) over the
 //! locally provisioned eight-model corpus and prints the census the

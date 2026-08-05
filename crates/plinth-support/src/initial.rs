@@ -367,7 +367,7 @@ pub(crate) fn build_initial_contacts(
         });
     }
 
-    if crate::census::enabled() {
+    crate::census_record!(if crate::census::enabled() {
         crate::census::record_contacts(contacts.iter().enumerate().map(|(slot, contact)| {
             let normal = contact.normal();
             let length = normal.iter().map(|value| value * value).sum::<f64>().sqrt();
@@ -377,7 +377,7 @@ pub(crate) fn build_initial_contacts(
                 loads.tip_radii_mm()[slot].get(),
             )
         }));
-    }
+    });
 
     let routing_order = routing_order(&seeds)?;
     let (overlaps, interval_batch_count) = classify_initial_overlaps(
