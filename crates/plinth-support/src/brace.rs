@@ -1010,7 +1010,25 @@ fn gather_candidates(
                     seat_depth_mm: extents.seat_depth_mm,
                 }),
             }],
-            printable: (p0[2] - seated_point[2]).abs() <= HEIGHT_TOLERANCE_MM,
+            // BLOCKER-3.  Printability is evaluated at the UNSEATED projection
+            // point, deliberately.
+            //
+            // `p0 = axis_point_at_z(member, projected.point[2])` returns
+            // `projected.point[2]` BIT-EXACTLY as its own z, so this predicate
+            // has been identically `true` for every model rung since the family
+            // was written -- it constrained nothing.  Comparing against
+            // `seated_point[2]` instead would turn that historic tautology into
+            // `|normal_z| * h <= HEIGHT_TOLERANCE_MM`, i.e. a brand-new rule
+            // deleting every model rung on a non-horizontal face, arriving as an
+            // ACCIDENT of PR-1 seating rather than as a designed, measured
+            // physics rule.  Under OD-8 a family-killing restriction may not
+            // arrive that way: PR-3 is the explicit, physics-derived incidence
+            // gate for this family, and it already refuses the rungs that cannot
+            // emerge from their own contact mask.
+            //
+            // The comparison is retained rather than replaced by `true` so the
+            // structure survives if `p0`'s derivation ever stops pinning z.
+            printable: (p0[2] - projected.point[2]).abs() <= HEIGHT_TOLERANCE_MM,
         });
     }
     candidates
@@ -1862,6 +1880,54 @@ mod tests {
         .unwrap()
     }
 
+    /// `near_wall_box` with its model-facing wall RAKED, so the surface normal
+    /// there has a non-zero z component.
+    ///
+    /// `near_wall_box` cannot exercise BLOCKER-3: its near face is exactly
+    /// vertical, so `normal_z == 0` and seating moves the contact point purely
+    /// in xy.  This fixture is the same solid with the near wall's two top
+    /// vertices pulled from `x = 4.0` to `x = 3.5`, giving a wall normal
+    /// proportional to `(-8, 0, -1)` (`|normal_z| ~ 0.124`).  The PR-1 seat then
+    /// displaces the contact point in z by `|normal_z| * h ~ 0.037 mm` — seven
+    /// orders of magnitude above `HEIGHT_TOLERANCE_MM` = 1e-9.  Everything else
+    /// (extent, grid pitch, distance from the host axis) matches the fixture
+    /// that already yields a model rung, so the only variable is the rake.
+    fn raked_wall_box() -> NativeSurface {
+        let vertices = vec![
+            [4.0, -1.0, 8.0],
+            [5.0, -1.0, 8.0],
+            [5.0, 1.0, 8.0],
+            [4.0, 1.0, 8.0],
+            [3.5, -1.0, 12.0],
+            [5.0, -1.0, 12.0],
+            [5.0, 1.0, 12.0],
+            [3.5, 1.0, 12.0],
+        ];
+        let faces = vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        NativeSurface::from_indexed(
+            &vertices,
+            &faces,
+            NativeSurfaceConfig {
+                grid_pitch_mm: 0.5,
+                max_grid_bytes: 4 * 1024 * 1024,
+            },
+        )
+        .unwrap()
+    }
+
     fn enclosing_box() -> NativeSurface {
         let vertices = vec![
             [0.0, 0.0, 0.0],
@@ -2311,6 +2377,57 @@ mod tests {
         assert_eq!(model.rods.len(), 1);
         assert!((model.rods[0].p0[2] - model.rods[0].p1[2]).abs() <= HEIGHT_TOLERANCE_MM);
         assert!(model.rods[0].p1[0] >= 4.0);
+    }
+
+    /// BLOCKER-3 regression: PR-1 seating must not silently delete the whole
+    /// model-rung family on non-horizontal faces.
+    ///
+    /// Printability is evaluated at the UNSEATED projection point.  The
+    /// historic predicate compared `p0[2]` against `projected.point[2]`, which
+    /// `axis_point_at_z` sets bit-identically, so it constrained NOTHING.
+    /// Re-pointing it at the seated endpoint would have converted that
+    /// tautology into `|normal_z| * h <= 1e-9` — a new, family-killing rule
+    /// arriving as an accident of seating rather than as measured physics.
+    /// PR-3 is the explicit incidence gate for this family.
+    ///
+    /// The second assertion is what makes this test discriminating: the seat
+    /// really does displace the contact point in z here, so the rejected
+    /// alternative would have failed.
+    #[test]
+    fn a_seated_rung_on_a_raked_wall_stays_printable() {
+        let mut forest = Forest::new();
+        let host = forest.add_member(member(
+            [0.0, 0.0, 20.0],
+            [0.0, 0.0, 0.0],
+            MemberKind::Trunk,
+            0,
+        ));
+        let needs = vec![Need {
+            host,
+            z_mm: 10.0,
+            rung_index: 0,
+            path_mapped: false,
+            triggers: Vec::new(),
+            alternatives: Vec::new(),
+        }];
+        let surface = raked_wall_box();
+        let config = BraceConfig::current(0.05).unwrap();
+        let candidates = gather_candidates(&forest, &surface, &needs, &config).unwrap();
+        let model = candidates
+            .iter()
+            .find(|row| row.kind == BraceAdditionKind::ModelRung)
+            .expect("the raked wall offers an admissible model rung");
+        assert!(
+            model.printable,
+            "a seated rung on a raked wall must stay printable; \
+             printability is evaluated at the unseated projection point"
+        );
+        let rod = &model.rods[0];
+        assert!(
+            (rod.p0[2] - rod.p1[2]).abs() > 1.0e-3,
+            "fixture is not discriminating: the seat displaced z by only {} mm",
+            (rod.p0[2] - rod.p1[2]).abs()
+        );
     }
 
     #[test]
