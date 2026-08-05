@@ -100,6 +100,17 @@ pub struct RungOutcome {
     pub viable: bool,
 }
 
+/// One PR-8 attestation verdict, for the T7 table.
+pub struct AttestationRow {
+    pub terminal: u32,
+    pub centreline: bool,
+    pub rim_engaged: usize,
+    pub rim_total: usize,
+    pub attested_radius_mm: f64,
+    pub refused: bool,
+    pub area_deficit: bool,
+}
+
 #[derive(Default)]
 pub struct CensusData {
     pub rung_outcomes: Vec<RungOutcome>,
@@ -108,6 +119,7 @@ pub struct CensusData {
     pub anchors: Vec<AnchorRow>,
     pub segs: Vec<SegRow>,
     pub contacts: Vec<ContactRow>,
+    pub attestations: Vec<AttestationRow>,
     pub appends: std::collections::BTreeMap<&'static str, usize>,
     pub stage_errors: Vec<String>,
 }
@@ -133,8 +145,33 @@ pub fn reset() {
         census.anchors.clear();
         census.segs.clear();
         census.contacts.clear();
+        census.attestations.clear();
         census.appends.clear();
         census.stage_errors.clear();
+    });
+}
+
+/// PR-8 — one attestation verdict per initial contact stub.
+#[allow(clippy::fn_params_excessive_bools, reason = "throwaway census row")]
+pub(crate) fn record_contact_attestation(
+    terminal: u32,
+    centreline: bool,
+    rim_engaged: usize,
+    rim_total: usize,
+    attested_radius_mm: f64,
+    refused: bool,
+    area_deficit: bool,
+) {
+    with(|census| {
+        census.attestations.push(AttestationRow {
+            terminal,
+            centreline,
+            rim_engaged,
+            rim_total,
+            attested_radius_mm,
+            refused,
+            area_deficit,
+        });
     });
 }
 
@@ -699,6 +736,57 @@ pub fn finish(model: &str, snapshot: &SupportVerificationSnapshot<'_>) {
         .map(|(label, count)| format!("{label}={count}"))
         .collect::<Vec<_>>();
     row(model, "T6_commits", &cells);
+
+    // --- Table 7: PR-8 contact attestation --------------------------------
+    if !census.attestations.is_empty() {
+        let total = census.attestations.len();
+        let refused = census.attestations.iter().filter(|a| a.refused).count();
+        let deficits = census
+            .attestations
+            .iter()
+            .filter(|a| a.area_deficit)
+            .count();
+        let full = census
+            .attestations
+            .iter()
+            .filter(|a| a.centreline && a.rim_engaged == a.rim_total)
+            .count();
+        let no_centre = census.attestations.iter().filter(|a| !a.centreline).count();
+        let min_engaged = census
+            .attestations
+            .iter()
+            .map(|a| a.rim_engaged)
+            .min()
+            .unwrap_or(0);
+        row(
+            model,
+            "T7_attestation",
+            &[
+                format!("total={total}"),
+                format!("fully_engaged={full}"),
+                format!("centreline_outside={no_centre}"),
+                format!("min_rim_engaged={min_engaged}"),
+                format!("refused={refused}"),
+                format!("area_deficit={deficits}"),
+            ],
+        );
+        for attestation in census.attestations.iter().filter(|a| {
+            a.refused || a.area_deficit || a.rim_engaged != a.rim_total || !a.centreline
+        }) {
+            row(
+                model,
+                "T7r_attestation_row",
+                &[
+                    format!("terminal={}", attestation.terminal),
+                    format!("centreline={}", attestation.centreline),
+                    format!("rim={}/{}", attestation.rim_engaged, attestation.rim_total),
+                    format!("r_eff_mm={:.6}", attestation.attested_radius_mm),
+                    format!("refused={}", attestation.refused),
+                    format!("area_deficit={}", attestation.area_deficit),
+                ],
+            );
+        }
+    }
 
     for error in &census.stage_errors {
         row(model, "T0_stage_error", std::slice::from_ref(error));
