@@ -4,6 +4,11 @@ Status: **PARTIAL — PR-1/PR-2/PR-3/PR-4 (brace path) and PR-6 landed; PR-5,
 PR-7, PR-8, PR-9 NOT yet implemented.** See *What is not done* at the end. The
 owner's contact-attestation requirement is still **UNMET**.
 
+Repair pass (2026-08-04, stage 1 of 2) resolved re-review findings BLOCKER-2,
+BLOCKER-3, MAJOR-4, MAJOR-5, MAJOR-6 and MAJOR-8; see *Repair pass* near the
+end. MAJOR-7 (PR-4 is inert — `contact::admit` is called with
+`carried_mm2 = 0.0`) is stage 2 and remains OPEN.
+
 Authority: owner ruling **OD-8** (2026-08-04) — behaviour preservation is
 lifted, correctness and measured physics govern, and every behavioural
 difference must be measured, reported and physics-justified. Silent geometry
@@ -239,7 +244,8 @@ carries no contact.
 ## MEASURED CORPUS DELTA
 
 Harness: `crates/plinth-support/examples/embed_incidence_census.rs`, verified
-result-inert. Baseline captured at `50b325c` before any change.
+result-inert and now behind `--features census`. Baseline captured at `50b325c`
+before any change; re-measured after the repair pass below.
 
 ### Placed geometry — unchanged on every reachable model
 
@@ -262,8 +268,43 @@ work in flight). **4 of 8 models reach the support engine.**
 | --- | ---: | ---: | --- |
 | model-rung candidates | 8 | **2** | PR-3 refusal |
 | rows built from a floored cosine | 7 | **0** | PR-2 (floor deleted) |
-| min checked fraction, `brace_candidate_clearance` | 0.191090 | **0.339004** | PR-2 |
-| median checked fraction | 0.472499 | **0.621539** | PR-2 |
+| model-rung candidates revalidated viable (T1a) | 3 | **2** | PR-3 refusal |
+| min checked fraction, `brace_candidate_clearance` | 0.191090 | **0.339004** | **PR-3** (set composition) |
+| median checked fraction | 0.472499 | **0.621539** | **PR-3** (set composition) |
+
+**Attribution correction (MAJOR-5).** An earlier revision of this table credited
+the checked-fraction movement to PR-2. That is wrong, and in the flattering
+direction. Both fractions are aggregates over a set whose MEMBERSHIP changed:
+the 0.191090 minimum belonged to the extreme grazing row
+(`|cos| = 0.003789`, `L = 3.090579`, floored inset 2.50 mm, usable 0.590579 mm),
+and PR-3 **deletes that row**. The aggregate improved because the worst rows are
+gone, not because any surviving row is better checked.
+
+Per-row, PR-2 moves the checked fraction in the OPPOSITE direction wherever the
+floor was active — which is the honest consequence of deleting a floor that was
+making the mask artificially small:
+
+| survivor | before (floored) | after (PR-1+PR-2) | direction |
+| --- | ---: | ---: | --- |
+| row 0, raw `\|cos\|` = 0.431225 — floor WAS active | 0.460113 | **0.339004** | **down** |
+| row 5, raw `\|cos\|` = 0.862506 — floor never active | 0.615757 | **0.621539** | ~flat (up) |
+
+Row 0's mask grows from the floored 2.500 mm to the honest 3.218 mm, so 12.1
+percentage points MORE of that rung is now exempt from the distance check than
+before. That is not a regression in checking quality: the floored 2.500 mm was
+never a claim about that rung's geometry, it was a constant substituted for one.
+The correct comparison is that the row is now masked by the extent its own
+incidence actually requires. Row 5, where the floor was never active, is
+essentially unchanged — seating raises `|cos|` (0.862506 → 0.879755), which
+grows length slightly faster than mask.
+
+**T1a `admitted_viable` (restored).** The pre-package baseline was 3 of 8 rung
+candidates revalidated viable. Under PR-3, 6 of those 8 candidates never reach
+revalidation, so the reachable maximum is 2 — and both survivors are viable, so
+the measure now reads **2**. It read **1** between the PR-1 seating commit and
+the BLOCKER-3 repair, because seating had silently converted the tautological
+printability check into `|normal_z| * h <= 1e-9`. The 3 → 2 step is PR-3; the
+2 → 1 → 2 excursion was the defect and its repair.
 
 The two survivors are exactly the two the design predicted, and their seated
 values reproduce the golden table:
@@ -312,6 +353,37 @@ change it measures.
 
 ---
 
+## Repair pass (2026-08-04, stage 1 of 2)
+
+Six findings from the independent Phase B-2 re-review, resolved on the same
+branch. Every behavioural item was measured with the same census harness before
+and after.
+
+| finding | disposition | corpus delta |
+| --- | --- | --- |
+| **BLOCKER-2** duplicate constant | `CONTACT_AREA_RATIO_ALLOWED` deleted; `X_ALLOWED` is the sole anchor and the gate reads it | none (nothing read it) |
+| **BLOCKER-3** rung printability | evaluated at the UNSEATED projection point; PR-3 is the explicit incidence gate | T1a `admitted_viable` 1 → **2** |
+| **MAJOR-4** false evidence claim | the planar-seat round trip is now pinned against the real kernel, with a negative control | none (test-only) |
+| **MAJOR-5** delta misattribution | checked-fraction movement re-attributed to PR-3 set composition; per-row direction stated | none (record-only) |
+| **MAJOR-6** over-mask for unseated families | `contact::seating_of` supplies the mask's depth term per family | none (latent — no non-stub member on the corpus declares a contact) |
+| **MAJOR-8** merge hygiene | census quarantined behind `--features census` | none (byte-identical instrumented run) |
+
+**The entire measured delta of this repair pass is one census cell.** Diffing the
+full instrumented census before and after the six commits yields exactly one
+changed line — `T1a_rung_outcome make_overhang_table admitted_viable 1 -> 2` on
+`make_overhang_table`. Every `snapshot_digest`, `routed_contacts` and
+`final_live_members` on all four reachable models is unchanged, so no placed
+geometry moves.
+
+**MAJOR-7 is deliberately NOT in this pass.** `contact::admit` has one
+production call site and it passes `carried_mm2 = 0.0`, so PR-4's area law gates
+nothing today. Wiring the real per-tip loads (`FrozenTipLoadPolicy` is the load
+authority) belongs to the Attestation stage together with PR-8, and documenting
+which families legitimately carry zero load is part of it. `admit`'s signature is
+left stable so that stage can extend it compatibly.
+
+---
+
 ## What is not done
 
 **The owner's contact-attestation requirement remains UNMET.** These rules are
@@ -332,6 +404,21 @@ designed (full text in the Phase B-2 design record) but NOT implemented:
 * **PR-9 `CONTACT_CLEARANCE_REFUSAL_IS_NOT_A_PIPELINE_VIOLATION`** — a seated
   contact reading negative clearance still flows into `exact_clearance_violations`
   and can hard-error via `pass_three_termination`, which OD-4 forbids.
+* **MAJOR-7 — PR-4 IS INERT.** `contact::admit` has exactly one production call
+  site (`brace.rs` model-rung gather) and it passes `carried_mm2 = 0.0`,
+  `ball_tipped = false`, `tip_clamped_at_max = false`. The H2 area law therefore
+  gates nothing today: with zero carried load every candidate is sufficient. The
+  Attestation stage must wire the real per-tip loads (`FrozenTipLoadPolicy` is
+  the load authority) into that call and document which families legitimately
+  carry zero. `admit`'s signature is deliberately left stable so that wiring can
+  extend it compatibly.
+
+Also still absent, and named by **OD-9**: the batched EXTERIOR-NESS screen (no
+attachment to buried surface). OD-9 postdates this design, and its adjudication
+hook says the screen lands on this branch before it retires. Nothing in this
+package subsumes it — a touching foot on a buried patch is genuinely "on the
+surface" and an embedded tip there passes an endpoint-connectivity proof
+trivially.
 
 Consequently `initial.rs` still seats stubs at a flat depth, `rewire.rs` and
 the CCO clearance rows still use flat cosine-free insets, `lower.rs` still
