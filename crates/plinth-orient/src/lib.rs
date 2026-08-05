@@ -65,10 +65,14 @@ impl RigidTransform {
 
 /// Applies the frozen legacy orientation choice and frame restoration.
 ///
-/// The pinned report must contain exactly one successful hollow stage and its authoritative
-/// `report.orientation` record. Identity must be explicitly encoded as a valid zero-degree
-/// orientation; missing or skipped stages never silently choose it. Identity still receives frame
-/// restoration, matching the legacy implementation.
+/// The pinned report must contain exactly one hollow stage that ran, plus its authoritative
+/// `report.orientation` record. "Ran" means `ok` or `failed`: the legacy writer selects and
+/// applies the orientation before the hollow stage self-verifies, so a hollow failure leaves the
+/// orientation final and already baked into the committed oriented-solid artifact. A `skipped`
+/// hollow stage skipped the orientation search with it and is refused. Identity must be
+/// explicitly encoded as a valid zero-degree orientation; missing or skipped stages never
+/// silently choose it. Identity still receives frame restoration, matching the legacy
+/// implementation.
 pub fn run(model: DecimatedModel, request: &OrientRequest) -> Result<OrientedModel, OrientError> {
     let pinned_report = request.pinned.pipeline_report.clone();
     let selection = read_selection(&pinned_report)?;
@@ -119,14 +123,27 @@ fn selection_from_report(report: &JsonValue) -> Option<BaselineSelection> {
     }
 
     let hollow = hollow?;
+    // The legacy writer chooses and applies the orientation before the hollow stage's own
+    // self-verification runs, so a hollow stage that later `failed` still carries the final,
+    // ratified orientation it printed into the oriented-solid artifact. `skipped` is different in
+    // kind: skipping the hollow stage skips the orientation search with it, so nothing was chosen
+    // and nothing may be inferred.
     let status = object_field(hollow, "status")?.as_str()?;
-    if status != "ok" {
+    if status != "ok" && status != "failed" {
         return None;
     }
     if hollow.iter().any(|(key, _)| key == "log") {
         return None;
     }
     let stage_report = object_field(hollow, "report")?.as_object()?;
+    // Belt and braces for the widened status: the legacy report states outright whether the
+    // orientation was applied. Where the claim is present it must be `true`, and it must be a
+    // boolean; only its total absence is tolerated, for reports predating the field.
+    if let Some(oriented) = object_field(stage_report, "oriented") {
+        if !oriented.as_bool()? {
+            return None;
+        }
+    }
     let orientation = object_field(stage_report, "orientation")?;
     let orientation = orientation.as_object()?;
     let axis = object_field(orientation, "axis")?.as_array()?;
@@ -274,7 +291,7 @@ enum JsonValue {
     Array(Vec<JsonValue>),
     String(String),
     Number(f64),
-    Bool,
+    Bool(bool),
     Null,
 }
 
@@ -303,6 +320,13 @@ impl JsonValue {
     fn as_number(&self) -> Option<&f64> {
         match self {
             Self::Number(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(value) => Some(*value),
             _ => None,
         }
     }
@@ -349,8 +373,8 @@ impl<'a> JsonParser<'a> {
             Some(b'[') => self.array(),
             Some(b'\"') => self.string().map(JsonValue::String),
             Some(b'-' | b'0'..=b'9') => self.number().map(JsonValue::Number),
-            Some(b't') => self.literal(b"true", JsonValue::Bool),
-            Some(b'f') => self.literal(b"false", JsonValue::Bool),
+            Some(b't') => self.literal(b"true", JsonValue::Bool(true)),
+            Some(b'f') => self.literal(b"false", JsonValue::Bool(false)),
             Some(b'n') => self.literal(b"null", JsonValue::Null),
             _ => Err(()),
         }
@@ -777,6 +801,43 @@ mod tests {
             parse(r#"{"stages":[{"name":"hollow","status":"ok","report":{}}]}"#),
             None
         );
+        // A skipped stage never chose an orientation, so even a record it somehow carries is
+        // refused; failing later is what widens the gate, skipping is not.
+        assert_eq!(
+            parse(
+                r#"{"stages":[{"name":"hollow","status":"skipped","report":{"oriented":true,"orientation":{"axis":[1,0,0],"deg":-20}}}]}"#
+            ),
+            None
+        );
+        assert_eq!(
+            parse(r#"{"stages":[{"name":"hollow","status":"failed","report":{}}]}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn a_failed_hollow_stage_still_carries_its_ratified_orientation() {
+        // The orientation is chosen and applied before the hollow stage self-verifies, so its
+        // later failure does not unmake the choice; `oriented: true` is the report saying so.
+        let identity = r#"{"stages":[{"name":"hollow","status":"failed","report":{"oriented":true,"orientation":{"axis":[1,0,0],"deg":0}}}]}"#;
+        assert_eq!(parse(identity), Some(BaselineSelection::Identity));
+
+        let rotated = r#"{"stages":[{"name":"hollow","status":"failed","report":{"oriented":true,"orientation":{"axis":[0,1,0],"deg":-30}}}]}"#;
+        assert_eq!(
+            parse(rotated),
+            Some(BaselineSelection::AxisDegrees {
+                axis: BaselineAxis::Y,
+                degrees: Finite::new(-30.0).expect("fixture degree is finite"),
+            })
+        );
+    }
+
+    #[test]
+    fn an_unapplied_or_non_boolean_oriented_claim_is_refused() {
+        let unapplied = r#"{"stages":[{"name":"hollow","status":"failed","report":{"oriented":false,"orientation":{"axis":[1,0,0],"deg":0}}}]}"#;
+        let non_boolean = r#"{"stages":[{"name":"hollow","status":"ok","report":{"oriented":"true","orientation":{"axis":[1,0,0],"deg":0}}}]}"#;
+        assert_eq!(parse(unapplied), None);
+        assert_eq!(parse(non_boolean), None);
     }
 
     #[test]
@@ -825,7 +886,10 @@ mod tests {
             br#"{"stages":{"name":"hollow"}}"#,
             br#"{"stages":[]}"#,
             br#"{"stages":[{"name":"hollow","status":"skipped","report":{}}]}"#,
+            br#"{"stages":[{"name":"hollow","status":"skipped","report":{"oriented":true,"orientation":{"axis":[1,0,0],"deg":0}}}]}"#,
             br#"{"stages":[{"name":"hollow","status":"ok","report":{}}]}"#,
+            br#"{"stages":[{"name":"hollow","status":"failed","report":{}}]}"#,
+            br#"{"stages":[{"name":"hollow","status":"failed","report":{"oriented":false,"orientation":{"axis":[1,0,0],"deg":0}}}]}"#,
             br#"{"stages":[{"name":"hollow","status":"ok","log":{"orientation":{"axis":[1,0,0],"deg":0}}}]}"#,
             br#"{"stages":[{"name":"hollow","status":"ok","log":{},"report":{"orientation":{"axis":[1,0,0],"deg":0}}}]}"#,
             br#"{"stages":[{"name":"hollow","status":"ok","report":{"orientation":{"axis":[0,0,1],"deg":0}}}]}"#,
