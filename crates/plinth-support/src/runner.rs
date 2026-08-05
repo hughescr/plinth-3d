@@ -3300,7 +3300,17 @@ fn brace_fixed_point_plan_digest(plan: &BraceFixedPointPlan) -> u64 {
         BraceFixedPointTermination::Converged => 0,
         BraceFixedPointTermination::IterationLimit => 1,
         BraceFixedPointTermination::Unplaceable => 2,
+        BraceFixedPointTermination::ContactRefused => 3,
     });
+    // PR-9. The refused keys are digested, not just the variant: two runs that
+    // both end in `ContactRefused` having refused DIFFERENT contacts are not
+    // the same run, and the forest digest cannot tell them apart either, since
+    // a quarantined member is absent from both.
+    hash.usize(plan.contact_refusals.len());
+    for key in &plan.contact_refusals {
+        hash.u32(key.slot());
+        hash.u32(key.generation());
+    }
     hash.finish()
 }
 
@@ -4085,6 +4095,7 @@ mod tests {
             additions: Vec::new(),
             iterations: 1,
             termination: BraceFixedPointTermination::Converged,
+            contact_refusals: Vec::new(),
         };
         let digest = brace_fixed_point_plan_digest(&base);
         for termination in [
@@ -5494,6 +5505,7 @@ mod tests {
                     crate::brace::BraceFixedPointTermination::Converged => 0,
                     crate::brace::BraceFixedPointTermination::IterationLimit => 1,
                     crate::brace::BraceFixedPointTermination::Unplaceable => 2,
+                    crate::brace::BraceFixedPointTermination::ContactRefused => 3,
                 },
             );
             let lowered = structured

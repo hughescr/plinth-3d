@@ -125,6 +125,19 @@ pub(crate) enum BraceFixedPointTermination {
     IterationLimit,
     /// Requests remained but every bounded candidate was geometrically invalid.
     Unplaceable,
+    /// **PR-9.** The third pass ended with negative exact clearance, and every
+    /// offending member DECLARES A MODEL CONTACT.
+    ///
+    /// That is a refused contact, not a broken pipeline, and the distinction is
+    /// OD-4's: a seated contact whose geometry cannot clear the model is an
+    /// ordinary candidate rejection and must route to quarantine, whereas a
+    /// member carrying NO model contact reading negative clearance means the
+    /// bracing controller put geometry inside the mini with nothing to reject —
+    /// that remains `BraceError::ClearanceViolation`.
+    ///
+    /// The refused members are quarantined in the returned forest, so this
+    /// termination never means "shipped anyway".
+    ContactRefused,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -159,6 +172,9 @@ pub(crate) struct BraceFixedPointPlan {
     pub(crate) additions: Vec<BraceAddition>,
     pub(crate) iterations: usize,
     pub(crate) termination: BraceFixedPointTermination,
+    /// PR-9 — contact-declaring members quarantined at the third-pass cap for
+    /// negative exact clearance. Ascending, so the evidence is order-stable.
+    pub(crate) contact_refusals: Vec<MemberKey>,
 }
 
 #[derive(Clone, Debug, PartialEq, Error)]
@@ -396,13 +412,13 @@ pub(crate) fn brace_fixed_point_current_parity(
         working = apply_resize(plan.forest_with_braces, &plan.resize)?;
         let added = !plan.additions.is_empty();
         additions.extend(plan.additions);
-        let violations = exact_clearance_violations(
+        let negative = exact_clearance_negatives(
             &working,
             surface,
             &BraceConfig::current(process_resolution_mm)?,
             penetration_limits,
         )?;
-        if !added && !changed && violations == 0 {
+        if !added && !changed && negative.is_clean() {
             return Ok(BraceFixedPointPlan {
                 forest: working,
                 additions,
@@ -412,16 +428,33 @@ pub(crate) fn brace_fixed_point_current_parity(
                 } else {
                     BraceFixedPointTermination::Converged
                 },
+                contact_refusals: Vec::new(),
             });
         }
         if iteration == FROZEN_PASS_CAP {
-            let termination = pass_three_termination(saw_unplaceable, added, changed, violations)?
-                .expect("the prior convergence return handles a stable clean third pass");
+            let termination = pass_three_termination(
+                saw_unplaceable,
+                added,
+                changed,
+                negative.pipeline_violations,
+                !negative.contact_refusals.is_empty(),
+            )?
+            .expect("the prior convergence return handles a stable clean third pass");
+            // PR-9. A refused contact is quarantined, not shipped and not
+            // hard-errored. Quarantining here rather than at pass 1 or 2 is
+            // deliberate: the earlier passes are still iterating and a member
+            // that is inside the model at pass 1 may be resized out of it at
+            // pass 2, so removing it early would delete a support the
+            // controller was about to fix.
+            for key in &negative.contact_refusals {
+                working.quarantine(*key)?;
+            }
             return Ok(BraceFixedPointPlan {
                 forest: working,
                 additions,
                 iterations: iteration,
                 termination,
+                contact_refusals: negative.contact_refusals,
             });
         }
     }
@@ -436,10 +469,20 @@ fn pass_three_termination(
     saw_unplaceable: bool,
     added: bool,
     changed: bool,
-    violations: usize,
+    pipeline_violations: usize,
+    contact_refused: bool,
 ) -> Result<Option<BraceFixedPointTermination>, BraceError> {
-    if violations > 0 {
-        return Err(BraceError::ClearanceViolation(violations));
+    // PR-9. Only a negative-clearance member that declares NO model contact is
+    // a pipeline violation. A contact-declaring one is an ordinary candidate
+    // refusal, and OD-4 forbids turning that into a hard pipeline failure —
+    // "a refused genuine-contact stub routes to the existing quarantine, never
+    // a hard pipeline failure". A real violation still wins: if both are
+    // present the run fails, because the un-refusable one is unfixable here.
+    if pipeline_violations > 0 {
+        return Err(BraceError::ClearanceViolation(pipeline_violations));
+    }
+    if contact_refused {
+        return Ok(Some(BraceFixedPointTermination::ContactRefused));
     }
     if !added && !changed {
         return Ok(None);
@@ -1459,18 +1502,49 @@ fn rods_printable(rods: &[Rod]) -> Result<bool, BraceError> {
     Ok(true)
 }
 
-fn exact_clearance_violations(
+/// PR-9 — the negative-clearance rows, split by whether they are refusable.
+#[derive(Clone, Debug, Default)]
+struct ExactClearanceNegatives {
+    /// Members reading negative clearance that declare NO model contact. There
+    /// is no candidate to reject here: the controller placed geometry inside
+    /// the mini, so this stays `BraceError::ClearanceViolation`.
+    pipeline_violations: usize,
+    /// Members reading negative clearance that DO declare a model contact.
+    /// These are refused candidates and route to quarantine (OD-4).
+    contact_refusals: Vec<MemberKey>,
+}
+
+impl ExactClearanceNegatives {
+    const fn is_clean(&self) -> bool {
+        self.pipeline_violations == 0 && self.contact_refusals.is_empty()
+    }
+}
+
+fn exact_clearance_negatives(
     forest: &Forest,
     surface: &NativeSurface,
     config: &BraceConfig,
     penetration_limits: PenetrationBatchLimits,
-) -> Result<usize, BraceError> {
-    Ok(
-        exact_clearance_rows(forest, surface, config, penetration_limits)?
-            .into_iter()
-            .filter(|(_, clearance)| *clearance < 0.0)
-            .count(),
-    )
+) -> Result<ExactClearanceNegatives, BraceError> {
+    let mut negatives = ExactClearanceNegatives::default();
+    for (key, clearance) in exact_clearance_rows(forest, surface, config, penetration_limits)? {
+        if clearance >= 0.0 {
+            continue;
+        }
+        let declares_contact = forest
+            .member(key)
+            .is_some_and(|member| member.model_contact_end().is_some());
+        if declares_contact {
+            negatives.contact_refusals.push(key);
+        } else {
+            negatives.pipeline_violations += 1;
+        }
+    }
+    // `exact_clearance_rows` walks `live_members`, which is already ascending,
+    // but sorting is stated rather than inherited so the evidence order cannot
+    // drift with an upstream change.
+    negatives.contact_refusals.sort_unstable();
+    Ok(negatives)
 }
 
 fn exact_clearance_violated_members(
@@ -2341,22 +2415,101 @@ mod tests {
     fn third_pass_termination_truth_table_preserves_frozen_outcomes() {
         for (added, changed) in [(true, false), (false, true), (true, true)] {
             assert_eq!(
-                pass_three_termination(false, added, changed, 0).unwrap(),
+                pass_three_termination(false, added, changed, 0, false).unwrap(),
                 Some(BraceFixedPointTermination::IterationLimit)
             );
             assert_eq!(
-                pass_three_termination(true, added, changed, 0).unwrap(),
+                pass_three_termination(true, added, changed, 0, false).unwrap(),
                 Some(BraceFixedPointTermination::Unplaceable)
             );
         }
         assert_eq!(
-            pass_three_termination(false, false, false, 0).unwrap(),
+            pass_three_termination(false, false, false, 0, false).unwrap(),
             None
         );
         assert!(matches!(
-            pass_three_termination(false, true, false, 1),
+            pass_three_termination(false, true, false, 1, false),
             Err(BraceError::ClearanceViolation(1))
         ));
+    }
+
+    /// PR-9 — the refusable/unrefusable split, exhaustively.
+    #[test]
+    fn a_contact_clearance_refusal_is_not_a_pipeline_violation() {
+        // A contact-declaring member reading negative clearance is a refusal
+        // in every combination of the other flags, and it OUTRANKS the
+        // iteration-limit and unplaceable outcomes, because those describe how
+        // the controller stopped while this describes a candidate that must be
+        // quarantined.
+        for saw_unplaceable in [false, true] {
+            for (added, changed) in [(false, false), (true, false), (false, true), (true, true)] {
+                assert_eq!(
+                    pass_three_termination(saw_unplaceable, added, changed, 0, true).unwrap(),
+                    Some(BraceFixedPointTermination::ContactRefused),
+                    "saw_unplaceable={saw_unplaceable} added={added} changed={changed}"
+                );
+            }
+        }
+        // But a genuine violation still wins: a member with no model contact
+        // inside the mini cannot be refused away, so the run must fail even
+        // when a refusable one is present alongside it.
+        assert!(matches!(
+            pass_three_termination(false, false, false, 2, true),
+            Err(BraceError::ClearanceViolation(2))
+        ));
+    }
+
+    /// PR-9 — the classifier, against a real forest.
+    #[test]
+    fn negative_clearance_is_split_by_whether_the_member_declares_a_contact() {
+        // Two identical members buried in the same box, differing ONLY in
+        // whether they declare a model contact. That is the whole rule, so the
+        // fixture isolates exactly it.
+        let surface = remote_box();
+        let config = BraceConfig::current(0.05).unwrap();
+        let mut forest = Forest::new();
+        // Buried in the middle of `remote_box`, which spans 100..110 on every
+        // axis, so both members read negative exact clearance.
+        let spec = |contact| MemberSpec {
+            p0_mm: [
+                finite(105.0).unwrap(),
+                finite(105.0).unwrap(),
+                finite(102.0).unwrap(),
+            ],
+            p1_mm: [
+                finite(105.0).unwrap(),
+                finite(105.0).unwrap(),
+                finite(108.0).unwrap(),
+            ],
+            r0_mm: TerminalEndRadius::new(PositiveFinite::new(0.5).unwrap()),
+            r1_mm: RootwardEndRadius::new(PositiveFinite::new(0.5).unwrap()),
+            kind: MemberKind::Shoot,
+            owner: Owner::Generated {
+                family: "pr9".into(),
+                ordinal: 0,
+            },
+            model_contact_end: contact,
+            carried_mm2: finite(0.0).unwrap(),
+        };
+        let plain = forest.add_member(Member::new(spec(None)));
+        let declaring = forest.add_member(Member::new(spec(Some(ContactEnd::Terminalward))));
+
+        let negatives =
+            exact_clearance_negatives(&forest, &surface, &config, test_penetration_limits())
+                .unwrap();
+        // Non-vacuity: both members really are in violation, so the split is
+        // being tested rather than an empty set being partitioned.
+        assert!(
+            !negatives.is_clean(),
+            "the fixture must actually produce negative clearance"
+        );
+        assert_eq!(negatives.pipeline_violations, 1, "the plain member");
+        assert_eq!(
+            negatives.contact_refusals,
+            vec![declaring],
+            "the contact-declaring member"
+        );
+        assert!(!negatives.contact_refusals.contains(&plain));
     }
 
     #[test]
