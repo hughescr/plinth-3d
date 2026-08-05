@@ -2127,6 +2127,200 @@ mod tests {
         );
     }
 
+    /// A TOUCHING-family candidate seated `depth` into the plane `x = face_x`
+    /// from the `-x` side, with the member running out in `+x`.
+    ///
+    /// This is the shape both touching families mint: the model contact is at
+    /// the ROOTWARD end (`brace.rs` seats `p1` into the surface, and
+    /// `cco::apply_model_anchor` puts its seat at `p1`), the mirror of the stub
+    /// family's terminalward contact. Both families' rows are built from this
+    /// one helper on purpose: they are geometrically indistinguishable at the
+    /// seat, so anything that separates them can only be the screen under test.
+    fn touching_seat_row(
+        face_x: f64,
+        y: f64,
+        depth: f64,
+        radius: f64,
+        probe_x: f64,
+        carried_mm2: f64,
+    ) -> SeatAttestationRow {
+        SeatAttestationRow {
+            p0_mm: [face_x + 2.5, y, 1.0],
+            p1_mm: [face_x - depth, y, 1.0],
+            r0_mm: radius,
+            r1_mm: radius,
+            end: ContactEnd::Rootward,
+            exterior_probe: [probe_x, y, 1.0],
+            carried_mm2,
+        }
+    }
+
+    /// **F3 acceptance — BOTH touching families over the overlap region.**
+    ///
+    /// The ruling is that the brace model rung and the CCO model anchor deliver
+    /// OD-9 at their seats, not only the stub family. This is that requirement
+    /// made executable on the SAME interpenetrating pair the stub family uses,
+    /// so all three families are held to one fixture and one standard.
+    ///
+    /// Row 0 is a brace model rung seated on `A`'s `+x` face at `x = 4`, which
+    /// over `x in [2, 4]` is buried inside `B`. Row 1 is a CCO model anchor
+    /// seated on `B`'s exterior `+x` face at `x = 6`, carrying a real routed
+    /// load the way that family does. The families are then SWAPPED, because a
+    /// screen that only worked for whichever family happened to be buried in
+    /// the fixture would pass a one-sided version of this.
+    #[test]
+    fn f3_a_buried_seat_is_refused_and_an_exterior_seat_attests_for_both_touching_families() {
+        let surface = interpenetrating_pair();
+        const DEPTH: f64 = 0.3;
+        const RADIUS: f64 = 0.2;
+
+        // The fixture's non-vacuity, asserted BEFORE the screen runs: if these
+        // parity facts ever stop holding, the fixture has stopped
+        // self-intersecting and this test must fail rather than pass for the
+        // wrong reason.
+        assert_eq!(
+            surface.inside(&[[4.05, 1.0, 1.0], [6.05, 1.0, 1.0]]),
+            vec![true, false],
+            "the fixture must keep x = 4 buried inside B and x = 6 exterior"
+        );
+
+        // Brace model rung on the BURIED face; CCO model anchor on the
+        // EXTERIOR one. A rung carries zero routed load (F2) and an anchor
+        // carries the terminal's real load (MAJOR-7), so the two rows differ in
+        // exactly the way production differs.
+        let seats = [
+            touching_seat_row(4.0, 1.0, DEPTH, RADIUS, 4.05, 0.0),
+            touching_seat_row(6.0, 1.0, DEPTH, RADIUS, 6.05, 0.1),
+        ];
+        let outcomes = attest_seats_batch(
+            &surface,
+            &seats,
+            extent(0.05),
+            validation_limits(&surface, seats.len()),
+            &attestation_policy(),
+        )
+        .unwrap();
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(
+            outcomes[0].verdict,
+            Err(ContactAttestationRefusal::BuriedSurface {
+                end: ContactEnd::Rootward
+            }),
+            "a rung seated on buried surface must be refused"
+        );
+        assert!(
+            outcomes[1].verdict.is_ok(),
+            "an anchor seated on exterior surface must attest"
+        );
+
+        // The trap OD-9 exists for: the BURIED seat's connectivity evidence is
+        // not merely adequate, it is PERFECT, because its whole neighbourhood
+        // is interior. Every pre-OD-9 check ranks it at least as highly as the
+        // exterior seat.
+        assert!(
+            outcomes[0].engagement.is_total(),
+            "the buried seat's connectivity witness is total -- which is why \
+             nothing but the parity screen can catch it"
+        );
+        assert!(outcomes[0].engagement.centreline);
+        assert_eq!(
+            outcomes[0].engagement.rim_engaged,
+            outcomes[0].engagement.rim_total
+        );
+
+        // Swap the families across the two seats. The verdicts must follow the
+        // GEOMETRY, not the family, or the screen is family-specific by
+        // accident.
+        let swapped = [
+            touching_seat_row(6.0, 1.0, DEPTH, RADIUS, 6.05, 0.0),
+            touching_seat_row(4.0, 1.0, DEPTH, RADIUS, 4.05, 0.1),
+        ];
+        let swapped_outcomes = attest_seats_batch(
+            &surface,
+            &swapped,
+            extent(0.05),
+            validation_limits(&surface, swapped.len()),
+            &attestation_policy(),
+        )
+        .unwrap();
+        assert!(
+            swapped_outcomes[0].verdict.is_ok(),
+            "an exterior seat attests whichever family proposed it"
+        );
+        assert_eq!(
+            swapped_outcomes[1].verdict,
+            Err(ContactAttestationRefusal::BuriedSurface {
+                end: ContactEnd::Rootward
+            }),
+            "a buried seat is refused whichever family proposed it"
+        );
+    }
+
+    /// The transcript must be able to SEE the refusal, or the digest chain that
+    /// carries it is decorative.
+    #[test]
+    fn f3_the_seat_transcript_digest_separates_a_refusal_from_an_attestation() {
+        let surface = interpenetrating_pair();
+        let buried = [touching_seat_row(4.0, 1.0, 0.3, 0.2, 4.05, 0.0)];
+        let exterior = [touching_seat_row(6.0, 1.0, 0.3, 0.2, 6.05, 0.0)];
+        let attest = |seats: &[SeatAttestationRow]| {
+            attest_seats_batch(
+                &surface,
+                seats,
+                extent(0.05),
+                validation_limits(&surface, seats.len()),
+                &attestation_policy(),
+            )
+            .unwrap()
+        };
+        let buried_outcomes = attest(&buried);
+        let exterior_outcomes = attest(&exterior);
+        let digest_of = |tag, seats: &[SeatAttestationRow], outcomes: &[ContactAttestation]| {
+            seat_attestation_digest(tag, extent(0.05), seats, outcomes)
+        };
+        assert_ne!(
+            digest_of(SEAT_TAG_BRACE_MODEL_RUNG, &buried, &buried_outcomes),
+            digest_of(SEAT_TAG_BRACE_MODEL_RUNG, &exterior, &exterior_outcomes),
+            "a refused seat and an attested one must not share a transcript"
+        );
+        // The family tag is load bearing: one transcript from two families is
+        // two different chain links.
+        assert_ne!(
+            digest_of(SEAT_TAG_BRACE_MODEL_RUNG, &buried, &buried_outcomes),
+            digest_of(SEAT_TAG_CCO_MODEL_ANCHOR, &buried, &buried_outcomes),
+        );
+        // An EMPTY batch is a real value, so "this family proposed nothing" and
+        // "the attestation stopped running" stay distinguishable.
+        assert_ne!(digest_of(SEAT_TAG_BRACE_MODEL_RUNG, &[], &[]), 0);
+    }
+
+    /// Batch-first, pinned rather than asserted in prose: the whole row set
+    /// costs ONE connectivity kernel call however many seats it carries.
+    #[test]
+    fn f3_the_seat_attestation_issues_one_kernel_call_for_the_whole_batch() {
+        let surface = interpenetrating_pair();
+        let seats = (0..6)
+            .map(|index| {
+                touching_seat_row(6.0, 0.25 + 0.25 * f64::from(index), 0.3, 0.2, 6.05, 0.0)
+            })
+            .collect::<Vec<_>>();
+        reset_endpoint_validation_kernel_calls();
+        let outcomes = attest_seats_batch(
+            &surface,
+            &seats,
+            extent(0.05),
+            validation_limits(&surface, seats.len()),
+            &attestation_policy(),
+        )
+        .unwrap();
+        assert_eq!(outcomes.len(), 6);
+        assert_eq!(
+            endpoint_validation_kernel_calls(),
+            1,
+            "six seats must cost one connectivity batch, not six"
+        );
+    }
+
     #[test]
     fn od9_the_screen_is_the_only_thing_that_separates_them() {
         // The complement of the test above: with the probes swapped to points

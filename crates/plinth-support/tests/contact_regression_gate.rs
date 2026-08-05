@@ -85,7 +85,7 @@ fn production_code_of(file: &str) -> String {
 /// evidence that it is still wired.
 ///
 /// Each row is `(file, needle, what its absence would mean)`.
-const REQUIRED: [(&str, &str, &str); 8] = [
+const REQUIRED: [(&str, &str, &str); 15] = [
     (
         "initial.rs",
         "attest_initial_contacts(",
@@ -124,6 +124,51 @@ const REQUIRED: [(&str, &str, &str); 8] = [
         "designed_embed.rs",
         "crate::contact::area_sufficient(",
         "the attested interface is no longer graded against the H2 allowance",
+    ),
+    // --- F3: the two TOUCHING families ---------------------------------
+    //
+    // These need the gate even more than the stub family does. On today's
+    // corpus neither family wins a tournament, so deleting their attestation
+    // moves NOTHING -- not a member, not a digest, not a census cell. There is
+    // no behavioural test that could notice.
+    (
+        "designed_embed.rs",
+        "pub(crate) fn attest_seats_batch(",
+        "the touching families have no batched attestation entry point, so a \
+         brace model rung and a CCO model anchor would seat on unproven \
+         surface again",
+    ),
+    (
+        "brace.rs",
+        "attest_model_rung_seats(",
+        "the brace model rung is no longer attested at its seat",
+    ),
+    (
+        "brace.rs",
+        "designed_embed::attest_seats_batch(",
+        "the rung attestation no longer reaches the batched verifier",
+    ),
+    (
+        "cco.rs",
+        "attest_model_anchor_seats(",
+        "the CCO model anchor is no longer attested at its seat",
+    ),
+    (
+        "cco.rs",
+        "designed_embed::attest_seats_batch(",
+        "the anchor attestation no longer reaches the batched verifier",
+    ),
+    (
+        "cco.rs",
+        "AnchorFootRefusal::seat_buried(",
+        "OD-9 burial no longer refuses a model anchor; a buried seat would \
+         re-enter the tournament",
+    ),
+    (
+        "runner.rs",
+        "extend_contact_attestation_chain(",
+        "the three families' transcripts are no longer chained, so an \
+         attestation that stopped running in ANY of them leaves no trace",
     ),
     (
         "brace.rs",
@@ -204,6 +249,20 @@ fn the_attestation_makes_no_per_contact_native_call() {
         "the OD-9 parity screen is issued from more than one site; it must be \
          exactly one batch for the whole stage"
     );
+    // F3. The touching families delegate to the same batched verifier, so the
+    // same one-call-site rule applies to each of them. A `for candidate in ..`
+    // loop that called `attest_seats_batch` per candidate is exactly how this
+    // regresses, and it would show up as a second call site.
+    for file in ["brace.rs", "cco.rs"] {
+        assert_eq!(
+            production_code_of(file)
+                .matches("designed_embed::attest_seats_batch(")
+                .count(),
+            1,
+            "`attest_seats_batch` has more than one call site in {file}, which \
+             is how a batched stage becomes a per-candidate native call"
+        );
+    }
     assert_eq!(
         designed
             .matches("penetration_intervals_batch_bounded(")
