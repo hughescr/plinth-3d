@@ -26,8 +26,66 @@
 
 use plinth_core::LayerPlan;
 
-use crate::forest::ContactEnd;
+use crate::forest::{ContactEnd, MemberKind};
 use crate::perception::FrozenTipLoadPolicy;
+
+/// The design family name carried by a brace model rung
+/// (`MemberKind::Other(MODEL_RUNG_FAMILY)` and `Owner::Generated { family }`).
+///
+/// Shared with `brace.rs`, which mints the members, so the family that CREATES
+/// a seated contact and the classifier that RECOGNISES one can never drift.
+pub(crate) const MODEL_RUNG_FAMILY: &str = "model_rung";
+
+/// Whether a member's model-contact endpoint is SEATED below the tangent plane
+/// or merely rests ON the projected surface point.
+///
+/// This distinction is load-bearing for PR-2.  The mask
+/// `u* = (h + r_max + standoff + MARGIN)/|cos|` contains the seat depth `h`
+/// because the axis station at arc distance `u*` from an endpoint seated `h`
+/// BELOW the plane stands `u*|cos| - h` above it.  For an endpoint sitting ON
+/// the plane that station stands `u*|cos|` above it, so the `h` term must not
+/// be there: including it over-masks the row by `h/|cos|` — roughly 0.6-1.1 mm
+/// of the member left unchecked, silently exempted from the distance test.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ContactSeating {
+    /// The endpoint was pushed inward along the normal by the PR-1 seat depth.
+    Seated,
+    /// The endpoint is the projected surface point itself.
+    OnSurface,
+}
+
+impl ContactSeating {
+    /// The depth term the PR-2 mask must use for a member in this state.
+    pub(crate) fn mask_seat_depth_mm(self, seat_depth_mm: f64) -> f64 {
+        match self {
+            Self::Seated => seat_depth_mm,
+            Self::OnSurface => 0.0,
+        }
+    }
+}
+
+/// Recompute a member's seating state from its DESIGN FAMILY.
+///
+/// Per OD-3 this is recomputed per stage from kind plus policy and is NEVER
+/// stored on `Member`, so no digest and no golden moves.
+///
+/// PR-1 seats exactly one family today: the brace model rung
+/// (`brace.rs` `gather_candidates`, which builds its `p1` with
+/// [`seat_endpoint`]).  Every other family that declares a model contact —
+/// notably the CCO model-anchor strut (`cco::apply_model_anchor`, whose `p1` IS
+/// the raw seat point) and any bifurcation half that inherits from one — sits ON
+/// the surface.  A bifurcation upper half keeps its host's `p1` AND its host's
+/// kind, so the classification follows the geometry automatically.
+///
+/// PR-7 will seat the CCO family; when it lands, that family moves to `Seated`
+/// here and the `h` term becomes correct for it by the same rule rather than by
+/// a second, divergent decision.
+pub(crate) fn seating_of(kind: &MemberKind) -> ContactSeating {
+    match kind {
+        MemberKind::Other(family) if family == MODEL_RUNG_FAMILY => ContactSeating::Seated,
+        _ => ContactSeating::OnSurface,
+    }
+}
 
 /// `sqrt(1 - c^2)`, clamped so float noise at `|c| = 1` cannot produce a NaN.
 pub(crate) fn sin_from_cos(abs_cos: f64) -> f64 {

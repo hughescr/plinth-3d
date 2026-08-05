@@ -93,6 +93,21 @@ distance `u` from an endpoint seated `h` below the tangent plane stands
 `u*|cos| - h` above it, and on a planar seat that height IS its distance to the
 surface. Requiring `u*|cos| - h >= r_max + standoff + MARGIN` gives the formula.
 
+**The `h` term is present only for members that are actually SEATED.** The
+depth term exists because the axis station at arc distance `u*` from an endpoint
+seated `h` BELOW the tangent plane stands `u*|cos| - h` above it. For an
+endpoint sitting ON the plane the station stands `u*|cos|` above it and the term
+must not be there — including it over-masks by `h/|cos|`, roughly 0.6-1.1 mm of
+the member silently exempted from the distance check. PR-1 seats exactly one
+family today, the brace model rung; the CCO model-anchor strut's endpoint IS the
+raw projected seat point, and a bifurcation half inherits its host's endpoint
+and its host's kind. `contact::seating_of` recomputes that state per stage from
+the design family (OD-3 — never stored on `Member`, so no digest moves) and is
+the single place the decision lives, so when PR-7 seats the CCO family the mask
+term becomes correct there by the same rule rather than by a second, divergent
+edit. Pinned end-to-end through the kernel by
+`brace::tests::an_unseated_contact_is_not_over_masked_by_the_seat_depth`.
+
 **There is no `r_end*sin(theta)` term in the mask.** The original Phase B-2
 design had one; it was wrong and is retracted. At `theta = 0` the sin-based
 mask is SHORT by `r_max`, leaving the first unmasked axis point standing only

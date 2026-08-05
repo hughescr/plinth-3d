@@ -473,12 +473,14 @@ fn append_candidate(
             r1_mm: RootwardEndRadius::new(rod.radius),
             kind: match candidate.kind {
                 BraceAdditionKind::CrossLink => MemberKind::Brace,
-                BraceAdditionKind::ModelRung => MemberKind::Other("model_rung".to_owned()),
+                BraceAdditionKind::ModelRung => {
+                    MemberKind::Other(contact::MODEL_RUNG_FAMILY.to_owned())
+                }
             },
             owner: crate::forest::Owner::Generated {
                 family: match candidate.kind {
                     BraceAdditionKind::CrossLink => "brace",
-                    BraceAdditionKind::ModelRung => "model_rung",
+                    BraceAdditionKind::ModelRung => contact::MODEL_RUNG_FAMILY,
                 }
                 .to_owned(),
                 ordinal: *ordinal,
@@ -1544,12 +1546,25 @@ fn exact_clearance_rows(
                 ContactEnd::Terminalward => member.terminal_radius_mm().get().get(),
                 ContactEnd::Rootward => member.rootward_radius_mm().get().get(),
             };
-            // PR-2 on the geometry the kernel will actually see. The member is
-            // already seated, so this incidence IS the seated one. The seat
-            // depth is RECOMPUTED from the design family plus policy rather
-            // than stored on `Member` (OD-3), which is why no digest moves.
+            // PR-2 on the geometry the kernel will actually see. These members
+            // are already placed, so the observed incidence IS the one the mask
+            // must use. The seat depth is RECOMPUTED from the design family
+            // plus policy rather than stored on `Member` (OD-3), which is why
+            // no digest moves.
+            //
+            // MAJOR-6. The mask's depth term must reflect this member's ACTUAL
+            // seating state, not the seating state of the one family PR-1
+            // happens to seat. Only brace model rungs are seated; a CCO
+            // model-anchor strut's `p1` IS the raw seat point and a bifurcation
+            // half inherits its host's endpoint, so for those the endpoint
+            // stands ON the plane and there is no depth to divide out.
+            // Including `h` for them over-masks by h/|cos| (~0.6-1.1 mm of the
+            // member silently exempted from the distance test). PR-7 seats the
+            // CCO family; `contact::seating_of` is the single place that
+            // decision is recorded, so the two changes stay coherent.
             let policy = config.contact_policy();
             let seat = contact::seat_depth_mm(abs_cos_raw, radius, &policy, false);
+            let mask_seat = contact::seating_of(member.kind()).mask_seat_depth_mm(seat);
             let r_max = member
                 .terminal_radius_mm()
                 .get()
@@ -1558,7 +1573,8 @@ fn exact_clearance_rows(
             // A degenerate incidence yields no mask. Masking nothing is the
             // conservative disposition here: the row is then fully distance
             // checked rather than exempted, and PR-3/PR-9 refuse it upstream.
-            let inset = contact::mask_extent_mm(seat, r_max, abs_cos_raw, &policy).unwrap_or(0.0);
+            let inset =
+                contact::mask_extent_mm(mask_seat, r_max, abs_cos_raw, &policy).unwrap_or(0.0);
             crate::census::record_embed(
                 abs_cos_raw,
                 abs_cos_raw,
@@ -1806,6 +1822,66 @@ mod tests {
             model_contact_end: None,
             carried_mm2: finite(0.0).unwrap(),
         })
+    }
+
+    fn contact_member(
+        p0: [f64; 3],
+        p1: [f64; 3],
+        kind: MemberKind,
+        end: ContactEnd,
+        ordinal: u32,
+    ) -> Member {
+        Member::new(MemberSpec {
+            p0_mm: finite3(p0).unwrap(),
+            p1_mm: finite3(p1).unwrap(),
+            r0_mm: TerminalEndRadius::new(positive(0.5)),
+            r1_mm: RootwardEndRadius::new(positive(0.5)),
+            kind,
+            owner: Owner::Generated {
+                family: "brace-test".into(),
+                ordinal,
+            },
+            model_contact_end: Some(end),
+            carried_mm2: finite(0.0).unwrap(),
+        })
+    }
+
+    /// A slab whose top face is exactly the plane `z = 0`.
+    fn flat_table() -> NativeSurface {
+        const H: f64 = 20.0;
+        let vertices = vec![
+            [-H, -H, -10.0],
+            [H, -H, -10.0],
+            [H, H, -10.0],
+            [-H, H, -10.0],
+            [-H, -H, 0.0],
+            [H, -H, 0.0],
+            [H, H, 0.0],
+            [-H, H, 0.0],
+        ];
+        let faces = vec![
+            [0, 2, 1],
+            [0, 3, 2],
+            [4, 5, 6],
+            [4, 6, 7],
+            [0, 1, 5],
+            [0, 5, 4],
+            [1, 2, 6],
+            [1, 6, 5],
+            [2, 3, 7],
+            [2, 7, 6],
+            [3, 0, 4],
+            [3, 4, 7],
+        ];
+        NativeSurface::from_indexed(
+            &vertices,
+            &faces,
+            NativeSurfaceConfig {
+                grid_pitch_mm: 0.5,
+                max_grid_bytes: 16 * 1024 * 1024,
+            },
+        )
+        .unwrap()
     }
 
     fn remote_box() -> NativeSurface {
@@ -2377,6 +2453,76 @@ mod tests {
         assert_eq!(model.rods.len(), 1);
         assert!((model.rods[0].p0[2] - model.rods[0].p1[2]).abs() <= HEIGHT_TOLERANCE_MM);
         assert!(model.rods[0].p1[0] >= 4.0);
+    }
+
+    /// MAJOR-6 regression: the exact-clearance mask must reflect each member's
+    /// ACTUAL seating state.
+    ///
+    /// A CCO model-anchor strut's rootward end IS the raw projected seat point,
+    /// so its axis station at arc distance `u*` stands `u*|cos|` above the
+    /// plane, not `u*|cos| - h`. The mask therefore carries no `h` term for it.
+    /// The check is end-to-end through the real kernel: on a planar seat the
+    /// correct mask makes `segment_clearance` read exactly `MARGIN`
+    /// (= process resolution, 0.05 mm at a 0.05 mm layer). Including `h` would
+    /// push the first checked station 0.3 mm further out and the row would read
+    /// 0.35 mm — 0.3 mm of the member silently exempted from the distance test.
+    #[test]
+    fn an_unseated_contact_is_not_over_masked_by_the_seat_depth() {
+        let mut forest = Forest::new();
+        let strut = forest.add_member(contact_member(
+            [0.0, 0.0, 6.0],
+            [0.0, 0.0, 0.0],
+            MemberKind::Strut,
+            ContactEnd::Rootward,
+            0,
+        ));
+        let surface = flat_table();
+        let config = BraceConfig::current(0.05).unwrap();
+        let rows =
+            exact_clearance_rows(&forest, &surface, &config, test_penetration_limits()).unwrap();
+        let (key, clearance) = rows
+            .iter()
+            .copied()
+            .find(|(key, _)| *key == strut)
+            .expect("the strut is a live non-stub row");
+        assert_eq!(key, strut);
+        // MARGIN is the run's own process resolution.
+        let margin = config.contact_policy().process_resolution_mm;
+        assert!(
+            (clearance - margin).abs() < 1.0e-9,
+            "unseated strut must read exactly MARGIN = {margin}, got {clearance}"
+        );
+        // Discrimination: the rejected alternative (h included) reads
+        // MARGIN + default_contact_depth_mm = 0.35, an order of magnitude away.
+        assert!(clearance < margin + config.contact_depth_mm / 2.0);
+    }
+
+    /// The seating classifier is keyed on the DESIGN FAMILY (OD-3), recomputed
+    /// per stage and never stored, and PR-1 seats exactly one family today.
+    #[test]
+    fn seating_follows_the_design_family() {
+        use crate::contact::{seating_of, ContactSeating, MODEL_RUNG_FAMILY};
+        assert_eq!(
+            seating_of(&MemberKind::Other(MODEL_RUNG_FAMILY.to_owned())),
+            ContactSeating::Seated
+        );
+        for kind in [
+            MemberKind::Strut,
+            MemberKind::Brace,
+            MemberKind::Shoot,
+            MemberKind::Trunk,
+            MemberKind::Stub,
+            MemberKind::Other("cco_upper".to_owned()),
+        ] {
+            assert_eq!(
+                seating_of(&kind),
+                ContactSeating::OnSurface,
+                "{kind:?} is not seated by PR-1"
+            );
+        }
+        // The depth term is present for a seated member and absent otherwise.
+        assert!((ContactSeating::Seated.mask_seat_depth_mm(0.3) - 0.3).abs() < 1e-15);
+        assert!(ContactSeating::OnSurface.mask_seat_depth_mm(0.3).abs() < 1e-15);
     }
 
     /// BLOCKER-3 regression: PR-1 seating must not silently delete the whole
