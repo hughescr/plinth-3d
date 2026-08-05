@@ -24,6 +24,20 @@ mod brace;
 mod cco;
 /// THROWAWAY INSTRUMENTATION -- 2026-08-04 embed-incidence census, never merges.
 pub mod census;
+/// Contact physics (PR-1..PR-4): seat depth, mask extent, emergence
+/// admissibility and area sufficiency.  Pure and kernel-free by design, so the
+/// candidate-gather and clearance loops can call it per member without turning
+/// a batched stage into a per-item native call.  Crate-private and never
+/// re-exported, matching the sealing `designed_embed` was credited for.
+// The allow is scoped and temporary, exactly as for `designed_embed` above: this
+// commit lands the physics core and its unit tests as one reviewable unit, and
+// the production callers (brace/cco/anchor/initial/rewire/runner) land in the
+// commits that follow. The allow comes off with the last of them.
+#[allow(
+    dead_code,
+    reason = "contact physics core lands before its production callers; allow removed as they wire in"
+)]
+pub(crate) mod contact;
 mod coverage;
 mod coverage_measurement;
 // Crate-private on purpose: a `pub` mask domain is exactly why dead-code lints

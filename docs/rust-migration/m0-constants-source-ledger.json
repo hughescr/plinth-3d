@@ -412,6 +412,17 @@
       "provenance_detail": "added to contact depth"
     },
     {
+      "id": "CONTACT_AREA_RATIO_ALLOWED",
+      "classification": "runtime_gate",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "docs/reference/home-support-calibration-p1-protocol.md:H2 plate 2026-08-04",
+        "docs/rust-migration/contact-physics-2026-08-04.md:PR-4"
+      ],
+      "normative": "H2 calibration plate 2026-08-04: measured failure boundary X* in (25,36); engineering allowance X_ALLOWED = 12",
+      "provenance_detail": "Measured on head/shaft area ratios of purpose-built coupons under peel plus gravity on a Saturn 4 Ultra tilt-peel printer, front-to-back release. Registered Placeholder rather than Measured because applying it to a support-to-model interface transfers it beyond its measured regime: the interface is a virtual cut through one continuous cured solid rather than a machined section, and the loading is mixed tension-shear at incidence rather than the coupon's tension/peel. The ~2-3x margin between allowance and measured boundary is the stated substitute for an unmeasured tau/sigma interaction criterion."
+    },
+    {
       "id": "COVERAGE_RADIUS_FACTOR",
       "classification": "runtime_gate",
       "normative": "03-physics-and-constants.md §3.4 = 1.5",
