@@ -68,14 +68,6 @@ fn main() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Models whose own pinned pipeline report carries no usable orientation
-/// record (their legacy hollow stage failed, so `plinth-orient` refuses it).
-/// With `PLINTH_CENSUS_SUBSTITUTE_ORIENT=1` the census borrows another
-/// member's ratified axis/degrees so the geometry still reaches the support
-/// engine. Every such row is reported as `orientation=substituted`.
-const SUBSTITUTE_ORIENT: [(&str, &str); 2] =
-    [("Cylinder", "Sphere"), ("make_box", "make_overhang_table")];
-
 fn run_model(root: &Path, name: &str) -> Result<String, String> {
     let stl = root.join("corpus/models").join(format!("{name}.stl"));
     let mesh = load_binary_stl(&stl, WeldPolicy::None).map_err(|error| format!("load: {error}"))?;
@@ -86,22 +78,13 @@ fn run_model(root: &Path, name: &str) -> Result<String, String> {
         .map_err(|error| format!("decimate: {error}"))?
         .into_decimated_model()
         .map_err(|scale| format!("decimate-scale-skip: {scale:?}"))?;
-    let substitute = (std::env::var("PLINTH_CENSUS_SUBSTITUTE_ORIENT").as_deref() == Ok("1"))
-        .then(|| {
-            SUBSTITUTE_ORIENT
-                .iter()
-                .find(|(model, _)| *model == name)
-                .map(|(_, donor)| *donor)
-        })
-        .flatten();
-    let baseline_name = substitute.unwrap_or(name);
     let oriented = run_orientation(
         decimated,
         &OrientRequest {
             pinned: PinnedBaseline {
                 pipeline_report: root
                     .join("corpus/baseline")
-                    .join(format!("{baseline_name}.pipeline.json")),
+                    .join(format!("{name}.pipeline.json")),
             },
         },
     )
@@ -158,12 +141,9 @@ fn run_model(root: &Path, name: &str) -> Result<String, String> {
 
     plinth_support::census::finish(name, &snapshot);
 
-    let orientation_note = if substitute.is_some() {
-        "substituted"
-    } else {
-        "own_pinned"
-    };
+    // Every corpus member now orients from its own repaired baseline; there is
+    // no donor-substitution path left.
     Ok(format!(
-        "faces={faces}\torientation={orientation_note}\tpitch_mm={pitch_mm}\tlayers={layer_count}\trouted_contacts={routed}\tfinal_live_members={live}\tsnapshot_digest={digest}"
+        "faces={faces}\torientation=own_pinned\tpitch_mm={pitch_mm}\tlayers={layer_count}\trouted_contacts={routed}\tfinal_live_members={live}\tsnapshot_digest={digest}"
     ))
 }
