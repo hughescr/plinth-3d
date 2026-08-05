@@ -15,6 +15,7 @@ use thiserror::Error;
 
 use crate::{
     anchor::{FOOT_BREACH_CONE_RAYS, FOOT_BREACH_HALF_DEG},
+    contact::{self, ContactPolicy},
     forest::{
         ContactEnd, Forest, ForestError, Member, MemberKey, MemberKind, MemberSpec,
         RootwardEndRadius, TerminalEndRadius,
@@ -24,6 +25,7 @@ use crate::{
         diagnostic_within_printability_cone, DiagnosticMemberSizingPolicy, LeanAngleDeg,
         MemberSizingError, MemberSpan,
     },
+    perception::FrozenTipLoadPolicy,
     transient::{
         resize_forest_current_parity, transient_report, TransientError, TransientReport,
         TransientResizePlan, ZInterval,
@@ -54,13 +56,34 @@ struct BraceConfig {
     ball_factor_foot: f64,
     ball_breach_epsilon_mm: f64,
     min_illegal_len_mm: f64,
+    /// `max(LayerPlan::heights_mm())` for the run being braced — the PR-1
+    /// slicer-resolution seat floor and the PR-2 mask margin.  Carried on the
+    /// config because it is a property of the RUN, not of the registry.
+    process_resolution_mm: f64,
+    ball_factor_stub: f64,
+    tip_load: FrozenTipLoadPolicy,
 }
 
 impl BraceConfig {
-    fn current() -> Result<Self, BraceError> {
+    /// The PR-1..PR-4 policy this brace pass evaluates contacts under.
+    fn contact_policy(&self) -> ContactPolicy {
+        ContactPolicy {
+            floor_depth_mm: self.contact_depth_mm,
+            process_resolution_mm: self.process_resolution_mm,
+            standoff_mm: self.standoff_mm,
+            min_free_span_mm: self.min_illegal_len_mm,
+            ball_factor_stub: self.ball_factor_stub,
+            tip_load: self.tip_load,
+        }
+    }
+
+    fn current(process_resolution_mm: f64) -> Result<Self, BraceError> {
         let constants = m0_constants().map_err(|error| BraceError::Constants(error.to_string()))?;
         let p = constants.placeholders();
         Ok(Self {
+            process_resolution_mm,
+            ball_factor_stub: p.ball_factor_stub().diagnostic().get(),
+            tip_load: FrozenTipLoadPolicy::from_placeholders(p),
             ladder_z_mm: p.brace_ladder_z_mm().diagnostic().get(),
             neighbor_max_xy_mm: p.brace_neighbor_max_xy_mm().diagnostic().get(),
             reach_tier_base_factor: p.bracing_reach_tier_base_factor().diagnostic().get(),
@@ -189,6 +212,21 @@ struct TriggerReliefResult {
     exact_clearance_batches: usize,
 }
 
+/// The seated contact geometry carried alongside a rod that touches the model.
+///
+/// Carried EXPLICITLY rather than reconstructed.  Two census consumers used to
+/// invert the retired `embed_inset_mm` to recover the incidence
+/// (`(r + standoff) / (inset1 - contact_depth)`); under the PR-2 mask that
+/// inverse is meaningless, and since the census is the OD-8 delta instrument,
+/// a meaningless inverse would invalidate the measurement itself.
+#[derive(Clone, Copy, Debug)]
+struct RodContact {
+    /// `|cos|` between the member axis and the surface normal, AFTER seating.
+    abs_cos_incidence: f64,
+    /// The PR-1 seat depth the rod endpoint was pushed in by.
+    seat_depth_mm: f64,
+}
+
 #[derive(Clone, Debug)]
 struct Rod {
     p0: [f64; 3],
@@ -196,6 +234,8 @@ struct Rod {
     radius: PositiveFinite,
     inset0: f64,
     inset1: f64,
+    /// `Some` exactly when this rod's `p1` end is a seated model contact.
+    contact: Option<RodContact>,
 }
 
 #[derive(Clone, Debug)]
@@ -234,11 +274,12 @@ pub(crate) fn brace_pass_current_parity(
     plate_z_mm: Finite,
     report: &TransientReport,
     penetration_limits: PenetrationBatchLimits,
+    process_resolution_mm: f64,
 ) -> Result<BracePassPlan, BraceError> {
     if &transient_report(forest, plate_z_mm)? != report {
         return Err(BraceError::StaleTransientReport);
     }
-    let config = BraceConfig::current()?;
+    let config = BraceConfig::current(process_resolution_mm)?;
     let mut need_batch = compute_needs(forest, report, &config)?;
     append_clearance_needs(
         forest,
@@ -330,6 +371,7 @@ pub(crate) fn brace_fixed_point_current_parity(
     surface: &NativeSurface,
     plate_z_mm: Finite,
     penetration_limits: PenetrationBatchLimits,
+    process_resolution_mm: f64,
 ) -> Result<BraceFixedPointPlan, BraceError> {
     const FROZEN_PASS_CAP: usize = 3;
     let mut working = forest.clone();
@@ -337,8 +379,14 @@ pub(crate) fn brace_fixed_point_current_parity(
     let mut saw_unplaceable = false;
     for iteration in 1..=FROZEN_PASS_CAP {
         let report = transient_report(&working, plate_z_mm)?;
-        let plan =
-            brace_pass_current_parity(&working, surface, plate_z_mm, &report, penetration_limits)?;
+        let plan = brace_pass_current_parity(
+            &working,
+            surface,
+            plate_z_mm,
+            &report,
+            penetration_limits,
+            process_resolution_mm,
+        )?;
         saw_unplaceable |= plan.rungs_unplaceable > 0;
         let changed = !plan.resize.changed.is_empty();
         working = apply_resize(plan.forest_with_braces, &plan.resize)?;
@@ -347,7 +395,7 @@ pub(crate) fn brace_fixed_point_current_parity(
         let violations = exact_clearance_violations(
             &working,
             surface,
-            &BraceConfig::current()?,
+            &BraceConfig::current(process_resolution_mm)?,
             penetration_limits,
         )?;
         if !added && !changed && violations == 0 {
@@ -904,14 +952,48 @@ fn gather_candidates(
         let radius = config.brace_radius_mm;
         let axis = scale(sub(projected.point, p0), 1.0 / length);
         let abs_cos_raw = dot(axis, projected.normal).abs();
-        let cosine = abs_cos_raw.max(0.5);
-        let rung_inset1 = embed_inset_mm(
-            config.contact_depth_mm,
+
+        // PR-1: SEAT the rung rather than kissing the surface. Today's code
+        // sets p1 to the projected surface point exactly, producing a
+        // measure-zero tangential contact whose fusion under union is decided
+        // by voxel rounding -- precisely the "properly attaches the tips for
+        // all cases" failure the owner named.
+        let policy = config.contact_policy();
+        let seat = contact::seat_depth_mm(abs_cos_raw, radius.get(), &policy, false);
+        let (seated_point, seated_cos, seated_length) =
+            contact::seat_endpoint(projected.point, projected.normal, p0, seat);
+
+        // PR-2/PR-3 evaluated on the SEATED geometry -- what the kernel will
+        // actually see. Exactly one pass: the PR-1 monotonicity lemma proves
+        // seating raises both |cos| and length, so the seat computed at the
+        // unseated incidence remains valid at the seated one. Nothing iterates.
+        let site = contact::ContactSite {
+            end: ContactEnd::Rootward,
+            end_radius_mm: radius.get(),
+            member_r_max_mm: radius.get(),
+            abs_cos_incidence: abs_cos_raw,
+            carried_mm2: 0.0,
+            member_length_mm: length,
+        };
+        let extents =
+            match contact::admit(&site, &policy, seated_cos, seated_length, 0.0, false, false) {
+                Ok(extents) => extents,
+                // An inadmissible rung is DROPPED, exactly like the length and
+                // breach filters above -- an ordinary candidate rejection, never a
+                // hard failure (OD-4). Under the retired floored formula these rows
+                // were instead admitted unconditionally: the floor made the mask
+                // smaller and the check stricter, and any rung whose insets
+                // over-masked the segment took `seg_clear_one`'s INFINITY
+                // trivially-clear branch.
+                Err(_) => continue,
+            };
+        crate::census::record_rung(
+            abs_cos_raw,
+            extents.seated_abs_cos,
+            extents.seated_length_mm,
             radius.get(),
-            config.standoff_mm,
-            cosine,
+            extents.mask_extent_mm,
         );
-        crate::census::record_rung(abs_cos_raw, cosine, length, radius.get(), rung_inset1);
         candidates.push(PlacementCandidate {
             need_index: projected.raw.need_index,
             site_index: projected.raw.site_index,
@@ -919,12 +1001,16 @@ fn gather_candidates(
             kind: BraceAdditionKind::ModelRung,
             rods: vec![Rod {
                 p0,
-                p1: projected.point,
+                p1: seated_point,
                 radius,
                 inset0: 0.0,
-                inset1: rung_inset1,
+                inset1: extents.mask_extent_mm,
+                contact: Some(RodContact {
+                    abs_cos_incidence: extents.seated_abs_cos,
+                    seat_depth_mm: extents.seat_depth_mm,
+                }),
             }],
-            printable: (p0[2] - projected.point[2]).abs() <= HEIGHT_TOLERANCE_MM,
+            printable: (p0[2] - seated_point[2]).abs() <= HEIGHT_TOLERANCE_MM,
         });
     }
     candidates
@@ -978,18 +1064,20 @@ fn evaluate_candidates(
             r1.push(rod.radius.get());
             inset0.push(rod.inset0);
             inset1.push(rod.inset1);
-            // Model rungs are the only candidate kind carrying a
-            // cosine-derived embed inset; recover the cosine that built it.
-            census_cos_class.push(if candidate.kind == BraceAdditionKind::ModelRung {
-                let cosine = (rod.radius.get() + config.standoff_mm)
-                    / (rod.inset1 - config.contact_depth_mm);
-                if cosine <= 0.5 + 1e-9 {
-                    1
-                } else {
-                    2
+            // Read the incidence DIRECTLY off the rod. It used to be
+            // reconstructed by inverting `embed_inset_mm`; that inverse does
+            // not exist for the PR-2 mask, and since this census is the OD-8
+            // delta instrument, inverting a retired formula would have
+            // invalidated the very measurement the ruling requires.
+            census_cos_class.push(match rod.contact {
+                Some(contact) => {
+                    if contact.abs_cos_incidence <= 0.5 + 1e-9 {
+                        1
+                    } else {
+                        2
+                    }
                 }
-            } else {
-                0
+                None => 0,
             });
         }
         ranges.push(start..p0.len());
@@ -1026,8 +1114,8 @@ fn evaluate_candidates(
             }
             for (rod, index) in candidate.rods.iter().zip(range.clone()) {
                 let length = norm(sub(rod.p1, rod.p0));
-                let cosine = (rod.radius.get() + config.standoff_mm)
-                    / (rod.inset1 - config.contact_depth_mm);
+                // Direct read, not an inverse of the retired formula.
+                let cosine = rod.contact.map_or(f64::NAN, |c| c.abs_cos_incidence);
                 outcomes.push(crate::census::RungOutcome {
                     cos_used: cosine,
                     length_mm: length,
@@ -1283,6 +1371,8 @@ fn cross_link_rods(
             radius,
             inset0: 0.0,
             inset1: 0.0,
+            // Cross-links join two supports; neither end touches the model.
+            contact: None,
         })
     };
     if distance <= config.twin_single_xy_mm {
@@ -1432,15 +1522,28 @@ fn exact_clearance_rows(
             );
             let axis = scale(axis_raw, 1.0 / norm(axis_raw));
             let abs_cos_raw = dot(axis, normal).abs();
-            let cosine = abs_cos_raw.max(0.5);
             let radius = match end {
                 ContactEnd::Terminalward => member.terminal_radius_mm().get().get(),
                 ContactEnd::Rootward => member.rootward_radius_mm().get().get(),
             };
-            let inset = embed_inset_mm(config.contact_depth_mm, radius, config.standoff_mm, cosine);
+            // PR-2 on the geometry the kernel will actually see. The member is
+            // already seated, so this incidence IS the seated one. The seat
+            // depth is RECOMPUTED from the design family plus policy rather
+            // than stored on `Member` (OD-3), which is why no digest moves.
+            let policy = config.contact_policy();
+            let seat = contact::seat_depth_mm(abs_cos_raw, radius, &policy, false);
+            let r_max = member
+                .terminal_radius_mm()
+                .get()
+                .get()
+                .max(member.rootward_radius_mm().get().get());
+            // A degenerate incidence yields no mask. Masking nothing is the
+            // conservative disposition here: the row is then fully distance
+            // checked rather than exempted, and PR-3/PR-9 refuse it upstream.
+            let inset = contact::mask_extent_mm(seat, r_max, abs_cos_raw, &policy).unwrap_or(0.0);
             crate::census::record_embed(
                 abs_cos_raw,
-                cosine,
+                abs_cos_raw,
                 radius,
                 inset,
                 norm(axis_raw),
@@ -1487,10 +1590,6 @@ fn exact_clearance_rows(
         .zip(clearance)
         .map(|((key, _), value)| (key, value))
         .collect())
-}
-
-fn embed_inset_mm(contact_depth_mm: f64, radius_mm: f64, standoff_mm: f64, cosine: f64) -> f64 {
-    contact_depth_mm + (radius_mm + standoff_mm) / cosine
 }
 
 fn slender_rungs(
@@ -1814,7 +1913,7 @@ mod tests {
             MemberKind::Trunk,
             1,
         ));
-        let config = BraceConfig::current().unwrap();
+        let config = BraceConfig::current(0.05).unwrap();
         let rows =
             cross_link_candidates(&forest, a, 10.0, 0, &config, config.neighbor_max_xy_mm).unwrap();
         assert_eq!(rows, vec![(2.0, b)]);
@@ -1828,7 +1927,7 @@ mod tests {
 
     #[test]
     fn registered_reach_tiers_preserve_the_intermediate_cap() {
-        let config = BraceConfig::current().unwrap();
+        let config = BraceConfig::current(0.05).unwrap();
         assert_eq!(
             reach_tiers_mm(&config),
             vec![
@@ -1853,7 +1952,7 @@ mod tests {
             MemberKind::Trunk,
             1,
         ));
-        let config = BraceConfig::current().unwrap();
+        let config = BraceConfig::current(0.05).unwrap();
         let rods = cross_link_rods(&forest, host, neighbor, 2.0, 2.0, 0, &config).unwrap();
         let compatibility = LegacyCompatibility::o10_live_current_support_and_raft();
         let expected = config
@@ -1864,11 +1963,49 @@ mod tests {
         assert!((rods[0].radius.get() - expected).abs() <= 1e-12);
     }
 
+    /// REPLACES `angled_embed_inset_leaves_contact_depth_unscaled`, which
+    /// pinned the retired `embed_inset_mm` -- and pinned it as CORRECT.
+    ///
+    /// That test asserted the seat depth is NOT divided by `|cos|`. It is: the
+    /// depth is measured along the normal while the mask is an arc length
+    /// along the axis, so the 1/|cos| conversion applies to every term. The old
+    /// formula therefore UNDER-masked by `h*(1/|cos| - 1)`, making the
+    /// clearance check stricter than the geometry warrants -- and the
+    /// `.max(0.5)` floor that fed it made the mask smaller still, which is why
+    /// it was the conservative branch rather than the grazing rejector it was
+    /// long believed to be.
     #[test]
-    fn angled_embed_inset_leaves_contact_depth_unscaled() {
-        let inset = embed_inset_mm(0.3, 0.5, 0.2, 0.5);
-        assert!((inset - 1.7).abs() <= 1e-12);
-        assert_ne!(inset, (0.3 + 0.5 + 0.2) / 0.5);
+    fn contact_mask_divides_every_term_by_the_incidence() {
+        let config = BraceConfig::current(0.05).unwrap();
+        let policy = config.contact_policy();
+        let seat = 0.3;
+        let mask = contact::mask_extent_mm(seat, 0.5, 0.5, &policy).unwrap();
+
+        // Every term divided, including the seat depth: 1.45 / 0.5 = 2.90 mm.
+        assert!((mask - 2.9).abs() <= 1e-12, "mask {mask}");
+        assert!((mask - (0.3 + 0.5 + 0.6 + 0.05) / 0.5).abs() <= 1e-12);
+
+        // Explicitly NOT the retired arithmetic, which left the depth
+        // unscaled: 0.3 + 1.1/0.5 = 2.50 mm.
+        let retired: f64 = 0.3 + (0.5 + 0.6) / 0.5;
+        assert!((retired - 2.5).abs() <= 1e-12);
+
+        // The gap decomposes into exactly TWO independent corrections, and
+        // conflating them is how the original design talked itself into a
+        // wrong mask. At |cos| = 0.5 with a 0.05 mm layer:
+        //   (i)  the undivided-depth fix, h*(1/|cos| - 1) = 0.30 mm; and
+        //   (ii) the engineering margin the retired formula had none of,
+        //        MARGIN/|cos| = 0.10 mm.
+        let undivided_depth_fix = seat * (1.0 / 0.5 - 1.0);
+        let margin_term = policy.process_resolution_mm / 0.5;
+        assert!((undivided_depth_fix - 0.3).abs() <= 1e-12);
+        assert!((margin_term - 0.1).abs() <= 1e-12);
+        assert!(
+            (mask - retired - undivided_depth_fix - margin_term).abs() <= 1e-12,
+            "mask {mask} must exceed the retired {retired} by exactly the \
+             undivided-depth fix {undivided_depth_fix} plus the margin term \
+             {margin_term}"
+        );
     }
 
     #[test]
@@ -1923,7 +2060,7 @@ mod tests {
             plate,
             &report,
             vec![first, second],
-            &BraceConfig::current().unwrap(),
+            &BraceConfig::current(0.05).unwrap(),
             test_penetration_limits(),
         )
         .unwrap();
@@ -1972,7 +2109,7 @@ mod tests {
     #[test]
     fn axis_penetration_belt_rejects_inside_rods_in_one_batch() {
         let surface = enclosing_box();
-        let config = BraceConfig::current().unwrap();
+        let config = BraceConfig::current(0.05).unwrap();
         let candidates = vec![
             PlacementCandidate {
                 need_index: 0,
@@ -1985,6 +2122,7 @@ mod tests {
                     radius: positive(0.1),
                     inset0: 0.0,
                     inset1: 0.0,
+                    contact: None,
                 }],
                 printable: true,
             },
@@ -1999,6 +2137,7 @@ mod tests {
                     radius: positive(0.1),
                     inset0: 0.0,
                     inset1: 0.0,
+                    contact: None,
                 }],
                 printable: true,
             },
@@ -2040,6 +2179,7 @@ mod tests {
             &remote_box(),
             finite(0.0).unwrap(),
             test_penetration_limits(),
+            0.05,
         )
         .unwrap();
         assert_eq!(plan.termination, BraceFixedPointTermination::Unplaceable);
@@ -2092,6 +2232,7 @@ mod tests {
             plate,
             &report,
             test_penetration_limits(),
+            0.05,
         )
         .unwrap();
         assert_eq!(forest.digest(), before);
@@ -2136,7 +2277,7 @@ mod tests {
                 worst_span_path: vec![lower, upper],
             }],
         };
-        let batch = compute_needs(&forest, &report, &BraceConfig::current().unwrap()).unwrap();
+        let batch = compute_needs(&forest, &report, &BraceConfig::current(0.05).unwrap()).unwrap();
         assert_eq!(batch.needs.len(), 1);
         assert!(batch.needs[0].path_mapped);
         assert_eq!(batch.needs[0].triggers, vec![lower]);
@@ -2161,7 +2302,7 @@ mod tests {
             alternatives: Vec::new(),
         }];
         let surface = near_wall_box();
-        let config = BraceConfig::current().unwrap();
+        let config = BraceConfig::current(0.05).unwrap();
         let candidates = gather_candidates(&forest, &surface, &needs, &config).unwrap();
         let model = candidates
             .iter()
@@ -2209,6 +2350,7 @@ mod tests {
                 plate,
                 &report,
                 test_penetration_limits(),
+                0.05,
             )
             .unwrap();
             assert!(!plan.additions.is_empty());

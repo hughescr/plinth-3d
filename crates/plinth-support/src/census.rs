@@ -346,11 +346,13 @@ pub fn finish(model: &str, snapshot: &SupportVerificationSnapshot<'_>) {
             "T1a_rung_outcome",
             &[
                 format!("rows={total}"),
-                format!("floored_cos={}", grazing.len()),
+                // Renamed for Phase B-2: nothing is floored any more, so this
+                // counts rows whose SEATED incidence is still grazing.
+                format!("seated_grazing_cos={}", grazing.len()),
                 format!("admitted_viable={admitted}"),
-                format!("floored_admitted={grazing_admitted}"),
+                format!("grazing_admitted={grazing_admitted}"),
                 format!("over_masked={over_masked}"),
-                format!("floored_over_masked={grazing_over_masked}"),
+                format!("grazing_over_masked={grazing_over_masked}"),
                 format!("clearance_infinite={infinite_clearance}"),
             ],
         );
@@ -365,7 +367,12 @@ pub fn finish(model: &str, snapshot: &SupportVerificationSnapshot<'_>) {
                 format!("i={index}"),
                 format!("abs_cos_raw={:.6}", entry.abs_cos_raw),
                 format!("cos_used={:.6}", entry.cos_used),
-                format!("floored={}", entry.abs_cos_raw < 0.5),
+                // Renamed for Phase B-2. This column used to mean "the cosine
+                // floor was active"; the floor is gone, and `cos_used` now
+                // differs from `abs_cos_raw` because of SEATING, which RAISES
+                // the incidence. Reporting that as "floored" would have made
+                // the delta instrument lie about the very change it measures.
+                format!("raw_grazing={}", entry.abs_cos_raw < 0.5),
                 format!("L_mm={:.6}", entry.length_mm),
                 format!("radius_mm={:.6}", entry.radius_mm),
                 format!("inset1_mm={:.6}", entry.inset1_mm),
@@ -525,7 +532,7 @@ pub fn finish(model: &str, snapshot: &SupportVerificationSnapshot<'_>) {
                 format!("rows={}", slot[0]),
                 format!("embed_inset_rows={}", slot[1]),
                 format!("cos_derived_rows={}", slot[2]),
-                format!("floored_cos_rows={}", slot[3]),
+                format!("grazing_cos_rows={}", slot[3]),
                 format!("over_masked={}", slot[4]),
                 format!("over_masked_floored_cos={}", slot[5]),
                 format!("over_masked_cos_ge_0.5={}", slot[6]),

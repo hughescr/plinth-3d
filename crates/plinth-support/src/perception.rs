@@ -476,7 +476,7 @@ impl FrozenTipLoadPolicy {
         }
     }
 
-    fn from_placeholders(policy: &M0PlaceholderConstants) -> Self {
+    pub(crate) fn from_placeholders(policy: &M0PlaceholderConstants) -> Self {
         Self {
             pressure_pa: policy.peel_pressure_pa().diagnostic().get(),
             tensile_pa: policy.tensile_green_mpa().diagnostic().get() * 1.0e6,

@@ -1847,6 +1847,10 @@ impl<'a> RewiredSupportRun<'a> {
             geometry.surface(),
             context.frame.plate_z_mm(),
             context.brace_penetration_limits(),
+            // PR-1/PR-2 need the run's OWN process resolution: the seat floor
+            // and the clearance margin are both one layer, and a layer is a
+            // property of this run's plan rather than of the registry.
+            crate::contact::ContactPolicy::process_resolution_of(context.layers()),
         )?;
         plan.forest.validate().map_err(BraceError::from)?;
         let report = transient_report(&plan.forest, context.frame.plate_z_mm())?;
@@ -3968,6 +3972,7 @@ mod tests {
             &remote_brace_surface(),
             plate,
             brace_penetration_limits(),
+            0.05,
         )
         .expect("empty forest is a valid production brace input");
         assert_eq!(converged.termination, BraceFixedPointTermination::Converged);
@@ -3979,6 +3984,7 @@ mod tests {
             &remote_brace_surface(),
             plate,
             brace_penetration_limits(),
+            0.05,
         )
         .expect("isolated long trunk remains a valid production brace input");
         assert_eq!(
@@ -3994,6 +4000,7 @@ mod tests {
             &remote_brace_surface(),
             plate,
             brace_penetration_limits(),
+            0.05,
         )
         .expect("paired long trunks remain a valid production brace input");
         assert_eq!(
