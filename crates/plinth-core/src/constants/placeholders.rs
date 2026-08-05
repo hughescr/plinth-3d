@@ -971,7 +971,7 @@ macro_rules! placeholder_declarations {
                 }
             )+
 
-            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 193], RegistryError> {
+            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 192], RegistryError> {
                 Ok([
                     $(ConstantDescriptor::from_placeholder(
                         ConstantId::from($id),
@@ -1064,8 +1064,6 @@ placeholder_declarations! {
     "CONNECTIVITY_AXIS_ATTACH_TOL_MM", "mm", "scalar", "Connectivity axis-attachment gate tolerance.";
     connectivity_embed_pad_mm: PositiveFinite = PositiveFinite::new(0.45)?;
     "CONNECTIVITY_EMBED_PAD_MM", "mm", "scalar", "Connectivity embed pad added to contact depth.";
-    contact_area_ratio_allowed: PositiveFinite = PositiveFinite::new(12.0)?;
-    "CONTACT_AREA_RATIO_ALLOWED", "1", "scalar", "H2 calibration-plate engineering allowance for supported_area/narrowest_section; measured failure boundary X* in (25,36) on Saturn 4 Ultra tilt-peel coupons, allowance 12. Bounds the engine's implied tip ratio; it is NOT independent corroboration of it.";
     coverage_radius_factor: PositiveFinite = PositiveFinite::new(1.5)?;
     "COVERAGE_RADIUS_FACTOR", "1", "scalar", "Coverage gate radius factor selected without measurement.";
     coverage_repair_max_attempts: NonZeroU64 = nonzero(8)?;

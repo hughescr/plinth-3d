@@ -8,7 +8,7 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_PLACEHOLDER_IDS: [&str; 193] = [
+const EXPECTED_PLACEHOLDER_IDS: [&str; 192] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -48,7 +48,6 @@ const EXPECTED_PLACEHOLDER_IDS: [&str; 193] = [
     "COLINEAR_RADIUS_FRAC",
     "CONNECTIVITY_AXIS_ATTACH_TOL_MM",
     "CONNECTIVITY_EMBED_PAD_MM",
-    "CONTACT_AREA_RATIO_ALLOWED",
     "COVERAGE_RADIUS_FACTOR",
     "COVERAGE_REPAIR_MAX_ATTEMPTS",
     "DECIMATION_ADAPTATION_POLICY",
@@ -217,7 +216,7 @@ macro_rules! rows {
     };
 }
 
-const EXPECTED_ROWS: [ExpectedRow; 193] = rows! {
+const EXPECTED_ROWS: [ExpectedRow; 192] = rows! {
     "A_ABS_MM2", "2.0", "mm²", "scalar";
     "BALL_BREACH_EPS_MM", "0.05", "mm", "scalar";
     "BALL_FACTOR_FOOT", "1.4", "1", "scalar";
@@ -257,7 +256,6 @@ const EXPECTED_ROWS: [ExpectedRow; 193] = rows! {
     "COLINEAR_RADIUS_FRAC", "0.2", "1", "scalar";
     "CONNECTIVITY_AXIS_ATTACH_TOL_MM", "0.25", "mm", "scalar";
     "CONNECTIVITY_EMBED_PAD_MM", "0.45", "mm", "scalar";
-    "CONTACT_AREA_RATIO_ALLOWED", "12.0", "1", "scalar";
     "COVERAGE_RADIUS_FACTOR", "1.5", "1", "scalar";
     "COVERAGE_REPAIR_MAX_ATTEMPTS", "8", "count", "scalar";
     "DECIMATION_ADAPTATION_POLICY", "{adaptations:3,error_multiplier:0.6,feature_multiplier:2.0}", "1", "record{adaptations,error_multiplier,feature_multiplier}";
@@ -414,7 +412,7 @@ const EXPECTED_ROWS: [ExpectedRow; 193] = rows! {
 };
 
 fn component() -> M0PlaceholderConstants {
-    M0PlaceholderConstants::new().expect("all 193 placeholder declarations must construct")
+    M0PlaceholderConstants::new().expect("all 192 placeholder declarations must construct")
 }
 
 #[test]
@@ -425,7 +423,7 @@ fn exact_handwritten_membership_is_stable_sorted_and_all_placeholder() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, EXPECTED_PLACEHOLDER_IDS);
-    assert_eq!(descriptors.len(), 193);
+    assert_eq!(descriptors.len(), 192);
     assert!(descriptors
         .windows(2)
         .all(|pair| pair[0].id() < pair[1].id()));
@@ -516,7 +514,7 @@ const fn bound_key(bound: BoundKind) -> &'static str {
 }
 
 #[test]
-fn evidence_and_placeholder_fixture_builds_one_213_entry_structural_batch() {
+fn evidence_and_placeholder_fixture_builds_one_212_entry_structural_batch() {
     let mut descriptors = component()
         .descriptors()
         .unwrap()
@@ -524,14 +522,14 @@ fn evidence_and_placeholder_fixture_builds_one_213_entry_structural_batch() {
         .collect::<Vec<_>>();
     descriptors.extend(M0EvidenceConstants::new().unwrap().descriptors().unwrap());
     let registry = ConstantsRegistry::build_batch(descriptors).unwrap();
-    assert_eq!(registry.len(), 213);
+    assert_eq!(registry.len(), 212);
     assert_eq!(
         registry
             .iter()
             .map(|descriptor| descriptor.id().as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        213
+        212
     );
 }
 
@@ -542,22 +540,38 @@ fn evidence_and_placeholder_fixture_builds_one_213_entry_structural_batch() {
 /// i.e. it already IS an area-ratio law with ratio
 /// `X_engine = tensile_green_pa / (peel_pressure_pa * tip_safety_factor)`.
 ///
+/// THE ALLOWANCE ANCHOR IS `X_ALLOWED`.  There is exactly one registered
+/// area-ratio allowance in this engine and it is the Derived evidence constant
+/// `X_ALLOWED = floor(lower(X_STAR_CONE)/2) = 12`, chained from the measured
+/// plate interval.  Contact physics PR-4 reads THAT entry — it does not
+/// re-declare the number as a hand-typed placeholder, because a duplicate would
+/// let a plate recalibration move `X_STAR_CONE` while the contact threshold
+/// silently stayed at the stale hand-typed 12.  Reading the chained constant is
+/// what makes a recalibration flow through.
+///
 /// This is deliberately a ONE-SIDED bound and not an exact-equality coupling.
 /// `X_engine` = 12 is an internal CONSISTENCY identity that is a function of
 /// the arbitrary Python-era `tip_safety_factor` = 8 — had that been 6 the
-/// identity would read 16 — so it is NOT an independent measurement of the H2
-/// plate's `X_ALLOWED` = 12.  Hard-coupling the two would let a future
-/// recalibration of `peel_pressure_pa` or `tensile_green_mpa` silently move the
-/// contact-area threshold, or break this unrelated gate.  What matters
-/// physically is only the safety direction: a LARGER implied ratio means less
-/// section per unit load than the calibration plate allows.
+/// identity would read 16 — so it is NOT an independent measurement of
+/// `X_ALLOWED`.  Hard-coupling the two would let a future recalibration of
+/// `peel_pressure_pa` or `tensile_green_mpa` silently move the contact-area
+/// threshold, or break this unrelated gate.  What matters physically is only
+/// the safety direction: a LARGER implied ratio means less section per unit
+/// load than the calibration plate allows.
 #[test]
 fn engine_implied_tip_area_ratio_does_not_exceed_the_h2_allowance() {
     let constants = M0PlaceholderConstants::new().expect("placeholder constants");
     let peel_pressure_pa = constants.peel_pressure_pa().diagnostic().get();
     let tensile_pa = constants.tensile_green_mpa().diagnostic().get() * 1.0e6;
     let safety_factor = constants.tip_safety_factor().diagnostic().get();
-    let allowance = constants.contact_area_ratio_allowed().diagnostic().get();
+    // The allowance comes from the EVIDENCE registry's `X_ALLOWED`, the sole
+    // registered anchor, so a plate recalibration reaches this gate.
+    let evidence = M0EvidenceConstants::new().expect("evidence constants");
+    let allowance = *evidence.x_allowed().value();
+    assert!(
+        (allowance - 12.0).abs() < 1.0e-12,
+        "X_ALLOWED is the anchor and currently reads {allowance}"
+    );
 
     let implied = tensile_pa / (peel_pressure_pa * safety_factor);
     assert!(

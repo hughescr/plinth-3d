@@ -42,7 +42,6 @@
 | COLINEAR&#95;RADIUS&#95;FRAC | 0.2 | 1 | scalar | placeholder(note="Placeholder; non-AcceptSafe. Joint colinearity radius fraction.") |
 | CONNECTIVITY&#95;AXIS&#95;ATTACH&#95;TOL&#95;MM | 0.25 | mm | scalar | placeholder(note="Placeholder; non-AcceptSafe. Connectivity axis-attachment gate tolerance.") |
 | CONNECTIVITY&#95;EMBED&#95;PAD&#95;MM | 0.45 | mm | scalar | placeholder(note="Placeholder; non-AcceptSafe. Connectivity embed pad added to contact depth.") |
-| CONTACT&#95;AREA&#95;RATIO&#95;ALLOWED | 12.0 | 1 | scalar | placeholder(note="Placeholder; non-AcceptSafe. H2 calibration-plate engineering allowance for supported&#95;area/narrowest&#95;section; measured failure boundary X&#42; in (25,36) on Saturn 4 Ultra tilt-peel coupons, allowance 12. Bounds the engine's implied tip ratio; it is NOT independent corroboration of it.") |
 | COVERAGE&#95;RADIUS&#95;FACTOR | 1.5 | 1 | scalar | placeholder(note="Placeholder; non-AcceptSafe. Coverage gate radius factor selected without measurement.") |
 | COVERAGE&#95;REPAIR&#95;MAX&#95;ATTEMPTS | 8 | count | scalar | placeholder(note="Placeholder; non-AcceptSafe. Result-changing coverage-repair cap, not a resource exclusion.") |
 | DECIMATION&#95;ADAPTATION&#95;POLICY | {"adaptations":3,"error&#95;multiplier":0.6,"feature&#95;multiplier":2.0} | 1 | record{adaptations,error&#95;multiplier,feature&#95;multiplier} | placeholder(note="Placeholder; non-AcceptSafe. Structured feature-protection adaptation policy.") |

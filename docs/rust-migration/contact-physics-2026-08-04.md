@@ -158,6 +158,18 @@ tolerance and makes the two checks agree at the `[0.2, 1.0]` clamp boundaries
 by construction rather than by inspection; a strict reimplementation would
 refuse a contact one ULP low and vanish a support that prints fine today.
 
+**The allowance anchor is the registered `X_ALLOWED`.** There is exactly one
+registered area-ratio allowance in this engine: the Derived evidence constant
+`X_ALLOWED = floor(lower(X_STAR_CONE)/2) = 12`, chained `from = ["X_STAR_CONE"]`
+(`crates/plinth-core/src/constants/evidence.rs`). PR-4 reads THAT entry. An
+earlier revision of this package registered a second, hand-typed
+`CONTACT_AREA_RATIO_ALLOWED = 12.0` Placeholder carrying the same number; that
+duplicate has been **deleted**. A duplicate is not a redundancy but a
+divergence hazard — a future plate recalibration would move `X_STAR_CONE` and
+`X_ALLOWED` with it while the hand-typed contact threshold silently stayed at
+the stale 12. The registry is back to **212 constants (192 placeholders)** and
+the one-sided engine-vs-allowance gate now reads `X_ALLOWED`.
+
 **`X = 12` is the H2 engineering allowance.** The engine's implied ratio
 `tensile_green_pa / (peel_pressure_pa * tip_safety_factor) = 12` is an internal
 CONSISTENCY identity — a function of the arbitrary Python-era

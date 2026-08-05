@@ -264,6 +264,17 @@ pub(crate) fn mask_extent_mm(
 /// `X = tensile_green_pa / (peel_pressure_pa * tip_safety_factor) = 12`,
 /// carrying the engine's 1e-6 tolerance on the realized safety factor.
 ///
+/// THE ALLOWANCE ANCHOR IS THE REGISTERED `X_ALLOWED`.  The H2 area-ratio
+/// allowance is already in the M0 registry as the Derived evidence constant
+/// `X_ALLOWED = floor(lower(X_STAR_CONE)/2) = 12`, chained from the measured
+/// plate interval (`constants/evidence.rs`).  This module deliberately does NOT
+/// re-declare that number as a second, hand-typed placeholder: a duplicate
+/// would let a plate recalibration move `X_STAR_CONE` while the contact
+/// threshold silently stayed at the stale hand-typed value.  The one-sided
+/// engine-vs-allowance relationship is asserted against `X_ALLOWED` in
+/// `crates/plinth-core/tests/constants_placeholders.rs`
+/// (`engine_implied_tip_area_ratio_does_not_exceed_the_h2_allowance`).
+///
 /// Delegation is deliberate (not a duplicated inequality): a strict
 /// reimplementation would refuse a contact one ULP low and vanish a support
 /// that prints fine today, and it would have to re-derive the `[0.2, 1.0]`
