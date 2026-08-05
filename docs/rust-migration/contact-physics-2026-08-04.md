@@ -384,14 +384,21 @@ Everything else reproduces exactly:
 * the CCO tournament totals (51 plate, 54 bifurcate, 0 model anchor) —
   `T6_commits` summed over the four reachable models.
 
-**One figure in this record is NOT census-derived and cannot be checked against
-it**: the "refused 22 of 32 reachable corpus contacts" measurement in PR-8
-design call 1. That number was produced by an implementation variant that was
-measured and then DISCARDED (the placement-depth-less-a-margin extent), so the
-committed census — which instruments only the landed rule — has no
-corresponding counter. It is retained as a narrative record of why the extent is
-one process resolution, not as a reproducible measurement. See the finisher's
-open question OQ-11.
+**One figure in this record was NOT census-derived and could not be checked
+against it, and it has now been STRUCK**: the "refused 22 of 32 reachable corpus
+contacts" measurement in PR-8 design call 1. That number was produced by an
+implementation variant that was measured and then DISCARDED (the
+placement-depth-less-a-margin extent), so the committed census — which
+instruments only the landed rule — has no corresponding counter.
+
+OQ-11 asked whether to re-measure it or strike it. **Ruled: struck.** The
+standard this section applies to every other figure is that the instrument must
+be able to reproduce it; a number that survives only because it is narrative is
+the exact thing this audit exists to catch, and re-deriving it would mean
+re-landing and re-instrumenting a variant that was discarded on purpose. The
+geometric argument it illustrated — `r^2/2R` rim shallowing on a convex seat —
+is unaffected and is retained, because it is what the design call rests on. The
+strike is recorded in place at the design call rather than silently deleted.
 
 ---
 
@@ -465,11 +472,24 @@ finding it deleted supports that print.
 
 1. **The attested extent is ONE PROCESS RESOLUTION, not the placement depth
    less a margin.** The latter (`0.3 - 0.05 = 0.25` mm) was implemented and
-   measured: it refused **22 of 32** reachable corpus contacts. Those refusals
-   were geometry, not defects — a disc of radius `r` pressed into a convex
-   surface of radius `R` has its RIM sitting `r^2/(2R)` shallower than its
-   centre, so on the Sphere the outer rays reached 0.2308–0.2497 mm against a
-   0.25 mm demand. Demanding placement depth of every rim ray conflates
+   measured, and it refused reachable corpus contacts that print today.
+
+   > **The count that stood here has been STRUCK (OQ-11, ruled).** This section
+   > previously cited "refused 22 of 32 reachable corpus contacts". That
+   > measurement came from an implementation variant that was measured and then
+   > DISCARDED, so the committed census — which instruments only the landed rule
+   > — carries no counter for it and it cannot be checked against a live run. By
+   > this record's own record-integrity standard (see *Record-integrity audit
+   > against the committed census*), a figure the instrument cannot reproduce is
+   > not a figure this record may assert. The **geometric argument stands on its
+   > own** and is what the design call actually rests on; only the unverifiable
+   > count is withdrawn.
+
+   Those refusals were geometry, not defects — a disc of radius `r` pressed into
+   a convex surface of radius `R` has its RIM sitting `r^2/(2R)` shallower than
+   its centre, so on a convex seat the outer rays fall measurably short of a
+   demand set at the placement depth while the contact is perfectly sound.
+   Demanding placement depth of every rim ray conflates
    attestation with the MASK-VALIDITY proof. Those are different questions:
    a mask tells the distance check to ignore an extent, so any ray leaving the
    solid inside it is geometry that then goes unchecked, and
@@ -729,9 +749,9 @@ decision this stage makes:**
 | verdict | disposition | why |
 | --- | --- | --- |
 | OD-9 `BuriedSurface` | **REFUSE** → the existing `AnchorFootOutcome::Refused` channel | burial is a statement about the SURFACE and is true whatever the seating rule is |
-| PR-8 `NotAttached` | **RECORD**, digested, not refused | it is a statement about the SEATING RULE, and this family is deliberately unseated because PR-7 is not landed |
+| PR-8 `NotAttached` | **RECORD** during candidacy, digested; **ENFORCE at commit** (tripwire) | it is a statement about the SEATING RULE, and this family is deliberately unseated because PR-7 is not landed — but a WINNER is no longer a measurement |
 
-Refusing an unseated anchor for failing a connectivity witness would land PR-7's
+Refusing an unseated anchor **while it is still a candidate** would land PR-7's
 family-killing consequence **without landing PR-7** — a family-killing
 restriction arriving as an ACCIDENT of a verification change rather than as a
 designed, measured physics rule. That is what OD-8 forbids, it is the same
@@ -739,6 +759,48 @@ mistake BLOCKER-3 was raised for one rule earlier, and PR-7's revival is
 explicitly reserved to the owner under OQ-10. It is also the same disposition,
 for the same reason, that PR-8 already gives an area deficit: measured,
 digested, referred to the owner.
+
+#### The tripwire — recorded during candidacy, enforced at commit
+
+Recording is honest for a CANDIDATE, because a candidate that loses never
+becomes geometry. A candidate that WINS is a different object: it is one
+statement away from being a printed strut whose model end reached nothing at
+all, and "the record says we measured it" is not an acceptable answer for a
+support that is about to be printed attached to nothing.
+
+So the asymmetry above stands, **with a commit-time guard**. At each point a CCO
+model-anchor candidate wins its tournament and would enter the forest, a winner
+whose seat attested `NotAttached` is REFUSED through the family's existing
+refusal channel instead of committed:
+
+| winner-commit point | gate | refusal channel |
+| --- | --- | --- |
+| terminal growth (`cco::grow_terminal_inner`, immediately above the `cco_winner_model_anchor` census counter and `apply_and_size`) | `elect_committable_winner` | `AnchorFootOutcome::Refused` carrying `AnchorFootRefusalReason::SeatNotAttached` |
+| rewire (`rewire::try_reattach`, the index it replays and splices) | `RewireCandidateBatch::winning_generation_index` | `RewireCandidateRefusalReason::AnchorFoot(SeatNotAttached)` |
+
+Both behave exactly as a breached foot ball does: the candidate leaves the
+tournament, the next survivor is considered, the terminal or the reattachment
+routes some other way, and nothing hard-fails (OD-4/PR-9). The refused winner
+also loses its `ValidatedModelAnchor` capability, so it cannot be committed by a
+later caller either. The new refusal reason is an APPENDED digest discriminant
+(8), so no existing transcript moves.
+
+**This guard is unreachable on today's corpus** — the family never wins a
+tournament, on either path, so the measured delta is zero. It is reached
+synthetically by
+`a_winning_but_unattested_model_anchor_is_refused_rather_than_committed` (the
+frozen three-candidate tournament in which the model anchor is genuinely
+cheapest, with a genuine validated anchor; the only forged input is the witness
+verdict) and by
+`a_winning_but_unattested_rewire_model_anchor_is_refused_rather_than_replayed`
+(the `near_anchor_fixture` batch, where nothing is forged: that seat really does
+attest `NotAttached`). Both call sites are pinned in
+`contact_regression_gate.rs`, for the same reason the rest of that gate exists —
+a rule the corpus cannot exercise needs a guard that does not depend on the
+corpus exercising it.
+
+**When PR-7 seats this family, the witness refuses at candidacy like the other
+families and this guard becomes unreachable.**
 
 **That call is now evidence rather than a hedge.** The measurement is the answer
 OQ-10 was missing:
@@ -870,14 +932,17 @@ stamps a global contact depth.
   seating (scar the mini deliberately, with a proven interface), or leave it
   dead. What is no longer available is reviving it unseated.
 
-* **OQ-11 — one narrative figure in this record is unreproducible.** PR-8's
-  first design call cites "refused 22 of 32 reachable corpus contacts" for the
+* **OQ-11 — RULED AND CLOSED: the unreproducible figure is struck.** PR-8's
+  first design call cited "refused 22 of 32 reachable corpus contacts" for the
   DISCARDED placement-depth-less-a-margin extent. That variant was never
   instrumented, so the committed census has no counter for it and the figure
-  cannot be checked (see *Record-integrity audit*). Should the next pass
-  re-measure it — the variant is a two-line change to the claimed extent — or
-  strike the number and keep only the geometric argument, which stands on its
-  own (`r^2 / 2R` rim shallowing on a convex seat)?
+  could not be checked (see *Record-integrity audit*). The owner's ruling is to
+  **strike the number and keep the geometric argument**, which stands on its own
+  (`r^2 / 2R` rim shallowing on a convex seat): a figure the instrument cannot
+  reproduce is not one this record may assert, which is this record's own
+  record-integrity standard applied to itself. The strike is recorded in place at
+  the design call and in the audit section, not silently deleted, so the reason
+  the extent is one process resolution remains legible.
 
 **Follow-ups recorded:** FU-CONTACT-1 (the `tip_radius_max_legacy_mm` clamp is
 the real limit on the largest-tip contacts, not a contact defect — now

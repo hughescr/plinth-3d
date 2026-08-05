@@ -430,12 +430,17 @@ pub(crate) fn build_initial_contacts(
     // the depth the kernel is asked to confirm rather than to the depth the
     // stub is placed at).
     //
-    // It is deliberately NOT the placement depth less a margin. That was
-    // measured and refused 22 of 32 reachable corpus contacts, and the refusals
-    // were geometry, not defects: a disc of radius `r` pressed into a convex
-    // surface of radius `R` has its RIM sitting `r^2/(2R)` shallower than its
-    // centre, so on the Sphere the outer rays reached 0.2308-0.2497 mm against
-    // a 0.25 mm demand. Demanding placement depth of every rim ray conflates
+    // It is deliberately NOT the placement depth less a margin. That variant was
+    // implemented, measured and DISCARDED because it refused reachable corpus
+    // contacts that print today, and the refusals were geometry, not defects: a
+    // disc of radius `r` pressed into a convex surface of radius `R` has its RIM
+    // sitting `r^2/(2R)` shallower than its centre, so on a convex seat the outer
+    // rays fall short of a demand set at the placement depth while the contact is
+    // perfectly sound. (The refusal COUNT that used to stand here is struck under
+    // OQ-11: the discarded variant was never instrumented, so the committed
+    // census cannot reproduce the number. The geometric argument, which is what
+    // this call rests on, is unaffected.) Demanding placement depth of every rim
+    // ray conflates
     // attestation with the mask-validity proof, which is a different question
     // and legitimately does demand totality (see `validate_members_batch`).
     // What the shallow rim actually costs is AREA, and that is measured and
