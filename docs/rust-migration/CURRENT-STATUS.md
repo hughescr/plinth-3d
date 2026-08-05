@@ -20,11 +20,21 @@ The integration authority is the clean worktree
 `/private/tmp/plinth-3d-pipeline-integration` on branch
 `codex/rust-pipeline-integration`.
 
-The current reviewed integration HEAD is `a3c7f6464dd219da7b7628183e96c740d5e194d6`
-(`merge: embed-zones Phase B safe groundwork (EmbedEnd->ContactEnd rename; package BLOCKED
-pending owner rulings)`), reached by the **second 2026-08-04 integration pass** from
-`1673a1628b1af04ec180fc204db84675eec8fc10`, plus the embed-zones Phase B safe-groundwork
-merge described below:
+The current reviewed integration HEAD is `1b6f2e47270de4373763d41b1d3f423078b50eee`
+(`fix(support): coalescing continues the shared merge-iteration budget`). It was reached
+from `a3c7f6464dd219da7b7628183e96c740d5e194d6` (embed-zones Phase B safe groundwork,
+itself reached by the second 2026-08-04 integration pass described below) via three
+docs-only commits recording the embed-zones stop-by-design outcome and owner rulings
+OD-8/OD-9 (`8756a65`, `dec7152`, `ff96774`), then the **corpus defect fixes merge**
+`65582556d2b748b8467a7cd651e3bb4eca659e56` (baselines data repair, terminal
+exact-coincident seat coalescing, perception unowned-hole fallback — merged from
+`codex/corpus-defect-fixes` off `dec7152`) and the reviewer-mandated follow-up fix
+`1b6f2e4` (shared whole-consolidate merge-iteration budget). See *Corpus defect fixes
+landed (2026-08-04, late)* below for full evidence.
+
+The second-2026-08-04-integration-pass table below records how `a3c7f64` itself was
+reached, from `1673a1628b1af04ec180fc204db84675eec8fc10`, plus the embed-zones Phase B
+safe-groundwork merge:
 
 | Commit | What |
 | --- | --- |
@@ -34,13 +44,18 @@ merge described below:
 | `029ced3f97ccebb8ba6593efba2d732493c3c625` | `refactor(support): rename EmbedEnd to ContactEnd` from `codex/embed-zones` — safe groundwork only; see *Embed-zones Phase B outcome (2026-08-04)* |
 | `a3c7f6464dd219da7b7628183e96c740d5e194d6` | merge of the rename above — `merge: embed-zones Phase B safe groundwork` |
 
-The full gate is **green** at `a3c7f64`: `cargo test --workspace --offline` **889 passed /
+The full gate was **green** at `a3c7f64`: `cargo test --workspace --offline` **889 passed /
 0 failed**; clippy `-D warnings` clean; `cargo fmt --all -- --check` clean; `git diff --check`
 clean. (Full gate was previously green at `c6a0884` with 877 passed; the higher count is
 the embed-zones Phase A test surface — including `designed_embed.rs`'s own suite — entering
-the workspace via the `e64f0ba` merge, not new tests from the rename itself.) This is the
+the workspace via the `e64f0ba` merge, not new tests from the rename itself.) That was the
 first pass in which the workspace gate was fully green — the frozen coverage golden was
 regenerated in the `1673a16` lineage, so it no longer masks regressions.
+
+The full gate is **green again** at the current head `1b6f2e4`: `cargo test --workspace
+--offline --no-fail-fast` **903 passed / 0 failed**; clippy `-D warnings` clean; `cargo fmt
+--all -- --check` clean; `git diff --check` clean. See *Corpus defect fixes landed
+(2026-08-04, late)* below for what moved between these two green gates.
 
 Earlier ancestry still holds: the canonical-delicacy merge
 `240d144e264cbe9ba27d45f6ff0194eb83a36ced`, the independently accepted SCAR remediation
@@ -360,6 +375,55 @@ base):
 The format and coverage rows are evidence for those slices only. They do not mean the
 whole M7 gate has passed.
 
+## Corpus defect fixes landed (2026-08-04, late) {#corpus-fixes-2026-08-04}
+
+Merged to integration as `65582556d2b748b8467a7cd651e3bb4eca659e56` (`merge: corpus defect
+fixes - baselines, seat coalescing, treant seam fallback (7 of 8 models reach sealed
+support runs)`), the SHA-verified tip of `codex/corpus-defect-fixes` (`4a9bc37`, based on
+`dec7152`; merge was zero-conflict), plus the reviewer-mandated follow-up fix
+`1b6f2e47270de4373763d41b1d3f423078b50eee` (`fix(support): coalescing continues the shared
+merge-iteration budget`).
+
+### Three fixes
+
+1. **Baselines data repair + orient reader + machine-provable rederivation gate.** Fixes
+   the two identity-orientation baseline records to be explicit and provable, and a failed
+   hollow stage now carries its ratified orientation forward rather than losing it. Adds a
+   machine-provable rederivation gate: residuals `<= 3.9e-6 mm` across all four artifact
+   models.
+2. **Terminal exact-coincident seat coalescing.** Unions exactly-coincident demand-free
+   regular seats that the existing merge machinery could not reach (`attach_exact_mixed_contacts`
+   only pairs regular against specialized; the gated tournament refuses demand-free pairs
+   outright), preventing a spurious `DuplicatePhysicalSeat`. Reported through a new
+   `coalesced_seat_count` evidence field on `SpecializedGateEvidence`, deliberately excluded
+   from the plan digest to keep already-covered fixtures byte-identical.
+3. **Perception unowned-hole non-fatal fallback.** An unclaimable slice hole is now treated
+   as survivable rather than a fatal open seam, with the perception error type split into
+   distinct variants so the non-fatal and fatal cases are no longer conflated.
+
+### Reviewer-measured reachability: 7 of 8 corpus models (was 3 of 8)
+
+Before this merge, 3 of the 8 corpus models completed a sealed support run under their own
+ratified orientation. After, **7 of 8** do:
+
+- **Sphere, make_overhang_table, make_thin_fin** — byte-identical digests (unaffected,
+  confirming no regression).
+- **Cylinder, make_box** — unblocked on native identity orientation.
+- **make_toed_slab, make_raking_blade** — now go through specialized and sealed
+  end-to-end.
+- **Weeping Treant** — now gets past perception, and is stopped by the kNN resource cap:
+  `KnnBatchLimits.max_work = 100_000_000` against a required `298_667_520`. The
+  `CandidateSurfaceGridLimit` (`67_108_864`) and the Specialized `GateOperationLimit`
+  (`2_000_000_000`) caps sit behind that same wall and have not yet been exercised.
+
+### Provisional freeze: make_toed_slab
+
+Containment-probe hardening was **deliberately deferred mid-implementation** because it
+moves the `make_toed_slab` digest (member count `72 -> 42`): the stop-on-digest-movement
+rule took priority over the ship-it instruction. Consequently the `make_toed_slab`
+required-table freeze (digest `11_859_964_443_161_510_103`) is **PROVISIONAL**, pending the
+parity investigation (vertex vs. interior probe) recorded as a follow-up below.
+
 ## Owner architecture decision {#owner-architecture-2026-08-03}
 
 The owner approved this binding clearance-mask architecture on 2026-08-03:
@@ -449,7 +513,7 @@ the owner's untagged-deletion decision.
 | Worktree/branch | Observed head | State |
 | --- | --- | --- |
 | `/Users/craig/code/hughescr/dnd-campaigns/plinth-3d`, `master` | `5e37d8c` | main checkout and ref store; strict ancestor of integration |
-| `/private/tmp/plinth-3d-pipeline-integration`, `codex/rust-pipeline-integration` | `a3c7f64` | clean; integration authority. Full gate green (889 tests, clippy/fmt/diff clean) |
+| `/private/tmp/plinth-3d-pipeline-integration`, `codex/rust-pipeline-integration` | `1b6f2e4` | clean; integration authority. Full gate green (903 tests, clippy/fmt/diff clean) |
 | `/private/tmp/plinth-embed-zones`, `codex/embed-zones` (worktree now on `census/embed-incidence-2026-08-04`) | `029ced3` | Phase B stopped by design; safe groundwork (rename) merged to integration as `a3c7f64`; package BLOCKED on OQ-1..OQ-7; incidence census running — see *Embed-zones Phase B outcome (2026-08-04)* |
 | `/private/tmp/plinth-home-calibration-plate`, `codex/home-calibration-plate` | `1541379` | accepted branch-only; plate and loading-fixture generator authority |
 | `/private/tmp/plinth-chitubox-preview`, `codex/chitubox-native-preview` | `9ffc829` | only live carrier of the unlanded embed-native-preview fallback; cherry-pick onto integration |
@@ -486,6 +550,16 @@ should be scheduled deliberately.
 | FU-4 | Commit a corpus provisioning script, or make the corpus-dependent targets loud-skip | Today a bare checkout hard-fails two test targets with no explanation. See `corpus-provisioning.md`. |
 | FU-5 | Pin the `scar.rs` duplicate registry-reader (`crates/plinth-metrics/src/scar.rs:183-186`) the way the new delicacy M0 test pins the `plinth-mesh` reader | The duplication is now documented in the delicacy test comment but is still unpinned on the `plinth-metrics` side. |
 | FU-6 | `chitubox-native-preview` fix `9ffc829` still awaits review and cherry-pick | Sole live carrier of the unlanded embed-native-preview fallback. |
+| FU-7 | `make_toed_slab` parity investigation (vertex vs. interior containment probe) | The digest-moving containment-probe hardening was deferred; the current `make_toed_slab` required-table freeze (digest `11_859_964_443_161_510_103`) is PROVISIONAL until this lands. See *Corpus defect fixes landed (2026-08-04, late)*. |
+| FU-8 | Treant resource caps defect — "production caps do not admit a real mini" | `KnnBatchLimits.max_work` (`100_000_000` vs. required `298_667_520`), `CandidateSurfaceGridLimit` (`67_108_864`), and Specialized `GateOperationLimit` (`2_000_000_000`) all need measurement-based raises before the Weeping Treant can clear the support stages behind perception. |
+| FU-9 | Hollow EDT margin defect | `grid_spec_from_bounds`'s no-padding path plus its all-foreground special case fabricate a distance ramp; the committed Sphere hollow goldens are wrong today. Est 8/16 pts; regenerates four `plinth-hollow` oracles. |
+| FU-10 | Per-layer polygon union under a fill rule | Owner-endorsed; supersedes the Tier-1 fallback. Candidate nomination must consume normalized layers per OD-9. |
+| FU-11 | Opt-in SDF/remesh repair mode | Roadmap item. |
+| FU-12 | Census doc erratum | The Reachability table is stale: the `make_box` measurement rows were computed under a borrowed -30deg pose and are invalid. Revise after the census branch reunites at the Phase B-2 merge. |
+| FU-13 | `DuplicatePhysicalSeat` error payload should carry position+routes instead of post-sort indices | Fold into any future `SpecializedError` change. |
+| FU-14 | `coalesced_seat_count` is deliberately NOT in the plan digest | Kept fixtures byte-identical. Fold it in at the next authorized digest-moving change. |
+| FU-15 | Corpus-gated end-to-end test tier, with loud skip for gitignored STLs | So the Cylinder and `make_box` sealed runs (digests `13310185350867878190` / `9657051231007502658`), currently test-uncovered, get pinned. |
+| FU-16 | Measure the bbox-claimed vs. discarded unowned-hole split on the treant once caps lift | bbox claiming can under-report a solid's area; the Tier 2 union supersedes it. |
 
 ## Ordered resumption checklist
 
