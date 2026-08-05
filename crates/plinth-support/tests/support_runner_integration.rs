@@ -67,6 +67,36 @@ fn hollowed_corpus_model(mesh: Mesh, baseline: &str) -> HollowedModel {
 /// survived to canonicalization and failed the whole sealed run closed with
 /// `DuplicatePhysicalSeat`, so neither model could reach brace, CCO, or
 /// rewiring at all.
+///
+/// **The tuples were re-pinned on 2026-08-05, and the whole movement is one
+/// rule.** They were first frozen by the corpus-fixes work, which unblocked
+/// these two models BEFORE the contact-physics package existed, so that
+/// package's zero-delta attestation never covered them. Post-merge:
+/// `make_toed_slab` 65/184 -> 64/179 and `make_raking_blade` 35/93 -> 32/89.
+///
+/// Every unit of that delta is PR-8 `NotAttached` quarantining FOUR stubs whose
+/// model contact has no renderable interface
+/// (`docs/rust-migration/contact-physics-2026-08-04.md`, PR-8 / OD-4).
+/// Measured against the run's 0.05 mm process resolution by the attestation
+/// witness (centreline false, 0 of 8 rim rays) and independently by a parity
+/// sweep along the contact normal at 0.0025 mm:
+///
+/// | model | contact | routed load | material behind the seat |
+/// | --- | --- | ---: | --- |
+/// | toed_slab | 68 | 0.000 mm^2 | none in [-0.01, +0.39] mm; tip 0.265 mm clear |
+/// | raking_blade | 7 | 0.060 mm^2 | 0.0275 mm skin; tip 0.152 mm clear beyond it |
+/// | raking_blade | 12 | 0.000 mm^2 | 0.0275 mm skin; body starts 0.03 mm past the tip |
+/// | raking_blade | 13 | 0.000 mm^2 | tip enters the body 0.025 mm, half a layer |
+///
+/// The other seven attestation refusals on these models (five OD-9
+/// `BuriedSurface` on `toed_slab`, two more `NotAttached` on `raking_blade`)
+/// contribute ZERO, because the pre-existing initial-overlap cutoff already
+/// condemned those same stubs. PR-3, the model-rung seat witness, PR-9 and the
+/// CCO model-anchor family fire exactly zero times on either model. Restoring
+/// only those four stubs reproduces the old tuples bit-for-bit, digests
+/// included, so nothing else in the package moved these models. The member
+/// counts move by more than the four stubs because CCO re-solves its tournament
+/// over the smaller contact set.
 #[test]
 fn public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing() {
     let mut failures = Vec::new();
@@ -74,16 +104,16 @@ fn public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing() {
         (
             "make_toed_slab",
             make_toed_slab().expect("procedural toed slab"),
-            65_usize,
-            184_usize,
-            15_554_091_706_332_339_621_u64,
+            64_usize,
+            179_usize,
+            4_826_202_191_472_851_835_u64,
         ),
         (
             "make_raking_blade",
             make_raking_blade().expect("procedural raking blade"),
-            35,
-            93,
-            6_761_406_004_527_881_770,
+            32,
+            89,
+            1_709_218_010_932_846_012,
         ),
     ] {
         let hollowed = hollowed_corpus_model(mesh, name);
