@@ -25,7 +25,9 @@ The current reviewed integration HEAD is the **contact-physics package merge**
 PR-1..9 (PR-7 deferred w/ tripwire), OD-1..9 discharged, attestation for all three
 families`), plus the 2026-08-05 commits that follow it: `6fe750b` (delete the census
 substitute-orient mechanism), `41f1801` (census erratum + first unified corpus census),
-and this docs update. See *Embed/contact package COMPLETE (2026-08-05)* below.
+and this docs update. See *Embed/contact package complete (2026-08-05)* below, and then
+*Post-merge interaction delta — ATTRIBUTED and re-pinned (2026-08-05, late)*, which is the
+closing pass and supersedes the red-gate section.
 
 `81ec3d4` was reached from `1b6f2e47270de4373763d41b1d3f423078b50eee`
 (`fix(support): coalescing continues the shared merge-iteration budget`), which was reached
@@ -431,10 +433,14 @@ rule took priority over the ship-it instruction. Consequently the `make_toed_sla
 required-table freeze (digest `11_859_964_443_161_510_103`) is **PROVISIONAL**, pending the
 parity investigation (vertex vs. interior probe) recorded as a follow-up below.
 
-## Embed/contact package COMPLETE (2026-08-05) {#contact-package-complete-2026-08-05}
+## Embed/contact package complete (2026-08-05) {#contact-package-complete-2026-08-05}
 
-**STATE: COMPLETE.** The embed-zones/contact-physics package that was BLOCKED on
-2026-08-04 (OQ-1..OQ-7) is closed. It merged to integration as
+**STATE: complete, with the post-merge interaction delta attributed below.** The
+embed-zones/contact-physics package that was BLOCKED on 2026-08-04 (OQ-1..OQ-7) is closed
+in scope, and the one behavioural difference the merge surfaced — on two models the package
+itself could never see — is measured, named and re-pinned in
+*Post-merge interaction delta — ATTRIBUTED and re-pinned (2026-08-05, late)*. Read that
+section before treating any claim here as final. It merged to integration as
 `81ec3d446f9429a5ca5cade6b957164f386134e5`. Its full design record is
 `docs/rust-migration/contact-physics-2026-08-04.md`; that file, not this section, is the
 normative account of the physics.
@@ -515,10 +521,14 @@ it**. Two models *did* move — see the next subsection. Full numbers:
 `docs/rust-migration/census-embed-incidence-2026-08-04.md`, section
 *Unified census — 2026-08-05*.
 
-### GATE IS RED at this head: two stale goldens {#stale-goldens-2026-08-05}
+### GATE WAS RED at this head: two stale goldens — SUPERSEDED {#stale-goldens-2026-08-05}
 
-`cargo test --workspace --offline --no-fail-fast` at this head is **939 passed / 1 failed**.
-The failure is `public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing`
+**SUPERSEDED 2026-08-05 (late) by *Post-merge interaction delta — ATTRIBUTED and
+re-pinned*.** Retained as the historical record of how the failure was first read; two
+claims in it are wrong and are corrected there. Do not read it as current state.
+
+`cargo test --workspace --offline --no-fail-fast` at that head was **939 passed / 1 failed**.
+The failure was `public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing`
 (`crates/plinth-support/tests/support_runner_integration.rs:130`):
 
 | model | pinned (pre-contact-physics) | now | delta |
@@ -529,19 +539,143 @@ The failure is `public_runner_seals_toed_slab_and_raking_blade_after_seat_coales
 This is **not a regression and not a surprise** — it is the known deferred re-pin. Those
 goldens were last written at `414e13f` (corpus-fixes era), i.e. in the window after those
 two models first became reachable but before contact physics existed, so they have never
-described the current engine. The two models are exactly the two carrying PR-9 contact
-refusals (`make_toed_slab` 6, `make_raking_blade` 5) and the only two with `min_rim = 0/8`;
-refusing contacts that cannot prove an interface, and rewiring what remains, is the intended
-OD-8 consequence.
+described the current engine.
+
+> **CORRECTED.** The sentence that stood here — "the two models are exactly the two carrying
+> PR-9 contact refusals (`make_toed_slab` 6, `make_raking_blade` 5)" — misnames the rule.
+> **PR-9 fires zero times on either model.** Those 6 and 5 are PR-8/OD-9 *attestation*
+> refusals in `initial.rs`, a different rule with a different disposition. The correct
+> attribution is below.
 
 Re-pinning is a digest-moving change and needed this census as its evidence, so it was left
-for a deliberate pass (FU-19). **Do not re-pin without recording the delta above**, and
-prefer to settle the `make_toed_slab` parity investigation (FU-7) first, or that model's pin
-will have to be redone.
+for a deliberate pass (FU-19).
 
-Until FU-19 lands, "COMPLETE" for this package means *scope complete with a recorded,
-explained red gate* — it does not mean the workspace gate is green. Treat FU-19 and FU-18
-as the conditions for a clean gate.
+## Post-merge interaction delta — ATTRIBUTED and re-pinned (2026-08-05, late) {#post-merge-delta-2026-08-05}
+
+This is the closing pass on the contact-physics merge. It discharges FU-18, FU-19 and
+FU-20, corrects the misattribution above, and records the two process rules the episode
+put in force.
+
+### Why the package's zero-delta claim never covered these two models
+
+`make_toed_slab` and `make_raking_blade` were UNREACHABLE on `codex/embed-zones` — blocked
+upstream at specialized/perception — for the entire life of that branch. Every "MEASURED
+CORPUS DELTA — ZERO" statement in `contact-physics-2026-08-04.md` was measured over the four
+models that *were* reachable there. The **corpus defect fixes** unblocked these two, and
+froze their seal tuples at `414e13f`, in a tree that had no contact physics in it. The two
+efforts were never in the same tree until merge `81ec3d4`, so the interaction could not have
+been measured before it. Nothing was missed; the intersection did not exist to measure.
+
+### Attribution: one rule, four contacts
+
+Under OD-8 a golden is not re-pinned until every missing member is attributed. Every unit of
+the delta is **PR-8 `NotAttached`** quarantining four initial-contact stubs. `NotAttached`
+fires only when nothing at all is engaged — centreline false AND 0 of 8 rim rays reaching
+one process resolution (0.05 mm) contiguously from the tip end. All four measure exactly
+that. An independent parity sweep along the contact normal at 0.0025 mm confirms the
+witness rather than restating it (`t` measured inward from the seat; the tip sits at
+`t = 0.30`):
+
+| model | contact | routed load | solid along the normal | verdict |
+| --- | --- | ---: | --- | --- |
+| `make_toed_slab` | 68 | 0.000 mm² | none in `[-0.01, +0.39]`; tip 0.265025200 mm clear of the nearest surface | PR-8 `NotAttached` |
+| `make_raking_blade` | 7 | 0.060 mm² | `[0.0025, 0.0300)` only — a 0.0275 mm skin; tip 0.151863225 mm clear beyond it | PR-8 `NotAttached` |
+| `make_raking_blade` | 12 | 0.000 mm² | 0.0275 mm skin at the seat, then void; body resumes at `t = 0.3300`, 0.03 mm past the tip | PR-8 `NotAttached` |
+| `make_raking_blade` | 13 | 0.000 mm² | 0.03 mm skin at the seat; body resumes at `t = 0.2750`, so the tip enters it by 0.025 mm | PR-8 `NotAttached` |
+
+Combined routed demand deleted: **0.060 mm²**, three of the four carrying none at all.
+PR-1(a)'s own argument governs the disposition: a fused region thinner than one layer is
+not resolvable by the printer, so there is no interface for PR-4's area law to grade and
+nothing to keep. Each refusal is inside PR-8's stated scope and each measured value
+genuinely violates its bound.
+
+### The other seven refusals contribute ZERO
+
+Eleven attestation refusals fire across the two models; seven land on stubs the pre-existing
+initial-overlap cutoff already condemned, so they move nothing:
+
+- `make_toed_slab` **#22 #26 #31 #59 #62 — OD-9 `BuriedSurface`.** The probe one process
+  resolution OUTWARD tests INSIDE, and the parity sweep is solid continuously from
+  `t = -0.01` through `t = +0.39`. Their connectivity evidence is **perfect** (8/8 rim rays
+  plus centreline, `r_eff` = the full 0.200 mm) — the exact trap OD-9 exists to catch, seen
+  on real corpus geometry for the first time rather than on the synthetic fixture. All five
+  also carry overlap 0.444907426 .. 2.500000000 mm against a 0.050000000 mm cutoff.
+- `make_raking_blade` **#8 #21 — `NotAttached`**, overlap 2.118262048 and 2.432244414 mm.
+
+### No other rule in the package fires here
+
+Measured on both models, not assumed:
+
+| rule | occurrences |
+| --- | ---: |
+| PR-3 incidence admissibility (`contact::admit` on rung candidates) | **0** — no rung candidate is generated at all |
+| brace model-rung seat witness (F3) | **0** rows |
+| PR-9 contact-clearance refusal / pipeline violation | **0** / **0** |
+| CCO model anchor, incl. the PR-7 commit-time tripwire | **0** — `T2_cco_anchor_attempted = 0` |
+
+### The control that closes the attribution
+
+Suppressing **only** the attestation-refusal quarantine — leaving the attestation itself,
+its digest, every other rule and every other stage untouched — reproduces both frozen tuples
+**bit-for-bit, digests included**. That is what licenses the re-pin: the delta is that one
+rule and nothing else, so no missing member is unaccounted for.
+
+The member counts fall by more than the four stubs (-5 and -4 against -1 and -3 contacts)
+because CCO re-solves its tournament over the smaller contact set: on `make_toed_slab`,
+Stub 65→64, Shoot 61→55, Trunk 57→58, Brace 0→1. **Zero contacts are ADDED** on either
+model, so the movement is a re-solve, not a substitution.
+
+Re-pinned at `f77dfe1`; the attribution above is reproduced in that commit message and in
+the test's own doc comment, so a future reader does not have to come here for it.
+
+### Instrument note: the census and the seal test are NOT interchangeable
+
+The census example reports `make_toed_slab` digest `11199296506741562956` while the seal
+test computes `4826202191472851835` for the same `(64 routed, 179 live)`. **The cause is the
+mesh source, not the layer plan** — the layer-plan hypothesis was tested and is false. Both
+build the identical `LayerPlan::new(0.0, vec![0.05; 1000])` (the census's
+`max(ceil(span/pitch), 1000)` evaluates to 1000 on both models and its `MODEL` row prints
+`layers=1000`). The seal test uses the **procedural** `make_toed_slab()` mesh in f64; the
+census loads **`corpus/models/make_toed_slab.stl`**, a binary STL, whose coordinates are
+f32. Measured: identical topology and triangle order (140 and 24 triangles), 740 of 1260 and
+144 of 216 coordinates bit-identical, max |Δ| **4.35e-7 mm** and **2.98e-7 mm**, and
+`f64::from(procedural as f32) == stl` for **every** coordinate. Feeding the STL mesh through
+the seal test's own code path reproduces the census digests exactly
+(`11199296506741562956`, `13278215294653054002`), which isolates the mesh as the only
+variable.
+
+Sub-micron coordinate differences move a bit-exact geometry digest, and here they also move
+a member count: on the pre-refusal baseline the STL-sourced run yields `make_toed_slab`
+live=181 against the procedural 184. **So the two instruments agree on physics and disagree
+on bits by construction.** Compare census-to-census and seal-test-to-seal-test; never read a
+digest from one against the other and conclude a regression.
+
+### Two process rules now in force
+
+1. **`cargo fmt --all -- --check` is part of every gate run.** The four inherited violations
+   (FU-18) reached the integration branch because the embed work's gate set was four
+   commands, not five. The gate set is: `cargo test --workspace --offline --no-fail-fast`;
+   the same with `--all-features`; `cargo clippy --workspace --all-targets --all-features
+   --offline -- -D warnings`; `cargo fmt --all -- --check`; `git diff --check`.
+2. **Tests always run with `--no-fail-fast`.** A bare `cargo test` stops at the first failing
+   target and under-reports the total, which is how a single red integration test can be
+   mistaken for a smaller or larger problem than it is. Every count quoted in this file is a
+   `--no-fail-fast` count.
+
+### Task-tracker cross-reference: the `make_toed_slab` freeze is still PROVISIONAL
+
+FU-7 (`make_toed_slab` parity investigation, vertex-probe vs interior-probe) is **not**
+settled by this pass and the model's required-table freeze stays **PROVISIONAL** — now on
+this new baseline. The seal tuple re-pinned here (`64 / 179 / 4826202191472851835`) will
+move again when FU-7 lands, and that is expected, not a regression. Nothing in this pass
+touched the containment probe.
+
+Note the adjacency without conflating them: the PR-8 refusals attributed above were reached
+through the *attestation* witness (`penetration_intervals_batch_bounded`), and the OD-9
+screen through `inside`. Both agreed with the independent parity sweep at every one of the
+eleven refused seats, including `make_raking_blade` #13 where the tip point tests inside
+while the interface is only 0.025 mm deep. That is evidence about these seats, not a
+resolution of FU-7, which is about a different probe on a different question.
 
 ### Area deficits: RECORDED as data, not adjudicated
 
@@ -553,13 +687,13 @@ model reaching CCO when it was taken; the corpus figures are larger purely becau
 `Cylinder` and `make_box` now reach the CCO stage natively. No rule changed, the denominator
 did. OQ-8 is the owner question these numbers feed.
 
-### Known hygiene debt at this head
+### Known hygiene debt at this head — CLEARED
 
-Four `rustfmt` violations inherited from the embed tip remain in `plinth-support`
-(`cco.rs:1425`, `cco.rs:2485`, `census.rs:852`, `designed_embed.rs:788`). They are
-formatting-only and were not introduced by the 2026-08-05 census work, but
-`cargo fmt --all -- --check` is **red** at this head until they are fixed. Recorded as
-FU-18.
+Four `rustfmt` violations inherited from the embed tip were in `plinth-support`
+(`cco.rs:1425`, `cco.rs:2485`, `census.rs:852`, `designed_embed.rs:788`). They were
+formatting-only and were not introduced by the 2026-08-05 census work.
+**Fixed at `cf2c2ab` (`cargo fmt --all`), FU-18 resolved**; the diff is those four sites and
+nothing else. See process rule 1 in *Post-merge interaction delta* for why they got through.
 
 ## Owner architecture decision {#owner-architecture-2026-08-03}
 
@@ -619,7 +753,7 @@ via merge `240d144`; see the *2026-08-04 integration pass* table above.
 | grounded calibration artifacts | `codex/home-calibration-plate` at `/private/tmp/plinth-home-calibration-plate` | `634abdb`, `1541379` | **ACCEPT** and owner GUI-checked | Branch-only; independently review the two-commit series and its base before cherry-picking. |
 The endpoint-connected-embed-zones row was **removed** on 2026-08-05: that package is now
 **INTEGRATED and COMPLETE** as merge `81ec3d4`, and the census work it spawned is
-integrated with it. See *Embed/contact package COMPLETE (2026-08-05)*. Both
+integrated with it. See *Embed/contact package complete (2026-08-05)*. Both
 `codex/embed-zones` (`dd505aa`) and `census/embed-incidence-2026-08-04` (`50b325c`) are
 **fully contained** in the integration head — verified with
 `git merge-base --is-ancestor <branch> HEAD` for each — so both are cleared for retirement.
@@ -658,9 +792,9 @@ the owner's untagged-deletion decision.
 | Worktree/branch | Observed head | State |
 | --- | --- | --- |
 | `/Users/craig/code/hughescr/dnd-campaigns/plinth-3d`, `master` | `5e37d8c` | main checkout and ref store; strict ancestor of integration |
-| `/private/tmp/plinth-3d-pipeline-integration`, `codex/rust-pipeline-integration` | 2026-08-05 docs head | clean; integration authority. **Gate RED**: 939 tests passed / 1 failed (two stale goldens, FU-19), `cargo fmt --all -- --check` red (4 violations, FU-18). Clippy clean. See *GATE IS RED at this head* |
-| `/private/tmp/plinth-embed-zones`, `codex/embed-zones` | `dd505aa` | **RETIRED IN SUBSTANCE.** Package COMPLETE and merged as `81ec3d4`; `git merge-base --is-ancestor codex/embed-zones HEAD` passes, so nothing is carried here alone. Branch ref and worktree still exist and are cleared for deletion — see FU-20. Do not resume work here |
-| `census/embed-incidence-2026-08-04` (branch only, no worktree) | `50b325c` | **RETIRED IN SUBSTANCE.** Fully contained in integration (`--is-ancestor` passes); the census is now maintained in-tree at `crates/plinth-support/examples/embed_incidence_census.rs` behind the `census` cargo feature. Ref cleared for deletion — see FU-20 |
+| `/private/tmp/plinth-3d-pipeline-integration`, `codex/rust-pipeline-integration` | 2026-08-05 late docs head | clean; integration authority. **Gate GREEN**: see *Post-merge interaction delta* for the five-command gate set and its counts |
+| ~~`/private/tmp/plinth-embed-zones`, `codex/embed-zones`~~ | was `dd505aa` | **RETIRED AND DELETED 2026-08-05.** `git merge-base --is-ancestor dd505aa HEAD` passed first, so nothing was carried there alone; the worktree was clean (`git status --porcelain` empty, no `--force` needed) and was removed, then `git worktree prune`, then `git branch -D codex/embed-zones`. No archive tag: an ancestor of the integration head is not recoverable-only-via-tag |
+| ~~`census/embed-incidence-2026-08-04` (branch only, no worktree)~~ | was `50b325c` | **RETIRED AND DELETED 2026-08-05.** `--is-ancestor` passed; the census is maintained in-tree at `crates/plinth-support/examples/embed_incidence_census.rs` behind the `census` cargo feature |
 | `/private/tmp/plinth-home-calibration-plate`, `codex/home-calibration-plate` | `1541379` | accepted branch-only; plate and loading-fixture generator authority |
 | `/private/tmp/plinth-chitubox-preview`, `codex/chitubox-native-preview` | `9ffc829` | only live carrier of the unlanded embed-native-preview fallback; cherry-pick onto integration |
 | `/private/tmp/plinth-normalization-controller`, `codex/normalization-controller` | `fc5a60d` | parked for independent review as candidate coverage-repair machinery |
@@ -686,9 +820,9 @@ use Python for migration implementation or ad-hoc verification.
 ## Follow-ups ledger {#follow-ups-2026-08-04}
 
 Items raised by the 2026-08-04 and 2026-08-05 reviews. Each should be scheduled
-deliberately. **Exception to "non-blocking": FU-18 and FU-19 are what make the workspace
-gate red at the current head** — see *GATE IS RED at this head*. Everything else here is
-non-blocking.
+deliberately. FU-18, FU-19 and FU-20 — the three that made the workspace gate red and the
+inventory stale — were **resolved on 2026-08-05 (late)**; see *Post-merge interaction delta*.
+Everything else here is non-blocking.
 
 | # | Follow-up | Note |
 | --- | --- | --- |
@@ -698,7 +832,7 @@ non-blocking.
 | FU-4 | Commit a corpus provisioning script, or make the corpus-dependent targets loud-skip | Today a bare checkout hard-fails two test targets with no explanation. See `corpus-provisioning.md`. |
 | FU-5 | Pin the `scar.rs` duplicate registry-reader (`crates/plinth-metrics/src/scar.rs:183-186`) the way the new delicacy M0 test pins the `plinth-mesh` reader | The duplication is now documented in the delicacy test comment but is still unpinned on the `plinth-metrics` side. |
 | FU-6 | `chitubox-native-preview` fix `9ffc829` still awaits review and cherry-pick | Sole live carrier of the unlanded embed-native-preview fallback. |
-| FU-7 | `make_toed_slab` parity investigation (vertex vs. interior containment probe) | The digest-moving containment-probe hardening was deferred; the current `make_toed_slab` required-table freeze (digest `11_859_964_443_161_510_103`) is PROVISIONAL until this lands. See *Corpus defect fixes landed (2026-08-04, late)*. |
+| FU-7 | `make_toed_slab` parity investigation (vertex vs. interior containment probe) | The digest-moving containment-probe hardening was deferred; the current `make_toed_slab` required-table freeze (digest `11_859_964_443_161_510_103`) is **still PROVISIONAL** until this lands, and so is the 2026-08-05 seal re-pin (`4826202191472851835`) — the freeze is now provisional **on the new baseline**. See *Corpus defect fixes landed (2026-08-04, late)* and the cross-reference in *Post-merge interaction delta*. |
 | FU-8 | Treant resource caps defect — "production caps do not admit a real mini" | `KnnBatchLimits.max_work` (`100_000_000` vs. required `298_667_520`), `CandidateSurfaceGridLimit` (`67_108_864`), and Specialized `GateOperationLimit` (`2_000_000_000`) all need measurement-based raises before the Weeping Treant can clear the support stages behind perception. |
 | FU-9 | Hollow EDT margin defect | `grid_spec_from_bounds`'s no-padding path plus its all-foreground special case fabricate a distance ramp; the committed Sphere hollow goldens are wrong today. Est 8/16 pts; regenerates four `plinth-hollow` oracles. |
 | FU-10 | Per-layer polygon union under a fill rule | Owner-endorsed; supersedes the Tier-1 fallback. Candidate nomination must consume normalized layers per OD-9. |
@@ -710,9 +844,9 @@ non-blocking.
 | FU-15 | Corpus-gated end-to-end test tier, with loud skip for gitignored STLs | So the Cylinder and `make_box` sealed runs (digests `13310185350867878190` / `9657051231007502658`), currently test-uncovered, get pinned. |
 | FU-16 | Measure the bbox-claimed vs. discarded unowned-hole split on the treant once caps lift | bbox claiming can under-report a solid's area; the Tier 2 union supersedes it. |
 | FU-17 | Contact-area deficits: 12 stub + 554 CCO model-anchor | RECORDED as data by the 2026-08-05 unified census, not adjudicated. These contacts attach over measurably less interface than their tip radius claims. This is the print-quality question OQ-8 asks the owner; the 554 CCO figure is moot unless PR-7 revives that family. |
-| FU-18 | 4 `rustfmt` violations inherited from the embed tip | `cco.rs:1425`, `cco.rs:2485`, `census.rs:852`, `designed_embed.rs:788`. Formatting-only, but `cargo fmt --all -- --check` is red until fixed. |
-| FU-19 | Re-pin the two stale `support_runner_integration` goldens | `make_toed_slab` and `make_raking_blade` moved under contact physics; the goldens date from `414e13f` and the workspace test gate is RED (939/1). Deltas are recorded under *GATE IS RED at this head*. Digest-moving, so do it deliberately — and settle FU-7 first or `make_toed_slab` will need re-pinning twice. |
-| FU-20 | Delete the retired `codex/embed-zones` branch + worktree and the `census/embed-incidence-2026-08-04` ref | Both are proven contained in integration (`git merge-base --is-ancestor` passes for each). Mechanical cleanup only; tag per the 2026-08-04 archive convention before deleting. |
+| FU-18 | ~~4 `rustfmt` violations inherited from the embed tip~~ | **RESOLVED 2026-08-05** (`cf2c2ab`). `cargo fmt --all` touched exactly `cco.rs:1425`, `cco.rs:2485`, `census.rs:852`, `designed_embed.rs:788` and nothing else. `cargo fmt --all -- --check` is now part of every gate run — see process rule 1 in *Post-merge interaction delta*. |
+| FU-19 | ~~Re-pin the two stale `support_runner_integration` goldens~~ | **RESOLVED 2026-08-05** (`f77dfe1`). Re-pinned to `make_toed_slab` 64/179/`4826202191472851835` and `make_raking_blade` 32/89/`1709218010932846012`, with the whole delta attributed to PR-8 `NotAttached` on four named contacts and a control run proving nothing else moved. See *Post-merge interaction delta*. FU-7 was NOT settled first, deliberately: it is a separate, currently unscheduled investigation, and the tuple is re-pinnable independently — but `make_toed_slab` **will** need re-pinning again when FU-7 lands. |
+| FU-20 | ~~Delete the retired `codex/embed-zones` branch + worktree and the `census/embed-incidence-2026-08-04` ref~~ | **RESOLVED 2026-08-05.** Both were proven contained in integration by `git merge-base --is-ancestor` before deletion; see *Post-merge interaction delta* and the worktree table. |
 
 ## Ordered resumption checklist
 
@@ -739,17 +873,19 @@ non-blocking.
    with a recorded containment proof.
 
 3. **Do not re-ask for rulings that have landed.** OD-1..OD-9 are all discharged and
-   OQ-1..OQ-7 and OQ-11 are closed — see *Embed/contact package COMPLETE (2026-08-05)*.
+   OQ-1..OQ-7 and OQ-11 are closed — see *Embed/contact package complete (2026-08-05)*.
    The still-open owner questions are **OQ-8** (refuse or resize a partially engaged
    contact), **OQ-9** (PR-5's normative text is lost — reconstruct or drop), and **OQ-10**
    (revive the CCO model-anchor family, WITH PR-7 seating, or leave it dead). OQ-10 is a
    print-consequence tradeoff, not a physics question; do not resolve it by inference.
 
-4. **Clear the red gate before starting new work.** FU-19 (re-pin the two stale
-   `support_runner_integration` goldens) and FU-18 (4 `rustfmt` violations). FU-19 is
-   digest-moving: record the delta from *GATE IS RED at this head*, and prefer to settle
-   FU-7 first so `make_toed_slab` is not pinned twice. Also FU-20, the mechanical retirement
-   of `codex/embed-zones` and `census/embed-incidence-2026-08-04`.
+4. **Done — the gate is green.** FU-19 (re-pin the two stale `support_runner_integration`
+   goldens, `f77dfe1`), FU-18 (4 `rustfmt` violations, `cf2c2ab`) and FU-20 (retire
+   `codex/embed-zones` and `census/embed-incidence-2026-08-04`) all landed on 2026-08-05
+   (late). The re-pin's full attribution is in *Post-merge interaction delta*; do not redo
+   it. **`make_toed_slab` still needs re-pinning once more when FU-7 lands** — its freeze is
+   provisional on this new baseline, which was a deliberate, recorded choice rather than an
+   oversight.
 
 ### Critical path (2026-08-05) — the next five items, in order
 

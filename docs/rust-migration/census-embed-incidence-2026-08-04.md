@@ -438,20 +438,28 @@ era, i.e. before contact physics), disagree with this run:
 | make_toed_slab | 65 routed, 184 live, digest `15554091706332339621` | 64 routed, 179 live, digest `4826202191472851835` | -1 routed, -5 live |
 | make_raking_blade | 35 routed, 93 live, digest `6761406004527881770` | 32 routed, 89 live, digest `1709218010932846012` | -3 routed, -4 live |
 
-These are exactly the two models that carry PR-9 contact refusals in the T7
-table below (`make_toed_slab` 6, `make_raking_blade` 5) and the only two with
-`min_rim = 0/8`. The movement is the intended OD-8 consequence — contacts that
-cannot prove an interface are refused, and rewiring redistributes what is left —
-not an unexplained drift. Both models were newly reachable from the corpus
-fixes, so their goldens were pinned in the window between the two packages and
-have never described the contact-physics engine.
+> **CORRECTED 2026-08-05 (late).** The sentence that stood here called these
+> "exactly the two models that carry **PR-9** contact refusals in the T7 table
+> below (`make_toed_slab` 6, `make_raking_blade` 5)". That misnames the rule.
+> **PR-9 fires zero times on either model** — zero contact refusals and zero
+> pipeline violations. Those 6 and 5 are **PR-8/OD-9 attestation** refusals in
+> `initial.rs`: a different rule, in a different stage, with a different
+> disposition. T7 is the attestation table, which is why the counts appear
+> there. See [Post-merge interaction delta](#post-merge-delta-2026-08-05) for the
+> per-contact attribution.
 
-`cargo test --workspace --offline` is therefore **RED** at this head: 939 passed,
-1 failed, the failure being
-`public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing`. Re-pinning
-those two goldens is a known, deliberately deferred item — it is a digest-moving
-change and needed this census as its evidence. Do not re-pin them without
-recording the delta above.
+They are also the only two models with `min_rim = 0/8`. The movement is the
+intended OD-8 consequence — contacts that cannot prove an interface are refused,
+and rewiring redistributes what is left — not an unexplained drift. Both models
+were newly reachable from the corpus fixes, so their goldens were pinned in the
+window between the two packages and have never described the contact-physics
+engine.
+
+`cargo test --workspace --offline --no-fail-fast` was therefore **RED** at that
+head: 939 passed, 1 failed, the failure being
+`public_runner_seals_toed_slab_and_raking_blade_after_seat_coalescing`. **That is
+now resolved** — the goldens were attributed and re-pinned at `f77dfe1`; see
+[Post-merge interaction delta](#post-merge-delta-2026-08-05).
 
 The narrower claim that does hold: the contact-physics package moved **no
 geometry on any model that was already reachable before it**.
@@ -612,10 +620,81 @@ curvature evidence still waits on the treant.
    centreline-outside, 0 committed. The numbers are large enough to look like
    evidence and are not: nothing downstream consumes them.
 3. **`make_toed_slab`'s freeze is provisional** pending the vertex-probe vs
-   interior-probe parity investigation; its 179 members and its digest here
-   inherit that provisional status. Its `support_runner_integration` golden is
-   also stale (see *Digest continuity* above), so it is doubly unpinned right
-   now — re-pin it only after the parity investigation settles, or the re-pin
-   will have to be redone.
+   interior-probe parity investigation (FU-7); its 179 members and its digest
+   here inherit that provisional status. Its `support_runner_integration` golden
+   was also stale; that half is now resolved — it was attributed and re-pinned at
+   `f77dfe1` (see
+   [Post-merge interaction delta](#post-merge-delta-2026-08-05)) — but the
+   **freeze remains PROVISIONAL on the new baseline** and this model will need
+   re-pinning once more when FU-7 lands.
 4. **Area deficits are recorded, not ruled on.** 566 deficits across two families
    is a print-quality question this package deliberately does not answer.
+
+---
+
+## Post-merge interaction delta — ATTRIBUTED (2026-08-05, late) {#post-merge-delta-2026-08-05}
+
+Closing pass on the two models this census flagged as moved. The authority copy
+of this account is `CURRENT-STATUS.md`, section *Post-merge interaction delta —
+ATTRIBUTED and re-pinned (2026-08-05, late)*; it is repeated here because a
+reader who arrives at *Digest continuity* above needs the correction in the same
+file.
+
+### One rule, four contacts
+
+The whole delta is **PR-8 `NotAttached`** quarantining four initial-contact
+stubs. `NotAttached` fires only when nothing at all is engaged — centreline false
+AND 0 of 8 rim rays reaching one process resolution (0.05 mm) contiguously from
+the tip end. An independent parity sweep along the contact normal at 0.0025 mm
+confirms the witness rather than restating it (`t` measured inward from the seat;
+the tip sits at `t = 0.30`):
+
+| model | contact | routed load | solid along the normal |
+| --- | --- | ---: | --- |
+| `make_toed_slab` | 68 | 0.000 mm² | none in `[-0.01, +0.39]`; tip 0.265025200 mm clear of the nearest surface |
+| `make_raking_blade` | 7 | 0.060 mm² | `[0.0025, 0.0300)` only — a 0.0275 mm skin; tip 0.151863225 mm clear beyond it |
+| `make_raking_blade` | 12 | 0.000 mm² | 0.0275 mm skin, then void; body resumes at `t = 0.3300`, 0.03 mm past the tip |
+| `make_raking_blade` | 13 | 0.000 mm² | 0.03 mm skin; body resumes at `t = 0.2750`, so the tip enters it by 0.025 mm |
+
+Combined routed demand deleted: **0.060 mm²**. The other seven attestation
+refusals — five OD-9 `BuriedSurface` on `make_toed_slab` (the probe one process
+resolution OUTWARD tests INSIDE, while connectivity is **perfect** at 8/8 rim
+rays plus centreline: the exact trap OD-9 exists for, seen on real corpus
+geometry rather than on the synthetic fixture) and two more `NotAttached` on
+`make_raking_blade` — contribute **zero**, because the pre-existing
+initial-overlap cutoff already condemned those same stubs.
+
+Zero occurrences on either model, measured rather than assumed: PR-3 incidence
+admissibility (no rung candidate is generated at all, consistent with
+`T1_rung_cos total=0`), the brace model-rung seat witness, PR-9 (0 contact
+refusals, 0 pipeline violations), and the CCO model-anchor family
+(`T2_cco_anchor_attempted = 0`). Suppressing only the attestation-refusal
+quarantine reproduces both pre-contact-physics tuples bit-for-bit, digests
+included — which is what licenses the re-pin under OD-8.
+
+### This census and the seal test are NOT interchangeable
+
+This file reports `make_toed_slab` digest `11199296506741562956`, while
+`support_runner_integration` computes `4826202191472851835` for the same
+`(64 routed, 179 live)`. **The cause is the mesh source, not the layer plan.**
+Both build the identical `LayerPlan::new(0.0, vec![0.05; 1000])` — this harness's
+`max(ceil(span/pitch), 1000)` evaluates to 1000 on both models, which its own
+`MODEL` row states as `layers=1000`. The difference is that the seal test uses
+the **procedural** `make_toed_slab()` mesh in f64 while this harness loads
+**`corpus/models/make_toed_slab.stl`**, a binary STL whose coordinates are f32.
+
+Measured: identical topology and triangle order (140 and 24 triangles), 740 of
+1260 and 144 of 216 coordinates bit-identical, max |Δ| **4.35e-7 mm** and
+**2.98e-7 mm**, and `f64::from(procedural as f32) == stl` for **every**
+coordinate. Feeding the STL mesh through the seal test's own code path reproduces
+this file's digests exactly (`11199296506741562956`, `13278215294653054002`),
+isolating the mesh as the only variable. On the pre-refusal baseline the same
+substitution also moves a member count (`make_toed_slab` live=181 from STL
+against 184 procedural).
+
+So the two instruments agree on physics and disagree on bits **by construction**.
+Compare census-to-census and seal-test-to-seal-test; a digest from one read
+against a digest from the other is not evidence of a regression. Contact-id
+numbering differs for the same reason: this harness's T7 rows name
+`make_toed_slab` terminals 22/23/27/59/60/68 where the procedural mesh numbers
+the same six refused seats 22/26/31/59/62/68.
