@@ -16,6 +16,7 @@ use thiserror::Error;
 use crate::{
     anchor::{FOOT_BREACH_CONE_RAYS, FOOT_BREACH_HALF_DEG},
     contact::{self, ContactPolicy},
+    designed_embed,
     forest::{
         ContactEnd, Forest, ForestError, Member, MemberKey, MemberKind, MemberSpec,
         RootwardEndRadius, TerminalEndRadius,
@@ -163,6 +164,8 @@ pub(crate) struct BracePassPlan {
     pub(crate) rungs_requested: usize,
     pub(crate) rungs_placed: usize,
     pub(crate) rungs_unplaceable: usize,
+    /// PR-8/OD-9 (F3) — this pass's model-rung seat-attestation transcript.
+    pub(crate) contact_attestation_digest: u64,
 }
 
 /// Bounded fixed-point result used by the pending support runner.
@@ -175,6 +178,37 @@ pub(crate) struct BraceFixedPointPlan {
     /// PR-9 — contact-declaring members quarantined at the third-pass cap for
     /// negative exact clearance. Ascending, so the evidence is order-stable.
     pub(crate) contact_refusals: Vec<MemberKey>,
+    /// PR-8/OD-9 (F3) — the model-rung seat-attestation transcript, chained
+    /// over every pass this controller ran.
+    ///
+    /// Carried separately from the forest digest for the same reason the stub
+    /// family's transcript is: an attested rung and an unattested one are the
+    /// same geometry, and a rung that was REFUSED leaves no trace in the forest
+    /// at all, so deleting the screen would move nothing an existing gate can
+    /// see.
+    pub(crate) contact_attestation_digest: u64,
+}
+
+/// The empty head of a seat-attestation chain.
+///
+/// A distinguished non-zero seed so "no pass ran" is distinguishable from "a
+/// pass ran and attested nothing", which is exactly the confusion a zero
+/// initial value would create.
+const fn contact_attestation_chain_seed() -> u64 {
+    0x8c00_0000_0000_0001
+}
+
+/// Fold one pass's transcript into the running chain.
+///
+/// The pass index is mixed in so that two passes producing the same transcript
+/// in a different order are not the same chain.
+fn extend_contact_attestation_chain(head: u64, pass: usize, stage: u64) -> u64 {
+    let mut digest = crate::forest::DigestWriter::new();
+    digest.tag(0x8d);
+    digest.u64(head);
+    digest.u64(pass as u64);
+    digest.u64(stage);
+    digest.finish()
 }
 
 #[derive(Clone, Debug, PartialEq, Error)]
@@ -309,7 +343,10 @@ pub(crate) fn brace_pass_current_parity(
         penetration_limits,
         &mut need_batch,
     )?;
-    let candidates = gather_candidates(forest, surface, &need_batch.needs, &config)?;
+    let CandidateGather {
+        candidates,
+        attestation_digest: contact_attestation_digest,
+    } = gather_candidates(forest, surface, &need_batch.needs, &config)?;
     let viable = evaluate_candidates(surface, &candidates, &config, penetration_limits)?;
     let mut planned = forest.clone();
     let mut additions = Vec::new();
@@ -381,6 +418,7 @@ pub(crate) fn brace_pass_current_parity(
         rungs_requested: need_batch.requested,
         rungs_placed,
         rungs_unplaceable,
+        contact_attestation_digest,
     })
 }
 
@@ -397,6 +435,10 @@ pub(crate) fn brace_fixed_point_current_parity(
     let mut working = forest.clone();
     let mut additions = Vec::new();
     let mut saw_unplaceable = false;
+    // F3 -- the model-rung seat-attestation chain across the bounded passes.
+    // Chained rather than summed or replaced, so a pass that stopped attesting
+    // moves the head even if a later pass attests the same rows.
+    let mut contact_attestation_digest = contact_attestation_chain_seed();
     for iteration in 1..=FROZEN_PASS_CAP {
         let report = transient_report(&working, plate_z_mm)?;
         let plan = brace_pass_current_parity(
@@ -408,6 +450,11 @@ pub(crate) fn brace_fixed_point_current_parity(
             process_resolution_mm,
         )?;
         saw_unplaceable |= plan.rungs_unplaceable > 0;
+        contact_attestation_digest = extend_contact_attestation_chain(
+            contact_attestation_digest,
+            iteration,
+            plan.contact_attestation_digest,
+        );
         let changed = !plan.resize.changed.is_empty();
         working = apply_resize(plan.forest_with_braces, &plan.resize)?;
         let added = !plan.additions.is_empty();
@@ -429,6 +476,7 @@ pub(crate) fn brace_fixed_point_current_parity(
                     BraceFixedPointTermination::Converged
                 },
                 contact_refusals: Vec::new(),
+                contact_attestation_digest,
             });
         }
         if iteration == FROZEN_PASS_CAP {
@@ -455,6 +503,7 @@ pub(crate) fn brace_fixed_point_current_parity(
                 iterations: iteration,
                 termination,
                 contact_refusals: negative.contact_refusals,
+                contact_attestation_digest,
             });
         }
     }
@@ -893,14 +942,34 @@ fn site_was_attempted(
     })
 }
 
+/// One pass's candidate set plus the PR-8 seat-attestation transcript for the
+/// model-rung family.
+///
+/// The transcript is returned rather than folded into the candidate list
+/// because it must survive into the digest chain even when it refuses nothing:
+/// an attested rung and an unattested one are the same geometry, so no forest
+/// digest can see the attestation stop happening.
+struct CandidateGather {
+    candidates: Vec<PlacementCandidate>,
+    /// `seat_attestation_digest(SEAT_TAG_BRACE_MODEL_RUNG, ..)` over every
+    /// model-rung candidate this pass proposed, refused rows included.
+    attestation_digest: u64,
+}
+
 fn gather_candidates(
     forest: &Forest,
     surface: &NativeSurface,
     needs: &[Need],
     config: &BraceConfig,
-) -> Result<Vec<PlacementCandidate>, BraceError> {
+) -> Result<CandidateGather, BraceError> {
     let mut candidates = Vec::new();
     let mut raw_model = Vec::new();
+    // Model-rung candidates are held aside from the cross-link ones until the
+    // whole-pass seat attestation has run, so a refused rung never reaches the
+    // tournament. They rejoin `candidates` before the deterministic sort, so
+    // candidate ORDER is unchanged for every rung that attests.
+    let mut model_candidates = Vec::new();
+    let mut seat_rows = Vec::new();
     for (need_index, need) in needs.iter().enumerate() {
         let mut sites = vec![(need.host, need.z_mm)];
         sites.extend(need.alternatives.iter().copied());
@@ -1090,7 +1159,28 @@ fn gather_candidates(
             radius.get(),
             extents.mask_extent_mm,
         ));
-        candidates.push(PlacementCandidate {
+        // PR-8/OD-9 at the SEAT (F3). One row per surviving rung candidate,
+        // gathered here and handed to ONE batched attestation below. The seat
+        // is `seated_point`, the contact end is `Rootward`, and the OD-9 probe
+        // steps one process resolution OUTWARD from the UNSEATED surface point
+        // along the same normal `seat_endpoint` used to push the seat inward --
+        // `p_contact = p_surface - normal * h` there, so `+ normal * res` here
+        // is the outward sense by the same construction.
+        seat_rows.push(designed_embed::SeatAttestationRow {
+            p0_mm: p0,
+            p1_mm: seated_point,
+            r0_mm: radius.get(),
+            r1_mm: radius.get(),
+            end: ContactEnd::Rootward,
+            exterior_probe: std::array::from_fn(|axis| {
+                projected.point[axis] + projected.normal[axis] * config.process_resolution_mm
+            }),
+            // Zero routed load -- the F2 argument above. PR-4 therefore grades
+            // nothing here, which is correct for a member with no area demand;
+            // PR-8 and OD-9 are what this family is gated on.
+            carried_mm2: 0.0,
+        });
+        model_candidates.push(PlacementCandidate {
             need_index: projected.raw.need_index,
             site_index: projected.raw.site_index,
             rank: projected.raw.rank,
@@ -1127,10 +1217,118 @@ fn gather_candidates(
             printable: (p0[2] - projected.point[2]).abs() <= HEIGHT_TOLERANCE_MM,
         });
     }
+
+    // F3 -- the model-rung family's PR-8 attestation and OD-9 exterior screen,
+    // in ONE batch for the whole pass, riding the same stage boundary as the
+    // `project` and `sphere_breach` batches above. Cost is a fixed pair of
+    // native calls per brace pass, independent of the candidate count; a
+    // per-candidate call here would be the batch-first defect.
+    //
+    // A refused rung is DROPPED, which is this family's form of quarantine
+    // (OD-4/PR-9): the candidate never entered the forest, so there is no
+    // placed member to quarantine and nothing to fail. It loses its tournament
+    // entry and the pass continues.
+    let attestation = attest_model_rung_seats(surface, &seat_rows, config)?;
+    for (candidate, attested) in model_candidates
+        .into_iter()
+        .zip(&attestation.attested_by_row)
+    {
+        if *attested {
+            candidates.push(candidate);
+        }
+    }
     candidates
         .sort_by_key(|candidate| (candidate.need_index, candidate.site_index, candidate.rank));
-    Ok(candidates)
+    Ok(CandidateGather {
+        candidates,
+        attestation_digest: attestation.digest,
+    })
 }
+
+/// The model-rung family's whole-pass seat attestation.
+struct ModelRungAttestation {
+    /// Row-aligned with the `seats` slice: `true` where the seat attested.
+    attested_by_row: Vec<bool>,
+    digest: u64,
+}
+
+/// PR-8/OD-9 for every model-rung candidate in one pass, in exactly two batched
+/// native calls (delegated to `attest_seats_batch`).
+///
+/// The claimed extent is ONE PROCESS RESOLUTION, the same choice PR-8 made for
+/// the stub family and for the same reason: attestation asks whether a
+/// renderable interface EXISTS, and the resolvability floor is one layer.
+/// Demanding the full PR-1 seat depth of every rim ray would conflate
+/// attestation with the mask-validity proof, which `validate_members_batch`
+/// enforces separately and TOTALLY.
+///
+/// A batch-level integrity failure (starved admission, kernel refusal,
+/// malformed row set) is an error, because nothing can be concluded about any
+/// rung from it. Per-row geometry verdicts are values, never errors -- OD-4.
+fn attest_model_rung_seats(
+    surface: &NativeSurface,
+    seats: &[designed_embed::SeatAttestationRow],
+    config: &BraceConfig,
+) -> Result<ModelRungAttestation, BraceError> {
+    let extent = designed_embed::PositiveFiniteMm::new(config.process_resolution_mm)
+        .map_err(|_| BraceError::InvalidGeometry)?;
+    if seats.is_empty() {
+        return Ok(ModelRungAttestation {
+            attested_by_row: Vec::new(),
+            digest: designed_embed::seat_attestation_digest(
+                designed_embed::SEAT_TAG_BRACE_MODEL_RUNG,
+                extent,
+                seats,
+                &[],
+            ),
+        });
+    }
+    // Sampling resolution is tied to the extent being proven, exactly as
+    // `initial.rs` does it: the majority step must be able to RESOLVE the OD-4
+    // margin, so it is one tenth of the claimed extent.
+    let majority_step = designed_embed::PositiveFiniteMm::new(extent.get() / 10.0)
+        .map_err(|_| BraceError::InvalidGeometry)?;
+    let limits = designed_embed::EndpointMaskValidationLimits::for_batch(
+        surface,
+        seats.len(),
+        majority_step,
+        MODEL_RUNG_ATTESTATION_SAMPLES_PER_SUBSEGMENT,
+    )
+    .map_err(|error| BraceError::NativeQuery(error.to_string()))?;
+    let policy = config.contact_policy();
+    let outcomes = designed_embed::attest_seats_batch(surface, seats, extent, limits, &policy)
+        .map_err(|error| BraceError::NativeQuery(error.to_string()))?;
+    let mut attested_by_row = vec![false; seats.len()];
+    for outcome in &outcomes {
+        if outcome.member >= seats.len() {
+            return Err(BraceError::InvalidGeometry);
+        }
+        attested_by_row[outcome.member] = outcome.verdict.is_ok();
+        crate::census_record!(crate::census::record_seat_attestation(
+            "brace_model_rung",
+            outcome.engagement.centreline,
+            outcome.engagement.rim_engaged,
+            outcome.engagement.rim_total,
+            outcome.attested_radius_mm,
+            outcome.verdict.is_err(),
+            outcome.area_deficit.is_some(),
+        ));
+    }
+    Ok(ModelRungAttestation {
+        attested_by_row,
+        digest: designed_embed::seat_attestation_digest(
+            designed_embed::SEAT_TAG_BRACE_MODEL_RUNG,
+            extent,
+            seats,
+            &outcomes,
+        ),
+    })
+}
+
+/// Matches `designed_embed::ENDPOINT_VALIDATION_OFFSET_RAYS`, for the same
+/// reason `initial.rs` matches it: the witness needs the eight rim rays and the
+/// centreline resolved at the density it samples them.
+const MODEL_RUNG_ATTESTATION_SAMPLES_PER_SUBSEGMENT: usize = 8;
 
 fn retain_projected_model_survivors(
     candidates: &mut Vec<ProjectedModelCandidate>,
@@ -2655,7 +2853,9 @@ mod tests {
         }];
         let surface = near_wall_box();
         let config = BraceConfig::current(0.05).unwrap();
-        let candidates = gather_candidates(&forest, &surface, &needs, &config).unwrap();
+        let candidates = gather_candidates(&forest, &surface, &needs, &config)
+            .unwrap()
+            .candidates;
         let model = candidates
             .iter()
             .find(|row| row.kind == BraceAdditionKind::ModelRung)
@@ -2768,7 +2968,9 @@ mod tests {
         }];
         let surface = raked_wall_box();
         let config = BraceConfig::current(0.05).unwrap();
-        let candidates = gather_candidates(&forest, &surface, &needs, &config).unwrap();
+        let candidates = gather_candidates(&forest, &surface, &needs, &config)
+            .unwrap()
+            .candidates;
         let model = candidates
             .iter()
             .find(|row| row.kind == BraceAdditionKind::ModelRung)

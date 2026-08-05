@@ -111,6 +111,22 @@ pub struct AttestationRow {
     pub area_deficit: bool,
 }
 
+/// One F3 seat-attestation verdict for a TOUCHING family (brace model rung or
+/// CCO model anchor), for the T8 table.
+///
+/// Kept separate from [`AttestationRow`] because the row identity is different:
+/// a stub is identified by its terminal, a candidate seat only by the family
+/// that proposed it and its position in that family's batch.
+pub struct SeatAttestationRow {
+    pub family: &'static str,
+    pub centreline: bool,
+    pub rim_engaged: usize,
+    pub rim_total: usize,
+    pub attested_radius_mm: f64,
+    pub refused: bool,
+    pub area_deficit: bool,
+}
+
 #[derive(Default)]
 pub struct CensusData {
     pub rung_outcomes: Vec<RungOutcome>,
@@ -120,6 +136,7 @@ pub struct CensusData {
     pub segs: Vec<SegRow>,
     pub contacts: Vec<ContactRow>,
     pub attestations: Vec<AttestationRow>,
+    pub seat_attestations: Vec<SeatAttestationRow>,
     pub appends: std::collections::BTreeMap<&'static str, usize>,
     pub stage_errors: Vec<String>,
 }
@@ -146,6 +163,7 @@ pub fn reset() {
         census.segs.clear();
         census.contacts.clear();
         census.attestations.clear();
+        census.seat_attestations.clear();
         census.appends.clear();
         census.stage_errors.clear();
     });
@@ -165,6 +183,30 @@ pub(crate) fn record_contact_attestation(
     with(|census| {
         census.attestations.push(AttestationRow {
             terminal,
+            centreline,
+            rim_engaged,
+            rim_total,
+            attested_radius_mm,
+            refused,
+            area_deficit,
+        });
+    });
+}
+
+/// F3 — one seat-attestation verdict per candidate of a touching family.
+#[allow(clippy::fn_params_excessive_bools, reason = "throwaway census row")]
+pub(crate) fn record_seat_attestation(
+    family: &'static str,
+    centreline: bool,
+    rim_engaged: usize,
+    rim_total: usize,
+    attested_radius_mm: f64,
+    refused: bool,
+    area_deficit: bool,
+) {
+    with(|census| {
+        census.seat_attestations.push(SeatAttestationRow {
+            family,
             centreline,
             rim_engaged,
             rim_total,
@@ -783,6 +825,63 @@ pub fn finish(model: &str, snapshot: &SupportVerificationSnapshot<'_>) {
                     format!("r_eff_mm={:.6}", attestation.attested_radius_mm),
                     format!("refused={}", attestation.refused),
                     format!("area_deficit={}", attestation.area_deficit),
+                ],
+            );
+        }
+    }
+
+    // --- Table 8: F3 seat attestation for the TOUCHING families -----------
+    //
+    // One row per family so the two are never conflated: a brace model rung is
+    // seated by PR-1 and a CCO model anchor is not (PR-7 is deliberately not
+    // landed), so they are expected to measure differently and the instrument
+    // must be able to say so.
+    for family in ["brace_model_rung", "cco_model_anchor"] {
+        let rows = census
+            .seat_attestations
+            .iter()
+            .filter(|seat| seat.family == family)
+            .collect::<Vec<_>>();
+        if rows.is_empty() {
+            continue;
+        }
+        let refused = rows.iter().filter(|seat| seat.refused).count();
+        let deficits = rows.iter().filter(|seat| seat.area_deficit).count();
+        let full = rows
+            .iter()
+            .filter(|seat| seat.centreline && seat.rim_engaged == seat.rim_total)
+            .count();
+        let no_centre = rows.iter().filter(|seat| !seat.centreline).count();
+        let min_engaged = rows
+            .iter()
+            .map(|seat| seat.rim_engaged)
+            .min()
+            .unwrap_or(0);
+        row(
+            model,
+            "T8_seat_attestation",
+            &[
+                format!("family={family}"),
+                format!("total={}", rows.len()),
+                format!("fully_engaged={full}"),
+                format!("centreline_outside={no_centre}"),
+                format!("min_rim_engaged={min_engaged}"),
+                format!("refused={refused}"),
+                format!("area_deficit={deficits}"),
+            ],
+        );
+        for (index, seat) in rows.iter().enumerate() {
+            row(
+                model,
+                "T8r_seat_attestation_row",
+                &[
+                    format!("family={family}"),
+                    format!("i={index}"),
+                    format!("centreline={}", seat.centreline),
+                    format!("rim={}/{}", seat.rim_engaged, seat.rim_total),
+                    format!("r_eff_mm={:.6}", seat.attested_radius_mm),
+                    format!("refused={}", seat.refused),
+                    format!("area_deficit={}", seat.area_deficit),
                 ],
             );
         }

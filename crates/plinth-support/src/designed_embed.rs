@@ -738,6 +738,186 @@ pub(crate) fn attest_members_batch(
         .collect())
 }
 
+/// One proposed model contact belonging to a family that attests CANDIDATE
+/// geometry rather than a minted forest member.
+///
+/// The stub family attests members that already exist in the forest, because
+/// `initial.rs` mints first and quarantines the refusals. The two TOUCHING
+/// families cannot: a brace model rung and a CCO model anchor are both decided
+/// by a tournament, so the only honest moment to attest them is at the SEAT,
+/// while they are still candidates. `attest_members_batch` was written
+/// member-INDEXED rather than key-indexed precisely so provisional geometry can
+/// be validated without minting forgeable forest keys; this row set is that
+/// contract made explicit.
+///
+/// Endpoint convention is the mint site's, verbatim: `p0`/`r0` are the
+/// terminalward end and `p1`/`r1` the rootward one, and `end` names the end
+/// that meets the model. A row whose `end` does not match the geometry it
+/// describes is a caller defect, and it fails closed in `prepare_rows`
+/// (`EndNotDesigned`) rather than attesting the wrong end.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SeatAttestationRow {
+    pub(crate) p0_mm: V3,
+    pub(crate) p1_mm: V3,
+    pub(crate) r0_mm: f64,
+    pub(crate) r1_mm: f64,
+    pub(crate) end: ContactEnd,
+    /// The attachment point displaced OUTWARD along the surface normal by one
+    /// process resolution — OD-9's probe. Supplied by the caller for the same
+    /// reason as [`ContactAttestationRequest::exterior_probe`]: only the mint
+    /// site knows the outward sense.
+    pub(crate) exterior_probe: V3,
+    /// Routed demand on this seat. Zero for a bracing member (see the F2
+    /// argument at `brace.rs`'s `contact::admit` call site); the terminal's
+    /// real `carried_mm2` for a CCO model anchor, which IS a demand route.
+    pub(crate) carried_mm2: f64,
+}
+
+impl SeatAttestationRow {
+    /// The provisional member this row describes.
+    ///
+    /// `Owner::Generated { family: "seat_attestation" }` is deliberately a
+    /// namespace that no mint site uses: this member exists only for the
+    /// duration of the batch and must never be mistakable for placed geometry
+    /// if it ever escapes into a debug dump.
+    fn provisional_member(&self) -> Result<Member, DesignedMaskError> {
+        let finite3 = |value: V3| -> Result<[Finite; 3], DesignedMaskError> {
+            let mut out = [Finite::new(0.0).expect("zero is finite"); 3];
+            for (slot, component) in out.iter_mut().zip(value) {
+                *slot = Finite::new(component).map_err(|_| DesignedMaskError::InvalidExtent)?;
+            }
+            Ok(out)
+        };
+        let radius = |value: f64| {
+            PositiveFinite::new(value).map_err(|_| DesignedMaskError::InvalidExtent)
+        };
+        Ok(Member::new(crate::forest::MemberSpec {
+            p0_mm: finite3(self.p0_mm)?,
+            p1_mm: finite3(self.p1_mm)?,
+            r0_mm: crate::forest::TerminalEndRadius::new(radius(self.r0_mm)?),
+            r1_mm: crate::forest::RootwardEndRadius::new(radius(self.r1_mm)?),
+            kind: crate::forest::MemberKind::Other(SEAT_ATTESTATION_FAMILY.to_owned()),
+            owner: crate::forest::Owner::Generated {
+                family: SEAT_ATTESTATION_FAMILY.to_owned(),
+                ordinal: 0,
+            },
+            model_contact_end: Some(self.end),
+            carried_mm2: Finite::new(self.carried_mm2)
+                .map_err(|_| DesignedMaskError::InvalidExtent)?,
+        }))
+    }
+
+    fn end_radius_mm(&self) -> f64 {
+        match self.end {
+            ContactEnd::Terminalward => self.r0_mm,
+            ContactEnd::Rootward => self.r1_mm,
+        }
+    }
+}
+
+const SEAT_ATTESTATION_FAMILY: &str = "seat_attestation_provisional";
+
+/// **PR-8 / OD-9 at a candidate SEAT** — the touching families' entry point.
+///
+/// Identical physics to [`attest_members_batch`], and literally the same two
+/// batched native calls, because it delegates to it: one `inside` batch
+/// carrying every OD-9 probe in the stage, one
+/// `penetration_intervals_batch_bounded` carrying every connectivity row. The
+/// only difference is that the members are provisional, so a refusal costs the
+/// CANDIDATE rather than requiring a quarantine transition on placed geometry.
+///
+/// Callers must issue this ONCE per stage over the whole candidate set. Calling
+/// it per candidate would restore exactly the per-item native call the batched
+/// verifier exists to prevent, and the structural gate counts the call sites.
+pub(crate) fn attest_seats_batch(
+    surface: &NativeSurface,
+    seats: &[SeatAttestationRow],
+    extent: PositiveFiniteMm,
+    limits: EndpointMaskValidationLimits,
+    policy: &ContactPolicy,
+) -> Result<Vec<ContactAttestation>, DesignedMaskError> {
+    if seats.is_empty() {
+        return Ok(Vec::new());
+    }
+    let members = seats
+        .iter()
+        .map(SeatAttestationRow::provisional_member)
+        .collect::<Result<Vec<_>, _>>()?;
+    let borrowed = members.iter().collect::<Vec<_>>();
+    let requests = seats
+        .iter()
+        .enumerate()
+        .map(|(index, seat)| ContactAttestationRequest {
+            member: index,
+            end: seat.end,
+            extent,
+            exterior_probe: seat.exterior_probe,
+            end_radius_mm: seat.end_radius_mm(),
+            carried_mm2: seat.carried_mm2,
+            // A candidate seat has no tip-sizing clamp to suppress: the clamp
+            // clause exists for `initial.rs`'s load-derived tip radii, and
+            // neither touching family derives its end radius from a load.
+            tip_clamped_at_max: false,
+        })
+        .collect::<Vec<_>>();
+    let outcomes = attest_members_batch(surface, &borrowed, &requests, limits, policy)?;
+    if outcomes.len() != seats.len() {
+        return Err(DesignedMaskError::CorruptKernelResult);
+    }
+    Ok(outcomes)
+}
+
+/// One stage's seat-attestation transcript, folded to a digest.
+///
+/// Same totality requirement as `initial.rs`'s `attestation_digest`, and for
+/// the same reason: it covers ATTESTED rows too, because a refusal that stopped
+/// firing leaves no geometric trace at all. `tag` names the family so two
+/// stages cannot produce a colliding transcript.
+pub(crate) fn seat_attestation_digest(
+    tag: u8,
+    extent: PositiveFiniteMm,
+    seats: &[SeatAttestationRow],
+    outcomes: &[ContactAttestation],
+) -> u64 {
+    let mut digest = crate::forest::DigestWriter::new();
+    digest.tag(0x8c);
+    digest.tag(tag);
+    digest.f64(extent.get());
+    digest.u64(seats.len() as u64);
+    for outcome in outcomes {
+        digest.u64(outcome.member as u64);
+        digest.tag(match outcome.end {
+            ContactEnd::Terminalward => 0,
+            ContactEnd::Rootward => 1,
+        });
+        digest.f64(outcome.attested_radius_mm);
+        digest.u64(outcome.engagement.rim_engaged as u64);
+        digest.u64(outcome.engagement.rim_total as u64);
+        digest.tag(u8::from(outcome.engagement.centreline));
+        // The witness digests every interval the kernel returned, so a seat
+        // that drifts inside its own verdict is still visible.
+        digest.u64(outcome.engagement.witness);
+        digest.tag(match &outcome.verdict {
+            Ok(_) => 0,
+            Err(ContactAttestationRefusal::BuriedSurface { .. }) => 1,
+            Err(ContactAttestationRefusal::NotAttached { .. }) => 2,
+        });
+        match outcome.area_deficit {
+            None => digest.tag(0),
+            Some(deficit) => {
+                digest.tag(1);
+                digest.f64(deficit.attested_radius_mm);
+                digest.f64(deficit.carried_mm2);
+            }
+        }
+    }
+    digest.finish()
+}
+
+/// Family tags for [`seat_attestation_digest`].
+pub(crate) const SEAT_TAG_BRACE_MODEL_RUNG: u8 = 0x01;
+pub(crate) const SEAT_TAG_CCO_MODEL_ANCHOR: u8 = 0x02;
+
 pub(crate) const ENDPOINT_VALIDATION_OFFSET_RAYS: usize = 8;
 
 #[cfg(test)]

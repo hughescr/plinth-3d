@@ -1145,6 +1145,22 @@ pub enum AnchorFootRefusalReason {
     StaleGeometry,
     StalePool,
     FootBallBreached,
+    /// OD-9 (F3) — the probe one process resolution OUTWARD of this seat tested
+    /// INSIDE the model, so the surface this anchor proposes to attach to is
+    /// buried: it lies within the printed solid and will not exist after the
+    /// per-layer union.
+    ///
+    /// This is NOT subsumed by `NearerNonExteriorObstruction` at discovery.
+    /// That screen reads `NativeSurface::exterior_face_mask`, which classifies
+    /// a whole FACE by sampling it; a buried PATCH of an otherwise exterior
+    /// face passes it, and the anchor then seats on geometry that will not
+    /// exist in the print.
+    ///
+    /// **This is the ONLY seat-attestation verdict that refuses a model
+    /// anchor.** The connectivity verdict is measured and recorded, never
+    /// refused — see the disposition argument at
+    /// `cco::attest_model_anchor_seats`.
+    SeatBuriedSurface,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1161,6 +1177,19 @@ impl AnchorFootRefusal {
     #[must_use]
     pub const fn reason(self) -> AnchorFootRefusalReason {
         self.reason
+    }
+
+    /// F3 — the OD-9 seat-burial refusal channel.
+    ///
+    /// Crate-private and deliberately narrow: only the CCO stage may mint one,
+    /// and it can carry only [`AnchorFootRefusalReason::SeatBuriedSurface`]. A
+    /// public caller cannot forge a refusal, and no other reason can arrive
+    /// through it.
+    pub(crate) const fn seat_buried(provenance: AnchorCandidateProvenance) -> Self {
+        Self {
+            provenance,
+            reason: AnchorFootRefusalReason::SeatBuriedSurface,
+        }
     }
 }
 
