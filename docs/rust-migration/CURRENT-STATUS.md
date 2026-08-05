@@ -238,6 +238,39 @@ on a falsified premise.
 A corpus incidence census (branch `census/embed-incidence-2026-08-04` off `029ced3`) is
 being run to answer OQ-1/OQ-2 empirically and inform OQ-3; results will be recorded here.
 
+### Owner ruling OD-8 (2026-08-04, evening) — correctness supersedes behavior preservation {#owner-ruling-od8}
+
+1. The owner's verbatim ruling, delivered 2026-08-04 after reading the Phase B stop report:
+
+   > "I have no idea what that Max 0.5 thing is or where any rule not to change it came
+   > from. You should figure out what the correct process/math/physics should be and
+   > implement that please."
+
+2. Binding interpretation:
+
+   - The behavior-preservation constraint on the embed/contact package is LIFTED. It was
+     integration scaffolding (verify-the-refactor-by-identical-output), imposed by the
+     orchestration layer — never owner policy and never physics. It died when the Phase B
+     agents proved the `.max(0.5)` floor is load-bearing for candidate survival, making
+     "clean AND identical" impossible.
+   - New standard for this package: derive contact, clearance-mask, and incidence rules
+     from correct geometry and measured physics (the calibration-plate area-ratio law and
+     its X_ALLOWED=12 design margin are the measured evidence base), implement them, and
+     MEASURE the resulting corpus delta (supports added/removed/moved, per model) instead
+     of requiring zero delta.
+   - Silent geometry change remains forbidden: every behavioral difference must be
+     measured, reported, and physics-justified. The owner's 2026-08-04 contact-attachment
+     requirement ("be sure that the new code properly attaches the tips to the mini for
+     all cases") stands unchanged and is the design's governing requirement.
+   - OQ-1 through OQ-7 are hereby DELEGATED by the owner to the orchestrator, to be
+     resolved on physics/geometry grounds with proposer-challenger adjudication. None of
+     them requires a further owner ruling unless a print-consequence tradeoff emerges that
+     has no physics-preferred answer.
+
+3. Next step is Phase B-2 (physics-first redesign), launching once the corpus incidence
+   census (branch `census/embed-incidence-2026-08-04`) reports; census numbers feed the
+   design as its empirical baseline.
+
 ### Embed-zones blocking findings {#embed-zones-blocked-2026-08-04}
 
 `codex/embed-zones` @ `68c3097` (1 file, `crates/plinth-support/src/forest.rs`, +753/-0)
@@ -440,15 +473,16 @@ should be scheduled deliberately.
    independent review returned ACCEPT, and the work merged as `c6a0884`. The superseded
    `codex/prepare-interface` was retired with a recorded containment proof.
 
-4. **Phase B of `codex/embed-zones` stopped by design (2026-08-04) — do not resume it as an
-   implementation task.** Safe groundwork (the `EmbedEnd`->`ContactEnd` rename, `029ced3`)
-   is integrated as merge `a3c7f64`. The redesign correctly halted when it found OD-2's
-   premise falsified rather than build on it — see *Embed-zones Phase B outcome
-   (2026-08-04)*. The next actionable step is an **owner ruling on OQ-1 through OQ-7**, not
-   further Rust implementation. A corpus incidence census on
-   `census/embed-incidence-2026-08-04` (off `029ced3`) is running to give OQ-1/OQ-2/OQ-3
-   empirical grounding first. Re-review remains BLOCKED until the owner rules and a
-   subsequent Phase B pass implements the ruling.
+4. **Owner ruling OD-8 landed (2026-08-04, evening) — do not re-ask for a ruling.** Safe
+   groundwork from Phase B of `codex/embed-zones` (the `EmbedEnd`->`ContactEnd` rename,
+   `029ced3`) is integrated as merge `a3c7f64`. Phase B correctly halted when it found
+   OD-2's premise falsified rather than build on it — see *Embed-zones Phase B outcome
+   (2026-08-04)*. The owner has now ruled (OD-8): behavior-preservation is lifted for this
+   package, correctness/physics governs, and OQ-1 through OQ-7 are DELEGATED to the
+   orchestrator for physics/geometry resolution — see *Owner ruling OD-8 (2026-08-04,
+   evening)*. The next actionable step is **Phase B-2 (physics-first redesign)**, launching
+   once the corpus incidence census on `census/embed-incidence-2026-08-04` (off `029ced3`)
+   reports; its numbers feed the design as its empirical baseline.
 
 5. Complete former M7 in its documented gate order:
 
