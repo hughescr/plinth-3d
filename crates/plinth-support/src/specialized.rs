@@ -3036,6 +3036,16 @@ struct GatePeakUsage {
     /// allocation this stage holds and does not charge for is the defect record
     /// fixes F6 and F9 found twice already.
     nearest_witness_bytes: usize,
+    /// The batch's retained per-proposal nearest plans, from
+    /// [`GatePlannedNearest::retained_plan_bytes`] (FU-8d phase F3,
+    /// 2026-08-06).  Retained, not phase-local: planning them once instead of
+    /// four times means all of them are live from the plan until the last
+    /// variant is evaluated, where before only the widest was.  Charged for the
+    /// same reason record fixes F6 and F9 charged their buffers — an allocation
+    /// the stage holds and does not charge for is a hole in the bound, and
+    /// trading operations for uncharged bytes would be the same trade in
+    /// reverse.
+    proposal_plan_bytes: usize,
     coverage_scratch_bytes: usize,
     coverage_nearest_bytes: usize,
     coverage_retained_bytes: usize,
@@ -3051,6 +3061,7 @@ fn check_gate_peak(usage: GatePeakUsage, limit: usize) -> Result<usize, Speciali
         .and_then(|bytes| bytes.checked_add(usage.batch_index_bytes))
         .and_then(|bytes| bytes.checked_add(usage.nearest_bytes))
         .and_then(|bytes| bytes.checked_add(usage.nearest_witness_bytes))
+        .and_then(|bytes| bytes.checked_add(usage.proposal_plan_bytes))
         .ok_or(SpecializedError::GateResourceOverflow)?;
     let coverage_phase = retained
         .checked_add(usage.coverage_scratch_bytes)
@@ -3488,46 +3499,96 @@ enum VariantRoutedWork {
     },
 }
 
+/// The batch-level totals every variant's operation count is stated over,
+/// computed **once** for the batch (FU-8d phase F3, part P5).
+///
+/// # Why these are batch-level and not per-variant
+///
+/// Both totals are proposal-invariant, and `variant_operation_count` re-derived
+/// both of them for every one of the `proposals + 1` variants — the same defect
+/// FU-8c removed from the nearest phase and FU-8b removed from the load
+/// extension, in its fourth dress.  On the Weeping Treant that is
+/// `39,224 × 1,366` contact visits and `39,224 × 1,095` demand visits to
+/// recompute two numbers that never change.
+///
+/// **The proposal variant's logical contact work is `baseline − 1`, exactly.**
+/// Writing `n` for the contact count, `R` for `Σ regular_routes` and `D` for
+/// `Σ demands`, the baseline sums `1 + routes + demands` over every contact, so
+/// it is `n + R + D`.  A proposal variant skips `left` and `right` and then
+/// adds one merged seat carrying the union of their route and demand slots:
+/// `(n − 2) + (R − r_l − r_r) + (D − d_l − d_r)` plus
+/// `1 + r_l + r_r + d_l + d_r`, i.e. `n − 1 + R + D`.  Every proposal-specific
+/// term cancels, which is why the derivation needs no knowledge of *which* pair
+/// merged.  Its physical contact count is `n − 1` for the same reason: two
+/// seats leave, one arrives.
+///
+/// Pinned by `fu8d_variant_totals_are_derived_not_rescanned`, which compares
+/// the derivation against the rescan it replaces over every proposal of the
+/// delta fixture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GateVariantTotals {
+    /// `Σ_contacts 1 + regular_routes + demands`, the baseline variant's own
+    /// logical contact work.
+    logical_contact_work: usize,
+    /// The batch's contact count, i.e. the baseline variant's physical seats.
+    physical_contacts: usize,
+    /// `Σ_demands demand_satisfaction_work(demand)`.
+    demand_satisfaction: usize,
+}
+
+impl GateVariantTotals {
+    fn build(
+        contacts: &[WorkingContact],
+        demands: &[SpecializedDemand],
+    ) -> Result<Self, SpecializedError> {
+        let logical_contact_work = contacts.iter().try_fold(0usize, |total, contact| {
+            total
+                .checked_add(1)
+                .and_then(|work| work.checked_add(contact.regular_routes.len()))
+                .and_then(|work| work.checked_add(contact.demands.len()))
+                .ok_or(SpecializedError::GateResourceOverflow)
+        })?;
+        let demand_satisfaction = demands.iter().try_fold(0usize, |total, demand| {
+            total
+                .checked_add(demand_satisfaction_work(demand)?)
+                .ok_or(SpecializedError::GateResourceOverflow)
+        })?;
+        Ok(Self {
+            logical_contact_work,
+            physical_contacts: contacts.len(),
+            demand_satisfaction,
+        })
+    }
+
+    /// This batch's totals as one variant sees them.  See the type's own
+    /// documentation for why the proposal case is `baseline − 1` on both
+    /// counts and needs no proposal argument.
+    fn for_variant(self, merged: bool) -> Result<(usize, usize), SpecializedError> {
+        if !merged {
+            return Ok((self.logical_contact_work, self.physical_contacts));
+        }
+        let logical = self
+            .logical_contact_work
+            .checked_sub(1)
+            .ok_or(SpecializedError::GateResourceOverflow)?;
+        let physical = self
+            .physical_contacts
+            .checked_sub(1)
+            .ok_or(SpecializedError::GateResourceOverflow)?;
+        Ok((logical, physical))
+    }
+}
+
 fn variant_operation_count(
-    contacts: &[WorkingContact],
-    proposal: Option<&MergeProposal>,
+    totals: GateVariantTotals,
+    merged: bool,
     routed: VariantRoutedWork,
-    demands: &[SpecializedDemand],
+    demand_count: usize,
     face_count: usize,
     owner_face_count: usize,
 ) -> Result<usize, SpecializedError> {
-    let mut logical_contact_work = 0usize;
-    let mut physical_contacts = 0usize;
-    for (index, contact) in contacts.iter().enumerate() {
-        if proposal.is_some_and(|p| index == p.left || index == p.right) {
-            continue;
-        }
-        logical_contact_work = logical_contact_work
-            .checked_add(1)
-            .and_then(|work| work.checked_add(contact.regular_routes.len()))
-            .and_then(|work| work.checked_add(contact.demands.len()))
-            .ok_or(SpecializedError::GateResourceOverflow)?;
-        physical_contacts = physical_contacts
-            .checked_add(1)
-            .ok_or(SpecializedError::GateResourceOverflow)?;
-    }
-    if let Some(proposal) = proposal {
-        logical_contact_work = logical_contact_work
-            .checked_add(1)
-            .and_then(|work| work.checked_add(contacts[proposal.left].regular_routes.len()))
-            .and_then(|work| work.checked_add(contacts[proposal.right].regular_routes.len()))
-            .and_then(|work| work.checked_add(contacts[proposal.left].demands.len()))
-            .and_then(|work| work.checked_add(contacts[proposal.right].demands.len()))
-            .ok_or(SpecializedError::GateResourceOverflow)?;
-        physical_contacts = physical_contacts
-            .checked_add(1)
-            .ok_or(SpecializedError::GateResourceOverflow)?;
-    }
-    let demand_satisfaction = demands.iter().try_fold(0usize, |total, demand| {
-        total
-            .checked_add(demand_satisfaction_work(demand)?)
-            .ok_or(SpecializedError::GateResourceOverflow)
-    })?;
+    let (logical_contact_work, physical_contacts) = totals.for_variant(merged)?;
+    let demand_satisfaction = totals.demand_satisfaction;
     // FU-8c: only the baseline variant routes every contact against every
     // sample and demand.  A proposal variant pays for the routes it perturbs,
     // the sample rows it rewrites, and one merged-seat test per demand.
@@ -3536,7 +3597,7 @@ fn variant_operation_count(
     let (routing_work, satisfaction_work) = match routed {
         VariantRoutedWork::BaselineSweep { sample_count } => {
             let routed_queries = sample_count
-                .checked_add(demands.len())
+                .checked_add(demand_count)
                 .ok_or(SpecializedError::GateResourceOverflow)?;
             (
                 logical_contact_work
@@ -3652,6 +3713,7 @@ fn evaluate_gate_batch(
         authoritative_demands.len(),
         &batch_index,
         limits.coverage_route_knn,
+        gate_operation_limit,
     )?;
     let plan = gate_resource_plan(
         contacts.len(),
@@ -3659,9 +3721,15 @@ fn evaluate_gate_batch(
         coverage_samples.len(),
         face_count,
         authoritative_demands.len(),
-        planned_nearest.proposal_work,
+        planned_nearest.batch.proposal_work,
         limits,
     )?;
+    // FU-8d phase F3 (P5): the batch's proposal-invariant contact and demand
+    // totals, computed once.  `variant_operation_count` used to re-derive both
+    // for every variant; see [`GateVariantTotals`] for why the proposal
+    // variant's are the baseline's minus one, exactly, with no proposal in the
+    // derivation.
+    let variant_totals = GateVariantTotals::build(contacts, authoritative_demands)?;
     let mut descriptor_operations = 0usize;
     let exact_operations = (0..plan.variants).try_fold(0usize, |total, variant| {
         let proposal = variant
@@ -3680,13 +3748,12 @@ fn evaluate_gate_batch(
             None => VariantRoutedWork::BaselineSweep {
                 sample_count: coverage_samples.len(),
             },
-            Some(proposal) => {
-                let delta = plan_proposal_nearest_delta(
-                    contacts,
-                    proposal,
-                    &batch_index,
-                    limits.coverage_route_knn,
-                )?;
+            Some(_) => {
+                // FU-8d phase F3: the second of the four planning passes lived
+                // here.  The fold now *charges* the plan the batch already made
+                // instead of re-deriving it, so the charge and the plan cannot
+                // disagree by construction.
+                let delta = &planned_nearest.proposals[variant - 1];
                 VariantRoutedWork::ProposalDelta {
                     nearest_work: delta.work,
                     touched_rows: delta.touched_rows,
@@ -3696,10 +3763,10 @@ fn evaluate_gate_batch(
         };
         total
             .checked_add(variant_operation_count(
-                contacts,
-                proposal,
+                variant_totals,
+                proposal.is_some(),
                 routed,
-                authoritative_demands,
+                authoritative_demands.len(),
                 face_count,
                 owner_face_count,
             )?)
@@ -3750,7 +3817,7 @@ fn evaluate_gate_batch(
         topology,
         islands,
         coverage_samples,
-        authoritative_demands.len(),
+        &planned_nearest,
         &batch_index,
         limits,
         &plan,
@@ -3864,8 +3931,9 @@ fn evaluate_gate_batch(
                         batch_index_bytes: batch_index.retained_bytes,
                         nearest_bytes: gate_nearest_array_bytes(coverage_samples.len())?,
                         nearest_witness_bytes: gate_nearest_witness_bytes(coverage_samples.len())?,
+                        proposal_plan_bytes: planned_nearest.retained_plan_bytes,
                         coverage_scratch_bytes: coverage_scratch.scratch_bytes,
-                        coverage_nearest_bytes: planned_nearest.peak_bytes()?,
+                        coverage_nearest_bytes: planned_nearest.batch.peak_bytes()?,
                         coverage_retained_bytes,
                         load_scratch_bytes: max_load_scratch,
                     },
@@ -3910,13 +3978,15 @@ fn evaluate_gate_batch(
                     let nearest: &[f64] = match proposal {
                         None => &baseline_nearest,
                         Some(proposal) => {
-                            let delta = plan_proposal_nearest_delta(
-                                contacts,
-                                proposal,
-                                &batch_index,
-                                limits.coverage_route_knn,
-                            )?;
-                            executed_nearest.record_proposal(&delta)?;
+                            // FU-8d phase F3: the fourth planning pass lived
+                            // here.  Execution reads the batch's own plan and
+                            // records that it consumed it, which is what the
+                            // re-founded `GateRoutePlanMismatch` now attests:
+                            // that every planned proposal was executed, once
+                            // and in order — not that a second planning pass
+                            // agreed with the first.
+                            let delta = &planned_nearest.proposals[variant - 1];
+                            executed_nearest.record_proposal(delta)?;
                             fill_proposal_nearest_delta(
                                 proposal,
                                 GateNearestBaseline {
@@ -4222,8 +4292,106 @@ impl GateNearestBatchPlan {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times [`plan_proposal_nearest_delta`] has run **on this
+    /// thread**.
+    ///
+    /// Test-only, and the pin behind FU-8d phase F3's "4 → 1": counting the
+    /// passes is the only way to observe a *removed repetition*, since three of
+    /// the four passes computed the same value the first one did and so left no
+    /// trace in any result.
+    /// `fu8d_a_gate_batch_plans_each_proposal_delta_exactly_once` reads it.
+    ///
+    /// Thread-local rather than process-wide because the test harness runs
+    /// tests in parallel while the planning path is serial: a global counter
+    /// would measure whatever else happened to be planning at the same moment.
+    static PROPOSAL_DELTA_PLANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The batch's nearest plan **and** the per-proposal deltas it was summed
+/// from, retained so no later site has to re-derive one (FU-8d phase F3).
+///
+/// # Why the deltas are retained rather than recomputed
+///
+/// FU-8d part (3) recorded that `plan_proposal_nearest_delta` ran **four**
+/// times for every proposal in a batch — once to build the batch plan, once
+/// inside the `exact_operations` fold that charges it, once inside
+/// `whole_gate_route_preflight`'s own re-plan, and once more in the execution
+/// loop — while the check that can refuse the batch sits after the first two.
+/// Every one of those passes computes the same function of the same immutable
+/// inputs (`contacts`, the proposal, the proposal-invariant [`GateBatchIndex`],
+/// and the limits), so three of the four were pure repetition.  They are now
+/// planned once, here, and read everywhere else: **4 → 1**.
+///
+/// The retention is charged.  `retained_plan_bytes` is the logical size of this
+/// vector — one [`ProposalNearestPlan`] per proposal plus each plan's own
+/// [`ProposalRouteDelta`] rows — and it enters [`GatePeakUsage`] as
+/// `proposal_plan_bytes`.  Before F3 only the *widest* proposal's execution
+/// scratch was charged (`max_proposal_retained_bytes`), because only one plan
+/// existed at a time.
+struct GatePlannedNearest {
+    batch: GateNearestBatchPlan,
+    proposals: Vec<ProposalNearestPlan>,
+    retained_plan_bytes: usize,
+}
+
+/// Bound the per-proposal planning pass **before** running it (FU-8d part (3)).
+///
+/// The hole part (3) names is not only that the planning passes were repeated:
+/// it is that *none of them was charged before it ran*.  A resource plan that
+/// cannot be afforded until after it has been executed bounds nothing, and on
+/// the Weeping Treant the gate burned 124 s deciding it was not allowed to
+/// proceed.  The fix has two halves and this is the first: a bound derived from
+/// the batch header alone — no route gather, no `BTreeMap`, no kNN arithmetic —
+/// checked against the same materialized `gate_operation_limit` the batch will
+/// be held to.
+///
+/// The bound is `Σ_proposals routes(left) + demands(left) + routes(right) +
+/// demands(right)`, which is exactly [`ProposalNearestPlan::key_visits`]
+/// summed, because [`push_contact_route_keys`] pushes one key per regular route
+/// and one per demand and [`proposal_route_keys`] records the pushed length
+/// before it sorts.  So this is not a *model* of the planning pass: it is the
+/// planning pass's own charged term, computed from counts the header already
+/// holds.  The second half is that the same term is then charged for real, as
+/// `GateProposalRoutedWork::key_visits`; a `debug_assert` in
+/// [`plan_gate_nearest_batch`] pins the two against each other.
+///
+/// Reading two `Vec` lengths per proposal is the one thing this cannot avoid,
+/// and it is `4 × proposals` slot reads against a bound that is itself at least
+/// the batch's `samples × contacts` floor — parts per million of what it
+/// guards.
+fn proposal_planning_precheck(
+    contacts: &[WorkingContact],
+    proposals: &[MergeProposal],
+    limit: usize,
+) -> Result<usize, SpecializedError> {
+    let mut key_visits = 0usize;
+    for proposal in proposals {
+        for contact in [&contacts[proposal.left], &contacts[proposal.right]] {
+            key_visits = key_visits
+                .checked_add(contact.regular_routes.len())
+                .and_then(|total| total.checked_add(contact.demands.len()))
+                .ok_or(SpecializedError::GateResourceOverflow)?;
+        }
+    }
+    if key_visits > limit {
+        return Err(SpecializedError::GateOperationLimit {
+            required: key_visits,
+            limit,
+        });
+    }
+    Ok(key_visits)
+}
+
 /// Plan the whole batch's nearest phase without gathering a point or building
 /// an index: one baseline route plan, then one route-local delta per proposal.
+///
+/// FU-8d phase F3: the deltas are **retained** in the returned
+/// [`GatePlannedNearest`] rather than discarded, and the loop below is now the
+/// only place in a gate batch that runs one.  It is preceded by
+/// [`proposal_planning_precheck`], so a batch whose planning pass alone would
+/// exceed its operation cap is refused before the first key is gathered.
 fn plan_gate_nearest_batch(
     contacts: &[WorkingContact],
     proposals: &[MergeProposal],
@@ -4231,7 +4399,9 @@ fn plan_gate_nearest_batch(
     demand_count: usize,
     index: &GateBatchIndex,
     limits: KnnBatchLimits,
-) -> Result<GateNearestBatchPlan, SpecializedError> {
+    gate_operation_limit: usize,
+) -> Result<GatePlannedNearest, SpecializedError> {
+    let planning_bound = proposal_planning_precheck(contacts, proposals, gate_operation_limit)?;
     let mut plan = GateNearestBatchPlan::seeded();
     let baseline = plan_variant_nearest_routes(
         contacts,
@@ -4241,9 +4411,18 @@ fn plan_gate_nearest_batch(
         NearestWitnessRetention::RetainWitnesses,
     )?;
     plan.record_baseline(&baseline);
+    let mut retained_plan_bytes = checked_route_bytes::<ProposalNearestPlan>(proposals.len())?;
+    let mut retained = Vec::with_capacity(proposals.len());
     for proposal in proposals {
         let delta = plan_proposal_nearest_delta(contacts, proposal, index, limits)?;
         plan.record_proposal(&delta)?;
+        retained_plan_bytes = checked_route_bytes::<ProposalRouteDelta>(delta.deltas.len())
+            .and_then(|bytes| {
+                retained_plan_bytes
+                    .checked_add(bytes)
+                    .ok_or(SpecializedError::GateResourceOverflow)
+            })?;
+        retained.push(delta);
     }
     plan.record_demand_rows(
         proposals
@@ -4251,7 +4430,12 @@ fn plan_gate_nearest_batch(
             .checked_mul(demand_count)
             .ok_or(SpecializedError::GateResourceOverflow)?,
     )?;
-    Ok(plan)
+    debug_assert_eq!(plan.proposal_work.key_visits, planning_bound);
+    Ok(GatePlannedNearest {
+        batch: plan,
+        proposals: retained,
+        retained_plan_bytes,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -4311,19 +4495,15 @@ fn whole_gate_route_preflight(
     topology: &plinth_mesh::FaceTopology,
     islands: &[SupportIsland],
     coverage_samples: &[CoverageSample],
-    demand_count: usize,
+    planned_nearest: &GatePlannedNearest,
     index: &GateBatchIndex,
     limits: SpecializedLimits,
     gate_plan: &GateResourcePlan,
 ) -> Result<GateWholeRoutePlan, SpecializedError> {
-    let nearest = plan_gate_nearest_batch(
-        contacts,
-        proposals,
-        coverage_samples,
-        demand_count,
-        index,
-        limits.coverage_route_knn,
-    )?;
+    // FU-8d phase F3: the third of the four `plan_proposal_nearest_delta`
+    // passes lived here.  The plan is now the caller's, computed once by
+    // `plan_gate_nearest_batch` before the batch's operation check, and read.
+    let nearest = planned_nearest.batch;
     let nearest_bytes = gate_nearest_array_bytes(coverage_samples.len())?;
     let nearest_witness_bytes = gate_nearest_witness_bytes(coverage_samples.len())?;
     let coverage_nearest_bytes = nearest.peak_bytes()?;
@@ -4414,6 +4594,7 @@ fn whole_gate_route_preflight(
                     batch_index_bytes: index.retained_bytes,
                     nearest_bytes,
                     nearest_witness_bytes,
+                    proposal_plan_bytes: planned_nearest.retained_plan_bytes,
                     coverage_scratch_bytes: coverage_scratch.scratch_bytes,
                     coverage_nearest_bytes,
                     coverage_retained_bytes,
@@ -4467,7 +4648,7 @@ fn whole_gate_route_preflight_then_execute<T>(
     topology: &plinth_mesh::FaceTopology,
     islands: &[SupportIsland],
     coverage_samples: &[CoverageSample],
-    demand_count: usize,
+    planned_nearest: &GatePlannedNearest,
     index: &GateBatchIndex,
     limits: SpecializedLimits,
     gate_plan: &GateResourcePlan,
@@ -4482,7 +4663,7 @@ fn whole_gate_route_preflight_then_execute<T>(
             topology,
             islands,
             coverage_samples,
-            demand_count,
+            planned_nearest,
             index,
             limits,
             gate_plan,
@@ -5257,6 +5438,8 @@ fn plan_proposal_nearest_delta(
     index: &GateBatchIndex,
     limits: KnnBatchLimits,
 ) -> Result<ProposalNearestPlan, SpecializedError> {
+    #[cfg(test)]
+    PROPOSAL_DELTA_PLANS.with(|count| count.set(count.get() + 1));
     let pair = MergedPair::of(proposal);
     let (keys, key_visits) = proposal_route_keys(contacts, pair);
     let mut deltas = Vec::with_capacity(keys.len());
@@ -5365,7 +5548,7 @@ struct GateNearestBaseline<'a> {
 fn fill_proposal_nearest_delta(
     proposal: &MergeProposal,
     baseline: GateNearestBaseline<'_>,
-    plan: ProposalNearestPlan,
+    plan: &ProposalNearestPlan,
     query_scratch: &mut Vec<[f64; 3]>,
     nearest: &mut [f64],
     touched: &mut Vec<usize>,
@@ -6634,6 +6817,8 @@ mod tests {
             nearest_bytes: 0,
             // Zero for the same reason, added 2026-08-06 (FU-8d).
             nearest_witness_bytes: 0,
+            // Zero for the same reason, added 2026-08-06 (FU-8d phase F3).
+            proposal_plan_bytes: 0,
             coverage_scratch_bytes: 0,
             coverage_nearest_bytes: 0,
             coverage_retained_bytes: 0,
@@ -7024,7 +7209,7 @@ mod tests {
                     index: &index,
                     witnesses: &witnesses,
                 },
-                delta,
+                &delta,
                 &mut query_scratch,
                 &mut working,
                 &mut touched,
@@ -7167,6 +7352,209 @@ mod tests {
             coverage.exact_tie_rows > 0,
             "no survivor tied the merged seat exactly, so the tie arm is untested"
         );
+    }
+
+    /// FU-8d phase F3, part (3) — **the planning pass runs once per proposal,
+    /// not four times.**
+    ///
+    /// A removed repetition leaves no trace in any result: all four passes
+    /// computed the same value of the same pure function, so nothing but a call
+    /// count can observe the difference.  This reads the count directly.
+    ///
+    /// It also pins that the retained plans *are* the plans — each one equals
+    /// what a fresh pass would produce for the same proposal — because "read
+    /// the plan instead of recomputing it" is only sound if the two agree.  The
+    /// re-derivation below is the last remaining place in the crate that plans
+    /// a delta outside `plan_gate_nearest_batch`, and it is test-only.
+    #[test]
+    fn fu8d_a_gate_batch_plans_each_proposal_delta_exactly_once() {
+        let (contacts, samples, demands, proposals, layers) = fu8d_delta_fixture();
+        let index =
+            GateBatchIndex::build(&contacts, &samples, &demands, &layers, 1.0).expect("index");
+        assert!(
+            proposals.len() > 1,
+            "a one-proposal fixture cannot tell 1 pass per proposal from 1 per batch"
+        );
+
+        let before = PROPOSAL_DELTA_PLANS.with(std::cell::Cell::get);
+        let planned = plan_gate_nearest_batch(
+            &contacts,
+            &proposals,
+            &samples,
+            demands.len(),
+            &index,
+            TEST_KNN_LIMITS,
+            usize::MAX,
+        )
+        .expect("planned batch");
+        let spent = PROPOSAL_DELTA_PLANS.with(std::cell::Cell::get) - before;
+        assert_eq!(
+            spent,
+            proposals.len(),
+            "planning the batch cost {spent} delta passes for {} proposals",
+            proposals.len()
+        );
+        assert_eq!(planned.proposals.len(), proposals.len());
+
+        for (proposal, retained) in proposals.iter().zip(&planned.proposals) {
+            let fresh =
+                plan_proposal_nearest_delta(&contacts, proposal, &index, TEST_KNN_LIMITS).unwrap();
+            assert_eq!(retained.touched_rows, fresh.touched_rows);
+            assert_eq!(retained.key_visits, fresh.key_visits);
+            assert_eq!(retained.work, fresh.work);
+            assert_eq!(retained.deltas.len(), fresh.deltas.len());
+            for (left, right) in retained.deltas.iter().zip(&fresh.deltas) {
+                assert_eq!(left.route, right.route);
+                assert_eq!(left.source_count, right.source_count);
+                assert_eq!(left.query_count, right.query_count);
+            }
+        }
+
+        // The retention is charged, and the charge is the vector's own shape.
+        let expected_bytes = proposals.len() * std::mem::size_of::<ProposalNearestPlan>()
+            + planned
+                .proposals
+                .iter()
+                .map(|plan| plan.deltas.len() * std::mem::size_of::<ProposalRouteDelta>())
+                .sum::<usize>();
+        assert_eq!(planned.retained_plan_bytes, expected_bytes);
+        assert!(planned.retained_plan_bytes > 0);
+    }
+
+    /// FU-8d phase F3, part P5 — **the variant totals are derived, not
+    /// rescanned, and the derivation is exact.**
+    ///
+    /// [`GateVariantTotals::for_variant`] claims a proposal variant's logical
+    /// contact work and physical seat count are the baseline's minus one, with
+    /// no dependence on *which* pair merged.  That is an arithmetic identity
+    /// (see the type's docs), and this is its check: the rescan it replaces —
+    /// skip both members, then add one merged seat carrying the union of their
+    /// route and demand slots — is written out below and compared against the
+    /// derivation for **every** proposal of the fixture.
+    ///
+    /// A fixture whose contacts all carried the same route and demand counts
+    /// could not tell the identity from a coincidence, so the assertion below
+    /// refuses to pass unless the members' own slot counts actually vary.
+    #[test]
+    fn fu8d_variant_totals_are_derived_not_rescanned() {
+        let (contacts, _samples, demands, proposals, _layers) = fu8d_delta_fixture();
+        let totals = GateVariantTotals::build(&contacts, &demands).expect("totals");
+
+        assert_eq!(
+            totals.for_variant(false),
+            Ok((totals.logical_contact_work, contacts.len()))
+        );
+
+        let mut member_shapes = std::collections::BTreeSet::new();
+        for proposal in &proposals {
+            // The rescan `variant_operation_count` performed per variant before
+            // FU-8d phase F3, verbatim in effect.
+            let mut logical = 0usize;
+            let mut physical = 0usize;
+            for (index, contact) in contacts.iter().enumerate() {
+                if index == proposal.left || index == proposal.right {
+                    continue;
+                }
+                logical += 1 + contact.regular_routes.len() + contact.demands.len();
+                physical += 1;
+            }
+            let left = &contacts[proposal.left];
+            let right = &contacts[proposal.right];
+            logical += 1
+                + left.regular_routes.len()
+                + right.regular_routes.len()
+                + left.demands.len()
+                + right.demands.len();
+            physical += 1;
+            member_shapes.insert((
+                left.regular_routes.len() + left.demands.len(),
+                right.regular_routes.len() + right.demands.len(),
+            ));
+
+            assert_eq!(
+                totals.for_variant(true),
+                Ok((logical, physical)),
+                "derived totals disagree with the rescan for proposal {}/{}",
+                proposal.left,
+                proposal.right
+            );
+        }
+        assert!(
+            member_shapes.len() > 1,
+            "every proposal merged identically shaped members, so the \
+             cancellation is untested"
+        );
+    }
+
+    /// FU-8d phase F3, part (3) — **the planning pass is bounded before it
+    /// runs.**
+    ///
+    /// Part (3)'s complaint is not only repetition: the whole cost of deciding
+    /// that a batch may not proceed was paid *before* the check that refuses
+    /// it, and none of it was charged.  This pins the pre-check that closes
+    /// that hole: with a limit one under the batch's own `key_visits` total,
+    /// the batch is refused with the gate's `GateOperationLimit` and **no delta
+    /// is planned at all** — the call counter does not move.
+    #[test]
+    fn fu8d_the_planning_precheck_refuses_before_any_delta_is_planned() {
+        let (contacts, samples, demands, proposals, layers) = fu8d_delta_fixture();
+        let index =
+            GateBatchIndex::build(&contacts, &samples, &demands, &layers, 1.0).expect("index");
+        let admitted = plan_gate_nearest_batch(
+            &contacts,
+            &proposals,
+            &samples,
+            demands.len(),
+            &index,
+            TEST_KNN_LIMITS,
+            usize::MAX,
+        )
+        .expect("planned batch");
+        let key_visits = admitted.batch.proposal_work.key_visits;
+        assert!(key_visits > 0);
+
+        // The pre-check is stated over the header alone and agrees exactly with
+        // the term the batch is charged.
+        assert_eq!(
+            proposal_planning_precheck(&contacts, &proposals, usize::MAX),
+            Ok(key_visits)
+        );
+
+        let before = PROPOSAL_DELTA_PLANS.with(std::cell::Cell::get);
+        assert_eq!(
+            plan_gate_nearest_batch(
+                &contacts,
+                &proposals,
+                &samples,
+                demands.len(),
+                &index,
+                TEST_KNN_LIMITS,
+                key_visits - 1,
+            )
+            .err(),
+            Some(SpecializedError::GateOperationLimit {
+                required: key_visits,
+                limit: key_visits - 1,
+            })
+        );
+        assert_eq!(
+            PROPOSAL_DELTA_PLANS.with(std::cell::Cell::get),
+            before,
+            "the refusal planned a delta, so the cost was paid before the check"
+        );
+
+        // Exactly at the bound the batch is admitted, so the check is a
+        // boundary and not a blanket refusal.
+        assert!(plan_gate_nearest_batch(
+            &contacts,
+            &proposals,
+            &samples,
+            demands.len(),
+            &index,
+            TEST_KNN_LIMITS,
+            key_visits,
+        )
+        .is_ok());
     }
 
     /// FU-8d part (1), the retention lemma.  **Three retained witnesses answer
@@ -7711,6 +8099,8 @@ mod tests {
             nearest_bytes: 0,
             // Zero for the same reason, added 2026-08-06 (FU-8d).
             nearest_witness_bytes: 0,
+            // Zero for the same reason, added 2026-08-06 (FU-8d phase F3).
+            proposal_plan_bytes: 0,
             coverage_scratch_bytes: 0,
             coverage_nearest_bytes: logical_peak_bytes,
             coverage_retained_bytes: 0,
@@ -9033,6 +9423,8 @@ mod tests {
             nearest_bytes: 0,
             // Zero for the same reason, added 2026-08-06 (FU-8d).
             nearest_witness_bytes: 0,
+            // Zero for the same reason, added 2026-08-06 (FU-8d phase F3).
+            proposal_plan_bytes: 0,
             coverage_scratch_bytes: 40,
             coverage_nearest_bytes: 0,
             coverage_retained_bytes: 8,
@@ -9086,6 +9478,8 @@ mod tests {
             nearest_bytes: 0,
             // Zero for the same reason, added 2026-08-06 (FU-8d).
             nearest_witness_bytes: 0,
+            // Zero for the same reason, added 2026-08-06 (FU-8d phase F3).
+            proposal_plan_bytes: 0,
             coverage_scratch_bytes: 40,
             coverage_nearest_bytes: 0,
             coverage_retained_bytes: 8,
