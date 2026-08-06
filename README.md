@@ -124,6 +124,24 @@ Measured on the 8-model corpus, most recently by the unified census of 2026-08-0
   until it lands, every physics conclusion rests on procedural fixtures plus two
   primitives.
 
+  > **Corrected 2026-08-06 — dated addendum; the bullet above is left standing as written.**
+  > **"It now decimates" is an overstatement.** The eighth model runs the decimation *search*
+  > and gets the original mesh back: every reduced candidate fails the topology gate
+  > (`nonmanifold_edges` goes 0 → non-zero at every attempted ratio), so decimation is a
+  > **no-op** on this model and its 429,120 triangles are the raw STL count, not a reduced
+  > one. **The stopping point has also moved.** The kNN cap named above was raised on
+  > measurement and is cleared; as of 2026-08-06 the model clears perception, the
+  > candidate-surface grid, the specialized gate's proposal-free batch and the entire load
+  > stage in 81.5 s at 2.84 GB peak RSS, and is halted further downstream — at the *merge*
+  > gate, which re-evaluates every contact against every coverage sample once per merge
+  > proposal and so states a demand of 21,755,124,103,146 operations against a measured
+  > bound of 35,445,500,736. That is tracked as FU-8c, and it is an algorithm defect, not a
+  > cap to raise. The rest of the bullet stands: this is still the largest known blind spot
+  > in the engine, and until it lands every physics conclusion rests on procedural fixtures
+  > plus two primitives. See `docs/rust-migration/CURRENT-STATUS.md` (*FU-8b resolved; the
+  > treant's stopping point moved*) and
+  > `docs/rust-migration/decimation-design-2026-08-06.md`.
+
 The stages exist as libraries and the census harness runs the real chain from STL through
 a sealed support run. The folder-level runner that chains them all the way to a written
 `.chitubox` is roadmap, per [The goal](#the-goal) above.

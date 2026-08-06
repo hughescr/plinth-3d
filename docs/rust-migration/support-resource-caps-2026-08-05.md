@@ -22,6 +22,20 @@ resource cap:
 Preparation: Perception(PointIndex("kNN work requires 298667520; limit is 100000000"))
 ```
 
+> **CORRECTED 2026-08-06 — dated addendum, the sentence above is left standing.**
+> "429,120 support faces **after decimation and hollowing**" attributes the count to two
+> stages that did not produce it. **429,120 is the raw STL triangle count** of
+> `corpus/models/Weeping Treant v1.2.stl` (`od -An -tu4 -j80 -N4` on the file). Decimation
+> is a **no-op** on this model — every reduced candidate fails `topology_not_increased`, so
+> `plinth_decimate::run` returns the original mesh unchanged — and the census hollows via
+> `HollowedModel::solid_decision`
+> (`crates/plinth-support/examples/embed_incidence_census.rs:93-95`), which decides *solid*
+> and moves no triangle. **Neither stage touched the count.** Nothing else in this document
+> depends on the attribution: every measurement below was taken on the 429,120-face mesh,
+> which is what the pipeline actually hands the support stage. Evidence:
+> [`decimation-design-2026-08-06.md`](decimation-design-2026-08-06.md) §0, and owner ruling
+> R6 in `CURRENT-STATUS.md`.
+
 Not one of the support pipeline's ~35 execution caps had a measurement of
 record. `git log -S` puts them all in Codex-era commits **73e7c13** ("Assemble
 preparation resource policy") and **c2b3b98** ("repair specialized verifier
