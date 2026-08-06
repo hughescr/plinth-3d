@@ -152,8 +152,11 @@ pub struct SupportPreparationLimits {
     max_grid_bytes: usize,
     /// `SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE`.
     grid_bytes_per_face: usize,
-    /// `SUPPORT_KNN_MAX_WORK_PER_FACE`. The matching floor is already carried
-    /// inside both `KnnBatchLimits::max_work` fields below.
+    /// `SUPPORT_KNN_MAX_WORK_PER_FACE`. It scales exactly one batch, the
+    /// perception minima-to-face kNN, because that is the only kNN batch with a
+    /// measurement of record. `SUPPORT_KNN_MAX_WORK_FLOOR` is carried inside
+    /// both `KnnBatchLimits::max_work` fields below, and for the specialized
+    /// coverage-route batch the floor is the whole cap.
     knn_max_work_per_face: usize,
     candidate_config: CandidatePayloadConfig,
     perception_limits: GenericPerceptionLimits,
@@ -270,12 +273,14 @@ impl SupportPreparationLimits {
         );
         let mut perception_limits = self.perception_limits;
         perception_limits.minima_knn.max_work = knn_max_work;
-        let mut specialized_limits = self.specialized_limits;
-        specialized_limits.coverage_route_knn.max_work = model_scaled_cap(
-            specialized_limits.coverage_route_knn.max_work,
-            self.knn_max_work_per_face,
-            face_count,
-        );
+        // The specialized coverage-route kNN batch shares the `KnnBatchLimits`
+        // *shape* with the minima batch, but it is deliberately NOT scaled.
+        // `SUPPORT_KNN_WORK_PER_FACE_OBSERVED` (696) was measured on the
+        // minima-to-face batch alone; the coverage-route batch has no
+        // measurement of record, so scaling it by that coefficient would be an
+        // undisclosed third cap resting on someone else's number. It stays at
+        // the flat `SUPPORT_KNN_MAX_WORK_FLOOR` until it is measured.
+        let specialized_limits = self.specialized_limits;
         SupportPreparationInput {
             layers,
             delicacy_by_face,
@@ -312,6 +317,14 @@ impl SupportPreparationInput<'_> {
     #[must_use]
     pub const fn minima_knn_max_work(&self) -> usize {
         self.perception_limits.minima_knn.max_work
+    }
+    /// The specialized coverage-route kNN work cap for this model. Read-only
+    /// on the same terms as [`Self::minima_knn_max_work`], and unlike it this
+    /// one is *not* model-scaled: it is here so a test can pin that fact
+    /// rather than let a third scaled cap reappear undisclosed.
+    #[must_use]
+    pub const fn coverage_route_knn_max_work(&self) -> usize {
+        self.specialized_limits.coverage_route_knn.max_work
     }
     #[must_use]
     pub const fn max_primitives(&self) -> usize {

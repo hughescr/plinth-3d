@@ -48,6 +48,48 @@ fn caps_for(face_count: usize) -> (usize, usize) {
     (input.minima_knn_max_work(), input.max_grid_bytes())
 }
 
+fn coverage_route_knn_cap_for(face_count: usize) -> usize {
+    let layers = LayerPlan::new(0.0, vec![0.05; 8]).expect("layer plan");
+    let delicacy = vec![0.0_f64; face_count];
+    SupportPreparationLimits::production()
+        .expect("production limits")
+        .input(&layers, &delicacy, &[])
+        .coverage_route_knn_max_work()
+}
+
+/// The scaled family has exactly two members, and this is the fence.
+///
+/// The specialized coverage-route kNN batch shares `KnnBatchLimits` with the
+/// minima batch, so scaling it costs one line and discloses nothing. It is not
+/// scaled: `SUPPORT_KNN_WORK_PER_FACE_OBSERVED` = 696 was measured on the
+/// minima-to-face batch, and the coverage-route batch has no measurement of
+/// record. It stays at the flat floor for every model, treant included, until
+/// one exists.
+#[test]
+fn the_coverage_route_knn_cap_is_the_flat_floor_at_every_face_count() {
+    let (knn_floor, knn_per_face, _, _) = floors_and_coefficients();
+    for faces in [
+        0,
+        1,
+        12,
+        24,
+        LARGEST_REACHABLE_CORPUS_FACES,
+        32_768,
+        TREANT_FACES,
+        100_000_000,
+    ] {
+        assert_eq!(
+            coverage_route_knn_cap_for(faces),
+            knn_floor,
+            "the coverage-route kNN cap must stay at its unscaled floor at {faces} faces"
+        );
+    }
+
+    // And it really is unscaled, not coincidentally equal: at the treant's face
+    // count the scaled rule would have produced a cap 8.8x larger.
+    assert!(knn_per_face * TREANT_FACES > 8 * knn_floor);
+}
+
 #[test]
 fn both_scaled_caps_are_exactly_floor_max_per_face_times_faces() {
     let (knn_floor, knn_per_face, grid_floor, grid_per_face) = floors_and_coefficients();
