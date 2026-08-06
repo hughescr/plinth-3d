@@ -151,8 +151,9 @@ impl SpecializedLimits {
     /// operations on a 553,835,949-unit batch — 613× this coefficient — and is
     /// refused (FU-8c).
     ///
-    /// Every corpus model sits at the floor; `the_batch_scaled_gate_and_load_caps_are_the_flat_floor_for_every_corpus_shape`
-    /// pins that.
+    /// Every corpus model sits at the floor;
+    /// `the_batch_scaled_caps_are_the_flat_floor_for_every_corpus_batch_shape`
+    /// (`crates/plinth-support/tests/resource_cap_policy.rs`) pins that.
     #[must_use]
     pub const fn gate_operation_limit(&self, coverage_samples: usize, contacts: usize) -> usize {
         batch_product_scaled_cap(

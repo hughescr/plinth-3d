@@ -313,9 +313,20 @@ const CORPUS_LOAD_BATCHES: [(&str, usize, usize); 7] = [
 const TREANT_GATE_SAMPLES: usize = 405_146;
 const TREANT_CONTACTS: usize = 1_366;
 const TREANT_GATE_OPERATIONS_REQUIRED: usize = 12_714_828_544;
-/// Its load partition and stated demand, after FU-8b fix (B) collapsed the rows
-/// from 7,988,078 `(owner, face)` pairs to the 134,368 distinct faces.
-const TREANT_LOAD_ROWS: usize = 134_368;
+/// Its load partition and stated demand, after FU-8b fix (B) stopped the row
+/// *prediction* counting `(owner, face)` pairs: the plan predicted 7,988,078
+/// rows and now states the 130,548 the builder had always produced — 16,627
+/// generic rows plus the 113,921 distinct faces of 7,971,451 pairs.
+///
+/// Re-pinned 2026-08-06 by record fix F1, from 134,368 to 130,548. The demand
+/// below is unchanged and was never in doubt; the row count paired with it
+/// was. One scratch-instrumented treant run printed `resource.rows = 130548`
+/// beside `resource.operations = 5402535619` at
+/// `finalize_specialized_load_partition`, and the census scaled-cap row prints
+/// the same `rows=130548` with `materialized=11421470912`. No 134,368-row load
+/// batch is planned anywhere in the corpus; had one been, it would have
+/// materialized 11,755,675,072 and taken the census's widest-per-kind slot.
+const TREANT_LOAD_ROWS: usize = 130_548;
 const TREANT_LOAD_OPERATIONS_REQUIRED: usize = 5_402_535_619;
 /// Its 39,223-proposal merge gate, on the *same* batch shape: the gate
 /// re-evaluates every contact once per proposal variant, so the plan is

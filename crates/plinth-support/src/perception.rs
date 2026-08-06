@@ -2422,12 +2422,21 @@ fn finalize_load_rows(
 /// Specialized `(owner_id, face_id)` pairs grouped by face id.
 ///
 /// FU-8b defect (B).  The extended load authority holds one row per *face*,
-/// but the pair list arrives one entry per `(owner, face)`: 7,558,958 pairs
-/// over 429,120 faces on the Weeping Treant, 18.6 per face.  Everything that
-/// sized itself on the pair count was therefore 18.6x too large — the row
-/// count that drives the `rows x contacts x (owner_log + 4)` load operation
-/// bound, and the retained bytes that drive the load scratch bound.  The
-/// grouping is built once, in one sort, and read by both.
+/// but the pair list arrives one entry per `(owner, face)`: on the Weeping
+/// Treant, 7,971,451 pairs covering 113,921 distinct faces, 70.0 pairs per
+/// covered face, on a 429,120-face mesh.  Everything that *predicted* its size
+/// from the pair count was therefore ~70x too large — the row count that
+/// drives the `rows x contacts x (owner_log + 4)` load operation bound, and
+/// the retained bytes that drive the load scratch bound.  The grouping is
+/// built once, in one sort, and read by both.
+///
+/// Correction 2026-08-06 (record fix F4).  This comment previously read
+/// "7,558,958 pairs over 429,120 faces … 18.6 per face" as though both were
+/// observed.  Neither was: 7,558,958 was **derived by arithmetic**, the
+/// falsified 7,988,078 predicted-row figure minus the 429,120 mesh faces, and
+/// 429,120 is the whole mesh, not the faces the pairs reach.  The counts above
+/// replace it and are read directly off `GroupedOwnerFaces` in one
+/// scratch-instrumented treant run.
 ///
 /// Cost, stated because it is spent before this build's own resource check
 /// (the upstream accepted-load preflight has already checked the same plan

@@ -973,6 +973,24 @@ They scale on the **batch product** each stage is handed instead, under the same
 | `SUPPORT_LOAD_WORK_PER_BATCH_UNIT_OBSERVED` | Measured | 30 | count/unit | 5,402,535,619 / 183,682,423 batch units = 29.41, ceiling. Same run |
 | `SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT` | Derived | 64 | count/unit | `next_power_of_two(2 × 30)` |
 
+> **CORRECTED 2026-08-06 (record fix F1) — dated addendum; the two load rows above are left
+> standing as written and are superseded by these.** Their divisor was taken over a
+> 134,368-row batch that this build plans nowhere. The demand 5,402,535,619 is
+> `finalize_specialized_load_partition`'s planned `resource.operations`, and that plan
+> states **130,548** rows against 1,366 contacts — the same row count the census scaled-cap
+> row prints, and the count one scratch-instrumented treant run printed beside the demand
+> itself.
+>
+> | constant | wrapper | value | unit | derivation |
+> | --- | --- | --- | --- | --- |
+> | `SUPPORT_LOAD_WORK_PER_BATCH_UNIT_OBSERVED` | Measured | **31** | count/unit | 5,402,535,619 / 178,460,483 batch units = 30.28, ceiling. Same run |
+> | `SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT` | Derived | **64** | count/unit | `next_power_of_two(2 × 31)` |
+>
+> **The coefficient is unchanged and nothing downstream moves**: `next_power_of_two` rounds
+> 60 and 62 alike, so every materialized cap, every corpus model's floor identity and the
+> treant's refusal line are bit-for-bit what they were. The registry, the M0 ledger and
+> generated `constants.md` carry the corrected observation; the gate rows are untouched.
+
 Neither floor was raised. Both are still the R5-registered inherited numbers;
 they are now the constant term of a rule rather than the whole cap, and they
 remain the whole cap for every corpus model — the widest corpus batch product is

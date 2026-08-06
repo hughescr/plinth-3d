@@ -258,6 +258,23 @@ of them is raised here.
   their job**: they are catching a real defect. Raising them would convert a
   fast, honest refusal into a multi-hour hang.
 
+> **CORRECTED 2026-08-06 (record fix F3) — dated addendum, the bullet above is left
+> standing.** "**builds** 7,988,078 load-eligibility rows … because
+> `specialized_owner_faces` pairs are appended without grouping" describes a build that
+> never happened. At `eb36358`, `build_load_eligibility`
+> (`crates/plinth-support/src/perception.rs`) was already a pure
+> `BTreeMap<u32, BTreeSet<LoadOwner>>` collapse keyed on `face_id`, emitting exactly one
+> row per distinct face; there were no ungrouped appends in it, then or now. **7,988,078
+> was a *predicted* row count**, computed inside `specialized_load_resource_plan` as
+> `plan.load_eligibility.len() + specialized_face_count` where `specialized_face_count`
+> had been handed the `(owner, face)` **pair** count — 16,627 + 7,971,451 on the treant.
+> FU-8b fix (B) corrected the prediction, not the data: the same function now states
+> 16,627 + 113,921 = **130,548**, and the row set the builder produces is unchanged. The
+> ~2.95 × 10¹¹ charge and the caps' verdict on it are unaffected — the charge was computed
+> from the inflated prediction, so what the caps refused was an inflated *plan*, which is
+> still exactly what a resource plan is for. The uncharged O(n²) rescan and the 4,127/4,127
+> stack samples were real and were defect (C).
+
 The remaining work is algorithmic, not policy. Constants for a future scaled
 gate/load bound must be set on **post-fix** dimensions; today's numbers are
 measurements of a defect, not of a requirement. Note also that the linear
@@ -302,6 +319,27 @@ reverted before every recorded run.
 | peak RSS | — | **2.84 GB** | far under the 100 GB machine ceiling |
 | wall clock to refusal | ~16 h (hang) | **81.5 s** | inside the 600 s timebox |
 
+> **CORRECTED 2026-08-06 (record fixes F1, F2, F3) — dated addendum, the table above is
+> left standing.** The "specialized load operations" row pairs a real demand with the
+> wrong batch and states a collapse ratio that follows from the mismatch.
+>
+> - **The demand is right; the row count is not.** 5,402,535,619 is
+>   `finalize_specialized_load_partition`'s planned `resource.operations`, and that plan
+>   states **130,548** rows, not 134,368 — `16,627` generic load-eligibility rows plus the
+>   `113,921` distinct faces of `7,971,451` specialized `(owner, face)` pairs. One
+>   scratch-instrumented treant run printed `rows=130548` and `operations=5402535619`
+>   together at that checkpoint. §7.4's own census transcript prints the same
+>   `rows=130548`. **No 134,368-row load batch is planned anywhere**: had one been, it
+>   would have materialized `64 × 134,369 × 1,367 = 11,755,675,072` and displaced the
+>   `11,421,470,912` the census records, since `record_scaled_cap` keeps only the widest
+>   materialization per kind.
+> - **"collapsed the row count 59.5×" is the same error carried forward.** The predicted
+>   row count fell from 7,988,078 to 130,548, i.e. **61.2×** — and it was a *prediction*
+>   that fell, not a row set (record fix F3; see the §2 addendum above).
+> - **Headroom.** 5,402,535,619 against the materialized 11,421,470,912 is **2.11×**, and
+>   that pairing is now consistent: both numbers are stated over the same 130,548 × 1,366
+>   batch.
+
 ### 7.2 The rule that was set, and the scale it uses
 
 Gate and load work do **not** track face count. The corpus proves it: 24-face
@@ -332,6 +370,20 @@ Both coefficients come from the same rule as §3.10.8's,
 | `SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT` | Derived | 64 | `next_power_of_two(2 x 23)` = `next_power_of_two(46)` |
 | `SUPPORT_LOAD_WORK_PER_BATCH_UNIT_OBSERVED` | Measured (n = 1) | 30 | 5,402,535,619 / ((134,368 + 1) x (1,366 + 1) = 183,682,423) = 29.41, ceiling |
 | `SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT` | Derived | 64 | `next_power_of_two(2 x 30)` = `next_power_of_two(60)` |
+
+> **CORRECTED 2026-08-06 (record fix F1) — dated addendum, the two load rows above are
+> left standing.** Their divisor came from the mis-paired 134,368; the registry now reads:
+>
+> | constant | wrapper | value | derivation |
+> | --- | --- | --- | --- |
+> | `SUPPORT_LOAD_WORK_PER_BATCH_UNIT_OBSERVED` | Measured (n = 1) | **31** | 5,402,535,619 / ((130,548 + 1) x (1,366 + 1) = 178,460,483) = 30.28, ceiling |
+> | `SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT` | Derived | **64** | `next_power_of_two(2 x 31)` = `next_power_of_two(62)` |
+>
+> **The coefficient does not move, and no cap materializes differently anywhere.**
+> `next_power_of_two` rounds 60 and 62 alike, so 64 stands, every corpus model stays at its
+> floor, and the treant's materialized load cap stays 11,421,470,912. Only the observation
+> and its stated derivation change. The gate rows are untouched: the gate observation's
+> 405,146-sample batch is the one the census prints.
 
 Both floors are the R5-registered inherited numbers, unchanged at 2,000,000,000
 and **not raised**: they are now the constant term of a rule rather than the
@@ -400,3 +452,19 @@ Out of scope and deliberately not touched: `finalize_load_rows` is a correctly
 charged dense contact-by-face nearest scan. Post-fix it costs 134,368 x 1,366 =
 1.8e8 row-contact pairs, not the 1.1e10 the pre-fix row count implied, and it
 runs inside the timebox.
+
+> **CORRECTED 2026-08-06 (record fixes F1, F2) — dated addendum, the block and paragraph
+> above are left standing.** Two things to state precisely.
+>
+> - **The census transcript above is the authority, and it says 130,548.** The headline
+>   figures elsewhere in this document (§7.1) paired that same 5,402,535,619 demand with
+>   134,368 rows and read a 2.1× headroom off the mismatched pair. Corrected: the demand
+>   and the `materialized=11421470912` bound are both stated over **130,548 rows × 1,366
+>   contacts**, and the headroom is **2.11×**. The transcript never needed correcting.
+> - **`finalize_load_rows` costs less than either figure.** Its `rows` is the *actual*
+>   extended eligibility, the union of the 16,627 generic rows and the 113,921 pair faces:
+>   **117,741** rows in one scratch-instrumented treant run, against the 130,548 the
+>   partition's plan predicts. The plan is deliberately an upper bound — it adds the two
+>   counts rather than unioning them, because the union does not exist yet when the bound
+>   is checked. So the scan costs 117,741 x 1,366 = **1.6e8** row-contact pairs, its plan
+>   charges 1.8e8, and both are far under the 1.1e10 the pre-fix prediction implied.

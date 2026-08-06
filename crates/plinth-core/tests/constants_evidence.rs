@@ -404,8 +404,15 @@ fn descriptor_values_preserve_exact_scalar_record_direction_and_interval_types()
             (2 * 12_714_828_544_u64.div_ceil(gate_batch_units)).next_power_of_two()
         )
     );
-    let load_batch_units = (134_368_u64 + 1) * (1_366 + 1);
-    assert_eq!(load_batch_units, 183_682_423);
+    // Re-pinned 2026-08-06 by record fix F1. The demand 5,402,535,619 was
+    // instrumented back to `finalize_specialized_load_partition`, whose plan
+    // states 130,548 rows — the same row count the census scaled-cap row
+    // prints. The 134,368 this line used to name belongs to no planned batch,
+    // so the batch units and the observed ceiling both move (29.41 -> 30.28,
+    // 30 -> 31). The coefficient below is unchanged at 64: next_power_of_two
+    // rounds 60 and 62 alike.
+    let load_batch_units = (130_548_u64 + 1) * (1_366 + 1);
+    assert_eq!(load_batch_units, 178_460_483);
     assert_eq!(
         descriptor(&descriptors, "SUPPORT_LOAD_WORK_PER_BATCH_UNIT_OBSERVED")
             .value()
