@@ -8,7 +8,7 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_PLACEHOLDER_IDS: [&str; 194] = [
+const EXPECTED_PLACEHOLDER_IDS: [&str; 236] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -186,8 +186,50 @@ const EXPECTED_PLACEHOLDER_IDS: [&str; 194] = [
     "STRUT_MODEL_ANCHOR_MAX_DELICACY",
     "STRUT_MODEL_ANCHOR_MIN_LEN_MM",
     "STUB_LENGTH_MM",
+    "SUPPORT_KNN_MAX_LOGICAL_PEAK_BYTES",
+    "SUPPORT_KNN_MAX_NEIGHBORS",
+    "SUPPORT_KNN_MAX_QUERY_POINTS",
+    "SUPPORT_KNN_MAX_SOURCE_POINTS",
     "SUPPORT_KNN_MAX_WORK_FLOOR",
     "SUPPORT_PARITY_GRID_MAX_BYTES_FLOOR",
+    "SUPPORT_PERCEPTION_MAX_ISLAND_NEIGHBOR_BYTES",
+    "SUPPORT_PERCEPTION_MAX_ISLAND_NEIGHBOR_PAIRS",
+    "SUPPORT_PERCEPTION_MAX_LOOP_VERTICES",
+    "SUPPORT_PERCEPTION_MAX_MINIMA_VERTICES",
+    "SUPPORT_PERCEPTION_MAX_OVERLAP_BYTES",
+    "SUPPORT_PERCEPTION_MAX_OVERLAP_EDGE_TESTS",
+    "SUPPORT_PERCEPTION_MAX_OVERLAP_PAIRS",
+    "SUPPORT_PERCEPTION_MAX_OVERLAP_VERTEX_TESTS",
+    "SUPPORT_PERCEPTION_MAX_PLANES",
+    "SUPPORT_PERCEPTION_MAX_SLICE_INTERSECTIONS",
+    "SUPPORT_PERCEPTION_MAX_SLICE_OUTPUT_BYTES",
+    "SUPPORT_PERCEPTION_MAX_TRIANGLE_PLANE_TESTS",
+    "SUPPORT_PREPARATION_COVERAGE_SAMPLES_MAX_VIRTUAL_CELLS",
+    "SUPPORT_PREPARATION_COVERAGE_SCORE_MATRIX_MAX_ENTRIES",
+    "SUPPORT_PREPARATION_MAX_PRIMITIVES",
+    "SUPPORT_PREPARATION_MAX_PRIMITIVE_BYTES",
+    "SUPPORT_SPECIALIZED_MAX_COVERAGE_OPERATIONS",
+    "SUPPORT_SPECIALIZED_MAX_COVERAGE_SCRATCH_BYTES",
+    "SUPPORT_SPECIALIZED_MAX_GATE_CONTACT_MATRIX_BYTES",
+    "SUPPORT_SPECIALIZED_MAX_GATE_OPERATIONS",
+    "SUPPORT_SPECIALIZED_MAX_GATE_PEAK_BYTES",
+    "SUPPORT_SPECIALIZED_MAX_GATE_VARIANTS",
+    "SUPPORT_SPECIALIZED_MAX_GATE_VECTOR_BYTES",
+    "SUPPORT_SPECIALIZED_MAX_GATE_WINDOW_VARIANTS",
+    "SUPPORT_SPECIALIZED_MAX_LOAD_OPERATIONS",
+    "SUPPORT_SPECIALIZED_MAX_LOAD_SCRATCH_BYTES",
+    "SUPPORT_SPECIALIZED_MAX_MERGE_COMMIT_BYTES",
+    "SUPPORT_SPECIALIZED_MAX_MERGE_DESCRIPTOR_OPERATIONS",
+    "SUPPORT_SPECIALIZED_MAX_MERGE_ITERATIONS",
+    "SUPPORT_SPECIALIZED_MAX_MERGE_PAIRS",
+    "SUPPORT_SPECIALIZED_MAX_MERGE_PROPOSALS",
+    "SUPPORT_SPECIALIZED_MAX_MERGE_PROPOSAL_BYTES",
+    "SUPPORT_SPECIALIZED_MAX_MERGE_TOTAL_PROPOSALS",
+    "SUPPORT_SPECIALIZED_MAX_SATISFACTION_NEIGHBOR_BYTES",
+    "SUPPORT_SPECIALIZED_MAX_SATISFACTION_NEIGHBOR_PAIRS",
+    "SUPPORT_SPECIALIZED_MAX_SATISFACTION_TESTS",
+    "SUPPORT_SPECIALIZED_MAX_SYNTHETIC_NEIGHBOR_BYTES",
+    "SUPPORT_SPECIALIZED_MAX_SYNTHETIC_NEIGHBOR_PAIRS",
     "SURFACE_TREE_MAX_POINTS",
     "SURFACE_TREE_PITCH_MM",
     "SURFACE_TREE_SEED",
@@ -218,7 +260,7 @@ macro_rules! rows {
     };
 }
 
-const EXPECTED_ROWS: [ExpectedRow; 194] = rows! {
+const EXPECTED_ROWS: [ExpectedRow; 236] = rows! {
     "A_ABS_MM2", "2.0", "mm²", "scalar";
     "BALL_BREACH_EPS_MM", "0.05", "mm", "scalar";
     "BALL_FACTOR_FOOT", "1.4", "1", "scalar";
@@ -396,8 +438,50 @@ const EXPECTED_ROWS: [ExpectedRow; 194] = rows! {
     "STRUT_MODEL_ANCHOR_MAX_DELICACY", "0.5", "1", "scalar";
     "STRUT_MODEL_ANCHOR_MIN_LEN_MM", "5.0", "mm", "scalar";
     "STUB_LENGTH_MM", "2.5", "mm", "scalar";
+    "SUPPORT_KNN_MAX_LOGICAL_PEAK_BYTES", "2147483648", "B", "scalar";
+    "SUPPORT_KNN_MAX_NEIGHBORS", "1", "count", "scalar";
+    "SUPPORT_KNN_MAX_QUERY_POINTS", "20000000", "count", "scalar";
+    "SUPPORT_KNN_MAX_SOURCE_POINTS", "20000000", "count", "scalar";
     "SUPPORT_KNN_MAX_WORK_FLOOR", "100000000", "count", "scalar";
     "SUPPORT_PARITY_GRID_MAX_BYTES_FLOOR", "67108864", "B", "scalar";
+    "SUPPORT_PERCEPTION_MAX_ISLAND_NEIGHBOR_BYTES", "2147483648", "B", "scalar";
+    "SUPPORT_PERCEPTION_MAX_ISLAND_NEIGHBOR_PAIRS", "100000000", "count", "scalar";
+    "SUPPORT_PERCEPTION_MAX_LOOP_VERTICES", "100000000", "count", "scalar";
+    "SUPPORT_PERCEPTION_MAX_MINIMA_VERTICES", "20000000", "count", "scalar";
+    "SUPPORT_PERCEPTION_MAX_OVERLAP_BYTES", "2147483648", "B", "scalar";
+    "SUPPORT_PERCEPTION_MAX_OVERLAP_EDGE_TESTS", "100000000", "count", "scalar";
+    "SUPPORT_PERCEPTION_MAX_OVERLAP_PAIRS", "100000000", "count", "scalar";
+    "SUPPORT_PERCEPTION_MAX_OVERLAP_VERTEX_TESTS", "100000000", "count", "scalar";
+    "SUPPORT_PERCEPTION_MAX_PLANES", "20000", "count", "scalar";
+    "SUPPORT_PERCEPTION_MAX_SLICE_INTERSECTIONS", "100000000", "count", "scalar";
+    "SUPPORT_PERCEPTION_MAX_SLICE_OUTPUT_BYTES", "2147483648", "B", "scalar";
+    "SUPPORT_PERCEPTION_MAX_TRIANGLE_PLANE_TESTS", "100000000", "count", "scalar";
+    "SUPPORT_PREPARATION_COVERAGE_SAMPLES_MAX_VIRTUAL_CELLS", "2000000", "count", "scalar";
+    "SUPPORT_PREPARATION_COVERAGE_SCORE_MATRIX_MAX_ENTRIES", "65536", "count", "scalar";
+    "SUPPORT_PREPARATION_MAX_PRIMITIVES", "200000", "count", "scalar";
+    "SUPPORT_PREPARATION_MAX_PRIMITIVE_BYTES", "134217728", "B", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_COVERAGE_OPERATIONS", "2000000000", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_COVERAGE_SCRATCH_BYTES", "536870912", "B", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_GATE_CONTACT_MATRIX_BYTES", "536870912", "B", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_GATE_OPERATIONS", "2000000000", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_GATE_PEAK_BYTES", "1073741824", "B", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_GATE_VARIANTS", "20000001", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_GATE_VECTOR_BYTES", "536870912", "B", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_GATE_WINDOW_VARIANTS", "1024", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_LOAD_OPERATIONS", "2000000000", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_LOAD_SCRATCH_BYTES", "536870912", "B", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_MERGE_COMMIT_BYTES", "536870912", "B", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_MERGE_DESCRIPTOR_OPERATIONS", "2000000000", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_MERGE_ITERATIONS", "100000", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_MERGE_PAIRS", "20000000", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_MERGE_PROPOSALS", "20000000", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_MERGE_PROPOSAL_BYTES", "536870912", "B", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_MERGE_TOTAL_PROPOSALS", "100000000", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_SATISFACTION_NEIGHBOR_BYTES", "2147483648", "B", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_SATISFACTION_NEIGHBOR_PAIRS", "100000000", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_SATISFACTION_TESTS", "100000000", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_SYNTHETIC_NEIGHBOR_BYTES", "536870912", "B", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_SYNTHETIC_NEIGHBOR_PAIRS", "20000000", "count", "scalar";
     "SURFACE_TREE_MAX_POINTS", "150000", "count", "scalar";
     "SURFACE_TREE_PITCH_MM", "0.4", "mm", "scalar";
     "SURFACE_TREE_SEED", "0", "count", "scalar";
@@ -416,7 +500,7 @@ const EXPECTED_ROWS: [ExpectedRow; 194] = rows! {
 };
 
 fn component() -> M0PlaceholderConstants {
-    M0PlaceholderConstants::new().expect("all 194 placeholder declarations must construct")
+    M0PlaceholderConstants::new().expect("all 236 placeholder declarations must construct")
 }
 
 #[test]
@@ -427,7 +511,7 @@ fn exact_handwritten_membership_is_stable_sorted_and_all_placeholder() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, EXPECTED_PLACEHOLDER_IDS);
-    assert_eq!(descriptors.len(), 194);
+    assert_eq!(descriptors.len(), 236);
     assert!(descriptors
         .windows(2)
         .all(|pair| pair[0].id() < pair[1].id()));
@@ -518,7 +602,7 @@ const fn bound_key(bound: BoundKind) -> &'static str {
 }
 
 #[test]
-fn evidence_and_placeholder_fixture_builds_one_218_entry_structural_batch() {
+fn evidence_and_placeholder_fixture_builds_one_260_entry_structural_batch() {
     let mut descriptors = component()
         .descriptors()
         .unwrap()
@@ -526,14 +610,14 @@ fn evidence_and_placeholder_fixture_builds_one_218_entry_structural_batch() {
         .collect::<Vec<_>>();
     descriptors.extend(M0EvidenceConstants::new().unwrap().descriptors().unwrap());
     let registry = ConstantsRegistry::build_batch(descriptors).unwrap();
-    assert_eq!(registry.len(), 218);
+    assert_eq!(registry.len(), 260);
     assert_eq!(
         registry
             .iter()
             .map(|descriptor| descriptor.id().as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        218
+        260
     );
 }
 

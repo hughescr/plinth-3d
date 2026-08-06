@@ -2173,6 +2173,50 @@
       "provenance_detail": "Measured EvidenceSource kind=CalibrationPlate plate=COUPON-PLATE-6-support-arm-capacity record=docs/reference/plate-06-results.md locator=§5 Finding 2 date=Exact(2026-07-31) err=null interval"
     },
     {
+      "id": "SUPPORT_KNN_MAX_LOGICAL_PEAK_BYTES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production knn max_logical_peak_bytes",
+        "rust/geom_kernel/src/point_index.rs:KnnBatchLimits::max_logical_peak_bytes"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 2147483648",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 2bca0c8; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured kNN batch logical-peak byte cap; it refuses a batch whose projected working set is too large before any allocation happens."
+    },
+    {
+      "id": "SUPPORT_KNN_MAX_NEIGHBORS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production knn max_neighbors",
+        "rust/geom_kernel/src/point_index.rs:KnnBatchLimits::max_neighbors"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 1",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 2bca0c8; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured kNN neighbor-count cap; the support pipeline only ever asks for the single nearest neighbor, so this is a one-neighbor ceiling rather than a tuning lever."
+    },
+    {
+      "id": "SUPPORT_KNN_MAX_QUERY_POINTS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production knn max_query_points",
+        "rust/geom_kernel/src/point_index.rs:KnnBatchLimits::max_query_points"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 20000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 2bca0c8; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured kNN query-point cap; it bounds one dimension of the work product that SUPPORT_KNN_MAX_WORK_FLOOR bounds as a whole."
+    },
+    {
+      "id": "SUPPORT_KNN_MAX_SOURCE_POINTS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production knn max_source_points",
+        "rust/geom_kernel/src/point_index.rs:KnnBatchLimits::max_source_points"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 20000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 2bca0c8; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured kNN source-point cap; it bounds the other dimension of the work product that SUPPORT_KNN_MAX_WORK_FLOOR bounds as a whole."
+    },
+    {
       "id": "SUPPORT_KNN_MAX_WORK_FLOOR",
       "classification": "runtime_resource_cap",
       "provenance_wrapper": "Placeholder",
@@ -2235,6 +2279,386 @@
       ],
       "normative": "03-physics-and-constants.md §3.10.8 = 1214544/429120",
       "provenance_detail": "Weeping Treant v1.2 corpus study 2026-08-05: projected peak 78482308 B inverts through 81*429120 + 36*R + 4 to exactly R = 1214544 (cell, face) references, i.e. 2.8303132 per face. Rust-era; no legacy Python source. Owner ruling R4 (2026-08-05) single-specimen basis: the Weeping Treant v1.2 alone, 429120 faces, 2026-08-05. This quantity is measured to vary 186x across the corpus (526 refs/face on the 244-face Cylinder against 2.83 here), so one point on that curve is not a distribution; a second large-model measurement triggers re-derivation of SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE rather than silent inheritance."
+    },
+    {
+      "id": "SUPPORT_PERCEPTION_MAX_ISLAND_NEIGHBOR_BYTES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/perception.rs:GenericPerceptionLimits::production max_island_neighbor_bytes"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 2147483648",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 4f140f0; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured perception cap on island-neighbor pair storage."
+    },
+    {
+      "id": "SUPPORT_PERCEPTION_MAX_ISLAND_NEIGHBOR_PAIRS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/perception.rs:GenericPerceptionLimits::production max_island_neighbor_pairs"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 100000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 4f140f0; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured perception cap on island-neighbor pair count."
+    },
+    {
+      "id": "SUPPORT_PERCEPTION_MAX_LOOP_VERTICES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/perception.rs:GenericPerceptionLimits::production max_loop_vertices"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 100000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era fc7162d; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured perception cap on total slice-loop vertices."
+    },
+    {
+      "id": "SUPPORT_PERCEPTION_MAX_MINIMA_VERTICES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/perception.rs:GenericPerceptionLimits::production max_minima_vertices"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 20000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era fc7162d; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured perception cap on detected minima vertices; it bounds the source side of the minima-to-face kNN batch."
+    },
+    {
+      "id": "SUPPORT_PERCEPTION_MAX_OVERLAP_BYTES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/perception.rs:GenericPerceptionLimits::production max_overlap_bytes"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 2147483648",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 6458c9b; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured perception cap on overlap-test scratch bytes."
+    },
+    {
+      "id": "SUPPORT_PERCEPTION_MAX_OVERLAP_EDGE_TESTS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/perception.rs:GenericPerceptionLimits::production max_overlap_edge_tests"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 100000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 4f140f0; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured perception cap on overlap edge tests."
+    },
+    {
+      "id": "SUPPORT_PERCEPTION_MAX_OVERLAP_PAIRS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/perception.rs:GenericPerceptionLimits::production max_overlap_pairs"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 100000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 6458c9b; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured perception cap on overlap candidate pairs."
+    },
+    {
+      "id": "SUPPORT_PERCEPTION_MAX_OVERLAP_VERTEX_TESTS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/perception.rs:GenericPerceptionLimits::production max_overlap_vertex_tests"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 100000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 4f140f0; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured perception cap on overlap vertex tests."
+    },
+    {
+      "id": "SUPPORT_PERCEPTION_MAX_PLANES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/perception.rs:GenericPerceptionLimits::production max_planes"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 20000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era cb982ac; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured perception cap on slice planes per run; the only cap in this family denominated in layers rather than in work or bytes."
+    },
+    {
+      "id": "SUPPORT_PERCEPTION_MAX_SLICE_INTERSECTIONS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/perception.rs:GenericPerceptionLimits::production max_slice_intersections"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 100000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era fc7162d; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured perception cap on triangle-plane intersection results."
+    },
+    {
+      "id": "SUPPORT_PERCEPTION_MAX_SLICE_OUTPUT_BYTES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/perception.rs:GenericPerceptionLimits::production max_slice_output_bytes"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 2147483648",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era fc7162d; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured perception cap on slice output bytes."
+    },
+    {
+      "id": "SUPPORT_PERCEPTION_MAX_TRIANGLE_PLANE_TESTS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/perception.rs:GenericPerceptionLimits::production max_triangle_plane_tests"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 100000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era cb982ac; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured perception cap on triangle-against-plane tests; it is the faces x planes product, so it is the cap most directly exposed to a large mesh."
+    },
+    {
+      "id": "SUPPORT_PREPARATION_COVERAGE_SAMPLES_MAX_VIRTUAL_CELLS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production coverage_samples_max_virtual_cells"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 2000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 19aa4fd; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured cap on virtual coverage-sample cells."
+    },
+    {
+      "id": "SUPPORT_PREPARATION_COVERAGE_SCORE_MATRIX_MAX_ENTRIES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production coverage_score_matrix_max_entries"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 65536",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 19aa4fd; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured cap on coverage score-matrix entries."
+    },
+    {
+      "id": "SUPPORT_PREPARATION_MAX_PRIMITIVES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production max_primitives"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 200000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 73611c3; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured cap on emitted support primitives per run."
+    },
+    {
+      "id": "SUPPORT_PREPARATION_MAX_PRIMITIVE_BYTES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/runner.rs:SupportPreparationLimits::production max_primitive_bytes"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 134217728",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 73611c3; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured cap on emitted support primitive bytes per run."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_COVERAGE_OPERATIONS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_coverage_operations"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 2000000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 7ef66f6; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on charged coverage-assessment operations."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_COVERAGE_SCRATCH_BYTES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_coverage_scratch_bytes"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 536870912",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 7ef66f6; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on coverage-assessment scratch bytes."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_GATE_CONTACT_MATRIX_BYTES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_gate_contact_matrix_bytes"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 536870912",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era c2b3b98; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on the dense gate contact-matrix allocation."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_GATE_OPERATIONS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_gate_operations"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 2000000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era c2b3b98; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on charged gate operations. Measured 2026-08-05 to be refusing an algorithm defect, not a large model: the Weeping Treant trips it at limit+1 through a selection sort in unique_island_face_count that charges 16,795,425,332 operations where a scratch set with identical output charges 142,646. Registered as the inherited number; it is tracked as FU-8b algorithm work and must NOT be raised."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_GATE_PEAK_BYTES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_gate_peak_bytes"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 1073741824",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 7ef66f6; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on peak gate-stage bytes. Measured 2026-08-05 to be correctly refusing an 8.0 M-row load-eligibility explosion on a 429,120-face mesh; tracked as FU-8b algorithm work and must NOT be raised."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_GATE_VARIANTS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_gate_variants"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 20000001",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era c2b3b98; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on enumerated gate variants; the lone off-round value in the family, which is itself unexplained by any record."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_GATE_VECTOR_BYTES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_gate_vector_bytes"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 536870912",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era c2b3b98; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on gate vector bytes."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_GATE_WINDOW_VARIANTS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_gate_window_variants"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 1024",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era c2b3b98; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on gate window variants."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_LOAD_OPERATIONS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_load_operations"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 2000000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 7ef66f6; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on charged load-partition operations. Measured 2026-08-05 to be correctly refusing a real defect: the treant builds 7,988,078 load-eligibility rows for a 429,120-face mesh (18.6 rows per face) and a dense contact x row scan over them is ~2.95e11 charged operations. Tracked as FU-8b algorithm work and must NOT be raised."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_LOAD_SCRATCH_BYTES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_load_scratch_bytes"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 536870912",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 7ef66f6; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on load-partition scratch bytes. Measured 2026-08-05 to be correctly refusing the same load-eligibility explosion; tracked as FU-8b algorithm work and must NOT be raised."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_MERGE_COMMIT_BYTES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_merge_commit_bytes"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 536870912",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era abea502; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on merge-commit bytes."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_MERGE_DESCRIPTOR_OPERATIONS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_merge_descriptor_operations"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 2000000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 7ef66f6; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on charged merge-descriptor operations."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_MERGE_ITERATIONS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_merge_iterations"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 100000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era abea502; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on merge fixed-point iterations."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_MERGE_PAIRS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_merge_pairs"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 20000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 6a66245; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on merge candidate pairs."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_MERGE_PROPOSALS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_merge_proposals"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 20000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era c2b3b98; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on merge proposals in one iteration."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_MERGE_PROPOSAL_BYTES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_merge_proposal_bytes"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 536870912",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 7ef66f6; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on merge-proposal bytes."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_MERGE_TOTAL_PROPOSALS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_merge_total_proposals"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 100000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era abea502; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on merge proposals across all iterations."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_SATISFACTION_NEIGHBOR_BYTES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_satisfaction_neighbor_bytes"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 2147483648",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 6a66245; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on satisfaction-neighbor storage bytes."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_SATISFACTION_NEIGHBOR_PAIRS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_satisfaction_neighbor_pairs"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 100000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 6a66245; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on satisfaction-neighbor pairs."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_SATISFACTION_TESTS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_satisfaction_tests"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 100000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 6a66245; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on demand-satisfaction tests."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_SYNTHETIC_NEIGHBOR_BYTES",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_synthetic_neighbor_bytes"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 536870912",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 6a66245; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on synthetic-neighbor storage bytes."
+    },
+    {
+      "id": "SUPPORT_SPECIALIZED_MAX_SYNTHETIC_NEIGHBOR_PAIRS",
+      "classification": "runtime_resource_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-support/src/specialized.rs:SpecializedLimits::production max_synthetic_neighbor_pairs"
+      ],
+      "normative": "03-physics-and-constants.md §3.10.9 = 20000000",
+      "provenance_detail": "Rust-era support-pipeline execution authority with no legacy Python source and NO measurement of record. Introduced Codex-era 6a66245; the SupportPreparationLimits::production policy that assembles it is Codex-era 73e7c13 / a8acfb9 / c2b3b98. Registered by owner ruling R5 (2026-08-05) so that no support execution cap is unregistered; registration records the inherited number and does NOT ratify it. Inherited unmeasured specialized cap on synthetic-neighbor pairs."
     }
   ],
   "aliases": [

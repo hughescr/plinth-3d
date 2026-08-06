@@ -971,7 +971,7 @@ macro_rules! placeholder_declarations {
                 }
             )+
 
-            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 194], RegistryError> {
+            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 236], RegistryError> {
                 Ok([
                     $(ConstantDescriptor::from_placeholder(
                         ConstantId::from($id),
@@ -1351,10 +1351,94 @@ placeholder_declarations! {
     "STRUT_MODEL_ANCHOR_MIN_LEN_MM", "mm", "scalar", "Model-anchor candidate length floor.";
     stub_length_mm: PositiveFinite = PositiveFinite::new(2.5)?;
     "STUB_LENGTH_MM", "mm", "scalar", "Support stub length.";
+    support_knn_max_logical_peak_bytes: NonZeroU64 = nonzero(2147483648)?;
+    "SUPPORT_KNN_MAX_LOGICAL_PEAK_BYTES", "B", "scalar", "Inherited unmeasured kNN batch logical-peak byte cap; it refuses a batch whose projected working set is too large before any allocation happens. Codex-era 2bca0c8; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_knn_max_neighbors: NonZeroU64 = nonzero(1)?;
+    "SUPPORT_KNN_MAX_NEIGHBORS", "count", "scalar", "Inherited unmeasured kNN neighbor-count cap; the support pipeline only ever asks for the single nearest neighbor, so this is a one-neighbor ceiling rather than a tuning lever. Codex-era 2bca0c8; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_knn_max_query_points: NonZeroU64 = nonzero(20000000)?;
+    "SUPPORT_KNN_MAX_QUERY_POINTS", "count", "scalar", "Inherited unmeasured kNN query-point cap; it bounds one dimension of the work product that SUPPORT_KNN_MAX_WORK_FLOOR bounds as a whole. Codex-era 2bca0c8; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_knn_max_source_points: NonZeroU64 = nonzero(20000000)?;
+    "SUPPORT_KNN_MAX_SOURCE_POINTS", "count", "scalar", "Inherited unmeasured kNN source-point cap; it bounds the other dimension of the work product that SUPPORT_KNN_MAX_WORK_FLOOR bounds as a whole. Codex-era 2bca0c8; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
     support_knn_max_work_floor: NonZeroU64 = nonzero(100_000_000)?;
     "SUPPORT_KNN_MAX_WORK_FLOOR", "count", "scalar", "Inherited unmeasured kNN work floor, Codex-era 73e7c13/a8acfb9 with no measurement of record; it is only the constant term under the measured per-face rule and is never the whole cap.";
     support_parity_grid_max_bytes_floor: NonZeroU64 = nonzero(67_108_864)?;
     "SUPPORT_PARITY_GRID_MAX_BYTES_FLOOR", "B", "scalar", "Inherited unmeasured parity-grid byte floor, Codex-era 73e7c13 with no measurement of record; it governs every corpus model coarse enough that references, not faces, dominate the projection.";
+    support_perception_max_island_neighbor_bytes: NonZeroU64 = nonzero(2147483648)?;
+    "SUPPORT_PERCEPTION_MAX_ISLAND_NEIGHBOR_BYTES", "B", "scalar", "Inherited unmeasured perception cap on island-neighbor pair storage. Codex-era 4f140f0; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_perception_max_island_neighbor_pairs: NonZeroU64 = nonzero(100000000)?;
+    "SUPPORT_PERCEPTION_MAX_ISLAND_NEIGHBOR_PAIRS", "count", "scalar", "Inherited unmeasured perception cap on island-neighbor pair count. Codex-era 4f140f0; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_perception_max_loop_vertices: NonZeroU64 = nonzero(100000000)?;
+    "SUPPORT_PERCEPTION_MAX_LOOP_VERTICES", "count", "scalar", "Inherited unmeasured perception cap on total slice-loop vertices. Codex-era fc7162d; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_perception_max_minima_vertices: NonZeroU64 = nonzero(20000000)?;
+    "SUPPORT_PERCEPTION_MAX_MINIMA_VERTICES", "count", "scalar", "Inherited unmeasured perception cap on detected minima vertices; it bounds the source side of the minima-to-face kNN batch. Codex-era fc7162d; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_perception_max_overlap_bytes: NonZeroU64 = nonzero(2147483648)?;
+    "SUPPORT_PERCEPTION_MAX_OVERLAP_BYTES", "B", "scalar", "Inherited unmeasured perception cap on overlap-test scratch bytes. Codex-era 6458c9b; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_perception_max_overlap_edge_tests: NonZeroU64 = nonzero(100000000)?;
+    "SUPPORT_PERCEPTION_MAX_OVERLAP_EDGE_TESTS", "count", "scalar", "Inherited unmeasured perception cap on overlap edge tests. Codex-era 4f140f0; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_perception_max_overlap_pairs: NonZeroU64 = nonzero(100000000)?;
+    "SUPPORT_PERCEPTION_MAX_OVERLAP_PAIRS", "count", "scalar", "Inherited unmeasured perception cap on overlap candidate pairs. Codex-era 6458c9b; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_perception_max_overlap_vertex_tests: NonZeroU64 = nonzero(100000000)?;
+    "SUPPORT_PERCEPTION_MAX_OVERLAP_VERTEX_TESTS", "count", "scalar", "Inherited unmeasured perception cap on overlap vertex tests. Codex-era 4f140f0; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_perception_max_planes: NonZeroU64 = nonzero(20000)?;
+    "SUPPORT_PERCEPTION_MAX_PLANES", "count", "scalar", "Inherited unmeasured perception cap on slice planes per run; the only cap in this family denominated in layers rather than in work or bytes. Codex-era cb982ac; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_perception_max_slice_intersections: NonZeroU64 = nonzero(100000000)?;
+    "SUPPORT_PERCEPTION_MAX_SLICE_INTERSECTIONS", "count", "scalar", "Inherited unmeasured perception cap on triangle-plane intersection results. Codex-era fc7162d; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_perception_max_slice_output_bytes: NonZeroU64 = nonzero(2147483648)?;
+    "SUPPORT_PERCEPTION_MAX_SLICE_OUTPUT_BYTES", "B", "scalar", "Inherited unmeasured perception cap on slice output bytes. Codex-era fc7162d; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_perception_max_triangle_plane_tests: NonZeroU64 = nonzero(100000000)?;
+    "SUPPORT_PERCEPTION_MAX_TRIANGLE_PLANE_TESTS", "count", "scalar", "Inherited unmeasured perception cap on triangle-against-plane tests; it is the faces x planes product, so it is the cap most directly exposed to a large mesh. Codex-era cb982ac; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_preparation_coverage_samples_max_virtual_cells: NonZeroU64 = nonzero(2000000)?;
+    "SUPPORT_PREPARATION_COVERAGE_SAMPLES_MAX_VIRTUAL_CELLS", "count", "scalar", "Inherited unmeasured cap on virtual coverage-sample cells. Codex-era 19aa4fd; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_preparation_coverage_score_matrix_max_entries: NonZeroU64 = nonzero(65536)?;
+    "SUPPORT_PREPARATION_COVERAGE_SCORE_MATRIX_MAX_ENTRIES", "count", "scalar", "Inherited unmeasured cap on coverage score-matrix entries. Codex-era 19aa4fd; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_preparation_max_primitives: NonZeroU64 = nonzero(200000)?;
+    "SUPPORT_PREPARATION_MAX_PRIMITIVES", "count", "scalar", "Inherited unmeasured cap on emitted support primitives per run. Codex-era 73611c3; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_preparation_max_primitive_bytes: NonZeroU64 = nonzero(134217728)?;
+    "SUPPORT_PREPARATION_MAX_PRIMITIVE_BYTES", "B", "scalar", "Inherited unmeasured cap on emitted support primitive bytes per run. Codex-era 73611c3; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_coverage_operations: NonZeroU64 = nonzero(2000000000)?;
+    "SUPPORT_SPECIALIZED_MAX_COVERAGE_OPERATIONS", "count", "scalar", "Inherited unmeasured specialized cap on charged coverage-assessment operations. Codex-era 7ef66f6; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_coverage_scratch_bytes: NonZeroU64 = nonzero(536870912)?;
+    "SUPPORT_SPECIALIZED_MAX_COVERAGE_SCRATCH_BYTES", "B", "scalar", "Inherited unmeasured specialized cap on coverage-assessment scratch bytes. Codex-era 7ef66f6; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_gate_contact_matrix_bytes: NonZeroU64 = nonzero(536870912)?;
+    "SUPPORT_SPECIALIZED_MAX_GATE_CONTACT_MATRIX_BYTES", "B", "scalar", "Inherited unmeasured specialized cap on the dense gate contact-matrix allocation. Codex-era c2b3b98; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_gate_operations: NonZeroU64 = nonzero(2000000000)?;
+    "SUPPORT_SPECIALIZED_MAX_GATE_OPERATIONS", "count", "scalar", "Inherited unmeasured specialized cap on charged gate operations. Measured 2026-08-05 to be refusing an algorithm defect, not a large model: the Weeping Treant trips it at limit+1 through a selection sort in unique_island_face_count that charges 16,795,425,332 operations where a scratch set with identical output charges 142,646. Registered as the inherited number; it is tracked as FU-8b algorithm work and must NOT be raised. Codex-era c2b3b98; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_gate_peak_bytes: NonZeroU64 = nonzero(1073741824)?;
+    "SUPPORT_SPECIALIZED_MAX_GATE_PEAK_BYTES", "B", "scalar", "Inherited unmeasured specialized cap on peak gate-stage bytes. Measured 2026-08-05 to be correctly refusing an 8.0 M-row load-eligibility explosion on a 429,120-face mesh; tracked as FU-8b algorithm work and must NOT be raised. Codex-era 7ef66f6; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_gate_variants: NonZeroU64 = nonzero(20000001)?;
+    "SUPPORT_SPECIALIZED_MAX_GATE_VARIANTS", "count", "scalar", "Inherited unmeasured specialized cap on enumerated gate variants; the lone off-round value in the family, which is itself unexplained by any record. Codex-era c2b3b98; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_gate_vector_bytes: NonZeroU64 = nonzero(536870912)?;
+    "SUPPORT_SPECIALIZED_MAX_GATE_VECTOR_BYTES", "B", "scalar", "Inherited unmeasured specialized cap on gate vector bytes. Codex-era c2b3b98; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_gate_window_variants: NonZeroU64 = nonzero(1024)?;
+    "SUPPORT_SPECIALIZED_MAX_GATE_WINDOW_VARIANTS", "count", "scalar", "Inherited unmeasured specialized cap on gate window variants. Codex-era c2b3b98; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_load_operations: NonZeroU64 = nonzero(2000000000)?;
+    "SUPPORT_SPECIALIZED_MAX_LOAD_OPERATIONS", "count", "scalar", "Inherited unmeasured specialized cap on charged load-partition operations. Measured 2026-08-05 to be correctly refusing a real defect: the treant builds 7,988,078 load-eligibility rows for a 429,120-face mesh (18.6 rows per face) and a dense contact x row scan over them is ~2.95e11 charged operations. Tracked as FU-8b algorithm work and must NOT be raised. Codex-era 7ef66f6; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_load_scratch_bytes: NonZeroU64 = nonzero(536870912)?;
+    "SUPPORT_SPECIALIZED_MAX_LOAD_SCRATCH_BYTES", "B", "scalar", "Inherited unmeasured specialized cap on load-partition scratch bytes. Measured 2026-08-05 to be correctly refusing the same load-eligibility explosion; tracked as FU-8b algorithm work and must NOT be raised. Codex-era 7ef66f6; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_merge_commit_bytes: NonZeroU64 = nonzero(536870912)?;
+    "SUPPORT_SPECIALIZED_MAX_MERGE_COMMIT_BYTES", "B", "scalar", "Inherited unmeasured specialized cap on merge-commit bytes. Codex-era abea502; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_merge_descriptor_operations: NonZeroU64 = nonzero(2000000000)?;
+    "SUPPORT_SPECIALIZED_MAX_MERGE_DESCRIPTOR_OPERATIONS", "count", "scalar", "Inherited unmeasured specialized cap on charged merge-descriptor operations. Codex-era 7ef66f6; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_merge_iterations: NonZeroU64 = nonzero(100000)?;
+    "SUPPORT_SPECIALIZED_MAX_MERGE_ITERATIONS", "count", "scalar", "Inherited unmeasured specialized cap on merge fixed-point iterations. Codex-era abea502; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_merge_pairs: NonZeroU64 = nonzero(20000000)?;
+    "SUPPORT_SPECIALIZED_MAX_MERGE_PAIRS", "count", "scalar", "Inherited unmeasured specialized cap on merge candidate pairs. Codex-era 6a66245; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_merge_proposals: NonZeroU64 = nonzero(20000000)?;
+    "SUPPORT_SPECIALIZED_MAX_MERGE_PROPOSALS", "count", "scalar", "Inherited unmeasured specialized cap on merge proposals in one iteration. Codex-era c2b3b98; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_merge_proposal_bytes: NonZeroU64 = nonzero(536870912)?;
+    "SUPPORT_SPECIALIZED_MAX_MERGE_PROPOSAL_BYTES", "B", "scalar", "Inherited unmeasured specialized cap on merge-proposal bytes. Codex-era 7ef66f6; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_merge_total_proposals: NonZeroU64 = nonzero(100000000)?;
+    "SUPPORT_SPECIALIZED_MAX_MERGE_TOTAL_PROPOSALS", "count", "scalar", "Inherited unmeasured specialized cap on merge proposals across all iterations. Codex-era abea502; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_satisfaction_neighbor_bytes: NonZeroU64 = nonzero(2147483648)?;
+    "SUPPORT_SPECIALIZED_MAX_SATISFACTION_NEIGHBOR_BYTES", "B", "scalar", "Inherited unmeasured specialized cap on satisfaction-neighbor storage bytes. Codex-era 6a66245; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_satisfaction_neighbor_pairs: NonZeroU64 = nonzero(100000000)?;
+    "SUPPORT_SPECIALIZED_MAX_SATISFACTION_NEIGHBOR_PAIRS", "count", "scalar", "Inherited unmeasured specialized cap on satisfaction-neighbor pairs. Codex-era 6a66245; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_satisfaction_tests: NonZeroU64 = nonzero(100000000)?;
+    "SUPPORT_SPECIALIZED_MAX_SATISFACTION_TESTS", "count", "scalar", "Inherited unmeasured specialized cap on demand-satisfaction tests. Codex-era 6a66245; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_synthetic_neighbor_bytes: NonZeroU64 = nonzero(536870912)?;
+    "SUPPORT_SPECIALIZED_MAX_SYNTHETIC_NEIGHBOR_BYTES", "B", "scalar", "Inherited unmeasured specialized cap on synthetic-neighbor storage bytes. Codex-era 6a66245; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
+    support_specialized_max_synthetic_neighbor_pairs: NonZeroU64 = nonzero(20000000)?;
+    "SUPPORT_SPECIALIZED_MAX_SYNTHETIC_NEIGHBOR_PAIRS", "count", "scalar", "Inherited unmeasured specialized cap on synthetic-neighbor pairs. Codex-era 6a66245; registered by owner ruling R5 (2026-08-05), which records the inherited number without ratifying it.";
     surface_tree_max_points: NonZeroU64 = nonzero(150_000)?;
     "SURFACE_TREE_MAX_POINTS", "count", "scalar", "Result-changing sampled-surface cap, not a resource exclusion.";
     surface_tree_pitch_mm: PositiveFinite = PositiveFinite::new(0.4)?;
