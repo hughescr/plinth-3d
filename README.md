@@ -142,6 +142,32 @@ Measured on the 8-model corpus, most recently by the unified census of 2026-08-0
   > treant's stopping point moved*) and
   > `docs/rust-migration/decimation-design-2026-08-06.md`.
 
+  > **FU-8c fixed 2026-08-06 — dated addendum; the two blocks above are both left standing
+  > as written.** The mechanism the addendum above describes — "re-evaluates every contact
+  > against every coverage sample once per merge proposal" — **is gone**. The merge gate now
+  > builds its proposal-invariant state once per batch (`GateBatchIndex`: samples by route
+  > key, contacts by route key, three satisfying contacts per demand) and each proposal
+  > re-answers only the route keys its own merged pair serves, so the plan is repriced from
+  > `(samples + demands + 1) × (proposals × (contacts − 1) + contacts)` to
+  > `(samples + demands + 1) × contacts + measured proposal work`. Equivalence was proved
+  > before the hot path was swapped: the predecessor's per-variant sweep is retained as a
+  > `#[cfg(test)]` reference and compared row by row on `f64::to_bits`. **No cap was raised,
+  > lowered or otherwise touched.** The treant's stated demand fell **108×**, from
+  > 21,755,124,103,146 to **201,480,535,329**, against the **same unchanged** 35,445,500,736.
+  > **The stopping point did not move.** The treant **still refuses at that same merge
+  > gate**, now 5.68× over rather than 613× over, and there is still no treant digest, no
+  > routed-contact count and no live-member count — the merge tournament, the PENETRATION
+  > and BRACE stages, the CCO anchors, attestation and the seal never execute. The run is
+  > **124 s at 2.50 GB peak RSS**, superseding the 81.5 s / 2.84 GB above as the current
+  > measurement (that figure stands as measured pre-fix; it is not being corrected). FU-8c
+  > is **closed** on the defect it named, not on the treant reaching a seal; the residual
+  > 196,264,386,588 — **97.4 %** of the demand — is per-proposal `sources × samples` work on
+  > the perturbed route key, and is opened as **FU-8d**. It is still an algorithm defect and
+  > still not a cap to raise, and the eighth model is still the largest known blind spot in
+  > the engine. See `docs/rust-migration/CURRENT-STATUS.md` (*FU-8c fixed 2026-08-06*, and
+  > the FU-8c/FU-8d follow-up rows) and
+  > `docs/rust-migration/support-resource-caps-2026-08-05.md` §7.
+
 The stages exist as libraries and the census harness runs the real chain from STL through
 a sealed support run. The folder-level runner that chains them all the way to a written
 `.chitubox` is roadmap, per [The goal](#the-goal) above.
