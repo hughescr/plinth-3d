@@ -6,7 +6,7 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_EVIDENCE_IDS: [&str; 24] = [
+const EXPECTED_EVIDENCE_IDS: [&str; 28] = [
     "CCO_X_PAIR_LOAD_DISCOUNT",
     "LAYER_HEIGHT_DEFAULT_MM",
     "LOAD_SHARING",
@@ -22,8 +22,12 @@ const EXPECTED_EVIDENCE_IDS: [&str; 24] = [
     "SATURN_LEADING_RELEASE_EDGE",
     "SATURN_RELEASE_FILM_THICKNESS_MM",
     "SATURN_RELEASE_FRONT_SWEEP_DIRECTION",
+    "SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT",
+    "SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED",
     "SUPPORT_KNN_MAX_WORK_PER_FACE",
     "SUPPORT_KNN_WORK_PER_FACE_OBSERVED",
+    "SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT",
+    "SUPPORT_LOAD_WORK_PER_BATCH_UNIT_OBSERVED",
     "SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE",
     "SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED",
     "TIP_DIAMETER_MIN_ALLOWED_MM",
@@ -33,7 +37,7 @@ const EXPECTED_EVIDENCE_IDS: [&str; 24] = [
     "X_STAR_CYLINDER",
 ];
 
-const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 24] = [
+const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 28] = [
     ("CCO_X_PAIR_LOAD_DISCOUNT", "1", "scalar"),
     ("LAYER_HEIGHT_DEFAULT_MM", "mm", "scalar"),
     ("LOAD_SHARING", "1", "load_sharing"),
@@ -53,8 +57,28 @@ const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 24] = [
         "enum",
         "y_direction",
     ),
+    (
+        "SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT",
+        "count/unit",
+        "scalar",
+    ),
+    (
+        "SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED",
+        "count/unit",
+        "scalar",
+    ),
     ("SUPPORT_KNN_MAX_WORK_PER_FACE", "count/face", "scalar"),
     ("SUPPORT_KNN_WORK_PER_FACE_OBSERVED", "count/face", "scalar"),
+    (
+        "SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT",
+        "count/unit",
+        "scalar",
+    ),
+    (
+        "SUPPORT_LOAD_WORK_PER_BATCH_UNIT_OBSERVED",
+        "count/unit",
+        "scalar",
+    ),
     ("SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE", "B/face", "scalar"),
     (
         "SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED",
@@ -78,7 +102,7 @@ struct ExpectedSource {
     date: &'static str,
 }
 
-const EXPECTED_SOURCES: [ExpectedSource; 18] = [
+const EXPECTED_SOURCES: [ExpectedSource; 20] = [
     ExpectedSource {
         constant: "LAYER_HEIGHT_DEFAULT_MM",
         kind: "project_record",
@@ -197,6 +221,24 @@ const EXPECTED_SOURCES: [ExpectedSource; 18] = [
         date: "2026-07-31",
     },
     ExpectedSource {
+        constant: "SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED",
+        kind: "corpus_study",
+        identity: "support-gate-load-batch-caps-weeping-treant-2026-08-06",
+        record: "docs/rust-migration/support-resource-caps-2026-08-05.md",
+        locator: "§7 FU-8b post-fix measurement (2026-08-06)",
+        precision: "exact",
+        date: "2026-08-06",
+    },
+    ExpectedSource {
+        constant: "SUPPORT_LOAD_WORK_PER_BATCH_UNIT_OBSERVED",
+        kind: "corpus_study",
+        identity: "support-gate-load-batch-caps-weeping-treant-2026-08-06",
+        record: "docs/rust-migration/support-resource-caps-2026-08-05.md",
+        locator: "§7 FU-8b post-fix measurement (2026-08-06)",
+        precision: "exact",
+        date: "2026-08-06",
+    },
+    ExpectedSource {
         constant: "SUPPORT_KNN_WORK_PER_FACE_OBSERVED",
         kind: "corpus_study",
         identity: "support-resource-caps-weeping-treant-2026-08-05",
@@ -269,7 +311,7 @@ fn declaration_batch_has_exact_membership_order_shapes_and_provenance_counts() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(actual_ids, EXPECTED_EVIDENCE_IDS);
-    assert_eq!(descriptors.len(), 24);
+    assert_eq!(descriptors.len(), 28);
 
     for (descriptor, (id, unit, shape)) in descriptors.iter().zip(EXPECTED_DESCRIPTOR_CONTRACT) {
         assert_eq!(descriptor.id().as_str(), id, "ID contract drift for {id}");
@@ -285,7 +327,7 @@ fn declaration_batch_has_exact_membership_order_shapes_and_provenance_counts() {
         .iter()
         .filter(|descriptor| descriptor.provenance().class() == RegistryProvenanceClass::Derived)
         .count();
-    assert_eq!((measured, derived), (18, 6));
+    assert_eq!((measured, derived), (20, 8));
     assert!(descriptors.iter().all(|descriptor| !matches!(
         descriptor.provenance().class(),
         RegistryProvenanceClass::Placeholder | RegistryProvenanceClass::Pending
@@ -341,6 +383,42 @@ fn descriptor_values_preserve_exact_scalar_record_direction_and_interval_types()
             .value()
             .view(),
         ConstantValueView::UnsignedInteger((2 * 696_u64).next_power_of_two())
+    );
+    // The same rule applied to the two batch-product coefficients. The scale
+    // is the batch's own product, not the face count: gate and load work were
+    // measured not to track faces (24-face make_raking_blade charges
+    // 612,887,212 gate operations, 429,120-face Weeping Treant 12,714,828,544).
+    let gate_batch_units = (405_146_u64 + 1) * (1_366 + 1);
+    assert_eq!(gate_batch_units, 553_835_949);
+    assert_eq!(
+        descriptor(&descriptors, "SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED")
+            .value()
+            .view(),
+        ConstantValueView::UnsignedInteger(12_714_828_544_u64.div_ceil(gate_batch_units))
+    );
+    assert_eq!(
+        descriptor(&descriptors, "SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT")
+            .value()
+            .view(),
+        ConstantValueView::UnsignedInteger(
+            (2 * 12_714_828_544_u64.div_ceil(gate_batch_units)).next_power_of_two()
+        )
+    );
+    let load_batch_units = (134_368_u64 + 1) * (1_366 + 1);
+    assert_eq!(load_batch_units, 183_682_423);
+    assert_eq!(
+        descriptor(&descriptors, "SUPPORT_LOAD_WORK_PER_BATCH_UNIT_OBSERVED")
+            .value()
+            .view(),
+        ConstantValueView::UnsignedInteger(5_402_535_619_u64.div_ceil(load_batch_units))
+    );
+    assert_eq!(
+        descriptor(&descriptors, "SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT")
+            .value()
+            .view(),
+        ConstantValueView::UnsignedInteger(
+            (2 * 5_402_535_619_u64.div_ceil(load_batch_units)).next_power_of_two()
+        )
     );
     let refs_per_face = scalar(&descriptors, "SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED");
     assert_eq!(refs_per_face, 1_214_544.0 / 429_120.0);

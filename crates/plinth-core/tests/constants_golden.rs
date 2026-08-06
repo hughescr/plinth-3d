@@ -4,7 +4,7 @@ use std::path::Path;
 
 // This is a hand-maintained cross-component inventory. It deliberately does
 // not read the source ledger or the generated Markdown golden.
-const EXPECTED_CONSTANT_IDS: [&str; 260] = [
+const EXPECTED_CONSTANT_IDS: [&str; 264] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -197,6 +197,8 @@ const EXPECTED_CONSTANT_IDS: [&str; 260] = [
     "STRUT_MODEL_ANCHOR_MAX_DELICACY",
     "STRUT_MODEL_ANCHOR_MIN_LEN_MM",
     "STUB_LENGTH_MM",
+    "SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT",
+    "SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED",
     "SUPPORT_KNN_MAX_LOGICAL_PEAK_BYTES",
     "SUPPORT_KNN_MAX_NEIGHBORS",
     "SUPPORT_KNN_MAX_QUERY_POINTS",
@@ -204,6 +206,8 @@ const EXPECTED_CONSTANT_IDS: [&str; 260] = [
     "SUPPORT_KNN_MAX_WORK_FLOOR",
     "SUPPORT_KNN_MAX_WORK_PER_FACE",
     "SUPPORT_KNN_WORK_PER_FACE_OBSERVED",
+    "SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT",
+    "SUPPORT_LOAD_WORK_PER_BATCH_UNIT_OBSERVED",
     "SUPPORT_PARITY_GRID_MAX_BYTES_FLOOR",
     "SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE",
     "SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED",
@@ -274,7 +278,7 @@ fn golden_path() -> std::path::PathBuf {
 }
 
 #[test]
-fn global_registry_is_one_complete_atomic_260_constant_publication() {
+fn global_registry_is_one_complete_atomic_264_constant_publication() {
     let first = m0_constants().expect("M0 constants registry must construct");
     let second = m0_constants().expect("M0 constants registry must construct");
     assert!(
@@ -307,7 +311,7 @@ fn global_registry_is_one_complete_atomic_260_constant_publication() {
             }
             counts
         });
-    assert_eq!(classes, [18, 6, 236, 0]);
+    assert_eq!(classes, [20, 8, 236, 0]);
 }
 
 #[test]

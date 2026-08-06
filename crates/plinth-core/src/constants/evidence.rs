@@ -43,8 +43,12 @@ pub struct M0EvidenceConstants {
     saturn_leading_release_edge: Measured<YDirection>,
     saturn_release_film_thickness_mm: Measured<f64>,
     saturn_release_front_sweep_direction: Measured<YDirection>,
+    support_gate_max_work_per_batch_unit: Derived<u64>,
+    support_gate_work_per_batch_unit_observed: Measured<u64>,
     support_knn_max_work_per_face: Derived<u64>,
     support_knn_work_per_face_observed: Measured<u64>,
+    support_load_max_work_per_batch_unit: Derived<u64>,
+    support_load_work_per_batch_unit_observed: Measured<u64>,
     support_parity_grid_max_bytes_per_face: Derived<u64>,
     support_parity_grid_refs_per_face_observed: Measured<f64>,
     tip_diameter_min_allowed_mm: Measured<f64>,
@@ -128,6 +132,16 @@ impl M0EvidenceConstants {
             "docs/rust-migration/support-resource-caps-2026-08-05.md",
             "§2 Measured requirement",
             exact_date("2026-08-05")?,
+        )?;
+
+        // The re-measurement of the same model after FU-8b removed the three
+        // quadratics that made the 2026-08-05 gate and load figures charges
+        // against a defect rather than statements of demand.
+        let treant_batch_source = EvidenceSource::corpus_study(
+            EvidenceId::new("support-gate-load-batch-caps-weeping-treant-2026-08-06")?,
+            "docs/rust-migration/support-resource-caps-2026-08-05.md",
+            "§7 FU-8b post-fix measurement (2026-08-06)",
+            exact_date("2026-08-06")?,
         )?;
 
         Ok(Self {
@@ -239,6 +253,17 @@ impl M0EvidenceConstants {
                 None,
                 "Project release-front sweep direction is PositiveY: the front moves -Y → +Y.",
             )?,
+            support_gate_max_work_per_batch_unit: Derived::new(
+                64,
+                ["SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED"],
+                "Cap coefficient by the single support resource-cap rule: next_power_of_two(2 × observed) = next_power_of_two(2 × 23) = next_power_of_two(46) = 64. The batch unit is one (coverage_samples + 1) × (contacts + 1) product element, which is the shape of the specialized gate's own routing scan, so the coefficient bounds gate work at a constant multiple of the batch the gate was handed. It does NOT scale with face count, and deliberately so: 24-face make_raking_blade charges 612,887,212 gate operations where 429,120-face Weeping Treant charges 12,714,828,544, a 20× spread against an 18,000× face spread. What the coefficient still refuses is the gate's proposal-variant re-evaluation, which is quadratic in the batch rather than linear in it: the treant's 39,223-proposal merge gate plans 21,755,124,103,146 operations on the same 553,835,949-unit batch, 613× this coefficient, and is refused (FU-8c). Single-specimen basis: its one input was observed on the Weeping Treant v1.2 alone (429,120 faces, 2026-08-06), so this coefficient is n = 1. A second large-model measurement triggers re-derivation over both specimens; it must never be inherited silently as a treant-shaped constant.",
+            ),
+            support_gate_work_per_batch_unit_observed: Measured::new(
+                23,
+                treant_batch_source.clone(),
+                None,
+                "Weeping Treant v1.2, 429,120 support faces, measured 2026-08-06 with FU-8b defects (a), (b) and (c) fixed: the specialized gate's proposal-free batch stated exact_operations = 12,714,828,544 over 405,146 coverage samples and 1,366 contacts, i.e. (405,146 + 1) × (1,366 + 1) = 553,835,949 batch units, so the batch costs 12,714,828,544 / 553,835,949 = 22.958 work units per batch unit, recorded as the ceiling 23. The pre-fix figure for the same batch was not a demand at all: it was the charge counter tripping at limit + 1 inside a selection sort. Single-specimen basis: the Weeping Treant v1.2 alone, 429,120 faces, 2026-08-06. The corpus's proposal-free batches sit between 1.90 and 2.09 work units per batch unit, so this observation is 11× the corpus band and has no second specimen at its own scale; a second large-model measurement triggers re-derivation of SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT rather than silent inheritance.",
+            )?,
             support_knn_max_work_per_face: Derived::new(
                 2_048,
                 ["SUPPORT_KNN_WORK_PER_FACE_OBSERVED"],
@@ -249,6 +274,17 @@ impl M0EvidenceConstants {
                 treant_cap_source.clone(),
                 None,
                 "Weeping Treant v1.2, 429,120 support faces: the minima-to-face kNN batch planned source_count × query_count = 298,667,520 work units, exactly 429,120 × 696, so the batch costs 696 work units per face. Single-specimen basis: the Weeping Treant v1.2 alone, 429,120 faces, 2026-08-05. It is the only corpus model above 4,760 faces, so this observation has no second specimen and no spread; a second large-model measurement triggers re-derivation of SUPPORT_KNN_MAX_WORK_PER_FACE rather than silent inheritance of a treant-shaped constant.",
+            )?,
+            support_load_max_work_per_batch_unit: Derived::new(
+                64,
+                ["SUPPORT_LOAD_WORK_PER_BATCH_UNIT_OBSERVED"],
+                "Cap coefficient by the single support resource-cap rule: next_power_of_two(2 × observed) = next_power_of_two(2 × 30) = next_power_of_two(60) = 64. The batch unit is one (load rows + 1) × (contacts + 1) product element, which is the shape of the load finalizer's own dense nearest scan, so the coefficient bounds load work at a constant multiple of the batch the finalizer was handed rather than at a constant. It admits the ~27 units per row-contact pair the finalizer spends (owner_log + 4, with owner_log = 23 on the treant) with 2.2× headroom, and still refuses anything quadratic in the row set. Single-specimen basis: its one input was observed on the Weeping Treant v1.2 alone (429,120 faces, 2026-08-06), so this coefficient is n = 1. A second large-model measurement triggers re-derivation over both specimens; it must never be inherited silently as a treant-shaped constant.",
+            ),
+            support_load_work_per_batch_unit_observed: Measured::new(
+                30,
+                treant_batch_source,
+                None,
+                "Weeping Treant v1.2, 429,120 support faces, measured 2026-08-06 with FU-8b defects (a), (b) and (c) fixed: the specialized load partition stated required_operations = 5,402,535,619 over 134,368 rows and 1,366 contacts, i.e. (134,368 + 1) × (1,366 + 1) = 183,682,423 batch units, so the partition costs 5,402,535,619 / 183,682,423 = 29.41 work units per batch unit, recorded as the ceiling 30. The pre-fix figure was 2.95e11 against a 7,988,078-row plan, because the row count was taken from the (owner, face) pair list rather than from the distinct faces; FU-8b fix (B) collapsed that to 134,368 rows, which is 59.5× fewer. Single-specimen basis: the Weeping Treant v1.2 alone, 429,120 faces, 2026-08-06; the next largest corpus model plans 66 rows, so there is no second specimen at this scale and a second large-model measurement triggers re-derivation of SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT rather than silent inheritance.",
             )?,
             support_parity_grid_max_bytes_per_face: Derived::new(
                 512,
@@ -363,6 +399,26 @@ impl M0EvidenceConstants {
     }
 
     #[must_use]
+    pub const fn support_gate_max_work_per_batch_unit(&self) -> &Derived<u64> {
+        &self.support_gate_max_work_per_batch_unit
+    }
+
+    #[must_use]
+    pub const fn support_gate_work_per_batch_unit_observed(&self) -> &Measured<u64> {
+        &self.support_gate_work_per_batch_unit_observed
+    }
+
+    #[must_use]
+    pub const fn support_load_max_work_per_batch_unit(&self) -> &Derived<u64> {
+        &self.support_load_max_work_per_batch_unit
+    }
+
+    #[must_use]
+    pub const fn support_load_work_per_batch_unit_observed(&self) -> &Measured<u64> {
+        &self.support_load_work_per_batch_unit_observed
+    }
+
+    #[must_use]
     pub const fn support_knn_max_work_per_face(&self) -> &Derived<u64> {
         &self.support_knn_max_work_per_face
     }
@@ -408,7 +464,7 @@ impl M0EvidenceConstants {
     }
 
     /// Returns the complete declaration batch in stable ID order.
-    pub fn descriptors(&self) -> Result<[ConstantDescriptor; 24], RegistryError> {
+    pub fn descriptors(&self) -> Result<[ConstantDescriptor; 28], RegistryError> {
         Ok([
             ConstantDescriptor::from_derived(
                 ConstantId::from("CCO_X_PAIR_LOAD_DISCOUNT"),
@@ -501,6 +557,18 @@ impl M0EvidenceConstants {
                 &self.saturn_release_front_sweep_direction,
             )?,
             ConstantDescriptor::from_derived(
+                ConstantId::from("SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT"),
+                "count/unit",
+                SCALAR,
+                &self.support_gate_max_work_per_batch_unit,
+            )?,
+            ConstantDescriptor::from_measured(
+                ConstantId::from("SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED"),
+                "count/unit",
+                SCALAR,
+                &self.support_gate_work_per_batch_unit_observed,
+            )?,
+            ConstantDescriptor::from_derived(
                 ConstantId::from("SUPPORT_KNN_MAX_WORK_PER_FACE"),
                 "count/face",
                 SCALAR,
@@ -511,6 +579,18 @@ impl M0EvidenceConstants {
                 "count/face",
                 SCALAR,
                 &self.support_knn_work_per_face_observed,
+            )?,
+            ConstantDescriptor::from_derived(
+                ConstantId::from("SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT"),
+                "count/unit",
+                SCALAR,
+                &self.support_load_max_work_per_batch_unit,
+            )?,
+            ConstantDescriptor::from_measured(
+                ConstantId::from("SUPPORT_LOAD_WORK_PER_BATCH_UNIT_OBSERVED"),
+                "count/unit",
+                SCALAR,
+                &self.support_load_work_per_batch_unit_observed,
             )?,
             ConstantDescriptor::from_derived(
                 ConstantId::from("SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE"),

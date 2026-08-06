@@ -945,6 +945,57 @@ constant.** `SUPPORT_SPECIALIZED_MAX_GATE_OPERATIONS`,
 `SUPPORT_SPECIALIZED_MAX_GATE_PEAK_BYTES` carry the 2026-08-05 measurement in
 their registry notes together with the instruction that they must **not** be
 raised — see the *Not raised, deliberately* paragraph in §3.10.8 and FU-8b.
+Two of those four, the gate and load **operation** caps, became the floors of a
+measured rule on 2026-08-06 without their numbers changing; see §3.10.10.
+
+### 3.10.10 Support execution-authority caps — the batch-product pair {#batch-product-caps}
+
+FU-8b, 2026-08-06. §3.10.8's two caps scale on the support mesh's **face
+count**, because both batches are built face by face. The specialized gate and
+load stages do not work that way, and the corpus proves it: 24-face
+`make_raking_blade` charges 612,887,212 gate operations while 429,120-face
+Weeping Treant charges 12,714,828,544 — a 20× spread over an 18,000× face
+spread. A per-face rule for those two would refuse the small model and admit
+anything at all on the large one.
+
+They scale on the **batch product** each stage is handed instead, under the same
+`max(floor, coefficient × scale)` shape and the same derivation rule:
+
+| cap | rule | floor (Placeholder, R5) | coefficient (Derived, n = 1) |
+| --- | --- | --- | --- |
+| specialized gate operations | `max(floor, K_G × (coverage_samples + 1) × (contacts + 1))` | `SUPPORT_SPECIALIZED_MAX_GATE_OPERATIONS` = 2,000,000,000 | `SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT` = 64 |
+| specialized load operations | `max(floor, K_L × (rows + 1) × (contacts + 1))` | `SUPPORT_SPECIALIZED_MAX_LOAD_OPERATIONS` = 2,000,000,000 | `SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT` = 64 |
+
+| constant | wrapper | value | unit | derivation |
+| --- | --- | --- | --- | --- |
+| `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` | Measured | 23 | count/unit | 12,714,828,544 / 553,835,949 batch units = 22.958, ceiling. Weeping Treant v1.2, 2026-08-06 |
+| `SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT` | Derived | 64 | count/unit | `next_power_of_two(2 × 23)` |
+| `SUPPORT_LOAD_WORK_PER_BATCH_UNIT_OBSERVED` | Measured | 30 | count/unit | 5,402,535,619 / 183,682,423 batch units = 29.41, ceiling. Same run |
+| `SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT` | Derived | 64 | count/unit | `next_power_of_two(2 × 30)` |
+
+Neither floor was raised. Both are still the R5-registered inherited numbers;
+they are now the constant term of a rule rather than the whole cap, and they
+remain the whole cap for every corpus model — the widest corpus batch product is
+the Cylinder's 27,998,135, and `64 × 27,998,135 = 1,791,880,640 < 2,000,000,000`.
+The Cylinder at 89.6% of the floor is the near case: a coefficient of 128 would
+take it off the floor, so a re-derivation must re-check that table rather than
+assume the floors still govern.
+
+Both caps are **declared** in the sense owner ruling R1 requires: a doc comment
+on the rule at `SpecializedLimits::gate_operation_limit` and
+`SpecializedLimits::load_operation_limit`, accessors that materialize them, a
+pinning test written as its derivation
+(`crates/plinth-support/tests/resource_cap_policy.rs`), a census row per model
+per cap (`CENSUS T0_scaled_cap … materialized=… at_floor=…`), and these table
+rows. Owner ruling R4's n = 1 marking and FU-23's re-derivation trigger apply to
+both coefficients unchanged.
+
+They still refuse. The treant's 39,223-proposal merge gate plans
+21,755,124,103,146 operations on the same 553,835,949-unit batch — 613× the
+coefficient — and is refused. That refusal is FU-8c, an algorithm defect of the
+FU-8b family, not a cap to raise: admitting it would need a coefficient near
+39,300, which would take most of the corpus off its floors. See
+`support-resource-caps-2026-08-05.md` §7.
 
 ### 3.11 NOT constants — resource guards
 
