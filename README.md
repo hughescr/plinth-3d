@@ -181,6 +181,33 @@ Measured on the 8-model corpus, most recently by the unified census of 2026-08-0
   > charged per route and per batch. See `docs/rust-migration/CURRENT-STATUS.md` (*FU-8d
   > phase F1 landed 2026-08-06*) and `support-resource-caps-2026-08-05.md` §8.
 
+  > **FU-8d phase F2 landed 2026-08-06 — dated addendum; every block above stands as
+  > written, and the treant's stopping point has moved for the first time since FU-8b.**
+  > F2 finishes FU-8d part (1). A merge proposal no longer re-sweeps the route keys its
+  > pair perturbs against those keys' whole surviving source sets: the survivors' answer is
+  > **read** from the witnesses F1 retained, and the merged seat's distances come from
+  > **one** kNN batch covering every perturbed row at once, with the square root taken once
+  > after the minimum. Equivalence was proved before the swap, against the same retained
+  > `#[cfg(test)]` full sweep, on a fixture grown until a narrow key, a total removal, a
+  > displaced baseline holder, a **steal** and an **exact distance tie** each occur.
+  > **No cap was raised, lowered or otherwise touched.** The per-proposal nearest term fell
+  > **94.2×**, from 196,264,386,588 to 2,083,167,818, and the merge gate's stated demand
+  > fell **27.6×**, from 201,480,535,329 to **7,299,316,559** against the **same unchanged**
+  > 35,445,500,736 — 20.6 % of it, so that check now **passes**. **The stopping point moved
+  > one site.** The treant still refuses at the same merge gate, but now inside the
+  > `exact_operations` fold, where the per-variant owner-face descriptor scan crosses the
+  > limit at **variant 275 of 39,224**: `required: 35445618202, limit: 35445500736`. That
+  > residual is **FU-8d part (2)**, the per-variant load/owner-face path — over those 275
+  > variants alone the exact finalizer term is already 3.04 × 10¹², which extrapolates to
+  > ~4.3 × 10¹⁴ over the full batch — and it is what phase F4 addresses. There is still no
+  > treant digest, no routed-contact count and no live-member count; the run is **129 s at
+  > 2,641,504 KB (2.52 GiB) peak RSS**, watchdog armed and never fired, superseding the
+  > 124 s / 2.50 GB above. All seven frozen corpus digests are byte-identical. FU-8d stays
+  > **open** in parts (2) and (3), it is still an algorithm defect and still not a cap to
+  > raise, and the eighth model is still the largest known blind spot in the engine. See
+  > `docs/rust-migration/CURRENT-STATUS.md` (*FU-8d phase F2 landed 2026-08-06*) and
+  > `support-resource-caps-2026-08-05.md` §9.
+
 The stages exist as libraries and the census harness runs the real chain from STL through
 a sealed support run. The folder-level runner that chains them all the way to a written
 `.chitubox` is roadmap, per [The goal](#the-goal) above.

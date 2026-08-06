@@ -970,6 +970,20 @@ digest.
 > The registry note on `SUPPORT_KNN_MAX_NEIGHBORS` carries the same amendment,
 > because its "the support pipeline only ever asks for the single nearest
 > neighbor" clause was true when written and is not true now.
+>
+> **Addendum 2026-08-06 (FU-8d phase F2) — everything above stands; the last
+> sentence's transcript is superseded.** F2 made the per-proposal delta *read*
+> those retained witnesses, so the neighbour ceiling above is now load-bearing
+> rather than merely allocated. **§3.10.8 and §3.10.9 remain untouched: F2 raised,
+> lowered and moved no cap either.** The seven frozen digests are again
+> byte-identical, but the treant's stage error is **not** — the merge gate's
+> stated demand fell 27.6×, from 201,480,535,329 to **7,299,316,559** against the
+> unchanged 35,445,500,736, so `gate_resource_plan` now passes and the refusal
+> moved one site later, into the `exact_operations` fold's per-variant owner-face
+> descriptor scan:
+> `Preparation: Specialized(GateOperationLimit { required: 35445618202, limit: 35445500736 })`.
+> That figure is the counter crossing at variant 275 of 39,224, not a total.
+> See `support-resource-caps-2026-08-05.md` §9.
 
 **Four of them are known to be refusing defects, and that is recorded on the
 constant.** `SUPPORT_SPECIALIZED_MAX_GATE_OPERATIONS`,
@@ -1070,6 +1084,28 @@ FU-8b family, not a cap to raise: admitting it would need a coefficient near
 > re-derivation trigger are unaffected, except that FU-23 should now fire after
 > FU-8d lands rather than after FU-8c. Full derivation and the exact census
 > transcript: `CURRENT-STATUS.md` under *FU-8c fixed 2026-08-06*.
+>
+> **Note added 2026-08-06 (FU-8d phase F2) — dated addendum; the two notes above
+> are left standing exactly as measured.** The 97.4 % residual they name is gone.
+> A merge proposal now answers its nearest from the baseline sweep's retained
+> witnesses plus one merged-seat kNN batch, so that term fell 94.2× — from
+> 196,264,386,588 to 2,083,167,818 — and the treant's stated demand fell a further
+> 27.6×, from 201,480,535,329 to **7,299,316,559** on the same 553,835,949-unit
+> batch: **13.2× the coefficient**, and 20.6 % of the same unchanged
+> `64 × 553,835,949 = 35,445,500,736`. **`gate_resource_plan` therefore now
+> passes, and neither coefficient changed here either.** What does *not* hold any
+> more is "it still refuses at this check": the treant still refuses at this gate,
+> but from the `exact_operations` fold, where the per-variant owner-face
+> descriptor scan crosses at variant 275 of 39,224 —
+> `required: 35445618202, limit: 35445500736`. Over those 275 variants the exact
+> `unique_face_finalizer_work` is already 3.04 × 10¹², extrapolating to
+> ~4.3 × 10¹⁴ over the batch, and *that* is the remaining wall: **FU-8d part (2)**,
+> the per-variant load/owner-face path, still an algorithm defect and still not a
+> cap to raise. R4's n = 1 marking is unaffected; FU-23's trigger is now ruling
+> R-f — re-derive only after FU-8d phase F3 lands **and** only from a treant run
+> that **completes** the gate, which this is not. Full derivation:
+> `support-resource-caps-2026-08-05.md` §9 and `CURRENT-STATUS.md` under *FU-8d
+> phase F2 landed 2026-08-06*.
 
 ### 3.11 NOT constants — resource guards
 

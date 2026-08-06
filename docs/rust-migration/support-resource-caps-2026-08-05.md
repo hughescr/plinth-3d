@@ -694,3 +694,147 @@ reaches it. What shows the retention runs on real corpus geometry is
 `13278215294653054002` unmoved — plus the two FU-8d tests. FU-23's trigger is
 unchanged and still pending: `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is to be
 re-derived only from a treant run that **completes** the gate, which this is not.
+
+## 9. FU-8d phase F2 — the nearest delta, and a stopping point that moved, 2026-08-06
+
+Dated addendum. Nothing in §§1–8 is rewritten. **No cap in this document moved,
+no coefficient was re-derived, and no cap code was touched.** This section exists
+because two things a caps record must carry did change: the merge gate's stated
+demand, and — for the first time since FU-8b — **which check refuses the Weeping
+Treant**.
+
+### 9.1 What F2 did
+
+A merge proposal's nearest phase used to re-sweep every route key its pair
+perturbs against that key's whole surviving source set: `Σ_{perturbed keys}
+source_count × query_count`. It no longer does. The minimum over
+`survivors(key) ∪ {merged seat}` splits into two parts that are each cheap:
+
+- **the survivors' side** is *read* from the witnesses phase F1 retained, as a
+  value — three retained slots answer any two-contact removal exactly, and the
+  bits returned are the bits the kernel emitted during the baseline sweep;
+- **the merged seat's side** is **one** `KnnBatchPlan(1 source, touched_rows
+  queries, k = 1)` per proposal, covering every perturbed key's rows at once.
+
+The two are combined by `f64::total_cmp` and the square root is taken **once,
+after** the minimum, so the arithmetic applied to the winning value is identical
+to the sweep's `squared_distances[row.start].sqrt()`, and an exact tie is a tie
+between two bit-identical `f64`.
+
+Equivalence was proved before the hot path was swapped, against the same
+retained `#[cfg(test)]` full sweep FU-8c used
+(`fu8d_proposal_nearest_deltas_reproduce_the_full_sweep_bit_for_bit`), on a
+fixture grown until each arm is reached and asserted non-vacuous: a key with
+fewer than three servers, a proposal that removes **every** server of a key, a
+row whose baseline nearest is merged away, a **steal**, and an **exact distance
+tie** between a survivor and the merged seat.
+
+### 9.2 The demand this cap is handed
+
+Measured on the Weeping Treant v1.2 (429,120 faces; 405,146 coverage samples,
+1,095 demands, 1,366 contacts, 39,223 merge proposals), release,
+`--features census`, `PLINTH_THREADS=4`, RSS watchdog armed:
+
+| `gate_resource_plan` term | at F1 (§8) | at F2 | shape |
+|---|---:|---:|---|
+| `baseline_rows` | 554,926,572 | 554,926,572 | `(samples + demands + 1) × contacts` |
+| per-proposal `nearest_work` | 195,222,841,902 | **1,041,544,686** | was `Σ s × q`; now `Σ 1 × touched_rows` |
+| per-proposal `touched_rows` | 1,041,544,686 | 1,041,544,686 | rows written, scanned and restored |
+| per-proposal `key_visits` | — (uncharged) | **78,446** | `routes(l)+demands(l)+routes(r)+demands(r)` |
+| per-proposal `demand_rows` | 42,949,185 | 42,949,185 | `proposals × demands` |
+| `face_rows` | 4,618,272,984 | 4,618,272,984 | `variants × distinct faces` |
+| **stated demand** | **201,480,535,329** | **7,299,316,559** | |
+| **cap (unchanged)** | 35,445,500,736 | 35,445,500,736 | `max(floor, K_G × (samples+1) × (contacts+1))` |
+
+The F1 column reconciles exactly with the number FU-8c recorded:
+`195,222,841,902 + 1,041,544,686 = 196,264,386,588`, the "per-proposal nearest"
+residual, 97.4 % of the demand. The whole per-proposal nearest term is therefore
+`196,264,386,588 → 2,083,167,818`, **94.2×**, and the stated demand is
+`201,480,535,329 → 7,299,316,559`, **27.6×** — **20.6 % of the unchanged cap, so
+`gate_resource_plan` now passes.** Per ruling **R-e** no literal of the post-fix
+total is pinned in a test; the count-derived terms keep their derivation-shaped
+pins and this dated transcript is the record.
+
+### 9.3 The stopping point moved — and this is the phase's real result
+
+The treant **still refuses at the merge gate**, and still with
+`GateOperationLimit`, but no longer at the same check. `gate_resource_plan`
+passes; the refusal now comes from the `exact_operations` fold, where
+`variant_specialized_owner_face_count`'s descriptor budget crosses this same
+limit:
+
+```
+CENSUS  T0_stage_error  Weeping Treant v1.2
+        Preparation: Specialized(GateOperationLimit { required: 35445618202, limit: 35445500736 })
+```
+
+That number is **not a total**. The scan refuses the instant its running counter
+crosses, which it does at **variant 275 of 39,224** — 0.70 % of the batch — so
+`35,445,618,202` is "the cap plus one variant's descriptor work", and the true
+demand is roughly `39,224 / 275 ×` larger. Measured at the crossing:
+
+| counter, accumulated over the first 275 variants | value | extrapolated over 39,224 |
+|---|---:|---:|
+| `descriptor_operations` (owner-face scan) | 35,445,417,382 | ~5.06 × 10¹² |
+| `unique_face_finalizer_work` inside `variant_operation_count` | 3,036,066,151,957 | **~4.33 × 10¹⁴** |
+| routed (nearest) work | 3,912,181 | ~5.6 × 10⁸ |
+
+The routed term is now about one part in a million of what the variant fold
+costs (3,912,181 against 3,037,219,978,143 over the same 275 variants). **The wall is entirely FU-8d part (2)** — the per-variant load and
+owner-face path — and the ~4.33 × 10¹⁴ above is the same order the FU-8d design
+predicted for it. Phase F4 is what addresses it. **It is not a cap to raise**, on
+exactly the grounds §5 and §7.2 already set out: admitting it would need a
+per-batch-unit coefficient in the millions and would take the Cylinder and most
+of the corpus off their floors.
+
+### 9.4 What was re-measured, and what it proves
+
+Full 8-model census at the F2 tip, release, `--features census`,
+`PLINTH_THREADS=4`, 3,415 lines:
+
+- all seven frozen OD-8 digests **byte-identical** (`Sphere 17667468971446251870`,
+  `Cylinder 13310185350867878190`, `make_box 9657051231007502658`,
+  `make_overhang_table 6686599816688114065`,
+  `make_toed_slab 11199296506741562956`,
+  `make_raking_blade 13278215294653054002`,
+  `make_thin_fin 7016743535301716631`);
+- all fourteen corpus `T0_scaled_cap` rows still `at_floor=true`;
+- the treant's stage error as quoted in §9.3.
+
+`make_raking_blade` carries the corpus weight, for the reason §8.3 gives: it is
+the one reachable model that runs a genuine merge tournament — 23 gate batches,
+1,402 merge proposals — through the exact code F2 rewrote, and its digest did not
+move. The treant run itself is **129 s at 2,641,504 KB (2.52 GiB) peak RSS**,
+watchdog armed and never fired, superseding the 124 s / 2.50 GB of §7.
+
+**Ruling R-f is not satisfied by this phase.**
+`SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is to be re-derived only after phase
+F3 lands **and** only from a treant run that **completes** the gate. This run does
+not complete it, so nothing was re-derived.
+
+### 9.5 Ruling R-c, measured and left unbuilt
+
+The design's radius-bounded steal path (candidate `d`) was **not built**. F2's
+scratch pass measured what it would have bought, over all 39,223 proposals, with
+`R_max(key)` taken as the largest baseline nearest distance that key carries — a
+merged seat farther than that from a sample cannot win it:
+
+| per proposal | mean | p50 | p99 | max | sum |
+|---|---:|---:|---:|---:|---:|
+| touched rows | 26,554.4 | 22,868 | 41,422 | 41,422 | 1,041,544,686 |
+| rows inside `R_max` | 15,399.5 | 13,270 | 29,303 | 38,679 | 604,013,078 |
+| rows whose baseline nearest was merged away | 93.9 | 20 | 891 | 16,694 | 3,681,423 |
+| steal rows | 0.449 | 0 | 13 | 535 | 17,594 |
+
+The radius bound removes **42 %** of the rows — a 1.7× constant factor, not an
+order. The adoption rule was "only if the measured margin is under 2×", and the
+margin is 4.9× (7,299,316,559 against 35,445,500,736), so **R-c is not adopted**.
+The rows that actually change are rarer still: 0.35 % of touched rows lose their
+holder and 0.0017 % are steals, which is why the delta is a lookup with one
+distance test rather than anything cleverer.
+
+Ruling **R-d** (batching proposals by hot key) is likewise measured and left
+unbuilt: 28 of the 48 perturbed keys carry ≥ 10 proposals, and one carries 26,543,
+so the precondition holds — but it is a constant-factor cleanup on a term that is
+now some five parts in a million of the wall, and it would be optimizing the
+wrong thing while part (2) stands.
