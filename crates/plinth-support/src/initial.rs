@@ -1269,7 +1269,10 @@ mod tests {
                 &generic,
                 &regular,
                 &selection,
-                SpecializedLimits::production(TEST_KNN_LIMITS),
+                SpecializedLimits::production(
+                    TEST_KNN_LIMITS,
+                    crate::specialized::test_batch_work(),
+                ),
             )
             .unwrap();
             let ids = plan
@@ -1336,7 +1339,10 @@ mod tests {
                 &self.generic,
                 &self.regular,
                 &selection,
-                SpecializedLimits::production(TEST_KNN_LIMITS),
+                SpecializedLimits::production(
+                    TEST_KNN_LIMITS,
+                    crate::specialized::test_batch_work(),
+                ),
                 &geometry,
                 limits,
             )
@@ -1448,7 +1454,7 @@ mod tests {
             &fixture.generic,
             &fixture.regular,
             &selection,
-            SpecializedLimits::production(TEST_KNN_LIMITS),
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work()),
         )
         .unwrap();
         let loads = FinalizedContactLoads::from_partition(
@@ -1473,7 +1479,7 @@ mod tests {
             &fixture.generic,
             &fixture.regular,
             &selection,
-            SpecializedLimits::production(TEST_KNN_LIMITS),
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work()),
             &geometry,
             ContactConstructionLimits::production(),
         )
@@ -1578,7 +1584,10 @@ mod tests {
                 &table.generic,
                 &table.regular,
                 &selection,
-                SpecializedLimits::production(TEST_KNN_LIMITS),
+                SpecializedLimits::production(
+                    TEST_KNN_LIMITS,
+                    crate::specialized::test_batch_work()
+                ),
                 &alien,
                 ContactConstructionLimits::production(),
             ),

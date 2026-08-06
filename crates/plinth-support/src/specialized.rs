@@ -56,19 +56,140 @@ pub struct SpecializedLimits {
     pub max_gate_variants: usize,
     pub max_gate_vector_bytes: usize,
     pub max_gate_contact_matrix_bytes: usize,
-    pub max_gate_operations: usize,
+    pub max_gate_operations_floor: usize,
     pub max_gate_window_variants: usize,
     pub max_coverage_scratch_bytes: usize,
     pub max_coverage_operations: usize,
     pub max_load_scratch_bytes: usize,
-    pub max_load_operations: usize,
+    pub max_load_operations_floor: usize,
     pub max_gate_peak_bytes: usize,
+    /// `SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT`. Never the whole cap on its own;
+    /// see [`SpecializedLimits::gate_operation_limit`].
+    pub gate_work_per_batch_unit: usize,
+    /// `SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT`. Never the whole cap on its own;
+    /// see [`SpecializedLimits::load_operation_limit`].
+    pub load_work_per_batch_unit: usize,
+}
+
+/// The two `Derived` batch-product coefficients, read from the one M0
+/// publication so this crate invents no second numeric owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpecializedBatchWork {
+    /// `SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT`.
+    pub gate_per_batch_unit: usize,
+    /// `SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT`.
+    pub load_per_batch_unit: usize,
+}
+
+/// The registered coefficients, for tests that build production limits.
+///
+/// Tests read the *registry*, never a literal, so a coefficient change moves
+/// the tests with it rather than leaving a second numeric owner behind.
+#[cfg(test)]
+pub(crate) fn test_batch_work() -> SpecializedBatchWork {
+    SpecializedBatchWork::registered().expect("registered support batch coefficients")
+}
+
+impl SpecializedBatchWork {
+    /// Reads both coefficients from the registered support resource-cap policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns the registry's own construction error, or
+    /// [`SpecializedError::UnrepresentableBatchWork`] if a registered
+    /// coefficient does not fit a `usize` on this target.
+    pub fn registered() -> Result<Self, SpecializedError> {
+        let caps = plinth_core::m0_constants()
+            .map_err(|error| SpecializedError::RegisteredConstantsUnavailable(error.to_string()))?
+            .support_resource_cap_policy();
+        let gate_per_batch_unit = usize::try_from(*caps.gate_max_work_per_batch_unit().value())
+            .map_err(|_| SpecializedError::UnrepresentableBatchWork)?;
+        let load_per_batch_unit = usize::try_from(*caps.load_max_work_per_batch_unit().value())
+            .map_err(|_| SpecializedError::UnrepresentableBatchWork)?;
+        Ok(Self {
+            gate_per_batch_unit,
+            load_per_batch_unit,
+        })
+    }
+}
+
+/// Materializes one batch-product-scaled cap: `max(floor, per_unit × units)`,
+/// where `units = (rows + 1) × (columns + 1)`.
+///
+/// Saturating, so an absurd batch yields `usize::MAX` rather than a
+/// wrapped-around tiny cap. The `+ 1` on each factor keeps the product
+/// non-zero for an empty batch, so the floor always governs there.
+#[must_use]
+pub(crate) const fn batch_product_scaled_cap(
+    floor: usize,
+    per_unit: usize,
+    rows: usize,
+    columns: usize,
+) -> usize {
+    let units = rows
+        .saturating_add(1)
+        .saturating_mul(columns.saturating_add(1));
+    let scaled = per_unit.saturating_mul(units);
+    if scaled > floor {
+        scaled
+    } else {
+        floor
+    }
 }
 
 impl SpecializedLimits {
+    /// The gate operation cap **for one gate batch**, materialized against that
+    /// batch's own shape: `max(floor, K_G × (coverage_samples + 1) × (contacts + 1))`.
+    ///
+    /// This is a **declared model-scaled cap**. It is not a constant, and it is
+    /// deliberately not scaled on the face count: gate work was measured not to
+    /// track faces (24-face `make_raking_blade` charges 612,887,212 gate
+    /// operations against the 429,120-face Weeping Treant's 12,714,828,544), so
+    /// a per-face rule would refuse the small model and admit anything on the
+    /// large one. What it still refuses is work that is superlinear in the
+    /// batch: the treant's 39,223-proposal merge gate plans 21,755,124,103,146
+    /// operations on a 553,835,949-unit batch — 613× this coefficient — and is
+    /// refused (FU-8c).
+    ///
+    /// Every corpus model sits at the floor; `the_batch_scaled_gate_and_load_caps_are_the_flat_floor_for_every_corpus_shape`
+    /// pins that.
     #[must_use]
-    pub const fn production(coverage_route_knn: KnnBatchLimits) -> Self {
+    pub const fn gate_operation_limit(&self, coverage_samples: usize, contacts: usize) -> usize {
+        batch_product_scaled_cap(
+            self.max_gate_operations_floor,
+            self.gate_work_per_batch_unit,
+            coverage_samples,
+            contacts,
+        )
+    }
+
+    /// The load operation cap **for one load partition**, materialized against
+    /// that partition's own shape:
+    /// `max(floor, K_L × (rows + 1) × (contacts + 1))`.
+    ///
+    /// A **declared model-scaled cap** on the same terms as
+    /// [`Self::gate_operation_limit`]. `rows` is the row count the partition's
+    /// own resource plan was computed from — one row per distinct mesh face,
+    /// never one per `(owner, face)` pair (FU-8b defect B) — so the cap and the
+    /// demand it bounds are always stated over the same batch.
+    #[must_use]
+    pub const fn load_operation_limit(&self, rows: usize, contacts: usize) -> usize {
+        batch_product_scaled_cap(
+            self.max_load_operations_floor,
+            self.load_work_per_batch_unit,
+            rows,
+            contacts,
+        )
+    }
+
+    #[must_use]
+    pub const fn production(
+        coverage_route_knn: KnnBatchLimits,
+        batch_work: SpecializedBatchWork,
+    ) -> Self {
         Self {
+            gate_work_per_batch_unit: batch_work.gate_per_batch_unit,
+            load_work_per_batch_unit: batch_work.load_per_batch_unit,
             coverage_route_knn,
             max_synthetic_neighbor_pairs: 20_000_000,
             max_synthetic_neighbor_bytes: 512 * 1024 * 1024,
@@ -85,12 +206,12 @@ impl SpecializedLimits {
             max_gate_variants: 20_000_001,
             max_gate_vector_bytes: 512 * 1024 * 1024,
             max_gate_contact_matrix_bytes: 512 * 1024 * 1024,
-            max_gate_operations: 2_000_000_000,
+            max_gate_operations_floor: 2_000_000_000,
             max_gate_window_variants: 1_024,
             max_coverage_scratch_bytes: 512 * 1024 * 1024,
             max_coverage_operations: 2_000_000_000,
             max_load_scratch_bytes: 512 * 1024 * 1024,
-            max_load_operations: 2_000_000_000,
+            max_load_operations_floor: 2_000_000_000,
             max_gate_peak_bytes: 1024 * 1024 * 1024,
         }
     }
@@ -1036,7 +1157,10 @@ impl<'a> SpecializedContactPlanEdit<'a> {
             &load_inputs.specialized_owner_faces,
             LoadFinalizeLimits {
                 max_scratch_bytes: self.plan.limits_authority.max_load_scratch_bytes,
-                max_operations: load_inputs.remaining_load_operations,
+                // Already a remaining budget carved out of the batch-materialized
+                // cap upstream, so it is the whole bound here: coefficient 0.
+                max_operations_floor: load_inputs.remaining_load_operations,
+                operations_per_batch_unit: 0,
             },
         )?;
         for row in load_partition.rows() {
@@ -1232,6 +1356,8 @@ pub enum SpecializedError {
     Selection(#[from] ContactSelectionError),
     #[error(transparent)]
     Dyadic(#[from] DyadicError),
+    #[error("a registered batch-work coefficient does not fit this target's usize")]
+    UnrepresentableBatchWork,
     #[error("specialized contact could not build topology: {0}")]
     Topology(String),
     #[error("specialized contact could not build the canonical surface: {0}")]
@@ -1619,7 +1745,10 @@ pub fn prepare_specialized_contacts(
         &load_inputs.specialized_owner_faces,
         LoadFinalizeLimits {
             max_scratch_bytes: limits.max_load_scratch_bytes,
-            max_operations: load_inputs.remaining_load_operations,
+            // Already a remaining budget carved out of the batch-materialized
+            // cap upstream, so it is the whole bound here: coefficient 0.
+            max_operations_floor: load_inputs.remaining_load_operations,
+            operations_per_batch_unit: 0,
         },
     )?;
     for row in load_partition.rows() {
@@ -1999,8 +2128,15 @@ fn working_load_inputs(
         contacts.len(),
         islands.len(),
         reservations.len(),
-        limits.max_load_operations,
+        limits.max_load_operations_floor,
     )?;
+    // The two gathers below run *before* the row count exists, so they are
+    // budgeted against the floor rather than against the batch-materialized
+    // cap.  The floor is never above that cap, so this is strictly
+    // conservative: it can refuse earlier than the batch bound would, never
+    // later.  On the Weeping Treant the larger of the two charges 2.2e6 against
+    // a 2e9 floor, so neither is anywhere near binding.
+    //
     // One distinct-face buffer for the whole accepted-load build; both the
     // count and the fill below reuse it rather than allocating per contact.
     let mut face_scratch: Vec<u32> = Vec::new();
@@ -2013,7 +2149,7 @@ fn working_load_inputs(
         islands,
         &mut face_scratch,
         &mut island_face_work,
-        limits.max_load_operations,
+        limits.max_load_operations_floor,
     )?;
     let mut descriptor_work = 0usize;
     let owner_face_count = variant_specialized_owner_face_count(
@@ -2023,7 +2159,7 @@ fn working_load_inputs(
         islands,
         &mut face_scratch,
         &mut descriptor_work,
-        limits.max_load_operations,
+        limits.max_load_operations_floor,
     )?;
     let retained_bytes = contacts
         .len()
@@ -2045,15 +2181,28 @@ fn working_load_inputs(
         .and_then(|work| work.checked_add(island_face_work))
         .and_then(|work| work.checked_add(finalizer.operations))
         .ok_or(SpecializedError::GateResourceOverflow)?;
-    if required_operations > limits.max_load_operations {
+    // The cap is materialized over the batch the plan above was computed from,
+    // so the demand and the bound are always stated over the same rows and
+    // contacts.
+    let load_operation_limit = limits.load_operation_limit(finalizer.rows, finalizer.contacts);
+    crate::census_record!(crate::census::record_scaled_cap(
+        crate::census::ScaledCapRow {
+            kind: "specialized_load_operations",
+            floor: limits.max_load_operations_floor,
+            per_batch_unit: limits.load_work_per_batch_unit,
+            rows: finalizer.rows,
+            columns: finalizer.contacts,
+            materialized: load_operation_limit,
+        }
+    ));
+    if required_operations > load_operation_limit {
         return Err(GenericPerceptionError::LoadOperationLimit {
             required: required_operations,
-            limit: limits.max_load_operations,
+            limit: load_operation_limit,
         }
         .into());
     }
-    let fill_limit = limits
-        .max_load_operations
+    let fill_limit = load_operation_limit
         .checked_sub(descriptor_work)
         .and_then(|remaining| remaining.checked_sub(island_face_work))
         .and_then(|remaining| remaining.checked_sub(finalizer.operations))
@@ -2084,8 +2233,7 @@ fn working_load_inputs(
         fill_limit,
     )?;
     debug_assert_eq!(fill_work, expected_fill_work);
-    let remaining_load_operations = limits
-        .max_load_operations
+    let remaining_load_operations = load_operation_limit
         .checked_sub(descriptor_work)
         .and_then(|remaining| remaining.checked_sub(island_face_work))
         .and_then(|remaining| remaining.checked_sub(fill_work))
@@ -2746,7 +2894,9 @@ fn gate_header_preflight(
     limits: SpecializedLimits,
     _telemetry: &mut GatePreflightTelemetry,
 ) -> Result<(), SpecializedError> {
-    if limits.max_gate_operations == 0
+    // The batch's own materialized gate cap: the header preflight and every
+    // check below in this batch use the one bound stated for this batch shape.
+    if limits.gate_operation_limit(sample_count, contact_count) == 0
         && (contact_count != 0
             || proposal_count != 0
             || sample_count != 0
@@ -2864,10 +3014,15 @@ fn gate_resource_plan(
     let operations = routed_rows
         .checked_add(face_rows)
         .ok_or(SpecializedError::GateResourceOverflow)?;
-    if operations > limits.max_gate_operations {
+    // The plan is bounded by the cap materialized for *this batch's* shape.
+    // The proposal count is deliberately not a factor in that shape: a gate
+    // that re-evaluates every contact once per merge proposal is superlinear
+    // in the batch, and that is exactly what this cap exists to refuse.
+    let operation_limit = limits.gate_operation_limit(sample_count, contact_count);
+    if operations > operation_limit {
         return Err(SpecializedError::GateOperationLimit {
             required: operations,
-            limit: limits.max_gate_operations,
+            limit: operation_limit,
         });
     }
     Ok(GateResourcePlan {
@@ -3050,11 +3205,25 @@ fn evaluate_gate_batch(
     // below reuses this allocation instead of building a set per contact.
     let mut face_scratch: Vec<u32> = Vec::new();
     let mut face_count_operations = 0usize;
+    // One materialized bound for the whole batch, stated once from the batch's
+    // own shape and then used by every charge site below, so the gather budget
+    // and the final check cannot disagree about what this batch may spend.
+    let gate_operation_limit = limits.gate_operation_limit(coverage_samples.len(), contacts.len());
+    crate::census_record!(crate::census::record_scaled_cap(
+        crate::census::ScaledCapRow {
+            kind: "specialized_gate_operations",
+            floor: limits.max_gate_operations_floor,
+            per_batch_unit: limits.gate_work_per_batch_unit,
+            rows: coverage_samples.len(),
+            columns: contacts.len(),
+            materialized: gate_operation_limit,
+        }
+    ));
     let face_count = unique_island_face_count(
         islands,
         &mut face_scratch,
         &mut face_count_operations,
-        limits.max_gate_operations,
+        gate_operation_limit,
     )?;
     let plan = gate_resource_plan(
         contacts.len(),
@@ -3076,7 +3245,7 @@ fn evaluate_gate_batch(
             islands,
             &mut face_scratch,
             &mut descriptor_operations,
-            limits.max_gate_operations,
+            gate_operation_limit,
         )?;
         total
             .checked_add(variant_operation_count(
@@ -3107,14 +3276,13 @@ fn evaluate_gate_batch(
                 .and_then(|reservation_work| work.checked_add(reservation_work))
         })
         .ok_or(SpecializedError::GateResourceOverflow)?;
-    if exact_operations > limits.max_gate_operations {
+    if exact_operations > gate_operation_limit {
         return Err(SpecializedError::GateOperationLimit {
             required: exact_operations,
-            limit: limits.max_gate_operations,
+            limit: gate_operation_limit,
         });
     }
-    let fill_operation_limit = limits
-        .max_gate_operations
+    let fill_operation_limit = gate_operation_limit
         .checked_sub(
             exact_operations
                 .checked_sub(expected_fill_operations)
@@ -3336,7 +3504,8 @@ fn evaluate_gate_batch(
                         owner_faces,
                         LoadFinalizeLimits {
                             max_scratch_bytes: limits.max_load_scratch_bytes,
-                            max_operations: limits.max_load_operations,
+                            max_operations_floor: limits.max_load_operations_floor,
+                            operations_per_batch_unit: limits.load_work_per_batch_unit,
                         },
                     )?;
                     let unsupported_specialized_count = authoritative_demands
@@ -4537,7 +4706,7 @@ fn test_pair_proposals(
         layers,
         attach_reach,
         spacing_floor,
-        SpecializedLimits::production(TEST_PAIR_KNN_LIMITS),
+        SpecializedLimits::production(TEST_PAIR_KNN_LIMITS, crate::specialized::test_batch_work()),
         &mut operations,
         &mut proposals,
     )
@@ -4969,7 +5138,7 @@ fn bound_authority_base(
     hash.usize(limits.max_gate_variants);
     hash.usize(limits.max_gate_vector_bytes);
     hash.usize(limits.max_gate_contact_matrix_bytes);
-    hash.usize(limits.max_gate_operations);
+    hash.usize(limits.max_gate_operations_floor);
     hash.usize(limits.max_gate_window_variants);
     hash
 }
@@ -4990,12 +5159,12 @@ fn hash_specialized_limits(hash: &mut Fnv, limits: SpecializedLimits) {
     hash.usize(limits.max_gate_variants);
     hash.usize(limits.max_gate_vector_bytes);
     hash.usize(limits.max_gate_contact_matrix_bytes);
-    hash.usize(limits.max_gate_operations);
+    hash.usize(limits.max_gate_operations_floor);
     hash.usize(limits.max_gate_window_variants);
     hash.usize(limits.max_coverage_scratch_bytes);
     hash.usize(limits.max_coverage_operations);
     hash.usize(limits.max_load_scratch_bytes);
-    hash.usize(limits.max_load_operations);
+    hash.usize(limits.max_load_operations_floor);
     hash.usize(limits.max_gate_peak_bytes);
 }
 
@@ -5030,7 +5199,7 @@ fn bound_authority_digest(
     hash.usize(limits.max_coverage_scratch_bytes);
     hash.usize(limits.max_coverage_operations);
     hash.usize(limits.max_load_scratch_bytes);
-    hash.usize(limits.max_load_operations);
+    hash.usize(limits.max_load_operations_floor);
     hash.usize(limits.max_gate_peak_bytes);
     hash.finish()
 }
@@ -5936,7 +6105,8 @@ mod tests {
         ];
         let mut proposals = Vec::new();
         let mut operations = 0;
-        let mut limits = SpecializedLimits::production(TEST_KNN_LIMITS);
+        let mut limits =
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
         limits.max_merge_proposals = 1;
         assert_eq!(
             gather_pair_proposals(
@@ -6040,7 +6210,8 @@ mod tests {
             })
             .unwrap();
         let exact = 4 + 2 * satisfaction;
-        let mut limits = SpecializedLimits::production(TEST_KNN_LIMITS);
+        let mut limits =
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
         limits.max_merge_descriptor_operations = exact - 1;
         let mut operations = 0;
         let mut proposals = Vec::new();
@@ -6073,7 +6244,8 @@ mod tests {
             WorkingContact::specialized(demand.clone()),
             WorkingContact::specialized(demand),
         ];
-        let mut limits = SpecializedLimits::production(TEST_KNN_LIMITS);
+        let mut limits =
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
         limits.max_merge_descriptor_operations = 0;
         let mut operations = 0;
         let mut proposals = Vec::new();
@@ -6351,8 +6523,15 @@ mod tests {
     #[test]
     fn zero_gate_caps_refuse_without_payload_allocation_or_work() {
         let mut telemetry = GatePreflightTelemetry::default();
-        let mut operation_limits = SpecializedLimits::production(TEST_KNN_LIMITS);
-        operation_limits.max_gate_operations = 0;
+        let mut operation_limits =
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
+        // Re-pinned 2026-08-06 (FU-8b batch-product caps): the gate operation cap
+        // is now max(floor, K_G x batch_product), so a zero *floor* is only a zero
+        // *cap* when the coefficient is zero too.  This test is about the zero-cap
+        // refusal path, so it disables the coefficient and pins exactly what it
+        // pinned before: floor 0 refuses a non-empty batch without allocating.
+        operation_limits.gate_work_per_batch_unit = 0;
+        operation_limits.max_gate_operations_floor = 0;
         assert_eq!(
             gate_header_preflight(
                 2,
@@ -6373,7 +6552,8 @@ mod tests {
         assert_eq!(telemetry.payload_allocations, 0);
         assert_eq!(telemetry.payload_operations, 0);
 
-        let mut peak_limits = SpecializedLimits::production(TEST_KNN_LIMITS);
+        let mut peak_limits =
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
         peak_limits.max_gate_peak_bytes = 0;
         let expected = std::mem::size_of::<MergeProposal>()
             + 2 * std::mem::size_of::<FrozenSpecializedGateVector>();
@@ -6879,16 +7059,25 @@ mod tests {
             })
         );
 
-        let limits = SpecializedLimits::production(TEST_KNN_LIMITS);
+        let limits =
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
         let exact = gate_resource_plan(3, 2, 5, 7, 11, limits).unwrap();
         assert_eq!(exact.variants, 3);
         assert_eq!(exact.operations, 140);
 
         let mut at_cap = limits;
+        // Re-pinned 2026-08-06 (FU-8b batch-product caps): `exact.operations` is 140
+        // on this fixture, far below K_G x (5 + 1) x (3 + 1) = 1,536, so with the
+        // coefficient live the cap would never be the floor and the cap-minus-one
+        // refusal could not be expressed.  The coefficient is disabled here so the
+        // test keeps pinning what it was written to pin, the exact flat bound and
+        // its one-unit-past refusal; the rule itself is pinned in
+        // `tests/resource_cap_policy.rs`.
+        at_cap.gate_work_per_batch_unit = 0;
         at_cap.max_gate_variants = exact.variants;
         at_cap.max_gate_vector_bytes = exact.vector_bytes;
         at_cap.max_gate_contact_matrix_bytes = exact.contact_window_bytes;
-        at_cap.max_gate_operations = exact.operations;
+        at_cap.max_gate_operations_floor = exact.operations;
         assert_eq!(gate_resource_plan(3, 2, 5, 7, 11, at_cap), Ok(exact));
 
         let mut below = at_cap;
@@ -6919,7 +7108,7 @@ mod tests {
             })
         );
         below = at_cap;
-        below.max_gate_operations -= 1;
+        below.max_gate_operations_floor -= 1;
         assert_eq!(
             gate_resource_plan(3, 2, 5, 7, 11, below),
             Err(SpecializedError::GateOperationLimit {
@@ -7060,7 +7249,7 @@ mod tests {
             &[matching, other_owner, exact_other_owner],
             &layers,
             0.2,
-            SpecializedLimits::production(TEST_KNN_LIMITS),
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work()),
         )
         .unwrap();
         assert!(dispositions[0].covered);
@@ -7096,7 +7285,7 @@ mod tests {
             &mut physical,
             &layers,
             0.2,
-            SpecializedLimits::production(TEST_KNN_LIMITS),
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work()),
             &mut MergeAllocationTelemetry::default(),
         )
         .unwrap();
@@ -7160,7 +7349,10 @@ mod tests {
                 &mut physical,
                 &layers,
                 0.2,
-                SpecializedLimits::production(TEST_KNN_LIMITS),
+                SpecializedLimits::production(
+                    TEST_KNN_LIMITS,
+                    crate::specialized::test_batch_work()
+                ),
                 &mut MergeAllocationTelemetry::default(),
             )
             .unwrap(),
@@ -7265,7 +7457,7 @@ mod tests {
             &generic,
             &regular,
             &selection_config,
-            SpecializedLimits::production(TEST_KNN_LIMITS),
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work()),
         )
         .map_err(|error| format!("required {name} specialized fixture failed: {error}"))
     }
@@ -7318,7 +7510,7 @@ mod tests {
             &generic,
             &regular,
             &selection_config,
-            SpecializedLimits::production(TEST_KNN_LIMITS),
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work()),
         )
         .map_err(|error| format!("required {name} specialized fixture failed: {error}"))?;
         Ok((mesh, generic, plan))
@@ -7565,7 +7757,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("{error}"));
         let digest = plan.digest();
         let mut changed_limits = plan.clone();
-        changed_limits.limits_authority.max_load_operations += 1;
+        changed_limits.limits_authority.max_load_operations_floor += 1;
         assert_ne!(changed_limits.digest(), digest);
         assert!(matches!(
             changed_limits.begin_regular_edit(),
@@ -7641,7 +7833,7 @@ mod tests {
             &generic,
             &regular_only.islands,
             &[],
-            SpecializedLimits::production(TEST_KNN_LIMITS),
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work()),
         )
         .expect("required zero-child fixture can form a regular load input");
         regular_only.load_partition = finalize_specialized_load_partition(
@@ -7651,9 +7843,13 @@ mod tests {
             &inputs.contacts,
             &inputs.specialized_owner_faces,
             LoadFinalizeLimits {
-                max_scratch_bytes: SpecializedLimits::production(TEST_KNN_LIMITS)
-                    .max_load_scratch_bytes,
-                max_operations: inputs.remaining_load_operations,
+                max_scratch_bytes: SpecializedLimits::production(
+                    TEST_KNN_LIMITS,
+                    crate::specialized::test_batch_work(),
+                )
+                .max_load_scratch_bytes,
+                max_operations_floor: inputs.remaining_load_operations,
+                operations_per_batch_unit: 0,
             },
         )
         .expect("required zero-child fixture can finalize a regular-only load partition");
@@ -7880,7 +8076,7 @@ mod tests {
         let mut telemetry = MergeAllocationTelemetry::default();
         let coalesced = coalesce_exact_regular_seats(
             &mut contacts,
-            SpecializedLimits::production(TEST_KNN_LIMITS),
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work()),
             &mut telemetry,
             0,
         )
@@ -7916,7 +8112,7 @@ mod tests {
         let before = contacts.clone();
         let again = coalesce_exact_regular_seats(
             &mut contacts,
-            SpecializedLimits::production(TEST_KNN_LIMITS),
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work()),
             &mut telemetry,
             0,
         )
@@ -7936,7 +8132,10 @@ mod tests {
             let mut telemetry = MergeAllocationTelemetry::default();
             let count = coalesce_exact_regular_seats(
                 &mut contacts,
-                SpecializedLimits::production(TEST_KNN_LIMITS),
+                SpecializedLimits::production(
+                    TEST_KNN_LIMITS,
+                    crate::specialized::test_batch_work(),
+                ),
                 &mut telemetry,
                 0,
             )
@@ -7978,7 +8177,7 @@ mod tests {
         let mut telemetry = MergeAllocationTelemetry::default();
         let coalesced = coalesce_exact_regular_seats(
             &mut contacts,
-            SpecializedLimits::production(TEST_KNN_LIMITS),
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work()),
             &mut telemetry,
             0,
         )
@@ -8005,7 +8204,8 @@ mod tests {
             test_regular_contact(position, other_normal, other_route, Vec::new()),
         ];
         let mut telemetry = MergeAllocationTelemetry::default();
-        let mut limits = SpecializedLimits::production(TEST_KNN_LIMITS);
+        let mut limits =
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
         limits.max_merge_iterations = 1;
 
         // A caller that already spent the entire budget upstream (attach
@@ -8231,7 +8431,8 @@ mod tests {
         let regular =
             crate::select_contacts(&mesh, generic.candidates(), generic.islands(), &selection)
                 .unwrap();
-        let limits = SpecializedLimits::production(TEST_KNN_LIMITS);
+        let limits =
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
         let plan = prepare_specialized_contacts(
             &mesh,
             &perception,
@@ -8442,7 +8643,7 @@ mod tests {
         changed.max_load_scratch_bytes += 1;
         new_limit_mutations.push(changed);
         changed = limits;
-        changed.max_load_operations += 1;
+        changed.max_load_operations_floor += 1;
         new_limit_mutations.push(changed);
         changed = limits;
         changed.max_gate_peak_bytes += 1;

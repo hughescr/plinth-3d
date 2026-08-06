@@ -93,13 +93,42 @@ pub struct PhysicalContact {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LoadFinalizeLimits {
     pub(crate) max_scratch_bytes: usize,
-    pub(crate) max_operations: usize,
+    /// `SUPPORT_SPECIALIZED_MAX_LOAD_OPERATIONS` where the specialized stage
+    /// supplies it; never the whole cap on its own, see
+    /// [`Self::operations_limit`].
+    pub(crate) max_operations_floor: usize,
+    /// `SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT`.
+    pub(crate) operations_per_batch_unit: usize,
+}
+
+impl LoadFinalizeLimits {
+    /// The load operation cap for one partition, materialized against the
+    /// batch its resource plan was computed from:
+    /// `max(floor, K_L × (rows + 1) × (contacts + 1))`.
+    ///
+    /// A **declared model-scaled cap**; the rule and its measurement live on
+    /// [`crate::specialized::SpecializedLimits::load_operation_limit`], which
+    /// is the same arithmetic over the same registered coefficient.
+    pub(crate) const fn operations_limit(&self, rows: usize, contacts: usize) -> usize {
+        crate::specialized::batch_product_scaled_cap(
+            self.max_operations_floor,
+            self.operations_per_batch_unit,
+            rows,
+            contacts,
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct LoadResourcePlan {
     pub(crate) scratch_bytes: usize,
     pub(crate) operations: usize,
+    /// The row and contact counts this plan was computed from. They are carried
+    /// so the operation cap can be materialized over the *same* batch the
+    /// demand was stated over; see
+    /// [`crate::specialized::SpecializedLimits::load_operation_limit`].
+    pub(crate) rows: usize,
+    pub(crate) contacts: usize,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1018,10 +1047,15 @@ pub fn prepare_generic_contacts(
         load_eligibility,
         load_limits: LoadFinalizeLimits {
             max_scratch_bytes: limits.max_overlap_bytes,
-            max_operations: limits
+            // The generic perception plan carries its own flat overlap budget,
+            // not the specialized batch-product rule: a coefficient of 0 makes
+            // `operations_limit` return this floor for every batch shape, which
+            // is exactly the bound this stage had before the rule existed.
+            max_operations_floor: limits
                 .max_overlap_vertex_tests
                 .checked_add(limits.max_overlap_edge_tests)
                 .ok_or(GenericPerceptionError::LoadResourceOverflow)?,
+            operations_per_batch_unit: 0,
         },
         slice_effective_threads: sliced.effective_threads,
         slice_participating_threads: sliced.participating_threads,
@@ -2248,6 +2282,8 @@ fn load_resource_plan_from_counts(
     Ok(LoadResourcePlan {
         scratch_bytes,
         operations,
+        rows: face_count,
+        contacts: contact_count,
     })
 }
 
@@ -2287,10 +2323,24 @@ fn finalize_load_rows(
             limit: limits.max_scratch_bytes,
         });
     }
-    if resource.operations > limits.max_operations {
+    let operation_limit = limits.operations_limit(resource.rows, resource.contacts);
+    if limits.operations_per_batch_unit != 0 {
+        // Declared model-scaled cap: report what this batch actually got.
+        crate::census_record!(crate::census::record_scaled_cap(
+            crate::census::ScaledCapRow {
+                kind: "specialized_load_operations",
+                floor: limits.max_operations_floor,
+                per_batch_unit: limits.operations_per_batch_unit,
+                rows: resource.rows,
+                columns: resource.contacts,
+                materialized: operation_limit,
+            }
+        ));
+    }
+    if resource.operations > operation_limit {
         return Err(GenericPerceptionError::LoadOperationLimit {
             required: resource.operations,
-            limit: limits.max_operations,
+            limit: operation_limit,
         });
     }
     let mut contact_order = Vec::with_capacity(contacts.len());
@@ -2611,10 +2661,24 @@ pub(crate) fn finalize_specialized_load_partition(
             limit: limits.max_scratch_bytes,
         });
     }
-    if resource.operations > limits.max_operations {
+    let operation_limit = limits.operations_limit(resource.rows, resource.contacts);
+    if limits.operations_per_batch_unit != 0 {
+        // Declared model-scaled cap: report what this batch actually got.
+        crate::census_record!(crate::census::record_scaled_cap(
+            crate::census::ScaledCapRow {
+                kind: "specialized_load_operations",
+                floor: limits.max_operations_floor,
+                per_batch_unit: limits.operations_per_batch_unit,
+                rows: resource.rows,
+                columns: resource.contacts,
+                materialized: operation_limit,
+            }
+        ));
+    }
+    if resource.operations > operation_limit {
         return Err(GenericPerceptionError::LoadOperationLimit {
             required: resource.operations,
-            limit: limits.max_operations,
+            limit: operation_limit,
         });
     }
     let extended = extend_load_eligibility(
@@ -3741,7 +3805,8 @@ mod tests {
             &contacts,
             LoadFinalizeLimits {
                 max_scratch_bytes: resource.scratch_bytes,
-                max_operations: resource.operations,
+                max_operations_floor: resource.operations,
+                operations_per_batch_unit: 0,
             },
         )
         .is_ok());
@@ -3753,7 +3818,8 @@ mod tests {
                 &contacts,
                 LoadFinalizeLimits {
                     max_scratch_bytes: resource.scratch_bytes - 1,
-                    max_operations: resource.operations,
+                    max_operations_floor: resource.operations,
+                    operations_per_batch_unit: 0,
                 },
             ),
             Err(GenericPerceptionError::LoadScratchLimit { .. })
@@ -3766,7 +3832,8 @@ mod tests {
                 &contacts,
                 LoadFinalizeLimits {
                     max_scratch_bytes: resource.scratch_bytes,
-                    max_operations: resource.operations - 1,
+                    max_operations_floor: resource.operations - 1,
+                    operations_per_batch_unit: 0,
                 },
             ),
             Err(GenericPerceptionError::LoadOperationLimit { .. })
@@ -3878,7 +3945,8 @@ mod tests {
             &pairs,
             LoadFinalizeLimits {
                 max_scratch_bytes: by_face.scratch_bytes,
-                max_operations: by_face.operations,
+                max_operations_floor: by_face.operations,
+                operations_per_batch_unit: 0,
             },
         )
         .unwrap();

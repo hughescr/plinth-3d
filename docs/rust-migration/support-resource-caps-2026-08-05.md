@@ -267,3 +267,122 @@ CENSUS T0_stage_error  Weeping Treant v1.2
 It clears perception, clears the candidate-surface grid, and is refused at the
 specialized gate stage — quickly, with a typed error, at 2.5 GB peak RSS. That
 refusal is correct and is tracked as algorithm work, not as a cap to raise.
+
+## 7. FU-8b post-fix measurement (2026-08-06)
+
+Dated addendum. §2's gate and load figures were charges against defects, not
+statements of demand; FU-8b removed the three quadratics behind them
+(`0bdec0c`, `1706c5d`, `e0a4bed`) and the model was then re-measured on the
+same corpus harness, release build, uncommitted capwatch instrumentation
+reverted before every recorded run.
+
+### 7.1 What the treant actually demands
+
+| quantity | pre-fix | post-fix | verdict |
+| --- | --- | --- | --- |
+| specialized gate operations, proposal-free batch | `required: 2000000001` — the counter tripping at `limit + 1` inside a selection sort, not a demand | **12,714,828,544** stated | honest, linear in the batch |
+| specialized load operations | 2.95e11 predicted, over 7,988,078 rows | **5,402,535,619** over 134,368 rows | honest; fix (B) collapsed the row count 59.5× |
+| load scratch bytes | over the 512 MB cap | **144,753,256** | under cap, no change needed |
+| gate peak bytes | unmeasured | **215,061,920** | under the 1 GB cap, no change needed |
+| specialized gate operations, 39,223-proposal merge batch | never reached (the 16-hour hang was defect (C)) | **21,755,124,103,146** | **superlinear in the batch — refused, FU-8c** |
+| peak RSS | — | **2.84 GB** | far under the 100 GB machine ceiling |
+| wall clock to refusal | ~16 h (hang) | **81.5 s** | inside the 600 s timebox |
+
+### 7.2 The rule that was set, and the scale it uses
+
+Gate and load work do **not** track face count. The corpus proves it: 24-face
+`make_raking_blade` charges 612,887,212 gate operations while 429,120-face
+Weeping Treant charges 12,714,828,544 — a 20× spread over an 18,000× face
+spread. Scaling those two caps per-face, as §3.10.8 scales kNN work and
+parity-grid bytes, would have refused the small model and admitted anything at
+all on the large one.
+
+They scale instead on the **batch product** each stage is handed:
+
+```
+max_gate_operations = max(SUPPORT_SPECIALIZED_MAX_GATE_OPERATIONS,
+                          SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT
+                              x (coverage_samples + 1) x (contacts + 1))
+
+max_load_operations = max(SUPPORT_SPECIALIZED_MAX_LOAD_OPERATIONS,
+                          SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT
+                              x (rows + 1) x (contacts + 1))
+```
+
+Both coefficients come from the same rule as §3.10.8's,
+`next_power_of_two(2 x observed)`:
+
+| constant | wrapper | value | derivation |
+| --- | --- | --- | --- |
+| `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` | Measured (n = 1) | 23 | 12,714,828,544 / ((405,146 + 1) x (1,366 + 1) = 553,835,949) = 22.958, ceiling |
+| `SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT` | Derived | 64 | `next_power_of_two(2 x 23)` = `next_power_of_two(46)` |
+| `SUPPORT_LOAD_WORK_PER_BATCH_UNIT_OBSERVED` | Measured (n = 1) | 30 | 5,402,535,619 / ((134,368 + 1) x (1,366 + 1) = 183,682,423) = 29.41, ceiling |
+| `SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT` | Derived | 64 | `next_power_of_two(2 x 30)` = `next_power_of_two(60)` |
+
+Both floors are the R5-registered inherited numbers, unchanged at 2,000,000,000
+and **not raised**: they are now the constant term of a rule rather than the
+whole cap.
+
+Owner ruling R4 applies unchanged: both observations rest on the Weeping Treant
+v1.2 alone, so both coefficients are **n = 1**, and FU-23's standing trigger
+covers them — a second large model is re-derived over both specimens, never
+inherited silently.
+
+### 7.3 Effect on the corpus — none, and the census prints it
+
+Every corpus model's batch product is far too small to leave the floor. The
+widest is the Cylinder's gate batch, `(509,056 + 1) x (54 + 1) = 27,998,135`,
+and `64 x 27,998,135 = 1,791,880,640 < 2,000,000,000`. All fourteen corpus
+materializations are therefore bit-identical to the pre-rule caps, and the
+census says so per model:
+
+```
+CENSUS T0_scaled_cap  Cylinder  kind=specialized_gate_operations
+       floor=2000000000 per_batch_unit=64 rows=509056 columns=54
+       materialized=2000000000 at_floor=true
+```
+
+`the_batch_scaled_caps_are_the_flat_floor_for_every_corpus_batch_shape` pins it
+over all seven models and both caps.
+
+**The Cylinder is the near case and it is worth recording as such.** At 89.6% of
+the floor it is the only corpus model within an order of magnitude of leaving
+it. A coefficient of 128 rather than 64 would move the Cylinder's gate cap off
+the floor and change a corpus model's materialized authority. The rule chose 64
+by derivation, not by fit, but the margin is thin enough that a future
+re-derivation must re-check this table rather than assume the floors still
+govern.
+
+### 7.4 Where the treant stands now
+
+```
+CENSUS T0_scaled_cap  Weeping Treant v1.2  kind=specialized_gate_operations
+       floor=2000000000 per_batch_unit=64 rows=405146 columns=1366
+       materialized=35445500736 at_floor=false
+CENSUS T0_scaled_cap  Weeping Treant v1.2  kind=specialized_load_operations
+       floor=2000000000 per_batch_unit=64 rows=130548 columns=1366
+       materialized=11421470912 at_floor=false
+CENSUS T0_stage_error Weeping Treant v1.2
+       Preparation: Specialized(GateOperationLimit { required: 21755124103146,
+                                                     limit: 35445500736 })
+```
+
+It now clears the proposal-free gate batch **and the whole load stage**, and is
+refused at the *merge* gate, on a demand 613× the coefficient. That is the cap
+doing its job rather than failing at it: the admitted batch is linear in its own
+shape, the refused one is quadratic in it, and the same constant separates them.
+
+The refusal is a **new** finding, not a cap to raise. `gate_resource_plan`
+prices a merge batch at `(samples + demands + 1) x (proposals x (contacts - 1) +
+contacts)`: the gate re-evaluates the entire contact set once per merge
+proposal, and the treant offers 39,223 proposals. No honest constant admits it —
+covering it would need a coefficient near 39,300, which would multiply every
+corpus model's cap by the same factor and take the Cylinder, `make_raking_blade`
+and several others off their floors. It is opened as **FU-8c** and is algorithm
+work of exactly the FU-8b kind: the proposal loop is a per-item rescan of a whole
+batch standing in for a batched evaluation.
+
+Out of scope and deliberately not touched: `finalize_load_rows` is a correctly
+charged dense contact-by-face nearest scan. Post-fix it costs 134,368 x 1,366 =
+1.8e8 row-contact pairs, not the 1.1e10 the pre-fix row count implied, and it
+runs inside the timebox.

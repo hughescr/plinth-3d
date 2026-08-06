@@ -139,6 +139,22 @@ pub struct CensusData {
     pub seat_attestations: Vec<SeatAttestationRow>,
     pub appends: std::collections::BTreeMap<&'static str, usize>,
     pub stage_errors: Vec<String>,
+    pub scaled_caps: Vec<ScaledCapRow>,
+}
+
+/// One materialization of a batch-product-scaled execution cap.
+///
+/// The no-silent-scaled-caps rule (owner ruling R1) requires every cap whose
+/// bound becomes model-scaled to be observable, not merely documented: this row
+/// is how the census reports what bound a model's own batch actually got.
+#[derive(Clone, Copy, Debug)]
+pub struct ScaledCapRow {
+    pub kind: &'static str,
+    pub floor: usize,
+    pub per_batch_unit: usize,
+    pub rows: usize,
+    pub columns: usize,
+    pub materialized: usize,
 }
 
 fn data() -> &'static Mutex<CensusData> {
@@ -166,6 +182,7 @@ pub fn reset() {
         census.seat_attestations.clear();
         census.appends.clear();
         census.stage_errors.clear();
+        census.scaled_caps.clear();
     });
 }
 
@@ -215,6 +232,41 @@ pub(crate) fn record_seat_attestation(
             area_deficit,
         });
     });
+}
+
+/// Records one materialized batch-product-scaled cap. Only the widest
+/// materialization per kind is kept, which is the one that governs whether the
+/// model is refused.
+pub(crate) fn record_scaled_cap(entry: ScaledCapRow) {
+    with(|census| {
+        match census
+            .scaled_caps
+            .iter_mut()
+            .find(|existing| existing.kind == entry.kind)
+        {
+            Some(existing) if existing.materialized >= entry.materialized => {}
+            Some(existing) => *existing = entry,
+            None => census.scaled_caps.push(entry),
+        }
+    });
+}
+
+fn report_scaled_caps(model: &str, census: &CensusData) {
+    for cap in &census.scaled_caps {
+        row(
+            model,
+            "T0_scaled_cap",
+            &[
+                format!("kind={}", cap.kind),
+                format!("floor={}", cap.floor),
+                format!("per_batch_unit={}", cap.per_batch_unit),
+                format!("rows={}", cap.rows),
+                format!("columns={}", cap.columns),
+                format!("materialized={}", cap.materialized),
+                format!("at_floor={}", cap.materialized == cap.floor),
+            ],
+        );
+    }
 }
 
 pub(crate) fn note_stage_error<E: std::fmt::Debug>(stage: &str, error: &E) {
@@ -883,6 +935,7 @@ pub fn finish(model: &str, snapshot: &SupportVerificationSnapshot<'_>) {
         }
     }
 
+    report_scaled_caps(model, &census);
     for error in &census.stage_errors {
         row(model, "T0_stage_error", std::slice::from_ref(error));
     }
@@ -896,6 +949,7 @@ pub fn report_failure(model: &str) {
     let Ok(census) = data().lock() else {
         return;
     };
+    report_scaled_caps(model, &census);
     for error in &census.stage_errors {
         row(model, "T0_stage_error", std::slice::from_ref(error));
     }
