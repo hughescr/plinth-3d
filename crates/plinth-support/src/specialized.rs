@@ -160,6 +160,37 @@ impl SpecializedLimits {
     /// that shape. **FU-8c did not change this cap**: the demand came down to
     /// it, which is what the example is still here to illustrate.
     ///
+    /// **Correction added 2026-08-06 to the paragraph immediately above — it is
+    /// left standing, and it is incomplete in a way that reads as the opposite
+    /// of the measurement.** "Now priced at … 5,173,199,556, inside the
+    /// 35,445,500,736" states a *floor*, not the treant's price, and standing
+    /// beside the cap the way it does it invites the inference that the treant
+    /// is now admitted at this gate. **It is not. The treant still refuses
+    /// here.** 5,173,199,556 is the repriced plan's two *count-derived* terms —
+    /// `baseline_rows` 554,926,572 + `face_rows` 4,618,272,984 — evaluated with
+    /// the third term, `measured proposal work`, at **zero**; that is exactly
+    /// what `fu8c_repriced_plan_admits_the_treant_gate_shape_under_the_unchanged_cap`
+    /// asserts, and its name is exact: the *shape* fits. The real batch supplies
+    /// real proposal work, so the demand this cap is handed is
+    ///
+    /// ```text
+    /// baseline_rows 554,926,572 + face_rows 4,618,272,984
+    ///   + demand_rows 42,949,185 + proposal work 196,264,386,588
+    ///   = 201,480,535,329   against 35,445,500,736  -> refused, 5.68x over
+    /// ```
+    ///
+    /// — 363.8× this coefficient's linear budget on the same 553,835,949-unit
+    /// batch, measured at `a3308ec` and reproduced byte-identically at
+    /// `8695398`. FU-8c is **closed** on the defect it named — the per-proposal
+    /// re-evaluation is gone and the demand fell 108×, from 21,755,124,103,146
+    /// to 201,480,535,329, against this **unchanged** cap — but the treant's
+    /// stopping point did not move: it is still this gate. The residual
+    /// 196,264,386,588 (97.4 % of the demand) is a *different* defect, opened as
+    /// **FU-8d**. Read 5,173,199,556 as the floor of the repriced plan, never as
+    /// the treant's price. See
+    /// `docs/rust-migration/support-resource-caps-2026-08-05.md` §7 and
+    /// `docs/rust-migration/CURRENT-STATUS.md` (*FU-8c fixed 2026-08-06*).
+    ///
     /// Every corpus model sits at the floor;
     /// `the_batch_scaled_caps_are_the_flat_floor_for_every_corpus_batch_shape`
     /// (`crates/plinth-support/tests/resource_cap_policy.rs`) pins that.
