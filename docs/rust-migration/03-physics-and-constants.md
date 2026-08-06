@@ -855,7 +855,11 @@ dimensions when the algorithm work (FU-8b) lands. (Owner ruling R5, 2026-08-05:
 they are no longer *unregistered* — all four are registered as `Placeholder` in
 §3.10.9 and carry that measurement in their registry notes. Registration
 discloses the inherited number; it does not ratify it and does not authorize
-raising it.)
+raising it.) **2026-08-06:** the selection sort named above is fixed (FU-8b (A),
+`0bdec0c`), and `max_gate_operations` now refuses a *stated* treant demand of
+12,714,828,544 rather than a counter tripping at `limit + 1`. All four still
+stay at their inherited values: FU-8b (b) and (c) are unfixed, so the post-fix
+dimensions the constants must be set on do not exist yet.
 
 ### 3.10.9 Support execution-authority caps — the unmeasured inventory
 

@@ -220,6 +220,17 @@ of them is raised here.
   operations; a scratch `BTreeSet` drop-in with identical output measured
   **142,646**, a ~117,000× reduction. **This cap needs no raise; it needs the
   quadratic removed.**
+  - *Follow-up, 2026-08-06 — FU-8b fix (A) landed (`0bdec0c`).* The quadratic is
+    gone: both gatherers now gather each island once into one reused buffer and
+    `sort_unstable` + `dedup` in a single batch, charging `n` for the gather
+    plus the `n·(⌈log₂(n+1)⌉+1)` sort/dedup comparison bound instead of
+    `n·(distinct+1)`. The treant's refusal became a **stated** demand,
+    `GateOperationLimit { required: 12714828544, limit: 2000000000 }` — 3.97 %
+    above this study's instrumented exact figure of 12,229,532,794, the
+    difference being the new sort-bound charge over the prototype's flat
+    one-unit-per-id. The cap still stands unraised: what it refuses now is
+    other gate work, and its measured bound stays deferred until (b) and (c)
+    land. Peak RSS for that census row: 2.45 GB. Single specimen, n = 1.
 - **`max_load_operations` (2 × 10⁹), `max_load_scratch_bytes` (512 MiB),
   `max_gate_peak_bytes` (1 GiB) stand.** With caps raised, the treant reaches
   `finalize_specialized_load_partition` and builds **7,988,078** load-eligibility
