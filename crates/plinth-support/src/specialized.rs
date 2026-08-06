@@ -21,7 +21,7 @@ use crate::perception::{
     finalize_specialized_load_partition, load_violation_count, specialized_load_resource_plan,
     FinalizedContactLoads, FinalizedLoadPartition, GenericContactPlan, GenericPerceptionError,
     GenericPerceptionLimits, LoadFinalizeLimits, LoadOwner, PhysicalContact, SliceSolid,
-    SpecializedOwnerReservation,
+    SpecializedLoadCounts, SpecializedOwnerReservation,
 };
 use crate::{
     assess_coverage, build_dyadic_coverage_samples, coverage_assessment_resource_plan, BuildFrame,
@@ -2004,6 +2004,17 @@ fn working_load_inputs(
     // One distinct-face buffer for the whole accepted-load build; both the
     // count and the fill below reuse it rather than allocating per contact.
     let mut face_scratch: Vec<u32> = Vec::new();
+    // The distinct island faces bound how many *rows* the specialized pairs can
+    // add to the extended load authority, however many `(owner, face)` pairs
+    // those rows carry (FU-8b defect B).  Charged on its own counter:
+    // `descriptor_work` is the fill pass's exact prediction and must stay that.
+    let mut island_face_work = 0usize;
+    let island_face_count = unique_island_face_count(
+        islands,
+        &mut face_scratch,
+        &mut island_face_work,
+        limits.max_load_operations,
+    )?;
     let mut descriptor_work = 0usize;
     let owner_face_count = variant_specialized_owner_face_count(
         contacts,
@@ -2023,10 +2034,15 @@ fn working_load_inputs(
                 .and_then(|owner_bytes| bytes.checked_add(owner_bytes))
         })
         .ok_or(SpecializedError::GateResourceOverflow)?;
-    let finalizer = specialized_load_resource_plan(generic, contacts.len(), owner_face_count)?;
+    let finalizer = specialized_load_resource_plan(
+        generic,
+        contacts.len(),
+        SpecializedLoadCounts::bounded(owner_face_count, island_face_count),
+    )?;
     let expected_fill_work = fill_operation_count(descriptor_work, reservations.len(), 1)?;
     let required_operations = descriptor_work
         .checked_add(expected_fill_work)
+        .and_then(|work| work.checked_add(island_face_work))
         .and_then(|work| work.checked_add(finalizer.operations))
         .ok_or(SpecializedError::GateResourceOverflow)?;
     if required_operations > limits.max_load_operations {
@@ -2039,6 +2055,7 @@ fn working_load_inputs(
     let fill_limit = limits
         .max_load_operations
         .checked_sub(descriptor_work)
+        .and_then(|remaining| remaining.checked_sub(island_face_work))
         .and_then(|remaining| remaining.checked_sub(finalizer.operations))
         .ok_or(SpecializedError::GateResourceOverflow)?;
     let required_peak = retained_bytes
@@ -2070,6 +2087,7 @@ fn working_load_inputs(
     let remaining_load_operations = limits
         .max_load_operations
         .checked_sub(descriptor_work)
+        .and_then(|remaining| remaining.checked_sub(island_face_work))
         .and_then(|remaining| remaining.checked_sub(fill_work))
         .ok_or(SpecializedError::GateResourceOverflow)?;
     Ok(WorkingLoadInputs {
@@ -3201,7 +3219,7 @@ fn evaluate_gate_batch(
                         let resource = specialized_load_resource_plan(
                             generic,
                             variant_contact_count(contacts.len(), variant),
-                            owner_faces,
+                            SpecializedLoadCounts::bounded(owner_faces, face_count),
                         )?;
                         Ok::<_, SpecializedError>(maximum.max(resource.scratch_bytes))
                     })?;
@@ -3593,6 +3611,17 @@ fn whole_gate_route_preflight(
     // One distinct-face buffer for the whole preflight; the per-variant face
     // counts below reuse it rather than allocating per contact.
     let mut face_scratch: Vec<u32> = Vec::new();
+    // Distinct island faces, once for the whole preflight: the bound on how
+    // many rows a variant's `(owner, face)` pairs can add (FU-8b defect B).
+    // Uncapped like the per-variant counts beside it — this route plans, the
+    // batch it plans for charges.
+    let mut island_face_work = 0usize;
+    let island_face_count = unique_island_face_count(
+        islands,
+        &mut face_scratch,
+        &mut island_face_work,
+        usize::MAX,
+    )?;
     traverse_whole_gate_windows(
         gate_plan.variants,
         limits.max_gate_window_variants,
@@ -3667,7 +3696,7 @@ fn whole_gate_route_preflight(
                     let resource = specialized_load_resource_plan(
                         generic,
                         variant_contact_count(contacts.len(), variant),
-                        owner_faces,
+                        SpecializedLoadCounts::bounded(owner_faces, island_face_count),
                     )?;
                     Ok::<_, SpecializedError>(maximum.max(resource.scratch_bytes))
                 })?;
