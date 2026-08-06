@@ -21,7 +21,7 @@ use crate::perception::{
     finalize_specialized_load_partition, load_violation_count, specialized_load_resource_plan,
     FinalizedContactLoads, FinalizedLoadPartition, GenericContactPlan, GenericPerceptionError,
     GenericPerceptionLimits, LoadFinalizeLimits, LoadOwner, PhysicalContact, SliceSolid,
-    SpecializedOwnerReservation,
+    SpecializedLoadCounts, SpecializedOwnerReservation,
 };
 use crate::{
     assess_coverage, build_dyadic_coverage_samples, coverage_assessment_resource_plan, BuildFrame,
@@ -56,19 +56,141 @@ pub struct SpecializedLimits {
     pub max_gate_variants: usize,
     pub max_gate_vector_bytes: usize,
     pub max_gate_contact_matrix_bytes: usize,
-    pub max_gate_operations: usize,
+    pub max_gate_operations_floor: usize,
     pub max_gate_window_variants: usize,
     pub max_coverage_scratch_bytes: usize,
     pub max_coverage_operations: usize,
     pub max_load_scratch_bytes: usize,
-    pub max_load_operations: usize,
+    pub max_load_operations_floor: usize,
     pub max_gate_peak_bytes: usize,
+    /// `SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT`. Never the whole cap on its own;
+    /// see [`SpecializedLimits::gate_operation_limit`].
+    pub gate_work_per_batch_unit: usize,
+    /// `SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT`. Never the whole cap on its own;
+    /// see [`SpecializedLimits::load_operation_limit`].
+    pub load_work_per_batch_unit: usize,
+}
+
+/// The two `Derived` batch-product coefficients, read from the one M0
+/// publication so this crate invents no second numeric owner.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SpecializedBatchWork {
+    /// `SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT`.
+    pub gate_per_batch_unit: usize,
+    /// `SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT`.
+    pub load_per_batch_unit: usize,
+}
+
+/// The registered coefficients, for tests that build production limits.
+///
+/// Tests read the *registry*, never a literal, so a coefficient change moves
+/// the tests with it rather than leaving a second numeric owner behind.
+#[cfg(test)]
+pub(crate) fn test_batch_work() -> SpecializedBatchWork {
+    SpecializedBatchWork::registered().expect("registered support batch coefficients")
+}
+
+impl SpecializedBatchWork {
+    /// Reads both coefficients from the registered support resource-cap policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns the registry's own construction error, or
+    /// [`SpecializedError::UnrepresentableBatchWork`] if a registered
+    /// coefficient does not fit a `usize` on this target.
+    pub fn registered() -> Result<Self, SpecializedError> {
+        let caps = plinth_core::m0_constants()
+            .map_err(|error| SpecializedError::RegisteredConstantsUnavailable(error.to_string()))?
+            .support_resource_cap_policy();
+        let gate_per_batch_unit = usize::try_from(*caps.gate_max_work_per_batch_unit().value())
+            .map_err(|_| SpecializedError::UnrepresentableBatchWork)?;
+        let load_per_batch_unit = usize::try_from(*caps.load_max_work_per_batch_unit().value())
+            .map_err(|_| SpecializedError::UnrepresentableBatchWork)?;
+        Ok(Self {
+            gate_per_batch_unit,
+            load_per_batch_unit,
+        })
+    }
+}
+
+/// Materializes one batch-product-scaled cap: `max(floor, per_unit × units)`,
+/// where `units = (rows + 1) × (columns + 1)`.
+///
+/// Saturating, so an absurd batch yields `usize::MAX` rather than a
+/// wrapped-around tiny cap. The `+ 1` on each factor keeps the product
+/// non-zero for an empty batch, so the floor always governs there.
+#[must_use]
+pub(crate) const fn batch_product_scaled_cap(
+    floor: usize,
+    per_unit: usize,
+    rows: usize,
+    columns: usize,
+) -> usize {
+    let units = rows
+        .saturating_add(1)
+        .saturating_mul(columns.saturating_add(1));
+    let scaled = per_unit.saturating_mul(units);
+    if scaled > floor {
+        scaled
+    } else {
+        floor
+    }
 }
 
 impl SpecializedLimits {
+    /// The gate operation cap **for one gate batch**, materialized against that
+    /// batch's own shape: `max(floor, K_G × (coverage_samples + 1) × (contacts + 1))`.
+    ///
+    /// This is a **declared model-scaled cap**. It is not a constant, and it is
+    /// deliberately not scaled on the face count: gate work was measured not to
+    /// track faces (24-face `make_raking_blade` charges 612,887,212 gate
+    /// operations against the 429,120-face Weeping Treant's 12,714,828,544), so
+    /// a per-face rule would refuse the small model and admit anything on the
+    /// large one. What it still refuses is work that is superlinear in the
+    /// batch: the treant's 39,223-proposal merge gate plans 21,755,124,103,146
+    /// operations on a 553,835,949-unit batch — 613× this coefficient — and is
+    /// refused (FU-8c).
+    ///
+    /// Every corpus model sits at the floor;
+    /// `the_batch_scaled_caps_are_the_flat_floor_for_every_corpus_batch_shape`
+    /// (`crates/plinth-support/tests/resource_cap_policy.rs`) pins that.
     #[must_use]
-    pub const fn production(coverage_route_knn: KnnBatchLimits) -> Self {
+    pub const fn gate_operation_limit(&self, coverage_samples: usize, contacts: usize) -> usize {
+        batch_product_scaled_cap(
+            self.max_gate_operations_floor,
+            self.gate_work_per_batch_unit,
+            coverage_samples,
+            contacts,
+        )
+    }
+
+    /// The load operation cap **for one load partition**, materialized against
+    /// that partition's own shape:
+    /// `max(floor, K_L × (rows + 1) × (contacts + 1))`.
+    ///
+    /// A **declared model-scaled cap** on the same terms as
+    /// [`Self::gate_operation_limit`]. `rows` is the row count the partition's
+    /// own resource plan was computed from — one row per distinct mesh face,
+    /// never one per `(owner, face)` pair (FU-8b defect B) — so the cap and the
+    /// demand it bounds are always stated over the same batch.
+    #[must_use]
+    pub const fn load_operation_limit(&self, rows: usize, contacts: usize) -> usize {
+        batch_product_scaled_cap(
+            self.max_load_operations_floor,
+            self.load_work_per_batch_unit,
+            rows,
+            contacts,
+        )
+    }
+
+    #[must_use]
+    pub const fn production(
+        coverage_route_knn: KnnBatchLimits,
+        batch_work: SpecializedBatchWork,
+    ) -> Self {
         Self {
+            gate_work_per_batch_unit: batch_work.gate_per_batch_unit,
+            load_work_per_batch_unit: batch_work.load_per_batch_unit,
             coverage_route_knn,
             max_synthetic_neighbor_pairs: 20_000_000,
             max_synthetic_neighbor_bytes: 512 * 1024 * 1024,
@@ -85,12 +207,12 @@ impl SpecializedLimits {
             max_gate_variants: 20_000_001,
             max_gate_vector_bytes: 512 * 1024 * 1024,
             max_gate_contact_matrix_bytes: 512 * 1024 * 1024,
-            max_gate_operations: 2_000_000_000,
+            max_gate_operations_floor: 2_000_000_000,
             max_gate_window_variants: 1_024,
             max_coverage_scratch_bytes: 512 * 1024 * 1024,
             max_coverage_operations: 2_000_000_000,
             max_load_scratch_bytes: 512 * 1024 * 1024,
-            max_load_operations: 2_000_000_000,
+            max_load_operations_floor: 2_000_000_000,
             max_gate_peak_bytes: 1024 * 1024 * 1024,
         }
     }
@@ -1036,7 +1158,10 @@ impl<'a> SpecializedContactPlanEdit<'a> {
             &load_inputs.specialized_owner_faces,
             LoadFinalizeLimits {
                 max_scratch_bytes: self.plan.limits_authority.max_load_scratch_bytes,
-                max_operations: load_inputs.remaining_load_operations,
+                // Already a remaining budget carved out of the batch-materialized
+                // cap upstream, so it is the whole bound here: coefficient 0.
+                max_operations_floor: load_inputs.remaining_load_operations,
+                operations_per_batch_unit: 0,
             },
         )?;
         for row in load_partition.rows() {
@@ -1232,6 +1357,8 @@ pub enum SpecializedError {
     Selection(#[from] ContactSelectionError),
     #[error(transparent)]
     Dyadic(#[from] DyadicError),
+    #[error("a registered batch-work coefficient does not fit this target's usize")]
+    UnrepresentableBatchWork,
     #[error("specialized contact could not build topology: {0}")]
     Topology(String),
     #[error("specialized contact could not build the canonical surface: {0}")]
@@ -1619,7 +1746,10 @@ pub fn prepare_specialized_contacts(
         &load_inputs.specialized_owner_faces,
         LoadFinalizeLimits {
             max_scratch_bytes: limits.max_load_scratch_bytes,
-            max_operations: load_inputs.remaining_load_operations,
+            // Already a remaining budget carved out of the batch-materialized
+            // cap upstream, so it is the whole bound here: coefficient 0.
+            max_operations_floor: load_inputs.remaining_load_operations,
+            operations_per_batch_unit: 0,
         },
     )?;
     for row in load_partition.rows() {
@@ -1988,6 +2118,41 @@ fn accepted_load_header_preflight(
     Ok(())
 }
 
+/// Build the accepted-load inputs, within this stage's operation and byte
+/// bounds.
+///
+/// Byte semantics (record fix F9, 2026-08-06). This path allocates its own
+/// shared distinct-face `Vec<u32>` — the third such buffer FU-8b fix (A)
+/// introduced, after the two on the gate path that record fix F6 charged —
+/// and reuses it across `unique_island_face_count`,
+/// `variant_specialized_owner_face_count` and `append_variant_load_inputs`.
+/// It was charged against nothing: the `max_load_scratch_bytes` check priced
+/// only `retained_bytes` and the finalizer's own scratch. It is now the
+/// `face_scratch_bytes` term of [`LoadScratchUsage`], on the same terms the
+/// gate charges its own:
+///
+/// - The term is a **capacity bound, not an observation**. It is priced from
+///   the islands' `face_ids` lengths rather than from the buffer's own
+///   capacity, so it over-states rather than under-states whatever the buffer
+///   has actually grown to; see [`island_face_scratch_bytes`] for why it
+///   doubles. It is *not* a claim about ordering — the buffer is filled by the
+///   `unique_island_face_count` call above before this check runs, exactly as
+///   on the gate path.
+/// - The term is **small against the bound**, measured 2026-08-06 by
+///   instrumenting this check over the 8-model census. Each of the seven
+///   reachable corpus models enters here exactly once; the widest requirement
+///   is `Sphere`'s 78,408 B, of which the new term is 4,592 B, against the
+///   536,870,912 B cap — 0.015 % of it. The other six are between 1,344 B and
+///   11,680 B, with terms of 16 B to 488 B. Nothing is within four orders of
+///   magnitude of the cap, so no refusal can flip, and none did: the census was
+///   re-run at this tip with all seven frozen digests byte-identical and the
+///   treant's single stage error unchanged.
+/// - The **Weeping Treant never reaches this function** — its `Preparation`
+///   refuses at the merge gate first (FU-8c). The 144,753,256 B "load scratch
+///   bytes" figure of record for the treant is therefore *not* this check's; it
+///   belongs to `finalize_specialized_load_partition`'s own
+///   `LoadFinalizeLimits::max_scratch_bytes` check in `perception.rs`, which
+///   F9 does not touch. That figure is unaffected by this change.
 fn working_load_inputs(
     contacts: &[WorkingContact],
     generic: &GenericContactPlan,
@@ -1999,7 +2164,28 @@ fn working_load_inputs(
         contacts.len(),
         islands.len(),
         reservations.len(),
-        limits.max_load_operations,
+        limits.max_load_operations_floor,
+    )?;
+    // The two gathers below run *before* the row count exists, so they are
+    // budgeted against the floor rather than against the batch-materialized
+    // cap.  The floor is never above that cap, so this is strictly
+    // conservative: it can refuse earlier than the batch bound would, never
+    // later.  On the Weeping Treant the larger of the two charges 2.2e6 against
+    // a 2e9 floor, so neither is anywhere near binding.
+    //
+    // One distinct-face buffer for the whole accepted-load build; both the
+    // count and the fill below reuse it rather than allocating per contact.
+    let mut face_scratch: Vec<u32> = Vec::new();
+    // The distinct island faces bound how many *rows* the specialized pairs can
+    // add to the extended load authority, however many `(owner, face)` pairs
+    // those rows carry (FU-8b defect B).  Charged on its own counter:
+    // `descriptor_work` is the fill pass's exact prediction and must stay that.
+    let mut island_face_work = 0usize;
+    let island_face_count = unique_island_face_count(
+        islands,
+        &mut face_scratch,
+        &mut island_face_work,
+        limits.max_load_operations_floor,
     )?;
     let mut descriptor_work = 0usize;
     let owner_face_count = variant_specialized_owner_face_count(
@@ -2007,8 +2193,9 @@ fn working_load_inputs(
         None,
         generic.islands(),
         islands,
+        &mut face_scratch,
         &mut descriptor_work,
-        limits.max_load_operations,
+        limits.max_load_operations_floor,
     )?;
     let retained_bytes = contacts
         .len()
@@ -2019,34 +2206,56 @@ fn working_load_inputs(
                 .and_then(|owner_bytes| bytes.checked_add(owner_bytes))
         })
         .ok_or(SpecializedError::GateResourceOverflow)?;
-    let finalizer = specialized_load_resource_plan(generic, contacts.len(), owner_face_count)?;
+    let finalizer = specialized_load_resource_plan(
+        generic,
+        contacts.len(),
+        SpecializedLoadCounts::bounded(owner_face_count, island_face_count),
+    )?;
     let expected_fill_work = fill_operation_count(descriptor_work, reservations.len(), 1)?;
     let required_operations = descriptor_work
         .checked_add(expected_fill_work)
+        .and_then(|work| work.checked_add(island_face_work))
         .and_then(|work| work.checked_add(finalizer.operations))
         .ok_or(SpecializedError::GateResourceOverflow)?;
-    if required_operations > limits.max_load_operations {
+    // The cap is materialized over the batch the plan above was computed from,
+    // so the demand and the bound are always stated over the same rows and
+    // contacts.
+    let load_operation_limit = limits.load_operation_limit(finalizer.rows, finalizer.contacts);
+    crate::census_record!(crate::census::record_scaled_cap(
+        crate::census::ScaledCapRow {
+            kind: "specialized_load_operations",
+            floor: limits.max_load_operations_floor,
+            per_batch_unit: limits.load_work_per_batch_unit,
+            rows: finalizer.rows,
+            columns: finalizer.contacts,
+            materialized: load_operation_limit,
+        }
+    ));
+    if required_operations > load_operation_limit {
         return Err(GenericPerceptionError::LoadOperationLimit {
             required: required_operations,
-            limit: limits.max_load_operations,
+            limit: load_operation_limit,
         }
         .into());
     }
-    let fill_limit = limits
-        .max_load_operations
+    let fill_limit = load_operation_limit
         .checked_sub(descriptor_work)
+        .and_then(|remaining| remaining.checked_sub(island_face_work))
         .and_then(|remaining| remaining.checked_sub(finalizer.operations))
         .ok_or(SpecializedError::GateResourceOverflow)?;
-    let required_peak = retained_bytes
-        .checked_add(finalizer.scratch_bytes)
-        .ok_or(SpecializedError::GateResourceOverflow)?;
-    if required_peak > limits.max_load_scratch_bytes {
-        return Err(GenericPerceptionError::LoadScratchLimit {
-            required: required_peak,
-            limit: limits.max_load_scratch_bytes,
-        }
-        .into());
-    }
+    // Record fix F9 (2026-08-06): `face_scratch` above is the third buffer
+    // FU-8b fix (A) introduced and the last one to be charged. The gate's two
+    // are `GatePeakUsage::face_scratch_bytes` (record fix F6); this one is real
+    // memory this path holds across the count, the fill and the finalizer plan,
+    // and until now it was priced against no byte bound at all.
+    check_load_scratch(
+        LoadScratchUsage {
+            retained_bytes,
+            finalizer_scratch_bytes: finalizer.scratch_bytes,
+            face_scratch_bytes: island_face_scratch_bytes(islands)?,
+        },
+        limits.max_load_scratch_bytes,
+    )?;
     let mut physical = Vec::with_capacity(contacts.len());
     let mut specialized_owner_faces = Vec::with_capacity(owner_face_count);
     let mut fill_work = 0usize;
@@ -2058,13 +2267,14 @@ fn working_load_inputs(
         reservations,
         &mut physical,
         &mut specialized_owner_faces,
+        &mut face_scratch,
         &mut fill_work,
         fill_limit,
     )?;
     debug_assert_eq!(fill_work, expected_fill_work);
-    let remaining_load_operations = limits
-        .max_load_operations
+    let remaining_load_operations = load_operation_limit
         .checked_sub(descriptor_work)
+        .and_then(|remaining| remaining.checked_sub(island_face_work))
         .and_then(|remaining| remaining.checked_sub(fill_work))
         .ok_or(SpecializedError::GateResourceOverflow)?;
     Ok(WorkingLoadInputs {
@@ -2671,11 +2881,54 @@ fn first_safe_proposal(
         .position(|vector| gate_not_worse(*vector, baseline))
 }
 
+/// Worst-case bytes a shared distinct-face buffer may hold.
+///
+/// FU-8b fix (A) introduced one `Vec<u32>` per gate batch, reused by every
+/// distinct-face gather in it (see [`distinct_faces_in_place`]).  It was
+/// threaded through the batch without ever becoming a term in
+/// [`GatePeakUsage`]; record fix F6 (2026-08-06) makes it one, so the gate's
+/// byte bound covers every allocation the gate holds rather than every
+/// allocation someone remembered.
+///
+/// Record fix F9 (2026-08-06) applies the same term to the **accepted-load**
+/// bound.  Fix (A) created a *third* such buffer, in [`working_load_inputs`],
+/// which is charged against no byte bound at all: that path checks only the
+/// retained contacts and pairs plus the finalizer's own scratch against
+/// `max_load_scratch_bytes`.  It is now [`LoadScratchUsage::face_scratch_bytes`]
+/// there.  Both callers hand this function the same `islands` slice and get the
+/// same bound, because both fill their buffer the same way.
+///
+/// The bound is the largest single gather the batch can perform.
+/// `unique_island_face_count` gathers *every* island's `face_ids` before
+/// deduping, and every other gather in the batch
+/// (`visit_served_owner_faces`) gathers a subset of the same ids, so the
+/// islands' total `face_ids` length bounds them all.  The doubling covers
+/// `Vec`'s amortized growth: a buffer filled by repeated `extend_from_slice`
+/// and never shrunk can sit at up to twice its live length.  That factor is a
+/// design bound on this buffer, not a guarantee extracted from `Vec` — `Vec`
+/// documents no exact growth policy — which is why the term is deliberately
+/// generous rather than exact.
+fn island_face_scratch_bytes(islands: &[SupportIsland]) -> Result<usize, SpecializedError> {
+    islands
+        .iter()
+        .try_fold(0usize, |total, island| {
+            total.checked_add(island.face_ids.len())
+        })
+        .and_then(|entries| entries.checked_mul(std::mem::size_of::<u32>()))
+        .and_then(|bytes| bytes.checked_mul(2))
+        .ok_or(SpecializedError::GateResourceOverflow)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GatePeakUsage {
     proposal_bytes: usize,
     result_bytes: usize,
     matrix_bytes: usize,
+    /// The batch's shared distinct-face buffer, from
+    /// [`island_face_scratch_bytes`].  Retained, not phase-local: the buffer
+    /// is allocated once at the top of the batch and lives across the
+    /// coverage, nearest and load phases alike.
+    face_scratch_bytes: usize,
     coverage_scratch_bytes: usize,
     coverage_nearest_bytes: usize,
     coverage_retained_bytes: usize,
@@ -2687,6 +2940,7 @@ fn check_gate_peak(usage: GatePeakUsage, limit: usize) -> Result<usize, Speciali
         .proposal_bytes
         .checked_add(usage.result_bytes)
         .and_then(|bytes| bytes.checked_add(usage.matrix_bytes))
+        .and_then(|bytes| bytes.checked_add(usage.face_scratch_bytes))
         .ok_or(SpecializedError::GateResourceOverflow)?;
     let coverage_phase = retained
         .checked_add(usage.coverage_scratch_bytes)
@@ -2701,6 +2955,40 @@ fn check_gate_peak(usage: GatePeakUsage, limit: usize) -> Result<usize, Speciali
     let required = coverage_phase.max(coverage_nearest_phase).max(load_phase);
     if required > limit {
         return Err(SpecializedError::GatePeakByteLimit { required, limit });
+    }
+    Ok(required)
+}
+
+/// What the **accepted-load** build holds at once, checked against
+/// `max_load_scratch_bytes` by [`check_load_scratch`].
+///
+/// Record fix F9 (2026-08-06) introduced this struct so the accepted-load byte
+/// bound states its terms the way [`GatePeakUsage`] states the gate's, and so
+/// the term F9 added can be pinned. Before F9 the check was two inline
+/// `checked_add`s over `retained_bytes` and the finalizer's scratch, and the
+/// distinct-face buffer beside them was charged against nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LoadScratchUsage {
+    /// The contacts and the `(owner, face)` pairs the build retains.
+    retained_bytes: usize,
+    /// The load finalizer's own scratch, from `specialized_load_resource_plan`.
+    finalizer_scratch_bytes: usize,
+    /// The build's shared distinct-face buffer, from
+    /// [`island_face_scratch_bytes`] — the same allocation the gate charges as
+    /// [`GatePeakUsage::face_scratch_bytes`], on the path taken after the gate
+    /// accepts. Added by record fix F9 (2026-08-06); it was held and never
+    /// charged before that.
+    face_scratch_bytes: usize,
+}
+
+fn check_load_scratch(usage: LoadScratchUsage, limit: usize) -> Result<usize, SpecializedError> {
+    let required = usage
+        .retained_bytes
+        .checked_add(usage.finalizer_scratch_bytes)
+        .and_then(|bytes| bytes.checked_add(usage.face_scratch_bytes))
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    if required > limit {
+        return Err(GenericPerceptionError::LoadScratchLimit { required, limit }.into());
     }
     Ok(required)
 }
@@ -2723,7 +3011,9 @@ fn gate_header_preflight(
     limits: SpecializedLimits,
     _telemetry: &mut GatePreflightTelemetry,
 ) -> Result<(), SpecializedError> {
-    if limits.max_gate_operations == 0
+    // The batch's own materialized gate cap: the header preflight and every
+    // check below in this batch use the one bound stated for this batch shape.
+    if limits.gate_operation_limit(sample_count, contact_count) == 0
         && (contact_count != 0
             || proposal_count != 0
             || sample_count != 0
@@ -2841,10 +3131,15 @@ fn gate_resource_plan(
     let operations = routed_rows
         .checked_add(face_rows)
         .ok_or(SpecializedError::GateResourceOverflow)?;
-    if operations > limits.max_gate_operations {
+    // The plan is bounded by the cap materialized for *this batch's* shape.
+    // The proposal count is deliberately not a factor in that shape: a gate
+    // that re-evaluates every contact once per merge proposal is superlinear
+    // in the batch, and that is exactly what this cap exists to refuse.
+    let operation_limit = limits.gate_operation_limit(sample_count, contact_count);
+    if operations > operation_limit {
         return Err(SpecializedError::GateOperationLimit {
             required: operations,
-            limit: limits.max_gate_operations,
+            limit: operation_limit,
         });
     }
     Ok(GateResourcePlan {
@@ -2855,33 +3150,123 @@ fn gate_resource_plan(
     })
 }
 
+/// Gather one island's face ids into the shared distinct-face scratch.
+///
+/// The whole island is charged in a single bulk add *before* a single id is
+/// copied, so an island that cannot fit inside the remaining budget is refused
+/// without growing the buffer.  The charge is one unit per id, the same unit
+/// the surrounding descriptor scans charge for inspecting one element.
+fn gather_island_faces(
+    scratch: &mut Vec<u32>,
+    island: &SupportIsland,
+    work: &mut usize,
+    limit: usize,
+) -> Result<(), SpecializedError> {
+    charge_load_descriptor_work(work, island.face_ids.len(), limit)?;
+    scratch.extend_from_slice(&island.face_ids);
+    Ok(())
+}
+
+/// Collapse a gathered face-id buffer to its ascending distinct ids in place.
+///
+/// Charging semantics (FU-8b fix A, 2026-08-06).  The meter counts elementary
+/// comparisons, matching every other `charge_load_descriptor_work` site.  The
+/// batch dedup performs at most `n * ceil(log2(n + 1))` comparisons — the
+/// comparison bound for `sort_unstable` — plus one adjacent-pair pass of `n`
+/// for `dedup`, so it charges `n * (ceil(log2(n + 1)) + 1)` in one bulk add
+/// (`gather_island_faces` has already charged the `n` inspections that filled
+/// the buffer).  The predecessor was a repeated-minimum selection sort that
+/// charged one unit per inner comparison, i.e. `n * (distinct + 1)`: quadratic
+/// in the face count.  The emitted values — the count and the ascending
+/// distinct order — are unchanged; only the meter moved.
+///
+/// Byte semantics (record fixes F6 and F9, 2026-08-06).  `scratch` is the one
+/// `Vec<u32>` its caller's batch allocates and every gather in that batch
+/// reuses — that reuse is the point of fix (A), which otherwise would have
+/// traded a quadratic charge for a per-contact allocation.  Fix (A) threaded
+/// three such buffers through three batches and left all three out of their
+/// byte bounds, so each was real memory the stage held and never charged for.
+/// All three are charged now:
+///
+/// - the gate's two, in `evaluate_gate_batch` and
+///   `whole_gate_route_preflight`, as the `face_scratch_bytes` term of
+///   [`GatePeakUsage`] — added to that check's *retained* total, because the
+///   buffer outlives every individual phase (record fix F6);
+/// - the accepted-load path's, in [`working_load_inputs`], as the
+///   `face_scratch_bytes` term of [`LoadScratchUsage`], checked against
+///   `max_load_scratch_bytes` (record fix F9, which found the omission F6 had
+///   fixed only on the gate side).
+///
+/// All three use [`island_face_scratch_bytes`], and two things follow at every
+/// site.  Both are deliberate:
+///
+/// - The term is a **capacity bound, not an observation**.  It is priced from
+///   the islands' `face_ids` lengths rather than from the buffer's own
+///   capacity, so it over-states rather than under-states whatever the buffer
+///   has actually grown to; see [`island_face_scratch_bytes`] for why it
+///   doubles.  (Corrected 2026-08-06, record fix F8: this bullet previously
+///   said the term "is priced before any gather runs", which is false at every
+///   production site — `evaluate_gate_batch`, `whole_gate_route_preflight` and
+///   [`working_load_inputs`] each fill the buffer via
+///   `unique_island_face_count` before reaching their check.  The pricing
+///   basis, not the ordering, is what makes the term an over-statement, and
+///   the ordering claim is dropped.)
+/// - The term is **small against everything else in the bound**.  Measured on
+///   the Weeping Treant's gate batch, 2026-08-06: 570,584 B of live face ids,
+///   charged as 1,141,168 B after the doubling.  That takes the gate peak from
+///   215,061,920 B to 216,203,088 B against the unchanged 1,073,741,824 B cap
+///   — 0.53 % of the peak and 0.11 % of the cap, leaving the batch at 20.1 %
+///   of its bound.  Charging it therefore flips no refusal anywhere on the
+///   corpus, which was proved by re-running the census: the seven frozen
+///   digests stayed byte-identical and the treant's refusal line stayed
+///   `GateOperationLimit { required: 21755124103146, limit: 35445500736 }`.
+///   The accepted-load site is smaller again: it is the path the seven
+///   reachable corpus models actually take, and their whole load-scratch
+///   requirement peaks at `Sphere`'s 78,408 B — 0.015 % of the 536,870,912 B
+///   cap, with the new term 4,592 B of it — so F9 too flipped no refusal,
+///   proved by the same census re-run.  Each is charged because the stage must
+///   bound what it holds, not because anything was observed to be near a
+///   limit.
+fn distinct_faces_in_place(
+    scratch: &mut Vec<u32>,
+    work: &mut usize,
+    limit: usize,
+) -> Result<(), SpecializedError> {
+    let count = scratch.len();
+    // `usize::BITS - leading_zeros` is the significant-bit count, i.e.
+    // `ceil(log2(count + 1))`, and is 0 for an empty gather.
+    let log2_ceiling = usize::try_from(usize::BITS - count.leading_zeros())
+        .map_err(|_| SpecializedError::GateResourceOverflow)?;
+    let comparisons = log2_ceiling
+        .checked_add(1)
+        .and_then(|per_element| count.checked_mul(per_element))
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    charge_load_descriptor_work(work, comparisons, limit)?;
+    scratch.sort_unstable();
+    scratch.dedup();
+    Ok(())
+}
+
+/// Count the distinct face ids owned by `islands`.
+///
+/// `scratch` is a caller-owned buffer reused across every distinct-face gather
+/// in one gate batch, so no gather allocates per island or per contact.  Its
+/// capacity is bounded by the largest single gather: at most one `u32` per
+/// entry in the islands' own `face_ids`, i.e. no more than the face-id arrays
+/// the caller already holds (and, independently, at most `limit` entries, since
+/// every gathered id is charged before it is copied).
 fn unique_island_face_count(
     islands: &[SupportIsland],
+    scratch: &mut Vec<u32>,
     work: &mut usize,
     limit: usize,
 ) -> Result<usize, SpecializedError> {
-    let mut count = 0usize;
-    let mut last = None;
-    loop {
-        let mut next = None;
-        for island in islands {
-            for &face_id in &island.face_ids {
-                charge_load_descriptor_work(work, 1, limit)?;
-                if last.is_none_or(|last| face_id > last) && next.is_none_or(|next| face_id < next)
-                {
-                    next = Some(face_id);
-                }
-            }
-        }
-        let Some(face_id) = next else {
-            break;
-        };
-        count = count
-            .checked_add(1)
-            .ok_or(SpecializedError::GateResourceOverflow)?;
-        last = Some(face_id);
+    scratch.clear();
+    for island in islands {
+        gather_island_faces(scratch, island, work, limit)?;
     }
-    Ok(count)
+    distinct_faces_in_place(scratch, work, limit)?;
+    Ok(scratch.len())
 }
 
 fn variant_operation_count(
@@ -2981,11 +3366,29 @@ fn evaluate_gate_batch(
     )?;
     debug_assert_eq!(preflight_telemetry.payload_allocations, 0);
     debug_assert_eq!(preflight_telemetry.payload_operations, 0);
+    // One distinct-face buffer for the whole gate batch: every face gather
+    // below reuses this allocation instead of building a set per contact.
+    let mut face_scratch: Vec<u32> = Vec::new();
     let mut face_count_operations = 0usize;
+    // One materialized bound for the whole batch, stated once from the batch's
+    // own shape and then used by every charge site below, so the gather budget
+    // and the final check cannot disagree about what this batch may spend.
+    let gate_operation_limit = limits.gate_operation_limit(coverage_samples.len(), contacts.len());
+    crate::census_record!(crate::census::record_scaled_cap(
+        crate::census::ScaledCapRow {
+            kind: "specialized_gate_operations",
+            floor: limits.max_gate_operations_floor,
+            per_batch_unit: limits.gate_work_per_batch_unit,
+            rows: coverage_samples.len(),
+            columns: contacts.len(),
+            materialized: gate_operation_limit,
+        }
+    ));
     let face_count = unique_island_face_count(
         islands,
+        &mut face_scratch,
         &mut face_count_operations,
-        limits.max_gate_operations,
+        gate_operation_limit,
     )?;
     let plan = gate_resource_plan(
         contacts.len(),
@@ -3005,8 +3408,9 @@ fn evaluate_gate_batch(
             proposal,
             generic.islands(),
             islands,
+            &mut face_scratch,
             &mut descriptor_operations,
-            limits.max_gate_operations,
+            gate_operation_limit,
         )?;
         total
             .checked_add(variant_operation_count(
@@ -3037,14 +3441,13 @@ fn evaluate_gate_batch(
                 .and_then(|reservation_work| work.checked_add(reservation_work))
         })
         .ok_or(SpecializedError::GateResourceOverflow)?;
-    if exact_operations > limits.max_gate_operations {
+    if exact_operations > gate_operation_limit {
         return Err(SpecializedError::GateOperationLimit {
             required: exact_operations,
-            limit: limits.max_gate_operations,
+            limit: gate_operation_limit,
         });
     }
-    let fill_operation_limit = limits
-        .max_gate_operations
+    let fill_operation_limit = gate_operation_limit
         .checked_sub(
             exact_operations
                 .checked_sub(expected_fill_operations)
@@ -3096,6 +3499,7 @@ fn evaluate_gate_batch(
                                 proposal,
                                 generic.islands(),
                                 islands,
+                                &mut face_scratch,
                                 &mut work,
                                 usize::MAX,
                             )?)
@@ -3141,13 +3545,14 @@ fn evaluate_gate_batch(
                             proposal,
                             generic.islands(),
                             islands,
+                            &mut face_scratch,
                             &mut work,
                             usize::MAX,
                         )?;
                         let resource = specialized_load_resource_plan(
                             generic,
                             variant_contact_count(contacts.len(), variant),
-                            owner_faces,
+                            SpecializedLoadCounts::bounded(owner_faces, face_count),
                         )?;
                         Ok::<_, SpecializedError>(maximum.max(resource.scratch_bytes))
                     })?;
@@ -3187,6 +3592,7 @@ fn evaluate_gate_batch(
                         proposal_bytes: proposal_storage_bytes,
                         result_bytes: plan.vector_bytes,
                         matrix_bytes: working_bytes,
+                        face_scratch_bytes: island_face_scratch_bytes(islands)?,
                         coverage_scratch_bytes: coverage_scratch.scratch_bytes,
                         coverage_nearest_bytes,
                         coverage_retained_bytes,
@@ -3226,6 +3632,7 @@ fn evaluate_gate_batch(
                         reservations,
                         &mut physical_matrix,
                         &mut owner_face_matrix,
+                        &mut face_scratch,
                         &mut append_work,
                         fill_operation_limit,
                     )?;
@@ -3263,7 +3670,8 @@ fn evaluate_gate_batch(
                         owner_faces,
                         LoadFinalizeLimits {
                             max_scratch_bytes: limits.max_load_scratch_bytes,
-                            max_operations: limits.max_load_operations,
+                            max_operations_floor: limits.max_load_operations_floor,
+                            operations_per_batch_unit: limits.load_work_per_batch_unit,
                         },
                     )?;
                     let unsupported_specialized_count = authoritative_demands
@@ -3535,6 +3943,20 @@ fn whole_gate_route_preflight(
         .len()
         .checked_mul(std::mem::size_of::<usize>())
         .ok_or(SpecializedError::GateResourceOverflow)?;
+    // One distinct-face buffer for the whole preflight; the per-variant face
+    // counts below reuse it rather than allocating per contact.
+    let mut face_scratch: Vec<u32> = Vec::new();
+    // Distinct island faces, once for the whole preflight: the bound on how
+    // many rows a variant's `(owner, face)` pairs can add (FU-8b defect B).
+    // Uncapped like the per-variant counts beside it — this route plans, the
+    // batch it plans for charges.
+    let mut island_face_work = 0usize;
+    let island_face_count = unique_island_face_count(
+        islands,
+        &mut face_scratch,
+        &mut island_face_work,
+        usize::MAX,
+    )?;
     traverse_whole_gate_windows(
         gate_plan.variants,
         limits.max_gate_window_variants,
@@ -3560,6 +3982,7 @@ fn whole_gate_route_preflight(
                             proposal,
                             generic.islands(),
                             islands,
+                            &mut face_scratch,
                             &mut work,
                             usize::MAX,
                         )?)
@@ -3601,13 +4024,14 @@ fn whole_gate_route_preflight(
                         proposal,
                         generic.islands(),
                         islands,
+                        &mut face_scratch,
                         &mut work,
                         usize::MAX,
                     )?;
                     let resource = specialized_load_resource_plan(
                         generic,
                         variant_contact_count(contacts.len(), variant),
-                        owner_faces,
+                        SpecializedLoadCounts::bounded(owner_faces, island_face_count),
                     )?;
                     Ok::<_, SpecializedError>(maximum.max(resource.scratch_bytes))
                 })?;
@@ -3633,6 +4057,7 @@ fn whole_gate_route_preflight(
                     proposal_bytes: proposal_storage_bytes,
                     result_bytes: gate_plan.vector_bytes,
                     matrix_bytes: working_bytes,
+                    face_scratch_bytes: island_face_scratch_bytes(islands)?,
                     coverage_scratch_bytes: coverage_scratch.scratch_bytes,
                     coverage_nearest_bytes,
                     coverage_retained_bytes,
@@ -4055,6 +4480,7 @@ fn visit_specialized_owner_faces(
     parts: ContactParts<'_>,
     generic_islands: &[SupportIsland],
     islands: &[SupportIsland],
+    scratch: &mut Vec<u32>,
     work: &mut usize,
     limit: usize,
     visit: impl FnMut(u32) -> Result<(), SpecializedError>,
@@ -4062,49 +4488,51 @@ fn visit_specialized_owner_faces(
     if let Some(owner) = generic_owner_for_parts(parts, generic_islands, work, limit)? {
         return Ok(Some(owner));
     }
-    visit_served_owner_faces(parts, islands, work, limit, visit)?;
+    visit_served_owner_faces(parts, islands, scratch, work, limit, visit)?;
     Ok(None)
 }
 
+/// Visit the ascending distinct face ids of every island `parts` serves.
+///
+/// The emitted sequence is exactly `BTreeSet` order over the served islands'
+/// face ids, which is what keeps the load rows canonical even when island face
+/// ranges interleave.  It is produced by gathering each served island's ids
+/// once and collapsing the gather in one batch, so each island is tested for
+/// service exactly once and each id is inspected exactly once.  Its predecessor
+/// re-scanned every island — service test included — once per emitted face, a
+/// selection sort quadratic in the served face count (FU-8b defect A).
+///
+/// `scratch` is a caller-owned buffer reused across contacts and variants; see
+/// [`unique_island_face_count`] for its bound.
 fn visit_served_owner_faces(
     parts: ContactParts<'_>,
     islands: &[SupportIsland],
+    scratch: &mut Vec<u32>,
     work: &mut usize,
     limit: usize,
     mut visit: impl FnMut(u32) -> Result<(), SpecializedError>,
 ) -> Result<(), SpecializedError> {
-    // Match BTreeSet iteration without allocating it: repeatedly select the
-    // smallest served face greater than the last emitted face. This keeps the
-    // load rows canonical even when island face ranges interleave.
-    let mut last = None;
-    loop {
-        let mut next = None;
-        for island in islands {
-            if !parts_serves_owner(parts, island.id, work, limit)? {
-                continue;
-            }
-            for &face_id in &island.face_ids {
-                charge_load_descriptor_work(work, 1, limit)?;
-                if last.is_none_or(|last| face_id > last) && next.is_none_or(|next| face_id < next)
-                {
-                    next = Some(face_id);
-                }
-            }
+    scratch.clear();
+    for island in islands {
+        if !parts_serves_owner(parts, island.id, work, limit)? {
+            continue;
         }
-        let Some(face_id) = next else {
-            break;
-        };
+        gather_island_faces(scratch, island, work, limit)?;
+    }
+    distinct_faces_in_place(scratch, work, limit)?;
+    for &face_id in scratch.iter() {
         visit(face_id)?;
-        last = Some(face_id);
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn variant_specialized_owner_face_count(
     contacts: &[WorkingContact],
     proposal: Option<&MergeProposal>,
     generic_islands: &[SupportIsland],
     islands: &[SupportIsland],
+    scratch: &mut Vec<u32>,
     work: &mut usize,
     limit: usize,
 ) -> Result<usize, SpecializedError> {
@@ -4117,6 +4545,7 @@ fn variant_specialized_owner_face_count(
             ContactParts::new(contact, None),
             generic_islands,
             islands,
+            scratch,
             work,
             limit,
             |_| {
@@ -4132,6 +4561,7 @@ fn variant_specialized_owner_face_count(
             ContactParts::new(&contacts[proposal.left], Some(&contacts[proposal.right])),
             generic_islands,
             islands,
+            scratch,
             work,
             limit,
             |_| {
@@ -4154,6 +4584,7 @@ fn append_variant_load_inputs(
     reservations: &[SpecializedOwnerReservation],
     physical: &mut Vec<PhysicalContact>,
     specialized_owner_faces: &mut Vec<(u32, u32)>,
+    scratch: &mut Vec<u32>,
     work: &mut usize,
     limit: usize,
 ) -> Result<(), SpecializedError> {
@@ -4186,7 +4617,7 @@ fn append_variant_load_inputs(
                         u32::try_from(contact_id).map_err(|_| SpecializedError::OwnerIdOverflow)?,
                     )
                     .ok_or(SpecializedError::OwnerIdOverflow)?;
-                visit_served_owner_faces(parts, islands, work, limit, |face_id| {
+                visit_served_owner_faces(parts, islands, scratch, work, limit, |face_id| {
                     specialized_owner_faces.push((specialized_owner, face_id));
                     Ok(())
                 })?;
@@ -4442,7 +4873,7 @@ fn test_pair_proposals(
         layers,
         attach_reach,
         spacing_floor,
-        SpecializedLimits::production(TEST_PAIR_KNN_LIMITS),
+        SpecializedLimits::production(TEST_PAIR_KNN_LIMITS, crate::specialized::test_batch_work()),
         &mut operations,
         &mut proposals,
     )
@@ -4874,7 +5305,7 @@ fn bound_authority_base(
     hash.usize(limits.max_gate_variants);
     hash.usize(limits.max_gate_vector_bytes);
     hash.usize(limits.max_gate_contact_matrix_bytes);
-    hash.usize(limits.max_gate_operations);
+    hash.usize(limits.max_gate_operations_floor);
     hash.usize(limits.max_gate_window_variants);
     hash
 }
@@ -4895,12 +5326,12 @@ fn hash_specialized_limits(hash: &mut Fnv, limits: SpecializedLimits) {
     hash.usize(limits.max_gate_variants);
     hash.usize(limits.max_gate_vector_bytes);
     hash.usize(limits.max_gate_contact_matrix_bytes);
-    hash.usize(limits.max_gate_operations);
+    hash.usize(limits.max_gate_operations_floor);
     hash.usize(limits.max_gate_window_variants);
     hash.usize(limits.max_coverage_scratch_bytes);
     hash.usize(limits.max_coverage_operations);
     hash.usize(limits.max_load_scratch_bytes);
-    hash.usize(limits.max_load_operations);
+    hash.usize(limits.max_load_operations_floor);
     hash.usize(limits.max_gate_peak_bytes);
 }
 
@@ -4935,7 +5366,7 @@ fn bound_authority_digest(
     hash.usize(limits.max_coverage_scratch_bytes);
     hash.usize(limits.max_coverage_operations);
     hash.usize(limits.max_load_scratch_bytes);
-    hash.usize(limits.max_load_operations);
+    hash.usize(limits.max_load_operations_floor);
     hash.usize(limits.max_gate_peak_bytes);
     hash.finish()
 }
@@ -5104,6 +5535,12 @@ mod tests {
             proposal_bytes: 0,
             result_bytes: 0,
             matrix_bytes: summary.max_peak_bytes,
+            // Re-pinned 2026-08-06 by record fix F6, which added
+            // `face_scratch_bytes` to the retained total. Zero here: this test
+            // pins how a *window summary's* max peak flows into the check, and
+            // the face buffer is not the term under test. Both assertions below
+            // keep their pre-F6 values, which is the point of pinning it at 0.
+            face_scratch_bytes: 0,
             coverage_scratch_bytes: 0,
             coverage_nearest_bytes: 0,
             coverage_retained_bytes: 0,
@@ -5366,6 +5803,12 @@ mod tests {
             proposal_bytes: 0,
             result_bytes: 0,
             matrix_bytes: 0,
+            // Re-pinned 2026-08-06 by record fix F6. Zero: this test pins that
+            // serial route batches are charged as one maximum rather than a
+            // sum, so every term but `coverage_nearest_bytes` must stay 0 for
+            // the assertion to mean what it says. Its two pinned values are
+            // unchanged by F6.
+            face_scratch_bytes: 0,
             coverage_scratch_bytes: 0,
             coverage_nearest_bytes: logical_peak_bytes,
             coverage_retained_bytes: 0,
@@ -5841,7 +6284,8 @@ mod tests {
         ];
         let mut proposals = Vec::new();
         let mut operations = 0;
-        let mut limits = SpecializedLimits::production(TEST_KNN_LIMITS);
+        let mut limits =
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
         limits.max_merge_proposals = 1;
         assert_eq!(
             gather_pair_proposals(
@@ -5945,7 +6389,8 @@ mod tests {
             })
             .unwrap();
         let exact = 4 + 2 * satisfaction;
-        let mut limits = SpecializedLimits::production(TEST_KNN_LIMITS);
+        let mut limits =
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
         limits.max_merge_descriptor_operations = exact - 1;
         let mut operations = 0;
         let mut proposals = Vec::new();
@@ -5978,7 +6423,8 @@ mod tests {
             WorkingContact::specialized(demand.clone()),
             WorkingContact::specialized(demand),
         ];
-        let mut limits = SpecializedLimits::production(TEST_KNN_LIMITS);
+        let mut limits =
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
         limits.max_merge_descriptor_operations = 0;
         let mut operations = 0;
         let mut proposals = Vec::new();
@@ -6256,8 +6702,15 @@ mod tests {
     #[test]
     fn zero_gate_caps_refuse_without_payload_allocation_or_work() {
         let mut telemetry = GatePreflightTelemetry::default();
-        let mut operation_limits = SpecializedLimits::production(TEST_KNN_LIMITS);
-        operation_limits.max_gate_operations = 0;
+        let mut operation_limits =
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
+        // Re-pinned 2026-08-06 (FU-8b batch-product caps): the gate operation cap
+        // is now max(floor, K_G x batch_product), so a zero *floor* is only a zero
+        // *cap* when the coefficient is zero too.  This test is about the zero-cap
+        // refusal path, so it disables the coefficient and pins exactly what it
+        // pinned before: floor 0 refuses a non-empty batch without allocating.
+        operation_limits.gate_work_per_batch_unit = 0;
+        operation_limits.max_gate_operations_floor = 0;
         assert_eq!(
             gate_header_preflight(
                 2,
@@ -6278,7 +6731,8 @@ mod tests {
         assert_eq!(telemetry.payload_allocations, 0);
         assert_eq!(telemetry.payload_operations, 0);
 
-        let mut peak_limits = SpecializedLimits::production(TEST_KNN_LIMITS);
+        let mut peak_limits =
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
         peak_limits.max_gate_peak_bytes = 0;
         let expected = std::mem::size_of::<MergeProposal>()
             + 2 * std::mem::size_of::<FrozenSpecializedGateVector>();
@@ -6316,11 +6770,263 @@ mod tests {
             face_ids: (0..10_000).collect(),
         }];
         let mut work = 0usize;
+        let mut scratch = Vec::new();
+        // FU-8b fix A re-pin (2026-08-06): `required` was 11, now 10_001.
+        // The old selection sort charged one unit per inner comparison, so it
+        // tripped the cap eleven comparisons into its first pass (one demand
+        // service test plus ten face comparisons).  The batch gather charges
+        // the island's whole face count in one add *before* copying any id, so
+        // the same refusal now states the real demand (1 service test + 10_000
+        // faces) instead of the point at which a quadratic scan happened to
+        // cross the line.  The refusal is still allocation-free: `scratch` is
+        // untouched, which the assertion below pins.
         assert_eq!(
-            variant_specialized_owner_face_count(&contacts, None, &[], &islands, &mut work, 10,),
+            variant_specialized_owner_face_count(
+                &contacts,
+                None,
+                &[],
+                &islands,
+                &mut scratch,
+                &mut work,
+                10,
+            ),
             Err(SpecializedError::GateOperationLimit {
-                required: 11,
+                required: 10_001,
                 limit: 10,
+            })
+        );
+        assert!(scratch.is_empty());
+    }
+
+    /// The pre-FU-8b repeated-minimum selection sort, kept as a test-only
+    /// oracle.  Fix A is allowed to change what the work meter charges; it is
+    /// not allowed to change what the gatherers emit, so the fixtures below are
+    /// checked against the algorithm that was replaced rather than against
+    /// hand-written expectations.
+    fn selection_sort_distinct_faces(islands: &[SupportIsland], served: &[bool]) -> Vec<u32> {
+        let mut emitted = Vec::new();
+        let mut last: Option<u32> = None;
+        loop {
+            let mut next: Option<u32> = None;
+            for (island, serves) in islands.iter().zip(served) {
+                if !serves {
+                    continue;
+                }
+                for &face_id in &island.face_ids {
+                    if last.is_none_or(|last| face_id > last)
+                        && next.is_none_or(|next| face_id < next)
+                    {
+                        next = Some(face_id);
+                    }
+                }
+            }
+            let Some(face_id) = next else {
+                break;
+            };
+            emitted.push(face_id);
+            last = Some(face_id);
+        }
+        emitted
+    }
+
+    fn contact_routed_to(owners: &[u32]) -> WorkingContact {
+        let route = |owner: u32| RegularContactRoute {
+            candidate_id: u64::from(owner),
+            owner_island_id: owner,
+            coverage_face_id: 0,
+            component_id: 0,
+            source_kind: RepairRowSourceKind::Generic,
+        };
+        let mut contact = test_regular_contact(
+            [0.0, 0.0, 0.1],
+            [0.0, 0.0, -1.0],
+            route(owners[0]),
+            Vec::new(),
+        );
+        contact.regular_routes = owners.iter().copied().map(route).collect();
+        contact
+    }
+
+    /// `(name, islands, island ids the probe contact routes to)`.
+    fn distinct_face_fixtures() -> Vec<(&'static str, Vec<SupportIsland>, Vec<u32>)> {
+        vec![
+            ("no islands at all", Vec::new(), vec![0]),
+            (
+                "one island, one face",
+                vec![SupportIsland {
+                    id: 0,
+                    face_ids: vec![7],
+                }],
+                vec![0],
+            ),
+            (
+                "duplicates inside one island",
+                vec![SupportIsland {
+                    id: 0,
+                    face_ids: vec![5, 5, 5, 2, 2, 9],
+                }],
+                vec![0],
+            ),
+            (
+                "unsorted interleaved island ranges",
+                vec![
+                    SupportIsland {
+                        id: 0,
+                        face_ids: vec![9, 3, 7],
+                    },
+                    SupportIsland {
+                        id: 1,
+                        face_ids: vec![8, 1, 4],
+                    },
+                ],
+                vec![0, 1],
+            ),
+            (
+                "the same face shared by two islands",
+                vec![
+                    SupportIsland {
+                        id: 0,
+                        face_ids: vec![4, 2],
+                    },
+                    SupportIsland {
+                        id: 1,
+                        face_ids: vec![2, 4, 6],
+                    },
+                ],
+                vec![0, 1],
+            ),
+            (
+                "an empty island among served islands",
+                vec![
+                    SupportIsland {
+                        id: 0,
+                        face_ids: Vec::new(),
+                    },
+                    SupportIsland {
+                        id: 1,
+                        face_ids: vec![3, 1],
+                    },
+                ],
+                vec![0, 1],
+            ),
+            (
+                "an unserved island must contribute nothing",
+                vec![
+                    SupportIsland {
+                        id: 0,
+                        face_ids: vec![1, 2],
+                    },
+                    SupportIsland {
+                        id: 1,
+                        face_ids: vec![100, 101],
+                    },
+                ],
+                vec![0],
+            ),
+            (
+                "a fully descending run",
+                vec![SupportIsland {
+                    id: 0,
+                    face_ids: (0..64u32).rev().collect(),
+                }],
+                vec![0],
+            ),
+            (
+                "a wide island that is mostly duplicates",
+                vec![SupportIsland {
+                    id: 0,
+                    face_ids: (0..1_000u32).map(|index| index % 250).collect(),
+                }],
+                vec![0],
+            ),
+        ]
+    }
+
+    #[test]
+    fn batched_distinct_face_gathers_emit_exactly_what_the_selection_sort_emitted() {
+        // One buffer across every fixture, so buffer reuse between unrelated
+        // gathers is exercised too: a stale id would show up as a mismatch.
+        let mut scratch = Vec::new();
+        for (name, islands, routed) in distinct_face_fixtures() {
+            let all_served = vec![true; islands.len()];
+            let expected_all = selection_sort_distinct_faces(&islands, &all_served);
+            let mut work = 0usize;
+            let count =
+                unique_island_face_count(&islands, &mut scratch, &mut work, usize::MAX).unwrap();
+            assert_eq!(count, expected_all.len(), "{name}: distinct face count");
+            assert_eq!(
+                scratch, expected_all,
+                "{name}: buffer left in ascending distinct order"
+            );
+
+            let contact = contact_routed_to(&routed);
+            let parts = ContactParts::new(&contact, None);
+            let served = islands
+                .iter()
+                .map(|island| routed.contains(&island.id))
+                .collect::<Vec<_>>();
+            let expected_served = selection_sort_distinct_faces(&islands, &served);
+            let mut emitted = Vec::new();
+            let mut served_work = 0usize;
+            visit_served_owner_faces(
+                parts,
+                &islands,
+                &mut scratch,
+                &mut served_work,
+                usize::MAX,
+                |face_id| {
+                    emitted.push(face_id);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(emitted, expected_served, "{name}: served face visit order");
+        }
+    }
+
+    #[test]
+    fn the_batched_distinct_face_charge_is_linearithmic_where_the_sort_was_quadratic() {
+        // 1_024 distinct ids in descending order: the shape that made the
+        // Weeping Treant refuse at limit+1 (FU-8b defect A).
+        let islands = [SupportIsland {
+            id: 0,
+            face_ids: (0..1_024u32).rev().collect(),
+        }];
+        let mut scratch = Vec::new();
+        let mut work = 0usize;
+        let count =
+            unique_island_face_count(&islands, &mut scratch, &mut work, usize::MAX).unwrap();
+        assert_eq!(count, 1_024);
+        // Gather charges 1_024 inspections; the batch dedup charges
+        // 1_024 * (ceil(log2(1_025)) + 1) = 1_024 * (11 + 1) = 12_288.
+        assert_eq!(work, 1_024 + 12_288);
+        // The selection sort charged one unit per inner comparison across
+        // `distinct + 1` passes over every id.
+        const SELECTION_SORT_CHARGE: usize = 1_024 * (1_024 + 1);
+        assert!(work * 78 < SELECTION_SORT_CHARGE);
+    }
+
+    #[test]
+    fn the_batched_distinct_face_charge_accepts_the_cap_and_refuses_cap_minus_one() {
+        let islands = [SupportIsland {
+            id: 0,
+            face_ids: vec![4, 2, 2, 9],
+        }];
+        // Gather 4, then dedup 4 * (ceil(log2(5)) + 1) = 4 * (3 + 1) = 16.
+        const EXACT: usize = 4 + 16;
+        let mut scratch = Vec::new();
+        let mut work = 0usize;
+        assert_eq!(
+            unique_island_face_count(&islands, &mut scratch, &mut work, EXACT),
+            Ok(3)
+        );
+        assert_eq!(work, EXACT);
+        let mut work = 0usize;
+        assert_eq!(
+            unique_island_face_count(&islands, &mut scratch, &mut work, EXACT - 1),
+            Err(SpecializedError::GateOperationLimit {
+                required: EXACT,
+                limit: EXACT - 1,
             })
         );
     }
@@ -6346,6 +7052,7 @@ mod tests {
 
         let mut physical = Vec::new();
         let mut owner_faces = Vec::new();
+        let mut scratch = Vec::new();
         let mut work = 0usize;
         assert_eq!(
             append_variant_load_inputs(
@@ -6356,6 +7063,7 @@ mod tests {
                 &reservations,
                 &mut physical,
                 &mut owner_faces,
+                &mut scratch,
                 &mut work,
                 reservations.len() - 1,
             ),
@@ -6376,6 +7084,7 @@ mod tests {
             &reservations,
             &mut physical,
             &mut owner_faces,
+            &mut scratch,
             &mut work,
             reservations.len(),
         )
@@ -6392,6 +7101,7 @@ mod tests {
                 &reservations[..1],
                 &mut physical,
                 &mut owner_faces,
+                &mut scratch,
                 &mut work,
                 0,
             ),
@@ -6409,6 +7119,13 @@ mod tests {
             proposal_bytes: 10,
             result_bytes: 20,
             matrix_bytes: 30,
+            // Re-pinned 2026-08-06 by record fix F6, which added this term to
+            // the retained total. Held at 0 so the boundary this test pins —
+            // exactly at the cap, and one byte over — stays the same pair of
+            // numbers it pinned before F6 (100 / 101). The term's own effect on
+            // the boundary is pinned separately by
+            // `the_shared_face_buffer_is_charged_against_the_gate_peak`.
+            face_scratch_bytes: 0,
             coverage_scratch_bytes: 40,
             coverage_nearest_bytes: 0,
             coverage_retained_bytes: 8,
@@ -6425,6 +7142,158 @@ mod tests {
                 required: 101,
                 limit: 100,
             })
+        );
+    }
+
+    /// Record fix F6 (2026-08-06). FU-8b fix (A) allocates one `Vec<u32>` per
+    /// gate batch and threads it through every distinct-face gather, but never
+    /// made it a term in the gate's byte bound: it was memory the gate held and
+    /// did not charge for. These pin that it is charged, that it is charged as
+    /// *retained* rather than phase-local, and that the number charged is the
+    /// islands' own `face_ids`.
+    #[test]
+    fn the_shared_face_buffer_is_charged_against_the_gate_peak() {
+        // Two islands, 3 + 5 face ids: 8 entries x 4 bytes x 2 for growth = 64.
+        // Duplicate ids across islands still count, because the gather copies
+        // before it dedups — the buffer really does hold both.
+        let islands = [
+            SupportIsland {
+                id: 1,
+                face_ids: vec![7, 8, 9],
+            },
+            SupportIsland {
+                id: 2,
+                face_ids: vec![7, 8, 9, 4, 5],
+            },
+        ];
+        assert_eq!(island_face_scratch_bytes(&islands), Ok(64));
+        assert_eq!(island_face_scratch_bytes(&[]), Ok(0));
+
+        let base = GatePeakUsage {
+            proposal_bytes: 10,
+            result_bytes: 20,
+            matrix_bytes: 30,
+            face_scratch_bytes: 0,
+            coverage_scratch_bytes: 40,
+            coverage_nearest_bytes: 0,
+            coverage_retained_bytes: 8,
+            load_scratch_bytes: 32,
+        };
+        // Without the term, the batch fits a 100-byte cap exactly.
+        assert_eq!(check_gate_peak(base, 100), Ok(100));
+        let charged = GatePeakUsage {
+            face_scratch_bytes: island_face_scratch_bytes(&islands).expect("scratch bytes"),
+            ..base
+        };
+        // With it, the requirement rises by exactly the buffer's bound, and the
+        // same cap now refuses. The term is genuinely part of the bound, not
+        // decoration.
+        assert_eq!(
+            check_gate_peak(charged, 100),
+            Err(SpecializedError::GatePeakByteLimit {
+                required: 164,
+                limit: 100,
+            })
+        );
+        assert_eq!(check_gate_peak(charged, 164), Ok(164));
+
+        // Retained, not phase-local. With every phase term zeroed the whole
+        // requirement is the retained set, and it still carries the 64 — the
+        // buffer is charged whichever phase turns out to be the widest.
+        let retained_only = GatePeakUsage {
+            coverage_scratch_bytes: 0,
+            coverage_nearest_bytes: 0,
+            coverage_retained_bytes: 0,
+            load_scratch_bytes: 0,
+            ..charged
+        };
+        assert_eq!(check_gate_peak(retained_only, usize::MAX), Ok(124));
+        // 10 + 20 + 30 = 60 without it, so the whole difference is the buffer.
+        assert_eq!(
+            check_gate_peak(
+                GatePeakUsage {
+                    face_scratch_bytes: 0,
+                    ..retained_only
+                },
+                usize::MAX
+            ),
+            Ok(60)
+        );
+    }
+
+    /// Record fix F9 (2026-08-06). FU-8b fix (A) left a *third* shared
+    /// distinct-face buffer uncharged, in `working_load_inputs` — the same
+    /// omission F6 fixed on the gate side, on the path taken after the gate
+    /// accepts. These pin that the accepted-load byte bound now carries it, and
+    /// that it is the islands' own `face_ids` that price it.
+    #[test]
+    fn the_shared_face_buffer_is_charged_against_the_load_scratch_bound() {
+        // The same two islands the gate test uses: 3 + 5 face ids, 8 entries x
+        // 4 bytes x 2 for growth = 64. Both paths price the buffer from the
+        // same `islands` slice through `island_face_scratch_bytes`, so the
+        // number is the same number.
+        let islands = [
+            SupportIsland {
+                id: 1,
+                face_ids: vec![7, 8, 9],
+            },
+            SupportIsland {
+                id: 2,
+                face_ids: vec![7, 8, 9, 4, 5],
+            },
+        ];
+
+        let base = LoadScratchUsage {
+            retained_bytes: 60,
+            finalizer_scratch_bytes: 40,
+            face_scratch_bytes: 0,
+        };
+        // Pre-F9 arithmetic: retained + finalizer only, fitting a 100-byte cap
+        // exactly. Held at 0 so this pins the same pair of numbers the inline
+        // check pinned before F9 (100 accepts, 101 would not).
+        assert_eq!(check_load_scratch(base, 100), Ok(100));
+        assert_eq!(
+            check_load_scratch(
+                LoadScratchUsage {
+                    retained_bytes: 61,
+                    ..base
+                },
+                100
+            ),
+            Err(GenericPerceptionError::LoadScratchLimit {
+                required: 101,
+                limit: 100,
+            }
+            .into())
+        );
+
+        // With the term, the requirement rises by exactly the buffer's bound
+        // and the same cap refuses. The term is part of the bound, not
+        // decoration.
+        let charged = LoadScratchUsage {
+            face_scratch_bytes: island_face_scratch_bytes(&islands).expect("scratch bytes"),
+            ..base
+        };
+        assert_eq!(
+            check_load_scratch(charged, 100),
+            Err(GenericPerceptionError::LoadScratchLimit {
+                required: 164,
+                limit: 100,
+            }
+            .into())
+        );
+        assert_eq!(check_load_scratch(charged, 164), Ok(164));
+        // No islands, no charge: the term is the islands' `face_ids` and
+        // nothing else.
+        assert_eq!(
+            check_load_scratch(
+                LoadScratchUsage {
+                    face_scratch_bytes: island_face_scratch_bytes(&[]).expect("scratch bytes"),
+                    ..base
+                },
+                100
+            ),
+            Ok(100)
         );
     }
 
@@ -6485,11 +7354,13 @@ mod tests {
             face_ids: vec![3],
         }];
         let mut work = 0usize;
+        let mut scratch = Vec::new();
         let owner_faces = variant_specialized_owner_face_count(
             &contacts,
             None,
             &[],
             &islands,
+            &mut scratch,
             &mut work,
             usize::MAX,
         )
@@ -6505,6 +7376,7 @@ mod tests {
             &[],
             &mut physical,
             &mut specialized_owner_faces,
+            &mut scratch,
             &mut fill_work,
             usize::MAX,
         )
@@ -6525,16 +7397,25 @@ mod tests {
             })
         );
 
-        let limits = SpecializedLimits::production(TEST_KNN_LIMITS);
+        let limits =
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
         let exact = gate_resource_plan(3, 2, 5, 7, 11, limits).unwrap();
         assert_eq!(exact.variants, 3);
         assert_eq!(exact.operations, 140);
 
         let mut at_cap = limits;
+        // Re-pinned 2026-08-06 (FU-8b batch-product caps): `exact.operations` is 140
+        // on this fixture, far below K_G x (5 + 1) x (3 + 1) = 1,536, so with the
+        // coefficient live the cap would never be the floor and the cap-minus-one
+        // refusal could not be expressed.  The coefficient is disabled here so the
+        // test keeps pinning what it was written to pin, the exact flat bound and
+        // its one-unit-past refusal; the rule itself is pinned in
+        // `tests/resource_cap_policy.rs`.
+        at_cap.gate_work_per_batch_unit = 0;
         at_cap.max_gate_variants = exact.variants;
         at_cap.max_gate_vector_bytes = exact.vector_bytes;
         at_cap.max_gate_contact_matrix_bytes = exact.contact_window_bytes;
-        at_cap.max_gate_operations = exact.operations;
+        at_cap.max_gate_operations_floor = exact.operations;
         assert_eq!(gate_resource_plan(3, 2, 5, 7, 11, at_cap), Ok(exact));
 
         let mut below = at_cap;
@@ -6565,7 +7446,7 @@ mod tests {
             })
         );
         below = at_cap;
-        below.max_gate_operations -= 1;
+        below.max_gate_operations_floor -= 1;
         assert_eq!(
             gate_resource_plan(3, 2, 5, 7, 11, below),
             Err(SpecializedError::GateOperationLimit {
@@ -6706,7 +7587,7 @@ mod tests {
             &[matching, other_owner, exact_other_owner],
             &layers,
             0.2,
-            SpecializedLimits::production(TEST_KNN_LIMITS),
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work()),
         )
         .unwrap();
         assert!(dispositions[0].covered);
@@ -6742,7 +7623,7 @@ mod tests {
             &mut physical,
             &layers,
             0.2,
-            SpecializedLimits::production(TEST_KNN_LIMITS),
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work()),
             &mut MergeAllocationTelemetry::default(),
         )
         .unwrap();
@@ -6806,7 +7687,10 @@ mod tests {
                 &mut physical,
                 &layers,
                 0.2,
-                SpecializedLimits::production(TEST_KNN_LIMITS),
+                SpecializedLimits::production(
+                    TEST_KNN_LIMITS,
+                    crate::specialized::test_batch_work()
+                ),
                 &mut MergeAllocationTelemetry::default(),
             )
             .unwrap(),
@@ -6911,7 +7795,7 @@ mod tests {
             &generic,
             &regular,
             &selection_config,
-            SpecializedLimits::production(TEST_KNN_LIMITS),
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work()),
         )
         .map_err(|error| format!("required {name} specialized fixture failed: {error}"))
     }
@@ -6964,7 +7848,7 @@ mod tests {
             &generic,
             &regular,
             &selection_config,
-            SpecializedLimits::production(TEST_KNN_LIMITS),
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work()),
         )
         .map_err(|error| format!("required {name} specialized fixture failed: {error}"))?;
         Ok((mesh, generic, plan))
@@ -7211,7 +8095,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("{error}"));
         let digest = plan.digest();
         let mut changed_limits = plan.clone();
-        changed_limits.limits_authority.max_load_operations += 1;
+        changed_limits.limits_authority.max_load_operations_floor += 1;
         assert_ne!(changed_limits.digest(), digest);
         assert!(matches!(
             changed_limits.begin_regular_edit(),
@@ -7287,7 +8171,7 @@ mod tests {
             &generic,
             &regular_only.islands,
             &[],
-            SpecializedLimits::production(TEST_KNN_LIMITS),
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work()),
         )
         .expect("required zero-child fixture can form a regular load input");
         regular_only.load_partition = finalize_specialized_load_partition(
@@ -7297,9 +8181,13 @@ mod tests {
             &inputs.contacts,
             &inputs.specialized_owner_faces,
             LoadFinalizeLimits {
-                max_scratch_bytes: SpecializedLimits::production(TEST_KNN_LIMITS)
-                    .max_load_scratch_bytes,
-                max_operations: inputs.remaining_load_operations,
+                max_scratch_bytes: SpecializedLimits::production(
+                    TEST_KNN_LIMITS,
+                    crate::specialized::test_batch_work(),
+                )
+                .max_load_scratch_bytes,
+                max_operations_floor: inputs.remaining_load_operations,
+                operations_per_batch_unit: 0,
             },
         )
         .expect("required zero-child fixture can finalize a regular-only load partition");
@@ -7526,7 +8414,7 @@ mod tests {
         let mut telemetry = MergeAllocationTelemetry::default();
         let coalesced = coalesce_exact_regular_seats(
             &mut contacts,
-            SpecializedLimits::production(TEST_KNN_LIMITS),
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work()),
             &mut telemetry,
             0,
         )
@@ -7562,7 +8450,7 @@ mod tests {
         let before = contacts.clone();
         let again = coalesce_exact_regular_seats(
             &mut contacts,
-            SpecializedLimits::production(TEST_KNN_LIMITS),
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work()),
             &mut telemetry,
             0,
         )
@@ -7582,7 +8470,10 @@ mod tests {
             let mut telemetry = MergeAllocationTelemetry::default();
             let count = coalesce_exact_regular_seats(
                 &mut contacts,
-                SpecializedLimits::production(TEST_KNN_LIMITS),
+                SpecializedLimits::production(
+                    TEST_KNN_LIMITS,
+                    crate::specialized::test_batch_work(),
+                ),
                 &mut telemetry,
                 0,
             )
@@ -7624,7 +8515,7 @@ mod tests {
         let mut telemetry = MergeAllocationTelemetry::default();
         let coalesced = coalesce_exact_regular_seats(
             &mut contacts,
-            SpecializedLimits::production(TEST_KNN_LIMITS),
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work()),
             &mut telemetry,
             0,
         )
@@ -7651,7 +8542,8 @@ mod tests {
             test_regular_contact(position, other_normal, other_route, Vec::new()),
         ];
         let mut telemetry = MergeAllocationTelemetry::default();
-        let mut limits = SpecializedLimits::production(TEST_KNN_LIMITS);
+        let mut limits =
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
         limits.max_merge_iterations = 1;
 
         // A caller that already spent the entire budget upstream (attach
@@ -7877,7 +8769,8 @@ mod tests {
         let regular =
             crate::select_contacts(&mesh, generic.candidates(), generic.islands(), &selection)
                 .unwrap();
-        let limits = SpecializedLimits::production(TEST_KNN_LIMITS);
+        let limits =
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
         let plan = prepare_specialized_contacts(
             &mesh,
             &perception,
@@ -8088,7 +8981,7 @@ mod tests {
         changed.max_load_scratch_bytes += 1;
         new_limit_mutations.push(changed);
         changed = limits;
-        changed.max_load_operations += 1;
+        changed.max_load_operations_floor += 1;
         new_limit_mutations.push(changed);
         changed = limits;
         changed.max_gate_peak_bytes += 1;

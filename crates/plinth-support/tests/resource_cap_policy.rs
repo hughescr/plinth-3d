@@ -276,3 +276,239 @@ fn a_scaled_cap_never_becomes_unbounded_and_never_wraps() {
         assert!(grid >= grid_floor && grid != usize::MAX);
     }
 }
+
+// ---------------------------------------------------------------------------
+// The two batch-product-scaled specialized caps (FU-8b, 2026-08-06).
+//
+// These scale on the *batch* the stage was handed, not on the face count, so
+// their shapes are stated as measured `(rows, columns)` pairs rather than
+// derived from a mesh. Every number below is either a measurement of record or
+// a derivation from one; none is a copied bound.
+// ---------------------------------------------------------------------------
+
+/// Gate batch shapes `(coverage_samples, contacts)` measured on the seven
+/// reachable corpus models, 2026-08-06, instrumented release run.
+const CORPUS_GATE_BATCHES: [(&str, usize, usize); 7] = [
+    ("Sphere", 9_184, 7),
+    ("Cylinder", 509_056, 54),
+    ("make_box", 12_288, 11),
+    ("make_overhang_table", 50_176, 84),
+    ("make_toed_slab", 50_688, 73),
+    ("make_raking_blade", 35_008, 62),
+    ("make_thin_fin", 20_480, 18),
+];
+
+/// Load batch shapes `(rows, contacts)` from the same run — **not** the
+/// census's `T0_scaled_cap` rows, which answer a different question.
+///
+/// Provenance corrected 2026-08-06 (record fix F11). This docstring used to say
+/// only "from the same run", which reads as "the census row" and is wrong for
+/// three of the seven models. Measured at this tip, by instrumenting
+/// `census::record_scaled_cap` to print every `specialized_load_operations`
+/// checkpoint each model records and segmenting the stream on `census::reset`:
+///
+/// | model | checkpoints | first — what the census prints | widest | pinned here |
+/// |---|---|---|---|---|
+/// | `Sphere`              |    5 | (574, 7)  | (574, 7)  | (574, 7)  |
+/// | `Cylinder`            |    5 | (61, 54)  | (66, 54)  | (66, 54)  |
+/// | `make_box`            |    5 | (5, 11)   | (5, 11)   | (5, 11)   |
+/// | `make_overhang_table` |    5 | (10, 84)  | (12, 84)  | (12, 84)  |
+/// | `make_toed_slab`      |    5 | (12, 73)  | (12, 73)  | (12, 73)  |
+/// | `make_raking_blade`   | 2851 | (13, 62)  | (13, 62)  | (13, 62)  |
+/// | `make_thin_fin`       |    5 | (3, 18)   | (3, 18)   | (6, 18)   |
+///
+/// Every model plans its load stage several times per run, and
+/// `record_scaled_cap` keeps exactly one row per cap kind: the one with the
+/// **widest materialization**, since that is the bound that decides whether the
+/// model is refused. Every corpus model materializes this cap **at the floor**,
+/// 2,000,000,000, at every checkpoint, so all of them tie — and on a tie
+/// `record_scaled_cap` keeps the incumbent, i.e. the **first** checkpoint
+/// rather than the widest. That, and only that, is why the census prints 61 for
+/// the Cylinder and 10 for `make_overhang_table` where this table pins 66 and
+/// 12. Both are real checkpoints of the same run; neither number is wrong.
+///
+/// The widest shape is the right one to pin here, because these constants exist
+/// to assert that no corpus batch is wide enough to lift the cap off its floor,
+/// and that claim has to be tested against the widest batch rather than the
+/// earliest one — which is what
+/// `the_batch_scaled_caps_are_the_flat_floor_for_every_corpus_batch_shape`
+/// does. If a future model ever leaves the floor, the census row and this table
+/// converge, because the tie that separates them is gone.
+///
+/// **`make_thin_fin` is the exception, and is NOT explained by the tie.** Its
+/// pinned 6 rows matches neither the census's 3 nor any of the five load
+/// checkpoints the instrumented run observed, all of which plan 3 rows. The
+/// pinned 18 contacts is right. 6 is conservative for what this table asserts —
+/// a wider batch than the model plans still materializes at the floor, so
+/// `the_batch_scaled_caps_are_the_flat_floor_for_every_corpus_batch_shape`
+/// passes either way and nothing downstream reads it — so it is left standing
+/// rather than silently re-pinned, and recorded here as unreconciled. Re-pin it
+/// to 3 only together with a run that states where the 6 came from.
+const CORPUS_LOAD_BATCHES: [(&str, usize, usize); 7] = [
+    ("Sphere", 574, 7),
+    ("Cylinder", 66, 54),
+    ("make_box", 5, 11),
+    ("make_overhang_table", 12, 84),
+    ("make_toed_slab", 12, 73),
+    ("make_raking_blade", 13, 62),
+    ("make_thin_fin", 6, 18),
+];
+
+/// The Weeping Treant's proposal-free gate batch and its stated demand.
+const TREANT_GATE_SAMPLES: usize = 405_146;
+const TREANT_CONTACTS: usize = 1_366;
+const TREANT_GATE_OPERATIONS_REQUIRED: usize = 12_714_828_544;
+/// Its load partition and stated demand, after FU-8b fix (B) stopped the row
+/// *prediction* counting `(owner, face)` pairs: the plan predicted 7,988,078
+/// rows and now states the 130,548 the builder had always produced — 16,627
+/// generic rows plus the 113,921 distinct faces of 7,971,451 pairs.
+///
+/// Re-pinned 2026-08-06 by record fix F1, from 134,368 to 130,548. The demand
+/// below is unchanged and was never in doubt; the row count paired with it
+/// was. One scratch-instrumented treant run printed `resource.rows = 130548`
+/// beside `resource.operations = 5402535619` at
+/// `finalize_specialized_load_partition`, and the census scaled-cap row prints
+/// the same `rows=130548` with `materialized=11421470912`. No 134,368-row load
+/// batch is planned anywhere in the corpus; had one been, it would have
+/// materialized 11,755,675,072 and taken the census's widest-per-kind slot.
+const TREANT_LOAD_ROWS: usize = 130_548;
+const TREANT_LOAD_OPERATIONS_REQUIRED: usize = 5_402_535_619;
+/// Its 39,223-proposal merge gate, on the *same* batch shape: the gate
+/// re-evaluates every contact once per proposal variant, so the plan is
+/// quadratic in the batch. FU-8c; this cap must keep refusing it.
+const TREANT_MERGE_GATE_OPERATIONS_REQUIRED: usize = 21_755_124_103_146;
+
+fn specialized_production_limits() -> plinth_support::specialized::SpecializedLimits {
+    plinth_support::specialized::SpecializedLimits::production(
+        KnnBatchLimits {
+            max_source_points: 1,
+            max_query_points: 1,
+            max_neighbors: 1,
+            max_logical_peak_bytes: 1,
+            max_work: 1,
+        },
+        plinth_support::specialized::SpecializedBatchWork::registered()
+            .expect("registered support batch coefficients"),
+    )
+}
+
+fn batch_floors_and_coefficients() -> (usize, usize, usize, usize) {
+    let policy = m0_constants()
+        .expect("M0 constants registry must construct")
+        .support_resource_cap_policy();
+    (
+        usize::try_from(policy.gate_max_operations_floor().diagnostic().get()).unwrap(),
+        usize::try_from(*policy.gate_max_work_per_batch_unit().value()).unwrap(),
+        usize::try_from(policy.load_max_operations_floor().diagnostic().get()).unwrap(),
+        usize::try_from(*policy.load_max_work_per_batch_unit().value()).unwrap(),
+    )
+}
+
+#[test]
+fn the_batch_product_coefficients_are_the_rule_applied_to_their_own_observations() {
+    let (_, gate_per_unit, _, load_per_unit) = batch_floors_and_coefficients();
+    let gate_units = (TREANT_GATE_SAMPLES + 1) * (TREANT_CONTACTS + 1);
+    let gate_observed = TREANT_GATE_OPERATIONS_REQUIRED.div_ceil(gate_units);
+    assert_eq!(
+        gate_per_unit,
+        (2 * gate_observed as u64).next_power_of_two() as usize,
+        "the gate coefficient must stay next_power_of_two(2 * observed)"
+    );
+    let load_units = (TREANT_LOAD_ROWS + 1) * (TREANT_CONTACTS + 1);
+    let load_observed = TREANT_LOAD_OPERATIONS_REQUIRED.div_ceil(load_units);
+    assert_eq!(
+        load_per_unit,
+        (2 * load_observed as u64).next_power_of_two() as usize,
+        "the load coefficient must stay next_power_of_two(2 * observed)"
+    );
+}
+
+#[test]
+fn the_batch_scaled_caps_are_the_flat_floor_for_every_corpus_batch_shape() {
+    let limits = specialized_production_limits();
+    let (gate_floor, _, load_floor, _) = batch_floors_and_coefficients();
+    for (name, samples, contacts) in CORPUS_GATE_BATCHES {
+        assert_eq!(
+            limits.gate_operation_limit(samples, contacts),
+            gate_floor,
+            "{name}: the batch rule must leave the corpus gate cap bit-identical to the floor"
+        );
+    }
+    for (name, rows, contacts) in CORPUS_LOAD_BATCHES {
+        assert_eq!(
+            limits.load_operation_limit(rows, contacts),
+            load_floor,
+            "{name}: the batch rule must leave the corpus load cap bit-identical to the floor"
+        );
+    }
+}
+
+#[test]
+fn the_treant_batch_scaled_caps_admit_its_measured_demands_with_headroom() {
+    let limits = specialized_production_limits();
+    let (gate_floor, gate_per_unit, load_floor, load_per_unit) = batch_floors_and_coefficients();
+
+    let gate_cap = limits.gate_operation_limit(TREANT_GATE_SAMPLES, TREANT_CONTACTS);
+    assert_eq!(
+        gate_cap,
+        gate_per_unit * (TREANT_GATE_SAMPLES + 1) * (TREANT_CONTACTS + 1)
+    );
+    assert!(
+        gate_cap > gate_floor,
+        "the treant must leave the gate floor"
+    );
+    assert!(
+        TREANT_GATE_OPERATIONS_REQUIRED <= gate_cap,
+        "the measured proposal-free gate demand must be admitted"
+    );
+    assert!(
+        TREANT_GATE_OPERATIONS_REQUIRED > gate_floor,
+        "and it must be a demand the flat floor really did refuse"
+    );
+
+    let load_cap = limits.load_operation_limit(TREANT_LOAD_ROWS, TREANT_CONTACTS);
+    assert_eq!(
+        load_cap,
+        load_per_unit * (TREANT_LOAD_ROWS + 1) * (TREANT_CONTACTS + 1)
+    );
+    assert!(
+        load_cap > load_floor,
+        "the treant must leave the load floor"
+    );
+    assert!(
+        TREANT_LOAD_OPERATIONS_REQUIRED <= load_cap,
+        "the measured load demand must be admitted"
+    );
+    assert!(
+        TREANT_LOAD_OPERATIONS_REQUIRED > load_floor,
+        "and it must be a demand the flat floor really did refuse"
+    );
+}
+
+#[test]
+fn the_batch_scaled_gate_cap_still_refuses_the_proposal_quadratic() {
+    let limits = specialized_production_limits();
+    // Same batch shape as the admitted one above: only the proposal count
+    // differs, and the proposal count is deliberately not part of the scale.
+    let gate_cap = limits.gate_operation_limit(TREANT_GATE_SAMPLES, TREANT_CONTACTS);
+    assert!(
+        TREANT_MERGE_GATE_OPERATIONS_REQUIRED > gate_cap,
+        "a gate that re-evaluates the whole batch once per merge proposal is \
+         superlinear in the batch and must stay refused (FU-8c)"
+    );
+    // Not marginally: the refused plan is three orders of magnitude over.
+    assert!(TREANT_MERGE_GATE_OPERATIONS_REQUIRED / gate_cap > 500);
+}
+
+#[test]
+fn a_batch_scaled_cap_never_becomes_unbounded_and_never_wraps() {
+    let limits = specialized_production_limits();
+    let (gate_floor, _, load_floor, _) = batch_floors_and_coefficients();
+    // An empty batch is the floor, never zero: a zero cap would refuse every
+    // batch including the empty one.
+    assert_eq!(limits.gate_operation_limit(0, 0), gate_floor);
+    assert_eq!(limits.load_operation_limit(0, 0), load_floor);
+    // An absurd batch saturates rather than wrapping to something tiny.
+    assert!(limits.gate_operation_limit(usize::MAX, usize::MAX) >= gate_floor);
+    assert!(limits.load_operation_limit(usize::MAX, usize::MAX) >= load_floor);
+}

@@ -95,7 +95,8 @@ use crate::{
     select_contacts_baseline,
     specialized::{
         fill_route_points_nearest, plan_route_points_nearest, prepare_specialized_contacts,
-        CoverageRoutePoint, SpecializedContactPlan, SpecializedError, SpecializedLimits,
+        CoverageRoutePoint, SpecializedBatchWork, SpecializedContactPlan, SpecializedError,
+        SpecializedLimits,
     },
     transient::{transient_report, TransientError, TransientReport},
     validate_perception_input, BuildFrame, ContactSelectionConfig, ContactSelectionError,
@@ -226,7 +227,11 @@ impl SupportPreparationLimits {
             perception_limits: GenericPerceptionLimits::production(knn),
             coverage_samples_max_virtual_cells: 2_000_000,
             coverage_score_matrix_max_entries: 65_536,
-            specialized_limits: SpecializedLimits::production(knn),
+            specialized_limits: SpecializedLimits::production(
+                knn,
+                SpecializedBatchWork::registered()
+                    .map_err(|error| SupportPreparationLimitsError::BatchWork(error.to_string()))?,
+            ),
             construction_limits: ContactConstructionLimits::new(
                 1_000_000,
                 10_000_000,
@@ -367,6 +372,8 @@ pub enum SupportPreparationLimitsError {
     RegisteredConstantsUnavailable(String),
     #[error("registered support resource cap {value} is unrepresentable as usize")]
     CapUnrepresentable { value: u64 },
+    #[error("registered support batch-work coefficients are unusable: {0}")]
+    BatchWork(String),
     #[error("support production candidate limits are invalid: {0}")]
     Candidate(String),
     #[error("support production construction limits are invalid")]
@@ -3787,7 +3794,7 @@ mod tests {
             &[],
             GenericPerceptionLimits::production(TEST_KNN_LIMITS),
             selection,
-            SpecializedLimits::production(TEST_KNN_LIMITS),
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work()),
             ContactConstructionLimits::production(),
             brace_penetration_limits(),
             RaftLimits::new(100_000, 100_000, 200_000, 128 * 1024 * 1024),
@@ -4723,7 +4730,10 @@ mod tests {
                 &[],
                 GenericPerceptionLimits::production(TEST_KNN_LIMITS),
                 selection,
-                SpecializedLimits::production(TEST_KNN_LIMITS),
+                SpecializedLimits::production(
+                    TEST_KNN_LIMITS,
+                    crate::specialized::test_batch_work(),
+                ),
                 ContactConstructionLimits::production(),
                 brace_penetration_limits(),
                 RaftLimits::new(100_000, 100_000, 200_000, 128 * 1024 * 1024),

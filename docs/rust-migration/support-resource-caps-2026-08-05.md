@@ -22,6 +22,20 @@ resource cap:
 Preparation: Perception(PointIndex("kNN work requires 298667520; limit is 100000000"))
 ```
 
+> **CORRECTED 2026-08-06 — dated addendum, the sentence above is left standing.**
+> "429,120 support faces **after decimation and hollowing**" attributes the count to two
+> stages that did not produce it. **429,120 is the raw STL triangle count** of
+> `corpus/models/Weeping Treant v1.2.stl` (`od -An -tu4 -j80 -N4` on the file). Decimation
+> is a **no-op** on this model — every reduced candidate fails `topology_not_increased`, so
+> `plinth_decimate::run` returns the original mesh unchanged — and the census hollows via
+> `HollowedModel::solid_decision`
+> (`crates/plinth-support/examples/embed_incidence_census.rs:93-95`), which decides *solid*
+> and moves no triangle. **Neither stage touched the count.** Nothing else in this document
+> depends on the attribution: every measurement below was taken on the 429,120-face mesh,
+> which is what the pipeline actually hands the support stage. Evidence:
+> [`decimation-design-2026-08-06.md`](decimation-design-2026-08-06.md) §0, and owner ruling
+> R6 in `CURRENT-STATUS.md`.
+
 Not one of the support pipeline's ~35 execution caps had a measurement of
 record. `git log -S` puts them all in Codex-era commits **73e7c13** ("Assemble
 preparation resource policy") and **c2b3b98** ("repair specialized verifier
@@ -220,6 +234,17 @@ of them is raised here.
   operations; a scratch `BTreeSet` drop-in with identical output measured
   **142,646**, a ~117,000× reduction. **This cap needs no raise; it needs the
   quadratic removed.**
+  - *Follow-up, 2026-08-06 — FU-8b fix (A) landed (`0bdec0c`).* The quadratic is
+    gone: both gatherers now gather each island once into one reused buffer and
+    `sort_unstable` + `dedup` in a single batch, charging `n` for the gather
+    plus the `n·(⌈log₂(n+1)⌉+1)` sort/dedup comparison bound instead of
+    `n·(distinct+1)`. The treant's refusal became a **stated** demand,
+    `GateOperationLimit { required: 12714828544, limit: 2000000000 }` — 3.97 %
+    above this study's instrumented exact figure of 12,229,532,794, the
+    difference being the new sort-bound charge over the prototype's flat
+    one-unit-per-id. The cap still stands unraised: what it refuses now is
+    other gate work, and its measured bound stays deferred until (b) and (c)
+    land. Peak RSS for that census row: 2.45 GB. Single specimen, n = 1.
 - **`max_load_operations` (2 × 10⁹), `max_load_scratch_bytes` (512 MiB),
   `max_gate_peak_bytes` (1 GiB) stand.** With caps raised, the treant reaches
   `finalize_specialized_load_partition` and builds **7,988,078** load-eligibility
@@ -232,6 +257,23 @@ of them is raised here.
   **4,127 of 4,127** stack samples in that one frame. **Here the caps are doing
   their job**: they are catching a real defect. Raising them would convert a
   fast, honest refusal into a multi-hour hang.
+
+> **CORRECTED 2026-08-06 (record fix F3) — dated addendum, the bullet above is left
+> standing.** "**builds** 7,988,078 load-eligibility rows … because
+> `specialized_owner_faces` pairs are appended without grouping" describes a build that
+> never happened. At `eb36358`, `build_load_eligibility`
+> (`crates/plinth-support/src/perception.rs`) was already a pure
+> `BTreeMap<u32, BTreeSet<LoadOwner>>` collapse keyed on `face_id`, emitting exactly one
+> row per distinct face; there were no ungrouped appends in it, then or now. **7,988,078
+> was a *predicted* row count**, computed inside `specialized_load_resource_plan` as
+> `plan.load_eligibility.len() + specialized_face_count` where `specialized_face_count`
+> had been handed the `(owner, face)` **pair** count — 16,627 + 7,971,451 on the treant.
+> FU-8b fix (B) corrected the prediction, not the data: the same function now states
+> 16,627 + 113,921 = **130,548**, and the row set the builder produces is unchanged. The
+> ~2.95 × 10¹¹ charge and the caps' verdict on it are unaffected — the charge was computed
+> from the inflated prediction, so what the caps refused was an inflated *plan*, which is
+> still exactly what a resource plan is for. The uncharged O(n²) rescan and the 4,127/4,127
+> stack samples were real and were defect (C).
 
 The remaining work is algorithmic, not policy. Constants for a future scaled
 gate/load bound must be set on **post-fix** dimensions; today's numbers are
@@ -256,3 +298,195 @@ CENSUS T0_stage_error  Weeping Treant v1.2
 It clears perception, clears the candidate-surface grid, and is refused at the
 specialized gate stage — quickly, with a typed error, at 2.5 GB peak RSS. That
 refusal is correct and is tracked as algorithm work, not as a cap to raise.
+
+## 7. FU-8b post-fix measurement (2026-08-06)
+
+Dated addendum. §2's gate and load figures were charges against defects, not
+statements of demand; FU-8b removed the three quadratics behind them
+(`0bdec0c`, `1706c5d`, `e0a4bed`) and the model was then re-measured on the
+same corpus harness, release build, uncommitted capwatch instrumentation
+reverted before every recorded run.
+
+### 7.1 What the treant actually demands
+
+| quantity | pre-fix | post-fix | verdict |
+| --- | --- | --- | --- |
+| specialized gate operations, proposal-free batch | `required: 2000000001` — the counter tripping at `limit + 1` inside a selection sort, not a demand | **12,714,828,544** stated | honest, linear in the batch |
+| specialized load operations | 2.95e11 predicted, over 7,988,078 rows | **5,402,535,619** over 134,368 rows | honest; fix (B) collapsed the row count 59.5× |
+| load scratch bytes | over the 512 MB cap | **144,753,256** | under cap, no change needed |
+| gate peak bytes | unmeasured | **215,061,920** | under the 1 GB cap, no change needed |
+| specialized gate operations, 39,223-proposal merge batch | never reached (the 16-hour hang was defect (C)) | **21,755,124,103,146** | **superlinear in the batch — refused, FU-8c** |
+| peak RSS | — | **2.84 GB** | far under the 100 GB machine ceiling |
+| wall clock to refusal | ~16 h (hang) | **81.5 s** | inside the 600 s timebox |
+
+> **CORRECTED 2026-08-06 (record fixes F1, F2, F3) — dated addendum, the table above is
+> left standing.** The "specialized load operations" row pairs a real demand with the
+> wrong batch and states a collapse ratio that follows from the mismatch.
+>
+> - **The demand is right; the row count is not.** 5,402,535,619 is
+>   `finalize_specialized_load_partition`'s planned `resource.operations`, and that plan
+>   states **130,548** rows, not 134,368 — `16,627` generic load-eligibility rows plus the
+>   `113,921` distinct faces of `7,971,451` specialized `(owner, face)` pairs. One
+>   scratch-instrumented treant run printed `rows=130548` and `operations=5402535619`
+>   together at that checkpoint. §7.4's own census transcript prints the same
+>   `rows=130548`. **No 134,368-row load batch is planned anywhere**: had one been, it
+>   would have materialized `64 × 134,369 × 1,367 = 11,755,675,072` and displaced the
+>   `11,421,470,912` the census records, since `record_scaled_cap` keeps only the widest
+>   materialization per kind.
+> - **"collapsed the row count 59.5×" is the same error carried forward.** The predicted
+>   row count fell from 7,988,078 to 130,548, i.e. **61.2×** — and it was a *prediction*
+>   that fell, not a row set (record fix F3; see the §2 addendum above).
+> - **Headroom.** 5,402,535,619 against the materialized 11,421,470,912 is **2.11×**, and
+>   that pairing is now consistent: both numbers are stated over the same 130,548 × 1,366
+>   batch.
+
+> **CORRECTED 2026-08-06 (record fix F7) — dated addendum, the table above is left
+> standing.** Its "gate peak bytes" row records **215,061,920 B**, which was the peak this
+> section measured at tip `d82c895`. Record fix F6 (`23d929d`) then made the gate batch's
+> shared distinct-face `Vec<u32>` a term of `GatePeakUsage` — FU-8b fix (A) had allocated
+> it once per batch and threaded it through every gather without ever charging it — so the
+> number that governs on this branch is larger:
+>
+> | quantity | at `d82c895` | at `23d929d` (governs) |
+> |---|---|---|
+> | treant gate peak bytes | 215,061,920 | **216,203,088** = 215,061,920 + 1,141,168 face-scratch |
+> | face-scratch term | not charged | 570,584 B of live face ids, charged as 1,141,168 B after the doubling for `Vec` growth slack |
+> | `max_gate_peak_bytes` | 1,073,741,824 | 1,073,741,824, **unchanged** |
+> | verdict | under cap, no change needed | still **under** cap, no change needed — 20.1 % of the bound |
+>
+> The term is 0.53 % of the peak and 0.11 % of the cap, and it is a worst-case **capacity
+> bound**, not an observation. Charging it flipped no refusal: the census re-run at
+> `23d929d` kept all seven frozen OD-8 digests byte-identical, kept the treant's single
+> stage error verbatim at
+> `Preparation: Specialized(GateOperationLimit { required: 21755124103146, limit: 35445500736 })`,
+> and left every corpus scaled-cap row `at_floor=true`. No cap, coefficient or digest moves;
+> only this observation does.
+
+### 7.2 The rule that was set, and the scale it uses
+
+Gate and load work do **not** track face count. The corpus proves it: 24-face
+`make_raking_blade` charges 612,887,212 gate operations while 429,120-face
+Weeping Treant charges 12,714,828,544 — a 20× spread over an 18,000× face
+spread. Scaling those two caps per-face, as §3.10.8 scales kNN work and
+parity-grid bytes, would have refused the small model and admitted anything at
+all on the large one.
+
+They scale instead on the **batch product** each stage is handed:
+
+```
+max_gate_operations = max(SUPPORT_SPECIALIZED_MAX_GATE_OPERATIONS,
+                          SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT
+                              x (coverage_samples + 1) x (contacts + 1))
+
+max_load_operations = max(SUPPORT_SPECIALIZED_MAX_LOAD_OPERATIONS,
+                          SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT
+                              x (rows + 1) x (contacts + 1))
+```
+
+Both coefficients come from the same rule as §3.10.8's,
+`next_power_of_two(2 x observed)`:
+
+| constant | wrapper | value | derivation |
+| --- | --- | --- | --- |
+| `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` | Measured (n = 1) | 23 | 12,714,828,544 / ((405,146 + 1) x (1,366 + 1) = 553,835,949) = 22.958, ceiling |
+| `SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT` | Derived | 64 | `next_power_of_two(2 x 23)` = `next_power_of_two(46)` |
+| `SUPPORT_LOAD_WORK_PER_BATCH_UNIT_OBSERVED` | Measured (n = 1) | 30 | 5,402,535,619 / ((134,368 + 1) x (1,366 + 1) = 183,682,423) = 29.41, ceiling |
+| `SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT` | Derived | 64 | `next_power_of_two(2 x 30)` = `next_power_of_two(60)` |
+
+> **CORRECTED 2026-08-06 (record fix F1) — dated addendum, the two load rows above are
+> left standing.** Their divisor came from the mis-paired 134,368; the registry now reads:
+>
+> | constant | wrapper | value | derivation |
+> | --- | --- | --- | --- |
+> | `SUPPORT_LOAD_WORK_PER_BATCH_UNIT_OBSERVED` | Measured (n = 1) | **31** | 5,402,535,619 / ((130,548 + 1) x (1,366 + 1) = 178,460,483) = 30.28, ceiling |
+> | `SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT` | Derived | **64** | `next_power_of_two(2 x 31)` = `next_power_of_two(62)` |
+>
+> **The coefficient does not move, and no cap materializes differently anywhere.**
+> `next_power_of_two` rounds 60 and 62 alike, so 64 stands, every corpus model stays at its
+> floor, and the treant's materialized load cap stays 11,421,470,912. Only the observation
+> and its stated derivation change. The gate rows are untouched: the gate observation's
+> 405,146-sample batch is the one the census prints.
+
+Both floors are the R5-registered inherited numbers, unchanged at 2,000,000,000
+and **not raised**: they are now the constant term of a rule rather than the
+whole cap.
+
+Owner ruling R4 applies unchanged: both observations rest on the Weeping Treant
+v1.2 alone, so both coefficients are **n = 1**, and FU-23's standing trigger
+covers them — a second large model is re-derived over both specimens, never
+inherited silently.
+
+### 7.3 Effect on the corpus — none, and the census prints it
+
+Every corpus model's batch product is far too small to leave the floor. The
+widest is the Cylinder's gate batch, `(509,056 + 1) x (54 + 1) = 27,998,135`,
+and `64 x 27,998,135 = 1,791,880,640 < 2,000,000,000`. All fourteen corpus
+materializations are therefore bit-identical to the pre-rule caps, and the
+census says so per model:
+
+```
+CENSUS T0_scaled_cap  Cylinder  kind=specialized_gate_operations
+       floor=2000000000 per_batch_unit=64 rows=509056 columns=54
+       materialized=2000000000 at_floor=true
+```
+
+`the_batch_scaled_caps_are_the_flat_floor_for_every_corpus_batch_shape` pins it
+over all seven models and both caps.
+
+**The Cylinder is the near case and it is worth recording as such.** At 89.6% of
+the floor it is the only corpus model within an order of magnitude of leaving
+it. A coefficient of 128 rather than 64 would move the Cylinder's gate cap off
+the floor and change a corpus model's materialized authority. The rule chose 64
+by derivation, not by fit, but the margin is thin enough that a future
+re-derivation must re-check this table rather than assume the floors still
+govern.
+
+### 7.4 Where the treant stands now
+
+```
+CENSUS T0_scaled_cap  Weeping Treant v1.2  kind=specialized_gate_operations
+       floor=2000000000 per_batch_unit=64 rows=405146 columns=1366
+       materialized=35445500736 at_floor=false
+CENSUS T0_scaled_cap  Weeping Treant v1.2  kind=specialized_load_operations
+       floor=2000000000 per_batch_unit=64 rows=130548 columns=1366
+       materialized=11421470912 at_floor=false
+CENSUS T0_stage_error Weeping Treant v1.2
+       Preparation: Specialized(GateOperationLimit { required: 21755124103146,
+                                                     limit: 35445500736 })
+```
+
+It now clears the proposal-free gate batch **and the whole load stage**, and is
+refused at the *merge* gate, on a demand 613× the coefficient. That is the cap
+doing its job rather than failing at it: the admitted batch is linear in its own
+shape, the refused one is quadratic in it, and the same constant separates them.
+
+The refusal is a **new** finding, not a cap to raise. `gate_resource_plan`
+prices a merge batch at `(samples + demands + 1) x (proposals x (contacts - 1) +
+contacts)`: the gate re-evaluates the entire contact set once per merge
+proposal, and the treant offers 39,223 proposals. No honest constant admits it —
+covering it would need a coefficient near 39,300, which would multiply every
+corpus model's cap by the same factor and take the Cylinder, `make_raking_blade`
+and several others off their floors. It is opened as **FU-8c** and is algorithm
+work of exactly the FU-8b kind: the proposal loop is a per-item rescan of a whole
+batch standing in for a batched evaluation.
+
+Out of scope and deliberately not touched: `finalize_load_rows` is a correctly
+charged dense contact-by-face nearest scan. Post-fix it costs 134,368 x 1,366 =
+1.8e8 row-contact pairs, not the 1.1e10 the pre-fix row count implied, and it
+runs inside the timebox.
+
+> **CORRECTED 2026-08-06 (record fixes F1, F2) — dated addendum, the block and paragraph
+> above are left standing.** Two things to state precisely.
+>
+> - **The census transcript above is the authority, and it says 130,548.** The headline
+>   figures elsewhere in this document (§7.1) paired that same 5,402,535,619 demand with
+>   134,368 rows and read a 2.1× headroom off the mismatched pair. Corrected: the demand
+>   and the `materialized=11421470912` bound are both stated over **130,548 rows × 1,366
+>   contacts**, and the headroom is **2.11×**. The transcript never needed correcting.
+> - **`finalize_load_rows` costs less than either figure.** Its `rows` is the *actual*
+>   extended eligibility, the union of the 16,627 generic rows and the 113,921 pair faces:
+>   **117,741** rows in one scratch-instrumented treant run, against the 130,548 the
+>   partition's plan predicts. The plan is deliberately an upper bound — it adds the two
+>   counts rather than unioning them, because the union does not exist yet when the bound
+>   is checked. So the scan costs 117,741 x 1,366 = **1.6e8** row-contact pairs, its plan
+>   charges 1.8e8, and both are far under the 1.1e10 the pre-fix prediction implied.

@@ -602,7 +602,7 @@ const fn bound_key(bound: BoundKind) -> &'static str {
 }
 
 #[test]
-fn evidence_and_placeholder_fixture_builds_one_260_entry_structural_batch() {
+fn evidence_and_placeholder_fixture_builds_one_264_entry_structural_batch() {
     let mut descriptors = component()
         .descriptors()
         .unwrap()
@@ -610,14 +610,14 @@ fn evidence_and_placeholder_fixture_builds_one_260_entry_structural_batch() {
         .collect::<Vec<_>>();
     descriptors.extend(M0EvidenceConstants::new().unwrap().descriptors().unwrap());
     let registry = ConstantsRegistry::build_batch(descriptors).unwrap();
-    assert_eq!(registry.len(), 260);
+    assert_eq!(registry.len(), 264);
     assert_eq!(
         registry
             .iter()
             .map(|descriptor| descriptor.id().as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        260
+        264
     );
 }
 

@@ -137,16 +137,29 @@ impl<'a> ScarAreaCapPolicy<'a> {
     }
 }
 
-/// Immutable typed authority for the support pipeline's two scaled execution
+/// Immutable typed authority for the support pipeline's four scaled execution
 /// caps.
 ///
 /// Like [`ScarAreaCapPolicy`] this is a view over the one M0 registry, not a
-/// second declaration set. Both caps take the same shape —
-/// `max(floor, per_face × support_mesh_face_count)` — so that a cap refuses
-/// work that is *superlinear in model size* rather than refusing large models.
-/// The floors are the inherited unmeasured constants and are `Placeholder`; the
-/// per-face coefficients are `Derived` from one instrumented Weeping Treant run
-/// by one stated rule, `next_power_of_two(2 × observed_per_face)`.
+/// second declaration set. All four caps take the same shape,
+/// `max(floor, coefficient × scale)`, so that a cap refuses work that is
+/// *superlinear in its own input* rather than refusing large models. The floors
+/// are the inherited unmeasured constants and are `Placeholder`; the
+/// coefficients are `Derived` from one instrumented Weeping Treant run by one
+/// stated rule, `next_power_of_two(2 × observed)`.
+///
+/// They differ only in what `scale` is, and that difference is itself measured:
+///
+/// * kNN work and parity-grid bytes scale on the **support mesh face count**,
+///   because both batches are built face by face.
+/// * Specialized gate and load operations scale on their own **batch product**
+///   — `(coverage_samples + 1) × (contacts + 1)` for the gate,
+///   `(rows + 1) × (contacts + 1)` for the load — because gate and load work
+///   does *not* track face count. 24-face `make_raking_blade` charges
+///   612,887,212 gate operations against 429,120-face Weeping Treant's
+///   12,714,828,544: a 20× spread over an 18,000× face spread. Scaling those
+///   two on faces would have refused the small model and admitted anything on
+///   the large one.
 ///
 /// These are execution-authority bounds only. They admit or refuse; they never
 /// alter a plan that is admitted, so they are result-inert and excluded from
@@ -157,6 +170,10 @@ pub struct SupportResourceCapPolicy<'a> {
     knn_max_work_per_face: &'a Derived<u64>,
     parity_grid_max_bytes_floor: &'a Placeholder<std::num::NonZeroU64>,
     parity_grid_max_bytes_per_face: &'a Derived<u64>,
+    gate_max_operations_floor: &'a Placeholder<std::num::NonZeroU64>,
+    gate_max_work_per_batch_unit: &'a Derived<u64>,
+    load_max_operations_floor: &'a Placeholder<std::num::NonZeroU64>,
+    load_max_work_per_batch_unit: &'a Derived<u64>,
 }
 
 impl<'a> SupportResourceCapPolicy<'a> {
@@ -166,14 +183,19 @@ impl<'a> SupportResourceCapPolicy<'a> {
         crate::DecisionId::from("SUPPORT-RESOURCE-CAP")
     }
 
-    /// Canonical registry IDs, floor then coefficient, kNN then parity grid.
+    /// Canonical registry IDs, floor then coefficient, kNN then parity grid
+    /// then specialized gate then specialized load.
     #[must_use]
-    pub const fn constant_ids(&self) -> [&'static str; 4] {
+    pub const fn constant_ids(&self) -> [&'static str; 8] {
         [
             "SUPPORT_KNN_MAX_WORK_FLOOR",
             "SUPPORT_KNN_MAX_WORK_PER_FACE",
             "SUPPORT_PARITY_GRID_MAX_BYTES_FLOOR",
             "SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE",
+            "SUPPORT_SPECIALIZED_MAX_GATE_OPERATIONS",
+            "SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT",
+            "SUPPORT_SPECIALIZED_MAX_LOAD_OPERATIONS",
+            "SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT",
         ]
     }
 
@@ -196,6 +218,31 @@ impl<'a> SupportResourceCapPolicy<'a> {
     pub const fn parity_grid_max_bytes_per_face(&self) -> &'a Derived<u64> {
         self.parity_grid_max_bytes_per_face
     }
+
+    /// The specialized gate operation floor: the whole cap for every model
+    /// whose batch product is small enough that the coefficient does not reach
+    /// it, which is every corpus model.
+    #[must_use]
+    pub const fn gate_max_operations_floor(&self) -> &'a Placeholder<std::num::NonZeroU64> {
+        self.gate_max_operations_floor
+    }
+
+    #[must_use]
+    pub const fn gate_max_work_per_batch_unit(&self) -> &'a Derived<u64> {
+        self.gate_max_work_per_batch_unit
+    }
+
+    /// The specialized load operation floor, on the same terms as
+    /// [`Self::gate_max_operations_floor`].
+    #[must_use]
+    pub const fn load_max_operations_floor(&self) -> &'a Placeholder<std::num::NonZeroU64> {
+        self.load_max_operations_floor
+    }
+
+    #[must_use]
+    pub const fn load_max_work_per_batch_unit(&self) -> &'a Derived<u64> {
+        self.load_max_work_per_batch_unit
+    }
 }
 
 impl M0Constants {
@@ -205,7 +252,7 @@ impl M0Constants {
 
         // Gather every declaration before one structural batch validation and
         // publication. Do not register constants incrementally.
-        let mut declarations = Vec::with_capacity(260);
+        let mut declarations = Vec::with_capacity(264);
         declarations.extend(evidence.descriptors()?);
         declarations.extend(placeholders.descriptors()?);
         let registry = ConstantsRegistry::build_batch(declarations)?;
@@ -276,6 +323,10 @@ impl M0Constants {
             knn_max_work_per_face: self.evidence.support_knn_max_work_per_face(),
             parity_grid_max_bytes_floor: self.placeholders.support_parity_grid_max_bytes_floor(),
             parity_grid_max_bytes_per_face: self.evidence.support_parity_grid_max_bytes_per_face(),
+            gate_max_operations_floor: self.placeholders.support_specialized_max_gate_operations(),
+            gate_max_work_per_batch_unit: self.evidence.support_gate_max_work_per_batch_unit(),
+            load_max_operations_floor: self.placeholders.support_specialized_max_load_operations(),
+            load_max_work_per_batch_unit: self.evidence.support_load_max_work_per_batch_unit(),
         }
     }
 }
@@ -283,7 +334,7 @@ impl M0Constants {
 /// The sole workspace-wide global constants initialization point.
 ///
 /// Its fallible result is itself published atomically: callers observe either
-/// the complete 260-entry registry and profile or the same construction error.
+/// the complete 264-entry registry and profile or the same construction error.
 static M0_CONSTANTS: LazyLock<Result<M0Constants, M0ConstantsError>> =
     LazyLock::new(M0Constants::build);
 

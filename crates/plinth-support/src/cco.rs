@@ -3999,7 +3999,7 @@ mod tests {
             &generic,
             &regular,
             &selection,
-            SpecializedLimits::production(TEST_KNN_LIMITS),
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work()),
         )
         .unwrap();
         let loads = plan.finalized_loads().unwrap().clone();
@@ -4027,7 +4027,7 @@ mod tests {
             &generic,
             &regular,
             &selection,
-            SpecializedLimits::production(TEST_KNN_LIMITS),
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work()),
             &geometry,
             ContactConstructionLimits::production(),
         )
