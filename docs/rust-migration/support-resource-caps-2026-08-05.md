@@ -381,6 +381,17 @@ reverted before every recorded run.
 > this table moves. Peak RSS 2.50 GB and 124 s to refusal also supersede the table's 2.84 GB
 > and 81.5 s **for the merge-gate run only**; both remain far inside the machine ceiling and
 > the timebox.
+>
+> **Note added 2026-08-06 on how much those seven digests prove.** Not as much as the
+> sentence above could be read to claim, and the census now says so with numbers. Six of the
+> seven reachable models offer the merge gate **zero** proposals, so their unchanged digests
+> are silent about FU-8c's per-proposal delta path — a model with no proposals never enters
+> it. `make_raking_blade` is the exception and offers **1,402** proposals over 23 gate
+> batches, so its unchanged digest `13278215294653054002` is the one that carries real
+> weight for that path. The proposal counts are a new additive census cell
+> (`merge_proposals=`, `gate_batches=`) on the `specialized_gate_operations` scaled-cap row;
+> full per-model table in `CURRENT-STATUS.md` (*Does any reachable model exercise the
+> proposal-delta path?*). The `at_floor=true` claim above is unaffected.
 
 ### 7.2 The rule that was set, and the scale it uses
 
@@ -544,6 +555,46 @@ batch standing in for a batched evaluation.
 > 5,173,199,556 as the floor of the repriced plan, never as the treant's price.
 > The residual 196,264,386,588 — 97.4 % of the demand — is opened as **FU-8d**.
 > Everything else in the addendum above stands unchanged.
+
+> **Owner/orchestrator ruling 2026-08-06 — what pins 201,480,535,329, and what
+> deliberately does not.** Recorded here because the verification of the two
+> corrections above asked for it directly: *should there be a test asserting the
+> 201,480,535,329 total, so a future change to the plan cannot move it
+> silently?*
+>
+> **Ruling: no pinned-literal test of the total, and the omission is
+> deliberate.** Three of the four terms above are count-derived and a test can
+> assert them from the batch's own shape; the fourth, `proposal work`
+> 196,264,386,588, is **caller-measured** — `plan_gate_nearest_batch` computes it
+> by running a delta pass per proposal over the treant's real coverage-sample
+> distribution, and no fixture in the test suite reproduces that distribution. A
+> test carrying 201,480,535,329 as a literal would therefore be a **copy of a
+> census transcript, not a derivation of it**: it would pass by agreeing with
+> itself, it would pin nothing about the plan, and the first legitimate FU-8d
+> change would have to edit the literal — which is exactly the "update the golden
+> until it's green" ritual the shape-derived tests exist to avoid.
+>
+> **What is of record instead**, and it is stronger for this term, not weaker:
+>
+> - The **census transcript in the dated record is the measurement of record**
+>   for the total. `CURRENT-STATUS.md` (*FU-8c fixed 2026-08-06*) carries it
+>   twice, independently measured at `a3308ec` and `8695398` and byte-identical,
+>   with the four-term decomposition beside it. A number that is measured is
+>   re-measured when it is doubted; it is not asserted.
+> - `fu8c_repriced_plan_admits_the_treant_gate_shape_under_the_unchanged_cap`
+>   **keeps its derivation-shaped expectations** and is not widened to the total.
+>   It pins the count-derived floor — `baseline_rows` + `face_rows` = 5,173,199,556
+>   — computed from the batch's stated shape, so a change to the *pricing formula*
+>   still fails it. Its name already says it covers the shape and not the batch;
+>   see the correction above.
+> - Equivalence of the per-proposal path is pinned where it can be pinned
+>   exactly, on `f64::to_bits`, by
+>   `fu8c_proposal_nearest_deltas_reproduce_the_full_sweep_bit_for_bit` and
+>   `fu8c_witness_demand_counts_reproduce_the_full_sweep`.
+>
+> The reading rule that follows: **treat 201,480,535,329 as a dated measurement,
+> not as an invariant.** FU-8d is expected to move it, and when it does the
+> record gets a new dated transcript rather than an edited literal.
 
 Out of scope and deliberately not touched: `finalize_load_rows` is a correctly
 charged dense contact-by-face nearest scan. Post-fix it costs 134,368 x 1,366 =
