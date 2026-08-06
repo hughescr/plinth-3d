@@ -2118,6 +2118,41 @@ fn accepted_load_header_preflight(
     Ok(())
 }
 
+/// Build the accepted-load inputs, within this stage's operation and byte
+/// bounds.
+///
+/// Byte semantics (record fix F9, 2026-08-06). This path allocates its own
+/// shared distinct-face `Vec<u32>` — the third such buffer FU-8b fix (A)
+/// introduced, after the two on the gate path that record fix F6 charged —
+/// and reuses it across `unique_island_face_count`,
+/// `variant_specialized_owner_face_count` and `append_variant_load_inputs`.
+/// It was charged against nothing: the `max_load_scratch_bytes` check priced
+/// only `retained_bytes` and the finalizer's own scratch. It is now the
+/// `face_scratch_bytes` term of [`LoadScratchUsage`], on the same terms the
+/// gate charges its own:
+///
+/// - The term is a **capacity bound, not an observation**. It is priced from
+///   the islands' `face_ids` lengths rather than from the buffer's own
+///   capacity, so it over-states rather than under-states whatever the buffer
+///   has actually grown to; see [`island_face_scratch_bytes`] for why it
+///   doubles. It is *not* a claim about ordering — the buffer is filled by the
+///   `unique_island_face_count` call above before this check runs, exactly as
+///   on the gate path.
+/// - The term is **small against the bound**, measured 2026-08-06 by
+///   instrumenting this check over the 8-model census. Each of the seven
+///   reachable corpus models enters here exactly once; the widest requirement
+///   is `Sphere`'s 78,408 B, of which the new term is 4,592 B, against the
+///   536,870,912 B cap — 0.015 % of it. The other six are between 1,344 B and
+///   11,680 B, with terms of 16 B to 488 B. Nothing is within four orders of
+///   magnitude of the cap, so no refusal can flip, and none did: the census was
+///   re-run at this tip with all seven frozen digests byte-identical and the
+///   treant's single stage error unchanged.
+/// - The **Weeping Treant never reaches this function** — its `Preparation`
+///   refuses at the merge gate first (FU-8c). The 144,753,256 B "load scratch
+///   bytes" figure of record for the treant is therefore *not* this check's; it
+///   belongs to `finalize_specialized_load_partition`'s own
+///   `LoadFinalizeLimits::max_scratch_bytes` check in `perception.rs`, which
+///   F9 does not touch. That figure is unaffected by this change.
 fn working_load_inputs(
     contacts: &[WorkingContact],
     generic: &GenericContactPlan,
@@ -2208,16 +2243,19 @@ fn working_load_inputs(
         .and_then(|remaining| remaining.checked_sub(island_face_work))
         .and_then(|remaining| remaining.checked_sub(finalizer.operations))
         .ok_or(SpecializedError::GateResourceOverflow)?;
-    let required_peak = retained_bytes
-        .checked_add(finalizer.scratch_bytes)
-        .ok_or(SpecializedError::GateResourceOverflow)?;
-    if required_peak > limits.max_load_scratch_bytes {
-        return Err(GenericPerceptionError::LoadScratchLimit {
-            required: required_peak,
-            limit: limits.max_load_scratch_bytes,
-        }
-        .into());
-    }
+    // Record fix F9 (2026-08-06): `face_scratch` above is the third buffer
+    // FU-8b fix (A) introduced and the last one to be charged. The gate's two
+    // are `GatePeakUsage::face_scratch_bytes` (record fix F6); this one is real
+    // memory this path holds across the count, the fill and the finalizer plan,
+    // and until now it was priced against no byte bound at all.
+    check_load_scratch(
+        LoadScratchUsage {
+            retained_bytes,
+            finalizer_scratch_bytes: finalizer.scratch_bytes,
+            face_scratch_bytes: island_face_scratch_bytes(islands)?,
+        },
+        limits.max_load_scratch_bytes,
+    )?;
     let mut physical = Vec::with_capacity(contacts.len());
     let mut specialized_owner_faces = Vec::with_capacity(owner_face_count);
     let mut fill_work = 0usize;
@@ -2843,7 +2881,7 @@ fn first_safe_proposal(
         .position(|vector| gate_not_worse(*vector, baseline))
 }
 
-/// Worst-case bytes the batch's shared distinct-face buffer may hold.
+/// Worst-case bytes a shared distinct-face buffer may hold.
 ///
 /// FU-8b fix (A) introduced one `Vec<u32>` per gate batch, reused by every
 /// distinct-face gather in it (see [`distinct_faces_in_place`]).  It was
@@ -2851,6 +2889,14 @@ fn first_safe_proposal(
 /// [`GatePeakUsage`]; record fix F6 (2026-08-06) makes it one, so the gate's
 /// byte bound covers every allocation the gate holds rather than every
 /// allocation someone remembered.
+///
+/// Record fix F9 (2026-08-06) applies the same term to the **accepted-load**
+/// bound.  Fix (A) created a *third* such buffer, in [`working_load_inputs`],
+/// which is charged against no byte bound at all: that path checks only the
+/// retained contacts and pairs plus the finalizer's own scratch against
+/// `max_load_scratch_bytes`.  It is now [`LoadScratchUsage::face_scratch_bytes`]
+/// there.  Both callers hand this function the same `islands` slice and get the
+/// same bound, because both fill their buffer the same way.
 ///
 /// The bound is the largest single gather the batch can perform.
 /// `unique_island_face_count` gathers *every* island's `face_ids` before
@@ -2909,6 +2955,40 @@ fn check_gate_peak(usage: GatePeakUsage, limit: usize) -> Result<usize, Speciali
     let required = coverage_phase.max(coverage_nearest_phase).max(load_phase);
     if required > limit {
         return Err(SpecializedError::GatePeakByteLimit { required, limit });
+    }
+    Ok(required)
+}
+
+/// What the **accepted-load** build holds at once, checked against
+/// `max_load_scratch_bytes` by [`check_load_scratch`].
+///
+/// Record fix F9 (2026-08-06) introduced this struct so the accepted-load byte
+/// bound states its terms the way [`GatePeakUsage`] states the gate's, and so
+/// the term F9 added can be pinned. Before F9 the check was two inline
+/// `checked_add`s over `retained_bytes` and the finalizer's scratch, and the
+/// distinct-face buffer beside them was charged against nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LoadScratchUsage {
+    /// The contacts and the `(owner, face)` pairs the build retains.
+    retained_bytes: usize,
+    /// The load finalizer's own scratch, from `specialized_load_resource_plan`.
+    finalizer_scratch_bytes: usize,
+    /// The build's shared distinct-face buffer, from
+    /// [`island_face_scratch_bytes`] — the same allocation the gate charges as
+    /// [`GatePeakUsage::face_scratch_bytes`], on the path taken after the gate
+    /// accepts. Added by record fix F9 (2026-08-06); it was held and never
+    /// charged before that.
+    face_scratch_bytes: usize,
+}
+
+fn check_load_scratch(usage: LoadScratchUsage, limit: usize) -> Result<usize, SpecializedError> {
+    let required = usage
+        .retained_bytes
+        .checked_add(usage.finalizer_scratch_bytes)
+        .and_then(|bytes| bytes.checked_add(usage.face_scratch_bytes))
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    if required > limit {
+        return Err(GenericPerceptionError::LoadScratchLimit { required, limit }.into());
     }
     Ok(required)
 }
@@ -3100,21 +3180,37 @@ fn gather_island_faces(
 /// in the face count.  The emitted values — the count and the ascending
 /// distinct order — are unchanged; only the meter moved.
 ///
-/// Byte semantics (record fix F6, 2026-08-06).  `scratch` is the one
-/// `Vec<u32>` a gate batch allocates and every gather in that batch reuses —
-/// that reuse is the point of fix (A), which otherwise would have traded a
-/// quadratic charge for a per-contact allocation.  Fix (A) threaded the buffer
-/// through the batch but left it out of the gate's byte bound, so the buffer
-/// was real memory the gate held and never charged for.  It is now the
-/// `face_scratch_bytes` term of [`GatePeakUsage`], computed by
-/// [`island_face_scratch_bytes`] and added to that check's *retained* total,
-/// because the buffer outlives every individual phase.  Two things follow, and
-/// both are deliberate:
+/// Byte semantics (record fixes F6 and F9, 2026-08-06).  `scratch` is the one
+/// `Vec<u32>` its caller's batch allocates and every gather in that batch
+/// reuses — that reuse is the point of fix (A), which otherwise would have
+/// traded a quadratic charge for a per-contact allocation.  Fix (A) threaded
+/// three such buffers through three batches and left all three out of their
+/// byte bounds, so each was real memory the stage held and never charged for.
+/// All three are charged now:
 ///
-/// - The term is a **capacity bound, not an observation**.  It is priced
-///   before any gather runs, from the islands' `face_ids` lengths, so it must
-///   over-state rather than under-state; see
-///   [`island_face_scratch_bytes`] for why it doubles.
+/// - the gate's two, in `evaluate_gate_batch` and
+///   `whole_gate_route_preflight`, as the `face_scratch_bytes` term of
+///   [`GatePeakUsage`] — added to that check's *retained* total, because the
+///   buffer outlives every individual phase (record fix F6);
+/// - the accepted-load path's, in [`working_load_inputs`], as the
+///   `face_scratch_bytes` term of [`LoadScratchUsage`], checked against
+///   `max_load_scratch_bytes` (record fix F9, which found the omission F6 had
+///   fixed only on the gate side).
+///
+/// All three use [`island_face_scratch_bytes`], and two things follow at every
+/// site.  Both are deliberate:
+///
+/// - The term is a **capacity bound, not an observation**.  It is priced from
+///   the islands' `face_ids` lengths rather than from the buffer's own
+///   capacity, so it over-states rather than under-states whatever the buffer
+///   has actually grown to; see [`island_face_scratch_bytes`] for why it
+///   doubles.  (Corrected 2026-08-06, record fix F8: this bullet previously
+///   said the term "is priced before any gather runs", which is false at every
+///   production site — `evaluate_gate_batch`, `whole_gate_route_preflight` and
+///   [`working_load_inputs`] each fill the buffer via
+///   `unique_island_face_count` before reaching their check.  The pricing
+///   basis, not the ordering, is what makes the term an over-statement, and
+///   the ordering claim is dropped.)
 /// - The term is **small against everything else in the bound**.  Measured on
 ///   the Weeping Treant's gate batch, 2026-08-06: 570,584 B of live face ids,
 ///   charged as 1,141,168 B after the doubling.  That takes the gate peak from
@@ -3124,8 +3220,13 @@ fn gather_island_faces(
 ///   corpus, which was proved by re-running the census: the seven frozen
 ///   digests stayed byte-identical and the treant's refusal line stayed
 ///   `GateOperationLimit { required: 21755124103146, limit: 35445500736 }`.
-///   It is charged because the gate must bound what it holds, not because
-///   anything was observed to be near a limit.
+///   The accepted-load site is smaller again: it is the path the seven
+///   reachable corpus models actually take, and their whole load-scratch
+///   requirement peaks at `Sphere`'s 78,408 B — 0.015 % of the 536,870,912 B
+///   cap, with the new term 4,592 B of it — so F9 too flipped no refusal,
+///   proved by the same census re-run.  Each is charged because the stage must
+///   bound what it holds, not because anything was observed to be near a
+///   limit.
 fn distinct_faces_in_place(
     scratch: &mut Vec<u32>,
     work: &mut usize,
@@ -7117,6 +7218,82 @@ mod tests {
                 usize::MAX
             ),
             Ok(60)
+        );
+    }
+
+    /// Record fix F9 (2026-08-06). FU-8b fix (A) left a *third* shared
+    /// distinct-face buffer uncharged, in `working_load_inputs` — the same
+    /// omission F6 fixed on the gate side, on the path taken after the gate
+    /// accepts. These pin that the accepted-load byte bound now carries it, and
+    /// that it is the islands' own `face_ids` that price it.
+    #[test]
+    fn the_shared_face_buffer_is_charged_against_the_load_scratch_bound() {
+        // The same two islands the gate test uses: 3 + 5 face ids, 8 entries x
+        // 4 bytes x 2 for growth = 64. Both paths price the buffer from the
+        // same `islands` slice through `island_face_scratch_bytes`, so the
+        // number is the same number.
+        let islands = [
+            SupportIsland {
+                id: 1,
+                face_ids: vec![7, 8, 9],
+            },
+            SupportIsland {
+                id: 2,
+                face_ids: vec![7, 8, 9, 4, 5],
+            },
+        ];
+
+        let base = LoadScratchUsage {
+            retained_bytes: 60,
+            finalizer_scratch_bytes: 40,
+            face_scratch_bytes: 0,
+        };
+        // Pre-F9 arithmetic: retained + finalizer only, fitting a 100-byte cap
+        // exactly. Held at 0 so this pins the same pair of numbers the inline
+        // check pinned before F9 (100 accepts, 101 would not).
+        assert_eq!(check_load_scratch(base, 100), Ok(100));
+        assert_eq!(
+            check_load_scratch(
+                LoadScratchUsage {
+                    retained_bytes: 61,
+                    ..base
+                },
+                100
+            ),
+            Err(GenericPerceptionError::LoadScratchLimit {
+                required: 101,
+                limit: 100,
+            }
+            .into())
+        );
+
+        // With the term, the requirement rises by exactly the buffer's bound
+        // and the same cap refuses. The term is part of the bound, not
+        // decoration.
+        let charged = LoadScratchUsage {
+            face_scratch_bytes: island_face_scratch_bytes(&islands).expect("scratch bytes"),
+            ..base
+        };
+        assert_eq!(
+            check_load_scratch(charged, 100),
+            Err(GenericPerceptionError::LoadScratchLimit {
+                required: 164,
+                limit: 100,
+            }
+            .into())
+        );
+        assert_eq!(check_load_scratch(charged, 164), Ok(164));
+        // No islands, no charge: the term is the islands' `face_ids` and
+        // nothing else.
+        assert_eq!(
+            check_load_scratch(
+                LoadScratchUsage {
+                    face_scratch_bytes: island_face_scratch_bytes(&[]).expect("scratch bytes"),
+                    ..base
+                },
+                100
+            ),
+            Ok(100)
         );
     }
 
