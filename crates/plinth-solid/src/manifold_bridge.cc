@@ -2,6 +2,7 @@
 
 #include "manifold/manifold.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -66,20 +67,26 @@ static_assert(static_cast<int>(manifold::Manifold::Error::Cancelled) == 14);
 namespace plinth::solid {
 namespace {
 
+std::atomic<std::uint64_t> get_mesh_gl64_calls{0};
+
 struct ExpectedError {
   FfiErrorCode code;
   std::int32_t manifold_status = 0;
   bool has_mesh_index = false;
   std::uint64_t mesh_index = 0;
+  FfiOutputLimit output_limit = FfiOutputLimit::Vertices;
+  std::uint64_t output_count = 0;
 };
 
 FfiResponse error_response(FfiErrorCode code) noexcept {
-  return FfiResponse{code, 0, false, 0, FfiMesh{}};
+  return FfiResponse{code, 0, false, 0, FfiOutputLimit::Vertices, 0,
+                     FfiMesh{}};
 }
 
 FfiResponse error_response(const ExpectedError& error) noexcept {
   return FfiResponse{error.code, error.manifold_status, error.has_mesh_index,
-                     error.mesh_index, FfiMesh{}};
+                     error.mesh_index, error.output_limit, error.output_count,
+                     FfiMesh{}};
 }
 
 void validate_offsets(rust::Slice<const double> vertices,
@@ -134,7 +141,9 @@ std::vector<manifold::Manifold> import_batch(
   return solids;
 }
 
-FfiMesh export_result(manifold::Manifold result) {
+FfiMesh export_result(manifold::Manifold result,
+                      std::uint64_t max_output_vertices,
+                      std::uint64_t max_output_triangles) {
   const auto status = result.Status();
   if (status != manifold::Manifold::Error::NoError) {
     throw ExpectedError{FfiErrorCode::ResultManifoldStatus,
@@ -143,14 +152,29 @@ FfiMesh export_result(manifold::Manifold result) {
   if (result.IsEmpty()) {
     throw ExpectedError{FfiErrorCode::EmptyResult};
   }
+  const std::size_t num_vertices = result.NumVert();
+  const std::size_t num_triangles = result.NumTri();
+  if (num_vertices > max_output_vertices) {
+    throw ExpectedError{FfiErrorCode::OutputLimitExceeded, 0, false, 0,
+                        FfiOutputLimit::Vertices,
+                        static_cast<std::uint64_t>(num_vertices)};
+  }
+  if (num_triangles > max_output_triangles) {
+    throw ExpectedError{FfiErrorCode::OutputLimitExceeded, 0, false, 0,
+                        FfiOutputLimit::Triangles,
+                        static_cast<std::uint64_t>(num_triangles)};
+  }
 
+  get_mesh_gl64_calls.fetch_add(1, std::memory_order_relaxed);
   const manifold::MeshGL64 mesh = result.GetMeshGL64();
   if (mesh.numProp < 3) {
     throw ExpectedError{FfiErrorCode::OutputPropertyStride};
   }
-
+  if (mesh.NumVert() != num_vertices || mesh.NumTri() != num_triangles ||
+      mesh.triVerts.size() % 3 != 0) {
+    throw ExpectedError{FfiErrorCode::OutputCountMismatch};
+  }
   FfiMesh out;
-  const std::size_t num_vertices = mesh.NumVert();
   if (num_vertices > std::numeric_limits<std::size_t>::max() / 3) {
     throw ExpectedError{FfiErrorCode::OutputOverflow};
   }
@@ -172,6 +196,7 @@ template <typename Operation>
 FfiResponse execute(Operation&& operation) noexcept {
   try {
     return FfiResponse{FfiErrorCode::Success, 0, false, 0,
+                       FfiOutputLimit::Vertices, 0,
                        operation()};
   } catch (const ExpectedError& error) {
     return error_response(error);
@@ -190,15 +215,26 @@ FfiResponse execute(Operation&& operation) noexcept {
 
 }  // namespace
 
+void reset_export_mesh_calls() noexcept {
+  get_mesh_gl64_calls.store(0, std::memory_order_relaxed);
+}
+
+std::uint64_t export_mesh_calls() noexcept {
+  return get_mesh_gl64_calls.load(std::memory_order_relaxed);
+}
+
 FfiResponse manifold_union_batch(rust::Slice<const double> vertices,
                                  rust::Slice<const std::uint64_t> triangles,
                                  rust::Slice<const std::uint64_t> vertex_offsets,
-                                 rust::Slice<const std::uint64_t> triangle_offsets) noexcept {
+                                 rust::Slice<const std::uint64_t> triangle_offsets,
+                                 std::uint64_t max_output_vertices,
+                                 std::uint64_t max_output_triangles) noexcept {
   return execute([&] {
     auto solids =
         import_batch(vertices, triangles, vertex_offsets, triangle_offsets);
-    return export_result(
-        manifold::Manifold::BatchBoolean(solids, manifold::OpType::Add));
+    return export_result(manifold::Manifold::BatchBoolean(
+                             solids, manifold::OpType::Add),
+                         max_output_vertices, max_output_triangles);
   });
 }
 
@@ -206,7 +242,9 @@ FfiResponse manifold_difference_batch(
     rust::Slice<const double> vertices,
     rust::Slice<const std::uint64_t> triangles,
     rust::Slice<const std::uint64_t> vertex_offsets,
-    rust::Slice<const std::uint64_t> triangle_offsets) noexcept {
+    rust::Slice<const std::uint64_t> triangle_offsets,
+    std::uint64_t max_output_vertices,
+    std::uint64_t max_output_triangles) noexcept {
   return execute([&] {
     auto solids =
         import_batch(vertices, triangles, vertex_offsets, triangle_offsets);
@@ -221,7 +259,8 @@ FfiResponse manifold_difference_batch(
     auto subtractor =
         manifold::Manifold::BatchBoolean(tail, manifold::OpType::Add);
     return export_result(
-        solids.front().Boolean(subtractor, manifold::OpType::Subtract));
+        solids.front().Boolean(subtractor, manifold::OpType::Subtract),
+        max_output_vertices, max_output_triangles);
   });
 }
 

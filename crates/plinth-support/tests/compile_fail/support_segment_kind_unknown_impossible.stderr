@@ -1,0 +1,8 @@
+error[E0423]: expected function, tuple struct or tuple variant, found enum `SupportSegmentKind`
+ --> tests/compile_fail/support_segment_kind_unknown_impossible.rs:4:13
+  |
+4 |     let _ = SupportSegmentKind(999);
+  |             ^^^^^^^^^^^^^^^^^^
+  |
+  = help: the enum has no tuple variants to construct
+  = help: you might have meant to construct one of the enum's non-tuple variants

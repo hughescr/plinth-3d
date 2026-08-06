@@ -75,6 +75,31 @@ fn audit(b: &[u8]) -> std::result::Result<(), String> {
         },
     ];
 
+    if count > 0 {
+        let descriptor_bytes = FROM_SCRATCH_MODEL_DESCRIPTOR_LEN
+            .checked_mul(count)
+            .ok_or("front descriptor overflow")?;
+        let descriptor_end = off20
+            .checked_add(descriptor_bytes)
+            .ok_or("front descriptor end overflow")?;
+        let first_mesh = rd(off8 + M_MESH_OFF)? as usize;
+        if first_mesh < descriptor_end {
+            return Err(format!(
+                "first mesh {first_mesh} overlaps/underfills {descriptor_bytes}-byte front descriptor region [{off20}..{descriptor_end}]"
+            ));
+        }
+        ivs.push(Interval {
+            start: off20,
+            end: descriptor_end,
+            what: "front_descriptors",
+        });
+        ivs.push(Interval {
+            start: descriptor_end,
+            end: first_mesh,
+            what: "front_opaque",
+        });
+    }
+
     let in_header_or_table = |x: usize| x < HEADER_LEN || (count > 0 && x >= off8 && x < table_end);
 
     for m in 0..count {

@@ -68,7 +68,7 @@ pub const STL_HEADER_LEN: usize = 80;
 pub const STL_BYTES_PER_TRI: usize = 50; // 12 normal + 36 verts + 2 attr
 
 // -- from-scratch layout ----------------------------------------------------
-/// Zero filler emitted between the model table and the first mesh blob for
-/// from-scratch builds — matches the 48-byte filler in every native
-/// unsupported multi-model specimen.
-pub const FROM_SCRATCH_FRONT_FILLER: usize = 48;
+/// Each model has one opaque 24-byte descriptor before the first mesh. Fresh
+/// scaffolds synthesize zero descriptors only; parsed descriptor bytes are
+/// preserved and never resized.
+pub const FROM_SCRATCH_MODEL_DESCRIPTOR_LEN: usize = 24;

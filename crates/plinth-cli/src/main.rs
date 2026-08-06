@@ -1,21 +1,27 @@
-//! The one future Plinth entry point.  M1 scaffolds its stable binary name only;
-//! scoring is deliberately unavailable until the complete harness lands.
-
 use std::process::ExitCode;
 
+use plinth_cli::{parse_args, CliAction, PREPARE_USAGE, ROOT_USAGE};
+
 fn main() -> ExitCode {
-    let argument = std::env::args().nth(1);
-    match argument.as_deref() {
-        None | Some("--help") | Some("-h") => {
-            println!("plinth {}\n\nUsage: plinth <subcommand>\n\nSubcommands are not implemented in this scaffold.", env!("CARGO_PKG_VERSION"));
+    match parse_args(std::env::args_os().skip(1)) {
+        Ok(CliAction::RootHelp) => {
+            println!("plinth {}\n\n{ROOT_USAGE}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Some("--version") | Some("-V") => {
+        Ok(CliAction::PrepareHelp) => {
+            println!("{PREPARE_USAGE}");
+            ExitCode::SUCCESS
+        }
+        Ok(CliAction::Version) => {
             println!("plinth {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Some(subcommand) => {
-            eprintln!("plinth: subcommand `{subcommand}` is not implemented in this milestone");
+        Ok(CliAction::Prepare(_selection)) => {
+            eprintln!("plinth prepare: execution is not implemented in this parser milestone");
+            ExitCode::from(2)
+        }
+        Err(error) => {
+            eprintln!("plinth: {error}\n\n{ROOT_USAGE}");
             ExitCode::from(2)
         }
     }

@@ -1021,7 +1021,10 @@ and the `cdylib` crate type together.
 
 **`rust/chitubox_io`** — `.chitubox` container read/write plus an independent structural audit
 (`src/verify.rs`). `plinth-emit` writes through it; `plinth-metrics` may link its **reader** (§14
-D-19). Its PyO3 layer is `rust/chitubox_io/src/py.rs` plus the `rust/chitubox_io/python/` shim
+D-19). `plinth-support` does not link it: support primitives carry the closed semantic
+`SupportSegmentKind`, and `plinth-emit` owns the sole exhaustive mapping from those domain kinds
+to native `SegmentType` IDs. Its PyO3 layer is `rust/chitubox_io/src/py.rs` plus the
+`rust/chitubox_io/python/` shim
 directory; both are deleted when the native `chitubox_io` boundary lands.
 
 Removal of PyO3 happens once nothing consumes each binding, at that native boundary's

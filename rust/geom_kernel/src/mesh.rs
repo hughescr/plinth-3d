@@ -11,6 +11,10 @@ pub type FaceBounds = [V3; 2];
 /// live here: a future subset can share this store but own independent indexes.
 pub struct FaceGeometry {
     v0: Vec<V3>,
+    /// Exact source coordinates retained independently of edge arithmetic.
+    /// Plane slicing needs these bits at tolerance boundaries.
+    v1: Vec<V3>,
+    v2: Vec<V3>,
     e1: Vec<V3>,
     e2: Vec<V3>,
     normals: Vec<V3>,
@@ -51,9 +55,48 @@ pub struct Mesh {
 }
 
 impl Mesh {
+    pub(crate) fn validate_indexed_bounds(
+        vertices: &[[f64; 3]],
+        faces: &[[u32; 3]],
+    ) -> Result<FaceBounds, SurfaceBuildError> {
+        if vertices.is_empty() {
+            return Err(SurfaceBuildError::EmptyVertices);
+        }
+        if faces.is_empty() {
+            return Err(SurfaceBuildError::EmptyFaces);
+        }
+        for (vertex, point) in vertices.iter().enumerate() {
+            for (axis, value) in point.iter().enumerate() {
+                if !value.is_finite() {
+                    return Err(SurfaceBuildError::NonFiniteVertex { vertex, axis });
+                }
+            }
+        }
+        let mut bounds = [[f64::INFINITY; 3], [f64::NEG_INFINITY; 3]];
+        for (face, indices) in faces.iter().enumerate() {
+            for (corner, &index) in indices.iter().enumerate() {
+                let Some(point) = vertices.get(index as usize) else {
+                    return Err(SurfaceBuildError::FaceIndexOutOfBounds {
+                        face,
+                        corner,
+                        index,
+                        vertex_count: vertices.len(),
+                    });
+                };
+                for axis in 0..3 {
+                    bounds[0][axis] = bounds[0][axis].min(point[axis]);
+                    bounds[1][axis] = bounds[1][axis].max(point[axis]);
+                }
+            }
+        }
+        Ok(bounds)
+    }
+
     #[allow(clippy::too_many_arguments)] // exact parallel face arrays are the immutable storage layout
     fn from_parts(
         v0: Vec<V3>,
+        v1: Vec<V3>,
+        v2: Vec<V3>,
         e1: Vec<V3>,
         e2: Vec<V3>,
         normals: Vec<V3>,
@@ -64,6 +107,8 @@ impl Mesh {
     ) -> Self {
         let n = v0.len();
         debug_assert!(n > 0);
+        debug_assert_eq!(v1.len(), n);
+        debug_assert_eq!(v2.len(), n);
         debug_assert_eq!(e1.len(), n);
         debug_assert_eq!(e2.len(), n);
         debug_assert_eq!(normals.len(), n);
@@ -72,6 +117,8 @@ impl Mesh {
         debug_assert_eq!(centroid.len(), n);
         let geometry = Arc::new(FaceGeometry {
             v0,
+            v1,
+            v2,
             e1,
             e2,
             normals,
@@ -98,6 +145,8 @@ impl Mesh {
     ) -> Self {
         let n = triangles.len();
         let mut v0 = Vec::with_capacity(n);
+        let mut v1 = Vec::with_capacity(n);
+        let mut v2 = Vec::with_capacity(n);
         let mut e1 = Vec::with_capacity(n);
         let mut e2 = Vec::with_capacity(n);
         let mut face_bounds = Vec::with_capacity(n);
@@ -105,6 +154,8 @@ impl Mesh {
         for triangle in triangles {
             let [a, b, c] = *triangle;
             v0.push(a);
+            v1.push(b);
+            v2.push(c);
             e1.push([b[0] - a[0], b[1] - a[1], b[2] - a[2]]);
             e2.push([c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
             face_bounds.push([
@@ -127,6 +178,8 @@ impl Mesh {
         }
         Self::from_parts(
             v0,
+            v1,
+            v2,
             e1,
             e2,
             normals.to_vec(),
@@ -143,44 +196,22 @@ impl Mesh {
         vertices: &[[f64; 3]],
         faces: &[[u32; 3]],
     ) -> Result<Self, SurfaceBuildError> {
-        if vertices.is_empty() {
-            return Err(SurfaceBuildError::EmptyVertices);
-        }
-        if faces.is_empty() {
-            return Err(SurfaceBuildError::EmptyFaces);
-        }
-        for (vertex, point) in vertices.iter().enumerate() {
-            for (axis, value) in point.iter().enumerate() {
-                if !value.is_finite() {
-                    return Err(SurfaceBuildError::NonFiniteVertex { vertex, axis });
-                }
-            }
-        }
+        let bounds = Self::validate_indexed_bounds(vertices, faces)?;
         let n = faces.len();
         let mut v0 = Vec::with_capacity(n);
+        let mut v1 = Vec::with_capacity(n);
+        let mut v2 = Vec::with_capacity(n);
         let mut e1s = Vec::with_capacity(n);
         let mut e2s = Vec::with_capacity(n);
         let mut normals = Vec::with_capacity(n);
         let mut areas = Vec::with_capacity(n);
         let mut face_bounds = Vec::with_capacity(n);
         let mut centroids = Vec::with_capacity(n);
-        let mut bounds = [[f64::INFINITY; 3], [f64::NEG_INFINITY; 3]];
         for (face, indices) in faces.iter().enumerate() {
             let mut points = [[0.0; 3]; 3];
             for (corner, &index) in indices.iter().enumerate() {
-                let Some(point) = vertices.get(index as usize) else {
-                    return Err(SurfaceBuildError::FaceIndexOutOfBounds {
-                        face,
-                        corner,
-                        index,
-                        vertex_count: vertices.len(),
-                    });
-                };
+                let point = &vertices[index as usize];
                 points[corner] = *point;
-                for axis in 0..3 {
-                    bounds[0][axis] = bounds[0][axis].min(point[axis]);
-                    bounds[1][axis] = bounds[1][axis].max(point[axis]);
-                }
             }
             let [a, b, c] = points;
             let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
@@ -239,6 +270,8 @@ impl Mesh {
                 });
             }
             v0.push(a);
+            v1.push(b);
+            v2.push(c);
             e1s.push(e1);
             e2s.push(e2);
             normals.push(normal);
@@ -259,6 +292,8 @@ impl Mesh {
         }
         Ok(Self::from_parts(
             v0,
+            v1,
+            v2,
             e1s,
             e2s,
             normals,
@@ -304,6 +339,16 @@ impl Mesh {
     }
     pub(crate) fn geometry(&self) -> &FaceGeometry {
         &self.geometry
+    }
+    pub(crate) fn triangle_soup_digest(&self) -> crate::SurfaceTriangleSoupDigest {
+        crate::triangle_soup_digest_from_iter(self.face_ids.iter().map(|&face_id| {
+            let face = face_id as usize;
+            [
+                self.geometry.v0[face],
+                self.geometry.v1[face],
+                self.geometry.v2[face],
+            ]
+        }))
     }
     pub(crate) fn subset(&self, face_ids: Vec<u32>) -> Self {
         debug_assert!(!face_ids.is_empty());
@@ -397,5 +442,13 @@ impl Mesh {
     #[inline]
     pub(crate) fn vertex_c(&self, i: usize) -> V3 {
         add(self.v0(i), self.e2(i))
+    }
+    #[inline]
+    pub(crate) fn source_vertex_b(&self, i: usize) -> V3 {
+        self.geometry.v1[i]
+    }
+    #[inline]
+    pub(crate) fn source_vertex_c(&self, i: usize) -> V3 {
+        self.geometry.v2[i]
     }
 }

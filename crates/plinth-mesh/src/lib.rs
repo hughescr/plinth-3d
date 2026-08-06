@@ -6,26 +6,33 @@
 //! reorder, repair, or f32 in-memory conversion.
 #![forbid(unsafe_code)]
 
+mod delicacy;
 mod fixtures;
 mod io;
 mod topology;
 mod triage;
 
+pub use delicacy::{
+    DelicacyBuildConfig, DelicacyError, DelicacyFaceValue, DelicacyField, DelicacySettings,
+    FaceTable, DELICACY_FIELD_SCHEMA, DELICACY_FIELD_SCHEMA_VERSION,
+};
 pub use fixtures::{
     make_box, make_box_default, make_overhang_table, make_overhang_table_with, make_raking_blade,
     make_raking_blade_with, make_thin_fin, make_thin_fin_with, make_toed_slab, make_toed_slab_with,
 };
 pub use io::{load_binary_stl, load_binary_stls, write_binary_stl, write_binary_stls, MeshIoError};
 pub use topology::{
-    build_face_topology, mesh_fingerprint, validate_face_topology, FaceTopology, TopologyDigest,
-    TopologyError, TopologySchema, TopologyValidationError, FACE_TOPOLOGY_SCHEMA,
+    build_face_topology, certify_closed_components, mesh_fingerprint, validate_face_topology,
+    ClosedComponent, ClosedComponentCertificate, EdgeTopologyCounts, FaceTopology, TopologyDigest,
+    TopologyError, TopologySchema, TopologyValidationError, WeldedView, FACE_TOPOLOGY_SCHEMA,
     FACE_TOPOLOGY_SCHEMA_VERSION, TOPOLOGY_CUT_BOUNDARY, TOPOLOGY_CUT_DEGENERATE,
     TOPOLOGY_CUT_DUPLICATE, TOPOLOGY_CUT_NONMANIFOLD, TOPOLOGY_CUT_POINT_ONLY,
     TOPOLOGY_CUT_SAME_DIRECTION,
 };
 pub use triage::{
-    triage_components, triage_settings, ComponentDescription, PreHollowed, TriageError,
-    TriageSettings, TriageSummary, TriagedMesh,
+    triage_components, triage_settings, ComponentDescription, PreHollowed, TriageAdmissionError,
+    TriageError, TriageSettings, TriageSummary, TriageTopologyAdmission, TriageTopologyLimits,
+    TriagedMesh,
 };
 
 use thiserror::Error;
@@ -83,6 +90,23 @@ impl Mesh {
     #[must_use]
     pub fn tris(&self) -> &[[u32; 3]] {
         &self.tris
+    }
+
+    /// Bytes reserved by this mesh's two owned buffers, measured from their
+    /// actual capacities rather than their logical lengths. Consumers that
+    /// enforce a process memory envelope must account for this retained
+    /// storage while they build additional working fields.
+    #[must_use]
+    pub fn retained_buffer_bytes(&self) -> Option<usize> {
+        self.verts
+            .capacity()
+            .checked_mul(std::mem::size_of::<[f64; 3]>())
+            .and_then(|vertices| {
+                self.tris
+                    .capacity()
+                    .checked_mul(std::mem::size_of::<[u32; 3]>())
+                    .and_then(|triangles| vertices.checked_add(triangles))
+            })
     }
 
     /// Audits geometry required by semantic consumers without changing this
@@ -235,7 +259,11 @@ impl Mesh {
 pub enum WeldPolicy {
     /// Preserve the source triangle soup exactly (the STL default).
     None,
-    /// Weld only coordinates with identical IEEE f64 bit patterns.
+    /// Weld only numerically identical coordinates. Distinct finite values,
+    /// including adjacent one-ULP values, remain separate; `+0.0` and `-0.0`
+    /// weld because they are the same physical coordinate despite their
+    /// different IEEE sign bits. The historical variant name refers to the
+    /// nonzero finite-value comparison.
     ExactBits,
     /// Weld coordinates within this positive, finite distance.
     Epsilon(f64),

@@ -1,0 +1,5 @@
+error[E0616]: field `snapshot_digest` of struct `SupportVerificationSnapshot` is private
+ --> tests/compile_fail/support_verification_snapshot_private.rs:4:14
+  |
+4 |     snapshot.snapshot_digest = 0;
+  |              ^^^^^^^^^^^^^^^ private field

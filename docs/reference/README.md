@@ -29,6 +29,7 @@ that data, design and results alike.**
 
 | file | what it is | read it when |
 |---|---|---|
+| [`home-support-calibration-p1-protocol.md`](home-support-calibration-p1-protocol.md) | Preregistered, cured-state home-test procedure for generated `HOME-SUPPORT-CAL-P1`; pins its source package/ID inventory, safety boundary, and the separately-verified-fixture gate. | You are preparing, testing, or reporting the new home support-calibration plate. |
 | [`plate-06-results.md`](plate-06-results.md) | **Record of record for calibration plate 6** (support-arm capacity; printed 2026-07-30, scored 2026-07-31). Full 34-specimen table with geometry and outcomes; load sharing is at least additive; cylindrical `X* ∈ (19.91, 30.48)`; family A6 void; the pre-registration override; the coupon-design rules that bind every future plate. | You need any measured support-load number, or you are designing another calibration plate. |
 | [`plate-06-verification-physicist.md`](plate-06-verification-physicist.md) | Appendix — failure-mode physics memo from the 2026-07-31 adversarial panel. Where the cap-plane-z confound was first identified. | You want to re-open the A6 anomaly. |
 | [`plate-06-verification-protocol.md`](plate-06-verification-protocol.md) | Appendix — protocol memo: build provenance, gate-by-gate validity ruling, and the literal plate-wide reading of the void. | You want to check whether a plate-6 conclusion was admissible. |

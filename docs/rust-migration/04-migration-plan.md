@@ -58,6 +58,65 @@ The following former requirements are explicitly superseded:
 | Python/PyO3 survives until M9 | O-7 removes each compatibility surface at its native handoff; the final gate proves zero Python after essential parity, loadability, determinism, and owner-print gates pass |
 | M2 requires a premature `SurfaceOracle` abstraction | Add an abstraction only when a second real backend is implemented after Python deletion |
 
+### O-10 — support compatibility is explicitly uncalibrated legacy behavior
+
+**Owner clarification, 2026-08-01.** The frozen Python support pipeline is a
+compatibility target only: it is known not to crash, but it does **not** produce
+viable models. The elimination-step support port therefore reproduces its current
+observable behavior as **explicitly uncalibrated legacy compatibility**. This is
+not a claim that the behavior is print-safe, mechanically adequate, or measured
+for lateral load, deflection, or brace performance.
+
+This bounded compatibility policy does not retain the Python runtime, change a
+retired/no-runtime declaration into `Measured`, or waive any metric. The emitted
+Rust artifact remains subject to every ordinary executable essential-parity,
+as-good-or-better, loadability, determinism, and ported verifier gate. In
+particular, `corpus/manifest.json` waivers remain empty. The frozen artifacts and
+source behavior are the legacy comparison target; they are not safety evidence.
+
+Support-physics redesign and calibration remain post-Python work under O-6. The
+concrete next task is
+[`07-post-python-support-calibration-plate.md`](07-post-python-support-calibration-plate.md):
+its preregistered plate must be challenged before fabrication, and it is roadmap
+work rather than a Python-deletion blocker.
+
+<!-- owner-override-O-10-live-compatibility -->
+#### O-10 operative precedence for the live compatibility path
+
+O-10 narrowly supersedes `03-physics-and-constants.md` §3.3's **RETIRED — no
+runtime declaration / do not port** disposition and §0's `Placeholder`
+accept-path prohibition only for calculations on the live legacy support/raft
+path that are required to reproduce current observable behavior. Inspection of
+the frozen baseline revision recorded in `corpus/manifest.json`,
+`6eb7f6a65e1a3442aa860d63d920788da778faed`, confirms both values are live:
+
+- `shaft_drag_force_n = 0.01 N` is declared at
+  `scripts/support_placement/config.py:128`, consumed by
+  `placement.py:_shaft_r_for_L` at lines 815 and 817 and
+  `max_unbraced_len_mm` at line 831, and reaches the production path through
+  the sizing/bracing calls.
+- `brace_free_span_mm = 18 mm` is declared at
+  `scripts/support_placement/config.py:365`, directly controls rung requests
+  and activation-trigger decisions in `bracing.py:compute_needs` at lines
+  260, 291, and 294, and reaches production through
+  `engine.py:brace_and_size` at lines 1266–1272.
+
+In the Rust compatibility port, declare these two values with the scoped
+disposition `LegacyCompatibility`, each still carrying the existing
+**uncalibrated `Placeholder`** provenance wrapper; `LegacyCompatibility` is not
+a fifth provenance wrapper. They are never `Measured`, `Derived`, `AcceptSafe`,
+or safety evidence. O-10 permits
+them to affect parity production output and its `DefectReport` solely for the
+current support/raft compatibility calculation. It does not grant either value
+to a new or redesigned algorithm, and no other retired or Placeholder value is
+admitted by implication.
+
+The exception remains until an owner-approved result from the post-Python
+calibration task replaces it. Until then, all 15 ordinary metrics, candidate
+hard bounds, verifier gates, loadability, determinism, and the owner print gate
+remain unchanged. There is no waived metric, and `corpus/manifest.json` waivers
+remain empty.
+
 No numeric point estimate is normative here. The detailed material below continues to
 define useful metrics, fixtures, hazards, and desired end-state behavior wherever it does
 not conflict with this override.
@@ -801,9 +860,9 @@ These numbers are the contract, not suggestions.
 | 2. Probe | One aggressive decimation at **ratio 0.2** to build a per-vertex backward-error map. |
 | 3. Feature seeds | Vertices with probe error **> 0.05 mm** are seeds. |
 | 4. Protection halo | **0.4 mm** radius around each seed, capped at **12 %** of vertices, with **3 backoff iterations** (`seed_thr ×= 2`, `halo ×= 0.6`) if the cap is exceeded. **Protection is a hard constraint — a protected vertex never collapses.** Blender expresses it as the vertex group `decimate_freedom` with `vertex_group_factor = 10.0`, where **weight 1 = decimated MORE and weight 0 = protected** (counterintuitive, verified empirically, `decimate_pipeline.py:164-170`). In Rust, express it directly: protected vertices are excluded from the collapse candidate set, not merely down-weighted. |
-| 4b. Budget precondition | **One probe at `RATIO_HI = 0.50` before any bisection.** If p99 or p99.9 already exceeds the budget at the loosest ratio, the model **FAILS** with a named `DecimationBudgetUnreachable` defect (Python: `status="FAIL_even_at_0.50"`, `decimate_pipeline.py:175-179`) — do not bisect, do not apply, do not export. This is a hard FAIL, distinct from stage 1's SKIP. |
-| 5. Bisect | **5 iterations** in **[0.05, 0.50]** for the *lowest* ratio whose two-sided sampled **p99** error ≤ `pixel_um/2000` mm and **p99.9** ≤ `pixel_um/1000` mm. `pixel_um` defaults to **19.0** (Saturn 4 Ultra 16K, 14 × 19 µm — the coarser axis). |
-| 6. Re-verify | **Full population**, both directions, with **1.1× slack** on both tolerances. The slack is a **final check only** — intentional, absorbing sample-vs-population drift. It is not a loosened spec and must not be applied to the bisection probes. |
+| 4b. Canonical identity precheck | One strict, bit-identical audit at `RATIO_HI = 1.00` establishes zero two-sided geometric error and unchanged topology for the original. It is evidence, not a decimation win. The previous 0.50 hard-fail ceiling was a Placeholder mistakenly promoted into a requirement and was corrected by the owner on 2026-08-01. |
+| 5. Search and acceptance | **5 bisection iterations** in **[0.05, 1.00]** gather baseline geometric evidence. A second bounded pass uses at most five deterministic integer-face targets to explore the still-unexamined interval for diagnostics. It splits intervals without assuming topology is monotone, detects fingerprint plateaus, and explicitly reports any intervals left unexplored when the bound is reached. `pixel_um` defaults to **19.0** (Saturn 4 Ultra 16K, 14 × 19 µm — the coarser axis), and the p99/p99.9 limits remain binding. A lower-ratio meshoptimizer no-op is `M3NoReduction`, never evidence of reduction. Production acceptance is a second, independent typed gate: the candidate must carry `DownstreamUseful` evidence from a registered AcceptSafe downstream-work or bounded-resource witness. `faces_removed > 0` alone is not such evidence. No witness is registered yet, so geometrically eligible candidates remain reusable diagnostics and production returns named verified `AlreadyPrintScale` with the strict, bit-identical original plus `NoDownstreamUtilityEvidence`. Do not invent a percentage or face-count threshold. |
+| 6. Re-verify | Audit topology before the expensive full-population distance probe. Only topology-safe candidates receive a **full population**, both-directions probe with **1.1× slack** on both tolerances. The slack is a **final check only** — intentional, absorbing sample-vs-population drift. It is not a loosened spec and must not be applied to sampled probes. |
 | 7. Topology guard | Non-manifold and boundary edge counts **must not increase**. |
 
 "Two-sided" means both directions: **forward** = decimated face centres → original surface
@@ -839,9 +898,9 @@ cargo test -p plinth-decimate --test corpus_budgets
 # reads corpus/models/ DIRECTLY (no CLI). Every model: decimation report passes the
 # p99 / p99.9 budgets; non-manifold and boundary edge counts not increased; any model
 # outside [10,300] mm is SKIPPED with a named reason, not silently passed; any model that
-# blows the budget even at RATIO_HI = 0.50 FAILS with DecimationBudgetUnreachable and
-# exports nothing (stage 4b) -- a SKIP and a FAIL are different outcomes and the test
-# asserts which one each model gets.
+# cannot safely reduce retains a strict-audited `AlreadyPrintScale` production mesh at
+# explicit ratio 1.00, with exact zero identity error and recorded refusal reason; a SKIP,
+# a native failure, and AlreadyPrintScale are distinct outcomes and the test asserts each.
 ```
 
 The CLI wiring (`plinth prepare --stop-after decimate`) is verified at **M4**, which owns
@@ -913,20 +972,18 @@ resin / high quality); it does not define a competing report vocabulary.
   through M7 compare like with like and orientation is not a confound. **This mechanism is
   load-bearing for three milestones' gates, so its contract is specified here exactly:**
 
-  1. Read `<baseline-dir>/<stem>.pipeline.json`. Walk `stages[]` to the entry named
-     `hollow` and take `log.orientation.{axis, deg}`.
-  2. **Absence of the `orientation` key means the identity rotation won.**
-     `hollow.orient_search` writes the key **only inside** its `if s < best[0]` branch
-     (`hollow.py:470`), so a model whose identity orientation was already best has no key
-     at all. Absent ⇒ identity. Do not treat it as an error.
+  1. Read `<baseline-dir>/<stem>.pipeline.json`. Require exactly one `stages[]` entry named
+     `hollow`, require its status to be `ok`, and take the frozen report field
+     `report.orientation.{axis, deg}`. A competing `log` field is ambiguous and invalid.
+  2. **Identity must be explicit.** A valid X/Y-axis orientation record with `deg: 0`
+     selects identity. A missing stage, missing orientation, skipped/non-`ok` status, or malformed
+     record is an invalid pinned baseline and must not silently select identity.
   3. Apply the rotation, then **reproduce the Python re-centering**, which the
      `{axis, deg}` pair does not capture: XY-center the bounding box and translate `zmin`
      to 0 (`hollow.py:472-474`). Skip this and every support lands offset.
-  4. A model whose baseline `hollow` stage is missing or `SKIPPED` has no pinned
-     orientation — `pipeline.py:379` records
-     `reason='hollow=False (orientation search skipped too)'` for that case. Treat it as
-     identity and record a non-blocking note in the `DefectReport`; do not emit a `Defect`
-     and do not guess.
+  4. A model whose required baseline fixture or valid orientation record is absent cannot
+     participate in pinned comparison. Fail with the named unreadable/invalid-baseline reason;
+     do not guess.
 - A coarse sweep driver over the `FaceTable`, including the legacy 13 candidates
   (identity + `±10/20/30°` about X and Y, exactly as `hollow.orient_search` enumerates them)
   so the old objective remains reproducible for comparison.

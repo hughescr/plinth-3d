@@ -1,0 +1,5 @@
+error[E0599]: no method named `into_parts` found for struct `FinalSupportAuthority<'a>` in the current scope
+ --> tests/compile_fail/final_support_authority_into_parts_private.rs:4:23
+  |
+4 |     let _ = authority.into_parts();
+  |                       ^^^^^^^^^^ method not found in `FinalSupportAuthority<'_>`

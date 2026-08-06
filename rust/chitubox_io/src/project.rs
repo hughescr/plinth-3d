@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use crate::codec::u32_of;
+use crate::codec::{add, mul, u32_of};
 use crate::consts::*;
 use crate::document::{bytes_to_f32, f32_to_bytes, Document, ModelEntry, Pristine};
 use crate::error::{ChituboxError, Result};
@@ -37,9 +37,9 @@ impl Project {
     }
 
     pub fn new_empty() -> Project {
-        Project {
-            doc: parse(EMPTY_TEMPLATE.to_vec()).expect("embedded empty.chitubox must parse"),
-        }
+        let mut doc = parse(EMPTY_TEMPLATE.to_vec()).expect("embedded empty.chitubox must parse");
+        doc.from_scratch = true;
+        Project { doc }
     }
 
     pub fn from_template_bytes(bytes: Vec<u8>) -> Result<Project> {
@@ -128,14 +128,29 @@ impl Project {
             });
         }
 
+        if built.is_empty() {
+            return Ok(Vec::new());
+        }
+        if !self.doc.from_scratch {
+            return Err(ChituboxError::UnsupportedOpaqueLayoutMutation {
+                operation: "adding models to a parsed project",
+            });
+        }
+
         // -- commit --
         let first_add = self.doc.models.is_empty();
         let start = self.doc.models.len();
+        let total = add(start, built.len(), "model count")?;
+        let descriptor_bytes = mul(
+            FROM_SCRATCH_MODEL_DESCRIPTOR_LEN,
+            total,
+            "from-scratch model descriptors",
+        )?;
         self.doc.models.extend(built);
-        // from-scratch builds need the native 48-byte unsupported front filler
-        if first_add && self.doc.front_filler.is_empty() {
-            self.doc.front_filler = vec![0u8; FROM_SCRATCH_FRONT_FILLER];
-        }
+        // The front region begins with one zero 24-byte descriptor per model.
+        // Only the explicit empty scaffold may synthesize these opaque slots;
+        // parsed projects preserve their front region and reject count changes.
+        self.doc.front_filler = vec![0u8; descriptor_bytes];
         // native populated files carry settings-size 420 (empty carries 0)
         if first_add && self.doc.settings_size == 0 {
             self.doc.settings_size = SETTINGS_SIZE_CONST;
@@ -555,9 +570,7 @@ impl Project {
         if !self.doc.dirty {
             if let Some(orig) = &self.doc.original {
                 if &bytes != orig {
-                    return Err(ChituboxError::VerifyFailed {
-                        detail: "clean structural rebuild differs from opened bytes".into(),
-                    });
+                    return Err(ChituboxError::CleanRoundtripDrift);
                 }
             }
         }

@@ -40,6 +40,11 @@ macro_rules! string_id {
 }
 
 string_id!(ModelId);
+// Stable logical identity for an emitted on-disk artifact. This is deliberately
+// distinct from ModelId: a format verifier must report an unreadable artifact
+// before it can discover any models in it, and absolute paths are not stable
+// report identities.
+string_id!(ArtifactId);
 string_id!(OrientationId);
 string_id!(PlateId);
 string_id!(ConstantId);

@@ -1,0 +1,142 @@
+use std::{path::PathBuf, process::Command};
+
+use plinth_core::{ArtifactId, LayerPlan, PositiveFinite};
+use plinth_decimate::{run as run_decimation, DecimationBudget, ProbeConfig};
+use plinth_hollow::{HollowedModel, SolidDecisionReason};
+use plinth_mesh::make_overhang_table;
+use plinth_orient::{run as run_orientation, OrientRequest, PinnedBaseline};
+use plinth_support::{
+    run_support, CoverageMeasurementLimits, CoverageMeasurementRequest, SupportPreparationLimits,
+    SupportRequest,
+};
+use plinth_verify::{verify_coverage, CoverageVerificationError};
+
+const THREAD_CHILD: &str = "PLINTH_VERIFY_COVERAGE_THREAD_CHILD";
+const THREAD_LINE: &str = "PLINTH_VERIFY_COVERAGE_JSON=";
+// The golden's `snapshot_digest` was refreshed (8022575652269967193 ->
+// 5304257786453935365) after ancestor commit 908d6df widened the
+// `verification_snapshot_digest` input set with `final_live_members_digest`
+// and the final live member count; every other field of the frozen report was
+// verified byte-identical. Any future widening must first flip the pinned
+// input-list test `verification_snapshot_digest_input_list_is_pinned` in
+// plinth-support's runner tests, forcing a deliberate refresh here.
+const FROZEN_REPORT_JSON: &str = include_str!("coverage_gate_overhang_table.json");
+
+fn verify_json(max_distance_work: usize) -> Result<String, CoverageVerificationError> {
+    let mesh = make_overhang_table().expect("procedural overhang table");
+    let budget =
+        DecimationBudget::ratified_default(ProbeConfig::new(1.0, 64 * 1024 * 1024, 10_000.0))
+            .expect("ratified decimation budget");
+    let decimated = run_decimation(&mesh, budget)
+        .expect("decimate procedural table")
+        .into_decimated_model()
+        .expect("print-scale table");
+    let oriented = run_orientation(
+        decimated,
+        &OrientRequest {
+            pinned: PinnedBaseline {
+                pipeline_report: PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../corpus/baseline/make_overhang_table.pipeline.json"),
+            },
+        },
+    )
+    .expect("pinned orientation");
+    let (mesh, orientation) = oriented.into_parts();
+    let hollowed =
+        HollowedModel::solid_decision(mesh, orientation, SolidDecisionReason::BelowThreshold)
+            .expect("solid decision");
+    let delicacy = vec![0.0; hollowed.mesh().tris().len()];
+    let layers = LayerPlan::new(0.0, vec![0.05; 1_000]).expect("layer plan");
+    let authority = run_support(
+        hollowed,
+        SupportRequest {
+            lift_mm: PositiveFinite::new(5.0).expect("positive lift"),
+        },
+        SupportPreparationLimits::production()
+            .expect("production support preparation limits")
+            .input(&layers, &delicacy, &[]),
+    )
+    .expect("explicit support run");
+    let snapshot = authority.verification_snapshot().expect("sealed snapshot");
+    let report = verify_coverage(
+        ArtifactId::from("coverage-gate-overhang-table"),
+        &snapshot,
+        request(max_distance_work),
+    )?;
+    assert!(!report.accepted());
+    assert_eq!(report.defects().len(), 9);
+    Ok(serde_json::to_string(&report).expect("serialize full coverage report"))
+}
+
+fn request(max_distance_work: usize) -> CoverageMeasurementRequest {
+    CoverageMeasurementRequest::from_f64(
+        1.0,
+        1.0,
+        CoverageMeasurementLimits::new(81, 77, 50_176, max_distance_work, 12_497_064, 5_820_416)
+            .expect("nonzero frozen limits"),
+    )
+    .expect("finite request")
+}
+
+fn report_json() -> String {
+    verify_json(1_574_912).expect("coverage report")
+}
+
+#[test]
+fn public_coverage_report_is_frozen_without_evidence_loss() {
+    if std::env::var_os(THREAD_CHILD).is_some() {
+        assert_eq!(
+            geom_kernel::current_threads().to_string(),
+            std::env::var("PLINTH_THREADS").unwrap()
+        );
+        println!("{THREAD_LINE}{}", report_json());
+        return;
+    }
+    let json = report_json();
+    assert_eq!(json, FROZEN_REPORT_JSON.trim_end());
+    assert!(json.contains("\"islands\""));
+    assert!(json.contains("\"patches\""));
+}
+
+#[test]
+fn cap_minus_one_returns_a_typed_error_without_a_report() {
+    assert_eq!(
+        verify_json(1_574_911),
+        Err(CoverageVerificationError::ResourceLimit {
+            resource: "distance work".to_owned()
+        })
+    );
+}
+
+#[test]
+fn complete_coverage_report_json_is_identical_at_one_four_and_sixteen_threads() {
+    if std::env::var_os(THREAD_CHILD).is_some() {
+        return;
+    }
+    let executable = std::env::current_exe().expect("coverage gate test executable");
+    let outputs = ["1", "4", "16"].map(|threads| {
+        let output = Command::new(&executable)
+            .args([
+                "--exact",
+                "public_coverage_report_is_frozen_without_evidence_loss",
+                "--nocapture",
+            ])
+            .env(THREAD_CHILD, "1")
+            .env("PLINTH_THREADS", threads)
+            .output()
+            .expect("coverage thread child starts");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout)
+            .expect("child output utf8")
+            .lines()
+            .find(|line| line.starts_with(THREAD_LINE))
+            .expect("child coverage json")
+            .to_owned()
+    });
+    assert_eq!(outputs[0], outputs[1]);
+    assert_eq!(outputs[0], outputs[2]);
+}

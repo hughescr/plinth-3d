@@ -6,6 +6,12 @@
 use crate::consts::EPS;
 use crate::mesh::Mesh;
 use crate::vec3::V3;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+// Result-inert instrumentation at the actual construction boundary. Count
+// attempts, not only retained NativeSurface instances, so failed/transient and
+// direct testkit builds cannot escape the reuse audit.
+static BVH_BUILD_ATTEMPTS: AtomicU64 = AtomicU64::new(0);
 
 pub const LEAF_MAX: usize = 8;
 const N_BINS: usize = 16;
@@ -52,6 +58,7 @@ fn surface_area(mn: V3, mx: V3) -> f64 {
 
 impl Bvh {
     pub fn build(mesh: &Mesh) -> Result<Bvh, String> {
+        BVH_BUILD_ATTEMPTS.fetch_add(1, Ordering::Relaxed);
         let n = mesh.nfaces();
         // per-triangle Möller pad = 2*EPS*(||E1||_inf + ||E2||_inf) (A11)
         let tri_pad: Vec<f64> = mesh
@@ -91,6 +98,10 @@ impl Bvh {
             depth: max_depth,
         })
     }
+}
+
+pub(crate) fn build_attempt_count() -> u64 {
+    BVH_BUILD_ATTEMPTS.load(Ordering::Relaxed)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -312,4 +323,21 @@ fn build_range(
     nodes[node_idx].b = right as i32;
     nodes[node_idx].leaf = false;
     Ok(node_idx)
+}
+
+#[cfg(test)]
+mod instrumentation_tests {
+    use super::*;
+
+    #[test]
+    fn direct_build_crosses_attempt_boundary() {
+        let mesh = Mesh::from_indexed(
+            &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            &[[0, 1, 2]],
+        )
+        .unwrap();
+        let before = build_attempt_count();
+        Bvh::build(&mesh).unwrap();
+        assert!(build_attempt_count() > before);
+    }
 }

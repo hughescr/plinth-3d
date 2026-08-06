@@ -32,8 +32,8 @@ pub use constants::{
     M0ConstantsError, M0EvidenceConstants, M0EvidenceConstantsError, M0PlaceholderConstants,
     M0PlaceholderConstantsError, NonNegativeFinite, PlaceholderValueError, PlacementXyMm,
     PositiveFinite, RegistryError, RegistryProvenance, RegistryProvenanceClass,
-    RegistryProvenanceView, SeedSpacingFactor, SphereTessellationPolicy, ToConstantValue,
-    TrialSetting, UnitFraction,
+    RegistryProvenanceView, ScarAreaCapPolicy, SeedSpacingFactor, SphereTessellationPolicy,
+    SupportResourceCapPolicy, ToConstantValue, TrialSetting, UnitFraction, VentDirections,
 };
 pub use cost::{
     CostError, CostVector, Fidelity, OptimizationError, OptimizationSummary, OrientationCost,
@@ -44,7 +44,9 @@ pub use defect::{
 };
 pub use digest::{digest_f64, digest_f64_slice, ContentDigest, DigestError};
 pub use frame::{Centered, Frame, Framed, Plated, Source};
-pub use id::{ConstantId, DecisionId, FixerId, ModelId, OrientationId, PlateId, StageId};
+pub use id::{
+    ArtifactId, ConstantId, DecisionId, FixerId, ModelId, OrientationId, PlateId, StageId,
+};
 pub use layer::{LayerPlan, LayerPlanError};
 pub use load::{EffectiveArmCount, LoadSharing, LoadSharingError};
 pub use metric::{MetricId, MetricSet, MetricValue};

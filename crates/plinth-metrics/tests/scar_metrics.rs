@@ -782,7 +782,7 @@ fn rows_are_ordered_and_source_indices_are_checked() {
 }
 
 #[test]
-fn committed_sphere_has_seven_reconstructed_stubs() {
+fn move_characterization_committed_sphere_pins_scar_weighted() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let sphere = root.join("corpus/baseline/Sphere.chitubox");
     assert!(

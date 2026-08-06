@@ -1,0 +1,10 @@
+error[E0624]: associated function `o10_live_current_support_and_raft` is private
+ --> tests/compile_fail/o10_compatibility_bridge_private.rs:4:34
+  |
+4 |     let _ = LegacyCompatibility::o10_live_current_support_and_raft();
+  |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private associated function
+  |
+ ::: src/legacy_compat.rs
+  |
+  |     pub(crate) fn o10_live_current_support_and_raft() -> Self {
+  |     --------------------------------------------------------- private associated function defined here

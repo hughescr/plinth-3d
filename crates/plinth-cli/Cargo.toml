@@ -8,3 +8,6 @@ publish = false
 [[bin]]
 name = "plinth"
 path = "src/main.rs"
+
+[dependencies]
+plinth-pipeline = { path = "../plinth-pipeline" }

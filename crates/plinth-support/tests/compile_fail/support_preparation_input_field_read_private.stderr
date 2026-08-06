@@ -1,0 +1,5 @@
+error[E0616]: field `coverage_samples_max_virtual_cells` of struct `SupportPreparationInput` is private
+ --> tests/compile_fail/support_preparation_input_field_read_private.rs:4:11
+  |
+4 |     input.coverage_samples_max_virtual_cells
+  |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ private field

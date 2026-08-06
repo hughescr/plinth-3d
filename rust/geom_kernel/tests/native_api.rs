@@ -1,18 +1,21 @@
 use geom_kernel::{
-    BatchInputError, Interval, NativeSurface, NativeSurfaceConfig, SurfaceBuildError,
-    SurfaceSubsetError, TriangleSoup,
+    indexed_triangle_soup_digest, triangle_soup_digest, BatchInputError, Interval, NativeSurface,
+    NativeSurfaceConfig, PenetrationBatchError, PenetrationBatchLimits, PlaneIntersectionKind,
+    PlaneSliceError, PlaneSliceLimits, SurfaceBuildError, SurfaceSubsetError, TriangleSoup,
 };
+use std::process::Command;
 
 const TRIANGLES: [[[f64; 3]; 3]; 1] = [[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]]];
 const NORMALS: [[f64; 3]; 1] = [[0.0, 0.0, 1.0]];
 const AREAS: [f64; 1] = [0.5];
 const BOUNDS: [[f64; 3]; 2] = [[0.0, 0.0, 0.0], [1.0, 1.0, 0.0]];
+const TEST_UNBOUNDED_GRID_BYTES: usize = usize::MAX;
 
 fn surface() -> NativeSurface {
     NativeSurface::from_triangle_soup(
         TriangleSoup::borrowed(&TRIANGLES, &NORMALS, &AREAS, BOUNDS),
         2.0,
-        usize::MAX,
+        TEST_UNBOUNDED_GRID_BYTES,
     )
     .unwrap()
 }
@@ -70,6 +73,392 @@ fn cube_surface() -> NativeSurface {
     cubes_surface(&[[0.0; 3]])
 }
 
+fn slice_limits() -> PlaneSliceLimits {
+    PlaneSliceLimits {
+        max_planes: usize::MAX,
+        max_triangle_plane_tests: usize::MAX,
+        max_intersections: usize::MAX,
+        max_output_bytes: usize::MAX,
+    }
+}
+
+#[test]
+fn slice_z_batch_matches_frozen_box_multiplane_vectors() {
+    let surface = cube_surface();
+    let batch = surface
+        .slice_z_batch(&[0.25, 0.75], slice_limits())
+        .unwrap();
+    assert_eq!(batch.plane_offsets, vec![0, 8, 16]);
+    assert_eq!(batch.candidate_work, 16);
+    let expected = [
+        [[0.25, 0.0, 0.25], [1.0, 0.0, 0.25]],
+        [[0.25, 0.0, 0.25], [0.0, 0.0, 0.25]],
+        [[1.0, 0.25, 0.25], [1.0, 1.0, 0.25]],
+        [[1.0, 0.25, 0.25], [1.0, 0.0, 0.25]],
+        [[0.75, 1.0, 0.25], [0.0, 1.0, 0.25]],
+        [[0.75, 1.0, 0.25], [1.0, 1.0, 0.25]],
+        [[0.0, 0.75, 0.25], [0.0, 0.0, 0.25]],
+        [[0.0, 0.75, 0.25], [0.0, 1.0, 0.25]],
+    ];
+    assert_eq!(
+        batch
+            .plane(0)
+            .iter()
+            .map(|event| event.face_id)
+            .collect::<Vec<_>>(),
+        (4..12).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        batch
+            .plane(0)
+            .iter()
+            .map(|event| event.segment)
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert!(batch
+        .intersections
+        .iter()
+        .all(|event| event.kind == PlaneIntersectionKind::Basic));
+}
+
+#[test]
+fn slice_z_batch_matches_frozen_tetrahedron_case_order_and_segments() {
+    let triangles = [
+        [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]],
+        [[0.0, 0.0, 0.0], [0.0, 0.0, 2.0], [2.0, 0.0, 0.0]],
+        [[2.0, 0.0, 0.0], [0.0, 0.0, 2.0], [0.0, 2.0, 0.0]],
+        [[0.0, 2.0, 0.0], [0.0, 0.0, 2.0], [0.0, 0.0, 0.0]],
+    ];
+    let surface = NativeSurface::from_triangle_soup(
+        TriangleSoup::borrowed(
+            &triangles,
+            &[[0.0, 0.0, 1.0]; 4],
+            &[1.0; 4],
+            [[0.0; 3], [2.0; 3]],
+        ),
+        2.0,
+        usize::MAX,
+    )
+    .unwrap();
+    let batch = surface.slice_z_batch(&[1.0], slice_limits()).unwrap();
+    assert_eq!(batch.plane_offsets, vec![0, 3]);
+    assert_eq!(
+        batch
+            .plane(0)
+            .iter()
+            .map(|event| event.face_id)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3]
+    );
+    assert!(batch
+        .plane(0)
+        .iter()
+        .all(|event| event.kind == PlaneIntersectionKind::Basic));
+    assert_eq!(
+        batch.plane(0)[0].segment,
+        [[1.0, 0.0, 1.0], [0.0, 0.0, 1.0]]
+    );
+    assert_eq!(
+        batch.plane(0)[1].segment,
+        [[0.0, 1.0, 1.0], [1.0, 0.0, 1.0]]
+    );
+    assert_eq!(
+        batch.plane(0)[2].segment,
+        [[0.0, 0.0, 1.0], [0.0, 1.0, 1.0]]
+    );
+}
+
+#[test]
+fn slice_z_batch_matches_frozen_shared_edge_coplanar_vertex_and_tolerance_fixture() {
+    let vertices = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 1.0],
+        [0.0, -1.0, -1.0],
+        [2.0, 0.0, 0.0],
+        [2.0, 1.0, 0.0],
+        [0.0, 2.0, 1.0],
+        [0.0, 3.0, -1.0],
+        [4.0, 0.0, 0.0],
+        [5.0, 0.0, 5.0e-9],
+        [4.0, 1.0, 1.0],
+    ];
+    let faces = [
+        [0, 1, 2],  // positive owner: shared edge is emitted
+        [1, 0, 3],  // negative owner: shared edge is suppressed
+        [0, 1, 4],  // fully coplanar patch
+        [1, 5, 4],  // fully coplanar patch
+        [0, 6, 7],  // vertex crossing
+        [0, 2, 6],  // vertex tangent, suppressed
+        [8, 9, 10], // 5e-9 is on-plane under frozen tol.merge
+    ];
+    let surface = NativeSurface::from_indexed(
+        &vertices,
+        &faces,
+        NativeSurfaceConfig {
+            grid_pitch_mm: 2.0,
+            max_grid_bytes: usize::MAX,
+        },
+    )
+    .unwrap();
+    let batch = surface.slice_z_batch(&[0.0], slice_limits()).unwrap();
+    assert_eq!(batch.plane_offsets, vec![0, 3]);
+    assert_eq!(
+        batch
+            .plane(0)
+            .iter()
+            .map(|event| event.face_id)
+            .collect::<Vec<_>>(),
+        vec![4, 0, 6]
+    );
+    assert_eq!(batch.plane(0)[0].kind, PlaneIntersectionKind::Vertex);
+    assert_eq!(
+        batch.plane(0)[0].segment,
+        [[0.0, 0.0, 0.0], [0.0, 2.5, 0.0]]
+    );
+    assert_eq!(batch.plane(0)[1].kind, PlaneIntersectionKind::PositiveEdge);
+    assert_eq!(
+        batch.plane(0)[1].segment,
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]
+    );
+    assert_eq!(batch.plane(0)[2].kind, PlaneIntersectionKind::PositiveEdge);
+    assert_eq!(
+        batch.plane(0)[2].segment,
+        [[4.0, 0.0, 0.0], [5.0, 0.0, 5.0e-9]]
+    );
+}
+
+#[test]
+fn slice_z_batch_uses_exact_source_vertex_bits_at_tol_merge_boundary_neighbors() {
+    const PLANE_BITS: u64 = 0x3eb0_9c04_82f1_8c75;
+    const LOW_Z_BITS: u64 = 0x3eb0_c6f7_a0b5_ed8d;
+    const EXPECTED_B: [u64; 3] = [0x3ff0_0000_0000_0000, 0, LOW_Z_BITS];
+    const EXPECTED_C: [u64; 3] = [0, 0x3ff0_0000_0000_0000, LOW_Z_BITS];
+
+    let plane = f64::from_bits(PLANE_BITS);
+    assert_eq!(plane, 9.9e-7);
+    let planes = [
+        f64::from_bits(PLANE_BITS - 1),
+        plane,
+        f64::from_bits(PLANE_BITS + 1),
+    ];
+    let triangle = [
+        [0.0, 0.0, 0.1],
+        [1.0, 0.0, f64::from_bits(LOW_Z_BITS)],
+        [0.0, 1.0, f64::from_bits(LOW_Z_BITS)],
+    ];
+    let indexed = NativeSurface::from_indexed(
+        &triangle,
+        &[[0, 1, 2]],
+        NativeSurfaceConfig {
+            grid_pitch_mm: 2.0,
+            max_grid_bytes: usize::MAX,
+        },
+    )
+    .unwrap();
+    let soup = NativeSurface::from_triangle_soup(
+        TriangleSoup::borrowed(
+            &[triangle],
+            &[[0.0, 0.0, 1.0]],
+            &[0.5],
+            [[0.0, 0.0, f64::from_bits(LOW_Z_BITS)], [1.0, 1.0, 0.1]],
+        ),
+        2.0,
+        usize::MAX,
+    )
+    .unwrap();
+
+    for surface in [&indexed, &soup] {
+        let batch = surface.slice_z_batch(&planes, slice_limits()).unwrap();
+        // Frozen Trimesh: one ULP below makes both low vertices positive;
+        // the exact plane and one ULP above classify them on-plane.
+        assert_eq!(batch.plane_offsets, vec![0, 0, 1, 2]);
+        assert_eq!(batch.intersections.len(), 2);
+        for event in &batch.intersections {
+            assert_eq!(event.kind, PlaneIntersectionKind::PositiveEdge);
+            assert_eq!(event.segment[0].map(f64::to_bits), EXPECTED_B);
+            assert_eq!(event.segment[1].map(f64::to_bits), EXPECTED_C);
+        }
+    }
+}
+
+#[test]
+fn slice_z_batch_preserves_both_frozen_face_owners_for_duplicate_positive_edge() {
+    let vertices = [
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 1.0],
+        [0.0, -1.0, 2.0],
+    ];
+    let surface = NativeSurface::from_indexed(
+        &vertices,
+        &[[0, 1, 2], [1, 0, 3]],
+        NativeSurfaceConfig {
+            grid_pitch_mm: 2.0,
+            max_grid_bytes: usize::MAX,
+        },
+    )
+    .unwrap();
+    let batch = surface.slice_z_batch(&[0.0], slice_limits()).unwrap();
+    assert_eq!(batch.plane_offsets, vec![0, 2]);
+    assert_eq!(
+        batch.plane(0),
+        [
+            geom_kernel::PlaneIntersection {
+                face_id: 0,
+                kind: PlaneIntersectionKind::PositiveEdge,
+                segment: [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            },
+            geom_kernel::PlaneIntersection {
+                face_id: 1,
+                kind: PlaneIntersectionKind::PositiveEdge,
+                segment: [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0]],
+            },
+        ]
+    );
+}
+
+#[test]
+fn slice_z_batch_preflights_bvh_candidate_caps_at_exact_boundary() {
+    let surface = cube_surface();
+    let planes = [0.5];
+    let candidates = 8;
+    let output_bytes = 2 * std::mem::size_of::<usize>()
+        + candidates * std::mem::size_of::<geom_kernel::PlaneIntersection>();
+    let limits = PlaneSliceLimits {
+        max_planes: 1,
+        max_triangle_plane_tests: candidates,
+        max_intersections: candidates,
+        max_output_bytes: output_bytes,
+    };
+    surface
+        .slice_z_batch(&planes, limits)
+        .expect("exact candidate-derived cap accepted");
+    assert!(matches!(
+        surface.slice_z_batch(
+            &planes,
+            PlaneSliceLimits {
+                max_planes: 0,
+                ..limits
+            }
+        ),
+        Err(PlaneSliceError::PlaneCountCap { .. })
+    ));
+    assert!(matches!(
+        surface.slice_z_batch(
+            &planes,
+            PlaneSliceLimits {
+                max_triangle_plane_tests: limits.max_triangle_plane_tests - 1,
+                ..limits
+            }
+        ),
+        Err(PlaneSliceError::TrianglePlaneWorkCap { .. })
+    ));
+    assert!(matches!(
+        surface.slice_z_batch(
+            &planes,
+            PlaneSliceLimits {
+                max_intersections: limits.max_intersections - 1,
+                ..limits
+            }
+        ),
+        Err(PlaneSliceError::IntersectionCap { .. })
+    ));
+    assert!(matches!(
+        surface.slice_z_batch(
+            &planes,
+            PlaneSliceLimits {
+                max_output_bytes: limits.max_output_bytes - 1,
+                ..limits
+            }
+        ),
+        Err(PlaneSliceError::OutputBytesCap { .. })
+    ));
+}
+
+#[test]
+fn slice_z_batch_outside_mesh_has_zero_candidate_work_not_faces_times_planes() {
+    let surface = cube_surface();
+    let limits = PlaneSliceLimits {
+        max_planes: 2,
+        max_triangle_plane_tests: 0,
+        max_intersections: 0,
+        max_output_bytes: 3 * std::mem::size_of::<usize>(),
+    };
+    let batch = surface.slice_z_batch(&[-10.0, 10.0], limits).unwrap();
+    assert_eq!(batch.candidate_work, 0);
+    assert_eq!(batch.plane_offsets, vec![0, 0, 0]);
+    assert!(batch.intersections.is_empty());
+}
+
+fn update_slice_hash(hash: &mut u64, value: u64) {
+    *hash ^= value;
+    *hash = hash.wrapping_mul(1_099_511_628_211);
+}
+
+#[test]
+fn slicing_thread_identity_child() {
+    let surface = cube_surface();
+    let planes: Vec<f64> = (0..8192)
+        .map(|index| if index % 2 == 0 { 0.25 } else { 0.75 })
+        .collect();
+    let batch = surface.slice_z_batch(&planes, slice_limits()).unwrap();
+    let mut hash = 1_469_598_103_934_665_603u64;
+    for &offset in &batch.plane_offsets {
+        update_slice_hash(&mut hash, offset as u64);
+    }
+    for event in &batch.intersections {
+        update_slice_hash(&mut hash, event.face_id as u64);
+        update_slice_hash(&mut hash, event.kind as u64);
+        for point in event.segment {
+            for value in point {
+                update_slice_hash(&mut hash, value.to_bits());
+            }
+        }
+    }
+    println!(
+        "SLICE_FINGERPRINT:{}:{}:{}:{hash}",
+        batch.effective_threads, batch.participating_threads, batch.candidate_work
+    );
+}
+
+#[test]
+fn slicing_thread_identity_is_subprocess_invariant() {
+    let executable = std::env::current_exe().unwrap();
+    let mut fingerprints = Vec::new();
+    for threads in ["1", "4", "16"] {
+        let output = Command::new(&executable)
+            .args(["--exact", "slicing_thread_identity_child", "--nocapture"])
+            .env("PLINTH_THREADS", threads)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child thread count {threads} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let line = stdout
+            .lines()
+            .find(|line| line.starts_with("SLICE_FINGERPRINT:"))
+            .unwrap();
+        let fields: Vec<&str> = line.split(':').collect();
+        assert_eq!(fields[1], threads, "effective pool mismatch: {line}");
+        let participating: usize = fields[2].parse().unwrap();
+        let configured: usize = threads.parse().unwrap();
+        assert!(
+            (1..=configured).contains(&participating),
+            "actual participation is outside the configured pool: {line}"
+        );
+        fingerprints.push((fields[3].to_owned(), fields[4].to_owned()));
+    }
+    assert!(
+        fingerprints.windows(2).all(|pair| pair[0] == pair[1]),
+        "{fingerprints:?}"
+    );
+}
+
 fn assert_intervals_equal(left: &[Vec<Interval>], right: &[Vec<Interval>]) {
     assert_eq!(left.len(), right.len());
     for (left_row, right_row) in left.iter().zip(right) {
@@ -83,6 +472,462 @@ fn assert_intervals_equal(left: &[Vec<Interval>], right: &[Vec<Interval>]) {
             assert_eq!(left.ray, right.ray);
         }
     }
+}
+
+fn bounded_penetration(
+    surface: &NativeSurface,
+    p0s: &[[f64; 3]],
+    p1s: &[[f64; 3]],
+    limits: PenetrationBatchLimits,
+) -> Result<Vec<Vec<Interval>>, PenetrationBatchError> {
+    surface.penetration_intervals_batch_bounded(
+        p0s,
+        p1s,
+        &vec![0.0; p0s.len()],
+        &vec![0.0; p0s.len()],
+        0,
+        0.12,
+        8,
+        0.05,
+        false,
+        limits,
+    )
+}
+
+fn generous_penetration_limits() -> PenetrationBatchLimits {
+    PenetrationBatchLimits {
+        max_rows: usize::MAX,
+        max_total_work: usize::MAX,
+        max_total_hits: usize::MAX,
+        max_total_samples: usize::MAX,
+        max_total_intervals: usize::MAX,
+        max_scratch_bytes: usize::MAX,
+    }
+}
+
+const HETEROGENEOUS_P0: [[f64; 3]; 3] = [[-1.0, 0.5, 0.5], [0.25, 0.25, -1.0], [1.25, 2.0, 0.5]];
+const HETEROGENEOUS_P1: [[f64; 3]; 3] = [[4.0, 0.5, 0.5], [0.25, 0.25, 2.0], [3.75, 2.0, 0.5]];
+const HETEROGENEOUS_RADII: [f64; 3] = [0.1, 0.05, 0.2];
+
+fn heterogeneous_penetration(
+    surface: &NativeSurface,
+    limits: PenetrationBatchLimits,
+) -> Result<Vec<Vec<Interval>>, PenetrationBatchError> {
+    surface.penetration_intervals_batch_bounded(
+        &HETEROGENEOUS_P0,
+        &HETEROGENEOUS_P1,
+        &HETEROGENEOUS_RADII,
+        &HETEROGENEOUS_RADII,
+        2,
+        0.12,
+        8,
+        0.05,
+        true,
+        limits,
+    )
+}
+
+#[test]
+fn bounded_penetration_frozen_heterogeneous_rows_are_bit_exact_and_ordered() {
+    let surface = cubes_surface(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+    let rows = heterogeneous_penetration(&surface, generous_penetration_limits()).unwrap();
+    type FrozenInterval = (i32, u64, u64, u64, bool, bool);
+    let expected: [&[FrozenInterval]; 3] = [
+        &[
+            (
+                -1,
+                4_607_182_418_800_017_408,
+                4_611_686_018_427_387_904,
+                4_601_678_019_255_453_472,
+                true,
+                true,
+            ),
+            (
+                -1,
+                4_613_937_818_241_073_153,
+                4_616_189_618_054_758_400,
+                4_601_678_019_255_453_480,
+                true,
+                true,
+            ),
+            (
+                0,
+                4_607_182_418_800_017_408,
+                4_611_686_018_427_387_904,
+                4_600_877_379_321_698_714,
+                true,
+                true,
+            ),
+            (
+                0,
+                4_613_937_818_241_073_153,
+                4_616_189_618_054_758_400,
+                4_600_877_379_321_698_714,
+                true,
+                true,
+            ),
+            (
+                1,
+                4_607_182_418_800_017_408,
+                4_611_686_018_427_387_904,
+                4_600_877_379_321_698_714,
+                true,
+                true,
+            ),
+            (
+                1,
+                4_613_937_818_241_073_153,
+                4_616_189_618_054_758_400,
+                4_600_877_379_321_698_714,
+                true,
+                true,
+            ),
+        ],
+        &[
+            (
+                -1,
+                4_607_182_418_800_017_408,
+                4_611_686_018_427_387_904,
+                4_598_175_219_545_276_416,
+                true,
+                true,
+            ),
+            (
+                0,
+                4_607_182_418_800_017_408,
+                4_611_686_018_427_387_904,
+                4_598_175_219_545_276_416,
+                true,
+                true,
+            ),
+            (
+                1,
+                4_607_182_418_800_017_408,
+                4_611_686_018_427_387_904,
+                4_596_373_779_694_328_218,
+                true,
+                true,
+            ),
+        ],
+        &[],
+    ];
+    assert_eq!(rows.len(), expected.len());
+    for (row, expected_row) in rows.iter().zip(expected) {
+        let actual = row
+            .iter()
+            .map(|interval| {
+                (
+                    interval.ray,
+                    interval.s_a.to_bits(),
+                    interval.s_b.to_bits(),
+                    interval.max_depth.to_bits(),
+                    interval.entered,
+                    interval.exited,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected_row);
+    }
+}
+
+#[test]
+fn bounded_penetration_preflights_every_resource_at_exact_cap() {
+    let surface = cube_surface();
+    let p0s = [[-1.0, 0.5, 0.5]];
+    let p1s = [[2.0, 0.5, 0.5]];
+    let limits = surface
+        .penetration_intervals_batch_worst_case_limits(1, 0, 8, false)
+        .unwrap();
+    let bounded = bounded_penetration(&surface, &p0s, &p1s, limits).unwrap();
+    assert_eq!(bounded.len(), 1);
+    assert_eq!(bounded[0].len(), 1);
+    let interval = &bounded[0][0];
+    assert_eq!(interval.s_a.to_bits(), 1.0f64.to_bits());
+    assert_eq!(interval.s_b.to_bits(), 2.0f64.to_bits());
+    assert_eq!(interval.max_depth.to_bits(), 4_601_678_019_255_453_472);
+    assert!(interval.entered);
+    assert!(interval.exited);
+    assert_eq!(interval.ray, -1);
+
+    for (resource, reduced) in [
+        (
+            "rows",
+            geom_kernel::PenetrationBatchLimits {
+                max_rows: limits.max_rows - 1,
+                ..limits
+            },
+        ),
+        (
+            "work",
+            geom_kernel::PenetrationBatchLimits {
+                max_total_work: limits.max_total_work - 1,
+                ..limits
+            },
+        ),
+        (
+            "hits",
+            geom_kernel::PenetrationBatchLimits {
+                max_total_hits: limits.max_total_hits - 1,
+                ..limits
+            },
+        ),
+        (
+            "samples",
+            geom_kernel::PenetrationBatchLimits {
+                max_total_samples: limits.max_total_samples - 1,
+                ..limits
+            },
+        ),
+        (
+            "intervals",
+            geom_kernel::PenetrationBatchLimits {
+                max_total_intervals: limits.max_total_intervals - 1,
+                ..limits
+            },
+        ),
+        (
+            "scratch bytes",
+            geom_kernel::PenetrationBatchLimits {
+                max_scratch_bytes: limits.max_scratch_bytes - 1,
+                ..limits
+            },
+        ),
+    ] {
+        assert!(matches!(
+            bounded_penetration(&surface, &p0s, &p1s, reduced),
+            Err(PenetrationBatchError::ResourceLimitExceeded { resource: actual, .. }) if actual == resource
+        ));
+    }
+}
+
+#[test]
+fn bounded_penetration_handles_zero_rows_and_checked_overflow() {
+    let surface = cube_surface();
+    let zero = geom_kernel::PenetrationBatchLimits {
+        max_rows: 0,
+        max_total_work: 0,
+        max_total_hits: 0,
+        max_total_samples: 0,
+        max_total_intervals: 0,
+        max_scratch_bytes: 0,
+    };
+    assert_eq!(
+        surface
+            .penetration_intervals_batch_bounded(&[], &[], &[], &[], 0, 0.12, 8, 0.05, false, zero,)
+            .unwrap()
+            .len(),
+        0
+    );
+    assert!(matches!(
+        surface.penetration_intervals_batch_worst_case_limits(1, usize::MAX, 8, true),
+        Err(PenetrationBatchError::ArithmeticOverflow { .. })
+    ));
+}
+
+#[test]
+fn bounded_penetration_high_crossing_mesh_has_one_ordered_refusal() {
+    let surface = cubes_surface(&[
+        [0.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0],
+        [4.0, 0.0, 0.0],
+        [6.0, 0.0, 0.0],
+    ]);
+    let p0s = [[-1.0, 0.5, 0.5], [-1.0, 0.5, 0.5]];
+    let p1s = [[8.0, 0.5, 0.5], [8.0, 0.5, 0.5]];
+    let limits = surface
+        .penetration_intervals_batch_worst_case_limits(2, 0, 8, false)
+        .unwrap();
+    let intervals = bounded_penetration(&surface, &p0s, &p1s, limits).unwrap();
+    assert_eq!(intervals.len(), 2);
+    assert!(intervals[0].len() >= 4, "all four cubes are crossed");
+    let below = geom_kernel::PenetrationBatchLimits {
+        max_total_hits: limits.max_total_hits - 1,
+        ..limits
+    };
+    assert!(matches!(
+        bounded_penetration(&surface, &p0s, &p1s, below),
+        Err(PenetrationBatchError::ResourceLimitExceeded {
+            resource: "hits",
+            required,
+            limit,
+        }) if required == limits.max_total_hits && limit == limits.max_total_hits - 1
+    ));
+}
+
+#[test]
+fn bounded_penetration_deep_bvh_and_parity_scratch_obey_exact_cap() {
+    let origins = (0..128)
+        .map(|index| [2.0 * index as f64, 0.0, 0.0])
+        .collect::<Vec<_>>();
+    let surface = cubes_surface(&origins);
+    assert!(surface.bvh.depth > 4);
+    assert!(surface.pv.grids.iter().any(|grid| grid.max_occ > 0));
+    let p0s = [[-1.0, 0.5, 0.5]];
+    let p1s = [[256.0, 0.5, 0.5]];
+    let limits = surface
+        .penetration_intervals_batch_worst_case_limits(1, 0, 8, false)
+        .unwrap();
+    assert!(bounded_penetration(&surface, &p0s, &p1s, limits).is_ok());
+    let below = PenetrationBatchLimits {
+        max_scratch_bytes: limits.max_scratch_bytes - 1,
+        ..limits
+    };
+    assert!(matches!(
+        bounded_penetration(&surface, &p0s, &p1s, below),
+        Err(PenetrationBatchError::ResourceLimitExceeded {
+            resource: "scratch bytes",
+            required,
+            limit,
+        }) if required == limits.max_scratch_bytes && limit == limits.max_scratch_bytes - 1
+    ));
+}
+
+fn update_penetration_hash(hash: &mut u64, value: u64) {
+    *hash ^= value;
+    *hash = hash.wrapping_mul(1_099_511_628_211);
+}
+
+#[test]
+fn bounded_penetration_thread_identity_child() {
+    let surface = cubes_surface(&[[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]]);
+    let limits = surface
+        .penetration_intervals_batch_worst_case_limits(HETEROGENEOUS_P0.len(), 2, 8, true)
+        .unwrap();
+    let rows = heterogeneous_penetration(&surface, limits).unwrap();
+    let mut hash = 1_469_598_103_934_665_603u64;
+    for (row_index, row) in rows.into_iter().enumerate() {
+        update_penetration_hash(&mut hash, 0x524f_575f_4245_4749 ^ row_index as u64);
+        update_penetration_hash(&mut hash, row.len() as u64);
+        for interval in row {
+            update_penetration_hash(&mut hash, interval.s_a.to_bits());
+            update_penetration_hash(&mut hash, interval.s_b.to_bits());
+            update_penetration_hash(&mut hash, interval.max_depth.to_bits());
+            update_penetration_hash(&mut hash, interval.entered as u64);
+            update_penetration_hash(&mut hash, interval.exited as u64);
+            update_penetration_hash(&mut hash, interval.ray as u64);
+        }
+        update_penetration_hash(&mut hash, 0x524f_575f_454e_4421 ^ row_index as u64);
+    }
+    let configured = geom_kernel::current_threads();
+    let effective = geom_kernel::ordered_index_map(
+        &[0u8],
+        geom_kernel::OrderedMapLimits::new(1, std::mem::size_of::<u8>()),
+        |_, value| *value,
+    )
+    .unwrap()
+    .effective_threads();
+    println!("PENETRATION_FINGERPRINT:{configured}:{effective}:{hash}");
+}
+
+#[test]
+fn bounded_penetration_thread_identity_is_subprocess_invariant() {
+    let executable = std::env::current_exe().unwrap();
+    let mut fingerprints = Vec::new();
+    for threads in ["1", "4", "16"] {
+        let output = Command::new(&executable)
+            .args([
+                "--exact",
+                "bounded_penetration_thread_identity_child",
+                "--nocapture",
+            ])
+            .env("PLINTH_THREADS", threads)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child thread count {threads} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let line = stdout
+            .lines()
+            .find(|line| line.starts_with("PENETRATION_FINGERPRINT:"))
+            .unwrap();
+        let fields: Vec<&str> = line.split(':').collect();
+        assert_eq!(fields[1], threads, "configured count mismatch: {line}");
+        assert_eq!(fields[2], threads, "effective pool mismatch: {line}");
+        fingerprints.push(fields[3].to_owned());
+    }
+    assert!(fingerprints.windows(2).all(|pair| pair[0] == pair[1]));
+}
+
+#[test]
+fn indexed_memory_estimate_is_checked_and_is_the_exact_grid_cap_boundary() {
+    let vertices = [[0.0, 0.0, 0.0], [8.0, 0.0, 0.0], [0.0, 8.0, 0.0]];
+    let faces = [[0, 1, 2]];
+    let estimate = NativeSurface::estimate_index_memory_from_indexed(&vertices, &faces, 0.5)
+        .expect("allocation-free estimate");
+    assert!(estimate.peak_bytes() >= estimate.retained_bytes());
+    assert!(estimate.max_axis_grid_bytes() > 0);
+    assert!(estimate
+        .axis_references()
+        .iter()
+        .all(|references| *references > 0));
+    NativeSurface::from_indexed(
+        &vertices,
+        &faces,
+        NativeSurfaceConfig {
+            grid_pitch_mm: 0.5,
+            max_grid_bytes: estimate.max_axis_grid_bytes(),
+        },
+    )
+    .expect("the estimated cap accepts the indexed surface");
+    let below = NativeSurface::from_indexed(
+        &vertices,
+        &faces,
+        NativeSurfaceConfig {
+            grid_pitch_mm: 0.5,
+            max_grid_bytes: estimate.max_axis_grid_bytes() - 1,
+        },
+    );
+    assert!(matches!(
+        below,
+        Err(SurfaceBuildError::GridBudget {
+            projected_bytes,
+            limit_bytes,
+            ..
+        }) if projected_bytes == estimate.max_axis_grid_bytes()
+            && limit_bytes == estimate.max_axis_grid_bytes() - 1
+    ));
+
+    assert!(matches!(
+        NativeSurface::estimate_index_memory_from_indexed(&vertices, &faces, 0.0),
+        Err(SurfaceBuildError::InvalidGridPitch(0.0))
+    ));
+}
+
+#[test]
+fn indexed_estimator_mirrors_edge_reconstruction_at_floating_cell_boundaries() {
+    // `a + (b - a)` lands just below the source bit-pattern at this scale.
+    // The indexed store intentionally retains edges, so its allocation
+    // preflight must bin the reconstructed vertex exactly like the builder.
+    let vertices = vec![
+        [1.0, 0.0, 0.0],
+        [0.1, 0.0, 0.0],
+        [0.0, 1.0, 1.0],
+        [0.0, 0.0, 2.0],
+    ];
+    let faces = vec![[0, 1, 2], [1, 3, 2]];
+    let estimate = NativeSurface::estimate_index_memory_from_indexed(&vertices, &faces, 0.1)
+        .expect("finite indexed estimate");
+    NativeSurface::from_indexed(
+        &vertices,
+        &faces,
+        NativeSurfaceConfig {
+            grid_pitch_mm: 0.1,
+            max_grid_bytes: estimate.max_axis_grid_bytes(),
+        },
+    )
+    .expect("exact reconstructed-coordinate cap");
+    assert!(NativeSurface::from_indexed(
+        &vertices,
+        &faces,
+        NativeSurfaceConfig {
+            grid_pitch_mm: 0.1,
+            max_grid_bytes: estimate.max_axis_grid_bytes() - 1,
+        },
+    )
+    .is_err());
 }
 
 fn assert_batch_error<T>(
@@ -106,6 +951,27 @@ fn assert_batch_error<T>(
     }
 }
 
+fn assert_penetration_input_error<T>(
+    result: Result<T, PenetrationBatchError>,
+    operation: &'static str,
+    field: &'static str,
+    expected: usize,
+    actual: usize,
+) {
+    match result {
+        Err(error) => assert_eq!(
+            error,
+            PenetrationBatchError::Input(BatchInputError {
+                operation,
+                field,
+                expected,
+                actual,
+            })
+        ),
+        Ok(_) => panic!("{operation} accepted mismatched {field}"),
+    }
+}
+
 fn subset_error(result: Result<NativeSurface, SurfaceSubsetError>) -> SurfaceSubsetError {
     match result {
         Err(error) => error,
@@ -118,13 +984,13 @@ fn owned_and_borrowed_triangle_soups_expose_the_same_batch_api() {
     let borrowed = NativeSurface::from_triangle_soup(
         TriangleSoup::borrowed(&TRIANGLES, &NORMALS, &AREAS, BOUNDS),
         2.0,
-        usize::MAX,
+        TEST_UNBOUNDED_GRID_BYTES,
     )
     .unwrap();
     let owned = NativeSurface::from_triangle_soup(
         TriangleSoup::owned(TRIANGLES.to_vec(), NORMALS.to_vec(), AREAS.to_vec(), BOUNDS),
         2.0,
-        usize::MAX,
+        TEST_UNBOUNDED_GRID_BYTES,
     )
     .unwrap();
 
@@ -134,6 +1000,68 @@ fn owned_and_borrowed_triangle_soups_expose_the_same_batch_api() {
         borrowed.query(&points, f64::INFINITY),
         owned.query(&points, f64::INFINITY)
     );
+}
+
+#[test]
+fn source_triangle_soup_digest_binds_face_vertex_and_ieee_order() {
+    let triangles = [
+        [[-0.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 2.0, 0.0]],
+        [[0.0, 0.0, 1.0], [2.0, 0.0, 1.0], [0.0, 2.0, 1.0]],
+    ];
+    let canonical = triangle_soup_digest(&triangles);
+
+    let mut face_reordered = triangles;
+    face_reordered.swap(0, 1);
+    assert_ne!(canonical, triangle_soup_digest(&face_reordered));
+
+    let mut vertex_permuted = triangles;
+    vertex_permuted[0].rotate_left(1);
+    assert_ne!(canonical, triangle_soup_digest(&vertex_permuted));
+
+    let mut winding_reversed = triangles;
+    winding_reversed[0].swap(1, 2);
+    assert_ne!(canonical, triangle_soup_digest(&winding_reversed));
+
+    let mut positive_zero = triangles;
+    positive_zero[0][0][0] = 0.0;
+    assert_ne!(canonical, triangle_soup_digest(&positive_zero));
+
+    let vertices = [
+        [-0.0, 0.0, 0.0],
+        [2.0, 0.0, 0.0],
+        [0.0, 2.0, 0.0],
+        [0.0, 0.0, 1.0],
+        [2.0, 0.0, 1.0],
+        [0.0, 2.0, 1.0],
+    ];
+    let faces = [[0, 1, 2], [3, 4, 5]];
+    assert_eq!(
+        indexed_triangle_soup_digest(&vertices, &faces),
+        Some(canonical)
+    );
+    let indexed = NativeSurface::from_indexed(
+        &vertices,
+        &faces,
+        NativeSurfaceConfig {
+            grid_pitch_mm: 2.0,
+            max_grid_bytes: TEST_UNBOUNDED_GRID_BYTES,
+        },
+    )
+    .unwrap();
+    assert_eq!(indexed.source_triangle_soup_digest(), canonical);
+
+    let soup = NativeSurface::from_triangle_soup(
+        TriangleSoup::borrowed(
+            &triangles,
+            &[[0.0, 0.0, 1.0]; 2],
+            &[2.0, 2.0],
+            [[-0.0, 0.0, 0.0], [2.0, 2.0, 1.0]],
+        ),
+        2.0,
+        TEST_UNBOUNDED_GRID_BYTES,
+    )
+    .unwrap();
+    assert_eq!(soup.source_triangle_soup_digest(), canonical);
 }
 
 #[test]
@@ -173,6 +1101,10 @@ fn subsets_validate_caller_order_and_return_global_face_ids() {
     );
 
     let identity = full.subset(&[2, 1, 0]).unwrap();
+    assert_eq!(
+        identity.source_triangle_soup_digest(),
+        full.source_triangle_soup_digest()
+    );
     assert_eq!(identity.bounds(), full.bounds());
     assert_eq!(
         identity.query(&[[0.25, 0.25, 1.0]], f64::INFINITY),
@@ -183,6 +1115,10 @@ fn subsets_validate_caller_order_and_return_global_face_ids() {
     let tied = full.subset(&[2, 0]).unwrap();
     let tied_reordered = full.subset(&[0, 2]).unwrap();
     assert_eq!(tied.face_ids(), &[0, 2]);
+    assert_ne!(
+        tied.source_triangle_soup_digest(),
+        full.source_triangle_soup_digest()
+    );
     assert_eq!(tied.face_ids(), tied_reordered.face_ids());
     assert_eq!(tied.nfaces(), 2);
     assert_eq!(tied.geometry().nfaces(), 3);
@@ -270,10 +1206,32 @@ fn identity_subset_matches_every_native_query_family() {
             .unwrap()
     );
     let full_intervals = full
-        .penetration_intervals_batch(&p0s, &p1s, &radii, &radii, 4, 0.12, 80, 0.05, true)
+        .penetration_intervals_batch_bounded(
+            &p0s,
+            &p1s,
+            &radii,
+            &radii,
+            4,
+            0.12,
+            80,
+            0.05,
+            true,
+            generous_penetration_limits(),
+        )
         .unwrap();
     let subset_intervals = subset
-        .penetration_intervals_batch(&p0s, &p1s, &radii, &radii, 4, 0.12, 80, 0.05, true)
+        .penetration_intervals_batch_bounded(
+            &p0s,
+            &p1s,
+            &radii,
+            &radii,
+            4,
+            0.12,
+            80,
+            0.05,
+            true,
+            generous_penetration_limits(),
+        )
         .unwrap();
     assert_intervals_equal(&full_intervals, &subset_intervals);
     assert_eq!(
@@ -332,10 +1290,32 @@ fn sparse_nested_subset_matches_every_native_query_family_and_owns_its_cache() {
             .unwrap()
     );
     let parent_intervals = parent
-        .penetration_intervals_batch(&p0s, &p1s, &radii, &radii, 4, 0.12, 80, 0.05, true)
+        .penetration_intervals_batch_bounded(
+            &p0s,
+            &p1s,
+            &radii,
+            &radii,
+            4,
+            0.12,
+            80,
+            0.05,
+            true,
+            generous_penetration_limits(),
+        )
         .unwrap();
     let child_intervals = child
-        .penetration_intervals_batch(&p0s, &p1s, &radii, &radii, 4, 0.12, 80, 0.05, true)
+        .penetration_intervals_batch_bounded(
+            &p0s,
+            &p1s,
+            &radii,
+            &radii,
+            4,
+            0.12,
+            80,
+            0.05,
+            true,
+            generous_penetration_limits(),
+        )
         .unwrap();
     assert_intervals_equal(&parent_intervals, &child_intervals);
     assert_eq!(
@@ -367,14 +1347,14 @@ fn malformed_and_nonfinite_inputs_return_named_errors() {
     let empty = NativeSurface::from_triangle_soup(
         TriangleSoup::borrowed(&[], &[], &[], BOUNDS),
         2.0,
-        usize::MAX,
+        TEST_UNBOUNDED_GRID_BYTES,
     );
     assert!(matches!(empty, Err(SurfaceBuildError::EmptyTriangleSoup)));
 
     let mismatch = NativeSurface::from_triangle_soup(
         TriangleSoup::borrowed(&TRIANGLES, &[], &AREAS, BOUNDS),
         2.0,
-        usize::MAX,
+        TEST_UNBOUNDED_GRID_BYTES,
     );
     assert!(matches!(
         mismatch,
@@ -390,7 +1370,7 @@ fn malformed_and_nonfinite_inputs_return_named_errors() {
     let error = NativeSurface::from_triangle_soup(
         TriangleSoup::borrowed(&nonfinite, &NORMALS, &AREAS, BOUNDS),
         2.0,
-        usize::MAX,
+        TEST_UNBOUNDED_GRID_BYTES,
     );
     assert!(matches!(
         error,
@@ -408,7 +1388,7 @@ fn malformed_and_nonfinite_inputs_return_named_errors() {
             [[2.0, 0.0, 0.0], [1.0, 1.0, 0.0]],
         ),
         2.0,
-        usize::MAX,
+        TEST_UNBOUNDED_GRID_BYTES,
     );
     assert!(matches!(
         malformed_bounds,
@@ -418,7 +1398,7 @@ fn malformed_and_nonfinite_inputs_return_named_errors() {
     let invalid_pitch = NativeSurface::from_triangle_soup(
         TriangleSoup::borrowed(&TRIANGLES, &NORMALS, &AREAS, BOUNDS),
         f64::INFINITY,
-        usize::MAX,
+        TEST_UNBOUNDED_GRID_BYTES,
     );
     assert!(matches!(
         invalid_pitch,
@@ -476,8 +1456,8 @@ fn every_multi_slice_batch_rejects_each_mismatched_companion() {
         0,
     );
 
-    assert_batch_error(
-        surface.penetration_intervals_batch(
+    assert_penetration_input_error(
+        surface.penetration_intervals_batch_bounded(
             &points,
             &[],
             &scalars,
@@ -487,14 +1467,15 @@ fn every_multi_slice_batch_rejects_each_mismatched_companion() {
             80,
             0.05,
             false,
+            generous_penetration_limits(),
         ),
         "penetration_intervals_batch",
         "p1s",
         1,
         0,
     );
-    assert_batch_error(
-        surface.penetration_intervals_batch(
+    assert_penetration_input_error(
+        surface.penetration_intervals_batch_bounded(
             &points,
             &points,
             &[],
@@ -504,14 +1485,15 @@ fn every_multi_slice_batch_rejects_each_mismatched_companion() {
             80,
             0.05,
             false,
+            generous_penetration_limits(),
         ),
         "penetration_intervals_batch",
         "r0s",
         1,
         0,
     );
-    assert_batch_error(
-        surface.penetration_intervals_batch(
+    assert_penetration_input_error(
+        surface.penetration_intervals_batch_bounded(
             &points,
             &points,
             &scalars,
@@ -521,6 +1503,7 @@ fn every_multi_slice_batch_rejects_each_mismatched_companion() {
             80,
             0.05,
             false,
+            generous_penetration_limits(),
         ),
         "penetration_intervals_batch",
         "r1s",
@@ -552,7 +1535,7 @@ fn indexed_geometry_and_batched_results_match_equivalent_soup() {
         &faces,
         NativeSurfaceConfig {
             grid_pitch_mm: 2.0,
-            max_grid_bytes: usize::MAX,
+            max_grid_bytes: TEST_UNBOUNDED_GRID_BYTES,
         },
     )
     .unwrap();
@@ -573,7 +1556,7 @@ fn indexed_geometry_and_batched_results_match_equivalent_soup() {
             [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]],
         ),
         2.0,
-        usize::MAX,
+        TEST_UNBOUNDED_GRID_BYTES,
     )
     .unwrap();
     assert_eq!(indexed.geometry().nfaces(), faces.len());
@@ -675,7 +1658,7 @@ fn indexed_geometry_and_batched_results_match_equivalent_soup() {
 fn indexed_constructor_reports_typed_input_and_derivation_failures() {
     let config = NativeSurfaceConfig {
         grid_pitch_mm: 2.0,
-        max_grid_bytes: usize::MAX,
+        max_grid_bytes: TEST_UNBOUNDED_GRID_BYTES,
     };
     assert!(matches!(
         NativeSurface::from_indexed(&[], &[[0, 0, 0]], config),
@@ -705,7 +1688,7 @@ fn indexed_constructor_reports_typed_input_and_derivation_failures() {
     ));
     for value in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
         assert!(
-            matches!(NativeSurface::from_indexed(&[[0.0; 3]], &[[0,0,0]], NativeSurfaceConfig { grid_pitch_mm: value, max_grid_bytes: usize::MAX }), Err(SurfaceBuildError::InvalidGridPitch(got)) if got.to_bits() == value.to_bits())
+            matches!(NativeSurface::from_indexed(&[[0.0; 3]], &[[0,0,0]], NativeSurfaceConfig { grid_pitch_mm: value, max_grid_bytes: TEST_UNBOUNDED_GRID_BYTES }), Err(SurfaceBuildError::InvalidGridPitch(got)) if got.to_bits() == value.to_bits())
         );
     }
     let budget_indexed = NativeSurface::from_indexed(
@@ -721,8 +1704,14 @@ fn indexed_constructor_reports_typed_input_and_derivation_failures() {
         2.0,
         0,
     );
-    assert!(matches!(budget_indexed, Err(SurfaceBuildError::Kernel(_))));
-    assert!(matches!(budget_soup, Err(SurfaceBuildError::Kernel(_))));
+    assert!(matches!(
+        budget_indexed,
+        Err(SurfaceBuildError::GridBudget { limit_bytes: 0, .. })
+    ));
+    assert!(matches!(
+        budget_soup,
+        Err(SurfaceBuildError::GridBudget { limit_bytes: 0, .. })
+    ));
     assert!(matches!(
         NativeSurface::from_indexed(&[[0.0; 3]], &[], config),
         Err(SurfaceBuildError::EmptyFaces)
@@ -746,7 +1735,7 @@ fn indexed_constructor_reports_typed_input_and_derivation_failures() {
             &[[0, 0, 0]],
             NativeSurfaceConfig {
                 grid_pitch_mm: 0.0,
-                max_grid_bytes: usize::MAX
+                max_grid_bytes: TEST_UNBOUNDED_GRID_BYTES
             }
         ),
         Err(SurfaceBuildError::InvalidGridPitch(0.0))
@@ -771,7 +1760,7 @@ fn indexed_repeated_index_face_keeps_kernel_degenerate_behavior() {
         &[[0, 0, 0]],
         NativeSurfaceConfig {
             grid_pitch_mm: 2.0,
-            max_grid_bytes: usize::MAX,
+            max_grid_bytes: TEST_UNBOUNDED_GRID_BYTES,
         },
     )
     .unwrap();

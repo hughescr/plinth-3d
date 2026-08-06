@@ -150,7 +150,9 @@ pub(crate) fn parse(bytes: Vec<u8>) -> Result<Document> {
         }
     }
 
-    // front filler + per-model post filler (total coverage of the tail).
+    // Front descriptor region + per-model post filler (total coverage of the
+    // tail). Existing bytes remain opaque, but every model needs at least one
+    // 24-byte descriptor before the first mesh.
     let mut models: Vec<ModelEntry> = Vec::with_capacity(model_count);
     let front_filler = if model_count == 0 {
         if off8 != n {
@@ -166,6 +168,19 @@ pub(crate) fn parse(bytes: Vec<u8>) -> Result<Document> {
         if first < off20 {
             return Err(ChituboxError::SupportSectionMalformed {
                 detail: "first mesh precedes model table end".into(),
+            });
+        }
+        let required_descriptors = mul(
+            FROM_SCRATCH_MODEL_DESCRIPTOR_LEN,
+            model_count,
+            "front model descriptors",
+        )?;
+        let descriptor_end = add(off20, required_descriptors, "front model descriptors")?;
+        if first < descriptor_end {
+            return Err(ChituboxError::HeaderInvariant {
+                detail: format!(
+                    "first mesh {first} precedes {required_descriptors}-byte model descriptor region ending at {descriptor_end}"
+                ),
             });
         }
         bytes[off20..first].to_vec()
@@ -200,6 +215,7 @@ pub(crate) fn parse(bytes: Vec<u8>) -> Result<Document> {
         preview,
         models,
         front_filler,
+        from_scratch: false,
         original: Some(bytes),
         dirty: false,
         warnings,

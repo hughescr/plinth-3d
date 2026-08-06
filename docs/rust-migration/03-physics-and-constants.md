@@ -660,6 +660,9 @@ remain `Placeholder` unless another wrapper is stated explicitly.
 | `HOLLOW_VOLUME_BALANCE_REL_TOL` | 0.02 | final volume-balance tolerance relative to the solid-model volume |
 | `HOLLOW_EXIT_RAY_MAX_MM` | 45 mm | drain/vent exit search ceiling |
 | `HOLLOW_DRAIN_DIRECTIONS` | `(0,0,-1)`, `(0.5,0,-1)`, `(-0.5,0,-1)`, `(0,0.5,-1)`, `(0,-0.5,-1)` | one structured downward-direction policy |
+| `HOLLOW_VENT_DIRECTIONS` | `(1,0,0)`, `(-1,0,0)`, `(0,1,0)`, `(0,-1,0)` | one ordered structured horizontal-direction policy |
+| `HOLLOW_VENT_TOP_BAND_MM` | 2.0 mm | cavity-top band searched for a horizontal vent site |
+| `HOLLOW_VENT_SAMPLE_DIVISOR` | 40 | deterministic top-band sampling divisor |
 | `HOLLOW_EXTRA_DRAIN_POLICY` | min 0.5 mL; max 3; exit <= 8 mm; extensions 4/8/9 mm; 24 cylinder sides | one structured trapped-pocket repair policy |
 
 The frozen orientation heuristic is **retired/no-port as a policy**, not silently
@@ -714,7 +717,7 @@ claim that 25 is physics.
 | `DECIMATION_FEATURE_PROBE_RATIO` / `DECIMATION_SEED_ERROR_MM` / `DECIMATION_FEATURE_HALO_MM` / `DECIMATION_PROTECTED_CAP_FRACTION` | 0.2 / 0.050 mm / 0.4 mm / 0.12 | feature-protection controls |
 | `DECIMATION_ADAPTATION_POLICY` | 3 adaptations; feature multiplier 2.0; error multiplier 0.6 | one structured adaptive policy |
 | `DECIMATION_VERTEX_GROUP_FACTOR` | 10 | protected vertex-group sizing |
-| `DECIMATION_RATIO_SEARCH` | [0.05, 0.50], 5 bisections | one structured ratio-search policy |
+| `DECIMATION_RATIO_SEARCH` | [0.05, 1.00], 5 bisections; only a genuinely reduced candidate may win | **Placeholder** search policy. The owner corrected the former 0.50 ceiling on 2026-08-01: it was unmeasured and must not force damage or rejection of already-print-scale geometry. |
 | `DECIMATION_P99_SAMPLE_POLICY` / `DECIMATION_P999_SAMPLE_POLICY` | seed/cap 42/120000 and 1/150000 | independent error-sampling policies |
 | `DECIMATION_SCALE_ACCEPTANCE_MM` | [10, 300] mm | scale sanity interval |
 | `GEOMETRY_SWEEP_MAX_PASSES` / `GEOMETRY_SWEEP_ZERO_THRESHOLD` | 8 / 1e-4 | Blender repair-loop defaults; retained only until the tool is retired |
@@ -763,16 +766,20 @@ listed payload has `err: null`.
 | `P8_CHORD_CANON_MICRON` | `corpus_study(id=phase8-micron-chord-canonicalization-2026-07-24, record=docs/specs/SPEC-P8-RELOCATE.md, locator=§5.3 Layer 3/amendment G)` | `Exact(2026-07-24)`, f64/integer-micron `err: null` |
 | `P8_POCKET_VOXEL_MM` | `owner_decision(id=p8-pocket-voxel-owner-decision, record=docs/specs/SPEC-P8-RELOCATE.md, locator=§4.1)` | `Exact(2026-07-25)`, `err: null` |
 | `PRINT_FLOOR_CHORD_MM` | `owner_decision(id=print-floor-owner-decision-2026-07-24, record=docs/specs/SPEC-EMBED-POLICY.md, locator=PRINT-FLOOR amendment and Normative constants)` | `Exact(2026-07-24)`, `err: null` |
+| `SUPPORT_KNN_WORK_PER_FACE_OBSERVED` | `corpus_study(id=support-resource-caps-weeping-treant-2026-08-05, record=docs/rust-migration/support-resource-caps-2026-08-05.md, locator=§2 Measured requirement)` | `Exact(2026-08-05)`, integer-count `err: null` |
+| `SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED` | same corpus study and locator | `Exact(2026-08-05)`, `err: null` |
 
 The vendor document's retrieval date, 2026-07-31, remains metadata; its evidence
 date is the checked-in document's 2025-01-22 publication date.
 
-Exactly four declarations remain `Derived`:
+Exactly six declarations remain `Derived`:
 
 | Stable ID | `from` | Exact relation / proof |
 |---|---|---|
 | `CCO_X_PAIR_LOAD_DISCOUNT` | `[]` | `(F/2)^0.25 / F^0.25 = 0.5^0.25`; proof-only relation in `docs/reference/physics_transient_peel.md`, implemented in both `cco.py` and `bracing.py` |
 | `N_EFF_CAP` | `[LOAD_SHARING]` | reads the measured `Additive` payload's largest tested group size, `6.0`; not a separate measurement |
+| `SUPPORT_KNN_MAX_WORK_PER_FACE` | `[SUPPORT_KNN_WORK_PER_FACE_OBSERVED]` | `next_power_of_two(2 × 696) = next_power_of_two(1392) = 2048` |
+| `SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE` | `[SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED]` | `next_power_of_two(2 × (81 + 36 × 2.8303132)) = next_power_of_two(366) = 512`, through the exact parity projection `81·faces + 36·references + 4` |
 | `TIP_RADIUS_MIN_ALLOWED_MM` | `[TIP_DIAMETER_MIN_ALLOWED_MM]` | `TIP_DIAMETER_MIN_ALLOWED_MM / 2 = 0.075 mm` |
 | `X_ALLOWED` | `[X_STAR_CONE]` | binding commitment/precedence: `floor(lower(X_STAR_CONE)/2) = floor(25.00/2) = 12`; `X_STAR_CYLINDER` only supplies the `19.91/12 = 1.66×` margin check |
 
@@ -791,6 +798,149 @@ selected in a flat sensitivity region, not a measurement.
 
 `SURFACE_PITCH_BOUND_PERCENTILE` is retired/no-port: `SPEC-V5-GEOM` §2.1 and
 §2.6 make sampled-cloud pitch uncertainty identically zero on exact triangle paths.
+
+### 3.10.8 Support execution-authority caps — the model-scaled pair
+
+These are the first support-pipeline **execution-authority** caps to enter the
+registry, under the new `runtime_resource_cap` classification. They are Rust-era
+and have **no legacy Python source**, so §3.11's "not constants" ruling — which
+is about numpy/CPython memory-accounting artifacts — does not cover them: these
+are ratified numeric authority with a stated rule and a measurement of record.
+The full measurement is `support-resource-caps-2026-08-05.md`.
+
+Both caps take one shape, materialized per model by
+`SupportPreparationLimits::input` against that model's own support-mesh face
+count:
+
+```
+cap = max(floor, per_face × support_mesh_face_count)
+```
+
+and both coefficients come from one rule over the 2026-08-05 Weeping Treant
+measurement: `per_face = next_power_of_two(2 × observed_per_face)`.
+
+| Stable ID | Value | Unit | Wrapper | Source meaning |
+|---|---|---|---|---|
+| `SUPPORT_KNN_WORK_PER_FACE_OBSERVED` | 696 | count/face | **Measured** | `298,667,520 / 429,120`, exact; the treant's minima-kNN batch cost per face |
+| `SUPPORT_KNN_MAX_WORK_PER_FACE` | 2048 | count/face | **Derived** | `next_power_of_two(2 × 696)` |
+| `SUPPORT_KNN_MAX_WORK_FLOOR` | 100,000,000 | count | **Placeholder** | inherited unmeasured Codex-era floor (73e7c13 / a8acfb9), unchanged |
+| `SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED` | 1,214,544 / 429,120 | count/face | **Measured** | the treant's parity `(cell, face)` references per face; inverts the exact projection `81·faces + 36·references + 4 = 78,482,308` |
+| `SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE` | 512 | B/face | **Derived** | `next_power_of_two(2 × (81 + 36 × 2.8303132))` |
+| `SUPPORT_PARITY_GRID_MAX_BYTES_FLOOR` | 67,108,864 | B | **Placeholder** | inherited unmeasured Codex-era floor (73e7c13), unchanged |
+
+**Why scaled and not simply larger.** A cap's job is to refuse work that is
+superlinear in model size, not to refuse a large model, and a flat constant
+cannot tell those apart: at 429,120 faces the old constants fired on honest
+linear work, while at 24 faces `make_raking_blade` was already burning 31% of an
+unrelated 2 × 10⁹ gate cap on a genuine quadratic. `k·N` is still a bound — it
+refuses anything worse than linear in `N`. An all-pairs kNN over the treant is
+`429,120² = 1.84 × 10¹¹` and is refused 209× over; 512 B/face admits at most
+`(512 − 81)/36 = 11.97` grid references per face against the treant's measured
+2.83.
+
+**These caps are result-inert.** They admit or refuse; they never alter an
+admitted plan, and they enter no semantic or result digest. The floor governs
+for every model the corpus can currently run — Sphere, the largest at 4,760
+faces, needs 2,437,120 grid bytes and 9,748,480 kNN work — so introducing the
+rule moved no corpus digest, which the 2026-08-05 before/after census confirms
+line by line.
+
+**Not raised, deliberately.** `max_gate_operations`, `max_load_operations`,
+`max_load_scratch_bytes` and `max_gate_peak_bytes` stay at their inherited
+values. Measurement showed they are refusing algorithm defects — a selection
+sort charging ~1.7 × 10¹⁰ operations where a set charges 142,646, and an
+8.0 M-row load-eligibility explosion on a 429,120-face mesh — not a large
+model's honest requirement. Their constants must be set on **post-fix**
+dimensions when the algorithm work (FU-8b) lands. (Owner ruling R5, 2026-08-05:
+they are no longer *unregistered* — all four are registered as `Placeholder` in
+§3.10.9 and carry that measurement in their registry notes. Registration
+discloses the inherited number; it does not ratify it and does not authorize
+raising it.)
+
+### 3.10.9 Support execution-authority caps — the unmeasured inventory
+
+Owner ruling **R5, 2026-08-05**. §3.10.8 registered six constants and left the
+rest of the support pipeline's execution authority **unregistered**: real
+numbers, live in production, refusing real work, with no registry entry, no
+stated provenance, and no place a reader could look them up. Every cap below is
+now registered as classification `runtime_resource_cap`, wrapper
+**`Placeholder`**, with `source_locators` naming its own construction site.
+
+Read the wrapper literally. **Registration is disclosure, not ratification.**
+Every value here is an inherited Codex-era number with **no measurement of
+record**; the `Placeholder` wrapper is what structurally bars it from any accept
+path. Registering them changes nothing about what they are — it changes only
+whether they can be found. Nothing here is a licence to *tune* them: a value
+that acquires a measurement moves to `Measured`/`Derived` under §3.10.8's rule,
+and until then the number stands as inherited.
+
+The scope of this ruling is exactly the four authority types named in it:
+`GenericPerceptionLimits`, `SpecializedLimits`, `KnnBatchLimits`, and the
+remaining direct scalar fields of `SupportPreparationLimits`. It is **42
+constants**. The four further nested authorities reachable from
+`SupportPreparationLimits::production` — `CandidatePayloadConfig`,
+`ContactConstructionLimits`, `PenetrationBatchLimits` and `RaftLimits`, ~19 more
+values — are **not** covered: `CandidatePayloadConfig` in particular mixes
+result-changing refinement policy with execution caps, so they need their own
+classification pass rather than a blanket `runtime_resource_cap` sweep.
+
+| Stable ID | Value | Unit | Construction site |
+|---|---|---|---|
+| `SUPPORT_KNN_MAX_LOGICAL_PEAK_BYTES` | 2,147,483,648 | B | `KnnBatchLimits`.max_logical_peak_bytes |
+| `SUPPORT_KNN_MAX_NEIGHBORS` | 1 | count | `KnnBatchLimits`.max_neighbors |
+| `SUPPORT_KNN_MAX_QUERY_POINTS` | 20,000,000 | count | `KnnBatchLimits`.max_query_points |
+| `SUPPORT_KNN_MAX_SOURCE_POINTS` | 20,000,000 | count | `KnnBatchLimits`.max_source_points |
+| `SUPPORT_PERCEPTION_MAX_ISLAND_NEIGHBOR_BYTES` | 2,147,483,648 | B | `GenericPerceptionLimits`.max_island_neighbor_bytes |
+| `SUPPORT_PERCEPTION_MAX_ISLAND_NEIGHBOR_PAIRS` | 100,000,000 | count | `GenericPerceptionLimits`.max_island_neighbor_pairs |
+| `SUPPORT_PERCEPTION_MAX_LOOP_VERTICES` | 100,000,000 | count | `GenericPerceptionLimits`.max_loop_vertices |
+| `SUPPORT_PERCEPTION_MAX_MINIMA_VERTICES` | 20,000,000 | count | `GenericPerceptionLimits`.max_minima_vertices |
+| `SUPPORT_PERCEPTION_MAX_OVERLAP_BYTES` | 2,147,483,648 | B | `GenericPerceptionLimits`.max_overlap_bytes |
+| `SUPPORT_PERCEPTION_MAX_OVERLAP_EDGE_TESTS` | 100,000,000 | count | `GenericPerceptionLimits`.max_overlap_edge_tests |
+| `SUPPORT_PERCEPTION_MAX_OVERLAP_PAIRS` | 100,000,000 | count | `GenericPerceptionLimits`.max_overlap_pairs |
+| `SUPPORT_PERCEPTION_MAX_OVERLAP_VERTEX_TESTS` | 100,000,000 | count | `GenericPerceptionLimits`.max_overlap_vertex_tests |
+| `SUPPORT_PERCEPTION_MAX_PLANES` | 20,000 | count | `GenericPerceptionLimits`.max_planes |
+| `SUPPORT_PERCEPTION_MAX_SLICE_INTERSECTIONS` | 100,000,000 | count | `GenericPerceptionLimits`.max_slice_intersections |
+| `SUPPORT_PERCEPTION_MAX_SLICE_OUTPUT_BYTES` | 2,147,483,648 | B | `GenericPerceptionLimits`.max_slice_output_bytes |
+| `SUPPORT_PERCEPTION_MAX_TRIANGLE_PLANE_TESTS` | 100,000,000 | count | `GenericPerceptionLimits`.max_triangle_plane_tests |
+| `SUPPORT_PREPARATION_COVERAGE_SAMPLES_MAX_VIRTUAL_CELLS` | 2,000,000 | count | `SupportPreparationLimits`.coverage_samples_max_virtual_cells |
+| `SUPPORT_PREPARATION_COVERAGE_SCORE_MATRIX_MAX_ENTRIES` | 65,536 | count | `SupportPreparationLimits`.coverage_score_matrix_max_entries |
+| `SUPPORT_PREPARATION_MAX_PRIMITIVES` | 200,000 | count | `SupportPreparationLimits`.max_primitives |
+| `SUPPORT_PREPARATION_MAX_PRIMITIVE_BYTES` | 134,217,728 | B | `SupportPreparationLimits`.max_primitive_bytes |
+| `SUPPORT_SPECIALIZED_MAX_COVERAGE_OPERATIONS` | 2,000,000,000 | count | `SpecializedLimits`.max_coverage_operations |
+| `SUPPORT_SPECIALIZED_MAX_COVERAGE_SCRATCH_BYTES` | 536,870,912 | B | `SpecializedLimits`.max_coverage_scratch_bytes |
+| `SUPPORT_SPECIALIZED_MAX_GATE_CONTACT_MATRIX_BYTES` | 536,870,912 | B | `SpecializedLimits`.max_gate_contact_matrix_bytes |
+| `SUPPORT_SPECIALIZED_MAX_GATE_OPERATIONS` | 2,000,000,000 | count | `SpecializedLimits`.max_gate_operations |
+| `SUPPORT_SPECIALIZED_MAX_GATE_PEAK_BYTES` | 1,073,741,824 | B | `SpecializedLimits`.max_gate_peak_bytes |
+| `SUPPORT_SPECIALIZED_MAX_GATE_VARIANTS` | 20,000,001 | count | `SpecializedLimits`.max_gate_variants |
+| `SUPPORT_SPECIALIZED_MAX_GATE_VECTOR_BYTES` | 536,870,912 | B | `SpecializedLimits`.max_gate_vector_bytes |
+| `SUPPORT_SPECIALIZED_MAX_GATE_WINDOW_VARIANTS` | 1,024 | count | `SpecializedLimits`.max_gate_window_variants |
+| `SUPPORT_SPECIALIZED_MAX_LOAD_OPERATIONS` | 2,000,000,000 | count | `SpecializedLimits`.max_load_operations |
+| `SUPPORT_SPECIALIZED_MAX_LOAD_SCRATCH_BYTES` | 536,870,912 | B | `SpecializedLimits`.max_load_scratch_bytes |
+| `SUPPORT_SPECIALIZED_MAX_MERGE_COMMIT_BYTES` | 536,870,912 | B | `SpecializedLimits`.max_merge_commit_bytes |
+| `SUPPORT_SPECIALIZED_MAX_MERGE_DESCRIPTOR_OPERATIONS` | 2,000,000,000 | count | `SpecializedLimits`.max_merge_descriptor_operations |
+| `SUPPORT_SPECIALIZED_MAX_MERGE_ITERATIONS` | 100,000 | count | `SpecializedLimits`.max_merge_iterations |
+| `SUPPORT_SPECIALIZED_MAX_MERGE_PAIRS` | 20,000,000 | count | `SpecializedLimits`.max_merge_pairs |
+| `SUPPORT_SPECIALIZED_MAX_MERGE_PROPOSALS` | 20,000,000 | count | `SpecializedLimits`.max_merge_proposals |
+| `SUPPORT_SPECIALIZED_MAX_MERGE_PROPOSAL_BYTES` | 536,870,912 | B | `SpecializedLimits`.max_merge_proposal_bytes |
+| `SUPPORT_SPECIALIZED_MAX_MERGE_TOTAL_PROPOSALS` | 100,000,000 | count | `SpecializedLimits`.max_merge_total_proposals |
+| `SUPPORT_SPECIALIZED_MAX_SATISFACTION_NEIGHBOR_BYTES` | 2,147,483,648 | B | `SpecializedLimits`.max_satisfaction_neighbor_bytes |
+| `SUPPORT_SPECIALIZED_MAX_SATISFACTION_NEIGHBOR_PAIRS` | 100,000,000 | count | `SpecializedLimits`.max_satisfaction_neighbor_pairs |
+| `SUPPORT_SPECIALIZED_MAX_SATISFACTION_TESTS` | 100,000,000 | count | `SpecializedLimits`.max_satisfaction_tests |
+| `SUPPORT_SPECIALIZED_MAX_SYNTHETIC_NEIGHBOR_BYTES` | 536,870,912 | B | `SpecializedLimits`.max_synthetic_neighbor_bytes |
+| `SUPPORT_SPECIALIZED_MAX_SYNTHETIC_NEIGHBOR_PAIRS` | 20,000,000 | count | `SpecializedLimits`.max_synthetic_neighbor_pairs |
+
+All 42 are `Placeholder`, `scalar`, and result-inert on the same terms as
+§3.10.8's floors: they admit or refuse, they never alter an admitted plan, and
+they enter no semantic or result digest. Registering them moved no value and no
+digest.
+
+**Four of them are known to be refusing defects, and that is recorded on the
+constant.** `SUPPORT_SPECIALIZED_MAX_GATE_OPERATIONS`,
+`SUPPORT_SPECIALIZED_MAX_LOAD_OPERATIONS`,
+`SUPPORT_SPECIALIZED_MAX_LOAD_SCRATCH_BYTES` and
+`SUPPORT_SPECIALIZED_MAX_GATE_PEAK_BYTES` carry the 2026-08-05 measurement in
+their registry notes together with the instruction that they must **not** be
+raised — see the *Not raised, deliberately* paragraph in §3.10.8 and FU-8b.
 
 ### 3.11 NOT constants — resource guards
 

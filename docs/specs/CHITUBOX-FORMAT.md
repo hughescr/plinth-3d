@@ -281,8 +281,13 @@ the model. The library must set/track this lift when it emits supports.
    unsupported model manually lifted in Z.
 6. **20-byte footer** cited in the earlier note was NOT observed in these small files
    (mesh/records run to EOF); re-check on files that have one.
-7. **`off8` +2 / small filler between off20 and first mesh** (48 B unsupported vs 314 B
-   supported) — a variable-size stub, contents zero here; purpose unconfirmed.
+7. **Front descriptor prefix** — bytes after `off20` begin with one contiguous
+   24-byte descriptor per model: `(u64 count, u64 table_abs_ptr, u64 aux_abs_ptr)`.
+   A zero descriptor is valid for unsupported models. Any remaining bytes before
+   the first mesh stay opaque and variable-size (48 B in regenerated two-model
+   specimens; larger in native supported specimens). Fresh scaffolds emit only
+   the exact zero `24 * model_count` prefix; parsed front regions are preserved
+   verbatim and not resized.
 8. **Format is version-pinned** (CHITUBOX Basic 1.3.0). Re-verify on upgrade.
 9. Earlier morel recon cited a mesh pointer at abs 408706 -> (409138, 7288704); this
    session's `morel.chitubox` has the model table at 412940 and mesh at 413777 (+7288704,

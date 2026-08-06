@@ -1,0 +1,7 @@
+error: lifetime may not live long enough
+ --> tests/compile_fail/final_support_authority_lifetime_bound.rs:4:5
+  |
+3 | fn erase_lifetime(authority: FinalSupportAuthority<'_>) -> FinalSupportAuthority<'static> {
+  |                   --------- has type `FinalSupportAuthority<'1>`
+4 |     authority
+  |     ^^^^^^^^^ returning this value requires that `'1` must outlive `'static`

@@ -8,7 +8,7 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_PLACEHOLDER_IDS: [&str; 187] = [
+const EXPECTED_PLACEHOLDER_IDS: [&str; 236] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -98,9 +98,14 @@ const EXPECTED_PLACEHOLDER_IDS: [&str; 187] = [
     "HOLLOW_SHARD_MAX_DIM_MM",
     "HOLLOW_SHARD_MAX_FACES",
     "HOLLOW_SHARD_MAX_VOLUME_MM3",
+    "HOLLOW_VENT_DIRECTIONS",
     "HOLLOW_VENT_R_MM",
+    "HOLLOW_VENT_SAMPLE_DIVISOR",
+    "HOLLOW_VENT_TOP_BAND_MM",
     "HOLLOW_VOLUME_BALANCE_REL_TOL",
     "HOLLOW_WALL_DEFAULT_MM",
+    "INITIAL_AXIS_MAJORITY_CAP",
+    "INITIAL_AXIS_MAJORITY_STEP_MM",
     "ISLAND_ATTACH_REACH_MM",
     "ISLAND_BIRTH_LINK_R_MM",
     "ISLAND_MERGE_RADIUS_MM",
@@ -181,6 +186,50 @@ const EXPECTED_PLACEHOLDER_IDS: [&str; 187] = [
     "STRUT_MODEL_ANCHOR_MAX_DELICACY",
     "STRUT_MODEL_ANCHOR_MIN_LEN_MM",
     "STUB_LENGTH_MM",
+    "SUPPORT_KNN_MAX_LOGICAL_PEAK_BYTES",
+    "SUPPORT_KNN_MAX_NEIGHBORS",
+    "SUPPORT_KNN_MAX_QUERY_POINTS",
+    "SUPPORT_KNN_MAX_SOURCE_POINTS",
+    "SUPPORT_KNN_MAX_WORK_FLOOR",
+    "SUPPORT_PARITY_GRID_MAX_BYTES_FLOOR",
+    "SUPPORT_PERCEPTION_MAX_ISLAND_NEIGHBOR_BYTES",
+    "SUPPORT_PERCEPTION_MAX_ISLAND_NEIGHBOR_PAIRS",
+    "SUPPORT_PERCEPTION_MAX_LOOP_VERTICES",
+    "SUPPORT_PERCEPTION_MAX_MINIMA_VERTICES",
+    "SUPPORT_PERCEPTION_MAX_OVERLAP_BYTES",
+    "SUPPORT_PERCEPTION_MAX_OVERLAP_EDGE_TESTS",
+    "SUPPORT_PERCEPTION_MAX_OVERLAP_PAIRS",
+    "SUPPORT_PERCEPTION_MAX_OVERLAP_VERTEX_TESTS",
+    "SUPPORT_PERCEPTION_MAX_PLANES",
+    "SUPPORT_PERCEPTION_MAX_SLICE_INTERSECTIONS",
+    "SUPPORT_PERCEPTION_MAX_SLICE_OUTPUT_BYTES",
+    "SUPPORT_PERCEPTION_MAX_TRIANGLE_PLANE_TESTS",
+    "SUPPORT_PREPARATION_COVERAGE_SAMPLES_MAX_VIRTUAL_CELLS",
+    "SUPPORT_PREPARATION_COVERAGE_SCORE_MATRIX_MAX_ENTRIES",
+    "SUPPORT_PREPARATION_MAX_PRIMITIVES",
+    "SUPPORT_PREPARATION_MAX_PRIMITIVE_BYTES",
+    "SUPPORT_SPECIALIZED_MAX_COVERAGE_OPERATIONS",
+    "SUPPORT_SPECIALIZED_MAX_COVERAGE_SCRATCH_BYTES",
+    "SUPPORT_SPECIALIZED_MAX_GATE_CONTACT_MATRIX_BYTES",
+    "SUPPORT_SPECIALIZED_MAX_GATE_OPERATIONS",
+    "SUPPORT_SPECIALIZED_MAX_GATE_PEAK_BYTES",
+    "SUPPORT_SPECIALIZED_MAX_GATE_VARIANTS",
+    "SUPPORT_SPECIALIZED_MAX_GATE_VECTOR_BYTES",
+    "SUPPORT_SPECIALIZED_MAX_GATE_WINDOW_VARIANTS",
+    "SUPPORT_SPECIALIZED_MAX_LOAD_OPERATIONS",
+    "SUPPORT_SPECIALIZED_MAX_LOAD_SCRATCH_BYTES",
+    "SUPPORT_SPECIALIZED_MAX_MERGE_COMMIT_BYTES",
+    "SUPPORT_SPECIALIZED_MAX_MERGE_DESCRIPTOR_OPERATIONS",
+    "SUPPORT_SPECIALIZED_MAX_MERGE_ITERATIONS",
+    "SUPPORT_SPECIALIZED_MAX_MERGE_PAIRS",
+    "SUPPORT_SPECIALIZED_MAX_MERGE_PROPOSALS",
+    "SUPPORT_SPECIALIZED_MAX_MERGE_PROPOSAL_BYTES",
+    "SUPPORT_SPECIALIZED_MAX_MERGE_TOTAL_PROPOSALS",
+    "SUPPORT_SPECIALIZED_MAX_SATISFACTION_NEIGHBOR_BYTES",
+    "SUPPORT_SPECIALIZED_MAX_SATISFACTION_NEIGHBOR_PAIRS",
+    "SUPPORT_SPECIALIZED_MAX_SATISFACTION_TESTS",
+    "SUPPORT_SPECIALIZED_MAX_SYNTHETIC_NEIGHBOR_BYTES",
+    "SUPPORT_SPECIALIZED_MAX_SYNTHETIC_NEIGHBOR_PAIRS",
     "SURFACE_TREE_MAX_POINTS",
     "SURFACE_TREE_PITCH_MM",
     "SURFACE_TREE_SEED",
@@ -211,7 +260,7 @@ macro_rules! rows {
     };
 }
 
-const EXPECTED_ROWS: [ExpectedRow; 187] = rows! {
+const EXPECTED_ROWS: [ExpectedRow; 236] = rows! {
     "A_ABS_MM2", "2.0", "mm²", "scalar";
     "BALL_BREACH_EPS_MM", "0.05", "mm", "scalar";
     "BALL_FACTOR_FOOT", "1.4", "1", "scalar";
@@ -261,7 +310,7 @@ const EXPECTED_ROWS: [ExpectedRow; 187] = rows! {
     "DECIMATION_P99_FACTOR", "0.0005", "1", "scalar";
     "DECIMATION_P99_SAMPLE_POLICY", "{cap:120000,seed:42}", "count", "record{cap,seed}";
     "DECIMATION_PROTECTED_CAP_FRACTION", "0.12", "1", "scalar";
-    "DECIMATION_RATIO_SEARCH", "{bisections:5,lower:0.05,upper:0.5}", "1", "record{bisections,lower,upper}";
+    "DECIMATION_RATIO_SEARCH", "{bisections:5,lower:0.05,upper:1.0}", "1", "record{bisections,lower,upper}";
     "DECIMATION_RECHECK_SLACK", "1.1", "1", "scalar";
     "DECIMATION_SCALE_ACCEPTANCE_MM", "interval(10.0,inclusive,300.0,inclusive)", "mm", "interval";
     "DECIMATION_SEED_ERROR_MM", "0.05", "mm", "scalar";
@@ -301,9 +350,14 @@ const EXPECTED_ROWS: [ExpectedRow; 187] = rows! {
     "HOLLOW_SHARD_MAX_DIM_MM", "1.0", "mm", "scalar";
     "HOLLOW_SHARD_MAX_FACES", "64", "count", "scalar";
     "HOLLOW_SHARD_MAX_VOLUME_MM3", "0.01", "mm³", "scalar";
+    "HOLLOW_VENT_DIRECTIONS", "[{x:1.0,y:0.0,z:0.0},{x:-1.0,y:0.0,z:0.0},{x:0.0,y:1.0,z:0.0},{x:0.0,y:-1.0,z:0.0}]", "1", "list[4]<record{x,y,z}>";
     "HOLLOW_VENT_R_MM", "1.25", "mm", "scalar";
+    "HOLLOW_VENT_SAMPLE_DIVISOR", "40", "count", "scalar";
+    "HOLLOW_VENT_TOP_BAND_MM", "2.0", "mm", "scalar";
     "HOLLOW_VOLUME_BALANCE_REL_TOL", "0.02", "1", "scalar";
     "HOLLOW_WALL_DEFAULT_MM", "2.5", "mm", "scalar";
+    "INITIAL_AXIS_MAJORITY_CAP", "80", "count", "scalar";
+    "INITIAL_AXIS_MAJORITY_STEP_MM", "0.12", "mm", "scalar";
     "ISLAND_ATTACH_REACH_MM", "0.2", "mm", "scalar";
     "ISLAND_BIRTH_LINK_R_MM", "0.6", "mm", "scalar";
     "ISLAND_MERGE_RADIUS_MM", "2.0", "mm", "scalar";
@@ -384,6 +438,50 @@ const EXPECTED_ROWS: [ExpectedRow; 187] = rows! {
     "STRUT_MODEL_ANCHOR_MAX_DELICACY", "0.5", "1", "scalar";
     "STRUT_MODEL_ANCHOR_MIN_LEN_MM", "5.0", "mm", "scalar";
     "STUB_LENGTH_MM", "2.5", "mm", "scalar";
+    "SUPPORT_KNN_MAX_LOGICAL_PEAK_BYTES", "2147483648", "B", "scalar";
+    "SUPPORT_KNN_MAX_NEIGHBORS", "1", "count", "scalar";
+    "SUPPORT_KNN_MAX_QUERY_POINTS", "20000000", "count", "scalar";
+    "SUPPORT_KNN_MAX_SOURCE_POINTS", "20000000", "count", "scalar";
+    "SUPPORT_KNN_MAX_WORK_FLOOR", "100000000", "count", "scalar";
+    "SUPPORT_PARITY_GRID_MAX_BYTES_FLOOR", "67108864", "B", "scalar";
+    "SUPPORT_PERCEPTION_MAX_ISLAND_NEIGHBOR_BYTES", "2147483648", "B", "scalar";
+    "SUPPORT_PERCEPTION_MAX_ISLAND_NEIGHBOR_PAIRS", "100000000", "count", "scalar";
+    "SUPPORT_PERCEPTION_MAX_LOOP_VERTICES", "100000000", "count", "scalar";
+    "SUPPORT_PERCEPTION_MAX_MINIMA_VERTICES", "20000000", "count", "scalar";
+    "SUPPORT_PERCEPTION_MAX_OVERLAP_BYTES", "2147483648", "B", "scalar";
+    "SUPPORT_PERCEPTION_MAX_OVERLAP_EDGE_TESTS", "100000000", "count", "scalar";
+    "SUPPORT_PERCEPTION_MAX_OVERLAP_PAIRS", "100000000", "count", "scalar";
+    "SUPPORT_PERCEPTION_MAX_OVERLAP_VERTEX_TESTS", "100000000", "count", "scalar";
+    "SUPPORT_PERCEPTION_MAX_PLANES", "20000", "count", "scalar";
+    "SUPPORT_PERCEPTION_MAX_SLICE_INTERSECTIONS", "100000000", "count", "scalar";
+    "SUPPORT_PERCEPTION_MAX_SLICE_OUTPUT_BYTES", "2147483648", "B", "scalar";
+    "SUPPORT_PERCEPTION_MAX_TRIANGLE_PLANE_TESTS", "100000000", "count", "scalar";
+    "SUPPORT_PREPARATION_COVERAGE_SAMPLES_MAX_VIRTUAL_CELLS", "2000000", "count", "scalar";
+    "SUPPORT_PREPARATION_COVERAGE_SCORE_MATRIX_MAX_ENTRIES", "65536", "count", "scalar";
+    "SUPPORT_PREPARATION_MAX_PRIMITIVES", "200000", "count", "scalar";
+    "SUPPORT_PREPARATION_MAX_PRIMITIVE_BYTES", "134217728", "B", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_COVERAGE_OPERATIONS", "2000000000", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_COVERAGE_SCRATCH_BYTES", "536870912", "B", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_GATE_CONTACT_MATRIX_BYTES", "536870912", "B", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_GATE_OPERATIONS", "2000000000", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_GATE_PEAK_BYTES", "1073741824", "B", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_GATE_VARIANTS", "20000001", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_GATE_VECTOR_BYTES", "536870912", "B", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_GATE_WINDOW_VARIANTS", "1024", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_LOAD_OPERATIONS", "2000000000", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_LOAD_SCRATCH_BYTES", "536870912", "B", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_MERGE_COMMIT_BYTES", "536870912", "B", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_MERGE_DESCRIPTOR_OPERATIONS", "2000000000", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_MERGE_ITERATIONS", "100000", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_MERGE_PAIRS", "20000000", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_MERGE_PROPOSALS", "20000000", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_MERGE_PROPOSAL_BYTES", "536870912", "B", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_MERGE_TOTAL_PROPOSALS", "100000000", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_SATISFACTION_NEIGHBOR_BYTES", "2147483648", "B", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_SATISFACTION_NEIGHBOR_PAIRS", "100000000", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_SATISFACTION_TESTS", "100000000", "count", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_SYNTHETIC_NEIGHBOR_BYTES", "536870912", "B", "scalar";
+    "SUPPORT_SPECIALIZED_MAX_SYNTHETIC_NEIGHBOR_PAIRS", "20000000", "count", "scalar";
     "SURFACE_TREE_MAX_POINTS", "150000", "count", "scalar";
     "SURFACE_TREE_PITCH_MM", "0.4", "mm", "scalar";
     "SURFACE_TREE_SEED", "0", "count", "scalar";
@@ -402,7 +500,7 @@ const EXPECTED_ROWS: [ExpectedRow; 187] = rows! {
 };
 
 fn component() -> M0PlaceholderConstants {
-    M0PlaceholderConstants::new().expect("all 187 placeholder declarations must construct")
+    M0PlaceholderConstants::new().expect("all 236 placeholder declarations must construct")
 }
 
 #[test]
@@ -413,7 +511,7 @@ fn exact_handwritten_membership_is_stable_sorted_and_all_placeholder() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, EXPECTED_PLACEHOLDER_IDS);
-    assert_eq!(descriptors.len(), 187);
+    assert_eq!(descriptors.len(), 236);
     assert!(descriptors
         .windows(2)
         .all(|pair| pair[0].id() < pair[1].id()));
@@ -504,7 +602,7 @@ const fn bound_key(bound: BoundKind) -> &'static str {
 }
 
 #[test]
-fn evidence_and_placeholder_fixture_builds_one_207_entry_structural_batch() {
+fn evidence_and_placeholder_fixture_builds_one_260_entry_structural_batch() {
     let mut descriptors = component()
         .descriptors()
         .unwrap()
@@ -512,15 +610,76 @@ fn evidence_and_placeholder_fixture_builds_one_207_entry_structural_batch() {
         .collect::<Vec<_>>();
     descriptors.extend(M0EvidenceConstants::new().unwrap().descriptors().unwrap());
     let registry = ConstantsRegistry::build_batch(descriptors).unwrap();
-    assert_eq!(registry.len(), 207);
+    assert_eq!(registry.len(), 260);
     assert_eq!(
         registry
             .iter()
             .map(|descriptor| descriptor.id().as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        207
+        260
     );
+}
+
+/// The engine's implied tip area ratio must not EXCEED the H2 allowance.
+///
+/// `FrozenTipLoadPolicy::tip_radius_mm` sizes tips so that
+/// `pi*r^2 = A * peel_pressure_pa * tip_safety_factor / tensile_green_pa`,
+/// i.e. it already IS an area-ratio law with ratio
+/// `X_engine = tensile_green_pa / (peel_pressure_pa * tip_safety_factor)`.
+///
+/// THE ALLOWANCE ANCHOR IS `X_ALLOWED`.  There is exactly one registered
+/// area-ratio allowance in this engine and it is the Derived evidence constant
+/// `X_ALLOWED = floor(lower(X_STAR_CONE)/2) = 12`, chained from the measured
+/// plate interval.  Contact physics PR-4 reads THAT entry — it does not
+/// re-declare the number as a hand-typed placeholder, because a duplicate would
+/// let a plate recalibration move `X_STAR_CONE` while the contact threshold
+/// silently stayed at the stale hand-typed 12.  Reading the chained constant is
+/// what makes a recalibration flow through.
+///
+/// This is deliberately a ONE-SIDED bound and not an exact-equality coupling.
+/// `X_engine` = 12 is an internal CONSISTENCY identity that is a function of
+/// the arbitrary Python-era `tip_safety_factor` = 8 — had that been 6 the
+/// identity would read 16 — so it is NOT an independent measurement of
+/// `X_ALLOWED`.  Hard-coupling the two would let a future recalibration of
+/// `peel_pressure_pa` or `tensile_green_mpa` silently move the contact-area
+/// threshold, or break this unrelated gate.  What matters physically is only
+/// the safety direction: a LARGER implied ratio means less section per unit
+/// load than the calibration plate allows.
+#[test]
+fn engine_implied_tip_area_ratio_does_not_exceed_the_h2_allowance() {
+    let constants = M0PlaceholderConstants::new().expect("placeholder constants");
+    let peel_pressure_pa = constants.peel_pressure_pa().diagnostic().get();
+    let tensile_pa = constants.tensile_green_mpa().diagnostic().get() * 1.0e6;
+    let safety_factor = constants.tip_safety_factor().diagnostic().get();
+    // The allowance comes from the EVIDENCE registry's `X_ALLOWED`, the sole
+    // registered anchor, so a plate recalibration reaches this gate.
+    let evidence = M0EvidenceConstants::new().expect("evidence constants");
+    let allowance = *evidence.x_allowed().value();
+    assert!(
+        (allowance - 12.0).abs() < 1.0e-12,
+        "X_ALLOWED is the anchor and currently reads {allowance}"
+    );
+
+    let implied = tensile_pa / (peel_pressure_pa * safety_factor);
+    assert!(
+        implied <= allowance * (1.0 + 1.0e-12),
+        "engine implied area ratio {implied} exceeds the H2 allowance {allowance}: \
+         the tip policy would provision LESS section per unit load than the \
+         calibration plate permits"
+    );
+
+    // SOFT review trigger — records rather than fails.  A strictly smaller
+    // implied ratio is safe, but means the engine and the measured allowance
+    // have drifted apart and the pairing should be re-examined.
+    if implied < allowance * (1.0 - 1.0e-12) {
+        println!(
+            "REVIEW TRIGGER: engine implied tip area ratio {implied} is now strictly \
+             more conservative than the H2 allowance {allowance}. This is safe, but the \
+             pairing in contact-physics PR-4 should be re-examined against the current \
+             calibration evidence."
+        );
+    }
 }
 
 #[test]
@@ -626,14 +785,14 @@ fn coupled_structures_validate_domains_accessors_and_strict_wire_shapes() {
     assert!(DecimationSamplingPolicy::new(42, 0).is_err());
     assert_strict_roundtrip(&sample, r#"{"seed":42,"cap":120000}"#);
 
-    let ratio = DecimationRatioSearchPolicy::new(0.05, 0.5, 5).unwrap();
+    let ratio = DecimationRatioSearchPolicy::new(0.05, 1.0, 5).unwrap();
     assert_eq!(
         (ratio.lower(), ratio.upper(), ratio.bisections().get()),
-        (0.05, 0.5, 5)
+        (0.05, 1.0, 5)
     );
-    assert!(DecimationRatioSearchPolicy::new(0.5, 0.05, 5).is_err());
-    assert!(DecimationRatioSearchPolicy::new(0.05, 0.5, 0).is_err());
-    assert_strict_roundtrip(&ratio, r#"{"lower":0.05,"upper":0.5,"bisections":5}"#);
+    assert!(DecimationRatioSearchPolicy::new(1.0, 0.05, 5).is_err());
+    assert!(DecimationRatioSearchPolicy::new(0.05, 1.0, 0).is_err());
+    assert_strict_roundtrip(&ratio, r#"{"lower":0.05,"upper":1.0,"bisections":5}"#);
 }
 
 #[test]

@@ -9,6 +9,8 @@ use crate::moller::moller as _moller;
 use crate::queries::NativeSurface;
 use crate::vec3::{norm, sub, V3};
 
+const TEST_UNBOUNDED_GRID_BYTES: usize = usize::MAX;
+
 pub struct TestMesh {
     pub tris: Vec<f64>, // n*9
     pub normals: Vec<f64>,
@@ -114,7 +116,7 @@ pub fn make_slivers(n: usize) -> TestMesh {
 
 pub fn build_surface(m: &TestMesh) -> NativeSurface {
     let mesh = Mesh::new(&m.tris, &m.normals, &m.areas, &m.bounds).unwrap();
-    NativeSurface::new(mesh, 2.0, usize::MAX).unwrap()
+    NativeSurface::new(mesh, 2.0, TEST_UNBOUNDED_GRID_BYTES).unwrap()
 }
 
 /// Build a surface directly from a flat n*9 triangle list (test fixtures).
@@ -125,7 +127,7 @@ pub fn build_from_tris(tris: Vec<f64>) -> NativeSurface {
 /// Build with an explicit parity-grid memory budget (A17 budget-failure test).
 pub fn build_surface_budget(m: &TestMesh, max_grid_bytes: usize) -> Result<NativeSurface, String> {
     let mesh = Mesh::new(&m.tris, &m.normals, &m.areas, &m.bounds)?;
-    NativeSurface::new(mesh, 2.0, max_grid_bytes)
+    NativeSurface::new(mesh, 2.0, max_grid_bytes).map_err(|error| error.to_string())
 }
 
 /// Public accessor for the make_* meshes so the budget test can reuse them.
@@ -158,6 +160,56 @@ pub fn brute_seg_min(s: &NativeSurface, a: V3, b: V3) -> (f64, V3) {
 /// Proves that two surface views retain the same immutable face allocation.
 pub fn surfaces_share_geometry(a: &NativeSurface, b: &NativeSurface) -> bool {
     a.mesh.shares_geometry(&b.mesh)
+}
+
+/// Process-local construction-attempt counts at the actual BVH and parity-axis
+/// index build boundaries.
+///
+/// These result-inert seams include successful, failed, transient, and direct
+/// builds. A projection reuse test must assert that neither value changes.
+pub fn index_construction_attempt_counts() -> (u64, u64) {
+    (
+        crate::bvh::build_attempt_count(),
+        crate::parity::axis_build_attempt_count(),
+    )
+}
+
+/// Brute-force allowed-face projection oracle for bounded generated tests.
+/// Production callers must use `project_allowed_faces_batch`.
+pub fn brute_allowed_projection(
+    surface: &NativeSurface,
+    allowed_face_ids: &[u32],
+    point: V3,
+    upper_bound: f64,
+) -> Option<(f64, u32, V3)> {
+    let mut best_distance = upper_bound;
+    let mut best_face = surface.mesh.global_nfaces();
+    let mut best_point = [0.0; 3];
+    for &face_id in allowed_face_ids {
+        let face = face_id as usize;
+        let closest = _closest(
+            point,
+            surface.mesh.v0(face),
+            surface.mesh.vertex_b(face),
+            surface.mesh.vertex_c(face),
+        );
+        let delta = [
+            point[0] - closest[0],
+            point[1] - closest[1],
+            point[2] - closest[2],
+        ];
+        let distance = (delta[0] * delta[0] + delta[1] * delta[1] + delta[2] * delta[2]).sqrt();
+        if distance < best_distance || (distance == best_distance && face < best_face) {
+            best_distance = distance;
+            best_face = face;
+            best_point = closest;
+        }
+    }
+    (best_face < surface.mesh.global_nfaces()).then_some((
+        best_distance,
+        best_face as u32,
+        best_point,
+    ))
 }
 
 pub fn surf_bvh_face_ids(s: &NativeSurface) -> Vec<u32> {

@@ -1,5 +1,6 @@
 use crate::{
-    Finite, FixerId, MetricSet, ModelId, ProvenanceManifest, SearchEvidence, StageId, ViolationKind,
+    ArtifactId, Finite, FixerId, MetricSet, ModelId, ProvenanceManifest, SearchEvidence, StageId,
+    ViolationKind,
 };
 use serde::{de, Deserialize, Deserializer, Serialize};
 use thiserror::Error;
@@ -15,11 +16,15 @@ pub enum Severity {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "id", rename_all = "snake_case")]
 pub enum SiteId {
+    /// A stable artifact identity, used when no model can be truthfully
+    /// identified (for example, a missing or unreadable project file).
+    Artifact(ArtifactId),
     Member(u32),
     Quarantine(u32),
     Ball(u32),
     Contact(u32),
     Face(u32),
+    Island(u32),
     Cavity(u32),
     Model(ModelId),
 }

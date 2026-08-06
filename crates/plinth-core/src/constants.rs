@@ -18,6 +18,7 @@ pub use placeholders::{
     FixBraceIterationCap, HollowExtraDrainPolicy, M0PlaceholderConstants,
     M0PlaceholderConstantsError, NonNegativeFinite, PlaceholderValueError, PlacementXyMm,
     PositiveFinite, SeedSpacingFactor, SphereTessellationPolicy, TrialSetting, UnitFraction,
+    VentDirections,
 };
 
 /// Errors while atomically constructing the complete M0 constants registry.
@@ -41,8 +42,160 @@ pub enum M0ConstantsError {
 #[derive(Clone, Debug, PartialEq)]
 pub struct M0Constants {
     registry: ConstantsRegistry,
+    evidence: M0EvidenceConstants,
     placeholders: M0PlaceholderConstants,
     saturn4_ultra: PrinterProfile,
+}
+
+/// Immutable typed authority for the SCAR-AREA-CAP and PRINT-FLOOR inputs.
+///
+/// This is deliberately a view over the one M0 registry, rather than a second
+/// declaration set. The policy literals remain owned by their canonical
+/// registry entries: seven are `Placeholder` policy values and
+/// `PRINT_FLOOR_CHORD_MM` is an owner-decision `Measured` value. See
+/// `docs/specs/SPEC-EMBED-POLICY.md` "Normative constants" and
+/// "PRINT-FLOOR amendment", and
+/// `docs/rust-migration/03-physics-and-constants.md` §3.6.
+///
+/// The later measurement/gate implementation must preserve the specification's
+/// strict boundaries: a scar limit is legal at equality (`<=`), while an
+/// unanchored transit is moot only when its chord is strictly below the print
+/// floor (`<`); equality is a firm transit. This type supplies no geometry,
+/// predicate, request limit, or report behavior.
+#[derive(Clone, Copy, Debug)]
+pub struct ScarAreaCapPolicy<'a> {
+    a_abs_mm2: &'a Placeholder<PositiveFinite>,
+    kappa: &'a Placeholder<PositiveFinite>,
+    l_scar_max_mm: &'a Placeholder<PositiveFinite>,
+    eps_cos: &'a Placeholder<PositiveFinite>,
+    interval_tol_mm: &'a Placeholder<PositiveFinite>,
+    print_floor_chord_mm: &'a Measured<f64>,
+    tip_ball_factor: &'a Placeholder<PositiveFinite>,
+    foot_ball_factor: &'a Placeholder<PositiveFinite>,
+}
+
+impl<'a> ScarAreaCapPolicy<'a> {
+    /// Stable decision identity for provenance recording once the gate exists.
+    #[must_use]
+    pub fn decision_id(&self) -> crate::DecisionId {
+        crate::DecisionId::from("SCAR-AREA-CAP")
+    }
+
+    /// Canonical registry IDs, in the policy specification's order.
+    #[must_use]
+    pub const fn constant_ids(&self) -> [&'static str; 8] {
+        [
+            "A_ABS_MM2",
+            "KAPPA",
+            "L_SCAR_MAX_MM",
+            "EPS_COS",
+            "TOL_MM",
+            "PRINT_FLOOR_CHORD_MM",
+            "BALL_FACTOR_STUB",
+            "BALL_FACTOR_FOOT",
+        ]
+    }
+
+    #[must_use]
+    pub const fn a_abs_mm2(&self) -> &'a Placeholder<PositiveFinite> {
+        self.a_abs_mm2
+    }
+
+    #[must_use]
+    pub const fn kappa(&self) -> &'a Placeholder<PositiveFinite> {
+        self.kappa
+    }
+
+    #[must_use]
+    pub const fn l_scar_max_mm(&self) -> &'a Placeholder<PositiveFinite> {
+        self.l_scar_max_mm
+    }
+
+    #[must_use]
+    pub const fn eps_cos(&self) -> &'a Placeholder<PositiveFinite> {
+        self.eps_cos
+    }
+
+    #[must_use]
+    pub const fn interval_tol_mm(&self) -> &'a Placeholder<PositiveFinite> {
+        self.interval_tol_mm
+    }
+
+    #[must_use]
+    pub const fn print_floor_chord_mm(&self) -> &'a Measured<f64> {
+        self.print_floor_chord_mm
+    }
+
+    #[must_use]
+    pub const fn tip_ball_factor(&self) -> &'a Placeholder<PositiveFinite> {
+        self.tip_ball_factor
+    }
+
+    #[must_use]
+    pub const fn foot_ball_factor(&self) -> &'a Placeholder<PositiveFinite> {
+        self.foot_ball_factor
+    }
+}
+
+/// Immutable typed authority for the support pipeline's two scaled execution
+/// caps.
+///
+/// Like [`ScarAreaCapPolicy`] this is a view over the one M0 registry, not a
+/// second declaration set. Both caps take the same shape —
+/// `max(floor, per_face × support_mesh_face_count)` — so that a cap refuses
+/// work that is *superlinear in model size* rather than refusing large models.
+/// The floors are the inherited unmeasured constants and are `Placeholder`; the
+/// per-face coefficients are `Derived` from one instrumented Weeping Treant run
+/// by one stated rule, `next_power_of_two(2 × observed_per_face)`.
+///
+/// These are execution-authority bounds only. They admit or refuse; they never
+/// alter a plan that is admitted, so they are result-inert and excluded from
+/// every semantic and result digest.
+#[derive(Clone, Copy, Debug)]
+pub struct SupportResourceCapPolicy<'a> {
+    knn_max_work_floor: &'a Placeholder<std::num::NonZeroU64>,
+    knn_max_work_per_face: &'a Derived<u64>,
+    parity_grid_max_bytes_floor: &'a Placeholder<std::num::NonZeroU64>,
+    parity_grid_max_bytes_per_face: &'a Derived<u64>,
+}
+
+impl<'a> SupportResourceCapPolicy<'a> {
+    /// Stable decision identity for provenance recording.
+    #[must_use]
+    pub fn decision_id(&self) -> crate::DecisionId {
+        crate::DecisionId::from("SUPPORT-RESOURCE-CAP")
+    }
+
+    /// Canonical registry IDs, floor then coefficient, kNN then parity grid.
+    #[must_use]
+    pub const fn constant_ids(&self) -> [&'static str; 4] {
+        [
+            "SUPPORT_KNN_MAX_WORK_FLOOR",
+            "SUPPORT_KNN_MAX_WORK_PER_FACE",
+            "SUPPORT_PARITY_GRID_MAX_BYTES_FLOOR",
+            "SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE",
+        ]
+    }
+
+    #[must_use]
+    pub const fn knn_max_work_floor(&self) -> &'a Placeholder<std::num::NonZeroU64> {
+        self.knn_max_work_floor
+    }
+
+    #[must_use]
+    pub const fn knn_max_work_per_face(&self) -> &'a Derived<u64> {
+        self.knn_max_work_per_face
+    }
+
+    #[must_use]
+    pub const fn parity_grid_max_bytes_floor(&self) -> &'a Placeholder<std::num::NonZeroU64> {
+        self.parity_grid_max_bytes_floor
+    }
+
+    #[must_use]
+    pub const fn parity_grid_max_bytes_per_face(&self) -> &'a Derived<u64> {
+        self.parity_grid_max_bytes_per_face
+    }
 }
 
 impl M0Constants {
@@ -52,7 +205,7 @@ impl M0Constants {
 
         // Gather every declaration before one structural batch validation and
         // publication. Do not register constants incrementally.
-        let mut declarations = Vec::with_capacity(207);
+        let mut declarations = Vec::with_capacity(260);
         declarations.extend(evidence.descriptors()?);
         declarations.extend(placeholders.descriptors()?);
         let registry = ConstantsRegistry::build_batch(declarations)?;
@@ -74,6 +227,7 @@ impl M0Constants {
 
         Ok(Self {
             registry,
+            evidence,
             placeholders,
             saturn4_ultra,
         })
@@ -96,12 +250,40 @@ impl M0Constants {
     pub const fn saturn4_ultra(&self) -> &PrinterProfile {
         &self.saturn4_ultra
     }
+
+    /// Returns the SCAR-AREA-CAP / PRINT-FLOOR authority without copying its
+    /// registry entries or inventing defaults for caller-supplied geometry.
+    #[must_use]
+    pub const fn scar_area_cap_policy(&self) -> ScarAreaCapPolicy<'_> {
+        ScarAreaCapPolicy {
+            a_abs_mm2: self.placeholders.a_abs_mm2(),
+            kappa: self.placeholders.kappa(),
+            l_scar_max_mm: self.placeholders.l_scar_max_mm(),
+            eps_cos: self.placeholders.eps_cos(),
+            interval_tol_mm: self.placeholders.tol_mm(),
+            print_floor_chord_mm: self.evidence.print_floor_chord_mm(),
+            tip_ball_factor: self.placeholders.ball_factor_stub(),
+            foot_ball_factor: self.placeholders.ball_factor_foot(),
+        }
+    }
+
+    /// Returns the SUPPORT-RESOURCE-CAP authority without copying its registry
+    /// entries or inventing a second numeric owner in the support crate.
+    #[must_use]
+    pub const fn support_resource_cap_policy(&self) -> SupportResourceCapPolicy<'_> {
+        SupportResourceCapPolicy {
+            knn_max_work_floor: self.placeholders.support_knn_max_work_floor(),
+            knn_max_work_per_face: self.evidence.support_knn_max_work_per_face(),
+            parity_grid_max_bytes_floor: self.placeholders.support_parity_grid_max_bytes_floor(),
+            parity_grid_max_bytes_per_face: self.evidence.support_parity_grid_max_bytes_per_face(),
+        }
+    }
 }
 
 /// The sole workspace-wide global constants initialization point.
 ///
 /// Its fallible result is itself published atomically: callers observe either
-/// the complete 207-entry registry and profile or the same construction error.
+/// the complete 260-entry registry and profile or the same construction error.
 static M0_CONSTANTS: LazyLock<Result<M0Constants, M0ConstantsError>> =
     LazyLock::new(M0Constants::build);
 

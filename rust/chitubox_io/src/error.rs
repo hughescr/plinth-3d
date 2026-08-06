@@ -61,11 +61,17 @@ pub enum ChituboxError {
     #[error("write verification failed (structural re-parse rejected output): {detail}")]
     VerifyFailed { detail: String },
 
+    #[error("clean structural rebuild differs from the opened bytes")]
+    CleanRoundtripDrift,
+
     #[error("format drift: {detail}")]
     FormatDrift { detail: String },
 
     #[error("unknown opaque region id: {0}")]
     UnknownOpaqueRegion(u32),
+
+    #[error("unsupported opaque-layout mutation: {operation}")]
+    UnsupportedOpaqueLayoutMutation { operation: &'static str },
 }
 
 pub(crate) type Result<T> = std::result::Result<T, ChituboxError>;

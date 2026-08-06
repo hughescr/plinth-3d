@@ -1,0 +1,20 @@
+[package]
+name = "plinth-emit"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+publish = false
+
+[dependencies]
+chitubox_io = { path = "../../rust/chitubox_io" }
+plinth-core = { path = "../plinth-core" }
+plinth-mesh = { path = "../plinth-mesh" }
+plinth-support = { path = "../plinth-support" }
+serde = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+plinth-decimate = { path = "../plinth-decimate" }
+plinth-hollow = { path = "../plinth-hollow" }
+plinth-orient = { path = "../plinth-orient" }
+serde_json = { workspace = true }

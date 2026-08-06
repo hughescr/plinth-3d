@@ -13,11 +13,11 @@ use crate::bvh::Bvh;
 use crate::closest::{closest_on_tri, segseg};
 use crate::consts::{DEDUP_LOC_MM, EPS, NEAR_WALL_SKIP, THRESHOLD_BAND_MM};
 use crate::mesh::Mesh;
-use crate::moller::{dedup_loc, moller};
+use crate::moller::{dedup_loc_into, moller};
 use crate::par;
-use crate::parity::ParityVote;
+use crate::parity::{ParityBuildError, ParityVote};
 use crate::vec3::{add, cross, dot, norm, scale, sub, V3};
-use crate::{SurfaceIndexKind, SurfaceSubsetError};
+use crate::{SurfaceIndexKind, SurfaceSubsetError, SurfaceTriangleSoupDigest};
 
 thread_local! {
     static STACK: RefCell<Vec<i32>> = RefCell::new(Vec::with_capacity(128));
@@ -33,6 +33,135 @@ pub struct Interval {
     /// -1 = axis ray; k >= 0 = offset ray k
     pub ray: i32,
 }
+
+/// One centerline or capsule-offset ray used by penetration interval queries.
+///
+/// `label == -1` identifies the centerline; non-negative labels identify
+/// offset rays in their canonical angular order.  The segment length is the
+/// exact norm of this ray's own direction, which differs from the centerline
+/// length for a tapered member.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CapsuleRay {
+    label: i32,
+    origin: V3,
+    direction: V3,
+    length_mm: f64,
+}
+
+impl CapsuleRay {
+    #[must_use]
+    pub const fn label(self) -> i32 {
+        self.label
+    }
+
+    #[must_use]
+    pub const fn origin(self) -> V3 {
+        self.origin
+    }
+
+    #[must_use]
+    pub const fn direction(self) -> V3 {
+        self.direction
+    }
+
+    #[must_use]
+    pub const fn length_mm(self) -> f64 {
+        self.length_mm
+    }
+}
+
+/// Construct the canonical centerline and, when requested, capsule-offset
+/// rays for one tapered member.
+///
+/// This is shared with consumers that validate interval arc-length bounds, so
+/// the query and validation paths cannot drift in basis, offset, label, or
+/// tapered-ray length.
+#[must_use]
+pub fn capsule_rays(
+    p0: V3,
+    p1: V3,
+    r0: f64,
+    r1: f64,
+    n_offset_rays: usize,
+    rays_all: bool,
+) -> CapsuleRays {
+    let axis = sub(p1, p0);
+    let axis_length = norm(axis);
+    let offset_count = usize::from(rays_all && axis_length >= 1e-9) * n_offset_rays;
+    let (e1, e2) = if offset_count == 0 {
+        ([0.0; 3], [0.0; 3])
+    } else {
+        perp_basis(scale(axis, 1.0 / axis_length))
+    };
+    CapsuleRays {
+        p0,
+        p1,
+        r0,
+        r1,
+        axis,
+        axis_length,
+        e1,
+        e2,
+        offset_count,
+        next: 0,
+    }
+}
+
+/// Allocation-free iterator over the canonical rays of one tapered member.
+#[derive(Clone, Copy, Debug)]
+pub struct CapsuleRays {
+    p0: V3,
+    p1: V3,
+    r0: f64,
+    r1: f64,
+    axis: V3,
+    axis_length: f64,
+    e1: V3,
+    e2: V3,
+    offset_count: usize,
+    next: usize,
+}
+
+impl Iterator for CapsuleRays {
+    type Item = CapsuleRay;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.next == 0 {
+            self.next = 1;
+            return Some(CapsuleRay {
+                label: -1,
+                origin: self.p0,
+                direction: self.axis,
+                length_mm: self.axis_length,
+            });
+        }
+        let offset = self.next - 1;
+        if offset >= self.offset_count {
+            return None;
+        }
+        self.next += 1;
+        let th = 2.0 * std::f64::consts::PI * (offset as f64) / (self.offset_count as f64);
+        let unit = add(scale(self.e1, th.cos()), scale(self.e2, th.sin()));
+        let origin = add(self.p0, scale(unit, self.r0));
+        let direction = sub(add(self.p1, scale(unit, self.r1)), origin);
+        Some(CapsuleRay {
+            label: offset as i32,
+            origin,
+            direction,
+            length_mm: norm(direction),
+        })
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self
+            .offset_count
+            .saturating_add(1)
+            .saturating_sub(self.next);
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for CapsuleRays {}
 
 /// A companion input slice did not match its batch's authoritative length.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -75,6 +204,366 @@ impl std::fmt::Display for BatchInputError {
 
 impl std::error::Error for BatchInputError {}
 
+/// Caller-owned hard limits for [`NativeSurface::penetration_intervals_batch_bounded`].
+///
+/// The limits describe the whole batch, not one Rayon worker. Before any
+/// parallel work begins the kernel derives a conservative exact-shape bound:
+/// every ray can test and hit every selected face, every resulting subsegment
+/// can consume `cap` samples, and every subsegment can become an interval.
+/// This makes the refusal independent of Rayon scheduling and leaves every
+/// row with pre-reserved, fallible scratch buffers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PenetrationBatchLimits {
+    pub max_rows: usize,
+    pub max_total_work: usize,
+    pub max_total_hits: usize,
+    pub max_total_samples: usize,
+    pub max_total_intervals: usize,
+    pub max_scratch_bytes: usize,
+}
+
+/// Caller-owned policy for projection onto a restricted set of global faces.
+///
+/// `None` means the exact nearest allowed face at any distance. A finite cap
+/// returns a per-point [`AllowedFaceProjectionOutcome::NoWinner`] when every
+/// allowed face is farther away. Equality is admitted: a projection exactly
+/// at the cap is a winner.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AllowedFaceProjectionPolicy {
+    pub max_distance_mm: Option<f64>,
+}
+
+/// Whole-batch limits for [`NativeSurface::project_allowed_faces_batch`].
+///
+/// The node-visit limit includes one visit per existing BVH node to build the
+/// allowed-subtree mask plus a deterministic conservative total over all query
+/// rows. Since each leaf has at most `LEAF_MAX` faces, this setup-node charge
+/// also bounds one-time face-filter checks. The triangle-test limit is the
+/// conservative total over all rows. `max_memory_bytes` covers every retained
+/// buffer used by the call: gathered allowed IDs, face/subtree masks, leaf
+/// ranges, fixed traversal stacks, parallel row results, and serially
+/// scattered outcomes. Allocator metadata and Rayon's executor-internal
+/// storage are not included.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AllowedFaceProjectionLimits {
+    pub max_points: usize,
+    pub max_allowed_faces: usize,
+    pub max_total_node_visits: usize,
+    pub max_total_triangle_tests: usize,
+    pub max_memory_bytes: usize,
+}
+
+/// Exact winner for one allowed-face projection row.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AllowedFaceProjection {
+    pub distance_mm: f64,
+    pub point: V3,
+    /// Stable global face ID from the source surface.
+    pub face_id: u32,
+}
+
+/// Why a valid point has no winner under an explicit projection policy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AllowedFaceProjectionNoWinner {
+    BeyondMaxDistance { max_distance_mm: f64 },
+}
+
+/// One output row. Input and resource failures are reported by the outer
+/// `Result`; `NoWinner` is therefore never overloaded with an error state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AllowedFaceProjectionOutcome {
+    Projected(AllowedFaceProjection),
+    NoWinner(AllowedFaceProjectionNoWinner),
+}
+
+/// Named preflight or allocation refusal from an allowed-face batch.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AllowedFaceProjectionError {
+    EmptyAllowedFaces,
+    PointLimitExceeded {
+        required: usize,
+        limit: usize,
+    },
+    AllowedFaceLimitExceeded {
+        required: usize,
+        limit: usize,
+    },
+    DuplicateFaceId {
+        face_id: u32,
+    },
+    FaceIdOutOfBounds {
+        position: usize,
+        face_id: u32,
+        global_face_count: usize,
+    },
+    FaceIdNotSelected {
+        position: usize,
+        face_id: u32,
+    },
+    NonFinitePoint {
+        point: usize,
+        axis: usize,
+    },
+    InvalidMaxDistance {
+        max_distance_mm: f64,
+    },
+    ResourceArithmeticOverflow {
+        resource: &'static str,
+    },
+    ResourceLimitExceeded {
+        resource: &'static str,
+        required: usize,
+        limit: usize,
+    },
+    AllocationFailure {
+        buffer: &'static str,
+        requested_bytes: usize,
+    },
+}
+
+impl std::fmt::Display for AllowedFaceProjectionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyAllowedFaces => {
+                write!(formatter, "allowed-face projection requires at least one face")
+            }
+            Self::PointLimitExceeded { required, limit } => write!(
+                formatter,
+                "allowed-face projection needs {required} points; limit is {limit}"
+            ),
+            Self::AllowedFaceLimitExceeded { required, limit } => write!(
+                formatter,
+                "allowed-face projection needs {required} allowed faces; limit is {limit}"
+            ),
+            Self::DuplicateFaceId { face_id } => write!(
+                formatter,
+                "allowed-face projection repeats global face ID {face_id}"
+            ),
+            Self::FaceIdOutOfBounds {
+                position,
+                face_id,
+                global_face_count,
+            } => write!(
+                formatter,
+                "allowed_face_ids[{position}] is {face_id}, outside {global_face_count} global faces"
+            ),
+            Self::FaceIdNotSelected {
+                position,
+                face_id,
+            } => write!(
+                formatter,
+                "allowed_face_ids[{position}] global face ID {face_id} is not selected by this surface"
+            ),
+            Self::NonFinitePoint { point, axis } => write!(
+                formatter,
+                "allowed-face projection point {point} axis {axis} is non-finite"
+            ),
+            Self::InvalidMaxDistance { max_distance_mm } => write!(
+                formatter,
+                "allowed-face projection max_distance_mm must be finite and non-negative, got {max_distance_mm}"
+            ),
+            Self::ResourceArithmeticOverflow { resource } => write!(
+                formatter,
+                "allowed-face projection resource arithmetic overflow in {resource}"
+            ),
+            Self::ResourceLimitExceeded {
+                resource,
+                required,
+                limit,
+            } => write!(
+                formatter,
+                "allowed-face projection {resource} requires {required}; limit is {limit}"
+            ),
+            Self::AllocationFailure {
+                buffer,
+                requested_bytes,
+            } => write!(
+                formatter,
+                "allowed-face projection could not reserve {requested_bytes} bytes for {buffer}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AllowedFaceProjectionError {}
+
+#[derive(Clone, Copy)]
+struct AllowedFaceProjectionRequirements {
+    stack_capacity: usize,
+    memory_bytes: usize,
+}
+
+#[derive(Clone, Copy, Default)]
+struct AllowedLeafRange {
+    start: usize,
+    count: usize,
+}
+
+fn checked_allowed_projection_mul(
+    left: usize,
+    right: usize,
+    resource: &'static str,
+) -> Result<usize, AllowedFaceProjectionError> {
+    left.checked_mul(right)
+        .ok_or(AllowedFaceProjectionError::ResourceArithmeticOverflow { resource })
+}
+
+fn checked_allowed_projection_add(
+    left: usize,
+    right: usize,
+    resource: &'static str,
+) -> Result<usize, AllowedFaceProjectionError> {
+    left.checked_add(right)
+        .ok_or(AllowedFaceProjectionError::ResourceArithmeticOverflow { resource })
+}
+
+fn allowed_projection_bytes<T>(
+    count: usize,
+    resource: &'static str,
+) -> Result<usize, AllowedFaceProjectionError> {
+    checked_allowed_projection_mul(count, std::mem::size_of::<T>(), resource)
+}
+
+fn reserve_allowed_projection_vec<T>(
+    capacity: usize,
+    buffer: &'static str,
+) -> Result<Vec<T>, AllowedFaceProjectionError> {
+    let requested_bytes = allowed_projection_bytes::<T>(capacity, buffer)?;
+    let mut values = Vec::new();
+    values.try_reserve_exact(capacity).map_err(|_| {
+        AllowedFaceProjectionError::AllocationFailure {
+            buffer,
+            requested_bytes,
+        }
+    })?;
+    Ok(values)
+}
+
+/// Refusal from the bounded penetration batch. Resource values are always the
+/// preflight-required amount and the caller-supplied hard limit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PenetrationBatchError {
+    Input(BatchInputError),
+    ResourceLimitExceeded {
+        resource: &'static str,
+        required: usize,
+        limit: usize,
+    },
+    ArithmeticOverflow {
+        resource: &'static str,
+    },
+    AllocationFailure {
+        row: Option<usize>,
+        buffer: &'static str,
+        requested_bytes: usize,
+    },
+}
+
+impl From<BatchInputError> for PenetrationBatchError {
+    fn from(error: BatchInputError) -> Self {
+        Self::Input(error)
+    }
+}
+
+impl std::fmt::Display for PenetrationBatchError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Input(error) => error.fmt(formatter),
+            Self::ResourceLimitExceeded {
+                resource,
+                required,
+                limit,
+            } => write!(
+                formatter,
+                "penetration batch {resource} requires {required}; limit is {limit}"
+            ),
+            Self::ArithmeticOverflow { resource } => {
+                write!(formatter, "penetration batch resource arithmetic overflow in {resource}")
+            }
+            Self::AllocationFailure {
+                row,
+                buffer,
+                requested_bytes,
+            } => match row {
+                Some(row) => write!(
+                    formatter,
+                    "penetration batch row {row} could not reserve {requested_bytes} bytes for {buffer}"
+                ),
+                None => write!(
+                    formatter,
+                    "penetration batch could not reserve {requested_bytes} bytes for {buffer}"
+                ),
+            },
+        }
+    }
+}
+
+impl std::error::Error for PenetrationBatchError {}
+
+#[derive(Clone, Copy)]
+struct PenetrationRowBudget {
+    rays: usize,
+    hits_per_ray: usize,
+    samples_per_ray: usize,
+    subsegments_per_ray: usize,
+    intervals: usize,
+    traversal_stack: usize,
+    parity_crossings: usize,
+}
+
+#[derive(Clone, Copy)]
+struct PenetrationBatchRequirements {
+    rows: usize,
+    work: usize,
+    hits: usize,
+    samples: usize,
+    intervals: usize,
+    scratch_bytes: usize,
+    row: PenetrationRowBudget,
+}
+
+fn checked_penetration_mul(
+    a: usize,
+    b: usize,
+    resource: &'static str,
+) -> Result<usize, PenetrationBatchError> {
+    a.checked_mul(b)
+        .ok_or(PenetrationBatchError::ArithmeticOverflow { resource })
+}
+
+fn checked_penetration_add(
+    a: usize,
+    b: usize,
+    resource: &'static str,
+) -> Result<usize, PenetrationBatchError> {
+    a.checked_add(b)
+        .ok_or(PenetrationBatchError::ArithmeticOverflow { resource })
+}
+
+fn checked_penetration_bytes<T>(
+    count: usize,
+    resource: &'static str,
+) -> Result<usize, PenetrationBatchError> {
+    checked_penetration_mul(count, std::mem::size_of::<T>(), resource)
+}
+
+fn reserve_penetration_vec<T>(
+    capacity: usize,
+    row: Option<usize>,
+    buffer: &'static str,
+) -> Result<Vec<T>, PenetrationBatchError> {
+    let requested_bytes = checked_penetration_bytes::<T>(capacity, buffer)?;
+    let mut result = Vec::new();
+    result
+        .try_reserve_exact(capacity)
+        .map_err(|_| PenetrationBatchError::AllocationFailure {
+            row,
+            buffer,
+            requested_bytes,
+        })?;
+    Ok(result)
+}
+
 pub type CastRaysBatch = (Vec<i64>, Vec<f64>, Vec<i64>);
 pub type SphereBreachBatch = (Vec<bool>, Vec<f64>, Vec<f64>);
 
@@ -83,7 +572,8 @@ pub struct NativeSurface {
     pub bvh: Bvh,
     pub pv: ParityVote,
     pub grid_pitch_mm: f64,
-    max_grid_bytes: usize,
+    pub(crate) max_grid_bytes: usize,
+    pub(crate) source_triangle_soup_digest: SurfaceTriangleSoupDigest,
     exterior_mask: OnceLock<Vec<bool>>,
     // result-inert telemetry (spec sec 4.2): decisions within 1e-6 of a
     // threshold, and measured-tie breach disagreements.
@@ -171,26 +661,26 @@ fn build_indexes(
 ) -> Result<(Bvh, ParityVote), (SurfaceIndexKind, String)> {
     let bvh = Bvh::build(mesh).map_err(|reason| (SurfaceIndexKind::Bvh, reason))?;
     let pv = ParityVote::build(mesh, grid_pitch_mm, max_grid_bytes)
-        .map_err(|reason| (SurfaceIndexKind::Parity, reason))?;
+        .map_err(|reason| (SurfaceIndexKind::Parity, reason.to_string()))?;
     Ok((bvh, pv))
 }
 
 impl NativeSurface {
-    pub fn new(
+    pub(crate) fn new(
         mesh: Mesh,
         grid_pitch_mm: f64,
         max_grid_bytes: usize,
-    ) -> Result<NativeSurface, String> {
-        // Preserve the established construction error text. Typed index
-        // attribution is specific to the subset boundary below.
-        let (bvh, pv) = build_indexes(&mesh, grid_pitch_mm, max_grid_bytes)
-            .map_err(|(_index, reason)| reason)?;
+    ) -> Result<NativeSurface, ParityBuildError> {
+        let source_triangle_soup_digest = mesh.triangle_soup_digest();
+        let bvh = Bvh::build(&mesh).map_err(ParityBuildError::Other)?;
+        let pv = ParityVote::build(&mesh, grid_pitch_mm, max_grid_bytes)?;
         Ok(NativeSurface {
             mesh,
             bvh,
             pv,
             grid_pitch_mm,
             max_grid_bytes,
+            source_triangle_soup_digest,
             exterior_mask: OnceLock::new(),
             band_counter: AtomicU64::new(0),
             tie_counter: AtomicU64::new(0),
@@ -226,6 +716,7 @@ impl NativeSurface {
         let mut canonical = face_ids.to_vec();
         canonical.sort_unstable();
         let mesh = self.mesh.subset(canonical);
+        let source_triangle_soup_digest = mesh.triangle_soup_digest();
         let (bvh, pv) = build_indexes(&mesh, self.grid_pitch_mm, self.max_grid_bytes)
             .map_err(|(index, _reason)| SurfaceSubsetError::IndexBuild { index })?;
         Ok(NativeSurface {
@@ -234,6 +725,7 @@ impl NativeSurface {
             pv,
             grid_pitch_mm: self.grid_pitch_mm,
             max_grid_bytes: self.max_grid_bytes,
+            source_triangle_soup_digest,
             exterior_mask: OnceLock::new(),
             band_counter: AtomicU64::new(0),
             tie_counter: AtomicU64::new(0),
@@ -258,54 +750,60 @@ impl NativeSurface {
     /// Exact nearest via branch-and-bound with lexicographic (dist, idx),
     /// strict `>` pruning, seed (upper_bound, global_nfaces) (Amendment A12).
     pub(crate) fn nearest_one(&self, p: V3, upper_bound: f64) -> (f64, usize, V3) {
+        STACK.with(|s| self.nearest_one_with_stack(p, upper_bound, &mut s.borrow_mut()))
+    }
+
+    fn nearest_one_with_stack(
+        &self,
+        p: V3,
+        upper_bound: f64,
+        stack: &mut Vec<i32>,
+    ) -> (f64, usize, V3) {
         // Keep the historical full-surface face count as the no-hit sentinel.
         // A selected global ID can never collide with this value.
         let nf = self.mesh.global_nfaces();
         let mut best_d = upper_bound;
         let mut best_i = nf;
         let mut best_cp: V3 = [0.0; 3];
-        STACK.with(|s| {
-            let mut stack = s.borrow_mut();
-            stack.clear();
-            stack.push(0);
-            while let Some(ni) = stack.pop() {
-                let node = &self.bvh.nodes[ni as usize];
-                // prune STRICTLY (> best_d): keep equal-distance lower-index tris
-                if point_box_dist(p, node.bmin, node.bmax) > best_d {
-                    continue;
+        stack.clear();
+        stack.push(0);
+        while let Some(ni) = stack.pop() {
+            let node = &self.bvh.nodes[ni as usize];
+            // prune STRICTLY (> best_d): keep equal-distance lower-index tris
+            if point_box_dist(p, node.bmin, node.bmax) > best_d {
+                continue;
+            }
+            if node.leaf {
+                let start = node.a as usize;
+                let cnt = node.b as usize;
+                for &tid in &self.bvh.order[start..start + cnt] {
+                    let t = tid as usize;
+                    let a = self.mesh.v0(t);
+                    let b = self.mesh.vertex_b(t);
+                    let cc = self.mesh.vertex_c(t);
+                    let cp = closest_on_tri(p, a, b, cc);
+                    let d = norm(sub(p, cp));
+                    if d < best_d || (d == best_d && t < best_i) {
+                        best_d = d;
+                        best_i = t;
+                        best_cp = cp;
+                    }
                 }
-                if node.leaf {
-                    let start = node.a as usize;
-                    let cnt = node.b as usize;
-                    for &tid in &self.bvh.order[start..start + cnt] {
-                        let t = tid as usize;
-                        let a = self.mesh.v0(t);
-                        let b = self.mesh.vertex_b(t);
-                        let cc = self.mesh.vertex_c(t);
-                        let cp = closest_on_tri(p, a, b, cc);
-                        let d = norm(sub(p, cp));
-                        if d < best_d || (d == best_d && t < best_i) {
-                            best_d = d;
-                            best_i = t;
-                            best_cp = cp;
-                        }
-                    }
+            } else {
+                // visit nearer child first => push farther first (LIFO)
+                let l = node.a as usize;
+                let r = node.b as usize;
+                let dl = point_box_dist(p, self.bvh.nodes[l].bmin, self.bvh.nodes[l].bmax);
+                let dr = point_box_dist(p, self.bvh.nodes[r].bmin, self.bvh.nodes[r].bmax);
+                if dl <= dr {
+                    stack.push(r as i32);
+                    stack.push(l as i32);
                 } else {
-                    // visit nearer child first => push farther first (LIFO)
-                    let l = node.a as usize;
-                    let r = node.b as usize;
-                    let dl = point_box_dist(p, self.bvh.nodes[l].bmin, self.bvh.nodes[l].bmax);
-                    let dr = point_box_dist(p, self.bvh.nodes[r].bmin, self.bvh.nodes[r].bmax);
-                    if dl <= dr {
-                        stack.push(r as i32);
-                        stack.push(l as i32);
-                    } else {
-                        stack.push(l as i32);
-                        stack.push(r as i32);
-                    }
+                    stack.push(l as i32);
+                    stack.push(r as i32);
                 }
             }
-        });
+        }
         (best_d, best_i, best_cp)
     }
 
@@ -361,6 +859,354 @@ impl NativeSurface {
         (dist, cp, idx, nrm)
     }
 
+    fn allowed_projection_requirements(
+        &self,
+        points: usize,
+        allowed_faces: usize,
+    ) -> Result<AllowedFaceProjectionRequirements, AllowedFaceProjectionError> {
+        let stack_capacity = self.bvh.depth.checked_add(1).ok_or(
+            AllowedFaceProjectionError::ResourceArithmeticOverflow {
+                resource: "traversal stack depth",
+            },
+        )?;
+        let stack_slots =
+            checked_allowed_projection_mul(points, stack_capacity, "traversal stack slots")?;
+
+        let mut memory_bytes =
+            allowed_projection_bytes::<u32>(allowed_faces, "gathered allowed IDs")?;
+        memory_bytes = checked_allowed_projection_add(
+            memory_bytes,
+            allowed_projection_bytes::<u8>(self.mesh.global_nfaces(), "allowed-face mask")?,
+            "batch memory",
+        )?;
+        memory_bytes = checked_allowed_projection_add(
+            memory_bytes,
+            allowed_projection_bytes::<u8>(self.bvh.nodes.len(), "allowed-subtree mask")?,
+            "batch memory",
+        )?;
+        memory_bytes = checked_allowed_projection_add(
+            memory_bytes,
+            allowed_projection_bytes::<AllowedLeafRange>(
+                self.bvh.nodes.len(),
+                "allowed leaf ranges",
+            )?,
+            "batch memory",
+        )?;
+        memory_bytes = checked_allowed_projection_add(
+            memory_bytes,
+            allowed_projection_bytes::<i32>(stack_slots, "traversal stacks")?,
+            "batch memory",
+        )?;
+        let result_bytes = allowed_projection_bytes::<AllowedFaceProjectionOutcome>(
+            points,
+            "projection outcomes",
+        )?;
+        memory_bytes = checked_allowed_projection_add(memory_bytes, result_bytes, "batch memory")?;
+        memory_bytes = checked_allowed_projection_add(memory_bytes, result_bytes, "batch memory")?;
+
+        Ok(AllowedFaceProjectionRequirements {
+            stack_capacity,
+            memory_bytes,
+        })
+    }
+
+    fn nearest_allowed_one_with_stack(
+        &self,
+        point: V3,
+        upper_bound: f64,
+        allowed_leaf_faces: &[u32],
+        allowed_leaf_ranges: &[AllowedLeafRange],
+        allowed_subtrees: &[u8],
+        stack: &mut [i32],
+    ) -> (f64, usize, V3) {
+        let no_face = self.mesh.global_nfaces();
+        let mut best_distance = upper_bound;
+        let mut best_face = no_face;
+        let mut best_point = [0.0; 3];
+        let mut stack_len = 1usize;
+        stack[0] = 0;
+
+        while stack_len > 0 {
+            stack_len -= 1;
+            let node_index = stack[stack_len] as usize;
+            debug_assert_ne!(allowed_subtrees[node_index], 0);
+            let node = &self.bvh.nodes[node_index];
+            // Strict pruning preserves equal-distance candidates for the
+            // stable global-face-ID tie break.
+            if point_box_dist(point, node.bmin, node.bmax) > best_distance {
+                continue;
+            }
+            if node.leaf {
+                let range = allowed_leaf_ranges[node_index];
+                for &face_id in &allowed_leaf_faces[range.start..range.start + range.count] {
+                    let face = face_id as usize;
+                    let closest = closest_on_tri(
+                        point,
+                        self.mesh.v0(face),
+                        self.mesh.vertex_b(face),
+                        self.mesh.vertex_c(face),
+                    );
+                    let distance = norm(sub(point, closest));
+                    if distance < best_distance || (distance == best_distance && face < best_face) {
+                        best_distance = distance;
+                        best_face = face;
+                        best_point = closest;
+                    }
+                }
+                continue;
+            }
+
+            let left = node.a as usize;
+            let right = node.b as usize;
+            let left_allowed = allowed_subtrees[left] != 0;
+            let right_allowed = allowed_subtrees[right] != 0;
+            match (left_allowed, right_allowed) {
+                (true, true) => {
+                    let left_distance =
+                        point_box_dist(point, self.bvh.nodes[left].bmin, self.bvh.nodes[left].bmax);
+                    let right_distance = point_box_dist(
+                        point,
+                        self.bvh.nodes[right].bmin,
+                        self.bvh.nodes[right].bmax,
+                    );
+                    debug_assert!(stack_len + 2 <= stack.len());
+                    if left_distance <= right_distance {
+                        stack[stack_len] = right as i32;
+                        stack[stack_len + 1] = left as i32;
+                    } else {
+                        stack[stack_len] = left as i32;
+                        stack[stack_len + 1] = right as i32;
+                    }
+                    stack_len += 2;
+                }
+                (true, false) => {
+                    debug_assert!(stack_len < stack.len());
+                    stack[stack_len] = left as i32;
+                    stack_len += 1;
+                }
+                (false, true) => {
+                    debug_assert!(stack_len < stack.len());
+                    stack[stack_len] = right as i32;
+                    stack_len += 1;
+                }
+                (false, false) => unreachable!("allowed subtree mask must be closed upward"),
+            }
+        }
+        (best_distance, best_face, best_point)
+    }
+
+    /// Project a batch onto an exact allowed subset while reusing this
+    /// surface's immutable BVH and face store.
+    ///
+    /// The allowed set is gathered once into a global-face mask and one compact
+    /// vector grouped by existing BVH leaf. A bottom-up mask marks only BVH
+    /// nodes containing an allowed face, so each row skips wholly disallowed
+    /// subtrees and never scans disallowed leaf faces. It then applies the
+    /// kernel's exact `(distance, global face ID)` rule. For `P` points, `A`
+    /// allowed faces, `K` marked BVH nodes, and `N` existing BVH nodes,
+    /// worst-case query work is `N + P*K` node visits and `P*A` triangle tests;
+    /// both totals are preflight-capped.
+    /// The one-time gather is `O(N + A)` for `N` existing BVH faces/nodes;
+    /// `N` is bounded by the admitted surface and by this call's face/node mask
+    /// memory charge.
+    /// No geometry, BVH, parity grid, or per-point subset is constructed.
+    pub fn project_allowed_faces_batch(
+        &self,
+        allowed_face_ids: &[u32],
+        points: &[V3],
+        policy: AllowedFaceProjectionPolicy,
+        limits: AllowedFaceProjectionLimits,
+    ) -> Result<Vec<AllowedFaceProjectionOutcome>, AllowedFaceProjectionError> {
+        if allowed_face_ids.is_empty() {
+            return Err(AllowedFaceProjectionError::EmptyAllowedFaces);
+        }
+        if points.len() > limits.max_points {
+            return Err(AllowedFaceProjectionError::PointLimitExceeded {
+                required: points.len(),
+                limit: limits.max_points,
+            });
+        }
+        if allowed_face_ids.len() > limits.max_allowed_faces {
+            return Err(AllowedFaceProjectionError::AllowedFaceLimitExceeded {
+                required: allowed_face_ids.len(),
+                limit: limits.max_allowed_faces,
+            });
+        }
+        if let Some(max_distance_mm) = policy.max_distance_mm {
+            if !max_distance_mm.is_finite() || max_distance_mm < 0.0 {
+                return Err(AllowedFaceProjectionError::InvalidMaxDistance { max_distance_mm });
+            }
+        }
+
+        let global_face_count = self.mesh.global_nfaces();
+        for (position, &face_id) in allowed_face_ids.iter().enumerate() {
+            if face_id as usize >= global_face_count {
+                return Err(AllowedFaceProjectionError::FaceIdOutOfBounds {
+                    position,
+                    face_id,
+                    global_face_count,
+                });
+            }
+            if !self.mesh.contains_face(face_id) {
+                return Err(AllowedFaceProjectionError::FaceIdNotSelected { position, face_id });
+            }
+        }
+        for (point, value) in points.iter().enumerate() {
+            for (axis, component) in value.iter().enumerate() {
+                if !component.is_finite() {
+                    return Err(AllowedFaceProjectionError::NonFinitePoint { point, axis });
+                }
+            }
+        }
+
+        // This exact shape-only total is known before any masks, leaf scans,
+        // or allocations. Refuse doomed batches at the earliest boundary.
+        let total_triangle_tests = checked_allowed_projection_mul(
+            points.len(),
+            allowed_face_ids.len(),
+            "total triangle tests",
+        )?;
+        if total_triangle_tests > limits.max_total_triangle_tests {
+            return Err(AllowedFaceProjectionError::ResourceLimitExceeded {
+                resource: "total triangle tests",
+                required: total_triangle_tests,
+                limit: limits.max_total_triangle_tests,
+            });
+        }
+
+        // Building the allowed-subtree mask visits every existing node once.
+        // Charge that exact setup work before allocating or scanning the BVH.
+        let setup_node_visits = self.bvh.nodes.len();
+        if setup_node_visits > limits.max_total_node_visits {
+            return Err(AllowedFaceProjectionError::ResourceLimitExceeded {
+                resource: "setup node visits",
+                required: setup_node_visits,
+                limit: limits.max_total_node_visits,
+            });
+        }
+
+        let requirements =
+            self.allowed_projection_requirements(points.len(), allowed_face_ids.len())?;
+        if requirements.memory_bytes > limits.max_memory_bytes {
+            return Err(AllowedFaceProjectionError::ResourceLimitExceeded {
+                resource: "memory bytes",
+                required: requirements.memory_bytes,
+                limit: limits.max_memory_bytes,
+            });
+        }
+
+        let mut allowed_faces =
+            reserve_allowed_projection_vec(global_face_count, "allowed-face mask")?;
+        allowed_faces.resize(global_face_count, 0u8);
+        for &face_id in allowed_face_ids {
+            let mark = &mut allowed_faces[face_id as usize];
+            if *mark != 0 {
+                return Err(AllowedFaceProjectionError::DuplicateFaceId { face_id });
+            }
+            *mark = 1;
+        }
+
+        let mut allowed_leaf_faces = reserve_allowed_projection_vec(
+            allowed_face_ids.len(),
+            "allowed IDs in BVH leaf order",
+        )?;
+        let mut allowed_leaf_ranges =
+            reserve_allowed_projection_vec(self.bvh.nodes.len(), "allowed leaf ranges")?;
+        allowed_leaf_ranges.resize(self.bvh.nodes.len(), AllowedLeafRange::default());
+        let mut allowed_subtrees =
+            reserve_allowed_projection_vec(self.bvh.nodes.len(), "allowed-subtree mask")?;
+        allowed_subtrees.resize(self.bvh.nodes.len(), 0u8);
+        for node_index in (0..self.bvh.nodes.len()).rev() {
+            let node = &self.bvh.nodes[node_index];
+            allowed_subtrees[node_index] = if node.leaf {
+                let start = node.a as usize;
+                let count = node.b as usize;
+                let allowed_start = allowed_leaf_faces.len();
+                allowed_leaf_faces.extend(
+                    self.bvh.order[start..start + count]
+                        .iter()
+                        .copied()
+                        .filter(|&face_id| allowed_faces[face_id as usize] != 0),
+                );
+                let allowed_count = allowed_leaf_faces.len() - allowed_start;
+                allowed_leaf_ranges[node_index] = AllowedLeafRange {
+                    start: allowed_start,
+                    count: allowed_count,
+                };
+                u8::from(allowed_count != 0)
+            } else {
+                u8::from(
+                    allowed_subtrees[node.a as usize] != 0
+                        || allowed_subtrees[node.b as usize] != 0,
+                )
+            };
+        }
+        debug_assert_ne!(allowed_subtrees[0], 0);
+        debug_assert_eq!(allowed_leaf_faces.len(), allowed_face_ids.len());
+        let marked_nodes = allowed_subtrees.iter().filter(|&&mark| mark != 0).count();
+        let query_node_visits =
+            checked_allowed_projection_mul(points.len(), marked_nodes, "total node visits")?;
+        let total_node_visits = checked_allowed_projection_add(
+            setup_node_visits,
+            query_node_visits,
+            "total node visits",
+        )?;
+        if total_node_visits > limits.max_total_node_visits {
+            return Err(AllowedFaceProjectionError::ResourceLimitExceeded {
+                resource: "total node visits",
+                required: total_node_visits,
+                limit: limits.max_total_node_visits,
+            });
+        }
+
+        let stack_slots = checked_allowed_projection_mul(
+            points.len(),
+            requirements.stack_capacity,
+            "traversal stack slots",
+        )?;
+        let mut traversal_stacks = reserve_allowed_projection_vec(stack_slots, "traversal stacks")?;
+        traversal_stacks.resize(stack_slots, 0i32);
+        let mut rows = reserve_allowed_projection_vec(points.len(), "parallel row results")?;
+        let mut outcomes = reserve_allowed_projection_vec(points.len(), "ordered outcomes")?;
+        let upper_bound = policy.max_distance_mm.unwrap_or(f64::INFINITY);
+        par::run(|| {
+            points
+                .par_iter()
+                .copied()
+                .zip(traversal_stacks.par_chunks_mut(requirements.stack_capacity))
+                .map(|(point, stack)| {
+                    let (distance_mm, face, closest) = self.nearest_allowed_one_with_stack(
+                        point,
+                        upper_bound,
+                        &allowed_leaf_faces,
+                        &allowed_leaf_ranges,
+                        &allowed_subtrees,
+                        stack,
+                    );
+                    if face < global_face_count {
+                        AllowedFaceProjectionOutcome::Projected(AllowedFaceProjection {
+                            distance_mm,
+                            point: closest,
+                            face_id: face as u32,
+                        })
+                    } else {
+                        let max_distance_mm = policy.max_distance_mm.expect(
+                            "uncapped projection over a nonempty valid allowed set must win",
+                        );
+                        AllowedFaceProjectionOutcome::NoWinner(
+                            AllowedFaceProjectionNoWinner::BeyondMaxDistance { max_distance_mm },
+                        )
+                    }
+                })
+                .collect_into_vec(&mut rows);
+        });
+
+        // Keep scatter ordered and serial. This is deliberately separate from
+        // the parallel query stage so scheduling can never affect row order.
+        outcomes.extend(rows);
+        Ok(outcomes)
+    }
+
     // ---- inside -----------------------------------------------------------
     pub fn inside(&self, pts: &[V3]) -> Vec<bool> {
         par::run(|| {
@@ -380,41 +1226,59 @@ impl NativeSurface {
     /// filter). Returns unsorted (t, face) pairs.
     pub(crate) fn collect_hits(&self, o: V3, d: V3, t_max: f64) -> Vec<(f64, u32)> {
         let mut out: Vec<(f64, u32)> = Vec::new();
+        self.collect_hits_into(o, d, t_max, &mut out);
+        out
+    }
+
+    /// Shared allocation-free traversal for ordinary ray casting and the
+    /// bounded penetration path. Callers which need a hard allocation ceiling
+    /// reserve `out` before entering this routine.
+    fn collect_hits_into(&self, o: V3, d: V3, t_max: f64, out: &mut Vec<(f64, u32)>) {
+        STACK.with(|s| {
+            self.collect_hits_with_stack(o, d, t_max, out, &mut s.borrow_mut());
+        });
+    }
+
+    fn collect_hits_with_stack(
+        &self,
+        o: V3,
+        d: V3,
+        t_max: f64,
+        out: &mut Vec<(f64, u32)>,
+        stack: &mut Vec<i32>,
+    ) {
+        out.clear();
         let t0 = -EPS;
         let t1 = t_max + EPS;
-        STACK.with(|s| {
-            let mut stack = s.borrow_mut();
-            stack.clear();
-            stack.push(0);
-            while let Some(ni) = stack.pop() {
-                let node = &self.bvh.nodes[ni as usize];
-                if !ray_box(o, d, node.bmin, node.bmax, node.pad, t0, t1) {
-                    continue;
-                }
-                if node.leaf {
-                    let start = node.a as usize;
-                    let cnt = node.b as usize;
-                    for &tid in &self.bvh.order[start..start + cnt] {
-                        let t = tid as usize;
-                        let (hit, tv) = moller(
-                            o,
-                            d,
-                            self.mesh.v0(t),
-                            self.mesh.e1(t),
-                            self.mesh.e2(t),
-                            t_max,
-                        );
-                        if hit {
-                            out.push((tv, tid));
-                        }
-                    }
-                } else {
-                    stack.push(node.a);
-                    stack.push(node.b);
-                }
+        stack.clear();
+        stack.push(0);
+        while let Some(ni) = stack.pop() {
+            let node = &self.bvh.nodes[ni as usize];
+            if !ray_box(o, d, node.bmin, node.bmax, node.pad, t0, t1) {
+                continue;
             }
-        });
-        out
+            if node.leaf {
+                let start = node.a as usize;
+                let cnt = node.b as usize;
+                for &tid in &self.bvh.order[start..start + cnt] {
+                    let t = tid as usize;
+                    let (hit, tv) = moller(
+                        o,
+                        d,
+                        self.mesh.v0(t),
+                        self.mesh.e1(t),
+                        self.mesh.e2(t),
+                        t_max,
+                    );
+                    if hit {
+                        out.push((tv, tid));
+                    }
+                }
+            } else {
+                stack.push(node.a);
+                stack.push(node.b);
+            }
+        }
     }
 
     /// cast_rays for one ray: deduped by arc location; representative t = first
@@ -671,50 +1535,61 @@ impl NativeSurface {
         cap: usize,
         min_illegal_len_mm: f64,
         rays_all: bool,
-    ) -> Vec<Interval> {
+        budget: PenetrationRowBudget,
+        row: usize,
+    ) -> Result<Vec<Interval>, PenetrationBatchError> {
         let l = norm(sub(p1, p0));
-        let mut out = Vec::new();
+        let mut out = reserve_penetration_vec(budget.intervals, Some(row), "interval output")?;
         if l < 1e-9 {
-            return out;
+            return Ok(out);
         }
-        // build ray list: (ray_id, O, Dv, seg)
-        let mut raylist: Vec<(i32, V3, V3, f64)> = Vec::new();
-        if !rays_all {
-            raylist.push((-1, p0, sub(p1, p0), l));
-        } else {
-            // member_rays: axis + n offset rays
-            raylist.push((-1, p0, sub(p1, p0), l));
-            let du = scale(sub(p1, p0), 1.0 / l);
-            let (e1, e2) = perp_basis(du);
-            for k in 0..n_offset_rays {
-                let th = 2.0 * std::f64::consts::PI * (k as f64) / (n_offset_rays as f64);
-                let uu = add(scale(e1, th.cos()), scale(e2, th.sin()));
-                let a = add(p0, scale(uu, r0));
-                let b = add(p1, scale(uu, r1));
-                let dv = sub(b, a);
-                raylist.push((k as i32, a, dv, norm(dv)));
-            }
-        }
+        let mut traversal_stack =
+            reserve_penetration_vec(budget.traversal_stack, Some(row), "BVH traversal stack")?;
+        let mut parity_crossings =
+            reserve_penetration_vec(budget.parity_crossings, Some(row), "parity crossings")?;
+        // Shared construction keeps query geometry identical to consumers'
+        // interval-bound validation.
+        let mut raylist = reserve_penetration_vec(budget.rays, Some(row), "ray list")?;
+        raylist.extend(capsule_rays(p0, p1, r0, r1, n_offset_rays, rays_all));
 
-        for (label, o, dv, seg) in raylist {
+        for ray in raylist {
+            let label = ray.label();
+            let o = ray.origin();
+            let dv = ray.direction();
+            let seg = ray.length_mm();
             if seg < 1e-9 {
                 continue;
             }
             // crossings along this ray
-            let hits = self.collect_hits(o, dv, 1.0);
-            let mut tvals: Vec<f64> = hits.iter().map(|h| h.0).collect();
+            let mut hits = reserve_penetration_vec(budget.hits_per_ray, Some(row), "hits")?;
+            self.collect_hits_with_stack(o, dv, 1.0, &mut hits, &mut traversal_stack);
+            let mut tvals =
+                reserve_penetration_vec(budget.hits_per_ray, Some(row), "crossing parameters")?;
+            tvals.extend(hits.iter().map(|h| h.0));
             tvals.sort_by(|a, b| a.partial_cmp(b).unwrap());
-            let ts = dedup_loc(&tvals, seg, DEDUP_LOC_MM);
+            let mut ts =
+                reserve_penetration_vec(budget.hits_per_ray, Some(row), "deduplicated crossings")?;
+            dedup_loc_into(&tvals, DEDUP_LOC_MM / seg.max(1e-9), &mut ts);
             // boundaries [0, ts..., 1]
-            let mut b_bounds: Vec<f64> = Vec::with_capacity(ts.len() + 2);
+            let mut b_bounds = reserve_penetration_vec(
+                checked_penetration_add(budget.hits_per_ray, 2, "boundary capacity")?,
+                Some(row),
+                "boundaries",
+            )?;
             b_bounds.push(0.0);
             b_bounds.extend_from_slice(&ts);
             b_bounds.push(1.0);
 
             // sample each sub-segment, gather all sample points
-            let mut sample_pts: Vec<V3> = Vec::new();
-            let mut slices: Vec<(usize, usize)> = Vec::new();
-            let mut sub_bounds: Vec<(f64, f64, bool, bool)> = Vec::new();
+            let mut sample_pts =
+                reserve_penetration_vec(budget.samples_per_ray, Some(row), "sample points")?;
+            let mut slices =
+                reserve_penetration_vec(budget.subsegments_per_ray, Some(row), "sample slices")?;
+            let mut sub_bounds = reserve_penetration_vec(
+                budget.subsegments_per_ray,
+                Some(row),
+                "subsegment bounds",
+            )?;
             let nb = b_bounds.len();
             for si in 0..nb - 1 {
                 let ta = b_bounds[si];
@@ -733,21 +1608,36 @@ impl NativeSurface {
             }
 
             // inside classification + depth (nearest dist) for inside samples
-            let mut ins_all = vec![false; sample_pts.len()];
-            let mut dist_all = vec![0.0f64; sample_pts.len()];
+            let mut ins_all =
+                reserve_penetration_vec(budget.samples_per_ray, Some(row), "inside samples")?;
+            ins_all.resize(sample_pts.len(), false);
+            let mut dist_all =
+                reserve_penetration_vec(budget.samples_per_ray, Some(row), "sample depths")?;
+            dist_all.resize(sample_pts.len(), 0.0f64);
             for (i, &sp) in sample_pts.iter().enumerate() {
-                let ins = self.inside_serial(sp);
+                let ins = self.pv.inside(sp, &mut parity_crossings);
                 ins_all[i] = ins;
                 if ins {
-                    let (di, _, _) = self.nearest_one(sp, f64::INFINITY);
+                    let (di, _, _) =
+                        self.nearest_one_with_stack(sp, f64::INFINITY, &mut traversal_stack);
                     dist_all[i] = di;
                 }
             }
 
             // per sub-segment inside vote + depth
             let nsub = slices.len();
-            let mut insub = vec![false; nsub];
-            let mut depsub = vec![0.0f64; nsub];
+            let mut insub = reserve_penetration_vec(
+                budget.subsegments_per_ray,
+                Some(row),
+                "subsegment inside votes",
+            )?;
+            insub.resize(nsub, false);
+            let mut depsub = reserve_penetration_vec(
+                budget.subsegments_per_ray,
+                Some(row),
+                "subsegment depths",
+            )?;
+            depsub.resize(nsub, 0.0f64);
             for (k, &(a0, a1)) in slices.iter().enumerate() {
                 if a1 > a0 {
                     let cnt = a1 - a0;
@@ -805,13 +1695,198 @@ impl NativeSurface {
                 }
             }
         }
-        out
+        Ok(out)
     }
 
-    /// Batched penetration_intervals (Amendment A7). Returns per-member interval
-    /// lists as ragged SoA.
+    fn penetration_requirements(
+        &self,
+        rows: usize,
+        n_offset_rays: usize,
+        cap: usize,
+        rays_all: bool,
+    ) -> Result<PenetrationBatchRequirements, PenetrationBatchError> {
+        if rows == 0 {
+            return Ok(PenetrationBatchRequirements {
+                rows: 0,
+                work: 0,
+                hits: 0,
+                samples: 0,
+                intervals: 0,
+                scratch_bytes: 0,
+                row: PenetrationRowBudget {
+                    rays: 0,
+                    hits_per_ray: 0,
+                    samples_per_ray: 0,
+                    subsegments_per_ray: 0,
+                    intervals: 0,
+                    traversal_stack: 0,
+                    parity_crossings: 0,
+                },
+            });
+        }
+        if rays_all && n_offset_rays > i32::MAX as usize {
+            return Err(PenetrationBatchError::ArithmeticOverflow {
+                resource: "offset ray labels",
+            });
+        }
+        let rays = if rays_all {
+            checked_penetration_add(n_offset_rays, 1, "rays per row")?
+        } else {
+            1
+        };
+        let hits_per_ray = self.mesh.nfaces();
+        let subsegments_per_ray = checked_penetration_add(hits_per_ray, 1, "subsegments per ray")?;
+        let samples_per_ray = checked_penetration_mul(subsegments_per_ray, cap, "samples per ray")?;
+        let intervals_per_row =
+            checked_penetration_mul(rays, subsegments_per_ray, "intervals per row")?;
+        let work_per_row = checked_penetration_mul(rays, hits_per_ray, "work per row")?;
+        let samples_per_row = checked_penetration_mul(rays, samples_per_ray, "samples per row")?;
+        let traversal_stack = checked_penetration_add(self.bvh.depth, 1, "BVH traversal stack")?;
+        let parity_crossings = self
+            .pv
+            .grids
+            .iter()
+            .map(|grid| grid.max_occ)
+            .max()
+            .unwrap_or(0);
+
+        // All vectors which coexist for a ray are included. Interval output is
+        // bounded separately by `max_total_intervals`; it is not scratch.
+        let raylist_bytes =
+            checked_penetration_bytes::<(i32, V3, V3, f64)>(rays, "ray list bytes")?;
+        let hits_bytes = checked_penetration_bytes::<(f64, u32)>(hits_per_ray, "hit bytes")?;
+        let tvals_bytes =
+            checked_penetration_bytes::<f64>(hits_per_ray, "crossing parameter bytes")?;
+        let dedup_bytes = checked_penetration_bytes::<f64>(hits_per_ray, "dedup bytes")?;
+        let bounds_bytes = checked_penetration_bytes::<f64>(
+            checked_penetration_add(hits_per_ray, 2, "boundary capacity")?,
+            "boundary bytes",
+        )?;
+        let samples_bytes = checked_penetration_bytes::<V3>(samples_per_ray, "sample point bytes")?;
+        let slices_bytes =
+            checked_penetration_bytes::<(usize, usize)>(subsegments_per_ray, "slice bytes")?;
+        let sub_bounds_bytes = checked_penetration_bytes::<(f64, f64, bool, bool)>(
+            subsegments_per_ray,
+            "subsegment bound bytes",
+        )?;
+        let inside_bytes = checked_penetration_bytes::<bool>(samples_per_ray, "inside bytes")?;
+        let depths_bytes = checked_penetration_bytes::<f64>(samples_per_ray, "sample depth bytes")?;
+        let votes_bytes = checked_penetration_bytes::<bool>(subsegments_per_ray, "vote bytes")?;
+        let subdepth_bytes =
+            checked_penetration_bytes::<f64>(subsegments_per_ray, "subsegment depth bytes")?;
+        let traversal_bytes =
+            checked_penetration_bytes::<i32>(traversal_stack, "BVH traversal stack bytes")?;
+        let parity_bytes =
+            checked_penetration_bytes::<f64>(parity_crossings, "parity crossing bytes")?;
+        let row_scratch = [
+            raylist_bytes,
+            hits_bytes,
+            tvals_bytes,
+            dedup_bytes,
+            bounds_bytes,
+            samples_bytes,
+            slices_bytes,
+            sub_bounds_bytes,
+            inside_bytes,
+            depths_bytes,
+            votes_bytes,
+            subdepth_bytes,
+            traversal_bytes,
+            parity_bytes,
+        ]
+        .into_iter()
+        .try_fold(0usize, |total, bytes| {
+            checked_penetration_add(total, bytes, "row scratch bytes")
+        })?;
+        Ok(PenetrationBatchRequirements {
+            rows,
+            work: checked_penetration_mul(rows, work_per_row, "total work")?,
+            hits: checked_penetration_mul(rows, work_per_row, "total hits")?,
+            samples: checked_penetration_mul(rows, samples_per_row, "total samples")?,
+            intervals: checked_penetration_mul(rows, intervals_per_row, "total intervals")?,
+            scratch_bytes: checked_penetration_mul(rows, row_scratch, "total scratch bytes")?,
+            row: PenetrationRowBudget {
+                rays,
+                hits_per_ray,
+                samples_per_ray,
+                subsegments_per_ray,
+                intervals: intervals_per_row,
+                traversal_stack,
+                parity_crossings,
+            },
+        })
+    }
+
+    fn check_penetration_limits(
+        requirements: PenetrationBatchRequirements,
+        limits: PenetrationBatchLimits,
+    ) -> Result<(), PenetrationBatchError> {
+        for (resource, required, limit) in [
+            ("rows", requirements.rows, limits.max_rows),
+            ("work", requirements.work, limits.max_total_work),
+            ("hits", requirements.hits, limits.max_total_hits),
+            ("samples", requirements.samples, limits.max_total_samples),
+            (
+                "intervals",
+                requirements.intervals,
+                limits.max_total_intervals,
+            ),
+            (
+                "scratch bytes",
+                requirements.scratch_bytes,
+                limits.max_scratch_bytes,
+            ),
+        ] {
+            if required > limit {
+                return Err(PenetrationBatchError::ResourceLimitExceeded {
+                    resource,
+                    required,
+                    limit,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_penetration_inputs(
+        p0s: &[V3],
+        p1s: &[V3],
+        r0s: &[f64],
+        r1s: &[f64],
+    ) -> Result<(), PenetrationBatchError> {
+        let n = p0s.len();
+        BatchInputError::require_len("penetration_intervals_batch", "p1s", n, p1s.len())?;
+        BatchInputError::require_len("penetration_intervals_batch", "r0s", n, r0s.len())?;
+        BatchInputError::require_len("penetration_intervals_batch", "r1s", n, r1s.len())?;
+        Ok(())
+    }
+
+    /// Conservative limits sufficient for this surface and batch shape. This
+    /// is a sizing helper, not a production policy: callers normally lower one
+    /// or more fields to their own admitted workload budget.
+    pub fn penetration_intervals_batch_worst_case_limits(
+        &self,
+        rows: usize,
+        n_offset_rays: usize,
+        cap: usize,
+        rays_all: bool,
+    ) -> Result<PenetrationBatchLimits, PenetrationBatchError> {
+        let requirements = self.penetration_requirements(rows, n_offset_rays, cap, rays_all)?;
+        Ok(PenetrationBatchLimits {
+            max_rows: requirements.rows,
+            max_total_work: requirements.work,
+            max_total_hits: requirements.hits,
+            max_total_samples: requirements.samples,
+            max_total_intervals: requirements.intervals,
+            max_scratch_bytes: requirements.scratch_bytes,
+        })
+    }
+
+    /// Bounded, one-shot batch extraction of penetration intervals. Input
+    /// gathering, one index-parallel map, and ordered scatter are retained;
+    /// limits are fully preflighted before Rayon starts.
     #[allow(clippy::too_many_arguments)]
-    pub fn penetration_intervals_batch(
+    pub fn penetration_intervals_batch_bounded(
         &self,
         p0s: &[V3],
         p1s: &[V3],
@@ -822,12 +1897,14 @@ impl NativeSurface {
         cap: usize,
         min_illegal_len_mm: f64,
         rays_all: bool,
-    ) -> Result<Vec<Vec<Interval>>, BatchInputError> {
+        limits: PenetrationBatchLimits,
+    ) -> Result<Vec<Vec<Interval>>, PenetrationBatchError> {
         let n = p0s.len();
-        BatchInputError::require_len("penetration_intervals_batch", "p1s", n, p1s.len())?;
-        BatchInputError::require_len("penetration_intervals_batch", "r0s", n, r0s.len())?;
-        BatchInputError::require_len("penetration_intervals_batch", "r1s", n, r1s.len())?;
-        Ok(par::run(|| {
+        Self::validate_penetration_inputs(p0s, p1s, r0s, r1s)?;
+        let requirements = self.penetration_requirements(n, n_offset_rays, cap, rays_all)?;
+        Self::check_penetration_limits(requirements, limits)?;
+        let mut per = reserve_penetration_vec(n, None, "ordered row results")?;
+        par::run(|| {
             (0..n)
                 .into_par_iter()
                 .map(|i| {
@@ -841,10 +1918,68 @@ impl NativeSurface {
                         cap,
                         min_illegal_len_mm,
                         rays_all,
+                        requirements.row,
+                        i,
                     )
                 })
-                .collect()
-        }))
+                .collect_into_vec(&mut per);
+        });
+        // Rayon completes all rows before this ordered scan. A resource or
+        // allocator failure therefore always reports the lowest failing row,
+        // regardless of which worker happened to finish first.
+        let first_error = per.iter().position(Result::is_err);
+        if let Some(index) = first_error {
+            return match per.swap_remove(index) {
+                Err(error) => Err(error),
+                Ok(_) => unreachable!("checked above"),
+            };
+        }
+        let mut ordered = reserve_penetration_vec(n, None, "ordered interval rows")?;
+        for row in per {
+            ordered.push(row.expect("checked above"));
+        }
+        Ok(ordered)
+    }
+
+    /// Crate-internal compatibility entry point retained solely for the inline
+    /// PyO3 frozen-oracle surface. Delete it with that Python surface in M9.
+    /// Rust production callers cannot bypass an explicit resource policy.
+    #[allow(
+        dead_code,
+        reason = "retained until the inline PyO3 frozen-oracle surface is deleted in M9"
+    )]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn penetration_intervals_batch(
+        &self,
+        p0s: &[V3],
+        p1s: &[V3],
+        r0s: &[f64],
+        r1s: &[f64],
+        n_offset_rays: usize,
+        majority_step_mm: f64,
+        cap: usize,
+        min_illegal_len_mm: f64,
+        rays_all: bool,
+    ) -> Result<Vec<Vec<Interval>>, PenetrationBatchError> {
+        Self::validate_penetration_inputs(p0s, p1s, r0s, r1s)?;
+        let limits = self.penetration_intervals_batch_worst_case_limits(
+            p0s.len(),
+            n_offset_rays,
+            cap,
+            rays_all,
+        )?;
+        self.penetration_intervals_batch_bounded(
+            p0s,
+            p1s,
+            r0s,
+            r1s,
+            n_offset_rays,
+            majority_step_mm,
+            cap,
+            min_illegal_len_mm,
+            rays_all,
+            limits,
+        )
     }
 
     // ---- sphere breach ----------------------------------------------------
