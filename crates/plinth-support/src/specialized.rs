@@ -191,6 +191,31 @@ impl SpecializedLimits {
     /// `docs/rust-migration/support-resource-caps-2026-08-05.md` §7 and
     /// `docs/rust-migration/CURRENT-STATUS.md` (*FU-8c fixed 2026-08-06*).
     ///
+    /// **Dated addendum 2026-08-06 — FU-8d phase F2. The block above is left
+    /// standing exactly as written; every number in it was true when measured
+    /// and two of them have since moved.** F2 replaced the per-proposal
+    /// `sources × samples` re-sweep with a merged-seat single batch read
+    /// against the baseline's retained witnesses. The `proposal work` line is
+    /// now `nearest_work 1,041,544,686 + touched_rows 1,041,544,686 +
+    /// key_visits 78,446` = **2,083,167,818** where it was 196,264,386,588 —
+    /// **94.2× less** — and the demand this cap is handed is
+    ///
+    /// ```text
+    /// baseline_rows 554,926,572 + face_rows 4,618,272,984
+    ///   + demand_rows 42,949,185 + proposal work 2,083,167,818
+    ///   = 7,299,316,559   against 35,445,500,736  -> FITS (20.6 % of cap)
+    /// ```
+    ///
+    /// **The cap did not move and no cap code was touched.** The treant still
+    /// refuses at this gate, but no longer *here*: `gate_resource_plan` now
+    /// passes, and the refusal comes from the `exact_operations` fold, where
+    /// `variant_specialized_owner_face_count`'s descriptor budget crosses this
+    /// same limit at **variant 275 of 39,224**, printing
+    /// `required: 35445618202, limit: 35445500736`. That residual is FU-8d
+    /// part (2) — the per-variant load/owner-face path — and it is what phase
+    /// F4 is for. See `support-resource-caps-2026-08-05.md` §9 and
+    /// `CURRENT-STATUS.md` (*FU-8d phase F2 landed 2026-08-06*).
+    ///
     /// Every corpus model sits at the floor;
     /// `the_batch_scaled_caps_are_the_flat_floor_for_every_corpus_batch_shape`
     /// (`crates/plinth-support/tests/resource_cap_policy.rs`) pins that.
@@ -3175,11 +3200,30 @@ struct GateResourcePlan {
 /// pretending to a worst case it no longer pays.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct GateProposalRoutedWork {
-    /// `Σ_proposals Σ_{perturbed routes} source_count × query_count` — the same
-    /// unit `plan_route_points_nearest` charges for the baseline sweep.
+    /// `Σ_proposals 1 × touched_rows` — one merged-seat kNN batch per proposal,
+    /// in the same `source_count × query_count` unit
+    /// `plan_route_points_nearest` charges for the baseline sweep.
+    ///
+    /// **FU-8d phase F2 (2026-08-06) is what made this term small.**  It was
+    /// `Σ_proposals Σ_{perturbed routes} source_count × query_count`, a full
+    /// re-sweep of every perturbed key against its whole surviving source set;
+    /// the survivors' answer is now read from the baseline witness table, so
+    /// the merged seat is the only source whose distances are still computed.
     nearest_work: usize,
-    /// `Σ_proposals` sample rows overwritten and restored.
+    /// `Σ_proposals` sample rows overwritten and restored.  Each row also pays
+    /// one bounded witness scan — at most `NEAREST_WITNESS_SLOTS` slot tests —
+    /// and one minimum, the same "one row unit, bounded constant work"
+    /// convention `demand_rows` below uses.
     touched_rows: usize,
+    /// `Σ_proposals routes(left) + demands(left) + routes(right) +
+    /// demands(right)` — the route-key slots visited to build each proposal's
+    /// `K(left) ∪ K(right)`.
+    ///
+    /// Charged from FU-8d phase F2 because after F2 it is no longer lost in the
+    /// noise of the term above: deciding a proposal's *shape* is now a
+    /// comparable fraction of evaluating it, and an uncharged decision cost is
+    /// exactly the hole FU-8d part (3) names.
+    key_visits: usize,
     /// `Σ_proposals` demand rows re-tested against the merged seat, i.e.
     /// `proposals × demands`: one witness lookup plus at most one `satisfies`
     /// call each, replacing the old `demands × contacts` sweep per variant.
@@ -3190,6 +3234,7 @@ impl GateProposalRoutedWork {
     fn total(self) -> Result<usize, SpecializedError> {
         self.nearest_work
             .checked_add(self.touched_rows)
+            .and_then(|work| work.checked_add(self.key_visits))
             .and_then(|work| work.checked_add(self.demand_rows))
             .ok_or(SpecializedError::GateResourceOverflow)
     }
@@ -3259,6 +3304,17 @@ fn gate_resource_plan(
     //   face_rows     = 39,224 × 117,741          =     4,618,272,984
     // against `gate_operation_limit(405,146, 1,366)` = 35,445,500,736.  The
     // predecessor charged 21,750,505,830,162 for the routed term alone.
+    //
+    // FU-8d phase F2 (2026-08-06) leaves both shapes above exactly as they are
+    // and changes only what `proposal_routed_work` measures.  `nearest_work`
+    // was `Σ_proposals Σ_{perturbed routes} source_count × query_count` — on
+    // this batch 196,264,386,588, i.e. 97.4 % of the whole stated demand — and
+    // is now `Σ_proposals 1 × touched_rows`, the merged seat being the only
+    // source whose distances are still computed.  `key_visits` is new and is
+    // the route-key gather that decides each proposal's shape.  Both are
+    // measured, not modelled; ruling R-e forbids pinning a literal for the
+    // post-fix treant total here, and the derivation-shaped pins live in the
+    // tests instead.  **No cap moved for F2.**
     let baseline_rows = sample_count
         .checked_add(demand_count)
         .and_then(|value| value.checked_add(1))
@@ -3428,6 +3484,7 @@ enum VariantRoutedWork {
     ProposalDelta {
         nearest_work: usize,
         touched_rows: usize,
+        key_visits: usize,
     },
 }
 
@@ -3474,6 +3531,8 @@ fn variant_operation_count(
     // FU-8c: only the baseline variant routes every contact against every
     // sample and demand.  A proposal variant pays for the routes it perturbs,
     // the sample rows it rewrites, and one merged-seat test per demand.
+    // FU-8d F2: "the routes it perturbs" is now the merged seat's single kNN
+    // batch over those routes' rows, plus the key gather that found them.
     let (routing_work, satisfaction_work) = match routed {
         VariantRoutedWork::BaselineSweep { sample_count } => {
             let routed_queries = sample_count
@@ -3491,9 +3550,11 @@ fn variant_operation_count(
         VariantRoutedWork::ProposalDelta {
             nearest_work,
             touched_rows,
+            key_visits,
         } => (
             nearest_work
                 .checked_add(touched_rows)
+                .and_then(|work| work.checked_add(key_visits))
                 .ok_or(SpecializedError::GateResourceOverflow)?,
             demand_satisfaction,
         ),
@@ -3629,6 +3690,7 @@ fn evaluate_gate_batch(
                 VariantRoutedWork::ProposalDelta {
                     nearest_work: delta.work,
                     touched_rows: delta.touched_rows,
+                    key_visits: delta.key_visits,
                 }
             }
         };
@@ -3725,6 +3787,9 @@ fn evaluate_gate_batch(
             debug_assert_eq!(baseline_witnesses.rows.len(), coverage_samples.len());
             let mut working_nearest = baseline_nearest.clone();
             let mut touched_rows: Vec<usize> = Vec::new();
+            // FU-8d F2: one query-point buffer for the whole batch.  Every
+            // proposal refills it; none allocates its own.
+            let mut proposal_query_scratch: Vec<[f64; 3]> = Vec::new();
             let mut executed_whole_gate_route_plan = GateWholeRoutePlan::default();
             for window_start in (0..plan.variants).step_by(limits.max_gate_window_variants) {
                 let window_end =
@@ -3853,11 +3918,14 @@ fn evaluate_gate_batch(
                             )?;
                             executed_nearest.record_proposal(&delta)?;
                             fill_proposal_nearest_delta(
-                                contacts,
                                 proposal,
-                                coverage_samples,
-                                &batch_index,
+                                GateNearestBaseline {
+                                    samples: coverage_samples,
+                                    index: &batch_index,
+                                    witnesses: &baseline_witnesses,
+                                },
                                 delta,
+                                &mut proposal_query_scratch,
                                 &mut working_nearest,
                                 &mut touched_rows,
                             )?;
@@ -4101,6 +4169,11 @@ impl GateNearestBatchPlan {
             .touched_rows
             .checked_add(planned.touched_rows)
             .ok_or(SpecializedError::GateResourceOverflow)?;
+        self.proposal_work.key_visits = self
+            .proposal_work
+            .key_visits
+            .checked_add(planned.key_visits)
+            .ok_or(SpecializedError::GateResourceOverflow)?;
         self.max_proposal_retained_bytes = self
             .max_proposal_retained_bytes
             .max(planned.retained_logical_bytes);
@@ -4113,10 +4186,18 @@ impl GateNearestBatchPlan {
                 u64::from(delta.route.component_id),
                 delta.source_count as u64,
                 delta.query_count as u64,
-                delta.knn.logical_peak_bytes() as u64,
             ] {
                 mix_fingerprint(&mut self.fingerprint, word);
             }
+        }
+        // FU-8d F2: one batch answers the whole proposal, so its shape is mixed
+        // once per proposal rather than once per perturbed key.
+        for word in [
+            planned.key_visits as u64,
+            planned.merged_seat_knn.query_count() as u64,
+            planned.merged_seat_knn.logical_peak_bytes() as u64,
+        ] {
+            mix_fingerprint(&mut self.fingerprint, word);
         }
         Ok(())
     }
@@ -4471,6 +4552,40 @@ impl NearestWitnessTable {
         Self {
             rows: vec![[NearestWitness::UNUSED; NEAREST_WITNESS_SLOTS]; sample_count],
         }
+    }
+
+    /// The baseline's nearest **squared** distance among the sources that
+    /// survive removing `pair`, or `+∞` when the removal leaves none.
+    ///
+    /// This is the read FU-8d phase F2 exists for, and it is a *value* lookup
+    /// rather than a re-derivation: the returned `f64` is the bits the kernel
+    /// emitted during the baseline sweep, so a caller may compare it against a
+    /// fresh kernel answer by `to_bits`.  `sources` must be
+    /// [`GateBatchIndex::sources_for`]'s ascending contact list for the route
+    /// this sample carries — the same list the retained `source_slot` indexes,
+    /// because the baseline gather walks contacts in ascending index and
+    /// deduplicates by `physical_id`, which *is* the contact index for
+    /// variant 0.
+    ///
+    /// Correctness rests on the retention lemma
+    /// (`fu8d_three_retained_witnesses_answer_any_two_removal`): a merge
+    /// proposal removes exactly two contacts, so scanning at most
+    /// [`NEAREST_WITNESS_SLOTS`] slots either finds a survivor — necessarily
+    /// *the* nearest survivor, because the slots are in the kernel's ascending
+    /// `(distance, item)` emission order — or proves the route had at most two
+    /// servers and the removal took all of them.
+    fn surviving_squared_distance(
+        &self,
+        sample_index: usize,
+        sources: &[usize],
+        pair: MergedPair,
+    ) -> f64 {
+        self.rows[sample_index]
+            .iter()
+            .find(|witness| {
+                witness.source_slot != NO_WITNESS && !pair.contains(sources[witness.source_slot])
+            })
+            .map_or(f64::INFINITY, |witness| witness.squared_distance)
     }
 }
 
@@ -5053,36 +5168,65 @@ fn compare_coverage_routes(left: CoverageRoute, right: CoverageRoute) -> Orderin
         .then_with(|| left.component_id.cmp(&right.component_id))
 }
 
-/// One route key a merge proposal perturbs, with the kNN batch that re-answers
-/// it for that proposal's variant.
+/// One route key a merge proposal perturbs, and the shape of the rows it
+/// re-answers there.
+///
+/// It carried its own `KnnBatchPlan` before FU-8d phase F2, because each
+/// perturbed key was re-swept against its whole surviving source set.  It no
+/// longer does: the proposal asks the kernel for **one** batch over the single
+/// merged seat covering every perturbed key at once, and takes the survivors'
+/// side from the retained baseline witnesses.  `source_count` stays because it
+/// is what the plan/execution fingerprint is stated over.
 struct ProposalRouteDelta {
     route: CoverageRoute,
     source_count: usize,
     query_count: usize,
-    knn: KnnBatchPlan,
 }
 
 /// Everything one merge proposal's nearest phase costs and holds.
 struct ProposalNearestPlan {
+    /// Perturbed route keys that actually carry coverage samples, ascending.
+    /// A key with no samples costs its visit and nothing else.
     deltas: Vec<ProposalRouteDelta>,
-    /// Sample rows this proposal overwrites and then restores.
+    /// Sample rows this proposal overwrites and then restores.  Each also pays
+    /// one bounded witness scan (at most [`NEAREST_WITNESS_SLOTS`] slot tests)
+    /// and one minimum against the merged seat's distance.
     touched_rows: usize,
-    /// `source_count × query_count` summed over the perturbed routes, the same
-    /// unit [`plan_route_points_nearest`] charges.
+    /// Route-key slots visited to build `K(left) ∪ K(right)`:
+    /// `routes(left) + demands(left) + routes(right) + demands(right)`.  This
+    /// is the term FU-8d part (3)'s pre-check is derived from, and it is
+    /// charged here so that the cost of *deciding* a proposal's shape is not
+    /// free (FU-8d part (1)/(3) corollary).
+    key_visits: usize,
+    /// The single merged-seat kNN batch: `1 × touched_rows`, the same
+    /// `source_count × query_count` unit [`plan_route_points_nearest`] charges.
+    ///
+    /// Before FU-8d F2 this was `Σ_{perturbed routes} source_count ×
+    /// query_count` — a full re-sweep of every perturbed key against its whole
+    /// surviving source set, which on the Weeping Treant was 97.4 % of the
+    /// gate's entire stated demand.  The survivors' contribution is now a
+    /// *lookup* in the baseline witness table, so the only distances this
+    /// proposal asks the kernel for are the merged seat's.
     work: usize,
+    /// The merged seat's batch, planned before a point is gathered.
+    merged_seat_knn: KnnBatchPlan,
     max_knn_logical_peak_bytes: usize,
     retained_logical_bytes: usize,
 }
 
 /// Route keys a proposal's merged seat serves: `K(left) ∪ K(right)`, ascending
-/// and deduplicated.
-fn proposal_route_keys(contacts: &[WorkingContact], pair: MergedPair) -> Vec<CoverageRoute> {
+/// and deduplicated, with the number of key slots visited to build them.
+fn proposal_route_keys(
+    contacts: &[WorkingContact],
+    pair: MergedPair,
+) -> (Vec<CoverageRoute>, usize) {
     let mut keys = Vec::new();
     push_contact_route_keys(&contacts[pair.left], &mut keys);
     push_contact_route_keys(&contacts[pair.right], &mut keys);
+    let key_visits = keys.len();
     keys.sort_unstable();
     keys.dedup();
-    keys
+    (keys, key_visits)
 }
 
 /// How many distinct source seats a perturbed route has in the proposal's
@@ -5097,8 +5241,16 @@ fn proposal_route_source_count(sources: &[usize], pair: MergedPair) -> usize {
     sources.len() - removed + 1
 }
 
-/// Plan one proposal's nearest delta.  Charges and checks exactly what
-/// [`plan_route_points_nearest`] would have charged for the same routes.
+/// Plan one proposal's nearest delta: the route keys it perturbs, the sample
+/// rows those keys carry, and the **one** merged-seat kNN batch that answers
+/// all of them (FU-8d phase F2, 2026-08-06).
+///
+/// The predecessor planned one kNN batch per perturbed key over that key's
+/// whole surviving source set, so it charged `Σ source_count × query_count` —
+/// on the Weeping Treant, 196,264,386,588 of a stated 201,480,535,329.  The
+/// survivors' answer is now read from the baseline witness table instead of
+/// recomputed, so the only distances still asked for are the merged seat's:
+/// `1 × touched_rows`, one batch for the whole proposal.
 fn plan_proposal_nearest_delta(
     contacts: &[WorkingContact],
     proposal: &MergeProposal,
@@ -5106,52 +5258,43 @@ fn plan_proposal_nearest_delta(
     limits: KnnBatchLimits,
 ) -> Result<ProposalNearestPlan, SpecializedError> {
     let pair = MergedPair::of(proposal);
-    let keys = proposal_route_keys(contacts, pair);
+    let (keys, key_visits) = proposal_route_keys(contacts, pair);
     let mut deltas = Vec::with_capacity(keys.len());
     let mut touched_rows = 0usize;
-    let mut work = 0usize;
-    let mut max_knn_logical_peak_bytes = 0usize;
-    let mut max_source_count = 0usize;
-    let mut max_query_count = 0usize;
     for route in keys {
-        let sources = index.sources_for(route);
-        let source_count = proposal_route_source_count(sources, pair);
         let query_count = index.sample_rows_for(route).len();
-        work = work
-            .checked_add(
-                source_count
-                    .checked_mul(query_count)
-                    .ok_or(SpecializedError::GateResourceOverflow)?,
-            )
-            .ok_or(SpecializedError::GateResourceOverflow)?;
         if query_count == 0 {
             continue;
         }
+        let sources = index.sources_for(route);
+        let source_count = proposal_route_source_count(sources, pair);
         touched_rows = touched_rows
             .checked_add(query_count)
             .ok_or(SpecializedError::GateResourceOverflow)?;
-        let knn = KnnBatchPlan::new(source_count, query_count, 1, limits)
-            .map_err(|error| SpecializedError::CoverageNearest(error.to_string()))?;
-        max_knn_logical_peak_bytes = max_knn_logical_peak_bytes.max(knn.logical_peak_bytes());
-        max_source_count = max_source_count.max(source_count);
-        max_query_count = max_query_count.max(query_count);
         deltas.push(ProposalRouteDelta {
             route,
             source_count,
             query_count,
-            knn,
         });
     }
-    if work > limits.max_work {
+    // Checked as an operation demand before the kernel's own work check, so a
+    // proposal too wide for this batch refuses with the gate's error rather
+    // than with a `KnnBatchPlanError` string.  The merged seat is one point, so
+    // `1 × touched_rows` is the work either way.
+    if touched_rows > limits.max_work {
         return Err(SpecializedError::GateOperationLimit {
-            required: work,
+            required: touched_rows,
             limit: limits.max_work,
         });
     }
+    let merged_seat_knn = KnnBatchPlan::new(1, touched_rows, 1, limits)
+        .map_err(|error| SpecializedError::CoverageNearest(error.to_string()))?;
     let retained_logical_bytes = [
         checked_route_bytes::<ProposalRouteDelta>(deltas.len())?,
-        checked_route_bytes::<[f64; 3]>(max_source_count)?,
-        checked_route_bytes::<[f64; 3]>(max_query_count)?,
+        // The merged seat's own source point, and the gathered query points and
+        // restored-row record, all `touched_rows` long.
+        checked_route_bytes::<[f64; 3]>(1)?,
+        checked_route_bytes::<[f64; 3]>(touched_rows)?,
         checked_route_bytes::<usize>(touched_rows)?,
     ]
     .into_iter()
@@ -5163,56 +5306,114 @@ fn plan_proposal_nearest_delta(
     Ok(ProposalNearestPlan {
         deltas,
         touched_rows,
-        work,
-        max_knn_logical_peak_bytes,
+        key_visits,
+        work: merged_seat_knn.work(),
+        max_knn_logical_peak_bytes: merged_seat_knn.logical_peak_bytes(),
+        merged_seat_knn,
         retained_logical_bytes,
     })
+}
+
+/// The batch-level state one merge proposal's nearest delta reads: the coverage
+/// samples, the proposal-invariant [`GateBatchIndex`], and the baseline sweep's
+/// retained witnesses (FU-8d phase F2).
+///
+/// They are grouped because they are only meaningful together — a witness's
+/// `source_slot` indexes [`GateBatchIndex::sources_for`] for the route one of
+/// *these* samples carries — so passing them separately would invite pairing a
+/// witness table with the wrong batch.
+#[derive(Clone, Copy)]
+struct GateNearestBaseline<'a> {
+    samples: &'a [CoverageSample],
+    index: &'a GateBatchIndex,
+    witnesses: &'a NearestWitnessTable,
 }
 
 /// Overwrite `nearest` in place with one proposal variant's answers, recording
 /// every row written into `touched` so the caller can restore the baseline.
 ///
-/// The gather order — ascending contact index for the surviving servers, then
-/// the merged seat last — is the order the whole-variant gather in
-/// [`fill_variant_nearest`] produces after its route filter and `physical_id`
-/// dedup, which is why the two agree bit for bit.
+/// # Why this is the full sweep's answer, bit for bit
+///
+/// A perturbed key's variant source set is `survivors(key) ∪ {merged seat}`,
+/// and the variant's answer for one sample is the minimum squared distance over
+/// that set, square-rooted once.  The minimum splits exactly:
+///
+/// - **over the survivors** — read from the baseline witness table as a
+///   *value*, never recomputed.  The kernel wrote those bits during the
+///   baseline sweep, and three retained slots answer any two-contact removal
+///   (see [`NearestWitnessTable::surviving_squared_distance`]).
+/// - **over the merged seat** — one kernel batch, `SquaredEuclidean` over the
+///   single merged point.  It is the kernel's own answer and not a
+///   hand-computed distance, so it is the same pure function applied to the
+///   same two points the full sweep would have applied it to.
+///
+/// The two are combined by `f64::total_cmp` and the square root is taken
+/// **once, after** the minimum — so the arithmetic performed on the winning
+/// value is identical to the sweep's `squared_distances[row.start].sqrt()`.
+/// An exact tie between a survivor and the merged seat is answered by two
+/// bit-identical `f64`s, which is why the direction the tie breaks cannot move
+/// the answer.  Pinned against the retained full sweep by
+/// `fu8d_proposal_nearest_deltas_reproduce_the_full_sweep_bit_for_bit`.
+///
+/// `query_scratch` is the caller's reusable gather buffer: one allocation for
+/// the whole batch rather than one per proposal.
+///
+/// The three read-only pieces of batch state travel together in
+/// [`GateNearestBaseline`], because they are only ever correct *together*: the
+/// witnesses index the batch index's source lists, and both are stated over
+/// these samples.
 fn fill_proposal_nearest_delta(
-    contacts: &[WorkingContact],
     proposal: &MergeProposal,
-    samples: &[CoverageSample],
-    index: &GateBatchIndex,
+    baseline: GateNearestBaseline<'_>,
     plan: ProposalNearestPlan,
+    query_scratch: &mut Vec<[f64; 3]>,
     nearest: &mut [f64],
     touched: &mut Vec<usize>,
 ) -> Result<(), SpecializedError> {
+    let GateNearestBaseline {
+        samples,
+        index,
+        witnesses,
+    } = baseline;
     debug_assert_eq!(nearest.len(), samples.len());
+    debug_assert_eq!(witnesses.rows.len(), samples.len());
+    if plan.deltas.is_empty() {
+        return Ok(());
+    }
     let pair = MergedPair::of(proposal);
-    for delta in plan.deltas {
-        let sources = index.sources_for(delta.route);
-        let mut source_points = Vec::with_capacity(delta.source_count);
-        source_points.extend(
-            sources
-                .iter()
-                .filter(|&&contact| !pair.contains(contact))
-                .map(|&contact| contacts[contact].position_mm),
-        );
-        source_points.push(proposal.position_mm);
-        debug_assert_eq!(source_points.len(), delta.source_count);
+    query_scratch.clear();
+    query_scratch.reserve(plan.touched_rows);
+    for delta in &plan.deltas {
         let rows = index.sample_rows_for(delta.route);
         debug_assert_eq!(rows.len(), delta.query_count);
-        let mut query_points = Vec::with_capacity(delta.query_count);
-        query_points.extend(rows.iter().map(|&row| samples[row].point_mm));
-        let point_index = PointCloudIndex::new_for_knn_batch(&source_points, &delta.knn)
-            .map_err(|error| SpecializedError::CoverageNearest(error.to_string()))?;
-        let answers = point_index
-            .knn_batch_planned(&query_points, &delta.knn)
-            .map_err(|error| SpecializedError::CoverageNearest(error.to_string()))?;
-        for (query_row, &sample_index) in rows.iter().enumerate() {
+        query_scratch.extend(rows.iter().map(|&row| samples[row].point_mm));
+    }
+    debug_assert_eq!(query_scratch.len(), plan.touched_rows);
+    let merged_seat = [proposal.position_mm];
+    let point_index = PointCloudIndex::new_for_knn_batch(&merged_seat, &plan.merged_seat_knn)
+        .map_err(|error| SpecializedError::CoverageNearest(error.to_string()))?;
+    let answers = point_index
+        .knn_batch_planned(query_scratch, &plan.merged_seat_knn)
+        .map_err(|error| SpecializedError::CoverageNearest(error.to_string()))?;
+    let mut query_row = 0usize;
+    for delta in &plan.deltas {
+        let sources = index.sources_for(delta.route);
+        for &sample_index in index.sample_rows_for(delta.route) {
             let row = answers.row_range(query_row).expect("planned row exists");
-            nearest[sample_index] = answers.squared_distances[row.start].sqrt();
+            let merged_squared = answers.squared_distances[row.start];
+            let survivor_squared =
+                witnesses.surviving_squared_distance(sample_index, sources, pair);
+            let winner = if survivor_squared.total_cmp(&merged_squared).is_le() {
+                survivor_squared
+            } else {
+                merged_squared
+            };
+            nearest[sample_index] = winner.sqrt();
             touched.push(sample_index);
+            query_row += 1;
         }
     }
+    debug_assert_eq!(query_row, plan.touched_rows);
     Ok(())
 }
 
@@ -6605,18 +6806,287 @@ mod tests {
     /// per variant — and the candidate side is the baseline sweep plus
     /// `plan_proposal_nearest_delta` / `fill_proposal_nearest_delta`.  Rows are
     /// compared by `f64::to_bits`, so an answer that is merely *close* fails.
+    /// FU-8d phase F2 equivalence fixture: [`fu8c_fixture`] grown until every
+    /// arm of the witness-plus-merged-seat delta is reached.
+    ///
+    /// Three contacts are added on a new route key `island 3 / component 10` at
+    /// exactly representable coordinates, and the outer two also serve a second
+    /// key `island 4 / component 10` that **only they** serve:
+    ///
+    /// ```text
+    ///   A(-3, 0)          merged(A,B) = (-1, 0)          B(1, 0)
+    ///                     C(0, 1)
+    ///          S(0, 0)          T(-1, 0.05)          U(10, 0)  [on key (4,10)]
+    /// ```
+    ///
+    /// - `S` — baseline nearest is `B` at `d² = 1`, and `B` is merged away, so
+    ///   the witness scan must skip slot 0; the surviving `C` is also at
+    ///   `d² = 1` and the merged seat is at `d² = 1`, an **exact three-way
+    ///   tie** whose bits must survive the minimum and the single square root.
+    /// - `T` — the baseline holder `C` *survives*, and the merged seat is
+    ///   nearer (`d² = 0.0025` against `1.9025`): a **steal**.
+    /// - `U` — key `(4, 10)` is served by `A` and `B` alone, so merging them
+    ///   leaves **no survivor** and the merged seat answers by itself.
+    fn fu8d_delta_fixture() -> (
+        Vec<WorkingContact>,
+        Vec<CoverageSample>,
+        Vec<SpecializedDemand>,
+        Vec<MergeProposal>,
+        LayerPlan,
+    ) {
+        let (mut contacts, mut samples, demands, mut proposals, layers) = fu8c_fixture();
+        let up = [0.0, 0.0, 1.0];
+        let route = |candidate: u64, island: u32, component: u32, face: u32| RegularContactRoute {
+            candidate_id: candidate,
+            owner_island_id: island,
+            coverage_face_id: face,
+            component_id: component,
+            source_kind: RepairRowSourceKind::Generic,
+        };
+        let left = contacts.len();
+        for (candidate, face, position) in [
+            (12u64, 12u32, [-3.0, 0.0, 0.0]),
+            (13, 13, [1.0, 0.0, 0.0]),
+            (14, 14, [0.0, 1.0, 0.0]),
+        ] {
+            contacts.push(test_regular_contact(
+                position,
+                up,
+                route(candidate, 3, 10, face),
+                Vec::new(),
+            ));
+        }
+        let right = left + 1;
+        let survivor = left + 2;
+        // A second key served by the outer two and nobody else, so merging them
+        // removes every server it has.
+        contacts[left].regular_routes.push(route(15, 4, 10, 15));
+        contacts[right].regular_routes.push(route(16, 4, 10, 16));
+
+        for (island, component, face, point) in [
+            (3u32, 10u32, 12u32, [0.0, 0.0, 0.0]),
+            (3, 10, 13, [-1.0, 0.05, 0.0]),
+            (4, 10, 15, [10.0, 0.0, 0.0]),
+        ] {
+            samples.push(CoverageSample {
+                island_id: island,
+                face_id: face,
+                component_id: component,
+                point_mm: point,
+                area_mm2: 1.0,
+            });
+        }
+
+        let merged = |contacts: &[WorkingContact], left: usize, right: usize| MergeProposal {
+            left,
+            right,
+            representative_component_id: 10,
+            representative_position_mm: contacts[left].position_mm,
+            representative_face_id: 0,
+            representative_normal: up,
+            primary_regular: contacts[left].primary_regular,
+            seat_provenance: contacts[left].seat_provenance,
+            position_mm: [
+                (contacts[left].position_mm[0] + contacts[right].position_mm[0]) / 2.0,
+                (contacts[left].position_mm[1] + contacts[right].position_mm[1]) / 2.0,
+                (contacts[left].position_mm[2] + contacts[right].position_mm[2]) / 2.0,
+            ],
+            normal: up,
+        };
+        proposals.extend([
+            // The tie, the steal, and the key whose every server is removed.
+            merged(&contacts, left, right),
+            // Removals that leave a survivor on the wide key, from both sides.
+            merged(&contacts, left, survivor),
+            merged(&contacts, right, survivor),
+            // A pair straddling two route keys, one of which nothing else
+            // serves in the merged variant.
+            merged(&contacts, 0, left),
+        ]);
+        (contacts, samples, demands, proposals, layers)
+    }
+
+    /// What one equivalence sweep actually exercised, so a fixture can be
+    /// asserted **non-vacuous** rather than merely passing.
+    #[derive(Debug, Default)]
+    struct ProposalDeltaCoverage {
+        /// Perturbed keys carrying fewer servers than the retained slot count.
+        narrow_key_visits: usize,
+        /// Touched rows where the removal left the route no server at all, so
+        /// the survivors' side of the minimum is `+∞`.
+        rows_with_no_survivor: usize,
+        /// Touched rows whose baseline nearest was one of the merged pair.
+        removed_nearest_rows: usize,
+        /// Touched rows the merged seat wins outright from a *surviving*
+        /// baseline holder — a steal.
+        steal_rows: usize,
+        /// Touched rows where a survivor and the merged seat are at exactly
+        /// equal squared distance, bit for bit.
+        exact_tie_rows: usize,
+        /// Rows the reference full sweep moved off the baseline.
+        moved_rows: usize,
+    }
+
+    /// Run the swap test: for every proposal, the retained `#[cfg(test)]`
+    /// full-sweep reference against the delta path, row by row on
+    /// `f64::to_bits`, plus the touched-superset and restore invariants.
+    ///
+    /// The reference side is `plan_variant_nearest_routes` /
+    /// `fill_variant_nearest` with `Some(proposal)` — literally the code the
+    /// hot path ran once per variant before FU-8c — and the candidate side is
+    /// the baseline sweep plus `plan_proposal_nearest_delta` /
+    /// `fill_proposal_nearest_delta`.  Returns what it observed so the caller
+    /// can refuse a fixture that never reaches the interesting arms.
+    fn assert_proposal_deltas_match_the_full_sweep(
+        contacts: &[WorkingContact],
+        samples: &[CoverageSample],
+        demands: &[SpecializedDemand],
+        proposals: &[MergeProposal],
+        layers: &LayerPlan,
+    ) -> ProposalDeltaCoverage {
+        let index =
+            GateBatchIndex::build(contacts, samples, demands, layers, 1.0).expect("batch index");
+
+        let baseline_plan = plan_variant_nearest_routes(
+            contacts,
+            None,
+            samples,
+            TEST_KNN_LIMITS,
+            NearestWitnessRetention::RetainWitnesses,
+        )
+        .unwrap();
+        let mut baseline = vec![f64::INFINITY; samples.len()];
+        let mut witnesses = NearestWitnessTable::seeded(samples.len());
+        fill_variant_nearest(
+            contacts,
+            None,
+            samples,
+            &mut baseline,
+            baseline_plan,
+            Some(&mut witnesses),
+        )
+        .unwrap();
+
+        // The kernel's own distance from one point to one query: the same pure
+        // function the delta asks for the merged seat, used here only to
+        // classify what each row exercised.
+        let kernel_squared = |source: [f64; 3], query: [f64; 3]| -> f64 {
+            let plan = KnnBatchPlan::new(1, 1, 1, TEST_KNN_LIMITS).expect("plan");
+            let cloud = PointCloudIndex::new_for_knn_batch(&[source], &plan).expect("index");
+            let answers = cloud.knn_batch_planned(&[query], &plan).expect("query");
+            let row = answers.row_range(0).expect("planned row");
+            answers.squared_distances[row.start]
+        };
+
+        let mut coverage = ProposalDeltaCoverage::default();
+        let mut working = baseline.clone();
+        let mut touched = Vec::new();
+        let mut query_scratch = Vec::new();
+
+        for (proposal_index, proposal) in proposals.iter().enumerate() {
+            let reference_plan = plan_variant_nearest_routes(
+                contacts,
+                Some(proposal),
+                samples,
+                TEST_KNN_LIMITS,
+                NearestWitnessRetention::RetainWitnesses,
+            )
+            .unwrap();
+            let mut reference = vec![f64::INFINITY; samples.len()];
+            fill_variant_nearest(
+                contacts,
+                Some(proposal),
+                samples,
+                &mut reference,
+                reference_plan,
+                None,
+            )
+            .unwrap();
+
+            touched.clear();
+            let delta =
+                plan_proposal_nearest_delta(contacts, proposal, &index, TEST_KNN_LIMITS).unwrap();
+            // The plan's own shape is part of the claim: one merged-seat batch
+            // covering exactly the rows the perturbed keys carry.
+            assert_eq!(delta.merged_seat_knn.source_count(), 1);
+            assert_eq!(delta.merged_seat_knn.query_count(), delta.touched_rows);
+            assert_eq!(delta.work, delta.touched_rows);
+            let pair = MergedPair::of(proposal);
+            for route_delta in &delta.deltas {
+                if index.sources_for(route_delta.route).len() < NEAREST_WITNESS_SLOTS {
+                    coverage.narrow_key_visits += 1;
+                }
+            }
+            fill_proposal_nearest_delta(
+                proposal,
+                GateNearestBaseline {
+                    samples,
+                    index: &index,
+                    witnesses: &witnesses,
+                },
+                delta,
+                &mut query_scratch,
+                &mut working,
+                &mut touched,
+            )
+            .unwrap();
+
+            for row in 0..samples.len() {
+                assert_eq!(
+                    working[row].to_bits(),
+                    reference[row].to_bits(),
+                    "proposal {proposal_index} row {row}: delta {} vs full sweep {}",
+                    working[row],
+                    reference[row]
+                );
+            }
+            // Every row the reference disagrees with the baseline on must have
+            // been touched, or the delta got the right answer by luck.
+            for row in 0..samples.len() {
+                if reference[row].to_bits() != baseline[row].to_bits() {
+                    coverage.moved_rows += 1;
+                    assert!(
+                        touched.contains(&row),
+                        "proposal {proposal_index} moved row {row} without touching it"
+                    );
+                }
+            }
+            for &row in &touched {
+                let sources = index.sources_for(CoverageRoute {
+                    island_id: samples[row].island_id,
+                    component_id: samples[row].component_id,
+                });
+                let survivor = witnesses.surviving_squared_distance(row, sources, pair);
+                let merged = kernel_squared(proposal.position_mm, samples[row].point_mm);
+                let holder = witnesses.rows[row][0].source_slot;
+                let removed_nearest = holder != NO_WITNESS && pair.contains(sources[holder]);
+                if survivor.is_infinite() {
+                    coverage.rows_with_no_survivor += 1;
+                }
+                if removed_nearest {
+                    coverage.removed_nearest_rows += 1;
+                } else if survivor.is_finite() && merged < survivor {
+                    coverage.steal_rows += 1;
+                }
+                if survivor.to_bits() == merged.to_bits() {
+                    coverage.exact_tie_rows += 1;
+                }
+                working[row] = baseline[row];
+            }
+            assert!(
+                working
+                    .iter()
+                    .zip(&baseline)
+                    .all(|(left, right)| left.to_bits() == right.to_bits()),
+                "proposal {proposal_index} did not restore the baseline"
+            );
+        }
+        coverage
+    }
+
     #[test]
     fn fu8c_proposal_nearest_deltas_reproduce_the_full_sweep_bit_for_bit() {
-        let (contacts, samples, demands, proposals, _layers) = fu8c_fixture();
-        let index = GateBatchIndex::build(
-            &contacts,
-            &samples,
-            &demands,
-            &LayerPlan::new(0.0, vec![0.05; 10]).expect("layer plan"),
-            1.0,
-        )
-        .expect("batch index");
-
+        let (contacts, samples, demands, proposals, layers) = fu8c_fixture();
         let baseline_plan = plan_variant_nearest_routes(
             &contacts,
             None,
@@ -6638,73 +7108,65 @@ mod tests {
         // The unserved route key really is unserved, or the fixture is not
         // exercising the infinite-row case it claims to.
         assert!(baseline[9].is_infinite());
-        let mut working = baseline.clone();
-        let mut touched = Vec::new();
 
-        for (proposal_index, proposal) in proposals.iter().enumerate() {
-            let reference_plan = plan_variant_nearest_routes(
-                &contacts,
-                Some(proposal),
-                &samples,
-                TEST_KNN_LIMITS,
-                NearestWitnessRetention::RetainWitnesses,
-            )
-            .unwrap();
-            let mut reference = vec![f64::INFINITY; samples.len()];
-            fill_variant_nearest(
-                &contacts,
-                Some(proposal),
-                &samples,
-                &mut reference,
-                reference_plan,
-                None,
-            )
-            .unwrap();
+        let coverage = assert_proposal_deltas_match_the_full_sweep(
+            &contacts, &samples, &demands, &proposals, &layers,
+        );
+        assert!(
+            coverage.moved_rows > 0,
+            "no proposal moved a row, so agreement is vacuous"
+        );
+    }
 
-            touched.clear();
-            let delta =
-                plan_proposal_nearest_delta(&contacts, proposal, &index, TEST_KNN_LIMITS).unwrap();
-            fill_proposal_nearest_delta(
-                &contacts,
-                proposal,
-                &samples,
-                &index,
-                delta,
-                &mut working,
-                &mut touched,
-            )
-            .unwrap();
-
-            for row in 0..samples.len() {
-                assert_eq!(
-                    working[row].to_bits(),
-                    reference[row].to_bits(),
-                    "proposal {proposal_index} row {row}: delta {} vs full sweep {}",
-                    working[row],
-                    reference[row]
-                );
-            }
-            // Every row the reference disagrees with the baseline on must have
-            // been touched, or the delta got the right answer by luck.
-            for row in 0..samples.len() {
-                if reference[row].to_bits() != baseline[row].to_bits() {
-                    assert!(
-                        touched.contains(&row),
-                        "proposal {proposal_index} moved row {row} without touching it"
-                    );
-                }
-            }
-            for &row in &touched {
-                working[row] = baseline[row];
-            }
-            assert!(
-                working
-                    .iter()
-                    .zip(&baseline)
-                    .all(|(left, right)| left.to_bits() == right.to_bits()),
-                "proposal {proposal_index} did not restore the baseline"
-            );
-        }
+    /// FU-8d phase F2, the swap test for the **new** delta.
+    ///
+    /// Same reference as FU-8c's — the retained `#[cfg(test)]` full sweep — but
+    /// the candidate is now the merged-seat single batch plus witness-slot
+    /// inspection, which is a different algorithm producing the same bits.  The
+    /// fixture is grown past FU-8c's until every arm of that algorithm is
+    /// reached, and the assertions below **refuse to pass vacuously**:
+    ///
+    /// - a perturbed key with fewer than [`NEAREST_WITNESS_SLOTS`] servers, so
+    ///   the "retained set *is* the whole set" arm runs;
+    /// - a proposal that removes *every* server of a key, so the survivors'
+    ///   side of the minimum is `+∞` and the merged seat answers alone;
+    /// - a proposal whose baseline nearest is one of the merged pair, so the
+    ///   witness scan has to skip past slot 0;
+    /// - a **steal** — the merged seat wins a row whose baseline holder
+    ///   survived, which no removal-only argument would produce;
+    /// - an **exact distance tie** between a survivor and the merged seat,
+    ///   which is where a `partial_cmp`-shaped minimum or a per-side square
+    ///   root would be free to disagree with the sweep and does not.
+    #[test]
+    fn fu8d_proposal_nearest_deltas_reproduce_the_full_sweep_bit_for_bit() {
+        let (contacts, samples, demands, proposals, layers) = fu8d_delta_fixture();
+        let coverage = assert_proposal_deltas_match_the_full_sweep(
+            &contacts, &samples, &demands, &proposals, &layers,
+        );
+        assert!(
+            coverage.moved_rows > 0,
+            "no proposal moved a row, so agreement is vacuous"
+        );
+        assert!(
+            coverage.narrow_key_visits > 0,
+            "no perturbed key carried fewer than {NEAREST_WITNESS_SLOTS} servers"
+        );
+        assert!(
+            coverage.rows_with_no_survivor > 0,
+            "no proposal removed every server of a key it perturbs"
+        );
+        assert!(
+            coverage.removed_nearest_rows > 0,
+            "no touched row had its baseline nearest removed by the merge"
+        );
+        assert!(
+            coverage.steal_rows > 0,
+            "the merged seat never stole a row from a surviving holder"
+        );
+        assert!(
+            coverage.exact_tie_rows > 0,
+            "no survivor tied the merged seat exactly, so the tie arm is untested"
+        );
     }
 
     /// FU-8d part (1), the retention lemma.  **Three retained witnesses answer
@@ -6998,15 +7460,18 @@ mod tests {
             SAMPLES,
             FACES,
             DEMANDS,
+            // FU-8d F2 added `key_visits`; the distinct powers of two keep the
+            // assertion below a *derivation*, not a coincidence.
             GateProposalRoutedWork {
                 nearest_work: 1,
                 touched_rows: 2,
+                key_visits: 8,
                 demand_rows: 4,
             },
             limits,
         )
         .expect("plan");
-        assert_eq!(charged.operations, plan.operations + 7);
+        assert_eq!(charged.operations, plan.operations + 15);
     }
 
     #[test]
@@ -8855,9 +9320,15 @@ mod tests {
         // 17 x 3 = 51` plus `40 + 20 + 8 = 68`, also 119, with `face_rows =
         // 3 x 7 = 21` either way.  `exact.operations` is therefore still 140 and
         // every cap-minus-one refusal below still pins the same boundary.
+        //
+        // Re-split 2026-08-06 (FU-8d phase F2), same total.  The measured
+        // proposal work gained a `key_visits` term, so the 20 that was all
+        // `touched_rows` is now `14 + 6`; `40 + 14 + 6 + 8 = 68` exactly as
+        // before, and this test's boundary is deliberately untouched by F2.
         const FIXTURE_PROPOSAL_WORK: GateProposalRoutedWork = GateProposalRoutedWork {
             nearest_work: 40,
-            touched_rows: 20,
+            touched_rows: 14,
+            key_visits: 6,
             demand_rows: 8,
         };
         let exact = gate_resource_plan(3, 2, 5, 7, 11, FIXTURE_PROPOSAL_WORK, limits).unwrap();
