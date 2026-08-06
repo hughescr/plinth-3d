@@ -231,7 +231,33 @@ impl SpecializedLimits {
         Self {
             gate_work_per_batch_unit: batch_work.gate_per_batch_unit,
             load_work_per_batch_unit: batch_work.load_per_batch_unit,
-            coverage_route_knn,
+            // FU-8d ruling R-b (2026-08-06).  The merge gate's baseline
+            // coverage sweep asks the kernel for `min(NEAREST_WITNESS_SLOTS,
+            // source_count)` neighbours per sample so that it can retain the
+            // witnesses a proposal delta reads, so this batch's neighbour
+            // ceiling must admit that shape.
+            //
+            // **It is a `KnnBatchLimits` shape field, not an FU-8 cap.**  It is
+            // raised here rather than at each caller so that one authority
+            // governs every construction of the specialized limits — the
+            // production set and every test set alike — and so that raising it
+            // cannot leak into the generic perception limits, which are built
+            // from the caller's `KnnBatchLimits` unchanged and still ask for
+            // one neighbour.  What it admits is bytes, not operations: a
+            // `KnnBatchPlan`'s charged work is `source_count × query_count`,
+            // k-independent, so nothing it permits is charged differently
+            // (ruling R-a; see [`NEAREST_WITNESS_SLOTS`]).  The bytes it does
+            // admit are charged — per route inside
+            // `KnnBatchPlan::logical_peak_bytes` (`+2 × query_count × 16 B`,
+            // single-digit MB on the Weeping Treant's widest route against this
+            // batch's 2 GB logical-peak limit) and per batch as
+            // [`GatePeakUsage::nearest_witness_bytes`] (~19 MB over that
+            // model's 405,146 coverage samples, against a 1 GiB gate peak whose
+            // last measured value was 216,203,088 B).
+            coverage_route_knn: KnnBatchLimits {
+                max_neighbors: NEAREST_WITNESS_SLOTS,
+                ..coverage_route_knn
+            },
             max_synthetic_neighbor_pairs: 20_000_000,
             max_synthetic_neighbor_bytes: 512 * 1024 * 1024,
             max_satisfaction_tests: 100_000_000,
@@ -2978,6 +3004,13 @@ struct GatePeakUsage {
     /// FU-8c this was a `window_variants × samples` matrix charged as part of
     /// `matrix_bytes`; the batch now holds two rows instead of up to 1,024.
     nearest_bytes: usize,
+    /// The baseline sweep's retained witness table, from
+    /// [`gate_nearest_witness_bytes`]: `samples × NEAREST_WITNESS_SLOTS` fixed
+    /// slots, held for the whole batch (FU-8d, 2026-08-06).  Retained, not
+    /// phase-local, and charged from the first batch that builds one — an
+    /// allocation this stage holds and does not charge for is the defect record
+    /// fixes F6 and F9 found twice already.
+    nearest_witness_bytes: usize,
     coverage_scratch_bytes: usize,
     coverage_nearest_bytes: usize,
     coverage_retained_bytes: usize,
@@ -2992,6 +3025,7 @@ fn check_gate_peak(usage: GatePeakUsage, limit: usize) -> Result<usize, Speciali
         .and_then(|bytes| bytes.checked_add(usage.face_scratch_bytes))
         .and_then(|bytes| bytes.checked_add(usage.batch_index_bytes))
         .and_then(|bytes| bytes.checked_add(usage.nearest_bytes))
+        .and_then(|bytes| bytes.checked_add(usage.nearest_witness_bytes))
         .ok_or(SpecializedError::GateResourceOverflow)?;
     let coverage_phase = retained
         .checked_add(usage.coverage_scratch_bytes)
@@ -3670,16 +3704,25 @@ fn evaluate_gate_batch(
                 None,
                 coverage_samples,
                 limits.coverage_route_knn,
+                NearestWitnessRetention::RetainWitnesses,
             )?;
             executed_nearest.record_baseline(&baseline_route_plan);
             let mut baseline_nearest = vec![f64::INFINITY; coverage_samples.len()];
+            // FU-8d: the sweep also retains up to `NEAREST_WITNESS_SLOTS`
+            // nearest sources per sample.  Retaining them changes no answer
+            // (see [`fill_route_points_nearest`]) and changes no charge (ruling
+            // R-a); its bytes are charged as
+            // `GatePeakUsage::nearest_witness_bytes`.
+            let mut baseline_witnesses = NearestWitnessTable::seeded(coverage_samples.len());
             fill_variant_nearest(
                 contacts,
                 None,
                 coverage_samples,
                 &mut baseline_nearest,
                 baseline_route_plan,
+                Some(&mut baseline_witnesses),
             )?;
+            debug_assert_eq!(baseline_witnesses.rows.len(), coverage_samples.len());
             let mut working_nearest = baseline_nearest.clone();
             let mut touched_rows: Vec<usize> = Vec::new();
             let mut executed_whole_gate_route_plan = GateWholeRoutePlan::default();
@@ -3755,6 +3798,7 @@ fn evaluate_gate_batch(
                         face_scratch_bytes: island_face_scratch_bytes(islands)?,
                         batch_index_bytes: batch_index.retained_bytes,
                         nearest_bytes: gate_nearest_array_bytes(coverage_samples.len())?,
+                        nearest_witness_bytes: gate_nearest_witness_bytes(coverage_samples.len())?,
                         coverage_scratch_bytes: coverage_scratch.scratch_bytes,
                         coverage_nearest_bytes: planned_nearest.peak_bytes()?,
                         coverage_retained_bytes,
@@ -4108,7 +4152,13 @@ fn plan_gate_nearest_batch(
     limits: KnnBatchLimits,
 ) -> Result<GateNearestBatchPlan, SpecializedError> {
     let mut plan = GateNearestBatchPlan::seeded();
-    let baseline = plan_variant_nearest_routes(contacts, None, coverage_samples, limits)?;
+    let baseline = plan_variant_nearest_routes(
+        contacts,
+        None,
+        coverage_samples,
+        limits,
+        NearestWitnessRetention::RetainWitnesses,
+    )?;
     plan.record_baseline(&baseline);
     for proposal in proposals {
         let delta = plan_proposal_nearest_delta(contacts, proposal, index, limits)?;
@@ -4194,6 +4244,7 @@ fn whole_gate_route_preflight(
         limits.coverage_route_knn,
     )?;
     let nearest_bytes = gate_nearest_array_bytes(coverage_samples.len())?;
+    let nearest_witness_bytes = gate_nearest_witness_bytes(coverage_samples.len())?;
     let coverage_nearest_bytes = nearest.peak_bytes()?;
     let coverage_scratch = coverage_assessment_resource_plan(coverage_samples, topology)?;
     let coverage_retained_bytes = coverage_samples
@@ -4281,6 +4332,7 @@ fn whole_gate_route_preflight(
                     face_scratch_bytes: island_face_scratch_bytes(islands)?,
                     batch_index_bytes: index.retained_bytes,
                     nearest_bytes,
+                    nearest_witness_bytes,
                     coverage_scratch_bytes: coverage_scratch.scratch_bytes,
                     coverage_nearest_bytes,
                     coverage_retained_bytes,
@@ -4358,10 +4410,118 @@ fn whole_gate_route_preflight_then_execute<T>(
     )
 }
 
+/// How many nearest sources per coverage sample the **baseline** sweep retains.
+///
+/// A merge proposal removes exactly two contacts, so three retained witnesses
+/// always leave at least one survivor wherever the route had three or more
+/// servers; where it had fewer, the retained set *is* the whole set.  Either
+/// way "which source is nearest among the survivors of a two-contact removal?"
+/// is answerable from the retained slots alone — the same top-`k` argument
+/// [`DEMAND_WITNESS_SLOTS`] makes for the demands, applied to the nearest
+/// (FU-8d part (1), 2026-08-06).
+///
+/// **Ruling R-a (2026-08-06): retaining `k = min(3, source_count)` witnesses
+/// leaves the sweep's *charge* exactly where it was, and that silence is
+/// deliberate rather than an oversight.**  A `KnnBatchPlan`'s work term is
+/// `source_count × query_count` and is k-independent, and
+/// [`plan_route_points_nearest`] charges precisely that term, so the baseline
+/// sweep costs what it cost before the retention existed.  What `k` does move
+/// is bytes, and both terms are charged: the kernel's CSR pair arrays are
+/// `query_count × k`, i.e. `+2 × query_count × 16 B` per route inside each
+/// route's `KnnBatchPlan::logical_peak_bytes`, and the retained table itself is
+/// charged as [`GatePeakUsage::nearest_witness_bytes`].
+const NEAREST_WITNESS_SLOTS: usize = 3;
+
+/// One retained baseline witness: a source the kernel named for one coverage
+/// sample, kept in the kernel's own emission order.
+///
+/// Both fields are the kernel's own output, copied and never re-derived — the
+/// distance in particular is `SquaredEuclidean` as `knn_batch_planned` computed
+/// it, so a later comparison against a fresh kernel answer is a comparison of
+/// two outputs of the same pure function.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct NearestWitness {
+    /// The kernel's `item` for this neighbour: an index into the route's
+    /// gathered source list, or [`NO_WITNESS`] for an unfilled slot.
+    source_slot: usize,
+    /// The kernel's squared distance for this neighbour.
+    squared_distance: f64,
+}
+
+impl NearestWitness {
+    const UNUSED: Self = Self {
+        source_slot: NO_WITNESS,
+        squared_distance: f64::INFINITY,
+    };
+}
+
+/// The baseline sweep's retained witnesses: one fixed-width row per coverage
+/// sample, in the kernel's emission order (ascending
+/// `(squared_distance, source_slot)`), padded with [`NearestWitness::UNUSED`].
+///
+/// A sample carries exactly one route key, so one row per sample is a complete
+/// record.  Rows for samples on a route no contact serves stay unused, which is
+/// the same "stays infinite" case the nearest array itself has.
+pub(crate) struct NearestWitnessTable {
+    rows: Vec<[NearestWitness; NEAREST_WITNESS_SLOTS]>,
+}
+
+impl NearestWitnessTable {
+    fn seeded(sample_count: usize) -> Self {
+        Self {
+            rows: vec![[NearestWitness::UNUSED; NEAREST_WITNESS_SLOTS]; sample_count],
+        }
+    }
+}
+
+/// Bytes the baseline witness table retains for the whole batch (FU-8d).
+fn gate_nearest_witness_bytes(sample_count: usize) -> Result<usize, SpecializedError> {
+    sample_count
+        .checked_mul(std::mem::size_of::<[NearestWitness; NEAREST_WITNESS_SLOTS]>())
+        .ok_or(SpecializedError::GateResourceOverflow)
+}
+
+/// Whether one route-batched nearest sweep retains its top-`k` witnesses.
+///
+/// The choice is the caller's because it is the caller that knows whether
+/// anything will read them, and asking for neighbours nobody reads would move
+/// that caller's charged logical peak for nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum NearestWitnessRetention {
+    /// One neighbour per query, answer only.  The coverage **measurement** path
+    /// takes this arm: it evaluates no merge proposals, so it has nothing to
+    /// answer from witnesses, and its charged peak is unchanged by FU-8d.
+    NearestOnly,
+    /// `min(NEAREST_WITNESS_SLOTS, source_count)` neighbours per query,
+    /// retained.  The merge gate's baseline sweep takes this arm (FU-8d).
+    RetainWitnesses,
+}
+
+impl NearestWitnessRetention {
+    /// Neighbours to request for a route with `source_count` distinct servers.
+    ///
+    /// `KnnBatchPlan::new` refuses `neighbors > source_count`, and every route
+    /// planned here has at least one server, so the clamp is what keeps a
+    /// one-server or two-server route planning at all.
+    const fn neighbors_for(self, source_count: usize) -> usize {
+        match self {
+            Self::NearestOnly => 1,
+            Self::RetainWitnesses => {
+                if source_count < NEAREST_WITNESS_SLOTS {
+                    source_count
+                } else {
+                    NEAREST_WITNESS_SLOTS
+                }
+            }
+        }
+    }
+}
+
 pub(crate) fn plan_route_points_nearest(
     points: &[CoverageRoutePoint],
     samples: &[CoverageSample],
     limits: KnnBatchLimits,
+    retention: NearestWitnessRetention,
 ) -> Result<CoverageRouteNearestPlan, SpecializedError> {
     let mut source_counts = BTreeMap::<CoverageRoute, BTreeSet<u64>>::new();
     let mut route_membership_counts = BTreeMap::<CoverageRoute, usize>::new();
@@ -4421,8 +4581,13 @@ pub(crate) fn plan_route_points_nearest(
         total_queries = total_queries
             .checked_add(query_count)
             .ok_or(SpecializedError::GateResourceOverflow)?;
-        let knn = KnnBatchPlan::new(source_ids.len(), query_count, 1, limits)
-            .map_err(|error| SpecializedError::CoverageNearest(error.to_string()))?;
+        let knn = KnnBatchPlan::new(
+            source_ids.len(),
+            query_count,
+            retention.neighbors_for(source_ids.len()),
+            limits,
+        )
+        .map_err(|error| SpecializedError::CoverageNearest(error.to_string()))?;
         max_route_peak = max_route_peak.max(knn.logical_peak_bytes());
         max_source_count = max_source_count.max(source_ids.len());
         max_query_count = max_query_count.max(query_count);
@@ -4476,6 +4641,7 @@ fn plan_variant_nearest_routes(
     proposal: Option<&MergeProposal>,
     samples: &[CoverageSample],
     limits: KnnBatchLimits,
+    retention: NearestWitnessRetention,
 ) -> Result<CoverageRouteNearestPlan, SpecializedError> {
     let mut points = Vec::new();
     let mut add_contact = |physical_id: u64, position_mm: [f64; 3], contact: &WorkingContact| {
@@ -4512,7 +4678,7 @@ fn plan_variant_nearest_routes(
         add_contact(physical_id, proposal.position_mm, &contacts[proposal.left]);
         add_contact(physical_id, proposal.position_mm, &contacts[proposal.right]);
     }
-    plan_route_points_nearest(&points, samples, limits)
+    plan_route_points_nearest(&points, samples, limits, retention)
 }
 
 fn fill_variant_nearest(
@@ -4521,6 +4687,7 @@ fn fill_variant_nearest(
     samples: &[CoverageSample],
     nearest: &mut [f64],
     planned: CoverageRouteNearestPlan,
+    witnesses: Option<&mut NearestWitnessTable>,
 ) -> Result<(), SpecializedError> {
     let mut points = Vec::new();
     let mut add = |physical_id: u64, position_mm: [f64; 3], contact: &WorkingContact| {
@@ -4556,16 +4723,32 @@ fn fill_variant_nearest(
         add(physical_id, proposal.position_mm, &contacts[proposal.left]);
         add(physical_id, proposal.position_mm, &contacts[proposal.right]);
     }
-    fill_route_points_nearest(&points, samples, nearest, planned)
+    fill_route_points_nearest(&points, samples, nearest, planned, witnesses)
 }
 
+/// Fill one variant's nearest answers from a checked route plan, optionally
+/// retaining that plan's top-`k` witnesses per sample.
+///
+/// **The answers are exactly what they were before FU-8d.** `nearest[sample]`
+/// is `squared_distances[row.start].sqrt()` at every `k`, and row 0 of a
+/// planned kNN batch does not depend on `k`: the boundary is the max over the
+/// `k` candidates, the tie refetch is inclusive with `tie_cap = source_count`,
+/// so a larger `k` only enlarges the candidate set, and the row is sorted by
+/// the total order `(distance.total_cmp, item)` before truncation.  Pinned
+/// against the kernel itself by
+/// `fu8d_knn_row_zero_is_k_independent_bit_for_bit`, over engineered exact ties
+/// as well as random clouds.
 pub(crate) fn fill_route_points_nearest(
     points: &[CoverageRoutePoint],
     samples: &[CoverageSample],
     nearest: &mut [f64],
     planned: CoverageRouteNearestPlan,
+    mut witnesses: Option<&mut NearestWitnessTable>,
 ) -> Result<(), SpecializedError> {
     debug_assert_eq!(nearest.len(), samples.len());
+    debug_assert!(witnesses
+        .as_ref()
+        .is_none_or(|table| table.rows.len() == samples.len()));
     /* All route plans are checked before any geometric gather or query. */
     for route_plan in planned.route_plans {
         let route = route_plan.route;
@@ -4600,7 +4783,27 @@ pub(crate) fn fill_route_points_nearest(
             .map_err(|error| SpecializedError::CoverageNearest(error.to_string()))?;
         for (query_row, &sample_index) in query_indices.iter().enumerate() {
             let row = rows.row_range(query_row).expect("planned row exists");
+            // The answer, unchanged: row start, one square root, as before.
             nearest[sample_index] = rows.squared_distances[row.start].sqrt();
+            if let Some(table) = witnesses.as_mut() {
+                let slots = &mut table.rows[sample_index];
+                for (slot, position) in slots.iter_mut().zip(row.clone()) {
+                    *slot = NearestWitness {
+                        source_slot: usize::try_from(rows.point_ids[position])
+                            .map_err(|_| SpecializedError::GateResourceOverflow)?,
+                        squared_distance: rows.squared_distances[position],
+                    };
+                }
+                // Slot 0 *is* the answer's own row, not a re-derivation of it.
+                debug_assert_eq!(
+                    slots[0].squared_distance.to_bits(),
+                    rows.squared_distances[row.start].to_bits()
+                );
+                debug_assert_eq!(
+                    u64::try_from(slots[0].source_slot).unwrap_or(u64::MAX),
+                    rows.point_ids[row.start]
+                );
+            }
         }
     }
     Ok(())
@@ -6141,10 +6344,15 @@ mod tests {
     use plinth_core::{Finite, PositiveFinite};
     use plinth_mesh::{make_overhang_table, make_raking_blade, make_thin_fin, make_toed_slab};
 
+    /// The gate's own kNN limits for tests.  `max_neighbors` matches what
+    /// `SpecializedLimits::production` states for `coverage_route_knn`: the
+    /// baseline sweep asks for `min(NEAREST_WITNESS_SLOTS, source_count)`
+    /// neighbours, so a ceiling of 1 would refuse every witness-retaining plan
+    /// (FU-8d ruling R-b; a `KnnBatchLimits` shape field, not an FU-8 cap).
     const TEST_KNN_LIMITS: KnnBatchLimits = KnnBatchLimits {
         max_source_points: 20_000_000,
         max_query_points: 20_000_000,
-        max_neighbors: 1,
+        max_neighbors: NEAREST_WITNESS_SLOTS,
         max_logical_peak_bytes: 2 * 1024 * 1024 * 1024,
         max_work: 100_000_000,
     };
@@ -6223,6 +6431,8 @@ mod tests {
             // Zero for the same reason, added 2026-08-06 (FU-8c).
             batch_index_bytes: 0,
             nearest_bytes: 0,
+            // Zero for the same reason, added 2026-08-06 (FU-8d).
+            nearest_witness_bytes: 0,
             coverage_scratch_bytes: 0,
             coverage_nearest_bytes: 0,
             coverage_retained_bytes: 0,
@@ -6407,10 +6617,24 @@ mod tests {
         )
         .expect("batch index");
 
-        let baseline_plan =
-            plan_variant_nearest_routes(&contacts, None, &samples, TEST_KNN_LIMITS).unwrap();
+        let baseline_plan = plan_variant_nearest_routes(
+            &contacts,
+            None,
+            &samples,
+            TEST_KNN_LIMITS,
+            NearestWitnessRetention::RetainWitnesses,
+        )
+        .unwrap();
         let mut baseline = vec![f64::INFINITY; samples.len()];
-        fill_variant_nearest(&contacts, None, &samples, &mut baseline, baseline_plan).unwrap();
+        fill_variant_nearest(
+            &contacts,
+            None,
+            &samples,
+            &mut baseline,
+            baseline_plan,
+            None,
+        )
+        .unwrap();
         // The unserved route key really is unserved, or the fixture is not
         // exercising the infinite-row case it claims to.
         assert!(baseline[9].is_infinite());
@@ -6418,9 +6642,14 @@ mod tests {
         let mut touched = Vec::new();
 
         for (proposal_index, proposal) in proposals.iter().enumerate() {
-            let reference_plan =
-                plan_variant_nearest_routes(&contacts, Some(proposal), &samples, TEST_KNN_LIMITS)
-                    .unwrap();
+            let reference_plan = plan_variant_nearest_routes(
+                &contacts,
+                Some(proposal),
+                &samples,
+                TEST_KNN_LIMITS,
+                NearestWitnessRetention::RetainWitnesses,
+            )
+            .unwrap();
             let mut reference = vec![f64::INFINITY; samples.len()];
             fill_variant_nearest(
                 &contacts,
@@ -6428,6 +6657,7 @@ mod tests {
                 &samples,
                 &mut reference,
                 reference_plan,
+                None,
             )
             .unwrap();
 
@@ -6475,6 +6705,204 @@ mod tests {
                 "proposal {proposal_index} did not restore the baseline"
             );
         }
+    }
+
+    /// FU-8d part (1), the retention lemma.  **Three retained witnesses answer
+    /// any two-contact removal exactly, as a value.**
+    ///
+    /// The delta path FU-8d builds re-answers a merge proposal's nearest by
+    /// taking, per touched sample, the first retained witness whose source is
+    /// outside the merged pair, and comparing that against one distance to the
+    /// merged seat.  This test pins the removal half of that claim, and pins it
+    /// against the kernel rather than against hand-computed geometry: the
+    /// reference is a fresh `PointCloudIndex` over exactly the surviving
+    /// sources, queried with the same `SquaredEuclidean` the retention itself
+    /// recorded, and the two are compared by `f64::to_bits`.
+    ///
+    /// It also pins the slot→contact mapping that path depends on:
+    /// `source_slot` indexes [`GateBatchIndex::sources_for`]'s ascending list,
+    /// because the baseline gather walks contacts in ascending index and
+    /// deduplicates by `physical_id`, which is the contact index for variant 0.
+    ///
+    /// The FU-8c fixture is densified on one route key first, because its
+    /// widest key carries exactly three servers — where the retained set *is*
+    /// the whole set and the lemma is trivially true.  Truncation has to bite
+    /// for this to prove anything, and the assertions below refuse to pass
+    /// vacuously: a route wider than [`NEAREST_WITNESS_SLOTS`], a case answered
+    /// from the last retained slot, and a case where the removal leaves no
+    /// survivor at all must each occur.
+    #[test]
+    fn fu8d_three_retained_witnesses_answer_any_two_removal() {
+        let (mut contacts, mut samples, demands, _proposals, layers) = fu8c_fixture();
+        let up = [0.0, 0.0, 1.0];
+        // Four more servers on island 1 / component 10, taking that key to
+        // seven — comfortably past the three retained slots.
+        for (candidate, face, x) in [
+            (8u64, 8u32, 1.5f64),
+            (9, 9, 3.0),
+            (10, 10, 5.0),
+            (11, 11, 6.0),
+        ] {
+            contacts.push(test_regular_contact(
+                [x, 0.0, 0.0],
+                up,
+                RegularContactRoute {
+                    candidate_id: candidate,
+                    owner_island_id: 1,
+                    coverage_face_id: face,
+                    component_id: 10,
+                    source_kind: RepairRowSourceKind::Generic,
+                },
+                Vec::new(),
+            ));
+        }
+        for point in [[1.6, 0.1, 0.0], [3.1, 0.0, 0.0], [5.5, 0.2, 0.0]] {
+            samples.push(CoverageSample {
+                island_id: 1,
+                face_id: 8,
+                component_id: 10,
+                point_mm: point,
+                area_mm2: 1.0,
+            });
+        }
+
+        let index =
+            GateBatchIndex::build(&contacts, &samples, &demands, &layers, 1.0).expect("index");
+        assert!(
+            index
+                .route_sources
+                .iter()
+                .any(|(_, sources)| sources.len() > NEAREST_WITNESS_SLOTS),
+            "fixture must carry a route wider than the retained slot count"
+        );
+
+        let planned = plan_variant_nearest_routes(
+            &contacts,
+            None,
+            &samples,
+            TEST_KNN_LIMITS,
+            NearestWitnessRetention::RetainWitnesses,
+        )
+        .expect("baseline plan");
+        let mut nearest = vec![f64::INFINITY; samples.len()];
+        let mut witnesses = NearestWitnessTable::seeded(samples.len());
+        fill_variant_nearest(
+            &contacts,
+            None,
+            &samples,
+            &mut nearest,
+            planned,
+            Some(&mut witnesses),
+        )
+        .expect("baseline fill");
+
+        let sample_route = |sample: &CoverageSample| CoverageRoute {
+            island_id: sample.island_id,
+            component_id: sample.component_id,
+        };
+        // The kernel's own answer over an explicit source set: the reference
+        // this lemma is measured against, never a hand-rolled distance.
+        let kernel_nearest = |point: [f64; 3], survivors: &[usize]| -> Option<(usize, u64)> {
+            if survivors.is_empty() {
+                return None;
+            }
+            let points = survivors
+                .iter()
+                .map(|&contact| contacts[contact].position_mm)
+                .collect::<Vec<_>>();
+            let plan = KnnBatchPlan::new(points.len(), 1, 1, TEST_KNN_LIMITS).expect("plan");
+            let cloud = PointCloudIndex::new_for_knn_batch(&points, &plan).expect("index");
+            let answers = cloud.knn_batch_planned(&[point], &plan).expect("query");
+            let row = answers.row_range(0).expect("planned row");
+            let slot = usize::try_from(answers.point_ids[row.start]).expect("slot fits usize");
+            Some((
+                survivors[slot],
+                answers.squared_distances[row.start].to_bits(),
+            ))
+        };
+
+        // Slot 0 is the batch's own answer, before any removal.
+        for (sample_index, sample) in samples.iter().enumerate() {
+            let sources = index.sources_for(sample_route(sample));
+            let row = witnesses.rows[sample_index];
+            let filled = row
+                .iter()
+                .filter(|witness| witness.source_slot != NO_WITNESS)
+                .count();
+            assert_eq!(
+                filled,
+                sources.len().min(NEAREST_WITNESS_SLOTS),
+                "sample {sample_index} retained the wrong number of witnesses"
+            );
+            if filled == 0 {
+                assert!(nearest[sample_index].is_infinite());
+                continue;
+            }
+            assert_eq!(
+                row[0].squared_distance.sqrt().to_bits(),
+                nearest[sample_index].to_bits(),
+                "sample {sample_index}: slot 0 is not the answer the sweep wrote"
+            );
+            assert_eq!(
+                Some((
+                    sources[row[0].source_slot],
+                    row[0].squared_distance.to_bits()
+                )),
+                kernel_nearest(sample.point_mm, sources),
+                "sample {sample_index}: slot 0 disagrees with the kernel over the full source set"
+            );
+        }
+
+        let mut answered_from_last_slot = 0usize;
+        let mut removed_every_server = 0usize;
+        for left in 0..contacts.len() {
+            for right in (left + 1)..contacts.len() {
+                let pair = MergedPair { left, right };
+                for (sample_index, sample) in samples.iter().enumerate() {
+                    let sources = index.sources_for(sample_route(sample));
+                    let survivors = sources
+                        .iter()
+                        .copied()
+                        .filter(|&contact| !pair.contains(contact))
+                        .collect::<Vec<_>>();
+                    let from_witnesses = witnesses.rows[sample_index]
+                        .iter()
+                        .position(|witness| {
+                            witness.source_slot != NO_WITNESS
+                                && !pair.contains(sources[witness.source_slot])
+                        })
+                        .map(|slot| {
+                            let witness = witnesses.rows[sample_index][slot];
+                            (
+                                slot,
+                                sources[witness.source_slot],
+                                witness.squared_distance.to_bits(),
+                            )
+                        });
+                    assert_eq!(
+                        from_witnesses.map(|(_, contact, distance)| (contact, distance)),
+                        kernel_nearest(sample.point_mm, &survivors),
+                        "removing ({left}, {right}) from sample {sample_index}: \
+                         the retained witnesses disagree with the kernel over the survivors"
+                    );
+                    match from_witnesses {
+                        Some((slot, _, _)) if slot + 1 == NEAREST_WITNESS_SLOTS => {
+                            answered_from_last_slot += 1;
+                        }
+                        None if !sources.is_empty() => removed_every_server += 1,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        assert!(
+            answered_from_last_slot > 0,
+            "no case was answered from the last retained slot, so truncation was never tested"
+        );
+        assert!(
+            removed_every_server > 0,
+            "no case removed a route's every server, so the no-survivor arm was never tested"
+        );
     }
 
     /// FU-8c.  The witness-backed unsupported-demand count must agree with the
@@ -6626,14 +7054,20 @@ mod tests {
             },
         ];
         let mut nearest = vec![f64::INFINITY; samples.len()];
-        let planned =
-            plan_variant_nearest_routes(&contacts, None, &samples, TEST_KNN_LIMITS).unwrap();
+        let planned = plan_variant_nearest_routes(
+            &contacts,
+            None,
+            &samples,
+            TEST_KNN_LIMITS,
+            NearestWitnessRetention::RetainWitnesses,
+        )
+        .unwrap();
         assert_eq!(
             planned.measurement_counts(),
             (3, 2, 2, 1, 2, 2),
             "duplicate logical rows remain memberships while each route index deduplicates physical seats"
         );
-        fill_variant_nearest(&contacts, None, &samples, &mut nearest, planned).unwrap();
+        fill_variant_nearest(&contacts, None, &samples, &mut nearest, planned, None).unwrap();
         assert_eq!(nearest[0], 5.0);
         assert_eq!(nearest[1], 2.0);
         assert!(nearest[2].is_infinite());
@@ -6663,11 +7097,16 @@ mod tests {
             area_mm2: 1.0,
         }];
 
-        let planned = plan_route_points_nearest(&points, &samples, TEST_KNN_LIMITS)
-            .expect("duplicate logical rows are one indexed seat");
+        let planned = plan_route_points_nearest(
+            &points,
+            &samples,
+            TEST_KNN_LIMITS,
+            NearestWitnessRetention::RetainWitnesses,
+        )
+        .expect("duplicate logical rows are one indexed seat");
         assert_eq!(planned.measurement_counts(), (2, 2, 1, 1, 1, 1));
         let mut nearest = vec![f64::INFINITY; samples.len()];
-        fill_route_points_nearest(&points, &samples, &mut nearest, planned)
+        fill_route_points_nearest(&points, &samples, &mut nearest, planned, None)
             .expect("the deduplicated index remains valid");
         assert_eq!(nearest, vec![0.0]);
     }
@@ -6699,7 +7138,13 @@ mod tests {
             ..TEST_KNN_LIMITS
         };
         assert!(matches!(
-            plan_variant_nearest_routes(&contacts, None, &samples, refused),
+            plan_variant_nearest_routes(
+                &contacts,
+                None,
+                &samples,
+                refused,
+                NearestWitnessRetention::RetainWitnesses,
+            ),
             Err(SpecializedError::CoverageNearest(_))
         ));
     }
@@ -6740,8 +7185,14 @@ mod tests {
                 area_mm2: 1.0,
             },
         ];
-        let planned = plan_variant_nearest_routes(&contacts, None, &samples, TEST_KNN_LIMITS)
-            .expect("two independent route batches plan");
+        let planned = plan_variant_nearest_routes(
+            &contacts,
+            None,
+            &samples,
+            TEST_KNN_LIMITS,
+            NearestWitnessRetention::RetainWitnesses,
+        )
+        .expect("two independent route batches plan");
         let max_route_peak = planned
             .route_plans
             .iter()
@@ -6793,6 +7244,8 @@ mod tests {
             // Zero for the same reason, added 2026-08-06 (FU-8c).
             batch_index_bytes: 0,
             nearest_bytes: 0,
+            // Zero for the same reason, added 2026-08-06 (FU-8d).
+            nearest_witness_bytes: 0,
             coverage_scratch_bytes: 0,
             coverage_nearest_bytes: logical_peak_bytes,
             coverage_retained_bytes: 0,
@@ -8113,6 +8566,8 @@ mod tests {
             // Zero for the same reason, added 2026-08-06 (FU-8c).
             batch_index_bytes: 0,
             nearest_bytes: 0,
+            // Zero for the same reason, added 2026-08-06 (FU-8d).
+            nearest_witness_bytes: 0,
             coverage_scratch_bytes: 40,
             coverage_nearest_bytes: 0,
             coverage_retained_bytes: 8,
@@ -8164,6 +8619,8 @@ mod tests {
             // Zero for the same reason, added 2026-08-06 (FU-8c).
             batch_index_bytes: 0,
             nearest_bytes: 0,
+            // Zero for the same reason, added 2026-08-06 (FU-8d).
+            nearest_witness_bytes: 0,
             coverage_scratch_bytes: 40,
             coverage_nearest_bytes: 0,
             coverage_retained_bytes: 8,
