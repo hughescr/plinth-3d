@@ -147,9 +147,18 @@ impl SpecializedLimits {
     /// operations against the 429,120-face Weeping Treant's 12,714,828,544), so
     /// a per-face rule would refuse the small model and admit anything on the
     /// large one. What it still refuses is work that is superlinear in the
-    /// batch: the treant's 39,223-proposal merge gate plans 21,755,124,103,146
-    /// operations on a 553,835,949-unit batch — 613× this coefficient — and is
+    /// batch: the treant's 39,223-proposal merge gate planned 21,755,124,103,146
+    /// operations on a 553,835,949-unit batch — 613× this coefficient — and was
     /// refused (FU-8c).
+    ///
+    /// **Corrected 2026-08-06 (FU-8c fixed) — the sentence above is left
+    /// standing, moved into the past tense it now belongs in.** That plan was
+    /// the gate re-evaluating the whole contact set once per merge proposal, and
+    /// the gate no longer does it; see [`GateBatchIndex`]. The same treant merge
+    /// batch is now priced at 554,926,572 routed rows plus 4,618,272,984 face
+    /// rows = 5,173,199,556, inside the 35,445,500,736 this cap materializes for
+    /// that shape. **FU-8c did not change this cap**: the demand came down to
+    /// it, which is what the example is still here to illustrate.
     ///
     /// Every corpus model sits at the floor;
     /// `the_batch_scaled_caps_are_the_flat_floor_for_every_corpus_batch_shape`

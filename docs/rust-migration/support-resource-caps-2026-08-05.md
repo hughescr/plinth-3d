@@ -470,6 +470,36 @@ and several others off their floors. It is opened as **FU-8c** and is algorithm
 work of exactly the FU-8b kind: the proposal loop is a per-item rescan of a whole
 batch standing in for a batched evaluation.
 
+> **FU-8c FIXED 2026-08-06 — dated addendum; the paragraph above is left standing
+> as the finding it was.** The merge gate no longer re-evaluates the entire
+> contact set once per merge proposal, so `gate_resource_plan` no longer prices
+> it that way. A proposal replaces two contacts with one merged seat and leaves
+> every other contact's position and routes verbatim, so it can only move
+> coverage rows whose route key its own pair serves, and can only unseat a demand
+> one of its own pair was witnessing. `GateBatchIndex`
+> (`crates/plinth-support/src/specialized.rs`) builds that proposal-invariant
+> state once per batch; each proposal then re-answers only its own route keys and
+> re-tests each demand once against the merged seat. The plan is repriced to
+> describe that:
+>
+> ```text
+> routed_rows = (samples + demands + 1) x contacts + measured proposal work
+> ```
+>
+> On the treant's merge batch that is 554,926,572 routed rows plus 4,618,272,984
+> face rows = **5,173,199,556**, against the **unchanged** 35,445,500,736. **No
+> cap was raised, lowered or otherwise touched.** The sentence above — that no
+> honest constant admits a plan quadratic in the batch — is still true, and is
+> still the reason none was sought. Equivalence was proved before the hot path
+> was swapped: the predecessor's per-variant sweep is retained as a `#[cfg(test)]`
+> reference and compared row by row with `f64::to_bits` against the delta path on
+> a seven-proposal fixture
+> (`fu8c_proposal_nearest_deltas_reproduce_the_full_sweep_bit_for_bit`).
+>
+> The census transcript above is a **historical** refusal record and is not
+> re-run by this addendum; the treant's post-fix stopping point is recorded in
+> `CURRENT-STATUS.md` under *FU-8c fixed*.
+
 Out of scope and deliberately not touched: `finalize_load_rows` is a correctly
 charged dense contact-by-face nearest scan. Post-fix it costs 134,368 x 1,366 =
 1.8e8 row-contact pairs, not the 1.1e10 the pre-fix row count implied, and it

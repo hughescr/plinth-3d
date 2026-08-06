@@ -990,6 +990,11 @@ the gate's shared distinct-face buffer a term in that bound. See the F7 addendum
 > `Preparation: Specialized(GateOperationLimit { required: 21755124103146, limit: 35445500736 })`,
 > and every corpus scaled-cap row stayed `at_floor=true`. The term is charged because the
 > gate must bound what it holds, not because anything was near a limit.
+>
+> **Note added 2026-08-06 (FU-8c landed):** the refusal line quoted above is the one that
+> held *at `23d929d`*, and it is left standing as the record of that re-run. It moved when
+> FU-8c landed — to `required: 201480535329, limit: 35445500736` — and the seven digests
+> stayed byte-identical across that landing too. See *FU-8c fixed 2026-08-06*.
 
 > **ADDED 2026-08-06 (record fixes F8–F11) — dated addendum; nothing above is rewritten.**
 > A second independent re-verification of this section's landing found four more defects
@@ -1132,6 +1137,109 @@ batch-first violation as (A)/(B)/(C) in a fourth dress.
 which multiplies *every* corpus model's cap by the same factor and takes the Cylinder
 (already at 89.6 % of the floor), `make_raking_blade` and others off their floors — i.e. it
 would admit real quadratics on small models to accommodate one large one.
+
+### FU-8c fixed 2026-08-06 — the proposal factor is gone; the treant's demand fell 108× and still refuses {#fu8c-fixed-2026-08-06}
+
+> **Dated addendum. Everything above this heading is left standing as the finding it was.**
+> The formula block above described the code as it stood at `d82c895`; it no longer
+> describes the code, and the paragraphs below state what replaced it. Nothing above is
+> rewritten.
+
+**What changed.** A merge proposal replaces two contacts with one merged seat and leaves
+every other contact's position and routes verbatim. Two locality facts follow:
+
+- a coverage sample's nearest distance is a minimum over the contacts serving **its own**
+  route key, so a proposal can only move rows whose key its own pair serves. For every
+  other key the variant's source set is bit-identical to the baseline's — same members,
+  same gather order — so the baseline's answer already *is* the variant's answer;
+- a demand is satisfied by **some** contact, so removing two can only unseat it if one of
+  them was a witness, and three retained witnesses per demand answer that without a scan.
+
+`GateBatchIndex` (`crates/plinth-support/src/specialized.rs`) builds that
+proposal-invariant state once per batch. Each proposal then re-answers only its own route
+keys and re-tests each demand once against the merged seat. `gate_resource_plan` is
+repriced to describe the new work:
+
+```text
+routed_rows = (samples + demands + 1) x contacts + measured proposal work
+```
+
+**No cap was changed.** The 35,445,500,736 the treant is measured against is the same
+`gate_operation_limit(405,146, 1,366)` it was measured against before, and no cap code is
+touched by the fix.
+
+**Equivalence was proved before the hot path was swapped.** The predecessor's per-variant
+sweep is retained as a `#[cfg(test)]` reference and compared with the delta path row by row
+using `f64::to_bits` on a seven-proposal fixture
+(`fu8c_proposal_nearest_deltas_reproduce_the_full_sweep_bit_for_bit`), which also asserts
+that every row the reference moves was touched, so a right answer cannot be reached by
+leaving a row alone. `fu8c_witness_demand_counts_reproduce_the_full_sweep` does the same
+for the demand counts, variant 0 included.
+
+**The treant's new stopping point, measured 2026-08-06 at `a3308ec`, reported exactly:**
+
+```
+MODEL  Weeping Treant v1.2  UNREACHABLE  faces=429120
+       max_grid_bytes=219709440  knn_max_work=878837760
+       support: sealed support run failed during Preparation
+CENSUS T0_scaled_cap  Weeping Treant v1.2  kind=specialized_gate_operations
+       floor=2000000000 per_batch_unit=64 rows=405146 columns=1366
+       materialized=35445500736 at_floor=false
+CENSUS T0_scaled_cap  Weeping Treant v1.2  kind=specialized_load_operations
+       floor=2000000000 per_batch_unit=64 rows=130548 columns=1366
+       materialized=11421470912 at_floor=false
+CENSUS T0_stage_error  Weeping Treant v1.2
+       Preparation: Specialized(GateOperationLimit { required: 201480535329, limit: 35445500736 })
+```
+
+- 129 s wall clock at `PLINTH_THREADS=4` (127 s before the fix), peak RSS **2,650,256 KB =
+  2.53 GB**, 35× under the 90 GB kill line. The watchdog never fired. This is a refusal,
+  not an EXCEEDS-TIMEBOX.
+- **It still refuses, at the same gate, and this record does not dress that up.** The
+  demand fell from 21,755,124,103,146 to 201,480,535,329 — **108× less** — but the cap is
+  35,445,500,736, so it is still **5.68× over**. There is still no treant census digest, no
+  routed-contact count and no live-member count.
+
+**Where the residual is, derived from the printed demand.** The four terms of the repriced
+plan on the treant's shape:
+
+```text
+baseline_rows = 406,242 x 1,366                    =         554,926,572
+face_rows     = 39,224 x 117,741                   =       4,618,272,984
+demand_rows   = 39,223 x 1,095                     =          42,949,185
+residual (per-proposal route-local nearest work)   =     196,264,386,588
+                                                     -----------------
+operations                                         =     201,480,535,329   <- the printed demand
+```
+
+The residual is **97.4 % of the demand** and averages 5,003,809 units per proposal. Route
+locality is real and bought 108×, but the treant's coverage samples are concentrated in a
+few very large route keys and its merge proposals sit on them: a perturbed key carrying
+~10² sources and ~10⁴–10⁵ samples costs ~5 × 10⁶ on its own.
+
+The refusal is `gate_resource_plan`'s, not the exact-operations fold's, and that is
+arithmetic rather than assertion: the fold's `unique_face_finalizer_work` term alone is at
+least `face_count x physical_contacts x proposals` = 117,741 × 1,365 × 39,223 ≈ 6.3 × 10¹²,
+so a fold that had run to completion could not have produced 2.0 × 10¹¹. It also means
+**that term is itself superlinear and the plan under-charges it** — the plan charges
+`variants x faces`, the fold charges `variants x faces x contacts`.
+
+**Opened as FU-8d, two parts, both measured above and neither speculative:**
+
+1. **Per-proposal nearest is still `sources x samples` on the perturbed key.** It need not
+   be. Retaining the *three* nearest sources per sample in the baseline sweep answers
+   "nearest among the survivors" for any two-contact removal by inspection, leaving one
+   distance test per touched sample against the merged seat: `sources x samples` becomes
+   `samples` on the perturbed key. That is the same top-`k` argument FU-8c used for the
+   demand witnesses, applied to the nearest.
+2. **`unique_face_finalizer_work` is `variants x faces x contacts` and the plan charges it
+   as `variants x faces`.** The under-charge is why it has never been the refusing term;
+   the superlinearity is why it will be once (1) lands.
+
+The per-variant `assess_coverage` call is a third candidate — it is `O(samples)` per
+variant and is bounded by its own separate `max_coverage_operations` cap rather than by the
+gate plan — but the treant has never reached it, so it is recorded here as **unmeasured**,
+not as a finding.
 
 ### OD-8 delta at this tip — MEASURED ZERO {#fu8b-od8-delta-2026-08-06}
 
@@ -1412,6 +1520,20 @@ Everything else here is non-blocking.
    and PR-4 were written for. The full measurement record, the exact derivation of the
    21,755,124,103,146 demand, the census proof that no geometry moved, and owner ruling R6
    are in *FU-8b resolved; the treant's stopping point moved (2026-08-06)*.
+
+   > **SUPERSEDED 2026-08-06 (FU-8c landed) — dated addendum; the item above is left
+   > standing.** The proposal factor is gone: the merge gate evaluates once per batch and
+   > only route-local deltas per proposal, and `gate_resource_plan` is repriced to describe
+   > that. The treant's demand fell **108×**, from 21,755,124,103,146 to
+   > **201,480,535,329** against the same unchanged 35,445,500,736 cap, in 129 s at 2.53 GB
+   > peak RSS. **It still refuses**, 5.68× over, so this item stays first on the critical
+   > path — but its remaining work is now **FU-8d**, and both parts of it are measured, not
+   > guessed: 97.4 % of the residual is per-proposal `sources x samples` work on the
+   > perturbed route key (fixable by retaining the three nearest sources per sample), and
+   > behind it sits a `variants x faces x contacts` finalizer term the plan charges as
+   > `variants x faces`. Full record, derivation and the exact census transcript:
+   > *FU-8c fixed 2026-08-06 — the proposal factor is gone; the treant's demand fell 108×
+   > and still refuses*.
 
 6. **Model-anchor bundle — PR-7 seating + tournament-bias investigation + tripwire
    retirement.** Treat these three as one unit; landing any alone is incoherent. **Organic
