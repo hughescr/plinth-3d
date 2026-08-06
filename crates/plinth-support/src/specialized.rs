@@ -2001,12 +2001,16 @@ fn working_load_inputs(
         reservations.len(),
         limits.max_load_operations,
     )?;
+    // One distinct-face buffer for the whole accepted-load build; both the
+    // count and the fill below reuse it rather than allocating per contact.
+    let mut face_scratch: Vec<u32> = Vec::new();
     let mut descriptor_work = 0usize;
     let owner_face_count = variant_specialized_owner_face_count(
         contacts,
         None,
         generic.islands(),
         islands,
+        &mut face_scratch,
         &mut descriptor_work,
         limits.max_load_operations,
     )?;
@@ -2058,6 +2062,7 @@ fn working_load_inputs(
         reservations,
         &mut physical,
         &mut specialized_owner_faces,
+        &mut face_scratch,
         &mut fill_work,
         fill_limit,
     )?;
@@ -2855,33 +2860,75 @@ fn gate_resource_plan(
     })
 }
 
+/// Gather one island's face ids into the shared distinct-face scratch.
+///
+/// The whole island is charged in a single bulk add *before* a single id is
+/// copied, so an island that cannot fit inside the remaining budget is refused
+/// without growing the buffer.  The charge is one unit per id, the same unit
+/// the surrounding descriptor scans charge for inspecting one element.
+fn gather_island_faces(
+    scratch: &mut Vec<u32>,
+    island: &SupportIsland,
+    work: &mut usize,
+    limit: usize,
+) -> Result<(), SpecializedError> {
+    charge_load_descriptor_work(work, island.face_ids.len(), limit)?;
+    scratch.extend_from_slice(&island.face_ids);
+    Ok(())
+}
+
+/// Collapse a gathered face-id buffer to its ascending distinct ids in place.
+///
+/// Charging semantics (FU-8b fix A, 2026-08-06).  The meter counts elementary
+/// comparisons, matching every other `charge_load_descriptor_work` site.  The
+/// batch dedup performs at most `n * ceil(log2(n + 1))` comparisons — the
+/// comparison bound for `sort_unstable` — plus one adjacent-pair pass of `n`
+/// for `dedup`, so it charges `n * (ceil(log2(n + 1)) + 1)` in one bulk add
+/// (`gather_island_faces` has already charged the `n` inspections that filled
+/// the buffer).  The predecessor was a repeated-minimum selection sort that
+/// charged one unit per inner comparison, i.e. `n * (distinct + 1)`: quadratic
+/// in the face count.  The emitted values — the count and the ascending
+/// distinct order — are unchanged; only the meter moved.
+fn distinct_faces_in_place(
+    scratch: &mut Vec<u32>,
+    work: &mut usize,
+    limit: usize,
+) -> Result<(), SpecializedError> {
+    let count = scratch.len();
+    // `usize::BITS - leading_zeros` is the significant-bit count, i.e.
+    // `ceil(log2(count + 1))`, and is 0 for an empty gather.
+    let log2_ceiling = usize::try_from(usize::BITS - count.leading_zeros())
+        .map_err(|_| SpecializedError::GateResourceOverflow)?;
+    let comparisons = log2_ceiling
+        .checked_add(1)
+        .and_then(|per_element| count.checked_mul(per_element))
+        .ok_or(SpecializedError::GateResourceOverflow)?;
+    charge_load_descriptor_work(work, comparisons, limit)?;
+    scratch.sort_unstable();
+    scratch.dedup();
+    Ok(())
+}
+
+/// Count the distinct face ids owned by `islands`.
+///
+/// `scratch` is a caller-owned buffer reused across every distinct-face gather
+/// in one gate batch, so no gather allocates per island or per contact.  Its
+/// capacity is bounded by the largest single gather: at most one `u32` per
+/// entry in the islands' own `face_ids`, i.e. no more than the face-id arrays
+/// the caller already holds (and, independently, at most `limit` entries, since
+/// every gathered id is charged before it is copied).
 fn unique_island_face_count(
     islands: &[SupportIsland],
+    scratch: &mut Vec<u32>,
     work: &mut usize,
     limit: usize,
 ) -> Result<usize, SpecializedError> {
-    let mut count = 0usize;
-    let mut last = None;
-    loop {
-        let mut next = None;
-        for island in islands {
-            for &face_id in &island.face_ids {
-                charge_load_descriptor_work(work, 1, limit)?;
-                if last.is_none_or(|last| face_id > last) && next.is_none_or(|next| face_id < next)
-                {
-                    next = Some(face_id);
-                }
-            }
-        }
-        let Some(face_id) = next else {
-            break;
-        };
-        count = count
-            .checked_add(1)
-            .ok_or(SpecializedError::GateResourceOverflow)?;
-        last = Some(face_id);
+    scratch.clear();
+    for island in islands {
+        gather_island_faces(scratch, island, work, limit)?;
     }
-    Ok(count)
+    distinct_faces_in_place(scratch, work, limit)?;
+    Ok(scratch.len())
 }
 
 fn variant_operation_count(
@@ -2981,9 +3028,13 @@ fn evaluate_gate_batch(
     )?;
     debug_assert_eq!(preflight_telemetry.payload_allocations, 0);
     debug_assert_eq!(preflight_telemetry.payload_operations, 0);
+    // One distinct-face buffer for the whole gate batch: every face gather
+    // below reuses this allocation instead of building a set per contact.
+    let mut face_scratch: Vec<u32> = Vec::new();
     let mut face_count_operations = 0usize;
     let face_count = unique_island_face_count(
         islands,
+        &mut face_scratch,
         &mut face_count_operations,
         limits.max_gate_operations,
     )?;
@@ -3005,6 +3056,7 @@ fn evaluate_gate_batch(
             proposal,
             generic.islands(),
             islands,
+            &mut face_scratch,
             &mut descriptor_operations,
             limits.max_gate_operations,
         )?;
@@ -3096,6 +3148,7 @@ fn evaluate_gate_batch(
                                 proposal,
                                 generic.islands(),
                                 islands,
+                                &mut face_scratch,
                                 &mut work,
                                 usize::MAX,
                             )?)
@@ -3141,6 +3194,7 @@ fn evaluate_gate_batch(
                             proposal,
                             generic.islands(),
                             islands,
+                            &mut face_scratch,
                             &mut work,
                             usize::MAX,
                         )?;
@@ -3226,6 +3280,7 @@ fn evaluate_gate_batch(
                         reservations,
                         &mut physical_matrix,
                         &mut owner_face_matrix,
+                        &mut face_scratch,
                         &mut append_work,
                         fill_operation_limit,
                     )?;
@@ -3535,6 +3590,9 @@ fn whole_gate_route_preflight(
         .len()
         .checked_mul(std::mem::size_of::<usize>())
         .ok_or(SpecializedError::GateResourceOverflow)?;
+    // One distinct-face buffer for the whole preflight; the per-variant face
+    // counts below reuse it rather than allocating per contact.
+    let mut face_scratch: Vec<u32> = Vec::new();
     traverse_whole_gate_windows(
         gate_plan.variants,
         limits.max_gate_window_variants,
@@ -3560,6 +3618,7 @@ fn whole_gate_route_preflight(
                             proposal,
                             generic.islands(),
                             islands,
+                            &mut face_scratch,
                             &mut work,
                             usize::MAX,
                         )?)
@@ -3601,6 +3660,7 @@ fn whole_gate_route_preflight(
                         proposal,
                         generic.islands(),
                         islands,
+                        &mut face_scratch,
                         &mut work,
                         usize::MAX,
                     )?;
@@ -4055,6 +4115,7 @@ fn visit_specialized_owner_faces(
     parts: ContactParts<'_>,
     generic_islands: &[SupportIsland],
     islands: &[SupportIsland],
+    scratch: &mut Vec<u32>,
     work: &mut usize,
     limit: usize,
     visit: impl FnMut(u32) -> Result<(), SpecializedError>,
@@ -4062,49 +4123,51 @@ fn visit_specialized_owner_faces(
     if let Some(owner) = generic_owner_for_parts(parts, generic_islands, work, limit)? {
         return Ok(Some(owner));
     }
-    visit_served_owner_faces(parts, islands, work, limit, visit)?;
+    visit_served_owner_faces(parts, islands, scratch, work, limit, visit)?;
     Ok(None)
 }
 
+/// Visit the ascending distinct face ids of every island `parts` serves.
+///
+/// The emitted sequence is exactly `BTreeSet` order over the served islands'
+/// face ids, which is what keeps the load rows canonical even when island face
+/// ranges interleave.  It is produced by gathering each served island's ids
+/// once and collapsing the gather in one batch, so each island is tested for
+/// service exactly once and each id is inspected exactly once.  Its predecessor
+/// re-scanned every island — service test included — once per emitted face, a
+/// selection sort quadratic in the served face count (FU-8b defect A).
+///
+/// `scratch` is a caller-owned buffer reused across contacts and variants; see
+/// [`unique_island_face_count`] for its bound.
 fn visit_served_owner_faces(
     parts: ContactParts<'_>,
     islands: &[SupportIsland],
+    scratch: &mut Vec<u32>,
     work: &mut usize,
     limit: usize,
     mut visit: impl FnMut(u32) -> Result<(), SpecializedError>,
 ) -> Result<(), SpecializedError> {
-    // Match BTreeSet iteration without allocating it: repeatedly select the
-    // smallest served face greater than the last emitted face. This keeps the
-    // load rows canonical even when island face ranges interleave.
-    let mut last = None;
-    loop {
-        let mut next = None;
-        for island in islands {
-            if !parts_serves_owner(parts, island.id, work, limit)? {
-                continue;
-            }
-            for &face_id in &island.face_ids {
-                charge_load_descriptor_work(work, 1, limit)?;
-                if last.is_none_or(|last| face_id > last) && next.is_none_or(|next| face_id < next)
-                {
-                    next = Some(face_id);
-                }
-            }
+    scratch.clear();
+    for island in islands {
+        if !parts_serves_owner(parts, island.id, work, limit)? {
+            continue;
         }
-        let Some(face_id) = next else {
-            break;
-        };
+        gather_island_faces(scratch, island, work, limit)?;
+    }
+    distinct_faces_in_place(scratch, work, limit)?;
+    for &face_id in scratch.iter() {
         visit(face_id)?;
-        last = Some(face_id);
     }
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn variant_specialized_owner_face_count(
     contacts: &[WorkingContact],
     proposal: Option<&MergeProposal>,
     generic_islands: &[SupportIsland],
     islands: &[SupportIsland],
+    scratch: &mut Vec<u32>,
     work: &mut usize,
     limit: usize,
 ) -> Result<usize, SpecializedError> {
@@ -4117,6 +4180,7 @@ fn variant_specialized_owner_face_count(
             ContactParts::new(contact, None),
             generic_islands,
             islands,
+            scratch,
             work,
             limit,
             |_| {
@@ -4132,6 +4196,7 @@ fn variant_specialized_owner_face_count(
             ContactParts::new(&contacts[proposal.left], Some(&contacts[proposal.right])),
             generic_islands,
             islands,
+            scratch,
             work,
             limit,
             |_| {
@@ -4154,6 +4219,7 @@ fn append_variant_load_inputs(
     reservations: &[SpecializedOwnerReservation],
     physical: &mut Vec<PhysicalContact>,
     specialized_owner_faces: &mut Vec<(u32, u32)>,
+    scratch: &mut Vec<u32>,
     work: &mut usize,
     limit: usize,
 ) -> Result<(), SpecializedError> {
@@ -4186,7 +4252,7 @@ fn append_variant_load_inputs(
                         u32::try_from(contact_id).map_err(|_| SpecializedError::OwnerIdOverflow)?,
                     )
                     .ok_or(SpecializedError::OwnerIdOverflow)?;
-                visit_served_owner_faces(parts, islands, work, limit, |face_id| {
+                visit_served_owner_faces(parts, islands, scratch, work, limit, |face_id| {
                     specialized_owner_faces.push((specialized_owner, face_id));
                     Ok(())
                 })?;
@@ -6316,11 +6382,263 @@ mod tests {
             face_ids: (0..10_000).collect(),
         }];
         let mut work = 0usize;
+        let mut scratch = Vec::new();
+        // FU-8b fix A re-pin (2026-08-06): `required` was 11, now 10_001.
+        // The old selection sort charged one unit per inner comparison, so it
+        // tripped the cap eleven comparisons into its first pass (one demand
+        // service test plus ten face comparisons).  The batch gather charges
+        // the island's whole face count in one add *before* copying any id, so
+        // the same refusal now states the real demand (1 service test + 10_000
+        // faces) instead of the point at which a quadratic scan happened to
+        // cross the line.  The refusal is still allocation-free: `scratch` is
+        // untouched, which the assertion below pins.
         assert_eq!(
-            variant_specialized_owner_face_count(&contacts, None, &[], &islands, &mut work, 10,),
+            variant_specialized_owner_face_count(
+                &contacts,
+                None,
+                &[],
+                &islands,
+                &mut scratch,
+                &mut work,
+                10,
+            ),
             Err(SpecializedError::GateOperationLimit {
-                required: 11,
+                required: 10_001,
                 limit: 10,
+            })
+        );
+        assert!(scratch.is_empty());
+    }
+
+    /// The pre-FU-8b repeated-minimum selection sort, kept as a test-only
+    /// oracle.  Fix A is allowed to change what the work meter charges; it is
+    /// not allowed to change what the gatherers emit, so the fixtures below are
+    /// checked against the algorithm that was replaced rather than against
+    /// hand-written expectations.
+    fn selection_sort_distinct_faces(islands: &[SupportIsland], served: &[bool]) -> Vec<u32> {
+        let mut emitted = Vec::new();
+        let mut last: Option<u32> = None;
+        loop {
+            let mut next: Option<u32> = None;
+            for (island, serves) in islands.iter().zip(served) {
+                if !serves {
+                    continue;
+                }
+                for &face_id in &island.face_ids {
+                    if last.is_none_or(|last| face_id > last)
+                        && next.is_none_or(|next| face_id < next)
+                    {
+                        next = Some(face_id);
+                    }
+                }
+            }
+            let Some(face_id) = next else {
+                break;
+            };
+            emitted.push(face_id);
+            last = Some(face_id);
+        }
+        emitted
+    }
+
+    fn contact_routed_to(owners: &[u32]) -> WorkingContact {
+        let route = |owner: u32| RegularContactRoute {
+            candidate_id: u64::from(owner),
+            owner_island_id: owner,
+            coverage_face_id: 0,
+            component_id: 0,
+            source_kind: RepairRowSourceKind::Generic,
+        };
+        let mut contact = test_regular_contact(
+            [0.0, 0.0, 0.1],
+            [0.0, 0.0, -1.0],
+            route(owners[0]),
+            Vec::new(),
+        );
+        contact.regular_routes = owners.iter().copied().map(route).collect();
+        contact
+    }
+
+    /// `(name, islands, island ids the probe contact routes to)`.
+    fn distinct_face_fixtures() -> Vec<(&'static str, Vec<SupportIsland>, Vec<u32>)> {
+        vec![
+            ("no islands at all", Vec::new(), vec![0]),
+            (
+                "one island, one face",
+                vec![SupportIsland {
+                    id: 0,
+                    face_ids: vec![7],
+                }],
+                vec![0],
+            ),
+            (
+                "duplicates inside one island",
+                vec![SupportIsland {
+                    id: 0,
+                    face_ids: vec![5, 5, 5, 2, 2, 9],
+                }],
+                vec![0],
+            ),
+            (
+                "unsorted interleaved island ranges",
+                vec![
+                    SupportIsland {
+                        id: 0,
+                        face_ids: vec![9, 3, 7],
+                    },
+                    SupportIsland {
+                        id: 1,
+                        face_ids: vec![8, 1, 4],
+                    },
+                ],
+                vec![0, 1],
+            ),
+            (
+                "the same face shared by two islands",
+                vec![
+                    SupportIsland {
+                        id: 0,
+                        face_ids: vec![4, 2],
+                    },
+                    SupportIsland {
+                        id: 1,
+                        face_ids: vec![2, 4, 6],
+                    },
+                ],
+                vec![0, 1],
+            ),
+            (
+                "an empty island among served islands",
+                vec![
+                    SupportIsland {
+                        id: 0,
+                        face_ids: Vec::new(),
+                    },
+                    SupportIsland {
+                        id: 1,
+                        face_ids: vec![3, 1],
+                    },
+                ],
+                vec![0, 1],
+            ),
+            (
+                "an unserved island must contribute nothing",
+                vec![
+                    SupportIsland {
+                        id: 0,
+                        face_ids: vec![1, 2],
+                    },
+                    SupportIsland {
+                        id: 1,
+                        face_ids: vec![100, 101],
+                    },
+                ],
+                vec![0],
+            ),
+            (
+                "a fully descending run",
+                vec![SupportIsland {
+                    id: 0,
+                    face_ids: (0..64u32).rev().collect(),
+                }],
+                vec![0],
+            ),
+            (
+                "a wide island that is mostly duplicates",
+                vec![SupportIsland {
+                    id: 0,
+                    face_ids: (0..1_000u32).map(|index| index % 250).collect(),
+                }],
+                vec![0],
+            ),
+        ]
+    }
+
+    #[test]
+    fn batched_distinct_face_gathers_emit_exactly_what_the_selection_sort_emitted() {
+        // One buffer across every fixture, so buffer reuse between unrelated
+        // gathers is exercised too: a stale id would show up as a mismatch.
+        let mut scratch = Vec::new();
+        for (name, islands, routed) in distinct_face_fixtures() {
+            let all_served = vec![true; islands.len()];
+            let expected_all = selection_sort_distinct_faces(&islands, &all_served);
+            let mut work = 0usize;
+            let count =
+                unique_island_face_count(&islands, &mut scratch, &mut work, usize::MAX).unwrap();
+            assert_eq!(count, expected_all.len(), "{name}: distinct face count");
+            assert_eq!(
+                scratch, expected_all,
+                "{name}: buffer left in ascending distinct order"
+            );
+
+            let contact = contact_routed_to(&routed);
+            let parts = ContactParts::new(&contact, None);
+            let served = islands
+                .iter()
+                .map(|island| routed.contains(&island.id))
+                .collect::<Vec<_>>();
+            let expected_served = selection_sort_distinct_faces(&islands, &served);
+            let mut emitted = Vec::new();
+            let mut served_work = 0usize;
+            visit_served_owner_faces(
+                parts,
+                &islands,
+                &mut scratch,
+                &mut served_work,
+                usize::MAX,
+                |face_id| {
+                    emitted.push(face_id);
+                    Ok(())
+                },
+            )
+            .unwrap();
+            assert_eq!(emitted, expected_served, "{name}: served face visit order");
+        }
+    }
+
+    #[test]
+    fn the_batched_distinct_face_charge_is_linearithmic_where_the_sort_was_quadratic() {
+        // 1_024 distinct ids in descending order: the shape that made the
+        // Weeping Treant refuse at limit+1 (FU-8b defect A).
+        let islands = [SupportIsland {
+            id: 0,
+            face_ids: (0..1_024u32).rev().collect(),
+        }];
+        let mut scratch = Vec::new();
+        let mut work = 0usize;
+        let count =
+            unique_island_face_count(&islands, &mut scratch, &mut work, usize::MAX).unwrap();
+        assert_eq!(count, 1_024);
+        // Gather charges 1_024 inspections; the batch dedup charges
+        // 1_024 * (ceil(log2(1_025)) + 1) = 1_024 * (11 + 1) = 12_288.
+        assert_eq!(work, 1_024 + 12_288);
+        // The selection sort charged one unit per inner comparison across
+        // `distinct + 1` passes over every id.
+        const SELECTION_SORT_CHARGE: usize = 1_024 * (1_024 + 1);
+        assert!(work * 78 < SELECTION_SORT_CHARGE);
+    }
+
+    #[test]
+    fn the_batched_distinct_face_charge_accepts_the_cap_and_refuses_cap_minus_one() {
+        let islands = [SupportIsland {
+            id: 0,
+            face_ids: vec![4, 2, 2, 9],
+        }];
+        // Gather 4, then dedup 4 * (ceil(log2(5)) + 1) = 4 * (3 + 1) = 16.
+        const EXACT: usize = 4 + 16;
+        let mut scratch = Vec::new();
+        let mut work = 0usize;
+        assert_eq!(
+            unique_island_face_count(&islands, &mut scratch, &mut work, EXACT),
+            Ok(3)
+        );
+        assert_eq!(work, EXACT);
+        let mut work = 0usize;
+        assert_eq!(
+            unique_island_face_count(&islands, &mut scratch, &mut work, EXACT - 1),
+            Err(SpecializedError::GateOperationLimit {
+                required: EXACT,
+                limit: EXACT - 1,
             })
         );
     }
@@ -6346,6 +6664,7 @@ mod tests {
 
         let mut physical = Vec::new();
         let mut owner_faces = Vec::new();
+        let mut scratch = Vec::new();
         let mut work = 0usize;
         assert_eq!(
             append_variant_load_inputs(
@@ -6356,6 +6675,7 @@ mod tests {
                 &reservations,
                 &mut physical,
                 &mut owner_faces,
+                &mut scratch,
                 &mut work,
                 reservations.len() - 1,
             ),
@@ -6376,6 +6696,7 @@ mod tests {
             &reservations,
             &mut physical,
             &mut owner_faces,
+            &mut scratch,
             &mut work,
             reservations.len(),
         )
@@ -6392,6 +6713,7 @@ mod tests {
                 &reservations[..1],
                 &mut physical,
                 &mut owner_faces,
+                &mut scratch,
                 &mut work,
                 0,
             ),
@@ -6485,11 +6807,13 @@ mod tests {
             face_ids: vec![3],
         }];
         let mut work = 0usize;
+        let mut scratch = Vec::new();
         let owner_faces = variant_specialized_owner_face_count(
             &contacts,
             None,
             &[],
             &islands,
+            &mut scratch,
             &mut work,
             usize::MAX,
         )
@@ -6505,6 +6829,7 @@ mod tests {
             &[],
             &mut physical,
             &mut specialized_owner_faces,
+            &mut scratch,
             &mut fill_work,
             usize::MAX,
         )
