@@ -2432,6 +2432,22 @@ impl GroupedOwnerFaces {
     fn owner_entry_count(&self) -> usize {
         self.entries.len()
     }
+
+    /// Group `group`'s face id.  Ascending in `group`.
+    fn face(&self, group: usize) -> u32 {
+        self.entries[self.starts[group]].0
+    }
+
+    /// Group `group`'s ascending distinct owner ids.
+    fn owners(&self, group: usize) -> impl Iterator<Item = u32> + '_ {
+        self.entries[self.starts[group]..self.starts[group + 1]]
+            .iter()
+            .map(|&(_, owner_id)| owner_id)
+    }
+
+    fn group_len(&self, group: usize) -> usize {
+        self.starts[group + 1] - self.starts[group]
+    }
 }
 
 /// What the specialized extension contributes to the load resource plan.
@@ -2523,19 +2539,38 @@ pub(crate) fn specialized_load_resource_plan(
         .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
     let mut resource =
         load_resource_plan_from_counts(row_count, owner_count, contact_count, retained_bytes)?;
+    // What `extend_load_eligibility` costs on top of the finalizer itself,
+    // restated for the batched builder (FU-8b defect C).  The meter counts
+    // elementary comparisons, the same unit the terms above count.
+    //
+    //   pairs * (ceil(log2(pairs + 1)) + 4)
+    //       the grouping: one gather pass, `sort_unstable`'s comparison bound,
+    //       one `dedup` pass, one group-boundary pass, one range-check pass.
+    //   base * (ceil(log2(base + 1)) + 2)
+    //       ordering the base rows by face id, then walking them in the merge.
+    //   faces
+    //       walking the groups once to emit the rows no base row covers.
+    //
+    // Its predecessor charged `pairs^2 + base * pairs` for the rescans it
+    // really did: 5.71e13 + 3.24e12 on the Weeping Treant, which is why that
+    // stage was measured at sixteen hours.  This is linearithmic where that
+    // was quadratic — larger than the old charge only when `pairs` is under a
+    // handful, and about 2.2e8 where the old charge was 6.0e13.
+    let base_count = plan.load_eligibility.len();
+    let pair_log = usize::BITS as usize - specialized_owner_face_count.leading_zeros() as usize;
+    let base_log = usize::BITS as usize - base_count.leading_zeros() as usize;
+    let extension = specialized_owner_face_count
+        .checked_mul(pair_log.saturating_add(4))
+        .and_then(|work| {
+            base_count
+                .checked_mul(base_log.saturating_add(2))
+                .and_then(|base_work| work.checked_add(base_work))
+        })
+        .and_then(|work| work.checked_add(specialized_face_count))
+        .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
     resource.operations = resource
         .operations
-        .checked_add(
-            specialized_owner_face_count
-                .checked_mul(specialized_owner_face_count)
-                .ok_or(GenericPerceptionError::LoadResourceOverflow)?,
-        )
-        .and_then(|work| {
-            plan.load_eligibility
-                .len()
-                .checked_mul(specialized_owner_face_count)
-                .and_then(|extension| work.checked_add(extension))
-        })
+        .checked_add(extension)
         .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
     Ok(resource)
 }
@@ -2582,38 +2617,154 @@ pub(crate) fn finalize_specialized_load_partition(
             limit: limits.max_operations,
         });
     }
-    let mut extended =
-        Vec::with_capacity(plan.load_eligibility.len() + specialized_owner_faces.len());
-    for base in &plan.load_eligibility {
+    let extended = extend_load_eligibility(
+        &plan.load_eligibility,
+        mesh.tris().len(),
+        surface,
+        &grouped,
+        specialized_owner_faces,
+    )?;
+    finalize_load_rows(plan, mesh, &extended, contacts, limits)
+}
+
+/// Merge the specialized owners into the generic load authority's rows.
+///
+/// The result is one row per distinct face of `base` and the pairs, ascending
+/// by face id, each carrying the ascending distinct union of its generic and
+/// specialized owners.  A face that `base` already knows keeps `base`'s
+/// centroid and area; a face only the pairs reach takes them from `surface`.
+///
+/// FU-8b defect (C).  The predecessor rescanned the whole pair list twice for
+/// every base row (once to size the row's owner vector, once to fill it) and,
+/// for every pair, once more over `base` and once more over the pairs already
+/// visited — about 6e13 scalar comparisons on the Weeping Treant, single
+/// threaded, and charged by no cap, which is the 16-hour hang the instrumented
+/// caps study found with 4,127 of 4,127 stack samples inside this function.
+/// It now gathers once — `grouped` is the single sort the caller already paid
+/// for — and scatters once, in one linear merge over the ascending face ids.
+fn extend_load_eligibility(
+    base: &[LoadEligibility],
+    mesh_face_count: usize,
+    surface: &NativeSurface,
+    grouped: &GroupedOwnerFaces,
+    specialized_owner_faces: &[(u32, u32)],
+) -> Result<Vec<LoadEligibility>, GenericPerceptionError> {
+    // Range-check every pair up front, in the order the pairs were supplied,
+    // so the face id this reports is the one the per-pair scan reported.  The
+    // row build below cannot fail, so hoisting the check changes nothing but
+    // the number of times the pair list is walked.
+    for &(_, face_id) in specialized_owner_faces {
+        if face_id as usize >= mesh_face_count {
+            return Err(GenericPerceptionError::SpecializedFaceOutOfRange { face_id });
+        }
+    }
+
+    // Join the base rows to the groups in one merge over ascending face ids.
+    // `base` is built by `build_load_eligibility` from a `BTreeMap` and is
+    // already ascending, but nothing here depends on that: the merge walks an
+    // explicit order, and duplicate base faces all bind to the same group,
+    // exactly as the per-row filter they replace did.
+    let group_count = grouped.face_count();
+    let mut base_order = (0..base.len()).collect::<Vec<_>>();
+    base_order.sort_by_key(|&index| base[index].face_id);
+    let mut base_group = vec![usize::MAX; base.len()];
+    let mut group_is_base_face = vec![false; group_count];
+    let mut group = 0usize;
+    for &index in &base_order {
+        let face_id = base[index].face_id;
+        while group < group_count && grouped.face(group) < face_id {
+            group += 1;
+        }
+        if group < group_count && grouped.face(group) == face_id {
+            base_group[index] = group;
+            group_is_base_face[group] = true;
+        }
+    }
+
+    let mut extended = Vec::with_capacity(base.len() + group_count);
+    for (index, row) in base.iter().enumerate() {
+        let specialized = base_group[index];
+        let addition_count = if specialized == usize::MAX {
+            0
+        } else {
+            grouped.group_len(specialized)
+        };
+        let mut owners = Vec::with_capacity(row.eligible_owners.len() + addition_count);
+        owners.extend(row.eligible_owners.iter().copied());
+        if specialized != usize::MAX {
+            owners.extend(grouped.owners(specialized).map(LoadOwner::Specialized));
+        }
+        owners.sort_unstable();
+        owners.dedup();
+        extended.push(LoadEligibility {
+            face_id: row.face_id,
+            eligible_owners: owners,
+            centroid_mm: row.centroid_mm,
+            area_mm2: row.area_mm2,
+        });
+    }
+    for (group, is_base_face) in group_is_base_face.iter().enumerate() {
+        if *is_base_face {
+            continue;
+        }
+        let face_id = grouped.face(group);
+        let mut owners = Vec::with_capacity(grouped.group_len(group));
+        owners.extend(grouped.owners(group).map(LoadOwner::Specialized));
+        owners.sort_unstable();
+        owners.dedup();
+        extended.push(LoadEligibility {
+            face_id,
+            eligible_owners: owners,
+            centroid_mm: surface.geometry().centroids()[face_id as usize],
+            area_mm2: surface.geometry().areas()[face_id as usize],
+        });
+    }
+    // Still a stable sort by face id: the appended rows carry faces `base`
+    // does not, so only base's own order among equal face ids can survive it,
+    // and that is the order the predecessor preserved too.
+    extended.sort_by_key(|eligibility| eligibility.face_id);
+    Ok(extended)
+}
+
+/// The FU-8b defect (C) algorithm, kept verbatim as the equivalence oracle for
+/// [`extend_load_eligibility`].  It is quadratic by construction — that is the
+/// defect — so it is only ever run against the synthetic fixtures in
+/// `specialized_extension_matches_the_rescanning_algorithm_it_replaced`.
+#[cfg(test)]
+fn reference_extend_load_eligibility(
+    base: &[LoadEligibility],
+    mesh_face_count: usize,
+    surface: &NativeSurface,
+    specialized_owner_faces: &[(u32, u32)],
+) -> Result<Vec<LoadEligibility>, GenericPerceptionError> {
+    let mut extended = Vec::with_capacity(base.len() + specialized_owner_faces.len());
+    for base_row in base {
         let additions = specialized_owner_faces
             .iter()
-            .filter(|(_, face_id)| *face_id == base.face_id)
+            .filter(|(_, face_id)| *face_id == base_row.face_id)
             .count();
-        let mut owners = Vec::with_capacity(base.eligible_owners.len() + additions);
-        owners.extend(base.eligible_owners.iter().copied());
+        let mut owners = Vec::with_capacity(base_row.eligible_owners.len() + additions);
+        owners.extend(base_row.eligible_owners.iter().copied());
         owners.extend(
             specialized_owner_faces
                 .iter()
-                .filter(|(_, face_id)| *face_id == base.face_id)
+                .filter(|(_, face_id)| *face_id == base_row.face_id)
                 .map(|(owner_id, _)| LoadOwner::Specialized(*owner_id)),
         );
         owners.sort_unstable();
         owners.dedup();
         extended.push(LoadEligibility {
-            face_id: base.face_id,
+            face_id: base_row.face_id,
             eligible_owners: owners,
-            centroid_mm: base.centroid_mm,
-            area_mm2: base.area_mm2,
+            centroid_mm: base_row.centroid_mm,
+            area_mm2: base_row.area_mm2,
         });
     }
     for (pair_index, &(_, face_id)) in specialized_owner_faces.iter().enumerate() {
-        if face_id as usize >= mesh.tris().len() {
+        if face_id as usize >= mesh_face_count {
             return Err(GenericPerceptionError::SpecializedFaceOutOfRange { face_id });
         }
-        if plan
-            .load_eligibility
-            .iter()
-            .any(|row| row.face_id == face_id)
+        if base.iter().any(|row| row.face_id == face_id)
             || specialized_owner_faces[..pair_index]
                 .iter()
                 .any(|(_, earlier_face)| *earlier_face == face_id)
@@ -2641,7 +2792,7 @@ pub(crate) fn finalize_specialized_load_partition(
         });
     }
     extended.sort_by_key(|eligibility| eligibility.face_id);
-    finalize_load_rows(plan, mesh, &extended, contacts, limits)
+    Ok(extended)
 }
 
 /// Exact live `placement.tip_radius_mm` plus `verify.load_report` predicate.
@@ -3741,6 +3892,105 @@ mod tests {
         assert!(partition.rows().len() < pairs.len());
         // Every pair face reached a row, so the collapse dropped no face.
         assert!((0..FACES).all(|face_id| faces.contains(&face_id)));
+    }
+
+    /// FU-8b defect (C).  The extended-eligibility builder used to rescan the
+    /// whole pair list twice per base row, and then, per pair, once over the
+    /// base rows and once over the pairs already visited — about 6e13 scalar
+    /// comparisons on the Weeping Treant, uncharged by any cap, which is the
+    /// 16-hour hang the caps study sampled.  Its replacement gathers once and
+    /// scatters once.  The rows it emits must be identical, not merely
+    /// equivalent-looking, so this drives both against the same fixtures and
+    /// compares the whole `Vec`, `Err` included.
+    #[test]
+    fn specialized_extension_matches_the_rescanning_algorithm_it_replaced() {
+        let mesh = plinth_mesh::make_box_default().unwrap();
+        let delicacy = vec![0.0; mesh.tris().len()];
+        let surface = build_surface(&mesh, &perception_config(&delicacy)).unwrap();
+        let faces = mesh.tris().len();
+        assert!(faces >= 12, "fixture needs faces to spread the cases over");
+
+        // Base centroids and areas are deliberately unlike the surface's own,
+        // so a row that silently took its geometry from the wrong side shows
+        // up as a mismatch rather than a coincidence.
+        let base_row = |face_id: u32, owners: Vec<LoadOwner>| LoadEligibility {
+            face_id,
+            eligible_owners: owners,
+            centroid_mm: [f64::from(face_id), -1.0, 0.25],
+            area_mm2: f64::from(face_id) + 0.5,
+        };
+        let island = LoadOwner::GenericIsland;
+        let bases: Vec<Vec<LoadEligibility>> = vec![
+            Vec::new(),
+            vec![base_row(0, vec![island(0)])],
+            vec![
+                base_row(0, vec![island(0), island(1)]),
+                base_row(2, vec![island(1)]),
+                base_row(5, vec![island(3), LoadOwner::Specialized(7)]),
+                base_row(9, vec![island(0)]),
+            ],
+            // Two rows for one face: legal for this function, and the only
+            // shape where the final sort's stability is observable.
+            vec![
+                base_row(4, vec![island(0)]),
+                base_row(4, vec![island(1)]),
+                base_row(1, vec![island(2)]),
+            ],
+        ];
+        let pair_sets: Vec<Vec<(u32, u32)>> = vec![
+            Vec::new(),
+            // Every pair lands on a base face.
+            vec![(3, 0), (4, 2), (1, 0)],
+            // No pair lands on a base face.
+            vec![(0, 11), (1, 7), (2, 11), (0, 7)],
+            // Mixed, out of order, one owner serving several faces and one
+            // face served by several owners, plus an exact duplicate pair.
+            vec![
+                (6, 9),
+                (2, 11),
+                (6, 5),
+                (0, 0),
+                (6, 11),
+                (2, 11),
+                (1, 4),
+                (9, 2),
+                (0, 8),
+            ],
+            // One face, many owners: the treant's shape in miniature.
+            (0..32u32).map(|owner| (owner, 6)).collect(),
+        ];
+
+        for base in &bases {
+            for pairs in &pair_sets {
+                let grouped = GroupedOwnerFaces::from_pairs(pairs);
+                let expected =
+                    reference_extend_load_eligibility(base, faces, &surface, pairs).unwrap();
+                let actual =
+                    extend_load_eligibility(base, faces, &surface, &grouped, pairs).unwrap();
+                assert_eq!(actual, expected, "base {base:?} pairs {pairs:?}");
+                // The rows are one per distinct face, which is what defect (B)
+                // sized the plan for.
+                assert!(actual.len() <= base.len() + grouped.face_count());
+            }
+        }
+
+        // An out-of-range face refuses identically, naming the same face: the
+        // first offending pair in the order the pairs were supplied.
+        let out_of_range = vec![
+            (0, 2),
+            (1, u32::try_from(faces).unwrap() + 3),
+            (2, u32::try_from(faces).unwrap()),
+        ];
+        let grouped = GroupedOwnerFaces::from_pairs(&out_of_range);
+        let expected = reference_extend_load_eligibility(&bases[2], faces, &surface, &out_of_range);
+        let actual = extend_load_eligibility(&bases[2], faces, &surface, &grouped, &out_of_range);
+        assert_eq!(
+            expected,
+            Err(GenericPerceptionError::SpecializedFaceOutOfRange {
+                face_id: u32::try_from(faces).unwrap() + 3,
+            })
+        );
+        assert_eq!(actual, expected);
     }
 
     #[test]
