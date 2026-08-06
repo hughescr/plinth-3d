@@ -4,6 +4,42 @@ Durable handoff recorded 2026-08-03; updated after the 2026-08-04 integration pa
 file distinguishes integrated work from reviewed-but-branch-only work and from work still
 awaiting review. A review result is not evidence that a commit has been merged.
 
+## 2026-08-05 — the line of record moved to `develop`
+
+Everything below this section was written while the engine line lived on a topic branch in
+a temporary worktree. That is no longer true, and where the older text names that branch or
+that path as "the integration authority", read it as history rather than as instruction.
+
+**The single line of record is now `develop` in the definitive checkout
+`/Users/craig/code/hughescr/dnd-campaigns/plinth-3d`.** The repository follows git flow:
+`main` and `develop` are the long-lived branches, `main` is release-only and moves only when
+the owner releases `develop` into it, and every new piece of work starts as a `feature/*`
+branch cut from `develop` and merges back into `develop` with `--no-ff`.
+
+`codex/rust-pipeline-integration` was merged into `develop` in full — a true two-parent
+merge of its tip `cef27a1`, no squash and no rebase, so the whole engine arc including the
+caps landing (`3d91390`, `e3670ab`, `ef88ab0`) and owner rulings R1–R5 is preserved commit
+for commit in `develop`'s history. The README overhaul (`feature/docs-readme-overhaul`,
+tip `207f84d`) was merged immediately after so its documentation links resolve against the
+engine tree. **With those merges recorded, the integration branch and its worktree
+`/private/tmp/plinth-3d-pipeline-integration` are retired and deleted as part of this
+commit.** Containment is the merge itself: `cef27a1` is an ancestor of `develop`.
+
+The five gates were run on the merged `develop` tip and are green. The authority records for
+the caps landing are this file and
+[`support-resource-caps-2026-08-05.md`](support-resource-caps-2026-08-05.md), both now on
+`develop`.
+
+Practical consequences for anyone resuming:
+
+- Work in `/Users/craig/code/hughescr/dnd-campaigns/plinth-3d`, not in `/private/tmp`.
+- Read the live head with `git -C /Users/craig/code/hughescr/dnd-campaigns/plinth-3d log`,
+  not from the retired integration worktree, which no longer exists.
+- "Integrated" now means **an ancestor of `develop`**. The status vocabulary below still
+  says "the integration branch"; substitute `develop` throughout.
+- Start new work on `feature/<topic>` off `develop`. Never push to the `github` remote
+  without the owner's explicit instruction.
+
 ## Status vocabulary
 
 - **Integrated:** the commit is an ancestor of the integration branch.
@@ -16,9 +52,13 @@ awaiting review. A review result is not evidence that a commit has been merged.
 
 ## Integration authority and verified snapshot
 
-The integration authority is the clean worktree
-`/private/tmp/plinth-3d-pipeline-integration` on branch
-`codex/rust-pipeline-integration`.
+> **Superseded 2026-08-05 — historical.** The integration authority *was* the clean worktree
+> `/private/tmp/plinth-3d-pipeline-integration` on branch `codex/rust-pipeline-integration`.
+> That branch has been merged into `develop` in full and both the branch and the worktree
+> are deleted; see *The line of record moved to `develop`* at the top of this file. The
+> commits and acceptances recorded in this section remain valid — they are all ancestors of
+> `develop` — but the paths and branch name in it are no longer live. Read the heads named
+> below as history.
 
 The current reviewed integration HEAD is the **contact-physics package merge**
 `81ec3d446f9429a5ca5cade6b957164f386134e5` (`merge: contact-physics package complete -
@@ -904,6 +944,12 @@ regression.
 
 ## Active and pending work
 
+Updated 2026-08-05 (late): after the merge to `develop` and the retirement of the two merged
+branches, the live inventory is **`main`, `develop`, and three parked `codex/*` branches;
+one definitive checkout plus three parked worktrees**. The paragraph and table that follow
+describe the earlier pass and are kept for provenance; the struck-through rows record what
+was retired and why.
+
 This table is the live inventory as of the 2026-08-05 pass: **5 branches, 5 worktrees**.
 `codex/embed-zones` and `census/embed-incidence-2026-08-04` were retired-in-substance
 (content fully contained in integration); both refs and the one worktree between them are
@@ -919,8 +965,10 @@ the owner's untagged-deletion decision.
 
 | Worktree/branch | Observed head | State |
 | --- | --- | --- |
-| `/Users/craig/code/hughescr/dnd-campaigns/plinth-3d`, `master` | `5e37d8c` | main checkout and ref store; strict ancestor of integration |
-| `/private/tmp/plinth-3d-pipeline-integration`, `codex/rust-pipeline-integration` | 2026-08-05 late docs head | clean; integration authority. **Gate GREEN**: see *Post-merge interaction delta* for the five-command gate set and its counts |
+| `/Users/craig/code/hughescr/dnd-campaigns/plinth-3d`, `develop` | merged 2026-08-05 | **The single line of record.** Definitive checkout and ref store. Carries the whole engine arc and the README overhaul as true merges. Gates green at the merged tip. New work branches `feature/*` from here |
+| `/Users/craig/code/hughescr/dnd-campaigns/plinth-3d`, `main` | `02e2471` | release branch; moves only when the owner releases `develop` into it |
+| ~~`/private/tmp/plinth-3d-pipeline-integration`, `codex/rust-pipeline-integration`~~ | was `cef27a1` | **RETIRED AND DELETED 2026-08-05.** Merged into `develop` in full with `--no-ff` (two-parent merge, no squash, no rebase), so `cef27a1` is an ancestor of `develop` and every engine commit survives. Worktree clean at removal; branch deleted with plain `git branch -d`, which git accepted precisely because it was fully merged. No archive tag: an ancestor of `develop` is not recoverable-only-via-tag |
+| ~~`/private/tmp/plinth-readme`, `feature/docs-readme-overhaul`~~ | was `207f84d` | **RETIRED AND DELETED 2026-08-05.** Merged into `develop` with `--no-ff` after the engine line so its links resolve; every relative link in the final README was checked against the develop tip. Worktree clean at removal; branch deleted with plain `git branch -d` |
 | ~~`/private/tmp/plinth-embed-zones`, `codex/embed-zones`~~ | was `dd505aa` | **RETIRED AND DELETED 2026-08-05.** `git merge-base --is-ancestor dd505aa HEAD` passed first, so nothing was carried there alone; the worktree was clean (`git status --porcelain` empty, no `--force` needed) and was removed, then `git worktree prune`, then `git branch -D codex/embed-zones`. No archive tag: an ancestor of the integration head is not recoverable-only-via-tag |
 | ~~`census/embed-incidence-2026-08-04` (branch only, no worktree)~~ | was `50b325c` | **RETIRED AND DELETED 2026-08-05.** `--is-ancestor` passed; the census is maintained in-tree at `crates/plinth-support/examples/embed_incidence_census.rs` behind the `census` cargo feature |
 | `/private/tmp/plinth-home-calibration-plate`, `codex/home-calibration-plate` | `1541379` | accepted branch-only; plate and loading-fixture generator authority |
@@ -986,13 +1034,19 @@ Everything else here is non-blocking.
 
 ## Ordered resumption checklist
 
-1. Reconcile the live integration head and preserve the recorded SCAR acceptance:
+1. Reconcile the live head and preserve the recorded SCAR acceptance. **Updated 2026-08-05:
+   the head to reconcile is `develop` in the definitive checkout; the integration worktree
+   these commands used to name is deleted.**
 
    ```sh
-   git -C /private/tmp/plinth-3d-pipeline-integration status --short --branch
-   git -C /private/tmp/plinth-3d-pipeline-integration log -3 --oneline --decorate
-   git -C /private/tmp/plinth-3d-pipeline-integration diff --check
+   git -C /Users/craig/code/hughescr/dnd-campaigns/plinth-3d status --short --branch
+   git -C /Users/craig/code/hughescr/dnd-campaigns/plinth-3d log -3 --oneline --decorate
+   git -C /Users/craig/code/hughescr/dnd-campaigns/plinth-3d diff --check
    ```
+
+   Then cut a `feature/*` branch off `develop` for whatever comes next; do not commit
+   directly to `develop` except for merges, and do not push to `github` without the owner
+   saying so.
 
    The independent ACCEPT for `b5a3290` and its integrated successors are recorded above. If the live head has advanced,
    inspect its ancestry and require independent review for each new change before extending
