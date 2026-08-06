@@ -616,3 +616,81 @@ runs inside the timebox.
 >   counts rather than unioning them, because the union does not exist yet when the bound
 >   is checked. So the scan costs 117,741 x 1,366 = **1.6e8** row-contact pairs, its plan
 >   charges 1.8e8, and both are far under the 1.1e10 the pre-fix prediction implied.
+
+## 8. FU-8d phase F1 — witness retention, 2026-08-06
+
+Dated addendum. Nothing in §§1–7 is rewritten: no cap in this document moved, no
+coefficient was re-derived, and the treant's stated demand is unchanged at
+**201,480,535,329** against the unchanged **35,445,500,736**. This section exists
+because F1 changed two things a caps record has to carry — a `KnnBatchLimits`
+shape field, and the term list of the gate peak bound.
+
+**What F1 did.** The merge gate's *baseline* coverage sweep now asks the kernel
+for `k = min(3, source_count)` neighbours per coverage sample instead of one, and
+retains them as `(source_slot, squared_distance)` in the kernel's own emission
+order. Nothing reads them yet; FU-8d's per-proposal delta (part (1)) will, and
+that is what removes the `sources × samples` re-sweep of a perturbed route key.
+Every answer this stage produces is unchanged: `nearest[sample]` is still
+`squared_distances[row.start].sqrt()`, and row 0 of a planned kNN batch does not
+depend on `k` — pinned against the kernel by
+`fu8d_knn_row_zero_is_k_independent_bit_for_bit`.
+
+### 8.1 The one limit that moved is not a cap
+
+`SpecializedLimits::production` now states `coverage_route_knn.max_neighbors = 3`
+where it previously carried the caller's 1. **This is a `KnnBatchLimits` shape
+field, not an FU-8 resource cap, and §5's list of what was deliberately not
+raised is untouched by it.** Owner ruling **R-b** (2026-08-06) records it as such,
+with the arithmetic:
+
+| term | what `k = 3` costs | against |
+|---|---|---|
+| per-route kNN CSR pair arrays | `+2 × query_count × 16 B` per route — single-digit MB on the treant's widest route | that batch's unchanged **2 GB** `max_logical_peak_bytes` |
+| per-batch retained witness table | `samples × 3 × 16 B` = **19,447,008 B ≈ 19 MB** on the treant's 405,146 samples | the unchanged **1,073,741,824 B** `max_gate_peak_bytes`, whose last measured value on this model was 216,203,088 B |
+| charged gate operations | **nothing** — `KnnBatchPlan`'s work term is `source_count × query_count` and is k-independent (ruling **R-a**) | — |
+
+Ruling R-a is why the operations column is empty, and it is recorded on
+`NEAREST_WITNESS_SLOTS` in `specialized.rs` as well as here, so that the silence
+of the charge cannot be mistaken for an oversight. The `SUPPORT_KNN_MAX_NEIGHBORS`
+registry entry keeps its value of **1** — it describes
+`SupportPreparationLimits::production`'s own `KnnBatchLimits`, which did not
+change and which the generic perception limits still carry verbatim — but its
+note, its `m0-constants-source-ledger.json` entry, the regenerated `constants.md`
+and §3.10.9's table in `03-physics-and-constants.md` all now carry the dated
+amendment, because the note's claim that "the support pipeline only ever asks for
+the single nearest neighbor" was true when written and is not true now.
+
+### 8.2 The gate peak bound gained a term
+
+`GatePeakUsage` gains `nearest_witness_bytes`, charged into the **retained**
+total beside `face_scratch_bytes` (record fix F6) and `batch_index_bytes`
+(FU-8c), because the witness table is built once at the top of the batch and held
+across the phases. That is the same discipline F6 and F9 each had to impose after
+finding a real allocation charged against nothing; here it is charged from the
+first batch that builds one.
+
+**The cap it is charged against — `max_gate_peak_bytes` = 1,073,741,824 — is
+unchanged, and no model on the corpus comes near it.** The treant does not reach
+this check at all: it refuses at `exact_operations` before the preflight that
+performs it, so on that model the table is never allocated and its ~19 MB is a
+**bound this run did not exercise**, not an observation. The §7.1 F7 correction's
+216,203,088 B stands exactly as measured at `23d929d`; F1 does not restate it.
+
+### 8.3 What was re-measured, and what it proves
+
+Full 8-model census at the F1 tip, release, `--features census`,
+`PLINTH_THREADS=4`:
+
+- all seven frozen OD-8 digests **byte-identical**;
+- all fourteen corpus `T0_scaled_cap` rows still `at_floor=true`;
+- the treant's stage error **verbatim**:
+  `Preparation: Specialized(GateOperationLimit { required: 201480535329, limit: 35445500736 })`.
+
+**That immobility is the phase's proof**, and it is worth being exact about what
+it does and does not show. It shows F1 moved no charge and no admitted result. It
+does *not* show the retention runs at treant scale, because the treant never
+reaches it. What shows the retention runs on real corpus geometry is
+`make_raking_blade` — 23 gate batches, 1,402 merge proposals, digest
+`13278215294653054002` unmoved — plus the two FU-8d tests. FU-23's trigger is
+unchanged and still pending: `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is to be
+re-derived only from a treant run that **completes** the gate, which this is not.

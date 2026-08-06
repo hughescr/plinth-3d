@@ -168,6 +168,19 @@ Measured on the 8-model corpus, most recently by the unified census of 2026-08-0
   > the FU-8c/FU-8d follow-up rows) and
   > `docs/rust-migration/support-resource-caps-2026-08-05.md` §7.
 
+  > **FU-8d phase F1 landed 2026-08-06 — dated addendum; everything above stands, and the
+  > numbers in it are the reason this note is short.** F1 is the first phase of FU-8d's
+  > part (1) and it deliberately changes **no answer and no charge**: the merge gate's
+  > baseline coverage sweep now retains the three nearest sources per coverage sample, which
+  > the per-proposal delta will read in phase F2, and nothing reads them yet. The treant's
+  > demand is **still 201,480,535,329** against the **still unchanged** 35,445,500,736, at
+  > the same gate, 5.68× over; all seven frozen corpus digests are byte-identical. **No cap
+  > was raised or touched.** One `KnnBatchLimits` shape field moved — the coverage-route
+  > batch's neighbour ceiling, 1 → 3 — and it is explicitly **not** a cap: the charged work
+  > `source_count × query_count` is k-independent, and the bytes the raise admits are
+  > charged per route and per batch. See `docs/rust-migration/CURRENT-STATUS.md` (*FU-8d
+  > phase F1 landed 2026-08-06*) and `support-resource-caps-2026-08-05.md` §8.
+
 The stages exist as libraries and the census harness runs the real chain from STL through
 a sealed support run. The folder-level runner that chains them all the way to a written
 `.chitubox` is roadmap, per [The goal](#the-goal) above.

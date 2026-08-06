@@ -938,6 +938,39 @@ All 42 are `Placeholder`, `scalar`, and result-inert on the same terms as
 they enter no semantic or result digest. Registering them moved no value and no
 digest.
 
+> **Dated addendum 2026-08-06 (FU-8d phase F1, ruling R-b) — the table above is
+> left standing, and `SUPPORT_KNN_MAX_NEIGHBORS` is still 1 where the table says
+> it is.** That row names one construction site, `KnnBatchLimits.max_neighbors`,
+> and there are now two values behind it:
+>
+> | limits value | `max_neighbors` | who reads it |
+> |---|---|---|
+> | `SupportPreparationLimits::production`'s `knn`, carried verbatim into `GenericPerceptionLimits::production` | **1**, unchanged — this is the registered constant | the generic perception batches, which still ask for one neighbour |
+> | `SpecializedLimits::production`'s `coverage_route_knn` | **3** | the merge gate's baseline coverage sweep, which asks for `min(3, source_count)` neighbours per sample |
+>
+> The gate's baseline sweep retains up to three nearest sources per coverage
+> sample so a merge-proposal delta can answer "nearest among the survivors of a
+> two-contact removal" by inspection instead of re-sweeping the perturbed route
+> key. **The 3 is a `KnnBatchLimits` shape field, not a cap, and nothing in
+> §3.10.8 or §3.10.9 was raised to make room for it.** A `KnnBatchPlan`'s charged
+> work is `source_count × query_count` and is k-independent, so no operation
+> charge anywhere moves with it (ruling R-a, recorded on
+> `NEAREST_WITNESS_SLOTS` in `specialized.rs`). What it does cost is bytes, and
+> both terms are charged rather than absorbed: `+2 × query_count × 16 B` per
+> route inside `KnnBatchPlan::logical_peak_bytes` against that batch's 2 GB
+> logical-peak limit, and `samples × 3 × 16 B` per batch as the new
+> `GatePeakUsage::nearest_witness_bytes` term against the unchanged
+> 1,073,741,824 B `SUPPORT_SPECIALIZED_MAX_GATE_PEAK_BYTES` — on the Weeping
+> Treant's 405,146-sample batch that second term is ~19 MB beside a gate peak
+> last measured at 216,203,088 B.
+>
+> Across the change all seven frozen OD-8 digests stayed byte-identical and the
+> treant's stage error stayed verbatim at
+> `Preparation: Specialized(GateOperationLimit { required: 201480535329, limit: 35445500736 })`.
+> The registry note on `SUPPORT_KNN_MAX_NEIGHBORS` carries the same amendment,
+> because its "the support pipeline only ever asks for the single nearest
+> neighbor" clause was true when written and is not true now.
+
 **Four of them are known to be refusing defects, and that is recorded on the
 constant.** `SUPPORT_SPECIALIZED_MAX_GATE_OPERATIONS`,
 `SUPPORT_SPECIALIZED_MAX_LOAD_OPERATIONS`,
