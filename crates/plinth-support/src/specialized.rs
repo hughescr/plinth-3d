@@ -2843,11 +2843,46 @@ fn first_safe_proposal(
         .position(|vector| gate_not_worse(*vector, baseline))
 }
 
+/// Worst-case bytes the batch's shared distinct-face buffer may hold.
+///
+/// FU-8b fix (A) introduced one `Vec<u32>` per gate batch, reused by every
+/// distinct-face gather in it (see [`distinct_faces_in_place`]).  It was
+/// threaded through the batch without ever becoming a term in
+/// [`GatePeakUsage`]; record fix F6 (2026-08-06) makes it one, so the gate's
+/// byte bound covers every allocation the gate holds rather than every
+/// allocation someone remembered.
+///
+/// The bound is the largest single gather the batch can perform.
+/// `unique_island_face_count` gathers *every* island's `face_ids` before
+/// deduping, and every other gather in the batch
+/// (`visit_served_owner_faces`) gathers a subset of the same ids, so the
+/// islands' total `face_ids` length bounds them all.  The doubling covers
+/// `Vec`'s amortized growth: a buffer filled by repeated `extend_from_slice`
+/// and never shrunk can sit at up to twice its live length.  That factor is a
+/// design bound on this buffer, not a guarantee extracted from `Vec` — `Vec`
+/// documents no exact growth policy — which is why the term is deliberately
+/// generous rather than exact.
+fn island_face_scratch_bytes(islands: &[SupportIsland]) -> Result<usize, SpecializedError> {
+    islands
+        .iter()
+        .try_fold(0usize, |total, island| {
+            total.checked_add(island.face_ids.len())
+        })
+        .and_then(|entries| entries.checked_mul(std::mem::size_of::<u32>()))
+        .and_then(|bytes| bytes.checked_mul(2))
+        .ok_or(SpecializedError::GateResourceOverflow)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GatePeakUsage {
     proposal_bytes: usize,
     result_bytes: usize,
     matrix_bytes: usize,
+    /// The batch's shared distinct-face buffer, from
+    /// [`island_face_scratch_bytes`].  Retained, not phase-local: the buffer
+    /// is allocated once at the top of the batch and lives across the
+    /// coverage, nearest and load phases alike.
+    face_scratch_bytes: usize,
     coverage_scratch_bytes: usize,
     coverage_nearest_bytes: usize,
     coverage_retained_bytes: usize,
@@ -2859,6 +2894,7 @@ fn check_gate_peak(usage: GatePeakUsage, limit: usize) -> Result<usize, Speciali
         .proposal_bytes
         .checked_add(usage.result_bytes)
         .and_then(|bytes| bytes.checked_add(usage.matrix_bytes))
+        .and_then(|bytes| bytes.checked_add(usage.face_scratch_bytes))
         .ok_or(SpecializedError::GateResourceOverflow)?;
     let coverage_phase = retained
         .checked_add(usage.coverage_scratch_bytes)
@@ -3063,6 +3099,33 @@ fn gather_island_faces(
 /// charged one unit per inner comparison, i.e. `n * (distinct + 1)`: quadratic
 /// in the face count.  The emitted values — the count and the ascending
 /// distinct order — are unchanged; only the meter moved.
+///
+/// Byte semantics (record fix F6, 2026-08-06).  `scratch` is the one
+/// `Vec<u32>` a gate batch allocates and every gather in that batch reuses —
+/// that reuse is the point of fix (A), which otherwise would have traded a
+/// quadratic charge for a per-contact allocation.  Fix (A) threaded the buffer
+/// through the batch but left it out of the gate's byte bound, so the buffer
+/// was real memory the gate held and never charged for.  It is now the
+/// `face_scratch_bytes` term of [`GatePeakUsage`], computed by
+/// [`island_face_scratch_bytes`] and added to that check's *retained* total,
+/// because the buffer outlives every individual phase.  Two things follow, and
+/// both are deliberate:
+///
+/// - The term is a **capacity bound, not an observation**.  It is priced
+///   before any gather runs, from the islands' `face_ids` lengths, so it must
+///   over-state rather than under-state; see
+///   [`island_face_scratch_bytes`] for why it doubles.
+/// - The term is **small against everything else in the bound**.  Measured on
+///   the Weeping Treant's gate batch, 2026-08-06: 570,584 B of live face ids,
+///   charged as 1,141,168 B after the doubling.  That takes the gate peak from
+///   215,061,920 B to 216,203,088 B against the unchanged 1,073,741,824 B cap
+///   — 0.53 % of the peak and 0.11 % of the cap, leaving the batch at 20.1 %
+///   of its bound.  Charging it therefore flips no refusal anywhere on the
+///   corpus, which was proved by re-running the census: the seven frozen
+///   digests stayed byte-identical and the treant's refusal line stayed
+///   `GateOperationLimit { required: 21755124103146, limit: 35445500736 }`.
+///   It is charged because the gate must bound what it holds, not because
+///   anything was observed to be near a limit.
 fn distinct_faces_in_place(
     scratch: &mut Vec<u32>,
     work: &mut usize,
@@ -3428,6 +3491,7 @@ fn evaluate_gate_batch(
                         proposal_bytes: proposal_storage_bytes,
                         result_bytes: plan.vector_bytes,
                         matrix_bytes: working_bytes,
+                        face_scratch_bytes: island_face_scratch_bytes(islands)?,
                         coverage_scratch_bytes: coverage_scratch.scratch_bytes,
                         coverage_nearest_bytes,
                         coverage_retained_bytes,
@@ -3892,6 +3956,7 @@ fn whole_gate_route_preflight(
                     proposal_bytes: proposal_storage_bytes,
                     result_bytes: gate_plan.vector_bytes,
                     matrix_bytes: working_bytes,
+                    face_scratch_bytes: island_face_scratch_bytes(islands)?,
                     coverage_scratch_bytes: coverage_scratch.scratch_bytes,
                     coverage_nearest_bytes,
                     coverage_retained_bytes,
@@ -5369,6 +5434,12 @@ mod tests {
             proposal_bytes: 0,
             result_bytes: 0,
             matrix_bytes: summary.max_peak_bytes,
+            // Re-pinned 2026-08-06 by record fix F6, which added
+            // `face_scratch_bytes` to the retained total. Zero here: this test
+            // pins how a *window summary's* max peak flows into the check, and
+            // the face buffer is not the term under test. Both assertions below
+            // keep their pre-F6 values, which is the point of pinning it at 0.
+            face_scratch_bytes: 0,
             coverage_scratch_bytes: 0,
             coverage_nearest_bytes: 0,
             coverage_retained_bytes: 0,
@@ -5631,6 +5702,12 @@ mod tests {
             proposal_bytes: 0,
             result_bytes: 0,
             matrix_bytes: 0,
+            // Re-pinned 2026-08-06 by record fix F6. Zero: this test pins that
+            // serial route batches are charged as one maximum rather than a
+            // sum, so every term but `coverage_nearest_bytes` must stay 0 for
+            // the assertion to mean what it says. Its two pinned values are
+            // unchanged by F6.
+            face_scratch_bytes: 0,
             coverage_scratch_bytes: 0,
             coverage_nearest_bytes: logical_peak_bytes,
             coverage_retained_bytes: 0,
@@ -6941,6 +7018,13 @@ mod tests {
             proposal_bytes: 10,
             result_bytes: 20,
             matrix_bytes: 30,
+            // Re-pinned 2026-08-06 by record fix F6, which added this term to
+            // the retained total. Held at 0 so the boundary this test pins —
+            // exactly at the cap, and one byte over — stays the same pair of
+            // numbers it pinned before F6 (100 / 101). The term's own effect on
+            // the boundary is pinned separately by
+            // `the_shared_face_buffer_is_charged_against_the_gate_peak`.
+            face_scratch_bytes: 0,
             coverage_scratch_bytes: 40,
             coverage_nearest_bytes: 0,
             coverage_retained_bytes: 8,
@@ -6957,6 +7041,82 @@ mod tests {
                 required: 101,
                 limit: 100,
             })
+        );
+    }
+
+    /// Record fix F6 (2026-08-06). FU-8b fix (A) allocates one `Vec<u32>` per
+    /// gate batch and threads it through every distinct-face gather, but never
+    /// made it a term in the gate's byte bound: it was memory the gate held and
+    /// did not charge for. These pin that it is charged, that it is charged as
+    /// *retained* rather than phase-local, and that the number charged is the
+    /// islands' own `face_ids`.
+    #[test]
+    fn the_shared_face_buffer_is_charged_against_the_gate_peak() {
+        // Two islands, 3 + 5 face ids: 8 entries x 4 bytes x 2 for growth = 64.
+        // Duplicate ids across islands still count, because the gather copies
+        // before it dedups — the buffer really does hold both.
+        let islands = [
+            SupportIsland {
+                id: 1,
+                face_ids: vec![7, 8, 9],
+            },
+            SupportIsland {
+                id: 2,
+                face_ids: vec![7, 8, 9, 4, 5],
+            },
+        ];
+        assert_eq!(island_face_scratch_bytes(&islands), Ok(64));
+        assert_eq!(island_face_scratch_bytes(&[]), Ok(0));
+
+        let base = GatePeakUsage {
+            proposal_bytes: 10,
+            result_bytes: 20,
+            matrix_bytes: 30,
+            face_scratch_bytes: 0,
+            coverage_scratch_bytes: 40,
+            coverage_nearest_bytes: 0,
+            coverage_retained_bytes: 8,
+            load_scratch_bytes: 32,
+        };
+        // Without the term, the batch fits a 100-byte cap exactly.
+        assert_eq!(check_gate_peak(base, 100), Ok(100));
+        let charged = GatePeakUsage {
+            face_scratch_bytes: island_face_scratch_bytes(&islands).expect("scratch bytes"),
+            ..base
+        };
+        // With it, the requirement rises by exactly the buffer's bound, and the
+        // same cap now refuses. The term is genuinely part of the bound, not
+        // decoration.
+        assert_eq!(
+            check_gate_peak(charged, 100),
+            Err(SpecializedError::GatePeakByteLimit {
+                required: 164,
+                limit: 100,
+            })
+        );
+        assert_eq!(check_gate_peak(charged, 164), Ok(164));
+
+        // Retained, not phase-local. With every phase term zeroed the whole
+        // requirement is the retained set, and it still carries the 64 — the
+        // buffer is charged whichever phase turns out to be the widest.
+        let retained_only = GatePeakUsage {
+            coverage_scratch_bytes: 0,
+            coverage_nearest_bytes: 0,
+            coverage_retained_bytes: 0,
+            load_scratch_bytes: 0,
+            ..charged
+        };
+        assert_eq!(check_gate_peak(retained_only, usize::MAX), Ok(124));
+        // 10 + 20 + 30 = 60 without it, so the whole difference is the buffer.
+        assert_eq!(
+            check_gate_peak(
+                GatePeakUsage {
+                    face_scratch_bytes: 0,
+                    ..retained_only
+                },
+                usize::MAX
+            ),
+            Ok(60)
         );
     }
 
