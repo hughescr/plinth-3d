@@ -1015,6 +1015,29 @@ FU-8b family, not a cap to raise: admitting it would need a coefficient near
 39,300, which would take most of the corpus off its floors. See
 `support-resource-caps-2026-08-05.md` §7.
 
+> **Note added 2026-08-06 (FU-8c landed at `a3308ec`) — dated addendum; the
+> paragraph above is left standing as the measurement it was.** The number it
+> quotes has moved and this note is the correction, not a rewrite. FU-8c was
+> fixed: the merge gate no longer re-evaluates the whole batch once per proposal,
+> and `gate_resource_plan` is repriced to
+> `(samples + demands + 1) × contacts + measured proposal work`. On the same
+> 553,835,949-unit batch and against the **same unchanged**
+> `64 × 553,835,949 = 35,445,500,736` cap, the treant's stated demand is now
+> **201,480,535,329** — 108× less than the 21,755,124,103,146 above, and **363.8×
+> the coefficient** rather than 613×.
+>
+> **Both sentences above nevertheless still hold, and neither coefficient
+> changed.** It *still refuses*, now 5.68× over instead of 613×, and it is still
+> not a cap to raise: admitting 363.8 would need a coefficient near 364, which
+> takes the Cylinder — at 89.6 % of the floor by the paragraph above — and most of
+> the rest of the corpus off their floors, for the same reason 39,300 would. The
+> residual is a further algorithm defect of the same family, opened as **FU-8d**
+> and measured, not assumed: 97.4 % of it is per-proposal `sources × samples` work
+> on the perturbed route key. Owner ruling R4's n = 1 marking and FU-23's
+> re-derivation trigger are unaffected, except that FU-23 should now fire after
+> FU-8d lands rather than after FU-8c. Full derivation and the exact census
+> transcript: `CURRENT-STATUS.md` under *FU-8c fixed 2026-08-06*.
+
 ### 3.11 NOT constants — resource guards
 
 These exist in `config.py` and in module scope but are **not physics and not

@@ -362,6 +362,26 @@ reverted before every recorded run.
 > and left every corpus scaled-cap row `at_floor=true`. No cap, coefficient or digest moves;
 > only this observation does.
 
+> **SUPERSEDED IN ONE ROW 2026-08-06 (FU-8c landed at `a3308ec`) — dated addendum; §7.1's
+> table and both corrections above are left standing exactly as they were measured.** The
+> table's `post-fix` column means *post-FU-8b*, and for every row but one it still does. The
+> exception is **"specialized gate operations, 39,223-proposal merge batch — 21,755,124,103,146
+> — superlinear in the batch, refused, FU-8c"**. FU-8c has since been fixed, and on the same
+> batch against the same unchanged 35,445,500,736 cap that demand is now **201,480,535,329**,
+> 108× less. The two refusal lines quoted verbatim in the F7 correction above and in §7.1 are
+> the lines that held **at `23d929d`**; they are correct records of that tip and are not
+> rewritten. As of `a3308ec` the treant's single stage error reads
+> `Preparation: Specialized(GateOperationLimit { required: 201480535329, limit: 35445500736 })`,
+> reproduced byte-identically at `8695398`.
+>
+> The row's **verdict is unchanged in kind**: still superlinear in the batch, still refused,
+> still an algorithm defect rather than a cap to raise — 5.68× over instead of 613×. The
+> successor defect is **FU-8d**. Across the FU-8c landing the seven frozen OD-8 digests stayed
+> byte-identical and every corpus scaled-cap row stayed `at_floor=true`, so nothing else in
+> this table moves. Peak RSS 2.50 GB and 124 s to refusal also supersede the table's 2.84 GB
+> and 81.5 s **for the merge-gate run only**; both remain far inside the machine ceiling and
+> the timebox.
+
 ### 7.2 The rule that was set, and the scale it uses
 
 Gate and load work do **not** track face count. The corpus proves it: 24-face
@@ -499,6 +519,31 @@ batch standing in for a batched evaluation.
 > The census transcript above is a **historical** refusal record and is not
 > re-run by this addendum; the treant's post-fix stopping point is recorded in
 > `CURRENT-STATUS.md` under *FU-8c fixed*.
+
+> **Correction added 2026-08-06 to the addendum immediately above — it is
+> incomplete in a way that reads as the opposite of the measurement, and this note
+> is the correction.** The "**5,173,199,556** against the **unchanged**
+> 35,445,500,736" figure is arithmetically right but is **not the treant's
+> demand**, and standing beside the cap the way it does it invites the inference
+> that the treant is now admitted. **It is not. The treant still refuses at this
+> gate.** 5,173,199,556 is the repriced plan's two *count-derived* terms —
+> `baseline_rows` 554,926,572 + `face_rows` 4,618,272,984 — evaluated with the
+> third term, `measured proposal work`, at **zero**. That is what the pinning test
+> `fu8c_repriced_plan_admits_the_treant_gate_shape_under_the_unchanged_cap`
+> asserts, and its name is exact: the *shape* fits. The real batch supplies real
+> proposal work, so the demand the treant actually states is
+>
+> ```text
+> baseline_rows 554,926,572 + face_rows 4,618,272,984
+>   + demand_rows 42,949,185 + proposal work 196,264,386,588
+>   = 201,480,535,329   against 35,445,500,736  -> refused, 5.68x over
+> ```
+>
+> — measured at `a3308ec` and reproduced byte-identically at `8695398` (124 s,
+> 2.50 GB peak RSS, `PLINTH_THREADS=4`, 90 GB watchdog never fired). Read
+> 5,173,199,556 as the floor of the repriced plan, never as the treant's price.
+> The residual 196,264,386,588 — 97.4 % of the demand — is opened as **FU-8d**.
+> Everything else in the addendum above stands unchanged.
 
 Out of scope and deliberately not touched: `finalize_load_rows` is a correctly
 charged dense contact-by-face nearest scan. Post-fix it costs 134,368 x 1,366 =
