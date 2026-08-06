@@ -340,6 +340,28 @@ reverted before every recorded run.
 >   that pairing is now consistent: both numbers are stated over the same 130,548 × 1,366
 >   batch.
 
+> **CORRECTED 2026-08-06 (record fix F7) — dated addendum, the table above is left
+> standing.** Its "gate peak bytes" row records **215,061,920 B**, which was the peak this
+> section measured at tip `d82c895`. Record fix F6 (`23d929d`) then made the gate batch's
+> shared distinct-face `Vec<u32>` a term of `GatePeakUsage` — FU-8b fix (A) had allocated
+> it once per batch and threaded it through every gather without ever charging it — so the
+> number that governs on this branch is larger:
+>
+> | quantity | at `d82c895` | at `23d929d` (governs) |
+> |---|---|---|
+> | treant gate peak bytes | 215,061,920 | **216,203,088** = 215,061,920 + 1,141,168 face-scratch |
+> | face-scratch term | not charged | 570,584 B of live face ids, charged as 1,141,168 B after the doubling for `Vec` growth slack |
+> | `max_gate_peak_bytes` | 1,073,741,824 | 1,073,741,824, **unchanged** |
+> | verdict | under cap, no change needed | still **under** cap, no change needed — 20.1 % of the bound |
+>
+> The term is 0.53 % of the peak and 0.11 % of the cap, and it is a worst-case **capacity
+> bound**, not an observation. Charging it flipped no refusal: the census re-run at
+> `23d929d` kept all seven frozen OD-8 digests byte-identical, kept the treant's single
+> stage error verbatim at
+> `Preparation: Specialized(GateOperationLimit { required: 21755124103146, limit: 35445500736 })`,
+> and left every corpus scaled-cap row `at_floor=true`. No cap, coefficient or digest moves;
+> only this observation does.
+
 ### 7.2 The rule that was set, and the scale it uses
 
 Gate and load work do **not** track face count. The corpus proves it: 24-face

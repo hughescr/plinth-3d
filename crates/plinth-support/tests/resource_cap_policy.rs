@@ -298,7 +298,52 @@ const CORPUS_GATE_BATCHES: [(&str, usize, usize); 7] = [
     ("make_thin_fin", 20_480, 18),
 ];
 
-/// Load batch shapes `(rows, contacts)` from the same run.
+/// Load batch shapes `(rows, contacts)` from the same run — **not** the
+/// census's `T0_scaled_cap` rows, which answer a different question.
+///
+/// Provenance corrected 2026-08-06 (record fix F11). This docstring used to say
+/// only "from the same run", which reads as "the census row" and is wrong for
+/// three of the seven models. Measured at this tip, by instrumenting
+/// `census::record_scaled_cap` to print every `specialized_load_operations`
+/// checkpoint each model records and segmenting the stream on `census::reset`:
+///
+/// | model | checkpoints | first — what the census prints | widest | pinned here |
+/// |---|---|---|---|---|
+/// | `Sphere`              |    5 | (574, 7)  | (574, 7)  | (574, 7)  |
+/// | `Cylinder`            |    5 | (61, 54)  | (66, 54)  | (66, 54)  |
+/// | `make_box`            |    5 | (5, 11)   | (5, 11)   | (5, 11)   |
+/// | `make_overhang_table` |    5 | (10, 84)  | (12, 84)  | (12, 84)  |
+/// | `make_toed_slab`      |    5 | (12, 73)  | (12, 73)  | (12, 73)  |
+/// | `make_raking_blade`   | 2851 | (13, 62)  | (13, 62)  | (13, 62)  |
+/// | `make_thin_fin`       |    5 | (3, 18)   | (3, 18)   | (6, 18)   |
+///
+/// Every model plans its load stage several times per run, and
+/// `record_scaled_cap` keeps exactly one row per cap kind: the one with the
+/// **widest materialization**, since that is the bound that decides whether the
+/// model is refused. Every corpus model materializes this cap **at the floor**,
+/// 2,000,000,000, at every checkpoint, so all of them tie — and on a tie
+/// `record_scaled_cap` keeps the incumbent, i.e. the **first** checkpoint
+/// rather than the widest. That, and only that, is why the census prints 61 for
+/// the Cylinder and 10 for `make_overhang_table` where this table pins 66 and
+/// 12. Both are real checkpoints of the same run; neither number is wrong.
+///
+/// The widest shape is the right one to pin here, because these constants exist
+/// to assert that no corpus batch is wide enough to lift the cap off its floor,
+/// and that claim has to be tested against the widest batch rather than the
+/// earliest one — which is what
+/// `the_batch_scaled_caps_are_the_flat_floor_for_every_corpus_batch_shape`
+/// does. If a future model ever leaves the floor, the census row and this table
+/// converge, because the tie that separates them is gone.
+///
+/// **`make_thin_fin` is the exception, and is NOT explained by the tie.** Its
+/// pinned 6 rows matches neither the census's 3 nor any of the five load
+/// checkpoints the instrumented run observed, all of which plan 3 rows. The
+/// pinned 18 contacts is right. 6 is conservative for what this table asserts —
+/// a wider batch than the model plans still materializes at the floor, so
+/// `the_batch_scaled_caps_are_the_flat_floor_for_every_corpus_batch_shape`
+/// passes either way and nothing downstream reads it — so it is left standing
+/// rather than silently re-pinned, and recorded here as unreconciled. Re-pin it
+/// to 3 only together with a run that states where the 6 came from.
 const CORPUS_LOAD_BATCHES: [(&str, usize, usize); 7] = [
     ("Sphere", 574, 7),
     ("Cylinder", 66, 54),

@@ -237,6 +237,29 @@ pub(crate) fn record_seat_attestation(
 /// Records one materialized batch-product-scaled cap. Only the widest
 /// materialization per kind is kept, which is the one that governs whether the
 /// model is refused.
+///
+/// **Ties keep the first, not the widest batch** (documented 2026-08-06,
+/// record fix F11). The row this keeps is selected on `materialized` alone,
+/// and `materialized` saturates at the cap's floor: while a model's batches
+/// are all small enough to sit at the floor — which is every corpus model
+/// today, for both kinds — every checkpoint materializes the *same* number,
+/// the `>=` arm below wins every time, and the row that survives is the
+/// **first** checkpoint recorded rather than the one with the largest
+/// `rows`/`columns`. So the printed `rows=`/`columns=` are not the model's
+/// widest batch shape whenever the floor governs; only `materialized` is
+/// authoritative under a tie.
+///
+/// That is deliberate and adequate for what the census claims — the governing
+/// bound, and whether it is still the floor — but it means the census row must
+/// not be read as a batch-shape measurement. `CORPUS_LOAD_BATCHES` in
+/// `crates/plinth-support/tests/resource_cap_policy.rs` pins the widest
+/// instrumented shapes instead, and differs from the census for exactly this
+/// reason on the Cylinder (66 rows pinned, 61 printed) and
+/// `make_overhang_table` (12 pinned, 10 printed); see that docstring for the
+/// full per-model checkpoint table. Comparing on `rows * columns` instead
+/// would break the tie by width, but it would also stop the kept row being the
+/// one that states the governing bound; the choice has not been made lightly
+/// and should not be changed without re-pinning both.
 pub(crate) fn record_scaled_cap(entry: ScaledCapRow) {
     with(|census| {
         match census
@@ -244,6 +267,7 @@ pub(crate) fn record_scaled_cap(entry: ScaledCapRow) {
             .iter_mut()
             .find(|existing| existing.kind == entry.kind)
         {
+            // `>=`, not `>`: on a tie the incumbent stays. See the tie note above.
             Some(existing) if existing.materialized >= entry.materialized => {}
             Some(existing) => *existing = entry,
             None => census.scaled_caps.push(entry),
