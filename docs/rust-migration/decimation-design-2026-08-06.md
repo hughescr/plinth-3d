@@ -1,0 +1,247 @@
+# Decimation design record — 2026-08-06
+
+> **Provenance.** Produced 2026-08-06 by a read-only architect agent against `develop @ eb36358`
+> (working tree untouched), drawing on the live measurement artifact
+> `target/plinth-decimate-corpus-budgets/corpus-budget-report.json` (written 2026-08-05 22:15 by
+> `crates/plinth-decimate/tests/corpus_budgets.rs`). This document is the evidence behind the owner's
+> 2026-08-06 re-prioritization ruling: **FU-8b (gate/load quadratics) runs first; decimation is
+> demoted** to a diagnosis + witness follow-up, because the measurements below falsified the
+> compounding-speedup premise of the original decimation priority. Handed off verbatim by the
+> orchestrator; commit under `docs/rust-migration/` unmodified below this banner.
+
+---
+
+## 0. Four things in the original framing that the source contradicts
+
+**(a) The treant's search result is NOT discarded by the utility gate. It is discarded by the topology gate, and `assess_downstream_utility` never matters.**
+
+Every reduced treant candidate fails `topology_not_increased` (`crates/plinth-decimate/src/lib.rs:1843`), because `nonmanifold_edges` goes from 0 to non-zero at *every* attempted ratio:
+
+| target faces | reduction | nonmanifold edges after | result |
+|---|---|---|---|
+| 425,934 | 0.74 % | 3 | TopologyIncreased |
+| 422,750 | 1.5 % | 3 | TopologyIncreased |
+| 419,564 | 2.2 % | 6 | TopologyIncreased |
+| 416,380 | 3.0 % | 7 | TopologyIncreased |
+| 410,010 | 4.5 % | 11 | TopologyIncreased |
+| 403,640 | 5.9 % | 16 | TopologyIncreased |
+| 390,898 | 8.9 % | 24 | TopologyIncreased |
+
+`geometrically_eligible_candidate_count` for the treant is **0**. Granting `DownstreamUseful` — by any definition — changes the treant by exactly zero faces. The `NoDownstreamUtilityEvidence` refusal recorded in its trace is the *last* refusal appended at `lib.rs:1427`, not the operative one; the operative ones are the two `TopologyIncreased` entries at `lib.rs:1330`.
+
+**(b) Even ignoring topology, the treant's ratified geometric budget admits only ~6–9 % reduction, not a shrink that "compounds across everything".**
+
+From the same report, sampled p99/p99.9 against the limits 0.0095 / 0.019 mm:
+
+| requested ratio | output faces | p99 mm | p99.9 mm | passed |
+|---|---|---|---|---|
+| 0.5250 | 225,242 | 0.02340 | 0.03983 | no |
+| 0.7625 | 327,190 | 0.01379 | 0.02639 | no |
+| 0.8813 | 378,160 | 0.00959 | 0.02044 | no |
+| 0.9406 | 403,640 | 0.00643 | 0.01557 | **yes** |
+| 0.9109 | 390,898 | 0.00815 | 0.01814 | **yes** |
+
+The treant is genuinely near print-scale at half-a-pixel p99. A 47 % reduction already costs 23 µm of p99 — 1.2 pixels. So the FU-8b arithmetic the motivation rests on (faces × minima, 81F+36R+4, 18.6 rows/face) improves by ~9 % at best, not by an order of magnitude. At r ≈ 0.91 the gate charge (quadratic, `unique_island_face_count`, `crates/plinth-support/src/specialized.rs:2858-2885`) falls from ~1.68 × 10¹⁰ to ~1.39 × 10¹⁰ — still 7× over the 2 × 10⁹ cap. The treant refuses in the same place with a smaller demand, exactly as predicted, but for the opposite reason: because the reduction is *small*, not because it is large.
+
+**(c) The treant DOES have a sealed committed artifact, and a test that explicitly forbids decimating it.**
+
+`corpus/baseline/Weeping Treant v1.2.prepped.oriented-solid.stl` is 21,456,084 bytes and is **tracked in git** (`git ls-files corpus/baseline`). `crates/plinth-orient/tests/orientation_rederivation.rs:30-40` lists the treant in `REDERIVABLE`, and at `:129-136` asserts:
+
+```rust
+assert_eq!(decimated.mesh().tris().len(), source_faces,
+  "{name}: the corpus is entirely already-print-scale, so orientation must see the \
+   unreduced source; a reduction here would invalidate the artifact comparison rather \
+   than fail it");
+```
+
+then compares vertex-for-vertex against the artifact (`:96-105`, `:170-181`) at a ~3.9 × 10⁻⁶ mm f32-quantization bound. "Changing the treant's mesh is delta-free downstream today" is false: it breaks this gate.
+
+**(d) Two *small* models would decimate the instant a witness is granted — the size threshold is proven necessary, not merely prudent.**
+
+- `Sphere` (4,760 faces): two `GeometricallyEligible` final attempts, at **4,052** faces (`achieved_ratio` 0.85126) and 4,194; plus five `GeometricallyEligible` adaptive probes. Frozen census digest `17667468971446251870` would move.
+- `make_toed_slab` (140 faces): one `GeometricallyEligible` final attempt at **134** faces (`achieved_ratio` 0.95714). Frozen digest `11199296506741562956` and the provisional seal tuple `64 / 179 / 4826202191472851835` would move.
+- The other five (`Cylinder`, `make_box`, `make_overhang_table`, `make_raking_blade`, `make_thin_fin`) all refuse at `ProtectionCap` before the search — structurally immune.
+
+Minor corrections:
+
+- **Printer specs.** `docs/datasheets/printers/saturn-4-ultra-16k.md:31,57-58`: XY pitch is **14 × 19 µm** (project X = 14, project Y = 19), not 19–24. Layer 0.050 mm is a *project* record (`:34`), not a vendor default. `DecimationBudget::ratified_default` (`lib.rs:211-220`) uses the coarser 19 µm Y axis.
+- **Surface builds.** The treant's run builds **21** `NativeSurface`es, not ~11: 1 (feature protection, `lib.rs:1964`) + 5 bisections × 2 + 5 adaptive probes × 2 (`lib.rs:1983-1984`). Ten of those twenty are redundant rebuilds of the *unchanged original* mesh.
+- **`support-resource-caps-2026-08-05.md:15`** says "429,120 support faces after decimation and hollowing". The raw STL triangle count is 429,120 (`od -An -tu4 -j80 -N4` on the file). Decimation is a no-op and the census hollows via `HollowedModel::solid_decision` (`crates/plinth-support/examples/embed_incidence_census.rs:93-95`). Neither stage touched it.
+- **README.md:120** — "It now decimates, orients…" is the same overstatement. It runs the search and returns the original.
+- **Decimation never moves a vertex.** `compact_result` writes `mesh.verts()[original as usize]` (`lib.rs:2466`) — original f64 bits. `quantize_positions` (`lib.rs:2350`) f32-quantizes *only* the meshopt input; `max_input_quantization_delta` is diagnostic. So "decimation-moved vertices" does not exist as a phenomenon; decimation is pure vertex/face **removal**.
+
+---
+
+## 1. Machinery map
+
+**Entry point and search.**
+- `plinth_decimate::run` (`lib.rs:844-877`) → scale sanity → `select_feature_protection` → `run_budget_search`. A `FeatureProtectionError::CapExceeded` short-circuits to `already_print_scale` (this is what stops 5 of 8 corpus models).
+- `select_feature_protection` (`lib.rs:905-926`): one ratio-0.20 `simplify_locked`, one `backward_error_map` (1 surface), then `select_feature_protection_from_errors` (`:928-1019`) — a seed threshold + radius halo + structural lock closure, with a 12 % cap and 3 bounded backoffs.
+- `run_budget_search` (`lib.rs:1170-1431`): identity precondition step (`canonical_identity_step`, `:1572`), 5 bisections in [0.05, 1.00] (`:1221-1242`), candidates sorted by exact face ratio (`:1249-1255`), then per-candidate deterministic rebuild → fingerprint match → `build_face_topology` → **full-population** `probe_two_sided` → `classify_final_attempt` → `assess_downstream_utility`.
+- `run_adaptive_diagnostics` (`lib.rs:1683-1833`): up to 5 more integer-face targets, diagnostics only (A-2 forbids them authorizing production).
+
+**What `assess_downstream_utility` sees today.** `lib.rs:1453-1457` — signature is `fn assess_downstream_utility(_candidate: &SimplifyOutcome)`, argument ignored, returns `NoDownstreamUtilityEvidence` unconditionally. At the single call site (`lib.rs:1361`) the following are all in scope and *not* passed: `final_probe: TwoSidedProbe` (carries `p99_mm`, `p99_9_mm`, **`max_mm`**, `distance_digest`), `topology_before`/`topology_after`, `error_budget`, `original`, `policy`. Widening the signature is a local change.
+
+**The sealed type.** `DownstreamUseful { witness_id: &'static str }` (`lib.rs:366-376`) — private field, no public constructor, `compile_fail,E0451` doctest at `:361-365`. `DownstreamUtilityEvidence` (`:380-384`) is the two-state enum. Minting one is a one-line `const fn` inside the crate.
+
+**Is downstream wiring dead? No — it is live and complete.** `BudgetSearchOutcome::into_decimated_model` (`lib.rs:634-666`) maps `Verified` → `DecimationDisposition::Reduced` and moves the mesh into `DecimatedModel`; `plinth_orient::run` (`crates/plinth-orient/src/lib.rs:76-92`) does `let (mesh, decimation) = model.into_parts();` and transforms *that* mesh; the census (`embed_incidence_census.rs:77-95`) carries it straight into `HollowedModel::solid_decision` and `run_support`. A granted witness would genuinely reach every downstream stage. The only unwired thing is `SimplifyOutcome::retained_original_vertex_ids` (`lib.rs:48`), which `run_budget_search` discards — it is the map you would need to compare a decimated mesh against a full-resolution artifact.
+
+**Quality/error metrics already computed.** `probe_two_sided` (`lib.rs:1976-2031`) does two whole-batch exact nearest-surface queries — candidate face centres → original surface (forward), original vertices → candidate surface (backward) — concatenates them, and reports NumPy-linear `p99`, `p99.9`, `max`, plus an order-preserving `distance_digest`. This is a two-sided sampled Hausdorff. The budget (`lib.rs:1190-1193`, `search_policy` at `:1927-1949`) is:
+
+```
+p99_mm   = pixel_um(19.0) × DECIMATION_P99_FACTOR (1/2000) = 0.0095 mm
+p99_9_mm = pixel_um(19.0) × DECIMATION_P999_FACTOR(1/1000) = 0.0190 mm
+final    = ×1.1 slack → 0.01045 / 0.02090 mm
+```
+
+Because `pixel_um` carries a **µm-valued** number and the product is consumed as **mm**, the `/1000` *is* the µm→mm conversion. So the two factors are exactly **0.5 pixel** and **1.0 pixel** of the coarser printer axis. That is a real, defensible printer-resolution bound that happens to be encoded as two `Placeholder` fractions.
+
+**The gap.** `TwoSidedProbe.max_mm` is measured on every probe and **is never checked anywhere**. Nothing bounds the worst-case deviation.
+
+---
+
+## 2. Evidence semantics — what `DownstreamUseful` should require
+
+`DownstreamUseful` must be minted only when **all five** hold. Three are already computed; two are new.
+
+**U1 — genuine reduction.** `output_face_count < input_face_count`. Already available.
+
+**U2 — bounded typical deviation, from AcceptSafe provenance.** `p99 ≤ DECIMATION_MAX_P99_DEVIATION_MM` and `p99.9 ≤ DECIMATION_MAX_P999_DEVIATION_MM`, where these are **new `Derived` constants** from the `Measured` vendor pitch:
+
+```
+DECIMATION_MAX_P999_DEVIATION_MM = PIXEL_PITCH_Y_UM / 1000            = 0.019  mm  (one pixel, coarser axis)
+DECIMATION_MAX_P99_DEVIATION_MM  = DECIMATION_MAX_P999_DEVIATION_MM/2 = 0.0095 mm  (half a pixel)
+```
+
+Derivation rule to state on the constant: *the printer addresses the XY plane on a 14 × 19 µm lattice; a deviation at or below one lattice step on the coarser axis cannot move a printed surface by more than one addressable step, and half that is the quantization half-step the printer already introduces.* `from = [PIXEL_PITCH_Y_UM]`, wrapper `Derived`, provenance chain terminating in the vendor datasheet.
+
+This is numerically identical to what the search enforces today. It must nonetheless be a *separate* declaration, because `DECIMATION_P99_FACTOR` / `DECIMATION_P999_FACTOR` are `Placeholder` (`03-physics-and-constants.md:786-793`) and "arithmetic from a Placeholder cannot improve its provenance". The witness must assert the **Derived** bound, and a test must pin that the Derived bound and the Placeholder-search bound agree — so if either moves, the disagreement is loud.
+
+**U3 — bounded worst-case deviation.** `final_probe.max_mm ≤ DECIMATION_MAX_ABSOLUTE_DEVIATION_MM`. **This is the genuinely new physics.** p99.9 leaves 0.1 % of samples unbounded; on a 429 k-face treant that is ~1,700 unbounded points, any one of which could be a collapsed twig. Candidate sources, in order of preference:
+
+1. `PRINT_FLOOR_CHORD_MM = 0.08 mm` (`Measured`, `owner_decision(print-floor-owner-decision-2026-07-24)`, `03-physics-and-constants.md:768`) — the registered smallest printable chord. Rule: *a deviation below the smallest chord the process can print cannot produce a printed difference.* `Derived` from one `Measured` input. Cleanest.
+2. `LAYER_HEIGHT_DEFAULT_MM = 0.050 mm` — matches the project's own established "one process resolution" argument (`crates/plinth-support/src/contact.rs:150-155`) and the same 0.05 mm figure PR-1(a)/PR-8 already use.
+3. Half the finest pitch, `min(14,19)/2000 = 0.007 mm` — most conservative, almost certainly unachievable at any useful ratio.
+
+**Set the number on Phase-1 data, not on this page.** The trace already records `max_mm` for every probe (`lib.rs:2021`) but `corpus_budgets.rs` does not serialize it — one line to add. Measure `max_mm` across the ratio sweep first; if 0.08 mm forces the achievable ratio to ~1.0, decimation is a no-op again and we have learned that honestly rather than by shipping it.
+
+**U4 — structural invariants downstream stages actually assume.** Not "watertight" as a slogan; the exact things that break:
+
+- **Sliceability.** `stitch_layer` (`crates/plinth-support/src/perception.rs:1213-1270`) builds a quantized point/edge graph at `PLANE_SLICE_MERGE_TOLERANCE_MM` and raises `OpenSliceSeam` if **any** vertex has degree ≠ 2, or if a walk revisits a consumed edge. That is exactly a manifold-closed-surface requirement. `after.nonmanifold_edges ≤ before.nonmanifold_edges` and `after.boundary_edges ≤ before.boundary_edges` (`lib.rs:1843-1846`) is the right proxy and must **stay** in the witness, not be relaxed. For a watertight input (`before.boundary_edges == 0`) this already implies the output is watertight.
+- **Strict audit.** `Mesh::audit_strict` (`crates/plinth-mesh/src/lib.rs:130-165`) — no repeated indices, no zero-area/collinear triangles. Already run inside `compact_result` (`lib.rs:2484-2488`) and inside every probe (`lib.rs:2038-2049`).
+- **Exterior-ness (OD-9).** Decimation cannot *create* buried surface out of nothing, but it can merge an exterior patch into a near-buried one. The OD-9 exterior screen runs later, in the contact machinery, and will catch it. No new gate needed; state the reliance explicitly.
+
+**U5 — the actual downstream-utility claim, stated so it is provable rather than treant-shaped.** A-1 (`06-conventions.md:390`) requires a *registered* work-or-bounded-resource saving. The honest, model-independent claim is:
+
+> Reducing the support-mesh face count `F` strictly reduces the demand on two **registered** execution-authority resources whose demand is an exact function of `F` alone: the minima-kNN batch's `source_count` (= `F`; cap `SUPPORT_KNN_MAX_WORK_PER_FACE`, `03-physics-and-constants.md:824-829`) and the `81·F` per-triangle term of the parity-grid projection `81·F + 36·R + 4` (`rust/geom_kernel/src/parity.rs:60-82`).
+
+The witness must **not** claim the `36·R` reference term falls — `R/F` is measured to rise as a mesh coarsens (526 refs/face on the 244-face Cylinder against 2.83 on the treant, `support-resource-caps-2026-08-05.md:69-73`), so total `R` falls sublinearly and could in principle be flat. Saying only what is exactly provable is what keeps the witness honest and keeps it from inheriting the n=1 treant coefficients (R4).
+
+Witness id: something like `"support-face-scaled-resource-demand"`, registered in the M0 registry notes of the two constants it names, so the reference is bidirectional.
+
+---
+
+## 3. Size threshold and the golden story
+
+**Placement — put the threshold in the witness, not in front of the search.** This matters more than the value.
+
+If the gate sits at the top of `run`, every small mesh takes a new short-circuit and `BudgetSearchTrace` changes shape for `make_box` (12 faces), the octahedron unit fixtures, `locked_box`, etc. That breaks `exhausted_reduction_search_returns_audited_already_print_scale` (`lib.rs:3116`), `five_bisections_select_the_lowest_observed_passing_ratio_with_honest_locks` (`:3174`), `orientation_boundary_preserves_identity_without_registered_utility` (`:3193`), and the whole `corpus_budgets` report shape — and it deletes the search's own test coverage on small fixtures.
+
+If instead `assess_downstream_utility` returns `NoDownstreamUtilityEvidence` whenever `input_face_count < threshold`:
+
+- every trace below the threshold is **byte-identical to today**, including `final_attempts[].downstream_utility` and the `NoDownstreamUtilityEvidence { geometrically_eligible_candidate_count }` refusal;
+- the returned mesh is the same `original.clone()` from `already_print_scale` (`lib.rs:1560-1568`);
+- therefore all 7 reachable corpus digests are frozen **structurally**, not merely measured — and the OD-8 census check becomes confirmation of a proof rather than the proof itself;
+- zero test churn on the small path.
+
+The wall-clock cost of *not* skipping the search is nil: the 5 sub-5,000-face models cost milliseconds. The 18 s is entirely the treant, which is above any threshold.
+
+**Value — `32,768`, with `65,536` as the conservative alternative.**
+
+Constraints: strictly above 4,760 (Sphere, largest reachable) and at or below 429,120 (treant). Argument for 32,768: it is the smallest power of two strictly above 4× the largest reachable corpus model, and — decisively — it sits **below the 65,024-face UV sphere** that `crates/plinth-decimate/tests/thread_sweep.rs:263-305` builds. That fixture would start genuinely reducing (a 10 mm-radius sphere at a 0.0095 mm sagitta bound admits ~0.87 mm edges → roughly 4,000 faces, a ~16× reduction), which turns `protected_budget_search_is_bit_identical_at_1_4_and_16_threads` from a determinism test of the identity path into a determinism test of the **reduced** path at 1/4/16 threads. That is exactly the coverage this change needs and it costs no frozen digest — the sweep compares thread-count reports against each other, with no pinned constant.
+
+If maximum conservatism is preferred, 65,536 keeps the sweep fixture untouched; then the reduced path has no cross-thread determinism coverage and one must be added deliberately.
+
+**Provenance class — `Placeholder`, and say so plainly.** A face-count threshold is not derivable from the datasheet. The derivable alternative fails: gating on "the mesh is finer than the printer can resolve" (`surface_area / (pixel × layer)` = `area / 9.5e-4 mm²`) yields a resolvable-face count of ~10⁶ for a mini-sized model — the treant's 429,120 faces are **coarser** than the printer's resolution, so that rule would forbid decimating the treant too. The honest statement: *the justification for decimating a large mesh is not that its detail is invisible to the printer; it is that downstream cost is superlinear in face count and the geometric price of the reduction is below print resolution.* The threshold is a corpus-shaped policy gate.
+
+Register it as `DECIMATION_UTILITY_MIN_INPUT_FACES`, wrapper **`Placeholder`**, class `scalar`, alongside the existing `DECIMATION_*` placeholders in `crates/plinth-core/src/constants/placeholders.rs:1071-1096`, read through `.diagnostic()` exactly as `search_policy` already does (`lib.rs:1932-1947`). Its note must carry the R4-shaped standing trigger: **n = 1 large specimen; a second corpus model above ~4,760 faces triggers re-derivation, never silent inheritance.**
+
+**The OD-8 zero-delta census check** stays exactly as run for R1–R5 (`CURRENT-STATUS.md:830-863`). Expect: 3,399 lines, all 3,390 `CENSUS` body lines byte-identical, all seven `snapshot_digest` values unmoved, the treant's `T0_stage_error` row unchanged apart from deliberately-moved fields. Compare census-to-census only; never a census digest against a seal-test digest (`CURRENT-STATUS.md:685-706`).
+
+---
+
+## 4. Measurement plan
+
+1. **Extend the existing report** (`corpus_budgets.rs`) to serialize `max_mm` for every sampled and full probe, per-phase wall-clock (feature protection; each bisection; each final verification; each adaptive probe; total), `SimplifyOutcome::meshopt_advisory_error`, and `retained_original_vertex_ids.len()`. All already computed in memory.
+2. **Face count.** Before: 429,120. After: whatever the search selects. On today's evidence the geometric budget alone caps it at 403,640 (r = 0.9406, −5.9 %) — and today the topology gate takes even that away.
+3. **Error metrics** p99 / p99.9 / **max** at the selected ratio against the Derived bounds (`final_p99_limit_mm` reported as 0.01045).
+4. **Per-stage wall-clock** and surface-build count (21 today).
+5. **Downstream demand** from the census `MODEL` row (`faces=`, `max_grid_bytes=`, `knn_max_work=` on the failure path). Predictions at reduction ratio `r`:
+
+| quantity | today | scaling | at r = 0.94 | cap | verdict |
+|---|---|---|---|---|---|
+| support faces | 429,120 | `r·F` | 403,640 | — | — |
+| minima-kNN work (`F × minima`) | 298,667,520 | ~`r²` | ~264 M | `max(1e8, 2048·r·F)` = 827 M | clears |
+| parity grid bytes `81F+36R+4` | 78,482,308 | `81·r·F` + sublinear `R` | ~74 M | `max(6.71e7, 512·r·F)` = 207 M | clears |
+| load-eligibility rows (18.6/face) | 7,988,078 | `r` | ~7.5 M | — | — |
+| gate ops (selection sort, `≈F²`) | ~1.68 × 10¹⁰ | `r²` | ~1.48 × 10¹⁰ | 2 × 10⁹ | **still refuses, 7× over** |
+
+6. **Corpus census before/after must be byte-identical** — as in §3.
+
+**Also measure, because it decides the design:** the `TopologyIncreased` diagnosis. For the mildest treant candidate (425,934 faces, 3 non-manifold edges), dump the offending edges and their incident faces. Three edges out of ~640,000 is a tiny, tractable defect; whether it comes from (i) coincident sheets in the self-interpenetrating regions, (ii) duplicate faces produced by collapse, or (iii) the operational lock closure (`lib.rs:1077-1128`) pinching a fan, determines whether the fix is a `SimplifyOptions` flag, a targeted post-pass, or a search-space restriction.
+
+---
+
+## 5. Risks and interactions
+
+**R-1 (blocking, highest) — the topology gate, not the witness, is what stops the treant.** Bisection cannot route around it: non-manifold edges appear at 0.74 % reduction and grow monotonically, so there is no ratio band with zero. Options, in preference order: (a) diagnose the 3 edges and fix at the source; (b) try `SimplifyOptions::Prune` / `LockBorder` (`meshopt-0.6.2 src/simplify.rs:5-28`) — cheap to test; (c) a targeted post-collapse repair. **Do not** relax `topology_not_increased`: `stitch_layer` genuinely requires degree-2 adjacency (`perception.rs:1236-1238`), so relaxing it re-opens the seam the Tier-1 fix closed.
+
+**R-2 (must guard) — decimation could convert the treant's fast typed refusal into a multi-hour hang.** The gate charge is `≈ 1.68e10 · r²` against a 2 × 10⁹ cap, so it stops refusing at `r < √(2e9/1.68e10) ≈ 0.345`. Below that the run proceeds into `finalize_specialized_load_partition` and hits the **uncharged** `O(n²)` rescan in `perception.rs` (FU-8b(c), `~6 × 10¹³ · r²` scalar comparisons, single-threaded). No cap catches it. Today's achievable r ≈ 0.91–0.94 is far above 0.345 — latent, not immediate, and a numerical coincidence rather than a designed guard. **Add an explicit guard**: pin `the_treant_still_refuses_at_the_gate_cap` as a test, and if any future change pushes r below ~0.35, land FU-8b first. (Resolved by ordering: FU-8b now runs first.)
+
+**R-3 — seam re-opening.** "Decimation-moved vertices" does not apply: no vertex moves (`lib.rs:2466`). Surviving vertices keep bit-exact f64 coordinates. The real risk is topological — larger triangles produce a different intersection-segment set, and `point_key` quantization at `PLANE_SLICE_MERGE_TOLERANCE_MM` (`perception.rs:1183-1188`) could fuse two now-nearby crossings into one degree-4 node. Coarsening generally *reduces* segment density; not a proof. The census run is the test.
+
+**R-4 — f32/f64: benign, provably.** The **weld** is decided in f64 `ExactBits` (`prepare_welded_input`, `lib.rs:2308-2344`) *before* `quantize_positions` (`:2263`), so index identity is never decided in f32. The QEM metric runs on f32 in both the procedural-f64 and STL-f32 cases, and `f64::from(procedural as f32) == stl` holds for every corpus coordinate (`CURRENT-STATUS.md:696`) — both variants quantize to *identical* f32 input, take an identical collapse sequence, and retain an identical vertex subset. **Decimation cannot create a new class of f32/f64 divergence; it can only propagate the existing one.** The threshold keeps all f64-procedural-vs-f32-STL twins below it anyway.
+
+**R-5 — orientation.** (i) `orientation_rederivation.rs:129-136` hard-asserts no reduction for the treant; see §6 Phase 3. (ii) `transform_mesh` recomputes translation from the transformed bounds, so removing an extremal vertex would shift the whole model by that vertex's protrusion. `select_feature_protection` locks high-error vertices, which extremal spikes tend to be, but this is not guaranteed. Worth an explicit before/after bounding-box comparison in the measurement.
+
+**R-6 — batch-first violations in the search itself.** The 18 s is not irreducible:
+- `probe_two_sided` (`lib.rs:1983`) rebuilds the **original** surface on every call — 10 redundant 429 k-face `NativeSurface` builds per treant run. Build once, pass in.
+- `simplify_locked` re-runs `mesh.audit_strict()` and `WeldedView::build(ExactBits)` over 1,287,360 source vertices on **every** of its 13 calls (`lib.rs:2209`, `:2312`). Weld once.
+- `OperationalLockTopology::build` allocates `incident_faces: Vec<Vec<usize>>` (`lib.rs:1052`) — ~1.29 M individual heap allocations on the treant. Should be CSR.
+- `select_feature_protection_from_errors:967-975` computes `max_output_pairs = seeds × verts` and `max_output_bytes` from it. On the treant with 10 k seeds that is 1.3 × 10¹⁰ pairs / 2 × 10¹¹ bytes — the halo query is **effectively uncapped**. This is a live unbounded-allocation hazard against the 100 GB memory directive, not just a performance note.
+- `select_points` (`lib.rs:2142`) materializes `(0..1_287_360)` then truncates to 120,000, per call.
+
+**Recommendation on the 18 s search: keep it, fix the redundancy, do not replace it.** It is the only instrument that produces the error/topology evidence the witness needs, and it already anticipates a `Verified` outcome (`corpus_budgets.rs:596-640`, `independently_audit_verified`). The threshold means it is only paid on models where it matters.
+
+**R-7 — FU-8b/R4/FU-23 interplay.** If R-1 is ever fixed well enough for a deep reduction, the treant may fall **under both cap floors** (at F = 43,000: parity ≈ 14 MB vs the 67 MB floor; kNN ≈ 9 M vs the 100 M floor). Then `SUPPORT_KNN_MAX_WORK_PER_FACE` and `SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE` — both `Derived`, both n = 1, both measured on the *undecimated* treant — become inert on the entire corpus, and their single specimen no longer exists in the form that produced them. That is precisely the FU-23/R4 re-derivation trigger. Any deep-reduction landing must re-measure those two coefficients on the decimated treant and say so.
+
+**R-8 — `make_toed_slab` (FU-7).** Its freeze is already PROVISIONAL. A threshold at ≥ 32,768 keeps it at 140 faces, so this change does not disturb FU-7.
+
+---
+
+## 6. Workflow slicing (as designed; Phases renumbered when scheduled)
+
+Feature branch off `develop` per git flow; never push. Five gates on every phase.
+
+**Phase 1 — Measure, and diagnose the real blocker (no behaviour change).** Extend `corpus_budgets.rs` (report-schema bump `plinth/m3-decimation-corpus-budget-report/v4`): serialize `max_mm`, per-phase wall-clock, surface-build count. Treant-only diagnostic dumping the 3 non-manifold edges of the 425,934-face candidate with incident faces and welded-vertex provenance. Test `SimplifyOptions::Prune`/`LockBorder`. Produce the max-deviation-vs-ratio curve that sets `DECIMATION_MAX_ABSOLUTE_DEVIATION_MM`. **Exit criterion:** whether the treant can be decimated at all, and at what max deviation. *If it cannot, stop and report.*
+
+**Phase 2 — Register the constants and mint the witness (still no corpus delta).** M0 registration updating all four membership artifacts (golden 260 → 264, classes `[18, 6, 236, 0]` → `[18, 9, 237, 0]`), `constants.md` regenerated via producer. Widen `assess_downstream_utility` to `(&SimplifyOutcome, &TwoSidedProbe, EdgeTopologyCounts, EdgeTopologyCounts)`, implement U1–U5, private `DownstreamUseful::witness(...)` constructor (compile-fail doctest stays green). Witness unit tests (each of U1–U5 refuses in isolation); threshold-agreement test pinning Derived bounds == Placeholder search bounds. OD-8 census: zero delta, measured.
+
+**Phase 3 — Make the treant's reduction reachable, and re-pin what it moves.** Land the Phase-1 topology remedy. Add an explicit threshold field to `DecimationBudget` (defaulted from the registry in `ratified_default`) so `orientation_rederivation.rs` can construct a budget whose threshold is above 429,120 and prove what it actually claims — the *pinned orientation record* rederives its committed artifact — without a decimation confound. Delta: the treant's mesh moves, and nothing else; prove with census; attribute every moved number.
+
+**Phase 4 (optional, separable) — Batch-first repairs in the search.** Build the original surface once; weld once; CSR incidence; bound the halo query honestly. Byte-identical `corpus_budgets` report (apart from timings); `thread_sweep` still bit-identical at 1/4/16.
+
+---
+
+## 7. Open questions and recommended answers
+
+| # | Question | Recommended answer |
+|---|---|---|
+| Q1 | Is granting the witness still wanted, given zero eligible treant candidates? | Yes, but only after Phase 1 — alone it is another measured no-op; its value is turning the blanket refusal into a real predicate. |
+| Q2 | Which constant sources the absolute (max) deviation bound? | `PRINT_FLOOR_CHORD_MM` (0.08 mm, Measured, owner decision) first choice; `LAYER_HEIGHT_DEFAULT_MM` (0.050) second. Decide on the Phase-1 max-vs-ratio curve. |
+| Q3 | Threshold 32,768 or 65,536? | **32,768** — gives the reduced path cross-thread determinism coverage via the 65,024-face `thread_sweep` fixture, at no digest cost. |
+| Q4 | Is a `Placeholder` size threshold acceptable? | Yes — it decides only *whether to attempt*, never *whether the result is safe*; the safety bounds are `Derived`. That separation is the point. |
+| Q5 | May `orientation_rederivation.rs`'s treant row use a decimation-disabling budget? | Yes — its subject is the orientation record, not decimation. **Do not regenerate the 21 MB artifact.** |
+| Q6 | May an adaptive-diagnostic candidate win once a witness exists? | No — A-2 forbids it; nothing is lost (the final path already finds the better candidate). |
+| Q7 | Must the `max_gate_operations` refusal survive decimation? | Yes, as an explicit pinned expectation — the alternative (R-2) is a multi-hour hang. If r ever falls below ~0.345, FU-8b first. |
+| Q8 | Do the §0 doc corrections warrant their own commit? | Yes — dated addenda for `support-resource-caps-2026-08-05.md:15` and `README.md:120`, per the honest-addendum convention. |
