@@ -554,3 +554,110 @@ fn public_api_is_batch_only_and_batch_results_are_thread_identical() {
     );
     println!("\n{THREAD_SWEEP_SIGNATURE}{result:?}");
 }
+
+/// FU-8d (2026-08-06).  **Row 0 of a planned kNN batch does not depend on `k`.**
+///
+/// This pins the single riskiest claim in the FU-8d design: that the merge
+/// gate's baseline coverage sweep can be raised from `k = 1` to
+/// `k = min(3, source_count)` — so that it retains the witnesses a proposal
+/// delta needs — **without moving a single answer**, because the answer every
+/// caller reads is `squared_distances[row.start]`.
+///
+/// The argument is a property of `knn_batch_planned` itself, and it is
+/// structural rather than statistical:
+///
+/// - the boundary is `max` over the `k` candidates Kiddo names, so it is
+///   non-decreasing in `k`;
+/// - the tie refetch is `nearest_n_within_exclusive(query, boundary,
+///   tie_cap = source_count, …)` with the boundary **inclusive** and the cap at
+///   the full source count, so a larger `k` can only *add* candidates — the
+///   `k = 3` candidate set is a superset of the `k = 1` set;
+/// - the row is then sorted by `(distance.total_cmp, item)`, a total order on
+///   the whole set, so the first element of a superset that contains the first
+///   element of the subset is the same element.
+///
+/// Element 0 is therefore bit-identical, ties or no ties.  Both halves of that
+/// are exercised: an engineered cloud where every candidate distance is an
+/// exact tie (so `item` alone breaks the order, and a larger `k` pulls in more
+/// tied candidates), and pseudo-random clouds where it generally is not.
+#[test]
+fn fu8d_knn_row_zero_is_k_independent_bit_for_bit() {
+    fn row_zero(index: &PointCloudIndex, queries: &[[f64; 3]], k: usize) -> Vec<(u64, u64)> {
+        let result = index
+            .knn_batch_planned(queries, &knn_plan(index.point_count(), queries.len(), k))
+            .unwrap();
+        (0..queries.len())
+            .map(|query| {
+                let row = result.row_range(query).unwrap();
+                assert_eq!(row.end - row.start, k, "planned row width");
+                (
+                    result.point_ids[row.start],
+                    result.squared_distances[row.start].to_bits(),
+                )
+            })
+            .collect()
+    }
+
+    // (a) Engineered exact ties: sources on the axes of four shells about the
+    // origin, so a query at the shell centre sees six sources at one distance,
+    // then six more at the next.  `k = 1..6` all land inside the first tied
+    // shell, which is precisely the case where the boundary refetch decides the
+    // answer rather than the tree's own ordering.
+    let mut tied = Vec::new();
+    for shell in [1.0f64, 2.0, 3.0, 4.0] {
+        for axis in 0..3 {
+            for sign in [1.0f64, -1.0] {
+                let mut point = [0.0f64; 3];
+                point[axis] = sign * shell;
+                tied.push(point);
+            }
+        }
+    }
+    let tied_index = PointCloudIndex::new(&tied).unwrap();
+    let tied_queries = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.25], [-0.125, 0.0625, 0.0]];
+    // The fixture really is tied, or this case proves nothing.
+    let first_row = tied_index
+        .knn_batch_planned(&tied_queries[..1], &knn_plan(tied.len(), 1, 6))
+        .unwrap();
+    assert!(
+        first_row.squared_distances[..6]
+            .windows(2)
+            .all(|pair| pair[0].to_bits() == pair[1].to_bits()),
+        "engineered fixture must present exact distance ties at the boundary"
+    );
+    let tied_at_one = row_zero(&tied_index, &tied_queries, 1);
+    for k in [2, 3, 4, 6] {
+        assert_eq!(
+            row_zero(&tied_index, &tied_queries, k),
+            tied_at_one,
+            "engineered ties: row 0 moved between k=1 and k={k}"
+        );
+    }
+
+    // (b) Pseudo-random clouds, deterministic (a fixed 64-bit LCG, no crate
+    // dependency and no wall-clock seed), over several cloud and batch shapes.
+    let mut state = 0x2545_f491_4f6c_dd1d_u64;
+    let mut next = move || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        ((state >> 11) as f64) / ((1u64 << 53) as f64)
+    };
+    for (source_count, query_count) in [(3usize, 7usize), (17, 5), (64, 33), (257, 11)] {
+        let sources = (0..source_count)
+            .map(|_| [next() * 10.0, next() * 10.0, next() * 10.0])
+            .collect::<Vec<_>>();
+        let queries = (0..query_count)
+            .map(|_| [next() * 10.0, next() * 10.0, next() * 10.0])
+            .collect::<Vec<_>>();
+        let index = PointCloudIndex::new(&sources).unwrap();
+        let at_one = row_zero(&index, &queries, 1);
+        for k in [2, 3] {
+            assert_eq!(
+                row_zero(&index, &queries, k),
+                at_one,
+                "random cloud {source_count}x{query_count}: row 0 moved between k=1 and k={k}"
+            );
+        }
+    }
+}
