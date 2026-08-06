@@ -3530,6 +3530,10 @@ fn evaluate_gate_batch(
             materialized: gate_operation_limit,
         }
     ));
+    // FU-8c observation O1: what this batch offers the per-proposal delta path.
+    // Recorded before any charge site below can refuse, so a batch that trips
+    // the cap still reports its proposal count.
+    crate::census_record!(crate::census::record_gate_proposals(proposals.len()));
     let face_count = unique_island_face_count(
         islands,
         &mut face_scratch,
