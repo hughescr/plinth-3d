@@ -723,6 +723,105 @@ formatting-only and were not introduced by the 2026-08-05 census work.
 **Fixed at `cf2c2ab` (`cargo fmt --all`), FU-18 resolved**; the diff is those four sites and
 nothing else. See process rule 1 in *Post-merge interaction delta* for why they got through.
 
+## Owner caps-landing rulings R1–R5 (2026-08-05, late) {#owner-caps-rulings-2026-08-05}
+
+The support resource-cap landing (`3d91390`, `e3670ab`, `ef88ab0`) was reviewed **ACCEPT
+with findings**. The following are **binding owner decisions of 2026-08-05**, delegated by
+the owner with veto retained, adjudicating those findings. The measurement record they act
+on is `docs/rust-migration/support-resource-caps-2026-08-05.md`, which carries the long
+form of R1–R4 at the exact numbers they correct; this section is the index.
+
+- **R1 — the undisclosed third scaled cap is PINNED BACK.** `SupportPreparationLimits::input`
+  scaled **three** caps where the doc comment, the caps record and the M0 registry all
+  declared two: `SpecializedLimits::coverage_route_knn.max_work` rode the same
+  `2048 × faces` rule purely for sharing the `KnnBatchLimits` shape. That coefficient was
+  measured on the **minima-to-face** batch alone; the coverage-route batch has no
+  measurement of record, no accessor and no test. The scaling is **removed** — the cap stays
+  at the flat `SUPPORT_KNN_MAX_WORK_FLOOR` (100,000,000) until someone measures that batch.
+  Behaviorally inert on every model: the treant's instrumented coverage-route demand is
+  **15,282,619**, 6.5× under the floor, and the treant stops at the specialized gate before
+  coverage routing runs at all. Landed `2aec85a`, pinned across 0…10⁸ faces by
+  `the_coverage_route_knn_cap_is_the_flat_floor_at_every_face_count`.
+- **R2 — 512 B/face is RATIFIED.** The landed parity-grid coefficient is 512 where the
+  proposal said 256. Ratified as written, **no code change**: the deviation buys **one**
+  uniform `next_power_of_two(2 × observed)` rule for both coefficients, and the wider margin
+  it leaves (4.2× admitted-over-observed refs/face against kNN's 1.7×) is earned by the
+  corpus showing refs/face varying 526 ↔ 2.83. Recorded `354c27d`.
+- **R3 — the census headline is CORRECTED.** The caps record claimed the before/after census
+  "differs in exactly one line out of 3,399". The true diff is **9 lines**: 8 additive
+  harness fields on the `MODEL` rows plus the treant's own stage-error row. What the
+  measurement supports — **all 3,390 instrumented `CENSUS` body lines byte-identical, all 7
+  reachable digests unmoved** — is the zero-behavioral-delta claim, and it survives intact.
+  Written as a **visible dated addendum** below the original per this project's
+  honest-addendum convention, not a silent rewrite. Recorded `354c27d`.
+- **R4 — both scaled coefficients are MARKED n = 1.** The two Measured observations and the
+  two Derived coefficients above them rest on a single specimen: **Weeping Treant v1.2,
+  429,120 faces, 2026-08-05**, the only corpus model above 4,760 faces. All four M0 registry
+  notes now say so and say the consequence: **a second large-model measurement triggers
+  re-derivation**, never silent inheritance of a treant-shaped constant. The `Measured`
+  classification of the refs-per-face observation **stands** — the inversion through
+  `axis_memory_bounds` is disclosed in its own note. Notes changed at the producer
+  (`constants/evidence.rs`) and `constants.md` regenerated; the generated file was never
+  hand-edited. Recorded `354c27d`.
+- **R5 — the orphan execution caps are REGISTERED.** The support pipeline's remaining
+  execution authority had **no registry entry at all**. Every cap in the four named
+  authority types is now registered — **42** of them, not the ruling's estimated ~29, the
+  count reported as enumerated rather than trimmed to the estimate — all
+  `runtime_resource_cap`, all wrapped `Placeholder`, each with `source_locators` and a
+  `provenance_detail` naming the Codex-era commit that introduced it (`73e7c13` / `a8acfb9`
+  / `c2b3b98`, no measurement of record). **Registration is disclosure, not ratification**,
+  and the `Placeholder` wrapper is what keeps them off any accept path. The four gate/load
+  caps measured to be refusing algorithm defects carry that prohibition in their own notes:
+  they must **NOT** be raised (see FU-8b). Nested authorities under
+  `SupportPreparationLimits::production` — `CandidatePayloadConfig`,
+  `ContactConstructionLimits`, `PenetrationBatchLimits`, `RaftLimits` — are explicitly **out
+  of scope** and need their own pass; the boundary is stated in
+  `03-physics-and-constants.md` §3.10.9. Landed `e6994f9`; registry moved **218 → 260**
+  constants, classes `[18 Measured, 6 Derived, 194 Placeholder, 0 Pending]` →
+  `[18, 6, 236, 0]`, `constants.md` regenerated via the producer example.
+
+**OD-8 delta discipline.** The expected behavioral delta across all five rulings is
+**ZERO**, and it was measured, not assumed: R1 removes a scaling no model reaches, R2 is a
+no-op, and R3/R4/R5 move note text and registry membership, which are not accept-path
+inputs. See *Caps-rulings OD-8 delta* immediately below.
+
+### Caps-rulings OD-8 delta — MEASURED ZERO {#caps-rulings-od8-delta-2026-08-05}
+
+Re-run at the rulings tip over all 8 corpus models:
+
+```
+PLINTH_CENSUS=1 cargo run --release --offline --features census \
+  --example embed_incidence_census -p plinth-support
+```
+
+The transcript is **3,399 lines**, the same length as the caps-landing run, and **all seven
+reachable digests are byte-identical to the values recorded in
+`support-resource-caps-2026-08-05.md` §4**:
+
+| Model | faces | `snapshot_digest` at rulings tip | vs recorded |
+|---|---|---|---|
+| `Sphere` | 4,760 | `17667468971446251870` | unmoved |
+| `Cylinder` | 244 | `13310185350867878190` | unmoved |
+| `make_box` | 12 | `9657051231007502658` | unmoved |
+| `make_overhang_table` | 60 | `6686599816688114065` | unmoved |
+| `make_toed_slab` | 140 | `11199296506741562956` | unmoved |
+| `make_raking_blade` | 24 | `13278215294653054002` | unmoved |
+| `make_thin_fin` | 24 | `7016743535301716631` | unmoved |
+
+The treant still refuses at the same place, with the same typed error:
+
+```
+MODEL  Weeping Treant v1.2  UNREACHABLE  faces=429120
+       max_grid_bytes=219709440  knn_max_work=878837760
+       support: sealed support run failed during Preparation
+CENSUS T0_stage_error  Weeping Treant v1.2
+       Preparation: Specialized(GateOperationLimit { required: 2000000001, limit: 2000000000 })
+```
+
+Note that `knn_max_work=878837760` on that row is the **minima** batch, which R1 did not
+touch and which stays scaled. R1 removed the scaling on the *coverage-route* batch, which
+is not printed and which the treant never reaches. **Behavioral delta: zero, measured.**
+
 ## Owner architecture decision {#owner-architecture-2026-08-03}
 
 The owner approved this binding clearance-mask architecture on 2026-08-03:
@@ -866,7 +965,7 @@ Everything else here is non-blocking.
 | FU-5 | Pin the `scar.rs` duplicate registry-reader (`crates/plinth-metrics/src/scar.rs:183-186`) the way the new delicacy M0 test pins the `plinth-mesh` reader | The duplication is now documented in the delicacy test comment but is still unpinned on the `plinth-metrics` side. |
 | FU-6 | `chitubox-native-preview` fix `9ffc829` still awaits review and cherry-pick | Sole live carrier of the unlanded embed-native-preview fallback. |
 | FU-7 | `make_toed_slab` parity investigation (vertex vs. interior containment probe) | The digest-moving containment-probe hardening was deferred; the current `make_toed_slab` required-table freeze (digest `11_859_964_443_161_510_103`) is **still PROVISIONAL** until this lands, and so is the 2026-08-05 seal re-pin (`4826202191472851835`) — the freeze is now provisional **on the new baseline**. See *Corpus defect fixes landed (2026-08-04, late)* and the cross-reference in *Post-merge interaction delta*. |
-| FU-8 | ~~Treant resource caps defect — "production caps do not admit a real mini"~~ | **PARTLY RESOLVED 2026-08-05, and the brief's framing was corrected by measurement.** Two of the three named caps were genuinely too small and are now model-scaled on the treant's own measurement: `KnnBatchLimits.max_work` → `max(100_000_000, 2048 × faces)` = 878,837,760, and `CandidateSurfaceGridLimit` → `max(67_108_864, 512 × faces)` = 219,709,440. The treant clears both. The third, Specialized `GateOperationLimit` (`2_000_000_000`), **was falsely accused and is deliberately NOT raised**: its reported `required: 2000000001` is `limit + 1`, a charge counter tripping on a selection sort in `unique_island_face_count` that a `BTreeSet` reduces ~117,000×. Three further caps nobody had seen (`max_load_operations`, `max_load_scratch_bytes`, `max_gate_peak_bytes`) are correctly refusing an 8.0 M-row load-eligibility explosion on a 429k-face mesh. Remaining work is algorithmic, tracked as FU-8b. See `docs/rust-migration/support-resource-caps-2026-08-05.md`. |
+| FU-8 | ~~Treant resource caps defect — "production caps do not admit a real mini"~~ | **PARTLY RESOLVED 2026-08-05, and the brief's framing was corrected by measurement.** Two of the three named caps were genuinely too small and are now model-scaled on the treant's own measurement: `KnnBatchLimits.max_work` → `max(100_000_000, 2048 × faces)` = 878,837,760, and `CandidateSurfaceGridLimit` → `max(67_108_864, 512 × faces)` = 219,709,440. The treant clears both. The third, Specialized `GateOperationLimit` (`2_000_000_000`), **was falsely accused and is deliberately NOT raised**: its reported `required: 2000000001` is `limit + 1`, a charge counter tripping on a selection sort in `unique_island_face_count` that a `BTreeSet` reduces ~117,000×. Three further caps nobody had seen (`max_load_operations`, `max_load_scratch_bytes`, `max_gate_peak_bytes`) are correctly refusing an 8.0 M-row load-eligibility explosion on a 429k-face mesh. Remaining work is algorithmic, tracked as FU-8b. See `docs/rust-migration/support-resource-caps-2026-08-05.md`, and *Owner caps-landing rulings R1–R5 (2026-08-05, late)* for the five adjudicated findings from that landing's review — R1 in particular removed a **third**, undisclosed scaled cap that this row's "two of three" framing did not count. |
 | FU-8b | Treant support gate/load stage is quadratic | Three defects behind the now-cleared caps: (a) `unique_island_face_count` / `visit_served_owner_faces` in `specialized.rs` find distinct face ids by repeated-minimum selection sort, charging ~1.7e10 gate operations where a set charges 142,646; (b) `build_load_eligibility` appends `specialized_owner_faces` pairs without grouping, producing 7,988,078 rows for 429,120 faces (18.6 rows/face); (c) the extended-eligibility builder in `perception.rs` rescans `specialized_owner_faces` linearly per row, ~6e13 uncharged scalar comparisons single-threaded — `sample(1)` put 4,127/4,127 stack samples in that frame. All three are batch-first violations: group once by `face_id`, gather/scatter. Fix these, re-measure, and only then set constants for a scaled gate/load bound — and not on face count, since 24-face `make_raking_blade` already burns 31% of the gate cap. |
 | FU-9 | Hollow EDT margin defect | `grid_spec_from_bounds`'s no-padding path plus its all-foreground special case fabricate a distance ramp; the committed Sphere hollow goldens are wrong today. Est 8/16 pts; regenerates four `plinth-hollow` oracles. |
 | FU-10 | Per-layer polygon union under a fill rule | Owner-endorsed; supersedes the Tier-1 fallback. Candidate nomination must consume normalized layers per OD-9. |
