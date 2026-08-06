@@ -140,6 +140,30 @@ pub struct CensusData {
     pub appends: std::collections::BTreeMap<&'static str, usize>,
     pub stage_errors: Vec<String>,
     pub scaled_caps: Vec<ScaledCapRow>,
+    pub gate_proposals: GateProposalCensus,
+}
+
+/// FU-8c observation O1 — how much merge-proposal work each model actually
+/// offers the specialized gate.
+///
+/// FU-8c replaced the gate's per-proposal re-evaluation of the whole contact
+/// set with a per-proposal route-key delta, and the delta path's equivalence to
+/// its predecessor is proved on a seven-proposal fixture. Whether any corpus
+/// model other than the Weeping Treant *exercises* that path on real geometry
+/// was an open question the records could not answer, because nothing counted
+/// proposals: a model with zero merge proposals never enters the loop at all.
+/// This counts them so the answer is measured rather than assumed.
+///
+/// Accumulated over **every** `evaluate_gate_batch` call the model makes, not
+/// kept per widest batch like [`ScaledCapRow`]: the delta path runs once per
+/// proposal per batch, so "does this model exercise it" is a total, not a
+/// maximum. `batches` is carried alongside so a zero `proposals` can be told
+/// apart from a model that never reached the gate — the latter records no gate
+/// batch at all and prints no row.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct GateProposalCensus {
+    pub batches: usize,
+    pub proposals: usize,
 }
 
 /// One materialization of a batch-product-scaled execution cap.
@@ -183,6 +207,18 @@ pub fn reset() {
         census.appends.clear();
         census.stage_errors.clear();
         census.scaled_caps.clear();
+        census.gate_proposals = GateProposalCensus::default();
+    });
+}
+
+/// FU-8c observation O1 — one specialized gate batch's merge-proposal count.
+/// Recorded at the top of `evaluate_gate_batch`, beside the scaled-cap row and
+/// before any charge can refuse, so a model that is refused at this gate still
+/// reports what it offered.
+pub(crate) fn record_gate_proposals(proposals: usize) {
+    with(|census| {
+        census.gate_proposals.batches = census.gate_proposals.batches.saturating_add(1);
+        census.gate_proposals.proposals = census.gate_proposals.proposals.saturating_add(proposals);
     });
 }
 
@@ -277,19 +313,31 @@ pub(crate) fn record_scaled_cap(entry: ScaledCapRow) {
 
 fn report_scaled_caps(model: &str, census: &CensusData) {
     for cap in &census.scaled_caps {
-        row(
-            model,
-            "T0_scaled_cap",
-            &[
-                format!("kind={}", cap.kind),
-                format!("floor={}", cap.floor),
-                format!("per_batch_unit={}", cap.per_batch_unit),
-                format!("rows={}", cap.rows),
-                format!("columns={}", cap.columns),
-                format!("materialized={}", cap.materialized),
-                format!("at_floor={}", cap.materialized == cap.floor),
-            ],
-        );
+        let mut cells = vec![
+            format!("kind={}", cap.kind),
+            format!("floor={}", cap.floor),
+            format!("per_batch_unit={}", cap.per_batch_unit),
+            format!("rows={}", cap.rows),
+            format!("columns={}", cap.columns),
+            format!("materialized={}", cap.materialized),
+            format!("at_floor={}", cap.materialized == cap.floor),
+        ];
+        // FU-8c observation O1, additive: the gate row alone carries the
+        // model's merge-proposal census. It rides here rather than on a row of
+        // its own because these are the same batches under the same cap, and
+        // because this row is printed on the failure path too -- a model
+        // refused at this gate still reports what it offered. Unlike the
+        // `rows=`/`columns=` above, which are the retained batch's shape, these
+        // two are totals over every gate batch the model ran; see
+        // [`GateProposalCensus`].
+        if cap.kind == "specialized_gate_operations" {
+            cells.push(format!("gate_batches={}", census.gate_proposals.batches));
+            cells.push(format!(
+                "merge_proposals={}",
+                census.gate_proposals.proposals
+            ));
+        }
+        row(model, "T0_scaled_cap", &cells);
     }
 }
 
