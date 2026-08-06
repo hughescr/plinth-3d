@@ -242,24 +242,24 @@ impl M0EvidenceConstants {
             support_knn_max_work_per_face: Derived::new(
                 2_048,
                 ["SUPPORT_KNN_WORK_PER_FACE_OBSERVED"],
-                "Cap coefficient by the single support resource-cap rule: next_power_of_two(2 × observed) = next_power_of_two(2 × 696) = next_power_of_two(1392) = 2048. It bounds kNN work at a constant multiple of the support mesh's own face count, so an all-pairs (face²) batch is still refused for any mesh above 2048 faces.",
+                "Cap coefficient by the single support resource-cap rule: next_power_of_two(2 × observed) = next_power_of_two(2 × 696) = next_power_of_two(1392) = 2048. It bounds kNN work at a constant multiple of the support mesh's own face count, so an all-pairs (face²) batch is still refused for any mesh above 2048 faces. Single-specimen basis: its one input was observed on the Weeping Treant v1.2 alone (429,120 faces, 2026-08-05), so this coefficient is n = 1. A second large-model measurement triggers re-derivation over both specimens; it must never be inherited silently as a treant-shaped constant. It scales exactly one batch, the perception minima-to-face kNN — the specialized coverage-route kNN batch shares the KnnBatchLimits shape but has no measurement of record and stays at SUPPORT_KNN_MAX_WORK_FLOOR.",
             ),
             support_knn_work_per_face_observed: Measured::new(
                 696,
                 treant_cap_source.clone(),
                 None,
-                "Weeping Treant v1.2, 429,120 support faces: the minima-to-face kNN batch planned source_count × query_count = 298,667,520 work units, exactly 429,120 × 696, so the batch costs 696 work units per face.",
+                "Weeping Treant v1.2, 429,120 support faces: the minima-to-face kNN batch planned source_count × query_count = 298,667,520 work units, exactly 429,120 × 696, so the batch costs 696 work units per face. Single-specimen basis: the Weeping Treant v1.2 alone, 429,120 faces, 2026-08-05. It is the only corpus model above 4,760 faces, so this observation has no second specimen and no spread; a second large-model measurement triggers re-derivation of SUPPORT_KNN_MAX_WORK_PER_FACE rather than silent inheritance of a treant-shaped constant.",
             )?,
             support_parity_grid_max_bytes_per_face: Derived::new(
                 512,
                 ["SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED"],
-                "Cap coefficient by the single support resource-cap rule applied to the exact parity-grid projection 81·faces + 36·references + 4 bytes (rust/geom_kernel/src/parity.rs axis_memory_bounds): observed bytes per face = 81 + 36 × 2.8303132 = 182.8913, and next_power_of_two(2 × 182.8913) = next_power_of_two(366) = 512.",
+                "Cap coefficient by the single support resource-cap rule applied to the exact parity-grid projection 81·faces + 36·references + 4 bytes (rust/geom_kernel/src/parity.rs axis_memory_bounds): observed bytes per face = 81 + 36 × 2.8303132 = 182.8913, and next_power_of_two(2 × 182.8913) = next_power_of_two(366) = 512. The 4.2× margin this leaves over the observation (11.97 admitted refs/face against 2.83 observed) is wider than the kNN coefficient's 1.7× and is ratified as such: one uniform rule for both coefficients is worth more than a tighter grid bound, and refs/face is the quantity measured to vary 526 ↔ 2.83 across the corpus. Single-specimen basis: its one input was observed on the Weeping Treant v1.2 alone (429,120 faces, 2026-08-05), so this coefficient is n = 1. A second large-model measurement triggers re-derivation over both specimens; it must never be inherited silently as a treant-shaped constant.",
             ),
             support_parity_grid_refs_per_face_observed: Measured::new(
                 1_214_544.0 / 429_120.0,
                 treant_cap_source,
                 None,
-                "Weeping Treant v1.2, 429,120 support faces: the axis parity grid projected a peak of 78,482,308 bytes, which inverts through 81·faces + 36·references + 4 to exactly 1,214,544 (cell, face) references. References, not faces, dominate that projection, and their ratio to faces falls as a mesh refines — 526 per face on the 244-face Cylinder against 2.83 here — so the treant is the tight case and the byte floor governs every coarse model.",
+                "Weeping Treant v1.2, 429,120 support faces: the axis parity grid projected a peak of 78,482,308 bytes, which inverts through 81·faces + 36·references + 4 to exactly 1,214,544 (cell, face) references. References, not faces, dominate that projection, and their ratio to faces falls as a mesh refines — 526 per face on the 244-face Cylinder against 2.83 here — so the treant is the tight case and the byte floor governs every coarse model. Single-specimen basis: the Weeping Treant v1.2 alone, 429,120 faces, 2026-08-05. The 526 ↔ 2.83 spread is the reason that matters: this quantity is measured to vary by 186× across the corpus, and one point on a curve that steep is not a distribution. A second large-model measurement triggers re-derivation of SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE rather than silent inheritance of a treant-shaped constant.",
             )?,
             tip_diameter_min_allowed_mm,
             tip_radius_min_allowed_mm: Derived::new(

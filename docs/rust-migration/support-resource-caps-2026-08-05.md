@@ -49,6 +49,23 @@ The parity projection is exactly `81·F + 36·R + 4`: 81 B of per-triangle
 projected arrays per face, and 36 B per `(cell, face)` reference for the CSR
 plus the transient pair vector.
 
+> **Owner ruling R4 (2026-08-05) — this is n = 1, and it is marked as such.**
+> Both observations in the table above, and therefore both coefficients derived
+> from them, rest on a **single specimen**: the Weeping Treant v1.2, 429,120
+> faces, 2026-08-05. There is no second large model in the corpus to check them
+> against — the next largest is 4,760 faces, 90× smaller, and sits under both
+> floors where the coefficients never bind. Two numbers from one mesh are a
+> measurement, not a distribution.
+>
+> The consequence is recorded in the M0 registry notes of all four constants
+> (`SUPPORT_KNN_WORK_PER_FACE_OBSERVED`, `SUPPORT_KNN_MAX_WORK_PER_FACE`,
+> `SUPPORT_PARITY_GRID_REFS_PER_FACE_OBSERVED`,
+> `SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE`) and is binding: **a second
+> large-model measurement triggers re-derivation of these coefficients, not
+> silent inheritance of a treant-shaped constant.** The next large model may not
+> ratify 696 or 2.83; if it does not, the rule is re-run over both specimens
+> rather than the new model being declared an outlier.
+
 **References, not faces, dominate that projection, and `R/F` falls as a mesh
 refines** — 526 references per face on the 244-face Cylinder against 2.83 on the
 429k-face treant, because a coarse mesh's large triangles each span many 1 mm
@@ -81,6 +98,48 @@ per_face = next_power_of_two(2 × observed_per_face)
 | `SUPPORT_KNN_MAX_WORK_FLOOR` | 100,000,000 | inherited unmeasured value, unchanged |
 | `SUPPORT_PARITY_GRID_MAX_BYTES_FLOOR` | 67,108,864 | inherited unmeasured value, unchanged |
 
+> **CORRECTED 2026-08-05 (late), owner ruling R1 — the scaled family is two, and
+> now it really is two.** As landed at `ef88ab0`, `SupportPreparationLimits::input`
+> scaled a **third** cap that this document, the registry, and the type's own doc
+> comment all omitted: `SpecializedLimits::coverage_route_knn.max_work`, by the
+> same 2,048 coefficient, purely because it shares the `KnnBatchLimits` shape with
+> the minima batch. It had no measurement of record, no accessor, and no test.
+> `SUPPORT_KNN_WORK_PER_FACE_OBSERVED` = 696 was measured on the **minima-to-face**
+> batch alone (§2); nothing in this record measures the coverage-route batch.
+>
+> That scaling is **removed**. The coverage-route cap stays at the flat
+> `SUPPORT_KNN_MAX_WORK_FLOOR` until someone measures the coverage-route batch.
+> The removal is behaviorally inert on every model: the treant's instrumented
+> coverage-route demand is **15,282,619** work units, **6.5× under** the flat
+> floor, and the treant stops at the specialized gate (§6) before coverage
+> routing runs at all; every other corpus model is ≤ 4,760 faces, where the floor
+> governed under the scaling too. Pinned by
+> `the_coverage_route_knn_cap_is_the_flat_floor_at_every_face_count`
+> (`crates/plinth-support/tests/resource_cap_policy.rs`).
+
+> **RATIFIED 2026-08-05, owner ruling R2 — the 512 B/face coefficient stands.**
+> The pre-landing proposal carried **256** B/face for the parity grid; the
+> landed value is **512**. That deviation is deliberate and is ratified as
+> written, with no code change.
+>
+> The point of the deviation is that there is **one** rule,
+> `next_power_of_two(2 × observed)`, applied uniformly to both coefficients.
+> 256 would have required reading the rule differently for the grid than for
+> kNN — `next_power_of_two(observed)` rounding 182.89 up to 256 — and a policy
+> with two rules dressed as one is worse than a policy with a wider margin.
+> Uniformity is the property being bought here.
+>
+> The margin it buys is wider, and that is also on purpose. 512 B/face admits
+> **4.2×** the treant's observed 2.83 refs/face (11.97 admitted against 2.83
+> observed), where the kNN coefficient admits only **1.7×** its observed 696.
+> The asymmetry is justified by the corpus itself: the refs-per-face ratio is
+> the one quantity here measured to vary by more than two orders of magnitude
+> across the corpus — **526 refs/face on the 244-face Cylinder against 2.83 on
+> the 429k-face treant** (§2). A coefficient derived from the *tight* end of a
+> 186× spread earns a wider margin than one derived from a quantity with no
+> demonstrated spread at all. Note also that 512 is inert on today's corpus in
+> either case: the byte floor governs every reachable model (§4).
+
 `k·N` is still a bound. It refuses anything worse than linear in `N`, which is
 precisely the runaway each cap was written to catch:
 
@@ -111,6 +170,27 @@ are refusal-only bounds that never alter an admitted plan.
 Measured, not assumed: the 2026-08-05 before/after census differs in **exactly
 one line out of 3,399**, the treant's own stage-error row. All seven reachable
 models keep their digests:
+
+> **CORRECTED 2026-08-05 (late), owner ruling R3.** The headline above is
+> **wrong as stated and is not the claim the measurement supports**. The true
+> before/after diff over the 3,399-line census is **9 changed lines**, not one:
+>
+> - **8 additive harness fields** on the eight `MODEL` rows — the two
+>   materialized caps (`max_grid_bytes=`, `knn_max_work=`) that this policy
+>   makes observable per model. They are new *reporting*, present on every model
+>   including the seven whose values did not move, and they are exactly why the
+>   line count moved at all.
+> - **1 substantive line**, the treant's own `T0_stage_error` row, which now
+>   names the specialized gate instead of perception because the treant now
+>   clears perception.
+>
+> What the measurement *does* establish, and what the sentence should have said:
+> **all 3,390 instrumented `CENSUS` body lines are byte-identical**, and **all
+> seven reachable digests are unmoved** — the table below is the full check. The
+> zero-behavioral-delta claim survives the correction intact; the "one line"
+> figure did not, and it was the more impressive of the two claims, which is
+> precisely why it needed checking. Retained above rather than rewritten, per
+> this project's honest-addendum convention.
 
 | Model | faces | digest (before == after) |
 |---|---|---|
