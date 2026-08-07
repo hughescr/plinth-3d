@@ -1,6 +1,6 @@
 use geom_kernel::{
-    KnnBatchLimits, KnnBatchPlan, KnnBatchPlanError, NeighborCsr, PointCloudIndex,
-    PointIndexBuildError, PointQueryError, RadiusQueryLimits,
+    knn_single_source_planned_into, KnnBatchLimits, KnnBatchPlan, KnnBatchPlanError, NeighborCsr,
+    PointCloudIndex, PointIndexBuildError, PointQueryError, RadiusQueryLimits,
 };
 
 const THREAD_SWEEP_CHILD: &str = "GEOM_KERNEL_POINT_INDEX_THREAD_SWEEP_CHILD";
@@ -660,4 +660,218 @@ fn fu8d_knn_row_zero_is_k_independent_bit_for_bit() {
             );
         }
     }
+}
+
+/// FU-8e (2026-08-07).  **The single-source fast path is the tree's answer,
+/// bit for bit.**
+///
+/// [`knn_single_source_planned_into`] skips the immutable kd-tree entirely at
+/// `source_count == 1` and evaluates `SquaredEuclidean::dist` directly.  That
+/// is admissible only as a *specialisation*, never as a second opinion: the
+/// merge gate compares these distances with `total_cmp` and takes a minimum,
+/// so a one-ULP disagreement is a different geometry, not a rounding nicety.
+///
+/// The argument for identity is structural and lives on the function itself
+/// (five clauses: `k = 1` is the only legal `k`; one leaf and zero stems, so no
+/// descent; the leaf's remainder loop is literally `((0.0 + d0) + d1) + d2`,
+/// the same seed and the same term order as `SquaredEuclidean::dist`; the SIMD
+/// chunk paths are compiled out *and* unreachable at one point; the boundary
+/// refetch is an identity).  This fixture is the empirical half — it holds the
+/// claim still if the `kiddo` pin, its features, or either code path moves.
+///
+/// Both sides are compared on `f64::to_bits`, and the general path's
+/// `point_ids[row.start]` is asserted to be `0`, because that is the other
+/// thing the fast path silently claims by returning distances alone.
+///
+/// Coverage: 23,409 engineered pairs drawn from a value set of `+-0`,
+/// subnormals, `f64::EPSILON`-apart neighbours, `1e150`, `1e-300`, sign-mixed
+/// triples and mixed `1e12`/`1e-6` magnitudes — the diagonal of that grid is
+/// the exact-coincidence case — plus 21,000 pseudo-random pairs whose three
+/// dimensions are deliberately scaled to different exponents, since a
+/// mismatched fold order would disagree exactly there and nowhere else.
+#[test]
+fn fu8e_single_source_is_the_tree_answer_bit_for_bit() {
+    /// One batch: the fast path against the general path, on raw bits.
+    fn agree(source: [f64; 3], queries: &[[f64; 3]], label: &str) {
+        let plan = knn_plan(1, queries.len(), 1);
+        let index = PointCloudIndex::new_for_knn_batch(&[source], &plan)
+            .expect("one finite source point builds an index");
+        let tree = index
+            .knn_batch_planned(queries, &plan)
+            .expect("planned batch executes");
+        // Pre-poison the buffer: the fast path must clear it, never append.
+        let mut fast = vec![f64::from_bits(0x7ff8_0000_0000_0001); 3];
+        knn_single_source_planned_into(&source, queries, &plan, &mut fast)
+            .expect("fast path executes");
+        assert_eq!(
+            fast.len(),
+            queries.len(),
+            "{label}: fast path must clear and refill, one distance per query"
+        );
+        for (query, point) in queries.iter().enumerate() {
+            let row = tree.row_range(query).expect("planned row exists");
+            assert_eq!(row.end - row.start, 1, "{label}: planned row width");
+            assert_eq!(
+                tree.point_ids[row.start], 0,
+                "{label}: the only source must be point id 0"
+            );
+            let expected = tree.squared_distances[row.start];
+            assert_eq!(
+                fast[query].to_bits(),
+                expected.to_bits(),
+                "{label}: query {query} {point:?} against source {source:?}: \
+                 fast {} ({:#018x}) vs tree {expected} ({:#018x})",
+                fast[query],
+                fast[query].to_bits(),
+                expected.to_bits(),
+            );
+        }
+    }
+
+    // (a) Engineered points.  Every edge value is placed through nine
+    // dimensional patterns, and every resulting point is then used as a source
+    // against the whole engineered set as one batch — so the grid's diagonal is
+    // the exact-coincidence case and its off-diagonal sweeps sign, magnitude
+    // and subnormal mixtures.
+    const EDGE_VALUES: [f64; 17] = [
+        0.0,
+        -0.0,
+        f64::MIN_POSITIVE,
+        -f64::MIN_POSITIVE,
+        5e-324,
+        -5e-324,
+        f64::EPSILON,
+        1.0,
+        1.0 + f64::EPSILON,
+        -1.0,
+        1e-6,
+        -1e-6,
+        1e12,
+        -1e12,
+        1e150,
+        -1e150,
+        1e-300,
+    ];
+    let mut engineered = Vec::new();
+    for value in EDGE_VALUES {
+        engineered.push([value, value, value]);
+        engineered.push([value, 0.0, -0.0]);
+        engineered.push([0.0, value, 0.0]);
+        engineered.push([-value, value, -value]);
+        engineered.push([value, 1.0, -1.0]);
+        engineered.push([1.0 + value, 1.0, 1.0]);
+        engineered.push([1e12, value, 1e-6]);
+        engineered.push([value, 1e150, 1e-300]);
+        engineered.push([1e-6, 1e12, value]);
+    }
+    assert_eq!(engineered.len(), 153, "engineered point set size");
+    // The engineered distances must stay finite, or this case would prove only
+    // that both paths agree on `inf`.
+    for source in &engineered {
+        for query in &engineered {
+            let squared: f64 = (0..3)
+                .map(|dim| (source[dim] - query[dim]) * (source[dim] - query[dim]))
+                .sum();
+            assert!(
+                squared.is_finite(),
+                "engineered pair {source:?}/{query:?} overflows to {squared}"
+            );
+        }
+    }
+    for &source in &engineered {
+        agree(source, &engineered, "engineered");
+    }
+
+    // (b) Pseudo-random pairs, deterministic (a fixed 64-bit LCG, no crate
+    // dependency and no wall-clock seed).  The three dimensions of each batch
+    // are scaled to different exponents on purpose: floating-point addition is
+    // not associative, so a fold that summed the terms in another order would
+    // disagree exactly here.
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut next = move || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (((state >> 11) as f64) / ((1u64 << 53) as f64)) * 2.0 - 1.0
+    };
+    const SCALES: [[f64; 3]; 5] = [
+        [1.0, 1.0, 1.0],
+        [1e8, 1e-8, 1.0],
+        [1e-12, 1.0, 1e12],
+        [1e6, 1e6, 1e-18],
+        [1e-3, 1e15, 1e-15],
+    ];
+    let mut random_pairs = 0usize;
+    for batch in 0..50usize {
+        let scale = SCALES[batch % SCALES.len()];
+        let source = [next() * scale[0], next() * scale[1], next() * scale[2]];
+        let queries = (0..420)
+            .map(|_| [next() * scale[0], next() * scale[1], next() * scale[2]])
+            .collect::<Vec<_>>();
+        agree(source, &queries, "random");
+        random_pairs += queries.len();
+    }
+    assert!(
+        random_pairs >= 20_000,
+        "fixture must carry at least 20,000 random pairs, carried {random_pairs}"
+    );
+
+    // (c) A zero-query plan is valid on both paths, and still clears `out`.
+    let mut out = vec![1.0, 2.0, 3.0];
+    knn_single_source_planned_into(&[0.0; 3], &[], &knn_plan(1, 0, 1), &mut out)
+        .expect("zero-query fast path");
+    assert!(
+        out.is_empty(),
+        "zero-query batch must leave an empty buffer"
+    );
+
+    // (d) The guards refuse rather than silently answering "the nearest".
+    let mut out = Vec::new();
+    assert_eq!(
+        knn_single_source_planned_into(&[0.0; 3], &[[1.0; 3]], &knn_plan(4, 1, 2), &mut out),
+        Err(PointQueryError::KnnFastPathPlanShape {
+            source_count: 4,
+            neighbors: 2,
+        }),
+        "a multi-source plan must be refused, not specialised"
+    );
+    assert_eq!(
+        knn_single_source_planned_into(
+            &[0.0; 3],
+            &[[1.0; 3], [2.0; 3]],
+            &knn_plan(1, 1, 1),
+            &mut out
+        ),
+        Err(PointQueryError::KnnPlanQueryCountMismatch {
+            planned: 1,
+            actual: 2,
+        }),
+        "the query-count guard must survive the specialisation"
+    );
+    assert_eq!(
+        knn_single_source_planned_into(
+            &[0.0, f64::NAN, 0.0],
+            &[[1.0; 3]],
+            &knn_plan(1, 1, 1),
+            &mut out
+        ),
+        Err(PointQueryError::NonFiniteSource { axis: 1 }),
+        "a non-finite source must be a typed refusal, not a NaN distance"
+    );
+    assert_eq!(
+        knn_single_source_planned_into(
+            &[0.0; 3],
+            &[[0.0, 0.0, f64::INFINITY]],
+            &knn_plan(1, 1, 1),
+            &mut out
+        ),
+        Err(PointQueryError::NonFiniteQuery { query: 0, axis: 2 }),
+        "a non-finite query must be a typed refusal, not a NaN distance"
+    );
+    // The general path refuses the same non-finite source, at build time.
+    assert_eq!(
+        PointCloudIndex::new_for_knn_batch(&[[0.0, f64::NAN, 0.0]], &knn_plan(1, 1, 1)).err(),
+        Some(PointIndexBuildError::NonFinitePoint { point: 0, axis: 1 }),
+        "both paths must refuse the same non-finite source"
+    );
 }
