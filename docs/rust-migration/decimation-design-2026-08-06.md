@@ -301,6 +301,10 @@ Boundary edges are **0** at every row, as they are on the original: the damage i
 opened boundary. §0(a)'s non-manifold column reproduces exactly where the targets coincide
 (3 at 425,934; 11 at 410,010; 16 at 403,640; 24 at 390,898).
 
+> **Corrected 2026-08-07 — see §8.9.** The `390,898 → 390,896` row above is re-measured as
+> **390,898 output faces** by the now-committed instrument. The topology and worst-point
+> figures are unchanged.
+
 **R-5 is real but late.** The bounding box is bit-identical to the original's through
 r = 0.70 and moves by 0.0085 mm only at r ≤ 0.60 — deeper than any reduction this model can
 pass. Extremal-vertex protection is holding at every ratio that matters.
@@ -352,6 +356,10 @@ Every defect below is created by the reduction.
 | 390,896 | 8.907 % | 109 | 24 |
 | 214,492 | 50.016 % | 664 | 170 |
 
+> **Corrected 2026-08-07 — see §8.9.** The `390,896` row is re-measured as **390,898** output
+> faces by the committed instrument, at 24 non-manifold edges as recorded. The duplicate-face
+> column has no instrument at all — that is FU-26 part (2) — and remains a scratch measurement.
+
 Anatomy of the offenders, dumped at r = 0.9109 (25 by a clean classification; see §8.6 for why
 the gate says 24):
 
@@ -396,6 +404,10 @@ Three targets × four option sets, full-population probes:
 | 403,640 | 403,640 f / 16 nm / max 0.0876457 | identical | identical | identical |
 | 390,898 | 390,896 f / 24 nm / max 0.0881166 | identical | identical | identical |
 
+> **Corrected 2026-08-07 — see §8.9.** The `390,898 → 390,896 f` control is re-measured as
+> **390,898 f**, at the same 24 non-manifold edges and the same max 0.0881166 mm. The
+> `Prune`/`LockBorder` comparison is a control-against-variant one and is unaffected.
+
 "Identical" means every reported quantity — output faces, boundary edges, non-manifold edges,
 p99, p99.9, max — matched the control to the printed precision. Both flags are inert here for
 structural reasons, not by accident: **`LockBorder` has nothing to lock** (the treant is closed;
@@ -418,6 +430,13 @@ order-dependent, and it under-counts:
 | 390,896 faces | 25 | 24 | (144833, 144834) |
 | 214,492 faces | 208 | 170 | 38 keys |
 
+> **Corrected 2026-08-07 — see §8.9.** The r ≈ 0.911 candidate is **390,898 faces**, not
+> 390,896, and the committed instrument reproduces the `build_face_topology` column there
+> exactly: **24**. The `frozen-snapshot classification` column is *not* reproducible from any
+> committed instrument, because the engine has no such counter — which is precisely the defect
+> this section opens. Read 25 and 208 as scratch measurements of 2026-08-07, and 24 and 170 as
+> the engine's own output.
+
 Separately and larger: **duplicate faces are excluded from `nonmanifold_edges` by design and are
 counted nowhere else**, so `topology_not_increased` cannot see them at all — 664 duplicate-face
 groups at r = 0.50 pass that gate unremarked. Both points make the gate's number a *floor* on
@@ -437,7 +456,10 @@ deviation. *If it cannot, stop and report.*" **It cannot, and this is the report
    `PRINT_FLOOR_CHORD_MM` (0.08 mm) caps the treant at (2.125 %, 4.453 %]; with
    `LAYER_HEIGHT_DEFAULT_MM` (0.050 mm) at ≈0.12 %. The p99/p99.9 budget independently caps at
    ~8.9 % — and note that at 390,896 faces the full-population p99.9 is **0.019756 mm**, over
-   the un-slacked 0.019 limit, passing only on the ×1.1 final slack. The binding constraint in
+   the un-slacked 0.019 limit, passing only on the ×1.1 final slack. (Corrected 2026-08-07, §8.9:
+   read that mesh as 390,898 faces; the full-population percentiles at it stay a scratch
+   measurement, because the committed search refuses the candidate on topology before it ever
+   runs a full-population probe.) The binding constraint in
    every case is a handful of thin twigs, and it binds at single-digit percent or less.
 3. **A ≤2 % face reduction changes no downstream disposition.** The gate arithmetic in §0(b)
    and §5 R-2 has since been overtaken by FU-8d phases F1–F3: the treant's merge gate no longer
@@ -493,6 +515,64 @@ transcript: since FU-8d phase F3 the treant no longer refuses at the merge gate 
 EXCEEDS-TIMEBOX, so an 8-model run would spend a timebox to produce no digest. The treant
 carries no frozen digest and is not part of the OD-8 set. `routed_contacts` and
 `final_live_members` are unmoved on all seven as well.
+
+### 8.9 Dated correction, 2026-08-07 — the r ≈ 0.911 candidate is 390,898 faces
+
+§8 was measured with scratch instrumentation that was reverted before the gates. The
+serialization it needed is now committed (report schema
+`plinth/m3-decimation-corpus-budget-report/v4`, §9.8), so §8's headline row can be — and has
+been — re-derived from an instrument that survives a clean checkout. One figure moves.
+
+**What was re-run.** `cargo test -p plinth-decimate --offline --test corpus_budgets` at this
+branch tip, macOS/arm64, against the same tracked 429,120-face
+`corpus/models/Weeping Treant v1.2.stl` and the same production budget. The treant's r ≈ 0.911
+candidate now reports:
+
+| quantity | §8.2/§8.4/§8.5/§8.6 as written | committed instrument, 2026-08-07 |
+|---|---|---|
+| requested ratio | `ratio_for_integer_target(390,898)` = `0.91092992636092474` | bisection midpoint `0.91093749999999996` |
+| face target that ratio asks for | 390,898 | **390,901** |
+| achieved ratio | — | `0.91092934377330348` |
+| **output faces** | **390,896** | **390,898** |
+| non-manifold edges after | 24 | **24** |
+| boundary edges after | 0 | **0** |
+| `max_mm` | 0.0881166 (full population) | **0.08811664288378389** (sampled) |
+| disposition | — | `TopologyIncreased`, `NoDownstreamUtilityEvidence` |
+
+**The discrepancy is two faces, and it is a difference of what was asked for, not of what the
+engine does.** §8's provenance says every candidate was simplified "at the exact integer face
+target the search itself would request (`ratio_for_integer_target`)". That is true of the
+*adaptive* probes — and where it applies, the committed instrument reproduces §8 exactly:
+targets 425,935, 422,750, 419,565, 416,380 and 410,010 return 425,934, 422,750, 419,564,
+416,380 and 410,010 faces at 3, 3, 6, 7 and 11 non-manifold edges, matching §8.2 and §0(a) row
+for row. But the r ≈ 0.911 candidate does not come from the adaptive path; it comes from the
+**bisection**, which requests midpoints. `429,120 × 0.91093749999999996 = 390,901.5`, so the
+search asks meshoptimizer for **390,901** faces and gets 390,898 — an undershoot of 3 — where
+the integer-target request asked for 390,898 and got 390,896, an undershoot of 2. Two different
+requests, three decimal places apart, both r ≈ 0.911.
+
+**§0 had it right all along.** §0(b), written from the live 2026-08-05 corpus report, records
+`requested ratio 0.9109 → output faces 390,898`, and §0(a) lists 390,898 at 24 non-manifold
+edges. It was §8's scratch re-measurement that introduced 390,896, by asking for a slightly
+different target than the search asks for. The v4 instrument agrees with §0, which is the
+outcome one wants from a reproducibility fix: the durable instrument and the original live
+report agree, and the reverted scratch is the odd one out.
+
+**Nothing in the topology conclusion changes.** 24 non-manifold edges and 0 boundary edges at
+this candidate, monotone in faces removed on either side of the two-face difference; the
+worst-point deviation agrees to seven significant figures (0.0881166 mm) even though one figure
+is a full-population probe and the other a sampled one, because the worst point is a single
+twig-wall fusion that both populations capture. §8.7's go/no-go, §8.4's coincident-sheet
+mechanism and §8.5's closure of R-1 option (b) all stand unaltered.
+
+**FU-26 is written against the instrument-produced mesh.** Its headline is now the 390,898-face
+candidate: `build_face_topology` reports **24** there, and that half of the finding is
+reproducible by anyone from a clean checkout. The `25` it is compared against is not, and cannot
+be — no committed instrument counts it, which is FU-26 part (1) itself. Likewise the
+duplicate-face-group counts (109 here, 664 at r = 0.50) have no committed counter at all, which
+is FU-26 part (2). Both remain scratch measurements of 2026-08-07 and are labelled as such in
+§8.4 and §8.6. Whoever lands FU-26 lands the counter first, and then these numbers become
+re-derivable rather than remembered.
 
 ---
 
@@ -741,3 +821,59 @@ here because U4's strength is bounded by FU-26 until FU-26 lands.
 **`retained_original_vertex_ids` is still discarded** by `run_budget_search` (§1). Nothing in
 Phase 2 needed it; anything that later compares a decimated mesh against a full-resolution
 artifact still will.
+
+### 9.8 The Phase-1 instrument, landed 2026-08-07 — and the wall-clock that deliberately is not in it
+
+> **Third dated addendum.** Everything above stands. This section closes the §6 Phase-1
+> serialization deliverable, which the Phase-1 landing did not execute: the diagnosis in §8 was
+> produced with scratch instrumentation that was reverted before the gates, so §8's own
+> measurement set could not be reproduced from a clean checkout. It can now.
+
+§6 Phase 1 asks for a report-schema bump to
+`plinth/m3-decimation-corpus-budget-report/v4` serializing three things. Their disposition, one
+by one, so nothing on that list is left silently absent:
+
+**1. `max_mm` — landed.** Every probe the search records now serializes its worst-case
+deviation: `search_steps[].max_mm` for the sampled bisections,
+`final_attempts[].max_mm` for the full-population attempts, and
+`adaptive_exploration.probes[].sampled_max_mm` / `.full_max_mm` for both adaptive probes. The
+model level gains `final_max_mm` and `final_max_limit_mm`, the latter read from the M0 registry
+(`DECIMATION_MAX_ABSOLUTE_DEVIATION_MM`) rather than restated in the test, so the reported bound
+cannot drift from the bound the witness applies. This is the quantity U3 exists for and the one
+§8.3 shows the ratified percentile budget to be blind to — 0.0566 mm of worst-case deviation
+while p99.9 reads 0.000073 mm — and until now it was measured on every probe and written down
+nowhere. §8.9 is the first re-derivation off it.
+
+**2. Surface-build count — landed, as a counter rather than an inference.**
+`BudgetSearchTrace::native_surface_builds` is incremented at the four call sites the search
+owns, two per `probe_two_sided` call (original and candidate); the exact-identity probes build
+none, because an identity's two directed distances are exactly zero by construction and are not
+routed through a nearest kernel. `run` builds exactly one more, for the mandatory
+feature-protection backward error map, on every path including the `ProtectionCap`
+short-circuit, so the per-run total is the reported value plus one. Measured at this tip:
+**20** on the Weeping Treant v1.2 (21 per run — the figure §0's minor corrections derive by
+hand), 34 on `Sphere`, 26 on `make_toed_slab`, and 0 on the five models that refuse at
+`ProtectionCap` before the search exists. Ten of the treant's twenty are redundant rebuilds of
+the unchanged original; that is R-6's first bullet and §6 Phase 4's first repair, and this
+counter is how it would be shown to have worked.
+`the_surface_build_counter_agrees_with_every_probe_the_trace_recorded` rederives the counter
+from what the trace recorded, so a probe added later without its increment fails a test instead
+of quietly under-reporting.
+
+**3. Per-phase wall-clock — deliberately NOT serialized, in application of the contention
+caveat.** The project's standing rule is that wall-clock measured while other work runs in
+parallel is not admissible as a landed number, and this branch's gates and censuses were run
+alongside other workflows. Serializing per-phase timings into a committed, byte-compared report
+would have done two bad things at once: put contention-contaminated figures on the record as if
+they were measurements, and make the report itself non-deterministic, which would break
+`protected_budget_search_is_bit_identical_at_1_4_and_16_threads`'s byte comparison across
+thread counts and the gate's own re-encode-and-compare round trip. §4 item 4 and §6 Phase 1
+list it; it is not dropped for convenience and it is not forgotten. When a quiet machine is
+available, the honest form is a separate, uncommitted timing run — not a field in this report.
+The one thing the report *does* carry that bears on cost is the surface-build count above,
+which is a deterministic count of work rather than a measurement of time.
+
+**No behaviour changed with the instrument.** The engine gains one `usize` counter on the trace
+and nothing that can alter a candidate, a probe, a topology audit or a disposition; the corpus
+gate's own expected statuses are unmoved on all eight models. The OD-8 re-measurement at
+this tip is §9.9.
