@@ -542,11 +542,27 @@ deliberate details:
   geometrically eligible and *not* downstream-useful. That asymmetry is intended and is
   pinned by `u2_refuses_on_either_percentile_independently_and_grants_no_slack`.
 
-**U5 is machine-checked, not prose.** `registered_face_scaled_demand_falls` computes the two
+**U5 is machine-checked, not prose.** `registered_face_scaled_demand_falls` decides the two
 face-exact registered demands — the minima-kNN batch's `source_count` (`= F`) and the `81·F`
-per-triangle term of `81·F + 36·R + 4` — in `u128` and requires both to fall strictly. It is
-implied by U1; it is computed anyway so the registered claim is checked rather than asserted.
-The `36·R` term is deliberately absent, exactly as §2 U5 requires.
+per-triangle term of `81·F + 36·R + 4`. It is implied by U1; it is computed anyway so the
+registered claim is checked rather than asserted. The `36·R` term is deliberately absent,
+exactly as §2 U5 requires.
+
+**Correction 2026-08-07 — U5 was two clauses, and the second was the first restated.** As
+landed, that function computed `out < in` *and* `81·out < 81·in` in `u128` and required both.
+The second conjunct cannot fail when the first holds: `81·F` is `F` multiplied by a positive
+integer constant fixed in the kernel, so over non-negative face counts the two comparisons are
+the same comparison. Written as a conjunction it read as two independent checks and would have
+let a reviewer believe two quantities had been measured. The two *resources* are genuinely
+distinct and both stay named; the two *quantities* are proportional by construction, so the
+clause is now stated **once**, with the proportionality documented in the function's doc
+comment as the reason one comparison covers both. The test
+`u5_is_one_clause_because_both_registered_demands_are_proportional_to_the_face_count` no longer
+asserts the same thing twice: it recomputes each demand separately — including at
+`81 · usize::MAX`, the width where the scaled form needs `u128` not to wrap — and requires them
+to *agree*, so if the kernel ever makes the parity term something other than a constant times
+`F`, the single clause fails loudly and must become two. No behaviour changes: the predicate
+accepts and refuses exactly the same candidates it did before.
 
 ### 9.2 The four constants, and which of §7's questions they answer
 

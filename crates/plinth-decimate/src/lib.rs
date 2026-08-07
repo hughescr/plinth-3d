@@ -1530,10 +1530,12 @@ fn record_unexplored_dense_interval(input_faces: usize, trace: &mut BudgetSearch
 ///   exterior-ness is relied on, not re-proved: the contact machinery screens it
 ///   later.
 /// - **U5 — the registered saving.** The two execution-authority resources whose
-///   demand is an exact function of face count alone must both strictly fall:
-///   the minima-kNN batch's `source_count` (`= F`) and the `81·F` per-triangle
-///   term of the parity-grid projection. This is implied by U1, and is computed
-///   explicitly anyway so the registered claim is machine-checked rather than
+///   demand is an exact function of face count alone must strictly fall: the
+///   minima-kNN batch's `source_count` (`= F`) and the `81·F` per-triangle term
+///   of the parity-grid projection. Those two demands are proportional by
+///   construction, so this is one comparison and not two — see
+///   [`registered_face_scaled_demand_falls`]. It is implied by U1, and is
+///   computed anyway so the registered claim is machine-checked rather than
 ///   asserted in prose. It stops at those two terms on purpose — see
 ///   [`SUPPORT_FACE_SCALED_RESOURCE_DEMAND`].
 fn assess_downstream_utility(
@@ -1568,19 +1570,31 @@ fn assess_downstream_utility(
     ))
 }
 
-/// U5's arithmetic, stated exactly and in a width that cannot wrap.
+/// U5's arithmetic — one clause, because the two registered demands are
+/// exactly proportional by construction.
 ///
-/// `PARITY_GRID_BYTES_PER_FACE` is the `81·F` per-triangle term of the parity
-/// projection `81·F + 36·R + 4` (`rust/geom_kernel/src/parity.rs`); the kNN
-/// batch's `source_count` is `F` itself. Both are exact functions of the face
-/// count alone, so both fall strictly whenever the face count does. The `36·R`
-/// reference term is deliberately absent from this claim.
+/// The witness names two *resources*: the minima-kNN batch's `source_count`,
+/// which is `F` itself and is capped by `SUPPORT_KNN_MAX_WORK_PER_FACE`, and
+/// the `81·F` per-triangle term of the parity projection `81·F + 36·R + 4`
+/// (`rust/geom_kernel/src/parity.rs`), capped by
+/// `SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE`. They are not two independent
+/// *quantities*: `81·F` is `F` multiplied by a positive integer constant fixed
+/// in the kernel, so over non-negative face counts `81·out < 81·in` is `out <
+/// in` restated. Asserting both would be one comparison written twice and
+/// would read as two checks where there is one, so the clause is stated once
+/// and the proportionality is what makes the single comparison cover both
+/// named resources. `u5_is_one_clause_because_both_registered_demands_are_\
+/// proportional_to_the_face_count` pins that equivalence, including at the
+/// `81 · usize::MAX` width where the scaled form needs `u128` not to wrap.
+///
+/// The `36·R` reference term is deliberately absent from the claim, and is the
+/// reason this predicate cannot simply be "the mesh got smaller": `R` is the
+/// one term of that projection that is *not* an exact function of `F`, and it
+/// is measured to fall sublinearly (526 references per face on the 244-face
+/// Cylinder against 2.83 on the 429,120-face treant). See
+/// [`SUPPORT_FACE_SCALED_RESOURCE_DEMAND`].
 fn registered_face_scaled_demand_falls(input_faces: usize, output_faces: usize) -> bool {
-    const PARITY_GRID_BYTES_PER_FACE: u128 = 81;
-    let knn_falls = (output_faces as u128) < (input_faces as u128);
-    let parity_falls = (output_faces as u128) * PARITY_GRID_BYTES_PER_FACE
-        < (input_faces as u128) * PARITY_GRID_BYTES_PER_FACE;
-    knn_falls && parity_falls
+    output_faces < input_faces
 }
 
 fn record_sampled_refusal(
@@ -3946,18 +3960,42 @@ mod tests {
     }
 
     #[test]
-    fn u5_claims_only_the_two_exactly_face_scaled_registered_demands() {
-        // Both named terms fall for any genuine reduction, and neither falls
-        // without one. The 36·R reference term is deliberately not claimed.
-        assert!(registered_face_scaled_demand_falls(65_024, 40_000));
-        assert!(registered_face_scaled_demand_falls(32_768, 32_767));
-        assert!(!registered_face_scaled_demand_falls(65_024, 65_024));
-        assert!(!registered_face_scaled_demand_falls(65_024, 65_025));
-        // The 81·F term is computed in a width that cannot wrap.
-        assert!(registered_face_scaled_demand_falls(
-            usize::MAX,
-            usize::MAX - 1
-        ));
+    fn u5_is_one_clause_because_both_registered_demands_are_proportional_to_the_face_count() {
+        // The witness names two registered resources: the minima-kNN batch's
+        // `source_count` (= F) and the parity projection's 81·F per-triangle
+        // term. This test is what licenses stating the clause once: it
+        // recomputes both demands separately and requires them to agree on
+        // every case, including the width at which the scaled form would wrap
+        // a `usize`. If the kernel ever makes the parity term something other
+        // than a positive constant times F, this fails and the single clause
+        // must become two.
+        const PARITY_GRID_BYTES_PER_FACE: u128 = 81;
+        for (input_faces, output_faces, expected) in [
+            (65_024_usize, 40_000_usize, true),
+            (32_768, 32_767, true),
+            (65_024, 65_024, false),
+            (65_024, 65_025, false),
+            (usize::MAX, usize::MAX - 1, true),
+            (0, 0, false),
+        ] {
+            let knn_falls = (output_faces as u128) < (input_faces as u128);
+            let parity_falls = (output_faces as u128) * PARITY_GRID_BYTES_PER_FACE
+                < (input_faces as u128) * PARITY_GRID_BYTES_PER_FACE;
+            assert_eq!(
+                knn_falls, parity_falls,
+                "{input_faces} -> {output_faces}: the two registered demands are proportional by \
+                 construction and must never disagree"
+            );
+            assert_eq!(
+                registered_face_scaled_demand_falls(input_faces, output_faces),
+                expected,
+                "{input_faces} -> {output_faces}"
+            );
+            assert_eq!(
+                registered_face_scaled_demand_falls(input_faces, output_faces),
+                knn_falls && parity_falls
+            );
+        }
     }
 
     #[test]
