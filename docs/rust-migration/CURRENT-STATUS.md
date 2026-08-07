@@ -1973,6 +1973,90 @@ the gate.
 **Left VERIFIED-NOT-MERGED** on `feature/fu8f-load-transpose`; this branch queues behind the
 FU-8e merge, which owns the variant loop.
 
+### FU-8f phase G2 landed 2026-08-07 — the mesh is hashed once per gate stage; no charged number moves {#fu8f-g2-2026-08-07}
+
+**Scope, stated first.** G2 is the design record's D2a′ and touches exactly one thing: *how many
+times the gate hashes the mesh*. It moves no charged operation count, adds no byte term, raises
+or lowers no cap, and changes no answer. It does not touch anything FU-8e owns (the variant
+loop, `fill_proposal_nearest_delta`, the `assess_coverage` call sites) or anything G3 owns
+(`first_safe_proposal`, tournament acceptance).
+
+**The defect (design record F-4).** `mesh_fingerprint` walks every triangle. The merge gate paid
+for that walk **twice per batch** — once in `finalize_specialized_load_partition`, again in the
+`finalize_load_rows` it immediately calls — over a mesh that **cannot change inside a
+tournament**, because the tournament merges *contacts* and never touches geometry. Measured on
+the Weeping Treant v1.2's 429,120-triangle mesh at `7aa6b73`: 85.1 ms + 81.5 ms = **166.6 ms per
+merge round**, contended. After G1 that was ~40 % of the remaining round, which is why the design
+record sequenced it immediately after the transpose rather than deferring it with D3.
+
+**The fix.** `VerifiedMeshFingerprint` (`perception.rs`) is the digest computed once and carried
+together with the mesh it was computed from. `create_specialized_contact_plan` computes **one**
+for the whole specialized-plan build and threads it through `consolidate` → `evaluate_gate_batch`
+→ `build_gate_load_state` → `SpecializedLoadBaseline::build` → both finalizers, plus the rare
+`variant_load_violation_count_in_full` path, and the accepted plan's own final load finalize
+reuses the same one. Per gate round the hash count goes 2 → 0; per plan build it goes
+`2 × rounds + 2` → 1.
+
+**What did NOT change, and must not.** The staleness **comparison stays at every site**. This
+hoists the hash, not the check: each consumer still compares the threaded digest against its own
+`plan.authority.mesh` and still returns `StaleAuthority` when they disagree. *Verify once, thread
+the proof* — never *stop verifying*. Nothing anywhere is verified less than it was.
+
+**Why the mesh travels inside the proof.** The consumers need the geometry as well as the digest.
+Two separate arguments would admit a proof computed from one mesh being presented alongside a
+different one — a fingerprint that attests nothing. `VerifiedMeshFingerprint::mesh()` is the only
+mesh a holder can reach through it, so digest and geometry cannot drift apart **by construction
+rather than by discipline**.
+
+**The non-gate paths keep their own single hash, deliberately.** `finalize_load_partition` and
+the specialized-plan **edit** replay (`derive_child`) are one-shot, outside the gate's per-round
+loop; threading a proof into them would move a public edit boundary for no saving. G2's claim is
+about the **per-round double hash inside the tournament**, and that is the whole of it. Said
+plainly here so a later reader does not mistake the omission for an oversight.
+
+**The test.** `fu8f_hoisted_fingerprint_still_refuses_a_foreign_mesh_at_both_finalizers` pins the
+comparison at **both** sites *independently*, by handing each a proof that is honestly computed
+and perfectly valid — **for a different mesh**. That is the exact failure a caller mixing two
+meshes would produce, and the exact failure a site that stopped comparing would miss. The
+positive arm asserts the same inputs are admitted under the mesh's own proof, so neither refusal
+passes for the trivial reason that the inputs are refused anyway.
+
+**Nothing to sweep.** No charged number moves, so no dated addendum is owed at
+`placeholders.rs`, `constants.md`, `support-resource-caps-2026-08-05.md` or
+`03-physics-and-constants.md` — the every-record-site rule is satisfied by this section and the
+`VerifiedMeshFingerprint` doc comment, which carries the same argument at the code.
+
+**No wall-clock figure from this phase is recorded as a landed number.** The 166.6 ms is the
+design record's own contended measurement at `7aa6b73`, quoted as the motivation, not re-measured
+here; other workflows built and ran on this machine throughout. The proofs are the hash **count**
+and the bit-identity of the corpus digests. Re-measurement is G4's job.
+
+**OD-8 at this tip — MEASURED ZERO.** All seven frozen census digests are byte-identical:
+`Sphere` 17667468971446251870, `Cylinder` 13310185350867878190, `make_box`
+9657051231007502658, `make_overhang_table` 6686599816688114065, `make_toed_slab`
+11199296506741562956, `make_raking_blade` 13278215294653054002, `make_thin_fin`
+7016743535301716631. `Sphere`/`Cylinder`/`make_box` exercise the **accepted-load** finalize path
+this change touches with no tournament at all; `make_raking_blade` is the live merge witness, 21
+committed merges over 23 gate batches, every one of which now runs on the threaded proof.
+
+**The Weeping Treant is excluded from this census**, which is why it was invoked per model with
+`PLINTH_CENSUS_ONLY` rather than as one 8-model sweep. Stated as observed and no further: a full
+sweep started at this tip was still running after ~25 minutes and was cancelled **without a
+transcript**, so nothing about where it was is claimed here. That is expected and is not a
+finding — G1+G2 shorten batch *preparation*, while the per-round variant loop D1/G3 targets is
+still standing (G3 requires the FU-8e merge first), so a long treant run is exactly what this tip
+should produce. Running the treant to a conclusion is **G4's job by design**, under G4's timebox,
+thread pinning and RSS watchdog. It is not a gate on this phase and was not treated as one.
+
+**Flake observed, not a regression.**
+`specialized::tests::full_specialized_evidence_is_identical_at_one_four_and_sixteen_threads`
+failed once in a full-workspace run at this tip and passed on immediate re-run and in isolation.
+It is a 1/4/16-thread determinism test run while other workflows were saturating the machine.
+Recorded rather than silently re-run.
+
+**Left VERIFIED-NOT-MERGED** on `feature/fu8f-load-transpose` alongside G1; the branch queues
+behind the FU-8e merge.
+
 ### OD-8 delta at this tip — MEASURED ZERO {#fu8b-od8-delta-2026-08-06}
 
 Full 8-model census re-run at `d82c895`, **3,415 lines**. All seven reachable digests are
