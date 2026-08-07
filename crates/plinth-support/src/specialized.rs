@@ -1180,7 +1180,7 @@ impl SpecializedContactPlan {
             hash.usize(vector.load_violation_count);
             hash.usize(vector.unsupported_specialized_count);
         }
-        hash.usize(self.gate_evidence.evaluated_pair_count);
+        hash.usize(self.gate_evidence.gathered_pair_count);
         hash.usize(self.gate_evidence.accepted_pair_count);
         hash.usize(self.gate_evidence.deep_clone_count);
         hash.usize(self.gate_evidence.max_commit_bytes);
@@ -1490,7 +1490,26 @@ impl FrozenSpecializedGateVector {
 pub struct SpecializedGateEvidence {
     pub baseline: FrozenSpecializedGateVector,
     pub accepted: FrozenSpecializedGateVector,
-    pub evaluated_pair_count: usize,
+    /// Merge proposals the tournament **gathered**, summed over its rounds.
+    ///
+    /// Renamed from `evaluated_pair_count` by FU-8f phase G3, 2026-08-07, and
+    /// the rename corrects a mis-statement that predates the phase.  The field
+    /// has always been assigned `total_proposals`, the running sum of
+    /// `gather_pair_proposals`' output, incremented immediately after the
+    /// gather and checked against `max_merge_total_proposals` — so it counted
+    /// proposals *offered to* the gate, never proposals the gate evaluated.
+    /// The two happened to be close while the gate evaluated every variant it
+    /// was handed; under G3's prefix acceptance the gap on the Weeping Treant
+    /// v1.2 is 39,223 gathered against 1 evaluated, and a field named
+    /// "evaluated" counting "gathered" would be a quiet falsehood at three
+    /// orders of magnitude.
+    ///
+    /// **Nothing frozen moves with the name.**  The sealed digest hashes this
+    /// field's *value* (`hash.usize`), not its identifier, so all seven OD-8
+    /// census digests are byte-identical across the rename; the cost is prose,
+    /// which is what the every-record-site rule exists to pay.
+    ///
+    pub gathered_pair_count: usize,
     pub accepted_pair_count: usize,
     /// Seats removed by the terminal exactly-coincident regular coalescing
     /// pass.  That pass is canonicalization, not the gated merge tournament,
@@ -2835,7 +2854,7 @@ fn consolidate(
         selection_config.voxel_pitch_mm.get().powi(2),
         limits,
     )?[0];
-    let mut total_proposals = 0usize;
+    let mut gathered_proposals = 0usize;
     loop {
         check_merge_pair_limit(contacts.len(), limits.max_merge_pairs)?;
         let mut proposals = Vec::new();
@@ -2855,12 +2874,12 @@ fn consolidate(
                 )?;
             }
         }
-        total_proposals = total_proposals
+        gathered_proposals = gathered_proposals
             .checked_add(proposals.len())
             .ok_or(SpecializedError::GateResourceOverflow)?;
-        if total_proposals > limits.max_merge_total_proposals {
+        if gathered_proposals > limits.max_merge_total_proposals {
             return Err(SpecializedError::MergeTotalProposalLimit {
-                required: total_proposals,
+                required: gathered_proposals,
                 limit: limits.max_merge_total_proposals,
             });
         }
@@ -2951,7 +2970,7 @@ fn consolidate(
     Ok(SpecializedGateEvidence {
         baseline: initial_baseline,
         accepted: accepted_vector,
-        evaluated_pair_count: total_proposals,
+        gathered_pair_count: gathered_proposals,
         accepted_pair_count: iterations,
         coalesced_seat_count,
         deep_clone_count: telemetry.deep_clone_count,
@@ -12078,7 +12097,7 @@ mod tests {
             let gate = plan.gate_evidence();
             let actual_gate = (
                 gate.accepted.load_violation_count,
-                gate.evaluated_pair_count,
+                gate.gathered_pair_count,
                 gate.accepted_pair_count,
                 gate.coalesced_seat_count,
             );
