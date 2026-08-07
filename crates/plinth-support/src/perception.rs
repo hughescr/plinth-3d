@@ -4806,6 +4806,7 @@ mod tests {
         let mut saw_merged_tie = false;
         let mut saw_no_survivor = false;
         let mut saw_displaced_holder = false;
+        let mut saw_survivor_inherited_row = false;
         let mut saw_steal = false;
         let mut saw_untouched_row = false;
 
@@ -4974,7 +4975,10 @@ mod tests {
                         if before == left as u32 || before == right as u32 {
                             saw_displaced_holder = true;
                             if after != baseline.carried_area_mm2.len() as u32 {
-                                // A survivor inherited a displaced holder's row.
+                                // A survivor inherited a displaced holder's
+                                // row: the holder was merged away and the
+                                // merged seat did NOT win it back.
+                                saw_survivor_inherited_row = true;
                             }
                         } else if after == baseline.carried_area_mm2.len() as u32 {
                             saw_steal = true;
@@ -5010,6 +5014,10 @@ mod tests {
         assert!(
             saw_displaced_holder,
             "no row's baseline holder was merged away"
+        );
+        assert!(
+            saw_survivor_inherited_row,
+            "no displaced holder's row was inherited by a survivor"
         );
         assert!(
             saw_steal,
