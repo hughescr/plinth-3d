@@ -861,6 +861,23 @@ raising it.) **2026-08-06:** the selection sort named above is fixed (FU-8b (A),
 stay at their inherited values: FU-8b (b) and (c) are unfixed, so the post-fix
 dimensions the constants must be set on do not exist yet.
 
+**Addendum 2026-08-07 (FU-8f phase G1) — a new charged term, not a new cap.**
+Everything above stands and all four caps remain at their inherited values.
+`finalize_load_rows` now scans a **contact-major CSR transpose** of the load
+eligibility instead of scanning `contacts × rows` and skipping the ineligible
+cells — 8,210,643 eligible cells of 160,834,206 visited on the Weeping Treant
+v1.2 at `7aa6b73`, so 94.9 % of the old visits were the skip. That buffer is
+charged as a **new** `LoadResourcePlan::scratch_bytes` term,
+`cells × 4 B + (contacts + 1) × 4 B` = **32,848,040 B**, which is **6.1 % of the
+unchanged 512 MiB `max_load_scratch_bytes`**. No cap was raised, lowered or
+touched, and **no charged operation count moved**: the load operation model
+still prices the scan as `rows × contacts × (owner_log + 4)` and now
+deliberately over-states it, on the FU-8e Q5 precedent that a plan admitting the
+general path *a fortiori* admits its specialisation. Repricing that term is
+sequenced as its own later phase (G5), after a treant run completes the gate.
+See `support-resource-caps-2026-08-05.md` for the counter table, the
+preflight-versus-exact-plan asymmetry, and the bit-identity evidence.
+
 ### 3.10.9 Support execution-authority caps — the unmeasured inventory
 
 Owner ruling **R5, 2026-08-05**. §3.10.8 registered six constants and left the

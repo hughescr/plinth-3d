@@ -1872,6 +1872,107 @@ producer** (`cargo run -p plinth-core --offline --example render_constants_golde
 hand-edited, and the regeneration touched exactly the two lines whose registry notes changed.
 **All five gates green at this tip.**
 
+### FU-8f phase G1 landed 2026-08-07 — the load finalize is transposed; one new charged byte term, no operation count moved {#fu8f-g1-2026-08-07}
+
+**Scope, stated first, because this phase is deliberately narrow.** G1 is *the transpose, and
+nothing else moves*. It touches `finalize_load_rows` and its resource plan. It does **not**
+touch the variant loop, `fill_proposal_nearest_delta`, the `assess_coverage` call sites, or
+`first_safe_proposal` / tournament acceptance — those are FU-8e's and phase G3's, after the
+merges. The spec is the FU-8f design record of 2026-08-07 (owner ruling in its banner,
+Craig 2026-08-07: *"2.1 hours down to 28 minutes seems worth it; anywhere else that we can
+also still shave more time off?"*); this section is the in-repo landing of its D2a / D5-G1
+content.
+
+**The defect (design record finding F-3).** `finalize_load_rows` was
+`for contact { for row { if eligible_owners.binary_search(contact.owner).is_err() { continue } … } }`
+— a `contacts × rows` scan that visits every cell to discard most of them. Measured on the
+Weeping Treant v1.2's merge-gate batch at `7aa6b73`, in a detached instrumented worktree
+(five runs, all scratch reverted, nothing committed):
+
+| counter | value |
+|---|---:|
+| cells visited (`rows × contacts`) | **160,834,206** |
+| cells that are actually eligible | **8,210,643** — 19.6× fewer; **94.9 %** of the visits were the `continue` |
+| `Σ\|eligible_owners\|` over rows | **7,988,078**, max **568** on one row |
+| load rows / contacts in that batch | 117,741 / 1,366 |
+
+That scan was ~3,090 ms of a 3,899.6 ms batch preparation — **79 % of the round** — and it is
+a batch-first defect of the same family as FU-8b, FU-8c and FU-8d.
+
+**The fix.** `finalize_load_rows` builds a **contact-major CSR transpose** of the eligibility
+it is handed — self-contained, deliberately *not* reusing the gate's `pair_starts`/`face_row`,
+which would couple this phase to the gate — and runs the **identical loop body** over the
+eligible cells only.
+
+**Bit-identity is by construction, and it was measured before it was written.** The buckets are
+filled by walking rows **ascending** and appending each row to every eligible contact's bucket,
+so each bucket comes out ascending with **no sort**; consuming contacts **ascending** therefore
+reproduces the old visit sequence cell for cell, so the running argmin (with its
+`(distance, contact_id)` tie-break) and `insert_load_witness` see an identical
+`(contact_index, distance)` sequence. The in-process replica on the treant's real batch
+reported `nearest_bit_identical = true` and `buckets_already_sorted = true` — the defensive
+sort the first draft ran was provably a no-op — at a **53×** scan speedup.
+
+**Charged: one new byte term, and nothing else.** `cells × 4 B + (contacts + 1) × 4 B` =
+**32,848,040 B** on the treant, a **new** `LoadResourcePlan::scratch_bytes` term — **6.1 %** of
+the unchanged 512 MiB `max_load_scratch_bytes`, 3.1 % of the 1 GiB gate peak. **No cap was
+raised, lowered or touched. No charged operation count moved.** The operation model is left
+standing and **over-stating**: `load_resource_plan_from_counts` still prices the scan as
+`rows × contacts × (owner_log + 4)` ≈ 4.34 × 10⁹ where the executed work is now ~10⁸. That is
+the FU-8e Q5 precedent — a plan that admits the general path *a fortiori* admits its
+specialisation — and repricing is sequenced as its own later phase (G5), after G4's
+completed-gate run, because G4's transcript is the last measurement stated in the old numbers.
+
+**One asymmetry, stated rather than left to be discovered.** The term is added in
+`load_resource_plan`, the finalizer's own **exact** plan, and **not** in
+`specialized_load_resource_plan`, the preflight. The term *is* the exact eligible-cell count,
+and every bound a preflight could state without the eligibility (`owner_count × contact_count`,
+`rows × contacts`) over-states it by two to three orders of magnitude and would refuse batches
+this build admits. So the preflight under-states this finalizer's scratch by the transpose
+term. That costs a **later** refusal, never an unafforded allocation: the buffer is allocated
+only after the exact check passes, and the exact check is the binding one.
+
+**Tests.** `fu8f_transposed_finalize_reproduces_the_scan_bit_for_bit` compares the production
+pass against the **retained `#[cfg(test)]` `contacts × rows` scan** — the replaced
+implementation itself, kept compilable as the oracle, the same shape FU-8c and FU-8d used —
+row by row on `to_bits`, on the argmin's contact index *and* squared distance and on all three
+retained witness slots. Three datasets, all on `make_overhang_table`'s mesh: its own generic
+load authority (the **accepted-load** path's shape, 2 cells of 2 — dense by construction and
+carried for equivalence, not sparsity); the FU-8d phase F3 load fixture's extended eligibility
+(17 cells of 70, 4.1×, where the exact survivor/survivor tie lives); and a wide specialized fan
+(50 cells of 1,250, **25×**) that carries the design record's *>10× sparsity* non-vacuity
+assertion. **The record asked for that assertion on the two named fixtures and neither can
+carry it** — the treant's 19.6× comes from many contacts each eligible for a small fraction of
+the rows, a shape those fixtures do not have — so the fan reproduces the shape, and the
+assertion is landed rather than quietly weakened.
+
+**Two record notes, so nothing is "corrected" back.**
+
+1. **The 7,988,078 coincidence** (design record open question 8). `GroupedOwnerFaces`'s doc
+   comment records 7,988,078 as a **falsified** predicted-row figure, corrected by record fix
+   F4. It is *also*, exactly, the measured `Σ|eligible_owners|` over the treant's load rows.
+   Same digits, unrelated quantities, both correct in their own sentence. A note now sits at
+   that doc comment saying so.
+2. **Rows are not uniformly small** (open question 7). One treant row carries **568** eligible
+   owners of 1,366 contacts. The transpose handles it identically and nothing assumes short
+   buckets.
+
+**Record sites swept in the same commit set** (the addition is dated at every one):
+`crates/plinth-core/src/constants/placeholders.rs` (the
+`SUPPORT_SPECIALIZED_MAX_LOAD_SCRATCH_BYTES` registry note), `constants.md` **regenerated by
+its producer**, `support-resource-caps-2026-08-05.md`, `03-physics-and-constants.md` §3.10.8,
+this section, and the `LoadEligibilityTranspose` / `load_resource_plan` / `GroupedOwnerFaces`
+doc comments in `perception.rs`.
+
+**No wall-clock figure from this phase is recorded as a landed number.** Other workflows built
+and ran on this machine throughout; the millisecond figures quoted above are the design
+record's own contended measurements, and the counters and the bit-identity are the proofs.
+The phase's speedup is **not** re-measured here — that is G4's job, on a run that completes
+the gate.
+
+**Left VERIFIED-NOT-MERGED** on `feature/fu8f-load-transpose`; this branch queues behind the
+FU-8e merge, which owns the variant loop.
+
 ### OD-8 delta at this tip — MEASURED ZERO {#fu8b-od8-delta-2026-08-06}
 
 Full 8-model census re-run at `d82c895`, **3,415 lines**. All seven reachable digests are
