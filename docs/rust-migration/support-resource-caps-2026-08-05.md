@@ -1063,7 +1063,7 @@ wall-clock above is a single-core number.
 Before any measurement below is read: **R-f is not satisfied by this phase, and
 was never going to be.** `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` (FU-23) is
 re-derived only from a Weeping Treant run that **COMPLETES** the gate stage.
-FU-8e's clean run at its own tip is an **EXCEEDS-TIMEBOX at 600 s**, exactly as
+FU-8e's clean run at its own tip is an **EXCEEDS-TIMEBOX at 601 s**, exactly as
 F3's and F4's were, and the reason is arithmetic rather than luck:
 
 - The merge tournament commits **exactly one** merge per round — the
@@ -1091,12 +1091,28 @@ The FU-8e finding as opened (see `CURRENT-STATUS.md`) named two costs and had th
 
 1. **The 62 % was never index construction.** One
    `PointCloudIndex::new_for_knn_batch` over a one-point cloud costs **83.3 ns**;
-   the 39,223 of them in a gate batch total **16.7 microseconds**. The trees were
+   the 39,223 of them in a gate batch total **≈3.27 ms**. The trees were
    free. The cost was the **query loop** — per query a `nearest_n` descent
    allocating a `SortedVec`, a second `nearest_n_within_exclusive` descent
    allocating a `Vec`, and a `sort_by`: about **1.04 × 10⁹ query iterations and
    2.08 × 10⁹ heap allocations per batch**. Phase E1 answers a one-source batch
    without a tree; E2 makes the gate consume it.
+
+   > **Arithmetic corrected 2026-08-07 (records fix; this is the PRIMARY note on
+   > the construction total, and every other site carrying it points here).** The
+   > total above first landed as **16.7 microseconds**, which was an **arithmetic
+   > slip in the design pass**, not a second measurement: 39,223 × 83.3 ns =
+   > **3.267 ms**, and 16.7 µs across 39,223 builds would have implied 0.426 ns
+   > per construction — below one memory access, so physically implausible on its
+   > face. **The per-build 83.3 ns is retained unchanged**; it is the design
+   > pass's measurement of record and nothing re-measures it here. **Only the
+   > product is corrected**, and the conclusion it was quoted for is unchanged:
+   > 3.27 ms is **0.009 %** of the 37.33 s `fill_proposal_nearest_delta` frame,
+   > so index construction remains **negligible** — the honest total is 196× the
+   > figure the slip stated, and negligible either way — and the fix still targets the
+   > **query loop** behind the trees, exactly as E1 and E2 built it. No measured
+   > quantity, cap, floor or coefficient moves.
+
 2. **The 28 % was never allocation churn.** In `RepairNoEvidence` mode
    `assess_coverage` allocates **six** `Vec::with_capacity(samples.len())`, not
    "~7 … of order a terabyte", and its traversal visits only *uncovered* rows.
@@ -1188,9 +1204,17 @@ Against the design pass at `7aa6b73` (all scratch reverted), first merge round:
 | batch preparation | 3.56 s | — | 3.95 s |
 | variant loop | 60.23 s | 25.28 s | **10.73 s** |
 | `fill_proposal_nearest_delta` | 37.33 s | 3.58 s | 4.67 s |
-| coverage per variant | 17.05 s | 16.84 s | **0.001 s** |
+| `assess_coverage`, all variants in the round | 17.05 s | 16.84 s | **0.001 s** |
 | `merged_violation_count` | 4.66 s | 2.63 s\* | 5.50 s |
 | restore / other | ~1.2 s | — | 0.55 s |
+
+**Every cell in this table is a whole-round total for the first merge round**, on
+the same basis as the header line above it — including the coverage row, which is
+the sum over all 39,224 variants of that round and **not** a per-variant figure.
+*(Row relabelled 2026-08-07, records fix: it read "coverage per variant", which
+named the wrong basis for a per-round number. Only the label changed; 17.05 /
+16.84 / 0.001 s are the figures as measured. Per variant the E4 column would be
+≈25 ns, not 0.001 s.)*
 
 **4.35× on the round, 5.6× on the variant loop.** Two rows need honesty rather
 than celebration:

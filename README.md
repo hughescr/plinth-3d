@@ -259,7 +259,12 @@ Measured on the 8-model corpus, most recently by the unified census of 2026-08-0
   > **Amended 2026-08-07 — FU-8e phases E1–E4 landed; every block above stands exactly as
   > written, and the block immediately above is corrected on mechanism.** FU-8e is resolved on
   > the defect it named. **The kd-trees were free**: one one-point `PointCloudIndex` costs
-  > 83.3 ns, so the 39,223 per batch total 16.7 microseconds. The cost was the **query loop**
+  > 83.3 ns, so the 39,223 per batch total **≈3.27 ms** *[arithmetic corrected 2026-08-07
+  > (records fix): first published as "16.7 microseconds", an arithmetic slip in the design
+  > pass — 39,223 × 83.3 ns = 3.267 ms, where 16.7 µs would have implied 0.426 ns per build.
+  > The per-build 83.3 ns stands as measured; only the product is corrected and the conclusion
+  > is unchanged — 0.009 % of the 37.33 s frame, so construction is negligible and the fix
+  > targets the query loop]*. The cost was the **query loop**
   > behind them — about 1.04 × 10⁹ query iterations and 2.08 × 10⁹ heap allocations per batch.
   > `assess_coverage`'s cost was likewise **not** allocation churn but **two unconditional
   > full scans** of the nearest array per variant, ≈254 GB of reads per batch. The kernel

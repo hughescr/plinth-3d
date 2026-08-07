@@ -5993,8 +5993,17 @@ impl GateCoverageQuestion<'_> {
 /// followed by `knn_batch_planned`.  FU-8d's merge message blamed the resulting
 /// 62 % of the gate's variant loop on building those trees; the FU-8e
 /// measurement says otherwise.  One such index costs 83.3 ns, and the 39,223 of
-/// them in a Weeping Treant gate batch total 16.7 microseconds — the trees are
-/// free.  The cost was the *query* loop: per query, a `nearest_n` descent that
+/// them in a Weeping Treant gate batch total ≈3.27 ms — the trees are
+/// free.  (Arithmetic corrected 2026-08-07, records fix: this total was first
+/// written as "16.7 microseconds", an arithmetic slip in the design pass rather
+/// than a second measurement — 39,223 × 83.3 ns = 3.267 ms, and 16.7 µs would
+/// have implied 0.426 ns per construction.  The per-build 83.3 ns is retained as
+/// measured; only the product is corrected, and the conclusion this comment
+/// rests on is unchanged: 3.27 ms is 0.009 % of the 37.33 s
+/// `fill_proposal_nearest_delta` frame, so construction is negligible and the
+/// fix targets the query loop.  Primary note:
+/// `docs/rust-migration/support-resource-caps-2026-08-05.md` §12.2.)
+/// The cost was the *query* loop: per query, a `nearest_n` descent that
 /// allocates a `SortedVec`, a second `nearest_n_within_exclusive` descent that
 /// allocates a `Vec`, and a `sort_by`, for about 1.04e9 query iterations and
 /// 2.08e9 heap allocations per batch.
