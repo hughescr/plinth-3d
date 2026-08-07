@@ -17,7 +17,18 @@ use plinth_mesh::{load_binary_stl, write_binary_stl, EdgeTopologyCounts, Mesh, W
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const REPORT_SCHEMA: &str = "plinth/m3-decimation-corpus-budget-report/v3";
+/// v4 (2026-08-07) adds the worst-case deviation `max_mm` to every probe the
+/// search records — sampled bisection steps, final full-population attempts,
+/// and both the sampled and full adaptive probes — plus the model-level
+/// `final_max_mm`, the `DECIMATION_MAX_ABSOLUTE_DEVIATION_MM` bound it is
+/// judged against, and the search's `native_surface_builds`. `max_mm` is the
+/// quantity U3 exists for and the one the ratified p99/p99.9 budget is blind
+/// to; before v4 it was measured on every probe and serialized nowhere, so the
+/// design record's §8 max-deviation figures could not be reproduced from a
+/// clean checkout without re-adding scratch instrumentation. Per-phase
+/// wall-clock, which §6 Phase 1 also lists, is deliberately NOT serialized —
+/// see the record's §9.8.
+const REPORT_SCHEMA: &str = "plinth/m3-decimation-corpus-budget-report/v4";
 const DEFAULT_OUTPUT_DIR: &str = "target/plinth-decimate-corpus-budgets";
 const EXPECTED: [CorpusModel; 8] = [
     CorpusModel::already_print_scale(
@@ -124,8 +135,20 @@ struct ModelReport {
     search_p99_9_mm: Option<String>,
     final_p99_mm: Option<String>,
     final_p99_9_mm: Option<String>,
+    /// The worst-case two-sided deviation of the returned mesh. This is the
+    /// quantity U3 is the only clause to see: on the Weeping Treant v1.2 it
+    /// reaches 0.0566 mm while `p99_9` is still 0.000073 mm.
+    final_max_mm: Option<String>,
     final_p99_limit_mm: Option<String>,
     final_p99_9_limit_mm: Option<String>,
+    /// `DECIMATION_MAX_ABSOLUTE_DEVIATION_MM`, the registered `Derived` bound
+    /// `final_max_mm` is judged against. Unlike the two percentile limits it
+    /// carries no ×1.1 recheck slack.
+    final_max_limit_mm: Option<String>,
+    /// Two per `probe_two_sided` call the search made, plus one more built by
+    /// `run` for the feature-protection backward error map, which the search
+    /// never sees.
+    search_native_surface_builds: Option<usize>,
     topology_before: Option<TopologyReport>,
     topology_after: Option<TopologyReport>,
     final_attempts: Vec<FinalAttemptReport>,
@@ -141,6 +164,7 @@ struct SearchStepReport {
     reduced: bool,
     p99_mm: String,
     p99_9_mm: String,
+    max_mm: Option<String>,
     passed: bool,
 }
 
@@ -160,9 +184,11 @@ struct AdaptiveProbeReport {
     plateau_of_fingerprint: Option<String>,
     sampled_p99_mm: String,
     sampled_p99_9_mm: String,
+    sampled_max_mm: Option<String>,
     topology_after: Option<TopologyReport>,
     full_p99_mm: Option<String>,
     full_p99_9_mm: Option<String>,
+    full_max_mm: Option<String>,
     result: String,
 }
 
@@ -174,6 +200,7 @@ struct FinalAttemptReport {
     candidate_fingerprint: String,
     p99_mm: Option<String>,
     p99_9_mm: Option<String>,
+    max_mm: Option<String>,
     topology_after: TopologyReport,
     result: String,
     downstream_utility: String,
@@ -256,14 +283,18 @@ fn report_writer_canonicalizes_arithmetic_floats_before_the_only_disk_write() {
                 reduced: true,
                 p99_mm: ratio_text(0.0),
                 p99_9_mm: ratio_text(0.0),
+                max_mm: Some(ratio_text(0.0)),
                 passed: true,
             }],
             search_p99_mm: Some(ratio_text(0.0)),
             search_p99_9_mm: Some(ratio_text(0.0)),
             final_p99_mm: Some(ratio_text(0.0)),
             final_p99_9_mm: Some(ratio_text(0.0)),
+            final_max_mm: Some(ratio_text(0.0)),
             final_p99_limit_mm: Some(ratio_text(0.0095 * 1.1)),
             final_p99_9_limit_mm: Some(ratio_text(0.019 * 1.1)),
+            final_max_limit_mm: Some(ratio_text(0.08)),
+            search_native_surface_builds: Some(2),
             topology_before: Some(TopologyReport {
                 boundary_edges: 0,
                 nonmanifold_edges: 0,
@@ -382,8 +413,11 @@ fn run_one(
             search_p99_9_mm: None,
             final_p99_mm: None,
             final_p99_9_mm: None,
+            final_max_mm: None,
             final_p99_limit_mm: None,
             final_p99_9_limit_mm: None,
+            final_max_limit_mm: None,
+            search_native_surface_builds: None,
             topology_before: None,
             topology_after: None,
             final_attempts: Vec::new(),
@@ -420,8 +454,11 @@ fn run_one(
             search_p99_9_mm: None,
             final_p99_mm: None,
             final_p99_9_mm: None,
+            final_max_mm: None,
             final_p99_limit_mm: None,
             final_p99_9_limit_mm: None,
+            final_max_limit_mm: None,
+            search_native_surface_builds: None,
             topology_before: None,
             topology_after: None,
             final_attempts: Vec::new(),
@@ -466,6 +503,7 @@ fn success_report(
                 reduced: step.reduced,
                 p99_mm: ratio_text(step.probe.p99_mm),
                 p99_9_mm: ratio_text(step.probe.p99_9_mm),
+                max_mm: step.probe.max_mm.map(ratio_text),
                 passed: step.passed,
             })
             .collect(),
@@ -476,8 +514,11 @@ fn success_report(
             .map(|step| ratio_text(step.probe.p99_9_mm)),
         final_p99_mm: Some(ratio_text(final_probe.p99_mm)),
         final_p99_9_mm: Some(ratio_text(final_probe.p99_9_mm)),
+        final_max_mm: final_probe.max_mm.map(ratio_text),
         final_p99_limit_mm: Some(ratio_text(trace.budget.p99_mm * 1.1)),
         final_p99_9_limit_mm: Some(ratio_text(trace.budget.p99_9_mm * 1.1)),
+        final_max_limit_mm: Some(ratio_text(registered_max_absolute_deviation_mm())),
+        search_native_surface_builds: Some(trace.native_surface_builds),
         topology_before: Some(success.topology_before().into()),
         topology_after: Some(success.topology_after().into()),
         final_attempts: trace
@@ -493,6 +534,11 @@ fn success_report(
                     .probe
                     .as_ref()
                     .map(|probe| ratio_text(probe.p99_9_mm)),
+                max_mm: attempt
+                    .probe
+                    .as_ref()
+                    .and_then(|probe| probe.max_mm)
+                    .map(ratio_text),
                 topology_after: attempt.topology_after.into(),
                 result: format!("{:?}", attempt.result),
                 downstream_utility: format!("{:?}", attempt.downstream_utility),
@@ -511,6 +557,7 @@ fn success_report(
                     plateau_of_fingerprint: probe.plateau_of_fingerprint.clone(),
                     sampled_p99_mm: ratio_text(probe.sampled_probe.p99_mm),
                     sampled_p99_9_mm: ratio_text(probe.sampled_probe.p99_9_mm),
+                    sampled_max_mm: probe.sampled_probe.max_mm.map(ratio_text),
                     topology_after: probe.topology_after.map(Into::into),
                     full_p99_mm: probe
                         .full_probe
@@ -520,6 +567,11 @@ fn success_report(
                         .full_probe
                         .as_ref()
                         .map(|full| ratio_text(full.p99_9_mm)),
+                    full_max_mm: probe
+                        .full_probe
+                        .as_ref()
+                        .and_then(|full| full.max_mm)
+                        .map(ratio_text),
                     result: format!("{:?}", probe.result),
                 })
                 .collect(),
@@ -747,6 +799,17 @@ fn expected_status_name(status: ExpectedStatus) -> &'static str {
 
 fn ratio_text(value: f64) -> String {
     format!("{value:.17}")
+}
+
+/// `DECIMATION_MAX_ABSOLUTE_DEVIATION_MM`, read from the one M0 registry rather
+/// than restated here, so the report's stated U3 bound cannot drift from the
+/// bound the witness actually applies.
+fn registered_max_absolute_deviation_mm() -> f64 {
+    *plinth_core::m0_constants()
+        .expect("M0 constants registry must construct")
+        .evidence()
+        .decimation_max_absolute_deviation_mm()
+        .value()
 }
 
 fn write_and_reopen_report(path: &Path, report: &GateReport) -> Result<(), String> {

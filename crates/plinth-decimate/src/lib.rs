@@ -292,6 +292,21 @@ pub struct BudgetSearchTrace {
     /// Why no safely reduced mesh was authorized when this trace backs an
     /// [`BudgetSearchOutcome::AlreadyPrintScale`] result.
     pub reduction_refusals: Vec<ReductionRefusalReason>,
+    /// How many `NativeSurface`s the *search* built: exactly two per
+    /// [`probe_two_sided`] call (original and candidate), counted at each call
+    /// site the search owns and never inferred from the trace's shape. The
+    /// exact-identity probes build none — an identity's two directed distances
+    /// are exactly zero by construction and are not routed through a nearest
+    /// kernel.
+    ///
+    /// [`run`] builds exactly one more, for the mandatory feature-protection
+    /// backward error map, which happens before the search exists and is not
+    /// counted here; the per-run total is therefore this value plus one on
+    /// every path through [`run`], including the `ProtectionCap` short-circuit.
+    /// Ten of the Weeping Treant v1.2's twenty search-owned builds are
+    /// redundant rebuilds of the unchanged original — the batch-first repair
+    /// §6 Phase 4 describes, and this counter is how it would be measured.
+    pub native_surface_builds: usize,
 }
 
 /// Full verification evidence for one sampled-safe, genuinely reduced QEM
@@ -1278,6 +1293,7 @@ fn run_budget_search(
                 phase: "ratio bisection",
                 message: error,
             })?;
+        trace.native_surface_builds += NATIVE_SURFACES_PER_TWO_SIDED_PROBE;
         match (step.reduced, step.passed) {
             // A real, budget-safe candidate lets us try for still fewer faces.
             (true, true) => high = midpoint,
@@ -1402,6 +1418,7 @@ fn run_budget_search(
                 },
             )
         })?;
+        trace.native_surface_builds += NATIVE_SURFACES_PER_TWO_SIDED_PROBE;
         let result = classify_final_attempt(
             &final_probe,
             error_budget,
@@ -1682,8 +1699,13 @@ fn new_budget_trace(
             complete: true,
         },
         reduction_refusals: Vec::new(),
+        native_surface_builds: 0,
     }
 }
+
+/// Every [`probe_two_sided`] call builds two nearest surfaces: one over the
+/// original and one over the candidate.
+const NATIVE_SURFACES_PER_TWO_SIDED_PROBE: usize = 2;
 
 /// Authorize the canonical input only after a strict audit and full, two-sided
 /// zero-error identity probe.  This is the sole identity success path; callers
@@ -1933,6 +1955,7 @@ fn run_adaptive_diagnostics(
             phase: "adaptive sampled probe",
             message: error.to_string(),
         })?;
+        trace.native_surface_builds += NATIVE_SURFACES_PER_TWO_SIDED_PROBE;
         let candidate_fingerprint = mesh_fingerprint(&outcome.mesh).map_err(|error| {
             BudgetSearchError::SearchExecution {
                 phase: "adaptive candidate fingerprint",
@@ -1978,6 +2001,7 @@ fn run_adaptive_diagnostics(
                         phase: "adaptive full probe",
                         message: error.to_string(),
                     })?;
+                trace.native_surface_builds += NATIVE_SURFACES_PER_TWO_SIDED_PROBE;
                 let within = within_final_slack(&full_probe, trace.budget, policy.final_slack);
                 adaptive.full_probe = Some(full_probe);
                 if within {
@@ -3255,6 +3279,7 @@ mod tests {
                 complete: true,
             },
             reduction_refusals: Vec::new(),
+            native_surface_builds: 0,
         }
     }
 
@@ -3366,6 +3391,45 @@ mod tests {
         assert!(success.mesh.audit_strict().is_ok());
         assert_eq!(success.mesh.tris().len(), mesh.tris().len());
         assert_eq!(success.trace.protected_vertex_count, mesh.verts().len());
+    }
+
+    #[test]
+    fn the_surface_build_counter_agrees_with_every_probe_the_trace_recorded() {
+        // The counter is incremented at the call sites the search owns; this
+        // rederives the same number from what the trace actually recorded, so a
+        // future probe added without its increment fails here rather than
+        // quietly under-reporting the search's real allocation cost.
+        let (mesh, locks) = locked_box(10.0);
+        let outcome = run_budget_search(&mesh, &locks, d2_budget(1_000_000.0)).unwrap();
+        let BudgetSearchOutcome::AlreadyPrintScale(success) = outcome else {
+            panic!("a fully protected simple mesh must be explicit print-scale identity");
+        };
+        let trace = success.trace();
+        // The identity step is the one recorded probe that builds no surface.
+        let two_sided_probes = trace.steps.iter().filter(|step| step.ratio != 1.0).count()
+            + trace
+                .final_attempts
+                .iter()
+                .filter(|attempt| attempt.probe.is_some())
+                .count()
+            + trace.adaptive_exploration.probes.len()
+            + trace
+                .adaptive_exploration
+                .probes
+                .iter()
+                .filter(|probe| probe.full_probe.is_some())
+                .count();
+        assert_eq!(
+            trace.native_surface_builds,
+            two_sided_probes * NATIVE_SURFACES_PER_TWO_SIDED_PROBE,
+            "counter {} disagrees with the {two_sided_probes} two-sided probes the trace records",
+            trace.native_surface_builds
+        );
+        assert_eq!(
+            trace.native_surface_builds,
+            2 * trace.steps.len() - 2,
+            "a fully locked box runs the identity step plus five bisections and nothing else"
+        );
     }
 
     #[test]
