@@ -877,3 +877,33 @@ which is a deterministic count of work rather than a measurement of time.
 and nothing that can alter a candidate, a probe, a topology audit or a disposition; the corpus
 gate's own expected statuses are unmoved on all eight models. The OD-8 re-measurement at
 this tip is §9.9.
+
+### 9.9 OD-8 at the finding-closure tip
+
+Re-measured 2026-08-07 at the tip that closes the verifier findings (§8.9, §9.8, and the U4/U5
+corrections in §9.1). All **seven** frozen `snapshot_digest` values are byte-identical,
+together with `faces`, `routed_contacts` and `final_live_members`:
+
+| Model | faces | `routed_contacts` | `final_live_members` | `snapshot_digest` | vs frozen |
+|---|---|---|---|---|---|
+| `Sphere` | 4,760 | 7 | 15 | `17667468971446251870` | unmoved |
+| `Cylinder` | 244 | 54 | 119 | `13310185350867878190` | unmoved |
+| `make_box` | 12 | 11 | 25 | `9657051231007502658` | unmoved |
+| `make_overhang_table` | 60 | 73 | 261 | `6686599816688114065` | unmoved |
+| `make_toed_slab` | 140 | 64 | 179 | `11199296506741562956` | unmoved |
+| `make_raking_blade` | 24 | 32 | 89 | `13278215294653054002` | unmoved |
+| `make_thin_fin` | 24 | 17 | 41 | `7016743535301716631` | unmoved |
+
+Run as seven single-model invocations (`PLINTH_CENSUS=1 PLINTH_CENSUS_ONLY=<model>` against a
+fresh `--features census` release build of `embed_incidence_census`), for the reason §8.8
+gives; the treant carries no frozen digest and is out of scope. `make_toed_slab`'s
+`64 / 179` is the provisional seal tuple §0(d) names, also unmoved.
+
+This is the expected result and it is confirmatory rather than probative, for §9.3's structural
+reason: the threshold is the witness's first clause, so every below-threshold trace is
+byte-identical, and none of this closure's changes can move a candidate, a probe, a topology
+audit or a disposition. Five gates green at the same tip: **981 tests passed, 0 failed**
+(`--all-features`; 980 without), clippy clean at `-D warnings`, `cargo fmt --check` clean,
+`git diff --check` clean. The 980 is Phase 2's 979 plus
+`the_surface_build_counter_agrees_with_every_probe_the_trace_recorded`; the U5 test was renamed
+and rewritten, not added.
