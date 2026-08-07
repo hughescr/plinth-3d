@@ -2245,6 +2245,56 @@ pub(crate) fn authority_consistent_empty_load_partition_for_test(
     )
 }
 
+/// The load finalizer's operation and scratch model, from counts alone.
+///
+/// # FU-8f phase G5 — the honest post-transpose scan charge
+///
+/// Until this phase the leading operation term was `face_count x contact_count
+/// x (owner_log + 4)`: one binary search into a row's `eligible_owners` for
+/// every `(row, contact)` cell, because that is exactly what the finalizer did
+/// — it visited every cell and skipped the ineligible ones.  Phase G1 replaced
+/// that scan with a contact-major CSR transpose and **deliberately left this
+/// model standing and over-stating**, on the FU-8e Q5 precedent that a plan
+/// admitting the general path a fortiori admits its specialisation.  Phase G5
+/// pays that debt: the quadratic is gone from the charge as well as from the
+/// code, and the stated demand falls with it.
+///
+/// What the finalizer now spends, term by term, in the elementary-comparison
+/// unit every term here counts:
+///
+/// - `eligible_owner_count * (log + 2) * 2` — [`LoadTransposeCounts::count`]
+///   and [`LoadTransposeCounts::finish`] each walk the row-major eligibility
+///   once and, per `(row, eligible owner)` entry, run one forward
+///   `partition_point` over the contact order (`log` comparisons) plus a
+///   bounds-and-equality test.  **This is the term that replaces the
+///   quadratic**, and its shape is the point: `Σ |eligible_owners|`, never
+///   `rows x contacts`.
+/// - `contact_count * (log + 6)` — `order.sort_unstable_by_key`'s comparison
+///   bound (`log + 2`, the term this line already carried) plus the
+///   transpose's four contact-sized passes: the two owner-run walks, the
+///   `starts` prefix sum, and the cursor copy.
+/// - `eligible_owner_count * (owner_log * 2)` and
+///   `face_count * (face_log * 2 + 1)` — unchanged, and unrelated to the
+///   transpose: the eligibility's own ordering and the row emit.
+///
+/// What is **not** charged here is the per-cell cost of the fill and of the
+/// scan the transpose drives.  That term is exactly `cells`-shaped, `cells` is
+/// not a count any caller of this function holds, and it is added by
+/// [`load_resource_plan`] from [`LoadTransposeCounts::operations`] — the same
+/// split, for the same reason, that phase G1 used for the transpose's *bytes*.
+/// The consequence is stated rather than left to be discovered: the preflight
+/// [`specialized_load_resource_plan`] under-states this finalizer's operations
+/// by the cells term, exactly as it already under-states its scratch bytes.
+/// That costs a **later** refusal, never unafforded execution — the fill and
+/// the scan run only after [`finalize_load_rows`]'s own exact check, and that
+/// check is the one carrying the cells term.
+///
+/// Measured on the Weeping Treant v1.2, 2026-08-07: the deleted quadratic
+/// charged 117,741 x 1,366 x 27 = 4,342,523,562 for the gate batch's scan;
+/// what replaces it is 7,988,078 x 13 x 2 = 207,690,028 here plus
+/// 8,210,643 x 8 = 65,685,144 in [`load_resource_plan`].  **No cap is raised,
+/// lowered or touched by this repricing; a falling demand can create no
+/// refusal.**
 fn load_resource_plan_from_counts(
     face_count: usize,
     eligible_owner_count: usize,
@@ -2271,12 +2321,12 @@ fn load_resource_plan_from_counts(
     let log = usize::BITS as usize - contact_count.max(1).leading_zeros() as usize;
     let owner_log = usize::BITS as usize - eligible_owner_count.max(1).leading_zeros() as usize;
     let face_log = usize::BITS as usize - face_count.max(1).leading_zeros() as usize;
-    let operations = face_count
-        .checked_mul(contact_count)
-        .and_then(|pairs| pairs.checked_mul(owner_log.saturating_add(4)))
+    let operations = eligible_owner_count
+        .checked_mul(log.saturating_add(2))
+        .and_then(|pass| pass.checked_mul(2))
         .and_then(|work| {
             contact_count
-                .checked_mul(log.saturating_add(2))
+                .checked_mul(log.saturating_add(6))
                 .and_then(|contacts| work.checked_add(contacts))
         })
         .and_then(|work| {
@@ -2315,10 +2365,19 @@ fn load_resource_plan_from_counts(
 /// scratch by the transpose term.  That costs a **later** refusal, never an
 /// unafforded allocation — the buffer is allocated only after the check below
 /// passes, and the check below is the exact one.
+///
+/// `transpose_operations` is FU-8f phase **G5**'s new **operation** term, and
+/// it is here for exactly the reasons the byte term above is here: it is
+/// `cells`-shaped, `cells` is knowable only after
+/// [`LoadTransposeCounts::count`] has walked the eligibility, and the check
+/// below is the last one before the fill and the scan it prices actually run.
+/// See [`LoadTransposeCounts::operations`] for its decomposition and
+/// [`load_resource_plan_from_counts`] for the quadratic it retires.
 fn load_resource_plan(
     load_eligibility: &[LoadEligibility],
     contacts: &[PhysicalContact],
     transpose_bytes: usize,
+    transpose_operations: usize,
 ) -> Result<LoadResourcePlan, GenericPerceptionError> {
     let eligible_owner_count = load_eligibility.iter().try_fold(0usize, |total, row| {
         total
@@ -2334,6 +2393,10 @@ fn load_resource_plan(
     plan.scratch_bytes = plan
         .scratch_bytes
         .checked_add(transpose_bytes)
+        .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
+    plan.operations = plan
+        .operations
+        .checked_add(transpose_operations)
         .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
     Ok(plan)
 }
@@ -2356,6 +2419,16 @@ fn load_resource_plan(
 /// `owner_log + 4` per-pair allowance `load_resource_plan_from_counts` already
 /// charges for the eligibility binary search.  Bytes do move and are charged,
 /// as `SpecializedLoadBaseline::retained_bytes`.
+///
+/// **Dated addendum 2026-08-07 — FU-8f phase G5.  The paragraph above stands as
+/// the history of this retention's charge, and its allowance no longer
+/// exists.**  G5 retired the `rows x contacts x (owner_log + 4)` model, so
+/// there is no eligibility binary search left for these slot comparisons to
+/// hide inside.  They are now charged explicitly and per cell, as the
+/// `LOAD_WITNESS_SLOTS` component of [`LoadTransposeCounts::operations`].  The
+/// retention still moves **no** measured work — the pass was already visiting
+/// the pair — but it is no longer free of charge, and saying so is the point of
+/// this addendum.  No cap moved with it.
 pub(crate) const LOAD_WITNESS_SLOTS: usize = 3;
 
 /// An unfilled [`LoadWitness`] slot.
@@ -2482,6 +2555,18 @@ fn insert_load_witness(
 /// repricing is deferred to phase G5 by design, so no charged operation count
 /// moves in this phase.
 ///
+/// **Dated addendum 2026-08-07 — FU-8f phase G5.  The paragraph above is left
+/// standing and its last two sentences have come due.**  G5 repriced the model:
+/// `rows x contacts x (owner_log + 4)` is gone from
+/// [`load_resource_plan_from_counts`], replaced by the transpose's own
+/// `Σ |eligible_owners|`-shaped search term there and by
+/// [`LoadTransposeCounts::operations`]'s `cells`-shaped term in
+/// [`load_resource_plan`].  On the treant's gate batch 4,342,523,562 becomes
+/// 207,690,028 + 65,685,144.  The charged operation count therefore **does**
+/// move in G5, and it moves **downward at every site**, so no refusal can be
+/// created by it.  **No cap is raised, lowered or touched.**  The bytes
+/// described above are unchanged, to the byte.
+///
 /// Note (design record open question 7): the rows are **not** uniformly small.
 /// One treant row carries 568 eligible owners of 1,366 contacts.  The transpose
 /// handles it identically; nothing here assumes short buckets.
@@ -2584,6 +2669,40 @@ impl LoadTransposeCounts {
             owner_rows,
             cells,
         })
+    }
+
+    /// What [`Self::finish`] and [`scan_transposed_load`] will **spend** on the
+    /// cells this count has just sized — FU-8f phase G5's new charged operation
+    /// term, and the exact replacement for the `rows x contacts` quadratic that
+    /// phase deletes from [`load_resource_plan_from_counts`].
+    ///
+    /// `cells x (LOAD_WITNESS_SLOTS + 5)`, in the elementary unit every other
+    /// term of that model counts:
+    ///
+    /// - **1** per cell for [`Self::finish`]'s row store and cursor bump — the
+    ///   only per-cell work the fill does, the rest of it being the per-owner
+    ///   searches charged from the counts.
+    /// - **4** per cell for the squared distance and the running-argmin
+    ///   comparison.  That is precisely the allowance the superseded
+    ///   `owner_log + 4` model carried for everything that was *not* the
+    ///   eligibility binary search, kept at its own value rather than
+    ///   re-derived.
+    /// - **[`LOAD_WITNESS_SLOTS`]** per cell for [`insert_load_witness`], which
+    ///   FU-8d charged *inside* that binary-search allowance ("at most
+    ///   `LOAD_WITNESS_SLOTS` slot comparisons per retained pair, inside the
+    ///   `owner_log + 4` per-pair allowance").  The allowance it was hiding in
+    ///   no longer exists, so the slots are charged in the open.  They are
+    ///   charged unconditionally, including on the accepted-load path that
+    ///   retains nothing, because a bound may over-state and must not
+    ///   under-state.
+    ///
+    /// On the Weeping Treant v1.2's merge-gate batch: 8,210,643 x 8 =
+    /// 65,685,144, against the 4,342,523,562 the deleted quadratic charged for
+    /// the same work.  Single specimen, 2026-08-07 (n = 1, per R4/FU-23).
+    fn operations(&self) -> Result<usize, GenericPerceptionError> {
+        self.cells
+            .checked_mul(LOAD_WITNESS_SLOTS.saturating_add(5))
+            .ok_or(GenericPerceptionError::LoadResourceOverflow)
     }
 
     /// What [`Self::finish`] will allocate: the phase's new charged term.
@@ -2870,6 +2989,7 @@ fn finalize_load_rows(
         load_eligibility,
         contacts,
         transpose.scratch_bytes(contacts.len())?,
+        transpose.operations()?,
     )?;
     if resource.scratch_bytes > limits.max_scratch_bytes {
         return Err(GenericPerceptionError::LoadScratchLimit {
@@ -2975,7 +3095,12 @@ fn finalize_load_rows(
 /// from the pair count was therefore ~70x too large — the row count that
 /// drives the `rows x contacts x (owner_log + 4)` load operation bound, and
 /// the retained bytes that drive the load scratch bound.  The grouping is
-/// built once, in one sort, and read by both.
+/// built once, in one sort, and read by both.  (That operation bound is quoted
+/// as it stood on 2026-08-06; FU-8f phase G5 replaced it on 2026-08-07 with the
+/// transpose's own terms.  The row count still drives the replacement — it is
+/// the `face_count` of [`load_resource_plan_from_counts`] and the row set the
+/// eligibility entries are counted over — so this paragraph's point is
+/// unaffected.)
 ///
 /// Correction 2026-08-06 (record fix F4).  This comment previously read
 /// "7,558,958 pairs over 429,120 faces … 18.6 per face" as though both were
@@ -4931,13 +5056,17 @@ mod tests {
         assert!(load_violation_count(&partition, &contacts).is_ok());
         // FU-8f phase G1: the finalizer's exact plan now also carries the
         // contact-major transpose it scans over, so the boundary this test
-        // pins is stated over the same terms the finalizer charges.
-        let transpose_bytes = LoadTransposeCounts::count(&plan.load_eligibility, &contacts)
-            .unwrap()
-            .scratch_bytes(contacts.len())
-            .unwrap();
-        let resource =
-            load_resource_plan(&plan.load_eligibility, &contacts, transpose_bytes).unwrap();
+        // pins is stated over the same terms the finalizer charges.  Phase G5
+        // added the transpose's *operation* term beside its byte term, for the
+        // same reason and from the same count, so both are taken from it here.
+        let transpose = LoadTransposeCounts::count(&plan.load_eligibility, &contacts).unwrap();
+        let resource = load_resource_plan(
+            &plan.load_eligibility,
+            &contacts,
+            transpose.scratch_bytes(contacts.len()).unwrap(),
+            transpose.operations().unwrap(),
+        )
+        .unwrap();
         let verified_mesh = VerifiedMeshFingerprint::compute(&mesh).unwrap();
         assert!(finalize_load_rows(
             &plan,
@@ -5010,9 +5139,11 @@ mod tests {
     /// *face*, but the specialized pairs arrive one entry per `(owner, face)`
     /// — 18.6 per face on the Weeping Treant.  Sizing the row count by the
     /// pair count therefore inflated both the load operation bound
-    /// (`rows x contacts x (owner_log + 4)`) and the retained-byte bound by
-    /// that same factor, which is what put the treant's load stage over its
-    /// caps.  This fixture reproduces the shape in miniature: 64 specialized
+    /// (`rows x contacts x (owner_log + 4)`, as that bound stood in 2026-08-06
+    /// and until FU-8f phase G5 repriced it on 2026-08-07) and the retained-byte
+    /// bound by that same factor, which is what put the treant's load stage over
+    /// its caps.  What this fixture pins is what `rows` **counts**, which no
+    /// repricing touches.  This fixture reproduces the shape in miniature: 64 specialized
     /// owners all serving the same 8 faces, 512 pairs over 8 faces.
     #[test]
     fn specialized_load_rows_are_bounded_by_faces_not_by_owner_face_pairs() {
@@ -5764,6 +5895,117 @@ mod tests {
             fan_cells * 10 < fan_dense,
             "the transpose is not sparse by >10x: \
              {fan_cells} cells of {fan_dense} rows x contacts",
+        );
+    }
+
+    /// FU-8f phase G5: the load charge is no longer quadratic in
+    /// `rows x contacts`, and what replaced it is the transpose's own shape.
+    ///
+    /// The old model's whole defect was its **shape**: it charged one
+    /// eligibility binary search per `(row, contact)` cell, so holding the
+    /// eligibility fixed and widening the contact set multiplied the charge by
+    /// the contact count even though the finalizer's work did not move.  That
+    /// is the property this test pins, and it pins it as a *shape* rather than
+    /// as a literal, per ruling R-e: both arms are derivations, and the
+    /// superseded expression is written out here so the comparison is against
+    /// the thing that was replaced rather than against a remembered number.
+    ///
+    /// Arm 1 — the treant's own gate-batch counts, 2026-08-07: 117,741 rows,
+    /// 1,366 contacts, `Σ |eligible_owners|` = 7,988,078.  The superseded
+    /// expression charged 4,342,523,562 for the scan alone and 4,714,113,843 in
+    /// total; the repriced model states 579,285,773 here plus the 65,685,144
+    /// cells term [`load_resource_plan`] adds — a **21x** fall on the scan
+    /// term and an **8.1x** fall on the total.  The gap between those two
+    /// factors is deliberate and is stated so nobody reads the smaller one as a
+    /// disappointment: what is left is dominated by
+    /// `Σ |eligible_owners| x owner_log x 2` = 367,451,588, which prices the
+    /// eligibility's own ordering, is not the scan, and G5 did not touch.  The
+    /// assertion is therefore 5x, which the 8.1x clears with margin while
+    /// still failing outright if the quadratic ever returns.
+    ///
+    /// Arm 2 — non-vacuity against a silent revert.  Widening the contact count
+    /// 100x with the eligibility held fixed must **not** multiply the charge:
+    /// under the old model it grew 100x exactly, and the transpose's only
+    /// contact-shaped costs are the `log` inside each search and the
+    /// contact-linear passes.
+    #[test]
+    fn fu8f_g5_load_charge_is_no_longer_quadratic_in_rows_times_contacts() {
+        /// The pre-G5 model, written out so this test compares against the
+        /// expression it replaced rather than against a copied total.
+        fn superseded(
+            face_count: usize,
+            eligible_owner_count: usize,
+            contact_count: usize,
+        ) -> usize {
+            let log = usize::BITS as usize - contact_count.max(1).leading_zeros() as usize;
+            let owner_log =
+                usize::BITS as usize - eligible_owner_count.max(1).leading_zeros() as usize;
+            let face_log = usize::BITS as usize - face_count.max(1).leading_zeros() as usize;
+            face_count * contact_count * (owner_log + 4)
+                + contact_count * (log + 2)
+                + eligible_owner_count * (owner_log * 2)
+                + face_count * (face_log * 2 + 1)
+        }
+
+        const TREANT_GATE_LOAD_ROWS: usize = 117_741;
+        const TREANT_CONTACTS: usize = 1_366;
+        const TREANT_OWNER_ENTRIES: usize = 7_988_078;
+
+        let charged = load_resource_plan_from_counts(
+            TREANT_GATE_LOAD_ROWS,
+            TREANT_OWNER_ENTRIES,
+            TREANT_CONTACTS,
+            0,
+        )
+        .expect("the treant's gate-batch load counts must plan")
+        .operations;
+        let old = superseded(TREANT_GATE_LOAD_ROWS, TREANT_OWNER_ENTRIES, TREANT_CONTACTS);
+        assert!(
+            charged * 5 < old,
+            "the repriced load model must state less than a fifth of the \
+             superseded one on the treant's gate batch: {charged} against {old}",
+        );
+
+        // The cells term is the only part of the finalizer's charge that is
+        // cells-shaped, and it is added by `load_resource_plan`, not here.
+        let contacts = (0..3u32)
+            .map(|index| PhysicalContact {
+                contact_id: u64::from(index),
+                owner: LoadOwner::Specialized(index),
+                point_mm: [0.0, 0.0, 0.0],
+            })
+            .collect::<Vec<_>>();
+        let eligibility = (0..4u32)
+            .map(|face| LoadEligibility {
+                face_id: face,
+                eligible_owners: vec![LoadOwner::Specialized(face % 3)],
+                centroid_mm: [0.0, 0.0, 0.0],
+                area_mm2: 1.0,
+            })
+            .collect::<Vec<_>>();
+        let transpose = LoadTransposeCounts::count(&eligibility, &contacts).expect("count");
+        assert_eq!(
+            transpose.operations().expect("transpose operations"),
+            transpose.cells * (LOAD_WITNESS_SLOTS + 5),
+            "the cells term must be exactly what its doc comment states",
+        );
+
+        // Arm 2: 100x the contacts, the same eligibility.
+        let narrow = load_resource_plan_from_counts(1_000, 4_000, 10, 0)
+            .expect("narrow")
+            .operations;
+        let wide = load_resource_plan_from_counts(1_000, 4_000, 1_000, 0)
+            .expect("wide")
+            .operations;
+        assert!(
+            wide < narrow * 3,
+            "widening the contact set 100x with the eligibility fixed must not \
+             multiply the charge: {narrow} -> {wide}",
+        );
+        assert!(
+            superseded(1_000, 4_000, 1_000) > superseded(1_000, 4_000, 10) * 50,
+            "the superseded model really was contact-multiplied, so arm 2 is \
+             not vacuous",
         );
     }
 

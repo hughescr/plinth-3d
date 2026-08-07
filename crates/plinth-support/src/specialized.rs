@@ -265,6 +265,38 @@ impl SpecializedLimits {
     /// unsatisfied**. See `support-resource-caps-2026-08-05.md` §12 and
     /// `CURRENT-STATUS.md` (*FU-8e phases E1–E4 landed 2026-08-07*).
     ///
+    /// **Dated addendum 2026-08-07 — FU-8f phase G5. Every block above is left
+    /// standing exactly as written, and for the first time since F3 the demand
+    /// this limit is handed MOVES — downward, by 4,748,065,084.** G5 repriced
+    /// `load_resource_plan_from_counts`'s scan term from
+    /// `rows × contacts × (owner_log + 4)` — a model of the dense
+    /// `contacts × rows` scan that phase G1 had *already* replaced with a CSR
+    /// transpose, and which G1 deliberately left standing and over-stating — to
+    /// what the transpose really spends: `Σ |eligible_owners| × (log + 2) × 2`
+    /// for its two eligibility traversals, plus `cells × (LOAD_WITNESS_SLOTS +
+    /// 5)` for the fill and the scan, the latter charged from the exact cell
+    /// count that no preflight can state. The demand becomes
+    ///
+    /// ```text
+    /// baseline_rows 554,926,572 + load 1,844,748,658
+    ///   + demand_rows 42,949,185 + proposal work 2,083,167,818
+    ///   = 4,525,792,233   against 35,445,500,736  -> FITS (12.8 % of cap)
+    /// ```
+    ///
+    /// with `exact_operations` **5,709,845,912** (16.1 %). The `load` line is
+    /// `specialized_load_resource_plan`'s own 5,543,831,115 → **795,766,031**
+    /// plus the **unchanged** 1,048,982,627 proposal bound; the other three
+    /// lines are byte-identical to F3's. Measured on the treant's round-1
+    /// merge-gate batch, 2026-08-07, on a **quiet** machine, one instrumented
+    /// release run whose instrumentation was reverted by editing before the
+    /// gates. **The cap still did not move and no cap code was touched — a
+    /// falling demand can create no refusal.** What stops the treant is still
+    /// wall-clock: G4's two attempts are EXCEEDS-TIMEBOX at 602 s with 436 and
+    /// 430 merge rounds counted, so **ruling R-f remains unsatisfied** and
+    /// `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is still not re-derived. See
+    /// `support-resource-caps-2026-08-05.md` §15 and `CURRENT-STATUS.md`
+    /// (*FU-8f phase G5 landed 2026-08-07*).
+    ///
     /// **Ruling note 2026-08-06 on the 12,714,828,544 quoted at the top of this
     /// comment.** It is a dated FU-8b-era charge for the treant's proposal-free
     /// gate batch, quoted here only for the face-count spread it demonstrates
