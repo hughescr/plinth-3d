@@ -21,7 +21,8 @@ use crate::perception::{
     finalize_specialized_load_partition, load_violation_count, specialized_load_resource_plan,
     FinalizedContactLoads, FinalizedLoadPartition, GenericContactPlan, GenericPerceptionError,
     GenericPerceptionLimits, LoadFinalizeLimits, LoadOwner, PhysicalContact, SliceSolid,
-    SpecializedLoadCounts, SpecializedOwnerReservation,
+    SpecializedLoadBaseline, SpecializedLoadCounts, SpecializedLoadDeltaScratch,
+    SpecializedLoadDeltaWork, SpecializedOwnerReservation,
 };
 use crate::{
     assess_coverage, build_dyadic_coverage_samples, coverage_assessment_resource_plan, BuildFrame,
@@ -1254,6 +1255,7 @@ impl<'a> SpecializedContactPlanEdit<'a> {
                 max_operations_floor: load_inputs.remaining_load_operations,
                 operations_per_batch_unit: 0,
             },
+            None,
         )?;
         for row in load_partition.rows() {
             let contact = contacts
@@ -1842,6 +1844,7 @@ pub fn prepare_specialized_contacts(
             max_operations_floor: load_inputs.remaining_load_operations,
             operations_per_batch_unit: 0,
         },
+        None,
     )?;
     for row in load_partition.rows() {
         let contact = contacts
@@ -2358,6 +2361,7 @@ fn working_load_inputs(
         reservations,
         &mut physical,
         &mut specialized_owner_faces,
+        None,
         &mut face_scratch,
         &mut fill_work,
         fill_limit,
@@ -3014,7 +3018,19 @@ fn island_face_scratch_bytes(islands: &[SupportIsland]) -> Result<usize, Special
 struct GatePeakUsage {
     proposal_bytes: usize,
     result_bytes: usize,
-    matrix_bytes: usize,
+    /// The batch's **one** set of load inputs and its baseline partition, from
+    /// [`gate_load_state_bytes`] (FU-8d phase F3, part P2).
+    ///
+    /// It was `matrix_bytes`: a window of up to `max_gate_window_variants`
+    /// `PhysicalContact` and `(owner, face)` matrices, one pair of them per
+    /// variant in the window.  On the Weeping Treant the pair matrix alone is
+    /// 7,971,451 entries **per variant**, so `gate_window_matrix_bytes` stated
+    /// tens of gigabytes against a 512 MiB limit — a wall that had never fired
+    /// only because `exact_operations` refused the batch before the window loop
+    /// ran.  Removing the operations wall without removing the matrices would
+    /// have moved the refusal onto that byte limit instead, which is why the
+    /// matrices are structurally gone rather than merely repriced.
+    load_baseline_bytes: usize,
     /// The batch's shared distinct-face buffer, from
     /// [`island_face_scratch_bytes`].  Retained, not phase-local: the buffer
     /// is allocated once at the top of the batch and lives across the
@@ -3056,7 +3072,7 @@ fn check_gate_peak(usage: GatePeakUsage, limit: usize) -> Result<usize, Speciali
     let retained = usage
         .proposal_bytes
         .checked_add(usage.result_bytes)
-        .and_then(|bytes| bytes.checked_add(usage.matrix_bytes))
+        .and_then(|bytes| bytes.checked_add(usage.load_baseline_bytes))
         .and_then(|bytes| bytes.checked_add(usage.face_scratch_bytes))
         .and_then(|bytes| bytes.checked_add(usage.batch_index_bytes))
         .and_then(|bytes| bytes.checked_add(usage.nearest_bytes))
@@ -3195,6 +3211,14 @@ struct GateResourcePlan {
     vector_bytes: usize,
     contact_window_bytes: usize,
     operations: usize,
+    /// The load term inside `operations`, from
+    /// [`crate::perception::specialized_load_resource_plan`] plus the
+    /// per-proposal bound (FU-8d phase F3, part P2).
+    load_operations: usize,
+    /// The per-proposal share of `load_operations`, kept so the execution's
+    /// running meter can be given the batch's whole remaining headroom rather
+    /// than only what the bound claimed.
+    load_proposal_bound: usize,
 }
 
 /// The batch's measured per-proposal routed work, supplied to
@@ -3251,13 +3275,39 @@ impl GateProposalRoutedWork {
     }
 }
 
+/// What the load phase costs a merge batch, from the load planner itself
+/// (FU-8d phase F3, part P2).
+///
+/// Before F3 the gate charged the load phase with a hand-built model —
+/// `variants × (faces + owner_faces)` inside `variant_operation_count` — that
+/// sat beside `specialized_load_resource_plan`'s own figure and disagreed with
+/// it: FU-8d part (2) recorded that the model charged `variants × faces` where
+/// the fold really did `variants × faces × contacts`, and that the under-charge
+/// is why the term was never the refusing one.  There is now **one authority**.
+/// `baseline_operations` is what `specialized_load_resource_plan` returns for
+/// the batch's single baseline finalize, and `proposal_bound` is
+/// [`proposal_load_bound`]'s count-derived allowance for the deltas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GateLoadWork {
+    baseline_operations: usize,
+    proposal_bound: usize,
+}
+
+impl GateLoadWork {
+    fn total(self) -> Result<usize, SpecializedError> {
+        self.baseline_operations
+            .checked_add(self.proposal_bound)
+            .ok_or(SpecializedError::GateResourceOverflow)
+    }
+}
+
 fn gate_resource_plan(
     contact_count: usize,
     proposal_count: usize,
     sample_count: usize,
-    face_count: usize,
     demand_count: usize,
     proposal_routed_work: GateProposalRoutedWork,
+    load_work: GateLoadWork,
     limits: SpecializedLimits,
 ) -> Result<GateResourcePlan, SpecializedError> {
     if limits.max_gate_window_variants == 0 {
@@ -3334,11 +3384,15 @@ fn gate_resource_plan(
     let routed_rows = baseline_rows
         .checked_add(proposal_routed_work.total()?)
         .ok_or(SpecializedError::GateResourceOverflow)?;
-    let face_rows = variants
-        .checked_mul(face_count)
-        .ok_or(SpecializedError::GateResourceOverflow)?;
+    // FU-8d phase F3 (P2): `face_rows = variants × distinct faces` is gone.
+    // It was the gate's own model of a per-variant load finalize, and it was
+    // wrong by a factor of the contact count — part (2) measured the real fold
+    // at `variants × faces × contacts`, ≈ 4.33 × 10¹⁴ on the treant against a
+    // charge of 4,618,272,984.  The finalize now runs **once**, and what it
+    // costs is what its own planner says it costs.
+    let load_operations = load_work.total()?;
     let operations = routed_rows
-        .checked_add(face_rows)
+        .checked_add(load_operations)
         .ok_or(SpecializedError::GateResourceOverflow)?;
     // The plan is bounded by the cap materialized for *this batch's* shape.
     // The proposal count is deliberately not a factor in that shape: a gate
@@ -3358,6 +3412,8 @@ fn gate_resource_plan(
         vector_bytes,
         contact_window_bytes,
         operations,
+        load_operations,
+        load_proposal_bound: load_work.proposal_bound,
     })
 }
 
@@ -3584,8 +3640,6 @@ fn variant_operation_count(
     merged: bool,
     routed: VariantRoutedWork,
     demand_count: usize,
-    face_count: usize,
-    owner_face_count: usize,
 ) -> Result<usize, SpecializedError> {
     let (logical_contact_work, physical_contacts) = totals.for_variant(merged)?;
     let demand_satisfaction = totals.demand_satisfaction;
@@ -3620,17 +3674,13 @@ fn variant_operation_count(
             demand_satisfaction,
         ),
     };
-    let unique_face_finalizer_work = face_count
-        .checked_mul(physical_contacts)
-        .and_then(|work| {
-            owner_face_count
-                .checked_mul(physical_contacts)
-                .and_then(|owners| work.checked_add(owners))
-        })
-        .ok_or(SpecializedError::GateResourceOverflow)?;
+    // FU-8d phase F3 (P2): `unique_face_finalizer_work` — the gate's own
+    // `variants × (faces + owner_faces) × physical_contacts` model of a
+    // per-variant load finalize — is gone from here.  The finalize runs once
+    // for the batch and its cost is charged where it is *measured*, by
+    // `specialized_load_resource_plan`, as `GateLoadWork`.
     routing_work
         .checked_add(logical_contact_work)
-        .and_then(|work| work.checked_add(unique_face_finalizer_work))
         .and_then(|work| work.checked_add(satisfaction_work))
         .ok_or(SpecializedError::GateResourceOverflow)
 }
@@ -3715,13 +3765,34 @@ fn evaluate_gate_batch(
         limits.coverage_route_knn,
         gate_operation_limit,
     )?;
+    let mut descriptor_operations = 0usize;
+    // FU-8d phase F3 (P2): the batch's ONE set of load inputs and its ONE
+    // finalized load partition.  Both were per variant; see [`GateLoadState`]
+    // for the locality argument that makes a proposal's answer a delta against
+    // this, and for why the per-variant window matrices had to go with them.
+    let load_state = build_gate_load_state(
+        contacts,
+        generic,
+        mesh,
+        surface,
+        islands,
+        face_count,
+        reservations,
+        &mut face_scratch,
+        &mut descriptor_operations,
+        gate_operation_limit,
+        limits,
+    )?;
     let plan = gate_resource_plan(
         contacts.len(),
         proposals.len(),
         coverage_samples.len(),
-        face_count,
         authoritative_demands.len(),
         planned_nearest.batch.proposal_work,
+        GateLoadWork {
+            baseline_operations: load_state.baseline_operations,
+            proposal_bound: proposal_load_bound(&load_state, proposals)?,
+        },
         limits,
     )?;
     // FU-8d phase F3 (P5): the batch's proposal-invariant contact and demand
@@ -3730,30 +3801,17 @@ fn evaluate_gate_batch(
     // variant's are the baseline's minus one, exactly, with no proposal in the
     // derivation.
     let variant_totals = GateVariantTotals::build(contacts, authoritative_demands)?;
-    let mut descriptor_operations = 0usize;
     let exact_operations = (0..plan.variants).try_fold(0usize, |total, variant| {
-        let proposal = variant
-            .checked_sub(1)
-            .and_then(|index| proposals.get(index));
-        let owner_face_count = variant_specialized_owner_face_count(
-            contacts,
-            proposal,
-            generic.islands(),
-            islands,
-            &mut face_scratch,
-            &mut descriptor_operations,
-            gate_operation_limit,
-        )?;
-        let routed = match proposal {
+        let routed = match variant.checked_sub(1) {
             None => VariantRoutedWork::BaselineSweep {
                 sample_count: coverage_samples.len(),
             },
-            Some(_) => {
+            Some(index) => {
                 // FU-8d phase F3: the second of the four planning passes lived
                 // here.  The fold now *charges* the plan the batch already made
                 // instead of re-deriving it, so the charge and the plan cannot
                 // disagree by construction.
-                let delta = &planned_nearest.proposals[variant - 1];
+                let delta = &planned_nearest.proposals[index];
                 VariantRoutedWork::ProposalDelta {
                     nearest_work: delta.work,
                     touched_rows: delta.touched_rows,
@@ -3764,31 +3822,24 @@ fn evaluate_gate_batch(
         total
             .checked_add(variant_operation_count(
                 variant_totals,
-                proposal.is_some(),
+                variant != 0,
                 routed,
                 authoritative_demands.len(),
-                face_count,
-                owner_face_count,
             )?)
             .ok_or(SpecializedError::GateResourceOverflow)
     })?;
-    // Each variant descriptor is scanned once for the global operation plan,
-    // once for the window matrix size, once for the load scratch plan, and
-    // once while filling the preallocated matrix.
-    let expected_fill_operations =
-        fill_operation_count(descriptor_operations, reservations.len(), plan.variants)?;
-    let descriptor_operations = descriptor_operations
-        .checked_mul(4)
-        .ok_or(SpecializedError::GateResourceOverflow)?;
+    // FU-8d phase F3: the descriptor term is what building the batch's **one**
+    // set of load inputs cost, charged once.  It was `× 4 × variants` — each
+    // variant's descriptors were scanned for the operation plan, for the window
+    // matrix size, for the load scratch plan and again while filling the
+    // matrix — and on the treant that product alone crossed the cap at variant
+    // 275 of 39,224.  Three of those four scans belonged to matrices that no
+    // longer exist and the fourth now happens once.
     let exact_operations = exact_operations
         .checked_add(face_count_operations)
         .and_then(|work| work.checked_add(descriptor_operations))
-        .and_then(|work| {
-            reservations
-                .len()
-                .checked_mul(plan.variants)
-                .and_then(|reservation_work| work.checked_add(reservation_work))
-        })
+        .and_then(|work| work.checked_add(reservations.len()))
+        .and_then(|work| work.checked_add(plan.load_operations))
         .ok_or(SpecializedError::GateResourceOverflow)?;
     if exact_operations > gate_operation_limit {
         return Err(SpecializedError::GateOperationLimit {
@@ -3796,10 +3847,17 @@ fn evaluate_gate_batch(
             limit: gate_operation_limit,
         });
     }
-    let fill_operation_limit = gate_operation_limit
+    // What the per-proposal load deltas may spend, measured as they run.  The
+    // plan above charged a count-derived bound for them; this is the whole
+    // headroom the batch has left once every other term is paid, so a proposal
+    // set whose measured delta work exceeds its bound is still admitted if the
+    // batch can afford it — and refused the moment it cannot.  It is the same
+    // "state a bound, then meter the real spend against it" shape
+    // `charge_load_descriptor_work` uses everywhere else in this stage.
+    let load_delta_limit = gate_operation_limit
         .checked_sub(
             exact_operations
-                .checked_sub(expected_fill_operations)
+                .checked_sub(plan.load_proposal_bound)
                 .ok_or(SpecializedError::GateResourceOverflow)?,
         )
         .ok_or(SpecializedError::GateResourceOverflow)?;
@@ -3809,21 +3867,21 @@ fn evaluate_gate_batch(
     // Each preflight window temporarily builds bounded `Vec`/`BTree*` route
     // payloads, then retains only its arithmetic summary. It therefore does
     // not retain data for the full gate payload.
+    let mut load_scratch = SpecializedLoadDeltaScratch::for_rows(load_state.baseline.row_count());
+    let load_baseline_bytes = gate_load_state_bytes(&load_state, &load_scratch)?;
     whole_gate_route_preflight_then_execute(
-        contacts,
-        proposals,
         proposal_storage_bytes,
-        generic,
         topology,
         islands,
         coverage_samples,
         &planned_nearest,
+        load_baseline_bytes,
+        load_state.baseline_scratch_bytes,
         &batch_index,
         limits,
         &plan,
         |whole_gate_route_plan| {
             let mut vectors = Vec::with_capacity(plan.variants);
-            let mut append_work = 0usize;
             let mut executed_nearest = GateNearestBatchPlan::seeded();
             // The batch's one baseline nearest sweep.  Every proposal variant
             // below reads its answers and rewrites only the rows its own merged
@@ -3858,116 +3916,39 @@ fn evaluate_gate_batch(
             // proposal refills it; none allocates its own.
             let mut proposal_query_scratch: Vec<[f64; 3]> = Vec::new();
             let mut executed_whole_gate_route_plan = GateWholeRoutePlan::default();
-            for window_start in (0..plan.variants).step_by(limits.max_gate_window_variants) {
-                let window_end =
-                    (window_start + limits.max_gate_window_variants).min(plan.variants);
-                let window_variants = window_end - window_start;
-                let physical_len =
-                    (window_start..window_end).try_fold(0usize, |total, variant| {
-                        total
-                            .checked_add(variant_contact_count(contacts.len(), variant))
-                            .ok_or(SpecializedError::GateResourceOverflow)
-                    })?;
-                let owner_face_len =
-                    (window_start..window_end).try_fold(0usize, |total, variant| {
-                        let proposal = variant
-                            .checked_sub(1)
-                            .and_then(|index| proposals.get(index));
-                        let mut work = 0usize;
-                        total
-                            .checked_add(variant_specialized_owner_face_count(
-                                contacts,
-                                proposal,
-                                generic.islands(),
-                                islands,
-                                &mut face_scratch,
-                                &mut work,
-                                usize::MAX,
-                            )?)
-                            .ok_or(SpecializedError::GateResourceOverflow)
-                    })?;
-                let working_bytes =
-                    gate_window_matrix_bytes(physical_len, owner_face_len, window_variants)?;
-                if working_bytes > limits.max_gate_contact_matrix_bytes {
-                    return Err(SpecializedError::GateContactMatrixByteLimit {
-                        required: working_bytes,
-                        limit: limits.max_gate_contact_matrix_bytes,
-                    });
-                }
-                let coverage_scratch =
-                    coverage_assessment_resource_plan(coverage_samples, topology)?;
-                let max_load_scratch =
-                    (window_start..window_end).try_fold(0usize, |maximum, variant| {
-                        let proposal = variant
-                            .checked_sub(1)
-                            .and_then(|index| proposals.get(index));
-                        let mut work = 0usize;
-                        let owner_faces = variant_specialized_owner_face_count(
-                            contacts,
-                            proposal,
-                            generic.islands(),
-                            islands,
-                            &mut face_scratch,
-                            &mut work,
-                            usize::MAX,
-                        )?;
-                        let resource = specialized_load_resource_plan(
-                            generic,
-                            variant_contact_count(contacts.len(), variant),
-                            SpecializedLoadCounts::bounded(owner_faces, face_count),
-                        )?;
-                        Ok::<_, SpecializedError>(maximum.max(resource.scratch_bytes))
-                    })?;
-                let coverage_retained_bytes = coverage_samples
-                    .len()
-                    .checked_mul(std::mem::size_of::<usize>())
-                    .ok_or(SpecializedError::GateResourceOverflow)?;
-                let executed_peak_bytes = check_gate_peak(
-                    GatePeakUsage {
-                        proposal_bytes: proposal_storage_bytes,
-                        result_bytes: plan.vector_bytes,
-                        matrix_bytes: working_bytes,
-                        face_scratch_bytes: island_face_scratch_bytes(islands)?,
-                        batch_index_bytes: batch_index.retained_bytes,
-                        nearest_bytes: gate_nearest_array_bytes(coverage_samples.len())?,
-                        nearest_witness_bytes: gate_nearest_witness_bytes(coverage_samples.len())?,
-                        proposal_plan_bytes: planned_nearest.retained_plan_bytes,
-                        coverage_scratch_bytes: coverage_scratch.scratch_bytes,
-                        coverage_nearest_bytes: planned_nearest.batch.peak_bytes()?,
-                        coverage_retained_bytes,
-                        load_scratch_bytes: max_load_scratch,
-                    },
-                    limits.max_gate_peak_bytes,
-                )?;
-                executed_whole_gate_route_plan.record(executed_peak_bytes)?;
-                let mut physical_matrix = Vec::with_capacity(physical_len);
-                let mut physical_offsets = Vec::with_capacity(window_variants + 1);
-                let mut owner_face_matrix = Vec::with_capacity(owner_face_len);
-                let mut owner_face_offsets = Vec::with_capacity(window_variants + 1);
-                physical_offsets.push(0);
-                owner_face_offsets.push(0);
-                for variant in window_start..window_end {
-                    let proposal = variant
-                        .checked_sub(1)
-                        .and_then(|index| proposals.get(index));
-                    append_variant_load_inputs(
-                        contacts,
-                        proposal,
-                        generic.islands(),
-                        islands,
-                        reservations,
-                        &mut physical_matrix,
-                        &mut owner_face_matrix,
-                        &mut face_scratch,
-                        &mut append_work,
-                        fill_operation_limit,
-                    )?;
-                    physical_offsets.push(physical_matrix.len());
-                    owner_face_offsets.push(owner_face_matrix.len());
-                }
-                debug_assert_eq!(physical_matrix.len(), physical_len);
-                debug_assert_eq!(owner_face_matrix.len(), owner_face_len);
-                for (window_row, variant) in (window_start..window_end).enumerate() {
+            // FU-8d phase F3 (P2): there are no windows any more, because there
+            // are no per-window matrices for a window to bound.  The batch
+            // holds one physical list, one `(owner, face)` list and one
+            // finalized partition, so the peak is stated once for the batch
+            // rather than once per window of variants.
+            let coverage_scratch = coverage_assessment_resource_plan(coverage_samples, topology)?;
+            let coverage_retained_bytes = coverage_samples
+                .len()
+                .checked_mul(std::mem::size_of::<usize>())
+                .ok_or(SpecializedError::GateResourceOverflow)?;
+            let mut merged_rows: Vec<u32> = Vec::new();
+            let executed_peak_bytes = check_gate_peak(
+                GatePeakUsage {
+                    proposal_bytes: proposal_storage_bytes,
+                    result_bytes: plan.vector_bytes,
+                    load_baseline_bytes: gate_load_state_bytes(&load_state, &load_scratch)?,
+                    face_scratch_bytes: island_face_scratch_bytes(islands)?,
+                    batch_index_bytes: batch_index.retained_bytes,
+                    nearest_bytes: gate_nearest_array_bytes(coverage_samples.len())?,
+                    nearest_witness_bytes: gate_nearest_witness_bytes(coverage_samples.len())?,
+                    proposal_plan_bytes: planned_nearest.retained_plan_bytes,
+                    coverage_scratch_bytes: coverage_scratch.scratch_bytes,
+                    coverage_nearest_bytes: planned_nearest.batch.peak_bytes()?,
+                    coverage_retained_bytes,
+                    load_scratch_bytes: load_state.baseline_scratch_bytes,
+                },
+                limits.max_gate_peak_bytes,
+            )?;
+            executed_whole_gate_route_plan.record(executed_peak_bytes)?;
+            let mut executed_load_work = SpecializedLoadDeltaWork::default();
+            let mut executed_touched_rows = 0usize;
+            {
+                for variant in 0..plan.variants {
                     let proposal = variant
                         .checked_sub(1)
                         .and_then(|index| proposals.get(index));
@@ -3999,6 +3980,9 @@ fn evaluate_gate_batch(
                                 &mut working_nearest,
                                 &mut touched_rows,
                             )?;
+                            executed_touched_rows = executed_touched_rows
+                                .checked_add(touched_rows.len())
+                                .ok_or(SpecializedError::GateResourceOverflow)?;
                             &working_nearest
                         }
                     };
@@ -4013,22 +3997,57 @@ fn evaluate_gate_batch(
                             max_operations: limits.max_coverage_operations,
                         },
                     )?;
-                    let physical = &physical_matrix
-                        [physical_offsets[window_row]..physical_offsets[window_row + 1]];
-                    let owner_faces = &owner_face_matrix
-                        [owner_face_offsets[window_row]..owner_face_offsets[window_row + 1]];
-                    let partition = finalize_specialized_load_partition(
-                        generic,
-                        mesh,
-                        surface,
-                        physical,
-                        owner_faces,
-                        LoadFinalizeLimits {
-                            max_scratch_bytes: limits.max_load_scratch_bytes,
-                            max_operations_floor: limits.max_load_operations_floor,
-                            operations_per_batch_unit: limits.load_work_per_batch_unit,
-                        },
-                    )?;
+                    // FU-8d phase F3 (P2): variant 0 reads the batch's one
+                    // finalized partition; a proposal variant re-answers only
+                    // `elig(left) ∪ elig(right)` against it.
+                    let load_violations = match proposal {
+                        None => load_state.baseline.violation_count(),
+                        Some(proposal) => {
+                            if load_state.merged_seat_is_specialized(
+                                contacts,
+                                generic.islands(),
+                                proposal,
+                            )? {
+                                load_state.merged_rows(
+                                    proposal.left,
+                                    proposal.right,
+                                    &mut merged_rows,
+                                );
+                                let outcome = load_state.baseline.merged_violation_count(
+                                    proposal.left,
+                                    proposal.right,
+                                    proposal.position_mm,
+                                    &merged_rows,
+                                    &mut load_scratch,
+                                )?;
+                                executed_load_work.record(outcome.work)?;
+                                let spent = executed_load_work.total()?;
+                                if spent > load_delta_limit {
+                                    return Err(SpecializedError::GateOperationLimit {
+                                        required: spent,
+                                        limit: load_delta_limit,
+                                    });
+                                }
+                                outcome.violation_count
+                            } else {
+                                // The one shape the delta's locality argument
+                                // does not cover, and one a production merge
+                                // batch cannot produce: finalize it in full
+                                // rather than answer it approximately.
+                                variant_load_violation_count_in_full(
+                                    contacts,
+                                    proposal,
+                                    generic,
+                                    mesh,
+                                    surface,
+                                    islands,
+                                    reservations,
+                                    &mut face_scratch,
+                                    limits,
+                                )?
+                            }
+                        }
+                    };
                     let unsupported_specialized_count = variant_unsupported_count(
                         contacts,
                         proposal,
@@ -4039,7 +4058,7 @@ fn evaluate_gate_batch(
                     );
                     vectors.push(FrozenSpecializedGateVector::from_live(
                         coverage.objective,
-                        load_violation_count(&partition, physical)?,
+                        load_violations,
                         unsupported_specialized_count,
                     ));
                     // Restore the baseline rows this variant borrowed, so the
@@ -4056,21 +4075,214 @@ fn evaluate_gate_batch(
                     .ok_or(SpecializedError::GateResourceOverflow)?,
             )?;
             executed_whole_gate_route_plan.nearest = executed_nearest;
+            executed_whole_gate_route_plan.touched_rows = executed_touched_rows;
             if whole_gate_route_plan != executed_whole_gate_route_plan {
                 return Err(SpecializedError::GateRoutePlanMismatch);
             }
-            debug_assert_eq!(append_work, expected_fill_operations);
             Ok(vectors)
         },
     )
 }
 
-fn variant_contact_count(contact_count: usize, variant: usize) -> usize {
-    if variant == 0 {
-        contact_count
-    } else {
-        contact_count.saturating_sub(1)
+/// Build the merge gate's one set of load inputs and its one baseline
+/// partition (FU-8d phase F3, part P2).  See [`GateLoadState`].
+#[allow(clippy::too_many_arguments)]
+fn build_gate_load_state(
+    contacts: &[WorkingContact],
+    generic: &GenericContactPlan,
+    mesh: &Mesh,
+    surface: &NativeSurface,
+    islands: &[SupportIsland],
+    island_face_count: usize,
+    reservations: &[SpecializedOwnerReservation],
+    face_scratch: &mut Vec<u32>,
+    work: &mut usize,
+    limit: usize,
+    limits: SpecializedLimits,
+) -> Result<GateLoadState, SpecializedError> {
+    let mut physical = Vec::with_capacity(contacts.len());
+    let mut owner_faces = Vec::new();
+    let mut pair_starts = Vec::with_capacity(contacts.len() + 1);
+    append_variant_load_inputs(
+        contacts,
+        None,
+        generic.islands(),
+        islands,
+        reservations,
+        &mut physical,
+        &mut owner_faces,
+        Some(&mut pair_starts),
+        face_scratch,
+        work,
+        limit,
+    )?;
+    let load_limits = LoadFinalizeLimits {
+        max_scratch_bytes: limits.max_load_scratch_bytes,
+        max_operations_floor: limits.max_load_operations_floor,
+        operations_per_batch_unit: limits.load_work_per_batch_unit,
+    };
+    // `specialized_load_resource_plan` is the ONE authority for what the load
+    // phase costs and holds.  The gate no longer states a hand-built model of
+    // it beside it — the `variants × faces × contacts` term FU-8d part (2)
+    // named as under-charged is gone, and this figure, for one baseline, is
+    // what `gate_resource_plan` charges in its place.
+    let baseline_resource = specialized_load_resource_plan(
+        generic,
+        physical.len(),
+        SpecializedLoadCounts::bounded(owner_faces.len(), island_face_count),
+    )?;
+    let (partition, baseline) = SpecializedLoadBaseline::build(
+        generic,
+        mesh,
+        surface,
+        &physical,
+        &owner_faces,
+        load_limits,
+    )?;
+    // `face_row` is one `u32` per mesh face, independent of the batch's
+    // contact count.
+    let mut face_row = vec![u32::MAX; mesh.tris().len()];
+    let mut row_face = Vec::with_capacity(partition.rows().len());
+    for (row, load) in partition.rows().iter().enumerate() {
+        row_face.push(load.face_id);
+        // Rows are ascending by face id, so the first row carrying a face is
+        // the one recorded and the rest of its run follows contiguously.
+        if face_row[load.face_id as usize] == u32::MAX {
+            face_row[load.face_id as usize] =
+                u32::try_from(row).map_err(|_| SpecializedError::GateResourceOverflow)?;
+        }
     }
+    let mut contact_rows = vec![0usize; contacts.len()];
+    for (contact, count) in contact_rows.iter_mut().enumerate() {
+        for &(_, face_id) in &owner_faces[pair_starts[contact]..pair_starts[contact + 1]] {
+            let mut row = face_row[face_id as usize];
+            if row == u32::MAX {
+                continue;
+            }
+            while (row as usize) < row_face.len() && row_face[row as usize] == face_id {
+                *count += 1;
+                row += 1;
+            }
+        }
+    }
+    // One unit per pair inspected while indexing them, the same unit every
+    // other descriptor scan in this stage charges.
+    charge_load_descriptor_work(work, owner_faces.len(), limit)?;
+    Ok(GateLoadState {
+        physical,
+        owner_faces,
+        pair_starts,
+        face_row,
+        row_face,
+        contact_rows,
+        baseline,
+        baseline_operations: baseline_resource.operations,
+        baseline_scratch_bytes: baseline_resource.scratch_bytes,
+    })
+}
+
+/// What the batch's retained load state holds, charged as one term of the gate
+/// peak (FU-8d phase F3, part P2).
+///
+/// It replaces `matrix_bytes`, and it is smaller by construction: one physical
+/// list and one pair list for the batch where there were up to
+/// `max_gate_window_variants` of each.
+fn gate_load_state_bytes(
+    state: &GateLoadState,
+    scratch: &SpecializedLoadDeltaScratch,
+) -> Result<usize, SpecializedError> {
+    [
+        checked_route_bytes::<PhysicalContact>(state.physical.len())?,
+        checked_route_bytes::<(u32, u32)>(state.owner_faces.len())?,
+        checked_route_bytes::<usize>(state.pair_starts.len())?,
+        checked_route_bytes::<u32>(state.face_row.len())?,
+        checked_route_bytes::<u32>(state.row_face.len())?,
+        checked_route_bytes::<usize>(state.contact_rows.len())?,
+        state.baseline.retained_bytes(),
+        scratch.retained_bytes()?,
+    ]
+    .into_iter()
+    .try_fold(0usize, |total, bytes| {
+        total
+            .checked_add(bytes)
+            .ok_or(SpecializedError::GateResourceOverflow)
+    })
+}
+
+/// The count-derived bound the plan charges for the per-proposal load deltas
+/// (FU-8d phase F3, parts P2 and (3)).
+///
+/// `|elig(left) ∪ elig(right)|` is at most `|elig(left)| + |elig(right)|`, and
+/// both counts are read from `contact_rows`, which was built once with the load
+/// state.  The `+ 3` per proposal is the floor on touched contacts: `left`,
+/// `right` and the merged seat are always re-evaluated.  Stating it before the
+/// loop is what keeps the gate from having to spend the deltas in order to
+/// discover it cannot afford them — the hole FU-8d part (3) names — and the
+/// real spend is then metered against `load_delta_limit` as it happens, the
+/// same shape `charge_load_descriptor_work` uses throughout this stage.
+fn proposal_load_bound(
+    state: &GateLoadState,
+    proposals: &[MergeProposal],
+) -> Result<usize, SpecializedError> {
+    proposals.iter().try_fold(0usize, |total, proposal| {
+        state.contact_rows[proposal.left]
+            .checked_add(state.contact_rows[proposal.right])
+            .and_then(|rows| rows.checked_add(3))
+            .and_then(|rows| total.checked_add(rows))
+            .ok_or(SpecializedError::GateResourceOverflow)
+    })
+}
+
+/// Finalize one proposal variant's load partition in full and count its
+/// violations, for the single shape
+/// [`GateLoadState::merged_seat_is_specialized`] rejects.
+///
+/// This is the predecessor's per-variant path, kept for a case a production
+/// merge batch cannot produce: it costs a whole finalize, which is exactly what
+/// FU-8d phase F3 exists to stop doing 39,223 times, and it is reached only
+/// when the merged seat would not serve `elig(left) ∪ elig(right)`.
+#[allow(clippy::too_many_arguments)]
+fn variant_load_violation_count_in_full(
+    contacts: &[WorkingContact],
+    proposal: &MergeProposal,
+    generic: &GenericContactPlan,
+    mesh: &Mesh,
+    surface: &NativeSurface,
+    islands: &[SupportIsland],
+    reservations: &[SpecializedOwnerReservation],
+    face_scratch: &mut Vec<u32>,
+    limits: SpecializedLimits,
+) -> Result<usize, SpecializedError> {
+    let mut physical = Vec::with_capacity(contacts.len());
+    let mut owner_faces = Vec::new();
+    let mut work = 0usize;
+    append_variant_load_inputs(
+        contacts,
+        Some(proposal),
+        generic.islands(),
+        islands,
+        reservations,
+        &mut physical,
+        &mut owner_faces,
+        None,
+        face_scratch,
+        &mut work,
+        usize::MAX,
+    )?;
+    let partition = finalize_specialized_load_partition(
+        generic,
+        mesh,
+        surface,
+        &physical,
+        &owner_faces,
+        LoadFinalizeLimits {
+            max_scratch_bytes: limits.max_load_scratch_bytes,
+            max_operations_floor: limits.max_load_operations_floor,
+            operations_per_batch_unit: limits.load_work_per_batch_unit,
+        },
+        None,
+    )?;
+    Ok(load_violation_count(&partition, &physical)?)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -4442,6 +4654,22 @@ fn plan_gate_nearest_batch(
 struct GateWholeRoutePlan {
     window_count: usize,
     nearest: GateNearestBatchPlan,
+    /// Sample rows the nearest deltas actually wrote, summed over proposals.
+    ///
+    /// FU-8d phase F3 re-founds `GateRoutePlanMismatch` on this kind of term.
+    /// Before F3 the check compared a plan against a **second plan**: the
+    /// preflight planned every proposal's delta, execution planned them all
+    /// again, and the two were compared.  Execution now reads the batch's one
+    /// plan, so that comparison would be a tautology.  What execution can still
+    /// disagree with the plan about is what it *did*, and this is that: it is
+    /// counted from `touched.len()` as the delta fills each variant, not read
+    /// back from the plan.  The check therefore attests "the batch executed the
+    /// work it planned, once per proposal and in order" rather than "two
+    /// identical computations agreed".  That is a weaker statement than the
+    /// predecessor's, and deliberately so — the predecessor bought its extra
+    /// strength by paying for the whole planning pass twice, which is the
+    /// defect FU-8d part (3) opened.
+    touched_rows: usize,
     max_peak_bytes: usize,
 }
 
@@ -4464,38 +4692,25 @@ fn preflight_then_execute<T, U>(
     execute(preflight?)
 }
 
-/// Traverse every gate window and retain only checked summaries.
-fn traverse_whole_gate_windows(
-    variants: usize,
-    max_window_variants: usize,
-    nearest: GateNearestBatchPlan,
-    mut plan_window: impl FnMut(usize, usize) -> Result<usize, SpecializedError>,
-) -> Result<GateWholeRoutePlan, SpecializedError> {
-    let mut preflight = GateWholeRoutePlan {
-        nearest,
-        ..GateWholeRoutePlan::default()
-    };
-    for window_start in (0..variants).step_by(max_window_variants) {
-        let window_end = (window_start + max_window_variants).min(variants);
-        let peak_bytes = plan_window(window_start, window_end)?;
-        preflight.record(peak_bytes)?;
-    }
-    Ok(preflight)
-}
+// FU-8d phase F3 (P2) removed `traverse_whole_gate_windows` and
+// `gate_window_matrix_bytes`.  Both existed to size and bound the per-variant
+// `PhysicalContact` / `(owner, face)` window matrices, and there are no such
+// matrices any more: the batch holds one of each.  Nothing in the gate's byte
+// bound varies by variant, so the peak is stated once for the batch by
+// `whole_gate_route_preflight` and re-measured once by the execution.
 
 /// Route-plan all windows before execution. Each window uses bounded temporary
 /// `Vec`/`BTree*` payloads for counting and `KnnBatchPlan` arithmetic; it does
 /// not gather points or construct an index.
 #[allow(clippy::too_many_arguments)]
 fn whole_gate_route_preflight(
-    contacts: &[WorkingContact],
-    proposals: &[MergeProposal],
     proposal_storage_bytes: usize,
-    generic: &GenericContactPlan,
     topology: &plinth_mesh::FaceTopology,
     islands: &[SupportIsland],
     coverage_samples: &[CoverageSample],
     planned_nearest: &GatePlannedNearest,
+    load_baseline_bytes: usize,
+    load_scratch_bytes: usize,
     index: &GateBatchIndex,
     limits: SpecializedLimits,
     gate_plan: &GateResourcePlan,
@@ -4512,98 +4727,36 @@ fn whole_gate_route_preflight(
         .len()
         .checked_mul(std::mem::size_of::<usize>())
         .ok_or(SpecializedError::GateResourceOverflow)?;
-    // One distinct-face buffer for the whole preflight; the per-variant face
-    // counts below reuse it rather than allocating per contact.
-    let mut face_scratch: Vec<u32> = Vec::new();
-    // Distinct island faces, once for the whole preflight: the bound on how
-    // many rows a variant's `(owner, face)` pairs can add (FU-8b defect B).
-    // Uncapped like the per-variant counts beside it — this route plans, the
-    // batch it plans for charges.
-    let mut island_face_work = 0usize;
-    let island_face_count = unique_island_face_count(
-        islands,
-        &mut face_scratch,
-        &mut island_face_work,
-        usize::MAX,
-    )?;
-    traverse_whole_gate_windows(
-        gate_plan.variants,
-        limits.max_gate_window_variants,
-        nearest,
-        |window_start, window_end| {
-            let window_variants = window_end - window_start;
-            let physical_len = (window_start..window_end).try_fold(0usize, |total, variant| {
-                total
-                    .checked_add(variant_contact_count(contacts.len(), variant))
-                    .ok_or(SpecializedError::GateResourceOverflow)
-            })?;
-            let owner_face_len =
-                (window_start..window_end).try_fold(0usize, |total, variant| {
-                    let proposal = variant
-                        .checked_sub(1)
-                        .and_then(|index| proposals.get(index));
-                    let mut work = 0usize;
-                    total
-                        .checked_add(variant_specialized_owner_face_count(
-                            contacts,
-                            proposal,
-                            generic.islands(),
-                            islands,
-                            &mut face_scratch,
-                            &mut work,
-                            usize::MAX,
-                        )?)
-                        .ok_or(SpecializedError::GateResourceOverflow)
-                })?;
-            let working_bytes =
-                gate_window_matrix_bytes(physical_len, owner_face_len, window_variants)?;
-            if working_bytes > limits.max_gate_contact_matrix_bytes {
-                return Err(SpecializedError::GateContactMatrixByteLimit {
-                    required: working_bytes,
-                    limit: limits.max_gate_contact_matrix_bytes,
-                });
-            }
-            let max_load_scratch =
-                (window_start..window_end).try_fold(0usize, |maximum, variant| {
-                    let proposal = variant
-                        .checked_sub(1)
-                        .and_then(|index| proposals.get(index));
-                    let mut work = 0usize;
-                    let owner_faces = variant_specialized_owner_face_count(
-                        contacts,
-                        proposal,
-                        generic.islands(),
-                        islands,
-                        &mut face_scratch,
-                        &mut work,
-                        usize::MAX,
-                    )?;
-                    let resource = specialized_load_resource_plan(
-                        generic,
-                        variant_contact_count(contacts.len(), variant),
-                        SpecializedLoadCounts::bounded(owner_faces, island_face_count),
-                    )?;
-                    Ok::<_, SpecializedError>(maximum.max(resource.scratch_bytes))
-                })?;
-            check_gate_peak(
-                GatePeakUsage {
-                    proposal_bytes: proposal_storage_bytes,
-                    result_bytes: gate_plan.vector_bytes,
-                    matrix_bytes: working_bytes,
-                    face_scratch_bytes: island_face_scratch_bytes(islands)?,
-                    batch_index_bytes: index.retained_bytes,
-                    nearest_bytes,
-                    nearest_witness_bytes,
-                    proposal_plan_bytes: planned_nearest.retained_plan_bytes,
-                    coverage_scratch_bytes: coverage_scratch.scratch_bytes,
-                    coverage_nearest_bytes,
-                    coverage_retained_bytes,
-                    load_scratch_bytes: max_load_scratch,
-                },
-                limits.max_gate_peak_bytes,
-            )
+    // FU-8d phase F3 (P2): the window traversal is gone with the matrices it
+    // sized.  Nothing in the gate's byte bound varies by variant any more — the
+    // batch holds one physical list, one `(owner, face)` list, one finalized
+    // partition and two `samples`-long nearest arrays — so the peak is one
+    // number for the batch, stated once here and re-measured once by the
+    // execution.
+    let peak_bytes = check_gate_peak(
+        GatePeakUsage {
+            proposal_bytes: proposal_storage_bytes,
+            result_bytes: gate_plan.vector_bytes,
+            load_baseline_bytes,
+            face_scratch_bytes: island_face_scratch_bytes(islands)?,
+            batch_index_bytes: index.retained_bytes,
+            nearest_bytes,
+            nearest_witness_bytes,
+            proposal_plan_bytes: planned_nearest.retained_plan_bytes,
+            coverage_scratch_bytes: coverage_scratch.scratch_bytes,
+            coverage_nearest_bytes,
+            coverage_retained_bytes,
+            load_scratch_bytes,
         },
-    )
+        limits.max_gate_peak_bytes,
+    )?;
+    let mut preflight = GateWholeRoutePlan {
+        nearest,
+        touched_rows: nearest.proposal_work.touched_rows,
+        ..GateWholeRoutePlan::default()
+    };
+    preflight.record(peak_bytes)?;
+    Ok(preflight)
 }
 
 /// The two `samples`-long `f64` arrays the batch retains for the nearest phase:
@@ -4615,40 +4768,15 @@ fn gate_nearest_array_bytes(sample_count: usize) -> Result<usize, SpecializedErr
         .ok_or(SpecializedError::GateResourceOverflow)
 }
 
-/// One gate window's physical-contact and owner-face matrices with their offset
-/// arrays.  The nearest matrix left this bound at FU-8c: it is no longer
-/// window-shaped.
-fn gate_window_matrix_bytes(
-    physical_len: usize,
-    owner_face_len: usize,
-    window_variants: usize,
-) -> Result<usize, SpecializedError> {
-    physical_len
-        .checked_mul(std::mem::size_of::<PhysicalContact>())
-        .and_then(|bytes| {
-            owner_face_len
-                .checked_mul(std::mem::size_of::<(u32, u32)>())
-                .and_then(|owners| bytes.checked_add(owners))
-        })
-        .and_then(|bytes| {
-            window_variants
-                .checked_add(1)
-                .and_then(|offsets| offsets.checked_mul(2 * std::mem::size_of::<usize>()))
-                .and_then(|offsets| bytes.checked_add(offsets))
-        })
-        .ok_or(SpecializedError::GateResourceOverflow)
-}
-
 #[allow(clippy::too_many_arguments)]
 fn whole_gate_route_preflight_then_execute<T>(
-    contacts: &[WorkingContact],
-    proposals: &[MergeProposal],
     proposal_storage_bytes: usize,
-    generic: &GenericContactPlan,
     topology: &plinth_mesh::FaceTopology,
     islands: &[SupportIsland],
     coverage_samples: &[CoverageSample],
     planned_nearest: &GatePlannedNearest,
+    load_baseline_bytes: usize,
+    load_scratch_bytes: usize,
     index: &GateBatchIndex,
     limits: SpecializedLimits,
     gate_plan: &GateResourcePlan,
@@ -4656,14 +4784,13 @@ fn whole_gate_route_preflight_then_execute<T>(
 ) -> Result<T, SpecializedError> {
     preflight_then_execute(
         whole_gate_route_preflight(
-            contacts,
-            proposals,
             proposal_storage_bytes,
-            generic,
             topology,
             islands,
             coverage_samples,
             planned_nearest,
+            load_baseline_bytes,
+            load_scratch_bytes,
             index,
             limits,
             gate_plan,
@@ -5859,6 +5986,7 @@ fn append_variant_load_inputs(
     reservations: &[SpecializedOwnerReservation],
     physical: &mut Vec<PhysicalContact>,
     specialized_owner_faces: &mut Vec<(u32, u32)>,
+    mut pair_starts: Option<&mut Vec<usize>>,
     scratch: &mut Vec<u32>,
     work: &mut usize,
     limit: usize,
@@ -5878,8 +6006,18 @@ fn append_variant_load_inputs(
             .ok_or(SpecializedError::OwnerIdOverflow)
     })?;
     let start = physical.len();
+    // FU-8d phase F3 (P2): `pair_starts`, when asked for, records where each
+    // appended contact's `(owner, face)` run begins, so a later reader can
+    // recover `elig(contact)` without a second gather.  It is the merge gate's
+    // handle on `elig(left) ∪ elig(right)`; every other caller passes `None`.
+    if let Some(starts) = pair_starts.as_deref_mut() {
+        starts.clear();
+    }
     let mut append =
         |position_mm: [f64; 3], parts: ContactParts<'_>| -> Result<(), SpecializedError> {
+            if let Some(starts) = pair_starts.as_deref_mut() {
+                starts.push(specialized_owner_faces.len());
+            }
             let contact_id = u64::try_from(physical.len() - start)
                 .map_err(|_| SpecializedError::OwnerIdOverflow)?;
             let owner = if let Some(generic_owner) =
@@ -5917,7 +6055,139 @@ fn append_variant_load_inputs(
             ContactParts::new(&contacts[proposal.left], Some(&contacts[proposal.right])),
         )?;
     }
+    if let Some(starts) = pair_starts {
+        starts.push(specialized_owner_faces.len());
+    }
     Ok(())
+}
+
+/// The merge gate's load state, built **once** for the batch (FU-8d phase F3,
+/// part P2).
+///
+/// It holds variant 0's load inputs, the baseline partition those inputs
+/// finalize to, and the two index arrays a proposal needs to name
+/// `elig(left) ∪ elig(right)` without re-gathering anything:
+///
+/// - `pair_starts`, from [`append_variant_load_inputs`], slices
+///   `owner_faces` into one ascending distinct face run per contact;
+/// - `face_row` maps a face id to the first load row carrying it, and
+///   `row_face` lets the run of rows carrying that face be walked (rows are
+///   ascending by face id, so equal faces are contiguous — a base authority
+///   that carries the same face twice therefore yields two rows, and both are
+///   found).
+///
+/// Because each contact's face run is ascending and rows are ordered by face,
+/// a contact's eligible rows come out ascending, and two contacts' runs merge
+/// in one linear pass with no sort.
+///
+/// **The per-variant window matrices are gone, not merely unpriced.** Before
+/// F3 the gate materialized, for every window of up to
+/// `max_gate_window_variants` variants, one `PhysicalContact` matrix and one
+/// `(owner, face)` matrix covering every variant in the window. On the Weeping
+/// Treant the second of those is 7,971,451 pairs × 8 B **per variant**;
+/// `gate_window_matrix_bytes` therefore states a figure in the tens of
+/// gigabytes against `max_gate_contact_matrix_bytes` = 512 MiB, and the only
+/// reason that check never fired is that `exact_operations` refused the batch
+/// first. Removing the operations wall without removing the matrices would
+/// have moved the refusal onto a byte limit instead. There is now exactly one
+/// physical list and one pair list for the whole batch.
+struct GateLoadState {
+    physical: Vec<PhysicalContact>,
+    owner_faces: Vec<(u32, u32)>,
+    pair_starts: Vec<usize>,
+    face_row: Vec<u32>,
+    row_face: Vec<u32>,
+    /// How many load rows each baseline contact is eligible for.  Read by the
+    /// plan's count-derived bound; never used as an answer.
+    contact_rows: Vec<usize>,
+    baseline: SpecializedLoadBaseline,
+    baseline_operations: usize,
+    baseline_scratch_bytes: usize,
+}
+
+impl GateLoadState {
+    /// `elig(left) ∪ elig(right)`, ascending and deduplicated, in one linear
+    /// merge over the two contacts' ascending face runs.
+    fn merged_rows(&self, left: usize, right: usize, out: &mut Vec<u32>) {
+        out.clear();
+        let (mut index, end) = (self.pair_starts[left], self.pair_starts[left + 1]);
+        let (mut other, other_end) = (self.pair_starts[right], self.pair_starts[right + 1]);
+        while index < end || other < other_end {
+            let face_id = if index < end && other < other_end {
+                let (a, b) = (self.owner_faces[index].1, self.owner_faces[other].1);
+                match a.cmp(&b) {
+                    std::cmp::Ordering::Less => {
+                        index += 1;
+                        a
+                    }
+                    std::cmp::Ordering::Greater => {
+                        other += 1;
+                        b
+                    }
+                    std::cmp::Ordering::Equal => {
+                        index += 1;
+                        other += 1;
+                        a
+                    }
+                }
+            } else if index < end {
+                let a = self.owner_faces[index].1;
+                index += 1;
+                a
+            } else {
+                let b = self.owner_faces[other].1;
+                other += 1;
+                b
+            };
+            let mut row = self.face_row[face_id as usize];
+            if row == u32::MAX {
+                continue;
+            }
+            while (row as usize) < self.row_face.len() && self.row_face[row as usize] == face_id {
+                out.push(row);
+                row += 1;
+            }
+        }
+        debug_assert!(out.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    /// Whether this proposal's merged seat serves exactly
+    /// `elig(left) ∪ elig(right)`, which is what the delta assumes.
+    ///
+    /// It does whenever all three of `left`, `right` and the merged parts
+    /// resolve to *specialized* owners, and in a production merge batch they
+    /// always do: `gather_pair_proposals` only offers a pair when **both**
+    /// members carry demands, and `generic_owner_for_parts` returns `None` for
+    /// any parts that carry a demand.  The check is here anyway because the
+    /// consequence of being wrong is silent — a generic merged seat serves the
+    /// base rows of one island instead of the union, stranding every row only
+    /// the pair served — and because a caller outside that construction path
+    /// would otherwise get a wrong answer rather than a slow one.  When it is
+    /// false the caller finalizes that variant in full.
+    fn merged_seat_is_specialized(
+        &self,
+        contacts: &[WorkingContact],
+        generic_islands: &[SupportIsland],
+        proposal: &MergeProposal,
+    ) -> Result<bool, SpecializedError> {
+        if !matches!(
+            self.physical[proposal.left].owner,
+            LoadOwner::Specialized(_)
+        ) || !matches!(
+            self.physical[proposal.right].owner,
+            LoadOwner::Specialized(_)
+        ) {
+            return Ok(false);
+        }
+        let mut work = 0usize;
+        let merged = generic_owner_for_parts(
+            ContactParts::new(&contacts[proposal.left], Some(&contacts[proposal.right])),
+            generic_islands,
+            &mut work,
+            usize::MAX,
+        )?;
+        Ok(merged.is_none())
+    }
 }
 
 fn contact_serves_owner(contact: &WorkingContact, owner: u32) -> bool {
@@ -6720,7 +6990,7 @@ impl Fnv {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::{Cell, RefCell};
+    use std::cell::Cell;
     use std::collections::BTreeSet;
 
     use super::*;
@@ -6741,36 +7011,27 @@ mod tests {
         max_work: 100_000_000,
     };
 
+    /// Re-pinned 2026-08-06 (FU-8d phase F3, part P2).  The predecessor drove
+    /// `traverse_whole_gate_windows` over five variants in windows of two and
+    /// asserted that a failure in the *second* window stopped the traversal and
+    /// never reached execution.  There are no windows left to traverse — the
+    /// per-variant matrices they sized are gone — so what survives, and what is
+    /// pinned here, is the ordering guarantee itself: a failed preflight is
+    /// never executed.
     #[test]
-    fn whole_gate_window_traversal_stops_before_execution_after_later_window_failure() {
-        let planned_windows = RefCell::new(Vec::new());
+    fn a_failed_gate_preflight_is_never_executed() {
         let execution_calls = Cell::new(0usize);
         let result = preflight_then_execute(
-            traverse_whole_gate_windows(
-                5,
-                2,
-                GateNearestBatchPlan::seeded(),
-                |window_start, window_end| {
-                    planned_windows
-                        .borrow_mut()
-                        .push((window_start, window_end));
-                    if window_start == 0 {
-                        Ok(11)
-                    } else {
-                        Err(SpecializedError::GateOperationLimit {
-                            required: 5,
-                            limit: 4,
-                        })
-                    }
-                },
-            ),
-            |_| {
+            Err(SpecializedError::GateOperationLimit {
+                required: 5,
+                limit: 4,
+            }),
+            |_: GateWholeRoutePlan| {
                 execution_calls.set(execution_calls.get() + 1);
                 Ok(())
             },
         );
 
-        assert_eq!(planned_windows.into_inner(), vec![(0, 2), (2, 4)]);
         assert_eq!(
             result,
             Err(SpecializedError::GateOperationLimit {
@@ -6781,31 +7042,21 @@ mod tests {
         assert_eq!(execution_calls.get(), 0);
     }
 
+    /// Re-pinned 2026-08-06 (FU-8d phase F3, part P2).  This pinned that a
+    /// window traversal carried the *maximum* window peak into the gate peak
+    /// check; with the windows gone, what it pins is the check itself at the
+    /// cap and one byte over.  The two numbers are the ones it always pinned.
     #[test]
-    fn whole_gate_window_traversal_accumulates_peak_at_cap_minus_one() {
+    fn the_gate_peak_check_admits_the_cap_and_refuses_one_byte_over() {
         const CAP: usize = 32;
-        let summary = traverse_whole_gate_windows(
-            5,
-            2,
-            GateNearestBatchPlan::seeded(),
-            |window_start, _window_end| Ok(if window_start == 2 { CAP - 1 } else { 9 }),
-        )
-        .expect("all windows must plan");
-
-        assert_eq!(summary.window_count, 3);
-        // Re-pinned 2026-08-06 (FU-8c): the traversal no longer folds a
-        // per-window route plan, because the nearest phase is planned once for
-        // the whole batch and carried through the traversal unchanged.  The two
-        // struck assertions were `summary.total_routes == 5` and
-        // `summary.total_work == 9`, both summed from the per-window route
-        // plans this test synthesized; the traversal's remaining job — window
-        // count and peak bytes — is what is pinned now.
-        assert_eq!(summary.nearest, GateNearestBatchPlan::seeded());
+        let mut summary = GateWholeRoutePlan::default();
+        summary.record(CAP - 1).expect("one peak recorded");
+        assert_eq!(summary.window_count, 1);
         assert_eq!(summary.max_peak_bytes, CAP - 1);
         let usage = GatePeakUsage {
             proposal_bytes: 0,
             result_bytes: 0,
-            matrix_bytes: summary.max_peak_bytes,
+            load_baseline_bytes: summary.max_peak_bytes,
             // Re-pinned 2026-08-06 by record fix F6, which added
             // `face_scratch_bytes` to the retained total. Zero here: this test
             // pins how a *window summary's* max peak flows into the check, and
@@ -7421,6 +7672,99 @@ mod tests {
         assert!(planned.retained_plan_bytes > 0);
     }
 
+    /// FU-8d phase F3, part P2 — **a merged seat a proposal offers is always
+    /// specialized, which is why the delta's locality argument holds.**
+    ///
+    /// The delta assumes the merged seat serves exactly
+    /// `elig(left) ∪ elig(right)`.  That is true when the merged parts resolve
+    /// to a *specialized* owner and false when they resolve to a generic one —
+    /// a generic seat serves one island's base rows instead, which need not lie
+    /// inside the union and would strand every row only the pair served.
+    /// `GateLoadState::merged_seat_is_specialized` guards it and
+    /// `variant_load_violation_count_in_full` handles the rejected case.
+    ///
+    /// This pins that the guard is a guard and not a live branch:
+    /// `gather_pair_proposals` only offers a pair when **both** members carry
+    /// demands, and `generic_owner_for_parts` returns `None` for any parts that
+    /// carry a demand — so for every proposal the fixture produces, the merged
+    /// parts and each member alone resolve specialized.  The second half shows
+    /// the guard is not vacuous either: a demand-free pair on one shared route
+    /// *does* resolve generic, which is exactly the shape it rejects.
+    #[test]
+    fn fu8d_a_proposals_merged_seat_always_resolves_specialized() {
+        let generic_islands = [SupportIsland {
+            id: 3,
+            face_ids: vec![0, 1],
+        }];
+        let route = RegularContactRoute {
+            candidate_id: 41,
+            owner_island_id: 3,
+            coverage_face_id: 0,
+            component_id: 0,
+            source_kind: RepairRowSourceKind::Generic,
+        };
+
+        // Half one: a pair whose members both carry demands — which is the only
+        // kind `gather_pair_proposals` offers — resolves specialized, as merged
+        // parts and as each member alone.
+        let demanding = WorkingContact::specialized(minimum_demand(0, 3, 7, [1.0, 2.0, 0.1]));
+        let mut work = 0usize;
+        for parts in [
+            ContactParts::new(&demanding, Some(&demanding)),
+            ContactParts::new(&demanding, None),
+        ] {
+            assert!(parts.has_demands());
+            assert_eq!(
+                generic_owner_for_parts(parts, &generic_islands, &mut work, usize::MAX),
+                Ok(None),
+                "a part carrying a demand can never resolve to a generic owner"
+            );
+        }
+
+        // Half two: `gather_pair_proposals` refuses to offer a pair either of
+        // whose members is demand-free, so the demand-carrying precondition
+        // above is the *only* shape a real proposal has.
+        let regular = test_regular_contact([0.0, 0.0, 0.0], [0.0, 0.0, -1.0], route, Vec::new());
+        let contacts = vec![regular.clone(), demanding.clone()];
+        let layers = LayerPlan::new(0.0, vec![0.05; 10]).unwrap();
+        let limits =
+            SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
+        let mut descriptor_operations = 0usize;
+        let mut proposals = Vec::new();
+        gather_pair_proposals(
+            &contacts,
+            0,
+            1,
+            &layers,
+            1.0,
+            1.0,
+            limits,
+            &mut descriptor_operations,
+            &mut proposals,
+        )
+        .expect("gathering a demand-free pair is not an error");
+        assert!(
+            proposals.is_empty(),
+            "a pair with a demand-free member must not be offered at all"
+        );
+
+        // And the guard is not vacuous: the shape it rejects is real.  Two
+        // demand-free contacts on one shared route whose island is generic do
+        // resolve to a generic owner, and a merged seat built from them would
+        // serve that island's base rows rather than `elig(left) ∪ elig(right)`.
+        let mut work = 0usize;
+        assert_eq!(
+            generic_owner_for_parts(
+                ContactParts::new(&regular, Some(&regular)),
+                &generic_islands,
+                &mut work,
+                usize::MAX,
+            ),
+            Ok(Some(3)),
+            "the guard's rejected case must be reachable, or the guard is decoration"
+        );
+    }
+
     /// FU-8d phase F3, part P5 — **the variant totals are derived, not
     /// rescanned, and the derivation is exact.**
     ///
@@ -7807,7 +8151,9 @@ mod tests {
         const DEMANDS: usize = 1_095;
         const CONTACTS: usize = 1_366;
         const PROPOSALS: usize = 39_223;
-        const FACES: usize = 117_741;
+        // The batch's 117,741 distinct island faces were a `FACES` constant
+        // here until FU-8d phase F3 (part P2) removed the `variants x faces`
+        // term they fed; `gate_resource_plan` no longer takes a face count.
         let limits =
             SpecializedLimits::production(TEST_KNN_LIMITS, crate::specialized::test_batch_work());
         let cap = limits.gate_operation_limit(SAMPLES, CONTACTS);
@@ -7820,24 +8166,41 @@ mod tests {
         assert_eq!(old_routed_rows, 21_750_505_830_162);
         assert!(old_routed_rows > cap);
 
+        // Re-pinned 2026-08-06 (FU-8d phase F3, part P2).  The struck
+        // assertions were `plan.operations == (SAMPLES + DEMANDS + 1) *
+        // CONTACTS + (PROPOSALS + 1) * FACES` and its evaluation
+        // `554,926,572 + 4,618,272,984`.  The second term was the gate's own
+        // model of a per-variant load finalize; it is gone, replaced by what
+        // `specialized_load_resource_plan` states for the batch's **one**
+        // baseline plus the count-derived per-proposal bound, which the caller
+        // supplies.  `FACES` no longer enters this plan at all.  The load
+        // figures below are stand-ins for that supplied pair, chosen as
+        // distinct powers of ten so the assertion stays a derivation.
+        //
         // The new routed term with *zero* measured proposal work is the
         // baseline sweep alone.
+        const BASELINE_LOAD: usize = 5_402_535_619;
+        const PROPOSAL_LOAD_BOUND: usize = 1_000_000;
         let plan = gate_resource_plan(
             CONTACTS,
             PROPOSALS,
             SAMPLES,
-            FACES,
             DEMANDS,
             GateProposalRoutedWork::default(),
+            GateLoadWork {
+                baseline_operations: BASELINE_LOAD,
+                proposal_bound: PROPOSAL_LOAD_BOUND,
+            },
             limits,
         )
         .expect("the repriced plan admits the treant's gate shape");
         assert_eq!(plan.variants, PROPOSALS + 1);
         assert_eq!(
             plan.operations,
-            (SAMPLES + DEMANDS + 1) * CONTACTS + (PROPOSALS + 1) * FACES
+            (SAMPLES + DEMANDS + 1) * CONTACTS + BASELINE_LOAD + PROPOSAL_LOAD_BOUND
         );
-        assert_eq!(plan.operations, 554_926_572 + 4_618_272_984);
+        assert_eq!(plan.load_operations, BASELINE_LOAD + PROPOSAL_LOAD_BOUND);
+        assert_eq!(plan.load_proposal_bound, PROPOSAL_LOAD_BOUND);
         assert!(plan.operations < cap);
 
         // And the per-proposal term is charged, not ignored: one more unit of
@@ -7846,7 +8209,6 @@ mod tests {
             CONTACTS,
             PROPOSALS,
             SAMPLES,
-            FACES,
             DEMANDS,
             // FU-8d F2 added `key_visits`; the distinct powers of two keep the
             // assertion below a *derivation*, not a coincidence.
@@ -7855,6 +8217,10 @@ mod tests {
                 touched_rows: 2,
                 key_visits: 8,
                 demand_rows: 4,
+            },
+            GateLoadWork {
+                baseline_operations: BASELINE_LOAD,
+                proposal_bound: PROPOSAL_LOAD_BOUND,
             },
             limits,
         )
@@ -8087,7 +8453,7 @@ mod tests {
         let usage = GatePeakUsage {
             proposal_bytes: 0,
             result_bytes: 0,
-            matrix_bytes: 0,
+            load_baseline_bytes: 0,
             // Re-pinned 2026-08-06 by record fix F6. Zero: this test pins that
             // serial route batches are charged as one maximum rather than a
             // sum, so every term but `coverage_nearest_bytes` must stay 0 for
@@ -9355,6 +9721,7 @@ mod tests {
                 &reservations,
                 &mut physical,
                 &mut owner_faces,
+                None,
                 &mut scratch,
                 &mut work,
                 reservations.len() - 1,
@@ -9376,6 +9743,7 @@ mod tests {
             &reservations,
             &mut physical,
             &mut owner_faces,
+            None,
             &mut scratch,
             &mut work,
             reservations.len(),
@@ -9393,6 +9761,7 @@ mod tests {
                 &reservations[..1],
                 &mut physical,
                 &mut owner_faces,
+                None,
                 &mut scratch,
                 &mut work,
                 0,
@@ -9410,7 +9779,7 @@ mod tests {
         let exact = GatePeakUsage {
             proposal_bytes: 10,
             result_bytes: 20,
-            matrix_bytes: 30,
+            load_baseline_bytes: 30,
             // Re-pinned 2026-08-06 by record fix F6, which added this term to
             // the retained total. Held at 0 so the boundary this test pins —
             // exactly at the cap, and one byte over — stays the same pair of
@@ -9471,7 +9840,7 @@ mod tests {
         let base = GatePeakUsage {
             proposal_bytes: 10,
             result_bytes: 20,
-            matrix_bytes: 30,
+            load_baseline_bytes: 30,
             face_scratch_bytes: 0,
             // Zero for the same reason, added 2026-08-06 (FU-8c).
             batch_index_bytes: 0,
@@ -9682,6 +10051,7 @@ mod tests {
             &[],
             &mut physical,
             &mut specialized_owner_faces,
+            None,
             &mut scratch,
             &mut fill_work,
             usize::MAX,
@@ -9719,13 +10089,34 @@ mod tests {
         // proposal work gained a `key_visits` term, so the 20 that was all
         // `touched_rows` is now `14 + 6`; `40 + 14 + 6 + 8 = 68` exactly as
         // before, and this test's boundary is deliberately untouched by F2.
+        //
+        // Re-pinned 2026-08-06 (FU-8d phase F3, part P2), same total.  The
+        // `face_rows = variants x faces = 3 x 7 = 21` term is gone — the gate
+        // no longer models a per-variant load finalize — and the caller now
+        // supplies what the load planner itself states.  `21 + 0` keeps this
+        // fixture's boundary at exactly 140, so every cap-minus-one refusal
+        // below still pins the same numbers it always did.  The `faces`
+        // argument is gone from the signature with the term it fed.
         const FIXTURE_PROPOSAL_WORK: GateProposalRoutedWork = GateProposalRoutedWork {
             nearest_work: 40,
             touched_rows: 14,
             key_visits: 6,
             demand_rows: 8,
         };
-        let exact = gate_resource_plan(3, 2, 5, 7, 11, FIXTURE_PROPOSAL_WORK, limits).unwrap();
+        const FIXTURE_LOAD_WORK: GateLoadWork = GateLoadWork {
+            baseline_operations: 21,
+            proposal_bound: 0,
+        };
+        let exact = gate_resource_plan(
+            3,
+            2,
+            5,
+            11,
+            FIXTURE_PROPOSAL_WORK,
+            FIXTURE_LOAD_WORK,
+            limits,
+        )
+        .unwrap();
         assert_eq!(exact.variants, 3);
         assert_eq!(exact.operations, 140);
 
@@ -9743,14 +10134,22 @@ mod tests {
         at_cap.max_gate_contact_matrix_bytes = exact.contact_window_bytes;
         at_cap.max_gate_operations_floor = exact.operations;
         assert_eq!(
-            gate_resource_plan(3, 2, 5, 7, 11, FIXTURE_PROPOSAL_WORK, at_cap),
+            gate_resource_plan(
+                3,
+                2,
+                5,
+                11,
+                FIXTURE_PROPOSAL_WORK,
+                FIXTURE_LOAD_WORK,
+                at_cap
+            ),
             Ok(exact)
         );
 
         let mut below = at_cap;
         below.max_gate_variants -= 1;
         assert_eq!(
-            gate_resource_plan(3, 2, 5, 7, 11, FIXTURE_PROPOSAL_WORK, below),
+            gate_resource_plan(3, 2, 5, 11, FIXTURE_PROPOSAL_WORK, FIXTURE_LOAD_WORK, below),
             Err(SpecializedError::GateVariantLimit {
                 required: exact.variants,
                 limit: exact.variants - 1,
@@ -9759,7 +10158,7 @@ mod tests {
         below = at_cap;
         below.max_gate_vector_bytes -= 1;
         assert_eq!(
-            gate_resource_plan(3, 2, 5, 7, 11, FIXTURE_PROPOSAL_WORK, below),
+            gate_resource_plan(3, 2, 5, 11, FIXTURE_PROPOSAL_WORK, FIXTURE_LOAD_WORK, below),
             Err(SpecializedError::GateVectorByteLimit {
                 required: exact.vector_bytes,
                 limit: exact.vector_bytes - 1,
@@ -9768,7 +10167,7 @@ mod tests {
         below = at_cap;
         below.max_gate_contact_matrix_bytes -= 1;
         assert_eq!(
-            gate_resource_plan(3, 2, 5, 7, 11, FIXTURE_PROPOSAL_WORK, below),
+            gate_resource_plan(3, 2, 5, 11, FIXTURE_PROPOSAL_WORK, FIXTURE_LOAD_WORK, below),
             Err(SpecializedError::GateContactMatrixByteLimit {
                 required: exact.contact_window_bytes,
                 limit: exact.contact_window_bytes - 1,
@@ -9777,7 +10176,7 @@ mod tests {
         below = at_cap;
         below.max_gate_operations_floor -= 1;
         assert_eq!(
-            gate_resource_plan(3, 2, 5, 7, 11, FIXTURE_PROPOSAL_WORK, below),
+            gate_resource_plan(3, 2, 5, 11, FIXTURE_PROPOSAL_WORK, FIXTURE_LOAD_WORK, below),
             Err(SpecializedError::GateOperationLimit {
                 required: exact.operations,
                 limit: exact.operations - 1,
@@ -9786,7 +10185,7 @@ mod tests {
         below = at_cap;
         below.max_gate_window_variants = 0;
         assert_eq!(
-            gate_resource_plan(3, 2, 5, 7, 11, FIXTURE_PROPOSAL_WORK, below),
+            gate_resource_plan(3, 2, 5, 11, FIXTURE_PROPOSAL_WORK, FIXTURE_LOAD_WORK, below),
             Err(SpecializedError::InvalidGateWindow)
         );
     }
@@ -10518,6 +10917,7 @@ mod tests {
                 max_operations_floor: inputs.remaining_load_operations,
                 operations_per_batch_unit: 0,
             },
+            None,
         )
         .expect("required zero-child fixture can finalize a regular-only load partition");
         for contact in &mut regular_only.contacts {
