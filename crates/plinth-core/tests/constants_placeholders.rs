@@ -8,7 +8,7 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_PLACEHOLDER_IDS: [&str; 236] = [
+const EXPECTED_PLACEHOLDER_IDS: [&str; 237] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -62,6 +62,7 @@ const EXPECTED_PLACEHOLDER_IDS: [&str; 236] = [
     "DECIMATION_RECHECK_SLACK",
     "DECIMATION_SCALE_ACCEPTANCE_MM",
     "DECIMATION_SEED_ERROR_MM",
+    "DECIMATION_UTILITY_MIN_INPUT_FACES",
     "DECIMATION_VERTEX_GROUP_FACTOR",
     "DEFAULT_CONTACT_DEPTH_MM",
     "DELICACY_CURVATURE_WEIGHT",
@@ -260,7 +261,7 @@ macro_rules! rows {
     };
 }
 
-const EXPECTED_ROWS: [ExpectedRow; 236] = rows! {
+const EXPECTED_ROWS: [ExpectedRow; 237] = rows! {
     "A_ABS_MM2", "2.0", "mm²", "scalar";
     "BALL_BREACH_EPS_MM", "0.05", "mm", "scalar";
     "BALL_FACTOR_FOOT", "1.4", "1", "scalar";
@@ -314,6 +315,7 @@ const EXPECTED_ROWS: [ExpectedRow; 236] = rows! {
     "DECIMATION_RECHECK_SLACK", "1.1", "1", "scalar";
     "DECIMATION_SCALE_ACCEPTANCE_MM", "interval(10.0,inclusive,300.0,inclusive)", "mm", "interval";
     "DECIMATION_SEED_ERROR_MM", "0.05", "mm", "scalar";
+    "DECIMATION_UTILITY_MIN_INPUT_FACES", "32768", "count", "scalar";
     "DECIMATION_VERTEX_GROUP_FACTOR", "10.0", "1", "scalar";
     "DEFAULT_CONTACT_DEPTH_MM", "0.3", "mm", "scalar";
     "DELICACY_CURVATURE_WEIGHT", "0.6", "1", "scalar";
@@ -500,7 +502,7 @@ const EXPECTED_ROWS: [ExpectedRow; 236] = rows! {
 };
 
 fn component() -> M0PlaceholderConstants {
-    M0PlaceholderConstants::new().expect("all 236 placeholder declarations must construct")
+    M0PlaceholderConstants::new().expect("all 237 placeholder declarations must construct")
 }
 
 #[test]
@@ -511,7 +513,7 @@ fn exact_handwritten_membership_is_stable_sorted_and_all_placeholder() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(ids, EXPECTED_PLACEHOLDER_IDS);
-    assert_eq!(descriptors.len(), 236);
+    assert_eq!(descriptors.len(), 237);
     assert!(descriptors
         .windows(2)
         .all(|pair| pair[0].id() < pair[1].id()));
@@ -602,7 +604,7 @@ const fn bound_key(bound: BoundKind) -> &'static str {
 }
 
 #[test]
-fn evidence_and_placeholder_fixture_builds_one_264_entry_structural_batch() {
+fn evidence_and_placeholder_fixture_builds_one_268_entry_structural_batch() {
     let mut descriptors = component()
         .descriptors()
         .unwrap()
@@ -610,14 +612,14 @@ fn evidence_and_placeholder_fixture_builds_one_264_entry_structural_batch() {
         .collect::<Vec<_>>();
     descriptors.extend(M0EvidenceConstants::new().unwrap().descriptors().unwrap());
     let registry = ConstantsRegistry::build_batch(descriptors).unwrap();
-    assert_eq!(registry.len(), 264);
+    assert_eq!(registry.len(), 268);
     assert_eq!(
         registry
             .iter()
             .map(|descriptor| descriptor.id().as_str())
             .collect::<std::collections::BTreeSet<_>>()
             .len(),
-        264
+        268
     );
 }
 

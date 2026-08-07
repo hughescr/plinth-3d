@@ -29,6 +29,9 @@ pub enum M0EvidenceConstantsError {
 #[derive(Clone, Debug, PartialEq)]
 pub struct M0EvidenceConstants {
     cco_x_pair_load_discount: Derived<f64>,
+    decimation_max_absolute_deviation_mm: Derived<f64>,
+    decimation_max_p999_deviation_mm: Derived<f64>,
+    decimation_max_p99_deviation_mm: Derived<f64>,
     layer_height_default_mm: Measured<f64>,
     load_sharing: Measured<LoadSharing>,
     minima_drop_interior_faces: Measured<bool>,
@@ -144,11 +147,52 @@ impl M0EvidenceConstants {
             exact_date("2026-08-06")?,
         )?;
 
+        // Hoisted because the three decimation deviation bounds are derived
+        // from these two measurements' own values, not from restated literals.
+        let pixel_pitch_y_um = Measured::new(
+            19.0,
+            vendor_source.clone(),
+            None,
+            "The vendor's second pitch maps to project Y; retrieval date 2026-07-31 is metadata, while 2025-01-22 is the evidence date.",
+        )?;
+        let print_floor_chord_mm = Measured::new(
+            0.08,
+            EvidenceSource::owner_decision(
+                EvidenceId::new("print-floor-owner-decision-2026-07-24")?,
+                "docs/specs/SPEC-EMBED-POLICY.md",
+                "PRINT-FLOOR amendment and Normative constants",
+                exact_date("2026-07-24")?,
+            )?,
+            None,
+            "Owner-ratified print-floor chord below which a rule-4 unanchored transit is moot.",
+        )?;
+        // µm / 1000 is the µm→mm conversion, so this is exactly one addressable
+        // step of the coarser printer axis, and half of it is the quantization
+        // half-step the printer already introduces.
+        let decimation_max_p999_deviation_value = *pixel_pitch_y_um.value() / 1000.0;
+        let decimation_max_p99_deviation_value = decimation_max_p999_deviation_value / 2.0;
+        let decimation_max_absolute_deviation_value = *print_floor_chord_mm.value();
+
         Ok(Self {
             cco_x_pair_load_discount: Derived::new(
                 0.840_896_415_253_714_5,
                 std::iter::empty::<&str>(),
                 "Proof-only fourth-root relation: (F/2)^0.25/F^0.25 = 0.5^0.25. The proof is in docs/reference/physics_transient_peel.md and the relation is implemented in both cco.py and bracing.py.",
+            ),
+            decimation_max_absolute_deviation_mm: Derived::new(
+                decimation_max_absolute_deviation_value,
+                ["PRINT_FLOOR_CHORD_MM"],
+                "Worst-case (max) two-sided deviation a decimated mesh may carry and still be authorized as downstream-useful. Exact identity, not arithmetic: the bound IS the registered print-floor chord re-expressed as a deviation limit, on the rule that a deviation below the smallest chord the process can print cannot produce a printed difference. It exists as a separate declaration because it is a decimation authority with its own re-derivation trigger, and because the search's own p99/p99.9 budget is blind to the worst point: on the Weeping Treant v1.2 at 520 faces removed the measured max is 0.0566357 mm while p99.9 is 0.000073 mm and p99 is exactly 0, a factor of 776 (docs/rust-migration/decimation-design-2026-08-06.md §8.3). Measured consequence on the one large specimen, recorded so this bound is never mistaken for a permissive one: it admits only (2.125 %, 4.453 %] reduction on that model, and the topology gate independently stops it at ≈0.2 % first, so no corpus model reaches it today. LAYER_HEIGHT_DEFAULT_MM (0.050 mm) was the runner-up and was NOT chosen: the Phase-1 max-vs-ratio curve does not discriminate between them (0.050 mm admits ≈0.12 %), so the choice rests on provenance alone, and a Z-axis layer quantum applied to an XY deviation is the weaker argument.",
+            ),
+            decimation_max_p999_deviation_mm: Derived::new(
+                decimation_max_p999_deviation_value,
+                ["PIXEL_PITCH_Y_UM"],
+                "Typical-deviation ceiling at the 99.9th percentile for the decimation downstream-utility witness: PIXEL_PITCH_Y_UM / 1000 = 19 / 1000 = 0.019 mm, where the /1000 is the µm→mm conversion, so the bound is exactly one addressable step of the coarser printer axis. The printer addresses the XY plane on a 14 × 19 µm lattice, and a deviation at or below one lattice step on the coarser axis cannot move a printed surface by more than one addressable step. It is numerically identical to the limit the budget search already enforces (PIXEL_PITCH_Y_UM × DECIMATION_P999_FACTOR) and is nonetheless a separate declaration, because DECIMATION_P999_FACTOR is a non-AcceptSafe selected fraction and arithmetic from a non-AcceptSafe value cannot improve its authority. The two are pinned to agree bit-for-bit by decimation_witness_bounds_agree_with_the_search_policy_bounds in crates/plinth-decimate/src/lib.rs, so a move in either is loud.",
+            ),
+            decimation_max_p99_deviation_mm: Derived::new(
+                decimation_max_p99_deviation_value,
+                ["DECIMATION_MAX_P999_DEVIATION_MM"],
+                "Typical-deviation ceiling at the 99th percentile for the decimation downstream-utility witness: DECIMATION_MAX_P999_DEVIATION_MM / 2 = 0.0095 mm, half an addressable step of the coarser printer axis, which is the quantization half-step the printer already introduces. Numerically identical to the search's PIXEL_PITCH_Y_UM × DECIMATION_P99_FACTOR and separately declared for the same reason its p99.9 sibling is: the search factor is a non-AcceptSafe selected fraction. Pinned bit-for-bit against that product by decimation_witness_bounds_agree_with_the_search_policy_bounds in crates/plinth-decimate/src/lib.rs.",
             ),
             layer_height_default_mm: Measured::new(
                 0.050,
@@ -207,23 +251,8 @@ impl M0EvidenceConstants {
                 None,
                 "The vendor's first pitch maps to project X; retrieval date 2026-07-31 is metadata, while 2025-01-22 is the evidence date.",
             )?,
-            pixel_pitch_y_um: Measured::new(
-                19.0,
-                vendor_source.clone(),
-                None,
-                "The vendor's second pitch maps to project Y; retrieval date 2026-07-31 is metadata, while 2025-01-22 is the evidence date.",
-            )?,
-            print_floor_chord_mm: Measured::new(
-                0.08,
-                EvidenceSource::owner_decision(
-                    EvidenceId::new("print-floor-owner-decision-2026-07-24")?,
-                    "docs/specs/SPEC-EMBED-POLICY.md",
-                    "PRINT-FLOOR amendment and Normative constants",
-                    exact_date("2026-07-24")?,
-                )?,
-                None,
-                "Owner-ratified print-floor chord below which a rule-4 unanchored transit is moot.",
-            )?,
+            pixel_pitch_y_um,
+            print_floor_chord_mm,
             saturn_build_volume_mm: Measured::new(
                 BuildVolumeMm::new(211.68, 118.37, 220.0)?,
                 vendor_source,
@@ -326,6 +355,21 @@ impl M0EvidenceConstants {
     #[must_use]
     pub const fn cco_x_pair_load_discount(&self) -> &Derived<f64> {
         &self.cco_x_pair_load_discount
+    }
+
+    #[must_use]
+    pub const fn decimation_max_absolute_deviation_mm(&self) -> &Derived<f64> {
+        &self.decimation_max_absolute_deviation_mm
+    }
+
+    #[must_use]
+    pub const fn decimation_max_p999_deviation_mm(&self) -> &Derived<f64> {
+        &self.decimation_max_p999_deviation_mm
+    }
+
+    #[must_use]
+    pub const fn decimation_max_p99_deviation_mm(&self) -> &Derived<f64> {
+        &self.decimation_max_p99_deviation_mm
     }
 
     #[must_use]
@@ -464,13 +508,31 @@ impl M0EvidenceConstants {
     }
 
     /// Returns the complete declaration batch in stable ID order.
-    pub fn descriptors(&self) -> Result<[ConstantDescriptor; 28], RegistryError> {
+    pub fn descriptors(&self) -> Result<[ConstantDescriptor; 31], RegistryError> {
         Ok([
             ConstantDescriptor::from_derived(
                 ConstantId::from("CCO_X_PAIR_LOAD_DISCOUNT"),
                 "1",
                 SCALAR,
                 &self.cco_x_pair_load_discount,
+            )?,
+            ConstantDescriptor::from_derived(
+                ConstantId::from("DECIMATION_MAX_ABSOLUTE_DEVIATION_MM"),
+                "mm",
+                SCALAR,
+                &self.decimation_max_absolute_deviation_mm,
+            )?,
+            ConstantDescriptor::from_derived(
+                ConstantId::from("DECIMATION_MAX_P999_DEVIATION_MM"),
+                "mm",
+                SCALAR,
+                &self.decimation_max_p999_deviation_mm,
+            )?,
+            ConstantDescriptor::from_derived(
+                ConstantId::from("DECIMATION_MAX_P99_DEVIATION_MM"),
+                "mm",
+                SCALAR,
+                &self.decimation_max_p99_deviation_mm,
             )?,
             ConstantDescriptor::from_measured(
                 ConstantId::from("LAYER_HEIGHT_DEFAULT_MM"),

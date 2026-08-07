@@ -971,7 +971,7 @@ macro_rules! placeholder_declarations {
                 }
             )+
 
-            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 236], RegistryError> {
+            pub fn descriptors(&self) -> Result<[ConstantDescriptor; 237], RegistryError> {
                 Ok([
                     $(ConstantDescriptor::from_placeholder(
                         ConstantId::from($id),
@@ -1092,6 +1092,8 @@ placeholder_declarations! {
     "DECIMATION_SCALE_ACCEPTANCE_MM", "mm", "interval", "Inclusive scale-sanity acceptance interval.";
     decimation_seed_error_mm: PositiveFinite = PositiveFinite::new(0.050)?;
     "DECIMATION_SEED_ERROR_MM", "mm", "scalar", "Feature seed error threshold.";
+    decimation_utility_min_input_faces: NonZeroU64 = nonzero(32_768)?;
+    "DECIMATION_UTILITY_MIN_INPUT_FACES", "count", "scalar", "Input-face floor below which the downstream-utility witness refuses without examining geometry; corpus-shaped policy, not printer physics, and it decides only whether to attempt, never whether a result is safe. It is deliberately NOT derivable: gating on 'finer than the printer can resolve' (area / (pixel x layer)) puts a mini-sized model's resolvable face count near 1e6, which would forbid decimating the 429,120-face Weeping Treant too. The honest statement is that downstream cost is superlinear in face count while the geometric price is bounded by the Derived deviation limits. Value: the smallest power of two strictly above 4x the largest reachable corpus model (Sphere, 4,760 faces), chosen over 65,536 because it sits below the 65,024-face thread_sweep UV sphere and so gives the reduced path cross-thread determinism coverage at no frozen-digest cost. Single-specimen basis (R4-shaped standing trigger): n = 1 large specimen; a second corpus model above ~4,760 faces triggers re-derivation, never silent inheritance.";
     decimation_vertex_group_factor: PositiveFinite = PositiveFinite::new(10.0)?;
     "DECIMATION_VERTEX_GROUP_FACTOR", "1", "scalar", "Protected vertex-group sizing factor.";
     default_contact_depth_mm: PositiveFinite = PositiveFinite::new(0.3)?;
