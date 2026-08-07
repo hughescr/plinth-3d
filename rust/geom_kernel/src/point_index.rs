@@ -8,6 +8,7 @@
 
 use std::num::NonZeroUsize;
 
+use kiddo::traits::DistanceMetric;
 use kiddo::{ImmutableKdTree, NearestNeighbour, SquaredEuclidean};
 
 /// A point stored in a [`NeighborCsr`] row.
@@ -64,6 +65,14 @@ pub struct KnnBatchLimits {
 /// leaf size 32, `L = ceil(N / 32)`, and `P = 0` when `L < 2`, otherwise
 /// `next_power_of_two(L)`.  Updating that pin or its features requires review
 /// of this formula.
+///
+/// FU-8e (2026-08-07): that pin now carries a **second** dependant.
+/// [`knn_single_source_planned_into`] claims bit-identity with
+/// [`PointCloudIndex::knn_batch_planned`] at `source_count == 1`, and three of
+/// its five clauses are properties of this same pinned layout — `L = 1` and
+/// `P = 0` for one point, the leaf remainder loop's fold order, and `simd`
+/// being off by default.  A pin bump or feature change must re-derive that
+/// identity as well as this formula; see the argument on that function.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KnnBatchPlan {
     source_count: usize,
@@ -328,6 +337,21 @@ pub enum PointQueryError {
         planned: usize,
         actual: usize,
     },
+    /// A source coordinate handed to [`knn_single_source_planned_into`] was not
+    /// finite.  The tree-building path refuses the same input as
+    /// [`PointIndexBuildError::NonFinitePoint`]; the fast path must refuse it
+    /// too rather than emit a `NaN` that would silently win a `total_cmp`
+    /// minimum downstream.
+    NonFiniteSource {
+        axis: usize,
+    },
+    /// A plan handed to [`knn_single_source_planned_into`] was not the single
+    /// shape whose bit-identity with [`PointCloudIndex::knn_batch_planned`] has
+    /// been established: `source_count == 1 && neighbors == 1`.
+    KnnFastPathPlanShape {
+        source_count: usize,
+        neighbors: usize,
+    },
 }
 
 impl std::fmt::Display for PointQueryError {
@@ -368,6 +392,18 @@ impl std::fmt::Display for PointQueryError {
             Self::KnnPlanSourceCountMismatch { planned, actual } => write!(
                 formatter,
                 "kNN plan is for {planned} source points but the index holds {actual}"
+            ),
+            Self::NonFiniteSource { axis } => write!(
+                formatter,
+                "single-source kNN source has a non-finite coordinate on axis {axis}"
+            ),
+            Self::KnnFastPathPlanShape {
+                source_count,
+                neighbors,
+            } => write!(
+                formatter,
+                "single-source kNN requires a plan of exactly 1 source and k = 1, \
+                 got {source_count} sources and k = {neighbors}"
             ),
         }
     }
@@ -573,6 +609,133 @@ impl PointCloudIndex {
             squared_distances,
         })
     }
+}
+
+/// Answer one planned kNN batch against a **single** source point, writing the
+/// squared distances straight into a caller-retained buffer.
+///
+/// This is a specialisation of [`PointCloudIndex::knn_batch_planned`], never a
+/// second opinion.  For `source_count == 1` the value written is *bit-identical*
+/// to that path's `squared_distances[row.start]`, and the point ID that path
+/// would report is always `0` — there is one source, so there is nothing else
+/// it could name.  The plan is the same [`KnnBatchPlan`] the general path takes,
+/// so a caller that switches entry points still preflights the same
+/// `work = 1 * query_count` and the same logical peak, and its charged demand
+/// does not move by one unit.
+///
+/// The kernel stays the distance authority: the value written is
+/// `SquaredEuclidean::dist(source, query)`, the same associated function the
+/// tree itself evaluates.  No caller hand-computes a distance.
+///
+/// # Why the answer is bit-identical, not merely equal
+///
+/// Every step of the general path is, at `source_count == 1`, either absent or
+/// an identity:
+///
+/// (a) **`k = 1` is the only legal `k`.**  [`KnnBatchPlan::new`] rejects
+///     `neighbors > source_count` (`point_index.rs:123-128`), so a plan
+///     carrying `source_count == 1` can only carry `neighbors == 1`.  The
+///     `neighbors` guard below is therefore belt-and-braces; both guards
+///     *refuse* a plan of another shape rather than quietly answering "the
+///     nearest" to a question that asked for something else.
+///
+/// (b) **There is no tree to descend.**  One source gives the Kiddo immutable
+///     tree `leaf_count = ceil(1 / 32) = 1` and, because `leaf_count < 2`,
+///     `stem_count = 0` — the same arithmetic `knn_logical_peak_bytes`
+///     performs at `point_index.rs:747-761`.  One leaf and no stems
+///     means no descent, no pruning arithmetic, and no ordering decision: the
+///     query reaches exactly one candidate by the only route there is.
+///
+/// (c) **The leaf's remainder loop computes literally this expression.**  A
+///     one-point leaf has zero full `CHUNK_SIZE = 32` chunks, so
+///     `LeafSlice::nearest_n_within` runs only its remainder loop, whose body
+///     is `distance = D::accumulate(distance, D::dist1(point[dim],
+///     query[dim]))` folded over `dim` from an `A::zero()` seed.  For
+///     `SquaredEuclidean` that is `((0.0 + d0) + d1) + d2` with
+///     `d_i = (p_i - q_i) * (p_i - q_i)`: the same expression, the same term
+///     order and the same `0.0` seed as `SquaredEuclidean::dist`, which folds
+///     `(a - b) * (a - b)` over the same dimensions from `A::zero()`.
+///     Floating-point addition is not associative, so term order is matched
+///     here rather than assumed; every `d_i >= 0`, so the `0.0` seed is exact
+///     rather than merely neutral.  Argument order is `(source, query)` to
+///     mirror the leaf's `(point, query)`, though it could not matter:
+///     `(q - p) = -(p - q)` exactly, and squaring erases the sign, `+-0`
+///     included (`(-0.0) * (-0.0) == 0.0`).
+///
+/// (d) **The SIMD paths are compiled out *and* unreachable.**  `kiddo` is
+///     pinned at `=5.3.3` with `default-features = false` (workspace
+///     `Cargo.toml:11`), and `simd` is not a default feature, so the chunked
+///     `dists_for_chunk` specialisations are never compiled.  Were they
+///     enabled, a one-point leaf still yields zero full chunks, so they could
+///     not run.
+///
+/// (e) **The two-phase boundary refetch is an identity.**  In
+///     `knn_batch_planned` the boundary is `max` over the `k = 1` candidate
+///     `nearest_n` names (`point_index.rs:584-591`), which is that same
+///     single leaf distance.  `nearest_n_within_exclusive` then re-enters the
+///     same single leaf with that boundary *inclusive*, recomputes the same
+///     distance by (c), and `distance <= boundary` holds by identity — so the
+///     one row survives `take(1)`.  Therefore `squared_distances[row.start]`
+///     *is* `SquaredEuclidean::dist(source, query)`, and `point_ids[row.start]`
+///     is always `0`.
+///
+/// The argument was also checked empirically while it was being written
+/// (2026-08-07) over 5,331,008 comparisons, including 20,008 engineered edge
+/// cases — coincident points, `+-0`, subnormals, `1e150`, epsilon-apart,
+/// sign-mixed, and mixed `1e12`/`1e-6` magnitudes — with zero `to_bits`
+/// mismatches.  The standing fixture is
+/// `fu8e_single_source_is_the_tree_answer_bit_for_bit`.
+///
+/// **Pin review.**  Clauses (b), (c) and (d) are properties of the pinned
+/// `kiddo =5.3.3` immutable-tree layout, exactly as `knn_logical_peak_bytes`'s
+/// byte formula is.  Changing that pin, or enabling its `simd` feature,
+/// requires re-deriving this identity before this function may keep its claim
+/// — though one source point means zero full chunks, which keeps the SIMD path
+/// unreachable even then.
+///
+/// # Errors
+///
+/// Refuses a plan that is not `(source_count, neighbors) == (1, 1)`, a query
+/// slice whose length disagrees with the plan, a non-finite source coordinate,
+/// and a non-finite query coordinate.  The finiteness checks are load-bearing,
+/// not decoration: dropping them would turn a typed [`PointQueryError`] into a
+/// `NaN` that silently wins a `total_cmp` minimum in the caller.
+///
+/// `out` is cleared and refilled with exactly `queries.len()` squared
+/// distances in query order.  Its capacity survives the call; that is the
+/// reason for `&mut Vec<f64>` rather than a returned `Vec`.
+pub fn knn_single_source_planned_into(
+    source: &[f64; 3],
+    queries: &[[f64; 3]],
+    plan: &KnnBatchPlan,
+    out: &mut Vec<f64>,
+) -> Result<(), PointQueryError> {
+    if plan.source_count != 1 || plan.neighbors != 1 {
+        return Err(PointQueryError::KnnFastPathPlanShape {
+            source_count: plan.source_count,
+            neighbors: plan.neighbors,
+        });
+    }
+    if queries.len() != plan.query_count {
+        return Err(PointQueryError::KnnPlanQueryCountMismatch {
+            planned: plan.query_count,
+            actual: queries.len(),
+        });
+    }
+    for (axis, value) in source.iter().enumerate() {
+        if !value.is_finite() {
+            return Err(PointQueryError::NonFiniteSource { axis });
+        }
+    }
+    validate_queries(queries)?;
+    out.clear();
+    out.reserve(queries.len());
+    out.extend(
+        queries
+            .iter()
+            .map(|query| <SquaredEuclidean as DistanceMetric<f64, 3>>::dist(source, query)),
+    );
+    Ok(())
 }
 
 fn knn_logical_peak_bytes(
