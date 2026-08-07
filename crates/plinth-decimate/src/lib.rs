@@ -387,8 +387,15 @@ pub struct DownstreamUseful {
 }
 
 impl DownstreamUseful {
-    /// Mints the witness. Crate-private on purpose: no downstream caller may
-    /// name a witness id, and no caller outside this crate may mint one at all.
+    /// Mints the witness. Crate-private on purpose, and the thing it withholds
+    /// is *minting*, not *naming*: the registered id is exported as
+    /// [`SUPPORT_FACE_SCALED_RESOURCE_DEMAND`], so any caller may name it, read
+    /// it, and compare it against [`DownstreamUseful::witness_id`]. What no
+    /// caller outside this crate can do is construct a `DownstreamUseful` —
+    /// with that id or any other — because this constructor is crate-private
+    /// and the field is private. A witness is therefore always something
+    /// [`assess_downstream_utility`] produced by satisfying every clause, never
+    /// something a caller asserted by writing the right string.
     const fn witness(witness_id: &'static str) -> Self {
         Self { witness_id }
     }
@@ -1528,7 +1535,8 @@ fn record_unexplored_dense_interval(input_faces: usize, trace: &mut BudgetSearch
 ///   `stitch_layer` genuinely requires degree-2 adjacency. Strict audit is
 ///   already enforced inside `compact_result` and inside every probe. OD-9
 ///   exterior-ness is relied on, not re-proved: the contact machinery screens it
-///   later.
+///   later. **This clause is defence in depth and is unreachable in production
+///   today** — see the note at the clause itself.
 /// - **U5 — the registered saving.** The two execution-authority resources whose
 ///   demand is an exact function of face count alone must strictly fall: the
 ///   minima-kNN batch's `source_count` (`= F`) and the `81·F` per-triangle term
@@ -1557,6 +1565,20 @@ fn assess_downstream_utility(
         || final_probe.p99_mm > policy.max_p99_deviation_mm
         || final_probe.p99_9_mm > policy.max_p99_9_deviation_mm
         || max_mm > policy.max_absolute_deviation_mm
+        // U4. Unreachable from `run_budget_search` as that function is ordered
+        // today: it applies `topology_not_increased` to the same two counts and
+        // `continue`s on failure BEFORE it runs the full-population probe or
+        // calls this predicate, so every candidate that arrives here has
+        // already satisfied this clause and it can never be the clause that
+        // refuses. It is kept deliberately rather than deleted as dead code:
+        // it is the only place the *witness* — as opposed to the search — takes
+        // responsibility for the invariant `stitch_layer` needs, the unit tests
+        // pin it in isolation, and a future reordering that probed before it
+        // gated topology (or a second caller of this predicate) would otherwise
+        // silently lose the guard rather than fail a test. Its strength is
+        // bounded by FU-26: the counter it reads under-counts non-manifold
+        // edges and cannot see duplicate faces at all, so it is a floor on the
+        // damage, not a measurement of it.
         || !topology_not_increased(topology_before, topology_after)
         || !registered_face_scaled_demand_falls(
             candidate.input_face_count,
@@ -3924,6 +3946,11 @@ mod tests {
 
     #[test]
     fn u4_refuses_any_increase_in_boundary_or_nonmanifold_edges() {
+        // This test is the reason the U4 clause exists at all: `run_budget_search`
+        // gates on the same two counts and `continue`s before it ever calls
+        // `assess_downstream_utility`, so in production no candidate can reach
+        // the witness with increased topology. The clause is defence in depth,
+        // and this is what would fail if a future reordering removed it.
         let candidate = admissible_candidate();
         let probe = admissible_probe();
 
@@ -3944,8 +3971,10 @@ mod tests {
             );
         }
 
-        // This is the clause the Weeping Treant v1.2 fails: 3 non-manifold
-        // edges at 0.742 % reduction, monotone in faces removed thereafter.
+        // The Weeping Treant v1.2's own numbers — 3 non-manifold edges at
+        // 0.742 % reduction, monotone in faces removed thereafter. On the
+        // production path the search gate refuses them first; here the witness
+        // is shown to refuse them on its own.
         assert_eq!(
             assess(
                 &candidate,

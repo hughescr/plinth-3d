@@ -529,13 +529,20 @@ doctest is unchanged and still green. The registered witness id is
 `support-face-scaled-resource-demand`, exported as the public constant
 `SUPPORT_FACE_SCALED_RESOURCE_DEMAND`.
 
-Clause order in the implementation is threshold → U1 → U2 → U3 → U4 → U5, with two
-deliberate details:
+Clause order in the implementation is **`max_mm` presence-and-finiteness guard → threshold →
+U1 → `p99`/`p99.9` finiteness → U2 → U3 → U4 → U5**, with two deliberate details.
+
+*(Corrected 2026-08-07: this paragraph previously read "threshold → U1 → U2 → U3 → U4 → U5",
+which omitted the guard that actually runs first. The `max_mm` guard is a `let … else` ahead of
+the conjunction — it has to be, because it is what turns `Option<f64>` into `f64` — so a
+candidate with an absent or non-finite worst point is refused before the threshold is even
+consulted. The clause order below the guard is unchanged, and no behaviour was misdescribed
+beyond the ordering.)*
 
 - **Non-finite is a refusal, not a comparison.** `max_mm` is `Option<f64>`; an absent or
   non-finite worst point returns `NoDownstreamUtilityEvidence`. `NaN > limit` is `false`, so
   an unguarded `>` would have read a missing measurement as a pass. `p99`/`p99.9` are
-  finite-checked for the same reason.
+  finite-checked for the same reason, inside the conjunction alongside their bounds.
 - **U2 grants no slack.** The search's final classification admits a candidate on the
   `DECIMATION_RECHECK_SLACK` ×1.1 recheck; the witness asserts the un-slacked `Derived`
   bounds. A candidate that passes final verification only on the slack is therefore
@@ -563,6 +570,19 @@ asserts the same thing twice: it recomputes each demand separately — including
 to *agree*, so if the kernel ever makes the parity term something other than a constant times
 `F`, the single clause fails loudly and must become two. No behaviour changes: the predicate
 accepts and refuses exactly the same candidates it did before.
+
+**U4 is a defence-in-depth clause and is unreachable in production — stated 2026-08-07.**
+`run_budget_search` applies `topology_not_increased` to the same two counts and `continue`s on
+failure *before* it runs the full-population probe and *before* it calls
+`assess_downstream_utility`, so every candidate that reaches the witness has already satisfied
+U4 and U4 can never be the clause that refuses a real run. It is kept rather than deleted for
+three reasons: it is the only place the *witness* — as opposed to the search — takes
+responsibility for the invariant `stitch_layer` needs; the unit tests pin it in isolation, so
+it is not untested dead code; and a future reordering that probed before it gated topology, or
+a second caller of this predicate, would otherwise lose the guard silently instead of failing a
+test. The clause and its test now say so in their own comments. Nothing was restructured to
+make it reachable: the ordering `run_budget_search` uses is the cheap one (topology audit
+before a full-population probe) and is worth keeping.
 
 ### 9.2 The four constants, and which of §7's questions they answer
 
