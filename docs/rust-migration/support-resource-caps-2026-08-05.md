@@ -1490,3 +1490,106 @@ has landed. Re-measure after the tournament's shape settles; build nothing now.
 
 **`PLINTH_THREADS=4` still buys the merge gate nothing.** Unchanged by G3, and
 still a note rather than a licence.
+
+## 14. FU-8f phase G4 (2026-08-07) — the rounds are counted; no cap moves, and none came close
+
+**G4 changed no engine code.** Two instrumented treant runs, per-round counters
+from env-gated scratch that was reverted by editing before the gates, and a
+record. `git diff` over `crates/` at the G4 tip is empty. **Nothing in §§1–13 is
+touched.** The treant's stated demand is still **9,273,857,317** against the
+unchanged **35,445,500,736**, `exact_operations` still **10,457,910,996**.
+
+### 14.1 The measurement, without a contention caveat for once
+
+Release, `--features census`, `PLINTH_CENSUS_ONLY="Weeping Treant v1.2"`,
+`PLINTH_THREADS=4`, RSS watchdog unsandboxed (ruling R-g) polling at 2 s, armed
+at 90 GB and **never fired**, 600 s timebox, two attempts. **The machine was
+quiet — no concurrent workflow of any kind.** Every millisecond in §§11–13
+carried a 5–30 % contention inflation; these do not, and the two attempts agree
+round for round to within 2 %.
+
+| | attempt 1 | attempt 2 |
+|---|---:|---:|
+| outcome | EXCEEDS-TIMEBOX 602 s | EXCEEDS-TIMEBOX 602 s |
+| merge rounds | **436** | **430** |
+| contacts 1,366 → | 931 | 937 |
+| mean round | 1,099.4 ms | 1,121.4 ms |
+| peak RSS | 2,677,888 KB (2.554 GiB) | 2,650,144 KB (2.528 GiB) |
+
+Fitted over all 436 rounds: `round_ms = 304.17 + 0.6924 × contacts`. Gate stage
+alone projects to **504.7 s (8.4 min)** at `make_raking_blade`'s 463-round ratio
+and **1,061.6 s (17.7 min)** at the 1,365-round hard bound.
+
+### 14.2 No cap binds, and the two that could are quantified
+
+- **`max_merge_iterations` = 100,000** against a 1,365-round hard bound. Two
+  orders of magnitude of headroom. Untouched.
+- **`max_merge_total_proposals` = 100,000,000.** This one accumulates across
+  rounds and is the only per-stage cap the tournament's *length* can approach.
+  Measured cumulative gather over attempt 1's 436 rounds: **15,544,641**.
+  Extrapolating the measured `proposals ≈ 7,318 + 24.67 × contacts` to the full
+  1,365-round bound gives **≈33.0 M** — a **3× margin**. Recorded so that a
+  later, longer run does not meet this cap as a surprise, and stated as
+  measurement rather than as a request: **it is not raised, lowered or touched.**
+- **`gate_operation_limit`, `max_load_scratch_bytes`, `max_load_operations_floor`,
+  `load_work_per_batch_unit`, `max_merge_commit_bytes`, `max_coverage_*`** — all
+  unmoved and all admitted every round of both runs.
+
+### 14.3 Memory: far under everything, and G3's 3.32 GiB is not reproduced
+
+Peak RSS **2.554 GiB** and **2.528 GiB** against the 90 GB watchdog and the
+100 GB machine ceiling — 2.6 % of the ceiling. §13's G3 run recorded
+**3,479,600 KB (3.32 GiB)** as observed-and-unexplained and left attributing it
+to G4. **G4 does not reproduce it.** Two independent instrumented runs at the
+same tip land ~0.8 GiB lower, in FU-8e's own neighbourhood. G1's charged
+transpose is 32,848,040 B in all three runs and explains neither figure. This is
+recorded as a **non-reproduction, not an explanation**: the G3 peak's cause is
+unknown, and it is not a cap question in either direction.
+
+### 14.4 What the round is actually spent on — and why D4 was out by 2.8×
+
+Frame means over attempt 2's 430 rounds, summing to the measured round:
+
+| frame | ms | % |
+|---|---:|---:|
+| `gather_pair_proposals` (outside the gate batch) | 28.56 | 2.5 % |
+| `unique_island_face_count` | 1.44 | 0.13 % |
+| `GateBatchIndex::build` | 6.64 | 0.59 % |
+| `plan_gate_nearest_batch` | 9.98 | 0.89 % |
+| **`build_gate_load_state`** | **958.37** | **85.5 %** |
+| `gate_resource_plan` + `exact_operations` fold | 0.56 | 0.05 % |
+| baseline nearest sweep | 114.39 | 10.2 % |
+| **the variant loop (G3's prefix)** | **0.52** | **0.046 %** |
+
+Inside `build_gate_load_state`, from a bounded 32-round sub-frame probe:
+`GroupedOwnerFaces::from_pairs` 136.0, `extend_load_eligibility` 17.1,
+`append_variant_load_inputs` 13.6, `contact_rows` 8.1, and the transpose —
+**`LoadTransposeCounts::count` 406.4 + `finish` 410.5 = 816.9 ms of build**
+against **`scan_transposed_load` at 47.4 ms**.
+
+**The charging discipline that costs those 406 ms is correct and must not be
+traded away.** `count` exists so the cells-sized buffer is **charged before it is
+allocated** — the ordering FU-8d part (3) established and G1 deliberately
+preserved, and the reason `LoadTransposeCounts` is a separate type at all. What
+is wrong is only that the count is a **second full traversal** rather than a
+quantity the batch already has: `build_gate_load_state` already walks
+`owner_faces` through `face_row` to *count* `contact_rows`, at 8.1 ms. Any future
+phase that fixes this **must keep count-before-charge-before-allocate**; the
+target is to make the count cheap, never to skip it.
+
+### 14.5 Ruling R-f — STILL UNSATISFIED
+
+Neither run completed the gate, so
+`SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is **not** re-derived and must not
+be. G4 supplies the round count and cost model that the re-derivation will need;
+it does not supply the completed run that R-f names. That re-derivation is its
+own follow-up task and is **unblocked only by a run that finishes the
+tournament**.
+
+### 14.6 The unexercised remainder, named so it is not assumed
+
+The pipeline never left `prepare_support_run`. **Nothing** is measured or claimed
+about `pen_intervals_one`'s eager `24 × (T+1) × cap` bytes per ray per thread
+(predicted 14–32 GB at `T = 4`), about the brace's `max_scratch_bytes` of 1e11
+sitting **above** the 90 GB watchdog line, or about a first treant seal. Those
+predictions stand exactly as they were, untested.

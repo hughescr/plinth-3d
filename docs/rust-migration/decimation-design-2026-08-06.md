@@ -907,3 +907,57 @@ audit or a disposition. Five gates green at the same tip: **981 tests passed, 0 
 `git diff --check` clean. The 980 is Phase 2's 979 plus
 `the_surface_build_counter_agrees_with_every_probe_the_trace_recorded`; the U5 test was renamed
 and rewritten, not added.
+
+## 10. PROVENANCE of the specimen — added 2026-08-07 (FU-8f phase G4)
+
+**Why this section exists.** §8.4 diagnoses the treant's decimation failure as coincident thin
+twig walls: "QEM collapse in a twig whose two walls are closer together than the collapse's own
+error scale fuses the walls." A reader meeting that for the first time reasonably asks *why this
+model is so unusually susceptible*. This section records where the specimen came from, so that
+question has an answer on the page rather than being rediscovered. **It changes no measurement,
+no constant and no disposition in §§0–9; it is provenance only.**
+
+**Identity, verified by digest.** The corpus file
+`corpus/models/Weeping Treant v1.2.stl` is **SHA-256-identical** to
+`/Users/craig/Desktop/Saturn 4/Minis/Morel Mudskipper/Summons/Awakened Tree.stl`:
+
+```
+4c027b7849019ab9598c85f285b9df7d480aacfd1733123a32a8a81239525552   (both, 21,456,084 bytes)
+```
+
+Binary-STL arithmetic confirms the face count from the byte count alone:
+`84 + 50 × 429,120 = 21,456,084`. The desktop file's mtime is **2026-07-28**.
+
+**Its source, inspected.** The adjacent `Awakened Tree.blend` (21,852,385 bytes, mtime
+2026-07-19) was opened read-only, headless, and contains **exactly one object and one mesh**:
+
+| | measured in the `.blend` |
+|---|---:|
+| vertices | **214,562** |
+| edges | **643,680** |
+| faces (all triangles) | **429,120** |
+| modifiers retained | **one**: a Geometry Nodes modifier named `Hollow` |
+| Decimate modifiers retained | **none** |
+
+The counts match the exported STL exactly — 429,120 faces — and match this document's own
+independently measured figures: §8.4's "the 214,562 welded vertices occupy 214,562 distinct f32
+positions". Euler closes at `V − E + F = 214,562 − 643,680 + 429,120 = 2`, a closed genus-0
+manifold, consistent with §8.4's "boundary edges 0, non-manifold edges 0" for the original.
+
+**What this suggests, marked as inference and not as measurement.** A hand-modelled or sculpted
+tree of this size would not normally arrive as a clean 429,120-triangle closed manifold with no
+reduction modifier in the file. **Destructively-applied prior manual decimation in Blender —
+a Decimate modifier applied and therefore not retained — is a plausible explanation**, and it
+would account directly for the susceptibility §8 diagnoses: a mesh already reduced once has its
+error budget partly spent, so the twig walls are already at the scale where the next collapse
+fuses them. **This is a hypothesis. It is not measured and cannot be from the artifacts on this
+machine**: an applied modifier leaves no record, and **the vendor original was not located
+here** — the `.blend` and the STL are the only two files of this model present. The alternative
+— that the mesh was authored at this density — is not excluded.
+
+**Why it is worth recording either way.** R6 and §§8.3–8.4 rest on the treant refusing every
+reduction ratio on topology grounds while a 6–9 % geometric budget is all the ratified rules
+would grant. If the specimen is an already-reduced mesh, that behaviour is *expected* rather
+than anomalous, and a future reader should not go looking for a defect in the decimator to
+explain it. If it is not, the diagnosis in §8.4 stands unchanged on its own measurements. **Both
+readings leave every number in this document exactly where it is.**
