@@ -799,6 +799,43 @@ selected in a flat sensitivity region, not a measurement.
 `SURFACE_PITCH_BOUND_PERCENTILE` is retired/no-port: `SPEC-V5-GEOM` §2.1 and
 §2.6 make sampled-cloud pitch uncertainty identically zero on exact triangle paths.
 
+**Addendum 2026-08-07 (FU-25 Phase 2 — the decimation downstream-utility witness).** The
+paragraphs and tables above are left standing as written; two counts in them have moved and
+one new `Placeholder` joins §3.10.5's decimation block. The sentence "Exactly six
+declarations remain `Derived`" was already superseded before this branch — the caps/FU-8d
+work added `SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT` and
+`SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT`, taking it to eight — and this addendum takes it to
+**eleven**. The registry total is **268** and its class vector is `[20, 11, 237, 0]`
+(`[measured, derived, placeholder, pending]`). The three new `Derived` rows:
+
+| Stable ID | `from` | Exact relation / proof |
+|---|---|---|
+| `DECIMATION_MAX_ABSOLUTE_DEVIATION_MM` | `[PRINT_FLOOR_CHORD_MM]` | exact identity, no arithmetic: the bound **is** the registered print-floor chord, 0.08 mm, re-expressed as a worst-case decimation deviation limit, on the rule that a deviation below the smallest printable chord cannot produce a printed difference |
+| `DECIMATION_MAX_P999_DEVIATION_MM` | `[PIXEL_PITCH_Y_UM]` | `PIXEL_PITCH_Y_UM / 1000 = 19 / 1000 = 0.019 mm`; the `/1000` is the µm→mm conversion, so the bound is exactly one addressable step of the coarser printer axis |
+| `DECIMATION_MAX_P99_DEVIATION_MM` | `[DECIMATION_MAX_P999_DEVIATION_MM]` | `0.019 / 2 = 0.0095 mm`, half an addressable step — the quantization half-step the printer already introduces |
+
+The p99/p99.9 pair is **numerically identical** to what the budget search already enforces as
+`PIXEL_PITCH_Y_UM × DECIMATION_P99_FACTOR` and `× DECIMATION_P999_FACTOR`, and is separately
+declared for the reason the last paragraph above states: those two factors are `Placeholder`,
+and arithmetic from a `Placeholder` cannot improve its provenance, so an acceptance path must
+assert the `Derived` bound. The two are pinned to agree bit-for-bit by
+`decimation_witness_bounds_agree_with_the_search_policy_bounds`
+(`crates/plinth-decimate/src/lib.rs`), so a move in either side is loud rather than silent.
+`DECIMATION_P99_FACTOR`, `DECIMATION_P999_FACTOR` and `DECIMATION_RECHECK_SLACK` are
+unchanged and remain `Placeholder`.
+
+The one new `Placeholder`, belonging with §3.10.5's decimation rows, is
+`DECIMATION_UTILITY_MIN_INPUT_FACES = 32,768` (`count`): the input-face floor below which the
+downstream-utility witness refuses without examining geometry. It is deliberately not
+derivable — gating on "finer than the printer can resolve" (`area / (pixel × layer)`) puts a
+mini-sized model's resolvable face count near 10⁶ and would forbid decimating the
+429,120-face Weeping Treant too — so it is registered as the corpus-shaped policy gate it is.
+It decides only *whether to attempt*; every safety bound in the witness is `Derived`.
+Single-specimen basis, R4-shaped standing trigger: n = 1 large specimen, and a second corpus
+model above ~4,760 faces triggers re-derivation rather than silent inheritance. Full
+derivation, the measured consequences on the one large specimen, and the OD-8 evidence:
+[`decimation-design-2026-08-06.md`](decimation-design-2026-08-06.md) §9.
+
 ### 3.10.8 Support execution-authority caps — the model-scaled pair
 
 These are the first support-pipeline **execution-authority** caps to enter the

@@ -869,6 +869,27 @@ These numbers are the contract, not suggestions.
 (sample cap 150 000 centres); **backward** = original vertices → decimated surface (sample
 cap 120 000 vertices, seed 42).
 
+> **Addendum 2026-08-07 (FU-25 Phase 2) — the table above is left standing as written; one
+> clause of row 5 has stopped being true.** "No witness is registered yet" was accurate until
+> this date. One is now registered:
+> `DownstreamUseful { witness_id: "support-face-scaled-resource-demand" }`, minted by
+> `assess_downstream_utility` only when a face threshold and five clauses all hold — U1 a
+> genuine reduction; U2 `p99 ≤ DECIMATION_MAX_P99_DEVIATION_MM` (0.0095 mm) and
+> `p99.9 ≤ DECIMATION_MAX_P999_DEVIATION_MM` (0.019 mm), both `Derived`, with **no** ×1.1
+> slack, so row 6's slack admits a candidate that this gate still refuses; U3
+> `max ≤ DECIMATION_MAX_ABSOLUTE_DEVIATION_MM` (0.08 mm, `Derived` from
+> `PRINT_FLOOR_CHORD_MM`), which is the first bound ever placed on the worst point; U4 row
+> 7's own topology guard, unrelaxed; and U5 the strict fall of the two registered demands
+> that are exact functions of face count alone — the minima-kNN `source_count` and the
+> `81·F` parity-grid term. Everything else in row 5 stands: `faces_removed > 0` alone is
+> still not evidence, and the rest of the corpus still returns verified `AlreadyPrintScale`.
+> The final sentence — "Do not invent a percentage or face-count threshold" — is
+> **superseded by registration, not by invention**: `DECIMATION_UTILITY_MIN_INPUT_FACES`
+> = 32,768 is a `Placeholder` with honest provenance, it sits inside the witness rather than
+> in front of the search so no trace below it changes, and it decides only whether to
+> attempt, never whether a result is safe. Derivation, the alternatives considered, and the
+> zero-corpus-delta evidence: `decimation-design-2026-08-06.md` §3 and §9.
+
 Also deliver the **search-proxy path** for `ProxyLadder`: L1 ≈ 10 % of faces, L2 ≈ 2 %.
 These are for M8's dense orientation sweep and are allowed to be far cruder than the
 production decimation.
