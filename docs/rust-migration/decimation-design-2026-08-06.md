@@ -464,7 +464,12 @@ deviation. *If it cannot, stop and report.*" **It cannot, and this is the report
 3. **A ≤2 % face reduction changes no downstream disposition.** The gate arithmetic in §0(b)
    and §5 R-2 has since been overtaken by FU-8d phases F1–F3: the treant's merge gate no longer
    refuses (9,273,857,317 against an unchanged 35,445,500,736) and its stopping point is now
-   wall-clock, opened as FU-8e. Against FU-8e's recorded frames — a per-proposal kd-tree
+   wall-clock, opened as FU-8e. (Updated 2026-08-07, FU-8f phase G5: that stated demand has
+   since been repriced **downward** to **4,525,792,233** against the same unchanged
+   35,445,500,736 — the load term's `rows × contacts × (owner_log + 4)` model retired in
+   favour of what the CSR transpose really spends. This bullet's conclusion is unaffected and
+   if anything strengthened: the gate sits further from its cap than ever, and the treant's
+   stopping point is still wall-clock rather than a limit.) Against FU-8e's recorded frames — a per-proposal kd-tree
    construction at 59–62 % that scales with *proposals*, and `assess_coverage` at 24–34 % that
    scales with samples — trimming 2 % of faces moves the total by well under one percent. The
    treant needs an order of magnitude; decimation offers, at the very most, two percent.

@@ -282,6 +282,32 @@ Measured on the 8-model corpus, most recently by the unified census of 2026-08-0
   > `docs/rust-migration/CURRENT-STATUS.md` (*FU-8e phases E1–E4 landed 2026-08-07*, *FU-8f
   > opened 2026-08-07*) and `support-resource-caps-2026-08-05.md` §12.
 
+  > **Amended 2026-08-07 — FU-8f G1–G5 landed; every block above is left standing, and one of
+  > their claims has stopped being true.** The ruling came (Craig, 2026-08-07) and FU-8f was
+  > built, so "awaiting owner ruling and deliberately not built" is history. **G1** replaced
+  > the load finalizer's dense `contacts × rows` scan with a contact-major CSR transpose over
+  > the eligible cells only — 8,210,643 of 160,834,206 visited, so 94.9 % of the visits were
+  > the skip — bit-identical including the `(distance, contact_id)` tie-break. **G2** hashes
+  > the mesh once per gate stage instead of twice per batch (the *check* stays at both sites).
+  > **G3** stops the variant loop at the first proposal that is not worse than the baseline:
+  > the batch is still **charged** for all 39,224 variants and now **executes a prefix** of
+  > them — 2 to 4 of 39,224 — with charged and executed severed and both stated, which
+  > re-founds `GateRoutePlanMismatch` prefix-wise. **G4** counted the rounds at last, on a
+  > quiet machine: 436 and 430 merge rounds in two 602 s attempts, one merge committed per
+  > round exactly, still **EXCEEDS-TIMEBOX**, still no treant digest. **G5** paid G1's
+  > deliberate debt by repricing the charge to match the code: the load model's
+  > `rows × contacts × (owner_log + 4)` term is gone, replaced by the transpose's own
+  > `Σ |eligible_owners|`-shaped search plus a `cells`-shaped fill-and-scan. So the figures
+  > quoted above move, **downward**: the honest load figure 6,592,813,742 →
+  > **1,844,748,658** and the **stated demand 9,273,857,317 → 4,525,792,233**, i.e. **12.8 %**
+  > of the same unchanged 35,445,500,736 where it was 26.2 %, with `exact_operations`
+  > 10,457,910,996 → **5,709,845,912**. The fall is 4,748,065,084 at both and is *entirely*
+  > the load term. **No cap was raised, lowered or otherwise touched** — a falling demand can
+  > create no refusal — and all seven frozen corpus digests are byte-identical. What still
+  > stops the treant is wall-clock, not a cap; **ruling R-f remains unsatisfied** because no
+  > run has completed the gate. See `docs/rust-migration/CURRENT-STATUS.md` (*FU-8f phases
+  > G1–G5, 2026-08-07*) and `support-resource-caps-2026-08-05.md` §13–§15.
+
 The stages exist as libraries and the census harness runs the real chain from STL through
 a sealed support run. The folder-level runner that chains them all the way to a written
 `.chitubox` is roadmap, per [The goal](#the-goal) above.

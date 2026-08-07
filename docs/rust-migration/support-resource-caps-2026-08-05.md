@@ -984,6 +984,22 @@ load phase at `variants × faces` while the fold really did
 is 1.43× the model it replaced. Every term that fell is a *quadratic removed*, not
 a bound relaxed.
 
+> **Dated addendum 2026-08-07 — FU-8f phase G5. The table and the paragraph above
+> are left standing exactly as measured; three of their figures have since moved,
+> downward.** The `load term` **6,592,813,742 → 1,844,748,658** (its
+> `specialized_load_resource_plan` component 5,543,831,115 → **795,766,031**, the
+> 1,048,982,627 proposal bound unchanged), the `stated demand`
+> **9,273,857,317 → 4,525,792,233** (26.2 % → **12.8 %** of the same unchanged
+> cap), and `exact_operations` **10,457,910,996 → 5,709,845,912** (29.5 % →
+> **16.1 %**). Every other row is byte-identical. The cause is neither a bound
+> relaxed nor a quadratic removed from the *code* — phase G1 had already removed
+> that one — but the **charge** catching up with the code:
+> `load_resource_plan_from_counts` stopped pricing the load scan as
+> `rows × contacts × (owner_log + 4)`. **The paragraph above still holds, in the
+> other direction:** §7.2's rule is that a cap prices what a stage really does,
+> and here what the stage really does is *less* than what it was charged. **No
+> cap moved.** See §15.
+
 **A byte wall went with it, and it had never fired only by accident.**
 `gate_window_matrix_bytes` sized one `PhysicalContact` matrix and one
 `(owner, face)` matrix per variant per window — on the treant 7,971,451 pairs × 8 B
@@ -1047,7 +1063,10 @@ maximum).
 
 **No cap refused anything in either attempt.** That is the headline for this
 document: since F3 the treant's merge gate states a demand of 9,273,857,317
-against an unchanged 35,445,500,736 and is **admitted**. Peak RSS is 2.5 GiB
+against an unchanged 35,445,500,736 and is **admitted**. *(Updated 2026-08-07,
+FU-8f phase G5: that demand is now **4,525,792,233** against the same unchanged
+35,445,500,736 — the load term repriced, no cap touched. This section's headline
+is unaffected and only strengthened. See §15.)* Peak RSS is 2.5 GiB
 against the 90 GB kill line and the 100 GB machine ceiling — memory has not been
 this stage's constraint since FU-8b, and this run is four orders inside it.
 
@@ -1114,7 +1133,10 @@ wall-clock above is a single-core number.
 > cap, floor or coefficient.** The demand §10 states — **9,273,857,317** against
 > the unchanged materialization **35,445,500,736** — is byte-identical after
 > FU-8e, deliberately, and §12.6 says why that immobility is the phases' proof
-> rather than an oversight.
+> rather than an oversight. *(Updated 2026-08-07: the immobility claim is exact
+> **as of the FU-8e tip**, which is what this section records. FU-8f phase G5
+> later reprices the load term and that demand becomes **4,525,792,233** against
+> the same unchanged 35,445,500,736 — see §15. Nothing in §12 is retrofitted.)*
 
 ### 12.1 Ruling R-f is STILL NOT satisfied, and here is the arithmetic
 
@@ -1376,7 +1398,11 @@ treant's stated demand is still **9,273,857,317** against the unchanged
 **35,445,500,736**, `exact_operations` still **10,457,910,996**, because
 `gate_resource_plan` still prices `plan.variants = proposals + 1` and the
 `exact_operations` fold still folds all 39,224. All seven frozen OD-8 digests are
-byte-identical at the G3 tip. **This section exists to record what G3 changes
+byte-identical at the G3 tip. *(Updated 2026-08-07: those two figures are exact
+**as of the G3 tip**, which is what this section records. Phase G5 later reprices
+the load term to **4,525,792,233** and **5,709,845,912** against the same
+unchanged cap — see §15. Nothing in §13 is retrofitted, and G3 itself still moves
+no charged number.)* **This section exists to record what G3 changes
 about the *meaning* of a charge, not about its value.**
 
 ### 13.1 Charged and executed are severed, and both are stated
@@ -1498,6 +1524,11 @@ from env-gated scratch that was reverted by editing before the gates, and a
 record. `git diff` over `crates/` at the G4 tip is empty. **Nothing in §§1–13 is
 touched.** The treant's stated demand is still **9,273,857,317** against the
 unchanged **35,445,500,736**, `exact_operations` still **10,457,910,996**.
+*(Updated 2026-08-07: exact **as of the G4 tip**. G4 was deliberately sequenced
+before the repricing precisely so its transcript would be the last measurement
+stated in these numbers; phase G5 then moves them to **4,525,792,233** and
+**5,709,845,912** against the same unchanged cap. **§14 is not retrofitted** —
+every figure in it is correct at its own tip. See §15.)*
 
 ### 14.1 The measurement, without a contention caveat for once
 
@@ -1593,3 +1624,206 @@ about `pen_intervals_one`'s eager `24 × (T+1) × cap` bytes per ray per thread
 (predicted 14–32 GB at `T = 4`), about the brace's `max_scratch_bytes` of 1e11
 sitting **above** the 90 GB watchdog line, or about a first treant seal. Those
 predictions stand exactly as they were, untested.
+
+## 15. FU-8f phase G5 (2026-08-07) — the honest load charge; the demand falls 4.75e9 and no cap moves
+
+**Scope first, because the direction matters.** G5 changes **no** executed work
+and **no** geometry. It changes one **charge**: the operation model that prices
+the load finalizer's nearest-and-witness scan. Phase G1 had already replaced the
+dense `contacts × rows` scan with a contact-major CSR transpose and had
+**deliberately left the model standing and over-stating**, on the FU-8e Q5
+precedent that a plan admitting the general path *a fortiori* admits its
+specialisation, with the repricing sequenced here by design. This section pays
+that debt.
+
+**No cap, floor or coefficient is raised, lowered or touched, and none is
+re-derived.** The stated demand moves **downward** at four quoted values, and a
+falling demand can create no refusal.
+
+### 15.1 What the model said, and what it says now
+
+The retired term was
+
+```text
+face_count × contact_count × (owner_log + 4)
+```
+
+— one eligibility binary search for every `(row, contact)` cell, which is
+precisely what the pre-G1 code did. What replaces it, in the same
+elementary-comparison unit every other term of the model counts:
+
+| term | where | what it prices |
+|---|---|---|
+| `Σ\|eligible_owners\| × (log + 2) × 2` | `load_resource_plan_from_counts` | `LoadTransposeCounts::count` and `::finish` each walk the row-major eligibility once, running one forward `partition_point` over the contact order per `(row, eligible owner)` entry |
+| `contact_count × (log + 6)` | same | the contact-order sort's comparison bound (`log + 2`, which this line already carried) plus the transpose's four contact-sized passes |
+| `cells × (LOAD_WITNESS_SLOTS + 5)` | `LoadTransposeCounts::operations`, added by `load_resource_plan` | 1 per cell for the fill's store and cursor bump, 4 for the distance and the argmin comparison — the very allowance the retired `owner_log + 4` carried for everything that was *not* the binary search — and `LOAD_WITNESS_SLOTS` for `insert_load_witness`, which FU-8d had charged *inside* that binary-search allowance |
+| `Σ\|eligible_owners\| × owner_log × 2`, `face_count × (face_log × 2 + 1)` | same | **unchanged**; the eligibility's own ordering and the row emit, neither of which is the scan |
+
+**The `cells` term sits in the exact plan, not the preflight, and that asymmetry
+is the same one G1 established for the transpose's bytes.** `cells` is knowable
+only after `LoadTransposeCounts::count` has walked the eligibility; no preflight
+can state it without over-stating by orders of magnitude. So
+`specialized_load_resource_plan` under-states this finalizer's operations by the
+cells term, exactly as it already under-states its scratch bytes. **That costs a
+later refusal, never unafforded execution**: the fill and the scan run only after
+`finalize_load_rows`'s own exact check, and that check is the one carrying the
+term.
+
+### 15.2 The treant's batch header, old against new
+
+Conditions: release, `--features census`,
+`PLINTH_CENSUS=1 PLINTH_CENSUS_ONLY="Weeping Treant v1.2" PLINTH_THREADS=4`, RSS
+watchdog unsandboxed (ruling R-g) polling every 2 s, armed at 90 GB and **never
+fired**. **The machine was quiet — no concurrent workflow** — as it was for G4.
+One instrumented release run, stopped at 260 s once the gate's first two batches
+had printed; the instrumentation was env-gated (`PLINTH_G5`), never reached
+without it, and removed by editing before the gates. **This was not a completion
+attempt and is not offered as one.**
+
+Round-1 merge-gate batch — samples 405,146, demands 1,095, contacts 1,366,
+proposals 39,223, variants 39,224:
+
+| term | before G5 | after G5 |
+|---|---:|---:|
+| `baseline_rows` | 554,926,572 | 554,926,572 |
+| load baseline (`specialized_load_resource_plan`) | **5,543,831,115** | **795,766,031** |
+| load proposal bound | 1,048,982,627 | 1,048,982,627 |
+| **gate `load` term** | **6,592,813,742** | **1,844,748,658** |
+| `demand_rows` | 42,949,185 | 42,949,185 |
+| proposal work | 2,083,167,818 | 2,083,167,818 |
+| **stated demand** (`gate_resource_plan`) | **9,273,857,317** — 26.2 % | **4,525,792,233** — **12.8 %** |
+| `exact_operations` | **10,457,910,996** — 29.5 % | **5,709,845,912** — **16.1 %** |
+| **cap — UNCHANGED** | 35,445,500,736 | 35,445,500,736 |
+
+**The fall is 4,748,065,084 at both sites, to the unit, and it is entirely the
+load term.** Every other line is byte-identical, which is the check that the
+repricing touched what it claimed to touch and nothing else.
+
+Arithmetic, so it can be verified rather than believed. At the 134,368-row
+preflight the retired term was `134,368 × 1,366 × 27 = 4,955,760,576`; what
+replaces it is `7,988,078 × 13 × 2 = 207,690,028` plus the `contact_count × 4`
+widening of `1,366 × 4 = 5,464`. Net: **−4,748,065,084**, exactly.
+
+Two more figures from the same run:
+
+- **The accepted-load path**, 130,548 rows: **5,402,535,619 → 795,359,775**, a
+  6.79× fall. This is the figure `TREANT_LOAD_OPERATIONS_REQUIRED` pins.
+- **The finalizer's own exact plan**, 117,741 rows / 1,366 contacts /
+  `Σ|eligible_owners|` 7,988,078 / **8,210,643 cells**:
+  **4,714,113,843 → 644,970,917**. Of the new total, 207,690,028 is the search
+  term, 65,685,144 the cells term, and 371,595,745 the two untouched terms — so
+  the **scan** term falls **21×** (4,342,523,562 → 273,375,172) while the
+  **total** falls 7.3×. The gap is stated rather than smoothed over: what is
+  left is dominated by `Σ|eligible_owners| × owner_log × 2 = 367,451,588`, which
+  is the eligibility's ordering and not the scan, and G5 did not touch it.
+
+### 15.3 The corpus — and one place the demand does NOT fall
+
+Every reachable corpus model was re-measured under the same instrumentation, one
+`PLINTH_CENSUS_ONLY` invocation each. **Every model's widest load demand falls:**
+
+| model | widest before | widest after |
+|---|---:|---:|
+| `Sphere` | 86,709 | 61,481 |
+| `Cylinder` | 42,078 | 26,509 |
+| `make_box` | 658 | 445 |
+| `make_overhang_table` | 11,690 | 3,354 |
+| `make_toed_slab` | 10,704 | 3,291 |
+| `make_raking_blade` | 12,426 | 5,696 |
+| `make_thin_fin` | 595 | 480 |
+
+**"A falling demand can create no refusal" is true of every model's widest
+demand and of every treant site, and it is NOT literally true checkpoint by
+checkpoint — recorded rather than glossed.** On `make_box` and `make_thin_fin`
+three individual load checkpoints **rise**, by at most 56 units: `make_box`
+409 → 445 at (3 rows, 11 contacts, 8 owner entries, 20 cells), `make_thin_fin`
+424 → 480 at (2 rows, 18 contacts, 6 owner entries, 19 cells). The cause is the
+new model's *shape*: it is `Σ|eligible_owners|`- and `cells`-shaped, and on a
+batch of three rows those two counts are larger relative to `rows × contacts`
+than they are on any real workload. Every one of those checkpoints is more than
+four million times under the **2,000,000,000 flat floor**, so none is anywhere
+near a refusal; but the claim is stated as it measures, not as it would be
+tidier.
+
+### 15.4 The finding: the treant no longer leaves the load floor
+
+`SUPPORT_SPECIALIZED_MAX_LOAD_OPERATIONS` is a flat floor of **2,000,000,000**
+lifted by the batch-product rule `max(floor, 64 × (rows + 1) × (contacts + 1))`.
+The Weeping Treant was **the only model that ever left that floor**. At
+795,359,775 it no longer does. **The batch-product scaling at the load stage is
+now load-bearing for nothing in the corpus.**
+
+**It is kept, unchanged, and here is why that is not inertia.** Applying the
+derivation rule to the repriced observation gives
+`next_power_of_two(2 × ceil(795,359,775 / 178,460,483)) = next_power_of_two(10)
+= 16`, or 8 by the `ceil` of 4.46 — either way a **reduction** of
+`SUPPORT_LOAD_MAX_WORK_PER_BATCH_UNIT` from 64. Lowering a cap is the direction
+that creates refusals, FU-23/R4 trigger re-derivation on a **second specimen**
+rather than on the same specimen getting cheaper, and G5's mandate is that no
+cap is raised, lowered or touched. The derivation input of record therefore
+stays the 2026-08-06 figure of 31, dated and attributed in
+`crates/plinth-support/tests/resource_cap_policy.rs`, which now pins
+`TREANT_LOAD_OPERATIONS_REQUIRED` (the derivation input) and
+`TREANT_LOAD_OPERATIONS_REPRICED` (what the treant now asks) side by side and
+asserts the second is below the floor.
+
+### 15.5 Open question 4 — `plan.vector_bytes` — deliberately LEFT
+
+The design record's open question 4 asked whether `plan.vector_bytes` should
+shrink under `StopAtFirstNotWorse`, answered "not in G3; move the charge in G5
+if at all". **G5 leaves it, and the reason is a distinction rather than a
+deferral.**
+
+G5's subject is a model that was **always** an over-statement of what the code
+did — a modelling error, corrected. `vector_bytes` is not that. It is a
+**charged batch bound**, the byte twin of `plan.variants`, and open question 3
+already settled the principle for the variant count: *charge the batch, meter
+the prefix, state both*, because a bound not knowable until after the work that
+determines it bounds nothing. Shrinking `vector_bytes` to the executed prefix
+would re-open exactly that hole on the byte side. It is left charged for the
+full batch, over-stating executed bytes by construction and refusing nothing
+that was not already refused.
+
+What *is* left undone, and is named here so it is not mistaken for settled:
+`check_gate_peak` reports `result_bytes: plan.vector_bytes` as the **executed**
+peak, so the executed byte figure it attests is an over-statement now that the
+vectors are never materialised. Metering the executed prefix's real bytes beside
+the charged bound — the D1 "state a bound, meter the spend" shape, applied to
+bytes — is a **follow-up**, not a G5 omission, and it is a byte-term record
+sweep of its own.
+
+### 15.6 What this licenses, and what it does not
+
+- **Licensed:** reading the treant's merge gate as sitting at 12.8 % of its cap
+  rather than 26.2 %, and reading the load stage as no longer needing its
+  batch-product scaling.
+- **NOT licensed:** re-deriving either batch-product coefficient. **Ruling R-f
+  is STILL NOT satisfied.** G5 ran no completion attempt at all; its single
+  measurement run was stopped at 260 s having reached the gate stage, which is
+  not a completed tournament. G4's two attempts remain the round-count record,
+  both EXCEEDS-TIMEBOX at 602 s.
+- **NOT licensed:** reading any of this as a wall-clock improvement. G5 changes
+  no executed work. The treant's stopping point is unchanged and is still
+  wall-clock.
+- **G4's transcript is deliberately left in the OLD numbers.** §14 was the last
+  measurement stated before the repricing, which is why G5 was sequenced after
+  it; its tables are correct as of their tip and are not retrofitted.
+
+**Memory, observed and not explained.** The G5 measurement run peaked at
+**3,538,624 KB (3.375 GiB)** at ≈154 s, shortly after the gate stage opened,
+falling back to ≈2.4 GiB for the remainder. That is a **third** data point
+beside G3's unreproduced 3.32 GiB and G4's two runs at 2.554/2.528 GiB, and it
+is recorded as an observation only: G5 changes no byte term, the transpose's
+charged 32,848,040 B is present in all four runs and explains none of the
+spread, and the honest statement is that a short-lived transient near
+gate-stage entry has now been seen twice and sampled at 2 s in every run. It is
+26× under the 90 GB watchdog and 29× under the 100 GB machine ceiling. It is
+not a cap question in either direction.
+
+**Gates and OD-8.** Five gates green, verbatim, tests with `--no-fail-fast`.
+**All seven frozen census digests byte-identical** at this tip — `Sphere`
+17667468971446251870, `Cylinder` 13310185350867878190, `make_box`
+9657051231007502658, `make_overhang_table` 6686599816688114065, `make_toed_slab`
+11199296506741562956, `make_raking_blade` 13278215294653054002, `make_thin_fin`
+7016743535301716631 — which is the check that matters here: **repricing changes
+charges, never geometry.**
