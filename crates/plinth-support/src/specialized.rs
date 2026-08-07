@@ -3986,7 +3986,26 @@ fn evaluate_gate_batch(
                 limits.max_gate_peak_bytes,
             )?;
             executed_whole_gate_route_plan.record(executed_peak_bytes)?;
+            // FU-8e phase E3: the batch's **one** full coverage assessment.
+            // Variant 0 is the baseline, so this is literally the call its
+            // iteration used to make, hoisted out of the loop; every proposal
+            // variant that leaves the uncovered rows alone is handed this same
+            // objective instead of rescanning the nearest array for it.  See
+            // [`variant_coverage_objective`].
+            let coverage_question = GateCoverageQuestion {
+                samples: coverage_samples,
+                topology,
+                radius_mm: coverage_radius,
+                area_floor_mm2: coverage_area_floor_mm2,
+                limits: CoverageAssessmentLimits {
+                    max_scratch_bytes: limits.max_coverage_scratch_bytes,
+                    max_operations: limits.max_coverage_operations,
+                },
+            };
+            let baseline_coverage_objective = coverage_question.objective_of(&baseline_nearest)?;
             let mut executed_load_work = SpecializedLoadDeltaWork::default();
+            // FU-8e phase E3: what the coverage fallbacks have spent so far.
+            let mut executed_coverage_work = 0usize;
             let mut executed_touched_rows = 0usize;
             {
                 for variant in 0..plan.variants {
@@ -3997,6 +4016,8 @@ fn evaluate_gate_batch(
                     // proposal variant overwrites only the rows its merged pair
                     // can move, and restores them before the next variant.
                     touched_rows.clear();
+                    // Variant 0 *is* the baseline, so it moves nothing.
+                    let mut coverage_delta = ProposalCoverageDelta::default();
                     let nearest: &[f64] = match proposal {
                         None => &baseline_nearest,
                         Some(proposal) => {
@@ -4009,17 +4030,19 @@ fn evaluate_gate_batch(
                             // agreed with the first.
                             let delta = &planned_nearest.proposals[variant - 1];
                             executed_nearest.record_proposal(delta)?;
-                            fill_proposal_nearest_delta(
+                            coverage_delta = fill_proposal_nearest_delta(
                                 proposal,
                                 GateNearestBaseline {
                                     samples: coverage_samples,
                                     index: &batch_index,
                                     witnesses: &baseline_witnesses,
+                                    nearest: &baseline_nearest,
                                 },
                                 delta,
                                 &mut proposal_nearest_scratch,
                                 &mut working_nearest,
                                 &mut touched_rows,
+                                coverage_radius,
                             )?;
                             executed_touched_rows = executed_touched_rows
                                 .checked_add(touched_rows.len())
@@ -4027,16 +4050,43 @@ fn evaluate_gate_batch(
                             &working_nearest
                         }
                     };
-                    let coverage = assess_coverage(
-                        coverage_samples,
-                        topology,
+                    // FU-8e phase E3.  A variant that moved an uncovered row
+                    // re-runs the full assessment, and that assessment's work
+                    // is charged HERE, as it is spent, rather than bounded up
+                    // front: the batch cannot know how many variants will need
+                    // one without evaluating them.  Spending before checking is
+                    // only acceptable because the identical shape sits a few
+                    // lines below in this same loop — `executed_load_work`
+                    // against `load_delta_limit` — and it is called out rather
+                    // than left to be noticed.  Both spends draw on the ONE
+                    // headroom `load_delta_limit` states, so it is their SUM
+                    // that is checked; metering them separately would let the
+                    // pair exceed the `gate_operation_limit` the batch was
+                    // admitted under.  `coverage_scratch.operations` is
+                    // `assess_coverage`'s own stated cost for these samples,
+                    // the number it already checks per call against
+                    // `max_coverage_operations` — which, until now, was the
+                    // only bound this stage's coverage work ever met.
+                    if coverage_delta.requires_reassessment() {
+                        executed_coverage_work = executed_coverage_work
+                            .checked_add(coverage_scratch.operations)
+                            .ok_or(SpecializedError::GateResourceOverflow)?;
+                        let spent = executed_load_work
+                            .total()?
+                            .checked_add(executed_coverage_work)
+                            .ok_or(SpecializedError::GateResourceOverflow)?;
+                        if spent > load_delta_limit {
+                            return Err(SpecializedError::GateOperationLimit {
+                                required: spent,
+                                limit: load_delta_limit,
+                            });
+                        }
+                    }
+                    let coverage_objective = variant_coverage_objective(
+                        coverage_question,
                         nearest,
-                        coverage_radius,
-                        coverage_area_floor_mm2,
-                        CoverageAssessmentLimits {
-                            max_scratch_bytes: limits.max_coverage_scratch_bytes,
-                            max_operations: limits.max_coverage_operations,
-                        },
+                        coverage_delta,
+                        baseline_coverage_objective,
                     )?;
                     // FU-8d phase F3 (P2): variant 0 reads the batch's one
                     // finalized partition; a proposal variant re-answers only
@@ -4062,7 +4112,14 @@ fn evaluate_gate_batch(
                                     &mut load_scratch,
                                 )?;
                                 executed_load_work.record(outcome.work)?;
-                                let spent = executed_load_work.total()?;
+                                // FU-8e phase E3: plus whatever the coverage
+                                // fallbacks have spent out of the same
+                                // headroom.  It is zero unless a variant moved
+                                // an uncovered row.
+                                let spent = executed_load_work
+                                    .total()?
+                                    .checked_add(executed_coverage_work)
+                                    .ok_or(SpecializedError::GateResourceOverflow)?;
                                 if spent > load_delta_limit {
                                     return Err(SpecializedError::GateOperationLimit {
                                         required: spent,
@@ -4098,7 +4155,7 @@ fn evaluate_gate_batch(
                         attach_reach,
                     );
                     vectors.push(FrozenSpecializedGateVector::from_live(
-                        coverage.objective,
+                        coverage_objective,
                         load_violations,
                         unsupported_specialized_count,
                     ));
@@ -5697,6 +5754,16 @@ struct GateNearestBaseline<'a> {
     samples: &'a [CoverageSample],
     index: &'a GateBatchIndex,
     witnesses: &'a NearestWitnessTable,
+    /// The batch's baseline nearest answers (FU-8e phase E3).
+    ///
+    /// [`fill_proposal_nearest_delta`] reads each row's *baseline* value out of
+    /// the **working** array, immediately before overwriting it, because the
+    /// caller restores every touched row from this one after each variant — so
+    /// the two agree bit for bit on entry, and the working read costs nothing
+    /// on a cache line the store is about to claim anyway.  This slice is what
+    /// turns that invariant from prose into a `debug_assert`: it is checked on
+    /// every delta row in a debug or test build and compiled away in release.
+    nearest: &'a [f64],
 }
 
 /// The two buffers one proposal's nearest delta refills: gathered query points
@@ -5718,6 +5785,166 @@ struct GateNearestBaseline<'a> {
 struct ProposalNearestScratch {
     queries: Vec<[f64; 3]>,
     merged_squared: Vec<f64>,
+}
+
+/// What one proposal's nearest delta observed about the rows it rewrote, as
+/// far as [`assess_coverage`] can tell them apart (FU-8e phase E3).
+///
+/// The merge gate consumes exactly one thing from a variant's coverage
+/// assessment — [`CoverageObjective`] — and the objective is *not* a function
+/// of the whole nearest array.  It is a function of the **uncovered rows**:
+/// which they are, and what value the uncovered ones hold.  This counts the
+/// delta rows that can move either, so the caller can tell a variant whose
+/// objective is the batch baseline's from one whose is not.
+///
+/// Both counters are folded into the delta's own row loop, which the plan
+/// already charges `touched_rows` for; neither adds a charged unit, and neither
+/// adds a load — `previous` and `updated` are already in registers there.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct ProposalCoverageDelta {
+    /// Rows whose covered/uncovered **status** changed: `nearest > radius`
+    /// answers differently before and after.  Recorded because it is the
+    /// headline rate for the record (measured zero on both proposal-carrying
+    /// corpus models); the reassessment trigger is the field below, which
+    /// strictly contains it.
+    flipped_rows: usize,
+    /// Rows that force a full reassessment: a row that is uncovered on
+    /// **either** side and whose value moved.
+    ///
+    /// This is a superset of `flipped_rows` — a status change needs two
+    /// different values, one of them above the radius — and the extra rows it
+    /// catches are the ones a pure flip test misses.  See
+    /// [`variant_coverage_objective`] for why they are not optional.
+    moved_uncovered_rows: usize,
+}
+
+impl ProposalCoverageDelta {
+    /// Fold one rewritten row in.  `previous` is the row's baseline value and
+    /// `updated` is the variant's; `radius_mm` is the same `f64` the coverage
+    /// assessment compares against, and the comparison is the same `>`.
+    #[inline]
+    fn observe(&mut self, previous: f64, updated: f64, radius_mm: f64) {
+        let was_uncovered = previous > radius_mm;
+        let is_uncovered = updated > radius_mm;
+        if was_uncovered != is_uncovered {
+            self.flipped_rows += 1;
+        }
+        if (was_uncovered || is_uncovered) && previous.to_bits() != updated.to_bits() {
+            self.moved_uncovered_rows += 1;
+        }
+    }
+
+    /// Whether this variant needs its own [`assess_coverage`] call.
+    const fn requires_reassessment(self) -> bool {
+        self.moved_uncovered_rows > 0
+    }
+}
+
+/// One variant's [`CoverageObjective`]: the batch baseline's, or a fresh
+/// assessment (FU-8e phase E3, 2026-08-07).
+///
+/// # What the gate actually asked for
+///
+/// The merge gate calls [`assess_coverage`] once per variant and keeps
+/// `objective`; `failing_sample_indices` and `patches` are built and dropped.
+/// On the Weeping Treant that is 39,224 assessments of 405,146 samples per
+/// merge round, 17.05 s of a 63.83 s round in the design pass — and the cost is
+/// not allocation churn.  In `RepairNoEvidence` mode the traversal only visits
+/// *uncovered* rows, but it brackets that traversal with two unconditional full
+/// scans of the 3.24 MB nearest array: the uncovered filter and the
+/// `worst_gap_mm` fold.  About 254 GB of reads per gate batch, at memory
+/// bandwidth.  So the fix is to not scan, not to not allocate.
+///
+/// # Why the baseline's objective is the variant's, exactly
+///
+/// A proposal variant's nearest array differs from the baseline's only at the
+/// rows its delta rewrote, and the caller restores those rows afterwards.  Take
+/// a variant where every rewritten row was `observe`d as neither flipping nor
+/// moving-while-uncovered.  Then:
+///
+/// - the **uncovered set** is identical.  Only a rewritten row can change
+///   status, and none did.  Every downstream structure — the sort, the
+///   `(island, face)` groups, the connected patches, the area floor test — is a
+///   pure function of that set with the samples and topology, both
+///   proposal-invariant here, so `failing_uncovered_area_mm2`,
+///   `max_patch_area_mm2` and `failing_patch_count` are identical, and so is
+///   the failing-island set the last field folds over.
+/// - `worst_gap_mm` is identical too, and this is the field that makes the
+///   second counter necessary.  It is a `max` over the nearest **values** of
+///   every sample in a failing island, so it is *not* determined by the
+///   uncovered set alone: a row that stays uncovered but moves from 12 mm to
+///   11 mm lowers it without flipping anything.  A covered row can never
+///   determine it — a failing island holds at least one uncovered sample, whose
+///   value exceeds the radius, which no covered value can — so it is enough to
+///   know that no uncovered row moved.  That is exactly
+///   `moved_uncovered_rows == 0`, and the fold then runs over identical values
+///   in identical order for an identical `f64`.
+///
+/// The trigger is deliberately wider than the uncovered rows of a *failing*
+/// island: telling those apart would mean retaining the baseline's failing
+/// islands and charging their bytes against the gate peak, to save a fallback
+/// on rows in patches under the area floor.  Uncovered rows are the rows the
+/// traversal already treats as rare.
+///
+/// # The other arm is the same function it always was
+///
+/// A variant that does move an uncovered row calls [`assess_coverage`]
+/// verbatim, on the same array, with the same limits.  There is no incremental
+/// objective and no patch delta: the fallback is exact by being the original.
+///
+/// So bit-identity holds on both arms by construction, and what is
+/// **model-dependent is only the speed**.  The fast path is taken whenever a
+/// merge leaves the uncovered rows alone, which is measured at 100 % of
+/// proposals on both proposal-carrying corpus models; a model whose merges
+/// churn uncovered geometry would take the fallback more often and land back at
+/// the pre-FU-8e cost.  It can never land on a different answer.
+fn variant_coverage_objective(
+    question: GateCoverageQuestion<'_>,
+    nearest: &[f64],
+    delta: ProposalCoverageDelta,
+    baseline_objective: CoverageObjective,
+) -> Result<CoverageObjective, SpecializedError> {
+    debug_assert!(
+        delta.flipped_rows <= delta.moved_uncovered_rows,
+        "a status flip is a moved uncovered row"
+    );
+    if !delta.requires_reassessment() {
+        return Ok(baseline_objective);
+    }
+    question.objective_of(nearest)
+}
+
+/// Everything the merge gate's coverage assessment holds still for a whole
+/// batch: the samples, their topology, the radius that decides covered from
+/// uncovered, the area floor that decides a failing patch from a tolerable one,
+/// and the limits the assessment checks itself against (FU-8e phase E3).
+///
+/// They travel together because the batch asks the *same* question of every
+/// variant and only the nearest array differs — and because the baseline's
+/// assessment and a fallback variant's must be the same call, or the fast path
+/// would be comparing answers to two different questions.
+#[derive(Clone, Copy)]
+struct GateCoverageQuestion<'a> {
+    samples: &'a [CoverageSample],
+    topology: &'a plinth_mesh::FaceTopology,
+    radius_mm: f64,
+    area_floor_mm2: f64,
+    limits: CoverageAssessmentLimits,
+}
+
+impl GateCoverageQuestion<'_> {
+    /// [`assess_coverage`], verbatim, keeping the one field the gate consumes.
+    fn objective_of(self, nearest: &[f64]) -> Result<CoverageObjective, SpecializedError> {
+        Ok(assess_coverage(
+            self.samples,
+            self.topology,
+            nearest,
+            self.radius_mm,
+            self.area_floor_mm2,
+            self.limits,
+        )?
+        .objective)
+    }
 }
 
 /// Overwrite `nearest` in place with one proposal variant's answers, recording
@@ -5776,10 +6003,23 @@ struct ProposalNearestScratch {
 /// `scratch` is the caller's reusable pair of buffers: one allocation each for
 /// the whole batch rather than one per proposal.
 ///
-/// The three read-only pieces of batch state travel together in
+/// The read-only pieces of batch state travel together in
 /// [`GateNearestBaseline`], because they are only ever correct *together*: the
 /// witnesses index the batch index's source lists, and both are stated over
 /// these samples.
+///
+/// # What it reports back (FU-8e phase E3)
+///
+/// The returned [`ProposalCoverageDelta`] is folded in this loop rather than
+/// scanned for afterwards, because the loop already holds what it needs: the
+/// row's baseline value, which the caller restores and this function is about
+/// to overwrite, and the winner it is about to write.  `coverage_radius_mm` is
+/// the same radius the variant's assessment will compare against, and the
+/// comparison is the same `>`, so the two agree on every row by construction.
+/// The rows it counts are already charged — they are `touched_rows`, which
+/// [`plan_proposal_nearest_delta`] states and the gate has already paid for —
+/// so this adds no operation to any demand.  See [`variant_coverage_objective`]
+/// for what the caller does with it.
 fn fill_proposal_nearest_delta(
     proposal: &MergeProposal,
     baseline: GateNearestBaseline<'_>,
@@ -5787,16 +6027,20 @@ fn fill_proposal_nearest_delta(
     scratch: &mut ProposalNearestScratch,
     nearest: &mut [f64],
     touched: &mut Vec<usize>,
-) -> Result<(), SpecializedError> {
+    coverage_radius_mm: f64,
+) -> Result<ProposalCoverageDelta, SpecializedError> {
     let GateNearestBaseline {
         samples,
         index,
         witnesses,
+        nearest: baseline_nearest,
     } = baseline;
     debug_assert_eq!(nearest.len(), samples.len());
+    debug_assert_eq!(baseline_nearest.len(), samples.len());
     debug_assert_eq!(witnesses.rows.len(), samples.len());
+    let mut coverage_delta = ProposalCoverageDelta::default();
     if plan.deltas.is_empty() {
-        return Ok(());
+        return Ok(coverage_delta);
     }
     let pair = MergedPair::of(proposal);
     scratch.queries.clear();
@@ -5829,13 +6073,26 @@ fn fill_proposal_nearest_delta(
             } else {
                 merged_squared
             };
-            nearest[sample_index] = winner.sqrt();
+            // The row's baseline value, read from the working array on the
+            // cache line the store below is about to claim.  The caller
+            // restores every touched row from `baseline_nearest` after each
+            // variant, so the two hold the same bits here; that invariant is
+            // asserted rather than assumed in debug and test builds.
+            let previous = nearest[sample_index];
+            debug_assert_eq!(
+                previous.to_bits(),
+                baseline_nearest[sample_index].to_bits(),
+                "row {sample_index} was not restored to the batch baseline"
+            );
+            let updated = winner.sqrt();
+            coverage_delta.observe(previous, updated, coverage_radius_mm);
+            nearest[sample_index] = updated;
             touched.push(sample_index);
             query_row += 1;
         }
     }
     debug_assert_eq!(query_row, plan.touched_rows);
-    Ok(())
+    Ok(coverage_delta)
 }
 
 /// Count the demands one variant leaves unsupported, from the batch index
@@ -7570,11 +7827,17 @@ mod tests {
                     samples,
                     index: &index,
                     witnesses: &witnesses,
+                    nearest: &baseline,
                 },
                 &delta,
                 &mut nearest_scratch,
                 &mut working,
                 &mut touched,
+                // The radius this fixture asserts nothing about: it drives only
+                // the FU-8e coverage delta, which
+                // `fu8e_coverage_delta_matches_assess_coverage` owns.  Every
+                // row assertion below is on the nearest values themselves.
+                1.0,
             )
             .unwrap();
 
@@ -7714,6 +7977,221 @@ mod tests {
             coverage.exact_tie_rows > 0,
             "no survivor tied the merged seat exactly, so the tie arm is untested"
         );
+    }
+
+    /// Four samples on a closed tetrahedron, two islands, one sample per face.
+    ///
+    /// Faces of a tetrahedron are all mutually adjacent, but a coverage patch
+    /// never crosses an island, so island 7 (faces 0, 1) and island 8
+    /// (faces 2, 3) form two independent patches — which is what lets one
+    /// island fail the area floor while the other passes, and therefore what
+    /// lets `worst_gap_mm` fold over a strict subset of the samples.
+    fn fu8e_coverage_fixture() -> (Mesh, Vec<CoverageSample>) {
+        let mesh = Mesh::new(
+            vec![
+                [-1.0, -1.0, 0.0],
+                [1.0, -1.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 2.0],
+            ],
+            vec![[0, 2, 1], [0, 1, 3], [1, 2, 3], [2, 0, 3]],
+        )
+        .expect("closed tetrahedron");
+        let samples = [(7u32, 0u32, 1.0), (7, 1, 1.0), (8, 2, 0.4), (8, 3, 0.4)]
+            .into_iter()
+            .map(|(island_id, face_id, area_mm2)| CoverageSample {
+                island_id,
+                face_id,
+                component_id: 0,
+                point_mm: [0.0, 0.0, 0.0],
+                area_mm2,
+            })
+            .collect();
+        (mesh, samples)
+    }
+
+    /// FU-8e phase E3 — **the coverage delta answers what `assess_coverage`
+    /// would have answered, on both of its arms.**
+    ///
+    /// The gate keeps one thing from a variant's assessment, its
+    /// [`CoverageObjective`], and E3 stops recomputing that objective for a
+    /// variant that cannot have changed it.  This is the fixture that says when
+    /// "cannot" is true.  Every case compares all four objective fields against
+    /// a real [`assess_coverage`] call on the variant's own array —
+    /// `f64::to_bits` on the three floats, so an answer that is merely close
+    /// fails — and asserts what the delta counted while it got there.
+    ///
+    /// NON-VACUITY IS ASSERTED, NOT HOPED FOR.  Three of the five cases also
+    /// assert that the true objective **differs** from the batch baseline's, so
+    /// a `variant_coverage_objective` that lost its fallback — or a
+    /// `ProposalCoverageDelta` that stopped counting — fails here rather than
+    /// silently handing the gate a stale objective.  Two of those three flip a
+    /// row's covered/uncovered status, one in each direction; the third flips
+    /// nothing at all.
+    #[test]
+    fn fu8e_coverage_delta_matches_assess_coverage() {
+        let (mesh, samples) = fu8e_coverage_fixture();
+        let topology = build_face_topology(&mesh, WeldPolicy::ExactBits).unwrap();
+        let radius_mm = 1.0;
+        let question = GateCoverageQuestion {
+            samples: &samples,
+            topology: &topology,
+            radius_mm,
+            area_floor_mm2: 0.5,
+            limits: CoverageAssessmentLimits::UNBOUNDED,
+        };
+        let objective_of = |nearest: &[f64]| question.objective_of(nearest).expect("assessment");
+
+        // Island 7 is uncovered and over the floor; island 8 is covered.
+        let covered = [3.0, 2.0, 0.5, 0.5];
+        // Island 8 uncovered too: its patch is 0.8 mm², also over the floor.
+        let uncovered = [3.0, 2.0, 1.5, 1.5];
+        let baseline_objective = objective_of(&covered);
+        assert_eq!(baseline_objective.failing_patch_count, 1);
+        assert_eq!(baseline_objective.worst_gap_mm, 3.0);
+
+        struct Case {
+            name: &'static str,
+            baseline: [f64; 4],
+            variant: [f64; 4],
+            flips: usize,
+            reassessment: bool,
+        }
+        let case = |name, baseline, variant, flips, reassessment| Case {
+            name,
+            baseline,
+            variant,
+            flips,
+            reassessment,
+        };
+        let cases = [
+            // The variant is the baseline: nothing to do, and the fast path
+            // must be the one that does it.
+            case("unchanged", covered, covered, 0, false),
+            // A covered row moves and stays covered.  It cannot reach
+            // `worst_gap_mm` — a failing island always holds a sample above the
+            // radius, which no covered value can exceed — so the objective is
+            // the baseline's, and the fast path must take it.
+            case("covered row moves", covered, [3.0, 2.0, 0.9, 0.5], 0, false),
+            // NO FLIP, BUT THE OBJECTIVE MOVES.  Row 0 stays uncovered and
+            // drops from 3 mm to 2.5 mm, which lowers `worst_gap_mm` while the
+            // uncovered set, the patches and the failing islands all stand
+            // still.  A trigger that only watched for status flips would hand
+            // the gate 3.0 here.
+            case(
+                "uncovered row moves without flipping",
+                covered,
+                [2.5, 2.0, 0.5, 0.5],
+                0,
+                true,
+            ),
+            // Covered → uncovered, both rows of island 8: a second failing
+            // patch appears.
+            case("covered becomes uncovered", covered, uncovered, 2, true),
+            // …and back the other way, from the uncovered baseline.
+            case("uncovered becomes covered", uncovered, covered, 2, true),
+        ];
+
+        for Case {
+            name,
+            baseline,
+            variant,
+            flips: expected_flips,
+            reassessment: expected_reassessment,
+        } in cases
+        {
+            let baseline_objective = objective_of(&baseline);
+            let expected = objective_of(&variant);
+            // The gate observes exactly the rows its delta rewrote.  Observing
+            // every row instead is the same count: a row whose bits did not
+            // move contributes to neither counter, and FU-8c's own equivalence
+            // fixture already refuses a delta that moves a row it did not
+            // touch.
+            let mut delta = ProposalCoverageDelta::default();
+            for row in 0..samples.len() {
+                delta.observe(baseline[row], variant[row], radius_mm);
+            }
+            assert_eq!(delta.flipped_rows, expected_flips, "{name}: flips");
+            assert_eq!(
+                delta.requires_reassessment(),
+                expected_reassessment,
+                "{name}: reassessment"
+            );
+            if expected_reassessment {
+                assert_ne!(
+                    (
+                        expected.failing_uncovered_area_mm2.to_bits(),
+                        expected.max_patch_area_mm2.to_bits(),
+                        expected.failing_patch_count,
+                        expected.worst_gap_mm.to_bits(),
+                    ),
+                    (
+                        baseline_objective.failing_uncovered_area_mm2.to_bits(),
+                        baseline_objective.max_patch_area_mm2.to_bits(),
+                        baseline_objective.failing_patch_count,
+                        baseline_objective.worst_gap_mm.to_bits(),
+                    ),
+                    "{name}: the baseline objective would have been accepted, \
+                     so the fallback is untested here"
+                );
+            }
+            let answer = variant_coverage_objective(question, &variant, delta, baseline_objective)
+                .expect("variant objective");
+            assert_eq!(
+                answer.failing_uncovered_area_mm2.to_bits(),
+                expected.failing_uncovered_area_mm2.to_bits(),
+                "{name}: failing_uncovered_area_mm2"
+            );
+            assert_eq!(
+                answer.max_patch_area_mm2.to_bits(),
+                expected.max_patch_area_mm2.to_bits(),
+                "{name}: max_patch_area_mm2"
+            );
+            assert_eq!(
+                answer.failing_patch_count, expected.failing_patch_count,
+                "{name}: failing_patch_count"
+            );
+            assert_eq!(
+                answer.worst_gap_mm.to_bits(),
+                expected.worst_gap_mm.to_bits(),
+                "{name}: worst_gap_mm"
+            );
+        }
+    }
+
+    /// FU-8e phase E3 — the row-level counters, at the boundary.
+    ///
+    /// `assess_coverage` calls a row uncovered when `nearest > radius`, so the
+    /// delta must too: a row that lands exactly *on* the radius is covered, and
+    /// moving onto or off that value is a flip.  The other half of the claim is
+    /// the containment `flipped_rows <= moved_uncovered_rows`, which is what
+    /// lets one counter be the trigger and the other be a report.
+    #[test]
+    fn fu8e_coverage_delta_counts_rows_the_way_assess_coverage_reads_them() {
+        let radius = 1.0_f64;
+        let just_over = f64::from_bits(radius.to_bits() + 1);
+        let mut delta = ProposalCoverageDelta::default();
+        // Exactly the radius is covered, on both sides: no flip, no move.
+        delta.observe(radius, radius, radius);
+        assert_eq!(delta, ProposalCoverageDelta::default());
+        // One ULP over is uncovered, so this is a flip — and a move.
+        delta.observe(radius, just_over, radius);
+        assert_eq!(delta.flipped_rows, 1);
+        assert_eq!(delta.moved_uncovered_rows, 1);
+        // Uncovered on both sides, different values: a move, not a flip.
+        delta.observe(3.0, 2.0, radius);
+        assert_eq!(delta.flipped_rows, 1);
+        assert_eq!(delta.moved_uncovered_rows, 2);
+        // Covered on both sides, different values: neither.
+        delta.observe(0.25, 0.5, radius);
+        assert_eq!(delta.flipped_rows, 1);
+        assert_eq!(delta.moved_uncovered_rows, 2);
+        // An unreachable row never reached: infinity is uncovered and equal to
+        // itself, so it neither flips nor moves.
+        delta.observe(f64::INFINITY, f64::INFINITY, radius);
+        assert_eq!(delta.moved_uncovered_rows, 2);
+        assert!(delta.requires_reassessment());
+        assert!(delta.flipped_rows <= delta.moved_uncovered_rows);
     }
 
     /// FU-8d phase F3, part (3) — **the planning pass runs once per proposal,
