@@ -1136,6 +1136,22 @@ FU-8b family, not a cap to raise: admitting it would need a coefficient near
 > not a cap to raise. Full derivation: `support-resource-caps-2026-08-05.md` §10
 > and §11, and `CURRENT-STATUS.md` under *FU-8d phase F3 landed 2026-08-06* and
 > *FU-8d phase F4 measured 2026-08-06*.
+>
+> **Addendum 2026-08-07 — FU-8e phases E1–E4 landed; everything above stands, and
+> neither coefficient moved here either.** The merge gate stopped building a kd-tree
+> per proposal and stopped re-assessing coverage for a variant that cannot have
+> moved the objective. **The demand these coefficients price did NOT move**:
+> `plan_proposal_nearest_delta` is untouched, so the treant still states
+> **9,273,857,317** against the unchanged **35,445,500,736** — a phase that removed
+> 4.35× of the wall-clock and moved no charged number, which is what "no cap was
+> raised" is supposed to look like. **Ruling R-f is STILL not satisfied**:
+> FU-8e's own clean run is an EXCEEDS-TIMEBOX at 601 s having completed 33 of an
+> estimated ~460 merge rounds, because the tournament commits one merge per round
+> and the post-fix gate stage is ≈1.8–5.5 h. R4's n = 1 marking is again unaffected.
+> The successor is **FU-8f**, a recorded finding awaiting owner ruling; it is not a
+> cap to raise either. Full derivation:
+> `support-resource-caps-2026-08-05.md` §12, and `CURRENT-STATUS.md` under
+> *FU-8e phases E1–E4 landed 2026-08-07* and *FU-8f opened 2026-08-07*.
 
 ### 3.11 NOT constants — resource guards
 

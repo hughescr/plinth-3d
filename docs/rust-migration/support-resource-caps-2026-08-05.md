@@ -1049,3 +1049,258 @@ now the measured leader. It is recorded as FU-8e input; nothing is built here.
 `__psynch_cvwait` for the whole gate stage while preparation is genuinely
 parallel. This is not a reason to raise thread counts; it is a note that the gate
 wall-clock above is a single-core number.
+
+## 12. FU-8e phases E1–E4 (2026-08-07) — the treant's merge round falls 4.35×, and still does not fit
+
+> **Dated addendum. Nothing in §§1–11 is rewritten, and this section changes no
+> cap, floor or coefficient.** The demand §10 states — **9,273,857,317** against
+> the unchanged materialization **35,445,500,736** — is byte-identical after
+> FU-8e, deliberately, and §12.6 says why that immobility is the phases' proof
+> rather than an oversight.
+
+### 12.1 Ruling R-f is STILL NOT satisfied, and here is the arithmetic
+
+Before any measurement below is read: **R-f is not satisfied by this phase, and
+was never going to be.** `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` (FU-23) is
+re-derived only from a Weeping Treant run that **COMPLETES** the gate stage.
+FU-8e's clean run at its own tip is an **EXCEEDS-TIMEBOX at 601 s**, exactly as
+F3's and F4's were, and the reason is arithmetic rather than luck:
+
+- The merge tournament commits **exactly one** merge per round — the
+  `consolidate` loop gathers, evaluates, accepts the first safe proposal and
+  starts over — so the round count is bounded by the contact count: 1,366
+  contacts admit at most **1,365** rounds.
+- `make_raking_blade`, the only other proposal-carrying corpus model, runs its
+  tournament to completion in **21 rounds, 62 → 41 contacts** — 33.9 % of its
+  contacts consumed. At the same ratio the treant needs about **460** rounds.
+- FU-8e's measured round is **13.8 s** mean inside the gate batch (§12.3) and
+  **14.4 s** end to end including the gather and the commit (§12.4). So the
+  post-fix gate stage is **≈1.8 h at the blade ratio and ≈5.5 h at the contact
+  bound** — **11× to 33× the 600 s box**.
+
+The run reached **33 merge rounds**, which is 7.2 % of the blade-ratio estimate
+and 2.4 % of the contact bound. **This is not a completed gate and must not be
+read as one.** F3's record over-claimed in this direction once; this section
+states the shortfall first, before any number that might tempt a reader to forget
+it.
+
+### 12.2 Two framing corrections, both measured, both of which changed the fix
+
+The FU-8e finding as opened (see `CURRENT-STATUS.md`) named two costs and had the
+*mechanism* of both wrong. The corrections are the reason the phases work.
+
+1. **The 62 % was never index construction.** One
+   `PointCloudIndex::new_for_knn_batch` over a one-point cloud costs **83.3 ns**;
+   the 39,223 of them in a gate batch total **≈3.27 ms**. The trees were
+   free. The cost was the **query loop** — per query a `nearest_n` descent
+   allocating a `SortedVec`, a second `nearest_n_within_exclusive` descent
+   allocating a `Vec`, and a `sort_by`: about **1.04 × 10⁹ query iterations and
+   2.08 × 10⁹ heap allocations per batch**. Phase E1 answers a one-source batch
+   without a tree; E2 makes the gate consume it.
+
+   > **Arithmetic corrected 2026-08-07 (records fix; this is the PRIMARY note on
+   > the construction total, and every other site carrying it points here).** The
+   > total above first landed as **16.7 microseconds**, which was an **arithmetic
+   > slip in the design pass**, not a second measurement: 39,223 × 83.3 ns =
+   > **3.267 ms**, and 16.7 µs across 39,223 builds would have implied 0.426 ns
+   > per construction — below one memory access, so physically implausible on its
+   > face. **The per-build 83.3 ns is retained unchanged**; it is the design
+   > pass's measurement of record and nothing re-measures it here. **Only the
+   > product is corrected**, and the conclusion it was quoted for is unchanged:
+   > 3.27 ms is **0.009 %** of the 37.33 s `fill_proposal_nearest_delta` frame,
+   > so index construction remains **negligible** — the honest total is 196× the
+   > figure the slip stated, and negligible either way — and the fix still targets the
+   > **query loop** behind the trees, exactly as E1 and E2 built it. No measured
+   > quantity, cap, floor or coefficient moves.
+
+2. **The 28 % was never allocation churn.** In `RepairNoEvidence` mode
+   `assess_coverage` allocates **six** `Vec::with_capacity(samples.len())`, not
+   "~7 … of order a terabyte", and its traversal visits only *uncovered* rows.
+   What costs is the **two unconditional full scans** bracketing that traversal —
+   the uncovered filter and the `worst_gap_mm` fold: 39,224 × 405,146 × 2 × 8 B
+   ≈ **254 GB of reads per batch**, which is ~17 s at this machine's memory
+   bandwidth. So the fix is *not to scan*, not *not to allocate*; E3's fallback
+   allocates exactly as it always did.
+
+A third correction landed inside E3 and is recorded in its commit: the design's
+status-**flip** trigger was **unsound**, because `worst_gap_mm` is a `max` over
+the nearest *values* of a failing island's samples. A row that stays uncovered
+and moves 12 mm → 11 mm lowers it while flipping nothing, and a flip-counting
+trigger would have handed the gate 12. The shipped trigger is the wider "an
+uncovered row **moved**", which strictly contains the flip test.
+
+A fourth, in phase E4 part (a): folding `merged_violation_count`'s two
+per-proposal `Vec`s into batch scratch was measured at **0.13 %** of that
+function's cost and **not adopted** — a merge proposal touches a mean of **3.77
+contacts**, so each allocation is about fifteen bytes. See the
+`SpecializedLoadDeltaScratch` doc comment.
+
+**The pattern across all four is one thing: at this scale an allocation count is
+a poor proxy for cost, and the row traffic is the thing.**
+
+### 12.3 The round, decomposed — measured at the FU-8e tip
+
+Conditions (ruling **R-g**: the entire run *and* its watchdog ran unsandboxed,
+because `ps -o rss=` is blocked in the sandbox): 2026-08-07,
+`PLINTH_CENSUS=1 PLINTH_CENSUS_ONLY="Weeping Treant v1.2"`, release,
+`--features census`, `PLINTH_THREADS=4`, RSS polled every 2 s, watchdog armed at
+**90 GB**, 600 s timebox, **one attempt** of a permitted two. Timers were
+env-gated scratch counters at the branch tip, reverted by editing afterwards
+(`git status` clean against the commit; a grep for every scratch identifier
+returns nothing). Per ruling **R-e** no total below is pinned in a test — the
+dated transcript is the record.
+
+| round | contacts | proposals | batch s | prep s | loop s | fill s | merged_violation s | restore s |
+|---|---|---|---|---|---|---|---|---|
+| base | 1366 | 0 | 3.313 | 3.313 | 0.000 | 0.000 | 0.000 | 0.000 |
+| 1 | 1366 | 39223 | 14.679 | 3.952 | 10.727 | 4.672 | 5.495 | 0.517 |
+| 2 | 1365 | 39212 | 15.148 | 3.249 | 11.898 | 5.331 | 5.958 | 0.564 |
+| 3 | 1364 | 39209 | 18.244 | 5.697 | 12.547 | 5.624 | 6.269 | 0.604 |
+| 4 | 1363 | 39203 | 15.355 | 5.772 | 9.584 | 4.291 | 4.797 | 0.460 |
+| 5 | 1362 | 39189 | 12.740 | 3.234 | 9.505 | 4.223 | 4.793 | 0.455 |
+| 6 | 1361 | 39180 | 12.717 | 3.141 | 9.576 | 4.275 | 4.811 | 0.455 |
+| 7 | 1360 | 39174 | 12.835 | 3.321 | 9.514 | 4.245 | 4.769 | 0.464 |
+| 8 | 1359 | 39169 | 13.398 | 3.255 | 10.143 | 4.508 | 5.095 | 0.498 |
+| 9 | 1358 | 39167 | 14.319 | 4.306 | 10.013 | 4.451 | 5.046 | 0.476 |
+| 10 | 1357 | 39166 | 14.132 | 3.406 | 10.726 | 4.839 | 5.309 | 0.523 |
+| 11 | 1356 | 39165 | 13.513 | 3.986 | 9.527 | 4.252 | 4.781 | 0.455 |
+| 12 | 1355 | 39160 | 13.660 | 4.152 | 9.508 | 4.242 | 4.775 | 0.453 |
+| 13 | 1354 | 39157 | 12.104 | 2.992 | 9.112 | 4.069 | 4.575 | 0.435 |
+| 14 | 1353 | 39155 | 12.623 | 3.027 | 9.597 | 4.282 | 4.823 | 0.456 |
+| 15 | 1352 | 39152 | 13.171 | 3.720 | 9.451 | 4.219 | 4.742 | 0.452 |
+| 16 | 1351 | 39149 | 12.400 | 3.161 | 9.239 | 4.133 | 4.630 | 0.442 |
+| 17 | 1350 | 39147 | 12.078 | 2.988 | 9.090 | 4.058 | 4.564 | 0.435 |
+| 18 | 1349 | 39145 | 13.912 | 3.011 | 10.901 | 4.882 | 5.463 | 0.514 |
+| 19 | 1348 | 39143 | 16.979 | 7.421 | 9.559 | 4.269 | 4.794 | 0.456 |
+| 20 | 1347 | 39142 | 20.794 | 7.156 | 13.638 | 6.212 | 6.714 | 0.653 |
+| 21 | 1346 | 39141 | 13.057 | 3.571 | 9.486 | 4.237 | 4.759 | 0.453 |
+| 22 | 1345 | 39136 | 13.009 | 3.445 | 9.564 | 4.270 | 4.802 | 0.454 |
+| 23 | 1344 | 39133 | 13.065 | 3.527 | 9.538 | 4.256 | 4.790 | 0.453 |
+| 24 | 1343 | 39131 | 13.584 | 3.957 | 9.627 | 4.309 | 4.815 | 0.463 |
+| 25 | 1342 | 39129 | 13.785 | 4.262 | 9.523 | 4.255 | 4.776 | 0.452 |
+| 26 | 1341 | 39128 | 12.649 | 3.366 | 9.283 | 4.141 | 4.662 | 0.443 |
+| 27 | 1340 | 39122 | 12.871 | 3.168 | 9.702 | 4.344 | 4.862 | 0.459 |
+| 28 | 1339 | 39114 | 14.616 | 5.327 | 9.289 | 4.146 | 4.665 | 0.444 |
+| 29 | 1338 | 39103 | 12.349 | 3.004 | 9.346 | 4.170 | 4.696 | 0.445 |
+| 30 | 1337 | 39100 | 12.290 | 3.008 | 9.282 | 4.146 | 4.659 | 0.443 |
+| 31 | 1336 | 39098 | 12.117 | 3.002 | 9.115 | 4.068 | 4.577 | 0.436 |
+| 32 | 1335 | 39097 | 13.652 | 2.925 | 10.728 | 4.847 | 5.334 | 0.504 |
+| 33 | 1334 | 39096 | 14.141 | 4.656 | 9.485 | 4.233 | 4.761 | 0.453 |
+
+Over the 33 merge rounds: batch **mean 13.818 s, median 13.398 s, range
+12.078–20.794 s**; prep mean 3.884 s; variant loop mean 9.934 s; within the loop,
+`fill_proposal_nearest_delta` 4.439 s, `merged_violation_count` (with its
+`merged_rows` gather) 4.981 s, the baseline-row restore 0.475 s,
+`variant_unsupported_count` 0.029 s, `variant_coverage_objective` **0.0010 s**,
+residual 0.010 s. Peak RSS **2,565,232 KiB = 2.446 GiB**; the 90 GB watchdog
+**never fired**; **no typed refusal at any cap**; verdict **EXCEEDS-TIMEBOX at
+601 s**.
+
+Against the design pass at `7aa6b73` (all scratch reverted), first merge round:
+
+| | design pass | E2 tip | E4 tip |
+|---|---|---|---|
+| round total | 63.83 s | — | **14.68 s** |
+| batch preparation | 3.56 s | — | 3.95 s |
+| variant loop | 60.23 s | 25.28 s | **10.73 s** |
+| `fill_proposal_nearest_delta` | 37.33 s | 3.58 s | 4.67 s |
+| `assess_coverage`, all variants in the round | 17.05 s | 16.84 s | **0.001 s** |
+| `merged_violation_count` | 4.66 s | 2.63 s\* | 5.50 s |
+| restore / other | ~1.2 s | — | 0.55 s |
+
+**Every cell in this table is a whole-round total for the first merge round**, on
+the same basis as the header line above it — including the coverage row, which is
+the sum over all 39,224 variants of that round and **not** a per-variant figure.
+*(Row relabelled 2026-08-07, records fix: it read "coverage per variant", which
+named the wrong basis for a per-round number. Only the label changed; 17.05 /
+16.84 / 0.001 s are the figures as measured. Per variant the E4 column would be
+≈25 ns, not 0.001 s.)*
+
+**4.35× on the round, 5.6× on the variant loop.** Two rows need honesty rather
+than celebration:
+
+- **The fill went 3.58 s → 4.67 s between E2 and E4, and that is E3 being paid
+  for.** E3 folds its two-counter probe into the fill's own row loop — about
+  1 ns over 1.04 × 10⁹ rows. It buys the 16.84 s → 0.001 s on the row above it.
+  Net −15.9 s. The phases are not independent and the record should not pretend
+  they are.
+- **\*The E2 figure is not comparable to the other two.** E2's timer bracketed
+  `merged_violation_count` alone; the design pass's 4.66 s and E4's 5.50 s both
+  include the `merged_rows` gather. Read that row as **4.66 s → 4.98 s mean, i.e.
+  unmoved** — FU-8e never touched it.
+
+### 12.4 The counters, and what did not move
+
+- **`touched_rows` = 1,041,544,686** in merge round 1 — **to the row**, the
+  figure F2 recorded and E2 reproduced, in two independent E4 runs. That is the
+  arithmetic proof that the same distances were asked for by a path that no
+  longer builds a tree.
+- **Coverage fallbacks: ZERO.** Across 33 rounds and ~1.29 million proposal
+  variants, `moved_uncovered_rows` = 0 and `flipped_rows` = 0 — **not one**
+  variant needed its own `assess_coverage`. With `make_raking_blade`'s 1,402
+  proposals (E3's record), the fast path is what runs on both proposal-carrying
+  models. **The speedup is model-dependent; the answer is not.** A model whose
+  merges churn uncovered geometry falls back to `assess_coverage` verbatim and
+  lands back at the pre-FU-8e cost, never on a different objective.
+- **The stated demand did not move**, and nor did anything derived from it.
+  `plan_proposal_nearest_delta` still builds `KnnBatchPlan::new(1, touched_rows,
+  1, limits)`, `work()` is still `1 × touched_rows`, and `logical_peak_bytes`
+  still charges the kiddo terms for a tree nobody builds — a deliberate ~64 B per
+  proposal over-statement, recorded as conservatism in E2's doc comment rather
+  than restated, because restating it would move a charged number to save tens of
+  bytes per proposal.
+- **Where the other ~142 s went.** The run's 601 s is ~**127 s** of pre-gate
+  pipeline plus the proposal-free baseline batch, then ~474 s of tournament — so
+  **14.4 s** per round end to end, of which the `O(contacts²)` proposal gather is
+  **30 ms**. The gather is not the problem and never was.
+
+### 12.5 The successor frame, named plainly
+
+Inside the post-FU-8e variant loop the leader is **`merged_violation_count` (with
+its `merged_rows` gather) at 4.98 s — 50.1 % of the loop and 36.0 % of the
+round.** `fill_proposal_nearest_delta` is second at 4.44 s (44.7 % / 32.1 %), and
+batch preparation is third at 3.88 s (28.1 % of the round). Coverage, the frame
+that opened this finding at 24–34 %, is now **0.01 %**.
+
+FU-8d phase F4 sampled `merged_violation_count` at "a steady ~4.6 %", and FU-8e's
+design predicted ~29 % after the fix. **Both are low: it is 36 %.** It is named
+here so the next phase does not rediscover it as a surprise. It is also *not* the
+thing to fix next — see §12.6.
+
+### 12.6 What this licenses, and what it does not
+
+**No cap change, again.** Nothing FU-8e removed was ever charged against
+`gate_operation_limit`, so no cap was "too tight" for it; the phases delete work
+rather than admit more. Every cap, floor and coefficient in §§1–11 is untouched
+by E1–E4. E3's coverage fallback is the one *new* charge, and it is charged as
+spent, into the same `load_delta_limit` headroom `executed_load_work` already
+draws on, checked as a **sum** so the pair cannot jointly exceed the budget the
+batch was admitted under. On the treant it is zero.
+
+**Ruling R-f: unsatisfied.** Stated first, in §12.1, and repeated here.
+`SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is **not** re-derived. R4's n = 1
+marking is unaffected.
+
+**Ruling R-c (radius-bounded steal): measured, NOT adopted.** §9.5 declined it at
+a 4.9× margin against a 1.7× constant; F4 revived it as a question because it
+would have shrunk the then-leader. Post-FU-8e the frame it shrinks is 4.44 s, so
+the most it can save is ~42 % of that — **1.9 s of a 13.8 s round, 13.5 %** — and
+it saves nothing at all if FU-8f lands, because FU-8f evaluates one variant per
+round rather than 39,223. **Re-measure after the tournament's shape settles;
+build nothing now.**
+
+**Ruling R-d (route-key concentration): NOT adopted.** Its win is amortising a
+per-key sweep across the proposals that share the key. The post-fix row body is
+**6.30 ns** and gather-dominated — a scattered read of the witness table and of
+the sample point — so there is no per-key sweep left for it to amortise.
+
+**`PLINTH_THREADS=4` still buys the merge gate nothing.** The wall-clock above is
+a single-core number. That is a note, not a licence to raise thread counts.
+
+**The next finding is FU-8f, and it is a RECORDED FINDING AWAITING OWNER RULING,
+not an implementation.** See `CURRENT-STATUS.md`. In one line: the 39,224-vector
+`vectors` array is consumed by exactly two lines, `first_safe_proposal` returned
+index **0** in every round measured on two models, and evaluating lazily would
+take the round to ~3.9 s — but it severs charged-batch from executed-batch and
+re-founds `GateRoutePlanMismatch` a second time after F3, which is an owner's
+call and not an agent's.
