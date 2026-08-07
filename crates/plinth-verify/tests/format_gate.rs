@@ -17,7 +17,7 @@ struct TempArtifact {
 impl TempArtifact {
     fn new(bytes: &[u8]) -> Self {
         let sequence = NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
-        let path = PathBuf::from("/private/tmp").join(format!(
+        let path = std::env::temp_dir().join(format!(
             "plinth-verify-format-gate-{}-{sequence}.chitubox",
             std::process::id()
         ));
@@ -172,7 +172,7 @@ fn corrupt_truncated_pointer_and_underlength_descriptor_cases_fail_by_named_reas
 #[test]
 fn missing_path_is_a_truthful_artifact_read_failure() {
     let sequence = NEXT_TEMP_FILE.fetch_add(1, Ordering::Relaxed);
-    let path = PathBuf::from("/private/tmp").join(format!(
+    let path = std::env::temp_dir().join(format!(
         "plinth-verify-format-missing-{}-{sequence}.chitubox",
         std::process::id()
     ));
