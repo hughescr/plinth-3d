@@ -3676,7 +3676,24 @@ mod tests {
                 output.status.success(),
                 "thread child {threads} failed: {output:?}"
             );
-            String::from_utf8(output.stdout).expect("test output utf-8")
+            let stdout = String::from_utf8(output.stdout).expect("test output utf-8");
+            // Compare the TRANSIT_SIGNATURE lines and nothing else.  The child
+            // is a libtest binary, so its stdout also carries libtest's own
+            // "test result: ok. 1 passed ... finished in X.XXs" line.  That
+            // timing is load-dependent, not thread-dependent: comparing whole
+            // stdouts made this test fail on a busy machine purely because one
+            // child was scheduled differently from another.  A wall clock is
+            // not determinism evidence; the signature is.
+            let signature = stdout
+                .lines()
+                .filter(|line| line.starts_with("TRANSIT_SIGNATURE:"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !signature.is_empty(),
+                "thread child {threads} printed no TRANSIT_SIGNATURE line: {stdout}"
+            );
+            signature
         });
         assert_eq!(signatures[0], signatures[1]);
         assert_eq!(signatures[0], signatures[2]);
