@@ -217,6 +217,35 @@ impl SpecializedLimits {
     /// F4 is for. See `support-resource-caps-2026-08-05.md` §9 and
     /// `CURRENT-STATUS.md` (*FU-8d phase F2 landed 2026-08-06*).
     ///
+    /// **Dated addendum 2026-08-06 — FU-8d phases F3 and F4. Every block above
+    /// is left standing exactly as written; the F2 block's closing claim is the
+    /// one that has stopped being true.** F3 finalizes the load partition
+    /// **once** per batch rather than once per variant, deletes the per-variant
+    /// window matrices, collapses the four per-proposal planning passes to one
+    /// behind a count-derived pre-check, and replaces the gate's hand-built
+    /// `variants × faces` load model with `specialized_load_resource_plan`'s own
+    /// figure. The descriptor scan that crossed at variant 275 falls to
+    /// **136,791,451 charged once**, and `unique_face_finalizer_work` ceases to
+    /// exist as a term. The demand this cap is handed becomes
+    ///
+    /// ```text
+    /// baseline_rows 554,926,572 + load 6,592,813,742
+    ///   + demand_rows 42,949,185 + proposal work 2,083,167,818
+    ///   = 9,273,857,317   against 35,445,500,736  -> FITS (26.2 % of cap)
+    /// ```
+    ///
+    /// with `exact_operations` 10,457,910,996 (29.5 %). **The treant's merge
+    /// gate no longer refuses at all**: it executes the 39,224-variant batch,
+    /// accepts a merge and opens the next. Read "the treant still refuses at
+    /// this gate" above as history — the standing figure is a demand that
+    /// *passes*. **The cap still did not move and no cap code was touched by
+    /// F3 or F4.** What stops the treant now is wall-clock rather than a limit:
+    /// F4's clean run at this tip is an EXCEEDS-TIMEBOX at 600 s, and its
+    /// successor defect is opened as **FU-8e**. See
+    /// `support-resource-caps-2026-08-05.md` §10 and §11, and
+    /// `CURRENT-STATUS.md` (*FU-8d phase F3 landed 2026-08-06*, *FU-8d phase F4
+    /// measured 2026-08-06*).
+    ///
     /// Every corpus model sits at the floor;
     /// `the_batch_scaled_caps_are_the_flat_floor_for_every_corpus_batch_shape`
     /// (`crates/plinth-support/tests/resource_cap_policy.rs`) pins that.

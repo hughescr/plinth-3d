@@ -839,7 +839,13 @@ so the precondition holds — but it is a constant-factor cleanup on a term that
 now some five parts in a million of the wall, and it would be optimizing the
 wrong thing while part (2) stands.
 
-## 9. FU-8d phase F3 (2026-08-06) — the treant's merge gate stops refusing
+## 10. FU-8d phase F3 (2026-08-06) — the treant's merge gate stops refusing
+
+> **Numbering correction added 2026-08-06 (phase F4).** This section landed as a
+> second `## 9`, beside phase F2's, so "§9" was ambiguous for a day. It is **§10**;
+> **§9 is phase F2**. Only the heading digit changed — no sentence, table or figure
+> in either section was touched — and the pointers that meant *this* section
+> (`README.md`, `03-physics-and-constants.md`, `specialized.rs`) now say §10.
 
 > **Dated addendum. §§1–8 are left standing exactly as measured.** This section
 > supersedes §7.4's and §8's *stopping point* for the Weeping Treant and nothing
@@ -904,3 +910,96 @@ batch**, none of it charged against `gate_operation_limit`. It is opened as
 **Ruling R-f remains unsatisfied.** `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED`
 (FU-23) is re-derived only from a treant run that **completes** the gate. This is
 not that run.
+
+> **Correction added 2026-08-06 (phase F4) — §10 is left standing exactly as
+> written, and the paragraph beginning "What the time is spent on is measured by
+> implication" is now known to be wrong in proportion.** It is measured
+> *directly* in §11, and `assess_coverage` is the **second** frame at about a
+> quarter of main-thread time, not the whole of it. The leading frame is F2's own
+> `fill_proposal_nearest_delta`, at about three fifths. The `1.59 × 10¹⁰`
+> arithmetic above is right and still stands; the attribution of *all* the 600 s
+> to it does not. Both are FU-8e, in measured order.
+
+## 11. FU-8d phase F4 (2026-08-06) — the treant sampled rather than inferred
+
+> **Dated addendum. §§1–10 are left standing exactly as measured.** F4 changes
+> **no engine code**: it is a clean measurement at the committed F3 tip plus the
+> record sweep the every-record-site rule still owed F3. **No cap was raised,
+> lowered or touched, and no cap code was edited.**
+
+### 11.1 The run, and why there are two of them
+
+Ruling **R-g** governs both: the run *and* its RSS watchdog executed
+**unsandboxed**, because `ps -o rss=` is blocked in the sandbox and a watchdog
+that cannot read RSS is decoration. Release, `--features census`,
+`PLINTH_CENSUS=1 PLINTH_CENSUS_ONLY="Weeping Treant v1.2"`, `PLINTH_THREADS=4`,
+RSS polled every 2 s, hard kill armed at 90 GB, 600 s timebox, two attempts (the
+maximum).
+
+| attempt | verdict | wall clock | peak RSS | watchdog | typed refusal |
+|---|---|---:|---:|---|---|
+| 1 | EXCEEDS-TIMEBOX | 607 s | 2,606,256 KB (2.49 GiB) | armed 90 GB, **never fired** | none |
+| 2 | EXCEEDS-TIMEBOX | 602 s | 2,600,960 KB (2.48 GiB) | armed 90 GB, **never fired** | none |
+
+**No cap refused anything in either attempt.** That is the headline for this
+document: since F3 the treant's merge gate states a demand of 9,273,857,317
+against an unchanged 35,445,500,736 and is **admitted**. Peak RSS is 2.5 GiB
+against the 90 GB kill line and the 100 GB machine ceiling — memory has not been
+this stage's constraint since FU-8b, and this run is four orders inside it.
+
+Attempt 2 exists because attempt 1's evidence was one 5-second window at
+t = 600, which cannot separate "this frame dominates" from "this frame was
+running at the end". Attempt 2 sampled the same binary at six points across the
+timebox. The runs are otherwise identical.
+
+**No batch counters are reported here.** The tip carries no
+`PLINTH_FU8D_MEASURE` instrumentation (verified absent by grep before building),
+so §10's per-batch table remains the counter record and F4 does not restate it as
+independently reproduced.
+
+### 11.2 What the 600 s is actually spent on
+
+Main-thread samples per window:
+
+| t (s) | main-thread samples | `fill_proposal_nearest_delta` | `assess_coverage_with_mode` | `merged_violation_count` |
+|---:|---:|---:|---:|---:|
+| 60 | 2,033 | — still in preparation | — | — |
+| 180 | 2,268 | 1,386 (61.1 %) | 554 (24.4 %) | 115 (5.1 %) |
+| 300 | 2,278 | 1,366 (60.0 %) | 574 (25.2 %) | 112 (4.9 %) |
+| 420 | 2,275 | 1,382 (60.7 %) | 579 (25.4 %) | 104 (4.6 %) |
+| 540 | 2,278 | 1,393 (61.2 %) | 563 (24.7 %) | 95 (4.2 %) |
+| 597 | 2,264 | 1,402 (61.9 %) | 542 (23.9 %) | 95 (4.2 %) |
+| **pooled** | **11,363** | **6,929 (61.0 %)** | **2,812 (24.7 %)** | **521 (4.6 %)** |
+
+Attempt 1's separate window gives 58.5 % and 34.1 %. Read the split as
+**≈ 59–62 % / 24–34 %** across two runs and seven windows; per ruling **R-e** no
+literal is pinned in a test and this dated transcript is the record.
+
+The leading frame is not doing arithmetic — it is *constructing*:
+`fill_proposal_nearest_delta` builds a fresh `PointCloudIndex` kd-tree over a
+**one-point** cloud, once per proposal, and its children in the call graph are
+`knn_batch_planned` over allocator traffic (`_xzm_free`, `_free`,
+`_xzm_xzone_malloc`). 39,223 tree constructions and teardowns per gate batch, each
+to answer distances to a single point. It is batched *within* a proposal and
+unbatched *across* proposals.
+
+### 11.3 What this does and does not license
+
+**It licenses no cap change.** None of the dominant work is charged against
+`gate_operation_limit` at all, so no cap is "too tight" here; the remedy removes
+work rather than admitting more. Every cap, floor and coefficient in §§1–10 is
+untouched by F3 and F4 alike.
+
+**Ruling R-f remains unsatisfied — twice over.** Neither attempt completes the
+gate stage, so `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` (FU-23) is **not**
+re-derived. R4's n = 1 marking is likewise unaffected.
+
+**Ruling R-c is revived as a question, not adopted.** §9.5 declined the
+radius-bounded steal path because the margin was 4.9× and the bound was a 1.7×
+constant. F4 changes that calculus's *subject*: the frame R-c would have shrunk is
+now the measured leader. It is recorded as FU-8e input; nothing is built here.
+
+**`PLINTH_THREADS=4` buys the merge gate nothing** — all four rayon workers sit in
+`__psynch_cvwait` for the whole gate stage while preparation is genuinely
+parallel. This is not a reason to raise thread counts; it is a note that the gate
+wall-clock above is a single-core number.

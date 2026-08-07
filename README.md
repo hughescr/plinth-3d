@@ -234,7 +234,27 @@ Measured on the 8-model corpus, most recently by the unified census of 2026-08-0
   > per-variant `assess_coverage` — 1.59 × 10¹⁰ uncharged sample visits per batch — opened as
   > **FU-8e**; FU-8d is **resolved** on the defect it named. All seven frozen corpus digests
   > are byte-identical. See `docs/rust-migration/CURRENT-STATUS.md` (*FU-8d phase F3 landed
-  > 2026-08-06*) and `support-resource-caps-2026-08-05.md` §9.
+  > 2026-08-06*) and `support-resource-caps-2026-08-05.md` §10 (renumbered from a duplicate
+  > §9 in phase F4).
+
+  > **Amended 2026-08-06 — FU-8d phase F4 measured; every block above stands exactly as
+  > written, and one clause in the block immediately above is corrected in proportion.** F4
+  > changes no engine code: it re-ran the treant clean at the committed F3 tip and swept the
+  > record. The gate result holds — **two** 600 s attempts, **no typed refusal at any cap in
+  > either**, 2.49 GiB and 2.48 GiB peak RSS with the 90 GB watchdog never firing, both
+  > **EXCEEDS-TIMEBOX**. What is corrected is *where the time goes*. F3 named the per-variant
+  > `assess_coverage` as "the successor defect"; F4 sampled the running process at six points
+  > across the timebox instead of inferring it from counts, and `assess_coverage` is the
+  > **second** frame at 24–34 % of main-thread samples. The **leader, at 59–62 %, is the
+  > nearest delta F2 itself introduced** — `fill_proposal_nearest_delta` builds a fresh
+  > kd-tree over a **one-point** cloud once per proposal, 39,223 constructions and teardowns
+  > per gate batch, its cost dominated by allocator traffic rather than by geometry. Batched
+  > within a proposal, unbatched across proposals: the same batch-first defect the whole FU-8
+  > chain has been about, one level in. **FU-8e is opened on both parts, in measured order.**
+  > Neither run completes the gate, so FU-23's coefficient is still not re-derived. **No cap
+  > was raised, lowered or touched.** There is still no treant digest. See
+  > `docs/rust-migration/CURRENT-STATUS.md` (*FU-8d phase F4 measured 2026-08-06*) and
+  > `support-resource-caps-2026-08-05.md` §11.
 
 The stages exist as libraries and the census harness runs the real chain from STL through
 a sealed support run. The folder-level runner that chains them all the way to a written

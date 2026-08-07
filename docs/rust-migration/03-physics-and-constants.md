@@ -1107,6 +1107,36 @@ FU-8b family, not a cap to raise: admitting it would need a coefficient near
 > `support-resource-caps-2026-08-05.md` §9 and `CURRENT-STATUS.md` under *FU-8d
 > phase F2 landed 2026-08-06*.
 
+> **Note added 2026-08-06 (FU-8d phases F3 and F4) — dated addendum; the three
+> notes above are left standing exactly as measured. This section carried "the
+> treant is refused at this gate" from FU-8b through F2, and that sentence is now
+> history: there is no refusal at this cap.** F3 finalizes the load partition
+> **once** per gate batch instead of once per variant, deletes the per-variant
+> `(owner, face)` window matrices, collapses the four per-proposal planning passes
+> into one behind a count-derived pre-check, and prices the load phase from
+> `specialized_load_resource_plan` itself rather than from the gate's own
+> `variants × faces` model. The descriptor scan that crossed at variant 275 falls
+> to **136,791,451 charged once**, the ~4.3 × 10¹⁴ `unique_face_finalizer_work`
+> term ceases to exist, and the honest load figure — 6,592,813,742 against the
+> 4,618,272,984 the model asserted — makes the **stated demand rise** to
+> **9,273,857,317**, i.e. **26.2 %** of the same unchanged
+> `64 × 553,835,949 = 35,445,500,736`, with `exact_operations` 10,457,910,996
+> (29.5 %). **Both checks pass, the batch executes, and neither coefficient
+> changed here either.** A demand that *rose* is the rule working: §7.2 asks a cap
+> to price what a stage really does, and part (2) had recorded that the gate priced
+> a `variants × faces × contacts` fold as `variants × faces`.
+>
+> **What the treant stops on now is wall-clock, not a limit.** F4's clean run at the
+> F3 tip — release, `--features census`, `PLINTH_THREADS=4`, RSS watchdog armed at
+> 90 GB and never fired, peak ~2.5 GiB — is an **EXCEEDS-TIMEBOX at 600 s**. So
+> **ruling R-f is still not satisfied**: `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED`
+> is re-derived only from a run that **completes** the gate, and this is not that
+> run either. R4's n = 1 marking is likewise unaffected. F4 sampled the stack
+> rather than inferring it, and the successor defect is opened as **FU-8e**; it is
+> not a cap to raise. Full derivation: `support-resource-caps-2026-08-05.md` §10
+> and §11, and `CURRENT-STATUS.md` under *FU-8d phase F3 landed 2026-08-06* and
+> *FU-8d phase F4 measured 2026-08-06*.
+
 ### 3.11 NOT constants — resource guards
 
 These exist in `config.py` and in module scope but are **not physics and not
