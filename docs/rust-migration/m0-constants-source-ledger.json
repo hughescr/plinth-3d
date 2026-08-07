@@ -982,6 +982,28 @@
       "provenance_detail": "wall default"
     },
     {
+      "id": "INITIAL_AXIS_MAJORITY_CAP",
+      "classification": "runtime_search_cap",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-core/src/constants/placeholders.rs:INITIAL_AXIS_MAJORITY_CAP",
+        "crates/plinth-support/src/initial.rs:initial_axis_majority_cap consumer"
+      ],
+      "normative": "04-migration-plan.md §O-10 = 80 (count); no §3.x entry in 03-physics-and-constants.md",
+      "provenance_detail": "O-10 legacy-compatibility interval majority cap for the initial-contact stub quarantine leaf added 2026-08-02 (commit 3d79a07); native Rust declaration with no Python legacy source, not safety evidence"
+    },
+    {
+      "id": "INITIAL_AXIS_MAJORITY_STEP_MM",
+      "classification": "runtime_search",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-core/src/constants/placeholders.rs:INITIAL_AXIS_MAJORITY_STEP_MM",
+        "crates/plinth-support/src/initial.rs:initial_axis_majority_step_mm consumer"
+      ],
+      "normative": "04-migration-plan.md §O-10 = 0.12 mm; no §3.x entry in 03-physics-and-constants.md",
+      "provenance_detail": "O-10 legacy-compatibility interval majority step for the initial-contact stub quarantine leaf added 2026-08-02 (commit 3d79a07); native Rust declaration with no Python legacy source, not safety evidence"
+    },
+    {
       "id": "ISLAND_ATTACH_REACH_MM",
       "classification": "runtime_perception",
       "normative": "03-physics-and-constants.md §3.4 = 0.2 mm; Placeholder tuning policy",
