@@ -720,7 +720,10 @@ mod tests {
                 .expect("registered corpus budget");
         let outcome = run_decimation(&mesh, budget).expect("Sphere decimation succeeds");
         let plinth_decimate::BudgetSearchOutcome::AlreadyPrintScale(success) = &outcome else {
-            panic!("no registered downstream utility may authorize the Sphere reduction");
+            // Sphere is 4,760 faces, below DECIMATION_UTILITY_MIN_INPUT_FACES
+            // (32,768), so the registered witness refuses it on its first
+            // clause and its frozen census digest cannot move.
+            panic!("the Sphere is below the registered face threshold and may not reduce");
         };
         let expected_trace = success.trace().clone();
         let expected_final_probe = success.final_probe().clone();

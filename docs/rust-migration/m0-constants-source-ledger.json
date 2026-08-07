@@ -462,6 +462,39 @@
       "provenance_detail": "probe ratio"
     },
     {
+      "id": "DECIMATION_MAX_ABSOLUTE_DEVIATION_MM",
+      "classification": "runtime_decimation",
+      "provenance_wrapper": "Derived",
+      "source_locators": [
+        "crates/plinth-decimate/src/lib.rs:assess_downstream_utility clause U3",
+        "crates/plinth-decimate/src/lib.rs:UtilityPolicy::max_absolute_deviation_mm"
+      ],
+      "normative": "decimation-design-2026-08-06.md §2 U3 = 0.08 mm",
+      "provenance_detail": "Exact identity from PRINT_FLOOR_CHORD_MM (0.08 mm, Measured, owner_decision(print-floor-owner-decision-2026-07-24)); no arithmetic is performed. Rust-era; no legacy Python source. Rule: a deviation below the smallest chord the process can print cannot produce a printed difference. It is the only clause that sees the worst point at all -- the ratified p99/p99.9 budget is blind to it (Weeping Treant v1.2 at 520 faces removed: max 0.0566357 mm against p99.9 0.000073 mm and p99 exactly 0, a factor of 776; decimation-design-2026-08-06.md §8.3). Single-specimen consequence, recorded so the bound is never read as permissive: on that model it admits only (2.125 %, 4.453 %] reduction, and the topology gate stops the model at about 0.2 % first, so no corpus model reaches this clause today. LAYER_HEIGHT_DEFAULT_MM (0.050 mm) was the runner-up and was not chosen: the Phase-1 curve does not discriminate between them, so the decision rests on provenance, and a Z-axis layer quantum applied to an XY deviation is the weaker argument."
+    },
+    {
+      "id": "DECIMATION_MAX_P999_DEVIATION_MM",
+      "classification": "runtime_decimation",
+      "provenance_wrapper": "Derived",
+      "source_locators": [
+        "crates/plinth-decimate/src/lib.rs:assess_downstream_utility clause U2",
+        "crates/plinth-decimate/src/lib.rs:UtilityPolicy::max_p99_9_deviation_mm"
+      ],
+      "normative": "decimation-design-2026-08-06.md §2 U2 = 0.019 mm",
+      "provenance_detail": "PIXEL_PITCH_Y_UM / 1000 = 19 / 1000 = 0.019 mm, where the /1000 is the micron-to-millimetre conversion, so the bound is exactly one addressable step of the coarser printer axis. Rust-era; no legacy Python source. Numerically identical to the limit the budget search already enforces as PIXEL_PITCH_Y_UM x DECIMATION_P999_FACTOR, and separately declared because that factor is a Placeholder: arithmetic from a Placeholder cannot improve its authority, so the witness must assert the Derived bound. The two are pinned to agree bit-for-bit by decimation_witness_bounds_agree_with_the_search_policy_bounds in crates/plinth-decimate/src/lib.rs."
+    },
+    {
+      "id": "DECIMATION_MAX_P99_DEVIATION_MM",
+      "classification": "runtime_decimation",
+      "provenance_wrapper": "Derived",
+      "source_locators": [
+        "crates/plinth-decimate/src/lib.rs:assess_downstream_utility clause U2",
+        "crates/plinth-decimate/src/lib.rs:UtilityPolicy::max_p99_deviation_mm"
+      ],
+      "normative": "decimation-design-2026-08-06.md §2 U2 = 0.0095 mm",
+      "provenance_detail": "DECIMATION_MAX_P999_DEVIATION_MM / 2 = 0.0095 mm, half an addressable step of the coarser printer axis, which is the quantization half-step the printer already introduces. Rust-era; no legacy Python source. Numerically identical to the search's PIXEL_PITCH_Y_UM x DECIMATION_P99_FACTOR and separately declared for the same reason its p99.9 sibling is: the search factor is a Placeholder. Pinned bit-for-bit against that product by decimation_witness_bounds_agree_with_the_search_policy_bounds in crates/plinth-decimate/src/lib.rs."
+    },
+    {
       "id": "DECIMATION_P999_FACTOR",
       "classification": "runtime_metric",
       "normative": "03-physics-and-constants.md §3.7 = pixel_um/1000; Placeholder policy fraction",
@@ -552,6 +585,17 @@
       ],
       "normative": "03-physics-and-constants.md §3.10.5 = 0.050 mm",
       "provenance_detail": "feature seed error"
+    },
+    {
+      "id": "DECIMATION_UTILITY_MIN_INPUT_FACES",
+      "classification": "runtime_decimation",
+      "provenance_wrapper": "Placeholder",
+      "source_locators": [
+        "crates/plinth-decimate/src/lib.rs:assess_downstream_utility threshold clause",
+        "crates/plinth-decimate/src/lib.rs:UtilityPolicy::min_input_faces"
+      ],
+      "normative": "decimation-design-2026-08-06.md §3 = 32768 faces",
+      "provenance_detail": "non-AcceptSafe policy: a face-count threshold is not derivable from the datasheet. Rust-era; no legacy Python source. The derivable alternative fails outright -- gating on 'the mesh is finer than the printer can resolve' (surface_area / (pixel x layer)) puts a mini-sized model's resolvable face count near 1e6, so it would forbid decimating the 429,120-face Weeping Treant as well. The honest statement is that downstream cost is superlinear in face count while the geometric price is bounded by the Derived deviation limits, which makes this a corpus-shaped policy gate. It decides only whether to attempt, never whether a result is safe; the safety bounds are the three Derived DECIMATION_MAX_* constants. Value: the smallest power of two strictly above 4x the largest reachable corpus model (Sphere, 4,760 faces), chosen over 65,536 because it sits below the 65,024-face thread_sweep UV sphere and therefore gives the reduced path cross-thread determinism coverage at no frozen-digest cost. Placement is deliberate and load-bearing: the threshold lives inside assess_downstream_utility, not in front of the search, so every trace below it -- and all seven frozen OD-8 census digests -- is structurally byte-identical rather than merely measured to be. Single-specimen basis (R4-shaped standing trigger): n = 1 large specimen; a second corpus model above ~4,760 faces triggers re-derivation, never silent inheritance."
     },
     {
       "id": "DECIMATION_VERTEX_GROUP_FACTOR",

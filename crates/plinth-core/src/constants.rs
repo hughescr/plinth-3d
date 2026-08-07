@@ -259,7 +259,7 @@ impl M0Constants {
 
         // Gather every declaration before one structural batch validation and
         // publication. Do not register constants incrementally.
-        let mut declarations = Vec::with_capacity(264);
+        let mut declarations = Vec::with_capacity(268);
         declarations.extend(evidence.descriptors()?);
         declarations.extend(placeholders.descriptors()?);
         let registry = ConstantsRegistry::build_batch(declarations)?;
@@ -298,6 +298,14 @@ impl M0Constants {
     #[must_use]
     pub const fn placeholders(&self) -> &M0PlaceholderConstants {
         &self.placeholders
+    }
+
+    /// The immutable, typed evidence-grade component that backs this atomic M0
+    /// publication. Its `Measured`/`Derived` wrappers are the only ones an
+    /// acceptance path may read.
+    #[must_use]
+    pub const fn evidence(&self) -> &M0EvidenceConstants {
+        &self.evidence
     }
 
     #[must_use]
@@ -341,7 +349,7 @@ impl M0Constants {
 /// The sole workspace-wide global constants initialization point.
 ///
 /// Its fallible result is itself published atomically: callers observe either
-/// the complete 264-entry registry and profile or the same construction error.
+/// the complete 268-entry registry and profile or the same construction error.
 static M0_CONSTANTS: LazyLock<Result<M0Constants, M0ConstantsError>> =
     LazyLock::new(M0Constants::build);
 

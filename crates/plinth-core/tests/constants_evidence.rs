@@ -6,8 +6,11 @@ use plinth_core::{
 };
 use std::path::Path;
 
-const EXPECTED_EVIDENCE_IDS: [&str; 28] = [
+const EXPECTED_EVIDENCE_IDS: [&str; 31] = [
     "CCO_X_PAIR_LOAD_DISCOUNT",
+    "DECIMATION_MAX_ABSOLUTE_DEVIATION_MM",
+    "DECIMATION_MAX_P999_DEVIATION_MM",
+    "DECIMATION_MAX_P99_DEVIATION_MM",
     "LAYER_HEIGHT_DEFAULT_MM",
     "LOAD_SHARING",
     "MINIMA_DROP_INTERIOR_FACES",
@@ -37,8 +40,11 @@ const EXPECTED_EVIDENCE_IDS: [&str; 28] = [
     "X_STAR_CYLINDER",
 ];
 
-const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 28] = [
+const EXPECTED_DESCRIPTOR_CONTRACT: [(&str, &str, &str); 31] = [
     ("CCO_X_PAIR_LOAD_DISCOUNT", "1", "scalar"),
+    ("DECIMATION_MAX_ABSOLUTE_DEVIATION_MM", "mm", "scalar"),
+    ("DECIMATION_MAX_P999_DEVIATION_MM", "mm", "scalar"),
+    ("DECIMATION_MAX_P99_DEVIATION_MM", "mm", "scalar"),
     ("LAYER_HEIGHT_DEFAULT_MM", "mm", "scalar"),
     ("LOAD_SHARING", "1", "load_sharing"),
     ("MINIMA_DROP_INTERIOR_FACES", "1", "scalar"),
@@ -311,7 +317,7 @@ fn declaration_batch_has_exact_membership_order_shapes_and_provenance_counts() {
         .map(|descriptor| descriptor.id().as_str())
         .collect::<Vec<_>>();
     assert_eq!(actual_ids, EXPECTED_EVIDENCE_IDS);
-    assert_eq!(descriptors.len(), 28);
+    assert_eq!(descriptors.len(), 31);
 
     for (descriptor, (id, unit, shape)) in descriptors.iter().zip(EXPECTED_DESCRIPTOR_CONTRACT) {
         assert_eq!(descriptor.id().as_str(), id, "ID contract drift for {id}");
@@ -327,7 +333,7 @@ fn declaration_batch_has_exact_membership_order_shapes_and_provenance_counts() {
         .iter()
         .filter(|descriptor| descriptor.provenance().class() == RegistryProvenanceClass::Derived)
         .count();
-    assert_eq!((measured, derived), (20, 8));
+    assert_eq!((measured, derived), (20, 11));
     assert!(descriptors.iter().all(|descriptor| !matches!(
         descriptor.provenance().class(),
         RegistryProvenanceClass::Placeholder | RegistryProvenanceClass::Pending
@@ -800,11 +806,15 @@ fn registry_rendering_is_deterministic_complete_and_in_stable_order() {
     assert!(!rendered.contains("placeholder"));
     assert!(!rendered.contains("pending"));
 
+    // Anchor on the row's own leading cell, not on any occurrence of the ID.
+    // A `Derived` entry names its inputs in `from=[...]` and every note may
+    // name a sibling constant, so a bare substring search finds cross
+    // references rather than rows, and reports drift where there is none.
     let mut previous = 0;
     for id in EXPECTED_EVIDENCE_IDS {
-        let rendered_id = id.replace('_', "&#95;");
+        let row_anchor = format!("\n| {} | ", id.replace('_', "&#95;"));
         let position = rendered
-            .find(&rendered_id)
+            .find(&row_anchor)
             .unwrap_or_else(|| panic!("deterministic renderer omitted {id}"));
         assert!(position >= previous, "renderer order drift at {id}");
         previous = position;

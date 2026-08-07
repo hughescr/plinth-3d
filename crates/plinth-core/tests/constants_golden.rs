@@ -4,7 +4,7 @@ use std::path::Path;
 
 // This is a hand-maintained cross-component inventory. It deliberately does
 // not read the source ledger or the generated Markdown golden.
-const EXPECTED_CONSTANT_IDS: [&str; 264] = [
+const EXPECTED_CONSTANT_IDS: [&str; 268] = [
     "A_ABS_MM2",
     "BALL_BREACH_EPS_MM",
     "BALL_FACTOR_FOOT",
@@ -50,6 +50,9 @@ const EXPECTED_CONSTANT_IDS: [&str; 264] = [
     "DECIMATION_ADAPTATION_POLICY",
     "DECIMATION_FEATURE_HALO_MM",
     "DECIMATION_FEATURE_PROBE_RATIO",
+    "DECIMATION_MAX_ABSOLUTE_DEVIATION_MM",
+    "DECIMATION_MAX_P999_DEVIATION_MM",
+    "DECIMATION_MAX_P99_DEVIATION_MM",
     "DECIMATION_P999_FACTOR",
     "DECIMATION_P999_SAMPLE_POLICY",
     "DECIMATION_P99_FACTOR",
@@ -59,6 +62,7 @@ const EXPECTED_CONSTANT_IDS: [&str; 264] = [
     "DECIMATION_RECHECK_SLACK",
     "DECIMATION_SCALE_ACCEPTANCE_MM",
     "DECIMATION_SEED_ERROR_MM",
+    "DECIMATION_UTILITY_MIN_INPUT_FACES",
     "DECIMATION_VERTEX_GROUP_FACTOR",
     "DEFAULT_CONTACT_DEPTH_MM",
     "DELICACY_CURVATURE_WEIGHT",
@@ -278,7 +282,7 @@ fn golden_path() -> std::path::PathBuf {
 }
 
 #[test]
-fn global_registry_is_one_complete_atomic_264_constant_publication() {
+fn global_registry_is_one_complete_atomic_268_constant_publication() {
     let first = m0_constants().expect("M0 constants registry must construct");
     let second = m0_constants().expect("M0 constants registry must construct");
     assert!(
@@ -311,7 +315,7 @@ fn global_registry_is_one_complete_atomic_264_constant_publication() {
             }
             counts
         });
-    assert_eq!(classes, [20, 8, 236, 0]);
+    assert_eq!(classes, [20, 11, 237, 0]);
 }
 
 #[test]
