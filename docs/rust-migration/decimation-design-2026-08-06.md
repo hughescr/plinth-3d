@@ -245,3 +245,251 @@ Feature branch off `develop` per git flow; never push. Five gates on every phase
 | Q6 | May an adaptive-diagnostic candidate win once a witness exists? | No — A-2 forbids it; nothing is lost (the final path already finds the better candidate). |
 | Q7 | Must the `max_gate_operations` refusal survive decimation? | Yes, as an explicit pinned expectation — the alternative (R-2) is a multi-hour hang. If r ever falls below ~0.345, FU-8b first. |
 | Q8 | Do the §0 doc corrections warrant their own commit? | Yes — dated addenda for `support-resource-caps-2026-08-05.md:15` and `README.md:120`, per the honest-addendum convention. |
+
+---
+
+## 8. Phase-1 diagnosis — measured 2026-08-07
+
+> **Dated addendum, appended below the verbatim record.** §0–§7 above are left standing
+> exactly as handed off; nothing in them is edited. This section reports what Phase 1 (§6)
+> asked for and says plainly which of the recommendations above the measurements
+> **supersede** (R-1 option (b), and the framing of Q2).
+
+**Provenance.** Measured 2026-08-07 on `feature/decimation-followup` off `develop @ 7aa6b73`,
+release build, macOS/arm64. Subject: `corpus/models/Weeping Treant v1.2.stl` — 429,120 faces,
+1,287,360 source vertices, 214,562 `ExactBits`-welded vertices. Probe configuration is the
+production one the corpus gate uses (`NativeSurfaceConfig { grid_pitch_mm: 1.0,
+max_grid_bytes: 64 MiB }`, `nearest_upper_bound_mm: 10_000.0`); locks are the production
+`select_feature_protection` output; every candidate is `simplify_locked` at the exact integer
+face target the search itself would request (`ratio_for_integer_target`). **All probes below
+are full-population** `probe_two_sided`, not the sampled probes §0(b) quotes — the two are not
+comparable row for row, and the difference is population, not a discrepancy. The instrumentation
+was scratch inside `crates/plinth-decimate` and was reverted before the gates; nothing in this
+section changed engine behaviour, and the seven frozen census digests are byte-identical (§8.8).
+
+### 8.1 The treant's feature protection is running in backoff
+
+| attempt | seed threshold | halo radius | seeds | halo vertices | after lock closure | vs cap 154,483 |
+|---|---|---|---|---|---|---|
+| 0 | 0.050 mm | 0.40 mm | 36,732 | 684,486 | 705,306 | **refused** (4.6×) |
+| 1 | 0.100 mm | 0.24 mm | 2,657 | 30,377 | **41,067** | accepted (26.6 %) |
+
+`DECIMATION_PROTECTED_CAP_FRACTION` (0.12 of 1,287,360 = 154,483) binds on the treant, so the
+ratified first attempt never runs: one backoff (`DECIMATION_ADAPTATION_POLICY` = 3 adaptations,
+feature ×2.0, error ×0.6) discards **92.8 % of the seeds** and the run proceeds with 41,067
+locked vertices — 3.19 % of source vertices. Any future argument that "stronger feature
+protection would prevent the damage in §8.4" has to start here, not at the seed threshold.
+
+### 8.2 The max-deviation curve
+
+| target | output faces | reduction | p99 mm | p99.9 mm | **max mm** | non-manifold edges | bbox delta mm |
+|---|---|---|---|---|---|---|---|
+| 429,119 | 429,118 | 0.0005 % | 0.000000 | 0.000000 | 0.00000023 | 0 | 0 |
+| 428,000 | 428,000 | 0.261 % | 0.000000 | 0.002531 | **0.0566357** | 1 | 0 |
+| 425,935 | 425,934 | 0.742 % | 0.000000 | 0.007110 | 0.0566357 | 3 | 0 |
+| 420,000 | 420,000 | 2.125 % | 0.002376 | 0.011737 | 0.0637372 | 5 | 0 |
+| 410,010 | 410,010 | 4.453 % | 0.005636 | 0.015448 | 0.0876457 | 11 | 0 |
+| 403,640 | 403,640 | 5.937 % | 0.006912 | 0.017087 | 0.0876457 | 16 | 0 |
+| 390,898 | 390,896 | 8.907 % | 0.009026 | 0.019756 | 0.0881166 | 24 | 0 |
+| 386,208 | 386,206 | 10.000 % | 0.009611 | 0.020697 | 0.0929040 | 28 | 0 |
+| 343,296 | 343,288 | 20.002 % | 0.014267 | 0.027669 | 0.1217317 | 47 | 0 |
+| 300,384 | 300,350 | 30.008 % | 0.017763 | 0.033570 | 0.1217317 | 70 | 0 |
+| 257,472 | 257,452 | 40.005 % | 0.022193 | 0.041524 | 0.1247810 | 113 | 0.008503 |
+| 214,560 | 214,492 | 50.016 % | 0.027863 | 0.050668 | 0.1292336 | 170 | 0.008503 |
+
+Boundary edges are **0** at every row, as they are on the original: the damage is never an
+opened boundary. §0(a)'s non-manifold column reproduces exactly where the targets coincide
+(3 at 425,934; 11 at 410,010; 16 at 403,640; 24 at 390,898).
+
+**R-5 is real but late.** The bounding box is bit-identical to the original's through
+r = 0.70 and moves by 0.0085 mm only at r ≤ 0.60 — deeper than any reduction this model can
+pass. Extremal-vertex protection is holding at every ratio that matters.
+
+### 8.3 `max_mm` is a staircase, and it clears the candidate U3 bounds almost immediately
+
+| faces removed | reduction | p99.9 mm | **max mm** | duplicate face groups | non-manifold edges |
+|---|---|---|---|---|---|
+| 2 | 0.0005 % | 0.000000 | 0.00000023 | 0 | 0 |
+| 10 | 0.0023 % | 0.000000 | 0.0000313 | 0 | 0 |
+| 20 | 0.0047 % | 0.000000 | 0.0000366 | 0 | 0 |
+| 70 | 0.0163 % | 0.000000 | **0.0149534** | 0 | 0 |
+| 120 | 0.0280 % | 0.000000 | 0.0154398 | 0 | 0 |
+| 220 | 0.0513 % | 0.000000 | 0.0154398 | 0 | 0 |
+| 320 | 0.0746 % | 0.000000 | 0.0154398 | 0 | 0 |
+| 520 | 0.1212 % | 0.000073 | **0.0566357** | 0 | 0 |
+| 720 | 0.1678 % | 0.000577 | 0.0566357 | **1** | 0 |
+| 920 | 0.2144 % | 0.001467 | 0.0566357 | 1 | **1** |
+
+Two things this settles.
+
+**(a) The ratified p99/p99.9 budget is blind to the worst point.** At 520 faces removed the
+worst deviation is 0.0566 mm while p99.9 is 0.000073 mm — a ratio of **776×** — and p99 is
+still exactly 0. U3 is not a formality; it is the only clause that would see this.
+
+**(b) Every candidate U3 constant caps the treant at effectively nothing.** Reading the last
+passing and first failing measured row:
+
+| candidate bound | source | admissible reduction | admissible faces removed |
+|---|---|---|---|
+| 0.007 mm | half the finest pitch (§2 option 3) | (0.0047 %, 0.0163 %] | (20, 70] |
+| **0.050 mm** | `LAYER_HEIGHT_DEFAULT_MM` (§2 option 2) | (0.0746 %, 0.1212 %] | (320, 520] |
+| **0.080 mm** | `PRINT_FLOOR_CHORD_MM` (§2 option 1) | (2.125 %, 4.453 %] | (9,120, 19,110] |
+
+The `max_mm` staircase is not noise: each riser is a single collapse in a single thin twig, and
+the same worst point holds flat across 520 → 3,186 faces removed.
+
+### 8.4 The topology defect: what the offending edges actually are
+
+**The original is clean.** Boundary edges 0, non-manifold edges 0, **duplicate face groups 0**.
+Every defect below is created by the reduction.
+
+| output faces | reduction | duplicate face groups | non-manifold edges (gate authority) |
+|---|---|---|---|
+| 429,118 | 0.0005 % | 0 | 0 |
+| 428,000 | 0.261 % | 1 | 1 |
+| 425,934 | 0.742 % | 5 | 3 |
+| 403,640 | 5.937 % | 67 | 16 |
+| 390,896 | 8.907 % | 109 | 24 |
+| 214,492 | 50.016 % | 664 | 170 |
+
+Anatomy of the offenders, dumped at r = 0.9109 (25 by a clean classification; see §8.6 for why
+the gate says 24):
+
+- **Every offender has exactly four incident faces.** Not five, not a fan — 25 of 25. Each
+  defect is one extra pair of faces on one edge.
+- **It is not the operational lock closure.** 24 of 25 have *neither* endpoint in the protected
+  set. R-1's hypothesis (iii) is excluded.
+- **It is not an f32/f64 artifact.** `max_input_quantization_delta` on the treant is exactly
+  **0** (binary-STL coordinates are f32 and widen/narrow exactly), and the 214,562 welded
+  vertices occupy **214,562 distinct f32 positions** — no two welded vertices collide under
+  quantization, so no collapse is being made free by the f32 input. R-4's benign verdict holds,
+  and is now measured rather than argued.
+- **It is coincident sheets — hypothesis (i) — produced by the collapse, not pre-existing.**
+  The maximum absolute cosine between incident-face normals around an offending edge ranges
+  **0.919 to 1.000000**, i.e. the four faces are two near-parallel sheets (the mildest is 23°,
+  the typical is under 2°, several are parallel to seven decimals). Smallest incident face area
+  6.18 × 10⁻⁵ mm². In **18 of 25** the edge already existed in the original as an ordinary
+  2-face manifold edge and the collapse dragged two further faces onto it; in the other **7**
+  the edge did not exist in the original at all.
+- **It is spatially concentrated in the thin twigs.** The 25 offenders fall into ten clusters,
+  and **12 of 25** lie in one 2.9 mm column at x ∈ [−11.4, −9.4], y ≈ −6.3, z ∈ [88.8, 91.7] —
+  the same locality as the `captured_treant_locked_fan` fixture already captured in
+  `crates/plinth-decimate/src/lib.rs` and as the treant's known self-interpenetrating region.
+  The *first* defect of all, the single edge at 428,000 faces, is inside that column at
+  (−10.874, −6.350, 91.508), with its four faces parallel to 2.0°.
+
+**Mechanism, stated once.** QEM collapse in a twig whose two walls are closer together than the
+collapse's own error scale fuses the walls: the cheap collapse is the one that walks a vertex
+across the gap. The product is a coincident-sheet pair — first as duplicate faces, then as
+4-face bowtie edges. This is a property of the *model's* feature thickness against the *error
+budget*, not of a meshopt flag, and it is why the two symptoms of §8.3 and §8.4 appear within
+a few hundred collapses of each other in the same twig: they are the same event seen by two
+different instruments.
+
+### 8.5 `Prune` and `LockBorder` are dead ends — R-1 option (b) is closed
+
+Three targets × four option sets, full-population probes:
+
+| target | `ErrorAbsolute` | `+Prune` | `+LockBorder` | `+Prune+LockBorder` |
+|---|---|---|---|---|
+| 425,935 | 425,934 f / 3 nm / max 0.0566357 | identical | identical | identical |
+| 403,640 | 403,640 f / 16 nm / max 0.0876457 | identical | identical | identical |
+| 390,898 | 390,896 f / 24 nm / max 0.0881166 | identical | identical | identical |
+
+"Identical" means every reported quantity — output faces, boundary edges, non-manifold edges,
+p99, p99.9, max — matched the control to the printed precision. Both flags are inert here for
+structural reasons, not by accident: **`LockBorder` has nothing to lock** (the treant is closed;
+boundary edges are 0 before and after), and **`Prune` removes whole disconnected components**
+while this damage is interior to one. §5 R-1 lists (b) as "cheap to test"; it was, and it fails.
+Of R-1's three options only (a) diagnose-and-fix-at-source and (c) a targeted post-collapse
+repair remain — and §8.7 argues neither is worth building for this model.
+
+### 8.6 A defect found while reconciling the counter — reported, deliberately not fixed here
+
+`plinth_mesh::topology::build_face_topology` reads `cut_flags` for its duplicate-face exclusion
+**inside the same loop that writes it** (`crates/plinth-mesh/src/topology.rs:339-341` reads,
+`:371-373` writes). A face that shares an edge with a genuine duplicate face therefore acquires
+`TOPOLOGY_CUT_DUPLICATE` part-way through the loop, and any *later* edge key touching that face
+is silently dropped from `nonmanifold_edges`. It is deterministic (`BTreeMap` key order) but
+order-dependent, and it under-counts:
+
+| candidate | frozen-snapshot classification | `build_face_topology` | excluded key |
+|---|---|---|---|
+| 390,896 faces | 25 | 24 | (144833, 144834) |
+| 214,492 faces | 208 | 170 | 38 keys |
+
+Separately and larger: **duplicate faces are excluded from `nonmanifold_edges` by design and are
+counted nowhere else**, so `topology_not_increased` cannot see them at all — 664 duplicate-face
+groups at r = 0.50 pass that gate unremarked. Both points make the gate's number a *floor* on
+the damage, and the gap widens with reduction. Neither is fixed in Phase 1, because Phase 1 must
+not move behaviour; both are logged as **FU-26**.
+
+### 8.7 Exit criterion — Phase 1's question answered, and the Phase-3 go/no-go
+
+§6's Phase-1 exit criterion is "whether the treant can be decimated at all, and at what max
+deviation. *If it cannot, stop and report.*" **It cannot, and this is the report.**
+
+1. **The topology gate stops it at ≈0.2 % reduction.** The first non-manifold edge appears
+   between 720 and 920 faces removed (0.168 %–0.214 %); the first duplicate face between 520 and
+   720 (0.121 %–0.168 %). There is no ratio band above that with zero — the count is monotone in
+   faces removed across every row measured.
+2. **A perfect topology remedy would not unlock a useful reduction.** U3 with
+   `PRINT_FLOOR_CHORD_MM` (0.08 mm) caps the treant at (2.125 %, 4.453 %]; with
+   `LAYER_HEIGHT_DEFAULT_MM` (0.050 mm) at ≈0.12 %. The p99/p99.9 budget independently caps at
+   ~8.9 % — and note that at 390,896 faces the full-population p99.9 is **0.019756 mm**, over
+   the un-slacked 0.019 limit, passing only on the ×1.1 final slack. The binding constraint in
+   every case is a handful of thin twigs, and it binds at single-digit percent or less.
+3. **A ≤2 % face reduction changes no downstream disposition.** The gate arithmetic in §0(b)
+   and §5 R-2 has since been overtaken by FU-8d phases F1–F3: the treant's merge gate no longer
+   refuses (9,273,857,317 against an unchanged 35,445,500,736) and its stopping point is now
+   wall-clock, opened as FU-8e. Against FU-8e's recorded frames — a per-proposal kd-tree
+   construction at 59–62 % that scales with *proposals*, and `assess_coverage` at 24–34 % that
+   scales with samples — trimming 2 % of faces moves the total by well under one percent. The
+   treant needs an order of magnitude; decimation offers, at the very most, two percent.
+4. **R-2's hazard is confirmed dormant, and now provably so.** r never approaches the ≈0.345
+   below which the uncharged rescan would open up; the achievable r is ≥ 0.978.
+
+**Recommendation: do not run Phase 3 as scoped.** Its deliverable — making the treant's
+reduction reachable — is worth at most ~2 % of faces on this model and cannot change any
+downstream outcome, while its cost includes a topology remedy for a coincident-sheet fusion and
+a `DecimationBudget` threshold field threaded into `orientation_rederivation.rs`. The evidence
+that would *reverse* this: a remedy that holds `max_mm` under 0.08 mm at ≥ 30 % reduction on
+this model. Nothing measured here suggests one exists — at 30 % the max is 0.1217 mm, 1.5× the
+bound, and it is set by twig features the printer *can* resolve.
+
+**Phase 2 remains worth doing**, for the reason Q1 gives — it turns a blanket refusal into a
+real predicate — but it must be entered knowing the predicate will refuse *this* model on U3
+even if the topology gate is satisfied. The witness's value is on the next large model, not on
+the treant.
+
+**Q2's framing is superseded.** The recommendation was to decide the absolute bound on the
+Phase-1 curve. The curve does not discriminate: 0.08 mm and 0.050 mm both reduce the treant to
+nothing (2.1 % and 0.12 %), so the treant is not evidence for either. Decide it on the physics
+argument alone — on which `PRINT_FLOOR_CHORD_MM` (0.08 mm, `Measured`,
+`owner_decision(print-floor-owner-decision-2026-07-24)`) remains the better-provenanced choice,
+being the registered smallest printable chord rather than a Z-axis quantum applied to an XY
+deviation.
+
+### 8.8 OD-8
+
+Phase 1 landed **no engine change** — the diagnosis instrumentation was scratch and was reverted
+by editing before the gates, leaving `crates/plinth-decimate/src/lib.rs` byte-identical to
+`develop @ 7aa6b73`; `git diff` against develop is docs-only. The census was nevertheless
+re-run at the branch tip, and all **seven** frozen `snapshot_digest` values are byte-identical:
+
+| Model | faces | `snapshot_digest` at the Phase-1 tip | vs frozen |
+|---|---|---|---|
+| `Sphere` | 4,760 | `17667468971446251870` | unmoved |
+| `Cylinder` | 244 | `13310185350867878190` | unmoved |
+| `make_box` | 12 | `9657051231007502658` | unmoved |
+| `make_overhang_table` | 60 | `6686599816688114065` | unmoved |
+| `make_toed_slab` | 140 | `11199296506741562956` | unmoved |
+| `make_raking_blade` | 24 | `13278215294653054002` | unmoved |
+| `make_thin_fin` | 24 | `7016743535301716631` | unmoved |
+
+Run as seven single-model invocations (`PLINTH_CENSUS=1 PLINTH_CENSUS_ONLY=<model>` against the
+`--features census` release build of `embed_incidence_census`) rather than one 8-model
+transcript: since FU-8d phase F3 the treant no longer refuses at the merge gate and instead
+EXCEEDS-TIMEBOX, so an 8-model run would spend a timebox to produce no digest. The treant
+carries no frozen digest and is not part of the OD-8 set. `routed_contacts` and
+`final_live_members` are unmoved on all seven as well.
