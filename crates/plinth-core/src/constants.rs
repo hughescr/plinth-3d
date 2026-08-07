@@ -161,6 +161,13 @@ impl<'a> ScarAreaCapPolicy<'a> {
 ///   two on faces would have refused the small model and admitted anything on
 ///   the large one.
 ///
+/// The 12,714,828,544 above is a dated FU-8b-era charge and is quoted here only
+/// for that spread. FU-8d phase F3's repricing plausibly supersedes it as an
+/// input and no re-measurement exists at this tip; the ruling note on
+/// `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` (`constants/evidence.rs`, and
+/// `docs/rust-migration/support-resource-caps-2026-08-05.md` §7.1) is the
+/// primary record. The spread this paragraph draws from it is unaffected.
+///
 /// These are execution-authority bounds only. They admit or refuse; they never
 /// alter a plan that is admitted, so they are result-inert and excluded from
 /// every semantic and result digest.

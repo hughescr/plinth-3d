@@ -393,6 +393,43 @@ reverted before every recorded run.
 > full per-model table in `CURRENT-STATUS.md` (*Does any reachable model exercise the
 > proposal-delta path?*). The `at_floor=true` claim above is unaffected.
 
+> **Ruling note 2026-08-06 (FU-8d record close) — the standing of
+> 12,714,828,544. Dated addendum; the table and every correction above are left
+> standing.** This is the **primary note** on that figure. It is the treant's
+> proposal-free gate batch charge as measured post-FU-8b, and it is the sole
+> input behind `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED = 23`
+> (`12,714,828,544 / 553,835,949 = 22.958`, §7.2). Three things hold at once,
+> and the record has to carry all three rather than pick one:
+>
+> - **F3's repricing plausibly supersedes it as an input.** Phase F3 (§10)
+>   changed what the gate charges for the same stage: the load phase is priced
+>   from `specialized_load_resource_plan`'s own figure instead of the gate's
+>   `variants × faces` model, the per-variant owner-face descriptor scan is
+>   charged **once**, and `unique_face_finalizer_work` ceases to exist as a term.
+>   A charge stated under the old pricing is not automatically a charge under the
+>   new one.
+> - **No re-measurement exists at this tip.** The census prints scaled-cap
+>   materializations, `at_floor` flags and stage errors — **not per-batch
+>   demands** — so nothing on this branch restates the proposal-free batch's
+>   charge under F3's pricing. "Plausibly superseded" is therefore exactly as
+>   strong a claim as the evidence supports, and no stronger. **23 is not
+>   corrected, not restated and not re-derived**; it stands as recorded.
+> - **Re-derivation is blocked regardless, by ruling R-f.**
+>   `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is re-derived only from a treant
+>   run that **COMPLETES** the gate stage, and phase F4's two clean runs (§11) are
+>   EXCEEDS-TIMEBOX at 607 s and 602 s with no typed refusal in either. When R-f
+>   is satisfied, the proposal-free batch charge and the 23 it yields are to be
+>   re-measured **together**; neither is to be inherited into the other.
+>
+> The other sites carrying 12,714,828,544 — `constants/evidence.rs`
+> (`SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT` and
+> `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED`, the latter being the primary
+> in-code note), `constants.rs`'s `SupportResourceCapPolicy` doc comment,
+> `specialized.rs`'s `gate_operation_limit` doc comment, §7.2's prose and rule
+> table below, and the M0 ledger — quote it for the **face-count spread** against 24-face
+> `make_raking_blade`'s 612,887,212, and that use is unaffected by any of the
+> above. They point here rather than restating it.
+
 ### 7.2 The rule that was set, and the scale it uses
 
 Gate and load work do **not** track face count. The corpus proves it: 24-face
@@ -813,6 +850,15 @@ F3 lands **and** only from a treant run that **completes** the gate. This run do
 not complete it, so nothing was re-derived.
 
 ### 9.5 Ruling R-c, measured and left unbuilt
+
+> **Nomenclature pointer, added 2026-08-06 (FU-8d record close).** The FU-8d
+> design named two measurement stages that this document records under their
+> rulings instead, so a grep for either term lands nowhere. They map exactly:
+> **Stage A** = the key-concentration and per-key proposal tables, recorded here
+> as ruling **R-d** (the R-d paragraph at the end of this section); **Stage B** =
+> the removed-holder, steal and radius-bound row counts, recorded here as ruling
+> **R-c** (the table immediately below). No measurement is added or restated by
+> this pointer — the substance is already of record under the ruling names.
 
 The design's radius-bounded steal path (candidate `d`) was **not built**. F2's
 scratch pass measured what it would have bought, over all 39,223 proposals, with

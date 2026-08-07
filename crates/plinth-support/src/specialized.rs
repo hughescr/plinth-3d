@@ -246,6 +246,16 @@ impl SpecializedLimits {
     /// `CURRENT-STATUS.md` (*FU-8d phase F3 landed 2026-08-06*, *FU-8d phase F4
     /// measured 2026-08-06*).
     ///
+    /// **Ruling note 2026-08-06 on the 12,714,828,544 quoted at the top of this
+    /// comment.** It is a dated FU-8b-era charge for the treant's proposal-free
+    /// gate batch, quoted here only for the face-count spread it demonstrates
+    /// against `make_raking_blade`, and that use is unaffected. As an *input* it
+    /// is plausibly superseded by F3's repricing, and no re-measurement of it
+    /// exists at this tip. The primary record is the ruling note on
+    /// `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED`
+    /// (`plinth-core/src/constants/evidence.rs`) and
+    /// `support-resource-caps-2026-08-05.md` §7.1.
+    ///
     /// Every corpus model sits at the floor;
     /// `the_batch_scaled_caps_are_the_flat_floor_for_every_corpus_batch_shape`
     /// (`crates/plinth-support/tests/resource_cap_policy.rs`) pins that.
