@@ -5894,10 +5894,13 @@ impl ProposalCoverageDelta {
 ///
 /// So bit-identity holds on both arms by construction, and what is
 /// **model-dependent is only the speed**.  The fast path is taken whenever a
-/// merge leaves the uncovered rows alone, which is measured at 100 % of
-/// proposals on both proposal-carrying corpus models; a model whose merges
-/// churn uncovered geometry would take the fallback more often and land back at
-/// the pre-FU-8e cost.  It can never land on a different answer.
+/// merge leaves the uncovered rows alone.  Measured 2026-08-07 on the corpus,
+/// that is *every* proposal of `make_raking_blade` — the only proposal-carrying
+/// model among the seven frozen digests — with not one fallback and not one
+/// moved uncovered row across its gate batches; the Weeping Treant's rate is
+/// phase E4's measurement and is not claimed here.  A model whose merges churn
+/// uncovered geometry would fall back more often and land back at the pre-FU-8e
+/// cost.  It can never land on a different answer.
 fn variant_coverage_objective(
     question: GateCoverageQuestion<'_>,
     nearest: &[f64],
