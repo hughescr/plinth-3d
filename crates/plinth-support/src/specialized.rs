@@ -9,8 +9,8 @@ use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
 use geom_kernel::{
-    KnnBatchLimits, KnnBatchPlan, NativeSurface, NativeSurfaceConfig, PointCloudIndex,
-    RadiusQueryLimits,
+    knn_single_source_planned_into, KnnBatchLimits, KnnBatchPlan, NativeSurface,
+    NativeSurfaceConfig, PointCloudIndex, RadiusQueryLimits,
 };
 use plinth_core::{m0_constants, LayerPlan};
 use plinth_mesh::{build_face_topology, mesh_fingerprint, Mesh, WeldPolicy};
@@ -3952,8 +3952,10 @@ fn evaluate_gate_batch(
             let mut working_nearest = baseline_nearest.clone();
             let mut touched_rows: Vec<usize> = Vec::new();
             // FU-8d F2: one query-point buffer for the whole batch.  Every
-            // proposal refills it; none allocates its own.
-            let mut proposal_query_scratch: Vec<[f64; 3]> = Vec::new();
+            // proposal refills it; none allocates its own.  FU-8e E2 added its
+            // output twin — the merged seat's squared distances now land in a
+            // batch-retained buffer instead of in a per-proposal `NeighborCsr`.
+            let mut proposal_nearest_scratch = ProposalNearestScratch::default();
             let mut executed_whole_gate_route_plan = GateWholeRoutePlan::default();
             // FU-8d phase F3 (P2): there are no windows any more, because there
             // are no per-window matrices for a window to bound.  The batch
@@ -4015,7 +4017,7 @@ fn evaluate_gate_batch(
                                     witnesses: &baseline_witnesses,
                                 },
                                 delta,
-                                &mut proposal_query_scratch,
+                                &mut proposal_nearest_scratch,
                                 &mut working_nearest,
                                 &mut touched_rows,
                             )?;
@@ -5636,6 +5638,25 @@ fn plan_proposal_nearest_delta(
             limit: limits.max_work,
         });
     }
+    // FU-8e phase E2 (2026-08-07): UNCHANGED, deliberately.  Execution stopped
+    // building a one-point kd-tree, but this plan still describes one — the same
+    // `KnnBatchPlan::new(1, touched_rows, 1, limits)`, so `work()` is still
+    // `1 × touched_rows` and the treant's stated gate demand does not move by a
+    // single unit.  `logical_peak_bytes()` therefore still carries the Kiddo
+    // terms for a tree nobody builds and the CSR terms for a structure nobody
+    // materialises: at `source_count == 1` that over-states the executed peak by
+    // 64 B per proposal (leaf coordinates, leaf items, leaf extents, stems, the
+    // build sort indices and the inclusive tie scratch) plus 16 B per query row
+    // (the CSR offsets and point IDs; the CSR *distances* term is real — it is
+    // exactly the retained output buffer the fast path fills).
+    //
+    // The over-statement is conservatism, not staleness, and it is kept on
+    // purpose: a plan that admits the general path a fortiori admits its
+    // specialisation, so nothing this branch executes can exceed what was
+    // checked.  Restating the formula would move a charged number — the gate
+    // peak, via `GatePlannedNearest::peak_bytes` — for a saving of tens of bytes
+    // per proposal, and every record site that quotes the demand would have to
+    // move with it.
     let merged_seat_knn = KnnBatchPlan::new(1, touched_rows, 1, limits)
         .map_err(|error| SpecializedError::CoverageNearest(error.to_string()))?;
     let retained_logical_bytes = [
@@ -5678,6 +5699,27 @@ struct GateNearestBaseline<'a> {
     witnesses: &'a NearestWitnessTable,
 }
 
+/// The two buffers one proposal's nearest delta refills: gathered query points
+/// in, merged-seat squared distances out.
+///
+/// Both are retained for the whole gate batch and reused by every proposal, so
+/// neither is a per-proposal allocation.  They travel together because they are
+/// only correct together — `merged_squared[i]` is the distance to
+/// `queries[i]` — and because the batch that fills them fills both at once.
+///
+/// Neither adds an uncharged byte.  `queries` is the FU-8d gather buffer under a
+/// new name, charged as the plan's gathered-query-coordinates term and again as
+/// `ProposalNearestPlan::retained_logical_bytes`.  `merged_squared` is exactly
+/// the CSR squared-distances term (`query_count × neighbors × 8` at
+/// `neighbors == 1`) that [`KnnBatchPlan::logical_peak_bytes`] already charges —
+/// the fast path writes the same values into the caller's buffer instead of into
+/// a `NeighborCsr` it would then throw away.
+#[derive(Default)]
+struct ProposalNearestScratch {
+    queries: Vec<[f64; 3]>,
+    merged_squared: Vec<f64>,
+}
+
 /// Overwrite `nearest` in place with one proposal variant's answers, recording
 /// every row written into `touched` so the caller can restore the baseline.
 ///
@@ -5696,6 +5738,33 @@ struct GateNearestBaseline<'a> {
 ///   hand-computed distance, so it is the same pure function applied to the
 ///   same two points the full sweep would have applied it to.
 ///
+/// # Why the merged seat's batch no longer builds a tree (FU-8e phase E2)
+///
+/// That batch used to be a [`PointCloudIndex::new_for_knn_batch`] over one point
+/// followed by `knn_batch_planned`.  FU-8d's merge message blamed the resulting
+/// 62 % of the gate's variant loop on building those trees; the FU-8e
+/// measurement says otherwise.  One such index costs 83.3 ns, and the 39,223 of
+/// them in a Weeping Treant gate batch total 16.7 microseconds — the trees are
+/// free.  The cost was the *query* loop: per query, a `nearest_n` descent that
+/// allocates a `SortedVec`, a second `nearest_n_within_exclusive` descent that
+/// allocates a `Vec`, and a `sort_by`, for about 1.04e9 query iterations and
+/// 2.08e9 heap allocations per batch.
+///
+/// So this now calls [`knn_single_source_planned_into`], which answers the same
+/// question without the tree.  It takes the **same** [`KnnBatchPlan`] this
+/// proposal already planned, so the charged demand is untouched (see
+/// [`plan_proposal_nearest_delta`]), and it is a specialisation rather than a
+/// second opinion: at `source_count == 1` its value is bit-identical to
+/// `squared_distances[row.start]`, argued in five clauses on that function and
+/// pinned by `fu8e_single_source_is_the_tree_answer_bit_for_bit`.  The point ID
+/// the old path read is dropped because it was never consulted: one source seat
+/// means `point_ids[row.start]` was always `0`.
+///
+/// The proof that this changed nothing is that
+/// `fu8d_proposal_nearest_deltas_reproduce_the_full_sweep_bit_for_bit` — which
+/// compares every row against the retained full sweep on `to_bits` — was not
+/// rewritten for it and still passes.
+///
 /// The two are combined by `f64::total_cmp` and the square root is taken
 /// **once, after** the minimum — so the arithmetic performed on the winning
 /// value is identical to the sweep's `squared_distances[row.start].sqrt()`.
@@ -5704,7 +5773,7 @@ struct GateNearestBaseline<'a> {
 /// the answer.  Pinned against the retained full sweep by
 /// `fu8d_proposal_nearest_deltas_reproduce_the_full_sweep_bit_for_bit`.
 ///
-/// `query_scratch` is the caller's reusable gather buffer: one allocation for
+/// `scratch` is the caller's reusable pair of buffers: one allocation each for
 /// the whole batch rather than one per proposal.
 ///
 /// The three read-only pieces of batch state travel together in
@@ -5715,7 +5784,7 @@ fn fill_proposal_nearest_delta(
     proposal: &MergeProposal,
     baseline: GateNearestBaseline<'_>,
     plan: &ProposalNearestPlan,
-    query_scratch: &mut Vec<[f64; 3]>,
+    scratch: &mut ProposalNearestScratch,
     nearest: &mut [f64],
     touched: &mut Vec<usize>,
 ) -> Result<(), SpecializedError> {
@@ -5730,26 +5799,29 @@ fn fill_proposal_nearest_delta(
         return Ok(());
     }
     let pair = MergedPair::of(proposal);
-    query_scratch.clear();
-    query_scratch.reserve(plan.touched_rows);
+    scratch.queries.clear();
+    scratch.queries.reserve(plan.touched_rows);
     for delta in &plan.deltas {
         let rows = index.sample_rows_for(delta.route);
         debug_assert_eq!(rows.len(), delta.query_count);
-        query_scratch.extend(rows.iter().map(|&row| samples[row].point_mm));
+        scratch
+            .queries
+            .extend(rows.iter().map(|&row| samples[row].point_mm));
     }
-    debug_assert_eq!(query_scratch.len(), plan.touched_rows);
-    let merged_seat = [proposal.position_mm];
-    let point_index = PointCloudIndex::new_for_knn_batch(&merged_seat, &plan.merged_seat_knn)
-        .map_err(|error| SpecializedError::CoverageNearest(error.to_string()))?;
-    let answers = point_index
-        .knn_batch_planned(query_scratch, &plan.merged_seat_knn)
-        .map_err(|error| SpecializedError::CoverageNearest(error.to_string()))?;
+    debug_assert_eq!(scratch.queries.len(), plan.touched_rows);
+    knn_single_source_planned_into(
+        &proposal.position_mm,
+        &scratch.queries,
+        &plan.merged_seat_knn,
+        &mut scratch.merged_squared,
+    )
+    .map_err(|error| SpecializedError::CoverageNearest(error.to_string()))?;
+    debug_assert_eq!(scratch.merged_squared.len(), plan.touched_rows);
     let mut query_row = 0usize;
     for delta in &plan.deltas {
         let sources = index.sources_for(delta.route);
         for &sample_index in index.sample_rows_for(delta.route) {
-            let row = answers.row_range(query_row).expect("planned row exists");
-            let merged_squared = answers.squared_distances[row.start];
+            let merged_squared = scratch.merged_squared[query_row];
             let survivor_squared =
                 witnesses.surviving_squared_distance(sample_index, sources, pair);
             let winner = if survivor_squared.total_cmp(&merged_squared).is_le() {
@@ -7456,7 +7528,7 @@ mod tests {
         let mut coverage = ProposalDeltaCoverage::default();
         let mut working = baseline.clone();
         let mut touched = Vec::new();
-        let mut query_scratch = Vec::new();
+        let mut nearest_scratch = ProposalNearestScratch::default();
 
         for (proposal_index, proposal) in proposals.iter().enumerate() {
             let reference_plan = plan_variant_nearest_routes(
@@ -7500,7 +7572,7 @@ mod tests {
                     witnesses: &witnesses,
                 },
                 &delta,
-                &mut query_scratch,
+                &mut nearest_scratch,
                 &mut working,
                 &mut touched,
             )
