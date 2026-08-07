@@ -2212,9 +2212,12 @@ pub(crate) fn finalize_load_partition(
     mesh: &Mesh,
     contacts: &[PhysicalContact],
 ) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
+    // FU-8f phase G2: this entry point is outside the merge gate's per-round
+    // loop, so it keeps its own single hash rather than pulling a proof
+    // through a public signature for a saving it does not make.
     finalize_load_rows(
         plan,
-        mesh,
+        &VerifiedMeshFingerprint::compute(mesh)?,
         &plan.load_eligibility,
         contacts,
         plan.load_limits,
@@ -2232,7 +2235,14 @@ pub(crate) fn authority_consistent_empty_load_partition_for_test(
     plan: &GenericContactPlan,
     mesh: &Mesh,
 ) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
-    finalize_load_rows(plan, mesh, &[], &[], plan.load_limits, None)
+    finalize_load_rows(
+        plan,
+        &VerifiedMeshFingerprint::compute(mesh)?,
+        &[],
+        &[],
+        plan.load_limits,
+        None,
+    )
 }
 
 fn load_resource_plan_from_counts(
@@ -2288,21 +2298,44 @@ fn load_resource_plan_from_counts(
     })
 }
 
+/// The load finalizer's own exact resource plan.
+///
+/// `transpose_bytes` is FU-8f phase G1's **new** scratch-bytes term:
+/// `cells x 4 B + (contacts + 1) x 4 B` for the contact-major
+/// [`LoadEligibilityTranspose`] the finalizer's scan runs over — 32,848,040 B
+/// on the Weeping Treant v1.2 (8,210,643 cells, 1,366 contacts), 6.1 % of the
+/// 512 MiB `max_load_scratch_bytes`.  It is added **here** and not in
+/// [`specialized_load_resource_plan`] because the term is the exact
+/// eligible-cell count, which the preflight cannot state ahead of the
+/// eligibility: bounding it by anything the preflight knows
+/// (`owner_count x contact_count`, or `rows x contacts`) over-states by two to
+/// three orders of magnitude and would refuse batches this build admits.  The
+/// consequence, stated rather than left to be discovered: the preflight in
+/// [`finalize_specialized_load_partition`] under-states this finalizer's
+/// scratch by the transpose term.  That costs a **later** refusal, never an
+/// unafforded allocation — the buffer is allocated only after the check below
+/// passes, and the check below is the exact one.
 fn load_resource_plan(
     load_eligibility: &[LoadEligibility],
     contacts: &[PhysicalContact],
+    transpose_bytes: usize,
 ) -> Result<LoadResourcePlan, GenericPerceptionError> {
     let eligible_owner_count = load_eligibility.iter().try_fold(0usize, |total, row| {
         total
             .checked_add(row.eligible_owners.len())
             .ok_or(GenericPerceptionError::LoadResourceOverflow)
     })?;
-    load_resource_plan_from_counts(
+    let mut plan = load_resource_plan_from_counts(
         load_eligibility.len(),
         eligible_owner_count,
         contacts.len(),
         0,
-    )
+    )?;
+    plan.scratch_bytes = plan
+        .scratch_bytes
+        .checked_add(transpose_bytes)
+        .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
+    Ok(plan)
 }
 
 /// How many nearest eligible contacts per load row the **baseline** finalize
@@ -2411,20 +2444,433 @@ fn insert_load_witness(
     slots[position] = candidate;
 }
 
+/// The contact-major transpose of the load eligibility matrix, in CSR form.
+///
+/// FU-8f phase G1 (design record `handoff-fu8f-design-2026-08-07`, finding
+/// F-3).  [`finalize_load_rows`] used to visit every `(contact, row)` cell and
+/// `continue` on the ones the row's ascending `eligible_owners` did not admit.
+/// Measured inside the Weeping Treant v1.2's merge-gate batch at `7aa6b73`:
+/// **160,834,206 cells visited, of which 8,210,643 were eligible** — 94.9 % of
+/// the visits were the `continue` — and that scan cost ~3,090 ms of a
+/// 3,899.6 ms batch preparation, 79 % of the round.  The same loop body run
+/// over only the eligible cells measured **53x** faster in-process on that
+/// batch.  This is a batch-first defect of the same family as FU-8b/8c/8d.
+///
+/// **Bit-identity is by construction, not by argument.**  The buckets are
+/// filled by walking the rows **ascending** and appending each row index to
+/// every eligible contact's bucket, so every bucket is already strictly
+/// ascending — no sort is performed, and none is needed (the in-process
+/// replica's defensive sort was measured to be a no-op,
+/// `buckets_already_sorted = true`).  Consuming the contacts **ascending**
+/// therefore reproduces the old `for contact { for row { … } }` visit sequence
+/// cell for cell: every cell the old scan did not skip is visited exactly once,
+/// in the same order, by the same loop body.  So `nearest`'s running argmin
+/// with its `(distance, contact_id)` tie-break, and `insert_load_witness`'s
+/// slots, see an identical `(contact_index, distance)` sequence.  The replica
+/// reported `nearest_bit_identical = true` on the treant's real batch, and
+/// `fu8f_transposed_finalize_reproduces_the_scan_bit_for_bit` pins it against
+/// the retained `contacts x rows` scan on fixtures.
+///
+/// **Charged.**  `cells x 4 B + (contacts + 1) x 4 B`, a **new**
+/// [`LoadResourcePlan::scratch_bytes`] term introduced by this phase —
+/// 32,848,040 B on the treant, 6.1 % of the 512 MiB `max_load_scratch_bytes`
+/// and 3.1 % of the 1 GiB gate peak.  Nothing else moves.  The operation model
+/// is deliberately **left standing and over-stating**: it still prices the scan
+/// as `rows x contacts x (owner_log + 4)` (~4.34e9 on the treant) where the
+/// executed work is now ~1e8.  That is the FU-8e Q5 precedent — a plan that
+/// admits the general path a fortiori admits its specialisation — and the
+/// repricing is deferred to phase G5 by design, so no charged operation count
+/// moves in this phase.
+///
+/// Note (design record open question 7): the rows are **not** uniformly small.
+/// One treant row carries 568 eligible owners of 1,366 contacts.  The transpose
+/// handles it identically; nothing here assumes short buckets.
+struct LoadEligibilityTranspose {
+    /// Every eligible row index, contact-major.  Contact `contact`'s rows are
+    /// `rows[starts[contact] as usize..starts[contact + 1] as usize]`, strictly
+    /// ascending.
+    rows: Vec<u32>,
+    /// One boundary per contact plus a terminator, so `starts.len()` is
+    /// `contacts.len() + 1` and `starts[contacts.len()]` is the cell count.
+    starts: Vec<u32>,
+}
+
+impl LoadEligibilityTranspose {
+    /// Contact `contact`'s ascending eligible rows.
+    fn rows_of(&self, contact: usize) -> &[u32] {
+        &self.rows[self.starts[contact] as usize..self.starts[contact + 1] as usize]
+    }
+}
+
+/// The counting half of the transpose build: everything needed to **charge**
+/// the buffer before any of it is allocated.
+///
+/// The split exists because [`LoadEligibilityTranspose`]'s size is the exact
+/// eligible-cell count, which no preflight can state without walking the
+/// eligibility — so the count runs first, the plan is charged and checked, and
+/// only then is the cells-sized buffer allocated.  What the count itself
+/// spends is stated rather than hidden, the same way [`GroupedOwnerFaces`]
+/// states its cost: two `u32` per contact (`order` and `owner_rows`, together
+/// exactly the `contact_count x size_of::<usize>()` the plan already charges),
+/// and one binary search per `(row, eligible owner)` — 7,988,078 of them on the
+/// treant, against the 4.34e9 the standing operation model already prices for
+/// the scan those searches replace.
+struct LoadTransposeCounts {
+    /// Contact indices ascending by `(owner, contact index)`, so contacts
+    /// sharing an owner form one contiguous ascending run.
+    order: Vec<u32>,
+    /// Indexed by a run's **start position in `order`**: how many rows that
+    /// run's owner is eligible for.  Positions that do not start a run are
+    /// never read.  Reused as the per-contact fill cursor in [`Self::finish`].
+    owner_rows: Vec<u32>,
+    /// `Σ` over contacts of the rows that contact is eligible for — the exact
+    /// number of cells the transposed scan will visit.
+    cells: usize,
+}
+
+impl LoadTransposeCounts {
+    /// Count the eligible cells without allocating anything cells-sized.
+    ///
+    /// Contacts that share a [`LoadOwner`] have, by definition, the identical
+    /// row set — eligibility is a predicate on the owner alone.  So the count
+    /// is taken **once per owner run** over the `Σ|eligible_owners|` cells of
+    /// the row-major eligibility, never once per `(row, contact)` cell.
+    fn count(
+        load_eligibility: &[LoadEligibility],
+        contacts: &[PhysicalContact],
+    ) -> Result<Self, GenericPerceptionError> {
+        let contact_count = u32::try_from(contacts.len())
+            .map_err(|_| GenericPerceptionError::LoadResourceOverflow)?;
+        u32::try_from(load_eligibility.len())
+            .map_err(|_| GenericPerceptionError::LoadResourceOverflow)?;
+        let mut order: Vec<u32> = (0..contact_count).collect();
+        order.sort_unstable_by_key(|&index| (contacts[index as usize].owner, index));
+        let mut owner_rows = vec![0u32; contacts.len()];
+        for eligibility in load_eligibility {
+            // `eligible_owners` is ascending and `order` is ascending by owner,
+            // so each row's searches only ever move forward.
+            let mut lower = 0usize;
+            for owner in &eligibility.eligible_owners {
+                let start = lower
+                    + order[lower..]
+                        .partition_point(|&index| contacts[index as usize].owner < *owner);
+                lower = start;
+                if start < order.len() && contacts[order[start] as usize].owner == *owner {
+                    // One row admits one owner at most once: `eligible_owners`
+                    // is deduplicated, so this cannot exceed the row count,
+                    // which `u32::try_from` above has already bounded.
+                    owner_rows[start] += 1;
+                }
+            }
+        }
+        let mut cells = 0usize;
+        let mut position = 0usize;
+        while position < order.len() {
+            let owner = contacts[order[position] as usize].owner;
+            let rows = owner_rows[position] as usize;
+            let mut end = position;
+            while end < order.len() && contacts[order[end] as usize].owner == owner {
+                end += 1;
+            }
+            cells = (end - position)
+                .checked_mul(rows)
+                .and_then(|run| cells.checked_add(run))
+                .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
+            position = end;
+        }
+        u32::try_from(cells).map_err(|_| GenericPerceptionError::LoadResourceOverflow)?;
+        Ok(Self {
+            order,
+            owner_rows,
+            cells,
+        })
+    }
+
+    /// What [`Self::finish`] will allocate: the phase's new charged term.
+    fn scratch_bytes(&self, contact_count: usize) -> Result<usize, GenericPerceptionError> {
+        self.cells
+            .checked_mul(std::mem::size_of::<u32>())
+            .and_then(|rows| {
+                contact_count
+                    .checked_add(1)
+                    .and_then(|boundaries| boundaries.checked_mul(std::mem::size_of::<u32>()))
+                    .and_then(|starts| rows.checked_add(starts))
+            })
+            .ok_or(GenericPerceptionError::LoadResourceOverflow)
+    }
+
+    /// Fill the buckets, rows ascending, so every bucket comes out ascending.
+    fn finish(
+        self,
+        load_eligibility: &[LoadEligibility],
+        contacts: &[PhysicalContact],
+    ) -> LoadEligibilityTranspose {
+        let Self {
+            order,
+            mut owner_rows,
+            cells,
+        } = self;
+        // `starts[contact + 1]` first holds contact `contact`'s own row count,
+        // then becomes the prefix sum.  Every contact of one owner run gets the
+        // run's count, because eligibility is a predicate on the owner alone.
+        let mut starts = vec![0u32; contacts.len() + 1];
+        let mut position = 0usize;
+        while position < order.len() {
+            let owner = contacts[order[position] as usize].owner;
+            let rows = owner_rows[position];
+            let mut end = position;
+            while end < order.len() && contacts[order[end] as usize].owner == owner {
+                starts[order[end] as usize + 1] = rows;
+                end += 1;
+            }
+            position = end;
+        }
+        for index in 0..contacts.len() {
+            // The total is `cells`, which `count` proved fits in `u32`.
+            starts[index + 1] += starts[index];
+        }
+        debug_assert_eq!(starts[contacts.len()] as usize, cells);
+        let mut rows = vec![0u32; cells];
+        // `owner_rows` is done; reuse it as the per-contact write cursor rather
+        // than allocating a second contact-sized buffer.
+        let cursors = &mut owner_rows;
+        cursors.copy_from_slice(&starts[..contacts.len()]);
+        for (face_index, eligibility) in load_eligibility.iter().enumerate() {
+            let face = face_index as u32;
+            let mut lower = 0usize;
+            for owner in &eligibility.eligible_owners {
+                let start = lower
+                    + order[lower..]
+                        .partition_point(|&index| contacts[index as usize].owner < *owner);
+                lower = start;
+                let mut end = start;
+                while end < order.len() && contacts[order[end] as usize].owner == *owner {
+                    let contact = order[end] as usize;
+                    rows[cursors[contact] as usize] = face;
+                    cursors[contact] += 1;
+                    end += 1;
+                }
+            }
+        }
+        debug_assert!(
+            (0..contacts.len()).all(|contact| cursors[contact] == starts[contact + 1]),
+            "every bucket filled exactly to its boundary",
+        );
+        LoadEligibilityTranspose { rows, starts }
+    }
+}
+
+/// The load finalizer's nearest-and-witness pass, over the transposed
+/// eligibility.
+///
+/// This is the pre-FU-8f inner loop body, unchanged, driven by
+/// [`LoadEligibilityTranspose`] instead of by a `contacts x rows` scan with a
+/// `continue`.  It is a named function so the equivalence test can run the
+/// production pass itself against the retained reference scan rather than a
+/// re-typed copy of it.
+fn scan_transposed_load(
+    load_eligibility: &[LoadEligibility],
+    contacts: &[PhysicalContact],
+    transpose: &LoadEligibilityTranspose,
+    retain: Option<&mut LoadRowRetention>,
+) -> Vec<Option<(usize, f64)>> {
+    // One flattened owner x face x contact batch.  The matrix is streamed into
+    // a caller-budgeted nearest row rather than issuing scalar spatial calls.
+    let mut nearest = vec![None::<(usize, f64)>; load_eligibility.len()];
+    // FU-8d phase F3 (P2): when the caller asks, the same pass also keeps the
+    // `LOAD_WITNESS_SLOTS` smallest pairs per row.  The running argmin below is
+    // untouched — the retention is written *beside* it, never through it — so
+    // the emitted partition cannot depend on whether anything was retained.
+    // `debug_assert`s in the caller pin slot 0 against the argmin.
+    let mut retention = retain;
+    if let Some(retention) = retention.as_deref_mut() {
+        retention.witnesses =
+            vec![[LoadWitness::UNUSED; LOAD_WITNESS_SLOTS]; load_eligibility.len()];
+        retention.centroids_mm = load_eligibility
+            .iter()
+            .map(|eligibility| eligibility.centroid_mm)
+            .collect();
+    }
+    for (contact_index, contact) in contacts.iter().enumerate() {
+        for &row in transpose.rows_of(contact_index) {
+            let face_index = row as usize;
+            let eligibility = &load_eligibility[face_index];
+            let distance = contact
+                .point_mm
+                .iter()
+                .zip(eligibility.centroid_mm)
+                .map(|(left, right)| (left - right).powi(2))
+                .sum::<f64>();
+            if let Some(retention) = retention.as_deref_mut() {
+                insert_load_witness(
+                    &mut retention.witnesses[face_index],
+                    contacts,
+                    contact_index,
+                    distance,
+                );
+            }
+            let replace = nearest[face_index].is_none_or(|(old_index, old_distance)| {
+                distance
+                    .total_cmp(&old_distance)
+                    .then_with(|| contact.contact_id.cmp(&contacts[old_index].contact_id))
+                    .is_lt()
+            });
+            if replace {
+                nearest[face_index] = Some((contact_index, distance));
+            }
+        }
+    }
+    nearest
+}
+
+/// The pre-FU-8f `contacts x rows` scan, retained verbatim as the equivalence
+/// oracle [`scan_transposed_load`] is proved against.
+///
+/// Same shape as the retained references FU-8c and FU-8d left behind: the
+/// replaced implementation stays compilable so the replacement is checked
+/// against the thing it replaced, not against a restatement of it.  It visits
+/// all `rows x contacts` cells — 160,834,206 on the treant against 8,210,643
+/// eligible — which is exactly why it is `#[cfg(test)]` and fixture-sized.
+#[cfg(test)]
+type ReferenceScan = (
+    Vec<Option<(usize, f64)>>,
+    Vec<[LoadWitness; LOAD_WITNESS_SLOTS]>,
+);
+
+#[cfg(test)]
+fn reference_contacts_x_rows_scan(
+    load_eligibility: &[LoadEligibility],
+    contacts: &[PhysicalContact],
+) -> ReferenceScan {
+    let mut nearest = vec![None::<(usize, f64)>; load_eligibility.len()];
+    let mut witnesses = vec![[LoadWitness::UNUSED; LOAD_WITNESS_SLOTS]; load_eligibility.len()];
+    for (contact_index, contact) in contacts.iter().enumerate() {
+        for (face_index, eligibility) in load_eligibility.iter().enumerate() {
+            if eligibility
+                .eligible_owners
+                .binary_search(&contact.owner)
+                .is_err()
+            {
+                continue;
+            }
+            let distance = contact
+                .point_mm
+                .iter()
+                .zip(eligibility.centroid_mm)
+                .map(|(left, right)| (left - right).powi(2))
+                .sum::<f64>();
+            insert_load_witness(
+                &mut witnesses[face_index],
+                contacts,
+                contact_index,
+                distance,
+            );
+            let replace = nearest[face_index].is_none_or(|(old_index, old_distance)| {
+                distance
+                    .total_cmp(&old_distance)
+                    .then_with(|| contact.contact_id.cmp(&contacts[old_index].contact_id))
+                    .is_lt()
+            });
+            if replace {
+                nearest[face_index] = Some((contact_index, distance));
+            }
+        }
+    }
+    (nearest, witnesses)
+}
+
+/// A mesh carried together with its own [`mesh_fingerprint`], hashed once.
+///
+/// # FU-8f phase G2 — why this type exists
+///
+/// `mesh_fingerprint` walks every triangle of the mesh.  On the Weeping Treant
+/// v1.2 that is 429,120 triangles, and the merge gate used to pay for it
+/// **twice per batch** — once in [`finalize_specialized_load_partition`] and
+/// again in the [`finalize_load_rows`] it immediately calls — over a mesh that
+/// cannot change inside a tournament, because the tournament merges *contacts*
+/// and never touches geometry.  Measured at `7aa6b73` on the treant's real
+/// gate batch: 85.1 ms + 81.5 ms = 166.6 ms per merge round, contended.
+///
+/// # What did NOT change, and must not
+///
+/// The **staleness comparison stays at every site**.  This type hoists the
+/// *hash*, not the *check*: each consumer still compares the fingerprint
+/// against its own `plan.authority.mesh` and still returns
+/// [`GenericPerceptionError::StaleAuthority`] when they disagree.  "Verify
+/// once, thread the proof" — never "stop verifying".  A caller that has no
+/// proof to hand builds one with [`Self::compute`] and pays exactly what it
+/// paid before; nothing anywhere is verified less than it was.
+///
+/// That claim is pinned, one arm per site, by
+/// `fu8f_hoisted_fingerprint_still_refuses_a_foreign_mesh_at_both_finalizers`.
+/// *Amended 2026-08-07*: the original G2 test pinned
+/// [`finalize_specialized_load_partition`] only **by delegation** — deleting
+/// that site's own comparison left the test green, because the call fell
+/// through to the [`finalize_load_rows`] it invokes, which refused on the
+/// same proof.  The test was strengthened so each arm can be satisfied only
+/// by the site it names, and each site's deletion was measured to fail its
+/// own arm; the arm shapes and the mutation results are in its doc comment.
+///
+/// # Why the mesh travels inside the proof
+///
+/// The consumers need the mesh itself (face counts, triangles) as well as the
+/// digest.  Taking them as two arguments would admit a proof computed from one
+/// mesh being presented alongside a different one — a fingerprint that attests
+/// nothing.  The proof therefore *owns the reference*: [`Self::mesh`] is the
+/// only mesh a holder can reach through it, so digest and geometry cannot
+/// drift apart by construction rather than by discipline.
+pub(crate) struct VerifiedMeshFingerprint<'mesh> {
+    mesh: &'mesh Mesh,
+    fingerprint: String,
+}
+
+impl<'mesh> VerifiedMeshFingerprint<'mesh> {
+    /// Hash `mesh` once and bind the digest to it.
+    pub(crate) fn compute(mesh: &'mesh Mesh) -> Result<Self, GenericPerceptionError> {
+        let fingerprint = mesh_fingerprint(mesh)
+            .map_err(|error| GenericPerceptionError::Topology(error.to_string()))?;
+        Ok(Self { mesh, fingerprint })
+    }
+
+    /// The mesh this digest was computed from — the only one it attests to.
+    pub(crate) fn mesh(&self) -> &'mesh Mesh {
+        self.mesh
+    }
+
+    /// The digest, for the caller's own staleness comparison.
+    pub(crate) fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+}
+
 fn finalize_load_rows(
     plan: &GenericContactPlan,
-    mesh: &Mesh,
+    verified_mesh: &VerifiedMeshFingerprint<'_>,
     load_eligibility: &[LoadEligibility],
     contacts: &[PhysicalContact],
     limits: LoadFinalizeLimits,
     retain: Option<&mut LoadRowRetention>,
 ) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
-    let fingerprint = mesh_fingerprint(mesh)
-        .map_err(|error| GenericPerceptionError::Topology(error.to_string()))?;
-    if fingerprint != plan.authority.mesh {
+    // FU-8f phase G2: the digest is threaded in rather than recomputed here,
+    // but the comparison it feeds is the same comparison this site has always
+    // made, and it still refuses.  The mesh itself was only ever an input to
+    // that hash here — every geometric quantity this finalizer reads comes
+    // from `load_eligibility`, which is why the parameter is the proof and not
+    // the mesh.
+    if verified_mesh.fingerprint() != plan.authority.mesh {
         return Err(GenericPerceptionError::StaleAuthority);
     }
-    let resource = load_resource_plan(load_eligibility, contacts)?;
+    // FU-8f phase G1.  The transpose is counted before it is charged and
+    // charged before it is allocated: its size is the exact eligible-cell
+    // count, which nothing upstream can state.  See [`LoadTransposeCounts`]
+    // for what the count itself spends and why the standing operation model
+    // already affords it.
+    let transpose = LoadTransposeCounts::count(load_eligibility, contacts)?;
+    let resource = load_resource_plan(
+        load_eligibility,
+        contacts,
+        transpose.scratch_bytes(contacts.len())?,
+    )?;
     if resource.scratch_bytes > limits.max_scratch_bytes {
         return Err(GenericPerceptionError::LoadScratchLimit {
             required: resource.scratch_bytes,
@@ -2469,57 +2915,14 @@ fn finalize_load_rows(
         }
     }
     let mut rows = Vec::with_capacity(load_eligibility.len());
-    // One flattened owner x face x contact batch.  The matrix is streamed into
-    // a caller-budgeted nearest row rather than issuing scalar spatial calls.
-    let mut nearest = vec![None::<(usize, f64)>; load_eligibility.len()];
-    // FU-8d phase F3 (P2): when the caller asks, the same pass also keeps the
-    // `LOAD_WITNESS_SLOTS` smallest pairs per row.  The running argmin below is
-    // untouched — the retention is written *beside* it, never through it — so
-    // the emitted partition cannot depend on whether anything was retained.
-    // `debug_assert`s after the loop pin slot 0 against the argmin.
+    let transpose = transpose.finish(load_eligibility, contacts);
     let mut retention = retain;
-    if let Some(retention) = retention.as_deref_mut() {
-        retention.witnesses =
-            vec![[LoadWitness::UNUSED; LOAD_WITNESS_SLOTS]; load_eligibility.len()];
-        retention.centroids_mm = load_eligibility
-            .iter()
-            .map(|eligibility| eligibility.centroid_mm)
-            .collect();
-    }
-    for (contact_index, contact) in contacts.iter().enumerate() {
-        for (face_index, eligibility) in load_eligibility.iter().enumerate() {
-            if eligibility
-                .eligible_owners
-                .binary_search(&contact.owner)
-                .is_err()
-            {
-                continue;
-            }
-            let distance = contact
-                .point_mm
-                .iter()
-                .zip(eligibility.centroid_mm)
-                .map(|(left, right)| (left - right).powi(2))
-                .sum::<f64>();
-            if let Some(retention) = retention.as_deref_mut() {
-                insert_load_witness(
-                    &mut retention.witnesses[face_index],
-                    contacts,
-                    contact_index,
-                    distance,
-                );
-            }
-            let replace = nearest[face_index].is_none_or(|(old_index, old_distance)| {
-                distance
-                    .total_cmp(&old_distance)
-                    .then_with(|| contact.contact_id.cmp(&contacts[old_index].contact_id))
-                    .is_lt()
-            });
-            if replace {
-                nearest[face_index] = Some((contact_index, distance));
-            }
-        }
-    }
+    let nearest = scan_transposed_load(
+        load_eligibility,
+        contacts,
+        &transpose,
+        retention.as_deref_mut(),
+    );
     if let Some(retention) = retention {
         debug_assert_eq!(retention.witnesses.len(), load_eligibility.len());
         for (row, slots) in retention.witnesses.iter().enumerate() {
@@ -2581,6 +2984,15 @@ fn finalize_load_rows(
 /// 429,120 is the whole mesh, not the faces the pairs reach.  The counts above
 /// replace it and are read directly off `GroupedOwnerFaces` in one
 /// scratch-instrumented treant run.
+///
+/// Note 2026-08-07 (FU-8f phase G1, design record open question 8) — **do not
+/// "correct" 7,988,078 back.**  That figure appears in this codebase's records
+/// as two unrelated quantities that happen to share their digits on the same
+/// model.  Here it is the **falsified predicted row count** the paragraph above
+/// strikes.  In [`LoadEligibilityTranspose`] and the caps record it is the
+/// **measured `Σ |eligible_owners|` over the treant's 117,741 load rows**, a
+/// real and current counter read at `7aa6b73`.  Both sentences are correct as
+/// written, and neither number is evidence about the other.
 ///
 /// Cost, stated because it is spent before this build's own resource check
 /// (the upstream accepted-load preflight has already checked the same plan
@@ -2780,16 +3192,25 @@ pub(crate) fn specialized_load_resource_plan(
 
 pub(crate) fn finalize_specialized_load_partition(
     plan: &GenericContactPlan,
-    mesh: &Mesh,
+    verified_mesh: &VerifiedMeshFingerprint<'_>,
     surface: &NativeSurface,
     contacts: &[PhysicalContact],
     specialized_owner_faces: &[(u32, u32)],
     limits: LoadFinalizeLimits,
     retain: Option<&mut LoadRowRetention>,
 ) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
-    let fingerprint = mesh_fingerprint(mesh)
-        .map_err(|error| GenericPerceptionError::Topology(error.to_string()))?;
-    if fingerprint != plan.authority.mesh {
+    // FU-8f phase G2: hoisted digest, unchanged comparison.  This site and the
+    // `finalize_load_rows` it calls below used to hash the same unchanging
+    // mesh twice per gate batch; they now share one hash and each still checks.
+    //
+    // This comparison must stay AHEAD of everything below it, not merely
+    // present (amended 2026-08-07).  `extend_load_eligibility` takes its face
+    // range from `verified_mesh.mesh()` while `surface` is an independent
+    // argument, so a proof of a LARGER mesh would carry a face-range bound
+    // past the surface it indexes.  Refusing here is what keeps those two
+    // from ever being read against each other.
+    let mesh = verified_mesh.mesh();
+    if verified_mesh.fingerprint() != plan.authority.mesh {
         return Err(GenericPerceptionError::StaleAuthority);
     }
     // A child specialized-plan edit may intentionally remove every
@@ -2798,7 +3219,7 @@ pub(crate) fn finalize_specialized_load_partition(
     // through the same finalizer, with an empty eligibility set, rather than
     // fabricating rows or silently retaining the parent's load artifact.
     if contacts.is_empty() {
-        return finalize_load_rows(plan, mesh, &[], contacts, limits, retain);
+        return finalize_load_rows(plan, verified_mesh, &[], contacts, limits, retain);
     }
     // Group the pairs by face once.  The row count, the eligible-owner count
     // and the extension below are all read off this one grouping instead of
@@ -2842,7 +3263,7 @@ pub(crate) fn finalize_specialized_load_partition(
         &grouped,
         specialized_owner_faces,
     )?;
-    finalize_load_rows(plan, mesh, &extended, contacts, limits, retain)
+    finalize_load_rows(plan, verified_mesh, &extended, contacts, limits, retain)
 }
 
 /// Merge the specialized owners into the generic load authority's rows.
@@ -3263,7 +3684,7 @@ impl SpecializedLoadBaseline {
     /// inputs, running the production finalizer exactly once.
     pub(crate) fn build(
         plan: &GenericContactPlan,
-        mesh: &Mesh,
+        mesh: &VerifiedMeshFingerprint<'_>,
         surface: &NativeSurface,
         contacts: &[PhysicalContact],
         specialized_owner_faces: &[(u32, u32)],
@@ -4508,10 +4929,19 @@ mod tests {
             .iter()
             .all(|row| loads.contact_ids().contains(&row.contact_id)));
         assert!(load_violation_count(&partition, &contacts).is_ok());
-        let resource = load_resource_plan(&plan.load_eligibility, &contacts).unwrap();
+        // FU-8f phase G1: the finalizer's exact plan now also carries the
+        // contact-major transpose it scans over, so the boundary this test
+        // pins is stated over the same terms the finalizer charges.
+        let transpose_bytes = LoadTransposeCounts::count(&plan.load_eligibility, &contacts)
+            .unwrap()
+            .scratch_bytes(contacts.len())
+            .unwrap();
+        let resource =
+            load_resource_plan(&plan.load_eligibility, &contacts, transpose_bytes).unwrap();
+        let verified_mesh = VerifiedMeshFingerprint::compute(&mesh).unwrap();
         assert!(finalize_load_rows(
             &plan,
-            &mesh,
+            &verified_mesh,
             &plan.load_eligibility,
             &contacts,
             LoadFinalizeLimits {
@@ -4525,7 +4955,7 @@ mod tests {
         assert!(matches!(
             finalize_load_rows(
                 &plan,
-                &mesh,
+                &verified_mesh,
                 &plan.load_eligibility,
                 &contacts,
                 LoadFinalizeLimits {
@@ -4540,7 +4970,7 @@ mod tests {
         assert!(matches!(
             finalize_load_rows(
                 &plan,
-                &mesh,
+                &verified_mesh,
                 &plan.load_eligibility,
                 &contacts,
                 LoadFinalizeLimits {
@@ -4653,7 +5083,7 @@ mod tests {
         // distinct face of the mesh.
         let partition = finalize_specialized_load_partition(
             &plan,
-            &mesh,
+            &VerifiedMeshFingerprint::compute(&mesh).unwrap(),
             &surface,
             &contacts,
             &pairs,
@@ -4812,9 +5242,15 @@ mod tests {
             max_operations_floor: usize::MAX,
             operations_per_batch_unit: 0,
         };
-        let (baseline_partition, baseline) =
-            SpecializedLoadBaseline::build(&plan, &mesh, &surface, &contacts, &pairs, limits)
-                .expect("baseline");
+        let (baseline_partition, baseline) = SpecializedLoadBaseline::build(
+            &plan,
+            &VerifiedMeshFingerprint::compute(&mesh).unwrap(),
+            &surface,
+            &contacts,
+            &pairs,
+            limits,
+        )
+        .expect("baseline");
         let mut scratch = SpecializedLoadDeltaScratch::for_rows(baseline.row_count());
 
         let face_rows = |face: u32| {
@@ -4889,7 +5325,7 @@ mod tests {
                         .extend(union_faces.iter().map(|&face| (merged_slot as u32, face)));
                     let reference = finalize_specialized_load_partition(
                         &plan,
-                        &mesh,
+                        &VerifiedMeshFingerprint::compute(&mesh).unwrap(),
                         &surface,
                         &variant_contacts,
                         &variant_pairs,
@@ -5052,6 +5488,531 @@ mod tests {
             saw_untouched_row,
             "every row was inside some union, so the locality claim is untested"
         );
+    }
+
+    /// FU-8f phase G1: the transposed load finalize reproduces the
+    /// `contacts x rows` scan it replaced, cell for cell.
+    ///
+    /// The oracle is [`reference_contacts_x_rows_scan`] — the replaced
+    /// implementation itself, retained `#[cfg(test)]`, the same shape FU-8c and
+    /// FU-8d used.  What is compared is the production pass
+    /// ([`scan_transposed_load`], the one `finalize_load_rows` calls), row by
+    /// row, on `to_bits`: the argmin's contact index *and* its squared
+    /// distance, and all [`LOAD_WITNESS_SLOTS`] retained witness slots with
+    /// both their fields.  `to_bits` rather than `==` because the claim is
+    /// bit-identity, and `NaN`/`-0.0` would pass a float compare that
+    /// bit-identity must not.
+    ///
+    /// Two datasets, both from real geometry: `make_overhang_table`'s own
+    /// generic load authority, and the FU-8d phase F3 load fixture's extended
+    /// eligibility (six specialized seats over shared faces, plus one seat per
+    /// generic island), which is where owner runs, exact ties and rows served
+    /// by several owners actually occur.
+    ///
+    /// Non-vacuity, the FU-8d way: the transpose must be *sparse*, so a
+    /// silently-dense transpose (or an eligibility that admits everything)
+    /// fails the test rather than passing it trivially.
+    #[test]
+    fn fu8f_transposed_finalize_reproduces_the_scan_bit_for_bit() {
+        let mesh = make_overhang_table().unwrap();
+        let delicacy = vec![0.0; mesh.tris().len()];
+        let config = perception_config(&delicacy);
+        let plan = prepare_generic_contacts(
+            &mesh,
+            &config,
+            frame(),
+            &layer_plan(),
+            &candidate_config(),
+            &[],
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
+        )
+        .unwrap();
+        let surface = build_surface(&mesh, &config).unwrap();
+        let centroids = surface.geometry().centroids();
+        let generic_islands = plan
+            .islands()
+            .iter()
+            .map(|island| island.id)
+            .collect::<Vec<_>>();
+
+        // Returns `(cells, rows x contacts)` so the caller can assert sparsity
+        // on the dataset that carries it.
+        let compare = |eligibility: &[LoadEligibility],
+                       contacts: &[PhysicalContact],
+                       label: &str|
+         -> (usize, usize) {
+            let counts = LoadTransposeCounts::count(eligibility, contacts).expect("count");
+            let cells = counts.cells;
+            let dense = eligibility.len() * contacts.len();
+            assert_eq!(
+                counts.scratch_bytes(contacts.len()).expect("bytes"),
+                cells * 4 + (contacts.len() + 1) * 4,
+                "{label}: the charged term is cells x 4 B + (contacts + 1) x 4 B",
+            );
+            let transpose = counts.finish(eligibility, contacts);
+
+            // The CSR is exactly the eligible set, and every bucket is
+            // strictly ascending *without a sort* — the property the
+            // cell-for-cell visit-order claim rests on.
+            let mut recovered = 0usize;
+            for (contact_index, contact) in contacts.iter().enumerate() {
+                let bucket = transpose.rows_of(contact_index);
+                assert!(
+                    bucket.windows(2).all(|pair| pair[0] < pair[1]),
+                    "{label}: contact {contact_index}'s bucket is not strictly ascending",
+                );
+                for &row in bucket {
+                    assert!(
+                        eligibility[row as usize]
+                            .eligible_owners
+                            .binary_search(&contact.owner)
+                            .is_ok(),
+                        "{label}: bucket holds an ineligible cell",
+                    );
+                }
+                recovered += bucket.len();
+                let expected = eligibility
+                    .iter()
+                    .filter(|row| row.eligible_owners.binary_search(&contact.owner).is_ok())
+                    .count();
+                assert_eq!(
+                    bucket.len(),
+                    expected,
+                    "{label}: contact {contact_index} lost or gained cells",
+                );
+            }
+            assert_eq!(
+                recovered, cells,
+                "{label}: cells disagrees with the buckets"
+            );
+
+            let mut retention = LoadRowRetention {
+                witnesses: Vec::new(),
+                centroids_mm: Vec::new(),
+            };
+            let transposed =
+                scan_transposed_load(eligibility, contacts, &transpose, Some(&mut retention));
+            let (reference, reference_witnesses) =
+                reference_contacts_x_rows_scan(eligibility, contacts);
+            assert_eq!(transposed.len(), reference.len(), "{label}: row count");
+            for row in 0..reference.len() {
+                assert_eq!(
+                    transposed[row].map(|(index, distance)| (index, distance.to_bits())),
+                    reference[row].map(|(index, distance)| (index, distance.to_bits())),
+                    "{label}: row {row}'s nearest is not bit-identical",
+                );
+                for (slot, (left, right)) in retention.witnesses[row]
+                    .iter()
+                    .zip(reference_witnesses[row].iter())
+                    .enumerate()
+                {
+                    assert_eq!(
+                        (left.contact, left.squared_distance.to_bits()),
+                        (right.contact, right.squared_distance.to_bits()),
+                        "{label}: row {row} witness slot {slot} is not bit-identical",
+                    );
+                }
+            }
+            assert_eq!(
+                retention.centroids_mm.len(),
+                eligibility.len(),
+                "{label}: centroids not retained per row",
+            );
+            (cells, dense)
+        };
+
+        // Dataset 1 — `make_overhang_table`'s generic load authority, one
+        // contact per generic island.
+        let generic_contacts = generic_islands
+            .iter()
+            .enumerate()
+            .map(|(slot, &island)| PhysicalContact {
+                contact_id: slot as u64,
+                owner: LoadOwner::GenericIsland(island),
+                point_mm: [-5.0 - slot as f64, -5.0, -5.0],
+            })
+            .collect::<Vec<_>>();
+        // No sparsity is claimed here and none exists: `make_overhang_table`'s
+        // generic authority is a handful of rows over a single island, so its
+        // matrix is dense by construction.  It is carried because it is the
+        // *accepted-load* path's own shape — the path `Sphere`, `Cylinder` and
+        // `make_box` exercise in the OD-8 census with no tournament at all —
+        // and equivalence there is what the census digests depend on.
+        let (generic_cells, generic_dense) = compare(
+            &plan.load_eligibility,
+            &generic_contacts,
+            "make_overhang_table generic authority",
+        );
+        assert!(
+            generic_cells <= generic_dense,
+            "a transpose cannot hold more cells than the dense matrix has",
+        );
+
+        // Dataset 2 — the FU-8d phase F3 load fixture: six specialized seats
+        // over shared faces (seats 0 and 1 share a point exactly, so rows both
+        // serve are an exact tie the `contact_id` tie-break must resolve
+        // identically), plus one seat per generic island.
+        const CONTACTS: usize = 6;
+        let served: [&[u32]; CONTACTS] = [
+            &[0, 1, 2],
+            &[0, 1, 3],
+            &[2, 3, 4],
+            &[4, 5],
+            &[5, 6],
+            &[6, 7],
+        ];
+        let point = |face: u32, offset: f64| {
+            let c = centroids[face as usize];
+            [c[0] + offset, c[1], c[2]]
+        };
+        let points: [[f64; 3]; CONTACTS] = [
+            point(1, 0.5),
+            point(1, 0.5),
+            point(3, 0.25),
+            point(5, 0.25),
+            point(6, 0.25),
+            point(7, 0.25),
+        ];
+        let pairs = (0..CONTACTS)
+            .flat_map(|contact| {
+                served[contact]
+                    .iter()
+                    .map(move |&face| (contact as u32, face))
+            })
+            .collect::<Vec<_>>();
+        let fixture_contacts = (0..CONTACTS)
+            .map(|index| PhysicalContact {
+                contact_id: index as u64,
+                owner: LoadOwner::Specialized(index as u32),
+                point_mm: points[index],
+            })
+            .chain(
+                generic_islands
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, &island)| PhysicalContact {
+                        contact_id: (CONTACTS + slot) as u64,
+                        owner: LoadOwner::GenericIsland(island),
+                        point_mm: [-5.0 - slot as f64, -5.0, -5.0],
+                    }),
+            )
+            .collect::<Vec<_>>();
+        let grouped = GroupedOwnerFaces::from_pairs(&pairs);
+        let extended = extend_load_eligibility(
+            &plan.load_eligibility,
+            mesh.tris().len(),
+            &surface,
+            &grouped,
+            &pairs,
+        )
+        .expect("extended eligibility");
+        let (fixture_cells, fixture_dense) =
+            compare(&extended, &fixture_contacts, "FU-8d F3 load fixture");
+        assert!(
+            fixture_cells < fixture_dense,
+            "the F3 fixture's transpose is dense: {fixture_cells} of {fixture_dense}",
+        );
+
+        // Dataset 3 — the non-vacuity witness the design record asks for
+        // (cells sparser than `rows x contacts` by more than 10x).  Neither
+        // named fixture can carry it: `make_overhang_table`'s generic
+        // authority is one island over a couple of rows, and the F3 fixture's
+        // six seats over eight shared faces is only ~4x.  The treant's own
+        // ratio is 19.6x (8,210,643 eligible of 160,834,206 visited), and it
+        // comes from *many contacts each eligible for a small fraction of the
+        // rows* — so the witness reproduces that shape rather than that scale:
+        // one seat per pair of faces, over the same mesh.
+        const FAN_SEATS: usize = 24;
+        let fan_pairs = (0..FAN_SEATS)
+            .flat_map(|seat| {
+                let face = 2 * seat as u32;
+                [(seat as u32, face), (seat as u32, face + 1)]
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            2 * FAN_SEATS <= mesh.tris().len(),
+            "the fan fixture wants more faces than the mesh has",
+        );
+        let fan_contacts = (0..FAN_SEATS)
+            .map(|index| PhysicalContact {
+                contact_id: index as u64,
+                owner: LoadOwner::Specialized(index as u32),
+                point_mm: point(2 * index as u32, 0.25),
+            })
+            .chain(
+                generic_islands
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, &island)| PhysicalContact {
+                        contact_id: (FAN_SEATS + slot) as u64,
+                        owner: LoadOwner::GenericIsland(island),
+                        point_mm: [-5.0 - slot as f64, -5.0, -5.0],
+                    }),
+            )
+            .collect::<Vec<_>>();
+        let fan_grouped = GroupedOwnerFaces::from_pairs(&fan_pairs);
+        let fan_extended = extend_load_eligibility(
+            &plan.load_eligibility,
+            mesh.tris().len(),
+            &surface,
+            &fan_grouped,
+            &fan_pairs,
+        )
+        .expect("fan eligibility");
+        let (fan_cells, fan_dense) = compare(&fan_extended, &fan_contacts, "wide specialized fan");
+        assert!(
+            fan_cells * 10 < fan_dense,
+            "the transpose is not sparse by >10x: \
+             {fan_cells} cells of {fan_dense} rows x contacts",
+        );
+    }
+
+    /// FU-8f phase G2: hoisting the hash must not hoist the **check**.
+    ///
+    /// The gate stage now hashes the mesh once and threads the proof to both
+    /// load finalizers instead of each re-hashing 429,120 triangles per merge
+    /// round.  The saving is only legitimate if every consumer still compares
+    /// the threaded digest against its own plan authority — "verify once,
+    /// thread the proof", never "stop verifying".
+    ///
+    /// # Why the arms are shaped the way they are (strengthened 2026-08-07)
+    ///
+    /// The original G2 version of this test asserted `StaleAuthority` from
+    /// each finalizer with empty specialized pairs.  That pinned
+    /// [`finalize_load_rows`] honestly — it was called directly, and nothing
+    /// else on its path can produce that error — but it pinned
+    /// [`finalize_specialized_load_partition`] only **by delegation**: with
+    /// that site's own comparison deleted, the call fell straight through to
+    /// the `finalize_load_rows` it invokes, which refused on the same proof
+    /// and produced the same error.  The assertion could not tell the two
+    /// sites apart, so it did not prove what its name claimed.
+    ///
+    /// Each arm below therefore hands the specialized site a specialized
+    /// pair whose face id makes the delegate **unreachable** with the site's
+    /// own comparison gone, so the arm can only be satisfied by that site:
+    ///
+    /// * **Arm 1** — [`finalize_load_rows`], called directly.
+    /// * **Arm 2** — [`finalize_specialized_load_partition`] with a foreign
+    ///   mesh *smaller* than the real surface, and a pair naming a face the
+    ///   real surface has and the foreign mesh does not.  Past a deleted
+    ///   check, `extend_load_eligibility` sizes its range guard from
+    ///   `verified_mesh.mesh()` and returns `SpecializedFaceOutOfRange`
+    ///   **before** any delegation, so the arm sees a different variant.
+    /// * **Arm 3** — the same site with a foreign mesh *larger* than the real
+    ///   surface, and a pair naming a face the foreign mesh has and the real
+    ///   surface does not.  This is the dangerous direction: `surface` is an
+    ///   argument independent of the proof, so past a deleted check the
+    ///   larger mesh's face count admits a face id that then indexes
+    ///   `surface.geometry()` out of bounds.  Both finalizers are asserted on
+    ///   the larger proof.  The assertion is on the exact error *variant*, so
+    ///   it also proves the fingerprint comparison is genuinely fail-fast:
+    ///   `StaleAuthority`, never the range error the same inputs would raise
+    ///   downstream.
+    ///
+    /// # Mutation evidence — the arms are non-vacuous and independent
+    ///
+    /// Measured 2026-08-07 the FU-8e way, by disabling one comparison at a
+    /// time and re-running this test, then restoring it:
+    ///
+    /// * `finalize_load_rows`'s comparison disabled → **arm 1 FAILED**
+    ///   (`Ok`, i.e. `.err()` was `None`, against `Some(StaleAuthority)`).
+    ///   Re-run with only the two direct `finalize_load_rows` assertions
+    ///   neutralized, the same mutation left in place: **arms 2 and 3
+    ///   passed** — the specialized site refuses on its own, which is the
+    ///   delegation-independence this test previously lacked.
+    /// * `finalize_specialized_load_partition`'s comparison disabled →
+    ///   arm 1 passed and **arm 2 FAILED** with
+    ///   `Some(SpecializedFaceOutOfRange { face_id: 12 })` against
+    ///   `Some(StaleAuthority)` — the delegate was never reached, so nothing
+    ///   but this site could have satisfied the arm.
+    /// * Same mutation with arm 2's expectation relaxed so arm 3 is reached →
+    ///   **arm 3 FAILED** by panic, `index out of bounds: the len is 60 but
+    ///   the index is 60`, inside `extend_load_eligibility`'s
+    ///   `surface.geometry().centroids()[face_id]` — the out-of-range read
+    ///   the larger-mesh direction was added to cover, demonstrated to be
+    ///   reachable and not merely argued.
+    ///
+    /// The positive arms are asserted alongside, including one with arm 2's
+    /// own pairs, so no refusal passes for the trivial reason that these
+    /// inputs are refused anyway.
+    #[test]
+    fn fu8f_hoisted_fingerprint_still_refuses_a_foreign_mesh_at_both_finalizers() {
+        // The specialized owner the arms' pairs name.  It carries a physical
+        // contact of its own so the pairs are admissible on their own merits
+        // under the mesh's own proof — see the positive arms at the end.
+        const SPECIALIZED_OWNER: u32 = 7;
+
+        let mesh = make_overhang_table().unwrap();
+        let faces = mesh.tris().len();
+        let delicacy = vec![0.0; faces];
+        let config = perception_config(&delicacy);
+        let plan = prepare_generic_contacts(
+            &mesh,
+            &config,
+            frame(),
+            &layer_plan(),
+            &candidate_config(),
+            &[],
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
+        )
+        .unwrap();
+        let surface = build_surface(&mesh, &config).unwrap();
+        let mut contacts = plan
+            .islands()
+            .iter()
+            .map(|island| PhysicalContact {
+                contact_id: u64::from(island.id),
+                owner: LoadOwner::GenericIsland(island.id),
+                point_mm: [0.0, 0.0, 0.0],
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !contacts.is_empty(),
+            "the fixture must reach the non-empty specialized path",
+        );
+        contacts.push(PhysicalContact {
+            contact_id: u64::MAX,
+            owner: LoadOwner::Specialized(SPECIALIZED_OWNER),
+            point_mm: [0.0, 0.0, 0.0],
+        });
+        let limits = LoadFinalizeLimits {
+            max_scratch_bytes: usize::MAX,
+            max_operations_floor: usize::MAX,
+            operations_per_batch_unit: 0,
+        };
+
+        // Two real, honestly computed proofs — each of the wrong mesh, and
+        // deliberately one on each side of the real surface's face count,
+        // because the two directions fail differently past a missing check.
+        let smaller = plinth_mesh::make_box_default().unwrap();
+        let larger = plinth_mesh::make_toed_slab().unwrap();
+        assert!(
+            smaller.tris().len() < faces && faces < larger.tris().len(),
+            "the arms need one foreign mesh smaller and one larger than the \
+             real surface's {faces} faces, got {} and {}",
+            smaller.tris().len(),
+            larger.tris().len(),
+        );
+        let smaller_proof = VerifiedMeshFingerprint::compute(&smaller).unwrap();
+        let larger_proof = VerifiedMeshFingerprint::compute(&larger).unwrap();
+        for proof in [&smaller_proof, &larger_proof] {
+            assert_ne!(
+                proof.fingerprint(),
+                plan.authority.mesh,
+                "the fixture meshes must actually differ, or this test proves nothing",
+            );
+        }
+
+        // A face the real surface has and the smaller foreign mesh does not.
+        let real_only_face = u32::try_from(smaller.tris().len()).unwrap();
+        let near_pairs = [(SPECIALIZED_OWNER, real_only_face)];
+        // A face the larger foreign mesh has and the real surface does not.
+        let foreign_only_face = u32::try_from(faces).unwrap();
+        let far_pairs = [(SPECIALIZED_OWNER, foreign_only_face)];
+
+        // Arm 1 — `finalize_load_rows`'s own comparison, reached directly.
+        // Nothing else on this path can raise `StaleAuthority`, and with the
+        // comparison gone the call runs to completion and returns `Ok`.
+        assert_eq!(
+            finalize_load_rows(
+                &plan,
+                &smaller_proof,
+                &plan.load_eligibility,
+                &contacts,
+                limits,
+                None,
+            )
+            .err(),
+            Some(GenericPerceptionError::StaleAuthority),
+            "finalize_load_rows stopped checking the threaded fingerprint",
+        );
+
+        // Arm 2 — `finalize_specialized_load_partition`'s OWN comparison, not
+        // its delegate's.  `real_only_face` is out of range for the proof's
+        // mesh, so the only path past this site's check ends in
+        // `SpecializedFaceOutOfRange` before `finalize_load_rows` is ever
+        // called.  This arm is satisfiable by this site alone.
+        assert_eq!(
+            finalize_specialized_load_partition(
+                &plan,
+                &smaller_proof,
+                &surface,
+                &contacts,
+                &near_pairs,
+                limits,
+                None,
+            )
+            .err(),
+            Some(GenericPerceptionError::StaleAuthority),
+            "finalize_specialized_load_partition stopped checking the threaded \
+             fingerprint at its own site",
+        );
+
+        // Arm 3 — the dangerous direction: a foreign mesh with MORE faces
+        // than the surface it is presented alongside.  `foreign_only_face` is
+        // in range for the proof's mesh and out of range for `surface`, so
+        // past this site's check the face-range guard would admit a face id
+        // that indexes `surface.geometry()` out of bounds.  Asserting the
+        // exact variant also pins the check as fail-fast: it must refuse
+        // before the range guard, not after it.
+        assert_eq!(
+            finalize_specialized_load_partition(
+                &plan,
+                &larger_proof,
+                &surface,
+                &contacts,
+                &far_pairs,
+                limits,
+                None,
+            )
+            .err(),
+            Some(GenericPerceptionError::StaleAuthority),
+            "finalize_specialized_load_partition admitted a LARGER foreign \
+             mesh, whose face count would bound a range guard over a surface \
+             it does not index",
+        );
+        assert_eq!(
+            finalize_load_rows(
+                &plan,
+                &larger_proof,
+                &plan.load_eligibility,
+                &contacts,
+                limits,
+                None,
+            )
+            .err(),
+            Some(GenericPerceptionError::StaleAuthority),
+            "finalize_load_rows admitted a LARGER foreign mesh",
+        );
+
+        // The same inputs under the mesh's own proof are accepted, so the
+        // refusals above are the fingerprint's doing and nothing else's —
+        // including arm 2's pairs, which are a legal specialized assignment
+        // for this mesh and are refused only because the proof is foreign.
+        let proof = VerifiedMeshFingerprint::compute(&mesh).unwrap();
+        assert_eq!(proof.fingerprint(), plan.authority.mesh);
+        assert!(std::ptr::eq(proof.mesh(), &mesh));
+        finalize_load_rows(
+            &plan,
+            &proof,
+            &plan.load_eligibility,
+            &contacts,
+            limits,
+            None,
+        )
+        .expect("the mesh's own proof admits the generic finalize");
+        finalize_specialized_load_partition(&plan, &proof, &surface, &contacts, &[], limits, None)
+            .expect("the mesh's own proof admits the specialized finalize");
+        finalize_specialized_load_partition(
+            &plan,
+            &proof,
+            &surface,
+            &contacts,
+            &near_pairs,
+            limits,
+            None,
+        )
+        .expect("the mesh's own proof admits arm 2's specialized pairs");
     }
 
     #[test]

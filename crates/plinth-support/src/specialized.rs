@@ -22,7 +22,7 @@ use crate::perception::{
     FinalizedContactLoads, FinalizedLoadPartition, GenericContactPlan, GenericPerceptionError,
     GenericPerceptionLimits, LoadFinalizeLimits, LoadOwner, PhysicalContact, SliceSolid,
     SpecializedLoadBaseline, SpecializedLoadCounts, SpecializedLoadDeltaScratch,
-    SpecializedLoadDeltaWork, SpecializedOwnerReservation,
+    SpecializedLoadDeltaWork, SpecializedOwnerReservation, VerifiedMeshFingerprint,
 };
 use crate::{
     assess_coverage, build_dyadic_coverage_samples, coverage_assessment_resource_plan, BuildFrame,
@@ -1300,9 +1300,12 @@ impl<'a> SpecializedContactPlanEdit<'a> {
             &self.plan.reservations_authority,
             self.plan.limits_authority,
         )?;
+        // FU-8f phase G2: an edit replay is a one-shot path, not the gate's
+        // per-round loop, so it hashes its own mesh here.  Threading a proof
+        // in would change this public edit boundary for no saving.
         let load_partition = finalize_specialized_load_partition(
             &self.plan.generic_authority,
-            &self.plan.mesh_authority,
+            &VerifiedMeshFingerprint::compute(&self.plan.mesh_authority)?,
             &self.surface,
             &load_inputs.contacts,
             &load_inputs.specialized_owner_faces,
@@ -1852,10 +1855,17 @@ pub fn prepare_specialized_contacts(
         }
         physical.push(WorkingContact::specialized(demand));
     }
+    // FU-8f phase G2.  ONE `mesh_fingerprint` for the whole specialized-plan
+    // build: every merge-gate round inside `consolidate` and the accepted
+    // plan's own load finalize below now read this proof instead of re-hashing
+    // 429,120 triangles apiece.  The mesh cannot change across any of them --
+    // the tournament merges contacts, not geometry -- and each consumer still
+    // runs its own staleness comparison against its own plan authority.
+    let verified_mesh = VerifiedMeshFingerprint::compute(mesh)?;
     let gate_evidence = consolidate(
         &mut physical,
         generic,
-        mesh,
+        &verified_mesh,
         &surface,
         &topology,
         &islands,
@@ -1891,7 +1901,7 @@ pub fn prepare_specialized_contacts(
         .collect::<Result<Vec<_>, SpecializedError>>()?;
     let load_partition = finalize_specialized_load_partition(
         generic,
-        mesh,
+        &verified_mesh,
         &surface,
         &load_inputs.contacts,
         &load_inputs.specialized_owner_faces,
@@ -2786,7 +2796,9 @@ fn coalesce_exact_regular_seats(
 fn consolidate(
     contacts: &mut Vec<WorkingContact>,
     generic: &GenericContactPlan,
-    mesh: &Mesh,
+    // FU-8f phase G2: the gate stage receives the mesh already hashed, once,
+    // and every round below reads that proof rather than re-hashing.
+    mesh: &VerifiedMeshFingerprint<'_>,
     surface: &NativeSurface,
     topology: &plinth_mesh::FaceTopology,
     islands: &[SupportIsland],
@@ -3749,7 +3761,7 @@ fn evaluate_gate_batch(
     proposals: &[MergeProposal],
     proposal_storage_bytes: usize,
     generic: &GenericContactPlan,
-    mesh: &Mesh,
+    mesh: &VerifiedMeshFingerprint<'_>,
     surface: &NativeSurface,
     topology: &plinth_mesh::FaceTopology,
     islands: &[SupportIsland],
@@ -4207,7 +4219,7 @@ fn evaluate_gate_batch(
 fn build_gate_load_state(
     contacts: &[WorkingContact],
     generic: &GenericContactPlan,
-    mesh: &Mesh,
+    mesh: &VerifiedMeshFingerprint<'_>,
     surface: &NativeSurface,
     islands: &[SupportIsland],
     island_face_count: usize,
@@ -4258,7 +4270,7 @@ fn build_gate_load_state(
     )?;
     // `face_row` is one `u32` per mesh face, independent of the batch's
     // contact count.
-    let mut face_row = vec![u32::MAX; mesh.tris().len()];
+    let mut face_row = vec![u32::MAX; mesh.mesh().tris().len()];
     let mut row_face = Vec::with_capacity(partition.rows().len());
     for (row, load) in partition.rows().iter().enumerate() {
         row_face.push(load.face_id);
@@ -4363,7 +4375,7 @@ fn variant_load_violation_count_in_full(
     contacts: &[WorkingContact],
     proposal: &MergeProposal,
     generic: &GenericContactPlan,
-    mesh: &Mesh,
+    mesh: &VerifiedMeshFingerprint<'_>,
     surface: &NativeSurface,
     islands: &[SupportIsland],
     reservations: &[SpecializedOwnerReservation],
@@ -11524,7 +11536,7 @@ mod tests {
         .expect("required zero-child fixture can form a regular load input");
         regular_only.load_partition = finalize_specialized_load_partition(
             &generic,
-            &mesh,
+            &VerifiedMeshFingerprint::compute(&mesh).expect("fixture mesh hashes"),
             &NativeSurface::from_indexed(mesh.verts(), mesh.tris(), edit_surface_config()).unwrap(),
             &inputs.contacts,
             &inputs.specialized_owner_faces,

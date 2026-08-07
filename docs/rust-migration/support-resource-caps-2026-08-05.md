@@ -275,6 +275,64 @@ of them is raised here.
 > still exactly what a resource plan is for. The uncharged O(n²) rescan and the 4,127/4,127
 > stack samples were real and were defect (C).
 
+> **ADDENDUM 2026-08-07 (FU-8f phase G1) — a NEW term is charged against
+> `max_load_scratch_bytes`; the cap itself is untouched.** Everything above is
+> left standing. `max_load_scratch_bytes` remains **536,870,912 B (512 MiB)**,
+> unraised and unlowered, and no charged *operation* count moved in this phase.
+> What changed is what `finalize_load_rows` does and therefore what it must pay
+> for. It no longer scans `contacts × rows` and `continue`s on the ineligible
+> cells; it builds a **contact-major CSR transpose** of the eligibility it is
+> handed and runs the identical loop body over the eligible cells only, in the
+> identical order. Measured on the Weeping Treant v1.2's merge-gate batch at
+> `7aa6b73`:
+>
+> | counter | value |
+> |---|---:|
+> | cells visited by the old `contacts × rows` scan | **160,834,206** |
+> | cells that are actually eligible | **8,210,643** (19.6× fewer; 94.9 % of the old visits were the `continue`) |
+> | `Σ|eligible_owners|` over rows | **7,988,078** (max **568** on one row) |
+> | transpose bytes charged, `cells × 4 + (contacts + 1) × 4` | **32,848,040 B** |
+> | share of this 512 MiB cap | **6.1 %** (3.1 % of the 1 GiB gate peak) |
+>
+> The term is added to `LoadResourcePlan::scratch_bytes` inside
+> `load_resource_plan` — the finalizer's own **exact** plan — and deliberately
+> **not** to `specialized_load_resource_plan`, the preflight: the term *is* the
+> exact eligible-cell count, and every bound a preflight could state without the
+> eligibility (`owner_count × contact_count`, `rows × contacts`) over-states it
+> by two to three orders of magnitude and would refuse batches this build
+> admits. Consequence, stated rather than left to be found: the preflight
+> under-states this finalizer's scratch by the transpose term. That costs a
+> **later** refusal, never an unafforded allocation — the buffer is allocated
+> only after the exact check passes.
+>
+> **The operation model is left standing and over-stating, on purpose.**
+> `load_resource_plan_from_counts` still prices the scan as
+> `rows × contacts × (owner_log + 4)` ≈ 4.34 × 10⁹ on the treant where the
+> executed work is now ~10⁸. That is the FU-8e Q5 precedent — a plan that admits
+> the general path *a fortiori* admits its specialisation — and it is why **no
+> charged operation count moves in this phase**. Repricing is sequenced as its
+> own phase (G5), after the completed-gate measurement (G4), because G4's
+> transcript is the last measurement stated in the old numbers.
+>
+> Equivalence is by construction and is measured, not argued: filling the
+> buckets by walking rows **ascending** leaves every bucket ascending with no
+> sort (`buckets_already_sorted = true`), so consuming contacts **ascending**
+> reproduces the old visit sequence cell for cell; the in-process replica on the
+> treant's real batch reported `nearest_bit_identical = true`, tie-breaks
+> included. `fu8f_transposed_finalize_reproduces_the_scan_bit_for_bit` pins it
+> against the retained `#[cfg(test)]` `contacts × rows` reference, and the OD-8
+> census is the corpus gate: `Sphere`, `Cylinder` and `make_box` exercise this
+> finalizer on the **accepted-load** path with no tournament at all.
+>
+> Two record notes, so nothing is "corrected" back:
+> - **`Σ|eligible_owners| = 7,988,078` is a coincidence with the falsified
+>   figure of the same value** that record fix F3/F4 corrected above. The
+>   falsified 7,988,078 was a *predicted row count*; this 7,988,078 is a
+>   *measured sum of eligible owners over rows* on the same model. Same digits,
+>   unrelated quantities, both correct in their own sentence.
+> - **Rows are not uniformly small.** One treant row carries **568** eligible
+>   owners of 1,366 contacts. Nothing in the transpose assumes short buckets.
+
 The remaining work is algorithmic, not policy. Constants for a future scaled
 gate/load bound must be set on **post-fix** dimensions; today's numbers are
 measurements of a defect, not of a requirement. Note also that the linear
