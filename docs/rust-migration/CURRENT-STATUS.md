@@ -2096,6 +2096,59 @@ Everything else here is non-blocking.
 | FU-24 | ~~`m0-constants-source-ledger.json` is hand-maintained and had drifted from the registry~~ | **RESOLVED 2026-08-07.** The ledger's `registry_entries` array is prose provenance for the live `M0PlaceholderConstants`/`M0EvidenceConstants` registry (264 published ids as of this row); nothing mechanically tied the two together, so a new registry constant could land without its ledger entry and nobody would notice. Diffing ledger `id`s against the registry's own published id set found exactly two drifted: `INITIAL_AXIS_MAJORITY_CAP` and `INITIAL_AXIS_MAJORITY_STEP_MM`, added to the registry 2026-08-02 (commit `3d79a07`, "Add initial contact stub quarantine leaf") with no matching ledger entry ever added. Both are now entered with honest provenance — `Placeholder`, classification `runtime_search_cap`/`runtime_search`, normative `04-migration-plan.md §O-10` (there is no §3.x entry in `03-physics-and-constants.md`), and source locators pointing at the Rust declaration and consumer sites rather than a nonexistent Python legacy source, since this pair was a native-Rust O-10 declaration from the start. The drift was silent because nothing checked it: `crates/plinth-core/tests/constants_ledger_consistency.rs` now parses the ledger's `registry_entries` and asserts its id set equals the registry's published id set in both directions, cheaply (one JSON parse against the one registry construction every other constants test already pays for). Verified to fail on reintroduced drift before landing. `constants.md` was unaffected throughout — it renders from the registry alone, never from the ledger, so it already carried both ids; only the ledger and this row were behind. |
 | FU-25 | Decimation — topology diagnosis, then a real downstream-utility witness | **DEMOTED 2026-08-06 by owner ruling R6**, from "runs first" to a diagnosis + witness follow-up, because measurement falsified the compounding-speedup premise. The blocker is `topology_not_increased`, not `assess_downstream_utility`: `nonmanifold_edges` goes 0 → non-zero at every attempted treant ratio and `geometrically_eligible_candidate_count` is **0**, so minting a witness today moves the treant by zero faces. The ratified geometric budget admits only ~6–9 % reduction anyway (p99 0.00643 mm at r = 0.9406), which would still leave the gate charge ~7× over the flat floor. Sequenced as: diagnose the 3 non-manifold edges of the 425,934-face candidate → register constants and mint the witness (zero corpus delta) → make the reduction reachable and re-pin what it moves. Note the two live constraints: `crates/plinth-orient/tests/orientation_rederivation.rs` hard-asserts **no** reduction for the treant against its tracked 21,456,084-byte artifact, and `Sphere` + `make_toed_slab` would decimate the instant a witness exists, moving frozen digests `17667468971446251870` and `11199296506741562956` — hence the size threshold is proven necessary, not merely prudent. Full design, evidence and open questions Q1–Q8: [`decimation-design-2026-08-06.md`](decimation-design-2026-08-06.md). |
 
+## Test-count counting recipe (2026-08-07) {#test-count-recipe-2026-08-07}
+
+Certified gate test counts have been re-litigated across agents more than once — 946/947 and
+947/948 historically, 970/971 immediately before this section was written. **The pair is real,
+not noise, and both halves are correct — they are just two different, both-valid, invocations.**
+The gap is caused by exactly one feature-gated unit test:
+`chitubox_io::py::tests::every_format_gate_error_has_a_stable_python_kind` in
+`rust/chitubox_io/src/py.rs`, compiled only when `chitubox_io`'s sole optional feature (`python`,
+the PyO3 binding) is enabled. `python` is not in chitubox_io's `default = []` feature set, so:
+
+- `cargo test --workspace --offline --no-fail-fast` (gate 1, default features) compiles without
+  it and passed **971** as this section was written.
+- `cargo test --workspace --offline --all-features --no-fail-fast` (gate 2) turns `python` on
+  and passed **972** — one more, always that one test, verified by diffing the two runs'
+  per-binary `running N tests` lines: every other of the 82 test-result sections (65 unit /
+  integration binaries plus 14 per-crate doc-test batches, one per workspace member — the
+  workspace has 14 members, but `plinth-cli` alone contributes two unit-test binaries,
+  `src/lib.rs` and `src/main.rs`, which is why unit-test binaries outnumber doc-test batches by
+  exactly one crate's worth) reports an identical count in both logs.
+
+So: **"the test count" is not one number**, it is a pair, one per gate invocation, and quoting
+either half without saying which gate produced it is what has been re-litigated as drift. Prior
+disagreements (946/947, 947/948) are almost certainly the same ±1 default/all-features pair
+observed at earlier points in the workspace's growth, not a flaky suite.
+
+**A second, independent trap for a naive count**: do not grep the raw log text for lines that
+look like individual test results and sum them. `crates/plinth-core/tests/compile_fail.rs` and
+`crates/plinth-support/tests/compile_fail.rs` are `trybuild` harnesses — each is exactly **one**
+`#[test]` fn as far as cargo's own libtest accounting is concerned (each contributes 1 to its
+binary's own `running N tests` / `test result: ok. N passed`), but internally `trybuild` prints
+its own `test tests/compile_fail/<fixture>.rs ... ok` line per fixture file it compile-checks —
+23 such lines across the two harnesses in this workspace (3 + 20), none of which is a libtest
+test and none of which appears in any `test result:` summary. A log-wide
+`grep -c '\.\.\. ok$'` therefore overcounts by the fixture count; only a sum keyed off the
+`test result: ok. N passed` summary lines — the number libtest itself already computed per
+binary — is authoritative.
+
+**Canonical counting command** (run whichever gate's count you need to state, and say which):
+
+```sh
+cargo test --workspace --offline --all-features --no-fail-fast 2>&1 \
+  | tee /tmp/plinth-test-run.log \
+  | tail -5
+grep -oE '^test result: ok\. [0-9]+ passed' /tmp/plinth-test-run.log \
+  | grep -oE '[0-9]+' \
+  | awk '{s+=$1} END{print s}'
+```
+
+Swap in `--offline --no-fail-fast` (no `--all-features`) for the default-feature count. Report
+the number **with** the invocation it came from (e.g. "971 default-feature / 972 all-features"),
+never a bare figure — that is the one canonical command and the one canonical report shape;
+future verifiers should stop re-deriving this from scratch.
+
 ## Ordered resumption checklist
 
 1. Reconcile the live head and preserve the recorded SCAR acceptance. **Updated 2026-08-05:
