@@ -14,6 +14,11 @@
 //! diffs two id sets against the one registry construction every other
 //! constants test in this crate already pays for. It does not validate
 //! ledger prose content, classification values, or source locators.
+//!
+//! Recorded future tightening: the `BTreeSet` comparison also passes silently
+//! on duplicate `id`s within `registry_entries`, and the ledger's `retired`,
+//! `excluded`, and `aliases` arrays are not cross-checked against
+//! `registry_entries` at all.
 
 use plinth_core::m0_constants;
 use serde::Deserialize;
