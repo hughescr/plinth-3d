@@ -2018,8 +2018,34 @@ plainly here so a later reader does not mistake the omission for an oversight.
 comparison at **both** sites *independently*, by handing each a proof that is honestly computed
 and perfectly valid — **for a different mesh**. That is the exact failure a caller mixing two
 meshes would produce, and the exact failure a site that stopped comparing would miss. The
-positive arm asserts the same inputs are admitted under the mesh's own proof, so neither refusal
+positive arms assert the same inputs are admitted under the mesh's own proof, so no refusal
 passes for the trivial reason that the inputs are refused anyway.
+
+*Amended 2026-08-07 — the original G2 test pinned the sites by delegation, and was
+strengthened.* As first landed, the test asserted `StaleAuthority` from each finalizer with empty
+specialized pairs, and the G2 verifier measured that deleting **only**
+`finalize_specialized_load_partition`'s own comparison left it green: the call fell through to
+the `finalize_load_rows` it invokes, which refused on the same proof. The second assertion was
+satisfied by *delegation*, not by the site it named. The test now runs three arms, each
+satisfiable only by the site it names, each handed a specialized pair that makes the delegate
+unreachable with that site's check gone — and non-vacuity is measured by mutation rather than
+argued: deleting `finalize_load_rows`'s comparison fails arm 1 (`None` against
+`Some(StaleAuthority)`) while arms 2 and 3 still pass; deleting
+`finalize_specialized_load_partition`'s fails arm 2 with
+`Some(SpecializedFaceOutOfRange { face_id: 12 })` while arm 1 still passes. The mutation
+transcript lives in the test's doc comment.
+
+**The dangerous direction is now covered too.** The original fixture's foreign mesh was
+`make_box_default` (12 triangles) against `make_overhang_table` (60) — **smaller**, which is the
+harmless side. The specialized site's check is not purely fail-fast in effect: past it,
+`extend_load_eligibility` derives its face-range guard from `verified_mesh.mesh()` while
+`surface` remains an independent argument, so a **larger** foreign mesh would carry a face-range
+bound past the surface it indexes. Arm 3 uses `make_toed_slab` (140 triangles) with a pair
+naming face 60 — in range for the proof's mesh, out of range for the surface — and asserts
+`StaleAuthority` at both finalizers. Under the mutation it fails by panic, `index out of bounds:
+the len is 60 but the index is 60`, at `surface.geometry().centroids()[face_id]`: the
+out-of-bounds read is real and reachable, and the comparison's *position* ahead of the range
+guard is what prevents it. That ordering is now stated at the code as well.
 
 **Nothing to sweep.** No charged number moves, so no dated addendum is owed at
 `placeholders.rs`, `constants.md`, `support-resource-caps-2026-08-05.md` or

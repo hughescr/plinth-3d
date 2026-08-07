@@ -2801,6 +2801,16 @@ fn reference_contacts_x_rows_scan(
 /// proof to hand builds one with [`Self::compute`] and pays exactly what it
 /// paid before; nothing anywhere is verified less than it was.
 ///
+/// That claim is pinned, one arm per site, by
+/// `fu8f_hoisted_fingerprint_still_refuses_a_foreign_mesh_at_both_finalizers`.
+/// *Amended 2026-08-07*: the original G2 test pinned
+/// [`finalize_specialized_load_partition`] only **by delegation** — deleting
+/// that site's own comparison left the test green, because the call fell
+/// through to the [`finalize_load_rows`] it invokes, which refused on the
+/// same proof.  The test was strengthened so each arm can be satisfied only
+/// by the site it names, and each site's deletion was measured to fail its
+/// own arm; the arm shapes and the mutation results are in its doc comment.
+///
 /// # Why the mesh travels inside the proof
 ///
 /// The consumers need the mesh itself (face counts, triangles) as well as the
@@ -3192,6 +3202,13 @@ pub(crate) fn finalize_specialized_load_partition(
     // FU-8f phase G2: hoisted digest, unchanged comparison.  This site and the
     // `finalize_load_rows` it calls below used to hash the same unchanging
     // mesh twice per gate batch; they now share one hash and each still checks.
+    //
+    // This comparison must stay AHEAD of everything below it, not merely
+    // present (amended 2026-08-07).  `extend_load_eligibility` takes its face
+    // range from `verified_mesh.mesh()` while `surface` is an independent
+    // argument, so a proof of a LARGER mesh would carry a face-range bound
+    // past the surface it indexes.  Refusing here is what keeps those two
+    // from ever being read against each other.
     let mesh = verified_mesh.mesh();
     if verified_mesh.fingerprint() != plan.authority.mesh {
         return Err(GenericPerceptionError::StaleAuthority);
@@ -5733,16 +5750,76 @@ mod tests {
     /// the threaded digest against its own plan authority — "verify once,
     /// thread the proof", never "stop verifying".
     ///
-    /// So this pins the comparison at **both** sites independently, by handing
-    /// each a proof that is perfectly valid *for a different mesh*: the exact
-    /// failure a caller that mixed two meshes would produce, and the exact
-    /// failure a site that stopped comparing would miss.  The positive arm is
-    /// asserted alongside, so the refusal is not passing for the trivial
-    /// reason that these inputs are refused anyway.
+    /// # Why the arms are shaped the way they are (strengthened 2026-08-07)
+    ///
+    /// The original G2 version of this test asserted `StaleAuthority` from
+    /// each finalizer with empty specialized pairs.  That pinned
+    /// [`finalize_load_rows`] honestly — it was called directly, and nothing
+    /// else on its path can produce that error — but it pinned
+    /// [`finalize_specialized_load_partition`] only **by delegation**: with
+    /// that site's own comparison deleted, the call fell straight through to
+    /// the `finalize_load_rows` it invokes, which refused on the same proof
+    /// and produced the same error.  The assertion could not tell the two
+    /// sites apart, so it did not prove what its name claimed.
+    ///
+    /// Each arm below therefore hands the specialized site a specialized
+    /// pair whose face id makes the delegate **unreachable** with the site's
+    /// own comparison gone, so the arm can only be satisfied by that site:
+    ///
+    /// * **Arm 1** — [`finalize_load_rows`], called directly.
+    /// * **Arm 2** — [`finalize_specialized_load_partition`] with a foreign
+    ///   mesh *smaller* than the real surface, and a pair naming a face the
+    ///   real surface has and the foreign mesh does not.  Past a deleted
+    ///   check, `extend_load_eligibility` sizes its range guard from
+    ///   `verified_mesh.mesh()` and returns `SpecializedFaceOutOfRange`
+    ///   **before** any delegation, so the arm sees a different variant.
+    /// * **Arm 3** — the same site with a foreign mesh *larger* than the real
+    ///   surface, and a pair naming a face the foreign mesh has and the real
+    ///   surface does not.  This is the dangerous direction: `surface` is an
+    ///   argument independent of the proof, so past a deleted check the
+    ///   larger mesh's face count admits a face id that then indexes
+    ///   `surface.geometry()` out of bounds.  Both finalizers are asserted on
+    ///   the larger proof.  The assertion is on the exact error *variant*, so
+    ///   it also proves the fingerprint comparison is genuinely fail-fast:
+    ///   `StaleAuthority`, never the range error the same inputs would raise
+    ///   downstream.
+    ///
+    /// # Mutation evidence — the arms are non-vacuous and independent
+    ///
+    /// Measured 2026-08-07 the FU-8e way, by disabling one comparison at a
+    /// time and re-running this test, then restoring it:
+    ///
+    /// * `finalize_load_rows`'s comparison disabled → **arm 1 FAILED**
+    ///   (`Ok`, i.e. `.err()` was `None`, against `Some(StaleAuthority)`).
+    ///   Re-run with only the two direct `finalize_load_rows` assertions
+    ///   neutralized, the same mutation left in place: **arms 2 and 3
+    ///   passed** — the specialized site refuses on its own, which is the
+    ///   delegation-independence this test previously lacked.
+    /// * `finalize_specialized_load_partition`'s comparison disabled →
+    ///   arm 1 passed and **arm 2 FAILED** with
+    ///   `Some(SpecializedFaceOutOfRange { face_id: 12 })` against
+    ///   `Some(StaleAuthority)` — the delegate was never reached, so nothing
+    ///   but this site could have satisfied the arm.
+    /// * Same mutation with arm 2's expectation relaxed so arm 3 is reached →
+    ///   **arm 3 FAILED** by panic, `index out of bounds: the len is 60 but
+    ///   the index is 60`, inside `extend_load_eligibility`'s
+    ///   `surface.geometry().centroids()[face_id]` — the out-of-range read
+    ///   the larger-mesh direction was added to cover, demonstrated to be
+    ///   reachable and not merely argued.
+    ///
+    /// The positive arms are asserted alongside, including one with arm 2's
+    /// own pairs, so no refusal passes for the trivial reason that these
+    /// inputs are refused anyway.
     #[test]
     fn fu8f_hoisted_fingerprint_still_refuses_a_foreign_mesh_at_both_finalizers() {
+        // The specialized owner the arms' pairs name.  It carries a physical
+        // contact of its own so the pairs are admissible on their own merits
+        // under the mesh's own proof — see the positive arms at the end.
+        const SPECIALIZED_OWNER: u32 = 7;
+
         let mesh = make_overhang_table().unwrap();
-        let delicacy = vec![0.0; mesh.tris().len()];
+        let faces = mesh.tris().len();
+        let delicacy = vec![0.0; faces];
         let config = perception_config(&delicacy);
         let plan = prepare_generic_contacts(
             &mesh,
@@ -5755,7 +5832,7 @@ mod tests {
         )
         .unwrap();
         let surface = build_surface(&mesh, &config).unwrap();
-        let contacts = plan
+        let mut contacts = plan
             .islands()
             .iter()
             .map(|island| PhysicalContact {
@@ -5768,25 +5845,53 @@ mod tests {
             !contacts.is_empty(),
             "the fixture must reach the non-empty specialized path",
         );
+        contacts.push(PhysicalContact {
+            contact_id: u64::MAX,
+            owner: LoadOwner::Specialized(SPECIALIZED_OWNER),
+            point_mm: [0.0, 0.0, 0.0],
+        });
         let limits = LoadFinalizeLimits {
             max_scratch_bytes: usize::MAX,
             max_operations_floor: usize::MAX,
             operations_per_batch_unit: 0,
         };
 
-        // A real, honestly computed proof — of the wrong mesh.
-        let foreign = plinth_mesh::make_box_default().unwrap();
-        let foreign_proof = VerifiedMeshFingerprint::compute(&foreign).unwrap();
-        assert_ne!(
-            foreign_proof.fingerprint(),
-            plan.authority.mesh,
-            "the fixture meshes must actually differ, or this test proves nothing",
+        // Two real, honestly computed proofs — each of the wrong mesh, and
+        // deliberately one on each side of the real surface's face count,
+        // because the two directions fail differently past a missing check.
+        let smaller = plinth_mesh::make_box_default().unwrap();
+        let larger = plinth_mesh::make_toed_slab().unwrap();
+        assert!(
+            smaller.tris().len() < faces && faces < larger.tris().len(),
+            "the arms need one foreign mesh smaller and one larger than the \
+             real surface's {faces} faces, got {} and {}",
+            smaller.tris().len(),
+            larger.tris().len(),
         );
+        let smaller_proof = VerifiedMeshFingerprint::compute(&smaller).unwrap();
+        let larger_proof = VerifiedMeshFingerprint::compute(&larger).unwrap();
+        for proof in [&smaller_proof, &larger_proof] {
+            assert_ne!(
+                proof.fingerprint(),
+                plan.authority.mesh,
+                "the fixture meshes must actually differ, or this test proves nothing",
+            );
+        }
 
+        // A face the real surface has and the smaller foreign mesh does not.
+        let real_only_face = u32::try_from(smaller.tris().len()).unwrap();
+        let near_pairs = [(SPECIALIZED_OWNER, real_only_face)];
+        // A face the larger foreign mesh has and the real surface does not.
+        let foreign_only_face = u32::try_from(faces).unwrap();
+        let far_pairs = [(SPECIALIZED_OWNER, foreign_only_face)];
+
+        // Arm 1 — `finalize_load_rows`'s own comparison, reached directly.
+        // Nothing else on this path can raise `StaleAuthority`, and with the
+        // comparison gone the call runs to completion and returns `Ok`.
         assert_eq!(
             finalize_load_rows(
                 &plan,
-                &foreign_proof,
+                &smaller_proof,
                 &plan.load_eligibility,
                 &contacts,
                 limits,
@@ -5796,23 +5901,69 @@ mod tests {
             Some(GenericPerceptionError::StaleAuthority),
             "finalize_load_rows stopped checking the threaded fingerprint",
         );
+
+        // Arm 2 — `finalize_specialized_load_partition`'s OWN comparison, not
+        // its delegate's.  `real_only_face` is out of range for the proof's
+        // mesh, so the only path past this site's check ends in
+        // `SpecializedFaceOutOfRange` before `finalize_load_rows` is ever
+        // called.  This arm is satisfiable by this site alone.
         assert_eq!(
             finalize_specialized_load_partition(
                 &plan,
-                &foreign_proof,
+                &smaller_proof,
                 &surface,
                 &contacts,
-                &[],
+                &near_pairs,
                 limits,
                 None,
             )
             .err(),
             Some(GenericPerceptionError::StaleAuthority),
-            "finalize_specialized_load_partition stopped checking the threaded fingerprint",
+            "finalize_specialized_load_partition stopped checking the threaded \
+             fingerprint at its own site",
         );
 
-        // The same inputs under the mesh's own proof are accepted, so the two
-        // refusals above are the fingerprint's doing and nothing else's.
+        // Arm 3 — the dangerous direction: a foreign mesh with MORE faces
+        // than the surface it is presented alongside.  `foreign_only_face` is
+        // in range for the proof's mesh and out of range for `surface`, so
+        // past this site's check the face-range guard would admit a face id
+        // that indexes `surface.geometry()` out of bounds.  Asserting the
+        // exact variant also pins the check as fail-fast: it must refuse
+        // before the range guard, not after it.
+        assert_eq!(
+            finalize_specialized_load_partition(
+                &plan,
+                &larger_proof,
+                &surface,
+                &contacts,
+                &far_pairs,
+                limits,
+                None,
+            )
+            .err(),
+            Some(GenericPerceptionError::StaleAuthority),
+            "finalize_specialized_load_partition admitted a LARGER foreign \
+             mesh, whose face count would bound a range guard over a surface \
+             it does not index",
+        );
+        assert_eq!(
+            finalize_load_rows(
+                &plan,
+                &larger_proof,
+                &plan.load_eligibility,
+                &contacts,
+                limits,
+                None,
+            )
+            .err(),
+            Some(GenericPerceptionError::StaleAuthority),
+            "finalize_load_rows admitted a LARGER foreign mesh",
+        );
+
+        // The same inputs under the mesh's own proof are accepted, so the
+        // refusals above are the fingerprint's doing and nothing else's —
+        // including arm 2's pairs, which are a legal specialized assignment
+        // for this mesh and are refused only because the proof is foreign.
         let proof = VerifiedMeshFingerprint::compute(&mesh).unwrap();
         assert_eq!(proof.fingerprint(), plan.authority.mesh);
         assert!(std::ptr::eq(proof.mesh(), &mesh));
@@ -5827,6 +5978,16 @@ mod tests {
         .expect("the mesh's own proof admits the generic finalize");
         finalize_specialized_load_partition(&plan, &proof, &surface, &contacts, &[], limits, None)
             .expect("the mesh's own proof admits the specialized finalize");
+        finalize_specialized_load_partition(
+            &plan,
+            &proof,
+            &surface,
+            &contacts,
+            &near_pairs,
+            limits,
+            None,
+        )
+        .expect("the mesh's own proof admits arm 2's specialized pairs");
     }
 
     #[test]
