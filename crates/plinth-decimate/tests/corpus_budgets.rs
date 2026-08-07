@@ -569,8 +569,11 @@ fn independently_audit_already_print_scale(
             && attempt.downstream_utility
                 != plinth_decimate::DownstreamUtilityEvidence::NoDownstreamUtilityEvidence
     }) {
+        // A granted witness on a geometrically eligible attempt would have
+        // produced `Verified`, not this outcome, so seeing one here means the
+        // search returned the original after minting downstream evidence.
         return Err(
-            "AlreadyPrintScaleUtility: unregistered downstream evidence authorized reduction"
+            "AlreadyPrintScaleUtility: downstream evidence was minted but no reduction was returned"
                 .to_owned(),
         );
     }

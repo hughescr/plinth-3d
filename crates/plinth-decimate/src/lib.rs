@@ -354,9 +354,27 @@ pub enum FinalVerificationResult {
     TopologyIncreased,
 }
 
+/// The one registered AcceptSafe downstream-utility witness.
+///
+/// Reducing the support-mesh face count `F` strictly reduces the demand on two
+/// *registered* execution-authority resources whose demand is an exact function
+/// of `F` alone: the minima-kNN batch's `source_count` (which is `F` itself,
+/// capped by `SUPPORT_KNN_MAX_WORK_PER_FACE`) and the `81·F` per-triangle term
+/// of the parity-grid projection `81·F + 36·R + 4`, capped by
+/// `SUPPORT_PARITY_GRID_MAX_BYTES_PER_FACE`.
+///
+/// The claim deliberately stops there. It does **not** assert that the `36·R`
+/// reference term falls: `R/F` is measured to *rise* as a mesh coarsens (526
+/// references per face on the 244-face Cylinder against 2.83 on the 429,120-face
+/// Weeping Treant v1.2), so total `R` falls sublinearly and could in principle
+/// be flat. Saying only what is exactly provable is what keeps this witness from
+/// inheriting the n = 1 treant coefficients.
+pub const SUPPORT_FACE_SCALED_RESOURCE_DEMAND: &str = "support-face-scaled-resource-demand";
+
 /// Opaque proof that a reduced mesh saves registered downstream work or a
-/// registered bounded resource. No such AcceptSafe witness is registered yet,
-/// so this type intentionally has no public constructor.
+/// registered bounded resource. The field stays private and the type has no
+/// public constructor: the only way to obtain one is for
+/// `assess_downstream_utility` to satisfy every clause of a registered witness.
 ///
 /// ```compile_fail,E0451
 /// use plinth_decimate::DownstreamUseful;
@@ -369,6 +387,12 @@ pub struct DownstreamUseful {
 }
 
 impl DownstreamUseful {
+    /// Mints the witness. Crate-private on purpose: no downstream caller may
+    /// name a witness id, and no caller outside this crate may mint one at all.
+    const fn witness(witness_id: &'static str) -> Self {
+        Self { witness_id }
+    }
+
     #[must_use]
     pub const fn witness_id(&self) -> &'static str {
         self.witness_id
@@ -488,9 +512,13 @@ pub enum BudgetSearchOutcome {
 
 /// The production disposition carried across the orientation boundary.
 ///
-/// `AlreadyPrintScale` is the only current success because no constructor for
-/// [`DownstreamUseful`] is registered. Geometric eligibility alone therefore
-/// never authorizes a reduced production mesh.
+/// `Reduced` requires every clause of a registered [`DownstreamUseful`] witness
+/// (see `assess_downstream_utility`); geometric eligibility alone still never
+/// authorizes a reduced production mesh. As of 2026-08-07 the one registered
+/// witness is [`SUPPORT_FACE_SCALED_RESOURCE_DEMAND`], and no corpus model
+/// reaches it: five refuse at `ProtectionCap`, `Sphere` and `make_toed_slab`
+/// sit below `DECIMATION_UTILITY_MIN_INPUT_FACES`, and the Weeping Treant v1.2
+/// is stopped by the topology gate before the witness is ever consulted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DecimationDisposition {
     Reduced,
@@ -886,6 +914,22 @@ struct SearchPolicy {
     p99_factor: f64,
     p99_9_factor: f64,
     final_slack: f64,
+    utility: UtilityPolicy,
+}
+
+/// The registered authorities behind the downstream-utility witness, read once
+/// per run rather than once per candidate.
+///
+/// The three deviation bounds are `Derived` from the vendor pitch and the
+/// owner-ratified print floor; the face threshold is a `Placeholder`. That
+/// split is the point: the threshold decides only *whether to attempt*, never
+/// *whether the result is safe*.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct UtilityPolicy {
+    min_input_faces: usize,
+    max_p99_deviation_mm: f64,
+    max_p99_9_deviation_mm: f64,
+    max_absolute_deviation_mm: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -1358,7 +1402,13 @@ fn run_budget_search(
             topology_before,
             topology_after,
         );
-        let downstream_utility = assess_downstream_utility(&final_outcome);
+        let downstream_utility = assess_downstream_utility(
+            policy.utility,
+            &final_outcome,
+            &final_probe,
+            topology_before,
+            topology_after,
+        );
         trace.final_attempts.push(FinalVerificationAttempt {
             requested_ratio: candidate.ratio,
             achieved_ratio: final_outcome.achieved_ratio,
@@ -1450,10 +1500,87 @@ fn record_unexplored_dense_interval(input_faces: usize, trace: &mut BudgetSearch
     }
 }
 
-fn assess_downstream_utility(_candidate: &SimplifyOutcome) -> DownstreamUtilityEvidence {
-    // M3 has no registered AcceptSafe work/resource witness yet. Face removal
-    // alone is not downstream utility evidence.
-    DownstreamUtilityEvidence::NoDownstreamUtilityEvidence
+/// The registered `support-face-scaled-resource-demand` witness predicate.
+///
+/// Every clause must hold. Three read evidence the search already computes; two
+/// are new. In clause order:
+///
+/// - **Threshold.** `input_face_count >= DECIMATION_UTILITY_MIN_INPUT_FACES`.
+///   This is checked *first and here*, rather than in front of the search, so
+///   that every trace below the threshold stays byte-identical to the
+///   pre-witness engine — same `final_attempts`, same
+///   `NoDownstreamUtilityEvidence` refusal, same returned `original.clone()`.
+///   The seven frozen OD-8 census digests are therefore frozen *structurally*,
+///   not merely measured to be unmoved.
+/// - **U1 — genuine reduction.** `output_face_count < input_face_count`.
+/// - **U2 — bounded typical deviation.** `p99 <= DECIMATION_MAX_P99_DEVIATION_MM`
+///   and `p99.9 <= DECIMATION_MAX_P999_DEVIATION_MM`. Numerically identical to
+///   what the search enforces, and deliberately re-asserted against the
+///   `Derived` constants rather than the `Placeholder` search factors: no slack
+///   multiplier applies here, so a candidate admitted on the final ×1.1 slack
+///   still fails this clause.
+/// - **U3 — bounded worst-case deviation.** `max <= DECIMATION_MAX_ABSOLUTE_DEVIATION_MM`.
+///   The genuinely new physics: p99.9 leaves 0.1 % of samples unbounded, and on
+///   a 429 k-face mesh that is ~1,700 points, any one of which could be a
+///   collapsed twig. An absent `max_mm` is a refusal, never a pass.
+/// - **U4 — structural invariants downstream stages assume.**
+///   `topology_not_increased`, the same predicate the search gate uses, because
+///   `stitch_layer` genuinely requires degree-2 adjacency. Strict audit is
+///   already enforced inside `compact_result` and inside every probe. OD-9
+///   exterior-ness is relied on, not re-proved: the contact machinery screens it
+///   later.
+/// - **U5 — the registered saving.** The two execution-authority resources whose
+///   demand is an exact function of face count alone must both strictly fall:
+///   the minima-kNN batch's `source_count` (`= F`) and the `81·F` per-triangle
+///   term of the parity-grid projection. This is implied by U1, and is computed
+///   explicitly anyway so the registered claim is machine-checked rather than
+///   asserted in prose. It stops at those two terms on purpose — see
+///   [`SUPPORT_FACE_SCALED_RESOURCE_DEMAND`].
+fn assess_downstream_utility(
+    policy: UtilityPolicy,
+    candidate: &SimplifyOutcome,
+    final_probe: &TwoSidedProbe,
+    topology_before: EdgeTopologyCounts,
+    topology_after: EdgeTopologyCounts,
+) -> DownstreamUtilityEvidence {
+    // A non-finite deviation is a refusal, not a comparison: `NaN > limit` is
+    // false, so an unguarded `>` would read a missing measurement as a pass.
+    let Some(max_mm) = final_probe.max_mm.filter(|value| value.is_finite()) else {
+        return DownstreamUtilityEvidence::NoDownstreamUtilityEvidence;
+    };
+    if candidate.input_face_count < policy.min_input_faces
+        || candidate.output_face_count >= candidate.input_face_count
+        || !final_probe.p99_mm.is_finite()
+        || !final_probe.p99_9_mm.is_finite()
+        || final_probe.p99_mm > policy.max_p99_deviation_mm
+        || final_probe.p99_9_mm > policy.max_p99_9_deviation_mm
+        || max_mm > policy.max_absolute_deviation_mm
+        || !topology_not_increased(topology_before, topology_after)
+        || !registered_face_scaled_demand_falls(
+            candidate.input_face_count,
+            candidate.output_face_count,
+        )
+    {
+        return DownstreamUtilityEvidence::NoDownstreamUtilityEvidence;
+    }
+    DownstreamUtilityEvidence::DownstreamUseful(DownstreamUseful::witness(
+        SUPPORT_FACE_SCALED_RESOURCE_DEMAND,
+    ))
+}
+
+/// U5's arithmetic, stated exactly and in a width that cannot wrap.
+///
+/// `PARITY_GRID_BYTES_PER_FACE` is the `81·F` per-triangle term of the parity
+/// projection `81·F + 36·R + 4` (`rust/geom_kernel/src/parity.rs`); the kNN
+/// batch's `source_count` is `F` itself. Both are exact functions of the face
+/// count alone, so both fall strictly whenever the face count does. The `36·R`
+/// reference term is deliberately absent from this claim.
+fn registered_face_scaled_demand_falls(input_faces: usize, output_faces: usize) -> bool {
+    const PARITY_GRID_BYTES_PER_FACE: u128 = 81;
+    let knn_falls = (output_faces as u128) < (input_faces as u128);
+    let parity_falls = (output_faces as u128) * PARITY_GRID_BYTES_PER_FACE
+        < (input_faces as u128) * PARITY_GRID_BYTES_PER_FACE;
+    knn_falls && parity_falls
 }
 
 fn record_sampled_refusal(
@@ -1936,6 +2063,16 @@ fn search_policy() -> Result<SearchPolicy, BudgetSearchError> {
             message: format!("ratio bisection count cannot fit usize: {error}"),
         }
     })?;
+    let evidence = constants.evidence();
+    let min_input_faces = usize::try_from(
+        placeholders
+            .decimation_utility_min_input_faces()
+            .diagnostic()
+            .get(),
+    )
+    .map_err(|error| BudgetSearchError::Constants {
+        message: format!("downstream-utility face threshold cannot fit usize: {error}"),
+    })?;
     Ok(SearchPolicy {
         scale_min_mm: scale.lower(),
         scale_max_mm: scale.upper(),
@@ -1945,6 +2082,12 @@ fn search_policy() -> Result<SearchPolicy, BudgetSearchError> {
         p99_factor: placeholders.decimation_p99_factor().diagnostic().get(),
         p99_9_factor: placeholders.decimation_p999_factor().diagnostic().get(),
         final_slack: placeholders.decimation_recheck_slack().diagnostic().get(),
+        utility: UtilityPolicy {
+            min_input_faces,
+            max_p99_deviation_mm: *evidence.decimation_max_p99_deviation_mm().value(),
+            max_p99_9_deviation_mm: *evidence.decimation_max_p999_deviation_mm().value(),
+            max_absolute_deviation_mm: *evidence.decimation_max_absolute_deviation_mm().value(),
+        },
     })
 }
 
@@ -3191,10 +3334,13 @@ mod tests {
 
     #[test]
     fn orientation_boundary_preserves_identity_without_registered_utility() {
+        // A 12-face box is far below DECIMATION_UTILITY_MIN_INPUT_FACES, so the
+        // witness refuses on its first clause and this whole path is
+        // byte-identical to the engine that had no witness at all.
         let (mesh, locks) = locked_box(10.0);
         let outcome = run_budget_search(&mesh, &locks, d2_budget(1_000_000.0)).unwrap();
         let BudgetSearchOutcome::AlreadyPrintScale(success) = &outcome else {
-            panic!("no registered downstream utility may authorize reduction");
+            panic!("a mesh below the registered face threshold may not be authorized as reduced");
         };
         assert!(success
             .trace()
@@ -3541,5 +3687,315 @@ mod tests {
             panic!("the production path must refuse a candidate when the cap cannot be met")
         };
         assert_eq!(trace.probe_ratio, 0.2);
+    }
+
+    // ---- The registered downstream-utility witness -------------------------
+
+    fn utility_policy() -> UtilityPolicy {
+        search_policy().unwrap().utility
+    }
+
+    /// A candidate that satisfies every clause with room to spare: well above
+    /// the face threshold, a real reduction, and deviations an order of
+    /// magnitude inside all three registered bounds.
+    fn admissible_candidate() -> SimplifyOutcome {
+        SimplifyOutcome {
+            mesh: octahedron(),
+            retained_original_vertex_ids: Vec::new(),
+            input_face_count: 65_024,
+            output_face_count: 40_000,
+            input_vertex_count: 32_514,
+            output_vertex_count: 20_002,
+            requested_ratio: 0.615,
+            target_face_count: 40_000,
+            achieved_ratio: 40_000.0 / 65_024.0,
+            meshopt_advisory_error: 0.0,
+            max_input_quantization_delta: 0.0,
+            locked_vertex_count: 0,
+            identity_bypass: false,
+        }
+    }
+
+    fn admissible_probe() -> TwoSidedProbe {
+        let mut probe = probe_with_percentiles(0.001, 0.002);
+        probe.max_mm = Some(0.01);
+        probe
+    }
+
+    fn clean_topology() -> EdgeTopologyCounts {
+        EdgeTopologyCounts {
+            boundary_edges: 0,
+            nonmanifold_edges: 0,
+        }
+    }
+
+    fn assess(
+        candidate: &SimplifyOutcome,
+        probe: &TwoSidedProbe,
+        after: EdgeTopologyCounts,
+    ) -> DownstreamUtilityEvidence {
+        assess_downstream_utility(utility_policy(), candidate, probe, clean_topology(), after)
+    }
+
+    #[test]
+    fn the_registered_witness_is_minted_only_when_every_clause_holds() {
+        let evidence = assess(
+            &admissible_candidate(),
+            &admissible_probe(),
+            clean_topology(),
+        );
+        let DownstreamUtilityEvidence::DownstreamUseful(witness) = evidence else {
+            panic!("an admissible candidate must mint the registered witness");
+        };
+        assert_eq!(witness.witness_id(), SUPPORT_FACE_SCALED_RESOURCE_DEMAND);
+        assert_eq!(witness.witness_id(), "support-face-scaled-resource-demand");
+    }
+
+    #[test]
+    fn the_face_threshold_refuses_below_the_registered_floor_and_admits_at_it() {
+        let policy = utility_policy();
+        assert_eq!(policy.min_input_faces, 32_768);
+
+        // One face below the floor refuses without examining any geometry:
+        // this is what keeps every small-model trace byte-identical.
+        let mut small = admissible_candidate();
+        small.input_face_count = policy.min_input_faces - 1;
+        small.output_face_count = policy.min_input_faces - 2;
+        assert_eq!(
+            assess(&small, &admissible_probe(), clean_topology()),
+            DownstreamUtilityEvidence::NoDownstreamUtilityEvidence
+        );
+
+        // Exactly at the floor it is admitted; the clause is `>=`.
+        let mut at_floor = admissible_candidate();
+        at_floor.input_face_count = policy.min_input_faces;
+        at_floor.output_face_count = policy.min_input_faces - 1;
+        assert!(matches!(
+            assess(&at_floor, &admissible_probe(), clean_topology()),
+            DownstreamUtilityEvidence::DownstreamUseful(_)
+        ));
+    }
+
+    #[test]
+    fn the_threshold_covers_every_reachable_corpus_model_that_would_otherwise_decimate() {
+        // Sphere (4,760 faces) and make_toed_slab (140) are the two corpus
+        // models with GeometricallyEligible candidates; both sit below the
+        // floor, which is why their frozen census digests cannot move.
+        let policy = utility_policy();
+        for (name, faces) in [("Sphere", 4_760_usize), ("make_toed_slab", 140)] {
+            let mut candidate = admissible_candidate();
+            candidate.input_face_count = faces;
+            candidate.output_face_count = faces - 1;
+            assert_eq!(
+                assess(&candidate, &admissible_probe(), clean_topology()),
+                DownstreamUtilityEvidence::NoDownstreamUtilityEvidence,
+                "{name} must stay below the {} face floor",
+                policy.min_input_faces
+            );
+        }
+    }
+
+    #[test]
+    fn u1_refuses_a_candidate_that_removed_no_faces() {
+        let mut candidate = admissible_candidate();
+        candidate.output_face_count = candidate.input_face_count;
+        assert_eq!(
+            assess(&candidate, &admissible_probe(), clean_topology()),
+            DownstreamUtilityEvidence::NoDownstreamUtilityEvidence
+        );
+
+        let mut grown = admissible_candidate();
+        grown.output_face_count = grown.input_face_count + 1;
+        assert_eq!(
+            assess(&grown, &admissible_probe(), clean_topology()),
+            DownstreamUtilityEvidence::NoDownstreamUtilityEvidence
+        );
+    }
+
+    #[test]
+    fn u2_refuses_on_either_percentile_independently_and_grants_no_slack() {
+        let policy = utility_policy();
+        let candidate = admissible_candidate();
+
+        let mut at_limit = admissible_probe();
+        at_limit.p99_mm = policy.max_p99_deviation_mm;
+        at_limit.p99_9_mm = policy.max_p99_9_deviation_mm;
+        assert!(
+            matches!(
+                assess(&candidate, &at_limit, clean_topology()),
+                DownstreamUtilityEvidence::DownstreamUseful(_)
+            ),
+            "the bounds are inclusive"
+        );
+
+        let mut p99_over = at_limit.clone();
+        p99_over.p99_mm = policy.max_p99_deviation_mm * 1.0000001;
+        assert_eq!(
+            assess(&candidate, &p99_over, clean_topology()),
+            DownstreamUtilityEvidence::NoDownstreamUtilityEvidence
+        );
+
+        let mut p99_9_over = at_limit.clone();
+        p99_9_over.p99_9_mm = policy.max_p99_9_deviation_mm * 1.0000001;
+        assert_eq!(
+            assess(&candidate, &p99_9_over, clean_topology()),
+            DownstreamUtilityEvidence::NoDownstreamUtilityEvidence
+        );
+
+        // The search's final classification admits a candidate on the ×1.1
+        // recheck slack. The witness does not: no slack multiplier applies.
+        let slack = search_policy().unwrap().final_slack;
+        let mut on_slack = at_limit;
+        on_slack.p99_mm = policy.max_p99_deviation_mm * slack;
+        assert_eq!(
+            assess(&candidate, &on_slack, clean_topology()),
+            DownstreamUtilityEvidence::NoDownstreamUtilityEvidence
+        );
+    }
+
+    #[test]
+    fn u3_refuses_a_worst_point_the_percentile_budget_cannot_see() {
+        let policy = utility_policy();
+        let candidate = admissible_candidate();
+
+        // The Phase-1 staircase, reproduced as a unit case: the Weeping Treant
+        // v1.2 at 520 faces removed measured p99 exactly 0, p99.9 0.000073 mm
+        // and max 0.0566357 mm — a factor of 776. U2 sees nothing wrong.
+        let mut staircase = admissible_probe();
+        staircase.p99_mm = 0.0;
+        staircase.p99_9_mm = 0.000_073;
+        staircase.max_mm = Some(0.056_635_7);
+        assert!(
+            staircase.p99_mm <= policy.max_p99_deviation_mm
+                && staircase.p99_9_mm <= policy.max_p99_9_deviation_mm,
+            "the percentile clause must be the one that passes here"
+        );
+        assert!(
+            matches!(
+                assess(&candidate, &staircase, clean_topology()),
+                DownstreamUtilityEvidence::DownstreamUseful(_)
+            ),
+            "0.0566 mm is inside the 0.08 mm absolute bound"
+        );
+
+        let mut at_limit = staircase.clone();
+        at_limit.max_mm = Some(policy.max_absolute_deviation_mm);
+        assert!(matches!(
+            assess(&candidate, &at_limit, clean_topology()),
+            DownstreamUtilityEvidence::DownstreamUseful(_)
+        ));
+
+        let mut over = staircase.clone();
+        over.max_mm = Some(policy.max_absolute_deviation_mm * 1.0000001);
+        assert_eq!(
+            assess(&candidate, &over, clean_topology()),
+            DownstreamUtilityEvidence::NoDownstreamUtilityEvidence
+        );
+
+        // A missing or non-finite worst point is a refusal, never a pass.
+        let mut absent = staircase.clone();
+        absent.max_mm = None;
+        assert_eq!(
+            assess(&candidate, &absent, clean_topology()),
+            DownstreamUtilityEvidence::NoDownstreamUtilityEvidence
+        );
+
+        let mut not_a_number = staircase;
+        not_a_number.max_mm = Some(f64::NAN);
+        assert_eq!(
+            assess(&candidate, &not_a_number, clean_topology()),
+            DownstreamUtilityEvidence::NoDownstreamUtilityEvidence
+        );
+    }
+
+    #[test]
+    fn u4_refuses_any_increase_in_boundary_or_nonmanifold_edges() {
+        let candidate = admissible_candidate();
+        let probe = admissible_probe();
+
+        for after in [
+            EdgeTopologyCounts {
+                boundary_edges: 0,
+                nonmanifold_edges: 1,
+            },
+            EdgeTopologyCounts {
+                boundary_edges: 1,
+                nonmanifold_edges: 0,
+            },
+        ] {
+            assert_eq!(
+                assess(&candidate, &probe, after),
+                DownstreamUtilityEvidence::NoDownstreamUtilityEvidence,
+                "{after:?}"
+            );
+        }
+
+        // This is the clause the Weeping Treant v1.2 fails: 3 non-manifold
+        // edges at 0.742 % reduction, monotone in faces removed thereafter.
+        assert_eq!(
+            assess(
+                &candidate,
+                &probe,
+                EdgeTopologyCounts {
+                    boundary_edges: 0,
+                    nonmanifold_edges: 3,
+                }
+            ),
+            DownstreamUtilityEvidence::NoDownstreamUtilityEvidence
+        );
+    }
+
+    #[test]
+    fn u5_claims_only_the_two_exactly_face_scaled_registered_demands() {
+        // Both named terms fall for any genuine reduction, and neither falls
+        // without one. The 36·R reference term is deliberately not claimed.
+        assert!(registered_face_scaled_demand_falls(65_024, 40_000));
+        assert!(registered_face_scaled_demand_falls(32_768, 32_767));
+        assert!(!registered_face_scaled_demand_falls(65_024, 65_024));
+        assert!(!registered_face_scaled_demand_falls(65_024, 65_025));
+        // The 81·F term is computed in a width that cannot wrap.
+        assert!(registered_face_scaled_demand_falls(
+            usize::MAX,
+            usize::MAX - 1
+        ));
+    }
+
+    #[test]
+    fn decimation_witness_bounds_agree_with_the_search_policy_bounds() {
+        // The witness asserts Derived bounds; the search enforces the same two
+        // numbers as products of Placeholder fractions. They must agree
+        // bit-for-bit at the ratified pixel pitch, so that a move in either is
+        // loud rather than silent.
+        let policy = search_policy().unwrap();
+        let budget = DecimationBudget::ratified_default(d2_probe_config()).unwrap();
+        let search = ErrorBudget {
+            p99_mm: budget.pixel_um.get() * policy.p99_factor,
+            p99_9_mm: budget.pixel_um.get() * policy.p99_9_factor,
+        };
+        assert_eq!(
+            search.p99_mm.to_bits(),
+            policy.utility.max_p99_deviation_mm.to_bits(),
+            "DECIMATION_MAX_P99_DEVIATION_MM {} disagrees with the search limit {}",
+            policy.utility.max_p99_deviation_mm,
+            search.p99_mm
+        );
+        assert_eq!(
+            search.p99_9_mm.to_bits(),
+            policy.utility.max_p99_9_deviation_mm.to_bits(),
+            "DECIMATION_MAX_P999_DEVIATION_MM {} disagrees with the search limit {}",
+            policy.utility.max_p99_9_deviation_mm,
+            search.p99_9_mm
+        );
+        assert_eq!(policy.utility.max_p99_deviation_mm, 0.0095);
+        assert_eq!(policy.utility.max_p99_9_deviation_mm, 0.019);
+
+        // The absolute bound is a separate authority with no search twin: it
+        // is the registered print floor, and nothing in the search sees it.
+        let constants = m0_constants().unwrap();
+        assert_eq!(
+            policy.utility.max_absolute_deviation_mm,
+            *constants.evidence().print_floor_chord_mm().value()
+        );
+        assert_eq!(policy.utility.max_absolute_deviation_mm, 0.08);
     }
 }
