@@ -168,6 +168,94 @@ Measured on the 8-model corpus, most recently by the unified census of 2026-08-0
   > the FU-8c/FU-8d follow-up rows) and
   > `docs/rust-migration/support-resource-caps-2026-08-05.md` §7.
 
+  > **FU-8d phase F1 landed 2026-08-06 — dated addendum; everything above stands, and the
+  > numbers in it are the reason this note is short.** F1 is the first phase of FU-8d's
+  > part (1) and it deliberately changes **no answer and no charge**: the merge gate's
+  > baseline coverage sweep now retains the three nearest sources per coverage sample, which
+  > the per-proposal delta will read in phase F2, and nothing reads them yet. The treant's
+  > demand is **still 201,480,535,329** against the **still unchanged** 35,445,500,736, at
+  > the same gate, 5.68× over; all seven frozen corpus digests are byte-identical. **No cap
+  > was raised or touched.** One `KnnBatchLimits` shape field moved — the coverage-route
+  > batch's neighbour ceiling, 1 → 3 — and it is explicitly **not** a cap: the charged work
+  > `source_count × query_count` is k-independent, and the bytes the raise admits are
+  > charged per route and per batch. See `docs/rust-migration/CURRENT-STATUS.md` (*FU-8d
+  > phase F1 landed 2026-08-06*) and `support-resource-caps-2026-08-05.md` §8.
+
+  > **FU-8d phase F2 landed 2026-08-06 — dated addendum; every block above stands as
+  > written, and the treant's stopping point has moved for the first time since FU-8b.**
+  > F2 finishes FU-8d part (1). A merge proposal no longer re-sweeps the route keys its
+  > pair perturbs against those keys' whole surviving source sets: the survivors' answer is
+  > **read** from the witnesses F1 retained, and the merged seat's distances come from
+  > **one** kNN batch covering every perturbed row at once, with the square root taken once
+  > after the minimum. Equivalence was proved before the swap, against the same retained
+  > `#[cfg(test)]` full sweep, on a fixture grown until a narrow key, a total removal, a
+  > displaced baseline holder, a **steal** and an **exact distance tie** each occur.
+  > **No cap was raised, lowered or otherwise touched.** The per-proposal nearest term fell
+  > **94.2×**, from 196,264,386,588 to 2,083,167,818, and the merge gate's stated demand
+  > fell **27.6×**, from 201,480,535,329 to **7,299,316,559** against the **same unchanged**
+  > 35,445,500,736 — 20.6 % of it, so that check now **passes**. **The stopping point moved
+  > one site.** The treant still refuses at the same merge gate, but now inside the
+  > `exact_operations` fold, where the per-variant owner-face descriptor scan crosses the
+  > limit at **variant 275 of 39,224**: `required: 35445618202, limit: 35445500736`. That
+  > residual is **FU-8d part (2)**, the per-variant load/owner-face path — over those 275
+  > variants alone the exact finalizer term is already 3.04 × 10¹², which extrapolates to
+  > ~4.3 × 10¹⁴ over the full batch — and it is what phase F4 addresses. There is still no
+  > treant digest, no routed-contact count and no live-member count; the run is **129 s at
+  > 2,641,504 KB (2.52 GiB) peak RSS**, watchdog armed and never fired, superseding the
+  > 124 s / 2.50 GB above. All seven frozen corpus digests are byte-identical. FU-8d stays
+  > **open** in parts (2) and (3), it is still an algorithm defect and still not a cap to
+  > raise, and the eighth model is still the largest known blind spot in the engine. See
+  > `docs/rust-migration/CURRENT-STATUS.md` (*FU-8d phase F2 landed 2026-08-06*) and
+  > `support-resource-caps-2026-08-05.md` §9.
+
+  > **Amended 2026-08-06 — FU-8d phase F3 landed; the blocks above are left standing exactly
+  > as measured.** *The treant's merge gate no longer refuses.* The load partition is
+  > finalized **once** per gate batch instead of once per variant — a proposal re-answers
+  > only the rows its own merged pair serves, from three retained witnesses plus one
+  > distance, and the merged seat serves *exactly* that union by construction — and with it
+  > go the per-variant window matrices, a tens-of-gigabyte byte wall that had never fired
+  > only because the operations check refused first. The four per-proposal planning passes
+  > become one behind a pre-check stated from the batch header, and the per-variant contact
+  > and demand rescans are derived rather than repeated. The gate's hand-built
+  > `variants × faces` model of the load phase is replaced by what the load planner itself
+  > reports: the honest figure is 6,592,813,742 where the model said 4,618,272,984, so the
+  > **stated demand rose** to **9,273,857,317** — and that is **26.2 %** of the **same
+  > unchanged** 35,445,500,736, so the batch is admitted and **executes**. What collapsed is
+  > what actually refused: the per-variant owner-face descriptor scan, 35,445,417,382 at
+  > variant 275 → **136,791,451** charged once, and the ~4.3 × 10¹⁴ finalizer term to nothing
+  > at all. **No cap was raised, lowered or otherwise touched.** Equivalence was proved
+  > before the swap, against the whole production finalizer run on hand-renumbered variant
+  > inputs, row by row and on carried area by `f64::to_bits`, over a fixture that asserts it
+  > reached an exact survivor tie, an exact merged-seat tie, a row with no survivor, a
+  > displaced holder and a steal. The treant now evaluates 39,224 variants, accepts a merge,
+  > opens the next batch, and planned **eight batches inside the 600 s timebox** without
+  > finishing the tournament — an **EXCEEDS-TIMEBOX with counters**, not a refusal, at
+  > ~2.4–2.5 GB peak RSS. There is still no treant digest. The successor defect is the
+  > per-variant `assess_coverage` — 1.59 × 10¹⁰ uncharged sample visits per batch — opened as
+  > **FU-8e**; FU-8d is **resolved** on the defect it named. All seven frozen corpus digests
+  > are byte-identical. See `docs/rust-migration/CURRENT-STATUS.md` (*FU-8d phase F3 landed
+  > 2026-08-06*) and `support-resource-caps-2026-08-05.md` §10 (renumbered from a duplicate
+  > §9 in phase F4).
+
+  > **Amended 2026-08-06 — FU-8d phase F4 measured; every block above stands exactly as
+  > written, and one clause in the block immediately above is corrected in proportion.** F4
+  > changes no engine code: it re-ran the treant clean at the committed F3 tip and swept the
+  > record. The gate result holds — **two** 600 s attempts, **no typed refusal at any cap in
+  > either**, 2.49 GiB and 2.48 GiB peak RSS with the 90 GB watchdog never firing, both
+  > **EXCEEDS-TIMEBOX**. What is corrected is *where the time goes*. F3 named the per-variant
+  > `assess_coverage` as "the successor defect"; F4 sampled the running process at six points
+  > across the timebox instead of inferring it from counts, and `assess_coverage` is the
+  > **second** frame at 24–34 % of main-thread samples. The **leader, at 59–62 %, is the
+  > nearest delta F2 itself introduced** — `fill_proposal_nearest_delta` builds a fresh
+  > kd-tree over a **one-point** cloud once per proposal, 39,223 constructions and teardowns
+  > per gate batch, its cost dominated by allocator traffic rather than by geometry. Batched
+  > within a proposal, unbatched across proposals: the same batch-first defect the whole FU-8
+  > chain has been about, one level in. **FU-8e is opened on both parts, in measured order.**
+  > Neither run completes the gate, so FU-23's coefficient is still not re-derived. **No cap
+  > was raised, lowered or touched.** There is still no treant digest. See
+  > `docs/rust-migration/CURRENT-STATUS.md` (*FU-8d phase F4 measured 2026-08-06*) and
+  > `support-resource-caps-2026-08-05.md` §11.
+
 The stages exist as libraries and the census harness runs the real chain from STL through
 a sealed support run. The folder-level runner that chains them all the way to a written
 `.chitubox` is roadmap, per [The goal](#the-goal) above.

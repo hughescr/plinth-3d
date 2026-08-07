@@ -2218,6 +2218,7 @@ pub(crate) fn finalize_load_partition(
         &plan.load_eligibility,
         contacts,
         plan.load_limits,
+        None,
     )
 }
 
@@ -2231,7 +2232,7 @@ pub(crate) fn authority_consistent_empty_load_partition_for_test(
     plan: &GenericContactPlan,
     mesh: &Mesh,
 ) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
-    finalize_load_rows(plan, mesh, &[], &[], plan.load_limits)
+    finalize_load_rows(plan, mesh, &[], &[], plan.load_limits, None)
 }
 
 fn load_resource_plan_from_counts(
@@ -2304,12 +2305,119 @@ fn load_resource_plan(
     )
 }
 
+/// How many nearest eligible contacts per load row the **baseline** finalize
+/// retains for the merge gate's per-proposal delta (FU-8d phase F3, part P2).
+///
+/// A merge proposal removes exactly two contacts and adds one, so three
+/// retained witnesses always leave at least one survivor wherever the row had
+/// three or more eligible contacts; where it had fewer, the retained set *is*
+/// the whole set.  Either way "which eligible contact is nearest among the
+/// survivors of a two-contact removal?" is answerable from the retained slots
+/// alone.  This is [`crate::specialized::NEAREST_WITNESS_SLOTS`]'s argument,
+/// applied to the load partition's argmin instead of the coverage nearest.
+///
+/// **The retention moves no charge.** The baseline finalize already visits
+/// every `(row, eligible contact)` pair and already computes every distance;
+/// keeping the three smallest instead of the one smallest costs at most
+/// `LOAD_WITNESS_SLOTS` slot comparisons per *retained* pair, inside the
+/// `owner_log + 4` per-pair allowance `load_resource_plan_from_counts` already
+/// charges for the eligibility binary search.  Bytes do move and are charged,
+/// as `SpecializedLoadBaseline::retained_bytes`.
+pub(crate) const LOAD_WITNESS_SLOTS: usize = 3;
+
+/// An unfilled [`LoadWitness`] slot.
+const NO_LOAD_WITNESS: u32 = u32::MAX;
+
+/// One retained baseline witness: an eligible contact the finalizer measured
+/// against one load row, kept in the finalizer's own order.
+///
+/// Both fields are the finalizer's own values, copied and never re-derived —
+/// `squared_distance` in particular is the exact `Σ (l − r)²` the argmin loop
+/// computed, so a later comparison against a merged seat's distance is a
+/// comparison of two values of the same expression.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LoadWitness {
+    /// Index into the baseline variant's `contacts` slice, or
+    /// [`NO_LOAD_WITNESS`].
+    contact: u32,
+    /// The finalizer's own squared distance from that contact to this row's
+    /// centroid.
+    squared_distance: f64,
+}
+
+impl LoadWitness {
+    const UNUSED: Self = Self {
+        contact: NO_LOAD_WITNESS,
+        squared_distance: f64::INFINITY,
+    };
+}
+
+/// What the baseline finalize retains for the merge gate's delta path, filled
+/// only when the caller asks for it.
+///
+/// It is an out-parameter rather than a return value because it is optional:
+/// the accepted-load path finalizes exactly one partition and reads nothing
+/// back, and asking it to build a witness table would be bytes held for no
+/// reader.
+pub(crate) struct LoadRowRetention {
+    /// One fixed-width row per load row, ascending by
+    /// `(squared_distance, contact_id)` — the finalizer's own total order —
+    /// padded with [`LoadWitness::UNUSED`].
+    witnesses: Vec<[LoadWitness; LOAD_WITNESS_SLOTS]>,
+    /// Each load row's centroid, in row order.  The delta needs it to measure
+    /// a merged seat against the same point the finalizer measured every other
+    /// contact against; taking it from `surface` instead would silently
+    /// substitute the mesh's centroid for the generic authority's.
+    centroids_mm: Vec<[f64; 3]>,
+}
+
+/// Insert one measured `(row, contact)` pair into a row's ascending witness
+/// slots.
+///
+/// The order is the finalizer's own — `distance.total_cmp` then `contact_id` —
+/// which is a strict total order because contact ids within one partition are
+/// unique (`finalize_load_rows` refuses duplicates before this runs).  So slot
+/// 0 is the argmin, exactly and unambiguously, and there is no tie for the
+/// insertion order to break differently from the running argmin beside it.
+fn insert_load_witness(
+    slots: &mut [LoadWitness; LOAD_WITNESS_SLOTS],
+    contacts: &[PhysicalContact],
+    contact_index: usize,
+    squared_distance: f64,
+) {
+    let candidate = LoadWitness {
+        contact: contact_index as u32,
+        squared_distance,
+    };
+    let precedes = |left: LoadWitness, right: LoadWitness| -> bool {
+        if right.contact == NO_LOAD_WITNESS {
+            return true;
+        }
+        left.squared_distance
+            .total_cmp(&right.squared_distance)
+            .then_with(|| {
+                contacts[left.contact as usize]
+                    .contact_id
+                    .cmp(&contacts[right.contact as usize].contact_id)
+            })
+            .is_lt()
+    };
+    let Some(position) = slots.iter().position(|&slot| precedes(candidate, slot)) else {
+        return;
+    };
+    for index in (position + 1..LOAD_WITNESS_SLOTS).rev() {
+        slots[index] = slots[index - 1];
+    }
+    slots[position] = candidate;
+}
+
 fn finalize_load_rows(
     plan: &GenericContactPlan,
     mesh: &Mesh,
     load_eligibility: &[LoadEligibility],
     contacts: &[PhysicalContact],
     limits: LoadFinalizeLimits,
+    retain: Option<&mut LoadRowRetention>,
 ) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
     let fingerprint = mesh_fingerprint(mesh)
         .map_err(|error| GenericPerceptionError::Topology(error.to_string()))?;
@@ -2364,6 +2472,20 @@ fn finalize_load_rows(
     // One flattened owner x face x contact batch.  The matrix is streamed into
     // a caller-budgeted nearest row rather than issuing scalar spatial calls.
     let mut nearest = vec![None::<(usize, f64)>; load_eligibility.len()];
+    // FU-8d phase F3 (P2): when the caller asks, the same pass also keeps the
+    // `LOAD_WITNESS_SLOTS` smallest pairs per row.  The running argmin below is
+    // untouched — the retention is written *beside* it, never through it — so
+    // the emitted partition cannot depend on whether anything was retained.
+    // `debug_assert`s after the loop pin slot 0 against the argmin.
+    let mut retention = retain;
+    if let Some(retention) = retention.as_deref_mut() {
+        retention.witnesses =
+            vec![[LoadWitness::UNUSED; LOAD_WITNESS_SLOTS]; load_eligibility.len()];
+        retention.centroids_mm = load_eligibility
+            .iter()
+            .map(|eligibility| eligibility.centroid_mm)
+            .collect();
+    }
     for (contact_index, contact) in contacts.iter().enumerate() {
         for (face_index, eligibility) in load_eligibility.iter().enumerate() {
             if eligibility
@@ -2379,6 +2501,14 @@ fn finalize_load_rows(
                 .zip(eligibility.centroid_mm)
                 .map(|(left, right)| (left - right).powi(2))
                 .sum::<f64>();
+            if let Some(retention) = retention.as_deref_mut() {
+                insert_load_witness(
+                    &mut retention.witnesses[face_index],
+                    contacts,
+                    contact_index,
+                    distance,
+                );
+            }
             let replace = nearest[face_index].is_none_or(|(old_index, old_distance)| {
                 distance
                     .total_cmp(&old_distance)
@@ -2388,6 +2518,20 @@ fn finalize_load_rows(
             if replace {
                 nearest[face_index] = Some((contact_index, distance));
             }
+        }
+    }
+    if let Some(retention) = retention {
+        debug_assert_eq!(retention.witnesses.len(), load_eligibility.len());
+        for (row, slots) in retention.witnesses.iter().enumerate() {
+            debug_assert_eq!(
+                nearest[row].map(|(index, _)| index as u32),
+                (slots[0].contact != NO_LOAD_WITNESS).then_some(slots[0].contact),
+            );
+            debug_assert_eq!(
+                nearest[row].map(|(_, distance)| distance.to_bits()),
+                (slots[0].contact != NO_LOAD_WITNESS)
+                    .then_some(slots[0].squared_distance.to_bits()),
+            );
         }
     }
     for (face_index, eligibility) in load_eligibility.iter().enumerate() {
@@ -2641,6 +2785,7 @@ pub(crate) fn finalize_specialized_load_partition(
     contacts: &[PhysicalContact],
     specialized_owner_faces: &[(u32, u32)],
     limits: LoadFinalizeLimits,
+    retain: Option<&mut LoadRowRetention>,
 ) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
     let fingerprint = mesh_fingerprint(mesh)
         .map_err(|error| GenericPerceptionError::Topology(error.to_string()))?;
@@ -2653,7 +2798,7 @@ pub(crate) fn finalize_specialized_load_partition(
     // through the same finalizer, with an empty eligibility set, rather than
     // fabricating rows or silently retaining the parent's load artifact.
     if contacts.is_empty() {
-        return finalize_load_rows(plan, mesh, &[], contacts, limits);
+        return finalize_load_rows(plan, mesh, &[], contacts, limits, retain);
     }
     // Group the pairs by face once.  The row count, the eligible-owner count
     // and the extension below are all read off this one grouping instead of
@@ -2697,7 +2842,7 @@ pub(crate) fn finalize_specialized_load_partition(
         &grouped,
         specialized_owner_faces,
     )?;
-    finalize_load_rows(plan, mesh, &extended, contacts, limits)
+    finalize_load_rows(plan, mesh, &extended, contacts, limits, retain)
 }
 
 /// Merge the specialized owners into the generic load authority's rows.
@@ -2883,6 +3028,538 @@ pub(crate) fn load_violation_count(
     );
     FinalizedContactLoads::from_physical_contacts(partition, contacts, limits)?
         .load_violation_count()
+}
+
+/// What one merge proposal costs the load partition, measured rather than
+/// modelled (FU-8d phase F3, part P2).
+///
+/// The units follow the convention `GateProposalRoutedWork` already uses: one
+/// unit per **row** or per **contact** actually visited, with the bounded
+/// constant work per visit named in each field's documentation.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct SpecializedLoadDeltaWork {
+    /// Rows in `elig(left) ∪ elig(right)`.  Each pays one merge step, one
+    /// witness scan of at most [`LOAD_WITNESS_SLOTS`] slots, one squared
+    /// distance against the merged seat, and one comparison.
+    pub(crate) eligible_rows: usize,
+    /// Rows re-summed to restate a touched contact's carried area **exactly**,
+    /// in the finalizer's own ascending row order.  This term exists because
+    /// `f64` addition is not associative: an incremental `-= area; += area`
+    /// would be cheaper and would not reproduce the fold's bits.
+    pub(crate) carried_rows: usize,
+    /// Contacts whose carried area moved, and whose tip radius and
+    /// safety-factor verdict are therefore re-evaluated.
+    pub(crate) touched_contacts: usize,
+}
+
+impl SpecializedLoadDeltaWork {
+    pub(crate) fn total(self) -> Result<usize, GenericPerceptionError> {
+        self.eligible_rows
+            .checked_add(self.carried_rows)
+            .and_then(|work| work.checked_add(self.touched_contacts))
+            .ok_or(GenericPerceptionError::LoadResourceOverflow)
+    }
+
+    pub(crate) fn record(&mut self, other: Self) -> Result<(), GenericPerceptionError> {
+        self.eligible_rows = self
+            .eligible_rows
+            .checked_add(other.eligible_rows)
+            .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
+        self.carried_rows = self
+            .carried_rows
+            .checked_add(other.carried_rows)
+            .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
+        self.touched_contacts = self
+            .touched_contacts
+            .checked_add(other.touched_contacts)
+            .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
+        Ok(())
+    }
+}
+
+/// The merge gate's **baseline** load partition, plus everything a merge
+/// proposal's delta reads from it (FU-8d phase F3, part P2).
+///
+/// # What this replaces
+///
+/// `finalize_specialized_load_partition` ran **once per variant**: a dense
+/// `contacts × rows` argmin over the whole extended eligibility, preceded by a
+/// per-variant rebuild of the `(owner, face)` pair list and the row extension.
+/// On the Weeping Treant that is `(117,741 + 7,971,451) × 1,365 ≈ 1.10 × 10¹⁰`
+/// per variant and `39,223` proposal variants — about `4.33 × 10¹⁴`, which is
+/// the whole of FU-8d part (2) and was the treant's entire remaining wall.
+///
+/// # Why a proposal's answer is local, in **both** directions
+///
+/// A variant replaces contacts `left` and `right` with one merged seat.  Write
+/// `elig(c)` for the load rows contact `c` is eligible for.
+///
+/// - **The merged seat serves exactly `elig(left) ∪ elig(right)`.** Its
+///   `(owner, face)` pairs come from `visit_served_owner_faces` over
+///   `ContactParts::new(left, Some(right))`, and `parts_serves_owner` is true
+///   for an island exactly when `left` or `right` serves it.  So the union is
+///   an identity, not a bound.
+/// - **A row outside that union cannot move.** Neither member is eligible for
+///   it, so removing them removes no candidate; the merged seat is not eligible
+///   for it, so it adds none.  Its candidate set is bit-identical to the
+///   baseline's, in the same order, so its argmin is the baseline's.
+/// - **A row inside the union is answered from three retained witnesses.** Its
+///   variant candidate set is `eligible(row) \ {left, right} ∪ {merged}`.  The
+///   minimum over the survivors is the first retained witness outside the pair
+///   ([`LOAD_WITNESS_SLOTS`] = 3 answers any two-contact removal), and the
+///   merged seat contributes one squared distance.
+///
+/// The row **set** is variant-invariant for the same reason: the variant's rows
+/// are the base rows plus the faces of its own pairs, and
+/// `∪_survivors served ∪ served(merged) = ∪_all served`.
+///
+/// # The renumbering invariant, which is what makes the comparison sound
+///
+/// `append_variant_load_inputs` renumbers per variant: a contact's `contact_id`
+/// is its position in that variant's physical list, and its specialized owner
+/// id is `first_specialized_owner + contact_id`.  The finalizer's argmin
+/// tie-breaks on `contact_id`, so the delta is only sound because the
+/// renumbering is **order-preserving on the survivors** — survivors keep their
+/// relative order, since the variant emits them in ascending baseline index —
+/// **and the merged seat is last**, so it carries the largest id in its variant
+/// and loses every exact distance tie to a survivor.  That is exactly how the
+/// comparison below breaks a tie, and
+/// `fu8d_load_delta_matches_the_per_variant_finalize` pins it with an
+/// engineered exact-tie fixture.
+///
+/// One case would break the locality argument and is refused rather than
+/// approximated: if `generic_owner_for_parts` returned `Some` for the merged
+/// parts, the merged seat would emit **no** specialized pairs and would instead
+/// be eligible for whatever base rows carry that generic island — a set that
+/// need not lie inside `elig(left) ∪ elig(right)`, and one that would strand
+/// every row only the pair served.  The caller detects it and falls back to a
+/// full finalize for that variant; see
+/// [`SpecializedLoadBaseline::merged_violation_count`]'s `merged_rows`
+/// contract.
+pub(crate) struct SpecializedLoadBaseline {
+    /// Each load row's carried area, in the finalizer's row order.
+    row_area_mm2: Vec<f64>,
+    /// Each load row's centroid, in the finalizer's row order.
+    row_centroid_mm: Vec<[f64; 3]>,
+    /// The three nearest eligible contacts per row, ascending.
+    witnesses: Vec<[LoadWitness; LOAD_WITNESS_SLOTS]>,
+    /// Baseline winner per row: an index into the baseline contacts.
+    winner: Vec<u32>,
+    /// CSR over baseline contacts: the rows each one wins, ascending.
+    won_starts: Vec<u32>,
+    won_rows: Vec<u32>,
+    /// Baseline carried area per contact, summed in the fold's own order.
+    carried_area_mm2: Vec<f64>,
+    /// The baseline variant's own `load_violation_count`.
+    violation_count: usize,
+    tip_policy: FrozenTipLoadPolicy,
+    retained_bytes: usize,
+}
+
+/// Reusable per-proposal buffers for the load delta: allocated once for the
+/// batch, cleared and refilled per proposal.
+///
+/// `row_stamp` is the one that must be a batch-level allocation rather than a
+/// per-proposal `Vec`: it is `rows`-long, and building it per proposal would
+/// trade the quadratic this phase removes for a linear allocation the phase
+/// performs 39,223 times.
+pub(crate) struct SpecializedLoadDeltaScratch {
+    /// `elig(left) ∪ elig(right)`, ascending row indices.
+    rows: Vec<u32>,
+    /// The variant's winner for each entry of `rows`, positionally.
+    new_winner: Vec<u32>,
+    /// `row + 1` at the row's position in `rows`, `0` elsewhere.  Cleared by
+    /// walking `rows`, never by reallocating.
+    row_stamp: Vec<u32>,
+    /// Contacts whose carried area moved, ascending, deduplicated.
+    touched: Vec<u32>,
+    /// Rows each touched contact gains, ascending, in `touched` order.
+    gained_starts: Vec<u32>,
+    gained_rows: Vec<u32>,
+    /// Working carried areas for the touched contacts, in `touched` order.
+    carried_scratch: Vec<f64>,
+}
+
+impl SpecializedLoadDeltaScratch {
+    pub(crate) fn for_rows(row_count: usize) -> Self {
+        Self {
+            rows: Vec::new(),
+            new_winner: Vec::new(),
+            row_stamp: vec![0; row_count],
+            touched: Vec::new(),
+            gained_starts: Vec::new(),
+            gained_rows: Vec::new(),
+            carried_scratch: Vec::new(),
+        }
+    }
+
+    pub(crate) fn retained_bytes(&self) -> Result<usize, GenericPerceptionError> {
+        self.row_stamp
+            .len()
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or(GenericPerceptionError::LoadResourceOverflow)
+    }
+
+    /// The rows the last delta answered, ascending — the equivalence test's
+    /// handle on "which rows did this variant touch?".
+    #[cfg(test)]
+    pub(crate) fn answered_rows(&self) -> &[u32] {
+        &self.rows
+    }
+
+    /// The variant winner the last delta assigned to each entry of
+    /// [`Self::answered_rows`], positionally.
+    #[cfg(test)]
+    pub(crate) fn answered_winners(&self) -> &[u32] {
+        &self.new_winner
+    }
+
+    /// The contacts the last delta re-evaluated, ascending, paired with their
+    /// restated carried areas.
+    #[cfg(test)]
+    pub(crate) fn touched_carried_areas(&self) -> impl Iterator<Item = (u32, f64)> + '_ {
+        self.touched
+            .iter()
+            .copied()
+            .zip(self.carried_scratch.iter().copied())
+    }
+}
+
+/// One merge proposal's load answer: the variant's violation count and what
+/// producing it cost.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SpecializedLoadDeltaOutcome {
+    pub(crate) violation_count: usize,
+    pub(crate) work: SpecializedLoadDeltaWork,
+}
+
+impl SpecializedLoadBaseline {
+    /// Build the merge gate's baseline load state from the **variant 0**
+    /// inputs, running the production finalizer exactly once.
+    pub(crate) fn build(
+        plan: &GenericContactPlan,
+        mesh: &Mesh,
+        surface: &NativeSurface,
+        contacts: &[PhysicalContact],
+        specialized_owner_faces: &[(u32, u32)],
+        limits: LoadFinalizeLimits,
+    ) -> Result<(FinalizedLoadPartition, Self), GenericPerceptionError> {
+        let mut retention = LoadRowRetention {
+            witnesses: Vec::new(),
+            centroids_mm: Vec::new(),
+        };
+        let partition = finalize_specialized_load_partition(
+            plan,
+            mesh,
+            surface,
+            contacts,
+            specialized_owner_faces,
+            limits,
+            Some(&mut retention),
+        )?;
+        let loads = FinalizedContactLoads::from_physical_contacts(
+            &partition,
+            contacts,
+            FinalizedContactLoadLimits::new(
+                contacts.len(),
+                partition.rows.len(),
+                finalized_contact_load_required_bytes(contacts.len())?,
+            ),
+        )?;
+        let violation_count = loads.load_violation_count()?;
+        // The delta indexes contacts by slot, so the gate's own dense
+        // `contact_id == index` numbering is a precondition, not an
+        // assumption: `append_variant_load_inputs` emits exactly that, and a
+        // partition that does not is refused rather than mis-indexed.
+        for (index, contact) in contacts.iter().enumerate() {
+            if contact.contact_id != index as u64 {
+                return Err(GenericPerceptionError::UnknownFinalizedLoadContact {
+                    contact_id: contact.contact_id,
+                });
+            }
+        }
+
+        let row_count = partition.rows.len();
+        let mut winner = Vec::with_capacity(row_count);
+        let mut won_counts = vec![0u32; contacts.len()];
+        for slots in &retention.witnesses {
+            if slots[0].contact == NO_LOAD_WITNESS {
+                // `finalize_load_rows` has already refused this case with
+                // `MissingPhysicalContact`, so it cannot be reached here.
+                return Err(GenericPerceptionError::LoadResourceOverflow);
+            }
+            winner.push(slots[0].contact);
+            won_counts[slots[0].contact as usize] += 1;
+        }
+        let mut won_starts = Vec::with_capacity(contacts.len() + 1);
+        let mut running = 0u32;
+        for count in &won_counts {
+            won_starts.push(running);
+            running += count;
+        }
+        won_starts.push(running);
+        let mut fill = won_starts.clone();
+        let mut won_rows = vec![0u32; row_count];
+        for (row, &owner) in winner.iter().enumerate() {
+            won_rows[fill[owner as usize] as usize] = row as u32;
+            fill[owner as usize] += 1;
+        }
+
+        let row_area_mm2 = partition
+            .rows
+            .iter()
+            .map(|row| row.carried_area_mm2)
+            .collect::<Vec<_>>();
+        let retained_bytes = [
+            (row_count, std::mem::size_of::<f64>()),
+            (row_count, std::mem::size_of::<[f64; 3]>()),
+            (
+                row_count,
+                std::mem::size_of::<[LoadWitness; LOAD_WITNESS_SLOTS]>(),
+            ),
+            (row_count, std::mem::size_of::<u32>()),
+            (row_count, std::mem::size_of::<u32>()),
+            (contacts.len() + 1, std::mem::size_of::<u32>()),
+            (contacts.len(), std::mem::size_of::<f64>()),
+        ]
+        .into_iter()
+        .try_fold(0usize, |total, (count, width)| {
+            count
+                .checked_mul(width)
+                .and_then(|bytes| total.checked_add(bytes))
+                .ok_or(GenericPerceptionError::LoadResourceOverflow)
+        })?;
+
+        let baseline = Self {
+            row_area_mm2,
+            row_centroid_mm: retention.centroids_mm,
+            witnesses: retention.witnesses,
+            winner,
+            won_starts,
+            won_rows,
+            carried_area_mm2: loads.carried_area_mm2().to_vec(),
+            violation_count,
+            tip_policy: loads.tip_policy,
+            retained_bytes,
+        };
+        Ok((partition, baseline))
+    }
+
+    pub(crate) const fn violation_count(&self) -> usize {
+        self.violation_count
+    }
+
+    pub(crate) const fn row_count(&self) -> usize {
+        self.winner.len()
+    }
+
+    pub(crate) const fn retained_bytes(&self) -> usize {
+        self.retained_bytes
+    }
+
+    fn violates(&self, area_mm2: f64) -> Result<bool, GenericPerceptionError> {
+        if !area_mm2.is_finite() {
+            return Err(GenericPerceptionError::NonFiniteFinalizedLoadTotal);
+        }
+        let radius = self.tip_policy.tip_radius_mm(area_mm2)?;
+        Ok(self.tip_policy.violates_safety_factor(area_mm2, radius))
+    }
+
+    /// The variant's `load_violation_count` for the proposal that merges
+    /// `left` and `right` into a seat at `merged_point_mm`.
+    ///
+    /// `merged_rows` must be `elig(left) ∪ elig(right)` as **ascending,
+    /// deduplicated** row indices — exactly the rows the merged seat is
+    /// eligible for.  The caller owns that derivation because it owns the
+    /// `(owner, face)` pair list the union is read from, and because it is the
+    /// caller that can see the one case this path must not be used for: a
+    /// merged seat whose parts resolve to a generic owner, which serves base
+    /// rows rather than the union.
+    pub(crate) fn merged_violation_count(
+        &self,
+        left: usize,
+        right: usize,
+        merged_point_mm: [f64; 3],
+        merged_rows: &[u32],
+        scratch: &mut SpecializedLoadDeltaScratch,
+    ) -> Result<SpecializedLoadDeltaOutcome, GenericPerceptionError> {
+        debug_assert!(merged_rows.windows(2).all(|pair| pair[0] < pair[1]));
+        let merged_seat = u32::try_from(self.carried_area_mm2.len())
+            .map_err(|_| GenericPerceptionError::LoadResourceOverflow)?;
+        let (left, right) = (left as u32, right as u32);
+
+        scratch.rows.clear();
+        scratch.rows.extend_from_slice(merged_rows);
+        scratch.new_winner.clear();
+        scratch.touched.clear();
+        scratch.gained_starts.clear();
+        scratch.gained_rows.clear();
+        scratch.carried_scratch.clear();
+
+        // Stamp the touched rows so a baseline row list can be filtered in O(1)
+        // per row rather than by a second merge against `rows`.
+        for (position, &row) in scratch.rows.iter().enumerate() {
+            scratch.row_stamp[row as usize] = position as u32 + 1;
+        }
+
+        // Phase 1 — answer every touched row.
+        for &row in &scratch.rows {
+            let survivor = self.witnesses[row as usize]
+                .iter()
+                .find(|witness| {
+                    witness.contact != NO_LOAD_WITNESS
+                        && witness.contact != left
+                        && witness.contact != right
+                })
+                .copied();
+            let merged_squared = merged_point_mm
+                .iter()
+                .zip(self.row_centroid_mm[row as usize])
+                .map(|(left, right)| (left - right).powi(2))
+                .sum::<f64>();
+            // The merged seat carries the largest `contact_id` in its variant,
+            // so it replaces a survivor only on a *strictly* smaller distance.
+            // That is the finalizer's own `(distance, contact_id)` order with
+            // the renumbering's "merged seat last" fact substituted in.
+            let winner = match survivor {
+                Some(witness) if witness.squared_distance.total_cmp(&merged_squared).is_le() => {
+                    witness.contact
+                }
+                _ => merged_seat,
+            };
+            scratch.new_winner.push(winner);
+        }
+
+        // Phase 2 — which contacts moved.  A row's baseline holder loses it
+        // whenever the variant's winner differs; the variant's winner gains it.
+        for (position, &row) in scratch.rows.iter().enumerate() {
+            let before = self.winner[row as usize];
+            let after = scratch.new_winner[position];
+            if before != after {
+                scratch.touched.push(before);
+                scratch.touched.push(after);
+            }
+        }
+        scratch.touched.push(left);
+        scratch.touched.push(right);
+        scratch.touched.push(merged_seat);
+        scratch.touched.sort_unstable();
+        scratch.touched.dedup();
+        // `left` and `right` leave the variant entirely; they are carried into
+        // `touched` only so their baseline violations are subtracted.
+        let touched_count = scratch.touched.len();
+
+        // Phase 3 — gather each touched contact's gained rows, ascending.
+        let mut gained_counts = vec![0u32; touched_count];
+        for (position, &winner) in scratch.new_winner.iter().enumerate() {
+            let row = scratch.rows[position];
+            if self.winner[row as usize] == winner {
+                continue;
+            }
+            let slot = scratch
+                .touched
+                .binary_search(&winner)
+                .map_err(|_| GenericPerceptionError::LoadResourceOverflow)?;
+            gained_counts[slot] += 1;
+        }
+        let mut running = 0u32;
+        for count in &gained_counts {
+            scratch.gained_starts.push(running);
+            running += count;
+        }
+        scratch.gained_starts.push(running);
+        let mut fill = scratch.gained_starts.clone();
+        scratch.gained_rows.resize(running as usize, 0);
+        for (position, &winner) in scratch.new_winner.iter().enumerate() {
+            let row = scratch.rows[position];
+            if self.winner[row as usize] == winner {
+                continue;
+            }
+            let slot = scratch
+                .touched
+                .binary_search(&winner)
+                .map_err(|_| GenericPerceptionError::LoadResourceOverflow)?;
+            scratch.gained_rows[fill[slot] as usize] = row;
+            fill[slot] += 1;
+        }
+
+        // Phase 4 — restate each touched contact's carried area exactly, by
+        // re-summing its variant rows in ascending row order.  That is the
+        // order `FinalizedContactLoads` folds them in, and `f64` addition is
+        // not associative, so an incremental adjustment would be cheaper and
+        // wrong.
+        let mut carried_rows = 0usize;
+        let mut violation_count = self.violation_count;
+        for (slot, &contact) in scratch.touched.iter().enumerate() {
+            let before = if contact == merged_seat {
+                0.0
+            } else {
+                self.carried_area_mm2[contact as usize]
+            };
+            let mut after = 0.0_f64;
+            if contact != left && contact != right {
+                let gained = &scratch.gained_rows[scratch.gained_starts[slot] as usize
+                    ..scratch.gained_starts[slot + 1] as usize];
+                let kept: &[u32] = if contact == merged_seat {
+                    &[]
+                } else {
+                    &self.won_rows[self.won_starts[contact as usize] as usize
+                        ..self.won_starts[contact as usize + 1] as usize]
+                };
+                let mut gained_index = 0usize;
+                for &row in kept {
+                    let stamp = scratch.row_stamp[row as usize];
+                    if stamp != 0 && scratch.new_winner[stamp as usize - 1] != contact {
+                        // The variant took this row away from its baseline
+                        // holder.
+                        continue;
+                    }
+                    while gained_index < gained.len() && gained[gained_index] < row {
+                        after += self.row_area_mm2[gained[gained_index] as usize];
+                        gained_index += 1;
+                    }
+                    after += self.row_area_mm2[row as usize];
+                }
+                for &row in &gained[gained_index..] {
+                    after += self.row_area_mm2[row as usize];
+                }
+                carried_rows = carried_rows
+                    .checked_add(kept.len())
+                    .and_then(|total| total.checked_add(gained.len()))
+                    .ok_or(GenericPerceptionError::LoadResourceOverflow)?;
+            }
+            scratch.carried_scratch.push(after);
+            let was = self.violates(before)?;
+            let now = if contact == left || contact == right {
+                // Removed from the variant: it has no tip to violate.
+                false
+            } else {
+                self.violates(after)?
+            };
+            violation_count = match (was, now) {
+                (true, false) => violation_count
+                    .checked_sub(1)
+                    .ok_or(GenericPerceptionError::LoadResourceOverflow)?,
+                (false, true) => violation_count
+                    .checked_add(1)
+                    .ok_or(GenericPerceptionError::LoadResourceOverflow)?,
+                _ => violation_count,
+            };
+        }
+
+        for &row in &scratch.rows {
+            scratch.row_stamp[row as usize] = 0;
+        }
+
+        Ok(SpecializedLoadDeltaOutcome {
+            violation_count,
+            work: SpecializedLoadDeltaWork {
+                eligible_rows: scratch.rows.len(),
+                carried_rows,
+                touched_contacts: touched_count,
+            },
+        })
+    }
 }
 
 #[cfg_attr(
@@ -3817,6 +4494,7 @@ mod tests {
                 max_operations_floor: resource.operations,
                 operations_per_batch_unit: 0,
             },
+            None,
         )
         .is_ok());
         assert!(matches!(
@@ -3830,6 +4508,7 @@ mod tests {
                     max_operations_floor: resource.operations,
                     operations_per_batch_unit: 0,
                 },
+                None,
             ),
             Err(GenericPerceptionError::LoadScratchLimit { .. })
         ));
@@ -3844,6 +4523,7 @@ mod tests {
                     max_operations_floor: resource.operations - 1,
                     operations_per_batch_unit: 0,
                 },
+                None,
             ),
             Err(GenericPerceptionError::LoadOperationLimit { .. })
         ));
@@ -3957,6 +4637,7 @@ mod tests {
                 max_operations_floor: by_face.operations,
                 operations_per_batch_unit: 0,
             },
+            None,
         )
         .unwrap();
         let faces = partition
@@ -3979,6 +4660,375 @@ mod tests {
     /// scatters once.  The rows it emits must be identical, not merely
     /// equivalent-looking, so this drives both against the same fixtures and
     /// compares the whole `Vec`, `Err` included.
+    /// FU-8d phase F3, part P2 — **the load delta reproduces the per-variant
+    /// finalize it replaces, row by row and on `load_violation_count`.**
+    ///
+    /// The reference is the predecessor: for each proposal, build that
+    /// variant's load inputs and run the *whole* production finalizer on them,
+    /// then compare against the delta's answer for every row and for the
+    /// violation count.  A merely-close answer fails; areas are compared on
+    /// `f64::to_bits`.
+    ///
+    /// **The variant inputs are built here exactly as
+    /// `append_variant_load_inputs` builds them**, and that mirroring is the
+    /// point rather than an implementation detail.  The renumbering is what the
+    /// delta's soundness rests on: survivors are emitted in ascending baseline
+    /// order and take `contact_id = rank` with `owner = first + rank`, and the
+    /// merged seat is emitted **last**, so it carries the largest id in its
+    /// variant.  The finalizer's argmin tie-breaks on `contact_id`, so
+    /// order-preservation on the survivors and last-place for the merged seat
+    /// are together the reason a comparison against the *baseline's* indices
+    /// gives the variant's answer.
+    ///
+    /// The fixture refuses to pass vacuously.  It asserts that it reached:
+    ///
+    /// - an **exact tie between two survivors**, which is the case the
+    ///   renumbering could silently reorder and does not — two contacts share a
+    ///   point, so their squared distances are bit-identical and only the id
+    ///   order decides;
+    /// - an **exact tie between a survivor and the merged seat**, which the
+    ///   merged seat must lose because it is renumbered last;
+    /// - a row with **no survivor** — served only by the merged pair, so the
+    ///   merged seat is its only candidate;
+    /// - a **displaced holder** — the row's baseline winner was one of the
+    ///   merged pair;
+    /// - a **steal** — the merged seat takes a row whose baseline holder
+    ///   survived;
+    /// - a row **outside** `elig(left) ∪ elig(right)`, whose answer the delta
+    ///   never touches.
+    #[test]
+    fn fu8d_load_delta_matches_the_per_variant_finalize() {
+        const CONTACTS: usize = 6;
+        let mesh = make_overhang_table().unwrap();
+        let delicacy = vec![0.0; mesh.tris().len()];
+        let config = perception_config(&delicacy);
+        let plan = prepare_generic_contacts(
+            &mesh,
+            &config,
+            frame(),
+            &layer_plan(),
+            &candidate_config(),
+            &[],
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
+        )
+        .unwrap();
+        let surface = build_surface(&mesh, &config).unwrap();
+        let centroids = surface.geometry().centroids();
+
+        // Six specialized seats.  Faces 0..=7 are shared out so that some rows
+        // are served only by the pair, some by a survivor as well, and some by
+        // nobody in the pair at all.  Seats 0 and 1 share a point exactly, so
+        // any row both serve is an exact survivor/survivor tie.
+        let served: [&[u32]; CONTACTS] = [
+            &[0, 1, 2],
+            &[0, 1, 3],
+            &[2, 3, 4],
+            &[4, 5],
+            &[5, 6],
+            &[6, 7],
+        ];
+        let point = |face: u32, offset: f64| {
+            let c = centroids[face as usize];
+            [c[0] + offset, c[1], c[2]]
+        };
+        let points: [[f64; 3]; CONTACTS] = [
+            point(1, 0.5),
+            point(1, 0.5), // exactly seat 0's point: a survivor/survivor tie
+            point(3, 0.25),
+            point(5, 0.25),
+            point(6, 0.25),
+            point(7, 0.25),
+        ];
+        let pairs = (0..CONTACTS)
+            .flat_map(|contact| {
+                served[contact]
+                    .iter()
+                    .map(move |&face| (contact as u32, face))
+            })
+            .collect::<Vec<_>>();
+        // The generic authority's own rows need a holder or the finalizer
+        // refuses with `MissingPhysicalContact`, so the batch also carries one
+        // seat per generic island — exactly as a real gate batch does.  They
+        // are numbered after the specialized seats and never merge, and their
+        // presence is what makes "a row outside `elig(left) ∪ elig(right)`"
+        // reachable at all.
+        let generic_islands = plan
+            .islands()
+            .iter()
+            .map(|island| island.id)
+            .collect::<Vec<_>>();
+        let contacts = (0..CONTACTS)
+            .map(|index| PhysicalContact {
+                contact_id: index as u64,
+                owner: LoadOwner::Specialized(index as u32),
+                point_mm: points[index],
+            })
+            .chain(
+                generic_islands
+                    .iter()
+                    .enumerate()
+                    .map(|(slot, &island)| PhysicalContact {
+                        contact_id: (CONTACTS + slot) as u64,
+                        owner: LoadOwner::GenericIsland(island),
+                        point_mm: [-5.0 - slot as f64, -5.0, -5.0],
+                    }),
+            )
+            .collect::<Vec<_>>();
+        let owner_of = |index: usize, rank: usize| -> LoadOwner {
+            if index < CONTACTS {
+                LoadOwner::Specialized(rank as u32)
+            } else {
+                LoadOwner::GenericIsland(generic_islands[index - CONTACTS])
+            }
+        };
+        let total_contacts = contacts.len();
+        let limits = LoadFinalizeLimits {
+            max_scratch_bytes: usize::MAX,
+            max_operations_floor: usize::MAX,
+            operations_per_batch_unit: 0,
+        };
+        let (baseline_partition, baseline) =
+            SpecializedLoadBaseline::build(&plan, &mesh, &surface, &contacts, &pairs, limits)
+                .expect("baseline");
+        let mut scratch = SpecializedLoadDeltaScratch::for_rows(baseline.row_count());
+
+        let face_rows = |face: u32| {
+            baseline_partition
+                .rows()
+                .iter()
+                .enumerate()
+                .filter(move |(_, row)| row.face_id == face)
+                .map(|(index, _)| index as u32)
+                .collect::<Vec<_>>()
+        };
+
+        let mut saw_survivor_tie = false;
+        let mut saw_merged_tie = false;
+        let mut saw_no_survivor = false;
+        let mut saw_displaced_holder = false;
+        let mut saw_survivor_inherited_row = false;
+        let mut saw_steal = false;
+        let mut saw_untouched_row = false;
+
+        for left in 0..CONTACTS {
+            for right in left + 1..CONTACTS {
+                for (case, merged_point) in [
+                    // Far away: the merged seat wins only what it must.
+                    ("far", [1.0e3, 1.0e3, 1.0e3]),
+                    // On seat `left`'s point: an exact tie with any survivor
+                    // sharing that point, which the merged seat must lose.
+                    ("tie", points[left]),
+                    // Very close to a face the pair does not serve's holder:
+                    // steals whatever it can reach inside the union.
+                    ("near", point(4, 0.01)),
+                ] {
+                    // `elig(left) ∪ elig(right)`, ascending row indices.
+                    let mut union_faces = served[left].to_vec();
+                    union_faces.extend_from_slice(served[right]);
+                    union_faces.sort_unstable();
+                    union_faces.dedup();
+                    let merged_rows = union_faces
+                        .iter()
+                        .flat_map(|&face| face_rows(face))
+                        .collect::<Vec<_>>();
+                    let mut sorted_rows = merged_rows.clone();
+                    sorted_rows.sort_unstable();
+                    assert_eq!(merged_rows, sorted_rows, "union rows must be ascending");
+
+                    // The reference: the variant's own inputs, renumbered as
+                    // `append_variant_load_inputs` renumbers them, through the
+                    // whole production finalizer.
+                    let survivors = (0..total_contacts)
+                        .filter(|index| *index != left && *index != right)
+                        .collect::<Vec<_>>();
+                    let mut variant_contacts = Vec::with_capacity(survivors.len() + 1);
+                    let mut variant_pairs = Vec::new();
+                    for (rank, &index) in survivors.iter().enumerate() {
+                        variant_contacts.push(PhysicalContact {
+                            contact_id: rank as u64,
+                            owner: owner_of(index, rank),
+                            point_mm: contacts[index].point_mm,
+                        });
+                        if index < CONTACTS {
+                            variant_pairs
+                                .extend(served[index].iter().map(|&face| (rank as u32, face)));
+                        }
+                    }
+                    let merged_slot = survivors.len();
+                    variant_contacts.push(PhysicalContact {
+                        contact_id: merged_slot as u64,
+                        owner: LoadOwner::Specialized(merged_slot as u32),
+                        point_mm: merged_point,
+                    });
+                    variant_pairs
+                        .extend(union_faces.iter().map(|&face| (merged_slot as u32, face)));
+                    let reference = finalize_specialized_load_partition(
+                        &plan,
+                        &mesh,
+                        &surface,
+                        &variant_contacts,
+                        &variant_pairs,
+                        limits,
+                        None,
+                    )
+                    .expect("reference variant finalize");
+                    let reference_violations =
+                        load_violation_count(&reference, &variant_contacts).expect("reference");
+
+                    let outcome = baseline
+                        .merged_violation_count(
+                            left,
+                            right,
+                            merged_point,
+                            &merged_rows,
+                            &mut scratch,
+                        )
+                        .expect("delta");
+
+                    assert_eq!(
+                        outcome.violation_count, reference_violations,
+                        "{case}: violations for merge {left}/{right}"
+                    );
+                    assert_eq!(
+                        outcome.work.eligible_rows,
+                        merged_rows.len(),
+                        "{case}: every union row is charged"
+                    );
+                    assert_eq!(reference.rows().len(), baseline_partition.rows().len());
+
+                    // Row by row.  A row inside the union takes the delta's
+                    // answer; a row outside keeps the baseline's holder, and
+                    // both must equal what the full finalize said, after the
+                    // renumbering is applied.
+                    let rank_of = |index: u32| -> u64 {
+                        survivors
+                            .iter()
+                            .position(|&survivor| survivor as u32 == index)
+                            .map_or(merged_slot as u64, |rank| rank as u64)
+                    };
+                    for (row, reference_row) in reference.rows().iter().enumerate() {
+                        let row = row as u32;
+                        let answered = scratch
+                            .answered_rows()
+                            .iter()
+                            .position(|&touched| touched == row);
+                        let winner = match answered {
+                            Some(position) => scratch.answered_winners()[position],
+                            None => {
+                                saw_untouched_row = true;
+                                baseline.winner[row as usize]
+                            }
+                        };
+                        assert_eq!(
+                            reference_row.contact_id,
+                            rank_of(winner),
+                            "{case}: row {row} of merge {left}/{right}"
+                        );
+                        assert_eq!(
+                            reference_row.face_id,
+                            baseline_partition.rows()[row as usize].face_id
+                        );
+                        assert_eq!(
+                            reference_row.carried_area_mm2.to_bits(),
+                            baseline_partition.rows()[row as usize]
+                                .carried_area_mm2
+                                .to_bits()
+                        );
+                    }
+
+                    // The carried areas the violation count is derived from
+                    // must be bit-identical to the fold's, not merely close:
+                    // `f64` addition is not associative, so the delta re-sums
+                    // each touched contact's variant rows in ascending row
+                    // order instead of adjusting the baseline incrementally,
+                    // and this is what pins that choice.
+                    let mut reference_carried = vec![0.0_f64; variant_contacts.len()];
+                    for reference_row in reference.rows() {
+                        reference_carried[reference_row.contact_id as usize] +=
+                            reference_row.carried_area_mm2;
+                    }
+                    for (contact, carried) in scratch.touched_carried_areas() {
+                        if contact == left as u32 || contact == right as u32 {
+                            continue;
+                        }
+                        let rank = rank_of(contact) as usize;
+                        assert_eq!(
+                            carried.to_bits(),
+                            reference_carried[rank].to_bits(),
+                            "{case}: carried area for contact {contact} of merge {left}/{right}"
+                        );
+                    }
+
+                    // Arms reached, recorded so agreement cannot be vacuous.
+                    for (position, &row) in scratch.answered_rows().iter().enumerate() {
+                        let after = scratch.answered_winners()[position];
+                        let before = baseline.winner[row as usize];
+                        let slots = &baseline.witnesses[row as usize];
+                        let survivor = slots.iter().find(|witness| {
+                            witness.contact != NO_LOAD_WITNESS
+                                && witness.contact != left as u32
+                                && witness.contact != right as u32
+                        });
+                        if survivor.is_none() {
+                            saw_no_survivor = true;
+                        }
+                        if before == left as u32 || before == right as u32 {
+                            saw_displaced_holder = true;
+                            if after != baseline.carried_area_mm2.len() as u32 {
+                                // A survivor inherited a displaced holder's
+                                // row: the holder was merged away and the
+                                // merged seat did NOT win it back.
+                                saw_survivor_inherited_row = true;
+                            }
+                        } else if after == baseline.carried_area_mm2.len() as u32 {
+                            saw_steal = true;
+                        }
+                        if let Some(witness) = survivor {
+                            let merged_squared = merged_point
+                                .iter()
+                                .zip(baseline.row_centroid_mm[row as usize])
+                                .map(|(a, b)| (a - b).powi(2))
+                                .sum::<f64>();
+                            if witness.squared_distance.to_bits() == merged_squared.to_bits() {
+                                saw_merged_tie = true;
+                            }
+                        }
+                        let filled = slots
+                            .iter()
+                            .filter(|witness| witness.contact != NO_LOAD_WITNESS)
+                            .collect::<Vec<_>>();
+                        if filled.len() >= 2
+                            && filled[0].squared_distance.to_bits()
+                                == filled[1].squared_distance.to_bits()
+                        {
+                            saw_survivor_tie = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(saw_survivor_tie, "no exact survivor/survivor distance tie");
+        assert!(saw_merged_tie, "no exact survivor/merged-seat distance tie");
+        assert!(saw_no_survivor, "no row was served only by the merged pair");
+        assert!(
+            saw_displaced_holder,
+            "no row's baseline holder was merged away"
+        );
+        assert!(
+            saw_survivor_inherited_row,
+            "no displaced holder's row was inherited by a survivor"
+        );
+        assert!(
+            saw_steal,
+            "the merged seat never stole a surviving holder's row"
+        );
+        assert!(
+            saw_untouched_row,
+            "every row was inside some union, so the locality claim is untested"
+        );
+    }
+
     #[test]
     fn specialized_extension_matches_the_rescanning_algorithm_it_replaced() {
         let mesh = plinth_mesh::make_box_default().unwrap();

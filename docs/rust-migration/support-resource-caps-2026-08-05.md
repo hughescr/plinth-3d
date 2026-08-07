@@ -393,6 +393,43 @@ reverted before every recorded run.
 > full per-model table in `CURRENT-STATUS.md` (*Does any reachable model exercise the
 > proposal-delta path?*). The `at_floor=true` claim above is unaffected.
 
+> **Ruling note 2026-08-06 (FU-8d record close) — the standing of
+> 12,714,828,544. Dated addendum; the table and every correction above are left
+> standing.** This is the **primary note** on that figure. It is the treant's
+> proposal-free gate batch charge as measured post-FU-8b, and it is the sole
+> input behind `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED = 23`
+> (`12,714,828,544 / 553,835,949 = 22.958`, §7.2). Three things hold at once,
+> and the record has to carry all three rather than pick one:
+>
+> - **F3's repricing plausibly supersedes it as an input.** Phase F3 (§10)
+>   changed what the gate charges for the same stage: the load phase is priced
+>   from `specialized_load_resource_plan`'s own figure instead of the gate's
+>   `variants × faces` model, the per-variant owner-face descriptor scan is
+>   charged **once**, and `unique_face_finalizer_work` ceases to exist as a term.
+>   A charge stated under the old pricing is not automatically a charge under the
+>   new one.
+> - **No re-measurement exists at this tip.** The census prints scaled-cap
+>   materializations, `at_floor` flags and stage errors — **not per-batch
+>   demands** — so nothing on this branch restates the proposal-free batch's
+>   charge under F3's pricing. "Plausibly superseded" is therefore exactly as
+>   strong a claim as the evidence supports, and no stronger. **23 is not
+>   corrected, not restated and not re-derived**; it stands as recorded.
+> - **Re-derivation is blocked regardless, by ruling R-f.**
+>   `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is re-derived only from a treant
+>   run that **COMPLETES** the gate stage, and phase F4's two clean runs (§11) are
+>   EXCEEDS-TIMEBOX at 607 s and 602 s with no typed refusal in either. When R-f
+>   is satisfied, the proposal-free batch charge and the 23 it yields are to be
+>   re-measured **together**; neither is to be inherited into the other.
+>
+> The other sites carrying 12,714,828,544 — `constants/evidence.rs`
+> (`SUPPORT_GATE_MAX_WORK_PER_BATCH_UNIT` and
+> `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED`, the latter being the primary
+> in-code note), `constants.rs`'s `SupportResourceCapPolicy` doc comment,
+> `specialized.rs`'s `gate_operation_limit` doc comment, §7.2's prose and rule
+> table below, and the M0 ledger — quote it for the **face-count spread** against 24-face
+> `make_raking_blade`'s 612,887,212, and that use is unaffected by any of the
+> above. They point here rather than restating it.
+
 ### 7.2 The rule that was set, and the scale it uses
 
 Gate and load work do **not** track face count. The corpus proves it: 24-face
@@ -616,3 +653,399 @@ runs inside the timebox.
 >   counts rather than unioning them, because the union does not exist yet when the bound
 >   is checked. So the scan costs 117,741 x 1,366 = **1.6e8** row-contact pairs, its plan
 >   charges 1.8e8, and both are far under the 1.1e10 the pre-fix prediction implied.
+
+## 8. FU-8d phase F1 — witness retention, 2026-08-06
+
+Dated addendum. Nothing in §§1–7 is rewritten: no cap in this document moved, no
+coefficient was re-derived, and the treant's stated demand is unchanged at
+**201,480,535,329** against the unchanged **35,445,500,736**. This section exists
+because F1 changed two things a caps record has to carry — a `KnnBatchLimits`
+shape field, and the term list of the gate peak bound.
+
+**What F1 did.** The merge gate's *baseline* coverage sweep now asks the kernel
+for `k = min(3, source_count)` neighbours per coverage sample instead of one, and
+retains them as `(source_slot, squared_distance)` in the kernel's own emission
+order. Nothing reads them yet; FU-8d's per-proposal delta (part (1)) will, and
+that is what removes the `sources × samples` re-sweep of a perturbed route key.
+Every answer this stage produces is unchanged: `nearest[sample]` is still
+`squared_distances[row.start].sqrt()`, and row 0 of a planned kNN batch does not
+depend on `k` — pinned against the kernel by
+`fu8d_knn_row_zero_is_k_independent_bit_for_bit`.
+
+### 8.1 The one limit that moved is not a cap
+
+`SpecializedLimits::production` now states `coverage_route_knn.max_neighbors = 3`
+where it previously carried the caller's 1. **This is a `KnnBatchLimits` shape
+field, not an FU-8 resource cap, and §5's list of what was deliberately not
+raised is untouched by it.** Owner ruling **R-b** (2026-08-06) records it as such,
+with the arithmetic:
+
+| term | what `k = 3` costs | against |
+|---|---|---|
+| per-route kNN CSR pair arrays | `+2 × query_count × 16 B` per route — single-digit MB on the treant's widest route | that batch's unchanged **2 GB** `max_logical_peak_bytes` |
+| per-batch retained witness table | `samples × 3 × 16 B` = **19,447,008 B ≈ 19 MB** on the treant's 405,146 samples | the unchanged **1,073,741,824 B** `max_gate_peak_bytes`, whose last measured value on this model was 216,203,088 B |
+| charged gate operations | **nothing** — `KnnBatchPlan`'s work term is `source_count × query_count` and is k-independent (ruling **R-a**) | — |
+
+Ruling R-a is why the operations column is empty, and it is recorded on
+`NEAREST_WITNESS_SLOTS` in `specialized.rs` as well as here, so that the silence
+of the charge cannot be mistaken for an oversight. The `SUPPORT_KNN_MAX_NEIGHBORS`
+registry entry keeps its value of **1** — it describes
+`SupportPreparationLimits::production`'s own `KnnBatchLimits`, which did not
+change and which the generic perception limits still carry verbatim — but its
+note, its `m0-constants-source-ledger.json` entry, the regenerated `constants.md`
+and §3.10.9's table in `03-physics-and-constants.md` all now carry the dated
+amendment, because the note's claim that "the support pipeline only ever asks for
+the single nearest neighbor" was true when written and is not true now.
+
+### 8.2 The gate peak bound gained a term
+
+`GatePeakUsage` gains `nearest_witness_bytes`, charged into the **retained**
+total beside `face_scratch_bytes` (record fix F6) and `batch_index_bytes`
+(FU-8c), because the witness table is built once at the top of the batch and held
+across the phases. That is the same discipline F6 and F9 each had to impose after
+finding a real allocation charged against nothing; here it is charged from the
+first batch that builds one.
+
+**The cap it is charged against — `max_gate_peak_bytes` = 1,073,741,824 — is
+unchanged, and no model on the corpus comes near it.** The treant does not reach
+this check at all: it refuses at `exact_operations` before the preflight that
+performs it, so on that model the table is never allocated and its ~19 MB is a
+**bound this run did not exercise**, not an observation. The §7.1 F7 correction's
+216,203,088 B stands exactly as measured at `23d929d`; F1 does not restate it.
+
+### 8.3 What was re-measured, and what it proves
+
+Full 8-model census at the F1 tip, release, `--features census`,
+`PLINTH_THREADS=4`:
+
+- all seven frozen OD-8 digests **byte-identical**;
+- all fourteen corpus `T0_scaled_cap` rows still `at_floor=true`;
+- the treant's stage error **verbatim**:
+  `Preparation: Specialized(GateOperationLimit { required: 201480535329, limit: 35445500736 })`.
+
+**That immobility is the phase's proof**, and it is worth being exact about what
+it does and does not show. It shows F1 moved no charge and no admitted result. It
+does *not* show the retention runs at treant scale, because the treant never
+reaches it. What shows the retention runs on real corpus geometry is
+`make_raking_blade` — 23 gate batches, 1,402 merge proposals, digest
+`13278215294653054002` unmoved — plus the two FU-8d tests. FU-23's trigger is
+unchanged and still pending: `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is to be
+re-derived only from a treant run that **completes** the gate, which this is not.
+
+## 9. FU-8d phase F2 — the nearest delta, and a stopping point that moved, 2026-08-06
+
+Dated addendum. Nothing in §§1–8 is rewritten. **No cap in this document moved,
+no coefficient was re-derived, and no cap code was touched.** This section exists
+because two things a caps record must carry did change: the merge gate's stated
+demand, and — for the first time since FU-8b — **which check refuses the Weeping
+Treant**.
+
+### 9.1 What F2 did
+
+A merge proposal's nearest phase used to re-sweep every route key its pair
+perturbs against that key's whole surviving source set: `Σ_{perturbed keys}
+source_count × query_count`. It no longer does. The minimum over
+`survivors(key) ∪ {merged seat}` splits into two parts that are each cheap:
+
+- **the survivors' side** is *read* from the witnesses phase F1 retained, as a
+  value — three retained slots answer any two-contact removal exactly, and the
+  bits returned are the bits the kernel emitted during the baseline sweep;
+- **the merged seat's side** is **one** `KnnBatchPlan(1 source, touched_rows
+  queries, k = 1)` per proposal, covering every perturbed key's rows at once.
+
+The two are combined by `f64::total_cmp` and the square root is taken **once,
+after** the minimum, so the arithmetic applied to the winning value is identical
+to the sweep's `squared_distances[row.start].sqrt()`, and an exact tie is a tie
+between two bit-identical `f64`.
+
+Equivalence was proved before the hot path was swapped, against the same
+retained `#[cfg(test)]` full sweep FU-8c used
+(`fu8d_proposal_nearest_deltas_reproduce_the_full_sweep_bit_for_bit`), on a
+fixture grown until each arm is reached and asserted non-vacuous: a key with
+fewer than three servers, a proposal that removes **every** server of a key, a
+row whose baseline nearest is merged away, a **steal**, and an **exact distance
+tie** between a survivor and the merged seat.
+
+### 9.2 The demand this cap is handed
+
+Measured on the Weeping Treant v1.2 (429,120 faces; 405,146 coverage samples,
+1,095 demands, 1,366 contacts, 39,223 merge proposals), release,
+`--features census`, `PLINTH_THREADS=4`, RSS watchdog armed:
+
+| `gate_resource_plan` term | at F1 (§8) | at F2 | shape |
+|---|---:|---:|---|
+| `baseline_rows` | 554,926,572 | 554,926,572 | `(samples + demands + 1) × contacts` |
+| per-proposal `nearest_work` | 195,222,841,902 | **1,041,544,686** | was `Σ s × q`; now `Σ 1 × touched_rows` |
+| per-proposal `touched_rows` | 1,041,544,686 | 1,041,544,686 | rows written, scanned and restored |
+| per-proposal `key_visits` | — (uncharged) | **78,446** | `routes(l)+demands(l)+routes(r)+demands(r)` |
+| per-proposal `demand_rows` | 42,949,185 | 42,949,185 | `proposals × demands` |
+| `face_rows` | 4,618,272,984 | 4,618,272,984 | `variants × distinct faces` |
+| **stated demand** | **201,480,535,329** | **7,299,316,559** | |
+| **cap (unchanged)** | 35,445,500,736 | 35,445,500,736 | `max(floor, K_G × (samples+1) × (contacts+1))` |
+
+The F1 column reconciles exactly with the number FU-8c recorded:
+`195,222,841,902 + 1,041,544,686 = 196,264,386,588`, the "per-proposal nearest"
+residual, 97.4 % of the demand. The whole per-proposal nearest term is therefore
+`196,264,386,588 → 2,083,167,818`, **94.2×**, and the stated demand is
+`201,480,535,329 → 7,299,316,559`, **27.6×** — **20.6 % of the unchanged cap, so
+`gate_resource_plan` now passes.** Per ruling **R-e** no literal of the post-fix
+total is pinned in a test; the count-derived terms keep their derivation-shaped
+pins and this dated transcript is the record.
+
+### 9.3 The stopping point moved — and this is the phase's real result
+
+The treant **still refuses at the merge gate**, and still with
+`GateOperationLimit`, but no longer at the same check. `gate_resource_plan`
+passes; the refusal now comes from the `exact_operations` fold, where
+`variant_specialized_owner_face_count`'s descriptor budget crosses this same
+limit:
+
+```
+CENSUS  T0_stage_error  Weeping Treant v1.2
+        Preparation: Specialized(GateOperationLimit { required: 35445618202, limit: 35445500736 })
+```
+
+That number is **not a total**. The scan refuses the instant its running counter
+crosses, which it does at **variant 275 of 39,224** — 0.70 % of the batch — so
+`35,445,618,202` is "the cap plus one variant's descriptor work", and the true
+demand is roughly `39,224 / 275 ×` larger. Measured at the crossing:
+
+| counter, accumulated over the first 275 variants | value | extrapolated over 39,224 |
+|---|---:|---:|
+| `descriptor_operations` (owner-face scan) | 35,445,417,382 | ~5.06 × 10¹² |
+| `unique_face_finalizer_work` inside `variant_operation_count` | 3,036,066,151,957 | **~4.33 × 10¹⁴** |
+| routed (nearest) work | 3,912,181 | ~5.6 × 10⁸ |
+
+The routed term is now about one part in a million of what the variant fold
+costs (3,912,181 against 3,037,219,978,143 over the same 275 variants). **The wall is entirely FU-8d part (2)** — the per-variant load and
+owner-face path — and the ~4.33 × 10¹⁴ above is the same order the FU-8d design
+predicted for it. Phase F4 is what addresses it. **It is not a cap to raise**, on
+exactly the grounds §5 and §7.2 already set out: admitting it would need a
+per-batch-unit coefficient in the millions and would take the Cylinder and most
+of the corpus off their floors.
+
+### 9.4 What was re-measured, and what it proves
+
+Full 8-model census at the F2 tip, release, `--features census`,
+`PLINTH_THREADS=4`, 3,415 lines:
+
+- all seven frozen OD-8 digests **byte-identical** (`Sphere 17667468971446251870`,
+  `Cylinder 13310185350867878190`, `make_box 9657051231007502658`,
+  `make_overhang_table 6686599816688114065`,
+  `make_toed_slab 11199296506741562956`,
+  `make_raking_blade 13278215294653054002`,
+  `make_thin_fin 7016743535301716631`);
+- all fourteen corpus `T0_scaled_cap` rows still `at_floor=true`;
+- the treant's stage error as quoted in §9.3.
+
+`make_raking_blade` carries the corpus weight, for the reason §8.3 gives: it is
+the one reachable model that runs a genuine merge tournament — 23 gate batches,
+1,402 merge proposals — through the exact code F2 rewrote, and its digest did not
+move. The treant run itself is **129 s at 2,641,504 KB (2.52 GiB) peak RSS**,
+watchdog armed and never fired, superseding the 124 s / 2.50 GB of §7.
+
+**Ruling R-f is not satisfied by this phase.**
+`SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is to be re-derived only after phase
+F3 lands **and** only from a treant run that **completes** the gate. This run does
+not complete it, so nothing was re-derived.
+
+### 9.5 Ruling R-c, measured and left unbuilt
+
+> **Nomenclature pointer, added 2026-08-06 (FU-8d record close).** The FU-8d
+> design named two measurement stages that this document records under their
+> rulings instead, so a grep for either term lands nowhere. They map exactly:
+> **Stage A** = the key-concentration and per-key proposal tables, recorded here
+> as ruling **R-d** (the R-d paragraph at the end of this section); **Stage B** =
+> the removed-holder, steal and radius-bound row counts, recorded here as ruling
+> **R-c** (the table immediately below). No measurement is added or restated by
+> this pointer — the substance is already of record under the ruling names.
+
+The design's radius-bounded steal path (candidate `d`) was **not built**. F2's
+scratch pass measured what it would have bought, over all 39,223 proposals, with
+`R_max(key)` taken as the largest baseline nearest distance that key carries — a
+merged seat farther than that from a sample cannot win it:
+
+| per proposal | mean | p50 | p99 | max | sum |
+|---|---:|---:|---:|---:|---:|
+| touched rows | 26,554.4 | 22,868 | 41,422 | 41,422 | 1,041,544,686 |
+| rows inside `R_max` | 15,399.5 | 13,270 | 29,303 | 38,679 | 604,013,078 |
+| rows whose baseline nearest was merged away | 93.9 | 20 | 891 | 16,694 | 3,681,423 |
+| steal rows | 0.449 | 0 | 13 | 535 | 17,594 |
+
+The radius bound removes **42 %** of the rows — a 1.7× constant factor, not an
+order. The adoption rule was "only if the measured margin is under 2×", and the
+margin is 4.9× (7,299,316,559 against 35,445,500,736), so **R-c is not adopted**.
+The rows that actually change are rarer still: 0.35 % of touched rows lose their
+holder and 0.0017 % are steals, which is why the delta is a lookup with one
+distance test rather than anything cleverer.
+
+Ruling **R-d** (batching proposals by hot key) is likewise measured and left
+unbuilt: 28 of the 48 perturbed keys carry ≥ 10 proposals, and one carries 26,543,
+so the precondition holds — but it is a constant-factor cleanup on a term that is
+now some five parts in a million of the wall, and it would be optimizing the
+wrong thing while part (2) stands.
+
+## 10. FU-8d phase F3 (2026-08-06) — the treant's merge gate stops refusing
+
+> **Numbering correction added 2026-08-06 (phase F4).** This section landed as a
+> second `## 9`, beside phase F2's, so "§9" was ambiguous for a day. It is **§10**;
+> **§9 is phase F2**. Only the heading digit changed — no sentence, table or figure
+> in either section was touched — and the pointers that meant *this* section
+> (`README.md`, `03-physics-and-constants.md`, `specialized.rs`) now say §10.
+
+> **Dated addendum. §§1–8 are left standing exactly as measured.** This section
+> supersedes §7.4's and §8's *stopping point* for the Weeping Treant and nothing
+> else. **No cap was raised, lowered or touched, and no cap code was edited.**
+
+Phase F3 closed FU-8d parts (2) and (3): the load partition is finalized **once**
+per gate batch instead of once per variant, the per-variant `(owner, face)` window
+matrices are deleted, the four per-proposal planning passes become one behind a
+count-derived pre-check, and the per-variant contact/demand rescans are derived
+rather than repeated. Measured on the treant's first merge batch — samples
+405,146, demands 1,095, contacts 1,366, proposals 39,223, variants 39,224,
+distinct island faces 117,741:
+
+| term | F2 | F3 |
+|---|---:|---:|
+| `baseline_rows` | 554,926,572 | 554,926,572 |
+| proposal nearest (`nearest_work + touched_rows`) | 2,083,089,372 | 2,083,089,372 |
+| proposal `key_visits` | 78,446 | 78,446, now pre-checked before it is spent |
+| proposal `demand_rows` | 42,949,185 | 42,949,185 |
+| load term | 4,618,272,984 (`variants × faces`, a **model**) | **6,592,813,742** (`specialized_load_resource_plan`'s own 5,543,831,115, plus a 1,048,982,627 proposal bound) |
+| **stated demand** | 7,299,316,559 | **9,273,857,317** |
+| `descriptor_operations` | 35,445,417,382 at variant 275 of 39,224 (~5.06 × 10¹² extrapolated) | **136,791,451**, charged once |
+| `unique_face_finalizer_work` | ~4.33 × 10¹⁴ extrapolated | **term deleted** |
+| `exact_operations` | refused at the crossing | **10,457,910,996** |
+| **cap — UNCHANGED** | 35,445,500,736 | 35,445,500,736 |
+| verdict | refused | **admitted — 26.2 % stated, 29.5 % exact — and executed** |
+
+**The stated demand rose, and that is the point.** §7.2's rule is that a cap
+prices what a stage really does. FU-8d part (2) recorded that the gate priced the
+load phase at `variants × faces` while the fold really did
+`variants × faces × contacts`; there is one authority now, and the honest figure
+is 1.43× the model it replaced. Every term that fell is a *quadratic removed*, not
+a bound relaxed.
+
+**A byte wall went with it, and it had never fired only by accident.**
+`gate_window_matrix_bytes` sized one `PhysicalContact` matrix and one
+`(owner, face)` matrix per variant per window — on the treant 7,971,451 pairs × 8 B
+*per variant* — against `SUPPORT_SPECIALIZED_MAX_GATE_CONTACT_MATRIX_BYTES` =
+536,870,912. It stated a figure in the tens of gigabytes and would have refused the
+moment the operations wall fell. The batch now holds one physical list and one pair
+list; `gate_window_matrix_bytes` and `traverse_whole_gate_windows` are deleted and
+`GatePeakUsage::matrix_bytes` is replaced by `load_baseline_bytes`. **The cap itself
+is untouched**: its remaining consumer is `contact_window_bytes`, and its registered
+value and provenance note are unchanged.
+
+**Where the treant stops now, and it is not a refusal.** Under `PLINTH_THREADS=4`,
+release, `--features census`, the treant planned eight gate batches inside the 600 s
+timebox — the proposal-free batch plus seven merge rounds at 1,366 → 1,360 contacts,
+the stated demand falling monotonically with the contact set and the share holding
+flat at 26.2 % of each batch's own materialized cap — and did not finish the
+tournament. That run is recorded as **EXCEEDS-TIMEBOX with counters**: peak RSS
+~2.4–2.5 GB sampled once per second, watchdog armed at 90 GB and never fired, far
+inside the 100 GB machine ceiling.
+
+What the time is spent on is measured by implication and is **not a cap to raise**:
+`assess_coverage` runs `O(samples)` per variant with about six
+`Vec::with_capacity(405,146)` allocations per call, i.e. `39,224 × 405,146 ≈
+1.59 × 10¹⁰` sample visits and of order a terabyte of allocation churn **per gate
+batch**, none of it charged against `gate_operation_limit`. It is opened as
+**FU-8e**.
+
+**Ruling R-f remains unsatisfied.** `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED`
+(FU-23) is re-derived only from a treant run that **completes** the gate. This is
+not that run.
+
+> **Correction added 2026-08-06 (phase F4) — §10 is left standing exactly as
+> written, and the paragraph beginning "What the time is spent on is measured by
+> implication" is now known to be wrong in proportion.** It is measured
+> *directly* in §11, and `assess_coverage` is the **second** frame at about a
+> quarter of main-thread time, not the whole of it. The leading frame is F2's own
+> `fill_proposal_nearest_delta`, at about three fifths. The `1.59 × 10¹⁰`
+> arithmetic above is right and still stands; the attribution of *all* the 600 s
+> to it does not. Both are FU-8e, in measured order.
+
+## 11. FU-8d phase F4 (2026-08-06) — the treant sampled rather than inferred
+
+> **Dated addendum. §§1–10 are left standing exactly as measured.** F4 changes
+> **no engine code**: it is a clean measurement at the committed F3 tip plus the
+> record sweep the every-record-site rule still owed F3. **No cap was raised,
+> lowered or touched, and no cap code was edited.**
+
+### 11.1 The run, and why there are two of them
+
+Ruling **R-g** governs both: the run *and* its RSS watchdog executed
+**unsandboxed**, because `ps -o rss=` is blocked in the sandbox and a watchdog
+that cannot read RSS is decoration. Release, `--features census`,
+`PLINTH_CENSUS=1 PLINTH_CENSUS_ONLY="Weeping Treant v1.2"`, `PLINTH_THREADS=4`,
+RSS polled every 2 s, hard kill armed at 90 GB, 600 s timebox, two attempts (the
+maximum).
+
+| attempt | verdict | wall clock | peak RSS | watchdog | typed refusal |
+|---|---|---:|---:|---|---|
+| 1 | EXCEEDS-TIMEBOX | 607 s | 2,606,256 KB (2.49 GiB) | armed 90 GB, **never fired** | none |
+| 2 | EXCEEDS-TIMEBOX | 602 s | 2,600,960 KB (2.48 GiB) | armed 90 GB, **never fired** | none |
+
+**No cap refused anything in either attempt.** That is the headline for this
+document: since F3 the treant's merge gate states a demand of 9,273,857,317
+against an unchanged 35,445,500,736 and is **admitted**. Peak RSS is 2.5 GiB
+against the 90 GB kill line and the 100 GB machine ceiling — memory has not been
+this stage's constraint since FU-8b, and this run is four orders inside it.
+
+Attempt 2 exists because attempt 1's evidence was one 5-second window at
+t = 600, which cannot separate "this frame dominates" from "this frame was
+running at the end". Attempt 2 sampled the same binary at six points across the
+timebox. The runs are otherwise identical.
+
+**No batch counters are reported here.** The tip carries no
+`PLINTH_FU8D_MEASURE` instrumentation (verified absent by grep before building),
+so §10's per-batch table remains the counter record and F4 does not restate it as
+independently reproduced.
+
+### 11.2 What the 600 s is actually spent on
+
+Main-thread samples per window:
+
+| t (s) | main-thread samples | `fill_proposal_nearest_delta` | `assess_coverage_with_mode` | `merged_violation_count` |
+|---:|---:|---:|---:|---:|
+| 60 | 2,033 | — still in preparation | — | — |
+| 180 | 2,268 | 1,386 (61.1 %) | 554 (24.4 %) | 115 (5.1 %) |
+| 300 | 2,278 | 1,366 (60.0 %) | 574 (25.2 %) | 112 (4.9 %) |
+| 420 | 2,275 | 1,382 (60.7 %) | 579 (25.4 %) | 104 (4.6 %) |
+| 540 | 2,278 | 1,393 (61.2 %) | 563 (24.7 %) | 95 (4.2 %) |
+| 597 | 2,264 | 1,402 (61.9 %) | 542 (23.9 %) | 95 (4.2 %) |
+| **pooled** | **11,363** | **6,929 (61.0 %)** | **2,812 (24.7 %)** | **521 (4.6 %)** |
+
+Attempt 1's separate window gives 58.5 % and 34.1 %. Read the split as
+**≈ 59–62 % / 24–34 %** across two runs and seven windows; per ruling **R-e** no
+literal is pinned in a test and this dated transcript is the record.
+
+The leading frame is not doing arithmetic — it is *constructing*:
+`fill_proposal_nearest_delta` builds a fresh `PointCloudIndex` kd-tree over a
+**one-point** cloud, once per proposal, and its children in the call graph are
+`knn_batch_planned` over allocator traffic (`_xzm_free`, `_free`,
+`_xzm_xzone_malloc`). 39,223 tree constructions and teardowns per gate batch, each
+to answer distances to a single point. It is batched *within* a proposal and
+unbatched *across* proposals.
+
+### 11.3 What this does and does not license
+
+**It licenses no cap change.** None of the dominant work is charged against
+`gate_operation_limit` at all, so no cap is "too tight" here; the remedy removes
+work rather than admitting more. Every cap, floor and coefficient in §§1–10 is
+untouched by F3 and F4 alike.
+
+**Ruling R-f remains unsatisfied — twice over.** Neither attempt completes the
+gate stage, so `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` (FU-23) is **not**
+re-derived. R4's n = 1 marking is likewise unaffected.
+
+**Ruling R-c is revived as a question, not adopted.** §9.5 declined the
+radius-bounded steal path because the margin was 4.9× and the bound was a 1.7×
+constant. F4 changes that calculus's *subject*: the frame R-c would have shrunk is
+now the measured leader. It is recorded as FU-8e input; nothing is built here.
+
+**`PLINTH_THREADS=4` buys the merge gate nothing** — all four rayon workers sit in
+`__psynch_cvwait` for the whole gate stage while preparation is genuinely
+parallel. This is not a reason to raise thread counts; it is a note that the gate
+wall-clock above is a single-core number.

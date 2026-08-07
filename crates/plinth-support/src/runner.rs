@@ -95,8 +95,8 @@ use crate::{
     select_contacts_baseline,
     specialized::{
         fill_route_points_nearest, plan_route_points_nearest, prepare_specialized_contacts,
-        CoverageRoutePoint, SpecializedBatchWork, SpecializedContactPlan, SpecializedError,
-        SpecializedLimits,
+        CoverageRoutePoint, NearestWitnessRetention, SpecializedBatchWork, SpecializedContactPlan,
+        SpecializedError, SpecializedLimits,
     },
     transient::{transient_report, TransientError, TransientReport},
     validate_perception_input, BuildFrame, ContactSelectionConfig, ContactSelectionError,
@@ -1069,10 +1069,20 @@ impl<'a> SupportVerificationSnapshot<'a> {
         }
         #[cfg(test)]
         record_measurement_call(|counts| counts.coverage_route_planner_allocations += 1);
-        let planned = plan_route_points_nearest(&points, self.coverage_samples, knn_limits)
-            .map_err(|_| CoverageMeasurementError::ResourceLimit {
-                resource: "route kNN preflight",
-            })?;
+        // FU-8d: the measurement path evaluates no merge proposals, so it has
+        // nothing to answer from retained witnesses.  It keeps asking the
+        // kernel for one neighbour per query, and its charged logical peak —
+        // which `measurement_preflight` above states at the same `k` — is
+        // unchanged by FU-8d.
+        let planned = plan_route_points_nearest(
+            &points,
+            self.coverage_samples,
+            knn_limits,
+            NearestWitnessRetention::NearestOnly,
+        )
+        .map_err(|_| CoverageMeasurementError::ResourceLimit {
+            resource: "route kNN preflight",
+        })?;
         debug_assert_eq!(points.len(), preflight.memberships);
         let (
             memberships,
@@ -1090,11 +1100,10 @@ impl<'a> SupportVerificationSnapshot<'a> {
         let mut nearest = vec![f64::INFINITY; self.coverage_samples.len()];
         #[cfg(test)]
         record_measurement_call(|counts| counts.coverage_route_queries += 1);
-        fill_route_points_nearest(&points, self.coverage_samples, &mut nearest, planned).map_err(
-            |_| CoverageMeasurementError::KernelRefusal {
+        fill_route_points_nearest(&points, self.coverage_samples, &mut nearest, planned, None)
+            .map_err(|_| CoverageMeasurementError::KernelRefusal {
                 operation: "route kNN query",
-            },
-        )?;
+            })?;
         #[cfg(test)]
         record_measurement_call(|counts| counts.coverage_assessment_traversals += 1);
         let assessment = assess_coverage_with_mode(
@@ -5297,8 +5306,13 @@ mod tests {
             point_mm: [0.0, 0.0, 0.0],
             area_mm2: 1.0,
         }];
-        let planned = plan_route_points_nearest(&points, &samples, TEST_KNN_LIMITS)
-            .expect("distinct provenance rows share one indexed seat");
+        let planned = plan_route_points_nearest(
+            &points,
+            &samples,
+            TEST_KNN_LIMITS,
+            NearestWitnessRetention::NearestOnly,
+        )
+        .expect("distinct provenance rows share one indexed seat");
         assert_eq!(planned.measurement_counts(), (2, 2, 1, 1, 1, 1));
     }
 
@@ -5325,8 +5339,13 @@ mod tests {
             point_mm: [0.0, 0.0, 0.0],
             area_mm2: 1.0,
         }];
-        let planned = plan_route_points_nearest(&points, &samples, TEST_KNN_LIMITS)
-            .expect("tiny fixture route plan");
+        let planned = plan_route_points_nearest(
+            &points,
+            &samples,
+            TEST_KNN_LIMITS,
+            NearestWitnessRetention::NearestOnly,
+        )
+        .expect("tiny fixture route plan");
         let expected = 2 * size_of::<crate::specialized::CoverageRoute>()
             + 2 * size_of::<(crate::specialized::CoverageRoute, usize)>()
             + 2 * size_of::<u64>()
@@ -5353,8 +5372,13 @@ mod tests {
             point_mm: [0.0, 0.0, 0.0],
             area_mm2: 1.0,
         }];
-        let planned = plan_route_points_nearest(&points, &samples, TEST_KNN_LIMITS)
-            .expect("tiny fixture route plan");
+        let planned = plan_route_points_nearest(
+            &points,
+            &samples,
+            TEST_KNN_LIMITS,
+            NearestWitnessRetention::NearestOnly,
+        )
+        .expect("tiny fixture route plan");
         let (memberships, membership_peak, indexed_points, indexed_peak, query_rows, distance_work) =
             planned.measurement_counts();
         let preflight = CoverageMeasurementPreflight {
@@ -5607,9 +5631,13 @@ mod tests {
                         })
                 })
                 .collect::<Vec<_>>();
-            let planned =
-                plan_route_points_nearest(&points, snapshot.coverage_samples, TEST_KNN_LIMITS)
-                    .expect("fixture route preflight");
+            let planned = plan_route_points_nearest(
+                &points,
+                snapshot.coverage_samples,
+                TEST_KNN_LIMITS,
+                NearestWitnessRetention::NearestOnly,
+            )
+            .expect("fixture route preflight");
             let island_rows = snapshot
                 .coverage_samples
                 .iter()
