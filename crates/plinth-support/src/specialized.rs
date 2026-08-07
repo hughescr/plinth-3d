@@ -246,6 +246,25 @@ impl SpecializedLimits {
     /// `CURRENT-STATUS.md` (*FU-8d phase F3 landed 2026-08-06*, *FU-8d phase F4
     /// measured 2026-08-06*).
     ///
+    /// **Dated addendum 2026-08-07 — FU-8e phases E1–E4 landed. Every block
+    /// above is left standing, and this one exists to say that nothing in them
+    /// moved.** FU-8e removed the gate's per-proposal kd-tree construction (E1's
+    /// [`knn_single_source_planned_into`], argued bit-identical to the tree's
+    /// answer in five clauses) and its per-variant `assess_coverage` (E3's
+    /// retained baseline objective). **The demand this limit is handed is
+    /// unchanged at 9,273,857,317**, because `plan_proposal_nearest_delta` is
+    /// untouched: `work()` is still `1 × touched_rows`, and the treant's
+    /// `touched_rows` re-measured at **1,041,544,686, to the row**. E3 adds the
+    /// one new charge in the loop — a fallback variant's
+    /// `coverage_assessment_resource_plan_for(samples).operations`, spent into
+    /// the same `load_delta_limit` headroom `executed_load_work` draws on and
+    /// checked as their **sum**; on the treant it is zero, because zero variants
+    /// fell back. **The cap still did not move and no cap code was touched.**
+    /// What stops the treant is still wall-clock: EXCEEDS-TIMEBOX at 601 s, now
+    /// 33 merge rounds of an estimated ~460, so **ruling R-f remains
+    /// unsatisfied**. See `support-resource-caps-2026-08-05.md` §12 and
+    /// `CURRENT-STATUS.md` (*FU-8e phases E1–E4 landed 2026-08-07*).
+    ///
     /// **Ruling note 2026-08-06 on the 12,714,828,544 quoted at the top of this
     /// comment.** It is a dated FU-8b-era charge for the treant's proposal-free
     /// gate batch, quoted here only for the face-count spread it demonstrates

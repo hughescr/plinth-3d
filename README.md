@@ -256,6 +256,27 @@ Measured on the 8-model corpus, most recently by the unified census of 2026-08-0
   > `docs/rust-migration/CURRENT-STATUS.md` (*FU-8d phase F4 measured 2026-08-06*) and
   > `support-resource-caps-2026-08-05.md` §11.
 
+  > **Amended 2026-08-07 — FU-8e phases E1–E4 landed; every block above stands exactly as
+  > written, and the block immediately above is corrected on mechanism.** FU-8e is resolved on
+  > the defect it named. **The kd-trees were free**: one one-point `PointCloudIndex` costs
+  > 83.3 ns, so the 39,223 per batch total 16.7 microseconds. The cost was the **query loop**
+  > behind them — about 1.04 × 10⁹ query iterations and 2.08 × 10⁹ heap allocations per batch.
+  > `assess_coverage`'s cost was likewise **not** allocation churn but **two unconditional
+  > full scans** of the nearest array per variant, ≈254 GB of reads per batch. The kernel
+  > gained a one-source fast path that needs no tree, argued bit-identical to the tree's
+  > answer in five clauses and pinned on `f64::to_bits`; the gate consumes it; and a variant
+  > that cannot have moved the coverage objective is handed the batch baseline's instead of
+  > rescanning for it. **The merge round falls 63.83 s → 14.68 s (4.35×)**, coverage per
+  > variant 17.05 s → 0.001 s, with `touched_rows` unchanged **to the row** at 1,041,544,686
+  > and **zero** coverage fallbacks across 33 rounds. **No cap was raised, lowered or touched,
+  > and the stated demand did not move.** **There is still no treant digest**: the outcome is
+  > another **EXCEEDS-TIMEBOX**, at 601 s with 33 merge rounds of an estimated ~460, because
+  > the tournament commits one merge per round and the gate stage is ≈1.8–5.5 h. Ruling R-f is
+  > still unsatisfied and FU-23's coefficient is still not re-derived. The successor, **FU-8f**,
+  > is recorded as a finding **awaiting owner ruling** and deliberately not built. See
+  > `docs/rust-migration/CURRENT-STATUS.md` (*FU-8e phases E1–E4 landed 2026-08-07*, *FU-8f
+  > opened 2026-08-07*) and `support-resource-caps-2026-08-05.md` §12.
+
 The stages exist as libraries and the census harness runs the real chain from STL through
 a sealed support run. The folder-level runner that chains them all the way to a written
 `.chitubox` is roadmap, per [The goal](#the-goal) above.
