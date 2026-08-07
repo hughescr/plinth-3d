@@ -2212,9 +2212,12 @@ pub(crate) fn finalize_load_partition(
     mesh: &Mesh,
     contacts: &[PhysicalContact],
 ) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
+    // FU-8f phase G2: this entry point is outside the merge gate's per-round
+    // loop, so it keeps its own single hash rather than pulling a proof
+    // through a public signature for a saving it does not make.
     finalize_load_rows(
         plan,
-        mesh,
+        &VerifiedMeshFingerprint::compute(mesh)?,
         &plan.load_eligibility,
         contacts,
         plan.load_limits,
@@ -2232,7 +2235,14 @@ pub(crate) fn authority_consistent_empty_load_partition_for_test(
     plan: &GenericContactPlan,
     mesh: &Mesh,
 ) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
-    finalize_load_rows(plan, mesh, &[], &[], plan.load_limits, None)
+    finalize_load_rows(
+        plan,
+        &VerifiedMeshFingerprint::compute(mesh)?,
+        &[],
+        &[],
+        plan.load_limits,
+        None,
+    )
 }
 
 fn load_resource_plan_from_counts(
@@ -2769,17 +2779,75 @@ fn reference_contacts_x_rows_scan(
     (nearest, witnesses)
 }
 
+/// A mesh carried together with its own [`mesh_fingerprint`], hashed once.
+///
+/// # FU-8f phase G2 — why this type exists
+///
+/// `mesh_fingerprint` walks every triangle of the mesh.  On the Weeping Treant
+/// v1.2 that is 429,120 triangles, and the merge gate used to pay for it
+/// **twice per batch** — once in [`finalize_specialized_load_partition`] and
+/// again in the [`finalize_load_rows`] it immediately calls — over a mesh that
+/// cannot change inside a tournament, because the tournament merges *contacts*
+/// and never touches geometry.  Measured at `7aa6b73` on the treant's real
+/// gate batch: 85.1 ms + 81.5 ms = 166.6 ms per merge round, contended.
+///
+/// # What did NOT change, and must not
+///
+/// The **staleness comparison stays at every site**.  This type hoists the
+/// *hash*, not the *check*: each consumer still compares the fingerprint
+/// against its own `plan.authority.mesh` and still returns
+/// [`GenericPerceptionError::StaleAuthority`] when they disagree.  "Verify
+/// once, thread the proof" — never "stop verifying".  A caller that has no
+/// proof to hand builds one with [`Self::compute`] and pays exactly what it
+/// paid before; nothing anywhere is verified less than it was.
+///
+/// # Why the mesh travels inside the proof
+///
+/// The consumers need the mesh itself (face counts, triangles) as well as the
+/// digest.  Taking them as two arguments would admit a proof computed from one
+/// mesh being presented alongside a different one — a fingerprint that attests
+/// nothing.  The proof therefore *owns the reference*: [`Self::mesh`] is the
+/// only mesh a holder can reach through it, so digest and geometry cannot
+/// drift apart by construction rather than by discipline.
+pub(crate) struct VerifiedMeshFingerprint<'mesh> {
+    mesh: &'mesh Mesh,
+    fingerprint: String,
+}
+
+impl<'mesh> VerifiedMeshFingerprint<'mesh> {
+    /// Hash `mesh` once and bind the digest to it.
+    pub(crate) fn compute(mesh: &'mesh Mesh) -> Result<Self, GenericPerceptionError> {
+        let fingerprint = mesh_fingerprint(mesh)
+            .map_err(|error| GenericPerceptionError::Topology(error.to_string()))?;
+        Ok(Self { mesh, fingerprint })
+    }
+
+    /// The mesh this digest was computed from — the only one it attests to.
+    pub(crate) fn mesh(&self) -> &'mesh Mesh {
+        self.mesh
+    }
+
+    /// The digest, for the caller's own staleness comparison.
+    pub(crate) fn fingerprint(&self) -> &str {
+        &self.fingerprint
+    }
+}
+
 fn finalize_load_rows(
     plan: &GenericContactPlan,
-    mesh: &Mesh,
+    verified_mesh: &VerifiedMeshFingerprint<'_>,
     load_eligibility: &[LoadEligibility],
     contacts: &[PhysicalContact],
     limits: LoadFinalizeLimits,
     retain: Option<&mut LoadRowRetention>,
 ) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
-    let fingerprint = mesh_fingerprint(mesh)
-        .map_err(|error| GenericPerceptionError::Topology(error.to_string()))?;
-    if fingerprint != plan.authority.mesh {
+    // FU-8f phase G2: the digest is threaded in rather than recomputed here,
+    // but the comparison it feeds is the same comparison this site has always
+    // made, and it still refuses.  The mesh itself was only ever an input to
+    // that hash here — every geometric quantity this finalizer reads comes
+    // from `load_eligibility`, which is why the parameter is the proof and not
+    // the mesh.
+    if verified_mesh.fingerprint() != plan.authority.mesh {
         return Err(GenericPerceptionError::StaleAuthority);
     }
     // FU-8f phase G1.  The transpose is counted before it is charged and
@@ -3114,16 +3182,18 @@ pub(crate) fn specialized_load_resource_plan(
 
 pub(crate) fn finalize_specialized_load_partition(
     plan: &GenericContactPlan,
-    mesh: &Mesh,
+    verified_mesh: &VerifiedMeshFingerprint<'_>,
     surface: &NativeSurface,
     contacts: &[PhysicalContact],
     specialized_owner_faces: &[(u32, u32)],
     limits: LoadFinalizeLimits,
     retain: Option<&mut LoadRowRetention>,
 ) -> Result<FinalizedLoadPartition, GenericPerceptionError> {
-    let fingerprint = mesh_fingerprint(mesh)
-        .map_err(|error| GenericPerceptionError::Topology(error.to_string()))?;
-    if fingerprint != plan.authority.mesh {
+    // FU-8f phase G2: hoisted digest, unchanged comparison.  This site and the
+    // `finalize_load_rows` it calls below used to hash the same unchanging
+    // mesh twice per gate batch; they now share one hash and each still checks.
+    let mesh = verified_mesh.mesh();
+    if verified_mesh.fingerprint() != plan.authority.mesh {
         return Err(GenericPerceptionError::StaleAuthority);
     }
     // A child specialized-plan edit may intentionally remove every
@@ -3132,7 +3202,7 @@ pub(crate) fn finalize_specialized_load_partition(
     // through the same finalizer, with an empty eligibility set, rather than
     // fabricating rows or silently retaining the parent's load artifact.
     if contacts.is_empty() {
-        return finalize_load_rows(plan, mesh, &[], contacts, limits, retain);
+        return finalize_load_rows(plan, verified_mesh, &[], contacts, limits, retain);
     }
     // Group the pairs by face once.  The row count, the eligible-owner count
     // and the extension below are all read off this one grouping instead of
@@ -3176,7 +3246,7 @@ pub(crate) fn finalize_specialized_load_partition(
         &grouped,
         specialized_owner_faces,
     )?;
-    finalize_load_rows(plan, mesh, &extended, contacts, limits, retain)
+    finalize_load_rows(plan, verified_mesh, &extended, contacts, limits, retain)
 }
 
 /// Merge the specialized owners into the generic load authority's rows.
@@ -3572,7 +3642,7 @@ impl SpecializedLoadBaseline {
     /// inputs, running the production finalizer exactly once.
     pub(crate) fn build(
         plan: &GenericContactPlan,
-        mesh: &Mesh,
+        mesh: &VerifiedMeshFingerprint<'_>,
         surface: &NativeSurface,
         contacts: &[PhysicalContact],
         specialized_owner_faces: &[(u32, u32)],
@@ -4826,9 +4896,10 @@ mod tests {
             .unwrap();
         let resource =
             load_resource_plan(&plan.load_eligibility, &contacts, transpose_bytes).unwrap();
+        let verified_mesh = VerifiedMeshFingerprint::compute(&mesh).unwrap();
         assert!(finalize_load_rows(
             &plan,
-            &mesh,
+            &verified_mesh,
             &plan.load_eligibility,
             &contacts,
             LoadFinalizeLimits {
@@ -4842,7 +4913,7 @@ mod tests {
         assert!(matches!(
             finalize_load_rows(
                 &plan,
-                &mesh,
+                &verified_mesh,
                 &plan.load_eligibility,
                 &contacts,
                 LoadFinalizeLimits {
@@ -4857,7 +4928,7 @@ mod tests {
         assert!(matches!(
             finalize_load_rows(
                 &plan,
-                &mesh,
+                &verified_mesh,
                 &plan.load_eligibility,
                 &contacts,
                 LoadFinalizeLimits {
@@ -4970,7 +5041,7 @@ mod tests {
         // distinct face of the mesh.
         let partition = finalize_specialized_load_partition(
             &plan,
-            &mesh,
+            &VerifiedMeshFingerprint::compute(&mesh).unwrap(),
             &surface,
             &contacts,
             &pairs,
@@ -5129,9 +5200,15 @@ mod tests {
             max_operations_floor: usize::MAX,
             operations_per_batch_unit: 0,
         };
-        let (baseline_partition, baseline) =
-            SpecializedLoadBaseline::build(&plan, &mesh, &surface, &contacts, &pairs, limits)
-                .expect("baseline");
+        let (baseline_partition, baseline) = SpecializedLoadBaseline::build(
+            &plan,
+            &VerifiedMeshFingerprint::compute(&mesh).unwrap(),
+            &surface,
+            &contacts,
+            &pairs,
+            limits,
+        )
+        .expect("baseline");
         let mut scratch = SpecializedLoadDeltaScratch::for_rows(baseline.row_count());
 
         let face_rows = |face: u32| {
@@ -5206,7 +5283,7 @@ mod tests {
                         .extend(union_faces.iter().map(|&face| (merged_slot as u32, face)));
                     let reference = finalize_specialized_load_partition(
                         &plan,
-                        &mesh,
+                        &VerifiedMeshFingerprint::compute(&mesh).unwrap(),
                         &surface,
                         &variant_contacts,
                         &variant_pairs,
@@ -5646,6 +5723,110 @@ mod tests {
             "the transpose is not sparse by >10x: \
              {fan_cells} cells of {fan_dense} rows x contacts",
         );
+    }
+
+    /// FU-8f phase G2: hoisting the hash must not hoist the **check**.
+    ///
+    /// The gate stage now hashes the mesh once and threads the proof to both
+    /// load finalizers instead of each re-hashing 429,120 triangles per merge
+    /// round.  The saving is only legitimate if every consumer still compares
+    /// the threaded digest against its own plan authority — "verify once,
+    /// thread the proof", never "stop verifying".
+    ///
+    /// So this pins the comparison at **both** sites independently, by handing
+    /// each a proof that is perfectly valid *for a different mesh*: the exact
+    /// failure a caller that mixed two meshes would produce, and the exact
+    /// failure a site that stopped comparing would miss.  The positive arm is
+    /// asserted alongside, so the refusal is not passing for the trivial
+    /// reason that these inputs are refused anyway.
+    #[test]
+    fn fu8f_hoisted_fingerprint_still_refuses_a_foreign_mesh_at_both_finalizers() {
+        let mesh = make_overhang_table().unwrap();
+        let delicacy = vec![0.0; mesh.tris().len()];
+        let config = perception_config(&delicacy);
+        let plan = prepare_generic_contacts(
+            &mesh,
+            &config,
+            frame(),
+            &layer_plan(),
+            &candidate_config(),
+            &[],
+            GenericPerceptionLimits::production(TEST_KNN_LIMITS),
+        )
+        .unwrap();
+        let surface = build_surface(&mesh, &config).unwrap();
+        let contacts = plan
+            .islands()
+            .iter()
+            .map(|island| PhysicalContact {
+                contact_id: u64::from(island.id),
+                owner: LoadOwner::GenericIsland(island.id),
+                point_mm: [0.0, 0.0, 0.0],
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            !contacts.is_empty(),
+            "the fixture must reach the non-empty specialized path",
+        );
+        let limits = LoadFinalizeLimits {
+            max_scratch_bytes: usize::MAX,
+            max_operations_floor: usize::MAX,
+            operations_per_batch_unit: 0,
+        };
+
+        // A real, honestly computed proof — of the wrong mesh.
+        let foreign = plinth_mesh::make_box_default().unwrap();
+        let foreign_proof = VerifiedMeshFingerprint::compute(&foreign).unwrap();
+        assert_ne!(
+            foreign_proof.fingerprint(),
+            plan.authority.mesh,
+            "the fixture meshes must actually differ, or this test proves nothing",
+        );
+
+        assert_eq!(
+            finalize_load_rows(
+                &plan,
+                &foreign_proof,
+                &plan.load_eligibility,
+                &contacts,
+                limits,
+                None,
+            )
+            .err(),
+            Some(GenericPerceptionError::StaleAuthority),
+            "finalize_load_rows stopped checking the threaded fingerprint",
+        );
+        assert_eq!(
+            finalize_specialized_load_partition(
+                &plan,
+                &foreign_proof,
+                &surface,
+                &contacts,
+                &[],
+                limits,
+                None,
+            )
+            .err(),
+            Some(GenericPerceptionError::StaleAuthority),
+            "finalize_specialized_load_partition stopped checking the threaded fingerprint",
+        );
+
+        // The same inputs under the mesh's own proof are accepted, so the two
+        // refusals above are the fingerprint's doing and nothing else's.
+        let proof = VerifiedMeshFingerprint::compute(&mesh).unwrap();
+        assert_eq!(proof.fingerprint(), plan.authority.mesh);
+        assert!(std::ptr::eq(proof.mesh(), &mesh));
+        finalize_load_rows(
+            &plan,
+            &proof,
+            &plan.load_eligibility,
+            &contacts,
+            limits,
+            None,
+        )
+        .expect("the mesh's own proof admits the generic finalize");
+        finalize_specialized_load_partition(&plan, &proof, &surface, &contacts, &[], limits, None)
+            .expect("the mesh's own proof admits the specialized finalize");
     }
 
     #[test]
