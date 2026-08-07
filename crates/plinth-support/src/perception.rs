@@ -3163,6 +3163,31 @@ pub(crate) struct SpecializedLoadBaseline {
 /// per-proposal `Vec`: it is `rows`-long, and building it per proposal would
 /// trade the quadratic this phase removes for a linear allocation the phase
 /// performs 39,223 times.
+///
+/// # The two per-proposal allocations that are still here, and why they stay
+///
+/// [`SpecializedLoadBaseline::merged_violation_count`] allocates twice per
+/// proposal outside this struct — `vec![0u32; touched_count]` for the gained-row
+/// counts and a `gained_starts.clone()` for the fill cursors.  FU-8e phase E4
+/// listed folding both into this struct as an optional, zero-risk change, and
+/// **measured it instead of assuming it**.  It is NOT adopted, because the
+/// measurement says it would buy nothing.
+///
+/// Measured 2026-08-07 on the Weeping Treant (`PLINTH_CENSUS=1`, release,
+/// `--features census`, `PLINTH_THREADS=4`), with env-gated scratch timers at
+/// the branch tip that were reverted by editing afterwards: across 33 merge
+/// rounds of 39,096–39,223 proposals each, the two allocations together cost a
+/// mean **6.7 ms per round** — **0.13 %** of the 4.98 s that
+/// `merged_violation_count` and its `merged_rows` gather spend, and 0.05 % of
+/// the 13.8 s round.  The reason is that `touched_count` is *small*: a merge
+/// proposal touches a mean of **3.77 contacts**, not 1,365, so each `vec!` is
+/// about fifteen bytes.  What `merged_violation_count` actually costs is the row
+/// work over `elig(left) ∪ elig(right)`, which no buffer reuse touches.
+///
+/// The general lesson is the one FU-8e's two framing corrections already made
+/// twice: at this scale allocation counts are a poor proxy for cost, and the
+/// row traffic is the thing.  Per ruling R-e the totals above are a dated
+/// transcript, not a pinned literal.
 pub(crate) struct SpecializedLoadDeltaScratch {
     /// `elig(left) ∪ elig(right)`, ascending row indices.
     rows: Vec<u32>,
