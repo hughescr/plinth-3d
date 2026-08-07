@@ -208,6 +208,34 @@ Measured on the 8-model corpus, most recently by the unified census of 2026-08-0
   > `docs/rust-migration/CURRENT-STATUS.md` (*FU-8d phase F2 landed 2026-08-06*) and
   > `support-resource-caps-2026-08-05.md` §9.
 
+  > **Amended 2026-08-06 — FU-8d phase F3 landed; the blocks above are left standing exactly
+  > as measured.** *The treant's merge gate no longer refuses.* The load partition is
+  > finalized **once** per gate batch instead of once per variant — a proposal re-answers
+  > only the rows its own merged pair serves, from three retained witnesses plus one
+  > distance, and the merged seat serves *exactly* that union by construction — and with it
+  > go the per-variant window matrices, a tens-of-gigabyte byte wall that had never fired
+  > only because the operations check refused first. The four per-proposal planning passes
+  > become one behind a pre-check stated from the batch header, and the per-variant contact
+  > and demand rescans are derived rather than repeated. The gate's hand-built
+  > `variants × faces` model of the load phase is replaced by what the load planner itself
+  > reports: the honest figure is 6,592,813,742 where the model said 4,618,272,984, so the
+  > **stated demand rose** to **9,273,857,317** — and that is **26.2 %** of the **same
+  > unchanged** 35,445,500,736, so the batch is admitted and **executes**. What collapsed is
+  > what actually refused: the per-variant owner-face descriptor scan, 35,445,417,382 at
+  > variant 275 → **136,791,451** charged once, and the ~4.3 × 10¹⁴ finalizer term to nothing
+  > at all. **No cap was raised, lowered or otherwise touched.** Equivalence was proved
+  > before the swap, against the whole production finalizer run on hand-renumbered variant
+  > inputs, row by row and on carried area by `f64::to_bits`, over a fixture that asserts it
+  > reached an exact survivor tie, an exact merged-seat tie, a row with no survivor, a
+  > displaced holder and a steal. The treant now evaluates 39,224 variants, accepts a merge,
+  > opens the next batch, and planned **eight batches inside the 600 s timebox** without
+  > finishing the tournament — an **EXCEEDS-TIMEBOX with counters**, not a refusal, at
+  > ~2.4–2.5 GB peak RSS. There is still no treant digest. The successor defect is the
+  > per-variant `assess_coverage` — 1.59 × 10¹⁰ uncharged sample visits per batch — opened as
+  > **FU-8e**; FU-8d is **resolved** on the defect it named. All seven frozen corpus digests
+  > are byte-identical. See `docs/rust-migration/CURRENT-STATUS.md` (*FU-8d phase F3 landed
+  > 2026-08-06*) and `support-resource-caps-2026-08-05.md` §9.
+
 The stages exist as libraries and the census harness runs the real chain from STL through
 a sealed support run. The folder-level runner that chains them all the way to a written
 `.chitubox` is roadmap, per [The goal](#the-goal) above.

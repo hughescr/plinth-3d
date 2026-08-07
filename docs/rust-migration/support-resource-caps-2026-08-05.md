@@ -838,3 +838,69 @@ unbuilt: 28 of the 48 perturbed keys carry ≥ 10 proposals, and one carries 26,
 so the precondition holds — but it is a constant-factor cleanup on a term that is
 now some five parts in a million of the wall, and it would be optimizing the
 wrong thing while part (2) stands.
+
+## 9. FU-8d phase F3 (2026-08-06) — the treant's merge gate stops refusing
+
+> **Dated addendum. §§1–8 are left standing exactly as measured.** This section
+> supersedes §7.4's and §8's *stopping point* for the Weeping Treant and nothing
+> else. **No cap was raised, lowered or touched, and no cap code was edited.**
+
+Phase F3 closed FU-8d parts (2) and (3): the load partition is finalized **once**
+per gate batch instead of once per variant, the per-variant `(owner, face)` window
+matrices are deleted, the four per-proposal planning passes become one behind a
+count-derived pre-check, and the per-variant contact/demand rescans are derived
+rather than repeated. Measured on the treant's first merge batch — samples
+405,146, demands 1,095, contacts 1,366, proposals 39,223, variants 39,224,
+distinct island faces 117,741:
+
+| term | F2 | F3 |
+|---|---:|---:|
+| `baseline_rows` | 554,926,572 | 554,926,572 |
+| proposal nearest (`nearest_work + touched_rows`) | 2,083,089,372 | 2,083,089,372 |
+| proposal `key_visits` | 78,446 | 78,446, now pre-checked before it is spent |
+| proposal `demand_rows` | 42,949,185 | 42,949,185 |
+| load term | 4,618,272,984 (`variants × faces`, a **model**) | **6,592,813,742** (`specialized_load_resource_plan`'s own 5,543,831,115, plus a 1,048,982,627 proposal bound) |
+| **stated demand** | 7,299,316,559 | **9,273,857,317** |
+| `descriptor_operations` | 35,445,417,382 at variant 275 of 39,224 (~5.06 × 10¹² extrapolated) | **136,791,451**, charged once |
+| `unique_face_finalizer_work` | ~4.33 × 10¹⁴ extrapolated | **term deleted** |
+| `exact_operations` | refused at the crossing | **10,457,910,996** |
+| **cap — UNCHANGED** | 35,445,500,736 | 35,445,500,736 |
+| verdict | refused | **admitted — 26.2 % stated, 29.5 % exact — and executed** |
+
+**The stated demand rose, and that is the point.** §7.2's rule is that a cap
+prices what a stage really does. FU-8d part (2) recorded that the gate priced the
+load phase at `variants × faces` while the fold really did
+`variants × faces × contacts`; there is one authority now, and the honest figure
+is 1.43× the model it replaced. Every term that fell is a *quadratic removed*, not
+a bound relaxed.
+
+**A byte wall went with it, and it had never fired only by accident.**
+`gate_window_matrix_bytes` sized one `PhysicalContact` matrix and one
+`(owner, face)` matrix per variant per window — on the treant 7,971,451 pairs × 8 B
+*per variant* — against `SUPPORT_SPECIALIZED_MAX_GATE_CONTACT_MATRIX_BYTES` =
+536,870,912. It stated a figure in the tens of gigabytes and would have refused the
+moment the operations wall fell. The batch now holds one physical list and one pair
+list; `gate_window_matrix_bytes` and `traverse_whole_gate_windows` are deleted and
+`GatePeakUsage::matrix_bytes` is replaced by `load_baseline_bytes`. **The cap itself
+is untouched**: its remaining consumer is `contact_window_bytes`, and its registered
+value and provenance note are unchanged.
+
+**Where the treant stops now, and it is not a refusal.** Under `PLINTH_THREADS=4`,
+release, `--features census`, the treant planned eight gate batches inside the 600 s
+timebox — the proposal-free batch plus seven merge rounds at 1,366 → 1,360 contacts,
+the stated demand falling monotonically with the contact set and the share holding
+flat at 26.2 % of each batch's own materialized cap — and did not finish the
+tournament. That run is recorded as **EXCEEDS-TIMEBOX with counters**: peak RSS
+~2.4–2.5 GB sampled once per second, watchdog armed at 90 GB and never fired, far
+inside the 100 GB machine ceiling.
+
+What the time is spent on is measured by implication and is **not a cap to raise**:
+`assess_coverage` runs `O(samples)` per variant with about six
+`Vec::with_capacity(405,146)` allocations per call, i.e. `39,224 × 405,146 ≈
+1.59 × 10¹⁰` sample visits and of order a terabyte of allocation churn **per gate
+batch**, none of it charged against `gate_operation_limit`. It is opened as
+**FU-8e**.
+
+**Ruling R-f remains unsatisfied.** `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED`
+(FU-23) is re-derived only from a treant run that **completes** the gate. This is
+not that run.
