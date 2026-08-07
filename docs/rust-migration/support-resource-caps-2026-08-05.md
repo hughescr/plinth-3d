@@ -1362,3 +1362,131 @@ index **0** in every round measured on two models, and evaluating lazily would
 take the round to ~3.9 s — but it severs charged-batch from executed-batch and
 re-founds `GateRoutePlanMismatch` a second time after F3, which is an owner's
 call and not an agent's.
+
+> **ADDENDUM 2026-08-07 (FU-8f phase G3) — the ruling came, and the paragraph
+> above is now past tense.** It is left standing exactly as written. FU-8f is no
+> longer awaiting a ruling and is no longer unimplemented: phase G3 landed the
+> lazy first-safe acceptance it describes. See §13.
+
+## 13. FU-8f phase G3 (2026-08-07) — the gate evaluates a prefix, and no cap moves
+
+**Nothing in §§1–12 is touched by G3.** No cap, floor or coefficient is raised,
+lowered or touched; no charged operation count moves; no byte term moves. The
+treant's stated demand is still **9,273,857,317** against the unchanged
+**35,445,500,736**, `exact_operations` still **10,457,910,996**, because
+`gate_resource_plan` still prices `plan.variants = proposals + 1` and the
+`exact_operations` fold still folds all 39,224. All seven frozen OD-8 digests are
+byte-identical at the G3 tip. **This section exists to record what G3 changes
+about the *meaning* of a charge, not about its value.**
+
+### 13.1 Charged and executed are severed, and both are stated
+
+Before G3 the merge gate's charged batch and its executed batch were the same
+set: `plan.variants` were priced, admitted and then all evaluated. G3 evaluates a
+**prefix** — the variants up to and including the first one that is
+`gate_not_worse` than the batch baseline — and the two numbers part company.
+
+**The charged side does not move, and that is the whole safety argument.**
+
+- `gate_resource_plan` prices every variant.
+- The `exact_operations` fold folds every variant.
+- The refusal at `exact_operations > gate_operation_limit` runs **before** the
+  loop, as it always has.
+- `plan.vector_bytes` still charges for the per-variant vector, which is no
+  longer materialised at all under the prefix mode.
+
+So the batch is admitted on what it **may** spend, and it may still spend all of
+it: the no-safe-proposal case evaluates every variant. **Charging the prefix
+would be a bound not knowable until after the work that determines it** — exactly
+the hole FU-8d part (3) closed, and the reason design open question 3 is answered
+*no, emphatically*. Open question 4 (should `vector_bytes` shrink?) is answered
+**not in G3**: it is a charged byte term, and moving one alongside a control-flow
+change mixes two record sweeps. The executed peak does fall; the charge does not
+follow it here.
+
+**The executed side is metered.** `GateBatchOutcome::executed_variant_count`
+joins `executed_touched_rows` and `executed_load_work` — the same *state a bound
+from the plan, meter the real spend as it runs* shape §12 records for
+`load_delta_limit`, and G3 adds no limit of its own. The invariant asserted is
+`executed_variant_count <= plan.variants`, with the exact length stated rather
+than only bounded. It is reported out of the stage as
+`SpecializedGateEvidence::evaluated_variant_count`, beside the renamed
+`gathered_pair_count`.
+
+**An over-charge can refuse; it cannot admit.** Every term G3 leaves standing
+over-states what the prefix executes, and an over-stating plan is the safe
+direction: it may cost a batch a refusal it would not strictly have needed, and
+it can never let a batch execute work it was not first afforded. That is the same
+disposition G1 took for `load_resource_plan_from_counts` and the FU-8e Q5
+precedent took before it. Repricing is G5's, and is not to be done as a side
+effect of anything else.
+
+### 13.2 `GateRoutePlanMismatch`, re-founded a second time
+
+Landed verbatim on the error variant's doc comment and appended to F3's own
+section in `CURRENT-STATUS.md`:
+
+> `GateRoutePlanMismatch` is re-founded for the second time, and it is weaker
+> again — said plainly rather than left to be discovered. At F1–F2 it compared a
+> plan against a **second plan**. FU-8d phase F3 re-founded it as
+> plan-vs-execution, attesting *"the batch executed the work it planned, once per
+> proposal and **in order**"*, counting `touched_rows` from `touched.len()` as
+> each delta filled and comparing measured peak bytes. FU-8f severs
+> charged-batch from executed-batch, so *"every planned proposal was executed"*
+> is no longer true and **must not be claimed**.
+>
+> What it attests now: **"the batch executed a prefix of the work it planned —
+> the first `executed_variant_count` variants, in plan order, each exactly once,
+> at the peak the plan stated"**, together with `executed_variant_count <=
+> plan.variants` and the equality case. The three fingerprints are therefore
+> compared **prefix-wise**: the executed nearest plan must equal the plan's own
+> first `executed_variant_count` records, not its total.
+>
+> What is lost is the attestation that the tail was executed at all — and the
+> tail is precisely what the owner's ruling authorises not executing:
+>
+> > *"2.1 hours down to 28 minutes seems worth it; anywhere else that we can also
+> > still shave more time off?"* — Craig, 2026-08-07
+>
+> The trade is deliberate and is the ruling's, not the implementation's. What is
+> **not** weakened: the batch is still admitted on the whole batch's charge, so
+> nothing is executed that was not first afforded; and the no-safe-proposal path
+> still evaluates every variant, so the refusal path's attestation is exactly
+> F3's.
+
+Mechanically, `GateWholeRoutePlan::executed_prefix` replays the plan's own
+retained per-proposal deltas — the plan's records, in the plan's order — onto the
+plan's baseline-only snapshot, and short-circuits to the whole plan when the
+whole batch ran. The byte terms and the baseline sweep's fingerprint are carried
+through untouched, so those comparisons remain preflight-against-execution across
+two independent computations. **Only the proposal tail is relaxed.**
+
+### 13.3 What this licenses, and what it does not
+
+**No cap change.** Nothing G3 removed was ever charged against
+`gate_operation_limit` — it was charged, and still is; what changed is that less
+of it is spent. The remedy removes work rather than admitting more, as with
+FU-8c, FU-8d and FU-8e.
+
+**Ruling R-f: still unsatisfied.** `SUPPORT_GATE_WORK_PER_BATCH_UNIT_OBSERVED` is
+**not** re-derived and must not be. The treant runs at the G3 tip — release,
+`--features census`, `PLINTH_CENSUS_ONLY="Weeping Treant v1.2"`,
+`PLINTH_THREADS=4`, RSS watchdog unsandboxed (ruling R-g) armed at 90 GB and
+**never fired**, 600 s timebox, two attempts — are **both EXCEEDS-TIMEBOX at
+600 s with no transcript**, so no run has yet completed the treant's gate. They
+were taken on a **quiet machine with no concurrent workflow**, unlike every
+measurement in §§11–12, so the wall-clock is a clean number rather than an
+inflated one. Attempt 2's peak RSS is **3,479,600 KB (3.32 GiB)**, against
+FU-8e's 2.446 GiB — recorded as observed and **not** explained here: G1's charged
+transpose is ~33 MB and cannot account for ~0.9 GB, and "the run got further into
+the tournament" is a hypothesis rather than a measurement while there are no
+counters. Counting the rounds and attributing that peak are both **G4's**
+deliverables.
+
+**Ruling R-c: still not adopted, and now moot in the shape §12.6 described.**
+§12.6 recorded that the radius-bounded steal path "saves nothing at all if FU-8f
+lands, because FU-8f evaluates one variant per round rather than 39,223". FU-8f
+has landed. Re-measure after the tournament's shape settles; build nothing now.
+
+**`PLINTH_THREADS=4` still buys the merge gate nothing.** Unchanged by G3, and
+still a note rather than a licence.
